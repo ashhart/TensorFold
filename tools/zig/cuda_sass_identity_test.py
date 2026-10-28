@@ -65,5 +65,26 @@ class FunctionsTest(unittest.TestCase):
         self.assertEqual(fs[("sm_121", "same")][3], "/* 0x000fea0003800000 */")
 
 
+class RecheckTest(unittest.TestCase):
+    def run_recheck(self, base, head, base2, head2):
+        kept, shaky = sid.recheck((sid.functions(base), sid.functions(head)), (sid.functions(base2), sid.functions(head2)))
+        return [k[1] for k in kept], [k[1] for k in shaky]
+
+    def test_real_change_kept(self):
+        """A change both builds reproduce counts once, and nothing is unstable."""
+        base, head = dump("FADD R2, R2, R3", "0x000fc00000000000"), dump("FMUL R2, R2, R3", "0x000fc00000000000")
+        self.assertEqual(self.run_recheck(base, head, base, head), (["late"], []))
+
+    def test_flaky_head(self):
+        """The head's first build differed and its rebuild matches the base: not a change, but the head is unstable."""
+        base, flaky = dump("NOP", "0x000fc00000000000"), dump("NOP", "0x000fe20000000000")
+        self.assertEqual(self.run_recheck(base, flaky, base, base), ([], ["late"]))
+
+    def test_flaky_base(self):
+        """A base whose rebuild disagrees with itself is unstable too, even where the head matched it once."""
+        base, other = dump("NOP", "0x000fc00000000000"), dump("NOP", "0x000fe20000000000")
+        self.assertEqual(self.run_recheck(base, base, other, base), ([], ["late"]))
+
+
 if __name__ == "__main__":
     unittest.main()

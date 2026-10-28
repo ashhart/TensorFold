@@ -21,9 +21,11 @@ USAGE = """BASE and HEAD are git revisions of this repository (a merge commit wo
 (zig/build/cuda_kernels.zig) whose unit includes, directly or through other headers, a file under zig/kernels changed
 between them is built from both trees with that tree's catalog flags, torch's nvcc flags and -I zig/kernels/cuda, for
 sm_80/86/89/120/121 as the build passes them (min_sm, the "a" targets of arch-specific units), and compared function
-by function. Two planted controls then prove the comparison can go red: a changed fp4pair constant
-(common/fp_pairs.cuh) and a reversed warp_sum butterfly (common/reduce.cuh), each built against the head. Exit status
-0 only when every function matches and both controls change functions."""
+by function. An image that differs is built again from both trees, one build at a time: a function counts as changed
+only if it differs again, and a tree whose two builds disagree is reported as unstable. Two planted controls then prove
+the comparison can go red: a changed fp4pair constant (common/fp_pairs.cuh) and a reversed warp_sum butterfly
+(common/reduce.cuh), each built against the head. Exit status 0 only when every function matches, no build is
+unstable and both controls change functions."""
 INCLUDE = re.compile(r'^\s*#\s*include\s*"([^"]+)"', re.M)
 
 
@@ -119,12 +121,22 @@ def compare(fb, fh):
     return [k for k in fb if k in fh and fb[k] != fh[k]], [k for k in fh if k not in fb], [k for k in fb if k not in fh]
 
 
+def recheck(first, again):
+    """First builds against rebuilds: (keys that differ again, keys whose tree disagreed with itself)."""
+    (fb, fh), (fb2, fh2) = first, again
+    unstable = sorted({k for k in set(fb) | set(fb2) if fb.get(k) != fb2.get(k)} | {k for k in set(fh) | set(fh2) if fh.get(k) != fh2.get(k)})
+    ch, add, rem = compare(fb, fh)
+    ch2, add2, rem2 = compare(fb2, fh2)
+    return sorted((set(ch) & set(ch2)) | (set(add) & set(add2)) | (set(rem) & set(rem2))), unstable
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, epilog=USAGE)
     ap.add_argument("base")
     ap.add_argument("head")
     ap.add_argument("--receipt", help="write image, arch, function and both SASS digests here")
     ap.add_argument("--no-controls", action="store_true")
+    ap.add_argument("--no-recheck", action="store_true", help="count the first builds' differences, without rebuilding")
     ap.add_argument("-j", type=int, default=4, help="parallel nvcc runs")
     ap.add_argument("--repo", default=".")
     a = ap.parse_args()
@@ -148,7 +160,7 @@ def main():
         jobs = [(tag, n) for n in imgs for tag in trees]
         with cf.ThreadPoolExecutor(a.j) as ex:
             dumps = dict(zip(jobs, ex.map(lambda j: build(trees[j[0]], cats[j[0]][0], cats[j[0]][1][j[1]], tmp / "o" / j[0] / f"{j[1]}.fatbin"), jobs)))
-        bad, total, heads, rows = 0, 0, {}, []
+        bad, total, heads, rows, unstable = 0, 0, {}, [], 0
         for n in imgs:
             b, h = dumps[("base", n)], dumps[("head", n)]
             if b.startswith("BUILD FAIL") or h.startswith("BUILD FAIL"):
@@ -159,13 +171,29 @@ def main():
             heads[n] = fh
             ch, add, rem = compare(fb, fh)
             total += len(fh)
-            bad += len(ch) + len(add) + len(rem)
             note = " (checked-in unit; the build generates this one)" if n in GENERATED else ""
             print(f"{n}: {len(fh)} functions over {','.join(sorted({k[0] for k in fh}))}; changed {len(ch)} added {len(add)} removed {len(rem)}{note}")
             for k in (ch + add + rem)[:5]:
                 print("   ", *k)
             rows += [(n, *k, digest(fb[k]) if k in fb else "-", digest(fh[k]) if k in fh else "-") for k in sorted(set(fb) | set(fh))]
-        print(f"images {len(imgs)} functions {total} differing {bad}")
+            if not (ch or add or rem):
+                continue
+            if a.no_recheck:
+                bad += len(ch) + len(add) + len(rem)
+                continue
+            # rebuild each tree, one at a time: a difference counts if it comes back; a self-disagreeing tree fails
+            again = [build(trees[t], cats[t][0], cats[t][1][n], tmp / "o" / f"{t}-again" / f"{n}.fatbin") for t in trees]
+            if any(d.startswith("BUILD FAIL") for d in again):
+                bad += 1
+                print(f"    rebuild: {next(d for d in again if d.startswith('BUILD FAIL'))}")
+                continue
+            kept, shaky = recheck((fb, fh), tuple(functions(d) for d in again))
+            bad += len(kept)
+            unstable += len(shaky)
+            print(f"    rebuilt: {len(kept)} differ again, {len(shaky)} unstable (a tree's two builds disagree)")
+            for k in shaky[:5]:
+                print("    unstable", *k)
+        print(f"images {len(imgs)} functions {total} differing {bad} unstable {unstable}")
         if a.receipt:
             with open(a.receipt, "w") as f:
                 f.write(f"# cuda_sass_identity base {revs[0]} head {revs[1]}; {nvcc}\n# image\tarch\tfunction\tbase sha256\thead sha256\n")
@@ -191,7 +219,7 @@ def main():
                 print(f"control {label}: {sum(moved.values())} functions changed in {sum(1 for v in moved.values() if v)} of {len(hit)} images"
                       + (f", build failed: {' '.join(fails)}" if fails else ""))
                 red = red and sum(moved.values()) > 0 and not fails
-    return 0 if bad == 0 and red else 1
+    return 0 if bad == 0 and unstable == 0 and red else 1
 
 
 if __name__ == "__main__":
