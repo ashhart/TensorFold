@@ -262,6 +262,47 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     stage3_probe_run.addPassthruArgs();
     stage3_run.dependOn(&stage3_probe_run.step);
 
+    // The attention contract (group `attention`): rope_bf16 and sdpa_rows_bf16
+    // against stage3_fixture's f64 references over the served shapes (decode
+    // rows 1, prefill rows <= 32, visible keys 1..7168 on the shader's
+    // reduction edges). Host half runs with the fixture suite; the GPU half
+    // is its own probe embedding the SAME SPIR-V images the stage 3 probe
+    // uses, plus the sdpa source text the depth derivation is pinned to.
+    const attention_files = b.addWriteFiles();
+    _ = attention_files.addCopyFile(b.path("zig/kernels/vulkan/sdpa_decode_native.comp"), "sdpa_decode_native.comp");
+    const attention_sources = b.createModule(.{ .root_source_file = attention_files.add("attention_sources.zig",
+        \\pub const sdpa_decode_native = @embedFile("sdpa_decode_native.comp");
+        \\
+    ) });
+    const attention_contract_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/vulkan/contract_attention.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+        .imports = &.{
+            .{ .name = "contract", .module = @import("kernel_contract.zig").module(b, b.graph.host, .debug) },
+            .{ .name = "attention_sources", .module = attention_sources },
+        },
+    }) });
+    host.dependOn(&b.addRunArtifact(attention_contract_tests).step);
+    stage3_host.dependOn(&b.addRunArtifact(attention_contract_tests).step);
+    const attention_contract = b.addExecutable(.{ .name = "tf-attention-contract", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/vulkan/contract_attention_main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "vulkan", .module = vulkan },
+            .{ .name = "stage1_shaders", .module = stage1_shaders_mod },
+            .{ .name = "stage3_shaders", .module = stage3_shaders_mod },
+            .{ .name = "contract", .module = @import("kernel_contract.zig").module(b, target, .debug) },
+            .{ .name = "attention_sources", .module = attention_sources },
+        },
+    }) });
+    stage3_build.dependOn(&b.addInstallArtifact(attention_contract, .{}).step);
+    const attention_contract_run = b.addRunArtifact(attention_contract);
+    attention_contract_run.addPassthruArgs();
+    b.step("attention-contract-run", "Run the attention contract (rope_bf16 + sdpa_rows_bf16, served shapes) on the chosen device (args after --)").dependOn(&attention_contract_run.step);
+
     const stage4_files = b.addWriteFiles();
     const stage4_build = b.step("stage4-gpu-build", "Compile the stage 4 GDN SPIR-V variants, install them under stage4/, and build the stage 4 GPU probe without running it");
     const stage4_run = b.step("stage4-gpu-run", "Run the stage 4 GPU probe on the chosen device (args after --)");
