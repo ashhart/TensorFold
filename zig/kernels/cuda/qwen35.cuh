@@ -94,20 +94,25 @@ __device__ __forceinline__ bool past_rows(const int* P, int m) { return P != nul
 __device__ __forceinline__ int mrope_axis(int i) { return (i % 3 == 1 && i < 33) ? 1 : ((i % 3 == 2 && i < 30) ? 2 : 0); }
 
 // RoPE on the first 64 of HD: pairs (i, i + 32) turned by pos[axis(i)] * theta^(-i / 32); text has one position.
-// Y (null: that plain rope): YaRN's attention factor, then its 32 frequencies; cos and sin carry the factor.
+template <bool YARN>  // Y: YaRN's factor, then 32 frequencies; false is its own code, contracted as before YaRN
 __device__ __forceinline__ __nv_bfloat16 rotate(const __nv_bfloat16* x, int d, const int pos[3], const float* __restrict__ Y) {
     if (d >= 64) return x[d];
     const int i = d % 32;
-    const float freq = Y != nullptr ? Y[1 + i] : powf(10000000.0f, -(float)i / 32.0f);
-    const float angle = (float)pos[mrope_axis(i)] * freq;
-    float sn, cs;
-    sincosf(angle, &sn, &cs);
-    if (Y != nullptr) {
+    if constexpr (!YARN) {
+        const float angle = (float)pos[mrope_axis(i)] * powf(10000000.0f, -(float)i / 32.0f);
+        float sn, cs;
+        sincosf(angle, &sn, &cs);
+        const float a = bf(x[i]), b = bf(x[i + 32]);
+        return __float2bfloat16_rn(d < 32 ? a * cs - b * sn : b * cs + a * sn);
+    } else {
+        const float angle = (float)pos[mrope_axis(i)] * Y[1 + i];
+        float sn, cs;
+        sincosf(angle, &sn, &cs);
         cs *= Y[0];
         sn *= Y[0];
+        const float a = bf(x[i]), b = bf(x[i + 32]);
+        return __float2bfloat16_rn(d < 32 ? a * cs - b * sn : b * cs + a * sn);
     }
-    const float a = bf(x[i]), b = bf(x[i + 32]);
-    return __float2bfloat16_rn(d < 32 ? a * cs - b * sn : b * cs + a * sn);
 }
 
 // A tree uses all 64 ancestor bits; prompt chains keep their depth separately, including rows past 64.
@@ -131,8 +136,8 @@ __device__ __forceinline__ void row_positions(const Seg& sg, Ancestor anc, size_
 }
 
 // The rope kernels' body, a block a row and head (y: query heads, then key heads): rotated in place, or stored.
-template <typename Store>
-__device__ __forceinline__ void rope_rows(const Geo& geo, __nv_bfloat16* __restrict__ Qn, const __nv_bfloat16* __restrict__ Kn,
+template <bool YARN, typename Store>
+__device__ __forceinline__ void rope_rows_as(const Geo& geo, __nv_bfloat16* __restrict__ Qn, const __nv_bfloat16* __restrict__ Kn,
                                           const __nv_bfloat16* __restrict__ Vr, const Seg* __restrict__ segs,
                                           const int* __restrict__ rowseg, const Ancestor* __restrict__ rowanc,
                                           const int* __restrict__ P, const int* __restrict__ M, const float* __restrict__ Y, Store store) {
@@ -149,11 +154,21 @@ __device__ __forceinline__ void rope_rows(const Geo& geo, __nv_bfloat16* __restr
         __shared__ __nv_bfloat16 qs[HD];
         qs[d] = Qn[(m * QH + h) * HD + d];
         __syncthreads();
-        Qn[(m * QH + h) * HD + d] = rotate(qs, d, pos, Y);
+        Qn[(m * QH + h) * HD + d] = rotate<YARN>(qs, d, pos, Y);
     } else if (h < QH + KVH) {
         const int kh = h - QH;
-        store(sg, kh, slot, d, rotate(Kn + (m * KVH + kh) * HD, d, pos, Y), Vr[(m * KVH + kh) * HD + d]);
+        store(sg, kh, slot, d, rotate<YARN>(Kn + (m * KVH + kh) * HD, d, pos, Y), Vr[(m * KVH + kh) * HD + d]);
     }
+}
+
+// rope_rows_as for the launch's table: one uniform branch, then each rope's own code (Y null: plain rope).
+template <typename Store>
+__device__ __forceinline__ void rope_rows(const Geo& geo, __nv_bfloat16* __restrict__ Qn, const __nv_bfloat16* __restrict__ Kn,
+                                          const __nv_bfloat16* __restrict__ Vr, const Seg* __restrict__ segs,
+                                          const int* __restrict__ rowseg, const Ancestor* __restrict__ rowanc,
+                                          const int* __restrict__ P, const int* __restrict__ M, const float* __restrict__ Y, Store store) {
+    if (Y == nullptr) rope_rows_as<false>(geo, Qn, Kn, Vr, segs, rowseg, rowanc, P, M, Y, store);
+    else rope_rows_as<true>(geo, Qn, Kn, Vr, segs, rowseg, rowanc, P, M, Y, store);
 }
 
 }  // namespace tf_q35
