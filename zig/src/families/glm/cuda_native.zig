@@ -210,8 +210,6 @@ fn openRank(a: StartArgs, set: ranks.Settings) !Loaded {
     const roce_bytes = a.roce_bytes;
     // TF_GLM_KV_SHARE keeps prompts as the pool's pages: refused before the weights load, every rank told (startup)
     if (a.share > 0 and !set.pages) return error.GlmShareNeedsPages;
-    // cc-defer: one rank; a follower keeps its fixed parts and maps adopted pages when the TP stage lands (V9F_RADIX)
-    if (a.share > 0 and p.world > 1) return error.GlmShareOneRank;
     cuda.memory_receipt.emit(@intCast(p.rank), .load_begin, true); // the four phases tools/memory_receipts.py reads
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
@@ -442,8 +440,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.RankMismatch => "the ranks' settings differ (each rank's log names the one): start them alike",
         error.Fp8OnPages => "--kv-cache fp8 keeps a window per stream: unset TF_KV_PAGES, or set it to auto or off",
         error.BadGlmKvShare => "TF_GLM_KV_SHARE: give how many states the prompt cache over the KV pages keeps, or 0 or unset for off",
-        error.GlmShareNeedsPages => "TF_GLM_KV_SHARE keeps prompts as KV pool pages: on one rank set TF_KV_PAGES=on as well",
-        error.GlmShareOneRank => "TF_GLM_KV_SHARE runs on one rank for now: serve TF_GLM_WORLD=1, or unset it",
+        error.GlmShareNeedsPages => "TF_GLM_KV_SHARE keeps prompts as KV pool pages: set TF_KV_PAGES=on as well",
         error.TooManyRanks => std.fmt.comptimePrint(
             "GLM-5.3-Flash on CUDA runs on at most {d} ranks: set TF_GLM_WORLD to {d} or fewer",
             .{ ranks.max_world, ranks.max_world },

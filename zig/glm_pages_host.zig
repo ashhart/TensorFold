@@ -205,15 +205,15 @@ test "GLM pages: a follower refuses a duplicate owner and rolls back a failed ta
     defer f.deinit();
     f.p.leader = false;
     F.fail_put = true;
-    try t.expectError(error.NotReady, f.p.map(0, &.{ 3, 2 }));
+    try t.expectError(error.NotReady, f.p.map(0, &.{ 3, 2 }, 0));
     try t.expectEqual(@as(usize, 0), f.p.leases[0].ids.items.len);
     try t.expect(!f.p.used[0]);
     F.fail_put = false;
-    try f.p.map(0, &.{ 3, 2 });
-    try t.expectError(error.BadStep, f.p.map(0, &.{ 1, 0 }));
+    try f.p.map(0, &.{ 3, 2 }, 0);
+    try t.expectError(error.BadStep, f.p.map(0, &.{ 1, 0 }, 0));
     try t.expectEqualSlices(u32, &.{ 3, 2 }, f.e.seqs.items[0].?.st.pages);
     f.p.close(0);
-    try f.p.map(0, &.{ 1, 0 });
+    try f.p.map(0, &.{ 1, 0 }, 0);
     f.p.close(0);
     try t.expect(f.p.pool.idle());
 }
