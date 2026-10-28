@@ -1,0 +1,111 @@
+// Copyright © 2026 Joshua Warren / mlx-omarchy contributors.
+// SPDX-License-Identifier: MIT
+//
+// Reused from mlx-omarchy shaders/swiglu.comp (MIT), comment-condensed.
+//
+// Four-wide SwiGLU: sigmoid(gate) * gate * up, each intermediate
+// rounded to the storage dtype exactly as the fused_chain interpreter
+// rounds it (packHalf2x16 round trip for f16, bf16_store for bf16),
+// so stored bits match. Host gate (dispatch_chain): two direct leaves
+// and count and both leaf offsets multiples of four. materialize != 0
+// additionally stores sig/silu to bindings 3/4; the eager-fusion host
+// path keeps those at 0 and leaves the buffers untouched.
+
+#version 460
+
+#ifdef USE_FP16
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#define STORAGE_VEC f16vec4
+#define LOAD_VEC(x) vec4(x)
+#define STORE_VEC(v) f16vec4(v)
+float round_intermediate(float f) {
+  return unpackHalf2x16(packHalf2x16(vec2(f, 0.0))).x;
+}
+#else
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#define STORAGE_VEC u16vec4
+#define LOAD_VEC(x) uintBitsToFloat(uvec4(x) << 16u)
+uint16_t bf16_store(float value) {
+  uint bits = floatBitsToUint(value);
+  if (isnan(value)) {
+    return uint16_t((bits >> 16) | 0x40u);
+  }
+  return uint16_t((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16);
+}
+#define STORE_VEC(v) \
+  u16vec4(bf16_store(v.x), bf16_store(v.y), bf16_store(v.z), bf16_store(v.w))
+float round_intermediate(float f) {
+  return uintBitsToFloat(uint(bf16_store(f)) << 16u);
+}
+#endif
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Gate {
+  STORAGE_VEC values[];
+} gate_buf;
+layout(set = 0, binding = 1, std430) readonly buffer Up {
+  STORAGE_VEC values[];
+} up_buf;
+layout(set = 0, binding = 2, std430) writeonly buffer Output {
+  STORAGE_VEC values[];
+} output_data;
+layout(set = 0, binding = 3, std430) writeonly buffer SigmoidOut {
+  STORAGE_VEC values[];
+} sigmoid_out;
+layout(set = 0, binding = 4, std430) writeonly buffer SiluOut {
+  STORAGE_VEC values[];
+} silu_out;
+
+layout(push_constant) uniform Params {
+  uint count;
+  uint gate_offset;
+  uint up_offset;
+  uint materialize;
+} params;
+
+vec4 round4(vec4 v) {
+  return vec4(
+      round_intermediate(v.x),
+      round_intermediate(v.y),
+      round_intermediate(v.z),
+      round_intermediate(v.w));
+}
+
+void main() {
+  uint vec_count = params.count / 4u;
+  uint index = gl_GlobalInvocationID.x;
+  uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  while (index < vec_count) {
+    vec4 gate = LOAD_VEC(gate_buf.values[params.gate_offset / 4u + index]);
+#ifdef SILU_ONLY
+    vec4 up = vec4(1.0);  // standalone silu: silu * 1.0 is exact
+#else
+    vec4 up = LOAD_VEC(up_buf.values[params.up_offset / 4u + index]);
+#endif
+#ifdef ASH_QWEN35
+    // Ash8c Metal oracle (qwen3_5/mlp_act.metal): g / (1 + exp(-g)) — one fp32
+    // division, no intermediate rounding, one round at the output store. The
+    // reciprocal-multiply form 1/sig would round differently; not used.
+    vec4 denom = 1.0 + exp(-gate);
+    vec4 sig = 1.0 / denom;  // exact only for the materialize path
+    vec4 silu = gate / denom;
+    vec4 value = silu * up;
+#else
+    vec4 sig = round4(1.0 / (1.0 + exp(-gate)));
+    vec4 silu = round4(gate * sig);
+    vec4 value = round4(silu * up);
+#endif
+    if (params.materialize != 0u) {
+      sigmoid_out.values[index] = STORE_VEC(sig);
+      silu_out.values[index] = STORE_VEC(silu);
+    }
+    output_data.values[index] = STORE_VEC(value);
+    if (vec_count - index <= stride) {
+      break;
+    }
+    index += stride;
+  }
+}
