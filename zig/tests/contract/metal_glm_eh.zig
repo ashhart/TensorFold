@@ -9,6 +9,10 @@ const c = contract.spec;
 const g = contract.gates;
 const Dense = contract.dense.Dense;
 
+fn convertRow(d: Dense, slice: usize, row: usize, values: []f64) void {
+    for (values, slice * (d.shape.k / d.slices)..) |*v, i| v.* = c.fromBf16(d.x[row * d.shape.k + i]);
+}
+
 /// One converted input row per reference call; products and both FP64 reduction orders stay unchanged.
 pub const RowReferenceCache = struct {
     values: ?[]f64 = null,
@@ -34,7 +38,7 @@ pub const RowReferenceCache = struct {
             self.values = try a.alloc(f64, per);
         }
         if (self.row_index != row or self.slice_index != slice) {
-            for (self.values.?, slice * per..) |*value, i| value.* = c.fromBf16(d.x[row * d.shape.k + i]);
+            convertRow(d, slice, row, self.values.?);
             self.row_index = row;
             self.slice_index = slice;
         }
@@ -42,6 +46,12 @@ pub const RowReferenceCache = struct {
     }
 
     pub fn reference(self: *RowReferenceCache, a: std.mem.Allocator, d: Dense, want: []f64, mag: []f64) !void {
+        self.invalidate();
+        if (d.shape.rows > 1) return parallelReference(a, d, want, mag, 8, .normal);
+        return self.referenceSerial(a, d, want, mag);
+    }
+
+    pub fn referenceSerial(self: *RowReferenceCache, a: std.mem.Allocator, d: Dense, want: []f64, mag: []f64) !void {
         self.invalidate();
         const per = d.shape.k / d.slices;
         const terms = try a.alloc(f64, per);
@@ -63,6 +73,69 @@ pub const RowReferenceCache = struct {
         };
     }
 };
+
+const ReferenceJob = struct {
+    d: Dense,
+    first: usize,
+    end: usize,
+    converted: []f64,
+    terms: []f64,
+    want: []f64,
+    mag: []f64,
+    fn run(job: *@This()) void {
+        const d = job.d;
+        const per = d.shape.k / d.slices;
+        for (0..d.slices) |slice| for (job.first..job.end) |row| {
+            // The row conversion remains outside the output-column loop.
+            convertRow(d, slice, row, job.converted);
+            for (0..d.shape.n) |column| {
+                for (job.terms, job.converted, slice * per..) |*term, value, i|
+                    term.* = value * d.w[column * d.shape.k + i];
+                var sum: f64 = 0;
+                var magnitude: f64 = 0;
+                for (job.terms) |term| {
+                    sum += term;
+                    magnitude += @abs(term);
+                }
+                const at = (slice * d.shape.rows + row) * d.shape.n + column;
+                job.want[at] = sum;
+                job.mag[at] = magnitude;
+            }
+        };
+    }
+};
+const SpawnMode = enum { normal, partial_failure, all_failure };
+
+fn parallelReference(a: std.mem.Allocator, d: Dense, want: []f64, mag: []f64, requested: usize, mode: SpawnMode) !void {
+    const count = @min(@min(@max(requested, 1), 8), d.shape.rows);
+    if (count == 0) return;
+    const per = d.shape.k / d.slices;
+    const scratch = try a.alloc(f64, count * per * 2);
+    defer a.free(scratch);
+    var jobs: [8]ReferenceJob = undefined;
+    var threads: [8]?std.Thread = @splat(null);
+    for (0..count) |worker| {
+        jobs[worker] = .{
+            .d = d,
+            .first = worker * d.shape.rows / count,
+            .end = (worker + 1) * d.shape.rows / count,
+            .converted = scratch[worker * per * 2 ..][0..per],
+            .terms = scratch[worker * per * 2 + per ..][0..per],
+            .want = want,
+            .mag = mag,
+        };
+    }
+    // Thread creation failure changes scheduling only; already-started jobs still join.
+    for (1..count) |worker| {
+        threads[worker] = (if (mode == .all_failure or (mode == .partial_failure and worker % 2 == 0))
+            error.ReferenceThreadUnavailable
+        else
+            std.Thread.spawn(.{}, ReferenceJob.run, .{&jobs[worker]})) catch null;
+        if (threads[worker] == null) jobs[worker].run();
+    }
+    jobs[0].run();
+    for (threads[0..count]) |thread| if (thread) |t| t.join();
+}
 
 /// One 8-wide MMA step a k-tile (products round entering the fp32 dot); tail guard: k/8 steps at k = 8192.
 fn depth(s: c.Shape) usize {
@@ -267,4 +340,62 @@ test "GLM eh reference cache invalidates a one-row fixture after input mutation"
     try cache.reference(a, d, &want, &mag);
     try std.testing.expectEqual(@as(f64, 71), want[0]);
     try checkReferenceCache(&cache, a, d);
+}
+
+pub fn checkParallelReference() !void {
+    const a = std.testing.allocator;
+    var cache: RowReferenceCache = .{};
+    defer cache.deinit(a);
+    const shapes = [_]c.Shape{
+        .{ .rows = 1, .n = 3, .k = 32 },
+        .{ .rows = 3, .n = 8, .k = 512 },
+        .{ .rows = 9, .n = 8, .k = 8192 },
+    };
+    for ([_]usize{ 2, 0, 1, 2 }, 0..) |index, turn| {
+        const d = try Dense.init(a, shapes[index], if (index == 1) 2 else 1);
+        defer d.deinit();
+        const n = d.outputs();
+        const values = try a.alloc(f64, 4 * n);
+        defer a.free(values);
+        const want = values[0..n];
+        const mag = values[n .. 2 * n];
+        const got = values[2 * n .. 3 * n];
+        const got_mag = values[3 * n ..];
+        for ([_]g.Fill{ .random, .stress, .nonfinite }) |fill| {
+            d.fillX(fill, 517 + turn, 2);
+            var random = std.Random.DefaultPrng.init(517 ^ turn);
+            const rng = random.random();
+            for (d.w) |*weight| weight.* = rng.float(f64) * 2 - 1;
+            if (fill == .stress) for (0..d.shape.n) |column| for (0..d.shape.k / 2) |i| {
+                const weight: f64 = @floatFromInt(1 + rng.uintLessThan(u32, 7));
+                d.w[column * d.shape.k + i] = weight;
+                d.w[column * d.shape.k + d.shape.k / 2 + i] = -weight;
+            };
+            for (0..2) |mutation| {
+                if (mutation == 1) d.x[0] = c.toBf16(7);
+                try cache.referenceSerial(a, d, want, mag);
+                for ([_]usize{ 1, 2, 4, 8 }) |workers| {
+                    for ([_]SpawnMode{ .normal, .partial_failure, .all_failure }) |mode| {
+                        @memset(got, -517);
+                        @memset(got_mag, -517);
+                        try parallelReference(a, d, got, got_mag, workers, mode);
+                        try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(want), std.mem.sliceAsBytes(got));
+                        try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(mag), std.mem.sliceAsBytes(got_mag));
+                    }
+                }
+            }
+        }
+    }
+    const d = try Dense.init(a, .{ .rows = 3, .n = 8, .k = 512 }, 1);
+    defer d.deinit();
+    var want: [24]f64 = @splat(-517);
+    var mag: [24]f64 = @splat(-519);
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, parallelReference(failing.allocator(), d, &want, &mag, 8, .normal));
+    for (want) |value| try std.testing.expectEqual(@as(f64, -517), value);
+    for (mag) |value| try std.testing.expectEqual(@as(f64, -519), value);
+}
+
+test "GLM eh parallel reference preserves FP64 bytes and finishes thread failure partitions" {
+    try checkParallelReference();
 }
