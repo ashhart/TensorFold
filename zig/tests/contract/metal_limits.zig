@@ -60,6 +60,7 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
     }
     if (std.mem.startsWith(u8, d.name, "metal lfm2 ")) return .{ .decl = d, .function = fun, .here = sources.lfm2, .pre_m5 = sources.lfm2 };
     if (std.mem.startsWith(u8, d.name, "nemotron paged ")) return pagedLaunch(a, device, d, fun);
+    if (std.mem.startsWith(u8, d.name, "nemotron attention ")) return attentionLaunch(a, device, d, fun);
     if (std.mem.startsWith(u8, d.name, "drama3 ")) {
         const text_d3 = try @import("metal_drama3.zig").source(a, d.name);
         return .{ .decl = d, .function = fun, .here = text_d3, .pre_m5 = text_d3 };
@@ -120,6 +121,31 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
         break :blk try std.mem.concat(a, u8, &.{ head, body });
     } else pre;
     return .{ .decl = d, .function = fun, .here = here, .pre_m5 = pre };
+}
+
+/// Main's Nemotron attention library as kernels.zig and prefill_kernels.zig build it here, and before the M5.
+fn attentionLaunch(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, fun: []const u8) !Launch {
+    const tensor = device.tensorUnits();
+    if (std.mem.indexOf(u8, d.name, " partial ") != null or std.mem.indexOf(u8, d.name, " merge ") != null) {
+        const text = for (sources.nemotron.all) |k| {
+            if (std.mem.eql(u8, k.function, fun)) break k.source;
+        } else return error.UnknownLaunch;
+        const pre = if (std.mem.indexOf(u8, d.name, " partial ") != null) try tf.nemotron.simd_attention.rewrite(a, text) else text;
+        return .{ .decl = d, .function = fun, .here = if (tensor) text else pre, .pre_m5 = pre };
+    }
+    if (std.mem.indexOf(u8, d.name, " tree ") != null) {
+        const pre = try std.mem.concat(a, u8, &.{ "#define TF_SIMD_LAYOUT 1\n", sources.nemotron_tree });
+        return .{ .decl = d, .function = fun, .here = if (tensor) sources.nemotron_tree else pre, .pre_m5 = pre };
+    }
+    if (std.mem.indexOf(u8, d.name, " prompt ") != null) {
+        const file = if (std.mem.indexOf(u8, fun, "kv_put") != null) "glue" else "attention_nax";
+        const text = for (sources.prefill) |f| {
+            if (std.mem.eql(u8, f.name, file)) break f.text;
+        } else return error.UnknownLaunch;
+        const pre = try preM5(a, "", text);
+        return .{ .decl = d, .function = fun, .here = if (tensor) try std.mem.replaceOwned(u8, a, text, "#include \"../nax.h\"", sources.nax) else pre, .pre_m5 = pre };
+    }
+    return .{ .decl = d, .function = fun, .here = sources.nemotron_glue, .pre_m5 = sources.nemotron_glue };
 }
 
 /// A Nemotron paged twin's library as its loader would build it here, and before the M5.
