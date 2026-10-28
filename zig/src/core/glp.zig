@@ -70,6 +70,14 @@ pub const Vector = struct {
     publication: Publication = .{},
 };
 
+/// The control vector a serve applies to the residual stream (--glp).
+pub const Glp = struct {
+    /// The file's vector: one direction per layer, the mode and the checkpoint it was derived from.
+    vector: Vector,
+    /// The strength in force: --glp-alpha, or the file's own alpha_default.
+    alpha: f32,
+};
+
 /// The residual site this reader applies at, the one llama.cpp's control vectors name.
 pub const residual_site = "residual_stream_post_layer";
 
