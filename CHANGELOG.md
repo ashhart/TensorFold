@@ -36,6 +36,10 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - The serving line names what can propose drafts, for example `drafts: copies only`, `drafts: MTP + copies` or `drafts: DFlash2 (z-lab/Qwen3.8-27B-DFlash2) + copies`, where it used to say `drafts: on` whether or not a drafter was loaded (#1515). `drafts: off` is unchanged, and drafting itself doesn't change. Thanks to @Deesha08.
 
+- HIP: AMD RDNA4 cards (gfx1201) take a tuning table of their own, which keeps gfx1100's bounds for now, so no kernel choice changes; `zig build hip-affine-tune -Dhip=true` times the MLX affine prompt tiles on a card to fill it (#1527). Thanks to @laudney.
+
+- CUDA kernels take their shared helpers from one set of headers; every kernel compiles to the same code as before (#1440). Thanks to @jschmied.
+
 ## 1.1.8
 
 - Qwen3.5 and 3.6 on HIP (Linux): when a checkpoint shard can't be memory-mapped and is read into memory instead (for example on some network or FUSE mounts), releasing an uploaded layer no longer zeroes that copy. Before, it also zeroed neighbouring tensors not yet uploaded: 269 of 690 layer tensors on Qwen3.5-2B, so the model ran on wrong weights or the loader panicked at close. A malformed shard header is now refused by name. Loads that map their shards are byte-identical to before.
