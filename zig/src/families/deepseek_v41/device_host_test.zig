@@ -33,3 +33,7 @@ test {
 test {
     _ = @import("session_stall_test.zig");
 }
+
+test {
+    _ = @import("union_stall_test.zig");
+}
