@@ -70,14 +70,6 @@
   "running_m5_job": "Unchanged immutable binary; no claim this patch accelerates the currently running qualification",
   "limits": "EH-only reference timing on one M4 Pro; no M5, Affine or full-suite speedup claim",
   "reproduction": "zig build test-glm-window-contract-host -Dglm-rows-contract-filter=\"eh reference parallel\"",
-  "public_source_sha256": {
-    "zig/tests/contract/metal_glm_eh.zig": "2a48fc2328e0aee5072b6cc5918150b4abd22a2078e08f39287419a247f087f7",
-    "zig/glm_rows_contract_host.zig": "f7c491ed3a5e584ddec17c3dae8811d3164b892994e6d27ffc08068f44d1f857"
-  },
-  "normal_host_build": {
-    "command": "zig build test-glm-window-contract-host tf-kernel-contract -Dcpu=apple_m1 --summary all",
-    "summary": "Build Summary: 47/47 steps succeeded; 18/18 tests passed"
-  },
   "affine_extension": {
     "per_output_arithmetic": "Calls unchanged Affine.one; no multiplication/reduction/magnitude reordering",
     "partition": "Disjoint flat output ranges, including multi-worker single-row projections",
@@ -147,5 +139,19 @@
       "zig/tests/contract/metal_glm_eh.zig": "975bb66b38d636d93f2e152aa3ecc6ba052421cc943a4b5d064e92303e52a603"
     },
     "performance": "No Affine or whole-suite speedup claimed; EH ABBA above does not measure Affine.reference"
+  },
+  "eh_initial_source_sha256": {
+    "zig/tests/contract/metal_glm_eh.zig": "2a48fc2328e0aee5072b6cc5918150b4abd22a2078e08f39287419a247f087f7",
+    "zig/glm_rows_contract_host.zig": "f7c491ed3a5e584ddec17c3dae8811d3164b892994e6d27ffc08068f44d1f857"
+  },
+  "eh_initial_host_build": {
+    "command": "zig build test-glm-window-contract-host tf-kernel-contract -Dcpu=apple_m1 --summary all",
+    "summary": "Build Summary: 47/47 steps succeeded; 18/18 tests passed"
+  },
+  "current_source_sha256": {
+    "zig/src/core/contract/reference_threads.zig": "395537771d6086fdd9298a68f4cdc2c33a3db59ed146cf0fd419d70f6b8233bc",
+    "zig/src/core/contract/affine.zig": "e2f407779c9fa5ce7f6545c1155f241be8e236779537f63a4cbea933d117b665",
+    "zig/src/core/contract.zig": "900db88fb68ab9b9efa180c4d32ad3ba83e69e265c4a7917eb908b87b16a2b2b",
+    "zig/tests/contract/metal_glm_eh.zig": "975bb66b38d636d93f2e152aa3ecc6ba052421cc943a4b5d064e92303e52a603"
   }
 }
