@@ -1,7 +1,9 @@
 //! Norm/MLP pointwise Vulkan operators: BF16 RMSNorm gamma, residual add and
 //! SiLU(gate)*up, over the shared set-0 storage / push-constant pipeline model.
-//! Shaders: kernels/vulkan/{fast_norm,binary_vec,swiglu}.comp compiled with
-//! -DUSE_BF16 (mlx-omarchy sources, MIT); the runtime never falls back to CPU.
+//! Shaders: kernels/vulkan/{fast_norm,binary_vec,swiglu}.comp (mlx-omarchy sources, MIT);
+//! fast_norm and swiglu compiled with -DUSE_BF16; binary_vec's default storage IS bf16
+//! (no such ifdef there), so add_bf16 builds with no defines at all. The runtime never
+//! falls back to CPU.
 const std = @import("std");
 const dispatch = @import("dispatch.zig");
 const memory = @import("memory.zig");
