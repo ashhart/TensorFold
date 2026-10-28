@@ -84,3 +84,17 @@ test "after a dense layer's reserves, its gate/up group decodes 1-16 rows withou
     _ = try bare.groupScratch(s, &ws, 16);
     try std.testing.expect(mock.allocations > before);
 }
+
+test "pick: linear_wc, then the mid-M kernels from min_rows; the linear below them, for other widths and fixed plans" {
+    const w = weight(5120, 17408, 8);
+    try expectEqual(exl3.Pick{ .wc = 1 }, exl3.pick(w, 17, true, true, 17).?);
+    try std.testing.expect(exl3.pick(w, 36, true, true, 17).? == .mpg); // 33-40 rows, 4-bit: mid-M
+    try std.testing.expect(exl3.pick(w, 36, false, true, 17).? == .linear);
+    try std.testing.expect(exl3.pick(w, 16, true, true, 17).? == .linear);
+    try std.testing.expect(exl3.pick(weight(5120, 1024, 6), 64, true, true, 17).? == .mpg); // 3-bit
+    try std.testing.expect(exl3.pick(weight(5120, 1024, 7), 64, true, true, 17).? == .linear); // 3.5-bit: none
+    var fixed = w;
+    fixed.sk = 1;
+    fixed.wk = 8;
+    try std.testing.expect(exl3.pick(fixed, 64, true, true, 17).? == .linear); // (unregistered forms otherwise)
+}
