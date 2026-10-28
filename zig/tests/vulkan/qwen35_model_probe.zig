@@ -393,14 +393,18 @@ pub fn main(init: std.process.Init) !u8 {
     defer a.free(ids_a);
     const ids_b = try a.alloc(u32, expected.len);
     defer a.free(ids_b);
+    const samples_a = try a.alloc(SteadySample, expected.len - 1);
+    defer a.free(samples_a);
+    const samples_b = try a.alloc(SteadySample, expected.len - 1);
+    defer a.free(samples_b);
 
-    greedyRun(engine, opts.teacher_forced, opts.sequential_prefill, prompt, expected, ids_a, rows_a, row_len) catch |e| {
+    greedyRun(engine, opts.teacher_forced, opts.sequential_prefill, prompt, expected, ids_a, rows_a, row_len, samples_a, io) catch |e| {
         std.debug.print("FAIL run1: {s}\n", .{@errorName(e)});
         return 1;
     };
     std.debug.print("MILESTONE run1-done elapsed_ms={d}\n", .{clock.ms()});
     try engine.reset();
-    greedyRun(engine, opts.teacher_forced, opts.sequential_prefill, prompt, expected, ids_b, rows_b, row_len) catch |e| {
+    greedyRun(engine, opts.teacher_forced, opts.sequential_prefill, prompt, expected, ids_b, rows_b, row_len, samples_b, io) catch |e| {
         std.debug.print("FAIL run2: {s}\n", .{@errorName(e)});
         return 1;
     };
@@ -428,6 +432,26 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print("FAIL receipt: cannot write logits_bf16.bin: {s}\n", .{@errorName(e)});
         return 1;
     };
+    // per-token timing of the steady tokens (index s feeds draw s-1 and yields draw s): written after
+    // both runs, never inside a timed sample
+    {
+        var sw: std.Io.Writer.Allocating = .init(a);
+        defer sw.deinit();
+        for ([_]struct { run: []const u8, samples: []const SteadySample }{
+            .{ .run = "run_a", .samples = samples_a },
+            .{ .run = "run_b", .samples = samples_b },
+        }) |group| {
+            for (group.samples) |t| {
+                try sw.writer.print("{{\"run\":\"{s}\",\"s\":{d},\"fed_index\":{d},\"position\":{d},\"output_index\":{d},\"id\":{d},\"t0_ns\":{d},\"t1_ns\":{d},\"wall_ns\":{d}}}\n", .{
+                    group.run, t.s, t.fed_index, t.position, t.output_index, t.id, t.t0_ns, t.t1_ns, t.wall_ns,
+                });
+            }
+        }
+        out.writeFile(io, .{ .sub_path = "steady_samples.jsonl", .data = sw.written() }) catch |e| {
+            std.debug.print("FAIL receipt: cannot write steady_samples.jsonl: {s}\n", .{@errorName(e)});
+            return 1;
+        };
+    }
     const ids_hash = try sha256HexA(diag, std.mem.sliceAsBytes(ids_a));
     writeResult(a, io, out, .{
         .status = if (match_a and match_b and ids_equal and logits_equal) "ok" else "mismatch",
@@ -482,16 +506,64 @@ pub fn main(init: std.process.Init) !u8 {
 /// anchor) feeds each draw back; the teacher-forced mode feeds the oracle's
 /// own id for the step just scored as the next input — a labelled per-step
 /// check, never a free-running chain proof.
-fn greedyRun(e: *Engine, teacher_forced: bool, sequential: bool, prompt: []const u32, expected: []const u32, ids_out: []u32, rows_out: []u8, row_len: usize) !void {
+/// One steady token's wall time. The sample covers the whole token: the clock starts before the
+/// first host action of the fed token and stops only after the chosen id AND the full logits row
+/// are in host memory. An engine with the combined `decodeDraw` runs it as one submit; one without
+/// runs its separate decode, GPU draw and logits readback inside the same timed span.
+pub const SteadySample = struct {
+    s: u64, // steady sample index 1..N-1
+    fed_index: u64, // the drawn id fed back: s-1
+    position: u64, // zero-based model position of the fed token
+    output_index: u64, // the generated id this sample produced: s
+    id: u32,
+    t0_ns: u64,
+    t1_ns: u64,
+    wall_ns: u64,
+};
+
+fn steadyToken(io: std.Io, e: *Engine, s: u64, token: u32, row: []u8) !SteadySample {
+    const position = e.visible();
+    const t0 = std.Io.Clock.awake.now(io);
+    const id = if (comptime @hasDecl(Engine, "decodeDraw")) try e.decodeDraw(token, row) else immediate: {
+        try e.decode(token);
+        const drawn = try e.draw();
+        try e.logitsBytes(row);
+        break :immediate drawn;
+    };
+    const t1 = std.Io.Clock.awake.now(io);
+    return .{
+        .s = s,
+        .fed_index = s - 1,
+        .position = position,
+        .output_index = s,
+        .id = id,
+        .t0_ns = @intCast(t0.nanoseconds),
+        .t1_ns = @intCast(t1.nanoseconds),
+        .wall_ns = @intCast(t1.nanoseconds - t0.nanoseconds),
+    };
+}
+
+/// One greedy run over the fresh state: whole-prompt prefill (the engine
+/// chunks it canonically into 32-row pieces; --sequential-prefill instead
+/// issues one Engine.prefill call per prompt token for the boundary
+/// evidence), then the first draw and its logits row, then `ids_out.len - 1` timed steady tokens, every
+/// id selected by the GPU argreduce and recorded as drawn. Free-running (the default and the
+/// anchor) feeds each draw back; the teacher-forced mode feeds the oracle's
+/// own id for the step just scored as the next input - a labelled per-step
+/// check, never a free-running chain proof.
+fn greedyRun(e: *Engine, teacher_forced: bool, sequential: bool, prompt: []const u32, expected: []const u32, ids_out: []u32, rows_out: []u8, row_len: usize, samples_out: []SteadySample, io: std.Io) !void {
+    if (samples_out.len != ids_out.len - 1) return error.Invalid;
     if (sequential) {
         for (prompt) |tok| try e.prefill(&.{tok});
     } else {
         try e.prefill(prompt);
     }
-    for (ids_out, 0..) |*slot, step| {
-        slot.* = try e.draw();
-        try e.logitsBytes(rows_out[step * row_len ..][0..row_len]);
-        if (step + 1 < ids_out.len) try e.decode(if (teacher_forced) expected[step] else slot.*);
+    ids_out[0] = try e.draw();
+    try e.logitsBytes(rows_out[0..row_len]);
+    for (1..ids_out.len) |step| {
+        const feed: u32 = if (teacher_forced) expected[step - 1] else ids_out[step - 1];
+        samples_out[step - 1] = try steadyToken(io, e, step, feed, rows_out[step * row_len ..][0..row_len]);
+        ids_out[step] = samples_out[step - 1].id;
     }
 }
 
