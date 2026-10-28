@@ -181,7 +181,7 @@ pub fn main(init: std.process.Init) !void {
         e.setBuffer(s.sums, 0, 4);
         e.setValue(@as(i32, @intCast(rows)), 5);
         e.dispatchGroups(.{ .width = rows }, .{ .width = 1024 });
-        fwd.pleInputs(m, e, &s, &m.kernels.ple.?, rows);
+        fwd.pleInputs(m, e, &s, &m.kernels.ple.?, rows, m.config.geo.layers);
         e.end();
         try finish(cb);
     }

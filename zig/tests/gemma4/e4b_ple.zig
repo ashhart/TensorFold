@@ -80,7 +80,7 @@ pub fn main(init: std.process.Init) !void {
         const cb = m.queue.commandBuffer();
         const e = cb.compute(.serial);
         g4.forward.embedRows(m, e, &s, rows);
-        g4.forward.pleInputs(m, e, &s, &m.kernels.ple.?, rows);
+        g4.forward.pleInputs(m, e, &s, &m.kernels.ple.?, rows, m.config.geo.layers);
         e.end();
         cb.commit();
         cb.wait();

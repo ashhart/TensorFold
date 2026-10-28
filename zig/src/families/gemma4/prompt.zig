@@ -155,9 +155,10 @@ fn pass(m: *Model, s: *Scratch, c: *state.Cache, ids: []const u32, images: []con
     e.setValue(cfg.eps, 3);
     noSums(e, s, 4);
     e.dispatchGroups(.{ .width = rows }, .{ .width = 1024 });
-    if (m.kernels.ple) |*pk| fwd.pleInputs(m, e, s, pk, rows);
+    const used = if (last) geo.layers else m.deepFrom();
+    if (m.kernels.ple) |*pk| fwd.pleInputs(m, e, s, pk, rows, used);
     var cur: usize = 0;
-    for (0..if (last) geo.layers else m.deepFrom()) |i| {
+    for (0..used) |i| {
         if (geo.layer_input != 0) try layerE(m, e, s, c, i, cur, r32) else try layer(m, e, s, c, i, cur, r32, .{});
         cur = 1 - cur;
     }

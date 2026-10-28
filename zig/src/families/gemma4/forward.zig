@@ -119,10 +119,11 @@ fn runWindow(m: *Model, s: *state.Scratch, segments: []const Segment, ids: []con
     e.setValue(cfg.eps, 3);
     sumsOut(e, s, rows, 4);
     e.dispatchGroups(.{ .width = rows }, .{ .width = 1024 });
-    if (m.kernels.ple) |*pk| pleInputs(m, e, s, pk, rows);
+    const used = if (reads == .none) m.deepFrom() else geo.layers;
+    if (m.kernels.ple) |*pk| pleInputs(m, e, s, pk, rows, used);
     var cur: usize = 0;
     const fused = rows == 1 and m.fuse;
-    for (0..if (reads == .none) m.deepFrom() else geo.layers) |i| {
+    for (0..used) |i| {
         try layer(m, e, s, segments, &chunks, i, cur, rows, .{}, fused);
         cur = 1 - cur;
     }
@@ -189,18 +190,18 @@ fn bf16Round(x: f32) f32 {
     return @bitCast((b + 0x7FFF + ((b >> 16) & 1)) & 0xFFFF0000);
 }
 
-/// y [rows, d.n] = x [rows, d.k] times a bf16 matrix d, a simdgroup four columns (gemma4/dense.metal).
-fn denseBf16(e: mtl.ComputeEncoder, pk: *const kernels.Ple, x: mtl.Buffer, d: weights.Dense, y: mtl.Buffer, rows: usize) void {
+/// y [rows, d.n] = x [rows, d.k] times a bf16 matrix d, a simdgroup four columns; y's first `cols` columns only.
+fn denseBf16(e: mtl.ComputeEncoder, pk: *const kernels.Ple, x: mtl.Buffer, d: weights.Dense, y: mtl.Buffer, rows: usize, cols: usize) void {
     e.setPipeline(pk.dense);
     e.setBuffer(x, 0, 0);
     bindRef(e, d.w, 1);
     e.setBuffer(y, 0, 2);
     e.setValue([3]i32{ @intCast(rows), @intCast(d.n), @intCast(d.k) }, 3);
-    e.dispatchGroups(.{ .width = (d.n / 4 + 1) / 2 }, .{ .width = 64 });
+    e.dispatchGroups(.{ .width = (cols / 4 + 1) / 2 }, .{ .width = 64 });
 }
 
-/// The E-series' per-layer inputs of the window's rows, into s.ple.pli.
-pub fn pleInputs(m: *Model, e: mtl.ComputeEncoder, s: anytype, pk: *const kernels.Ple, rows: usize) void {
+/// The E-series' per-layer inputs of layers [0, used) for the window's rows, into s.ple.pli.
+pub fn pleInputs(m: *Model, e: mtl.ComputeEncoder, s: anytype, pk: *const kernels.Ple, rows: usize, used: usize) void {
     const geo = m.config.geo;
     const t = m.weights.ple.?;
     const sp = s.ple.?;
@@ -213,7 +214,7 @@ pub fn pleInputs(m: *Model, e: mtl.ComputeEncoder, s: anytype, pk: *const kernel
     bind(e, &.{sp.tok}, 4);
     e.setValue(bf16Round(@sqrt(@as(f32, @floatFromInt(geo.layer_input)))), 5);
     e.dispatchThreads(.{ .width = wide / 2, .height = rows }, .{ .width = 256 });
-    denseBf16(e, pk, s.h[0], t.model_projection, sp.prj, rows);
+    denseBf16(e, pk, s.h[0], t.model_projection, sp.prj, rows, used * geo.layer_input);
     e.setPipeline(pk.combine);
     bind(e, &.{ sp.prj, sp.tok }, 0);
     bindRef(e, t.projection_norm, 2);
@@ -221,7 +222,7 @@ pub fn pleInputs(m: *Model, e: mtl.ComputeEncoder, s: anytype, pk: *const kernel
     e.setValue(@as(f32, 1.0) / @sqrt(@as(f32, @floatFromInt(geo.hidden))), 4);
     e.setValue(@as(f32, 1.0) / @sqrt(@as(f32, 2.0)), 5);
     bind(e, &.{sp.pli}, 6);
-    e.dispatchGroups(.{ .width = geo.layers, .height = rows }, .{ .width = geo.layer_input });
+    e.dispatchGroups(.{ .width = used, .height = rows }, .{ .width = geo.layer_input });
 }
 
 /// A dense tail's tap output: layer i's rows at its tap's columns and their stride, or `spare` with stride 0.
@@ -268,7 +269,7 @@ pub fn pleTail(m: *Model, e: mtl.ComputeEncoder, s: anytype, i: usize, cur: usiz
         bind(e, &.{sp.pli}, 4);
         e.setValue([2]i32{ @intCast(i * geo.layer_input), @intCast(geo.layers * geo.layer_input) }, 5);
         e.dispatchGroups(.{ .width = gate.n / 4 }, .{ .width = 32 * kernels.gate_ksplit });
-        denseBf16(e, pk, sp.mid, l.ple_projection.?, s.y, rows);
+        denseBf16(e, pk, sp.mid, l.ple_projection.?, s.y, rows, l.ple_projection.?.n);
         tail(m, e, s, s.h[1 - cur], s.y, l.ple_norm.?, l.scalar, next, cur, rows, i);
     }
 }
