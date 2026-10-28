@@ -99,6 +99,7 @@ pub fn build(b: *std.Build) void {
     }
     @import("zig/build/h3_host.zig").tests(b, target, test_step);
     @import("zig/build/ling_host.zig").tests(b, target, test_step);
+    @import("zig/build/lfm3_host.zig").steps(b, test_step);
     @import("zig/build/digest.zig").steps(b, test_step, draft_ids, build_options);
     @import("zig/build/flashnext_budget.zig").steps(b, test_step);
     @import("zig/build/flashnext_batch_host.zig").tests(b, test_step);
