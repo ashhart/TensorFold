@@ -35,6 +35,36 @@ pub const tokens: u64 = 8;
 /// `worst` is |got - want| OVER its budget (a ratio; >1 fails), with `where`.
 pub const Report = struct { worst: f64 = 0, where: usize = 0 };
 
+/// The first element that failed a check, for the probe's failure print.
+/// `want` is the HOST Ash-chain reference (recomputable; sp/exp are NOT
+/// stored by either side and are never invented). Checkers only fill this on
+/// the real failure path; negative plants pass null and stay silent.
+pub const Output = enum { soa, g, beta, y, state, snapshot };
+pub const Violation = struct {
+    index: usize,
+    output: Output = .soa,
+    want: f64 = 0,
+    got: f64 = 0,
+    bound: f64 = 0,
+    ratio: f64 = 0,
+    /// The want value's f32 bits where the reference is an f32 scalar (g):
+    /// lets the diagnostic show f32 class (subnormal/underflow) without
+    /// pretending anything about unstored GPU intermediates.
+    want_f32_bits: u32 = 0,
+};
+
+fn violated(v: ?*Violation, output: Output, index: usize, want: f64, got: f64, bound: f64) void {
+    if (v) |d| d.* = .{
+        .output = output,
+        .index = index,
+        .want = want,
+        .got = got,
+        .bound = bound,
+        .ratio = if (bound > 0) @abs(got - want) / bound else std.math.inf(f64),
+        .want_f32_bits = @bitCast(@as(f32, @floatCast(want))),
+    };
+}
+
 /// Stated fixed bring-up budget: a depth-deep f32 sum at its magnitude scale,
 /// `ops` further f32 roundings and `mids` bf16 roundings at the value's scale,
 /// one final bf16 store. Never a sum of squares of outputs; always finite and
@@ -72,9 +102,31 @@ fn f32Of(pairs: []const u16, word: usize) f64 {
 }
 
 /// The g/beta gate chain in f64 (the split's lane-0 chain and the decode
-/// prologue's raw-gates chain share this formula).
+/// prologue's raw-gates chain share this formula). NOTE: f64-idealized — it
+/// omits the shader's bf16 roundings on s and sp, which exp(a_log) amplifies
+/// by up to ~20x at this fixture's ranges. Use `gateRefAsh` for checker
+/// references; this stays for the amplification evidence test.
 pub fn gateRef(a_in: f64, b_in: f64, a_log: f64, dt: f64) gdn_mod.GateF64 {
     return gdn_mod.gateReferenceF64(a_in, b_in, a_log, dt);
+}
+
+/// The ASH gate chain EXACTLY as the shaders compute it (gdn_split.comp
+/// ash_gate and gated_delta_decode's ASH_QWEN35 prologue): s = BF16(a+dt);
+/// sp = BF16(max(s,0)+log(1+exp(-|s|))) with the DIRECT log; g =
+/// exp(-exp(A_log_f32)*sp) kept f32; beta = BF16(sigmoid(b)). Every bf16
+/// rounding and f32 op of the shader, on the host — the residual vs the GPU
+/// is f32 exp/log ulps, what the unchanged ops budget covers.
+pub fn gateRefAsh(a_in: u16, b_in: u16, a_log: f64, dt_in: u16) gdn_mod.GateF64 {
+    const a = c.fromBf16(a_in);
+    const dt = c.fromBf16(dt_in);
+    const s = c.fromBf16(c.toBf16(a + dt));
+    const sp_raw: f32 = @max(s, 0.0) + @log(@as(f32, 1.0) + @exp(-@abs(s)));
+    const sp = c.fromBf16(c.toBf16(sp_raw));
+    // the shader's exp reads the f32 A_log: cast BEFORE the exp
+    const ea: f32 = @exp(@as(f32, @floatCast(a_log)));
+    const g: f32 = @exp(-ea * sp);
+    const beta_raw: f32 = 1.0 / (1.0 + @exp(-c.fromBf16(b_in)));
+    return .{ .g = @floatCast(g), .beta = @floatCast(c.fromBf16(c.toBf16(beta_raw))) };
 }
 
 // ---------------------------------------------------------------------------
@@ -126,7 +178,7 @@ pub const Split = struct {
         f.a.free(f.a_log_bits);
     }
 
-    pub fn check(f: Split, soa_bits: []const u16, g_pairs: []const u16, beta_bits: []const u16) !Report {
+    pub fn check(f: Split, soa_bits: []const u16, g_pairs: []const u16, beta_bits: []const u16, violation: ?*Violation) !Report {
         var r: Report = .{};
         const C: usize = @intCast(Model.conv_channels);
         const section: usize = @intCast(tokens * Model.linear_dim);
@@ -151,35 +203,54 @@ pub const Split = struct {
                 for (0..128) |i| {
                     const want = if (is_q or is_k) scale_f * (vals[i] * inv) else vals[i];
                     const got = c.fromBf16(soa_bits[dst_base + i]);
-                    if (!std.math.isFinite(got)) return error.NonFiniteOutput;
+                    if (!std.math.isFinite(got)) {
+                        violated(violation, .soa, dst_base + i, want, got, 0);
+                        return error.NonFiniteOutput;
+                    }
                     const d = @abs(got - want);
                     const bound = budget(40, 5, 3, want, vmax * vmax);
-                    if (d > bound) return error.OverBound;
+                    if (d > bound) {
+                        violated(violation, .soa, dst_base + i, want, got, bound);
+                        return error.OverBound;
+                    }
                     const ratio = d / bound;
                     if (ratio > r.worst) r = .{ .worst = ratio, .where = dst_base + i };
                 }
             }
             for (0..@intCast(Model.heads)) |hv| {
-                const ref = gateRef(
-                    c.fromBf16(f.a_bits[t * 16 + hv]),
-                    c.fromBf16(f.b_bits[t * 16 + hv]),
+                // HOST Ash chain: the exact bf16 rounds the shader does
+                const ref = gateRefAsh(
+                    f.a_bits[t * 16 + hv],
+                    f.b_bits[t * 16 + hv],
                     f32Of(f.a_log_bits, hv),
-                    c.fromBf16(f.dt_bits[hv]),
+                    f.dt_bits[hv],
                 );
                 const g_idx = (t * 16 + hv) * 2;
                 const g_got = f32Of(g_pairs, t * 16 + hv);
-                if (!std.math.isFinite(g_got)) return error.NonFiniteOutput;
+                if (!std.math.isFinite(g_got)) {
+                    violated(violation, .g, g_idx / 2, ref.g, g_got, 0);
+                    return error.NonFiniteOutput;
+                }
                 const gd = @abs(g_got - ref.g);
                 const gbound = budget(1, 4, 2, ref.g, @abs(ref.g));
-                if (gd > gbound) return error.GateOverBound;
+                if (gd > gbound) {
+                    violated(violation, .g, g_idx / 2, ref.g, g_got, gbound);
+                    return error.GateOverBound;
+                }
                 const gratio = gd / gbound;
                 if (gratio > r.worst) r = .{ .worst = gratio, .where = g_idx };
                 const beta_want = ref.beta;
                 const beta_got = c.fromBf16(beta_bits[t * 16 + hv]);
-                if (!std.math.isFinite(beta_got)) return error.NonFiniteOutput;
+                if (!std.math.isFinite(beta_got)) {
+                    violated(violation, .beta, g_idx / 2, beta_want, beta_got, 0);
+                    return error.NonFiniteOutput;
+                }
                 const bd = @abs(beta_got - beta_want);
                 const bbound = budget(1, 3, 1, beta_want, @abs(beta_want));
-                if (bd > bbound) return error.GateOverBound;
+                if (bd > bbound) {
+                    violated(violation, .beta, g_idx / 2, beta_want, beta_got, bbound);
+                    return error.GateOverBound;
+                }
                 const bratio = bd / bbound;
                 if (bratio > r.worst) r = .{ .worst = bratio, .where = g_idx + 1 };
             }
@@ -238,7 +309,49 @@ pub const SplitOne = struct {
         f.a.free(f.a_log_bits);
     }
 
-    pub fn check(f: SplitOne, soa_bits: []const u16, g_pairs: []const u16, beta_bits: []const u16) !Report {
+    /// The gate section alone (g/beta are conv_out-independent), shared by
+    /// check() and the host replay test.
+    pub fn checkGates(f: SplitOne, g_pairs: []const u16, beta_bits: []const u16, violation: ?*Violation) !Report {
+        var r: Report = .{};
+        for (0..@intCast(Model.heads)) |hv| {
+            // HOST Ash chain: the exact bf16 rounds the shader does
+            const ref = gateRefAsh(
+                f.a_bits[hv],
+                f.b_bits[hv],
+                f32Of(f.a_log_bits, hv),
+                f.dt_bits[hv],
+            );
+            const g_got = f32Of(g_pairs, hv);
+            if (!std.math.isFinite(g_got)) {
+                violated(violation, .g, hv, ref.g, g_got, 0);
+                return error.NonFiniteOutput;
+            }
+            const gd = @abs(g_got - ref.g);
+            const gbound = budget(1, 4, 2, ref.g, @abs(ref.g));
+            if (gd > gbound) {
+                violated(violation, .g, hv, ref.g, g_got, gbound);
+                return error.GateOverBound;
+            }
+            const gratio = gd / gbound;
+            if (gratio > r.worst) r = .{ .worst = gratio, .where = hv };
+            const beta_got = c.fromBf16(beta_bits[hv]);
+            if (!std.math.isFinite(beta_got)) {
+                violated(violation, .beta, hv, ref.beta, beta_got, 0);
+                return error.NonFiniteOutput;
+            }
+            const bd = @abs(beta_got - ref.beta);
+            const bbound = budget(1, 3, 1, ref.beta, @abs(ref.beta));
+            if (bd > bbound) {
+                violated(violation, .beta, hv, ref.beta, beta_got, bbound);
+                return error.GateOverBound;
+            }
+            const bratio = bd / bbound;
+            if (bratio > r.worst) r = .{ .worst = bratio, .where = 16 + hv };
+        }
+        return r;
+    }
+
+    pub fn check(f: SplitOne, soa_bits: []const u16, g_pairs: []const u16, beta_bits: []const u16, violation: ?*Violation) !Report {
         var r: Report = .{};
         const section: usize = @intCast(Model.linear_dim);
         for (0..@intCast(3 * Model.heads)) |head| {
@@ -261,36 +374,22 @@ pub const SplitOne = struct {
             for (0..128) |i| {
                 const want = if (is_q or is_k) scale_f * (vals[i] * inv) else vals[i];
                 const got = c.fromBf16(soa_bits[dst_base + i]);
-                if (!std.math.isFinite(got)) return error.NonFiniteOutput;
+                if (!std.math.isFinite(got)) {
+                    violated(violation, .soa, dst_base + i, want, got, 0);
+                    return error.NonFiniteOutput;
+                }
                 const d = @abs(got - want);
                 const bound = budget(40, 5, 3, want, vmax * vmax);
-                if (d > bound) return error.OverBound;
+                if (d > bound) {
+                    violated(violation, .soa, dst_base + i, want, got, bound);
+                    return error.OverBound;
+                }
                 const ratio = d / bound;
                 if (ratio > r.worst) r = .{ .worst = ratio, .where = dst_base + i };
             }
         }
-        for (0..@intCast(Model.heads)) |hv| {
-            const ref = gateRef(
-                c.fromBf16(f.a_bits[hv]),
-                c.fromBf16(f.b_bits[hv]),
-                f32Of(f.a_log_bits, hv),
-                c.fromBf16(f.dt_bits[hv]),
-            );
-            const g_got = f32Of(g_pairs, hv);
-            if (!std.math.isFinite(g_got)) return error.NonFiniteOutput;
-            const gd = @abs(g_got - ref.g);
-            const gbound = budget(1, 4, 2, ref.g, @abs(ref.g));
-            if (gd > gbound) return error.GateOverBound;
-            const gratio = gd / gbound;
-            if (gratio > r.worst) r = .{ .worst = gratio, .where = hv };
-            const beta_got = c.fromBf16(beta_bits[hv]);
-            if (!std.math.isFinite(beta_got)) return error.NonFiniteOutput;
-            const bd = @abs(beta_got - ref.beta);
-            const bbound = budget(1, 3, 1, ref.beta, @abs(ref.beta));
-            if (bd > bbound) return error.GateOverBound;
-            const bratio = bd / bbound;
-            if (bratio > r.worst) r = .{ .worst = bratio, .where = 16 + hv };
-        }
+        const g = try f.checkGates(g_pairs, beta_bits, violation);
+        if (g.worst > r.worst) r = g;
         return r;
     }
 };
@@ -479,38 +578,56 @@ pub const Recur = struct {
 
     /// The snapshot slot against its boundary reference; poison and partial
     /// writes are refused by the same finite/budget gates as hf.
-    pub fn checkSnap(f: Recur, snap_pairs: []const u16) !Report {
+    pub fn checkSnap(f: Recur, snap_pairs: []const u16, violation: ?*Violation) !Report {
         const ws = f.want_snap orelse return error.NoSnapshotExpected;
         var r: Report = .{};
         for (ws, 0..) |w, i| {
             const got = f32Of(snap_pairs, i);
-            if (!std.math.isFinite(got)) return error.NonFiniteOutput;
+            if (!std.math.isFinite(got)) {
+                violated(violation, .snapshot, i, w, got, 0);
+                return error.NonFiniteOutput;
+            }
             const d = @abs(got - w);
             const bound = budget(130 * 4 + 2, 2, 0, w, f.max_state); // chunk tokens deep
-            if (d > bound) return error.OverBound;
+            if (d > bound) {
+                violated(violation, .snapshot, i, w, got, bound);
+                return error.OverBound;
+            }
             const ratio = d / bound;
             if (ratio > r.worst) r = .{ .worst = ratio, .where = i };
         }
         return r;
     }
 
-    pub fn check(f: Recur, y_bits: []const u16, hf_pairs: []const u16) !Report {
+    pub fn check(f: Recur, y_bits: []const u16, hf_pairs: []const u16, violation: ?*Violation) !Report {
         var r: Report = .{};
         for (f.want_y, 0..) |w, i| {
             const got = c.fromBf16(y_bits[i]);
-            if (!std.math.isFinite(got)) return error.NonFiniteOutput;
+            if (!std.math.isFinite(got)) {
+                violated(violation, .y, i, w, got, 0);
+                return error.NonFiniteOutput;
+            }
             const d = @abs(got - w);
             const bound = budget(130 * @as(f64, tokens) + 130, 4, 0, w, f.max_state);
-            if (d > bound) return error.OverBound;
+            if (d > bound) {
+                violated(violation, .y, i, w, got, bound);
+                return error.OverBound;
+            }
             const ratio = d / bound;
             if (ratio > r.worst) r = .{ .worst = ratio, .where = i };
         }
         for (f.want_state, 0..) |w, i| {
             const got = f32Of(hf_pairs, i);
-            if (!std.math.isFinite(got)) return error.NonFiniteOutput;
+            if (!std.math.isFinite(got)) {
+                violated(violation, .state, i, w, got, 0);
+                return error.NonFiniteOutput;
+            }
             const d = @abs(got - w);
             const bound = budget(130 * @as(f64, tokens) + 2, 2, 0, w, f.max_state);
-            if (d > bound) return error.OverBound;
+            if (d > bound) {
+                violated(violation, .state, i, w, got, bound);
+                return error.OverBound;
+            }
             const ratio = d / bound;
             if (ratio > r.worst) r = .{ .worst = ratio, .where = i };
         }
@@ -572,11 +689,12 @@ pub const Decode = struct {
         var st: [16 * 128 * 128]f64 = @splat(0);
         for (0..16 * 128 * 128) |i| st[i] = f32Of(state_in_bits, i);
         for (0..16) |h| {
-            const gref = gateRef(
-                c.fromBf16(a_bits[h]),
-                c.fromBf16(b_bits[h]),
+            // HOST Ash chain: the exact bf16 rounds the decode prologue does
+            const gref = gateRefAsh(
+                a_bits[h],
+                b_bits[h],
                 f32Of(a_log_bits, h),
-                c.fromBf16(dt_bits[h]),
+                dt_bits[h],
             );
             const g = gref.g;
             const beta = gref.beta;
@@ -624,23 +742,35 @@ pub const Decode = struct {
         f.a.free(f.want_state);
     }
 
-    pub fn check(f: Decode, y_bits: []const u16, state_out_pairs: []const u16) !Report {
+    pub fn check(f: Decode, y_bits: []const u16, state_out_pairs: []const u16, violation: ?*Violation) !Report {
         var r: Report = .{};
         for (f.want_y, 0..) |w, i| {
             const got = c.fromBf16(y_bits[i]);
-            if (!std.math.isFinite(got)) return error.NonFiniteOutput;
+            if (!std.math.isFinite(got)) {
+                violated(violation, .y, i, w, got, 0);
+                return error.NonFiniteOutput;
+            }
             const d = @abs(got - w);
             const bound = budget(260, 4, 0, w, f.max_state);
-            if (d > bound) return error.OverBound;
+            if (d > bound) {
+                violated(violation, .y, i, w, got, bound);
+                return error.OverBound;
+            }
             const ratio = d / bound;
             if (ratio > r.worst) r = .{ .worst = ratio, .where = i };
         }
         for (f.want_state, 0..) |w, i| {
             const got = f32Of(state_out_pairs, i);
-            if (!std.math.isFinite(got)) return error.NonFiniteOutput;
+            if (!std.math.isFinite(got)) {
+                violated(violation, .state, i, w, got, 0);
+                return error.NonFiniteOutput;
+            }
             const d = @abs(got - w);
             const bound = budget(132, 2, 0, w, f.max_state);
-            if (d > bound) return error.OverBound;
+            if (d > bound) {
+                violated(violation, .state, i, w, got, bound);
+                return error.OverBound;
+            }
             const ratio = d / bound;
             if (ratio > r.worst) r = .{ .worst = ratio, .where = i };
         }
@@ -718,6 +848,75 @@ pub const Norm = struct {
         return r;
     }
 };
+
+// Replay the exact decode fixture seed through the production gate checker.
+// Report old-reference drift; it is not assumed to explain the GPU failure.
+test "gateRefAsh replays the fixture seed and diagnoses g and beta separately" {
+    const a = testing.allocator;
+    const f = try SplitOne.init(a, 0x57ac);
+    defer f.deinit();
+    // what the shader computes, on the host: g f32 words, beta bf16
+    const g_pairs = try a.alloc(u16, 2 * @as(usize, @intCast(Model.heads)));
+    defer a.free(g_pairs);
+    const beta_bits = try a.alloc(u16, @intCast(Model.heads));
+    defer a.free(beta_bits);
+    var old_worst: f64 = 0;
+    for (0..@intCast(Model.heads)) |hv| {
+        const ash = gateRefAsh(f.a_bits[hv], f.b_bits[hv], f32Of(f.a_log_bits, hv), f.dt_bits[hv]);
+        const gbits: u32 = @bitCast(@as(f32, @floatCast(ash.g)));
+        g_pairs[2 * hv] = @truncate(gbits);
+        g_pairs[2 * hv + 1] = @truncate(gbits >> 16);
+        beta_bits[hv] = c.toBf16(@floatCast(ash.beta));
+        // evidence: the OLD unrounded f64 reference vs the shader chain
+        const old = gateRef(
+            c.fromBf16(f.a_bits[hv]),
+            c.fromBf16(f.b_bits[hv]),
+            f32Of(f.a_log_bits, hv),
+            c.fromBf16(f.dt_bits[hv]),
+        );
+        const gd = @abs(old.g - ash.g);
+        const gbound = budget(1, 4, 2, ash.g, @abs(ash.g));
+        old_worst = @max(old_worst, gd / gbound);
+    }
+    std.debug.print("HOST gate old-reference drift seed=0x57ac max_ratio={e} (not a GPU diagnosis)\n", .{old_worst});
+    // the exact chain replays CLEAN through the same checker
+    const rep = try f.checkGates(g_pairs, beta_bits, null);
+    try testing.expect(rep.worst <= 1);
+    var diag: Violation = undefined;
+    const g0 = g_pairs[0];
+    const g1 = g_pairs[1];
+    g_pairs[0] = 0;
+    g_pairs[1] = 0x4f00;
+    try testing.expectError(error.GateOverBound, f.checkGates(g_pairs, beta_bits, &diag));
+    try testing.expectEqual(Output.g, diag.output);
+    try testing.expectEqual(@as(usize, 0), diag.index);
+    g_pairs[0] = g0;
+    g_pairs[1] = g1;
+    const beta0 = beta_bits[0];
+    beta_bits[0] = 0x4f00;
+    try testing.expectError(error.GateOverBound, f.checkGates(g_pairs, beta_bits, &diag));
+    try testing.expectEqual(Output.beta, diag.output);
+    try testing.expectEqual(@as(usize, 0), diag.index);
+    beta_bits[0] = beta0;
+    // f32-subnormal census over the EXACT seed (log-only, no acceptance
+    // change): with a_log up to 3 and sp up to ~4.5, g can reach
+    // exp(-20.085*4.5) ≈ 5.6e-40 — f32 subnormal territory. A flush-to-zero
+    // device would produce g=0 for these; if a diagnostic ever shows
+    // want_f32_bits subnormal with got=0, that is THIS and Main decides on
+    // the measured data. No FTZ assumption is baked into the host ref.
+    var min_g: f32 = std.math.floatMax(f32);
+    var subnormals: usize = 0;
+    for (0..@intCast(Model.heads)) |hv| {
+        const ash = gateRefAsh(f.a_bits[hv], f.b_bits[hv], f32Of(f.a_log_bits, hv), f.dt_bits[hv]);
+        const g: f32 = @floatCast(ash.g);
+        if (g > 0) min_g = @min(min_g, g);
+        const bits: u32 = @bitCast(g);
+        const exponent = (bits >> 23) & 0xff;
+        if (exponent == 0 and (bits & 0x7fffff) != 0) subnormals += 1; // f32 subnormal
+        if (g == 0) subnormals += 1; // flushed/underflowed to zero
+    }
+    std.debug.print("HOST gate g census (exact seed): min_positive_g={e} subnormal_or_zero_g={d}/16\n", .{ min_g, subnormals });
+}
 
 const testing = std.testing;
 
@@ -813,17 +1012,17 @@ test "recur checker accepts rounded state and refuses poisoned carry-out" {
     const y_good = try a.alloc(u16, @intCast(tokens * Model.linear_dim));
     defer a.free(y_good);
     for (f.want_y, 0..) |w, i| y_good[i] = c.toBf16(@floatCast(w));
-    const rep = try f.check(y_good, hf_good);
+    const rep = try f.check(y_good, hf_good, null);
     try testing.expect(rep.worst <= 1);
     // poisoned carry-out (NaN word) must be rejected
     const hf_bad = try a.dupe(u16, hf_good);
     defer a.free(hf_bad);
     hf_bad[0] = 0xffff;
     hf_bad[1] = 0xffff;
-    try testing.expectError(error.NonFiniteOutput, f.check(y_good, hf_bad));
+    try testing.expectError(error.NonFiniteOutput, f.check(y_good, hf_bad, null));
     // a dead store: all-poison state must be rejected
     @memset(hf_bad, 0xffff);
-    try testing.expectError(error.NonFiniteOutput, f.check(y_good, hf_bad));
+    try testing.expectError(error.NonFiniteOutput, f.check(y_good, hf_bad, null));
     // single-chunk Recur expects NO snapshot
     try testing.expect(f.want_snap == null);
     // a chunked Recur has exactly one interior boundary reference; the
@@ -839,13 +1038,13 @@ test "recur checker accepts rounded state and refuses poisoned carry-out" {
         snap_good[2 * i] = @truncate(bits);
         snap_good[2 * i + 1] = @truncate(bits >> 16);
     }
-    const snap_rep = try fc.checkSnap(snap_good);
+    const snap_rep = try fc.checkSnap(snap_good, null);
     try testing.expect(snap_rep.worst <= 1);
     snap_good[2] = 0xffff;
     snap_good[3] = 0xffff;
-    try testing.expectError(error.NonFiniteOutput, fc.checkSnap(snap_good));
+    try testing.expectError(error.NonFiniteOutput, fc.checkSnap(snap_good, null));
     @memset(snap_good, 0xffff);
-    try testing.expectError(error.NonFiniteOutput, fc.checkSnap(snap_good));
+    try testing.expectError(error.NonFiniteOutput, fc.checkSnap(snap_good, null));
 }
 
 test "decode checker refuses poisoned carry-out state" {
@@ -863,13 +1062,13 @@ test "decode checker refuses poisoned carry-out state" {
         souts_good[2 * i] = @truncate(bits);
         souts_good[2 * i + 1] = @truncate(bits >> 16);
     }
-    const rep = try f.check(y_good, souts_good);
+    const rep = try f.check(y_good, souts_good, null);
     try testing.expect(rep.worst <= 1);
     const souts_bad = try a.dupe(u16, souts_good);
     defer a.free(souts_bad);
     souts_bad[100] = 0xffff;
     souts_bad[101] = 0xffff;
-    try testing.expectError(error.NonFiniteOutput, f.check(y_good, souts_bad));
+    try testing.expectError(error.NonFiniteOutput, f.check(y_good, souts_bad, null));
 }
 
 test "fixture initialization fails cleanly under allocation failure" {

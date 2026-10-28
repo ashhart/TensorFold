@@ -172,13 +172,13 @@ fn plantRefuse2(f: anytype, good: []const u16, extra: []const u16, name: []const
     }
     const at = first_finite orelse return error.NoFiniteReference;
     mutated[at] = 0x4f00; // 2^31: an absolutely wrong finite the budgets must refuse
-    if (f.check(mutated, extra_mut)) |_| {
+    if (f.check(mutated, extra_mut, null)) |_| {
         std.debug.print("FAIL {s} case=\"{s}\": a planted wrong finite output passed\n", .{ gate, name });
         return false;
     } else |_| {}
     for ([_]u16{ 0x7fc0, 0x7f80, 0xff80 }) |pb| {
         mutated[at] = pb;
-        if (f.check(mutated, extra_mut)) |_| {
+        if (f.check(mutated, extra_mut, null)) |_| {
             std.debug.print("FAIL {s} case=\"{s}\": a planted nonfinite output passed\n", .{ gate, name });
             return false;
         } else |_| {}
@@ -348,8 +348,14 @@ fn convSplitGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cm
     try fetch(cmds, staging, conv_out, std.mem.sliceAsBytes(conv_out_bits), timeout);
     try fetch(cmds, staging, state_out, std.mem.sliceAsBytes(state_out_bits), timeout);
 
-    const sr = fx.Split.check(f, soa_bits, g_pairs, beta_bits) catch |e| {
-        std.debug.print("FAIL conv-split: split {s}\n", .{@errorName(e)});
+    // The split's reference must read the ACTUAL conv output the kernel
+    // produced (the composite's split input), not the fixture's synthetic
+    // conv_out_bits — those were never uploaded in this gate.
+    @memcpy(f.conv_out_bits[0..conv_out_bits.len], conv_out_bits);
+    var sr_diag: fx.Violation = undefined;
+    const sr = fx.Split.check(f, soa_bits, g_pairs, beta_bits, &sr_diag) catch |e| {
+        std.debug.print("FAIL conv-split: split {s} first at index {d}: want={e} got={e} bound={e} ratio={e} want_f32_bits={x}\n", .{ @errorName(e), sr_diag.index, sr_diag.want, sr_diag.got, sr_diag.bound, sr_diag.ratio, sr_diag.want_f32_bits });
+        printSplitGateInputs(f, sr_diag);
         return false;
     };
     fx.Conv.checkInput(cf, conv_input_bits) catch |e| {
@@ -390,13 +396,13 @@ fn convSplitGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cm
         }
         const at = first_finite orelse return error.NoFiniteReference;
         mutated[at] = 0x4f00; // 2^31: an absolutely wrong finite the budgets must refuse
-        if (fx.Split.check(f, mutated, g_pairs, beta_bits)) |_| {
+        if (fx.Split.check(f, mutated, g_pairs, beta_bits, null)) |_| {
             std.debug.print("FAIL conv-split: a planted wrong finite split output passed\n", .{});
             return false;
         } else |_| {}
         for ([_]u16{ 0x7fc0, 0x7f80, 0xff80 }) |pb| {
             mutated[at] = pb;
-            if (fx.Split.check(f, mutated, g_pairs, beta_bits)) |_| {
+            if (fx.Split.check(f, mutated, g_pairs, beta_bits, null)) |_| {
                 std.debug.print("FAIL conv-split: a planted nonfinite split output passed\n", .{});
                 return false;
             } else |_| {}
@@ -497,8 +503,10 @@ fn runSplit(s: *SharedSplit, a: std.mem.Allocator, dev: *const vk.Device, cmds: 
     try fetch(cmds, staging, s.soa_buf, std.mem.sliceAsBytes(s.soa_bits), timeout);
     try fetch(cmds, staging, s.g_buf, std.mem.sliceAsBytes(s.g_pairs), timeout);
     try fetch(cmds, staging, s.beta_buf, std.mem.sliceAsBytes(s.beta_bits), timeout);
-    const srep = s.f.check(s.soa_bits, s.g_pairs, s.beta_bits) catch |e| {
-        std.debug.print("FAIL split standalone: {s}\n", .{@errorName(e)});
+    var s_diag: fx.Violation = undefined;
+    const srep = s.f.check(s.soa_bits, s.g_pairs, s.beta_bits, &s_diag) catch |e| {
+        std.debug.print("FAIL split standalone: {s} first at index {d}: want={e} got={e} bound={e} ratio={e} want_f32_bits={x}\n", .{ @errorName(e), s_diag.index, s_diag.want, s_diag.got, s_diag.bound, s_diag.ratio, s_diag.want_f32_bits });
+        printSplitGateInputs(s.f, s_diag);
         return error.SplitFailed;
     };
     std.debug.print("MILESTONE split-standalone worst={e} of bound\n", .{srep.worst});
@@ -531,6 +539,7 @@ fn prefillGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds
     const hf_view = try vk.tensor.View.init(&hf, .f32, 0, state_elems);
     const snap_view: ?vk.tensor.View = if (snap) |*s| try vk.tensor.View.init(s, .f32, 0, snap_chunks.? * state_elems) else null;
 
+    var r_diag: fx.Violation = undefined;
     // poison y AND hf/snap before EVERY repeat: a dead or partial state-store
     // leaves poison behind and fails; the hf/snap readback is compared against
     // the independent f64 reference, never against pre-seeded values
@@ -576,8 +585,9 @@ fn prefillGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds
             first = try a.dupe(u16, ybits);
             hf_first = try a.dupe(u16, hfpairs);
         }
-        _ = rf.check(ybits, hfpairs) catch |e| {
-            std.debug.print("FAIL prefill chunk={d}: repeat {d} {s}\n", .{ chunk, rep, @errorName(e) });
+        _ = rf.check(ybits, hfpairs, &r_diag) catch |e| {
+            std.debug.print("FAIL prefill chunk={d}: repeat {d} {s} first at index {d}: want={e} got={e} bound={e} ratio={e} want_f32_bits={x}\n", .{ chunk, rep, @errorName(e), r_diag.index, r_diag.want, r_diag.got, r_diag.bound, r_diag.ratio, r_diag.want_f32_bits });
+            printRecurInputs(split.f, r_diag, T - 1);
             return false;
         };
         // the snapshot slot: downloaded, checked against the walker's boundary
@@ -590,14 +600,16 @@ fn prefillGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds
                     return false;
                 }
             } else snap_first = try a.dupe(u16, snappairs);
-            _ = rf.checkSnap(snappairs) catch |e| {
-                std.debug.print("FAIL prefill chunk={d}: repeat {d} snap {s}\n", .{ chunk, rep, @errorName(e) });
+            _ = rf.checkSnap(snappairs, &r_diag) catch |e| {
+                std.debug.print("FAIL prefill chunk={d}: repeat {d} snap {s} first at index {d}: want={e} got={e} bound={e} ratio={e}\n", .{ chunk, rep, @errorName(e), r_diag.index, r_diag.want, r_diag.got, r_diag.bound, r_diag.ratio });
+                printRecurInputs(split.f, r_diag, chunk - 1);
                 return false;
             };
         }
     }
-    const rrep = rf.check(ybits, hfpairs) catch |e| {
-        std.debug.print("FAIL prefill chunk={d}: {s}\n", .{ chunk, @errorName(e) });
+    const rrep = rf.check(ybits, hfpairs, &r_diag) catch |e| {
+        std.debug.print("FAIL prefill chunk={d}: {s} first at index {d}: want={e} got={e} bound={e} ratio={e} want_f32_bits={x}\n", .{ chunk, @errorName(e), r_diag.index, r_diag.want, r_diag.got, r_diag.bound, r_diag.ratio, r_diag.want_f32_bits });
+        printRecurInputs(split.f, r_diag, T - 1);
         return false;
     };
     if (!try unchanged(a, cmds, staging, rf.h0_bits, h0, timeout) or
@@ -671,8 +683,12 @@ fn decodeGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds:
             }
         } else first = try a.dupe(u16, ybits);
     }
-    const drep = f.check(ybits, souts) catch |e| {
-        std.debug.print("FAIL decode: {s}\n", .{@errorName(e)});
+    var d_diag: fx.Violation = undefined;
+    const drep = f.check(ybits, souts, &d_diag) catch |e| {
+        std.debug.print("FAIL decode: {s} first at index {d}: want={e} got={e} bound={e} ratio={e} want_f32_bits={x}\n", .{ @errorName(e), d_diag.index, d_diag.want, d_diag.got, d_diag.bound, d_diag.ratio, d_diag.want_f32_bits });
+        std.debug.print("  DIAG output={s}\n", .{@tagName(d_diag.output)});
+        const hv = if (d_diag.output == .state) d_diag.index / (128 * 128) else d_diag.index / 128;
+        printGateInputs(f.a_bits, f.b_bits, f.a_log_bits, f.dt_bits, hv);
         return false;
     };
     if (!try unchanged(a, cmds, staging, f.soa_bits, soa, timeout) or
@@ -688,6 +704,49 @@ fn decodeGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds:
     if (!try plantRefuse2(f, first.?, souts, "y", "decode")) return false;
     std.debug.print("MILESTONE decode elapsed_ms={d} worst={e} of bound, repeats byte-identical, inputs unchanged, planted outputs refused\n", .{ clock.ms(), drep.worst });
     return true;
+}
+
+/// Uploaded host inputs; GPU softplus/exp intermediates are not stored.
+fn printGateInputs(a_bits: []const u16, b_bits: []const u16, a_log_pairs: []const u16, dt_bits: []const u16, gate_index: usize) void {
+    const hv = gate_index % 16;
+    const alog_word = @as(u32, a_log_pairs[2 * hv]) | (@as(u32, a_log_pairs[2 * hv + 1]) << 16);
+    const alog: f32 = @bitCast(alog_word);
+    const ref = fx.gateRefAsh(a_bits[gate_index], b_bits[gate_index], alog, dt_bits[hv]);
+    std.debug.print("  HOST gate token={d} head={d} a=0x{x:0>4} ({e}) b=0x{x:0>4} ({e}) dt=0x{x:0>4} ({e}) A_log=0x{x:0>8} ({e}) Ash_g={e} Ash_beta={e}\n", .{
+        gate_index / 16, hv, a_bits[gate_index], fx.c.fromBf16(a_bits[gate_index]), b_bits[gate_index], fx.c.fromBf16(b_bits[gate_index]), dt_bits[hv], fx.c.fromBf16(dt_bits[hv]), alog_word, alog, ref.g, ref.beta,
+    });
+}
+
+fn printGateInputsOne(f: fx.SplitOne, v: fx.Violation) void {
+    std.debug.print("  DIAG output={s}\n", .{@tagName(v.output)});
+    if (v.output == .g or v.output == .beta) {
+        printGateInputs(f.a_bits, f.b_bits, f.a_log_bits, f.dt_bits, v.index);
+    } else {
+        std.debug.print("  HOST soa index={d} conv=0x{x:0>4} ({e})\n", .{ v.index, f.conv_out_bits[v.index], fx.c.fromBf16(f.conv_out_bits[v.index]) });
+    }
+}
+
+fn printSplitGateInputs(f: fx.Split, v: fx.Violation) void {
+    std.debug.print("  DIAG output={s}\n", .{@tagName(v.output)});
+    if (v.output == .g or v.output == .beta) {
+        printGateInputs(f.a_bits, f.b_bits, f.a_log_bits, f.dt_bits, v.index);
+    } else {
+        const section: usize = @intCast(fx.tokens * fx.Model.linear_dim);
+        const kind = v.index / section;
+        const within = v.index % section;
+        const token = within / 2048;
+        const head = (within % 2048) / 128;
+        const col = within % 128;
+        const source = token * 6144 + kind * 2048 + head * 128 + col;
+        std.debug.print("  HOST soa token={d} section={d} head={d} col={d} conv=0x{x:0>4} ({e})\n", .{ token, kind, head, col, f.conv_out_bits[source], fx.c.fromBf16(f.conv_out_bits[source]) });
+    }
+}
+
+fn printRecurInputs(f: fx.Split, v: fx.Violation, final_token: u64) void {
+    std.debug.print("  DIAG output={s}\n", .{@tagName(v.output)});
+    const head = if (v.output == .y) (v.index / 128) % 16 else v.index / (128 * 128);
+    const token: usize = if (v.output == .y) v.index / 2048 else @intCast(final_token);
+    printGateInputs(f.a_bits, f.b_bits, f.a_log_bits, f.dt_bits, token * 16 + head);
 }
 
 /// The compound convDecodeStep gate: one token's concat(state, x) 4-tap conv
@@ -828,20 +887,22 @@ fn convDecodeGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, c
     try fetch(cmds, staging, soa, std.mem.sliceAsBytes(soa_bits), timeout);
     try fetch(cmds, staging, g_out, std.mem.sliceAsBytes(g_pairs), timeout);
     try fetch(cmds, staging, beta_out, std.mem.sliceAsBytes(beta_bits), timeout);
-    const srep = sf.check(soa_bits, g_pairs, beta_bits) catch |e| {
-        std.debug.print("FAIL conv-decode: split {s}\n", .{@errorName(e)});
+    var s2_diag: fx.Violation = undefined;
+    const srep = sf.check(soa_bits, g_pairs, beta_bits, &s2_diag) catch |e| {
+        std.debug.print("FAIL conv-decode: split {s} first at index {d}: want={e} got={e} bound={e} ratio={e} want_f32_bits={x}\n", .{ @errorName(e), s2_diag.index, s2_diag.want, s2_diag.got, s2_diag.bound, s2_diag.ratio, s2_diag.want_f32_bits });
+        printGateInputsOne(sf, s2_diag);
         return false;
     };
     {
         const mutated = try a.dupe(u16, soa_bits);
         defer a.free(mutated);
         mutated[0] = 0x4f00;
-        if (sf.check(mutated, g_pairs, beta_bits)) |_| {
+        if (sf.check(mutated, g_pairs, beta_bits, null)) |_| {
             std.debug.print("FAIL conv-decode: a planted wrong split output passed\n", .{});
             return false;
         } else |_| {}
         mutated[0] = 0x7fc0;
-        if (sf.check(mutated, g_pairs, beta_bits)) |_| {
+        if (sf.check(mutated, g_pairs, beta_bits, null)) |_| {
             std.debug.print("FAIL conv-decode: a planted nonfinite split output passed\n", .{});
             return false;
         } else |_| {}
