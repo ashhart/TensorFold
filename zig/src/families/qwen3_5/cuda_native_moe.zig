@@ -14,6 +14,7 @@ pub const open = native.open;
 pub const attach = native.attach;
 pub const pagedLayout = native.pagedLayout; // TF_QWEN_KV_PAGES: the same pool as the dense models'
 pub const fits = native.fits;
+pub const contextCeiling = native.contextCeiling;
 pub const window_rows = native.window_rows;
 pub const openDrafter = native.openDrafter;
 pub const explain = native.explain;
