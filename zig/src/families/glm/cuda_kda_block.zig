@@ -52,17 +52,7 @@ pub fn padOn() bool {
     return !(t.len == 0 or std.mem.eql(u8, t, "0"));
 }
 
-/// The fused input's row width. glm_mm needs the output width and row stride to be multiples of eight, and the fused
-/// width is 3*heads*dk + 2*dk + heads - 8,726 at TP=3's 22 heads, 8,341 at 21 - so without padding those tensors stay
-/// bf16 row-major and cost about 9 ms a call.
-///
-/// With TF_GLM_KDA_PAD the width is the one EVERY rank carries: the widest rank's, eight-aligned. Padding each rank
-/// to its own width (8,732 against 8,344) leaves the prompt plan and its exchanges no single row width and the ranks
-/// hang on the first prompt; one common width keeps them in step and costs the smaller ranks unused zero columns.
-/// One rule, read by the loader (which pads the weights) and by the state (which sizes the rows), so they agree.
-/// The one padded width every rank carries, set once at load (0: no padding). A global rather than a per-layer
-/// field, because a layer built by another path (the MTP head) would otherwise pad to ITS own width and the ranks
-/// would disagree - which is exactly how this failed: descriptor 8,341 against buffers of 8,732.
+/// The fused input's row width: one eight-aligned width for every rank when TF_GLM_KDA_PAD is set.
 pub var pad_to: usize = 0;
 
 pub fn rowWidth(own_heads: usize, max_heads: usize) usize {
