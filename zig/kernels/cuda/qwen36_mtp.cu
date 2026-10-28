@@ -14,6 +14,62 @@ __device__ __forceinline__ float rbf(float x) { return __bfloat162float(__float2
 
 using tf_common::warp_sum;
 
+constexpr int DPL = HD / 32;  // a lane's elements of a head row
+constexpr int AHEAD = 8;      // ring slots loaded a group, the next group's loads in flight while one folds
+
+// A key's score: the lane's products summed in order, then across the warp, scaled by 1/sqrt(HD).
+__device__ __forceinline__ float score(const float (&q)[DPL], const __nv_bfloat16* k) {
+    float dot = 0.0f;
+#pragma unroll
+    for (int i = 0; i < DPL; i++) dot = fmaf(q[i], bf(k[i]), dot);
+    return warp_sum(dot) * (1.0f / 16.0f);
+}
+
+// One key folded into the running softmax (mx, l) and the lane's weighted values o.
+__device__ __forceinline__ void fold(float s, const __nv_bfloat16* v, float& mx, float& l, float (&o)[DPL]) {
+    const float mn = fmaxf(mx, s);
+    const float a = __expf(mx - mn), b = __expf(s - mn);
+    l = l * a + b;
+#pragma unroll
+    for (int i = 0; i < DPL; i++) o[i] = fmaf(b, bf(v[i]), o[i] * a);
+    mx = mn;
+}
+
+// Ring slots [begin, end) of a ring of w folded in order: the same terms one at a time, with loads run ahead.
+__device__ __forceinline__ void fold_ring(const __nv_bfloat16* rk, const __nv_bfloat16* rv, int w, int width, size_t off, long long begin,
+                                          long long end, const float (&q)[DPL], float& mx, float& l, float (&o)[DPL]) {
+    long long pos = begin;
+    int slot = (int)(begin % w);
+    uint4 kn[AHEAD], vn[AHEAD];
+    const auto load = [&](uint4 (&k)[AHEAD], uint4 (&v)[AHEAD]) {
+#pragma unroll
+        for (int u = 0; u < AHEAD; u++) {
+            k[u] = __ldg(reinterpret_cast<const uint4*>(rk + (size_t)slot * width + off));  // read-only path, as a __restrict__ ring's
+            v[u] = __ldg(reinterpret_cast<const uint4*>(rv + (size_t)slot * width + off));
+            slot = slot + 1 == w ? 0 : slot + 1;
+        }
+    };
+    if (end - pos >= AHEAD) load(kn, vn);
+    for (; end - pos >= AHEAD; pos += AHEAD) {
+        uint4 kr[AHEAD], vr[AHEAD];
+#pragma unroll
+        for (int u = 0; u < AHEAD; u++) {
+            kr[u] = kn[u];
+            vr[u] = vn[u];
+        }
+        if (end - pos >= 2 * AHEAD) load(kn, vn);  // differences: no position near the type's end overflows
+        float s[AHEAD];
+#pragma unroll
+        for (int u = 0; u < AHEAD; u++) s[u] = score(q, reinterpret_cast<const __nv_bfloat16*>(&kr[u]));
+#pragma unroll
+        for (int u = 0; u < AHEAD; u++) fold(s[u], reinterpret_cast<const __nv_bfloat16*>(&vr[u]), mx, l, o);
+    }
+    for (; pos < end; pos++) {
+        fold(score(q, rk + (size_t)slot * width + off), rv + (size_t)slot * width + off, mx, l, o);
+        slot = slot + 1 == w ? 0 : slot + 1;
+    }
+}
+
 }  // namespace tf_q36m
 
 using namespace tf_q36m;
@@ -22,7 +78,6 @@ using namespace tf_q36m;
 extern "C" __global__ void __launch_bounds__(32) tf_q36m_norm_rope(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ W,
                                                                      __nv_bfloat16* __restrict__ OUT, int heads, int stride, int in_head,
                                                                      long long pos0, int step, float eps, float theta) {
-    constexpr int DPL = HD / 32;
     const int head = blockIdx.x % heads;
     const size_t m = blockIdx.x / heads;
     const int t = threadIdx.x;
@@ -62,12 +117,10 @@ extern "C" __global__ void __launch_bounds__(32) tf_q36m_attn(const __nv_bfloat1
                                                                 const __nv_bfloat16* __restrict__ KB, const __nv_bfloat16* __restrict__ VB,
                                                                 const __nv_bfloat16* __restrict__ RK, const __nv_bfloat16* __restrict__ RV, int heads,
                                                                 int kv_heads, int W, long long begin, long long pos0, __nv_bfloat16* __restrict__ OUT) {
-    constexpr int DPL = HD / 32;
     const int lane = threadIdx.x;
     const int m = blockIdx.x, h = blockIdx.y;
     const int kvh = h / (heads / kv_heads);
     const int width = kv_heads * HD;
-    const float scale = 1.0f / 16.0f;
     float q[DPL], o[DPL];
 #pragma unroll
     for (int i = 0; i < DPL; i++) {
@@ -75,33 +128,10 @@ extern "C" __global__ void __launch_bounds__(32) tf_q36m_attn(const __nv_bfloat1
         o[i] = 0.0f;
     }
     float mx = -INFINITY, l = 0.0f;
-    for (long long pos = begin; pos < pos0; pos++) {
-        const __nv_bfloat16* k = RK + (size_t)(pos % W) * width + kvh * HD + lane * DPL;
-        float dot = 0.0f;
-#pragma unroll
-        for (int i = 0; i < DPL; i++) dot = fmaf(q[i], bf(k[i]), dot);
-        const float s = warp_sum(dot) * scale;
-        const float mn = fmaxf(mx, s);
-        const float a = __expf(mx - mn), b = __expf(s - mn);
-        l = l * a + b;
-        const __nv_bfloat16* v = RV + (size_t)(pos % W) * width + kvh * HD + lane * DPL;
-#pragma unroll
-        for (int i = 0; i < DPL; i++) o[i] = fmaf(b, bf(v[i]), o[i] * a);
-        mx = mn;
-    }
+    fold_ring(RK, RV, W, width, (size_t)kvh * HD + lane * DPL, begin, pos0, q, mx, l, o);
     for (int r = 0; r <= m; r++) {
-        const __nv_bfloat16* k = KB + ((size_t)r * kv_heads + kvh) * HD + lane * DPL;
-        float dot = 0.0f;
-#pragma unroll
-        for (int i = 0; i < DPL; i++) dot = fmaf(q[i], bf(k[i]), dot);
-        const float s = warp_sum(dot) * scale;
-        const float mn = fmaxf(mx, s);
-        const float a = __expf(mx - mn), b = __expf(s - mn);
-        l = l * a + b;
-        const __nv_bfloat16* v = VB + ((size_t)r * kv_heads + kvh) * HD + lane * DPL;
-#pragma unroll
-        for (int i = 0; i < DPL; i++) o[i] = fmaf(b, bf(v[i]), o[i] * a);
-        mx = mn;
+        const size_t at = ((size_t)r * kv_heads + kvh) * HD + lane * DPL;
+        fold(score(q, KB + at), VB + at, mx, l, o);
     }
     const __nv_bfloat16* g = G + (size_t)m * gstride + (size_t)h * (2 * HD) + HD + lane * DPL;  // the gate half
 #pragma unroll
@@ -126,13 +156,11 @@ extern "C" __global__ void __launch_bounds__(32) tf_q36m_attn_rows(const __nv_bf
                                                                      const __nv_bfloat16* __restrict__ KB, const __nv_bfloat16* __restrict__ VB,
                                                                      const RingRow* __restrict__ T, int heads, int kv_heads,
                                                                      __nv_bfloat16* __restrict__ OUT) {
-    constexpr int DPL = HD / 32;
     const int lane = threadIdx.x;
     const int m = blockIdx.x, h = blockIdx.y;
     const RingRow t = T[m];
     const int kvh = h / (heads / kv_heads);
     const int width = kv_heads * HD;
-    const float scale = 1.0f / 16.0f;
     float q[DPL], o[DPL];
 #pragma unroll
     for (int i = 0; i < DPL; i++) {
@@ -140,33 +168,10 @@ extern "C" __global__ void __launch_bounds__(32) tf_q36m_attn_rows(const __nv_bf
         o[i] = 0.0f;
     }
     float mx = -INFINITY, l = 0.0f;
-    for (long long pos = t.begin; pos < t.end; pos++) {
-        const __nv_bfloat16* k = t.rk + (size_t)(pos % t.w) * width + kvh * HD + lane * DPL;
-        float dot = 0.0f;
-#pragma unroll
-        for (int i = 0; i < DPL; i++) dot = fmaf(q[i], bf(k[i]), dot);
-        const float s = warp_sum(dot) * scale;
-        const float mn = fmaxf(mx, s);
-        const float a = __expf(mx - mn), b = __expf(s - mn);
-        l = l * a + b;
-        const __nv_bfloat16* v = t.rv + (size_t)(pos % t.w) * width + kvh * HD + lane * DPL;
-#pragma unroll
-        for (int i = 0; i < DPL; i++) o[i] = fmaf(b, bf(v[i]), o[i] * a);
-        mx = mn;
-    }
+    fold_ring(t.rk, t.rv, t.w, width, (size_t)kvh * HD + lane * DPL, t.begin, t.end, q, mx, l, o);
     for (int r = t.seg; r <= m; r++) {
-        const __nv_bfloat16* k = KB + ((size_t)r * kv_heads + kvh) * HD + lane * DPL;
-        float dot = 0.0f;
-#pragma unroll
-        for (int i = 0; i < DPL; i++) dot = fmaf(q[i], bf(k[i]), dot);
-        const float s = warp_sum(dot) * scale;
-        const float mn = fmaxf(mx, s);
-        const float a = __expf(mx - mn), b = __expf(s - mn);
-        l = l * a + b;
-        const __nv_bfloat16* v = VB + ((size_t)r * kv_heads + kvh) * HD + lane * DPL;
-#pragma unroll
-        for (int i = 0; i < DPL; i++) o[i] = fmaf(b, bf(v[i]), o[i] * a);
-        mx = mn;
+        const size_t at = ((size_t)r * kv_heads + kvh) * HD + lane * DPL;
+        fold(score(q, KB + at), VB + at, mx, l, o);
     }
     const __nv_bfloat16* g = G + (size_t)m * gstride + (size_t)h * (2 * HD) + HD + lane * DPL;  // the gate half
 #pragma unroll
@@ -183,12 +188,10 @@ extern "C" __global__ void __launch_bounds__(32) tf_q36m_attn_tree(const __nv_bf
                                                                      const int* __restrict__ ANC, int anc_stride, const __nv_bfloat16* __restrict__ RK,
                                                                      const __nv_bfloat16* __restrict__ RV, int heads, int kv_heads, int W, long long begin,
                                                                      long long end, __nv_bfloat16* __restrict__ OUT) {
-    constexpr int DPL = HD / 32;
     const int lane = threadIdx.x;
     const int m = blockIdx.x, h = blockIdx.y;
     const int kvh = h / (heads / kv_heads);
     const int width = kv_heads * HD;
-    const float scale = 1.0f / 16.0f;
     float q[DPL], o[DPL];
 #pragma unroll
     for (int i = 0; i < DPL; i++) {
@@ -196,36 +199,13 @@ extern "C" __global__ void __launch_bounds__(32) tf_q36m_attn_tree(const __nv_bf
         o[i] = 0.0f;
     }
     float mx = -INFINITY, l = 0.0f;
-    for (long long pos = begin; pos < end; pos++) {
-        const __nv_bfloat16* k = RK + (size_t)(pos % W) * width + kvh * HD + lane * DPL;
-        float dot = 0.0f;
-#pragma unroll
-        for (int i = 0; i < DPL; i++) dot = fmaf(q[i], bf(k[i]), dot);
-        const float s = warp_sum(dot) * scale;
-        const float mn = fmaxf(mx, s);
-        const float a = __expf(mx - mn), b = __expf(s - mn);
-        l = l * a + b;
-        const __nv_bfloat16* v = RV + (size_t)(pos % W) * width + kvh * HD + lane * DPL;
-#pragma unroll
-        for (int i = 0; i < DPL; i++) o[i] = fmaf(b, bf(v[i]), o[i] * a);
-        mx = mn;
-    }
+    const size_t off = (size_t)kvh * HD + lane * DPL;
+    fold_ring(RK, RV, W, width, off, begin, end, q, mx, l, o);
     const int* anc = ANC + (size_t)m * anc_stride;
     const int n = anc[0];
     for (int j = 0; j <= n; j++) {
-        const bool self = j == n;
-        const __nv_bfloat16* k = (self ? KB + (size_t)m * width : LK + (size_t)anc[1 + j] * width) + kvh * HD + lane * DPL;
-        float dot = 0.0f;
-#pragma unroll
-        for (int i = 0; i < DPL; i++) dot = fmaf(q[i], bf(k[i]), dot);
-        const float s = warp_sum(dot) * scale;
-        const float mn = fmaxf(mx, s);
-        const float a = __expf(mx - mn), b = __expf(s - mn);
-        l = l * a + b;
-        const __nv_bfloat16* v = (self ? VB + (size_t)m * width : LV + (size_t)anc[1 + j] * width) + kvh * HD + lane * DPL;
-#pragma unroll
-        for (int i = 0; i < DPL; i++) o[i] = fmaf(b, bf(v[i]), o[i] * a);
-        mx = mn;
+        const size_t at = (j == n ? (size_t)m : (size_t)anc[1 + j]) * width + off;
+        fold(score(q, (j == n ? KB : LK) + at), (j == n ? VB : LV) + at, mx, l, o);
     }
     const __nv_bfloat16* g = G + (size_t)m * gstride + (size_t)h * (2 * HD) + HD + lane * DPL;
 #pragma unroll
