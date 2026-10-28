@@ -21,3 +21,7 @@ test {
 test {
     _ = @import("review_handoff_test.zig");
 }
+
+test {
+    _ = @import("model_supervisor_test.zig");
+}
