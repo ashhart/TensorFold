@@ -444,6 +444,7 @@ pub fn snap_drop(ptr: *anyopaque, saved: *anyopaque) void {
 
 /// The native family entry: TF_TP_* for two ranks (rank 0 serves; `tf-mimo follow` on rank 1); its own kernels.
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, _: ?[]const u8, o: Options) !Loaded {
+    if (try ctx.capability() != 121) return error.MimoV2RequiresSm121;
     if (o.lanes == 0 or o.lanes > 16) return error.Slots;
     const su: engine.Setup = .{ .context = o.context, .slots = o.lanes, .drafts = o.drafts };
     var session: ?*tp.Session = null;
@@ -528,6 +529,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.PromptTooLong => "the prompt and its reply exceed this server's context window: shorten it or lower max_tokens",
         error.NoFreeSlot => "every stream slot is busy: retry once another request ends",
         error.BadSetting => "a TF_TP_* setting is out of range (TF_TP_WORLD 1 to 64, TF_TP_RANK below it, TF_TP_PORT): fix it or unset TF_TP_WORLD for one GPU",
+        error.MimoV2RequiresSm121 => "MiMo-V2 is validated on GB10 (sm_121) only: its kernels' launch records and every receipt are GB10's",
         else => null,
     };
 }
