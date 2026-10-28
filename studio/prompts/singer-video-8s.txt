@@ -1,0 +1,7 @@
+For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.
+
+integrated_multimodal_description: [Shot 1] Live-action, cinematic, a medium close-up frames a woman soul singer in her thirties with curly dark hair, wearing a dark blue dress, standing at a vintage condenser microphone with a round pop filter in a warm wood-panelled recording studio. Soft amber light falls from the left. The camera holds steady for the single continuous eight-second shot. She sings alone, a cappella, with no instruments, eyes half closed, one hand lightly on her headphones. The melody is slow: it begins on very low notes in a deep, rich chest voice, climbs step by step through her middle range, reaches a long, high, bright sustained note at full power, and then glides back down to a low, soft ending. The singer, in a full, soulful female voice (S1), sings: <d>[English] Low in the valley, I rise, I rise, and I come back home.</d> Her mouth movements follow her singing. After the last note she opens her eyes and smiles softly.
+
+overall_soundscape: A quiet, acoustically treated vocal booth. Only her unaccompanied voice, recorded close to the microphone and completely dry: no reverb, no echo, no room ambience. No instruments, no backing track, no other voices.
+
+non_diegetic_music: N/A
