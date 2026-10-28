@@ -117,17 +117,16 @@ fn routeUnderflow(r: *Rig) !void {
     const rows = 3;
     const part = try r.a.alloc(f32, 2 * rows * E);
     @memset(part, -50);
-    const logits = try r.a.alloc(f32, rows * E);
-    @memset(logits, -100);
     const bias = try r.f32s(E, -0.05, 0.05);
     const idx = try r.a.alloc(i32, rows * NS);
-    const wt = try r.a.alloc(f64, rows * NS);
-    ref.topk(logits, bias, idx, wt, rows, 2.5, E, top_k, NS, true);
+    const wt = try r.a.alloc(f32, rows * NS);
+    ref.topk(part, bias, idx, wt, rows, 2.5, E, 2, top_k, NS, true);
     const idxd = try r.zeros(i32, rows * NS);
     const wtd = try r.zeros(f32, rows * NS);
     const route_: cuda.moe_glue.Route = .{ .experts = E, .topk = top_k, .shared = true, .shared_slots = NS - top_k, .normalize = true, .scale = 2.5, .score = true, .slices = 2 };
     try r.moe.topk(r.s, try r.dev(f32, part), try r.dev(f32, bias), route_, idxd, wtd, rows);
     try r.same("underflowed top-k ids", i32, idxd, idx);
+    try r.same("underflowed top-k weights", f32, wtd, wt);
     r.cases += 1;
     for (try r.get(f32, wtd, rows * NS), 0..) |w, i| if (w != @as(f32, if (i % NS < top_k) 0 else 1)) {
         r.bad += 1;
@@ -162,21 +161,16 @@ fn superLogits(r: *Rig, rows: usize) !void {
     try r.same("Super router tiles", f32, tiles, part);
 }
 
-/// `rows` rows `skew` bf16 values into their buffer: the router's slices summed in order, then the shared top-k.
+/// `rows` rows that start `skew` bf16 values into their buffer, routed and ranked against the host references.
 fn routeRows(r: *Rig, sk: usize, rows: usize, skew: usize, d: usize, e: usize, k: usize, ns: usize) !void {
     const x = try r.bfs(skew + rows * d, 1.0);
     const w = try r.bfs(e * d, 0.05);
     const bias = try r.f32s(e, -0.05, 0.05);
     const part = try r.a.alloc(f32, sk * rows * e);
-    ref.router(x[skew..], w, part, rows, d, e, sk);
-    const logits = try r.a.alloc(f32, rows * e);
-    for (logits, 0..) |*l, i| { // the top-k's chain: slice 0, then each slice added in order
-        l.* = part[i];
-        for (1..sk) |s| l.* += part[s * rows * e + i];
-    }
     const idx = try r.a.alloc(i32, rows * ns);
-    const wt = try r.a.alloc(f64, rows * ns);
-    ref.topk(logits, bias, idx, wt, rows, 2.5, e, k, ns, true);
+    const wt = try r.a.alloc(f32, rows * ns);
+    ref.router(x[skew..], w, part, rows, d, e, sk);
+    ref.topk(part, bias, idx, wt, rows, 2.5, e, sk, k, ns, true);
     const partd = try r.zeros(f32, sk * rows * e);
     const idxd = try r.zeros(i32, rows * ns);
     const wtd = try r.zeros(f32, rows * ns);
@@ -184,7 +178,7 @@ fn routeRows(r: *Rig, sk: usize, rows: usize, skew: usize, d: usize, e: usize, k
     try r.g().route(xd, try r.dev(u16, w), try r.dev(f32, bias), partd, idxd, wtd, rows, d, e, k, ns, 2.5, true);
     try r.same("router partials", f32, partd, part);
     try r.same("top-k ids", i32, idxd, idx);
-    try r.near("top-k weights", wtd, wt);
+    try r.same("top-k weights", f32, wtd, wt);
 }
 
 /// Windows through conv and scan, each replaying kept rows of the last at the other parity (51 steps: two stages).
@@ -578,5 +572,5 @@ pub fn run(gpu: Gpu) !void {
     try latentTopk(&r, latent);
     try check.expect(r.bad == 0, "glue: {d} of {d} comparisons differ from the host references or the one-stream kernels", .{ r.bad, r.cases });
     try check.expect(r.sparsest > 0, "glue: a host reference is all zeros, so its comparison proves nothing", .{});
-    check.pass("glue: {d} of {d} comparisons byte-equal to the host references (norms, router; top-k weights within 2^-20 of float64; the latent top-k, conv, scan, attention, paged attention, draw, several streams at once) and the shared-window kernels to the one-stream ones; every reference at least {d:.0}% nonzero", .{ r.cases, r.cases, r.sparsest * 100 });
+    check.pass("glue: {d} of {d} comparisons byte-equal to the host references (norms, router, top-k, the latent top-k, conv, scan, attention, paged attention, draw, several streams at once) and the shared-window kernels to the one-stream ones; every reference at least {d:.0}% nonzero", .{ r.cases, r.cases, r.sparsest * 100 });
 }

@@ -82,17 +82,6 @@ pub const Rig = struct {
         std.debug.print("DIFFER {s}: {d} of {d} elements, first at {d}: got {any}, want {any}\n", .{ what, n, want.len, first.?, got[first.?], want[first.?] });
     }
 
-    /// Device values at `ptr` within 2^-20 of float64's `want` (relative), one case; a miss names its first element.
-    pub fn near(r: *Rig, what: []const u8, ptr: u64, want: []const f64) !void {
-        const got = try r.get(f32, ptr, want.len);
-        r.cases += 1;
-        for (got, want, 0..) |x, w, i| if (!(@abs(x - w) <= @abs(w) * 0x1p-20 + 1e-30)) {
-            r.bad += 1;
-            std.debug.print("DIFFER {s}: element {d} is {d}, float64 gives {d}\n", .{ what, i, x, w });
-            return;
-        };
-    }
-
     /// n elements of the device bytes at `ptr`, once the rig's stream is done.
     pub fn get(r: *Rig, comptime T: type, ptr: u64, n: usize) ![]T {
         try r.s.synchronize();

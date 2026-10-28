@@ -7,6 +7,8 @@
 #include <math.h>
 #include <stdint.h>
 
+#include "glue_math.cuh"
+
 namespace tf_moe {
 
 constexpr int NT = 256;
@@ -167,8 +169,9 @@ __device__ __forceinline__ void score_warp(const float* logits, const float* bia
 #pragma unroll
         for (int s = 1; s < MAXSK; ++s)
             if (s < slices) l = __fadd_rn(l, part[j][s]);
-        x[j] = e < ne ? __fdiv_rn(1.f, __fadd_rn(1.f, expf(-l))) : 0.f;
-        v[j] = e < ne ? __fadd_rn(x[j], b[j]) : -INFINITY;
+        x[j] = e < ne ? tf_glue::tf_sigmoid(l) : 0.f;
+        const float vj = __fadd_rn(x[j], b[j]);
+        v[j] = e < ne && vj == vj ? vj : -INFINITY; // a NaN logit is never picked ahead of a number
     }
     const int slots = topk + shared;
     float xk = 0.f; // lane k's pick's score
