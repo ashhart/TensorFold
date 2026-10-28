@@ -308,3 +308,62 @@ test "a history every turn resumes again after one kept a longer state is a bran
     f.leave(mine.items);
     try std.testing.expectEqual(s.tree.snaps, f.live);
 }
+
+/// A golden pass: where it resumed and kept, then what the tree held and had counted.
+const Row = struct { from: u32, marks: []const u32, snaps: usize, pages: usize, bytes: u64, hits: u64, misses: u64, kept: u64, evicted: u64, refused: u64 };
+
+/// Two conversations over a shared system block, a growing and an edited turn, a third prompt that evicts, a refusal.
+fn goldenRun(a: Allocator, f: *Fake, s: *Store, out: *std.ArrayList(Row)) !void {
+    var mine: std.ArrayList(u32) = .empty;
+    var edited = seq(42, 0);
+    edited[25] = 999;
+    var other: [32]u32 = undefined;
+    @memcpy(other[0..13], &seq(13, 0));
+    @memcpy(other[13..], &seq(19, 200));
+    const Pass = struct { prompt: []const u32, history: u32, shared: []const u32 };
+    const passes = [_]Pass{
+        .{ .prompt = &seq(30, 0), .history = 0, .shared = &.{12} },
+        .{ .prompt = &seq(42, 0), .history = 30, .shared = &.{12} },
+        .{ .prompt = &other, .history = 0, .shared = &.{12} },
+        .{ .prompt = &edited, .history = 30, .shared = &.{12} },
+        .{ .prompt = &seq(56, 0), .history = 42, .shared = &.{12} },
+        .{ .prompt = &seq(30, 300), .history = 20, .shared = &.{} },
+        .{ .prompt = &seq(92, 400), .history = 88, .shared = &.{} },
+    };
+    for (passes) |p| {
+        const plan = try pass(f, s, a, p.prompt, p.history, p.shared, &mine);
+        const c = s.tree.counts;
+        try out.append(a, .{ .from = plan.from, .marks = plan.marks, .snaps = s.tree.snaps, .pages = s.tree.held_pages, .bytes = s.tree.held(), .hits = c.hits, .misses = c.misses, .kept = c.kept, .evicted = c.evicted, .refused = c.refused });
+        f.leave(mine.items);
+    }
+}
+
+test "golden: lookahead 0 and no grid, as HIP's families and Qwen's CUDA path keep, resume and evict the same" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f: Fake = .{ .gpa = std.testing.allocator };
+    var s = try newStore(&f, .{ .page = 4, .min_gap = 16, .min_prompt = 0, .tail = true });
+    defer s.deinit();
+    s.limit(.{ .pages = 20, .snaps = 4 });
+    var rows: std.ArrayList(Row) = .empty;
+    try goldenRun(a, &f, &s, &rows);
+    // the store before it learned a lookahead and a grid kept exactly these
+    const want = [_]Row{
+        .{ .from = 0, .marks = &.{28}, .snaps = 1, .pages = 7, .bytes = 170, .hits = 0, .misses = 1, .kept = 1, .evicted = 0, .refused = 0 },
+        .{ .from = 28, .marks = &.{}, .snaps = 1, .pages = 7, .bytes = 170, .hits = 1, .misses = 1, .kept = 1, .evicted = 0, .refused = 0 },
+        .{ .from = 0, .marks = &.{28}, .snaps = 2, .pages = 11, .bytes = 310, .hits = 1, .misses = 2, .kept = 2, .evicted = 0, .refused = 0 },
+        .{ .from = 0, .marks = &.{28}, .snaps = 3, .pages = 12, .bytes = 420, .hits = 1, .misses = 3, .kept = 3, .evicted = 0, .refused = 0 },
+        .{ .from = 28, .marks = &.{40}, .snaps = 4, .pages = 15, .bytes = 550, .hits = 2, .misses = 3, .kept = 4, .evicted = 0, .refused = 0 },
+        .{ .from = 0, .marks = &.{20}, .snaps = 4, .pages = 20, .bytes = 600, .hits = 2, .misses = 4, .kept = 5, .evicted = 1, .refused = 0 },
+        .{ .from = 0, .marks = &.{}, .snaps = 4, .pages = 20, .bytes = 600, .hits = 2, .misses = 5, .kept = 5, .evicted = 1, .refused = 1 },
+    };
+    try std.testing.expectEqual(want.len, rows.items.len);
+    for (want, rows.items) |w, r| {
+        try std.testing.expectEqualSlices(u32, w.marks, r.marks);
+        var got = r;
+        got.marks = w.marks;
+        try std.testing.expectEqual(w, got);
+    }
+    try std.testing.expectEqual(s.tree.snaps, f.live);
+}
