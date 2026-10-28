@@ -95,7 +95,7 @@ pub const Metrics = struct {
     }
 
     /// What the ledger says of an engine that cannot render live: parked (no engine values), or its last counts.
-    pub const Parked = struct { parked: bool = false, running: u32 = 0, waiting: u32 = 0 };
+    pub const Parked = struct { parked: bool = false, running: u32 = 0, waiting: u32 = 0, generation: u64 = 0 };
 
     /// The scrape body without an engine read: the request and process families, and no engine value while parked.
     pub fn renderParked(m: *Metrics, io: std.Io, w: *std.Io.Writer, view: Parked) !void {
@@ -114,7 +114,7 @@ pub const Metrics = struct {
         if (!view.parked) {
             try gauge(w, "requests_running", "gauge", "Requests in prefill or decode.", view.running);
             try gauge(w, "requests_waiting", "gauge", "Requests queued or held until a lane is free.", view.waiting);
-            try gauge(w, "generation_tokens_running", "gauge", "Generated tokens held by live streams.", 0);
+            try gauge(w, "generation_tokens_running", "gauge", "Generated tokens held by live streams.", view.generation);
         }
         try gauge(w, "prompt_tokens_total", "counter", "Prompt tokens of finished requests.", snap.prompt);
         try gauge(w, "generation_tokens_total", "counter", "Generated tokens of finished requests.", snap.generation);

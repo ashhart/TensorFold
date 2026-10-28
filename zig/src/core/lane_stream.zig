@@ -76,8 +76,7 @@ pub fn open(h: *LaneHost, job: *Job) bool {
         return !h.drop(job, "out of memory");
     };
     job.started = true;
-    job.fill_on.store(true, .release); // status readers count the fill from here until the pass reports
-    @import("lane_host_load.zig").began(h, job);
+    @import("lane_host_load.zig").began(h, job); // the fill shows here
     job.began = std.Io.Clock.awake.now(h.io).toNanoseconds();
     return true;
 }

@@ -34,6 +34,8 @@ pub const Pass = struct {
     hint: u32 = 0,
     /// Computed tokens of this attempt already counted.
     credited: u32 = 0,
+    /// The start is settled: no reuse proposed, or the backend confirmed or refused it; `fill_at` counts from it.
+    sure: bool = false,
     /// When the running prompt call began, or its time was last taken (0: no call timed).
     call_ns: i96 = 0,
     /// Call time not yet counted: it moves into `busy_ns` only with this pass's own tokens.
@@ -70,11 +72,13 @@ pub fn publish(h: *LaneHost) void {
     p.publish(now.requests, now.work, now.capacity);
 }
 
-/// A prompt pass starts, a new attempt from zero: a requeued job's repeated work counts again.
+/// A prompt pass starts and its fill shows, a new attempt from zero: a requeued job's repeated work counts again.
 pub fn began(h: *LaneHost, job: *Job) void {
     h.lock();
-    defer h.unlock();
-    job.load = .{ .on = true, .hint = job.stream.fill_at.load(.monotonic) };
+    defer h.unlock(); // its publish sees the pass and its fill together: a blocking prefill may unlock no more
+    const hint = job.stream.fill_at.load(.monotonic);
+    job.load = .{ .on = true, .hint = hint, .sure = hint == 0 };
+    job.fill_on.store(true, .release); // status readers count the fill from here until the pass reports
 }
 
 /// A backend prompt call for `job` starts now (engine thread).
@@ -96,9 +100,9 @@ pub fn progress(h: *LaneHost, job: *Job) void {
     const p = &job.load;
     if (!p.on) return; // reported already, as by an early first token inside the chunk
     take(h, p);
-    if (!h.core.backend.vtable.reports_fill) return;
     const s = &job.stream;
-    if (!(p.hint == 0 or s.cached == p.hint or s.reuse_failed)) return; // a start in doubt counts at the report
+    if (s.cached == p.hint or s.reuse_failed) p.sure = true; // a returned chunk has settled the restore
+    if (!h.core.backend.vtable.reports_fill or !p.sure) return; // a start in doubt counts at the report
     const start = if (s.reuse_failed) 0 else @max(s.cached, p.hint);
     const d = (s.fill_at.load(.monotonic) -| start) -| p.credited;
     if (d == 0) return;
@@ -210,9 +214,10 @@ fn filling(h: *const LaneHost) ?u64 {
     var left: u64 = 0;
     var any = false;
     for (h.admitted.items) |job| {
-        if (!job.fill_on.load(.acquire) or job.request.background) continue; // as the dashboard's fill totals
+        if (!job.fill_on.load(.acquire) or job.request.background or !job.load.on) continue; // reported: none left
         any = true;
-        left += job.request.prompt.len -| job.stream.fill_at.load(.monotonic);
+        const done: u64 = if (job.load.sure) job.stream.fill_at.load(.monotonic) else 0; // a reuse hint is not progress
+        left += job.request.prompt.len -| done;
     }
     if (any and !h.core.backend.vtable.reports_fill) return null;
     return left;
