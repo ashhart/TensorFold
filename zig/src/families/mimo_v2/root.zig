@@ -23,4 +23,5 @@ test {
     _ = engine;
     _ = kept;
     _ = native;
+    if (comptime @import("builtin").os.tag != .windows) _ = @import("native_test.zig"); // open reaches the TP sockets
 }
