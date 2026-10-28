@@ -5,6 +5,39 @@ const cubin = @import("contract").cubin;
 const a = std.testing.allocator;
 const root = "/opt/private-build-root";
 
+test "release paths: address-table object-extension words are not paths in raw or UTF16LE bytes" {
+    const rows = [_][16]u8{
+        .{ 0x5c, 0x2e, 0x6f, 0x00, 0xe0, 0x48, 0x06, 0x03, 0x70, 0x2e, 0x6f, 0x00, 0x10, 0x49, 0x06, 0x03 },
+        .{ 0x5c, 0x2e, 0x6f, 0x00, 0x01, 0x00, 0x00, 0x00, 0x48, 0x2e, 0x6f, 0x00, 0x01, 0x00, 0x00, 0x00 },
+    };
+    for (rows) |row| {
+        for (0..2) |alignment| {
+            var bytes: [33]u8 = @splat(0);
+            @memcpy(bytes[alignment..][0..row.len], &row);
+            try paths.check(a, bytes[0 .. alignment + row.len], root);
+            for (row, 0..) |byte, i| std.mem.writeInt(u16, bytes[alignment + 2 * i ..][0..2], byte, .little);
+            try paths.check(a, bytes[0 .. alignment + 2 * row.len], root);
+        }
+    }
+}
+
+test "release paths: an extension needs a filename but named object and source paths still refuse" {
+    for ([_][]const u8{ "\\.o", "/.o", "\\.c", "/.h", "/x/.o" }) |text|
+        try paths.check(a, text, root);
+    for ([_][]const u8{ "\\a.o", "/x/a.o", "C:\\main.cu" }) |text| {
+        try std.testing.expectError(error.PrivateBuildPath, paths.check(a, text, root));
+        const wide = try std.unicode.utf8ToUtf16LeAlloc(a, text);
+        defer a.free(wide);
+        for (0..2) |alignment| {
+            var bytes: std.ArrayList(u8) = .empty;
+            defer bytes.deinit(a);
+            if (alignment == 1) try bytes.append(a, 0);
+            try bytes.appendSlice(a, std.mem.sliceAsBytes(wide));
+            try std.testing.expectError(error.PrivateBuildPath, paths.check(a, bytes.items, root));
+        }
+    }
+}
+
 test "release paths: build roots and absolute source paths refuse without rejecting runtime paths or URLs" {
     for ([_][]const u8{ "/opt/private-build-root/data.bin", "/home/sample/repo/zig/kernels/cuda/part", "/some/location/source.cu", "D:\\work\\source.cuh", "/ci/zig-cache/o/hash/object" }) |text|
         try std.testing.expectError(error.PrivateBuildPath, paths.check(a, text, root));
