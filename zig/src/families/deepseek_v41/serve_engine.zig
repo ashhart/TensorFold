@@ -129,7 +129,8 @@ pub const Served = struct {
         s.host.on_thread = .{ .ctx = m, .run = bindContext };
         // /metrics' device memory: bytes this rank holds in cuda.DeviceBuffers (weights, KV pool, staging), peak
         s.host.memory = .{ .read = readMemory };
-        s.host.health = .{ .ctx = &m.ctx, .read = contextHealthy };
+        s.host.health = .{ .ctx = m, .read = @import("model_health.zig").serving };
+        s.host.activity = .{ .ctx = m, .begin = beginActivity, .end = endActivity, .failed = executionFailed };
         // TF_DSV41_PREFILL_PIECES=1: the batcher plans the rounds; served shape only, same setting on every rank
         s.sched = null;
         if (model.Model.piecesEnv()) {
@@ -169,8 +170,19 @@ pub const Served = struct {
         return .{ .active = u.device, .cache = 0, .peak = u.peak };
     }
 
-    fn contextHealthy(ctx: *anyopaque) bool {
-        return @as(*@import("cuda").Context, @ptrCast(@alignCast(ctx))).healthy();
+    fn beginActivity(ctx: *anyopaque) void {
+        const m: *model.Model = @ptrCast(@alignCast(ctx));
+        _ = m.progress.begin(.round);
+    }
+    fn endActivity(ctx: *anyopaque) void {
+        const m: *model.Model = @ptrCast(@alignCast(ctx));
+        var scope: @import("round_progress.zig").Progress.Scope = .{ .owner = &m.progress };
+        scope.end();
+    }
+
+    fn executionFailed(ctx: *anyopaque, err: anyerror) void {
+        const m: *model.Model = @ptrCast(@alignCast(ctx));
+        if (@import("lockstep.zig").isFatal(err)) if (m.supervisor) |*s| s.report(err);
     }
 
     fn bindContext(ctx: *anyopaque) anyerror!void {

@@ -159,7 +159,7 @@ fn round(h: *LaneHost, rd: Rounds) bool {
     if (h.core.activeCount() > 0) {
         did = true;
         h.core.step() catch |e| {
-            ends.failAll(h, @errorName(e));
+            ends.failAll(h, h.words(e));
             return true;
         };
     }
@@ -263,6 +263,8 @@ fn runFinals(h: *LaneHost) void {
 /// The engine thread under a round planner; an idle round waits for an arrival, a cancel or a short timeout.
 pub fn run(h: *LaneHost, rd: Rounds) void {
     while (true) {
+        var activity = @import("lane_activity.zig").Activity.enter(h.activity);
+        defer activity.end();
         ends.takeCancels(h);
         pressure.step(h);
         rows_host.answer(h);
@@ -287,6 +289,7 @@ pub fn run(h: *LaneHost, rd: Rounds) void {
             continue;
         }
         if (!work) {
+            activity.end();
             if (rows_host.idle(h)) continue;
             if (h.cancels.items.len == 0) h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } }) catch {};
             h.unlock();

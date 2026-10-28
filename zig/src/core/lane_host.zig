@@ -83,6 +83,7 @@ pub const LaneHost = struct {
     prefix: @import("lane_host_prefix.zig").Wait = .{}, // a request's wait for a cut another prompt is filling
     finals: std.ArrayList(usize) = .empty,
     pressure: ?@import("memory_pressure.zig").Governor = null, // macOS memory pressure (lane_host_pressure.zig); null: off
+    activity: ?@import("lane_activity.zig").Activity = null,
 
     pub const ThreadInit = struct { ctx: *anyopaque, run: *const fn (ctx: *anyopaque) anyerror!void };
 
@@ -449,6 +450,7 @@ pub const LaneHost = struct {
     }
 
     pub fn words(h: *const LaneHost, e: anyerror) []const u8 {
+        if (h.activity) |activity| if (activity.failed) |failed| failed(activity.ctx, e);
         const x = h.explain orelse return @errorName(e);
         return x.text(x.ctx, e) orelse @errorName(e);
     }
@@ -534,6 +536,8 @@ pub const LaneHost = struct {
         // a family planner: prompt pieces and decode rows in one pass; else whole or `prefill_step` chunked prompts
         if (h.rounds) |rd| return rounds.run(h, rd);
         while (true) {
+            var activity = @import("lane_activity.zig").Activity.enter(h.activity);
+            defer activity.end();
             ends.takeCancels(h);
             pressure.step(h);
             rows_host.answer(h);
@@ -542,7 +546,7 @@ pub const LaneHost = struct {
             while (h.admitOne()) {}
             fill.run(h);
             h.core.sweep() catch |err| {
-                ends.failAll(h, @errorName(err));
+                ends.failAll(h, h.words(err));
                 continue;
             };
             h.deliverPending();
@@ -569,6 +573,7 @@ pub const LaneHost = struct {
                     learn.step(h);
                     continue;
                 }
+                activity.end();
                 if (rows_host.idle(h)) continue;
                 if (h.cancels.items.len == 0 and (h.queued.items.len == 0 or h.admitted.items.len >= h.info_.lanes or admit.holds(h)))
                     h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } }) catch {};
@@ -579,7 +584,7 @@ pub const LaneHost = struct {
             const owed = h.share.debt_ns > 0; // a round is timed only while it pays a prompt step's debt down
             const r0 = if (owed) std.Io.Clock.awake.now(h.io) else std.Io.Timestamp.zero;
             h.core.step() catch |e| {
-                ends.failAll(h, @errorName(e));
+                ends.failAll(h, h.words(e));
                 continue;
             };
             if (owed) h.share.rounded(@intCast(r0.durationTo(std.Io.Clock.awake.now(h.io)).toNanoseconds()));

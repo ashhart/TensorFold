@@ -223,6 +223,8 @@ pub fn follow(f: *Forward) !void {
     while (true) {
         const msg = try f.link.?.recvGrow(f.gpa, &buf);
         if (msg.len == 0) return error.BadPlan;
+        var activity: @import("round_progress.zig").Progress.Scope = if (f.progress) |progress| progress.begin(.follower) else .{ .owner = null };
+        defer activity.end();
         const ended = followOp(f, msg, &ids, &prompt, &picks) catch |e| {
             // Runner.guard failed the leader's same window before any launch: only its request fails
             if (e != error.MissingTritonVariant) return e;

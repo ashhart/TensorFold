@@ -25,3 +25,7 @@ test {
 test {
     _ = @import("model_supervisor_test.zig");
 }
+
+test {
+    _ = @import("round_progress_test.zig");
+}

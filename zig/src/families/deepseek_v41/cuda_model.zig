@@ -112,6 +112,7 @@ pub const Model = struct {
     /// TF_DSV41_ARENA's sub-allocator (dev_arena.zig), for the process's lifetime
     dev_arena: ?*@import("dev_arena.zig").Installed = null,
     supervisor: ?@import("model_supervisor.zig").Supervisor = null,
+    progress: @import("round_progress.zig").Progress,
     /// the boot check's figures before the pool, for its measured end (kv_state.afterBoot)
     boot_check: ?kvs.Boot = null,
     slot_set: ?*slots_mod.SlotSet = null,
@@ -147,6 +148,8 @@ pub const Model = struct {
         m.retained = false;
         m.boot_complete = false;
         m.io = io;
+        m.progress = .{ .io = io };
+        const stall_ns = try @import("round_progress.zig").timeoutNs(if (std.c.getenv("TF_DSV41_STALL_EXIT_S")) |v| std.mem.span(v) else null);
         // gpa.create applies no field defaults: optional parts start null so close() never frees garbage
         m.pass = null;
         m.l2pf = null;
@@ -176,7 +179,7 @@ pub const Model = struct {
         else
             &.{};
         try m.session.open(&m.driver, m.tcfg, image);
-        m.supervisor = .{ .io = io, .ctx = m, .healthy = contextHealthy, .fail = contextFailed };
+        m.supervisor = .{ .io = io, .ctx = m, .healthy = @import("model_health.zig").context, .fail = @import("model_health.zig").failed, .progress = &m.progress, .stall_ns = stall_ns };
         m.supervisor.?.start() catch |err| {
             m.session.bootFailed(err);
             return err;
@@ -195,6 +198,8 @@ pub const Model = struct {
             } else |_| {}
             return err;
         };
+        m.runner.progress = &m.progress;
+        m.f.progress = &m.progress;
         m.boot_complete = true;
         return m;
     }
@@ -456,16 +461,6 @@ pub const Model = struct {
     fn announceStop(ctx: *anyopaque) void {
         const s: *tp.Session = @ptrCast(@alignCast(ctx));
         s.announceStop();
-    }
-
-    fn contextHealthy(ctx: *anyopaque) bool {
-        const m: *Model = @ptrCast(@alignCast(ctx));
-        return m.ctx.healthy();
-    }
-    fn contextFailed(ctx: *anyopaque, err: anyerror) void {
-        const m: *Model = @ptrCast(@alignCast(ctx));
-        m.session.fatal("CUDA context", err);
-        std.c._exit(70);
     }
 
     pub fn close(m: *Model) void {
