@@ -84,12 +84,14 @@ fn bindRef(e: mtl.ComputeEncoder, r: weights.Ref, i: usize) void {
 
 /// Every segment's rows in one forward: soft-capped logits in s.logits by segment; each cache grows by its rows.
 pub fn run(m: *Model, s: *state.Scratch, segments: []const Segment, ids: []const u32) !void {
-    return runWindow(m, s, segments, ids, false);
+    return runWindow(m, s, segments, ids, .all);
 }
 
-/// run; `last`: a prompt pass's window, whose rows but the last need no logits: the head, soft-cap and argmax on it alone
-/// (on the row path; the tensor-unit path projects every row).
-fn runWindow(m: *Model, s: *state.Scratch, segments: []const Segment, ids: []const u32, last: bool) !void {
+/// Which rows of a window are read; none: it stops before Model.deepFrom's layers and the head.
+const Reads = enum { all, last, none };
+
+/// run; `.last`: a prompt pass's window, where only the last row needs logits (on the row path; not with tensor units).
+fn runWindow(m: *Model, s: *state.Scratch, segments: []const Segment, ids: []const u32, reads: Reads) !void {
     const geo = m.config.geo;
     var rows: usize = 0;
     for (segments) |seg| {
@@ -120,23 +122,25 @@ fn runWindow(m: *Model, s: *state.Scratch, segments: []const Segment, ids: []con
     if (m.kernels.ple) |*pk| pleInputs(m, e, s, pk, rows);
     var cur: usize = 0;
     const fused = rows == 1 and m.fuse;
-    for (0..geo.layers) |i| {
+    for (0..if (reads == .none) m.deepFrom() else geo.layers) |i| {
         try layer(m, e, s, segments, &chunks, i, cur, rows, .{}, fused);
         cur = 1 - cur;
     }
-    if (fused) denseTail(m, e, s, geo.layers - 1, 1 - cur, rows); // the last layer's tail, no projection to carry it
-    // a prompt pass's window needs its last row's logits alone (at that row's place in s.logits)
-    const from: usize = if (last and w.head.raw != null) rows - 1 else 0;
-    if (from == 0) try project(m, s, e, w.head, s.normed[cur], s.logits, rows) else try weights.projectRowAt(&m.projections, m.device, e, w.head.raw.?, w.head, .{ .buf = s.normed[cur], .off = from * geo.hidden * 2 }, s.logits, from * cfg.vocab * 2, 1);
-    e.setPipeline(ks.softcap);
-    e.setBuffer(s.logits, from * cfg.vocab * 2, 0);
-    e.setValue(cfg.softcap, 1);
-    e.dispatchThreads(.{ .width = (rows - from) * cfg.vocab }, .{ .width = 256 });
-    // each row's greedy token (the softcap keeps the order): tree_round's argmax in 16-row pieces
-    var first: usize = from;
-    while (first < rows) : (first += 16) {
-        const n = @min(16, rows - first);
-        try m.picks.argmax(e, .{ .buf = s.logits, .off = first * cfg.vocab * 2 }, .{ .buf = s.picks, .off = first * 8 }, .{ .rows = @intCast(n), .vocab = cfg.vocab, .stride = cfg.vocab });
+    if (fused and reads != .none) denseTail(m, e, s, geo.layers - 1, 1 - cur, rows); // the last layer's tail, no projection to carry it
+    if (reads != .none) {
+        // a prompt pass's window needs its last row's logits alone (at that row's place in s.logits)
+        const from: usize = if (reads == .last and w.head.raw != null) rows - 1 else 0;
+        if (from == 0) try project(m, s, e, w.head, s.normed[cur], s.logits, rows) else try weights.projectRowAt(&m.projections, m.device, e, w.head.raw.?, w.head, .{ .buf = s.normed[cur], .off = from * geo.hidden * 2 }, s.logits, from * cfg.vocab * 2, 1);
+        e.setPipeline(ks.softcap);
+        e.setBuffer(s.logits, from * cfg.vocab * 2, 0);
+        e.setValue(cfg.softcap, 1);
+        e.dispatchThreads(.{ .width = (rows - from) * cfg.vocab }, .{ .width = 256 });
+        // each row's greedy token (the softcap keeps the order): tree_round's argmax in 16-row pieces
+        var first: usize = from;
+        while (first < rows) : (first += 16) {
+            const n = @min(16, rows - first);
+            try m.picks.argmax(e, .{ .buf = s.logits, .off = first * cfg.vocab * 2 }, .{ .buf = s.picks, .off = first * 8 }, .{ .rows = @intCast(n), .vocab = cfg.vocab, .stride = cfg.vocab });
+        }
     }
     e.end();
     cb.commit();
@@ -170,7 +174,13 @@ pub fn embedRows(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, rows: usiz
 /// A prompt pass's window: the same rows' arithmetic as `window`, logits for the last row alone.
 pub fn promptWindow(m: *Model, s: *state.Scratch, c: *state.Cache, ids: []const u32, p0: usize) !void {
     if (p0 != c.len) return error.BadPosition;
-    return runWindow(m, s, &.{.{ .cache = c, .rows = ids.len }}, ids, true);
+    return runWindow(m, s, &.{.{ .cache = c, .rows = ids.len }}, ids, .last);
+}
+
+/// A prompt pass's window nothing reads: the cache fills, the layers from `Model.deepFrom` and the head are left out.
+pub fn fillWindow(m: *Model, s: *state.Scratch, c: *state.Cache, ids: []const u32, p0: usize) !void {
+    if (p0 != c.len) return error.BadPosition;
+    return runWindow(m, s, &.{.{ .cache = c, .rows = ids.len }}, ids, .none);
 }
 
 /// x rounded to bf16, to nearest even.

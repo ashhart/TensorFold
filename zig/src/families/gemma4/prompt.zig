@@ -110,18 +110,9 @@ pub fn run(m: *Model, s: *Scratch, c: *state.Cache, ids: []const u32, images: []
     return pass(m, s, c, ids, images, true);
 }
 
-/// run for a chunk nothing reads: the cache and the taps fill, the layers from `deepFrom` and the head are left out.
+/// run for a chunk nothing reads: the cache and the taps fill; Model.deepFrom's layers and the head are left out.
 pub fn fill(m: *Model, s: *Scratch, c: *state.Cache, ids: []const u32, images: []const Span) !void {
     return pass(m, s, c, ids, images, false);
-}
-
-/// The first layer whose output feeds no cache and no tap: past the layers that own a cache and the drafter's last tap.
-pub fn deepFrom(m: *const Model) usize {
-    var from = m.config.geo.cacheLayers();
-    for (m.tap_of[0..m.config.geo.layers], 0..) |t, i| {
-        if (t >= 0) from = @max(from, i + 1);
-    }
-    return from;
 }
 
 fn pass(m: *Model, s: *Scratch, c: *state.Cache, ids: []const u32, images: []const Span, last: bool) !void {
@@ -166,7 +157,7 @@ fn pass(m: *Model, s: *Scratch, c: *state.Cache, ids: []const u32, images: []con
     e.dispatchGroups(.{ .width = rows }, .{ .width = 1024 });
     if (m.kernels.ple) |*pk| fwd.pleInputs(m, e, s, pk, rows);
     var cur: usize = 0;
-    for (0..if (last) geo.layers else deepFrom(m)) |i| {
+    for (0..if (last) geo.layers else m.deepFrom()) |i| {
         if (geo.layer_input != 0) try layerE(m, e, s, c, i, cur, r32) else try layer(m, e, s, c, i, cur, r32, .{});
         cur = 1 - cur;
     }
