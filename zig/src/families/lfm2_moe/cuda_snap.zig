@@ -53,10 +53,10 @@ pub const Pages = struct {
     }
 };
 
-/// `slot`'s state at `at`, region by region: one copy a run of consecutive whole pages, a layer's rows of the last.
-fn each(m: *const mdl.Model, slot: usize, at: usize, ctx: anytype, comptime f: fn (@TypeOf(ctx), dev: u64, off: usize, len: usize) anyerror!void) !void {
+/// `slot`'s state at `at`: conv states (from `conv`), a copy a run of consecutive whole pages, the last's rows a layer.
+fn each(m: *const mdl.Model, slot: usize, conv: u64, at: usize, ctx: anytype, comptime f: fn (@TypeOf(ctx), dev: u64, off: usize, len: usize) anyerror!void) !void {
     if (at > m.caps[slot]) return error.PastPages;
-    try f(ctx, m.states + slot * state_bytes, 0, state_bytes);
+    try f(ctx, conv, 0, state_bytes);
     var off: usize = state_bytes;
     const ids = m.ids[slot * m.perSlot() ..];
     const whole = at / kern.page;
@@ -105,21 +105,21 @@ fn copy(c: Leased, dev: u64, off: usize, len: usize) anyerror!void {
     try pageRuns(c.ids, off, len, Copy{ .d = c.d, .s = c.s, .arena = c.arena, .dev = dev, .out = c.out }, copyRun);
 }
 
-/// Copy `slot`'s state at `at` into leased pages, queued on `s` behind the chunk that ends there.
-pub fn save(gpa: std.mem.Allocator, p: *Pages, m: *const mdl.Model, s: cuda.Stream, slot: usize, at: u32) !*Saved {
+/// `slot`'s state at `at` copied into leased pages behind the chunk that ends there or taps it (conv states at `conv`).
+pub fn save(gpa: std.mem.Allocator, p: *Pages, m: *const mdl.Model, s: cuda.Stream, slot: usize, at: u32, conv: u64) !*Saved {
     if (at == 0 or at > m.context) return error.NotAtMark;
     const k = try gpa.create(Saved);
     errdefer gpa.destroy(k);
     k.* = .{ .at = at, .lease = try p.take(bytes(at) / page) };
     errdefer p.pages.finish(&k.lease);
-    try each(m, slot, at, Leased{ .d = m.d, .s = s, .arena = p.arena.?.ptr, .ids = k.lease.ids.items, .out = true }, copy);
+    try each(m, slot, conv, at, Leased{ .d = m.d, .s = s, .arena = p.arena.?.ptr, .ids = k.lease.ids.items, .out = true }, copy);
     return k;
 }
 
 /// Make `slot`'s pages and conv states hold `k`'s state, queued on `s` before the next chunk.
 pub fn restore(p: *const Pages, m: *const mdl.Model, s: cuda.Stream, slot: usize, k: *const Saved) !void {
     if (k.at > m.context) return error.PastContext;
-    try each(m, slot, k.at, Leased{ .d = m.d, .s = s, .arena = p.arena.?.ptr, .ids = k.lease.ids.items, .out = false }, copy);
+    try each(m, slot, m.states + slot * state_bytes, k.at, Leased{ .d = m.d, .s = s, .arena = p.arena.?.ptr, .ids = k.lease.ids.items, .out = false }, copy);
 }
 
 /// Give a state's pages back: every copy that reads or writes them is queued on the one stream, ahead of any later one.
@@ -156,7 +156,7 @@ test "a state: the conv states, consecutive whole pages as one copy, the last pa
     const at = 3 * kern.page + 100;
     var runs: std.ArrayList([3]usize) = .empty;
     defer runs.deinit(testing.allocator);
-    try each(&m, 1, at, Count{ .runs = &runs }, Count.add);
+    try each(&m, 1, m.states + state_bytes, at, Count{ .runs = &runs }, Count.add);
     try testing.expectEqual(@as(usize, 1 + 2 + 20), runs.items.len);
     try testing.expectEqual([3]usize{ (1 << 36) + state_bytes, 0, state_bytes }, runs.items[0]);
     try testing.expectEqual([3]usize{ (1 << 40) + 7 * page_bytes, state_bytes, 2 * page_bytes }, runs.items[1]);
@@ -175,10 +175,10 @@ test "a state on whole pages has no partial copies; one past a slot's pages is r
     const m = fake(&ids, &caps);
     var runs: std.ArrayList([3]usize) = .empty;
     defer runs.deinit(testing.allocator);
-    try each(&m, 0, 2 * kern.page, Count{ .runs = &runs }, Count.add);
+    try each(&m, 0, m.states, 2 * kern.page, Count{ .runs = &runs }, Count.add);
     try testing.expectEqual(@as(usize, 2), runs.items.len);
     try testing.expectEqual(@as(usize, 2 * page_bytes), runs.items[1][2]);
-    try testing.expectError(error.PastPages, each(&m, 0, 2 * kern.page + 1, Count{ .runs = &runs }, Count.add));
+    try testing.expectError(error.PastPages, each(&m, 0, m.states, 2 * kern.page + 1, Count{ .runs = &runs }, Count.add));
 }
 
 const Run = struct {

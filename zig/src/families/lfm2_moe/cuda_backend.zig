@@ -55,6 +55,7 @@ pub const Lfm = struct {
     slot_bufs: []cuda.DeviceBuffer, // a slot's last-row logits, then its rule: two a slot
     next: u64 = 0,
     pool: ?kv.Pool = null, // the pages every slot leases (attach)
+    tapped: ?struct { stream: *const Stream, cut: Cut } = null, // the chunk's tapped marks while its hooks run
     snaps: ?snap.Pages = null, // the prompt cache's pages, allocated once inside its budget (snap_ready)
 
     /// The device bytes `init` allocates: the token and pick rings, metas, each slot's last row and rule.
@@ -157,8 +158,10 @@ pub const Lfm = struct {
     pub fn saveState(x: *Lfm, owner: ?*anyopaque, at: u32) !*snap.Saved {
         const s: *const Stream = @ptrCast(@alignCast(owner orelse return error.NoOwner));
         const l = x.lanes.getPtr(s) orelse return error.UnknownStream;
-        if ((l.fill orelse l.len) != at) return error.NotAtMark; // a state is copied only where the pass stands
-        return snap.save(x.gpa, try x.snapPages(), x.m, x.s, l.slot, at);
+        const tap: ?usize = if (x.tapped) |t| if (t.stream == s) std.mem.indexOfScalar(usize, t.cut.taps(), at) else null else null;
+        if (tap == null and (l.fill orelse l.len) != at) return error.NotAtMark; // where the pass stands, or a tap
+        const conv = if (tap) |j| x.m.s.tap + j * mdl.slot_elems * 2 else x.m.states + l.slot * mdl.slot_elems * 2;
+        return snap.save(x.gpa, try x.snapPages(), x.m, x.s, l.slot, at, conv);
     }
 
     /// The stream's slot made to hold `k`'s state (a restore outside its prompt pass).
@@ -268,18 +271,53 @@ pub const Lfm = struct {
         const p = s.prompt();
         const at = l.fill.?;
         if (s.isCancelled()) return error.Cancelled;
-        var end = @min(p.len, (at / prompt_rows + 1) * prompt_rows);
-        for (s.reuse.marks) |mk| if (mk > at and mk < end) {
-            end = mk;
-        };
-        const done = end == p.len;
-        try fwd.forward(x.m, x.k, x.s, &.{.{ .slot = l.slot, .p0 = at, .tokens = p[at..end] }}, true, end - at - 1, @intFromBool(done));
+        const c = cut(at, p.len, s.reuse.marks);
+        const done = c.end == p.len;
+        var rows: [mdl.max_taps]usize = undefined;
+        for (c.taps(), 0..) |t, j| rows[j] = t - at - 1;
+        try fwd.forward(x.m, x.k, x.s, &.{.{ .slot = l.slot, .p0 = at, .tokens = p[at..c.end], .taps = rows[0..c.n] }}, true, c.end - at - 1, @intFromBool(done));
         if (done) try x.d.check(x.d.api.cuMemcpyDtoDAsync_v2(l.last, x.m.s.logits, cfg.vocab * 2, x.s.handle), "cuMemcpyDtoDAsync");
-        s.fill_at.store(@intCast(end), .monotonic);
-        l.fill = if (done) null else end;
+        s.fill_at.store(@intCast(c.end), .monotonic);
+        l.fill = if (done) null else c.end;
         if (done) l.len = p.len;
-        if (s.reuse.hook) |hk| if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(end)) != null) hk.at(hk.ptr, s, @intCast(end));
+        if (s.reuse.hook) |hk| {
+            x.tapped = .{ .stream = s, .cut = c };
+            defer x.tapped = null;
+            for (c.taps()) |t| hk.at(hk.ptr, s, @intCast(t));
+            if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(c.end)) != null) hk.at(hk.ptr, s, @intCast(c.end));
+        }
         return done;
+    }
+
+    /// A chunk's end (the grid line, the prompt's end or a mark) and the marks inside it, tapped in order.
+    const Cut = struct {
+        end: usize,
+        at: [mdl.max_taps]usize = undefined,
+        n: usize = 0,
+        fn taps(c: *const Cut) []const usize {
+            return c.at[0..c.n];
+        }
+    };
+
+    /// The chunk from `at`: up to max_taps marks inside it are tapped, the next one ends it.
+    fn cut(at: usize, len: usize, marks: []const u32) Cut {
+        var c: Cut = .{ .end = @min(len, (at / prompt_rows + 1) * prompt_rows) };
+        var from = at;
+        while (true) { // the marks inside in order, the first max_taps tapped
+            var next: ?usize = null;
+            for (marks) |mk| if (mk > from and mk < c.end and (next == null or mk < next.?)) {
+                next = mk;
+            };
+            const mk = next orelse break;
+            if (c.n == mdl.max_taps) {
+                c.end = mk;
+                break;
+            }
+            c.at[c.n] = mk;
+            c.n += 1;
+            from = mk;
+        }
+        return c;
     }
 
     fn prefill(ptr: *anyopaque, s: *Stream) anyerror!void {
@@ -433,4 +471,21 @@ test "a request holds its prompt, its reply and one verify window in whole pages
     try std.testing.expectEqual(@as(usize, 1), pagesFor(400, 96));
     try std.testing.expectEqual(@as(usize, 2), pagesFor(400, 97));
     try std.testing.expectEqual(@as(usize, 65), pagesFor(32768, 0));
+}
+
+test "a chunk taps the marks inside it, up to four, and ends at the next one, the grid line or the prompt's end" {
+    const cases = [_]struct { at: usize, len: usize, marks: []const u32, end: usize, taps: []const usize }{
+        .{ .at = 0, .len = 3000, .marks = &.{}, .end = prompt_rows, .taps = &.{} },
+        .{ .at = 0, .len = 3000, .marks = &.{700}, .end = prompt_rows, .taps = &.{700} },
+        .{ .at = 0, .len = 3000, .marks = &.{ 900, 300, 2900 }, .end = prompt_rows, .taps = &.{ 300, 900 } },
+        .{ .at = 0, .len = 3000, .marks = &.{ 5, 4, 3, 2, 1 }, .end = 5, .taps = &.{ 1, 2, 3, 4 } },
+        .{ .at = 9216, .len = 10144, .marks = &.{ 10050, 10140 }, .end = 10144, .taps = &.{ 10050, 10140 } },
+        .{ .at = 2048, .len = 2500, .marks = &.{ 2100, 2500 }, .end = 2500, .taps = &.{2100} },
+        .{ .at = 700, .len = 3000, .marks = &.{700}, .end = prompt_rows, .taps = &.{} },
+    };
+    for (cases) |k| {
+        const c = Lfm.cut(k.at, k.len, k.marks);
+        try std.testing.expectEqual(k.end, c.end);
+        try std.testing.expectEqualSlices(usize, k.taps, c.taps());
+    }
 }
