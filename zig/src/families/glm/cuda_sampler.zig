@@ -34,6 +34,7 @@ pub const Sampler = struct {
     vocab: usize,
     rows: usize,
     full: cuda.DeviceBuffer, // bf16 [rows][vocab]: every rank's columns in place
+    stage: cuda.DeviceBuffer, // bf16, rows * vocab: every rank's columns as one block a rank (gather)
     rule: cuda.DeviceBuffer,
     meta: cuda.DeviceBuffer,
     tok: cuda.DeviceBuffer,
@@ -47,6 +48,8 @@ pub const Sampler = struct {
         const gm = try m.function("tf_grammar_mask");
         var full = try cuda.DeviceBuffer.alloc(d, rows * vocab * 2);
         errdefer full.free();
+        var stage = try cuda.DeviceBuffer.alloc(d, rows * vocab * 2);
+        errdefer stage.free();
         var r = try cuda.DeviceBuffer.alloc(d, @sizeOf(Rule));
         errdefer r.free();
         var meta = try cuda.DeviceBuffer.alloc(d, 16);
@@ -54,7 +57,7 @@ pub const Sampler = struct {
         var tok = try cuda.DeviceBuffer.alloc(d, rows * 4);
         errdefer tok.free();
         const prob = try cuda.DeviceBuffer.alloc(d, rows * 4);
-        return .{ .d = d, .module = m, .tf_draw = f, .tf_logprob_rows = lp, .tf_grammar_mask = gm, .vocab = vocab, .rows = rows, .full = full, .rule = r, .meta = meta, .tok = tok, .prob = prob };
+        return .{ .d = d, .module = m, .tf_draw = f, .tf_logprob_rows = lp, .tf_grammar_mask = gm, .vocab = vocab, .rows = rows, .full = full, .stage = stage, .rule = r, .meta = meta, .tok = tok, .prob = prob };
     }
 
     pub fn deinit(s: *Sampler) void {
@@ -62,13 +65,14 @@ pub const Sampler = struct {
         s.tok.free();
         s.meta.free();
         s.rule.free();
+        s.stage.free();
         s.full.free();
         s.module.unload();
     }
 
     /// `rows` rows of `mine` -> `out`, tokens at positions first, first + 1, ...; `spans`: every rank's, rank order.
     pub fn draw(s: *Sampler, stream: cuda.Stream, exchange: Exchange, spans: []const Span, mine: []const Local, rows: usize, first: u64, r: Rule, out: []u32) !void {
-        try s.gather(stream, exchange, spans, mine, rows, s.full.ptr);
+        try s.gather(stream, exchange, spans, mine, rows, s.stage.ptr, s.full.ptr);
         try s.drawFull(stream, rows, first, r, out);
     }
 
@@ -92,17 +96,21 @@ pub const Sampler = struct {
         try s.tok.download(0, std.mem.sliceAsBytes(out[0..rows]));
     }
 
-    /// `rows` rows of `mine` made whole in `full` (bf16 [rows][vocab]) on every rank, each column from its rank.
-    pub fn gather(s: *const Sampler, stream: cuda.Stream, exchange: Exchange, spans: []const Span, mine: []const Local, rows: usize, full: u64) !void {
-        const V = s.vocab;
-        for (mine) |l| {
-            const span = spans[l.rank];
-            for (0..rows) |row| try s.copy(stream, full + (row * V + span.lo) * 2, l.logits + row * span.len() * 2, span.len() * 2);
-        }
+    /// `full` (bf16 [rows][vocab]) whole on every rank: one broadcast a rank into `stage`, one strided copy a rank.
+    pub fn gather(s: *const Sampler, stream: cuda.Stream, exchange: Exchange, spans: []const Span, mine: []const Local, rows: usize, stage: u64, full: u64) !void {
         switch (exchange) {
-            .local => {},
-            .nccl => |x| try x.lib.group(Spread{ .lib = x.lib, .comm = x.comm, .stream = stream, .full = full, .vocab = V, .spans = spans, .rows = rows }, Spread.post),
+            .local => for (mine) |l| try s.place(stream, full, l.logits, spans[l.rank], rows),
+            .nccl => |x| {
+                try x.lib.group(Spread{ .lib = x.lib, .comm = x.comm, .stream = stream, .stage = stage, .spans = spans, .mine = mine, .rows = rows }, Spread.post);
+                for (spans) |span| try s.place(stream, full, stage + rows * span.lo * 2, span, rows);
+            },
         }
+    }
+
+    /// One rank's columns (bf16 [rows][span], packed) into their columns of `full`.
+    fn place(s: *const Sampler, stream: cuda.Stream, full: u64, src: u64, span: Span, rows: usize) !void {
+        const p: cuda.abi.Memcpy2D = .{ .src = src, .src_pitch = span.len() * 2, .dst = full + span.lo * 2, .dst_pitch = s.vocab * 2, .width = span.len() * 2, .height = rows };
+        try s.d.check(s.d.api.cuMemcpy2DAsync_v2(&p, stream.handle), "cuMemcpy2DAsync");
     }
 
     /// Structured output: each of `rows` whole rows in `full` keeps its allowed tokens (`words` u32 a row at `bits`).
@@ -147,20 +155,24 @@ test "rules as nemotron/cuda_sampler fills them; temperature 0 is greedy" {
     try std.testing.expectEqual(@as(?Sampling, null), check(.{ .seed = 0, .temperature = 0 }));
 }
 
-/// Each rank's columns of each row from that rank (spans may differ in width: TP=3), in one group.
+/// Each rank's columns as one block from that rank (spans may differ in width: TP=3), in one group: world broadcasts.
 const Spread = struct {
     lib: *const cuda.nccl.Library,
     comm: cuda.nccl.Comm,
     stream: cuda.Stream,
-    full: u64,
-    vocab: usize,
+    stage: u64,
     spans: []const Span,
+    mine: []const Local,
     rows: usize,
 
     fn post(t: Spread) anyerror!void {
-        for (0..t.rows) |row| for (t.spans, 0..) |span, q| {
-            const at = t.full + (row * t.vocab + span.lo) * 2;
-            try t.lib.check(t.lib.api.ncclBroadcast(at, at, span.len(), .bf16, @intCast(q), t.comm, t.stream.handle), "ncclBroadcast");
-        };
+        for (t.spans, 0..) |span, q| {
+            const at = t.stage + t.rows * span.lo * 2;
+            var send = at;
+            for (t.mine) |l| if (l.rank == q) {
+                send = l.logits;
+            };
+            try t.lib.check(t.lib.api.ncclBroadcast(send, at, t.rows * span.len(), .bf16, @intCast(q), t.comm, t.stream.handle), "ncclBroadcast");
+        }
     }
 };
