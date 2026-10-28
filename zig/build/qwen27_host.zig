@@ -76,6 +76,8 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
 
 pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module) void {
     pocketProbe(b, metal);
+    const learner = b.addExecutable(.{ .name = "tf-qwen27-learning", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/qwen27/learning.zig"), .target = b.graph.host, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } } }) });
+    b.step("tf-qwen27-learning", "Build native forward/trainer identity and gradient checks without running a GPU").dependOn(&b.addInstallArtifact(learner, .{}).step);
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_served.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api } } });
     const boundary = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/qwen27_bank_boundary_host.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "tensorfold", .module = engine }, .{ .name = "metal", .module = metal } } }), .filters = &.{"qwen27 bank boundary:"} });
@@ -86,6 +88,11 @@ pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.M
     b.step("test-qwen27-grants-host", "Native shared draft policy counts granted and proposed nodes without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = grants })).step);
     const tree_host = b.addTest(.{ .root_module = engine, .filters = &.{"qwen27 window:"} });
     b.step("test-qwen27-draft-tree-host", "Real selector 31-node tree and verify parents without a GPU").dependOn(&b.addRunArtifact(tree_host).step);
+    const learner_host = b.addTest(.{ .root_module = engine, .filters = &.{"qwen27 learning:"} });
+    b.step("test-qwen27-learning-host", "Learner argument ABI, explicit memory reserve and weight epoch without devices").dependOn(&b.addRunArtifact(learner_host).step);
+    const metal_flags = b.createModule(.{ .root_source_file = b.path("zig/src/native/metal.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api } } });
+    const slide_flags = b.addTest(.{ .root_module = metal_flags, .filters = &.{"--slide admits"} });
+    b.step("test-qwen27-slide-flags-host", "The actual Metal startup --slide family admission without loading a model").dependOn(&b.addRunArtifact(slide_flags).step);
     const object = b.addObject(.{ .name = "qwen27-speed-compile", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/qwen27_speed_compile.zig"),
         .target = b.graph.host,

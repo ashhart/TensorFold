@@ -149,6 +149,16 @@ pub const Pool = struct {
         return .{ .buffer = span.buffer, .offset = span.offset };
     }
 
+    /// Prepared native rows, captured after the scan before this scratch is reused by the next layer.
+    pub fn trainingRows(pool: *const Pool, layer: usize) ![6]Ref {
+        var refs: [6]Ref = undefined;
+        inline for (.{ Field.query, Field.key, Field.value, Field.decay, Field.mixing, Field.recurrent }, 0..) |field, i| {
+            const span = if (field == .recurrent) gdn.Span{ .buffer = pool.get(field), .bytes = pool.get(field).length() } else try pool.layerSpan(field, layer);
+            refs[i] = .{ .buffer = span.buffer, .offset = span.offset };
+        }
+        return refs;
+    }
+
     pub fn forward(pool: *Pool, layer: usize, plan: DevicePlan, refs: Refs, e: metal.ComputeEncoder) !void {
         try @import("gdn_pool.zig").validatePlan(pool.budget.shape, pool.budget.slots, pool.budget.rows, plan.host);
         const prepared = try pool.round(layer, plan, refs, false);

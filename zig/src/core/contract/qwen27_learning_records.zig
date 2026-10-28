@@ -1,0 +1,26 @@
+//! Learner groups have source-declared thread ceilings; old-chip compile receipts remain separate.
+const M = @import("limits.zig").MetalLaunch;
+pub const metal = [_]M{
+    .{ .name = "qwen27 learning learn_linear tf_learn_attn_gate_grad", .threads = 256, .reserved = 256, .tg_memory = 0 },
+    .{ .name = "qwen27 learning gdn_train tf_gdn_norm_back", .threads = 128, .reserved = 128, .tg_memory = 644 },
+    .{ .name = "qwen27 learning gdn_train tf_gdn_scan_back", .threads = 256, .reserved = 256, .tg_memory = 9536 },
+    .{ .name = "qwen27 learning gdn_train tf_gdn_qk_back", .threads = 128, .reserved = 128, .tg_memory = 128 },
+    .{ .name = "qwen27 learning gdn_train tf_gdn_gates_back", .threads = 256, .reserved = 256, .tg_memory = 4 },
+    .{ .name = "qwen27 learning gdn_train tf_gdn_conv_back", .threads = 256, .reserved = 256, .tg_memory = 4 },
+    .{ .name = "qwen27 learning attn_train tf_attn_q", .threads = 256, .reserved = 256, .tg_memory = 18560 },
+    .{ .name = "qwen27 learning attn_train tf_attn_gate_back", .threads = 256, .reserved = 256, .tg_memory = 4 },
+    .{ .name = "qwen27 learning attn_train tf_attn_prep_back", .threads = 256, .reserved = 256, .tg_memory = 1152 },
+    .{ .name = "qwen27 learning learn_rows tf_learn_copy", .threads = 256, .reserved = 256, .tg_memory = 0 },
+    .{ .name = "qwen27 learning learn_rows tf_learn_zero", .threads = 256, .reserved = 256, .tg_memory = 0 },
+    .{ .name = "qwen27 learning learn_rows tf_learn_nudge", .threads = 256, .reserved = 256, .tg_memory = 0 },
+    .{ .name = "qwen27 learning learn_rows tf_learn_widen", .threads = 256, .reserved = 256, .tg_memory = 0 },
+    .{ .name = "qwen27 learning learn_rows tf_learn_gdn_act", .threads = 256, .reserved = 256, .tg_memory = 0 },
+    .{ .name = "qwen27 learning learn_rows tf_learn_loss", .threads = 256, .reserved = 256, .tg_memory = 32 },
+    .{ .name = "qwen27 learning learn_rows tf_learn_rms_back", .threads = 256, .reserved = 256, .tg_memory = 32 },
+    .{ .name = "qwen27 learning learn_rows tf_learn_swiglu_back", .threads = 256, .reserved = 256, .tg_memory = 0 },
+    .{ .name = "qwen27 learning learn_rows tf_learn_pocket_back", .threads = 256, .reserved = 256, .tg_memory = 512 },
+    .{ .name = "qwen27 learning learn_linear tf_learn_q4_back", .threads = 256, .reserved = 256, .tg_memory = 0 },
+    .{ .name = "qwen27 learning learn_linear tf_learn_attn_kv_back", .threads = 256, .reserved = 256, .tg_memory = 0 },
+    .{ .name = "qwen27 learning pocket tf_q27_pocket_rows", .threads = 256, .reserved = 256, .tg_memory = 256 },
+    .{ .name = "qwen27 learning pocket tf_q27_pocket_scaled", .threads = 256, .reserved = 256, .tg_memory = 256 },
+};

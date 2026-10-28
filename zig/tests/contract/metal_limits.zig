@@ -48,6 +48,15 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
         const body = try @import("qwen4").family.limits_sources.source(a, d.name);
         return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
     }
+    if (std.mem.startsWith(u8, d.name, "qwen27 learning ")) {
+        inline for (.{ "gdn_train", "attn_train", "learn_rows", "learn_linear", "pocket" }) |unit| {
+            if (std.mem.startsWith(u8, d.name, "qwen27 learning " ++ unit ++ " ")) {
+                const body = @field(tf.qwen27.runtime_sources, unit);
+                return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+            }
+        }
+        return error.NoLearningSource;
+    }
     if (std.mem.startsWith(u8, d.name, "hc-pointwise ")) {
         const body = try @import("metal_hc_pointwise.zig").text(a);
         return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };

@@ -27,11 +27,16 @@ The acceptance checks still decide what is kept on every run.
   for Nemotron, 10.6 GiB for Qwen3.8 Flash Next); on a Mac the trainer works on the model's own weights.
 - The Nemotron 3.5 Lightning MLX 4-bit checkpoint, or, on a GB10 only, the Qwen3.8 Flash Next MLX 4-bit group-32
   checkpoint with its MTP head. Macs refuse `--slide` for Flash Next.
+- Qwen3.8-27B MLX affine 4-bit group-64 folders can load saved CUDA neurons on Metal. The Metal trainer and
+  `--slide` use the same lesson gate as CUDA; real-checkpoint lesson, retention and served A/B qualification is pending.
+  See the [Metal learner checks](recipes/qwen27-living-weights-metal.md).
 - A TensorFold build with the pocket learner described here (the release after 1.0.6). A folder taught by 1.0.3 to
   1.0.6 still serves and answers from what it learned, but `--slide` refuses it: those releases saved lessons into
   the shared experts the pocket widens. Teach a fresh copy instead.
 
-A Nemotron folder that learned on either backend serves on the other.
+A Nemotron folder that learned on either backend serves on the other. Qwen3.8-27B uses the same saved neuron
+format on CUDA and Metal. A Metal server reserves its trainer memory before fitting its serving streams; an
+untaught 27B server opened without `--slide` allocates no trainer.
 
 ## Quick start
 

@@ -125,6 +125,10 @@ pub fn main(init: std.process.Init) !u8 {
         return 0;
     }
     if (o.gates) try @import("metal_delta_slots.zig").run(a, device, queue, o.only, o.seed);
+    if (o.gates and (o.only == null or std.mem.indexOf(u8, "qwen27 learning", o.only.?) != null)) {
+        const path = try std.fmt.allocPrint(a, "zig-out/qwen27-learning-contract-{d}", .{std.Io.Clock.awake.now(init.io).toNanoseconds()});
+        try @import("qwen27_learning").run(a, init.io, path);
+    }
     try gemma.requireComplete(gemma.entries);
     var gemma_list: std.ArrayList(*gemma.Probe) = .empty;
     defer {
