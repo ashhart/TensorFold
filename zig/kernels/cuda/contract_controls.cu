@@ -365,3 +365,52 @@ extern "C" __global__ void __launch_bounds__(128) tf_ctl_pocket_in_fmax(const __
         act[static_cast<int64_t>(r) * 64 + j] = z * z;
     }
 }
+// Gate 3: main's tf_exl3_plan_finish (PlanStage without alpha), the baseline, and two SwiGLU-OAI faults that go red.
+#include "exl3_plan.cuh"
+
+struct PlanStageMain {
+    const int *items, *counts, *members;
+    const __nv_bfloat16* x;
+    const half *su0, *su1, *sv0, *sv1;
+    half *x0, *x1;
+    const float* z;
+    void* out;
+    int k, n, p, sk, slots, stride, skip, epi, act_mode;
+    float limit;
+};
+
+extern "C" __global__ void tf_ctl_exl3_plan_finish_old(const PlanStageMain a) {
+    const int it = blockIdx.x, blk = blockIdx.y, lane = threadIdx.x;
+    if (it >= a.counts[0]) return;
+    const int e = a.items[3 * it], first = a.items[3 * it + 1], count = a.items[3 * it + 2];
+    if (e == a.skip) return;
+    const int n = blk * 128 + 4 * lane;
+    for (int j = 0; j < count; ++j) {
+        const int p = a.members[first + j];
+        float g[4] = {}, u[4] = {};
+        for (int s = 0; s < a.sk; ++s)
+            for (int q = 0; q < 4; ++q) {
+                g[q] += a.z[((size_t)s * a.p + p) * a.n + n + q];
+                if (a.epi == 2) u[q] += a.z[((size_t)(a.sk + s) * a.p + p) * a.n + n + q];
+            }
+        tf_exl3::fwht128(g, lane);
+        if (a.epi == 2) tf_exl3::fwht128(u, lane);
+        for (int q = 0; q < 4; ++q) {
+            float v = g[q] * tf_exl3::HAD_SCALE * __half2float(a.sv0[(size_t)e * a.n + n + q]);
+            if (a.epi == 2) {
+                float up = u[q] * tf_exl3::HAD_SCALE * __half2float(a.sv1[(size_t)e * a.n + n + q]);
+                if (a.act_mode == 0) { v = tf_exl3::bf16r(v); up = tf_exl3::bf16r(up); }
+                if (a.limit > 0) { v = tf_exl3::upTo(v, a.limit); up = tf_exl3::within(up, a.limit); }
+                v = v / (1.f + expf(-v));
+                if (a.act_mode == 0) v = tf_exl3::bf16r(v);
+                v *= up;
+            }
+            const size_t at = (size_t)p * a.n + n + q;
+            if (a.epi == 0) reinterpret_cast<float*>(a.out)[at] = v;
+            else reinterpret_cast<__nv_bfloat16*>(a.out)[at] = __float2bfloat16_rn(v);
+        }
+    }
+}
+
+extern "C" __global__ void tf_ctl_exl3_plan_finish_no_plus_one(const PlanStage a) { tf_exl3::plan_finish<tf_exl3::FINISH_NO_PLUS_ONE>(a); }
+extern "C" __global__ void tf_ctl_exl3_plan_finish_alpha_one(const PlanStage a) { tf_exl3::plan_finish<tf_exl3::FINISH_ALPHA_ONE>(a); }

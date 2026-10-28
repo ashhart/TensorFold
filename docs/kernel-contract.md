@@ -208,6 +208,10 @@ shared expert): relu^2 up into act rows and down added into the shared expert's 
 down to fp32 and bf16, against float64, the neurons past the count NaN so a read of one shows (two controls: the up's
 relu by `fmaxf`, and the down launched one neuron short).
 
+CUDA also checks the grouped EXL3 experts' `tf_exl3_plan_finish`: its bf16 and fp32 SwiGLU and its fp32 and bf16 down
+epilogues bit-equal to main's kernel (kept in `contract_controls.cu`), and its SwiGLU-OAI (`act_mode` 2,
+MiniMax-M3.1-Flash's) against float64 at its rounding points (two controls: the up without its + 1, alpha 1).
+
 ## CUDA records per nvcc release
 
 nvcc allocates registers differently from one release to the next, so the CUDA records are kept per release.

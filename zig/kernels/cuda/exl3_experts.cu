@@ -5,6 +5,7 @@
 #include <cuda_fp16.h>
 
 #include "exl3_decode.cuh"
+#include "exl3_plan.cuh"
 
 namespace tf_exl3 {
 
@@ -258,11 +259,6 @@ extern "C" __global__ void tf_exl3_experts_rot_in(const RotInArgs a) {
     for (int j = 0; j < 4; ++j) o[j] = __float2half_rn(v[j] * HAD_SCALE);
 }
 
-__device__ __forceinline__ float bf16r(float x) { return __bfloat162float(__float2bfloat16_rn(x)); }
-// The SwiGLU clamps as torch.clamp has them: a NaN stays a NaN, where fminf and fmaxf hand back the limit.
-__device__ __forceinline__ float upTo(float x, float l) { return x > l ? l : x; }
-__device__ __forceinline__ float within(float x, float l) { return x > l ? l : (x < -l ? -l : x); }
-
 // Program (slot, 128-block of the width): splits summed in order, rotated, * svh, SwiGLU (0: bf16, 1: fp32), then Xd.
 struct GateUpArgs {
     const float* z; // [(mat * sk + split) * P + p] * N + col
@@ -374,18 +370,6 @@ extern "C" __global__ void tf_exl3_down_combine(const DownArgs a) {
 
 }  // namespace tf_exl3
 
-// The shared Grouped plan supplies triples (expert, first, count) and direct pair indices.
-struct PlanStage {
-    const int *items, *counts, *members;
-    const __nv_bfloat16* x;
-    const half *su0, *su1, *sv0, *sv1;
-    half *x0, *x1;
-    const float* z;
-    void* out;
-    int k, n, p, sk, slots, stride, skip, epi, act_mode;
-    float limit;
-};
-
 extern "C" __global__ void tf_exl3_plan_rotate(const PlanStage a) {
     const int it = blockIdx.x, blk = blockIdx.y, mat = blockIdx.z;
     if (it >= a.counts[0]) return;
@@ -404,38 +388,7 @@ extern "C" __global__ void tf_exl3_plan_rotate(const PlanStage a) {
     }
 }
 
-extern "C" __global__ void tf_exl3_plan_finish(const PlanStage a) {
-    const int it = blockIdx.x, blk = blockIdx.y, lane = threadIdx.x;
-    if (it >= a.counts[0]) return;
-    const int e = a.items[3 * it], first = a.items[3 * it + 1], count = a.items[3 * it + 2];
-    if (e == a.skip) return;
-    const int n = blk * 128 + 4 * lane;
-    for (int j = 0; j < count; ++j) {
-        const int p = a.members[first + j];
-        float g[4] = {}, u[4] = {};
-        for (int s = 0; s < a.sk; ++s)
-            for (int q = 0; q < 4; ++q) {
-                g[q] += a.z[((size_t)s * a.p + p) * a.n + n + q];
-                if (a.epi == 2) u[q] += a.z[((size_t)(a.sk + s) * a.p + p) * a.n + n + q];
-            }
-        tf_exl3::fwht128(g, lane);
-        if (a.epi == 2) tf_exl3::fwht128(u, lane);
-        for (int q = 0; q < 4; ++q) {
-            float v = g[q] * tf_exl3::HAD_SCALE * __half2float(a.sv0[(size_t)e * a.n + n + q]);
-            if (a.epi == 2) {
-                float up = u[q] * tf_exl3::HAD_SCALE * __half2float(a.sv1[(size_t)e * a.n + n + q]);
-                if (a.act_mode == 0) { v = tf_exl3::bf16r(v); up = tf_exl3::bf16r(up); }
-                if (a.limit > 0) { v = tf_exl3::upTo(v, a.limit); up = tf_exl3::within(up, a.limit); }
-                v = v / (1.f + expf(-v));
-                if (a.act_mode == 0) v = tf_exl3::bf16r(v);
-                v *= up;
-            }
-            const size_t at = (size_t)p * a.n + n + q;
-            if (a.epi == 0) reinterpret_cast<float*>(a.out)[at] = v;
-            else reinterpret_cast<__nv_bfloat16*>(a.out)[at] = __float2bfloat16_rn(v);
-        }
-    }
-}
+extern "C" __global__ void tf_exl3_plan_finish(const PlanStage a) { tf_exl3::plan_finish<tf_exl3::FINISH_SERVED>(a); }
 
 // Transposed fp32 prompt accumulators in the shared EXL3 module; decode kernels above stay unchanged.
 #include "exl3_prompt.cuh"
