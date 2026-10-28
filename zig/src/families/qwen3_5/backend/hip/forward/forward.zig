@@ -69,6 +69,7 @@ pub fn span(ops: Ops, m: *const view.Model, caches: *state.Caches, ids: u64, len
             try reduce.residualNorm(o, m.tp, xs, y, post_norm, normed, rows, s.hidden, @floatCast(s.eps));
             const z = try mlpRows(o, m, mlp, normed, rows, true);
             try residual(o, m, xs, z, rows * s.hidden);
+            if (m.taps.of(index)) |ti| if (caches.tap) |ring| try hip.plan_ops.tapRows(o, xs, ring.base(), rows, s.hidden, ti, m.taps.n, m.taps.rows, pos0 + start);
         }
         if (trace) |t| t.layer(t.ctx, index, x, len) catch |err| return if (err == error.Cancelled) error.Cancelled else error.HipFailed;
     }

@@ -109,6 +109,9 @@ pub const Launcher = struct {
     const PlanFns = struct {
         kv_write: Function,
         kv_write_act: Function,
+        /// A drafter's tap rings: a round's rows from the plan, and a prompt's rows from one position.
+        tap: Function,
+        tap_rows: Function,
         score: [2]Function, // fp16, bf16
         score_act: [2]Function,
         score2: [2]Function, // the same at two keys a warp, for short spans
@@ -198,6 +201,8 @@ pub const Launcher = struct {
         l.plan = .{
             .kv_write = try pl.function("tf_plan_kv_write"),
             .kv_write_act = try pl.function("tf_plan_kv_write_act"),
+            .tap = try pl.function("tf_plan_tap"),
+            .tap_rows = try pl.function("tf_tap_rows"),
             .score = .{ try pl.function("tf_plan_score_f16"), try pl.function("tf_plan_score_bf16") },
             .score_act = .{ try pl.function("tf_plan_score_act_f16"), try pl.function("tf_plan_score_act_bf16") },
             .score2 = .{ try pl.function("tf_plan_score2_f16"), try pl.function("tf_plan_score2_bf16") },
@@ -369,6 +374,8 @@ pub const Launcher = struct {
     pub const planCausal = plan.planCausal;
     pub const planCausalAs = plan.planCausalAs;
     pub const planKvWriteAct = plan.planKvWriteAct;
+    pub const planTap = plan.planTap;
+    pub const tapRows = plan.tapRows;
     pub const planAttend = plan.planAttend;
     pub const planGatedDelta = plan.planGatedDelta;
     pub const planKeep = plan.planKeep;

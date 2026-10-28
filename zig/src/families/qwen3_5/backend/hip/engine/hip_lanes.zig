@@ -462,6 +462,25 @@ pub const Hip = struct {
         }
     }
 
+    /// A drafter's tapped layers, told before any stream exists: their rings then come with every stream's caches.
+    pub fn prepareFeatures(h: *Hip, taps: []const u32) !void {
+        if (h.streams.map.count() != 0) return error.TapsAfterStreams;
+        if (h.e.o.world != 1) return error.TapsUnderTensorParallel;
+        try h.e.setTaps(taps);
+    }
+
+    /// Rows [start, start + count) of a lane's tap ring (row = position % ring rows), the newest ring rows kept.
+    pub fn features(h: *Hip, lane: *const Lane, taps: []const u32, start: u64, count: u32) !be.Features {
+        const t = &h.e.model().taps;
+        if (taps.len != t.n or !std.mem.eql(u32, taps, t.layers[0..t.n])) return error.TapsMismatch;
+        const ring = lane.caches.tap orelse return error.NoTaps;
+        // a verify's rows are in the ring before its keep: they count as written until the keep drops them
+        const written = lane.len + if (lane.pending) |p| p.rows else 0;
+        if (start + count > written or start + count <= written -| t.rows) return error.RowsNotHeld;
+        const row_bytes = t.n * h.e.model().spec.hidden * 2;
+        return .{ .buffer = ring.base(), .offset = start, .rows = count, .row_bytes = @intCast(row_bytes), .space = .device, .device = h.e.o.device, .dtype = if (h.e.act == .bf16) .bf16 else .f16 };
+    }
+
     /// The stream's lane freed; the other ranks free theirs.
     pub fn release(h: *Hip, lane: *Lane) void {
         h.tp.release(lane.id) catch {};

@@ -154,3 +154,15 @@ pub fn gdnReplay(o: Ops, keep_counts: u64, p: Plan, key_heads: usize, value_head
 pub fn gather(o: Ops, srcs: u64, dst: u64, words: usize, rows: usize) Error!void {
     try (try launcher(o)).planGather(srcs, dst, words, rows, o.stream);
 }
+
+/// Each round row's residual into its slot's tap ring as tap `tap` of `taps` (see `launches.planTap`).
+pub fn tap(o: Ops, x: Tensor, p: Plan, hidden: usize, index: usize, taps: usize, tap_rows: usize) Error!void {
+    if (x.kind.size() != 2) return error.BadShape;
+    try (try launcher(o)).planTap(x.ptr, p, hidden, index, taps, tap_rows, o.stream);
+}
+
+/// A prompt's rows at positions `pos0` on into one stream's tap ring (see `launches.tapRows`).
+pub fn tapRows(o: Ops, x: Tensor, ring: u64, rows: usize, hidden: usize, index: usize, taps: usize, tap_rows: usize, pos0: usize) Error!void {
+    if (x.kind.size() != 2) return error.BadShape;
+    try (try launcher(o)).tapRows(x.ptr, ring, rows, hidden, index, taps, tap_rows, pos0, o.stream);
+}
