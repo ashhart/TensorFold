@@ -210,7 +210,58 @@ extern "C" __global__ void __launch_bounds__(NT) tf_add_rms_rows(const void* x, 
 #undef TF_ADD
 }
 
-#include "norms_vec.cuh"
+// bf16 rows with 16-byte loads (width % 8, at most 8 * VEC_MOST * VNT, 16 B aligned): a short straight line.
+namespace tf_norms {
+
+constexpr int VNT = 256;
+constexpr int VEC_MOST = 4; // 8,192 wide
+
+__device__ __forceinline__ void unpack8(const uint4& u, float* f) {
+    const __nv_bfloat162* h = reinterpret_cast<const __nv_bfloat162*>(&u);
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        const float2 t = __bfloat1622float2(h[i]);
+        f[2 * i] = t.x;
+        f[2 * i + 1] = t.y;
+    }
+}
+
+__device__ __forceinline__ uint4 pack8(const float* f) {
+    uint4 u;
+    __nv_bfloat162* h = reinterpret_cast<__nv_bfloat162*>(&u);
+#pragma unroll
+    for (int i = 0; i < 4; ++i) h[i] = __floats2bfloat162_rn(f[2 * i], f[2 * i + 1]);
+    return u;
+}
+
+__device__ __forceinline__ void load8f(const float* p, float* f) {
+    const float4 a = reinterpret_cast<const float4*>(p)[0];
+    const float4 b = reinterpret_cast<const float4*>(p)[1];
+    f[0] = a.x, f[1] = a.y, f[2] = a.z, f[3] = a.w, f[4] = b.x, f[5] = b.y, f[6] = b.z, f[7] = b.w;
+}
+
+__device__ __forceinline__ void store8f(float* p, const float* f) {
+    reinterpret_cast<float4*>(p)[0] = make_float4(f[0], f[1], f[2], f[3]);
+    reinterpret_cast<float4*>(p)[1] = make_float4(f[4], f[5], f[6], f[7]);
+}
+
+// 1 / sqrt(sum / width + eps), IEEE division and square root, over a VNT-thread block: warp trees, then the 8 warps'.
+template <bool ONCE = false>
+__device__ __forceinline__ float inv_rms_v(float part, int width, float eps) {
+    __shared__ float warps[VNT / 32];
+    for (int m = 16; m > 0; m >>= 1) part = __fadd_rn(part, __shfl_xor_sync(0xFFFFFFFFu, part, m));
+    if ((threadIdx.x & 31) == 0) warps[threadIdx.x >> 5] = part;
+    __syncthreads();
+    // every warp folds the warps' sums in the same tree, so each holds the same total: no broadcast
+    float s = (threadIdx.x & 31) < VNT / 32 ? warps[threadIdx.x & 31] : 0.f;
+    for (int m = 4; m > 0; m >>= 1) s = __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, m));
+    s = __shfl_sync(0xFFFFFFFFu, s, 0);
+    const float r = __fdiv_rn(1.f, __fsqrt_rn(__fadd_rn(__fdiv_rn(s, static_cast<float>(width)), eps)));
+    if constexpr (!ONCE) __syncthreads(); // `warps` is reused by a second norm in the same block
+    return r;
+}
+
+}  // namespace tf_norms
 
 // tf_rms_rows for bf16 x and y (w fp32, null: none), 16-byte loads.
 extern "C" __global__ void __launch_bounds__(VNT) tf_rms_rows_bf16(const __nv_bfloat16* __restrict__ x,
@@ -300,6 +351,84 @@ extern "C" __global__ void __launch_bounds__(VNT) tf_add_rms_rows_bf16(const __n
     }
 }
 
+// Rows that hand on a bf16 residual and fp32 sums over each 64 outputs (the next affine matmul's group sums).
+namespace tf_norms {
+
+__device__ __forceinline__ void load8w(const float* p, float* f) { load8f(p, f); }
+__device__ __forceinline__ void load8w(const __nv_bfloat16* p, float* f) { unpack8(*reinterpret_cast<const uint4*>(p), f); }
+
+// A thread's 8 stored outputs summed in order, then the group's 8 lanes in a fixed tree (every lane of the warp calls).
+__device__ __forceinline__ float group_sum8(const uint4& packed, bool live) {
+    float f[8];
+    unpack8(packed, f);
+    float s = 0.f;
+    if (live)
+#pragma unroll
+        for (int i = 0; i < 8; ++i) s = __fadd_rn(s, f[i]);
+    s = __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, 4));
+    s = __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, 2));
+    return __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, 1));
+}
+
+// h = bf16(x + r) (r null: h = x), y = bf16(rms(h) * w), xs y's 64-value sums; width % 64, 16-byte loads.
+template <typename WT>
+__device__ __forceinline__ void add_rms_h(const __nv_bfloat16* __restrict__ x, const __nv_bfloat16* __restrict__ r,
+                                          const WT* __restrict__ w, __nv_bfloat16* __restrict__ h,
+                                          __nv_bfloat16* __restrict__ y, float* __restrict__ xs, int width, float eps) {
+    const int64_t at = static_cast<int64_t>(blockIdx.x) * width;
+    const int chunks = width / 8;
+    float v[VEC_MOST][8], wv[VEC_MOST][8];
+    uint4 xp[VEC_MOST], rp[VEC_MOST];
+#pragma unroll
+    for (int j = 0; j < VEC_MOST; ++j) { // every load issued before any is used
+        const int c = threadIdx.x + j * VNT;
+        if (c < chunks) {
+            xp[j] = reinterpret_cast<const uint4*>(x + at)[c];
+            if (r != nullptr) rp[j] = reinterpret_cast<const uint4*>(r + at)[c];
+            load8w(w + 8 * c, wv[j]);
+        }
+    }
+#pragma unroll
+    for (int j = 0; j < VEC_MOST; ++j) {
+        const int c = threadIdx.x + j * VNT;
+        if (c < chunks) {
+            unpack8(xp[j], v[j]);
+            if (r != nullptr) {
+                float rv[8];
+                unpack8(rp[j], rv);
+#pragma unroll
+                for (int i = 0; i < 8; ++i) v[j][i] = __fadd_rn(v[j][i], rv[i]);
+                const uint4 hp = pack8(v[j]);
+                reinterpret_cast<uint4*>(h + at)[c] = hp;
+                unpack8(hp, v[j]); // the norm reads h as stored
+            }
+        }
+    }
+    float part = 0.f;
+#pragma unroll
+    for (int j = 0; j < VEC_MOST; ++j)
+        if (threadIdx.x + j * VNT < chunks)
+#pragma unroll
+            for (int i = 0; i < 8; ++i) part = __fmaf_rn(v[j][i], v[j][i], part);
+    const float inv = inv_rms_v<true>(part, width, eps);
+#pragma unroll
+    for (int j = 0; j < VEC_MOST; ++j) {
+        const int c = threadIdx.x + j * VNT;
+        const bool live = c < chunks;
+        float o[8];
+#pragma unroll
+        for (int i = 0; i < 8; ++i) o[i] = __fmul_rn(__fmul_rn(v[j][i], inv), wv[j][i]);
+        const uint4 yp = pack8(o);
+        if (live) reinterpret_cast<uint4*>(y + at)[c] = yp;
+        if (xs != nullptr && j * VNT < chunks) { // whole warps of whole groups: width % 64 == 0
+            const float s = group_sum8(yp, live);
+            if (live && (c & 7) == 0) xs[static_cast<int64_t>(blockIdx.x) * (width / 64) + c / 8] = s;
+        }
+    }
+}
+
+}  // namespace tf_norms
+
 extern "C" __global__ void __launch_bounds__(VNT) tf_add_rms_rows_bf16h(const __nv_bfloat16* x, const __nv_bfloat16* r,
                                                                          const __nv_bfloat16* w, __nv_bfloat16* h,
                                                                          __nv_bfloat16* y, float* xs, int width, float eps) {
@@ -311,16 +440,6 @@ extern "C" __global__ void __launch_bounds__(VNT) tf_add_rms_rows_bf16h_f32w(con
                                                                               __nv_bfloat16* h, __nv_bfloat16* y,
                                                                               float* xs, int width, float eps) {
     add_rms_h(x, r, w, h, y, xs, width, eps);
-}
-
-// add_rms_h on r = tf_moe_combine's bf16 of ys [rows, slots, width] (ys_kind 0 fp32, 2 bf16) by wt, in one launch.
-extern "C" __global__ void __launch_bounds__(VNT) tf_moe_add_rms_rows_bf16h(const __nv_bfloat16* x, const void* ys,
-                                                                           int ys_kind, const float* wt, int slots,
-                                                                           const __nv_bfloat16* w, __nv_bfloat16* h,
-                                                                           __nv_bfloat16* y, float* xs, int width,
-                                                                           float eps) {
-    if (ys_kind == 0) add_rms_h<__nv_bfloat16, 0>(x, nullptr, w, h, y, xs, width, eps, ys, wt, slots);
-    else add_rms_h<__nv_bfloat16, 2>(x, nullptr, w, h, y, xs, width, eps, ys, wt, slots);
 }
 
 // Per head of dv = 8 L: out = bf16(silu(z) * rms(y) * w), y and z rows at strides y_ld, z_ld; xs its 64-value sums.
@@ -418,75 +537,26 @@ extern "C" __global__ void __launch_bounds__(tf_l2::NT) tf_slerp_rows(const __nv
     tf_l2::slerp_rows<tf_l2::A | tf_l2::B>(res, out, alpha, scale, h, width, eps);
 }
 
-// tail's norm on (row, part) blocks: part p of row r at x + r x_ld + p x_part, w + p w_part; y and xs alike.
-template <int R>
-__device__ __forceinline__ void rms_parts(const __nv_bfloat16* x, long long x_ld, long long x_part, const __nv_bfloat16* w,
-                                          long long w_part, __nv_bfloat16* y, long long y_ld, long long y_part, float* xs,
-                                          int width, float eps) {
-    const int64_t r = blockIdx.x, p = blockIdx.y, yo = r * (y_ld - width) + p * y_part; // tail adds r * width itself
-    tf_rms_tail::tail<R>(x + r * (x_ld - width) + p * x_part, nullptr, nullptr, nullptr, w + p * w_part, nullptr, y + yo,
-                         xs != nullptr ? xs + yo / 64 : nullptr, width, eps);
-}
+// Nemotron's rows in its own order (norms_strided.cuh): a thread's elements strided by the block, sums in order.
+#include "norms_strided.cuh"
 
-// y = bf16(rms(x) w) and xs its 64-value sums on strided parts of rows: the tail's norm, rounded once.
-extern "C" __global__ void __launch_bounds__(tf_rms_tail::NT) tf_rms_rows_bf16h_parts(
+// y = bf16((x inv) w), xs its 64-sums, on parts of rows (part p of row r at x + r x_ld + p x_part), to 4,096 wide.
+extern "C" __global__ void __launch_bounds__(256) tf_rms_rows_bf16h_parts(
     const __nv_bfloat16* x, long long x_ld, long long x_part, const __nv_bfloat16* w, long long w_part, __nv_bfloat16* y,
     long long y_ld, long long y_part, float* xs, int width, float eps) {
-    rms_parts<tf_rms_tail::ONCE>(x, x_ld, x_part, w, w_part, y, y_ld, y_part, xs, width, eps);
+    tf_rms_strided::parts<256, 16, false>(x, x_ld, x_part, w, w_part, y, y_ld, y_part, xs, width, eps);
 }
 
-// The same parts with MLX's bf16 steps: y = bf16(w * bf16(x * inv)).
-extern "C" __global__ void __launch_bounds__(tf_rms_tail::NT) tf_rms_rows_bf16h_parts_round(
+// The same parts with MLX's bf16 steps, y = bf16(w bf16(x inv)), 128 threads a part, to 1,024 wide.
+extern "C" __global__ void __launch_bounds__(128) tf_rms_rows_bf16h_parts_round(
     const __nv_bfloat16* x, long long x_ld, long long x_part, const __nv_bfloat16* w, long long w_part, __nv_bfloat16* y,
     long long y_ld, long long y_part, float* xs, int width, float eps) {
-    rms_parts<tf_rms_tail::MLX>(x, x_ld, x_part, w, w_part, y, y_ld, y_part, xs, width, eps);
+    tf_rms_strided::parts<128, 8, true>(x, x_ld, x_part, w, w_part, y, y_ld, y_part, xs, width, eps);
 }
 
-// rms_parts' bits for parts up to 512 wide, 4 a block at 64 threads: warps 2-7 of its tree only added zeros.
-template <int R>
-__device__ __forceinline__ void rms_parts4(const __nv_bfloat16* x, long long x_ld, long long x_part, const __nv_bfloat16* w,
-                                           long long w_part, __nv_bfloat16* y, long long y_ld, long long y_part, float* xs,
-                                           int width, float eps, int rows, int parts) {
-    __shared__ float warps[8];
-    const int sub = threadIdx.x >> 6, c = threadIdx.x & 63, lane = threadIdx.x & 31;
-    const int64_t q = static_cast<int64_t>(blockIdx.x) * 4 + sub, r = q / parts, p = q % parts;
-    const bool live = q < static_cast<int64_t>(rows) * parts && c < width / 8;
-    float v[8], wv[8];
-    uint4 xp = make_uint4(0, 0, 0, 0), wp = make_uint4(0, 0, 0, 0);
-    if (live) {
-        xp = reinterpret_cast<const uint4*>(x + r * x_ld + p * x_part)[c];
-        wp = reinterpret_cast<const uint4*>(w + p * w_part)[c];
-    }
-    tf_rms_tail::unpack8(xp, v);
-    tf_rms_tail::unpack8(wp, wv);
-    float part = 0.f;
-#pragma unroll
-    for (int i = 0; i < 8; ++i) part = __fmaf_rn(v[i], v[i], part);
-    for (int m = 16; m > 0; m >>= 1) part = __fadd_rn(part, __shfl_xor_sync(0xFFFFFFFFu, part, m));
-    if (lane == 0) warps[threadIdx.x >> 5] = part;
-    __syncthreads();
-    const float s = __fadd_rn(warps[2 * sub], warps[2 * sub + 1]);
-    const float inv = __fdiv_rn(1.f, __fsqrt_rn(__fadd_rn(__fdiv_rn(s, static_cast<float>(width)), eps)));
-    float o[8];
-#pragma unroll
-    for (int i = 0; i < 8; ++i) o[i] = tf_rms_tail::normed<R, tf_rms_tail::ROW>(v[i], inv, wv[i]);
-    const uint4 yp = tf_rms_tail::pack8(o);
-    const int64_t yo = r * y_ld + p * y_part;
-    if (live) reinterpret_cast<uint4*>(y + yo)[c] = yp;
-    if (xs != nullptr) {
-        const float g = tf_rms_tail::group_sum8(yp, live);
-        if (live && (c & 7) == 0) xs[yo / 64 + c / 8] = g;
-    }
-}
-
-extern "C" __global__ void __launch_bounds__(256) tf_rms_rows_bf16h_parts4(
-    const __nv_bfloat16* x, long long x_ld, long long x_part, const __nv_bfloat16* w, long long w_part, __nv_bfloat16* y,
-    long long y_ld, long long y_part, float* xs, int width, float eps, int rows, int parts) {
-    rms_parts4<tf_rms_tail::ONCE>(x, x_ld, x_part, w, w_part, y, y_ld, y_part, xs, width, eps, rows, parts);
-}
-
-extern "C" __global__ void __launch_bounds__(256) tf_rms_rows_bf16h_parts4_round(
-    const __nv_bfloat16* x, long long x_ld, long long x_part, const __nv_bfloat16* w, long long w_part, __nv_bfloat16* y,
-    long long y_ld, long long y_part, float* xs, int width, float eps, int rows, int parts) {
-    rms_parts4<tf_rms_tail::MLX>(x, x_ld, x_part, w, w_part, y, y_ld, y_part, xs, width, eps, rows, parts);
+// h = bf16(x + bf16(routed fma chain + shared sum)) over a row's expert slots ys (fp32 or bf16), then the strided norm.
+extern "C" __global__ void __launch_bounds__(tf_rms_strided::LT) tf_moe_add_rms_rows_bf16h(
+    const __nv_bfloat16* x, const void* ys, int y_f32, const float* wt, const __nv_bfloat16* w, __nv_bfloat16* h,
+    __nv_bfloat16* y, float* xs, float eps, int width, int routed, int slots) {
+    tf_rms_strided::moe_row<false>(x, ys, y_f32, wt, w, h, y, xs, eps, width, routed, slots);
 }

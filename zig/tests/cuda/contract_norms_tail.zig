@@ -26,7 +26,7 @@ fn depth(_: c.Shape) usize {
     return tail_.depth;
 }
 
-/// h's one sum: the combine's fma a slot in slot order from 0, rounded to bf16 before the add.
+/// h's one sum: the routed slots' fma chain and the shared slots' sum, each in slot order, then added: under 8 steps.
 fn slotChain(_: c.Shape) usize {
     return moe_slots;
 }
@@ -53,8 +53,8 @@ pub fn spec(which: Which) c.Spec {
             .moe_bf16_h => "cuda norm tf_moe_add_rms_rows_bf16h (h = x + bf16 combine of 8 bf16 slots), residual h",
             .moe_f32_y => "cuda norm tf_moe_add_rms_rows_bf16h (h = x + bf16 combine of 8 fp32 slots), output y",
             .moe_f32_h => "cuda norm tf_moe_add_rms_rows_bf16h (h = x + bf16 combine of 8 fp32 slots), residual h",
-            .parts_once_y => "cuda norm parts tf_rms_rows_bf16h_parts and _parts4 to 512 wide (rounded once, two parts a row), output y",
-            .parts_round_y => "cuda norm parts tf_rms_rows_bf16h_parts_round and _parts4_round to 512 wide (MLX's rows, two parts a row), output y",
+            .parts_once_y => "cuda norm parts tf_rms_rows_bf16h_parts (strided rows, rounded once, two parts a row), output y",
+            .parts_round_y => "cuda norm parts tf_rms_rows_bf16h_parts_round (strided rows, MLX's, two parts a row), output y",
             .drop_branch_row => "control: MLX tail without the branch's normalized-row rounding",
             .drop_branch_out => "control: MLX tail without the branch output's rounding",
             .drop_sum => "control: MLX tail without the sum's rounding before the scalar",
@@ -202,7 +202,7 @@ pub const Tail = struct {
 
     /// Gate 4's slots for h: bf16 values, terms exact in fp32 in any order, slot 0's past fp16's 65,504.
     fn exactSlots(rng: std.Random, ys: []f64, wt: []f32, width: usize) void {
-        for (wt, 0..) |*w, i| w.* = if (i % moe_slots == 0) 1 else std.math.ldexp(@as(f32, 1), @as(i32, @intCast(i % 3)) - 1);
+        for (wt, 0..) |*w, i| w.* = if (i % moe_slots == 0 or i % moe_slots >= moe_routed) 1 else std.math.ldexp(@as(f32, 1), @as(i32, @intCast(i % 3)) - 1);
         for (ys, 0..) |*y, i| {
             const sign: f64 = if (rng.boolean()) 1 else -1;
             y.* = if ((i / width) % moe_slots == 0) sign * @as(f64, @floatFromInt(128 + rng.uintLessThan(u32, 128))) * 512 else @as(f64, @floatFromInt(rng.uintLessThan(u32, 511))) - 255;
@@ -212,6 +212,8 @@ pub const Tail = struct {
     pub fn prepare(self: *Tail, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         const width = shape.k;
         if (width % 64 != 0 or width > 8192 or shape.rows == 0) return false;
+        if (moe(self.which) and width > 4096) return false; // the strided rows' widest
+        if (!residual(self.which) and width > cuda.norms.partsMost(round(self.which))) return false;
         self.rig.reset();
         if (self.arena) |*a| a.deinit();
         self.arena = std.heap.ArenaAllocator.init(self.rig.gpu.gpa);
@@ -254,7 +256,7 @@ pub const Tail = struct {
             }
         }
         const br = branch(self.which);
-        self.k = .{ .rows = shape.rows, .width = width, .round = round(self.which), .x = x, .w = w, .r = if (residual(self.which) and !mo) r else null, .wb = if (br) wb else null, .sc = if (br) sc else null, .moe = if (mo) .{ .slots = moe_slots, .ys = ys, .wt = wt } else null };
+        self.k = .{ .rows = shape.rows, .width = width, .round = round(self.which), .x = x, .w = w, .r = if (residual(self.which) and !mo) r else null, .wb = if (br) wb else null, .sc = if (br) sc else null, .moe = if (mo) .{ .slots = moe_slots, .ys = ys, .wt = wt } else null, .chain_sums = mo or !residual(self.which) };
         for ([_][]const u8{ std.mem.sliceAsBytes(x), std.mem.sliceAsBytes(r), std.mem.sliceAsBytes(wb), std.mem.asBytes(&sc), std.mem.sliceAsBytes(w) }, &self.dev) |bytes, *d| d.* = try self.rig.input(bytes);
         if (hView(self.which)) {
             self.out[0] = try self.rig.output(n * 2);
@@ -282,14 +284,12 @@ pub const Tail = struct {
             if (self.ctl) |f| {
                 var args: cuda.Args = .{};
                 for ([_]u64{ self.dev[0], self.ys }) |d| args.add(d);
-                args.add(@as(i32, @backingInt(slotKind(self.which))));
-                args.add(self.wt);
-                args.add(@as(i32, moe_slots));
-                for ([_]u64{ self.dev[4], self.out[0], self.out[1], self.out[2] }) |d| args.add(d);
-                args.add(@as(i32, @intCast(k.width)));
+                args.add(@as(i32, @intFromBool(slotKind(self.which) == .f32)));
+                for ([_]u64{ self.wt, self.dev[4], self.out[0], self.out[1], self.out[2] }) |d| args.add(d);
                 args.add(@as(f32, 1e-6));
-                try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(k.rows), .y = 1, .z = 1 }, .block = .{ .x = 256 } }, s, &args);
-            } else try self.norms.moeAddRmsH(s, self.dev[0], self.ys, slotKind(self.which), self.wt, moe_slots, self.dev[4], self.out[0], self.out[1], self.out[2], k.rows, k.width, 1e-6);
+                for ([_]usize{ k.width, moe_routed, moe_slots }) |v| args.add(@as(i32, @intCast(v)));
+                try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(k.rows), .y = 1, .z = 1 }, .block = .{ .x = 1024 } }, s, &args);
+            } else try self.norms.moeAddRmsH(s, self.dev[0], self.ys, slotKind(self.which), self.wt, moe_routed, moe_slots, self.dev[4], self.out[0], self.out[1], self.out[2], k.rows, k.width, 1e-6);
         } else if (self.ctl) |f| {
             var args: cuda.Args = .{};
             for (self.dev[0..4]) |d| args.add(d);
@@ -300,7 +300,7 @@ pub const Tail = struct {
             try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(k.rows), .y = 1, .z = 1 }, .block = .{ .x = 256 } }, s, &args);
         } else if (!residual(self.which)) {
             const p = partsOf(k.rows); // contract row i is part i % p of row i / p, so the rows stay contiguous
-            try self.norms.rmsParts(s, self.dev[0], p * k.width, k.width, self.dev[4], 0, self.out[1], p * k.width, k.width, self.out[2], k.rows / p, p, k.width, 1e-6, k.round);
+            try self.norms.rmsParts(s, self.dev[0], p * k.width, @intCast(k.width), self.dev[4], 0, self.out[1], p * k.width, k.width, self.out[2], k.rows / p, p, k.width, 1e-6, k.round);
         } else if (!branch(self.which)) {
             try self.norms.addRmsH(s, self.dev[0], self.dev[1], self.dev[4], .bf16, self.out[0], self.out[1], self.out[2], k.rows, k.width, 1e-6);
         } else try self.norms.addRmsTail(s, self.dev[0], self.dev[1], self.dev[4], self.out[0], self.out[1], self.out[2], k.rows, k.width, 1e-6, .{ .round = k.round, .branch = self.dev[2], .scalar = self.dev[3] });

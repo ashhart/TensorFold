@@ -66,7 +66,7 @@ fn norms(r: *Rig) !void {
         const hn = try r.a.alloc(u16, rows * D);
         const out = try r.a.alloc(u16, rows * D);
         const xs = try r.a.alloc(f32, rows * D / 64);
-        try ref.addMoeNorm(r.a, x, if (f32_out) y32 else null, if (f32_out) null else y16, wt, w, hn, out, xs, rows, D, eps, NS);
+        try ref.addMoeNorm(r.a, x, if (f32_out) y32 else null, if (f32_out) null else y16, wt, w, hn, out, xs, rows, D, eps, top_k, NS);
         const hnd = try r.zeros(u16, rows * D);
         const outd = try r.zeros(u16, rows * D);
         const xsd = try r.zeros(f32, rows * D / 64);
