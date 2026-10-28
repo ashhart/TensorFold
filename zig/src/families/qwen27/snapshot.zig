@@ -281,6 +281,57 @@ pub fn moveSlot(a: std.mem.Allocator, r: *Runner, from: u32, from_ring: ?Ring, t
     if (to_ring) |g| g.end.* = at;
 }
 
+/// Bytes of a slot's rewind point: its DeltaNet states and a whole taps ring, not its K/V rows (they stay in the slot).
+pub fn rewindBytes(r: *const Runner, ring: ?Ring) usize {
+    return slotBytes(r, null, 0) + if (ring) |g| g.bytes(g.window) else 0;
+}
+
+/// Slot `slot`'s rewind point at `at`, once its prompt pass stands there with its GPU work done.
+pub fn saveRewind(a: std.mem.Allocator, r: *const Runner, slot: u32, ring: ?Ring, at: u32, buf: mtl.Buffer) !void {
+    if (at == 0 or r.failed or r.active != null or r.offsets[slot] != at) return error.NotAtMark;
+    if (ring) |g| if (g.end.* != at) return error.NotAtMark;
+    try rewindCopy(a, r, slot, ring, at, buf, true);
+}
+
+/// Slot `slot` (reset first) goes back to its rewind point at `at`: no later round wrote its K/V rows before `at`.
+pub fn rewindSlot(a: std.mem.Allocator, r: *Runner, slot: u32, ring: ?Ring, at: u32, buf: mtl.Buffer) !void {
+    try r.reset(slot);
+    try rewindCopy(a, r, slot, ring, at, buf, false);
+    r.offsets[slot] = at;
+    if (ring) |g| g.end.* = at;
+}
+
+/// A slot's DeltaNet states and taps ring at `at`, into `buf` (`to_buf`) or back out of it, in one waited blit pass.
+fn rewindCopy(a: std.mem.Allocator, r: *const Runner, slot: u32, ring: ?Ring, at: u32, buf: mtl.Buffer, to_buf: bool) !void {
+    if (slot >= r.ready) return error.SlotNotReady;
+    var list: std.ArrayList(Part) = .empty;
+    defer list.deinit(a);
+    for (0..r.gdn.budget.layers) |layer| for ([_]bool{ true, false }) |recurrent| {
+        const live = try r.gdn.committedSpan(layer, slot, recurrent);
+        try list.append(a, .{ .buffer = live.buffer, .offset = live.offset, .len = live.bytes });
+    };
+    if (ring) |g| try list.append(a, .{ .buffer = g.buf, .offset = 0, .len = g.bytes(at) });
+    var total: usize = 0;
+    for (list.items) |p| {
+        if (p.offset % 4 != 0 or p.len % 4 != 0) return error.SnapshotAlignment; // blits copy 4-byte words
+        total += p.len;
+    }
+    if (total > buf.length()) return error.SnapshotSize;
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const cb = r.model.queue.commandBuffer();
+    const e = cb.blit();
+    var off: usize = 0;
+    for (list.items) |p| {
+        if (p.len > 0) if (to_buf) e.copy(p.buffer, p.offset, buf, off, p.len) else e.copy(buf, off, p.buffer, p.offset, p.len);
+        off += p.len;
+    }
+    e.end();
+    cb.commit();
+    cb.wait();
+    if (cb.failure() != null) return error.SnapshotGpuFailure;
+}
+
 pub fn drop(a: std.mem.Allocator, st: *State) void {
     st.landed() catch {};
     giveBack(st);

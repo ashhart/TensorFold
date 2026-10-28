@@ -7,13 +7,14 @@ const q = tf.qwen27;
 const lanes = tf.lanes;
 const lb = @import("qwen27_lanes.zig");
 const images = @import("qwen27_images.zig");
+const resume_rules = @import("qwen27_resume.zig");
 const Metal = lb.Metal;
 const Ring = q.tap_ring.Ring;
 const Context = q.dflash.runtime_model.Context;
 const max_rows = lb.max_rows;
 
 /// A prompt pass under way in `slot`: where its next chunk starts, where its restore ended, and its encoded images.
-pub const Fill = struct { slot: u32, at: usize, from: usize, images: ?q.image_rows.Images };
+pub const Fill = struct { slot: u32, at: usize, from: usize, images: ?q.image_rows.Images, rewind: u32 = 0 }; // rewind: slot 0's point
 
 /// A stream's prompt into `slot`, from its kept state: chunks cut as a fresh pass cuts, decoded spans as decoded.
 pub fn prefill(b: *Metal, s: *lanes.Stream, slot: u32) !void {
@@ -27,15 +28,21 @@ pub fn opening(b: *Metal, s: *lanes.Stream, slot: u32) !Fill {
     const ids = s.prompt();
     if (ids.len == 0 or ids.len + s.max_new + max_rows > b.runner.capacity) return error.PromptTooLong;
     if (s.yields()) return error.Yielded; // a background pass steps aside before it touches the slot
+    // as does one over the conversation slot 0 holds when the cache cannot keep its end: it would leave nothing there
+    if (slot == 0 and s.yield_check != null and s.max_new == 0 and !keepsEnd(s) and resumable(b, s, 0) != .none) return error.Yielded;
     if (b.vision != null and s.images.len > 0 and b.image_fill != null and b.image_fill != s) return error.LaneMemory;
     try recover(b, s);
     b.runner.rope[slot] = try images.layout(b.vision, s);
     const d = b.drafter(slot);
-    if (d) |x| try x.reset() else try b.runner.reset(slot);
-    try clearContext(b, slot);
-    s.cached = 0;
-    var at: usize = 0;
-    if (s.reuse.saved) |saved| { // a kept state of this prompt's prefix: the pass starts there
+    const kept_at: u32 = if (s.reuse.saved) |saved| @as(*const q.snapshot.State, @ptrCast(@alignCast(saved))).at else 0;
+    const resumed = if (slot == 0) try takeStanding(b, s, kept_at) else 0; // slot 0's own state: nothing copied
+    if (resumed == 0) {
+        if (d) |x| try x.reset() else try b.runner.reset(slot);
+        try clearContext(b, slot);
+    }
+    s.cached = resumed;
+    var at: usize = resumed;
+    if (resumed == 0) if (s.reuse.saved) |saved| { // a kept state of this prompt's prefix: the pass starts there
         const st: *q.snapshot.State = @ptrCast(@alignCast(saved));
         if (st.at < ids.len) {
             if (restore(b, slot, st)) {
@@ -47,11 +54,11 @@ pub fn opening(b: *Metal, s: *lanes.Stream, slot: u32) !Fill {
                 try clearContext(b, slot);
             }
         } else s.reuse_failed = true;
-    }
+    };
     s.fill_at.store(@intCast(at), .monotonic); // what the restore kept: 0 when it failed
     const encoded = if (b.vision) |v| try images.encode(v, b.runner.model.queue, s, slot) else null;
     if (encoded != null) b.image_fill = s; // the vision rows are this pass's until it closes
-    return .{ .slot = slot, .at = at, .from = at, .images = encoded };
+    return .{ .slot = slot, .at = at, .from = at, .images = encoded, .rewind = rewindPoint(b, s, slot, at) };
 }
 
 /// The pass is over (done, failed or cancelled): its images' rows are free for the next image prompt.
@@ -77,6 +84,7 @@ pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill) !bool {
     if (s.isCancelled()) return error.Cancelled;
     if (s.yields()) { // real work waits: the cache keeps what this background pass prefilled
         if (f.at > f.from) if (s.reuse.hook) |k| k.at(k.ptr, s, @intCast(f.at));
+        if (slot == 0) leave(b, s); // and slot 0 stands at it for the next prompt
         return error.Yielded;
     }
     const at = f.at;
@@ -120,6 +128,7 @@ pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill) !bool {
     if (mark_bank == null) for (s.reuse.marks) |mark| if (mark > at and mark < end) {
         end = mark;
     };
+    if (mark_bank == null and f.rewind > at and f.rewind < end) end = f.rewind;
     const part = ids[at..end];
     const last = end == ids.len;
     const before = b.runner.gpu_seconds;
@@ -133,6 +142,7 @@ pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill) !bool {
     charge(b, s, before);
     f.at = end;
     s.fill_at.store(@intCast(end), .monotonic); // a prompt chunk waits: `at` is landed progress
+    if (end == f.rewind) saveRewind(b, f.rewind);
     if (s.isCancelled()) return error.Cancelled;
     if (mark_bank) |*m| {
         try m.complete(slot, @intCast(end));
@@ -192,11 +202,101 @@ pub fn endFill(b: *Metal, s: *lanes.Stream) void {
     if (b.fills.remove(s)) closing(b, s);
 }
 
+/// Slot 0 resumes a later prompt from where its last stream left it unless TF_QWEN27_SLOT_RESUME=0 (read at start).
+pub fn slotResumeEnv() bool {
+    const v = std.c.getenv("TF_QWEN27_SLOT_RESUME") orelse return true;
+    return !std.mem.eql(u8, std.mem.span(v), "0");
+}
+
+/// Whether slot 0 resumes in place: on, and without --vision (an image prompt's rows go by its images, not its ids).
+fn slotResume(b: *const Metal) bool {
+    return b.slot_resume and b.vision == null;
+}
+
+/// A stream the prompt cache would look up: no images, no prompt logprobs (they start at 0), taught rows.
+fn plain(s: *const lanes.Stream) bool {
+    return s.images.len == 0 and s.prompt_logprobs == null and !s.untaught and s.embedding == null;
+}
+
+/// Whether the cache keeps the state at the end of `s`'s prompt (a background pass's: the cache planned that mark).
+fn keepsEnd(s: *const lanes.Stream) bool {
+    return std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(s.prompt().len)) != null;
+}
+
+/// Slot 0 and its drafter stand at `at`, with no failure or round pending.
+fn standsAt(b: *const Metal, at: usize) bool {
+    if (b.runner.failed or b.runner.active != null or b.runner.offsets[0] != at) return false;
+    const d = b.draft orelse return true;
+    return !d.model.backend.failed and d.model.committed_end == at;
+}
+
+/// How `s` resumes from what slot 0 stands at, past the cache's restore point `kept_at` (qwen27_resume.zig).
+fn resumable(b: *const Metal, s: *const lanes.Stream, kept_at: u32) resume_rules.Resume {
+    if (!slotResume(b) or !plain(s) or !standsAt(b, b.standing.tokens.len)) return .none;
+    return b.standing.plan(s.prompt(), s.decode_spans, kept_at);
+}
+
+/// Slot 0's position for `s` when it resumes there (0: not); the record is used up, as the pass changes the slot.
+fn takeStanding(b: *Metal, s: *const lanes.Stream, kept_at: u32) !u32 {
+    defer b.standing.deinit(b.gpa);
+    switch (resumable(b, s, kept_at)) {
+        .none => return 0,
+        .here => |n| {
+            const d = b.draft orelse return n;
+            try d.model.reset(); // a new session over the kept taps, as after a restore
+            d.model.committed_end = n;
+            return n;
+        },
+        .back => |h| {
+            const buf = b.rewind orelse return 0;
+            if (b.draft) |d| try d.model.reset();
+            q.snapshot.rewindSlot(b.gpa, b.runner, 0, b.ringOf(0), h, buf) catch return 0; // the pass then starts at 0
+            return h;
+        },
+    }
+}
+
+/// A stream leaves slot 0: what it stands at stays for the next prompt that extends it, if a fresh pass stands there.
+fn leave(b: *Metal, s: *const lanes.Stream) void {
+    const at = b.runner.offsets[0];
+    const ended = s.finished and s.reason != .cancelled and s.reason != .@"error";
+    if (!slotResume(b) or !plain(s) or !standsAt(b, at)) return b.standing.deinit(b.gpa);
+    b.standing.leave(b.gpa, .{ .at = at, .prompt_len = @intCast(s.prompt_len), .context_len = @intCast(s.context.items.len), .fill_at = s.fill_at.load(.monotonic), .ended = ended }, s.context.items, s.decode_spans);
+}
+
+/// Where slot 0's pass keeps its rewind point: its rendered history's end, which a next turn shares (0: none).
+fn rewindPoint(b: *const Metal, s: *const lanes.Stream, slot: u32, at: usize) u32 {
+    if (slot != 0 or b.rewind == null or !slotResume(b) or !plain(s)) return 0;
+    return if (s.history_len > at and s.history_len < s.prompt().len) s.history_len else 0;
+}
+
+/// Slot 0 stands at its prompt's history end: its DeltaNet states and taps go to the rewind buffer (none if it fails).
+fn saveRewind(b: *Metal, at: u32) void {
+    b.standing.rewind_at = 0;
+    q.snapshot.saveRewind(b.gpa, b.runner, 0, b.ringOf(0), at, b.rewind.?) catch return;
+    b.standing.rewind_at = at;
+}
+
+/// The rewind buffer, where the prompt cache cannot keep a full-context state (`cache` bytes) and `room` holds it.
+pub fn rewindInit(b: *Metal, room: u64, cache: u64) ?mtl.Buffer {
+    if (!slotResume(b) or b.runner.ready == 0) return null;
+    const need = q.snapshot.rewindBytes(b.runner, b.ringOf(0));
+    if (cache >= q.snapshot.slotBytes(b.runner, b.ringOf(0), b.runner.capacity)) return null; // the cache keeps them
+    if (need > room) {
+        std.log.info("qwen27: no rewind point for slot 0 ({d} MiB, {d} MiB left under the load limit): a next turn that drops the last reply's reasoning reads its prompt again", .{ need >> 20, room >> 20 });
+        return null;
+    }
+    b.rewind = b.runner.model.device.buffer(need, mtl.ResourceOptions.private | mtl.ResourceOptions.untracked) catch return null;
+    std.log.info("qwen27: slot 0 keeps a rewind point of {d} MiB at each prompt's history end", .{need >> 20});
+    return b.rewind;
+}
+
 /// After a GPU failure whose streams have all left, the runner and drafter take rounds again; `s` takes its slot now.
 fn recover(b: *Metal, s: *const lanes.Stream) !void {
     const drafter = if (b.draft) |d| d.model.backend.failed else false;
     if (!b.runner.failed and !drafter) return;
     for (b.owners[0..b.runner.slots]) |o| if (o != null and o != s) return error.RoundGpuFailure;
+    b.standing.deinit(b.gpa); // the failure may have left slot 0 anywhere
     b.dropRound();
     b.dropTree();
     b.runner.recover();
@@ -285,6 +385,7 @@ pub fn unbind(b: *Metal, s: *lanes.Stream) void {
     b.dropRound();
     b.dropTreeOf(slot);
     if (b.release_hook) |hook| if (s.finished and s.reason != .cancelled and s.reason != .@"error") hook.kept(hook.ctx, s, slot);
+    if (slot == 0) leave(b, s);
     b.owners[slot] = null;
     b.runner.rope[slot] = .{};
     if (slot == 0) b.promote_due = b.draft != null; // the next backend call moves a stream in, after this reply is out
@@ -308,6 +409,7 @@ pub fn promote(b: *Metal) void {
         const s = b.owners[k] orelse continue;
         if (s.finished or b.fills.contains(s)) continue; // a prompt pass under way stays in its slot until it is in
         const from: u32 = @intCast(k);
+        b.standing.deinit(b.gpa); // slot 0 takes another stream's state
         d.model.reset() catch return;
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
@@ -326,6 +428,7 @@ pub fn promote(b: *Metal) void {
 
 /// Slot 0 emptied and prefilled with `prompt`, through the drafter when there is one (the window timing's context).
 pub fn refill(b: *Metal, prompt: []const u32) !void {
+    b.standing.deinit(b.gpa);
     b.runner.rope[0] = .{};
     if (b.draft) |d| try d.reset() else try b.runner.reset(0);
     if (b.draft) |d| try d.generation.prefill(prompt, 128) else try (q.session.Session{ .runner = b.runner }).prefill(prompt, 128);

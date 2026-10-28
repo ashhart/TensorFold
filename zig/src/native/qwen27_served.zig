@@ -10,6 +10,7 @@ const lanes = tf.lanes;
 const pc = api.prompt_cache;
 const cache_fit = @import("cache_fit.zig");
 const share_fit = @import("qwen27_share_fit.zig");
+const slot_state = @import("qwen27_slots.zig");
 const Resident = @import("resident.zig").Resident;
 const lb = @import("qwen27_lanes.zig");
 pub const lanes_backend = lb;
@@ -364,6 +365,9 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
         };
         if (model.ane) |share| share.footprint_growth = platform.memory_policy.growth(before, cache_fit.footprint());
     }
+    // slot 0's rewind point where the cache cannot keep a whole context, wired before the cache's budget is read
+    const rewind_room = laterRoom(h);
+    if (slot_state.rewindInit(h.back, rewind_room, if (o.cache_gib) |g| gibBytes(g) else @min(rewind_room, cache_fit.DEFAULT_CEILING))) |buf| if (h.resident) |*r| r.addNow(&.{buf});
     try enableCache(h, o.cache_gib, o.cache_over_cap, a, why);
     errdefer if (h.cache) |*store| store.deinit();
     if (o.learn) |l| try disk.attach(h, io, a, l);
@@ -382,6 +386,17 @@ fn profileEvery() ?u64 {
         std.log.warn("TF_Q27_PROFILE={s} is not 0, 1 or a round count: profiling stays off", .{v});
         return null;
     };
+}
+
+/// The room under the load limit beside everything loaded and reserved, as the share's (unreadable guards: none).
+fn laterRoom(h: *const Host) u64 {
+    const guards = share_fit.Guards.read() catch return 0;
+    return share_fit.room(cache_fit.ram(), cache_fit.footprint(), laterFootprint(h) catch return 0, guards);
+}
+
+/// --prompt-cache-gib's bytes (0 or less: none).
+fn gibBytes(gib: f64) u64 {
+    return if (gib > 0) std.math.lossyCast(u64, gib * cache_fit.GiB) else 0;
 }
 
 /// Reserve later buffers and the loaded share's priced bytes that its construction left outside the footprint.

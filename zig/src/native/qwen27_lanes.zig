@@ -73,6 +73,9 @@ pub const Metal = struct {
     fills: std.AutoHashMapUnmanaged(*lanes.Stream, slots.Fill) = .empty, // prompt passes the lane host runs by chunks
     image_fill: ?*const lanes.Stream = null, // the pass whose images the vision rows hold, until it closes
     promote_due: bool = false, // slot 0 freed: a stream moves in at the next backend call (slots.promoteDue)
+    standing: @import("qwen27_resume.zig").Standing = .{}, // what slot 0 stands at once its stream left (#1197)
+    rewind: ?mtl.Buffer = null, // slot 0's DeltaNet states and taps at its last pass's history end
+    slot_resume: bool = true, // TF_QWEN27_SLOT_RESUME: a later prompt resumes where slot 0 stands (0: off)
 
     pub fn init(gpa: std.mem.Allocator, runner: *q.decode_round.Runner, draft: ?*Draft) !*Metal {
         if (runner.slots == 0 or runner.slots > max_streams or runner.model.frame.capacity < batch_rows) return error.TargetBinding;
@@ -85,7 +88,7 @@ pub const Metal = struct {
         errdefer kept.deinit();
         const b = try gpa.create(Metal);
         errdefer gpa.destroy(b);
-        b.* = .{ .gpa = gpa, .runner = runner, .draft = draft, .ops = ops, .picks = picks, .kept = kept, .draft_slots = draftSlots() };
+        b.* = .{ .gpa = gpa, .runner = runner, .draft = draft, .ops = ops, .picks = picks, .kept = kept, .draft_slots = draftSlots(), .slot_resume = slots.slotResumeEnv() };
         errdefer b.freeContexts();
         if (draft) |d| {
             const g = d.model.ring();
@@ -106,6 +109,8 @@ pub const Metal = struct {
 
     pub fn deinit(b: *Metal) void {
         q.residency.setBack(b, null);
+        b.standing.deinit(b.gpa);
+        if (b.rewind) |x| x.deinit();
         b.dropRound();
         b.dropTree();
         b.freeContexts();

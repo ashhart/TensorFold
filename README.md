@@ -338,6 +338,11 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 `--learn` keeps shared prompt prefixes, such as a system prompt and its tools, on disk, so new conversations resume
 them after a restart or an upgrade that computes the same bits. It covers GLM-5.3-Flash, Nemotron, and Flash Next on
 one Mac; Qwen3.8-27B, Qwen3.5-2B, LFM2.5-24B-A2B, GLM-5.3 (EXLR8) and a CUDA server refuse it at startup.
+Qwen3.8-27B on Metal also resumes a follow-up turn from the state its last reply left in the server's first slot,
+when the prompt cache holds nothing as far: the turn reads only its new tokens, even on a Mac whose cache cannot keep
+a long conversation. Where the cache cannot keep a whole context, the server also keeps that slot's DeltaNet states
+at each prompt's history end, so a turn whose template drops the last reply's reasoning resumes there. Replies are
+the same tokens as a fresh prompt pass; `TF_QWEN27_SLOT_RESUME=0` turns both off.
 
 Sampling defaults come from the checkpoint's `generation_config.json`, then serve flags and request fields override them.
 `--context 0` is family-specific; use a positive limit for GLM and inspect the capacity reported at startup.
