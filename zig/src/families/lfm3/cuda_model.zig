@@ -15,6 +15,8 @@ pub const round_rows = 128;
 /// Layers of each mixer kind in the admitted schedule.
 pub const conv_layers = count(.conv);
 pub const full_layers = count(.full_attention);
+/// The layers whose keys and values live in pages (liquid's kept-state walk).
+pub const paged_layers = full_layers;
 pub const sliding_layers = count(.sliding_attention);
 /// Elements a KV row holds (4 heads of 128) and a page holds over every full layer's keys and values.
 pub const kv_width = c.kv_heads * c.head_dim;
@@ -91,6 +93,14 @@ pub const Model = struct {
 
     /// Bytes a stream's fixed part takes: its conv states and sliding rings.
     pub const fixed_bytes = (slot_elems + ring_elems) * 2;
+
+    /// A slot's regions outside its pages (liquid's walk): conv states, then each sliding layer's K and V rings.
+    pub fn fixed(m: *const Model, slot: usize, i: usize) ?[2]u64 {
+        const ring_bytes = ring * kv_width * 2;
+        if (i == 0) return .{ m.states + slot * slot_elems * 2, slot_elems * 2 };
+        if (i > 2 * sliding_layers) return null;
+        return .{ m.ringOf((i - 1) / 2, (i - 1) % 2 == 1) + slot * ring_bytes, ring_bytes };
+    }
 
     /// Bytes one stream's caches take at `context` positions: its pages, conv states and rings.
     pub fn streamBytes(context: usize) usize {

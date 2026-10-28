@@ -2,7 +2,7 @@
 const std = @import("std");
 
 pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module) *std.Build.Module {
-    return b.createModule(.{ .root_source_file = b.path("zig/src/families/lfm2_moe/cuda_family.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core }, .{ .name = "lanes", .module = lanes } } });
+    return b.createModule(.{ .root_source_file = b.path("zig/src/families/lfm2_moe/cuda_family.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core }, .{ .name = "lanes", .module = lanes }, .{ .name = "liquid_cuda", .module = @import("liquid_cuda.zig").module(b, target, optimize, cuda, core, lanes) } } });
 }
 
 pub fn host(b: *std.Build, m: *std.Build.Module, all: *std.Build.Step) void {
