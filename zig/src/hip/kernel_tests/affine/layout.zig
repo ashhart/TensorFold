@@ -72,25 +72,32 @@ fn compare(t: *Rig, rng: *data.Rng, kind: Kind, bits: c_int) !usize {
     defer gpa.free(hx);
     var x = try Buffer.fromHost(t.base, hx);
     defer x.free();
-    const bytes = most_rows * n * 4;
+    // a routed round sends each row to both experts, so its output holds two pairs a row
+    const bytes = @as(usize, if (kind == .routed) 2 else 1) * most_rows * n * 4;
     var outs: [2]Buffer = .{ try Buffer.alloc(t.base, bytes), undefined };
     defer outs[0].free();
     outs[1] = try Buffer.alloc(t.base, bytes);
     defer outs[1].free();
-    var members: [most_rows]c_int = undefined;
-    for (&members, 0..) |*mb, i| mb.* = @intCast(i);
-    var mem = try Buffer.fromHost(t.base, @as([]const c_int, &members));
-    defer mem.free();
     const words_bytes = n * k_dim * @as(usize, @intCast(bits)) / 32 * 4;
     const table_bytes = n * (k_dim / group) * 2;
 
     var diff: usize = 0;
     for (rounds) |m| {
-        // two experts split the round's rows, the first holding the most
-        const first: c_int = @intCast((m + 1) / 2);
-        const plan = [_]c_int{ 0, 0, first, 1, first, @as(c_int, @intCast(m)) - first };
+        // the launch reaches the interleaved grid only past one row block
+        const block_rows = affine.stream_rows[affine.stream_rows.len - 1];
+        try base.expect(m > block_rows, "stream layout: {d} rows fit one row block", .{m});
+        // top-2 routing: every row goes to both experts, pair 2r to the first and 2r + 1 to the second
+        const rows: c_int = @intCast(m);
+        const plan = [_]c_int{ 0, 0, rows, 1, rows, rows };
+        var members: [2 * most_rows]c_int = undefined;
+        for (0..m) |i| {
+            members[i] = @intCast(2 * i);
+            members[m + i] = @intCast(2 * i + 1);
+        }
         var items = try Buffer.fromHost(t.base, @as([]const c_int, &plan));
         defer items.free();
+        var mem = try Buffer.fromHost(t.base, @as([]const c_int, members[0 .. 2 * m]));
+        defer mem.free();
         for (outs, [_]*const Kernels{ t.kernels, &reference }) |out, kern| {
             try out.fill8(0xA5, null);
             var arg: affine.Arg = .{
@@ -107,10 +114,7 @@ fn compare(t: *Rig, rng: *data.Rng, kind: Kind, bits: c_int) !usize {
                 .group = group,
                 .fp16 = @intFromBool(t.fp16),
             };
-            if (kind == .routed) {
-                arg.m = first;
-                arg.route = .{ .items = items.ptr, .members = mem.ptr, .x_div = 1 };
-            }
+            if (kind == .routed) arg.route = .{ .items = items.ptr, .members = mem.ptr, .x_div = 2 };
             // three sides of unequal widths over one x, each writing its own stretch of the output
             const sides = [_]affine.Side{
                 .{ .words = tables.words.ptr, .scale = tables.scale.ptr, .bias = tables.bias.ptr, .n = 512, .out = out.ptr },
