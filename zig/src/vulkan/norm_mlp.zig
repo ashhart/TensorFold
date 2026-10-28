@@ -18,9 +18,13 @@ const View = tensor.View;
 /// norm and swiglu with -DASH_QWEN35 (together) for the Ash8c Metal oracle
 /// semantics; default is the copied MLX bit-parity form. The host API is
 /// identical either way; the variant is fixed at build time, not a runtime option.
+/// add_preserve_bf16 is binary_vec with -DPRESERVE_F32 (OpExecutionMode
+/// DenormPreserve 32); init runs it only where the device declares
+/// shaderDenormPreserveFloat32, and add_bf16 everywhere else.
 pub const Shaders = struct {
     norm_bf16: []align(4) const u8,
     add_bf16: []align(4) const u8,
+    add_preserve_bf16: []align(4) const u8,
     swiglu_bf16: []align(4) const u8,
 };
 
@@ -66,7 +70,7 @@ pub const NormMlp = struct {
         errdefer m.dummy.deinit();
         m.norm_bf16 = try dispatch.Pipeline.init(dev, shaders.norm_bf16, .{ .bindings = 4, .push_bytes = norm_push_bytes, .writes = 1 << 3 });
         errdefer m.norm_bf16.deinit();
-        m.add_bf16 = try dispatch.Pipeline.init(dev, shaders.add_bf16, .{ .bindings = 3, .push_bytes = add_push_bytes, .writes = 1 << 2 });
+        m.add_bf16 = try dispatch.Pipeline.init(dev, if (dev.v12.shaderDenormPreserveFloat32 != 0) shaders.add_preserve_bf16 else shaders.add_bf16, .{ .bindings = 3, .push_bytes = add_push_bytes, .writes = 1 << 2 });
         errdefer m.add_bf16.deinit();
         m.swiglu_bf16 = try dispatch.Pipeline.init(dev, shaders.swiglu_bf16, .{ .bindings = 5, .push_bytes = swiglu_push_bytes, .writes = 1 << 2 });
         return m;
