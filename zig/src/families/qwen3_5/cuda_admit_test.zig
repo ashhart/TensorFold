@@ -7,6 +7,7 @@ const engine_mod = @import("cuda_engine.zig");
 const E = engine_mod.Engine;
 const D = cuda.paging_test_device.Device;
 const t = std.testing;
+const env = @import("sys").env;
 
 const page = 256;
 const capacity = 3 * 4096;
@@ -48,11 +49,8 @@ fn admitted(comptime Lanes: type, parallel: u32, share: usize) !usize {
 pub fn admits(comptime Lanes: type) !void {
     for ([_]u32{ 2, 8 }) |parallel| {
         try t.expectEqual(@as(usize, parallel), try admitted(Lanes, parallel, 4 * parallel)); // TF_QWEN_KV_SHARE
-        _ = setenv("TF_QWEN_KV_PAGES_ALL", "1", 1);
-        defer _ = unsetenv("TF_QWEN_KV_PAGES_ALL");
+        _ = env.setenv("TF_QWEN_KV_PAGES_ALL", "1", 1);
+        defer _ = env.unsetenv("TF_QWEN_KV_PAGES_ALL");
         try t.expectEqual(@as(usize, parallel), try admitted(Lanes, parallel, 0)); // the checks
     }
 }
-
-extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-extern "c" fn unsetenv(name: [*:0]const u8) c_int;
