@@ -107,8 +107,9 @@ pub const Ple = struct {
     /// The per-layer gate, gelu(gate) x the per-layer input as its epilogue.
     gate: mtl.Pipeline,
 
-    pub fn init(a: std.mem.Allocator, device: mtl.Device, geo: cfg.Geometry) !Ple {
-        const text = try std.fmt.allocPrint(a,
+    /// ple.metal with the geometry's constants (the contract compiles the same text).
+    pub fn source(a: std.mem.Allocator, geo: cfg.Geometry) ![]u8 {
+        return std.fmt.allocPrint(a,
             \\#define D {d}
             \\#define P {d}
             \\#define L {d}
@@ -117,6 +118,13 @@ pub const Ple = struct {
             \\#define GELU_C1 0.044715f
             \\{s}
         , .{ geo.hidden, geo.layer_input, geo.layers, geo.layer_input, ple_source });
+    }
+
+    /// dense.metal: the bf16 per-layer linears and the gate with its gelu epilogue.
+    pub const dense_text = dense_source;
+
+    pub fn init(a: std.mem.Allocator, device: mtl.Device, geo: cfg.Geometry) !Ple {
+        const text = try source(a, geo);
         defer a.free(text);
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
