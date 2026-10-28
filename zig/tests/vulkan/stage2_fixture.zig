@@ -35,6 +35,18 @@ fn classOfBits(bits: u16) c.Class {
     return c.classOf(c.fromBf16(bits));
 }
 
+/// Human name for the value class of raw bf16 bits: sign, then zero/subnormal/normal/inf/nan.
+pub fn classify(bits: u16) []const u8 {
+    const neg = bits & 0x8000 != 0;
+    const e = (bits >> 7) & 0xff;
+    const m = bits & 0x7f;
+    return switch (e) {
+        0xff => if (m == 0) (if (neg) "-inf" else "+inf") else (if (neg) "-nan" else "+nan"),
+        0 => if (m == 0) (if (neg) "-zero" else "+zero") else (if (neg) "-subnormal" else "+subnormal"),
+        else => if (neg) "-normal" else "+normal",
+    };
+}
+
 /// The worst output: |got - want| over its bound (nonfinite counts as infinitely far).
 pub const Report = struct { worst: f64 = 0, row: usize = 0, col: usize = 0 };
 
@@ -155,16 +167,25 @@ pub const Add = struct {
         f.a.free(f.want);
     }
 
-    /// got: the whole out shell read back; guards keep their poison, data bits equal want exactly.
-    pub fn check(f: Add, got: []const u16) !void {
+    /// The first mismatch under the exact check acceptance (class-vs-bit), or null when the
+    /// whole window matches. Length/guard failures stay errors: the caller names them.
+    pub const Mismatch = struct { kind: error{ NonFiniteMismatch, BitMismatch }, index: usize, a: u16, b: u16, want: u16, got: u16 };
+
+    pub fn firstMismatch(f: Add, got: []const u16) !?Mismatch {
         if (got.len != f.out.len) return error.LengthMismatch;
         const at = f.case.at.out;
         try guardIntact(got, at, f.case.elems);
         for (f.want, 0..) |w, i| {
             const g = got[at + i];
-            if (classOfBits(g) != classOfBits(w)) return error.NonFiniteMismatch;
-            if (std.math.isFinite(c.fromBf16(w)) and g != w) return error.BitMismatch;
+            if (classOfBits(g) != classOfBits(w)) return .{ .kind = error.NonFiniteMismatch, .index = i, .a = f.a_bits[f.case.at.a + i], .b = f.b_bits[f.case.at.b + i], .want = w, .got = g };
+            if (std.math.isFinite(c.fromBf16(w)) and g != w) return .{ .kind = error.BitMismatch, .index = i, .a = f.a_bits[f.case.at.a + i], .b = f.b_bits[f.case.at.b + i], .want = w, .got = g };
         }
+        return null;
+    }
+
+    /// got: the whole out shell read back; guards keep their poison, data bits equal want exactly.
+    pub fn check(f: Add, got: []const u16) !void {
+        if (try f.firstMismatch(got)) |m| return m.kind;
     }
 };
 
@@ -462,6 +483,61 @@ test "rms references are finite and the zero row wants exact zeros" {
             for (f.want[zero_at..]) |w| try testing.expectEqual(@as(f64, 0), w);
         }
     }
+}
+
+test "classify names the class of raw bf16 bits with the sign visible" {
+    try testing.expectEqualStrings("+zero", classify(0x0000));
+    try testing.expectEqualStrings("-zero", classify(0x8000));
+    try testing.expectEqualStrings("+subnormal", classify(0x0001));
+    try testing.expectEqualStrings("-subnormal", classify(0x807f));
+    try testing.expectEqualStrings("+normal", classify(0x0080));
+    try testing.expectEqualStrings("-normal", classify(0xbf80));
+    try testing.expectEqualStrings("+inf", classify(0x7f80));
+    try testing.expectEqualStrings("-inf", classify(0xff80));
+    try testing.expectEqualStrings("+nan", classify(0x7fc0));
+    try testing.expectEqualStrings("-nan", classify(0xffc1));
+}
+
+test "add firstMismatch reports the first bad element with both inputs and want/got words" {
+    const f = try Add.init(testing.allocator, add_cases[2], 0x5717);
+    defer f.deinit();
+    const bits = try testing.allocator.dupe(u16, f.out);
+    defer testing.allocator.free(bits);
+    @memcpy(bits[f.case.at.out..][0..f.want.len], f.want);
+    try testing.expectEqual(@as(?Add.Mismatch, null), try f.firstMismatch(bits));
+    // Two corruptions at finite-want elements: the helper must report only the FIRST, zero-based.
+    bits[f.case.at.out + 10] = 0x0000;
+    bits[f.case.at.out + 11] = 0x0000;
+    const m = (try f.firstMismatch(bits)).?;
+    try testing.expectEqual(error.BitMismatch, m.kind);
+    try testing.expectEqual(@as(usize, 10), m.index);
+    try testing.expectEqual(f.a_bits[f.case.at.a + 10], m.a);
+    try testing.expectEqual(f.b_bits[f.case.at.b + 10], m.b);
+    try testing.expectEqual(f.want[10], m.want);
+    try testing.expectEqual(@as(u16, 0x0000), m.got);
+    try testing.expectError(error.BitMismatch, f.check(bits));
+    // A class break at a nonfinite-want element: NonFiniteMismatch, still first index.
+    @memcpy(bits[f.case.at.out..][0..f.want.len], f.want);
+    const inf_at: usize = blk: {
+        for (f.want, 0..) |w, i| if (classOfBits(w) == .pos_inf) break :blk i;
+        unreachable;
+    };
+    bits[f.case.at.out + inf_at] = 0x3f80; // +inf wanted, +1 got: class break
+    const nf = (try f.firstMismatch(bits)).?;
+    try testing.expectEqual(error.NonFiniteMismatch, nf.kind);
+    try testing.expectEqual(inf_at, nf.index);
+    try testing.expectError(error.NonFiniteMismatch, f.check(bits));
+}
+
+test "add firstMismatch keeps the named length and guard failures" {
+    const f = try Add.init(testing.allocator, add_cases[2], 0x5718);
+    defer f.deinit();
+    try testing.expectError(error.LengthMismatch, f.firstMismatch(f.out[0 .. f.out.len - 1]));
+    const bits = try testing.allocator.dupe(u16, f.out);
+    defer testing.allocator.free(bits);
+    @memcpy(bits[f.case.at.out..][0..f.want.len], f.want);
+    bits[0] = 0x1234; // guard poison clobbered before the data window
+    try testing.expectError(error.GuardClobbered, f.firstMismatch(bits));
 }
 
 test "the checkers reject a deliberately wrong finite output, not only accept good ones" {
