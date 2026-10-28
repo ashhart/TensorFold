@@ -59,13 +59,16 @@ pub fn variantIndex(halves: u32, codebook: Codebook, warps: u32) ?usize {
     return null;
 }
 
+/// From this many 128-column blocks a shape plans one K split, so a view that wide keeps the whole matrix's bits.
+pub const wide_blocks = 64;
+
 /// What one shape launches, from the shape alone so a row's bits never depend on the row count (linear.py plan).
 pub fn plan(k: usize, n: usize, blocks: usize, min_tiles: usize) struct { sk: u32, wk: u32 } {
     const kt = k / 16;
     const nb = n / 128;
     var sk: usize = 1;
-    var wk: usize = if (nb >= 64) 8 else 4;
-    if (nb < 64) {
+    var wk: usize = if (nb >= wide_blocks) 8 else 4;
+    if (nb < wide_blocks) {
         while (nb * sk < blocks and sk < 64) sk *= 2;
     }
     while ((wk > 4 or sk > 1) and (kt % (sk * wk) != 0 or kt / (sk * wk) < min_tiles)) {
