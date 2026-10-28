@@ -137,7 +137,7 @@ pub const Dense = struct {
             e.setBuffer(p.pl.buf, p.pl.off, 4);
             e.setValue([2]i32{ @intCast(2 * p.shape.n), @intCast(4 * p.shape.n) }, 5);
         }
-        e.dispatchGroups(.{ .width = (p.shape.n / 4 + 1) / 2 }, .{ .width = 64 });
+        if (p.gate) e.dispatchGroups(.{ .width = p.shape.n / 4 }, .{ .width = 32 * kernels.gate_ksplit }) else e.dispatchGroups(.{ .width = (p.shape.n / 4 + 1) / 2 }, .{ .width = 64 });
         try p.rig.finish(pass);
     }
 
@@ -439,13 +439,13 @@ pub fn limits(a: std.mem.Allocator, device: mtl.Device, only: ?[]const u8) !usiz
     defer a.free(text);
     const list = [_]struct { name: []const u8, function: []const u8, source: []const u8, threads: u32 }{
         .{ .name = dense_name, .function = "gemma_dense4", .source = kernels.Ple.dense_text, .threads = 64 },
-        .{ .name = gate_name, .function = "gemma_dense4_gate", .source = kernels.Ple.dense_text, .threads = 64 },
+        .{ .name = gate_name, .function = "gemma_dense4_gate", .source = kernels.Ple.dense_text, .threads = 32 * kernels.gate_ksplit },
         .{ .name = embed_name, .function = "gemma_ple_embed", .source = text, .threads = 256 },
         .{ .name = combine_name, .function = "gemma_ple_combine", .source = text, .threads = P },
     };
     for (list) |v| {
         if (only) |s| if (std.mem.indexOf(u8, v.name, s) == null) continue;
-        problems += try @import("metal_limits.zig").onThisGpu(a, device, .{ .decl = .{ .name = v.name, .threads = v.threads, .tg_memory = if (std.mem.eql(u8, v.function, "gemma_ple_combine")) @as(u32, P / 32 * 4) else 0, .offline = false }, .function = v.function, .here = v.source, .pre_m5 = "" }, false);
+        problems += try @import("metal_limits.zig").onThisGpu(a, device, .{ .decl = .{ .name = v.name, .threads = v.threads, .tg_memory = if (std.mem.eql(u8, v.function, "gemma_ple_combine")) @as(u32, P / 32 * 4) else if (std.mem.eql(u8, v.function, "gemma_dense4_gate")) @as(u32, kernels.gate_ksplit * 8 * 4 * 4) else 0, .offline = false }, .function = v.function, .here = v.source, .pre_m5 = "" }, false);
     }
     return problems;
 }

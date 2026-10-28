@@ -257,7 +257,7 @@ pub fn pleTail(m: *Model, e: mtl.ComputeEncoder, s: anytype, i: usize, cur: usiz
         e.setValue([3]i32{ @intCast(rows), @intCast(gate.n), @intCast(gate.k) }, 3);
         bind(e, &.{sp.pli}, 4);
         e.setValue([2]i32{ @intCast(i * geo.layer_input), @intCast(geo.layers * geo.layer_input) }, 5);
-        e.dispatchGroups(.{ .width = (gate.n / 4 + 1) / 2 }, .{ .width = 64 });
+        e.dispatchGroups(.{ .width = gate.n / 4 }, .{ .width = 32 * kernels.gate_ksplit });
         denseBf16(e, pk, sp.mid, l.ple_projection.?, s.y, rows);
         tail(m, e, s, s.h[1 - cur], s.y, l.ple_norm.?, l.scalar, next, cur, rows, i);
     }
