@@ -305,6 +305,8 @@ pub const Sessions = struct {
     pub fn snapshot(s: *Sessions) !*Snap {
         try s.active();
         const r = s.f.runner;
+        var activity: @import("round_progress.zig").Progress.Scope = if (r.progress) |progress| progress.begin(.snapshot) else .{ .owner = null };
+        defer activity.end();
         try r.stream.synchronize();
         const p = try s.gpa.create(Snap);
         errdefer s.gpa.destroy(p);
