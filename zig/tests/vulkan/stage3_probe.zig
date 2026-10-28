@@ -138,11 +138,11 @@ fn ropeGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *
     defer f.deinit();
     var q = try upload16(dev, cmds, staging, f.q_bits, timeout);
     defer q.deinit();
-    // out initialized with the bf16 cast of the reference BEFORE any dispatch.
-    var want_bits = try a.alloc(u16, f.want.len);
-    defer a.free(want_bits);
-    for (f.want, 0..) |w, i| want_bits[i] = cx.toBf16(@floatCast(w));
-    var out = try upload16(dev, cmds, staging, want_bits, timeout);
+    // Poison every output word so missing writes cannot inherit a reference.
+    const out_shell = try a.alloc(u16, f.want.len + fx.tail);
+    defer a.free(out_shell);
+    @memset(out_shell, fx.poison16);
+    var out = try upload16(dev, cmds, staging, out_shell, timeout);
     defer out.deinit();
     const out_view = try vk.tensor.View.init(&out, .bf16, 0, f.want.len);
     const q_view = try vk.tensor.View.init(&q, .bf16, 0, f.want.len);
@@ -150,11 +150,24 @@ fn ropeGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *
     const rows: u64 = case.rows;
     var first: ?[]u16 = null;
     defer if (first) |x| a.free(x);
-    const bits = try a.alloc(u16, f.want.len);
-    defer a.free(bits);
+    // readback covers data + tail
+    const full_bits = try a.alloc(u16, f.want.len + fx.tail);
+    defer a.free(full_bits);
+    const bits = full_bits[0..f.want.len];
     for (0..repeats) |rep| {
+        // re-upload the all-poison shell before every dispatch: the kernel
+        // must write every output word itself — a no-op or partially-writing
+        // kernel leaves poison (NaN) behind and fails the finite-output check.
+        try vk.orExit(vk.upload(cmds, out, 0, staging, std.mem.sliceAsBytes(out_shell), timeout));
         try vk.orExit(attn.ropeQueries(cmds, out_view, q_view, rows, timeout));
-        try fetch(cmds, staging, out, std.mem.sliceAsBytes(bits), timeout);
+        try fetch(cmds, staging, out, std.mem.sliceAsBytes(full_bits), timeout);
+        // poison tail must survive untouched
+        for (full_bits[f.want.len..]) |g_elem| {
+            if (g_elem != fx.poison16) {
+                std.debug.print("FAIL rope case=\"{s}\": output tail overwritten at element {d}\n", .{ case.name, f.want.len + (std.mem.indexOf(u16, full_bits[f.want.len..], &[_]u16{g_elem}) orelse 0) });
+                return false;
+            }
+        }
         if (first) |x| {
             if (std.mem.indexOfDiff(u16, x, bits)) |at| {
                 std.debug.print("FAIL rope case=\"{s}\": repeat {d} differs at element {d}\n", .{ case.name, rep, at });
@@ -305,33 +318,43 @@ fn attendGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds:
         return false;
     };
 
-    // Causality without a budget: poison every non-visible key three ways and
-    // require bit-identical outputs.
-    var alt_keys = try a.dupe(u16, keys_back);
+    // Causality WITHOUT a budget — strong per-row form. For EVERY row r and
+    // EVERY poison variant, upload a FRESH key cache in which exactly that
+    // row's non-visible keys (keys >= prefix+r+1) are poisoned, run attend
+    // for ONLY that row (rows=1, prefix=prefix+r) on the row's q/out slices,
+    // and require bit-identical output to the baseline's row-r slice. A
+    // kernel reading one key past its row's bound flips this immediately.
+    const alt_keys = try a.alloc(u16, @intCast(cache_elems));
     defer a.free(alt_keys);
+    const y_row_bits = try a.alloc(u16, @intCast(qrow_elems));
+    defer a.free(y_row_bits);
     const variants = [_]u16{ fx.poison16, finite_poison, 0x0000 };
     const vnames = [_][]const u8{ "nan", "large-finite", "zero" };
     for (variants, vnames) |fill, vname| {
         for (0..@intCast(rows)) |r| {
-            const visible: u64 = ac.prefix + @as(u64, @intCast(r)) + 1;
+            @memcpy(alt_keys, keys_back);
+            const visible = fx.visibleFrom(ac, @intCast(r));
             for (0..@intCast(fx.kv_heads)) |kh| {
                 for (visible..cc.capacity) |j| {
                     const base = (@as(usize, @intCast(kh)) * @as(usize, @intCast(cc.capacity)) + j) * @as(usize, @intCast(fx.head_dim));
                     @memset(alt_keys[base..][0..@intCast(fx.head_dim)], fill);
                 }
             }
-        }
-        // also poison the non-visible SEGMENT v/knorm inputs is unnecessary:
-        // they were consumed into the cache already.
-        var alt_buf = try upload16(dev, cmds, staging, alt_keys, timeout);
-        defer alt_buf.deinit();
-        const alt_view = try vk.tensor.View.init(&alt_buf, .bf16, 0, cache_elems);
-        try vk.orExit(vk.upload(cmds, ybuf, 0, staging, std.mem.sliceAsBytes(y_init), timeout));
-        try vk.orExit(attn.attend(cmds, y_view, rotated_view, alt_view, values_view, ac.prefix, rows, cc.capacity, timeout));
-        try fetch(cmds, staging, ybuf, std.mem.sliceAsBytes(ybits), timeout);
-        if (std.mem.indexOfDiff(u16, first.?, ybits)) |at| {
-            std.debug.print("FAIL sdpa causality: {s} future keys changed output at element {d}\n", .{ vname, at });
-            return false;
+            var alt_buf = try upload16(dev, cmds, staging, alt_keys, timeout);
+            defer alt_buf.deinit();
+            const alt_view = try vk.tensor.View.init(&alt_buf, .bf16, 0, cache_elems);
+            // row-slice views: q row r of `rotated`, output row r of `ybuf`
+            const row_byte_offset = r * qrow_elems * 2;
+            const q_row_view = try vk.tensor.View.init(&rotated, .bf16, row_byte_offset, qrow_elems);
+            const y_row_view = try vk.tensor.View.init(&ybuf, .bf16, row_byte_offset, qrow_elems);
+            try vk.orExit(vk.upload(cmds, ybuf, 0, staging, std.mem.sliceAsBytes(y_init), timeout));
+            try vk.orExit(attn.attend(cmds, y_row_view, q_row_view, alt_view, values_view, ac.prefix + @as(u64, @intCast(r)), 1, cc.capacity, timeout));
+            try vk.orExit(vk.download(cmds, ybuf, row_byte_offset, staging, std.mem.sliceAsBytes(y_row_bits), timeout));
+            const baseline_row = first.?[r * @as(usize, @intCast(qrow_elems)) ..][0..@intCast(qrow_elems)];
+            if (std.mem.indexOfDiff(u16, baseline_row, y_row_bits)) |at| {
+                std.debug.print("FAIL sdpa causality: {s} future keys changed row {d} output at element {d}\n", .{ vname, r, at });
+                return false;
+            }
         }
     }
     if (!try plantRefuse(g, first.?, ac.name, "sdpa")) return false;

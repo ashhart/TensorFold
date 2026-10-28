@@ -203,6 +203,16 @@ vec2 gdn_gates(uint head) {
     // bf16); the widen is exact.
 #endif /* GDN_COMPOSED_ORDER */
     float x = bf16_load(bf16_store(a_in + dt));
+#ifdef ASH_QWEN35
+    // Ash8c Metal gdn_pre softplus: DIRECT log (not the corrected log1p
+    // ratio form), rounded to bf16, regardless of the A_log dtype —
+    //   sp = bf16(max(x,0) + log(1 + exp(-|x|)))
+    //   g  = exp(-exp(A_log_f32) * sp)   (f32, like Metal)
+    // beta keeps the bf16 sigmoid above. This replaces the MLX C++-fallback
+    // reference choice (bit 9 keeping sp f32) for this oracle.
+    float sp = bf16_load(bf16_store(max(x, 0.0f) + log(1.0f + exp(-abs(x)))));
+    g = exp(-(exp(a_log) * sp));
+#else /* ASH_QWEN35 */
 #ifndef GDN_COMPOSED_ORDER
     // softplus = logaddexp(0, x): the eager chain lowers nn.softplus to
     // LogAddExp, computed here with the elementwise kernel's exact
@@ -239,6 +249,7 @@ vec2 gdn_gates(uint head) {
       g = exp(-(exp(a_log) * sp));
     }
 #endif /* GDN_COMPOSED_ORDER */
+#endif /* ASH_QWEN35 */
   } else {
     g = bf16_load(g_buf.v[params.shape[0] + head]);
     beta = bf16_load(b_buf.v[params.aux_offset + head]);
