@@ -109,8 +109,11 @@ pub const Model = struct {
         errdefer m.checkpoint.deinit();
         const files = try shards.shardFiles(gpa, io, dir);
         defer shards.freeShardFiles(gpa, files);
-        for (files) |path| try m.checkpoint.addFileSelected(m.device, path, "", "language_model.");
-        m.weights = try weights.load(gpa, m.device, &m.checkpoint, m.config);
+        // the E-series on a chip without tensor units keeps one copy of its projections and tied table: the packed one
+        const lean = m.config.geo.layer_input != 0 and !m.device.tensorUnits();
+        for (files) |path| try m.checkpoint.addFileSplit(m.device, path, "", "language_model.", if (lean) weights.later else null);
+        m.weights = try weights.load(gpa, m.device, &m.checkpoint, m.config, lean);
+        if (lean) m.checkpoint.closeFiles();
         errdefer m.weights.deinit(gpa);
         m.kernels = try kernels.Kernels.init(gpa, m.device, m.config.geo, m.weights.embed_bits);
         errdefer m.kernels.deinit();

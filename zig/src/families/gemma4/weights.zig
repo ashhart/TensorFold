@@ -307,6 +307,33 @@ fn storedK(r: Src, prefix: []const u8, member: []const u8, width: cfg.widths.Wid
     return k;
 }
 
+/// A tensor's dtype and shape, kept in the checkpoint or still in its file (a lean load, see `later`).
+const Meta = struct {
+    dtype: ckpt.DType,
+    shape: @FieldType(ckpt.Tensor, "shape"),
+    rank: usize,
+    bytes: usize,
+
+    fn count(m: Meta) usize {
+        return m.bytes / m.dtype.size();
+    }
+};
+
+fn meta(c: *const ckpt.Checkpoint, name: []const u8) !Meta {
+    if (c.deferred.get(name)) |d| return .{ .dtype = d.dtype, .shape = d.shape, .rank = d.rank, .bytes = d.bytes };
+    const t = try c.get(name);
+    return .{ .dtype = t.dtype, .shape = t.shape, .rank = t.rank, .bytes = t.bytes };
+}
+
+/// Lean loads (the E-series without tensor units): projections and the tied table stay in their files until `pack`.
+pub fn later(name: []const u8, _: usize) bool {
+    if (std.mem.indexOf(u8, name, "_proj.") != null and (std.mem.indexOf(u8, name, ".self_attn.") != null or std.mem.indexOf(u8, name, ".mlp.") != null)) return true;
+    for ([_][]const u8{ "embed_tokens.weight", "embed_tokens.scales", "embed_tokens.biases" }) |t| {
+        if (std.mem.endsWith(u8, name, t) and std.mem.indexOf(u8, name, plan.prefix) != null) return true;
+    }
+    return false;
+}
+
 fn ref(c: *const ckpt.Checkpoint, name: []const u8) !Ref {
     const t = try c.get(name);
     return .{ .buf = t.buffer, .off = t.offset };
@@ -431,12 +458,12 @@ fn dense(c: *const ckpt.Checkpoint, name: []const u8, n: usize, k: usize) !Dense
     return .{ .w = .{ .buf = t.buffer, .off = t.offset }, .n = n, .k = k };
 }
 
-/// plan.check's view of a loaded checkpoint: each tensor asked for at its dtype and shape; the skipped ones are not read.
+/// plan.check's view of a loaded checkpoint: each tensor asked for at its dtype and shape; skipped ones are not read.
 const Checker = struct {
     c: *const ckpt.Checkpoint,
 
     pub fn expect(k: Checker, name: []const u8, dtype: ckpt.DType, shape: []const usize) !void {
-        const t = try k.c.get(name);
+        const t = try meta(k.c, name);
         if (t.dtype != dtype or t.rank != shape.len or !std.mem.eql(usize, t.shape[0..t.rank], shape)) {
             std.log.warn("gemma4: {s} is not the {s} tensor of shape {any} the plan stores", .{ name, @tagName(dtype), shape });
             return error.UnexpectedTensor;
@@ -446,7 +473,8 @@ const Checker = struct {
     pub fn skip(_: Checker, _: []const u8) !void {}
 };
 
-pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoint, config: cfg.Config) !Weights {
+/// `lean`: the checkpoint was read with `later`, so no copy of the projections or the tied table stays in it.
+pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoint, config: cfg.Config, lean: bool) !Weights {
     const geo = config.geo;
     const ws = &config.widths;
     try plan.check(config, Checker{ .c = c });
@@ -500,9 +528,17 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoin
     }
     w.head = try pack(gpa, device, c, &w.owned, geo, plan.prefix, &.{"embed_tokens"}, ws.embed, false);
     w.embed_bits = ws.embed.bits;
-    w.embed_w = try ref(c, plan.prefix ++ "embed_tokens.weight");
-    w.embed_s = try ref(c, plan.prefix ++ "embed_tokens.scales");
-    w.embed_b = try ref(c, plan.prefix ++ "embed_tokens.biases");
+    // lean: the embedding gather reads the head's words, scales and biases as the checkpoint stores them
+    if (lean) {
+        const raw = w.head.raw orelse return error.BadGemmaWeight;
+        w.embed_w = .{ .buf = raw.w };
+        w.embed_s = .{ .buf = raw.scales };
+        w.embed_b = .{ .buf = raw.biases };
+    } else {
+        w.embed_w = try ref(c, plan.prefix ++ "embed_tokens.weight");
+        w.embed_s = try ref(c, plan.prefix ++ "embed_tokens.scales");
+        w.embed_b = try ref(c, plan.prefix ++ "embed_tokens.biases");
+    }
     w.final_norm = try ref(c, plan.prefix ++ "norm.weight");
     if (pm.layer_table) |table| {
         const mp = pm.model_project.?;
