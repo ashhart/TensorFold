@@ -261,6 +261,13 @@ pub const Prefetch = struct {
         }
     }
 
+    /// `name`'s read, if any, out of the list and freed (engine thread): its state is forgotten.
+    pub fn forget(f: *Prefetch, name: Name) void {
+        f.lock();
+        defer f.unlock();
+        f.drop(f.reads.orderedRemove(f.find(name) orelse return));
+    }
+
     /// A read out of the list freed now, or by the I/O thread when it is reading it (the lock held).
     fn drop(f: *Prefetch, rd: *Read) void {
         if (!rd.used) f.counts.cancelled += 1;

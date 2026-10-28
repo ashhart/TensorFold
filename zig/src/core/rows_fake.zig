@@ -15,6 +15,9 @@ const ring_row = 4;
 /// A kept state: its position and image.
 pub const Kept = struct { at: u32, img: []u8 };
 
+/// The error every copy fails with once `after` of them have succeeded.
+pub const Fault = struct { after: usize, err: anyerror };
+
 /// The family: the request in its pass (prompt, spans, starts), its position and running sum.
 pub const Fake = struct {
     gpa: Allocator,
@@ -29,6 +32,7 @@ pub const Fake = struct {
     blanks: usize = 0,
     slots: ?usize = null, // a family whose states each take one of so many slots (Nemotron CUDA's): past them, none
     gathers: ?usize = null, // copies out of kept states that succeed before every later one fails (null: all succeed)
+    scatters: ?Fault = null, // copies into new states that succeed before every later one fails (null: all succeed)
 
     pub fn snapshots(f: *Fake) pc.Snapshots {
         return .{ .ptr = f, .vtable = &.{ .bytes = bytesFn, .save = saveFn, .restore = restoreFn, .drop = dropFn, .rows = &.{ .parts = partsFn, .gather = gatherFn, .blank = blankFn, .scatter = scatterFn } } };
@@ -151,7 +155,10 @@ pub const Fake = struct {
         f.blanks += 1;
         return k;
     }
-    fn scatterFn(_: *anyopaque, saved: pc.Saved, ranges: []const image.Range, in: []const u8) anyerror!void {
+    fn scatterFn(ptr: *anyopaque, saved: pc.Saved, ranges: []const image.Range, in: []const u8) anyerror!void {
+        if (of(ptr).scatters) |*n| if (n.after == 0) return n.err else {
+            n.after -= 1;
+        };
         const k: *Kept = @ptrCast(@alignCast(saved));
         var o: usize = 0;
         for (ranges) |r| {
