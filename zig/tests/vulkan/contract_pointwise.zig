@@ -11,13 +11,16 @@
 //!    reference is never bent to the flush;
 //!  - the attention output gate: s = bf16(1/(1+exp(-gate))) rounded to bf16 once, then
 //!    out = bf16(f32(ctx) * f32(s)) — ops 4, mids 1, exactly attention_gate.comp's math;
-//!  - the gated RMSNorm: out = bf16(silu_f32(z) * widen(bf16(x * rsqrt(mean(x^2)+eps) * w)))
-//!    — the rows family bound (the reduction sums only squares, so its relative error stays
-//!    under gamma(depth) in any order) plus one mid rounding, the normed store.
+//!  - the gated RMSNorm: the production per-head geometry (gdn.gatedNorm: tokens x 16 head
+//!    rows of 128, the [128] gain shared by every head), out = bf16(silu_f32(z) *
+//!    widen(bf16(x * rsqrt(mean(x_head^2)+eps) * w_col))) — the rows family bound re-derived
+//!    for the 128-wide reduction (the reduction sums only squares, so its relative error
+//!    stays under gamma(depth) in any order) plus one mid rounding, the normed store.
 const std = @import("std");
 const contract = @import("contract");
 const stage2 = @import("stage2_fixture.zig");
 const shaders2 = @import("stage2_shaders");
+const vk = @import("vulkan");
 
 const c = contract.spec;
 pub const Report = stage2.Report;
@@ -186,59 +189,77 @@ pub const Gate = struct {
 };
 
 // ---------------------------------------------------------------------------
-// Gated RMSNorm: the rows family bound plus one mid rounding
+// Gated RMSNorm: the production per-head geometry — tokens x 16 head rows of
+// 128, the [128] gain shared by every head — plus one mid rounding
 // ---------------------------------------------------------------------------
 
-/// depth = 20 f32 reduction roundings, the same conservative figure the stage 2 RMSNorm
-/// fixture states for the identical 256-thread strided-partial + tree structure at width
-/// 2048. ops = 10: the mean divide, inversesqrt (<= 2 ulp), norm*weight, value*norm_weight,
-/// the sigmoid's exp/1+/divide, the silu multiply and the final product. mids = 12: ONE
-/// mid bf16 rounding of the normed value (outUnit 2^-8) whose error is relative to |normed|,
-/// i.e. |want|/|silu(z)| — the fixture's gate floor |z| >= 0.25 keeps |silu(z)| >= 0.109,
+/// depth = 12 f32 reduction roundings, honestly recomputed for the 128-wide per-head row
+/// the production kernel runs (the old 20 was the 2048-wide row's figure): 256 threads
+/// over 128 columns gives each thread at most one square (1 rounding), the shared-memory
+/// tree folds 256 slots in 8 levels (8 roundings; the zero slots add exactly), and the
+/// mean divide is one more — 10, with 2 of margin. ops = 10: the mean divide,
+/// inversesqrt (<= 2 ulp), norm*weight, value*norm_weight, the sigmoid's exp/1+/divide,
+/// the silu multiply and the final product. mids = 12: ONE mid bf16 rounding of the
+/// normed value (outUnit 2^-8) whose error is relative to |normed|, i.e.
+/// |want|/|silu(z)| — the fixture's gate floor |z| >= 0.25 keeps |silu(z)| >= 0.109,
 /// so the mid costs at most 2^-8/0.109 ~ 3.6e-3 of |want| and mids = 12 covers it with
-/// margin. Fixed bring-up acceptance, NOT a Vulkan-spec proof.
-const gated_depth = 20;
+/// margin. gamma(12, 2^-24) ~ 7.2e-6 against the old gamma(20) ~ 1.2e-5: the bound is
+/// TIGHTER than the 2048 model's, not looser. Fixed bring-up acceptance, NOT a
+/// Vulkan-spec proof.
+const gated_depth = 12;
 const gated_spec: c.Spec = .{
-    .name = "vulkan fast_norm_gated bf16 gated rms rows (silu(z)*bf16(x*(inv*w)))",
+    .name = "vulkan fast_norm_gated bf16 per-head gated rms (silu(z)*bf16(x*(inv*w)), head rows of 128)",
     .accum = .f32,
     .depth = gatedDepth,
     .ops = 10,
     .mids = 12,
     .out = .bf16,
-    .served = &[_]c.Shape{ .{ .rows = 1, .n = 1, .k = gated_width }, .{ .rows = 2, .n = 1, .k = gated_width } },
+    .served = &[_]c.Shape{ .{ .rows = 1, .n = 1, .k = gated_head_dim }, .{ .rows = 2, .n = 1, .k = gated_head_dim } },
 };
 fn gatedDepth(_: c.Shape) usize {
     return gated_depth;
 }
 
-/// The production wrapper's pinned width (gdn.Model.linear_dim, 2048).
-pub const gated_width: usize = 2048;
+/// The production geometry (gdn.Model): 16 head rows of 128 per token — 2048 bf16
+/// elements a token, head-major, exactly the recurrence's y layout — and the [128]
+/// gain indexed by the column within the head and shared by every head. This is
+/// gdn.gatedNorm/gatedNormPlan's own shape, not a 2048-wide global row.
+pub const gated_heads: usize = 16;
+pub const gated_head_dim: usize = 128;
+pub const gated_width: usize = gated_heads * gated_head_dim;
 pub const gated_eps: f32 = 1e-6;
 
 pub const GatedOffsets = struct { x: usize = 0, weight: usize = 0, gate: usize = 0, out: usize = 0 };
 
 pub const GatedCase = struct {
     name: []const u8,
-    rows: usize,
+    tokens: usize,
     fill: stage2.RmsFill = .flat,
-    /// The last row is all zeros: mean square 0, norm = rsqrt(eps), outputs exactly zero.
-    zero_row: bool = false,
-    /// Row 0 plants z controls (nan/+inf/-inf/±0/tame magnitudes); row 1 poisons x[0] with
-    /// +inf (its sum goes infinite, norm 0: signed-zero outputs, nan at x[0]'s inf*0) and a
-    /// nan z at column 1; row 2 poisons x[0] with nan (the sum goes nan: a whole nan row).
+    /// The last token's 16 head rows are all zeros: mean square 0, norm = rsqrt(eps),
+    /// outputs exactly signed zero.
+    zero_token: bool = false,
+    /// Token 0 plants z controls; token 1 poisons x[head 0][0] with +inf (that head row's
+    /// sum goes infinite, norm 0: signed-zero outputs across the head row, nan at x[0]'s
+    /// inf*0) and a nan z at column 1; token 2 poisons x[head 0][0] with nan (that head
+    /// row's sum goes nan: a whole nan head row). The other heads stay random: the norm
+    /// is per head, so the poison must not leak across heads.
     controls: bool = false,
     at: GatedOffsets = .{},
 };
 
+/// The tokens the engine serves: one decode row and a whole prefill chunk
+/// (qwen3_5 vulkan forward: decode rows = 1, prefill chunks of max_prefill_rows = 32),
+/// plus the controls on three tokens.
 pub const gated_cases = [_]GatedCase{
-    .{ .name = "1x2048", .rows = 1, .at = .{ .x = 128, .weight = 0, .gate = 256, .out = 384 } },
-    .{ .name = "2x2048 dynamic zero row", .rows = 2, .fill = .dynamic, .zero_row = true, .at = .{ .x = 128, .weight = 0, .gate = 256, .out = 384 } },
-    .{ .name = "controls 3x2048", .rows = 3, .controls = true, .at = .{ .x = 128, .weight = 0, .gate = 256, .out = 384 } },
+    .{ .name = "1x16x128", .tokens = 1, .at = .{ .x = 128, .weight = 0, .gate = 256, .out = 384 } },
+    .{ .name = "32x16x128 dynamic zero token", .tokens = 32, .fill = .dynamic, .zero_token = true, .at = .{ .x = 128, .weight = 0, .gate = 256, .out = 384 } },
+    .{ .name = "controls 3x16x128", .tokens = 3, .controls = true, .at = .{ .x = 128, .weight = 0, .gate = 256, .out = 384 } },
 };
 
-/// The z controls planted at row 0, columns 0..: |silu| >= 0.109 for every finite tame value
-/// (the mids budget's stated floor), the signed zeros come from z = ±0, the nonfinite
-/// classes from z = nan/±inf. z = -inf gives silu = -inf*0 = nan in f32 exactly as in f64.
+/// The z controls planted at token 0, head 0, columns 0..: |silu| >= 0.109 for every
+/// finite tame value (the mids budget's stated floor), the signed zeros come from
+/// z = ±0, the nonfinite classes from z = nan/±inf. z = -inf gives silu = -inf*0 = nan
+/// in f32 exactly as in f64.
 const gated_z_controls = [_]u16{ 0x7fc0, 0x7f80, 0xff80, 0x0000, 0x8000, 0x3f80, 0xbf80, 0x3e80, 0xbe80, 0x4000, 0x4100, 0xc000 };
 
 /// |z| in [0.25, 8] on one side of zero (resampled): the mids budget's stated gate floor.
@@ -263,15 +284,16 @@ pub const GatedNorm = struct {
     weight: []u16,
     z: []u16,
     out: []u16,
-    /// silu64(z) * widen(bf16(x*(n*w))) per element, f64, mid rounding modeled; nonfinite
-    /// where the planted controls make it so. want == 0 carries the product's exact sign.
+    /// silu64(z) * widen(bf16(x*(n*w))) per element, f64, mid rounding modeled; n is the
+    /// 128-wide per-head row's norm and w the shared [128] gain at the element's column.
+    /// nonfinite where the planted controls make it so; want == 0 carries the sign.
     want: []f64,
 
     pub fn init(a: std.mem.Allocator, case: GatedCase, seed: u64) !GatedNorm {
-        const elems = case.rows * gated_width;
+        const elems = case.tokens * gated_width;
         const x = try poisonedShell16(a, case.at.x, elems);
         errdefer a.free(x);
-        const weight = try poisonedShell16(a, case.at.weight, gated_width);
+        const weight = try poisonedShell16(a, case.at.weight, gated_head_dim);
         errdefer a.free(weight);
         const z = try poisonedShell16(a, case.at.gate, elems);
         errdefer a.free(z);
@@ -281,28 +303,33 @@ pub const GatedNorm = struct {
         errdefer a.free(want);
         var prng = std.Random.DefaultPrng.init(seed);
         const rng = prng.random();
-        for (0..gated_width) |i| weight[case.at.weight + i] = sampleBits(rng, 1);
-        for (0..case.rows) |row| {
-            const base = case.at.x + row * gated_width;
-            const zbase = case.at.gate + row * gated_width;
-            var sum_sq: f64 = 0;
-            for (0..gated_width) |i| {
-                var bits: u16 = if (case.zero_row and row + 1 == case.rows) 0x0000 else switch (case.fill) {
-                    .flat => sampleBits(rng, 1),
-                    .dynamic => sampleBits(rng, if (i % 4 == 0) 0x1p10 else if (i % 4 == 2) 0x1p-10 else 1),
-                };
-                if (case.controls and row == 1 and i == 0) bits = 0x7f80; // +inf: the row's sum goes infinite, norm 0
-                if (case.controls and row == 2 and i == 0) bits = 0x7fc0; // nan: the whole row's sums go nan
-                x[base + i] = bits;
-                sum_sq += @as(f64, c.fromBf16(bits)) * @as(f64, c.fromBf16(bits));
-            }
-            const n: f64 = 1 / @sqrt(sum_sq / @as(f64, @floatFromInt(gated_width)) + gated_eps);
-            for (0..gated_width) |i| {
-                const zb: u16 = if (case.controls and row == 0 and i < gated_z_controls.len) gated_z_controls[i] else if (case.controls and row == 1 and i == 1) 0x7fc0 else gatedGateBits(rng);
-                z[zbase + i] = zb;
-                // The shader's association: value * (norm * weight), one mid bf16 rounding.
-                const normed = c.toBf16(@floatCast(c.fromBf16(x[base + i]) * (n * c.fromBf16(weight[case.at.weight + i]))));
-                want[row * gated_width + i] = silu64(c.fromBf16(zb)) * c.fromBf16(normed);
+        for (0..gated_head_dim) |i| weight[case.at.weight + i] = sampleBits(rng, 1);
+        for (0..case.tokens) |token| {
+            const base = case.at.x + token * gated_width;
+            const zbase = case.at.gate + token * gated_width;
+            for (0..gated_heads) |head| {
+                const head_base = base + head * gated_head_dim;
+                const zhead = zbase + head * gated_head_dim;
+                var sum_sq: f64 = 0;
+                for (0..gated_head_dim) |i| {
+                    var bits: u16 = if (case.zero_token and token + 1 == case.tokens) 0x0000 else switch (case.fill) {
+                        .flat => sampleBits(rng, 1),
+                        .dynamic => sampleBits(rng, if (i % 4 == 0) 0x1p10 else if (i % 4 == 2) 0x1p-10 else 1),
+                    };
+                    if (case.controls and token == 1 and head == 0 and i == 0) bits = 0x7f80; // +inf: head 0's sum goes infinite, norm 0
+                    if (case.controls and token == 2 and head == 0 and i == 0) bits = 0x7fc0; // nan: head 0's sums go nan
+                    x[head_base + i] = bits;
+                    sum_sq += @as(f64, c.fromBf16(bits)) * @as(f64, c.fromBf16(bits));
+                }
+                const n: f64 = 1 / @sqrt(sum_sq / @as(f64, @floatFromInt(gated_head_dim)) + gated_eps);
+                for (0..gated_head_dim) |i| {
+                    const zb: u16 = if (case.controls and token == 0 and head == 0 and i < gated_z_controls.len) gated_z_controls[i] else if (case.controls and token == 1 and head == 0 and i == 1) 0x7fc0 else gatedGateBits(rng);
+                    z[zhead + i] = zb;
+                    // The shader's association: value * (norm * weight), one mid bf16
+                    // rounding; the weight rides the column within the head.
+                    const normed = c.toBf16(@floatCast(c.fromBf16(x[head_base + i]) * (n * c.fromBf16(weight[case.at.weight + i]))));
+                    want[token * gated_width + head * gated_head_dim + i] = silu64(c.fromBf16(zb)) * c.fromBf16(normed);
+                }
             }
         }
         return .{ .a = a, .case = case, .x = x, .weight = weight, .z = z, .out = out, .want = want };
@@ -323,9 +350,9 @@ pub const GatedNorm = struct {
     pub fn check(f: GatedNorm, got: []const u16) !Report {
         if (got.len != f.out.len) return error.LengthMismatch;
         const at = f.case.at.out;
-        try guardIntact(got, at, f.case.rows * gated_width, poison16);
+        try guardIntact(got, at, f.case.tokens * gated_width, poison16);
         var r: Report = .{};
-        const shape: c.Shape = .{ .rows = f.case.rows, .n = 1, .k = gated_width };
+        const shape: c.Shape = .{ .rows = f.case.tokens * gated_heads, .n = 1, .k = gated_head_dim };
         for (f.want, 0..) |w, i| {
             const g = got[at + i];
             const gf = c.fromBf16(g);
@@ -478,27 +505,29 @@ test "gate checker refuses wrong finite outputs, wrong-signed zeros and class br
     try testing.expectError(error.NonFiniteMismatch, f.check(bits));
 }
 
-test "gated references are finite off the controls, and the zero row wants exact signed zeros" {
+test "gated references are finite off the controls, and the zero token wants exact signed zeros" {
     for (gated_cases) |case| {
         const f = try GatedNorm.init(testing.allocator, case, 0x58ab);
         defer f.deinit();
         if (case.controls) continue;
         for (f.want) |w| try testing.expect(std.math.isFinite(w));
-        if (case.zero_row) {
-            const zero_at = (case.rows - 1) * gated_width;
+        if (case.zero_token) {
+            const zero_at = (case.tokens - 1) * gated_width;
             for (f.want[zero_at..]) |w| try testing.expectEqual(@as(f64, 0), @abs(w));
         }
     }
-    // The controls: nan and both infinities among the wants, signed zeros from z = ±0.
+    // The controls: token 0's z controls give nan and both infinities among the wants and
+    // signed zeros from z = ±0; token 1's poisoned x[head 0][0] sends only head 0's sum
+    // infinite, so head 0's row reads signed zeros except x[0]'s inf*0 nan and the nan z
+    // at column 1, while the other heads stay ordinary finite; token 2's nan input
+    // poisons only head 0's row — the norm is per head, the poison must not leak.
     const g = try GatedNorm.init(testing.allocator, gated_cases[2], 0x58ac);
     defer g.deinit();
     try testing.expect(std.math.isNan(g.want[0])); // z = nan
     try testing.expect(std.math.isInf(g.want[1])); // z = +inf, silu +inf
     try testing.expect(std.math.isNan(g.want[2])); // z = -inf: silu = -inf*0 = nan
     try testing.expectEqual(@as(f64, 0), @abs(g.want[3])); // z = +0
-    // Row 1: the infinite sum gives norm 0, so signed zeros everywhere except the two
-    // nonfinite products: x[0]'s inf*0 and the nan z at column 1.
-    for (0..gated_width) |i| {
+    for (0..gated_head_dim) |i| { // token 1, head 0
         const w = g.want[gated_width + i];
         if (i == 0 or i == 1) {
             try testing.expect(std.math.isNan(w));
@@ -506,8 +535,12 @@ test "gated references are finite off the controls, and the zero row wants exact
             try testing.expectEqual(@as(f64, 0), @abs(w));
         }
     }
-    // Row 2: a nan input poisons the row's sums — every output is nan.
-    for (g.want[2 * gated_width ..]) |w| try testing.expect(std.math.isNan(w));
+    for (gated_width + gated_head_dim .. 2 * gated_width) |i| // token 1, heads 1..15
+        try testing.expect(std.math.isFinite(g.want[i]));
+    for (2 * gated_width .. 2 * gated_width + gated_head_dim) |i| // token 2, head 0: all nan
+        try testing.expect(std.math.isNan(g.want[i]));
+    for (2 * gated_width + gated_head_dim .. 3 * gated_width) |i| // token 2, heads 1..15
+        try testing.expect(std.math.isFinite(g.want[i]));
 }
 
 test "gated checker refuses wrong finite outputs, sign-flipped zeros and class breaks" {
@@ -524,7 +557,7 @@ test "gated checker refuses wrong finite outputs, sign-flipped zeros and class b
         bits[f.case.at.out + gated_width / 2] = c.toBf16(@floatCast(f.want[gated_width / 2] * 2));
         try testing.expectError(error.OutOfBound, f.check(bits));
     }
-    // Zero row: one bf16 subnormal unit where an exact zero belongs is refused.
+    // Zero token: one bf16 subnormal unit where an exact zero belongs is refused.
     {
         const f = try GatedNorm.init(testing.allocator, gated_cases[1], 0x58ae);
         defer f.deinit();
@@ -532,7 +565,7 @@ test "gated checker refuses wrong finite outputs, sign-flipped zeros and class b
         defer testing.allocator.free(bits);
         for (f.want, 0..) |w, i| bits[f.case.at.out + i] = c.toBf16(@floatCast(w));
         _ = try f.check(bits);
-        bits[f.case.at.out + (f.case.rows - 1) * gated_width] = 0x0001;
+        bits[f.case.at.out + (f.case.tokens - 1) * gated_width] = 0x0001;
         try testing.expectError(error.OutOfBound, f.check(bits));
     }
     // Controls: a sign-flipped zero and a class break are both refused.
@@ -552,6 +585,33 @@ test "gated checker refuses wrong finite outputs, sign-flipped zeros and class b
         for (f.want, 0..) |w, i| bits[f.case.at.out + i] = c.toBf16(@floatCast(w));
         bits[f.case.at.out] = 0x3f80; // nan wanted, 1 got
         try testing.expectError(error.NonFiniteMismatch, f.check(bits));
+    }
+}
+
+test "the production plan accepts every gated case, and the old 2048-gain shape is refused" {
+    for (gated_cases) |case| {
+        const elems = case.tokens * gated_width;
+        const plan = try vk.gdn.gatedNormPlan(elems, elems, elems, gated_head_dim, case.tokens, gated_eps);
+        try testing.expectEqual(case.tokens * gated_heads, plan.rows); // one head row a workgroup
+    }
+    // The shape the old runner passed (a [2048] weight) is exactly what the plan refuses:
+    // the production gain is the [128] head row.
+    try testing.expectError(error.Invalid, vk.gdn.gatedNormPlan(gated_width, gated_width, gated_width, gated_width, 1, gated_eps));
+    // A wrong element count and a bad eps are refused too.
+    try testing.expectError(error.Invalid, vk.gdn.gatedNormPlan(gated_width + 2, gated_width, gated_width, gated_head_dim, 1, gated_eps));
+    try testing.expectError(error.Invalid, vk.gdn.gatedNormPlan(gated_width, gated_width, gated_width, gated_head_dim, 1, 0));
+}
+
+test "gated fixture element counts are the production geometry, guards outside" {
+    for (gated_cases) |case| {
+        const f = try GatedNorm.init(testing.allocator, case, 0x58b6);
+        defer f.deinit();
+        const elems = case.tokens * gated_width;
+        try testing.expectEqual(case.at.x + elems + tail, f.x.len);
+        try testing.expectEqual(case.at.gate + elems + tail, f.z.len);
+        try testing.expectEqual(case.at.out + elems + tail, f.out.len);
+        try testing.expectEqual(case.at.weight + gated_head_dim + tail, f.weight.len);
+        try testing.expectEqual(elems, f.want.len);
     }
 }
 
@@ -596,11 +656,11 @@ test "guards sit poisoned outside every data window" {
     const f = try GatedNorm.init(testing.allocator, gated_cases[1], 0x58b3);
     defer f.deinit();
     for (f.x, 0..) |g, i| {
-        if (i >= f.case.at.x and i < f.case.at.x + f.case.rows * gated_width) continue;
+        if (i >= f.case.at.x and i < f.case.at.x + f.case.tokens * gated_width) continue;
         try testing.expectEqual(poison16, g);
     }
     for (f.z, 0..) |g, i| {
-        if (i >= f.case.at.gate and i < f.case.at.gate + f.case.rows * gated_width) continue;
+        if (i >= f.case.at.gate and i < f.case.at.gate + f.case.tokens * gated_width) continue;
         try testing.expectEqual(poison16, g);
     }
     const p = try PreserveAdd.init(testing.allocator, preserve_cases[0], 0x58b4);
