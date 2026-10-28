@@ -255,6 +255,6 @@ test "the pinned checkpoint's wide native window clamps by default, and an expli
 test "the core's production bounds helpers gate prompt and capacity" {
     try std.testing.expect(fam.backend.validPrompt(&.{1}));
     try std.testing.expect(!fam.backend.validPrompt(&.{}));
-    try std.testing.expect(fam.backend.fitsCapacity(4, 8, 11));
-    try std.testing.expect(!fam.backend.fitsCapacity(4, 9, 11));
+    try fam.engine.planFor(11, 0, 4, 8); // four prompt rows and seven decodes
+    try std.testing.expectError(error.ContextTooLong, fam.engine.planFor(11, 0, 4, 9)); // one past
 }
