@@ -106,3 +106,34 @@ test "server_info escapes its label values" {
     try load_metrics.render(&out.writer, snapshot(false), .{ .model = "a\\b\"c\nd", .backend = "", .version = "" });
     try std.testing.expect(has(out.written(), "server_info{model=\"a\\\\b\\\"c\\nd\",backend=\"\",version=\"\",instance=\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"} 1\n"));
 }
+
+fn loadBody(arena: std.mem.Allocator, s: ledger.Snapshot) ![]const u8 {
+    const json = @import("json");
+    const body = try json.stringify(arena, try load_metrics.object(arena, s, 1793200001.5, "glm"), .{});
+    return std.mem.replaceOwned(u8, arena, body, " ", ""); // no value here holds a space: keys match either layout
+}
+
+test "the /v1/load object carries every group a host fills, and only server values while parked" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var s = snapshot(false);
+    s.http[@backingInt(ledger.RouteGroup.chat_completions)] = 3;
+    s.requests = .{ .running = 3, .waiting = 2, .waiting_prompt_tokens = 9000, .filling_left = 512, .started = 40, .requeued = 1, .yields = 2 };
+    s.work = .{ .prefill_compute = 1000, .prefill_cache = 400, .decode = 300, .prefill_busy_ns = 1_500_000 };
+    s.capacity = .{ .mode = .paged, .lanes_free = 1 };
+    s.pool = .{ .capacity = 4096, .available = 1024, .reclaimable = 512, .promised = 256, .run = false };
+    const live = try loadBody(a, s);
+    for ([_][]const u8{
+        "\"instance\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"", "\"parked\":false",               "\"chat_completions\":3",
+        "\"running\":3",                                     "\"waiting_prompt_tokens\":9000", "\"filling_prompt_tokens_left\":512",
+        "\"mode\":\"paged\"",                                "\"available_tokens\":1024",      "\"run_available\":false",
+        "\"prefill_compute\":1000",                          "\"busy_us\":{\"prefill\":1500}",
+    }) |key| {
+        if (!has(live, key)) std.debug.print("missing {s} in {s}\n", .{ key, live });
+        try std.testing.expect(has(live, key));
+    }
+    const parked = try loadBody(a, snapshot(true));
+    try std.testing.expect(has(parked, "\"parked\":true") and has(parked, "\"http_active\""));
+    for ([_][]const u8{ "running", "tokens", "capacity", "busy_us", "fill_unknown" }) |key| try std.testing.expect(!has(parked, key));
+}
