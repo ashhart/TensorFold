@@ -1,4 +1,4 @@
-//! MiniMax-M3.1-Flash's shape from the converted config.json: dense or routed MLP, sparse attention per layer.
+//! MiniMax-M3.1-Flash's shape from the release's config.json (text_config): routed or dense MLP, sparse attention.
 const std = @import("std");
 
 pub const max_layers = 128;
@@ -104,7 +104,11 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Config {
     var doc = try std.json.parseFromSlice(std.json.Value, gpa, bytes, .{});
     defer doc.deinit();
     if (doc.value != .object) return error.BadMiniMaxConfig;
-    const t = doc.value.object;
+    const root = doc.value.object;
+    try says(root, "model_type", "minimax_m3_vl");
+    const text = try field(root, "text_config");
+    if (text != .object) return error.BadMiniMaxConfig;
+    const t = text.object;
     var c = Config{};
     c.hidden = try int(t, "hidden_size");
     c.layers = try int(t, "num_hidden_layers");
@@ -124,7 +128,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Config {
     c.swiglu_alpha = @floatCast(try number(try field(t, "swiglu_alpha")));
     c.swiglu_limit = @floatCast(try number(try field(t, "swiglu_limit")));
     c.context = try int(t, "max_position_embeddings");
-    if (t.get("image_token_index")) |v| if (v == .integer and v.integer > 0) {
+    if (root.get("image_token_index")) |v| if (v == .integer and v.integer > 0) {
         c.image_token = @intCast(v.integer);
     };
     if (c.layers > max_layers) return error.BadMiniMaxConfig;
@@ -185,14 +189,15 @@ test "minimax_m3 config: the release's shape, three dense layers, every layer sp
     try std.testing.expectEqual(@as(f32, 2.0), c.routed_scale);
 }
 
-test "minimax_m3 config: softmax scores, init blocks, an index-value branch or a dense layer are refused" {
+test "minimax_m3 config: the flat converted form, softmax scores, init blocks, an index-value branch or a dense layer are refused" {
     const fixture = @embedFile("config_fixture.json");
     const Case = struct { from: []const u8, to: []const u8, err: anyerror };
     const cases = [_]Case{
+        .{ .from = "\"model_type\": \"minimax_m3_vl\"", .to = "\"model_type\": \"minimax_m3\"", .err = error.UnsupportedMiniMaxConfig },
         .{ .from = "\"scoring_func\": \"sigmoid\"", .to = "\"scoring_func\": \"softmax\"", .err = error.UnsupportedMiniMaxConfig },
         .{ .from = "\"sparse_init_block\": 0", .to = "\"sparse_init_block\": 1", .err = error.UnsupportedMiniMaxAttention },
-        .{ .from = "\"sparse_disable_index_value\": [\n   1,", .to = "\"sparse_disable_index_value\": [\n   0,", .err = error.UnsupportedMiniMaxAttention },
-        .{ .from = "\"sparse_attention_freq\": [\n   1,", .to = "\"sparse_attention_freq\": [\n   0,", .err = error.UnsupportedMiniMaxAttention },
+        .{ .from = "\"sparse_disable_index_value\": [\n    1,", .to = "\"sparse_disable_index_value\": [\n    0,", .err = error.UnsupportedMiniMaxAttention },
+        .{ .from = "\"sparse_attention_freq\": [\n    1,", .to = "\"sparse_attention_freq\": [\n    0,", .err = error.UnsupportedMiniMaxAttention },
         .{ .from = "\"head_dim\": 128", .to = "\"head_dim\": 96", .err = error.UnsupportedMiniMaxAttention },
         .{ .from = "\"num_experts_per_tok\": 4", .to = "\"num_experts_per_tok\": 9", .err = error.UnsupportedMiniMaxExperts },
     };
