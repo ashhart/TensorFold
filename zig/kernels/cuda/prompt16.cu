@@ -5,6 +5,7 @@
 #include <cuda_runtime.h>
 
 #include "common/qmm_frag.cuh"
+#include "common/fp_pairs.cuh"
 
 namespace tf_prompt16 {
 
@@ -14,13 +15,7 @@ enum Mode : int { FP4 = 0, FP8 = 1, MXFP8 = 2 };
 
 constexpr int GS = 64;
 
-__device__ __forceinline__ uint32_t fp4pair(uint32_t w, int s) {
-    const uint32_t v = w >> s;
-    const uint32_t t = ((v & 0x00070007u) << 6) | ((v & 0x00080008u) << 12);
-    uint32_t r;
-    asm("fma.rn.bf16x2 %0, %1, %2, %3;\n" : "=r"(r) : "r"(t), "r"(0x7E807E80u), "r"(0x80008000u));
-    return r;
-}
+using tf_common::fp4pair;
 
 __device__ __forceinline__ uint32_t fp8pair(uint32_t w, uint32_t unit) {
     const uint32_t x = (w & 0xFFu) | ((w & 0xFF00u) << 8);
