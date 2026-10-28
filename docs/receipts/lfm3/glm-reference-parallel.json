@@ -153,5 +153,77 @@
     "zig/src/core/contract/affine.zig": "e2f407779c9fa5ce7f6545c1155f241be8e236779537f63a4cbea933d117b665",
     "zig/src/core/contract.zig": "900db88fb68ab9b9efa180c4d32ad3ba83e69e265c4a7917eb908b87b16a2b2b",
     "zig/tests/contract/metal_glm_eh.zig": "975bb66b38d636d93f2e152aa3ecc6ba052421cc943a4b5d064e92303e52a603"
+  },
+  "glm_window_fixture_extension": {
+    "profiled_call_path": "Fixture.reference -> Affine.one; direct call bypassed the separately parallel Affine.reference",
+    "change": "Independent flat logical-output jobs only; unchanged coordinates, q.one, clipped GLU and magnitude order",
+    "serial_reference_retained": true,
+    "entries": 78,
+    "bits": [
+      2,
+      3,
+      4,
+      5,
+      6,
+      8
+    ],
+    "kinds": [
+      "narrow",
+      "wide",
+      "down",
+      "glu"
+    ],
+    "modes": [
+      "oracle",
+      "replacement",
+      "control",
+      "up_oracle where defined"
+    ],
+    "row_counts": [
+      3,
+      4
+    ],
+    "groups": [
+      32,
+      64
+    ],
+    "fills": [
+      "random",
+      "stress",
+      "nonfinite"
+    ],
+    "mutations": [
+      "input",
+      "codes",
+      "scales",
+      "up input/codes",
+      "order duplicate",
+      "consistent expert boundaries"
+    ],
+    "fixture_states": 936,
+    "raw_want_magnitude_pair_checks": 9360,
+    "worker_requests": [
+      1,
+      3,
+      8
+    ],
+    "spawn_modes": [
+      "normal",
+      "partial_failure",
+      "all_failure"
+    ],
+    "fixture_allocator_unused": true,
+    "verification": {
+      "existing_glm_host_tests_passed": 19,
+      "single_threaded_fixture_tests_passed": 1,
+      "final_mutation_filtered_host_tests_passed": 1,
+      "replacement_binary_sha256": "fb93eb182eb46d13ebbc507cc4448d75d9463f5d7f7894d7b8d3b5d3084df991"
+    },
+    "source_sha256": {
+      "zig/tests/contract/glm_rows_fixture.zig": "5bc793d71cd9d0113729a9f389f1ced0e903dc2e7745e785d670c9350dabd207",
+      "zig/glm_rows_contract_host.zig": "f81ab35aa1fabbe777a297ab163a0ed512a905adf4ebcf037fefadfdf99de4b4",
+      "zig/src/core/contract/reference_threads.zig": "395537771d6086fdd9298a68f4cdc2c33a3db59ed146cf0fd419d70f6b8233bc"
+    },
+    "performance": "No timing or whole-suite speedup claimed for this extension; next immutable full run supplies actual completion evidence"
   }
 }
