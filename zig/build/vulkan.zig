@@ -3,13 +3,14 @@
 const std = @import("std");
 
 /// Vulkan's options as given, declared whether or not -Dvulkan=true builds anything with them.
-pub const Options = struct { include: ?[]const u8, glslang: ?[]const u8, stage1_root: ?[]const u8 };
+pub const Options = struct { include: ?[]const u8, glslang: ?[]const u8, stage1_root: ?[]const u8, contract_root: ?[]const u8 };
 
 pub fn options(b: *std.Build) Options {
     return .{
         .include = b.option([]const u8, "vulkan-include", "Directory holding vulkan/vulkan_core.h and vk_video/ (default /usr/include)"),
         .glslang = b.option([]const u8, "glslang", "glslang for the Vulkan shaders (default: glslang on PATH)"),
         .stage1_root = b.option([]const u8, "stage1-test-root", "Root .zig of the stage 1 GPU probe (default zig/tests/vulkan/stage1_probe.zig)"),
+        .contract_root = b.option([]const u8, "contract-root", "Root .zig of the Vulkan kernel-contract runner (default zig/tests/vulkan/contract_main.zig)"),
     };
 }
 
@@ -144,66 +145,6 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     run.addPassthruArgs();
     b.step("vulkan-probe", "Run the Vulkan qmm probe on the chosen GPU (args after --)").dependOn(&run.step);
 
-    const contract_fixture = b.createModule(.{
-        .root_source_file = b.path("zig/tests/vulkan/contract_qmm.zig"),
-        .target = b.graph.host,
-        .optimize = .debug,
-        .imports = &.{
-            .{ .name = "vulkan", .module = module(b, b.graph.host, .debug, o) },
-            .{ .name = "contract", .module = @import("kernel_contract.zig").module(b, b.graph.host, .debug) },
-        },
-    });
-    host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = contract_fixture })).step);
-    const contract_glslang = o.glslang orelse "glslang";
-    const qmm_bf16_cmd = b.addSystemCommand(&.{ contract_glslang, "-V", "--target-env", "vulkan1.2", "-S", "comp", "-DUSE_BF16=1", "-o" });
-    const qmm_bf16 = qmm_bf16_cmd.addOutputFileArg("qmm_bf16.spv");
-    qmm_bf16_cmd.addFileArg(b.path("zig/kernels/vulkan/qmm.comp"));
-    const variants = .{
-        .{ "qmm_fmax", "-DTF_CTL_QMM_FMAX=1" },
-        .{ "atomic_sum", "-DTF_CTL_ATOMIC_SUM=1" },
-        .{ "scribble_sum", "-DTF_CTL_SCRIBBLE=1" },
-        .{ "drop_tail", "-DTF_CTL_DROP_TAIL=1" },
-        .{ "fp16_accum", "-DTF_CTL_FP16=1" },
-        .{ "over_limit", "-DTF_CTL_OVER_LIMIT=1" },
-    };
-    const controls: [6]std.Build.LazyPath = blk: {
-        var out: [6]std.Build.LazyPath = undefined;
-        inline for (variants, 0..) |variant, i| {
-            const command = b.addSystemCommand(&.{ contract_glslang, "-V", "--target-env", "vulkan1.2", "-S", "comp", variant[1], "-o" });
-            out[i] = command.addOutputFileArg(variant[0] ++ ".spv");
-            command.addFileArg(b.path("zig/kernels/vulkan/contract_controls.comp"));
-        }
-        break :blk out;
-    };
-    const contract_files = b.addWriteFiles();
-    _ = contract_files.addCopyFile(qmm_bf16, "qmm_bf16.spv");
-    inline for (variants, 0..) |variant, i| {
-        _ = contract_files.addCopyFile(controls[i], variant[0] ++ ".spv");
-    }
-    const contract_shaders = b.createModule(.{ .root_source_file = contract_files.add("vulkan_contract_shaders.zig",
-        "pub const qmm_bf16 align(4) = @embedFile(\"qmm_bf16.spv\").*;\n" ++
-        "pub const qmm_fmax align(4) = @embedFile(\"qmm_fmax.spv\").*;\n" ++
-        "pub const atomic_sum align(4) = @embedFile(\"atomic_sum.spv\").*;\n" ++
-        "pub const scribble_sum align(4) = @embedFile(\"scribble_sum.spv\").*;\n" ++
-        "pub const drop_tail align(4) = @embedFile(\"drop_tail.spv\").*;\n" ++
-        "pub const fp16_accum align(4) = @embedFile(\"fp16_accum.spv\").*;\n" ++
-        "pub const over_limit align(4) = @embedFile(\"over_limit.spv\").*;\n") });
-    const contract_module = @import("kernel_contract.zig").module(b, target, .debug);
-    const contract_exe = b.addExecutable(.{ .name = "tf-vulkan-kernel-contract", .root_module = b.createModule(.{
-        .root_source_file = b.path("zig/tests/vulkan/contract_main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .imports = &.{
-            .{ .name = "vulkan", .module = vulkan },
-            .{ .name = "vulkan_shaders", .module = contract_shaders },
-            .{ .name = "core", .module = contract_module },
-            .{ .name = "contract", .module = contract_module },
-        },
-    }) });
-    const contract_install = b.addInstallArtifact(contract_exe, .{});
-    b.step("tf-vulkan-kernel-contract", "Build Vulkan QMM contract runner and planted control shaders without running them").dependOn(&contract_install.step);
-    b.step("vulkan-kernel-contract", "Run Vulkan QMM contract gates and planted controls on the selected device").dependOn(&b.addRunArtifact(contract_exe).step);
 
     // Stage 1: the operator variants as SPIR-V assets, and the GPU probe from the fixture owner's root.
     const stage1_files = b.addWriteFiles();
@@ -251,6 +192,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         stage2_build.dependOn(&b.addInstallFile(spv, b.fmt("stage2/{s}.spv", .{v.name})).step);
         _ = stage2_files.addCopyFile(spv, b.fmt("{s}.spv", .{v.name}));
     }
+    const stage2_shaders_mod = b.createModule(.{ .root_source_file = stage2_files.add("stage2_shaders.zig", stage2_shaders_src) });
     const stage2_probe = b.addExecutable(.{ .name = "tf-stage2-gpu", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/vulkan/stage2_probe.zig"),
         .target = target,
@@ -258,7 +200,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .link_libc = true,
         .imports = &.{
             .{ .name = "vulkan", .module = vulkan },
-            .{ .name = "stage2_shaders", .module = b.createModule(.{ .root_source_file = stage2_files.add("stage2_shaders.zig", stage2_shaders_src) }) },
+            .{ .name = "stage2_shaders", .module = stage2_shaders_mod },
             .{ .name = "contract", .module = @import("kernel_contract.zig").module(b, target, .debug) },
         },
     }) });
@@ -286,6 +228,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         stage3_build.dependOn(&b.addInstallFile(spv, b.fmt("stage3/{s}.spv", .{v.name})).step);
         _ = stage3_files.addCopyFile(spv, b.fmt("{s}.spv", .{v.name}));
     }
+    const stage3_shaders_mod = b.createModule(.{ .root_source_file = stage3_files.add("stage3_shaders.zig", stage3_shaders_src) });
     const stage3_probe = b.addExecutable(.{ .name = "tf-stage3-gpu", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/vulkan/stage3_probe.zig"),
         .target = target,
@@ -294,7 +237,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .imports = &.{
             .{ .name = "vulkan", .module = vulkan },
             .{ .name = "stage1_shaders", .module = stage1_shaders_mod },
-            .{ .name = "stage3_shaders", .module = b.createModule(.{ .root_source_file = stage3_files.add("stage3_shaders.zig", stage3_shaders_src) }) },
+            .{ .name = "stage3_shaders", .module = stage3_shaders_mod },
             .{ .name = "contract", .module = @import("kernel_contract.zig").module(b, target, .debug) },
         },
     }) });
@@ -316,6 +259,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         stage4_build.dependOn(&b.addInstallFile(spv, b.fmt("stage4/{s}.spv", .{v.name})).step);
         _ = stage4_files.addCopyFile(spv, b.fmt("{s}.spv", .{v.name}));
     }
+    const stage4_shaders_mod = b.createModule(.{ .root_source_file = stage4_files.add("stage4_shaders.zig", stage4_shaders_src) });
     const stage4_probe = b.addExecutable(.{ .name = "tf-stage4-gpu", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/vulkan/stage4_probe.zig"),
         .target = target,
@@ -323,7 +267,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .link_libc = true,
         .imports = &.{
             .{ .name = "vulkan", .module = vulkan },
-            .{ .name = "stage4_shaders", .module = b.createModule(.{ .root_source_file = stage4_files.add("stage4_shaders.zig", stage4_shaders_src) }) },
+            .{ .name = "stage4_shaders", .module = stage4_shaders_mod },
             .{ .name = "contract", .module = @import("kernel_contract.zig").module(b, target, .debug) },
         },
     }) });
@@ -348,6 +292,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         stage5_build.dependOn(&b.addInstallFile(spv, b.fmt("stage5/{s}.spv", .{v.name})).step);
         _ = stage5_files.addCopyFile(spv, b.fmt("{s}.spv", .{v.name}));
     }
+    const stage5_shaders_mod = b.createModule(.{ .root_source_file = stage5_files.add("stage5_shaders.zig", stage5_shaders_src) });
     const stage5_probe = b.addExecutable(.{ .name = "tf-stage5-gpu", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/vulkan/stage5_probe.zig"),
         .target = target,
@@ -355,7 +300,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .link_libc = true,
         .imports = &.{
             .{ .name = "vulkan", .module = vulkan },
-            .{ .name = "stage5_shaders", .module = b.createModule(.{ .root_source_file = stage5_files.add("stage5_shaders.zig", stage5_shaders_src) }) },
+            .{ .name = "stage5_shaders", .module = stage5_shaders_mod },
             .{ .name = "contract", .module = @import("kernel_contract.zig").module(b, target, .debug) },
         },
     }) });
@@ -363,6 +308,72 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const stage5_probe_run = b.addRunArtifact(stage5_probe);
     stage5_probe_run.addPassthruArgs();
     stage5_run.dependOn(&stage5_probe_run.step);
+
+    const contract_fixture = b.createModule(.{
+        .root_source_file = b.path("zig/tests/vulkan/contract_qmm.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+        .imports = &.{
+            .{ .name = "vulkan", .module = module(b, b.graph.host, .debug, o) },
+            .{ .name = "contract", .module = @import("kernel_contract.zig").module(b, b.graph.host, .debug) },
+        },
+    });
+    host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = contract_fixture })).step);
+    const contract_glslang = o.glslang orelse "glslang";
+    const qmm_bf16_cmd = b.addSystemCommand(&.{ contract_glslang, "-V", "--target-env", "vulkan1.2", "-S", "comp", "-DUSE_BF16=1", "-o" });
+    const qmm_bf16 = qmm_bf16_cmd.addOutputFileArg("qmm_bf16.spv");
+    qmm_bf16_cmd.addFileArg(b.path("zig/kernels/vulkan/qmm.comp"));
+    const variants = .{
+        .{ "qmm_fmax", "-DTF_CTL_QMM_FMAX=1" },
+        .{ "atomic_sum", "-DTF_CTL_ATOMIC_SUM=1" },
+        .{ "scribble_sum", "-DTF_CTL_SCRIBBLE=1" },
+        .{ "drop_tail", "-DTF_CTL_DROP_TAIL=1" },
+        .{ "fp16_accum", "-DTF_CTL_FP16=1" },
+        .{ "over_limit", "-DTF_CTL_OVER_LIMIT=1" },
+    };
+    const controls: [6]std.Build.LazyPath = blk: {
+        var out: [6]std.Build.LazyPath = undefined;
+        inline for (variants, 0..) |variant, i| {
+            const command = b.addSystemCommand(&.{ contract_glslang, "-V", "--target-env", "vulkan1.2", "-S", "comp", variant[1], "-o" });
+            out[i] = command.addOutputFileArg(variant[0] ++ ".spv");
+            command.addFileArg(b.path("zig/kernels/vulkan/contract_controls.comp"));
+        }
+        break :blk out;
+    };
+    const contract_files = b.addWriteFiles();
+    _ = contract_files.addCopyFile(qmm_bf16, "qmm_bf16.spv");
+    inline for (variants, 0..) |variant, i| {
+        _ = contract_files.addCopyFile(controls[i], variant[0] ++ ".spv");
+    }
+    const contract_shaders = b.createModule(.{ .root_source_file = contract_files.add("vulkan_contract_shaders.zig",
+        "pub const qmm_bf16 align(4) = @embedFile(\"qmm_bf16.spv\").*;\n" ++
+        "pub const qmm_fmax align(4) = @embedFile(\"qmm_fmax.spv\").*;\n" ++
+        "pub const atomic_sum align(4) = @embedFile(\"atomic_sum.spv\").*;\n" ++
+        "pub const scribble_sum align(4) = @embedFile(\"scribble_sum.spv\").*;\n" ++
+        "pub const drop_tail align(4) = @embedFile(\"drop_tail.spv\").*;\n" ++
+        "pub const fp16_accum align(4) = @embedFile(\"fp16_accum.spv\").*;\n" ++
+        "pub const over_limit align(4) = @embedFile(\"over_limit.spv\").*;\n") });
+    const contract_module = @import("kernel_contract.zig").module(b, target, .debug);
+    const contract_exe = b.addExecutable(.{ .name = "tf-vulkan-kernel-contract", .root_module = b.createModule(.{
+        .root_source_file = b.path(o.contract_root orelse "zig/tests/vulkan/contract_main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "vulkan", .module = vulkan },
+            .{ .name = "vulkan_shaders", .module = contract_shaders },
+            .{ .name = "stage1_shaders", .module = stage1_shaders_mod },
+            .{ .name = "stage2_shaders", .module = stage2_shaders_mod },
+            .{ .name = "stage3_shaders", .module = stage3_shaders_mod },
+            .{ .name = "stage4_shaders", .module = stage4_shaders_mod },
+            .{ .name = "stage5_shaders", .module = stage5_shaders_mod },
+            .{ .name = "core", .module = contract_module },
+            .{ .name = "contract", .module = contract_module },
+        },
+    }) });
+    const contract_install = b.addInstallArtifact(contract_exe, .{});
+    b.step("tf-vulkan-kernel-contract", "Build Vulkan QMM contract runner and planted control shaders without running them").dependOn(&contract_install.step);
+    b.step("vulkan-kernel-contract", "Run Vulkan QMM contract gates and planted controls on the selected device").dependOn(&b.addRunArtifact(contract_exe).step);
 
     // The qwen3.5 Vulkan family weights/state host admission (auditable in this
     // tree, unlike a child harness): refAllDeclsRecursive over the family
