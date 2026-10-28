@@ -12,6 +12,18 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Qwen3.8 Flash Next on Metal, sampled replies: the checkpoint samples by default (temperature 1.0, top_k 20, top_p 0.95), and a sampled reply now gets the GPU gate, MTP drafts drawn under the reply's own keyed rule (as shared rounds' drafts already were), and a faster draw. For top_k from 1 to 64 the GPU keeps each of 32 slices' top_k, then merges and races the row's top_k in a second pass: about 29 µs where the whole-vocabulary draw took about 700 µs, with the same sums, cuts and tie rule, so it picks the same token at every seed and position. On an M3 Ultra, sampled prose ran 122.5 to 136.0 tok/s, code 180 to 194 and hard prompts 133 to 146, each reply the same tokens as before; greedy replies are unchanged.
 
+- Nemotron 3.5 on Metal: a GPU round prices its draft head's depth from the backend's window-cost table, where it used to choose between all of the head's levels and a fixed 4, and it no longer steps back up to a level that has shown it doesn't land (#1115). Replies are the same tokens. With Nemotron 3.5 Lightning 30B-A3B (MLX 4-bit), decode after 2k to 64k-token prompts is 1.2 to 2.4% faster on an M3 Ultra and within 0.3% of before on an M5 Ultra. Thanks to @jishnuvenugopal.
+
+- Qwen3.8 Flash Next on CUDA with NVFP4 experts: at decode, the routed experts' work goes out in equal waves instead of leaving a short last wave, and when every half unit fits the GPU at once, two warps share a unit (#1351). Each output keeps the same multiply-adds in the same order, so replies are the same tokens, and the expert kernels Nemotron and GLM use compile to the same code as before. On a GB10 with Qwen3.8-Flash-Next FP4, served decode is 0.6% faster at one stream and 0.2% at two. Thanks to @jschmied.
+
+- Qwen3.8-27B on CUDA: prompts on the default path (without `TF_QWEN_KV_PAGES`) take whole-window attention kernels without page-table arguments again, as before #1373, which wins back the prefill that change cost at long prompts (#1458). Replies are the same tokens. On a GB10, prefill is 0.5% faster at 32k tokens and 0.8% at 64k.
+
+- Tests: `kernel-contract-limits` no longer reports Qwen's prompt partials as launched past their bounds on every SM. Two stale 1,024-thread entries sat beside their 128-thread records.
+
+- Release builds: the release path check no longer refuses a clean binary whose address tables happen to hold the bytes `5c 2e 6f 00`, which read as `\.o` (#1533). A path's extension now needs a file name before it; every other rule is unchanged.
+
+- Qwen3.5-2B on Metal: with `--prompt-cache-gib N`, a later request that extends a conversation resumes from its deepest kept prompt state, held in RAM (recurrence, convolution tails, attention K/V and logits), instead of prefilling it again (#505). Without the flag nothing changes: the same tokens and speed as before. On an M5 Ultra, the next turn of a 28.5k-token chat resumed with 28,544 tokens cached, and on an M5 Ultra and an M3 Ultra every resumed reply equalled a fresh one. Thanks to @akol1.
+
 ## 1.1.8
 
 - Qwen3.5 and 3.6 on HIP (Linux): when a checkpoint shard can't be memory-mapped and is read into memory instead (for example on some network or FUSE mounts), releasing an uploaded layer no longer zeroes that copy. Before, it also zeroed neighbouring tensors not yet uploaded: 269 of 690 layer tensors on Qwen3.5-2B, so the model ran on wrong weights or the loader panicked at close. A malformed shard header is now refused by name. Loads that map their shards are byte-identical to before.
