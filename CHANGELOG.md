@@ -26,6 +26,14 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Qwen3.8-27B on Metal requests 2,048 prompt rows on M5 when no other request is decoding, and caps each chunk at 512 beside a decoder (#1478). The larger frame is used only when the configured context, every stream and full prompt scratch fit beside the weights and the existing 8 GiB margin; otherwise M5 also keeps 512 rows. Startup now reserves those scratch allocations. Earlier chips keep the 512-row default. `TF_PROMPT_ROWS` overrides the requested width within the existing frame and attention limits.
 
+- Qwen3.8-27B on CUDA: a prompt runs up to four of its projections in one launch, each keeping the shipped BF16 kernel's own block order, and takes a 2x2-warp tile at the measured large-prompt widths (#1439, for #1398). Outputs are the same bytes. On a GB10 with the MLX 4-bit checkpoint, prefill is 10.8% faster at 2k tokens, 9.7% at 8k and 7.8% at 32k. Thanks to @yguanrong.
+
+- GLM-5.3-Flash on CUDA: at long positions a decode step's DSA select gives each row a 1,024-thread block where it used 128 threads, for up to 48 rows over buckets of 4,096 pools or more, with the same picks in the same order (#1424). On three GB10s at TP=3, decode after a 136k-token prompt ran 1.8% faster; on two GB10s at TP=2 with a 65k window, tokens match main and speed is unchanged. Thanks to @Bizuayeu.
+
+- GLM-5.3-Flash on CUDA with two or more ranks splits a prompt chunk's DSA indexer across the ranks: from position 2,048 on, each rank scores and picks the pools for its share of the chunk's rows, and an all-gather gives every rank every row's picks (#1404). A row's picks come from the same kernels on the same inputs whichever rank computes them, so replies are the same tokens, and decode never splits. `TF_GLM_INDEX_SPLIT` sets the position it starts from, and 0 turns it off. On two GB10s at TP=2, prefill at 128k tokens was 1 to 2% faster, with the same tokens at every length. Thanks to @Bizuayeu.
+
+- With `TENSORFOLD_PREFILL_SHARE` below 1, GLM-5.3-Flash on CUDA ends a long prompt's step on the GPU before it returns when the lane host bills that step to decoding streams (#1352). The step used to return with part of its GPU work still queued, so that tail ran in the decoders' next round and counted against their share. At the default of 1, or with nothing decoding, no step waits and nothing changes; replies are the same tokens. Thanks to @Bizuayeu.
+
 ## 1.1.8
 
 - Qwen3.5 and 3.6 on HIP (Linux): when a checkpoint shard can't be memory-mapped and is read into memory instead (for example on some network or FUSE mounts), releasing an uploaded layer no longer zeroes that copy. Before, it also zeroed neighbouring tensors not yet uploaded: 269 of 690 layer tensors on Qwen3.5-2B, so the model ran on wrong weights or the loader panicked at close. A malformed shard header is now refused by name. Loads that map their shards are byte-identical to before.
