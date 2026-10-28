@@ -319,6 +319,19 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         },
     });
     host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = contract_fixture })).step);
+    // the gdn group's host-checkable proofs: its walker against the stage 4
+    // fixture's, the depth functions' shape honesty and the stress sums' f32
+    // exactness and fp16 margins, without GPU work
+    const contract_gdn_fixture = b.createModule(.{
+        .root_source_file = b.path("zig/tests/vulkan/contract_gdn.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+        .imports = &.{
+            .{ .name = "vulkan", .module = module(b, b.graph.host, .debug, o) },
+            .{ .name = "contract", .module = @import("kernel_contract.zig").module(b, b.graph.host, .debug) },
+        },
+    });
+    host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = contract_gdn_fixture })).step);
     const contract_glslang = o.glslang orelse "glslang";
     const qmm_bf16_cmd = b.addSystemCommand(&.{ contract_glslang, "-V", "--target-env", "vulkan1.2", "-S", "comp", "-DUSE_BF16=1", "-o" });
     const qmm_bf16 = qmm_bf16_cmd.addOutputFileArg("qmm_bf16.spv");
