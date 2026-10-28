@@ -2,6 +2,7 @@
 const std = @import("std");
 const c = @import("contract.zig");
 const rows = @import("rows.zig");
+const reference_threads = @import("reference_threads.zig");
 
 /// The formula a kernel computes: MLX's per-group s*sum(q x) + b*sum(x), or each weight s*q + b first.
 pub const Form = enum { factored, dequantized };
@@ -138,6 +139,24 @@ pub const Affine = struct {
     }
 
     pub fn reference(f: Affine, want: []f64, mag: []f64) !void {
+        f.referenceParallel(want, mag, reference_threads.maximum, .normal);
+    }
+
+    fn referenceParallel(f: Affine, want: []f64, mag: []f64, requested: usize, mode: reference_threads.Mode) void {
+        const jobs_count = reference_threads.count(requested, f.outputs());
+        if (jobs_count == 0) return;
+        var jobs: [reference_threads.maximum]ReferenceJob = undefined;
+        for (jobs[0..jobs_count], 0..) |*job, worker| job.* = .{
+            .f = f,
+            .first = worker * f.outputs() / jobs_count,
+            .end = (worker + 1) * f.outputs() / jobs_count,
+            .want = want,
+            .mag = mag,
+        };
+        reference_threads.run(ReferenceJob, jobs[0..jobs_count], mode);
+    }
+
+    pub fn referenceSerial(f: Affine, want: []f64, mag: []f64) !void {
         for (0..f.shape.rows) |r| for (0..f.shape.n) |j| {
             const o = f.one(r, j);
             want[r * f.shape.n + j] = o[0];
@@ -177,6 +196,22 @@ pub const Affine = struct {
     }
 };
 
+const ReferenceJob = struct {
+    f: Affine,
+    first: usize,
+    end: usize,
+    want: []f64,
+    mag: []f64,
+
+    pub fn run(job: *@This()) void {
+        for (job.first..job.end) |index| {
+            const result = job.f.one(index / job.f.shape.n, index % job.f.shape.n);
+            job.want[index] = result[0];
+            job.mag[index] = result[1];
+        }
+    }
+};
+
 test "the stress weights: exact fp32 sums, every fp16 and bf16 structure far off" {
     const a = std.testing.allocator;
     for ([_]u8{ 2, 4, 8, 4 }, 0..) |bits, i| {
@@ -210,4 +245,80 @@ test "MLX's bit stream: 3-bit codes cross word boundaries" {
     f.words(&w);
     try std.testing.expectEqual(@as(u32, 0b10_001_000) | (0b011 << 9) | (0b100 << 12), w[0] & 0x7fff);
     try std.testing.expectEqual(@as(u32, 2), (w[0] >> 30) | ((w[1] & 1) << 2)); // code 10 = 2 at bits 30-32
+}
+
+fn checkParallel(f: Affine) !void {
+    const a = std.testing.allocator;
+    const n = f.outputs();
+    const values = try a.alloc(f64, 4 * n);
+    defer a.free(values);
+    const want = values[0..n];
+    const mag = values[n .. 2 * n];
+    const got = values[2 * n .. 3 * n];
+    const got_mag = values[3 * n ..];
+    try f.referenceSerial(want, mag);
+    for ([_]usize{ 1, 2, 4, 8 }) |workers| {
+        for ([_]reference_threads.Mode{ .normal, .partial_failure, .all_failure }) |mode| {
+            @memset(got, -517);
+            @memset(got_mag, -519);
+            f.referenceParallel(got, got_mag, workers, mode);
+            try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(want), std.mem.sliceAsBytes(got));
+            try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(mag), std.mem.sliceAsBytes(got_mag));
+        }
+    }
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    var borrowed = f;
+    borrowed.a = failing.allocator();
+    try borrowed.reference(got, got_mag);
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(want), std.mem.sliceAsBytes(got));
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(mag), std.mem.sliceAsBytes(got_mag));
+}
+
+test "affine parallel reference retains all forms bits groups offsets mutation and failure bytes" {
+    const a = std.testing.allocator;
+    for ([_]u8{ 2, 3, 4, 5, 6, 8 }) |bits| for ([_]Form{ .factored, .dequantized }) |form| {
+        for ([_]usize{ 128, 32, 64, 32 }) |group| {
+            var f = try Affine.init(a, .{ .rows = 5, .n = 7, .k = 256 }, bits, group);
+            defer f.deinit();
+            f.form = form;
+            for ([_]f64{ 0, 128 }) |off| {
+                f.off = off;
+                for ([_]rows.Fill{ .random, .stress, .nonfinite }) |fill| {
+                    try f.fill(fill, bits + group);
+                    try checkParallel(f);
+                    f.x[0] = c.toBf16(7);
+                    f.scales[0] = c.toBf16(-0.5);
+                    f.biases[0] = c.toBf16(0.25);
+                    try checkParallel(f);
+                }
+            }
+        }
+    };
+}
+
+test "affine parallel reference preserves signed nonfinite classes and empty single row shapes" {
+    const a = std.testing.allocator;
+    for ([_]Form{ .factored, .dequantized }) |form| {
+        var f = try Affine.init(a, .{ .rows = 3, .n = 3, .k = 128 }, 6, 64);
+        defer f.deinit();
+        f.form = form;
+        @memset(f.x, c.toBf16(1));
+        @memset(f.codes, 1);
+        @memset(f.scales, c.toBf16(1));
+        @memset(f.biases, 0);
+        f.scales[0] = c.toBf16(std.math.inf(f32));
+        f.scales[2] = c.toBf16(-std.math.inf(f32));
+        f.biases[4] = c.toBf16(std.math.nan(f32));
+        try checkParallel(f);
+        try std.testing.expectEqual(c.Class.pos_inf, c.classOf(f.one(0, 0)[0]));
+        try std.testing.expectEqual(c.Class.neg_inf, c.classOf(f.one(0, 1)[0]));
+        try std.testing.expectEqual(c.Class.nan, c.classOf(f.one(0, 2)[0]));
+    }
+    for ([_]c.Shape{ .{ .rows = 0, .n = 3, .k = 64 }, .{ .rows = 3, .n = 0, .k = 64 }, .{ .rows = 1, .n = 7, .k = 64 } }) |shape| {
+        const f = try Affine.init(a, shape, 4, 32);
+        defer f.deinit();
+        try f.fill(.random, 517);
+        try checkParallel(f);
+    }
 }

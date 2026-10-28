@@ -4,6 +4,7 @@ pub const delta_slots_records = @import("contract/delta_slots_records.zig");
 pub const spec = @import("contract/contract.zig");
 pub const gates = @import("contract/gates.zig");
 pub const rows = @import("contract/rows.zig");
+pub const reference_threads = @import("contract/reference_threads.zig");
 pub const affine = @import("contract/affine.zig");
 pub const dense = @import("contract/dense.zig");
 pub const bf16_round = @import("bf16_round.zig");
@@ -30,6 +31,7 @@ test {
     _ = gates;
     _ = rows;
     _ = affine;
+    _ = reference_threads;
     _ = dense;
     _ = limits;
     _ = registry;
