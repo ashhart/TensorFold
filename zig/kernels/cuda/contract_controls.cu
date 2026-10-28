@@ -414,3 +414,17 @@ extern "C" __global__ void tf_ctl_exl3_plan_finish_old(const PlanStageMain a) {
 
 extern "C" __global__ void tf_ctl_exl3_plan_finish_no_plus_one(const PlanStage a) { tf_exl3::plan_finish<tf_exl3::FINISH_NO_PLUS_ONE>(a); }
 extern "C" __global__ void tf_ctl_exl3_plan_finish_alpha_one(const PlanStage a) { tf_exl3::plan_finish<tf_exl3::FINISH_ALPHA_ONE>(a); }
+
+// Gate 3: main's grouped EXL3 loop, the baseline its load-ahead replaces, and two load-ahead faults that must go red.
+#include "exl3_grouped.cuh"
+
+#define TF_CTL_EXL3_GROUPED(NAME, CB, LOAD)                                                                       \
+    extern "C" __global__ void NAME(tf_exl3::GroupedArgs a) {                                                  \
+        tf_exl3::grouped_body<CB, 8, 4, LOAD>(a, blockIdx.x, blockIdx.y, blockIdx.z);                          \
+    }
+TF_CTL_EXL3_GROUPED(tf_ctl_exl3_grouped_old_0, 0, tf_exl3::PLAIN)
+TF_CTL_EXL3_GROUPED(tf_ctl_exl3_grouped_old_1, 1, tf_exl3::PLAIN)
+TF_CTL_EXL3_GROUPED(tf_ctl_exl3_grouped_old_2, 2, tf_exl3::PLAIN)
+TF_CTL_EXL3_GROUPED(tf_ctl_exl3_grouped_skip, 2, tf_exl3::SKIP)
+TF_CTL_EXL3_GROUPED(tf_ctl_exl3_grouped_stale, 2, tf_exl3::STALE)
+#undef TF_CTL_EXL3_GROUPED

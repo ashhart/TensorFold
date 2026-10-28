@@ -212,6 +212,12 @@ CUDA also checks the grouped EXL3 experts' `tf_exl3_plan_finish`: its bf16 and f
 epilogues bit-equal to main's kernel (kept in `contract_controls.cu`), and its SwiGLU-OAI (`act_mode` 2,
 MiniMax-M3.1-Flash's) against float64 at its rounding points (two controls: the up without its + 1, alpha 1).
 
+CUDA also checks the grouped EXL3 experts (`tf_exl3_grouped_0`, `_1` and `_2`, one a codebook), which on sm_120 and
+sm_121 load a warp's next k tile while the current one decodes: each bit-equal to main's loop (kept in
+`contract_controls.cu`) at one, two and three k tiles a warp and at GLM-5.3-Flash's, MiMo-V2.6-Flash's and the Qwen3.5
+EXL3 pack's widths (two controls: the next load reading tile i + 2, the last tile decoding the words before it).
+Older SMs build main's loop, and their records are main's.
+
 ## CUDA records per nvcc release
 
 nvcc allocates registers differently from one release to the next, so the CUDA records are kept per release.
