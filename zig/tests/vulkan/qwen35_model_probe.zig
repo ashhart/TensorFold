@@ -21,7 +21,7 @@
 //!
 //! Shader images come from the build-generated "qwen35_shaders" module: the
 //! stage-variant decl names of every field of engine.ShaderBundle (8 stage-1
-//! op variants, 3 norm/MLP, 3 attention, 7 GDN, 3 greedy). The build wires
+//! op variants, 4 norm/MLP, 3 attention, 7 GDN, 3 greedy). The build wires
 //! the module and the executable; this file owns no lab paths, ids or
 //! checkpoint hashes.
 const std = @import("std");
@@ -298,7 +298,7 @@ pub fn main(init: std.process.Init) !u8 {
             .copy_u32 = &q35s.copy_u32,
             .copy_u16 = &q35s.copy_u16,
         },
-        .norm = .{ .norm_bf16 = &q35s.norm_bf16, .add_bf16 = &q35s.add_bf16, .swiglu_bf16 = &q35s.swiglu_bf16 },
+        .norm = .{ .norm_bf16 = &q35s.norm_bf16, .add_bf16 = &q35s.add_bf16, .add_preserve_bf16 = &q35s.add_preserve_bf16, .swiglu_bf16 = &q35s.swiglu_bf16 },
         .attention = .{ .rope_bf16 = &q35s.rope_bf16, .sdpa_rows_bf16 = &q35s.sdpa_rows_bf16, .gate_bf16 = &q35s.gate_bf16 },
         .gdn = .{
             .conv_dw1d_bf16 = &q35s.conv_dw1d_bf16,
