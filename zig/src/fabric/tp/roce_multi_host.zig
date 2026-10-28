@@ -5,4 +5,5 @@ test {
     _ = @import("roce_verbs_test.zig");
     _ = @import("roce_multi_wire_test.zig");
     _ = @import("roce_multi_route_test.zig");
+    _ = @import("roce_multi_wait_test.zig");
 }
