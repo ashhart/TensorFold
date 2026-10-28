@@ -75,7 +75,7 @@ fn probe(a: std.mem.Allocator, clock: Elapsed, vendor: ?u32, timeout: u64) !bool
     const driver = .{ std.mem.sliceTo(&dev.v12.driverName, 0), std.mem.sliceTo(&dev.v12.driverInfo, 0) };
     std.debug.print("MILESTONE device-found elapsed_ms={d} name=\"{s}\" vendor=0x{x:0>4} device=0x{x:0>4} type={s} " ++
         "api={d}.{d}.{d} driver=\"{s}\" info=\"{s}\" subgroup={d} storage16={} int16={} " ++
-        "max-storage-range={d} max-buffer-size={d} fence-timeout={d}ms\n", .{
+        "max-storage-range={d} max-buffer-size={d} fence-timeout={d}ms preserve32={} flush32={} denorm-independence={d}\n", .{
         clock.ms(),
         name,
         pr.vendorID,
@@ -84,7 +84,7 @@ fn probe(a: std.mem.Allocator, clock: Elapsed, vendor: ?u32, timeout: u64) !bool
         v >> 22 & 0x7f,
         v >> 12 & 0x3ff,
         v & 0xfff,
-    } ++ driver ++ .{ dev.v11.subgroupSize, dev.features.storage16, dev.features.int16, dev.properties.limits.maxStorageBufferRange, dev.v13.maxBufferSize, timeout / std.time.ns_per_ms });
+    } ++ driver ++ .{ dev.v11.subgroupSize, dev.features.storage16, dev.features.int16, dev.properties.limits.maxStorageBufferRange, dev.v13.maxBufferSize, timeout / std.time.ns_per_ms, dev.v12.shaderDenormPreserveFloat32 != 0, dev.v12.shaderDenormFlushToZeroFloat32 != 0, dev.v12.denormBehaviorIndependence });
     if (pr.deviceType == vk.c.VK_PHYSICAL_DEVICE_TYPE_CPU) {
         std.debug.print("FAIL device: a CPU (software) Vulkan device is never a GPU result\n", .{});
         return false;
@@ -98,11 +98,11 @@ fn probe(a: std.mem.Allocator, clock: Elapsed, vendor: ?u32, timeout: u64) !bool
     defer cmds.deinit();
     var staging = try vk.Buffer.init(&dev, .staging, 64 << 10);
     defer staging.deinit();
-    // The compiled stage 2 closure: norm and swiglu carry the Ash8c Metal-oracle variant,
-    // add the plain bf16 form; all three built with -DUSE_BF16 (see stage2-gpu-build).
+    // The add image requests preservation only when the device advertises it.
     var m = try vk.norm_mlp.NormMlp.init(&dev, .{
         .norm_bf16 = &shaders.norm_bf16,
         .add_bf16 = &shaders.add_bf16,
+        .add_preserve_bf16 = &shaders.add_preserve_bf16,
         .swiglu_bf16 = &shaders.swiglu_bf16,
     });
     defer m.deinit();
@@ -171,8 +171,9 @@ fn checkUnchanged(a: std.mem.Allocator, cmds: *vk.Commands, staging: vk.Buffer, 
 /// store): three byte-identical repeats, planted nonfinite refused at a finite element, inputs
 /// and poison guards unchanged.
 fn addGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, m: *vk.norm_mlp.NormMlp, case: fx.AddCase, timeout: u64) !bool {
-    const f = try fx.Add.init(a, case, 0x57a9);
+    var f = try fx.Add.init(a, case, 0x57a9);
     defer f.deinit();
+    f.allow_subnormal_flush = dev.v12.shaderDenormPreserveFloat32 == 0;
     var in_a = try boundShell(a, dev, cmds, staging, f.a_bits, case.at.a, case.elems, timeout);
     defer in_a.buf.deinit();
     var in_b = try boundShell(a, dev, cmds, staging, f.b_bits, case.at.b, case.elems, timeout);
@@ -219,8 +220,8 @@ fn addGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *v
         std.debug.print("FAIL residual-add case=\"{s}\": an input binding changed\n", .{case.name});
         return false;
     }
-    std.debug.print("MILESTONE residual-add elapsed_ms={d} case=\"{s}\" elements={d} matches f32-add + RNE-store pipeline bit for bit, repeats byte-identical, " ++
-        "inputs and guards unchanged, planted nan/+inf/-inf refused\n", .{ clock.ms(), case.name, case.elems });
+    std.debug.print("MILESTONE residual-add elapsed_ms={d} case=\"{s}\" elements={d} matches f32-add + RNE-store with subnormal-class-flush-allowed={}, repeats byte-identical, " ++
+        "inputs and guards unchanged, planted nan/+inf/-inf refused\n", .{ clock.ms(), case.name, case.elems, f.allow_subnormal_flush and case.fill == .classes });
     return true;
 }
 
