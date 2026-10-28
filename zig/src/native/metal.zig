@@ -229,7 +229,9 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     const mamba = nemotron.state.Pool;
     const per_stream = nemotron.state.Cache.bytes(m.config, positions, o.drafts and m.weights.mtp != null);
     const left = metal_admit.room(m.device) -| mamba.bytes(m.config, 3, 2); // the pool's spare slots and two replay ids
-    const served = try metal_admit.streams(a, "nemotron", per_stream + mamba.bytes(m.config, 2, 1), left, o, positions, problem) orelse {
+    const on = nemotron.kv_pages.on(); // TF_NEMOTRON_METAL_KV_PAGES: the page plan sets the streams, else whole caches
+    const paged = if (on) try metal_admit.pages(a, "TF_NEMOTRON_METAL_KV_PAGES", nemotron.state.pagedLayout(m.config, o.drafts and m.weights.mtp != null), m.device, o, positions, left, problem) else null;
+    const served = (if (on) if (paged) |p| @min(p.lanes, o.lanes) else null else try metal_admit.streams(a, "nemotron", per_stream + mamba.bytes(m.config, 2, 1), left, o, positions, problem)) orelse {
         m.deinit();
         gpa.destroy(h);
         return null;
@@ -242,6 +244,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         .batch_rows = @min(128, @max(64, 4 * served)), // four rows a lane, so 32 and 64 sessions keep their drafts
     });
     errdefer h.metal.deinit();
+    if (paged) |p| try nemotron.kv_pages.attach(h.metal, p.layout, p.pages, positions, served);
     nemotron.slide.loadLiving(gpa, io, h.metal) catch |e| {
         problem.* = try std.fmt.allocPrint(a, "the native engine cannot read the saved lessons in {s} ({s})", .{ o.dir, @errorName(e) });
         return null;
@@ -258,7 +261,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     h.round = .{ .depth = 8 };
     h.cache = null;
     var why: []const u8 = "";
-    const later = @as(u64, served) * per_stream;
+    const later = @as(u64, served) * if (paged) |p| p.layout.fixed_bytes else per_stream; // paged: the pages are taken
     const plan = cache_fit.budgetBeside(o.prompt_cache_gib, o.prompt_cache_over_cap, h.m.device.maxWorkingSet() -| h.m.device.allocated() -| (8 << 30), later, a, &why, "") catch |e| {
         if (e == error.CacheOverCap) problem.* = why;
         return e;
