@@ -24,7 +24,7 @@ pub fn read(r: *Rows, i: usize) !pc.Saved {
     errdefer f.drop(r.family.ptr, saved);
     var bytes: u64 = 0;
     for (plan.pieces) |p| {
-        if (ahead) |a| try r.img.scatter(r.family.ptr, saved, plan.rangesOf(p), a.payload(p)) else bytes += try one(r, p.name, p.kind, prefetch.ext(p.kind), p.at, plan.rangesOf(p), saved);
+        if (ahead) |a| try scatter(r, p.name, prefetch.ext(p.kind), saved, plan.rangesOf(p), a.payload(p)) else bytes += try one(r, p.name, p.kind, prefetch.ext(p.kind), p.at, plan.rangesOf(p), saved);
     }
     if (ahead) |a| bytes = a.disk;
     const ns = if (ahead) |a| a.ns else write.nowNs() - t0;
@@ -46,8 +46,21 @@ fn one(r: *Rows, name: Name, kind: file.Kind, ext: []const u8, at: u32, ranges: 
     if (o.trailer.payload != n or o.trailer.block != r.keying.block or o.trailer.at != at) return bad(r, name, ext, error.RowsRead);
     const stage = try r.staged(n);
     const got = file.payload(&o, stage) catch |err| return bad(r, name, ext, err);
-    try r.img.scatter(r.family.ptr, saved, ranges, got);
+    try scatter(r, name, ext, saved, ranges, got);
     return o.trailer.payload + o.trailer.meta + @sizeOf(file.Trailer);
+}
+
+/// Whether a family refused what a file holds (words that differ, a size or a range that does not fit its blank).
+fn refused(err: anyerror) bool {
+    return switch (err) {
+        error.SnapshotSize, error.BadKeptRange, error.DiskWords, error.KeptWordsDiffer => true,
+        else => false,
+    };
+}
+
+/// A file's payload copied into `ranges` of `saved`; a refusal of its words is a failed check of the file.
+fn scatter(r: *Rows, name: Name, ext: []const u8, saved: pc.Saved, ranges: []const image.Range, in: []const u8) !void {
+    r.img.scatter(r.family.ptr, saved, ranges, in) catch |err| return if (refused(err)) bad(r, name, ext, err) else err;
 }
 
 /// A file that failed its checks deleted, with every state that names it; the error passed on.
@@ -68,7 +81,12 @@ fn bad(r: *Rows, name: Name, ext: []const u8, err: anyerror) anyerror {
             r.wantsOf(r.gpa, s, &wants) catch {};
             for (wants.items) |w| names = names or std.mem.eql(u8, &w.name, &name);
         }
-        if (names) r.remove(i) else i += 1;
+        if (!names) {
+            i += 1;
+            continue;
+        }
+        if (r.fetch) |f| f.forget(s.name); // a state that is gone takes its read ahead with it
+        r.remove(i);
     }
     return err;
 }

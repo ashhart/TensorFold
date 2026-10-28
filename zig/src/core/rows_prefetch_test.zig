@@ -78,14 +78,14 @@ const Server = struct {
     }
 };
 
-fn counts(f: *prefetch.Prefetch) prefetch.Counts {
+pub fn counts(f: *prefetch.Prefetch) prefetch.Counts {
     f.mutex.lockUncancelable(f.io);
     defer f.mutex.unlock(f.io);
     return f.counts;
 }
 
 /// `name`'s read once it has finished or failed (null: it left the list).
-fn settled(f: *prefetch.Prefetch, name: Name) ?prefetch.Phase {
+pub fn settled(f: *prefetch.Prefetch, name: Name) ?prefetch.Phase {
     while (true) {
         f.mutex.lockUncancelable(f.io);
         const phase: ?prefetch.Phase = for (f.reads.items) |rd| {
