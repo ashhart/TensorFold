@@ -366,6 +366,47 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     stage5_probe_run.addPassthruArgs();
     stage5_run.dependOn(&stage5_probe_run.step);
 
+    // The greedy contract (group `greedy`): the composed draw — finite_logits,
+    // argreduce_chunk and argreduce_combine behind one submission — through
+    // gates 1-4, plus the planted control (a row max that drops a NaN)
+    // required to go red on the nonfinite gate. Host half runs with the
+    // fixture suite; the GPU half is its own probe embedding the SAME stage 5
+    // images plus the control's SPIR-V.
+    const greedy_files = b.addWriteFiles();
+    const greedy_ctl_cmd = b.addSystemCommand(&.{ glslang, "-V", "--target-env", "vulkan1.2", "-S", "comp", "-o" });
+    const greedy_ctl_spv = greedy_ctl_cmd.addOutputFileArg("contract_controls_greedy.spv");
+    greedy_ctl_cmd.addFileArg(b.path("zig/kernels/vulkan/contract_controls_greedy.comp"));
+    _ = greedy_files.addCopyFile(greedy_ctl_spv, "contract_controls_greedy.spv");
+    const greedy_controls = b.createModule(.{ .root_source_file = greedy_files.add("greedy_controls.zig",
+        "pub const fmax_max align(4) = @embedFile(\"contract_controls_greedy.spv\").*;\n") });
+    const greedy_contract_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/vulkan/contract_greedy.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+        .imports = &.{
+            .{ .name = "vulkan", .module = module(b, b.graph.host, .debug, o) },
+            .{ .name = "contract", .module = @import("kernel_contract.zig").module(b, b.graph.host, .debug) },
+        },
+    }) });
+    host.dependOn(&b.addRunArtifact(greedy_contract_tests).step);
+    stage5_host.dependOn(&b.addRunArtifact(greedy_contract_tests).step);
+    const greedy_contract = b.addExecutable(.{ .name = "tf-vulkan-greedy-contract", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/vulkan/contract_greedy_main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "vulkan", .module = vulkan },
+            .{ .name = "stage5_shaders", .module = stage5_shaders_mod },
+            .{ .name = "greedy_controls", .module = greedy_controls },
+            .{ .name = "contract", .module = @import("kernel_contract.zig").module(b, target, .debug) },
+        },
+    }) });
+    stage5_build.dependOn(&b.addInstallArtifact(greedy_contract, .{}).step);
+    const greedy_contract_run = b.addRunArtifact(greedy_contract);
+    greedy_contract_run.addPassthruArgs();
+    b.step("greedy-contract-run", "Run the greedy contract (the composed draw and its planted control) on the chosen device (args after --)").dependOn(&greedy_contract_run.step);
+
     const contract_fixture = b.createModule(.{
         .root_source_file = b.path("zig/tests/vulkan/contract_qmm.zig"),
         .target = b.graph.host,
