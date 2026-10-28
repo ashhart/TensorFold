@@ -17,14 +17,25 @@ const Ring = q.tap_ring.Ring;
 const Context = q.dflash.runtime_model.Context;
 const Landing = @import("qwen27_landing.zig").Landing;
 const contract = tf.tree_round;
+const pair_mod = @import("qwen27_pair.zig");
+
+/// The pair transport's types and seam ABI, in their own unit: the lane backend and the link's adapter share them.
+pub const Pair = pair_mod.Pair;
+pub const Kind = pair_mod.Kind;
+pub const Link = pair_mod.Link;
+pub const batch_rows = pair_mod.batch_rows;
+pub const pairReduce = pair_mod.pairReduce;
+pub const pairBytes = pair_mod.pairBytes;
+pub const pairChunk = pair_mod.chunk;
+pub const seamBytes = pair_mod.seamBytes;
+pub const resumesInPlace = pair_mod.resumesInPlace;
+pub const slotResume = pair_mod.slotResume;
 
 /// A window's rows at most: the pending row and a DFlash2 tree.
 pub const max_rows = @import("qwen27_window.zig").capacity;
 pub fn windowRows(units: bool) !u32 {
     return platform.environment.read(u32, "TF_QWEN27_WINDOW", @import("qwen27_window.zig").rows(units)) catch return error.BadQwenWindow;
 }
-/// A shared round's rows at most: the frame's.
-pub const batch_rows = @import("qwen27_prompt_floor.zig").minimum;
 /// Streams a runner holds at most (the attention plan's).
 pub const max_streams = q.attention_plan.max_streams;
 const ring = 64;
@@ -100,6 +111,7 @@ pub const Metal = struct {
     held_taps: ?mtl.Buffer = null,
     features_state: @import("sensenova_features.zig").State = .{},
     sn_features: bool = false, // SenseNova-Loop's MTP head in front: its tap slots are sensenova_features.zig's
+    link: ?*Link = null, // the pair: rank 0 sends each round here before it runs, rank 1 replays it
 
     pub fn init(gpa: std.mem.Allocator, runner: *q.decode_round.Runner, draft: ?*Draft) !*Metal {
         if (runner.slots == 0 or runner.slots > max_streams) return error.TargetBinding;
@@ -266,6 +278,8 @@ pub const Metal = struct {
 
     /// Rows [first, first + rows) drawn at their positions: GPU argmax, else on the host (sampled, masked or `pens`).
     fn draw(b: *Metal, s: *const lanes.Stream, first: usize, rows: usize, positions: []const u64, out: []u32, masks: []const u32, pens: bool) !void {
+        // a pair's token comes from the round's own head seam: a second local argmax would decide differently on rank 1
+        if (b.runner.reduce != null) return error.PairGreedyOnly;
         const logits = b.runner.model.frame.get(.logits);
         const vocab: u32 = @intCast(b.runner.model.config.vocab);
         const width = (@as(usize, vocab) + 31) / 32;
@@ -317,6 +331,16 @@ pub const Metal = struct {
 
     /// The tokens argmaxRows picked for rows [first, first + rows).
     fn picked(b: *const Metal, first: usize, rows: usize, out: []u32) !void {
+        if (b.runner.reduce != null) {
+            const seam_picks = b.runner.picks orelse return error.HeadSeamMissing;
+            const vocab: u32 = @intCast(b.runner.model.shard.global.vocab);
+            const ids: [*]const u32 = @ptrCast(@alignCast(seam_picks.buffer.contents() + seam_picks.offset));
+            for (out[0..rows], ids[first..][0..rows]) |*t, id| {
+                if (id >= vocab) return error.NonfiniteLogits;
+                t.* = id;
+            }
+            return;
+        }
         const picks: [*]const contract.Pick = @ptrCast(@alignCast(b.picks.contents()));
         for (out[0..rows], picks[first..][0..rows]) |*t, p| {
             if (p.token == contract.invalid_token or p.nonfinite != 0) return error.NonfiniteLogits;
@@ -325,7 +349,7 @@ pub const Metal = struct {
     }
 
     /// Keep the last verify's rows on `paths`: slot 0 alone keeps on the GPU with its taps, else the runner and rings.
-    fn keepPaths(b: *Metal, paths: []const []const u32) !void {
+    pub fn keepPaths(b: *Metal, paths: []const []const u32) !void {
         defer mtl.pass_metrics.end();
         const metric = mtl.pass_metrics.phase(.keep);
         defer metric.end();
@@ -406,6 +430,8 @@ pub const Metal = struct {
 
     fn prefillFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!void {
         const b = self(ptr);
+        try pair_mod.refuseSampling(b.link, s); // a sampled or grammar-constrained row has no pair answer: refuse before any backend call
+        try pair_mod.refuseFollower(b.link); // before settle, dropRound, promoteDue and bind: rank 1 touched nothing yet
         b.settle() catch {};
         b.dropRound();
         slots.promoteDue(b);
@@ -420,6 +446,11 @@ pub const Metal = struct {
         const b = self(ptr);
         _ = try b.slotFor(s);
         var token: [1]u32 = undefined;
+        if (b.runner.reduce != null) {
+            // the prompt's last chunk (head = .last) picked on both ranks: no second round, no unannounced exchange
+            try b.picked(0, 1, &token);
+            return b.push(token[0]);
+        }
         try b.draw(s, 0, 1, &.{position}, &token, &.{}, false); // a reply's first token: no count yet
         return b.push(token[0]);
     }
@@ -456,7 +487,7 @@ pub const Metal = struct {
     }
 
     /// Every stream's window (pending token, then its drafts as a chain or tree) in one forward, every row drawn.
-    fn verifyFn(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) anyerror!void {
+    pub fn verifyFn(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) anyerror!void {
         const b = self(ptr);
         if (windows.len == 0 or windows.len > b.runner.slots or windows.len != out.len) return error.BadWindows;
         try b.settle();
@@ -492,7 +523,8 @@ pub const Metal = struct {
         if (windows.len > 1) b.dropTree();
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
-        b.round = try Round.init(b.gpa, inputs[0..windows.len], @intCast(r.model.config.conv_kernel), r.slots, @intCast(r.model.config.vocab));
+        // Ids are global on every rank (only the head's rows are split), so the round validates the whole vocabulary.
+        b.round = try Round.init(b.gpa, inputs[0..windows.len], @intCast(r.model.config.conv_kernel), r.slots, @intCast(r.model.shard.global.vocab));
         b.count = windows.len;
         errdefer b.dropRound();
         b.rows = total;
@@ -508,12 +540,17 @@ pub const Metal = struct {
         if (fused) r.tail = .{ .ptr = b, .encode = @import("qwen27_keep.zig").encodeTail } else if (tail_argmax) r.tail = .{ .ptr = b, .encode = encodeArgmaxTail };
         defer r.tail = null;
         const before = r.gpu_seconds;
+        if (b.runner.reduce != null) {
+            // landing 1 is one greedy stream of one-row windows: the words are the slot and the pending token.
+            if (windows.len != 1 or total != 1) return error.CommandOutOfStep;
+            if (b.link) |l| try l.step(inputs[0].slot, b.ids[0]);
+        }
         if (plain) try r.advance(&b.round.?, .all) else try r.verifyHead(&b.round.?, .all);
         try @import("sensenova_features.zig").recordVerify(b, windows, inputs[0..windows.len]);
         for (windows) |w| slots.charge(b, w.stream, before); // a shared round counts whole in each reply
         b.advanced = plain;
         b.rows = total;
-        if (fused) try @import("qwen27_keep.zig").finishPrefetch(b) else if (greedy and !tail_argmax) try b.argmaxRows(0, total);
+        if (fused) try @import("qwen27_keep.zig").finishPrefetch(b) else if (greedy and !tail_argmax and b.runner.reduce == null) try b.argmaxRows(0, total);
         for (windows, out, b.round.?.firsts) |w, o, first| {
             const rows = w.rows();
             const pens = w.stream.penalties.active();
@@ -592,6 +629,7 @@ pub const Metal = struct {
         const b = self(ptr);
         if (b.slotOf(s)) |slot| b.features_state.clearSlot(slot);
         slots.endFill(b, s);
+        if (b.link) |l| if (b.slotOf(s)) |slot| l.end(slot);
         b.unbind(s);
     }
 };

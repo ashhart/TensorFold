@@ -316,7 +316,7 @@ fn refusal(a: Allocator, o: api.Open, dense: bool) !?[]const u8 {
     if (@import("qwen27_mtp.zig").refusal(o.mtp_drafts, o.mtp_confidence, o.drafter != null, std.mem.eql(u8, t, "qwen3_5") and dense)) |why| return why;
     if (o.drafter != null and (!dense or loop_sn) and !isGemma4(t) and !std.mem.eql(u8, t, "llama") and !std.mem.eql(u8, t, "qwen3_5_moe") and !std.mem.eql(u8, t, "flint") and !std.mem.eql(u8, t, "glm5_next") and !std.mem.eql(u8, t, "inkling2_loop") and !std.mem.eql(u8, t, "ricursive")) return "--drafter is supported for Qwen3.8-27B-class checkpoints (qwen3_5 with its own output head), Qwen3.5-MoE (qwen3_5_moe), GLM-5.3-Flash (glm5_next), Gemma 4 dense, Flint (DFlash2 on M5), Inkling 2 Mini (DSpark), Llama (a smaller Llama on the same tokenizer) and Ripple (its DFlash2 drafter)";
     const one_mac: ?[]const u8 = if (loop_sn) "SenseNova-Loop" else if (std.mem.eql(u8, t, "nemotron_h")) "Nemotron" else if (std.mem.eql(u8, t, "nemotron_h_puzzle")) "Nemotron 3.5 Bolt" else if (std.mem.eql(u8, t, "lfm2_moe")) "LFM2.5-24B-A2B" else if (isGemma4(t)) "Gemma 4" else if (std.mem.eql(u8, t, "step5_vl")) "Step-5" else if (std.mem.eql(u8, t, "spark2_5")) "Spark-X2.6" else if (std.mem.eql(u8, t, "minimax_m3_vl")) "MiniMax-M3.1-Flash" else if (std.mem.eql(u8, t, "qwen3_5_moe")) "Qwen3.5-MoE" else if (std.mem.eql(u8, t, "llama")) "Llama" else if (std.mem.eql(u8, t, "flint")) "Flint" else if (std.mem.eql(u8, t, "unlimited-ocr")) "Unlimited-OCR-2" else if (std.mem.eql(u8, t, "ricursive")) "Ripple" else if (!std.mem.eql(u8, t, "qwen3_5")) null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
-    if (o.speed_up != null) if (one_mac) |name| return try std.fmt.allocPrint(a, "--speed-up joins two Macs for Flash Next, GLM-5.3-Flash and GLM-5.3 only: serve {s} without it", .{name});
+    if (o.speed_up != null and !(std.mem.eql(u8, t, "qwen3_5") and dense)) if (one_mac) |name| return try std.fmt.allocPrint(a, "--speed-up joins two Macs for Qwen3.8-27B, Flash Next, GLM-5.3-Flash and GLM-5.3 only: serve {s} without it", .{name});
     if (o.recall and std.mem.eql(u8, t, "qwen4_exp")) return recall_refusal;
     if (spill.refusal(o)) |why| return why;
     if (o.learn == null) return null;
@@ -352,7 +352,7 @@ fn openQwen27(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[
     const learn: ?@import("qwen27_disk.zig").Learn = if (o.learn_conversations) if (o.learn) |root| .{ .root = root, .dir = o.dir, .drafter = drafter, .cap = gibBytes(o.learn_gib), .floor = gibBytes(o.learn_min_free_gib), .daily = gibBytes(o.learn_daily_gib), .spill = o.spill, .slots = spill.slots(o) } else null else null;
     const witness = try q27_witness.begin(gpa, io, o); // before the load: stamps, and the libraries it builds
     defer q27_witness.release(witness);
-    const h = qwen27.open(gpa, io, o.dir, .{ .context = @intCast(context), .streams = o.lanes, .streams_fixed = o.lanes_fixed, .drafts = if (sn) o.drafts else true, .drafter = drafter, .drafter_name = o.drafter_name, .drafter_bits = o.drafter_bits, .mtp_drafts = if (o.drafts) o.mtp_drafts else null, .mtp_confidence = o.mtp_confidence, .cache_gib = o.prompt_cache_gib, .cache_over_cap = o.prompt_cache_over_cap, .decode_share = o.decode_share, .learn = learn, .vision = o.vision, .rope_yarn = if (sn) o.rope_yarn else null, .slide = o.slide }, a, &why) catch |err| {
+    const h = qwen27.open(gpa, io, o.dir, .{ .pair = o.speed_up, .context = @intCast(context), .streams = o.lanes, .streams_fixed = o.lanes_fixed, .drafts = if (sn) o.drafts else true, .drafter = drafter, .drafter_name = o.drafter_name, .drafter_bits = o.drafter_bits, .mtp_drafts = if (o.drafts) o.mtp_drafts else null, .mtp_confidence = o.mtp_confidence, .cache_gib = o.prompt_cache_gib, .cache_over_cap = o.prompt_cache_over_cap, .decode_share = o.decode_share, .learn = learn, .vision = o.vision, .rope_yarn = if (sn) o.rope_yarn else null, .slide = o.slide }, a, &why) catch |err| {
         problem.* = if (why.len > 0) why else try std.fmt.allocPrint(a, "the native {s} engine cannot load {s} ({s})", .{ if (sn) "SenseNova" else "Qwen (27B class)", o.dir, @errorName(err) });
         return null;
     };
@@ -519,7 +519,7 @@ test "--speed-up is refused by Nemotron, Bolt, the 27B and the 2B before any loa
     const a = arena.allocator();
     const two: api.Open = .{ .dir = "d", .model_type = "qwen3_5", .speed_up = "pair.json" };
     const tail = " only: serve {s} without it";
-    try std.testing.expectStringEndsWith((try refusal(a, two, true)) orelse "", try std.fmt.allocPrint(a, tail, .{"Qwen3.8-27B"}));
+    try std.testing.expect((try refusal(a, two, true)) == null); // the 27B pairs: the pair seam is its two-Mac transport
     try std.testing.expectStringEndsWith((try refusal(a, two, false)) orelse "", try std.fmt.allocPrint(a, tail, .{"Qwen3.5-2B"}));
     try std.testing.expectStringEndsWith((try refusal(a, .{ .dir = "d", .model_type = "nemotron_h", .speed_up = "pair.json" }, false)) orelse "", try std.fmt.allocPrint(a, tail, .{"Nemotron"}));
     try std.testing.expectStringEndsWith((try refusal(a, .{ .dir = "d", .model_type = "nemotron_h_puzzle", .speed_up = "pair.json" }, false)) orelse "", try std.fmt.allocPrint(a, tail, .{"Nemotron 3.5 Bolt"}));
