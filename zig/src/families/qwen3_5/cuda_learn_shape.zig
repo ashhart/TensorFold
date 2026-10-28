@@ -63,6 +63,7 @@ pub fn from(g: owned.Geometry) !Geometry {
     if (!std.meta.eql(out, the_27b) or g.vocab != vocab or g.eps != eps) return error.UnsupportedLearningGeometry;
     for (g.linear[0..g.layers], 0..) |v, i| if (v != linear(i)) return error.UnsupportedLearningGeometry;
     if (g.moe() or g.bits.embed != 4 or g.bits.head != 4) return error.UnsupportedLearningFormat;
+    if (g.rope != .plain) return error.QwenYarnNoLearner; // the backward attention ropes with theta's frequencies alone
     for (g.bits.proj[0..g.layers]) |widths| for (widths) |bits| if (bits != 4) return error.UnsupportedLearningFormat;
     return out;
 }
@@ -79,6 +80,9 @@ test "Dense learning: learning admits the dense affine4 layout and refuses mixed
     g.bits.embed = 8;
     try std.testing.expectError(error.UnsupportedLearningFormat, from(g));
     g.bits.embed = 4;
+    g.rope = .{ .yarn = .{ .factor = 4, .trained = 262144, .table = @splat(0) } }; // its forward, not its backward, has YaRN
+    try std.testing.expectError(error.QwenYarnNoLearner, from(g));
+    g.rope = .plain;
     g.experts = 256;
     try std.testing.expectError(error.UnsupportedLearningFormat, from(g));
 }
