@@ -367,3 +367,141 @@ test "golden: lookahead 0 and no grid, as HIP's families and Qwen's CUDA path ke
     }
     try std.testing.expectEqual(s.tree.snaps, f.live);
 }
+
+test "lookahead 1: a state resumes when the token past it repeats, and not when it differs" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f: Fake = .{ .gpa = std.testing.allocator };
+    var s = try newStore(&f, .{ .page = 4, .min_gap = 8, .min_prompt = 0, .lookahead = 1 });
+    defer s.deinit();
+    s.limit(.{ .pages = 40, .snaps = 8 });
+    var mine: std.ArrayList(u32) = .empty;
+    const t1 = seq(24, 0);
+    var plan = try pass(&f, &s, a, &t1, 20, &.{}, &mine);
+    try std.testing.expectEqualSlices(u32, &.{20}, plan.marks);
+    f.leave(mine.items);
+    const t2 = seq(32, 0); // the next turn repeats token 20
+    plan = try pass(&f, &s, a, &t2, 28, &.{}, &mine);
+    try std.testing.expectEqual(@as(u32, 20), plan.from);
+    f.leave(mine.items);
+    var t3 = seq(32, 0); // a conversation parting exactly at token 20 cannot use the state there
+    t3[20] = 999;
+    plan = try pass(&f, &s, a, &t3, 28, &.{}, &mine);
+    try std.testing.expectEqual(@as(u32, 0), plan.from);
+    f.leave(mine.items);
+    try std.testing.expectEqual(@as(u32, 20), s.find(&seq(21, 0)).?.end); // its lookahead, the one token to prefill
+    try std.testing.expect(s.find(&seq(20, 0)) == null); // no token past the state: nothing to resume
+    try std.testing.expectEqual(s.tree.snaps, f.live);
+}
+
+/// Pages a second conversation takes from a first's state at 20 when it keeps at 20 too, parting from it at `branch`.
+fn sharedAfter(branch: usize, lookahead: u32) !usize {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f: Fake = .{ .gpa = std.testing.allocator };
+    var s = try newStore(&f, .{ .page = 4, .min_gap = 8, .min_prompt = 0, .lookahead = lookahead });
+    defer s.deinit();
+    s.limit(.{ .pages = 40, .snaps = 8 });
+    var mine: std.ArrayList(u32) = .empty;
+    _ = try pass(&f, &s, a, &seq(24, 0), 20, &.{}, &mine);
+    f.leave(mine.items);
+    var second = seq(24, 0);
+    second[branch] = 999;
+    var own: [5]u32 = undefined;
+    f.lane(&own);
+    var path: [5]u32 = undefined;
+    const kept = s.keep(&second, 20, null, &own, &path);
+    f.leave(&own);
+    try std.testing.expect(kept.held);
+    try std.testing.expectEqual(s.tree.snaps, f.live);
+    var taken: usize = 0;
+    for (own, path) |o, p| taken += @intFromBool(o != p);
+    return taken;
+}
+
+test "lookahead 1: a conversation shares only the pages whose next token it still repeats" {
+    // parting at the state's end: the last page's rows read the token past it, so it is not shared
+    try std.testing.expectEqual(@as(usize, 5), try sharedAfter(20, 0));
+    try std.testing.expectEqual(@as(usize, 4), try sharedAfter(20, 1));
+    // parting at an inner page edge, and one token after it
+    try std.testing.expectEqual(@as(usize, 4), try sharedAfter(16, 0));
+    try std.testing.expectEqual(@as(usize, 3), try sharedAfter(16, 1));
+    try std.testing.expectEqual(@as(usize, 4), try sharedAfter(17, 1));
+}
+
+test "planned: marks and resumes sit on the grid, never on a page between" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f: Fake = .{ .gpa = std.testing.allocator };
+    var s = try newStore(&f, .{ .page = 4, .min_gap = 8, .min_prompt = 0, .tail = true, .planned = true, .grid = 8 });
+    defer s.deinit();
+    s.limit(.{ .pages = 40, .snaps = 8 });
+    // a page store would cut at 12 and 40; the grid of 8 moves the block's cut to 8, the tail joins the history's 40
+    try std.testing.expectEqualSlices(u32, &.{ 8, 40 }, try s.marks(a, &seq(48, 0), 0, 41, &.{12}, &.{}));
+    var mine: std.ArrayList(u32) = .empty;
+    var plan = try pass(&f, &s, a, &seq(24, 0), 20, &.{}, &mine);
+    try std.testing.expectEqualSlices(u32, &.{16}, plan.marks); // history 20, its grid point 16
+    f.leave(mine.items);
+    plan = try pass(&f, &s, a, &seq(40, 0), 36, &.{}, &mine);
+    try std.testing.expectEqual(@as(u32, 16), plan.from);
+    f.leave(mine.items);
+    try std.testing.expectEqual(s.tree.snaps, f.live);
+}
+
+test "planned: a keep off the grid is refused, one on it kept" {
+    var f: Fake = .{ .gpa = std.testing.allocator };
+    var s = try newStore(&f, .{ .page = 4, .min_gap = 8, .min_prompt = 0, .planned = true, .grid = 8 });
+    defer s.deinit();
+    s.limit(.{ .pages = 40, .snaps = 8 });
+    var own: [4]u32 = undefined;
+    f.lane(&own);
+    defer f.leave(&own);
+    var path: [4]u32 = undefined;
+    const prompt = seq(24, 0);
+    try std.testing.expect(!s.keep(&prompt, 12, null, own[0..3], path[0..3]).held);
+    try std.testing.expectEqual(@as(usize, 0), s.tree.snaps);
+    try std.testing.expect(s.keep(&prompt, 16, null, &own, &path).held);
+    try std.testing.expectEqual(@as(usize, 1), s.tree.snaps);
+}
+
+test "the tree's deepest state is the deepest at a multiple of the step it is asked for" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f: Fake = .{ .gpa = std.testing.allocator };
+    var s = try newStore(&f, rules);
+    defer s.deinit();
+    s.limit(.{ .pages = 40, .snaps = 8 });
+    var mine: std.ArrayList(u32) = .empty;
+    const prompt = seq(24, 0);
+    _ = try pass(&f, &s, a, &prompt, 12, &.{}, &mine); // a state at 12, off a grid of 8
+    f.leave(mine.items);
+    try std.testing.expectEqual(@as(u32, 12), s.tree.deepest(&prompt, 20, 4).?.end);
+    try std.testing.expect(s.tree.deepest(&prompt, 20, 8) == null);
+}
+
+test "GLM's shape, a grid of four pages and lookahead 1: a chat resumes at its history's grid point, sharing its pages" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f: Fake = .{ .gpa = std.testing.allocator };
+    var s = try newStore(&f, .{ .page = 4, .min_gap = 16, .min_prompt = 0, .lookahead = 1, .planned = true, .grid = 16 });
+    defer s.deinit();
+    s.limit(.{ .pages = 40, .snaps = 8 });
+    var mine: std.ArrayList(u32) = .empty;
+    var plan = try pass(&f, &s, a, &seq(40, 0), 36, &.{}, &mine);
+    try std.testing.expectEqualSlices(u32, &.{32}, plan.marks);
+    const first = try a.dupe(u32, mine.items[0..8]);
+    f.leave(mine.items);
+    plan = try pass(&f, &s, a, &seq(56, 0), 52, &.{}, &mine);
+    try std.testing.expectEqual(@as(u32, 32), plan.from);
+    try std.testing.expectEqualSlices(u32, first, mine.items[0..8]); // the resume adopted the first turn's pages
+    try std.testing.expectEqualSlices(u32, &.{48}, plan.marks);
+    f.leave(mine.items);
+    try std.testing.expectEqual(@as(usize, 2), s.tree.snaps);
+    try std.testing.expectEqual(@as(usize, 12), s.tree.held_pages);
+    try std.testing.expectEqual(s.tree.snaps, f.live);
+}

@@ -32,7 +32,7 @@ pub const Node = struct {
     parent: ?*Node,
     /// Tokens up to the end of this node.
     end: u32,
-    /// The tokens of this node's pages, a page's worth each.
+    /// The tokens of this node's pages, a page's worth each, and the tree's `ahead` more past its last page.
     tokens: []u32,
     pages: []u32,
     kids: std.ArrayList(*Node) = .empty,
@@ -46,6 +46,8 @@ pub const Tree = struct {
     pages: Pages,
     /// Tokens a page holds.
     page: usize,
+    /// Tokens past a page that its rows read (the family's lookahead): a page matches only when they match too.
+    ahead: usize,
     root: *Node,
     clock: u64 = 0,
     /// Pages and snapshots the tree holds.
@@ -53,10 +55,10 @@ pub const Tree = struct {
     snaps: usize = 0,
     counts: Counts = .{},
 
-    pub fn init(gpa: Allocator, family: Snapshots, pages: Pages, page: usize) !Tree {
+    pub fn init(gpa: Allocator, family: Snapshots, pages: Pages, page: usize, ahead: usize) !Tree {
         const root = try gpa.create(Node);
         root.* = .{ .parent = null, .end = 0, .tokens = &.{}, .pages = &.{} };
-        return .{ .gpa = gpa, .family = family, .pages = pages, .page = page, .root = root };
+        return .{ .gpa = gpa, .family = family, .pages = pages, .page = page, .ahead = ahead, .root = root };
     }
 
     pub fn deinit(t: *Tree) void {
@@ -82,19 +84,21 @@ pub const Tree = struct {
     }
 
     fn child(t: *const Tree, n: *const Node, tokens: []const u32) ?*Node {
-        for (n.kids.items) |k| if (std.mem.eql(u32, k.tokens[0..t.page], tokens[0..t.page])) return k;
+        const w = t.page + t.ahead;
+        for (n.kids.items) |k| if (std.mem.eql(u32, k.tokens[0..w], tokens[0..w])) return k;
         return null;
     }
 
-    /// Whole pages of `n` that `tokens` repeats, at most `most`.
+    /// Whole pages of `n` that `tokens` repeats with the `ahead` tokens past each, at most `most`.
     fn common(t: *const Tree, n: *const Node, tokens: []const u32, most: usize) usize {
+        const w = t.page + t.ahead;
         var p: usize = 0;
-        while (p < n.pages.len and p < most and std.mem.eql(u32, n.tokens[p * t.page ..][0..t.page], tokens[p * t.page ..][0..t.page])) p += 1;
+        while (p < n.pages.len and p < most and std.mem.eql(u32, n.tokens[p * t.page ..][0..w], tokens[p * t.page ..][0..w])) p += 1;
         return p;
     }
 
-    /// The deepest node with a state that `prompt` repeats whole up to `limit_at` (a page edge).
-    pub fn deepest(t: *const Tree, prompt: []const u32, limit_at: usize) ?*Node {
+    /// The deepest node with a state at a multiple of `step` that `prompt` repeats up to `limit_at` (a page edge).
+    pub fn deepest(t: *const Tree, prompt: []const u32, limit_at: usize, step: usize) ?*Node {
         var node = t.root;
         var at: usize = 0;
         var best: ?*Node = null;
@@ -104,12 +108,12 @@ pub const Tree = struct {
             if (p < c.pages.len) break;
             at += p * t.page;
             node = c;
-            if (c.entry != null) best = c;
+            if (c.entry != null and c.end % step == 0) best = c;
         }
         return best;
     }
 
-    /// Pages of `tokens` (`np` whole pages) the tree holds from the start, into `path` if any; `last` the end node.
+    /// Pages of `tokens` (`np` whole pages and `ahead` more) the tree holds, into `path` if any; `last` the end node.
     pub fn heldPrefix(t: *const Tree, tokens: []const u32, np: usize, path: ?[]u32, last: *?*Node) usize {
         var node = t.root;
         var pi: usize = 0;
@@ -125,10 +129,10 @@ pub const Tree = struct {
         return pi;
     }
 
-    /// Pages of `tokens` (whole pages) the tree holds from the start.
+    /// Pages of `tokens` (whole pages, then `ahead` tokens) the tree holds from the start.
     pub fn have(t: *const Tree, tokens: []const u32) usize {
         var last: ?*Node = null;
-        return t.heldPrefix(tokens, tokens.len / t.page, null, &last);
+        return t.heldPrefix(tokens, (tokens.len -| t.ahead) / t.page, null, &last);
     }
 
     /// The pages of the path to `n`, each held once more for the caller; the nodes marked used.
@@ -147,7 +151,7 @@ pub const Tree = struct {
         }
     }
 
-    /// Puts `tokens` (whole pages, `mine` the caller's) in the tree, returns the end node; `path` gets the tree's page.
+    /// Puts `tokens` (whole pages, `mine` the caller's, and `ahead` more) in the tree; the end node, `path` its pages.
     pub fn insert(t: *Tree, tokens: []const u32, mine: []const u32, path: []u32) !*Node {
         const np = mine.len;
         var node = t.root;
@@ -180,7 +184,7 @@ pub const Tree = struct {
     fn split(t: *Tree, c: *Node, p: usize) !*Node {
         const up = try t.gpa.create(Node);
         errdefer t.gpa.destroy(up);
-        const head_tokens = try t.gpa.dupe(u32, c.tokens[0 .. p * t.page]);
+        const head_tokens = try t.gpa.dupe(u32, c.tokens[0 .. p * t.page + t.ahead]); // its pages, the tail's first `ahead`
         errdefer t.gpa.free(head_tokens);
         const head_pages = try t.gpa.dupe(u32, c.pages[0..p]);
         errdefer t.gpa.free(head_pages);
