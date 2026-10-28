@@ -33,7 +33,7 @@ For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.
 | Nanbeige4.3-33B | [Native Metal, the bf16 and INT4 releases, the Llama family](nanbeige-4.3-33b-metal.md) |
 | Recursive Flint | [Native Metal, the publisher's affine 4-bit export, reasoning and tool calls](flint.md) |
 | Unlimited-OCR-2 | [Native Metal, the bf16 release: page images to structured text, 131k context](unlimited-ocr-metal.md) |
-| Muse Spark Open | [EXL3 on CUDA, two-rank DGX Spark, DFlash2 drafts](muse-spark.md) |
+| Muse Spark Open | [EXL3 on CUDA, two-rank DGX Spark, plain decode](muse-spark.md) |
 
 [Persisted serving-state identities](persisted-serving-keys.md) lists the disk owners, their compatibility keys and stale-state host checks.
 
