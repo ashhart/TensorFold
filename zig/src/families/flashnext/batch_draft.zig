@@ -37,12 +37,6 @@ pub const State = struct {
     calls: usize = 0,
 };
 
-/// FZ_KEYED_DRAFTS=0: a sampled stream drafts by argmax, as before.
-fn keyed() bool {
-    const v = std.c.getenv("FZ_KEYED_DRAFTS") orelse return true;
-    return v[0] != '0';
-}
-
 pub fn on(st: *State) bool {
     if (st.off == null) st.off = if (std.c.getenv("FZ_BATCH_MTP_ROWS")) |v| v[0] == '0' else false;
     return !st.off.?;
@@ -247,7 +241,7 @@ fn tail(m: *fz.Model, x: *Scratch, g: []const Row, md1: Buf, p0: usize, j: usize
     var any = false;
     for (g, 0..) |w, q| {
         at[q] = w.position + j;
-        if (w.sampling) |s| if (s.temperature > 0 and keyed()) {
+        if (w.sampling) |s| if (s.temperature > 0 and sample.keyed()) {
             draws[q] = s;
             any = true;
         };

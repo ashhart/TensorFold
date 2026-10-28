@@ -165,7 +165,10 @@ pub fn mtpLayer(m: *Model, sl: *Slot, rows: usize, ids: Buf, streams: Buf, out: 
         return;
     }
     try m.mtpLane(h.draft, "mtp:lane_qmm_bytes_grouped@mtp.draft", x, md1, 1, D, h.logits);
-    r.argmax(h.logits, h.n_ids, out, h.ids, 1);
+    if (r.head_draw) |d| { // a sampled reply's draft under its keyed rule, as the target draws that position
+        @import("sample.zig").drawIdAt(r.enc, &r.draws, h.logits, h.ids, h.ids_n, d, out);
+        if (!r.serial) r.enc.barrier();
+    } else r.argmax(h.logits, h.n_ids, out, h.ids, 1);
 }
 
 pub fn mtpLane(m: *Model, l: Lane, role: []const u8, x: Buf, md: Buf, rows: usize, k: usize, y: Buf) !void {

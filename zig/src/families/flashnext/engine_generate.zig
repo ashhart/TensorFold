@@ -277,6 +277,14 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
             } else e.statesCopy(r.gdn_kept == null); // kept states replay the kept rows themselves
             r.copyKept(e.cins[(round - 1) % 2], e.cins[round % 2], PLE_TAIL * WIDE / 2, WIDE / 2, 0, 0, 1, 0);
             if (wr > 1) {
+                // a sampled reply's drafts by its keyed rule, at each row's draw position (cache length + 1 + j)
+                const kd: ?sample.HeadDraw = if (out.sampling) |p| (if (sample.keyed()) .{ .s = p, .pos = e.draw_at } else null) else null;
+                if (kd != null) {
+                    sample.positions(r.enc, r.positions_pipe, r.ar, e.draw_at, MAXR);
+                    if (!r.serial) r.enc.barrier();
+                }
+                r.head_draw = kd;
+                defer r.head_draw = null;
                 try m.mtpEncode(MAXR - 1 + wp, wp, m.t.picks, m.last, .{ .b = e.wids.b, .off = 4 });
                 if (gt) |g| g.encode(r, m.mtp.logits, 0, wr);
                 if (tr) |t| if (t.sib > 0) t.siblingsEncode(r, m.mtp.logits, m.mtp.n_ids, m.mtp.ids, e.wids, 1);
@@ -286,6 +294,7 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
                 for (1..if (tr) |t| t.a else wr - 1) |j| {
                     r.head_md1 = if (gt) |g| g.md1(j) else null; // a gated chain step runs only when the gate opened it
                     defer r.head_md1 = null;
+                    if (kd) |d| r.head_draw = .{ .s = d.s, .pos = .{ .b = d.pos.b, .off = d.pos.off + 4 * j } };
                     try m.mtpEncode(j, 1, .{ .b = e.wids.b, .off = 4 * j }, m.mtp.h[1], .{ .b = e.wids.b, .off = 4 * (j + 1) });
                     if (gt) |g| g.encode(r, m.mtp.logits, @intCast(j), wr);
                     if (tr) |t| if (t.sib > 0) t.siblingsEncode(r, m.mtp.logits, m.mtp.n_ids, m.mtp.ids, e.wids, j + 1);

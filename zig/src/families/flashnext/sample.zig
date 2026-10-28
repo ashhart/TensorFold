@@ -122,6 +122,21 @@ pub fn drawRows(enc: mtl.ComputeEncoder, d: *const Draws, logits: fz.Buf, pos: f
 /// A greedy row among keyed ones: its top token alone races.
 const top_one: lanes.Sampling = .{ .seed = 0, .temperature = 1.0, .top_k = 1, .top_p = 1.0 };
 
+/// FZ_KEYED_DRAFTS=0: a sampled reply or stream drafts by argmax, as before.
+pub fn keyed() bool {
+    const v = std.c.getenv("FZ_KEYED_DRAFTS") orelse return true;
+    return v[0] != '0';
+}
+
+/// A sampled reply's head draft in GPU-side rounds: its keyed rule, and where the GPU holds the draft's position.
+pub const HeadDraw = struct { s: lanes.Sampling, pos: fz.Buf };
+
+/// One bf16 row of `n` token-id columns drawn under `h`'s rule at the position the GPU holds at `h.pos`.
+pub fn drawIdAt(enc: mtl.ComputeEncoder, d: *const Draws, logits: fz.Buf, ids: fz.Buf, n: usize, h: HeadDraw, out: fz.Buf) void {
+    const rules = [1]lanes.gpu_rule.Rule{lanes.gpu_rule.rule(h.s)};
+    keyedDraws(enc, d, logits, ids, n, &rules, .{ .gpu = h.pos }, out, true);
+}
+
 /// Bf16 rows of `n` token-id columns: row i's draft at lands[i] by its keyed rule (null: its top token).
 pub fn drawIds(enc: mtl.ComputeEncoder, d: *const Draws, logits: fz.Buf, ids: fz.Buf, n: usize, ss: []const ?lanes.Sampling, lands: []const u64, out: fz.Buf) void {
     var rules: [fz.MAXR]lanes.gpu_rule.Rule = undefined;
@@ -245,6 +260,18 @@ test "a sampled stream's draft over the draft head's ids is the shared rule's ho
         try std.testing.expectEqual(want, out.slice(u32, 2)[0]);
         const greedy = std.mem.indexOfScalar(u32, ids.slice(u32, n), out.slice(u32, 2)[1]).?;
         try std.testing.expectEqual(std.mem.max(f32, row), row[greedy]); // a top score (ties may go either way)
+        // a reply's draft at a position the GPU holds, read at an offset as a round's chain step reads it
+        const at_gpu = try dev.buffer(16, fz.opts);
+        defer at_gpu.deinit();
+        at_gpu.slice(u32, 4)[2] = @intCast(at);
+        const cb2 = q.commandBuffer();
+        const enc2 = cb2.compute(.serial);
+        drawIdAt(enc2, &d, .{ .b = logits }, .{ .b = ids }, n, .{ .s = s, .pos = .{ .b = at_gpu, .off = 8 } }, .{ .b = out, .off = 4 });
+        enc2.end();
+        cb2.commit();
+        cb2.wait();
+        try std.testing.expect(cb2.failure() == null);
+        try std.testing.expectEqual(want, out.slice(u32, 2)[1]);
     };
 }
 
