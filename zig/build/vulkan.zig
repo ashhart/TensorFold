@@ -160,22 +160,38 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         stage1_build.dependOn(&b.addInstallFile(spv, b.fmt("stage1/{s}.spv", .{v.name})).step);
         _ = stage1_files.addCopyFile(spv, b.fmt("{s}.spv", .{v.name}));
     }
+    const stage1_imports: []const std.Build.Module.Import = &.{
+        .{ .name = "vulkan", .module = vulkan },
+        .{ .name = "stage1_shaders", .module = stage1_shaders_mod },
+        .{ .name = "contract", .module = @import("kernel_contract.zig").module(b, target, .debug) },
+    };
     const probe_root = b.path(o.stage1_root orelse "zig/tests/vulkan/stage1_probe.zig");
     const stage1_probe = b.addExecutable(.{ .name = "tf-stage1-gpu", .root_module = b.createModule(.{
         .root_source_file = probe_root,
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{
-            .{ .name = "vulkan", .module = vulkan },
-            .{ .name = "stage1_shaders", .module = stage1_shaders_mod },
-            .{ .name = "contract", .module = @import("kernel_contract.zig").module(b, target, .debug) },
-        },
+        .imports = stage1_imports,
     }) });
     stage1_build.dependOn(&b.addInstallArtifact(stage1_probe, .{}).step);
     const stage1_probe_run = b.addRunArtifact(stage1_probe);
     stage1_probe_run.addPassthruArgs();
     stage1_run.dependOn(&stage1_probe_run.step);
+
+    // The datamove group's contract: the seven exact kernels through gates 1-4.
+    const datamove_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/vulkan/contract_datamove_main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = stage1_imports,
+    });
+    const datamove = b.addExecutable(.{ .name = "tf-stage1-datamove", .root_module = datamove_module });
+    stage1_build.dependOn(&b.addInstallArtifact(datamove, .{}).step);
+    const datamove_run = b.addRunArtifact(datamove);
+    datamove_run.addPassthruArgs();
+    b.step("stage1-datamove", "Run the datamove group's contract gates on the chosen device (args after --)").dependOn(&datamove_run.step);
+    host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = datamove_module })).step);
 
     // Stage 2: the norm/MLP pointwise variants — norm and swiglu compiled as the Ash8c
     // Metal-oracle form (ASH_QWEN35), add the plain bf16 form; all with -DUSE_BF16 —
