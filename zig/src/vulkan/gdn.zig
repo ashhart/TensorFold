@@ -176,7 +176,7 @@ pub const Gdn = struct {
             .prefill_bf16 = undefined,
             .decode_bf16 = undefined,
             .norm_bf16 = undefined,
-            .dummy = try Buffer.init(dev, .device, dummy_bytes),
+            .dummy = try Buffer.init(dev, .device, 2 * dummy_bytes),
         };
         errdefer g.dummy.deinit();
         g.copy_u16 = try dispatch.Pipeline.init(dev, shaders.copy_u16, .{ .bindings = 4, .push_bytes = full_push_bytes, .writes = 1 << 2 });
@@ -210,6 +210,28 @@ pub const Gdn = struct {
 
     fn dummyView(m: *const Gdn, kind: tensor.Kind) Error!View {
         return View.init(&m.dummy, kind, 0, dummy_bytes / kind.size());
+    }
+
+    fn snapshotDummyView(m: *const Gdn) Error!View {
+        // Binding 9 is declared writable even when the single-chunk shader never touches it.
+        return View.init(&m.dummy, .f32, dummy_bytes, dummy_bytes / tensor.Kind.f32.size());
+    }
+
+    fn bindPrefill(m: *Gdn, bindings: []const dispatch.Binding) Error!void {
+        m.prefill_bf16.bind(bindings) catch |e| {
+            if (e == error.Aliased) {
+                const names = [_][]const u8{ "q", "k", "v", "g_bf16_dummy", "beta", "h0", "y", "hf", "g_f32", "snapshot" };
+                for (bindings, 0..) |w, i| if (m.prefill_bf16.layout.writes >> @intCast(i) & 1 != 0) {
+                    for (bindings, 0..) |r, j| {
+                        if (i != j and w.buffer.handle == r.buffer.handle and w.offset < r.offset + r.len and r.offset < w.offset + w.len)
+                            std.debug.print("GDN prefill alias: {s} binding={d} buffer={any} bytes=[{d},{d}) overlaps {s} binding={d} buffer={any} bytes=[{d},{d})\n", .{
+                                names[i], i, w.buffer.handle, w.offset, w.offset + w.len, names[j], j, r.buffer.handle, r.offset, r.offset + r.len,
+                            });
+                    }
+                };
+            }
+            return e;
+        };
     }
 
     fn copy(m: *Gdn, cmds: *Commands, out: View, src: View, timeout_ns: u64) Error!void {
@@ -326,15 +348,15 @@ pub const Gdn = struct {
         if (plan.chunks > 1) {
             const snap_v = snap orelse return error.Invalid;
             const db = try m.dummyView(.bf16);
-            try m.prefill_bf16.bind(&.{
+            try m.bindPrefill(&.{
                 q.bind(),  k.bind(), v.bind(),  db.bind(), beta.bind(),
                 h0.bind(), y.bind(), hf.bind(), g.bind(),  snap_v.bind(),
             });
             try m.runPrefillPass(cmds, scan_flags, plan, timeout_ns);
         }
-        const snap_binding = snap orelse try m.dummyView(.f32);
+        const snap_binding = snap orelse try m.snapshotDummyView();
         const db = try m.dummyView(.bf16);
-        try m.prefill_bf16.bind(&.{
+        try m.bindPrefill(&.{
             q.bind(),  k.bind(), v.bind(),  db.bind(), beta.bind(),
             h0.bind(), y.bind(), hf.bind(), g.bind(),  snap_binding.bind(),
         });
@@ -647,4 +669,17 @@ test "the fixed model constants agree with the Metal kernel constexprs" {
     try testing.expectEqual(@as(usize, 4), Model.taps);
     try testing.expectEqual(@as(usize, 18), Model.linear_layers);
     try testing.expectEqual(@as(usize, 262144), Model.state_elements);
+}
+
+test "single-chunk prefill read and written snapshot dummies are disjoint" {
+    var m: Gdn = undefined;
+    m.dummy = .{ .dev = undefined, .handle = null, .memory = null, .len = 2 * dummy_bytes, .kind = .device, .mapped = null, .coherent = false };
+    const read = try m.dummyView(.bf16);
+    const snapshot = try m.snapshotDummyView();
+    try testing.expect(read.buffer == snapshot.buffer);
+    try testing.expect(!read.overlaps(snapshot));
+    try testing.expectEqual(@as(u64, 0), read.byte_offset);
+    try testing.expectEqual(dummy_bytes, snapshot.byte_offset);
+    try testing.expectEqual(dummy_bytes, read.byteLen());
+    try testing.expectEqual(dummy_bytes, snapshot.byteLen());
 }
