@@ -456,13 +456,19 @@ pub const Roce = struct {
 
     pub fn check(r: *Roce) Error!void {
         if (r.word(w_failed).load(.acquire) != 0) {
-            const src = r.word(w_failed + 6).load(.acquire);
-            const slot = r.word(w_failed + 1).load(.acquire) & 1;
-            log.warn("tp roce: rank {d}'s wait for seq {d} from rank {d} failed ({s} after {d} us; HCA {d}, flag held {d}, now {d}); doorbell {d}, posted {d}, completed {d}, abort {d}, proxy failed {d}", .{ r.me, r.word(w_failed + 1).load(.acquire), src, if (r.word(w_failed + 4).load(.acquire) == 1) "aborted" else "timed out", r.word(w_failed + 5).load(.acquire), r.word(w_failed + 3).load(.acquire), r.word(w_failed + 2).load(.acquire), r.flagWord(src, slot, 0), r.word(w_seq).load(.acquire), r.last_seq, r.word(w_completed).load(.acquire), r.word(w_abort).load(.acquire), r.word(w_proxy_failed).load(.acquire) });
+            var line: [384]u8 = undefined;
+            log.warn("{s}", .{r.describeFailure(&line)});
             return error.PeerFailed;
         }
         if (r.word(w_proxy_failed).load(.acquire) != 0) return error.BackendFailed;
         if (r.aborted.load(.acquire) or r.word(w_abort).load(.acquire) != 0) return error.Aborted;
+    }
+
+    /// The failed wait the kernel recorded, as `check` reports it: this rank, the seq and the rank it waited on.
+    fn describeFailure(r: *const Roce, buf: []u8) []const u8 {
+        const src = r.word(w_failed + 6).load(.acquire);
+        const slot = r.word(w_failed + 1).load(.acquire) & 1;
+        return std.fmt.bufPrint(buf, "tp roce: rank {d}'s wait for seq {d} from rank {d} failed ({s} after {d} us; HCA {d}, flag held {d}, now {d}); doorbell {d}, posted {d}, completed {d}, abort {d}, proxy failed {d}", .{ r.me, r.word(w_failed + 1).load(.acquire), src, if (r.word(w_failed + 4).load(.acquire) == 1) "aborted" else "timed out", r.word(w_failed + 5).load(.acquire), r.word(w_failed + 3).load(.acquire), r.word(w_failed + 2).load(.acquire), r.flagWord(src, slot, 0), r.word(w_seq).load(.acquire), r.last_seq, r.word(w_completed).load(.acquire), r.word(w_abort).load(.acquire), r.word(w_proxy_failed).load(.acquire) }) catch "tp roce: a failed wait (its report did not fit)";
     }
 
     /// The flag rank `src`'s HCA `hca` last wrote for `slot` here (0 out of range).
@@ -543,4 +549,27 @@ fn pin(cpu: u32) void {
     var set: std.os.linux.cpu_set_t = @splat(0);
     set[cpu / @bitSizeOf(usize)] |= @as(usize, 1) << @intCast(cpu % @bitSizeOf(usize));
     std.os.linux.sched_setaffinity(0, &set) catch log.warn("tp roce: could not pin the proxy to CPU {d}", .{cpu});
+}
+
+test "multirank check: a failed wait the kernel recorded is reported with this rank, the seq and the rank it waited on" {
+    const t = std.testing;
+    const slot = 4096;
+    const region = try t.allocator.alignedAlloc(u8, .fromByteUnits(page), Roce.regionBytes(3, slot));
+    defer t.allocator.free(region);
+    @memset(region, 0);
+    var r: Roce = undefined;
+    r.me = 1;
+    r.world = 3;
+    r.layout = Layout.of(3, slot);
+    r.region = region;
+    r.last_seq = 0;
+    r.aborted = .init(false);
+    try r.check();
+    // the kernel's record of a wait that timed out: seq 7 from rank 2 (mailbox.cu's ctrl[16 + 1] and ctrl[16 + 6])
+    r.word(w_failed + 1).store(7, .release);
+    r.word(w_failed + 6).store(2, .release);
+    r.word(w_failed).store(1, .release);
+    try t.expectError(error.PeerFailed, r.check());
+    var line: [384]u8 = undefined;
+    try t.expect(std.mem.startsWith(u8, r.describeFailure(&line), "tp roce: rank 1's wait for seq 7 from rank 2 failed (timed out after "));
 }
