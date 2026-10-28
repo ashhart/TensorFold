@@ -75,6 +75,7 @@ pub const Host = struct {
     startup: []u8 = &.{},
     lone: ?LoneRun = null, // the family's driver for a lone drafted stream, called with `family`
     store: ?*api.prompt_cache.Store = null, // kept Nemotron states; null when the budget is 0
+    kv: kv_pages.Watch = .{}, // what the load ledger hears of the KV pool (cuda_kv_pool.zig)
     learn: ?api.Learner = null, // the family's Sliding Weights learner (--slide), called with the context current
     slide: ?*anyopaque = null, // that learner's adapter, freed by slide_free before the family
     slide_free: ?*const fn (Allocator, *anyopaque) void = null,
@@ -133,6 +134,8 @@ pub const Host = struct {
         h.host.warm_quiet = if (info.warm_turns) nemotron.native.warm_quiet else 0;
         if (h.lone != null) h.host.lone = .{ .ctx = h, .run = loneRun, .sampled = true, .logprobs = h.inner.vtable.first_row != null, .structures = h.inner.vtable.first_masked != null, .min_budget = nemotron.native.lone_min_budget, .resumes = true };
         if (h.learn != null) h.host.learner = h.learner();
+        kv_pages.install(&h.kv, &h.host); // the pool's first census, before the engine thread owns the pool
+        errdefer kv_pages.unwatch(&h.kv); // a host that never starts leaves the pool reporting to no one
         try h.host.start();
     }
     /// The family's learner, each call made with the context current on the lane thread.
@@ -472,6 +475,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     errdefer if (h.recording) |r| r.free(gpa);
     // the family cuts its own prompt grid from position 0, as `tensorfold run` does: prefill_step 0
     const admit: ?api.Admit = if (comptime !@hasDecl(F, "fits")) null else if (paged != null) .{ .ctx = loaded.ctx, .fits = F.fits } else null;
+    h.kv = kv_pages.watchOf(F, loaded, paged);
     try h.serve(io, served.facts, loaded.rows, .{
         .lanes = streams,
         .draft_sources = .{ .drafter = served.source },

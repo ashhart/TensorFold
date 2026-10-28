@@ -81,6 +81,14 @@ pub fn fits(p: *anyopaque, prompt: u32, max_tokens: u32) bool {
     return own.lanes.fits(prompt, max_tokens);
 }
 
+/// The page pool the load ledger watches: rank 0's, the one that takes and gives pages for every rank.
+pub fn kvPool(p: *anyopaque) ?kv.Source {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    const pages = own.e.pages orelse return null; // a window a stream
+    if (!pages.leader) return null;
+    return .{ .pool = &pages.pool, .page_tokens = @import("cuda_state.zig").page_rows };
+}
+
 /// This rank's place: TF_GLM_RANK of TF_GLM_WORLD (both, or neither for a refusal that names them).
 pub const Place = struct { rank: usize, world: usize };
 

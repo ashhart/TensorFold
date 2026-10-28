@@ -87,12 +87,14 @@ pub const LaneHost = struct {
     activity: ?@import("lane_activity.zig").Activity = null, // owned work scopes for a backend's watchdog; null: off
     failure: ?@import("lane_activity.zig").Failure = null, // hears a round's or request's error; null: off
     load: load.State = .{}, // this host's part of the server's load ledger (lane_host_load.zig)
+    capacity: ?load.Source = null, // how the engine holds KV, set before start; null: no capacity group
 
     pub const ThreadInit = struct { ctx: *anyopaque, run: *const fn (ctx: *anyopaque) anyerror!void };
 
     const Lesson = struct { request: *const api.LearnRequest, sink: api.LearnSink };
 
     pub const Job = @import("lane_job.zig").Job;
+    pub const Load = load;
 
     pub fn init(gpa: Allocator, io: std.Io, core: *lanes.Engine, info_: Info) LaneHost {
         var shown = info_.ofLanes();
