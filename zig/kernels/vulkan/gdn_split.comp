@@ -1,0 +1,163 @@
+// Copyright © 2026 Joshua Warren / mlx-omarchy contributors.
+// SPDX-License-Identifier: MIT
+//
+// GDN pre-stage split for the Ash8c Metal oracle (gdn_pre.metal, post-conv
+// half): the depthwise conv has already run (conv_dw1d.comp over the
+// [T+3, C] conv input), so this kernel reads the raw conv output and does
+// the rest of gdn_pre: SiLU, the Q/K L2 norm split, the V passthrough and
+// the a/b gate from A_log / dt_bias. One workgroup of 32 lanes per
+// (token, head) mirrors Metal exactly: each lane owns 4 contiguous
+// channels (PER = 128/32), the row sum is a 32-lane reduction over the
+// per-lane partials, and every intermediate the Metal kernel rounds to
+// bf16 is rounded here too.
+//
+// Math per (t, head), C = 6144, DK = 128, NK = NV = 16:
+//   conv   = widen(conv_out[t*C + head*DK + lane*4 + j])     (already bf16)
+//   sig    = bf16(1/(1+exp(-conv)));  vals[j] = bf16(conv*sig)
+//   q (head < 16) / k (16..31):  inv = rsqrt(sum(vals^2)/128 + 1e-6/128),
+//       scale = bf16(1/128) for q, bf16(rsqrt(128)) for k,
+//       out = bf16(scale * bf16(vals[j]*inv))
+//   v (head 32..47): out = vals[j]
+//   lane 0:  s  = bf16(a[t,hv] + widen(dt[hv]))
+//            sp = bf16(max(s,0) + log(1+exp(-|s|)))
+//            g  = exp(-exp(A_log_f32[hv]) * sp)            (f32, like Metal)
+//            beta = bf16(1/(1+exp(-b[t,hv])))
+//
+// The reduction order differs from Metal's hardware simd_sum (documented in
+// gdn.zig; not claimed bit-exact). The gate chain is the same expression
+// sequence gated_delta_decode.comp's raw-gates prologue uses.
+//
+// Bindings (views bind at their base, so shader offsets start at zero):
+//   0 conv_out  bf16 [T, 6144]            readonly
+//   1 a         bf16 [T, 16]              readonly
+//   2 b         bf16 [T, 16]              readonly
+//   3 a_log     f32  [16]                 readonly
+//   4 dt_bias   bf16 [16]                 readonly
+//   5 qkv       bf16 SoA [3, T, 16, 128]  writeonly (q | k | v sections,
+//                                           each T*2048 elements)
+//   6 g         f32  [T, 16]              writeonly
+//   7 beta      bf16 [T, 16]              writeonly
+// Push (the standard Params prefix; only these fields are read):
+//   count       = T (tokens; grid x)
+//   lhs_size    = C (conv row stride, 6144)
+//   rhs_size    = T (SoA section stride in head-rows: T*16 heads * 128)
+//   output_size = 48 (heads; grid y)
+// Local size 32x1x1; grid (T, 48, 1). Shared memory: 32 f32 (128 B).
+
+#version 460
+
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer ConvOut { uint16_t v[]; } conv_out;
+layout(set = 0, binding = 1, std430) readonly buffer Ain     { uint16_t v[]; } ain;
+layout(set = 0, binding = 2, std430) readonly buffer Bin     { uint16_t v[]; } bin;
+layout(set = 0, binding = 3, std430) readonly buffer ALog    { float     v[]; } alog;
+layout(set = 0, binding = 4, std430) readonly buffer Dt      { uint16_t v[]; } dt;
+layout(set = 0, binding = 5, std430) writeonly buffer Qkv     { uint16_t v[]; } qkv;
+layout(set = 0, binding = 6, std430) writeonly buffer Gout    { float     v[]; } g_out;
+layout(set = 0, binding = 7, std430) writeonly buffer Beta    { uint16_t v[]; } beta;
+
+layout(push_constant) uniform Params {
+  uint count;        // T
+  uint operation;
+  uint lhs_size;     // C
+  uint rhs_size;     // T (SoA section stride in head-rows)
+  uint reduce_size;
+  uint output_size;  // heads
+  uint lhs_offset;
+  uint rhs_offset;
+  uint output_offset;
+  uint aux_size;
+  uint aux_offset;
+  uint matrix_m;
+  uint matrix_n;
+  uint matrix_k;
+  uint flags;
+  float alpha;
+  float beta_f;
+  uint dims;
+  uint shape[4];
+  uint in_strides[4];
+  uint out_strides[4];
+} params;
+
+float bf16_load(uint16_t bits) {
+  return uintBitsToFloat(uint(bits) << 16u);
+}
+
+uint16_t bf16_store(float value) {
+  uint bits = floatBitsToUint(value);
+  if ((bits & 0x7fff0000u) == 0x7f800000u) {
+    return uint16_t((bits >> 16) | 0x40u);
+  }
+  return uint16_t((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16);
+}
+
+// The a/b gate exactly as the Ash8c Metal gdn_pre lane 0 runs it: bf16
+// roundings on s and softplus, g kept f32 (exp(-exp(A_log) * sp)).
+vec2 ash_gate(float a_in, float b_in, float a_log, float dt_in) {
+  float s = bf16_load(bf16_store(a_in + dt_in));
+  float sp = bf16_load(bf16_store(max(s, 0.0f) + log(1.0f + exp(-abs(s)))));
+  float g = exp(-(exp(a_log) * sp));
+  float beta = bf16_load(bf16_store(1.0f / (1.0f + exp(-b_in))));
+  return vec2(g, beta);
+}
+
+shared float row_reduce[32];
+
+void main() {
+  const uint C = params.lhs_size;
+  const uint T = params.count;
+  const uint t = gl_WorkGroupID.x;
+  const uint head = gl_WorkGroupID.y;
+  const uint lane = gl_LocalInvocationID.x;
+  const uint hv = head % 16u;
+  const bool isq = head < 16u;
+  const bool isk = head >= 16u && head < 32u;
+
+  float vals[4];
+  uint base = t * C + head * 128u + lane * 4u;
+  for (uint j = 0u; j < 4u; ++j) {
+    float conv = bf16_load(conv_out.v[base + j]);
+    float sig = bf16_load(bf16_store(1.0f / (1.0f + exp(-conv))));
+    vals[j] = bf16_load(bf16_store(conv * sig));
+  }
+
+  uint out_head_row = t * 16u + hv;
+  uint section = isq ? 0u : (isk ? params.rhs_size * 2048u : 2u * params.rhs_size * 2048u); // T*16*128 per section
+  if (isq || isk) {
+    float ss = 0.0f;
+    for (uint j = 0u; j < 4u; ++j) ss += vals[j] * vals[j];
+    row_reduce[lane] = ss;
+    barrier();
+    for (uint stride = 16u; stride > 0u; stride >>= 1u) {
+      float other = lane < stride ? row_reduce[lane + stride] : 0.0f;
+      barrier();
+      if (lane < stride) row_reduce[lane] += other;
+      barrier();
+    }
+    float inv = inversesqrt(row_reduce[0] / 128.0f + (1e-6f / 128.0f));
+    float scale = bf16_load(bf16_store(isq ? (1.0f / 128.0f) : inversesqrt(128.0f)));
+    uint dst = section + out_head_row * 128u + lane * 4u;
+    for (uint j = 0u; j < 4u; ++j) {
+      qkv.v[dst + j] = bf16_store(scale * bf16_load(bf16_store(vals[j] * inv)));
+    }
+  } else {
+    uint dst = section + out_head_row * 128u + lane * 4u;
+    for (uint j = 0u; j < 4u; ++j) {
+      qkv.v[dst + j] = bf16_store(vals[j]);
+    }
+  }
+
+  if (lane == 0u) {
+    vec2 gates = ash_gate(bf16_load(ain.v[t * 16u + hv]),
+                          bf16_load(bin.v[t * 16u + hv]),
+                          alog.v[hv],
+                          bf16_load(dt.v[hv]));
+    g_out.v[t * 16u + hv] = gates.x;
+    beta.v[t * 16u + hv] = bf16_store(gates.y);
+  }
+}
