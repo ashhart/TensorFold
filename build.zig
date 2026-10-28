@@ -59,6 +59,7 @@ fn poolChecks(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.B
 }
 
 pub fn build(b: *std.Build) void {
+    @import("zig/build/qwen35_cache_host.zig").tests(b);
     @import("zig/build/residency_host.zig").steps(b);
     @import("zig/build/lane_halt_host.zig").steps(b);
     @import("zig/build/dsv41_shared.zig").steps(b);
@@ -93,6 +94,7 @@ pub fn build(b: *std.Build) void {
         const empty = b.addWriteFiles().add("step5-compile-only.metallib", "");
         step5_mods.sources.addImport("nemotron_packed_metallib", embedded(b, empty, "nemotron_packed.metallib"));
         @import("zig/build/step5_host.zig").steps(b, step5_mods.metal, step5_mods.engine, step5_mods.lanes);
+        @import("zig/build/qwen35_cache_host.zig").compileHost(b, step5_mods.metal, step5_mods.engine, step5_mods.lanes);
     }
     @import("zig/build/h3_host.zig").tests(b, target, test_step);
     @import("zig/build/digest.zig").steps(b, test_step, draft_ids, build_options);

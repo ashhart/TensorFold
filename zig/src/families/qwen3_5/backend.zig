@@ -9,6 +9,7 @@ const Model = @import("model.zig").Model;
 const kvp = @import("../../core/metal_kv_pages.zig");
 const kv = @import("../../core/kv_pool.zig");
 const be = lanes.backend;
+const snapshot = @import("snapshot.zig");
 
 pub const Options = struct { capacity: usize, chunk: usize = 128, streams: u32 = 8 };
 
@@ -103,19 +104,14 @@ pub const Metal = struct {
         const cache = try self.newPagedCache(capacity, paged);
         errdefer self.gpa.destroy(cache);
         errdefer cache.deinit();
-        var at: usize = 0;
-        while (at < ids.len) {
-            var end: usize = @min(ids.len, at + self.options.chunk);
-            for (stream.chunks) |boundary| if (boundary > at) {
-                end = @min(end, boundary);
-                break;
-            };
-            try coverRows(cache, end);
-            try fwd.run(self.model, &self.scratch, &.{.{ .cache = cache, .rows = end - at }}, ids[at..end], false, .last);
-            at = end;
-            stream.fill_at.store(@intCast(at), .monotonic); // fwd.run waits: `at` is landed progress
-        }
         try self.caches.put(self.gpa, stream, cache);
+        errdefer _ = self.caches.remove(stream);
+        try @import("prefill.zig").run(cache, stream, self.options.chunk, self, promptChunk);
+    }
+
+    fn promptChunk(self: *Metal, cache: *st.Cache, ids: []const u32) !void {
+        try coverRows(cache, cache.len + ids.len);
+        try fwd.run(self.model, &self.scratch, &.{.{ .cache = cache, .rows = ids.len }}, ids, false, .last);
     }
 
     fn firstFn(ptr: *anyopaque, stream: *lanes.Stream, position: u64) !u64 {
@@ -198,6 +194,26 @@ pub const Metal = struct {
             entry.value.deinit();
             self.gpa.destroy(entry.value);
         }
+    }
+};
+
+pub const Snaps = struct {
+    fn metal(ptr: *anyopaque) *Metal {
+        return @ptrCast(@alignCast(ptr));
+    }
+    pub fn bytes(_: *anyopaque, at: u32) u64 {
+        return snapshot.bytes(at);
+    }
+    pub fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
+        const self = metal(ptr);
+        const cache = try self.cacheOf(@ptrCast(@alignCast(owner orelse return error.NoStream)));
+        return @ptrCast(try snapshot.save(self.gpa, cache, at));
+    }
+    pub fn restore(_: *anyopaque, _: ?*anyopaque, _: *anyopaque) anyerror!void {
+        return error.RestoredInPrefill;
+    }
+    pub fn drop(ptr: *anyopaque, saved: *anyopaque) void {
+        snapshot.drop(metal(ptr).gpa, @ptrCast(@alignCast(saved)));
     }
 };
 
