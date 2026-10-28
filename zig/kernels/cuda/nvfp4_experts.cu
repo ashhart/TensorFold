@@ -185,7 +185,8 @@ __device__ __forceinline__ void prompt_tiles(const __nv_bfloat16* __restrict__ X
                                              float limit, int cbt, int e, int first, int cnt) {
   using P = Prompt4<M, RT, WM, WN>;
   constexpr int STAGES = P::STAGES;
-  constexpr bool XQ = FACT && NT == RT && WM == 1;  // WM 1: the CTA's warps share NT, so they share X's layout
+  // WM 1: the CTA's warps share NT, so they share X's layout. fact_swiglu (M 2) only: the down stays on the pair reads
+  constexpr bool XQ = FACT && M == 2 && NT == RT && WM == 1;
   extern __shared__ uint4 sm[];
   const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, wm = warp / WN, wn = warp - wm * WN;
   const int t = lane & 3, gq = lane >> 2, cb = cbt * WN + wn, cbs = min(WN, NB - cbt * WN);
