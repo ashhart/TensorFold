@@ -115,6 +115,20 @@ pub fn variantIndex(halves: u32, codebook: Codebook, warps: u32) ?usize {
 /// From this many 128-column blocks a shape plans one K split, so a view that wide keeps the whole matrix's bits.
 pub const wide_blocks = 64;
 
+/// The kernel matmul launches after the rotation: a linear_wc, a mid-M kernel or the linear, by index.
+pub const Pick = union(enum) { wc: usize, mpg: usize, linear: usize };
+
+/// matmul's choice for m rows of `w` (null: no kernel for its width); a family's fixed plan keeps the linear.
+pub fn pick(w: Weight, m: usize, midm: bool, use_wc: bool, min_rows: usize) ?Pick {
+    const p = planOf(w);
+    const idx = variantIndex(w.halves, w.codebook, p.wk) orelse return null;
+    if (!midm or w.sk != 0) return .{ .linear = idx };
+    if (use_wc) if (wcPick(w, m, p.sk, p.wk, min_rows)) |wi| return .{ .wc = wi };
+    // 17-48 rows: 16-row groups; 49-128: 32-row groups, each group's tiles decoded once (linear.cu's dispatch)
+    if (m >= min_rows) if (mpgIndex(w.halves, w.codebook, p.wk, if (m > 48) 2 else 1)) |mi| return .{ .mpg = mi };
+    return .{ .linear = idx };
+}
+
 /// What one shape launches, from the shape alone so a row's bits never depend on the row count (linear.py plan).
 pub fn plan(k: usize, n: usize, blocks: usize, min_tiles: usize) struct { sk: u32, wk: u32 } {
     const kt = k / 16;
@@ -251,7 +265,7 @@ pub const Linear = struct {
         if (w.k % 128 != 0 or w.n % 128 != 0) return error.Exl3Shape;
         const p = planOf(w);
         if ((w.k / 16) % (p.sk * p.wk) != 0) return error.Exl3Shape;
-        const idx = variantIndex(w.halves, w.codebook, p.wk) orelse return error.UnsupportedExl3Width;
+        const how = pick(w, m, l.midm, l.use_wc, l.min_rows) orelse return error.UnsupportedExl3Width;
         if (p.sk > 1 and z == 0) return error.Exl3Scratch;
 
         var r: launch_.Args = .{};
@@ -283,32 +297,32 @@ pub const Linear = struct {
         args.add(@as(i32, @intCast(p.sk)));
         args.add(@as(i32, @intCast(m)));
         args.add(@as(i32, @intCast(w.k)));
-        // 17-48 rows: 16-row groups; 49-128: 32-row groups, each group's tiles decoded once (linear.cu's dispatch)
-        if (l.midm and l.use_wc) if (wcPick(w, m, p.sk, p.wk, l.min_rows)) |wi| {
-            const v = wc_variants[wi];
-            args.add(@as(i32, @intCast(p.wk))); // WcArgs: LinearArgs, then the plan's warps
-            const rg = 16 * v.mt;
-            return launch_.launch(l.wc[wi], .{
-                .grid = .{ .x = @intCast(w.n / 128 * ((m + rg - 1) / rg)), .y = if (v.fold) 1 else p.sk, .z = 1 },
-                .block = .{ .x = 256, .y = 1, .z = 1 },
-                .shared = wcShared(v),
-            }, s, &args);
-        };
-        const pg: u32 = if (m > 48) 2 else 1;
-        if (l.midm and m >= l.min_rows) if (mpgIndex(w.halves, w.codebook, p.wk, pg)) |mi| {
-            const groups = (m + 16 * pg - 1) / (16 * pg);
-            return launch_.launch(l.mpg[mi], .{
-                .grid = .{ .x = @intCast(w.n / 128 * groups), .y = p.sk, .z = 1 },
+        switch (how) {
+            .wc => |wi| {
+                const v = wc_variants[wi];
+                args.add(@as(i32, @intCast(p.wk))); // WcArgs: LinearArgs, then the plan's warps
+                const rg = 16 * v.mt;
+                try launch_.launch(l.wc[wi], .{
+                    .grid = .{ .x = @intCast(w.n / 128 * ((m + rg - 1) / rg)), .y = if (v.fold) 1 else p.sk, .z = 1 },
+                    .block = .{ .x = 256, .y = 1, .z = 1 },
+                    .shared = wcShared(v),
+                }, s, &args);
+            },
+            .mpg => |mi| {
+                const rg = 16 * mpg_variants[mi].p;
+                try launch_.launch(l.mpg[mi], .{
+                    .grid = .{ .x = @intCast(w.n / 128 * ((m + rg - 1) / rg)), .y = p.sk, .z = 1 },
+                    .block = .{ .x = @intCast(p.wk * 32), .y = 1, .z = 1 },
+                    .shared = sharedBytes(w, m),
+                }, s, &args);
+            },
+            .linear => |idx| try launch_.launch(l.fns[idx], .{
+                .grid = .{ .x = @intCast(w.n / 128 * p.sk), .y = 1, .z = 1 },
                 .block = .{ .x = @intCast(p.wk * 32), .y = 1, .z = 1 },
                 .shared = sharedBytes(w, m),
-            }, s, &args);
-        };
-        try launch_.launch(l.fns[idx], .{
-            .grid = .{ .x = @intCast(w.n / 128 * p.sk), .y = 1, .z = 1 },
-            .block = .{ .x = @intCast(p.wk * 32), .y = 1, .z = 1 },
-            .shared = sharedBytes(w, m),
-            .pdl = l.pdl, // prefetches its weights, then waits for the rotation
-        }, s, &args);
+                .pdl = l.pdl, // prefetches its weights, then waits for the rotation
+            }, s, &args),
+        }
     }
 
     /// y_i = x through each of `ws` in one rotation and one launch (a member's own bits); scratch back to back, zeroed.
