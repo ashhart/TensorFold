@@ -96,7 +96,7 @@ fn probe(a: std.mem.Allocator, clock: Elapsed, vendor: ?u32, timeout: u64) !bool
     const device_kind = if (pr.deviceType < types.len) types[pr.deviceType] else "unknown";
     const v = pr.apiVersion;
     std.debug.print("MILESTONE device-found elapsed_ms={d} name=\"{s}\" vendor=0x{x:0>4} device=0x{x:0>4} type={s} api={d}.{d}.{d} " ++
-        "storage16={} int16={} fence-timeout={d}ms\n", .{ clock.ms(), name, pr.vendorID, pr.deviceID, device_kind, v >> 22 & 0x7f, v >> 12 & 0x3ff, v & 0xfff, dev.features.storage16, dev.features.int16, timeout / std.time.ns_per_ms });
+        "storage16={} int16={} preserve32={} flush32={} fence-timeout={d}ms\n", .{ clock.ms(), name, pr.vendorID, pr.deviceID, device_kind, v >> 22 & 0x7f, v >> 12 & 0x3ff, v & 0xfff, dev.features.storage16, dev.features.int16, dev.v12.shaderDenormPreserveFloat32 != 0, dev.v12.shaderDenormFlushToZeroFloat32 != 0, timeout / std.time.ns_per_ms });
     if (pr.deviceType == vk.c.VK_PHYSICAL_DEVICE_TYPE_CPU) {
         std.debug.print("FAIL device: a CPU (software) Vulkan device is never a GPU result\n", .{});
         return false;
@@ -110,9 +110,9 @@ fn probe(a: std.mem.Allocator, clock: Elapsed, vendor: ?u32, timeout: u64) !bool
     defer cmds.deinit();
     var staging = try vk.Buffer.init(&dev, .staging, 64 << 10);
     defer staging.deinit();
-    // Stage 2's three through the production operator; the preserve add compiled without
-    // -DUSE_BF16 (f32 in, exact f32 sum out), the gate and gated norm in the same dispatch
-    // shapes their wrappers use.
+    // Stage 2's three through the production operator; the preserve add over the same
+    // pipeline's DenormPreserve image (binary_vec.comp + -DPRESERVE_F32, bf16 in and out),
+    // the gate and gated norm in the same dispatch shapes their wrappers use.
     var m = try vk.norm_mlp.NormMlp.init(&dev, .{
         .norm_bf16 = &shaders2.norm_bf16,
         .add_bf16 = &shaders2.add_bf16,
@@ -194,23 +194,6 @@ fn boundShell(a: std.mem.Allocator, dev: *const vk.Device, cmds: *vk.Commands, s
     return .{ .buf = buf, .byte_offset = at_elems * 2, .elements = elements };
 }
 
-/// One f32 binding's shell (the preserve add); same lifetime rule as Bound16.
-const Bound32 = struct {
-    buf: vk.Buffer,
-    byte_offset: u64,
-    elements: u64,
-
-    fn view(b: *const Bound32) !vk.tensor.View {
-        return vk.tensor.View.init(&b.buf, .f32, b.byte_offset, b.elements);
-    }
-};
-
-fn boundShell32(a: std.mem.Allocator, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, shell: []const u32, at_elems: usize, elements: u64, timeout: u64) !Bound32 {
-    var buf = try uploaded(a, dev, cmds, staging, std.mem.sliceAsBytes(shell), timeout);
-    errdefer buf.deinit();
-    return .{ .buf = buf, .byte_offset = at_elems * 4, .elements = elements };
-}
-
 fn reportFail(comptime what: []const u8, name: []const u8, e: anyerror) bool {
     std.debug.print("FAIL " ++ what ++ " case=\"" ++ "{s}" ++ "\": " ++ "{s}" ++ "\n", .{ name, @errorName(e) });
     return false;
@@ -219,8 +202,13 @@ fn reportFail(comptime what: []const u8, name: []const u8, e: anyerror) bool {
 /// Stage 2's three: identical to the stage 2 probe's gates (same fixtures, same production
 /// operator), so the pointwise contract stands alone on a fresh device.
 fn addGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, m: *vk.norm_mlp.NormMlp, case: fx2.AddCase, timeout: u64) !bool {
-    const f = try fx2.Add.init(a, case, 0x59a9);
+    var f = try fx2.Add.init(a, case, 0x59a9);
     defer f.deinit();
+    // The stage 2 add's measured-property policy: the subnormal classes rows may read as
+    // signed zero only where the device reports no f32 denormal preservation. The device
+    // line above prints the property, so a strict refusal on a preserving device is a
+    // decidable honest finding.
+    f.allow_subnormal_flush = dev.v12.shaderDenormPreserveFloat32 == 0;
     var in_a = try boundShell(a, dev, cmds, staging, f.a_bits, case.at.a, case.elems, timeout);
     defer in_a.buf.deinit();
     var in_b = try boundShell(a, dev, cmds, staging, f.b_bits, case.at.b, case.elems, timeout);
@@ -261,7 +249,7 @@ fn addGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *v
         std.debug.print("FAIL residual-add case=\"{s}\": an input binding changed\n", .{case.name});
         return false;
     }
-    std.debug.print("MILESTONE residual-add elapsed_ms={d} case=\"{s}\" elements={d} matches the f32-add + RNE-store pipeline bit for bit, repeats byte-identical, inputs and guards unchanged, planted nan/+inf/-inf refused\n", .{ clock.ms(), case.name, case.elems });
+    std.debug.print("MILESTONE residual-add elapsed_ms={d} case=\"{s}\" elements={d} matches the f32-add + RNE-store pipeline bit for bit, subnormal-class-flush-allowed={}, repeats byte-identical, inputs and guards unchanged, planted nan/+inf/-inf refused\n", .{ clock.ms(), case.name, case.elems, f.allow_subnormal_flush and case.fill == .classes });
     return true;
 }
 
@@ -360,21 +348,22 @@ fn rmsGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *v
     return true;
 }
 
-/// The preserved residual add: the exact f32 sum, bit for bit. A device that flushes fp32
-/// denormals fails the classes rows HONESTLY — the fixture's reference is not fitted to the
-/// flush, and this gate prints that finding as what it is.
+/// The preserved residual add: the same stage 2 add pipeline (f32 add, one RNE bf16 store)
+/// over the DenormPreserve-requesting image, checked STRICTLY — no measured-property
+/// qualification. A device that flushes fp32 denormals fails the classes rows HONESTLY
+/// (the NOTE prints the finding); the fixture's reference is never fitted to the flush.
 fn preserveGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, p: *vk.dispatch.Pipeline, case: fx.PreserveCase, timeout: u64) !bool {
     const f = try fx.PreserveAdd.init(a, case, 0x59ac);
     defer f.deinit();
-    var in_a = try boundShell32(a, dev, cmds, staging, f.a_bits, case.at.a, case.elems, timeout);
+    var in_a = try boundShell(a, dev, cmds, staging, f.a_bits, case.at.a, case.elems, timeout);
     defer in_a.buf.deinit();
-    var in_b = try boundShell32(a, dev, cmds, staging, f.b_bits, case.at.b, case.elems, timeout);
+    var in_b = try boundShell(a, dev, cmds, staging, f.b_bits, case.at.b, case.elems, timeout);
     defer in_b.buf.deinit();
-    var out = try boundShell32(a, dev, cmds, staging, f.out, case.at.out, case.elems, timeout);
+    var out = try boundShell(a, dev, cmds, staging, f.out, case.at.out, case.elems, timeout);
     defer out.buf.deinit();
-    const bits = try a.alloc(u32, f.out.len);
+    const bits = try a.alloc(u16, f.out.len);
     defer a.free(bits);
-    var first: ?[]u32 = null;
+    var first: ?[]u16 = null;
     defer if (first) |x| a.free(x);
     for (0..repeats) |rep| {
         try vk.orExit(vk.upload(cmds, out.buf, 0, staging, std.mem.sliceAsBytes(f.out), timeout));
@@ -383,26 +372,26 @@ fn preserveGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmd
         try vk.orExit(p.run(cmds, std.mem.asBytes(&push)[0..vk.params.cast_push_bytes], try groups(case.elems, p.local[0], dev.properties.limits.maxComputeWorkGroupCount[0]), timeout));
         try fetch(cmds, staging, out.buf, std.mem.sliceAsBytes(bits), timeout);
         if (first) |x| {
-            if (std.mem.indexOfDiff(u32, x, bits)) |at| {
+            if (std.mem.indexOfDiff(u16, x, bits)) |at| {
                 std.debug.print("FAIL preserve-add case=\"{s}\": repeat {d} differs at element {d}\n", .{ case.name, rep, at });
                 return false;
             }
-        } else first = try a.dupe(u32, bits);
+        } else first = try a.dupe(u16, bits);
     }
     const mm = f.firstMismatch(bits) catch |e| return reportFail("preserve-add", case.name, e);
     if (mm) |bad| {
-        std.debug.print("FAIL preserve-add case=\"{s}\": {s} at element {d}: a=0x{x:0>8} b=0x{x:0>8} want=0x{x:0>8} got=0x{x:0>8}\n", .{ case.name, @errorName(bad.kind), bad.index, bad.a, bad.b, bad.want, bad.got });
-        if (case.fill == .classes and isDenormalBits(bad.want)) {
-            std.debug.print("NOTE preserve-add: want is an fp32 subnormal and got differs — this device flushes fp32 denormals; the contract's denormal rows fail honestly by design\n", .{});
+        std.debug.print("FAIL preserve-add case=\"{s}\": {s} at element {d}: a=0x{x:0>4} ({s}) b=0x{x:0>4} ({s}) want=0x{x:0>4} ({s}) got=0x{x:0>4} ({s})\n", .{ case.name, @errorName(bad.kind), bad.index, bad.a, fx.classify(bad.a), bad.b, fx.classify(bad.b), bad.want, fx.classify(bad.want), bad.got, fx.classify(bad.got) });
+        if (case.fill == .classes and isBf16Subnormal(bad.want)) {
+            std.debug.print("NOTE preserve-add: want is a bf16 subnormal whose f32 sum the pipeline must carry through fp32 denormals, and got differs — this device flushes fp32 denormals despite the requested DenormPreserve; the preserve gate fails here honestly by design\n", .{});
         }
         return false;
     }
     // A planted nonfinite output at a finite-want element must be refused by the same checker.
     const data_at = case.at.out + firstFinite(f.want).?;
-    var mutated = try a.dupe(u32, bits);
+    var mutated = try a.dupe(u16, bits);
     defer a.free(mutated);
     for (planted_bits, planted) |pb, pname| {
-        mutated[data_at] = @as(u32, pb) << 16;
+        mutated[data_at] = pb;
         if (f.check(mutated)) |_| {
             std.debug.print("FAIL preserve-add case=\"{s}\": a planted {s} output passed the check\n", .{ case.name, pname });
             return false;
@@ -412,13 +401,13 @@ fn preserveGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmd
         std.debug.print("FAIL preserve-add case=\"{s}\": an input binding changed\n", .{case.name});
         return false;
     }
-    std.debug.print("MILESTONE preserve-add elapsed_ms={d} case=\"{s}\" elements={d} matches the exact f32 sum bit for bit, repeats byte-identical, inputs and guards unchanged, planted nan/+inf/-inf refused\n", .{ clock.ms(), case.name, case.elems });
+    std.debug.print("MILESTONE preserve-add elapsed_ms={d} case=\"{s}\" elements={d} matches the stage 2 add pipeline bits over the DenormPreserve image, strict on subnormal sums, repeats byte-identical, inputs and guards unchanged, planted nan/+inf/-inf refused\n", .{ clock.ms(), case.name, case.elems });
     return true;
 }
 
-fn isDenormalBits(bits: u32) bool {
-    const v: f32 = @bitCast(bits);
-    return std.math.isFinite(v) and v != 0 and @abs(v) < std.math.floatMin(f32);
+/// bf16 bits whose value is a subnormal: exponent 0 with a nonzero mantissa.
+fn isBf16Subnormal(bits: u16) bool {
+    return bits & 0x7f80 == 0 and bits & 0x7f != 0;
 }
 
 /// The attention output gate: bf16(sigmoid(gate)) once, times ctx, one bf16 store.
