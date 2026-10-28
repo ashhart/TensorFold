@@ -227,9 +227,9 @@ const Builder = struct {
     fn mlp(b: *Builder, base: []const u8) !DenseMlp {
         var buf: [192]u8 = undefined;
         return .{
-            .gate = try b.quant(try key(&buf, "{s}mlp.gate_proj", .{base}), pinned.hidden, pinned.intermediate),
-            .up = try b.quant(try key(&buf, "{s}mlp.up_proj", .{base}), pinned.hidden, pinned.intermediate),
-            .down = try b.quant(try key(&buf, "{s}mlp.down_proj", .{base}), pinned.intermediate, pinned.hidden),
+            .gate = try b.quant(try key(&buf, "{s}mlp.gate_proj", .{base}), pinned.intermediate, pinned.hidden),
+            .up = try b.quant(try key(&buf, "{s}mlp.up_proj", .{base}), pinned.intermediate, pinned.hidden),
+            .down = try b.quant(try key(&buf, "{s}mlp.down_proj", .{base}), pinned.hidden, pinned.intermediate),
         };
     }
 
