@@ -203,7 +203,12 @@ pub const Metal = struct {
                 if (snapshot.restore(self.gpa, self.model.queue, snap, cache)) stream.cached = snap.at else |_| stream.reuse_failed = true;
             } else stream.reuse_failed = true;
         }
-        if (self.model.config.geo.layer_input != 0) return self.prefillWindows(stream, cache, ids, sink);
+        // the E-series' prompt runs on affine_mm's tiles where the row path packed its weights; not the first window
+        const tiles = self.model.weights.head.raw != null and std.c.getenv("GEMMA_E4B_WINDOWS") == null;
+        if (self.model.config.geo.layer_input != 0) {
+            if (!tiles or ids.len <= st.prompt_rows) return self.prefillWindows(stream, cache, ids, sink);
+            if (cache.len < st.prompt_rows) try self.prefillWindows(stream, cache, ids[0..st.prompt_rows], sink);
+        }
         var spans: std.ArrayList(prompt.Span) = .empty;
         defer spans.deinit(self.gpa);
         const rows_buf = try self.encodeImages(stream, cache.len, &spans);

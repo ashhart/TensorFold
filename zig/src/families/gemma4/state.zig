@@ -174,7 +174,7 @@ pub const Scratch = struct {
         /// bf16 1.0: the MLP's dense tail leaves the residual unscaled; the layer scalar follows the per-layer input.
         one: mtl.Buffer,
 
-        fn init(device: mtl.Device, geo: cfg.Geometry, rows: usize) !Ple {
+        pub fn init(device: mtl.Device, geo: cfg.Geometry, rows: usize) !Ple {
             const wide = rows * geo.layers * geo.layer_input * 2;
             var p: Ple = undefined;
             var made: usize = 0;
@@ -187,7 +187,7 @@ pub const Scratch = struct {
             return p;
         }
 
-        fn deinit(p: Ple) void {
+        pub fn deinit(p: Ple) void {
             inline for (.{ "tok", "prj", "pli", "gate", "mid", "one" }) |f| @field(p, f).deinit();
         }
     };
