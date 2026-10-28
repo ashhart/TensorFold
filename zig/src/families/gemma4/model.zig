@@ -195,6 +195,15 @@ pub const Model = struct {
         m.taps = @intCast(layers.len);
     }
 
+    /// The first layer whose output feeds no cache and no tap: past the cache-owning layers and the drafter's last tap.
+    pub fn deepFrom(m: *const Model) usize {
+        var from = m.config.geo.cacheLayers();
+        for (m.tap_of[0..m.config.geo.layers], 0..) |t, i| {
+            if (t >= 0) from = @max(from, i + 1);
+        }
+        return from;
+    }
+
     pub fn deinit(m: *Model) void {
         if (m.vision) |v| v.deinit();
         m.inv_sliding.deinit();
