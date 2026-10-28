@@ -48,6 +48,10 @@ pub fn tinyPack(a: std.mem.Allocator, c: *const Config, extra: []const u8, skip:
 
 /// `tinyPack`, and the data bytes its header describes.
 fn tinyPackLen(a: std.mem.Allocator, c: *const Config, extra: []const u8, skip: []const u8, data_len: *u64) ![]u8 {
+    return tinyPackWidths(a, c, extra, skip, data_len, null);
+}
+
+fn tinyPackWidths(a: std.mem.Allocator, c: *const Config, extra: []const u8, skip: []const u8, data_len: *u64, widths: ?[]const u64) ![]u8 {
     var w: std.Io.Writer.Allocating = .init(a);
     errdefer w.deinit();
     var at: u64 = 0;
@@ -122,7 +126,7 @@ fn tinyPackLen(a: std.mem.Allocator, c: *const Config, extra: []const u8, skip: 
             var e: u64 = 0;
             while (e < E) : (e += 1) {
                 // block 2: expert 1's down projection at 3 bits, expert 3's gate at 3 bits (a gate/up width mismatch)
-                const words: u64 = if (l == 2 and ((e == 1 and comptime std.mem.eql(u8, m, "w2")) or (e == 3 and comptime std.mem.eql(u8, m, "w1")))) 48 else 32;
+                const words: u64 = if (widths) |ws| ws[e % ws.len] else if (l == 2 and ((e == 1 and comptime std.mem.eql(u8, m, "w2")) or (e == 3 and comptime std.mem.eql(u8, m, "w1")))) 48 else 32;
                 try T.group(wr, &at, &first, skip, try std.fmt.bufPrint(&nb, "{s}.ffn.experts.{d}." ++ m, .{ p, e }), kn[0], kn[1], words);
             }
         }
@@ -354,4 +358,42 @@ test "a synthetic pack: an F16 confidence head plans and keeps its stored dtype"
     defer r.deinit();
     try testing.expect(r.dspark.?.confidence.?.info.dtype == .f16);
     try testing.expectEqual(@as(u64, 2 * n), r.dspark.?.confidence.?.bytes);
+}
+
+test "cold native headers preserve expert identity across three width classes on both ranks" {
+    const a = testing.allocator;
+    const c = config.tiny();
+    var bytes: u64 = 0;
+    const widths = [_]u64{ 32, 80, 48, 32, 48, 80, 32, 48 };
+    const header = try tinyPackWidths(a, &c, "", "", &bytes, &widths);
+    defer a.free(header);
+    var pack = Pack.init(a);
+    defer pack.deinit();
+    try pack.addHeader("cold.safetensors", header, bytes);
+    var r0 = try plan.build(a, &c, &pack, .{ .rank = 0, .world = 2 });
+    defer r0.deinit();
+    var r1 = try plan.build(a, &c, &pack, .{ .rank = 1, .world = 2 });
+    defer r1.deinit();
+    for (r0.layers, r1.layers) |l0, l1| {
+        for (l0.experts, l1.experts) |e0, e1| {
+            try testing.expect(e0.layout.kind == .ragged and e1.layout.kind == .ragged);
+            try testing.expectEqual(@as(u32, 3), e0.layout.widths());
+            try testing.expectEqualSlices(u16, e0.layout.words, e1.layout.words);
+            try testing.expectEqualSlices(u64, e0.layout.offsets, e1.layout.offsets);
+            var offset: u64 = 0;
+            for (e0.parts, e1.parts, e0.prefixes, e1.prefixes, 0..) |p0, p1, n0, n1, id| {
+                try testing.expectEqualStrings(n0, n1);
+                var name: [128]u8 = undefined;
+                try testing.expectEqualStrings(try @import("names.zig").expertName(l0.prefix, @intCast(id), e0.proj, &name), n0);
+                try testing.expectEqual(@as(u32, @intCast(widths[id % widths.len])), p0.group.words);
+                try testing.expectEqual(offset, e0.layout.byteOffset(id));
+                const stored = pack.names.get(try std.fmt.bufPrint(&name, "{s}.trellis", .{n0})).?;
+                try testing.expectEqual(stored.nbytes, p0.trellis.bytes() + p1.trellis.bytes());
+                offset += p0.trellis.bytes();
+            }
+            try testing.expectEqual(offset, e0.layout.trellisBytes());
+        }
+    }
+    try testing.expectEqual(@as(usize, 0), r0.leftovers.len);
+    try testing.expectEqual(@as(usize, 0), r1.leftovers.len);
 }
