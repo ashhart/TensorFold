@@ -12,7 +12,10 @@ pub const registry = @import("contract/registry.zig");
 pub const cubin = @import("contract/cubin.zig");
 pub const hsaco = @import("contract/hsaco.zig");
 pub const hip_records = @import("contract/hip_records.zig");
-
+pub const vulkan_records = @import("contract/vulkan_records.zig");
+test {
+    _ = vulkan_records;
+}
 test {
     _ = @import("contract/qwen_served_records.zig");
     _ = @import("contract/delta_slots_records.zig");
