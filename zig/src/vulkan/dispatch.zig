@@ -8,9 +8,44 @@ const commands = @import("commands.zig");
 
 const check = runtime.check;
 
-pub const Error = runtime.Error || error{ BadSpirv, NoLocalSize, TooManyBindings, BadPushSize, BadWorkgroup, BadGroupCount, BadBindings, Aliased };
+pub const Error = runtime.Error || error{ BadSpirv, NoLocalSize, TooManyBindings, BadPushSize, BadWorkgroup, BadGroupCount, BadBindings, Aliased, BatchOverflow };
 
 pub const max_bindings = 10;
+
+/// The bounded per-pipeline bank of immutable descriptor snapshots for
+/// batched recording. 512 covers the worst token (489 dispatch records; no
+/// single pipeline exceeds that within one token). A snapshot set, once
+/// recorded, is never rewritten until the batch epoch advances, which
+/// happens only after the previous batch's fence has been waited — so the
+/// GPU never observes a set whose contents change under it.
+pub const batch_cap: u32 = 512;
+
+/// Batch session state shared by every pipeline; driven by commands.zig's
+/// beginBatch (batchBegin) and after the fence (batchEnd).
+pub var batch_open: bool = false;
+/// Advances at every batch open; a pipeline whose seen epoch differs resets
+/// its bank cursor, reusing snapshots only after the previous fence.
+pub var batch_epoch: u32 = 0;
+
+pub fn batchBegin() void {
+    batch_open = true;
+    batch_epoch +%= 1;
+}
+
+pub fn batchEnd() void {
+    batch_open = false;
+}
+
+/// The next bank cursor for a pipeline whose snapshots were last reset at
+/// epoch `seen`: a new epoch resets to 0 (legal only because beginBatch runs
+/// after the previous batch's fence), and the bounded bank refuses past
+/// batch_cap instead of silently reusing a set the GPU is still reading.
+/// Pure and host-tested.
+pub fn nextBatchCursor(seen: u32, cursor: u32) Error!u32 {
+    const next = if (seen != batch_epoch) 0 else cursor;
+    if (next >= batch_cap) return error.BatchOverflow;
+    return next;
+}
 
 /// The shader's set 0: storage buffers 0..bindings-1, its push bytes, and a mask of the bindings it writes.
 pub const Layout = struct { bindings: u32, push_bytes: u32, writes: u32 };
@@ -29,6 +64,16 @@ pub const Pipeline = struct {
     pool: c.VkDescriptorPool = null,
     set: c.VkDescriptorSet = null,
     bound: bool = false,
+    // Batched-recording bank: lazily created pool, allocated sets, the write
+    // cursor and the epoch it was last reset at. Bindings staged by bind()
+    // while a batch is open are snapshotted into the bank at record time.
+    batch_pool: c.VkDescriptorPool = null,
+    batch_sets: [batch_cap]c.VkDescriptorSet = undefined,
+    batch_n: u32 = 0,
+    batch_cursor: u32 = 0,
+    batch_epoch_seen: u32 = 0,
+    stash: [max_bindings]Binding = undefined,
+    stash_n: u32 = 0,
 
     /// Checks the module and the device's limits before creating anything; a failure destroys what was made.
     pub fn init(dev: *const Device, spirv: []align(4) const u8, layout: Layout) Error!Pipeline {
@@ -121,6 +166,7 @@ pub const Pipeline = struct {
     pub fn deinit(p: *Pipeline) void {
         const api = &p.dev.api;
         const h = p.dev.handle;
+        if (p.batch_pool != null) api.vkDestroyDescriptorPool(h, p.batch_pool, null);
         api.vkDestroyDescriptorPool(h, p.pool, null);
         api.vkDestroyPipeline(h, p.pipeline, null);
         api.vkDestroyPipelineLayout(h, p.pipeline_layout, null);
@@ -128,14 +174,26 @@ pub const Pipeline = struct {
     }
 
     /// Updates checked device-local bindings; call only when no submission using this descriptor set is pending.
+    /// While a batch is open the bindings are staged instead and snapshotted
+    /// into that dispatch's own banked set at record time — a batched token
+    /// never rewrites a set the GPU has been commanded to read.
     pub fn bind(p: *Pipeline, bindings: []const Binding) Error!void {
         if (bindings.len != p.layout.bindings) return error.BadBindings;
         var infos: [max_bindings]c.VkDescriptorBufferInfo = undefined;
-        var writes: [max_bindings]c.VkWriteDescriptorSet = undefined;
         for (bindings, 0..) |b, i| {
             if (b.buffer.kind != .device or b.buffer.dev != p.dev) return error.BadBindings;
             if (b.len % 4 != 0) return error.Misaligned; // 32-bit element arrays: a ragged range drops its last element
             infos[i] = try b.buffer.descriptor(b.offset, b.len);
+        }
+        try disjoint(bindings, p.layout.writes);
+        if (batch_open) {
+            @memcpy(p.stash[0..bindings.len], bindings);
+            p.stash_n = @intCast(bindings.len);
+            return;
+        }
+        p.stash_n = 0; // discard any unrecorded binding left by an aborted batch
+        var writes: [max_bindings]c.VkWriteDescriptorSet = undefined;
+        for (bindings, 0..) |_, i| {
             writes[i] = .{
                 .sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                 .dstSet = p.set,
@@ -145,23 +203,78 @@ pub const Pipeline = struct {
                 .pBufferInfo = &infos[i],
             };
         }
-        try disjoint(bindings, p.layout.writes);
         p.dev.api.vkUpdateDescriptorSets(p.dev.handle, p.layout.bindings, &writes, 0, null);
         p.bound = true;
     }
 
+    /// The descriptor set this dispatch binds: the pipeline's live set on the
+    /// immediate schedule, or a fresh immutable bank snapshot per batched
+    /// dispatch (the staged bindings' vkUpdateDescriptorSets, counted by the
+    /// profiler, happens here).
+    fn snapshotSet(p: *Pipeline) Error!c.VkDescriptorSet {
+        if (p.stash_n == 0) return p.set; // immediate schedule: bind already updated p.set
+        const cursor = try nextBatchCursor(p.batch_epoch_seen, p.batch_cursor);
+        if (p.batch_epoch_seen != batch_epoch) {
+            p.batch_epoch_seen = batch_epoch;
+            p.batch_cursor = cursor; // previous batch's fence has been waited; its snapshots are reusable
+        }
+        const api = &p.dev.api;
+        const h = p.dev.handle;
+        if (p.batch_pool == null) {
+            // First batched use of this pipeline: the persistent bounded
+            // bank. First-use cost only; later tokens reuse the sets.
+            const size: c.VkDescriptorPoolSize = .{ .type = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = batch_cap * p.layout.bindings };
+            const pool_info: c.VkDescriptorPoolCreateInfo = .{
+                .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+                .maxSets = batch_cap,
+                .poolSizeCount = 1,
+                .pPoolSizes = &size,
+            };
+            try check(api.vkCreateDescriptorPool(h, &pool_info, null, &p.batch_pool));
+        }
+        if (p.batch_cursor == p.batch_n) {
+            const alloc_info: c.VkDescriptorSetAllocateInfo = .{
+                .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+                .descriptorPool = p.batch_pool,
+                .descriptorSetCount = 1,
+                .pSetLayouts = &p.set_layout,
+            };
+            try check(api.vkAllocateDescriptorSets(h, &alloc_info, &p.batch_sets[p.batch_cursor]));
+            p.batch_n += 1;
+        }
+        const set = p.batch_sets[p.batch_cursor];
+        var infos: [max_bindings]c.VkDescriptorBufferInfo = undefined;
+        var writes: [max_bindings]c.VkWriteDescriptorSet = undefined;
+        for (p.stash[0..p.stash_n], 0..) |b, i| {
+            infos[i] = try b.buffer.descriptor(b.offset, b.len);
+            writes[i] = .{
+                .sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = set,
+                .dstBinding = @intCast(i),
+                .descriptorCount = 1,
+                .descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .pBufferInfo = &infos[i],
+            };
+        }
+        api.vkUpdateDescriptorSets(h, p.stash_n, &writes, 0, null);
+        p.batch_cursor += 1;
+        p.stash_n = 0;
+        return set;
+    }
+
     /// Records one dispatch, then a barrier making its writes visible to a later dispatch or transfer.
-    pub fn record(p: *const Pipeline, cmd: c.VkCommandBuffer, push: []const u8, groups: [3]u32) Error!void {
-        if (!p.bound) return error.BadBindings;
+    pub fn record(p: *Pipeline, cmd: c.VkCommandBuffer, push: []const u8, groups: [3]u32) Error!void {
+        if (p.stash_n == 0 and !p.bound) return error.BadBindings;
         if (push.len != p.layout.push_bytes) return error.BadPushSize;
         const most = p.dev.properties.limits.maxComputeWorkGroupCount;
         counts(most, groups) catch |e| {
             std.log.err("vulkan: dispatch {any} groups refused, device allows {any}", .{ groups, most });
             return e;
         };
+        const set = try p.snapshotSet();
         const api = &p.dev.api;
         api.vkCmdBindPipeline(cmd, c.VK_PIPELINE_BIND_POINT_COMPUTE, p.pipeline);
-        api.vkCmdBindDescriptorSets(cmd, c.VK_PIPELINE_BIND_POINT_COMPUTE, p.pipeline_layout, 0, 1, &p.set, 0, null);
+        api.vkCmdBindDescriptorSets(cmd, c.VK_PIPELINE_BIND_POINT_COMPUTE, p.pipeline_layout, 0, 1, &set, 0, null);
         if (push.len > 0) api.vkCmdPushConstants(cmd, p.pipeline_layout, c.VK_SHADER_STAGE_COMPUTE_BIT, 0, p.layout.push_bytes, push.ptr);
         api.vkCmdDispatch(cmd, groups[0], groups[1], groups[2]);
         const reads = c.VK_ACCESS_SHADER_READ_BIT | c.VK_ACCESS_SHADER_WRITE_BIT | c.VK_ACCESS_TRANSFER_READ_BIT | c.VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -170,7 +283,9 @@ pub const Pipeline = struct {
     }
 
     /// One dispatch in its own submission; wrap it in commands.orExit, which ends the process on error.Timeout.
-    pub fn run(p: *const Pipeline, cmds: *commands.Commands, push: []const u8, groups: [3]u32, timeout_ns: u64) Error!void {
+    /// Inside an open batch the begin/submit pair is the session's no-op and
+    /// the dispatch only records into the packed command buffer.
+    pub fn run(p: *Pipeline, cmds: *commands.Commands, push: []const u8, groups: [3]u32, timeout_ns: u64) Error!void {
         try p.record(try cmds.begin(), push, groups);
         try cmds.submit(timeout_ns);
     }
@@ -328,4 +443,16 @@ test "device limits refuse bindings, push bytes, workgroups and group counts pas
     try std.testing.expectError(error.TooManyBindings, fits(l, .{ .bindings = max_bindings + 1, .push_bytes = 120, .writes = 1 << 10 }, .{ 256, 1, 1 }));
     l.maxPerStageDescriptorStorageBuffers = 8;
     try std.testing.expectError(error.TooManyBindings, fits(l, .{ .bindings = max_bindings, .push_bytes = 120, .writes = 1 << 9 }, .{ 256, 1, 1 }));
+}
+
+test "the batched bank cursor resets per epoch and refuses past the bounded cap" {
+    batch_epoch += 1; // beginBatch bumps: the previous batch's fence has been waited
+    try std.testing.expectEqual(@as(u32, 0), try nextBatchCursor(0, 489)); // stale seen epoch resets
+    try std.testing.expectEqual(@as(u32, 7), try nextBatchCursor(batch_epoch, 7)); // same epoch advances
+    try std.testing.expectEqual(@as(u32, batch_cap - 1), try nextBatchCursor(batch_epoch, batch_cap - 1)); // last slot
+    try std.testing.expectEqual(@as(u32, 0), try nextBatchCursor(batch_epoch -% 1, batch_cap)); // fresh epoch clears even a full cursor
+    // exhausting the bank within one epoch refuses instead of rewriting a set in flight
+    const full: u32 = batch_cap;
+    batch_epoch += 1;
+    try std.testing.expectError(error.BatchOverflow, nextBatchCursor(batch_epoch, full));
 }

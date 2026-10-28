@@ -148,18 +148,11 @@ pub const Greedy = struct {
         g.results.deinit();
     }
 
-    /// One draw over `logits` (a bf16 view of exactly the init count; the view's
-    /// word-padding rule refuses odd counts before any dispatch). One compute
-    /// submission resets the three result words (the runtime's recordFill), then
-    /// runs finite_logits -> argreduce_chunk -> argreduce_combine behind
-    /// dispatch barriers; a second fenced submission stages the 12-byte readback.
-    /// Wrap in commands.orExit: on Timeout/InFlight nothing may be freed.
-    pub fn select(g: *Greedy, cmds: *Commands, staging: Buffer, logits: View, timeout_ns: u64) Error!u32 {
-        if (logits.kind != .bf16 or logits.elements != g.plan.count) return error.Invalid;
-        try g.finite_logits.bind(&.{ logits.bind(), .{ .buffer = &g.results, .len = 8 } });
-        try g.chunk.bind(&.{ logits.bind(), .{ .buffer = &g.partials, .len = g.partials.len } });
-        try g.combine.bind(&.{ .{ .buffer = &g.partials, .len = g.partials.len }, .{ .buffer = &g.results, .len = g.results.len } });
-        const cmd = try cmds.begin();
+    /// The draw's GPU work into an already-begun command buffer `cmd`: the
+    /// per-call three-word reset, the ordering barrier and the finite ->
+    /// chunk -> combine dispatch sequence — exactly the kernels and order
+    /// of select, with no submit. Shared by the immediate and batched paths.
+    fn recordKernels(g: *Greedy, cmd: c.VkCommandBuffer) Error!void {
         // Per-call reset of all three words; the barrier orders the fills and
         // the compute that reads or overwrites them. The index word resets to
         // 0xffffffff, so a run whose combine never wrote is refused by
@@ -182,9 +175,46 @@ pub const Greedy = struct {
             .output_offset = 2, // Result.index: word 2, after flag and first_bad
         };
         try g.combine.record(cmd, std.mem.asBytes(&o)[0..greedy_push_bytes], .{ 1, 1, 1 });
+    }
+
+    fn bindAll(g: *Greedy, logits: View) Error!void {
+        if (logits.kind != .bf16 or logits.elements != g.plan.count) return error.Invalid;
+        try g.finite_logits.bind(&.{ logits.bind(), .{ .buffer = &g.results, .len = 8 } });
+        try g.chunk.bind(&.{ logits.bind(), .{ .buffer = &g.partials, .len = g.partials.len } });
+        try g.combine.bind(&.{ .{ .buffer = &g.partials, .len = g.partials.len }, .{ .buffer = &g.results, .len = g.results.len } });
+    }
+
+    /// One draw over `logits` (a bf16 view of exactly the init count; the view's
+    /// word-padding rule refuses odd counts before any dispatch). One compute
+    /// submission resets the three result words (the runtime's recordFill), then
+    /// runs finite_logits -> argreduce_chunk -> argreduce_combine behind
+    /// dispatch barriers; a second fenced submission stages the 12-byte readback.
+    /// Wrap in commands.orExit: on Timeout/InFlight nothing may be freed.
+    pub fn select(g: *Greedy, cmds: *Commands, staging: Buffer, logits: View, timeout_ns: u64) Error!u32 {
+        try g.bindAll(logits);
+        const cmd = try cmds.begin();
+        try g.recordKernels(cmd);
         try cmds.submit(timeout_ns);
         var out: Result = undefined;
         try commands.download(cmds, g.results, 0, staging, std.mem.asBytes(&out), timeout_ns);
+        return g.decodeResult(out);
+    }
+
+    /// The batched draw: records the SAME reset/fill/finite/chunk/combine
+    /// sequence and the 12-byte result copy into the OPEN batch command
+    /// buffer — immutable banked descriptor snapshots, no submit, no host
+    /// read. Returns the batch staging offset holding the Result; the
+    /// caller reads it only after the batch's fence (commands.readDown) and
+    /// decodes it with decodeResult.
+    pub fn recordInto(g: *Greedy, cmds: *Commands, logits: View) Error!u64 {
+        try g.bindAll(logits);
+        const cmd = try cmds.begin();
+        try g.recordKernels(cmd);
+        return commands.batchDownload(cmds, g.results, 0, @sizeOf(Result));
+    }
+
+    /// The readback's verdict with the operator's log line on a refusal.
+    pub fn decodeResult(g: *Greedy, out: Result) Error!u32 {
         return decode(g.plan.count, out) catch |e| {
             if (e == error.NonFinite) std.log.err("greedy: non-finite bf16 logit at index {d} of {d}; row refused", .{ out.first_bad, g.plan.count });
             return e;

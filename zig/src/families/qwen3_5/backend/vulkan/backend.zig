@@ -157,8 +157,10 @@ pub const Vulkan = struct {
             .handle => |h| std.math.cast(u32, h) orelse return error.InvalidQwenToken,
         };
         if (token >= pinned.vocab) return error.InvalidQwenToken;
-        try self.engine.decode(token);
-        return try self.engine.draw();
+        // one combined engine operation: decode + GPU greedy draw in a
+        // single submit/fence; the legacy decode/draw pair remains for
+        // reference paths
+        return try self.engine.decodeDraw(token, null);
     }
 
     fn readFn(_: *anyopaque, handle: u64) !u32 {
@@ -177,8 +179,9 @@ pub const Vulkan = struct {
         if (self.owner != w.stream) return error.UnknownQwenStream;
         if (w.positions.len != 1 or w.positions[0] != self.engine.visible() + 1) return error.InvalidQwenPosition;
         if (samplingRefused(w.stream)) return error.UnsupportedQwenSampling;
-        try self.engine.decode(w.pending);
-        o.sampled[0] = try self.engine.draw();
+        // the same combined engine operation as queueFn: decode + GPU greedy
+        // draw in a single submit/fence
+        o.sampled[0] = try self.engine.decodeDraw(w.pending, null);
     }
 
     fn keepFn(ptr: *anyopaque, windows: []const be.Window, paths: []const []const u32) !void {

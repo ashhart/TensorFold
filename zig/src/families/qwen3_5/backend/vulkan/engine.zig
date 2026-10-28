@@ -268,6 +268,46 @@ pub const Engine = struct {
         e.poisoned = false;
     }
 
+    /// One steady decode token as ONE command buffer, ONE vkQueueSubmit and
+    /// ONE fence wait: the fed token's ids upload, embed, all 24 layers,
+    /// final norm and head, the GPU greedy finite/argmax, the 12-byte
+    /// chosen-ID result copy and the optional full-row logits receipt copy
+    /// are all recorded into a single batch; the host reads the Result and
+    /// receipt only after that fence. Same op order, barriers, push values,
+    /// shaders and arithmetic as decode + draw + logitsBytes — only the
+    /// submission granularity differs. Every staging input and output gets
+    /// its own immutable slice within the batch; descriptor sets are banked
+    /// snapshots reused only after the fence. Wrap in vk.orExit as ever; a
+    /// pre-submit recording error aborts the batch cleanly and leaves the
+    /// engine poisoned (reset before reuse), exactly like decode.
+    pub fn decodeDraw(e: *Engine, token: u32, receipt_out: ?[]u8) Error!u32 {
+        if (e.poisoned) return error.Poisoned;
+        try vk.ops_q4.checkIds(&.{token}, e.model.embed.n);
+        try planFor(@intCast(e.state.capacity), e.state.visible(), 1, 1);
+        try logitsReady(false, e.state.visible());
+        if (receipt_out) |o| if (o.len != e.logits.byteLen()) return error.Invalid;
+        e.poisoned = true;
+        try e.cmds.beginBatch(e.staging);
+        errdefer e.cmds.abortBatch();
+        try vk.orExit(vk.upload(e.cmds, e.ids.buffer.*, e.ids.byte_offset, e.staging, std.mem.sliceAsBytes(&[1]u32{token}), e.timeout_ns));
+        try vk.orExit(embed(e, try e.h[0].slice(0, pinned.hidden), 1));
+        try runLayers(e, 1);
+        const result_at = try vk.orExit(e.greedy.recordInto(e.cmds, e.logits));
+        const receipt_at: u64 = if (receipt_out != null)
+            try vk.commands.batchDownload(e.cmds, e.logits.buffer.*, e.logits.byte_offset, e.logits.byteLen())
+        else
+            0;
+        try vk.orExit(e.cmds.endBatch(e.timeout_ns)); // flush, one submit, fence, invalidate
+        var res: vk.greedy.Result = undefined;
+        try e.cmds.readDown(result_at, std.mem.asBytes(&res));
+        // the committed visible count advances only after completion
+        try vk.orExit(e.state.append(1));
+        const chosen = vk.orExit(e.greedy.decodeResult(res)) catch |err| return err;
+        if (receipt_out) |o| try e.cmds.readDown(receipt_at, o);
+        e.poisoned = false;
+        return chosen;
+    }
+
     /// The GPU greedy draw over the current logits row: the unchanged-Ash
     /// rule — largest finite logit, exact ties (including +0/-0) to the
     /// lowest index, any NaN or infinity anywhere in the row refuses. A
