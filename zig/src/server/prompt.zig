@@ -115,11 +115,29 @@ pub fn prepare(srv: *Server, cx: *Cx, input: chat.Input, thinking: bool, effort:
     var history_len: usize = 0;
     if (history.len > 0 and history.len < prompt.len and std.mem.eql(u32, prompt[0..history.len], history)) history_len = history.len;
     if (history_len == 0 and prompt.len > 1 and std.mem.eql(u32, history, prompt)) history_len = prompt.len - 1; // a template with no generation suffix
+    if (history_len > 0) history_len = continuedLen(srv, cx, input.messages, input.tools, thinking, effort, history, history_len);
     // --vision: placeholders expanded to image tokens before the window, chunks and cache see it; no rewind kept
     if (try images.expand(srv.info.vision, if (srv.config.vision_urls) images.Fetch.network(srv.io) else null, srv.text, cx, input.messages, prompt, history_len)) |x| return .{ .ids = x.ids, .history_len = x.history_len, .images = x.images, .cache_key = x.cache_key };
     const count = if (input.messages == .array) input.messages.array.len else 0;
     const rewind_len = if (srv.info.prompt_cache) rewindLen(srv, cx, input.messages, count, input.tools, prompt, thinking, effort) else 0; // one more render
     return .{ .ids = prompt, .history_len = history_len, .rewind_len = rewind_len, .user_end = userEnd(input.messages, history_len) };
+}
+
+/// The history's prefix the next turn repeats (a template may close a tool reply's turn only when nothing follows).
+fn continuedLen(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, thinking: bool, effort: ?[]const u8, history: []const u32, history_len: usize) usize {
+    if (messages != .array or messages.array.len == 0) return history_len;
+    const role = messages.array[messages.array.len - 1].strField("role") orelse return history_len;
+    if (!std.mem.eql(u8, role, "tool")) return history_len;
+    const list = cx.a.alloc(Value, messages.array.len + 1) catch return history_len;
+    @memcpy(list[0..messages.array.len], messages.array);
+    const reply = json.newObject(cx.a) catch return history_len;
+    reply.put(cx.a, "role", .{ .string = "assistant" }) catch return history_len;
+    reply.put(cx.a, "content", .{ .string = "\u{2063}probe" }) catch return history_len;
+    list[messages.array.len] = .{ .object = reply };
+    var scratch: Cx = .{ .a = cx.a, .clear_thinking = cx.clear_thinking };
+    const probe = renderIds(srv, &scratch, .{ .array = list }, tools, thinking, effort, false) catch return history_len;
+    const i = std.mem.indexOfDiff(u32, history, probe) orelse return history_len;
+    return if (i > 0 and i < history_len) i else history_len;
 }
 
 /// The history ends the last user only when that user is the final input message. Other ends stay unknown.
