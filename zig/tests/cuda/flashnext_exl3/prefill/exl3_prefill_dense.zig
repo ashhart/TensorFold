@@ -1,4 +1,4 @@
-//! exl3-prefill dense: the prompt tiles of a dense EXL3 projection against a float64 reference.
+//! exl3-prefill dense: the prompt tiles of a dense EXL3 projection, bit-equal to the decode kernel at every row count.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -23,7 +23,9 @@ const DenseCall = struct {
     x: u64,
     y: u64,
     rows: usize,
+    exact: bool = false,
     pub fn go(c: DenseCall) anyerror!void {
+        if (c.exact) return c.de.promptExact(c.s, c.w, c.x, c.rows, c.y, .bf16);
         try c.de.prompt(c.s, c.w, c.x, .bf16, c.rows, c.y, .bf16);
     }
 };
@@ -78,7 +80,7 @@ pub fn denseRun(gpu: Gpu, pack: *const Pack, s: cuda.Stream) !void {
         "model.language_model.layers.3.mlp.shared_expert.gate_proj",
         "model.language_model.layers.3.mlp.shared_expert.down_proj",
     };
-    const row_counts = [_]usize{ 16, 128, 256, 1024, 2048 };
+    const row_counts = [_]usize{ 16, 63, 64, 65, 128, 256, 1024, 2048 };
     const max_rows: usize = 2048;
     var prng = std.Random.DefaultPrng.init(0xde45e);
     const rng = prng.random();
@@ -143,29 +145,25 @@ pub fn denseRun(gpu: Gpu, pack: *const Pack, s: cuda.Stream) !void {
                 peak = @max(peak, @abs(wv));
             }
             if (tiles_ok) {
-                de.implementation = .tiles;
-                const tc: DenseCall = .{ .de = &de, .s = s, .w = w, .x = x.ptr, .y = yt.ptr, .rows = rows };
+                try de.candidates(w.k);
+                const tc: DenseCall = .{ .de = &de, .s = s, .w = w, .x = x.ptr, .y = yt.ptr, .rows = rows, .exact = true };
                 ms_tiles = try t.best(s, 3, tc, DenseCall.go);
                 sum_tiles[ri] += ms_tiles;
                 const got_t = try a.alloc(u16, rows * n);
                 defer a.free(got_t);
                 try yt.download(0, std.mem.sliceAsBytes(got_t));
-                diff = 0;
-                var rpeak: f64 = 0;
-                for (got_r, got_t) |g, h| {
-                    diff = @max(diff, @abs(bfValue(g) - bfValue(h)));
-                    rpeak = @max(rpeak, @abs(bfValue(g)));
-                }
-                diff /= rpeak;
+                var unequal: usize = 0;
+                for (got_r, got_t) |g, h| unequal += @intFromBool(g != h);
+                diff = @floatFromInt(unequal);
                 err_tiles = 0;
                 for (got_t[0 .. 2 * n], want) |g, wv| err_tiles = @max(err_tiles, @abs(bfValue(g) - wv));
-                de.implementation = .reference;
+                try check.expect(unequal == 0, "{s}: the prompt tiles' bytes are the decode kernel's at {d} rows ({d} of {d} outputs differ)", .{ name, rows, unequal, got_r.len });
             } else sum_tiles[ri] += ms_ref;
-            std.debug.print("    rows {d:5}: reference {d:8.4} ms ({d:6.2} us/row)  tiles {d:8.4} ms ({d:6.2} us/row)  max|ref-tiles|/peak {e:.2}  rows 0-1 vs f64: ref {e:.2} tiles {e:.2} (rel to peak {d:.3})\n", .{ rows, ms_ref, 1e3 * ms_ref / @as(f64, @floatFromInt(rows)), ms_tiles, 1e3 * ms_tiles / @as(f64, @floatFromInt(rows)), diff, err_ref / peak, err_tiles / peak, peak });
+            std.debug.print("    rows {d:5}: reference {d:8.4} ms ({d:6.2} us/row)  tiles {d:8.4} ms ({d:6.2} us/row)  outputs differing from the decode kernel's {d:.0}  rows 0-1 vs f64: ref {e:.2} tiles {e:.2} (rel to peak {d:.3})\n", .{ rows, ms_ref, 1e3 * ms_ref / @as(f64, @floatFromInt(rows)), ms_tiles, 1e3 * ms_tiles / @as(f64, @floatFromInt(rows)), diff, err_ref / peak, err_tiles / peak, peak });
         }
     }
     std.debug.print("  sum over the {d} shapes (ms): ", .{names.len});
     for (row_counts, sum_ref, sum_tiles) |r, x, y| std.debug.print("rows {d}: reference {d:.3} best {d:.3}; ", .{ r, x, y });
     std.debug.print("\n", .{});
-    check.pass("dense prompt kernels timed", .{});
+    check.pass("dense prompt tiles are the decode kernel's bytes at {d} row counts, timed", .{row_counts.len});
 }

@@ -92,11 +92,14 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     own.next = 0;
     if (o.slide) own.lay = try @import("cuda_slide.zig").layoutOf(gpa, io, dir);
     const scratch_bytes = cuda.usage(false).device -| persistent_bytes;
+    const deep_before = cuda.usage(false).device;
+    @import("exl3/prefill/cuda_exl3_prefill.zig").reserveFor(own.engine, o.context, o.tp); // EXL3 offload: deep prefill rows before the pools
+    const deep_bytes = cuda.usage(false).device -| deep_before;
     const own_seq_bytes = try prompt.seqBytesPaged(window, try @import("cuda_pages.zig").pageTest());
     var stream_bytes = own_seq_bytes;
     if (own.head) |h| {
-        stream_bytes = try std.math.add(u64, stream_bytes, mtp.Draft.bytes(window, h.ids.len, own.engine.chunk));
-    } else if (o.drafts and o.tp == 2) stream_bytes = try std.math.add(u64, stream_bytes, mtp.Draft.bytes(if (mode == .exl3) 1 else window, 1, own.engine.chunk)); // an EXL3 rank 1 keeps no head cache
+        stream_bytes = try std.math.add(u64, stream_bytes, mtp.Draft.bytes(window, h.ids.len, @import("exl3/prefill/cuda_exl3_prefill.zig").draftRows(own.engine)));
+    } else if (o.drafts and o.tp == 2) stream_bytes = try std.math.add(u64, stream_bytes, mtp.Draft.bytes(if (mode == .exl3) 1 else window, 1, @import("exl3/prefill/cuda_exl3_prefill.zig").draftRows(own.engine))); // an EXL3 rank 1 keeps no head cache
     if (o.vision) |v| stream_bytes = try std.math.add(u64, stream_bytes, try std.math.add(u64, try std.math.mul(u64, v.image_tokens, @import("cuda_prompt_wt.zig").dims * 2), try std.math.mul(u64, 16, o.context)));
     if (page_tokens > 0) {
         // the lane's head runs at the engine's chunk: its cache on the stream's pages, its buffers in the run
@@ -120,11 +123,12 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     const ledger: memory.Ledger = .{
         .persistent = persistent_bytes,
         .scratch = scratch_bytes,
+        .deep_prefill = try std.math.add(u64, deep_bytes, attached.prefill_window_bytes),
         .pool_scratch = attached.scratch_bytes,
         .expert_pools = attached.device_bytes,
         .reservation = .{ .stream_bytes = stream_bytes, .streams = if (stream_bytes == 0) 0 else pool_budget.other / stream_bytes },
     };
-    std.log.info("flashnext rank {d} memory ledger: persistent={d} scratch={d} pool_scratch={d} expert_pools={d} stream_bytes={d} streams={d} planned_total={d} free_after_pools={d}", .{ o.rank, ledger.persistent, ledger.scratch, ledger.pool_scratch, ledger.expert_pools, stream_bytes, ledger.reservation.streams, try ledger.total(), attached.free_after });
+    std.log.info("flashnext rank {d} memory ledger: persistent={d} scratch={d} deep_prefill={d} pool_scratch={d} expert_pools={d} stream_bytes={d} streams={d} planned_total={d} free_after_pools={d}", .{ o.rank, ledger.persistent, ledger.scratch, ledger.deep_prefill, ledger.pool_scratch, ledger.expert_pools, stream_bytes, ledger.reservation.streams, try ledger.total(), attached.free_after });
     return .{
         .layout = own.kv.layout,
         .vision = own.vision,
@@ -132,7 +136,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
         .facts = own.facts(),
         .rows = if (own.head != null) mtp.max_rows else 2,
         .prompt_rows = @intCast(own.engine.chunk),
-        .snap_grid = if (mode == .exl3) @intCast(own.engine.chunk) else 0,
+        .snap_grid = if (mode == .exl3) @intCast(@import("exl3/prefill/cuda_exl3_prefill.zig").stepRows(own.engine, own.engine.chunk, null)) else 0,
         .stream_bytes = stream_bytes,
         .host_snaps = @import("exl3/kv/cuda_exl3_kv.zig").snapHost(o.context, mode == .exl3),
         .ctx = own,

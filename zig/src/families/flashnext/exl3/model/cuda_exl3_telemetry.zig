@@ -3,6 +3,7 @@ const prompt = @import("../../cuda_prompt.zig");
 const load = @import("../../cuda_prompt_load.zig");
 const pool = @import("../offload/cuda_exl3_pool.zig");
 const pass = @import("cuda_exl3_pass.zig");
+const prefill = @import("../prefill/cuda_exl3_prefill.zig");
 const weights = @import("../../cuda_prompt_wt.zig");
 pub const counters = @import("exl3_telemetry.zig");
 pub const Completion = enum { all_rank_consumers_joined };
@@ -76,8 +77,19 @@ pub fn sampleAfterConsumers(allocator: std.mem.Allocator, engine: *prompt.Engine
         }
     }
     for (sequences, 0..) |sequence, index| for (sequences[0..index]) |previous| if (previous == sequence) return error.TelemetryDuplicateOwner;
+    const ring = prefill.ringTelemetry(engine);
+    if (ring) |observed| {
+        totals.ring_dma_copies = observed.copies;
+        totals.ring_dma_requested_bytes = observed.dma_requested_bytes;
+        totals.ring_unused_copies = observed.unused_copies;
+        totals.ring_hit_picks = observed.hit_picks;
+        totals.ring_miss_picks = observed.miss_picks;
+        totals.ring_hit_expert_requests = observed.hit_expert_requests;
+        totals.ring_miss_expert_requests = observed.miss_expert_requests;
+        if (observed.attribution) |by_source| @import("../prefill/cuda_exl3_prefill_attribution.zig").publish(by_source, &totals);
+    }
     const sampled_layers = if (engine.telemetry.layers_enabled) try allocator.realloc(layers, seen_count) else layers;
-    return .{ .rank = rank, .scope = hash.final(), .experts = totals, .expert_pools = seen_count, .layers = sampled_layers };
+    return .{ .rank = rank, .scope = hash.final(), .ring_owner = if (ring) |observed| observed.owner else 0, .experts = totals, .expert_pools = seen_count, .layers = sampled_layers };
 }
 
 test "exl3: cache telemetry pure host contracts" {

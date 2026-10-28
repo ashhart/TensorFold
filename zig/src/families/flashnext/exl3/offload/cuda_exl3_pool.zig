@@ -243,6 +243,10 @@ pub const Pool = struct {
         return p.planInternal(picks, rows, true);
     }
 
+    pub fn planUnobserved(p: *Pool, picks: []const i32, rows: usize) !*const Round {
+        return p.planInternal(picks, rows, false);
+    }
+
     fn planInternal(p: *Pool, picks: []const i32, rows: usize, observe: bool) !*const Round {
         if (rows == 0 or rows > p.opt.max_rows or picks.len != rows * p.opt.slots) return error.Invalid;
         p.now += 1;

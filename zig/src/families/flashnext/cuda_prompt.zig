@@ -246,6 +246,7 @@ pub const Engine = struct {
     }
 
     pub fn deinit(e: *Engine) void {
+        @import("exl3/prefill/cuda_exl3_prefill.zig").releaseFor(e);
         e.round_graph.clear();
         e.pockets.deinit();
         if (e.batch_s) |*bs| bs.free(e.gpa);
@@ -403,6 +404,7 @@ pub const Engine = struct {
 
     fn forwardUnmeasured(e: *Engine, comptime Tri: type, tri: Tri, seq: *Seq, ids: []const u32, hooks: batch.Hooks) !void {
         if (ids.len == 0 or seq.fed > seq.cap or ids.len > seq.cap - seq.fed) return error.UnexpectedTensor;
+        if (try @import("exl3/prefill/cuda_exl3_prefill.zig").forward(e, Tri, tri, seq, ids, hooks)) return;
         if ((hooks.keep != null or hooks.logits == .all) and ids.len > e.chunk) return error.UnexpectedTensor;
         const s = try e.reserve(@min(ids.len, e.chunk));
         const scores = try e.reserveScores(seq.cap, s.cap);

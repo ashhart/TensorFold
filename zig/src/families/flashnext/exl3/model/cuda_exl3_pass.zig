@@ -25,6 +25,7 @@ fn part(p: anytype, ops: *load.Ops, pt: load.Part, x: u64, k: usize, m: usize, y
     switch (pt.kind) {
         .exl3 => |w| {
             const de = try ops.linear();
+            if (try @import("../prefill/cuda_exl3_prefill.zig").tilesPart(de, p.stream, w, x, m, y, f32_out)) return; // prefill rows on #806's tiles
             try de.decode(p.stream, w, x, .bf16, m, y, if (f32_out) .f32 else .bf16);
         },
         .native => |w| {
@@ -192,7 +193,7 @@ test "EXL3 pool reserves the requested number of concurrent stream caches" {
     try std.testing.expectError(error.InvalidStreamCount, streamReservation(100, 0));
 }
 
-pub const Attached = struct { layers: usize = 0, lines: usize = 0, line_bytes: usize = 0, device_bytes: u64 = 0, free_before: u64 = 0, free_after: u64 = 0, scratch_bytes: u64 = 0, bank_bytes: u64 = 0, bank_ns: u64 = 0 };
+pub const Attached = struct { layers: usize = 0, lines: usize = 0, line_bytes: usize = 0, device_bytes: u64 = 0, free_before: u64 = 0, free_after: u64 = 0, scratch_bytes: u64 = 0, bank_bytes: u64 = 0, bank_ns: u64 = 0, prefill_window_bytes: u64 = 0 };
 
 pub fn freeBytes(d: *const cuda.Driver) !u64 {
     var free: usize = 0;
@@ -242,6 +243,17 @@ pub fn attach(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, st: cud
         fixed = try std.math.add(u64, fixed, try std.math.add(u64, cuda.exl3_pool.Tables.init(wt.experts_n + 1).bytes + (64 << 10), picks_bytes));
     }
     const future = b.other;
+    const prefill = @import("../prefill/cuda_exl3_prefill.zig");
+    const minimum_pools = try memory.poolBytes(b.lines orelse pool_.min_lines, out.line_bytes, n, fixed);
+    const protected = try std.math.add(u64, try std.math.add(u64, reserve, future), minimum_pools);
+    out.prefill_window_bytes = prefill.reserveTwoChunk(d, free, protected) catch |err| declined: {
+        std.log.warn("flashnext exl3 prefill: two-chunk reservation refused ({t}); keeping single-chunk prefill", .{err});
+        break :declined 0;
+    };
+    if (out.prefill_window_bytes != 0) {
+        free = @intCast(try freeBytes(d));
+        out.free_before = free;
+    }
     const pool_room = try memory.available(free, reserve, future);
     const lines = b.lines orelse try pool_.linesFor(free, reserve, try std.math.add(u64, future, fixed), out.line_bytes, n, pool_.min_lines);
     if (lines < pool_.min_lines) return error.PoolTooSmall;
