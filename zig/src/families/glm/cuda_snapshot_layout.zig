@@ -6,30 +6,33 @@ const Config = @import("config.zig").Config;
 const cache = @import("cuda_dsa_block.zig");
 const sparse = @import("cuda_sparse.zig");
 
-/// `len` bytes from `live`, or on a paged sequence's pages `span` bytes a page, the pages `page` bytes apart.
-pub const Part = struct { live: u64, len: usize, span: usize = 0, page: u64 = 0 };
+/// `len` bytes from `live`, or on a paged sequence's pages `span` bytes a page `page` bytes apart, from byte `from`.
+pub const Part = struct { live: u64, len: usize, span: usize = 0, page: u64 = 0, from: usize = 0 };
 pub const Plan = struct {
     parts: [5 * (@import("config.zig").max_layers + 1) + 2]Part = undefined,
     count: usize = 0,
     len: usize = 0,
     ids: []const u32 = &.{}, // a paged sequence's pages in row order
     sizing: bool = false, // `size`: the rows counted, not read, so no page need be mapped
+    shared: usize = 0, // a paged sequence's first pages a page-sharing store holds: their rows stay on them
 
-    pub fn init(st: *const State, c: *const Config, at: usize, head: ?usize) !Plan {
-        return make(st, c, at, head, false);
+    /// The state at `at`; past `shared` pages only, on a paged sequence whose first pages the store holds.
+    pub fn init(st: *const State, c: *const Config, at: usize, head: ?usize, shared: usize) !Plan {
+        return make(st, c, at, head, shared, false);
     }
 
     /// A prefix's bytes at `at`, rows to `capacity` counted held or not (a paged sequence holds its request's alone).
-    pub fn size(st: *const State, c: *const Config, capacity: usize, at: usize, head: ?usize) !usize {
+    pub fn size(st: *const State, c: *const Config, capacity: usize, at: usize, head: ?usize, shared: usize) !usize {
         var whole = st.*;
         whole.capacity = capacity;
-        return (try make(&whole, c, at, head, true)).len;
+        return (try make(&whole, c, at, head, shared, true)).len;
     }
 
-    fn make(st: *const State, c: *const Config, at: usize, head: ?usize, sizing: bool) !Plan {
+    fn make(st: *const State, c: *const Config, at: usize, head: ?usize, shared: usize, sizing: bool) !Plan {
         if (at > st.capacity or st.caches.len > @import("config.zig").max_layers) return error.SnapshotShape;
         if (st.rings.len != 2 * (st.caches.len + 1)) return error.SnapshotShape;
-        var p: Plan = .{ .ids = st.pages, .sizing = sizing };
+        if (shared > 0 and (st.table == 0 or shared * page_rows > at)) return error.SnapshotShape; // pages below `at` only
+        var p: Plan = .{ .ids = st.pages, .sizing = sizing, .shared = shared };
         // a paged sequence's caches are its pages: its fields up to them end at its first ring
         const first = if (st.table != 0) st.rings[0] else if (st.caches.len > 0) st.caches[0].lc else st.mtp_caches.lc;
         if (first < st.arena.buf.ptr) return error.SnapshotShape;
@@ -58,21 +61,23 @@ pub const Plan = struct {
         try p.addCache(st, x, x.pk, pooled, page_rows / sparse.pool * @as(usize, c.i_dim) * 2);
     }
 
-    /// A cache's rows: in the arena, or on the sequence's pages, `span` bytes a page.
+    /// A cache's rows: in the arena, or on the sequence's pages, `span` bytes a page (past the store's `shared`).
     fn addCache(p: *Plan, st: *const State, x: cache.Caches, live: u64, len: usize, span: usize) !void {
         if (x.pt == 0) return p.add(st, live, len);
-        if (len == 0) return;
+        const from = @min(len, p.shared * span);
+        if (len == from) return;
         if ((!p.sizing and (len - 1) / span >= p.ids.len) or p.count == p.parts.len) return error.SnapshotShape;
-        p.len = try std.math.add(usize, p.len, len);
-        p.parts[p.count] = .{ .live = live, .len = len, .span = span, .page = x.ps };
+        p.len = try std.math.add(usize, p.len, len - from);
+        p.parts[p.count] = .{ .live = live, .len = len - from, .span = span, .page = x.ps, .from = from };
         p.count += 1;
     }
 
     /// Where a part's bytes from `done` on sit, as many as lie in a row there.
     pub fn piece(p: *const Plan, part: Part, done: usize) Part {
         if (part.span == 0) return .{ .live = part.live + done, .len = part.len - done };
-        const off = done % part.span;
-        return .{ .live = part.live + @as(u64, p.ids[done / part.span]) * part.page + off, .len = @min(part.span - off, part.len - done) };
+        const at = part.from + done;
+        const off = at % part.span;
+        return .{ .live = part.live + @as(u64, p.ids[at / part.span]) * part.page + off, .len = @min(part.span - off, part.len - done) };
     }
 
     fn add(p: *Plan, st: *const State, live: u64, len: usize) !void {

@@ -133,15 +133,32 @@ pub const Pages = struct {
 
     /// Rank 0: paged slot `slot` takes the pages of a prompt, its reply and a last window; LaneMemory: not yet.
     pub fn open(p: *Pages, slot: u32, prompt: usize, max_tokens: usize) ![]const u32 {
+        return p.openWith(slot, prompt, max_tokens, &.{});
+    }
+
+    /// The prompt cache's pages a resume held, given back when no lease took them.
+    pub fn give(p: *Pages, adopted: []const u32) void {
+        for (adopted) |id| p.pool.release(id);
+    }
+
+    /// `open` with the prompt cache's `adopted` pages (held for this call) first: their rows stay as the cache kept.
+    pub fn openWith(p: *Pages, slot: u32, prompt: usize, max_tokens: usize, adopted: []const u32) ![]const u32 {
+        var held = adopted.len > 0;
+        errdefer if (held) for (adopted) |id| p.pool.release(id);
         if (!p.paged(slot) or p.used[slot]) return error.SlotTaken;
         const n = need(p.layout, prompt, max_tokens);
-        if (n > tableLen(p.e.capacity)) return error.PromptTooLong;
+        if (n > tableLen(p.e.capacity) or adopted.len > n) return error.PromptTooLong;
         const l = &p.leases[slot];
-        try p.pool.promise(l, n);
+        try p.pool.promise(l, n - adopted.len);
         errdefer p.pool.finish(l);
+        if (adopted.len > 0) {
+            held = false;
+            try p.pool.adopt(l, adopted); // the lease holds them now (its finish releases them)
+        }
         var up: Upload = .{ .p = p, .slot = slot };
+        if (adopted.len > 0) try Upload.write(&up, l.ids.items, 0);
         try p.pool.cover(l, n, .{ .ctx = &up, .write = Upload.write });
-        try p.mapped(slot, l.ids.items);
+        try p.mapped(slot, l.ids.items, adopted.len);
         return l.ids.items;
     }
 
@@ -156,14 +173,14 @@ pub const Pages = struct {
         errdefer l.ids.clearRetainingCapacity();
         var up: Upload = .{ .p = p, .slot = slot };
         try Upload.write(&up, l.ids.items, 0);
-        try p.mapped(slot, l.ids.items);
+        try p.mapped(slot, l.ids.items, 0);
     }
 
-    /// The slot's sequence reaches its pages' rows (NaN first under TF_KV_POISON).
-    fn mapped(p: *Pages, slot: u32, ids: []const u32) !void {
+    /// The slot's sequence reaches its pages' rows (past the `kept` first, NaN first under TF_KV_POISON).
+    fn mapped(p: *Pages, slot: u32, ids: []const u32, kept: usize) !void {
         const st = &p.e.seqs.items[slot].?.st;
         const page = p.layout.pageBytes();
-        if (p.poison) for (ids) |id| try p.e.d.check(p.e.d.api.cuMemsetD32Async(p.arena.?.ptr + id * page, 0xFFFF_FFFF, page / 4, p.e.stream.handle), "cuMemsetD32Async");
+        if (p.poison) for (ids[kept..]) |id| try p.e.d.check(p.e.d.api.cuMemsetD32Async(p.arena.?.ptr + id * page, 0xFFFF_FFFF, page / 4, p.e.stream.handle), "cuMemsetD32Async");
         st.pages = ids;
         st.capacity = @min(ids.len * state.page_rows, p.e.capacity);
         p.used[slot] = true;

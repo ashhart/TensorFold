@@ -4,6 +4,11 @@ const cuda = @import("cuda");
 const weights = @import("cuda_weights.zig");
 const shard = @import("cuda_shard.zig");
 const pages_mod = @import("cuda_pages.zig");
+const Plan = @import("cuda_snapshot_layout.zig").Plan;
+const page_rows = @import("cuda_state.zig").page_rows;
+const sparse = @import("cuda_sparse.zig");
+const prefix_mod = @import("cuda_prefix.zig");
+const Kept = @import("cuda_engine.zig").Kept;
 const Engine = @import("cuda_engine.zig").Engine;
 const Lanes = @import("cuda_lanes.zig").Lanes;
 const lanes = @import("lanes");
@@ -202,17 +207,17 @@ test "TF_KV_PAGES: a stream past the paged sequences waits for one, and its slot
     var ln: Lanes = .{ .x = .{ .e = &f.e, .link = undefined } };
     defer ln.lanes.deinit(f.e.gpa);
     var streams: [3]lanes.Stream = undefined; // as many at once as lanes: the engine's own sequence and one more
-    try expectEqual(@as(usize, 2), (try ln.seat(&streams[0], 600, 100)).len);
+    try expectEqual(@as(usize, 2), (try ln.seat(&streams[0], 600, 100, &.{})).len);
     try expectEqual(@as(u32, 0), ln.lanes.get(&streams[0]).?.slot); // the engine's own takes pages too
-    try expectEqual(@as(usize, 2), (try ln.seat(&streams[1], 600, 100)).len);
+    try expectEqual(@as(usize, 2), (try ln.seat(&streams[1], 600, 100, &.{})).len);
     const live = F.live;
-    try std.testing.expectError(error.LaneMemory, ln.seat(&streams[2], 600, 100)); // slot 2: past the paged ones
+    try std.testing.expectError(error.LaneMemory, ln.seat(&streams[2], 600, 100, &.{})); // slot 2: past the paged ones
     try expectEqual(live, F.live); // nothing allocated for it
     try expectEqual(@as(usize, 2), f.e.seqs.items.len);
     try expectEqual(@as(usize, 2), ln.lanes.count());
     _ = ln.lanes.remove(&streams[0]); // a stream ends: the one that waited takes its paged sequence
     p.close(0);
-    _ = try ln.seat(&streams[2], 600, 100);
+    _ = try ln.seat(&streams[2], 600, 100, &.{});
     try expectEqual(@as(u32, 0), ln.lanes.get(&streams[2]).?.slot);
     try expectEqual(@as(u32, 0), f.e.slot);
 }
@@ -228,8 +233,8 @@ test "TF_KV_PAGES: the lane host admits a request by the pool alone, the engine'
     defer ln.lanes.deinit(f.e.gpa);
     try expect(ln.fits(3000, 100)); // 7 of the 8 pages
     var streams: [2]lanes.Stream = undefined;
-    _ = try ln.seat(&streams[0], 600, 100); // slot 0: 2 pages
-    _ = try ln.seat(&streams[1], 2000, 100); // slot 1: 5 pages
+    _ = try ln.seat(&streams[0], 600, 100, &.{}); // slot 0: 2 pages
+    _ = try ln.seat(&streams[1], 2000, 100, &.{}); // slot 1: 5 pages
     _ = ln.lanes.remove(&streams[0]);
     p.close(0);
     try expect(!ln.fits(3000, 100)); // the engine's own is free, but only 3 pages are
@@ -245,6 +250,170 @@ test "TF_KV_POISON: every page a stream takes is filled with NaN before its rows
     p.poison = true;
     _ = try p.open(0, 1200, 100);
     try expectEqual(@as(usize, 3), F.fills);
+}
+
+test "a stream resuming a kept prompt takes the prompt cache's pages first: its table starts with them, NaN spares them" {
+    var f: Fake = undefined;
+    try f.init(std.testing.allocator);
+    const l = try pages_mod.layout(std.testing.allocator, &f.e, 0);
+    const p = try f.pool(l, 3, 8, true);
+    defer f.deinit(p);
+    p.poison = true;
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2, 3 }, try p.open(1, 1500, 100));
+    p.pool.retain(0); // the prompt cache keeps the first two pages
+    p.pool.retain(1);
+    p.close(1);
+    p.pool.retain(0); // its resume holds them once more for the stream
+    p.pool.retain(1);
+    F.fills = 0;
+    const ids = try p.openWith(2, 1500, 100, &.{ 0, 1 });
+    try expectEqual(@as(usize, 4), ids.len);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1 }, ids[0..2]);
+    try std.testing.expectEqualSlices(u32, ids, F.table(f.e.seqs.items[2].?.st.table, 4));
+    try expectEqual(@as(usize, 2), F.fills); // the two fresh pages alone
+    try expectEqual(@as(u32, 2), p.pool.holders(0)); // the cache and the stream
+    p.close(2);
+    try expectEqual(@as(u32, 1), p.pool.holders(0)); // the cache's alone again
+    p.pool.release(0);
+    p.pool.release(1);
+    try expect(p.pool.idle() and p.pool.census().free == 8);
+}
+
+test "a resume that cannot have its fresh pages gives the prompt cache's back, and nothing is mapped" {
+    var f: Fake = undefined;
+    try f.init(std.testing.allocator);
+    const l = try pages_mod.layout(std.testing.allocator, &f.e, 0);
+    const p = try f.pool(l, 3, 8, true);
+    defer f.deinit(p);
+    _ = try p.open(1, 1500, 100); // pages 0 to 3
+    p.pool.retain(0);
+    p.close(1);
+    _ = try p.open(0, 3000, 100); // 7 of the 7 free pages
+    p.pool.retain(0); // the resume's hold
+    try std.testing.expectError(error.LaneMemory, p.openWith(2, 1500, 100, &.{0}));
+    try expectEqual(@as(u32, 1), p.pool.holders(0)); // the cache's alone
+    try expectEqual(@as(usize, 0), f.e.seqs.items[2].?.st.capacity);
+    p.close(0);
+    p.pool.release(0);
+    try expect(p.pool.idle() and p.pool.census().free == 8);
+}
+
+test "a kept state's copy leaves the prompt cache's pages out: past them, two pools a paged cache and the head's rows" {
+    var f: Fake = undefined;
+    try f.init(std.testing.allocator);
+    const l = try pages_mod.layout(std.testing.allocator, &f.e, 0);
+    const p = try f.pool(l, 2, 8, true);
+    defer f.deinit(p);
+    const ids = try p.open(1, 3000, 100); // 7 pages
+    const st = &f.e.seqs.items[1].?.st;
+    const c = &f.e.w.config;
+    const at = 2048;
+    const held = at / page_rows;
+    const whole = try Plan.init(st, c, at, at, 0);
+    const kept = try Plan.init(st, c, at, at, held);
+    const latent = c.kv_lora * 2; // a row's
+    const pooled = c.i_dim * 2; // a pool's
+    // the DSA layer's and the MTP head's caches: their 2,048 latent rows and 512 pools stay on the held pages
+    try expectEqual(whole.len - kept.len, 2 * (at * latent + at / sparse.pool * pooled));
+    var parts: usize = 0;
+    for (kept.parts[0..kept.count]) |part| if (part.span != 0) {
+        parts += 1;
+        try expectEqual(2 * pooled, part.len); // the pooled keys' two rows past the last whole pool
+        try expectEqual(part.live + @as(u64, ids[held]) * part.page, kept.piece(part, 0).live); // the next page's first
+    };
+    try expectEqual(@as(usize, 2), parts);
+    // the head 8 rows past the mark: those rows are copied from the next page too
+    const ahead = try Plan.init(st, c, at, at + 8, held);
+    var rows: usize = 0;
+    for (ahead.parts[0..ahead.count]) |part| if (part.span == page_rows * latent) {
+        rows += part.len / latent;
+        try expectEqual(part.live + @as(u64, ids[held]) * part.page, ahead.piece(part, 0).live);
+    };
+    try expectEqual(@as(usize, 8), rows);
+    try std.testing.expectError(error.SnapshotShape, Plan.init(st, c, at, at, held + 1)); // a page past the mark
+}
+
+/// The prompt cache's states without a device: each a Kept, live until the store drops it.
+const States = struct {
+    gpa: std.mem.Allocator,
+    next: u64 = 1,
+    live: usize = 0,
+
+    fn of(p: *anyopaque) *States {
+        return @ptrCast(@alignCast(p));
+    }
+    fn bytes(_: *anyopaque, _: u32) u64 {
+        return 1;
+    }
+    fn save(p: *anyopaque, _: ?*anyopaque, at: u32) anyerror!*anyopaque {
+        const x = of(p);
+        const k = try x.gpa.create(Kept);
+        k.* = .{ .id = x.next, .at = at };
+        x.next += 1;
+        x.live += 1;
+        return k;
+    }
+    fn drop(p: *anyopaque, saved: *anyopaque) void {
+        const x = of(p);
+        x.gpa.destroy(@as(*Kept, @ptrCast(@alignCast(saved))));
+        x.live -= 1;
+    }
+    const vtable: prefix_mod.radix.Snapshots.VTable = .{ .bytes = bytes, .save = save, .restore = prefix_mod.Prefix.restore, .drop = drop };
+};
+
+test "TF_GLM_KV_SHARE: a pass's pages below its mark go to the prompt cache, and a later pass resumes on those pages" {
+    const gpa = std.testing.allocator;
+    var f: Fake = undefined;
+    try f.init(gpa);
+    const l = try pages_mod.layout(gpa, &f.e, 0);
+    const p = try f.pool(l, 3, 8, true);
+    defer f.deinit(p);
+    var states: States = .{ .gpa = gpa };
+    const x = try prefix_mod.Prefix.initWith(gpa, p, 2048, 4, .{ .ptr = &states, .vtable = &States.vtable });
+    defer x.deinit();
+    var owner: prefix_mod.Owner = .{};
+    var adopt: std.ArrayList(u32) = .empty;
+    defer adopt.deinit(gpa);
+    var a: [3000]u32 = undefined;
+    for (&a, 1..) |*t, i| t.* = @intCast(i);
+    // a cold pass: a mark on the grid below its end, where the tree takes the pages below it and the state
+    const cold = try x.begin(&a, 0, &.{}, &owner, &adopt);
+    defer gpa.free(cold.marks);
+    try std.testing.expectEqualSlices(u32, &.{2048}, cold.marks);
+    try expect(cold.from == 0 and owner.pending == null and adopt.items.len == 0);
+    var kept: [4]u32 = undefined;
+    @memcpy(&kept, (try p.openWith(1, a.len, 100, adopt.items))[0..4]);
+    x.keep(1, &a, 2048);
+    try expectEqual(@as(usize, 1), states.live);
+    p.close(1); // its pages past the mark free again, those below it the tree's
+    for (kept) |id| try expectEqual(@as(u32, 1), p.pool.holders(id));
+    // the same 2,049 tokens, another tail: the pass resumes at 2,048 on the tree's pages, its state pending
+    var b = a;
+    for (b[2049..]) |*t| t.* += 10_000;
+    const warm = try x.begin(&b, 0, &.{}, &owner, &adopt);
+    defer gpa.free(warm.marks);
+    try expectEqual(@as(u32, 2048), warm.from);
+    try expectEqual(@as(u32, 2048), owner.pending.?.at);
+    try std.testing.expectEqualSlices(u32, &kept, adopt.items);
+    try std.testing.expectEqualSlices(u32, &kept, (try p.openWith(2, b.len, 100, adopt.items))[0..4]);
+    for (kept) |id| try expectEqual(@as(u32, 2), p.pool.holders(id)); // the tree and the stream
+    adopt.clearRetainingCapacity();
+    p.close(2);
+    // another token at the mark: the head's row 2,047 read it, so the last page is another page and nothing resumes
+    var c = a;
+    for (c[2048..]) |*t| t.* += 10_000;
+    owner = .{};
+    const miss = try x.begin(&c, 0, &.{}, &owner, &adopt);
+    defer gpa.free(miss.marks);
+    try expect(miss.from == 0 and owner.pending == null and adopt.items.len == 0);
+    // a stream that needs the tree's pages: its promise evicts the state, and the pages are the stream's
+    _ = try p.openWith(0, c.len, 100, &.{}); // 7 pages: the 4 free and 3 of the tree's
+    try expectEqual(@as(usize, 0), states.live);
+    p.close(0);
+    const gone = try x.begin(&a, 0, &.{}, &owner, &adopt);
+    defer gpa.free(gone.marks);
+    try expect(gone.from == 0 and owner.pending == null and adopt.items.len == 0);
+    try expect(p.pool.idle() and p.pool.census().free == 8);
 }
 
 fn made(gpa: std.mem.Allocator) !void {

@@ -103,7 +103,8 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     runner.addImport("exlr8_frozen", b.createModule(.{ .root_source_file = b.path("zig/tests/fixtures/exlr8/frozen.zig"), .target = target, .optimize = optimize }));
     runner.addImport("exlr8_frozen_dense", b.createModule(.{ .root_source_file = b.path("zig/tests/fixtures/exlr8/frozen_dense.zig"), .target = target, .optimize = optimize }));
     for (exlr8_build.denseModules(b, target, optimize, exlr8, exlr8_tests[0])) |m| runner.addImport(m.name, m.module);
-    runner.addImport("glm_cuda", glmCuda(b, target, optimize, cuda, mods.core, mods.lanes, mods.heat));
+    const glm_cuda = glmCuda(b, target, optimize, cuda, mods.core, mods.lanes, mods.heat, mods.api);
+    runner.addImport("glm_cuda", glm_cuda);
     @import("minimax_cuda.zig").targets(b, target, optimize, strip, cuda, mods.core, mods.lanes, runner);
     for ([_]struct { []const u8, *std.Build.Module }{ .{ "kolibri1", kolibri1Module(b, target, optimize, cuda, mods.core, mods.lanes) }, .{ "dory", @import("dory.zig").module(b, target, optimize, cuda, mods.core, mods.lanes) } }) |m| runner.addImport(m[0], m[1]);
     runner.addImport("gemma4_cuda", @import("gemma4_cuda.zig").module(b, target, optimize, cuda, mods.core, mods.lanes));
@@ -449,7 +450,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     // the contract's attention reference (tests/cuda/contract_attn.zig): its allocations under failure
     const attn_ref = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/contract_attn.zig"), .target = host, .optimize = .debug, .imports = &.{.{ .name = "core", .module = mods.core }} });
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = attn_ref })).step);
-    const glm = glmCuda(b, host, .debug, cuda, mods.core, mods.lanes, mods.heat);
+    const glm = glmCuda(b, host, .debug, cuda, mods.core, mods.lanes, mods.heat, mods.api);
     @import("glm_family_host.zig").steps(b, cuda, glm, mods, step);
     @import("kolibri.zig").host(b, kolibri1Module(b, host, .debug, cuda, mods.core, mods.lanes), native_modules.api, step);
     @import("gemma4_cuda.zig").host(b, @import("gemma4_cuda.zig").module(b, host, .debug, cuda, mods.core, mods.lanes), step);

@@ -264,13 +264,13 @@ test "GLM pages: a failed seat binding returns its pages and lane before retry" 
     defer back.deinit();
     var stream = try lanes.Stream.init(t.allocator, .{ .id = "page-test", .prompt = &.{100}, .max_new = 8 });
     defer stream.deinit(t.allocator);
-    try t.expectError(error.OutOfMemory, back.seat(&stream, 1, 8));
+    try t.expectError(error.OutOfMemory, back.seat(&stream, 1, 8, &.{}));
     try t.expectEqual(@as(usize, 0), back.lanes.count());
     try t.expect(f.p.pool.idle());
     try t.expectEqual(@as(usize, 8), f.p.pool.census().free);
     try t.expectEqual(@as(u32, 1), f.e.slot);
     v.gpa = t.allocator;
-    try t.expectEqual(@as(usize, 1), (try back.seat(&stream, 1, 8)).len);
+    try t.expectEqual(@as(usize, 1), (try back.seat(&stream, 1, 8, &.{})).len);
     try t.expectEqual(@as(usize, 1), back.lanes.count());
     try t.expectEqual(@as(u32, 0), f.e.slot);
     f.e.release(0);
