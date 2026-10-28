@@ -66,7 +66,7 @@ void main() {
     for (uint lane = 0u; lane < 2u; ++lane) {
       float gate = bf16_lane(gate_word, lane);
       float s = 1.0f / (1.0f + exp(-gate));
-      s = bf16_lane(bf16_bits(s) << 16u, 0u); // Metal's bfloat(s) rounding
+      s = bf16_lane(bf16_bits(s), 0u); // Metal's bfloat(s) rounding
       float v = bf16_lane(ctx_word, lane) * s;
       out_word |= bf16_bits(v) << (16u * lane);
     }
