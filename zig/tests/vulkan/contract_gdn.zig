@@ -745,9 +745,12 @@ pub const Gdn = struct {
                     fillDyadicF32(rng, f.a_log_bits, -4, 1);
                 },
                 .prefill_y, .prefill_state => {
-                    fillDyadic(rng, f.soa_bits, -3, 1);
-                    fillDyadicF32(rng, f.g_pairs, -4, 0);
-                    fillDyadic(rng, f.beta_bits, -3, 1);
+                    // 130 tokens must stay inside f32: g <= 2^-3, beta and the
+                    // whole soa <= 2^-3, so the state's per-token factor is
+                    // well under one and the walk decays to the delta floor
+                    fillDyadic(rng, f.soa_bits, -6, -3);
+                    fillDyadicF32(rng, f.g_pairs, -6, -3);
+                    fillDyadic(rng, f.beta_bits, -6, -4);
                     fillDyadicF32(rng, f.h0_bits, -6, -2);
                 },
                 .decode_y, .decode_state => {
@@ -778,9 +781,12 @@ pub const Gdn = struct {
                     fillDyadicF32(rng, f.a_log_bits, -4, 1);
                 },
                 .prefill_y, .prefill_state => {
-                    fillDyadic(rng, f.soa_bits, -3, 1);
-                    fillDyadicF32(rng, f.g_pairs, -4, 0);
-                    fillDyadic(rng, f.beta_bits, -3, 1);
+                    // 130 tokens must stay inside f32: g <= 2^-3, beta and the
+                    // whole soa <= 2^-3, so the state's per-token factor is
+                    // well under one and the walk decays to the delta floor
+                    fillDyadic(rng, f.soa_bits, -6, -3);
+                    fillDyadicF32(rng, f.g_pairs, -6, -3);
+                    fillDyadic(rng, f.beta_bits, -6, -4);
                     fillDyadicF32(rng, f.h0_bits, -6, -2);
                 },
                 .decode_y, .decode_state => {
@@ -863,8 +869,8 @@ pub const Gdn = struct {
             // the initial state rides its own never-written buffer, so the
             // unchanged check sees it exactly as the first step consumed it
             .conv_decode => {
-                buf[0..8].* = .{ f.state_bits, f.qkv_bits, f.weight_bits, f.a_bits, f.b_bits, f.dt_bits, f.a_log_bits, f.state_init_bits };
-                return buf[0..8];
+                buf[0..7].* = .{ f.state_init_bits, f.qkv_bits, f.weight_bits, f.a_bits, f.b_bits, f.dt_bits, f.a_log_bits };
+                return buf[0..7];
             },
             .prefill_y, .prefill_state => {
                 buf[0..4].* = .{ f.soa_bits, f.g_pairs, f.beta_bits, f.h0_bits };
@@ -884,15 +890,20 @@ pub const Gdn = struct {
         const T = f.tokens;
         switch (f.which) {
             .split_soa, .split_g => {
-                // 0 conv_out, 1 a, 2 b, 3 dt, 4 a_log, 5 soa, 6 g, 7 beta
+                // 0 conv_out, 1 a, 2 b, 3 dt, 4 a_log, 5 soa, 6 g, 7 beta;
+                // the checked output takes its poison from out, the others
+                // from scratch
                 _ = try f.devBuf(std.mem.sliceAsBytes(f.conv_out_bits));
                 _ = try f.devBuf(std.mem.sliceAsBytes(f.a_bits));
                 _ = try f.devBuf(std.mem.sliceAsBytes(f.b_bits));
                 _ = try f.devBuf(std.mem.sliceAsBytes(f.dt_bits));
                 _ = try f.devBuf(std.mem.sliceAsBytes(f.a_log_bits));
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.out[0 .. 3 * T * linear_dim + T * heads]));
-                const g_words = try f.allocU16(2 * T * heads, poison);
+                const soa_words = if (f.which == .split_soa) f.out[0 .. 3 * T * linear_dim] else try f.allocU16(3 * T * linear_dim, poison);
+                _ = try f.devBuf(std.mem.sliceAsBytes(soa_words));
+                const g_words = if (f.which == .split_g) f.out[0 .. 2 * T * heads] else try f.allocU16(2 * T * heads, poison);
                 _ = try f.devBuf(std.mem.sliceAsBytes(g_words));
+                const beta_words = if (f.which == .split_soa) f.out[3 * T * linear_dim .. 3 * T * linear_dim + T * heads] else try f.allocU16(T * heads, poison);
+                _ = try f.devBuf(std.mem.sliceAsBytes(beta_words));
             },
             .conv_prefill => {
                 // 0 state_in, 1 qkv, 2 weight, 3 a, 4 b, 5 dt, 6 a_log,
@@ -1189,6 +1200,92 @@ pub const Gdn = struct {
             .decode_y, .decode_state => {
                 buf[0..6].* = .{ 0, 1, 2, 3, 4, 5 };
                 return buf[0..6];
+            },
+        }
+    }
+
+    /// The sums replay gate 4 runs: every dot in the op re-summed in `accum`
+    /// in `order`, everything else in float64, into `out` in the output
+    /// layout reference() uses.
+    pub fn simulate(f: *Gdn, accum: c.Accum, order: g.Order, out: []f64) !void {
+        const T = f.tokens;
+        switch (f.which) {
+            .split_soa => {
+                var terms: [dk]f64 = undefined;
+                for (0..T) |t| {
+                    for (0..3 * heads) |head| {
+                        const hv: usize = head % heads;
+                        var vals: [dk]f64 = undefined;
+                        var vmax: f64 = 0;
+                        for (0..dk) |i| {
+                            const cv = bf(f.conv_out_bits[t * channels + head * dk + i]);
+                            vals[i] = cv / (1.0 + @exp(-cv));
+                            vmax = @max(vmax, @abs(vals[i]));
+                        }
+                        for (0..dk) |i| terms[i] = vals[i] * vals[i];
+                        const ss = rows.sumIn(accum, order, &terms);
+                        const inv: f64 = 1.0 / @sqrt(ss / 128.0 + 1e-6 / 128.0);
+                        const scale_f: f64 = if (head < heads) 1.0 / 128.0 else @sqrt(1.0 / 128.0);
+                        const dst = (head / heads) * (T * linear_dim) + (t * heads + hv) * dk;
+                        for (0..dk) |i| out[dst + i] = if (head < 2 * heads) scale_f * (vals[i] * inv) else vals[i];
+                    }
+                    for (0..heads) |hv| {
+                        const ref = fx.gateRefAsh(f.a_bits[t * heads + hv], f.b_bits[t * heads + hv], f32Of(f.a_log_bits, hv), f.dt_bits[hv]);
+                        out[3 * T * linear_dim + t * heads + hv] = ref.beta;
+                    }
+                }
+            },
+            .split_g => return error.Unimplemented, // accum none; gate 4 is N/A
+            .conv_prefill => {
+                const ctx: PrefillInput = .{ .state_bits = f.state_bits, .qkv_bits = f.qkv_bits };
+                var terms: [taps]f64 = undefined;
+                for (0..channels) |ch| {
+                    for (0..T) |t| {
+                        for (0..taps) |k| terms[k] = bf(ctx.inWord(t + k, ch)) * bf(f.weight_bits[ch * taps + k]);
+                        out[t * channels + ch] = rows.sumIn(accum, order, &terms);
+                    }
+                    for (0..3) |j| out[T * channels + j * channels + ch] = bf(ctx.inWord(T + j, ch));
+                }
+            },
+            .conv_decode => {
+                // the chain replays from the UPLOADED initial state
+                var terms: [taps]f64 = undefined;
+                const chain_a = try f.allocU16(3 * channels, 0);
+                const chain_b = try f.allocU16(3 * channels, 0);
+                @memcpy(chain_a, f.state_init_bits);
+                var chain: []u16 = chain_a;
+                for (0..T) |t| {
+                    const ctx: DecodeInput = .{ .state_bits = chain, .x_bits = f.qkv_bits, .t = t };
+                    for (0..channels) |ch| {
+                        for (0..taps) |k| terms[k] = bf(ctx.inWord(t + k, ch)) * bf(f.weight_bits[ch * taps + k]);
+                        out[t * channels + ch] = rows.sumIn(accum, order, &terms);
+                    }
+                    const nxt: []u16 = if (chain.ptr == chain_a.ptr) chain_b else chain_a;
+                    for (0..2) |r| @memcpy(nxt[r * channels ..][0..channels], chain[(r + 1) * channels ..][0..channels]);
+                    @memcpy(nxt[2 * channels ..][0..channels], f.qkv_bits[t * channels ..][0..channels]);
+                    chain = nxt;
+                }
+                for (0..3 * channels) |i| out[T * channels + i] = bf(chain[i]);
+            },
+            .prefill_y => walk(T, f.soa_bits, f.g_pairs, f.beta_bits, f.h0_bits, f.walk_st, out, null, &f.max_state, null, null, accum, order),
+            .prefill_state => {
+                const snap_chunk: ?usize = if (f.chunks > 1) @intCast(chunk_fixed) else null;
+                walk(T, f.soa_bits, f.g_pairs, f.beta_bits, f.h0_bits, f.walk_st, null, out[0..state_elems], &f.max_state, snap_chunk, if (f.chunks > 1) out[state_elems..] else null, accum, order);
+            },
+            .decode_y, .decode_state => {
+                const g_t = try f.allocU16(2 * heads, 0);
+                const beta_t = try f.allocU16(heads, 0);
+                const y_t: ?[]f64 = if (f.which == .decode_y) out else null;
+                const st_scratch = try f.allocF64(state_elems);
+                const st_out = try f.allocF64(state_elems);
+                const bits = try f.allocU16(2 * state_elems, 0);
+                @memcpy(bits, f.state_init_bits);
+                for (0..T) |t| {
+                    decodeGates(f.a_bits, f.b_bits, f.a_log_bits, f.dt_bits, t, g_t, beta_t);
+                    walk(1, f.soa_bits[t * 3 * linear_dim ..][0 .. 3 * linear_dim], g_t, beta_t, bits, st_scratch, if (y_t) |y| y[t * linear_dim ..][0..linear_dim] else null, st_out, &f.max_state, null, null, accum, order);
+                    if (f.which == .decode_state) @memcpy(out[0..state_elems], st_out);
+                    for (0..state_elems) |i| putF32(bits, i, @floatCast(st_out[i]));
+                }
             },
         }
     }
