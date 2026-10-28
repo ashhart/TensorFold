@@ -5,6 +5,8 @@ const glue = @import("kernel_sources").gemma4_glue;
 const prompt_attention = @import("kernel_sources").gemma4_prompt_attention;
 const ple_source = @import("kernel_sources").gemma4_ple;
 const dense_source = @import("kernel_sources").gemma4_dense;
+/// Simdgroups the per-layer gate splits its K over (dense.metal).
+pub const gate_ksplit = 5;
 const frags = @import("../../core/frags.zig");
 const cfg = @import("config.zig");
 
@@ -121,7 +123,7 @@ pub const Ple = struct {
     }
 
     /// dense.metal: the bf16 per-layer linears and the gate with its gelu epilogue.
-    pub const dense_text = dense_source;
+    pub const dense_text = "#define GATE_KS " ++ std.fmt.comptimePrint("{d}", .{gate_ksplit}) ++ "\n" ++ dense_source;
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, geo: cfg.Geometry) !Ple {
         const text = try source(a, geo);
@@ -131,7 +133,7 @@ pub const Ple = struct {
         var k: Ple = undefined;
         inline for (.{ "embed", "combine" }, .{ "gemma_ple_embed", "gemma_ple_combine" }) |field, name|
             @field(k, field) = try mtl.Pipeline.init(device, lib, name, false);
-        const dl = try mtl.Library.fromSource(device, dense_source, mtl.CompileOptions.mlx());
+        const dl = try mtl.Library.fromSource(device, dense_text, mtl.CompileOptions.mlx());
         defer dl.deinit();
         k.dense = try mtl.Pipeline.init(device, dl, "gemma_dense4", false); // the bf16 per-layer linears
         k.gate = try mtl.Pipeline.init(device, dl, "gemma_dense4_gate", false);

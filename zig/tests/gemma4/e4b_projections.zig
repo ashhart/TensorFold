@@ -114,6 +114,35 @@ fn dense(m: *g4.Model, io: std.Io, gpa: std.mem.Allocator, dir: []const u8, tag:
     try npy(io, gpa, dir, try std.fmt.bufPrint(&name, "{s}.y", .{tag}), yb.slice(u16, rows * d.n), rows, d.n);
 }
 
+/// The per-layer gate with its gelu epilogue (what the decode runs), on the layer's real inputs and per-layer rows.
+fn gateFused(m: *g4.Model, io: std.Io, gpa: std.mem.Allocator, dir: []const u8, tag: []const u8, d: g4.weights.Dense, x: []const u16, pli: []const u16, layer: usize, rows: usize) !void {
+    const geo = m.config.geo;
+    const xb = try m.device.buffer(rows * d.k * 2, shared);
+    defer xb.deinit();
+    @memcpy(xb.slice(u16, rows * d.k), x[0 .. rows * d.k]);
+    const pb = try m.device.buffer(pli.len * 2, shared);
+    defer pb.deinit();
+    @memcpy(pb.slice(u16, pli.len), pli);
+    const yb = try m.device.buffer(rows * d.n * 2, shared);
+    defer yb.deinit();
+    const cb = m.queue.commandBuffer();
+    const e = cb.compute(.serial);
+    e.setPipeline(m.kernels.ple.?.gate);
+    e.setBuffer(xb, 0, 0);
+    e.setBuffer(d.w.buf, d.w.off, 1);
+    e.setBuffer(yb, 0, 2);
+    e.setValue([3]i32{ @intCast(rows), @intCast(d.n), @intCast(d.k) }, 3);
+    e.setBuffer(pb, 0, 4);
+    e.setValue([2]i32{ @intCast(layer * geo.layer_input), @intCast(geo.layers * geo.layer_input) }, 5);
+    if (@hasDecl(g4.kernels, "gate_ksplit")) e.dispatchGroups(.{ .width = d.n / 4 }, .{ .width = 32 * g4.kernels.gate_ksplit }) else e.dispatchGroups(.{ .width = (d.n / 4 + 1) / 2 }, .{ .width = 64 });
+    e.end();
+    try finish(cb);
+    var name: [128]u8 = undefined;
+    try npy(io, gpa, dir, try std.fmt.bufPrint(&name, "{s}.x", .{tag}), x, rows, d.k);
+    try npy(io, gpa, dir, try std.fmt.bufPrint(&name, "{s}.pli", .{tag}), pli, rows, geo.layers * geo.layer_input);
+    try npy(io, gpa, dir, try std.fmt.bufPrint(&name, "{s}.y", .{tag}), yb.slice(u16, rows * d.n), rows, d.n);
+}
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -189,6 +218,9 @@ pub fn main(init: std.process.Init) !void {
             const h_out = try grab(m, gpa, s.h[1 - cur], rows * geo.hidden * 2);
             defer gpa.free(h_out);
             try dense(m, io, gpa, dir, try std.fmt.bufPrint(&tag, "plegate_L{d}", .{i}), l.ple_gate.?, h_out, rows);
+            const pli = try grab(m, gpa, s.ple.?.pli, rows * geo.layers * geo.layer_input * 2);
+            defer gpa.free(pli);
+            try gateFused(m, io, gpa, dir, try std.fmt.bufPrint(&tag, "gatefused_L{d}", .{i}), l.ple_gate.?, h_out, pli, i, rows);
             const mid = try grab(m, gpa, s.ple.?.mid, rows * geo.layer_input * 2);
             defer gpa.free(mid);
             try dense(m, io, gpa, dir, try std.fmt.bufPrint(&tag, "pleproj_L{d}", .{i}), l.ple_projection.?, mid, rows);
