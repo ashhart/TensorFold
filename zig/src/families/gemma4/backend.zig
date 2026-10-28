@@ -203,6 +203,7 @@ pub const Metal = struct {
                 if (snapshot.restore(self.gpa, self.model.queue, snap, cache)) stream.cached = snap.at else |_| stream.reuse_failed = true;
             } else stream.reuse_failed = true;
         }
+        if (self.model.config.geo.layer_input != 0) return self.prefillWindows(stream, cache, ids, sink);
         var spans: std.ArrayList(prompt.Span) = .empty;
         defer spans.deinit(self.gpa);
         const rows_buf = try self.encodeImages(stream, cache.len, &spans);
@@ -236,6 +237,26 @@ pub const Metal = struct {
             if (std.mem.indexOfScalar(u32, stream.reuse.marks, @intCast(cache.len)) != null) if (stream.reuse.hook) |k| k.at(k.ptr, stream, @intCast(cache.len));
         }
         @memcpy(cache.logits.slice(u16, cfg.vocab), self.prompt_scratch.logits.slice(u16, cfg.vocab));
+    }
+
+    /// The E-series' prompt in decode windows of up to 128 rows, each a decode step's, cut at planned starts and marks.
+    fn prefillWindows(self: *Metal, stream: *lanes.Stream, cache: *st.Cache, ids: []const u32, sink: ?be.FeatureSink) !void {
+        if (sink != null or stream.images.len != 0) return error.InvalidGemmaPrompt; // no drafter taps and no image input here
+        var at: usize = cache.len;
+        var last: usize = 0;
+        while (at < ids.len) {
+            if (stream.isCancelled()) return error.Cancelled;
+            var end = @min(ids.len, at + st.prompt_rows);
+            for ([_][]const u32{ stream.chunks, stream.reuse.marks }) |cuts| for (cuts) |x| if (x > at and x < end) {
+                end = x;
+            };
+            try fwd.promptWindow(self.model, &self.scratch, cache, ids[at..end], at);
+            last = end - 1 - at;
+            lanes.prefill_widths.completed(self.gpa, stream, end - at);
+            at = end;
+            if (std.mem.indexOfScalar(u32, stream.reuse.marks, @intCast(cache.len)) != null) if (stream.reuse.hook) |k| k.at(k.ptr, stream, @intCast(cache.len));
+        }
+        @memcpy(cache.logits.slice(u16, cfg.vocab), self.scratch.logits.slice(u16, st.prompt_rows * cfg.vocab)[last * cfg.vocab ..][0..cfg.vocab]);
     }
 
     /// The stream's images from `from` on through the tower into one buffer of rows (null: none), a span each.
