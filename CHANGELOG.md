@@ -2,13 +2,13 @@
 
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](RELEASE-NOTES-1.0.0.md) for the native binary's supported models and migration details.
 
-## Unreleased
+## 1.1.8
 
 - Qwen3.5 and 3.6 on HIP (Linux): when a checkpoint shard can't be memory-mapped and is read into memory instead (for example on some network or FUSE mounts), releasing an uploaded layer no longer zeroes that copy. Before, it also zeroed neighbouring tensors not yet uploaded: 269 of 690 layer tensors on Qwen3.5-2B, so the model ran on wrong weights or the loader panicked at close. A malformed shard header is now refused by name. Loads that map their shards are byte-identical to before.
 
 - Nemotron on CUDA counts the checkpoint's bytes for admission from the shard headers alone, without reading the weights. The estimate is unchanged, and with memory mapping off the count no longer reads each shard into memory.
 
-- Tests: the CUDA kernel contract runs to completion in a ReleaseSafe build. Three test adapters freed or copied memory in ways a safe build stops on (#1428). Thanks to @Bizuayeu.
+- Tests: the CUDA kernel contract runs to completion in a ReleaseSafe build. Three test adapters did things a safe build stops on: freeing or copying memory wrongly, and walking two operands of different lengths together (#1428). Thanks to @Bizuayeu.
 
 - The KV pool keeps its counts of free, kept and leased pages up to date as pages change hands, so an admission check no longer scans every page: about 55 µs at 262k pages before, now constant. Admission decisions and page order are unchanged, and on a GB10 with Nemotron's paged CUDA cache replies are the same tokens.
 
@@ -30,17 +30,17 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - CUDA servers with two or more ranks log, at startup, each GPU's peer-to-peer read and write status and PCIe path to the others, the driver, CUDA and NCCL versions, the P2P-related NCCL and CUDA settings in effect, and the transport NCCL chose. Nothing changes peer access or NCCL settings, nothing here can fail startup, and replies are unchanged; `TENSORFOLD_P2P_DIAGNOSTICS=0` turns the report off and `TENSORFOLD_P2P_PROBE` times a small all-gather.
 
-- CI builds each platform's release server and runs the release path check on it for every pull request, so a private path in a built binary fails the pull request instead of the release (#1472).
+- CI builds the release server and runs the release path check on it: for every pull request on Linux x86_64, and for every push to main on each platform, so a private path in a built binary fails CI instead of the release (#1472).
 
 - With `--cortheon`, a turn sent as an array of parts (a vision turn) gives Cortheon its text parts joined, as the chat template reads them, so its checks see the turn's words and two different vision turns no longer share a key (#1469). Without `--cortheon` nothing changes. Thanks to @ppardus.
 
 - Structured output: with `"grammar_budget": true` beside a grammar or a required tool call, each token is drawn so the reply can still finish the grammar within `max_tokens`, so a tool call is no longer cut off unparsed (#1473). It is off by default, where nothing changes; drafted, plain and concurrent replies stay equal with it on, and a grammar it cannot follow (token-level, budgeted, captured or left-recursive rules) is refused with HTTP 400. The first request with a new grammar explores it once, about 60 ms for one tool and 640 ms for twelve.
 
-- `--loop-guard-stop` (opt-in, implies `--loop-guard`): when the reasoning-loop guard fires, the reply ends there instead of closing the reasoning and answering, so an agent no longer gets tool calls that repeat finished work (#1463). The reply keeps its reasoning and `tensorfold.loop` with `"stopped": true`, carries `finish_reason: "content_filter"` and an error with code `reasoning_loop` (`/v1/messages`: `stop_reason: "refusal"`), and the stream's lane is released at once. Without the flag nothing changes.
+- `--loop-guard-stop` (opt-in, implies `--loop-guard`): when the reasoning-loop guard fires, the reply ends there instead of closing the reasoning and answering, so an agent no longer gets tool calls that repeat finished work (#1463). The reply keeps its reasoning and `tensorfold.loop` with `"stopped": true`, carries `finish_reason: "content_filter"` and an error with code `reasoning_loop` (`/v1/messages`: `stop_reason: "refusal"`), and the stream's lane is released at once. Without the flag nothing changes. Thanks to @kesslerio for the report.
 
 - The prompt cache finds a conversation's kept state through an index kept longest first, instead of comparing the prompt with every kept state, so a conversation that keeps a state each turn no longer pays a full prefix compare per kept state on every lookup. Every resume, its position, ties and evictions are the same as before; on an M5 Ultra the Qwen3.8-27B cells give the same tokens at the same speed.
 
-- On macOS the server watches the system's memory pressure (#1454). At warning, a queued request starts only when no other stream runs and the prompt cache lets kept states go in its usual eviction order, one a round, down to half its budget (`TENSORFOLD_PRESSURE_CACHE_PERCENT`), writing each one to disk first with `--spill-gib`; at critical, new requests are refused with 503 and a message naming the pressure, while queued and running requests continue. Replies are the same tokens either way, and at normal pressure nothing changes; on an M5 Ultra the Qwen3.8-27B cells give the same tokens at the same speed. `TENSORFOLD_MEMORY_PRESSURE=0` turns it off.
+- On macOS, engines served through the shared lane host (Flash Next with `--parallel` above one, Qwen3.8-27B and GLM) watch the system's memory pressure (#1454); see [memory pressure](RUNBOOK.md#memory-pressure-on-a-shared-mac). At warning, a queued request starts only when no other stream runs and the prompt cache lets kept states go in its usual eviction order, one a round, down to half its budget (`TENSORFOLD_PRESSURE_CACHE_PERCENT`), writing each one to disk first with `--spill-gib`; at critical, new requests are refused with 503 and a message naming the pressure, while queued and running requests continue. Replies are the same tokens either way, and at normal pressure nothing changes; on an M5 Ultra the Qwen3.8-27B cells give the same tokens at the same speed. `TENSORFOLD_MEMORY_PRESSURE=0` turns it off.
 
 - Flash Next on CUDA with NVFP4 experts loads them on several threads straight from the checkpoint's mapped planes, staged through the store's pinned buffer, so a server starts in about 83 s instead of about 200 s on a GB10 with `Qwen3.8-Flash-Next-FP4-Local` (#1368). Replies are the same tokens, and prompt and decode speed are unchanged or slightly faster. Thanks to @Arminova.
 
@@ -54,7 +54,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Tools: `tools/bench_cache.py` takes `--api-key-env NAME`, as the other benchmark clients do, so its probes can reach a server started with `--api-key`. The key is read from that variable alone and is never printed or written into a report; without the flag the probes send no key, as before (#1483). Thanks to @Maxrio9.
 
-- LFM2.5-24B-A2B on Metal decodes several streams in shared rounds: each layer's short convolution and attention run once over all of a round's streams, in kernels bit-equal to the per-stream ones, and a verify's greedy rows take the GPU's pick of their logits (#1377). On an M5 Ultra with the 4-bit export, aggregate decode rose 20% at 4 streams, 34% at 8 and 31% at 16, and one stream about 2%; every reply is the same tokens as before, alone or beside others, and the exactness checks pass on the 4-, 6- and 8-bit exports. See [the recipe](docs/recipes/lfm2.5-24b-a2b.md). Thanks to @BlivionIaG.
+- LFM2.5-24B-A2B on Metal decodes several streams in shared rounds: each layer's short convolution and attention run once over all of a round's streams, in kernels bit-equal to the per-stream ones, and a verify's greedy rows take the GPU's pick of their logits (#1377). On an M5 Ultra with the 4-bit export, aggregate decode rose 20% at 4 streams, 34% at 8 and 31% at 16, and one stream about 2%; every reply is the same tokens as before, alone or beside others, and the exactness checks pass on the 4-, 6- and 8-bit exports. [The recipe](docs/recipes/lfm2.5-24b-a2b.md) has the author's own receipt, measured against an earlier main. Thanks to @BlivionIaG.
 
 - Kernel contract: Nemotron's routed-expert Metal pipelines are checked from one row to 128 on the engine's route tables: the default window kernels against float64, and the rows2, rows4 and geometry pipelines bit-equal to them, with two planted controls (#1494). One known finding is recorded: a NaN dot in `tf_xup_w3` comes out as 0, as Metal's `max` returns the other operand.
 
