@@ -365,3 +365,36 @@ extern "C" __global__ void __launch_bounds__(256) tf_ctl_lfm2m_route(const __nv_
                                                                       float* WTS, float* LOGITS, int rows, int D, float scale) {
     tf_lfm2m::lfm2m_route<1>(X, W, BIAS, PICK, WTS, LOGITS, rows, D, scale);
 }
+
+// Paged attention at head 64, one planted fault each: values from the next lane's dims (decode) or next 8 (prompt).
+namespace tf_ctl_paged {
+using tf_glue::bf;
+using tf_glue::tf_exp;
+#include "paged_attn.cuh"
+#define SEG_HD 64
+#define SEG_KW (64 / 2 + 2)
+#define SEG_WIDE 0
+#define SEG_VLANE 1
+#define SEG_CHUNK tf_ctl_paged_attn_chunk_segs_64
+#define SEG_MERGE tf_ctl_paged_attn_merge_segs_64
+#include "paged_attn_segs.cuh"
+}  // namespace tf_ctl_paged
+
+#define PATTN_VLANE 1
+#include "prefill_attention.cuh"
+
+namespace tf_prefill_attention {
+extern "C" __global__ void __launch_bounds__(256, 1) tf_ctl_pattn_64(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc,
+                                                                     const __nv_bfloat16* __restrict__ vc, __nv_bfloat16* __restrict__ out, int p0,
+                                                                     int W, int H, int HK, int G, float scale, const int* __restrict__ PT, long long PS) {
+    constexpr int D = 64, WARPS = 8, HPC = 4, NS = 8;
+    constexpr bool causal = true;
+    constexpr int skip = 0;
+    constexpr bool HPAGED = false, F8 = false, HM = false;
+    constexpr int CAP = 0, PTOK = 1;
+    const float *ks = nullptr, *vs = nullptr;
+    const int HO = H;
+    auto first_row = [] { return blockIdx.x * 16 * (WARPS / HPC); };
+#include "prefill_attention_rows.cuh"
+}
+}  // namespace tf_prefill_attention

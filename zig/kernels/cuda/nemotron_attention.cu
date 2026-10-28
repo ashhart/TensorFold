@@ -5,44 +5,14 @@
 #include <stdint.h>
 
 #include "common/glue_math.cuh"
+#include "paged_attn.cuh"
 
 using namespace tf_glue;
 
 namespace {
 
 constexpr int HD = 128;     // head dim the chunk kernels take
-constexpr int GMAX = 16;    // query heads a KV head
-constexpr int TILE = 64;    // keys a tile: the online softmax's unit
 constexpr int KW = HD / 2 + 2;  // a key row's words in shared memory, padded so 64-bit reads of 16 rows miss no bank
-
-__device__ __forceinline__ float lo(uint32_t w) { return __uint_as_float(w << 16); }
-__device__ __forceinline__ float hi(uint32_t w) { return __uint_as_float(w & 0xFFFF0000u); }
-
-// Max over the 16 lanes of a half warp (xor 8, 4, 2, 1).
-__device__ __forceinline__ float half_max(float v) {
-#pragma unroll
-    for (int off = 8; off > 0; off >>= 1) v = fmaxf(v, __shfl_xor_sync(0xffffffffu, v, off));
-    return v;
-}
-
-// Sum over the 16 lanes of a half warp (xor 8, 4, 2, 1): each lane ends with the same sum.
-__device__ __forceinline__ float half_sum(float v) {
-#pragma unroll
-    for (int off = 8; off > 0; off >>= 1) v = __fadd_rn(v, __shfl_xor_sync(0xffffffffu, v, off));
-    return v;
-}
-
-constexpr int PAGE = 512;  // rows a KV page holds: one attention chunk
-
-// Element offset of chunk c's first key row: contiguous rows, or the page the stream's table names (PT null: rows).
-__device__ __forceinline__ int64_t chunk_at(const int* PT, int64_t PS, int c, int KVD) {
-    return PT ? static_cast<int64_t>(PT[c]) * PS : static_cast<int64_t>(c) * PAGE * KVD;
-}
-
-// Element offset of key row k: its chunk's first row, then its row inside the chunk.
-__device__ __forceinline__ int64_t key_at(const int* PT, int64_t PS, int64_t k, int KVD) {
-    return chunk_at(PT, PS, static_cast<int>(k / PAGE), KVD) + (k % PAGE) * KVD;
-}
 
 }  // namespace
 
@@ -197,23 +167,6 @@ extern "C" __global__ void __launch_bounds__(256) tf_nemo_attn_merge(const float
 }
 
 // Shared-window copies of the kernels above (a shared body slowed a lone stream): stream k's rows from ROW0[k] on.
-constexpr int MAXSEG = 8;
-struct AttnSegs {
-    __nv_bfloat16* KC[MAXSEG];
-    __nv_bfloat16* VC[MAXSEG];
-    const int* META[MAXSEG];
-    const int* PT[MAXSEG];  // each stream's page table (null: its rows are contiguous)
-    long long PS;           // elements between pages
-    int ROW0[MAXSEG];
-    int N;
-};
-
-__device__ __forceinline__ int seg_of(const AttnSegs& sg, int rq) {
-    int k = 0;
-    while (k + 1 < sg.N && sg.ROW0[k + 1] <= rq) ++k;
-    return k;
-}
-
 extern "C" __global__ void tf_nemo_kv_write_segs(const AttnSegs sg, const __nv_bfloat16* __restrict__ QKV, int NQKV, int QD, int KVD) {
     const int rq = blockIdx.x, k = seg_of(sg, rq);
     __nv_bfloat16* __restrict__ KC = sg.KC[k];
