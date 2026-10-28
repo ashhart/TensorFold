@@ -30,6 +30,7 @@ test {
     _ = geometry;
     _ = @import("draw.zig");
     _ = @import("cuda_draft_weights.zig");
+    _ = @import("cuda_draft_config.zig");
     _ = draft;
     _ = vision;
     _ = @import("cuda_vision_prompt.zig");
