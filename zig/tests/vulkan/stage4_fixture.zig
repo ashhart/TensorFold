@@ -366,7 +366,10 @@ pub const Conv = struct {
 // ---------------------------------------------------------------------------
 
 pub const RecurWalk = struct {
-    /// state[head][row][dk]; y[token][head*128+row].
+    /// state[head][row][dk]; y[token][head*128+row]. When `snap_after` is
+    /// non-null, `want_snap` receives the FULL state after token
+    /// `snap_after.? - 1` (the shader's interior chunk boundary): the
+    /// snapshot slot the prefill scan stores there.
     pub fn run(
         soa_bits: []const u16,
         g_pairs: []const u16, // f32 as u16 pairs [T*16*2]
@@ -375,6 +378,8 @@ pub const RecurWalk = struct {
         want_y: []f64,
         want_state: []f64, // [262144]
         max_state: *f64,
+        snap_after: ?u64,
+        want_snap: ?[]f64,
     ) void {
         const dk: usize = @intCast(Model.head_dim);
         const heads: usize = @intCast(Model.heads);
@@ -413,6 +418,10 @@ pub const RecurWalk = struct {
                     want_y[(t * 16 + h) * dk + row] = o;
                 }
             }
+            // the interior chunk boundary's snapshot slot
+            if (snap_after) |after| if (want_snap) |ws| {
+                if (@as(u64, t) + 1 == after) @memcpy(ws[0..state_elems], st[0..state_elems]);
+            };
         }
         @memcpy(want_state[0..state_elems], st[0..state_elems]);
     }
@@ -426,8 +435,12 @@ pub const Recur = struct {
     want_y: []f64,
     want_state: []f64,
     max_state: f64,
+    /// The interior chunk boundary's reference snapshot: non-null exactly when
+    /// the gate runs chunked (0 < chunk < tokens, chunks >= 2, one interior
+    /// boundary at token `chunk`).
+    want_snap: ?[]f64,
 
-    pub fn init(a: std.mem.Allocator, soa_bits: []const u16, g_pairs: []const u16, beta_bits: []const u16, seed: u64) !Recur {
+    pub fn init(a: std.mem.Allocator, soa_bits: []const u16, g_pairs: []const u16, beta_bits: []const u16, seed: u64, chunk: u64) !Recur {
         const state_elems: usize = @intCast(Model.state_elements);
         const y_elems: usize = @intCast(tokens * Model.linear_dim);
         const h0_bits = try poisonedShell(a, 2 * state_elems);
@@ -444,14 +457,41 @@ pub const Recur = struct {
         const want_state = try a.alloc(f64, state_elems);
         errdefer a.free(want_state);
         var max_state: f64 = 0;
-        RecurWalk.run(soa_bits, g_pairs, beta_bits, h0_bits, want_y, want_state, &max_state);
-        return .{ .a = a, .h0_bits = h0_bits, .want_y = want_y, .want_state = want_state, .max_state = max_state };
+        var want_snap: ?[]f64 = null;
+        errdefer if (want_snap) |ws| a.free(ws);
+        if (chunk > 0 and chunk < tokens) {
+            // chunks >= 2: exactly ONE interior boundary (after `chunk` tokens)
+            const ws = try a.alloc(f64, state_elems);
+            want_snap = ws;
+            RecurWalk.run(soa_bits, g_pairs, beta_bits, h0_bits, want_y, want_state, &max_state, chunk, ws);
+        } else {
+            RecurWalk.run(soa_bits, g_pairs, beta_bits, h0_bits, want_y, want_state, &max_state, null, null);
+        }
+        return .{ .a = a, .h0_bits = h0_bits, .want_y = want_y, .want_state = want_state, .max_state = max_state, .want_snap = want_snap };
     }
 
     pub fn deinit(f: Recur) void {
         f.a.free(f.h0_bits);
         f.a.free(f.want_y);
         f.a.free(f.want_state);
+        if (f.want_snap) |ws| f.a.free(ws);
+    }
+
+    /// The snapshot slot against its boundary reference; poison and partial
+    /// writes are refused by the same finite/budget gates as hf.
+    pub fn checkSnap(f: Recur, snap_pairs: []const u16) !Report {
+        const ws = f.want_snap orelse return error.NoSnapshotExpected;
+        var r: Report = .{};
+        for (ws, 0..) |w, i| {
+            const got = f32Of(snap_pairs, i);
+            if (!std.math.isFinite(got)) return error.NonFiniteOutput;
+            const d = @abs(got - w);
+            const bound = budget(130 * 4 + 2, 2, 0, w, f.max_state); // chunk tokens deep
+            if (d > bound) return error.OverBound;
+            const ratio = d / bound;
+            if (ratio > r.worst) r = .{ .worst = ratio, .where = i };
+        }
+        return r;
     }
 
     pub fn check(f: Recur, y_bits: []const u16, hf_pairs: []const u16) !Report {
@@ -612,12 +652,13 @@ pub const Decode = struct {
 // Gated norm
 // ---------------------------------------------------------------------------
 
-/// gatedNorm at rows=4: out = bf16(silu(z) * bf16(x * rsqrt(mean(x^2)+eps) * w)).
+/// gatedNorm at tokens=4: PER-HEAD 128-wide RMS (Ash gdn_post), head-major
+/// [4, 16, 128]; out = bf16(silu_div(z) * bf16(w * (x * inv))).
 pub const Norm = struct {
     a: std.mem.Allocator,
     y_bits: []u16, // norm input
     z_bits: []u16, // gate
-    w_bits: []u16, // [2048]
+    w_bits: []u16, // [128]: per-head weight, repeated for every head
     eps: f64,
 
     pub fn init(a: std.mem.Allocator, seed: u64) !Norm {
@@ -626,13 +667,13 @@ pub const Norm = struct {
         errdefer a.free(y_bits);
         const z_bits = try poisonedShell(a, total);
         errdefer a.free(z_bits);
-        const w_bits = try poisonedShell(a, @intCast(Model.linear_dim));
+        const w_bits = try poisonedShell(a, @intCast(Model.head_dim));
         errdefer a.free(w_bits);
         var prng = std.Random.DefaultPrng.init(seed);
         const rng = prng.random();
         for (y_bits[0..total]) |*x| x.* = sampleDyadic(rng, -4, 2);
         for (z_bits[0..total]) |*x| x.* = sampleDyadic(rng, -4, 2);
-        for (w_bits[0..@intCast(Model.linear_dim)]) |*x| x.* = sampleDyadic(rng, -3, 1);
+        for (w_bits[0..@intCast(Model.head_dim)]) |*x| x.* = sampleDyadic(rng, -3, 1);
         return .{ .a = a, .y_bits = y_bits, .z_bits = z_bits, .w_bits = w_bits, .eps = 1e-6 };
     }
 
@@ -642,16 +683,14 @@ pub const Norm = struct {
         f.a.free(f.w_bits);
     }
 
-    /// gatedNorm at rows=4, the Ash8c Metal gdn_post association: the scale
-    /// rides the value (scaled = value*norm), the weight the outside
-    /// (result = weight*scaled, one bf16 normed round), and the gate is
-    /// divided — silu = gate/(1+exp(-gate)) — times the normed value, one
-    /// bf16 store. Budget unchanged (the association is exact f32 ordering,
-    /// covered by ops; never loosened).
+    /// Per-head-row reference (tokens=4, 16 heads, width 128): each (token,
+    /// head) row of 128 reduces its OWN mean square; the weight indexes the
+    /// column within the head and repeats across heads. Association and
+    /// budget unchanged.
     pub fn check(f: Norm, bits: []const u16) !Report {
         var r: Report = .{};
-        const width: usize = @intCast(Model.linear_dim);
-        for (0..4) |row| {
+        const width: usize = @intCast(Model.head_dim);
+        for (0..4 * @as(usize, @intCast(Model.heads))) |row| {
             var ss: f64 = 0;
             var xmax: f64 = 0;
             for (0..width) |i| {
@@ -709,10 +748,11 @@ test "norm checker refuses planted outputs" {
     const a = testing.allocator;
     const f = try Norm.init(a, 0x18);
     defer f.deinit();
-    const width: usize = @intCast(Model.linear_dim);
-    const good = try a.alloc(u16, 4 * width);
+    const width: usize = @intCast(Model.head_dim);
+    const head_rows: usize = 4 * @as(usize, @intCast(Model.heads));
+    const good = try a.alloc(u16, head_rows * width);
     defer a.free(good);
-    for (0..4) |row| {
+    for (0..head_rows) |row| {
         var ss: f64 = 0;
         for (0..width) |i| {
             const v = c.fromBf16(f.y_bits[row * width + i]);
@@ -734,6 +774,102 @@ test "norm checker refuses planted outputs" {
     try testing.expectError(error.OverBound, f.check(good));
     good[0] = 0x7f80;
     try testing.expectError(error.NonFiniteOutput, f.check(good));
+}
+
+// Checker self-tests for the state carry-out path: a correctly
+// reference-rounded state PASSES, a poisoned (0xffff = NaN) carry-out is
+// REJECTED, and a dead store (all-poison state) cannot pass.
+test "recur checker accepts rounded state and refuses poisoned carry-out" {
+    const a = testing.allocator;
+    // fabricate the split's outputs as dyadic bits (the walker reads them)
+    const soa_len: usize = @intCast(3 * tokens * Model.linear_dim);
+    const soa_bits = try a.alloc(u16, soa_len);
+    defer a.free(soa_bits);
+    var prng = std.Random.DefaultPrng.init(0x51);
+    const rng = prng.random();
+    for (soa_bits) |*x| x.* = sampleDyadic(rng, -3, 1);
+    const g_len: usize = @intCast(tokens * Model.heads * 2);
+    const g_pairs = try a.alloc(u16, g_len);
+    defer a.free(g_pairs);
+    for (g_pairs) |*x| {
+        const bits: u32 = @bitCast(sampleDyadicF32(rng, -4, 0));
+        x.* = @truncate(bits);
+    }
+    const beta_len: usize = @intCast(tokens * Model.heads);
+    const beta_bits = try a.alloc(u16, beta_len);
+    defer a.free(beta_bits);
+    for (beta_bits) |*x| x.* = sampleDyadic(rng, -3, 1);
+    const f = try Recur.init(a, soa_bits, g_pairs, beta_bits, 0x52, tokens); // single chunk: no interior snapshot
+    defer f.deinit();
+    const state_elems: usize = @intCast(Model.state_elements);
+    // correctly reference-rounded state must pass
+    const hf_good = try a.alloc(u16, 2 * state_elems);
+    defer a.free(hf_good);
+    for (f.want_state, 0..) |w, i| {
+        const bits: u32 = @bitCast(@as(f32, @floatCast(w)));
+        hf_good[2 * i] = @truncate(bits);
+        hf_good[2 * i + 1] = @truncate(bits >> 16);
+    }
+    const y_good = try a.alloc(u16, @intCast(tokens * Model.linear_dim));
+    defer a.free(y_good);
+    for (f.want_y, 0..) |w, i| y_good[i] = c.toBf16(@floatCast(w));
+    const rep = try f.check(y_good, hf_good);
+    try testing.expect(rep.worst <= 1);
+    // poisoned carry-out (NaN word) must be rejected
+    const hf_bad = try a.dupe(u16, hf_good);
+    defer a.free(hf_bad);
+    hf_bad[0] = 0xffff;
+    hf_bad[1] = 0xffff;
+    try testing.expectError(error.NonFiniteOutput, f.check(y_good, hf_bad));
+    // a dead store: all-poison state must be rejected
+    @memset(hf_bad, 0xffff);
+    try testing.expectError(error.NonFiniteOutput, f.check(y_good, hf_bad));
+    // single-chunk Recur expects NO snapshot
+    try testing.expect(f.want_snap == null);
+    // a chunked Recur has exactly one interior boundary reference; the
+    // correctly-rounded slot passes, poison is refused
+    const fc = try Recur.init(a, soa_bits, g_pairs, beta_bits, 0x54, 4);
+    defer fc.deinit();
+    const ws = fc.want_snap.?;
+    try testing.expectEqual(@as(usize, @intCast(Model.state_elements)), ws.len);
+    const snap_good = try a.alloc(u16, 2 * @as(usize, @intCast(Model.state_elements)));
+    defer a.free(snap_good);
+    for (ws, 0..) |w, i| {
+        const bits: u32 = @bitCast(@as(f32, @floatCast(w)));
+        snap_good[2 * i] = @truncate(bits);
+        snap_good[2 * i + 1] = @truncate(bits >> 16);
+    }
+    const snap_rep = try fc.checkSnap(snap_good);
+    try testing.expect(snap_rep.worst <= 1);
+    snap_good[2] = 0xffff;
+    snap_good[3] = 0xffff;
+    try testing.expectError(error.NonFiniteOutput, fc.checkSnap(snap_good));
+    @memset(snap_good, 0xffff);
+    try testing.expectError(error.NonFiniteOutput, fc.checkSnap(snap_good));
+}
+
+test "decode checker refuses poisoned carry-out state" {
+    const a = testing.allocator;
+    const f = try Decode.init(a, 0x53);
+    defer f.deinit();
+    const state_elems: usize = @intCast(Model.state_elements);
+    const y_good = try a.alloc(u16, @intCast(Model.linear_dim));
+    defer a.free(y_good);
+    for (f.want_y, 0..) |w, i| y_good[i] = c.toBf16(@floatCast(w));
+    const souts_good = try a.alloc(u16, 2 * state_elems);
+    defer a.free(souts_good);
+    for (f.want_state, 0..) |w, i| {
+        const bits: u32 = @bitCast(@as(f32, @floatCast(w)));
+        souts_good[2 * i] = @truncate(bits);
+        souts_good[2 * i + 1] = @truncate(bits >> 16);
+    }
+    const rep = try f.check(y_good, souts_good);
+    try testing.expect(rep.worst <= 1);
+    const souts_bad = try a.dupe(u16, souts_good);
+    defer a.free(souts_bad);
+    souts_bad[100] = 0xffff;
+    souts_bad[101] = 0xffff;
+    try testing.expectError(error.NonFiniteOutput, f.check(y_good, souts_bad));
 }
 
 test "fixture initialization fails cleanly under allocation failure" {
