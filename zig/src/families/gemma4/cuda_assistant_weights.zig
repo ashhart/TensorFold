@@ -296,6 +296,22 @@ test "the 31B's assistant is admitted against the 31B with its 32 query heads, a
     try std.testing.expectError(error.AssistantForAnotherTarget, Config.parse(std.testing.allocator, fixture_31b, cfg.unified12b));
 }
 
+test "an assistant of another type, with a mismatched text type or with other query heads than its target is refused" {
+    const a = std.testing.allocator;
+    const fixture_31b = @embedFile("fixtures/assistant_31b_config.json");
+    const cases = .{
+        .{ "\"model_type\": \"gemma4_assistant\"", "\"model_type\": \"gemma4_other\"", error.UnsupportedAssistantType },
+        .{ "\"model_type\": \"gemma4_text\"", "\"model_type\": \"gemma4_unified_text\"", error.BadDraftConfig },
+        .{ "\"num_attention_heads\": 32", "\"num_attention_heads\": 16", error.UnsupportedAssistantGeometry },
+    };
+    inline for (cases) |c| {
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, fixture_31b, c[0]));
+        const bytes = try std.mem.replaceOwned(u8, a, fixture_31b, c[0], c[1]);
+        defer a.free(bytes);
+        try std.testing.expectError(c[2], Config.parse(a, bytes, cfg.dense31b));
+    }
+}
+
 test "a group quantizes as MLX's affine 4-bit: every value within half a step" {
     var x: [64]u16 = undefined;
     for (&x, 0..) |*v, i| v.* = toBf(@as(f32, @floatFromInt(i)) * 0.03 - 0.7);
