@@ -31,6 +31,7 @@ pub fn steps(b: *std.Build, all: *std.Build.Step) void {
         .link_libc = true,
         .imports = &.{ .{ .name = "lfm3", .module = family }, .{ .name = "safetensors", .module = st } },
     }) });
+    b.installArtifact(tool);
     b.step("tf-lfm3-check", "Validate saved LFM3 tensor-header metadata without model data or a GPU")
         .dependOn(&b.addInstallArtifact(tool, .{}).step);
 }
