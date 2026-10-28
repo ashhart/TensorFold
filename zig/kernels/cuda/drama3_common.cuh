@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <math.h>
 #include "common/reduce.cuh"
+#include "common/act.cuh"
 
 typedef __nv_bfloat16 bf16;
 
@@ -77,9 +78,9 @@ __device__ __forceinline__ float dot8(uint4 a, uint4 b) {
   return s;
 }
 
-__device__ __forceinline__ float sigmoidf_(float x) { return 1.f / (1.f + expf(-x)); }
+using tf_common::sigmoidf_;
 __device__ __forceinline__ float siluf_(float x) { return x / (1.f + expf(-x)); }
-__device__ __forceinline__ float softplusf_(float x) { return x > 20.f ? x : log1pf(expf(x)); }
+using tf_common::softplusf_;
 
 __device__ __forceinline__ bool is_semantic(int tok, int sem_begin, int sem_end) {
   return tok >= sem_begin && tok <= sem_end;

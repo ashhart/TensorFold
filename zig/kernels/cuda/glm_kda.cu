@@ -4,6 +4,7 @@
 #include <cuda_runtime.h>
 #include <stdint.h>
 #include "common/reduce.cuh"
+#include "common/act.cuh"
 namespace {
 
 constexpr int DK = 128, DV = 128, TAPS = 4;
@@ -12,7 +13,7 @@ __device__ __forceinline__ float bf(float x) { return __bfloat162float(__float2b
 
 using tf_common::warp_sum;
 
-__device__ __forceinline__ float sigmoidf_(float x) { return 1.0f / (1.0f + expf(-x)); }
+using tf_common::sigmoidf_;
 
 // One delta-rule step on this thread's 4 x 4 block of the state: per-channel decay, read (k), correct toward v.
 __device__ __forceinline__ void update(float (&s)[4][4], const float (&kk)[4], const float (&gg)[4],

@@ -3,6 +3,7 @@
 #include <cuda_bf16.h>
 #include <stdint.h>
 #include "common/reduce.cuh"
+#include "common/act.cuh"
 
 typedef __nv_bfloat16 bf16;
 
@@ -14,7 +15,7 @@ using tf_common::warp_max;
 using tf_common::block_sum_tree;
 using tf_common::block_max_tree;
 
-__device__ __forceinline__ float sigm(float v) { return 1.0f / (1.0f + expf(-v)); }
+using tf_common::sigmoidf_;
 
 // ---- the attention layer --------------------------------------------------------------------------------------------
 
@@ -130,7 +131,7 @@ extern "C" __global__ void tf_attn_gate_back(const float* dgated, const bf16* ga
     if (c >= qw) return;
     const int h = c / dim, d = c % dim;
     const size_t at = (size_t)r * 2 * qw + h * 2 * dim + dim + d;
-    const float sg = sigm(f32(pq[at])), g = dgated[(size_t)r * qw + c];
+    const float sg = sigmoidf_(f32(pq[at])), g = dgated[(size_t)r * qw + c];
     dout[(size_t)r * qw + c] = g * sg;
     dpq[at] = g * f32(gated[(size_t)r * qw + c]) * (1.0f - sg);
 }

@@ -3,6 +3,7 @@
 #include <cuda_bf16.h>
 #include <stdint.h>
 #include "common/reduce.cuh"
+#include "common/act.cuh"
 
 typedef __nv_bfloat16 bf16;
 
@@ -14,12 +15,9 @@ using tf_common::warp_max;
 using tf_common::block_sum_tree;
 using tf_common::block_max_tree;
 
-__device__ __forceinline__ float silu(float v) { return v / (1.0f + expf(-v)); }
+using tf_common::silu;
 
-__device__ __forceinline__ float silu_grad(float v) {
-    const float s = 1.0f / (1.0f + expf(-v));
-    return s * (1.0f + v * (1.0f - s));
-}
+using tf_common::silu_grad;
 
 __device__ __forceinline__ float softplus(float v) { return v > 20.0f ? v : log1pf(expf(v)); }
 

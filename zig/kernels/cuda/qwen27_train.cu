@@ -3,6 +3,7 @@
 #include <cuda_bf16.h>
 #include <stdint.h>
 #include "common/reduce.cuh"
+#include "common/act.cuh"
 
 typedef __nv_bfloat16 bf16;
 
@@ -14,13 +15,10 @@ __device__ __forceinline__ float wide(bf16 v) { return __bfloat162float(v); }
 using tf_common::warp_sum;
 using tf_common::block_sum_tree;
 
-__device__ __forceinline__ float sigm(float v) { return 1.0f / (1.0f + expf(-v)); }
-__device__ __forceinline__ float silu(float v) { return v / (1.0f + expf(-v)); }
+using tf_common::sigmoidf_;
+using tf_common::silu;
 
-__device__ __forceinline__ float silu_grad(float v) {
-    const float s = sigm(v);
-    return s * (1.0f + v * (1.0f - s));
-}
+using tf_common::silu_grad;
 
 // ---- 4-bit products, any group --------------------------------------------------------------------------------------
 

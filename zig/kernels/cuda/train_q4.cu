@@ -5,6 +5,7 @@
 #include <cuda_bf16.h>
 #include <stdint.h>
 #include "common/reduce.cuh"
+#include "common/act.cuh"
 
 typedef __nv_bfloat16 bf16;
 
@@ -16,13 +17,10 @@ __device__ __forceinline__ float wide(bf16 v) { return __bfloat162float(v); }
 using tf_common::warp_sum;
 using tf_common::block_sum_tree;
 
-__device__ __forceinline__ float sigm(float v) { return 1.0f / (1.0f + expf(-v)); }
-__device__ __forceinline__ float silu(float v) { return v / (1.0f + expf(-v)); }
+using tf_common::sigmoidf_;
+using tf_common::silu;
 
-__device__ __forceinline__ float silu_grad(float v) {
-    const float s = sigm(v);
-    return s * (1.0f + v * (1.0f - s));
-}
+using tf_common::silu_grad;
 
 // ---- products -------------------------------------------------------------------------------------------------------
 
@@ -424,7 +422,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_q4_route_back(const float* 
             dl[k] = e[k] / total * (a[r * slots + k] - mix);
             at[k] = ids[r * slots + k];
         }
-        const float sg = sigm(l[shared]);
+        const float sg = sigmoidf_(l[shared]);
         dl[top_k] = a[r * slots + top_k] * sg * (1.0f - sg);
         at[top_k] = shared;
         if (dlog)
