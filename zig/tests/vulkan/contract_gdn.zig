@@ -93,7 +93,7 @@ fn servedOf(which: Which) []const c.Shape {
     };
 }
 
-const soa_sums_why = "the 32-lane square sum reaches the output only through its inverse square root, so a bf16 sum's error hides under the stated magnitude budget: the fp16 margin proves fp32 sums";
+const soa_sums_why = "the 32-lane square sum reaches the output only through its inverse square root, and the stated budget's magnitude term at the output's scale is wider than any fp16 miss the stress can engineer: gate 3's shapes bound the sum to f32 quality instead (a bf16-summed ss misses by ~2^-8 relative, far past the observed worst of bound)";
 const conv_sums_why = "these stress inputs do not separate bf16 tap sums beyond the rounded output bound; fp16 overflows";
 const recur_sums_why = "the kv dot's bf16 error enters the state only scaled by beta and the budget's magnitude term already carries the f32 chain: the fp16 margin proves fp32 sums";
 
@@ -108,7 +108,7 @@ pub fn spec(which: Which) c.Spec {
             .out = .bf16,
             .tiles = .{ token_tile, .{}, .{} },
             .served = servedOf(which),
-            .sums = .{ .bf16 = 0, .why = soa_sums_why },
+            .sums = .{ .f16 = 0, .bf16 = 0, .why = soa_sums_why },
         },
         .split_g => .{
             .name = "vulkan gdn split g (f32)",
@@ -733,7 +733,11 @@ pub const Gdn = struct {
                     fillDyadic(rng, f.a_bits, -3, 2);
                     fillDyadic(rng, f.b_bits, -3, 2);
                     fillDyadic(rng, f.dt_bits, -4, 1);
-                    fillDyadicF32(rng, f.a_log_bits, -4, 1);
+                    // served a_log keeps g a normal f32; a_log above ~2.4
+                    // drives g subnormal, which the device flushes - the
+                    // stage 4 fixture's census case, Main's call, not a
+                    // random-fill failure
+                    fillDyadicF32(rng, f.a_log_bits, -6, 0);
                 },
                 .conv_prefill, .conv_decode => {
                     fillDyadic(rng, f.state_bits, -4, 2);
@@ -742,7 +746,7 @@ pub const Gdn = struct {
                     fillDyadic(rng, f.a_bits, -3, 2);
                     fillDyadic(rng, f.b_bits, -3, 2);
                     fillDyadic(rng, f.dt_bits, -4, 1);
-                    fillDyadicF32(rng, f.a_log_bits, -4, 1);
+                    fillDyadicF32(rng, f.a_log_bits, -6, 0);
                 },
                 .prefill_y, .prefill_state => {
                     // 130 tokens must stay inside f32: g <= 2^-3, beta and the
@@ -769,7 +773,11 @@ pub const Gdn = struct {
                     fillDyadic(rng, f.a_bits, -3, 2);
                     fillDyadic(rng, f.b_bits, -3, 2);
                     fillDyadic(rng, f.dt_bits, -4, 1);
-                    fillDyadicF32(rng, f.a_log_bits, -4, 1);
+                    // served a_log keeps g a normal f32; a_log above ~2.4
+                    // drives g subnormal, which the device flushes - the
+                    // stage 4 fixture's census case, Main's call, not a
+                    // random-fill failure
+                    fillDyadicF32(rng, f.a_log_bits, -6, 0);
                 },
                 .conv_prefill, .conv_decode => {
                     fillDyadic(rng, f.state_bits, -4, 2);
@@ -778,7 +786,7 @@ pub const Gdn = struct {
                     fillDyadic(rng, f.a_bits, -3, 2);
                     fillDyadic(rng, f.b_bits, -3, 2);
                     fillDyadic(rng, f.dt_bits, -4, 1);
-                    fillDyadicF32(rng, f.a_log_bits, -4, 1);
+                    fillDyadicF32(rng, f.a_log_bits, -6, 0);
                 },
                 .prefill_y, .prefill_state => {
                     // 130 tokens must stay inside f32: g <= 2^-3, beta and the
