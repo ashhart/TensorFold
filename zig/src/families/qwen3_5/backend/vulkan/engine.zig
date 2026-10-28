@@ -35,6 +35,13 @@ const View = vk.tensor.View;
 
 pub const max_prefill_rows = fwd.max_prefill_rows;
 
+/// The canonical 32-row cut: the end index of the chunk starting at `done`
+/// within a `total`-row request. Pure and host-tested (the schedule gates:
+/// 32 ends a full chunk, 33/63/64/65 cut at 32/64/64/65).
+pub fn chunkEnd(done: usize, total: usize) usize {
+    return @min(done +| max_prefill_rows, total);
+}
+
 /// The staged-transfer buffer: 8 MiB so the load's ~27k tensors stream in
 /// large chunks instead of one 64 KiB fence each.
 pub const staging_bytes: u64 = 8 << 20;
@@ -65,11 +72,13 @@ pub const ShaderBundle = struct {
 };
 
 /// One engine's sequence plan: checked before any GPU work; pure and
-/// host-tested. `steps` greedy draws need `rows + steps - 1` new positions.
+/// host-tested. `steps` greedy draws need `rows + steps - 1` new positions;
+/// `rows` is a whole request (any length, the pass cuts its own chunks).
 /// `visible` and `steps` arrive from files and callers, so the sum is
 /// computed with checked adds — an extreme value refuses, never wraps.
 pub fn planFor(capacity: usize, visible: u64, rows: usize, steps: usize) Error!void {
-    if (rows == 0 or rows > max_prefill_rows or steps == 0) return error.UnsupportedPrompt;
+    if (rows == 0 or steps == 0) return error.UnsupportedPrompt;
+    if (capacity > state.max_capacity) return error.ContextTooLong;
     const need = std.math.add(u64, visible, rows) catch return error.ContextTooLong;
     const total = std.math.add(u64, need, steps) catch return error.ContextTooLong;
     if (total - 1 > capacity) return error.ContextTooLong;
@@ -211,10 +220,28 @@ pub const Engine = struct {
         e.poisoned = false;
     }
 
-    /// The prompt pass: one chunk of 1..32 checked rows. Bounds and ids are
-    /// validated before the first write; the logits row afterwards is the
-    /// next-token distribution past the prompt.
+    /// The prompt pass over a whole validated prompt of any length up to the
+    /// state's capacity: every id and the request's whole footprint are
+    /// checked before the first write, then the existing forward runs over
+    /// stable 32-row chunks, the visible count committed after each. A
+    /// failure after the first chunk poisons (the partial RNN state is never
+    /// reused); a refused call leaves the state untouched.
     pub fn prefill(e: *Engine, tokens: []const u32) Error!void {
+        if (e.poisoned) return error.Poisoned;
+        if (tokens.len == 0) return error.UnsupportedPrompt;
+        try vk.ops_q4.checkIds(tokens, e.model.embed.n);
+        try planFor(@intCast(e.state.capacity), e.state.visible(), tokens.len, 1);
+        var done: usize = 0;
+        while (done < tokens.len) {
+            const end = chunkEnd(done, tokens.len);
+            try e.prefillChunk(tokens[done..end]);
+            done = end;
+        }
+    }
+
+    /// One forward chunk of 1..32 checked rows over the current state; the
+    /// logits row afterwards is the next-token distribution past the chunk.
+    pub fn prefillChunk(e: *Engine, tokens: []const u32) Error!void {
         if (e.poisoned) return error.Poisoned;
         if (tokens.len == 0 or tokens.len > max_prefill_rows) return error.UnsupportedPrompt;
         try vk.ops_q4.checkIds(tokens, e.model.embed.n);
@@ -347,12 +374,11 @@ test "logitsReady admits only a clean engine with a visible prefix" {
     try testing.expectError(error.Poisoned, logitsReady(true, 0)); // poison wins
 }
 
-test "the plan refuses empty, oversized, stepless and overflowing sequences before any GPU work" {
+test "the plan refuses empty, stepless and overflowing sequences before any GPU work" {
     const cap = 256;
     try planFor(cap, 0, 16, 16);
     try planFor(cap, 240, 16, 1); // exactly fills: 240 + 16 + 1 - 1 = 256
     try testing.expectError(error.UnsupportedPrompt, planFor(cap, 0, 0, 1));
-    try testing.expectError(error.UnsupportedPrompt, planFor(cap, 0, max_prefill_rows + 1, 1));
     try testing.expectError(error.UnsupportedPrompt, planFor(cap, 0, 1, 0));
     try testing.expectError(error.ContextTooLong, planFor(cap, 241, 16, 1));
     try testing.expectError(error.ContextTooLong, planFor(0, 0, 1, 1));
@@ -360,6 +386,41 @@ test "the plan refuses empty, oversized, stepless and overflowing sequences befo
     try testing.expectError(error.ContextTooLong, planFor(cap, std.math.maxInt(u64), 1, 1));
     try testing.expectError(error.ContextTooLong, planFor(cap, 0, 1, std.math.maxInt(usize)));
     try testing.expectError(error.ContextTooLong, planFor(cap, std.math.maxInt(u64) - 1, 1, 3));
+}
+
+test "the canonical cut ends every whole-request length at 32-row boundaries" {
+    for ([_]struct { len: usize, cuts: []const usize }{
+        .{ .len = 1, .cuts = &.{1} },
+        .{ .len = 31, .cuts = &.{31} },
+        .{ .len = 32, .cuts = &.{32} },
+        .{ .len = 33, .cuts = &.{ 32, 33 } },
+        .{ .len = 63, .cuts = &.{ 32, 63 } },
+        .{ .len = 64, .cuts = &.{ 32, 64 } },
+        .{ .len = 65, .cuts = &.{ 32, 64, 65 } },
+    }) |case| {
+        var done: usize = 0;
+        var at: usize = 0;
+        while (done < case.len) : (at += 1) {
+            const end = chunkEnd(done, case.len);
+            try testing.expect(at < case.cuts.len and end == case.cuts[at]); // exactly the expected schedule
+            done = end;
+        }
+        try testing.expectEqual(case.cuts.len, at);
+    }
+}
+
+test "the plan admits whole requests up to the capacity ceiling and refuses one past" {
+    const cap: usize = 7168;
+    for ([_]usize{ 1, 31, 32, 33, 63, 64, 65, 7105, 7168 }) |len| {
+        try planFor(cap, 0, len, 1); // a prompt-only request always fits at or under the ceiling
+    }
+    try testing.expectError(error.ContextTooLong, planFor(cap, 0, 7169, 1)); // one past the ceiling
+    try planFor(cap, 0, 7168, 1); // exact fit prompt + one draw reads a written row
+    try testing.expectError(error.ContextTooLong, planFor(cap, 0, 7168, 2)); // one past with a decode
+    try planFor(cap, 0, 7105, 64); // the frozen long case ends at exactly 7168 writes
+    try testing.expectError(error.ContextTooLong, planFor(cap, 0, 7106, 64));
+    try testing.expectError(error.ContextTooLong, planFor(cap + 1, 0, 1, 1));
+    try planFor(cap, 0, 7167, 2); // 7167 + 2 - 1 = 7168: exact fit
 }
 
 test "the arena holds the persistent windows plus the worst transient layer" {
