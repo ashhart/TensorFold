@@ -449,7 +449,10 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .root_source_file = b.path("zig/tests/vulkan/contract_pointwise.zig"),
         .target = b.graph.host,
         .optimize = .debug,
-        .imports = &.{.{ .name = "contract", .module = @import("kernel_contract.zig").module(b, b.graph.host, .debug) }},
+        .imports = &.{
+            .{ .name = "contract", .module = @import("kernel_contract.zig").module(b, b.graph.host, .debug) },
+            .{ .name = "stage2_shaders", .module = stage2_shaders_mod },
+        },
     }) });
     host.dependOn(&b.addRunArtifact(pointwise_fixture_tests).step);
     b.step("contract-pointwise-host-test", "The pointwise contract fixtures' host suite (references and checkers), without GPU work").dependOn(host);
@@ -576,11 +579,13 @@ const stage1_shaders_src =
 ;
 
 /// The stage 2 closure's shader images: norm and swiglu carry the Ash8c Metal-oracle variant
-/// (single store rounding; weight applied to the product), add the plain bf16 form.
+/// (single store rounding; weight applied to the product); add is the plain bf16 form and
+/// add_preserve_bf16 the same shader with the DenormPreserve (f32) execution mode (binary_vec.comp
+/// has no USE_BF16 ifdef — its default storage IS bf16, so the two add builds differ only there).
 const stage2_variants = [_]ShaderVariant{
     .{ .name = "norm_bf16", .src = "zig/kernels/vulkan/fast_norm.comp", .defines = &.{ "-DUSE_BF16", "-DASH_QWEN35" } },
-    .{ .name = "add_bf16", .src = "zig/kernels/vulkan/binary_vec.comp", .defines = &.{"-DUSE_BF16"} },
-    .{ .name = "add_preserve_bf16", .src = "zig/kernels/vulkan/binary_vec.comp", .defines = &.{ "-DUSE_BF16", "-DPRESERVE_F32" } },
+    .{ .name = "add_bf16", .src = "zig/kernels/vulkan/binary_vec.comp", .defines = &.{} },
+    .{ .name = "add_preserve_bf16", .src = "zig/kernels/vulkan/binary_vec.comp", .defines = &.{"-DPRESERVE_F32"} },
     .{ .name = "swiglu_bf16", .src = "zig/kernels/vulkan/swiglu.comp", .defines = &.{ "-DUSE_BF16", "-DASH_QWEN35" } },
 };
 
