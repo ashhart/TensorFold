@@ -49,6 +49,15 @@ pub const Fixture = struct {
             rows.write.io.nap();
         }
     }
+
+    /// The engine's idle turns until `states` are on disk: a queued save is staged whenever `ready` says so.
+    pub fn idle(x: *Fixture, states: usize) !void {
+        const end = rows.write.nowNs() + 3 * std.time.ns_per_s;
+        while (x.r.states.items.len < states) {
+            if (rows.write.nowNs() >= end) return error.WriterTimedOut;
+            if (rows.write.ready(x.r)) _ = rows.write.step(x.r) else rows.write.io.nap();
+        }
+    }
 };
 
 pub fn prompt(salt: u32) [1100]u32 {

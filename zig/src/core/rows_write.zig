@@ -33,7 +33,15 @@ pub fn queued(r: *Rows, e: *pc.Entry, starts: []const u32) void {
 
 /// Staged work owns no entry pointer; eviction only removes an entry still waiting to be staged.
 pub fn dropped(r: *Rows, e: *pc.Entry) void {
+    if (r.waiting == e) forget(r, e);
     sync.dropped(r, e);
+}
+
+/// A save that waited for room loses its entry before any appeared: no mark names it now, and it counts as skipped.
+fn forget(r: *Rows, e: *pc.Entry) void {
+    r.waiting = null;
+    if (r.stopped) return;
+    for (r.queue.items) |q| if (q.entry == e) skip(r, chain.state(r.keying, e.tokens, e.decode_spans, q.starts, e.at), e.at, error.StagingFull);
 }
 
 pub fn pending(r: *const Rows) bool {
@@ -43,7 +51,13 @@ pub fn pending(r: *const Rows) bool {
 
 pub fn ready(r: *const Rows) bool {
     if (r.sync_writes) return sync.pending(r);
-    return (if (r.worker) |w| w.ready() else false) or (!r.stopped and r.spill != .evicted and r.queue.items.len > 0);
+    return (if (r.worker) |w| w.ready() else false) or (!r.stopped and r.spill != .evicted and r.queue.items.len > 0 and !blocked(r));
+}
+
+/// Whether the newest queued save was refused room by the jobs in flight and none has been taken since.
+fn blocked(r: *const Rows) bool {
+    const e = r.waiting orelse return false;
+    return r.queue.items.len > 0 and r.queue.items[r.queue.items.len - 1].entry == e;
 }
 
 /// A spill copies the entry before RAM releases it, without waiting for filesystem work or a byte permit.
@@ -52,7 +66,8 @@ pub fn evicted(r: *Rows, e: *pc.Entry) void {
     if (r.spill == .off or r.stopped) return;
     reap(r);
     for (r.queue.items, 0..) |q, i| if (q.entry == e) {
-        _ = stage(r, r.queue.orderedRemove(i));
+        // The entry leaves RAM now, so a full permit skips it rather than hold it.
+        _ = stage(r, r.queue.orderedRemove(i), false);
         return;
     };
 }
@@ -62,14 +77,13 @@ pub fn wanted(r: *const Rows, n: chain.Stem) bool {
     return if (r.worker) |w| w.wanted(n) else false;
 }
 
-/// Reconcile finished jobs and stage at most one queued entry; an outstanding write alone does not spin the engine.
+/// Reconcile finished jobs and stage at most one queued entry; a save waiting for room is work only a reap can free.
 pub fn step(r: *Rows) bool {
     if (r.sync_writes) return sync.step(r);
     reap(r);
-    if (r.stopped or (r.spill == .evicted and r.flush_clock == null)) return false;
+    if (r.stopped or blocked(r) or (r.spill == .evicted and r.flush_clock == null)) return false;
     const q = r.queue.pop() orelse return false;
-    _ = stage(r, q);
-    return true;
+    return stage(r, q, true);
 }
 
 pub fn abort(r: *Rows, j: *Job) void {
@@ -145,6 +159,7 @@ pub fn reap(r: *Rows) void {
     const w = r.worker orelse return;
     while (w.take()) |j| {
         defer j.destroy();
+        r.waiting = null;
         const err: ?anyerror = j.failure orelse if (j.generation != w.generation.load(.acquire)) error.Cancelled else null;
         if (err) |e| {
             failed(r, j, e);
@@ -203,34 +218,45 @@ fn complete(r: *const Rows, j: *const io.Job) bool {
     return true;
 }
 
-fn stage(r: *Rows, q: Queued) bool {
+/// Whether `q` left the queue, staged or skipped; false when it waits for room and is queued again (`may_wait`).
+fn stage(r: *Rows, q: Queued, may_wait: bool) bool {
     const at = q.entry.at;
     r.next_job +%= 1;
     const name = chain.state(r.keying, q.entry.tokens, q.entry.decode_spans, q.starts, at);
     const j = sync.prepare(r, q) catch |err| {
-        r.counts.skipped += 1;
-        r.failures.add(.{ .id = r.next_job, .generation = if (r.worker) |w| w.generation.load(.acquire) else 0, .name = name, .at = at, .err = err });
-        pc.note("imprint: saving {d} tokens skipped ({s})", .{ at, @errorName(err) });
-        return false;
-    } orelse return false;
+        skip(r, name, at, err);
+        return true;
+    } orelse return true;
+    var queued_again = false;
     defer {
-        r.gpa.free(j.starts);
+        if (!queued_again) r.gpa.free(j.starts);
         r.gpa.free(j.parts);
         r.gpa.free(j.wants);
         r.gpa.free(j.own);
         r.gpa.destroy(j);
     }
-    stageJob(r, j) catch |err| {
-        r.counts.skipped += 1;
-        r.failures.add(.{ .id = r.next_job, .generation = if (r.worker) |w| w.generation.load(.acquire) else 0, .name = j.name, .at = at, .err = err });
+    stageJob(r, j, may_wait) catch |err| {
+        if (err == error.StagingBusy) {
+            queued_again = true;
+            r.waiting = q.entry;
+            r.queue.appendAssumeCapacity(q);
+            return false;
+        }
+        skip(r, j.name, at, err);
         if (err == error.GatherFailed or err == error.SnapshotGpuFailure) r.counts.failed += 1;
-        pc.note("imprint: saving {d} tokens skipped ({s})", .{ at, @errorName(err) });
-        return false;
+        return true;
     };
     return true;
 }
 
-fn stageJob(r: *Rows, prepared: *const Job) !void {
+/// A save given up: counted, recorded under the job id it would have had, and noted.
+fn skip(r: *Rows, name: chain.Name, at: u32, err: anyerror) void {
+    r.counts.skipped += 1;
+    r.failures.add(.{ .id = r.next_job, .generation = if (r.worker) |w| w.generation.load(.acquire) else 0, .name = name, .at = at, .err = err });
+    pc.note("imprint: saving {d} tokens skipped ({s})", .{ at, @errorName(err) });
+}
+
+fn stageJob(r: *Rows, prepared: *const Job, may_wait: bool) !void {
     if (r.worker == null) r.worker = try io.Worker.open(r.dir, r.staging_bytes, r.file_io);
     const w = r.worker.?;
     if (w.names(prepared.name)) return;
@@ -244,7 +270,7 @@ fn stageJob(r: *Rows, prepared: *const Job) !void {
     var charge: u64 = 0;
     while (true) {
         charge = bytes + @sizeOf(io.Job) + count * @sizeOf(io.File) + prepared.wants.len * @sizeOf(Want) + 4 * @sizeOf([]const u8);
-        if (!w.fits(charge)) return error.StagingFull;
+        if (!w.fits(charge)) return if (may_wait and w.busy(charge)) error.StagingBusy else error.StagingFull;
         const reserved = w.reserved();
         if (!r.budget(bytes + reserved)) return error.DailyBudgetSpent;
         if (!r.room(bytes + reserved)) return error.OverCap;

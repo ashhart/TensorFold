@@ -86,6 +86,15 @@ pub const Worker = struct {
         return false;
     }
 
+    /// Whether the jobs in flight alone keep `amount` out: it fits an empty permit, and one is staged to be taken.
+    pub fn busy(w: *Worker, amount: u64) bool {
+        w.lock();
+        defer w.mutex.unlock();
+        if (w.stopped.load(.acquire) or amount > w.limit) return false;
+        for (w.slots) |s| if (s != null) return true;
+        return false;
+    }
+
     pub fn submit(w: *Worker, j: *Job) void {
         w.lock();
         defer w.mutex.unlock();
