@@ -74,6 +74,25 @@ pub fn cachePoint(enabled: bool, at: usize, chunk: usize, len: usize, history: u
     return if (end > at and end < history and end < len) @intCast(end) else 0;
 }
 
+/// An extra checkpoint uses only unclaimed room, including every later planned mark and spare buffer.
+pub fn checkpointFits(store: *const @import("engine_api").prompt_cache.Store, prompt: []const u32, at: u32, marks: []const u32, spans: []const modes.Span) bool {
+    if (store.hold or at == 0 or at >= prompt.len) return false;
+    var need = store.family.vtable.bytes(store.family.ptr, at);
+    var slots: usize = 1;
+    for (store.entries.items) |e| if (!e.expired and e.at == at and store.wouldServe(prompt, &.{}, spans, e.tokens, e.decode_spans, at)) return false;
+    for (marks) |mark| {
+        if (mark <= at) continue;
+        const exists = for (store.entries.items) |e| {
+            if (!e.expired and e.at == mark and store.wouldServe(prompt, &.{}, spans, e.tokens, e.decode_spans, mark)) break true;
+        } else false;
+        if (!exists) {
+            need +|= store.family.vtable.bytes(store.family.ptr, mark);
+            slots +|= 1;
+        }
+    }
+    return need <= store.room() and slots <= store.most -| store.entries.items.len;
+}
+
 const t = std.testing;
 
 test "qwen27 resume: a prompt extending what slot 0 stands after resumes there, past the cache's own restore only" {

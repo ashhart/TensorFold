@@ -58,7 +58,7 @@ pub fn opening(b: *Metal, s: *lanes.Stream, slot: u32) !Fill {
     s.fill_at.store(@intCast(at), .monotonic); // what the restore kept: 0 when it failed
     const encoded = if (b.vision) |v| try images.encode(v, b.runner.model.queue, s, slot) else null;
     if (encoded != null) b.image_fill = s; // the vision rows are this pass's until it closes
-    return .{ .slot = slot, .at = at, .from = at, .images = encoded, .checkpoint = resume_rules.cachePoint(slot == 0 and slotResume(b) and plain(s) and s.max_new > 0 and s.reuse.hook != null, at, b.chunk, ids.len, s.history_len, s.reuse.marks, s.chunks, s.decode_spans), .rewind = rewindPoint(b, s, slot, at) };
+    return .{ .slot = slot, .at = at, .from = at, .images = encoded, .checkpoint = resume_rules.cachePoint(slot == 0 and slotResume(b) and plain(s) and s.max_new > 0 and s.reuse.hook != null and b.checkpoint_hook != null, at, b.chunk, ids.len, s.history_len, s.reuse.marks, s.chunks, s.decode_spans), .rewind = rewindPoint(b, s, slot, at) };
 }
 
 /// The pass is over (done, failed or cancelled): its images' rows are free for the next image prompt.
@@ -144,7 +144,11 @@ pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill) !bool {
             if (row != 0) k.at(k.ptr, s, m.position.start + row);
         };
     }
-    if (end == f.checkpoint or std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(end)) != null) if (s.reuse.hook) |k| k.at(k.ptr, s, @intCast(end));
+    if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(end)) != null) {
+        if (s.reuse.hook) |k| k.at(k.ptr, s, @intCast(end));
+    } else if (end == f.checkpoint) {
+        if (b.checkpoint_hook) |k| k.at(k.ptr, s, @intCast(end));
+    }
     if (end == ids.len) b.runner.settleSlot(slot); // the stream's first round writes the slot next
     return end == ids.len;
 }

@@ -26,15 +26,8 @@ pub const max_streams = q.attention_plan.max_streams;
 const ring = 64;
 pub const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
-/// Called before a finished stream leaves its slot, its state still standing there (the reply's prompt-cache keep).
-pub const Release = struct { ctx: *anyopaque, kept: *const fn (ctx: *anyopaque, s: *lanes.Stream, slot: u32) void };
-
-/// A slot's memory on first use: `room` says whether `bytes` more fit for stream `s`, `added` takes the new buffers.
-pub const Grow = struct {
-    ctx: *anyopaque,
-    room: *const fn (ctx: *anyopaque, bytes: usize, s: *const lanes.Stream) bool,
-    added: *const fn (ctx: *anyopaque, buffers: []const mtl.Buffer) void,
-};
+pub const Release = @import("qwen27_hooks.zig").Release;
+pub const Grow = @import("qwen27_hooks.zig").Grow;
 
 pub const Metal = struct {
     residency: ?mtl.ResidencySet.Follow = null,
@@ -47,6 +40,7 @@ pub const Metal = struct {
     contexts: [max_streams]?*Context = @splat(null), // slots past 0: their taps (a kept state carries them) and drafter state
     draft_slots: u32 = 1, // slots below this draft their own trees while no more streams are live (TF_Q27_DRAFT_SLOTS)
     release_hook: ?Release = null,
+    checkpoint_hook: ?lanes.stream.MarkHook = null, // unplanned prompt states only when the cache has room
     grow: ?Grow = null,
     drawn: [ring]u32 = undefined, // drawn tokens by handle
     next: u64 = 0,

@@ -82,6 +82,15 @@ pub const Host = struct {
         if (h.cache) |*store| keepEnd(store, h.gpa, s, h.runner.offsets[slot]);
     }
 
+    /// A fallback never displaces a kept state or spends the room promised to this pass's later marks.
+    fn checkpoint(ptr: *anyopaque, s: *lanes.Stream, at: u32) void {
+        const store = if (of(ptr).cache) |*c| c else return;
+        const key = if (s.key.len > 0) s.key else s.prompt();
+        if (@import("qwen27_resume.zig").checkpointFits(store, key, at, s.reuse.marks, s.decode_spans)) {
+            if (s.reuse.hook) |k| k.at(k.ptr, s, at);
+        }
+    }
+
     /// Info.vision's prepare, on the HTTP thread.
     fn prepareImage(ptr: *anyopaque, a: Allocator, bytes: []const u8, max_tokens: u32) anyerror!api.PreparedImage {
         const h = of(ptr);
@@ -420,6 +429,7 @@ fn enableCache(h: *Host, gib: ?f64, over: bool, a: Allocator, why: *[]const u8) 
     h.cache = pc.Store.init(h.gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop, .charged = Snaps.charged, .spare = Snaps.spare, .trim = Snaps.trim, .reuses = Snaps.reuses, .rows = &disk.image } }, cacheRules(@intCast(h.back.chunk)), plan.budget_bytes);
     h.host.cache = &h.cache.?;
     h.back.release_hook = .{ .ctx = h, .kept = Host.keepReply };
+    h.back.checkpoint_hook = .{ .ptr = h, .at = Host.checkpoint };
     h.host.info_.warm_turns = true;
     h.host.info_.prompt_cache = true;
     h.host.info_.prompt_cache_plan = plan;
