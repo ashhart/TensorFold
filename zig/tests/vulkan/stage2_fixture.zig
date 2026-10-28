@@ -7,7 +7,8 @@
 //!  - Residual add: outputs must match the shader's own pipeline bit for bit — the host computes
 //!    the scalar f32 add and applies the contract's RNE bf16 cast (the same bit formula as the
 //!    shader's bf16_store). Finite outputs compare by bits; nonfinite outputs by class (a driver
-//!    may raise a different NaN payload). No FP64 reference is claimed for this gate.
+//!    may raise a different NaN payload). Only the three subnormal-class results may instead be
+//!    signed zero when the device reports no f32 denormal preservation. No FP64 add claim.
 //!  - SwiGLU: |got - want| <= c.boundExact: an independent FP64 reference, the output's own bf16
 //!    rounding, and a FIXED budget of 8*2^-24 relative for the f32 exp/1+/div/mul chain. The
 //!    8-op figure is an acceptance choice (exp is transcendental; no per-op error bound is proven
@@ -20,9 +21,9 @@
 //!    normalized denominator, so the output's own magnitude is the budget's magnitude scale.
 //!    want == 0 demands an exactly-zero output (a small nonzero is rejected outright).
 //! Every finite reference demands a finite output (planted nan/+inf/-inf must be refused); the
-//! nonfinite controls compare value CLASSES against the FP64 reference. Subnormal rows in the add
-//! classes case make a flush-to-zero device FAIL honestly — denormal preservation is not claimed
-//! without a GPU result.
+//! nonfinite controls compare value CLASSES against the FP64 reference. The probe records the
+//! actual float-control properties and selected class policy; normal and signed-zero checks
+//! remain strict. A preserving device must request DenormPreserve and pass the exact reference.
 const std = @import("std");
 const contract = @import("contract");
 const c = contract.spec;
@@ -85,8 +86,8 @@ pub const AddCase = struct { name: []const u8, elems: usize, at: Offsets = .{}, 
 /// Vulkan allows.
 
 // Add classes pairs: 0x0001..0x007f are bf16 SUBNORMALS (0x0080 is the
-// smallest NORMAL). A device that flushes subnormals to zero fails these rows honestly; denormal
-// preservation is NOT claimed without a GPU result.
+// smallest NORMAL). The measured device properties, never a vendor name, qualify the
+// three subnormal-class rows for signed-zero results when f32 preservation is unsupported.
 pub const add_cases = [_]AddCase{
     .{ .name = "random 512", .elems = 512, .at = .{ .a = 128, .b = 256, .out = 384 } },
     .{ .name = "cancel 512", .elems = 512, .at = .{ .a = 128, .b = 256, .out = 384 }, .fill = .cancel },
@@ -127,6 +128,7 @@ pub const Add = struct {
     /// The exact bits the shader pipeline (f32 add, one RNE bf16 store) must produce; a
     /// nonfinite result carries its class bits and is checked by class only.
     want: []u16,
+    allow_subnormal_flush: bool = false,
 
     pub fn init(a: std.mem.Allocator, case: AddCase, seed: u64) !Add {
         const a_bits = try poisonedShell(a, case.at.a, case.elems);
@@ -178,7 +180,9 @@ pub const Add = struct {
         for (f.want, 0..) |w, i| {
             const g = got[at + i];
             if (classOfBits(g) != classOfBits(w)) return .{ .kind = error.NonFiniteMismatch, .index = i, .a = f.a_bits[f.case.at.a + i], .b = f.b_bits[f.case.at.b + i], .want = w, .got = g };
-            if (std.math.isFinite(c.fromBf16(w)) and g != w) return .{ .kind = error.BitMismatch, .index = i, .a = f.a_bits[f.case.at.a + i], .b = f.b_bits[f.case.at.b + i], .want = w, .got = g };
+            const flushed = f.allow_subnormal_flush and f.case.fill == .classes and
+                (w & 0x7f80) == 0 and (w & 0x007f) != 0 and g == (w & 0x8000);
+            if (std.math.isFinite(c.fromBf16(w)) and g != w and !flushed) return .{ .kind = error.BitMismatch, .index = i, .a = f.a_bits[f.case.at.a + i], .b = f.b_bits[f.case.at.b + i], .want = w, .got = g };
         }
         return null;
     }
@@ -538,6 +542,46 @@ test "add firstMismatch keeps the named length and guard failures" {
     @memcpy(bits[f.case.at.out..][0..f.want.len], f.want);
     bits[0] = 0x1234; // guard poison clobbered before the data window
     try testing.expectError(error.GuardClobbered, f.firstMismatch(bits));
+}
+
+test "only unsupported-device subnormal classes may flush; preserving devices stay strict" {
+    const f_base = try Add.init(testing.allocator, add_cases[2], 0x5719);
+    defer f_base.deinit();
+    const bits = try testing.allocator.dupe(u16, f_base.out);
+    defer testing.allocator.free(bits);
+    for ([_]bool{ true, false }) |preserve32| {
+        var f = f_base;
+        f.allow_subnormal_flush = !preserve32;
+        @memcpy(bits[f.case.at.out..][0..f.want.len], f.want);
+        try f.check(bits);
+        for ([_]usize{ 12, 13, 14 }) |i| bits[f.case.at.out + i] = f.want[i] & 0x8000;
+        if (preserve32) {
+            try testing.expectError(error.BitMismatch, f.check(bits));
+        } else {
+            try f.check(bits);
+            bits[f.case.at.out + 12] = 0x8000;
+            try testing.expectError(error.BitMismatch, f.check(bits));
+            bits[f.case.at.out + 12] = 0;
+            for ([_]usize{ 4, 5, 10, 15, 16 }) |i| {
+                const old = bits[f.case.at.out + i];
+                bits[f.case.at.out + i] = old ^ 0x8000;
+                try testing.expectError(error.BitMismatch, f.check(bits));
+                bits[f.case.at.out + i] = old;
+            }
+            bits[f.case.at.out] = 0;
+            try testing.expectError(error.NonFiniteMismatch, f.check(bits));
+        }
+    }
+    // The policy is scoped to the classes gate, not arbitrary finite outputs.
+    var normal = try Add.init(testing.allocator, add_cases[0], 0x571a);
+    defer normal.deinit();
+    normal.allow_subnormal_flush = true;
+    const normal_bits = try testing.allocator.dupe(u16, normal.out);
+    defer testing.allocator.free(normal_bits);
+    @memcpy(normal_bits[normal.case.at.out..][0..normal.want.len], normal.want);
+    normal.want[0] = 0x0001;
+    normal_bits[normal.case.at.out] = 0;
+    try testing.expectError(error.BitMismatch, normal.check(normal_bits));
 }
 
 test "the checkers reject a deliberately wrong finite output, not only accept good ones" {
