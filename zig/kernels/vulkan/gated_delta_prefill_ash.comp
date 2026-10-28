@@ -1,0 +1,255 @@
+// Copyright © 2026 Joshua Warren / mlx-omarchy contributors.
+// SPDX-License-Identifier: MIT
+//
+// ASH arm of gated_delta_prefill.comp: the copied file with the u8 mask
+// binding removed. A uint8_t SSBO requires storageBuffer8BitAccess, which
+// the Device does not enable (storage16/int16 only). The Ash8c Metal oracle
+// never passes a mask, so this fixed variant compiles the declaration and
+// read out and the host rejects flag bit 1 before dispatch. The copied
+// default (gated_delta_prefill.comp) is unchanged.
+// Bindings: 0 q, 1 k, 2 v, 3 g (bf16, unused with bit2), 4 beta, 5 h0 (f32),
+// 6 y, 7 hf (f32), 8 g f32 (bit2, read at shape[0]), 9 snapshot (f32).
+// Push: 120 B; dims=T, chunk=C, chunks, matrix_m=DK, matrix_n=Dv,
+// matrix_k=Hv; shape[0]=g offset, [1]=h0, [2]=hf; flags bit2 g f32, bit3
+// output pass; bit1 (mask) is refused by the host.
+#version 460
+
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle_relative : require
+
+// Dk is 128 by the dispatch contract (GatedDeltaUpdate::use_fallback).
+#define DK 128u
+#define LANES 4u
+#define SLICE (DK / LANES)
+#define WG_THREADS 128u
+#define ROWS_PER_WG (WG_THREADS / LANES)
+
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer QBuf  { uint16_t v[]; } q_buf;
+layout(set = 0, binding = 1, std430) readonly buffer KBuf  { uint16_t v[]; } k_buf;
+layout(set = 0, binding = 2, std430) readonly buffer VBuf  { uint16_t v[]; } v_buf;
+layout(set = 0, binding = 3, std430) readonly buffer GBuf  { uint16_t v[]; } g_buf;
+layout(set = 0, binding = 4, std430) readonly buffer BBuf  { uint16_t v[]; } b_buf;
+layout(set = 0, binding = 5, std430) readonly buffer SIn    { float    v[]; } s_in;
+layout(set = 0, binding = 6, std430) writeonly buffer YBuf { uint16_t v[]; } y_buf;
+layout(set = 0, binding = 7, std430) buffer         SOut { float    v[]; } s_out;
+layout(set = 0, binding = 8, std430) readonly buffer GBufF { float     v[]; } g_buf_f;
+layout(set = 0, binding = 9, std430) buffer         Snap   { float    v[]; } snap;
+
+layout(push_constant) uniform Params {
+  uint count;
+  uint operation;
+  uint lhs_size;
+  uint rhs_size;
+  uint reduce_size;
+  uint output_size;
+  uint lhs_offset;
+  uint rhs_offset;
+  uint output_offset;
+  uint aux_size;
+  uint aux_offset;
+  uint matrix_m;   // Dk
+  uint matrix_n;   // Dv
+  uint matrix_k;   // Hv
+  uint flags;      // bit0: per-Dk decay, bit1: mask, bit2: g is f32,
+                   // bit3: output pass
+  float alpha;
+  float beta_f;
+  uint dims;       // T
+  uint shape[4];   // [0]=g offset, [1]=h0 offset, [2]=hf offset, [3]=mask offset
+  uint in_strides[4];
+  uint out_strides[4];
+  uint chunk;      // chunk size C
+  uint chunks;     // ceil(T / C)
+} params;
+
+float bf16_load(uint16_t bits) {
+  return uintBitsToFloat(uint(bits) << 16u);
+}
+
+uint16_t bf16_store(float value) {
+  uint bits = floatBitsToUint(value);
+  if ((bits & 0x7fff0000u) == 0x7f800000u) {
+    return uint16_t((bits >> 16) | 0x40u);
+  }
+  return uint16_t((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16);
+}
+
+shared float sk[2][DK];
+shared float sq[2][DK];
+shared float sg[2][DK];
+
+float load_g_scalar(uint t, uint head, uint hv) {
+  if ((params.flags & 4u) != 0u) {
+    return g_buf_f.v[params.shape[0] + t * hv + head];
+  }
+  return bf16_load(g_buf.v[params.shape[0] + t * hv + head]);
+}
+
+// Broadcast lane LANES-1's value to the LANES lanes of its row (two
+// uniform relative shuffles; LANES == 4).
+float row_total(float acc, uint sub) {
+  float d1 = subgroupShuffleDown(acc, 1u);
+  acc = (sub == 2u) ? d1 : acc;
+  float d2 = subgroupShuffleDown(acc, 2u);
+  return (sub < 2u) ? d2 : acc;
+}
+
+// One token's recurrence on the register-resident state slice |st|
+// (elements sub*SLICE .. sub*SLICE+SLICE-1 of the row). The two dot
+// products chain lane to lane in ascending Dk order. Arithmetic mirrors
+// the ops path elementwise rounding.
+void token_step(
+    inout float st[SLICE],
+    uint sub,
+    bool tok,
+    float beta,
+    float g,
+    float v_row,
+    bool compute_o,
+    uint buf,
+    out float o_acc) {
+  o_acc = 0.0f;
+  if (!tok) {
+    return;
+  }
+  uint k0 = sub * SLICE;
+  // precise: the ops reference rounds each product and each add
+  // separately (elementwise kernels then a sequential sum); NoContraction
+  // keeps the driver from fusing these into FMAs.
+  precise float acc = 0.0f;
+  for (uint j = 0u; j < LANES; ++j) {
+    precise float prev = subgroupShuffleUp(acc, 1u);
+    if (sub == j) {
+      acc = (j == 0u) ? 0.0f : prev;
+      for (uint i = 0u; i < SLICE; ++i) {
+        precise float gi = (params.flags & 1u) != 0u ? sg[buf][k0 + i] : g;
+        precise float p = st[i] * gi;
+        p = p * sk[buf][k0 + i];
+        acc += p;
+      }
+    }
+  }
+  precise float kv_acc = row_total(acc, sub);
+  precise float delta = (v_row - kv_acc) * beta;
+  for (uint i = 0u; i < SLICE; ++i) {
+    precise float gi = (params.flags & 1u) != 0u ? sg[buf][k0 + i] : g;
+    precise float dec = st[i] * gi;
+    // The ops reference stores the decayed state, then its eager-fused
+    // add(state, k*delta) elementwise kernel contracts the multiply-add;
+    // mirror that with an explicit fma.
+    precise float ns = fma(delta, sk[buf][k0 + i], dec);
+    st[i] = ns;
+  }
+  if (compute_o) {
+    // Output pass only: the prefix scan never reads o_acc, so the
+    // ns*q dot is skipped there (state arithmetic is untouched).
+    acc = 0.0f;
+    for (uint j = 0u; j < LANES; ++j) {
+      precise float prev = subgroupShuffleUp(acc, 1u);
+      if (sub == j) {
+        acc = (j == 0u) ? 0.0f : prev;
+        for (uint i = 0u; i < SLICE; ++i) {
+          precise float o = st[i] * sq[buf][k0 + i];
+          acc += o;
+        }
+      }
+    }
+    o_acc = row_total(acc, sub);
+  }
+}
+
+void main() {
+  uint dv = params.matrix_n;
+  uint hv = params.matrix_k;
+  uint T = params.dims;
+  uint C = params.chunk;
+  uint head = gl_WorkGroupID.x / LANES;
+  uint row_block = gl_WorkGroupID.x % LANES;
+  uint tid = gl_LocalInvocationID.x;
+  uint sub = tid % LANES;                       // slice index within the row
+  uint row = row_block * ROWS_PER_WG + tid / LANES;
+  bool out_pass = (params.flags & 8u) != 0u;
+  uint chunk = out_pass ? gl_WorkGroupID.y : 0u;
+
+  if (head >= hv) {
+    return;
+  }
+  uint head_base = head * dv * DK;
+  uint slice_base = head_base + row * DK + sub * SLICE;
+
+  float st[SLICE];
+
+  // Restore this slice's chunk-initial state: chunk 0 reads h0, later
+  // chunks read the prefix scan's snapshot slot (chunk c stores at c-1).
+  if (chunk == 0u) {
+    for (uint i = 0u; i < SLICE; ++i) {
+      st[i] = s_in.v[params.shape[1] + slice_base + i];
+    }
+  } else {
+    uint snap_base = ((chunk - 1u) * hv) * dv * DK + slice_base;
+    for (uint i = 0u; i < SLICE; ++i) {
+      st[i] = snap.v[snap_base + i];
+    }
+  }
+
+  // Pass 0 (prefix scan) walks every token; pass 1 replays one chunk.
+  uint t_begin = out_pass ? chunk * C : 0u;
+  uint t_end = out_pass ? min(t_begin + C, T) : T;
+
+  for (uint t = t_begin; t < t_end; ++t) {
+    uint t_head = t * hv + head;
+    // ASH arm: no mask binding; the host rejects flag bit 1, so every
+    // token is valid.
+    bool tok = true;
+    // Parallel shared load: thread i stages k/q (and per-Dk g when
+    // present) into this token's double-buffer slot, then one barrier
+    // orders the load before every thread's token_step. The second slot
+    // lets the next iteration's writes (two steps later) safely wait on
+    // the single per-iteration barrier.
+    uint buf = t & 1u;
+    sk[buf][tid] = bf16_load(k_buf.v[params.rhs_offset + t_head * DK + tid]);
+    sq[buf][tid] = bf16_load(q_buf.v[params.lhs_offset + t_head * DK + tid]);
+    if ((params.flags & 1u) != 0u) {
+      sg[buf][tid] = (params.flags & 4u) != 0u
+          ? g_buf_f.v[params.shape[0] + (t * hv + head) * DK + tid]
+          : bf16_load(g_buf.v[params.shape[0] + (t * hv + head) * DK + tid]);
+    }
+    barrier();
+
+    float beta = bf16_load(b_buf.v[params.aux_offset + t * hv + head]);
+    float g = (params.flags & 1u) != 0u ? 0.0f : load_g_scalar(t, head, hv);
+    float v_row = bf16_load(v_buf.v[params.aux_size + t_head * dv + row]);
+
+    float o_acc;
+    token_step(st, sub, tok, beta, g, v_row, out_pass, buf, o_acc);
+
+    if (out_pass) {
+      if (sub == 0u) {
+        y_buf.v[params.output_offset + t_head * dv + row] =
+            tok ? bf16_store(o_acc) : bf16_store(0.0f);
+      }
+    } else if ((t + 1u) % C == 0u && t + 1u < T) {
+      // Chunk boundary: snapshot the slice for pass 1's chunk t/C + 1
+      // (slot index t/C).
+      uint snap_base = ((t / C) * hv) * dv * DK + slice_base;
+      for (uint i = 0u; i < SLICE; ++i) {
+        snap.v[snap_base + i] = st[i];
+      }
+    }
+    // No trailing barrier: the next iteration reads the other shared
+    // slot, and its load barrier orders the slot reuse after every
+    // thread's reads from two slots ago.
+  }
+
+  if (out_pass && chunk + 1u == params.chunks) {
+    // Last chunk's terminal state is hf.
+    for (uint i = 0u; i < SLICE; ++i) {
+      s_out.v[params.shape[2] + slice_base + i] = st[i];
+    }
+  }
+}

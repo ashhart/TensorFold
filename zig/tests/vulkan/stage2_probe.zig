@@ -140,14 +140,24 @@ fn bitsBuffer(a: std.mem.Allocator, shell: []const u16) ![]u16 {
     return a.alloc(u16, shell.len);
 }
 
-/// One bf16 binding's shell uploaded at its fixture offsets; the view carries the byte offset.
-const Bound16 = struct { buf: vk.Buffer, view: vk.tensor.View };
+/// One bf16 binding's shell uploaded at its fixture offsets; the view is derived against the
+/// caller-resident Bound16 (a stored View would point at boundShell's dead stack frame).
+const Bound16 = struct {
+    buf: vk.Buffer,
+    byte_offset: u64,
+    elements: u64,
+
+    /// The checked window over this binding's own buffer, derived against caller storage
+    /// (a stored View would point at boundShell's dead stack frame).
+    fn view(b: *const Bound16) !vk.tensor.View {
+        return vk.tensor.View.init(&b.buf, .bf16, b.byte_offset, b.elements);
+    }
+};
 
 fn boundShell(a: std.mem.Allocator, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, shell: []const u16, at_elems: usize, elements: u64, timeout: u64) !Bound16 {
     var buf = try uploaded(a, dev, cmds, staging, std.mem.sliceAsBytes(shell), timeout);
     errdefer buf.deinit();
-    const view = try vk.tensor.View.init(&buf, .bf16, at_elems * 2, elements);
-    return .{ .buf = buf, .view = view };
+    return .{ .buf = buf, .byte_offset = at_elems * 2, .elements = elements };
 }
 
 fn checkUnchanged(a: std.mem.Allocator, cmds: *vk.Commands, staging: vk.Buffer, shell: []const u16, buf: vk.Buffer, timeout: u64) !bool {
@@ -175,7 +185,7 @@ fn addGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *v
     defer if (first) |x| a.free(x);
     for (0..repeats) |rep| {
         try vk.orExit(vk.upload(cmds, out.buf, 0, staging, std.mem.sliceAsBytes(f.out), timeout));
-        try vk.orExit(m.add(cmds, out.view, in_a.view, in_b.view, timeout));
+        try vk.orExit(m.add(cmds, try out.view(), try in_a.view(), try in_b.view(), timeout));
         try fetch(cmds, staging, out.buf, std.mem.sliceAsBytes(bits), timeout);
         if (first) |x| {
             if (std.mem.indexOfDiff(u16, x, bits)) |at| {
@@ -228,7 +238,7 @@ fn swigluGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds:
     var r: fx.Report = .{};
     for (0..repeats) |rep| {
         try vk.orExit(vk.upload(cmds, out.buf, 0, staging, std.mem.sliceAsBytes(f.out), timeout));
-        try vk.orExit(m.swiglu(cmds, out.view, gate.view, up.view, timeout));
+        try vk.orExit(m.swiglu(cmds, try out.view(), try gate.view(), try up.view(), timeout));
         try fetch(cmds, staging, out.buf, std.mem.sliceAsBytes(bits), timeout);
         r = f.check(bits) catch |e| {
             // No cached worst/position here: r belongs to the last PASSING repeat, and printing
@@ -283,7 +293,7 @@ fn rmsGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *v
     var r: fx.Report = .{};
     for (0..repeats) |rep| {
         try vk.orExit(vk.upload(cmds, out.buf, 0, staging, std.mem.sliceAsBytes(f.out), timeout));
-        try vk.orExit(m.rmsNorm(cmds, out.view, x.view, gamma.view, case.rows, case.width, fx.rms_eps, timeout));
+        try vk.orExit(m.rmsNorm(cmds, try out.view(), try x.view(), try gamma.view(), case.rows, case.width, fx.rms_eps, timeout));
         try fetch(cmds, staging, out.buf, std.mem.sliceAsBytes(bits), timeout);
         r = f.check(bits) catch |e| {
             // No cached worst/position here: r belongs to the last PASSING repeat, and printing
@@ -324,4 +334,32 @@ fn rmsGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *v
     std.debug.print("MILESTONE rms-norm elapsed_ms={d} case=\"{s}\" rows={d} width={d} worst={d:.4} of bound at row {d} col {d}, " ++
         "repeats byte-identical, inputs and guards unchanged, planted nan/+inf/-inf refused{s}\n", .{ clock.ms(), case.name, case.rows, case.width, r.worst, r.row, r.col, if (case.zero_row) ", zero row exactly zero" else "" });
     return true;
+}
+
+/// A host-only stand-in for a device buffer: View.init reads only `len`, and this regression
+/// exists to prove the view derivation stays on caller storage, not to touch the driver.
+fn hostBuffer(len: u64) vk.Buffer {
+    return .{ .dev = undefined, .handle = null, .memory = null, .len = len, .kind = .device, .mapped = null, .coherent = false };
+}
+
+test "Bound16.view binds the caller-owned buffer, never a factory stack frame" {
+    const b1: Bound16 = .{ .buf = hostBuffer(64), .byte_offset = 8, .elements = 28 };
+    const b2: Bound16 = .{ .buf = hostBuffer(128), .byte_offset = 16, .elements = 56 };
+    const v1 = try b1.view();
+    const v2 = try b2.view();
+    try std.testing.expect(v1.buffer == &b1.buf);
+    try std.testing.expect(v2.buffer == &b2.buf);
+    try std.testing.expect(v1.buffer != v2.buffer);
+    try std.testing.expectEqual(@as(u64, 8), v1.byte_offset);
+    try std.testing.expectEqual(@as(u64, 28), v1.elements);
+    try std.testing.expectEqual(vk.tensor.Kind.bf16, v1.kind);
+}
+
+test "bound window keeps the offset, range and alignment checks" {
+    const buf = hostBuffer(64);
+    try std.testing.expectError(error.OutOfRange, vk.tensor.View.init(&buf, .bf16, 0, 0));
+    try std.testing.expectError(error.Misaligned, vk.tensor.View.init(&buf, .bf16, 2, 4));
+    try std.testing.expectError(error.OutOfRange, vk.tensor.View.init(&buf, .bf16, 8, 30)); // past the 64-byte end
+    const b: Bound16 = .{ .buf = hostBuffer(64), .byte_offset = 8, .elements = 28 };
+    _ = try b.view(); // the derived window is the checked one
 }
