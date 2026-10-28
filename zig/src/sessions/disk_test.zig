@@ -123,3 +123,39 @@ test "split ranks write and restore their own pages (rank 0 and 1 of 2)" {
     try roundTrip(2, 0);
     try roundTrip(2, 1);
 }
+
+test "split reconcile refuses before deleting temporary files or indexing physical bytes" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const d = try disk.Disk.open(gpa, io, .{ .root = root, .compat = @splat(9), .world = 2 });
+    defer d.close();
+    const f = try d.dir.createFile(io, "unreconciled.tmp", .{});
+    f.close(io);
+    var found: std.ArrayList(disk.Disk.Found) = .empty;
+    defer found.deinit(gpa);
+    try testing.expectError(error.SplitReconcileUnsupported, d.scan(&found));
+    try testing.expectEqual(@as(usize, 0), d.recs.items.len);
+    try testing.expectEqual(@as(u64, 0), d.used);
+    const kept = try d.dir.openFile(io, "unreconciled.tmp", .{});
+    kept.close(io);
+}
+
+test "logical charge counts delta pages and bounded measure independently of blob and padded file bytes" {
+    const charge = @import("disk_charge.zig").charge;
+    var src: disk.WriteSrc = undefined;
+    src.page = 64;
+    src.npages = 7;
+    src.first_page = 4;
+    src.ids = &.{ 1, 2, 3 };
+    src.measure = 3000;
+    src.families = &fams;
+    var expected: u64 = 3012;
+    for (fams) |f| expected += 3 * f.pageBytes(64) / (if (f.split) @as(u64, 2) else 1);
+    try testing.expectEqual(expected, charge(&src, 2, 999999));
+    try testing.expectEqual(expected, charge(&src, 2, 4096));
+    try testing.expectEqual(@as(u64, 4096), charge(&src, 1, 4096));
+}
