@@ -137,7 +137,7 @@ pub const Dense = struct {
             e.setBuffer(p.pl.buf, p.pl.off, 4);
             e.setValue([2]i32{ @intCast(2 * p.shape.n), @intCast(4 * p.shape.n) }, 5);
         }
-        if (p.gate) e.dispatchGroups(.{ .width = p.shape.n / 4 }, .{ .width = 32 * kernels.gate_ksplit }) else e.dispatchGroups(.{ .width = (p.shape.n / 4 + 1) / 2 }, .{ .width = 64 });
+        if (p.gate) e.dispatchGroups(.{ .width = p.shape.n / 4, .height = (p.shape.rows + kernels.gate_rows - 1) / kernels.gate_rows }, .{ .width = 32 * kernels.gate_ksplit }) else e.dispatchGroups(.{ .width = (p.shape.n / 4 + 1) / 2 }, .{ .width = 64 });
         try p.rig.finish(pass);
     }
 

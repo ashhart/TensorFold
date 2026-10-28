@@ -2,13 +2,6 @@
 #include <metal_stdlib>
 using namespace metal;
 
-#ifndef GELU_C0
-#define GELU_C0 0.7978845608028654f
-#endif
-#ifndef GELU_C1
-#define GELU_C1 0.044715f
-#endif
-
 // Columns a simdgroup computes in the bf16 kernel.
 constant constexpr int QMV_COLS = 4;
 constant constexpr int QMV_ROWS = 8;
@@ -68,11 +61,21 @@ kernel void gemma_dense4(const device bfloat* X [[buffer(0)]], const device bflo
 }
 
 // Simdgroups sharing one threadgroup's QMV_COLS columns of the gate, each taking every GATE_KS-th 256-deep step of K.
+#ifndef GELU_C0
+#define GELU_C0 0.7978845608028654f
+#endif
+#ifndef GELU_C1
+#define GELU_C1 0.044715f
+#endif
 #ifndef GATE_KS
 #define GATE_KS 5
 #endif
+// Rows a threadgroup takes, the grid's second axis stepping through the row blocks.
+#ifndef GATE_ROWS
+#define GATE_ROWS 32
+#endif
 
-// The E4B's per-layer gate: y = x W^T, K over GATE_KS simdgroups, then the tanh GELU times PLI[r * ple.y + ple.x + n].
+// The E4B per-layer gate: y = x W^T, K split over GATE_KS simdgroups, then the tanh GELU times the per-layer input.
 template <int NR>
 inline void gtile(const device bfloat* X, const device bfloat* W, device bfloat* Y, int N, int K, int r0, int n0,
                   uint lane, uint sg, threadgroup float* part, const device bfloat* PLI, int2 ple) {
@@ -123,13 +126,14 @@ kernel void gemma_dense4_gate(const device bfloat* X [[buffer(0)]], const device
                               device bfloat* Y [[buffer(2)]], constant int3& dims [[buffer(3)]],
                               const device bfloat* PLI [[buffer(4)]], constant int2& ple [[buffer(5)]],
                               uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]],
-                              uint tg [[threadgroup_position_in_grid]]) {
+                              uint2 tg2 [[threadgroup_position_in_grid]]) {
   threadgroup float part[GATE_KS * QMV_ROWS * QMV_COLS];
   const int rows = dims.x, N = dims.y, K = dims.z;
-  const int n0 = int(tg) * QMV_COLS;
-  int r0 = 0;
-  for (; r0 + QMV_ROWS <= rows; r0 += QMV_ROWS) gtile<QMV_ROWS>(X, W, Y, N, K, r0, n0, lane, sg, part, PLI, ple);
-  switch (rows - r0) {
+  const int n0 = int(tg2.x) * QMV_COLS;
+  int r0 = int(tg2.y) * GATE_ROWS;
+  const int rend = min(rows, r0 + GATE_ROWS);
+  for (; r0 + QMV_ROWS <= rend; r0 += QMV_ROWS) gtile<QMV_ROWS>(X, W, Y, N, K, r0, n0, lane, sg, part, PLI, ple);
+  switch (rend - r0) {
     case 1: gtile<1>(X, W, Y, N, K, r0, n0, lane, sg, part, PLI, ple); break;
     case 2: gtile<2>(X, W, Y, N, K, r0, n0, lane, sg, part, PLI, ple); break;
     case 3: gtile<3>(X, W, Y, N, K, r0, n0, lane, sg, part, PLI, ple); break;

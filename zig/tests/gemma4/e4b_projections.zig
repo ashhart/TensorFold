@@ -134,7 +134,7 @@ fn gateFused(m: *g4.Model, io: std.Io, gpa: std.mem.Allocator, dir: []const u8, 
     e.setValue([3]i32{ @intCast(rows), @intCast(d.n), @intCast(d.k) }, 3);
     e.setBuffer(pb, 0, 4);
     e.setValue([2]i32{ @intCast(layer * geo.layer_input), @intCast(geo.layers * geo.layer_input) }, 5);
-    if (@hasDecl(g4.kernels, "gate_ksplit")) e.dispatchGroups(.{ .width = d.n / 4 }, .{ .width = 32 * g4.kernels.gate_ksplit }) else e.dispatchGroups(.{ .width = (d.n / 4 + 1) / 2 }, .{ .width = 64 });
+    if (@hasDecl(g4.kernels, "gate_ksplit")) e.dispatchGroups(.{ .width = d.n / 4, .height = (rows + g4.kernels.gate_rows - 1) / g4.kernels.gate_rows }, .{ .width = 32 * g4.kernels.gate_ksplit }) else e.dispatchGroups(.{ .width = (d.n / 4 + 1) / 2 }, .{ .width = 64 });
     e.end();
     try finish(cb);
     var name: [128]u8 = undefined;

@@ -214,7 +214,9 @@ pub fn pleInputs(m: *Model, e: mtl.ComputeEncoder, s: anytype, pk: *const kernel
     bind(e, &.{sp.tok}, 4);
     e.setValue(bf16Round(@sqrt(@as(f32, @floatFromInt(geo.layer_input)))), 5);
     e.dispatchThreads(.{ .width = wide / 2, .height = rows }, .{ .width = 256 });
+    // The model projection of the scaled embeddings (s.h[0]) into sp.prj: DeepMind _modules.py encode_per_layer_input.
     denseBf16(e, pk, s.h[0], t.model_projection, sp.prj, rows, used * geo.layer_input);
+    // Projection norm, plus the table rows, times rsqrt(2): one group per (layer, row), P threads.
     e.setPipeline(pk.combine);
     bind(e, &.{ sp.prj, sp.tok }, 0);
     bindRef(e, t.projection_norm, 2);
@@ -252,26 +254,24 @@ pub fn denseTail(m: *Model, e: mtl.ComputeEncoder, s: anytype, i: usize, cur: us
     tail(m, e, s, s.hn, s.y, l.post_feedforward, l.scalar, next, cur, rows, i);
 }
 
-/// The E-series' per-layer block on the residual rows in s.h[1 - cur]: in place, then the layer scalar and next input.
+/// The E-series' per-layer block on the residual rows in s.h[1 - cur]: in place, then the next layer's normed input.
 pub fn pleTail(m: *Model, e: mtl.ComputeEncoder, s: anytype, i: usize, cur: usize, rows: usize) void {
+    // The Block's PLE step in DeepMind _modules.py: gate and gelu * per-layer input, projection, post norm, add, scale.
+    const geo = m.config.geo;
     const l = &m.weights.layers[i];
-    const next = if (i + 1 < m.config.geo.layers) m.weights.layers[i + 1].input_norm else m.weights.final_norm;
-    const gate = l.ple_gate.?;
-    {
-        const pk = &m.kernels.ple.?;
-        const sp = s.ple.?;
-        const geo = m.config.geo;
-        e.setPipeline(pk.gate); // the gate, gelu(gate) x the layer's per-layer input as its epilogue
-        e.setBuffer(s.h[1 - cur], 0, 0);
-        bindRef(e, gate.w, 1);
-        bind(e, &.{sp.mid}, 2);
-        e.setValue([3]i32{ @intCast(rows), @intCast(gate.n), @intCast(gate.k) }, 3);
-        bind(e, &.{sp.pli}, 4);
-        e.setValue([2]i32{ @intCast(i * geo.layer_input), @intCast(geo.layers * geo.layer_input) }, 5);
-        e.dispatchGroups(.{ .width = gate.n / 4 }, .{ .width = 32 * kernels.gate_ksplit });
-        denseBf16(e, pk, sp.mid, l.ple_projection.?, s.y, rows, l.ple_projection.?.n);
-        tail(m, e, s, s.h[1 - cur], s.y, l.ple_norm.?, l.scalar, next, cur, rows, i);
-    }
+    const sp = s.ple.?;
+    const pk = &m.kernels.ple.?;
+    e.setPipeline(pk.gate);
+    e.setBuffer(s.h[1 - cur], 0, 0);
+    bindRef(e, l.ple_gate.?.w, 1);
+    e.setBuffer(sp.mid, 0, 2);
+    e.setValue([3]i32{ @intCast(rows), @intCast(geo.layer_input), @intCast(geo.hidden) }, 3);
+    e.setBuffer(sp.pli, 0, 4);
+    e.setValue([2]i32{ @intCast(i * geo.layer_input), @intCast(geo.layers * geo.layer_input) }, 5);
+    e.dispatchGroups(.{ .width = geo.layer_input / 4, .height = (rows + kernels.gate_rows - 1) / kernels.gate_rows }, .{ .width = 32 * kernels.gate_ksplit });
+    denseBf16(e, pk, sp.mid, l.ple_projection.?, s.y, rows, geo.hidden);
+    const nw = l.ple_norm.?;
+    tail(m, e, s, s.h[1 - cur], s.y, nw, l.scalar, if (i + 1 < geo.layers) m.weights.layers[i + 1].input_norm else m.weights.final_norm, cur, rows, i);
 }
 
 /// gemma_dense_tail: (h + RMSNorm(y) w) * scalar into s.h[1 - cur] and the next normed input; `tap`: the tapped layer.
