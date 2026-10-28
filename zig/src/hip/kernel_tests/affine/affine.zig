@@ -89,7 +89,7 @@ pub fn product(rig: *Rig, c: Case, tot: *Totals) !void {
     const env = rig.kernels.env();
     var pickable_set: std.ArrayList(*const Entry) = .empty;
     defer pickable_set.deinit(gpa);
-    try prod.pickable(rig.kernels, p.arg(0, 0), p.items, c.path, env, &pickable_set, gpa);
+    try prod.pickable(rig.kernels, p.arg(0, 0), p.items, p.pairCount(), c.path, env, &pickable_set, gpa);
 
     var out = try Buffer.alloc(rig.base, p.outBytes(false));
     defer out.free();
@@ -113,7 +113,8 @@ pub fn product(rig: *Rig, c: Case, tot: *Totals) !void {
             const digest = try prod.digestOf(out, p.outBytes(rounded));
             rig.digest = std.hash.Wyhash.hash(rig.digest, std.mem.asBytes(&digest));
             const r: usize = @intFromBool(rounded);
-            if (std.mem.indexOfScalar(*const Entry, pickable_set.items, e) != null) {
+            // every prompt entry is the gemm family, so all of them, not only those this table picks, write one set
+            if (c.path == .prefill or std.mem.indexOfScalar(*const Entry, pickable_set.items, e) != null) {
                 seen[r][n_seen[r]] = .{ .e = e, .digest = digest };
                 n_seen[r] += 1;
             }

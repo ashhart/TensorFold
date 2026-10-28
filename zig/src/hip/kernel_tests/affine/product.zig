@@ -252,6 +252,11 @@ pub const Product = struct {
         };
     }
 
+    /// A routed plan's pairs (rows x slots), as serving passes them to the choice; 0 for a plain product.
+    pub fn pairCount(p: Product) usize {
+        return if (p.c.routed()) p.c.rows * p.c.slots else 0;
+    }
+
     pub fn outBytes(p: Product, rounded: bool) usize {
         return p.out_rows * p.c.n * @as(usize, if (rounded) 2 else 4);
     }
@@ -282,41 +287,56 @@ fn drawShared(expert_of: []u32, c: cases.Case, rng: *data.Rng) void {
 }
 
 /// The shape a registry entry is asked about: a split entry is asked for two parts.
-pub fn shapeFor(a: affine.Arg, items: usize, e: *const Entry) registry.Shape {
+pub fn shapeFor(a: affine.Arg, items: usize, pairs: usize, e: *const Entry) registry.Shape {
     var s = Kernels.shapeOf(a, @intCast(items));
+    s.plan_pairs = @intCast(pairs);
     if (e.family == .split) s.parts = 2;
     return s;
 }
 
 pub fn shapeOf(p: *const Product, e: *const Entry) registry.Shape {
-    return shapeFor(p.arg(0, 0), p.items, e);
+    return shapeFor(p.arg(0, 0), p.items, p.pairCount(), e);
 }
 
 /// Whether `e` is an entry of the launch's (op, path) that the GPU has and whose shape takes it.
-pub fn takesArg(k: *const Kernels, e: *const Entry, a: affine.Arg, items: usize, path: registry.Path) bool {
+pub fn takesArg(k: *const Kernels, e: *const Entry, a: affine.Arg, items: usize, pairs: usize, path: registry.Path) bool {
     const op: registry.Op = if (a.route.items != 0) .routed else .project;
     if (e.format != .mlx or e.op != op or e.path != path) return false;
     var env = k.env();
     env.matrix_on = env.matrix;
-    return e.caps(env) and e.fits(shapeFor(a, items, e));
+    return e.caps(env) and e.fits(shapeFor(a, items, pairs, e));
 }
 
 /// Entries of the product's (op, path) that the GPU has and whose shapes take it.
 pub fn takes(p: *const Product, e: *const Entry) bool {
-    return takesArg(p.rig.kernels, e, p.arg(0, 0), p.items, p.c.path);
+    return takesArg(p.rig.kernels, e, p.arg(0, 0), p.items, p.pairCount(), p.c.path);
 }
 
-/// The entries the registry picks between at some row count under `env`, for the shape of `a`.
-pub fn pickable(k: *const Kernels, a: affine.Arg, items: usize, path: registry.Path, env: registry.Env, out: *std.ArrayList(*const Entry), alloc: std.mem.Allocator) !void {
+/// The entries the registry picks between at some row count under `env`, or at some pair count for a routed prompt.
+pub fn pickable(k: *const Kernels, a: affine.Arg, items: usize, pairs: usize, path: registry.Path, env: registry.Env, out: *std.ArrayList(*const Entry), alloc: std.mem.Allocator) !void {
     const op: registry.Op = if (a.route.items != 0) .routed else .project;
     var shape = Kernels.shapeOf(a, @intCast(items));
+    if (op == .routed and path == .prefill) {
+        // ascending, so the tiles that take fewer pairs come first; past 8 * items a plan is above every pairs bound
+        const top = 8 * items + 1;
+        for (1..@max(top, pairs) + 1) |n| {
+            if (n > top and n != pairs) continue;
+            shape.plan_pairs = @intCast(n);
+            try put(k.reg.select(env, .mlx, op, path, shape), out, alloc);
+        }
+        return;
+    }
     // a lane round keeps one family at every row count; outside one the decode tiles change with the rows
     shape.round = path == .decode;
     for (1..registry.rule_rows + 1) |m| {
         shape.m = @intCast(m);
-        const e = k.reg.select(env, .mlx, op, path, shape) orelse continue;
-        if (std.mem.indexOfScalar(*const Entry, out.items, e) == null) try out.append(alloc, e);
+        try put(k.reg.select(env, .mlx, op, path, shape), out, alloc);
     }
+}
+
+fn put(e: ?*const Entry, out: *std.ArrayList(*const Entry), alloc: std.mem.Allocator) !void {
+    const x = e orelse return;
+    if (std.mem.indexOfScalar(*const Entry, out.items, x) == null) try out.append(alloc, x);
 }
 
 /// Launches `e` on the product into `out`, rounded to the activation type when `rounded`.

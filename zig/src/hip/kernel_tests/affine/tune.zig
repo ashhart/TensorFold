@@ -87,13 +87,15 @@ const Tuner = struct {
         const op: registry.Op = if (p.c.routed()) .routed else .project;
         const arg = p.arg(0, 0);
         const reads = @as(f64, @floatFromInt(p.copies)) * p.bytes();
-        try t.cells.append(gpa, .{ .class = class, .count = count, .op = op, .shape = affine.Kernels.shapeOf(arg, @intCast(p.items)), .qualified = reads >= read_target });
+        var shape = affine.Kernels.shapeOf(arg, @intCast(p.items));
+        shape.plan_pairs = @intCast(p.pairCount());
+        try t.cells.append(gpa, .{ .class = class, .count = count, .op = op, .shape = shape, .qualified = reads >= read_target });
         const ci = t.cells.items.len - 1;
         var out = try Buffer.alloc(t.rig.base, p.outBytes(false));
         defer out.free();
         for (t.rig.kernels.reg.entries, 0..) |*e, i| {
             if (e.format != .mlx or e.op != op or e.path != .prefill) continue;
-            if (!e.caps(t.env) or !e.policy(t.env) or !e.fits(prod.shapeFor(arg, p.items, e))) continue;
+            if (!e.caps(t.env) or !e.policy(t.env) or !e.fits(prod.shapeFor(arg, p.items, p.pairCount(), e))) continue;
             const r = try t.timeEntry(p, e, out);
             try t.times.append(gpa, .{ .cell = ci, .entry = i, .us = r.us, .noise = r.noise });
             const c = t.classes[class];
