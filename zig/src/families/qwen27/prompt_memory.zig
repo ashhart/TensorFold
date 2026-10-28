@@ -12,7 +12,7 @@ pub fn buffers(sizes: anytype) usize {
 }
 
 pub fn frameBytes(c: Config, rows: u32) usize {
-    return buffers(frame.allocationSizes(c, rows));
+    return buffers(frame.allocationSizes(c, rows)) + (if (rows > frame.small_rows) buffers(frame.decodeSizes(c, rows)) else 0);
 }
 
 /// Frame bytes already belong to the model; these are the runner's future bytes at its peak.

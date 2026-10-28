@@ -209,3 +209,7 @@ test "qwen27 bank: real two-layer verify and empty keep use partial strides and 
     try std.testing.expect(f.pool.before == null);
     for (0..2) |layer| try f.pool.forwardChain(layer, .{ .host = plan, .metadata = f.metadata }, f.refs(), e, true);
 }
+
+test {
+    _ = @import("qwen27_frame_test.zig");
+}

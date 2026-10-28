@@ -15,6 +15,8 @@ tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --drafter z-lab/Qwen3.8-27B-DFl
 On Metal, M5 prompt passes request 2,048 rows when no other request is decoding; earlier chips keep the 512-row
 default. The larger frame must fit the configured context and all streams beside loaded weights and the 8 GiB
 margin, otherwise M5 keeps 512 rows. Startup reserves the actual prompt scratch sizes as well as stream caches.
+Wide prompt frames keep separate 512-row activation scratch for small rounds, so decoding binds the small buffers.
+Admission counts both banks.
 `TF_QWEN27_WORKING_SET_BYTES` can lower the device working-set budget for admission checks. `TF_PROMPT_ROWS` selects another multiple of 16 from 16 to 2,048. Each chunk takes at most 512 rows beside
 a decoding request, including with an override, and still respects the frame, attention and request boundaries.
 

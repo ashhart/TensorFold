@@ -28,10 +28,22 @@ pub fn allocationSizes(config: Config, capacity: u32) [std.enums.values(Field).l
     };
 }
 
+pub const small_rows = 512;
+const scratch_fields = [_]Field{ .hidden, .residual, .input, .sums, .mixed, .mixer_out, .output, .z, .a, .b, .query, .key, .value, .norm_query, .norm_key, .q_gate, .gate, .up, .activated, .act_sums };
+
+pub fn decodeSizes(config: Config, capacity: u32) [scratch_fields.len]usize {
+    const widths = allocationSizes(config, @min(capacity, small_rows));
+    var result: [scratch_fields.len]usize = undefined;
+    for (scratch_fields, &result) |field, *bytes| bytes.* = widths[@backingInt(field)];
+    return result;
+}
+
 pub const Frame = struct {
     buffers: [std.enums.values(Field).len]mtl.Buffer,
     capacity: u32,
     config: Config,
+    standby: ?[scratch_fields.len]mtl.Buffer = null,
+    small: bool = false,
 
     pub fn init(device: mtl.Device, config: Config, capacity: u32) !Frame {
         if (capacity == 0 or capacity > max_rows) return error.BadFrameRows;
@@ -44,20 +56,46 @@ pub const Frame = struct {
             b.* = try device.buffer(@max(bytes, 16), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
             count += 1;
         }
+        var standby: ?[scratch_fields.len]mtl.Buffer = null;
+        if (capacity > small_rows) {
+            var bank: [scratch_fields.len]mtl.Buffer = undefined;
+            var made: usize = 0;
+            errdefer for (bank[0..made]) |buffer| buffer.deinit();
+            for (decodeSizes(config, capacity), &bank) |bytes, *buffer| {
+                buffer.* = try device.buffer(@max(bytes, 16), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+                made += 1;
+            }
+            standby = bank;
+        }
         buffers[@backingInt(Field.eps)].slice(f32, 1)[0] = config.eps;
-        return .{ .buffers = buffers, .capacity = capacity, .config = config };
+        return .{ .buffers = buffers, .capacity = capacity, .config = config, .standby = standby };
     }
 
     pub fn deinit(frame: *Frame) void {
         for (frame.buffers) |b| b.deinit();
+        if (frame.standby) |bank| for (bank) |b| b.deinit();
+    }
+
+    /// Both banks keep their residency even when the next completed round changes the active views.
+    pub fn appendBuffers(frame: *const Frame, a: std.mem.Allocator, list: *std.ArrayList(mtl.Buffer)) !void {
+        try list.appendSlice(a, &frame.buffers);
+        if (frame.standby) |bank| try list.appendSlice(a, &bank);
     }
 
     pub fn get(frame: *const Frame, field: Field) Ref {
         return .{ .buffer = frame.buffers[@backingInt(field)] };
     }
 
+    /// Called between completed rounds; metadata, position planes and outputs retain their original owners.
     pub fn setRows(frame: *Frame, ids: []const u32, positions: []const i32) !void {
         if (ids.len == 0 or ids.len > frame.capacity or positions.len != ids.len) return error.BadFrameRows;
+        if (frame.standby) |*bank| {
+            const small = ids.len <= small_rows;
+            if (small != frame.small) {
+                for (scratch_fields, bank) |field, *buffer| std.mem.swap(mtl.Buffer, &frame.buffers[@backingInt(field)], buffer);
+                frame.small = small;
+            }
+        }
         @memcpy(frame.get(.ids).buffer.slice(u32, ids.len), ids);
         @memcpy(frame.get(.positions).buffer.slice(i32, positions.len), positions);
         @memset(frame.get(.dims).buffer.slice(i32, 8), 0);
