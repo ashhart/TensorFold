@@ -347,7 +347,7 @@ test "spill I/O: killing a child inside a partial write leaves no published stat
     try std.testing.expectEqual(@as(usize, 0), fixture.files(reopened.dir, ".part"));
 }
 
-test "spill I/O: a full byte permit skips another save without waiting for the first job" {
+test "spill I/O: a full byte permit holds another save that fits it alone until the first job is written" {
     const x = try Fixture.open("full-permit", .finish, false, 1 << 20);
     defer x.close();
     var hold: Hold = .{};
@@ -362,13 +362,18 @@ test "spill I/O: a full byte permit skips another save without waiting for the f
     try x.keep(&second, 600);
     try std.testing.expectEqual(@as(usize, 1), x.r.worker.?.pending());
     try std.testing.expectEqual(used, x.r.worker.?.bytes());
-    try std.testing.expectEqual(error.StagingFull, x.r.failures.records[0].?.err);
+    try std.testing.expectEqual(@as(usize, 1), x.r.queue.items.len);
+    try std.testing.expectEqual(@as(u64, 0), x.r.counts.skipped);
+    try std.testing.expectEqual(@as(u64, 0), x.r.failures.count);
+    try std.testing.expect(rows.write.pending(x.r) and !rows.write.ready(x.r) and !rows.write.step(x.r));
     hold.release.store(true, .release);
-    try x.settle();
-    try std.testing.expectEqual(@as(usize, 1), x.r.states.items.len);
+    try x.idle(2);
+    try std.testing.expectEqual(@as(usize, 0), x.r.queue.items.len);
+    try std.testing.expectEqual(@as(u64, 0), x.r.counts.skipped);
+    try std.testing.expectEqual(@as(u64, 2), x.r.counts.writes);
 }
 
-test "spill I/O: the job permit bounds metadata when many small saves queue behind a blocked write" {
+test "spill I/O: the job permit holds a ninth small save behind eight blocked writes until one is written" {
     const x = try Fixture.open("job-permit", .finish, false, 1 << 30);
     defer x.close();
     var hold: Hold = .{};
@@ -380,10 +385,11 @@ test "spill I/O: the job permit bounds metadata when many small saves queue behi
         try x.keep(p, 600);
     }
     try std.testing.expectEqual(@as(usize, 8), x.r.worker.?.pending());
-    try std.testing.expectEqual(@as(u64, 1), x.r.counts.skipped);
+    try std.testing.expectEqual(@as(usize, 1), x.r.queue.items.len);
+    try std.testing.expectEqual(@as(u64, 0), x.r.counts.skipped);
     hold.release.store(true, .release);
-    try x.settle();
-    try std.testing.expectEqual(@as(usize, 8), x.r.states.items.len);
+    try x.idle(9);
+    try std.testing.expectEqual(@as(usize, 0), x.r.queue.items.len);
 }
 
 test "spill I/O: shutdown keeps a completed job's own filesystem error" {
