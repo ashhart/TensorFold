@@ -64,6 +64,7 @@ test "prefetch: closing the store does not join a blocked read past its deadline
     try x.keep(&tokens, 900);
     x.s.remove(0);
     try x.settle();
+    try t.expectEqual(@as(usize, 1), x.r.states.items.len);
     const f = try prefetch.make(x.r, t.io, .{ .reads = 1 });
     const Hold = struct {
         var entered: std.atomic.Value(bool) = .init(false);

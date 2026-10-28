@@ -5,6 +5,7 @@ const lanes = @import("lanes");
 const api = @import("engine_api.zig");
 const pc = @import("prompt_cache.zig");
 const prefetch = @import("rows_prefetch.zig");
+const fixture = @import("rows_async_fixture.zig");
 const rmTree = @import("prompt_imprint_test.zig").rmTree;
 const LaneHost = api.LaneHost;
 const Reason = api.Reason;
@@ -65,16 +66,29 @@ const Box = struct {
     tokens: std.ArrayList(u32) = .empty,
     cached: ?u32 = null,
     done: ?Reason = null,
+    progress: ?*fixture.Gate = null,
     fn event(ctx: *anyopaque, _: api.Id, e: *const api.Event) void {
         const b: *@This() = @ptrCast(@alignCast(ctx));
         b.mutex.lockUncancelable(t.io);
         defer b.mutex.unlock(t.io);
         switch (e.*) {
             .prefilled => |c| b.cached = c,
-            .tokens => |x| b.tokens.appendSlice(gpa, x) catch {},
+            .tokens => |x| {
+                b.tokens.appendSlice(gpa, x) catch {};
+                if (b.progress) |g| {
+                    g.entered.store(true, .release);
+                    b.progress = null;
+                }
+            },
             .finished => |f| b.done = f.reason,
             else => {},
         }
+    }
+    fn arm(b: *@This(), gate: ?*fixture.Gate) usize {
+        b.mutex.lockUncancelable(t.io);
+        defer b.mutex.unlock(t.io);
+        b.progress = gate;
+        return b.tokens.items.len;
     }
     fn wait(b: *@This()) Reason {
         while (true) {
@@ -192,8 +206,10 @@ fn returning(h: *LaneHost, mode: Mode, first: *[706]u32, seen: *Seen) !void {
     defer Gate.open.store(true, .release);
     if (mode != .off) {
         while (Gate.entered.load(.acquire) == 0) std.Io.sleep(t.io, .fromMilliseconds(1), .awake) catch {};
-        const n0 = other.read().n;
-        std.Io.sleep(t.io, .fromMilliseconds(30), .awake) catch {};
+        var progress: fixture.Gate = .{};
+        const n0 = other.arm(&progress);
+        defer _ = other.arm(null);
+        try fixture.Gate.wait(&progress.entered);
         try t.expect(other.read().n > n0); // the other stream decodes while the read is under way
         try t.expectEqual(@as(?u32, null), b.read().cached); // and the returning request waits, not admitted
         if (mode == .cancelled) h.engine().cancel(3);

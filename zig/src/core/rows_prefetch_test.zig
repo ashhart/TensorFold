@@ -4,6 +4,7 @@ const platform = @import("sys");
 const pc = @import("prompt_cache.zig");
 const rows = @import("rows_store.zig");
 const prefetch = @import("rows_prefetch.zig");
+const fixture = @import("rows_async_fixture.zig");
 const Fake = @import("rows_fake.zig").Fake;
 const fresh = @import("rows_fake.zig").fresh;
 const rmTree = @import("prompt_imprint_test.zig").rmTree;
@@ -37,15 +38,21 @@ fn request(a: Allocator, s: *pc.Store, f: *Fake, p: []const u32, history: u32) !
 /// Conversation `c`'s state at 1400 tokens written under `dir` (beside what is there); its next turn's prompt.
 fn written(a: Allocator, dir: []const u8, c: u32) ![]u32 {
     const turn1 = try prompt(a, c, 1500);
+    defer a.free(turn1);
     var f: Fake = .{ .gpa = gpa };
-    const r = try rows.Rows.open(gpa, f.snapshots(), options(dir));
+    var opts = options(dir);
+    opts.sync_writes = true;
+    const r = try rows.Rows.open(gpa, f.snapshots(), opts);
     defer r.deinit();
     var s = pc.Store.init(gpa, f.snapshots(), rules, 1 << 30);
     defer s.deinit();
     s.disk = r;
     _ = try request(a, &s, &f, turn1, 1400);
-    _ = rows.write.drain(r, rows.write.nowNs() + 3 * std.time.ns_per_s);
-    return std.mem.concat(a, u32, &.{ turn1[0..1401], &[_]u32{ 9, 8, 7, 6 } });
+    const next = try std.mem.concat(a, u32, &.{ turn1[0..1401], &[_]u32{ 9, 8, 7, 6 } });
+    errdefer a.free(next);
+    const left = rows.write.drain(r, rows.write.nowNs() + 60 * std.time.ns_per_s);
+    if (left != 0 or r.best(next, &.{}, &.{}, 0) == null) return error.SeedNotWritten;
+    return next;
 }
 
 /// A server's store over `dir`: the family, its disk states and the RAM store (in place: the store points at `f`).
@@ -137,6 +144,59 @@ fn emptyDir(dir: [:0]const u8) void {
     }
 }
 
+test "prefetch: a seed that cannot publish reports SeedNotWritten" {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var buf: [128]u8 = undefined;
+    const dir = root(&buf, "seed-failed");
+    defer rmTree(dir);
+    const turn1 = try prompt(a, 1, 1500);
+    var f: Fake = .{ .gpa = gpa };
+    var path: [1200]u8 = undefined;
+    const dest = blk: {
+        const r = try rows.Rows.open(gpa, f.snapshots(), options(dir));
+        defer r.deinit();
+        const name = rows.chain.state(r.keying, turn1[0..1401], &.{}, &.{}, 1400);
+        break :blk try rows.file.path(&path, r.dir, &rows.chain.hex(name), ".st", false);
+    };
+    try t.expectEqual(@as(c_int, 0), platform.c.mkdir(dest, 0o700));
+    defer _ = platform.c.rmdir(dest);
+    try t.expectError(error.SeedNotWritten, written(a, dir, 1));
+}
+
+test "prefetch: an unfinished asynchronous seed has no state or reader after reopen" {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var buf: [128]u8 = undefined;
+    const dir = root(&buf, "seed-late");
+    defer rmTree(dir);
+    const turn1 = try prompt(a, 1, 1500);
+    const next = try std.mem.concat(a, u32, &.{ turn1[0..1401], &[_]u32{ 9, 8, 7, 6 } });
+    {
+        var x: Server = .{};
+        try x.open(dir);
+        defer x.close();
+        var gate: fixture.Gate = .{};
+        defer gate.release.store(true, .release);
+        x.r.file_io = gate.io();
+        _ = try request(a, &x.s, &x.f, turn1, 1400);
+        try t.expect(rows.write.step(x.r));
+        try fixture.Gate.wait(&gate.entered);
+        const left = rows.write.drain(x.r, rows.write.nowNs() + 20 * std.time.ns_per_ms);
+        gate.release.store(true, .release);
+        try fixture.Gate.wait(&gate.left);
+        try t.expectEqual(@as(usize, 1), left);
+    }
+    var x: Server = .{};
+    try x.open(dir);
+    defer x.close();
+    const f = try prefetch.make(x.r, t.io, .{});
+    try t.expect(x.start(f, next) == null);
+    try t.expect(f.thread == null);
+}
+
 test "prefetch: a state read ahead restores equal to a synchronous read and to a fresh pass, nothing read at admission" {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
@@ -156,7 +216,7 @@ test "prefetch: a state read ahead restores equal to a synchronous read and to a
     try x.open(dir);
     defer x.close();
     const f = try prefetch.make(x.r, t.io, .{});
-    const name = x.start(f, again).?;
+    const name = x.start(f, again) orelse return error.NotReadAhead;
     try t.expectEqual(@as(?prefetch.Phase, .ready), settled(f, name));
     emptyDir(x.r.dir); // the restore below must come from the read ahead
     const got = try request(a, &x.s, &x.f, again, 1404);
@@ -184,8 +244,9 @@ test "prefetch: cancellation before, during and after the read frees each read e
     const f = try prefetch.make(x.r, t.io, .{});
     f.reader = Gate.reader;
     Gate.reset(false);
-    const n1 = x.start(f, one).?;
-    _ = x.start(f, two).?;
+    defer Gate.open.store(true, .release);
+    const n1 = x.start(f, one) orelse return error.NotReadAhead;
+    _ = x.start(f, two) orelse return error.NotReadAhead;
     Gate.reached(1); // the first is reading, the second queued behind it
     f.sweep(&n1, only); // before: the queued one's request went
     try t.expectEqual(@as(u64, 1), counts(f).freed);
@@ -195,7 +256,7 @@ test "prefetch: cancellation before, during and after the read frees each read e
     try t.expect(x.start(f, one) == null); // a cancelled read keeps its permit until its blocked syscall returns
     Gate.open.store(true, .release);
     until(f, "freed", 2);
-    const n3 = x.start(f, one).?; // after: read in full, then its request went
+    const n3 = x.start(f, one) orelse return error.NotReadAhead; // after: read in full, then its request went
     try t.expectEqual(@as(?prefetch.Phase, .ready), settled(f, n3));
     f.sweep({}, none);
     const c = counts(f);
@@ -222,8 +283,9 @@ test "prefetch: a failed read, or a file that fails its check, falls back to tod
         const f = try prefetch.make(x.r, t.io, .{});
         f.reader = Gate.reader;
         Gate.reset(true);
+        defer Gate.open.store(true, .release);
         Gate.open.store(true, .release);
-        const name = x.start(f, again).?;
+        const name = x.start(f, again) orelse return error.NotReadAhead;
         try t.expectEqual(@as(?prefetch.Phase, .failed), settled(f, name));
         const got = try request(a, &x.s, &x.f, again, 1404); // read from disk at admission, as before
         try t.expectEqual(@as(u32, 1400), got.from);
@@ -246,7 +308,7 @@ test "prefetch: a failed read, or a file that fails its check, falls back to tod
     try t.expectEqual(@as(isize, 1), platform.c.pwrite(fd, "X", 1, 100));
     _ = platform.c.close(fd);
     const f = try prefetch.make(x.r, t.io, .{});
-    const name = x.start(f, again).?;
+    const name = x.start(f, again) orelse return error.NotReadAhead;
     try t.expectEqual(@as(?prefetch.Phase, .failed), settled(f, name));
     const got = try request(a, &x.s, &x.f, again, 1404); // the synchronous read finds the garbled block, as today
     try t.expectEqual(@as(u32, 0), got.from);
@@ -270,8 +332,9 @@ test "prefetch: two requests for one state read it once; the second resumes the 
     const f = try prefetch.make(x.r, t.io, .{});
     f.reader = Gate.reader;
     Gate.reset(false);
-    const n1 = x.start(f, again).?;
-    const n2 = x.start(f, other).?;
+    defer Gate.open.store(true, .release);
+    const n1 = x.start(f, again) orelse return error.NotReadAhead;
+    const n2 = x.start(f, other) orelse return error.NotReadAhead;
     try t.expectEqualSlices(u8, &n1, &n2);
     try t.expect(f.pending(n1));
     Gate.open.store(true, .release);
@@ -304,7 +367,8 @@ test "prefetch: a read not finished at admission goes, and the state is read the
     const f = try prefetch.make(x.r, t.io, .{ .wait_ns = 0 });
     f.reader = Gate.reader;
     Gate.reset(false);
-    const name = x.start(f, again).?;
+    defer Gate.open.store(true, .release);
+    const name = x.start(f, again) orelse return error.NotReadAhead;
     Gate.reached(1);
     try t.expect(!f.pending(name)); // past its bound: the request stops waiting, counted once
     try t.expect(!f.pending(name));
