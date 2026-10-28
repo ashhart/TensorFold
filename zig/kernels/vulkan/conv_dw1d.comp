@@ -1,0 +1,102 @@
+// Copyright © 2026 Joshua Warren / mlx-omarchy contributors.
+// SPDX-License-Identifier: MIT
+//
+// Copied from mlx-omarchy shaders/conv_dw1d.comp (MIT), comments condensed.
+// Depthwise 1-D conv, channels-last [N,L_in,C], weight [C,K], stride 1, no
+// padding/flip: the Qwen3.5 GDN prefill conv. One thread per output, the K
+// taps accumulate ascending from 0.0 on widened operands, one RNE store.
+// Push constants: count=N*L_out*C, operation=K taps, lhs_size=L_in,
+// rhs_size=L_out, reduce_size=C, lhs/rhs/output offsets (words 6..8).
+#version 460
+
+// Depthwise 1-D convolution over channels-last input [N, L_in, C] with weight
+// [C, K, 1] and output [N, L_out, C] (groups == C, stride 1, dilation 1, no
+// padding, no flip): the Qwen3.5/3.8 GatedDeltaNet prefill conv. conv.comp is
+// the fully general 1-D/2-D/3-D kernel (dilation, padding, flip, chunked
+// partial reductions) and ran this shape at ~6% of the memory roofline
+// (2.9 ms for 12.6M outputs at T=2048); this kernel is straight-line.
+//
+// Bit-exact to conv.comp on this shape: one thread per output element, the
+// K taps accumulate in ascending order from 0.0 with the same
+// `accumulator += x * w` expression on widened operands, one RNE store.
+//
+// Push constants (the fixed omarchy::ComputeParams layout, first words):
+//   count        N * L_out * C output elements
+//   operation    K taps
+//   lhs_size     L_in
+//   rhs_size     L_out
+//   reduce_size  C channels
+//   lhs_offset   input element offset, rhs_offset weight offset,
+//   output_offset output offset (words 6..8)
+
+#ifdef USE_FP16
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#define STORAGE_TYPE float16_t
+#define LOAD_VALUE(x) float(x)
+#define STORE_VALUE(f) STORAGE_TYPE(f)
+#elif defined(USE_BF16)
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#define STORAGE_TYPE uint16_t
+#define LOAD_VALUE(x) uintBitsToFloat(uint(x) << 16u)
+uint16_t bf16_store(float value) {
+  uint bits = floatBitsToUint(value);
+  if (isnan(value)) {
+    return uint16_t((bits >> 16) | 0x40u);
+  }
+  return uint16_t((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16);
+}
+#define STORE_VALUE(f) bf16_store(f)
+#else
+#define STORAGE_TYPE float
+#define LOAD_VALUE(x) float(x)
+#define STORE_VALUE(f) STORAGE_TYPE(f)
+#endif
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer InputX {
+  STORAGE_TYPE values[];
+} input_x;
+layout(set = 0, binding = 1, std430) readonly buffer Weight {
+  STORAGE_TYPE values[];
+} weight;
+layout(set = 0, binding = 2, std430) writeonly buffer Output {
+  STORAGE_TYPE values[];
+} output_data;
+
+layout(push_constant) uniform Params {
+  uint count;
+  uint operation;
+  uint lhs_size;
+  uint rhs_size;
+  uint reduce_size;
+  uint output_size;
+  uint lhs_offset;
+  uint rhs_offset;
+  uint output_offset;
+} params;
+
+void main() {
+  const uint channels = params.reduce_size;
+  const uint taps = params.operation;
+  const uint l_in = params.lhs_size;
+  const uint l_out = params.rhs_size;
+  uint stride_threads = gl_NumWorkGroups.x * 256u;
+  for (uint index = gl_GlobalInvocationID.x; index < params.count;
+       index += stride_threads) {
+    uint channel = index % channels;
+    uint row = index / channels;
+    uint t = row % l_out;
+    uint batch = row / l_out;
+    uint in_base = params.lhs_offset + (batch * l_in + t) * channels + channel;
+    uint w_base = params.rhs_offset + channel * taps;
+    float accumulator = 0.0;
+    for (uint k = 0u; k < taps; ++k) {
+      accumulator += LOAD_VALUE(input_x.values[in_base + k * channels]) *
+          LOAD_VALUE(weight.values[w_base + k]);
+    }
+    output_data.values[params.output_offset + index] = STORE_VALUE(accumulator);
+  }
+}
