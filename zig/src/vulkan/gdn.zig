@@ -17,7 +17,10 @@
 //! softplus is bf16-rounded, g = exp(-exp(A_log_f32) * softplus) is stored
 //! f32, and beta = sigmoid(b) is stored bf16. A_log rides f32, dt_bias bf16.
 //! The decode kernel's bit9 flag both selects the f32 A_log read and the
-//! kv-walk association the Metal chain uses (state*g then *k).
+//! kv-walk association the Metal chain uses (state*g then *k). Its
+//! raw-gates prologue has an ASH_QWEN35 variant: softplus is the Metal
+//! gdn_pre form — DIRECT log(1+exp(-|x|)), bf16-rounded (not the MLX
+//! elementwise log1p ratio form, and not the C++ fallback's f32 sp).
 //!
 //! Binding counts vs dispatch.max_bindings = 10:
 //!   conv_dw1d 3, gdn_conv_decode 5, gdn_split 8, fast_norm_gated 4,
@@ -385,9 +388,13 @@ pub const Gdn = struct {
         try m.decode_bf16.run(cmds, std.mem.asBytes(&p), .{ Model.heads, Model.head_dim / 32, 1 }, timeout_ns);
     }
 
-    /// Gated RMSNorm + SiLU epilogue (Metal gdn_post): out = silu(z) * rms(y)
-    /// * norm weight, one bf16 round. y/z/out are [rows, 2048] bf16, the
-    /// weight [2048] bf16, eps the model's norm epsilon.
+    /// Gated RMSNorm + SiLU epilogue (Ash8c Metal gdn_post): PER-HEAD 128-wide
+    /// RMS, not a 2048 global row. out = bf16((gate/(1+exp(-gate))) *
+    /// bf16(weight * (value * inv))). y/z/out are [tokens, 16, 128] bf16
+    /// (tokens*2048 elements, head-major, exactly the recurrence's y layout);
+    /// the weight is [128] bf16, indexed by the column within the head and
+    /// repeated for every head; `rows` is the TOKEN count (the dispatch runs
+    /// rows*16 one-workgroup-per-head-row). eps the model's norm epsilon.
     pub fn gatedNorm(m: *Gdn, cmds: *Commands, out: View, y: View, z: View, weight: View, rows: u64, eps: f32, timeout_ns: u64) Error!void {
         try wantBf16(&.{ out, y, z, weight });
         const plan = try gatedNormPlan(out.elements, y.elements, z.elements, weight.elements, rows, eps);
@@ -395,9 +402,9 @@ pub const Gdn = struct {
         try m.norm_bf16.bind(&.{ y.bind(), weight.bind(), z.bind(), out.bind() });
         var p: params.Params = .{
             .operation = 0, // gated mode
-            .lhs_size = Model.linear_dim, // per-column weight rows
-            .reduce_size = Model.linear_dim,
-            .output_size = plan.rows,
+            .lhs_size = Model.head_dim, // per-column weight within the head (!= 1)
+            .reduce_size = Model.head_dim, // the 128-wide per-head row
+            .output_size = plan.rows, // tokens * 16 head-rows
         };
         p.alpha = eps;
         const g = try groups(plan.rows, 1, m.dev.properties.limits.maxComputeWorkGroupCount[0]);
@@ -494,13 +501,17 @@ pub fn decodePlan(soa_elements: u64, a_elements: u64, b_elements: u64, a_log_u16
 
 pub const GatedNormPlan = struct { rows: u32 };
 
+/// `rows` is the TOKEN count; the plan dispatches rows*16 one-workgroup
+/// head-rows of width head_dim=128 (the Ash gdn_post per-head norm). The
+/// weight is the [128] per-head row, NOT a [2048] full-row vector.
 pub fn gatedNormPlan(out_elements: u64, y_elements: u64, z_elements: u64, weight_elements: u64, rows: u64, eps: f32) Error!GatedNormPlan {
     if (!std.math.isFinite(eps) or eps <= 0) return error.Invalid;
     if (rows == 0) return error.Invalid;
     const total = std.math.mul(u64, rows, Model.linear_dim) catch return error.TooLarge;
     if (out_elements != total or y_elements != total or z_elements != total) return error.Invalid;
-    if (weight_elements != Model.linear_dim) return error.Invalid;
-    return .{ .rows = try cast32(rows) };
+    if (weight_elements != Model.head_dim) return error.Invalid;
+    const head_rows = std.math.mul(u64, rows, Model.heads) catch return error.TooLarge;
+    return .{ .rows = try cast32(head_rows) };
 }
 
 fn cast32(v: u64) Error!u32 {
@@ -617,13 +628,16 @@ test "decodePlan checks the u16 A_log window and the fixed decode shapes" {
     try testing.expectError(error.Invalid, decodePlan(3 * Model.linear_dim, heads, heads, 2 * heads, heads, Model.state_elements + 4, Model.state_elements, Model.linear_dim));
 }
 
-test "gatedNormPlan refuses ragged rows and non-positive eps" {
+test "gatedNormPlan is the per-head 128 norm and refuses torn geometry" {
     const rows: u64 = 3;
     const total = rows * Model.linear_dim;
-    try testing.expectEqual(@as(u32, 3), (try gatedNormPlan(total, total, total, Model.linear_dim, rows, 1e-6)).rows);
-    try testing.expectError(error.Invalid, gatedNormPlan(total + 2, total, total, Model.linear_dim, rows, 1e-6));
-    try testing.expectError(error.Invalid, gatedNormPlan(total, total, total, Model.linear_dim, rows, 0));
-    try testing.expectError(error.Invalid, gatedNormPlan(total, total, total, Model.linear_dim, 0, 1e-6));
+    // rows = tokens; the plan dispatches tokens*16 head-rows, weight [128]
+    try testing.expectEqual(@as(u32, 3 * Model.heads), (try gatedNormPlan(total, total, total, Model.head_dim, rows, 1e-6)).rows);
+    // the old 2048 global-row weight is REFUSED
+    try testing.expectError(error.Invalid, gatedNormPlan(total, total, total, Model.linear_dim, rows, 1e-6));
+    try testing.expectError(error.Invalid, gatedNormPlan(total + 2, total, total, Model.head_dim, rows, 1e-6));
+    try testing.expectError(error.Invalid, gatedNormPlan(total, total, total, Model.head_dim, rows, 0));
+    try testing.expectError(error.Invalid, gatedNormPlan(total, total, total, Model.head_dim, 0, 1e-6));
 }
 
 test "the fixed model constants agree with the Metal kernel constexprs" {
