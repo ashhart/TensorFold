@@ -192,6 +192,29 @@ standard-library source from the checkpoint's own tokenizer, one request each th
 | Time to first token | 0.38 s | 1.42 s | 6.59 s | 15.91 s |
 | Prompt rate | 5,441 tok/s | 5,757 tok/s | 4,975 tok/s | 4,120 tok/s |
 
+### A 1M-token window (YaRN)
+
+The checkpoint was trained on 262,144 positions. Static YaRN rope with factor 4 serves 1,048,576, as SGLang's Spark
+recipe does: either name the factor on the checkpoint as downloaded, or serve a copy whose `config.json` carries the
+YaRN block (`rope_type: yarn`, `factor: 4.0`, `original_max_position_embeddings: 262144`,
+`max_position_embeddings: 1048576`, the copy SGLang's `extend-qwen3.6-35b-a3b-nvfp4-context-1m` mod stages):
+
+```bash
+tensorfold serve nvidia/Qwen3.6-35B-A3B-NVFP4 --drafter nvidia/Qwen3.6-35B-A3B-NVFP4 --rope-yarn 4 --context 1048576
+```
+
+YaRN turns every position, so replies differ from plain rope at any length; without the flag or the block, every
+byte is as before. Both ways give the same reply bytes. A 1M window takes 22.2 GiB a stream, so a GB10 admits two;
+`--context 0` serves the whole window. The target's and the MTP layer's rope read the YaRN table; the DFlash2 drafter
+keeps its own rope over its 2,048-row window, and a scaled rope in a config TensorFold cannot honor (HIP, Metal, the
+DFlash2 drafters, another scaling type) is refused rather than read as plain rope.
+
+On one GB10 with `--parallel 2`: drafted replies equal their `"draft": false` runs (6 of 6), concurrent ones their
+solo runs, and a resumed second turn its fresh run. A passphrase 5% into a 300,000-token prompt comes back after
+173 s of prefill (1,740 tok/s). A prompt of 1,048,512 tokens with the passphrase prefills in 1,546 s (680 tok/s),
+returns it, and decodes its 64 tokens to the window's last position at 31 tok/s; one token more is refused with the
+server's context-window error. The MTP drafter's cost over a continuation of many thousands of tokens is not measured.
+
 ## Measurements
 
 One DGX Spark (GB10) in NVIDIA's `pytorch:26.07-py3` container, checkpoint revision 81169a9, against vLLM serving
