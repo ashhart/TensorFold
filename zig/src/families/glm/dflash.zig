@@ -34,6 +34,12 @@ pub const TAP_ROW: usize = taps_mod.layers.len * D * 2; // bytes of one row's ta
 /// Device bytes a stream's context ring takes (K and V of every layer).
 pub const ring_bytes: u64 = LAYERS * 2 * @as(u64, @intCast(WIN)) * KVW * 2;
 
+/// TF_GLM_DRAFT_CONFIDENCE: where a DFlash2 chain's chance product stops it (glm_cuda's 0.7).
+pub fn confidence() f64 {
+    const v = std.c.getenv("TF_GLM_DRAFT_CONFIDENCE") orelse return 0.7;
+    return std.fmt.parseFloat(f64, std.mem.span(v)) catch 0.7;
+}
+
 /// Device bytes of the loader's raw scratch: a 4-bit linear's words, scales and biases, for the largest at `world`.
 pub fn rawBytes(bits: u8, world: usize) usize {
     const ff: usize = if (world == 2) FF / 2 else FF; // the MLP width a rank holds, as dflash_load splits it
