@@ -89,6 +89,9 @@ pub fn projection(d: *Dev, repack: ze.H, c: *const Checkpoint, prefix: []const u
             return .{ .w = p, .s = p, .bg = p, .n = @intCast(w.shape[0]), .k = @intCast(w.shape[1]), .wide = true, .dense = true };
         }
     }
+    if (parts.len == 1) for ([_][]const u8{ "per_layer_input_gate", "per_layer_projection", "per_layer_model_projection" }) |ple| {
+        if (std.mem.eql(u8, parts[0], ple)) std.debug.print("warning: {s}{s} is quantized, not bf16: the result will diverge from the bf16 per-layer recipe\n", .{ prefix, parts[0] });
+    };
     var eight = false;
     for (parts) |p| {
         const w = try c.get(named("{s}{s}.weight", .{ prefix, p }));
