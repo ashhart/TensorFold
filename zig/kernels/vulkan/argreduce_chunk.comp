@@ -1,0 +1,142 @@
+// Copied verbatim from mlx-omarchy shaders/argreduce_chunk.comp (same SHA-256,
+// 120d1171…) for the stage-2 greedy draw; the greedy host drives it with
+// operation = 1 (max), one row, matrix_m = 4096.
+
+// Copyright © 2026 Joshua Warren / mlx-omarchy contributors.
+// SPDX-License-Identifier: MIT
+//
+// ArgMin/ArgMax over the last axis of a long float row, phase 1 of 2. The
+// single-workgroup kernel (argreduce_suffix.comp) walks a 248320-wide logits
+// row with 256 lanes and takes about 0.4 ms on an M2 Max. Here the row is cut
+// into `matrix_n` contiguous chunks of `matrix_m` elements (at most 4096, so
+// a lane holds at most 16 values), one workgroup per (row, chunk), and each
+// workgroup writes its (value, index) pair to a partial buffer. Phase 2
+// (argreduce_combine.comp) combines the pairs of one row.
+//
+// The rule is the one of argreduce_suffix.comp, so the final index is the same
+// for every input: the first index of the extreme value; a NaN wins over any
+// non-NaN and the FIRST NaN index wins; the running pair starts at the type's
+// infinity with index 0, so an element that equals that infinity never wins
+// and a row with no winner returns 0. A pair is an element of a total
+// preorder (value, then lower index), so cutting and combining in any order
+// gives the same pair.
+//
+// Variants: float32 (default), -DUSE_FP16, -DUSE_BF16. Floats compare in
+// float32. Grid: x = rows * chunks (at most 65535).
+#version 460
+
+#ifdef USE_FP16
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#define STORAGE_TYPE float16_t
+#define LOAD_VALUE(x) float(x)
+#elif defined(USE_BF16)
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#define STORAGE_TYPE uint16_t
+#define LOAD_VALUE(x) uintBitsToFloat(uint(x) << 16u)
+#else
+#define STORAGE_TYPE float
+#define LOAD_VALUE(x) float(x)
+#endif
+
+#define ACC_LOWEST uintBitsToFloat(0xff800000u)
+#define ACC_HIGHEST uintBitsToFloat(0x7f800000u)
+
+layout(local_size_x = 256) in;
+
+struct Partial {
+  float value;
+  uint index;
+};
+
+layout(set = 0, binding = 0, std430) readonly buffer Input {
+  STORAGE_TYPE values[];
+} input_data;
+layout(set = 0, binding = 1, std430) writeonly buffer Partials {
+  Partial values[];
+} partial_data;
+
+layout(push_constant) uniform Params {
+  uint count;
+  uint operation;
+  uint lhs_size;
+  uint rhs_size;
+  uint reduce_size;
+  uint output_size;
+  uint lhs_offset;
+  uint rhs_offset;
+  uint output_offset;
+  uint aux_size;
+  uint aux_offset;
+  uint matrix_m;
+  uint matrix_n;
+  uint matrix_k;
+  uint flags;
+} params;
+
+shared float block_values[256];
+shared uint block_indices[256];
+
+bool challenges(float next, float incumbent, bool is_max) {
+  return isnan(next) ? !isnan(incumbent)
+                     : (!isnan(incumbent) &&
+                        (is_max ? next > incumbent : next < incumbent));
+}
+
+bool challenges_at(
+    float next, float incumbent, uint next_index, uint incumbent_index,
+    bool is_max) {
+  return isnan(next)
+      ? (!isnan(incumbent) || next_index < incumbent_index)
+      : (!isnan(incumbent) &&
+         ((is_max ? next > incumbent : next < incumbent) ||
+          (next == incumbent && next_index < incumbent_index)));
+}
+
+void main() {
+  uint thread = gl_LocalInvocationID.x;
+  uint n = params.reduce_size;
+  uint chunks = params.matrix_n;
+  uint chunk_length = params.matrix_m;
+  bool is_max = params.operation == 1u;
+  uint id = gl_WorkGroupID.x;
+  uint row = id / chunks;
+  uint chunk = id - row * chunks;
+  uint begin = chunk * chunk_length;
+  uint end = min(begin + chunk_length, n);
+  uint start = params.lhs_offset + row * n;
+  float never = is_max ? ACC_LOWEST : ACC_HIGHEST;
+  float v[16];
+  for (uint k = 0u; k < 16u; ++k) {
+    uint index = begin + thread + k * 256u;
+    v[k] = index < end ? LOAD_VALUE(input_data.values[start + index]) : never;
+  }
+  float local_value = never;
+  uint local_index = 0u;
+  for (uint k = 0u; k < 16u; ++k) {
+    if (challenges(v[k], local_value, is_max)) {
+      local_value = v[k];
+      local_index = begin + thread + k * 256u;
+    }
+  }
+  block_values[thread] = local_value;
+  block_indices[thread] = local_index;
+  barrier();
+  for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+    if (thread < stride) {
+      float mine = block_values[thread];
+      float theirs = block_values[thread + stride];
+      if (challenges_at(
+              theirs, mine, block_indices[thread + stride],
+              block_indices[thread], is_max)) {
+        block_values[thread] = theirs;
+        block_indices[thread] = block_indices[thread + stride];
+      }
+    }
+    barrier();
+  }
+  if (thread == 0u) {
+    partial_data.values[id] = Partial(block_values[0], block_indices[0]);
+  }
+}
