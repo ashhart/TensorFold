@@ -1,0 +1,289 @@
+// Copyright © 2026 Joshua Warren / mlx-omarchy contributors.
+// SPDX-License-Identifier: MIT
+//
+// Copied from mlx-omarchy shaders/fast_norm_gated.comp (MIT), comments condensed.
+// Fused RMSNorm epilogue (bf16). Mode 0: out = bf16(silu_f32(z) * widen(bf16(
+// x * rsqrt(mean(x^2)+eps) * w))); the row reduction, the value*(norm*weight)
+// association (precise) and the single final round match the composed
+// FastRmsNormBF16 -> FusedChainF32(sigmoid, mul, mul) -> CastF32BF16 chain.
+// Mode 1: RMSNorm scaled by the bf16-rounded f32 scalar in beta. One
+// 256-thread workgroup per row, grid-stride row loop; eps rides alpha.
+// Bindings: 0 x, 1 weight, 2 gate (z), 3 output.
+#version 460
+#ifdef APPLE_REDUCTION
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#endif
+
+#ifdef USE_FP16
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#define STORAGE_TYPE float16_t
+#define LOAD_VALUE(x) float(x)
+#define STORE_VALUE(f) STORAGE_TYPE(f)
+#define WIDEN(x) float(x)
+#elif defined(USE_BF16)
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#define STORAGE_TYPE uint16_t
+#define LOAD_VALUE(x) uintBitsToFloat(uint(x) << 16u)
+uint16_t bf16_store(float value) {
+  uint bits = floatBitsToUint(value);
+  if (isnan(value)) {
+    return uint16_t((bits >> 16) | 0x40u);
+  }
+  return uint16_t((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16);
+}
+// Exact bf16 -> float32 widening of a stored value.
+#define WIDEN(x) (uintBitsToFloat(uint(x) << 16u))
+#define STORE_VALUE(f) bf16_store(f)
+#else
+#define STORAGE_TYPE float
+#define LOAD_VALUE(x) float(x)
+#define STORE_VALUE(f) STORAGE_TYPE(f)
+#define WIDEN(x) float(x)
+#endif
+
+// GATED_ONLY builds have no runtime mode branch (the gated kernel used by
+// RMSNormGated); the default build keeps both modes for RMSNormScaled.
+#ifdef GATED_ONLY
+#define IS_SCALED (false)
+#define IS_GATED (true)
+#else
+#define IS_SCALED (params.operation == 1u)
+#define IS_GATED (params.operation == 0u)
+#endif
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Input {
+  STORAGE_TYPE values[];
+} input_data;
+layout(set = 0, binding = 1, std430) readonly buffer Weight {
+  STORAGE_TYPE values[];
+} weight_data;
+layout(set = 0, binding = 2, std430) readonly buffer Gate {
+  STORAGE_TYPE values[];
+} gate_data;
+layout(set = 0, binding = 3, std430) writeonly buffer Output {
+  STORAGE_TYPE values[];
+} output_data;
+
+layout(push_constant) uniform Params {
+  uint count;
+  uint operation;
+  uint lhs_size;
+  uint rhs_size;
+  uint reduce_size;
+  uint output_size;
+  uint lhs_offset;
+  uint rhs_offset;
+  uint output_offset;
+  uint aux_size;
+  uint aux_offset;
+  uint matrix_m;
+  uint matrix_n;
+  uint matrix_k;
+  uint flags;
+  float alpha;
+  float beta;
+} params;
+
+#ifdef APPLE_REDUCTION
+shared float subgroup_values[8];
+shared float apple_norm;
+
+void store_normed(uint row, uint row_length, uint index, float value,
+                  float norm, float scale) {
+  float weight =
+      (params.lhs_size == 1u)
+          ? LOAD_VALUE(weight_data.values[params.rhs_offset])
+          : LOAD_VALUE(weight_data.values[params.rhs_offset + index]);
+#ifdef ASH_QWEN35
+  // The Ash8c Metal oracle (gdn_post.metal): the scale rides the value, the
+  // weight the outside — BF16(weight * (value * norm)) — and the gate is
+  // divided, not sigmoid-multiplied: BF16((gate / (1 + exp(-gate))) * normed).
+  precise float scaled = value * norm;
+  precise float result = weight * scaled;
+  float normed = WIDEN(STORE_VALUE(result));
+  float out_value;
+  if (IS_GATED) {
+    uint gate_index = params.aux_offset + row * row_length + index;
+    float gate = WIDEN(gate_data.values[gate_index]);
+    precise float silu = gate / (1.0f + exp(-gate));
+    precise float prod = silu * normed;
+    out_value = prod;
+  } else {
+    out_value = normed * scale;
+  }
+#else
+  precise float norm_weight = norm * weight;
+  precise float result = value * norm_weight;
+  float normed = WIDEN(STORE_VALUE(result));
+  float out_value;
+  if (IS_GATED) {
+    uint gate_index = params.aux_offset + row * row_length + index;
+    float gate = WIDEN(gate_data.values[gate_index]);
+    float sigmoid_value = 1.0 / (1.0 + exp(-gate));
+    precise float silu = gate * sigmoid_value;
+    precise float prod = silu * normed;
+    out_value = prod;
+  } else {
+    out_value = normed * scale;
+  }
+#endif
+  output_data.values[params.output_offset + row * row_length + index] =
+      STORE_VALUE(out_value);
+}
+#else
+shared float block_values[256];
+#endif
+
+void main() {
+  uint thread = gl_LocalInvocationID.x;
+  uint row_length = params.reduce_size;
+  float eps = params.alpha;
+  uint threads = 256u;
+
+  // Mode-1 scalar: round the f32 scale to the storage dtype exactly as
+  // the composed promote cast does, then widen.
+  float scale = 0.0;
+  if (IS_SCALED) {
+#ifdef USE_BF16
+    scale = WIDEN(bf16_store(params.beta));
+#else
+    scale = params.beta;
+#endif
+  }
+
+  for (uint row = gl_WorkGroupID.x; row < params.output_size;
+       row += gl_NumWorkGroups.x) {
+    uint start = params.lhs_offset + row * row_length;
+
+#ifdef APPLE_REDUCTION
+    bool contiguous = row_length == 8u * threads;
+    float cached_x[8];
+    float local_sq = 0.0;
+    if (contiguous) {
+      for (uint read = 0u; read < 8u; ++read) {
+        float value = LOAD_VALUE(input_data.values[start + thread * 8u + read]);
+        cached_x[read] = value;
+        precise float square = value * value;
+        local_sq += square;
+      }
+    } else {
+      for (uint index = thread; index < row_length; index += threads) {
+        float value = LOAD_VALUE(input_data.values[start + index]);
+        precise float square = value * value;
+        local_sq += square;
+      }
+    }
+    float subgroup_sum = subgroupAdd(local_sq);
+    if (gl_SubgroupInvocationID == 0u) {
+      subgroup_values[gl_SubgroupID] = subgroup_sum;
+    }
+    barrier();
+    float partial = gl_SubgroupID == 0u && gl_SubgroupInvocationID < 8u
+        ? subgroup_values[gl_SubgroupInvocationID]
+        : 0.0;
+    float row_sum = subgroupAdd(partial);
+    if (gl_LocalInvocationIndex == 0u) {
+      apple_norm = inversesqrt(row_sum / float(row_length) + eps);
+    }
+    barrier();
+    float norm = apple_norm;
+    barrier();
+    if (contiguous) {
+      for (uint read = 0u; read < 8u; ++read) {
+        store_normed(row, row_length, thread * 8u + read, cached_x[read],
+                     norm, scale);
+      }
+    } else {
+      for (uint index = thread; index < row_length; index += threads) {
+        store_normed(row, row_length, index,
+                     LOAD_VALUE(input_data.values[start + index]), norm,
+                     scale);
+      }
+    }
+#else
+    float local_sq = 0.0;
+    for (uint index = thread; index < row_length; index += threads) {
+      float value = LOAD_VALUE(input_data.values[start + index]);
+      local_sq += value * value;
+    }
+    block_values[thread] = local_sq;
+    barrier();
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+      if (thread < stride) {
+        block_values[thread] += block_values[thread + stride];
+      }
+      barrier();
+    }
+    float mean_square = block_values[0] / float(row_length);
+    barrier();
+    float norm = inversesqrt(mean_square + eps);
+
+    for (uint index = thread; index < row_length; index += threads) {
+      float value = LOAD_VALUE(input_data.values[start + index]);
+      float weight =
+          (params.lhs_size == 1u)
+              ? LOAD_VALUE(weight_data.values[params.rhs_offset])
+              : LOAD_VALUE(weight_data.values[params.rhs_offset + index]);
+#ifdef ASH_QWEN35
+      // Ash8c Metal gdn_post association: the scale rides the value, the
+      // weight the outside; the gate is divided (see store_normed).
+      precise float scaled = value * norm;
+      precise float result = weight * scaled;
+      // The normed value the composed path stores and its consumers
+      // widen: round once to the storage dtype, then widen exactly.
+      float normed = WIDEN(STORE_VALUE(result));
+      float out_value;
+      if (IS_GATED) {
+        uint gate_index = params.aux_offset + row * row_length + index;
+        float gate = WIDEN(gate_data.values[gate_index]);
+        precise float silu = gate / (1.0f + exp(-gate));
+        precise float prod = silu * normed;
+        out_value = prod;
+      } else {
+        out_value = normed * scale;
+      }
+#else
+      // The reference FastRmsNormBF16 kernel compiles this product as
+      // value * (norm * weight); the shader compiler is free to reassociate a
+      // plain fmul chain differently in this kernel, which flipped ~5e-6 of
+      // outputs by one bf16 ulp. precise pins the association to the reference's
+      // (measured: 0 mismatches over 5.4M elements; the source order gave 25).
+      precise float norm_weight = norm * weight;
+      precise float result = value * norm_weight;
+      // The normed value the composed path stores and its consumers
+      // widen: round once to the storage dtype, then widen exactly.
+      float normed = WIDEN(STORE_VALUE(result));
+      float out_value;
+      if (IS_GATED) {
+        uint gate_index = params.aux_offset + row * row_length + index;
+        float gate = WIDEN(gate_data.values[gate_index]);
+        // silu(gate) then silu * normed, left-associated exactly like the
+        // composed sigmoid -> mul -> mul chain. mlx-lm's _precise_swiglu
+        // (and this primitive's C++ fallback) run that chain in float32
+        // (gate.astype(float32)) and round ONCE at the end, so nothing is
+        // rounded to the storage dtype between the sigmoid and the final
+        // multiply. (An earlier revision of this file rounded sigmoid and
+        // silu to bf16, which flipped ~36% of outputs by one ulp against
+        // the composed path; measured on hardware before the f32 chain landed.)
+        float sigmoid_value = 1.0 / (1.0 + exp(-gate));
+        // precise: keep the composed chain's association (gate * sigmoid) * normed;
+        // without it the compiler reassociated the product (7e-6 of outputs off).
+        precise float silu = gate * sigmoid_value;
+        precise float prod = silu * normed;
+        out_value = prod;
+      } else {
+        out_value = normed * scale;
+      }
+#endif
+      output_data.values[params.output_offset + row * row_length + index] =
+          STORE_VALUE(out_value);
+    }
+    barrier();
+#endif
+  }
+}
