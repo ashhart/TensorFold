@@ -2,21 +2,56 @@
 """Record the two-turn chat case of qwen38_27b_oracle.json from a live, single-Mac serve.
 
 Start the serve the oracle describes on this Mac (same checkpoint, no drafter, temperature 0, seed 1234), then run
-this recorder against it. Turn 1 is the oracle's chat prompt; its reply becomes the assistant turn, turn 2 asks the
-follow-up, and the reply's token_sha is checked against its own decimal token ids before it is stored. The first
-turn must also reproduce chat-128's token_sha, so the new receipt cannot come from a serve that is not the record's
-single-Mac run. With --write the case replaces (or appends) itself in the oracle.
+this recorder against it. It reads the serve's /health first: a serve that reports the two-Mac pair policy is refused,
+because rank 0 of a pair would pass the chat-128 check below just as well, and an oracle always has to come from one
+Mac; the version /health reports becomes the case's runtime. Turn 1 is the oracle's chat prompt; its reply becomes
+the assistant turn, turn 2 asks the follow-up, and the reply's token_sha is checked against its own decimal token ids
+before it is stored. The first turn must also reproduce chat-128's token_sha, so the new receipt cannot come from a
+serve that is not the record's single-Mac run. With --write the case replaces (or appends) itself in the oracle.
 """
 import argparse
 import hashlib
 import json
 import sys
+import urllib.error
+import urllib.request
 
 from pair_accept import DEFAULT_MODEL, family_refusal, load_oracle, post, reply_text, request_body, token_sha
 
 CASE_NAME = "chat-two-turn-128"
 OPENING_CASE = "chat-128"
 SECOND_TURN = "Now give the same example for a 3 by 3 matrix."
+
+
+def refuse(message):
+    """Print a plain refusal on stderr and exit 2, the status the family refusal also uses."""
+    print("record_oracle: " + message, file=sys.stderr)
+    raise SystemExit(2)
+
+
+def served_runtime(base, timeout):
+    """The serve's runtime, "tensorfold-native <version>", read from /health; a pair serve is refused.
+
+    /health is unauthenticated and cheap, and it is the only place a serve says what it is: a pair serve names the
+    two-Mac speed-up mode in its policy line, so it is refused before any completion request is sent.
+    """
+    url = base.rstrip("/") + "/health"
+    try:
+        with urllib.request.urlopen(url, timeout=min(timeout, 30.0)) as response:
+            health = json.loads(response.read())
+    except (urllib.error.URLError, OSError, ValueError) as error:
+        refuse("{} did not answer with a /health document: {}; start the single-Mac serve first".format(url, error))
+    if not isinstance(health, dict):
+        refuse("{} is not a /health document".format(url))
+    version = health.get("version")
+    if not isinstance(version, str) or not version.strip():
+        refuse("{} has no version string, so the build that recorded the receipt is unknown".format(url))
+    policy = health.get("policy")
+    if isinstance(policy, str) and "pair" in policy.lower():
+        refuse(
+            "{} reports the two-Mac pair policy ({}); an oracle must come from a single-Mac serve".format(url, policy)
+        )
+    return "tensorfold-native " + version.strip()
 
 
 def two_turn_messages(oracle, base, model, timeout):
@@ -55,6 +90,8 @@ def main():
     if refusal is not None:
         print("record_oracle: " + refusal, file=sys.stderr)
         return 2
+    runtime = served_runtime(args.base_url, args.timeout)
+    print("record_oracle: serve reports {} at {}".format(runtime, args.base_url.rstrip("/")))
     messages = two_turn_messages(oracle, args.base_url, args.model, args.timeout)
     case = {
         "name": CASE_NAME,
@@ -62,6 +99,7 @@ def main():
         "thinking": False,
         "messages": messages,
         "max_tokens": 128,
+        "runtime": runtime,
         "token_sha": "",
     }
     body = request_body(case, args.model)

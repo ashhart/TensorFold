@@ -2,7 +2,8 @@
 """Accept a paired TensorFold serve against the checked-in single-host receipts.
 
 run   send every oracle case twice; both replies must be identical, and their token_sha must equal the oracle's
-warm  one chat turn, then that conversation's next turn: the reply must report cached prompt tokens
+cold  one chat turn, then that conversation's next turn: the pair must report no reused prompt tokens, because a
+      pair runs no prompt cache (its one slot's states are two Macs', so the serve enables none)
 
 The oracle (qwen38_27b_oracle.json, next to this file) is the single-Mac, undrafted, temperature-0 record, made on
 the GPU family it names: run refuses a Mac in any other family, because before the M5 the bits come from simd_qmm
@@ -149,7 +150,14 @@ def cached_tokens(reply):
     return value if value is not None else usage.get("cached_tokens")
 
 
-def warm(base, oracle, model, timeout):
+def cold(base, oracle, model, timeout):
+    """Two turns of one conversation: the pair must report no prompt state reused between them.
+
+    A pair runs no prompt cache at all (`qwen27_served.attach`: a pair's slots are one and its prompt states are
+    two Macs', so `enableCache` is skipped), so the second turn has to prefill the whole conversation again. A cached
+    count here would mean a pair kept one Mac's states and served them as the other's: a wrong answer, not a
+    faster one. This pin fails if the count ever becomes positive without the shard handling the cache needs.
+    """
     case = next((c for c in oracle["cases"] if c["name"].startswith("chat")), None)
     if case is None:
         print("pair_accept: the oracle has no chat case to build a conversation from", file=sys.stderr)
@@ -158,7 +166,7 @@ def warm(base, oracle, model, timeout):
     used = cached_tokens(first)
     text = reply_text(first, case["endpoint"])
     if not text:
-        print("FAIL warm: the first turn returned no text", file=sys.stderr)
+        print("FAIL cold: the first turn returned no text", file=sys.stderr)
         return 1
     second_body = {
         "model": model,
@@ -174,18 +182,21 @@ def warm(base, oracle, model, timeout):
     }
     second = post(base, case["endpoint"], second_body, timeout)
     cached = cached_tokens(second)
-    print("warm: turn 1 prefill marked {}; turn 2 cached={}".format(used, cached))
-    if cached is None or cached <= 0:
-        print("FAIL warm: the next turn reused no prompt state (cached={})".format(cached))
+    print("cold: turn 1 prefill marked {}; turn 2 cached={}".format(used, cached))
+    if cached is None:
+        print("FAIL cold: the next turn reported no cached-token count")
         return 1
-    print("PASS warm: the next turn resumed {} cached prompt tokens".format(cached))
+    if cached > 0:
+        print("FAIL cold: the pair reused {} prompt tokens; a pair runs no prompt cache".format(cached))
+        return 1
+    print("PASS cold: the pair kept no prompt cache, as its one slot over two Macs' states implies")
     return 0
 
 
 def main():
     parser = argparse.ArgumentParser(description="Accept a paired TensorFold serve against single-host receipts")
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("run", "warm"):
+    for name in ("run", "cold"):
         p = sub.add_parser(name)
         p.add_argument("--base-url", default="http://127.0.0.1:4100")
         p.add_argument("--oracle", default="tools/qwen27/qwen38_27b_oracle.json")
@@ -199,7 +210,7 @@ def main():
     try:
         if args.command == "run":
             return run(args.base_url, oracle, args.model, args.repeat, args.timeout, args.only)
-        return warm(args.base_url, oracle, args.model, args.timeout)
+        return cold(args.base_url, oracle, args.model, args.timeout)
     except urllib.error.URLError as err:
         print("pair_accept: {} did not answer: {}".format(args.base_url, err), file=sys.stderr)
         return 2
