@@ -7,6 +7,7 @@ const rowp = @import("../../core/row_projection.zig");
 const ks = @import("kernel_sources");
 const fused = @import("fused_lane.zig");
 const cfg = @import("config.zig");
+const plan = @import("plan.zig");
 
 const shared = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
@@ -64,8 +65,20 @@ pub const Stack = struct {
 /// A linear as core/affine_mm reads it (prompt chunks): MLX's words, scales and biases, copied to aligned storage.
 pub const Mlx = struct { w: Ref, s: Ref, b: Ref, n: u32, k: u32, bits: u8 = 4 };
 
+/// A bf16 linear read in place [n, k] (the E-series' per-layer linears, the converter's --dense-ple).
+pub const Dense = struct { w: Ref, n: usize, k: usize };
+
+/// The E-series' per-layer inputs: the 4/64 table, the projection of the embeddings and its norm.
+pub const Ple = struct {
+    table_w: Ref,
+    table_s: Ref,
+    table_b: Ref,
+    model_projection: Dense,
+    projection_norm: Ref,
+};
+
 pub const Layer = struct {
-    /// q, k, v (k again on global layers, which have none), o, gate, up, down for prompt chunks.
+    /// q, k, v (k again on global layers, which have none), o, gate, up, down for prompt chunks (unset on E-series).
     mlx: [7]Mlx,
     qkv: Stack,
     o: Linear,
@@ -78,6 +91,10 @@ pub const Layer = struct {
     pre_feedforward: Ref,
     post_feedforward: Ref,
     scalar: Ref,
+    /// The E-series' per-layer gate [width, hidden], projection [hidden, width] and the norm after it.
+    ple_gate: ?Dense = null,
+    ple_projection: ?Dense = null,
+    ple_norm: ?Ref = null,
 };
 
 /// Python's lane_qmm.split_k: K slices fixed by the weight's shape, so every window width keeps one summation order.
@@ -120,6 +137,7 @@ pub const Weights = struct {
     embed_s: Ref,
     embed_b: Ref,
     final_norm: Ref,
+    ple: ?Ple = null,
     owned: std.ArrayList(mtl.Buffer) = .empty,
 
     pub fn deinit(w: *Weights, gpa: std.mem.Allocator) void {
@@ -270,42 +288,119 @@ pub fn packRows(gpa: std.mem.Allocator, device: mtl.Device, owned: *std.ArrayLis
     return out;
 }
 
-pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoint, geo: cfg.Geometry, ws: *const cfg.widths.Widths) !Weights {
+/// A bf16 matrix [n, k] read in place.
+fn dense(c: *const ckpt.Checkpoint, name: []const u8, n: usize, k: usize) !Dense {
+    const t = try c.get(name);
+    if (t.dtype != .bf16 or t.rank != 2 or t.shape[0] != n or t.shape[1] != k) {
+        std.log.warn("gemma4: {s} is not a bf16 matrix [{d}, {d}] (tools/zig/gemma4_e4b_convert.py --dense-ple keeps it so)", .{ name, n, k });
+        return error.BadGemmaWeight;
+    }
+    return .{ .w = .{ .buf = t.buffer, .off = t.offset }, .n = n, .k = k };
+}
+
+/// plan.check's view of a loaded checkpoint: each tensor asked for at its dtype and shape; the skipped ones are not read.
+const Checker = struct {
+    c: *const ckpt.Checkpoint,
+
+    pub fn expect(k: Checker, name: []const u8, dtype: ckpt.DType, shape: []const usize) !void {
+        const t = try k.c.get(name);
+        if (t.dtype != dtype or t.rank != shape.len or !std.mem.eql(usize, t.shape[0..t.rank], shape)) {
+            std.log.warn("gemma4: {s} is not the {s} tensor of shape {any} the plan stores", .{ name, @tagName(dtype), shape });
+            return error.UnexpectedTensor;
+        }
+    }
+
+    pub fn skip(_: Checker, _: []const u8) !void {}
+};
+
+pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoint, config: cfg.Config) !Weights {
+    const geo = config.geo;
+    const ws = &config.widths;
+    try plan.check(config, Checker{ .c = c });
+    const pm = plan.model(config);
     var w: Weights = undefined;
     w.owned = .empty;
+    w.ple = null;
     errdefer w.deinit(gpa);
     var p: [96]u8 = undefined;
     var name: [160]u8 = undefined;
     for (w.layers[0..geo.layers], 0..) |*l, i| {
-        const pre = try std.fmt.bufPrint(&p, "language_model.model.layers.{d}.", .{i});
+        const pl = plan.layer(config, i);
+        const pre = try std.fmt.bufPrint(&p, plan.prefix ++ "layers.{d}.", .{i});
         const lw = ws.layers[i];
-        const qkv: []const []const u8 = if (cfg.global(i)) &.{ "self_attn.q_proj", "self_attn.k_proj" } else &.{ "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj" };
-        l.qkv = try stack(gpa, device, c, &w.owned, geo, pre, qkv, lw[0..qkv.len], false);
+        // the planned members: a layer that reads another's cache has q alone, a global layer with k = v no v_proj
+        var members: [3][]const u8 = .{ "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj" };
+        var widths3: [3]cfg.widths.Width = .{ lw[0], lw[1], lw[2] };
+        var count: usize = 1;
+        if (pl.k != null) count += 1;
+        if (pl.v != null) {
+            members[count] = "self_attn.v_proj";
+            widths3[count] = lw[2];
+            count += 1;
+        }
+        l.qkv = try stack(gpa, device, c, &w.owned, geo, pre, members[0..count], widths3[0..count], false);
         l.o = try pack(gpa, device, c, &w.owned, geo, pre, &.{"self_attn.o_proj"}, lw[3], false);
         l.gate_up = try stack(gpa, device, c, &w.owned, geo, pre, &.{ "mlp.gate_proj", "mlp.up_proj" }, lw[4..6], true);
         l.down = try pack(gpa, device, c, &w.owned, geo, pre, &.{"mlp.down_proj"}, lw[6], false);
-        for (&l.mlx, cfg.widths.module_names, lw) |*x, member, width| {
+        if (geo.layer_input != 0) {
+            l.mlx = undefined; // prompt chunks (prompt.zig) read these; the E-series' prompts run in decode windows
+        } else for (&l.mlx, cfg.widths.module_names, lw) |*x, member, width| {
             // global layers have no v_proj: k stands in, never read
             x.* = if (cfg.global(i) and std.mem.eql(u8, member, "self_attn.v_proj")) l.mlx[1] else try mlxCopy(gpa, device, c, &w.owned, pre, member, width);
         }
-        inline for (.{ "q_norm", "k_norm", "input_norm", "post_attention", "pre_feedforward", "post_feedforward", "scalar" }, .{ "self_attn.q_norm.weight", "self_attn.k_norm.weight", "input_layernorm.weight", "post_attention_layernorm.weight", "pre_feedforward_layernorm.weight", "post_feedforward_layernorm.weight", "layer_scalar" }) |field, t|
+        inline for (.{ "q_norm", "input_norm", "post_attention", "pre_feedforward", "post_feedforward", "scalar" }, .{ "self_attn.q_norm.weight", "input_layernorm.weight", "post_attention_layernorm.weight", "pre_feedforward_layernorm.weight", "post_feedforward_layernorm.weight", "layer_scalar" }) |field, t|
             @field(l, field) = try ref(c, try std.fmt.bufPrint(&name, "{s}{s}", .{ pre, t }));
+        l.k_norm = if (geo.layer_input == 0 or pl.k != null) try ref(c, try std.fmt.bufPrint(&name, "{s}self_attn.k_norm.weight", .{pre})) else l.q_norm; // an E-series reader of another's cache has none
+        l.ple_gate = null;
+        l.ple_projection = null;
+        l.ple_norm = null;
+        if (pl.layer_input) |li| {
+            if (li.gate.width != null or li.project.width != null) return perLayerQuantized();
+            l.ple_gate = try dense(c, try std.fmt.bufPrint(&name, "{s}per_layer_input_gate.weight", .{pre}), li.gate.n, li.gate.k);
+            l.ple_projection = try dense(c, try std.fmt.bufPrint(&name, "{s}per_layer_projection.weight", .{pre}), li.project.n, li.project.k);
+            l.ple_norm = try ref(c, try std.fmt.bufPrint(&name, "{s}post_per_layer_input_norm.weight", .{pre}));
+        }
     }
-    w.head = try pack(gpa, device, c, &w.owned, geo, "language_model.model.", &.{"embed_tokens"}, ws.embed, false);
+    w.head = try pack(gpa, device, c, &w.owned, geo, plan.prefix, &.{"embed_tokens"}, ws.embed, false);
     w.embed_bits = ws.embed.bits;
-    w.embed_w = try ref(c, "language_model.model.embed_tokens.weight");
-    w.embed_s = try ref(c, "language_model.model.embed_tokens.scales");
-    w.embed_b = try ref(c, "language_model.model.embed_tokens.biases");
-    w.final_norm = try ref(c, "language_model.model.norm.weight");
+    w.embed_w = try ref(c, plan.prefix ++ "embed_tokens.weight");
+    w.embed_s = try ref(c, plan.prefix ++ "embed_tokens.scales");
+    w.embed_b = try ref(c, plan.prefix ++ "embed_tokens.biases");
+    w.final_norm = try ref(c, plan.prefix ++ "norm.weight");
+    if (pm.layer_table) |table| {
+        const mp = pm.model_project.?;
+        if (table.width == null or !std.meta.eql(table.width.?, cfg.widths.fast)) { // the per-layer gather reads 4/64 codes
+            std.log.warn("gemma4: embed_tokens_per_layer must be 4-bit in groups of 64", .{});
+            return error.UnsupportedGemmaQuantization;
+        }
+        if (mp.width != null) return perLayerQuantized();
+        w.ple = .{
+            .table_w = try ref(c, plan.prefix ++ "embed_tokens_per_layer.weight"),
+            .table_s = try ref(c, plan.prefix ++ "embed_tokens_per_layer.scales"),
+            .table_b = try ref(c, plan.prefix ++ "embed_tokens_per_layer.biases"),
+            .model_projection = try dense(c, plan.prefix ++ "per_layer_model_projection.weight", mp.n, mp.k),
+            .projection_norm = try ref(c, plan.prefix ++ "per_layer_projection_norm.weight"),
+        };
+    }
     return w;
+}
+
+fn perLayerQuantized() error{UnsupportedGemmaQuantization} {
+    std.log.warn("gemma4: the per-layer linears must be bf16 (tools/zig/gemma4_e4b_convert.py --dense-ple)", .{});
+    return error.UnsupportedGemmaQuantization;
 }
 
 /// The row path's projection (a chip without tensor units): the checkpoint's arrays as stored on the simdgroup tiles.
 pub fn projectRow(ps: *Projections, device: mtl.Device, e: mtl.ComputeEncoder, raw: rowp.Weights, l: Linear, x: lane.Ref, y: mtl.Buffer, rows: usize) !void {
+    return projectRowAt(ps, device, e, raw, l, x, y, 0, rows);
+}
+
+/// projectRow into y from byte offset `y_off` (the first row's place).
+pub fn projectRowAt(ps: *Projections, device: mtl.Device, e: mtl.ComputeEncoder, raw: rowp.Weights, l: Linear, x: lane.Ref, y: mtl.Buffer, y_off: usize, rows: usize) !void {
     const p = try ps.simd(device);
     const mtx = rowp.simd_bits.Matrix{ .w = raw.w, .scales = raw.scales, .biases = raw.biases };
     const call = try rowp.simd_bits.call(p, raw.bits, raw.n, raw.k, rows, l.y_stride orelse l.n, false, 0);
-    rowp.simd_bits.encode(e, call, mtx, x.buf, x.off, y, l.col * 2);
+    rowp.simd_bits.encode(e, call, mtx, x.buf, x.off, y, y_off + l.col * 2);
 }
 
 /// The lane pipelines, one per distinct (n, k, width, stride, prologue).

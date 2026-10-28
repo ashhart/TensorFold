@@ -309,8 +309,11 @@ These follow a model's release code or a library's model code for their math, ro
 - `zig/src/vision/qwen_cuda.zig`: `Qwen3_5VisionModel` in transformers.
 - `zig/src/core/picture/patches_test.zig`: recorded image-processor output data from `Lfm3VlImageProcessor` and `Qwen2VLImageProcessor` in transformers; the processing implementation is described below.
 - `zig/src/families/flashnext/rotary_config.zig`: `_compute_yarn_parameters` in transformers, for the 64 rotary dims.
+- `zig/kernels/metal/gemma4/ple.metal`, `zig/kernels/metal/gemma4/dense.metal`, `zig/src/families/gemma4/forward.zig` (the per-layer-input combine, gate and tail): `encode_per_layer_input` and the Block's per-layer-input step in `gemma/gm/nn/gemma4/_modules.py` of google-deepmind/gemma, revision 9e1f74131ba9d45e5fe6ae7bb3941d9f2abb39c3.
 
 transformers is Copyright The HuggingFace Team, Apache License 2.0; see [the license text](LICENSES/Apache-2.0.txt).
+
+google-deepmind/gemma is Copyright 2026 DeepMind Technologies Limited, Apache License 2.0; see [the license text](LICENSES/Apache-2.0.txt).
 
 ## Image patch preparation
 
