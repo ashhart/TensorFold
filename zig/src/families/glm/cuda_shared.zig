@@ -47,6 +47,7 @@ pub fn mixer(f: *const fw.Forward, r: fw.Rank, l: weights.Layer, li: usize, di: 
             var s = b.kda;
             s.p = b.kproj;
             try kda_block.project(f.set(), f.stream, k, s, b.normed, c.hidden, rows);
+            if (f.prefetch()) |p| try p.fork(f.stream, l.index, .o); // TF_GLM_L2PF: o read into L2 while the chains run
             for (r.segs) |g| {
                 const st = g.st;
                 const cur = st.cur[li];

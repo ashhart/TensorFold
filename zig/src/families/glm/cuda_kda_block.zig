@@ -6,6 +6,7 @@ const glue = @import("cuda_glue.zig");
 const kda = @import("cuda_kda.zig");
 const b16 = @import("cuda_b16.zig");
 const prof = @import("cuda_prof.zig");
+const l2pf = @import("cuda_l2pf.zig");
 const projection = @import("cuda_proj.zig");
 
 /// The input projection [q | k | v | f_a | g_a | b] [3 heads 128 + 256 + heads][dims]: one bf16 stack, or two parts.
@@ -56,13 +57,14 @@ pub fn fill(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, lo: usize,
 
 /// The block up to its out_proj: the projections, the chain, and a prompt chunk's conv window commit.
 pub fn body(set: glue.Set, ks: *const kda.Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, rows: usize, conv_state: u64, state_in: u64, wide: bool, prompt: bool) !void {
-    return bodyProfile(set, ks, stream, l, s, x, x_stride, rows, conv_state, state_in, wide, prompt, null);
+    return bodyProfile(set, ks, stream, l, s, x, x_stride, rows, conv_state, state_in, wide, prompt, null, null);
 }
 
-pub fn bodyProfile(set: glue.Set, ks: *const kda.Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, rows: usize, conv_state: u64, state_in: u64, wide: bool, prompt: bool, profile: ?*prof.Prof) !void {
+pub fn bodyProfile(set: glue.Set, ks: *const kda.Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, rows: usize, conv_state: u64, state_in: u64, wide: bool, prompt: bool, profile: ?*prof.Prof, o_site: ?l2pf.At) !void {
     var stamp = prof.span(profile, stream, .projections);
     try project(set, stream, l, s, x, x_stride, rows);
     stamp.end();
+    if (o_site) |at| try at.fork(stream); // TF_GLM_L2PF: o read into L2 while the chain runs
     stamp = prof.span(profile, stream, .kda);
     defer stamp.end();
     try chainRows(ks, stream, l, s, rows, conv_state, state_in, wide);
