@@ -8,7 +8,7 @@
 // ROWS x Dk f32 state tile staged through shared memory (padded stride 129);
 // every row reduces sequentially over Dk in ascending order, f32 throughout,
 // output bf16 RNE, state f32 end to end.
-// Flag bit 8: raw-gates prologue in-kernel — slot 3 carries a, slot 4 b
+// Flag bit 3: raw-gates prologue in-kernel — slot 3 carries a, slot 4 b
 // (bf16), slots 8/9 A_log and dt_bias. Flag bit 9: A_log read as f32 (two
 // little-endian u16 words) AND the kv walk order that matches the Metal
 // chain (s*g then *k). bf16 roundings: x=a+dt, softplus, beta; g stays f32.
@@ -32,7 +32,7 @@ layout(set = 0, binding = 4, std430) readonly buffer BBuf  { uint16_t v[]; } b_b
 layout(set = 0, binding = 5, std430) readonly buffer SIn   { float    v[]; } s_in;
 layout(set = 0, binding = 6, std430) writeonly buffer YBuf { uint16_t v[]; } y_buf;
 layout(set = 0, binding = 7, std430) buffer         SOut  { float    v[]; } s_out;
-// Raw-gates mode (flag bit 8): the gate chain rides in-kernel. Slot 3
+// Raw-gates mode (flag bit 3): the gate chain rides in-kernel. Slot 3
 // carries a, slot 4 carries b (bf16); slots 8/9 carry A_log (bf16) and
 // dt_bias (bf16).
 layout(set = 0, binding = 8, std430) readonly buffer ALogBuf { uint16_t v[]; } alog_buf;
