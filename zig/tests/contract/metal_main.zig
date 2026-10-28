@@ -18,6 +18,7 @@ const drama_cfg = @import("metal_drama_cfg.zig");
 const glm_eh_k = @import("metal_glm_eh.zig");
 const glm_rows_k = @import("metal_glm_rows.zig");
 const bolt_k = @import("metal_bolt.zig");
+const bolt_mamba = @import("metal_bolt_mamba.zig");
 
 const flash_pool = @import("metal_flashnext_pool.zig");
 const flash = @import("metal_flashnext.zig");
@@ -265,6 +266,26 @@ pub fn main(init: std.process.Init) !u8 {
         bolt_ctl_norm_made += 1;
         try kernels.append(a, bolt_ctl_norm[bolt_ctl_norm_made - 1].kernel());
     };
+    // Bolt's Mamba conv and scan, then their controls (a probe's address is its kernel's context: they stay put)
+    const bm = bolt_mamba.controls;
+    var bolt_convs: [4]bolt_mamba.ConvProbe = undefined;
+    var bolt_conv_made: usize = 0;
+    defer for (bolt_convs[0..bolt_conv_made]) |*probe| probe.deinit();
+    for ([_]?bolt_k.Mut{ null, bm.conv_tap, bm.conv_state, bm.conv_half }) |m| {
+        if (!wanted(o, if (m) |x| x.name else bolt_mamba.convSpec().name)) continue;
+        bolt_convs[bolt_conv_made] = try bolt_mamba.ConvProbe.init(a, device, queue, m);
+        bolt_conv_made += 1;
+        try kernels.append(a, bolt_convs[bolt_conv_made - 1].kernel());
+    }
+    var bolt_scans: [4]bolt_mamba.ScanProbe = undefined;
+    var bolt_scan_made: usize = 0;
+    defer for (bolt_scans[0..bolt_scan_made]) |*probe| probe.deinit();
+    for ([_]?bolt_k.Mut{ null, bm.scan_skip, bm.scan_decay, bm.scan_half }) |m| {
+        if (!wanted(o, if (m) |x| x.name else bolt_mamba.scanSpec().name)) continue;
+        bolt_scans[bolt_scan_made] = try bolt_mamba.ScanProbe.init(a, device, queue, m);
+        bolt_scan_made += 1;
+        try kernels.append(a, bolt_scans[bolt_scan_made - 1].kernel());
+    }
     var flash_list: [8]flash.Probe = undefined;
     var flash_made: usize = 0;
     defer for (flash_list[0..flash_made]) |*probe| probe.deinit();

@@ -100,7 +100,11 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
         text = sources.core_deltanet;
     } else if (std.mem.startsWith(u8, d.name, "bolt ")) {
         // Bolt's ops are the engine's prefill op files (kernels/metal/sources.zig `prefill`), named by the label's 2nd word
-        if (has(d.name, " norm ")) {
+        if (has(d.name, " mamba ")) {
+            // the tree source as kernels.zig compiles it before the M5 (Bolt is refused on tensor-unit chips)
+            head = "#define TF_SIMD_LAYOUT 1\n";
+            text = sources.nemotron_tree;
+        } else if (has(d.name, " norm ")) {
             // Bolt's norm instantiations live beside Lightning's in kernels/metal/nemotron (kernels.zig `all`, by key)
             const key = if (has(d.name, " group norm ")) "group_norm_xs_bolt_16" else if (has(d.name, "add_norm_moe")) "add_norm_moe_xs_bolt" else "add_norm_xs_bolt";
             text = for (sources.nemotron.all) |k| {
