@@ -1,4 +1,4 @@
-//! MiMo-V2.6-Flash behind the native server: the lane backend over engine.zig, on one GPU or two TP ranks.
+//! MiMo-V2.6-Flash behind the native server: the lane backend over engine.zig, on two GB10s as TP ranks.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -442,25 +442,21 @@ pub fn snap_drop(ptr: *anyopaque, saved: *anyopaque) void {
     if (l.pins) |*x| x.remove(st);
 }
 
-/// The native family entry: TF_TP_* for two ranks (rank 0 serves; `tf-mimo follow` on rank 1); its own kernels.
+/// The native family entry: GB10s as two TF_TP_* ranks (rank 0 serves; `tf-mimo follow` on rank 1); its own kernels.
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, _: ?[]const u8, o: Options) !Loaded {
     if (try ctx.capability() != 121) return error.MimoV2RequiresSm121;
     if (o.lanes == 0 or o.lanes > 16) return error.Slots;
     const su: engine.Setup = .{ .context = o.context, .slots = o.lanes, .drafts = o.drafts };
-    var session: ?*tp.Session = null;
-    if (try tpConfig()) |c| if (c.world > 1) {
-        if (c.rank != 0) return error.FollowerServes; // rank 1 runs `tf-mimo follow`
-        const ss = try gpa.create(tp.Session);
-        errdefer gpa.destroy(ss);
-        try ss.open(ctx.d, c, @import("tp_kernel").mailbox); // RoCE needs the mailbox kernel (TF_COMM_BACKEND=roce)
-        session = ss;
-        try ss.plan.send(&engine.hello(su));
-    };
-    errdefer if (session) |ss| {
-        ss.announceStop();
-        ss.close();
-        gpa.destroy(ss);
-    };
+    const c = try twoRanks(&envGet);
+    if (c.rank != 0) return error.FollowerServes; // rank 1 runs `tf-mimo follow`
+    const session = try gpa.create(tp.Session);
+    errdefer gpa.destroy(session);
+    try session.open(ctx.d, c, @import("tp_kernel").mailbox); // RoCE needs the mailbox kernel (TF_COMM_BACKEND=roce)
+    errdefer {
+        session.announceStop();
+        session.close();
+    }
+    try session.plan.send(&engine.hello(su));
     const e = try Engine.init(gpa, io, ctx.d, dir, su, session);
     errdefer e.deinit();
     const own = try gpa.create(Owned);
@@ -479,14 +475,11 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     };
 }
 
-/// TF_TP_* once TF_TP_WORLD is set (rank 0 serves; `tf-mimo follow` on rank 1); null: one GPU. A bad setting refuses.
-fn tpConfig() tp.config.Error!?tp.Config {
-    return tpFrom(&envGet);
-}
-
-fn tpFrom(get: *const fn ([]const u8) ?[]const u8) tp.config.Error!?tp.Config {
-    if (get("TF_TP_WORLD") == null) return null;
-    return try tp.Config.parse(get);
+/// `get`'s TF_TP_* for two ranks, the only world validated: unset (one GPU) or any other world is refused by name.
+fn twoRanks(get: *const fn ([]const u8) ?[]const u8) (tp.config.Error || error{MimoV2RequiresTwoRanks})!tp.Config {
+    if (get("TF_TP_WORLD") == null) return error.MimoV2RequiresTwoRanks;
+    const c = try tp.Config.parse(get);
+    return if (c.world == 2) c else error.MimoV2RequiresTwoRanks;
 }
 
 fn envGet(name: []const u8) ?[]const u8 {
@@ -496,15 +489,14 @@ fn envGet(name: []const u8) ?[]const u8 {
 }
 
 /// Admission bytes of a rank: the split matrices' share of `total`, plus the embeddings and dflash/ whole on each.
-pub fn weightShare(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64) tp.config.Error!u64 {
+pub fn weightShare(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64) !u64 {
     return share(a, io, dir, total, &envGet);
 }
 
-/// weightShare under `get`'s TF_TP_*: a bad setting is BadSetting, as `open` refuses it, not one GPU's share.
-fn share(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64, get: *const fn ([]const u8) ?[]const u8) tp.config.Error!u64 {
+/// weightShare under `get`'s TF_TP_*: a setting `open` refuses is refused here by the same name, not sized.
+fn share(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64, get: *const fn ([]const u8) ?[]const u8) !u64 {
     const drafter = drafterBytes(a, io, dir);
-    const world: u64 = if (try tpFrom(get)) |c| c.world else 1;
-    if (world <= 1) return total + drafter;
+    const world: u64 = (try twoRanks(get)).world;
     const path = std.fs.path.join(a, &.{ dir, "config.json" }) catch return total + drafter;
     defer a.free(path);
     const text = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 24)) catch return total + drafter;
@@ -528,8 +520,9 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
     return switch (err) {
         error.PromptTooLong => "the prompt and its reply exceed this server's context window: shorten it or lower max_tokens",
         error.NoFreeSlot => "every stream slot is busy: retry once another request ends",
-        error.BadSetting => "a TF_TP_* setting is out of range (TF_TP_WORLD 1 to 64, TF_TP_RANK below it, TF_TP_PORT): fix it or unset TF_TP_WORLD for one GPU",
+        error.BadSetting => "a TF_TP_* setting is out of range (TF_TP_WORLD 1 to 64, TF_TP_RANK below it, TF_TP_PORT): fix it",
         error.MimoV2RequiresSm121 => "MiMo-V2 is validated on GB10 (sm_121) only: its kernels' launch records and every receipt are GB10's",
+        error.MimoV2RequiresTwoRanks => "MiMo-V2 is validated on two ranks only: set TF_TP_WORLD=2 and run `tf-mimo follow` on rank 1",
         else => null,
     };
 }
@@ -560,7 +553,7 @@ fn tpEnv(comptime world: []const u8, comptime rank: []const u8) *const fn ([]con
     }.get;
 }
 
-test "a bad TF_TP_* refuses the weight share; TF_TP_WORLD unset is one GPU" {
+test "a bad TF_TP_* refuses the weight share, and so does any world but two ranks" {
     const a = std.testing.allocator;
     const io = std.testing.io;
     const unset = struct {
@@ -568,7 +561,8 @@ test "a bad TF_TP_* refuses the weight share; TF_TP_WORLD unset is one GPU" {
             return null;
         }
     }.get;
-    try std.testing.expectEqual(@as(u64, 1000), try share(a, io, "no-such-pack", 1000, &unset));
+    try std.testing.expectError(error.MimoV2RequiresTwoRanks, share(a, io, "no-such-pack", 1000, &unset));
+    inline for (.{ "1", "3", "4" }) |world| try std.testing.expectError(error.MimoV2RequiresTwoRanks, share(a, io, "no-such-pack", 1000, tpEnv(world, "0")));
     inline for (.{ .{ "two", "" }, .{ "0", "" }, .{ "65", "" }, .{ "2", "2" }, .{ "2", "-1" }, .{ "2", "one" } }) |bad| {
         try std.testing.expectError(error.BadSetting, share(a, io, "no-such-pack", 1000, tpEnv(bad[0], bad[1])));
     }
