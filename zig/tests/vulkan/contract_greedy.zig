@@ -109,11 +109,23 @@ pub const Rig = struct {
         r.outs.clearRetainingCapacity();
     }
 
+    /// The uploaded shell: pattern, data, pattern. The pattern must ride the upload —
+    /// fresh device memory reads as zeros, not as the pattern intact() demands.
+    pub fn shellFor(r: *Rig, data: []const u8) ![]u8 {
+        const all = try r.a.alloc(u8, data.len + 2 * guard);
+        errdefer r.a.free(all);
+        @memset(all, pattern);
+        @memcpy(all[guard..][0..data.len], data);
+        return all;
+    }
+
     /// Uploads `data` between two guard spans; the shell's data window starts at `guard`.
     pub fn input(r: *Rig, data: []const u8) !vk.Buffer {
-        var b = try vk.Buffer.init(r.dev, .device, data.len + 2 * guard);
+        const all = try r.shellFor(data);
+        defer r.a.free(all);
+        var b = try vk.Buffer.init(r.dev, .device, all.len);
         errdefer b.deinit();
-        try vk.orExit(vk.upload(r.cmds, b, guard, r.staging, data, r.timeout));
+        try vk.orExit(vk.upload(r.cmds, b, 0, r.staging, all, r.timeout));
         r.shell = b;
         r.data_bytes = data.len;
         return b;
@@ -439,4 +451,19 @@ test "the refused marker is the word the draw's own decode refuses to pass" {
     try testing.expectEqual(std.math.maxInt(u32), refused);
     try testing.expectError(error.VulkanFailed, vk.greedy.decode(4, .{ .finite_flag = 0, .first_bad = refused, .index = refused }));
     try testing.expectError(error.NonFinite, vk.greedy.decode(4, .{ .finite_flag = 1, .first_bad = 1, .index = 0 }));
+}
+
+test "the input shell uploads the pattern intact() checks; fresh device memory reads zeros" {
+    var rig = Rig{ .a = testing.allocator, .dev = undefined, .cmds = undefined, .staging = undefined, .timeout = 0 };
+    defer rig.deinit();
+    const data = [_]u8{ 1, 2, 3, 4 };
+    const all = try rig.shellFor(&data);
+    defer testing.allocator.free(all);
+    try testing.expectEqual(data.len + 2 * guard, all.len);
+    for (all[0..guard]) |v| try testing.expectEqual(pattern, v);
+    for (all[guard + data.len ..]) |v| try testing.expectEqual(pattern, v);
+    try testing.expectEqualSlices(u8, &data, all[guard..][0..data.len]);
+    // intact() skips exactly the data window between the two patterned spans, so an
+    // uploaded shell without the pattern could only ever fail the repeat gate.
+    try testing.expect(all[0] == pattern and all[guard - 1] == pattern);
 }
