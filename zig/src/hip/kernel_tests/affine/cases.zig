@@ -23,6 +23,8 @@ pub const Case = struct {
     shared: bool = false,
     /// The plan serving passes (`hip/moe.zig`): items cut at its tile, padded with empty items to its capacity.
     served: bool = false,
+    /// The served plan is sized by its rows, not a power-of-two bucket (Flash Next).
+    exact: bool = false,
 
     pub fn routed(c: Case) bool {
         return c.experts > 0;
