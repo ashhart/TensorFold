@@ -130,7 +130,19 @@ pub fn coarse(c: Class, list: *std.ArrayList(usize), gpa: std.mem.Allocator) !vo
             if (sides(c, b, &two)) for (two) |v| try put(list, v, gpa);
         }
     };
+    // a routed class: both sides of every pairs-per-item bound the search may try, in each bucket
+    if (c.routed) for (1..9) |b| for (1..sampledMax(c)) |t| {
+        if (admits(c, b, t) and !admits(c, b, t + 1)) {
+            try put(list, t, gpa);
+            try put(list, t + 1, gpa);
+        }
+    };
     std.mem.sort(usize, list.items, {}, std.sort.asc(usize));
+}
+
+/// Whether a pairs-per-item bound `b` takes `tokens` tokens of a routed class.
+fn admits(c: Class, b: usize, tokens: usize) bool {
+    return tokens * c.slots <= b * selectorCount(c, tokens);
 }
 
 /// A table row of the prompt path of the plain (dense) or routed op.

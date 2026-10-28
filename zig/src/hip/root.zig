@@ -69,4 +69,5 @@ test {
     _ = @import("startup.zig");
     _ = @import("vote.zig");
     _ = @import("comm/loopback.zig");
+    _ = @import("tuning/search.zig");
 }
