@@ -19,6 +19,10 @@ pub const Case = struct {
     item_rows: usize = 8,
     /// Every expert takes the same number of pairs.
     even: bool = false,
+    /// Each token's last slot is the shared expert (index `experts`), the others distinct routed experts.
+    shared: bool = false,
+    /// The plan serving passes (`hip/moe.zig`): items cut at its tile, padded with empty items to its capacity.
+    served: bool = false,
 
     pub fn routed(c: Case) bool {
         return c.experts > 0;
