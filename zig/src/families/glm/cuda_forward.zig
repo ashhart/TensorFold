@@ -25,6 +25,7 @@ const images_mod = @import("cuda_images.zig");
 const exl3 = @import("cuda_exl3.zig");
 const shared = @import("cuda_shared.zig");
 const index_mod = @import("cuda_index.zig");
+const l2pf_mod = @import("cuda_l2pf.zig");
 
 pub const prefill_rows = state.prefill_rows;
 pub const solo_rows = state.solo_rows;
@@ -194,6 +195,12 @@ pub const Forward = struct {
     prof: ?*prof_mod.Prof = null, // TF_GLM_PROF=1: events between the sections
     taps: ?taps_mod.Taps = null, // DFlash2 (--drafter): the tapped layers' rows, after each such layer
     index_split: bool = false, // TF_GLM_INDEX_SPLIT: this prompt chunk's indexer rows split across the ranks (rank 0's choice)
+    l2pf: ?*const l2pf_mod.L2pf = null, // TF_GLM_L2PF: a decode window's sites read their next weights into L2
+
+    /// TF_GLM_L2PF on this forward: a decode window of this process's one rank (a prompt chunk reads at full rate).
+    pub fn prefetch(f: *const Forward) ?*const l2pf_mod.L2pf {
+        return if (f.ranks.len == 1 and !f.ranks[0].b.prefill) f.l2pf else null;
+    }
 
     pub fn set(f: *const Forward) glue.Set {
         return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows };
@@ -259,7 +266,7 @@ pub const Forward = struct {
                     s.saves.b = st.save_b + li * window_rows * st.heads * 4;
                 }
                 const conv = st.conv + li * 3 * st.conv_c * 2;
-                try kda_block.bodyProfile(f.set(), &f.m.kda, f.stream, k, s, b.normed, c.hidden, rows, conv, st.recAt(cur, li), !b.prefill and f.kda_wide, b.prefill, f.prof);
+                try kda_block.bodyProfile(f.set(), &f.m.kda, f.stream, k, s, b.normed, c.hidden, rows, conv, st.recAt(cur, li), !b.prefill and f.kda_wide, b.prefill, f.prof, if (f.prefetch()) |p| .{ .l2 = p, .layer = l.index } else null);
                 if (out) |o| try kda_block.fill(f.set(), f.stream, k, s, 0, rows, o);
                 if (b.prefill) st.cur[li] = 1 - cur; // a prompt chunk keeps every row: the layer commits now
             },
@@ -431,6 +438,7 @@ pub const Forward = struct {
     /// The unpieced loop over the layers (and the stream mean): each site's partials whole, then the glue.
     fn whole(f: *const Forward, R: usize) !void {
         const c = &f.ranks[0].w.config;
+        const pf = f.prefetch();
         var li: usize = 0;
         var di: usize = 0;
         for (f.ranks[0].w.layers, 0..) |_, j| {
@@ -441,6 +449,7 @@ pub const Forward = struct {
                 if (r.segs.len > 0) try shared.mixer(f, r, l, li, di, R, slot(r, R)) else try f.mixer(r, l, li, di, R, @min(latent.chunksFor(r.st.pos + R), r.b.nch), slot(r, R));
             }
             if (f.prof) |p| p.mark(f.stream, if (f.ranks[0].w.layers[j].mixer == .kda) .kda else .mla);
+            if (pf) |p| try p.fork(f.stream, j, .f);
             try f.gather(R);
             if (f.prof) |p| p.mark(f.stream, .gather_a);
             prof_mod.context(f.prof, j, null, .ffn);
@@ -451,6 +460,7 @@ pub const Forward = struct {
                 try f.ffn(r, l, R, slot(r, R));
             }
             if (f.prof) |p| p.mark(f.stream, if (f.ranks[0].w.layers[j].ffn == .dense) .dense else .shared); // MoE: its fill
+            if (pf) |p| try p.fork(f.stream, j, .n);
             try f.gather(R);
             for (f.ranks) |r| try f.post(r, R);
             if (f.taps) |t| try t.at(f.stream, j, f.ranks[0].b.x, R);
@@ -461,6 +471,7 @@ pub const Forward = struct {
             }
         }
         for (f.ranks) |r| try glue.streamMean(f.set(), f.stream, r.b.x, r.b.hidden, R, c.hidden, c.hc);
+        if (pf) |p| try p.join(f.stream);
     }
 
     /// The final norm and this rank's rows of the head (a prompt buffer's last row only).

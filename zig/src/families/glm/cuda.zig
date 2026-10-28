@@ -51,6 +51,7 @@ test {
     _ = @import("cuda_roce_multi.zig");
     _ = @import("cuda_lanes_test.zig");
     _ = prompt_solo;
+    _ = @import("cuda_l2pf.zig");
     _ = experts;
     _ = exl3;
     _ = vision;
