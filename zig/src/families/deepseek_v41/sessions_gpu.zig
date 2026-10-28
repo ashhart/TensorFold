@@ -417,10 +417,7 @@ pub const Sessions = struct {
     /// Admits the request, then restores the longest entry strictly prefixing `prompt`; its position (0: none).
     pub fn resume_(s: *Sessions, prompt: []const u32, max_new: ?u64) !u64 {
         if (s.f.slot.pos != 0 or s.kx.slot.len != 0) return error.SlotNotEmpty;
-        const hit = try s.find(prompt);
-        if (max_new) |mn| try s.admit(hit, prompt.len, mn);
-        s.ds_valid[s.cur()] = 0;
-        return (try s.resumeHit(prompt, hit)).at;
+        return (try @import("request_admission.zig").resumeRequest(s, prompt, max_new orelse 0)).at;
     }
 
     /// The longest saved entry that strictly prefixes `prompt` (a row must remain to prefill), null: none.
@@ -458,22 +455,6 @@ pub const Sessions = struct {
         if (!try s.restore(h.id, ids)) return .{ .damaged = true };
         std.log.scoped(.dsv41).info("sessions: slot {d} resumed {d} of {d} prompt tokens from {s}", .{ s.cur(), h.pos, n, if (h.ram) "RAM" else "NVMe" });
         return .{ .at = h.pos };
-    }
-
-    /// The request's admission: every rank evicts the leader's picks and reserves pages, else goes on unreserved.
-    fn admit(s: *Sessions, hit: ?sessions.store.Hit, n: usize, max_new: u64) !void {
-        var spills: std.ArrayList(u32) = .empty;
-        defer spills.deinit(s.gpa);
-        const held: []const u32 = if (hit) |h| &.{h.id} else &.{};
-        const plan = try kv.sess.admit(&s.store, hit, n, max_new, s.kx.slot.capacity, held, 0, &spills);
-        s.stats.admits += 1;
-        if (plan.wait) {
-            s.stats.waits += 1;
-            if (!quiet) std.log.scoped(.dsv41).warn("sessions: a {d}-token request (+{d}) needs {d} pool pages, {d} are free and unreserved even with every RAM entry gone; the reference server would queue it, it runs unreserved", .{ n, max_new, plan.want, s.kx.pool.available() });
-            return;
-        }
-        try s.f.sendSessAdmit(plan.need, spills.items);
-        try s.applyAdmit(plan.need, spills.items);
     }
 
     fn applyAdmit(s: *Sessions, need: u32, spills: []const u32) !void {
