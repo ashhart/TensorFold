@@ -198,6 +198,8 @@ pub const Core = struct {
         const last = (rows - 1) * pinned.hidden;
         const x_last = try x.slice(last, pinned.hidden);
         try vk.orExit(c.acc.norm.rmsNorm(c.cmds, x_last, try sum.slice(last, pinned.hidden), final_norm, 1, pinned.hidden, pinned.eps, c.timeout_ns));
+        const mark = c.scratch.mark();
+        defer c.scratch.reset(mark) catch {};
         try c.project(logits, x_last, head);
     }
 };
