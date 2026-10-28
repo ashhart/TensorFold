@@ -59,6 +59,7 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
         return .{ .decl = d, .function = fun, .here = text, .pre_m5 = text };
     }
     if (std.mem.startsWith(u8, d.name, "metal lfm2 ")) return .{ .decl = d, .function = fun, .here = sources.lfm2, .pre_m5 = sources.lfm2 };
+    if (std.mem.startsWith(u8, d.name, "nemotron paged ")) return pagedLaunch(a, device, d, fun);
     if (std.mem.startsWith(u8, d.name, "drama3 ")) {
         const text_d3 = try @import("metal_drama3.zig").source(a, d.name);
         return .{ .decl = d, .function = fun, .here = text_d3, .pre_m5 = text_d3 };
@@ -119,6 +120,25 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
         break :blk try std.mem.concat(a, u8, &.{ head, body });
     } else pre;
     return .{ .decl = d, .function = fun, .here = here, .pre_m5 = pre };
+}
+
+/// A Nemotron paged twin's library as its loader would build it here, and before the M5.
+fn pagedLaunch(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, fun: []const u8) !Launch {
+    const paged = sources.nemotron_paged;
+    const tensor = device.tensorUnits();
+    if (std.mem.indexOf(u8, d.name, " partial ") != null) {
+        const pre = try tf.nemotron.simd_attention.rewrite(a, paged.partial);
+        return .{ .decl = d, .function = fun, .here = if (tensor) paged.partial else pre, .pre_m5 = pre };
+    }
+    if (std.mem.indexOf(u8, d.name, " tail ") != null) {
+        const pre = try std.mem.concat(a, u8, &.{ "#define TF_SIMD_LAYOUT 1\n", paged.tree });
+        return .{ .decl = d, .function = fun, .here = if (tensor) paged.tree else pre, .pre_m5 = pre };
+    }
+    if (std.mem.indexOf(u8, d.name, " prompt ") != null) {
+        const pre = try preM5(a, "", paged.prefill);
+        return .{ .decl = d, .function = fun, .here = if (tensor) try std.mem.replaceOwned(u8, a, paged.prefill, "#include \"../nax.h\"", sources.nax) else pre, .pre_m5 = pre };
+    }
+    return .{ .decl = d, .function = fun, .here = paged.glue, .pre_m5 = paged.glue };
 }
 
 /// One launch on this GPU: the pipeline's own thread limit and threadgroup bytes against its declaration.
