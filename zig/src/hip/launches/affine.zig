@@ -465,9 +465,11 @@ pub const Kernels = struct {
     // ---- the entry points ----
 
     /// Prefill's tile, same bits however a prompt is cut: matrix on gfx11 unless off, else dot2 GEMM; few rows K-split.
-    pub fn prefillLaunch(k: *const Kernels, r: *const runtime.Runtime, a: Arg, s: abi.Stream, items: c_int) Error!void {
+    pub fn prefillLaunch(k: *const Kernels, r: *const runtime.Runtime, a: Arg, s: abi.Stream, items: c_int, pairs: c_int) Error!void {
         const op: registry.Op = if (a.route.items != 0) .routed else .project;
-        const e = k.choose(op, .prefill, shapeOf(a, items)) orelse return refuse("prefill shape");
+        var shape = shapeOf(a, items);
+        shape.plan_pairs = @intCast(@max(pairs, 0));
+        const e = k.choose(op, .prefill, shape) orelse return refuse("prefill shape");
         try e.launch(k, .{ .r = r, .s = s, .arg = a, .items = items });
     }
 

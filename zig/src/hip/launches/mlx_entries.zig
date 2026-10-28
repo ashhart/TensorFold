@@ -404,3 +404,26 @@ test "a prompt takes the K-parallel tiles by rows and by items, then the 128-row
     shape.m = 10;
     try std.testing.expect(std.mem.endsWith(u8, v.select(envOn("gfx1030", true, true, false), .mlx, .routed, .prefill, shape).?.id, "kp1"));
 }
+
+test "a routed prompt past its pairs per item leaves the K-parallel tiles for the 128-row tile" {
+    const tuning = @import("../tuning/tuning.zig");
+    const bounded = comptime blk: {
+        var rows: [tuning.gfx1201.rows.len]tuning.Row = undefined;
+        for (tuning.gfx1201.rows, 0..) |r, i| {
+            rows[i] = r;
+            if (std.mem.eql(u8, r.id, "mlx.routed.prefill.kp3") or std.mem.eql(u8, r.id, "mlx.routed.prefill.kp1")) rows[i].pairs_per_item = 3;
+        }
+        break :blk rows;
+    };
+    const table: tuning.Table = .{ .gfx = "gfx1201", .rows = &bounded };
+    const r = affine.Registry.init(&table, &all);
+    const shipped = kernelsOn("gfx1201");
+    const env = envOn("gfx1201", true, true, false);
+    var shape: Shape = .{ .m = 8, .n = 1024, .k = 2048, .bits = 4, .group = 64, .fp16 = false, .items = 300 };
+    for ([_]struct { u32, []const u8 }{ .{ 0, "kp3" }, .{ 900, "kp3" }, .{ 901, "gemm" } }) |w| {
+        shape.plan_pairs = w[0];
+        try std.testing.expect(std.mem.endsWith(u8, r.select(env, .mlx, .routed, .prefill, shape).?.id, w[1]));
+        // the shipped table bounds no pairs
+        try std.testing.expect(std.mem.endsWith(u8, shipped.select(env, .mlx, .routed, .prefill, shape).?.id, "kp3"));
+    }
+}
