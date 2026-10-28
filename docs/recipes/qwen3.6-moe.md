@@ -101,8 +101,9 @@ tensorfold serve TensorFold/Qwen3.6-35B-A3B-MLX-4bit-MTP --parallel 8 --name ben
 
 `--parallel N` decodes up to N requests in shared rounds, and every reply equals the same request served alone
 and its `"draft": false` run. A round verifies every stream's MTP chain or copied continuation in one forward;
-the head absorbs every stream's kept rows in one call, then the chains advance a step at a time for all streams
-by the one-stream rule, so a stream drafts what it drafts alone. A new prompt prefills 1,024 tokens a round
+the head absorbs every stream's kept rows in passes of up to 16 rows, then each draft level runs every stream
+still drafting in passes of up to 16 rows, with one vocabulary-head read and one synchronization a pass, so a
+stream drafts exactly what it drafts alone (`TF_MTP_BATCH=0` drafts one stream at a time, for comparison). A new prompt prefills 1,024 tokens a round
 while the others decode, states are kept at message starts and prompt ends, and each stream's caches are sized
 once, at admission. Startup admits N full prompt/reply windows, three kept prompt ends and the graph buffers
 before loading; an explicit `--context` that does not fit is refused with the window that does. Rounds over
@@ -123,6 +124,12 @@ checkpoint revision 81169a9), with 8 client threads over HTTP:
 Every reply's token SHA-256 is the same at each N and with `"draft": false`. The label replies repeat their JSON,
 so copied continuations keep 9.3 tokens a round per stream; chats keep 2.9. One client at a time gets 912 tok/s
 on the label requests at `--parallel 8`, as a lone stream replays the graphs.
+
+On one DGX Spark (GB10, sm_121, CUDA 13.0), checkpoint revision f84b054, the fleet benchmark's 4.2K-token prompt
+(`bench.py` of spark-sglang-docker, 512 tokens, thinking on) gives 115.7 tok/s single-stream decode and 136.8 /
+181.7 / 220.1 tok/s aggregate at 2 / 4 / 8 users, against 112.6 and 115.5 / 137.9 / 159.0 with `TF_MTP_BATCH=0` on
+the same binary. The drafter's attention over its ring loads eight slots ahead of the fold, in the same order: a
+4,200-slot ring takes 0.24 ms where it took 1.6 ms.
 
 ## Measurements
 
