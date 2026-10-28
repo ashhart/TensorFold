@@ -6,13 +6,14 @@ const errors = @import("errors.zig");
 const prompt = @import("prompt.zig");
 const tool_specs = @import("tool_specs.zig");
 const lfm2 = @import("tool_grammar_lfm2.zig");
+const deepseek = @import("tool_grammar_deepseek.zig");
 const Server = @import("server.zig").Server;
 const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
 
 /// The template's call envelope, with XML parameters or JSON arguments.
-pub const Style = enum { xml, json, gemma, glm };
+pub const Style = enum { xml, json, gemma, glm, deepseek };
 
 const probe = "tfprobe_fn";
 const key = "tfprobe_k";
@@ -25,6 +26,7 @@ const value_blanks = 32;
 
 /// The style of `rendered`, a turn that calls `probe` with {key: "v"}; null: markup this grammar does not write.
 pub fn style(rendered: []const u8) ?Style {
+    if (deepseek.isStyle(rendered, probe, key)) return .deepseek;
     if (std.mem.indexOf(u8, rendered, "<|tool_call>call:" ++ probe ++ "{") != null) return .gemma;
     const at = std.mem.lastIndexOf(u8, rendered, "<tool_call>") orelse return null;
     const text = rendered[at..];
@@ -55,9 +57,12 @@ pub fn build(a: Allocator, s: Style, tools: []const Value, parallel: bool) Alloc
     const one: Value = if (calls.len == 1) calls[0] else try node(a, "or", &.{.{ "elements", .{ .array = calls } }});
     const ws = try node(a, "regex", &.{.{ "pattern", .{ .string = blanks } }});
     var parts: std.ArrayList(Value) = .empty;
-    try parts.appendSlice(a, &.{ ws, one });
+    try parts.append(a, ws);
+    if (s == .deepseek) try parts.appendSlice(a, &.{ try constant(a, "<｜DSML｜function_calls>"), ws });
+    try parts.append(a, one);
     if (parallel) try parts.append(a, try node(a, "star", &.{.{ "content", try node(a, "sequence", &.{.{ "elements", try list(a, &.{ ws, one }) }}) }}));
     try parts.append(a, ws);
+    if (s == .deepseek) try parts.appendSlice(a, &.{ try constant(a, "</｜DSML｜function_calls>"), ws });
     const format = try node(a, "sequence", &.{.{ "elements", .{ .array = parts.items } }});
     return json.stringify(a, try node(a, "structural_tag", &.{.{ "format", format }}), .{ .ascii = false, .compact = true });
 }
@@ -66,6 +71,13 @@ pub fn build(a: Allocator, s: Style, tools: []const Value, parallel: bool) Alloc
 fn call(a: Allocator, s: Style, name: []const u8, schema: Value) Allocator.Error!Value {
     const ws = try node(a, "regex", &.{.{ "pattern", .{ .string = blanks } }});
     const elements = switch (s) {
+        .deepseek => try list(a, &.{
+            try constant(a, try std.fmt.allocPrint(a, "<｜DSML｜invoke name=\"{s}\">", .{name})),
+            ws,
+            try arguments(a, schema, "deepseek_v4_1_xml"),
+            ws,
+            try constant(a, "</｜DSML｜invoke>"),
+        }),
         .xml => try list(a, &.{
             try constant(a, "<tool_call>"),                                        ws,
             try constant(a, try std.fmt.allocPrint(a, "<function={s}>", .{name})), try arguments(a, schema, "qwen_xml"),
@@ -164,4 +176,8 @@ test "GLM required tools keep their name, schema and parallel policy" {
     const many = try build(a, picked, tools.array, true);
     try std.testing.expect(std.mem.indexOf(u8, many, "<tool_call>clock") != null);
     try std.testing.expect(std.mem.indexOf(u8, many, "\"type\":\"star\"") != null);
+}
+
+test {
+    _ = @import("tool_grammar_deepseek_test.zig");
 }
