@@ -276,6 +276,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
     const rope = try object(t.get("rope_parameters") orelse return error.UnsupportedQwenRotary);
     try is(rope, if (rope.get("rope_type") != null) "rope_type" else "type", []const u8, "default"); // "type": the older key
     if (try number(rope, "rope_theta") != 10000000 or try number(rope, "partial_rotary_factor") != 0.25) return error.UnsupportedQwenRotary;
+    if (t.get("rope_scaling")) |v| if (v != .null) return error.UnsupportedQwenRotary; // a scaled rope read as plain rope
     // An MLX table keeps precedence; otherwise the format selects its own loader and BF16 embedding owner.
     const qv = root.get("quantization");
     const exl3 = qv == null and isExl3(root);
@@ -395,6 +396,15 @@ test "the 35B-A3B's routed experts: 256 of width 512, 8 a row, the shared one th
     try std.testing.expectEqual(@as(usize, 9), g.slots());
     try std.testing.expectEqual(@as(usize, 512), g.intermediate);
     try std.testing.expectEqual(@as(usize, 8192), g.convWidth());
+    // a scaled rope, by type or as a rope_scaling block, is refused rather than read as plain rope
+    for ([_][2][]const u8{ .{ "\"rope_type\":\"default\"", "\"rope_type\":\"yarn\"" }, .{ "\"max_position_embeddings\"", "\"rope_scaling\":{\"type\":\"yarn\",\"factor\":4.0},\"max_position_embeddings\"" } }) |r| {
+        const scaled = try std.mem.replaceOwned(u8, std.testing.allocator, text, r[0], r[1]);
+        defer std.testing.allocator.free(scaled);
+        if (parse(std.testing.allocator, scaled)) |_| return error.TestUnexpectedResult else |_| {}
+    }
+    const block = try std.mem.replaceOwned(u8, std.testing.allocator, text, "\"max_position_embeddings\"", "\"rope_scaling\":{\"type\":\"yarn\"},\"max_position_embeddings\"");
+    defer std.testing.allocator.free(block);
+    try std.testing.expectError(error.UnsupportedQwenRotary, parse(std.testing.allocator, block));
     const odd = try std.mem.replaceOwned(u8, std.testing.allocator, text, "\"shared_expert_intermediate_size\":512", "\"shared_expert_intermediate_size\":1024");
     defer std.testing.allocator.free(odd);
     try std.testing.expectError(error.UnsupportedQwenGeometry, parse(std.testing.allocator, odd));

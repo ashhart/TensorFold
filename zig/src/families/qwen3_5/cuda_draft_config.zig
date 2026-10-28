@@ -69,7 +69,7 @@ pub const Config = struct {
             .rank = try int(d.object, "selector_rank"),
             .topk = try int(d.object, "selector_top_k"),
             .eps = @floatCast(try num(o, "rms_norm_eps")),
-            .theta = @floatCast(try num((o.get("rope_parameters") orelse return error.BadDraftConfig).object, "rope_theta")),
+            .theta = @floatCast(try num(try plainRope(o), "rope_theta")),
             .taps = @splat(0),
             .n_taps = 0,
         };
@@ -90,6 +90,17 @@ pub const Config = struct {
         return c;
     }
 };
+
+/// The draft's rope_parameters, refused unless unscaled: its kernels rope with theta alone.
+fn plainRope(o: std.json.ObjectMap) !std.json.ObjectMap {
+    const rope = o.get("rope_parameters") orelse return error.BadDraftConfig;
+    if (rope != .object) return error.BadDraftConfig;
+    for ([_][]const u8{ "rope_type", "type" }) |key| if (rope.object.get(key)) |v| {
+        if (v != .string or !std.mem.eql(u8, v.string, "default")) return error.UnsupportedDraftConfig;
+    };
+    if (o.get("rope_scaling")) |v| if (v != .null) return error.UnsupportedDraftConfig;
+    return rope.object;
+}
 
 /// Whether `dir`'s config.json declares a DFlash2 draft (a top-level dflash_config); no readable object: not one.
 pub fn declared(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) bool {

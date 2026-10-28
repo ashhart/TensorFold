@@ -281,6 +281,11 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8) 
         break :blk try integer(v, false);
     } else hidden / heads;
     const rope = if (t.get("rope_parameters")) |v| (if (v == .null) null else try object(v)) else null;
+    // the kernels rope with theta alone: a scaled rope would run as plain rope, so it is refused by name
+    if (t.get("rope_scaling") orelse root.get("rope_scaling")) |v| if (v != .null) return error.UnsupportedRopeScaling;
+    if (rope) |r| for ([_][]const u8{ "rope_type", "type" }) |key| if (r.get(key)) |v| {
+        if (v != .string or !std.mem.eql(u8, v.string, "default")) return error.UnsupportedRopeScaling;
+    };
     const factor = if (rope) |r| try optional(r, "partial_rotary_factor", try optional(t, "partial_rotary_factor", 0.25)) else try optional(t, "partial_rotary_factor", 0.25);
     if (factor <= 0 or factor > 1) return error.BadConfig;
     var c = Config{
