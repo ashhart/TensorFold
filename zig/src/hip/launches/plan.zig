@@ -63,6 +63,35 @@ pub fn planKvWriteAct(
     try l.flat(l.plan.kv_write_act, @intCast(p.rows * kv_heads * d), s, &a);
 }
 
+/// Each row's `hidden` 16-bit residual words, as tap `tap` of `taps`, into its slot's tap ring (`tap_rows` rows).
+pub fn planTap(l: *const Launcher, x: u64, p: PlanRef, hidden: usize, tap: usize, taps: usize, tap_rows: usize, s: S) Error!void {
+    if (hidden % 2 != 0 or tap >= taps) return invalid("planned tap");
+    var a: Args = .{};
+    try a.add(x);
+    try a.add(@as(c_int, @intCast(p.rows)));
+    try a.add(@as(c_int, @intCast(hidden)));
+    try a.add(@as(c_int, @intCast(tap)));
+    try a.add(@as(c_int, @intCast(taps)));
+    try a.add(@as(c_int, @intCast(tap_rows)));
+    try a.add(p.args);
+    try l.flat(l.plan.tap, @intCast(p.rows * hidden / 2), s, &a);
+}
+
+/// `planTap` for `rows` prompt rows of one stream at positions `pos0` on, into `ring`.
+pub fn tapRows(l: *const Launcher, x: u64, ring: u64, rows: usize, hidden: usize, tap: usize, taps: usize, tap_rows: usize, pos0: usize, s: S) Error!void {
+    if (hidden % 2 != 0 or tap >= taps) return invalid("prompt tap");
+    var a: Args = .{};
+    try a.add(x);
+    try a.add(ring);
+    try a.add(@as(c_int, @intCast(rows)));
+    try a.add(@as(c_int, @intCast(hidden)));
+    try a.add(@as(c_int, @intCast(tap)));
+    try a.add(@as(c_int, @intCast(taps)));
+    try a.add(@as(c_int, @intCast(tap_rows)));
+    try a.add(@as(c_longlong, @intCast(pos0)));
+    try l.flat(l.plan.tap_rows, @intCast(rows * hidden / 2), s, &a);
+}
+
 /// Keys a warp scores from score_span keys on, and below it (plan.hip's kScoreKeys and kScoreKeysShort).
 const score_keys = 4;
 const score_keys_short = 2;

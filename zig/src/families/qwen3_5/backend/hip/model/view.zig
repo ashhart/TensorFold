@@ -87,6 +87,26 @@ pub const Model = struct {
     head: Projection,
     qk: QkNorm,
     mtp: ?Mtp = null,
+    /// A drafter's tapped layers: after each, every row's residual lands in its stream's tap ring.
+    taps: Taps = .{},
+};
+
+/// The layers a drafter taps and the rows a stream's ring keeps (`Caches.tap`, row = position % rows).
+pub const Taps = struct {
+    layers: [8]u32 = undefined,
+    n: usize = 0,
+    rows: usize = 0,
+
+    /// The tap index of layer `layer`, or null when it is not tapped.
+    pub fn of(t: *const Taps, layer: usize) ?usize {
+        for (t.layers[0..t.n], 0..) |l, i| if (l == layer) return i;
+        return null;
+    }
+
+    /// Bytes of one stream's ring: `rows` rows of every tapped layer's `hidden` 16-bit values.
+    pub fn ringBytes(t: *const Taps, hidden: usize) usize {
+        return t.rows * t.n * hidden * 2;
+    }
 };
 
 /// q and k's normalize_qk weights and eps exactly as Python makes them: double arithmetic, then fp32.

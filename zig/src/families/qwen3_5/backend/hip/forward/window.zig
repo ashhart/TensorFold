@@ -88,6 +88,7 @@ pub fn forward(ops: Ops, m: *const view.Model, r: Round, trace: ?fwd.Trace) fwd.
                 }
             },
         }
+        if (m.taps.of(index)) |ti| try pops.tap(o, x, r.plan, s.hidden, ti, m.taps.n, m.taps.rows);
         if (trace) |t| t.layer(t.ctx, index, x, total) catch return error.HipFailed;
     }
     return out;
