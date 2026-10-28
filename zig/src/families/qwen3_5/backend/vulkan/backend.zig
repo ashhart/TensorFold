@@ -9,23 +9,19 @@ const pinned = @import("../../config.zig");
 const Engine = engine_mod.Engine;
 const be = lanes.backend;
 
-/// The core prefills a whole prompt in one pass of at most this many rows, and refuses longer ones.
+/// The advertised scheduling step: the engine cuts each prompt pass into
+/// chunks of at most this many rows (per dispatch activation chunk cap).
 pub const max_prompt_rows: usize = 32;
 
 /// The SDPA arm's visible-key limit, the state's capacity ceiling (state.zig).
 pub const max_capacity = @import("state.zig").max_capacity;
 
-/// A prompt the core takes: at most `max_prompt_rows` ids, each a real token id.
+/// A prompt the core takes: at most `max_capacity` ids (the state ceiling;
+/// the reply's decodes are admitted against it separately), each a real id.
 pub fn validPrompt(ids: []const u32) bool {
-    if (ids.len == 0 or ids.len > max_prompt_rows) return false;
+    if (ids.len == 0 or ids.len > max_capacity) return false;
     for (ids) |id| if (id >= pinned.vocab) return false;
     return true;
-}
-
-/// A request's writes fit the state: the prompt's rows, then a decode per further reply
-/// token — the last draw reads a row already written.
-pub fn fitsCapacity(prompt_len: usize, max_new: u32, capacity: usize) bool {
-    return prompt_len + @as(usize, max_new -| 1) <= capacity;
 }
 
 /// A stream's request must decode greedily; the host's `greedy_only` gate refuses the rest first.
@@ -74,6 +70,8 @@ pub const Vulkan = struct {
     pub fn backend(self: *Vulkan) be.Backend {
         return .{ .ptr = self, .vtable = &.{
             .prefill = prefillFn,
+            .prefill_step = prefillStepFn,
+            .cancel_prefill = cancelPrefillFn,
             .first = firstFn,
             .queue = queueFn,
             .read = readFn,
@@ -95,12 +93,51 @@ pub const Vulkan = struct {
         if (samplingRefused(stream)) return error.UnsupportedQwenSampling;
         const ids = stream.prompt();
         if (!validPrompt(ids)) return error.InvalidQwenPrompt;
-        // shortcut: prompt capped at 32 tokens, extend only after chunked recurrent-state parity is gated
-        if (!fitsCapacity(ids.len, stream.max_new, self.engine.capacity())) return error.ContextTooLong;
+        // steps floor 1: a prompt-only warm pass (max_new 0) still reads one row past the prompt
+        try engine_mod.planFor(self.engine.capacity(), 0, ids.len, @max(stream.max_new, 1));
         try self.engine.reset(); // a new prompt starts from a really zeroed state (also clears a poisoned one)
-        try self.engine.prefill(ids);
+        try self.engine.prefill(ids); // the same canonical 32-row schedule the stepped path runs
         stream.fill_at.store(@intCast(ids.len), .monotonic);
         self.owner = stream;
+    }
+
+    /// One 32-row chunk of the prompt pass per call; false while chunks
+    /// remain. The first call validates the whole request (ids, capacity
+    /// footprint with the reply's decodes) before any reset or write; later
+    /// calls resume at the engine's committed visible count, so `visible()`
+    /// is the progress and no cursor state exists.
+    fn prefillStepFn(ptr: *anyopaque, stream: *lanes.Stream) !bool {
+        const self = cast(ptr);
+        if (self.owner) |o| {
+            if (o != stream) return error.QwenStreamBusy;
+        } else {
+            if (samplingRefused(stream)) return error.UnsupportedQwenSampling;
+            const ids = stream.prompt();
+            if (!validPrompt(ids)) return error.InvalidQwenPrompt;
+            // steps floor 1: same footprint as the whole-pass admission (a prompt-only request reads one row past)
+            try engine_mod.planFor(self.engine.capacity(), 0, ids.len, @max(stream.max_new, 1));
+            try self.engine.reset(); // full request admitted: now the real zeroing
+            self.owner = stream;
+        }
+        const ids = stream.prompt();
+        const done: usize = @intCast(self.engine.visible());
+        if (done >= ids.len) return true;
+        const end = engine_mod.chunkEnd(done, ids.len);
+        try self.engine.prefillChunk(ids[done..end]);
+        const filled = self.engine.visible();
+        stream.fill_at.store(@intCast(filled), .monotonic);
+        return filled == ids.len;
+    }
+
+    /// A cancelled partial prompt: the engine holds a single sequence with no
+    /// rewind, so keeping a prefix is impossible — a real reset releases the
+    /// partially-prefilled state and the stream's ownership instead. A later
+    /// release of the same stream is then a no-op.
+    fn cancelPrefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {
+        const self = cast(ptr);
+        if (self.owner != stream) return error.UnknownQwenStream;
+        self.owner = null;
+        try self.engine.reset();
     }
 
     fn firstFn(ptr: *anyopaque, stream: *lanes.Stream, position: u64) !u64 {
@@ -180,19 +217,51 @@ test "facts pin the serial one-row greedy engine" {
     try std.testing.expect(!cfg.pipelined);
 }
 
-test "prompt validation bounds" {
+test "prompt validation bounds: whole requests to the ceiling, never past, real ids only" {
     try std.testing.expect(!validPrompt(&.{}));
     try std.testing.expect(validPrompt(&.{1}));
-    try std.testing.expect(!validPrompt(&.{pinned.vocab}));
-    const too_long: [max_prompt_rows + 1]u32 = @splat(1);
-    try std.testing.expect(!validPrompt(&too_long));
-    const full: [max_prompt_rows]u32 = @splat(7);
-    try std.testing.expect(validPrompt(&full));
+    try std.testing.expect(!validPrompt(&.{pinned.vocab})); // OOV
+    var oov_last: [65]u32 = @splat(7);
+    oov_last[oov_last.len - 1] = pinned.vocab; // valid length, OOV beyond the first chunk
+    try std.testing.expect(!validPrompt(&oov_last));
+    const over: [max_capacity + 1]u32 = @splat(7); // 7169 ids: one past the ceiling
+    try std.testing.expect(!validPrompt(&over));
+    const at_cap: [max_capacity]u32 = @splat(7); // 7168 ids: exactly the ceiling
+    try std.testing.expect(validPrompt(&at_cap));
+    const buf: [7168]u32 = @splat(7);
+    for ([_]usize{ 1, 31, 32, 33, 63, 64, 65, 7105 }) |len| {
+        try std.testing.expect(validPrompt(buf[0..len]));
+    }
 }
 
-test "a request's writes fit the state capacity" {
-    try std.testing.expect(fitsCapacity(32, 0, 32)); // a prompt-only request writes its rows
-    try std.testing.expect(fitsCapacity(4, 8, 11)); // four prompt rows and seven decodes
-    try std.testing.expect(!fitsCapacity(4, 9, 11));
-    try std.testing.expect(!fitsCapacity(max_prompt_rows, 2, max_prompt_rows));
+test "the whole-request plan gates exact fit and one past, with checked arithmetic" {
+    const cap: usize = max_capacity;
+    for ([_]usize{ 1, 31, 32, 33, 63, 64, 65, 7105, 7168 }) |len| {
+        try engine_mod.planFor(cap, 0, len, 1); // prompt-only: last draw reads a written row
+    }
+    try engine_mod.planFor(cap, 0, 7167, 2); // 7167 rows + 1 decode = exact fit
+    try std.testing.expectError(error.ContextTooLong, engine_mod.planFor(cap, 0, 7168, 2)); // one past
+    try std.testing.expectError(error.ContextTooLong, engine_mod.planFor(cap, 0, 7169, 1));
+    try std.testing.expectError(error.UnsupportedPrompt, engine_mod.planFor(cap, 0, 0, 1)); // empty
+    try std.testing.expectError(error.UnsupportedPrompt, engine_mod.planFor(cap, 0, 1, 0));
+    try std.testing.expectError(error.ContextTooLong, engine_mod.planFor(cap, std.math.maxInt(u64) - 2, 2, 2)); // checked add refuses, never wraps
+}
+
+test "stepped and cancel callbacks exist and their ownership guards fire before any engine access" {
+    var v: Vulkan = .{ .gpa = undefined, .engine = undefined };
+    const table = v.backend().vtable;
+    try std.testing.expect(table.prefill_step != null); // the advertised step is wired
+    try std.testing.expect(table.cancel_prefill != null);
+    try std.testing.expect(table.reports_fill);
+    // busy guard: a foreign stream while another owns the pass refuses before the engine is touched
+    var owned: Vulkan = .{ .gpa = undefined, .engine = undefined };
+    var other = try lanes.Stream.init(std.testing.allocator, .{ .id = "owned", .prompt = &.{1}, .max_new = 4 });
+    defer other.deinit(std.testing.allocator);
+    owned.owner = &other;
+    var s = try lanes.Stream.init(std.testing.allocator, .{ .id = "t", .prompt = &.{ 1, 2 }, .max_new = 4 });
+    defer s.deinit(std.testing.allocator);
+    try std.testing.expectError(error.QwenStreamBusy, table.prefill_step.?(@ptrCast(&owned), &s));
+    // cancel guard: no owner, or a foreign stream, refuses without touching the engine
+    var fresh: Vulkan = .{ .gpa = undefined, .engine = undefined };
+    try std.testing.expectError(error.UnknownQwenStream, table.cancel_prefill.?(@ptrCast(&fresh), &s));
 }
