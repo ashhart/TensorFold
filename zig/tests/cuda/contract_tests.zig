@@ -63,12 +63,9 @@ const contract = core.contract;
 const g = contract.gates;
 const kk = cuda.kernels;
 
-const controls = struct {
-    pub const bytes align(16) = @embedFile("fatbin_contract_controls").*;
-};
-
-const h3_image = struct {
-    pub const bytes align(16) = @embedFile("fatbin_h3").*;
+const images = struct {
+    pub const controls align(16) = @embedFile("fatbin_contract_controls").*;
+    pub const h3 align(16) = @embedFile("fatbin_h3").*;
 };
 
 /// Gates 1-4 on every registered CUDA kernel and each control at its own gate, then gate 5 on this GPU.
@@ -86,7 +83,7 @@ pub fn run(gpu: check.Gpu) !void {
     var mods: [8]cuda.Module = undefined;
     var loaded: usize = 0;
     defer for (mods[0..loaded]) |*m| m.unload();
-    for ([_][]const u8{ kk.nemotron_route, kk.qmm_group, kk.qmm_prefill, kk.lane_gemv, kk.affine4_pack, &controls.bytes, kk.experts, kk.nemotron_mamba }, 0..) |img, i| {
+    for ([_][]const u8{ kk.nemotron_route, kk.qmm_group, kk.qmm_prefill, kk.lane_gemv, kk.affine4_pack, &images.controls, kk.experts, kk.nemotron_mamba }, 0..) |img, i| {
         mods[i] = try cuda.Module.load(gpu.d, img);
         loaded += 1;
     }
@@ -286,7 +283,7 @@ pub fn run(gpu: check.Gpu) !void {
         selection.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = try batch.function("fn_qsa_select"), .padded = padded };
     defer for (&selections) |*selection| selection.deinit();
     for (&selections) |*selection| try kernels.append(a, selection.kernel());
-    var h3_mod = try cuda.Module.load(gpu.d, &h3_image.bytes);
+    var h3_mod = try cuda.Module.load(gpu.d, &images.h3);
     defer h3_mod.unload();
     const h3_which = comptime std.enums.values(h3_k.Which);
     var h3_list: [h3_which.len]h3_k.H3 = undefined;
