@@ -24,7 +24,7 @@ Use `--local-dir MODEL_DIR` instead of a repository name to inspect files alread
 Use the Zig version in `.zig-version`.
 
 ```sh
-zig build --build-file build-lfm3.zig test tf-lfm3-check
+zig build test-lfm3-host tf-lfm3-check
 ./zig-out/bin/tf-lfm3-check text4.json
 ./zig-out/bin/tf-lfm3-check vl4.json
 python3 -m unittest discover -s tools/lfm3 -p 'test_*.py' -v
@@ -63,3 +63,10 @@ Then exercise actual 1.7B 4-bit weights through the shared lane engine, followed
 The VL encoder and projector need their own native Metal operators and reference checks after text bring-up.
 
 Agree model-fidelity and performance acceptance criteria on the tracking issue before claiming release readiness.
+
+## Weight licence and checked hardware
+
+The official text and VL MLX exports retain the [LFM Open License v1.0](https://huggingface.co/LiquidAI/LFM3-1.7B-MLX-4bit/blob/main/LICENSE).
+The VL export carries its own [copy of that licence](https://huggingface.co/LiquidAI/LFM3-VL-2B-MLX-4bit/blob/main/LICENSE).
+TensorFold code remains Apache-2.0; admission does not change the weights’ licence.
+This slice validates metadata on the host and does not register inference or qualify a GPU.
