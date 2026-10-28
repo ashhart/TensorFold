@@ -114,8 +114,9 @@ pub fn compileGlue(r: *Run) !void {
     r.span_pipe = try r.ownResource(try mtl.Pipeline.init(r.device, verdict, "fz_span", false));
     r.positions_pipe = try r.ownResource(try mtl.Pipeline.init(r.device, verdict, "fz_positions", false));
     const draws = try r.ownResource(try mtl.Library.fromSource(r.device, ks.nemotron_sample, mtl.CompileOptions.mlx()));
-    r.draw_pipe = try r.ownResource(try mtl.Pipeline.init(r.device, draws, "tf_sample_full", false));
-    r.draw_ids_pipe = try r.ownResource(try mtl.Pipeline.init(r.device, draws, "tf_sample_full_ids", false));
+    r.draws = try @import("sample.zig").Draws.init(r.device, draws, MAXR);
+    for ([_]mtl.Pipeline{ r.draws.full, r.draws.full_ids, r.draws.slices, r.draws.race, r.draws.race_ids }) |p| _ = try r.ownResource(p);
+    for ([_]mtl.Buffer{ r.draws.ck, r.draws.ci }) |b| _ = try r.ownResource(b);
     r.take_pipe = try r.ownResource(try mtl.Pipeline.init(r.device, glue, "fz_mtp_take", false));
     r.repack_w = try r.ownResource(try mtl.Pipeline.init(r.device, glue, "fz_repack_w", false));
     r.repack_s = try r.ownResource(try mtl.Pipeline.init(r.device, glue, "fz_repack_s", false));

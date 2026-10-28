@@ -121,7 +121,7 @@ pub fn generateFrom(e: *Engine, prompt: []const u32, from: usize, marks: []const
             const cb = r.queue.commandBuffer();
             r.begin(cb, .serial);
             errdefer if (r.fsr != null) r.abort();
-            sample.draw(r.enc, r.draw_pipe, m.t.logits, e.draw_at, m.t.picks, 1, VOCAB, p);
+            sample.draw(r.enc, &r.draws, m.t.logits, e.draw_at, m.t.picks, 1, VOCAB, p);
             try m.finish(cb);
             pick = m.t.picks.b.slice(u32, 1)[0];
         };
@@ -310,7 +310,7 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
         if (out.sampling) |p| { // the window's picks redrawn from its logits, in place of the head's argmax
             sample.positions(r.enc, r.positions_pipe, r.ar, e.draw_at, wr);
             if (!r.serial) r.enc.barrier();
-            sample.draw(r.enc, r.draw_pipe, m.t.logits, e.draw_at, m.t.picks, wr, VOCAB, p);
+            sample.draw(r.enc, &r.draws, m.t.logits, e.draw_at, m.t.picks, wr, VOCAB, p);
             if (!r.serial) r.enc.barrier();
         }
         // the widest windows while copies land whole (a gated reply's too); otherwise the gate's or the head's rule

@@ -253,7 +253,7 @@ fn tail(m: *fz.Model, x: *Scratch, g: []const Row, md1: Buf, p0: usize, j: usize
         };
     }
     if (any) { // a sampled stream's draft under its keyed rule, every stream's row in one dispatch
-        sample.drawIds(r.enc, r.draw_ids_pipe, x.logits, h.ids, h.ids_n, draws[0..n], at[0..n], .{ .b = x.outs, .off = (j * MAXR + p0) * 4 });
+        sample.drawIds(r.enc, &r.draws, x.logits, h.ids, h.ids_n, draws[0..n], at[0..n], .{ .b = x.outs, .off = (j * MAXR + p0) * 4 });
         if (!r.serial) r.enc.barrier();
         return;
     }

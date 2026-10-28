@@ -57,7 +57,8 @@ pub fn check(verify: Verify, keep: Keep) !void {
     r.router_pipe = .{};
     r.xgu_pipe = .{ .name = "fz_xgu" };
     r.xdown_pipe = .{ .name = "fz_xdown" };
-    r.draw_pipe = .{ .name = "draw" };
+    const draw: mtl.Pipeline = .{ .name = "draw" };
+    r.draws = .{ .full = draw, .full_ids = draw, .slices = draw, .race = draw, .race_ids = draw, .ck = try r.device.buffer(64, fz.opts), .ci = try r.device.buffer(64, fz.opts) };
     r.rotary_pipe = .{ .name = "tf_rotary_prepare" };
     r.argpart_pipe = .{ .name = "fz_argmax_part" };
     r.argjoin_pipe = .{ .name = "fz_argmax_join" };

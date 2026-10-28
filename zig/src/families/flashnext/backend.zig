@@ -418,7 +418,7 @@ pub const Backend = struct {
             widths[i] = w.rows();
             ps[i] = w.stream.sampling;
         }
-        sample.encodeAll(b.e.r.enc, b.e.r.draw_pipe, t.logits, b.e.draw_at, t.picks, plan.starts[0..windows.len], widths[0..windows.len], ps[0..windows.len]);
+        sample.encodeAll(b.e.r.enc, &b.e.r.draws, t.logits, b.e.draw_at, t.picks, plan.starts[0..windows.len], widths[0..windows.len], ps[0..windows.len]);
         b.times.commit();
         try b.primary.finish(cb);
         b.times.end(cb, false, plan.total, windows.len);
