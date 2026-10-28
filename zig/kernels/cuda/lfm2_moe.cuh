@@ -6,7 +6,7 @@
 #include <math.h>
 #include <stdint.h>
 
-#include "glue_math.cuh"
+#include "common/glue_math.cuh"
 
 namespace tf_lfm2m {
 
