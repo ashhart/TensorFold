@@ -17,7 +17,10 @@ fn job(h: *Host, request: *const api.Request, cached: u32, progress: u32, began:
 }
 test "prefill remaining: progress reports cached floors and stale cursors preserve stable priority" {
     var target: lanes.fake.Fake = .{ .gpa = a };
+    var cfg = try lanes.Config.init(std.testing.allocator, .{}, 1, 0);
+    defer cfg.deinit(std.testing.allocator);
     var core: lanes.Engine = undefined;
+    core.cfg = &cfg;
     var vt = target.stepped().vtable.*;
     core.backend = .{ .ptr = &target, .vtable = &vt };
     var host = Host.init(a, t.io, &core, .{ .lanes = 2 });
@@ -48,7 +51,10 @@ test "prefill remaining: progress reports cached floors and stale cursors preser
 }
 test "prefill remaining: foreground preference yields to aging and keeps equal-age ties stable" {
     var target: lanes.fake.Fake = .{ .gpa = a };
+    var cfg = try lanes.Config.init(std.testing.allocator, .{}, 1, 0);
+    defer cfg.deinit(std.testing.allocator);
     var core: lanes.Engine = undefined;
+    core.cfg = &cfg;
     core.backend = target.stepped();
     var host = Host.init(a, t.io, &core, .{ .lanes = 3 });
     defer host.filling.deinit(a);

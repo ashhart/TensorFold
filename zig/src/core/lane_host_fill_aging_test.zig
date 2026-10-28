@@ -1,5 +1,6 @@
 //! Sustained shorter arrivals must not starve any admitted prompt, including background work.
 const std = @import("std");
+const lanes = @import("lanes");
 const api = @import("engine_api.zig");
 const Host = @import("lane_host.zig").LaneHost;
 const fill = @import("lane_host_fill.zig");
@@ -16,7 +17,11 @@ fn job(h: *Host, r: *const api.Request) Host.Job {
 test "fill aging: every admitted fill gets chunks within a fixed round bound under steady short arrivals" {
     const tokens: [1024]u32 = @splat(7);
     for ([_]usize{ 2, 3, 8 }) |n| for ([_]usize{ 1, n - 1 }) |slow| for ([_]bool{ false, true }) |background| {
-        var h = Host.init(a, std.testing.io, undefined, .{ .lanes = @intCast(n) });
+        var cfg = try lanes.Config.init(a, .{}, 1, 0);
+        defer cfg.deinit(a);
+        var core: lanes.Engine = undefined;
+        core.cfg = &cfg;
+        var h = Host.init(a, std.testing.io, &core, .{ .lanes = @intCast(n) });
         defer h.filling.deinit(a);
         const long: api.Request = .{ .prompt = &tokens, .max_tokens = 1, .background = background };
         const short: api.Request = .{ .prompt = &.{1}, .max_tokens = 1 };

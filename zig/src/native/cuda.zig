@@ -460,6 +460,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     const admit: ?api.Admit = if (comptime !@hasDecl(F, "fits")) null else if (paged != null) .{ .ctx = loaded.ctx, .fits = F.fits } else null;
     try h.serve(io, served.facts, loaded.rows, .{
         .lanes = streams,
+        .draft_sources = .{ .drafter = served.source },
         .context_window = @intCast(window),
         .startup = h.startup,
         .policy = if (@hasField(@TypeOf(loaded), "policy")) loaded.policy else "",
@@ -484,6 +485,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
 }
 const toGib = family_memory.toGib;
 test {
+    _ = @import("draft_sources_cuda_test.zig");
     _ = windows;
     _ = @import("cuda_startup_test.zig");
     _ = budget; // cuda_memory.zig's own tests, which no other test binary reaches

@@ -113,6 +113,9 @@ test "Qwen4 native host: public requests share the core and kept prompt state th
     var problem: @import("config.zig").Problem = .{};
     const opened = try H.open(a, std.testing.io, .{ .dir = path, .model_type = "qwen4", .context = 48, .lanes = 2, .lanes_fixed = true, .prompt_cache_gib = 0.01 }, &problem);
     defer opened.close(opened.ctx);
+    try t.expect(opened.engine.info().draft_sources.copies);
+    try t.expect(!opened.engine.info().draft_sources.mtp);
+    try t.expect(opened.engine.info().draft_sources.drafter == null);
     var tokens: [24]u32 = undefined;
     for (&tokens, 0..) |*v, i| v.* = @intCast(i % 29);
     const request: Api.Request = .{ .prompt = &tokens, .max_tokens = 6, .history_len = 16, .drafts = true };

@@ -394,3 +394,7 @@ test "matrix=on runs only where the matrix-core tiles exist; auto runs everywher
     const auto: hip.Policy = .{};
     for ([_][]const u8{ "gfx1030", "gfx1100", "gfx1151", "gfx1200", "gfx1201" }) |name| try std.testing.expect(matrixRefused(auto, hip.Caps.of(name).?) == null);
 }
+
+test {
+    _ = @import("draft_sources_hip_test.zig");
+}

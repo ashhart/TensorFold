@@ -25,7 +25,10 @@ test "prefetch: a queued write publishes before the next request reads its exact
     defer t.allocator.free(expected);
     x.s.remove(0);
     try t.expectEqual(@as(usize, 2), x.r.worker.?.pending());
+    var cfg = try lanes.Config.init(std.testing.allocator, .{}, 1, 0);
+    defer cfg.deinit(std.testing.allocator);
     var core: lanes.Engine = undefined;
+    core.cfg = &cfg;
     var host = api.LaneHost.init(t.allocator, t.io, &core, .{ .lanes = 2 });
     host.cache = &x.s;
     defer host.queued.deinit(t.allocator);
@@ -109,7 +112,10 @@ test "prefetch: a failed or late staged write releases its request without readi
         try x.keep(&tokens, 900);
         x.s.remove(0);
         try fixture.Gate.wait(&gate.entered);
+        var cfg = try lanes.Config.init(std.testing.allocator, .{}, 1, 0);
+        defer cfg.deinit(std.testing.allocator);
         var core: lanes.Engine = undefined;
+        core.cfg = &cfg;
         var host = api.LaneHost.init(t.allocator, t.io, &core, .{ .lanes = 2 });
         host.cache = &x.s;
         defer host.queued.deinit(t.allocator);

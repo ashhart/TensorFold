@@ -125,7 +125,7 @@ fn start(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, 
     h.core = lanes.Engine.init(gpa, &h.config, if (h.wrap) |*w| w.backend() else h.metal.backend(), h.clock.clock());
     errdefer h.core.deinit();
     const vis: ?api.Vision = if (o.vision) |v| .{ .ctx = h, .prepare = prepareImage, .image_token = h.markers[1], .markers = &h.markers, .wrap = .{ h.markers[0], h.markers[2] }, .part_type = "image", .image_tokens = v.image_tokens, .max_images = v.max_images, .explain = g.image.decoderProblem } else null;
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = served, .context_window = @intCast(window), .prefill_step = g.state.chunk_rows, .structures = true, .vision = vis });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = served, .context_window = @intCast(window), .prefill_step = g.state.chunk_rows, .draft_sources = .{ .drafter = if (drafter != null) .{ .kind = drafter.?.kind, .name = o.drafter_name orelse draft_dir orelse "" } else null }, .structures = true, .vision = vis });
     h.cache = null;
     try enableCache(h, a, o, served, @intCast(window), problem);
     errdefer if (h.cache) |*store| store.deinit();

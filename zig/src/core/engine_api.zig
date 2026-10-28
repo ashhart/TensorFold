@@ -3,6 +3,7 @@ const std = @import("std");
 const lanes = @import("lanes");
 const Allocator = std.mem.Allocator;
 pub const tfvideo = @import("tfvideo.zig");
+pub const DraftSources = @import("draft_sources.zig").Sources;
 /// The server's name for one request, unique while the process lives.
 pub const Id = u64;
 
@@ -227,6 +228,8 @@ pub const Info = struct {
     warm_turns: bool = false,
     /// The engine decodes plain whatever a request asks: no drafter loaded, or this chip is faster plain.
     plain_only: bool = false,
+    /// Available proposals, independent of a request's choice to use them.
+    draft_sources: DraftSources = .{},
     /// The immutable retained-prefix plan applied at startup, not a process memory limit or current cache occupancy.
     prompt_cache_plan: ?PromptCachePlan = null,
     /// The engine scores decisions (`score`) and writes no text: the server refuses text requests.
@@ -302,6 +305,7 @@ pub const Open = struct {
     drafts: bool = true,
     /// --drafter: a draft model's directory (Qwen3.8-27B's DFlash2; null: none), and --drafter-bits: 4, or 0 for bf16.
     drafter: ?[]const u8 = null,
+    drafter_name: ?[]const u8 = null, // the supplied --drafter name, before resolving its directory
     drafter_bits: u8 = 4,
     /// --record: each stream's committed rows and tapped features written under this folder, for drafter training.
     record: ?[]const u8 = null,

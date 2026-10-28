@@ -90,7 +90,9 @@ pub const LaneHost = struct {
     pub const Job = @import("lane_job.zig").Job;
 
     pub fn init(gpa: Allocator, io: std.Io, core: *lanes.Engine, info_: Info) LaneHost {
-        return .{ .gpa = gpa, .io = io, .core = core, .info_ = info_.ofLanes(), .share = .fromEnv(), .prefix = .fromEnv(), .pressure = .fromEnv() };
+        var shown = info_.ofLanes();
+        shown.draft_sources = shown.draft_sources.ofLanes(core.cfg, shown.lanes);
+        return .{ .gpa = gpa, .io = io, .core = core, .info_ = shown, .share = .fromEnv(), .prefix = .fromEnv(), .pressure = .fromEnv() };
     }
 
     pub fn start(h: *LaneHost) !void {

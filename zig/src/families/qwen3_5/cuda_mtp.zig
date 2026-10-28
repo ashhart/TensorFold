@@ -486,7 +486,7 @@ pub const Mtp = struct {
     // the Drafter contract
 
     pub fn drafter(d: *Mtp) dr.Drafter {
-        return .{ .ptr = d, .vtable = &.{ .taps = tapsFn, .facts = factsFn, .open = openFn, .absorb = absorbFn, .hold = holdFn, .held = heldFn, .release = releaseFn } };
+        return .{ .kind = "MTP", .ptr = d, .vtable = &.{ .taps = tapsFn, .facts = factsFn, .open = openFn, .absorb = absorbFn, .hold = holdFn, .held = heldFn, .release = releaseFn } };
     }
 
     fn cast(p: *anyopaque) *Mtp {

@@ -109,6 +109,7 @@ pub fn main(init: std.process.Init) !u8 {
     var problem: []const u8 = "";
     const dir = try hub.resolve(a, io, init.environ_map, args.model, &problem) orelse return fail(problem);
     // A drafter is named like a model: a directory, or a repo id `tensorfold pull` cached.
+    args.drafter_name = args.drafter;
     if (args.drafter) |d| args.drafter = try hub.resolve(a, io, init.environ_map, d, &problem) orelse return fail(problem);
     const model_type = modelType(a, io, dir, &problem) catch |e| {
         if (e == error.OutOfMemory) return e;

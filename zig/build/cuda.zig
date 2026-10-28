@@ -317,6 +317,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const native_modules = engines(b, host, .debug, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.qwen35, mods.qwen_vision);
     @import("rows_host.zig").tests(b, native_modules.api, step);
     const native = native_modules.engines;
+    b.step("test-draft-cuda-host", "CUDA draft source metadata without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"draft sources:"} })).step);
     @import("cuda_fault_host.zig").steps(b, cuda, flashnextModule(b, host, .debug, cuda, mods.core, mods.lanes, mods.qwen_vision, mods.api), native);
     @import("release_cuda_refusal.zig").tests(b, step, native_modules.api, mods.nemotron);
     @import("qwen_cost_open.zig").tests(b, mods, native_modules, step);

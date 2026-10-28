@@ -124,6 +124,7 @@ pub const Served = struct {
         s.x.attach(&s.core);
         const window: u32 = @intCast(@min(context orelse m.f.opts.limit, m.f.opts.limit));
         s.host = api.LaneHost.init(gpa, io, &s.core, .{ .name = "dsv41-cuda", .lanes = m.slots, .context_window = window, .prefill_step = m.gt.prefill_rows });
+        s.host.info_.draft_sources = draftSources(m.pass != null, s.cfg.max_copy > 0);
         // the lanes run on LaneHost's thread: the model's CUDA context must be current there
         s.host.on_thread = .{ .ctx = m, .run = bindContext };
         // /metrics' device memory: bytes this rank holds in cuda.DeviceBuffers (weights, KV pool, staging), peak
@@ -353,3 +354,16 @@ pub const Recorder = struct {
         std.Io.Dir.cwd().writeFile(r.io, .{ .sub_path = r.path.?, .data = r.log.items }) catch {};
     }
 };
+
+fn draftSources(dspark: bool, copies: bool) api.DraftSources {
+    return .{ .copies = copies, .drafter = if (dspark) .{ .kind = "DSpark" } else null };
+}
+
+test "draft sources: DeepSeek names the loaded DSpark pass and never calls NoDraft an MTP head" {
+    const t = std.testing;
+    const active = draftSources(true, true);
+    try t.expect(active.copies and !active.mtp);
+    try t.expectEqualStrings("DSpark", active.drafter.?.kind);
+    const plain = draftSources(false, true);
+    try t.expect(plain.copies and !plain.mtp and plain.drafter == null);
+}

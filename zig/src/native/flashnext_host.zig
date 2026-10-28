@@ -1,5 +1,6 @@
 //! Flash Next behind the native server: one reply at a time, sampled on the GPU on request (speed-up mode greedy only).
 const std = @import("std");
+pub const draft_sources: api.DraftSources = .{ .mtp = true, .copies = true };
 const platform = @import("sys");
 const mtl = @import("metal");
 const api = @import("engine_api");
@@ -14,7 +15,6 @@ const images = @import("flashnext_images.zig");
 const holdResident = @import("flashnext_residency.zig").hold;
 const dropResident = @import("flashnext_residency.zig").drop;
 const Allocator = std.mem.Allocator;
-
 const Job = struct {
     id: api.Id,
     request: *const api.Request,
@@ -479,7 +479,7 @@ pub fn openWarmed(gpa: Allocator, io: std.Io, eng: *fx.Engine, window: i64, cach
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
     const context_limit: i64 = @as(i64, @intCast(eng.r.window.capacity)) - fx.MARGIN;
-    h.* = .{ .gpa = gpa, .io = io, .eng = eng, .follower = follower, .load_limit = limit orelse 0, .vis = vis, .info_ = .{ .name = "flashnext-zig", .prompt_cache_plan = cache_plan, .lanes = 1, .greedy_only = eng.r.tp != null, .context_window = @intCast(if (window > 0) @min(window, context_limit) else context_limit) } };
+    h.* = .{ .gpa = gpa, .io = io, .eng = eng, .follower = follower, .load_limit = limit orelse 0, .vis = vis, .info_ = .{ .name = "flashnext-zig", .draft_sources = draft_sources, .prompt_cache_plan = cache_plan, .lanes = 1, .greedy_only = eng.r.tp != null, .context_window = @intCast(if (window > 0) @min(window, context_limit) else context_limit) } };
     h.warm = .{ .queue = eng.r.queue };
     if (vis) |v| h.info_.vision = images.offer(v, h, prepareImage, prepareVideo);
     // macOS unwires idle GPU memory within seconds: the engine's buffers join one set the idle keepalive's ticks use

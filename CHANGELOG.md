@@ -34,6 +34,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - With `TENSORFOLD_PREFILL_SHARE` below 1, GLM-5.3-Flash on CUDA ends a long prompt's step on the GPU before it returns when the lane host bills that step to decoding streams (#1352). The step used to return with part of its GPU work still queued, so that tail ran in the decoders' next round and counted against their share. At the default of 1, or with nothing decoding, no step waits and nothing changes; replies are the same tokens. Thanks to @Bizuayeu.
 
+- The serving line names what can propose drafts, for example `drafts: copies only`, `drafts: MTP + copies` or `drafts: DFlash2 (z-lab/Qwen3.8-27B-DFlash2) + copies`, where it used to say `drafts: on` whether or not a drafter was loaded (#1515). `drafts: off` is unchanged, and drafting itself doesn't change. Thanks to @Deesha08.
+
 ## 1.1.8
 
 - Qwen3.5 and 3.6 on HIP (Linux): when a checkpoint shard can't be memory-mapped and is read into memory instead (for example on some network or FUSE mounts), releasing an uploaded layer no longer zeroes that copy. Before, it also zeroed neighbouring tensors not yet uploaded: 269 of 690 layer tensors on Qwen3.5-2B, so the model ran on wrong weights or the loader panicked at close. A malformed shard header is now refused by name. Loads that map their shards are byte-identical to before.

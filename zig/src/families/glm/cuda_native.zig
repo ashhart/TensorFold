@@ -49,6 +49,7 @@ pub const Peer = struct { bytes: u64, rank: usize };
 pub const LoneRun = *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool, resumed: bool) anyerror!bool;
 
 pub const Loaded = struct {
+    draft_kind: ?[]const u8 = null,
     backend: lanes.backend.Backend,
     facts: lanes.Model,
     rows: u32,
@@ -305,6 +306,7 @@ fn finishRank(a: OpenArgs) !Loaded {
     const extra: u64 = (if (o.drafter != null) dflash.ring_bytes else 0) + if (own.e.images) |v| v.streamBytes() else @as(usize, 0);
     own.layout = if (set.pages) try pages_mod.layout(gpa, own.e, extra) else null;
     return .{
+        .draft_kind = if (own.e.drafter != null) "DFlash2" else null,
         .backend = own.lanes.backend(),
         .facts = own.lanes.facts(),
         .rows = glm_lanes.max_rows,
