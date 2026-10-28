@@ -16,8 +16,8 @@ pub fn generate(a: std.mem.Allocator) ![]const u8 {
     var body = update[start .. update.len - 1];
     body = try std.mem.replaceOwned(u8, a, body, "vrow[", "vs[");
     text = try edit.once(a, text, update, "");
-    const reduce = try edit.function(text, "float warp_sum(");
-    text = try edit.once(a, text, reduce, "");
+    text = try edit.once(a, text, "#include \"common/reduce.cuh\"", "");
+    text = try edit.once(a, text, "using tf_common::warp_sum;", "");
     const call = "update(s, kk, vs, warp, g, beta);";
     if (std.mem.count(u8, text, call) != 5) return error.GdnUpdate;
     text = try std.mem.replaceOwned(u8, a, text, call, try std.mem.concat(a, u8, &.{ "{\n", body, "\n}" }));

@@ -2,15 +2,13 @@
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
+#include "common/reduce.cuh"
 
 constexpr int DK = 128, DV = 128, TAPS = 4;
 
 static __device__ __forceinline__ float bf(float x) { return __bfloat162float(__float2bfloat16_rn(x)); }
 
-static __device__ __forceinline__ float warp_sum(float x) {
-    for (int o = 16; o; o >>= 1) x += __shfl_xor_sync(0xffffffffu, x, o);
-    return x;
-}
+using tf_common::warp_sum;
 
 static __device__ __forceinline__ float sigmoidf_(float x) { const float e = expf(-fabsf(x)); return (x < 0 ? e : 1.0f) / (1.0f + e); }
 static __device__ __forceinline__ float siluf_(float x) { const float e = expf(-fabsf(x)); return (x < 0 ? x * e : x) / (1.0f + e); }
