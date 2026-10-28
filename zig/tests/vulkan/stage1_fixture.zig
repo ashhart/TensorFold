@@ -11,6 +11,14 @@ pub const tail = 16;
 pub const poison16: u16 = 0xffff;
 pub const poison32: u32 = 0xffff_ffff;
 
+pub fn castGuards(readback: []const u16, elements: usize, words_per_element: usize) !void {
+    if (words_per_element != 1 and words_per_element != 2) return error.Invalid;
+    const data_words = try std.math.mul(usize, elements, words_per_element);
+    const total_words = try std.math.add(usize, data_words, tail * words_per_element);
+    if (readback.len != total_words) return error.LengthMismatch;
+    for (readback[data_words..]) |word| if (word != 0xa5a5) return error.GuardClobbered;
+}
+
 pub fn depth(s: c.Shape) usize {
     // Roundings an output passes through: s q and + b form its weight, x w its term, then k - 1 fp32 additions.
     return s.k + 2;
@@ -32,7 +40,7 @@ pub const cases = [_]Case{
     .{ .name = "m1 n8 k64", .shape = .{ .rows = 1, .n = 8, .k = 64 } },
     .{ .name = "m2 n257 k128", .shape = .{ .rows = 2, .n = 257, .k = 128 } },
     .{ .name = "m2 n256 k128 offsets", .shape = .{ .rows = 2, .n = 256, .k = 128 }, .at = .{ .x = 128, .w = 64, .scales = 256, .biases = 384, .out = 512 } },
-    .{ .name = "m3 n8 k64 cancel", .shape = .{ .rows = 3, .n = 8, .k = 64 }, .fill = .cancel, .at = .{ .x = 128, .w = 192, .scales = 256, .biases = 320, .out = 384 } },
+    .{ .name = "m3 n8 k64 cancel", .shape = .{ .rows = 3, .n = 8, .k = 64 }, .fill = .cancel, .at = .{ .x = 128, .w = 192, .scales = 256, .biases = 384, .out = 384 } },
 };
 
 const served = blk: {
@@ -288,6 +296,28 @@ const testing = std.testing;
 test "bf16 vectors agree with the contract's RNE cast at every stated geometry" {
     for (bf16_vectors) |v| try testing.expectEqual(v.want, c.toBf16(v.in));
     try testing.expectEqual(@as(u16, 0x3f81), c.toBf16(1.0 + 0x1p-8 + 0x1p-20)); // a hair above half
+}
+
+test "projection fixture bindings meet the largest Vulkan storage alignment" {
+    for (cases) |case| {
+        for ([_]usize{ case.at.x * 2, case.at.w * 4, case.at.scales * 2, case.at.biases * 2, case.at.out * 2 }) |bytes| {
+            try testing.expectEqual(@as(usize, 0), bytes % 256);
+        }
+    }
+}
+
+test "both cast widths check the actual tail after a whole output readback" {
+    const elements = bf16_vectors.len + 128;
+    inline for (.{ 1, 2 }) |words| {
+        var shell: [(elements + tail) * words]u16 = undefined;
+        @memset(shell[0 .. elements * words], 0x3f80);
+        @memset(shell[elements * words ..], 0xa5a5);
+        try castGuards(&shell, elements, words);
+        try testing.expectError(error.LengthMismatch, castGuards(shell[0 .. elements * words], elements, words));
+        try testing.expectError(error.LengthMismatch, castGuards(shell[0 .. tail * words], elements, words));
+        shell[elements * words] ^= 1;
+        try testing.expectError(error.GuardClobbered, castGuards(&shell, elements, words));
+    }
 }
 
 test "embedding tables choose valid, once-repeated ids and finite f64 wants over poison tails" {

@@ -229,6 +229,13 @@ test "gather plans derive the window and refuse torn shapes" {
     try testing.expectError(error.TooLarge, gatherPlan((1 << 32) * 4, (1 << 32) * 4, 1 << 32, 1 << 32));
 }
 
+test "stage1 out-of-range gather uses one output row for one id" {
+    _ = try gatherPlan(40, 60, 4, 6);
+    try testing.expectError(error.Invalid, gatherPlan(40, 60, 1, 6));
+    const one = try gatherPlan(10, 60, 1, 6);
+    try testing.expectEqual(@as(u32, 10), one.count);
+}
+
 test "dequant plans derive rows, words and groups and refuse torn geometry" {
     const plan = try dequantPlan(4 * 4096, 4 * 512, 4 * 64, 4 * 64, 4096, 64);
     try testing.expectEqual(@as(u64, 4), plan.rows);
