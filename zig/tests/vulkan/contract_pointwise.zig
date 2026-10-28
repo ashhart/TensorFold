@@ -2,22 +2,22 @@
 //! host-checkable fixtures, no device code here — contract_pointwise_main.zig drives the
 //! real GPU. Stage 2's residual add, SwiGLU and RMSNorm fixtures live in stage2_fixture.zig
 //! and are reused, not copied; this file adds the three that fixture cannot state:
-//!  - the f32-preserving residual add: binary_vec.comp compiled without -DUSE_BF16 stores
-//!    the exact f32 sum back in f32 — no rounding step at all, the strongest claim in the
-//!    group ("what is preserved" per the wrapper's stated one-RNE-store pipeline);
+//!  - the preserved residual add: add_preserve_bf16 (binary_vec.comp with -DPRESERVE_F32),
+//!    the stage 2 add pipeline with OpExecutionMode DenormPreserve (f32) requested — the
+//!    variant norm_mlp selects where the device declares shaderDenormPreserveFloat32. Its
+//!    fixture IS stage2.Add over that pipeline, checked STRICTLY (no measured-property
+//!    qualification): a device that flushes fp32 denormals fails the subnormal classes rows
+//!    honestly — denormal preservation is not claimed without a GPU result, and the
+//!    reference is never bent to the flush;
 //!  - the attention output gate: s = bf16(1/(1+exp(-gate))) rounded to bf16 once, then
 //!    out = bf16(f32(ctx) * f32(s)) — ops 4, mids 1, exactly attention_gate.comp's math;
 //!  - the gated RMSNorm: out = bf16(silu_f32(z) * widen(bf16(x * rsqrt(mean(x^2)+eps) * w)))
 //!    — the rows family bound (the reduction sums only squares, so its relative error stays
 //!    under gamma(depth) in any order) plus one mid rounding, the normed store.
-//!
-//! Denormal honesty (stated, not fitted): Apple GPUs flush fp32 denormals. The preserve-add
-//! classes case plants f32-subnormal RESULTS and a flush-to-zero device FAILS those rows —
-//! denormal preservation is not claimed without a GPU result. The same policy the stage 2
-//! add fixture states for bf16 subnormals; the reference is never bent to the flush.
 const std = @import("std");
 const contract = @import("contract");
 const stage2 = @import("stage2_fixture.zig");
+const shaders2 = @import("stage2_shaders");
 
 const c = contract.spec;
 pub const Report = stage2.Report;
@@ -28,11 +28,6 @@ pub const Offsets = stage2.Offsets;
 
 pub const tail = stage2.tail;
 pub const poison16 = stage2.poison16;
-pub const poison32: u32 = 0xffffffff;
-
-fn classOfBits(bits: u16) c.Class {
-    return c.classOf(c.fromBf16(bits));
-}
 
 fn poisonedShell16(a: std.mem.Allocator, at: usize, len: usize) ![]u16 {
     const buf = try a.alloc(u16, at + len + tail);
@@ -40,13 +35,7 @@ fn poisonedShell16(a: std.mem.Allocator, at: usize, len: usize) ![]u16 {
     return buf;
 }
 
-fn poisonedShell32(a: std.mem.Allocator, at: usize, len: usize) ![]u32 {
-    const buf = try a.alloc(u32, at + len + tail);
-    @memset(buf, poison32);
-    return buf;
-}
-
-fn guardIntact(comptime T: type, shell: []const T, at: usize, len: usize, poison: T) !void {
+fn guardIntact(shell: []const u16, at: usize, len: usize, poison: u16) !void {
     for (shell, 0..) |g, i| {
         if (i >= at and i < at + len) continue;
         if (g != poison) return error.GuardClobbered;
@@ -60,117 +49,29 @@ fn sampleBits(rng: std.Random, scale: f32) u16 {
 }
 
 // ---------------------------------------------------------------------------
-// Residual add, preserved: binary_vec.comp without -DUSE_BF16, the exact f32 sum
+// Residual add, preserved: add_preserve_bf16 (binary_vec.comp + -DPRESERVE_F32), the
+// stage 2 add pipeline with DenormPreserve requested, checked STRICTLY
 // ---------------------------------------------------------------------------
 
-pub const PreserveFill = enum { random, cancel, classes };
-
-pub const PreserveCase = struct { name: []const u8, elems: usize, at: Offsets = .{}, fill: PreserveFill = .random };
-
-/// Counts are multiples of four (binary_vec moves four elements per 8-byte load, the f32
-/// path included) and offsets are 256-byte aligned (64 f32 elements).
+/// The preserved add drives the same three shapes as the stage 2 add, at the same
+/// 256-byte-aligned bf16 element offsets. add_preserve_bf16 is binary_vec.comp with the
+/// DenormPreserve (f32) execution mode — the variant norm_mlp selects where the device
+/// declares shaderDenormPreserveFloat32 — and nothing else: the -DUSE_BF16 an earlier
+/// build passed alongside it matches no ifdef in the shader, so the pipeline was the
+/// plain bf16 add all along; no f32-storage variant of binary_vec.comp exists.
+pub const PreserveCase = stage2.AddCase;
 pub const preserve_cases = [_]PreserveCase{
-    .{ .name = "random 512", .elems = 512, .at = .{ .a = 64, .b = 128, .out = 192 } },
-    .{ .name = "cancel 512", .elems = 512, .at = .{ .a = 64, .b = 128, .out = 192 }, .fill = .cancel },
-    .{ .name = "classes 20", .elems = 20, .at = .{ .a = 64, .b = 128, .out = 192 }, .fill = .classes },
+    .{ .name = "random 512", .elems = 512, .at = .{ .a = 128, .b = 256, .out = 384 } },
+    .{ .name = "cancel 512", .elems = 512, .at = .{ .a = 128, .b = 256, .out = 384 }, .fill = .cancel },
+    .{ .name = "classes 20", .elems = 20, .at = .{ .a = 128, .b = 256, .out = 384 }, .fill = .classes },
 };
 
-/// Planted classes-case inputs; every pair is exercised (elems == len). Rows 9-11 and 13
-/// produce or carry fp32 SUBNORMALS: a flush-to-zero device (Apple GPUs flush fp32
-/// denormals) fails them honestly — that failure is the point, the reference is not fitted.
-const f32_class_pairs = [_][2]u32{
-    .{ 0x7f800000, 0x3f800000 }, // +inf + 1 -> +inf
-    .{ 0xff800000, 0x3f800000 }, // -inf + 1 -> -inf
-    .{ 0x7f800000, 0xff800000 }, // +inf + -inf -> nan
-    .{ 0x7fc00000, 0x3f800000 }, // nan + 1 -> nan
-    .{ 0x00000000, 0x80000000 }, // +0 + -0 -> +0 (round to nearest)
-    .{ 0x80000000, 0x80000000 }, // -0 + -0 -> -0
-    .{ 0x7f7fffff, 0x7f7fffff }, // f32 max + f32 max -> f32 overflow -> +inf
-    .{ 0xff7fffff, 0xff7fffff }, // both min -> -inf
-    .{ 0x3f800000, 0xbf800000 }, // 1 + -1 -> +0
-    .{ 0x00000001, 0x00000001 }, // smallest f32 DENORMAL doubled -> 0x00000002
-    .{ 0x00000001, 0x00000003 }, // 1 + 3 denormal units -> 0x00000004
-    .{ 0x00000001, 0x80000000 }, // denormal + -0 -> unchanged
-    .{ 0x00800000, 0x00800000 }, // smallest NORMAL doubled -> 0x01000000
-    .{ 0x00800000, 0x807fffff }, // smallest normal - largest denormal -> 0x00000001
-    .{ 0x00800000, 0x80000000 }, // smallest normal + -0 -> unchanged
-    .{ 0x4f000000, 0xb0800000 }, // 2^31 - ~2^-10, huge spread: f32 rounds to 2^31
-    .{ 0x42f60000, 0xc2f60000 }, // ±123 -> +0
-    .{ 0x3f000000, 0xc0000000 }, // 0.5 + -2 -> -1.5 exact
-    .{ 0x34000000, 0x00000001 }, // 2^-23 + 2^-149: the denormal is under half an ulp -> 2^-23
-    .{ 0x3f800000, 0x38800000 }, // 1 + 2^-14 exact in f32
-};
-
-pub const PreserveAdd = struct {
-    a: std.mem.Allocator,
-    case: PreserveCase,
-    a_bits: []u32,
-    b_bits: []u32,
-    out: []u32,
-    /// The exact bits the shader must produce: the IEEE f32 sum, stored unrounded.
-    want: []u32,
-
-    pub fn init(a: std.mem.Allocator, case: PreserveCase, seed: u64) !PreserveAdd {
-        const a_bits = try poisonedShell32(a, case.at.a, case.elems);
-        errdefer a.free(a_bits);
-        const b_bits = try poisonedShell32(a, case.at.b, case.elems);
-        errdefer a.free(b_bits);
-        const out = try poisonedShell32(a, case.at.out, case.elems);
-        errdefer a.free(out);
-        const want = try a.alloc(u32, case.elems);
-        errdefer a.free(want);
-        var prng = std.Random.DefaultPrng.init(seed);
-        const rng = prng.random();
-        for (0..case.elems) |i| {
-            const pair: [2]u32 = switch (case.fill) {
-                .random => .{
-                    @bitCast((rng.float(f32) + 0.5) * std.math.pow(f32, 2, @floatFromInt(@as(i32, @intCast(i % 5)) - 2)) * (if (rng.boolean()) @as(f32, 1) else -1)),
-                    @bitCast((rng.float(f32) + 0.5) * std.math.pow(f32, 2, @floatFromInt(@as(i32, @intCast(i % 3)) - 1)) * (if (rng.boolean()) @as(f32, 1) else -1)),
-                },
-                // v and -(v - k*ulp(v)): the sum is k ulps of v, exact in f32
-                .cancel => blk: {
-                    const vbits: u32 = @bitCast((rng.float(f32) + 0.5) * (if (rng.boolean()) @as(f32, 1) else -1));
-                    const v: f32 = @bitCast(vbits);
-                    const k: f32 = @floatFromInt(i % 3);
-                    const ulp = std.math.pow(f32, 2, @floor(std.math.log2(@abs(v))) - 23);
-                    break :blk .{ vbits, @bitCast(-(v - k * ulp)) };
-                },
-                .classes => f32_class_pairs[i % f32_class_pairs.len],
-            };
-            a_bits[case.at.a + i] = pair[0];
-            b_bits[case.at.b + i] = pair[1];
-            want[i] = @as(u32, @bitCast(@as(f32, @bitCast(pair[0])) + @as(f32, @bitCast(pair[1]))));
-        }
-        return .{ .a = a, .case = case, .a_bits = a_bits, .b_bits = b_bits, .out = out, .want = want };
-    }
-
-    pub fn deinit(f: PreserveAdd) void {
-        f.a.free(f.a_bits);
-        f.a.free(f.b_bits);
-        f.a.free(f.out);
-        f.a.free(f.want);
-    }
-
-    pub const Mismatch = struct { kind: error{ NonFiniteMismatch, BitMismatch }, index: usize, a: u32, b: u32, want: u32, got: u32 };
-
-    /// The first mismatch under the exact check (class-vs-bit), or null when the whole window
-    /// matches. Length/guard failures stay errors: the caller names them.
-    pub fn firstMismatch(f: PreserveAdd, got: []const u32) !?Mismatch {
-        if (got.len != f.out.len) return error.LengthMismatch;
-        const at = f.case.at.out;
-        try guardIntact(u32, got, at, f.case.elems, poison32);
-        for (f.want, 0..) |w, i| {
-            const g = got[at + i];
-            if (c.classOf(@as(f32, @bitCast(g))) != c.classOf(@as(f32, @bitCast(w)))) return .{ .kind = error.NonFiniteMismatch, .index = i, .a = f.a_bits[f.case.at.a + i], .b = f.b_bits[f.case.at.b + i], .want = w, .got = g };
-            if (std.math.isFinite(@as(f32, @bitCast(w))) and g != w) return .{ .kind = error.BitMismatch, .index = i, .a = f.a_bits[f.case.at.a + i], .b = f.b_bits[f.case.at.b + i], .want = w, .got = g };
-        }
-        return null;
-    }
-
-    pub fn check(f: PreserveAdd, got: []const u32) !void {
-        if (try f.firstMismatch(got)) |m| return m.kind;
-    }
-};
+/// The preserve gate's fixture IS the stage 2 add fixture: one model of the pipeline
+/// (f32 add, one RNE bf16 store), two pipelines. allow_subnormal_flush stays false —
+/// the preserve gate is where the GPU result must prove denormal preservation, so a
+/// flushing device fails the subnormal classes rows as an honest finding (the gate
+/// prints that NOTE); only the plain add gate qualifies them by measured properties.
+pub const PreserveAdd = stage2.Add;
 
 // ---------------------------------------------------------------------------
 // Attention output gate: one mid bf16 rounding of the sigmoid, one bf16 store
@@ -260,7 +161,7 @@ pub const Gate = struct {
     pub fn check(f: Gate, got: []const u16) !Report {
         if (got.len != f.out.len) return error.LengthMismatch;
         const at = f.case.at.out;
-        try guardIntact(u16, got, at, f.case.rows * gate_row_elems, poison16);
+        try guardIntact(got, at, f.case.rows * gate_row_elems, poison16);
         var r: Report = .{};
         for (f.want, 0..) |w, i| {
             const g = got[at + i];
@@ -422,7 +323,7 @@ pub const GatedNorm = struct {
     pub fn check(f: GatedNorm, got: []const u16) !Report {
         if (got.len != f.out.len) return error.LengthMismatch;
         const at = f.case.at.out;
-        try guardIntact(u16, got, at, f.case.rows * gated_width, poison16);
+        try guardIntact(got, at, f.case.rows * gated_width, poison16);
         var r: Report = .{};
         const shape: c.Shape = .{ .rows = f.case.rows, .n = 1, .k = gated_width };
         for (f.want, 0..) |w, i| {
@@ -453,28 +354,38 @@ const testing = std.testing;
 // Host tests: the references and the checkers, no GPU
 // ---------------------------------------------------------------------------
 
-test "preserve wants are the exact f32 sums, subnormal results included" {
+test "preserve wants are the stage 2 pipeline bits, and the flushed subnormal rows stay refused" {
     for (preserve_cases) |case| {
         const f = try PreserveAdd.init(testing.allocator, case, 0x58a2);
         defer f.deinit();
+        try testing.expect(!f.allow_subnormal_flush); // the preserve gate never qualifies a flush
         for (0..f.case.elems) |i| {
-            const sum = @as(f32, @bitCast(f.a_bits[f.case.at.a + i])) + @as(f32, @bitCast(f.b_bits[f.case.at.b + i]));
-            try testing.expectEqual(@as(u32, @bitCast(sum)), f.want[i]);
+            const sum = c.fromBf16(f.a_bits[f.case.at.a + i]) + c.fromBf16(f.b_bits[f.case.at.b + i]);
+            try testing.expectEqual(c.toBf16(sum), f.want[i]); // f32 add, one RNE bf16 store
         }
     }
-    // The planted denormal rows survive the host sum: 0x00000001 + 0x00000001 = 0x00000002.
+    // The classes case carries the subnormal-sum rows (0x0001 + 0x0001 wants 0x0002), and
+    // the checker refuses the flush: a signed zero where a bf16 subnormal belongs is a
+    // BitMismatch, not a qualified pass — the reference is never bent to the flush.
     const g = try PreserveAdd.init(testing.allocator, preserve_cases[2], 0x58a3);
     defer g.deinit();
-    try testing.expectEqual(@as(u32, 0x00000002), g.want[9]);
-    try testing.expectEqual(@as(u32, 0x00000004), g.want[10]);
-    try testing.expectEqual(@as(u32, 0x00000001), g.want[13]); // smallest normal - largest denormal
+    try testing.expectEqual(@as(u16, 0x0002), g.want[12]);
+    const bits = try testing.allocator.dupe(u16, g.out);
+    defer testing.allocator.free(bits);
+    @memcpy(bits[g.case.at.out..][0..g.want.len], g.want);
+    try testing.expectEqual(@as(?PreserveAdd.Mismatch, null), try g.firstMismatch(bits));
+    bits[g.case.at.out + 12] = 0x0000;
+    const m = (try g.firstMismatch(bits)).?;
+    try testing.expectEqual(error.BitMismatch, m.kind);
+    try testing.expectEqual(@as(u16, 0x0002), m.want);
+    try testing.expectError(error.BitMismatch, g.check(bits));
 }
 
 test "preserve classes plants every nonfinite class and the cancel case produces exact tiny sums" {
     const g = try PreserveAdd.init(testing.allocator, preserve_cases[2], 0x58a4);
     defer g.deinit();
     var classes: std.EnumSet(c.Class) = .empty;
-    for (g.want) |w| classes.insert(c.classOf(@as(f32, @bitCast(w))));
+    for (g.want) |w| classes.insert(c.classOf(c.fromBf16(w)));
     try testing.expect(classes.contains(.nan));
     try testing.expect(classes.contains(.pos_inf));
     try testing.expect(classes.contains(.neg_inf));
@@ -483,7 +394,7 @@ test "preserve classes plants every nonfinite class and the cancel case produces
     defer f.deinit();
     var tiny: usize = 0;
     for (0..f.case.elems) |i| {
-        const sum = @as(f32, @bitCast(f.a_bits[f.case.at.a + i])) + @as(f32, @bitCast(f.b_bits[f.case.at.b + i]));
+        const sum = c.fromBf16(f.a_bits[f.case.at.a + i]) + c.fromBf16(f.b_bits[f.case.at.b + i]);
         if (@abs(sum) < 0x1p-20) tiny += 1;
     }
     try testing.expect(tiny > 0); // v + -(v - 0*ulp) pairs cancel to exact zeros
@@ -492,11 +403,11 @@ test "preserve classes plants every nonfinite class and the cancel case produces
 test "preserve checker reports the first bad element and keeps named failures" {
     const f = try PreserveAdd.init(testing.allocator, preserve_cases[0], 0x58a6);
     defer f.deinit();
-    const bits = try testing.allocator.dupe(u32, f.out);
+    const bits = try testing.allocator.dupe(u16, f.out);
     defer testing.allocator.free(bits);
     @memcpy(bits[f.case.at.out..][0..f.want.len], f.want);
     try testing.expectEqual(@as(?PreserveAdd.Mismatch, null), try f.firstMismatch(bits));
-    bits[f.case.at.out + 3] +%= 1; // one ulp off: a finite bit mismatch
+    bits[f.case.at.out + 3] +%= 1; // one bf16 ulp off: a finite bit mismatch
     const m = (try f.firstMismatch(bits)).?;
     try testing.expectEqual(error.BitMismatch, m.kind);
     try testing.expectEqual(@as(usize, 3), m.index);
@@ -648,6 +559,24 @@ fn preserveAllocRun(a: std.mem.Allocator, case: PreserveCase) !void {
     (try PreserveAdd.init(a, case, 0x58b0)).deinit();
 }
 
+/// OpCapability (word count 2, opcode 17) followed by DenormPreserve (4464): the
+/// -DPRESERVE_F32 execution mode is what makes add_preserve_bf16 the preserving pipeline.
+/// A define that matches no ifdef — the -DUSE_BF16 an earlier build passed alongside it —
+/// silently produces the plain bf16 add instead; this catches that class of drift.
+fn hasCapability(spv: []align(4) const u8, cap: u32) bool {
+    const words = std.mem.bytesAsSlice(u32, spv);
+    if (words.len < 5 or words[0] != 0x07230203) return false;
+    for (words[1 .. words.len - 1], 1..) |w, i| {
+        if (w == ((2 << 16) | 17) and words[i + 1] == cap) return true;
+    }
+    return false;
+}
+
+test "the preserve build requests DenormPreserve and the plain add does not" {
+    try testing.expect(hasCapability(&shaders2.add_preserve_bf16, 4464));
+    try testing.expect(!hasCapability(&shaders2.add_bf16, 4464));
+}
+
 fn gateAllocRun(a: std.mem.Allocator, case: GateCase) !void {
     (try Gate.init(a, case, 0x58b1)).deinit();
 }
@@ -678,6 +607,6 @@ test "guards sit poisoned outside every data window" {
     defer p.deinit();
     for (p.a_bits, 0..) |g, i| {
         if (i >= p.case.at.a and i < p.case.at.a + p.case.elems) continue;
-        try testing.expectEqual(poison32, g);
+        try testing.expectEqual(poison16, g);
     }
 }
