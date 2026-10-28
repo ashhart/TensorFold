@@ -14,7 +14,7 @@ const Context = q.dflash.runtime_model.Context;
 const max_rows = lb.max_rows;
 
 /// A prompt pass under way in `slot`: where its next chunk starts, where its restore ended, and its encoded images.
-pub const Fill = struct { slot: u32, at: usize, from: usize, images: ?q.image_rows.Images, rewind: u32 = 0 }; // rewind: slot 0's point
+pub const Fill = struct { slot: u32, at: usize, from: usize, images: ?q.image_rows.Images, checkpoint: u32 = 0, rewind: u32 = 0 }; // rewind: slot 0's point
 
 /// A stream's prompt into `slot`, from its kept state: chunks cut as a fresh pass cuts, decoded spans as decoded.
 pub fn prefill(b: *Metal, s: *lanes.Stream, slot: u32) !void {
@@ -58,7 +58,7 @@ pub fn opening(b: *Metal, s: *lanes.Stream, slot: u32) !Fill {
     s.fill_at.store(@intCast(at), .monotonic); // what the restore kept: 0 when it failed
     const encoded = if (b.vision) |v| try images.encode(v, b.runner.model.queue, s, slot) else null;
     if (encoded != null) b.image_fill = s; // the vision rows are this pass's until it closes
-    return .{ .slot = slot, .at = at, .from = at, .images = encoded, .rewind = rewindPoint(b, s, slot, at) };
+    return .{ .slot = slot, .at = at, .from = at, .images = encoded, .checkpoint = resume_rules.cachePoint(slot == 0 and slotResume(b) and plain(s) and s.max_new > 0 and s.reuse.hook != null, at, b.chunk, ids.len, s.history_len, s.reuse.marks, s.chunks, s.decode_spans), .rewind = rewindPoint(b, s, slot, at) };
 }
 
 /// The pass is over (done, failed or cancelled): its images' rows are free for the next image prompt.
@@ -88,17 +88,10 @@ pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill) !bool {
         return error.Yielded;
     }
     const at = f.at;
-    var end = @min(ids.len, at + @import("qwen27_prompt_rows.zig").choose(b, s));
-    for (s.chunks) |cut| if (cut > at and cut < end) {
-        end = cut;
-    };
+    var end = resume_rules.chunkEnd(at, @import("qwen27_prompt_rows.zig").choose(b, s), ids.len, s.chunks, s.decode_spans);
+    if (f.checkpoint > at and f.checkpoint < end) end = f.checkpoint;
     var decoded = false;
-    for (s.decode_spans) |span| {
-        for (span) |cut| if (cut > at and cut < end) {
-            end = cut;
-        };
-        decoded = decoded or (at >= span[0] and at < span[1]);
-    }
+    for (s.decode_spans) |span| decoded = decoded or (at >= span[0] and at < span[1]);
     var mark_bank: ?q.gdn_pool_gpu.PromptMarks = null;
     defer {
         if (mark_bank) |*m| {
@@ -151,7 +144,7 @@ pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill) !bool {
             if (row != 0) k.at(k.ptr, s, m.position.start + row);
         };
     }
-    if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(end)) != null) if (s.reuse.hook) |k| k.at(k.ptr, s, @intCast(end));
+    if (end == f.checkpoint or std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(end)) != null) if (s.reuse.hook) |k| k.at(k.ptr, s, @intCast(end));
     if (end == ids.len) b.runner.settleSlot(slot); // the stream's first round writes the slot next
     return end == ids.len;
 }

@@ -55,6 +55,25 @@ pub const Standing = struct {
     }
 };
 
+/// A prompt's next physical chunk end, before cache marks or the slot's rewind point cut it further.
+pub fn chunkEnd(at: usize, chunk: usize, len: usize, starts: []const u32, spans: []const modes.Span) usize {
+    var end = @min(len, at + chunk);
+    for (starts) |cut| if (cut > at and cut < end) {
+        end = cut;
+    };
+    for (spans) |span| for (span) |cut| if (cut > at and cut < end) {
+        end = cut;
+    };
+    return end;
+}
+
+/// A skipped warm pass must still leave its first checkpoint when the cache cannot keep the history's end.
+pub fn cachePoint(enabled: bool, at: usize, chunk: usize, len: usize, history: u32, marks: []const u32, starts: []const u32, spans: []const modes.Span) u32 {
+    if (!enabled or history == 0 or std.mem.indexOfScalar(u32, marks, history) != null) return 0;
+    const end = chunkEnd(at, chunk, len, starts, spans);
+    return if (end > at and end < history and end < len) @intCast(end) else 0;
+}
+
 const t = std.testing;
 
 test "qwen27 resume: a prompt extending what slot 0 stands after resumes there, past the cache's own restore only" {
@@ -113,4 +132,8 @@ test "qwen27 resume: slot 0 keeps what a fresh pass would stand at, and the poin
     st.rewind_at = 3; // a point that is not strictly inside what the slot stands after is not kept
     st.leave(t.allocator, .{ .at = 3, .prompt_len = 5, .context_len = 5, .fill_at = 3, .ended = false }, &context, &.{});
     try t.expectEqual(@as(u32, 0), st.rewind_at);
+}
+
+test {
+    _ = @import("qwen27_resume_cache_test.zig");
 }
