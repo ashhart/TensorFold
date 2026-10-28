@@ -572,7 +572,7 @@ test {
     _ = paging;
 }
 /// The Metal collector keeps measured slots and the restored vision declarations.
-pub const all_metal = metal ++ @import("delta_slots_records.zig").records ++ @import("flashnext_pending.zig").records ++ @import("simd_pairs_records.zig").records ++ @import("glm_rows_records.zig").records ++ @import("weight_only_records.zig").metal ++ @import("hc_activation_records.zig").metal ++ @import("qwen4_records.zig").metal ++ @import("lfm2_records.zig").records ++ @import("nemotron_experts_records.zig").records ++
+pub const all_metal = metal ++ @import("delta_slots_records.zig").records ++ @import("flashnext_pending.zig").records ++ @import("simd_pairs_records.zig").records ++ @import("glm_rows_records.zig").records ++ @import("weight_only_records.zig").metal ++ @import("hc_activation_records.zig").metal ++ @import("qwen4_records.zig").metal ++ @import("lfm2_records.zig").records ++ @import("nemotron_experts_records.zig").records ++ @import("nemotron_pages_records.zig").records ++
     @import("moss_image_records.zig").records;
 const learning = @import("registry_learning.zig");
 pub const gradient_pending = learning.gradient_pending;
