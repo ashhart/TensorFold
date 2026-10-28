@@ -30,7 +30,11 @@ pub fn open(s: anytype, d: *const cuda.Driver, b: *Bootstrap, image: []const u8)
         return error.ChunkAbiMissing;
     }
     s.route = .{ .small = .{ .roce_multi = r }, .nccl = &s.nccl, .max_bytes = cfg.mailbox_max_bytes, .chunked_bytes = cfg.roce_chunked_bytes };
-    const good = probe(s, d) catch false;
+    try keepIfAll(s, b, r, probe(s, d) catch false);
+}
+
+/// The wire stays only when every rank's probe matched NCCL's bytes: one rank's mismatch drops it on every rank.
+fn keepIfAll(s: anytype, b: *Bootstrap, r: *roce.Roce, good: bool) !void {
     var blobs: [bootstrap.max_ranks][]const u8 = undefined;
     var buf: [bootstrap.max_ranks]u8 = undefined;
     for (try b.allGather(&.{@intFromBool(good)}, &buf, &blobs)) |x| if (x.len != 1 or x[0] != 1) {
@@ -68,4 +72,44 @@ fn probe(s: anytype, d: *const cuda.Driver) !bool {
     defer std.heap.page_allocator.free(got);
     try a.download(n, got);
     return std.mem.eql(u8, got[0 .. w * n], got[w * n .. 2 * w * n]) and std.mem.eql(u8, got[2 * w * n ..][0..n], got[(2 * w + 1) * n ..][0..n]);
+}
+
+test "multirank probe: one rank's mismatch leaves every rank without the wire; matches on every rank keep it on every rank" {
+    const sock = @import("sock.zig");
+    const Vote = struct {
+        port: u16,
+        lfd: sock.Fd,
+        odd: ?u32,
+        kept: [3]bool = .{ false, false, false },
+        errs: [3]?anyerror = .{ null, null, null },
+
+        fn rank(v: *@This(), me: u32) void {
+            v.errs[me] = v.body(me);
+        }
+
+        fn body(v: *@This(), me: u32) ?anyerror {
+            var b = (if (me == 0) Bootstrap.acceptOn(v.lfd, 3, 5 * std.time.ns_per_s) else Bootstrap.open(.{ .world = 3, .rank = me, .link_port = v.port, .connect_timeout_ns = 5 * std.time.ns_per_s })) catch |e| return e;
+            defer b.close();
+            const r = roce.Roce.init(null, &b, "", .{ .wire = .shm, .max_bytes = 4096 }) catch |e| return e;
+            var s: struct { cfg: struct { roce_fallback: enum { nccl, @"error" } = .nccl, rank: u32 }, roce_multi: ?*roce.Roce } = .{ .cfg = .{ .rank = me }, .roce_multi = r };
+            keepIfAll(&s, &b, r, v.odd != me) catch |e| return e;
+            v.kept[me] = s.roce_multi != null;
+            if (s.roce_multi) |x| {
+                b.agree("kept", "probe test end") catch |e| return e; // no rank unmaps its region while a peer may read it
+                x.deinit();
+            }
+            return null;
+        }
+    };
+    for ([_]?u32{ 1, null }) |odd| {
+        const l = try bootstrap.testListener();
+        defer sock.close(l.fd);
+        var v: Vote = .{ .port = l.port, .lfd = l.fd, .odd = odd };
+        var t: [2]std.Thread = undefined;
+        for (&t, 1..) |*x, me| x.* = try std.Thread.spawn(.{}, Vote.rank, .{ &v, @as(u32, @intCast(me)) });
+        v.rank(0);
+        for (t) |x| x.join();
+        for (v.errs) |e| try std.testing.expectEqual(@as(?anyerror, null), e);
+        for (v.kept) |k| try std.testing.expectEqual(odd == null, k);
+    }
 }
