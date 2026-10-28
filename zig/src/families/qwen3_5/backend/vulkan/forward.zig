@@ -17,9 +17,9 @@
 //! the per-head RMS gamma (256). RoPE, the flat KV cache write, causal GQA
 //! SDPA and the sigmoid output gate ride the admitted attention operator.
 //!
-//! The linear layers ride the admitted GDN operator: the 4-tap conv over the
-//! raw BF16 taps (both paths), the gate split (g F32, beta BF16), the chunked
-//! prefill scan or the raw-gates decode step, and the gated RMSNorm epilogue.
+//! The linear layers use one GDN graph for every row count: 4-tap conv over
+//! raw BF16 taps, gate split (g F32, beta BF16), prefill recurrence, and gated
+//! RMSNorm. Decode uses the same arithmetic as a one-row prefill.
 //! Conv state and recurrence state are the caller's ping-pong halves; the
 //! caller flips only after the writes' fences and commits visible length only
 //! after the whole forward.
@@ -134,10 +134,10 @@ pub const Core = struct {
         c.scratch.reset(mark) catch {};
     }
 
-    /// One linear GatedDeltaNet layer: the qkv/z/a/b projections, the conv
-    /// (prefill assemble or decode step) over the raw BF16 taps, the gate
-    /// split, the prefill scan or the raw-gates decode step, the gated
-    /// RMSNorm epilogue and the out projection. Conv and recurrence halves
+    /// One linear GatedDeltaNet layer: qkv/z/a/b projections, raw-BF16 conv,
+    /// gate split, prefill recurrence, gated RMSNorm and out projection.
+    /// The same graph handles one row so the prefill/decode split cannot
+    /// choose a different gate or recurrent rounding path. Conv and recurrence
     /// are the state's ping-pong pair; the slot flips after the writes.
     pub fn linearLayer(c: *const Core, x: View, layer: weights.LinearLayer, s: *state.State, slot: usize, rows: usize, r_out: View) !void {
         const mark = c.scratch.mark();
@@ -154,24 +154,14 @@ pub const Core = struct {
         const soa = try c.scratch.alloc(.bf16, rows * 3 * dim);
         const g = try c.scratch.alloc(.f32, rows * pinned.linear_heads);
         const beta = try c.scratch.alloc(.bf16, rows * pinned.linear_heads);
-        if (rows == 1) {
-            const activated = try c.scratch.alloc(.bf16, pinned.conv_dim);
-            try vk.orExit(c.acc.gdn.convDecodeStep(c.cmds, soa, g, beta, activated, s.convInput(slot), qkv, layer.conv, a, b, layer.a_log, layer.dt_bias, s.convOutput(slot), c.timeout_ns));
-            const y = try c.scratch.alloc(.bf16, dim);
-            try vk.orExit(c.acc.gdn.decodeRecur(c.cmds, soa, a, b, try aLogU16(layer.a_log), layer.dt_bias, s.gdnInput(slot), s.gdnOutput(slot), y, c.timeout_ns));
-            const mix = try c.scratch.alloc(.bf16, dim);
-            try vk.orExit(c.acc.gdn.gatedNorm(c.cmds, mix, y, z, layer.gnorm, rows, pinned.eps, c.timeout_ns));
-            try c.project(r_out, mix, layer.out);
-        } else {
-            const conv_out = try c.scratch.alloc(.bf16, rows * pinned.conv_dim);
-            const conv_in = try c.scratch.alloc(.bf16, (rows + state.conv_rows) * pinned.conv_dim);
-            try vk.orExit(c.acc.gdn.convPrefill(c.cmds, soa, g, beta, conv_out, conv_in, s.convInput(slot), qkv, layer.conv, a, b, layer.a_log, layer.dt_bias, s.convOutput(slot), rows, c.timeout_ns));
-            const y = try c.scratch.alloc(.bf16, rows * dim);
-            try vk.orExit(c.acc.gdn.prefillRecur(c.cmds, soa, g, beta, s.gdnInput(slot), y, s.gdnOutput(slot), null, rows, @min(rows, max_gdn_chunk), c.timeout_ns));
-            const mix = try c.scratch.alloc(.bf16, rows * dim);
-            try vk.orExit(c.acc.gdn.gatedNorm(c.cmds, mix, y, z, layer.gnorm, rows, pinned.eps, c.timeout_ns));
-            try c.project(r_out, mix, layer.out);
-        }
+        const conv_out = try c.scratch.alloc(.bf16, rows * pinned.conv_dim);
+        const conv_in = try c.scratch.alloc(.bf16, (rows + state.conv_rows) * pinned.conv_dim);
+        try vk.orExit(c.acc.gdn.convPrefill(c.cmds, soa, g, beta, conv_out, conv_in, s.convInput(slot), qkv, layer.conv, a, b, layer.a_log, layer.dt_bias, s.convOutput(slot), rows, c.timeout_ns));
+        const y = try c.scratch.alloc(.bf16, rows * dim);
+        try vk.orExit(c.acc.gdn.prefillRecur(c.cmds, soa, g, beta, s.gdnInput(slot), y, s.gdnOutput(slot), null, rows, @min(rows, max_gdn_chunk), c.timeout_ns));
+        const mix = try c.scratch.alloc(.bf16, rows * dim);
+        try vk.orExit(c.acc.gdn.gatedNorm(c.cmds, mix, y, z, layer.gnorm, rows, pinned.eps, c.timeout_ns));
+        try c.project(r_out, mix, layer.out);
         s.flip(slot);
         c.scratch.reset(mark) catch {};
     }
@@ -205,12 +195,6 @@ pub const Core = struct {
     }
 };
 
-/// The f32 A_log view as u16 pairs, the decode kernel's sanctioned transport
-/// (32 elements over the same 64 bytes; never a value reinterpretation).
-fn aLogU16(a_log: View) !View {
-    if (a_log.kind != .f32 or a_log.elements != pinned.linear_heads) return error.Invalid;
-    return View.init(a_log.buffer, .u16, a_log.byte_offset, 2 * pinned.linear_heads);
-}
 
 /// The Q extraction's derived geometry, or null when any view is torn; pure
 /// and host-tested. `dim` = head_dim, `heads_rows` = rows * query_heads,

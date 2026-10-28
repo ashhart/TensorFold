@@ -650,6 +650,21 @@ test "prefillPlan derives chunks and the snapshot size, refusing snap mismatch" 
     try testing.expectEqual(@as(u32, 1), single.chunks);
 }
 
+test "the common prefill graph admits decode and full prompt chunks" {
+    const ch: u64 = Model.conv_channels;
+    const conv_state = Model.conv_state_rows * ch;
+    const state: u64 = Model.state_elements;
+    for ([_]u64{ 1, 31, 32 }) |tokens| {
+        const conv = try convPrefillPlan((tokens + Model.conv_state_rows) * ch, conv_state, tokens * ch, ch * Model.taps, conv_state, tokens);
+        try testing.expectEqual(@as(u32, @intCast(tokens)), conv.tokens);
+        try testing.expectEqual(@as(u32, @intCast(tokens + Model.conv_state_rows)), conv.l_in);
+        const section = tokens * Model.linear_dim;
+        const recurrence = try prefillPlan(3 * section, tokens * Model.heads, tokens * Model.heads, state, section, state, 0, tokens, tokens);
+        try testing.expectEqual(@as(u32, 1), recurrence.chunks);
+        try testing.expectEqual(@as(u32, @intCast(tokens)), recurrence.chunk);
+    }
+}
+
 test "decodePlan checks the u16 A_log window and the fixed decode shapes" {
     const heads: u64 = Model.heads;
     _ = try decodePlan(3 * Model.linear_dim, heads, heads, 2 * heads, heads, Model.state_elements, Model.state_elements, Model.linear_dim);
