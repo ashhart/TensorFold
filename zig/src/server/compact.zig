@@ -52,7 +52,14 @@ pub fn reserveTokens(window: i64, at: CompactAt) i64 {
 }
 
 pub fn noteBudgetTokens(window: i64, at: CompactAt) i64 {
-    return @min(8192, @max(1, @divTrunc(reserveTokens(window, at) * 4, 5)));
+    return @min(8192, @max(1, @divTrunc(reserveInWindow(window, at) * 4, 5)));
+}
+
+/// Auto's 16384 floor applies only while the window holds it; a smaller window reserves fifteen percent.
+fn reserveInWindow(window: i64, at: CompactAt) i64 {
+    const reserve = reserveTokens(window, at);
+    if (at != .auto or reserve < window) return reserve;
+    return @max(@as(i64, 1), @divTrunc(window * 15, 100));
 }
 
 pub fn keepTokens(window: u32, override: ?u32) usize {
@@ -71,7 +78,7 @@ fn threshold(window: i64, f: f64) i64 {
 fn over(prompt: usize, max_out: i64, window: i64, at: CompactAt) bool {
     const sum = @as(i64, @intCast(prompt)) + @max(0, max_out);
     return switch (at) {
-        .auto => sum > window - reserveTokens(window, at),
+        .auto => sum > window - reserveInWindow(window, at),
         .fraction => |f| sum > threshold(window, f),
     };
 }
