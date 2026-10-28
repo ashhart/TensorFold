@@ -295,7 +295,7 @@ pub const Lanes = struct {
             _ = self.lanes.remove(s);
         }
         if (self.x.e.images) |v| v.clear(); // no earlier request's rows splice into this one
-        try self.x.beginOn(s.sampling, pages);
+        try self.x.beginOn(s.sampling, pages, adopt.items.len);
         s.cached = 0;
         s.prompt_rows.clearRetainingCapacity();
         const l = self.lanes.getPtr(s).?;
