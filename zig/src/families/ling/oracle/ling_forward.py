@@ -1,4 +1,4 @@
-"""For `tf-cuda-test ling-forward-synth`: a Ling-3.1 checkpoint's logits in float64, from its own file and config."""
+"""A Ling-3.1 checkpoint's logits in float64, from its own file and config."""
 import argparse
 import json
 import math

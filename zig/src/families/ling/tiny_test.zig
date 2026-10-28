@@ -2,7 +2,6 @@
 const std = @import("std");
 const config = @import("config.zig");
 const names = @import("names.zig");
-const ling = @import("cuda.zig");
 const names_test = @import("names_test.zig");
 
 const t = std.testing;
@@ -45,7 +44,7 @@ test "tiny's config.json parses: 24 layers in groups of 4, 16 heads, q_lora_rank
     try t.expectEqual(@as(u32, 0), c.mtp);
     try t.expectEqual(config.Quant.bf16, c.quant);
     for (0..c.layers) |i| {
-        const l = ling.limits(&c, @intCast(i));
+        const l = c.layerLimits(@intCast(i));
         try t.expectEqual(@as(f32, 0), l.routed + l.shared + l.dense); // "expert_swiglu_limit_list": null
     }
 }
@@ -63,9 +62,9 @@ test "tiny's schedule: MLA on layers 3, 7, 11, 15, 19 and 23, KDA on the other 1
 
 test "tiny's routing as glue.select takes it: 8 groups of 16 experts (not whole lane columns) keeping 4" {
     const c = try load();
-    const g = ling.groups(&c);
-    try t.expectEqual(@as(usize, 8), g.n);
-    try t.expectEqual(@as(usize, 4), g.keep);
+    const g = c.groups();
+    try t.expectEqual(@as(u32, 8), g.n);
+    try t.expectEqual(@as(u32, 4), g.keep);
     try t.expect(c.experts / g.n == 16 and (c.experts / g.n) % 32 != 0); // the division branch of keep_groups
     try t.expect(c.topk <= g.keep * (c.experts / g.n));
 }

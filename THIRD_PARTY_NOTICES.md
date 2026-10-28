@@ -358,3 +358,8 @@ with the common EXL3 and DeepSeek contributor credits preserved.
 recipe commit e1f564eb915bb5272474b6c1c527aec3b9ed3de6. It credits TensorFold Contributors for the expert
 arithmetic and staging design. Copyright (c) 2026 MiaAI-Lab and Copyright (c) 2026 TensorFold contributors.
 The complete original MIT notices and permission text are retained in [Mia-FlashNext-MIT.txt](LICENSES/Mia-FlashNext-MIT.txt).
+
+## Ling-3.0-tiny and Ling-3.1-flash
+
+Ling-3.0-tiny and Ling-3.1-flash are MIT licensed by inclusionAI. The host family package
+(`zig/src/families/ling/`) is a port of @jschmied's ling-tiny branch (98026d35). TensorFold ships no Ling weights.

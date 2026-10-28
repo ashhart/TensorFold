@@ -6,6 +6,12 @@ pub const max_layers = 80;
 
 pub const Kind = enum { kda, mla };
 
+/// Group-limited routing as the CUDA and Metal kernels will take it: n groups, keep of them.
+pub const Groups = struct { n: u32, keep: u32 };
+
+/// Layer i's SwiGLU clamps, 0 for none.
+pub const Limits = struct { routed: f32, shared: f32, dense: f32 };
+
 /// MLA's rope pairs: rope_interleave true is exllamav3's RopeStyle.GPTJ (adjacent pairs), false NeoX (halves).
 pub const RopeStyle = enum { gptj, neox };
 
@@ -96,6 +102,17 @@ pub const Config = struct {
     /// MLA's softmax scale, qk_head_dim^-0.5 (no rope_scaling mscale: parse refuses rope_scaling).
     pub fn smScale(c: *const Config) f32 {
         return @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(c.qkDim()))));
+    }
+
+    /// Group-limited routing: n_group groups, the best topk_group kept (parse holds those bounds).
+    pub fn groups(c: *const Config) Groups {
+        return .{ .n = c.n_group, .keep = c.topk_group };
+    }
+
+    /// Layer i's SwiGLU clamps, 0 for none. The lists cover the backbone; dense and MTP layers run unclamped.
+    pub fn layerLimits(c: *const Config, i: u32) Limits {
+        if (i >= c.layers or !c.isMoe(i)) return .{ .routed = 0, .shared = 0, .dense = 0 };
+        return .{ .routed = c.expert_limit[i], .shared = c.shared_limit[i], .dense = 0 };
     }
 
     pub fn plain(c: *const Config, i: u32) []const u8 {
