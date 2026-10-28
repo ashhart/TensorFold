@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Gemma 4 E4B on Metal: the native engine serves the E-series' E4B (per-layer inputs, the last 18 layers reading an earlier layer's cache, global values of their own) from the family's plan, on the row path of Macs without tensor units. On an M4 Max a cold prompt prefills at about 790 tokens/s and one chat stream decodes at 92 tokens/s, 199 over four, with 4.2 GiB wired; every reply equals its run alone and a resumed prompt gives the fresh pass's reply. Convert with `tools/zig/gemma4_e4b_convert.py --dense-ple`; there are no drafts, images or audio for it, and M5 and M1 to M3 are not qualified. (#1222, #2273). (#1222, #2273). See [the recipe](docs/recipes/gemma-4-e4b-native.md).
+
 - Internal: 42 more lean findings fixed in the tests' comments and the tools' docstrings, with no change in behaviour (#2315).
 
 - HIP: the decode round's residual-add and norm tail issues each row's loads before its branches, and a MoE tail loads its slots' rows together, with output bytes unchanged. On a gfx1151, one-stream decode is 2.7% faster on Qwen3.6-35B-A3B and 1.1% on the 27B. `tf_tail` is now under the kernel contract (#2247). Thanks to @AbrahamCete.
