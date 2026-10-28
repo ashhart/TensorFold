@@ -214,6 +214,9 @@ pub fn Cast(comptime to_bf16: bool) type {
         pub fn prepare(self: *Self, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
             if (shape.rows == 0 or shape.n == 0) return false;
             const elements = std.math.mul(usize, shape.rows, shape.n) catch return false;
+            // A 16-bit range with an odd element count is not bindable (dispatch.bind needs whole 32-bit words;
+            // View.init refuses the same tail): the kernel refuses that edge shape, it is not a served shape.
+            if (elements % 2 != 0 and (in_kind.size() == 2 or esz == 2)) return false;
             self.rig.reset();
             _ = self.arena.reset(.retain_capacity);
             const a = self.arena.allocator();
@@ -328,6 +331,8 @@ pub fn Copy(comptime kind: vk.tensor.Kind) type {
         pub fn prepare(self: *Self, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
             if (shape.rows == 0 or shape.n == 0) return false;
             const elements = std.math.mul(usize, shape.rows, shape.n) catch return false;
+            // See the casts: an odd 16-bit element count cannot be bound as whole 32-bit words.
+            if (elements % 2 != 0 and esz == 2) return false;
             self.rig.reset();
             _ = self.arena.reset(.retain_capacity);
             const a = self.arena.allocator();
