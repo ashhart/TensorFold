@@ -91,7 +91,7 @@ pub const Drafted = struct {
         try target.vtable.cancel_prefill.?(target.ptr, s);
     }
 
-    /// The target's facts with the drafter's depth, step cost, prior, plain guard and batching; chains drafted late.
+    /// The target's facts with the drafter's depth, step cost, prior, plain guard, batching and copy match; chains late.
     pub fn facts(x: *const Drafted, target: Model) Model {
         const d = x.drafter.facts();
         var m = target;
@@ -111,6 +111,7 @@ pub const Drafted = struct {
             m.draft_probabilities = x.drafter.vtable.chances != null;
             m.head_trees = false;
         }
+        if (d.copy_match > 0) m.copy_match = d.copy_match;
         if (d.window_costs.len > 0) m.window_costs = d.window_costs;
         if (d.lane_costs.len > 0) m.lane_costs = d.lane_costs;
         return m;

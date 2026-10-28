@@ -147,13 +147,10 @@ pub fn learnModel(p: *anyopaque, dir: []const u8) slide.Model {
     return .{ .e = l.e, .dir = dir, .lay = slide.layout(l.e.g.hidden, l.e.g.layers, l.e.g.intermediate, 0) catch unreachable };
 }
 
-/// A checkpoint's facts: the dense 27B copies from the root after long_match (20) tokens, leaving short ones to drafts.
+/// A checkpoint's facts: the dense 27B also copies from the root (DFlash2 raises its copy match, draft.copyMatch).
 pub fn modelFacts(window: u32, verify: u32, g: anytype) lanes.Model {
     var facts = laneFacts(window, verify);
-    if (g.hidden == 5120 and g.layers == 64 and g.experts == 0) {
-        facts.root_copies = true;
-        facts.copy_match = lanes.windows.long_match;
-    }
+    facts.root_copies = @import("cuda_geometry.zig").dense27(g);
     return facts;
 }
 

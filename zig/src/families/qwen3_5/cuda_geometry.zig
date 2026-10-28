@@ -162,6 +162,11 @@ pub const Geometry = struct {
 };
 
 /// The supported geometry: the prompt tiles take an even group and a chunk's rows; the partials the verify rows.
+/// The dense Qwen3.8-27B's shape (hidden 5120, 64 layers, no experts), whatever its checkpoint format.
+pub fn dense27(g: anytype) bool {
+    return g.hidden == 5120 and g.layers == 64 and g.experts == 0;
+}
+
 pub fn supported(g: Geometry, rows: usize, prompt: bool, partial_rows: usize) bool {
     const group = g.q_heads / g.kv_heads;
     if (prompt and group % 2 == 0) return true; // the prompt tiles: an even group, the chunk's rows
