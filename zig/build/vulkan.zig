@@ -430,6 +430,37 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         },
     });
     host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = contract_gdn_fixture })).step);
+    // The pointwise contract: all six pointwise closures (stage 2's three plus the preserve
+    // add, the attention output gate and the gated RMSNorm) against one GPU probe, and the
+    // fixtures' host suite in `test`.
+    const pointwise_fixture_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/vulkan/contract_pointwise.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+        .imports = &.{.{ .name = "contract", .module = @import("kernel_contract.zig").module(b, b.graph.host, .debug) }},
+    }) });
+    host.dependOn(&b.addRunArtifact(pointwise_fixture_tests).step);
+    b.step("contract-pointwise-host-test", "The pointwise contract fixtures' host suite (references and checkers), without GPU work").dependOn(host);
+    const pointwise = b.addExecutable(.{ .name = "tf-contract-pointwise", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/vulkan/contract_pointwise_main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "vulkan", .module = vulkan },
+            .{ .name = "stage2_shaders", .module = stage2_shaders_mod },
+            .{ .name = "stage3_shaders", .module = stage3_shaders_mod },
+            .{ .name = "stage4_shaders", .module = stage4_shaders_mod },
+            .{ .name = "contract", .module = @import("kernel_contract.zig").module(b, target, .debug) },
+        },
+    }) });
+    const pointwise_install = b.addInstallArtifact(pointwise, .{});
+    stage3_build.dependOn(&pointwise_install.step);
+    stage4_build.dependOn(&pointwise_install.step);
+    b.step("contract-pointwise-build", "Compile the six pointwise SPIR-V images and the pointwise contract probe without running GPU work").dependOn(&pointwise_install.step);
+    const pointwise_run = b.addRunArtifact(pointwise);
+    pointwise_run.addPassthruArgs();
+    b.step("contract-pointwise", "Run the pointwise shader contract on the chosen GPU (args after --)").dependOn(&pointwise_run.step);
     const contract_glslang = o.glslang orelse "glslang";
     const qmm_bf16_cmd = b.addSystemCommand(&.{ contract_glslang, "-V", "--target-env", "vulkan1.2", "-S", "comp", "-DUSE_BF16=1", "-o" });
     const qmm_bf16 = qmm_bf16_cmd.addOutputFileArg("qmm_bf16.spv");
