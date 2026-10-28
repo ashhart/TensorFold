@@ -9,6 +9,7 @@ pub const Mutation = enum {
     gather_own_halves,
     argmax_high_tie,
     argmax_no_flag,
+    pick_no_flag,
     pick_high_tie,
 
     pub fn name(m: Mutation) []const u8 {
@@ -18,6 +19,7 @@ pub const Mutation = enum {
             .gather_own_halves => "control: metal pair gather, this rank writes its own half on both sides",
             .argmax_high_tie => "control: metal pair argmax, a tie goes to the highest id",
             .argmax_no_flag => "control: metal pair argmax, a nonfinite logit is not flagged",
+            .pick_no_flag => "control: metal pair pick, a flagged row is not turned into the sentinel",
             .pick_high_tie => "control: metal pair pick, a tie goes to the higher id",
         };
     }
@@ -26,7 +28,7 @@ pub const Mutation = enum {
     pub fn gate(m: Mutation) ?contract.gates.Gate {
         return switch (m) {
             .none => null,
-            .argmax_no_flag => .nonfinite,
+            .argmax_no_flag, .pick_no_flag => .nonfinite,
             else => .shapes,
         };
     }
@@ -42,6 +44,8 @@ pub const Mutation = enum {
             .argmax_high_tie => .{ .from = "if (ob > best || (ob == best && oa < at)) best = ob, at = oa;", .to = "if (ob > best || (ob == best && oa > at)) best = ob, at = oa;" },
             .argmax_no_flag => .{ .from = "if (!isfinite(v)) { bad = true; continue; }", .to = "if (false) { bad = true; continue; }" },
             .pick_high_tie => .{ .from = "(vp > vm || (vp == vm && ap < am)) ? ap : am;", .to = "(vp > vm || (vp == vm && ap > am)) ? ap : am;" },
+            // The flag is planted only at the nonfinite fill, so dropping the rule is invisible at shapes.
+            .pick_no_flag => .{ .from = "((am | ap) & PAIR_FLAG) != 0u", .to = "false" },
         };
     }
 };

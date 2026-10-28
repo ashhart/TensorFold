@@ -147,9 +147,9 @@ The row-split seam's four kernels (`pair_rows.metal`, launched by `pair_rows.zig
 `pair_stage` copies this rank's half of a frame row into the slot the relay sends, and `pair_gather` writes both halves
 of every row, its own natively and the peer's from the relayed frame. `pair_argmax` flags a row whose logits are not
 finite (its id word carries bit 31, its value word a NaN) and takes the lower id on a tie; `pair_pick` turns a flagged
-rank's word into the id sentinel, so both Macs refuse a non-finite round where one Mac does. Five controls edit the
+rank's word into the id sentinel, so both Macs refuse a non-finite round where one Mac does. Six controls edit the
 source: a stage reading the peer's half, a gather writing its own half twice, and an argmax or pick tie to the higher
-id must go red at `shapes`, and an argmax that does not flag at `nonfinite`.
+id must go red at `shapes`, and an argmax or pick that does not flag at `nonfinite`.
 CUDA: the RMS norm rows (16-byte form and the fp32-out tree), the bf16 residual's norm tails (MLX's rounded rows and
 the once-rounded ones, each checked on its residual and its output, with four controls each dropping a rounding point), Nemotron's router logits (and their 128-row tiles,
 bit-equal to them) and top-k, the latent top-k's decode form (bit-equal to `tf_super_topk`), the latent combine and

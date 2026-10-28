@@ -219,7 +219,7 @@ pub fn main(init: std.process.Init) !u8 {
                 .stage_peer_half => w == .stage,
                 .gather_own_halves => w == .gather,
                 .argmax_high_tie, .argmax_no_flag => w == .argmax,
-                .pick_high_tie => w == .pick,
+                .pick_no_flag, .pick_high_tie => w == .pick,
             };
             if (!control_for) continue;
             if (!wanted(o, if (m == .none) pair_k.spec(w).name else m.name())) continue;
