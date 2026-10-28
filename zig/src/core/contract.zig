@@ -5,6 +5,7 @@ pub const spec = @import("contract/contract.zig");
 pub const gates = @import("contract/gates.zig");
 pub const attention_pv = @import("contract/attention_pv.zig");
 pub const rows = @import("contract/rows.zig");
+pub const reference_threads = @import("contract/reference_threads.zig");
 pub const affine = @import("contract/affine.zig");
 pub const dense = @import("contract/dense.zig");
 pub const bf16_round = @import("bf16_round.zig");
@@ -32,6 +33,7 @@ test {
     _ = rows;
     _ = attention_pv;
     _ = affine;
+    _ = reference_threads;
     _ = dense;
     _ = limits;
     _ = registry;
