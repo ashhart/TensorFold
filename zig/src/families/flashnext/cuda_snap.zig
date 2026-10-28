@@ -88,7 +88,7 @@ fn move(stream: cuda.Stream, seq: *prompt.Seq, d: ?*Draft, base: u64, at: usize,
                 var r: usize = 0;
                 while (r < n) {
                     const run = @min(per - r % per, n - r);
-                    const at_row = pg.rowAt(at_layer, part, r);
+                    const at_row = if (pg.hbase != 0 and (part == .key or part == .value)) pg.hostRowAt(at_layer, part, r) else pg.rowAt(at_layer, part, r);
                     const dst, const src = if (way == .save) .{ base + off, at_row } else .{ at_row, base + off };
                     try dr.check(dr.api.cuMemcpyDtoDAsync_v2(dst, src, run * row, stream.handle), "cuMemcpyDtoDAsync");
                     off += run * row;
@@ -118,6 +118,7 @@ pub fn save(gpa: std.mem.Allocator, driver: *const cuda.Driver, stream: cuda.Str
     const at = seq.fed;
     if (at > seq.cap) return error.SequenceTooShort;
     if (d) |h| if (h.len != at or h.drafted != 0 or h.open or at > h.cap) return error.NotAtMark;
+    if (seq.sel) |t| try t.flushAll(stream, at); // a host tier: the window's rows reach the host store first
     const n = bytes(at, d != null);
     const snap = try allocate(gpa, driver, n, at, seq.history, d != null);
     errdefer discard(gpa, stream, snap);
@@ -146,6 +147,7 @@ pub fn restore(stream: cuda.Stream, seq: *prompt.Seq, d: ?*Draft, snap: *const S
     // a state with the head's rows serves a stream without drafts too: those rows stay in the buffer
     try move(stream, seq, d, snap.buf.ptr, snap.at, .restore);
     try stream.synchronize();
+    if (seq.sel) |t| t.restored();
     seq.history = snap.history;
     seq.fed = snap.at;
     if (d) |h| {

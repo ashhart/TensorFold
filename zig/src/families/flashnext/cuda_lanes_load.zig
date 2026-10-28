@@ -66,6 +66,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     if (o.vision) |limits| {
         if (own.set != null) return error.VisionCapturedSetUnsupported;
         own.vision = try images.Vision.load(gpa, io, driver, own.stream, dir, limits, o.rank, own.glue.f.prep_media, own.glue.f.pool_media, own.glue.f.prep_media_paged, own.glue.f.pool_media_paged);
+        own.vision.?.planes = .{ .prep = own.glue.f.prep_media_planes, .pool = own.glue.f.pool_media_planes };
         own.engine.image_factory = own.vision;
     }
     errdefer if (own.vision) |v| v.deinit();

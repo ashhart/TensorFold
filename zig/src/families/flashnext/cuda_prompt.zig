@@ -507,6 +507,8 @@ pub const Seq = struct {
     pooled: []cuda.DeviceBuffer,
     /// kc, vc, ikc and pooled as borrowed views of page 0 of these pages (null: each its own contiguous buffer).
     paged: ?pages.Paged = null,
+    /// On a host tier: which blocks of the stream's K/V are in slots (null: every page is in a frame).
+    sel: ?*@import("exl3/kv/cuda_exl3_kvtier.zig").LaneSel = null,
     tail: cuda.DeviceBuffer,
     history: [2]i64,
     fed: usize,
@@ -517,7 +519,7 @@ pub const Seq = struct {
 
     /// The caches a batched pass reads and leaves; `scores` the engine's block scores (Engine.reserveScores).
     pub fn view(s: *Seq, scores: u64) batch.SeqState {
-        return .{ .media = if (s.media) |*m| m.view() else null, .conv = s.conv, .state = s.state, .kc = s.kc, .vc = s.vc, .ikc = s.ikc, .pooled = s.pooled, .tail = s.tail, .history = &s.history, .cap = s.cap, .scores = scores, .pg = s.pg() };
+        return .{ .media = if (s.media) |*m| m.view() else null, .conv = s.conv, .state = s.state, .kc = s.kc, .vc = s.vc, .ikc = s.ikc, .pooled = s.pooled, .tail = s.tail, .history = &s.history, .cap = s.cap, .scores = scores, .pg = s.pg(), .sel = s.sel };
     }
 
     /// The attention kernels' page argument (zero: contiguous caches).

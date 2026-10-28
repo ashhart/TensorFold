@@ -1,4 +1,4 @@
-//! Flash Next EXL3 launches (pick mask, prefill tiles in decode's bytes); nvcc 13.4 measured, older pending.
+//! Flash Next EXL3 launches (pick mask, prefill tiles, host-tier K/V); nvcc 13.4 measured, older pending.
 const std = @import("std");
 const limits = @import("limits.zig");
 const registry = @import("registry.zig");
@@ -18,6 +18,9 @@ pub const records = [_]registry.CudaRecord{
     .{ .launch = .{ .name = "exl3_candidate tf_exl3_promptd_0", .symbol = "tf_exl3_promptd_0", .image = "exl3_candidate", .threads = 256 }, .usage = registry.none },
     .{ .launch = .{ .name = "exl3_candidate tf_exl3_promptd_1", .symbol = "tf_exl3_promptd_1", .image = "exl3_candidate", .threads = 256 }, .usage = registry.none },
     .{ .launch = .{ .name = "exl3_candidate tf_exl3_promptd_2", .symbol = "tf_exl3_promptd_2", .image = "exl3_candidate", .threads = 256 }, .usage = registry.none },
+    .{ .launch = .{ .name = "flashnext_exl3_kvtier kvt_plan", .symbol = "kvt_plan", .image = "flashnext_exl3_kvtier", .threads = 1024 }, .usage = registry.none },
+    .{ .launch = .{ .name = "flashnext_exl3_kvtier kvt_fetch", .symbol = "kvt_fetch", .image = "flashnext_exl3_kvtier", .threads = 256 }, .usage = registry.none },
+    .{ .launch = .{ .name = "flashnext_exl3_kvtier kvt_remap", .symbol = "kvt_remap", .image = "flashnext_exl3_kvtier", .threads = 256 }, .usage = registry.none },
 };
 
 /// nvcc 13.4's measured registers, static shared bytes and launch bounds for sm_80, sm_86, sm_89, sm_120, sm_121.
@@ -35,6 +38,9 @@ pub const cuda_134 = [_]registry.Override{
     .{ .name = "exl3_candidate tf_exl3_promptd_0", .usage = .{ .{ .regs = 202, .static = 32768, .bound = 256 }, .{ .regs = 204, .static = 32768, .bound = 256 }, .{ .regs = 204, .static = 32768, .bound = 256 }, .{ .regs = 180, .static = 32768, .bound = 256 }, .{ .regs = 180, .static = 32768, .bound = 256 } } },
     .{ .name = "exl3_candidate tf_exl3_promptd_1", .usage = .{ .{ .regs = 202, .static = 32768, .bound = 256 }, .{ .regs = 204, .static = 32768, .bound = 256 }, .{ .regs = 204, .static = 32768, .bound = 256 }, .{ .regs = 180, .static = 32768, .bound = 256 }, .{ .regs = 180, .static = 32768, .bound = 256 } } },
     .{ .name = "exl3_candidate tf_exl3_promptd_2", .usage = .{ .{ .regs = 202, .static = 32768, .bound = 256 }, .{ .regs = 204, .static = 32768, .bound = 256 }, .{ .regs = 204, .static = 32768, .bound = 256 }, .{ .regs = 179, .static = 32768, .bound = 256 }, .{ .regs = 179, .static = 32768, .bound = 256 } } },
+    .{ .name = "flashnext_exl3_kvtier kvt_plan", .usage = .{ .{ .regs = 27, .static = 1056, .bound = 1024 }, .{ .regs = 27, .static = 1056, .bound = 1024 }, .{ .regs = 27, .static = 1056, .bound = 1024 }, .{ .regs = 34, .static = 1056, .bound = 1024 }, .{ .regs = 34, .static = 1056, .bound = 1024 } } },
+    .{ .name = "flashnext_exl3_kvtier kvt_fetch", .usage = .{ .{ .regs = 28, .static = 0, .bound = 256 }, .{ .regs = 28, .static = 0, .bound = 256 }, .{ .regs = 28, .static = 0, .bound = 256 }, .{ .regs = 28, .static = 0, .bound = 256 }, .{ .regs = 28, .static = 0, .bound = 256 } } },
+    .{ .name = "flashnext_exl3_kvtier kvt_remap", .usage = .{ .{ .regs = 19, .static = 4, .bound = 256 }, .{ .regs = 19, .static = 4, .bound = 256 }, .{ .regs = 19, .static = 4, .bound = 256 }, .{ .regs = 24, .static = 4, .bound = 256 }, .{ .regs = 24, .static = 4, .bound = 256 } } },
 };
 
 test "Flash Next EXL3 launches: pending below nvcc 13.4, measured 13.4 resources fit every SM launch limit" {

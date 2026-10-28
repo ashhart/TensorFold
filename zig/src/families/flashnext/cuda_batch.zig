@@ -369,12 +369,14 @@ pub fn Pass(comptime Tri: type) type {
             const ikc = self.seq.ikc[ai].ptr;
             const pooled = self.seq.pooled[ai].ptr;
             const pg = self.seq.pg;
+            const sl = self.seq.sel_layer + ai;
+            if (self.seq.sel) |t| try t.begin(self.stream, sl, self.pos0, n);
             if (self.seq.media) |m| try m.attn(self.stream, pa, at.pos, lw.q_scale.ptr, lw.k_scale.ptr, lw.i_scale.ptr, s.inv, at.q, kc, vc, at.iq, ikc, eps, n, pg) else try self.tri.attnPrep(pa, at.pos, lw.q_scale.ptr, lw.k_scale.ptr, lw.i_scale.ptr, s.inv, at.q, kc, vc, at.iq, ikc, s.dummy, s.dummy, eps, n, 0, pg);
             // attention.qsa_pool for the blocks these rows complete, then each block of rows' scores and attention
             if (self.seq.media) |m| try m.pooled(self.stream, ikc, pooled, at.pos, lw.ik_scale.ptr, s.inv, eps, n, pg) else try self.tri.qsaPool(ikc, pooled, at.pos, lw.ik_scale.ptr, s.inv, eps, n, pg);
             const nb = scoreStride(self.seq.cap);
             // prompt rows: selections for up to fused_rows rows, then one fused launch (chunks merged in the program)
-            const fused = n > att_rows and self.tri.fusedAttentionOwned();
+            const fused = n > att_rows and self.tri.fusedAttentionOwned() and self.seq.sel == null;
             const group: usize = if (fused) parts.fused_rows else att_rows;
             var g0: usize = 0;
             while (g0 < n) : (g0 += group) {
@@ -400,7 +402,9 @@ pub fn Pass(comptime Tri: type) type {
                     a.add(cint(top));
                     a.add(cint(ratio));
                     try cuda.launch.launch(self.k.select, .{ .grid = .{ .x = @intCast(m) }, .block = .{ .x = 1024 } }, self.stream, &a);
-                    if (!fused) {
+                    if (self.seq.sel) |t| {
+                        try @import("exl3/kv/cuda_exl3_kvtier.zig").attend(t, self, sl, .{ .q = at.q + r0 * q_heads * head_dim * 2, .ao = at.ao + r0 * out_k * 2, .kc = kc, .vc = vc, .pos = pos, .sel = sel, .m = m, .ends = ends, .first_row = self.pos0 + r0 });
+                    } else if (!fused) {
                         const chunks = cdiv(@min(ends, wt.dense_keys), 512);
                         try self.tri.attnChunks(at.q + r0 * q_heads * head_dim * 2, kc, vc, pos, s.po, s.pm, s.pl, s.qids, s.qnk, s.qspr, m, kv_heads, chunks, true, pg);
                         try self.tri.attnMerge(s.po, s.pm, s.pl, pos, at.ao + r0 * out_k * 2, s.qnk, s.qspr, m, kv_heads, true);

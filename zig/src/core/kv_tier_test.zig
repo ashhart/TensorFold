@@ -8,15 +8,15 @@ const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 const gpa = std.testing.allocator;
 
-const page_bytes = 8;
+pub const page_bytes = 8;
 
 /// A tier of `pages` logical pages and `frames` frames over a host store and a fake device.
-const Rig = struct {
+pub const Rig = struct {
     host: []u8,
     dev: []u8,
     tier: Tier,
 
-    fn open(r: *Rig, pages: usize, frames: usize) !void {
+    pub fn open(r: *Rig, pages: usize, frames: usize) !void {
         r.host = try gpa.alloc(u8, pages * page_bytes);
         errdefer gpa.free(r.host);
         @memset(r.host, 0);
@@ -26,23 +26,23 @@ const Rig = struct {
         try r.tier.init(gpa, r.host, frames, page_bytes);
     }
 
-    fn close(r: *Rig) void {
+    pub fn close(r: *Rig) void {
         r.tier.deinit();
         gpa.free(r.host);
         gpa.free(r.dev);
     }
 
-    fn frame(r: *Rig, f: u32) []u8 {
+    pub fn frame(r: *Rig, f: u32) []u8 {
         return r.dev[f * page_bytes ..][0..page_bytes];
     }
 
     /// A stream with `pages` pages covered and `frames` frames promised.
-    fn lease(r: *Rig, pages: usize, frames: usize) !Lease {
+    pub fn lease(r: *Rig, pages: usize, frames: usize) !Lease {
         return r.leaseLent(pages, frames, 0);
     }
 
     /// A stream that also has `lent` of its frames lent for its life.
-    fn leaseLent(r: *Rig, pages: usize, frames: usize, lent: usize) !Lease {
+    pub fn leaseLent(r: *Rig, pages: usize, frames: usize, lent: usize) !Lease {
         var l: Lease = .{};
         errdefer r.tier.finish(&l);
         try r.tier.reserve(&l, pages, frames);
@@ -52,20 +52,20 @@ const Rig = struct {
     }
 
     /// Pin `id`, copying its canonical rows in on a miss.
-    fn pin(r: *Rig, l: *Lease, id: u32) !kt.Fill {
+    pub fn pin(r: *Rig, l: *Lease, id: u32) !kt.Fill {
         const f = try r.tier.pin(l, id);
         if (f.miss) @memcpy(r.frame(f.frame), r.tier.host_page(id));
         return f;
     }
 
     /// Write `b` into every row byte of the pinned page and flush it to the host store.
-    fn write(r: *Rig, l: *const Lease, id: u32, b: u8) void {
+    pub fn write(r: *Rig, l: *const Lease, id: u32, b: u8) void {
         const tk = r.tier.resident(id).?;
         @memset(r.frame(tk.frame), b);
         r.tier.markDirty(l, id) catch unreachable;
     }
 
-    fn flush(r: *Rig, id: u32) void {
+    pub fn flush(r: *Rig, id: u32) void {
         const tk = r.tier.resident(id).?;
         @memcpy(r.tier.host_page(id), r.frame(tk.frame));
         r.tier.sync(id);
