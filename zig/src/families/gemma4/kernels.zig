@@ -7,6 +7,8 @@ const ple_source = @import("kernel_sources").gemma4_ple;
 const dense_source = @import("kernel_sources").gemma4_dense;
 /// Simdgroups the per-layer gate splits its K over (dense.metal).
 pub const gate_ksplit = 5;
+/// Rows a gate threadgroup takes; the grid's second axis counts the rows' blocks.
+pub const gate_rows = 32;
 const frags = @import("../../core/frags.zig");
 const cfg = @import("config.zig");
 
@@ -123,7 +125,7 @@ pub const Ple = struct {
     }
 
     /// dense.metal: the bf16 per-layer linears and the gate with its gelu epilogue.
-    pub const dense_text = "#define GATE_KS " ++ std.fmt.comptimePrint("{d}", .{gate_ksplit}) ++ "\n" ++ dense_source;
+    pub const dense_text = "#define GATE_KS " ++ std.fmt.comptimePrint("{d}", .{gate_ksplit}) ++ "\n#define GATE_ROWS " ++ std.fmt.comptimePrint("{d}", .{gate_rows}) ++ "\n" ++ dense_source;
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, geo: cfg.Geometry) !Ple {
         const text = try source(a, geo);
