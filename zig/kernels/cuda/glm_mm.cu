@@ -4,7 +4,7 @@
 #include <cuda_fp16.h>
 #include <stdint.h>
 
-#include "glm_qmm_frag.cuh"
+#include "common/qmm_frag.cuh"
 
 namespace {
 
