@@ -131,32 +131,43 @@ fn probe(a: std.mem.Allocator, clock: Elapsed, vendor: ?u32, timeout: u64) !bool
     var total: usize = 0;
     for (fx2.add_cases) |case| {
         total += 1;
-        passed += @intFromBool(try addGate(a, clock, &dev, &cmds, staging, &m, case, timeout));
+        passed += @intFromBool(guardedGate("residual-add", case.name, addGate, .{ a, clock, &dev, &cmds, staging, &m, case, timeout }));
     }
     for (fx2.swiglu_cases) |case| {
         total += 1;
-        passed += @intFromBool(try swigluGate(a, clock, &dev, &cmds, staging, &m, case, timeout));
+        passed += @intFromBool(guardedGate("swiglu", case.name, swigluGate, .{ a, clock, &dev, &cmds, staging, &m, case, timeout }));
     }
     for (fx2.rms_cases) |case| {
         total += 1;
-        passed += @intFromBool(try rmsGate(a, clock, &dev, &cmds, staging, &m, case, timeout));
+        passed += @intFromBool(guardedGate("rms-norm", case.name, rmsGate, .{ a, clock, &dev, &cmds, staging, &m, case, timeout }));
     }
     for (fx.preserve_cases) |case| {
         total += 1;
         const known_before = known_findings;
-        const ok = try preserveGate(a, clock, &dev, &cmds, staging, &preserve, case, timeout);
+        const ok = guardedGate("preserve-add", case.name, preserveGate, .{ a, clock, &dev, &cmds, staging, &preserve, case, timeout });
         passed += @intFromBool(ok and known_findings == known_before);
     }
     for (fx.gate_cases) |case| {
         total += 1;
-        passed += @intFromBool(try outputGate(a, clock, &dev, &cmds, staging, &gate, case, timeout));
+        passed += @intFromBool(guardedGate("output-gate", case.name, outputGate, .{ a, clock, &dev, &cmds, staging, &gate, case, timeout }));
     }
     for (fx.gated_cases) |case| {
         total += 1;
-        passed += @intFromBool(try gatedNormGate(a, clock, &dev, &cmds, staging, &gated, case, timeout));
+        passed += @intFromBool(guardedGate("gated-norm", case.name, gatedNormGate, .{ a, clock, &dev, &cmds, staging, &gated, case, timeout }));
     }
+    // The RESULT line always prints: a gate that raises (a refused shape, a plan error)
+    // is that case's FAIL, never the run's death.
     std.debug.print("RESULT contract-pointwise elapsed_ms={d} on \"{s}\": passed={d} known={d} total={d}\n", .{ clock.ms(), name, passed, known_findings, total });
     return passed + known_findings == total;
+}
+
+/// One case of one gate: an error the gate raises (a refused shape, a bad plan, a
+/// rejected binding) prints that case's FAIL and the run continues to the RESULT line.
+fn guardedGate(gate: []const u8, case_name: []const u8, comptime f: anytype, args: anytype) bool {
+    return @call(.auto, f, args) catch |e| blk: {
+        std.debug.print("FAIL {s} case=\"{s}\": {s}\n", .{ gate, case_name, @errorName(e) });
+        break :blk false;
+    };
 }
 
 /// Cases that ended as a KNOWN device finding (counted apart from passes).
@@ -385,13 +396,11 @@ fn preserveGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmd
     }
     const mm = f.firstMismatch(bits) catch |e| return reportFail("preserve-add", case.name, e);
     if (mm) |bad| {
-        std.debug.print("FAIL preserve-add case=\"{s}\": {s} at element {d}: a=0x{x:0>4} ({s}) b=0x{x:0>4} ({s}) want=0x{x:0>4} ({s}) got=0x{x:0>4} ({s})\n", .{ case.name, @errorName(bad.kind), bad.index, bad.a, fx.classify(bad.a), bad.b, fx.classify(bad.b), bad.want, fx.classify(bad.want), bad.got, fx.classify(bad.got) });
-        if (case.fill == .classes and isBf16Subnormal(bad.want)) {
-            std.debug.print("NOTE preserve-add: want is a bf16 subnormal whose f32 sum the pipeline must carry through fp32 denormals, and got differs — this device flushes fp32 denormals despite the requested DenormPreserve; the preserve gate fails here honestly by design\n", .{});
-        }
-        // KNOWN finding: every mismatch is a subnormal sum read as a same-signed zero AND the device reports
-        // no fp32 denormal preservation (the same device limit as the penalties denormal edge). Anything else
-        // (a device that claims preservation and flushes, a non-flush mismatch) stays a FAIL.
+        // A classes mismatch on a device that reports no f32 denormal preservation may be
+        // the known finding: every mismatch a subnormal sum read as the same-signed zero.
+        // That prints ONLY its KNOWN line (the reasoning folded into it); anything else —
+        // a device that claims preservation and flushes, a non-flush mismatch — keeps the
+        // FAIL, plus the NOTE when the want is a subnormal.
         if (case.fill == .classes and dev.v12.shaderDenormPreserveFloat32 == 0) {
             var flushes: usize = 0;
             var cur: ?@TypeOf(bad) = bad;
@@ -405,9 +414,13 @@ fn preserveGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmd
             }
             if (cur == null) {
                 known_findings += 1;
-                std.debug.print("KNOWN preserve-add case=\"{s}\": {d} subnormal sums read as zero; the device reports preserve32=false (shaderDenormPreserveFloat32 = 0) and flushes fp32 denormals, so the DenormPreserve image cannot keep them: recorded, not fitted\n", .{ case.name, flushes });
+                std.debug.print("KNOWN preserve-add case=\"{s}\": {d} subnormal sums read as zero, honest by design — the device reports preserve32=false (shaderDenormPreserveFloat32 = 0) and flushes fp32 denormals, so the DenormPreserve image cannot keep them: recorded, not fitted\n", .{ case.name, flushes });
                 return true;
             }
+        }
+        std.debug.print("FAIL preserve-add case=\"{s}\": {s} at element {d}: a=0x{x:0>4} ({s}) b=0x{x:0>4} ({s}) want=0x{x:0>4} ({s}) got=0x{x:0>4} ({s})\n", .{ case.name, @errorName(bad.kind), bad.index, bad.a, fx.classify(bad.a), bad.b, fx.classify(bad.b), bad.want, fx.classify(bad.want), bad.got, fx.classify(bad.got) });
+        if (case.fill == .classes and isBf16Subnormal(bad.want)) {
+            std.debug.print("NOTE preserve-add: want is a bf16 subnormal whose f32 sum the pipeline must carry through fp32 denormals, and got differs — this device flushes fp32 denormals despite the requested DenormPreserve; the preserve gate fails here honestly by design\n", .{});
         }
         return false;
     }
@@ -484,14 +497,16 @@ fn outputGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds:
     return true;
 }
 
-/// The gated RMSNorm: rows-family bound plus the stated mid budget.
+/// The gated RMSNorm: the production per-head geometry (gdn.gatedNorm's own dispatch:
+/// tokens x 16 one-workgroup head rows of 128, the [128] gain shared by every head),
+/// rows-family bound re-derived for the 128-wide reduction plus the stated mid budget.
 fn gatedNormGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, g: *vk.dispatch.Pipeline, case: fx.GatedCase, timeout: u64) !bool {
     const f = try fx.GatedNorm.init(a, case, 0x59ae);
     defer f.deinit();
-    const elems = case.rows * fx.gated_width;
+    const elems = case.tokens * fx.gated_width;
     var x = try boundShell(a, dev, cmds, staging, f.x, case.at.x, elems, timeout);
     defer x.buf.deinit();
-    var weight = try boundShell(a, dev, cmds, staging, f.weight, case.at.weight, fx.gated_width, timeout);
+    var weight = try boundShell(a, dev, cmds, staging, f.weight, case.at.weight, fx.gated_head_dim, timeout);
     defer weight.buf.deinit();
     var z = try boundShell(a, dev, cmds, staging, f.z, case.at.gate, elems, timeout);
     defer z.buf.deinit();
@@ -505,15 +520,17 @@ fn gatedNormGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cm
     for (0..repeats) |rep| {
         try vk.orExit(vk.upload(cmds, out.buf, 0, staging, std.mem.sliceAsBytes(f.out), timeout));
         try vk.orExit(g.bind(&.{ (try x.view()).bind(), (try weight.view()).bind(), (try z.view()).bind(), (try out.view()).bind() }));
-        const plan = try vk.gdn.gatedNormPlan(elems, elems, elems, fx.gated_width, case.rows, fx.gated_eps);
+        // The wrapper's own plan: out/y/z are tokens*2048 elements, the weight the [128]
+        // head row, rows = the TOKEN count, plan.rows = tokens*16 head rows.
+        const plan = try vk.gdn.gatedNormPlan(elems, elems, elems, fx.gated_head_dim, case.tokens, fx.gated_eps);
         var push: vk.params.Params = .{
             .operation = 0, // gated mode
-            .lhs_size = fx.gated_width, // per-column weight rows
-            .reduce_size = fx.gated_width,
+            .lhs_size = fx.gated_head_dim, // per-column weight within the head
+            .reduce_size = fx.gated_head_dim, // the 128-wide per-head row
             .output_size = plan.rows,
         };
         push.alpha = fx.gated_eps;
-        // One 256-thread workgroup per row, the wrapper's grid-stride row loop.
+        // One 256-thread workgroup per head row, the wrapper's grid-stride row loop.
         try vk.orExit(g.run(cmds, std.mem.asBytes(&push)[0..gated_push_bytes], try groups(plan.rows, 1, dev.properties.limits.maxComputeWorkGroupCount[0]), timeout));
         try fetch(cmds, staging, out.buf, std.mem.sliceAsBytes(bits), timeout);
         r = f.check(bits) catch |e| return reportFail("gated-norm", case.name, e);
@@ -538,14 +555,14 @@ fn gatedNormGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cm
         std.debug.print("FAIL gated-norm case=\"{s}\": an input binding changed\n", .{case.name});
         return false;
     }
-    if (case.zero_row) {
-        const zero_at = case.at.out + (case.rows - 1) * fx.gated_width;
+    if (case.zero_token) {
+        const zero_at = case.at.out + (case.tokens - 1) * fx.gated_width;
         for (bits[zero_at .. zero_at + fx.gated_width]) |gg| if (gg != 0x0000 and gg != 0x8000) {
-            std.debug.print("FAIL gated-norm case=\"{s}\": the zero row produced 0x{x:0>4}\n", .{ case.name, gg });
+            std.debug.print("FAIL gated-norm case=\"{s}\": the zero token produced 0x{x:0>4}\n", .{ case.name, gg });
             return false;
         };
     }
-    std.debug.print("MILESTONE gated-norm elapsed_ms={d} case=\"{s}\" rows={d} width={d} worst={d:.4} of bound at row {d} col {d}, repeats byte-identical, inputs and guards unchanged, planted nan/+inf/-inf refused{s}\n", .{ clock.ms(), case.name, case.rows, fx.gated_width, r.worst, r.row, r.col, if (case.zero_row) ", zero row exactly zero" else "" });
+    std.debug.print("MILESTONE gated-norm elapsed_ms={d} case=\"{s}\" tokens={d} head-rows={d} width={d} worst={d:.4} of bound at row {d} col {d}, repeats byte-identical, inputs and guards unchanged, planted nan/+inf/-inf refused{s}\n", .{ clock.ms(), case.name, case.tokens, case.tokens * fx.gated_heads, fx.gated_head_dim, r.worst, r.row, r.col, if (case.zero_token) ", zero token exactly zero" else "" });
     return true;
 }
 
