@@ -891,93 +891,89 @@ pub const Gdn = struct {
         }
     }
 
-    /// Device buffers at per-which fixed indices (uploadBuffers and run agree).
-    /// Inputs upload from the generated bits; outputs upload poison from out's
-    /// regions so a dead store survives as NaN into every gate.
-    fn uploadBuffers(f: *Gdn) !void {
+    /// One output's uploaded words: out's region at `start` when the fetch
+    /// downloads that output there, else fresh poison scratch (an output no
+    /// fetch reads). out is sliced only where prepare sized it, so a
+    /// mismatch is an error the gate reports, not a panic.
+    fn outWords(f: *Gdn, checked: bool, start: usize, words: usize) ![]u16 {
+        if (!checked) return f.allocU16(words, poison);
+        if (start > f.out_words or words > f.out_words - start) return error.OutputRegionOutOfRange;
+        return f.out[start .. start + words];
+    }
+
+    /// The words each device buffer takes, in buffer order: the inputs' bits
+    /// and the outputs' poison. The checked output of a kernel takes its
+    /// region of out, which prepare sized for it; every other output takes
+    /// fresh poison scratch, so out is only ever sliced where it was sized.
+    fn uploadWords(f: *Gdn, buf: *[16][]u16) !usize {
         const T = f.tokens;
+        var n: usize = 0;
         switch (f.which) {
             .split_soa, .split_g => {
-                // 0 conv_out, 1 a, 2 b, 3 dt, 4 a_log, 5 soa, 6 g, 7 beta;
-                // the checked output takes its poison from out, the others
-                // from scratch
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.conv_out_bits));
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.a_bits));
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.b_bits));
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.dt_bits));
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.a_log_bits));
-                const soa_words = if (f.which == .split_soa) f.out[0 .. 3 * T * linear_dim] else try f.allocU16(3 * T * linear_dim, poison);
-                _ = try f.devBuf(std.mem.sliceAsBytes(soa_words));
-                const g_words = if (f.which == .split_g) f.out[0 .. 2 * T * heads] else try f.allocU16(2 * T * heads, poison);
-                _ = try f.devBuf(std.mem.sliceAsBytes(g_words));
-                const beta_words = if (f.which == .split_soa) f.out[3 * T * linear_dim .. 3 * T * linear_dim + T * heads] else try f.allocU16(T * heads, poison);
-                _ = try f.devBuf(std.mem.sliceAsBytes(beta_words));
+                // 0 conv_out, 1 a, 2 b, 3 dt, 4 a_log, 5 soa, 6 g, 7 beta
+                buf[0..5].* = .{ f.conv_out_bits, f.a_bits, f.b_bits, f.dt_bits, f.a_log_bits };
+                n = 5;
+                buf[n] = try f.outWords(f.which == .split_soa, 0, 3 * T * linear_dim);
+                buf[n + 1] = try f.outWords(f.which == .split_g, 0, 2 * T * heads);
+                buf[n + 2] = try f.outWords(f.which == .split_soa, 3 * T * linear_dim, T * heads);
+                n += 3;
             },
             .conv_prefill => {
                 // 0 state_in, 1 qkv, 2 weight, 3 a, 4 b, 5 dt, 6 a_log,
                 // 7 conv_input, 8 conv_out, 9 soa, 10 g, 11 beta, 12 state_out
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.state_bits));
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.qkv_bits));
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.weight_bits));
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.a_bits));
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.b_bits));
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.dt_bits));
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.a_log_bits));
-                const conv_input = try f.allocU16((T + 3) * channels, poison);
-                _ = try f.devBuf(std.mem.sliceAsBytes(conv_input));
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.out[0 .. T * channels]));
-                const soa_words = try f.allocU16(3 * T * linear_dim, poison);
-                _ = try f.devBuf(std.mem.sliceAsBytes(soa_words));
-                const g_words = try f.allocU16(2 * T * heads, poison);
-                _ = try f.devBuf(std.mem.sliceAsBytes(g_words));
-                const beta_words = try f.allocU16(T * heads, poison);
-                _ = try f.devBuf(std.mem.sliceAsBytes(beta_words));
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.out[T * channels .. T * channels + 3 * channels]));
+                buf[0..7].* = .{ f.state_bits, f.qkv_bits, f.weight_bits, f.a_bits, f.b_bits, f.dt_bits, f.a_log_bits };
+                n = 7;
+                buf[n] = try f.outWords(false, 0, (T + 3) * channels);
+                buf[n + 1] = try f.outWords(true, 0, T * channels);
+                buf[n + 2] = try f.outWords(false, 0, 3 * T * linear_dim);
+                buf[n + 3] = try f.outWords(false, 0, 2 * T * heads);
+                buf[n + 4] = try f.outWords(false, 0, T * heads);
+                buf[n + 5] = try f.outWords(true, T * channels, 3 * channels);
+                n += 6;
             },
             .conv_decode => {
                 // 0 state_init, 1 state_a, 2 state_b, 3 x, 4 weight, 5 a, 6 b,
                 // 7 dt, 8 a_log, 9 activated, 10 soa, 11 g, 12 beta
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.state_init_bits));
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.state_swap_bits));
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.state_swap_bits));
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.qkv_bits));
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.weight_bits));
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.a_bits));
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.b_bits));
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.dt_bits));
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.a_log_bits));
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.out[0 .. T * channels]));
-                const soa_words = try f.allocU16(3 * T * linear_dim, poison);
-                _ = try f.devBuf(std.mem.sliceAsBytes(soa_words));
-                const g_words = try f.allocU16(2 * T * heads, poison);
-                _ = try f.devBuf(std.mem.sliceAsBytes(g_words));
-                const beta_words = try f.allocU16(T * heads, poison);
-                _ = try f.devBuf(std.mem.sliceAsBytes(beta_words));
+                buf[0..9].* = .{ f.state_init_bits, f.state_swap_bits, f.state_swap_bits, f.qkv_bits, f.weight_bits, f.a_bits, f.b_bits, f.dt_bits, f.a_log_bits };
+                n = 9;
+                buf[n] = try f.outWords(true, 0, T * channels);
+                buf[n + 1] = try f.outWords(false, 0, 3 * T * linear_dim);
+                buf[n + 2] = try f.outWords(false, 0, 2 * T * heads);
+                buf[n + 3] = try f.outWords(false, 0, T * heads);
+                n += 4;
             },
             .prefill_y, .prefill_state => {
                 // 0 soa, 1 g, 2 beta, 3 h0, 4 y, 5 hf, 6 snap?
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.soa_bits));
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.g_pairs));
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.beta_bits));
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.h0_bits));
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.out[0 .. T * linear_dim]));
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.out[0 .. 2 * state_elems]));
-                if (f.chunks > 1) _ = try f.devBuf(std.mem.sliceAsBytes(f.out[2 * state_elems .. 2 * state_elems * f.chunks]));
+                buf[0..4].* = .{ f.soa_bits, f.g_pairs, f.beta_bits, f.h0_bits };
+                n = 4;
+                buf[n] = try f.outWords(f.which == .prefill_y, 0, T * linear_dim);
+                buf[n + 1] = try f.outWords(f.which == .prefill_state, 0, 2 * state_elems);
+                n += 2;
+                if (f.chunks > 1) {
+                    buf[n] = try f.outWords(f.which == .prefill_state, 2 * state_elems, 2 * state_elems * (f.chunks - 1));
+                    n += 1;
+                }
             },
             .decode_y, .decode_state => {
                 // 0 soa, 1 a, 2 b, 3 a_log, 4 dt, 5 state_init, 6 state_a,
                 // 7 state_b, 8 y
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.soa_bits));
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.a_bits));
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.b_bits));
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.a_log_bits));
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.dt_bits));
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.state_init_bits));
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.state_swap_bits));
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.state_swap_bits));
-                _ = try f.devBuf(std.mem.sliceAsBytes(f.out[0 .. T * linear_dim]));
+                buf[0..8].* = .{ f.soa_bits, f.a_bits, f.b_bits, f.a_log_bits, f.dt_bits, f.state_init_bits, f.state_swap_bits, f.state_swap_bits };
+                n = 8;
+                buf[n] = try f.outWords(f.which == .decode_y, 0, T * linear_dim);
+                n += 1;
             },
         }
+        return n;
+    }
+
+    /// Device buffers at per-which fixed indices (uploadWords and run agree).
+    /// Inputs upload from the generated bits; a checked output uploads poison
+    /// from out's own region, so a dead store survives as NaN into every gate,
+    /// and an output no fetch reads uploads fresh poison scratch.
+    fn uploadBuffers(f: *Gdn) !void {
+        var words: [16][]u16 = undefined;
+        const n = try f.uploadWords(&words);
+        for (words[0..n]) |w| _ = try f.devBuf(std.mem.sliceAsBytes(w));
     }
 
     /// The f64 references over the generated bits, into want/mag, before any
@@ -1640,3 +1636,80 @@ test "gdn contract stress keeps f32 sums exact and makes fp16 miss by over 100x"
     try testing.expect(worst >= 100);
 }
 
+/// Whether the device buffer at `i` must take its words from out: the
+/// checked outputs the fetch downloads there, and nothing else.
+fn expectOut(which: Which, i: usize, chunks: usize) bool {
+    return switch (which) {
+        .split_soa => i == 5 or i == 7,
+        .split_g => i == 6,
+        .conv_prefill => i == 8 or i == 12,
+        .conv_decode => i == 9,
+        .prefill_y => i == 4,
+        .prefill_state => i == 5 or (i == 6 and chunks > 1),
+        .decode_y => i == 8,
+        .decode_state => false,
+    };
+}
+
+/// The device buffers every which uploads, so the fixed indices run() binds
+/// stay the ones uploadWords hands the device.
+fn expectCount(which: Which, chunks: usize) usize {
+    return switch (which) {
+        .split_soa, .split_g => 8,
+        .conv_prefill, .conv_decode => 13,
+        .prefill_y, .prefill_state => if (chunks > 1) 7 else 6,
+        .decode_y, .decode_state => 9,
+    };
+}
+
+test "gdn contract upload words: every upload inside the region prepare sized" {
+    for (std.enums.values(Which)) |which| {
+        var f = hostFixture(which);
+        defer f.deinit();
+        const s = spec(which);
+        // the shape sequence the gates drive: gate 1 and 2's small() shape,
+        // gate 3's served and edge shapes, gate 4's stress shape
+        var steps: [16]struct { shape: c.Shape, fill: rows.Fill } = undefined;
+        var ns: usize = 0;
+        var one = s.served[0];
+        one.rows = std.math.clamp(one.rows, 5, 8);
+        steps[ns] = .{ .shape = one, .fill = .nonfinite };
+        ns += 1;
+        one = s.served[0];
+        one.rows = std.math.clamp(one.rows, 1, 64);
+        steps[ns] = .{ .shape = one, .fill = .random };
+        ns += 1;
+        const list = try c.shapes(testing.allocator, s);
+        defer testing.allocator.free(list);
+        for (list) |sh| {
+            steps[ns] = .{ .shape = sh, .fill = .random };
+            ns += 1;
+        }
+        one = s.served[0];
+        one.rows = @min(one.rows, 4);
+        steps[ns] = .{ .shape = one, .fill = .stress };
+        ns += 1;
+
+        for (steps[0..ns]) |step| {
+            const prepared = f.prepareHost(step.shape, step.fill, 0x6764) catch |err| switch (err) {
+                // the fixture refuses this fill before any upload; the gate
+                // reports the error and the upload path is not reached
+                error.NonFiniteReference => continue,
+                else => return err,
+            };
+            const out_len = prepared orelse continue;
+            try testing.expect(out_len > 0);
+            // the upload path uploadBuffers takes, without a device
+            var words: [16][]u16 = undefined;
+            const n = try f.uploadWords(&words);
+            try testing.expectEqual(expectCount(which, f.chunks), n);
+            const lo = @intFromPtr(f.out.ptr);
+            const hi = lo + f.out.len * @sizeOf(u16);
+            for (words[0..n], 0..) |w, i| {
+                const at = @intFromPtr(w.ptr);
+                const in_out = at >= lo and at + w.len * @sizeOf(u16) <= hi;
+                try testing.expectEqual(expectOut(which, i, f.chunks), in_out);
+            }
+        }
+    }
+}
