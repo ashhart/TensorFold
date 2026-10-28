@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- [The runbook](RUNBOOK.md#prompt-prefill-share-and-budget) documents `TENSORFOLD_PREFILL_SHARE` and `TENSORFOLD_PREFILL_BUDGET`: what each accepts, its default, and how it trades a long prompt's finish against decoding streams' next rounds.
+
 - Kernel contract: Qwen4's dense activation check carries FP32 rounding through the stored BF16 SiLU before the up product, avoiding a false shape failure near a BF16 midpoint (#1547). Inference kernels are unchanged.
 
 - HIP: `-Dhip-relax-branches=true` (off by default) lets gfx1100 build the dot2 prompt tiles with Ubuntu's clang 21, which otherwise stops on a branch out of range (#1542, for #1521). It has not run on a gfx1100 GPU yet; with it off, every compile command is the same as before. Thanks to @AbrahamCete.
