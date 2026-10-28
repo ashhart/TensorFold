@@ -59,6 +59,7 @@ const Run = struct {
 };
 
 test "multirank: a rank that stops posting ends its peers' next gathers at the timeout, after every earlier gather matched" {
+    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest; // the shm wire: /dev/shm, a pinned proxy
     const t = std.testing;
     const l = try bootstrap.testListener();
     defer sock.close(l.fd);

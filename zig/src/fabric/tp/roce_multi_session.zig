@@ -75,6 +75,7 @@ fn probe(s: anytype, d: *const cuda.Driver) !bool {
 }
 
 test "multirank probe: one rank's mismatch leaves every rank without the wire; matches on every rank keep it on every rank" {
+    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest; // the shm wire: /dev/shm, a pinned proxy
     const sock = @import("sock.zig");
     const Vote = struct {
         port: u16,
