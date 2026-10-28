@@ -72,6 +72,8 @@ pub const Loaded = struct {
     layout: ?kv_pool.Layout = null,
     /// TF_QWEN_KV_SHARE: the family keeps prompts as pool pages itself; the host makes no prompt cache of its own.
     own_prompt_cache: bool = false,
+    /// TF_QWEN_KV_SHARE or TF_QWEN_KV_PAGES_ALL: every stream runs on the pool's pages; the engine's window sits idle.
+    all_on_pages: bool = false,
 };
 
 fn cacheBytes(e: *const E.Engine, cap: usize, test_tokens: usize) !usize {
@@ -150,6 +152,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .target = &l.target,
         .layout = if (page_tokens > 0) pages_mod.layout(e, o.context, page_tokens, 0, 0) else null,
         .own_prompt_cache = share_snaps > 0,
+        .all_on_pages = page_tokens > 0 and (share_snaps > 0 or pages_mod.pagedOnly()),
     };
 }
 

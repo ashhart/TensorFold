@@ -43,6 +43,11 @@ pub fn wrapped(comptime F: type, loaded: anytype, free: u32, stream_bytes: u64, 
     return served(planned, free, if (own) stream_bytes else loaded.stream_bytes, stream_bytes, room);
 }
 
+/// Every stream on the pool's pages, the engine's own window idle (Qwen's TF_QWEN_KV_SHARE and TF_QWEN_KV_PAGES_ALL).
+pub fn allOnPages(loaded: anytype) bool {
+    return if (comptime @hasField(@TypeOf(loaded), "all_on_pages")) loaded.all_on_pages else false;
+}
+
 /// Whether the family keeps prompts itself (qwen3_5's TF_QWEN_KV_SHARE): the host makes no prompt cache then.
 pub fn ownCache(loaded: anytype) bool {
     return if (comptime @hasField(@TypeOf(loaded), "own_prompt_cache")) loaded.own_prompt_cache else false;
@@ -123,8 +128,8 @@ pub fn store(comptime F: type, s: *api.prompt_cache.Store, target: anytype, k: K
 }
 
 /// The startup line's streams and cache.
-pub fn text(comptime F: type, a: Allocator, stream_bytes: u64, l: ?kv_pool.Layout, paged: ?Plan, engine_paged: bool, window: u64, k: Kept, kv8: bool) ![2][]const u8 {
-    const shape = if (paged) |p| (if (engine_paged) try std.fmt.allocPrint(a, "the engine's own and {d} more taking {d} pages of {d} rows ({d:.2} GiB) as they need them (enough for one at a {d}-token window), {d:.0} MiB fixed each", .{ p.lanes - 1, p.pages, l.?.page_tokens, toGib(p.pages * l.?.pageBytes()), window, @as(f64, @floatFromInt(l.?.fixed_bytes)) / (1 << 20) }) else try std.fmt.allocPrint(a, "the engine's own at a {d}-token window ({d:.2} GiB, in the model's), {d} more taking {d} pages of {d} rows ({d:.2} GiB) as they need them, {d:.0} MiB fixed each", .{ window, toGib(stream_bytes), p.lanes - 1, p.pages, l.?.page_tokens, toGib(p.pages * l.?.pageBytes()), @as(f64, @floatFromInt(l.?.fixed_bytes)) / (1 << 20) })) else try std.fmt.allocPrint(a, "{d:.2} GiB each at a {d}-token window{s}", .{ toGib(stream_bytes), window, if (kv8) " (fp8 caches)" else "" });
+pub fn text(comptime F: type, a: Allocator, stream_bytes: u64, l: ?kv_pool.Layout, paged: ?Plan, engine_paged: bool, all_on_pages: bool, window: u64, k: Kept, kv8: bool) ![2][]const u8 {
+    const shape = if (paged) |p| (if (all_on_pages) try std.fmt.allocPrint(a, "all {d} on {d} pages of {d} rows ({d:.2} GiB) as they need them, the engine's own window idle, {d:.0} MiB fixed each", .{ p.lanes, p.pages, l.?.page_tokens, toGib(p.pages * l.?.pageBytes()), @as(f64, @floatFromInt(l.?.fixed_bytes)) / (1 << 20) }) else if (engine_paged) try std.fmt.allocPrint(a, "the engine's own and {d} more taking {d} pages of {d} rows ({d:.2} GiB) as they need them (enough for one at a {d}-token window), {d:.0} MiB fixed each", .{ p.lanes - 1, p.pages, l.?.page_tokens, toGib(p.pages * l.?.pageBytes()), window, @as(f64, @floatFromInt(l.?.fixed_bytes)) / (1 << 20) }) else try std.fmt.allocPrint(a, "the engine's own at a {d}-token window ({d:.2} GiB, in the model's), {d} more taking {d} pages of {d} rows ({d:.2} GiB) as they need them, {d:.0} MiB fixed each", .{ window, toGib(stream_bytes), p.lanes - 1, p.pages, l.?.page_tokens, toGib(p.pages * l.?.pageBytes()), @as(f64, @floatFromInt(l.?.fixed_bytes)) / (1 << 20) })) else try std.fmt.allocPrint(a, "{d:.2} GiB each at a {d}-token window{s}", .{ toGib(stream_bytes), window, if (kv8) " (fp8 caches)" else "" });
     const placed = comptime @hasDecl(F, "snap_place"); // the startup line says where its prompt states went, and why
     const cache = if (k.copied == 0) ", no prompt cache" else if (k.host) try std.fmt.allocPrint(a, ", {s}a {d:.1} GiB prompt cache in host memory with {d:.0} MiB of device staging", .{ if (placed) "prompt states on host, the cache doesn't fit on the card: " else "", toGib(k.copied), @as(f64, @floatFromInt(k.snap_bytes)) / (1 << 20) }) else if (comptime @hasDecl(F, "snap_slots")) try std.fmt.allocPrint(a, ", {s}a prompt cache of {d} snapshot slots ({d:.1} GiB) and {d:.1} GiB of copied rows", .{ if (placed) "prompt states on device: " else "", k.snaps, toGib(k.snaps * k.snap_bytes), toGib(k.copied) }) else try std.fmt.allocPrint(a, ", a {d:.1} GiB prompt cache", .{toGib(k.copied)});
     return .{ shape, cache };
@@ -184,9 +189,9 @@ test "kv placement: a discrete card keeps prompt states when the asked cache fit
     const shared = .{ .ctx = @as(*anyopaque, &ctx), .host_snaps = false, .snap_bytes = @as(u64, 48 << 20), .layout = @as(?kv_pool.Layout, l), .free_streams = @as(u32, 1) };
     try std.testing.expectEqual(@as(?bool, false), try placeHost(Placing, a, shared, o, 12 << 30, 70000, 0, &problem));
     try std.testing.expectEqual(@as(?bool, true), try placeHost(Fixture, a, card, o, 70 << 30, 70000, 0, &problem));
-    const on_host = (try text(Placing, a, 1 << 30, l, null, false, 70000, .{ .snaps = 0, .copied = 8 << 30, .snap_bytes = 48 << 20, .host = true }, false))[1];
+    const on_host = (try text(Placing, a, 1 << 30, l, null, false, false, 70000, .{ .snaps = 0, .copied = 8 << 30, .snap_bytes = 48 << 20, .host = true }, false))[1];
     try std.testing.expect(std.mem.startsWith(u8, on_host, ", prompt states on host, the cache doesn't fit on the card: a 8.0 GiB"));
-    const on_device = (try text(Placing, a, 1 << 30, l, null, false, 70000, .{ .snaps = 64, .copied = 13 << 30, .snap_bytes = 48 << 20 }, false))[1];
+    const on_device = (try text(Placing, a, 1 << 30, l, null, false, false, 70000, .{ .snaps = 64, .copied = 13 << 30, .snap_bytes = 48 << 20 }, false))[1];
     try std.testing.expect(std.mem.startsWith(u8, on_device, ", prompt states on device: a prompt cache of 64 snapshot slots"));
 }
 const Copies = struct {
@@ -219,8 +224,12 @@ test "kv pages: an engine whose own rows are pages plans a window of them first,
     const floor = 17 * l.pageBytes();
     try std.testing.expectEqual(@as(?Plan, null), try plan(Owned, a, l, floor - 1, o, 8192, &problem, false, true));
     try std.testing.expect(std.mem.indexOf(u8, problem, "8192-token window") != null);
-    const shown = (try text(Owned, a, 180 << 20, l, p, true, 8192, .{ .snaps = 0, .copied = 4 << 30, .snap_bytes = 0 }, false))[0];
+    const shown = (try text(Owned, a, 180 << 20, l, p, true, false, 8192, .{ .snaps = 0, .copied = 4 << 30, .snap_bytes = 0 }, false))[0];
     try std.testing.expectEqualStrings("the engine's own and 3 more taking 68 pages of 512 rows (0.42 GiB) as they need them (enough for one at a 8192-token window), 180 MiB fixed each", shown);
+    // TF_QWEN_KV_SHARE: every stream on the pool's pages, the engine's window idle
+    const all = (try text(Owned, a, 180 << 20, l, p, false, true, 8192, .{ .snaps = 0, .copied = 4 << 30, .snap_bytes = 0 }, false))[0];
+    try std.testing.expectEqualStrings("all 4 on 68 pages of 512 rows (0.42 GiB) as they need them, the engine's own window idle, 180 MiB fixed each", all);
+    try std.testing.expect(allOnPages(.{ .all_on_pages = true }) and !allOnPages(.{ .layout = @as(?kv_pool.Layout, l) }));
     // the asked cache holds past the four windows' pages this room holds and a fixed part each, not a byte less
     const room = 4 * floor + 3 * (180 << 20) + (4 << 30);
     const loaded = .{ .layout = @as(?kv_pool.Layout, l), .engine_paged = true, .free_streams = @as(u32, 1) };
