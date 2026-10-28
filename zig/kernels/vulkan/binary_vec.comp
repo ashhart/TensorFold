@@ -1,0 +1,98 @@
+// Copyright © 2026 Joshua Warren / mlx-omarchy contributors.
+// SPDX-License-Identifier: MIT
+//
+// Reused from mlx-omarchy shaders/binary_vec.comp (MIT), comment-condensed.
+//
+// Four-wide bf16/f16 binary add/mul/div/sub: float math on widened
+// operands, one round to storage, dims == 0 modulo addressing
+// (size == count: direct, else index % size). A thread moves four
+// elements per 8-byte vector load. Host gate: count and both operand
+// sizes multiples of four (an 8-byte load would run past a smaller
+// scalar operand's binding) and every element offset 4-aligned.
+
+#version 460
+
+#ifdef USE_FP16
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#define STORAGE_VEC f16vec4
+#define LOAD_VEC(x) vec4(x)
+#define STORE_VEC(v) f16vec4(v)
+#else
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#define STORAGE_VEC u16vec4
+#define LOAD_VEC(x) uintBitsToFloat(uvec4(x) << 16u)
+uint16_t bf16_store(float value) {
+  uint bits = floatBitsToUint(value);
+  if (isnan(value)) {
+    return uint16_t((bits >> 16) | 0x40u);
+  }
+  return uint16_t((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16);
+}
+#define STORE_VEC(v) \
+  u16vec4(bf16_store(v.x), bf16_store(v.y), bf16_store(v.z), bf16_store(v.w))
+#endif
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer InputA {
+  STORAGE_VEC values[];
+} input_a;
+layout(set = 0, binding = 1, std430) readonly buffer InputB {
+  STORAGE_VEC values[];
+} input_b;
+layout(set = 0, binding = 2, std430) writeonly buffer Output {
+  STORAGE_VEC values[];
+} output_data;
+
+// Same push-constant block as elementwise.comp; only the first nine
+// words are read. count, sizes and offsets arrive in elements, divided
+// by four here.
+layout(push_constant) uniform Params {
+  uint count;
+  uint operation;
+  uint lhs_size;
+  uint rhs_size;
+  uint reduce_size;
+  uint output_size;
+  uint lhs_offset;
+  uint rhs_offset;
+  uint output_offset;
+} params;
+
+void main() {
+  uint vec_count = params.count / 4u;
+  uint lhs_vecs = params.lhs_size / 4u;
+  uint rhs_vecs = params.rhs_size / 4u;
+  uint index = gl_GlobalInvocationID.x;
+  uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  while (index < vec_count) {
+    uint lhs_index = params.lhs_offset / 4u +
+        (lhs_vecs == vec_count ? index : index % lhs_vecs);
+    uint rhs_index = params.rhs_offset / 4u +
+        (rhs_vecs == vec_count ? index : index % rhs_vecs);
+    vec4 lhs = LOAD_VEC(input_a.values[lhs_index]);
+    vec4 rhs = LOAD_VEC(input_b.values[rhs_index]);
+    vec4 value;
+    switch (params.operation) {
+      case 0u:
+        value = lhs + rhs;
+        break;
+      case 1u:
+        value = lhs * rhs;
+        break;
+      case 2u:
+        value = lhs / rhs;
+        break;
+      default:
+        value = lhs - rhs;
+        break;
+    }
+    output_data.values[params.output_offset / 4u + index] = STORE_VEC(value);
+    if (vec_count - index <= stride) {
+      break;
+    }
+    index += stride;
+  }
+}
