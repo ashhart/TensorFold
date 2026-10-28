@@ -31,7 +31,7 @@ pub fn lfm2(o: api.Open) ?[]const u8 {
 const lfm2_vision = "--vision: LFM2 reads the checkpoint's images through its own tower without the flag; " ++
     "serve it without --vision";
 
-/// A family takes --drafter only if it says so, and --learn-conversations only as Nemotron; null: `o` may open `F`.
+/// A family takes --drafter only if it says so, and --learn-conversations only as Nemotron, GLM or a kept_disk family.
 pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
     if (o.vision != null and !(@hasDecl(F, "Options") and @hasField(F.Options, "vision")))
         return "--vision: this CUDA family reads no images; serve it without --vision";
@@ -43,6 +43,8 @@ pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
     }
     // ahead of the drafter's and --learn-conversations' refusals (--spill-gib sets that flag), on a line of its own
     if (o.spill == .evicted and F != nemotron.native and @import("cuda_disk.zig").keptDisk(F) == null) return "--spill-gib keeps evicted states on disk for Nemotron, the Qwen hybrids and Flash Next only on CUDA: serve this model without it";
+    // GLM's disk store writes every rank's part between passes and stages nothing at eviction (cuda_glm_disk.attach)
+    if (F == @import("glm_cuda").native and (o.spill != .off or o.keep != null)) return "--spill-gib and --checkpoint-slots: GLM-5.3-Flash on CUDA keeps states on disk with --learn-conversations alone; serve it without them";
     if (o.drafter != null and !(@hasDecl(F, "takes_drafter") and F.takes_drafter)) {
         if (@hasDecl(F, "drafter_refusal")) return F.drafter_refusal; // a family without an MTP head says so itself
         return "--drafter loads a separate drafter, and this CUDA family drafts with its own MTP head: serve without --drafter";
@@ -202,13 +204,20 @@ test "prompt precision: int8 is refused unless a CUDA family consumes the option
     try std.testing.expect(family(Bf16, .{ .dir = "d", .model_type = "m" }) == null);
 }
 
-test "--spill-gib and --checkpoint-slots open the families with a disk image; the rest refuse them by name" {
+test "--spill-gib and --checkpoint-slots open Nemotron and the kept_disk families; GLM and the rest refuse them by name" {
     const spilled: api.Open = .{ .dir = "d", .model_type = "m", .learn = "/s", .learn_conversations = true, .spill = .evicted, .keep = 2 };
     try std.testing.expect(backend(spilled) == null);
     try std.testing.expect(family(nemotron.native, spilled) == null);
     try std.testing.expect(family(@import("qwen35").native, spilled) == null);
     try std.testing.expect(family(@import("qwen35").native_moe, spilled) == null);
     try std.testing.expect(family(@import("flashnext").native, spilled) == null);
+    const glm = @import("glm_cuda").native; // its states go to disk with --learn-conversations alone
+    try std.testing.expectStringStartsWith(family(glm, spilled) orelse "", "--spill-gib keeps evicted states");
+    const finish: api.Open = .{ .dir = "d", .model_type = "glm5_next", .learn = "/s", .learn_conversations = true, .spill = .finish };
+    try std.testing.expectStringStartsWith(family(glm, finish) orelse "", "--spill-gib and --checkpoint-slots: GLM");
+    const slots: api.Open = .{ .dir = "d", .model_type = "glm5_next", .learn = "/s", .learn_conversations = true, .keep = 2 };
+    try std.testing.expectStringStartsWith(family(glm, slots) orelse "", "--spill-gib and --checkpoint-slots: GLM");
+    try std.testing.expect(family(glm, .{ .dir = "d", .model_type = "glm5_next", .learn = "/s", .learn_conversations = true }) == null);
     const Other = struct {};
     try std.testing.expectStringStartsWith(family(Other, spilled) orelse "", "--spill-gib keeps evicted states");
     try std.testing.expectStringStartsWith(backend(.{ .dir = "d", .model_type = "m", .keep = 2 }) orelse "", "--checkpoint-slots sets how many");
