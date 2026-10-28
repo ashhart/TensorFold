@@ -102,6 +102,16 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const kernel_test = b.addTest(.{ .root_module = kernel_module });
     b.step("hip-kernel-build", "Compile the model-free kernels and their GPU tests without running them").dependOn(&kernel_test.step);
     b.step("hip-kernel-test", "Every model-free kernel against its host reference on the GPU").dependOn(&b.addRunArtifact(kernel_test).step);
+    const tune_module = b.createModule(.{ .root_source_file = b.path("zig/src/hip/affine_tune.zig"), .target = target, .link_libc = true });
+    tune_module.addIncludePath(.{ .cwd_relative = hip_include });
+    tune_module.addCSourceFile(.{ .file = b.path("zig/src/hip/device_arch.c"), .flags = &.{"-D__HIP_PLATFORM_AMD__"} });
+    tune_module.addImport("hip_kernels", objects);
+    tune_module.addImport("core", coreModule(b, target));
+    const tune_test = b.addTest(.{ .root_module = tune_module });
+    b.step("hip-affine-tune-build", "Compile the MLX affine prompt-tile timing step without running it").dependOn(&tune_test.step);
+    const tune_run = b.addRunArtifact(tune_test);
+    tune_run.has_side_effects = true; // timings: run every time, never from the cache
+    b.step("hip-affine-tune", "Time every MLX affine prompt tile the GPU has and propose table rows (-Dhip-arch)").dependOn(&tune_run.step);
     const stub_kernels = b.createModule(.{ .root_source_file = b.addWriteFiles().add("kernels.zig", stub) });
     const host = engineModules(b, b.graph.host, .Debug, stub_kernels, null);
     b.step("test-draft-hip-host", "HIP draft source metadata without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native, .filters = &.{"draft sources:"} })).step);
