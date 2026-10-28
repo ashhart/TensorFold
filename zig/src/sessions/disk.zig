@@ -36,6 +36,8 @@ pub const Options = struct {
     lanes: u32 = 4,
     /// delta files a chain may stack before a park writes the entry whole
     max_chain: u32 = 8,
+    /// Disposable serving namespace; persistent callers keep this false.
+    fresh_start: bool = false,
 };
 
 /// A piece of bounded state (rings, carries, taps): small, host bytes.
@@ -154,6 +156,7 @@ pub const Disk = struct {
         defer root.close(io);
         const dir = try root.createDirPathOpen(io, sub, .{ .open_options = .{ .iterate = true } });
         errdefer dir.close(io);
+        try @import("disk_namespace.zig").prepare(dir, io, opts.fresh_start);
         d.* = .{ .gpa = gpa, .io = io, .opts = opts, .dir = dir, .staging = try Staging.init(gpa, io, @max(2, opts.staging), up(opts.chunk)), .lanes = undefined };
         errdefer d.staging.deinit();
         d.lanes = try Lanes.start(gpa, io, &d.staging, @max(1, opts.lanes));
