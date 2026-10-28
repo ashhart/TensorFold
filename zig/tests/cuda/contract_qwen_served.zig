@@ -57,6 +57,7 @@ pub fn run(gpu: check.Gpu) !void {
     }
     try planRows(gpu, s);
     try @import("contract_qwen_mtp_rows.zig").fp64(gpu);
+    try @import("contract_qwen_rope_yarn.zig").run(gpu);
 }
 
 fn served(fns: cuda.moe.Fns, s: cuda.Stream, mode: ref.Mode, p: []const u64, rows: usize, variant: bool, params: u64) !void {

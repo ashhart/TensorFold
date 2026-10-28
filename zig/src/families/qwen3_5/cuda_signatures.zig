@@ -41,10 +41,10 @@ pub const attn_merge = Sig{ .name = "attn_merge", .handle = "e.fns.attn_merge", 
 pub const attn_gate = Sig{ .name = "attn_gate", .handle = "e.fns.attn_gate", .symbol = "tf_q35_attn_gate", .params = &.{ .geo, .ptr, .ptr, .ptr, .i32, .ptr, .ptr } };
 
 /// The rope: the queries rotated in place, the keys rotated and the values copied into the cache.
-pub const rope = Sig{ .name = "rope", .handle = "e.fns.rope", .symbol = "tf_q35_rope", .params = &.{ .geo, .ptr, .ptr, .ptr, .ptr, .ptr, .ptr, .i32, .ptr, .ptr } };
+pub const rope = Sig{ .name = "rope", .handle = "e.fns.rope", .symbol = "tf_q35_rope", .params = &.{ .geo, .ptr, .ptr, .ptr, .ptr, .ptr, .ptr, .i32, .ptr, .ptr, .ptr } };
 
 /// The e4m3 rope: the bf16 one's tiles in the e4m3 scales.
-pub const rope8 = Sig{ .name = "rope8", .handle = "e.fp8.rope", .symbol = "tf_q35_rope8", .params = &.{ .geo, .ptr, .ptr, .ptr, .ptr, .ptr, .ptr, .i32, .ptr, .ptr } };
+pub const rope8 = Sig{ .name = "rope8", .handle = "e.fp8.rope", .symbol = "tf_q35_rope8", .params = &.{ .geo, .ptr, .ptr, .ptr, .ptr, .ptr, .ptr, .i32, .ptr, .ptr, .ptr } };
 
 /// The draft frame's partial: the draft rows' own cache over the ring.
 pub const draft_partial = Sig{ .name = "draft_partial", .handle = "d.fns.attn_partial", .symbol = "tf_q35d_attn_partial", .params = &.{ .ptr, .ptr, .ptr, .ptr, .i32, .i32, .i32, .i32, .i32, .i32, .ptr, .ptr, .ptr } };
