@@ -1,0 +1,74 @@
+//! Vulkan launch declarations and unmeasured served-device rows; HIP's record tables use this same audit shape.
+const std = @import("std");
+const limits = @import("limits.zig");
+
+pub const Record = struct { launch: limits.VulkanLaunch, control_gate: ?u8 = null };
+
+/// Measured on the devices, never assumed: the LIMITS lines the runner prints from the live device
+/// (vkGetPhysicalDeviceProperties and the Vulkan 1.1 subgroup properties). All three chips ran Mesa 26.3.0-devel
+/// (git-9323171c12) Honeykrisp and reported the same values; they are listed per chip so a different chip or
+/// driver is a new row, not an edit of these.
+///   G13C (Apple M1 Max C0):  runner stderr sha256 21c6182cad39cf5f3c2dc9143f17880e08a1104a3cbc69dbe3589a344a19cf04
+///   G13G (Apple M1 B1):      runner stderr sha256 566f12088f47cde84bc05b5f84196fd8f0d1e41aa089ad8f8c251feba4b1ddad
+///   G14C (Apple M2 Max B1):  runner stderr sha256 b617429e198d6845c0aa2a432a9bbcbb14e59dd96ddbc134851ab43506c18851
+fn measuredRow(chip: []const u8) limits.VulkanDeviceLimits {
+    return .{
+        .chip = chip,
+        .max_compute_work_group_invocations = 1024,
+        .max_compute_work_group_size = .{ 1024, 1024, 64 },
+        .max_compute_shared_memory_size = 32768,
+        .max_storage_buffer_range = 2147483647,
+        .min_storage_buffer_offset_alignment = 16,
+        .subgroup_size = 32,
+    };
+}
+
+pub const devices = [_]limits.VulkanDeviceLimits{
+    measuredRow("G13C (M1 Max)"),
+    measuredRow("G13G (M1)"),
+    measuredRow("G14C (M2 Max)"),
+};
+
+pub const records = [_]Record{
+    .{ .launch = .{ .name = "qmm_bf16", .local_size = .{ 256, 1, 1 } } },
+    .{ .launch = .{ .name = "control:qmm_fmax_nonfinite", .local_size = .{ 256, 1, 1 } }, .control_gate = 1 },
+    .{ .launch = .{ .name = "control:atomic_sum", .local_size = .{ 256, 1, 1 } }, .control_gate = 2 },
+    .{ .launch = .{ .name = "control:scribble_input", .local_size = .{ 256, 1, 1 } }, .control_gate = 2 },
+    .{ .launch = .{ .name = "control:drop_tail", .local_size = .{ 256, 1, 1 } }, .control_gate = 3 },
+    .{ .launch = .{ .name = "control:fp16_accum", .local_size = .{ 256, 1, 1 } }, .control_gate = 4 },
+    .{ .launch = .{ .name = "control:over_limit", .local_size = .{ 2048, 1, 1 } }, .control_gate = 5 },
+};
+
+/// Every row must be measured before records can be considered audited.
+pub fn audit(row: limits.VulkanDeviceLimits) !usize {
+    var issues: usize = 0;
+    for (records) |record| {
+        if (!try limits.vulkanFits(record.launch, row)) issues += 1;
+    }
+    return issues;
+}
+
+test "an unmeasured chip is refused, never treated as permissive" {
+    try std.testing.expectError(error.Unmeasured, audit(.{ .chip = "not yet measured" }));
+    var partial = measuredRow("partial");
+    partial.subgroup_size = null;
+    try std.testing.expectError(error.Unmeasured, audit(partial));
+}
+
+test "every served chip fits every real launch and rejects only the planted over-limit control" {
+    for (devices) |device| try std.testing.expectEqual(@as(usize, 1), try audit(device));
+    for (devices) |device| for (records) |record| {
+        const fits = try limits.vulkanFits(record.launch, device);
+        try std.testing.expectEqual(record.control_gate != 5, fits);
+    };
+}
+
+test "the planted controls stay registered, one per gate, in gate order" {
+    const expected_gates = [_]u8{ 1, 2, 2, 3, 4, 5 };
+    var control_index: usize = 0;
+    for (records) |record| if (record.control_gate) |gate| {
+        try std.testing.expectEqual(expected_gates[control_index], gate);
+        control_index += 1;
+    };
+    try std.testing.expectEqual(expected_gates.len, control_index);
+}
