@@ -11,8 +11,8 @@ const Kernels = kern.Kernels;
 const Stream = cuda.Stream;
 const tail: cuda.norms.Tail = .{ .round = true }; // the norms' torch points: bf16(w * bf16(h * inv))
 
-/// A stream's rows in one forward: its slot, first position, tokens.
-pub const Chain = struct { slot: usize, p0: usize, tokens: []const u32 };
+/// A stream's rows in one forward: its slot, first position, tokens; a prompt chunk's tap rows keep their conv states.
+pub const Chain = struct { slot: usize, p0: usize, tokens: []const u32, taps: []const usize = &.{} };
 
 const Pass = struct {
     m: *const Model,
@@ -65,6 +65,10 @@ const Pass = struct {
         // a prompt chunk keeps its last row's state, a round each row's (a window keeps any prefix of its rows)
         const snap0: usize = if (p.prompt) p.rows - 1 else 0;
         try p.k.convRows(p.s, x.wide, cv.weight, state, mdl.slot_elems, x.slot, x.off, x.y, snaps, snap0, p.rows);
+        if (p.prompt) for (p.chains[0].taps, 0..) |r, j| { // the kernel again on row r: the same y, its states in tap j
+            const tap = x.tap + (j * mdl.slot_elems + index * 2 * c.hidden) * 2;
+            try p.k.convRows(p.s, x.wide + r * 3 * c.hidden * 2, cv.weight, state, mdl.slot_elems, x.slot + r * 4, x.off + r * 4, x.y + r * c.hidden * 2, tap, 0, 1);
+        };
         try p.sums(x.y, c.hidden);
         try p.project(cv.out, x.y, x.xs, x.r, p.rows, p.prompt);
     }
@@ -149,6 +153,8 @@ pub fn forward(m: *const Model, k: *const Kernels, s: Stream, chains: []const Ch
     for (chains) |ch| {
         if (ch.tokens.len == 0 or ch.slot >= m.slots or ch.p0 + ch.tokens.len > m.context) return error.BadChain;
         if (ch.p0 + ch.tokens.len > m.caps[ch.slot]) return error.PastPages;
+        if (ch.taps.len > 0 and (!prompt or ch.taps.len > mdl.max_taps)) return error.BadChain;
+        for (ch.taps) |r| if (r >= ch.tokens.len) return error.BadChain;
         rows += ch.tokens.len;
     }
     if (rows > @as(usize, if (prompt) mdl.prompt_rows else mdl.round_rows) or (prompt and chains.len != 1)) return error.BadWindow;
