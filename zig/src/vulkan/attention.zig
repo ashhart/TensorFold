@@ -228,7 +228,7 @@ pub const Attention = struct {
         // theta^(-i/32), the ASH pow(1e7, -i/32) form, to within exp/pow ulps.
         var p: params.Params = .{
             .count = plan.words,
-            .flags = 1 | 8, // forward, passthrough tail
+            .flags = rope_flags,
             .alpha = 1.0, // position = 1 * (t + base)
             .beta = @log(theta) / @as(f32, rotary_pairs),
             .dims = @intCast(rotary_pairs), // half_dims
@@ -240,6 +240,9 @@ pub const Attention = struct {
         try a.rope_bf16.run(cmds, std.mem.asBytes(&p), try groups(plan.words, a.rope_bf16.local[0], a.dev.properties.limits.maxComputeWorkGroupCount[0]), timeout_ns);
     }
 };
+
+/// ropeRun's push flags: bit0 forward, bit3 passthrough tail (fast_rope.comp).
+const rope_flags: u32 = 1 | 8;
 
 const RopeStrides = struct { in_head: u64, in_time: u64, out_head: u64, out_time: u64 };
 
@@ -357,4 +360,11 @@ test "gatePlan derives the word count and refuses torn rows" {
     try testing.expectError(error.Invalid, gatePlan(4 * 2048, 4 * 2048 + 1, 4 * 4096, 4));
     try testing.expectError(error.Invalid, gatePlan(4 * 2048, 4 * 2048, 4 * 4095, 4));
     try testing.expectError(error.Invalid, gatePlan(0, 0, 0, 0));
+}
+
+test "rope push flags match the masks the embedded rope shader actually tests" {
+    const src = @import("vulkan_comp_sources").fast_rope;
+    try testing.expectEqual(@as(u32, 1 | 8), rope_flags);
+    try testing.expect(std.mem.indexOf(u8, src, "(params.flags & 1u)") != null);
+    try testing.expect(std.mem.indexOf(u8, src, "(params.flags & 8u)") != null);
 }

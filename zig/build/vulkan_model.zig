@@ -106,7 +106,11 @@ pub fn steps(
             .{ .name = "core", .module = h.core },
         },
     }) });
-    all.dependOn(&b.addRunArtifact(probe_tests).step);
+    // TF_VULKAN_LOAD_DIR is not a cached input: the opt-in engine load reruns
+    // whenever the env changes, like TF_QWEN_DIR's loader in hip.zig.
+    const probe_run = b.addRunArtifact(probe_tests);
+    probe_run.has_side_effects = true;
+    all.dependOn(&probe_run.step);
     test_step.dependOn(all);
 }
 
