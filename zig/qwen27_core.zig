@@ -33,3 +33,6 @@ pub const bf16_topk_gpu = @import("bf16_topk_gpu");
 pub const tree_commit_gpu = @import("tree_commit_gpu");
 
 pub const tree_slots = @import("src/core/tree_slots.zig");
+
+/// The peer window and its seam kernel: the 27B's tensor-parallel exchange, and its one-Mac loopback.
+pub const pair = @import("src/core/pair_rows.zig");
