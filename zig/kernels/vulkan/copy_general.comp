@@ -1,0 +1,179 @@
+#version 460
+
+// From omarchy-mlx overlay/mlx/backend/omarchy/shaders/copy_general.comp at fde15c1ece69:
+
+// code unchanged, comments condensed.
+
+// Copyright © 2026 Joshua Warren and mlx-omarchy contributors; MIT License, full text in LICENSES/mlx-omarchy-MIT.txt.
+
+// Strided copy; USE_U32/U16/U64 bit-exact; USE_BOOL/U8 packed-byte atomicAnd/Or (scatter.comp).
+
+// USE_COMPLEX64: vec2 item copy; signed index math for negative-stride views (int32 span).
+
+// Honeykrisp: one straight-line per-thread load at a linear address.
+
+#ifdef USE_FP16
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#define STORAGE_TYPE float16_t
+#define LOAD_VALUE(x) float(x)
+#define STORE_VALUE(f) STORAGE_TYPE(f)
+#elif defined(USE_U32)
+#define STORAGE_TYPE uint
+#define LOAD_VALUE(x) (x)
+#define STORE_VALUE(x) (x)
+#elif defined(USE_BF16)
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#define STORAGE_TYPE uint16_t
+#define LOAD_VALUE(x) uintBitsToFloat(uint(x) << 16u)
+uint16_t bf16_store(float value) {
+  uint bits = floatBitsToUint(value);
+  if (isnan(value)) {
+    return uint16_t((bits >> 16) | 0x40u);
+  }
+  return uint16_t((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16);
+}
+#define STORE_VALUE(f) bf16_store(f)
+#elif defined(USE_COMPLEX64)
+// Complex64: vec2 (re,im) bit-exact like USE_U32; strides/offsets are item offsets.
+#define STORAGE_TYPE vec2
+#define LOAD_VALUE(x) (x)
+#define STORE_VALUE(f) STORAGE_TYPE(f)
+#elif defined(USE_BOOL) || defined(USE_U8)
+#define STORAGE_TYPE uint
+#define LOAD_VALUE(x) (x)
+#define STORE_VALUE(x) (x)
+#elif defined(USE_U16)
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#define STORAGE_TYPE uint16_t
+#define LOAD_VALUE(x) (x)
+#define STORE_VALUE(x) (x)
+#elif defined(USE_U64)
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#define STORAGE_TYPE uint64_t
+#define LOAD_VALUE(x) (x)
+#define STORE_VALUE(x) (x)
+#else
+#define STORAGE_TYPE float
+#define LOAD_VALUE(x) float(x)
+#define STORE_VALUE(f) STORAGE_TYPE(f)
+#endif
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer InputA {
+  STORAGE_TYPE values[];
+} input_a;
+layout(set = 0, binding = 1, std430) readonly buffer InputB {
+  STORAGE_TYPE values[];
+} input_b;
+#if defined(USE_BOOL) || defined(USE_U8)
+// Packed-byte dest uses atomics so binding is read-write.
+layout(set = 0, binding = 2, std430) buffer Output {
+  uint values[];
+} output_data;
+#else
+layout(set = 0, binding = 2, std430) writeonly buffer Output {
+  STORAGE_TYPE values[];
+} output_data;
+#endif
+
+layout(push_constant) uniform Params {
+  uint count;
+  uint operation;
+  uint lhs_size;
+  uint rhs_size;
+  uint reduce_size;
+  uint output_size;
+  uint lhs_offset;
+  uint rhs_offset;
+  uint output_offset;
+  uint aux_size;
+  uint aux_offset;
+  uint matrix_m;
+  uint matrix_n;
+  uint matrix_k;
+  uint flags;
+  float alpha;
+  float beta;
+  uint dims;
+  uint shape[4];
+  uint in_strides[4];
+  uint out_strides[4];
+} params;
+
+layout(set = 0, binding = 3, std430) readonly buffer AxisMetadata {
+  uint values[];
+} axis_data;
+
+uint axis_extent(uint index) {
+  return params.matrix_k == 0u ? params.shape[index] : axis_data.values[index];
+}
+
+uint in_stride_at(uint index) {
+  return params.matrix_k == 0u
+      ? params.in_strides[index]
+      : axis_data.values[params.matrix_k + index];
+}
+
+uint out_stride_at(uint index) {
+  return params.matrix_k == 0u
+      ? params.out_strides[index]
+      : axis_data.values[2u * params.matrix_k + index];
+}
+
+void main() {
+#if defined(USE_BOOL) || defined(USE_U8)
+  uint index = gl_GlobalInvocationID.x;
+  uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  while (index < params.count) {
+    uint rem = index;
+    int in_index = int(params.lhs_offset);
+    int out_index = int(params.output_offset);
+    for (int dim = int(params.dims) - 1; dim >= 0; --dim) {
+      uint coord = rem % axis_extent(uint(dim));
+      rem /= axis_extent(uint(dim));
+      in_index += int(coord) * int(in_stride_at(uint(dim)));
+      out_index += int(coord) * int(out_stride_at(uint(dim)));
+    }
+    uint word = input_a.values[in_index >> 2];
+    uint lane = uint(in_index & 3);
+    uint b = (lane == 0u)
+        ? (word & 0xFFu)
+        : (lane == 1u)
+        ? ((word >> 8u) & 0xFFu)
+        : (lane == 2u)
+        ? ((word >> 16u) & 0xFFu)
+        : ((word >> 24u) & 0xFFu);
+    uint shift = uint(out_index & 3) * 8u;
+    atomicAnd(output_data.values[out_index >> 2], ~(0xFFu << shift));
+    atomicOr(output_data.values[out_index >> 2], b << shift);
+    if (params.count - index <= stride) {
+      break;
+    }
+    index += stride;
+  }
+#else
+  uint index = gl_GlobalInvocationID.x;
+  uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  while (index < params.count) {
+    uint rem = index;
+    int in_index = int(params.lhs_offset);
+    int out_index = int(params.output_offset);
+    for (int dim = int(params.dims) - 1; dim >= 0; --dim) {
+      uint coord = rem % axis_extent(uint(dim));
+      rem /= axis_extent(uint(dim));
+      in_index += int(coord) * int(in_stride_at(uint(dim)));
+      out_index += int(coord) * int(out_stride_at(uint(dim)));
+    }
+    output_data.values[out_index] =
+        STORE_VALUE(LOAD_VALUE(input_a.values[in_index]));
+    if (params.count - index <= stride) {
+      break;
+    }
+    index += stride;
+  }
+#endif
+}
