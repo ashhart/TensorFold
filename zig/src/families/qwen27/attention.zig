@@ -118,15 +118,8 @@ pub const Scratch = struct {
     uploaded: ?[32]u8 = null,
     pub fn init(device: mtl.Device, limits: Limits) !Scratch {
         try validLimits(limits);
-        const hk: usize = limits.geometry.kv_heads;
-        const dim: usize = limits.geometry.dim;
-        const tiles = (limits.rows * limits.geometry.group() + 15) / 16 + limits.streams;
-        const chunks = @max((limits.keys + 511) / 512, (planning.fine_until + 128 + planning.fine_chunk - 1) / planning.fine_chunk); // fine chunks below fine_until
-        const rp: usize = tiles * 16;
-        const a: usize = if (limits.shared_prefix) hk * @as(usize, chunks) * rp else 0;
-        const tail_chunks = if (limits.shared_prefix) 3 else chunks; // a tail of up to 191 keys over 128-key chunks
-        const b: usize = hk * @as(usize, tail_chunks) * @as(usize, limits.rows) * 16;
-        const sizes = [_]usize{ tiles * 4, rp * 4, limits.rows * planning.node_words * 4, limits.rows * planning.path_width * 4, limits.rows * 4, hk * rp * dim * 2, hk * @as(usize, limits.rows) * 16 * dim * 2, a * dim * 4, a * 4, a * 4, b * dim * 4, b * 4, b * 4, limits.rows * hk * dim * 2, limits.rows * hk * dim * 2 };
+        const layout = @import("attention_memory.zig").Layout.init(limits);
+        const sizes = layout.sizes;
         comptime std.debug.assert(sizes.len == std.enums.values(Field).len);
         var buffers: [sizes.len]mtl.Buffer = undefined;
         var made: usize = 0;
@@ -135,7 +128,7 @@ pub const Scratch = struct {
             buffer.* = try device.buffer(@max(allocation_bytes, 16), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
             made += 1;
         }
-        return .{ .buffers = buffers, .limits = limits, .tiles = tiles, .chunks = chunks, .tail_chunks = tail_chunks };
+        return .{ .buffers = buffers, .limits = limits, .tiles = layout.tiles, .chunks = layout.chunks, .tail_chunks = layout.tail_chunks };
     }
     pub fn deinit(s: *Scratch) void {
         for (s.buffers) |buffer| buffer.deinit();

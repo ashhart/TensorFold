@@ -12,6 +12,8 @@ pub fn tests(b: *std.Build) void {
     b.step("test-qwen27-speed-host", "Prompt tap guards, attention admission and cache failure ownership").dependOn(&run.step);
     const fake = b.createModule(.{ .root_source_file = b.path("zig/src/qwen27_speed_metal.zig"), .target = b.graph.host });
     const core = b.createModule(.{ .root_source_file = b.path("zig/qwen27_speed_core.zig"), .target = b.graph.host, .imports = &.{.{ .name = "metal", .module = fake }} });
+    const memory = b.createModule(.{ .root_source_file = b.path("zig/src/qwen27_memory_test.zig"), .target = b.graph.host, .imports = &.{ .{ .name = "metal", .module = fake }, .{ .name = "core", .module = core } } });
+    b.step("test-qwen27-memory-host", "Prompt scratch and working-set fit without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = memory, .filters = &.{"qwen27 memory:"} })).step);
     const sources = b.createModule(.{ .root_source_file = b.addWriteFiles().add("qwen27-fake-source.zig", "pub const core_deltanet = \"\";\n"), .target = b.graph.host });
     const delta = b.createModule(.{ .root_source_file = b.path("zig/src/core/deltanet_kernels.zig"), .target = b.graph.host, .imports = &.{.{ .name = "metal", .module = fake }} });
     delta.addImport("kernel_sources", sources);

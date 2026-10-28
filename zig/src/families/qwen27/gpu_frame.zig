@@ -10,6 +10,24 @@ pub const Field = enum { ids, dims, positions, hidden, residual, input, sums, mi
 pub const max_rows = 2048;
 pub const logit_rows = 128;
 
+pub fn allocationSizes(config: Config, capacity: u32) [std.enums.values(Field).len]usize {
+    const mp = 16 * ((capacity + 15) / 16);
+    return .{
+        capacity * 4,                                                                       8 * 4,                                                                                                                                  3 * capacity * 4,
+        capacity * config.hidden * 2,                                                       capacity * config.hidden * 2,                                                                                                           capacity * config.hidden * 2,
+        mp * @max(config.hidden, @max(config.intermediate, config.gdnValueDim())) / 64 * 4, capacity * @max(config.gdnQkvDim(), @max(config.qDim(), @max(2 * config.intermediate, config.gdnValueDim() + 2 * config.v_heads))) * 2, capacity * config.gdnValueDim() * 2,
+        capacity * config.hidden * 2,                                                       capacity * config.gdnValueDim() * 2,                                                                                                    capacity * config.v_heads * 2,
+        capacity * config.v_heads * 2,                                                      capacity * config.heads * config.head_dim * 2,                                                                                          capacity * config.kvDim() * 2,
+        capacity * config.kvDim() * 2,                                                      capacity * config.heads * config.head_dim * 2,                                                                                          capacity * config.kvDim() * 2,
+        capacity * config.qDim() * 2,                                                       capacity * config.intermediate * 2,                                                                                                     capacity * config.intermediate * 2,
+        capacity * config.intermediate * 2,                                                 mp * config.intermediate / 64 * 4,                                                                                                      @min(capacity, logit_rows) * config.vocab * 2,
+        capacity * 4,                                                                       4,                                                                                                                                      capacity * 4,
+        capacity * config.conv_kernel * 4,                                                  capacity * 4,                                                                                                                           capacity * 16,
+        capacity * 16,                                                                      capacity * 4,                                                                                                                           capacity * config.kvDim() * 2,
+        capacity * 4,                                                                       capacity * @sizeOf(@import("core").tree_slots.Step),
+    };
+}
+
 pub const Frame = struct {
     buffers: [std.enums.values(Field).len]mtl.Buffer,
     capacity: u32,
@@ -17,21 +35,7 @@ pub const Frame = struct {
 
     pub fn init(device: mtl.Device, config: Config, capacity: u32) !Frame {
         if (capacity == 0 or capacity > max_rows) return error.BadFrameRows;
-        const mp = 16 * ((capacity + 15) / 16);
-        const widths = [_]usize{
-            capacity * 4,                                                                       8 * 4,                                                                                                                                  3 * capacity * 4,
-            capacity * config.hidden * 2,                                                       capacity * config.hidden * 2,                                                                                                           capacity * config.hidden * 2,
-            mp * @max(config.hidden, @max(config.intermediate, config.gdnValueDim())) / 64 * 4, capacity * @max(config.gdnQkvDim(), @max(config.qDim(), @max(2 * config.intermediate, config.gdnValueDim() + 2 * config.v_heads))) * 2, capacity * config.gdnValueDim() * 2,
-            capacity * config.hidden * 2,                                                       capacity * config.gdnValueDim() * 2,                                                                                                    capacity * config.v_heads * 2,
-            capacity * config.v_heads * 2,                                                      capacity * config.heads * config.head_dim * 2,                                                                                          capacity * config.kvDim() * 2,
-            capacity * config.kvDim() * 2,                                                      capacity * config.heads * config.head_dim * 2,                                                                                          capacity * config.kvDim() * 2,
-            capacity * config.qDim() * 2,                                                       capacity * config.intermediate * 2,                                                                                                     capacity * config.intermediate * 2,
-            capacity * config.intermediate * 2,                                                 mp * config.intermediate / 64 * 4,                                                                                                      @min(capacity, logit_rows) * config.vocab * 2,
-            capacity * 4,                                                                       4,                                                                                                                                      capacity * 4,
-            capacity * config.conv_kernel * 4,                                                  capacity * 4,                                                                                                                           capacity * 16,
-            capacity * 16,                                                                      capacity * 4,                                                                                                                           capacity * config.kvDim() * 2,
-            capacity * 4,                                                                       capacity * @sizeOf(@import("core").tree_slots.Step),
-        };
+        const widths = allocationSizes(config, capacity);
         comptime std.debug.assert(widths.len == std.enums.values(Field).len);
         var buffers: [widths.len]mtl.Buffer = undefined;
         var count: usize = 0;

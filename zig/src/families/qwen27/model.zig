@@ -86,7 +86,8 @@ pub const Model = struct {
         errdefer m.kernels.deinit();
         m.glue = try glue.Kernels.init(m.device);
         errdefer m.glue.deinit();
-        m.frame = try Frame.init(m.device, c, @max(rows, promptRows(m.device.generation())));
+        // Serving defers automatic widening until its context and streams are known; explicit widths stay exact.
+        m.frame = try Frame.init(m.device, c, @max(rows, promptRows(if (later) 0 else m.device.generation())));
         errdefer m.frame.deinit();
         m.ane = null;
         m.share_pending = true;

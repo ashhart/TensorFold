@@ -98,6 +98,10 @@ pub const Budget = struct {
         };
     }
 
+    pub fn allocationSizes(b: Budget) [12]usize {
+        return .{ b.state, b.history, b.history, b.projections, b.query, b.key, b.value, b.decay, b.mixing, b.snapshots, b.conv_tails, b.rows * b.shape.value * 2 };
+    }
+
     pub fn stateOffset(b: Budget, layer: usize, slot: usize) !usize {
         if (layer >= b.layers or slot >= b.slots) return error.BadGdnPoolIndex;
         return abi.countBytes(f32, b.shape.state, layer * b.slots + slot);
