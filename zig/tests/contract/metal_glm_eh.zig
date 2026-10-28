@@ -9,6 +9,61 @@ const c = contract.spec;
 const g = contract.gates;
 const Dense = contract.dense.Dense;
 
+/// One converted input row per reference call; products and both FP64 reduction orders stay unchanged.
+pub const RowReferenceCache = struct {
+    values: ?[]f64 = null,
+    row_index: ?usize = null,
+    slice_index: ?usize = null,
+
+    pub fn invalidate(self: *RowReferenceCache) void {
+        self.row_index = null;
+        self.slice_index = null;
+    }
+
+    pub fn deinit(self: *RowReferenceCache, a: std.mem.Allocator) void {
+        if (self.values) |values| a.free(values);
+        self.* = .{};
+    }
+
+    fn load(self: *RowReferenceCache, a: std.mem.Allocator, d: Dense, slice: usize, row: usize) ![]const f64 {
+        const per = d.shape.k / d.slices;
+        if (self.values == null or self.values.?.len != per) {
+            if (self.values) |values| a.free(values);
+            self.values = null;
+            self.invalidate();
+            self.values = try a.alloc(f64, per);
+        }
+        if (self.row_index != row or self.slice_index != slice) {
+            for (self.values.?, slice * per..) |*value, i| value.* = c.fromBf16(d.x[row * d.shape.k + i]);
+            self.row_index = row;
+            self.slice_index = slice;
+        }
+        return self.values.?;
+    }
+
+    pub fn reference(self: *RowReferenceCache, a: std.mem.Allocator, d: Dense, want: []f64, mag: []f64) !void {
+        self.invalidate();
+        const per = d.shape.k / d.slices;
+        const terms = try a.alloc(f64, per);
+        defer a.free(terms);
+        for (0..d.slices) |slice| for (0..d.shape.rows) |row| {
+            const x = try self.load(a, d, slice, row);
+            for (0..d.shape.n) |column| {
+                for (terms, x, slice * per..) |*term, value, i| term.* = value * d.w[column * d.shape.k + i];
+                var sum: f64 = 0;
+                var magnitude: f64 = 0;
+                for (terms) |term| {
+                    sum += term;
+                    magnitude += @abs(term);
+                }
+                const at = (slice * d.shape.rows + row) * d.shape.n + column;
+                want[at] = sum;
+                mag[at] = magnitude;
+            }
+        };
+    }
+};
+
 /// One 8-wide MMA step a k-tile (products round entering the fp32 dot); tail guard: k/8 steps at k = 8192.
 fn depth(s: c.Shape) usize {
     return s.k / 8 + 8;
@@ -59,6 +114,7 @@ pub const Nax = struct {
     x: rig_.Ref = undefined,
     w: rig_.Ref = undefined,
     out: rig_.Ref = undefined,
+    reference_cache: RowReferenceCache = .{},
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue) !Nax {
         // The engine's compilation unit: wide.zig's gather_source (projection, glue math, rows, gather).
@@ -70,6 +126,7 @@ pub const Nax = struct {
     }
 
     pub fn deinit(self: *Nax) void {
+        self.reference_cache.deinit(self.a);
         if (self.d) |d| d.deinit();
         self.rig.deinit();
         self.pipe.deinit();
@@ -82,6 +139,7 @@ pub const Nax = struct {
     const vt = g.hooks(Nax);
 
     pub fn prepare(self: *Nax, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
+        self.reference_cache.invalidate();
         if (shape.rows == 0 or shape.n == 0 or shape.k == 0 or shape.n % 64 != 0) return false;
         if (self.d) |d| d.deinit();
         self.d = null;
@@ -136,6 +194,10 @@ pub const Nax = struct {
     }
 
     pub fn reference(self: *Nax, want: []f64, mag: []f64) !void {
+        return self.reference_cache.reference(self.a, self.d.?, want, mag);
+    }
+
+    pub fn referenceUncached(self: *Nax, want: []f64, mag: []f64) !void {
         return self.d.?.reference(want, mag);
     }
 
@@ -143,3 +205,66 @@ pub const Nax = struct {
         return self.d.?.simulate(acc, order, out);
     }
 };
+
+fn checkReferenceCache(cache: *RowReferenceCache, a: std.mem.Allocator, d: Dense) !void {
+    const n = d.outputs();
+    const buffers = try a.alloc(f64, n * 4);
+    defer a.free(buffers);
+    const want = buffers[0..n];
+    const mag = buffers[n .. 2 * n];
+    const cached_want = buffers[2 * n .. 3 * n];
+    const cached_mag = buffers[3 * n ..];
+    try d.reference(want, mag);
+    try cache.reference(a, d, cached_want, cached_mag);
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(want), std.mem.sliceAsBytes(cached_want));
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(mag), std.mem.sliceAsBytes(cached_mag));
+}
+
+test "GLM eh reference cache preserves FP64 bytes in changing shape and fill orders" {
+    const a = std.testing.allocator;
+    var cache: RowReferenceCache = .{};
+    defer cache.deinit(a);
+    const shapes = [_]c.Shape{
+        .{ .rows = 1, .n = 3, .k = 32 },
+        .{ .rows = 5, .n = 64, .k = 128 },
+        .{ .rows = 3, .n = 8, .k = 512 },
+        .{ .rows = 4, .n = 64, .k = 8192 },
+    };
+    for ([_]usize{ 3, 0, 2, 1, 0, 3 }, 0..) |index, turn| {
+        for ([_]g.Fill{ .random, .nonfinite, .stress }) |fill| {
+            const d = try Dense.init(a, shapes[index], if (index == 2) 2 else 1);
+            defer d.deinit();
+            const seed = 0x6d + turn;
+            d.fillX(fill, seed, 2);
+            var random = std.Random.DefaultPrng.init(seed ^ 0x6d);
+            const rng = random.random();
+            for (d.w) |*weight| weight.* = rng.float(f64) * 2 - 1;
+            if (fill == .stress) for (0..d.shape.n) |column| for (0..d.shape.k / 2) |i| {
+                const weight: f64 = @floatFromInt(1 + rng.uintLessThan(u32, 7));
+                d.w[column * d.shape.k + i] = weight;
+                d.w[column * d.shape.k + d.shape.k / 2 + i] = -weight;
+            };
+            try checkReferenceCache(&cache, a, d);
+            cache.invalidate();
+            try checkReferenceCache(&cache, a, d);
+        }
+    }
+}
+
+test "GLM eh reference cache invalidates a one-row fixture after input mutation" {
+    const a = std.testing.allocator;
+    var cache: RowReferenceCache = .{};
+    defer cache.deinit(a);
+    const d = try Dense.init(a, .{ .rows = 1, .n = 2, .k = 64 }, 1);
+    defer d.deinit();
+    @memset(d.x, c.toBf16(1));
+    @memset(d.w, 1);
+    var want: [2]f64 = undefined;
+    var mag: [2]f64 = undefined;
+    try cache.reference(a, d, &want, &mag);
+    try std.testing.expectEqual(@as(f64, 64), want[0]);
+    d.x[0] = c.toBf16(8);
+    try cache.reference(a, d, &want, &mag);
+    try std.testing.expectEqual(@as(f64, 71), want[0]);
+    try checkReferenceCache(&cache, a, d);
+}
