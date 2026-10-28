@@ -13,3 +13,7 @@ test {
     _ = @import("core").exl3_layout;
     _ = @import("core").exl3_load;
 }
+
+test {
+    _ = @import("dsq_storage_test.zig");
+}
