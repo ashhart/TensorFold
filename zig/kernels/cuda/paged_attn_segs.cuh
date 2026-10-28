@@ -1,6 +1,9 @@
 // Paged shared-window chunk/merge bodies shared by families (Nemotron head 128, LFM2 head 64); SEG_* set the form.
 
 #define SEG_E (SEG_WIDE ? 8 : 4)
+#ifndef SEG_VLANE
+#define SEG_VLANE 0  // 1 in contract_controls.cu only: the narrow form reads its values from the neighbouring lane's dims
+#endif
 
 extern "C" __global__ void __launch_bounds__(256) SEG_CHUNK(const AttnSegs sg, const __nv_bfloat16* __restrict__ QKV,
                                                                             float* __restrict__ PO, float* __restrict__ PM, float* __restrict__ PL,
@@ -81,7 +84,7 @@ extern "C" __global__ void __launch_bounds__(256) SEG_CHUNK(const AttnSegs sg, c
 #pragma unroll
                 for (int e = 0; e < 4; ++e) {
 #else
-                const uint2 v = *reinterpret_cast<const uint2*>(&vw[j][2 * jj]);
+                const uint2 v = *reinterpret_cast<const uint2*>(&vw[j][2 * (jj ^ SEG_VLANE)]);
                 const uint32_t vv[2] = {v.x, v.y};
 #pragma unroll
                 for (int e = 0; e < 2; ++e) {
@@ -156,6 +159,7 @@ extern "C" __global__ void __launch_bounds__(256) SEG_MERGE(const AttnSegs sg, c
 }
 
 #undef SEG_E
+#undef SEG_VLANE
 #undef SEG_HD
 #undef SEG_KW
 #undef SEG_WIDE
