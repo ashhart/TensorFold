@@ -75,9 +75,10 @@ __device__ __forceinline__ void fold_ring(const __nv_bfloat16* rk, const __nv_bf
 using namespace tf_q36m;
 
 // A warp a (row, head): RMS norm, rope on [0, ROT) as pairs (i, i + 32) at pos0 + row * step; OUT (rows, heads, HD)
+// Y (null: theta's plain rope): YaRN's attention factor, then its 32 frequencies, as the target's rope takes them.
 extern "C" __global__ void __launch_bounds__(32) tf_q36m_norm_rope(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ W,
                                                                      __nv_bfloat16* __restrict__ OUT, int heads, int stride, int in_head,
-                                                                     long long pos0, int step, float eps, float theta) {
+                                                                     long long pos0, int step, float eps, float theta, const float* __restrict__ Y) {
     const int head = blockIdx.x % heads;
     const size_t m = blockIdx.x / heads;
     const int t = threadIdx.x;
@@ -103,9 +104,14 @@ extern "C" __global__ void __launch_bounds__(32) tf_q36m_norm_rope(const __nv_bf
         float r = n[i];
         if (d < ROT) {
             const int j = d < ROT / 2 ? d : d - ROT / 2;
-            const float angle = pos * powf(theta, -(float)j / (float)(ROT / 2));
+            const float freq = Y != nullptr ? Y[1 + j] : powf(theta, -(float)j / (float)(ROT / 2));
+            const float angle = pos * freq;
             float sn, cs;
             sincosf(angle, &sn, &cs);
+            if (Y != nullptr) {
+                cs *= Y[0];
+                sn *= Y[0];
+            }
             r = d < ROT / 2 ? n[i] * cs - partner * sn : n[i] * cs + partner * sn;
         }
         out[d] = __float2bfloat16_rn(r);
