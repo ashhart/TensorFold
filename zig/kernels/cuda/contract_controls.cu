@@ -365,3 +365,17 @@ extern "C" __global__ void __launch_bounds__(128) tf_ctl_pocket_in_fmax(const __
         act[static_cast<int64_t>(r) * 64 + j] = z * z;
     }
 }
+
+// Gate 3: main's grouped EXL3 loop, the baseline its load-ahead replaces, and two load-ahead faults that must go red.
+#include "exl3_grouped.cuh"
+
+#define TF_CTL_EXL3_GROUPED(NAME, CB, LOAD)                                                                       \
+    extern "C" __global__ void NAME(tf_exl3::GroupedArgs a) {                                                  \
+        tf_exl3::grouped_body<CB, 8, 4, LOAD>(a, blockIdx.x, blockIdx.y, blockIdx.z);                          \
+    }
+TF_CTL_EXL3_GROUPED(tf_ctl_exl3_grouped_old_0, 0, tf_exl3::PLAIN)
+TF_CTL_EXL3_GROUPED(tf_ctl_exl3_grouped_old_1, 1, tf_exl3::PLAIN)
+TF_CTL_EXL3_GROUPED(tf_ctl_exl3_grouped_old_2, 2, tf_exl3::PLAIN)
+TF_CTL_EXL3_GROUPED(tf_ctl_exl3_grouped_skip, 2, tf_exl3::SKIP)
+TF_CTL_EXL3_GROUPED(tf_ctl_exl3_grouped_stale, 2, tf_exl3::STALE)
+#undef TF_CTL_EXL3_GROUPED
