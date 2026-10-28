@@ -44,7 +44,14 @@ rows into a free one. With the pack filling most of a Spark, give the cache room
 ## Two Sparks
 
 Rank 1 follows rank 0 over the plan link; start it first, then the server. Both need the same build and checkpoint
-path. With rank 0's fabric address 192.0.2.1:
+path. The checkpoint, at the revision validated:
+
+```bash
+hf download ajensenwaud/MiMo-V2.6-Flash-RL-exl3-3.0bpw --revision 139d9a4e1eb32193890036fdddd521fe37033a30 \
+  --local-dir /models/mimo-v2.6-flash-exl3
+```
+
+With rank 0's fabric address 192.0.2.1:
 
 ```bash
 # rank 1
@@ -69,13 +76,18 @@ comes from its own acceptance rate, priced with a round cost that grows with its
 
 ## Licences and sources
 
-- Model: Xiaomi's `XiaomiMiMo/MiMo-V2.6-Flash-RL` on Hugging Face, MIT (its model card). The packs below are
-  converted from its revision `5711b268`.
-- Pack: `ajensenwaud/MiMo-V2.6-Flash-RL-exl3-3.0bpw`, MIT as its source, quantised from that revision with
-  exllamav3 v1.6.0 (`turboderp-org/exllamav3`, MIT): `-b 3.0 -hb 8 -mb 4 -hq -cr 250 -cc 2048 -cb mul1`.
-- benthecarman's 2.27 bpw pack, `benthecarman/MiMo-V2.6-Flash-RL-exl3` (MIT), is not yet validated with this
-  family. It fits one GB10, which is refused until one rank has its own receipts.
+- Model: Xiaomi's `XiaomiMiMo/MiMo-V2.6-Flash-RL` on Hugging Face, MIT (its model card), at revision
+  `5711b268169967567844e1e560e8a3966da959b1`. The packs below are converted from it. The repository's later
+  revision `dcd3fd83fb181622fbc606fbb1709901982a62c2` changes only `preprocessor_config.json` (vision).
+- Pack: `ajensenwaud/MiMo-V2.6-Flash-RL-exl3-3.0bpw` at revision `139d9a4e1eb32193890036fdddd521fe37033a30`
+  (the weights as uploaded in `f2d8d100101b5d8ed09761a33ddd28f277407b41`, plus the model card), MIT as its source,
+  quantised from the model's revision above with exllamav3 v1.6.0 (`turboderp-org/exllamav3`, MIT):
+  `-b 3.0 -hb 8 -mb 4 -hq -cr 250 -cc 2048 -cb mul1`. Every receipt is on this pack.
+- benthecarman's 2.27 bpw pack, `benthecarman/MiMo-V2.6-Flash-RL-exl3` at revision
+  `5ae87b830eb950c705967aea6130601a8e1f74a5` (MIT), is not yet validated with this family. It fits one GB10,
+  which is refused until one rank has its own receipts.
 - Drafter: Xiaomi's DFlash drafter, published in the model repository's `dflash/` folder under its MIT licence.
   The packs' `dflash/` is that drafter as benthecarman repaired it to load and quantised it to 4 bpw EXL3
-  (`benthecarman/MiMo-V2.6-Flash-RL-exl3` at `5ae87b83`); the 3.0 bpw pack carries the same file unchanged.
+  (`benthecarman/MiMo-V2.6-Flash-RL-exl3` at `5ae87b830eb950c705967aea6130601a8e1f74a5`); the 3.0 bpw pack
+  carries the same file unchanged.
   DFlash, the drafting method and its reference code, is z-lab's (`z-lab/dflash`, MIT).
