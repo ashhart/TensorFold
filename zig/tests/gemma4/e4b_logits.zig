@@ -29,6 +29,7 @@ pub fn main(init: std.process.Init) !void {
     const out = args.next() orelse return error.Usage;
     const width = if (args.next()) |a| try std.fmt.parseInt(usize, a, 10) else 16; // rows a window
     const only = args.next();
+    const tile = std.c.getenv("E4B_TILE") != null;
     if (width == 0 or width > g4.state.prompt_rows) return error.Usage;
     const cwd = std.Io.Dir.cwd();
     try cwd.createDirPath(io, out);
@@ -61,6 +62,17 @@ pub fn main(init: std.process.Init) !void {
         const first = r.prompt_ids.len - 1; // the position whose logits predict the first generated token
         const t1 = std.c.mach_absolute_time();
         var at: usize = 0;
+        var ps: ?g4.prompt.Scratch = if (tile) try g4.prompt.Scratch.init(m.device, m.config.geo, capacity) else null;
+        defer if (ps) |*p| p.deinit();
+        if (ps) |*p| { // E4B_TILE=1: the prompt in chunks of 512 on affine_mm's tiles, then decode windows over the rest
+            while (at < r.prompt_ids.len) {
+                const end = @min(at + g4.state.chunk_rows, r.prompt_ids.len);
+                try g4.prompt.run(m, p, &cache, ids[at..end], &.{});
+                at = end;
+            }
+            const got = p.logits.slice(u16, vocab);
+            for (rows[0..vocab], got) |*f, b| f.* = @bitCast(@as(u32, b) << 16);
+        }
         while (at < ids.len) : (at += width) {
             const end = @min(at + width, ids.len);
             try g4.forward.window(m, &s, &cache, ids[at..end], at);

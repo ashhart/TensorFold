@@ -69,7 +69,7 @@ fn projectStack(m: *Model, s: *state.Scratch, e: mtl.ComputeEncoder, st: *const 
 }
 
 /// The sums a producing kernel writes: s.sums with the window's rows as stride.
-fn sumsOut(e: mtl.ComputeEncoder, s: *state.Scratch, rows: usize, index: usize) void {
+fn sumsOut(e: mtl.ComputeEncoder, s: anytype, rows: usize, index: usize) void {
     e.setBuffer(s.sums, 0, index);
     e.setValue(@as(i32, @intCast(rows)), index + 1);
 }
@@ -190,7 +190,7 @@ fn denseBf16(e: mtl.ComputeEncoder, pk: *const kernels.Ple, x: mtl.Buffer, d: we
 }
 
 /// The E-series' per-layer inputs of the window's rows, into s.ple.pli.
-pub fn pleInputs(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, pk: *const kernels.Ple, rows: usize) void {
+pub fn pleInputs(m: *Model, e: mtl.ComputeEncoder, s: anytype, pk: *const kernels.Ple, rows: usize) void {
     const geo = m.config.geo;
     const t = m.weights.ple.?;
     const sp = s.ple.?;
@@ -229,7 +229,7 @@ pub fn tapOut(e: mtl.ComputeEncoder, m: *const Model, taps: ?mtl.Buffer, spare: 
 }
 
 /// Layer i's dense tail on the window's rows into s.h and s.normed[1 - cur]; E-series: unscaled, `pleTail` follows.
-fn denseTail(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, i: usize, cur: usize, rows: usize) void {
+pub fn denseTail(m: *Model, e: mtl.ComputeEncoder, s: anytype, i: usize, cur: usize, rows: usize) void {
     const l = &m.weights.layers[i];
     const next = if (i + 1 < m.config.geo.layers) m.weights.layers[i + 1].input_norm else m.weights.final_norm;
     if (l.ple_gate != null) {
@@ -242,7 +242,7 @@ fn denseTail(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, i: usize, cur:
 }
 
 /// The E-series' per-layer block on the residual rows in s.h[1 - cur]: in place, then the layer scalar and next input.
-pub fn pleTail(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, i: usize, cur: usize, rows: usize) void {
+pub fn pleTail(m: *Model, e: mtl.ComputeEncoder, s: anytype, i: usize, cur: usize, rows: usize) void {
     const l = &m.weights.layers[i];
     const next = if (i + 1 < m.config.geo.layers) m.weights.layers[i + 1].input_norm else m.weights.final_norm;
     const gate = l.ple_gate.?;
@@ -264,7 +264,7 @@ pub fn pleTail(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, i: usize, cu
 }
 
 /// gemma_dense_tail: (h + RMSNorm(y) w) * scalar into s.h[1 - cur] and the next normed input; `tap`: the tapped layer.
-fn tail(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, h: mtl.Buffer, y: mtl.Buffer, w: weights.Ref, scalar: weights.Ref, next: weights.Ref, cur: usize, rows: usize, tap: ?usize) void {
+fn tail(m: *Model, e: mtl.ComputeEncoder, s: anytype, h: mtl.Buffer, y: mtl.Buffer, w: weights.Ref, scalar: weights.Ref, next: weights.Ref, cur: usize, rows: usize, tap: ?usize) void {
     e.setPipeline(m.kernels.sliding.dense_tail);
     bind(e, &.{ h, y }, 0);
     bindRef(e, w, 2);

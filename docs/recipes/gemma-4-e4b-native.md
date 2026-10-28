@@ -28,11 +28,15 @@ zig-out/native/bin/tensorfold-native serve "$HOME/models/bolt-e4b" --port 8888 -
 | Images, audio | Not read: the converter drops both towers. |
 | Other widths | The attention and MLP linears and the tables at MLX affine 2-6 or 8 bits in groups of 64; the per-layer table must be 4-bit, the per-layer linears bf16. |
 
-On an M4 Max, a prompt runs in decode windows of up to 128 rows (the chunked prompt path has no per-layer inputs), so a
-prompt's logits equal decoding it token by token, at any window width. Measured with `tools/bench_openai.py`,
-`tools/bench_cache.py --require-cold` and `tools/bench_concurrent.py --alone --serial`: decode 92 tokens/s on one
-chat stream, 199 tokens/s over four; a cold prompt prefills at about 790 tokens/s; every reply equals its run alone.
-The server keeps 4.2 GiB wired.
+On an M4 Max, a prompt's first 128 rows run in decode windows (a short prompt answers sooner), the rest in chunks of 512 on
+affine_mm's tiles over the row path's packed weights, with the per-layer inputs in the chunk. The tiles sum in another
+order than a decode step, so a prompt's logits differ from decoding it token by token: with `tf-gemma4-e4b-logits`
+(`E4B_TILE=1` against its windows) the largest logit difference is 2.9 over 617 positions, top-1 agrees on 98.7% (the 8
+misses are near ties) and the mean KL is 0.0007; against the BF16 reference the windows give 93.8% top-1 and KL 0.073,
+the tiles 93.0% and 0.075. `GEMMA_E4B_WINDOWS=1` takes the windows for the whole prompt.
+Measured with `tools/bench_openai.py`, `tools/bench_cache.py --require-cold` and `tools/bench_concurrent.py --alone
+--serial`: decode 99 tokens/s on one chat stream, 212 tokens/s over four; a cold prompt prefills at about 2,400
+tokens/s; every reply equals its run alone and a resumed prompt gives the fresh pass's reply. The server keeps 4.2 GiB wired.
 
 `tf-gemma4-e4b-logits` writes the teacher-forced logits of a reference's prompts, and `tf-gemma4-e4b-ple` with
 `tf-gemma4-e4b-ple-host` compares the GPU's per-layer inputs with `layer_input.zig`'s.
