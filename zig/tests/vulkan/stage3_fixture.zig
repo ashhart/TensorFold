@@ -296,6 +296,12 @@ pub const AttendCase = struct { name: []const u8, rows: u64, prefix: u64, capaci
 
 pub const attend_case = AttendCase{ .name = "sdpa prefix2 rows3 cap8", .rows = 3, .prefix = 2, .capacity = 8 };
 
+/// Query row r's first NON-visible key (the poison start for that row):
+/// everything at or after this index must be invisible to row r.
+pub fn visibleFrom(case: AttendCase, r: u64) u64 {
+    return case.prefix + r + 1;
+}
+
 /// One causal SDPA gate. The caller supplies the cache key/value bits (already
 /// uploaded shells) and the ROTATED query bits the GPU will read; the fixture
 /// computes the f64 reference from them, so the sdpa budget carries no rope
@@ -439,6 +445,19 @@ pub const Gate = struct {
 
 const testing = std.testing;
 
+test "sdpa per-row visible counts and per-row poison windows" {
+    const ac = attend_case;
+    // prefix=2, rows=3: each row's visible key count is prefix+r+1 -> 3,4,5
+    try testing.expectEqual([3]u64{ 3, 4, 5 }, .{ visibleFrom(ac, 0), visibleFrom(ac, 1), visibleFrom(ac, 2) });
+    for (0..ac.rows) |r| {
+        const from = visibleFrom(ac, @intCast(r));
+        // the row's own key must always be visible; the poison window is
+        // non-empty and fresh per row (never accumulated across rows)
+        try testing.expect(from > ac.prefix);
+        try testing.expect(from <= ac.capacity);
+    }
+}
+
 test "rope reference matches the ASH half-split form on a hand vector" {
     // x[d<32] = 1, x[32..64] = 0, tail 0: out[d<32] = 1*cos - 0*sin = cos,
     // out[32..64] = 1*sin + 0*cos = sin, tail passthrough 0.
@@ -551,9 +570,109 @@ test "rope, cache and gate checkers refuse planted outputs" {
     }
 }
 
+test "all-poison output (dead kernel on poisoned init) is rejected by checkers" {
+    const a = testing.allocator;
+    // The probe's init pattern is: whole output shell = poison16, uploaded
+    // before EVERY dispatch. These tests prove the production checkers
+    // reject whatever that pattern leaves behind if the kernel writes
+    // nothing or only part of its output — a reference-prefilled or
+    // poisoned output can never pass.
+    {
+        const f = try Rope.init(a, rope_cases[0], 0x21);
+        defer f.deinit();
+        const shell = try a.alloc(u16, f.want.len + tail);
+        defer a.free(shell);
+        @memset(shell, poison16);
+        try testing.expectError(error.NonFiniteOutput, f.check(shell[0..f.want.len])); // dead kernel
+        // partial write: first row correct, rest poison
+        for (0..f.row_elems) |i| shell[i] = c.toBf16(@floatCast(f.want[i]));
+        try testing.expectError(error.NonFiniteOutput, f.check(shell[0..f.want.len]));
+    }
+    {
+        const f = try Gate.init(a, gate_case, 0x22);
+        defer f.deinit();
+        const out = try a.alloc(u16, @intCast(f.case.rows * 2048));
+        defer a.free(out);
+        @memset(out, poison16);
+        try testing.expectError(error.NonFiniteOutput, f.check(out));
+    }
+}
+
 test "fixture initialization fails cleanly under allocation failure" {
     var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 1 });
     try testing.expectError(error.OutOfMemory, Rope.init(failing.allocator(), rope_cases[0], 0x15));
     try testing.expectError(error.OutOfMemory, Cache.init(failing.allocator(), cache_case, 0x16));
     try testing.expectError(error.OutOfMemory, Gate.init(failing.allocator(), gate_case, 0x17));
+}
+
+// Host regression for the probe's causal poison check: row r of the
+// prefix2/rows3/cap8 case must see exactly visibleFrom(r) keys. A fresh
+// cache whose keys at positions >= visibleFrom(r) are planted NaN must
+// give the identical f64 reference as an unpolluted cache; and a
+// simulated one-key leak (prefix+1, same Attend.init) over that cache
+// must produce a different, nonfinite reference that the production
+// checker refuses. Fresh arrays every row: nothing accumulates.
+test "causal sdpa: poisoned future keys are invisible; a one-key leak is caught" {
+    const a = testing.allocator;
+    const ac = attend_case;
+    const row_elems: usize = @intCast(heads * head_dim);
+    const cache_elems: usize = @intCast(kv_heads * ac.capacity * head_dim);
+    const cap: usize = @intCast(ac.capacity);
+    var prng = std.Random.DefaultPrng.init(0x31);
+    const rng = prng.random();
+    for (0..ac.rows) |r| {
+        // Fresh, finite, nontrivial data each row (no cross-row accumulation).
+        const q = try a.alloc(u16, row_elems);
+        defer a.free(q);
+        for (q) |*x| x.* = sampleDyadic(rng, -5, 3);
+        const keys = try a.alloc(u16, cache_elems);
+        defer a.free(keys);
+        const values = try a.alloc(u16, cache_elems);
+        defer a.free(values);
+        for (keys) |*x| x.* = sampleDyadic(rng, -5, 3);
+        for (values) |*x| x.* = sampleDyadic(rng, -5, 3);
+
+        // Copy with every key at or after row r's visibility window poisoned.
+        const from: usize = @intCast(visibleFrom(ac, @intCast(r)));
+        const leaked_keys = try a.dupe(u16, keys);
+        defer a.free(leaked_keys);
+        for (0..@intCast(kv_heads)) |h| {
+            const head_base = @as(usize, @intCast(h)) * cap;
+            @memset(leaked_keys[(head_base + from) * @as(usize, @intCast(head_dim)) ..][0 .. (cap - from) * @as(usize, @intCast(head_dim))], poison16);
+        }
+
+        // Baseline: this row as a single-row query over the clean cache.
+        const one_row = AttendCase{ .name = "baseline row", .rows = 1, .prefix = ac.prefix + @as(u64, @intCast(r)), .capacity = ac.capacity };
+        const base = try Attend.init(a, one_row, q, keys, values, 0);
+        defer base.deinit();
+        // Same single-row query over the poisoned cache: identical reference.
+        const pbase = try Attend.init(a, one_row, q, leaked_keys, values, 0);
+        defer pbase.deinit();
+        try testing.expectEqualSlices(f64, base.want, pbase.want);
+
+        // The honest bf16 output passes BOTH production checkers.
+        const out = try a.alloc(u16, base.want.len);
+        defer a.free(out);
+        for (base.want, 0..) |w, i| out[i] = c.toBf16(@floatCast(w));
+        const rep = try pbase.check(out);
+        try testing.expect(rep.worst <= 1);
+
+        // Simulated one-key leak: prefix+1 for this row through the SAME
+        // Attend.init. Its reference consumes the planted NaN key, so it must
+        // differ from the causal baseline AND be refused by the checker.
+        const leak_case = AttendCase{ .name = "leak row", .rows = 1, .prefix = ac.prefix + @as(u64, @intCast(r)) + 1, .capacity = ac.capacity };
+        const leak = try Attend.init(a, leak_case, q, leaked_keys, values, 0);
+        defer leak.deinit();
+        var has_nonfinite = false;
+        for (leak.want) |w| {
+            if (!std.math.isFinite(w)) has_nonfinite = true;
+        }
+        try testing.expect(has_nonfinite); // the leak truly saw the poison
+        try testing.expect(!std.meta.eql(base.want[0], leak.want[0])); // differs from baseline
+        const leak_out = try a.alloc(u16, leak.want.len);
+        defer a.free(leak_out);
+        for (leak.want, 0..) |w, i| leak_out[i] = c.toBf16(@floatCast(w));
+        try testing.expectError(error.NonFiniteOutput, leak.check(leak_out));
+        try testing.expectError(error.NonFiniteOutput, base.check(leak_out)); // causal checker rejects the leaked output
+    }
 }
