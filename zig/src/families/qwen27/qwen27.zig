@@ -65,6 +65,7 @@ test {
     _ = prompt_state;
     _ = prompt_marks;
     _ = config;
+    _ = pocket_rows;
     _ = affine;
     _ = widths;
     _ = checkpoint;
@@ -73,3 +74,6 @@ test {
 }
 
 pub const residency = @import("residency.zig");
+
+pub const pocket = @import("pocket.zig");
+pub const pocket_rows = @import("pocket_rows.zig");

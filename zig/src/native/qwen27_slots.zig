@@ -57,6 +57,7 @@ pub fn opening(b: *Metal, s: *lanes.Stream, slot: u32) !Fill {
     s.fill_at.store(@intCast(at), .monotonic); // what the restore kept: 0 when it failed
     const encoded = if (b.vision) |v| try images.encode(v, b.runner.model.queue, s, slot) else null;
     if (encoded != null) b.image_fill = s; // the vision rows are this pass's until it closes
+    b.runner.untaught[slot] = s.untaught;
     return .{ .slot = slot, .at = at, .from = at, .images = encoded, .checkpoint = resume_rules.cachePoint(slot == 0 and slotResume(b) and plain(s) and s.max_new > 0 and s.reuse.hook != null and b.checkpoint_hook != null, at, b.chunk, ids.len, s.history_len, s.reuse.marks, s.chunks, s.decode_spans), .rewind = rewindPoint(b, s, slot, at) };
 }
 
@@ -420,6 +421,8 @@ pub fn promote(b: *Metal) void {
         };
         b.owners[0] = s;
         b.owners[k] = null;
+        b.runner.untaught[0] = s.untaught;
+        b.runner.untaught[k] = false;
         b.runner.rope[0] = b.runner.rope[k];
         b.runner.rope[k] = .{};
         clearContext(b, from) catch {};

@@ -299,3 +299,16 @@ test "the fused zba row keeps the tiled projection and each rank's a and b" {
     try std.testing.expectEqual(@as(usize, 6192), u.zbaA());
     try std.testing.expectEqual(@as(usize, 6240), u.zbaDim());
 }
+
+test "a CUDA-taught dense folder keeps the original Metal MLP width" {
+    const a = std.testing.allocator;
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, fixture, .{});
+    defer parsed.deinit();
+    const arena = parsed.arena.allocator();
+    try parsed.value.object.put(arena, "intermediate_size", .{ .integer = 192 });
+    try parsed.value.object.put(arena, "tensorfold_learned_neurons", .{ .integer = 64 });
+    const json = try std.json.Stringify.valueAlloc(a, parsed.value, .{});
+    defer a.free(json);
+    const c = try parse(a, json, null);
+    try std.testing.expectEqual(@as(usize, 128), c.intermediate);
+}

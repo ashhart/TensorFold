@@ -126,6 +126,7 @@ pub fn hold(h: anytype, io: std.Io) !void {
     defer list.deinit(h.gpa);
     for (h.model.checkpoint.shards.items) |s| try list.append(h.gpa, s.buffer);
     try list.appendSlice(h.gpa, h.model.weights.owned.items);
+    if (h.model.pockets) |*pockets| try pockets.appendBuffers(h.gpa, &list);
     try h.model.frame.appendBuffers(h.gpa, &list);
     if (h.model.ane) |share| {
         var buffers: ShareBuffers = undefined;
@@ -149,6 +150,7 @@ pub fn hold(h: anytype, io: std.Io) !void {
     h.resident = try mtl.resident.Resident.hold(h.gpa, io, h.model.device, h.model.queue, list.items, "qwen27");
     if (h.resident) |*r| {
         h.model.kernels.setResident(r.follow());
+        if (h.model.pockets) |*pockets| pockets.setResident(r.follow());
         h.runner.setResident(r.follow());
         setBack(h.back, r.follow());
         if (h.draft) |d| d.model.backend.setResident(r.follow());
@@ -158,6 +160,7 @@ pub fn hold(h: anytype, io: std.Io) !void {
 
 pub fn drop(h: anytype) void {
     h.model.kernels.setResident(null);
+    if (h.model.pockets) |*pockets| pockets.setResident(null);
     h.runner.setResident(null);
     setBack(h.back, null);
     if (h.draft) |d| d.model.backend.setResident(null);

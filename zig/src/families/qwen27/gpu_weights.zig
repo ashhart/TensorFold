@@ -110,13 +110,39 @@ const Builder = struct {
         };
         try b.stage.reserve(b.checkpoint, names);
         defer b.stage.reset();
+        var cuts: std.ArrayList(mtl.Buffer) = .empty;
+        defer {
+            for (cuts.items) |buffer| buffer.deinit();
+            cuts.deinit(b.allocator);
+        }
         var triples: [3]projection.Triple = undefined;
         for (parts, triples[0..parts.len], 0..) |p, *t, i| {
-            t.* = try viewed(p, k, .{
-                try b.stage.read(b.checkpoint, names[i * 3]),
-                try b.stage.read(b.checkpoint, names[i * 3 + 1]),
-                try b.stage.read(b.checkpoint, names[i * 3 + 2]),
-            });
+            if (k * p.w.bits % 32 != 0 or k % p.w.group != 0) return error.BadNativeTensor;
+            var tensors: [3]Tensor = undefined;
+            for (&tensors, 0..) |*item, j| {
+                const unit: usize = if (j == 0) 32 / p.w.bits else p.w.group;
+                const dtype: cp.DType = if (j == 0) .u32 else .bf16;
+                const nk = k + p.extra_cols;
+                item.* = try checked(try b.stage.read(b.checkpoint, names[i * 3 + j]), dtype, &.{ p.n + p.extra_rows, nk / unit });
+                if ((p.extra_rows != 0 or p.extra_cols != 0) and (p.w.bits != 4 or p.w.group != 64)) return error.BadPocketFormat;
+                const stride = nk / unit * dtype.size();
+                const kept = k / unit * dtype.size();
+                if (p.extra_cols != 0) {
+                    const buffer = try b.device.buffer(p.n * kept, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+                    cuts.append(b.allocator, buffer) catch |err| {
+                        buffer.deinit();
+                        return err;
+                    };
+                    const bytes = item.host(u8);
+                    for (0..p.n) |row| @memcpy(buffer.slice(u8, p.n * kept)[row * kept ..][0..kept], bytes[row * stride ..][0..kept]);
+                    item.buffer = buffer;
+                    item.offset = 0;
+                }
+                item.bytes = p.n * kept;
+                item.shape[0] = p.n;
+                item.shape[1] = k / unit;
+            }
+            t.* = try viewed(p, k, tensors);
         }
         return b.stack(triples[0..parts.len]);
     }
@@ -243,10 +269,10 @@ const Builder = struct {
             } },
         };
         const gu = try b.linear(&.{
-            .{ .module = try Name.full(a, prefix, "mlp.gate_proj"), .n = g.intermediate, .w = w[@backingInt(M.gate)], .span = s.intermediateRows() },
-            .{ .module = try Name.full(a, prefix, "mlp.up_proj"), .n = g.intermediate, .w = w[@backingInt(M.up)], .span = s.intermediateRows() },
+            .{ .module = try Name.full(a, prefix, "mlp.gate_proj"), .n = g.intermediate, .extra_rows = g.pocket, .w = w[@backingInt(M.gate)], .span = s.intermediateRows() },
+            .{ .module = try Name.full(a, prefix, "mlp.up_proj"), .n = g.intermediate, .extra_rows = g.pocket, .w = w[@backingInt(M.up)], .span = s.intermediateRows() },
         }, g.hidden);
-        const down = try b.linear(&.{.{ .module = try Name.full(a, prefix, "mlp.down_proj"), .n = g.hidden, .w = w[@backingInt(M.down)], .span = s.outputRows() }}, g.intermediate);
+        const down = try b.linear(&.{.{ .module = try Name.full(a, prefix, "mlp.down_proj"), .n = g.hidden, .extra_cols = g.pocket, .w = w[@backingInt(M.down)], .span = s.outputRows() }}, g.intermediate);
         return .{ .norm = try b.tensor(try Name.full(a, prefix, "input_layernorm.weight"), .bf16, &.{c.hidden}), .post_norm = try b.tensor(try Name.full(a, prefix, "post_attention_layernorm.weight"), .bf16, &.{c.hidden}), .gu = gu, .down = down, .mixer = mixer };
     }
 };
@@ -259,6 +285,8 @@ const Part = struct {
     w: Width,
     /// The rows this rank takes: the whole tensor unless the rank splits this matrix.
     span: cfg.Span = .{},
+    extra_rows: usize = 0,
+    extra_cols: usize = 0,
 };
 
 /// Rows `[span.from, end)` of `t`: rows are contiguous, so the same buffer at a later offset and a shorter shape.

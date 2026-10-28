@@ -145,3 +145,5 @@ pub const hc_pointwise_metal_adapter = @import("core/hc_pointwise_metal_impl.zig
 pub const hc_pointwise_contract = @import("core/contract/hc_pointwise.zig");
 
 pub const attention_ref = @import("core/attention_ref.zig");
+
+pub const dense_pocket = @import("core/dense_pocket.zig");

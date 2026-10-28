@@ -41,6 +41,7 @@ pub const Runner = struct {
     owned: std.ArrayList(mtl.Buffer),
     taps: Taps,
     slots: u32,
+    untaught: [attn.planning.max_streams]bool = @splat(false),
     ready: u32, // slots [0, ready) have their K/V rows; a later slot takes its own when first used (ensure)
     capacity: u32,
     active: ?[32]u8 = null,
@@ -261,6 +262,12 @@ pub const Runner = struct {
         defer pool.pop();
         const spanned = if (r.trace) |t| t.spanned else 0; // a profiled pass's spans commit buffers of their own
         const handed = if (r.model.ane) |share| share.gpu_seconds else 0;
+        if (r.model.pockets) |*pockets| {
+            pockets.selected = .{ .all = false };
+            for (round.slots, round.firsts, round.windows) |slot, first, window| {
+                if (!r.untaught[slot]) try pockets.selected.add(first, window.parents.len);
+            }
+        }
         var stages = forward.Stages{ .model = r.model, .rows = @intCast(round.ids.len), .hooks = .{ .ptr = r, .gdn = gdnForward, .attention = attentionForward, .tap = if (r.capture_taps) tap else null }, .head = head, .tail = r.tail, .images = placed.images, .reduce = r.reduce, .picks = r.picks };
         r.last_gpu_seconds = @import("core").segments.runCommitting(r.model.device, &.{r.model.queue}, r.model.config.layers, .concurrent, &stages, commit_every) catch |err| {
             r.failed = true;

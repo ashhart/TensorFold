@@ -19,6 +19,10 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     const allocated = b.createModule(.{ .root_source_file = b.path("zig/qwen27_allocation_host.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = pricing_lanes }} });
     const window_step = b.step("test-qwen27-window-host", "Device width, copied trees and counted zero-grant drafting without shaders");
     for ([_]*std.Build.Module{ window, taps, allocated }) |m| window_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
+    const living = b.createModule(.{ .root_source_file = b.path("zig/src/living/living.zig"), .target = b.graph.host, .link_libc = true });
+    const pocket = b.createModule(.{ .root_source_file = b.path("zig/qwen27_pocket_host.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "living", .module = living }} });
+    pocket.addImport("core", pocket);
+    b.step("test-qwen27-pocket-host", "CUDA-taught shard reader, original Metal width and untaught row runs without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = pocket })).step);
     const rows = b.createModule(.{ .root_source_file = b.path("zig/src/qwen27_rows_test.zig"), .target = b.graph.host });
     b.step("test-qwen27-prompt-rows-host", "Device-aware prompt rows beside owned decoding streams without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = rows, .filters = &.{"qwen27 rows:"} })).step);
     const ane_policy = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen27/ane_policy.zig"), .target = b.graph.host });
@@ -71,6 +75,7 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
 }
 
 pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module) void {
+    pocketProbe(b, metal);
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_served.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api } } });
     const boundary = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/qwen27_bank_boundary_host.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "tensorfold", .module = engine }, .{ .name = "metal", .module = metal } } }), .filters = &.{"qwen27 bank boundary:"} });
@@ -100,4 +105,17 @@ fn tryNames(b: *std.Build, names: *std.ArrayList([]const u8), text: []const u8) 
         names.append(b.allocator, rest[0..end]) catch @panic("OOM");
         rest = rest[end + 1 ..];
     }
+}
+
+fn pocketProbe(b: *std.Build, metal: *std.Build.Module) void {
+    const target = b.graph.host;
+    const core = b.createModule(.{ .root_source_file = b.path("zig/qwen27_pocket_core.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
+    core.addImport("metal", metal);
+    const files = b.addWriteFiles();
+    _ = files.addCopyFile(b.path("zig/kernels/metal/qwen27/pocket.metal"), "pocket.metal");
+    const sources = b.createModule(.{ .root_source_file = files.add("pocket_sources.zig", "pub const pocket = @embedFile(\"pocket.metal\");\n") });
+    const pocket = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen27/pocket.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "core", .module = core }, .{ .name = "qwen_runtime_sources", .module = sources } } });
+    const living = b.createModule(.{ .root_source_file = b.path("zig/src/living/living.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
+    const exe = b.addExecutable(.{ .name = "tf-qwen27-pocket", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/qwen27/pocket.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "core", .module = core }, .{ .name = "living", .module = living }, .{ .name = "pocket", .module = pocket } } }) });
+    b.step("tf-qwen27-pocket", "Build CUDA-taught folder and Metal pocket float64 checks without running a GPU").dependOn(&b.addInstallArtifact(exe, .{}).step);
 }

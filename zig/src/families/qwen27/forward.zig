@@ -174,6 +174,7 @@ pub const Stages = struct {
                 try m.kernels.addAne(lane.enc, .{ .buffer = share.partial }, .{ .buffer = share.outputs[slice].buffer }, f.get(.output), h, width, share.columns, @min(ane_mlp.width, s.rows - base), base);
             }
             lane.enc.barrier();
+            try m.addPocket(lane.enc, index, f.get(.input), f.get(.output), s.rows);
             s.pending = f.get(.output);
             return;
         } else {
@@ -205,6 +206,7 @@ pub const Stages = struct {
             if (s.reduce.?.broken()) return error.PairFailed;
             e.barrier();
         }
+        try m.addPocket(lane.enc, index, f.get(.input), f.get(.output), s.rows);
         s.pending = f.get(.output);
     }
     pub fn finish(s: *Stages, lane: *@import("core").segments.Lane) !void {

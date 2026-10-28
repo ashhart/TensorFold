@@ -8,6 +8,7 @@ pub const max_eos = 8;
 pub const Config = struct {
     hidden: usize,
     intermediate: usize,
+    pocket: usize = 0,
     layers: usize,
     vocab: usize,
     heads: usize,
@@ -305,6 +306,11 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8) 
         .rope_dims = @intFromFloat(@as(f64, @floatFromInt(head_dim)) * factor),
         .rope_theta = if (rope) |r| try optional(r, "rope_theta", try optional(t, "rope_theta", 10000000)) else try optional(t, "rope_theta", 10000000),
     };
+    if (t.get("tensorfold_learned_neurons")) |v| {
+        c.pocket = try integer(v, true);
+        if (c.pocket != 0 and (c.pocket != 64 or c.pocket >= c.intermediate)) return error.BadPocketShape;
+        c.intermediate -= c.pocket;
+    }
     if (t.get("max_position_embeddings")) |v| c.max_position = try integer(v, false);
     if (rope) |r| if (r.get("mrope_interleaved")) |v| {
         if (v != .bool or !v.bool) return error.UnsupportedMrope;
