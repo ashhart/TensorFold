@@ -280,6 +280,7 @@ pub fn explain(ctx: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.QwenPagesNoLearner => "TF_QWEN_KV_PAGES: the learner reads whole windows, not pages; drop --slide or unset it",
         error.QwenShareNeedsPages => "TF_QWEN_KV_SHARE keeps prompts as pool pages: set TF_QWEN_KV_PAGES to a divisor of the 4096-row prompt chunk",
         error.BadQwenKvShare => "TF_QWEN_KV_SHARE takes the most recurrent-state snapshots the prompt cache keeps (0 or unset: off)",
+        error.QwenYarnNoLearner => "--slide: the learner's attention ropes without YaRN; serve without --slide, or without --rope-yarn and a YaRN config",
         error.BadQwenKvPages => "TF_QWEN_KV_PAGES takes the positions a page holds (a whole number; 0 or unset: a window each)",
         error.UnsupportedQwenVision => "--vision: this checkpoint's image tower or text M-RoPE is not one the CUDA engine reads",
         else => null,
