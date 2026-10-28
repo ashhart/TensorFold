@@ -39,16 +39,43 @@ __device__ inline void stream_x_pairs(const uint32_t (&xn)[16], typename T::pair
      ...);
 }
 
-// One column's chunk against RG rows: each code pair is made once and dotted with every row's x.
-template <class Dec, typename T, int RG, int... I>
-__device__ inline void stream_dots(const typename T::pair (&xp)[RG][16], const uint32_t (&w)[Dec::kWords], float (&d)[RG],
-                                   std::integer_sequence<int, I...>) {
-    (([&] {
-         const typename T::pair q = Dec::template stream_pair<T, I>(w);
+// One column's 16 code pairs of a chunk, made once for every row of the block.
+template <class Dec, typename T, int... I>
+__device__ inline void stream_codes(const uint32_t (&w)[Dec::kWords], typename T::pair (&qp)[16],
+                                    std::integer_sequence<int, I...>) {
+    if constexpr (Dec::kWords == 4 && Dec::kGapPairs && !std::is_same_v<typename T::elem, __half>) {
+        // the byte path below hard-codes the decoder's pairing: pair 4 wd + k is codes 8 wd + k and 8 wd + k + 4
+        static_assert(Dec::gap() == 4);
+        static_assert(((Dec::template lo<I>() == 8 * (I >> 2) + (I & 3)) && ...));
+        // 4-bit BF16 pairs from bytes: a byte's float is exact and its top half is the BF16, as stream_pair makes it
+        // v_cvt_f32_ubyteN reads byte N itself; written out, LLVM would shift and extract first
+        auto f = [](uint32_t v, int b) {
+            uint32_t r;
+            switch (b) {
+                case 0: asm("v_cvt_f32_ubyte0 %0, %1" : "=v"(r) : "v"(v)); break;
+                case 1: asm("v_cvt_f32_ubyte1 %0, %1" : "=v"(r) : "v"(v)); break;
+                case 2: asm("v_cvt_f32_ubyte2 %0, %1" : "=v"(r) : "v"(v)); break;
+                default: asm("v_cvt_f32_ubyte3 %0, %1" : "=v"(r) : "v"(v)); break;
+            }
+            return r;
+        };
+        // the top halves of two floats as one pair, in one v_perm_b32 (stream_pick's selector)
+        auto pack = [](uint32_t lo, uint32_t hi) {
+            return __builtin_bit_cast(typename T::pair, stream_pick(lo, hi, 1));
+        };
 #pragma unroll
-         for (int r = 0; r < RG; ++r) d[r] = T::dot(xp[r][I], q, d[r]);
-     }()),
-     ...);
+        for (int wd = 0; wd < 4; ++wd) {
+            const uint32_t e = w[wd] & 0x0F0F0F0Fu;         // nibbles 0, 2, 4, 6 as bytes 0..3
+            const uint32_t o = (w[wd] >> 4) & 0x0F0F0F0Fu;  // nibbles 1, 3, 5, 7
+            // pair k of a word is nibbles k and k + 4
+            qp[4 * wd + 0] = pack(f(e, 0), f(e, 2));
+            qp[4 * wd + 1] = pack(f(o, 0), f(o, 2));
+            qp[4 * wd + 2] = pack(f(e, 1), f(e, 3));
+            qp[4 * wd + 3] = pack(f(o, 1), f(o, 3));
+        }
+    } else {
+        ((qp[I] = Dec::template stream_pair<T, I>(w)), ...);
+    }
 }
 
 // Epi::kPair: a lane's CB columns are CB / 2 gate columns and the same up columns; out is silu(gate) * up.
@@ -57,8 +84,6 @@ __device__ inline void stream_body(const typename Dec::Args& a, int lpc_log2, in
                                    float limit) {
     using pair = typename T::pair;
     constexpr bool PAIR = Epi::kPair;
-    constexpr int RG = R < 4 ? R : 4;  // rows a pass keeps in registers
-    constexpr int NG = R / RG;
     constexpr uint32_t kOne = T::ones;
     const int row0 = by * R;  // a block's rows: row block `by` of the grid's y, or of x when interleaved
     const int lpc = 1 << lpc_log2;
@@ -116,43 +141,37 @@ __device__ inline void stream_body(const typename Dec::Args& a, int lpc_log2, in
             sc[c] = live ? terms.widen(sr[c]) : 0.f;
             bi[c] = live ? terms.widen(br[c]) : 0.f;
         }
+        // every column's code pairs are made once, then each row in turn dots them in the order a row alone takes
+        pair qp[CB][16];
 #pragma unroll
-        for (int g = 0; g < NG; ++g) {
-            if (row0 + g * RG >= a.m) break;
-            pair xp[RG][16];
-            float sx[RG];
+        for (int c = 0; c < CB; ++c) stream_codes<Dec, T>(w[c], qp[c], std::make_integer_sequence<int, 16>{});
 #pragma unroll
-            for (int r = 0; r < RG; ++r) {
-                uint32_t xn[16];
-                const u32x4* src =
-                    reinterpret_cast<const u32x4*>(xr[g * RG + r] + static_cast<long long>(q) * 32);
+        for (int r = 0; r < R; ++r) {
+            if (row0 + r >= a.m) break;
+            pair xp[16];
+            uint32_t xn[16];
+            const u32x4* src = reinterpret_cast<const u32x4*>(xr[r] + static_cast<long long>(q) * 32);
 #pragma unroll
-                for (int v = 0; v < 4; ++v) {
-                    const u32x4 t = src[v];
-                    xn[4 * v] = t.x;
-                    xn[4 * v + 1] = t.y;
-                    xn[4 * v + 2] = t.z;
-                    xn[4 * v + 3] = t.w;
-                }
-                float s = 0.f;
-#pragma unroll
-                for (int i = 0; i < 16; ++i) {
-                    s = T::dot(__builtin_bit_cast(pair, xn[i]), __builtin_bit_cast(pair, kOne), s);
-                }
-                sx[r] = s;
-                stream_x_pairs<Dec, T>(xn, xp[r], std::make_integer_sequence<int, 16>{});
+            for (int v = 0; v < 4; ++v) {
+                const u32x4 t = src[v];
+                xn[4 * v] = t.x;
+                xn[4 * v + 1] = t.y;
+                xn[4 * v + 2] = t.z;
+                xn[4 * v + 3] = t.w;
             }
+            float sx = 0.f;
+#pragma unroll
+            for (int i = 0; i < 16; ++i) {
+                sx = T::dot(__builtin_bit_cast(pair, xn[i]), __builtin_bit_cast(pair, kOne), sx);
+            }
+            stream_x_pairs<Dec, T>(xn, xp, std::make_integer_sequence<int, 16>{});
 #pragma unroll
             for (int c = 0; c < CB; ++c) {
-                float d[RG];
+                float d = 0.f;
 #pragma unroll
-                for (int r = 0; r < RG; ++r) d[r] = 0.f;
-                stream_dots<Dec, T, RG>(xp, w[c], d, std::make_integer_sequence<int, 16>{});
-#pragma unroll
-                for (int r = 0; r < RG; ++r) {
-                    acc[g * RG + r][c] = Dec::fold_scale(acc[g * RG + r][c], d[r], sc[c]);
-                    acc[g * RG + r][c] = Dec::fold_bias(acc[g * RG + r][c], sx[r], bi[c]);
-                }
+                for (int i = 0; i < 16; ++i) d = T::dot(xp[i], qp[c][i], d);
+                acc[r][c] = Dec::fold_scale(acc[r][c], d, sc[c]);
+                acc[r][c] = Dec::fold_bias(acc[r][c], sx, bi[c]);
             }
         }
     };
