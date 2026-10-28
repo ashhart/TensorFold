@@ -29,6 +29,7 @@ const q35v = @import("qwen35_vulkan");
 const engine_mod = q35v.engine;
 const pinned = q35v.config;
 const q35s = @import("qwen35_shaders");
+const sys = @import("sys");
 
 const Engine = engine_mod.Engine;
 
@@ -198,6 +199,37 @@ fn readOracleMeta(a: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, oracle_dir:
     };
 }
 
+/// The exact production bundle: the build-generated qwen35_shaders SPIR-V
+/// image for every field of engine.ShaderBundle (8 stage-1 ops, 4 norm/MLP,
+/// 3 attention, 7 GDN, 3 greedy), shared by the probe run and the opt-in
+/// load test so both exercise the shader set the server serves with.
+fn bundle() engine_mod.ShaderBundle {
+    return .{
+        .ops = .{
+            .qmm_bf16 = &q35s.qmm_bf16,
+            .dequant_bf16 = &q35s.dequant_bf16,
+            .gather_u32 = &q35s.gather_u32,
+            .gather_u16 = &q35s.gather_u16,
+            .cast_bf16_f32 = &q35s.cast_bf16_f32,
+            .cast_f32_bf16 = &q35s.cast_f32_bf16,
+            .copy_u32 = &q35s.copy_u32,
+            .copy_u16 = &q35s.copy_u16,
+        },
+        .norm = .{ .norm_bf16 = &q35s.norm_bf16, .add_bf16 = &q35s.add_bf16, .add_preserve_bf16 = &q35s.add_preserve_bf16, .swiglu_bf16 = &q35s.swiglu_bf16 },
+        .attention = .{ .rope_bf16 = &q35s.rope_bf16, .sdpa_rows_bf16 = &q35s.sdpa_rows_bf16, .gate_bf16 = &q35s.gate_bf16 },
+        .gdn = .{
+            .conv_dw1d_bf16 = &q35s.conv_dw1d_bf16,
+            .gdn_conv_decode_bf16 = &q35s.gdn_conv_decode_bf16,
+            .gdn_split_bf16 = &q35s.gdn_split_bf16,
+            .prefill_recur_bf16 = &q35s.prefill_recur_bf16,
+            .gated_delta_decode_bf16 = &q35s.gated_delta_decode_bf16,
+            .fast_norm_gated_bf16 = &q35s.fast_norm_gated_bf16,
+            .copy_u16 = &q35s.copy_u16,
+        },
+        .greedy = .{ .finite_logits = &q35s.finite_logits, .argreduce_chunk = &q35s.argreduce_chunk, .argreduce_combine = &q35s.argreduce_combine },
+    };
+}
+
 pub fn main(init: std.process.Init) !u8 {
     const clock: Elapsed = .{ .io = init.io, .start = std.Io.Clock.awake.now(init.io) };
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -212,6 +244,9 @@ pub fn main(init: std.process.Init) !u8 {
     const a = init.gpa;
     const io = init.io;
     const cwd = std.Io.Dir.cwd();
+    // Immutable hash/diagnostic strings ride the process arena, exactly the
+    // readOracleMeta pattern: allocated once, freed only at exit, never on gpa.
+    const diag = init.arena.allocator();
 
     // every input validated before any GPU work exists
     const npy_bytes = cwd.readFileAlloc(io, opts.positional[1], a, .limited(1 << 26)) catch |e| {
@@ -241,7 +276,7 @@ pub fn main(init: std.process.Init) !u8 {
     defer a.free(expected);
     // immutable metadata rides the arena: readOracleMeta allocates and the
     // process-scoped arena frees, no per-field cleanup
-    const oracle = readOracleMeta(init.arena.allocator(), io, cwd, opts.positional[2]) catch |e| {
+    const oracle = readOracleMeta(diag, io, cwd, opts.positional[2]) catch |e| {
         std.debug.print("FAIL input: oracle result.json unreadable from {s}: {s}\n", .{ opts.positional[2], @errorName(e) });
         return 2;
     };
@@ -255,8 +290,8 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print("FAIL input: oracle id {d} past the vocab\n", .{id});
         return 2;
     };
-    const prompt_hash = try sha256HexA(a, std.mem.sliceAsBytes(prompt));
-    const expected_hash = try sha256HexA(a, std.mem.sliceAsBytes(expected));
+    const prompt_hash = try sha256HexA(diag, std.mem.sliceAsBytes(prompt));
+    const expected_hash = try sha256HexA(diag, std.mem.sliceAsBytes(expected));
     if (!sameHex(prompt_hash, oracle.prompt_token_hash)) {
         std.debug.print("FAIL input: prompt hash {s} is not the oracle's {s}\n", .{ prompt_hash, oracle.prompt_token_hash });
         return 2;
@@ -287,30 +322,7 @@ pub fn main(init: std.process.Init) !u8 {
     };
     defer out.close(io);
 
-    const engine = Engine.init(a, io, .{
-        .ops = .{
-            .qmm_bf16 = &q35s.qmm_bf16,
-            .dequant_bf16 = &q35s.dequant_bf16,
-            .gather_u32 = &q35s.gather_u32,
-            .gather_u16 = &q35s.gather_u16,
-            .cast_bf16_f32 = &q35s.cast_bf16_f32,
-            .cast_f32_bf16 = &q35s.cast_f32_bf16,
-            .copy_u32 = &q35s.copy_u32,
-            .copy_u16 = &q35s.copy_u16,
-        },
-        .norm = .{ .norm_bf16 = &q35s.norm_bf16, .add_bf16 = &q35s.add_bf16, .add_preserve_bf16 = &q35s.add_preserve_bf16, .swiglu_bf16 = &q35s.swiglu_bf16 },
-        .attention = .{ .rope_bf16 = &q35s.rope_bf16, .sdpa_rows_bf16 = &q35s.sdpa_rows_bf16, .gate_bf16 = &q35s.gate_bf16 },
-        .gdn = .{
-            .conv_dw1d_bf16 = &q35s.conv_dw1d_bf16,
-            .gdn_conv_decode_bf16 = &q35s.gdn_conv_decode_bf16,
-            .gdn_split_bf16 = &q35s.gdn_split_bf16,
-            .prefill_recur_bf16 = &q35s.prefill_recur_bf16,
-            .gated_delta_decode_bf16 = &q35s.gated_delta_decode_bf16,
-            .fast_norm_gated_bf16 = &q35s.fast_norm_gated_bf16,
-            .copy_u16 = &q35s.copy_u16,
-        },
-        .greedy = .{ .finite_logits = &q35s.finite_logits, .argreduce_chunk = &q35s.argreduce_chunk, .argreduce_combine = &q35s.argreduce_combine },
-    }, opts.positional[0], 256, opts.timeout_ms * std.time.ns_per_ms) catch |e| {
+    const engine = Engine.init(a, io, bundle(), opts.positional[0], 256, opts.timeout_ms * std.time.ns_per_ms) catch |e| {
         std.debug.print("FAIL engine: {s}\n", .{@errorName(e)});
         return 1;
     };
@@ -370,19 +382,19 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print("FAIL receipt: cannot write logits_bf16.bin: {s}\n", .{@errorName(e)});
         return 1;
     };
-    const ids_hash = try sha256HexA(a, std.mem.sliceAsBytes(ids_a));
+    const ids_hash = try sha256HexA(diag, std.mem.sliceAsBytes(ids_a));
     writeResult(a, io, out, .{
         .status = if (match_a and match_b and ids_equal and logits_equal) "ok" else "mismatch",
         .steps = expected.len,
         .capacity = engine.capacity(),
         .model_context = engine.modelContext(),
         .prompt_tokens = prompt.len,
-        .input_npy_sha256 = try sha256HexA(a, npy_bytes),
+        .input_npy_sha256 = try sha256HexA(diag, npy_bytes),
         .prompt_u32le_sha256 = prompt_hash,
         .generated_ids = ids_a,
         .generated_ids_hash = ids_hash,
         .logits_bytes = rows_a.len,
-        .logits_bf16_sha256 = try sha256HexA(a, rows_a),
+        .logits_bf16_sha256 = try sha256HexA(diag, rows_a),
         .repeat_checks = .{ .generated_ids_equal = ids_equal, .logits_bytes_equal = logits_equal },
         .oracle_match = .{ .ids_run_a = match_a, .ids_run_b = match_b },
         .oracle = .{
@@ -400,8 +412,8 @@ pub fn main(init: std.process.Init) !u8 {
 
     std.debug.print("RESULT qwen35-model elapsed_ms={d}: ids_match_a={} ids_match_b={} repeats(ids={},logits={}) " ++
         "oracle_logits_mismatches={s} expected_hash={s} got_hash={s}\n", .{
-        clock.ms(),                                                                        match_a,                   match_b,  ids_equal, logits_equal,
-        if (mismatches) |n| (std.fmt.allocPrint(a, "{d}", .{n}) catch "?") else "skipped", oracle.generated_ids_hash, ids_hash,
+        clock.ms(),                                                                           match_a,                   match_b,  ids_equal, logits_equal,
+        if (mismatches) |n| (std.fmt.allocPrint(diag, "{d}", .{n}) catch "?") else "skipped", oracle.generated_ids_hash, ids_hash,
     });
     return if (match_a and match_b and ids_equal and logits_equal) 0 else 1;
 }
@@ -576,4 +588,17 @@ test "prompt ids decode little-endian words without an alignment assumption" {
     defer testing.allocator.free(ids);
     try testing.expectEqualSlices(u32, &.{0x12345678}, ids);
     try testing.expectError(error.BadPayload, readPromptIds(testing.allocator, bytes[2..]));
+}
+
+test "the real engine load (TF_VULKAN_LOAD_DIR): device gates, pinned admission, every layer's uploads and state, then teardown; no forward" {
+    const dir = sys.getenv("TF_VULKAN_LOAD_DIR") orelse return error.SkipZigTest;
+    // init reaching here means every device gate passed, the pinned-model
+    // admission read the real config, all layers' weights uploaded and the
+    // zeroed state exists. A successful init then deinit with the leak-checked
+    // testing allocator is the whole receipt; nothing runs a forward.
+    const engine = try Engine.init(testing.allocator, testing.io, bundle(), dir, 256, 60 * std.time.ns_per_s);
+    defer engine.deinit();
+    try testing.expectEqual(@as(usize, pinned.layers), engine.model.layers.len);
+    try testing.expectEqual(@as(u64, 0), engine.visible());
+    std.debug.print("MILESTONE qwen35-load capacity={d} model_context={d} layers={d} logits_bytes={d} loaded, then torn down\n", .{ engine.capacity(), engine.modelContext(), engine.model.layers.len, engine.logitsLen() });
 }
