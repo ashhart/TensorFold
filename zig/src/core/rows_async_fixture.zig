@@ -88,7 +88,7 @@ pub const Gate = struct {
     entered: std.atomic.Value(bool) = .init(false),
     release: std.atomic.Value(bool) = .init(false),
     left: std.atomic.Value(bool) = .init(false),
-    mode: enum { good, full, short, sync_failure } = .good,
+    mode: enum { good, full, short, sync_failure, first_fails } = .good,
     calls: usize = 0,
     sync_entered: std.atomic.Value(bool) = .init(false),
     sync_release: std.atomic.Value(bool) = .init(true),
@@ -103,7 +103,7 @@ pub const Gate = struct {
         while (!g.release.load(.acquire)) rows.write.io.nap();
         defer g.left.store(true, .release);
         g.calls += 1;
-        if (g.mode == .full) return error.NoSpaceLeft;
+        if (g.mode == .full or (g.mode == .first_fails and g.calls == 1)) return error.NoSpaceLeft;
         if (g.mode == .short and g.calls > 1) return 0;
         const n = platform.c.write(fd, bytes.ptr, if (g.mode == .short) @min(bytes.len, 7) else bytes.len);
         if (n < 0) return error.RowsWrite;
