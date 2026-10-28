@@ -452,6 +452,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .imports = &.{
             .{ .name = "contract", .module = @import("kernel_contract.zig").module(b, b.graph.host, .debug) },
             .{ .name = "stage2_shaders", .module = stage2_shaders_mod },
+            .{ .name = "vulkan", .module = module(b, b.graph.host, .debug, o) },
         },
     }) });
     host.dependOn(&b.addRunArtifact(pointwise_fixture_tests).step);
