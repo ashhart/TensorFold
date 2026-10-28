@@ -3,6 +3,7 @@
 #include <cuda_bf16.h>
 #include <stdint.h>
 #include "common/reduce.cuh"
+#include "common/act.cuh"
 
 typedef __nv_bfloat16 bf16;
 
@@ -25,13 +26,10 @@ __device__ __forceinline__ float bf(float x) { return f32(b16(x)); }
 using tf_common::warp_sum;
 using tf_common::block_sum_tree;
 
-__device__ __forceinline__ float sigmoidf_(float x) { return 1.0f / (1.0f + expf(-x)); }
-__device__ __forceinline__ float softplusf_(float x) { return x > 20.0f ? x : log1pf(expf(x)); }
+using tf_common::sigmoidf_;
+using tf_common::softplusf_;
 
-__device__ __forceinline__ float silu_grad(float v) {
-    const float s = sigmoidf_(v);
-    return s * (1.0f + v * (1.0f - s));
-}
+using tf_common::silu_grad;
 
 __device__ __forceinline__ int chunks(int rows) { return (rows + CK - 1) / CK; }
 

@@ -5,6 +5,7 @@
 #include <cuda_bf16.h>
 #include <stdint.h>
 #include "common/reduce.cuh"
+#include "common/act.cuh"
 
 typedef __nv_bfloat16 bf16;
 
@@ -14,13 +15,10 @@ __device__ __forceinline__ bf16 b16(float v) { return __float2bfloat16(v); }
 using tf_common::warp_sum;
 using tf_common::block_sum_tree;
 
-__device__ __forceinline__ float sigm(float v) { return 1.0f / (1.0f + expf(-v)); }
-__device__ __forceinline__ float silu(float v) { return v / (1.0f + expf(-v)); }
+using tf_common::sigmoidf_;
+using tf_common::silu;
 
-__device__ __forceinline__ float silu_grad(float v) {
-    const float s = sigm(v);
-    return s * (1.0f + v * (1.0f - s));
-}
+using tf_common::silu_grad;
 
 // ---- the pocket -----------------------------------------------------------------------------------------------------
 
@@ -282,7 +280,7 @@ extern "C" __global__ void tf_fn_hc_mix_back(const float* dmix, const bf16* up, 
     const float g = dmix[(size_t)r * d + i] / (float)streams;
     for (int s = 0; s < streams; s++) {
         const size_t at = ((size_t)r * streams + s) * d + i;
-        const float sg = sigm(f32(up[at]));
+        const float sg = sigmoidf_(f32(up[at]));
         dnormed[at] = g * sg;
         dup[at] = g * f32(normed[at]) * sg * (1.0f - sg);
     }
@@ -299,7 +297,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_fn_hc_act_back(const float*
         if (i < low) {
             g = dact[(size_t)r * low + i] * silu_grad(x) * inv;
         } else if (dinject) {
-            const float sg = sigm(x);
+            const float sg = sigmoidf_(x);
             g = dinject[r * streams + i - low] * 2.0f * sg * (1.0f - sg) * inv;
         }
         dv[(size_t)r * nv + i] = g;
