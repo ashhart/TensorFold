@@ -17,16 +17,23 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, g: *Group
     var cfg = try tp.Config.fromEnv(); // TF_TP_MASTER, TF_TP_PORT and the wire's settings: a bad value refuses
     cfg.rank = @intCast(g.rank);
     cfg.world = @intCast(g.world);
-    const w = borrow(gpa, io, d, g, cfg) catch |err| {
-        if (cfg.roce_fallback == .@"error") return err; // TF_TP_ROCE_FALLBACK=error refuses rather than run on NCCL
+    var entered = false; // this rank's probe enqueued NCCL's gather
+    const w = borrow(gpa, io, d, g, cfg, &entered) catch |err| {
+        // TF_TP_ROCE_FALLBACK=error refuses rather than run on NCCL, as does a failure NCCL's order may not survive
+        if (cfg.roce_fallback == .@"error" or !fallsBack(err, entered)) return err;
         std.log.warn("rank {d}: TF_GLM_ROCE_MULTI=1, but the wire did not open ({s}); NCCL keeps the small gathers", .{ g.rank, @errorName(err) });
         return;
     };
     g.multi = .{ .ctx = w, .fits = fits, .gather = gather, .check = check, .abort = abort, .deinit = deinit };
 }
 
+/// Whether NCCL keeps the small gathers after `err`: no gather of the probe's entered yet, or every rank's verdict.
+fn fallsBack(err: anyerror, entered: bool) bool {
+    return !entered or err == error.ProbeMismatch;
+}
+
 /// fabric/tp's bootstrap, ports, wire and kernel, and a probe against the group's NCCL: each step every rank's or none.
-fn borrow(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, g: *const Group, cfg: tp.Config) !*Wire {
+fn borrow(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, g: *const Group, cfg: tp.Config, entered: *bool) !*Wire {
     const path = std.mem.span(std.c.getenv("TF_TP_KERNEL_IMAGE") orelse return error.NoKernelImage);
     const image = try std.Io.Dir.cwd().readFileAllocOptions(io, path, gpa, .limited(1 << 26), .@"16", null);
     defer gpa.free(image); // the module copies it at load
@@ -45,35 +52,97 @@ fn borrow(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, g: *const G
     const w = try gpa.create(Wire); // before the last vote: nothing after it can fail
     errdefer gpa.destroy(w);
     w.* = .{ .gpa = gpa, .r = r, .rank = g.rank };
-    try lendIfAll(&b, probe(gpa, d, g, r) catch false);
+    var p: Probe = .{ .gpa = gpa, .d = d, .g = g, .r = r };
+    defer p.deinit();
+    try vote(&b, p.steps(), entered);
     var line: [384]u8 = undefined;
     std.log.info("rank {d}: TF_GLM_ROCE_MULTI: gathers up to {d} KiB a rank on the wire, its probe equal to NCCL's: {s}", .{ g.rank, r.slot_bytes / 1024, r.describeLink(&line) });
     return w;
 }
 
-/// One 4 KiB gather in place, on the wire and on the group's NCCL (no wire lent yet): every byte must be equal.
-fn probe(gpa: std.mem.Allocator, d: *const cuda.Driver, g: *const Group, r: *tp.roce_multi.Roce) !bool {
-    const n = 4096;
-    const world = g.world;
-    var a = try cuda.DeviceBuffer.alloc(d, 2 * world * n); // the wire's rows, then NCCL's
-    defer a.free();
-    var s = try cuda.Stream.init(d, true);
-    defer s.deinit();
-    var mine: [n]u8 = undefined;
-    tp.reference.fill(&mine, .bf16, @intCast(g.rank), 0x7072_6f62);
-    try a.uploadAsync(g.rank * n, &mine, s.handle);
-    try a.uploadAsync((world + g.rank) * n, &mine, s.handle);
-    try r.allGatherBytes(a.ptr + g.rank * n, a.ptr, n, s.handle);
-    try g.allGather(s, a.ptr + (world + g.rank) * n, a.ptr + world * n, n);
-    try s.synchronize();
-    try r.check();
-    const got = try gpa.alloc(u8, 2 * world * n);
-    defer gpa.free(got);
-    try a.download(0, got);
-    const equal = std.mem.eql(u8, got[0 .. world * n], got[world * n ..]);
-    if (!equal) std.log.warn("rank {d}: TF_GLM_ROCE_MULTI's probe: the wire's gather DIFFERS from NCCL's", .{g.rank});
-    return equal;
+/// A rank's probe in steps (made ready before any gather, both gathers, the wait, the verdict); a test fails any.
+const Steps = struct {
+    ctx: *anyopaque,
+    prepare: *const fn (*anyopaque) anyerror!void,
+    wire: *const fn (*anyopaque) anyerror!void,
+    nccl: *const fn (*anyopaque) anyerror!void,
+    wait: *const fn (*anyopaque) anyerror!void,
+    equal: *const fn (*anyopaque) bool,
+};
+
+/// Every rank is ready before any enters a gather, then all enter both; a failed NCCL gather or wait refuses at once.
+fn vote(b: *tp.Bootstrap, s: Steps, entered: *bool) !void {
+    const ready = if (s.prepare(s.ctx)) |_| true else |_| false;
+    if (!try everyRank(b, ready)) return error.ProbeUnprepared;
+    const wired = if (s.wire(s.ctx)) |_| true else |_| false; // NCCL's gather follows it either way
+    entered.* = true;
+    try s.nccl(s.ctx);
+    try s.wait(s.ctx);
+    try lendIfAll(b, wired and s.equal(s.ctx));
 }
+
+/// One 4 KiB gather in place, on the wire and on the group's NCCL (no wire lent yet): every byte must be equal.
+const Probe = struct {
+    gpa: std.mem.Allocator,
+    d: *const cuda.Driver,
+    g: *const Group,
+    r: *tp.roce_multi.Roce,
+    a: ?cuda.DeviceBuffer = null, // the wire's rows, then NCCL's
+    s: ?cuda.Stream = null,
+
+    const n = 4096;
+
+    fn deinit(p: *Probe) void {
+        if (p.a) |*a| a.free();
+        if (p.s) |*s| s.deinit();
+    }
+
+    fn steps(p: *Probe) Steps {
+        return .{ .ctx = p, .prepare = prepare, .wire = wire, .nccl = nccl, .wait = wait, .equal = equal };
+    }
+
+    fn from(ctx: *anyopaque) *Probe {
+        return @ptrCast(@alignCast(ctx));
+    }
+
+    fn prepare(ctx: *anyopaque) anyerror!void {
+        const p = from(ctx);
+        const world = p.g.world;
+        p.a = try cuda.DeviceBuffer.alloc(p.d, 2 * world * n);
+        p.s = try cuda.Stream.init(p.d, true);
+        var mine: [n]u8 = undefined;
+        tp.reference.fill(&mine, .bf16, @intCast(p.g.rank), 0x7072_6f62);
+        try p.a.?.uploadAsync(p.g.rank * n, &mine, p.s.?.handle);
+        try p.a.?.uploadAsync((world + p.g.rank) * n, &mine, p.s.?.handle);
+        try p.s.?.synchronize(); // the rows are up before this rank says it is ready
+    }
+
+    fn wire(ctx: *anyopaque) anyerror!void {
+        const p = from(ctx);
+        try p.r.allGatherBytes(p.a.?.ptr + p.g.rank * n, p.a.?.ptr, n, p.s.?.handle);
+    }
+
+    fn nccl(ctx: *anyopaque) anyerror!void {
+        const p = from(ctx);
+        try p.g.allGather(p.s.?, p.a.?.ptr + (p.g.world + p.g.rank) * n, p.a.?.ptr + p.g.world * n, n);
+    }
+
+    fn wait(ctx: *anyopaque) anyerror!void {
+        try from(ctx).s.?.synchronize();
+    }
+
+    fn equal(ctx: *anyopaque) bool {
+        const p = from(ctx);
+        const world = p.g.world;
+        p.r.check() catch return false;
+        const got = p.gpa.alloc(u8, 2 * world * n) catch return false;
+        defer p.gpa.free(got);
+        p.a.?.download(0, got) catch return false;
+        const same = std.mem.eql(u8, got[0 .. world * n], got[world * n ..]);
+        if (!same) std.log.warn("rank {d}: TF_GLM_ROCE_MULTI's probe: the wire's gather DIFFERS from NCCL's", .{p.g.rank});
+        return same;
+    }
+};
 
 /// The wire is lent only when every rank's probe matched NCCL's bytes: one rank's mismatch keeps every rank on NCCL.
 fn lendIfAll(b: *tp.Bootstrap, good: bool) !void {
@@ -160,34 +229,82 @@ test "the wire is lent only when every rank's vote is one byte saying yes" {
     try std.testing.expect(!allSaid(&.{ &.{1}, &.{ 1, 1 }, &.{1} }));
 }
 
-test "a probe mismatch on one rank keeps all three on NCCL; matches on all three lend the wire on all three" {
+test "a probe step failing on any one rank: every rank refuses, or every rank keeps NCCL, and none enters a gather unready" {
     if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
-    const Vote = struct {
+    const Point = enum { none, prepare, wire, nccl, wait, equal };
+    const Run = struct {
         port: u16,
         lfd: tp.sock.Fd,
-        odd: ?u32,
+        at: Point,
+        on: u32,
+        took: [6]std.atomic.Value(u32) = @splat(.init(0)),
         errs: [3]?anyerror = .{ null, null, null },
+        entered: [3]bool = .{ false, false, false },
 
-        fn rank(v: *@This(), me: u32) void {
-            v.errs[me] = v.body(me);
-        }
+        const R = @This();
+        const Rank = struct {
+            run: *R,
+            me: u32,
 
-        fn body(v: *@This(), me: u32) ?anyerror {
-            var b = (if (me == 0) tp.Bootstrap.acceptOn(v.lfd, 3, 5 * std.time.ns_per_s) else tp.Bootstrap.open(.{ .world = 3, .rank = me, .link_port = v.port, .connect_timeout_ns = 5 * std.time.ns_per_s })) catch |e| return e;
+            fn step(k: *Rank, p: Point) anyerror!void {
+                _ = k.run.took[@backingInt(p)].fetchAdd(1, .monotonic);
+                if (k.run.at == p and k.run.on == k.me) return error.Injected;
+            }
+            fn from(ctx: *anyopaque) *Rank {
+                return @ptrCast(@alignCast(ctx));
+            }
+            fn prepare(ctx: *anyopaque) anyerror!void {
+                return from(ctx).step(.prepare);
+            }
+            fn wire(ctx: *anyopaque) anyerror!void {
+                return from(ctx).step(.wire);
+            }
+            fn nccl(ctx: *anyopaque) anyerror!void {
+                return from(ctx).step(.nccl);
+            }
+            fn wait(ctx: *anyopaque) anyerror!void {
+                return from(ctx).step(.wait);
+            }
+            fn equal(ctx: *anyopaque) bool {
+                from(ctx).step(.equal) catch return false;
+                return true;
+            }
+        };
+
+        fn rank(run: *@This(), me: u32) void {
+            var b = (if (me == 0) tp.Bootstrap.acceptOn(run.lfd, 3, 5 * std.time.ns_per_s) else tp.Bootstrap.open(.{ .world = 3, .rank = me, .link_port = run.port, .connect_timeout_ns = 5 * std.time.ns_per_s })) catch |e| {
+                run.errs[me] = e;
+                return;
+            };
             defer b.close();
-            lendIfAll(&b, v.odd != me) catch |e| return e;
-            return null;
+            var k: Rank = .{ .run = run, .me = me };
+            vote(&b, .{ .ctx = &k, .prepare = Rank.prepare, .wire = Rank.wire, .nccl = Rank.nccl, .wait = Rank.wait, .equal = Rank.equal }, &run.entered[me]) catch |e| {
+                run.errs[me] = e;
+            };
         }
     };
-    for ([_]?u32{ 1, null }) |odd| {
+    const Verdict = enum { lend, nccl, refuse };
+    for (std.enums.values(Point)) |at| for (0..3) |on| {
+        if (at == .none and on > 0) continue;
         const l = try tp.bootstrap.testListener();
         defer tp.sock.close(l.fd);
-        var v: Vote = .{ .port = l.port, .lfd = l.fd, .odd = odd };
+        var run: Run = .{ .port = l.port, .lfd = l.fd, .at = at, .on = @intCast(on) };
         var t: [2]std.Thread = undefined;
-        for (&t, 1..) |*x, me| x.* = try std.Thread.spawn(.{}, Vote.rank, .{ &v, @as(u32, @intCast(me)) });
-        v.rank(0);
+        for (&t, 1..) |*x, me| x.* = try std.Thread.spawn(.{}, Run.rank, .{ &run, @as(u32, @intCast(me)) });
+        run.rank(0);
         for (t) |x| x.join();
-        const want: ?anyerror = if (odd == null) null else error.ProbeMismatch;
-        for (v.errs) |e| try std.testing.expectEqual(want, e);
-    }
+        const want: Verdict = switch (at) {
+            .none => .lend,
+            .prepare, .wire, .equal => .nccl,
+            .nccl, .wait => .refuse,
+        };
+        for (run.errs, run.entered) |e, entered| {
+            const got: Verdict = if (e) |err| (if (fallsBack(err, entered)) .nccl else .refuse) else .lend;
+            try std.testing.expectEqual(want, got);
+        }
+        // unready anywhere: no rank entered a gather; past that, every rank entered NCCL's, the wire failing or not
+        const gathers: u32 = if (at == .prepare) 0 else 3;
+        try std.testing.expectEqual(gathers, run.took[@backingInt(Point.wire)].load(.monotonic));
+        try std.testing.expectEqual(gathers, run.took[@backingInt(Point.nccl)].load(.monotonic));
+    };
 }
