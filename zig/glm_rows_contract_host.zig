@@ -461,3 +461,7 @@ test "GLM window contract: every nonlinear stress residual covers scalar FP32 ro
         };
     }
 }
+
+test "GLM window contract: eh reference parallel rows preserve FP64 bytes and thread failure fallback" {
+    try @import("tests/contract/metal_glm_eh.zig").checkParallelReference();
+}
