@@ -162,9 +162,9 @@ pub const Pages = struct {
         return l.ids.items;
     }
 
-    /// Another rank: paged slot `slot` maps rank 0's page ids (sent with the stream's begin step).
-    pub fn map(p: *Pages, slot: u32, ids: []const u32) !void {
-        if (!p.paged(slot) or ids.len == 0 or ids.len > tableLen(p.e.capacity)) return error.BadStep;
+    /// Another rank: paged slot `slot` maps rank 0's page ids (its begin step's), the prompt cache's `kept` first.
+    pub fn map(p: *Pages, slot: u32, ids: []const u32, kept: usize) !void {
+        if (!p.paged(slot) or ids.len == 0 or ids.len > tableLen(p.e.capacity) or kept > ids.len) return error.BadStep;
         if (p.used[slot]) return error.BadStep;
         for (ids) |id| if (id >= p.pool.total()) return error.BadStep;
         const l = &p.leases[slot];
@@ -173,7 +173,7 @@ pub const Pages = struct {
         errdefer l.ids.clearRetainingCapacity();
         var up: Upload = .{ .p = p, .slot = slot };
         try Upload.write(&up, l.ids.items, 0);
-        try p.mapped(slot, l.ids.items, 0);
+        try p.mapped(slot, l.ids.items, kept);
     }
 
     /// The slot's sequence reaches its pages' rows (past the `kept` first, NaN first under TF_KV_POISON).

@@ -174,14 +174,45 @@ test "a follower maps rank 0's ids, and refuses ids past its pool or a slot that
     const l = try pages_mod.layout(std.testing.allocator, &f.e, 0);
     const p = try f.pool(l, 3, 8, false);
     defer f.deinit(p);
-    try p.map(2, &.{ 5, 3, 7 });
+    try p.map(2, &.{ 5, 3, 7 }, 0);
     try std.testing.expectEqualSlices(u32, &.{ 5, 3, 7 }, F.table(f.e.seqs.items[2].?.st.table, 3));
     try expectEqual(@as(usize, 1536), f.e.seqs.items[2].?.st.capacity);
-    try std.testing.expectError(error.BadStep, p.map(1, &.{8}));
-    try std.testing.expectError(error.BadStep, p.map(3, &.{1}));
+    try std.testing.expectError(error.BadStep, p.map(1, &.{8}, 0));
+    try std.testing.expectError(error.BadStep, p.map(3, &.{1}, 0));
     p.close(2);
     try expectEqual(@as(usize, 0), f.e.seqs.items[2].?.st.capacity);
     try expect(p.pool.idle()); // a follower's pool lends nothing
+}
+
+test "TF_GLM_KV_SHARE at TP: two followers map rank 0's resumed table, NaN past the cache's pages, more kept refused" {
+    var ids: [4]u32 = undefined;
+    {
+        var f: Fake = undefined; // rank 0: the prompt cache keeps the first two pages, and a resume holds them again
+        try f.init(std.testing.allocator);
+        const l = try pages_mod.layout(std.testing.allocator, &f.e, 0);
+        const p = try f.pool(l, 3, 8, true);
+        defer f.deinit(p);
+        _ = try p.open(1, 1500, 100);
+        for ([_]u32{ 0, 1, 0, 1 }) |id| p.pool.retain(id);
+        p.close(1);
+        @memcpy(&ids, try p.openWith(2, 1500, 100, &.{ 0, 1 }));
+        p.close(2);
+        for ([_]u32{ 0, 1 }) |id| p.pool.release(id);
+        try expect(p.pool.idle());
+    }
+    for (1..3) |_| { // ranks 1 and 2, one after the other on the fake driver
+        var f: Fake = undefined;
+        try f.init(std.testing.allocator);
+        const l = try pages_mod.layout(std.testing.allocator, &f.e, 0);
+        const p = try f.pool(l, 3, 8, false);
+        defer f.deinit(p);
+        p.poison = true;
+        try p.map(2, &ids, 2);
+        try std.testing.expectEqualSlices(u32, &ids, F.table(f.e.seqs.items[2].?.st.table, 4));
+        try expectEqual(@as(usize, 2), F.fills); // the stream's two fresh pages alone
+        p.close(2);
+        try std.testing.expectError(error.BadStep, p.map(2, ids[0..2], 3));
+    }
 }
 
 test "a follower refuses rank 0's pool when its KV page has other bytes, and makes no pool" {
