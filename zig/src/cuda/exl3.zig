@@ -85,10 +85,10 @@ fn wcShared(v: Wc) u32 {
 }
 
 /// linear.cu dispatch_wc: which linear_wc takes m rows of this weight, or null for the mid-M kernels.
-fn wcPick(w: Weight, m: usize, sk: u32, wk: u32) ?usize {
+pub fn wcPick(w: Weight, m: usize, sk: u32, wk: u32, min_rows: usize) ?usize {
     if (w.codebook != .mul1 or (w.halves != 8 and w.halves != 12)) return null;
     const per_warp = w.k / 16 / sk / wk;
-    if (per_warp % 2 != 0 or m <= 16 or m > 128) return null;
+    if (per_warp % 2 != 0 or m < min_rows or m > 128) return null;
     const nb = w.n / 128;
     const fold = sk > 1 and nb >= 32;
     if (!fold and w.halves == 8 and m > 32 and m <= 40) return null;
@@ -198,6 +198,8 @@ pub const Linear = struct {
     pdl: bool = true,
     /// 17-128 rows on the mid-M kernels where a width has them (false: the linear at every row count, same bits).
     midm: bool = true,
+    /// The least rows the mid-M kernels and linear_wc take (the kernel contract: 1, proving their bits at every count).
+    min_rows: usize = 17,
 
     pub fn load(d: *const Driver) !Linear {
         if (!kernels.available) return error.BuiltWithoutKernels;
@@ -282,7 +284,7 @@ pub const Linear = struct {
         args.add(@as(i32, @intCast(m)));
         args.add(@as(i32, @intCast(w.k)));
         // 17-48 rows: 16-row groups; 49-128: 32-row groups, each group's tiles decoded once (linear.cu's dispatch)
-        if (l.midm and l.use_wc) if (wcPick(w, m, p.sk, p.wk)) |wi| {
+        if (l.midm and l.use_wc) if (wcPick(w, m, p.sk, p.wk, l.min_rows)) |wi| {
             const v = wc_variants[wi];
             args.add(@as(i32, @intCast(p.wk))); // WcArgs: LinearArgs, then the plan's warps
             const rg = 16 * v.mt;
@@ -293,7 +295,7 @@ pub const Linear = struct {
             }, s, &args);
         };
         const pg: u32 = if (m > 48) 2 else 1;
-        if (l.midm and m > 16) if (mpgIndex(w.halves, w.codebook, p.wk, pg)) |mi| {
+        if (l.midm and m >= l.min_rows) if (mpgIndex(w.halves, w.codebook, p.wk, pg)) |mi| {
             const groups = (m + 16 * pg - 1) / (16 * pg);
             return launch_.launch(l.mpg[mi], .{
                 .grid = .{ .x = @intCast(w.n / 128 * groups), .y = p.sk, .z = 1 },
@@ -394,7 +396,7 @@ pub const Dense = struct {
 
     /// Grow every scratch buffer to what 128 rows of `w` need on `s`, so a call in a graph capture allocates nothing.
     pub fn reserve(de: *Dense, s: Stream, w: Weight) !void {
-        if (planOf(w).sk > 1) _ = try de.scratch(&de.z, Linear.zBytes(w, 128)); // a fixed plan's splits too
+        if (planOf(w).sk > 1) _ = try de.scratch(&de.z, Linear.zBytes(w, 128));
         _ = try de.grownCounters(s, Linear.counterBytes(w));
         _ = try de.scratch(&de.xh, 128 * w.k * 2);
     }
@@ -409,16 +411,22 @@ pub const Dense = struct {
 
     /// `reserve` for a group `decodeGroup` launches at once: its members' scratch side by side, at 16 rows.
     pub fn reserveGroup(de: *Dense, s: Stream, ws: []const Weight) !void {
-        if (!groupable(ws, 16)) return;
+        if (groupable(ws, 16)) _ = try de.groupScratch(s, ws, 16);
+    }
+
+    /// A group's scratch at `rows`: its members' split partials, counters and rotated inputs side by side.
+    pub fn groupScratch(de: *Dense, s: Stream, ws: []const Weight, rows: usize) !struct { z: u64, counters: u64, xh: u64 } {
         var zb: usize = 0;
         var cb: usize = 0;
         for (ws) |w| {
             zb += Linear.zBytes(w, 128);
             cb += Linear.counterBytes(w);
         }
-        if (zb > 0) _ = try de.scratch(&de.z, zb);
-        _ = try de.grownCounters(s, cb);
-        _ = try de.scratch(&de.xh, ws.len * 16 * ws[0].k * 2);
+        return .{
+            .z = if (zb > 0) try de.scratch(&de.z, zb) else 0,
+            .counters = try de.grownCounters(s, cb),
+            .xh = try de.scratch(&de.xh, ws.len * rows * ws[0].k * 2),
+        };
     }
 
     /// Decode rows: one call (the kernel takes 1..128), any count above in 128-row blocks.
@@ -465,16 +473,8 @@ pub const Dense = struct {
             for (ws, ys) |w, y| try de.decode(s, w, x, x_dtype, rows, y, y_dtype);
             return;
         }
-        var zb: usize = 0;
-        var cb: usize = 0;
-        for (ws) |w| {
-            zb += Linear.zBytes(w, 128);
-            cb += Linear.counterBytes(w);
-        }
-        const z: u64 = if (zb > 0) try de.scratch(&de.z, zb) else 0;
-        const counters = try de.grownCounters(s, cb); // the members' counters back to back
-        const xh = try de.scratch(&de.xh, ws.len * rows * ws[0].k * 2);
-        try de.lin.matmulGroup(s, ws, x, x_dtype, rows, ys, y_dtype, xh, z, counters);
+        const sc = try de.groupScratch(s, ws, rows);
+        try de.lin.matmulGroup(s, ws, x, x_dtype, rows, ys, y_dtype, sc.xh, sc.z, sc.counters);
     }
 
     fn blocks(de: *Dense, s: Stream, w: Weight, x: u64, x_dtype: DType, rows: usize, y: u64, y_dtype: DType) !void {
@@ -597,3 +597,7 @@ test "candidate selection refuses layouts it cannot represent" {
 }
 
 pub const block = @import("exl3_block.zig");
+
+test {
+    _ = @import("exl3_dense_test.zig");
+}

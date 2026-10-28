@@ -133,7 +133,7 @@ fn f64Linear(r: *Rig, lin: *const exl3.Linear, c: Cfg) !void {
     for (suh) |*v| v.* = @bitCast(@as(f16, @floatCast(r.rng.float(f32) * 2 - 1)));
     for (svh) |*v| v.* = @bitCast(@as(f16, @floatCast(r.rng.float(f32) * 2 - 1)));
     const x = try r.bfs(128 * k, 1.0);
-    const want = try reference(r, width, c.codebook, trellis, k, n, x, suh, svh, 128);
+    const want = try reference(r, width, c.codebook, trellis, k, n, x, suh, svh);
     const st = exl3.strides(k, n, c.halves, false);
     const w: exl3.Weight = .{
         .trellis = try r.dev(std.mem.sliceAsBytes(trellis)),
@@ -158,8 +158,9 @@ fn f64Linear(r: *Rig, lin: *const exl3.Linear, c: Cfg) !void {
     }
 }
 
-/// The Python engine's f64 reference for m (at most 128) rows: Wq fp16 from the trellis, fp16 xh, y, each |t| sum.
-pub fn reference(r: *Rig, width: exl3fmt.Width, cb: exl3fmt.Codebook, trellis: []const i16, k: usize, n: usize, x: []const u16, suh: []const u16, svh: []const u16, m: usize) !struct { want: []f64, tol: []f64 } {
+/// The Python engine's f64 reference: Wq fp16 from the trellis, fp16 xh, the y sums, and each element's |t| sum.
+fn reference(r: *Rig, width: exl3fmt.Width, cb: exl3fmt.Codebook, trellis: []const i16, k: usize, n: usize, x: []const u16, suh: []const u16, svh: []const u16) !struct { want: []f64, tol: []f64 } {
+    const m = 128;
     const wq = try r.a.alloc(f16, k * n);
     exl3fmt.unpack(width, cb, trellis, k / 16, n / 16, wq);
     const xs = try r.a.alloc(f64, m * k);
