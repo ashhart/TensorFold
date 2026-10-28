@@ -138,7 +138,7 @@ pub fn metrics(srv: *Server, conn: *Conn, a: Allocator) void {
         if (liveRead(snap, status)) {
             ledgerCounts(&status, snap);
             srv.metrics.render(srv.io, &out.writer, status, streams[0..@min(status.streams, streams.len)], info, memory, info.context_window) catch return;
-        } else srv.metrics.renderParked(srv.io, &out.writer, parkedView(snap)) catch return;
+        } else srv.metrics.renderParked(srv.io, &out.writer, parkedView(snap, status)) catch return;
     } else {
         var status: api.Status = .{};
         var streams: [512]u32 = undefined;
@@ -146,7 +146,7 @@ pub fn metrics(srv: *Server, conn: *Conn, a: Allocator) void {
         if (liveRead(snap, status)) {
             ledgerCounts(&status, snap);
             srv.metrics.render(srv.io, &out.writer, status, streams[0..@min(status.streams, streams.len)], srv.info, srv.engine.memory(false), srv.info.context_window) catch return;
-        } else srv.metrics.renderParked(srv.io, &out.writer, parkedView(snap)) catch return;
+        } else srv.metrics.renderParked(srv.io, &out.writer, parkedView(snap, status)) catch return;
     }
     @import("load_metrics.zig").render(&out.writer, snap, .{ .model = srv.config.served_name, .backend = srv.config.identity.backend, .version = srv.config.identity.version }) catch return;
     if (srv.config.admission.enabled()) @import("metrics.zig").renderAdmission(&out.writer, srv.admission.snapshot(srv.io)) catch return;
@@ -179,9 +179,10 @@ fn ledgerCounts(status: *api.Status, snap: api.load_ledger.Snapshot) void {
     status.preemptions = r.requeued + r.yields;
 }
 
-fn parkedView(snap: api.load_ledger.Snapshot) @import("metrics.zig").Metrics.Parked {
-    const r = snap.requests orelse return .{ .parked = snap.parked };
-    return .{ .parked = snap.parked, .running = r.running, .waiting = r.waiting };
+/// The fallback body's counts: the ledger's when it has them, and the status read's generated tokens, never a zero.
+fn parkedView(snap: api.load_ledger.Snapshot, status: api.Status) @import("metrics.zig").Metrics.Parked {
+    const r = snap.requests orelse return .{ .parked = snap.parked, .running = status.running, .waiting = status.waiting, .generation = status.generation_tokens };
+    return .{ .parked = snap.parked, .running = r.running, .waiting = r.waiting, .generation = status.generation_tokens };
 }
 
 pub fn dashboard(srv: *Server, conn: *Conn, a: Allocator) void {

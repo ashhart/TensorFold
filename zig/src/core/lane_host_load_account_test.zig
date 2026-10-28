@@ -176,3 +176,31 @@ test "a batch counts every completed prompt, a later first-token failure include
     x.report(&a); // its own report finds it counted
     try std.testing.expectEqual([2]u64{ 2000, 900 }, x.work());
 }
+
+test "an unconfirmed reuse hint leaves the whole prompt to fill; a confirmed restore leaves the rest" {
+    var x: Host = undefined;
+    try x.init();
+    defer x.deinit();
+    var ledger: api.load_ledger.Ledger = .init(std.testing.io);
+    defer ledger.detach(false);
+    var j: Job = .{ .host = &x.host, .id = 1, .request = &request, .sink = undefined };
+    j.stream.fill_at = .init(900); // the backend may yet refuse the 900-token restore
+    j.stream.cached = 0;
+    j.stream.reuse_failed = false;
+    try x.host.admitted.append(std.testing.allocator, &j);
+    defer {
+        x.host.lock();
+        _ = x.host.admitted.pop();
+        x.host.unlock();
+    }
+    ledger.attach(x.host.engine());
+    try std.testing.expectEqual(@as(?u64, 0), ledger.read().requests.?.filling_left);
+    load.began(&x.host, &j); // a blocking prefill unlocks no more: began's own publish must show the fill
+    try std.testing.expectEqual(@as(?u64, 1000), ledger.read().requests.?.filling_left); // an upper bound, not 100
+    j.stream.cached = 900; // the first chunk returned: the restore held
+    load.calling(&x.host, &j);
+    load.progress(&x.host, &j);
+    x.host.lock();
+    x.host.unlock();
+    try std.testing.expectEqual(@as(?u64, 100), ledger.read().requests.?.filling_left);
+}

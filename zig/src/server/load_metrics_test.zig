@@ -91,12 +91,13 @@ test "an unknown fill leaves its gauge out; a stale resident engine shows the le
     defer out.deinit();
     var s = snapshot(false);
     s.requests = .{ .running = 2, .waiting = 1, .filling_left = null, .fill_unknown = true };
-    try m.renderParked(std.testing.io, &out.writer, .{ .running = 2, .waiting = 1 });
+    try m.renderParked(std.testing.io, &out.writer, .{ .running = 2, .waiting = 1, .generation = 7 });
     try load_metrics.render(&out.writer, s, id);
     const body = out.written();
     try once(body);
     try std.testing.expect(has(body, "tensorfold:requests_running 2\n"));
     try std.testing.expect(has(body, "tensorfold:num_requests_waiting 1\n"));
+    try std.testing.expect(has(body, "tensorfold:generation_tokens_running 7\n")); // the status read's, not a zero
     try std.testing.expect(!has(body, "filling_prompt_tokens_left"));
 }
 
