@@ -442,11 +442,7 @@ fn requireCheckpoint(top: std.json.ObjectMap, text: std.json.ObjectMap) !void {
     const model = top.get("model_type") orelse return error.MissingField;
     if (model != .string or !std.mem.eql(u8, model.string, "deepseek_v41")) return error.UnsupportedCheckpoint;
     const quant = top.get("quantization_config") orelse return error.MissingField;
-    if (quant != .object) return error.BadConfig;
-    const method = quant.object.get("quant_method") orelse return error.MissingField;
-    const version = quant.object.get("version") orelse return error.MissingField;
-    if (method != .string or !std.mem.eql(u8, method.string, "exl3") or version != .string or
-        (!std.mem.eql(u8, version.string, "1") and !std.mem.startsWith(u8, version.string, "1."))) return error.UnsupportedCheckpoint;
+    try @import("checkpoint_metadata.zig").require(quant);
     try requireMetadata(top, text);
 }
 
@@ -508,4 +504,8 @@ test "asset metadata preserves release checks without widening checkpoint admiss
     const changed = try std.mem.replaceOwned(u8, a, bytes, "5120", "5248");
     defer a.free(changed);
     try std.testing.expectError(error.UnsupportedArchitecture, Config.parseMetadata(a, changed));
+}
+
+test {
+    _ = @import("dsq_admission_test.zig");
 }
