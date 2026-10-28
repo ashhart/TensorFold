@@ -9,7 +9,7 @@
 //!   gated_delta_prefill_ash.comp   gated-delta prefill scan, u8 mask binding
 //!                             removed (copied default kept alongside; MIT)
 //!   gated_delta_decode.comp   gated-delta decode step, raw-gates flags
-//!                             bit8|bit9 (copied, MIT)
+//!                             bit3|bit9 (copied, MIT)
 //!   fast_norm_gated.comp      gated RMSNorm + SiLU (copied, MIT)
 //!   copy_general.comp -DUSE_U16  contiguous bf16 copies (conv-input assembly)
 //!
@@ -87,7 +87,7 @@ pub const Shaders = struct {
     /// gated_delta_prefill_ash.comp -DUSE_BF16 (both passes dispatch this
     /// one image; the pass is a push-constant flag, not a variant)
     prefill_recur_bf16: []align(4) const u8,
-    /// gated_delta_decode.comp -DUSE_BF16 (raw gates ride flags bit8|bit9)
+    /// gated_delta_decode.comp -DUSE_BF16 (raw gates ride flags bit3|bit9)
     gated_delta_decode_bf16: []align(4) const u8,
     /// fast_norm_gated.comp -DUSE_BF16 (default build, mode 0 at runtime)
     fast_norm_gated_bf16: []align(4) const u8,
@@ -102,6 +102,8 @@ const full_push_bytes: u32 = params.push_bytes; // 120
 /// gated_delta_prefill_ash.comp appends `chunk` and `chunks` after the
 /// standard Params: 32 words.
 const prefill_push_bytes: u32 = 128;
+const decode_raw_gates: u32 = 8;
+const decode_f32_alog: u32 = 512;
 
 /// Params plus the prefill scan's trailing chunk fields, matching the
 /// shader's push block field for field.
@@ -379,7 +381,7 @@ pub const Gdn = struct {
         try m.prefill_bf16.run(cmds, std.mem.asBytes(&p), .{ grid_x, plan.chunks, 1 }, timeout_ns);
     }
 
-    /// Gated-delta decode step (T == 1): raw-gates mode (flags bit8|bit9) —
+    /// Gated-delta decode step (T == 1): raw-gates mode (flags bit3|bit9) —
     /// the kernel computes g and beta from a/b/A_log/dt_bias with the
     /// Metal-oracle rounding chain and f32 A_log, and the kv walk uses the
     /// Metal chain's association. a_log_u16 is the f32 A_log viewed as u16
@@ -401,7 +403,7 @@ pub const Gdn = struct {
             .matrix_m = Model.head_dim,
             .matrix_n = Model.head_dim,
             .matrix_k = Model.heads,
-            .flags = 0x300, // bit8 raw gates, bit9 f32 A_log + Metal kv order
+            .flags = decode_raw_gates | decode_f32_alog,
             .shape = .{ 0, 0, 0, 0 },
             .in_strides = .{ 0, 0, Model.heads, 0 }, // [2] = Hv for head % Hv
         };
@@ -682,4 +684,12 @@ test "single-chunk prefill read and written snapshot dummies are disjoint" {
     try testing.expectEqual(dummy_bytes, snapshot.byte_offset);
     try testing.expectEqual(dummy_bytes, read.byteLen());
     try testing.expectEqual(dummy_bytes, snapshot.byteLen());
+}
+
+test "decode gate flags match the shader masks, not the bit numbers" {
+    try testing.expectEqual(@as(u32, 8), decode_raw_gates);
+    try testing.expectEqual(@as(u32, 512), decode_f32_alog);
+    const flags = decode_raw_gates | decode_f32_alog;
+    try testing.expect(flags & 8 != 0);
+    try testing.expect(flags & 512 != 0);
 }
