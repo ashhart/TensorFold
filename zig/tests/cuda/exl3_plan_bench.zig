@@ -102,13 +102,6 @@ fn shape(r: *Rig, lin: *const exl3.Linear, sh: Shape) !void {
     }
 }
 
-/// The family's fixed plans (cuda_exl3_weights.zig) by shape name, for `midm` and `exl3-plan-f64`.
-pub const fixed = [_]struct { name: []const u8, sk: u32, wk: u32 }{
-    .{ .name = "gate_up", .sk = 1, .wk = 4 }, .{ .name = "down", .sk = 1, .wk = 8 },  .{ .name = "qkv", .sk = 1, .wk = 4 },
-    .{ .name = "z", .sk = 2, .wk = 4 },       .{ .name = "out_o", .sk = 2, .wk = 8 }, .{ .name = "q", .sk = 1, .wk = 8 },
-    .{ .name = "k_v", .sk = 5, .wk = 8 },     .{ .name = "head", .sk = 1, .wk = 4 },
-};
-
 /// `tf-cuda-test exl3-midm`: the mid-M kernels against the linear at 17-128 rows, byte for byte, and both timed at 128.
 pub fn midm(gpu: Gpu) !void {
     var arena = std.heap.ArenaAllocator.init(gpu.gpa);
@@ -124,7 +117,7 @@ pub fn midm(gpu: Gpu) !void {
     var lin = try exl3.Linear.load(gpu.d);
     defer lin.unload();
     var bad: usize = 0;
-    for (shapes, fixed) |sh, f| {
+    for (shapes) |sh| {
         const words = (sh.k / 16) * (sh.n / 16) * sh.halves * 4;
         const host = try r.a.alloc(u32, words);
         for (host) |*v| v.* = r.rng.int(u32);
@@ -133,7 +126,7 @@ pub fn midm(gpu: Gpu) !void {
         for (suh) |*v| v.* = @bitCast(@as(f16, @floatCast(r.rng.float(f32) * 2 - 1)));
         for (svh) |*v| v.* = @bitCast(@as(f16, @floatCast(r.rng.float(f32) * 2 - 1)));
         const st = exl3.strides(sh.k, sh.n, sh.halves, false);
-        const w: exl3.Weight = .{ .trellis = try r.dev(std.mem.sliceAsBytes(host)), .suh = try r.dev(std.mem.sliceAsBytes(suh)), .svh = try r.dev(std.mem.sliceAsBytes(svh)), .k = @intCast(sh.k), .n = @intCast(sh.n), .halves = sh.halves, .codebook = .mul1, .stride_k = st.k, .stride_nb = st.nb, .sk = f.sk, .wk = f.wk };
+        const w: exl3.Weight = .{ .trellis = try r.dev(std.mem.sliceAsBytes(host)), .suh = try r.dev(std.mem.sliceAsBytes(suh)), .svh = try r.dev(std.mem.sliceAsBytes(svh)), .k = @intCast(sh.k), .n = @intCast(sh.n), .halves = sh.halves, .codebook = .mul1, .stride_k = st.k, .stride_nb = st.nb };
         const x = try r.dev(std.mem.sliceAsBytes(try r.bfs(128 * sh.k, 1.0)));
         const xh = try r.zeros(128 * sh.k * 2);
         const z = try r.zeros(exl3.Linear.zBytes(w, 128));
@@ -186,7 +179,7 @@ pub fn midm(gpu: Gpu) !void {
     check.pass("exl3.midm", .{});
 }
 
-/// `tf-cuda-test exl3-shapes [rows]`: each 27B shape once at its fixed plan, 1 and 16 rows, for a profiler to attach.
+/// `tf-cuda-test exl3-shapes [rows]`: each 27B shape once at plan()'s launch, 1 and 16 rows, for a profiler to attach.
 pub fn profileShapes(gpu: Gpu, rows_arg: ?[]const u8) !void {
     var arena = std.heap.ArenaAllocator.init(gpu.gpa);
     defer arena.deinit();
@@ -201,7 +194,7 @@ pub fn profileShapes(gpu: Gpu, rows_arg: ?[]const u8) !void {
     var lin = try exl3.Linear.load(gpu.d);
     defer lin.unload();
     const ms: []const usize = if (rows_arg) |a| &.{try std.fmt.parseInt(usize, a, 10)} else &.{ 1, 16 };
-    for (shapes, fixed) |sh, f| {
+    for (shapes) |sh| {
         const words = (sh.k / 16) * (sh.n / 16) * sh.halves * 4;
         const host = try r.a.alloc(u32, words);
         for (host) |*v| v.* = r.rng.int(u32);
@@ -210,14 +203,14 @@ pub fn profileShapes(gpu: Gpu, rows_arg: ?[]const u8) !void {
         @memset(suh, 0x3C00);
         @memset(svh, 0x3C00);
         const st = exl3.strides(sh.k, sh.n, sh.halves, false);
-        const w: exl3.Weight = .{ .trellis = try r.dev(std.mem.sliceAsBytes(host)), .suh = try r.dev(std.mem.sliceAsBytes(suh)), .svh = try r.dev(std.mem.sliceAsBytes(svh)), .k = @intCast(sh.k), .n = @intCast(sh.n), .halves = sh.halves, .codebook = .mul1, .stride_k = st.k, .stride_nb = st.nb, .sk = f.sk, .wk = f.wk };
+        const w: exl3.Weight = .{ .trellis = try r.dev(std.mem.sliceAsBytes(host)), .suh = try r.dev(std.mem.sliceAsBytes(suh)), .svh = try r.dev(std.mem.sliceAsBytes(svh)), .k = @intCast(sh.k), .n = @intCast(sh.n), .halves = sh.halves, .codebook = .mul1, .stride_k = st.k, .stride_nb = st.nb };
         const x = try r.dev(std.mem.sliceAsBytes(try r.bfs(128 * sh.k, 1.0)));
         const xh = try r.zeros(128 * sh.k * 2);
         const z = try r.zeros(exl3.Linear.zBytes(w, 128) + 16);
         const counters = try exl3_tests.zeroed(&r, exl3.Linear.counterBytes(w));
         const y = try r.zeros(128 * sh.n * 2);
         for (ms) |m| {
-            std.debug.print("SHAPE {s} m={d} sk={d} wk={d}\n", .{ sh.name, m, f.sk, f.wk });
+            std.debug.print("SHAPE {s} m={d} sk={d} wk={d}\n", .{ sh.name, m, exl3.planOf(w).sk, exl3.planOf(w).wk });
             for (0..2) |_| try lin.matmul(r.s, w, x, .bf16, m, y, .bf16, xh, z, counters);
             try r.s.synchronize();
         }
@@ -226,9 +219,9 @@ pub fn profileShapes(gpu: Gpu, rows_arg: ?[]const u8) !void {
     }
 }
 
-/// The 27B's projection groups (q k v, gate up, qkv z) in one launch against each member's own, byte for byte.
+/// Groups plan() admits (gate up; q, gate, qkv: 8 warps; z, k_v: 4, split K) in one launch against each member's own.
 fn groups(r: *Rig, lin: *const exl3.Linear) !usize {
-    const sets = [_][]const usize{ &.{ 5, 6, 6 }, &.{ 0, 0 }, &.{ 2, 3 } }; // indices into shapes / fixed
+    const sets = [_][]const usize{ &.{ 0, 0 }, &.{ 5, 0, 2 }, &.{ 3, 6 } }; // indices into shapes
     var bad: usize = 0;
     for (sets) |set| {
         var ws: [3]exl3.Weight = undefined;
@@ -236,7 +229,6 @@ fn groups(r: *Rig, lin: *const exl3.Linear) !usize {
         var yb: [3]u64 = undefined;
         for (set, 0..) |si, i| {
             const sh = shapes[si];
-            const f = fixed[si];
             const words = (sh.k / 16) * (sh.n / 16) * sh.halves * 4;
             const host = try r.a.alloc(u32, words);
             for (host) |*v| v.* = r.rng.int(u32);
@@ -245,7 +237,7 @@ fn groups(r: *Rig, lin: *const exl3.Linear) !usize {
             for (suh) |*v| v.* = @bitCast(@as(f16, @floatCast(r.rng.float(f32) * 2 - 1)));
             for (svh) |*v| v.* = @bitCast(@as(f16, @floatCast(r.rng.float(f32) * 2 - 1)));
             const st = exl3.strides(sh.k, sh.n, sh.halves, false);
-            ws[i] = .{ .trellis = try r.dev(std.mem.sliceAsBytes(host)), .suh = try r.dev(std.mem.sliceAsBytes(suh)), .svh = try r.dev(std.mem.sliceAsBytes(svh)), .k = @intCast(sh.k), .n = @intCast(sh.n), .halves = sh.halves, .codebook = .mul1, .stride_k = st.k, .stride_nb = st.nb, .sk = f.sk, .wk = f.wk };
+            ws[i] = .{ .trellis = try r.dev(std.mem.sliceAsBytes(host)), .suh = try r.dev(std.mem.sliceAsBytes(suh)), .svh = try r.dev(std.mem.sliceAsBytes(svh)), .k = @intCast(sh.k), .n = @intCast(sh.n), .halves = sh.halves, .codebook = .mul1, .stride_k = st.k, .stride_nb = st.nb };
             ya[i] = try r.zeros(16 * sh.n * 2);
             yb[i] = try r.zeros(16 * sh.n * 2);
         }
