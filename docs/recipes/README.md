@@ -25,7 +25,7 @@ For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.
 | Kolibri-1 | [Native CUDA, block FP8, research checkpoint](kolibri-1.md) |
 | LFM2.5-24B-A2B | [Native Metal, MLX 4-bit, shared rounds](lfm2.5-24b-a2b.md) |
 | Spark-X2.6-4B | [Native CUDA](spark-x2.6-4b-cuda.md), [native Metal, the bf16 release, contexts to 1M](spark-x2.6-4b-metal.md) |
-| Muse Spark Open | [EXL3 on CUDA, two-rank DGX Spark, DFlash2 drafts](muse-spark.md) |
+| Muse Spark Open | [EXL3 on CUDA, two-rank DGX Spark, plain decode](muse-spark.md) |
 
 ## Capability floor
 
