@@ -20,6 +20,8 @@ pub const kv_width = c.kv_heads * c.head_dim;
 pub const page_elems = attention_layers * 2 * kern.page * kv_width;
 /// Elements a slot's conv states hold: two bx rows a conv layer.
 pub const slot_elems = conv_layers * 2 * c.hidden;
+/// Marks a prompt chunk taps (their conv states kept as the pass goes by); one more ends the chunk.
+pub const max_taps = 4;
 /// Key chunks one attention launch walks in parallel at most (nemotron's chunk_blocks).
 const chunk_blocks = 64;
 
@@ -52,6 +54,7 @@ pub const Scratch = struct {
     pm: u64,
     pl: u64,
     snaps: u64, // bf16 [conv_layers][round_rows][2][hidden]: each window row's conv state after it
+    tap: u64, // bf16 [max_taps][conv_layers][2][hidden]: the conv states after a chunk's tapped rows (a slot's layout)
     logits: u64, // bf16 [round_rows, vocab]
 };
 
@@ -238,6 +241,7 @@ pub const Model = struct {
             .pm = try m.alloc(parts * 4),
             .pl = try m.alloc(parts * 4),
             .snaps = try m.alloc(conv_layers * round_rows * 2 * h * 2),
+            .tap = try m.alloc(max_taps * slot_elems * 2),
             .logits = try m.alloc(round_rows * c.vocab * 2),
         };
         if (m.planned != null) return;
