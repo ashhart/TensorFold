@@ -283,9 +283,16 @@ pub const Runner = struct {
             if (r.pos + (end - at) > r.context) return error.ContextFull;
             var win: [MAXT]i32 = undefined;
             for (ids[at..end], 0..) |t, j| win[j] = @intCast(t);
-            const w: Want = if (want and end == ids.len) .last else .none;
-            if (try r.forward(win[0 .. end - at], r.pos, w)) |t| r.last = @intCast(t);
-            r.pos += @intCast(end - at);
+            // the prompt's last row runs alone: the rows before it only fill the cache (16 rows or fewer stay whole)
+            const split = want and end == ids.len and end - at > ROWS;
+            const body = end - at - @intFromBool(split);
+            const w: Want = if (want and end == ids.len and !split) .last else .none;
+            if (try r.forward(win[0..body], r.pos, w)) |t| r.last = @intCast(t);
+            r.pos += @intCast(body);
+            if (split) {
+                if (try r.forward(win[body .. body + 1], r.pos, .last)) |t| r.last = @intCast(t);
+                r.pos += 1;
+            }
             at = end;
         }
     }
@@ -462,7 +469,9 @@ pub const Runner = struct {
         if (r.cap) |c| try c.grab(r, .inputs, 0);
         try d.launch(k.resid, .{ .x = T }, .{ a.x, nul, nul, nul, m.layers[0].in_norm, a.h, a.ahi, a.alo, EPS, @as(i32, 0) });
         if (r.dump_dir != null and p0 == 0) try r.dumpBuf("pli", a.pli, T * cfg.ple_all * 2);
-        for (&m.layers, 0..) |*l, i| {
+        // a forward nothing reads stops after the layers that own a K/V cache: the deeper ones write none
+        const depth: usize = if (want == .none and r.cap == null) cfg.shared_from else cfg.layers;
+        for (m.layers[0..depth], 0..) |*l, i| {
             const glob = cfg.isGlobal(i);
             const hd: u32 = if (glob) cfg.dim_g else cfg.dim_s;
             const src = cfg.kvSource(i);
