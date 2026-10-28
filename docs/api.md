@@ -15,7 +15,7 @@ Both servers accept repeated `--api-key KEY`, comma-separated `TENSORFOLD_API_KE
 `#` for comments. Set its permissions to `0600`; startup refuses a file readable by other users.
 The server stores SHA-256 digests and compares every configured digest for each authentication attempt.
 
-Send `Authorization: Bearer KEY` from OpenAI-compatible clients, or `x-api-key: KEY` from Messages clients. Missing or invalid credentials return HTTP 401 with `WWW-Authenticate: Bearer` and the route's error format. With keys configured, the native server requires a key on every route by default. Its public exceptions are GET `/`, `/health`, `/slide` and the eight embedded `/slide/` scripts; `--metrics-open` also opens GET `/metrics` and `/v1/metrics`. Other methods and unknown assets require a key. This includes every `/systemone` inference alias and future private routes. `/health` remains open and returns only `{"status":"ok"}` when keys are configured. Public health is read-only, including when a reset query is supplied. With no keys, its health details remain available; a non-loopback bind prints a warning.
+Send `Authorization: Bearer KEY` from OpenAI-compatible clients, or `x-api-key: KEY` from Messages clients. Missing or invalid credentials return HTTP 401 with `WWW-Authenticate: Bearer` and the route's error format. With keys configured, the native server requires a key on every route by default. Its public exceptions are GET `/`, `/health`, `/slide` and the eight embedded `/slide/` scripts; `--metrics-open` also opens GET `/metrics`, `/v1/metrics` and `/v1/load`. Other methods and unknown assets require a key. This includes every `/systemone` inference alias and future private routes. `/health` remains open and returns only `{"status":"ok"}` when keys are configured. Public health is read-only, including when a reset query is supplied. With no keys, its health details remain available; a non-loopback bind prints a warning.
 
 The native server raises its soft open-file limit before listening when the platform permits it. If `accept` runs out of descriptors, it logs one guidance line per burst and keeps a short retry backoff.
 
@@ -43,7 +43,7 @@ different scopes, or scopes a key the flags or environment already give, is refu
 | Scope | Routes |
 | --- | --- |
 | `inference` | POST `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/tokenize`, `/v1/detokenize`, `/v1/audio/speech`, `/v1/embeddings`, `/v1/decisions`, `/v1/systemone`, and the same paths without `/v1` where the server has them; GET `/v1/models`, `/models`, `/v1/voices` |
-| `read` | GET `/metrics`, `/v1/metrics`, `/memory`, `/v1/memory`, `/stats`, `/dashboard`, `/v1/benchmark/manifest`, `/v1/models`, `/models`, `/v1/voices` |
+| `read` | GET `/metrics`, `/v1/metrics`, `/v1/load`, `/memory`, `/v1/memory`, `/stats`, `/dashboard`, `/v1/benchmark/manifest`, `/v1/models`, `/models`, `/v1/voices` |
 
 A scoped key reaches nothing else: not the stored Responses (GET or DELETE `/v1/responses/ID`), Recall, Sliding Weights,
 `/v1/imprint`, another method, or a suffix alias such as `/alt/completions` that the server answers for a full key. The route
@@ -98,6 +98,7 @@ tensorfold-native serve MODEL --allowed-host inference.example --allowed-origin 
 | `GET /health` | Liveness, the served model, the queue and live rates; open with keys (see [Health](#health)) |
 | `GET /memory`, `GET /v1/memory` | Native read-only memory snapshot ([memory diagnostics](memory-diagnostics.md)) |
 | `GET /metrics`, `GET /v1/metrics` | Prometheus text: requests, KV occupancy, drafts and latency (both servers) |
+| `GET /v1/load` | The scheduler load ledger as one JSON object (native server); see [Scheduler load](#scheduler-load) |
 | `GET /dashboard` | Native live dashboard page when `--dashboard` is enabled |
 | `GET /stats` | Native JSON dashboard snapshot when `--dashboard` is enabled |
 | `POST /v1/chat/completions` | Text chat, optional image input, tools and reasoning; streamed or non-streamed |
@@ -566,7 +567,8 @@ The readings vLLM also has are repeated under its names (`num_requests_running`,
 `kv_cache_usage_perc`, `spec_decode_num_draft_tokens_total`, `spec_decode_num_accepted_tokens_total`,
 `e2e_request_latency_seconds`, `request_decode_time_seconds`, `request_prefill_time_seconds`) with identical values, so a dashboard copied from vLLM fills by swapping the
 `tensorfold:` prefix for the metric name. `client_disconnections_total` (requests the client walked away from)
-and `preemptions_total` (background work that gave up a lane to a later request) are published where the
+and `preemptions_total` (requests requeued for memory before their first token, plus background passes that
+yielded their lane to foreground work) are published where the
 server counts those events, and never at a fabricated zero.
 An engine that keeps prompt states between requests (Flash Next and GLM-5.3-Flash unless `--prompt-cache-gib 0`)
 adds `prompt_tokens_cached_total` (already vLLM's name), the prompt tokens of finished requests restored from a kept
@@ -575,6 +577,31 @@ An engine that keeps no prompt states leaves all three out.
 
 The native `--dashboard` flag adds a self-contained `/dashboard` page and its `/stats` JSON snapshot; both routes
 return 404 when the flag is off, and the page polls once per second without adding access-log noise.
+
+### Scheduler load
+
+The scrape also carries the scheduler load a traffic shaper needs, from one ledger the server owns. Every server
+publishes `server_info{model,backend,version,instance}` (always 1; `instance` is a random id made at process start,
+so counters restart only with a new `instance`), `process_start_time_seconds`, `engine_parked` (1 while
+`--idle-unload` has closed the engine), `lanes`, and `http_requests_active{route}`: model requests from the end of
+their headers to the end of their reply, by route group (`chat_completions`, `completions`, `responses`,
+`messages`, `embeddings`, `speech`, `other`).
+
+An engine on the shared lane host adds these groups, each complete or absent:
+
+| Group | Families |
+| --- | --- |
+| Requests | `waiting_prompt_tokens` (prompt tokens of queued requests, before any kept prefix restores part of them), `filling_prompt_tokens_left` (absent while a backend without fill progress fills), `requests_started_total`, `requests_requeued_total`, `background_yields_total` |
+| Work | `scheduler_tokens_total{mode}` with `prefill_compute`, `prefill_cache` and `decode` (output tokens after each request's first), counted as the work happens, and `prefill_busy_seconds_total`: engine seconds in prompt calls whose work `prefill_compute` counted. The `prefill_compute` delta over its delta is the prefill rate. A family round planner publishes no work group |
+
+In the requests group, `requests_running`, `requests_waiting` and their vLLM mirrors take the ledger's values.
+While the engine is parked, none of these engine values is shown: neither the groups nor `requests_running`,
+`requests_waiting` and `generation_tokens_running`. A missing group means unknown, never zero.
+
+`GET /v1/load` returns the same ledger as one JSON object from one read: `instance`, `timestamp` (the read's wall
+time), `model`, `parked`, `lanes`, `http_active` by route group, and, when present, the request counts, `tokens`
+and `busy_us`. Keys of a group no host fills are left out. It follows the
+`/metrics` access rule, and `--metrics-open` opens it too.
 
 ## Admission
 

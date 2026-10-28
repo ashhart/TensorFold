@@ -84,6 +84,7 @@ fn get(srv: *Server, conn: *Conn, a: Allocator) void {
         return memory.get(srv, conn, a) catch {};
     if (responses.route(route)) |rid| if (rid.len > 0) return responses.get(srv, conn, a, rid);
     if (std.mem.eql(u8, route, "/metrics") or std.mem.eql(u8, route, "/v1/metrics")) return status.metrics(srv, conn, a);
+    if (std.mem.eql(u8, route, "/v1/load")) return @import("load_metrics.zig").get(srv, conn, a);
     if (std.mem.eql(u8, route, "/dashboard")) return status.dashboard(srv, conn, a);
     if (std.mem.eql(u8, route, "/stats")) return status.stats(srv, conn, a);
     if (std.mem.eql(u8, route, "/slide")) return slide.view(srv, conn, a);
