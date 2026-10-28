@@ -19,7 +19,7 @@ pub const Set = struct {
     draws: cuda.sample.Draws = undefined,
     penalize: ?penalize_k.Penalize = null,
     lfm2m: lfm2m_k.Set = .{}, // LFM2.5-24B-A2B's router, Liquid's 3-tap conv and commit (rows with sums, beside these)
-    paged: paged_k.Set = .{}, // the Liquid families' paged attention at head 64, decode and prompt rows
+    paged: paged_k.Set = .{}, // the Liquid families' paged attention: head 64 decode and prompt rows, head 128 prompt rows
     lfm3: lfm3_k.Set = .{}, // LFM3's 7-tap conv and commit
 
     /// Every registration onto `kernels`; the embed controls' symbols come from the contract_controls image `ctl_mod`.

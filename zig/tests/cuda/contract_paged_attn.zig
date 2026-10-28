@@ -1,4 +1,4 @@
-//! Liquid's paged attention, decode (segs chunk and merge) and prompt rows, over shuffled pages against float64.
+//! Liquid's paged attention (head 64 LFM2.5, 128 LFM3), decode and prompt rows, over shuffled pages against float64.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -25,6 +25,8 @@ pub const Form = union(enum) {
 pub const Cfg = struct { name: []const u8, h: usize, hk: usize, d: usize, form: Form, control: bool = false, served: []const c.Shape };
 
 const pattn64 = "_ZN20tf_prefill_attention12pattn_kernelILi64ELi8ELi4ELi8EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifPKix";
+const pattn128 = "_ZN20tf_prefill_attention12pattn_kernelILi128ELi8ELi4ELi8EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifPKix";
+const prompt128_served = [_]c.Shape{ .{ .rows = 256, .n = 16, .k = 0 }, .{ .rows = 64, .n = 16, .k = 3000 }, .{ .rows = 100, .n = 16, .k = 500 } };
 const decode64: Form = .{ .decode = .{ .chunk = "tf_paged_attn_chunk_segs_64", .merge = "tf_paged_attn_merge_segs_64" } };
 const prompt64: Form = .{ .prompt = .{ .sym = pattn64, .rows = 32, .smem = 8 * 32 * 8 * 16 } };
 const decode_served = [_]c.Shape{ .{ .rows = 1, .n = 32, .k = 3000 }, .{ .rows = 16, .n = 32, .k = 1500 }, .{ .rows = 128, .n = 32, .k = 700 }, .{ .rows = 8, .n = 32, .k = 4000 } };
@@ -36,6 +38,9 @@ pub const cfgs = [_]Cfg{
     .{ .name = "control: paged decode at head 64 reading its values from the neighbouring lane's dims", .h = 32, .hk = 8, .d = 64, .form = .{ .decode = .{ .chunk = "tf_ctl_paged_attn_chunk_segs_64", .merge = "tf_paged_attn_merge_segs_64" } }, .control = true, .served = &decode_served },
     .{ .name = "cuda paged prompt pattn_kernel<64, 8, 4, 8>, 32/8 heads of 64, 512-key pages", .h = 32, .hk = 8, .d = 64, .form = prompt64, .served = &prompt_served },
     .{ .name = "control: paged prompt rows at head 64 reading their values from the neighbouring 8 dims", .h = 32, .hk = 8, .d = 64, .form = .{ .prompt = .{ .sym = "tf_ctl_pattn_64", .rows = 32, .smem = 8 * 32 * 8 * 16 } }, .control = true, .served = &prompt_served },
+    // LFM3's full-attention layers: 16 query heads over 4 KV heads of 128
+    .{ .name = "cuda paged prompt pattn_kernel<128, 8, 4, 8>, 16/4 heads of 128, 512-key pages", .h = 16, .hk = 4, .d = 128, .form = .{ .prompt = .{ .sym = pattn128, .rows = 32, .smem = 8 * 32 * 16 * 16 } }, .served = &prompt128_served },
+    .{ .name = "control: paged prompt rows at head 128 reading their values from the neighbouring 8 dims", .h = 16, .hk = 4, .d = 128, .form = .{ .prompt = .{ .sym = "tf_ctl_pattn_128", .rows = 32, .smem = 8 * 32 * 16 * 16 } }, .control = true, .served = &prompt128_served },
 };
 
 /// Gates 1 and 3 run attention_ref's bound: decode weights are fp32 through fast exp, prompt P enters the mma as bf16.

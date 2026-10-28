@@ -410,4 +410,18 @@ extern "C" __global__ void __launch_bounds__(256, 1) tf_ctl_pattn_64(const __nv_
     auto first_row = [] { return blockIdx.x * 16 * (WARPS / HPC); };
 #include "prefill_attention_rows.cuh"
 }
+// The same fault at head dim 128 (LFM3's 16 query heads over 4).
+extern "C" __global__ void __launch_bounds__(256, 1) tf_ctl_pattn_128(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc,
+                                                                      const __nv_bfloat16* __restrict__ vc, __nv_bfloat16* __restrict__ out, int p0,
+                                                                      int W, int H, int HK, int G, float scale, const int* __restrict__ PT, long long PS) {
+    constexpr int D = 128, WARPS = 8, HPC = 4, NS = 8;
+    constexpr bool causal = true;
+    constexpr int skip = 0;
+    constexpr bool HPAGED = false, F8 = false, HM = false;
+    constexpr int CAP = 0, PTOK = 1;
+    const float *ks = nullptr, *vs = nullptr;
+    const int HO = H;
+    auto first_row = [] { return blockIdx.x * 16 * (WARPS / HPC); };
+#include "prefill_attention_rows.cuh"
+}
 }  // namespace tf_prefill_attention
