@@ -191,11 +191,13 @@ They widen packed values for the tensor operations without changing those values
 keep separate calls where a fused projection needs one width. Examples include
 `TensorFold/Qwen3.8-27B-oQ2` and `TensorFold/Qwen3.8-27B-oQ4`.
 
-A pair takes the MLX affine checkpoints a single Mac takes on Metal: the 4-bit
-`TensorFold/Qwen3.8-27B-MLX-4bit` it is qualified on, and the 2-, 3-, 4-, 5-, 6- and 8-bit affine stacks of groups 64
-above, reading the same checkpoint directory on each Mac. Each rank keeps its row slice of a projection while the K
-split stays the checkpoint matrix's, so the pair reads every format one Mac reads and nothing CUDA-only (no NVFP4, no
-EXL3); a tied embedding head is refused at load, as it is on one Mac.
+A pair takes the MLX affine checkpoints a single Mac takes on Metal, reading the same checkpoint directory on each Mac.
+The 4-bit `TensorFold/Qwen3.8-27B-MLX-4bit` stack is the one with a pair receipt: the two-Mac acceptance run and
+`tf-qwen27-tp-check` replay one Mac's recorded 4-bit replies against the pair. The 2-, 3-, 5-, 6- and 8-bit affine
+stacks of groups 64 above load through the same readers and split the same way, each rank keeping its row slice of a
+projection while the K split stays the checkpoint matrix's, but no pair run has produced a receipt on them yet: a pair
+serve there is unqualified. Nothing CUDA-only is read (no NVFP4, no EXL3); a tied embedding head is refused at load,
+as it is on one Mac.
 
 The packed row readers on Apple Silicon and the CUDA readers cover MLX affine 2/3/4/5/6/8-bit projections
 with groups of 32/64/128, including mixed layers. CUDA also reads [EXL3 packs](#exl3-checkpoints-experimental).
