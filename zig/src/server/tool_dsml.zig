@@ -30,10 +30,20 @@ fn spelled(comptime block: [2][]const u8, comptime sep: []const u8) Spelling {
     };
 }
 
-/// ``tool_calls``, then V4.1's: its release template writes a space before each tag's name and the block ``calls``.
-pub const spellings = [_]Spelling{ spelled(reply_text.calls[2], ""), spelled(reply_text.calls[4], " ") };
+/// Existing tool_calls and spaced calls, followed by the structural grammar's function_calls envelope.
+pub const spellings = [_]Spelling{ spelled(reply_text.calls[2], ""), spelled(reply_text.calls[4], " "), grammarSpelling() };
+
+/// xgrammar deepseek_v4_1_xml writes spaced parameter tags inside the canonical unspaced invokes.
+fn grammarSpelling() Spelling {
+    var sp = spelled(reply_text.calls[5], "");
+    const parameters = spelled(reply_text.calls[5], " ");
+    sp.param_open = parameters.param_open;
+    sp.param_close = parameters.param_close;
+    return sp;
+}
+
 /// The longest opener: a search resumed this far back finds one the last search saw only part of.
-pub const open_max = @max(spellings[0].open.len, spellings[1].open.len);
+pub const open_max = @max(@max(spellings[0].open.len, spellings[1].open.len), spellings[2].open.len);
 
 pub const Opener = struct { at: usize, spelling: *const Spelling };
 
