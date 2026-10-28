@@ -58,6 +58,7 @@ pub const Norms = struct {
     l2_fn: Function,
     slerp_fn: Function,
     parts_fns: [2]Function, // the tail's norm on strided parts of rows: rounded once, MLX's bf16 steps
+    parts4_fns: [2]Function, // the same up to 512 wide, four parts a block of 64 threads each (same bits)
 
     pub fn load(d: *const Driver) !Norms {
         if (!kernels.available) return error.BuiltWithoutKernels;
@@ -78,6 +79,7 @@ pub const Norms = struct {
             .l2_fn = try mod.function("tf_l2_rows"),
             .slerp_fn = try mod.function("tf_slerp_rows"),
             .parts_fns = .{ try mod.function("tf_rms_rows_bf16h_parts"), try mod.function("tf_rms_rows_bf16h_parts_round") },
+            .parts4_fns = .{ try mod.function("tf_rms_rows_bf16h_parts4"), try mod.function("tf_rms_rows_bf16h_parts4_round") },
         };
     }
 
@@ -206,6 +208,11 @@ pub const Norms = struct {
         a.add(xs orelse 0);
         a.add(@as(i32, @intCast(width)));
         a.add(eps);
+        if (width <= 512) { // a part fits 64 threads' 16-byte loads: four parts a block
+            a.add(@as(i32, @intCast(rows)));
+            a.add(@as(i32, @intCast(parts)));
+            return launch_.launch(n.parts4_fns[@intFromBool(round)], .{ .grid = .{ .x = @intCast((rows * parts + 3) / 4), .y = 1, .z = 1 }, .block = .{ .x = vec_threads } }, s, &a);
+        }
         try launch_.launch(n.parts_fns[@intFromBool(round)], .{ .grid = .{ .x = @intCast(rows), .y = @intCast(parts), .z = 1 }, .block = .{ .x = vec_threads } }, s, &a);
     }
 

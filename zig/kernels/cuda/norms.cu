@@ -441,3 +441,52 @@ extern "C" __global__ void __launch_bounds__(tf_rms_tail::NT) tf_rms_rows_bf16h_
     long long y_ld, long long y_part, float* xs, int width, float eps) {
     rms_parts<tf_rms_tail::MLX>(x, x_ld, x_part, w, w_part, y, y_ld, y_part, xs, width, eps);
 }
+
+// rms_parts' bits for parts up to 512 wide, 4 a block at 64 threads: warps 2-7 of its tree only added zeros.
+template <int R>
+__device__ __forceinline__ void rms_parts4(const __nv_bfloat16* x, long long x_ld, long long x_part, const __nv_bfloat16* w,
+                                           long long w_part, __nv_bfloat16* y, long long y_ld, long long y_part, float* xs,
+                                           int width, float eps, int rows, int parts) {
+    __shared__ float warps[8];
+    const int sub = threadIdx.x >> 6, c = threadIdx.x & 63, lane = threadIdx.x & 31;
+    const int64_t q = static_cast<int64_t>(blockIdx.x) * 4 + sub, r = q / parts, p = q % parts;
+    const bool live = q < static_cast<int64_t>(rows) * parts && c < width / 8;
+    float v[8], wv[8];
+    uint4 xp = make_uint4(0, 0, 0, 0), wp = make_uint4(0, 0, 0, 0);
+    if (live) {
+        xp = reinterpret_cast<const uint4*>(x + r * x_ld + p * x_part)[c];
+        wp = reinterpret_cast<const uint4*>(w + p * w_part)[c];
+    }
+    tf_rms_tail::unpack8(xp, v);
+    tf_rms_tail::unpack8(wp, wv);
+    float part = 0.f;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) part = __fmaf_rn(v[i], v[i], part);
+    for (int m = 16; m > 0; m >>= 1) part = __fadd_rn(part, __shfl_xor_sync(0xFFFFFFFFu, part, m));
+    if (lane == 0) warps[threadIdx.x >> 5] = part;
+    __syncthreads();
+    const float s = __fadd_rn(warps[2 * sub], warps[2 * sub + 1]);
+    const float inv = __fdiv_rn(1.f, __fsqrt_rn(__fadd_rn(__fdiv_rn(s, static_cast<float>(width)), eps)));
+    float o[8];
+#pragma unroll
+    for (int i = 0; i < 8; ++i) o[i] = tf_rms_tail::normed<R, tf_rms_tail::ROW>(v[i], inv, wv[i]);
+    const uint4 yp = tf_rms_tail::pack8(o);
+    const int64_t yo = r * y_ld + p * y_part;
+    if (live) reinterpret_cast<uint4*>(y + yo)[c] = yp;
+    if (xs != nullptr) {
+        const float g = tf_rms_tail::group_sum8(yp, live);
+        if (live && (c & 7) == 0) xs[yo / 64 + c / 8] = g;
+    }
+}
+
+extern "C" __global__ void __launch_bounds__(256) tf_rms_rows_bf16h_parts4(
+    const __nv_bfloat16* x, long long x_ld, long long x_part, const __nv_bfloat16* w, long long w_part, __nv_bfloat16* y,
+    long long y_ld, long long y_part, float* xs, int width, float eps, int rows, int parts) {
+    rms_parts4<tf_rms_tail::ONCE>(x, x_ld, x_part, w, w_part, y, y_ld, y_part, xs, width, eps, rows, parts);
+}
+
+extern "C" __global__ void __launch_bounds__(256) tf_rms_rows_bf16h_parts4_round(
+    const __nv_bfloat16* x, long long x_ld, long long x_part, const __nv_bfloat16* w, long long w_part, __nv_bfloat16* y,
+    long long y_ld, long long y_part, float* xs, int width, float eps, int rows, int parts) {
+    rms_parts4<tf_rms_tail::MLX>(x, x_ld, x_part, w, w_part, y, y_ld, y_part, xs, width, eps, rows, parts);
+}
