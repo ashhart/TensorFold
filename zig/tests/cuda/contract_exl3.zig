@@ -26,16 +26,49 @@ fn rotDepth(_: c.Shape) usize {
     return 7 + 8;
 }
 
-/// The engine's shapes (Qwen3.8-27B's, K 5120 / 6144): plan()'s splits from 1 to 8, 4 and 8 warps.
+/// The widths with mid-M kernels (exl3.mpg_variants); linear_wc takes 4- and 6-bit.
+const mid_widths = [_]u32{ 6, 8, 10, 12 };
+
+fn name(kind: Kind, halves: u32, control: bool) []const u8 {
+    inline for (mid_widths) |h| if (h == halves) return switch (kind) {
+        .midm => if (control) std.fmt.comptimePrint("control: exl3 {d}-bit mid-M kernels at another K split posing as linear_body", .{h / 2}) else std.fmt.comptimePrint("cuda exl3 mid-M kernels tf_exl3_mpg ({d}-bit, 1-128 rows)", .{h / 2}),
+        else => if (control) std.fmt.comptimePrint("control: exl3 {d}-bit linear_wc at another K split posing as linear_body", .{h / 2}) else std.fmt.comptimePrint("cuda exl3 linear_wc tf_exl3_wc ({d}-bit, 1-128 rows)", .{h / 2}),
+    };
+    unreachable;
+}
+
+fn sh(rows: usize, n: usize, k: usize) c.Shape {
+    return .{ .rows = rows, .n = n, .k = k };
+}
+
+// The 27B's shapes (K 5120 / 6144), then shapes reaching the rest of plan()'s forms (the host test below sweeps them)
+const qwen4 = [_]c.Shape{ sh(128, 1024, 5120), sh(100, 17408, 5120), sh(49, 6144, 5120), sh(33, 5120, 6144), sh(24, 12288, 5120), sh(64, 5120, 6144) };
+const qwen6 = [_]c.Shape{ sh(128, 2048, 5120), sh(97, 4096, 5120), sh(40, 2048, 5120) };
+const small_k = [_]c.Shape{ sh(17, 1024, 512), sh(49, 1024, 512), sh(17, 8192, 1024), sh(49, 8192, 1024) };
+const wc_k = [_]c.Shape{ sh(17, 1024, 640), sh(33, 1024, 512), sh(17, 1024, 1024), sh(17, 1024, 1408), sh(49, 1024, 640), sh(49, 1024, 1024), sh(49, 1024, 1408), sh(17, 4096, 1024), sh(17, 4096, 1280), sh(17, 8192, 1152), sh(33, 4096, 1280), sh(49, 8192, 1152) };
+const wc6_k = [_]c.Shape{ sh(17, 1024, 512), sh(17, 1024, 640), sh(33, 1024, 512), sh(17, 1024, 1024), sh(33, 1024, 640), sh(17, 1024, 1408), sh(33, 1024, 1024), sh(49, 1024, 1408), sh(17, 4096, 1024), sh(17, 4096, 1280), sh(33, 4096, 1024), sh(17, 8192, 1152), sh(49, 8192, 1152) };
+// n names the members (members())
+const groups = [_]c.Shape{ sh(16, 6144, 5120), sh(16, 17408, 5120), sh(7, 12288, 5120), sh(16, 9216, 512) };
+
+fn served(kind: Kind, halves: u32) []const c.Shape {
+    return switch (kind) {
+        .midm => switch (halves) {
+            8 => &(qwen4 ++ small_k[0..1].*),
+            12 => &(qwen6 ++ small_k[2..4].*),
+            else => &(qwen4[0..1].* ++ small_k),
+        },
+        .wc => if (halves == 8) &(qwen4 ++ wc_k) else &(qwen6 ++ wc6_k),
+        .group, .rot_group => &groups,
+    };
+}
+
+/// The served shapes: every form plan() gives the replacement at each width, every row edge at the first.
 pub fn spec(kind: Kind, halves: u32, control: bool) c.Spec {
     const rows = [3]c.Tile{ .{ .size = 16 }, .{}, .{} };
     const sums: c.Sums = .{ .f16 = 4, .bf16 = 0, .exact = false, .why = why };
     return switch (kind) {
         .midm, .wc => .{
-            .name = switch (kind) {
-                .midm => if (control) "control: exl3 mid-M kernels at another K split posing as linear_body" else if (halves == 8) "cuda exl3 mid-M kernels tf_exl3_mpg (4-bit, 1-128 rows)" else "cuda exl3 mid-M kernels tf_exl3_mpg (6-bit, 1-128 rows)",
-                else => if (control) "control: exl3 linear_wc at another K split posing as linear_body" else if (halves == 8) "cuda exl3 linear_wc tf_exl3_wc (4-bit, 1-128 rows)" else "cuda exl3 linear_wc tf_exl3_wc (6-bit, 1-128 rows)",
-            },
+            .name = name(kind, halves, control),
             .accum = .f32,
             .depth = depth,
             .ops = 4,
@@ -43,7 +76,7 @@ pub fn spec(kind: Kind, halves: u32, control: bool) c.Spec {
             .replaces = "tf_exl3_linear (linear_body)",
             .nan = .{ .stated = rule },
             .tiles = rows,
-            .served = if (halves == 8) &[_]c.Shape{ .{ .rows = 128, .n = 1024, .k = 5120 }, .{ .rows = 100, .n = 17408, .k = 5120 }, .{ .rows = 49, .n = 6144, .k = 5120 }, .{ .rows = 33, .n = 5120, .k = 6144 }, .{ .rows = 24, .n = 12288, .k = 5120 }, .{ .rows = 64, .n = 5120, .k = 6144 } } else &[_]c.Shape{ .{ .rows = 128, .n = 2048, .k = 5120 }, .{ .rows = 97, .n = 4096, .k = 5120 }, .{ .rows = 40, .n = 2048, .k = 5120 } },
+            .served = served(kind, halves),
             .sums = sums,
         },
         .group => .{
@@ -55,8 +88,7 @@ pub fn spec(kind: Kind, halves: u32, control: bool) c.Spec {
             .replaces = "each member's tf_exl3_linear (linear_body)",
             .nan = .{ .stated = rule },
             .tiles = rows,
-            // n names the members: 17408 gate + up, 12288 q + gate + qkv (8 warps), 6144 z + k_v (4 warps, K split)
-            .served = &[_]c.Shape{ .{ .rows = 16, .n = 6144, .k = 5120 }, .{ .rows = 16, .n = 17408, .k = 5120 }, .{ .rows = 7, .n = 12288, .k = 5120 } },
+            .served = served(kind, halves),
             .sums = sums,
         },
         .rot_group => .{
@@ -67,7 +99,7 @@ pub fn spec(kind: Kind, halves: u32, control: bool) c.Spec {
             .out = .f16,
             .replaces = "each member's tf_exl3_rot_in",
             .tiles = rows,
-            .served = &[_]c.Shape{ .{ .rows = 16, .n = 6144, .k = 5120 }, .{ .rows = 16, .n = 17408, .k = 5120 }, .{ .rows = 7, .n = 12288, .k = 5120 } },
+            .served = served(kind, halves),
             .sums = .{ .f16 = 4, .bf16 = 0, .exact = false, .why = "128-term rotations of bf16 inputs: fp32 is not exact on them, so gate 4 proves fp16's miss alone" },
         },
     };
@@ -86,9 +118,10 @@ const Mat = struct {
 /// The members a group shape names (n): their output widths.
 fn members(n: usize) []const usize {
     return switch (n) {
-        17408 => &.{ 17408, 17408 },
-        12288 => &.{ 12288, 17408, 10240 },
-        else => &.{ 6144, 1024 },
+        17408 => &.{ 17408, 17408 }, // gate + up, 8 warps
+        12288 => &.{ 12288, 17408, 10240 }, // q + gate + qkv, 8 warps
+        9216 => &.{ 8192, 1024 }, // two layers at K 512: 4 warps, no split
+        else => &.{ 6144, 1024 }, // z + k_v, 4 warps, K split
     };
 }
 
@@ -169,8 +202,8 @@ pub const Case = struct {
             m.trellis = try a.alloc(i16, (shape.k / 16) * (n / 16) * width.tileWords());
             m.suh = try a.alloc(u16, shape.k);
             m.svh = try a.alloc(u16, n);
-            if (fill == .stress and self.kind != .rot_group) { // one weight everywhere: a 2-bit period, scales 1
-                @memset(m.trellis, @bitCast(@as(u16, 0xaaaa)));
+            if (fill == .stress and self.kind != .rot_group) { // one weight at every width: all-ones states, scales 1
+                @memset(m.trellis, @bitCast(@as(u16, 0xffff)));
                 @memset(m.suh, 0x3c00);
                 @memset(m.svh, 0x3c00);
             } else {
@@ -404,19 +437,24 @@ pub const Case = struct {
 };
 
 /// Every registration and control, on one Linear the cases share; `add` appends them to the runner's list.
+const Reg = struct { k: Kind, h: u32 = 8, ctl: bool = false };
+
+/// The mid-M kernels at every width they have, linear_wc at 4 and 6 bits, the groups, rot_group, and the controls.
+pub const registrations = [_]Reg{
+    .{ .k = .midm, .h = 6 },              .{ .k = .midm },                   .{ .k = .midm, .h = 10 },              .{ .k = .midm, .h = 12 },
+    .{ .k = .wc },                        .{ .k = .wc, .h = 12 },            .{ .k = .group },                      .{ .k = .rot_group },
+    .{ .k = .midm, .h = 6, .ctl = true }, .{ .k = .midm, .ctl = true },      .{ .k = .midm, .h = 10, .ctl = true }, .{ .k = .wc, .ctl = true },
+    .{ .k = .group, .ctl = true },        .{ .k = .rot_group, .ctl = true },
+};
+
 pub const Set = struct {
     lin: ?exl3.Linear = null,
-    cases: [10]Case = undefined,
+    cases: [registrations.len]Case = undefined,
     n: usize = 0,
 
     pub fn add(self: *Set, gpu: check.Gpu, s: cuda.Stream, list: *std.ArrayList(g.Kernel)) !void {
         self.lin = try exl3.Linear.load(gpu.d);
-        const all = [_]struct { k: Kind, h: u32 = 8, ctl: bool = false }{
-            .{ .k = .midm },               .{ .k = .midm, .h = 12 },          .{ .k = .wc },                .{ .k = .wc, .h = 12 },
-            .{ .k = .group },              .{ .k = .rot_group },              .{ .k = .midm, .ctl = true }, .{ .k = .wc, .ctl = true },
-            .{ .k = .group, .ctl = true }, .{ .k = .rot_group, .ctl = true },
-        };
-        for (all) |x| {
+        for (registrations) |x| {
             self.cases[self.n] = .{ .rig = .{ .gpu = gpu, .s = s }, .lin = &self.lin.?, .kind = x.k, .halves = x.h, .control = x.ctl };
             self.n += 1;
         }
@@ -442,4 +480,89 @@ pub fn run(gpu: check.Gpu) !void {
     try g.runAll(gpu.gpa, list.items, 0x5eed, &t);
     std.debug.print("SUMMARY exl3 {d} kernels: {d} pass gates 1-4, {d} fail; {d} controls: {d} red as planted, {d} missed\n", .{ t.kernels, t.passed, t.failed, t.controls, t.caught, t.missed });
     if (t.problems() > 0) return error.TestFailed;
+}
+
+/// A launch the dispatch can reach: its kernel (a group's by warps), and whether its plan splits K.
+const Form = struct { kind: enum { wc, mpg, group }, index: usize, split: bool };
+
+fn weightOf(k: usize, n: usize, halves: u32) exl3.Weight {
+    return .{ .trellis = 0, .suh = 0, .svh = 0, .k = @intCast(k), .n = @intCast(n), .halves = halves, .codebook = .mul1, .stride_k = 0, .stride_nb = 0 };
+}
+
+fn formOf(w: exl3.Weight, m: usize, use_wc: bool, min_rows: usize) ?Form {
+    const split = exl3.planOf(w).sk > 1;
+    return switch (exl3.pick(w, m, true, use_wc, min_rows) orelse return null) {
+        .wc => |i| .{ .kind = .wc, .index = i, .split = split },
+        .mpg => |i| .{ .kind = .mpg, .index = i, .split = split },
+        .linear => null,
+    };
+}
+
+fn put(a: std.mem.Allocator, set: *std.ArrayList(Form), f: Form) !void {
+    for (set.items) |x| if (std.meta.eql(x, f)) return;
+    try set.append(a, f);
+}
+
+/// Every form a registration's gate-3 shapes run (the mid-M and linear_wc cases at 1 row up, as Case.run sets them).
+fn covered(a: std.mem.Allocator) !std.ArrayList(Form) {
+    var set: std.ArrayList(Form) = .empty;
+    errdefer set.deinit(a);
+    for (registrations) |r| if (!r.ctl and r.k != .rot_group) {
+        const shapes = try c.shapes(a, spec(r.k, r.h, false));
+        defer a.free(shapes);
+        for (shapes) |s| if (r.k == .group) {
+            for (members(s.n)) |n| {
+                const w = weightOf(s.k, n, 8);
+                try put(a, &set, .{ .kind = .group, .index = exl3.planOf(w).wk, .split = exl3.planOf(w).sk > 1 });
+            }
+        } else if (formOf(weightOf(s.k, s.n, r.h), s.rows, r.k == .wc, 1)) |f| try put(a, &set, f);
+    };
+    return set;
+}
+
+// K and N in steps of 128 to 16384: past every threshold plan() and the dispatch read (64 blocks, 8 k tiles a warp)
+test "contract_exl3: every mid-M and linear_wc form plan() reaches at 17-128 rows is a registration's gate-3 shape" {
+    const a = std.testing.allocator;
+    var have = try covered(a);
+    defer have.deinit(a);
+    var widths: [8]u32 = undefined; // every width with a mid-M kernel or a linear_wc
+    var nw: usize = 0;
+    inline for (.{ exl3.mpg_variants, exl3.wc_variants }) |vs| for (vs) |v| if (std.mem.indexOfScalar(u32, widths[0..nw], v.halves) == null) {
+        widths[nw] = v.halves;
+        nw += 1;
+    };
+    var k: usize = 128;
+    while (k <= 16384) : (k += 128) {
+        var n: usize = 128;
+        while (n <= 16384) : (n += 128) for (widths[0..nw]) |h| for (17..129) |m| {
+            const f = formOf(weightOf(k, n, h), m, true, 17) orelse continue;
+            for (have.items) |x| {
+                if (std.meta.eql(x, f)) break;
+            } else {
+                std.debug.print("unregistered: {t} {d} split {} ({d}-bit, {d} rows, n {d}, k {d})\n", .{ f.kind, f.index, f.split, h / 2, m, n, k });
+                return error.TestUnexpectedResult;
+            }
+        };
+    }
+}
+
+test "contract_exl3: every group form groupable() admits is a registration's gate-3 shape" {
+    const a = std.testing.allocator;
+    var have = try covered(a);
+    defer have.deinit(a);
+    var k: usize = 128;
+    while (k <= 16384) : (k += 128) {
+        var n: usize = 128;
+        while (n <= 16384) : (n += 128) {
+            const w = weightOf(k, n, 8);
+            if (!exl3.groupable(&.{ w, w }, 16)) continue;
+            const f: Form = .{ .kind = .group, .index = exl3.planOf(w).wk, .split = exl3.planOf(w).sk > 1 };
+            for (have.items) |x| {
+                if (std.meta.eql(x, f)) break;
+            } else {
+                std.debug.print("unregistered group form: {d} warps, split {} (n {d}, k {d})\n", .{ f.index, f.split, n, k });
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
 }
