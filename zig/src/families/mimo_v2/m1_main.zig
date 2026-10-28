@@ -79,6 +79,7 @@ pub fn main(init: std.process.Init) !u8 {
     defer driver.close();
     var ctx = try cuda.Context.init(&driver, @intCast(cfg.device));
     defer ctx.deinit();
+    if (try ctx.capability() != 121) return error.MimoV2RequiresSm121; // as native.open: GB10 only
     var session: tp.Session = undefined;
     const world: usize = cfg.world;
     if (world > 1) try session.open(&driver, cfg, @import("tp_kernel").mailbox);
