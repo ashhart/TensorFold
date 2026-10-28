@@ -401,6 +401,11 @@ fn gateGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *
     }
     const rep = f.check(first.?) catch |e| {
         std.debug.print("FAIL gate case=\"{s}\": {s}\n", .{ case.name, @errorName(e) });
+        if (f.firstViolation(first.?)) |d| {
+            std.debug.print("DIAG gate index={d} row={d} col={d} head={d} ctx=0x{x:0>4} ({e}) raw_gate=0x{x:0>4} ({e}) got_word=0x{x:0>4} got={e} want={e} bound={e} ratio={e} HOST_sigmoid_f64={e} HOST_sigmoid_f32={e} HOST_sigmoid_bf16=0x{x:0>4} ({e})\n", .{
+                d.index, d.row, d.d, d.head, d.ctx_bits, d.ctx, d.gate_bits, d.gate, first.?[d.index], d.got, d.want, d.bound, d.ratio, d.sigmoid_f64, d.sigmoid_f32, d.sigmoid_bf16_bits, d.sigmoid_bf16,
+            });
+        }
         return false;
     };
     if (!try plantRefuse(f, first.?, case.name, "gate")) return false;

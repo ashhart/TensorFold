@@ -386,6 +386,34 @@ pub const GateCase = struct { name: []const u8, rows: u64 };
 
 pub const gate_case = GateCase{ .name = "gate rows4", .rows = 4 };
 
+/// Everything the host knows about one gate element: the uploaded input
+/// words and their values, the f64 reference with its host intermediates,
+/// the stated budget, and the output value against it. Shared verbatim by
+/// Gate.check and firstViolation, so the diagnostic cannot drift from the
+/// checker.
+pub const GateDiag = struct {
+    index: usize,
+    row: usize,
+    d: usize,
+    head: usize,
+    /// Uploaded input words: ctx at ctx_bits, the raw qraw gate at gate_bits.
+    ctx_bits: u16,
+    gate_bits: u16,
+    ctx: f64,
+    gate: f64,
+    /// Host intermediates: the f64 sigmoid, the f32 sigmoid the reference
+    /// materializes before its one RNE bf16 round, and that bf16 value.
+    sigmoid_f64: f64,
+    sigmoid_f32: f64,
+    sigmoid_bf16_bits: u16,
+    sigmoid_bf16: f64,
+    want: f64,
+    got: f64,
+    bound: f64,
+    distance: f64,
+    ratio: f64,
+};
+
 /// The interleaved output gate: qraw row stride 4096, head h's gate at
 /// h*512 + 256 + d within the row.
 pub const Gate = struct {
@@ -416,30 +444,70 @@ pub const Gate = struct {
         f.a.free(f.out_bits);
     }
 
+    /// One element's reference, budget and output value; the checker and the
+    /// diagnostic both walk this.
+    fn element(f: Gate, bits: []const u16, row: usize, d: usize) GateDiag {
+        const head = d / 256;
+        const gate_bits = f.qraw_bits[row * 4096 + head * 512 + 256 + (d % 256)];
+        const gate = c.fromBf16(gate_bits);
+        // The exact Metal reference includes the intermediate bf16
+        // rounding of the sigmoid (f32 sigmoid, one RNE bf16 store,
+        // exact widening); the budget still absorbs the f32-exp vs
+        // f64-exp difference.
+        const sigmoid_f64 = 1.0 / (1.0 + @exp(-@as(f64, gate)));
+        const sigmoid_f32: f32 = @floatCast(sigmoid_f64);
+        const sigmoid_bf16_bits = c.toBf16(sigmoid_f32);
+        const sigmoid_bf16 = c.fromBf16(sigmoid_bf16_bits);
+        const ctx = c.fromBf16(f.ctx_bits[row * 2048 + d]);
+        const want = ctx * sigmoid_bf16;
+        const got = c.fromBf16(bits[row * 2048 + d]);
+        const distance: f32 = @abs(got - want);
+        const bound = budget(1, 3, 1, want, @abs(want));
+        return .{
+            .index = row * 2048 + d,
+            .row = row,
+            .d = d,
+            .head = head,
+            .ctx_bits = f.ctx_bits[row * 2048 + d],
+            .gate_bits = gate_bits,
+            .ctx = ctx,
+            .gate = gate,
+            .sigmoid_f64 = sigmoid_f64,
+            .sigmoid_f32 = sigmoid_f32,
+            .sigmoid_bf16_bits = sigmoid_bf16_bits,
+            .sigmoid_bf16 = sigmoid_bf16,
+            .want = want,
+            .got = got,
+            .bound = bound,
+            .distance = distance,
+            .ratio = @as(f64, distance) / bound,
+        };
+    }
+
     /// The checker recomputes the reference from the uploaded shells.
     pub fn check(f: Gate, bits: []const u16) !Report {
         var r: Report = .{};
         for (0..@intCast(f.case.rows)) |row| {
             for (0..2048) |d| {
-                const head = d / 256;
-                const gate_bits = f.qraw_bits[row * 4096 + head * 512 + 256 + (d % 256)];
-                const gate = c.fromBf16(gate_bits);
-                // The exact Metal reference includes the intermediate bf16
-                // rounding of the sigmoid (f32 sigmoid, one RNE bf16 store,
-                // exact widening); the budget still absorbs the f32-exp vs
-                // f64-exp difference.
-                const s_bits = c.toBf16(@as(f32, @floatCast(1.0 / (1.0 + @exp(-@as(f64, gate))))));
-                const want = c.fromBf16(f.ctx_bits[row * 2048 + d]) * c.fromBf16(s_bits);
-                const got = c.fromBf16(bits[row * 2048 + d]);
-                if (!std.math.isFinite(got)) return error.NonFiniteOutput;
-                const dd = @abs(got - want);
-                const bound = budget(1, 3, 1, want, @abs(want));
-                if (dd > bound) return error.OverBound;
-                const ratio = dd / bound;
-                if (ratio > r.worst) r = .{ .worst = ratio, .where = row * 2048 + d };
+                const e = f.element(bits, row, d);
+                if (!std.math.isFinite(e.got)) return error.NonFiniteOutput;
+                if (e.distance > e.bound) return error.OverBound;
+                if (e.ratio > r.worst) r = .{ .worst = e.ratio, .where = e.index };
             }
         }
         return r;
+    }
+
+    /// The first element failing the gate acceptance, with the full host
+    /// context for the probe's FAIL print. Silent; null when accepted.
+    pub fn firstViolation(f: Gate, bits: []const u16) ?GateDiag {
+        for (0..@intCast(f.case.rows)) |row| {
+            for (0..2048) |d| {
+                const e = f.element(bits, row, d);
+                if (!std.math.isFinite(e.got) or e.distance > e.bound) return e;
+            }
+        }
+        return null;
     }
 };
 
@@ -554,13 +622,11 @@ test "rope, cache and gate checkers refuse planted outputs" {
         defer f.deinit();
         const good = try a.alloc(u16, @intCast(f.case.rows * 2048));
         defer a.free(good);
-        // the gate reference is derived from the shells; compute it inline
+        @memset(good, 0);
+        // the gate reference is derived from the shells via the shared element walk
         for (0..@intCast(f.case.rows)) |row| {
             for (0..2048) |d| {
-                const head = d / 256;
-                const gate = c.fromBf16(f.qraw_bits[row * 4096 + head * 512 + 256 + (d % 256)]);
-                const s_bits = c.toBf16(@as(f32, @floatCast(1.0 / (1.0 + @exp(-@as(f64, gate))))));
-                good[row * 2048 + d] = c.toBf16(c.fromBf16(f.ctx_bits[row * 2048 + d]) * c.fromBf16(s_bits));
+                good[row * 2048 + d] = c.toBf16(@floatCast(f.element(good, row, d).want));
             }
         }
         const grep2 = try f.check(good);
@@ -675,4 +741,77 @@ test "causal sdpa: poisoned future keys are invisible; a one-key leak is caught"
         try testing.expectError(error.NonFiniteOutput, leak.check(leak_out));
         try testing.expectError(error.NonFiniteOutput, base.check(leak_out)); // causal checker rejects the leaked output
     }
+}
+
+// Host regression for the stage3k real-GPU failure: the gate shader's old
+// widening zeroed lane 0 of every output word, so zeroed output elements are
+// the bug's signature. An all-zero output must be refused OverBound, and the
+// diagnostic must name the first element with its inputs and reference.
+test "all-zero gate output is refused OverBound and the diagnostic names element 0" {
+    const a = testing.allocator;
+    const f = try Gate.init(a, gate_case, 0x25);
+    defer f.deinit();
+    // Pin element 0 to provable values: gate 1 (sigmoid ~0.731, never 0 in
+    // bf16), ctx 1 (want = that sigmoid). The dyadic shells stay as drawn.
+    f.qraw_bits[256] = c.toBf16(1.0);
+    f.ctx_bits[0] = c.toBf16(1.0);
+    const zeros = try a.alloc(u16, @intCast(f.case.rows * 2048));
+    defer a.free(zeros);
+    @memset(zeros, 0);
+    try testing.expectError(error.OverBound, f.check(zeros));
+    const diag = f.firstViolation(zeros).?;
+    try testing.expectEqual(@as(usize, 0), diag.index);
+    try testing.expectEqual(@as(usize, 0), diag.row);
+    try testing.expectEqual(@as(usize, 0), diag.d);
+    try testing.expectEqual(@as(usize, 0), diag.head);
+    try testing.expectEqual(@as(f64, 0), diag.got);
+    try testing.expectEqual(c.toBf16(1.0), diag.ctx_bits);
+    try testing.expectEqual(f.qraw_bits[256], diag.gate_bits);
+    try testing.expectEqual(@as(f64, 1), diag.ctx);
+    try testing.expect(diag.sigmoid_bf16 > 0.5 and diag.sigmoid_bf16 < 1);
+    try testing.expectEqual(diag.ctx * diag.sigmoid_bf16, diag.want);
+    try testing.expectEqual(diag.want, @abs(diag.got - diag.want));
+    try testing.expect(diag.ratio > 1);
+}
+
+// The planted-bad first element must give the diagnostic report (index, got,
+// ratio, inputs) while the checker's OverBound acceptance stays exactly as
+// before the diagnostic existed.
+test "gate diagnostic reports a planted bad first element with unchanged OverBound acceptance" {
+    const a = testing.allocator;
+    const f = try Gate.init(a, gate_case, 0x24);
+    defer f.deinit();
+    f.qraw_bits[256] = c.toBf16(1.0);
+    f.ctx_bits[0] = c.toBf16(1.0);
+    const good = try a.alloc(u16, @intCast(f.case.rows * 2048));
+    defer a.free(good);
+    @memset(good, 0);
+    for (0..@intCast(f.case.rows)) |row| {
+        for (0..2048) |d| {
+            good[row * 2048 + d] = c.toBf16(@floatCast(f.element(good, row, d).want));
+        }
+    }
+    const rep = try f.check(good); // the honest output passes
+    try testing.expect(rep.worst <= 1);
+    good[0] = 0x4f00; // 2^31 at the first element: absolutely wrong
+    try testing.expectError(error.OverBound, f.check(good));
+    const diag = f.firstViolation(good).?;
+    try testing.expectEqual(@as(usize, 0), diag.index);
+    try testing.expectEqual(@as(f64, 2147483648.0), diag.got);
+    try testing.expect(diag.ratio > 1);
+    try testing.expectEqual(f.qraw_bits[256], diag.gate_bits);
+    try testing.expectEqual(c.toBf16(1.0), diag.ctx_bits);
+}
+
+// Focused bit-pattern proof of the production shader bug: attention_gate.comp
+// fed bf16_bits(s) << 16 back into bf16_lane's lane 0, which shifts << 16
+// again. A bf16 word widened once is the sigmoid value; shifted 32 total it
+// annihilates to 0.0 — the old shader's s for lane 0 of every output word.
+test "gate sigmoid widen: bf16 0x3f00 widens once to 0.5; the old double shift gives 0" {
+    const bits: u32 = 0x3f00; // what bf16_bits(0.5) produces
+    const once: f32 = @bitCast(bits << 16); // bf16_lane(word, 0): the correct widen
+    try testing.expectEqual(@as(f32, 0.5), once);
+    const annihilated: u64 = @as(u64, bits) << 32; // (bits << 16) << 16 as the GPU takes it
+    const twice: f32 = @bitCast(@as(u32, @truncate(annihilated)));
+    try testing.expectEqual(@as(f32, 0.0), twice);
 }
