@@ -25,6 +25,8 @@ pub const Case = struct {
     wb: ?[]const u16 = null,
     sc: ?u16 = null,
     moe: ?Moe = null,
+    /// Group sums as one chain of 64 in order (norms_strided.cuh's rows), where false takes groupSum's tree.
+    chain_sums: bool = false,
 
     /// The kernel writes h when the tail has a residual, a branch norm or a scalar.
     pub fn writesH(k: Case) bool {
@@ -117,6 +119,13 @@ fn atMost(a: f64, b: f64) bool {
     return a < b or (a == b and (std.math.signbit(a) or !std.math.signbit(b)));
 }
 
+/// The 64 stored values summed in order in fp32.
+pub fn groupChain(y: []const u16) f32 {
+    var s: f32 = 0;
+    for (y) |h| s += bfr.value(h);
+    return s;
+}
+
 /// norms_tail.cuh's group_sum8 over stored outputs: each thread's 8 in order from 0, then 8 lanes' xor tree 4, 2, 1.
 pub fn groupSum(y: []const u16) f32 {
     var s: [8]f32 = undefined;
@@ -153,11 +162,11 @@ pub fn verify(a: std.mem.Allocator, k: Case, h: []const u16, y: []const u16, xs:
                 return try std.fmt.bufPrint(msg, "row {d} y[{d}] = {e} outside float64's [{e}, {e}]", .{ row, i, bfr.value(y[at + i]), y_lo[i], y_hi[i] });
         }
         if (xs) |sums| for (0..n / 64) |g| {
-            const want = groupSum(y[at + 64 * g ..][0..64]);
+            const want = if (k.chain_sums) groupChain(y[at + 64 * g ..][0..64]) else groupSum(y[at + 64 * g ..][0..64]);
             const got = sums[row * (n / 64) + g];
             stats.sums += 1;
             const same = @as(u32, @bitCast(got)) == @as(u32, @bitCast(want)) or (std.math.isNan(got) and std.math.isNan(want));
-            if (!same) return try std.fmt.bufPrint(msg, "row {d} sum {d} = {e} where the fp32 tree of the stored y gives {e}", .{ row, g, got, want });
+            if (!same) return try std.fmt.bufPrint(msg, "row {d} sum {d} = {e} where the fp32 {s} of the stored y gives {e}", .{ row, g, got, if (k.chain_sums) "chain" else "tree", want });
         };
     }
     return null;

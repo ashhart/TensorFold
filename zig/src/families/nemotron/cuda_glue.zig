@@ -150,10 +150,10 @@ pub const Glue = struct {
         try g.norms.addRmsH(g.s, x, r, w, .bf16, h, y, xs, rows, d, eps);
     }
 
-    /// The expert slots' weighted sum (shared slots weigh 1) in bf16, added to h, then its RMSNorm: one launch.
+    /// The routed and shared expert sums in slot order, added to h, then its RMSNorm (norms.cu's strided rows).
     pub fn addMoeNorm(g: Glue, h: u64, y: u64, y_f32: bool, wt: u64, w: u64, hn: u64, out: u64, xs: u64, rows: usize, d: usize, eps: f32, top_k: usize, slots: usize) !void {
         if (g.tri()) |t| return t.addMoeNorm(h, y, y_f32, wt, w, hn, out, xs, rows, d, eps, top_k, slots);
-        try g.norms.moeAddRmsH(g.s, h, y, if (y_f32) .f32 else .bf16, wt, slots, w, hn, out, xs, rows, d, eps);
+        try g.norms.moeAddRmsH(g.s, h, y, if (y_f32) .f32 else .bf16, wt, top_k, slots, w, hn, out, xs, rows, d, eps);
     }
 
     /// fp32 router logits over `sk` K slices, each one fma chain in input order whichever kernel runs it.
@@ -257,7 +257,7 @@ pub const Glue = struct {
     pub fn groupRmsnorm(g: Glue, x: u64, w: u64, out: u64, xs: u64, rows: usize, xd: usize, groups: usize, eps: f32) !void {
         if (g.tri()) |t| return t.groupRmsnorm(x, w, out, xs, rows, xd, groups, eps);
         const gs = xd / groups;
-        try g.norms.rmsParts(g.s, x, xd, gs, w, gs, out, xd, gs, xs, rows, groups, gs, eps, true);
+        try g.norms.rmsParts(g.s, x, xd, @intCast(gs), w, @intCast(gs), out, xd, gs, xs, rows, groups, gs, eps, true);
     }
 
     /// A prompt chunk's conv rows in parallel, then BASE takes its last three inputs.
@@ -352,8 +352,10 @@ pub const Glue = struct {
     /// The MTP input [rmsnorm(e) * enorm | rmsnorm(h) * hnorm] and its group sums.
     pub fn concatNorms(g: Glue, e: u64, h: u64, we: u64, wh: u64, out: u64, xs: u64, rows: usize, d: usize, eps: f32) !void {
         if (g.tri()) |t| return t.concatNorms(e, h, we, wh, out, xs, rows, d, eps);
-        try g.norms.rmsParts(g.s, e, d, 0, we, 0, out, 2 * d, 0, xs, rows, 1, d, eps, false);
-        try g.norms.rmsParts(g.s, h, d, 0, wh, 0, out + 2 * d, 2 * d, 0, xs + 4 * (d / 64), rows, 1, d, eps, false);
+        // one launch, two parts a row: part 1 reads h and wh, (h - e) / 2 and (wh - we) / 2 elements past part 0's
+        const x_part = @divExact(@as(isize, @bitCast(h -% e)), 2);
+        const w_part = @divExact(@as(isize, @bitCast(wh -% we)), 2);
+        try g.norms.rmsParts(g.s, e, d, x_part, we, w_part, out, 2 * d, d, xs, rows, 2, d, eps, false);
     }
 
     /// A draw over candidate rows; our kernel takes the greedy rule (the head's draw), with or without its share.
