@@ -5,12 +5,11 @@ const limits = @import("limits.zig");
 pub const Record = struct { launch: limits.VulkanLaunch, control_gate: ?u8 = null };
 
 /// Measured on the devices, never assumed: the LIMITS lines the runner prints from the live device
-/// (vkGetPhysicalDeviceProperties and the Vulkan 1.1 subgroup properties). All three chips ran Mesa 26.3.0-devel
-/// (git-9323171c12) Honeykrisp and reported the same values; they are listed per chip so a different chip or
-/// driver is a new row, not an edit of these.
-///   G13C (Apple M1 Max C0):  runner stderr sha256 21c6182cad39cf5f3c2dc9143f17880e08a1104a3cbc69dbe3589a344a19cf04
-///   G13G (Apple M1 B1):      runner stderr sha256 566f12088f47cde84bc05b5f84196fd8f0d1e41aa089ad8f8c251feba4b1ddad
-///   G14C (Apple M2 Max B1):  runner stderr sha256 b617429e198d6845c0aa2a432a9bbcbb14e59dd96ddbc134851ab43506c18851
+/// (vkGetPhysicalDeviceProperties and the Vulkan 1.1 subgroup properties). All three chips (Apple M1 Max C0,
+/// M1 B1, M2 Max B1) ran Mesa 26.3.0-devel (git-9323171c12) Honeykrisp and reported the same values; they are
+/// listed per chip so a different chip or driver is a new row, not an edit of these. The runner stderr of the
+/// runs that produced them, with the runner binary's hash and this head's SHA, is in the pull request description:
+/// a file cannot carry the hash of a run of itself.
 fn measuredRow(chip: []const u8) limits.VulkanDeviceLimits {
     return .{
         .chip = chip,

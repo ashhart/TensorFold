@@ -63,6 +63,9 @@ pub const Fixture = struct {
     x: []u16 = &.{}, w: []u32 = &.{}, scales: []u16 = &.{}, biases: []u16 = &.{}, out: []u16 = &.{},
     want: []f64 = &.{}, magnitude: []f64 = &.{}, input_snapshot: []u8 = &.{}, rig: Rig = .{},
     buffers: [5]vk.Buffer = undefined, made: usize = 0, bindings: [5]dispatch.Binding = undefined,
+    /// Planted control: after the dispatch, overwrite this input buffer (0 x, 1 w, 2 scales, 3 biases) as a kernel that
+    /// writes through its readonly input would; gate 2 must catch it now that the inputs are read back from the device.
+    corrupt: ?usize = null,
 
     pub fn init(a: std.mem.Allocator, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, pipeline: *dispatch.Pipeline) Fixture {
         return .{ .a = a, .dev = dev, .cmds = cmds, .staging = staging, .pipeline = pipeline };
@@ -81,7 +84,15 @@ pub const Fixture = struct {
     }
     // The table is a comptime constant: `&g.hooks(Fixture)` would point at a stack temporary that dies when kernel() returns.
     const vt = g.hooks(Fixture);
-    pub fn kernel(f: *Fixture) g.Kernel { return .{ .spec = spec, .ctx = f, .vt = &vt }; }
+    const corrupt_names = [4][]const u8{ "control: qmm writes its activations", "control: qmm writes its weights", "control: qmm writes its scales", "control: qmm writes its biases" };
+    pub fn kernel(f: *Fixture) g.Kernel {
+        if (f.corrupt) |i| {
+            var planted = spec;
+            planted.name = corrupt_names[i];
+            return .{ .spec = planted, .ctx = f, .vt = &vt, .control = .repeat };
+        }
+        return .{ .spec = spec, .ctx = f, .vt = &vt };
+    }
     fn allocPoison(a: std.mem.Allocator, data_len: usize) ![]u16 {
         const extra: usize = if (data_len % 2 == 0) 16 else 17;
         const p = try a.alloc(u16, data_len + extra); @memset(p, poison); return p;
@@ -125,7 +136,23 @@ pub const Fixture = struct {
         const s=f.shape; const p=Params{ .count=@intCast(s.rows*s.n), .output_size=@intCast(s.rows*s.n), .matrix_m=@intCast(s.rows), .matrix_n=@intCast(s.n), .matrix_k=@intCast(s.k) };
         try vk.orExit(vk.upload(f.cmds, f.buffers[4], 0, f.staging, std.mem.sliceAsBytes(f.out), timeout_ns));
         try vk.orExit(f.pipeline.run(f.cmds, std.mem.asBytes(&p), .{ @intCast((s.rows*s.n+local_size_x-1)/local_size_x), 1, 1 }, timeout_ns));
+        if (f.corrupt) |i| {
+            var from: usize = 0;
+            for (f.bindings[0..i]) |b| from += b.len;
+            const len: usize = f.bindings[i].len;
+            const bad = try f.a.dupe(u8, f.input_snapshot[from..][0..len]);
+            defer f.a.free(bad);
+            bad[len - 1] ^= 0x5a; // the last byte: a readback that stops one short misses it
+            try vk.orExit(vk.upload(f.cmds, f.buffers[i], 0, f.staging, bad, timeout_ns));
+        }
         try vk.orExit(vk.download(f.cmds, f.buffers[4], 0, f.staging, std.mem.sliceAsBytes(f.out), timeout_ns));
+        // Gate 2 compares the inputs before and after the runs, so what it sees must be what the device holds now:
+        // read the four input buffers back into the snapshot (the host copy taken at upload would make the check vacuous).
+        var at: usize = 0;
+        for (f.bindings[0..4]) |b| {
+            try vk.orExit(vk.download(f.cmds, b.buffer.*, 0, f.staging, f.input_snapshot[at..][0..b.len], timeout_ns));
+            at += b.len;
+        }
         const data_count = s.rows * s.n;
         f.rig.guards_ok = true;
         for (f.out[data_count..]) |v| if (v != poison) { f.rig.guards_ok = false; break; };
