@@ -170,3 +170,35 @@ test "model supervisor: fatal transport reports preserve the first error and wit
     try t.expectEqual(error.BackendFailed, c.failure.?);
     try t.expectEqual(@as(u32, 1), c.calls.load(.acquire));
 }
+
+test "model supervisor: the real model fatal callback exits without synchronous NCCL abort when fate is absent" {
+    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const platform = @import("sys");
+    const nccl = @import("cuda").nccl;
+    const pid = platform.c.fork();
+    if (pid < 0) return error.ForkFailed;
+    if (pid == 0) {
+        const Abort = struct {
+            fn entered(_: nccl.Comm) callconv(.c) nccl.Result {
+                std.c._exit(71);
+            }
+        };
+        var lib: nccl.Library = undefined;
+        lib.api.ncclCommAbort = Abort.entered;
+        var m: @import("cuda_model.zig").Model = undefined;
+        m.session.fate = null;
+        m.session.mail = null;
+        m.session.roce = null;
+        m.session.roce_multi = null;
+        m.session.nccl.lib = &lib;
+        m.session.nccl.borrowed = null;
+        m.session.nccl.aborted = .init(false);
+        m.session.nccl.comm = null;
+        @import("model_health.zig").failed(&m, error.CudaContextLost);
+        std.c._exit(72);
+    }
+    var status: c_int = 0;
+    try t.expectEqual(pid, platform.c.waitpid(pid, &status, 0));
+    try t.expectEqual(@as(c_int, 0), status & 127);
+    try t.expectEqual(@as(c_int, 70), (status >> 8) & 255);
+}
