@@ -3,6 +3,7 @@ const std = @import("std");
 const h = @import("hc_layout.zig");
 const ct = @import("core").contract;
 const c = ct.spec;
+const act = @import("hc_act_reference.zig");
 pub const Control = @import("hc_control_source.zig").Control;
 fn bf(x: f64) f64 {
     return c.fromBf16(c.toBf16(@floatCast(x)));
@@ -83,7 +84,7 @@ pub const Fixture = struct {
             },
             .act => {
                 const x = f.input(0, i);
-                out.* = bf(x * sig(x)) * f.input(1, i);
+                out.* = act.point(x, f.input(1, i));
                 magnitude.* = @abs(out.*);
             },
         };
@@ -120,7 +121,7 @@ pub fn Case(comptime contract: type, comptime B: type) type {
         }
         pub fn kernel(s: *Self) gates.Kernel {
             const label = std.fmt.bufPrint(&s.label, "{s} Qwen4 native HC {t} {t}", .{ if (@hasDecl(B, "name")) B.name else "metal", s.op, s.control }) catch unreachable;
-            return .{ .ctx = s, .vt = &vt, .control = switch (s.control) {
+            return .{ .ctx = s, .vt = if (s.op == .act) &vt else &scalar_vt, .control = switch (s.control) {
                 .production => null,
                 .nan => .nonfinite,
                 .repeat => .repeat,
@@ -143,6 +144,12 @@ pub fn Case(comptime contract: type, comptime B: type) type {
             } };
         }
         const vt = gates.hooks(Self);
+        const scalar_vt = blk: {
+            var hooks = vt;
+            hooks.bounds = null;
+            hooks.intervals = null;
+            break :blk hooks;
+        };
         pub fn prepare(s: *Self, shape: c.Shape, fill: gates.Fill, seed: u64) !bool {
             if (shape.rows == 0 or shape.rows > 128) return false;
             if (s.op == .act) {
@@ -165,6 +172,19 @@ pub fn Case(comptime contract: type, comptime B: type) type {
         }
         pub fn reference(s: *Self, want: []f64, mag: []f64) !void {
             s.fixture.reference(want, mag, .none, .sequential);
+        }
+        pub fn bounds(s: *Self, want: []const f64, _: []const f64, allow: []f64) !void {
+            for (want, allow, 0..) |w, *limit, i| {
+                const range = act.interval(s.fixture.input(0, i), s.fixture.input(1, i));
+                limit.* = @max(@abs(w - range.low), @abs(w - range.high));
+            }
+        }
+        pub fn intervals(s: *Self, low: []f64, high: []f64) !void {
+            for (low, high, 0..) |*l, *hgh, i| {
+                const range = act.interval(s.fixture.input(0, i), s.fixture.input(1, i));
+                l.* = range.low;
+                hgh.* = range.high;
+            }
         }
         pub fn simulate(s: *Self, acc: c.Accum, order: contract.rows.Order, out: []f64) !void {
             const mag = try s.arena.?.allocator().alloc(f64, out.len);

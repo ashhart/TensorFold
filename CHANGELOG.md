@@ -4,8 +4,12 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Kernel contract: Qwen4's dense activation check carries FP32 rounding through the stored BF16 SiLU before the up product, avoiding a false shape failure near a BF16 midpoint (#1547). Inference kernels are unchanged.
+
 - HIP: `-Dhip-relax-branches=true` (off by default) lets gfx1100 build the dot2 prompt tiles with Ubuntu's clang 21, which otherwise stops on a branch out of range (#1542, for #1521). It has not run on a gfx1100 GPU yet; with it off, every compile command is the same as before. Thanks to @AbrahamCete.
+
 - Ling 3.1: a host-only family package that the Metal and CUDA engines will share: config parsing and its refusals, the weight map checked against the published index, a float64 reference and small fixtures (#1541, for #1247). Nothing is served yet. Thanks to @ThinkOffApp and @jschmied.
+
 - `tools/zig/cuda_sass_identity.py` builds an image that differs again from both trees, one build at a time. A function counts as changed only if it differs again, and a tree whose two builds disagree fails the check as unstable instead of passing or failing by chance (#1532). `--no-recheck` keeps the old count. Thanks to @jschmied.
 
 - More CUDA kernels take their helpers from the shared headers in `zig/kernels/cuda/common`: the warp sum in the Flash Next and Qwen4 gated delta kernels, the FP4 and FP8 pair conversions, and the activations (`sigmoid`, `softplus`, `silu` and its gradient). All 1,866 kernel functions in the 104 CUDA images compile to the same code as before at sm_121 and sm_80 (#1550, #1555, #1556). Thanks to @jschmied.

@@ -106,3 +106,79 @@ test "Qwen4 HC native contract: actual CUDA dense source and every planted contr
         try std.testing.expectEqual(g.Verdict.fail, try g.one(a, bad.kernel().control.?, bad.kernel(), 0x367));
     }
 }
+
+test "Qwen4 HC native contract: dense activation rounding witness" {
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const seed = std.hash.Wyhash.hash(0x6b63, "metal Qwen4 native HC act production") + 1;
+    const f = try common.Fixture.init(arena.allocator(), .{ .hidden = 5120, .streams = 4 }, .act, .{ .rows = 128, .n = 14336, .k = 1 }, .random, seed);
+    const c = core.contract.spec;
+    const at = 218116;
+    const x = c.read(.bf16, f.inputs[0], at);
+    const up = c.read(.bf16, f.inputs[1], at);
+    const e = @exp(-@abs(x));
+    const silu = (if (x < 0) x * e else x) / (1 + e);
+    const round = @import("../../src/families/qwen4/rounding_bound.zig");
+    try std.testing.expectEqual(@as(f64, -0.00390625), x);
+    try std.testing.expectEqual(@as(f64, 2.0625), up);
+    const midpoint = -0.001949310302734375;
+    try std.testing.expect(silu < midpoint and midpoint - silu < 5e-12);
+    try std.testing.expectEqual(@as(f64, -0.0040283203125), round.bf64(round.bf64(silu) * up));
+}
+
+const ExpWitness = struct {
+    pub const Rig = B.Rig;
+    gate: f32 = -0.00390625,
+    up: f32 = 2.0625,
+    lower_exp: bool = true,
+    drop_mid: bool = false,
+    output_shift: i16 = 0,
+    out: []u16 = undefined,
+    pub fn bind(b: *@This(), r: *Rig, f: common.Fixture) !void {
+        const c = core.contract.spec;
+        @memset(std.mem.bytesAsSlice(u16, f.inputs[0]), c.toBf16(b.gate));
+        @memset(std.mem.bytesAsSlice(u16, f.inputs[1]), c.toBf16(b.up));
+        b.out = @alignCast(std.mem.bytesAsSlice(u16, try r.add(null, f.output_bytes)));
+    }
+    pub fn launch(b: *@This(), _: *Rig, _: h.Op, _: h.Call, _: u32) !void {
+        const c = core.contract.spec;
+        const rounded_exp = @exp(-@abs(b.gate));
+        const e: f32 = if (b.lower_exp) @bitCast(@as(u32, @bitCast(rounded_exp)) - 1) else rounded_exp;
+        const numerator = if (b.gate < 0) b.gate * e else b.gate;
+        const denominator = 1 + e;
+        const silu = numerator / denominator;
+        const mid = if (b.drop_mid) silu else c.fromBf16(c.toBf16(silu));
+        const bits: i32 = c.toBf16(mid * b.up);
+        @memset(b.out, @intCast(bits + b.output_shift));
+    }
+};
+
+test "Qwen4 HC native contract: one ULP of FP32 exp crosses the stored SiLU midpoint" {
+    const c = core.contract.spec;
+    const g = core.contract.gates;
+    const old = g.quiet;
+    g.quiet = true;
+    defer g.quiet = old;
+    const exact_exp = @exp(@as(f64, -0.00390625));
+    const rounded_exp: f32 = @floatCast(exact_exp);
+    const neighbor_exp: f32 = @bitCast(@as(u32, @bitCast(rounded_exp)) - 1);
+    const ulp: f64 = rounded_exp - neighbor_exp;
+    try std.testing.expect(@abs(exact_exp - neighbor_exp) < ulp);
+    const Case = common.Case(core.contract, ExpWitness);
+    var good: Case = .{ .a = a, .rig = .{}, .backend = .{}, .op = .act };
+    defer good.deinit();
+    try std.testing.expect(try good.prepare(.{ .rows = 1, .n = 257, .k = 1 }, .random, 1));
+    try good.run();
+    try std.testing.expectEqual(@as(f64, -0.003997802734375), c.read(.bf16, try good.rig.outputBytes(), 0));
+    try std.testing.expectEqual(g.Verdict.pass, try g.one(a, .shapes, good.kernel(), 1));
+    good.backend.up = -2.0625;
+    try std.testing.expectEqual(g.Verdict.pass, try g.one(a, .shapes, good.kernel(), 1));
+    good.backend.up = 2.0625;
+    for ([_]i16{ -1, 2 }) |shift| {
+        good.backend.output_shift = shift;
+        try std.testing.expectEqual(g.Verdict.fail, try g.one(a, .shapes, good.kernel(), 1));
+    }
+    var bad: Case = .{ .a = a, .rig = .{}, .backend = .{ .gate = 4, .up = 1.5, .lower_exp = false, .drop_mid = true }, .op = .act };
+    defer bad.deinit();
+    try std.testing.expectEqual(g.Verdict.fail, try g.one(a, .shapes, bad.kernel(), 1));
+}
