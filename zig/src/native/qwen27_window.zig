@@ -1,8 +1,14 @@
 //! Target verification width is independent of the unchanged masked drafter block and its selected tree.
 const std = @import("std");
 pub const capacity = 64;
-pub fn nodes(window: u32, copies: bool) u32 {
-    return @min(window -| 1, if (copies) @as(u32, 15) else 31);
+pub fn nodes(window: u32, _: bool) u32 {
+    return @min(window -| 1, capacity - 1);
+}
+/// A lone stream prices its full tree; shared grants and zero-grant pauses keep their existing limits.
+pub fn proposal(window: u32, copies: bool, granted: u32, room: u32, lone: bool) u32 {
+    if (granted == 0 or room < 2) return 0;
+    const cap = if (lone) nodes(window, copies) else @min(granted, if (copies) @as(u32, 15) else 31);
+    return @min(cap, window -| 1, room - 1);
 }
 pub fn copyPolicy(tensor_units: bool, window: u32, value: ?[]const u8) !bool {
     return flag(value, tensor_units and window > 16, error.BadQwenCopies);
@@ -27,10 +33,10 @@ test "qwen27 window: both device classes retain narrow defaults and admit explic
     try std.testing.expect(rows(false) <= capacity and rows(true) <= capacity);
 }
 test "qwen27 window: head plus copies matches the 64-row serial layout without enlarging the masked block" {
-    try std.testing.expectEqual(@as(u32, 31), nodes(64, false));
+    try std.testing.expectEqual(@as(u32, 63), nodes(64, false));
     try std.testing.expectEqual(@as(u32, 31), nodes(32, false));
-    try std.testing.expectEqual(@as(u32, 15), nodes(64, true));
-    try std.testing.expectEqual(@as(u32, 15), nodes(32, true));
+    try std.testing.expectEqual(@as(u32, 63), nodes(64, true));
+    try std.testing.expectEqual(@as(u32, 31), nodes(32, true));
     try std.testing.expectEqual(@as(u32, 15), nodes(16, false));
     try std.testing.expectEqual(@as(u32, 15), nodes(16, true));
 }
@@ -113,4 +119,20 @@ test "qwen27 window: preserve each device class's qualified default and checked 
     try std.testing.expectEqual(@as(u32, 16), try requested(true, null));
     try std.testing.expect(!try copyPolicy(false, try requested(false, null), null));
     try std.testing.expect(!try copyPolicy(true, try requested(true, null), null));
+}
+
+test "qwen27 window: the tree can use every draft row even beside copies" {
+    for ([_]bool{ false, true }) |copies| for ([_]u32{ 16, 32, 64 }) |width| {
+        try std.testing.expectEqual(width - 1, nodes(width, copies));
+    };
+}
+
+test "qwen27 window: a lone tree escapes the chain prior but shared and paused grants remain bounded" {
+    try std.testing.expectEqual(@as(u32, 63), proposal(64, true, 3, 100, true));
+    try std.testing.expectEqual(@as(u32, 31), proposal(32, true, 3, 100, true));
+    try std.testing.expectEqual(@as(u32, 15), proposal(16, false, 3, 100, true));
+    try std.testing.expectEqual(@as(u32, 3), proposal(64, true, 3, 100, false));
+    try std.testing.expectEqual(@as(u32, 15), proposal(64, true, 63, 100, false));
+    try std.testing.expectEqual(@as(u32, 0), proposal(64, true, 0, 100, true));
+    try std.testing.expectEqual(@as(u32, 2), proposal(64, true, 63, 3, true));
 }

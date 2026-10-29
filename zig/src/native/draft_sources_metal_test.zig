@@ -133,7 +133,7 @@ test "qwen27 window: native facts expose device width, node budget and hybrid co
             for (b.costs[0..width], 0..) |*cost, i| cost.* = .{ .width = @intCast(i + 1), .ms = 20 };
             const facts = b.facts();
             try std.testing.expectEqual(width, facts.exact_width);
-            try std.testing.expectEqual(@as(u32, if (width == 16 or copies) 15 else 31), facts.drafts);
+            try std.testing.expectEqual(width - 1, facts.drafts);
             try std.testing.expectEqual(width, facts.batch_rows);
             try std.testing.expectEqual(width, facts.window_costs.len);
             try std.testing.expectEqual(width, facts.window_costs[width - 1].width);
