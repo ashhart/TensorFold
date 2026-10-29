@@ -219,7 +219,7 @@ const usage =
     \\  block                     DFlash block attention over windowed contexts against float64 (synthetic)
     \\  window                    sliding-window attention against float64 references (synthetic)
     \\  window-rows               window attention at head dims 256 and 512 against float64 ranges (synthetic)
-    \\  window-pages-512          head dim 512 decode over shuffled pages bit-equal to the contiguous cache (synthetic)
+    \\  window-pages-512          head dim 512 decode and prompt rows over shuffled pages: the contiguous bits (synthetic)
     \\  window-bench WHICH        window attention's GPU time: callers (Kolibri-1's shapes) or gemma (head dims 256, 512)
     \\  moe-glue                  sigmoid top-k routing and the weighted combine against float64 references (synthetic)
     \\  dense-rows                bf16 rows times weight rows (routers, heads) against float64 references (synthetic)
