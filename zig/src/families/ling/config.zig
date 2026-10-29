@@ -304,7 +304,7 @@ fn quantization(o: std.json.ObjectMap, c: *Config, why: *Why) !void {
     if (std.mem.eql(u8, method, "fp8")) return fp8Block(q, c, why);
     if (std.ascii.eqlIgnoreCase(method, "modelopt")) return modelopt(q, c, why);
     if (std.ascii.eqlIgnoreCase(method, "exl3")) {
-        why.set("EXL3: Ling's EXL3 weights come with ashhart's EXL3 module (tracker #832), not this loader yet", .{});
+        why.set("EXL3: Ling's EXL3 weights need the shared EXL3 module (tracker #832), not this loader yet", .{});
         return error.Exl3;
     }
     why.set("quantization {s}: the loader reads bf16, FP8 128x128 blocks or ModelOpt NVFP4", .{if (method.len > 0) method else "without quant_method"});
