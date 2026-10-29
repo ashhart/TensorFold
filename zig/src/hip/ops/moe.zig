@@ -40,3 +40,9 @@ pub fn moeAct(o: Ops, both: u64, out: Tensor, pairs: usize, width: usize, limit:
 pub fn moeCombine(o: Ops, y: u64, wts: u64, out: Tensor, r: usize, slots: usize, d: usize) Error!void {
     try o.l.tf_moe_combine(f(y), f(wts), p(out.ptr), @backingInt(out.kind), int(r), int(slots), int(d), o.stream);
 }
+
+/// The same sum with a shared expert run beside the stack: `shared` (rows, d) fp32, or 0 where it adds nothing.
+pub fn moeCombineGate(o: Ops, y: u64, wts: u64, shared: u64, out: Tensor, r: usize, slots: usize, d: usize) Error!void {
+    if (slots < 2) return error.BadShape;
+    try o.l.tf_moe_combine_gate(f(y), f(wts), if (shared == 0) null else f(shared), p(out.ptr), @backingInt(out.kind), int(r), int(slots), int(d), o.stream);
+}
