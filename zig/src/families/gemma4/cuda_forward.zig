@@ -70,6 +70,8 @@ pub const Model = struct {
     /// Decode forwards of n rows as CUDA graphs, captured at their first use ([n]; null: not yet, or graphs off).
     graphs: [round_rows + 1]?cuda.graph.Exec = @splat(null),
     graphed: bool = true,
+    /// Counts dropGraphs calls: a drafter's graphs captured before one (attach moves the caches) are stale.
+    graph_gen: u32 = 0,
     /// A drafter's tapped layers: each one's output rows (before the next norm) at taps_buf [rows, taps, hidden].
     taps: [8]u32 = undefined,
     tap_count: usize = 0,
@@ -174,10 +176,10 @@ pub const Model = struct {
     /// Makes the arena of `pool` pages to lease, the rings and tables of `extra + 1` slots (no pages mapped).
     pub fn attach(m: *Model, s: cuda.Stream, extra: usize, pool: usize) !void {
         if (!m.paged or m.pages != 0 or pool == 0 or extra >= round_rows) return error.BadAttach;
-        for (0..m.layers) |i| if (!cfg.global(i)) {
+        for (0..m.layers) |i| { // the rings, and the global layers' first pages
             m.forget(m.kc[i]);
             m.forget(m.vc[i]);
-        };
+        }
         m.forget(m.table);
         m.gpa.free(m.ids);
         m.gpa.free(m.caps);
@@ -226,6 +228,7 @@ pub const Model = struct {
     }
 
     fn dropGraphs(m: *Model) void {
+        m.graph_gen +%= 1;
         for (&m.graphs) |*g| if (g.*) |*e| {
             e.deinit();
             g.* = null;
@@ -237,6 +240,12 @@ pub const Model = struct {
         const bytes = m.slots * m.cacheLen(i) * m.geo.kvHeads(i) * cfg.headDim(i) * 2;
         m.kc[i] = try m.zeros(s, bytes);
         m.vc[i] = try m.zeros(s, bytes);
+    }
+
+    /// A paged global layer before attach: one page (id 0) for slot 0, so a drafter can warm up at open.
+    fn firstPage(m: *Model, s: cuda.Stream, i: usize) !void {
+        m.kc[i] = try m.zeros(s, m.pageElems() * 2);
+        m.vc[i] = try m.zeros(s, m.pageElems() * 2);
     }
 
     /// The slots' page tables on the device and the host, no page mapped.
@@ -256,8 +265,11 @@ pub const Model = struct {
         m.vc = try m.gpa.alloc(u64, m.layers);
         @memset(m.kc, 0);
         @memset(m.vc, 0);
-        for (0..m.layers) |i| if (!m.paged or !cfg.global(i)) try m.ringOf(s, i); // paged global layers: attach's arena
-        if (m.paged) try m.makeTables(s);
+        for (0..m.layers) |i| if (!m.paged or !cfg.global(i)) try m.ringOf(s, i) else try m.firstPage(s, i);
+        if (m.paged) {
+            try m.makeTables(s);
+            if (m.planned == null) m.caps[0] = page_tokens; // before attach: slot 0 reads page 0, for a drafter's warm-up
+        }
         var sl: [cfg.sliding_dim / 2]f32 = undefined;
         var gl: [cfg.global_dim / 2]f32 = undefined;
         inverseFrequencies(false, &sl);
