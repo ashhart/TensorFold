@@ -13,6 +13,7 @@
 #include "../exl3_decode.cuh"
 #include "pfdense_args.h"
 #include "common/cp_async.cuh"
+#include "common/qmm_frag.cuh"
 
 namespace dsv41_pfd {
 
@@ -65,12 +66,7 @@ __device__ __forceinline__ void cp_async16(void* smem, const void* gmem, bool ok
 using tf_common::cp_commit;
 using tf_common::cp_wait;
 __device__ __forceinline__ void bar_sync() { asm volatile("bar.sync 0;\n" ::: "memory"); }
-__device__ __forceinline__ void ldsm4(uint32_t (&a)[4], const void* p) {
-    const unsigned s = (unsigned)__cvta_generic_to_shared(p);
-    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
-                 : "=r"(a[0]), "=r"(a[1]), "=r"(a[2]), "=r"(a[3])
-                 : "r"(s));
-}
+using qmm_frag::ldmatrix4;
 // mma.m16n8k16, bf16 inputs, fp32 accumulators (the epilogue's Hadamard chain): d += a @ b
 __device__ __forceinline__ void mma16816_bf16(float (&d)[4], const uint32_t (&a)[4], const uint32_t (&b)[2]) {
     asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
@@ -283,7 +279,7 @@ __global__ void __launch_bounds__(C::THREADS, (Lay<K2, LANES, C>::MINB)) pfd_ker
 #pragma unroll
             for (int mt = 0; mt < MT; ++mt) {
                 const int r = (wm * MT + mt) * 16 + (lane & 15);
-                ldsm4(af[mt], A + r * LDA + swz<CPR>(r, 2 * kk + (lane >> 4)) * 8);
+                ldmatrix4(af[mt], A + r * LDA + swz<CPR>(r, 2 * kk + (lane >> 4)) * 8);
             }
 #pragma unroll
             for (int nt = 0; nt < NT; ++nt) {
@@ -341,7 +337,7 @@ __global__ void __launch_bounds__(C::THREADS, (Lay<K2, LANES, C>::MINB)) pfd_ker
                 const int kb = q & 7;
                 const int row = grp * 16 + (lane & 15);
                 uint32_t af[4];
-                ldsm4(af, (q < 8 ? Et : Er) + row * 128 + esw(row, 2 * kb + (lane >> 4)) * 8);
+                ldmatrix4(af, (q < 8 ? Et : Er) + row * 128 + esw(row, 2 * kb + (lane >> 4)) * 8);
 #pragma unroll
                 for (int e = 0; e < C::EN8; ++e) {
                     uint32_t hb[2];

@@ -9,6 +9,7 @@
 
 #include "../exl3_decode.cuh"
 #include "experts_grouped.cuh"
+#include "common/qmm_frag.cuh"
 #include "common/cp_async.cuh"
 
 namespace dsv41_x3gm {
@@ -28,12 +29,7 @@ __device__ __forceinline__ void cp_async16(void* smem, const void* gmem, bool ok
 }
 using tf_common::cp_commit;
 using tf_common::cp_wait;
-__device__ __forceinline__ void ldsm4(uint32_t (&a)[4], const void* p) {
-    const unsigned s = (unsigned)__cvta_generic_to_shared(p);
-    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
-                 : "=r"(a[0]), "=r"(a[1]), "=r"(a[2]), "=r"(a[3])
-                 : "r"(s));
-}
+using qmm_frag::ldmatrix4;
 
 // the 16-byte chunk c of member row r in a stage (CPR chunks a row): 8 rows of an ldmatrix phase in 8 bank groups
 template <int CPR>
@@ -191,7 +187,7 @@ __global__ void __launch_bounds__(Cfg<MATS, XM, K2, MTL, NG, KS, NSA, NGR>::THRE
                 for (int np = 0; np < NG / 2; ++np) {
                     if (16 * np < cnt) {                      // warp-uniform
                         uint32_t b[4];
-                        ldsm4(b, A + (16 * np + lr) * LDA + chunk * 8);
+                        ldmatrix4(b, A + (16 * np + lr) * LDA + chunk * 8);
                         const uint32_t b01[2] = {b[0], b[1]}, b23[2] = {b[2], b[3]};
 #pragma unroll
                         for (int l = 0; l < MTL; ++l) {
