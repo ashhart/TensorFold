@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- The CUDA training kernels for Living Weights' and 4-bit training's gated attention backward now compile from one shared source, `zig/kernels/cuda/attn_back.cuh`, instead of two copies; both images keep their kernel names, and every function in them compiles to the same code as before at sm_80, 86, 89, 120 and 121 (#1565, for #1409). Thanks to @jschmied.
+
 - The GLM CUDA matrix multiply kernels take their copy, ldmatrix, mma and nibble helpers from the shared `zig/kernels/cuda/common/qmm_frag.cuh`, and their 117-line private copy of it is gone. All 110 functions in the `glm_mm` image compile to the same code as before at sm_80, sm_86, sm_89, sm_120 and sm_121 (#1564). Thanks to @jschmied.
 
 - Kernel contract: the CUDA runner now loads fp8_experts' image, so a `zig build kernel-contract` run on a CUDA machine no longer stops at its first fp8_experts record (about 90 minutes in on a GB10) and makes all 1,325 live-limit checks through to its `SUMMARY` line. A host test now fails if any registered CUDA launch or control names an image the runner cannot load (#1579). Inference kernels are unchanged. Thanks to @Bizuayeu.
