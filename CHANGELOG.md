@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- More CUDA kernels take their helpers from the shared headers in `zig/kernels/cuda/common`: the warp sum in the Flash Next and Qwen4 gated delta kernels, the FP4 and FP8 pair conversions, and the activations (`sigmoid`, `softplus`, `silu` and its gradient). All 1,866 kernel functions in the 104 CUDA images compile to the same code as before at sm_121 and sm_80 (#1550, #1555, #1556). Thanks to @jschmied.
+
 - After a tool reply, the prompt cache resumes the next turn at the part of the conversation that turn repeats. A chat template that closes a tool reply's turn only when nothing follows (Gemma 4's) used to put the resume point past it, so the next turn resumed one turn late; on an Arc Pro B70 with Gemma 4 E4B, those turns reached their first token in 0.8 to 1.4 s instead of 1.7 to 2.7 s (#1551). Other templates resume exactly as before. Thanks to @Mirrdhyn.
 
 - A conversation state on disk that its model refuses while reading it back is forgotten after one recall, as a file that fails its own checks already is, so later turns stop reading it again (#1543, for #1539). Thanks to @wojo.
