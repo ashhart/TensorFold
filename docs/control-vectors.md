@@ -411,6 +411,27 @@ tf-qwen27-steer-derive --model DIR --out FILE \
 the strength does, as it was measured. A vector is published on its own, as a
 file; it is not committed to this repository, and the code that writes it is.
 
+### The checkpoint the file names
+
+`glp.base_model` is the checkpoint the vector came from, and the server refuses
+a vector whose checkpoint is not the one it is serving. The check compares
+names: the served checkpoint's model name has to be the vector's model name or
+start with it, so a conversion published under a longer name takes the vector
+and a different model does not.
+
+The same weights under another name are refused with it. A file can be
+re-stamped for that name:
+
+```
+tf-glp-check rewrite vector.gguf vector-mlx.gguf \
+    --repo mlx-community/Qwen3.8-27B-4bit --revision REV
+```
+
+The directions stay the same bytes and the digest over them does not move; only
+the name the file carries changes. That is a claim the operator makes, not one
+the reader verifies: the check is a name comparison, so only re-stamp a file
+for a checkpoint that holds the same weights.
+
 ### The published file
 
 The vector is published as a file of its own, and this repository holds the code

@@ -440,6 +440,43 @@ test "a vector written again keeps its digest and its layers" {
     try std.testing.expectEqual(@as(u32, 10), reread.vector.layers[0].id);
 }
 
+test "a vector re-stamped for another checkpoint keeps its directions" {
+    const a = std.testing.allocator;
+    const bytes = try writeSample(a);
+    defer a.free(bytes);
+    var read = try readOk(bytes);
+    defer read.deinit();
+    // The same weights under another name: the directions stay, the checkpoint they name changes.
+    const again = try glp.write(a, .{
+        .mode = read.vector.mode,
+        .alpha = read.vector.alpha,
+        .hook_point = read.vector.hook_point,
+        .derived_at = read.vector.derived_at,
+        .base_model = "mlx-community/Qwen3.8-27B-4bit",
+        .base_revision = "10c35caafbb80f7dc6a7a432cdd11af10a6d4818",
+        .method = read.vector.method,
+        .contrast = read.vector.contrast,
+        .publication = read.vector.publication,
+        .layers = read.vector.layers,
+    });
+    defer a.free(again);
+    var reread = try readOk(again);
+    defer reread.deinit();
+    try std.testing.expectEqualStrings("mlx-community/Qwen3.8-27B-4bit", reread.vector.base_model);
+    try std.testing.expectEqualStrings("10c35caafbb80f7dc6a7a432cdd11af10a6d4818", reread.vector.base_revision);
+    // The numbers and the digest over them are what they were: only the name moved.
+    try std.testing.expectEqualSlices(u8, &read.vector.sha256, &reread.vector.sha256);
+    try std.testing.expectEqual(read.vector.layers.len, reread.vector.layers.len);
+    for (read.vector.layers, reread.vector.layers) |before, after| {
+        try std.testing.expectEqual(before.id, after.id);
+        try std.testing.expectEqualSlices(f32, before.dir, after.dir);
+    }
+    // The binding moved with it: the new checkpoint takes the vector, the old one does not.
+    var why: glp.Why = .{};
+    try glp.checkModel(reread.vector, 8, "mlx-community/Qwen3.8-27B-4bit", &why);
+    try std.testing.expectError(error.BadGlpVector, glp.checkModel(reread.vector, 8, "Qwen/Qwen3.8-27B", &why));
+}
+
 test "a producer refuses a direction that is not a unit vector" {
     const a = std.testing.allocator;
     const dir = try a.alloc(f32, 4);
