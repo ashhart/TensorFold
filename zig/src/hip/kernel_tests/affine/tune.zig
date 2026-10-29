@@ -67,7 +67,13 @@ const Tuner = struct {
         for (t.rig.kernels.reg.entries, 0..) |*e, i| {
             if (e.format != .mlx or e.op != op or e.path != .prefill) continue;
             if (!e.caps(t.env) or !e.policy(t.env) or !e.fits(prod.shapeFor(arg, p.items, p.pairCount(), e))) continue;
-            const r = try t.timeEntry(p, e, out);
+            // a noisy timing is taken again, up to twice, and the steadiest kept; one still noisy cannot move a bound
+            var r = try t.timeEntry(p, e, out);
+            for (0..2) |_| {
+                if (r.noise <= search.noise_limit) break;
+                const again = try t.timeEntry(p, e, out);
+                if (again.noise < r.noise) r = again;
+            }
             t.s.setTime(ci, i, .{ .us = r.us, .noise = r.noise });
             std.debug.print("TUNE {s} n{d} k{d} b{d} g{d} {s}={d} items={d} pairs={d} {s} {d:.2} us noise {d:.1}%{s}\n", .{
                 c.name, c.n,  c.k,           c.bits,                                                    c.group, if (c.routed) "tokens" else "rows", count, p.items, p.pairCount(),
@@ -167,7 +173,7 @@ test "time the prompt tiles" {
     // propose, then bisect where either table's choice changes; bisection only adds counts, so the passes end
     while (true) {
         t.s.reset();
-        t.s.propose(false);
+        try t.s.propose(false);
         const before = t.s.cells.items.len;
         for (t.classes, 0..) |_, ci| {
             var list: std.ArrayList(usize) = .empty;
@@ -177,9 +183,23 @@ test "time the prompt tiles" {
             for (list.items[0 .. list.items.len - 1], list.items[1..]) |x, y| {
                 if (y <= cells.sampledMax(t.classes[ci]) and y > x + 1 and t.s.changes(ci, x, y)) to_refine = true;
             }
-            if (!to_refine) continue;
+            // both sides of every place the proposal's routed choice changes, so no accepted bound rests on a guess
+            var edge_list: std.ArrayList(usize) = .empty;
+            defer edge_list.deinit(gpa);
+            if (t.classes[ci].routed) {
+                const table = t.s.proposal();
+                const reg = affine.Registry.init(&table, &mlx_entries.all);
+                const template = t.s.cells.items[t.s.cellOf(ci, list.items[0]).?].shape;
+                try cells.edges(t.classes[ci], template, &reg, t.env, &edge_list, gpa);
+            }
+            var new_edges = false;
+            for (edge_list.items) |v| if (t.s.cellOf(ci, v) == null) {
+                new_edges = true;
+            };
+            if (!to_refine and !new_edges) continue;
             var par = try t.parent(ci, most[ci]);
             defer par.deinit();
+            for (edge_list.items) |v| try t.timeCell(ci, &par, v);
             for (list.items[0 .. list.items.len - 1], list.items[1..]) |x, y| {
                 if (y <= cells.sampledMax(t.classes[ci])) try t.refine(ci, &par, x, y);
             }
@@ -187,7 +207,7 @@ test "time the prompt tiles" {
         if (t.s.cells.items.len == before) break;
     }
     t.s.reset();
-    t.s.propose(true);
+    try t.s.propose(true);
     for (t.s.rows[0..t.s.n_rows]) |r| if (cells.isPrompt(r.id, false) or cells.isPrompt(r.id, true)) printRow(r);
 
     // the compiled gfx1201 table against gfx1100's, cell by cell: the receipt once the measured rows are written

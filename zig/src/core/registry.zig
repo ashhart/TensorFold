@@ -116,8 +116,8 @@ pub fn Registry(comptime Launch: type) type {
             if (plan and !t.routed) return null;
             if (!plan and !t.plain) return null;
             if (t.items != 0 and plan and shape.items > t.items) return null;
-            if (t.pairs_per_item != 0 and plan and shape.plan_pairs != 0 and
-                @as(u64, shape.plan_pairs) > @as(u64, t.pairs_per_item) * shape.items) return null;
+            if (t.pairs_per_item > 0 and plan and shape.plan_pairs != 0 and
+                @as(f64, @floatFromInt(shape.plan_pairs)) > @as(f64, t.pairs_per_item) * @as(f64, @floatFromInt(shape.items))) return null;
             // a routed prompt's kernel is chosen by its items, whatever rows they hold
             if (!plan or e.path == .decode) {
                 const limit = if (t.rows_matrix != 0 and env.matrix_on and env.matrix) t.rows_matrix else t.rows;
@@ -322,6 +322,15 @@ test "a plan past its entry's pairs per item takes the next entry" {
     shape.items = 0;
     shape.plan_pairs = 5000;
     try std.testing.expect(std.mem.endsWith(u8, r.select(toy_env, .mlx, .project, .prefill, shape).?.id, "k1"));
+    // a fractional bound: 3.5 pairs an item over 100 items takes 350 pairs and refuses 351
+    var half = rows;
+    half[0].pairs_per_item = 3.5;
+    const h = Toy.init(&.{ .gfx = "toy", .rows = &half }, &entries);
+    shape.items = 100;
+    shape.plan_pairs = 350;
+    try std.testing.expect(std.mem.endsWith(u8, h.select(toy_env, .mlx, .project, .prefill, shape).?.id, "k3"));
+    shape.plan_pairs = 351;
+    try std.testing.expect(std.mem.endsWith(u8, h.select(toy_env, .mlx, .project, .prefill, shape).?.id, "k1"));
 }
 
 test "the family rule refuses a path whose family changes with the rows" {

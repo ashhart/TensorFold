@@ -426,4 +426,14 @@ test "a routed prompt past its pairs per item leaves the K-parallel tiles for th
         // the shipped table bounds no pairs
         try std.testing.expect(std.mem.endsWith(u8, shipped.select(env, .mlx, .routed, .prefill, shape).?.id, "kp3"));
     }
+    // a fractional bound: 3.5 pairs an item takes 1,050 pairs over 300 items and refuses 1,051
+    var half = bounded;
+    for (&half) |*row| if (row.pairs_per_item != 0) {
+        row.pairs_per_item = 3.5;
+    };
+    const h = affine.Registry.init(&.{ .gfx = "gfx1201", .rows = &half }, &all);
+    shape.plan_pairs = 1050;
+    try std.testing.expect(std.mem.endsWith(u8, h.select(env, .mlx, .routed, .prefill, shape).?.id, "kp3"));
+    shape.plan_pairs = 1051;
+    try std.testing.expect(std.mem.endsWith(u8, h.select(env, .mlx, .routed, .prefill, shape).?.id, "gemm"));
 }
