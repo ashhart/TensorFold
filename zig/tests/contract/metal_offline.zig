@@ -123,6 +123,10 @@ pub fn run(a: std.mem.Allocator, io: std.Io, dir: []const u8, list: []const limi
     for (list) |d| {
         const l = try launchOf(a, device, d);
         const control = std.mem.startsWith(u8, d.name, "control");
+        if (d.unbuildable) {
+            std.debug.print("SKIP offline {s}: air-tt refuses this pipeline for M1/M2; {d} threads a group unmeasured there\n", .{ d.name, d.threads });
+            continue;
+        }
         const safe = d.adapts or d.reserved >= d.threads or (!d.offline and d.threads <= 256);
         const got = blk: {
             const lib = library(x, l.pre_m5) catch |err| break :blk err;

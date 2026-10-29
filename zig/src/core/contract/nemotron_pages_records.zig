@@ -13,10 +13,10 @@ pub const records = [_]M{
     .{ .name = "nemotron paged prompt nemotron_attention_paged_t_t", .threads = 128, .tg_memory = 0, .reserved = 128 },
 };
 
-/// The decode partials at 1 to 8 tiles (32 threads and 2 KiB of scores a tile); past 8 they need 288 to 512 threads.
+/// The decode partials at 1 to 16 tiles (32 threads and 2 KiB of scores a tile); past 8 they need 288 to 512 threads.
 const partials = blk: {
-    var out: [8]M = undefined;
-    for (&out, 1..) |*r, n| r.* = .{ .name = std.fmt.comptimePrint("nemotron paged partial nemotron_attn_partial_paged_{d}", .{n}), .threads = 32 * n, .tg_memory = 2048 * n, .offline = false };
+    var out: [16]M = undefined;
+    for (&out, 1..) |*r, n| r.* = .{ .name = std.fmt.comptimePrint("nemotron paged partial nemotron_attn_partial_paged_{d}", .{n}), .threads = 32 * n, .tg_memory = 2048 * n, .offline = false, .unbuildable = n > 8 };
     break :blk out;
 };
 

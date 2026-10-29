@@ -26,6 +26,8 @@ pub const MetalLaunch = struct {
     adapts: bool = false,
     /// False for Metal 4 tensor-op kernels: Xcode's translator cannot build them for M1/M2 ahead of time.
     offline: bool = true,
+    /// air-tt refuses this pipeline for M1/M2 (Nemotron's attention partials): unmeasured there, not shown to fit.
+    unbuildable: bool = false,
 };
 
 /// An NVIDIA target we build for: its per-block and per-SM limits (CUDA's compute capability tables).
@@ -73,7 +75,7 @@ pub fn metal(l: MetalLaunch, f: Apple, out: *std.ArrayList(u8), a: std.mem.Alloc
     if (l.threads > f.threads) n += try note(out, a, "{s} on {s}: {d} threads a group, the family's most is {d}", .{ l.name, f.name, l.threads, f.threads });
     const tg = l.tg_memory + l.dynamic;
     if (tg > f.tg_memory) n += try note(out, a, "{s} on {s}: {d} threadgroup bytes, the family's most is {d}", .{ l.name, f.name, tg, f.tg_memory });
-    if (f.by_registers and l.reserved < l.threads and !l.adapts) {
+    if (f.by_registers and l.reserved < l.threads and !l.adapts and !l.unbuildable) {
         const lim = if (f.gen == 13) l.m1 else l.m2;
         if (!l.offline and l.threads > 256) n += try note(out, a, "{s} on {s}: {d} threads past 256 and no M1/M2 compile to show they fit (reserve them)", .{ l.name, f.name, l.threads });
         if (l.offline and lim == 0) n += try note(out, a, "{s} on {s}: no compiled thread limit recorded", .{ l.name, f.name });
@@ -260,6 +262,11 @@ test "a launch inside every family passes; each planted excess is named" {
     var wide_op = tensor_op;
     wide_op.threads = 512;
     try std.testing.expectEqual(@as(usize, 1), try metal(wide_op, apple[0], &out, a));
+    var wide_unmeasured = wide_op;
+    wide_unmeasured.unbuildable = true; // air-tt refuses it: unmeasured on M1/M2, not shown to fit
+    for (apple[0..2]) |f| try std.testing.expectEqual(@as(usize, 0), try metal(wide_unmeasured, f, &out, a));
+    wide_unmeasured.threads = 2048; // still held to the family's absolute limit
+    try std.testing.expectEqual(@as(usize, 1), try metal(wide_unmeasured, apple[0], &out, a));
 }
 
 /// The table's row for `sm` (a target the records cover).
