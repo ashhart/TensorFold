@@ -6,7 +6,7 @@ pub fn enabled(value: ?[]const u8) bool {
 }
 
 pub fn warm(g: anytype, tokens: []const u32, from: usize, to: usize) void {
-    if (!g.warm_ahead or g.format != .nvfp4 or from >= to or to > tokens.len or from < g.hash.n - 1) return;
+    if (!g.warm_ahead or (g.format != .nvfp4 and g.format != .fp8) or from >= to or to > tokens.len or from < g.hash.n - 1) return;
     var history: [ple.max_n]i64 = undefined;
     const hist = history[0 .. g.hash.n - 1];
     for (tokens[from - hist.len .. from], hist) |token, *h| h.* = token;
@@ -15,7 +15,7 @@ pub fn warm(g: anytype, tokens: []const u32, from: usize, to: usize) void {
         ple.lastIds(g.hash, hist, token, ids[0..g.hash.heads]) catch return;
         for (ids[0..g.hash.heads]) |id| {
             const at = g.hash.locate(id) catch return;
-            g.readers[at.shard].hint(g.tables[at.shard], at.local);
+            g.readers[at.shard].hint(at.local);
         }
         for (0..hist.len - 1) |i| hist[i] = hist[i + 1];
         hist[hist.len - 1] = token;
@@ -27,13 +27,13 @@ test "PLE read-ahead: future hashes equal a full token history and flags leave n
         var ids: [128]i64 = undefined;
         var count: usize = 0;
         start: i64,
-        pub fn hint(r: @This(), _: u8, row: usize) void {
+        pub fn hint(r: @This(), row: usize) void {
             ids[count] = r.start + @as(i64, @intCast(row));
             count += 1;
         }
     };
     const hash = try ple.Hash.init(.{ .vocab = 100, .ngram = 3, .per = 2, .base = 13, .divisor = 2, .shards = 2, .seed = 1234, .eos = 99, .ple_dim = 64, .ple_index = 0 });
-    var g: struct { hash: ple.Hash, warm_ahead: bool = false, format: enum { nvfp4, mlx } = .nvfp4, readers: [2]Recorder, tables: [2]u8 = .{ 0, 0 } } = .{ .hash = hash, .readers = .{ .{ .start = hash.starts[0] }, .{ .start = hash.starts[1] } } };
+    var g: struct { hash: ple.Hash, warm_ahead: bool = false, format: enum { nvfp4, mlx, fp8 } = .nvfp4, readers: [2]Recorder } = .{ .hash = hash, .readers = .{ .{ .start = hash.starts[0] }, .{ .start = hash.starts[1] } } };
     const tokens = [_]u32{ 7, 3, 9, 22, 4, 7, 9, 3 };
     const defaults: ple.Ngram = .{ .gpa = std.testing.allocator, .hash = hash, .scale = 1 };
     try std.testing.expect(!defaults.warm_ahead);
@@ -68,4 +68,9 @@ test "PLE read-ahead: future hashes equal a full token history and flags leave n
     warm(&g, &tokens, 4, tokens.len + 1);
     warm(&g, &tokens, tokens.len, tokens.len);
     try std.testing.expectEqual(before, Recorder.count);
+    const nvfp4 = Recorder.ids;
+    Recorder.count = 0;
+    g.format = .fp8;
+    warm(&g, &tokens, 4, tokens.len);
+    try std.testing.expectEqualSlices(i64, nvfp4[0..before], Recorder.ids[0..Recorder.count]);
 }
