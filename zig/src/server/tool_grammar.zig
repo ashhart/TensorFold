@@ -1,4 +1,4 @@
-//! tool_choice "required" or a named function as a grammar: calls in the template's markup, arguments in their schema.
+//! Tool calls as a grammar in the template's markup: required or named calls, or auto replies offering strict tools.
 const std = @import("std");
 const api = @import("engine_api");
 const json = @import("json");
@@ -42,23 +42,56 @@ const mm = "]<]minimax[>[";
 
 /// The grammar for a reply that must call one of `tools`: one call, or (`parallel`) one or more, then the end.
 pub fn structure(srv: *Server, cx: *Cx, tools: []const Value, parallel: bool, thinking: bool) errors.Refused!api.Structure {
-    const probe_turn = (try json.parse(cx.a, "[{\"role\": \"user\", \"content\": \"x\"}, {\"role\": \"assistant\", \"content\": \"\", \"tool_calls\": [{\"id\": \"call_0\", \"type\": \"function\", \"function\": {\"name\": \"" ++ probe ++ "\", \"arguments\": {\"" ++ key ++ "\": \"v\"}}}]}]")).ok;
-    var scratch: Cx = .{ .a = cx.a };
-    const rendered = if (prompt.renderIds(srv, &scratch, probe_turn, &.{}, false, null, false)) |ids| try srv.text.decode(cx.a, ids) else |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.Refused => "",
-    };
+    const rendered = try probed(srv, cx);
     const s = style(rendered) orelse .json; // unrecognized markup uses the canonical call form the parser accepts
     const text = if (lfm2.isStyle(rendered, probe, key)) try lfm2.build(cx.a, tools, parallel) else try build(cx.a, s, tools, parallel);
     const field = try std.fmt.allocPrint(cx.a, "tool_choice \"required\" or a named function on backend '{s}'", .{srv.backendName()});
     return srv.compiledStructure(cx, .structural_tag, text, field, thinking);
 }
 
+/// An auto reply's grammar: free text or calls, strict tools' arguments in their schema; null for LFM2's markup.
+pub fn optionalStructure(srv: *Server, cx: *Cx, tools: []const Value, all: bool, parallel: bool, thinking: bool) errors.Refused!?api.Structure {
+    const rendered = try probed(srv, cx);
+    if (lfm2.isStyle(rendered, probe, key)) return null; // its call list is one grammar rule, not a tag a trigger opens
+    const text = try optional(cx.a, style(rendered) orelse .json, tools, all, parallel);
+    const field = try std.fmt.allocPrint(cx.a, "strict tools under tool_choice \"auto\" on backend '{s}'", .{srv.backendName()});
+    return try srv.compiledStructure(cx, .structural_tag, text, field, thinking);
+}
+
+/// The template's rendering of an assistant turn that calls `probe`; empty when it renders no such turn.
+fn probed(srv: *Server, cx: *Cx) errors.Refused![]const u8 {
+    const probe_turn = (try json.parse(cx.a, "[{\"role\": \"user\", \"content\": \"x\"}, {\"role\": \"assistant\", \"content\": \"\", \"tool_calls\": [{\"id\": \"call_0\", \"type\": \"function\", \"function\": {\"name\": \"" ++ probe ++ "\", \"arguments\": {\"" ++ key ++ "\": \"v\"}}}]}]")).ok;
+    var scratch: Cx = .{ .a = cx.a };
+    return if (prompt.renderIds(srv, &scratch, probe_turn, &.{}, false, null, false)) |ids| try srv.text.decode(cx.a, ids) else |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Refused => "",
+    };
+}
+
+/// TENSORFOLD_TOOL_GRAMMAR=1 (legacy TF_DSV41_TOOL_GRAMMAR): every auto tools request is held as strict tools are.
+pub fn autoAllEnv() bool {
+    const v = std.c.getenv("TENSORFOLD_TOOL_GRAMMAR") orelse std.c.getenv("TF_DSV41_TOOL_GRAMMAR") orelse return false;
+    return std.mem.eql(u8, std.mem.trim(u8, std.mem.span(v), " "), "1");
+}
+
+/// Whether an auto reply offering `tools` gets a grammar: a tool marked "strict": true, or `all` are held.
+pub fn autoWanted(tools: []const Value, all: bool) bool {
+    if (tools.len == 0) return false;
+    if (all) return true;
+    for (tools) |t| if (strict(t)) return true;
+    return false;
+}
+
+/// OpenAI's function.strict (or a bare tool's strict) is true.
+fn strict(tool: Value) bool {
+    const function = if (tool.get("function")) |f| (if (f == .object) f else tool) else tool;
+    const s = function.get("strict") orelse return false;
+    return s == .bool and s.bool;
+}
+
 /// The structural tag's JSON text (xgrammar's form).
 pub fn build(a: Allocator, s: Style, tools: []const Value, parallel: bool) Allocator.Error![]const u8 {
-    const calls = try a.alloc(Value, tools.len);
-    for (tools, calls) |t, *c| c.* = try call(a, s, try tool_specs.toolName(a, t), try parameters(a, t));
-    const one: Value = if (calls.len == 1) calls[0] else try node(a, "or", &.{.{ "elements", .{ .array = calls } }});
+    const one = try anyCall(a, s, tools, true);
     const ws = try node(a, "regex", &.{.{ "pattern", .{ .string = blanks } }});
     if (s == .minimax) { // one block: its invokes back to back, as the template writes parallel calls
         var inner: std.ArrayList(Value) = .empty;
@@ -70,13 +103,64 @@ pub fn build(a: Allocator, s: Style, tools: []const Value, parallel: bool) Alloc
     }
     var parts: std.ArrayList(Value) = .empty;
     try parts.append(a, ws);
-    if (s == .deepseek) try parts.appendSlice(a, &.{ try constant(a, "<｜DSML｜function_calls>"), ws });
+    if (s == .deepseek) try parts.appendSlice(a, &.{ try constant(a, dsml_open), ws });
     try parts.append(a, one);
-    if (parallel) try parts.append(a, try node(a, "star", &.{.{ "content", try node(a, "sequence", &.{.{ "elements", try list(a, &.{ ws, one }) }}) }}));
+    if (parallel) try parts.append(a, try more(a, ws, one));
     try parts.append(a, ws);
-    if (s == .deepseek) try parts.appendSlice(a, &.{ try constant(a, "</｜DSML｜function_calls>"), ws });
+    if (s == .deepseek) try parts.appendSlice(a, &.{ try constant(a, dsml_close), ws });
     const format = try node(a, "sequence", &.{.{ "elements", .{ .array = parts.items } }});
     return json.stringify(a, try node(a, "structural_tag", &.{.{ "format", format }}), .{ .ascii = false, .compact = true });
+}
+
+/// The auto structural tag: any text; the call opener starts a call tag, after which text may resume (`parallel`).
+pub fn optional(a: Allocator, s: Style, tools: []const Value, all: bool, parallel: bool) Allocator.Error![]const u8 {
+    const tag = if (s == .deepseek) blk: {
+        const ws = try node(a, "regex", &.{.{ "pattern", .{ .string = blanks } }});
+        const one = try anyCall(a, s, tools, all);
+        var parts: std.ArrayList(Value) = .empty;
+        try parts.appendSlice(a, &.{ ws, one });
+        if (parallel) try parts.append(a, try more(a, ws, one));
+        try parts.append(a, ws);
+        const content = try node(a, "sequence", &.{.{ "elements", .{ .array = parts.items } }});
+        break :blk try node(a, "tag", &.{ .{ "begin", .{ .string = dsml_open } }, .{ "content", content }, .{ "end", .{ .string = dsml_close } } });
+    } else try callTag(a, s, tools, all);
+    const triggers = try list(a, &.{tag.get("begin").?});
+    const format = try node(a, "triggered_tags", &.{ .{ "triggers", triggers }, .{ "tags", try list(a, &.{tag}) }, .{ "stop_after_first", .{ .bool = !parallel } } });
+    return json.stringify(a, try node(a, "structural_tag", &.{.{ "format", format }}), .{ .ascii = false, .compact = true });
+}
+
+const dsml_open = "<｜DSML｜function_calls>";
+const dsml_close = "</｜DSML｜function_calls>";
+
+/// One call to any of `tools`; arguments in their schema when `all` or the tool is strict, else any JSON object.
+fn anyCall(a: Allocator, s: Style, tools: []const Value, all: bool) Allocator.Error!Value {
+    const calls = try a.alloc(Value, tools.len);
+    for (tools, calls) |t, *c| c.* = try call(a, s, try tool_specs.toolName(a, t), if (all or strict(t)) try parameters(a, t) else try anyObject(a));
+    if (calls.len == 1) return calls[0];
+    return node(a, "or", &.{.{ "elements", .{ .array = calls } }});
+}
+
+/// Zero or more further calls, each after blanks.
+fn more(a: Allocator, ws: Value, one: Value) Allocator.Error!Value {
+    return node(a, "star", &.{.{ "content", try node(a, "sequence", &.{.{ "elements", try list(a, &.{ ws, one }) }}) }});
+}
+
+/// A call tag for the non-DSML styles: the opener all calls share, what follows it in each call, the closer.
+fn callTag(a: Allocator, s: Style, tools: []const Value, all: bool) Allocator.Error!Value {
+    const open: []const u8 = if (s == .gemma) "<|tool_call>" else "<tool_call>";
+    const bodies = try a.alloc(Value, tools.len);
+    var close: []const u8 = "";
+    for (tools, bodies) |t, *b| {
+        const parts = (try anyCall(a, s, &.{t}, all)).get("elements").?.array;
+        close = parts[parts.len - 1].strField("value").?;
+        var body: std.ArrayList(Value) = .empty;
+        const rest = parts[0].strField("value").?[open.len..];
+        if (rest.len > 0) try body.append(a, try constant(a, rest));
+        try body.appendSlice(a, parts[1 .. parts.len - 1]);
+        b.* = try node(a, "sequence", &.{.{ "elements", .{ .array = body.items } }});
+    }
+    const content = if (bodies.len == 1) bodies[0] else try node(a, "or", &.{.{ "elements", .{ .array = bodies } }});
+    return node(a, "tag", &.{ .{ "begin", .{ .string = open } }, .{ "content", content }, .{ "end", .{ .string = close } } });
 }
 
 /// One call to `name`: <tool_call>, the name and its arguments in the template's style, </tool_call>.
@@ -130,6 +214,11 @@ fn parameters(a: Allocator, tool: Value) Allocator.Error!Value {
     try empty.put(a, "type", .{ .string = "object" });
     try empty.put(a, "properties", .{ .object = try json.newObject(a) });
     return .{ .object = empty };
+}
+
+/// A tool that is not strict takes any JSON object as its arguments.
+fn anyObject(a: Allocator) Allocator.Error!Value {
+    return node(a, "object", &.{});
 }
 
 fn arguments(a: Allocator, schema: Value, style_name: []const u8) Allocator.Error!Value {
@@ -208,4 +297,5 @@ test "GLM required tools keep their name, schema and parallel policy" {
 
 test {
     _ = @import("tool_grammar_deepseek_test.zig");
+    _ = @import("tool_grammar_auto_test.zig");
 }
