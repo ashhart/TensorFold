@@ -108,6 +108,13 @@ pub const prefill = [_]Case{
     .{ .name = "group 32", .path = .prefill, .rows = 2048, .n = 4096, .k = 2048, .group = 32 },
     .{ .name = "group 128", .path = .prefill, .rows = 2048, .n = 4096, .k = 2048, .group = 128 },
     .{ .name = "edges", .path = .prefill, .rows = 1000, .n = 1001, .k = 2112 },
+    // served plans on both sides of each routed bound gfx1201 moves (the Qwen3.6, Nemotron and Flash Next edges)
+    .{ .name = "35b served gate_up", .path = .prefill, .rows = 128, .n = 1024, .k = 2048, .experts = 256, .shared = true, .served = true },
+    .{ .name = "35b served gate_up", .path = .prefill, .rows = 129, .n = 1024, .k = 2048, .experts = 256, .shared = true, .served = true },
+    .{ .name = "nemotron served up", .path = .prefill, .rows = 186, .n = 1856, .k = 2688, .experts = 128, .slots = 6, .served = true },
+    .{ .name = "nemotron served up", .path = .prefill, .rows = 187, .n = 1856, .k = 2688, .experts = 128, .slots = 6, .served = true },
+    .{ .name = "flash next served gate_up", .path = .prefill, .rows = 41, .n = 1280, .k = 2560, .group = 32, .experts = 512, .slots = 11, .shared = true, .served = true, .exact = true },
+    .{ .name = "flash next served gate_up", .path = .prefill, .rows = 42, .n = 1280, .k = 2560, .group = 32, .experts = 512, .slots = 11, .shared = true, .served = true, .exact = true },
 };
 
 pub const widths = [_]u8{ 2, 3, 4, 5, 6, 8 };

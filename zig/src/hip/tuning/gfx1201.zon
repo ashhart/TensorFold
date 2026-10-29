@@ -5,9 +5,11 @@
 //   rows        the most rows of a plain product (0: any); rows_matrix, the most when matrix cores take the rows above
 //   min_rows    the fewest rows
 //   items       the most items of a routed plan (0: any)
+//   pairs_per_item  the most pairs a routed plan holds per item (0: any)
 //   plain, routed   whether it takes plain products, routed plans (both by default)
 // The decode rows are gfx1100's, so decode choices are the same; the matrix rows are gfx1100's too, and never run here.
-// The prompt rows keep gfx1100's bounds, which `zig build hip-affine-tune` measures against on a gfx1201 card.
+// The prompt rows keep gfx1100's bounds, which `zig build hip-affine-tune` measures against on a gfx1201 card, but
+// the routed K-parallel tile's: its items and pairs per item are the tuner's, checked served on Qwen3.6 and Nemotron.
 .{
     .gfx = "gfx1201",
     .entries = .{
@@ -37,7 +39,7 @@
         .{ .id = "mlx.project.prefill.gemm", .cost = 11 },
         .{ .id = "mlx.project.prefill.block", .cost = 12 },
         .{ .id = "mlx.routed.prefill.kp0", .cost = 1, .rows = 2, .routed = false },
-        .{ .id = "mlx.routed.prefill.kp3", .cost = 2, .items = 300, .plain = false },
+        .{ .id = "mlx.routed.prefill.kp3", .cost = 2, .items = 507, .pairs_per_item = 3.5, .plain = false },
         .{ .id = "mlx.routed.prefill.kp1", .cost = 3, .rows = 4, .items = 300 },
         .{ .id = "mlx.routed.prefill.kp2", .cost = 4, .rows = 32, .routed = false },
         .{ .id = "mlx.routed.prefill.matrix", .cost = 10 },
