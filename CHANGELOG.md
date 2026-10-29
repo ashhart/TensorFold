@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Conversation states saved to disk: a save that fits the staging permit (1 GiB and eight jobs) on its own now waits for a write in flight to finish instead of being skipped, and a block still being written is charged and copied once, however many saves name it (#1548, for #1538). A save larger than the permit is still skipped. So is a waiting save whose state leaves RAM, unless `--spill-gib` copies it then; that copy, like any made at an eviction, is skipped when the permit is full. Thanks to @wojo.
+
 - Qwen3.8-27B on CUDA: ModelOpt checkpoints (NVFP4 and FP8), such as `nvidia/Qwen3.8-27B-NVFP4`, now serve on cards from sm_80 to sm_89, such as a Jetson AGX Orin, where decode stopped at the first projection with `MissingLanePart`. The engine reserves the projections' partial sums for windows under 256 rows (about 21 MB for the 27B, and only on those cards) and reduces them without clusters, as Nemotron's ModelOpt path does; a card older than sm_80 is refused at load with the reason. It has not run on an sm_80 to sm_89 card yet. On sm_90 and newer, including the GB10, nothing changes (#1470, for #1452). Thanks to @javierbits and @valacroix.
 
 - More CUDA kernels take their `ldmatrix` loads and f16 `mma` from one home each: the prompt attention and Qwen 3.5 tensor-core attention take `qmm_frag`'s transposed load, the EXL3 grouped-expert, dense prompt and prompt kernels take its `ldmatrix4` and `ldmatrix2`, and the grouped EXL3 experts take `exl3_decode.cuh`'s f16 `mma16816`. All 1,935 kernel functions in the 14 CUDA images this reaches compile to the same code as before at sm_80, sm_86, sm_89, sm_120 and sm_121 (#1591). Thanks to @jschmied.
