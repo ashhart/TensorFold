@@ -60,6 +60,8 @@ pub const Launcher = struct {
     moe_select: Function,
     moe_act: [2]Function,
     moe_combine: Triple,
+    /// the same sum with a shared expert run beside the stack, weighted by wts' last slot
+    moe_combine_gate: Function,
     gdn_gate: Triple,
     gated_delta_tile: [2]Function, // dk 128, 16
     gated_delta_wave: [2]Function,
@@ -241,6 +243,7 @@ pub const Launcher = struct {
             try act.function(ns ++ "18moe_combine_kernelI6__halfEEvPKfS4_PT_ii"),
             try act.function(ns ++ "18moe_combine_kernelI12hip_bfloat16EEvPKfS4_PT_ii"),
         };
+        l.moe_combine_gate = try act.function("tf_moe_combine_gate");
         l.gdn_gate = .{
             try act.function(ns ++ "15gdn_gate_kernelIfEEvPKT_S4_PKfS6_PfS7_ii"),
             try act.function(ns ++ "15gdn_gate_kernelI6__halfEEvPKT_S5_PKfS7_PfS8_ii"),
@@ -309,6 +312,7 @@ pub const Launcher = struct {
     pub const tf_moe_select = moe.tf_moe_select;
     pub const tf_moe_act = moe.tf_moe_act;
     pub const tf_moe_combine = moe.tf_moe_combine;
+    pub const tf_moe_combine_gate = moe.tf_moe_combine_gate;
     pub const tf_moe_route = moe.tf_moe_route;
     pub const tf_causal = attention.tf_causal;
     pub const tf_attn_gate = attention.tf_attn_gate;
