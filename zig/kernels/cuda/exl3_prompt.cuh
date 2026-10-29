@@ -1,6 +1,7 @@
 // Common EXL3 prompt helpers, after @BobClawblaw (#976) and MiaAI-Lab (Apache-2.0, patches 0004 and 0009).
 #pragma once
 #include "common/cp_async.cuh"
+#include "common/qmm_frag.cuh"
 namespace tf_exl3_prompt {
 using namespace tf_exl3;
 __device__ __forceinline__ void decode_tile_p(const uint32_t* tile, int lane, uint32_t (&b0)[2], uint32_t (&b1)[2]) {
@@ -17,11 +18,7 @@ __device__ __forceinline__ void cp_async16(void* dst, const void* src, bool vali
 }
 using tf_common::cp_commit;
 using tf_common::cp_wait;
-__device__ __forceinline__ void ldmatrix_x4(uint32_t (&a)[4], const half* p) {
-    const unsigned s = (unsigned)__cvta_generic_to_shared(p);
-    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
-                 : "=r"(a[0]), "=r"(a[1]), "=r"(a[2]), "=r"(a[3]) : "r"(s));
-}
+using qmm_frag::ldmatrix4;
 }
 namespace tf_exl3_prompt {
 
@@ -109,7 +106,7 @@ __device__ __forceinline__ void tmain(const half* __restrict__ X0, const half* _
                 if (jb < nblocks) {
                     uint32_t r[4];
                     const int row = jb * 16 + (lane & 7) + ((lane >> 4) & 1) * 8;
-                    ldmatrix_x4(r, xs + (size_t)row * TXS + kk * 16 + ((lane >> 3) & 1) * 8);
+                    ldmatrix4(r, xs + (size_t)row * TXS + kk * 16 + ((lane >> 3) & 1) * 8);
                     const uint32_t bl[2] = {r[0], r[1]}, bh[2] = {r[2], r[3]};
 #pragma unroll
                     for (int i = 0; i < TMT; ++i) {

@@ -19,10 +19,7 @@ constexpr int GROUP_LEN = 8192;  // a stream this long shares each key tile acro
 // A tile row's chunk c, swizzled so ldmatrix's eight rows fall on distinct banks.
 __device__ __forceinline__ int swz(int r, int c) { return r * CH + (c ^ (r & 7)); }
 
-__device__ __forceinline__ void ldmatrix4t(uint32_t (&r)[4], const void* p) {
-    asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0, %1, %2, %3}, [%4];\n"
-                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(qmm_frag::smem(p)));
-}
+using qmm_frag::ldmatrix4t;
 
 __device__ __forceinline__ float texp(float x) {
     float y;

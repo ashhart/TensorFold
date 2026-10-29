@@ -9,6 +9,7 @@
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 #include <cstdint>  // what the cut torch includes provided: the fixed-width integers
+#include "exl3_decode.cuh"
 
 namespace tf_exl3x {
 
@@ -115,12 +116,7 @@ __device__ __forceinline__ void decode_tile(const uint32_t (&w)[Fmt<K2>::LW], co
     b1[1] = cb_pair<CB>(st[6], st[7]);
 }
 
-__device__ __forceinline__ void mma16816(float (&d)[4], const uint32_t (&a)[4], const uint32_t (&b)[2]) {
-    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
-                 "{%0,%1,%2,%3};\n"
-                 : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
-                 : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
-}
+using tf_exl3::mma16816;
 
 __device__ __forceinline__ uint32_t load_pair(const half* x, bool ok) {
     return ok ? *reinterpret_cast<const uint32_t*>(x) : 0u;
