@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Multirank RoCE (`TF_COMM_BACKEND=roce` at three ranks or more) now connects over a switchless ring: each peer's stripes go over the ports on the /24 it shares, so three GB10s cabled in a ring connect where they used to refuse, and pass `tf-tp-test suite` exactly, with an 8 KiB exchange taking 10.7 µs against NCCL's 26.3 µs. A switch pairs the ports as before, two ranks are unchanged, and a ring of four still refuses and falls back to NCCL (#1516, for #1288). Thanks to @Bizuayeu.
+
 - Gemma 4: Metal and CUDA now prepare images from one shared source file instead of a CUDA copy kept equal by a test (#1589). The patches and image hashes each step produces are unchanged. Thanks to @jschmied.
 
 - Qwen-VL pictures (Qwen3.8-27B, Qwen3.6-35B-A3B and Qwen3.8 Flash Next, on Metal and CUDA) are resized and normalized as the checkpoints' named processor, transformers' `Qwen2VLImageProcessorFast`, does: torchvision's antialiased bicubic and its fused normalization in float32, the same `pixel_values` bits on five test pictures. Pillow's bicubic was used before; on a 941×1672 photo it differed in 0.1% of pixel values, by at most 2 levels, so replies to pictures can differ slightly. Video frames already took these settings, and text-only replies are unchanged (#1586). Thanks to @jschmied.
