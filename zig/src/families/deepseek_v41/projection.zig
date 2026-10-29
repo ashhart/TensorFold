@@ -38,6 +38,21 @@ pub fn read(p: *const pk.Pack, prefix: []const u8) !Projection {
         if (w.dtype != .bf16 or w.rank != 2 or w.shape[0] == 0 or w.shape[1] == 0) return error.UnsupportedProjection;
         return .{ .dense = .{ .weight = w, .k = w.shape[1], .n = w.shape[0], .scales = try scales(p, prefix, w.shape[1], w.shape[0], false) } };
     }
+    return readTrellis(p, prefix);
+}
+
+/// CUDA selects its executable trellis even when the pack also keeps a dense sibling.
+pub fn cudaGroup(p: *const pk.Pack, prefix: []const u8) !exl3.Group {
+    var buf: [256]u8 = undefined;
+    const storage = if (p.has(try std.fmt.bufPrint(&buf, "{s}.trellis", .{prefix})))
+        try readTrellis(p, prefix)
+    else
+        try read(p, prefix);
+    return storage.cudaGroup();
+}
+
+fn readTrellis(p: *const pk.Pack, prefix: []const u8) !Projection {
+    var buf: [256]u8 = undefined;
     const trellis = try p.need(try std.fmt.bufPrint(&buf, "{s}.trellis", .{prefix}));
     if (trellis.dtype != .i16) return error.BadTrellis;
     const g = try exl3.Group.fromShape(trellis.dims());

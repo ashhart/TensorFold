@@ -138,10 +138,7 @@ const Builder = struct {
     }
 
     fn group(b: *Builder, proj: names.Proj, prefix: []const u8, split: exl3.Split, k: u32, n: u32) !GroupPlan {
-        var shared = try CheckpointPlan.init(b.a, b.pack, &.{prefix});
-        defer shared.deinit();
-        const storage = shared.projections[0].storage;
-        const g = try storage.cudaGroup();
+        const g = try b.pack.group(prefix, &b.buf);
         if ((k != 0 and g.k() != k) or (n != 0 and g.n() != n)) {
             if (!quiet) log.warn("{s}: K={d} N={d}, expected K={d} N={d}", .{ prefix, g.k(), g.n(), k, n });
             return error.UnexpectedShape;
@@ -349,4 +346,43 @@ test "an F16 router bias plans as its stored slice; an F16 sink is still refused
     const v = try b.native("mtp.0.ffn.gate.bias", bias.?);
     try testing.expectEqual(@as(u64, 2 * count), v.bytes);
     try testing.expectError(error.UnexpectedTensor, b.native("mtp.0.attn.attn_sink", sink.?));
+}
+
+test "CUDA rank planning selects EXL3 over a kept dense sibling from headers alone" {
+    const a = testing.allocator;
+    const prefix = "layers.2.attn.compressor.wkv";
+    var p = Pack.init(a);
+    defer p.deinit();
+    const dense = "{\"layers.2.attn.compressor.wkv.weight\":{\"dtype\":\"BF16\",\"shape\":[512,5120],\"data_offsets\":[0,5242880]}}";
+    const quant = "{\"layers.2.attn.compressor.wkv.trellis\":{\"dtype\":\"I16\",\"shape\":[320,32,80],\"data_offsets\":[0,1638400]}," ++
+        "\"layers.2.attn.compressor.wkv.suh\":{\"dtype\":\"F16\",\"shape\":[5120],\"data_offsets\":[1638400,1648640]}," ++
+        "\"layers.2.attn.compressor.wkv.svh\":{\"dtype\":\"F16\",\"shape\":[512],\"data_offsets\":[1648640,1649664]}}";
+    try p.addHeader("native.safetensors", dense, 5242880);
+    try p.addHeader("layer-02.safetensors", quant, 1649664);
+    const c: Config = .{};
+    for ([_]u32{ 0, 1 }) |rank| {
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        var b: Builder = .{ .a = arena.allocator(), .c = &c, .pack = &p, .o = .{ .rank = rank, .world = 2 } };
+        const g = try b.group(.wq_a, prefix, .whole, 5120, 512);
+        try testing.expectEqual(@as(u32, 10), g.full.k2());
+        try testing.expectEqual(@as(u64, 1638400), g.part.trellis.bytes());
+        try testing.expect(!b.used.contains("layers.2.attn.compressor.wkv.weight"));
+        try testing.expect(names.ignored("layers.2.attn.compressor.wkv.weight", &p));
+    }
+    try testing.expect((try p.projection(prefix)) == .dense);
+    var reversed = Pack.init(a);
+    defer reversed.deinit();
+    try reversed.addHeader("layer-02.safetensors", quant, 1649664);
+    try reversed.addHeader("native.safetensors", dense, 5242880);
+    var buf: [256]u8 = undefined;
+    try testing.expectEqual(@as(u32, 10), (try reversed.group(prefix, &buf)).k2());
+    reversed.names.getPtr("layers.2.attn.compressor.wkv.trellis").?.dtype = .f16;
+    try testing.expectError(error.BadTrellis, reversed.group(prefix, &buf));
+    _ = p.names.swapRemove("layers.2.attn.compressor.wkv.weight");
+    try testing.expectEqual(@as(u32, 10), (try p.group(prefix, &buf)).k2());
+    _ = p.names.swapRemove("layers.2.attn.compressor.wkv.trellis");
+    try testing.expectError(error.MissingTensor, p.group(prefix, &buf));
+    try p.addHeader("dense-only.safetensors", dense, 5242880);
+    try testing.expectError(error.UnsupportedDenseProjection, p.group(prefix, &buf));
 }

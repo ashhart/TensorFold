@@ -185,7 +185,7 @@ pub const Pack = struct {
     /// Current CUDA rank adapter. Complete dense/packed storage remains available through projection().
     pub fn group(p: *const Pack, prefix: []const u8, buf: []u8) !exl3.Group {
         _ = buf;
-        return (try p.projection(prefix)).cudaGroup();
+        return @import("projection.zig").cudaGroup(p, prefix);
     }
 
     /// The group's marker tensor name (mul1 or mcg) if it has one; its value picks the codebook at load time.

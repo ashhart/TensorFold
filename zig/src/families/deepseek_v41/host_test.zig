@@ -330,10 +330,18 @@ test "real pack headers (TF_DSV41_HEADERS: model.safetensors.index.json and <sha
         try p.addHeaderDump(shard, bytes);
         if (std.mem.startsWith(u8, shard, "layer-")) try blocks.append(a, try std.fmt.parseInt(u32, shard[6..8], 10));
     }
-    const c: Config = .{};
+    const full = testing.environ.getPosix("TF_DSV41_HEADERS_FULL") != null;
+    const c = if (full) try Config.read(a, io, dir) else Config{};
     for ([_]u32{ 0, 1 }) |rank| {
-        var pl = try plan.build(a, &c, &p, .{ .rank = rank, .world = 2, .blocks = blocks.items });
+        var pl = try plan.build(a, &c, &p, .{ .rank = rank, .world = 2, .blocks = if (full) null else blocks.items });
         defer pl.deinit();
+        if (full) {
+            for (pl.leftovers) |name| std.debug.print("unplanned tensor: {s}\n", .{name});
+            try testing.expectEqual(@as(usize, 0), pl.leftovers.len);
+            try testing.expectEqual(c.allLayers(), pl.layers.len);
+            try testing.expect(pl.head != null and pl.dspark != null);
+            std.debug.print("full headers rank {d}: {d} tensors, {d} layers, {d} bytes, zero leftovers\n", .{ rank, p.names.count(), pl.layers.len, pl.bytes() });
+        }
         for (pl.layers) |*l| {
             const h = l.experts[1].layout.histogram();
             std.debug.print("rank {d} {s} {t}: down {t} K2 4/6/8 = {d}/{d}/{d}, gate/up mismatches {d}, experts {d} B, block {d} B\n", .{ rank, l.prefix, l.mode, l.experts[1].layout.kind, h[4], h[6], h[8], l.gate_up_mismatch, l.expertBytes(), l.bytes() });
