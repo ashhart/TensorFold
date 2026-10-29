@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Kernel contract: the CUDA runner now loads fp8_experts' image, so a `zig build kernel-contract` run on a CUDA machine no longer stops at its first fp8_experts record (about 90 minutes in on a GB10) and makes all 1,325 live-limit checks through to its `SUMMARY` line. A host test now fails if any registered CUDA launch or control names an image the runner cannot load (#1579). Inference kernels are unchanged. Thanks to @Bizuayeu.
+
 - Cortheon: a research planner query longer than 200 bytes is now cut on a character boundary, so a multi-byte character at the cap is left out whole instead of being split into invalid UTF-8 in the search query (#1610). Thanks to @ppardus.
 
 - With `--cortheon`, the task goal that the search planner and web reads see is cut at 4,000 bytes on a character boundary. A character straddling the cut was split, so the planner's prompt was not valid UTF-8; now a character that does not fit is left out whole, as page titles and search queries already were (#1575). Without `--cortheon` nothing changes. Thanks to @ppardus.
