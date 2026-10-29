@@ -1,0 +1,19 @@
+tf-cuda-test flashnext-mtp-parity CHECKPOINT zig/tests/cuda/flashnext/lr7/mid.ids (exit code 0)
+PASS a shared MTP head over 2 greedy streams ({ 1, 1 } rows) equals each stream's own pass: logits, proposals, probabilities and the stop
+PASS a shared MTP head over 4 greedy streams ({ 16, 16, 16, 16 } rows) equals each stream's own pass: logits, proposals, probabilities and the stop
+PASS a shared MTP head over 6 greedy streams ({ 1, 1, 16, 16, 16, 16 } rows) equals each stream's own pass: logits, proposals, probabilities and the stop
+PASS a shared MTP head over 2 greedy streams ({ 1, 1 } rows) equals each stream's own pass: logits, proposals, probabilities and the stop
+PASS a shared MTP head over 4 greedy streams ({ 16, 16, 16, 16 } rows) equals each stream's own pass: logits, proposals, probabilities and the stop
+PASS a shared MTP head over 6 greedy streams ({ 1, 1, 16, 16, 16, 16 } rows) equals each stream's own pass: logits, proposals, probabilities and the stop
+PASS a shared MTP head over 2 sampled streams ({ 1, 1 } rows) equals each stream's own pass: logits, proposals, probabilities and the stop
+PASS a shared MTP head over 2 mixed streams ({ 1, 1 } rows) equals each stream's own pass: logits, proposals, probabilities and the stop
+PASS a shared MTP head over 4 sampled streams ({ 16, 16, 16, 16 } rows) equals each stream's own pass: logits, proposals, probabilities and the stop
+PASS a shared MTP head over 4 mixed streams ({ 16, 16, 16, 16 } rows) equals each stream's own pass: logits, proposals, probabilities and the stop
+PASS a shared MTP head over 6 sampled streams ({ 1, 1, 16, 16, 16, 16 } rows) equals each stream's own pass: logits, proposals, probabilities and the stop
+PASS a shared MTP head over 6 mixed streams ({ 1, 1, 16, 16, 16, 16 } rows) equals each stream's own pass: logits, proposals, probabilities and the stop
+PASS a shared MTP head over 2 sampled streams ({ 1, 1 } rows) equals each stream's own pass: logits, proposals, probabilities and the stop
+PASS a shared MTP head over 2 mixed streams ({ 1, 1 } rows) equals each stream's own pass: logits, proposals, probabilities and the stop
+PASS a shared MTP head over 4 sampled streams ({ 16, 16, 16, 16 } rows) equals each stream's own pass: logits, proposals, probabilities and the stop
+PASS a shared MTP head over 4 mixed streams ({ 16, 16, 16, 16 } rows) equals each stream's own pass: logits, proposals, probabilities and the stop
+PASS a shared MTP head over 6 sampled streams ({ 1, 1, 16, 16, 16, 16 } rows) equals each stream's own pass: logits, proposals, probabilities and the stop
+PASS a shared MTP head over 6 mixed streams ({ 1, 1, 16, 16, 16, 16 } rows) equals each stream's own pass: logits, proposals, probabilities and the stop

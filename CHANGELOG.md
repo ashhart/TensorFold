@@ -58,6 +58,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - [The runbook](RUNBOOK.md#prompt-prefill-share-and-budget) documents `TENSORFOLD_PREFILL_SHARE` and `TENSORFOLD_PREFILL_BUDGET`: what each accepts, its default, and how it trades a long prompt's finish against decoding streams' next rounds.
 
+- Flash Next on CUDA drafts a shared round's sampled streams in the batched MTP head pass too, each lane's draft drawn on the host under its own keyed rule from its own row of the pass, the draw its lone pick makes, so drafts and replies are unchanged. On a GB10 at 5 x 131,072, sampled code and chat requests decode 24% and 19% faster in aggregate at 5 streams (15% and 19% at 4), greedy cells and time to first token unchanged, every concurrent reply equal to its lone run. `TF_FLASHNEXT_SAMPLED_HEADS=0` restores drafting those streams one at a time. The parity checker covers sampled and mixed shapes. Receipt: `docs/receipts/flashnext-cuda-sampled-heads/`.
+
 - Kernel contract: Qwen4's dense activation check carries FP32 rounding through the stored BF16 SiLU before the up product, avoiding a false shape failure near a BF16 midpoint (#1547). Inference kernels are unchanged.
 
 - HIP: `-Dhip-relax-branches=true` (off by default) lets gfx1100 build the dot2 prompt tiles with Ubuntu's clang 21, which otherwise stops on a branch out of range (#1542, for #1521). It has not run on a gfx1100 GPU yet; with it off, every compile command is the same as before. Thanks to @AbrahamCete.
