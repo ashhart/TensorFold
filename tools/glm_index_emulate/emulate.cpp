@@ -11,7 +11,7 @@
 namespace glm_index {
 inline void cp16(void* d, const void* s, bool ok) { ok ? (void)std::memcpy(d, s, 16) : (void)std::memset(d, 0, 16); }
 inline void cp_commit() {}
-inline void cp_wait() {}
+template <int N> inline void cp_wait() {}
 inline void ldm4(uint32_t* r, const void* p) {  // matrix i, row j of the 8 x 8 b16 tiles at the address of lane 8 i + j
   const int t = (int)threadIdx.x, l = t & 31, base = t - l;
   emu::pbuf[t] = p;
