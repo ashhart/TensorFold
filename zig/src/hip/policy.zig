@@ -7,6 +7,8 @@ const affine = @import("launches/affine.zig");
 pub const Choice = enum { auto, on, off };
 /// The prefill attention tile: `f32` keeps the one-row kernel.
 pub const Attention = enum { auto, f32 };
+/// The sparse prefill attention of Flash Next: `wmma` takes the matrix tile, `scalar` keeps the per-row kernel.
+pub const Sparse = enum { scalar, wmma };
 /// One kernel family switched to its reference, apart from `kernels=reference` that switches them all.
 pub const Pick = enum { auto, reference };
 
@@ -32,6 +34,7 @@ pub const Path = struct {
 pub const Policy = struct {
     matrix: Choice = .auto,
     attention: Attention = .auto,
+    sparse: Sparse = .scalar,
     kernels: Pick = .auto,
     graphs: Choice = .auto,
     /// Reference kernels one at a time: decode stream tile, prefill GEMM tile, fused decode tails.
@@ -74,7 +77,7 @@ pub const Policy = struct {
             .on => .on,
             .off => .off,
         };
-        return .{ .fuse = p.fused(), .wide = p.wideAttention(), .products = .{ .matrix = matrix, .stream = p.streamOn(), .gemm = p.gemmOn() } };
+        return .{ .fuse = p.fused(), .wide = p.wideAttention(), .sparse_wmma = p.sparse == .wmma, .products = .{ .matrix = matrix, .stream = p.streamOn(), .gemm = p.gemmOn() } };
     }
 
     /// Whether the 64-row prefill attention tile is on.
@@ -107,7 +110,7 @@ pub const Policy = struct {
 
     fn set(p: *Policy, key: []const u8, value: []const u8) Error!void {
         const eql = std.mem.eql;
-        if (eql(u8, key, "matrix")) p.matrix = try parseEnum(Choice, value) else if (eql(u8, key, "attention")) p.attention = try parseEnum(Attention, value) else if (eql(u8, key, "kernels")) p.kernels = try parseEnum(Pick, value) else if (eql(u8, key, "graphs")) p.graphs = try parseEnum(Choice, value) else if (eql(u8, key, "stream")) p.stream = try parseEnum(Pick, value) else if (eql(u8, key, "gemm")) p.gemm = try parseEnum(Pick, value) else if (eql(u8, key, "fuse")) p.fuse = try parseEnum(Pick, value) else if (eql(u8, key, "prefill_step")) {
+        if (eql(u8, key, "matrix")) p.matrix = try parseEnum(Choice, value) else if (eql(u8, key, "attention")) p.attention = try parseEnum(Attention, value) else if (eql(u8, key, "sparse")) p.sparse = try parseEnum(Sparse, value) else if (eql(u8, key, "kernels")) p.kernels = try parseEnum(Pick, value) else if (eql(u8, key, "graphs")) p.graphs = try parseEnum(Choice, value) else if (eql(u8, key, "stream")) p.stream = try parseEnum(Pick, value) else if (eql(u8, key, "gemm")) p.gemm = try parseEnum(Pick, value) else if (eql(u8, key, "fuse")) p.fuse = try parseEnum(Pick, value) else if (eql(u8, key, "prefill_step")) {
             p.prefill_step = std.fmt.parseInt(u32, value, 10) catch return error.BadValue;
         } else if (eql(u8, key, "fill_rows")) {
             p.fill_rows = std.fmt.parseInt(u32, value, 10) catch return error.BadValue;
@@ -122,7 +125,7 @@ pub const Policy = struct {
 
     /// One line for the start-up log and server info; default and local fields are left out of the keys.
     pub fn format(p: Policy, w: *std.Io.Writer) std.Io.Writer.Error!void {
-        try w.print("matrix={t},attention={t},kernels={t},graphs={t},prefill_step={d},fill_rows={d}", .{ p.matrix, p.attention, p.kernels, p.graphs, p.prefill_step, p.fill_rows });
+        try w.print("matrix={t},attention={t},sparse={t},kernels={t},graphs={t},prefill_step={d},fill_rows={d}", .{ p.matrix, p.attention, p.sparse, p.kernels, p.graphs, p.prefill_step, p.fill_rows });
         if (p.stream != .auto) try w.print(",stream={t}", .{p.stream});
         if (p.gemm != .auto) try w.print(",gemm={t}", .{p.gemm});
         if (p.fuse != .auto) try w.print(",fuse={t}", .{p.fuse});
@@ -138,7 +141,7 @@ pub const Policy = struct {
         const conf: u64 = @bitCast(p.mtp.confidence);
         const pack = [_]u32{
             @backingInt(p.matrix), @backingInt(p.attention), @backingInt(p.kernels), @backingInt(p.graphs),
-            @backingInt(p.stream), @backingInt(p.gemm),      @backingInt(p.fuse),
+            @backingInt(p.stream), @backingInt(p.gemm),      @backingInt(p.fuse),   @backingInt(p.sparse),
         };
         var nibbles: [2]u32 = .{ 0, 0 };
         for (pack, 0..) |v, i| nibbles[i / 8] |= v << @intCast(4 * (i % 8));
@@ -148,7 +151,7 @@ pub const Policy = struct {
     /// `local` with every field rank 0 sent; a rank keeps its own graph fault and library path.
     pub fn fromWords(w: [word_count]u32, local: Policy) Policy {
         var p = local;
-        var vals: [7]u32 = undefined;
+        var vals: [8]u32 = undefined;
         for (&vals, 0..) |*v, i| v.* = (w[i / 8] >> @intCast(4 * (i % 8))) & 0xf;
         p.matrix = @fromBackingInt(@intCast(vals[0]));
         p.attention = @fromBackingInt(@intCast(vals[1]));
@@ -157,6 +160,7 @@ pub const Policy = struct {
         p.stream = @fromBackingInt(@intCast(vals[4]));
         p.gemm = @fromBackingInt(@intCast(vals[5]));
         p.fuse = @fromBackingInt(@intCast(vals[6]));
+        p.sparse = @fromBackingInt(@intCast(vals[7]));
         p.mtp = .{ .drafts = @truncate(w[1] >> 24), .confidence = @bitCast(@as(u64, w[3]) | @as(u64, w[4]) << 32) };
         p.prefill_step = w[2];
         p.slots = w[5];
@@ -225,7 +229,7 @@ test "apply sets fields and refuses what it does not know" {
 
 test "a policy survives its words" {
     var p: Policy = .{ .mtp = .{ .drafts = 2, .confidence = 0.25 }, .slots = 4, .graph_fail = 1 };
-    try p.apply("matrix=on,attention=f32,graphs=off,fuse=reference,fill_rows=128");
+    try p.apply("matrix=on,attention=f32,sparse=wmma,graphs=off,fuse=reference,fill_rows=128");
     const back = Policy.fromWords(p.words(), .{ .graph_fail = 1 });
     try std.testing.expectEqualDeep(p, back);
 }

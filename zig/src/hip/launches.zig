@@ -80,6 +80,8 @@ pub const Launcher = struct {
     fuse: bool,
     /// The 64-row prefill attention tile is on.
     wide: bool,
+    /// Flash Next's sparse prefill attention takes the WMMA tile.
+    sparse_wmma: bool,
     /// The MLX affine products and the registry that picks their tiles.
     affine: affine.Kernels,
     /// Flash Next's kernels: its residual streams, n-gram rows, indexer and sparse attention.
@@ -147,7 +149,7 @@ pub const Launcher = struct {
     };
 
     /// Which kernels a run takes where two give the same bits; every one defaults on.
-    pub const Choices = struct { fuse: bool = true, wide: bool = true, products: affine.Choices = .{} };
+    pub const Choices = struct { fuse: bool = true, wide: bool = true, sparse_wmma: bool = false, products: affine.Choices = .{} };
 
     /// Loads the code objects on the current device and resolves every kernel the launchers use.
     pub fn load(r: *const runtime.Runtime, choices: Choices, images: [kernels.group_count][]align(8) const u8) Error!Launcher {
@@ -168,6 +170,8 @@ pub const Launcher = struct {
         const pl = l.mods[@backingInt(kernels.Group.plan)];
         l.fuse = choices.fuse;
         l.wide = choices.wide;
+        // the WMMA tile exists only for gfx11's matrix cores; any other chip keeps the scalar kernel
+        l.sparse_wmma = choices.sparse_wmma and (caps.Caps.of(kernels.arch) orelse return error.Invalid).matrix == .wmma11;
         l.dec = .{ .router = .{ try dec.function("tf_router_decode_f16"), try dec.function("tf_router_decode_bf16") }, .tail = try dec.function("tf_tail"), .conv_split = try dec.function("tf_conv_split"), .rms2 = try dec.function("tf_rms2"), .gnorm_out = try dec.function("tf_gnorm_out"), .select = try dec.function("tf_select_decode") };
         l.plan = .{
             .kv_write = try pl.function("tf_plan_kv_write"),
