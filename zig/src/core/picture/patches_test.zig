@@ -1,4 +1,4 @@
-//! torchvision's processor backend, bit for bit: transformers 5.19's Lfm3VlImageProcessor on synthetic pictures.
+//! torchvision's processor backend, bit for bit: transformers 5.19's Lfm3VlImageProcessor and Qwen2VLImageProcessor.
 const std = @import("std");
 const patches = @import("patches.zig");
 
@@ -31,7 +31,7 @@ fn hash(pixels: []const f32) [64]u8 {
     return std.fmt.bytesToHex(digest, .lower);
 }
 
-// sha256 of pixel_values as float32 little-endian bytes, and the grid (transformers 5.19.0, torchvision 0.29.0)
+// sha256 of pixel_values (f32 LE) and grid, transformers 5.19.0, torchvision 0.29.0; Qwen3.8's processor: the same
 const cases = [_]struct { h: usize, w: usize, seed: usize, gh: u32, gw: u32, sha: []const u8 }{
     .{ .h = 217, .w = 300, .seed = 0, .gh = 14, .gw = 20, .sha = "53153c22eb4e065031bbdf4de0f038db37ef736a880e3438ac8e0d73f82dcea8" },
     .{ .h = 37, .w = 1000, .seed = 1, .gh = 4, .gw = 84, .sha = "ffeed836281b997e9f12e222714e9081d9baf8f24475e7be30038b3ca891dd9f" },

@@ -15,7 +15,7 @@ pub fn bounds(c: Config, max_tokens: u32) [2]u64 {
     return patches.bounds(c.patches(), max_tokens);
 }
 
-/// Bytes to patches: decoded as 0.6.6 decoded them (core/picture), resized with Pillow's bicubic, cut in merge order.
+/// Bytes to patches: decoded as 0.6.6 decoded them (core/picture), resized as torchvision does, cut in merge order.
 pub fn prepare(io: std.Io, gpa: std.mem.Allocator, bytes: []const u8, c: Config, max_tokens: u32) Error!Prepared {
     return patches.prepare(io, gpa, bytes, c.patches(), max_tokens);
 }
