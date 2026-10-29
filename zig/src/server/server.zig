@@ -77,6 +77,8 @@ pub const Config = struct {
     prompt_seed: bool = false,
     /// TENSORFOLD_REQUEST_LOG: where chat and completion bodies are appended; null: nowhere.
     request_log: ?[]const u8 = null,
+    /// The Spark server's keys in each reply's ``tensorfold`` block (spark_wire.zig): DeepSeek-V4, or TENSORFOLD_WIRE.
+    spark_stats: bool = false,
     /// Null keeps every reply identical to a server that has no compaction.
     compact_at: ?CompactAt = null,
     /// Tokens of the recent tail kept whole. Null uses min(20000, a quarter of the window).

@@ -101,6 +101,8 @@ test {
     _ = @import("completion_prompt_test.zig");
     _ = @import("hf_eos_http_test.zig");
     _ = @import("reply_gpu_seconds_test.zig");
+    _ = @import("spark_wire.zig");
+    _ = @import("spark_wire_test.zig");
     _ = @import("server_init_test.zig");
     _ = @import("connection_arena_test.zig");
     _ = @import("decisions.zig");
