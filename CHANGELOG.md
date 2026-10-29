@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- More CUDA kernels take their `ldmatrix` loads and f16 `mma` from one home each: the prompt attention and Qwen 3.5 tensor-core attention take `qmm_frag`'s transposed load, the EXL3 grouped-expert, dense prompt and prompt kernels take its `ldmatrix4` and `ldmatrix2`, and the grouped EXL3 experts take `exl3_decode.cuh`'s f16 `mma16816`. All 1,935 kernel functions in the 14 CUDA images this reaches compile to the same code as before at sm_80, sm_86, sm_89, sm_120 and sm_121 (#1591). Thanks to @jschmied.
+
 - The CUDA training kernels for Living Weights' and 4-bit training's gated attention backward now compile from one shared source, `zig/kernels/cuda/attn_back.cuh`, instead of two copies; both images keep their kernel names, and every function in them compiles to the same code as before at sm_80, 86, 89, 120 and 121 (#1565, for #1409). Thanks to @jschmied.
 
 - The GLM CUDA matrix multiply kernels take their copy, ldmatrix, mma and nibble helpers from the shared `zig/kernels/cuda/common/qmm_frag.cuh`, and their 117-line private copy of it is gone. All 110 functions in the `glm_mm` image compile to the same code as before at sm_80, sm_86, sm_89, sm_120 and sm_121 (#1564). Thanks to @jschmied.
