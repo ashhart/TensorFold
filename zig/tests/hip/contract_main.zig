@@ -16,6 +16,7 @@ const relu2_k = @import("contract_relu2.zig");
 const kv_k = @import("contract_kv_write.zig");
 const argmax_k = @import("contract_argmax.zig");
 const pair_k = @import("contract_relu2_pair.zig");
+const mdq_k = @import("contract_matrix_dq.zig");
 
 const g = core.contract.gates;
 
@@ -136,6 +137,12 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     var pair = pair_k.Pair.init(a, &r, s, &l);
     defer pair.deinit();
     try kernels.append(a, pair.kernel());
+    // the dequantizing prompt tile resolves only in a launcher loaded with its switch on
+    var l_dq = try hip.Launcher.load(&r, .{ .products = .{ .dq = true } }, hip.kernels.images);
+    defer l_dq.unload();
+    var mdq = mdq_k.Dq.init(a, &r, s, &l_dq);
+    defer mdq.deinit();
+    try kernels.append(a, mdq.kernel());
     var t: g.Tally = .{};
     const t0 = ms(io);
     try g.runAll(a, kernels.items, 0x6b63, &t);

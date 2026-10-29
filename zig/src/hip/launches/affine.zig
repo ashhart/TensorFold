@@ -21,7 +21,7 @@ const Error = runtime.Error;
 pub const Matrix = enum { auto, on, off };
 
 /// Which product tiles a run takes where two give the same bits; every one defaults on.
-pub const Choices = struct { matrix: Matrix = .auto, stream: bool = true, gemm: bool = true };
+pub const Choices = struct { matrix: Matrix = .auto, stream: bool = true, gemm: bool = true, dq: bool = false };
 
 /// quant/mlx.hpp's GroupTable, Routing and Affine as the kernels take them by value.
 pub const GroupTable = extern struct { p: u64, kind: c_int };
@@ -42,19 +42,7 @@ pub const Arg = extern struct {
     out16: u64 = 0,
 };
 
-/// quant/mlx_tiles.hpp's StreamSides: up to four products that share x, K, width and group in one launch.
-pub const StreamSides = extern struct {
-    words: [4]u64 = @splat(0),
-    scale: [4]u64 = @splat(0),
-    bias: [4]u64 = @splat(0),
-    out: [4]u64 = @splat(0),
-    n: [4]c_int = @splat(0),
-    first: [5]c_int = @splat(0),
-    count: c_int = 0,
-    out_half: c_int = 0,
-    pair_cols: c_int = 0,
-    limit: f32 = 0,
-};
+pub const StreamSides = @import("stream_sides.zig").StreamSides;
 
 /// One side of a group: its matrix and where its (rows, n) output goes.
 pub const Side = struct { words: u64, scale: u64, bias: u64, n: c_int, out: u64 };
@@ -106,8 +94,8 @@ pub const kp_tiles = [_]KpTile{
 /// The GEMM tiles of the m >= 64 products: `gemm` (the default) or the reference `block`.
 pub const Tile = enum { gemm, block };
 
-/// Which GEMM tile of the 128-row family a launch runs: the matrix cores, the dot2 tile, or the reference tile.
-pub const BlockKind = enum { matrix, gemm, block };
+/// Which GEMM tile of the 128-row family a launch runs: the matrix cores, theirs over dequantized weights, dot2, block.
+pub const BlockKind = enum { matrix, matrix_dq, gemm, block };
 
 pub const Kernels = struct {
     /// Whether block shape `tier` can take `m` rows: a tile that does not loop over its rows holds rb * r of them.
@@ -137,6 +125,7 @@ pub const Kernels = struct {
     block: [bit_widths.len]Function,
     gemm: [bit_widths.len]Function,
     wmma_gemm: [bit_widths.len]Function,
+    wmma_gemm_dq: [bit_widths.len]?Function, // the matrix-core tile over dequantized weights, when the run asks
     kp: [bit_widths.len][kp_tiles.len]Function,
     span: [2]Function,
     fold: Function,
@@ -159,7 +148,7 @@ pub const Kernels = struct {
         k.reg = Registry.init(tableFor(caps), &mlx_entries.all);
         k.reg.verify(k.env(), .mlx) catch return error.Invalid;
         // the GEMM tile's rows of x a lane keeps (tiles/gemm.hpp GemmShape): 8 for BF16, 16 for FP16
-        if (wmma) try k.resolve("7DotBF16", "Li8E", tiles_obj) else try k.resolve("6DotF16", "Li16E", tiles_obj);
+        if (wmma) try k.resolve("7DotBF16", "Li8E", choices.dq, tiles_obj) else try k.resolve("6DotF16", "Li16E", choices.dq, tiles_obj);
         const r = "_ZN2tf4rocm";
         k.span = .{ try dot2_obj.function(r ++ "16affine_dot2_spanILi1EEEvNS0_6AffineEPfi"), try dot2_obj.function(r ++ "16affine_dot2_spanILi8EEEvNS0_6AffineEPfi") };
         k.fold = try dot2_obj.function(r ++ "16affine_dot2_foldEPKfNS0_10GroupTableES3_Pfiii");
@@ -170,11 +159,12 @@ pub const Kernels = struct {
         return k;
     }
 
-    fn resolve(k: *Kernels, comptime dot: []const u8, comptime shape: []const u8, m: Module) Error!void {
+    fn resolve(k: *Kernels, comptime dot: []const u8, comptime shape: []const u8, dq: bool, m: Module) Error!void {
         @setEvalBranchQuota(300_000);
         inline for (bit_widths, 0..) |bits, b| {
             k.block[b] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm17affine_dot2_blockINS0_{s}ELi{d}EEEvNS0_6AffineE", .{ dot, bits }));
             if (k.matrix) k.wmma_gemm[b] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm16affine_wmma_gemmILi{d}EEEvNS0_6AffineE", .{bits}));
+            k.wmma_gemm_dq[b] = if (k.matrix and dq) try m.function(std.fmt.comptimePrint("_ZN2tf4rocm19affine_wmma_gemm_dqILi{d}EEEvNS0_6AffineE", .{bits})) else null;
             k.gemm[b] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm17affine_gemm_blockINS0_{s}ELi{d}E{s}EEvNS0_6AffineE", .{ dot, bits, shape }));
             inline for (kp_tiles, 0..) |t, i| {
                 k.kp[b][i] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm14affine_gemm_kpINS0_{s}ELi{d}ELi{d}ELi{d}ELi{d}ELi{d}ELb{d}EEEvNS0_6AffineE", .{ dot, bits, t.cb, t.r, t.waves, t.rb, @intFromBool(t.loop) }));
@@ -277,7 +267,7 @@ pub const Kernels = struct {
 
     /// The GPU and the run's switches as the registry reads them.
     pub fn env(k: *const Kernels) registry.Env {
-        return .{ .bf16 = k.wmma, .matrix = k.matrix, .matrix_on = k.matrix and k.mode != .off, .stream_on = k.stream_on, .gemm_on = k.tile == .gemm };
+        return .{ .bf16 = k.wmma, .matrix = k.matrix, .matrix_on = k.matrix and k.mode != .off, .stream_on = k.stream_on, .gemm_on = k.tile == .gemm, .dq_on = k.wmma_gemm_dq[0] != null };
     }
 
     /// The MLX entry that takes a product, or null.
@@ -445,6 +435,7 @@ pub const Kernels = struct {
         try args.add(a);
         const f = switch (kind) {
             .matrix => k.wmma_gemm[b],
+            .matrix_dq => k.wmma_gemm_dq[b] orelse return refuse("matrix_dq"),
             .gemm => k.gemm[b],
             .block => k.block[b],
         };

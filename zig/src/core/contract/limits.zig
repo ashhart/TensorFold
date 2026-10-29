@@ -190,6 +190,8 @@ pub const HipLaunch = struct {
     dynamic: u32 = 0,
     /// The symbol on each chip (rdna's order) where it differs, as a stream tile's dot2 type does.
     symbols: ?[rdna.len][]const u8 = null,
+    /// The chips a build and its launcher give the symbol to: a tile only some generations' matrix cores have.
+    chips: [rdna.len]bool = @splat(true),
 
     /// The symbol the launch resolves on chip `i` of `rdna`.
     pub fn symbolOn(l: HipLaunch, i: usize) []const u8 {

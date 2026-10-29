@@ -319,9 +319,9 @@ const headers = [_][]const u8{
     "common/arch.hpp",            "common/dot2.hpp",       "common/vec.hpp",        "common/wmma.hpp",
     "quant/act.hpp",              "quant/mlx.hpp",         "quant/mlx_decoder.hpp", "quant/mlx_pieces.hpp",
     "quant/mlx_tiles.hpp",        "tiles/dot2.hpp",        "tiles/epilogue.hpp",    "tiles/gemm.hpp",
-    "tiles/gemm_kp.hpp",          "tiles/matrix_gemm.hpp", "tiles/plan.hpp",        "tiles/stream.hpp",
-    "flashnext/streams.hpp",      "flashnext/ngram.hpp",   "flashnext/indexer.hpp", "flashnext/sparse.hpp",
-    "ops/nemotron_moe.hpp",
+    "tiles/gemm_kp.hpp",          "tiles/matrix_gemm.hpp", "tiles/matrix_dq.hpp",   "tiles/plan.hpp",
+    "tiles/stream.hpp",           "flashnext/streams.hpp", "flashnext/ngram.hpp",   "flashnext/indexer.hpp",
+    "flashnext/sparse.hpp",       "ops/nemotron_moe.hpp",
 };
 
 /// The flags of the kernels' first build: no contraction, wave32 on RDNA, C++20.
