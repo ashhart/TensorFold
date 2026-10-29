@@ -19,6 +19,11 @@ pub fn glmClearThinking(value: ?[]const u8) ?bool {
     return if (std.mem.eql(u8, v, "1")) true else null;
 }
 
+/// ``TF_DSV41_SCHEMA_PROMPT``: on unless 0 (the published engine's default).
+pub fn schemaPrompt(value: ?[]const u8) bool {
+    return !std.mem.eql(u8, std.mem.trim(u8, value orelse "", " \t\r\n"), "0");
+}
+
 pub const HfText = struct {
     gpa: Allocator,
     arena: std.heap.ArenaAllocator,
@@ -26,6 +31,7 @@ pub const HfText = struct {
     native_kimi: ?*KimiText = null,
     source: []const u8 = "",
     native_deepseek: bool = false,
+    schema_prompt: bool = true, // TF_DSV41_SCHEMA_PROMPT: response_format's schema as the encoder's ``## Response Format``
     clear_thinking: ?bool = null, // GLM-5.3's, given to its template on every render (``glmClearThinking``)
     tool_source: []const u8 = "",
     compiled: ?template.Compiled = null,
@@ -101,7 +107,9 @@ pub const HfText = struct {
                 problem.* = try std.fmt.allocPrint(pa, "cannot read chat template override ({s})", .{@errorName(e)});
                 return error.Load;
             };
-        } else try t.readTemplates(io, a, dir, config);
+        } else if (!t.native_deepseek) try t.readTemplates(io, a, dir, config);
+        // DeepSeek-V4.x releases ship encoding.py, not Jinja: a checkpoint's Jinja is a third party's (--chat-template)
+        if (t.native_deepseek) t.schema_prompt = schemaPrompt(if (std.c.getenv("TF_DSV41_SCHEMA_PROMPT")) |v| std.mem.span(v) else null);
         t.specials = try specialsOf(a, config);
         t.eos = t.eosIds(a, model_config, generation, config, t.tok.id_to_token.tokens.items.len) catch |e| {
             if (e == error.OutOfMemory) return e;
@@ -360,8 +368,12 @@ pub const HfText = struct {
         return if (t.tool_source.len > 0) std.mem.concat(t.arena.allocator(), u8, &.{ source, " ", t.tool_source }) catch source else source;
     }
 
-    fn renderDeepseek(_: *HfText, a: Allocator, messages: Value, options: model_text.RenderOptions, problem: *[]const u8) model_text.Error!model_text.Rendered {
+    fn renderDeepseek(t: *HfText, a: Allocator, messages: Value, options: model_text.RenderOptions, problem: *[]const u8) model_text.Error!model_text.Rendered {
         var opts: dsv41.Options = .{ .thinking = options.enable_thinking, .add_generation_prompt = options.add_generation_prompt };
+        if (options.images) opts.image = .{ .text = imageMarker }; // the image token, expanded by images.zig
+        if (t.schema_prompt) if (options.response_format) |rf| {
+            opts.response_format = try @import("deepseek_schema.zig").schemaFor(a, rf);
+        };
         if (options.tools) |tools| {
             if (tools != .array) {
                 problem.* = "tools must be a list";
@@ -384,6 +396,10 @@ pub const HfText = struct {
             return error.Template;
         };
         return .{ .text = out.text, .spans = out.spans };
+    }
+
+    fn imageMarker(_: ?*anyopaque, _: Value) []const u8 {
+        return dsv41.IMAGE;
     }
 
     fn renderFn(ctx: *anyopaque, a: Allocator, messages: Value, options: model_text.RenderOptions, problem: *[]const u8) model_text.Error!model_text.Rendered {
