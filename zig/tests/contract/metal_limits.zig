@@ -126,6 +126,7 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
 /// Main's Nemotron attention library as kernels.zig and prefill_kernels.zig build it here, and before the M5.
 fn attentionLaunch(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, fun: []const u8) !Launch {
     const tensor = device.tensorUnits();
+    std.debug.print("FORM limits {s}: {s}\n", .{ d.name, if (tensor) "tensor-op source as written" else "SIMD rewrite" });
     if (std.mem.indexOf(u8, d.name, " partial ") != null or std.mem.indexOf(u8, d.name, " merge ") != null) {
         const text = for (sources.nemotron.all) |k| {
             if (std.mem.eql(u8, k.function, fun)) break k.source;
@@ -152,6 +153,7 @@ fn attentionLaunch(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaun
 fn pagedLaunch(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, fun: []const u8) !Launch {
     const paged = sources.nemotron_paged;
     const tensor = device.tensorUnits();
+    std.debug.print("FORM limits {s}: {s}\n", .{ d.name, if (tensor) "tensor-op source as written" else "SIMD rewrite" });
     if (std.mem.indexOf(u8, d.name, " partial ") != null) {
         const pre = try tf.nemotron.simd_attention.rewrite(a, paged.partial);
         return .{ .decl = d, .function = fun, .here = if (tensor) paged.partial else pre, .pre_m5 = pre };

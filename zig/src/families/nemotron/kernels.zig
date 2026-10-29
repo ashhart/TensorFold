@@ -228,6 +228,11 @@ fn loadWith(allocator: std.mem.Allocator, device: mtl.Device, prebuilt: ?mtl.Lib
             jobs[i].source = rewritten[i].?;
         }
     };
+    if (device.tensorUnits()) {
+        std.log.info("nemotron: attention partials compiled as written, tensor ops (applegpu generation {d})", .{device.generation()});
+    } else {
+        std.log.info("nemotron: attention partials SIMD-rewritten (applegpu generation {d}, no tensor units)", .{device.generation()});
+    }
     const n = sources.nemotron.all.len;
     jobs[n] = .{ .device = device, .source = sources.nemotron_glue, .names = &glue_names, .out = k.pipelines[n .. n + glue_names.len] };
     const gp = n + glue_names.len;

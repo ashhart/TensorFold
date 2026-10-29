@@ -12,10 +12,10 @@ pub const records = partials ++ [_]M{
     .{ .name = "nemotron attention prompt custom_kernel_tf_kv_put_bfloat16_t_bfloat16_t_int32_t_bfloat16_t", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
 } ++ prompts;
 
-/// The decode partials at 1 to 8 tiles; 9 to 16 (288 to 512 threads) wait for a run on a GPU with tensor units.
+/// The decode partials at 1 to 16 tiles; 9 to 16 (288 to 512 threads) take an M1/M2 compile to show they fit.
 const partials = blk: {
-    var out: [8]M = undefined;
-    for (&out, 1..) |*r, n| r.* = .{ .name = "nemotron attention partial " ++ std.fmt.comptimePrint(partial_fn, .{n}), .threads = 32 * n, .tg_memory = 2048 * n, .offline = false };
+    var out: [16]M = undefined;
+    for (&out, 1..) |*r, n| r.* = .{ .name = "nemotron attention partial " ++ std.fmt.comptimePrint(partial_fn, .{n}), .threads = 32 * n, .tg_memory = 2048 * n, .offline = false, .unbuildable = n > 8 };
     break :blk out;
 };
 
