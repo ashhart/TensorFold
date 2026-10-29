@@ -37,19 +37,26 @@ test "Draft state: installed pack releases segments and removes its hook after a
     try std.testing.expectEqual(previous, cuda.memory.currentHook());
     try std.testing.expectEqual(mock.allocated, mock.freed);
 }
-test "Draft state: DSpark statics cannot be handed out before a failed prior transfer drains" {
+test "Draft state: DSpark statics hand out their own region without a context drain" {
     var d = mock.init();
-    var bytes: [32]u8 align(16) = @splat(7);
+    var bytes: [64]u8 align(16) = @splat(7);
     var dev: @import("dspark_dev.zig").Dev = undefined;
-    dev.regions = 1;
+    dev.regions = 2;
     dev.region_bytes = 32;
     dev.stage = .{ .d = &d, .bytes = &bytes };
     dev.agreement = undefined;
     dev.agreement.stream = .{ .d = &d, .handle = null };
+    // any synchronize fails: uploadAsync's copy_source custody, not a drain, frees the region for its next pass
     mock.fail_sync = true;
     defer mock.fail_sync = false;
-    try std.testing.expectError(error.NotReady, dev.statics(0, 1, 1));
-    try std.testing.expect(std.mem.allEqual(u8, &bytes, 7));
+    for (0..2) |g| {
+        const sv = try dev.statics(g, 2, 3);
+        try std.testing.expectEqual(@as([*]u8, @ptrCast(&bytes[32 * g])), @as([*]u8, @ptrCast(sv[0].ptr)));
+        try std.testing.expectEqual(@as([*]u8, @ptrCast(&bytes[32 * g + 16])), @as([*]u8, @ptrCast(sv[1].ptr)));
+        try std.testing.expectEqual(@as(usize, 3), sv[1].len);
+    }
+    try std.testing.expectError(error.Statics, dev.statics(2, 1, 1));
+    try std.testing.expectError(error.Statics, dev.statics(0, 4, 1));
 }
 test "Draft state: prefill teardown releases the second microbatch and workspace owners" {
     var d = mock.init();

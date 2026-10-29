@@ -129,10 +129,9 @@ pub const Dev = struct {
         return x.active != .host;
     }
 
-    /// Region `g`'s pinned staging for the statics: (int64 [n64], int32 [n32]); free once the previous round waited.
+    /// Region `g`'s statics staging (int64 [n64], int32 [n32]), no sync: uploadAsync clones it before returning.
     pub fn statics(x: *Dev, g: usize, n64: usize, n32: usize) !struct { []i64, []i32 } {
         if (g >= x.regions or 8 * n64 + 4 * n32 > x.region_bytes) return error.Statics;
-        try x.agreement.stream.d.synchronize();
         const b = x.stage.bytes[g * x.region_bytes ..][0..x.region_bytes];
         return .{ @alignCast(std.mem.bytesAsSlice(i64, b[0 .. 8 * n64])), @alignCast(std.mem.bytesAsSlice(i32, b[8 * n64 ..][0 .. 4 * n32])) };
     }
