@@ -16,6 +16,8 @@ pub const kernels = @import("metal/kernels.zig");
 pub const weights = @import("metal/weights.zig");
 pub const load_limit = @import("metal/load_limit.zig");
 pub const engine = @import("metal/engine.zig");
+pub const guidance = @import("metal/guidance.zig");
+pub const quant_check = @import("metal/quant_check.zig");
 pub const codec = @import("metal/codec.zig");
 pub const tts = @import("metal/tts.zig");
 
@@ -39,6 +41,8 @@ test {
     _ = wav;
     _ = kernels;
     _ = load_limit;
+    _ = guidance;
+    _ = @import("metal/quant_format_test.zig");
 }
 
 pub const residency = @import("metal/residency.zig");

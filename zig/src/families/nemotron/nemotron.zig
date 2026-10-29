@@ -15,6 +15,7 @@ pub const backend = @import("backend.zig");
 pub const mtp = @import("mtp.zig");
 pub const head_block = @import("head_block.zig");
 pub const gpu_round = @import("gpu_round.zig");
+pub const round_depth = @import("round_depth.zig");
 pub const copy_lanes = @import("copy_lanes.zig");
 pub const prefill = @import("prefill.zig");
 pub const prefill_launch = @import("prefill_launch.zig");
@@ -39,4 +40,5 @@ test {
     _ = @import("train_check.zig");
     _ = @import("model.zig");
     _ = @import("timing.zig");
+    _ = @import("round_depth.zig");
 }

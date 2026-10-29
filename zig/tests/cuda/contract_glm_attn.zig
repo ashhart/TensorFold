@@ -195,7 +195,7 @@ pub const Chunks = struct {
             ds[i] = abs * scale * 520 * 0x1p-24;
             most = pages.maxNan(most, s[i]);
         }
-        for (p, s) |*x, v| x.* = @exp(v - most);
+        for (p, s[0..n]) |*x, v| x.* = @exp(v - most);
         const l = if (acc) |k| pages.sumIn(k, order, p) else pages.sumIn(.none, .sequential, p);
         const col = try a.alloc(f64, n);
         defer a.free(col);

@@ -79,6 +79,11 @@ pub fn slice(gpa: std.mem.Allocator, source: Source, rows: Span, inputs: Span) !
 
 /// Read exact stored tensors, consuming optional calibration and refusing ambiguous plain/compressed scales.
 pub fn read(ck: anytype, gpa: std.mem.Allocator, module: []const u8, rows: Span, inputs: Span) !Linear {
+    return slice(gpa, try stored(ck, module), rows, inputs);
+}
+
+/// A module's tensors as `read` takes and refuses them, unchecked until `dimensions`; borrowed from `ck` until release.
+pub fn stored(ck: anytype, module: []const u8) !Source {
     var buf: [512]u8 = undefined;
     const w = try ck.get(try std.fmt.bufPrint(&buf, "{s}.weight", .{module}));
     const g = try ck.get(try std.fmt.bufPrint(&buf, "{s}.weight_scale_2", .{module}));
@@ -93,7 +98,7 @@ pub fn read(ck: anytype, gpa: std.mem.Allocator, module: []const u8, rows: Span,
     const plain = ck.has(plain_name);
     if (plain == (fixed != null)) return error.BadNvfp4;
     const scales: Scales = if (plain) .{ .plain = try ck.get(plain_name) } else .{ .csf = .{ .fixed = fixed.?, .exceptions = exceptions.? } };
-    return slice(gpa, .{ .weight = w, .scales = scales, .global = g, .input = a }, rows, inputs);
+    return .{ .weight = w, .scales = scales, .global = g, .input = a };
 }
 
 fn scalar(t: Tensor) bool {

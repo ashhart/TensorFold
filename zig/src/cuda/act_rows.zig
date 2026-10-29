@@ -33,12 +33,35 @@ pub const ActRows = struct {
     softcap_fn: Function,
     gate_l2_fn: Function,
     swiglu_l2_fn: Function,
+    head_gate_fn: Function,
+    gelu_erf_fn: Function,
 
     pub fn load(d: *const Driver) !ActRows {
         if (!kernels.available) return error.BuiltWithoutKernels;
         var mod = try Module.load(d, kernels.act_rows);
         errdefer mod.unload();
-        return .{ .mod = mod, .swiglu_fn = try mod.function("tf_swiglu_rows"), .gate_fn = try mod.function("tf_gate_rows"), .sums_fn = try mod.function("tf_group_sums_rows"), .dconv_fn = try mod.function("tf_dconv_rows"), .geglu_fn = try mod.function("tf_geglu_rows"), .swiglu_round_fn = try mod.function("tf_swiglu_rows_round"), .softcap_fn = try mod.function("tf_softcap_rows"), .gate_l2_fn = try mod.function("tf_gate_l2_rows"), .swiglu_l2_fn = try mod.function("tf_swiglu_l2_rows") };
+        return .{ .mod = mod, .swiglu_fn = try mod.function("tf_swiglu_rows"), .gate_fn = try mod.function("tf_gate_rows"), .sums_fn = try mod.function("tf_group_sums_rows"), .dconv_fn = try mod.function("tf_dconv_rows"), .geglu_fn = try mod.function("tf_geglu_rows"), .swiglu_round_fn = try mod.function("tf_swiglu_rows_round"), .softcap_fn = try mod.function("tf_softcap_rows"), .gate_l2_fn = try mod.function("tf_gate_l2_rows"), .swiglu_l2_fn = try mod.function("tf_swiglu_l2_rows"), .head_gate_fn = try mod.function("tf_head_gate_rows"), .gelu_erf_fn = try mod.function("tf_gelu_erf_rows") };
+    }
+
+    /// out = bf16(bf16(gelu_erf(gate)) * up) as PyTorch's exact GELU then the product, rows as swiglu's; xs: sums.
+    pub fn gegluErf(g: *const ActRows, s: Stream, gate: u64, g_ld: usize, up: u64, u_ld: usize, out: u64, xs: ?u64, rows: usize, n: usize) !void {
+        return g.glu(g.gelu_erf_fn, s, gate, g_ld, up, u_ld, out, xs, rows, n);
+    }
+
+    /// out [rows, heads d] = bf16(o * bf16(sigmoid(gate))), one gate a head at r * g_ld + h; o packed; xs: sums.
+    pub fn headGate(g: *const ActRows, s: Stream, o: u64, gate_: u64, g_ld: usize, out: u64, xs: ?u64, rows: usize, heads: usize, d: usize) !void {
+        if (d % 64 != 0 or !aligned(&.{ o, out }, &.{})) return error.RowShape;
+        if (rows == 0 or heads == 0) return;
+        var a: launch_.Args = .{};
+        a.add(o);
+        a.add(gate_);
+        a.add(@as(i64, @intCast(g_ld)));
+        a.add(out);
+        a.add(xs orelse 0);
+        a.add(@as(i32, @intCast(heads)));
+        a.add(@as(i32, @intCast(d)));
+        const t = launch_.rowThreads(rows, threads, 64);
+        try launch_.launch(g.head_gate_fn, .{ .grid = grid(rows, heads * d, t), .block = .{ .x = t } }, s, &a);
     }
 
     pub fn unload(g: *ActRows) void {

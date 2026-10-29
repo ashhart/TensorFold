@@ -1,4 +1,4 @@
-//! tf_sample_full on this GPU against its host reference on synthetic rows, timed beside tf_gpu_sample: exit 0 when all match.
+//! tf_sample_full and the two-pass top_k draw against their host reference on synthetic rows: exit 0 when all match.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -48,7 +48,18 @@ const cases = [_]Case{
     .{ .name = "spread, top_k 3000, top_p 0.5", .s = .{ .seed = 6, .temperature = 1.0, .top_k = 3000, .top_p = 0.5 }, .fill = spread },
     .{ .name = "two levels, min_p 0.01", .s = .{ .seed = 7, .temperature = 1.0, .top_k = 0, .top_p = 1.0, .min_p = 0.01 }, .fill = twoLevels },
     .{ .name = "draft vocabulary through an id map", .s = .{ .seed = 8, .temperature = 1.0, .top_k = 0, .top_p = 0.9 }, .fill = spread, .vocab = 49152, .map = true },
+    .{ .name = "spread, top_k 20, top_p 0.95 (Flash Next's vocabulary)", .s = .{ .seed = 9, .temperature = 1.0, .top_k = 20, .top_p = 0.95 }, .fill = spread, .vocab = 248320 },
+    .{ .name = "peaked, top_k 20, top_p 0.95, T 0.7", .s = .{ .seed = 10, .temperature = 0.7, .top_k = 20, .top_p = 0.95 }, .fill = peaked },
+    .{ .name = "7 tied levels, top_k 40, top_p 0.5", .s = .{ .seed = 11, .temperature = 1.0, .top_k = 40, .top_p = 0.5 }, .fill = ties },
+    .{ .name = "two levels, top_k 64, min_p 0.01", .s = .{ .seed = 12, .temperature = 1.0, .top_k = 64, .top_p = 1.0, .min_p = 0.01 }, .fill = twoLevels },
+    .{ .name = "flat, top_k 1", .s = .{ .seed = 13, .temperature = 1.0, .top_k = 1, .top_p = 1.0 }, .fill = flat },
+    .{ .name = "draft vocabulary through an id map, top_k 20", .s = .{ .seed = 14, .temperature = 1.0, .top_k = 20, .top_p = 0.95 }, .fill = spread, .vocab = 79616, .map = true },
 };
+
+/// tf_topk_slices' slices a row and threads a slice, and the widest top_k it draws (nemotron_sample.metal).
+const slices = 32;
+const slice_threads = 512;
+const kmax = 64;
 
 fn bf16(x: f32) u16 {
     const b: u32 = @bitCast(x);
@@ -100,6 +111,47 @@ fn dispatch(queue: mtl.Queue, p: mtl.Pipeline, logits: mtl.Buffer, s: Sampling, 
     return cb.gpuSeconds() * 1e3;
 }
 
+/// The two-pass draw of `rows` rows (tf_topk_slices into ck / ci, then `race`); its GPU milliseconds.
+fn twoPass(queue: mtl.Queue, first: mtl.Pipeline, race: mtl.Pipeline, logits: mtl.Buffer, s: Sampling, tok: mtl.Buffer, ids: mtl.Buffer, vocab: usize, ck: mtl.Buffer, ci: mtl.Buffer) !f64 {
+    var seeds: [2 * rows]u32 = undefined;
+    var positions: [rows]u32 = undefined;
+    var cfgs: [4 * rows]f32 = undefined;
+    var caps: [rows]u32 = undefined;
+    const rule = tf.lanes.gpu_rule.rule(s);
+    for (0..rows) |r| {
+        seeds[2 * r ..][0..2].* = rule.seedHalves();
+        positions[r] = position + @as(u32, @intCast(r));
+        cfgs[4 * r ..][0..4].* = rule.cfg();
+        caps[r] = rule.top_k;
+    }
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const cb = queue.commandBuffer();
+    const enc = cb.compute(.serial);
+    enc.setBuffer(logits, 0, 0);
+    enc.setBytes(std.mem.sliceAsBytes(&seeds), 1);
+    enc.setBytes(std.mem.sliceAsBytes(&positions), 2);
+    enc.setBytes(std.mem.sliceAsBytes(&cfgs), 3);
+    enc.setBytes(std.mem.sliceAsBytes(&caps), 4);
+    enc.setBuffer(tok, 0, 5);
+    enc.setBuffer(ids, 0, 6);
+    enc.setBytes(std.mem.asBytes(&@as(u32, @intCast(vocab))), 7);
+    enc.setBuffer(ck, 0, 8);
+    enc.setBuffer(ci, 0, 9);
+    enc.setPipeline(first);
+    enc.dispatchGroups(mtl.Size.of(slices, rows, 1), mtl.Size.of(slice_threads, 1, 1));
+    enc.setPipeline(race);
+    enc.dispatchThreads(mtl.Size.of(1024 * rows, 1, 1), mtl.Size.of(1024, 1, 1));
+    enc.end();
+    cb.commit();
+    cb.wait();
+    if (cb.failure()) |text| {
+        std.debug.print("command buffer failed: {s}\n", .{text});
+        return error.GpuFailed;
+    }
+    return cb.gpuSeconds() * 1e3;
+}
+
 pub fn main() !void {
     var gpa_state: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa_state.deinit();
@@ -117,6 +169,12 @@ pub fn main() !void {
     defer old_lib.deinit();
     const old = try mtl.Pipeline.init(device, old_lib, old_kernel.function, false);
     defer old.deinit();
+    const first = try mtl.Pipeline.init(device, lib, "tf_topk_slices", false);
+    defer first.deinit();
+    const ck = try device.buffer(rows * slices * kmax * 4, opts);
+    defer ck.deinit();
+    const ci = try device.buffer(rows * slices * kmax * 4, opts);
+    defer ci.deinit();
     std.debug.print("device: {s}\n", .{device.name()});
     var failed: usize = 0;
     for (cases) |c| {
@@ -156,6 +214,21 @@ pub fn main() !void {
             old_ms = try dispatch(queue, old, logits, c.s, tok, ids, c.vocab, false);
         };
         std.debug.print("{s}: {d}/{d} rows match, tf_sample_full {d:.3} ms, tf_gpu_sample {d:.3} ms ({d} rows)\n", .{ c.name, same, rows, ms, old_ms, rows });
+        if (c.s.top_k >= 1 and c.s.top_k <= kmax) {
+            const race = try mtl.Pipeline.init(device, lib, if (c.map) "tf_topk_race_ids" else "tf_topk_race", false);
+            defer race.deinit();
+            @memset(tok.slice(u32, rows), 0xFFFF_FFFF);
+            _ = try twoPass(queue, first, race, logits, c.s, tok, ids, c.vocab, ck, ci);
+            const two_ms = try twoPass(queue, first, race, logits, c.s, tok, ids, c.vocab, ck, ci);
+            var two_same: usize = 0;
+            for (tok.slice(u32, rows), 0..) |got, r| {
+                const want = full.race(row, plan, c.s.seed, position + @as(u32, @intCast(r)), if (c.map) map else null);
+                two_same += @intFromBool(got == want);
+                if (got != want) std.debug.print("  two-pass row {d}: GPU {d}, host {d}\n", .{ r, got, want });
+            }
+            failed += rows - two_same;
+            std.debug.print("  two-pass: {d}/{d} rows match, {d:.3} ms\n", .{ two_same, rows, two_ms });
+        }
     }
     std.debug.print("{s}\n", .{if (failed == 0) "all draws match" else "draws differ"});
     if (failed > 0) std.process.exit(1);

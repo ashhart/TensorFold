@@ -7,7 +7,7 @@
 #include <type_traits>
 #include <vector>
 
-#include "qmm_frag.cuh"
+#include "common/qmm_frag.cuh"
 
 namespace tf_qmm_group {
 

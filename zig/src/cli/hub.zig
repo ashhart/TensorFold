@@ -17,6 +17,7 @@ const titles = [_]struct { model_type: []const u8, title: []const u8 }{
     .{ .model_type = "gemma4", .title = "Gemma 4 31B" },
     .{ .model_type = "gemma4_unified", .title = "Gemma 4 12B" },
     .{ .model_type = "step5_vl", .title = "Step-5-Preview" },
+    .{ .model_type = "spark2_5", .title = "Spark-X2.6-4B" },
     .{ .model_type = "lfm2_moe", .title = "LFM2.5-24B-A2B" },
 };
 

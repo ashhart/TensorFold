@@ -30,6 +30,7 @@ const Lane = struct {
     rule: u64, // sample.cu's Rule, when the stream samples
     sampled: bool = false,
     fill: ?usize = null, // a prompt pass going a chunk at a time: where its next chunk starts
+    mark: ?usize = null, // a stepped pass's mark kept at its next step, after the drafter absorbed the chunk
     tap: Tap = .{},
     images: ?cuda.DeviceBuffer = null, // the prompt's images through the embedder, while its pass runs
 };
@@ -238,6 +239,7 @@ pub const Gemma = struct {
         }
         const l = got.value_ptr;
         l.sampled = false;
+        l.mark = null;
         if (s.sampling) |sp| if (sp.temperature > 0) {
             const r = cuda.sample.Rule.from(lanes.gpu_rule.rule(sp));
             try x.upload(l.rule, std.mem.asBytes(&r));
@@ -337,7 +339,7 @@ pub const Gemma = struct {
                 l.images = null;
             }
         }
-        if (!streamed) x.marked(s, end); // else after the drafter's absorb of the chunk (prefillFeatures)
+        if (!streamed) x.marked(s, end); // else after the drafter's absorb of the chunk (prefillFeatures, prefillStep)
         return done;
     }
 
@@ -359,7 +361,14 @@ pub const Gemma = struct {
         const going = if (x.lanes.getPtr(s)) |l| l.fill != null else false;
         const l = if (going) x.lanes.getPtr(s).? else try x.opening(s);
         errdefer x.dropLane(s);
-        return x.chunk(s, l, false);
+        if (l.mark) |at| x.marked(s, at); // the drafter's wrapper absorbed the last step's rows: its context is kept too
+        l.mark = null;
+        const later = x.keeper != null and s.drafts;
+        const done = try x.chunk(s, l, later);
+        if (later) {
+            if (done) x.marked(s, s.prompt().len) else l.mark = l.fill;
+        }
+        return done;
     }
 
     fn handle(x: *Gemma) usize {

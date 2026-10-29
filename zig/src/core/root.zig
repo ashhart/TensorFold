@@ -1,5 +1,6 @@
 //! Backend-neutral engine parts: checkpoint files, the CUDA draft-depth rule, the copy index, the tokenizer.
 
+pub const weight_only = @import("weight_only.zig");
 pub const safetensors = @import("safetensors.zig");
 pub const npy = @import("npy.zig");
 pub const exl3_format = @import("exl3_format.zig");
@@ -114,3 +115,15 @@ pub const tree_slots = @import("tree_slots.zig");
 pub const exl3_layout = @import("exl3_layout.zig");
 
 pub const exl3_prepare = @import("exl3_prepare.zig");
+
+pub const weight_only_contract = @import("contract/weight_only.zig");
+pub const weight_only_cuda_adapter = @import("weight_only_cuda_impl.zig").Adapter;
+pub const weight_only_metal_adapter = @import("weight_only_metal_impl.zig").Adapter;
+pub const hc_activation = @import("hc_activation.zig");
+pub const hc_activation_contract = @import("contract/hc_activation.zig");
+pub const hc_activation_cuda_adapter = @import("hc_activation_cuda_impl.zig").Adapter;
+pub const hc_activation_metal_adapter = @import("hc_activation_metal_impl.zig").Adapter;
+pub const hc_pointwise = @import("hc_pointwise.zig");
+pub const hc_pointwise_cuda_adapter = @import("hc_pointwise_cuda_impl.zig").Adapter;
+pub const hc_pointwise_metal_adapter = @import("hc_pointwise_metal_impl.zig").Adapter;
+pub const hc_pointwise_contract = @import("contract/hc_pointwise.zig");

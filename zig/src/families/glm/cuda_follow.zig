@@ -9,6 +9,7 @@ const sampler = @import("cuda_sampler.zig");
 const prompt_wire = @import("cuda_prompt_wire.zig");
 const dflash = @import("dflash.zig");
 const pages_mod = @import("cuda_pages.zig");
+const sparse = @import("cuda_sparse.zig");
 const Engine = engine.Engine;
 
 pub const Kind = enum(u32) { begin = 1, prefill, verify, keep, draft, end, drop, release, chunk, shared, image, block, many, redraw, idle, snapshots, pool };
@@ -18,7 +19,7 @@ pub const Header = extern struct {
     kind: u32,
     n: u32 = 0, // ids that follow
     depth: u32 = 0, // draft: drafts to chain; chunk: where it starts; shared: its parts
-    flags: u32 = 0, // begin: sampled; draft: from the prompt; prefill, chunk: prompt_logprobs; verify, shared: whole rows
+    flags: u32 = 0, // begin: sampled; draft: from the prompt; prefill, chunk: prompt_logprobs (1); chunk: indexer rows split (2); verify, shared: whole rows
     a: u64 = 0, // keep: rows; prefill, chunk: the kept state it resumes (0: none); redraw: the prompt's length
     seed: u64 = 0, // begin: the sampling seed; prefill, chunk: the kept state's position
     temperature: f64 = 0,
@@ -223,7 +224,9 @@ pub const Leader = struct {
         if (start >= ids.len) return error.BadChunk;
         try x.flush();
         const part = ids[start..@min(ids.len, start + engine.prompt_rows + 1)];
-        try x.send(.{ .kind = @backingInt(Kind.chunk), .flags = x.rows(), .a = if (from) |r| r.id else 0, .seed = if (from) |r| r.at else 0, .depth = @intCast(start), .top_k = @intCast(ids.len) }, part);
+        const split = sparse.splitAt(start, x.e.settings.index_split, x.e.share.world);
+        try x.send(.{ .kind = @backingInt(Kind.chunk), .flags = x.rows() | @as(u32, @intFromBool(split)) << 1, .a = if (from) |r| r.id else 0, .seed = if (from) |r| r.at else 0, .depth = @intCast(start), .top_k = @intCast(ids.len) }, part);
+        x.e.index_split = split;
         return x.e.prefillChunk(part, start, ids.len, from, cancel, marks);
     }
 
@@ -300,6 +303,12 @@ fn promptRows(h: Header) bool {
     return (kind == .prefill or kind == .chunk) and h.flags & 1 != 0;
 }
 
+/// A prompt chunk whose indexer rows split across the ranks (Leader.chunk): this rank picks for its block of rows.
+fn indexSplit(h: Header) bool {
+    const kind: Kind = @fromBackingInt(@intCast(h.kind));
+    return kind == .chunk and h.flags & 2 != 0;
+}
+
 /// A verify step under a grammar (Engine.structured): this rank's columns join the gather of each draw's whole rows.
 fn structuredStep(h: Header) bool {
     const kind: Kind = @fromBackingInt(@intCast(h.kind));
@@ -340,6 +349,7 @@ pub fn follow(e: *Engine, link: *Link) !void {
                 const ids = try e.gpa.dupe(u32, step.ids);
                 defer e.gpa.free(ids);
                 const from: ?engine.Resume = if (h.a != 0) .{ .id = h.a, .at = h.seed } else null;
+                e.index_split = indexSplit(h);
                 _ = e.prefillChunk(ids, h.depth, h.top_k, from, null, null) catch |err| switch (err) {
                     error.Cancelled => {},
                     else => return err,
@@ -476,4 +486,12 @@ test "flag 1 on verify and shared steps draws from whole rows; a prompt step's f
     try std.testing.expect(!structuredStep(.{ .kind = @backingInt(Kind.verify), .n = 4 }));
     try std.testing.expect(!structuredStep(.{ .kind = @backingInt(Kind.chunk), .flags = 1, .depth = 2048 }));
     try std.testing.expect(!structuredStep(.{ .kind = @backingInt(Kind.begin), .flags = 1 }));
+}
+
+test "flag 2 on a chunk splits its indexer rows across the ranks, beside flag 1's prompt rows; elsewhere it does not" {
+    try std.testing.expect(indexSplit(.{ .kind = @backingInt(Kind.chunk), .flags = 2, .depth = 65536, .top_k = 70000 }));
+    try std.testing.expect(indexSplit(.{ .kind = @backingInt(Kind.chunk), .flags = 3, .depth = 65536, .top_k = 70000 }));
+    try std.testing.expect(promptRows(.{ .kind = @backingInt(Kind.chunk), .flags = 3, .depth = 65536, .top_k = 70000 }));
+    try std.testing.expect(!indexSplit(.{ .kind = @backingInt(Kind.chunk), .flags = 1, .depth = 65536, .top_k = 70000 }));
+    try std.testing.expect(!indexSplit(.{ .kind = @backingInt(Kind.prefill), .flags = 2 }));
 }

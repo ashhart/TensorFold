@@ -6,6 +6,7 @@ const core = @import("core");
 const embed = @import("cuda_embed.zig");
 const hc = @import("cuda_hc.zig");
 const ple_pool = @import("cuda_ple_pool.zig");
+const ple_reader = @import("cuda_ple_reader.zig");
 
 const golden: u64 = 0x9E3779B97F4A7C15;
 const mix1: u64 = 0xBF58476D1CE4E5B9;
@@ -344,6 +345,9 @@ pub const Ngram = struct {
     b: [max_shards][]const u8 = undefined,
     format: enum { mlx, nvfp4 } = .mlx,
     tables: [max_shards]core.nvfp4_rows.Table = undefined,
+    readers: [max_shards]ple_reader.Reader = undefined,
+    read_mode: ple_reader.Mode = .mmap,
+    warm_ahead: bool = false,
     pool: ?*ple_pool.Pool = null, // the gather's parked workers (null: every row on the caller's thread)
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, model_dir: []const u8) !Ngram {
@@ -371,6 +375,8 @@ pub const Ngram = struct {
         const first = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.weight";
         const modelopt = wm.contains(first);
         g.format = if (modelopt) .nvfp4 else .mlx;
+        if (modelopt) g.read_mode = try ple_reader.mode(if (std.c.getenv("TF_FLASHNEXT_PLE_IO")) |v| std.mem.span(v) else null);
+        g.warm_ahead = @import("cuda_ple_ahead.zig").enabled(if (std.c.getenv("TF_FLASHNEXT_WARM_AHEAD")) |v| std.mem.span(v) else null);
         g.scale = if (modelopt)
             try readScale(gpa, io, model_dir, wm, "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.weight_scale_2", true)
         else
@@ -402,6 +408,7 @@ pub const Ngram = struct {
                 const table = try core.nvfp4_rows.Table.init(w, sc, g.scale);
                 if (table.width != dh) return error.UnexpectedTensor;
                 g.tables[shard] = table;
+                g.readers[shard] = ple_reader.Reader.init(&file.file, io, table);
             } else {
                 const sc = try file.tensor(try partNameFor(&key, shard, nested, "scales", false), .bf16);
                 const bias = try file.tensor(try partNameFor(&key, shard, nested, "biases", false), .bf16);
@@ -428,14 +435,17 @@ pub const Ngram = struct {
     }
 
     /// Rows [lo, hi) of a chunk's token-major row ids `ids`, each dequantized into its head's slice of `out`.
-    fn fill(g: *const Ngram, ids: []const i64, out: []u16, lo: usize, hi: usize) !void {
+    pub fn fill(g: *const Ngram, ids: []const i64, out: []u16, lo: usize, hi: usize) !void {
         const dh = g.hash.dh;
         for (lo..hi) |i| {
             const loc = try g.hash.locate(ids[i]);
             const row = out[i * dh ..][0..dh];
             switch (g.format) {
                 .mlx => try embed.dequant(g.w[loc.shard], g.s[loc.shard], g.b[loc.shard], dh, loc.local, row),
-                .nvfp4 => try g.tables[loc.shard].gather(&.{loc.local}, row),
+                .nvfp4 => if (g.read_mode == .pread)
+                    try g.readers[loc.shard].read(g.gpa, g.tables[loc.shard], loc.local, row)
+                else
+                    try g.tables[loc.shard].gather(&.{loc.local}, row),
             }
         }
     }
@@ -454,6 +464,8 @@ pub const Ngram = struct {
         }
     };
 
+    pub const warmAhead = @import("cuda_ple_ahead.zig").warm;
+
     /// `embedding` for each token after `history` (moved past the chunk) into out and xs, read by up to 128 threads.
     pub fn rows(g: *const Ngram, history: []i64, tokens: []const u32, out: []u16, xs: []f32) !void {
         const heads = g.hash.heads;
@@ -470,7 +482,9 @@ pub const Ngram = struct {
             hist[history.len - 1] = token;
         }
         const n_threads = @min(ple_pool.max_parts, items / 4);
-        if (n_threads <= 1 or g.pool == null) {
+        if (g.format == .nvfp4 and items > 1) {
+            try @import("cuda_ple_gather.zig").run(g, ids, out);
+        } else if (n_threads <= 1 or g.pool == null) {
             try g.fill(ids, out, 0, items);
         } else {
             const split: Split = .{ .g = g, .ids = ids, .out = out, .per = (items + n_threads - 1) / n_threads };
@@ -518,4 +532,13 @@ test {
     _ = @import("cuda_ple_nvfp4_test.zig");
     _ = @import("cuda_ple_pool.zig");
     _ = @import("cuda_ple_pool_gather_test.zig");
+}
+
+test {
+    _ = @import("cuda_ple_gather.zig");
+}
+
+test {
+    _ = ple_reader;
+    _ = @import("cuda_ple_ahead.zig");
 }

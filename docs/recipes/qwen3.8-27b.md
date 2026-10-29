@@ -12,6 +12,14 @@ tensorfold pull z-lab/Qwen3.8-27B-DFlash2
 tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --drafter z-lab/Qwen3.8-27B-DFlash2 --name bench
 ```
 
+On Metal, M5 prompt passes request 2,048 rows when no other request is decoding; earlier chips keep the 512-row
+default. The larger frame must fit the configured context and all streams beside loaded weights and the 8 GiB
+margin, otherwise M5 keeps 512 rows. Startup reserves the actual prompt scratch sizes as well as stream caches.
+Wide prompt frames keep separate 512-row activation scratch for small rounds, so decoding binds the small buffers.
+Admission counts both banks.
+`TF_QWEN27_WORKING_SET_BYTES` can lower the device working-set budget for admission checks. `TF_PROMPT_ROWS` selects another multiple of 16 from 16 to 2,048. Each chunk takes at most 512 rows beside
+a decoding request, including with an override, and still respects the frame, attention and request boundaries.
+
 Measured on an M5 Ultra (macOS 27) through the served API against mlx-lm 0.32.0 on the same checkpoint, raw prompts
 from this repository's docs, 100 greedy tokens, prefill from the time to the first token:
 
@@ -291,3 +299,14 @@ provenance object with `--source` to
 Kernel tests check rows alone and in windows, tree paths and committed state. Release checks must also
 compare drafted/serial, resumed/fresh and concurrent/solo requests with thinking on and off and tools.
 Decode rate, prefill, concurrency and peak-memory results are TBD [release-0.3.5].
+
+### Long-document prompt reuse
+
+The lane cache can keep one additional state inside a final user message of at least 8,192 tokens. It leaves
+at least 2,048 tokens outside the snapshot key for a different question following the same document. Qwen27
+Metal chooses an existing request chunk start, so the optional prompt bank and its fallback both already
+cut there. A direct caller supplying no chunk starts skips this optional state instead of guessing a cut.
+Endpoint, rewind and shared states have priority within the same byte and slot caps. Retained-state occupancy
+is published in `tensorfold:prompt_cache_states` and `tensorfold:prompt_cache_bytes`; restored tokens also count
+in `tensorfold:prompt_tokens_cached_total`. Synthetic host checks cover the two-request pattern and exact
+output. Real-model parity and TTFT for this state still need the Metal gate.

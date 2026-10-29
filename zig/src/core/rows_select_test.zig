@@ -14,7 +14,7 @@ const Rig = struct {
         for (&x.prompt, 0..) |*token, i| token.* = @intCast(101 + i * 7);
         x.family.prompt = &x.prompt;
         const f = x.family.snapshots();
-        x.disk = .{ .gpa = a, .family = f, .img = f.vtable.rows.?, .root = undefined, .dir = undefined, .keying = .{ .identity = 17, .block = rows.block_tokens, .lookahead = 1 }, .cap = 1 << 30, .daily = 1 << 30, .read_rate = 1000, .prefill_rate = 100 };
+        x.disk = .{ .gpa = a, .family = f, .img = f.vtable.rows.?, .sync_writes = true, .root = undefined, .dir = undefined, .keying = .{ .identity = 17, .block = rows.block_tokens, .lookahead = 1 }, .cap = 1 << 30, .daily = 1 << 30, .read_rate = 1000, .prefill_rate = 100 };
         x.store = pc.Store.init(a, f, .{ .min_prompt = 0, .min_gap = 1, .lookahead = 1 }, 1 << 20);
         x.store.disk = &x.disk;
     }

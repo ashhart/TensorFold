@@ -142,9 +142,8 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
         if (eng.ep != null) return error.LearnConversationsOnPair;
         if (h.cache) |*store| {
             const id = try glm_disk.identity(io, eng, &h.slots);
-            const r = try api.prompt_cache.rows.Rows.open(gpa, store.family, .{ .root = l.root, .identity = id.id, .cap = l.cap, .floor = l.floor, .daily = l.daily, .lookahead = cache_rules.lookahead, .planned = cache_rules.planned });
+            const r = try api.prompt_cache.rows.attach(gpa, store, .{ .root = l.root, .identity = id.id, .cap = l.cap, .floor = l.floor, .daily = l.daily, .lookahead = cache_rules.lookahead, .planned = cache_rules.planned, .spill = l.spill, .slots = l.slots });
             r.prefill_rate = id.rate;
-            store.disk = r;
         }
     } else {
         h.learned = try learnedStates(gpa, io, eng, &h.slots, l.root, l.cap);
@@ -222,7 +221,7 @@ fn follow(h: *Host) void {
 }
 
 /// --learn's settings: the root, cap, free-disk floor and daily writes, and whether conversations go to disk too.
-pub const Learn = struct { root: []const u8, cap: u64, floor: u64, daily: u64, conversations: bool };
+pub const Learn = struct { root: []const u8, cap: u64, floor: u64, daily: u64, conversations: bool, spill: api.prompt_cache.rows.Spill = .off, slots: ?usize = null };
 
 pub fn close(ctx: *anyopaque) void {
     const h: *Host = @ptrCast(@alignCast(ctx));

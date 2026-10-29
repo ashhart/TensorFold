@@ -1,6 +1,8 @@
 //! Host regressions use no shaders, model or GPU execution.
 const std = @import("std");
 pub fn tests(b: *std.Build) void {
+    const rows = b.createModule(.{ .root_source_file = b.path("zig/src/qwen27_rows_test.zig"), .target = b.graph.host });
+    b.step("test-qwen27-prompt-rows-host", "Device-aware prompt rows beside owned decoding streams without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = rows, .filters = &.{"qwen27 rows:"} })).step);
     const ane_policy = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen27/ane_policy.zig"), .target = b.graph.host });
     b.step("test-qwen27-ane-policy-host", "Neural Engine opt-in and tensor-unit chip policy without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = ane_policy })).step);
     const metal = b.createModule(.{ .root_source_file = b.path("zig/src/metal/metal.zig"), .target = b.graph.host });
@@ -10,6 +12,8 @@ pub fn tests(b: *std.Build) void {
     b.step("test-qwen27-speed-host", "Prompt tap guards, attention admission and cache failure ownership").dependOn(&run.step);
     const fake = b.createModule(.{ .root_source_file = b.path("zig/src/qwen27_speed_metal.zig"), .target = b.graph.host });
     const core = b.createModule(.{ .root_source_file = b.path("zig/qwen27_speed_core.zig"), .target = b.graph.host, .imports = &.{.{ .name = "metal", .module = fake }} });
+    const memory = b.createModule(.{ .root_source_file = b.path("zig/src/qwen27_memory_test.zig"), .target = b.graph.host, .imports = &.{ .{ .name = "metal", .module = fake }, .{ .name = "core", .module = core } } });
+    b.step("test-qwen27-memory-host", "Prompt scratch and working-set fit without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = memory, .filters = &.{"qwen27 memory:"} })).step);
     const sources = b.createModule(.{ .root_source_file = b.addWriteFiles().add("qwen27-fake-source.zig", "pub const core_deltanet = \"\";\n"), .target = b.graph.host });
     const delta = b.createModule(.{ .root_source_file = b.path("zig/src/core/deltanet_kernels.zig"), .target = b.graph.host, .imports = &.{.{ .name = "metal", .module = fake }} });
     delta.addImport("kernel_sources", sources);
@@ -40,6 +44,10 @@ pub fn tests(b: *std.Build) void {
     }), .filters = &.{"qwen27 speed:"} }));
     equal.has_side_effects = true;
     b.step("test-qwen27-equality-host", "Shared lanes drafted, resumed and concurrent equality on the fake target").dependOn(&equal.step);
+    const resume_lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host, .link_libc = true });
+    const resume_api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = resume_lanes }} });
+    const resume_rules = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_resume.zig"), .target = b.graph.host, .optimize = .debug, .imports = &.{.{ .name = "engine_api", .module = resume_api }} });
+    b.step("test-qwen27-resume-host", "Slot 0's in-place resume and rewind point: the cache's rule, with no GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = resume_rules, .filters = &.{"qwen27 resume:"} })).step);
 }
 
 pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module) void {

@@ -82,6 +82,60 @@ pub fn metal(l: MetalLaunch, f: Apple, out: *std.ArrayList(u8), a: std.mem.Alloc
     return n;
 }
 
+/// The most threads (a multiple of 32, 1024 down) whose build `probe.plainAt` finds equal to the plain build; 0: none.
+pub fn plainLimit(probe: anytype) !u32 {
+    var threads: u32 = 1024;
+    while (threads > 0) : (threads -= 32) if (try probe.plainAt(threads)) return threads;
+    return 0;
+}
+
+/// Builds that equal the plain one exactly at the listed thread counts, counting how many the search asks for.
+const FakeBuilds = struct {
+    equal: []const u32,
+    asked: *u32,
+
+    pub fn plainAt(f: FakeBuilds, threads: u32) !bool {
+        f.asked.* += 1;
+        return std.mem.indexOfScalar(u32, f.equal, threads) != null;
+    }
+
+    fn upTo(comptime limit: u32) [limit / 32]u32 {
+        var out: [limit / 32]u32 = undefined;
+        for (&out, 1..) |*t, i| t.* = @intCast(32 * i);
+        return out;
+    }
+};
+
+test "the offline search: the largest count equal to plain when every count up to it is" {
+    var asked: u32 = 0;
+    inline for (.{ 1024, 640, 448, 256, 32 }) |limit| {
+        const below = FakeBuilds.upTo(limit);
+        try std.testing.expectEqual(@as(u32, limit), try plainLimit(FakeBuilds{ .equal = &below, .asked = &asked }));
+    }
+    try std.testing.expectEqual(@as(u32, 0), try plainLimit(FakeBuilds{ .equal = &.{}, .asked = &asked }));
+}
+
+test "the offline search: the largest count equal to plain past counts that differ" {
+    var asked: u32 = 0;
+    // Nemotron's expert rows on M1/M2: plain at 224 and 320-448, not at 32-192, 256, 288 or 480 and up.
+    const gaps = [_]u32{ 224, 320, 352, 384, 416, 448 };
+    try std.testing.expectEqual(@as(u32, 448), try plainLimit(FakeBuilds{ .equal = &gaps, .asked = &asked }));
+    const lone = [_]u32{ 64, 512 };
+    try std.testing.expectEqual(@as(u32, 512), try plainLimit(FakeBuilds{ .equal = &lone, .asked = &asked }));
+    const odd = [_]u32{ 32, 96, 160 };
+    try std.testing.expectEqual(@as(u32, 160), try plainLimit(FakeBuilds{ .equal = &odd, .asked = &asked }));
+}
+
+test "the offline search: one build when 1024 equals plain, every count when none does" {
+    var asked: u32 = 0;
+    const all = FakeBuilds.upTo(1024);
+    try std.testing.expectEqual(@as(u32, 1024), try plainLimit(FakeBuilds{ .equal = &all, .asked = &asked }));
+    try std.testing.expectEqual(@as(u32, 1), asked);
+    asked = 0;
+    try std.testing.expectEqual(@as(u32, 0), try plainLimit(FakeBuilds{ .equal = &.{}, .asked = &asked }));
+    try std.testing.expectEqual(@as(u32, 32), asked);
+}
+
 /// Registers a block takes on one SM: each warp's registers rounded up to 256, times its warps.
 pub fn blockRegs(regs: u32, threads: u32) u32 {
     const warp = (regs * 32 + 255) / 256 * 256;

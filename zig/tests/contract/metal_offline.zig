@@ -63,8 +63,8 @@ fn section(buf: []const u8, base: usize, name: []const u8) ![]const u8 {
     return error.NoSection;
 }
 
-/// The native code metal-tt builds for one architecture, asking for `threads` a group (0: no request).
-fn native(x: Ctx, lib: []const u8, fun: []const u8, arch: []const u8, threads: u32) ![]const u8 {
+/// The image metal-tt builds for one architecture, asking for `threads` a group (0: no request); the caller frees it.
+fn native(x: Ctx, lib: []const u8, fun: []const u8, arch: []const u8, threads: u32) ![]u8 {
     const out = try std.fmt.allocPrint(x.a, "{s}.{s}.{s}.{d}.bin", .{ lib, fun, arch, threads });
     if (std.Io.Dir.cwd().access(x.io, out, .{})) |_| {} else |_| {
         var script: std.ArrayList(u8) = .empty;
@@ -77,23 +77,36 @@ fn native(x: Ctx, lib: []const u8, fun: []const u8, arch: []const u8, threads: u
         const ver = try std.fmt.bufPrint(&min, "{d}.0", .{mtl.objc.osVersion().major}); // the AIR version std_flag() made
         try exec(x, &.{ "xcrun", "metal-tt", "-arch", arch, "-macos-version-min", ver, "-o", out, lib, path });
     }
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(x.io, out, x.a, .limited(1 << 26));
+    return std.Io.Dir.cwd().readFileAlloc(x.io, out, x.a, .limited(1 << 26));
+}
+
+/// An image's native code: the text of the compute image it holds.
+fn code(bytes: []const u8) ![]const u8 {
     const outer = try section(bytes, 0, "__compute");
     const inner_at = @intFromPtr(outer.ptr) - @intFromPtr(bytes.ptr);
     return section(bytes, inner_at, "__text");
 }
 
+/// One function on one architecture against its plain build, for limits.plainLimit.
+const Builds = struct {
+    x: Ctx,
+    lib: []const u8,
+    fun: []const u8,
+    arch: []const u8,
+    plain: []const u8,
+
+    pub fn plainAt(b: Builds, threads: u32) !bool {
+        const bytes = try native(b.x, b.lib, b.fun, b.arch, threads);
+        defer b.x.a.free(bytes);
+        return std.mem.eql(u8, b.plain, try code(bytes));
+    }
+};
+
 /// The most threads (a multiple of 32) whose build equals the plain one: what the plain pipeline runs at.
 fn limitOn(x: Ctx, lib: []const u8, fun: []const u8, arch: []const u8) !u32 {
     const plain = try native(x, lib, fun, arch, 0);
-    if (std.mem.eql(u8, plain, try native(x, lib, fun, arch, 1024))) return 1024;
-    var lo: u32 = 0;
-    var hi: u32 = 33;
-    while (lo + 1 < hi) {
-        const mid = (lo + hi) / 2;
-        if (std.mem.eql(u8, plain, try native(x, lib, fun, arch, 32 * mid))) lo = mid else hi = mid;
-    }
-    return 32 * lo;
+    defer x.a.free(plain);
+    return limits.plainLimit(Builds{ .x = x, .lib = lib, .fun = fun, .arch = arch, .plain = try code(plain) });
 }
 
 fn familyLimit(x: Ctx, lib: []const u8, fun: []const u8, archs: []const []const u8) !u32 {

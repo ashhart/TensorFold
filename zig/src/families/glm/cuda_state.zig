@@ -217,7 +217,7 @@ pub const Buffers = struct {
             @min(seg, sparse.select_rows) * np_max * 4,
             rows * sparse.select_list * 4,
             rows * sparse.select_list * 4,
-            rows * sparse.topk_pools * 8,
+            (if (prefill) rows + s.world else rows) * sparse.topk_pools * 8, // pools; a split's equal blocks end at most world - 1 rows past them
             4,
             rows * sparse.width * 4,
             rows * 4,

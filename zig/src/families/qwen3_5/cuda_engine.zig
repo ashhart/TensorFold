@@ -146,6 +146,8 @@ pub const Engine = struct {
     host_logits: cuda.HostBuffer,
     /// The kept rows' device draws, when forward was given them.
     tokens: [most_verify]u32 = undefined,
+    /// presence and frequency penalties the next forward takes from its kept rows' logits (staged by the caller).
+    penalties: @import("cuda_penalties.zig").Rows = .{},
     /// The captured forwards by shape (`Shape.key`): the launches from the embedding to the head.
     graphs: std.AutoHashMapUnmanaged(u32, cuda.graph.Exec) = .empty,
     /// A drafter's tapped layers (`setTaps`): each row's residual after them lands in its stream's tap ring.
@@ -192,6 +194,7 @@ pub const Engine = struct {
         e.window_rows = most_window;
         e.arena_at = 0;
         e.graphs = .empty;
+        e.penalties = .{};
         e.rec_scratch = recurrent.Pool.init(gpa, @intFromPtr(e));
         e.n_taps = 0;
         e.features = 0;
@@ -231,10 +234,12 @@ pub const Engine = struct {
         inline for (@typeInfo(Fns).@"struct".field_names) |name| @field(e.fns, name) = try e.mods[4].function("tf_q35_" ++ name);
         try e.fns.attn_partial.allowDynamicShared(@import("cuda_forward.zig").attn_tiles); // bf16 tiles' two buffers
         try e.fns.attn_rows.allowDynamicShared(@import("cuda_forward.zig").attn_tiles);
+        try e.fns.attn_partial_whole.allowDynamicShared(@import("cuda_forward.zig").attn_tiles);
+        try e.fns.attn_rows_whole.allowDynamicShared(@import("cuda_forward.zig").attn_tiles);
         inline for (@typeInfo(Keeps).@"struct".field_names) |name| @field(e.keeps, name) = try e.mods[6].function("tf_q35k_" ++ name);
         e.prompt_attn = try @import("cuda_prompt.zig").resolve(e.mods[16], e.mods[17]);
         try e.int8.resolve(e.mods[18]);
-        e.fp8 = .{ .rope = try e.mods[9].function("tf_q35_rope8"), .attn_partial = try e.mods[9].function("tf_q35_attn_partial8"), .attn_rows = try e.mods[9].function("tf_q35_attn_rows8"), .attn_partial_paged = try e.mods[9].function("tf_q35_attn_partial8_paged"), .attn_partial_contiguous = try e.mods[9].function("tf_q35_attn_partial8_contiguous"), .compact = try e.mods[9].function("tf_q35k_compact8") };
+        e.fp8 = .{ .rope = try e.mods[9].function("tf_q35_rope8"), .attn_partial = try e.mods[9].function("tf_q35_attn_partial8"), .attn_rows = try e.mods[9].function("tf_q35_attn_rows8"), .attn_partial8_whole = try e.mods[9].function("tf_q35_attn_partial8_whole"), .attn_rows8_whole = try e.mods[9].function("tf_q35_attn_rows8_whole"), .compact = try e.mods[9].function("tf_q35k_compact8") };
         e.mo = if (g.kinds.modelopt) try modelopt.Kernels.load(d, @intCast(try ctx.attribute(.compute_capability_major))) else null;
         errdefer if (e.mo) |*m| m.unload();
         e.layers = try gpa.alloc(Layer, g.layers);
@@ -282,6 +287,7 @@ pub const Engine = struct {
         var it = e.graphs.valueIterator();
         while (it.next()) |x| x.deinit();
         e.graphs.deinit(e.gpa);
+        e.penalties.deinit(e.gpa);
         e.host_logits.free();
         e.staged.free();
         e.tables.free();
@@ -373,6 +379,7 @@ pub const Engine = struct {
     pub const projSums = @import("cuda_projection.zig").projSums;
     pub const projAgain = @import("cuda_projection.zig").projAgain;
     pub const projMany = @import("cuda_projection.zig").projMany;
+    pub const projManyPrompt = @import("cuda_projection.zig").projManyPrompt;
     pub const projManySums = @import("cuda_projection.zig").projManySums;
     pub const projectMany = @import("cuda_projection.zig").projectMany;
     pub const project = @import("cuda_projection.zig").project;
@@ -510,6 +517,7 @@ pub const Engine = struct {
             try gop.value_ptr.launchOn(e.stream);
         }
         for (parts) |p| p.cache.advanced(p.rows, record);
+        if (keep == .draws or keep == .logits) try e.penalties.apply(e.d, &e.draws, e.stream, e.logits, g.vocab) else e.penalties.clear();
         switch (keep) {
             .hidden => try e.stream.synchronize(), // mapped layer inputs are ready before the learner reads them
             .draws => |pk| {

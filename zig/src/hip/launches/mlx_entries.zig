@@ -2,7 +2,6 @@
 
 const std = @import("std");
 const registry = @import("core").registry;
-const tuning = @import("../tuning/tuning.zig");
 const affine = @import("affine.zig");
 
 const Entry = affine.Entry;
@@ -323,8 +322,7 @@ pub const all = project_decode ++ routed_decode ++ other_decode ++ prefill(.proj
 const Caps = @import("../caps.zig").Caps;
 
 fn kernelsOn(gfx: []const u8) affine.Registry {
-    const caps = Caps.of(gfx).?;
-    return affine.Registry.init(if (caps.generation == .rdna2) &tuning.gfx1030 else &tuning.gfx1100, &all);
+    return affine.Registry.init(Kernels.tableFor(Caps.of(gfx).?), &all);
 }
 
 fn envOn(gfx: []const u8, stream_on: bool, gemm_on: bool, matrix_on: bool) Env {
@@ -334,7 +332,7 @@ fn envOn(gfx: []const u8, stream_on: bool, gemm_on: bool, matrix_on: bool) Env {
 }
 
 test "a lane round and a prompt each keep one family at every row count, on every GPU and policy" {
-    for ([_][]const u8{ "gfx1030", "gfx1100", "gfx1151" }) |gfx| {
+    for ([_][]const u8{ "gfx1030", "gfx1100", "gfx1151", "gfx1201" }) |gfx| {
         const r = kernelsOn(gfx);
         for ([_]bool{ true, false }) |matrix_on| try r.verify(envOn(gfx, true, true, matrix_on), .mlx);
     }

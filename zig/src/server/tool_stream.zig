@@ -3,6 +3,8 @@ const std = @import("std");
 const json = @import("json");
 const ids = @import("ids.zig");
 const reply_text = @import("reply_text.zig");
+const tool_dsml = @import("tool_dsml.zig");
+const tool_glm_cut = @import("tool_glm_cut.zig");
 const tool_params = @import("tool_params.zig");
 const tool_specs = @import("tool_specs.zig");
 const tool_parse = @import("tool_parse.zig");
@@ -52,6 +54,7 @@ pub const Streamer = struct {
     searched: usize = 0, // the answer is only ever extended, so prose already searched holds no opener
     tools: []const Value,
     dsml_start: ?usize = null,
+    dsml_close: []const u8 = "", // the closer of the open DSML block's spelling
     dsml_searched: usize = 0,
     dsml_seen: bool = false,
     buffered_start: usize = 0,
@@ -109,28 +112,27 @@ pub const Streamer = struct {
                             return;
                         }
                     }
-                    const dsml_open = reply_text.calls[2][0];
-                    const dsml_close = reply_text.calls[2][1];
                     if (s.dsml_start) |start| {
-                        const from = @max(s.pos, s.dsml_searched -| (dsml_close.len - 1));
-                        const end = reply_text.findTag(text, from, dsml_close) orelse {
+                        const from = @max(s.pos, s.dsml_searched -| (s.dsml_close.len - 1));
+                        const end = reply_text.findTag(text, from, s.dsml_close) orelse {
                             s.dsml_searched = text.len;
                             return;
                         };
-                        s.pos = end + dsml_close.len;
+                        s.pos = end + s.dsml_close.len;
                         s.searched = s.pos;
                         s.dsml_start = null;
                         const parsed = try tool_parse.parse(s.a, text[start..s.pos], s.tools, null);
                         if (parsed.calls) |calls| try s.emitCalls(calls, out);
                     }
                     if (text.len < s.searched) s.searched = s.pos;
-                    const from = @min(text.len, @max(s.pos, s.searched -| (dsml_open.len - 1)));
+                    const from = @min(text.len, @max(s.pos, s.searched -| (tool_dsml.open_max - 1)));
                     var at = from;
                     while (std.mem.indexOfScalarPos(u8, text, at, '<')) |start| {
-                        if (std.mem.startsWith(u8, text[start..], dsml_open)) {
+                        if (tool_dsml.openedBy(text[start..])) |sp| {
                             s.dsml_seen = true;
                             s.dsml_start = start;
-                            s.pos = start + dsml_open.len;
+                            s.dsml_close = sp.close;
+                            s.pos = start + sp.open.len;
                             s.dsml_searched = s.pos;
                             break;
                         }
@@ -296,7 +298,62 @@ pub const Streamer = struct {
             }
         }
     }
+
+    /// A call that the reply's end left open: its name streamed, its envelope not closed.
+    pub fn open(s: *const Streamer) bool {
+        return s.index >= 0 and (s.state == .function or s.state == .value or s.state == .closing);
+    }
+
+    /// ``feed`` of the reply's final text; a value it cuts sends the bytes held back for a closer that never came.
+    pub fn finishCut(s: *Streamer, text: []const u8, out: *std.ArrayList(Value)) Allocator.Error!void {
+        try s.feed(text, out);
+        if (s.state != .value) return;
+        var cut = try std.mem.concat(s.a, u8, &.{ if (s.typed) s.buffer.items else "", s.held, text[@min(s.pos, text.len)..] });
+        if (s.lead and cut.len > 0 and cut[0] == '\n') cut = cut[1..];
+        s.lead = false;
+        s.pos = text.len;
+        s.held = "";
+        s.buffer.clearRetainingCapacity();
+        if (cut.len > 0) try out.append(s.a, try s.args(if (s.typed) cut else try s.esc(cut)));
+    }
 };
+
+/// A streamed reply's final prose: ``cutProse`` when max_tokens left a call open, else ``finishedProse``.
+pub fn endProse(a: Allocator, content: []const u8, text: []const u8, tools: []const Value, reason: []const u8) Allocator.Error![]const u8 {
+    const cut = std.mem.eql(u8, reason, "length") and (try cutCalls(a, text, tools)) != null;
+    return if (cut) reply_text.cutProse(a, content) else reply_text.finishedProse(a, content);
+}
+
+/// A reply max_tokens cut inside a call: the calls its stream sent, the cut one included; null when none was left open.
+pub fn cutCalls(a: Allocator, text: []const u8, tools: []const Value) Allocator.Error!?[]Value {
+    var s: Streamer = try .init(a, tools);
+    var deltas: std.ArrayList(Value) = .empty;
+    try s.finishCut(text, &deltas);
+    if (!s.open()) return tool_glm_cut.cutCalls(a, text, tools); // a GLM envelope streams no call before it closes
+    const Call = struct { id: []const u8 = "", name: []const u8 = "", args: std.ArrayList(u8) = .empty };
+    const built = try a.alloc(Call, @intCast(s.index + 1));
+    for (built) |*c| c.* = .{};
+    for (deltas.items) |d| {
+        const one = d.get("tool_calls").?.array[0];
+        const c = &built[@intCast(one.get("index").?.int64().?)];
+        if (one.strField("id")) |id| c.id = id;
+        const f = one.get("function").?;
+        if (f.strField("name")) |n| c.name = n;
+        if (f.strField("arguments")) |piece| try c.args.appendSlice(a, piece);
+    }
+    const calls = try a.alloc(Value, built.len);
+    for (built, calls) |*c, *slot| {
+        const function = try json.newObject(a);
+        try function.put(a, "name", .{ .string = c.name });
+        try function.put(a, "arguments", .{ .string = c.args.items });
+        const one = try json.newObject(a);
+        try one.put(a, "id", .{ .string = if (c.id.len > 0) c.id else try ids.make(a, "call_", 24) });
+        try one.put(a, "type", .{ .string = "function" });
+        try one.put(a, "function", .{ .object = function });
+        slot.* = .{ .object = one };
+    }
+    return calls;
+}
 
 /// Bytes of ``rest`` that cannot be the start of a ``tail``-byte closer (Python slices characters).
 fn trimTail(rest: []const u8, tail: usize) usize {
@@ -427,10 +484,10 @@ pub const Policy = struct {
         return out.items;
     }
 
-    /// What the filter held back that the reply keeps as text (a malformed call): ``final`` past the prose ``sent``.
-    pub fn kept(p: *const Policy, final: []const u8, sent: []const u8) ?[]const u8 {
-        if (!p.single) return null;
-        const shown = reply_text.pyLstrip(sent); // the parsed content starts stripped
+    /// Held-back malformed or unoffered call envelopes kept as reply text: ``final`` past the prose ``sent``.
+    pub fn kept(_: *const Policy, final: []const u8, sent: []const u8) ?[]const u8 {
+        // Replies without parsed calls retain their leading whitespace; parsed content may be stripped.
+        const shown = if (std.mem.startsWith(u8, final, sent)) sent else reply_text.pyLstrip(sent);
         if (!std.mem.startsWith(u8, final, shown)) return null;
         const rest = final[shown.len..];
         return if (reply_text.pyStrip(rest).len > 0) rest else null;

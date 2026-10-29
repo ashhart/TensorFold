@@ -33,3 +33,6 @@ pub const ane = @import("ane.zig");
 test {
     std.testing.refAllDecls(@This());
 }
+
+pub const CommandSessionFor = @import("command_session.zig").Session;
+pub const CommandSession = CommandSessionFor(@This());

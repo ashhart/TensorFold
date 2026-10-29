@@ -11,6 +11,7 @@ pub const Served = struct {
     facts: lanes.Model,
     stream_bytes: usize,
     held: ?*Held = null,
+    source: ?api.DraftSources.Named = null,
     prepare: ?startup.Prepare = null,
     /// The family's own per-stream buffers, when its Loaded pre-allocates them.
     family: ?struct { ctx: *anyopaque, reserve: *const fn (*anyopaque, u32) anyerror!void } = null,
@@ -40,6 +41,9 @@ const Held = struct { drafted: lanes.drafted.Drafted, ctx: *anyopaque, close: *c
 /// `loaded`'s backend, wrapped with the drafter `o.drafter` names when it does; null with `problem` set on refusal.
 pub fn wrap(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, loaded: anytype, o: api.Open, problem: *[]const u8) !?Served {
     var s: Served = .{ .backend = loaded.backend, .facts = loaded.facts, .stream_bytes = loaded.stream_bytes };
+    if (@hasField(@TypeOf(loaded), "draft_kind")) if (loaded.draft_kind) |kind| {
+        s.source = .{ .kind = kind, .name = o.drafter_name orelse o.drafter orelse "" };
+    };
     if (@hasField(@TypeOf(loaded), "reserve")) s.family = .{ .ctx = loaded.ctx, .reserve = loaded.reserve };
     const dir = o.drafter orelse return s;
     if (!o.drafts) return s;
@@ -61,6 +65,7 @@ pub fn wrap(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, loaded: 
         problem.* = try std.fmt.allocPrint(a, "the drafter {s} cannot attach to this model ({s})", .{ dir, @errorName(e) });
         return null;
     };
+    s.source = .{ .kind = opened.drafter.kind, .name = o.drafter_name orelse dir };
     s.backend = h.drafted.backend();
     s.facts = h.drafted.facts(loaded.facts);
     s.stream_bytes = h.drafted.streamBytes(loaded.stream_bytes);
@@ -72,15 +77,18 @@ pub fn wrap(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, loaded: 
 test "--drafter: a family that loads its own drafter (GLM's DFlash2) serves as it loaded, and one with neither refuses" {
     const F = @import("glm_cuda").native;
     try std.testing.expect(@hasField(F.Options, "drafter") and !@hasDecl(F, "openDrafter"));
-    const Loaded = struct { backend: lanes.backend.Backend, facts: lanes.Model, stream_bytes: usize };
+    const Loaded = struct { backend: lanes.backend.Backend, facts: lanes.Model, stream_bytes: usize, draft_kind: ?[]const u8 = null };
     var loaded: Loaded = undefined;
     loaded.stream_bytes = 7;
-    const o: api.Open = .{ .dir = "glm", .model_type = F.model_type, .drafter = "dflash2" };
+    loaded.draft_kind = "DFlash2";
+    const o: api.Open = .{ .dir = "glm", .model_type = F.model_type, .drafter = "cache/dflash2", .drafter_name = "example/DFlash2" };
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var problem: []const u8 = "";
     const served = (try wrap(F, arena.allocator(), std.testing.allocator, std.testing.io, loaded, o, &problem)) orelse return error.TestUnexpectedResult;
     try std.testing.expect(served.held == null and served.stream_bytes == 7);
+    try std.testing.expectEqualStrings("DFlash2", served.source.?.kind);
+    try std.testing.expectEqualStrings("example/DFlash2", served.source.?.name);
     const Plain = struct {
         pub const model_type = "plain";
         pub const Options = struct { context: usize };

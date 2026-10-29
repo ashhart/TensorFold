@@ -103,6 +103,20 @@ extern "C" __global__ void __launch_bounds__(256) tf_ctl_act_round(const __nv_bf
     else tf_act_round::rows<false>(gate, g_ld, up, u_ld, out, xs, n, keep);
 }
 
+// Gate 3: act_rows.cu's tf_head_gate_rows keeping only the rounding points in `keep`; the exact check must go red.
+extern "C" __global__ void __launch_bounds__(256) tf_ctl_head_gate(const __nv_bfloat16* o, const __nv_bfloat16* g,
+                                                                    long long g_ld, __nv_bfloat16* out, float* xs,
+                                                                    int heads, int d, int keep) {
+    tf_act_round::head_gate_rows(o, g, g_ld, out, xs, heads, d, keep);
+}
+
+// Gate 3: act_rows.cu's tf_gelu_erf_rows keeping only the rounding points in `keep`; the exact check must go red.
+extern "C" __global__ void __launch_bounds__(256) tf_ctl_gelu_erf(const __nv_bfloat16* gate, long long g_ld,
+                                                                   const __nv_bfloat16* up, long long u_ld,
+                                                                   __nv_bfloat16* out, float* xs, int n, int keep) {
+    tf_act_round::gelu_erf_rows(gate, g_ld, up, u_ld, out, xs, n, keep);
+}
+
 // Gate 5: bounded to 256 threads a block, which the registry says its launcher gives 512.
 extern "C" __global__ void __launch_bounds__(256) tf_ctl_bounded(const float* X, float* Y) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -251,7 +265,7 @@ extern "C" __global__ void tf_ctl_q35_dense_half(const __nv_bfloat16 *X, const _
 // The pre-template GLM BF16 operators, kept apart from the candidate math for byte equality.
 #include "contract_glm_bf16_baseline.cuh"
 // Gate 4: flashnext_hc's fn_hc_dense_mix8 with each 32-column group summed in bf16, while its spec declares fp32 sums.
-#include "glue_math.cuh"
+#include "common/glue_math.cuh"
 
 extern "C" __global__ void __launch_bounds__(256) tf_ctl_hc_mix8_bf16(const __nv_bfloat16* UP, const __nv_bfloat16* NORMED,
                                                                       __nv_bfloat16* MIXED, float* XSM, int D, int SS) {

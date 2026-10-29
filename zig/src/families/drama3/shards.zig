@@ -10,6 +10,7 @@ pub const Shards = struct {
     files: []st.File,
     map: std.StringHashMapUnmanaged(usize),
     arena: std.heap.ArenaAllocator,
+    metadata: ?std.json.Value = null,
 
     pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Shards {
         var s: Shards = .{ .files = &.{}, .map = .empty, .arena = std.heap.ArenaAllocator.init(gpa) };
@@ -19,6 +20,7 @@ pub const Shards = struct {
         const text = try std.Io.Dir.cwd().readFileAlloc(io, ipath, a, .limited(64 << 20));
         const tree = try std.json.parseFromSliceLeaky(std.json.Value, a, text, .{});
         const wm = try st.index.weightMap(tree);
+        s.metadata = tree.object.get("metadata");
         var names: std.ArrayList([]const u8) = .empty;
         var it = wm.iterator();
         while (it.next()) |e| {

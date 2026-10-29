@@ -55,7 +55,12 @@ pub fn capacity(pairs: usize, experts: usize) usize {
 
 /// tile_for: the decode tile below BLOCK_FROM rows, the GEMM tile from there; a lane round's rows keep the decode tile.
 pub fn tileFor(o: Ops, rows: usize) usize {
-    return if (rows < BLOCK_FROM or o.window) LANE_ROWS else BLOCK_ROWS;
+    return tileOf(rows, o.window);
+}
+
+/// tile_for's rule on its own, for a fixture that plans as serving does.
+pub fn tileOf(rows: usize, window: bool) usize {
+    return if (rows < BLOCK_FROM or window) LANE_ROWS else BLOCK_ROWS;
 }
 
 /// `x` (rows, D) to (rows, D) in its dtype: the top-k experts plus the shared one; a tp rank returns its fp32 share.

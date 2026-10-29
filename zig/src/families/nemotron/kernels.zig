@@ -58,8 +58,8 @@ fn geoSource(comptime key: []const u8, comptime which: []const u8, comptime head
     return text ++ "\n";
 }
 
-const geo_up = geoSource("expert_up", "up", "2688, 1856, 64", ", 6");
-const geo_down = geoSource("expert_down", "down", "1856, 2688, 64", "");
+pub const geo_up = geoSource("expert_up", "up", "2688, 1856, 64", ", 6");
+pub const geo_down = geoSource("expert_down", "down", "1856, 2688, 64", "");
 
 pub const total = sources.nemotron.all.len + glue_names.len + geo_names.len + rows_names.len + tree_names.len + round_names.len + head_names.len + sample_names.len + train_names.len + mixer_names.len;
 

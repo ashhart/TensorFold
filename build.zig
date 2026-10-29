@@ -59,6 +59,7 @@ fn poolChecks(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.B
 }
 
 pub fn build(b: *std.Build) void {
+    @import("zig/build/qwen35_cache_host.zig").tests(b);
     @import("zig/build/residency_host.zig").steps(b);
     @import("zig/build/lane_halt_host.zig").steps(b);
     @import("zig/build/dsv41_shared.zig").steps(b);
@@ -67,6 +68,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/dsv41_draft.zig").steps(b);
     const target = b.standardTargetOptions(.{});
     @import("zig/build/copy_source.zig").steps(b);
+    @import("zig/build/checkpoint_io_host.zig").steps(b, target);
     const release_version = b.option([]const u8, "version", "Release version, exactly MAJOR.MINOR.PATCH");
     if (release_version) |v| if (!dist_build.validVersion(v)) @panic("-Dversion must be exactly MAJOR.MINOR.PATCH");
     const build_options = b.addOptions();
@@ -82,15 +84,20 @@ pub fn build(b: *std.Build) void {
     _ = ids_files.addCopyFile(b.path("zig/src/families/nemotron/draft_ids.txt"), "draft_ids.txt");
     const draft_ids = b.createModule(.{ .root_source_file = ids_files.add("draft_ids.zig", "pub const text = @embedFile(\"draft_ids.txt\");\n") });
     const test_step = b.step("test", "Unit tests (macOS includes available Metal device checks)");
+    @import("zig/build/qwen4.zig").steps(b, test_step);
+    @import("zig/build/fsr.zig").steps(b, test_step);
     @import("zig/build/kernel_symbols.zig").tests(b, test_step);
     @import("zig/build/checkpoint_security.zig").tests(b, test_step);
+    @import("zig/build/quant_geometry_host.zig").steps(b, test_step);
     if (b.graph.host.result.os.tag == .macos) {
         const step5_mods = metalEngineModules(b, b.graph.host, .Debug, draft_ids);
         const empty = b.addWriteFiles().add("step5-compile-only.metallib", "");
         step5_mods.sources.addImport("nemotron_packed_metallib", embedded(b, empty, "nemotron_packed.metallib"));
         @import("zig/build/step5_host.zig").steps(b, step5_mods.metal, step5_mods.engine, step5_mods.lanes);
+        @import("zig/build/qwen35_cache_host.zig").compileHost(b, step5_mods.metal, step5_mods.engine, step5_mods.lanes);
     }
     @import("zig/build/h3_host.zig").tests(b, target, test_step);
+    @import("zig/build/ling_host.zig").tests(b, target, test_step);
     @import("zig/build/digest.zig").steps(b, test_step, draft_ids, build_options);
     @import("zig/build/flashnext_budget.zig").steps(b, test_step);
     @import("zig/build/flashnext_batch_host.zig").tests(b, test_step);
@@ -98,6 +105,7 @@ pub fn build(b: *std.Build) void {
         const budget_mods = metalEngineModules(b, b.graph.host, .Debug, draft_ids);
         const budget_empty = b.addWriteFiles().add("budget-compile-only.metallib", "");
         budget_mods.sources.addImport("nemotron_packed_metallib", embedded(b, budget_empty, "nemotron_packed.metallib"));
+        @import("zig/build/fsr.zig").deviceSteps(b, budget_mods.metal, budget_mods.engine, budget_mods.sources);
         @import("zig/build/flashnext_budget.zig").compileHost(b, budget_mods.metal, budget_mods.engine, budget_mods.lanes);
         @import("zig/build/residency_host.zig").compileHost(b, budget_mods.metal, budget_mods.engine, budget_mods.lanes);
     }
@@ -153,6 +161,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/qwen27_host.zig").tests(b);
     const xgrammar = grammar_build.option(b);
     dist_build.targets(b, draft_ids, build_options, release_version, xgrammar);
+    @import("zig/build/release_paths_step.zig").tests(b, test_step);
     @import("zig/build/sessions.zig").add(b, test_step);
     @import("zig/build/tp.zig").add(b, target, optimize, test_step, tp_options);
     @import("zig/build/gradient_host.zig").add(b);
@@ -196,12 +205,15 @@ pub fn build(b: *std.Build) void {
     const warning_run = b.addRunArtifact(warning);
     test_step.dependOn(&warning_run.step);
     b.step("test-learn-warning", "CPU production-log refusal, backoff and recovery test").dependOn(&warning_run.step);
-    grammar_build.steps(b, target, xgrammar);
+    grammar_build.steps(b, target, xgrammar, lanes_cpu);
     grammar_build.hostTests(b, test_step);
     contract_build.hostTests(b, gemma4_contract_host);
+    // the CPU-only fake server and engine-less CLI (zig build server-cpu), behind zig/tests/server/build.sh
+    @import("zig/build/server.zig").cpuArtefacts(b, b.graph.host, optimize, build_options);
     sys_build.wire(b);
     @import("zig/build/checkpoint_config.zig").wire(b);
     @import("zig/build/save_guard.zig").wire(b);
+    @import("zig/build/dev_tools.zig").wire(b, target);
 }
 
 /// The native Metal server build is owned by the shared Metal target module.

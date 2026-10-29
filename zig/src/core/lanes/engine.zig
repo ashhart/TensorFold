@@ -308,7 +308,7 @@ pub const Engine = struct {
         if (e.cfg.timed) {
             // the drafts budgets priced past each stream's first are no part of the round's overhead
             var steps: i64 = 0;
-            for (budgets) |d| steps += @max(0, d - 1);
+            for (budgets) |d| steps = if (e.cfg.draft_streams and depth.pricedBatched()) @max(steps, d - 1) else steps + @max(0, d - 1);
             const ms = e.clock.elapsedMs(.overhead) - e.cfg.draft_step_ms * @as(f64, @floatFromInt(steps));
             try trail.event(e, &.{ f("ev", str("overhead")), f("streams", int(plans.len)), f("rows", int(total)), f("ms", ev.bits(ms)) });
             try e.rule.observeOverhead(@intCast(plans.len), total, ms, sampled, e.rule.headMs(budgets));
@@ -344,9 +344,7 @@ pub const Engine = struct {
                 for (path[1..]) |r| own_kept += @intFromBool(r < own_end);
                 const own: usize = own_end - 1;
                 if (p.kind == .copy) {
-                    if (p.recalled) {
-                        if (s.recall) |r| r.observe(@intCast(own), @intCast(own_kept), s.rounds);
-                    } else if (s.proposer) |pr| pr.observe(@intCast(own), @intCast(own_kept));
+                    win.observeCopied(e, s, p.recalled, own_kept, own);
                     if (e.alone) {
                         const width = s.copy_width orelse e.cfg.first_copy;
                         s.copy_width = if (own_kept == own) @min(e.cfg.max_copy, 2 * width + 1) else e.cfg.first_copy;

@@ -26,6 +26,8 @@ pub const Collective = struct {
         try c.lib.requireSupportedVersion();
         const info = @typeInfo(Advanced).@"struct";
         inline for (info.field_names, info.field_types) |name, T| @field(c.api, name) = c.lib.lib.lookup(T, name) orelse return error.MissingSymbol;
+        var diag = cuda.p2p_report.begin(rank, 2);
+        defer diag.end();
         var id: nccl.UniqueId = undefined;
         const until = wire.deadline(timeout_ms);
         if (rank == 0) {
@@ -36,6 +38,7 @@ pub const Collective = struct {
         errdefer c.abort();
         try c.submitted(c.api.ncclCommInitRankConfig(&c.comm, 2, id, @intCast(rank), &config));
         try c.wait(null, until);
+        cuda.p2p_report.afterInit(&diag, .{ .lib = &c.lib, .comm = c.comm }); // no driver here: no probe
         return c;
     }
 

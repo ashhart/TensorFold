@@ -15,8 +15,10 @@ pub const reuse = @import("cuda_reuse.zig");
 
 test {
     _ = @import("cuda_attention.zig");
+    _ = @import("cuda_prompt.zig");
     _ = @import("cuda_forward.zig");
     _ = engine;
+    _ = prompt_int8;
     _ = native;
     _ = native_moe;
     _ = mtp;
@@ -28,10 +30,13 @@ test {
     _ = vision;
     _ = @import("cuda_vision_prompt.zig");
     _ = reuse;
+    _ = @import("cuda_disk.zig");
     _ = native;
     _ = @import("cuda_pages.zig");
+    _ = @import("cuda_penalties.zig");
     _ = @import("cuda_pages_init_test.zig");
     _ = @import("cuda_pages_lifetime_test.zig");
+    _ = @import("cuda_mtp_area_test.zig");
 }
 
 pub const slide = @import("cuda_slide.zig");

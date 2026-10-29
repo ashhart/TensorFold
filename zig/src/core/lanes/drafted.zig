@@ -29,6 +29,8 @@ pub const Drafted = struct {
     absorbs: std.ArrayList(dr.Absorb) = .empty,
     holds: std.ArrayList(dr.Hold) = .empty,
     firsts: std.ArrayList(u32) = .empty,
+    /// The target reads held drafts from the drafter itself (Window.held), so windows without fillers pass as they are.
+    held_on_target: bool = false,
 
     /// The wrapper, with the target told the drafter's taps before any forward.
     pub fn init(gpa: Allocator, target: be.Backend, drafter: dr.Drafter) !Drafted {
@@ -69,7 +71,7 @@ pub const Drafted = struct {
     };
     pub fn backend(x: *Drafted) be.Backend {
         const planned = if (x.drafter.proposal_head) |service| service.mode != .legacy and x.drafter.vtable.hold_planned != null and x.drafter.vtable.clear_proposals != null else false;
-        return .{ .proposal_head = x.drafter.proposal_head, .ptr = x, .round_observer = x.target.round_observer, .first_before_draft = x.target.first_before_draft, .vtable = vtableFor(planned, x.target.vtable.prefill_step != null and x.target.vtable.reports_fill and x.target.vtable.features != null, x.target.vtable.cancel_prefill != null) };
+        return .{ .proposal_head = x.drafter.proposal_head, .ptr = x, .round_observer = x.target.round_observer, .first_before_draft = x.target.first_before_draft, .penalties = x.target.penalties, .vtable = vtableFor(planned, x.target.vtable.prefill_step != null and x.target.vtable.reports_fill and x.target.vtable.features != null, x.target.vtable.cancel_prefill != null) };
     }
 
     const cancellable: [4]be.Backend.VTable = blk: {
@@ -156,18 +158,19 @@ pub const Drafted = struct {
         try x.drafter.absorb(&.{.{ .stream = s, .features = f, .start = from, .follow = ids[from + 1 ..] }});
     }
 
-    /// A step of the target's prompt pass, then the drafter absorbs its rows (as `take`); it opens at the first step.
+    /// A step of the target's prompt pass, then the drafter absorbs its rows (`take`); it opens after the first step.
     fn prefillStep(ptr: *anyopaque, s: *Stream) anyerror!bool {
         const x = self(ptr);
         const step = x.target.vtable.prefill_step.?;
         if (!s.drafts) return step(x.target.ptr, s);
+        errdefer x.dropStream(s);
+        const done = try step(x.target.ptr, s);
+        // the target's lane is open now: a drafter that keeps its stream's rows in the lane's run finds it
         if (!x.lanes.contains(s)) {
             try x.lanes.ensureUnusedCapacity(x.gpa, 1);
             try x.drafter.open(s);
             x.lanes.putAssumeCapacity(s, .{});
         }
-        errdefer x.dropStream(s);
-        const done = try step(x.target.ptr, s);
         const lane = x.lanes.getPtr(s).?;
         const from = lane.stepped orelse s.cached; // a resumed pass starts at its kept state
         const to: u64 = if (done) s.prompt().len else s.fill_at.load(.monotonic);
@@ -217,11 +220,13 @@ pub const Drafted = struct {
             lane.tree_first = null;
         };
         var total: usize = 0;
+        var through = x.held_on_target;
         for (windows) |w| {
             if (w.held > 0 and w.tokens.len != 0) return error.MixedDrafts;
             total += w.held;
+            if (through and w.held > 0 and (x.lanes.getPtr(w.stream) orelse return error.NotDrafting).filler > 0) through = false;
         }
-        if (total == 0) return x.target.verify(x.windows.items, out);
+        if (total == 0 or through) return x.target.verify(x.windows.items, out);
         try x.tokens.resize(x.gpa, total);
         x.streams.clearRetainingCapacity();
         x.outs.clearRetainingCapacity();

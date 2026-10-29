@@ -26,15 +26,8 @@ pub const max_streams = q.attention_plan.max_streams;
 const ring = 64;
 pub const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
-/// Called before a finished stream leaves its slot, its state still standing there (the reply's prompt-cache keep).
-pub const Release = struct { ctx: *anyopaque, kept: *const fn (ctx: *anyopaque, s: *lanes.Stream, slot: u32) void };
-
-/// A slot's memory on first use: `room` says whether `bytes` more fit for stream `s`, `added` takes the new buffers.
-pub const Grow = struct {
-    ctx: *anyopaque,
-    room: *const fn (ctx: *anyopaque, bytes: usize, s: *const lanes.Stream) bool,
-    added: *const fn (ctx: *anyopaque, buffers: []const mtl.Buffer) void,
-};
+pub const Release = @import("qwen27_hooks.zig").Release;
+pub const Grow = @import("qwen27_hooks.zig").Grow;
 
 pub const Metal = struct {
     residency: ?mtl.ResidencySet.Follow = null,
@@ -47,6 +40,7 @@ pub const Metal = struct {
     contexts: [max_streams]?*Context = @splat(null), // slots past 0: their taps (a kept state carries them) and drafter state
     draft_slots: u32 = 1, // slots below this draft their own trees while no more streams are live (TF_Q27_DRAFT_SLOTS)
     release_hook: ?Release = null,
+    checkpoint_hook: ?lanes.stream.MarkHook = null, // unplanned prompt states only when the cache has room
     grow: ?Grow = null,
     drawn: [ring]u32 = undefined, // drawn tokens by handle
     next: u64 = 0,
@@ -70,6 +64,12 @@ pub const Metal = struct {
     sampled: [max_rows]u32 = undefined, // the last lone window's draws
     landing: Landing = .{}, // drafted nodes offered with their parent kept, and landed, by own log-probability
     vision: ?*@import("qwen27_images.zig").Vision = null, // --vision: the image tower and a prompt pass's image rows
+    fills: std.AutoHashMapUnmanaged(*lanes.Stream, slots.Fill) = .empty, // prompt passes the lane host runs by chunks
+    image_fill: ?*const lanes.Stream = null, // the pass whose images the vision rows hold, until it closes
+    promote_due: bool = false, // slot 0 freed: a stream moves in at the next backend call (slots.promoteDue)
+    standing: @import("qwen27_resume.zig").Standing = .{}, // what slot 0 stands at once its stream left (#1197)
+    rewind: ?mtl.Buffer = null, // slot 0's DeltaNet states and taps at its last pass's history end
+    slot_resume: bool = true, // TF_QWEN27_SLOT_RESUME: a later prompt resumes where slot 0 stands (0: off)
 
     pub fn init(gpa: std.mem.Allocator, runner: *q.decode_round.Runner, draft: ?*Draft) !*Metal {
         if (runner.slots == 0 or runner.slots > max_streams or runner.model.frame.capacity < batch_rows) return error.TargetBinding;
@@ -82,7 +82,7 @@ pub const Metal = struct {
         errdefer kept.deinit();
         const b = try gpa.create(Metal);
         errdefer gpa.destroy(b);
-        b.* = .{ .gpa = gpa, .runner = runner, .draft = draft, .ops = ops, .picks = picks, .kept = kept, .draft_slots = draftSlots() };
+        b.* = .{ .gpa = gpa, .runner = runner, .draft = draft, .ops = ops, .picks = picks, .kept = kept, .draft_slots = draftSlots(), .slot_resume = slots.slotResumeEnv() };
         errdefer b.freeContexts();
         if (draft) |d| {
             const g = d.model.ring();
@@ -103,9 +103,12 @@ pub const Metal = struct {
 
     pub fn deinit(b: *Metal) void {
         q.residency.setBack(b, null);
+        b.standing.deinit(b.gpa);
+        if (b.rewind) |x| x.deinit();
         b.dropRound();
         b.dropTree();
         b.freeContexts();
+        b.fills.deinit(b.gpa);
         b.kept.deinit();
         b.picks.deinit();
         b.ops.deinit();
@@ -121,7 +124,7 @@ pub const Metal = struct {
     const refill = slots.refill;
 
     pub fn backend(b: *Metal) be.Backend {
-        return .{ .ptr = b, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draft_fns.draftFn, .probabilities = draft_fns.probabilitiesFn, .tree = draft_fns.treeFn, .release = releaseFn, .reports_fill = true } };
+        return .{ .ptr = b, .vtable = &.{ .prefill = prefillFn, .prefill_step = slots.prefillStep, .cancel_prefill = slots.cancelPrefill, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draft_fns.draftFn, .probabilities = draft_fns.probabilitiesFn, .tree = draft_fns.treeFn, .release = releaseFn, .reports_fill = true } };
     }
 
     /// What the round loop reads at setup: slot 0's stream drafts trees; every stream verifies copies.
@@ -417,10 +420,8 @@ pub const Metal = struct {
         const b = self(ptr);
         b.settle() catch {};
         b.dropRound();
-        const slot = b.slotOf(s) orelse (b.freeSlot() orelse return error.NoFreeSlot);
-        try b.ready(slot, s);
-        b.dropTreeOf(slot);
-        b.owners[slot] = s;
+        slots.promoteDue(b);
+        const slot = try slots.bind(b, s);
         errdefer b.owners[slot] = null;
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
@@ -445,13 +446,16 @@ pub const Metal = struct {
 
     fn queueFn(ptr: *anyopaque, s: *lanes.Stream, feed: be.Feed, position: u64) anyerror!u64 {
         const b = self(ptr);
-        const slot = try b.slotFor(s);
         try b.settle();
+        slots.promoteDue(b);
+        const slot = try b.slotFor(s);
         const token = try b.value(feed);
+        const before = b.runner.gpu_seconds;
         if (b.drafter(slot)) |d| try d.advance(token) else {
             try (q.session.Session{ .runner = b.runner, .slot = slot }).step(token);
             if (b.ringOf(slot)) |g| try b.ringChunk(g, 1);
         }
+        slots.charge(b, s, before);
         var next: [1]u32 = undefined;
         try b.draw(s, 0, 1, &.{position}, &next, &.{});
         return b.push(next[0]);
@@ -466,6 +470,7 @@ pub const Metal = struct {
         const b = self(ptr);
         if (windows.len == 0 or windows.len > b.runner.slots or windows.len != out.len) return error.BadWindows;
         try b.settle();
+        slots.promoteDue(b);
         const r = b.runner;
         var inputs: [max_streams]q.round_plan.Input = undefined;
         var total: usize = 0;
@@ -500,7 +505,9 @@ pub const Metal = struct {
         b.round = try Round.init(b.gpa, inputs[0..windows.len], @intCast(r.model.config.conv_kernel), r.slots, @intCast(r.model.config.vocab));
         b.count = windows.len;
         errdefer b.dropRound();
+        const before = r.gpu_seconds;
         if (plain) try r.advance(&b.round.?, .all) else try r.verifyHead(&b.round.?, .all);
+        for (windows) |w| slots.charge(b, w.stream, before); // a shared round counts whole in each reply
         b.advanced = plain;
         b.rows = total;
         // every greedy window's rows from one argmax over the round; a sampled window draws on the host
@@ -575,6 +582,7 @@ pub const Metal = struct {
     }
 
     fn releaseFn(ptr: *anyopaque, s: *lanes.Stream) void {
+        slots.endFill(self(ptr), s);
         self(ptr).unbind(s);
     }
 };

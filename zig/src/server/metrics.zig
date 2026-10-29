@@ -1,6 +1,7 @@
 //! Prometheus text for GET /metrics, family for family as the Python server writes it.
 const std = @import("std");
 const process = @import("process_memory.zig");
+const resident = @import("process_resident.zig");
 const api = @import("engine_api");
 
 const prefix = "tensorfold:";
@@ -122,6 +123,7 @@ pub const Metrics = struct {
         try gauge(w, "decode_rounds_total", "counter", "Decode rounds used by finished requests.", snap.rounds);
         try histogram(w, "request_prefill_seconds", "Seconds a finished request's prompt pass took.", snap.prefill);
         try processGauges(w, process.read());
+        try residentGauges(w, resident.read(io));
         try gauge(w, "num_requests_running", "gauge", "Requests in prefill or decode. A mirror of tensorfold:requests_running.", 0);
         try gauge(w, "num_requests_waiting", "gauge", "Requests queued or held until a lane is free. A mirror of tensorfold:requests_waiting.", 0);
         try histogram(w, "e2e_request_latency_seconds", "Seconds from arrival to the reply leaving, under vLLM's name.", snap.latency);
@@ -159,6 +161,10 @@ pub const Metrics = struct {
             try gauge(w, "prompt_cache_minimum_state_bytes", "gauge", "Smallest planned retained state, with the family's admission rounding.", c.minimum_state_bytes);
             try gauge(w, "prompt_cache_can_keep_state", "gauge", "Startup budget holds at least one planned state; not current occupancy.", @intFromBool(c.budget_bytes >= c.minimum_state_bytes));
         }
+        if (status.prompt_cache) |c| {
+            try gauge(w, "prompt_cache_states", "gauge", "All retained prompt states, including long-message interior cuts.", c.states);
+            try gauge(w, "prompt_cache_bytes", "gauge", "Storage held by retained prompt states and spare buffers, inside their budget.", c.bytes);
+        }
         const keeps = info.prompt_cache;
         if (keeps) try gauge(w, "prompt_tokens_cached_total", "counter", "Prompt tokens of finished requests restored from kept prompt states.", snap.cached);
         try gauge(w, "generation_tokens_total", "counter", "Generated tokens of finished requests.", snap.generation);
@@ -174,6 +180,7 @@ pub const Metrics = struct {
         try gauge(w, "decode_rounds_total", "counter", "Decode rounds used by finished requests.", snap.rounds);
         try histogram(w, "request_prefill_seconds", "Seconds a finished request's prompt pass took.", snap.prefill);
         try processGauges(w, process.read());
+        try residentGauges(w, resident.read(io));
         if (memory) |mem| {
             try gauge(w, "device_memory_bytes", "gauge", "Device memory the engine holds now: weights, caches and live streams; only where the backend counts it (CUDA).", mem.active);
             try gauge(w, "device_memory_peak_bytes", "gauge", "The most device memory the engine has held since start or the last /health?reset_peak=1.", mem.peak);
@@ -212,6 +219,15 @@ fn processGauges(w: *std.Io.Writer, sample: ?process.Snapshot) !void {
     try gauge(w, "process_footprint_peak_bytes", "gauge", "Kernel lifetime peak physical footprint including Metal buffers; never reset by health (macOS).", p.lifetime_peak_physical_footprint_bytes);
 }
 
+fn residentGauges(w: *std.Io.Writer, sample: ?resident.Snapshot) !void {
+    const r = sample orelse return;
+    if (r.resident_bytes) |b| try gauge(w, "process_resident_bytes", "gauge", "Current resident set (VmRSS); device memory is not in it, so it is not a physical footprint (Linux).", b);
+    if (r.anon_bytes) |b| try gauge(w, "process_resident_anon_bytes", "gauge", "Current resident anonymous memory (RssAnon): heap, stacks and private maps (Linux).", b);
+    if (r.file_bytes) |b| try gauge(w, "process_resident_file_bytes", "gauge", "Current resident file-backed memory (RssFile): the binary, libraries and mapped files (Linux).", b);
+    if (r.shmem_bytes) |b| try gauge(w, "process_resident_shmem_bytes", "gauge", "Current resident shared memory (RssShmem): System V shared memory, tmpfs maps and shared anonymous maps (Linux).", b);
+    if (r.peak_bytes) |b| try gauge(w, "process_resident_peak_bytes", "gauge", "Kernel lifetime peak resident set (VmHWM); never reset by health (Linux).", b);
+}
+
 test "process gauges omit unknown samples and keep current and lifetime peak distinct" {
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
@@ -220,6 +236,58 @@ test "process gauges omit unknown samples and keep current and lifetime peak dis
     try processGauges(&out.writer, .{ .physical_footprint_bytes = 0, .lifetime_peak_physical_footprint_bytes = 12 });
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "tensorfold:process_footprint_bytes 0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "tensorfold:process_footprint_peak_bytes 12\n") != null);
+}
+
+test "resident gauges render each count the kernel reports, and only those" {
+    var all: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer all.deinit();
+    try residentGauges(&all.writer, .{ .resident_bytes = 4 << 30, .anon_bytes = 3 << 30, .file_bytes = 768 << 20, .shmem_bytes = 256 << 20, .peak_bytes = 5 << 30 });
+    const body = all.written();
+    try std.testing.expect(std.mem.indexOf(u8, body, "# TYPE tensorfold:process_resident_bytes gauge\ntensorfold:process_resident_bytes 4294967296\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "tensorfold:process_resident_anon_bytes 3221225472\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "tensorfold:process_resident_file_bytes 805306368\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "tensorfold:process_resident_shmem_bytes 268435456\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "tensorfold:process_resident_peak_bytes 5368709120\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "process_footprint") == null); // not a footprint
+    var old: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer old.deinit();
+    try residentGauges(&old.writer, null);
+    try std.testing.expectEqual(@as(usize, 0), old.written().len);
+    try residentGauges(&old.writer, .{ .resident_bytes = 1 << 20, .peak_bytes = 2 << 20 }); // a kernel before 4.5
+    try std.testing.expect(std.mem.indexOf(u8, old.written(), "tensorfold:process_resident_bytes 1048576\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, old.written(), "process_resident_anon_bytes") == null);
+    try std.testing.expect(std.mem.indexOf(u8, old.written(), "process_resident_shmem_bytes") == null);
+    try std.testing.expect(std.mem.indexOf(u8, old.written(), "tensorfold:process_resident_peak_bytes 2097152\n") != null);
+}
+
+test "only a Linux scrape reports the resident set, parked or not, and never as the footprint" {
+    const gpa = std.testing.allocator;
+    var m: Metrics = .{ .gpa = gpa };
+    const stub: RenderStub = .{};
+    var live: std.Io.Writer.Allocating = .init(gpa);
+    defer live.deinit();
+    try m.render(std.testing.io, &live.writer, stub.status_value, &.{}, stub.info_value, stub.memory_value, 4096);
+    var parked: std.Io.Writer.Allocating = .init(gpa);
+    defer parked.deinit();
+    try m.renderParked(std.testing.io, &parked.writer, 4096);
+    for ([_][]const u8{ live.written(), parked.written() }) |body| {
+        if (@import("builtin").os.tag != .linux) {
+            try std.testing.expect(std.mem.indexOf(u8, body, "process_resident_") == null);
+            continue;
+        }
+        try std.testing.expect(std.mem.indexOf(u8, body, "process_footprint_bytes") == null);
+        const rss = try scraped(body, "\ntensorfold:process_resident_bytes ");
+        try std.testing.expect(rss > 0);
+        try std.testing.expect(try scraped(body, "\ntensorfold:process_resident_peak_bytes ") >= rss);
+        try std.testing.expect(std.mem.indexOf(u8, body, "\ntensorfold:process_resident_anon_bytes ") != null);
+    }
+}
+
+/// The number after `head` in a rendered body.
+fn scraped(body: []const u8, head: []const u8) !u64 {
+    const at = std.mem.indexOf(u8, body, head) orelse return error.NoGauge;
+    const rest = body[at + head.len ..];
+    return std.fmt.parseUnsigned(u64, rest[0 .. std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len], 10);
 }
 
 fn pools(w: *std.Io.Writer, name: []const u8, label: []const u8, lengths: []const u32, window: u32) !void {
@@ -385,4 +453,51 @@ test "metrics expose cache budget, minimum and inability to retain a state" {
     const info: api.Info = .{ .prompt_cache = true, .prompt_cache_capacity = .{ .budget_bytes = 322122547, .minimum_state_bytes = 384 << 20 } };
     try m.render(std.testing.io, &out.writer, .{}, &.{}, info, null, 262144);
     for ([_][]const u8{ "tensorfold:prompt_cache_budget_bytes 322122547\n", "tensorfold:prompt_cache_minimum_state_bytes 402653184\n", "tensorfold:prompt_cache_can_keep_state 0\n" }) |line| try std.testing.expect(std.mem.indexOf(u8, out.written(), line) != null);
+}
+
+test "metrics count interior states in retained occupancy as well as restored tokens" {
+    var m: Metrics = .{ .gpa = std.testing.allocator };
+    defer m.deinit();
+    m.note(std.testing.io, 131072, 129024, 1, 0, 0, 1, 1, null, null, null, null);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try m.render(std.testing.io, &out.writer, .{ .prompt_cache = .{ .states = 3, .bytes = 300000 } }, &.{}, .{ .prompt_cache = true }, null, 262144);
+    for ([_][]const u8{ "tensorfold:prompt_cache_states 3\n", "tensorfold:prompt_cache_bytes 300000\n", "tensorfold:prompt_tokens_cached_total 129024\n", "tensorfold:prefix_cache_hits_total 129024\n" }) |line| {
+        try std.testing.expect(std.mem.indexOf(u8, out.written(), line) != null);
+    }
+}
+
+/// Admission's families, only when a flag turned it on; the reasons are fixed, so no request value becomes a label.
+pub fn renderAdmission(w: *std.Io.Writer, snap: @import("request_admission.zig").Snapshot) !void {
+    try gauge(w, "admission_inflight", "gauge", "Model requests holding an admission reservation.", snap.inflight);
+    try gauge(w, "admission_inflight_peak", "gauge", "Most model requests holding reservations at once since start.", snap.peak);
+    try gauge(w, "admission_principals", "gauge", "Keys (or the one keyless principal) holding reservations.", snap.principals);
+    try gauge(w, "admission_rate_buckets", "gauge", "Per-key rate buckets kept, idle ones refilling included.", snap.rate_buckets);
+    try gauge(w, "admission_accepted_total", "counter", "Model requests admitted before their body was read.", snap.admitted);
+    try family(w, "admission_rejected_total", "counter", "Model requests refused with 429, by reason.");
+    for ([_][]const u8{ "global_limit", "key_limit", "principal_capacity", "rate_limit" }, [_]u64{
+        snap.rejected_global, snap.rejected_key, snap.rejected_capacity, snap.rejected_rate,
+    }) |reason, value| try w.print("{s}admission_rejected_total{{reason=\"{s}\"}} {d}\n", .{ prefix, reason, value });
+}
+
+test "admission metrics name each fixed reason and the reservations held" {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try renderAdmission(&out.writer, .{
+        .inflight = 2,
+        .peak = 4,
+        .principals = 1,
+        .admitted = 10,
+        .rejected_global = 3,
+        .rejected_key = 5,
+        .rejected_capacity = 0,
+        .rejected_rate = 7,
+        .rate_buckets = 3,
+    });
+    for ([_][]const u8{
+        "tensorfold:admission_inflight 2\n",                              "tensorfold:admission_inflight_peak 4\n",
+        "tensorfold:admission_accepted_total 10\n",                       "tensorfold:admission_rejected_total{reason=\"global_limit\"} 3\n",
+        "tensorfold:admission_rejected_total{reason=\"key_limit\"} 5\n",  "tensorfold:admission_rejected_total{reason=\"principal_capacity\"} 0\n",
+        "tensorfold:admission_rejected_total{reason=\"rate_limit\"} 7\n", "tensorfold:admission_rate_buckets 3\n",
+    }) |line| try std.testing.expect(std.mem.indexOf(u8, out.written(), line) != null);
 }

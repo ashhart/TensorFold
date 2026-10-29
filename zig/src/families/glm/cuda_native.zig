@@ -49,6 +49,7 @@ pub const Peer = struct { bytes: u64, rank: usize };
 pub const LoneRun = *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool, resumed: bool) anyerror!bool;
 
 pub const Loaded = struct {
+    draft_kind: ?[]const u8 = null,
     backend: lanes.backend.Backend,
     facts: lanes.Model,
     rows: u32,
@@ -202,6 +203,8 @@ fn openRank(a: StartArgs, set: ranks.Settings) !Loaded {
     if (std.c.getenv("NCCL_CUMEM_ENABLE") == null) _ = env.setenv("NCCL_CUMEM_ENABLE", "0", 0);
     // NCCL_COMM_ID holds NCCL's bootstrap to its subnet past NCCL_SOCKET_IFNAME: a follower naming one lets it pick
     if (p.rank > 0 and std.c.getenv("NCCL_SOCKET_IFNAME") != null) _ = env.unsetenv("NCCL_COMM_ID");
+    var diag = cuda.p2p_report.begin(p.rank, p.world);
+    defer diag.end();
     var lib = try cuda.nccl.Library.open();
     errdefer lib.close();
     var id: cuda.nccl.UniqueId = undefined;
@@ -214,6 +217,7 @@ fn openRank(a: StartArgs, set: ranks.Settings) !Loaded {
     own.group = .{ .lib = lib, .comm = comm, .rank = p.rank, .world = p.world };
     errdefer _ = own.group.lib.api.ncclCommDestroy(own.group.comm);
     if (p.world > 1) try warmPeers(ctx.d, &own.group);
+    cuda.p2p_report.afterInit(&diag, .{ .lib = &own.group.lib, .comm = comm, .d = ctx.d, .later = true });
     const cap = capacity(o.context);
     own.e = try engine.Engine.init(gpa, io, ctx.d, ctx, dir, &own.group.lib, own.group.comm, p.rank, p.world, .{ .capacity = cap, .mtp = o.drafts, .settings = set, .vision = o.vision, .drafter = o.drafter != null });
     errdefer own.e.deinit();
@@ -302,6 +306,7 @@ fn finishRank(a: OpenArgs) !Loaded {
     const extra: u64 = (if (o.drafter != null) dflash.ring_bytes else 0) + if (own.e.images) |v| v.streamBytes() else @as(usize, 0);
     own.layout = if (set.pages) try pages_mod.layout(gpa, own.e, extra) else null;
     return .{
+        .draft_kind = if (own.e.drafter != null) "DFlash2" else null,
         .backend = own.lanes.backend(),
         .facts = own.lanes.facts(),
         .rows = glm_lanes.max_rows,
@@ -433,12 +438,10 @@ test "a checkpoint refused for its format, at the entry or by the loader, is exp
     for ([_]anyerror{ error.NotModelOpt, error.UnsupportedQuant, error.UnreadableFormat }) |e| try std.testing.expect(explain(null, e) != null);
 }
 
-test "TF_KV_PAGES: auto pages from three ranks, off and 0 give windows, all and other values page like on" {
-    for ([_]usize{ 1, 2 }) |w| {
-        try std.testing.expect(!try paging(null, w, false));
-        try std.testing.expect(!try paging("auto", w, false));
-    }
-    for ([_]usize{ 3, 16 }) |w| {
+test "TF_KV_PAGES: auto pages from two ranks, off and 0 give windows, all and other values page like on" {
+    try std.testing.expect(!try paging(null, 1, false));
+    try std.testing.expect(!try paging("auto", 1, false));
+    for ([_]usize{ 2, 3, 16 }) |w| {
         try std.testing.expect(try paging(null, w, false));
         try std.testing.expect(try paging("auto", w, false));
     }

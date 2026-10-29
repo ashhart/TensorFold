@@ -34,6 +34,7 @@ pub const Draft = struct {
             return err;
         };
         d.* = .{ .gpa = gpa, .runner = runner, .model = model, .owns_model = owns_model, .generation = generation, .previous_capture = previous_capture, .previous_taps = previous_taps };
+        model.backend.profile(runner.trace); // the target's TF_Q27_PROFILE trace times the drafter's passes too
         return d;
     }
     pub fn reset(d: *Draft) !void {
@@ -63,6 +64,7 @@ pub const Draft = struct {
         d.generation.deinit();
         d.runner.capture_taps = d.previous_capture;
         d.runner.taps.ids = d.previous_taps;
+        d.model.backend.profile(null); // a borrowed drafter outlives the host and its trace
         if (d.owns_model) d.model.deinit();
         d.gpa.destroy(d);
     }

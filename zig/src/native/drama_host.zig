@@ -19,9 +19,11 @@ const Session = struct {
     /// Valid only while this lane's prefix KV remains untouched; snapshots own no KV copies.
     prefix: reference.Prefix = .{},
     cache: Snap = .{},
+    guide: ?Guide = null,
 };
 /// Metal snapshot buffers belong to the shared GPU owner; CUDA keeps its uncached path.
 const Snap = if (is_cuda) struct {} else d3.Snapshot;
+const Guide = if (is_cuda) struct {} else d3.guidance.Guide;
 const Job = struct {
     id: api.Id,
     request: *const api.SpeechRequest,
@@ -42,6 +44,8 @@ pub const Options = struct {
     silence: api.speech_guard.Config = .{},
     max_frames: ?u32 = null,
     prefill_rows: u32 = @intCast(d3.common.single_row), // rows a prompt chunk: one row until a caller opts in
+    cfg_enabled: bool = false,
+    cfg_batched: bool = false,
 };
 
 const Host = struct {
@@ -91,6 +95,16 @@ const Host = struct {
         if (!std.math.isFinite(r.temperature) or r.temperature < 0) return false;
         if (!std.math.isFinite(r.top_p) or r.top_p <= 0 or r.top_p > 1) return false;
         if (r.top_k == 0 or r.top_k > (if (is_cuda) @as(u32, std.math.maxInt(i32)) else 64)) return false;
+        if (!std.math.isFinite(r.cfg_gamma) or r.cfg_gamma < 1 or r.cfg_gamma > 5) return false;
+        if (r.unconditioned.len > 0) {
+            if (is_cuda or h.sessions[0].guide == null or r.unconditioned.len > sp.max_prompt_tokens) return false;
+            const ids_ = h.sessions[0].e.c.ids;
+            d3.model.validate(r.unconditioned, ids_, h.info_.context_window, r.max_frames) catch return false;
+            for (r.unconditioned) |row| {
+                if (row[0] >= ids_.sem_begin and row[0] <= ids_.sem_end) return false;
+                for (row[1..]) |code| if (code != 0) return false;
+            }
+        }
         d3.model.validate(r.frames, h.sessions[0].e.c.ids, h.info_.context_window, r.max_frames) catch return false;
         return true;
     }
@@ -200,6 +214,7 @@ const Host = struct {
             } else {
                 const ref_rows = reference.prefillRows(r.frames.len, r.reference_rows, s.e.o.max_rows);
                 if (!j.state.started) {
+                    if (lane.guide) |*guide| try guide.begin(r.unconditioned, r.cfg_gamma);
                     // Invalidate before reset, GPU work or any fallible preparation for a miss.
                     if (try lane.prefix.begin(h.gpa, r.frames, ref_rows)) {
                         try s.e.restore(&lane.cache);
@@ -213,6 +228,10 @@ const Host = struct {
                     try s.t.c.reset();
                     j.state.started = true;
                 }
+                if (lane.guide) |*guide| if (try guide.promptStep(r.unconditioned)) {
+                    try sync(s);
+                    return;
+                };
                 var count = s.e.o.promptRows(r.frames.len - j.state.prompt);
                 const want_snapshot = ref_rows > 0 and !lane.prefix.valid;
                 if (want_snapshot and j.state.prompt < ref_rows) count = @min(count, ref_rows - j.state.prompt);
@@ -235,7 +254,10 @@ const Host = struct {
             return;
         }
         const smp: d3.Sampling = .{ .temperature = r.temperature, .top_k = @intCast(r.top_k), .top_p = r.top_p, .seed = r.seed };
-        try s.e.frameStep(smp, true, null);
+        if (!is_cuda and lane.guide != null)
+            try lane.guide.?.frame(s.e, smp)
+        else
+            try s.e.frameStep(smp, true, null);
         var frame: d3.model.Frame = undefined;
         try s.e.download(s.e.frames_out + j.state.frames * 11 * 4, std.mem.asBytes(&frame));
         try h.produced(i, s.t, frame[0] == s.e.c.ids.eos);
@@ -269,6 +291,10 @@ const Host = struct {
         const completed = state.settle(&.{.{ .ctx = &h.sessions[lane], .call = waitSession }});
         const final_reason: api.Reason = if (completed) reason else .failed;
         const final_message = if (completed) message else "speech drain failed: engine closed; storage retained";
+        if (!is_cuda) {
+            if (h.sessions[lane].guide) |*guide| guide.clear();
+            if (final_reason == .cancelled or final_reason == .failed) h.sessions[lane].prefix.invalidate();
+        }
         h.lock();
         if (!completed) h.failed.closed = true;
         const j = h.jobs[lane].?;
@@ -313,6 +339,7 @@ const Host = struct {
         while (i > 0) {
             i -= 1;
             h.sessions[i].t.destroy();
+            if (!is_cuda) if (h.sessions[i].guide) |*guide| guide.destroy();
             h.sessions[i].e.destroy();
         }
         h.limit.deinit();
@@ -322,9 +349,11 @@ const Host = struct {
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, _: []const u8, o: Options) !api.Opened {
     if (o.context < 1025 or o.context > 8192) return error.BadDramaContext;
+    if (is_cuda and (o.cfg_enabled or o.cfg_batched)) return error.GuidanceRequiresMetal;
+    if (o.cfg_batched and !o.cfg_enabled) return error.BadDramaGuidance;
     const budget = try @import("drama_budget.zig").budget(o.context, o.max_frames);
     try (d3.Options{ .max_rows = @intCast(o.prefill_rows), .attn_chunk = @intCast(o.prefill_rows) }).validatePrefill();
-    if (!is_cuda) try d3.load_limit.admit(gpa, io, dir, o.context); // refused before a weight is read: the floor's one-Mac limit
+    if (!is_cuda) try d3.load_limit.admitStates(gpa, io, dir, o.context, o.lanes * (1 + @as(u32, @intFromBool(o.cfg_enabled))));
     try o.silence.validate();
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
@@ -343,6 +372,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, _: []const u8, 
         made -= 1;
         if (!is_cuda) h.sessions[made].prefix.deinit(gpa);
         h.sessions[made].t.destroy();
+        if (!is_cuda) if (h.sessions[made].guide) |*guide| guide.destroy();
         h.sessions[made].e.destroy();
     };
     const codec = try std.fs.path.join(gpa, &.{ dir, "codec.pth" });
@@ -359,6 +389,10 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, _: []const u8, 
         errdefer e.destroy();
         const t = if (made == 0) try d3.tts.Tts.create(gpa, io, e, codec, 1) else try h.sessions[0].t.fork(e);
         h.sessions[made] = .{ .e = e, .t = t };
+        if (!is_cuda and o.cfg_enabled) h.sessions[made].guide = d3.guidance.Guide.create(e, o.cfg_batched) catch |err| {
+            t.destroy();
+            return err;
+        };
     }
     const frame_cap = budget.frames;
     h.info_ = .{
@@ -374,6 +408,9 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, _: []const u8, 
     errdefer if (!is_cuda) h.warm.drop(h.sessions[0].e.g);
     h.worker = try std.Thread.spawn(.{}, Host.run, .{h});
     if (o.silence.enabled()) std.log.info("drama3: silence guard on: {f}", .{o.silence});
+    if (o.cfg_enabled) std.log.info("drama3: semantic CFG enabled; shared weights, independent states; {s}", .{
+        if (o.cfg_batched) "paired command-buffer submission (not vectorized GEMM)" else "separate sequence submissions",
+    });
     return .{ .engine = .{ .ctx = h, .vtable = &Host.vtable }, .ctx = h, .close = Host.close };
 }
 

@@ -34,6 +34,13 @@ pub const TAP_ROW: usize = taps_mod.layers.len * D * 2; // bytes of one row's ta
 /// Device bytes a stream's context ring takes (K and V of every layer).
 pub const ring_bytes: u64 = LAYERS * 2 * @as(u64, @intCast(WIN)) * KVW * 2;
 
+/// Device bytes of the loader's raw scratch: a 4-bit linear's words, scales and biases, for the largest at `world`.
+pub fn rawBytes(bits: u8, world: usize) usize {
+    const ff: usize = if (world == 2) FF / 2 else FF; // the MLP width a rank holds, as dflash_load splits it
+    const nk: usize = @max(5 * D * D, 2 * ff * D); // fc, or gate and up stacked
+    return if (bits == 4) nk / 2 + 2 * nk / 32 + 1024 else 256;
+}
+
 /// glm_dflash's functions.
 pub const Kernels = struct {
     tap: cuda.Function,

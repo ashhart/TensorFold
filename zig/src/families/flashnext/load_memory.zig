@@ -9,7 +9,7 @@ const window = struct {
 pub const trained = window.trained;
 pub const GiB: u64 = 1 << 30;
 pub const margin = @import("sys").memory_policy.margin;
-pub const options = "raise the OS wired limit where supported, use a smaller quantization, or reduce streams/context; native --ple-on-ssd is not implemented yet";
+pub const options = "raise the OS wired limit where supported, use a smaller quantization, or reduce streams/context; use --ssd-experts GIB for an exact routed-expert pool and --ple-on-ssd for bounded n-gram rows on Flash Next Metal";
 
 pub const Plan = struct {
     weights: u64,

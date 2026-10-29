@@ -440,8 +440,8 @@ pub fn Pass(comptime Tri: type) type {
                 const pt = nvfp4_tile.size(n);
                 try self.k.router.route(self.stream, s.picks, pairs, e, pt, plan);
                 const items = cuda.grouped.maxItems(pairs, e, pt);
-                try nvfp4_tile.run(pt)(&self.k.nvfp4, self.stream, .up, .{ .x = s.mixed, .stride = dims, .slots = slots }, owned.view(), plan, s.moe_act, items, experts_n);
-                try nvfp4_tile.run(pt)(&self.k.nvfp4, self.stream, .down_f32, .{ .x = s.moe_act, .stride = owned.width }, owned.view(), plan, s.y, items, experts_n);
+                try nvfp4_tile.run(self.k, pt, self.stream, .up, .{ .x = s.mixed, .stride = dims, .slots = slots }, owned.view(), plan, s.moe_act, items, experts_n);
+                try nvfp4_tile.run(self.k, pt, self.stream, .down_f32, .{ .x = s.moe_act, .stride = owned.width }, owned.view(), plan, s.y, items, experts_n);
                 if (native.rank == 0) {
                     const glue = self.tri.own orelse return error.NativeGlueRequired;
                     try self.k.native_lane.matmul(self.stream, s.mixed, dims, n, native.shared[0].native.?, s.shared_gate, s.native_part);

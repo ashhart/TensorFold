@@ -4,6 +4,8 @@
 
 #include <cuda_bf16.h>
 #include <stdint.h>
+#include "common/reduce.cuh"
+#include "common/act.cuh"
 
 typedef __nv_bfloat16 bf16;
 
@@ -12,30 +14,13 @@ __device__ __forceinline__ bf16 b16(float v) { return __float2bfloat16(v); }
 __device__ __forceinline__ float wide(float v) { return v; }
 __device__ __forceinline__ float wide(bf16 v) { return __bfloat162float(v); }
 
-__device__ __forceinline__ float warp_sum(float v) {
-#pragma unroll
-    for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
-    return v;
-}
+using tf_common::warp_sum;
+using tf_common::block_sum_tree;
 
-// The sum over a block of `groups` warps, the same in every thread.
-__device__ __forceinline__ float block_sum(float v, float* scratch, int groups) {
-    const int lane = threadIdx.x & 31, w = threadIdx.x >> 5;
-    v = warp_sum(v);
-    if (lane == 0) scratch[w] = v;
-    __syncthreads();
-    v = warp_sum(lane < groups ? scratch[lane] : 0.0f);
-    __syncthreads();
-    return v;
-}
+using tf_common::sigmoidf_;
+using tf_common::silu;
 
-__device__ __forceinline__ float sigm(float v) { return 1.0f / (1.0f + expf(-v)); }
-__device__ __forceinline__ float silu(float v) { return v / (1.0f + expf(-v)); }
-
-__device__ __forceinline__ float silu_grad(float v) {
-    const float s = sigm(v);
-    return s * (1.0f + v * (1.0f - s));
-}
+using tf_common::silu_grad;
 
 // ---- products -------------------------------------------------------------------------------------------------------
 
@@ -409,7 +394,7 @@ extern "C" __global__ void __launch_bounds__(128) tf_q4_swiglu_back(const float*
         out[i] = wt * d * uv * silu_grad(gv);
         out[width + i] = wt * d * sg;
     }
-    dot = block_sum(dot, scratch, 4);
+    dot = block_sum_tree(dot, scratch, 4);
     if (t == 0) a[p] = dot;
 }
 
@@ -437,7 +422,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_q4_route_back(const float* 
             dl[k] = e[k] / total * (a[r * slots + k] - mix);
             at[k] = ids[r * slots + k];
         }
-        const float sg = sigm(l[shared]);
+        const float sg = sigmoidf_(l[shared]);
         dl[top_k] = a[r * slots + top_k] * sg * (1.0f - sg);
         at[top_k] = shared;
         if (dlog)

@@ -16,6 +16,7 @@ pub fn backend(o: api.Open) ?[]const u8 {
             return "--mtp-drafts: this CUDA family's drafts are not tunable; serve it without --mtp-drafts or --mtp-confidence";
     }
     if (o.policy.len > 0) return "--policy is not supported by this CUDA build";
+    if (@import("disk_spill.zig").refusal(o, "")) |why| return why;
     if (o.learn != null and !o.learn_conversations) return "--learn learns shared prompt prefixes on Macs only; CUDA keeps conversation states on disk with --learn-conversations: serve with it, or without --learn, --learn-dir or --learn-gib";
     if (o.speed_up != null) return "--speed-up links two Macs: serve without --speed-up on CUDA";
     if (o.prompt_cache_over_cap) return "--prompt-cache-over-cap lifts a Mac's 70% cap: on CUDA the prompt cache takes at most the memory the weights and streams leave, so serve without it";
@@ -40,11 +41,14 @@ pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
         if (!F.tp_draft_snapshots and o.tp > 1 and o.drafts and (o.prompt_cache_gib orelse 1) > 0)
             return "Flash Next tensor-rank MTP snapshots are unavailable: use --prompt-cache-gib 0 with --tp and drafting";
     }
+    // ahead of the drafter's and --learn-conversations' refusals (--spill-gib sets that flag), on a line of its own
+    if (o.spill == .evicted and F != nemotron.native and @import("cuda_disk.zig").keptDisk(F) == null) return "--spill-gib keeps evicted states on disk for Nemotron, the Qwen hybrids and Flash Next only on CUDA: serve this model without it";
     if (o.drafter != null and !(@hasDecl(F, "takes_drafter") and F.takes_drafter)) {
         if (@hasDecl(F, "drafter_refusal")) return F.drafter_refusal; // a family without an MTP head says so itself
         return "--drafter loads a separate drafter, and this CUDA family drafts with its own MTP head: serve without --drafter";
     }
-    if (o.learn_conversations and F != nemotron.native) return "--learn-conversations keeps conversation states on disk for Nemotron only on CUDA: serve this model without it";
+    if (o.learn_conversations and F != nemotron.native and @import("cuda_disk.zig").keptDisk(F) == null) return "--learn-conversations keeps conversation states on disk for Nemotron, the Qwen hybrids and Flash Next only on CUDA: serve this model without it";
+    if (o.learn_conversations and o.tp > 1) if (@import("cuda_disk.zig").keptDisk(F)) |K| if (@hasDecl(K, "one_rank") and K.one_rank) return "--learn-conversations keeps one rank's states on disk for this CUDA family: serve without --tp or without --learn-conversations";
     if (o.kv8 and !(@hasDecl(F, "Options") and @hasField(F.Options, "kv8"))) return "--kv-cache fp8: this CUDA family keeps bf16 caches; serve without it";
     if (o.prompt_int8 and !(@hasDecl(F, "Options") and @hasField(F.Options, "prompt_int8"))) return "--prompt-precision int8: this CUDA family's prompt matmuls take bf16 inputs; serve without it";
     if (o.loops != null and !(@hasDecl(F, "Options") and @hasField(F.Options, "loops"))) return "--loops sets a looped model's recurrent passes (Dory's): this CUDA family has none; serve without it";
@@ -131,8 +135,29 @@ test "a family with no head of its own words its --drafter refusal" {
     try std.testing.expectEqualStrings("--drafter: none yet", family(Headless, .{ .dir = "d", .model_type = "m", .drafter = "x" }) orelse "");
 }
 
-test "--learn-conversations opens Nemotron only, the one CUDA family whose states have a disk image" {
+test "--learn-conversations opens Nemotron and a family whose states declare a disk image, no other" {
     const Other = struct {};
+    const Imaged = struct {
+        pub const kept_disk = struct {};
+    };
+    try std.testing.expect(family(Imaged, .{ .dir = "d", .model_type = "m", .learn_conversations = true }) == null);
+    try std.testing.expect(family(@import("flashnext").native, .{ .dir = "d", .model_type = "qwen4_exp", .learn_conversations = true }) == null);
+    const tp = family(@import("flashnext").native, .{ .dir = "d", .model_type = "qwen4_exp", .tp = 2, .drafts = false, .learn_conversations = true });
+    try std.testing.expectStringStartsWith(tp orelse "", "--learn-conversations keeps one rank's");
+    // the refusal is the kept states' flag, not a family's name: ranked states without it pass
+    const OneRank = struct {
+        pub const Options = struct { context: usize, rank: usize };
+        pub const kept_disk = struct {
+            pub const one_rank = true;
+        };
+    };
+    const AllRanks = struct {
+        pub const Options = struct { context: usize, rank: usize };
+        pub const kept_disk = struct {};
+    };
+    try std.testing.expectStringStartsWith(family(OneRank, .{ .dir = "d", .model_type = "m", .tp = 2, .learn_conversations = true }) orelse "", "--learn-conversations keeps one rank's");
+    try std.testing.expect(family(OneRank, .{ .dir = "d", .model_type = "m", .learn_conversations = true }) == null);
+    try std.testing.expect(family(AllRanks, .{ .dir = "d", .model_type = "m", .tp = 2, .learn_conversations = true }) == null);
     try std.testing.expectStringStartsWith(family(Other, .{ .dir = "d", .model_type = "m", .learn_conversations = true }) orelse "", "--learn-conversations keeps");
     try std.testing.expect(family(nemotron.native, .{ .dir = "d", .model_type = "nemotron_h", .learn_conversations = true }) == null);
 }
@@ -174,4 +199,17 @@ test "prompt precision: int8 is refused unless a CUDA family consumes the option
     try std.testing.expectStringStartsWith(family(Bf16, request) orelse "", "--prompt-precision int8:");
     try std.testing.expect(family(Int8, request) == null);
     try std.testing.expect(family(Bf16, .{ .dir = "d", .model_type = "m" }) == null);
+}
+
+test "--spill-gib and --checkpoint-slots open the families with a disk image; the rest refuse them by name" {
+    const spilled: api.Open = .{ .dir = "d", .model_type = "m", .learn = "/s", .learn_conversations = true, .spill = .evicted, .keep = 2 };
+    try std.testing.expect(backend(spilled) == null);
+    try std.testing.expect(family(nemotron.native, spilled) == null);
+    try std.testing.expect(family(@import("qwen35").native, spilled) == null);
+    try std.testing.expect(family(@import("qwen35").native_moe, spilled) == null);
+    try std.testing.expect(family(@import("flashnext").native, spilled) == null);
+    const Other = struct {};
+    try std.testing.expectStringStartsWith(family(Other, spilled) orelse "", "--spill-gib keeps evicted states");
+    try std.testing.expectStringStartsWith(backend(.{ .dir = "d", .model_type = "m", .keep = 2 }) orelse "", "--checkpoint-slots sets how many");
+    try std.testing.expect(backend(.{ .dir = "d", .model_type = "m" }) == null);
 }

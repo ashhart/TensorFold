@@ -28,6 +28,12 @@ pub const attn_rows = Sig{ .name = "attn_rows", .handle = "e.fns.attn_rows", .sy
 /// The e4m3 decode attention over a long stream's rows.
 pub const attn_rows8 = Sig{ .name = "attn_rows8", .handle = "e.fp8.attn_rows", .symbol = "tf_q35_attn_rows8", .params = &.{ .geo, .ptr, .ptr, .ptr, .ptr, .i32, .ptr, .f32, .i32, .ptr, .ptr, .ptr } };
 
+/// Whole-window instances use the same ABI without consulting Seg.pt.
+pub const attn_partial_whole = Sig{ .name = "attn_partial_whole", .handle = "e.fns.attn_partial_whole", .symbol = "tf_q35_attn_partial_whole", .params = &.{ .geo, .ptr, .ptr, .ptr, .ptr, .i32, .ptr, .f32, .ptr, .ptr, .ptr } };
+pub const attn_partial8_whole = Sig{ .name = "attn_partial8_whole", .handle = "e.fp8.attn_partial8_whole", .symbol = "tf_q35_attn_partial8_whole", .params = &.{ .geo, .ptr, .ptr, .ptr, .ptr, .i32, .ptr, .f32, .ptr, .ptr, .ptr } };
+pub const attn_rows_whole = Sig{ .name = "attn_rows_whole", .handle = "e.fns.attn_rows_whole", .symbol = "tf_q35_attn_rows_whole", .params = &.{ .geo, .ptr, .ptr, .ptr, .ptr, .i32, .ptr, .f32, .i32, .ptr, .ptr, .ptr } };
+pub const attn_rows8_whole = Sig{ .name = "attn_rows8_whole", .handle = "e.fp8.attn_rows8_whole", .symbol = "tf_q35_attn_rows8_whole", .params = &.{ .geo, .ptr, .ptr, .ptr, .ptr, .i32, .ptr, .f32, .i32, .ptr, .ptr, .ptr } };
+
 /// The merge: a row's chunks' partials into each (row, query head)'s output.
 pub const attn_merge = Sig{ .name = "attn_merge", .handle = "e.fns.attn_merge", .symbol = "tf_q35_attn_merge", .params = &.{ .geo, .ptr, .ptr, .ptr, .ptr, .ptr, .ptr, .ptr, .ptr } };
 
@@ -47,7 +53,7 @@ pub const draft_partial = Sig{ .name = "draft_partial", .handle = "d.fns.attn_pa
 pub const draft_merge = Sig{ .name = "draft_merge", .handle = "d.fns.attn_merge", .symbol = "tf_q35d_attn_merge", .params = &.{ .ptr, .ptr, .ptr, .i32, .ptr } };
 
 /// Every q35 attention kernel's list: the decode partials, the rows, the merge, the gate, the rope and the draft pair.
-pub const all = [_]Sig{ attn_partial, attn_partial8, attn_rows, attn_rows8, attn_merge, attn_gate, rope, rope8, draft_partial, draft_merge };
+pub const all = [_]Sig{ attn_partial, attn_partial8, attn_rows, attn_rows8, attn_merge, attn_gate, rope, rope8, draft_partial, draft_merge, attn_partial_whole, attn_partial8_whole, attn_rows_whole, attn_rows8_whole };
 
 /// The list a launch site's handle names, if the table holds one.
 pub fn byHandle(handle: []const u8) ?Sig {

@@ -55,12 +55,13 @@ pub const Params = struct {
     ngram: usize = 3,
     min_match: i64 = 6,
     max_extension: i64 = 64,
+    /// Asks (`propose` or `proposeAfter` calls with room) left empty after `window` rejected proposals in a row.
     silence_rounds: i64 = 16,
     window: usize = 4,
     confident_match: i64 = 24,
 };
 
-/// Continuations backed by enough matching context; silent for a while after a run of rejected proposals.
+/// Continuations backed by enough matching context; silent for `silence_rounds` asks (not rounds) after rejections.
 pub const SuffixLookup = struct {
     gpa: Allocator,
     params: Params,
@@ -74,7 +75,7 @@ pub const SuffixLookup = struct {
     proposed_tokens: i64 = 0,
     judged_tokens: i64 = 0,
     accepted_tokens: i64 = 0,
-    silenced_rounds: i64 = 0,
+    silenced_rounds: i64 = 0, // asks the silence answered empty (Python's name: a round may ask more than once)
     last_match: i64 = 0,
     last_confident: bool = false,
     last_end: usize = 0, // the history index the last match's continuation starts at
@@ -245,4 +246,24 @@ test "a drafted tail continues the history's copy, and history alone is indexed"
     try std.testing.expectEqual(@as(i64, 5), s.last_match);
     try std.testing.expectEqual(history.len, s.indexed);
     try std.testing.expectEqual(@as(usize, 0), (try s.proposeAfter(&history, &.{ 2, 3, 9 }, 3)).len);
+}
+
+test "silence lasts silence_rounds asks however many a round makes; round() and an ask without room leave it" {
+    const gpa = std.testing.allocator;
+    var s = try SuffixLookup.init(gpa, .{ .ngram = 2, .min_match = 2, .silence_rounds = 3, .window = 2 });
+    defer s.deinit();
+    const p = s.proposer();
+    const ctx = [_]u32{ 1, 2, 3, 4, 5, 9, 1, 2, 3 };
+    try s.observe(3, 0);
+    try s.observe(3, 0);
+    try std.testing.expectEqual(@as(i64, 3), s.silent_for);
+    p.round(4, 0); // the round hook: SuffixLookup has none, so rounds never shorten the silence
+    try std.testing.expectEqual(@as(usize, 0), (try p.proposeAfter(&ctx, &.{}, 0)).len); // no room: not an ask
+    try std.testing.expectEqual(@as(i64, 3), s.silent_for);
+    try std.testing.expectEqual(@as(usize, 0), (try p.proposeAfter(&ctx, &.{3}, 3)).len); // root copies' first ask
+    try std.testing.expectEqual(@as(usize, 0), (try p.propose(&ctx, 3)).len);
+    p.round(4, 0);
+    try std.testing.expectEqual(@as(usize, 0), (try p.propose(&ctx, 3)).len);
+    try std.testing.expectEqual(@as(i64, 3), s.silenced_rounds);
+    try std.testing.expectEqualSlices(u32, &.{ 4, 5, 9 }, try p.propose(&ctx, 3));
 }

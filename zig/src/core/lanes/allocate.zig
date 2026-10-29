@@ -3,6 +3,12 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Table = @import("table.zig").Table;
 
+/// A batched head's extra drafts cost the deepest stream's steps; FZ_PRICE_BATCHED=0 prices each stream's.
+pub fn pricedBatched() bool {
+    const v = std.c.getenv("FZ_PRICE_BATCHED") orelse return true;
+    return v[0] != '0';
+}
+
 pub const Cost = struct { width: u32, ms: f64 };
 
 /// Draft prefixes per stream with the most expected tokens a ms; fixed rows always run. Caller frees.
@@ -56,7 +62,7 @@ pub fn allocateDrafts(gpa: Allocator, fixed: []const u32, probs: []const []const
         drafts += 1;
         deepest = @max(deepest, counts[s]);
         expected += pick_p;
-        const steps: f64 = @floatFromInt(if (head.batched) deepest else drafts - (if (head.free_first) firsts else 0));
+        const steps: f64 = @floatFromInt(if (head.batched) deepest -| @intFromBool(head.free_first) else drafts - (if (head.free_first) firsts else 0));
         const now = rate(costs, timed, rows, expected, overhead_ms + head.step_ms * steps);
         if (now > best or (!timed and head.step_ms == 0)) {
             best = now;

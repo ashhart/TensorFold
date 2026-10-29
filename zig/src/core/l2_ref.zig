@@ -24,6 +24,11 @@ pub fn point(v: f64) Iv {
 /// a and b in order; NaN in either gives NaN for both.
 pub fn order(a: f64, b: f64) Iv {
     if (std.math.isNan(a) or std.math.isNan(b)) return @splat(std.math.nan(f64));
+    if (a == 0 and b == 0) {
+        const ab: u64 = @bitCast(a);
+        const bb: u64 = @bitCast(b);
+        return .{ @bitCast(ab | bb), @bitCast(ab & bb) }; // -0 sorts before +0, including rounded intervals
+    }
     return .{ @min(a, b), @max(a, b) };
 }
 
@@ -241,4 +246,17 @@ pub fn swigluL2(g: []const f64, u: []const f64, sug: []const f64, suu: []const f
         out.* = bf16If(p.prod, mul(s, us, st.u));
     }
     normalize(y, eps, sums, st, true, small, big);
+}
+
+test "zero intervals keep endpoint signs, including both orders of mixed zeros" {
+    const neg: u64 = 0x8000000000000000;
+    const cases = [_][4]u64{ .{ 0, neg, neg, 0 }, .{ neg, 0, neg, 0 }, .{ neg, neg, neg, neg }, .{ 0, 0, 0, 0 } };
+    for (cases) |v| {
+        const r = order(@bitCast(v[0]), @bitCast(v[1]));
+        try std.testing.expectEqual(v[2], @as(u64, @bitCast(r[0])));
+        try std.testing.expectEqual(v[3], @as(u64, @bitCast(r[1])));
+    }
+    const ranged = bf16(widen(point(0), 0x1p-24));
+    try std.testing.expectEqual(neg, @as(u64, @bitCast(ranged[0])));
+    try std.testing.expectEqual(@as(u64, 0), @as(u64, @bitCast(ranged[1])));
 }

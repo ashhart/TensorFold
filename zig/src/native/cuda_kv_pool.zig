@@ -216,11 +216,11 @@ test "kv pages: an engine whose own rows are pages plans a window of them first,
     try std.testing.expect(std.mem.indexOf(u8, problem, "8192-token window") != null);
     const shown = (try text(Owned, a, 180 << 20, l, p, true, 8192, .{ .snaps = 0, .copied = 4 << 30, .snap_bytes = 0 }, false))[0];
     try std.testing.expectEqualStrings("the engine's own and 3 more taking 68 pages of 512 rows (0.42 GiB) as they need them (enough for one at a 8192-token window), 180 MiB fixed each", shown);
-    // the asked cache holds past the window's pages and a fixed part and page for each other stream, not a byte less
-    const each = (180 << 20) + l.pageBytes();
+    // the asked cache holds past the four windows' pages this room holds and a fixed part each, not a byte less
+    const room = 4 * floor + 3 * (180 << 20) + (4 << 30);
     const loaded = .{ .layout = @as(?kv_pool.Layout, l), .engine_paged = true, .free_streams = @as(u32, 1) };
-    try std.testing.expect(fits(Owned, loaded, o, floor + 3 * each + (4 << 30), 8192, 0));
-    try std.testing.expect(!fits(Owned, loaded, o, floor + 3 * each + (4 << 30) - 1, 8192, 0));
+    try std.testing.expect(fits(Owned, loaded, o, room, 8192, 0));
+    try std.testing.expect(!fits(Owned, loaded, o, room - 1, 8192, 0));
 }
 test "kv merge: host armed-state staging is reserved once before planning the page pool" {
     const loaded = .{ .host_snaps = true, .snap_bytes = @as(u64, 8 << 20) };
@@ -259,7 +259,7 @@ pub fn capacity(comptime F: type, loaded: anytype, k: Kept, window: u64) ?api.Pr
 pub fn warnCapacity(facts: ?api.PromptCacheCapacity, disabled: bool, comptime log: type) void {
     const c = facts orelse return;
     if (disabled or c.budget_bytes >= c.minimum_state_bytes) return;
-    log.warn("GLM CUDA prompt cache budget {d} bytes ({d:.3} GiB) cannot keep one state: the minimum planned state needs {d} bytes ({d:.3} GiB); adjust --context, --parallel, --prompt-cache-gib or TENSORFOLD_MEMORY_RESERVE_GIB to make room", .{ c.budget_bytes, toGib(c.budget_bytes), c.minimum_state_bytes, toGib(c.minimum_state_bytes) });
+    log.warn("GLM CUDA prompt cache budget {d} bytes ({d:.3} GiB) cannot keep one state: the minimum planned state needs {d} bytes ({d:.3} GiB); lower --context or --parallel, or TENSORFOLD_MEMORY_RESERVE_GIB, to make room (--prompt-cache-gib only caps the budget the weights and streams leave)", .{ c.budget_bytes, toGib(c.budget_bytes), c.minimum_state_bytes, toGib(c.minimum_state_bytes) });
 }
 
 test {

@@ -3,6 +3,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const config = @import("config.zig");
 const fwd = @import("cuda_model.zig");
+const pages = @import("cuda_pages.zig");
 
 /// What a state was made under: its loop count and KV mode (a state never crosses either).
 pub const Key = struct { loops: u8, mode: Mode };
@@ -41,6 +42,19 @@ fn each(m: *const fwd.Model, slot: usize, at: usize, ctx: anytype, comptime f: f
     for (0..m.sched.caches) |i| for ([_][]u64{ m.k, m.v }) |cache| {
         const full = m.sched.cache_kind[i] == .full;
         const len = m.cacheLen(i);
+        if (full) if (m.paging) |pg| { // a full cache's positions: one copy a run of consecutive page ids
+            var q: usize = 0;
+            while (q < at) {
+                const id = pg.ids[slot * pg.per_slot + q / pages.tokens];
+                var end = (q / pages.tokens + 1) * pages.tokens;
+                while (end < at and pg.ids[slot * pg.per_slot + end / pages.tokens] == id + (end - q) / pages.tokens) end += pages.tokens;
+                const run = @min(at, end) - q;
+                try f(ctx, cache[i] + (@as(usize, id) * pages.tokens + q % pages.tokens) * rb, off, run * rb);
+                off += run * rb;
+                q += run;
+            }
+            continue;
+        };
         const base = cache[i] + slot * len * rb;
         var p = if (full) 0 else at - tail(m.c.window, at);
         while (p < at) {
@@ -108,6 +122,7 @@ test "a state holds every full cache's positions and each ring's last window - 1
     m.c = c;
     m.sched = @import("schedule.zig").build(c);
     m.context = 8192;
+    m.paging = null;
     m.ring = fwd.ringSize(fwd.prompt_rows, c.window);
     var ks: [64]u64 = undefined;
     var vs: [64]u64 = undefined;

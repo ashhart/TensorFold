@@ -17,6 +17,11 @@ pub const Server = server.Server;
 pub const Config = server.Config;
 
 test {
+    _ = @import("auth_scope_test.zig");
+    _ = @import("auth_scope_http_test.zig");
+    _ = @import("admission_cli.zig");
+    _ = @import("request_admission_test.zig");
+    _ = @import("request_admission_http_test.zig");
     _ = @import("vision_markers_test.zig");
     _ = @import("embedding_protocol_test.zig");
     _ = @import("embedding_service_test.zig");
@@ -26,6 +31,7 @@ test {
     _ = @import("keepalive_test.zig");
     _ = @import("idle_unload.zig");
     _ = @import("idle_unload_test.zig");
+    _ = @import("name_priority_http_test.zig");
     @import("std").testing.refAllDecls(@This());
     _ = @import("json");
     _ = @import("std_options.zig");
@@ -53,7 +59,12 @@ test {
     _ = @import("chunk_plan.zig");
     _ = @import("status_routes.zig");
     _ = @import("speech.zig");
+    _ = @import("drama_cfg.zig");
+    if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_cfg_test.zig");
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_stream_test.zig"); // over a Unix socket pair
+    if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_lane_release_test.zig");
+    if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_speakers_test.zig");
+    if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_sampling_test.zig");
     _ = @import("drama_voice_tool.zig");
     _ = @import("speech_redraw.zig");
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_redraw_test.zig"); // over a Unix socket pair
@@ -62,6 +73,7 @@ test {
     _ = @import("health_test.zig");
     _ = @import("memory_routes.zig");
     _ = @import("process_memory.zig");
+    _ = @import("process_resident.zig");
     _ = @import("log.zig");
     _ = @import("request_log.zig");
     _ = @import("messages.zig");
@@ -69,18 +81,23 @@ test {
     _ = @import("images_video_marker_test.zig");
     _ = @import("image_key.zig");
     _ = @import("image_pieces.zig");
+    _ = @import("image_reuse_test.zig");
     _ = @import("media_fetch.zig");
     _ = @import("videos.zig");
     _ = @import("stream_preflight_test.zig");
     _ = @import("stream_dsml_test.zig");
+    _ = @import("tool_cut_test.zig");
     _ = @import("logprobs_test.zig");
     _ = @import("think_split_test.zig");
     _ = @import("thinking_reserve_test.zig");
+    _ = @import("loop_stop_test.zig");
     _ = @import("late_system_test.zig");
     _ = @import("compact_test.zig");
+    _ = @import("compact_auto_test.zig");
     _ = @import("request_log.zig");
     _ = @import("completion_prompt_test.zig");
     _ = @import("hf_eos_http_test.zig");
+    _ = @import("reply_gpu_seconds_test.zig");
     _ = @import("server_init_test.zig");
     _ = @import("connection_arena_test.zig");
     _ = @import("decisions.zig");
@@ -177,4 +194,5 @@ test {
     _ = @import("control_tokens_http_test.zig");
     _ = @import("request_provenance_test.zig");
     _ = @import("request_cost_test.zig");
+    _ = @import("prompt_tool_turn_test.zig");
 }

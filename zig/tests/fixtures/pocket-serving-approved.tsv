@@ -41,7 +41,7 @@ zig/kernels/cuda/glm_glue_attn.cuh	daabfe78a2e747575aadc07bcee7324ab7e5fa43d2871
 zig/kernels/cuda/glm_glue_latent.cuh	85682ea59a41a5d4f6e07ee209bc51084b67a7aca20bd4b2be8fd3bab42c20a8	0	1.1.2 increments 118; approved 20 Oct 2026
 zig/kernels/cuda/glm_quant.cu	e27379a4192be52f390ad28f678157d592989af45b69d31f830671b2c54ca028	0	1.1.2 increments 126; approved 20 Oct 2026
 zig/kernels/cuda/norms.cu	0af0d9452803066422640857acc8509872dffe5ee5c029c6084ea7b22ddf8da8	0	1.1.2 increments 215 (#1056); approved 20 Oct 2026
-zig/kernels/cuda/route_rows.cu	64c1ac1064b2de6fcd70c68272295945c6ae4610deff84eb85d57d411b44ce5f	0	1.1.2 increments 234 (#1046), 241 (#1046), 243 (#1046); approved 20 Oct 2026
+zig/kernels/cuda/route_rows.cu	6a9c4eac0526465d8f6aae8f8bb9100bc85012b827e69e9c252896815383091a	0	1.1.2 increments 234 (#1046), 241 (#1046), 243 (#1046); approved 20 Oct 2026; #1440 moves its shared helpers to common/ (SASS unchanged)
 zig/src/cuda/embed_rows.zig	09fb2e612f43297c19d2cb77d45139dd98212a20075da0a15069a70544f72f6b	0	1.1.2 increments 220 (#1070); approved 20 Oct 2026
 zig/src/cuda/norms.zig	c87aeffa84b77119f714faa1aa764d72633f2809cbb8271d2f80be2455e34b37	0	1.1.2 increments 215 (#1056); approved 20 Oct 2026
 zig/src/cuda/route_rows.zig	938fa2311aa530a845c1218867734ea0a93f762bebb574d31b9aab83d2f3aa3b	0	1.1.2 increments 234 (#1046), 241 (#1046), 245 (#1046); approved 20 Oct 2026

@@ -1,5 +1,6 @@
 //! Flash Next behind the native server: one reply at a time, sampled on the GPU on request (speed-up mode greedy only).
 const std = @import("std");
+pub const draft_sources: api.DraftSources = .{ .mtp = true, .copies = true };
 const platform = @import("sys");
 const mtl = @import("metal");
 const api = @import("engine_api");
@@ -14,7 +15,6 @@ const images = @import("flashnext_images.zig");
 const holdResident = @import("flashnext_residency.zig").hold;
 const dropResident = @import("flashnext_residency.zig").drop;
 const Allocator = std.mem.Allocator;
-
 const Job = struct {
     id: api.Id,
     request: *const api.Request,
@@ -364,7 +364,7 @@ pub const Host = struct {
         h.prompt = r.prompt; // a learned state read back in `begin` is named by these tokens
         job.key = if (r.images.len > 0) images.key(arena.allocator(), r) catch r.prompt else r.prompt; // a state fits its frame alone
         if (h.cache) |*store| if (r.prompt.len + r.max_tokens + fx.MARGIN <= h.eng.r.window.capacity) {
-            plan = store.beginRewind(arena.allocator(), job.key, r.history_len, r.rewind_len, r.shared_prefixes, &.{}, null, &.{}) catch .{};
+            plan = store.beginUser(arena.allocator(), job.key, r.history_len, r.rewind_len, r.user_end, r.shared_prefixes, &.{}, null, &.{}) catch .{};
         };
         var vis: ?*tf.flashnext_replay.vis_prompt.VisPrompt = null;
         defer images.release(h.eng, vis);
@@ -431,7 +431,7 @@ fn cacheBudget(eng: *fx.Engine, gib: ?f64, over: bool, limit: ?u64, a: Allocator
 }
 
 /// --learn's settings: the root, cap, free-disk floor and daily writes, and whether conversations go to disk too.
-pub const Learn = struct { root: []const u8, cap: u64, floor: u64 = 4 << 30, daily: u64 = 32 << 30, conversations: bool = false };
+pub const Learn = struct { root: []const u8, cap: u64, floor: u64 = 4 << 30, daily: u64 = 32 << 30, conversations: bool = false, spill: api.prompt_cache.rows.Spill = .off, slots: ?usize = null };
 
 const rows_image: api.prompt_cache.rows.Image = disk.image(Host);
 
@@ -479,7 +479,7 @@ pub fn openWarmed(gpa: Allocator, io: std.Io, eng: *fx.Engine, window: i64, cach
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
     const context_limit: i64 = @as(i64, @intCast(eng.r.window.capacity)) - fx.MARGIN;
-    h.* = .{ .gpa = gpa, .io = io, .eng = eng, .follower = follower, .load_limit = limit orelse 0, .vis = vis, .info_ = .{ .name = "flashnext-zig", .prompt_cache_plan = cache_plan, .lanes = 1, .greedy_only = eng.r.tp != null, .context_window = @intCast(if (window > 0) @min(window, context_limit) else context_limit) } };
+    h.* = .{ .gpa = gpa, .io = io, .eng = eng, .follower = follower, .load_limit = limit orelse 0, .vis = vis, .info_ = .{ .name = "flashnext-zig", .draft_sources = draft_sources, .prompt_cache_plan = cache_plan, .lanes = 1, .greedy_only = eng.r.tp != null, .context_window = @intCast(if (window > 0) @min(window, context_limit) else context_limit) } };
     h.warm = .{ .queue = eng.r.queue };
     if (vis) |v| h.info_.vision = images.offer(v, h, prepareImage, prepareVideo);
     // macOS unwires idle GPU memory within seconds: the engine's buffers join one set the idle keepalive's ticks use
@@ -491,13 +491,14 @@ pub fn openWarmed(gpa: Allocator, io: std.Io, eng: *fx.Engine, window: i64, cach
     // a reply's background pass keeps its end: a client that drops the reasoning resumes past the reply
     h.info_.warm_turns = h.cache != null;
     if (learn) |l| if (l.conversations) {
-        if (h.cache) |*store| _ = try disk.attach(gpa, store, try disk.identity(gpa, io, eng), l.root, l.cap, l.floor, l.daily);
+        if (h.cache) |*store| _ = try disk.attach(gpa, store, try disk.identity(gpa, io, eng), l);
     } else {
         h.learned = try learnedStates(gpa, io, eng, l.root, l.cap);
         if (h.cache) |*store| store.imprint = &h.learned.?;
     };
     errdefer if (h.learned) |*m| m.deinit();
     errdefer if (h.cache) |*store| if (store.disk) |r| r.deinit();
+    if (eng.r.fsr) |stream| stream.trace_enabled = true;
     try h.start();
     return h;
 }

@@ -1,0 +1,61 @@
+ling31-names 214025 16f5c51dd86af196318448fc16a4177efbcbe83cbd34ab863409c57fc7f028a7
+lm_head.weight
+model.layers.{L}.attention.A_log 0-6,8-14,16-22,24-30,32-38,40-46,48-54,56-62,64-70
+model.layers.{L}.attention.b_proj.weight 0-6,8-14,16-22,24-30,32-38,40-46,48-54,56-62,64-70
+model.layers.{L}.attention.dense.weight 7,15,23,31,39,47,55,63,71-72
+model.layers.{L}.attention.dense.weight_scale_inv 7,15,23,31,39,47,55,63,71-72
+model.layers.{L}.attention.dt_bias 0-6,8-14,16-22,24-30,32-38,40-46,48-54,56-62,64-70
+model.layers.{L}.attention.f_proj.weight 0-6,8-14,16-22,24-30,32-38,40-46,48-54,56-62,64-70
+model.layers.{L}.attention.f_proj.weight_scale_inv 0-6,8-14,16-22,24-30,32-38,40-46,48-54,56-62,64-70
+model.layers.{L}.attention.g_proj.weight 0-72
+model.layers.{L}.attention.g_proj.weight_scale_inv 0-6,8-14,16-22,24-30,32-38,40-46,48-54,56-62,64-70,72
+model.layers.{L}.attention.k_conv1d.weight 0-6,8-14,16-22,24-30,32-38,40-46,48-54,56-62,64-70
+model.layers.{L}.attention.k_proj.weight 0-6,8-14,16-22,24-30,32-38,40-46,48-54,56-62,64-70
+model.layers.{L}.attention.k_proj.weight_scale_inv 0-6,8-14,16-22,24-30,32-38,40-46,48-54,56-62,64-70
+model.layers.{L}.attention.kv_a_layernorm.weight 7,15,23,31,39,47,55,63,71-72
+model.layers.{L}.attention.kv_a_proj_with_mqa.weight 7,15,23,31,39,47,55,63,71-72
+model.layers.{L}.attention.kv_a_proj_with_mqa.weight_scale_inv 7,15,23,31,39,47,55,63,71-72
+model.layers.{L}.attention.kv_b_proj.weight 7,15,23,31,39,47,55,63,71-72
+model.layers.{L}.attention.kv_b_proj.weight_scale_inv 7,15,23,31,39,47,55,63,71-72
+model.layers.{L}.attention.o_norm.weight 0-6,8-14,16-22,24-30,32-38,40-46,48-54,56-62,64-70
+model.layers.{L}.attention.o_proj.weight 0-6,8-14,16-22,24-30,32-38,40-46,48-54,56-62,64-70
+model.layers.{L}.attention.o_proj.weight_scale_inv 0-6,8-14,16-22,24-30,32-38,40-46,48-54,56-62,64-70
+model.layers.{L}.attention.q_a_layernorm.weight 7,15,23,31,39,47,55,63,71-72
+model.layers.{L}.attention.q_a_proj.weight 7,15,23,31,39,47,55,63,71-72
+model.layers.{L}.attention.q_a_proj.weight_scale_inv 7,15,23,31,39,47,55,63,71-72
+model.layers.{L}.attention.q_b_proj.weight 7,15,23,31,39,47,55,63,71-72
+model.layers.{L}.attention.q_b_proj.weight_scale_inv 7,15,23,31,39,47,55,63,71-72
+model.layers.{L}.attention.q_conv1d.weight 0-6,8-14,16-22,24-30,32-38,40-46,48-54,56-62,64-70
+model.layers.{L}.attention.q_proj.weight 0-6,8-14,16-22,24-30,32-38,40-46,48-54,56-62,64-70
+model.layers.{L}.attention.q_proj.weight_scale_inv 0-6,8-14,16-22,24-30,32-38,40-46,48-54,56-62,64-70
+model.layers.{L}.attention.v_conv1d.weight 0-6,8-14,16-22,24-30,32-38,40-46,48-54,56-62,64-70
+model.layers.{L}.attention.v_proj.weight 0-6,8-14,16-22,24-30,32-38,40-46,48-54,56-62,64-70
+model.layers.{L}.attention.v_proj.weight_scale_inv 0-6,8-14,16-22,24-30,32-38,40-46,48-54,56-62,64-70
+model.layers.{L}.eh_proj.weight 72
+model.layers.{L}.enorm.weight 72
+model.layers.{L}.final_layernorm.weight 72
+model.layers.{L}.hnorm.weight 72
+model.layers.{L}.input_layernorm.weight 0-72
+model.layers.{L}.mlp.down_proj.weight 0-3
+model.layers.{L}.mlp.down_proj.weight_scale_inv 0-3
+model.layers.{L}.mlp.experts.{E}.down_proj.weight 4-72 512
+model.layers.{L}.mlp.experts.{E}.down_proj.weight_scale_inv 4-72 512
+model.layers.{L}.mlp.experts.{E}.gate_proj.weight 4-72 512
+model.layers.{L}.mlp.experts.{E}.gate_proj.weight_scale_inv 4-72 512
+model.layers.{L}.mlp.experts.{E}.up_proj.weight 4-72 512
+model.layers.{L}.mlp.experts.{E}.up_proj.weight_scale_inv 4-72 512
+model.layers.{L}.mlp.gate.expert_bias 4-72
+model.layers.{L}.mlp.gate.weight 4-72
+model.layers.{L}.mlp.gate_proj.weight 0-3
+model.layers.{L}.mlp.gate_proj.weight_scale_inv 0-3
+model.layers.{L}.mlp.shared_experts.down_proj.weight 4-72
+model.layers.{L}.mlp.shared_experts.down_proj.weight_scale_inv 4-72
+model.layers.{L}.mlp.shared_experts.gate_proj.weight 4-72
+model.layers.{L}.mlp.shared_experts.gate_proj.weight_scale_inv 4-72
+model.layers.{L}.mlp.shared_experts.up_proj.weight 4-72
+model.layers.{L}.mlp.shared_experts.up_proj.weight_scale_inv 4-72
+model.layers.{L}.mlp.up_proj.weight 0-3
+model.layers.{L}.mlp.up_proj.weight_scale_inv 0-3
+model.layers.{L}.post_attention_layernorm.weight 0-72
+model.norm.weight
+model.word_embeddings.weight

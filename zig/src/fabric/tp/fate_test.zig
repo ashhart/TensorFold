@@ -58,6 +58,16 @@ fn waitExits(want: u32) !u64 {
     return sock.nowNs() - t0;
 }
 
+/// The bytes in rank 1's first MEM report to rank 0, waited for: a busy runner may start the fate threads late.
+fn firstReport(f: *const Fate) !u64 {
+    const t0 = sock.nowNs();
+    while (true) {
+        if (f.peerMem(1)) |mem| return mem.bytes;
+        if (sock.nowNs() - t0 > 5 * std.time.ns_per_s) return error.NoReport;
+        sock.sleepNs(std.time.ns_per_ms);
+    }
+}
+
 fn reset() void {
     exits.store(0, .release);
     hooks.store(0, .release);
@@ -68,9 +78,7 @@ test "rank 1's failure ends both ranks with its reason" {
     var fates: [2]Fate = undefined;
     try pair(&fates);
     defer for (&fates) |*f| f.close();
-    sock.sleepNs(60 * std.time.ns_per_ms);
-    const mem = fates[0].peerMem(1) orelse return error.NoReport;
-    try std.testing.expectEqual(@as(u64, 123 << 20), mem.bytes);
+    try std.testing.expectEqual(@as(u64, 123 << 20), try firstReport(&fates[0]));
     fates[1].fatal("prefill", error.OutOfMemory);
     const took = try waitExits(2);
     try std.testing.expect(took < grace + 500 * std.time.ns_per_ms);

@@ -29,7 +29,7 @@ pub fn check(comptime redraw: anytype) !void {
         capture.len = 0;
         var pcm = [_]f32{sample};
         var metadata: Metadata = .{ .enabled = false, .register_on = true };
-        const take = redraw(&srv, &conn, &cx, "register-test", .{ .sample_rate = 44100, .frame_length = 2048, .max_frames = 1024, .max_prompt_tokens = 4096 }, .{ .input = "hi", .prompt = &.{}, .seed = 0, .format = .pcm, .stream = false }, 0, undefined, 0, .{ .pcm = &pcm, .reason = .stop }, &spare, &metadata).?;
+        const take = redraw(&srv, &conn, &cx, "register-test", .{ .sample_rate = 44100, .frame_length = 2048, .max_frames = 1024, .max_prompt_tokens = 4096 }, .{ .input = "hi", .prompt = &.{}, .sampling = .{ .seed = 0 }, .format = .pcm, .stream = false }, 0, undefined, 0, .{ .pcm = &pcm, .reason = .stop }, &spare, &metadata).?;
         try std.testing.expect(take.jump == null);
         try std.testing.expect(take.pcm.ptr == &pcm);
         try std.testing.expect(!metadata.register_tripped and !metadata.register_redrawn);

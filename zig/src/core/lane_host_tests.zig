@@ -14,4 +14,15 @@ test {
 
 test {
     _ = @import("lane_host_score_exit_test.zig");
+    _ = @import("lane_host_grammar_test.zig");
+}
+
+test {
+    _ = @import("lane_host_interior_test.zig");
+    _ = @import("lane_host_gpu_seconds_test.zig");
+}
+
+test {
+    _ = @import("memory_pressure_test.zig");
+    _ = @import("lane_host_pressure_test.zig");
 }

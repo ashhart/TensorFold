@@ -166,6 +166,34 @@ test "the register guard measures the take silence redraws leave, and off sends 
     try expectSent(a, &.{ high, flat }, &.{}, .{}, "X-Deadline-S: soon\r\n", 0, 1);
 }
 
+test "speech sampling: silence then register redraws retain parameters and advance the explicit seed" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const high = try tones(a, 44100, &reply(130, 330));
+    const flat = try tones(a, 44100, &reply(130, 127));
+    const n = [_]usize{flat.len};
+    var script: harness.Script = .{ .steps = &n, .audio = &.{ flat, high, flat }, .reasons = &.{ .silence, .stop, .stop }, .max_frames = @intCast(n[0] / harness.frame + 1), .inline_ = true };
+    var s: harness.Served = undefined;
+    const cfg: @import("root.zig").Config = .{ .served_name = "m", .model_ids = &.{"m"}, .redraw = .{ .max = 1, .register = rule } };
+    const body = "{\"model\":\"m\",\"input\":\"hi\",\"response_format\":\"pcm\",\"temperature\":0.5,\"top_p\":0.75,\"top_k\":8,\"seed\":9007199254740993}";
+    try s.open(&script, cfg, "", "HTTP/1.1", body, 2000);
+    defer s.deinit();
+    {
+        defer s.join(&script);
+        _ = try s.readHead();
+        _ = try s.readRest();
+    }
+    try harness.expectHeader(s.got.items, "HTTP/1.1 200");
+    try harness.expectHeader(s.got.items, "X-Silence-Redraws: 1");
+    try harness.expectHeader(s.got.items, "X-Register-Redraws: 1");
+    try std.testing.expectEqual(@as(usize, 3), script.takes);
+    for (0..script.takes) |k| {
+        try std.testing.expectEqual(@as(u64, 9007199254740993) + k, script.seeds[k]);
+        try std.testing.expectEqualDeep(harness.Sampling{ .temperature = 0.5, .top_p = 0.75, .top_k = 8 }, script.sampling[k]);
+    }
+}
+
 test "register metadata counts admission not selection and latches trips even without budget" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

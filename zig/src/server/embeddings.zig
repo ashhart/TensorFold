@@ -49,6 +49,7 @@ pub fn reply(srv: *Server, cx: *errors.Cx, body: json.Value, gone: anytype) Fail
     srv.engine.submit(id, &ask, .{ .ctx = &done, .event = Completion.event }) catch |err| return switch (err) {
         error.InvalidRequest, error.InvalidSpans => cx.refuse("the embedding request does not match the model"),
         error.Busy, error.Closed, error.Stale => cx.fail(.capacity, "the embedding engine is unavailable", .{}),
+        error.MemoryPressure => cx.fail(.capacity, "{s}", .{api.pressure_message}),
     };
     var cancelling = false;
     while (true) {

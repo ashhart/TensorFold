@@ -6,7 +6,10 @@ const c = @import("config.zig");
 const st = @import("state.zig");
 const fwd = @import("forward.zig");
 const Model = @import("model.zig").Model;
+const kvp = @import("../../core/metal_kv_pages.zig");
+const kv = @import("../../core/kv_pool.zig");
 const be = lanes.backend;
+const snapshot = @import("snapshot.zig");
 
 pub const Options = struct { capacity: usize, chunk: usize = 128, streams: u32 = 8 };
 
@@ -18,6 +21,8 @@ pub const Metal = struct {
     scratch: st.Scratch,
     width: u32 = 1,
     caches: std.AutoHashMapUnmanaged(*lanes.Stream, *st.Cache) = .empty,
+    pages: ?*kvp.Pages = null, // TF_QWEN35_METAL_KV_PAGES=1: the streams' keys and values in the core pool's pages
+    taken: []bool = &.{}, // a lane a paged stream holds
 
     pub fn init(gpa: std.mem.Allocator, model: *Model, options: Options) !*Metal {
         const out = try gpa.create(Metal);
@@ -43,6 +48,8 @@ pub const Metal = struct {
             self.gpa.destroy(cache.*);
         }
         self.caches.deinit(self.gpa);
+        if (self.pages) |p| p.deinit();
+        self.gpa.free(self.taken);
         self.scratch.deinit();
         self.gpa.destroy(self);
     }
@@ -63,10 +70,26 @@ pub const Metal = struct {
         return self.caches.get(stream) orelse error.UnknownQwenStream;
     }
 
+    /// `lanes_n` streams over `pages` pages of the planned layout, the arena and tables in the residency set.
+    pub fn attachPages(self: *Metal, l: kv.Layout, lanes_n: u32, pages: usize, most_tokens: u64) !void {
+        const sized = kvp.Pages.bytes(l, lanes_n, pages, most_tokens);
+        if (sized.arena > self.model.device.maxBufferLength()) return error.ArenaTooLarge;
+        const arena = try self.scratch.memory.alloc(@intCast(sized.arena));
+        const tables = try self.scratch.memory.alloc(@intCast(sized.tables));
+        self.taken = try self.gpa.alloc(bool, lanes_n);
+        @memset(self.taken, false);
+        self.pages = try kvp.Pages.initIn(self.gpa, l, lanes_n, pages, most_tokens, arena, tables);
+        self.options.streams = lanes_n;
+    }
+
     pub fn newCache(self: *Metal, capacity: usize) !*st.Cache {
+        return self.newPagedCache(capacity, null);
+    }
+
+    fn newPagedCache(self: *Metal, capacity: usize, paged: ?st.Paged) !*st.Cache {
         const cache = try self.gpa.create(st.Cache);
         errdefer self.gpa.destroy(cache);
-        cache.* = try st.Cache.init(self.gpa, self.model.device, capacity);
+        cache.* = try st.Cache.initPaged(self.gpa, self.model.device, capacity, paged);
         cache.memory.setResident(self.residency);
         return cache;
     }
@@ -76,21 +99,19 @@ pub const Metal = struct {
         const ids = stream.prompt();
         if (ids.len == 0 or ids.len + stream.max_new > self.options.capacity or self.caches.contains(stream)) return error.InvalidQwenPrompt;
         const capacity = @min(self.options.capacity, ids.len + stream.max_new + st.window_rows);
-        const cache = try self.newCache(capacity);
+        const paged = try admitLane(self, capacity);
+        errdefer if (paged) |p| leaveLane(self, p.lane);
+        const cache = try self.newPagedCache(capacity, paged);
         errdefer self.gpa.destroy(cache);
         errdefer cache.deinit();
-        var at: usize = 0;
-        while (at < ids.len) {
-            var end: usize = @min(ids.len, at + self.options.chunk);
-            for (stream.chunks) |boundary| if (boundary > at) {
-                end = @min(end, boundary);
-                break;
-            };
-            try fwd.run(self.model, &self.scratch, &.{.{ .cache = cache, .rows = end - at }}, ids[at..end], false, .last);
-            at = end;
-            stream.fill_at.store(@intCast(at), .monotonic); // fwd.run waits: `at` is landed progress
-        }
         try self.caches.put(self.gpa, stream, cache);
+        errdefer _ = self.caches.remove(stream);
+        try @import("prefill.zig").run(cache, stream, self.options.chunk, self, promptChunk);
+    }
+
+    fn promptChunk(self: *Metal, cache: *st.Cache, ids: []const u32) !void {
+        try coverRows(cache, cache.len + ids.len);
+        try fwd.run(self.model, &self.scratch, &.{.{ .cache = cache, .rows = ids.len }}, ids, false, .last);
     }
 
     fn firstFn(ptr: *anyopaque, stream: *lanes.Stream, position: u64) !u64 {
@@ -115,6 +136,7 @@ pub const Metal = struct {
             .value => |v| v,
             .handle => |h| @intCast(h),
         };
+        try coverRows(cache, cache.len + 1);
         try fwd.run(self.model, &self.scratch, &.{.{ .cache = cache, .rows = 1 }}, &.{token}, false, .all);
         return try draw(self.gpa, cache.logits.slice(u16, c.vocab), stream.sampling, position, &.{});
     }
@@ -136,6 +158,7 @@ pub const Metal = struct {
             if (w.masks.len != 0 and w.masks.len != rows * mask_words) return error.InvalidQwenMasks;
             const cache = try self.cacheOf(w.stream);
             for (w.positions, 0..) |p, r| if (p != cache.len + r + 1) return error.InvalidQwenPosition;
+            try coverRows(cache, cache.len + rows);
             segments[i] = .{ .cache = cache, .rows = rows };
             ids[total] = w.pending;
             @memcpy(ids[total + 1 ..][0..w.tokens.len], w.tokens);
@@ -167,11 +190,54 @@ pub const Metal = struct {
     fn releaseFn(ptr: *anyopaque, stream: *lanes.Stream) void {
         const self = cast(ptr);
         if (self.caches.fetchRemove(stream)) |entry| {
+            if (entry.value.paged) |p| leaveLane(self, p.lane);
             entry.value.deinit();
             self.gpa.destroy(entry.value);
         }
     }
 };
+
+pub const Snaps = struct {
+    fn metal(ptr: *anyopaque) *Metal {
+        return @ptrCast(@alignCast(ptr));
+    }
+    pub fn bytes(_: *anyopaque, at: u32) u64 {
+        return snapshot.bytes(at);
+    }
+    pub fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
+        const self = metal(ptr);
+        const cache = try self.cacheOf(@ptrCast(@alignCast(owner orelse return error.NoStream)));
+        return @ptrCast(try snapshot.save(self.gpa, cache, at));
+    }
+    pub fn restore(_: *anyopaque, _: ?*anyopaque, _: *anyopaque) anyerror!void {
+        return error.RestoredInPrefill;
+    }
+    pub fn drop(ptr: *anyopaque, saved: *anyopaque) void {
+        snapshot.drop(metal(ptr).gpa, @ptrCast(@alignCast(saved)));
+    }
+};
+
+/// A free lane with `capacity` rows' pages promised, or null unpaged; LaneMemory: none free or the pool is full now.
+fn admitLane(self: *Metal, capacity: usize) !?st.Paged {
+    const p = self.pages orelse return null;
+    const lane = for (self.taken, 0..) |t, i| {
+        if (!t) break i;
+    } else return error.LaneMemory;
+    try p.admit(lane, p.layout.pages(capacity));
+    self.taken[lane] = true;
+    return .{ .pages = p, .lane = lane };
+}
+
+/// A paged stream holds the pages of its first `rows` rows before a pass writes them.
+fn coverRows(cache: *st.Cache, rows: usize) !void {
+    if (cache.paged) |p| try p.pages.cover(p.lane, rows);
+}
+
+/// The lane's stream ended: its pages and promise go back, the lane is free.
+fn leaveLane(self: *Metal, lane: usize) void {
+    self.pages.?.finish(lane);
+    self.taken[lane] = false;
+}
 
 const draws = @import("draw.zig");
 const mask_words = draws.mask_words;

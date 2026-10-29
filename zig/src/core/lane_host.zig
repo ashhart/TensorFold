@@ -11,6 +11,7 @@ const admit = @import("lane_host_admit.zig");
 const recalls = @import("lane_host_recall.zig");
 const ends = @import("lane_host_end.zig");
 const rows_host = @import("lane_host_rows.zig");
+const pressure = @import("lane_host_pressure.zig");
 const Allocator = std.mem.Allocator;
 const Id = api.Id;
 const Request = api.Request;
@@ -56,6 +57,7 @@ pub const LaneHost = struct {
     live_generated: u64 = 0,
     lone: ?api.Lone = null, // the backend's driver for a lone greedy stream; null: every stream in the lane core
     lone_job: ?*Job = null, // the job that driver holds now
+    cache_status: ?api.Status.PromptCache = null, // published under mutex; HTTP threads never read the store
     cache: ?*pc.Store = null, // kept prompt states (engine thread only); the backend restores and saves them
     recall: ?*lanes.recall_store.Store = null, // Recall's record: drafts from earlier requests (lane_host_recall.zig)
     decoded_rows: bool = false, // the backend prefills Request.decode_spans with decoded rows' arithmetic, cache or not
@@ -77,7 +79,9 @@ pub const LaneHost = struct {
     rounds: ?Rounds = null,
     pieces: std.ArrayList(Rounds.Piece) = .empty,
     share: fill.Share = .{}, // prompt work's share of wall time beside decoding streams (lane_host_fill.zig)
+    prefix: @import("lane_host_prefix.zig").Wait = .{}, // a request's wait for a cut another prompt is filling
     finals: std.ArrayList(usize) = .empty,
+    pressure: ?@import("memory_pressure.zig").Governor = null, // macOS memory pressure (lane_host_pressure.zig); null: off
 
     pub const ThreadInit = struct { ctx: *anyopaque, run: *const fn (ctx: *anyopaque) anyerror!void };
 
@@ -86,7 +90,9 @@ pub const LaneHost = struct {
     pub const Job = @import("lane_job.zig").Job;
 
     pub fn init(gpa: Allocator, io: std.Io, core: *lanes.Engine, info_: Info) LaneHost {
-        return .{ .gpa = gpa, .io = io, .core = core, .info_ = info_.ofLanes(), .share = .fromEnv() };
+        var shown = info_.ofLanes();
+        shown.draft_sources = shown.draft_sources.ofLanes(core.cfg, shown.lanes);
+        return .{ .gpa = gpa, .io = io, .core = core, .info_ = shown, .share = .fromEnv(), .prefix = .fromEnv(), .pressure = .fromEnv() };
     }
 
     pub fn start(h: *LaneHost) !void {
@@ -98,6 +104,7 @@ pub const LaneHost = struct {
     pub fn stop(h: *LaneHost) void {
         rows_host.drainThread(h);
         rows_host.close(h);
+        @import("lane_host_fetch.zig").stop(h);
         scoring.close(h);
         const closed: api.LearnEvent = .{ .done = .{ .message = "the engine closed" } };
         for (h.lessons.items) |l| l.sink.event(l.sink.ctx, &closed);
@@ -162,9 +169,9 @@ pub const LaneHost = struct {
         h.mutex.lockUncancelable(h.io);
         defer h.mutex.unlock(h.io);
         const unavailable = h.closing or (if (h.health) |source| !source.read(source.ctx) else false);
-        if (unavailable or h.stale) {
+        if (unavailable or h.stale or pressure.refuses(h)) {
             h.gpa.destroy(job);
-            return if (unavailable) error.Closed else error.Stale;
+            return if (unavailable) error.Closed else if (h.stale) error.Stale else error.MemoryPressure;
         }
         // foreground before background, each in arrival order (the Python job queue's priority)
         var at = h.queued.items.len;
@@ -258,7 +265,7 @@ pub const LaneHost = struct {
         h.gpa.free(job.marks);
         h.gpa.free(job.key);
         const s = &job.stream;
-        const stats: Stats = if (job.started) .{ .rounds = s.rounds, .drafted = s.drafted, .accepted = s.accepted, .min_rows = s.min_rows, .loop_period = s.loop_period, .prefill_seconds = if (job.prefilled) |done| @as(f64, @floatFromInt(@as(i64, @intCast(@max(0, done - job.began))))) / 1e9 else null } else .{};
+        const stats: Stats = if (job.started) .{ .rounds = s.rounds, .drafted = s.drafted, .accepted = s.accepted, .min_rows = s.min_rows, .loop_period = s.loop_period, .gpu_seconds = s.gpu_seconds, .prefill_seconds = if (job.prefilled) |done| @as(f64, @floatFromInt(@as(i64, @intCast(@max(0, done - job.began))))) / 1e9 else null } else .{};
         var told = if (job.started) recalls.finished(h, job, reason, stats) else stats;
         told.queued_seconds = if (job.admitted_ns) |at| @as(f64, @floatFromInt(@max(0, at - job.submitted))) / 1e9 else 0;
         emit(job, .{ .finished = .{ .reason = reason, .stats = told, .message = message } });
@@ -296,12 +303,7 @@ pub const LaneHost = struct {
     /// The next queued request a lane is free for, moved to the admitted list (`failed`: it was finished instead).
     pub fn takeJob(h: *LaneHost) Taken {
         h.lock();
-        // a stale device takes no reply: `learn.refuse` ends the queued ones instead
-        if (h.stale or h.queued.items.len == 0 or h.admitted.items.len >= @min(h.info_.lanes, h.memory_lanes orelse h.info_.lanes)) {
-            h.unlock();
-            return .none;
-        }
-        const at = admit.pick(h) orelse { // a shared cache pool's head waits for room
+        const at = admit.pick(h) orelse { // no lane free, or none may go: a shared cache pool's head waits for room
             h.unlock();
             return .none;
         };
@@ -390,7 +392,11 @@ pub const LaneHost = struct {
     /// A reply's grammar from the server's compiler (Info.structures engines get requests that carry one).
     pub fn constraint(h: *LaneHost, st: api.Structure) !*lanes.grammar.Constraint {
         const c = st.compiler orelse return error.NoGrammarCompiler;
-        return c.constraint(h.gpa, h.io, @fromBackingInt(@intCast(@backingInt(st.kind))), st.text, st.after);
+        // the server's compile, without the lock
+        const k = if (st.compiled) |g| try c.constrained(h.gpa, g, st.after) else try c.constraint(h.gpa, h.io, @fromBackingInt(@intCast(@backingInt(st.kind))), st.text, st.after);
+        errdefer k.deinit(h.gpa);
+        if (st.budget) try k.arm();
+        return k;
     }
 
     fn firstCommitted(ptr: *anyopaque) void {
@@ -410,7 +416,10 @@ pub const LaneHost = struct {
         h.unlock();
         rows_host.prefilled(h, job.request.prompt.len - job.stream.cached, done - began);
         job.reported();
-        if (h.cache) |store| store.report(job.request.prompt.len, job.stream.cached, store.counts.kept - job.kept0);
+        if (h.cache) |store| {
+            store.report(job.request.prompt.len, job.stream.cached, store.counts.kept - job.kept0);
+            if (job.request.images.len == 0 and job.request.cache_key.len == 0) store.repeat_log.note(store.gpa, store.rules.repeat_min, job.request.prompt);
+        }
         emit(job, .{ .prefilled = job.stream.cached });
         if (job.stream.prompt_logprobs != null) emit(job, .{ .prompt_logprobs = job.stream.prompt_rows.items });
         recalls.prompted(h, job);
@@ -476,6 +485,7 @@ pub const LaneHost = struct {
         recalls.release(job);
         job.started = false;
         job.fill_began = false;
+        job.reached = 0;
         job.entry = null; // looked up again at its next admission
         h.gpa.free(job.marks);
         job.marks = &.{};
@@ -524,6 +534,7 @@ pub const LaneHost = struct {
         if (h.rounds) |rd| return rounds.run(h, rd);
         while (true) {
             ends.takeCancels(h);
+            pressure.step(h);
             rows_host.answer(h);
             scoring.answer(h);
             learn.refuse(h);
@@ -558,7 +569,7 @@ pub const LaneHost = struct {
                     continue;
                 }
                 if (rows_host.idle(h)) continue;
-                if (h.cancels.items.len == 0 and (h.queued.items.len == 0 or h.admitted.items.len >= h.info_.lanes))
+                if (h.cancels.items.len == 0 and (h.queued.items.len == 0 or h.admitted.items.len >= h.info_.lanes or admit.holds(h)))
                     h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } }) catch {};
                 h.unlock();
                 continue;
@@ -580,4 +591,5 @@ pub const LaneHost = struct {
 test {
     _ = @import("lane_host_frame_test.zig");
     _ = @import("lane_host_tests.zig");
+    _ = @import("lane_host_fetch.zig");
 }

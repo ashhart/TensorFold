@@ -43,6 +43,14 @@ unified memory: do not add them. RSS, allocator peaks and physical footprint are
 The Darwin structure follows Apple's `sys/resource.h` `rusage_info_v4` layout; host tests check its size
 and both footprint offsets, and exercise the kernel reader on macOS.
 
+Linux has no physical footprint count, so the footprint gauges stay macOS only. On Linux, `/metrics` reads
+`/proc/self/status` at scrape time and reports the resident set: `tensorfold:process_resident_bytes` (`VmRSS`),
+its parts `tensorfold:process_resident_anon_bytes` (`RssAnon`), `tensorfold:process_resident_file_bytes`
+(`RssFile`) and `tensorfold:process_resident_shmem_bytes` (`RssShmem`), and
+`tensorfold:process_resident_peak_bytes` (`VmHWM`, the kernel's lifetime peak, never reset by TensorFold).
+A count the kernel does not report is omitted. The resident set holds no device or driver memory, so it is
+not a physical footprint.
+
 Route/auth regression checks use the CPU-only fake engine:
 
 ```sh

@@ -11,14 +11,22 @@ const limits_k = @import("metal_limits.zig");
 const h3_k = @import("metal_h3.zig");
 const h3_topk = @import("metal_h3_topk.zig");
 const drama3_k = @import("metal_drama3.zig");
+const drama_nvfp4 = @import("metal_drama3_nvfp4.zig");
+const drama_router = @import("metal_drama_router.zig");
+const drama_combine = @import("metal_drama_combine.zig");
+const drama_cfg = @import("metal_drama_cfg.zig");
 const glm_eh_k = @import("metal_glm_eh.zig");
 const glm_rows_k = @import("metal_glm_rows.zig");
 
 const flash_pool = @import("metal_flashnext_pool.zig");
 const flash = @import("metal_flashnext.zig");
+const fsr = @import("metal_fsr.zig");
 const gemma = @import("metal_gemma4.zig");
 const gemma_embed = @import("metal_gemma4_embed.zig");
 const gemma_mixed = @import("metal_gemma4_mixed.zig");
+const lfm2_argmax = @import("metal_lfm2_argmax.zig");
+const lfm2_streams = @import("metal_lfm2_streams.zig");
+const lfm2_controls = @import("metal_lfm2_controls.zig");
 const g = contract.gates;
 const usage = "usage: tf-kernel-contract [--only TEXT] [--no-gates] [--no-limits] [--offline DIR] [--seed N] [--repro] [--rotary-long] [--rotary-accuracy FILE]";
 
@@ -147,6 +155,42 @@ pub fn main(init: std.process.Init) !u8 {
         if (!tensor) return error.TensorUnitsRequired;
         try kernels.append(a, mixed.kernel());
     }
+    var lfm2_list: std.ArrayList(*lfm2_argmax.Probe) = .empty;
+    var lfm2_streams_list: std.ArrayList(*lfm2_streams.Probe) = .empty;
+    defer {
+        for (lfm2_list.items) |p| {
+            p.deinit();
+            a.destroy(p);
+        }
+        for (lfm2_streams_list.items) |p| {
+            p.deinit();
+            a.destroy(p);
+        }
+        lfm2_list.deinit(a);
+        lfm2_streams_list.deinit(a);
+    }
+    for (std.enums.values(lfm2_controls.Mutation)) |m| {
+        const argmax_side = m == .none or m == .argmax_last_tie or m == .argmax_no_flag;
+        if (argmax_side) {
+            if (!wanted(o, if (m == .none) lfm2_argmax.name else m.name())) continue;
+            const p = try a.create(lfm2_argmax.Probe);
+            errdefer a.destroy(p);
+            p.* = try lfm2_argmax.Probe.init(a, device, queue, m);
+            try lfm2_list.append(a, p);
+            try kernels.append(a, p.kernel());
+            if (m != .none) continue;
+        }
+        for (std.enums.values(lfm2_streams.Which)) |w| {
+            const control_for = (m == .conv_first_state and w == .conv) or (m == .attention_first_cache and w == .attention);
+            if (m != .none and !control_for) continue;
+            if (!wanted(o, if (m == .none) lfm2_streams.spec(w).name else m.name())) continue;
+            const p = try a.create(lfm2_streams.Probe);
+            errdefer a.destroy(p);
+            p.* = try lfm2_streams.Probe.init(a, device, queue, w, m);
+            try lfm2_streams_list.append(a, p);
+            try kernels.append(a, p.kernel());
+        }
+    }
     var rows_list: std.ArrayList(*rows_k.Row) = .empty;
     var proj_list: std.ArrayList(*affine_k.Proj) = .empty;
     defer for (rows_list.items) |r| r.deinit();
@@ -182,11 +226,56 @@ pub fn main(init: std.process.Init) !u8 {
             try kernels.append(a, flash_list[flash_made - 1].kernel());
         }
     };
+    var fsr_probes: [4]fsr.Probe = undefined;
+    var fsr_made: usize = 0;
+    defer for (fsr_probes[0..fsr_made]) |*probe| probe.deinit();
+    for ([_]usize{ 4, 6 }) |bits| for ([_]bool{ false, true }) |control| {
+        if (!wanted(o, fsr.Probe.name(bits, control))) continue;
+        fsr_probes[fsr_made] = .{ .a = a, .device = device, .queue = queue, .bits = bits, .control = control };
+        fsr_made += 1;
+        try kernels.append(a, fsr_probes[fsr_made - 1].kernel());
+    };
     var d3norm: ?drama3_k.Norm = null;
     defer if (d3norm) |*n| n.deinit();
     if (wanted(o, drama3_k.spec().name)) {
         d3norm = try drama3_k.Norm.init(a, device, queue);
         try kernels.append(a, d3norm.?.kernel());
+    }
+    var d3projections: [std.enums.values(drama_nvfp4.Variant).len]drama_nvfp4.Proj = undefined;
+    var d3projection_count: usize = 0;
+    defer for (d3projections[0..d3projection_count]) |*p| p.deinit();
+    for (std.enums.values(drama_nvfp4.Variant)) |v| {
+        if (!wanted(o, drama_nvfp4.spec(v).name)) continue;
+        d3projections[d3projection_count] = try drama_nvfp4.Proj.init(a, device, queue, v);
+        d3projection_count += 1;
+        try kernels.append(a, d3projections[d3projection_count - 1].kernel());
+    }
+    var d3routers: [std.enums.values(drama_router.Variant).len]drama_router.Router = undefined;
+    var d3router_count: usize = 0;
+    defer for (d3routers[0..d3router_count]) |*p| p.deinit();
+    for (std.enums.values(drama_router.Variant)) |v| {
+        if (!wanted(o, drama_router.spec(v).name)) continue;
+        d3routers[d3router_count] = try drama_router.Router.init(a, device, queue, v);
+        d3router_count += 1;
+        try kernels.append(a, d3routers[d3router_count - 1].kernel());
+    }
+    var d3combines: [std.enums.values(drama_combine.Variant).len]drama_combine.Combine = undefined;
+    var d3combine_count: usize = 0;
+    defer for (d3combines[0..d3combine_count]) |*p| p.deinit();
+    for (std.enums.values(drama_combine.Variant)) |v| {
+        if (!wanted(o, drama_combine.spec(v).name)) continue;
+        d3combines[d3combine_count] = try drama_combine.Combine.init(a, device, queue, v);
+        d3combine_count += 1;
+        try kernels.append(a, d3combines[d3combine_count - 1].kernel());
+    }
+    var d3mixes: [drama_cfg.gammas.len]drama_cfg.Mix = undefined;
+    var d3mix_count: usize = 0;
+    defer for (d3mixes[0..d3mix_count]) |*p| p.deinit();
+    for (drama_cfg.gammas) |gamma| {
+        if (!wanted(o, drama_cfg.spec(gamma).name)) continue;
+        d3mixes[d3mix_count] = try drama_cfg.Mix.init(a, device, queue, gamma);
+        d3mix_count += 1;
+        try kernels.append(a, d3mixes[d3mix_count - 1].kernel());
     }
     var glm_eh: ?glm_eh_k.Nax = null;
     defer if (glm_eh) |*n| n.deinit();
@@ -237,6 +326,49 @@ pub fn main(init: std.process.Init) !u8 {
     var glm_windows: glm_rows_k.Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer glm_windows.deinit();
     try glm_windows.collect(o.only);
+    var nemotron_experts: @import("metal_nemotron_experts.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer nemotron_experts.deinit();
+    try nemotron_experts.collect(o.only);
+    const weight_only = @import("metal_weight_only.zig");
+    const weight_source = try weight_only.text(a);
+    defer a.free(weight_source);
+    var weight_kernels = try weight_only.Kernels.load(device, weight_source, true);
+    defer weight_kernels.deinit();
+    var weight_cases: [weight_only.count]weight_only.Case = undefined;
+    try weight_only.collect(a, device, queue, &weight_kernels, &weight_cases, &kernels, o.only);
+    defer for (&weight_cases) |*case| case.deinit();
+    const hc = @import("metal_hc_activation.zig");
+    const hc_source = try hc.text(a);
+    defer a.free(hc_source);
+    var hc_kernels = try hc.Kernels.load(device, hc_source, true);
+    defer hc_kernels.deinit();
+    var hc_cases: [hc.count]hc.Case = undefined;
+    try hc.collect(a, device, queue, &hc_kernels, &hc_cases, &kernels, o.only);
+    defer for (&hc_cases) |*case| case.deinit();
+    const pointwise = @import("metal_hc_pointwise.zig");
+    const pointwise_source = try pointwise.text(a);
+    defer a.free(pointwise_source);
+    var pointwise_kernels = try pointwise.Kernels.load(device, pointwise_source, true);
+    defer pointwise_kernels.deinit();
+    var pointwise_cases: [pointwise.count]pointwise.Case = undefined;
+    try pointwise.collect(a, device, queue, &pointwise_kernels, &pointwise_cases, &kernels, o.only);
+    defer for (&pointwise_cases) |*case| case.deinit();
+    const native_hc = try @import("metal_qwen4_hc.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer native_hc.destroy();
+    const native_qsa_select = try @import("metal_qwen4_qsa_select.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer native_qsa_select.destroy();
+    const native_qsa_scores = try @import("metal_qwen4_qsa_scores.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer native_qsa_scores.destroy();
+    const native_qsa_attn = try @import("metal_qwen4_qsa_attn.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer native_qsa_attn.destroy();
+    const native_qsa_norm = try @import("metal_qwen4_qsa_norm.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer native_qsa_norm.destroy();
+    const native_ple = try @import("metal_qwen4_ple.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer native_ple.destroy();
+    const native_gdn = try @import("metal_qwen4_gdn.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer native_gdn.destroy();
+    const moss_image = try @import("metal_moss_image.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer moss_image.destroy();
     var t: g.Tally = .{};
     const t0 = std.Io.Clock.awake.now(init.io);
     if (o.gates) {

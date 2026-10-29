@@ -4,6 +4,7 @@
 
 #include <cuda_bf16.h>
 #include <stdint.h>
+#include "common/reduce.cuh"
 
 namespace tf_rms_tail {
 
@@ -33,23 +34,9 @@ __device__ __forceinline__ float normed(float v, float inv, float w) {
     else return __fmul_rn(__fmul_rn(v, inv), w);
 }
 
-__device__ __forceinline__ void unpack8(const uint4& u, float* f) {
-    const __nv_bfloat162* h = reinterpret_cast<const __nv_bfloat162*>(&u);
-#pragma unroll
-    for (int i = 0; i < 4; ++i) {
-        const float2 t = __bfloat1622float2(h[i]);
-        f[2 * i] = t.x;
-        f[2 * i + 1] = t.y;
-    }
-}
-
-__device__ __forceinline__ uint4 pack8(const float* f) {
-    uint4 u;
-    __nv_bfloat162* h = reinterpret_cast<__nv_bfloat162*>(&u);
-#pragma unroll
-    for (int i = 0; i < 4; ++i) h[i] = __floats2bfloat162_rn(f[2 * i], f[2 * i + 1]);
-    return u;
-}
+using tf_common::unpack8;
+using tf_common::pack8;
+using tf_common::group_sum8;
 
 // 1 / sqrt(sum / width + eps), IEEE division and square root: norms.cu's inv_rms_v tree over the 8 warps.
 template <bool ONCE_ONLY>
@@ -64,19 +51,6 @@ __device__ __forceinline__ float inv_rms(float part, int width, float eps) {
     const float r = __fdiv_rn(1.f, __fsqrt_rn(__fadd_rn(__fdiv_rn(s, static_cast<float>(width)), eps)));
     if constexpr (!ONCE_ONLY) __syncthreads(); // `warps` is read again by the output's norm
     return r;
-}
-
-// A thread's 8 stored outputs summed in order, then the group's 8 lanes in a fixed tree (every lane of the warp calls).
-__device__ __forceinline__ float group_sum8(const uint4& packed, bool live) {
-    float f[8];
-    unpack8(packed, f);
-    float s = 0.f;
-    if (live)
-#pragma unroll
-        for (int i = 0; i < 8; ++i) s = __fadd_rn(s, f[i]);
-    s = __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, 4));
-    s = __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, 2));
-    return __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, 1));
 }
 
 // b = wb ? bf16(rms(x) wb) : x, h = bf16(sc ? (r + b) sc : r + b) (if r, wb or sc), y = bf16(rms(h) w), xs its sums.

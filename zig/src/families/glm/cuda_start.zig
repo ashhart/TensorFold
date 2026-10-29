@@ -19,7 +19,7 @@ fn resolved(p: anytype, text: ?[]const u8, initial: anytype, args: anytype, comp
 /// TF_KV_PAGES keeps FP8 on whole windows; explicit pages with FP8 are refused on every rank.
 pub fn paging(text: ?[]const u8, world: usize, kv8: bool) !bool {
     const v = text orelse "auto";
-    if (std.mem.eql(u8, v, "auto")) return world >= 3 and !kv8;
+    if (std.mem.eql(u8, v, "auto")) return world >= 2 and !kv8;
     if (std.mem.eql(u8, v, "0") or std.mem.eql(u8, v, "off")) return false;
     if (kv8) return error.Fp8OnPages;
     return true;

@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "logprob_rows.cuh"
+#include "common/reduce.cuh"
 
 namespace tf_sample {
 
@@ -51,18 +52,8 @@ __device__ __forceinline__ float race_uniform(unsigned long long seed, unsigned 
     return fminf(uniform(seed, pos, id), __uint_as_float(0x3F7FFFFFu));
 }
 
-// Metal's simd_sum as the host reference has it: a 32-lane butterfly, every lane ending with the sum.
-__device__ __forceinline__ float warp_sum(float x) {
-#pragma unroll
-    for (int off = 16; off > 0; off >>= 1) x += __shfl_xor_sync(FULL, x, off);
-    return x;
-}
-
-__device__ __forceinline__ float warp_max(float x) {
-#pragma unroll
-    for (int off = 16; off > 0; off >>= 1) x = fmaxf(x, __shfl_xor_sync(FULL, x, off));
-    return x;
-}
+using tf_common::warp_sum;
+using tf_common::warp_max;
 
 __device__ __forceinline__ unsigned warp_sum_u(unsigned x) {
 #pragma unroll
@@ -596,5 +587,5 @@ extern "C" __global__ void __launch_bounds__(256) tf_grammar_mask(__nv_bfloat16*
         }
     }
 }
-
+#include "sample_penalties.cuh"
 #include "sample_slices.cuh"

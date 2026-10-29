@@ -19,6 +19,11 @@ pub fn capabilities(a: Allocator) cli.Engines {
     return .{ .version = @import("build_options").version, .chip = if (native.families.len > 0) native.chip(a) else null, .backends = native.backends, .families = native.families };
 }
 
+/// ``capabilities --json``'s NVML P2P summary when the backend has one (CUDA, two or more GPUs); else null.
+pub fn p2p(a: Allocator) ?[]const u8 {
+    return if (@hasDecl(native, "p2p")) native.p2p(a) else null;
+}
+
 /// What the open /health names: this release, the built-in backend and the GPU a serve with ``args`` opens.
 pub fn identity(a: Allocator, args: cli.Args) build_identity.Identity {
     return build_identity.of(native, a, @import("build_options").version, args.device);

@@ -6,6 +6,7 @@ const json = @import("json");
 const errors = @import("errors.zig");
 const fields = @import("fields.zig");
 const auth = @import("auth.zig");
+const scope = @import("auth_scope.zig");
 const request_guard = @import("request_guard.zig");
 const metrics = @import("metrics.zig");
 const model_text = @import("model_text.zig");
@@ -47,6 +48,8 @@ pub const Config = struct {
     default_voice: []const u8 = "default",
     /// The served name first, then aliases, without repeats.
     model_ids: []const []const u8,
+    /// Ids a request may name for background priority by default (--name-priority); each is in model_ids.
+    background_ids: []const []const u8 = &.{},
     default_max_tokens: i64 = 4096,
     enable_thinking: bool = true,
     reasoning_effort: ?[]const u8 = null,
@@ -54,6 +57,8 @@ pub const Config = struct {
     /// With thinking on, reply tokens the reasoning may use beyond the request's max_tokens (0: none).
     thinking_reserve: i64 = 0,
     loop_guard: bool = false,
+    /// --loop-guard-stop: a guarded reply ends where the guard fires, with a loop error and no answer or calls.
+    loop_stop: bool = false,
     /// Seconds the idle keepalive runs after the last request ends (0: off).
     keep_warm_s: i64 = 900,
     /// Seconds of idle past the last request before the engine closes; the next request reloads it (0: never).
@@ -67,6 +72,7 @@ pub const Config = struct {
     seed_salt: i64 = 0,
     silence_mid: bool = false,
     silence_guard: bool = false,
+    cfg: ?@import("drama_cfg.zig").Options = null,
     /// --prompt-seed keeps historical prompt-keyed sampling when a request omits its seed.
     prompt_seed: bool = false,
     /// TENSORFOLD_REQUEST_LOG: where chat and completion bodies are appended; null: nowhere.
@@ -89,11 +95,23 @@ pub const Config = struct {
     saved_conversations: bool = false,
     timeouts: http_conn.Timeouts = .{},
     max_connections: u32 = @import("http_admission.zig").default_limit,
+    /// --max-inflight, --max-inflight-per-key, --requests-per-second, --request-burst; all zero: no admission.
+    admission: @import("request_admission.zig").Limits = .{},
     /// The open /health names these after its other keys; empty fields are left out.
     identity: Identity = .{},
     /// The process environment GET /v1/benchmark/manifest reads (rank count, revision, the hardware probe); null: none.
     environ: ?*const std.process.Environ.Map = null,
 };
+
+/// --name-priority: background by default when the id the request names is configured (openai.replyModel parity).
+pub fn namedBackground(config: Config, f: Value) bool {
+    var asked = config.served_name;
+    if (f.get("model")) |m| if (m == .string) for (config.model_ids) |known| {
+        if (std.mem.eql(u8, known, m.string)) asked = m.string;
+    };
+    for (config.background_ids) |id| if (std.mem.eql(u8, id, asked)) return true;
+    return false;
+}
 
 pub const Server = struct {
     gpa: Allocator,
@@ -120,7 +138,10 @@ pub const Server = struct {
     /// Connections open now; a stop waits for them before freeing what they read.
     open_connections: std.atomic.Value(u32) = .init(0),
     draining: std.atomic.Value(bool) = .init(false),
+    penalties_logged: std.atomic.Value(bool) = .init(false), // an engine without them was sent penalties: said once
     generating: std.atomic.Value(u32) = .init(0),
+    /// Model requests holding a reservation, when config.admission is on.
+    admission: @import("request_admission.zig").Controller = .{},
     /// The idle keepalive on the engine's queue, armed by --keep-warm; null when off or not Metal.
     keepalive: ?*api.keepalive.Keepalive = null,
     /// The idle-unload manager (--idle-unload); null when off. Its thread parks the engine; a wake reloads it.
@@ -250,6 +271,20 @@ pub const Server = struct {
         };
     }
 
+    /// The request's penalties over the configured defaults; none, and a log line once, where the engine ignores them.
+    pub fn resolvePenalties(srv: *Server, cx: *Cx, f: Value) errors.Refused!api.Penalties {
+        const options = try json.newObject(cx.a);
+        if (srv.config.default_sampling) |d| try merge(options, cx, try fields.parseNumbers(cx, d));
+        try merge(options, cx, try fields.parseNumbers(cx, f));
+        const p: api.Penalties = .{
+            .presence = @floatCast(number(options.get("presence_penalty")) orelse 0),
+            .frequency = @floatCast(number(options.get("frequency_penalty")) orelse 0),
+        };
+        if (!p.active() or srv.info.penalties) return p;
+        if (!srv.penalties_logged.swap(true, .monotonic)) log.line("presence_penalty and frequency_penalty are ignored: {s} does not apply them", .{srv.backendName()});
+        return .{};
+    }
+
     /// A specific engine name, or the server's backend identity when the shared host uses its default name.
     pub fn backendName(srv: *const Server) []const u8 {
         return if (std.mem.eql(u8, srv.info.name, "lanes") and srv.config.identity.backend.len > 0) srv.config.identity.backend else srv.info.name;
@@ -258,6 +293,7 @@ pub const Server = struct {
     /// The grammar a request asks for, or its refusal when the engine cannot enforce it.
     pub fn checkFeatures(srv: *Server, cx: *Cx, f: Value, has_tools: bool, thinking: bool, prompt_ids: []const u32, tools: []const Value, request: *api.Request) errors.Refused!void {
         _ = prompt_ids;
+        errdefer srv.release(false, request.*); // a refused request frees what it compiled here
         const required = if (f.get("tool_call_required")) |r| r.truthy() else false;
         if (has_tools and required) {
             if (!srv.info.structures) return cx.fail(.request, "backend '{s}' cannot enforce tool_choice \"required\" or a named function: it has no token grammar support; send \"auto\" or \"none\"", .{srv.backendName()});
@@ -266,18 +302,39 @@ pub const Server = struct {
         }
         if (try grammar.spec(cx, f)) |s| {
             if (!srv.info.structures) return cx.refuse("structured output (response_format and the guided_* fields) is not supported by this engine yet");
-            request.structure = try srv.compiledStructure(cx, s.kind, s.text, s.field, thinking);
+            const st = try srv.compiledStructure(cx, s.kind, s.text, s.field, thinking);
+            if (request.structure) |tool| tool.free();
+            request.structure = st;
         }
+        try budgetStructure(cx, f, request);
     }
 
-    /// A request's grammar, compiled once here (a 400 with xgrammar's reason when it cannot be enforced).
+    /// Give back a request's preparing count, and its grammar once the engine is done with it (or it was never sent).
+    pub fn release(srv: *Server, preparing: bool, request: ?api.Request) void {
+        if (preparing) _ = srv.preparing.fetchSub(1, .acq_rel);
+        if (request) |r| if (r.structure) |st| st.free();
+    }
+
+    /// A request's grammar, compiled once here and handed to the engine (a 400 with xgrammar's reason if it cannot be).
     pub fn compiledStructure(srv: *Server, cx: *Cx, kind: grammar.Kind, text: []const u8, field: []const u8, thinking: bool) errors.Refused!api.Structure {
         const c = srv.grammarCompiler() orelse return cx.fail(.request, "{s}: {s}", .{ if (kind == .structural_tag) field else "structured output", srv.grammar_problem.? });
         var err: [512]u8 = undefined;
         const compiled = c.compile(srv.io, @fromBackingInt(@intCast(@backingInt(kind))), text, &err) catch
             return cx.fail(.request, "{s}: the grammar cannot be enforced: {s}", .{ field, std.mem.sliceTo(&err, 0) });
-        compiled.free(); // kept in the compiler's cache for the engine's compile
-        return .{ .kind = kind, .text = text, .after = if (thinking) srv.text.tokenId(srv.markers.close) else null, .compiler = c };
+        return .{ .kind = kind, .text = text, .after = if (thinking) srv.text.tokenId(srv.markers.close) else null, .compiler = c, .compiled = compiled };
+    }
+
+    /// grammar_budget: a boolean; true keeps a grammar's reply completable within max_tokens (none without a grammar).
+    fn budgetStructure(cx: *Cx, f: Value, request: *api.Request) errors.Refused!void {
+        const v = f.get("grammar_budget") orelse return;
+        if (v != .bool) return cx.refuse("grammar_budget must be a boolean");
+        if (!v.bool) return;
+        const st = if (request.structure) |*s| s else return;
+        const g = st.compiled orelse return cx.refuse("grammar_budget: the grammar was not compiled here");
+        if (g.f.budget_ready == null) return cx.refuse("grammar_budget needs a libtfgrammar built with it: rebuild with zig build grammar or use a release archive's lib/");
+        const ready = g.budgetReady() catch false;
+        if (!ready) return cx.refuse("grammar_budget cannot be kept for this grammar: it uses token-level, budgeted, captured or left-recursive rules");
+        st.budget = true;
     }
 
     /// The model's grammar compiler: tokenizer.json, the text model's vocab_size, the eos ids.
@@ -385,12 +442,23 @@ pub const Server = struct {
     fn authenticate(srv: *Server, conn: *http_conn.Conn, a: Allocator) bool {
         const keys = srv.keys orelse return true;
         if (std.mem.eql(u8, conn.method, "OPTIONS") or !keys.enabled()) return true;
-        conn.key_label = keys.match(a, single(conn, "Authorization"), single(conn, "x-api-key"));
-        if (!auth.gatedRequest(conn.method, conn.path, keys.metrics_open) or conn.key_label != null) return true;
+        const matched = keys.matchIdentity(a, single(conn, "Authorization"), single(conn, "x-api-key"));
+        if (matched) |m| {
+            conn.key_label = m.label;
+            conn.key_digest = m.digest;
+            conn.key_scopes = m.scopes;
+        }
+        if (!auth.gatedRequest(conn.method, conn.path, keys.metrics_open)) return true;
+        if (matched != null and scope.allows(conn.key_scopes, conn.method, conn.path)) return true;
         const path = auth.routePath(conn.path);
         const messages = for ([_][]const u8{ "/v1/messages", "/v1/messages/count_tokens", "/messages", "/messages/count_tokens" }) |p| {
             if (std.mem.eql(u8, path, p)) break true;
         } else false;
+        if (matched != null) {
+            // a key without this route's scope is refused before its body is read or a parked model wakes
+            @import("auth_scope_reply.zig").deny(conn, messages, .route);
+            return false;
+        }
         const body = if (messages)
             "{\"type\": \"error\", \"error\": {\"type\": \"authentication_error\", \"message\": \"A valid API key is required\"}}"
         else

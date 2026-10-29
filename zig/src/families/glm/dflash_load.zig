@@ -150,7 +150,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, ran
     errdefer wbuf.free();
     var tmp = try cuda.DeviceBuffer.alloc(d, 2 * FF * D * 2); // the largest linear as stored
     defer tmp.free();
-    var raw = try cuda.DeviceBuffer.alloc(d, if (bits == 4) 5 * D * D / 2 + 2 * 5 * D * D / 32 + 1024 else 256);
+    var raw = try cuda.DeviceBuffer.alloc(d, df.rawBytes(bits, world));
     defer raw.free();
     var module = try cuda.Module.load(d, cuda.kernels.glm_dflash);
     errdefer module.unload();

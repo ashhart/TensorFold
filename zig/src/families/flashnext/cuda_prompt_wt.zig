@@ -58,6 +58,17 @@ const Tensor = core.safetensors.Tensor;
 
 const Held = struct { rel: []u8, file: Shard };
 
+/// MADV_WILLNEED over `bytes` one 128 KiB readahead window a call: one call over a whole tensor reads its first window.
+fn prefetch(bytes: []const u8) void {
+    if (@import("builtin").os.tag != .linux or bytes.len == 0) return;
+    const page = std.heap.pageSize();
+    const step = 128 << 10;
+    const lo = std.mem.alignBackward(usize, @intFromPtr(bytes.ptr), page);
+    const hi = std.mem.alignForward(usize, @intFromPtr(bytes.ptr) + bytes.len, page);
+    var at = lo;
+    while (at < hi) : (at += step) _ = std.os.linux.madvise(@ptrFromInt(at), @min(step, hi - at), std.os.linux.MADV.WILLNEED);
+}
+
 /// One mapped shard: core.safetensors.File.
 const Shard = struct {
     f: core.safetensors.File,
@@ -84,8 +95,9 @@ pub const Store = struct {
     path: []u8 = &.{},
     rel: []u8 = &.{},
     file: ?Shard = null,
-    held: [12]Held = undefined,
-    nheld: usize = 0,
+    held: std.ArrayList(Held) = .empty, // as many shards as one layer's borrowed planes span (no fixed cap)
+    /// Pinned upload staging for this store's loaders, grown on demand; freed by dropStaging or deinit.
+    staging: ?cuda.HostBuffer = null,
     released: [2]Held = undefined,
     nreleased: usize = 0,
     norm_offset: f32 = 0,
@@ -131,15 +143,38 @@ pub const Store = struct {
     }
 
     pub fn deinit(self: *Store) void {
+        self.dropStaging();
         self.release();
+        self.held.deinit(self.gpa);
         self.closeReleased();
         self.closeFile();
         self.parsed.deinit();
     }
 
+    /// `len` bytes of the store's pinned staging, grown (reallocated) when a larger request comes.
+    pub fn pinned(self: *Store, d: *const cuda.Driver, len: usize) ![]align(16) u8 {
+        if (self.staging) |p| if (p.d == d and p.bytes.len >= len) return p.bytes[0..len];
+        self.dropStaging();
+        self.staging = try cuda.HostBuffer.alloc(d, len);
+        return self.staging.?.bytes[0..len];
+    }
+
+    /// Frees the pinned staging, if any (a loader calls it once its layers are on the device).
+    pub fn dropStaging(self: *Store) void {
+        if (self.staging) |*p| p.free();
+        self.staging = null;
+    }
+
+    /// A finished load: the pinned staging freed, borrowed planes released, the open shard closed.
+    pub fn loaded(self: *Store) void {
+        self.dropStaging();
+        self.release();
+        self.closeFile();
+    }
+
     /// Borrowers expire here; two indexed shards cover separate weight and calibration planes.
     pub fn release(self: *Store) void {
-        for (self.held[0..self.nheld]) |h| {
+        for (self.held.items) |h| {
             if (self.nreleased == self.released.len) {
                 self.released[0].file.close();
                 self.gpa.free(self.released[0].rel);
@@ -149,7 +184,7 @@ pub const Store = struct {
             self.released[self.nreleased] = h;
             self.nreleased += 1;
         }
-        self.nheld = 0;
+        self.held.clearRetainingCapacity();
     }
 
     fn closeReleased(self: *Store) void {
@@ -160,30 +195,35 @@ pub const Store = struct {
         self.nreleased = 0;
     }
 
+    /// hold, the tensor's pages read ahead: only for a reader that copies all of it (the one-GPU threaded loader).
+    pub fn holdAhead(self: *Store, requested: []const u8) !Tensor {
+        const t = try self.hold(requested);
+        prefetch(t.bytes);
+        return t;
+    }
+
     pub fn hold(self: *Store, requested: []const u8) !Tensor {
         var mapped: [512]u8 = undefined;
         const key = try self.resolveKey(requested, &mapped);
         const file = try self.shard(key);
-        for (self.held[0..self.nheld]) |*h| {
+        for (self.held.items) |*h| {
             if (std.mem.eql(u8, h.rel, file)) return h.file.get(key) orelse return error.MissingTensor;
         }
-        if (self.nheld == self.held.len) return error.UnexpectedTensor;
+        try self.held.ensureUnusedCapacity(self.gpa, 1);
         for (self.released[0..self.nreleased], 0..) |cached, i| {
             if (std.mem.eql(u8, cached.rel, file)) {
-                self.held[self.nheld] = cached;
+                self.held.appendAssumeCapacity(cached);
                 self.nreleased -= 1;
                 if (i < self.nreleased) self.released[i] = self.released[self.nreleased];
-                self.nheld += 1;
-                return self.held[self.nheld - 1].file.get(key) orelse return error.MissingTensor;
+                return self.held.items[self.held.items.len - 1].file.get(key) orelse return error.MissingTensor;
             }
         }
         const rel = try self.gpa.dupe(u8, file);
         errdefer self.gpa.free(rel);
         const path = try std.fs.path.join(self.gpa, &.{ self.dir, file });
         defer self.gpa.free(path);
-        self.held[self.nheld] = .{ .rel = rel, .file = try Shard.load(self.gpa, self.io, path) };
-        self.nheld += 1;
-        return self.held[self.nheld - 1].file.get(key) orelse {
+        self.held.appendAssumeCapacity(.{ .rel = rel, .file = try Shard.load(self.gpa, self.io, path) });
+        return self.held.items[self.held.items.len - 1].file.get(key) orelse {
             std.debug.print("absent {s}\n", .{key});
             return error.MissingTensor;
         };

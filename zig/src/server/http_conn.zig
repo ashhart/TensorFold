@@ -5,6 +5,7 @@ const posix = platform.posix;
 const Allocator = std.mem.Allocator;
 const log = @import("log.zig");
 const deadline = @import("http_deadline.zig");
+const scope = @import("auth_scope.zig");
 
 pub const max_line = 65536;
 pub const max_headers = 100;
@@ -56,6 +57,8 @@ pub const Conn = struct {
     requestline: []const u8 = "",
     headers: []Header = &.{},
     key_label: ?[]const u8 = null,
+    key_scopes: scope.Scopes = scope.full,
+    key_digest: ?[32]u8 = null,
     auth_enabled: bool = false,
     counted: bool = false,
     hook: ?StatusHook = null,
@@ -194,6 +197,8 @@ pub const Conn = struct {
         c.budget.head(c.nowMs(), idle and c.start == c.end, c.timeouts.request);
         defer c.budget = .{};
         c.key_label = null;
+        c.key_scopes = scope.full;
+        c.key_digest = null;
         c.counted = false;
         c.response_complete = false;
         const raw = c.readLine(a, max_line + 1, if (idle) c.timeouts.idle_ms else c.timeouts.read_ms) catch |e| switch (e) {
@@ -429,6 +434,7 @@ pub fn reason(code: u16) []const u8 {
         403 => "Forbidden",
         404 => "Not Found",
         414 => "URI Too Long",
+        429 => "Too Many Requests",
         431 => "Request Header Fields Too Large",
         500 => "Internal Server Error",
         501 => "Not Implemented",

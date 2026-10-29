@@ -7,6 +7,7 @@ const Allocator = std.mem.Allocator;
 const Proposer = @import("proposer.zig").Proposer;
 const Reader = @import("recall.zig").Reader;
 const Sampling = @import("sampling.zig").Sampling;
+const Penalties = @import("sampling.zig").Penalties;
 const State = @import("depth.zig").State;
 const Row = @import("logprob.zig").Row;
 const long_loop = @import("long_loop.zig");
@@ -117,6 +118,7 @@ pub const Spec = struct {
     max_new: u32,
     eos: []const u32 = &.{},
     sampling: ?Sampling = null,
+    penalties: Penalties = .{}, // where the backend applies them (Backend.VTable.penalties)
     drafts: bool = true,
     proposer: ?Proposer = null,
     recall: ?*Reader = null, // copies and grafts from the record of earlier requests (lanes/recall.zig)
@@ -129,6 +131,7 @@ pub const Spec = struct {
     think_open: ?bool = null, // null: open when a budget is set (the server's rule)
     answer_max: u32 = 0, // reply tokens after `think_end` at most, within `max_new` (0: `max_new` alone)
     loop_guard: bool = false,
+    loop_stop: bool = false, // with loop_guard: finish where it fires instead of forcing the close
     chunks: []const u32 = &.{}, // where prefill chunks start after 0 (Python's PrefillPlan); empty: the backend's step
     history_len: u32 = 0, // prompt prefix lengths a backend may keep for a later turn: the rendered history,
     shared_prefixes: []const u32 = &.{}, // then shared system blocks
@@ -150,6 +153,7 @@ pub const Stream = struct {
     max_new: u32,
     eos: []const u32,
     sampling: ?Sampling,
+    penalties: Penalties = .{},
     drafts: bool,
     proposer: ?Proposer,
     recall: ?*Reader,
@@ -163,6 +167,7 @@ pub const Stream = struct {
     answer_max: u32,
     answer_from: ?usize = null, // emitted() index after the first `think_end`: the answer starts there
     loop_guard: bool,
+    loop_stop: bool = false,
     loop_period: ?u32 = null,
     long_loop: long_loop.Index = .{}, // the reasoning's runs, for passages repeated verbatim (long_loop.zig)
     chunks: []const u32,
@@ -197,9 +202,12 @@ pub const Stream = struct {
     cost_probes: [129]@import("lone_costs.zig").Cooldown = @splat(.{}), // per-width losing-trial retry deadlines
     cost_probe_trial: ?@import("lone_costs.zig").Trial = null, // priced selection, consumed only by its completed width
     shared_round: bool = false, // a round beside another stream: its times are not this stream's alone
+    settle_step: bool = false, // the lane host bills this prompt step's time to decoders: end it on the device
     prices_seeded: bool = false, // its own prices started from the engine's kept calibration
     copy_landed: [2]f64 = .{ -1, -1 }, // a lone context copy's rows that landed, decayed, by short and long match (-1: unprimed)
     copy_broke: [2]f64 = .{ 0, 0 }, // and its chains that broke before their end: their ratio is a copied row's landing rate
+    copied_landed: [2]f64 = .{ -1, -1 }, // a copy window's rows that landed, decayed, by source: context, Recall (-1: unprimed)
+    copied_broke: [2]f64 = .{ 0, 0 }, // and its copies that broke before their end
     drafted: u64 = 0,
     accepted: u64 = 0,
     branch_rows: u64 = 0, // suffix-match branch rows verified (lanes/fill.zig)
@@ -217,6 +225,7 @@ pub const Stream = struct {
     measured: [plan_lanes.sizes.len + 1]plan_lanes.Measured = @splat(.{}), // each pick's round times past its table price
     priced: ?struct { choice: usize, ms: f64 } = null, // the pick that shaped the held window, at its table price
     min_rows: u32 = 0,
+    gpu_seconds: ?f64 = null, // a timed backend's passes this stream ran in (TF_Q27_PROFILE); null: untimed
     paused: bool = false,
     depth: ?State = null,
     mode: ?Mode = null,
@@ -235,6 +244,7 @@ pub const Stream = struct {
             .max_new = spec.max_new,
             .eos = spec.eos,
             .sampling = spec.sampling,
+            .penalties = spec.penalties,
             .drafts = spec.drafts,
             .proposer = if (spec.drafts) spec.proposer else null,
             .recall = if (spec.drafts) spec.recall else null,
@@ -247,6 +257,7 @@ pub const Stream = struct {
             .think_open = spec.think_open orelse (spec.think_budget > 0 or (spec.loop_guard and spec.think_end >= 0)),
             .answer_max = spec.answer_max,
             .loop_guard = spec.loop_guard,
+            .loop_stop = spec.loop_stop,
             .chunks = spec.chunks,
             .history_len = spec.history_len,
             .shared_prefixes = spec.shared_prefixes,
@@ -264,6 +275,10 @@ pub const Stream = struct {
         // under a grammar a forced close ends at the think end: the grammar takes the reply from the next token
         if (spec.grammar) |g| if (g.after) |end| if (std.mem.indexOfScalar(u32, s.think_close, end)) |at| {
             s.think_close = s.think_close[0 .. at + 1];
+        };
+        // grammar_budget counts the reply's tokens against the limits budgetLeft reads
+        if (spec.grammar) |g| if (g.budget) |*b| {
+            b.* = .{ .max_new = spec.max_new, .answer_max = spec.answer_max, .think_end = spec.think_end };
         };
         try s.context.appendSlice(gpa, spec.prompt);
         return s;
@@ -307,6 +322,11 @@ pub const Stream = struct {
 
     pub fn emitted(s: *const Stream) []const u32 {
         return s.context.items[s.prompt_len..];
+    }
+
+    /// A timed pass this stream ran in, counted whole toward its reply's `gpu_seconds`.
+    pub fn chargeGpu(s: *Stream, seconds: f64) void {
+        s.gpu_seconds = (s.gpu_seconds orelse 0) + seconds;
     }
 
     /// A long cycle ending at the last committed token (the runs before it indexed), then that token's run indexed.
@@ -456,7 +476,7 @@ pub const Stream = struct {
                 if (s.budgetLeft() <= 0) {
                     s.finished = true;
                     s.reason = .length;
-                } else if (s.think_close.len == 0) {
+                } else if (s.think_close.len == 0 or s.loop_stop) {
                     s.finished = true;
                     s.reason = .stop;
                 } else {

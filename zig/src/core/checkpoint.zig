@@ -75,13 +75,17 @@ pub const Checkpoint = struct {
         return openModelPrefix(gpa, io, dir, null);
     }
     pub fn openModelPrefix(gpa: std.mem.Allocator, io: Io, dir: []const u8, prefix: ?[]const u8) !Checkpoint {
+        return openModelPrefixes(gpa, io, dir, if (prefix) |p| &.{p} else &.{});
+    }
+    /// Every shard of `dir`, mapped, with only names under `prefixes` indexed (an empty list: every name).
+    pub fn openModelPrefixes(gpa: std.mem.Allocator, io: Io, dir: []const u8, prefixes: []const []const u8) !Checkpoint {
         try @import("save_guard").check(io, dir);
         const paths = try shardFiles(gpa, io, dir);
         defer freeShardFiles(gpa, paths);
         var ck: Checkpoint = .{ .gpa = gpa, .io = io };
         errdefer ck.close();
         try ck.files.ensureTotalCapacityPrecise(gpa, paths.len);
-        for (paths) |p| ck.files.appendAssumeCapacity(try st.File.openPrefix(gpa, io, p, prefix));
+        for (paths) |p| ck.files.appendAssumeCapacity(try st.File.openPrefixes(gpa, io, p, prefixes));
         return ck;
     }
 

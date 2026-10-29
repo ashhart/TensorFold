@@ -10,6 +10,7 @@ const gpa = base.gpa;
 const data = @import("data.zig");
 const ref = @import("reference.zig");
 const cases = @import("cases.zig");
+const moe = @import("../../moe.zig");
 const Kernels = affine.Kernels;
 const Entry = affine.Entry;
 
@@ -49,9 +50,11 @@ pub const Product = struct {
     copies: usize,
     copy_words: usize,
     copy_tab: usize,
+    /// A prefix view: its tables (host and device) are its parent's, which outlives it.
+    borrowed: bool,
 
     pub fn init(rig: *Rig, c: cases.Case) !Product {
-        const experts = @max(c.experts, 1);
+        const experts = @max(c.experts, 1) + @intFromBool(c.shared);
         const words_row = c.k * c.bits / 32;
         const groups = c.k / c.group;
         const pairs = c.rows * c.slots;
@@ -66,9 +69,8 @@ pub const Product = struct {
         p.expert_of = &.{};
         p.copy_words = std.mem.alignForward(usize, experts * c.n * words_row, 64);
         p.copy_tab = std.mem.alignForward(usize, experts * c.n * groups, 128);
-        const copy_bytes = p.copy_words * 4 + p.copy_tab * 4;
         p.copies = 1;
-        _ = copy_bytes;
+        p.borrowed = false;
         const x_rows: usize = if (!c.routed()) c.rows else if (c.down) pairs else c.rows;
         p.hx = try data.fill(gpa, u16, x_rows * c.k, &rig.rng, if (rig.fp16) data.makeX16 else data.makeXB);
         errdefer gpa.free(p.hx);
@@ -99,48 +101,123 @@ pub const Product = struct {
     fn makePlan(p: *Product, pairs: usize) !void {
         const c = p.c;
         p.expert_of = try gpa.alloc(u32, pairs);
-        for (p.expert_of, 0..) |*e, i| e.* = if (c.even) @intCast(i % c.experts) else @intCast(p.rig.rng.next() % c.experts);
+        if (c.shared) {
+            drawShared(p.expert_of, c, &p.rig.rng);
+        } else for (p.expert_of, 0..) |*e, i| {
+            e.* = if (c.even) @intCast(i % c.experts) else @intCast(p.rig.rng.next() % c.experts);
+        }
+        try p.planExperts(pairs);
+    }
+
+    /// The plan of `expert_of`: sorted by expert and cut into items, or as serving sizes it when `served`.
+    fn planExperts(p: *Product, pairs: usize) !void {
+        const c = p.c;
+        // served: serving's tile, and the capacity it sizes the plan for (one token: an item a slot)
+        const tile = if (c.served) moe.tileOf(c.rows, false) else c.item_rows;
+        const cap = if (c.served and c.rows > 1) moe.capacity(moe.bucket(c.rows) * c.slots, c.experts + @intFromBool(c.shared)) else 0;
         const order = try gpa.alloc(i32, pairs);
         defer gpa.free(order);
         for (order, 0..) |*o, i| o.* = @intCast(i);
-        std.mem.sort(i32, order, p.expert_of, struct {
+        // serving's one token keeps its slots in order: item k is (pick k, k, 1) (`ops/act.hip`, the select's plan)
+        const slot_order = c.served and c.rows == 1;
+        if (!slot_order) std.mem.sort(i32, order, p.expert_of, struct {
             fn less(of: []u32, a: i32, b: i32) bool {
                 const ea = of[@intCast(a)];
                 const eb = of[@intCast(b)];
                 return if (ea != eb) ea < eb else a < b;
             }
         }.less);
-        const items = try gpa.alloc(i32, pairs * 3);
+        const items = try gpa.alloc(i32, @max(pairs, cap) * 3);
         defer gpa.free(items);
+        @memset(items, 0);
         var count: usize = 0;
         var i: usize = 0;
         p.max_rows = 1;
         while (i < pairs) {
             const e = p.expert_of[@intCast(order[i])];
             var j = i;
-            while (j < pairs and j - i < c.item_rows and p.expert_of[@intCast(order[j])] == e) j += 1;
+            while (j < pairs and j - i < tile and p.expert_of[@intCast(order[j])] == e) j += 1;
             items[count * 3 ..][0..3].* = .{ @intCast(e), @intCast(i), @intCast(j - i) };
             p.max_rows = @max(p.max_rows, j - i);
             count += 1;
             i = j;
         }
-        p.items = count;
-        p.plan = try Buffer.fromHost(p.rig.base, items[0 .. count * 3]);
+        // the items past the used ones are empty, as serving's route leaves them; the launch skips them
+        std.debug.assert(cap == 0 or count <= cap);
+        std.debug.assert(!slot_order or count == pairs);
+        p.items = @max(count, cap);
+        if (c.served) p.max_rows = @min(tile, c.rows);
+        p.plan = try Buffer.fromHost(p.rig.base, items[0 .. p.items * 3]);
+        errdefer {
+            p.plan.?.free();
+            p.plan = null;
+        }
         p.members = try Buffer.fromHost(p.rig.base, order);
     }
 
     pub fn deinit(p: *Product) void {
         gpa.free(p.hx);
+        gpa.free(p.expert_of);
+        p.x.free();
+        if (p.plan) |*b| b.free();
+        if (p.members) |*b| b.free();
+        if (p.borrowed) return;
         gpa.free(p.hw);
         gpa.free(p.hs);
         gpa.free(p.hb);
-        gpa.free(p.expert_of);
-        p.x.free();
         p.words.free();
         p.scale.free();
         p.bias.free();
-        if (p.plan) |*b| b.free();
-        if (p.members) |*b| b.free();
+    }
+
+    /// The first `t` rows or tokens of `parent`: its own x and plan, over the parent's tables and copies.
+    pub fn prefix(parent: *const Product, t: usize) !Product {
+        std.debug.assert(t >= 1 and t <= parent.c.rows);
+        var p = parent.*;
+        p.c.rows = t;
+        p.borrowed = true;
+        p.items = 1;
+        p.max_rows = t;
+        p.plan = null;
+        p.members = null;
+        p.expert_of = &.{};
+        const pairs = t * p.c.slots;
+        p.out_rows = if (p.c.routed()) pairs else t;
+        const x_rows: usize = if (!p.c.routed()) t else if (p.c.down) pairs else t;
+        p.hx = try gpa.dupe(u16, parent.hx[0 .. x_rows * p.c.k]);
+        errdefer gpa.free(p.hx);
+        p.x = try Buffer.fromHost(p.rig.base, p.hx);
+        errdefer p.x.free();
+        if (p.c.routed()) {
+            p.expert_of = try gpa.dupe(u32, parent.expert_of[0..pairs]);
+            errdefer gpa.free(p.expert_of);
+            try p.planExperts(pairs);
+        }
+        return p;
+    }
+
+    /// Room for `copies` copies of the tables, each uploaded, so a run that rotates them reads its weights from DRAM.
+    pub fn grow(p: *Product, copies: usize) !void {
+        std.debug.assert(!p.borrowed);
+        if (copies <= p.copies) return;
+        var words = try Buffer.alloc(p.rig.base, copies * p.copy_words * 4);
+        errdefer words.free();
+        var scale = try Buffer.alloc(p.rig.base, copies * p.copy_tab * 2);
+        errdefer scale.free();
+        var bias = try Buffer.alloc(p.rig.base, copies * p.copy_tab * 2);
+        errdefer bias.free();
+        for (0..copies) |i| {
+            try words.upload(i * p.copy_words * 4, std.mem.sliceAsBytes(p.hw));
+            try scale.upload(i * p.copy_tab * 2, std.mem.sliceAsBytes(p.hs));
+            try bias.upload(i * p.copy_tab * 2, std.mem.sliceAsBytes(p.hb));
+        }
+        p.words.free();
+        p.scale.free();
+        p.bias.free();
+        p.words = words;
+        p.scale = scale;
+        p.bias = bias;
+        p.copies = copies;
     }
 
     pub fn flops(p: Product) f64 {
@@ -151,7 +228,7 @@ pub const Product = struct {
     pub fn bytes(p: Product) f64 {
         const per = @as(f64, @floatFromInt(p.c.n)) * @as(f64, @floatFromInt(p.c.k * p.c.bits / 8 + 4 * (p.c.k / p.c.group)));
         if (!p.c.routed()) return per;
-        var seen = std.bit_set.DynamicBitSetUnmanaged.initEmpty(gpa, p.c.experts) catch return per;
+        var seen = std.bit_set.DynamicBitSetUnmanaged.initEmpty(gpa, p.c.experts + @intFromBool(p.c.shared)) catch return per;
         defer seen.deinit(gpa);
         for (p.expert_of) |e| seen.set(e);
         return per * @as(f64, @floatFromInt(seen.count()));
@@ -189,6 +266,20 @@ pub const Product = struct {
         return ref.reference(p.problem(), if (p.c.down) row else row / p.c.slots, p.expert_of[row], col);
     }
 };
+
+/// A token's slots as serving picks them: distinct routed experts, then the shared one (index `experts`).
+fn drawShared(expert_of: []u32, c: cases.Case, rng: *data.Rng) void {
+    for (0..expert_of.len / c.slots) |t| {
+        const slot = expert_of[t * c.slots ..][0..c.slots];
+        for (slot[0 .. c.slots - 1], 0..) |*e, i| {
+            while (true) {
+                e.* = @intCast(rng.next() % c.experts);
+                if (std.mem.indexOfScalar(u32, slot[0..i], e.*) == null) break;
+            }
+        }
+        slot[c.slots - 1] = @intCast(c.experts);
+    }
+}
 
 /// The shape a registry entry is asked about: a split entry is asked for two parts.
 pub fn shapeFor(a: affine.Arg, items: usize, e: *const Entry) registry.Shape {

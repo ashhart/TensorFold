@@ -70,8 +70,9 @@ __device__ __forceinline__ uint32_t order_key(float s) {
 
 namespace glm_index {
 
-// 4 warps' exclusive prefix of v in thread order and its total, via slot of `wsum`; its barrier orders slot reuse.
-__device__ __forceinline__ int block_scan(int v, int (*wsum)[4], int slot, int* total) {
+// W warps' exclusive prefix of v in thread order and its total, via slot of `wsum`; its barrier orders slot reuse.
+template <int W>
+__device__ __forceinline__ int block_scan(int v, int (*wsum)[W], int slot, int* total) {
   const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
   int inc = v;
   for (int o = 1; o < 32; o <<= 1) {
@@ -82,18 +83,18 @@ __device__ __forceinline__ int block_scan(int v, int (*wsum)[4], int slot, int* 
   __syncthreads();
   int before = inc - v;
   for (int w = 0; w < warp; ++w) before += wsum[slot][w];
-  *total = wsum[slot][0] + wsum[slot][1] + wsum[slot][2] + wsum[slot][3];
+  int all = 0;
+  for (int w = 0; w < W; ++w) all += wsum[slot][w];
+  *total = all;
   return before;
 }
 
-}  // namespace glm_index
-
-// sparse._select_rows (VISIBLE), a row per 4-warp block: K best visible pools by 8-bit radix select, ties to lower.
-extern "C" __global__ void __launch_bounds__(128)
-    tf_glm_select_rows(const float* scores, int64_t* out, int64_t np, const int* pos, int k) {
+// sparse._select_rows (VISIBLE), a row per T-thread block: K best visible pools by 8-bit radix select, ties to lower.
+template <int T>
+__device__ __forceinline__ void select_row(const float* scores, int64_t* out, int64_t np, const int* pos, int k) {
   __shared__ int hist[256];
   __shared__ uint32_t sh_prefix;
-  __shared__ int sh_need, wsum[2][4];
+  __shared__ int sh_need, wsum[2][T / 32];
   const int64_t r = blockIdx.x;
   const float* row = scores + r * np;
   const int t = threadIdx.x, lane = t & 31, warp = t >> 5;
@@ -112,12 +113,13 @@ extern "C" __global__ void __launch_bounds__(128)
       for (int j = 0; j < 8; ++j) u[j] = i0 + j < limit ? glm_index::order_key(row[i0 + j]) : 0u;
     }
   };
+  // T only sets the pools a pass reads (8 a thread): digit counts and index-order scans give every T the same picks
   uint32_t prefix = 0, fixed = 0;
   int need = k;
   for (int shift = 24; shift >= 0; shift -= 8) {
     for (int b = t; b < 256; b += blockDim.x) hist[b] = 0;
     __syncthreads();
-    for (int64_t c = 0; c < limit; c += 1024) {
+    for (int64_t c = 0; c < limit; c += 8 * T) {
       uint32_t u[8];
       keys(c, u);
       for (int j = 0; j < 8; ++j) {
@@ -159,7 +161,7 @@ extern "C" __global__ void __launch_bounds__(128)
     __syncthreads();
   }
   int run_take = 0, run_eq = 0;
-  for (int64_t c = 0; c < limit; c += 1024) {
+  for (int64_t c = 0; c < limit; c += 8 * T) {
     uint32_t u[8];
     keys(c, u);
     bool eq[8], gt[8];
@@ -171,7 +173,7 @@ extern "C" __global__ void __launch_bounds__(128)
       eqs += eq[j];
     }
     int all_eq, all_take;
-    int seen = run_eq + glm_index::block_scan(eqs, wsum, 0, &all_eq);
+    int seen = run_eq + block_scan<T / 32>(eqs, wsum, 0, &all_eq);
     bool take[8];
     int takes = 0;
     for (int j = 0; j < 8; ++j) {
@@ -179,10 +181,24 @@ extern "C" __global__ void __launch_bounds__(128)
       seen += eq[j];
       takes += take[j];
     }
-    int at = run_take + glm_index::block_scan(takes, wsum, 1, &all_take);
+    int at = run_take + block_scan<T / 32>(takes, wsum, 1, &all_take);
     for (int j = 0; j < 8; ++j)
       if (take[j]) out[r * k + at++] = c + 8 * t + j;
     run_eq += all_eq;
     run_take += all_take;
   }
+}
+
+}  // namespace glm_index
+
+// sparse._select_rows (VISIBLE), a row per 4-warp block: K best visible pools by 8-bit radix select, ties to lower.
+extern "C" __global__ void __launch_bounds__(128)
+    tf_glm_select_rows(const float* scores, int64_t* out, int64_t np, const int* pos, int k) {
+  glm_index::select_row<128>(scores, out, np, pos, k);
+}
+
+// tf_glm_select_rows a row per 1,024-thread block, for a few rows over many pools (a decode step's): its bytes.
+extern "C" __global__ void __launch_bounds__(1024)
+    tf_glm_select_rows_wide(const float* scores, int64_t* out, int64_t np, const int* pos, int k) {
+  glm_index::select_row<1024>(scores, out, np, pos, k);
 }

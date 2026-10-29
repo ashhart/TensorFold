@@ -119,8 +119,9 @@ pub fn generateFrom(e: *Engine, prompt: []const u32, from: usize, marks: []const
         if (at + c.rows == prompt.len) if (out.sampling) |p| { // the first token, from the last row
             e.draw_at.b.slice(u32, MAXR)[0] = @intCast(prompt.len);
             const cb = r.queue.commandBuffer();
-            r.enc = cb.compute(.serial);
-            sample.draw(r.enc, r.draw_pipe, m.t.logits, e.draw_at, m.t.picks, 1, VOCAB, p);
+            r.begin(cb, .serial);
+            errdefer if (r.fsr != null) r.abort();
+            sample.draw(r.enc, &r.draws, m.t.logits, e.draw_at, m.t.picks, 1, VOCAB, p);
             try m.finish(cb);
             pick = m.t.picks.b.slice(u32, 1)[0];
         };
@@ -161,7 +162,8 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
     if (m.state == 1) { // the state into the rounds' state buffers
         ar[0] = 1;
         const cb = r.queue.commandBuffer();
-        r.enc = cb.compute(.serial);
+        r.begin(cb, .serial);
+        errdefer if (r.fsr != null) r.abort();
         e.statesCopy(true);
         try m.finish(cb);
         m.state = 0;
@@ -175,6 +177,9 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
     var gap_s: f64 = 0;
     var first_start: f64 = 0;
     defer if (busy_log and last_end > first_start) std.log.info("rounds: GPU busy {d:.1} ms, gaps {d:.2} ms, span {d:.1} ms", .{ busy_s * 1e3, gap_s * 1e3, (last_end - first_start) * 1e3 });
+    const round_log = platform.c.getenv("FZ_ROUND_LOG") != null; // dev: a reply's rounds by source, verified rows and kept
+    var kept_by = std.mem.zeroes([2][MAXR + 1][MAXR + 1]u32);
+    defer if (round_log) logRounds(&kept_by);
     var copy_rate: f64 = 0.6; // drafts landed over offered: copied rounds, the head's rounds
     var head_rate: f64 = 0.6;
     const long = prompt.len + max_tokens + 8 > 4 * TOP;
@@ -184,8 +189,8 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
     r.tree = tr;
     defer r.tree = null;
     if (tr) |t| t.select(prompt);
-    // gated lanes (FZ_GATE) for the same replies: the head's confidence sets each round's width on the GPU
-    const gt: ?*gate_mod.Gate = if (e.gate) |g| (if (tr == null and drafted and out.sampling == null and !watch.armed and r.tp == null and !long) g else null) else null;
+    // gated lanes (FZ_GATE), greedy or sampled, at any context: the head's confidence sets each round's width
+    const gt: ?*gate_mod.Gate = if (e.gate) |g| (if (tr == null and drafted and !watch.armed and r.tp == null) g else null) else null;
     const gfix: ?usize = if (platform.c.getenv("FZ_GATE_FIX")) |v| std.fmt.parseInt(usize, std.mem.span(v), 10) catch null else null; // dev: a fixed host window
     const fixed = if (tr) |t| t.a + t.b else if (gt != null) (gfix orelse gate_mod.WMAX_FIRST) - 1 else depth;
     const depth0 = fixed orelse if (by_cost) |*c| c.pick() else rule.pick();
@@ -203,7 +208,8 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
     const T: i32 = @intCast(m.pos);
     if (long) { // selection on the GPU: every complete block the target and the head hold, pooled
         const cb = r.queue.commandBuffer();
-        r.enc = cb.compute(.serial);
+        r.begin(cb, .serial);
+        errdefer if (r.fsr != null) r.abort();
         try r.sel.?.catchUp(r, m, m.pos / 4);
         try m.finish(cb);
         e.tsel.sel.b.slice(i32, 128)[fz.SEL_POOLED] = @intCast(m.pos / 4);
@@ -257,7 +263,8 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
         const wr = widths[round % 4];
         const cb = r.queue.commandBuffer();
         if (round > 0) cb.waitForEvent(r.event, base + round);
-        r.enc = cb.compute(.serial);
+        r.begin(cb, .serial);
+        errdefer if (r.fsr != null) r.abort();
         m.t.rows = if (gt) |g| g.rows() else e.rows_w[wr];
         m.t.mdims = e.mdims_w[wr];
         if (round > 0) {
@@ -270,32 +277,32 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
             } else e.statesCopy(r.gdn_kept == null); // kept states replay the kept rows themselves
             r.copyKept(e.cins[(round - 1) % 2], e.cins[round % 2], PLE_TAIL * WIDE / 2, WIDE / 2, 0, 0, 1, 0);
             if (wr > 1) {
+                // a sampled reply's drafts by its keyed rule, at each row's draw position (cache length + 1 + j)
+                const kd: ?sample.HeadDraw = if (out.sampling) |p| (if (sample.keyed()) .{ .s = p, .pos = e.draw_at } else null) else null;
+                if (kd != null) {
+                    sample.positions(r.enc, r.positions_pipe, r.ar, e.draw_at, MAXR);
+                    if (!r.serial) r.enc.barrier();
+                }
+                r.head_draw = kd;
+                defer r.head_draw = null;
                 try m.mtpEncode(MAXR - 1 + wp, wp, m.t.picks, m.last, .{ .b = e.wids.b, .off = 4 });
                 if (gt) |g| g.encode(r, m.mtp.logits, 0, wr);
                 if (tr) |t| if (t.sib > 0) t.siblingsEncode(r, m.mtp.logits, m.mtp.n_ids, m.mtp.ids, e.wids, 1);
+                const lenient = copy_rate + 0.05 >= head_rate;
+                // gated: copies looked for after chain step 1 close the head's later steps they replace
+                const early = tr == null and e.copy and gt != null and wr > 2;
                 for (1..if (tr) |t| t.a else wr - 1) |j| {
                     r.head_md1 = if (gt) |g| g.md1(j) else null; // a gated chain step runs only when the gate opened it
                     defer r.head_md1 = null;
+                    if (kd) |d| r.head_draw = .{ .s = d.s, .pos = .{ .b = d.pos.b, .off = d.pos.off + 4 * j } };
                     try m.mtpEncode(j, 1, .{ .b = e.wids.b, .off = 4 * j }, m.mtp.h[1], .{ .b = e.wids.b, .off = 4 * (j + 1) });
                     if (gt) |g| g.encode(r, m.mtp.logits, @intCast(j), wr);
                     if (tr) |t| if (t.sib > 0) t.siblingsEncode(r, m.mtp.logits, m.mtp.n_ids, m.mtp.ids, e.wids, j + 1);
+                    if (early and j == 1) lookupEncode(e, wr, gt, lenient, 2);
                 }
                 if (tr) |t| {
                     if (t.sib == 0) t.feedEncode(r, e.wids);
-                } else if (e.copy) { // copied drafts replace the head's when the history repeats its last tokens
-                    r.enc.setPipeline(r.lookup_pipe);
-                    r.enc.setBuffer(e.hist, 0, 0);
-                    r.enc.setBuffer(r.ar.b, r.ar.off, 1);
-                    r.enc.setBuffer(e.wids.b, e.wids.off, 2);
-                    const lenient = copy_rate + 0.05 >= head_rate;
-                    const lc = [4]u32{ @intCast(wr), if (lenient) e.copy_min else 4, if (lenient) e.copy_long else 9, if (lenient) 1 else 2 };
-                    r.enc.setBytes(std.mem.asBytes(&lc), 3);
-                    const opens = if (gt) |g| g.rows() else e.rows_w[MAXR]; // a copy opens a gated window to its drafts
-                    r.enc.setBuffer(opens.b, opens.off, 4);
-                    const gated: u32 = @intFromBool(gt != null);
-                    r.enc.setBytes(std.mem.asBytes(&gated), 5);
-                    r.enc.dispatchThreads(mtl.Size.of(1024, 1, 1), mtl.Size.of(1024, 1, 1));
-                }
+                } else if (e.copy) lookupEncode(e, wr, gt, lenient, 0); // copied drafts replace the head's, closed steps' too
             }
         }
         if (watch.armed) think.force(r, e.wids, e.hist, wr); // the close's tokens as the window's drafts
@@ -312,7 +319,7 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
         if (out.sampling) |p| { // the window's picks redrawn from its logits, in place of the head's argmax
             sample.positions(r.enc, r.positions_pipe, r.ar, e.draw_at, wr);
             if (!r.serial) r.enc.barrier();
-            sample.draw(r.enc, r.draw_pipe, m.t.logits, e.draw_at, m.t.picks, wr, VOCAB, p);
+            sample.draw(r.enc, &r.draws, m.t.logits, e.draw_at, m.t.picks, wr, VOCAB, p);
             if (!r.serial) r.enc.barrier();
         }
         // the widest windows while copies land whole (a gated reply's too); otherwise the gate's or the head's rule
@@ -334,10 +341,10 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
             r.enc.setBuffer(verified.b, verified.off, 7);
             r.enc.dispatchThreads(mtl.Size.of(1, 1, 1), mtl.Size.of(1, 1, 1));
         }
-        r.enc.end();
-        cb.signalEvent(r.event, base + round + 1);
-        cb.commit();
-        cbs[round % 4] = cb;
+        const final = try r.finishEncoding(cb);
+        final.signalEvent(r.event, base + round + 1);
+        final.commit();
+        cbs[round % 4] = final;
         round += 1;
         if (round < 2) continue;
         const prev = cbs[done % 4].?;
@@ -364,6 +371,7 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
         }
         last_end = prev.gpuEnd();
         const got = rg[slot + 3 .. slot + 3 + keep];
+        if (round_log and wd <= MAXR and keep <= MAXR) kept_by[@intFromBool(rg[slot + 1] != 0)][wd][keep] += 1;
         const learn = !watch.read(got); // a round that landed the close's tokens teaches no rate, rule or counter
         if (learn and wd > 1) {
             const frac = @as(f64, @floatFromInt(keep - 1)) / @as(f64, @floatFromInt(wd - 1));
@@ -423,6 +431,33 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
     if (failed) |err| return err;
     if (handoff) |h| if (res.reason == .cancelled) try e.handOver(h, round, kv_len);
     return res;
+}
+
+/// fz_lookup over a `wr`-row window: copies replace the head's drafts; `close` > 0 shuts gated chain steps from there.
+pub fn lookupEncode(e: *Engine, wr: usize, gt: ?*gate_mod.Gate, lenient: bool, close: u32) void {
+    const r = e.r;
+    r.enc.setPipeline(r.lookup_pipe);
+    r.enc.setBuffer(e.hist, 0, 0);
+    r.enc.setBuffer(r.ar.b, r.ar.off, 1);
+    r.enc.setBuffer(e.wids.b, e.wids.off, 2);
+    const lc = [4]u32{ @intCast(wr), if (lenient) e.copy_min else 4, if (lenient) e.copy_long else 9, if (lenient) 1 else 2 };
+    r.enc.setBytes(std.mem.asBytes(&lc), 3);
+    const opens = if (gt) |g| g.rows() else e.rows_w[MAXR];
+    r.enc.setBuffer(opens.b, opens.off, 4);
+    const gated: u32 = @intFromBool(gt != null);
+    r.enc.setBytes(std.mem.asBytes(&gated), 5);
+    r.enc.setBytes(std.mem.asBytes(&close), 6);
+    r.enc.dispatchThreads(mtl.Size.of(1024, 1, 1), mtl.Size.of(1024, 1, 1));
+    if (!r.serial) r.enc.barrier();
+}
+
+/// FZ_ROUND_LOG: each source's (head, copied) rounds at each verified width, counted by the tokens they kept.
+fn logRounds(kept_by: *const [2][MAXR + 1][MAXR + 1]u32) void {
+    for (kept_by, 0..) |by_width, copied| for (by_width, 0..) |kept, w| {
+        var n: u32 = 0;
+        for (kept) |c| n += c;
+        if (n > 0) std.log.info("rounds {s} rows {d}: {d}, kept 1.. {any}", .{ if (copied == 1) "copied" else "head", w, n, kept[1 .. w + 1] });
+    };
 }
 
 pub fn handOver(e: *Engine, h: *Handoff, round: usize, cache: usize) !void {

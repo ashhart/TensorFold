@@ -31,11 +31,34 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
             return std.mem.indexOf(u8, s, p) != null;
         }
     }.f;
+    if (std.mem.startsWith(u8, d.name, "qwen4-native ")) {
+        const body = try @import("qwen4").family.limits_sources.source(a, d.name);
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
+    if (std.mem.startsWith(u8, d.name, "hc-pointwise ")) {
+        const body = try @import("metal_hc_pointwise.zig").text(a);
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
+    if (std.mem.startsWith(u8, d.name, "hc-activation ")) {
+        const body = try @import("metal_hc_activation.zig").text(a);
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
+    if (std.mem.startsWith(u8, d.name, "weight-only ")) {
+        const body = try @import("metal_weight_only.zig").text(a);
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
+    if (std.mem.startsWith(u8, d.name, "flashnext FSR ")) {
+        const fsr = try tf.flashnext_fsr_contract.source(a, fun);
+        const pre = if (fsr.fragments) try preM5(a, "", fsr.text) else fsr.text;
+        const here = if (fsr.fragments and device.tensorUnits()) try std.mem.replaceOwned(u8, a, fsr.text, "#include \"../nax.h\"", sources.nax) else pre;
+        return .{ .decl = d, .function = fun, .here = here, .pre_m5 = pre };
+    }
     if (std.mem.startsWith(u8, d.name, "flashnext vision ") or std.mem.startsWith(u8, d.name, "flashnext rotary ")) {
         const w: tf.flashnext_vision_contract.Which = if (std.mem.eql(u8, fun, "fz_mask_rows")) .mask else if (std.mem.eql(u8, fun, "fn_attn_prep_mrope")) .mrope else if (std.mem.indexOf(u8, d.name, " target ") != null) .target else if (std.mem.indexOf(u8, d.name, " mtp ") != null) .mtp else if (std.mem.indexOf(u8, d.name, " absolute ") != null) .absolute else if (std.mem.indexOf(u8, d.name, " positioned ") != null) .positioned else .pooled;
         text = tf.flashnext_vision_contract.source(w);
         return .{ .decl = d, .function = fun, .here = text, .pre_m5 = text };
     }
+    if (std.mem.startsWith(u8, d.name, "metal lfm2 ")) return .{ .decl = d, .function = fun, .here = sources.lfm2, .pre_m5 = sources.lfm2 };
     if (std.mem.startsWith(u8, d.name, "drama3 ")) {
         const text_d3 = try @import("metal_drama3.zig").source(a, d.name);
         return .{ .decl = d, .function = fun, .here = text_d3, .pre_m5 = text_d3 };
@@ -52,6 +75,10 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
         text = @import("h3_kernels").source;
     } else if (std.mem.startsWith(u8, d.name, "glm gather ") or std.mem.startsWith(u8, d.name, "glm rows ")) {
         text = tf.glm.wide.gather_source;
+    } else if (std.mem.startsWith(u8, d.name, "nemotron experts ")) {
+        text = sources.nemotron_experts;
+    } else if (std.mem.startsWith(u8, d.name, "nemotron geometry ")) {
+        text = if (has(d.name, " up ")) tf.nemotron.kernels.geo_up else tf.nemotron.kernels.geo_down;
     } else if (std.mem.startsWith(u8, d.name, "glm ")) {
         const key = d.name[4..std.mem.indexOfScalarPos(u8, d.name, 4, ' ').?];
         text = for (sources.glm.all) |k| {
@@ -62,6 +89,12 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
         frags = true;
     } else if (std.mem.startsWith(u8, d.name, "qwen image ")) {
         text = sources.qwen_image;
+        frags = true;
+    } else if (std.mem.startsWith(u8, d.name, "moss image gemm ")) {
+        text = sources.core_qwen_vision;
+        frags = true;
+    } else if (std.mem.startsWith(u8, d.name, "moss image ")) {
+        text = sources.moss_image;
         frags = true;
     } else if (std.mem.startsWith(u8, d.name, "core deltanet ")) {
         text = sources.core_deltanet;

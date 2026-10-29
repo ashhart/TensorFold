@@ -2,6 +2,7 @@
 
 #include <cuda_bf16.h>
 #include <stdint.h>
+#include "common/reduce.cuh"
 
 // out[i] = the sum of the sk slices' part[s][i] in order, rounded once (qmm.cu's reduce_kernel): bf16 if out_bf16.
 extern "C" __global__ void fn_sum_slices(const float* __restrict__ part, void* __restrict__ out, int out_bf16,
@@ -37,10 +38,7 @@ constexpr int PW = C + NV * DV + 2 * NV;
 
 static __device__ __forceinline__ float bf(float x) { return __bfloat162float(__float2bfloat16_rn(x)); }
 
-static __device__ __forceinline__ float warp_sum(float x) {
-    for (int o = 16; o; o >>= 1) x += __shfl_xor_sync(0xffffffffu, x, o);
-    return x;
-}
+using tf_common::warp_sum;
 
 static __device__ __forceinline__ float sigmoidf_(float x) { return 1.0f / (1.0f + expf(-x)); }
 

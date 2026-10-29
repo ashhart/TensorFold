@@ -45,6 +45,8 @@ pub fn check(verify: Verify, keep: Keep) !void {
     const a = arena.allocator();
     mtl.allocator = a;
     var r: fz.Run = .{ .arena = a, .device = .{}, .queue = .{}, .serial = true, .xnew = true, .fused_xsum = true, .skip = 0xff & ~@as(u32, (1 << 2) | (1 << 6)), .argmax_pipe = .{ .name = "argmax" } };
+    const fsr = try @import("fsr_runtime.zig").Runtime.init(&r, "mtp", null, 42);
+    defer fsr.deinit();
     try site(&r, "qa_embed_rows@embed");
     try site(&r, "qa_ple_lookup@ple");
     try site(&r, "q4_ple_gate@ple");
@@ -55,7 +57,8 @@ pub fn check(verify: Verify, keep: Keep) !void {
     r.router_pipe = .{};
     r.xgu_pipe = .{ .name = "fz_xgu" };
     r.xdown_pipe = .{ .name = "fz_xdown" };
-    r.draw_pipe = .{ .name = "draw" };
+    const draw: mtl.Pipeline = .{ .name = "draw" };
+    r.draws = .{ .full = draw, .full_ids = draw, .slices = draw, .race = draw, .race_ids = draw, .ck = try r.device.buffer(64, fz.opts), .ci = try r.device.buffer(64, fz.opts) };
     r.rotary_pipe = .{ .name = "tf_rotary_prepare" };
     r.argpart_pipe = .{ .name = "fz_argmax_part" };
     r.argjoin_pipe = .{ .name = "fz_argmax_join" };
@@ -93,13 +96,14 @@ pub fn check(verify: Verify, keep: Keep) !void {
         s.m.t.kvmeta = .{ .b = try r.device.buffer(64, fz.opts) };
         s.m.t.ple_ids = .{ .b = try r.device.buffer(1024, fz.opts) };
     }
-    var b: Backend = .{ .gpa = a, .e = &e, .primary = &m, .sessions = &sessions, .hidden = dummy, .grammar = .{ .pipe = .{}, .bits = dummy } };
+    var b: Backend = .{ .gpa = a, .e = &e, .primary = &m, .sessions = &sessions, .hidden = dummy, .grammar = .{ .pipe = .{}, .bits = dummy }, .fence = try mtl.counters.Fence.init(e.r.device) };
     // Null widths preserve the recorded 6/32 dispatch. Non-null widths include mixed routed/shared widths.
     for ([_][4]usize{ .{ 4, 64, 4, 64 }, .{ 6, 32, 6, 32 }, .{ 4, 32, 8, 128 } }) |w| {
         m.embed_w = if (w[0] == 6) null else .{ w[0], w[1] };
         m.ple.w = m.embed_w;
         m.ple.scale = .{ .pipe = .{ .name = "scale" }, .value = 0.5 };
         for (&m.layers) |*l| l.xw = if (w[0] == 6) null else .{ .gu = w, .down = w };
+        r.fsr = null;
         mtl.expected = w;
         mtl.wrong = 0;
         mtl.calls = @splat(0);
@@ -145,6 +149,8 @@ pub fn check(verify: Verify, keep: Keep) !void {
                     fn draft(_: *anyopaque, _: []const be.DraftRequest) anyerror!void {}
                     fn release(_: *anyopaque, _: *lanes.Stream) void {}
                 };
+                r.fsr = if (mode >= 2) fsr else null;
+                b.overlap = mode % 2 != 0;
                 var bridge: Bridge = .{ .back = &b, .verify_ = verify, .keep_fn = keep };
                 var core = lanes.Engine.init(a, &cfg, .{ .ptr = &bridge, .vtable = &.{ .prefill = Bridge.nofill, .first = Bridge.first, .queue = Bridge.queue, .read = Bridge.read, .verify = Bridge.check_, .keep = Bridge.keep_, .draft = Bridge.draft, .release = Bridge.release } }, clock.clock());
                 defer core.deinit();
@@ -185,6 +191,10 @@ pub fn check(verify: Verify, keep: Keep) !void {
                 mtl.calls = @splat(0);
                 mtl.rotary_calls = 0;
                 try core.step();
+                if (r.fsr) |f| {
+                    try std.testing.expectEqual(if (b.overlap) mtl.DispatchType.concurrent else .serial, f.commands.mode);
+                    try std.testing.expect(f.commands.active == null and f.commands.pending == null);
+                }
                 try std.testing.expectEqual(@as(usize, 1), mtl.rotary_calls);
                 try std.testing.expect(stream.emitted().len > 0);
                 try std.testing.expectEqual(legacy, stream.emitted()[0]);
@@ -207,9 +217,15 @@ pub fn check(verify: Verify, keep: Keep) !void {
                 stream.dropHeld(a);
                 mtl.first_blit = null;
                 mtl.blits = 0;
+                mtl.source_count = 0;
                 try core.step();
                 try std.testing.expectEqual(@as(usize, if (drafted) fz.CS_ROW else 0), mtl.first_blit.?.offset);
                 try std.testing.expectEqual(fz.CS_ROW, mtl.first_blit.?.bytes);
+                // session 1's kept state sits at row 3; a copy encoded after outputs() would read row 1
+                if (drafted) {
+                    try std.testing.expectEqual(@as(usize, fz.CS_ROW), mtl.sources[0].off);
+                    if (mode >= 2) try std.testing.expectEqual(@as(usize, 3) * fz.CS_ROW, mtl.sources[72].off);
+                }
                 try std.testing.expectEqual(@as(u32, 7), stream.emitted()[stream.emitted().len - 1]);
             }
         }

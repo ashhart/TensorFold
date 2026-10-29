@@ -90,6 +90,12 @@ fn whole(_: *anyopaque, saved: api.prompt_cache.Saved) bool {
 
 /// What disk states are read under: the checkpoint, kernels (ours or a captured set), driver, device, a probe's bits.
 pub fn identity(a: Allocator, io: std.Io, g: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, backend: lanes.backend.Backend, t: *Target) !struct { id: u64, rate: f64 } {
+    const p = try probe(a, io, backend, t);
+    return .{ .id = try identityOf(a, io, g, dir, kernels, &[_]u64{@intFromBool(t.head != null)}, p.hash), .rate = p.rate };
+}
+
+/// The identity's hash: the checkpoint, kernels, device, driver, a family's facts, then its probe's hash.
+pub fn identityOf(a: Allocator, io: std.Io, g: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, facts: []const u64, probed: u64) !u64 {
     var h = std.hash.Wyhash.init(0x6375);
     try disk_identity.checkpoint(&h, a, io, dir);
     inline for (comptime std.meta.declarations(cuda.kernels)) |d| {
@@ -99,11 +105,11 @@ pub fn identity(a: Allocator, io: std.Io, g: *const cuda.Context, dir: []const u
     if (kernels) |k| h.update(try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ k, "aot.json" }), a, .limited(1 << 26)));
     var name_buf: [256]u8 = undefined;
     h.update(g.name(&name_buf) catch "GPU");
-    const facts = [_]u64{ try g.capability(), @intCast(try g.d.version()), @intFromBool(t.head != null) };
-    h.update(std.mem.sliceAsBytes(&facts));
-    const p = try probe(a, io, backend, t);
-    h.update(std.mem.asBytes(&p.hash));
-    return .{ .id = h.final(), .rate = p.rate };
+    const device = [_]u64{ try g.capability(), @intCast(try g.d.version()) };
+    h.update(std.mem.sliceAsBytes(&device));
+    h.update(std.mem.sliceAsBytes(facts));
+    h.update(std.mem.asBytes(&probed));
+    return h.final();
 }
 
 /// A fixed prompt's state at a mark inside its last chunk, hashed (a kernel, driver or arithmetic change moves it).
@@ -123,19 +129,18 @@ fn probe(a: Allocator, io: std.Io, backend: lanes.backend.Backend, t: *Target) !
         }
     };
     var hook: Hook = .{ .t = t };
+    defer if (hook.saved) |saved| kept.drop(t, saved);
     const marks = [_]u32{4136};
     var s = try lanes.Stream.init(a, .{ .id = "probe", .prompt = &toks, .max_new = 1, .drafts = t.head != null, .reuse = .{ .marks = &marks, .hook = .{ .ptr = &hook, .at = Hook.at } } });
     defer s.deinit(a);
-    const t0 = std.Io.Clock.awake.now(io).toNanoseconds();
-    backend.vtable.prefill(backend.ptr, &s) catch |e| {
-        backend.vtable.release(backend.ptr, &s);
-        return e;
+    const ns = pass: {
+        defer backend.vtable.release(backend.ptr, &s); // once, whether the pass, its wait or nothing failed
+        const t0 = std.Io.Clock.awake.now(io).toNanoseconds();
+        try backend.vtable.prefill(backend.ptr, &s);
+        try kept.settle(t);
+        break :pass std.Io.Clock.awake.now(io).toNanoseconds() - t0;
     };
-    try kept.settle(t);
-    const ns = std.Io.Clock.awake.now(io).toNanoseconds() - t0;
-    backend.vtable.release(backend.ptr, &s);
     const saved = hook.saved orelse return hook.failed orelse error.ProbeUnmarked;
-    defer kept.drop(t, saved);
     if (!whole(t, saved)) return error.ProbeUnmarked;
     const sh = kept.shape(t, 4136);
     const bytes = try a.alloc(u8, words + sh.kv + sh.mamba);
@@ -149,17 +154,89 @@ fn probe(a: Allocator, io: std.Io, backend: lanes.backend.Backend, t: *Target) !
 pub fn attach(a: Allocator, io: std.Io, ctx: *const cuda.Context, o: api.Open, root: []const u8, kernels: ?[]const u8, loaded: anytype, store: *api.prompt_cache.Store) !void {
     loaded.target.ctx = ctx;
     const id = try identity(a, io, ctx, o.dir, kernels, loaded.backend, loaded.target);
+    try open(o, root, id.id, id.rate, store, "nemotron");
+}
+
+/// The disk module of a family's kept states (image, probe, facts), or null: Nemotron's is this file's own.
+pub fn keptDisk(comptime F: type) ?type {
+    return if (@hasDecl(F, "kept_disk")) F.kept_disk else null;
+}
+
+/// Kept states through disk module `K` (keptDisk): the same store under the identity its probe and facts give.
+pub fn attachKept(comptime K: type, name: []const u8, a: Allocator, io: std.Io, ctx: *const cuda.Context, o: api.Open, root: []const u8, kernels: ?[]const u8, loaded: anytype, store: *api.prompt_cache.Store) !void {
+    // a module that opens the store itself (several ranks' parts, say) declares attach, and takes identityOf from here
+    if (comptime @hasDecl(K, "attach")) return K.attach(a, io, ctx, o, root, kernels, loaded, store) else {
+        if (@hasDecl(K, "bind")) K.bind(loaded.target, ctx); // the context the store's copies make current
+        const p = try K.probe(a, io, loaded.backend, loaded.target);
+        const facts = K.facts(loaded.target); // an array, or a slice
+        const list: []const u64 = if (@typeInfo(@TypeOf(facts)) == .pointer) facts else &facts;
+        try open(o, root, try identityOf(a, io, ctx, o.dir, kernels, list, p.hash), p.rate, store, name);
+    }
+}
+
+fn open(o: api.Open, root: []const u8, id: u64, rate: f64, store: *api.prompt_cache.Store, name: []const u8) !void {
     const gibs = struct {
         fn bytes(g: f64) u64 {
             return @intFromFloat(g * (1 << 30));
         }
     }.bytes;
-    const r = try api.prompt_cache.rows.Rows.open(store.gpa, store.family, .{ .root = root, .identity = id.id, .cap = gibs(o.learn_gib), .floor = gibs(o.learn_min_free_gib), .daily = gibs(o.learn_daily_gib), .lookahead = store.rules.lookahead, .planned = store.rules.planned });
-    r.prefill_rate = id.rate;
-    store.disk = r;
-    std.log.info("nemotron: conversation states on disk in {s} ({d} states, {d} MiB of {d} MiB)", .{ r.dir, r.states.items.len, r.held() >> 20, r.cap >> 20 });
+    // --spill-gib: evicted states only (or with --learn-conversations, both); --checkpoint-slots bounds RAM beside it
+    const r = try api.prompt_cache.rows.attach(store.gpa, store, .{ .root = root, .identity = id, .cap = gibs(o.learn_gib), .floor = gibs(o.learn_min_free_gib), .daily = gibs(o.learn_daily_gib), .lookahead = store.rules.lookahead, .planned = store.rules.planned, .grid = store.rules.grid, .spill = o.spill, .slots = @import("disk_spill.zig").slots(o) });
+    r.prefill_rate = rate;
+    std.log.info("{s}: conversation states on disk in {s} ({d} states, {d} MiB of {d} MiB)", .{ name, r.dir, r.states.items.len, r.held() >> 20, r.cap >> 20 });
 }
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("disk_spill.zig");
+}
+
+test "a disk module that declares attach opens the store itself" {
+    const K = struct {
+        pub var calls: usize = 0;
+        pub fn attach(_: Allocator, _: std.Io, _: *const cuda.Context, _: api.Open, root: []const u8, _: ?[]const u8, _: anytype, _: *api.prompt_cache.Store) !void {
+            calls += 1;
+            try std.testing.expectEqualStrings("/r", root);
+        }
+    };
+    try attachKept(K, "k", std.testing.allocator, std.testing.io, undefined, .{ .dir = "d", .model_type = "m" }, "/r", null, @as(u8, 0), undefined);
+    try std.testing.expectEqual(@as(usize, 1), K.calls);
+}
+
+test "CUDA disk open: --spill-gib's mode and --checkpoint-slots reach the store" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    // a disk module that opens the store itself, through this file's open, under a fixed identity and no device
+    const K = struct {
+        pub fn attach(_: Allocator, _: std.Io, _: *const cuda.Context, o: api.Open, root: []const u8, _: ?[]const u8, _: anytype, store: *api.prompt_cache.Store) !void {
+            try open(o, root, 7, 1.0, store, "fake");
+        }
+        fn bytes(_: *anyopaque, _: u32) u64 {
+            return 0;
+        }
+        fn save(_: *anyopaque, _: ?*anyopaque, _: u32) anyerror!api.prompt_cache.Saved {
+            return error.Unused;
+        }
+        fn restore(_: *anyopaque, _: ?*anyopaque, _: api.prompt_cache.Saved) anyerror!void {}
+        fn drop(_: *anyopaque, _: api.prompt_cache.Saved) void {}
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    var family: u8 = 0;
+    const vt: api.prompt_cache.Snapshots.VTable = .{ .bytes = K.bytes, .save = K.save, .restore = K.restore, .drop = K.drop, .rows = &image };
+    for ([_]api.prompt_cache.rows.Spill{ .evicted, .finish }, [_]?i64{ 3, null }) |mode, keep| {
+        var store = api.prompt_cache.Store.init(gpa, .{ .ptr = &family, .vtable = &vt }, .{ .lookahead = 1 }, 1 << 20);
+        const o: api.Open = .{ .dir = "d", .model_type = "nemotron_h", .keep = keep, .learn = root, .learn_conversations = true, .spill = mode };
+        attachKept(K, "k", gpa, io, undefined, o, root, null, @as(u8, 0), &store) catch |e| {
+            store.deinit();
+            return e;
+        };
+        const r = store.disk.?;
+        defer r.deinit();
+        defer store.deinit(); // the store before its disk, as the rows fixtures close them
+        try std.testing.expectEqual(mode, r.spill);
+        try std.testing.expectEqual(if (keep) |n| @as(usize, @intCast(n)) else std.math.maxInt(usize), store.most);
+    }
 }

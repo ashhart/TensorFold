@@ -47,6 +47,8 @@ pub const Runner = struct {
     capture_taps: bool = false,
     accepted_chain: bool = false,
     last_gpu_seconds: f64 = 0,
+    gpu_seconds: f64 = 0, // with a trace attached: every pass's GPU-busy seconds, its spans' and share's buffers too
+    trace: ?*@import("core").gpu_profile.Trace = null, // TF_Q27_PROFILE's: each pass run while it is enabled is a round
     current_round: ?*const Round = null,
     current_gdn: ?*const GdnPlan = null,
     current_attention: ?*const attn.Plan = null,
@@ -55,6 +57,8 @@ pub const Runner = struct {
     rope: [attn.planning.max_streams]mrope.Layout = @splat(.{}),
     /// A prompt pass's image rows, while it runs.
     images: ?image_rows.Images = null,
+    /// A kept state's blit still reading a slot, by slot: the slot's next write waits for it (settleSlot).
+    reading: [attn.planning.max_streams]?mtl.CommandBuffer = @splat(null),
 
     pub fn init(a: std.mem.Allocator, m: *Model, slots: u32, capacity: u32) !Runner {
         return initReady(a, m, slots, capacity, slots);
@@ -163,6 +167,7 @@ pub const Runner = struct {
     }
 
     pub fn deinit(r: *Runner) void {
+        for (0..r.slots) |slot| r.settleSlot(@intCast(slot));
         r.setResident(null);
         r.taps.deinit();
         r.gdn.deinit();
@@ -179,6 +184,7 @@ pub const Runner = struct {
     }
 
     pub fn profile(r: *Runner, trace: ?*@import("core").gpu_profile.Trace) void {
+        r.trace = trace;
         r.model.kernels.profiler = trace;
         r.model.glue.profiler = trace;
         r.gdn.profiler = trace;
@@ -240,6 +246,8 @@ pub const Runner = struct {
         if (r.capture_taps) r.taps.begin();
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
+        const spanned = if (r.trace) |t| t.spanned else 0; // a profiled pass's spans commit buffers of their own
+        const handed = if (r.model.ane) |share| share.gpu_seconds else 0;
         var stages = forward.Stages{ .model = r.model, .rows = @intCast(round.ids.len), .hooks = .{ .ptr = r, .gdn = gdnForward, .attention = attentionForward, .tap = if (r.capture_taps) tap else null }, .head = head, .images = placed.images };
         r.last_gpu_seconds = @import("core").segments.runCommitting(r.model.device, &.{r.model.queue}, r.model.config.layers, .concurrent, &stages, commit_every) catch |err| {
             r.failed = true;
@@ -249,6 +257,10 @@ pub const Runner = struct {
             r.failed = true;
             return err;
         };
+        if (r.trace) |t| {
+            r.gpu_seconds += r.last_gpu_seconds + (t.spanned - spanned) + (if (r.model.ane) |share| share.gpu_seconds - handed else 0);
+            t.round();
+        }
         if (r.capture_taps) try r.taps.complete();
         if (accepted) {
             for (round.slots, round.windows) |slot, window| r.offsets[slot] = window.start + @as(u32, @intCast(window.parents.len));
@@ -346,7 +358,22 @@ pub const Runner = struct {
         if (r.active == null) r.gdn.releaseBefore();
     }
 
+    /// A kept state's blit reading `slot` lands before the slot is written: its reset, next chunk or first round.
+    pub fn settleSlot(r: *Runner, slot: u32) void {
+        const cb = r.reading[slot] orelse return;
+        r.reading[slot] = null;
+        cb.wait();
+        cb.release();
+    }
+
+    /// `cb` reads `slot` (committed, not waited): the slot's next write settles it first.
+    pub fn readingSlot(r: *Runner, slot: u32, cb: mtl.CommandBuffer) void {
+        r.settleSlot(slot);
+        r.reading[slot] = cb.retain();
+    }
+
     pub fn reset(r: *Runner, slot: u32) !void {
+        r.settleSlot(slot);
         if (r.failed or r.active != null or slot >= r.ready) return error.RoundNotReady;
         const pool = mtl.objc.Pool.push();
         defer pool.pop();

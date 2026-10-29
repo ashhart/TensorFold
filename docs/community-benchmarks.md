@@ -15,6 +15,8 @@ An engine that decodes greedily only refuses the sampled cells, so it cannot com
 
 Results are saved locally in `~/.tensorfold/benchmarks/RUN_ID.json`; `--output FILE` chooses another location. Files contain public hardware and model metadata and individual attempts, never prompt text, generated output, machine names, serial numbers, GPU UUIDs, addresses or local model paths. Local model directories can be benchmarked but cannot be published, and a drafter directory is never named. Managed native runs record `python_version` as `"none"`. An attached manifest may attest the same value; an unattested attached run records `"unknown"`. Beside each receipt, `RUN_ID.drafts.json` (for `--output FILE.json`, `FILE.drafts.json`) keeps what the server reported for each attempt: its verify rounds, the tokens a drafter proposed and the tokens the target accepted, with their totals (null, and the run says so, when a sum would pass 64 bits) and whether the run passed a drafter. The board's receipt has no field for these counts, so they are never uploaded; they are how a local run shows that its drafter ran, since equal timings do not. When a drafter was passed and the server drafted no tokens, the run says so.
 
+[The Grill](https://github.com/plotarmordev/thegrill) is a separate third-party tool that reports whether a serving change measured faster, slower or inconclusive.
+
 ## Commands
 
 ```sh

@@ -17,6 +17,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     if ((o.tp != 1 and o.tp != 2) or o.rank >= o.tp) return error.BadRank;
     // refused before the stream, the glue or a captured set loads
     const chunk = try prompt.chunkRows();
+    _ = try @import("cuda_modelopt_threads.zig").configured(); // TF_FLASHNEXT_LOAD_THREADS, refused before any load
     const mode = try config.mode(gpa, io, dir);
     if (o.tp != 1 and (mode != .modelopt or captured != null)) return error.UnsupportedQuantization;
     if (o.slide and (mode != .affine or o.tp != 1)) return error.UnsupportedLearningFormat;

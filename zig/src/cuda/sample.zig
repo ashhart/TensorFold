@@ -60,6 +60,8 @@ pub const Draws = struct {
     draw_rows_fn: ?Function = null,
     /// tf_draw_slice_top and tf_draw_rows_finish: a window's rows over slices (null: one block a row).
     slices: ?[2]Function = null,
+    /// tf_penalize_rows; null in a kernel set built before it, where penalties are not offered.
+    penalize_fn: ?Function = null,
 
     /// sample.cu's SW: a slice's entries.
     pub const draw_slice = 8192;
@@ -70,7 +72,7 @@ pub const Draws = struct {
     pub const topk_slice = 4096;
 
     pub fn resolve(mod: Module) !Draws {
-        return .{ .draw_fn = try mod.function("tf_draw"), .draw_ids_fn = try mod.function("tf_draw_ids"), .logprob_rows_fn = try mod.function("tf_logprob_rows"), .topk_slices_fn = try mod.function("tf_topk_slices"), .topk_merge_fn = try mod.function("tf_topk_merge"), .draw_rows_fn = mod.function("tf_draw_rows") catch null, .slices = slicesOf(mod) };
+        return .{ .draw_fn = try mod.function("tf_draw"), .draw_ids_fn = try mod.function("tf_draw_ids"), .logprob_rows_fn = try mod.function("tf_logprob_rows"), .topk_slices_fn = try mod.function("tf_topk_slices"), .topk_merge_fn = try mod.function("tf_topk_merge"), .draw_rows_fn = mod.function("tf_draw_rows") catch null, .slices = slicesOf(mod), .penalize_fn = mod.function("tf_penalize_rows") catch null };
     }
 
     fn slicesOf(mod: Module) ?[2]Function {
@@ -152,6 +154,15 @@ pub const Draws = struct {
         a.add(meta);
         a.add(out);
         try launch_.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = 1024 } }, s, &a);
+    }
+
+    /// `n` entries at `entries` (n rows, n tokens, then n fp32 amounts): each takes its amount from its row's logit.
+    pub fn penalize(d: *const Draws, s: Stream, logits: u64, vocab: usize, entries: u64, n: usize) !void {
+        if (n == 0) return;
+        const f = d.penalize_fn orelse return error.PenaltiesUnsupported;
+        var a: launch_.Args = .{};
+        inline for (.{ logits, @as(u32, @intCast(vocab)), entries, entries + n * 4, entries + n * 8, @as(u32, @intCast(n)) }) |v| a.add(v);
+        try launch_.launch(f, .{ .grid = .{ .x = @intCast((n + 255) / 256), .y = 1, .z = 1 }, .block = .{ .x = 256 } }, s, &a);
     }
 
     /// Each bf16 logits row's logprob words at `out`: its pick in `picks`, its `k` best tokens, its rank if `rank`.

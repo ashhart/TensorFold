@@ -127,8 +127,8 @@ test "a masked row's draw on the GPU is the host's: fz_mask_rows then fz_argmax 
     defer m.deinit(gpa);
     const slib = try mtl.Library.fromSource(dev, ks.nemotron_sample, mtl.CompileOptions.mlx());
     defer slib.deinit();
-    const draw_pipe = try mtl.Pipeline.init(dev, slib, "tf_sample_full", false);
-    defer draw_pipe.deinit();
+    const draws = try @import("sample.zig").Draws.init(dev, slib, fz.MAXR);
+    defer draws.deinit();
     const glib = try mtl.Library.fromSource(dev, fz.glue_source, mtl.CompileOptions.mlx());
     defer glib.deinit();
     const argmax_pipe = try mtl.Pipeline.init(dev, glib, "fz_argmax", false);
@@ -167,7 +167,7 @@ test "a masked row's draw on the GPU is the host's: fz_mask_rows then fz_argmax 
         const cb = q.commandBuffer();
         const enc = cb.compute(.serial);
         m.encode(enc, .{ .b = logits }, rows);
-        if (s) |st| @import("sample.zig").draw(enc, draw_pipe, .{ .b = logits }, .{ .b = pos }, .{ .b = picks }, rows, fz.VOCAB, st) else {
+        if (s) |st| @import("sample.zig").draw(enc, &draws, .{ .b = logits }, .{ .b = pos }, .{ .b = picks }, rows, fz.VOCAB, st) else {
             enc.setPipeline(argmax_pipe);
             const v: u32 = fz.VOCAB;
             enc.setBuffer(logits, 0, 0);

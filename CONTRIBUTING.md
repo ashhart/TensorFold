@@ -31,6 +31,7 @@ The `apple_m1` CPU target keeps the macOS binary compatible with M1 through M5.
 Run the full suite on an isolated machine when the local GPU is serving a model.
 `test-golden` compares the frozen server corpus and records known differences separately.
 These results do not substitute for an actual checkpoint/model gate.
+On macOS, `zig build dev-tools` compiles and links every `tf-*` developer tool without running one; run it after changing an API they call.
 
 For the CUDA host-test subset without the macOS Metal family tests:
 

@@ -102,20 +102,27 @@ pub fn run(gpu: check.Gpu) !void {
     const router = try cuda.grouped.Router.resolve(mod);
     var kernels = try fx.load(gpu.d, @intCast(try gpu.ctx.attribute(.multiprocessor_count)));
     defer kernels.unload();
-    const act = [2]u64{ try r.out(pairs_most * width * 2), try r.out(pairs_most * width * 2) };
-    const out = [2]u64{ try r.out(pairs_most * d * 4), try r.out(pairs_most * d * 4) };
+    var tile_k = try cuda.experts_tile.Tile.load(gpu.d, @intCast(try gpu.ctx.attribute(.multiprocessor_count)), .both);
+    defer tile_k.unload();
+    const act = [3]u64{ try r.out(pairs_most * width * 2), try r.out(pairs_most * width * 2), try r.out(pairs_most * width * 2) };
+    const out = [3]u64{ try r.out(pairs_most * d * 4), try r.out(pairs_most * d * 4), try r.out(pairs_most * d * 4) };
     const tile = cuda.experts.promptTile(.nvfp4);
     var control_differs = false;
     for ([_]usize{ 1, 7, 17, 22, 64, 65, 130, most }) |rows| {
         const pairs = rows * slots;
-        for (0..2) |form| {
+        for (0..3) |form| {
             for ([_]u64{ act[form], out[form] }, [_]usize{ width * 2, d * 4 }) |p, bytes| try gpu.d.check(gpu.d.api.cuMemsetD8Async(p, 0xff, pairs * bytes, r.s.handle), "cuMemsetD8Async");
             const t: usize = if (form == 0) 16 else tile;
             const items = cuda.grouped.maxItems(pairs, experts + 1, t);
             try router.route(r.s, dp, pairs, experts + 1, t, plan);
-            const f = if (form == 0) &fx.run else &fx.runFact;
-            try f(&kernels, r.s, .up, .{ .x = dx, .stride = d, .slots = slots }, owned.view(), plan, act[form], items, experts);
-            try f(&kernels, r.s, .down_f32, .{ .x = act[form], .stride = width }, owned.view(), plan, out[form], items, experts);
+            if (form == 2) {
+                try tile_k.run(r.s, .up, .{ .x = dx, .stride = d, .slots = slots }, owned.view(), plan, act[form], items, experts);
+                try tile_k.run(r.s, .down_f32, .{ .x = act[form], .stride = width }, owned.view(), plan, out[form], items, experts);
+            } else {
+                const f = if (form == 0) &fx.run else &fx.runFact;
+                try f(&kernels, r.s, .up, .{ .x = dx, .stride = d, .slots = slots }, owned.view(), plan, act[form], items, experts);
+                try f(&kernels, r.s, .down_f32, .{ .x = act[form], .stride = width }, owned.view(), plan, out[form], items, experts);
+            }
         }
         const act0 = try r.back(u16, act[0], pairs * width);
         const act1 = try r.back(u16, act[1], pairs * width);
@@ -124,6 +131,10 @@ pub fn run(gpu: check.Gpu) !void {
         // the shared slots are left alone by both forms (still the 0xff fill), so compare every byte
         try check.sameBytes("NVFP4 fact gate-up rows equal the decode form's bytes", std.mem.sliceAsBytes(act1), std.mem.sliceAsBytes(act0));
         try check.sameBytes("NVFP4 fact fp32 down rows equal the decode form's bytes", std.mem.sliceAsBytes(y1), std.mem.sliceAsBytes(y0));
+        const k32_act = try r.back(u16, act[2], pairs * width);
+        const k32_y = try r.back(f32, out[2], pairs * d);
+        try check.sameBytes("K32 tile gate-up equals the decode form", std.mem.sliceAsBytes(k32_act), std.mem.sliceAsBytes(act0));
+        try check.sameBytes("K32 tile fp32 down equals the decode form", std.mem.sliceAsBytes(k32_y), std.mem.sliceAsBytes(y0));
         // control: the existing prompt tile (scaled codes, one sum over K) on the same plan must part somewhere
         {
             const items = cuda.grouped.maxItems(pairs, experts + 1, tile);

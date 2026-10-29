@@ -39,13 +39,14 @@ pub const Target = struct {
     e: *Engine,
     caches: *std.AutoHashMapUnmanaged(*lanes.Stream, *Cache),
     seen: *std.AutoHashMapUnmanaged(*lanes.Stream, []Seen),
+    ctx: ?*const cuda.Context = null, // --learn-conversations: made current where the disk tier allocates copies
 };
 
 /// One piece of a stream's state: its offset in the state or key/value buffer, its length.
-const Piece = struct { kv: bool, off: usize, len: usize };
+pub const Piece = struct { kv: bool, off: usize, len: usize };
 
 /// A state's pieces by index, any geometry: the state, then each (layer, key/value, head)'s first `at` rows.
-const Layout = struct {
+pub const Layout = struct {
     g: Geometry,
     format: Format,
     cap: usize,
@@ -55,12 +56,12 @@ const Layout = struct {
         return if (l.format == .fp8) 2 else 1;
     }
 
-    fn count(l: Layout) usize {
+    pub fn count(l: Layout) usize {
         return 1 + l.g.attentions() * 2 * l.g.kv_heads * l.parts();
     }
 
     /// Piece `i`: qwen35.cu's layout (a layer's keys then values, kv_heads blocks of cap rows), or qwen35_kv8.cu's.
-    fn piece(l: Layout, i: usize) Piece {
+    pub fn piece(l: Layout, i: usize) Piece {
         if (i == 0) return .{ .kv = false, .off = 0, .len = l.g.stateBytes() };
         const j = (i - 1) / l.parts();
         const kvh = l.g.kv_heads;
@@ -79,7 +80,7 @@ const Layout = struct {
     }
 
     /// The bytes a save at `at` takes.
-    fn total(l: Layout) u64 {
+    pub fn total(l: Layout) u64 {
         var n: u64 = 0;
         for (0..l.count()) |i| n += l.piece(i).len;
         return n;
@@ -136,6 +137,11 @@ pub fn sameImages(kept: []const Seen, request: []const Seen, at: usize) bool {
         n += 1;
     }
     return n == kept.len;
+}
+
+/// The pieces a host copy at `at` holds in the engine's cache format.
+pub fn layoutOf(e: *const Engine, at: usize) Layout {
+    return .{ .g = e.g, .format = formatOf(e), .cap = 0, .at = at };
 }
 
 /// Host bytes a save at `at` takes.

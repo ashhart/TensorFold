@@ -335,6 +335,27 @@ caches. The CUDA CLI also does not apply `--alias`; use `--name` for the served 
 `--reasoning-effort` and `--thinking-budget` set the defaults a request's `chat_template_kwargs.enable_thinking`,
 `reasoning_effort` and `thinking_budget` override, as on the Mac.
 
+## Multi-GPU P2P startup report
+
+With two or more CUDA ranks, each rank logs `p2p:` lines once its NCCL communicator is up: its GPU and PCI bus id,
+the driver, CUDA driver API and NCCL versions, each other GPU's NVML P2P read and write status and PCIe path
+(`nvidia-smi topo -m`'s names), CUDA's peer access when the process sees more than one device, the values of
+`NCCL_P2P_DISABLE`, `NCCL_P2P_LEVEL`, `NCCL_P2P_READ_ENABLE`, `NCCL_SHM_DISABLE`, `NCCL_ALGO`, `NCCL_PROTO` and
+`CUDA_VISIBLE_DEVICES` that are set, and the transport NCCL chose for this rank's connections (P2P read or write, SHM
+or NET). The transport comes from NCCL's own INFO log, written to a private temporary file during init and removed
+after it is read; the capture is skipped when `NCCL_DEBUG`, `NCCL_DEBUG_SUBSYS` or `NCCL_DEBUG_FILE` is set. NCCL
+connects peers on first use unless `NCCL_RUNTIME_CONNECT=0`, which GLM sets when it is unset: GLM reports the transport
+after init, Nemotron when its ranks are ready, and DeepSeek and Flash Next say `transport not reported` unless a
+connection was made by then (on DeepSeek the probe makes one). A P2P status other than OK adds one warning naming
+what NVML or CUDA reported.
+
+TensorFold never enables peer access itself; NCCL sets up its own peers. The report changes no driver, BIOS or IOMMU
+setting and overrides no NCCL setting the user made. NVML (`libnvidia-ml.so.1`) is optional. One rank logs nothing
+new, and `TENSORFOLD_P2P_DIAGNOSTICS=0` turns the report off. `TENSORFOLD_P2P_PROBE=1` (GLM, Nemotron and DeepSeek)
+times a 32 MiB-a-rank NCCL all-gather after init and logs its bus bandwidth; set it on every rank or none, since a rank
+without it leaves the others waiting in the probe. `capabilities --json` adds a `p2p` object with NVML's GPUs and
+every pair's status on a host with two or more GPUs.
+
 ## Measuring
 
 Use the [public benchmark command](README.md#measurements), the same client and fixtures for each engine,

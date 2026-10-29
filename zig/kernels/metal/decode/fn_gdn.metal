@@ -1,9 +1,4 @@
-// Flash Next's DeltaNet step for a window of up to 16 rows, value head FZ_H0 + threadgroup (the recorded q4_gdn's
-// arithmetic, so each row's outputs and states are its bits at any width): every row's conv, q/k norms and gates at
-// once, then the state recurrence row after row with no barrier between rows, then every row's gated RMS norm. The
-// includer puts the recorded kernels' helpers (bsilu, bsig, fsig, fsoftplus) before this file and sets FZ_GDN_REPLAY:
-// 0 stores every row's state (SO), 1 keeps one state a layer in place (S) and replays the previous window's kept rows
-// (AR[0] of them, from that window's k, v, k norms and gates in PREV) before this window's rows, whose own go to CUR.
+// Flash Next DeltaNet windows: fixed per-row arithmetic, state snapshots or replay of the kept prefix.
 
 constant constexpr int GDN_NK = 16, GDN_NV = 48, GDN_DK = 128, GDN_DV = 128, GDN_TAPS = 4, GDN_MAXR = 16;
 constant constexpr int GDN_C = 2 * GDN_NK * GDN_DK + GDN_NV * GDN_DV, GDN_PW = GDN_C + GDN_NV * GDN_DV + 2 * GDN_NV;

@@ -248,7 +248,8 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
             pr.* = &.{};
         } else if (p.kind == .copy) {
             fx.* = 1;
-            pr.* = try alloc.chainProbabilities(a, &.{e.cfg.copy_rate}, n);
+            const rate = if (e.cfg.own_copy_rates) copiedRate(e, p.stream, p.recalled) else e.cfg.copy_rate;
+            pr.* = try alloc.chainProbabilities(a, &.{rate}, n);
         } else {
             fx.* = 1;
             const chances = try planChances(e, p, n);
@@ -360,6 +361,31 @@ pub fn observeCopy(e: *const Engine, s: *Stream, trusted: bool, kept: u64, offer
         s.copy_landed[i] = copy_decay * s.copy_landed[i] + @as(f64, @floatFromInt(kept));
         s.copy_broke[i] = copy_decay * s.copy_broke[i] + @as(f64, @floatFromInt(@intFromBool(kept < offered)));
     }
+}
+
+/// A copy window's history weighs this many rows of cfg.copy_rate's prior before the stream's own copies teach it.
+const copied_prior = 4;
+
+/// A copy window's row landing rate for this stream and source: landed rows over those plus breaks, decayed a copy.
+pub fn copiedRate(e: *const Engine, s: *Stream, recalled: bool) f64 {
+    const i = @intFromBool(recalled);
+    if (s.copied_landed[i] < 0) {
+        s.copied_landed[i] = copied_prior * e.cfg.copy_rate;
+        s.copied_broke[i] = copied_prior * (1 - e.cfg.copy_rate);
+    }
+    return s.copied_landed[i] / (s.copied_landed[i] + s.copied_broke[i]);
+}
+
+/// A verified copy window of `offered` rows, `kept` landing: its source's counters, then its own rate's history.
+pub fn observeCopied(e: *const Engine, s: *Stream, recalled: bool, kept: usize, offered: usize) void {
+    if (recalled) {
+        if (s.recall) |r| r.observe(@intCast(offered), @intCast(kept), s.rounds);
+    } else if (s.proposer) |pr| pr.observe(@intCast(offered), @intCast(kept));
+    if (!e.cfg.own_copy_rates) return;
+    _ = copiedRate(e, s, recalled);
+    const i = @intFromBool(recalled);
+    s.copied_landed[i] = copy_decay * s.copied_landed[i] + @as(f64, @floatFromInt(kept));
+    s.copied_broke[i] = copy_decay * s.copied_broke[i] + @as(f64, @floatFromInt(@intFromBool(kept < offered)));
 }
 
 /// A context copy's appended rows: each its parent's chance times the stream's copy rate; the drafts keep their own.

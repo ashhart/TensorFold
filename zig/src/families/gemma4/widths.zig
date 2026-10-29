@@ -21,6 +21,11 @@ pub const Widths = struct {
     embed: Width = fast,
     /// The 31B tower's (and a quantized 12B's) embed_vision projection.
     vision: Width = fast,
+    /// The E-series' per-layer input linears and token table; null: stored as BF16 (the table says `false`).
+    layer_gate: [cfg.max_layers]?Width = @splat(fast),
+    layer_project: [cfg.max_layers]?Width = @splat(fast),
+    model_project: ?Width = fast,
+    layer_table: ?Width = fast,
 
     pub fn of(w: *const Widths, layer: usize, m: Module) Width {
         return w.layers[layer][@backingInt(m)];
@@ -28,7 +33,8 @@ pub const Widths = struct {
 
     /// Every linear at the fast width: the one-row windows may take the fused pipelines.
     pub fn allFast(w: *const Widths, layers: usize) bool {
-        if (!std.meta.eql(w.embed, fast)) return false;
+        if (!std.meta.eql(w.embed, fast) or !std.meta.eql(w.model_project, fast) or !std.meta.eql(w.layer_table, fast)) return false;
+        for (w.layer_gate[0..layers], w.layer_project[0..layers]) |g, p| if (!std.meta.eql(g, fast) or !std.meta.eql(p, fast)) return false;
         for (w.layers[0..layers]) |l| for (l) |x| if (!std.meta.eql(x, fast)) return false;
         return true;
     }
@@ -41,8 +47,31 @@ pub fn readable(w: Width) bool {
     return w.group == group and std.mem.indexOfScalar(u8, &bit_widths, w.bits) != null;
 }
 
-/// Each module's width from `quant` (`quantization` or `quantization_config`); global layers have no v_proj.
-pub fn read(gpa: std.mem.Allocator, quant: std.json.ObjectMap, layers: usize) Error!Widths {
+/// Whether the key names one of the per-layer input linears or their token table, the modules a table may leave BF16.
+fn perLayerInput(key: []const u8) bool {
+    for ([_][]const u8{ "per_layer_input_gate", "per_layer_projection", "per_layer_model_projection", "embed_tokens_per_layer" }) |m| {
+        if (std.mem.eql(u8, key, m) or (std.mem.endsWith(u8, key, m) and key[key.len - m.len - 1] == '.')) return true;
+    }
+    return false;
+}
+
+/// The width of a per-layer input module, null when the table marks it `false` (or `{}`) under any spelling: BF16.
+fn optional(q: mlx.Config, quant: std.json.ObjectMap, module: []const u8) Error!?Width {
+    var it = quant.iterator();
+    while (it.next()) |e| {
+        const k = e.key_ptr.*;
+        const v = e.value_ptr.*;
+        const unquantized = (v == .bool and !v.bool) or (v == .object and v.object.count() == 0);
+        if (!unquantized or !(std.mem.eql(u8, k, module) or (std.mem.endsWith(u8, k, module) and k[k.len - module.len - 1] == '.'))) continue;
+        // another spelling of the module has a width
+        if (q.modules.get(module)) |w| if (w != null) return error.UnsupportedGemmaQuantization;
+        return null;
+    }
+    return try named(q, module);
+}
+
+/// Each module's width from `quant`; `global_values`: global layers have a v_proj; `layer_input`: BF16 linears allowed.
+pub fn read(gpa: std.mem.Allocator, quant: std.json.ObjectMap, layers: usize, layer_input: bool, global_values: bool) Error!Widths {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
@@ -50,7 +79,7 @@ pub fn read(gpa: std.mem.Allocator, quant: std.json.ObjectMap, layers: usize) Er
     while (it.next()) |e| {
         const k = e.key_ptr.*;
         if (std.mem.eql(u8, k, "bits") or std.mem.eql(u8, k, "group_size") or std.mem.eql(u8, k, "mode")) continue;
-        if (e.value_ptr.* != .object or e.value_ptr.object.count() == 0) {
+        if ((e.value_ptr.* != .object or e.value_ptr.object.count() == 0) and !(layer_input and perLayerInput(k))) {
             std.log.warn("gemma4: {s} is not a width table (false or {{}} marks a module unquantized); every linear is affine", .{k});
             return error.GemmaModuleUnquantized;
         }
@@ -62,10 +91,18 @@ pub fn read(gpa: std.mem.Allocator, quant: std.json.ObjectMap, layers: usize) Er
     var w: Widths = .{};
     var key: [96]u8 = undefined;
     for (0..layers) |i| for (module_names, 0..) |name, mi| {
-        if (cfg.global(i) and mi == @backingInt(Module.v)) continue;
+        if (cfg.global(i) and !global_values and mi == @backingInt(Module.v)) continue;
         w.layers[i][mi] = try named(q, std.fmt.bufPrint(&key, "layers.{d}.{s}", .{ i, name }) catch unreachable);
     };
     w.embed = try named(q, "embed_tokens");
+    if (layer_input) {
+        for (0..layers) |i| {
+            w.layer_gate[i] = try optional(q, quant, std.fmt.bufPrint(&key, "layers.{d}.per_layer_input_gate", .{i}) catch unreachable);
+            w.layer_project[i] = try optional(q, quant, std.fmt.bufPrint(&key, "layers.{d}.per_layer_projection", .{i}) catch unreachable);
+        }
+        w.model_project = try optional(q, quant, "per_layer_model_projection");
+        w.layer_table = try optional(q, quant, "embed_tokens_per_layer");
+    }
     w.vision = try named(q, "embed_vision.embedding_projection");
     return w;
 }
@@ -85,7 +122,13 @@ fn named(q: mlx.Config, key: []const u8) Error!Width {
 fn table(text: []const u8) !Widths {
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, text, .{});
     defer parsed.deinit();
-    return read(std.testing.allocator, parsed.value.object, 12);
+    return read(std.testing.allocator, parsed.value.object, 12, false, false);
+}
+
+fn tableE(text: []const u8) !Widths {
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, text, .{});
+    defer parsed.deinit();
+    return read(std.testing.allocator, parsed.value.object, 12, true, true);
 }
 
 test "a uniform table gives every module the global width" {
@@ -130,4 +173,45 @@ test "widths no kernel reads are refused by name, never guessed" {
 test "a global layer's missing v_proj takes no entry" {
     const w = try table("{\"bits\": 4, \"group_size\": 64, \"layers.5.self_attn.v_proj\": {\"bits\": 4, \"group_size\": 32}}");
     try std.testing.expectEqual(@as(u8, 4), w.of(5, .k).bits);
+}
+
+test "an E-series global layer's v_proj takes its entry" {
+    const w = try tableE("{\"bits\": 4, \"group_size\": 64, \"layers.5.self_attn.v_proj\": {\"bits\": 8, \"group_size\": 64}}");
+    try std.testing.expectEqual(@as(u8, 8), w.of(5, .v).bits);
+    try std.testing.expectEqual(@as(u8, 4), w.of(4, .v).bits);
+}
+
+test "the per-layer input linears are BF16 when the table says false, or take their own width" {
+    const w = try tableE(
+        \\{"bits": 4, "group_size": 64, "mode": "affine",
+        \\ "language_model.model.layers.2.per_layer_input_gate": false,
+        \\ "model.layers.3.per_layer_projection": {},
+        \\ "language_model.model.per_layer_model_projection": false,
+        \\ "language_model.model.embed_tokens_per_layer": {"bits": 8, "group_size": 64},
+        \\ "language_model.model.layers.4.per_layer_projection": {"bits": 8, "group_size": 64},
+        \\ "language_model.model.layers.5.self_attn.q_proj": {"bits": 8, "group_size": 64}}
+    );
+    try std.testing.expectEqual(@as(?Width, null), w.layer_gate[2]);
+    try std.testing.expectEqual(@as(?Width, fast), w.layer_gate[3]);
+    try std.testing.expectEqual(@as(?Width, null), w.layer_project[3]);
+    try std.testing.expectEqual(@as(?Width, .{ .bits = 8, .group = 64 }), w.layer_project[4]);
+    try std.testing.expectEqual(@as(?Width, fast), w.layer_project[2]);
+    try std.testing.expectEqual(@as(?Width, null), w.model_project);
+    try std.testing.expectEqual(@as(?Width, .{ .bits = 8, .group = 64 }), w.layer_table);
+    try std.testing.expectEqual(@as(u8, 8), w.of(5, .q).bits);
+    try std.testing.expect(!w.allFast(12));
+    try std.testing.expect((try tableE("{\"bits\": 4, \"group_size\": 64}")).allFast(12));
+}
+
+test "only the per-layer input modules of an E-series may be BF16, and one spelling cannot name both" {
+    const cases = .{
+        .{ "{\"bits\": 4, \"group_size\": 64, \"layers.3.per_layer_input_gate\": false}", error.GemmaModuleUnquantized, false },
+        .{ "{\"bits\": 4, \"group_size\": 64, \"layers.3.self_attn.q_proj\": false}", error.GemmaModuleUnquantized, true },
+        .{ "{\"bits\": 4, \"group_size\": 64, \"layers.3.mlp.up_proj\": {}}", error.GemmaModuleUnquantized, true },
+        .{ "{\"bits\": 4, \"group_size\": 64, \"embed_tokens\": false}", error.GemmaModuleUnquantized, true },
+        .{ "{\"bits\": 4, \"group_size\": 64, \"layers.3.per_layer_projection_norm\": false}", error.GemmaModuleUnquantized, true },
+        .{ "{\"bits\": 4, \"group_size\": 64, \"layers.3.per_layer_projection\": false, \"model.layers.3.per_layer_projection\": {\"bits\": 8, \"group_size\": 64}}", error.UnsupportedGemmaQuantization, true },
+        .{ "{\"bits\": 4, \"group_size\": 64, \"layers.3.per_layer_input_gate\": {\"bits\": 7, \"group_size\": 64}}", error.GemmaWidthNotRead, true },
+    };
+    inline for (cases) |c| try std.testing.expectError(c[1], if (c[2]) tableE(c[0]) else table(c[0]));
 }

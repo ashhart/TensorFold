@@ -79,7 +79,9 @@ pub const Fexp = struct {
         const a = self.rig.gpu.gpa;
         for (self.aff.items) |f| f.deinit();
         self.aff.clearRetainingCapacity();
-        for ([_][]const u8{ std.mem.sliceAsBytes(self.expert), std.mem.sliceAsBytes(self.gs), std.mem.sliceAsBytes(self.us) }) |b| if (b.len > 0) a.free(b);
+        a.free(self.expert);
+        a.free(self.gs);
+        a.free(self.us);
         self.expert = &.{};
         self.gs = &.{};
         self.us = &.{};

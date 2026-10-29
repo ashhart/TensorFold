@@ -9,7 +9,6 @@ const mtp_ops = @import("cuda_mtp_ops.zig");
 const lanes_draft = @import("cuda_lanes_draft.zig");
 const snap = @import("cuda_snap.zig");
 const ranks = @import("cuda_rank_engine.zig");
-const config = @import("cuda_config.zig");
 const Glue = @import("cuda_glue.zig").Glue;
 const living = @import("living");
 const slide_mod = @import("cuda_slide.zig");
@@ -36,9 +35,11 @@ pub fn Namespace(comptime Tri: type) type {
         pub const prompt_rows: u32 = @intCast(prompt.batch.default_chunk);
         /// The prompt cache's copies of a stream's state (cuda_snap.zig), called with `Loaded.target`.
         pub const snap_bytes = snapBytes;
+        pub const snap_repeat_min: u32 = 16;
         pub const snap_save = snapSave;
         pub const snap_restore = snapRestore;
         pub const snap_drop = snapDrop;
+        pub const kept_disk = @import("cuda_disk.zig").Kept(@This()); // their disk image, as qwen3_5 declares its own
         /// TF_FLASHNEXT_KV_PAGES: the pool's lanes, the pages of a request's rows and a drafted window (kvl).
         pub const window_rows = kvl.window_rows;
         pub fn attach(p: *anyopaque, streams: u32, count: usize) !void {
@@ -304,7 +305,6 @@ pub fn Namespace(comptime Tri: type) type {
                 }
                 return l;
             }
-
             /// One prompt chunk, cut at the next cache mark; true once the last row's scores are in seq.logits.
             fn step(self: *Cuda, s: *lanes.Stream, l: *Lane) !bool {
                 const ids = s.prompt();
@@ -319,6 +319,7 @@ pub fn Namespace(comptime Tri: type) type {
                     break;
                 };
                 const last = stop == ids.len;
+                self.engine.ngram.warmAhead(ids, stop, @min(ids.len, stop + self.engine.chunk));
                 if (l.draft) |*d| {
                     try self.ops().prefillChunk(&l.seq, d, ids, at, stop);
                 } else if (self.ranks) |r| {
@@ -331,7 +332,6 @@ pub fn Namespace(comptime Tri: type) type {
                 return last;
             }
         };
-
         pub fn envUsize(name: [:0]const u8, default: usize) usize {
             const v = std.c.getenv(name) orelse return default;
             return std.fmt.parseInt(usize, std.mem.span(v), 10) catch default;
@@ -549,15 +549,15 @@ pub fn Namespace(comptime Tri: type) type {
             _ = @import("cuda_score.zig").CapabilityCases(Cuda);
         }
 
-        test "a bad TF_FLASHNEXT_CHUNK is refused at load before the loader takes a stream, a module or a buffer" {
+        test "a bad TF_FLASHNEXT_CHUNK or TF_FLASHNEXT_LOAD_THREADS is refused at load before the loader takes a stream, a module or a buffer" {
             const env = @import("sys").env;
-            defer _ = env.unsetenv("TF_FLASHNEXT_CHUNK");
             // every driver entry point undefined: the refusal must come before the first call
             var driver: cuda.Driver = undefined;
             const ctx: cuda.Context = .{ .d = &driver, .device = 0, .handle = null };
-            for ([_][*:0]const u8{ "0", "16385", "4k" }) |bad| {
-                _ = env.setenv("TF_FLASHNEXT_CHUNK", bad, 1);
-                try std.testing.expectError(error.BadChunk, open(std.testing.allocator, std.testing.io, &ctx, "no-such-checkpoint", null, .{ .context = 4096, .drafts = true }));
+            for ([_]struct { [*:0]const u8, [*:0]const u8, anyerror }{ .{ "TF_FLASHNEXT_CHUNK", "0", error.BadChunk }, .{ "TF_FLASHNEXT_CHUNK", "16385", error.BadChunk }, .{ "TF_FLASHNEXT_CHUNK", "4k", error.BadChunk }, .{ "TF_FLASHNEXT_LOAD_THREADS", "0", error.BadLoadThreads }, .{ "TF_FLASHNEXT_LOAD_THREADS", "33", error.BadLoadThreads }, .{ "TF_FLASHNEXT_LOAD_THREADS", "8x", error.BadLoadThreads } }) |bad| {
+                _ = env.setenv(bad[0], bad[1], 1);
+                defer _ = env.unsetenv(bad[0]);
+                try std.testing.expectError(bad[2], open(std.testing.allocator, std.testing.io, &ctx, "no-such-checkpoint", null, .{ .context = 4096, .drafts = true }));
             }
         }
 

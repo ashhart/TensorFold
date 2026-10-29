@@ -29,6 +29,10 @@ pub const Buffer = struct {
         return @as([*]T, @ptrCast(@alignCast(self.contents())))[0..len];
     }
 
+    pub fn deviceId(self: Buffer) Id {
+        return objc.msg(Id, self.id, "device", .{});
+    }
+
     pub fn gpuAddress(self: Buffer) u64 {
         return objc.msg(u64, self.id, "gpuAddress", .{});
     }
@@ -67,6 +71,11 @@ pub const Device = struct {
 
     pub fn maxWorkingSet(self: Device) u64 {
         return objc.msg(u64, self.id, "recommendedMaxWorkingSetSize", .{});
+    }
+
+    /// The longest buffer this device makes, in bytes.
+    pub fn maxBufferLength(self: Device) u64 {
+        return objc.msg(u64, self.id, "maxBufferLength", .{});
     }
 
     /// Bytes of every buffer and texture this device holds now.

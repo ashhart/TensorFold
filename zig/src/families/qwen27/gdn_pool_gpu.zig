@@ -81,9 +81,7 @@ pub const Pool = struct {
     }
 
     pub fn allocateBuffers(device: metal.Device, budget: Budget) !@FieldType(Pool, "buffers") {
-        const capacity = budget.rows;
-        const shape = budget.shape;
-        const widths = [_]usize{ budget.state, budget.history, budget.history, budget.projections, budget.query, budget.key, budget.value, budget.decay, budget.mixing, budget.snapshots, budget.conv_tails, capacity * shape.value * 2 };
+        const widths = budget.allocationSizes();
         var buffers: [widths.len]metal.Buffer = undefined;
         var count: usize = 0;
         errdefer for (buffers[0..count]) |buffer| buffer.deinit();

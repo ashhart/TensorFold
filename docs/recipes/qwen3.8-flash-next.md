@@ -427,7 +427,7 @@ allocations for RAM, so a checkpoint's GPU allocation alone does not describe it
 `--context` that leaves them no room is reported at startup; their lookups then page from disk, a cost of about 1.3x
 on prompts.
 
-`--ple-on-ssd` and `--ssd-experts` below are the Python engine's flags; the native binary refuses both.
+`--ple-on-ssd` and `--ssd-experts` below describe the Python engine's flags and measurements. The native binary takes both on one Mac: see [Exact Fluid Subgraph Residency](fluid-subgraph-residency.md).
 
 `--ple-on-ssd` leaves the 29.8 GiB of n-gram tables in the checkpoint and reads each lookup's rows from SSD,
 so a 128 GB Mac can hold Flash Next. It is an opt-in trade. On an M3 Ultra, replies were the same tokens,
@@ -536,3 +536,5 @@ least two. Image requests always prefill fresh; text prefix caching remains avai
 [image recipe](flash-next-vision.md) for tower weights, memory admission, EXL3 sidecar conversion and verification.
 The native binary's CUDA engine takes `--vision` too, experimental, through the Qwen-VL tower that Qwen's CUDA family
 runs (see [Flash Next on CUDA](flash-next-cuda.md)).
+
+The maintained Metal DeltaNet window body in decode/fn_gdn.metal takes up to 16 rows with each row's own convolution, Q/K norms and gates. The recurrence keeps its per-row arithmetic across window widths. FZ_GDN_REPLAY=0 stores each row's state; FZ_GDN_REPLAY=1 keeps one state per layer and replays the previous window's accepted rows from its saved K, V, norms and gates before the next window. Qwen4 specializations retain this body and declare their own head geometry, gate and exact weight storage.

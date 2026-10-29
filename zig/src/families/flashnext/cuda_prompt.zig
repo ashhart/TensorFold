@@ -217,8 +217,7 @@ pub const Engine = struct {
             learned += used;
         }
         if (learned > 0) std.log.info("flashnext: the folder's Living Weights pockets hold {d} learned neurons beside the shared experts", .{learned});
-        e.store.release();
-        e.store.closeFile();
+        e.store.loaded(); // every layer is on the device: no pinned staging, borrowed plane or open shard while serving
         e.ngram = try ple.Ngram.init(gpa, io, e.model_dir);
         errdefer e.ngram.deinit();
         e.batch_k = try batch.Kernels.load(driver);
@@ -404,6 +403,7 @@ pub const Engine = struct {
         while (at < ids.len) {
             const n = @min(s.cap, ids.len - at);
             const last = at + n == ids.len;
+            e.ngram.warmAhead(ids, at + n, @min(ids.len, at + n + s.cap));
             p.hooks.logits = if (last) hooks.logits else .none;
             p.hooks.streams = if (hooks.streams != 0) hooks.streams + at * wide * 2 else 0;
             try p.chunk(ids[at..][0..n], seq.fed + at, if (last and hooks.logits != .none) seq.logits else null);
@@ -412,7 +412,6 @@ pub const Engine = struct {
         if (hooks.logits == .none) try e.complete();
         seq.fed += ids.len;
     }
-
     /// A stream's window in a shared pass and the pass over several (cuda_prompt_windows.zig).
     pub const Window = @import("cuda_prompt_windows.zig").Window;
     pub const windows = @import("cuda_prompt_windows.zig").windows;

@@ -54,7 +54,7 @@ fn privatePath(path: []const u8) bool {
     for ([_][]const u8{ ".zig", ".cu", ".cuh", ".c", ".cpp", ".h", ".hpp", ".metal", ".ptx", ".cubin", ".fatbin", ".o", ".obj" }) |ext| {
         if (path.len < ext.len) continue;
         for (0..path.len - ext.len + 1) |i| {
-            if (!starts(path[i..], ext)) continue;
+            if (i == 0 or separator(path[i - 1]) or !starts(path[i..], ext)) continue;
             const end = i + ext.len;
             if (end == path.len or boundary(path[end]) or path[end] == ':') return true;
         }

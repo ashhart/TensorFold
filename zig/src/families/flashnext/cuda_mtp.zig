@@ -180,6 +180,7 @@ pub const Head = struct {
             const pack_fn = try pack_mod.function(wt.pack_symbol);
             h.layer = try load.loadLayerAt(gpa, driver, stream, &store, pack_fn, "language_model.mtp.layers.0", false, false);
         }
+        store.dropStaging(); // the head's experts are on the device
         errdefer h.layer.free(gpa);
         const ids = try draftIds(gpa);
         defer gpa.free(ids);

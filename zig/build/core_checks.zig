@@ -71,3 +71,28 @@ pub fn tileQmm(
     b.step("tf-tile-check", about).dependOn(&b.addInstallArtifact(tile_check, .{}).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = tile_mod })).step);
 }
+
+/// The core KV pool's pages on Metal: an arena and the streams' tables, host checks and a device round trip.
+pub fn kvPages(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, sources: *std.Build.Module, test_step: *std.Build.Step) void {
+    const pages = b.createModule(.{
+        .root_source_file = b.path("zig/src/core/metal_kv_pages.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources } },
+    });
+    const run = b.addRunArtifact(b.addTest(.{ .root_module = pages }));
+    // Qwen3.5-2B's paged kernels against its contiguous ones, the same bits through shuffled pages
+    const qwen = b.createModule(.{
+        .root_source_file = b.path("zig/src/families/qwen3_5/paged_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources } },
+    });
+    const qwen_run = b.addRunArtifact(b.addTest(.{ .root_module = qwen }));
+    const step = b.step("test-metal-kv-pages", "The KV pool's pages on Metal: leases into tables, a full pool, an idle pool, scattered pages on the GPU, Qwen3.5's paged kernels");
+    step.dependOn(&run.step);
+    step.dependOn(&qwen_run.step);
+    test_step.dependOn(step);
+}

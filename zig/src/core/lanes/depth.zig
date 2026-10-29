@@ -3,6 +3,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Table = @import("table.zig").Table;
 const alloc = @import("allocate.zig");
+pub const pricedBatched = alloc.pricedBatched;
 
 pub const Constants = struct {
     depth_rate: f64 = 0.15, // weight of the newest round in a depth's acceptance
@@ -232,7 +233,7 @@ pub const Rule = struct {
         @memset(ones, 1);
         const head: alloc.HeadCost = .{ .step_ms = r.mtp_step_ms, .batched = r.batched_heads };
         const counts = if (r.draft_step_ms != 0)
-            try alloc.allocatePriced(r.gpa, ones, probs, r.shared_costs, r.overheadMs(whos.len, sampled), @max(whos.len, r.batch_rows), r.draft_step_ms)
+            try alloc.allocateDrafts(r.gpa, ones, probs, r.shared_costs, r.overheadMs(whos.len, sampled), @max(whos.len, r.batch_rows), .{ .step_ms = r.draft_step_ms, .batched = r.batched_heads and pricedBatched(), .free_first = true })
         else
             try alloc.allocateDrafts(r.gpa, ones, probs, r.shared_costs, r.fixedMs(whos.len, sampled), @max(whos.len, r.batch_rows), head);
         defer r.gpa.free(counts);

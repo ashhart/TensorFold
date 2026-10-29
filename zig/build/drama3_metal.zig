@@ -2,7 +2,7 @@
 const std = @import("std");
 
 const dir = "zig/kernels/metal/drama3";
-const sources = [_][]const u8{ "dense.metal", "gdn.metal", "attn.metal", "moe.metal", "sample.metal", "codec.metal" };
+const sources = [_][]const u8{ "dense.metal", "gdn.metal", "attn.metal", "moe.metal", "nvfp4.metal", "guidance.metal", "sample.metal", "codec.metal" };
 
 /// Drama in the Metal engines: its `core` is the engine's safetensors, the server's tokenizer and frame_rounds.
 pub fn addNative(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, native: *std.Build.Module, metal_std: []const u8) void {
@@ -65,6 +65,17 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         .link_libc = true,
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "core", .module = core }, .{ .name = "drama3_metallib", .module = bytes } },
     });
+    const quant_check = b.addExecutable(.{
+        .name = "drama3-metal-quant-check",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("zig/tests/drama_nvfp4_metal.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{ .{ .name = "drama3", .module = family }, .{ .name = "drama3_metallib", .module = bytes } },
+        }),
+    });
+    b.step("drama3-metal-quant-check", "Build the NVFP4 Metal operator checker; does not execute GPU work").dependOn(&b.addInstallArtifact(quant_check, .{}).step);
     const tool = b.createModule(.{
         .root_source_file = b.path("zig/src/families/drama3/generate.zig"),
         .target = target,

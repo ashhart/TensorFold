@@ -10,6 +10,9 @@ pub fn tests(b: *std.Build, all: *std.Build.Step) void {
     const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host, .link_libc = true });
     const fabric = b.createModule(.{ .root_source_file = b.path("zig/src/fabric/fabric.zig"), .target = b.graph.host, .link_libc = true });
     const root = b.createModule(.{ .root_source_file = b.path("zig/flashnext_batch_tests.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "lanes", .module = lanes }, .{ .name = "fabric", .module = fabric }, .{ .name = "contract", .module = @import("kernel_contract.zig").module(b, b.graph.host, .debug) } } });
+    const fsr_owner = b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"FSR native"} }));
+    b.step("test-flashnext-fsr-owner-host", "Actual FSR route/demand/forecast and failure ownership with a recording device").dependOn(&fsr_owner.step);
+    all.dependOn(&fsr_owner.step);
     const schedule_metal = b.createModule(.{ .root_source_file = b.path("zig/src/metal/metal.zig"), .target = b.graph.host });
     const schedule = b.createModule(.{ .root_source_file = b.path("zig/flashnext_schedule_tests.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = schedule_metal }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "lanes", .module = lanes }, .{ .name = "fabric", .module = fabric } } });
     if (b.graph.host.result.os.tag == .macos) schedule.linkSystemLibrary("objc", .{});

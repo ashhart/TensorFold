@@ -34,7 +34,7 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator, op: api.ImprintOp) void {
     const body = http_body.readJson(conn, &cx) catch return refuse(conn, a, &cx);
     const input = openai.chatInput(srv, &cx, body) catch return refuse(conn, a, &cx);
     const p = chat.prepare(srv, &cx, input, Never{}) catch return refuse(conn, a, &cx);
-    defer chat.release(srv, p.preparing);
+    defer srv.release(p.preparing, p.request);
     const ask = make(srv, op, p.request) catch return conn.sendError(a, 500, "out of memory", null) catch {};
     answer(srv, conn, a, ask);
 }

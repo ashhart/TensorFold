@@ -23,7 +23,12 @@ test "compiler receipts: new 13.0 records preserve independent 13.2 selection" {
     try std.testing.expectEqualDeep(registry.none, registry.usageFor(unseen, .{ .major = 13, .minor = 2 }));
 }
 
-test "prompt int8: five-SM receipts remain independent of later releases, decode belongs to exactly 13.3" {
+fn receipt133(name: []const u8) ?[5]limits.Usage {
+    for (@import("measurements/pending_133.zig").records) |r| if (std.mem.eql(u8, r.name, name)) return r.usage;
+    return null;
+}
+
+test "prompt int8: five-SM receipts remain independent of later releases, 13.3's receipts belong to exactly 13.3" {
     for ([_][]const u8{ "w4a8_prefill tf_w4a8_quantize", "w4a8_prefill tf_w4a8_prefill" }) |name| {
         const row = for (registry.all_cuda) |r| {
             if (std.mem.eql(u8, r.launch.name, name)) break r;
@@ -33,8 +38,9 @@ test "prompt int8: five-SM receipts remain independent of later releases, decode
         else
             .{ .{ .regs = 27, .static = 0, .bound = 128 }, .{ .regs = 27, .static = 0, .bound = 128 }, .{ .regs = 27, .static = 0, .bound = 128 }, .{ .regs = 27, .static = 0, .bound = 128 }, .{ .regs = 27, .static = 0, .bound = 128 } };
         try std.testing.expectEqualDeep(want, registry.usageFor(row, .{ .major = 13, .minor = 0 }));
-        for ([_]?limits.Nvcc{ .{ .major = 13, .minor = 2 }, .{ .major = 13, .minor = 3 }, .{ .major = 14, .minor = 0 } }) |version|
+        for ([_]?limits.Nvcc{ .{ .major = 13, .minor = 2 }, .{ .major = 14, .minor = 0 } }) |version|
             try std.testing.expectEqualDeep(registry.none, registry.usageFor(row, version));
+        try std.testing.expectEqualDeep(receipt133(name).?, registry.usageFor(row, .{ .major = 13, .minor = 3 }));
     }
     for (@import("measurements/qwen_lanes_133.zig").records) |receipt| {
         const row = for (registry.all_cuda) |r| {
@@ -43,6 +49,14 @@ test "prompt int8: five-SM receipts remain independent of later releases, decode
         try std.testing.expectEqualDeep(row.usage, registry.usageFor(row, .{ .major = 13, .minor = 0 }));
         for ([_]?limits.Nvcc{ .{ .major = 13, .minor = 2 }, .{ .major = 13, .minor = 4 }, .{ .major = 14, .minor = 0 } }) |version|
             try std.testing.expectEqualDeep(registry.none, registry.usageFor(row, version));
+        try std.testing.expectEqualDeep(receipt.usage, registry.usageFor(row, .{ .major = 13, .minor = 3 }));
+    }
+    // the pending launches' 13.3 receipts: each names a registered launch, keeps 13.0's record there, and is 13.3's
+    for (@import("measurements/pending_133.zig").records) |receipt| {
+        const row = for (registry.all_cuda) |r| {
+            if (std.mem.eql(u8, r.launch.name, receipt.name)) break r;
+        } else return error.MissingPendingRecord;
+        try std.testing.expectEqualDeep(row.usage, registry.usageFor(row, .{ .major = 13, .minor = 0 }));
         try std.testing.expectEqualDeep(receipt.usage, registry.usageFor(row, .{ .major = 13, .minor = 3 }));
     }
 }
@@ -64,7 +78,7 @@ test "compiler receipts: 13.0 additions cannot replace a different later measure
         try std.testing.expectEqualDeep(registry.none, registry.usageFor(absent, version));
 }
 
-test "compiler receipts: Qwen BF16 rows keep measured 13.0 usage and pending later releases" {
+test "compiler receipts: Qwen BF16 rows keep measured 13.0 usage, 13.3's receipt, and pending other later releases" {
     const names = [_][]const u8{ "tf_q35_embed_bf16", "tf_q35_dense_bf16" };
     const regs = [_][5]u32{ .{ 16, 16, 16, 40, 40 }, .{ 34, 40, 40, 42, 42 } };
     for (names, regs, 0..) |symbol, counts, n| {
@@ -82,7 +96,8 @@ test "compiler receipts: Qwen BF16 rows keep measured 13.0 usage and pending lat
             defer problems.deinit(std.testing.allocator);
             try std.testing.expectEqual(@as(usize, 0), try limits.cuda(row.launch, usage, sm, &problems, std.testing.allocator));
         }
-        for ([_]limits.Nvcc{ .{ .major = 13, .minor = 2 }, .{ .major = 13, .minor = 3 }, .{ .major = 14, .minor = 0 } }) |version|
+        for ([_]limits.Nvcc{ .{ .major = 13, .minor = 2 }, .{ .major = 14, .minor = 0 } }) |version|
             try std.testing.expectEqualDeep(registry.none, registry.usageFor(row, version));
+        try std.testing.expectEqualDeep(receipt133(row.launch.name).?, registry.usageFor(row, .{ .major = 13, .minor = 3 }));
     }
 }

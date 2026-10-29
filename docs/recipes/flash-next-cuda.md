@@ -19,6 +19,34 @@ contract receipts. Compile success and host tests do not establish checkpoint fi
 limits must be measured with the exact checkpoint, binary, device topology and request settings. Prefix retention
 with MTP is outside this path's qualified scope; evaluate with `--prompt-cache-gib 0`.
 
+## Experimental K32 prompt experts
+
+`TF_FLASHNEXT_PROMPT_EXPERT_TILE=1` selects the K32 staging pipeline for NVFP4 prompt gate-up;
+`2` also selects its FP32 down projection. Unset or `0` keeps the existing kernels. Decode retains its existing
+16-pair form. `TF_FLASHNEXT_FACT_ROWS` retains its existing prompt threshold, including `0` to disable prompt tiles.
+The pipeline adapts MiaAI-Lab's MIT recipe patch0014 and retains the same packed weights, BF16 activations,
+16-term dots, scale-FMA order and epilogue. This is an unqualified opt-in pending the GPU gates.
+
+`tf-cuda-test nvfp4-fact` compares both prompt forms with the decode bytes on skewed routes, row and column tails,
+odd K32 groups and shared-expert skips. The normal CUDA kernel contract adds both replacement kernels and their
+rounding-order controls. Their compiler resource slots remain pending until measured for each served SM.
+Before enabling it for serving, run the full contract and compare main/candidate prompt-cut, resumed/fresh,
+drafted/plain and concurrent/solo tokens at the same checkpoint. Measure cold 4k, 16k and 128k prefill with cache
+disabled, alternating with the flag off. Host checks and compile-only checks do not establish GPU exactness or speed.
+
+NVFP4 PLE gathers sort requested row IDs, dequantize each distinct row once through the parked worker pool,
+and copy duplicate BF16 rows after the readers join. Hash history and FP32 row sums retain their existing order.
+On Linux these rows use positional reads by default; `TF_FLASHNEXT_PLE_IO=mmap` retains the mapped reader,
+and `pread` selects positional reads explicitly. MLX tables retain the mapped path.
+`TF_FLASHNEXT_WARM_AHEAD=1` enables next-chunk file hints; unset or `0` leaves them off. Hints derive IDs from the future token
+prefix without changing a sequence history, issue on the caller and leave no borrowed worker after return.
+These I/O choices need cold-storage and served-token A/B gates before a performance claim.
+
+Raw completion prompts of at least 16 tokens gain a kept end mark after they have been served once, when the
+prompt-cache budget fits it. The first pass is unchanged; a second identical pass keeps near its end; later repeats
+resume there. Chat endpoints retain priority. `TF_FLASHNEXT_REPEAT_CACHE=0` disables this Flash Next CUDA policy.
+Other families keep their existing cache policy. Full token keys and frame identity still decide every resume.
+
 ## Run
 
 ```bash
@@ -31,6 +59,9 @@ tensorfold-native serve /path/to/checkpoint --temperature 0
   tail, plus 28 KiB a token of keys, values and indexer keys, and with drafts its MTP head's cache.
 - `--no-drafts` serves without the MTP head; `"draft": false` on a request does the same for that request.
 - `TF_FLASHNEXT_DRAFTS` (1 to 15, default 6) and `TF_FLASHNEXT_CONFIDENCE` (default 0.60) set the head's chain.
+- `TF_FLASHNEXT_LOAD_THREADS` (1 to 32, default 8) packs the routed NVFP4 experts on that many threads at load, staged
+  through at most 192 MiB of pinned memory: every layer on one GPU, and the MTP head's layer on rank 0 at `--tp 2`.
+  1 keeps the one-expert loop. Other values are refused.
 - The engine uploads 73.3 GiB of the checkpoint: the n-gram tables stay mapped from the shards, and the vision tower is
   not loaded without `--vision`.
 - `--vision` (experimental) runs images through the Qwen-VL tower that Qwen's CUDA family runs too
@@ -57,6 +88,14 @@ The family plugs into the core's pieces and adds no scheduler:
 - The core's prompt cache keeps and resumes a stream's state at the marks it asks for. The family copies the state
   (`cuda_snap.zig`), with the MTP head's cache rows for a drafting stream; the head reads one token past a row, so
   states keep with a lookahead of 1, as Nemotron's do.
+- For a last user message of at least 8,192 tokens, the lane cache may also keep one state inside that message.
+  It chooses the latest existing cold chunk cut leaving at least 2,048 tokens outside the state's key, for a
+  replacement question after the same document. It uses the loaded prompt pass size and adds no chunk split.
+  Endpoint, rewind and shared states have priority; the extra copy is skipped if they cannot fit together under
+  the byte or snapshot-slot cap. Existing eviction rules still apply. `/metrics` includes it in
+  `tensorfold:prompt_cache_states` and `tensorfold:prompt_cache_bytes`; a successful resume counts toward
+  `tensorfold:prompt_tokens_cached_total`. The chunk and budget host fixtures exercise this policy; real-model
+  resumed/fresh parity and TTFT for this interior state still need the GPU gate.
 - Shared row kernels: the token rows (`embed_rows.cu`, groups of 32 and a copy a hyper-connection stream), the MTP
   head's RMS rows with their group sums (`norms.cu`), the router logits and softmax top-k (`route_rows.cu`), and the
   routed experts over a window's or a chunk's rows on the core's plan (`cuda/grouped.zig`, `experts_rows.cu`).

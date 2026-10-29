@@ -104,6 +104,9 @@ pub fn segPre(s: *Seg, m: *Model, i: usize) !void {
         tabs[0] = b.pids;
         tabs[1] = pp.starts;
         for (0..3 * GROUPS) |j| tabs[2 + j] = pp.tables[j];
+        if (r.fsr) |stream| if (try stream.tables(r, b.pids, rows)) |staged| {
+            tabs = staged;
+        };
         var cp: [2]variants.Const = undefined;
         try r.callRows("qa_ple_lookup@ple", rows, &tabs, &.{b.emb}, try variants.oneRow(r, "qa_ple_lookup@ple", variants.width(&cp, "BITS", "GS", pp.w)));
         if (pp.scale) |sc| sc.apply(r.enc, b.emb, rows * D, r.serial);
@@ -213,7 +216,7 @@ pub fn segPost(s: *Seg, m: *Model, i: usize) !void {
     try p.r.callRows("q4_hc_norm_plain#[10240]", s.rows, &.{ b.h[s.cur], b.inj_a, b.branch }, &.{ b.h[1 - s.cur], b.ssp }, null);
     s.cur = 1 - s.cur;
     p.hc(m, b.h[s.cur], L.mhc, s.rows, b.inj_m);
-    p.moe(L, s.rows);
+    try p.moe(L, s.rows, i);
     s.pending = true;
 }
 

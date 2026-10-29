@@ -23,7 +23,27 @@ The model's licence, the [Fish Audio Community License Agreement](https://huggin
 
 Reference `text` is the exact transcript. Codes are frame-major signed integers, with the semantic code first and residual codebooks following, in the same order as upstream `drama3-generate --encode` emits. Do not substitute codes from an unrelated codec.
 
-The loader enforces the family's reference count, transcript length, frame count and codebook ranges before serving. It also rejects empty references, structural prompt tokens, unsupported speaker tags, oversized files and oversized catalogs. The assembled prompt must still fit the engine's advertised prompt budget. Reference rows go through the same family `prompt.build` used by the generation CLI; only the tokenizer interface is adapted.
+The loader enforces the family's reference count, transcript length, frame count and codebook ranges before serving. It also rejects empty references, structural prompt tokens, malformed speaker tags, oversized files and oversized catalogs. The assembled prompt must still fit the engine's advertised prompt budget. Reference rows go through the same family `prompt.build` used by the generation CLI; only the tokenizer interface is adapted.
+
+## Dialogue speakers
+
+Speech input and reference transcripts accept `<|speaker:N|>` with decimal IDs from `0` through `15`. Tags can change speakers within one request. Untagged text defaults to speaker 0; a leading tag after Unicode whitespace is preserved. Leading zeros, negative IDs, non-ASCII digits, incomplete tags and IDs above 15 are rejected.
+
+For example, send this body to `POST /v1/audio/speech` with your served model name:
+
+```json
+{
+  "model": "MODEL",
+  "input": "<|speaker:0|> Is the gate open? <|speaker:15|> Yes, come through. <|speaker:0|> Thank you.",
+  "response_format": "wav"
+}
+```
+
+For streamed audio, set `"stream": true` and `"response_format": "pcm"`. To condition speakers on reference audio, create a catalog entry whose reference transcripts have matching tags, such as `<|speaker:0|> First reference transcript.` and `<|speaker:15|> Second reference transcript.`, then select its name with `"voice": "conversation"`. The HTTP `speaker` field remains an alias for that catalog name; dialogue speaker IDs belong in the text tags.
+
+One catalog entry still accepts at most **four reference passages**, even though there are sixteen valid speaker IDs. Each passage keeps its own transcript and code rows. Reusing a catalog entry preserves its exact reference prefix; changing a reference speaker tag changes that prefix. Speaker tags specify the prompt's roles; this does not guarantee distinguishable voices without suitable references or establish voice similarity.
+
+The public [Drama 3 MLX prompt implementation](https://github.com/Sogni-AI/drama3-mlx/blob/ecc235039ccd5f982f66a6982184f57432354ab4/drama3_mlx/prompt.py) provides a behavior reference for these speaker markers. TensorFold uses its existing native prompt builder.
 
 ## Writing a voice file
 
