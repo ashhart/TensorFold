@@ -26,7 +26,7 @@ pub const Rig = struct {
         errdefer r.k.deinit();
         r.s = try cuda.Stream.init(gpu.d, false);
         errdefer r.s.deinit();
-        r.m = try fwd.Model.init(gpu.gpa, gpu.d, r.s, &r.w, &r.k, context, slots, rows);
+        r.m = try fwd.Model.init(gpu.gpa, gpu.d, r.s, &r.w, &r.k, context, slots, rows, false);
         errdefer r.m.deinit();
         r.logits = try cuda.DeviceBuffer.alloc(gpu.d, rows * r.w.config.vocab * 4);
     }
