@@ -118,7 +118,7 @@ pub fn Registry(comptime Launch: type) type {
             if (t.items != 0 and plan and shape.items > t.items) return null;
             if (t.pairs_per_item > 0 and plan and shape.plan_pairs != 0 and
                 @as(f64, @floatFromInt(shape.plan_pairs)) > @as(f64, t.pairs_per_item) * @as(f64, @floatFromInt(shape.items))) return null;
-            // a routed prompt's kernel is chosen by its items, whatever rows they hold
+            // a routed prompt's kernel ignores the rows one item holds (`m`): its items and pairs bound it
             if (!plan or e.path == .decode) {
                 const limit = if (t.rows_matrix != 0 and env.matrix_on and env.matrix) t.rows_matrix else t.rows;
                 if (!(e.round_any and shape.round) and limit != 0 and shape.m > limit) return null;
