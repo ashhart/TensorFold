@@ -1,4 +1,4 @@
-// window_rows.cuh over paged caches (Dory's full attention at 256, Gemma 4's global layers at 512), and the writer.
+// window_rows.cuh over paged caches (Dory's and Spark2.5's full attention at 256, Gemma 4's global at 512), the writer.
 
 #include "window_rows.cuh"
 #include "window_rows512.cuh"
@@ -27,6 +27,14 @@ extern "C" __global__ void __launch_bounds__(NT, 1) tf_wrows_prompt_256_pg(
     int p0, int W, int H, int HK, int G, float scale, int win, int ring, const int* tab, long long page, int tok) {
     prompt::kernel<256, false, NONE, true>(q, kc, vc, out, hi, p0, W, H, HK, G, scale, win, ring,
                                            Pg{tab, page, tok, 0});
+}
+
+// Spark2.5's full-attention prompt rows over pages (head dim 256, P32): tab the stream's row, tok % 32 == 0.
+extern "C" __global__ void __launch_bounds__(NT, 1) tf_wrows_prompt_256_p32_pg(
+    const __nv_bfloat16* q, const __nv_bfloat16* kc, const __nv_bfloat16* vc, __nv_bfloat16* out, const int* hi,
+    int p0, int W, int H, int HK, int G, float scale, int win, int ring, const int* tab, long long page, int tok) {
+    prompt::kernel<256, true, NONE, true>(q, kc, vc, out, hi, p0, W, H, HK, G, scale, win, ring,
+                                          Pg{tab, page, tok, 0});
 }
 
 // Gemma 4's global decode over pages (head dim 512, no window): each key's page from tab, any tok; merge's replay too.
