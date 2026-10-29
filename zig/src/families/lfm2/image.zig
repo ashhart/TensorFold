@@ -285,11 +285,8 @@ fn closestGrid(w: usize, h: usize) [2]usize {
 
 /// The (x0, y0, tw, th) region of an RGB image of width `w` as normalized patches at `patches[at..]`; the next `at`.
 fn cut(patches: []f32, at: usize, rgb: []const u8, w: usize, x0: usize, y0: usize, tw: usize, th: usize) usize {
-    const normalized = comptime blk: {
-        var t: [256]f32 = undefined;
-        for (&t, 0..) |*v, i| v.* = (@as(f32, @floatFromInt(i)) - 127.5) / 127.5;
-        break :blk t;
-    };
+    // (x - 127.5) / 127.5 on every channel: torchvision's fused rescale and normalize
+    const normalized = comptime picture.normalize.table(.fused, 1.0 / 255.0, @splat(0.5), @splat(0.5))[0];
     var out = at;
     for (0..th / patch) |py| for (0..tw / patch) |px| {
         for (0..patch) |r| {

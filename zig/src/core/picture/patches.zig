@@ -100,18 +100,7 @@ pub fn patchify(gpa: std.mem.Allocator, img: picture.Rgb, p: Patches) error{OutO
     const gw = img.width / P;
     const width = p.width();
     const out = try gpa.alloc(f32, gh * gw * width);
-    // x * rescale (f64, to f32), then (x - mean) / std in f32; fused: (x - mean / rescale) / (std / rescale) in f32
-    var lut: [3][256]f32 = undefined;
-    for (&lut, 0..) |*row, ch| for (row, 0..) |*v, i| {
-        if (p.fused) {
-            const m: f32 = @floatCast(@as(f64, p.mean[ch]) / p.rescale);
-            const s: f32 = @floatCast(@as(f64, p.std[ch]) / p.rescale);
-            v.* = (@as(f32, @floatFromInt(i)) - m) / s;
-            continue;
-        }
-        const scaled: f32 = @floatCast(@as(f64, @floatFromInt(i)) * p.rescale);
-        v.* = (scaled - p.mean[ch]) / p.std[ch];
-    };
+    const lut = picture.normalize.table(if (p.fused) .fused else .unfused, p.rescale, p.mean, p.std);
     var n: usize = 0;
     for (0..gh / M) |by| for (0..gw / M) |bx| for (0..M) |my| for (0..M) |mx| {
         const y0 = (by * M + my) * P;
