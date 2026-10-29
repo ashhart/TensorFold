@@ -9,6 +9,6 @@ pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
 
 pub fn host(b: *std.Build, m: *std.Build.Module, all: *std.Build.Step) void {
     const run = b.addRunArtifact(b.addTest(.{ .root_module = m }));
-    b.step("test-lfm3-cuda-host", "LFM3 on CUDA: NVFP4 admission, page, ring and state sizes, RoPE tables, refusals without a GPU").dependOn(&run.step);
+    b.step("test-lfm3-cuda-host", "LFM3 on CUDA: admission of its three exports, page, ring and state sizes, RoPE tables, refusals without a GPU").dependOn(&run.step);
     all.dependOn(&run.step);
 }

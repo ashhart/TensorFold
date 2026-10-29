@@ -1,4 +1,4 @@
-//! LFM3-1.7B (ModelOpt NVFP4, weight-only) behind the native CUDA registry: plain and drafted decoding, prompt reuse.
+//! LFM3-1.7B (MLX 4-bit; NVFP4 and block FP8 weight-only) behind the native CUDA registry: drafts, prompt reuse.
 const std = @import("std");
 const liquid = @import("liquid_cuda");
 const be = @import("cuda_backend.zig");
@@ -15,7 +15,7 @@ const N = liquid.native.Native(struct {
 });
 
 pub const model_type = "lfm3";
-pub const formats: []const []const u8 = &.{"modelopt-nvfp4"};
+pub const formats: []const []const u8 = &.{ "mlx-q4g64", "modelopt-nvfp4", "fp8-block128" };
 pub const default_context: i64 = 32768;
 pub const max_segments: u32 = 1;
 pub const explains_open = true;
@@ -46,7 +46,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.StructuresUnsupported => "structured output is not built for LFM3 on CUDA yet",
         error.NonFiniteLogits => "the model's logits went non-finite at this row: the request is stopped rather than answered from them",
         error.CapturedKernels => "LFM3 runs on the engine's own kernels: unset TENSORFOLD_CUDA_KERNELS",
-        error.UnsupportedLfm3Quantization => "LFM3 on CUDA reads the ModelOpt NVFP4 text export (LiquidAI/LFM3-1.7B-NVFP4) for now: its MLX affine and FP8 exports are not loaded yet",
+        error.UnsupportedLfm3Quantization => "LFM3 on CUDA reads the text exports at MLX 4 bits in groups of 64, ModelOpt NVFP4 and block FP8: its 6- and 8-bit MLX exports and LFM3-VL are not loaded yet",
         error.UnsupportedLfm3Config, error.UnsupportedLfm3Geometry, error.UnsupportedLfm3LayerSchedule, error.UnsupportedLfm3Rotary, error.UnsupportedLfm3Context, error.BadLfm3Config => "this lfm3 checkpoint's config is not LFM3-1.7B's, which this engine serves",
         error.ParallelPastRound => std.fmt.comptimePrint("--parallel: LFM3 on CUDA holds at most {d} streams (a round's rows): serve --parallel {d} or fewer, or auto", .{ be.round_rows, be.round_rows }),
         error.ParallelPastMemory => "--parallel: the CUDA memory budget fits fewer LFM3 streams than asked (each stream's caches are allocated at load): lower --parallel or --context, serve --parallel auto, or adjust TENSORFOLD_MEMORY_RESERVE_GIB / TENSORFOLD_CUDA_MEMORY_LIMIT_GB",
