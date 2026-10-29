@@ -1,4 +1,4 @@
-//! tree_attention.cu against core/attention_ref.zig, and one stream's rows alone giving the same bits.
+//! tree_attention.cu against core/attention_ref.zig, one stream's rows alone and paged caches giving the same bits.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -43,7 +43,7 @@ const Set = struct {
 };
 
 /// One call over `rows` (global window rows of the given streams, in order): their outputs.
-fn call(x: *Set, s: cuda.Stream, g: *const tree.TreeAttention, d: usize, rows: []const usize, row_stream_all: []const i32, parents_all: []const i32, qs: []const u16, kns: []const u16, vns: []const u16, h: usize, hk: usize, streams_all: []const i32, offs: u64, origin: u64, ng: usize, scale: f32) ![]u16 {
+fn call(x: *Set, s: cuda.Stream, g: *const tree.TreeAttention, d: usize, rows: []const usize, row_stream_all: []const i32, parents_all: []const i32, qs: []const u16, kns: []const u16, vns: []const u16, h: usize, hk: usize, streams_all: []const i32, offs: u64, origin: u64, ng: usize, scale: f32, pages: ?tree.Pages) ![]u16 {
     const n = rows.len;
     var local: std.AutoHashMap(usize, i32) = .init(x.a);
     for (rows, 0..) |r, i| try local.put(r, @intCast(i));
@@ -76,12 +76,51 @@ fn call(x: *Set, s: cuda.Stream, g: *const tree.TreeAttention, d: usize, rows: [
     try g.paths(s, try x.up(std.mem.sliceAsBytes(par)), paths, depths, n);
     const sc_base = try x.zero(s, tree.TreeAttention.scratchBytes(n, h, hk, ng, d));
     const out = try x.zero(s, n * h * d * 2);
-    const rws: tree.Rows = .{ .row_stream = try x.up(std.mem.sliceAsBytes(rs)), .streams = streams_dev, .offs = offs, .origin = origin, .paths = paths, .depths = depths };
+    const rws: tree.Rows = .{ .row_stream = try x.up(std.mem.sliceAsBytes(rs)), .streams = streams_dev, .offs = offs, .origin = origin, .paths = paths, .depths = depths, .pages = pages };
     try g.run(s, try x.up(std.mem.sliceAsBytes(q)), try x.up(std.mem.sliceAsBytes(kn)), try x.up(std.mem.sliceAsBytes(vn)), rws, tree.TreeAttention.scratch(sc_base, n, h, hk, ng, d), out, n, h, hk, d, ng, scale);
     try s.synchronize();
     const got = try x.down(u16, out, n * h * d);
     try dump.output(x.a, "tree", "attention", "rows", &.{ n, h, d }, .bf16, .{ .hk = hk, .groups = ng, .row_ids = rows, .shared_blocks = g.shared_blocks, .sms = g.sms }, std.mem.sliceAsBytes(got));
     return got;
+}
+
+const Paged = struct { origin: u64, offs: u64, pages: tree.Pages };
+
+/// The streams' committed keys (K at offs[2s], V at offs[2s + 1] of kcache) copied to `tok`-position pages, shuffled.
+fn paged(x: *Set, rng: std.Random, kcache: []const u16, committed: []const usize, offs: []const i64, hk: usize, d: usize, tok: usize) !Paged {
+    var stride: usize = 0;
+    var count: usize = 0;
+    for (committed) |p| {
+        stride = @max(stride, (p + tok - 1) / tok);
+        count += (p + tok - 1) / tok;
+    }
+    count += 3; // pages no stream holds
+    const page = tok * hk * d;
+    const ids = try x.a.alloc(i32, count);
+    for (ids, 0..) |*v, i| v.* = @intCast(i);
+    rng.shuffle(i32, ids);
+    const table = try x.a.alloc(i32, committed.len * stride);
+    @memset(table, -1);
+    const pool = try x.a.alloc(u16, 2 * count * page);
+    @memset(pool, 0x7fc0); // a NaN in every position no key fills
+    var next: usize = 0;
+    for (committed, 0..) |p, si| {
+        for (0..(p + tok - 1) / tok) |j| {
+            table[si * stride + j] = ids[next];
+            next += 1;
+        }
+        for (0..p) |j| for (0..2) |part| {
+            const src: usize = @as(usize, @intCast(offs[2 * si + part])) + j * hk * d;
+            const dst = part * count * page + @as(usize, @intCast(table[si * stride + j / tok])) * page + (j % tok) * hk * d;
+            @memcpy(pool[dst..][0 .. hk * d], kcache[src..][0 .. hk * d]);
+        };
+    }
+    var o = try x.a.alloc(i64, 2 * committed.len);
+    for (0..committed.len) |si| {
+        o[2 * si] = 0;
+        o[2 * si + 1] = @intCast(count * page);
+    }
+    return .{ .origin = try x.up(std.mem.sliceAsBytes(pool)), .offs = try x.up(std.mem.sliceAsBytes(o)), .pages = .{ .table = try x.up(std.mem.sliceAsBytes(table)), .page = page, .tok = tok, .stride = stride } };
 }
 
 fn case(gpu: check.Gpu, d: usize, h: usize, hk: usize, seed: u64, worst_all: *f64) !void {
@@ -140,7 +179,7 @@ fn case(gpu: check.Gpu, d: usize, h: usize, hk: usize, seed: u64, worst_all: *f6
     const scale: f32 = @floatCast(1 / @sqrt(@as(f64, @floatFromInt(d))));
     const all = try a.alloc(usize, total);
     for (all, 0..) |*r, i| r.* = i;
-    const got = try call(&x, s, &g, d, all, row_stream, parents, qs, kns, vns, h, hk, &streams, offs_dev, origin, ng, scale);
+    const got = try call(&x, s, &g, d, all, row_stream, parents, qs, kns, vns, h, hk, &streams, offs_dev, origin, ng, scale, null);
     // the reference: committed keys, then the path root first
     var worst: f64 = 0;
     const kd = try a.alloc(f64, (4200 + 128) * d);
@@ -185,14 +224,20 @@ fn case(gpu: check.Gpu, d: usize, h: usize, hk: usize, seed: u64, worst_all: *f6
     // stream 1's rows alone (re-indexed): the same bits
     const only = try a.alloc(usize, widths[1]);
     for (only, 0..) |*r, i| r.* = widths[0] + i;
-    const alone = try call(&x, s, &g, d, only, row_stream, parents, qs, kns, vns, h, hk, &streams, offs_dev, origin, ng, scale);
+    const alone = try call(&x, s, &g, d, only, row_stream, parents, qs, kns, vns, h, hk, &streams, offs_dev, origin, ng, scale, null);
     try check.sameBytes("tree attention: one stream's rows alone", std.mem.sliceAsBytes(alone), std.mem.sliceAsBytes(got[widths[0] * h * d ..][0 .. widths[1] * h * d]));
+    // the committed keys scattered over shuffled pages of a few sizes: the same bits
+    for ([_]usize{ 16, 37, 256 }) |tok| {
+        const pg = try paged(&x, rng, kcache, &committed, &offs, hk, d, tok);
+        const at_pages = try call(&x, s, &g, d, all, row_stream, parents, qs, kns, vns, h, hk, &streams, pg.offs, pg.origin, ng, scale, pg.pages);
+        try check.sameBytes("tree attention: paged committed keys", std.mem.sliceAsBytes(at_pages), std.mem.sliceAsBytes(got));
+    }
     // one shared block walking every (row, group), and a grid sized for a long context: the same bits
     g.shared_blocks = 1;
-    const strided = try call(&x, s, &g, d, all, row_stream, parents, qs, kns, vns, h, hk, &streams, offs_dev, origin, ng, scale);
+    const strided = try call(&x, s, &g, d, all, row_stream, parents, qs, kns, vns, h, hk, &streams, offs_dev, origin, ng, scale, null);
     try check.sameBytes("tree attention: one shared block", std.mem.sliceAsBytes(strided), std.mem.sliceAsBytes(got));
     g.shared_blocks = 96;
-    const wide = try call(&x, s, &g, d, all, row_stream, parents, qs, kns, vns, h, hk, &streams, offs_dev, origin, 513, scale);
+    const wide = try call(&x, s, &g, d, all, row_stream, parents, qs, kns, vns, h, hk, &streams, offs_dev, origin, 513, scale, null);
     try check.sameBytes("tree attention: groups for a 262k context", std.mem.sliceAsBytes(wide), std.mem.sliceAsBytes(got));
     // one warp a block (a device with SMs to spare): stream 2's rows alone, its full groups too, the batch's bits
     g.sms = 1 << 20;
@@ -200,14 +245,17 @@ fn case(gpu: check.Gpu, d: usize, h: usize, hk: usize, seed: u64, worst_all: *f6
     const third = try a.alloc(usize, widths[2]);
     for (third, 0..) |*r, i| r.* = widths[0] + widths[1] + i;
     try check.expect(widths[2] * ng * hk <= tree.slice_items, "tree attention: the one-warp case fits the slices", .{});
-    const one = try call(&x, s, &g, d, third, row_stream, parents, qs, kns, vns, h, hk, &streams, offs_dev, origin, ng, scale);
+    const one = try call(&x, s, &g, d, third, row_stream, parents, qs, kns, vns, h, hk, &streams, offs_dev, origin, ng, scale, null);
     try check.sameBytes("tree attention: one warp a block", std.mem.sliceAsBytes(one), std.mem.sliceAsBytes(got[(widths[0] + widths[1]) * h * d ..][0 .. widths[2] * h * d]));
+    const pg1 = try paged(&x, rng, kcache, &committed, &offs, hk, d, 16);
+    const one_paged = try call(&x, s, &g, d, third, row_stream, parents, qs, kns, vns, h, hk, &streams, pg1.offs, pg1.origin, ng, scale, pg1.pages);
+    try check.sameBytes("tree attention: one warp a block, paged", std.mem.sliceAsBytes(one_paged), std.mem.sliceAsBytes(one));
     g.shared_blocks = 1;
-    const one_strided = try call(&x, s, &g, d, third, row_stream, parents, qs, kns, vns, h, hk, &streams, offs_dev, origin, ng, scale);
+    const one_strided = try call(&x, s, &g, d, third, row_stream, parents, qs, kns, vns, h, hk, &streams, offs_dev, origin, ng, scale, null);
     try check.sameBytes("tree attention: one warp a block, one shared block", std.mem.sliceAsBytes(one_strided), std.mem.sliceAsBytes(one));
     g.shared_blocks = 96;
     g.sms = 1; // more one-warp blocks than SMs: two tile stages instead of three
-    const two = try call(&x, s, &g, d, third, row_stream, parents, qs, kns, vns, h, hk, &streams, offs_dev, origin, ng, scale);
+    const two = try call(&x, s, &g, d, third, row_stream, parents, qs, kns, vns, h, hk, &streams, offs_dev, origin, ng, scale, null);
     try check.sameBytes("tree attention: one warp a block, two stages", std.mem.sliceAsBytes(two), std.mem.sliceAsBytes(one));
     g.shared_blocks = 96;
 }
@@ -216,5 +264,5 @@ pub fn run(gpu: check.Gpu) !void {
     var worst: f64 = 0;
     try case(gpu, 128, 48, 4, 41, &worst); // Kolibri
     try case(gpu, 256, 24, 4, 42, &worst); // Qwen3.8-27B
-    check.pass("tree attention: dim 128 and 256, committed keys and paths within float64 tolerance (worst {d:.3}), a stream's bits alone, any group slots, four-warp or one-warp blocks", .{worst});
+    check.pass("tree attention: dim 128 and 256, committed keys and paths within float64 tolerance (worst {d:.3}), a stream's bits alone, paged caches, any group slots, four-warp or one-warp blocks", .{worst});
 }

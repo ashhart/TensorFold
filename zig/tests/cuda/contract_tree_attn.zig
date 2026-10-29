@@ -18,8 +18,8 @@ fn keyChain(s: c.Shape) usize {
     return s.k + tree.max_depth + 16;
 }
 
-/// A tree attention call's blocks: four warps (sms 0), or one warp a slice with 2 (sms 1) or 3 tile stages.
-pub const Variant = struct { d: usize, h: usize, hk: usize, sms: usize, name: []const u8 };
+/// Blocks: four warps (sms 0) or one warp with 2 (sms 1) or 3 stages; `pages`: the _pg kernels, `swap`: their control.
+pub const Variant = struct { d: usize, h: usize, hk: usize, sms: usize, name: []const u8, pages: usize = 0, swap: bool = false };
 
 pub const variants = [_]Variant{
     .{ .d = 128, .h = 48, .hk = 4, .sms = 0, .name = "cuda tree attention dim 128, four-warp blocks (tf_tree_shared, tf_tree_part, tf_tree_merge)" },
@@ -28,6 +28,14 @@ pub const variants = [_]Variant{
     .{ .d = 256, .h = 24, .hk = 4, .sms = 0, .name = "cuda tree attention dim 256, four-warp blocks (tf_tree_shared_256, tf_tree_part_256, tf_tree_merge)" },
     .{ .d = 256, .h = 24, .hk = 4, .sms = 1, .name = "cuda tree attention dim 256, one-warp blocks (tf_tree_shared_256_w1, tf_tree_part_256_w1)" },
     .{ .d = 256, .h = 24, .hk = 4, .sms = 1 << 20, .name = "cuda tree attention dim 256, one-warp blocks, 3 stages (tf_tree_shared_256_w1s3)" },
+    .{ .d = 128, .h = 48, .hk = 4, .sms = 0, .pages = 16, .name = "cuda tree attention dim 128 over pages of 16, four-warp blocks (tf_tree_shared_pg, tf_tree_part_pg)" },
+    .{ .d = 128, .h = 48, .hk = 4, .sms = 1, .pages = 37, .name = "cuda tree attention dim 128 over pages of 37, one-warp blocks (tf_tree_shared_w1_pg, tf_tree_part_w1_pg)" },
+    .{ .d = 128, .h = 48, .hk = 4, .sms = 1 << 20, .pages = 256, .name = "cuda tree attention dim 128 over pages of 256, 3 stages (tf_tree_shared_w1s3_pg, tf_tree_part_w1s3_pg)" },
+    .{ .d = 256, .h = 24, .hk = 4, .sms = 0, .pages = 37, .name = "cuda tree attention dim 256 over pages of 37, four-warp blocks (tf_tree_shared_256_pg, tf_tree_part_256_pg)" },
+    .{ .d = 256, .h = 24, .hk = 4, .sms = 1, .pages = 16, .name = "cuda tree attention dim 256 over pages of 16, one-warp blocks (tf_tree_shared_256_w1_pg, tf_tree_part_256_w1_pg)" },
+    .{ .d = 256, .h = 24, .hk = 4, .sms = 1 << 20, .pages = 256, .name = "cuda tree attention dim 256 over pages of 256, 3 stages (tf_tree_shared_256_w1s3_pg, tf_tree_part_256_w1s3_pg)" },
+    .{ .d = 128, .h = 48, .hk = 4, .sms = 0, .pages = 16, .swap = true, .name = "control: dim 128 paged tree attention whose first page id is an unheld page" },
+    .{ .d = 256, .h = 24, .hk = 4, .sms = 1, .pages = 16, .swap = true, .name = "control: dim 256 one-warp paged tree attention whose first page id is an unheld page" },
 };
 
 /// Shape: drafted rows (trees of 16 over the streams), query heads (n) and stream 0's committed keys (k).
@@ -55,6 +63,7 @@ pub const Tree = struct {
     vn: std.ArrayList(u16) = .empty,
     cache: std.ArrayList(u16) = .empty,
     dev: [9]u64 = @splat(0),
+    pages: ?tree.Pages = null,
     sc: tree.Scratch = undefined,
     out: u64 = 0,
 
@@ -66,7 +75,7 @@ pub const Tree = struct {
     }
 
     pub fn kernel(self: *Tree) g.Kernel {
-        return .{ .spec = treeSpec(self.v), .ctx = self, .vt = &vt };
+        return .{ .spec = treeSpec(self.v), .ctx = self, .vt = &vt, .control = if (self.v.swap) .shapes else null };
     }
 
     const vt = g.hooks(Tree);
@@ -147,10 +156,59 @@ pub const Tree = struct {
         }
         self.scale = @floatCast(1 / @sqrt(@as(f64, @floatFromInt(v.d))));
         for ([_][]const u8{ std.mem.sliceAsBytes(self.q.items), std.mem.sliceAsBytes(self.kn.items), std.mem.sliceAsBytes(self.vn.items), std.mem.sliceAsBytes(self.cache.items), std.mem.sliceAsBytes(self.offs.items), std.mem.sliceAsBytes(self.row_stream.items), std.mem.sliceAsBytes(streams), std.mem.sliceAsBytes(self.paths.items), std.mem.sliceAsBytes(self.depths.items) }, &self.dev) |bytes, *p| p.* = try self.rig.input(bytes);
+        self.pages = if (v.pages > 0) try self.paged(rng) else null;
         const base = try self.rig.scratch(tree.TreeAttention.scratchBytes(n, v.h, v.hk, self.ng, v.d));
         self.sc = tree.TreeAttention.scratch(base, n, v.h, v.hk, self.ng, v.d);
         self.out = try self.rig.output(n * v.h * v.d * 2);
         return true;
+    }
+
+    /// The committed keys copied to shuffled `pages`-position pages (NaN in the rest): origin, offs and the table.
+    fn paged(self: *Tree, rng: std.Random) !tree.Pages {
+        const a = self.rig.gpu.gpa;
+        const v = self.v;
+        const kv = v.hk * v.d;
+        const tok = v.pages;
+        var stride: usize = 0;
+        var npages: usize = 2; // pages no stream holds
+        for (self.committed.items) |p| {
+            stride = @max(stride, (p + tok - 1) / tok);
+            npages += (p + tok - 1) / tok;
+        }
+        const ids = try a.alloc(i32, npages);
+        defer a.free(ids);
+        for (ids, 0..) |*x, i| x.* = @intCast(i);
+        rng.shuffle(i32, ids);
+        const ns = self.committed.items.len;
+        const table = try a.alloc(i32, ns * stride);
+        defer a.free(table);
+        @memset(table, -1);
+        const page = tok * kv;
+        const pool = try a.alloc(u16, 2 * npages * page);
+        defer a.free(pool);
+        @memset(pool, c.toBf16(std.math.nan(f32)));
+        var next: usize = 0;
+        for (self.committed.items, 0..) |p, si| {
+            for (0..(p + tok - 1) / tok) |j| {
+                table[si * stride + j] = ids[next];
+                next += 1;
+            }
+            for (0..p) |j| for (0..2) |part| {
+                const src: usize = @as(usize, @intCast(self.offs.items[2 * si + part])) + j * kv;
+                const dst = part * npages * page + @as(usize, @intCast(table[si * stride + j / tok])) * page + j % tok * kv;
+                @memcpy(pool[dst..][0..kv], self.cache.items[src..][0..kv]);
+            };
+        }
+        if (v.swap) table[0] = ids[next]; // the control: stream 0's first page is one no stream holds (NaN)
+        const offs = try a.alloc(i64, 2 * ns);
+        defer a.free(offs);
+        for (0..ns) |si| {
+            offs[2 * si] = 0;
+            offs[2 * si + 1] = @intCast(npages * page);
+        }
+        self.dev[3] = try self.rig.input(std.mem.sliceAsBytes(pool));
+        self.dev[4] = try self.rig.input(std.mem.sliceAsBytes(offs));
+        return .{ .table = try self.rig.input(std.mem.sliceAsBytes(table)), .page = page, .tok = tok, .stride = stride };
     }
 
     /// NaN in a query, +inf and -inf in values (committed, on a path, in one column), a NaN key, +inf at tiny weights.
@@ -215,7 +273,7 @@ pub const Tree = struct {
 
     pub fn run(self: *Tree) !void {
         const v = self.v;
-        const rws: tree.Rows = .{ .row_stream = self.dev[5], .streams = self.dev[6], .offs = self.dev[4], .origin = self.dev[3], .paths = self.dev[7], .depths = self.dev[8] };
+        const rws: tree.Rows = .{ .row_stream = self.dev[5], .streams = self.dev[6], .offs = self.dev[4], .origin = self.dev[3], .paths = self.dev[7], .depths = self.dev[8], .pages = self.pages };
         try self.ta.run(self.rig.s, self.dev[0], self.dev[1], self.dev[2], rws, self.sc, self.out, self.shape.rows, v.h, v.hk, v.d, self.ng, self.scale);
         try self.rig.s.synchronize();
     }

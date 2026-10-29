@@ -6,12 +6,14 @@
 #include <stdint.h>
 
 #include "attn_odd.cuh"
+#include "common/kv_pages.cuh"
 #include "common/qmm_frag.cuh"
 #include "window_split.cuh"
 
 // Prompt rows: prefill_attention.cu's tensor-core kernel with a window (keys (pos - win, pos]) and a ring of keys.
 namespace tf_window_prompt {
 
+using tf_common::Pg;
 using qmm_frag::commit;
 using qmm_frag::cp16z;
 using qmm_frag::ldmatrix4;
@@ -57,10 +59,11 @@ __device__ __forceinline__ float rowsum(const float (&c)[8]) {
 }
 
 // ODD: every NaN and infinite value leaves the mma, and the rows that see them add them back at float64's weights.
-template <int D, int WARPS, int HPC, int NS, bool ODD>
+template <int D, int WARPS, int HPC, int NS, bool ODD, typename... P> // P: empty, or one Pg read as tab[k / tok]
 __device__ __forceinline__ bool wattn_rows(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc,
                                            const __nv_bfloat16* __restrict__ vc, __nv_bfloat16* __restrict__ out,
-                                           int p0, int W, int H, int HK, int G, float scale, int win, int ring) {
+                                           int p0, int W, int H, int HK, int G, float scale, int win, int ring,
+                                           P... pg) {
     constexpr int C = D / 8, K16 = D / 16, NB = D / 8, RB = WARPS / HPC, THREADS = 32 * WARPS;
     constexpr bool QREG = D <= 128;               // the queries' fragments stay in registers, else in shared memory
     extern __shared__ uint4 wsmem[];
@@ -80,8 +83,15 @@ __device__ __forceinline__ bool wattn_rows(const __nv_bfloat16* __restrict__ q, 
         for (int i = threadIdx.x; i < HALF * C; i += THREADS) {
             const int key = key0 + i / C;
             const bool in = key < limit;             // past the cache's filled keys: zeros, never read
-            const int row = in ? (ring > 0 ? key % ring : key) : 0; // a ring keeps key p at row p % ring
-            cp16z(dst + sw<D>(i / C, i % C), src + ((int64_t)row * HK + hk) * D + (i % C) * 8, in);
+            if constexpr (sizeof...(P) != 0) {
+                const Pg& t = (pg, ...);
+                const int k = in ? key : 0;
+                const int64_t at = (int64_t)t.tab[k / t.tok] * t.page + ((int64_t)(k % t.tok) * HK + hk) * D;
+                cp16z(dst + sw<D>(i / C, i % C), src + at + (i % C) * 8, in);
+            } else {
+                const int row = in ? (ring > 0 ? key % ring : key) : 0; // a ring keeps key p at row p % ring
+                cp16z(dst + sw<D>(i / C, i % C), src + ((int64_t)row * HK + hk) * D + (i % C) * 8, in);
+            }
         }
     };
     uint32_t qa[QREG ? K16 : 1][4];
@@ -234,8 +244,20 @@ __device__ __forceinline__ bool wattn_rows(const __nv_bfloat16* __restrict__ q, 
     if constexpr (!ODD) { // a NaN or infinite output: the block runs again as ODD (finite values: the same bits)
         if (__syncthreads_or(attn_odd::nonfinite_out<NB>(o, r0 < W, r1 < W))) return true;
     } else {
-        const auto row = [&](int k) { return vc + ((int64_t)(ring > 0 ? k % ring : k) * HK + hk) * D; };
-        const auto krow = [&](int k) { return kc + ((int64_t)(ring > 0 ? k % ring : k) * HK + hk) * D; };
+        const auto row = [&](int k) {
+            if constexpr (sizeof...(P) != 0) { // a key's page of the stream's table row
+                const Pg& t = (pg, ...);
+                return vc + (int64_t)t.tab[k / t.tok] * t.page + ((int64_t)(k % t.tok) * HK + hk) * D;
+            } else
+                return vc + ((int64_t)(ring > 0 ? k % ring : k) * HK + hk) * D;
+        };
+        const auto krow = [&](int k) {
+            if constexpr (sizeof...(P) != 0) {
+                const Pg& t = (pg, ...);
+                return kc + (int64_t)t.tab[k / t.tok] * t.page + ((int64_t)(k % t.tok) * HK + hk) * D;
+            } else
+                return kc + ((int64_t)(ring > 0 ? k % ring : k) * HK + hk) * D;
+        };
         const auto lo = [&](int r) { return win > 0 ? max(pw + r - win + 1, 0) : 0; };
         const auto vis = [&](int r, int k) { return wrow + r < W && k >= lo(r) && k <= pw + r; };
         const auto each = [&](int r, auto f) { for (int k = lo(r); k <= pw + r; ++k) f(krow(k)); }; // row r's keys
@@ -270,6 +292,25 @@ wattn_kernel(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restric
              int G, float scale, int win, int ring) {
     if (wattn_rows<D, WARPS, HPC, NS, false>(q, kc, vc, out, p0, W, H, HK, G, scale, win, ring))
         wattn_odd<D, WARPS, HPC, NS>(q, kc, vc, out, p0, W, H, HK, G, scale, win, ring);
+}
+
+// The paged prompt rows' run again with ODD on: wattn_odd's arithmetic, its own symbol so wattn_odd keeps its name.
+template <int D, int WARPS, int HPC, int NS>
+__device__ __noinline__ void wattn_odd_pg(const __nv_bfloat16* q, const __nv_bfloat16* kc, const __nv_bfloat16* vc,
+                                          __nv_bfloat16* out, int p0, int W, int H, int HK, int G, float scale,
+                                          int win, int ring, Pg pg) {
+    wattn_rows<D, WARPS, HPC, NS, true>(q, kc, vc, out, p0, W, H, HK, G, scale, win, ring, pg);
+}
+
+// wattn_kernel over a stream's pages: kc/vc a layer's region, tab the stream's row of page ids.
+template <int D, int WARPS, int HPC, int NS>
+__device__ __forceinline__ void wattn_pg(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc,
+                                         const __nv_bfloat16* __restrict__ vc, __nv_bfloat16* __restrict__ out, int p0,
+                                         int W, int H, int HK, int G, float scale, int win, int ring,
+                                         const int* __restrict__ tab, long long page, int tok) {
+    const Pg pg{tab, page, tok, 0};
+    if (wattn_rows<D, WARPS, HPC, NS, false>(q, kc, vc, out, p0, W, H, HK, G, scale, win, ring, pg))
+        wattn_odd_pg<D, WARPS, HPC, NS>(q, kc, vc, out, p0, W, H, HK, G, scale, win, ring, pg);
 }
 
 // Decode on tensor cores (d 128): a row's heads one mma tile; warps take every 4th 32-key tile, fold in warp order.
@@ -533,3 +574,15 @@ template __global__ void tf_window_prompt::wattn_kernel<128, 8, 4, 8>(const __nv
 template __global__ void tf_window_prompt::wattn_kernel<128, 8, 8, 8>(const __nv_bfloat16* __restrict__,
     const __nv_bfloat16* __restrict__, const __nv_bfloat16* __restrict__, __nv_bfloat16* __restrict__, int, int, int,
     int, int, float, int, int);
+
+// Kolibri-1's full layers' prompt rows over pages: head dim 128, eight warps, four or eight query heads a block.
+#define TF_WATTN_PG(NAME, HPC)                                                                                       \
+    extern "C" __global__ void __launch_bounds__(256, 1)                                                              \
+        NAME(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc,                               \
+             const __nv_bfloat16* __restrict__ vc, __nv_bfloat16* __restrict__ out, int p0, int W, int H, int HK,     \
+             int G, float scale, int win, int ring, const int* __restrict__ tab, long long page, int tok) {         \
+        tf_window_prompt::wattn_pg<128, 8, HPC, 8>(q, kc, vc, out, p0, W, H, HK, G, scale, win, ring, tab, page, tok); \
+    }
+
+TF_WATTN_PG(tf_window_prompt_h4_pg, 4)
+TF_WATTN_PG(tf_window_prompt_h8_pg, 8)
