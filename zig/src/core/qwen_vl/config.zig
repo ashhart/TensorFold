@@ -23,6 +23,11 @@ pub const Config = struct {
     mean: [3]f32,
     std: [3]f32,
 
+    /// The processor's settings as core/picture/patches takes them: Pillow's bicubic, normalized after the rescale.
+    pub fn patches(c: Config) @import("../picture/patches.zig").Patches {
+        return .{ .patch = c.patch, .temporal = c.temporal, .merge = c.merge, .min_pixels = c.min_pixels, .max_pixels = c.max_pixels, .rescale = c.rescale, .mean = c.mean, .std = c.std };
+    }
+
     pub fn headDim(c: Config) u32 {
         return c.hidden / c.heads;
     }
