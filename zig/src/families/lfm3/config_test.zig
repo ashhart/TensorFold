@@ -2,6 +2,10 @@
 const std = @import("std");
 const c = @import("config.zig");
 
+test {
+    _ = @import("config_fp8_test.zig");
+}
+
 test "the rotary table is transformers' fp32 words, 0 past the partial angles" {
     var out: [64]f32 = undefined;
     var old: [64]f32 = undefined;
