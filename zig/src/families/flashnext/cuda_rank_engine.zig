@@ -30,11 +30,14 @@ fn fileHash(a: std.mem.Allocator, io: std.Io, path: []const u8) ![32]u8 {
     return out;
 }
 
+/// The checkpoint's bytes as both ranks see them: TENSORFOLD_CHECKPOINT_SHA256 when set, else the cached full digest.
 pub fn identity(a: std.mem.Allocator, io: std.Io, dir: []const u8, context: usize, chunk: usize) !Identity {
-    const digest = std.mem.span(std.c.getenv("TENSORFOLD_CHECKPOINT_SHA256") orelse return error.NoCheckpointIdentity);
-    if (digest.len != 64) return error.NoCheckpointIdentity;
     var checkpoint: [32]u8 = undefined;
-    _ = std.fmt.hexToBytes(&checkpoint, digest) catch return error.NoCheckpointIdentity;
+    if (std.c.getenv("TENSORFOLD_CHECKPOINT_SHA256")) |given| {
+        const digest = std.mem.span(given);
+        if (digest.len != 64) return error.NoCheckpointIdentity;
+        _ = std.fmt.hexToBytes(&checkpoint, digest) catch return error.NoCheckpointIdentity;
+    } else checkpoint = try @import("core").checkpoint_identity.fullIdentity(a, io, dir);
     const config = try std.fs.path.join(a, &.{ dir, "config.json" });
     defer a.free(config);
     const index = try std.fs.path.join(a, &.{ dir, "model.safetensors.index.json" });
@@ -42,6 +45,11 @@ pub fn identity(a: std.mem.Allocator, io: std.Io, dir: []const u8, context: usiz
     const program = try std.process.executablePathAlloc(io, a);
     defer a.free(program);
     return .{ .config = try fileHash(a, io, config), .index = try fileHash(a, io, index), .program = try fileHash(a, io, program), .checkpoint = checkpoint, .context = context, .chunk = chunk, .decode_graph = @intFromBool(@import("cuda_round_graph.zig").enabled()), .head_sharded = @intFromBool(try @import("cuda_head.zig").enabled()) };
+}
+
+/// How long a rank waits for its peer: a minute with a given digest, 30 when the peer may be hashing every byte.
+pub fn linkWait() u64 {
+    return if (std.c.getenv("TENSORFOLD_CHECKPOINT_SHA256") != null) 60_000 else 30 * 60_000;
 }
 
 pub const Session = struct {
@@ -59,12 +67,15 @@ pub const Session = struct {
     stopped: bool = false,
     available: std.atomic.Value(bool) = .init(true),
 
-    pub fn init(a: std.mem.Allocator, io: std.Io, host: []const u8, port: u16, rank: usize, mine: Identity) !*Session {
+    /// `wait_ms` bounds the link and the hello: the peer may still be reading every byte for its digest (`linkWait`).
+    pub fn init(a: std.mem.Allocator, io: std.Io, host: []const u8, port: u16, rank: usize, mine: Identity, wait_ms: u64) !*Session {
+        if (rank > 1) return error.BadRank;
         const s = try a.create(Session);
         errdefer a.destroy(s);
-        const link = try wire.Link.open(io, host, port, rank, 60_000);
+        if (wait_ms > 60_000) std.log.info("flashnext: rank {d} waits up to {d} min for rank {d} and its checkpoint digest", .{ rank, wait_ms / 60_000, 1 - rank });
+        const link = try wire.Link.open(io, host, port, rank, wait_ms);
         errdefer link.close();
-        const until = wire.deadline(60_000);
+        const until = wire.deadline(wait_ms);
         var peer: Identity = undefined;
         const hello: wire.Header = .{ .kind = .hello, .arg = rank, .bytes = @sizeOf(Identity) };
         if (rank == 0) {
@@ -489,4 +500,31 @@ test "tensor ranks agree on image admission limits" {
     try shape(.{ .kind = .media, .object = 1, .arg = 4096, .bytes = 12 });
     try std.testing.expectError(error.BadRankFrame, shape(.{ .kind = .media, .object = 1, .arg = 4096, .bytes = 65 * 12 }));
     _ = @import("cuda_rank_media.zig");
+}
+
+test "rank identity: the cached full digest by default, a given digest when set, and the wait each allows" {
+    const t = std.testing;
+    const env = @import("sys").env;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const header = "{\"w\":{\"dtype\":\"U8\",\"shape\":[4],\"data_offsets\":[0,4]}}";
+    var shard: [8 + header.len + 4]u8 = undefined;
+    std.mem.writeInt(u64, shard[0..8], header.len, .little);
+    @memcpy(shard[8..][0..header.len], header);
+    @memcpy(shard[8 + header.len ..], "abcd");
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "model.safetensors", .data = &shard });
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "config.json", .data = "{\"hidden_size\":8}" });
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "model.safetensors.index.json", .data = "{\"weight_map\":{\"w\":\"model.safetensors\"}}" });
+    const dir = try tmp.dir.realPathFileAlloc(t.io, ".", t.allocator);
+    defer t.allocator.free(dir);
+    _ = env.unsetenv("TENSORFOLD_CHECKPOINT_SHA256");
+    try t.expectEqual(@as(u64, 30 * 60_000), linkWait());
+    const computed = try identity(t.allocator, t.io, dir, 4096, 64);
+    try t.expectEqual(try @import("core").checkpoint_identity.fullIdentity(t.allocator, t.io, dir), computed.checkpoint);
+    _ = env.setenv("TENSORFOLD_CHECKPOINT_SHA256", "abababababababababababababababababababababababababababababababab", 1);
+    defer _ = env.unsetenv("TENSORFOLD_CHECKPOINT_SHA256");
+    try t.expectEqual(@as(u64, 60_000), linkWait());
+    try t.expectEqual(@as([32]u8, @splat(0xab)), (try identity(t.allocator, t.io, dir, 4096, 64)).checkpoint);
+    _ = env.setenv("TENSORFOLD_CHECKPOINT_SHA256", "ab", 1);
+    try t.expectError(error.NoCheckpointIdentity, identity(t.allocator, t.io, dir, 4096, 64));
 }
