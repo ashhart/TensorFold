@@ -22,11 +22,18 @@ pub const page_unit = chunk_keys;
 /// Keys a prompt tile (window_rows.cuh's BN): a paged tile takes one page base, so prompt pages hold whole tiles.
 pub const prompt_tile = 32;
 
-/// Head dim 256 pages hold whole chunks; 512's decode looks up each key's page (prompt rows: whole tiles, promptWith).
+/// Head dim 256 decode pages hold whole chunks; 512's decode looks up each key's page (prompt rows: promptShape).
 fn pagedShape(w: Window) bool {
     const p = w.pg orelse return true;
     if (w.win != 0 or p.tokens == 0 or p.page_elems > std.math.maxInt(i63)) return false;
     return if (w.d == 256) p.tokens % page_unit == 0 else w.d == 512;
+}
+
+/// Prompt rows at either head dim: a 32-key tile takes one page base, so pages hold whole tiles (prompt_tile).
+fn promptShape(w: Window) bool {
+    const p = w.pg orelse return true;
+    if (w.win != 0 or p.tokens == 0 or p.page_elems > std.math.maxInt(i63)) return false;
+    return wide(w.d) and p.tokens % prompt_tile == 0;
 }
 
 /// Head dims window_rows.cu serves, with any query heads a key head up to 16.
@@ -265,10 +272,9 @@ pub const WindowAttention = struct {
     /// promptRows by `f` (wideFns, or the contract's controls).
     pub fn promptWith(f: *const Wide, s: Stream, q: u64, kc: u64, vc: u64, out: u64, p0: usize, n: usize, w: Window, hi: ?u64) !void {
         const grp = if (w.hk > 0) w.h / w.hk else 0;
-        if (!wideShape(w) or p0 + n > std.math.maxInt(i32) or !pagedShape(w)) return error.WindowShape;
+        if (!wideShape(w) or p0 + n > std.math.maxInt(i32) or !promptShape(w)) return error.WindowShape;
         var paged: ?Function = null;
-        if (w.pg) |p| { // pages hold whole prompt tiles (prompt_tile), and the head dim has this P's paged twin
-            if (p.tokens % prompt_tile != 0) return error.WindowShape;
+        if (w.pg != null) { // the head dim has this P's paged twin
             paged = (f.paged orelse return error.WindowShape).prompt[@intFromBool(w.p32)] orelse return error.WindowShape;
         }
         if (n == 0) return;
@@ -302,6 +308,21 @@ test "paged shapes: head dim 256 pages hold whole chunks, 512's decode pages any
     w.d = 512;
     w.pg.?.tokens = 0;
     try std.testing.expect(!pagedShape(w));
+}
+
+test "paged prompt rows: pages of whole 32-key tiles at head dims 256 and 512, no window" {
+    var w: Window = .{ .h = 16, .hk = 4, .d = 256, .win = 0, .ring = 0, .scale = 1, .pg = .{ .table = 0, .page_elems = 32 * 1024, .tokens = 32 } };
+    try std.testing.expect(promptShape(w) and !pagedShape(w));
+    w.pg.?.tokens = 48;
+    try std.testing.expect(!promptShape(w));
+    w.pg.?.tokens = 64;
+    w.d = 512;
+    try std.testing.expect(promptShape(w));
+    w.win = 1024;
+    try std.testing.expect(!promptShape(w));
+    w.win = 0;
+    w.d = 128;
+    try std.testing.expect(!promptShape(w));
 }
 
 test "wide geometry rejects empty heads and preserves all sixteen GQA ratios" {
