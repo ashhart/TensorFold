@@ -159,7 +159,7 @@ pub const Inputs = struct {
 pub fn stage(m: *const model.Model, host: *Host, segs: []const Seg, window: bool) !Staged {
     const d = m.dims;
     const t = host.tables;
-    if (d.ple_dim / t.dims != ngram.heads) return error.UnsupportedNgramHeads;
+    if (d.ple_dim / t.rows.dims != ngram.heads) return error.UnsupportedNgramHeads;
     var rows: usize = 0;
     for (segs) |g| rows += g.tokens.len;
     const n16 = rows * ngram.heads;
@@ -268,9 +268,9 @@ fn ple(
         @backingInt(Kind.bf16),
         @ptrFromInt(in.local),
         @intCast(rows * ngram.heads),
-        t.bits,
-        @intCast(t.group),
-        @intCast(t.dims),
+        t.rows.bits,
+        @intCast(t.rows.group),
+        @intCast(t.rows.dims),
         @ptrFromInt(emb.ptr),
         @backingInt(m.act),
         o.stream,
