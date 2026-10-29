@@ -7,6 +7,7 @@
 #include <stdint.h>
 
 #include "common/qmm_frag.cuh"
+#include "common/cp_async.cuh"
 #include "window_fallback.h"
 
 namespace tf_wrows {
@@ -301,8 +302,7 @@ __device__ __forceinline__ void merge(const float* __restrict__ po, const float*
 
 namespace prompt {
 
-template <int N>
-__device__ __forceinline__ void wait_group() { asm volatile("cp.async.wait_group %0;\n" ::"n"(N)); }
+using tf_common::cp_wait;
 
 __device__ __forceinline__ uint32_t pack(float lo, float hi) {
     __nv_bfloat162 v = __floats2bfloat162_rn(lo, hi);
@@ -392,7 +392,7 @@ __device__ __forceinline__ bool rows(const __nv_bfloat16* __restrict__ q, const 
         commit();
     }
     auto take = [&](int it) -> const uint4* { // item it's slot, once every thread's copy has landed
-        wait_group<NS - 1>();
+        cp_wait<NS - 1>();
         __syncthreads();
         return slots + (it % NS) * K::SLOT;
     };
@@ -530,7 +530,7 @@ __device__ __forceinline__ bool rows(const __nv_bfloat16* __restrict__ q, const 
             done(2 * t + 1);
         }
     }
-    wait_group<0>();
+    cp_wait<0>();
     bool odd = false;
 #pragma unroll
     for (int i = 0; i < NB; ++i) {

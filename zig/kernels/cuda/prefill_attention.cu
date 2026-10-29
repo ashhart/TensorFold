@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "common/qmm_frag.cuh"
+#include "common/cp_async.cuh"
 
 namespace tf_prefill_attention {
 
@@ -19,8 +20,7 @@ constexpr int BN = 64, HALF = 32;             // keys a tile (the fold's unit), 
 constexpr float LOG2E = 1.4426950408889634f;
 constexpr int SMEM_MAX = 96 * 1024;
 
-template <int N>
-__device__ __forceinline__ void wait_group() { asm volatile("cp.async.wait_group %0;\n" ::"n"(N)); }
+using tf_common::cp_wait;
 
 __device__ __forceinline__ void ldmatrix4t(uint32_t (&r)[4], const void* p) {
     asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0, %1, %2, %3}, [%4];\n"
@@ -230,7 +230,7 @@ vision_kernel(const __nv_bfloat16* __restrict__ qkv, __nv_bfloat16* __restrict__
     float m0 = -INFINITY, m1 = -INFINITY, l0 = 0.0f, l1 = 0.0f;
     stage(0);
     for (int t = 0; t < tiles; ++t) {
-        wait_group<0>();
+        cp_wait<0>();
         __syncthreads();                                 // tile t landed, and every warp is done with tile t - 1
         if (t + 1 < tiles) stage(t + 1);
         const uint4* ks = smem + (t & 1) * 2 * BN * RS;

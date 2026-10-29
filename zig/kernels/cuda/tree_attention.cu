@@ -7,6 +7,7 @@
 
 #include "attn_odd.cuh"
 #include "common/qmm_frag.cuh"
+#include "common/cp_async.cuh"
 
 namespace tf_tree {
 
@@ -21,8 +22,7 @@ constexpr int SPAN = 512;      // keys a group: one partial (4 slices of its til
 constexpr int MAXD = 128;      // a path's most rows
 constexpr float LOG2E = 1.4426950408889634f;
 
-template <int N>
-__device__ __forceinline__ void wait_group() { asm volatile("cp.async.wait_group %0;\n" ::"n"(N)); }
+using tf_common::cp_wait;
 
 __device__ __forceinline__ float texp(float x) {
     float y;
@@ -101,7 +101,7 @@ __device__ __forceinline__ bool tree_group(
             cp16z(qs + sw<D>(i / C, i % C), q + (row * h + kh * G + (in ? a : pf) % G) * D + (i % C) * 8, in);
         }
         commit();
-        wait_group<0>();
+        cp_wait<0>();
         __syncthreads();
     }
     float o[NB][4];
@@ -142,7 +142,7 @@ __device__ __forceinline__ bool tree_group(
         const int ahead = t + 4 * (ST - 1);
         if (ahead * HB < k1) load(ahead, (st + ST - 1) % ST);
         else commit();
-        wait_group<ST - 1>(); // tile t landed; the next ST - 1 are in flight
+        cp_wait<ST - 1>(); // tile t landed; the next ST - 1 are in flight
         ks = kv0 + st * 2 * HB * C;
         vs = ks + HB * C;
         st = (st + 1) % ST;

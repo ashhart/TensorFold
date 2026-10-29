@@ -12,6 +12,7 @@
 
 #include "../exl3_decode.cuh"
 #include "pfdense_args.h"
+#include "common/cp_async.cuh"
 
 namespace dsv41_pfd {
 
@@ -61,9 +62,8 @@ __device__ __forceinline__ void cp_async16(void* smem, const void* gmem, bool ok
     const unsigned s = (unsigned)__cvta_generic_to_shared(smem);
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(s), "l"(gmem), "r"(ok ? 16 : 0));
 }
-__device__ __forceinline__ void cp_commit() { asm volatile("cp.async.commit_group;\n" ::); }
-template <int N>
-__device__ __forceinline__ void cp_wait() { asm volatile("cp.async.wait_group %0;\n" ::"n"(N)); }
+using tf_common::cp_commit;
+using tf_common::cp_wait;
 __device__ __forceinline__ void bar_sync() { asm volatile("bar.sync 0;\n" ::: "memory"); }
 __device__ __forceinline__ void ldsm4(uint32_t (&a)[4], const void* p) {
     const unsigned s = (unsigned)__cvta_generic_to_shared(p);

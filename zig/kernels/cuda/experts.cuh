@@ -3,6 +3,7 @@
 
 #include <cuda_bf16.h>
 #include <stdint.h>
+#include "common/cp_async.cuh"
 
 namespace {
 
@@ -25,10 +26,8 @@ __device__ __forceinline__ void cp16(void* dst, const void* src) {
   asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"(d), "l"(src));
 }
 
-__device__ __forceinline__ void cp_commit() { asm volatile("cp.async.commit_group;\n" ::); }
-
-template <int N>
-__device__ __forceinline__ void cp_wait() { asm volatile("cp.async.wait_group %0;\n" ::"n"(N)); }
+using tf_common::cp_commit;
+using tf_common::cp_wait;
 
 __device__ __forceinline__ uint32_t comp(const uint4& v, int c) {
   return c == 0 ? v.x : c == 1 ? v.y : c == 2 ? v.z : v.w;
