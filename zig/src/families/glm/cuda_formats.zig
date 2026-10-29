@@ -86,24 +86,44 @@ fn checked(v: error{Overflow}!usize) error{ShapeOverflow}!usize {
 
 /// `module`'s NVFP4 linear whose block scales are csf_32x2_v1 parts, decoded into `scales` ([n, k/16] e4m3).
 pub fn csfLinear(ck: *core.Checkpoint, module: []const u8, scales: []u8) !core.nvfp4.Linear {
+    return (try csfParts(ck, module)).linear(scales);
+}
+
+/// A csf_32x2_v1 linear as read from the checkpoint, its scales not yet decoded: `linear` touches no checkpoint state.
+pub const Csf = struct {
+    parts: core.nvfp4_csf32.Parts,
+    n: usize,
+    k: usize,
+    codes: []const u8,
+    global: f32,
+
+    /// The linear with its block scales decoded into `scales` ([n, k/16] e4m3), on any thread.
+    pub fn linear(c: Csf, scales: []u8) !core.nvfp4.Linear {
+        if (scales.len != try checked(std.math.mul(usize, c.n, c.k)) / core.nvfp4.group) return error.BadNvfp4;
+        try core.nvfp4_csf32.decode(c.parts, c.n, c.k / core.nvfp4.group, scales);
+        return .{ .n = c.n, .k = c.k, .codes = c.codes, .scales = scales, .global = c.global };
+    }
+};
+
+/// `module`'s csf_32x2_v1 linear read for `Csf.linear`; it marks each tensor used, so one thread reads them.
+pub fn csfParts(ck: *core.Checkpoint, module: []const u8) !Csf {
     var buf: [256]u8 = undefined;
     const w = try ck.get(try std.fmt.bufPrint(&buf, "{s}.weight", .{module}));
     if (w.dtype != .u8 or w.rank != 2) return error.BadNvfp4;
     const n = w.shape[0];
     if (n == 0 or w.shape[1] == 0) return error.EmptyShape;
     const k = try checked(std.math.mul(usize, 2, w.shape[1]));
-    if (k % core.nvfp4.group != 0 or scales.len != try checked(std.math.mul(usize, n, k)) / core.nvfp4.group) return error.BadNvfp4;
+    if (k % core.nvfp4.group != 0) return error.BadNvfp4;
     var p: core.nvfp4_csf32.Parts = undefined;
     inline for (.{ "bases", "codes", "page_bases", "offsets", "exceptions" }, .{ .u8, .u8, .u32, .u16, .u16 }) |part, dtype| {
         const t = try ck.get(try std.fmt.bufPrint(&buf, "{s}.weight_scale.csf32_" ++ part, .{module}));
         if (t.dtype != dtype or t.rank != 1) return error.BadNvfp4;
         @field(p, part) = t.bytes;
     }
-    try core.nvfp4_csf32.decode(p, n, k / core.nvfp4.group, scales);
     const g = try ck.get(try std.fmt.bufPrint(&buf, "{s}.weight_scale_2", .{module}));
     if (g.dtype != .f32 or g.numel() != 1) return error.BadNvfp4;
     _ = try ck.get(try std.fmt.bufPrint(&buf, "{s}.input_scale", .{module})); // the W4A4 math's, unread by W4A16
-    return .{ .n = n, .k = k, .codes = w.bytes, .scales = scales, .global = std.mem.bytesToValue(f32, g.bytes[0..4]) };
+    return .{ .parts = p, .n = n, .k = k, .codes = w.bytes, .global = std.mem.bytesToValue(f32, g.bytes[0..4]) };
 }
 
 /// `module`'s NVFP4 linear, scales stored plain; only W4A16_NVFP4 may lack the input_scale (FP4-Local's MTP experts).
@@ -246,23 +266,36 @@ pub fn admit(gpa: std.mem.Allocator, config_json: []const u8, why: *core.modelop
     recipes.deinit();
 }
 
-/// A routed expert's NVFP4 linear: scales as stored, or csf_32x2_v1's decoded into `scales`; else refused by name.
-pub fn expert(L: anytype, module: []const u8, scales: []u8) !core.nvfp4.Linear {
+/// A routed expert's NVFP4 linear as read: scales as stored, or csf_32x2_v1's parts to decode; else refused by name.
+pub fn expert(L: anytype, module: []const u8) !Pending {
     var buf: [224]u8 = undefined;
     const csf = L.ck.has(try std.fmt.bufPrint(&buf, "{s}.weight_scale.csf32_bases", .{module}));
     try L.formatIn(L.ck, module, if (csf) .nvfp4_csf else .nvfp4);
-    if (!csf) return plainLinear(L.ck, module, L.declaredAs(module)) catch |e| switch (e) {
+    if (!csf) return .{ .plain = plainLinear(L.ck, module, L.declaredAs(module)) catch |e| switch (e) {
         error.NoInputScale => {
             std.log.err("{s}: declared NVFP4 (W4A4) but stores no input_scale", .{module});
             return error.UnreadableFormat;
         },
         else => return e,
-    };
-    return csfLinear(L.ck, module, scales) catch |e| {
-        std.log.err("{s}: its csf_32x2_v1 scales do not read as docs/csf-scale-blocks.md has them ({t})", .{ module, e });
+    } };
+    return .{ .csf = csfParts(L.ck, module) catch |e| {
+        std.log.err("{s}: its csf_32x2_v1 parts do not read as docs/csf-scale-blocks.md has them ({t})", .{ module, e });
         return e;
-    };
+    } };
 }
+
+/// A routed expert's matrix as the loader's thread read it; `linear` finishes it on any thread (csf scales decoded).
+pub const Pending = union(enum) {
+    csf: Csf,
+    plain: core.nvfp4.Linear,
+
+    pub fn linear(p: Pending, scales: []u8) !core.nvfp4.Linear {
+        return switch (p) {
+            .csf => |c| c.linear(scales),
+            .plain => |l| l,
+        };
+    }
+};
 
 /// config.json's MIXED_PRECISION recipes, or null when it declares none this reader takes (the entry refuses those).
 pub fn readRecipes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !?core.modelopt.Recipes {
