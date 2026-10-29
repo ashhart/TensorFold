@@ -22,6 +22,7 @@ const h3_image = struct {
 pub fn image(name: []const u8) error{UnknownContractImage}![]const u8 {
     if (@import("contract_deepseek_images.zig").image(name)) |bytes| return bytes;
     if (std.mem.eql(u8, name, "window_rows")) return kk.window_rows;
+    if (std.mem.eql(u8, name, "fp8_experts")) return kk.fp8_experts;
     if (std.mem.eql(u8, name, "h3")) return &h3_image.bytes;
     inline for (.{ "qwen4_projection", "qwen4_hc", "qwen4_gdn", "qwen4_ple" }) |n|
         if (std.mem.eql(u8, name, n)) return @field(kk, n);
