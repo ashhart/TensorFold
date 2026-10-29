@@ -59,8 +59,9 @@ tensorfold-native serve /path/to/checkpoint --temperature 0
   tail, plus 28 KiB a token of keys, values and indexer keys, and with drafts its MTP head's cache.
 - `--no-drafts` serves without the MTP head; `"draft": false` on a request does the same for that request.
 - `TF_FLASHNEXT_CHUNK` (1 to 16,384, default 1,536) caps the rows of one prompt pass. Every pass reads the weights
-  of every expert its rows route to, so fewer, larger passes cost less a token; but a pass runs to its end before
-  other streams decode their next token. See [Prompt chunk size](#prompt-chunk-size).
+  of every expert its rows route to, so fewer, larger passes cost less a token; but a pass runs to its end, so a
+  stream decoding during a pass waits up to the whole pass for its next token. See
+  [Prompt chunk size](#prompt-chunk-size).
 - `TF_FLASHNEXT_DRAFTS` (1 to 15, default 6) and `TF_FLASHNEXT_CONFIDENCE` (default 0.60) set the head's chain.
 - `TF_FLASHNEXT_LOAD_THREADS` (1 to 32, default 8) packs the routed NVFP4 experts on that many threads at load, staged
   through at most 192 MiB of pinned memory: every layer on one GPU, and the MTP head's layer on rank 0 at `--tp 2`.
@@ -198,29 +199,17 @@ in one start of four on this machine. After the 131,072-token prompt the process
 
 ### Prompt chunk size
 
-`nvidia/Qwen3.8-Flash-Next-FP4-Local` (revision `b9ce18a6`) on a GB10 (driver 615.71.09, kernels from nvcc 13.0),
-main `a05d62003`, `--parallel 3 --context 40960 --no-drafts --prompt-cache-gib 0`, greedy. The two settings ran in
-fresh servers in the order 1,536 / 8,192 / 8,192 / 1,536; each cell is the median of 3, both runs of a setting given:
+`TF_FLASHNEXT_CHUNK` sets how many prompt rows one pass takes. A prompt of N rows runs in ceil(N / chunk) passes: a
+1,922-row prompt is two passes at the default 1,536 and one at 8,192.
 
-| | default (1,536) | `TF_FLASHNEXT_CHUNK=8192` |
-| --- | --- | --- |
-| First token at 436 tokens (s) | 0.304 / 0.306 | 0.306 / 0.307 |
-| First token at 1,922 tokens (s) | 1.062 / 1.068 | 0.928 / 0.928 (-13%) |
-| First token at 8,361 tokens (s) | 4.490 / 4.503 | 3.936 / 3.946 (-12%) |
-| First token at 31,901 tokens (s) | 17.81 / 17.94 | 14.95 / 14.95 (-16%) |
-| Longest wait between two decoding streams' tokens while an 8,361-token prompt runs (s) | 0.90 | 3.78 |
-| Memory available after load (GB) | 44 | 38 |
-
-- **For:** the gain is in the routed experts. In an `nsys` trace of the same build at one stream, a 1,922-token
-  prompt took 138 ms less GPU time at 8,192 rows (1,052 to 914 ms), and the two NVFP4 expert kernels account for all
-  of it: one pass instead of two, so each routed expert's gate, up and down weights are read once. A 1,536-row pass
-  routes to about 350 of the 512 experts, and each takes 1.84 MB of gate and up weights.
-- **Against:** a pass is not interrupted, so a stream that is decoding waits for the whole pass, about four times as
-  long at 8,192 rows as at 1,536. The prompt scratch takes about 6 GB more, and at 16,384 rows the n-gram tables of
-  the MLX 4-bit checkpoint page (see `docs/known-issues.md`).
-- One stream at a time (an agent loop, a single user): the larger chunk shortens every prompt past 1,536 tokens. Several
-  streams that decode while others send long prompts: the default keeps their waits under a second.
-- The 64 greedy tokens after the 436- and 1,922-token prompts were the same at both settings.
+- **For:** every pass reads the gate, up and down weights of each routed expert its rows route to (1.84 MB of gate and
+  up weights an expert, 512 experts a layer). Fewer passes read each expert fewer times, so a prompt longer than one
+  chunk gets faster as the chunk grows.
+- **Against:** a pass is not interrupted, so a stream that is decoding waits up to the whole pass for its next token,
+  and a pass's time grows with its rows. The prompt scratch grows with the chunk too, and at 16,384 rows the n-gram
+  tables of the MLX 4-bit checkpoint page (see `docs/known-issues.md`).
+- One stream at a time (an agent loop, a single user): a larger chunk shortens every prompt longer than the default
+  chunk. Several streams that decode while others send long prompts: the default keeps each wait to one short pass.
 
 ## Not yet
 
