@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- LFM2.5-24B-A2B on Metal can hand an external drafter the rows of the layers it reads (its taps), copied on the GPU by a new kernel, `lfm2_tap`, that the kernel contract checks bit for bit with two planted controls (#1390, part of #1374). A drafting stream resumes a kept prompt state only when it also holds the drafter's context. Nothing uses the taps yet: without a drafter none are kept and every forward runs as before. Thanks to @BlivionIaG.
+
 - Nemotron on CUDA: the MoE residual's norm, Mamba's group norm, the MTP input norms and the bf16 token rows run on the shared norm and embedding kernels instead of Nemotron's own copies, which are removed. The shared kernels keep Nemotron's summation order, so replies are the same tokens as before, and one fewer CUDA image loads (#1353, step 1 of #548). Thanks to @jschmied.
 
 - Qwen3.8-27B on two Macs, first step: the pair seam's Metal kernels, which exchange whole output rows between the two Macs as bf16 copies, so every sum stays on one Mac and no partial sum crosses the link, plus a one-Mac loopback peer and six kernel-contract controls that each go red as planted (#1432). Nothing serves through it yet, and one Mac's projections keep the same reduction order, so replies are byte-identical. Thanks to @akol1.
