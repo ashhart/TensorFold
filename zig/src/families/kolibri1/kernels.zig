@@ -62,6 +62,7 @@ pub const Kernels = struct {
         errdefer k.qk.unload();
         k.win = try cuda.window_attention.WindowAttention.load(d);
         errdefer k.win.unload();
+        try k.win.loadPages(d); // tf_wrows_put: a paged full layer's rows into its pages
         k.tree = try cuda.tree_attention.TreeAttention.load(d);
         k.tree.sms = sms;
         return k;
@@ -140,6 +141,11 @@ pub const Ops = struct {
     pub fn qkv(o: Ops, a: Qkv, n: usize, h: usize, hk: usize, d: usize, eps: f32, rope: bool) !void {
         const shape: cuda.qk_rows.Shape = .{ .norms = a.norms, .cos = if (rope) a.cos else null, .sin = if (rope) a.sin else null, .rot = if (rope) d else 0, .eps = eps };
         try o.k.qk.rows(o.s, a.rows, .{ .h = h, .hk = hk, .dim = d }, shape, a.pos, a.slots, .{ .q = a.q, .k = a.k, .v = a.v, .kc = a.kc, .vc = a.vc, .len = a.len }, n);
+    }
+
+    /// Rows k, v [n, hk * d] into a paged layer's pages at their positions and slots (`w.pg`: every slot's table).
+    pub fn put(o: Ops, k: u64, v: u64, kc: u64, vc: u64, pos: u64, slots: u64, w: cuda.window_attention.Window, n: usize) !void {
+        try o.k.win.put(o.s, k, v, kc, vc, pos, slots, w, n);
     }
 
     /// Decode rows of a sliding layer: each row over its stream's ring, keys (pos - window, pos].
