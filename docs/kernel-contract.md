@@ -175,6 +175,9 @@ each row then L2-normed, against float64's ranges at their bf16 points and expf'
 CUDA also checks `dense_rows`' scaled epilogue (Dory's logits, fp32(bf16(x . w)) times a per-column scale), bit-equal to its
 unscaled tile's outputs rounded and scaled on the host.
 HIP: the RMS norm rows, a wave a row (fp32, fp16 and bf16 out) and a block a row (fp16 and bf16 out).
+HIP also checks the router over the rows a checkpoint already holds in bf16 (`tf_router_bf16`, and its fp16-activation
+form), bit-equal to the fp32-rows router it replaces at 1 to 16 rows, with both kinds' non-finite plants through gate 1
+and the exact sums of gate 4.
 
 RADIO's fused bias, activation and residual (`tf_vit_bias_act`) replaces `tf_vit_bias` then
 `tf_vit_pointwise`, byte for byte.
