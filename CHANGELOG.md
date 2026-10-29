@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- [The Flash Next CUDA recipe](docs/recipes/flash-next-cuda.md#prompt-chunk-size) documents `TF_FLASHNEXT_CHUNK` (1 to 16,384 prompt rows a pass, default 1,536): a larger chunk takes a long prompt in fewer passes, each reading its routed experts' weights once, while a stream decoding during a pass waits up to the whole pass and the prompt scratch grows with the chunk (#1553). Thanks to @jschmied.
+
 - [The runbook](RUNBOOK.md#prompt-prefill-share-and-budget) documents `TENSORFOLD_PREFILL_SHARE` and `TENSORFOLD_PREFILL_BUDGET`: what each accepts, its default, and how it trades a long prompt's finish against decoding streams' next rounds.
 
 - Kernel contract: Qwen4's dense activation check carries FP32 rounding through the stored BF16 SiLU before the up product, avoiding a false shape failure near a BF16 midpoint (#1547). Inference kernels are unchanged.
