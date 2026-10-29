@@ -31,7 +31,14 @@ pub fn backend(o: api.Open) ?[]const u8 {
 
 /// LFM2 reads a checkpoint's pictures through its own tower without --vision: the flag is refused, not ignored.
 pub fn lfm2(o: api.Open) ?[]const u8 {
-    return if (o.vision != null) lfm2_vision else null;
+    return if (o.vision != null) lfm2_vision else unranked(o);
+}
+
+pub const no_ranks = "this CUDA family has no tensor-parallel ranks: serve without --tp";
+
+/// --tp for a family that opens outside `family()` (Fish, Qwen4, LFM2): refused, never ignored.
+pub fn unranked(o: api.Open) ?[]const u8 {
+    return if (o.tp != 1) no_ranks else null;
 }
 
 const lfm2_vision = "--vision: LFM2 reads the checkpoint's images through its own tower without the flag; " ++
@@ -42,7 +49,7 @@ pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
     if (o.vision != null and !(@hasDecl(F, "Options") and @hasField(F.Options, "vision")))
         return "--vision: this CUDA family reads no images; serve it without --vision";
     const ranked = @hasDecl(F, "Options") and @hasField(F.Options, "rank");
-    if (o.tp != 1 and !ranked) return "this CUDA family has no tensor-parallel ranks: serve without --tp";
+    if (o.tp != 1 and !ranked) return no_ranks;
     if (@hasDecl(F, "tp_draft_snapshots")) {
         if (!F.tp_draft_snapshots and o.tp > 1 and o.drafts and (o.prompt_cache_gib orelse 1) > 0)
             return "Flash Next tensor-rank MTP snapshots are unavailable: use --prompt-cache-gib 0 with --tp and drafting";
@@ -70,6 +77,11 @@ test "a family must consume rank options before tensor parallelism is admitted" 
     };
     try std.testing.expectStringStartsWith(family(Single, .{ .dir = "d", .model_type = "m", .tp = 2 }) orelse "", "this CUDA family has no tensor-parallel ranks");
     try std.testing.expect(family(Ranked, .{ .dir = "d", .model_type = "m", .tp = 2 }) == null);
+    try std.testing.expectEqualStrings(no_ranks, family(Single, .{ .dir = "d", .model_type = "m", .tp = 2 }).?);
+    // the families past family(): one rank opens, two are refused by the same words
+    try std.testing.expect(unranked(.{ .dir = "d", .model_type = "qwen4", .tp = 1 }) == null);
+    try std.testing.expectEqualStrings(no_ranks, unranked(.{ .dir = "d", .model_type = "qwen4", .tp = 2 }).?);
+    try std.testing.expectEqualStrings(no_ranks, lfm2(.{ .dir = "d", .model_type = "lfm2", .tp = 2 }).?);
 }
 
 test "--learn is refused whatever the family, and --slide or a learned-disk size alone is not" {
