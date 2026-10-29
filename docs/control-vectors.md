@@ -10,6 +10,19 @@ TensorFold reads these vectors on Metal for Qwen3.8-27B. The container, the
 kernel, the serve surface and the producer that derives a vector from the
 model itself are all native Zig.
 
+## The engine that steers
+
+The steering surface is in this branch, not in upstream's release archives, so
+it ships as its own build:
+
+    brew install blivioniag/tensorfold/tensorfold-glp
+
+That formula installs `tensorfold-glp` from
+[BlivionIaG/TensorFold](https://github.com/BlivionIaG/TensorFold)'s release
+`v1.1.8-glp.1`, which is upstream `main` plus this branch. The plain
+`tensorfold` formula installs upstream's engine, which has no `--glp` and
+serves the model without steering.
+
 ## Serving one
 
 ```
