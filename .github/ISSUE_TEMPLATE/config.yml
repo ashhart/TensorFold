@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Contributing guide
+    url: https://github.com/ashhart/TensorFold/blob/main/CONTRIBUTING.md
+    about: Build, exactness, receipts and the issue-first rule for families, backends and arithmetic.
+  - name: Agent radar
+    url: https://tensorfold.dev/atc
+    about: See which issues contributors and agents are working on before choosing one.
+  - name: Known issues
+    url: https://github.com/ashhart/TensorFold/blob/main/docs/known-issues.md
+    about: Problems we already know about, and their workarounds.
+  - name: Runbook
+    url: https://github.com/ashhart/TensorFold/blob/main/RUNBOOK.md
+    about: Installing and running a TensorFold server, with a troubleshooting section.

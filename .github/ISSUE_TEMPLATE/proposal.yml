@@ -1,0 +1,123 @@
+name: Model family, backend or arithmetic proposal
+description: Agree on a gate before adding a model family or backend, or changing arithmetic, precision, layout or distributed execution.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        CONTRIBUTING.md asks for an issue before a new model family, backend or arithmetic change so we can agree on its gate.
+        A proposed gate is not an agreed one: the work is ready to land only after a maintainer's decision.
+        Do not paste private paths, hostnames, tokens, keys or confidential prompts. Maintainers may relabel the issue.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind of proposal
+      multiple: true
+      options:
+        - New model family
+        - New backend
+        - Arithmetic or precision change
+        - Weight or cache layout change
+        - Distributed execution
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: decision
+    attributes:
+      label: Decision requested
+      description: The question a maintainer should answer.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and benefit
+      description: What changes, who gains from it, and what the native engine supports today.
+    validations:
+      required: true
+  - type: textarea
+    id: model
+    attributes:
+      label: Checkpoint, revision and licence
+      description: Repository and immutable revision, the published precision and format, and the weights' and drafter's licences. "n/a" if not model-specific.
+    validations:
+      required: true
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend
+      multiple: true
+      options:
+        - Metal
+        - CUDA
+        - HIP
+        - XPU
+        - A new backend
+        - None (no GPU involved)
+    validations:
+      required: true
+  - type: textarea
+    id: arithmetic
+    attributes:
+      label: Chips, precision and stored arithmetic
+      description: The chips, the precision and format, and whether stored weights or caches would be converted. Opt-in does not waive exactness or precision.
+    validations:
+      required: true
+  - type: textarea
+    id: design
+    attributes:
+      label: Shared modules to extend
+      description: The existing core, cache, operator or family code this extends, and why it cannot be reused if it adds something new.
+    validations:
+      required: true
+  - type: textarea
+    id: slice
+    attributes:
+      label: Smallest first slice
+      description: The first reviewable pull request, what it leaves out, and what it depends on.
+    validations:
+      required: true
+  - type: textarea
+    id: gate
+    attributes:
+      label: Proposed gate
+      description: The exactness, fidelity and performance checks, the workloads and inputs, and the acceptance thresholds.
+    validations:
+      required: true
+  - type: dropdown
+    id: gate-status
+    attributes:
+      label: Gate status
+      options:
+        - Proposed here
+        - Awaiting a maintainer decision
+        - Decision linked below
+    validations:
+      required: true
+  - type: input
+    id: gate-link
+    attributes:
+      label: Link to the gate decision
+      description: Optional. The maintainer comment or issue that agreed the gate.
+  - type: textarea
+    id: hardware
+    attributes:
+      label: Hardware available
+      description: The machines you can test on, and the coverage that needs another tester.
+    validations:
+      required: true
+  - type: textarea
+    id: related
+    attributes:
+      label: Related issues, pull requests and earlier attempts
+      description: Links, and what has changed since an earlier attempt, or "none found".
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy
+      options:
+        - label: This proposal holds no private paths, hostnames, tokens, keys or confidential prompts.
+          required: true
