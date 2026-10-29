@@ -5,22 +5,24 @@ const cuda = @import("cuda");
 const weights = @import("cuda_weights.zig");
 const projection = @import("cuda_proj.zig");
 
-/// TF_GLM_L2PF and its knobs at DeepSeek V4.1's defaults (TF_DSV41_L2PF's), the knobs read only when it is 1.
+/// TF_GLM_L2PF and its knobs at DeepSeek V4.1's defaults (TF_DSV41_L2PF's): on unless 0, the knobs read unless 0.
 pub const Options = struct {
-    on: bool = false,
+    on: bool = true,
+    named: bool = false, // TF_GLM_L2PF=1: on whatever the GPU, where unset is a GB10's alone (`want`)
     mb: u32 = 12, // TF_GLM_L2PF_MB: a site's budget in MiB
     ctas: u32 = 2, // TF_GLM_L2PF_CTAS: the CTAs a site's prefetch spreads over
     pace_gbps: u32 = 150, // TF_GLM_L2PF_PACE_GBPS: the sites beside a gather read at this rate (0: unpaced)
 
     pub fn read(get: *const fn ([:0]const u8) ?[]const u8, problem: *[]const u8) !Options {
         var o: Options = .{};
-        const v = get("TF_GLM_L2PF") orelse return o;
-        if (std.mem.eql(u8, v, "0")) return o;
-        if (!std.mem.eql(u8, v, "1")) {
-            problem.* = "TF_GLM_L2PF: 0 or 1";
-            return error.BadSetting;
+        if (get("TF_GLM_L2PF")) |v| {
+            if (std.mem.eql(u8, v, "0")) return .{ .on = false };
+            if (!std.mem.eql(u8, v, "1")) {
+                problem.* = "TF_GLM_L2PF: 0 or 1";
+                return error.BadSetting;
+            }
+            o.named = true;
         }
-        o.on = true;
         const knobs = .{
             .{ "TF_GLM_L2PF_MB", "mb", 1, "TF_GLM_L2PF_MB: a site's budget in MiB, 1 or more" },
             .{ "TF_GLM_L2PF_CTAS", "ctas", 1, "TF_GLM_L2PF_CTAS: 1 or more" },
@@ -40,6 +42,11 @@ pub const Options = struct {
     /// What the ranks agree on: zeros when off, so knobs nobody reads never differ.
     pub fn words(o: Options) [4]u32 {
         return if (o.on) .{ 1, o.mb, o.ctas, o.pace_gbps } else @splat(0);
+    }
+
+    /// Whether a GPU of compute capability `cap` prefetches: named on any GPU, unset on a GB10 (sm_121) alone.
+    pub fn want(o: Options, cap: usize) bool {
+        return o.on and (o.named or cap == 121);
     }
 };
 
@@ -251,16 +258,23 @@ fn Env(comptime pairs: anytype) type {
     };
 }
 
-test "TF_GLM_L2PF: off unless 1, DeepSeek's knobs by default, refusals naming a bad value, and unread knobs never differ" {
+test "TF_GLM_L2PF: on unless 0, unset on a GB10 alone, DeepSeek's knobs by default, refusals naming a bad value" {
     const t = std.testing;
     var problem: []const u8 = "";
-    try t.expectEqual([4]u32{ 0, 0, 0, 0 }, (try Options.read(Env(.{}).get, &problem)).words());
-    try t.expectEqual([4]u32{ 0, 0, 0, 0 }, (try Options.read(Env(.{ .{ "TF_GLM_L2PF", "0" }, .{ "TF_GLM_L2PF_MB", "0" } }).get, &problem)).words());
-    try t.expectEqual([4]u32{ 1, 12, 2, 150 }, (try Options.read(Env(.{.{ "TF_GLM_L2PF", "1" }}).get, &problem)).words());
+    const unset = try Options.read(Env(.{}).get, &problem);
+    try t.expectEqual([4]u32{ 1, 12, 2, 150 }, unset.words());
+    try t.expect(unset.want(121) and !unset.want(120) and !unset.want(90));
+    const off = try Options.read(Env(.{ .{ "TF_GLM_L2PF", "0" }, .{ "TF_GLM_L2PF_MB", "0" } }).get, &problem);
+    try t.expectEqual([4]u32{ 0, 0, 0, 0 }, off.words());
+    try t.expect(!off.want(121));
+    const named = try Options.read(Env(.{.{ "TF_GLM_L2PF", "1" }}).get, &problem);
+    try t.expectEqual([4]u32{ 1, 12, 2, 150 }, named.words());
+    try t.expect(named.want(121) and named.want(120) and named.want(90));
     const set = Env(.{ .{ "TF_GLM_L2PF", "1" }, .{ "TF_GLM_L2PF_MB", "4" }, .{ "TF_GLM_L2PF_CTAS", "4" }, .{ "TF_GLM_L2PF_PACE_GBPS", "0" } });
     try t.expectEqual([4]u32{ 1, 4, 4, 0 }, (try Options.read(set.get, &problem)).words());
     const bad = .{
         .{ Env(.{.{ "TF_GLM_L2PF", "yes" }}), "TF_GLM_L2PF: 0 or 1" },
+        .{ Env(.{.{ "TF_GLM_L2PF_MB", "0" }}), "TF_GLM_L2PF_MB: a site's budget in MiB, 1 or more" },
         .{ Env(.{ .{ "TF_GLM_L2PF", "1" }, .{ "TF_GLM_L2PF_MB", "0" } }), "TF_GLM_L2PF_MB: a site's budget in MiB, 1 or more" },
         .{ Env(.{ .{ "TF_GLM_L2PF", "1" }, .{ "TF_GLM_L2PF_CTAS", "x" } }), "TF_GLM_L2PF_CTAS: 1 or more" },
         .{ Env(.{ .{ "TF_GLM_L2PF", "1" }, .{ "TF_GLM_L2PF_PACE_GBPS", "-1" } }), "TF_GLM_L2PF_PACE_GBPS: GB/s, or 0 for unpaced" },
