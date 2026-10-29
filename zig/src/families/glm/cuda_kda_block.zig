@@ -28,7 +28,6 @@ pub const Layer = struct {
     lower: f32,
     heads: usize,
     dims: usize,
-    max_heads: usize = 0, // the widest rank's KDA head count: the pad target, so every rank carries one row width
 
     pub fn width(l: Layer) usize {
         return 3 * l.heads * kda.dk + 2 * kda.dk + l.heads;
@@ -36,7 +35,7 @@ pub const Layer = struct {
 
     /// The width the input stack's rows actually carry (TF_GLM_KDA_PAD): the COMMON width, so every rank agrees.
     pub fn matWidth(l: Layer) usize {
-        return rowWidth(l.heads, l.max_heads);
+        return rowWidth(l.heads);
     }
 
     /// The input stack and its two views need glm_mm's eight-column output and row stride.
@@ -45,22 +44,19 @@ pub const Layer = struct {
     }
 };
 
-/// Whether the pad is asked for (TF_GLM_KDA_PAD unset or 0: no padding anywhere).
-pub fn padOn() bool {
-    const v = std.c.getenv("TF_GLM_KDA_PAD") orelse return false;
-    const t = std.mem.trim(u8, std.mem.span(v), " ");
-    return !(t.len == 0 or std.mem.eql(u8, t, "0"));
-}
-
-/// The fused input's row width: one eight-aligned width for every rank when TF_GLM_KDA_PAD is set.
+/// TF_GLM_KDA_PAD's one eight-aligned row width for every rank, set once at load (Engine.open); 0: no pad.
 pub var pad_to: usize = 0;
 
-pub fn rowWidth(own_heads: usize, max_heads: usize) usize {
+/// The pad width for `kda_heads` split over `world` ranks: the widest rank's row, rounded up to eight columns.
+pub fn padWidth(kda_heads: usize, world: usize) usize {
+    const heads = (kda_heads + world - 1) / world;
+    return std.mem.alignForward(usize, 3 * heads * kda.dk + 2 * kda.dk + heads, 8);
+}
+
+/// The fused input's row width on a rank of `own_heads` heads: pad_to when the pad is on.
+pub fn rowWidth(own_heads: usize) usize {
     if (pad_to != 0) return pad_to;
-    const heads = @max(own_heads, max_heads);
-    const raw = 3 * heads * kda.dk + 2 * kda.dk + heads;
-    if (!padOn()) return 3 * own_heads * kda.dk + 2 * kda.dk + own_heads;
-    return std.mem.alignForward(usize, raw, 8);
+    return 3 * own_heads * kda.dk + 2 * kda.dk + own_heads;
 }
 
 /// The block's scratch for `rows` rows: projection, decay and gate rows, chain saves, B16 partials, a split's tmp.
