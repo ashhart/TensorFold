@@ -119,3 +119,20 @@ test "the ModelOpt NVFP4 export: 502 bare tensors, FP4 FFN with its scales, ever
     try std.testing.expect(h.get("model.layers.0.conv.in_proj.scales") == null);
     try std.testing.expectEqualSlices(usize, &.{ 2048, 1, 7 }, h.get("model.layers.0.conv.conv.weight").?.shape[0..3]);
 }
+
+test "the block FP8 export: 402 bare tensors, FP8 FFN and q/k/v/o with block scales, convs and gates bf16" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg = try c.parse(std.testing.allocator, @import("config_fp8_test.zig").fp8);
+    defer cfg.deinit();
+    const h = try header(arena.allocator(), &cfg, .bare);
+    const m = try w.validate(std.testing.allocator, &cfg, &h);
+    try std.testing.expectEqual(@as(usize, 402), m.tensors);
+    try std.testing.expectEqual(@as(usize, 2209949952), m.bytes);
+    const down = h.get("model.layers.0.feed_forward.w2.weight_scale").?;
+    try std.testing.expect(down.dtype == .bf16 and down.shape[0] == 16 and down.shape[1] == 60);
+    try std.testing.expect(h.get("model.layers.2.self_attn.k_proj.weight").?.dtype == .f8_e4m3);
+    try std.testing.expect(h.get("model.layers.2.self_attn.gate_proj.weight").?.dtype == .bf16);
+    try std.testing.expect(h.get("model.layers.0.conv.in_proj.weight").?.dtype == .bf16);
+    try std.testing.expectEqualSlices(usize, &.{ 2048, 1, 7 }, h.get("model.layers.0.conv.conv.weight").?.shape[0..3]);
+}

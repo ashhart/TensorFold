@@ -2,6 +2,10 @@
 const std = @import("std");
 const c = @import("config.zig");
 
+test {
+    _ = @import("config_fp8_test.zig");
+}
+
 test "text and VL preserve their distinct context and actual mixed embedding width" {
     var t = try c.parse(std.testing.allocator, text);
     defer t.deinit();
