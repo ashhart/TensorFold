@@ -14,6 +14,8 @@ pub const RenderOptions = struct {
     clear_thinking: ?bool = null,
     tool_choice: ?json.Value = null,
     response_format: ?json.Value = null,
+    /// The server serves images: native image parts may render.
+    images: bool = false,
 };
 
 pub const Error = error{ Template, OutOfMemory };

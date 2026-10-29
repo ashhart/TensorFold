@@ -40,6 +40,7 @@ pub fn renderIds(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, t
         .clear_thinking = cx.clear_thinking,
         .tool_choice = cx.template_fields.get("tool_choice"),
         .response_format = cx.template_fields.get("response_format"),
+        .images = srv.info.vision != null,
     };
     var ids = render(srv, cx.a, normalized, options, &problem) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -116,6 +117,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: chat.Input, thinking: bool, effort:
         } },
         .ids => |ids| return .{ .ids = ids },
     };
+    cx.template_fields = input.fields;
     const prompt = try renderIds(srv, cx, input.messages, input.tools, thinking, effort, true);
     const history = try renderIds(srv, cx, input.messages, input.tools, thinking, effort, false);
     var history_len: usize = 0;
