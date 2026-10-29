@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8-27B on CUDA: ModelOpt checkpoints (NVFP4 and FP8), such as `nvidia/Qwen3.8-27B-NVFP4`, now serve on cards from sm_80 to sm_89, such as a Jetson AGX Orin, where decode stopped at the first projection with `MissingLanePart`. The engine reserves the projections' partial sums for windows under 256 rows (about 21 MB for the 27B, and only on those cards) and reduces them without clusters, as Nemotron's ModelOpt path does; a card older than sm_80 is refused at load with the reason. It has not run on an sm_80 to sm_89 card yet. On sm_90 and newer, including the GB10, nothing changes (#1470, for #1452). Thanks to @javierbits and @valacroix.
+
 - More CUDA kernels take their `ldmatrix` loads and f16 `mma` from one home each: the prompt attention and Qwen 3.5 tensor-core attention take `qmm_frag`'s transposed load, the EXL3 grouped-expert, dense prompt and prompt kernels take its `ldmatrix4` and `ldmatrix2`, and the grouped EXL3 experts take `exl3_decode.cuh`'s f16 `mma16816`. All 1,935 kernel functions in the 14 CUDA images this reaches compile to the same code as before at sm_80, sm_86, sm_89, sm_120 and sm_121 (#1591). Thanks to @jschmied.
 
 - The CUDA training kernels for Living Weights' and 4-bit training's gated attention backward now compile from one shared source, `zig/kernels/cuda/attn_back.cuh`, instead of two copies; both images keep their kernel names, and every function in them compiles to the same code as before at sm_80, 86, 89, 120 and 121 (#1565, for #1409). Thanks to @jschmied.
