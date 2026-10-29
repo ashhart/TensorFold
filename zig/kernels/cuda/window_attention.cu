@@ -7,6 +7,7 @@
 
 #include "attn_odd.cuh"
 #include "common/qmm_frag.cuh"
+#include "common/cp_async.cuh"
 #include "window_split.cuh"
 
 // Prompt rows: prefill_attention.cu's tensor-core kernel with a window (keys (pos - win, pos]) and a ring of keys.
@@ -22,8 +23,7 @@ using qmm_frag::mma0;
 constexpr int BN = 64, HALF = 32;             // keys a tile (the fold's unit), keys a staging slot
 constexpr float LOG2E = 1.4426950408889634f;
 
-template <int N>
-__device__ __forceinline__ void wait_group() { asm volatile("cp.async.wait_group %0;\n" ::"n"(N)); }
+using tf_common::cp_wait;
 
 __device__ __forceinline__ float texp(float x) {
     float y;
@@ -117,7 +117,7 @@ __device__ __forceinline__ bool wattn_rows(const __nv_bfloat16* __restrict__ q, 
     float m0 = -INFINITY, m1 = -INFINITY, l0 = 0.0f, l1 = 0.0f;
     const int pos0 = p0 + wrow + g, pos1 = pos0 + 8;
     auto take = [&](int it, bool odd) -> const uint4* { // item it's slot, once every thread's copy has landed
-        wait_group<NS - 1>();
+        cp_wait<NS - 1>();
         if (odd) attn_odd::clean<D>(slots + (it % NS) * HALF * C, THREADS); // NaN and infinities out of the mma
         __syncthreads();
         return slots + (it % NS) * HALF * C;
@@ -229,7 +229,7 @@ __device__ __forceinline__ bool wattn_rows(const __nv_bfloat16* __restrict__ q, 
         values(pa[2], pa[3], take(it + 3, ODD));
         done(it + 3);
     }
-    wait_group<0>();
+    cp_wait<0>();
     const int r0 = wrow + g, r1 = r0 + 8, pw = p0 + wrow;
     if constexpr (!ODD) { // a NaN or infinite output: the block runs again as ODD (finite values: the same bits)
         if (__syncthreads_or(attn_odd::nonfinite_out<NB>(o, r0 < W, r1 < W))) return true;
@@ -324,7 +324,7 @@ __device__ __forceinline__ bool decode_tc_rows(
     stage(ks, kc, lo / HB + warp);
     stage(vs, vc, lo / HB + warp);
     for (int t = lo / HB + warp; t <= p / HB; t += 4) {
-        wait_group<1>(); // tile t's K (its V may still be in flight)
+        cp_wait<1>(); // tile t's K (its V may still be in flight)
         __syncwarp();
         float sc[4][4];
 #pragma unroll
@@ -390,7 +390,7 @@ __device__ __forceinline__ bool decode_tc_rows(
             o[i][2] = __fmul_rn(o[i][2], a1);
             o[i][3] = __fmul_rn(o[i][3], a1);
         }
-        wait_group<1>(); // tile t's V (the next K may still be in flight)
+        cp_wait<1>(); // tile t's V (the next K may still be in flight)
         if constexpr (ODD) attn_odd::clean_rows<D, HB>(vs, lane, 32); // the chunks this lane copied
         __syncwarp();
         uint32_t pa[2][4];
@@ -418,7 +418,7 @@ __device__ __forceinline__ bool decode_tc_rows(
         __syncwarp();
         stage(vs, vc, t + 4);
     }
-    wait_group<0>();
+    cp_wait<0>();
     const int na = min(4, p / HB - lo / HB + 1); // warps that saw keys
     if constexpr (ODD) {
         const auto krow = [&](int k) { return kc + ((base + k % ring) * hk + kh) * D; };

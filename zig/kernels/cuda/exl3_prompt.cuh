@@ -1,5 +1,6 @@
 // Common EXL3 prompt helpers, after @BobClawblaw (#976) and MiaAI-Lab (Apache-2.0, patches 0004 and 0009).
 #pragma once
+#include "common/cp_async.cuh"
 namespace tf_exl3_prompt {
 using namespace tf_exl3;
 __device__ __forceinline__ void decode_tile_p(const uint32_t* tile, int lane, uint32_t (&b0)[2], uint32_t (&b1)[2]) {
@@ -14,9 +15,8 @@ __device__ __forceinline__ void cp_async16(void* dst, const void* src, bool vali
     const int n = valid ? 16 : 0;
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(d), "l"(src), "r"(n));
 }
-__device__ __forceinline__ void cp_async_commit() { asm volatile("cp.async.commit_group;\n" ::); }
-template <int N>
-__device__ __forceinline__ void cp_async_wait() { asm volatile("cp.async.wait_group %0;\n" ::"n"(N)); }
+using tf_common::cp_commit;
+using tf_common::cp_wait;
 __device__ __forceinline__ void ldmatrix_x4(uint32_t (&a)[4], const half* p) {
     const unsigned s = (unsigned)__cvta_generic_to_shared(p);
     asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
@@ -85,13 +85,13 @@ __device__ __forceinline__ void tmain(const half* __restrict__ X0, const half* _
 #pragma unroll
     for (int c = 0; c < TSTAGES - 1; ++c) {
         if (c < chunks) load(c);
-        cp_async_commit();
+        cp_commit();
     }
     for (int c = 0; c < chunks; ++c) {
-        cp_async_wait<TSTAGES - 2>();
+        cp_wait<TSTAGES - 2>();
         __syncthreads();
         if (c + TSTAGES - 1 < chunks) load(c + TSTAGES - 1);
-        cp_async_commit();
+        cp_commit();
         const half* base = stage + (size_t)(c % TSTAGES) * SH;
         const half* xs = base + (size_t)(XR == TPM ? 0 : mat) * TPM * TXS;
         const uint32_t* ws = reinterpret_cast<const uint32_t*>(base + (size_t)XR * TXS);
@@ -120,7 +120,7 @@ __device__ __forceinline__ void tmain(const half* __restrict__ X0, const half* _
             }
         }
     }
-    cp_async_wait<0>();
+    cp_wait<0>();
     __syncthreads();   // the stages become the epilogue's sums
 }
 
