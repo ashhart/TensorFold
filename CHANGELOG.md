@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Gemma 4: Metal and CUDA now prepare images from one shared source file instead of a CUDA copy kept equal by a test (#1589). The patches and image hashes each step produces are unchanged. Thanks to @jschmied.
+
 - Qwen-VL pictures (Qwen3.8-27B, Qwen3.6-35B-A3B and Qwen3.8 Flash Next, on Metal and CUDA) are resized and normalized as the checkpoints' named processor, transformers' `Qwen2VLImageProcessorFast`, does: torchvision's antialiased bicubic and its fused normalization in float32, the same `pixel_values` bits on five test pictures. Pillow's bicubic was used before; on a 941×1672 photo it differed in 0.1% of pixel values, by at most 2 levels, so replies to pictures can differ slightly. Video frames already took these settings, and text-only replies are unchanged (#1586). Thanks to @jschmied.
 
 - LFM2-VL's picture sizing uses the shared `smart_resize` in `core/picture`, as a variant that keeps each side at least one 32-pixel step and has no aspect bound, instead of its own copy (#1593). Every picture from 1 to 4,000 pixels on each side gets the same size as before, so image tokens and replies are unchanged. Thanks to @jschmied.
