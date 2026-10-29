@@ -516,7 +516,7 @@ const Loader = struct {
         return .{ .format = .nvfp4, .up = ptrs[0], .down = ptrs[1], .up_scale = ptrs[2], .down_scale = ptrs[3], .width = ni, .dims = d, .experts = count, .limit = c.swiglu_limit };
     }
 
-    fn layer(L: *Loader, i: u32) !Layer {
+    pub fn layer(L: *Loader, i: u32) !Layer {
         const c = &L.w.config;
         const in_norm = try L.norm("layers.{d}.input_layernorm.weight", .{i}, "layers.{d}.in_norm");
         const post_norm = try L.norm("layers.{d}.post_attention_layernorm.weight", .{i}, "layers.{d}.post_norm");
@@ -553,11 +553,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, stream: c
     defer if (recipes) |*r| r.deinit();
     if (recipes) |*r| L.recipes = recipeTable(r);
     w.layers = try gpa.alloc(Layer, layers.len);
-    for (layers, w.layers) |i, *l| {
-        if (i >= c.layers) return error.BadLayer;
-        l.* = try L.layer(i);
-        ck.release(); // a rank reads about half the checkpoint: its pages would crowd the GPU's allocations out
-    }
+    try @import("cuda_load_ahead.zig").layers(&L, prefix, layers, w.layers);
     try L.whole(try L.get("embed_tokens.weight", .{}), .bf16);
     w.embed = try L.put("embed", .{});
     w.norm = try L.norm("norm.weight", .{}, "norm");
@@ -585,6 +581,7 @@ test {
     _ = @import("cuda_proj.zig");
     _ = @import("cuda_fp8pb.zig");
     _ = @import("cuda_mxfp8.zig");
+    _ = @import("cuda_load_ahead.zig");
 }
 
 test "an empty mixed recipe table cannot make an undeclared NVFP4 projection look declared" {

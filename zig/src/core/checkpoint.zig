@@ -4,9 +4,12 @@ const std = @import("std");
 const Io = std.Io;
 const st = @import("safetensors.zig");
 const index_format = @import("checkpoint_index.zig");
+const prefetching = @import("checkpoint_prefetch.zig");
 
 pub const Tensor = st.Tensor;
 pub const DType = st.DType;
+pub const Ahead = prefetching.Ahead;
+pub const max_readers = prefetching.max_readers;
 
 /// The checkpoint's shard paths in name order: model.safetensors.index.json's weight map, else every model*.safetensors.
 pub fn shardFiles(gpa: std.mem.Allocator, io: Io, dir: []const u8) ![][:0]u8 {
@@ -147,6 +150,12 @@ pub const Checkpoint = struct {
     /// Every file's pages out of the page cache (safetensors.File.release).
     pub fn release(self: *const Checkpoint) void {
         for (self.files.items) |*f| f.release();
+    }
+
+    /// Every tensor named `short`... read into the page cache by `readers` threads of their own until `join`.
+    pub fn prefetch(self: *const Checkpoint, short: []const u8, readers: usize) Ahead {
+        var buf: [320]u8 = undefined;
+        return prefetching.start(self, self.scoped(&buf, short) catch return .{}, readers);
     }
 
     /// Names no `get` took (the loader refuses a checkpoint with leftovers).

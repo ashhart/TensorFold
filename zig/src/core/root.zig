@@ -91,6 +91,7 @@ test {
     _ = exl3_load;
     _ = @import("exl3_rect_test.zig");
     _ = checkpoint;
+    _ = @import("checkpoint_prefetch.zig");
     _ = checkpoint_identity;
     _ = direct_io;
     _ = frame_rounds;
