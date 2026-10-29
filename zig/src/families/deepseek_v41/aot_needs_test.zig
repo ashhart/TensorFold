@@ -7,6 +7,11 @@ const Fn = aot_needs.Fn;
 const Sigs = aot_needs.Sigs;
 const Needs = aot_needs.Needs;
 const kvs = @import("cuda_kv.zig");
+const block = @import("block.zig");
+const block_prefill = @import("block_prefill.zig");
+const ced = @import("ced.zig");
+const check = @import("calls_check.zig");
+const Config = @import("config.zig").Config;
 
 const testing = std.testing;
 
@@ -120,15 +125,77 @@ test "aot guard: a program's key is its lookups' as `find` tells them apart, the
     try testing.expect(tk.of(32, 0x1000) != tk.of(32, 0x1008));
 }
 
-test "aot-needs: TF_DSV41_PF_4K lists the forward's own 2,048-row segments beside the 4K ones (their staging ring)" {
-    const block = @import("block.zig");
-    const base: aot_needs.Served = .{ .o = .{ .prefill_rows = 4096, .pf4k = true }, .slots = 4, .cap = 64, .drafts = false, .slot_drafts = false, .group = 1, .graphs = .{} };
-    const passes = aot_needs.promptPasses(base);
-    try testing.expectEqual(@as(i64, 4096), passes[0].?.o.prefill_rows);
-    try testing.expect(passes[0].?.o.pf4k);
-    try testing.expectEqual((block.Options{}).prefill_rows, passes[1].?.o.prefill_rows);
-    try testing.expect(!passes[1].?.o.pf4k);
-    var plain = base;
-    plain.o.pf4k = false;
-    try testing.expect(aot_needs.promptPasses(plain)[1] == null);
+/// The served PF_4K knobs (TF_DSV41_PIECE_RUNS, replay and images on), at the default 4,096-position context.
+const pf4k_env = [_][2][:0]const u8{
+    .{ "TF_DSV41_PF_4K", "1" },        .{ "TF_DSV41_PF_4K_MEMORY_OK", "1" }, .{ "TF_DSV41_PREFILL_ROWS", "4096" },
+    .{ "TF_DSV41_PREFILL", "replay" }, .{ "TF_DSV41_PIECE_RUNS", "1" },      .{ "TF_DSV41_IMAGES", "native" },
+    .{ "TF_DSV41_SLOTS", "2" },        .{ "TF_DSV41_NEEDS_POOL", "1" },      .{ "TF_DSV41_DRAFTS", "0" },
+    .{ "TF_DSV41_CONTEXT", "4096" },
+};
+
+/// main's widths: the K2 fixtures, every layer's x3gm sets, DSpark's main_proj.
+fn mainWidths(a: std.mem.Allocator, cfg: *const Config) !block.Widths {
+    var w: block.Widths = .{};
+    try check.parseDense(a, &w, @embedFile("fixtures/dense-k2.txt"));
+    try check.parseExperts(a, &w, @embedFile("fixtures/expert-k2.txt"));
+    for (0..cfg.layers) |L| try w.gm.put(a, @intCast(L), .{ (1 << 4) | (1 << 6) | (1 << 8), (1 << 4) | (1 << 10) });
+    try w.dense.put(a, "dspark.main_proj", try w.k2("L40.attn.wkv"));
+    return w;
+}
+
+/// How many of a program's variants `n` does not list.
+fn unlisted(a: std.mem.Allocator, n: *const Needs, cs: []const calls.Call) !usize {
+    var miss: usize = 0;
+    for (cs) |*c| if (c.triton) {
+        if (!n.keys.contains(try n.reduce(a, c))) miss += 1;
+    };
+    return miss;
+}
+
+test "aot-needs: TF_DSV41_PF_4K enumerates the forward's 2,048-row pass too (its staging ring, runs, images, CED decoder)" {
+    defer for (pf4k_env) |kv| {
+        _ = env.unsetenv(kv[0]);
+    };
+    for (pf4k_env) |kv| _ = env.setenv(kv[0], kv[1], 1);
+    const gpa = testing.allocator;
+    const parsed = try std.json.parseFromSlice(struct { kernels: Sigs }, gpa, @embedFile("fixtures/aot-sigs.json"), .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
+    defer parsed.deinit();
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cfg: Config = .{};
+    const w = try mainWidths(a, &cfg);
+    const sv = try aot_needs.Served.fromEnv();
+    try testing.expect(sv.o.pf4k and sv.o.prefill_rows == 4096 and sv.runs and sv.images and sv.replay);
+    var n: Needs = .{ .gpa = gpa, .sigs = &parsed.value.kernels };
+    defer n.deinit();
+    var log: std.Io.Writer.Allocating = .init(gpa);
+    defer log.deinit();
+    try aot_needs.enumerate(gpa, &n, &cfg, &w, sv, &log.writer);
+    // the staging ring of each pass: ceilPow2(rows + window - 1)
+    var rings: [2]bool = undefined;
+    for (&rings, [_][]const u8{ "\"RING\":4096,", "\"RING\":8192," }) |*got, ring| {
+        got.* = for (n.keys.keys()) |k| {
+            if (std.mem.startsWith(u8, k, "{\"fn\":\"_kv_store\"") and std.mem.indexOf(u8, k, ring) != null) break true;
+        } else false;
+    }
+    // the 2,048-row pass's own programs (not promptPasses'): a staged piece run, an image segment, CED's decoder
+    var two = sv.o;
+    two.pf4k = false;
+    two.prefill_rows = 2048;
+    var img = two;
+    img.image_keep = true;
+    var backbone: [64]u32 = undefined;
+    for (backbone[0..cfg.layers], 0..) |*l, i| l.* = @intCast(i);
+    const layers = backbone[0..cfg.layers];
+    const d0 = try ced.decoderStart(&cfg);
+    const runs = try block_prefill.emitMulti(a, &cfg, &w, two, layers[0 .. d0 + 1], &.{ .{ .slot = 0, .start = 0, .n = 17 }, .{ .slot = 1, .start = 0, .n = 1517 } }, .encoder);
+    const image = try block_prefill.emitPrefill(a, &cfg, &w, img, layers, 1517, 0, true);
+    const dec = try block_prefill.emitReplay(a, &cfg, &w, two, layers[d0..], ced.keep, 0, .decoder);
+    var miss: [3]usize = undefined;
+    for (&miss, [_][]const calls.Call{ runs, image, dec }) |*m, cs| m.* = try unlisted(a, &n, cs);
+    if (!rings[0] or !rings[1] or !std.mem.eql(usize, &miss, &.{ 0, 0, 0 })) {
+        std.debug.print("PF_4K: _kv_store RING 4096 / 8192 listed {any}; unlisted variants (run, image, decoder) {any}\n", .{ rings, miss });
+        return error.TestUnexpectedResult;
+    }
 }
