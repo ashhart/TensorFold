@@ -50,6 +50,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Qwen-VL video, LFM2, GLM5-Next and Step-5 pictures now turn each pixel's value into the vision tower's input through one shared table a channel, in `core/picture/normalize.zig`, instead of each family's own arithmetic (#1592). The tests check every value of every channel against each family's old expression, so the vision inputs are the same bits as before. Thanks to @jschmied.
 
+- Nemotron on M1-family Macs: routed experts in windows of 16 or more rows (shared rounds of concurrent streams, a 16-row prompt chunk, wide copy windows) take two members a pass at 8 rows a simdgroup, through two new instantiations of the existing kernel (#1466). Each output keeps the same summation order, so replies are the same tokens. On an M1 Max the routed-expert kernels take 4 to 5% less time at 16 rows and 14 to 20% less at 64 to 128 rows; served Nemotron 3.5 Lightning shows no regression there, and M3 Ultra and M5 Ultra, which keep their kernels, measured the same as before. Thanks to @mrv777.
+
 - [The runbook](RUNBOOK.md#prompt-prefill-share-and-budget) documents `TENSORFOLD_PREFILL_SHARE` and `TENSORFOLD_PREFILL_BUDGET`: what each accepts, its default, and how it trades a long prompt's finish against decoding streams' next rounds.
 
 - Kernel contract: Qwen4's dense activation check carries FP32 rounding through the stored BF16 SiLU before the up product, avoiding a false shape failure near a BF16 midpoint (#1547). Inference kernels are unchanged.
