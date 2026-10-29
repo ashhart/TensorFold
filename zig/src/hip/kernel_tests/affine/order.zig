@@ -25,7 +25,7 @@ fn dense(name: []const u8, rows: usize, n: usize, k: usize) Case {
     return .{ .name = name, .path = .prefill, .rows = rows, .n = n, .k = k };
 }
 
-/// The 27B's prompt projections at 2048 rows, then rows off the 128 tile and row-block counts off the band.
+/// The 27B's prompt projections at 2048 rows, then rows off the 128 tile and the band, and one row or column block.
 const shapes = [_]Case{
     dense("27b gate_up", 2048, 17408, 5120),
     dense("27b down", 2048, 5120, 17408),
@@ -39,6 +39,8 @@ const shapes = [_]Case{
     dense("edge band", 1300, 6144, 5120),
     dense("edge both", 300, 1001, 2112),
     dense("edge column", 2048, 130, 2048),
+    dense("one row block", 100, 1001, 2112),
+    dense("one column block", 300, 48, 2112),
     routed,
     .{ .name = "8-bit", .path = .prefill, .rows = 1300, .n = 4096, .k = 2048, .bits = 8 },
 };
