@@ -21,7 +21,7 @@ pub const scale: f32 = 1.0 / @sqrt(@as(f32, c.head_dim));
 /// nemotron_attention.cu's AttnSegs: each stream's caches, position, page table and first row.
 pub const AttnSegs = extern struct { kc: [max_segs]u64, vc: [max_segs]u64, meta: [max_segs]u64, pt: [max_segs]u64, ps: i64, row0: [max_segs]c_int, n: c_int };
 
-const images = .{ "sample", "tree_round", "prefill_attention", "nemotron_attention", "lfm2", "lfm3" };
+const images = .{ "sample", "tree_round", "prefill_attention", "nemotron_attention", "lfm2", "lfm3", "qmm_group", "qmm_prefill", "lane_gemv", "affine4_pack" };
 
 fn int(x: usize) c_int {
     return @intCast(x);
@@ -31,6 +31,7 @@ pub const Kernels = struct {
     mods: [images.len]cuda.Module,
     lane: cuda.qmmf.Lane,
     prompt16: cuda.nvfp4.Prompt,
+    affine: cuda.qlinear.Affine4Kernels, // MLX 4-bit projections and the head
     pack: cuda.modelopt.Packer,
     draws: cuda.sample.Draws,
     round: cuda.tree_round.Kernels,
@@ -68,6 +69,9 @@ pub const Kernels = struct {
         k.silu_mul = try m[4].function("tf_lfm2_silu_mul");
         k.conv = try m[5].function("tf_liquid_conv_7");
         k.commit = try m[5].function("tf_liquid_commit_7");
+        const sms: usize = @intCast(try ctx.attribute(.multiprocessor_count));
+        k.affine = try cuda.qlinear.Affine4Kernels.resolve(d, m[6], m[7], m[8], m[9], sms, try ctx.capability() == 121);
+        errdefer k.affine.deinit();
         k.lane = try cuda.qmmf.Lane.load(d, (try ctx.capability()) / 10);
         errdefer k.lane.unload();
         k.prompt16 = try cuda.nvfp4.Prompt.load(d);
@@ -95,12 +99,13 @@ pub const Kernels = struct {
         k.pack.unload();
         k.prompt16.unload();
         k.lane.unload();
+        k.affine.deinit();
         for (&k.mods) |*m| m.unload();
     }
 
     /// The lane for every row of a decode forward and the bf16 projections, prompt16 for an FP4 prompt chunk.
     pub fn linear(k: *const Kernels) cuda.qlinear.Linear {
-        return .{ .lane = &k.lane, .nvfp4_prompt = &k.prompt16 };
+        return .{ .lane = &k.lane, .nvfp4_prompt = &k.prompt16, .affine4 = &k.affine };
     }
 
     fn go(f: Function, s: Stream, grid: [3]usize, block: usize, smem: u32, a: *Args) !void {

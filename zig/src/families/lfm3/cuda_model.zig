@@ -49,6 +49,7 @@ pub const Scratch = struct {
     h: u64, // bf16 [R, hidden]: the residual
     x: u64, // bf16 [R, hidden]: a norm's output
     xs: u64, // fp32 [R, hidden / 64]: the decode attention merge's sums (read by nothing)
+    sums: u64, // fp32 [round_rows, intermediate / 64]: an affine projection's decode rows' 64-value sums
     r: u64, // bf16 [R, hidden]: a block's output
     wide: u64, // bf16 [R, 2 intermediate]: conv in (3 hidden), q|k|v|gate, w1|w3
     y: u64, // bf16 [R, intermediate]: conv out, the gated attention, the SwiGLU
@@ -227,15 +228,15 @@ pub const Model = struct {
         var most: usize = 0;
         const w = m.w;
         for (1..round_rows + 1) |rows| {
-            most = @max(most, k.lane.partBytes(rows, laneOf(w.head)));
+            most = @max(most, partOf(k, rows, w.head));
             for (w.layers) |l| {
-                for ([_]wts.Proj{ l.gate_up, l.down }) |p| most = @max(most, k.lane.partBytes(rows, laneOf(p)));
+                for ([_]wts.Proj{ l.gate_up, l.down }) |p| most = @max(most, partOf(k, rows, p));
                 switch (l.mixer) {
                     .conv => |cv| for ([_]wts.Proj{ cv.in, cv.out }) |p| {
-                        most = @max(most, k.lane.partBytes(rows, laneOf(p)));
+                        most = @max(most, partOf(k, rows, p));
                     },
-                    .attention => |a| for ([_]wts.Proj{ a.qkvg, a.out }) |p| {
-                        most = @max(most, k.lane.partBytes(rows, laneOf(p)));
+                    .attention => |a| for ([_]wts.Proj{ a.qkvg, a.gate orelse a.out, a.out }) |p| {
+                        most = @max(most, partOf(k, rows, p));
                     },
                 }
             }
@@ -262,6 +263,7 @@ pub const Model = struct {
             .h = try m.alloc(r * h * 2),
             .x = try m.alloc(r * h * 2),
             .xs = try m.alloc(r * (h / 64) * 4),
+            .sums = try m.alloc(round_rows * (c.intermediate / 64) * 4),
             .r = try m.alloc(r * h * 2),
             .wide = try m.alloc(r * 2 * c.intermediate * 2),
             .y = try m.alloc(r * c.intermediate * 2),
@@ -311,11 +313,11 @@ pub const Model = struct {
     }
 };
 
-/// A lane weight's view (every projection this family loads is one).
-pub fn laneOf(p: wts.Proj) cuda.qmmf.Weight {
+/// A lane weight's slice partials at `rows` (affine-4 projections take none).
+fn partOf(k: *const kern.Kernels, rows: usize, p: wts.Proj) usize {
     return switch (p) {
-        .nvfp4, .bf16, .fp8g, .fp8, .mxfp8 => |q| q,
-        else => unreachable,
+        .nvfp4, .bf16, .fp8g, .fp8, .mxfp8 => |q| k.lane.partBytes(rows, q),
+        else => 0,
     };
 }
 
