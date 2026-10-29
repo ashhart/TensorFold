@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- With `--cortheon`, the task goal that the search planner and web reads see is cut at 4,000 bytes on a character boundary. A character straddling the cut was split, so the planner's prompt was not valid UTF-8; now a character that does not fit is left out whole, as page titles and search queries already were (#1575). Without `--cortheon` nothing changes. Thanks to @ppardus.
+
 - [The Flash Next CUDA recipe](docs/recipes/flash-next-cuda.md#prompt-chunk-size) documents `TF_FLASHNEXT_CHUNK` (1 to 16,384 prompt rows a pass, default 1,536): a larger chunk takes a long prompt in fewer passes, each reading its routed experts' weights once, while a stream decoding during a pass waits up to the whole pass and the prompt scratch grows with the chunk (#1553). Thanks to @jschmied.
 
 - [The runbook](RUNBOOK.md#prompt-prefill-share-and-budget) documents `TENSORFOLD_PREFILL_SHARE` and `TENSORFOLD_PREFILL_BUDGET`: what each accepts, its default, and how it trades a long prompt's finish against decoding streams' next rounds.
