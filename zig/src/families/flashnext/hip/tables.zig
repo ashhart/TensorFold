@@ -184,6 +184,9 @@ pub const Tables = struct {
             if (spec == null)
                 spec = (try c.declared(stem, core.quant.keys.canonical)) orelse return error.UnsupportedQuantization;
             if (w.shape[0] != n or sc.dtype != .bf16 or bi.dtype != .bf16) return error.UnexpectedNgramTable;
+            // a gather reads these rows in no order: readahead per row would fetch a window for it
+            for ([_][]const u8{ "weight", "scales", "biases" }) |part|
+                try ck.adviseRandom(try std.fmt.allocPrint(a, "{s}.{s}", .{ stem, part }));
             s.* = .{ .words = w.bytes, .scales = sc.bytes, .biases = bi.bytes };
         }
         const dims = c.ple_dim / heads;

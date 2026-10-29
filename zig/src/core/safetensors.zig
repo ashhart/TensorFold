@@ -262,6 +262,17 @@ pub const File = struct {
         dropExcept(mem.ptr, mem.len, self.file.handle, keep, scratch);
     }
 
+    /// `bytes` (part of this file's mapping) marked read in no order, e.g. a table's rows; Linux only.
+    pub fn adviseRandom(self: *const File, bytes: []const u8) void {
+        if (@import("builtin").os.tag != .linux or bytes.len == 0) return;
+        // a map that fell back to a heap copy has no file pages to advise
+        if (self.map.section == null) return;
+        const page = std.heap.pageSize();
+        const lo = std.mem.alignBackward(usize, @intFromPtr(bytes.ptr), page);
+        const hi = std.mem.alignForward(usize, @intFromPtr(bytes.ptr) + bytes.len, page);
+        _ = std.os.linux.madvise(@ptrFromInt(lo), hi - lo, std.os.linux.MADV.RANDOM);
+    }
+
     pub fn get(self: *const File, name: []const u8) ?Tensor {
         const e = self.names.get(name) orelse return null;
         return .{ .dtype = e.dtype, .rank = e.rank, .shape = e.shape, .bytes = self.map.memory[self.data + e.begin .. self.data + e.end] };

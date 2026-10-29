@@ -154,6 +154,17 @@ pub const Checkpoint = struct {
         for (self.files.items) |*f| f.releaseExcept(keep, self.gpa);
     }
 
+    /// `short`'s bytes marked read in no order (safetensors.File.adviseRandom): a table's rows, not its file.
+    pub fn adviseRandom(self: *Checkpoint, short: []const u8) !void {
+        var buf: [320]u8 = undefined;
+        const name = try self.scoped(&buf, short);
+        for (self.files.items) |*f| if (f.get(name)) |t| {
+            f.adviseRandom(t.bytes);
+            return;
+        };
+        return error.MissingTensor;
+    }
+
     /// Names no `get` took (the loader refuses a checkpoint with leftovers).
     pub fn unused(self: *const Checkpoint) usize {
         var n: usize = 0;
@@ -296,6 +307,61 @@ test "has finds a name without taking it; skip marks a prefix used" {
     try ck.skip("mtp.");
     _ = try ck.get("backbone.x");
     try std.testing.expectEqual(@as(usize, 0), ck.unused());
+}
+
+/// Whether the smaps block holding `at` is marked read in no order (`rr`, MADV_RANDOM); null with no such block.
+fn randomAdviceAt(gpa: std.mem.Allocator, io: Io, at: usize) !?bool {
+    // procfs reports size 0: read the stream, not the length
+    var file = try Io.Dir.cwd().openFile(io, "/proc/self/smaps", .{});
+    defer file.close(io);
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(gpa);
+    var buf: [64 << 10]u8 = undefined;
+    while (true) {
+        const got = file.readStreaming(io, &.{&buf}) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        if (got == 0) break;
+        try text.appendSlice(gpa, buf[0..got]);
+    }
+    var lines = std.mem.splitScalar(u8, text.items, '\n');
+    var inside = false;
+    while (lines.next()) |line| {
+        if (std.mem.indexOfScalar(u8, line, '-')) |dash| {
+            const sp = std.mem.indexOfScalarPos(u8, line, dash, ' ') orelse continue;
+            const lo = std.fmt.parseInt(usize, line[0..dash], 16) catch continue;
+            const hi = std.fmt.parseInt(usize, line[dash + 1 .. sp], 16) catch continue;
+            inside = at >= lo and at < hi;
+        } else if (inside and std.mem.startsWith(u8, line, "VmFlags:")) {
+            var flags = std.mem.tokenizeAny(u8, line["VmFlags:".len..], " ");
+            while (flags.next()) |flag| if (std.mem.eql(u8, flag, "rr")) return true;
+            return false;
+        }
+    }
+    return null;
+}
+
+test "adviseRandom marks the mapping's pages as read in no order, and leaves the bytes alone" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const image = try testImage(gpa, "x", 64 << 10);
+    defer gpa.free(image);
+    for (image[image.len - (64 << 10) ..], 0..) |*b, i| b.* = @truncate(i * 7 + 1);
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = image });
+    var path: [64]u8 = undefined;
+    var ck = try Checkpoint.openModel(gpa, io, try std.fmt.bufPrint(&path, ".zig-cache/tmp/{s}", .{tmp.sub_path}));
+    defer ck.close();
+    const t = try ck.get("x");
+    const at = @intFromPtr(t.bytes.ptr);
+    // a fresh mapping: the kernel has not been told how it will be read
+    try std.testing.expectEqual(@as(?bool, false), try randomAdviceAt(gpa, io, at));
+    try ck.adviseRandom("x");
+    try std.testing.expectEqual(@as(?bool, true), try randomAdviceAt(gpa, io, at));
+    try std.testing.expectEqualSlices(u8, image[image.len - (64 << 10) ..], t.bytes);
 }
 
 test "after release the mapping stays readable: a later read faults the same bytes back in" {
