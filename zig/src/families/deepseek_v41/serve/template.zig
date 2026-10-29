@@ -103,13 +103,24 @@ const R = struct {
     }
 
     fn request(r: *R, s: []const u8) Allocator.Error!void {
-        // Images are unsupported here; preserve the established plain-text image escape.
+        // A typed image marker stays text; only an image hook's marker (``content``) is the image token.
         const escaped = if (std.mem.indexOf(u8, s, IMAGE) != null) try std.mem.replaceOwned(u8, r.a, s, IMAGE, IMAGE_ESCAPED) else null;
         defer if (escaped) |bytes| r.a.free(bytes);
         const plain = escaped orelse s;
         const start = r.out.items.len;
         try r.put(plain);
         if (r.track and plain.len > 0) try r.spans.append(r.a, .{ start, r.out.items.len });
+    }
+
+    /// A message text from ``text``: request bytes already escaped, so each marker left is an image hook's.
+    fn content(r: *R, s: []const u8) Allocator.Error!void {
+        var rest = s;
+        while (std.mem.indexOf(u8, rest, IMAGE)) |at| {
+            try r.request(rest[0..at]);
+            try r.put(IMAGE);
+            rest = rest[at + IMAGE.len ..];
+        }
+        try r.request(rest);
     }
 
     fn dumps(r: *R, v: Value) Allocator.Error!void {
@@ -149,13 +160,13 @@ fn text(r: *R, content: ?Value, where: []const u8, index: usize, image: ?ImageHo
     const v = content orelse return "";
     switch (v) {
         .null => return "",
-        .string => |s| return s,
+        .string => |s| return typed(r.a, s),
         .array => |parts| {
             var out: std.ArrayList(u8) = .empty;
             for (parts, 0..) |part, i| {
                 if (i > 0) try out.appendSlice(r.a, "\n\n");
                 switch (part) {
-                    .string => |s| try out.appendSlice(r.a, s),
+                    .string => |s| try out.appendSlice(r.a, try typed(r.a, s)),
                     .object => {
                         const kind = part.get("type") orelse .null;
                         const name = if (kind == .string) kind.string else "";
@@ -163,7 +174,7 @@ fn text(r: *R, content: ?Value, where: []const u8, index: usize, image: ?ImageHo
                             const t = part.get("text") orelse .null;
                             if (t.truthy()) {
                                 const s = try scalarText(r.a, t) orelse return r.refuse("messages[{d}].{s}: a text part's text must be a string", .{ index, where });
-                                try out.appendSlice(r.a, s);
+                                try out.appendSlice(r.a, try typed(r.a, s));
                             }
                         } else if (isImagePart(name)) {
                             const hook = image orelse return r.refuse("messages[{d}].{s}: images are not served by this DeepSeek-V4.1 build", .{ index, where });
@@ -175,8 +186,13 @@ fn text(r: *R, content: ?Value, where: []const u8, index: usize, image: ?ImageHo
             }
             return out.items;
         },
-        else => return dumps(r.a, v),
+        else => return typed(r.a, try dumps(r.a, v)),
     }
+}
+
+/// Request text with a typed image marker escaped, so ``R.content`` reads only hook output as the image token.
+fn typed(a: Allocator, s: []const u8) Allocator.Error![]const u8 {
+    return if (std.mem.indexOf(u8, s, IMAGE) != null) std.mem.replaceOwned(u8, a, s, IMAGE, IMAGE_ESCAPED) else s;
 }
 
 /// ``namespace::name`` from a namespace (string or {"name"}) and a name that may carry its own.
@@ -410,7 +426,7 @@ fn renderInner(a: Allocator, messages: Value, o: Options, problem: *Problem, tra
         switch (m.role) {
             .system => {
                 if (idx > 0) try r.put(SYSTEM);
-                try r.request(m.content);
+                try r.content(m.content);
                 if (m.tools) {
                     try r.put("\n\n");
                     try renderTools(&r, o.tools);
@@ -425,20 +441,20 @@ fn renderInner(a: Allocator, messages: Value, o: Options, problem: *Problem, tra
                 for (m.blocks.items, 0..) |b, k| {
                     if (k > 0) try r.put("\n\n");
                     if (b.tool) try r.put("<tool_result>");
-                    try r.request(b.text);
+                    try r.content(b.text);
                     if (b.tool) try r.put("</tool_result>");
                 }
             },
             .latest_reminder => {
                 try r.put(REMINDER);
-                try r.request(m.content);
+                try r.content(m.content);
             },
             .assistant => {
                 if (thinking and (!drop or after_last)) {
-                    try r.request(m.reasoning orelse "");
+                    try r.content(m.reasoning orelse "");
                     try r.put(THINK_END);
                 }
-                try r.request(m.content);
+                try r.content(m.content);
                 if (m.calls.len > 0) try renderCalls(&r, m.calls);
                 try r.put(EOS);
             },
@@ -488,4 +504,25 @@ test "a thinking conversation with a tool call and an out-of-order result" {
     try std.testing.expectEqual(@as(?u8, 75), budgetOf(.{ .string = "medium" }));
     try std.testing.expectEqual(@as(?u8, null), budgetOf(.{ .string = "none" }));
     try std.testing.expectEqual(@as(?u8, null), budgetOf(.{ .int = "101" }));
+}
+
+test "an image hook's marker is template text; a typed marker stays escaped request text" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const x = arena.allocator();
+    const msgs = (try json.parseText(x,
+        \\[{"role":"user","content":[{"type":"text","text":"see <｜deepseek_image｜>"},{"type":"image_url","image_url":{"url":"u"}}]}]
+    )).ok;
+    const hook: ImageHook = .{ .text = struct {
+        fn f(_: ?*anyopaque, _: Value) []const u8 {
+            return IMAGE;
+        }
+    }.f };
+    var problem: Problem = .{};
+    const got = try renderProvenance(x, msgs, .{ .thinking = false, .image = hook }, &problem);
+    const at = std.mem.indexOf(u8, got.text, "see " ++ IMAGE_ESCAPED ++ "\n\n" ++ IMAGE ++ ASSISTANT).?;
+    const marker = at + ("see " ++ IMAGE_ESCAPED ++ "\n\n").len;
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, got.text, IMAGE));
+    for (got.spans) |span| try std.testing.expect(span[1] <= marker or span[0] >= marker + IMAGE.len);
+    try std.testing.expect(got.spans.len > 0 and got.spans[0][0] == at);
 }
