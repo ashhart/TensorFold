@@ -14,6 +14,7 @@ const selector = @import("selector.zig");
 const backend_mod = @import("runtime_backend.zig");
 const Cache = backend_mod.Cache;
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
+pub const max_nodes = 31; // selected tree nodes, independent of the unchanged 16-row drafter block
 pub const Model = struct {
     allocator: std.mem.Allocator,
     checkpoint: core.checkpoint_metal.Checkpoint,
@@ -134,7 +135,7 @@ pub const Model = struct {
         var caches: [8][]Cache = undefined;
         var news: [8]?Fresh = @splat(null);
         for (entries, 0..) |en, k| {
-            if (en.pending >= c.vocab or en.nodes == 0 or en.nodes > 15) return error.BadDraftOptions;
+            if (en.pending >= c.vocab or en.nodes == 0 or en.nodes > max_nodes) return error.BadDraftOptions;
             if (en.context) |x| try m.swap(x);
             news[k] = m.fresh();
             const flushed: anyerror!void = if (news[k] == null) m.flush() else {};
@@ -197,7 +198,7 @@ pub const Model = struct {
         return .{ .ring = m.pending, .slot = slot, .rows = @intCast(behind), .first = m.session.context.end, .next = .{ .cache = m.session.context.cache, .begin = begin, .end = m.committed_end } };
     }
     pub fn propose(m: *Model, pending: u32, nodes: u32) !@import("selector.zig").Tree {
-        if (m.backend.failed or m.backend.frame.active or m.backend.transaction != null or pending >= m.graph.config.vocab or nodes > 15 or m.tree_block == 0 or m.tree_block > 16) return error.BadDraftOptions;
+        if (m.backend.failed or m.backend.frame.active or m.backend.transaction != null or pending >= m.graph.config.vocab or nodes > max_nodes or m.tree_block == 0 or m.tree_block > 16) return error.BadDraftOptions;
         if (m.committed_end == 0) return error.DraftContextNotReady;
         const block = @min(m.tree_block, nodes + 1);
         if (block < 2) return .{ .gpa = m.allocator, .tokens = &.{}, .parents = &.{}, .scores = &.{} };

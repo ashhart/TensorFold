@@ -313,3 +313,23 @@ test "recorded backend forwards optional prefill cancellation and its failure on
     }
     try std.testing.expectEqual(@as(usize, 1), target.prefill_count);
 }
+
+test "recorder: draft capacity keeps the inner context and optional capability" {
+    const Capacity = struct {
+        fn call(ptr: *anyopaque, _: *sm.Stream) u32 {
+            const f: *fake.Fake = @ptrCast(@alignCast(ptr));
+            return @intCast(f.probe_prompt);
+        }
+    };
+    var target: fake.Fake = .{ .gpa = gpa, .probe_prompt = 15 };
+    defer target.deinit();
+    var stream: sm.Stream = undefined;
+    for ([_]bool{ false, true }) |enabled| {
+        var table = target.backend().vtable.*;
+        table.draft_capacity = if (enabled) Capacity.call else null;
+        var recorded: rec.Recorded = .{ .inner = .{ .ptr = &target, .vtable = &table }, .recorder = undefined };
+        const backend = recorded.backend();
+        try std.testing.expectEqual(enabled, backend.vtable.draft_capacity != null);
+        if (enabled) try std.testing.expectEqual(@as(u32, 15), backend.vtable.draft_capacity.?(backend.ptr, &stream));
+    }
+}

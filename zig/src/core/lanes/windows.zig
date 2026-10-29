@@ -257,6 +257,11 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
             pr.* = if (p.kind == .head and e.cfg.draft_confidence != null) chances[0..controls.prefix(chances)] else chances;
         }
     }
+    if (e.cfg.allocate_shared_drafts) for (plans, probs) |p, chances| {
+        if (p.kind != .head or chances.len == 0) continue;
+        p.stream.draft_chances.clearRetainingCapacity();
+        try p.stream.draft_chances.appendSlice(e.gpa, chances);
+    };
     const untimed: @import("table.zig").Table = .{};
     const explicit = e.cfg.draft_confidence != null;
     const live = plans.len == 1 and lone_costs.enabled(e, plans[0]);

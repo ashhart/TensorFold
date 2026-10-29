@@ -10,6 +10,13 @@ const Metal = lb.Metal;
 const Tree = q.dflash.selector.Tree;
 const Proposal = q.dflash.runtime_model.Model.Proposal;
 
+/// Only slots that currently draft compete for rows in the next shared allocation.
+pub fn capacityFn(ptr: *anyopaque, s: *lanes.Stream) u32 {
+    const b = Metal.self(ptr);
+    const slot = b.slotOf(s) orelse return 0;
+    return if (b.draftsOwn(slot)) b.nodes else 0;
+}
+
 /// Each drafting slot proposes its next tree, up to eight in one drafter pass; a shared round's kept taps first.
 pub fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
     const b = Metal.self(ptr);
@@ -20,6 +27,10 @@ pub fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void
     for (requests) |r| {
         const slot = try b.slotFor(r.stream);
         if (!b.draftsOwn(slot)) continue;
+        if (r.depth == 0) {
+            b.dropTreeOf(slot);
+            continue;
+        }
         const g = &b.draft.?.generation;
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
