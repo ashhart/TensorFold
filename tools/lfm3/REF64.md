@@ -46,3 +46,31 @@ bf16-points misses where float64 agrees with the engine (margin = bf16 logit of 
 | items | prompt | 4 | 440 " The" | 229 " " | 0.0000 (pre-round -0.0985) | 0.0881 |
 | items | prompt | 631 | 32 "8" | 25 "1" | 0.0000 (pre-round -0.0467) | 0.0636 |
 | items | reply | 772 | 41501 " Item" | 1672 " So" | 0.0000 (pre-round -0.0814) | 0.1797 |
+
+## FP8 and MLX-4bit (2026-10-29)
+
+- Checkpoints: [LiquidAI/LFM3-1.7B-FP8](https://huggingface.co/LiquidAI/LFM3-1.7B-FP8) at
+  `243955da95b1cd68026f293b29de4b4c13f3638f` (block FP8, dequantized exactly: e4m3 times its block's bf16 scale) and
+  [LiquidAI/LFM3-1.7B-MLX-4bit](https://huggingface.co/LiquidAI/LFM3-1.7B-MLX-4bit) at
+  `d0ca73dcfa70ce18733754a492cdc1fb0123262d` (MLX affine, dequantized exactly).
+- Served the same way with `--no-drafts`; the same prompts and rows. Only the float64 pass was run: the `--bf16`
+  pass models the NVFP4 engine's rounding points.
+
+FP8: prompt rows 824/829, reply rows 128/128.
+
+| case | row | t | engine | float64 | f64 margin |
+|---|---|---|---|---|---|
+| items | prompt | 131 | 30 "6" | 1325 "24" | 0.0348 |
+| items | prompt | 582 | 654 "10" | 1035 "14" | 0.0756 |
+| items | prompt | 619 | 25 "1" | 29 "5" | 0.0066 |
+| items | prompt | 631 | 27 "3" | 32 "8" | 0.0290 |
+| items | prompt | 693 | 9402 " stone" | 17937 " stones" | 0.0773 |
+
+MLX-4bit: prompt rows 825/829, reply rows 128/128.
+
+| case | row | t | engine | float64 | f64 margin |
+|---|---|---|---|---|---|
+| items | prompt | 10 | 6802 " items" | 93266 " marbles" | 0.0466 |
+| items | prompt | 61 | 41501 " Item" | 29155 " Question" | 0.0042 |
+| items | prompt | 595 | 27 "3" | 1035 "14" | 0.0300 |
+| items | prompt | 748 | 34 ":" | 10494 " holds" | 0.0848 |
