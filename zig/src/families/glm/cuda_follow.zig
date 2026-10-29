@@ -19,7 +19,7 @@ pub const Header = extern struct {
     kind: u32,
     n: u32 = 0, // ids that follow
     depth: u32 = 0, // draft: drafts to chain; chunk: where it starts; shared: its parts
-    flags: u32 = 0, // begin: sampled; draft: from the prompt; prefill, chunk: prompt_logprobs (1); chunk: indexer rows split (2); verify, shared: whole rows
+    flags: u32 = 0, // begin: sampled; draft: from the prompt (1), chances (2); prefill, chunk: prompt_logprobs (1); chunk: indexer rows split (2); verify, shared: whole rows
     a: u64 = 0, // keep: rows; prefill, chunk: the kept state it resumes (0: none); redraw: the prompt's length
     seed: u64 = 0, // begin: the sampling seed; prefill, chunk: the kept state's position
     temperature: f64 = 0,
@@ -275,10 +275,11 @@ pub const Leader = struct {
         return x.e.redrawFirst(len, bits);
     }
 
-    pub fn draft(x: Leader, from_prompt: bool, follow_ids: []const u32, depth: usize, out: []u32) !void {
+    /// With `chances` every rank picks with its softmax sum, so rank 0 reads each draft's chance (--mtp-confidence).
+    pub fn draft(x: Leader, from_prompt: bool, follow_ids: []const u32, depth: usize, out: []u32, chances: ?[]f64) !void {
         try x.flush();
-        try x.send(.{ .kind = @backingInt(Kind.draft), .depth = @intCast(depth), .flags = @intFromBool(from_prompt) }, follow_ids);
-        try x.e.draft(from_prompt, follow_ids, depth, out);
+        try x.send(.{ .kind = @backingInt(Kind.draft), .depth = @intCast(depth), .flags = @intFromBool(from_prompt) | @as(u32, @intFromBool(chances != null)) << 1 }, follow_ids);
+        try x.e.draft(from_prompt, follow_ids, depth, out, chances);
     }
 
     /// DFlash2's round on every rank (Engine.draftBlock): each stream's slot, kept rows and anchor.
@@ -318,6 +319,7 @@ fn structuredStep(h: Header) bool {
 /// A rank other than 0 runs rank 0's steps until it ends; a cancelled prefill is error.Cancelled and the loop goes on.
 pub fn follow(e: *Engine, link: *Link) !void {
     var drafts: [engine.max_drafts]u32 = undefined;
+    var chances: [engine.max_drafts]f64 = undefined;
     var sampled: [16]u32 = undefined;
     cuda.tp_watch.sleep(e.io); // rank 0 starts with no stream: its first step wakes this rank
     while (true) {
@@ -383,7 +385,7 @@ pub fn follow(e: *Engine, link: *Link) !void {
             .draft => {
                 const ids = try e.gpa.dupe(u32, step.ids);
                 defer e.gpa.free(ids);
-                try e.draft(h.flags & 1 != 0, ids, h.depth, &drafts);
+                try e.draft(h.flags & 1 != 0, ids, h.depth, &drafts, if (h.flags & 2 != 0) &chances else null);
             },
             .block => {
                 const k = h.depth;

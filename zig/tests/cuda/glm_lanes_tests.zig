@@ -259,7 +259,7 @@ pub fn sharedCheck(gpu: Gpu, checkpoint: []const u8, dc_path: []const u8, rank: 
         }
         first[i] = t;
         var held: [glm.engine.max_drafts]u32 = undefined;
-        try x.draft(true, &.{t}, 1, &held);
+        try x.draft(true, &.{t}, 1, &held, null);
     }
     const lone = try a.alloc(u16, 4 * V);
     const mine = try a.alloc(u16, 4 * V);
@@ -296,7 +296,7 @@ pub fn sharedCheck(gpu: Gpu, checkpoint: []const u8, dc_path: []const u8, rank: 
             for ([_]u32{ @intCast(S + i), @intCast(i) }, [_]*[glm.engine.max_drafts]u32{ &d1, &d0 }) |slot, d| {
                 try x.bind(slot);
                 try x.keep(keep);
-                try x.draft(false, outs[i][0..keep], 2, d);
+                try x.draft(false, outs[i][0..keep], 2, d, null);
             }
             if (!std.mem.eql(u32, d0[0..2], d1[0..2])) {
                 std.debug.print("FAIL shared: round {d}, stream {d}: drafts {any} against its twin's {any}\n", .{ round, i, d0[0..2], d1[0..2] });

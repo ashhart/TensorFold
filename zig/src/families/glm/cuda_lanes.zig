@@ -34,7 +34,7 @@ const Lane = struct {
     slot: u32,
     pending_rows: ?usize = null,
     held: [max_held]u32 = undefined,
-    chances: [max_held]f64 = undefined, // DFlash2's: each held draft's chance from the selector
+    chances: [max_held]f64 = undefined, // each held draft's chance: DFlash2's selector's, or the MTP head's (--mtp-confidence)
     held_n: usize = 0,
     first: ?u64 = null,
     fill: ?usize = null, // a prompt pass going a chunk at a time: where its next chunk starts
@@ -44,6 +44,7 @@ pub const Lanes = struct {
     x: follow.Leader,
     whole: bool = false, // prompt passes run whole (TF_GLM_PROMPT_STEPS=0): no other stream's round between chunks
     alone: bool = false, // each window in its own forward (TF_GLM_SHARED=0)
+    mtp_confidence: ?f64 = null, // --mtp-confidence: the MTP head's chains stop where their chance falls under it
     shared: u64 = 0, // forwards that held several streams' windows (checks read it)
     lanes: std.AutoHashMapUnmanaged(*const lanes.Stream, Lane) = .empty,
     drawn: [ring]u32 = undefined,
@@ -114,7 +115,8 @@ pub const Lanes = struct {
             .drafts = if (block) max_held else engine.max_drafts,
             .draft_streams = block, // one block pass drafts every stream of the round
             .mtp_step_ms = if (block) 1.6 / @as(f64, max_held) else 0, // a block's 7 drafts in one pass (about 1.6 ms)
-            .draft_probabilities = block, // the selector's chances size each window against the costs below
+            .draft_probabilities = block or self.mtp_confidence != null, // chances size each window (DFlash2's by the costs)
+            .draft_confidence = if (block) null else self.mtp_confidence,
             .window_costs = if (block) &gb10_window_costs else &.{},
             .shared_costs = if (block) &gb10_shared_costs else &.{},
             .hidden_rows = sharing,
@@ -473,12 +475,13 @@ pub const Lanes = struct {
             if (r.position != self.x.e.pos() + 1) return error.PositionMismatch;
             if (r.lanes != null) return error.TreesNotBuilt;
             const depth = @min(r.depth, engine.max_drafts);
+            const chances: ?[]f64 = if (self.mtp_confidence != null) l.chances[0..depth] else null;
             if (r.rows) |rows| {
                 for (rows, 0..) |row, i| if (row != i) return error.TreesNotBuilt;
-                try self.x.draft(false, r.follow[0..rows.len], depth, &l.held);
+                try self.x.draft(false, r.follow[0..rows.len], depth, &l.held, chances);
             } else {
                 const first = self.value(r.first orelse return error.NoFirstToken);
-                try self.x.draft(true, &.{first}, depth, &l.held);
+                try self.x.draft(true, &.{first}, depth, &l.held, chances);
             }
             l.held_n = depth;
         }
@@ -521,10 +524,10 @@ pub const Lanes = struct {
         return std.fmt.parseFloat(f64, std.mem.span(v)) catch 0.7;
     }
 
-    /// DFlash2's chance for each held draft (the MTP head gives none: the lane core's per-depth rates stand).
+    /// Each held draft's chance, DFlash2's or the MTP head's under --mtp-confidence (else the per-depth rates stand).
     fn chancesFn(ptr: *anyopaque, s: *lanes.Stream, out: []f64) anyerror!bool {
         const self = of(ptr);
-        if (self.x.e.drafter == null) return false;
+        if (self.x.e.drafter == null and self.mtp_confidence == null) return false;
         const l = self.lanes.getPtr(s) orelse return false;
         if (l.held_n == 0) return false;
         const n = @min(out.len, l.held_n);

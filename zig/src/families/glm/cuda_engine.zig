@@ -528,7 +528,7 @@ pub const Engine = struct {
     }
 
     /// decode.draft: the MTP head absorbs the kept rows (committed first) with `follow`, then chains `depth` drafts.
-    pub fn draft(e: *Engine, from_prompt: bool, follow: []const u32, depth: usize, out: []u32) !void {
+    pub fn draft(e: *Engine, from_prompt: bool, follow: []const u32, depth: usize, out: []u32, chances: ?[]f64) !void {
         if (!e.mtp) return error.NoDraftHead;
         if (depth > max_drafts) return error.TooDeep;
         var one: [1]fw.Rank = undefined;
@@ -545,7 +545,14 @@ pub const Engine = struct {
             try e.cur.st.setMtpLen(e.stream, e.cur.st.mtp_len + part.len);
         }
         for (0..depth) |j| {
-            try e.draw(e.bm.logits, 1, e.cur.st.pos + 1 + j, 0, out[j..][0..1]);
+            if (chances != null and !e.structured and e.cur.sampling == null) {
+                const p = try e.greedyChance(e.bm.logits);
+                out[j] = p.token;
+                chances.?[j] = p.chance;
+            } else {
+                try e.draw(e.bm.logits, 1, e.cur.st.pos + 1 + j, 0, out[j..][0..1]);
+                if (chances) |c| c[j] = 1; // a sampled or structured draft keeps chance 1: its window runs whole
+            }
             if (j + 1 < depth) {
                 try f.mtp(@ptrCast(out[j..][0..1]), &.{e.bm.fnormed});
                 try e.cur.st.setMtpLen(e.stream, e.cur.st.mtp_len + 1);
@@ -569,6 +576,7 @@ pub const Engine = struct {
     pub const redrawFirst = @import("cuda_structured.zig").redrawFirst;
     /// decode.sample_rows' greedy pick: per-rank top-1 (tf_glm_top1), all-gathered, largest value then lowest id.
     const greedy = @import("cuda_engine_pick.zig").greedy;
+    const greedyChance = @import("cuda_engine_pick.zig").greedyChance;
 
     /// A failed RoCE gather's error, after a synchronize whose result read gathered rows (they hold nothing then).
     pub fn checkGathers(e: *const Engine) !void {
