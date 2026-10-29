@@ -119,3 +119,16 @@ test "aot guard: a program's key is its lookups' as `find` tells them apart, the
     try testing.expect(tk.of(32, 0x1000) != tk.of(1, 0x1000));
     try testing.expect(tk.of(32, 0x1000) != tk.of(32, 0x1008));
 }
+
+test "aot-needs: TF_DSV41_PF_4K lists the forward's own 2,048-row segments beside the 4K ones (their staging ring)" {
+    const block = @import("block.zig");
+    const base: aot_needs.Served = .{ .o = .{ .prefill_rows = 4096, .pf4k = true }, .slots = 4, .cap = 64, .drafts = false, .slot_drafts = false, .group = 1, .graphs = .{} };
+    const passes = aot_needs.promptPasses(base);
+    try testing.expectEqual(@as(i64, 4096), passes[0].?.o.prefill_rows);
+    try testing.expect(passes[0].?.o.pf4k);
+    try testing.expectEqual((block.Options{}).prefill_rows, passes[1].?.o.prefill_rows);
+    try testing.expect(!passes[1].?.o.pf4k);
+    var plain = base;
+    plain.o.pf4k = false;
+    try testing.expect(aot_needs.promptPasses(plain)[1] == null);
+}
