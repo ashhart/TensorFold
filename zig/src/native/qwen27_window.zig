@@ -12,20 +12,19 @@ pub fn rows(tensor_units: bool) u32 {
     _ = tensor_units;
     return 16;
 }
-/// Wider pre-tensor windows are explicit until their served cost is qualified.
+/// Both projection paths admit explicit wider windows with their measured costs.
 pub fn requested(tensor_units: bool, value: ?[]const u8) !u32 {
     const v = value orelse return rows(tensor_units);
     const n = std.fmt.parseInt(u32, v, 10) catch return error.BadQwenWindow;
-    if (tensor_units) return if (n == 16) 16 else error.BadQwenWindow;
     return if (n == 16 or n == 32 or n == 64) n else error.BadQwenWindow;
 }
-test "qwen27 window: both device classes keep 16 until a wider pre-tensor window is requested" {
+test "qwen27 window: both device classes retain narrow defaults and admit explicit wide windows" {
     try std.testing.expectEqual(@as(u32, 16), try requested(false, null));
     try std.testing.expectEqual(@as(u32, 32), try requested(false, "32"));
     try std.testing.expectEqual(@as(u32, 64), try requested(false, "64"));
     try std.testing.expectEqual(@as(u32, 16), try requested(true, null));
     try std.testing.expectError(error.BadQwenWindow, requested(false, "48"));
-    try std.testing.expectError(error.BadQwenWindow, requested(true, "64"));
+    try std.testing.expectEqual(@as(u32, 64), try requested(true, "64"));
     try std.testing.expect(rows(false) <= capacity and rows(true) <= capacity);
 }
 test "qwen27 window: head plus copies matches the 64-row serial layout without enlarging the masked block" {
@@ -50,12 +49,16 @@ fn flag(value: ?[]const u8, fallback: bool, comptime bad: anyerror) !bool {
     if (std.mem.eql(u8, v, "1")) return true;
     return bad;
 }
+/// Wide tensor-unit requests use lanes; explicit checked overrides select either loop.
+pub fn serial(tensor_units: bool, window: u32, value: ?[]const u8) !bool {
+    return !try flag(value, !(tensor_units and window == 16), error.BadQwenLanes);
+}
 pub fn serialPolicy(tensor_units: bool, value: ?[]const u8) !bool {
-    return !try flag(value, !tensor_units, error.BadQwenLanes);
+    return serial(tensor_units, 16, value);
 }
 pub fn problem(err: anyerror) ?[]const u8 {
     return switch (err) {
-        error.BadQwenWindow => "TF_QWEN27_WINDOW must be 16, 32 or 64 (tensor units currently require 16)",
+        error.BadQwenWindow => "TF_QWEN27_WINDOW must be 16, 32 or 64",
         error.BadQwenCopies => "TF_QWEN27_COPIES must be 0 or 1",
         error.BadQwenLanes => "TF_QWEN27_LANES must be 0 or 1",
         else => null,
@@ -75,10 +78,10 @@ test "qwen27 window: unknown switches refuse by their startup variable names" {
     try std.testing.expect(!try serialPolicy(true, "1"));
 }
 
-pub fn describe(buf: []u8, serial: bool, window: u32, drafting: bool, copies: bool) ![]const u8 {
+pub fn describe(buf: []u8, serial_loop: bool, window: u32, drafting: bool, copies: bool) ![]const u8 {
     return std.fmt.bufPrint(buf, "lone loop={s} width={d}; lane window={d}, lane copies={s}", .{
-        if (!drafting) "plain" else if (serial) "serial" else "lanes",
-        if (!drafting) @as(u32, 1) else if (serial) @as(u32, 16) else window,
+        if (!drafting) "plain" else if (serial_loop) "serial" else "lanes",
+        if (!drafting) @as(u32, 1) else if (serial_loop) @as(u32, 16) else window,
         window,
         if (copies) "on" else "off",
     });
@@ -88,4 +91,14 @@ test "qwen27 window: startup reports the effective lone width beside the lane po
     try std.testing.expectEqualStrings("lone loop=serial width=16; lane window=64, lane copies=on", try describe(&buf, true, 64, true, true));
     try std.testing.expectEqualStrings("lone loop=lanes width=32; lane window=32, lane copies=off", try describe(&buf, false, 32, true, false));
     try std.testing.expect(std.mem.startsWith(u8, try describe(&buf, false, 64, false, false), "lone loop=plain width=1;"));
+}
+
+test "qwen27 window: wide tensor lone rounds reach the checked lane policy" {
+    for ([_]u32{ 16, 32, 64 }) |width| {
+        try std.testing.expectEqual(width == 16, try serial(true, width, null));
+        try std.testing.expect(!try serial(false, width, null));
+        try std.testing.expect(!try serial(true, width, "1"));
+        try std.testing.expect(try serial(true, width, "0"));
+        try std.testing.expectError(error.BadQwenLanes, serial(true, width, "on"));
+    }
 }

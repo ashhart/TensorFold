@@ -6,7 +6,7 @@ const q = tf.qwen27;
 const Round = q.round_plan.Round;
 const Linear = q.projection.Linear;
 const Ref = q.projection.Ref;
-const help = "tf-qwen27-bench --model DIR [--ms 30] [--rounds 24] [--widths chain|tree|dflash|slots|shared]";
+const help = "tf-qwen27-bench --model DIR [--ms 30] [--rounds 24] [--widths chain|tree|dflash|costs|slots|shared]";
 
 /// Where a projection reads its rows and their group sums in the frame, as forward.zig and the mixers dispatch it.
 const Input = enum { input, activated, mixer_out };
@@ -79,7 +79,7 @@ pub fn main(init: std.process.Init) !void {
     const m = try q.model.Model.load(gpa, io, dir orelse return error.MissingModel, 128, null);
     defer m.deinit();
     if (shape) |sh| if (std.mem.eql(u8, sh, "shared")) return shared(gpa, io, m, rounds);
-    if (shape) |sh| return if (std.mem.eql(u8, sh, "slots")) slotsCheck(gpa, m) else widths(gpa, m, rounds, if (std.mem.eql(u8, sh, "tree")) .binary else if (std.mem.eql(u8, sh, "dflash")) .dflash else .chain);
+    if (shape) |sh| return if (std.mem.eql(u8, sh, "slots")) slotsCheck(gpa, m) else widths(gpa, m, rounds, if (std.mem.eql(u8, sh, "tree")) .binary else if (std.mem.eql(u8, sh, "dflash")) .dflash else .chain, std.mem.eql(u8, sh, "costs"));
     const w = m.weights;
     var gdn: ?q.gpu_weights.Gdn = null;
     var attn: ?q.gpu_weights.Attention = null;
@@ -308,7 +308,7 @@ fn sharedRound(gpa: std.mem.Allocator, io: std.Io, m: *q.model.Model, r: *q.deco
 
 /// A width sweep's window: a chain, a binary tree, or a main path with a side branch every third row.
 const Shape = enum { chain, binary, dflash };
-fn widths(gpa: std.mem.Allocator, m: *q.model.Model, rounds: usize, shape: Shape) !void {
+fn widths(gpa: std.mem.Allocator, m: *q.model.Model, rounds: usize, shape: Shape, all_widths: bool) !void {
     var r = try q.decode_round.Runner.init(gpa, m, 1, 4096);
     defer r.deinit();
     const vocab = m.config.vocab;
@@ -319,7 +319,12 @@ fn widths(gpa: std.mem.Allocator, m: *q.model.Model, rounds: usize, shape: Shape
     var pending = try s.greedy();
     var times: [64]f64 = undefined;
     const n = @min(rounds, times.len);
-    for ([_]u32{ 1, 8, 16, 17, 24, 32, 48, 64, 96, 128 }) |rows| {
+    if (n == 0) return error.NoTimingRounds;
+    const selected = [_]u32{ 1, 8, 16, 17, 24, 32, 48, 64, 96, 128 };
+    var wall: [64]f64 = undefined;
+    for (1..if (all_widths) @as(usize, 65) else 129) |row_count| {
+        const rows: u32 = @intCast(row_count);
+        if (!all_widths and std.mem.indexOfScalar(u32, &selected, rows) == null) continue;
         var ids: [128]u32 = undefined;
         var parents: [128]i32 = undefined;
         var digest: [32]u8 = undefined;
@@ -331,17 +336,26 @@ fn widths(gpa: std.mem.Allocator, m: *q.model.Model, rounds: usize, shape: Shape
                 .binary => @intCast((j - 1) / 2),
                 .dflash => @intCast(if (j % 3 == 0) j - 2 else j - 1),
             };
+            const began = mtl.clock.seconds();
             var plan = try Round.init(gpa, &.{.{ .slot = 0, .start = r.offsets[0], .capacity = r.capacity, .ids = ids[0..rows], .parents = parents[0..rows] }}, @intCast(m.config.conv_kernel), r.slots, @intCast(vocab));
             defer plan.deinit();
             try r.verifyHead(&plan, .all);
             if (round >= 2) times[round - 2] = r.last_gpu_seconds * 1e3;
+            const verified = mtl.clock.seconds();
             std.crypto.hash.sha2.Sha256.hash(std.mem.sliceAsBytes(m.frame.get(.logits).buffer.slice(u16, rows * vocab)), &digest, .{});
             pending = try q.session.argmax(m.frame.get(.logits).buffer.slice(u16, vocab));
             const root = [_]u32{0};
+            const keeping = mtl.clock.seconds();
             try r.keep(&plan, &.{&root});
+            // Exclude this diagnostic's host logit hash and scan from the verify-plus-keep price.
+            if (round >= 2) wall[round - 2] = (verified - began + mtl.clock.seconds() - keeping) * 1e3;
         }
         std.mem.sort(f64, times[0..n], {}, std.sort.asc(f64));
         std.debug.print("{s} rows {d:>3}: verify {d:.2} ms GPU (median of {d}; min {d:.2}) logits {x}\n", .{ @tagName(shape), rows, times[n / 2], n, times[0], digest[0..6] });
+        if (all_widths) {
+            std.mem.sort(f64, wall[0..n], {}, std.sort.asc(f64));
+            std.debug.print("COST rows {d} wall_ms {d:.3} gpu_ms {d:.3} rounds {d}\n", .{ rows, wall[n / 2], times[n / 2], n });
+        }
         if (std.c.getenv("QWEN27_PROFILE") == null or (rows != 16 and rows != 17 and rows != 32)) continue;
         var trace = tf.gpu_profile.Trace{ .queue = m.queue };
         r.profile(&trace);
