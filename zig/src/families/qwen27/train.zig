@@ -5,12 +5,14 @@ const living = @import("living");
 const Model = @import("model.zig").Model;
 const Config = @import("config.zig").Config;
 const Runner = @import("decode_round.zig").Runner;
-const Round = @import("round_plan.zig").Round;
+const Row = @import("train_row.zig").Row;
 const to = @import("train_ops.zig");
 const capture = @import("train_tape.zig");
 const load = @import("train_load.zig");
 const back = @import("train_back.zig");
 const more = @import("train_more.zig");
+const schedule = @import("train_schedule.zig");
+const submit = @import("train_submit.zig");
 const mode_api = living.train_mode;
 pub const Turn = living.lesson_route.Turn;
 pub const Mode = mode_api.Mode;
@@ -26,6 +28,7 @@ pub fn keepLow(layers: usize) usize {
 
 pub const Trainer = struct {
     gpa: std.mem.Allocator,
+    io: ?std.Io = null,
     m: *Model,
     g: Config,
     dir: []const u8,
@@ -75,13 +78,15 @@ pub const Trainer = struct {
     pub fn init(a: std.mem.Allocator, io: std.Io, m: *Model, dir: []const u8, follow: ?mtl.ResidencySet.Follow) !*Trainer {
         if (m.widths_tag != 0 or m.config.dk != 128 or m.config.dv != 128 or m.config.conv_kernel != 4 or m.config.head_dim != 256) return error.UnsupportedLearningShape;
         const t = try a.create(Trainer);
-        t.* = .{ .gpa = a, .m = m, .g = m.config, .dir = dir, .follow = follow, .reserved = m.learn_reserved };
+        t.* = .{ .gpa = a, .io = if (std.c.getenv("TF_Q27_LEARN_DIAG") != null) io else null, .m = m, .g = m.config, .dir = dir, .follow = follow, .reserved = m.learn_reserved };
         m.learn_reserved = 0; // The allocation replaces the reservation, under the lane host's exclusive learn phase.
         errdefer t.deinit();
         t.k = try to.Kernels.init(a, m.device);
         t.k_ready = true;
         t.runner = try Runner.init(a, m, max_seqs, max_rows + 1);
         t.runner_ready = true;
+        t.runner.learning_rows = true;
+        t.runner.learning_io = t.io;
         t.runner.setResident(follow);
         try load.weights(t, io);
         try capture.carve(t);
@@ -177,6 +182,13 @@ pub const Trainer = struct {
     pub fn pass(t: *Trainer, seqs: []const Seq, mode: Mode, _: living.lesson_route.Turn, out: []Result) !void {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
+        const began = submit.now(t.io);
+        t.runner.learning_stats = .{};
+        var forward_seconds: f64 = 0;
+        var back_encode: f64 = 0;
+        var back_wait: f64 = 0;
+        var back_gpu: f64 = 0;
+        var affine_work: to.Work = .{};
         if (seqs.len == 0 or seqs.len > max_seqs or out.len < seqs.len) return error.BadPass;
         switch (mode) {
             .keys, .loss, .target => {},
@@ -227,27 +239,40 @@ pub const Trainer = struct {
         std.debug.assert(t.m.learning == null);
         t.m.learning = .{ .ctx = t, .save = capture.save, .add = add };
         defer t.m.learning = null;
+        const forward_start = submit.now(t.io);
         for (seqs, t.spans[0..seqs.len], 0..) |sq, sp, si| for (0..sp.rows) |row| {
             t.hook_at = sp.at + row;
             t.local_row = row;
             t.slot = @intCast(si);
-            try t.forwardRow(&t.runner, @intCast(si), row, sq.ids[row..][0..1], mode != .keys);
+            try t.forwardRow(&t.runner, @intCast(si), row, sq.ids[row..][0..1], schedule.head(mode, row, sq.start));
         };
+        forward_seconds = submit.now(t.io) - forward_start;
         // Remove the hook before backward and before any caller can observe completion.
         t.m.learning = null;
         if (mode != .keys) {
+            const back_start = submit.now(t.io);
             const cb = t.m.queue.commandBuffer();
             const encoder = cb.compute(.serial);
             var ended = false;
             defer if (!ended) encoder.end();
-            const o = to.Ops{ .kernels = &t.k, .e = encoder };
-            try o.loss(t.logits, t.targets, t.weights, t.dlogits, t.stats, rows, t.g.vocab);
+            const o = to.Ops{ .kernels = &t.k, .e = encoder, .work = if (t.io != null) &affine_work else null };
+            try schedule.loss(t, o);
             if (mode == .target and low < t.g.layers) try back.run(t, o);
             encoder.end();
             ended = true;
+            back_encode = submit.now(t.io) - back_start;
+            const wait_start = submit.now(t.io);
             cb.commit();
             cb.wait();
+            back_wait = submit.now(t.io) - wait_start;
+            back_gpu = if (t.io != null) cb.gpuSeconds() else 0;
             if (@import("decode_round.zig").gpuFailed(cb, "learning backward")) return error.LearningGpuFailure;
+        }
+        if (t.io != null) {
+            const f = t.runner.learning_stats;
+            var answer_rows: usize = 0;
+            for (t.answers[0..seqs.len]) |a| answer_rows += a.rows;
+            std.log.info("slide qwen27: pass {d} {t}, {d} sequences, {d} rows, {d} answer rows: wall {d:.3} s; forward {d:.3} s (plan/upload {d:.3}, encode {d:.3}, commit/wait {d:.3}, GPU {d:.3}); backward/loss encode {d:.3}, commit/wait {d:.3}, GPU {d:.3}; row buffers/waits {d}/{d}, resets {d}, tail {d}; affine decodes {d}, FMAs {d}", .{ t.count.passes, mode, seqs.len, rows, answer_rows, submit.now(t.io) - began, forward_seconds, @max(0, forward_seconds - f.encode - f.wait), f.encode, f.wait, f.gpu, back_encode, back_wait, back_gpu, f.buffers, f.waits, seqs.len, @intFromBool(mode != .keys), affine_work.decodes, affine_work.fmas });
         }
         for (out[0..seqs.len], t.answers[0..seqs.len]) |*r, a| {
             r.* = .{ .loss = 0, .recalled = mode != .keys };
@@ -259,8 +284,9 @@ pub const Trainer = struct {
         }
     }
     pub fn forwardRow(t: *Trainer, runner: *Runner, slot: u32, at: usize, ids: []const u32, logits: bool) !void {
-        var round = try Round.init(t.gpa, &.{.{ .slot = slot, .start = @intCast(at), .capacity = runner.capacity, .ids = ids }}, @intCast(t.g.conv_kernel), runner.slots, @intCast(t.g.vocab));
-        defer round.deinit();
+        if (ids.len != 1) return error.BadLearningRows;
+        var row: Row = .{};
+        var round = try row.view(t.gpa, ids[0], slot, @intCast(at), runner.capacity, @intCast(t.g.conv_kernel), runner.slots, @intCast(t.g.vocab));
         try runner.advance(&round, if (logits) .all else .none);
     }
 };

@@ -10,7 +10,7 @@ resumed and drafted/plain checks remain required before calling this backend qua
 ## Forward and backward
 
 The trainer runs the serving runner with fresh per-sequence states, one row at a time, as the dense CUDA trainer does.
-It captures the native residuals, projections, prepared attention and DeltaNet rows, logits and recurrent checkpoints.
+It captures the native residuals, projections, prepared attention and DeltaNet rows, answer logits and recurrent checkpoints.
 A pack holds at most 1,024 rows across eight sequences, with at most 512 input rows per sequence. Long conversation
 keys use a separate, freshly admitted native cache. Target passes without a nudge still retain the residuals that the
 shared pocket checks read.
@@ -58,5 +58,36 @@ contract receipt; run the full Metal contract, its controls and the supported-ch
 The lead's real-model cells must use fresh writable copies, the unchanged CUDA lesson gate, original-folder hashes,
 held-out wordings and unrelated prompts. Check taught-folder restart with and without `--slide`, drafted/plain,
 concurrent/solo, resumed/fresh and untaught output equality. Record trainer time and peak memory separately from
-ordinary serving speed. The initial transposed-gradient implementation favors full FP32 arithmetic; whole-checkpoint
+ordinary serving speed. The transposed-gradient implementation keeps full FP32 arithmetic; whole-checkpoint
 training latency is not established by the synthetic fixture.
+
+## Lesson work and timing
+
+Each learner row uses the same native stages and barriers, in one command buffer instead of one per four layers.
+Its single-row round metadata lives on the stack. Serving retains its existing submission interval. Rows still run
+in order and wait before the next row uploads shared metadata. This preserves the decode arithmetic; it does not
+replace it with prompt matrix products. Prefix reuse is still disabled for this trainer.
+
+Only rows predicting an answer run the vocabulary projection, loss and head gradient. The other rows have zero loss
+weight and their head input gradient is explicitly zero. Earlier layers still differentiate through every prompt row,
+including attention and recurrent dependencies. Four independent affine-gradient rows share each weight decode, with
+each row's original FP32 FMA sequence in increasing output-column order. The optimizer and lesson gate are unchanged.
+
+Set `TF_Q27_LEARN_DIAG=1` before starting the server to log every trainer pass: mode, sequences, full and answer rows,
+wall time, forward planning/upload remainder, encoding, commit/wait and GPU spans, backward/loss encoding, commit/wait
+and GPU spans, submission/wait counts, resets, and affine weight-decode/FMA counts. During output fitting a target pass is a packed Adam batch;
+the server's outer "steps" counter does not count those batches. GPU spans are contained within completion waits;
+they must not be added to wall time. Planning/upload is the forward wall remainder after encoding and completion.
+The existing `slide pocket: round ...` line still reports read, fit, values, judge and check totals with rows/passes.
+
+Before measuring the full lesson, build and run the scalar replacement check on the GPU under its queue lock:
+
+```sh
+swiftc tools/zig/qwen27_learning_affine.swift -o zig-out/bin/qwen27-learning-affine
+zig-out/bin/qwen27-learning-affine .
+zig-out/bin/qwen27-learning-affine . --reorder-control
+```
+
+The last command must fail. It reverses each output-column accumulation in the production source copy. The normal
+check compares every output byte to the frozen scalar kernel, including partial row tiles, zero/nonfinite gradients, add/replace,
+five repeats, unchanged inputs and guard bytes. These device checks and full-model timing remain required.

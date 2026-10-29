@@ -51,6 +51,8 @@ pub fn tapRows(t: *train.Trainer, ids: []const u32, context: usize, rows: []cons
     if (need + (8 << 30) > free) return error.LearningMemory;
     var runner = try Runner.init(t.gpa, t.m, 1, @intCast(ids.len + 1));
     defer runner.deinit();
+    runner.learning_rows = true;
+    runner.learning_io = t.io;
     runner.setResident(t.follow);
     const old_mode = t.mode;
     const old_at = t.hook_at;

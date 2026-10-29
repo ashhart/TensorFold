@@ -62,9 +62,12 @@ pub const Kernels = struct {
     }
 };
 
+pub const Work = struct { decodes: usize = 0, fmas: usize = 0 };
+
 pub const Ops = struct {
     kernels: *const Kernels,
     e: mtl.ComputeEncoder,
+    work: ?*Work = null,
 
     pub fn go(o: Ops, name: []const u8, buffers: []const Ref, params: anytype, groups: mtl.Size, threads: usize) !void {
         const pipeline = o.kernels.pipelines.get(name) orelse return error.NoLearningKernel;
@@ -99,9 +102,13 @@ pub const Ops = struct {
     }
 
     pub fn q4Back(o: Ops, gradient: Ref, w: Q4, destination: Ref, rows: usize, add: bool) !void {
+        if (o.work) |work| {
+            work.decodes += @import("train_schedule.zig").q4Threads(rows, w.k) * w.n;
+            work.fmas += rows * w.k * w.n;
+        }
         try o.linear("tf_learn_q4_back", &.{ gradient, w.words, w.scales, w.biases, destination }, .{
             .u = .{ @intCast(rows), @intCast(w.n), @intCast(w.k), @intFromBool(add) },
-        }, rows * w.k);
+        }, @import("train_schedule.zig").q4Threads(rows, w.k));
     }
 
     pub fn rmsBack(o: Ops, x: Ref, gain: Ref, dy: Ref, residual_gradient: Ref, rows: usize, width: usize, eps: f32) !void {

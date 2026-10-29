@@ -54,7 +54,7 @@ pub fn run(a: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
         @memcpy(&baseline[row], q.train.slice(u16, m.frame.get(.logits), 96));
     }
     try t.pass(&.{seq}, .loss, turn, &results);
-    for (0..3) |row| if (!std.mem.eql(u16, &baseline[row], q.train.slice(u16, @import("tensorfold").qwen27.projection.Ref{ .buffer = t.logits.buffer, .offset = row * 96 * 2 }, 96))) return error.TrainerForwardDiffers;
+    for (seq.start - 1..3) |row| if (!std.mem.eql(u16, &baseline[row], q.train.slice(u16, @import("tensorfold").qwen27.projection.Ref{ .buffer = t.logits.buffer, .offset = row * 96 * 2 }, 96))) return error.TrainerForwardDiffers;
     const solo = results[0].loss;
     const other_ids = [_]u32{ 17, 19, 31, 37, 41 };
     const other: q.train.Seq = .{ .ids = &other_ids, .start = 3, .decide = 1 };
@@ -71,6 +71,14 @@ pub fn run(a: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
     };
     if (norm == 0) return error.MissingLearningGradient;
     const fingerprint = std.crypto.hash.sha2.Sha256.hash;
+    var solo_gradients: [3][32]u8 = undefined;
+    for (0..3) |i| fingerprint(std.mem.sliceAsBytes(t.pushAt(0, i, i)), &solo_gradients[i], .{});
+    try t.pass(&.{ nudged, other }, .target, turn, &results);
+    for (0..3) |i| {
+        var packed_hash: [32]u8 = undefined;
+        fingerprint(std.mem.sliceAsBytes(t.pushAt(0, i, i)), &packed_hash, .{});
+        if (!std.mem.eql(u8, &solo_gradients[i], &packed_hash)) return error.PackedGradientDiffers;
+    }
     var first: [32]u8 = undefined;
     fingerprint(std.mem.sliceAsBytes(t.pushAt(0, 0, 0)), &first, .{});
     for (0..4) |_| {

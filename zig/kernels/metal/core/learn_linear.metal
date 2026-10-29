@@ -9,17 +9,24 @@ kernel void tf_learn_q4_back(const device float* grad [[buffer(0)]], const devic
                              device float* dx [[buffer(4)]], constant learn_shape& p [[buffer(5)]],
                              uint i [[thread_position_in_grid]]) {
   const uint rows = p.u.x, n = p.u.y, k = p.u.z;
-  if (i >= rows * k) return;
-  const uint row = i / k, column = i % k;
-  float sum = 0.0f;
+  const uint row = (i / k) * 4, column = i % k;
+  if (row >= rows) return;
+  float s0 = 0.0f, s1 = 0.0f, s2 = 0.0f, s3 = 0.0f;
   for (uint out = 0; out < n; out++) {
     const size_t at = size_t(out) * k + column;
     const uint q = (words[at / 8] >> (4 * (column & 7))) & 15;
     const size_t group = size_t(out) * (k / 64) + column / 64;
     const float weight = float(scales[group]) * float(q) + float(biases[group]);
-    sum = fma(grad[size_t(row) * n + out], weight, sum);
+    s0 = fma(grad[size_t(row) * n + out], weight, s0);
+    if (row + 1 < rows) s1 = fma(grad[size_t(row + 1) * n + out], weight, s1);
+    if (row + 2 < rows) s2 = fma(grad[size_t(row + 2) * n + out], weight, s2);
+    if (row + 3 < rows) s3 = fma(grad[size_t(row + 3) * n + out], weight, s3);
   }
-  dx[i] = p.u.w != 0 ? dx[i] + sum : sum;
+  const size_t at = size_t(row) * k + column;
+  dx[at] = p.u.w != 0 ? dx[at] + s0 : s0;
+  if (row + 1 < rows) dx[at + k] = p.u.w != 0 ? dx[at + k] + s1 : s1;
+  if (row + 2 < rows) dx[at + 2 * k] = p.u.w != 0 ? dx[at + 2 * k] + s2 : s2;
+  if (row + 3 < rows) dx[at + 3 * k] = p.u.w != 0 ? dx[at + 3 * k] + s3 : s3;
 }
 
 // The grouped-query key/value gradients sum query heads, then query rows, in a fixed order.

@@ -67,3 +67,140 @@ test "qwen27 learning: detached disk rows retain their server owner until close"
     try std.testing.expect(owned.? == &rows);
     try std.testing.expect(@import("train_epoch.zig").takeDisk(&host) == null);
 }
+
+const schedule = @import("train_schedule.zig");
+const mode_api = @import("living").train_mode;
+
+test "qwen27 learning: only answer rows run the vocabulary forward and backward" {
+    const fake = struct {
+        g: struct { hidden: usize = 64, vocab: usize = 248320 } = .{},
+        rows: usize = 12,
+        answers: [2]mode_api.Answer = .{ .{ .first = 3, .at = 0, .rows = 2 }, .{ .first = 10, .at = 2, .rows = 2 } },
+        nseq: usize = 2,
+        dlogits: to.Ref = .{ .buffer = undefined, .offset = 0 },
+        head: to.Q4 = undefined,
+        dy: to.Ref = .{ .buffer = undefined, .offset = 0 },
+    }{};
+    const Ops = struct {
+        rows: *usize,
+        zeros: *usize,
+        pub fn q4Back(o: @This(), _: to.Ref, _: to.Q4, _: to.Ref, rows: usize, add: bool) !void {
+            try std.testing.expect(!add);
+            o.rows.* += rows;
+        }
+        pub fn zero(o: @This(), _: to.Ref, count: usize) !void {
+            o.zeros.* += count;
+        }
+    };
+    var rows: usize = 0;
+    var zeros: usize = 0;
+    try schedule.headBack(&fake, Ops{ .rows = &rows, .zeros = &zeros });
+    try std.testing.expectEqual(@as(usize, 4), rows);
+    try std.testing.expectEqual(@as(usize, 12 * 64), zeros);
+    try std.testing.expect(!schedule.head(.target, 0, 4));
+    try std.testing.expect(!schedule.head(.loss, 2, 4));
+    try std.testing.expect(schedule.head(.target, 3, 4));
+    try std.testing.expect(!schedule.head(.keys, 3, 4));
+}
+
+test "qwen27 learning: one submission per native learner row preserves the serving interval" {
+    try std.testing.expectEqual(@as(usize, 0), schedule.commitEvery(true));
+    try std.testing.expectEqual(@as(usize, 4), schedule.commitEvery(false));
+}
+
+test "qwen27 learning: four independent gradient rows share one affine weight walk" {
+    try std.testing.expectEqual(@as(usize, 2 * 64), schedule.q4Threads(7, 64));
+    try std.testing.expectEqual(@as(usize, 64), schedule.q4Threads(1, 64));
+    try std.testing.expectEqual(@as(usize, 0), schedule.q4Threads(0, 64));
+}
+
+const submit = @import("train_submit.zig");
+test "qwen27 learning: a native row commits and waits once without a device allocation" {
+    const Fake = struct {
+        buffers: usize = 0,
+        encoders: usize = 0,
+        ended: usize = 0,
+        commits: usize = 0,
+        waits: usize = 0,
+        layers: usize = 0,
+        encode_fail: bool = false,
+        gpu_fail: bool = false,
+        const Encoder = struct {
+            fake: *ThisFake,
+            pub fn end(e: @This()) void {
+                e.fake.ended += 1;
+            }
+        };
+        const ThisFake = @This();
+        pub fn commandBuffer(f: *@This()) *@This() {
+            f.buffers += 1;
+            return f;
+        }
+        pub fn compute(f: *@This(), _: enum { concurrent }) Encoder {
+            f.encoders += 1;
+            return .{ .fake = f };
+        }
+        pub fn commit(f: *@This()) void {
+            f.commits += 1;
+        }
+        pub fn wait(f: *@This()) void {
+            f.waits += 1;
+        }
+        pub fn failure(f: *@This()) ?[]const u8 {
+            return if (f.gpu_fail) "injected" else null;
+        }
+        pub fn gpuSeconds(_: *@This()) f64 {
+            return 0.25;
+        }
+        pub fn encode(f: *@This(), _: Encoder) !void {
+            for (0..64) |_| f.layers += 1;
+            if (f.encode_fail) return error.InjectedEncode;
+        }
+    };
+    var f: Fake = .{};
+    var stats: submit.Stats = .{};
+    try std.testing.expectEqual(@as(f64, 0.25), try submit.run(&f, &f, &stats, null));
+    try std.testing.expectEqual(@as(usize, 64), f.layers);
+    try std.testing.expectEqual(@as(usize, 1), f.buffers);
+    try std.testing.expectEqual(@as(usize, 1), f.ended);
+    try std.testing.expectEqual(@as(usize, 1), f.commits);
+    try std.testing.expectEqual(@as(usize, 1), f.waits);
+    try std.testing.expectEqual(@as(usize, 1), stats.buffers);
+    try std.testing.expectEqual(@as(usize, 1), stats.waits);
+    f = .{ .encode_fail = true };
+    try std.testing.expectError(error.InjectedEncode, submit.run(&f, &f, &stats, null));
+    try std.testing.expectEqual(@as(usize, 1), f.ended);
+    try std.testing.expectEqual(@as(usize, 0), f.commits);
+    try std.testing.expectEqual(@as(usize, 0), f.waits);
+    f = .{ .gpu_fail = true };
+    try std.testing.expectError(error.LearningGpuFailure, submit.run(&f, &f, &stats, null));
+    try std.testing.expectEqual(@as(usize, 1), f.ended);
+    try std.testing.expectEqual(@as(usize, 1), f.commits);
+    try std.testing.expectEqual(@as(usize, 1), f.waits);
+}
+
+test "qwen27 learning: row metadata is identical without the nine Round allocations" {
+    const Round = @import("round_plan.zig").Round;
+    const Row = @import("train_row.zig").Row;
+    for ([_]u32{ 0, 1, 127, 511 }) |at| for ([_]u32{ 0, 7 }) |slot| {
+        var old = try Round.init(std.testing.allocator, &.{.{ .slot = slot, .start = at, .capacity = 513, .ids = &.{17} }}, 4, 8, 32);
+        defer old.deinit();
+        var row: Row = .{};
+        const view = try row.view(std.testing.failing_allocator, 17, slot, at, 513, 4, 8, 32);
+        try std.testing.expectEqualSlices(u32, old.ids, view.ids);
+        try std.testing.expectEqualSlices(i32, old.feed_positions, view.feed_positions);
+        try std.testing.expectEqualSlices(u64, old.draw_positions, view.draw_positions);
+        try std.testing.expectEqualSlices(u32, old.slots, view.slots);
+        try std.testing.expectEqualSlices(u32, old.firsts, view.firsts);
+        try std.testing.expectEqual(old.windows[0].start, view.windows[0].start);
+        try std.testing.expectEqual(old.windows[0].taps, view.windows[0].taps);
+        try std.testing.expectEqualSlices(i32, old.windows[0].parents, view.windows[0].parents);
+        try std.testing.expectEqualSlices(u32, old.windows[0].depths, view.windows[0].depths);
+        try std.testing.expectEqualSlices(u32, old.windows[0].conv, view.windows[0].conv);
+    };
+    try std.testing.expectError(error.OutOfMemory, Round.init(std.testing.failing_allocator, &.{.{ .slot = 0, .start = 0, .capacity = 513, .ids = &.{17} }}, 4, 8, 32));
+    var row: Row = .{};
+    try std.testing.expectError(error.BadRoundPlan, row.view(std.testing.failing_allocator, 1, 8, 0, 513, 4, 8, 32));
+    try std.testing.expectError(error.BadRoundPlan, row.view(std.testing.failing_allocator, 1, 0, 513, 513, 4, 8, 32));
+    try std.testing.expectError(error.BadTokenId, row.view(std.testing.failing_allocator, 32, 0, 0, 513, 4, 8, 32));
+}

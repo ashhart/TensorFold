@@ -64,7 +64,7 @@ pub fn run(t: *train.Trainer, o: to.Ops) !void {
     const g = t.g;
     const R = t.rows;
     const D = g.hidden;
-    try o.q4Back(t.dlogits, t.head, t.dy, R, false);
+    try @import("train_schedule.zig").headBack(t, o);
     try o.zero(t.grad, R * D);
     try o.rmsBack(t.final_h, wts.ref(t.m.weights.norm), t.dy, t.grad, R, D, g.eps);
     var l = g.layers;

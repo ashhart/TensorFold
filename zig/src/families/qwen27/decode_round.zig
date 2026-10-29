@@ -6,7 +6,7 @@ const Frame = @import("gpu_frame.zig").Frame;
 const forward = @import("forward.zig");
 const Ref = @import("projection.zig").Ref;
 /// Layers a verify encodes before committing them, so the GPU starts while the CPU encodes the rest.
-const commit_every = 4;
+const schedule = @import("train_schedule.zig");
 const wts = @import("gpu_weights.zig");
 const attn = @import("attention.zig");
 const abi = @import("gdn_contract.zig");
@@ -48,6 +48,9 @@ pub const Runner = struct {
     failed: bool = false,
     capture_taps: bool = false,
     tail: ?forward.Tail = null,
+    learning_rows: bool = false, // the trainer uses the same row kernels with fewer submissions
+    learning_io: ?std.Io = null,
+    learning_stats: @import("train_submit.zig").Stats = .{},
     accepted_chain: bool = false,
     last_gpu_seconds: f64 = 0,
     gpu_seconds: f64 = 0, // with a trace attached: every pass's GPU-busy seconds, its spans' and share's buffers too
@@ -269,7 +272,10 @@ pub const Runner = struct {
             }
         }
         var stages = forward.Stages{ .model = r.model, .rows = @intCast(round.ids.len), .hooks = .{ .ptr = r, .gdn = gdnForward, .attention = attentionForward, .tap = if (r.capture_taps) tap else null }, .head = head, .tail = r.tail, .images = placed.images, .reduce = r.reduce, .picks = r.picks };
-        r.last_gpu_seconds = @import("core").segments.runCommitting(r.model.device, &.{r.model.queue}, r.model.config.layers, .concurrent, &stages, commit_every) catch |err| {
+        r.last_gpu_seconds = (if (schedule.commitEvery(r.learning_rows) == 0)
+            @import("train_submit.zig").run(r.model.queue, RowProgram{ .stages = &stages, .layers = r.model.config.layers }, &r.learning_stats, r.learning_io)
+        else
+            @import("core").segments.runCommitting(r.model.device, &.{r.model.queue}, r.model.config.layers, .concurrent, &stages, 4)) catch |err| {
             r.failed = true;
             return err;
         };
@@ -523,3 +529,18 @@ fn fingerprint(round: *const Round) [32]u8 {
     hash.final(&out);
     return out;
 }
+
+const RowProgram = struct {
+    stages: *forward.Stages,
+    layers: usize,
+    pub fn encode(p: @This(), e: mtl.ComputeEncoder) !void {
+        var lane: @import("core").segments.Lane = .{ .k = 0, .cb = undefined, .enc = e, .fence = undefined };
+        try p.stages.begin(&lane);
+        for (0..p.layers) |l| {
+            try p.stages.pre(&lane, l);
+            try p.stages.mixer(&lane, l);
+            try p.stages.post(&lane, l);
+        }
+        try p.stages.finish(&lane);
+    }
+};

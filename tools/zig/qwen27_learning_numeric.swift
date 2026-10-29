@@ -80,7 +80,7 @@ do {
     } } }
     let inputs=[fbuf(grad),buffer(data(words)),bbuf(scales),bbuf(biases)], out=zeros(R*K)
     try check("affine4 input gradient exact",out,expected,0,inputs) {
-        try linear("tf_learn_q4_back",inputs+[out],shape([UInt32(R),UInt32(N),UInt32(K),0]),R*K)
+        try linear("tf_learn_q4_back",inputs+[out],shape([UInt32(R),UInt32(N),UInt32(K),0]),((R+3)/4)*K)
     }
 }
 // RMS input derivative against the independent binary64 expression, including a partial vector tail.
