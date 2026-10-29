@@ -94,8 +94,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     inline for (variants, 0..) |variant, i| {
         _ = contract_files.addCopyFile(controls[i], variant[0] ++ ".spv");
     }
-    const contract_shaders = b.createModule(.{ .root_source_file = contract_files.add("vulkan_contract_shaders.zig",
-        "pub const qmm_bf16 align(4) = @embedFile(\"qmm_bf16.spv\").*;\n" ++
+    const contract_shaders = b.createModule(.{ .root_source_file = contract_files.add("vulkan_contract_shaders.zig", "pub const qmm_bf16 align(4) = @embedFile(\"qmm_bf16.spv\").*;\n" ++
         "pub const qmm_fmax align(4) = @embedFile(\"qmm_fmax.spv\").*;\n" ++
         "pub const atomic_sum align(4) = @embedFile(\"atomic_sum.spv\").*;\n" ++
         "pub const scribble_sum align(4) = @embedFile(\"scribble_sum.spv\").*;\n" ++
