@@ -13,17 +13,14 @@ pub fn layer(buf: []u8, i: usize) ![]const u8 {
     return std.fmt.bufPrint(buf, "language_model.model.layers.{d}", .{i});
 }
 
-/// The MTP head's tensors (one decoder layer, `layer0`).
+/// The MTP head's tensors (one decoder layer, `layer0`) as suffixes under the root `index.mtpRoot` names.
 pub const mtp = struct {
-    pub const stem = "language_model.mtp";
-    pub const layer0 = "language_model.mtp.layers.0";
-    pub const fc_e = "fc_embedding";
-    pub const fc_h = "fc_hidden";
-    pub const fc_embedding = stem ++ "." ++ fc_e;
-    pub const fc_hidden = stem ++ "." ++ fc_h;
-    pub const norm_embedding = "language_model.mtp.pre_fc_norm_embedding.weight";
-    pub const norm_hidden = "language_model.mtp.pre_fc_norm_hidden.weight";
-    pub const mixer = "language_model.mtp.hyper_connection_mixer";
+    pub const layer0 = "layers.0";
+    pub const fc_embedding = "fc_embedding";
+    pub const fc_hidden = "fc_hidden";
+    pub const norm_embedding = "pre_fc_norm_embedding.weight";
+    pub const norm_hidden = "pre_fc_norm_hidden.weight";
+    pub const mixer = "hyper_connection_mixer";
 };
 
 /// A hyper-connection under a layer's stem (`attn` or `mlp`) or the mixers: its norm and projections.
