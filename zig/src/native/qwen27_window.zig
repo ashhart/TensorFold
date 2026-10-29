@@ -4,9 +4,8 @@ pub const capacity = 64;
 pub fn nodes(window: u32, copies: bool) u32 {
     return @min(window -| 1, if (copies) @as(u32, 15) else 31);
 }
-pub fn copyPolicy(tensor_units: bool, value: ?[]const u8) !bool {
-    _ = tensor_units;
-    return flag(value, false, error.BadQwenCopies);
+pub fn copyPolicy(tensor_units: bool, window: u32, value: ?[]const u8) !bool {
+    return flag(value, tensor_units and window > 16, error.BadQwenCopies);
 }
 pub fn rows(tensor_units: bool) u32 {
     _ = tensor_units;
@@ -37,10 +36,10 @@ test "qwen27 window: head plus copies matches the 64-row serial layout without e
 }
 
 test "qwen27 window: copies remain off until explicitly requested" {
-    try std.testing.expect(!try copyPolicy(false, null));
-    try std.testing.expect(!try copyPolicy(true, null));
-    try std.testing.expect(!try copyPolicy(false, "0"));
-    try std.testing.expect(try copyPolicy(true, "1"));
+    try std.testing.expect(!try copyPolicy(false, 16, null));
+    try std.testing.expect(!try copyPolicy(true, 16, null));
+    try std.testing.expect(!try copyPolicy(false, 16, "0"));
+    try std.testing.expect(try copyPolicy(true, 16, "1"));
 }
 
 fn flag(value: ?[]const u8, fallback: bool, comptime bad: anyerror) !bool {
@@ -66,7 +65,7 @@ pub fn problem(err: anyerror) ?[]const u8 {
 }
 test "qwen27 window: unknown switches refuse by their startup variable names" {
     for ([_][]const u8{ "true", "on", "yes", "", "2" }) |v| {
-        try std.testing.expectError(error.BadQwenCopies, copyPolicy(false, v));
+        try std.testing.expectError(error.BadQwenCopies, copyPolicy(false, 16, v));
         try std.testing.expectError(error.BadQwenLanes, serialPolicy(false, v));
     }
     try std.testing.expectEqualStrings("TF_QWEN27_COPIES must be 0 or 1", problem(error.BadQwenCopies).?);
@@ -101,4 +100,17 @@ test "qwen27 window: wide tensor lone rounds reach the checked lane policy" {
         try std.testing.expect(try serial(true, width, "0"));
         try std.testing.expectError(error.BadQwenLanes, serial(true, width, "on"));
     }
+}
+
+test "qwen27 window: preserve each device class's qualified default and checked copy overrides" {
+    for ([_]bool{ false, true }) |units| for ([_]u32{ 16, 32, 64 }) |width| {
+        try std.testing.expectEqual(units and width > 16, try copyPolicy(units, width, null));
+        try std.testing.expect(!try copyPolicy(units, width, "0"));
+        try std.testing.expect(try copyPolicy(units, width, "1"));
+        try std.testing.expectError(error.BadQwenCopies, copyPolicy(units, width, "on"));
+    };
+    try std.testing.expectEqual(@as(u32, 16), try requested(false, null));
+    try std.testing.expectEqual(@as(u32, 16), try requested(true, null));
+    try std.testing.expect(!try copyPolicy(false, try requested(false, null), null));
+    try std.testing.expect(!try copyPolicy(true, try requested(true, null), null));
 }

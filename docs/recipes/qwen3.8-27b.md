@@ -14,8 +14,10 @@ tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --drafter z-lab/Qwen3.8-27B-DFl
 ```
 
 A lone Metal DFlash2 stream can verify 16, 32 or 64 rows (`TF_QWEN27_WINDOW`), on tensor units and earlier chips.
-The default is 64. Startup prices every row count through the selected width, in a width-tagged cache.
-Context copies share the window with a 15-node tree by default; `TF_QWEN27_COPIES=0` instead admits up to 31 tree nodes.
+Both device classes retain the 16-row default. Startup prices every row count through
+the selected width, in a width-tagged cache.
+Wide windows enable context copies beside a 15-node tree by default; `TF_QWEN27_COPIES=0` instead admits up to
+31 tree nodes. The narrow tensor-unit default keeps copies off.
 The masked drafter block is unchanged. Wide lone streams use the lane loop; `TF_QWEN27_LANES=1` also selects it at 16 rows.
 `tf-qwen27-bench --model DIR --widths costs` measures rows 1 through 64, with GPU and wall time including keep.
 The wall price excludes the diagnostic's host logit hash and scan.
