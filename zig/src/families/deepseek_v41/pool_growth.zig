@@ -20,6 +20,8 @@ pub fn reserve(agree: ?lockstep.Agree, needs: []const Need) !void {
         origin[i] = n.slot.origin;
         for (needs[0..i]) |prior| if (prior.slot == n.slot) return error.Slots;
     }
+    // No new page: ensure cannot refuse on any rank, so skip the vote; the lockstep lengths make this rank-symmetric.
+    if (!grows(needs)) return;
     var ok = true;
     for (needs) |n| {
         // Unadmitted callers may grow only into pages that no live request reserved.
@@ -46,4 +48,10 @@ pub fn reserve(agree: ?lockstep.Agree, needs: []const Need) !void {
         n.slot.reserve(null);
         n.slot.over = over[i];
     };
+}
+
+/// Some need maps a page past its slot's mapped length (Slot.ensure's own test), the only case a rank can refuse.
+pub fn grows(needs: []const Need) bool {
+    for (needs) |n| if (sessions.pool.pagesFor(n.end, n.slot.pool.page) > n.slot.len) return true;
+    return false;
 }
