@@ -31,6 +31,8 @@ pub const Cache = struct {
     root: []u8,
     write: bool,
     verify: bool,
+    /// The pack's content identity the key holds, for the other owners that need it (``packDigest`` reads every byte)
+    pack_digest: [32]u8,
     stats: Stats = .{},
 
     /// The cache TF_DSV41_PREPARED names, or null when unset.
@@ -60,7 +62,7 @@ pub const Cache = struct {
         const root = try std.fmt.allocPrint(gpa, "{s}/{s}/rank{d}", .{ dir, &hex, key.rank });
         errdefer gpa.free(root);
         if (write) try Io.Dir.cwd().createDirPath(io, root);
-        return .{ .gpa = gpa, .io = io, .root = root, .write = write, .verify = verify };
+        return .{ .gpa = gpa, .io = io, .root = root, .write = write, .verify = verify, .pack_digest = pack_digest };
     }
 
     pub fn deinit(c: *Cache) void {
@@ -149,6 +151,12 @@ pub fn packDigest(io: Io, p: *const pack_mod.Pack) ![32]u8 {
     var digest: [32]u8 = undefined;
     h.final(&digest);
     return digest;
+}
+
+/// The pack's content digest: an open cache's, else read here (``packDigest`` reads every byte).
+pub fn packIdentity(io: Io, p: *const pack_mod.Pack, cache: ?*const Cache) ![32]u8 {
+    if (cache) |c| return c.pack_digest;
+    return packDigest(io, p);
 }
 
 const Entry = extern struct {
@@ -431,4 +439,23 @@ test "prepared metadata corruption is a clean miss with no partial publication" 
             try std.testing.expectEqual(@as(usize, 0), back.out.items.len);
         }
     }
+}
+
+test "Pack identity: a boot with the prepared cache reads the pack's bytes once, not again for sessions" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(root);
+    var pack = pack_mod.Pack.init(a);
+    defer pack.deinit();
+    pack.dir = "/nonexistent-dsv41-pack";
+    try pack.files.append(pack.arena.allocator(), "absent.safetensors");
+    const key: Key = .{ .rank = 0, .world = 1, .o_groups = 1, .blocks = &.{}, .dspark = false };
+    var cache = try Cache.open(a, io, root, @splat(7), key, false, false);
+    defer cache.deinit();
+    const want: [32]u8 = @splat(7);
+    try std.testing.expectEqualSlices(u8, &want, &try packIdentity(io, &pack, &cache));
+    try std.testing.expectError(error.FileNotFound, packIdentity(io, &pack, null));
 }
