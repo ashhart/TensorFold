@@ -77,6 +77,11 @@ pub const Draft = struct {
     rows_cap: usize,
     /// The prompt's last row of streams in `streams`, which the first draft reads with the first token.
     prompt_last: u64 = 0,
+    /// Rounds the head has not absorbed: their rows sit in `streams` past the widest window, their next tokens here.
+    stashed: usize = 0,
+    /// `streams` holds the last window's rows (false after a plain round that left them out; the head cannot draft)
+    fresh: bool = true,
+    stash_next: [stash_rows]u32 = undefined,
     /// The head's last output row (its streams after the MoE write-back): the next chained draft's input.
     out: cuda.DeviceBuffer,
     /// A window's scores [max_rows, vocab], the draft head's [ids], best values [max_rows, 4].
@@ -101,6 +106,14 @@ pub const Draft = struct {
     verify_host: ?cuda.HostBuffer = null,
     verify_pending: ?cuda.Stream = null,
     verify_cache: @import("cuda_mtp_verify_cache.zig").Cache = .{},
+
+    /// Rounds the head defers at most; they need `streams` rows past a window's.
+    pub const stash_rows: usize = 32;
+
+    /// Whether `streams` has room for the deferred rows.
+    pub fn canStash(d: *const Draft) bool {
+        return d.rows_cap >= max_rows + stash_rows;
+    }
 
     const hist_at: usize = 0;
     const proj_at: usize = hist_at + linear_n * conv_bytes;
@@ -249,5 +262,7 @@ pub const Draft = struct {
         d.len = 0;
         d.drafted = 0;
         d.rows = 0;
+        d.stashed = 0;
+        d.fresh = true;
     }
 };

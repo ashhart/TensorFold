@@ -10,6 +10,7 @@ pub const Constants = struct {
     depth_probe_every: u64 = 8, // rounds between probes one depth deeper
     cost_rate: f64 = 0.2, // weight of the newest round in a depth's measured time
     plain_margin: f64 = 1.05, // a drafted depth must beat plain rounds' tokens a ms by this much
+    rate: @import("rate_guard.zig").Constants = .{},
     plain_wait_most: u64 = 128, // plain rounds between probes at most
     draft_slack: i64 = 2, // drafts a stream offers past what its last shared round granted it
     grant_slack: i64 = 1, // granted depths: drafts past a grant that verified every draft the stream held
@@ -21,12 +22,15 @@ pub const Constants = struct {
 pub const HoldCost = @import("hold_price.zig").HoldCost;
 const holdMs = @import("hold_price.zig").holdMs;
 
+pub const min_samples = @import("rate_guard.zig").min_samples;
+
 /// A stream's acceptance by depth and probe counters (Python `_depth_state[stream]`).
 pub const State = struct {
     p: []f64,
     rounds: u64 = 0,
     plain: ?u64 = null,
     wait: ?u64 = null,
+    rate: @import("rate_guard.zig").State = .{},
     ms: ?Table = null, // plain_guard: the stream's own round times
 
     pub fn deinit(st: *State, gpa: Allocator) void {
@@ -67,6 +71,7 @@ pub const Rule = struct {
     mtp_step_ms: f64,
     draft_step_ms: f64 = 0, // a shared round's draft past a stream's first (budgets price it)
     plain_guard: bool,
+    rate_guard: bool = false, // plain rounds compete with drafted ones on the stream's measured tokens a ms (preferPlain); needs plain_guard
     node_probabilities: bool,
     granted_depth: bool = false, // node_probabilities: a stream drafts its last grant plus draft_slack, lone ones too
     confidence_floor: ?f64 = null,
@@ -108,6 +113,11 @@ pub const Rule = struct {
             p[at] += r.k.depth_rate * (hit - p[at]);
         }
     }
+
+    pub const observeRate = @import("rate_guard.zig").observeRate;
+    pub const rowsWanted = @import("rate_guard.zig").rowsWanted;
+    const preferPlain = @import("rate_guard.zig").preferPlain;
+    const allPlain = @import("rate_guard.zig").allPlain;
 
     /// Round times by depth: the stream's own under `plain_guard`, else greedy rounds' for a greedy stream.
     fn costs(r: *Rule, who: ?Who) !*Table {
@@ -196,14 +206,11 @@ pub const Rule = struct {
     }
 
     /// One draft after `wait` plain rounds in a row; each probe doubles the wait until drafting wins again.
-    fn probePlain(r: *Rule, st: *State) bool {
-        st.plain = (st.plain orelse 0) + 1;
-        const wait = st.wait orelse r.k.depth_probe_every;
-        if (st.plain.? < wait) return false;
-        st.plain = 0;
-        st.wait = @min(2 * wait, r.k.plain_wait_most);
-        return true;
+    pub fn probePlain(r: *Rule, st: *State) bool {
+        return r.probeCount(&st.plain, &st.wait);
     }
+
+    const probeCount = @import("rate_guard.zig").probeCount;
 
     /// Drafts past a grant: none when it stopped short of the held drafts (the width did not bind), else grant_slack.
     fn slack(r: *const Rule, who: Who) i64 {
@@ -215,16 +222,16 @@ pub const Rule = struct {
         const most = @min(@as(i64, r.most_drafts), @max(1, who.draft_room - 1));
         const granted = who.granted orelse return most;
         _ = try r.rates(who);
-        const st = &who.state.*.?;
-        if (granted == 0) return if (!r.plain_guard or r.probePlain(st)) @min(most, r.k.draft_slack) else 0;
-        st.plain = 0;
-        st.wait = r.k.depth_probe_every;
+        if (granted == 0) return if (@import("rate_guard.zig").grantAllows(r, who, granted)) @min(most, r.k.draft_slack) else 0;
+        _ = @import("rate_guard.zig").grantAllows(r, who, granted);
         return @min(most, @as(i64, granted) + r.slack(who));
     }
 
     /// Python `_head_depth`: the next round's head drafts for a stream (0 when forced, 1 or none with a copy ahead).
     pub fn headDepth(r: *Rule, who: *const Who, budget: ?i64, probe: Probe) !i64 {
-        const d: i64 = if (who.finished) 0 else if (budget) |b| b else if (r.granted_depth)
+        const d: i64 = if (who.finished) 0 else if (budget) |b| b else if (r.rate_guard and r.node_probabilities and try r.preferPlain(who.*))
+            0
+        else if (r.granted_depth)
             try r.grantDepth(who.*)
         else if (r.node_probabilities and !(who.sampled and r.confidence_floor != null))
             @min(@as(i64, r.most_drafts), @max(1, who.draft_room - 1))
@@ -311,8 +318,10 @@ pub const Rule = struct {
             return;
         }
         if (r.node_probabilities) {
+            // rate_guard: plain only when every stream's rates say so (it would wait the drafting rows), else all draft
+            const plain = r.rate_guard and try r.allPlain(whos);
             for (whos, out) |*w, *o| {
-                const inner = try r.headDepth(w, null, probe);
+                const inner = if (!r.rate_guard) try r.headDepth(w, null, probe) else if (plain) try r.headDepth(w, 0, probe) else if (r.granted_depth) try r.headDepth(w, try r.grantDepth(w.*), probe) else try r.headDepth(w, @min(@as(i64, r.most_drafts), @max(1, w.draft_room - 1)), probe);
                 const granted: i64 = if (w.granted) |g| g else r.most_drafts;
                 o.* = if (r.granted_depth) inner else try r.headDepth(w, @min(inner, granted + r.k.draft_slack), probe);
             }

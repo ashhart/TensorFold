@@ -90,13 +90,15 @@ pub fn Ops(comptime Tri: type) type {
             return o.e.forward(Tri, o.tri, seq, ids, hooks);
         }
 
-        fn stream(o: Self) cuda.Stream {
+        pub fn stream(o: Self) cuda.Stream {
             return o.e.stream.*;
         }
 
         /// Prompt rows [at, stop): the pass with its streams kept, then the head over each row with a known next token.
         pub fn prefillChunk(o: Self, seq: *prompt.Seq, d: *Draft, ids: []const u32, at: usize, stop: usize) !void {
             d.verify_cache.invalidate();
+            if (at == 0) d.stashed = 0;
+            if (at == 0) d.fresh = true;
             if (stop > d.cap or stop <= at or stop - at > d.rows_cap) return error.PromptTooLong;
             if (seq.fed != at or d.len != at or d.drafted != 0) return error.PositionMismatch;
             d.media = if (seq.media) |*m| m.view() else null;
@@ -201,6 +203,15 @@ pub fn Ops(comptime Tri: type) type {
             try o.forwardHead(d, next, rows, scores);
         }
 
+        /// A round the head skips: its rows kept for a later pass; false when full (cuda_mtp_stash.zig).
+        pub fn stash(o: Self, d: *Draft, next: []const u32, rows: u64) !bool {
+            return @import("cuda_mtp_stash.zig").stash(o, d, next, rows);
+        }
+
+        pub fn flushStash(o: Self, d: *Draft) !void {
+            return @import("cuda_mtp_stash.zig").flush(o, d);
+        }
+
         /// The draft at `position` and its temperature-1 probability (Python Engine.sample_draft).
         pub fn pick(o: Self, d: *Draft, position: u64, sm: ?Sampling) !Pick {
             d.verify_cache.invalidate();
@@ -224,6 +235,7 @@ pub fn Ops(comptime Tri: type) type {
         /// Python decode.draft: absorb the kept rows, then chain up to `count` drafts, the first always kept.
         pub fn draft(o: Self, d: *Draft, next: []const u32, rows: u64, position: u64, count: usize, sm: ?Sampling, confidence: f64, out: *Chain) !void {
             d.verify_cache.invalidate();
+            try o.flushStash(d);
             if (try @import("exl3/model/cuda_exl3_chain.zig").draft(Tri, o, d, next, rows, position, count, sm, confidence, out)) return; // graphs: the greedy chain as one graph
             out.n = 0;
             try o.absorb(d, next, rows, count > 0);
@@ -356,6 +368,7 @@ pub fn Ops(comptime Tri: type) type {
 
         /// draft over several drafts, greedy or sampled: kept rows in one pass, then one a step, each as it would alone
         pub fn draftMany(o: Self, ds: []const *Draft, nexts: []const []const u32, rows: []const u64, counts: []const usize, positions: []const u64, sms: []const ?Sampling, confidence: f64, outs: []const *Chain) !void {
+            for (ds) |d| try o.flushStash(d);
             const h = o.h;
             const n_l = ds.len;
             for (ds, outs) |d, out| {

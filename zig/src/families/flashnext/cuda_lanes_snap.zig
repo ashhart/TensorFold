@@ -17,6 +17,7 @@ pub fn Copies(comptime of: anytype) type {
             const s: *lanes.Stream = @ptrCast(@alignCast(owner orelse return error.NoStream));
             const l = try self.lane(s);
             if (l.seq.fed != at) return error.NotAtMark;
+            if (l.draft) |*d| try self.ops().flushStash(d); // the head's deferred rounds are part of its rows
             if (self.ranks) |r| {
                 if (l.draft != null and !self.exl3) return error.TensorRankDraftSnapshotUnavailable;
                 return try r.save(&l.seq, if (l.draft) |*d| d else null); // an EXL3 pack's state carries the head's rows on rank 0
