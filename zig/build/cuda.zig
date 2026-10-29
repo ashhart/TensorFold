@@ -446,7 +446,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     @import("glm_family_host.zig").steps(b, cuda, glm, mods, step);
     @import("kolibri.zig").host(b, kolibri1Module(b, host, .debug, cuda, mods.core, mods.lanes), native_modules.api, step);
     @import("gemma4_cuda.zig").host(b, @import("gemma4_cuda.zig").module(b, host, .debug, cuda, mods.core, mods.lanes), step);
-    @import("spark25.zig").host(b, @import("spark25.zig").module(b, host, .debug, cuda, mods.core, mods.lanes), step);
+    inline for (.{ @import("spark25.zig"), @import("lfm2_moe_cuda.zig"), @import("lfm3_cuda.zig"), @import("liquid_cuda.zig") }) |m| m.host(b, m.module(b, host, .debug, cuda, mods.core, mods.lanes), step);
     @import("glm_contracts.zig").tests(b, glm, mods.lanes, cuda, mods.core);
     // the shares a GLM-5.3-Flash rank takes (cluster/canon.zig against the Python family's)
     const shares = b.createModule(.{ .root_source_file = b.path("zig/src/cluster/canon_glm_test.zig"), .target = host, .optimize = .debug });
