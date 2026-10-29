@@ -186,7 +186,7 @@ test "every media limit is part of the ranks' agreement" {
 test "every scheduling and identity field that differs stops the ranks" {
     const zero = Fingerprint.of(2, 0, .{}, 8192, true, @splat(0), @splat(0), hashBytes("/same"));
     const one = Fingerprint.of(2, 1, .{}, 8192, true, @splat(0), @splat(0), hashBytes("/same"));
-    inline for (.{ "layout", "world", "rank", "pages", "split", "kda_wide", "pieces", "layers", "mtp", "vision", "video_tokens", "max_images", "max_videos", "max_frames", "capacity", "heat_high", "heat_low" }) |name| {
+    inline for (.{ "layout", "world", "rank", "pages", "split", "kda_wide", "kda_pad", "pieces", "layers", "mtp", "vision", "video_tokens", "max_images", "max_videos", "max_frames", "capacity", "heat_high", "heat_low" }) |name| {
         var all = [_]Fingerprint{ zero, one };
         @field(all[1], name) += 1;
         try std.testing.expectEqual(@field(Fingerprint.Field, name), mismatch(&all).?.field);
@@ -206,6 +206,35 @@ test "ranks with different TF_GLM_MM choices disagree" {
     const h: [32]u8 = @splat(0);
     const all = [_]Fingerprint{ Fingerprint.of(2, 0, .{}, 8192, true, h, h, hashBytes("/model")), Fingerprint.of(2, 1, .{ .tiled = false }, 8192, true, h, h, hashBytes("/model")) };
     try std.testing.expect(mismatch(&all) != null);
+}
+
+test "TF_GLM_KDA_PAD: 0 by default, 1 or 0, refused otherwise and without glm_mm, and all ranks must agree" {
+    const Reader = struct {
+        fn on(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_KDA_PAD")) "1" else null;
+        }
+        fn off(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_KDA_PAD")) "0" else null;
+        }
+        fn yes(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_KDA_PAD")) "yes" else null;
+        }
+        fn untiled(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_KDA_PAD")) "1" else if (std.mem.eql(u8, key, "TF_GLM_MM")) "0" else null;
+        }
+    };
+    var problem: []const u8 = "";
+    try std.testing.expect(!(try Settings.read(&fake, &problem)).kda_pad);
+    try std.testing.expect(!(try Settings.read(Reader.off, &problem)).kda_pad);
+    const padded = try Settings.read(Reader.on, &problem);
+    try std.testing.expect(padded.kda_pad);
+    try std.testing.expectError(error.BadSetting, Settings.read(Reader.yes, &problem));
+    try std.testing.expectEqualStrings("TF_GLM_KDA_PAD: 0 or 1", problem);
+    try std.testing.expectError(error.BadSetting, Settings.read(Reader.untiled, &problem));
+    try std.testing.expectEqualStrings("TF_GLM_KDA_PAD=1 requires TF_GLM_MM=1 (glm_mm is what reads the padded rows)", problem);
+    const h: [32]u8 = @splat(0);
+    const all = [_]Fingerprint{ Fingerprint.of(2, 0, .{}, 8192, true, h, h, h), Fingerprint.of(2, 1, padded, 8192, true, h, h, h) };
+    try std.testing.expectEqual(@as(?Mismatch, .{ .field = .kda_pad, .rank = 1 }), mismatch(&all));
 }
 fn digestFixture(io: std.Io, dir: std.Io.Dir, sub: []const u8, byte: u8) !void {
     try dir.createDirPath(io, sub);
