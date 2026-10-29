@@ -31,17 +31,17 @@ pub fn queued(r: *Rows, e: *pc.Entry, starts: []const u32) void {
     sync.queued(r, e, starts);
 }
 
-/// Staged work owns no entry pointer; eviction only removes an entry still waiting to be staged.
+/// Eviction removes only a save still queued (staged work owns no entry); one that waited for room counts as skipped.
 pub fn dropped(r: *Rows, e: *pc.Entry) void {
-    if (r.waiting == e) forget(r, e);
+    if (r.waiting == e) r.waiting = null;
+    for (r.queue.items) |q| if (q.entry == e) {
+        if (q.waited and !r.stopped) {
+            r.next_job +%= 1; // the id a save staged now would take, so no job in flight shares it
+            skip(r, chain.state(r.keying, e.tokens, e.decode_spans, q.starts, e.at), e.at, error.StagingFull);
+        }
+        break;
+    };
     sync.dropped(r, e);
-}
-
-/// A save that waited for room loses its entry before any appeared: no mark names it now, and it counts as skipped.
-fn forget(r: *Rows, e: *pc.Entry) void {
-    r.waiting = null;
-    if (r.stopped) return;
-    for (r.queue.items) |q| if (q.entry == e) skip(r, chain.state(r.keying, e.tokens, e.decode_spans, q.starts, e.at), e.at, error.StagingFull);
 }
 
 pub fn pending(r: *const Rows) bool {
@@ -239,7 +239,7 @@ fn stage(r: *Rows, q: Queued, may_wait: bool) bool {
         if (err == error.StagingBusy) {
             queued_again = true;
             r.waiting = q.entry;
-            r.queue.appendAssumeCapacity(q);
+            r.queue.appendAssumeCapacity(.{ .entry = q.entry, .starts = q.starts, .waited = true });
             return false;
         }
         skip(r, j.name, at, err);

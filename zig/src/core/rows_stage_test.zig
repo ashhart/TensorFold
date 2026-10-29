@@ -239,3 +239,70 @@ test "rows stage: a save that waited for room and lost its entry is counted as s
     try x.settle();
     try t.expectEqual(@as(usize, 1), x.r.states.items.len);
 }
+
+test "rows stage: losing the older of two waiting saves counts it as skipped" {
+    const x = try Fixture.open("stage-two-waiters", .off, false, 1 << 20);
+    defer x.close();
+    var hold: Hold = .{};
+    defer hold.release.store(true, .release);
+    x.r.file_io = hold.io();
+    const first = fixture.prompt(41);
+    try x.keep(&first, 600);
+    try Hold.wait(&hold.entered);
+    x.r.worker.?.limit = x.r.worker.?.bytes();
+    const second = fixture.prompt(42);
+    try x.keep(&second, 600);
+    const older = x.r.waiting.?;
+    const third = fixture.prompt(43);
+    try x.keep(&third, 600);
+    try t.expectEqual(@as(usize, 2), x.r.queue.items.len);
+    const newer = x.r.waiting.?;
+    try t.expect(newer != older);
+    for (x.s.entries.items, 0..) |e, i| if (e == older) {
+        x.s.remove(i);
+        break;
+    };
+    try t.expectEqual(@as(usize, 1), x.r.queue.items.len);
+    try t.expectEqual(@as(u64, 1), x.r.counts.skipped);
+    try t.expectEqual(error.StagingFull, x.r.failures.records[0].?.err);
+    try t.expect(x.r.waiting == newer);
+    try t.expect(x.r.queue.items[0].entry == newer and x.r.queue.items[0].waited);
+    hold.release.store(true, .release);
+    try x.idle(2);
+    try t.expectEqual(@as(u64, 1), x.r.counts.skipped);
+}
+
+test "rows stage: a save that waited and loses its entry after a reap still counts, under an id no job holds" {
+    const x = try Fixture.open("stage-lost-after-reap", .off, false, 1 << 20);
+    defer x.close();
+    var hold: Hold = .{};
+    defer hold.release.store(true, .release);
+    x.r.file_io = hold.io();
+    const first = fixture.prompt(51);
+    try x.keep(&first, 600);
+    try Hold.wait(&hold.entered);
+    const limit = x.r.worker.?.limit;
+    x.r.worker.?.limit = x.r.worker.?.bytes();
+    const second = fixture.prompt(52);
+    try x.keep(&second, 600);
+    const lost = x.r.waiting.?;
+    hold.release.store(true, .release);
+    try x.settle();
+    try t.expect(x.r.waiting == null);
+    try t.expectEqual(@as(usize, 1), x.r.queue.items.len);
+    x.r.worker.?.limit = limit;
+    const third = fixture.prompt(53);
+    try x.keep(&third, 600);
+    const staged_as = x.r.next_job;
+    try t.expectEqual(@as(usize, 1), x.r.queue.items.len);
+    for (x.s.entries.items, 0..) |e, i| if (e == lost) {
+        x.s.remove(i);
+        break;
+    };
+    try t.expectEqual(@as(usize, 0), x.r.queue.items.len);
+    try t.expectEqual(@as(u64, 1), x.r.counts.skipped);
+    try t.expectEqual(error.StagingFull, x.r.failures.records[0].?.err);
+    try t.expect(x.r.failures.records[0].?.id != staged_as);
+    try x.settle();
+    try t.expectEqual(@as(usize, 2), x.r.states.items.len);
+}

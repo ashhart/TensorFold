@@ -17,7 +17,11 @@ const piece: u64 = 16 << 20;
 pub const Want = struct { name: Name, window: u32, k: u32, bytes: u64 };
 
 /// A kept entry waiting to be written, with the chunk starts below it (a planned family's state depends on them).
-pub const Queued = struct { entry: *pc.Entry, starts: []u32 };
+pub const Queued = struct {
+    entry: *pc.Entry,
+    starts: []u32,
+    waited: bool = false, // the jobs in flight once left it no room, so losing its entry counts as a skipped save
+};
 
 /// A kept state being written: the blocks the disk lacks, then its own file a piece at a time.
 pub const Job = struct {
