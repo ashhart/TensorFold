@@ -14,8 +14,7 @@ pub fn run(gpu: check.Gpu) !void {
     defer s.deinit();
     const c = glm.config.Config{};
     const world = 3;
-    const max_heads = (c.kda_heads + world - 1) / world;
-    kb.pad_to = std.mem.alignForward(usize, 3 * max_heads * dk + 2 * dk + max_heads, 8);
+    kb.pad_to = kb.padWidth(c.kda_heads, world);
     defer kb.pad_to = 0;
     var cases: usize = 0;
     for (0..world) |rank| {
@@ -27,8 +26,7 @@ pub fn run(gpu: check.Gpu) !void {
             const host = try gpa.alloc(u16, n * dims);
             defer gpa.free(host);
             for (host, 0..) |*v, i| v.* = @intCast((i * 7 + 1) % 0x7f00 + 1); // no zero, so a pad row cannot pass as one
-            var orig = try cuda.DeviceBuffer.fromHost(gpu.d, std.mem.sliceAsBytes(host));
-            defer orig.free();
+            const orig = try cuda.DeviceBuffer.fromHost(gpu.d, std.mem.sliceAsBytes(host)); // the weights own it, as loaded
             const in: kb.In = if (split) .{ .split = .{ .qkv = undefined, .rest = orig.ptr } } else .{ .bf16 = orig.ptr };
             var layers = [1]glm.weights.Layer{undefined};
             layers[0].mixer = .{ .kda = .{ .proj = in, .fb = 0, .gb = 0, .o = .{ .bf16 = 0 }, .conv_w = 0, .a_log = 0, .dt_bias = 0, .norm_w = 0, .eps = 1e-6, .lower = -5, .heads = heads, .dims = dims } };
@@ -37,10 +35,16 @@ pub fn run(gpu: check.Gpu) !void {
             w.layers = &layers;
             w.mtp = null;
             w.buffers = .empty;
+            w.named = .empty;
+            const name = try gpa.dupe(u8, if (split) "layers.0.kda.rest" else "layers.0.kda.proj");
             defer {
                 for (w.buffers.items) |*b| b.free();
                 w.buffers.deinit(gpa);
+                w.named.deinit(gpa);
+                gpa.free(name);
             }
+            try w.buffers.append(gpa, orig);
+            try w.named.append(gpa, .{ .name = name, .ptr = orig.ptr, .len = orig.len });
             try glm.tile.padKdaInputs(&w, gpu.d, s);
             const got = switch (layers[0].mixer.kda.proj) {
                 .bf16 => |p| p,
@@ -48,7 +52,8 @@ pub fn run(gpu: check.Gpu) !void {
             };
             const label = if (split) "split stack's bf16 rest" else "bf16 stack";
             try check.expect(got != orig.ptr, "glm-kda-pad-split: rank {d} ({d} heads) {s} kept its unpadded buffer", .{ rank, heads, label });
-            try check.expect(w.buffers.items.len == 1 and w.buffers.items[0].ptr == got and w.buffers.items[0].len == m * dims * 2, "glm-kda-pad-split: rank {d} {s}: the padded buffer is not the weights' own {d} rows", .{ rank, label, m });
+            try check.expect(w.buffers.items.len == 1 and w.buffers.items[0].ptr == got and w.buffers.items[0].len == m * dims * 2, "glm-kda-pad-split: rank {d} {s}: the weights hold {d} buffers, not the one padded stack of {d} rows", .{ rank, label, w.buffers.items.len, m });
+            try check.expect(w.named.items[0].ptr == got and w.named.items[0].len == m * dims * 2, "glm-kda-pad-split: rank {d} {s}: its name still points at the unpadded rows", .{ rank, label });
             const back = try gpa.alloc(u16, m * dims);
             defer gpa.free(back);
             try (cuda.DeviceBuffer{ .d = gpu.d, .ptr = got, .len = m * dims * 2, .borrowed = true }).download(0, std.mem.sliceAsBytes(back));
