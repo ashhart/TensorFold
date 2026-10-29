@@ -17,6 +17,12 @@ pub fn steps(b: *std.Build) void {
     b.step("compile-dsv41-engram-alloc-aarch64", "Emit Linux ARM64 Engram failure controls; never execute").dependOn(&arm.step);
     const run = b.addRunArtifact(host);
     run.setCwd(b.path("."));
+    if (b.graph.environ_map.get("TF_DSV41_HEADERS")) |dir| {
+        run.setEnvironmentVariable("TF_DSV41_HEADERS", dir);
+        if (b.graph.environ_map.get("TF_DSV41_HEADERS_FULL")) |full|
+            run.setEnvironmentVariable("TF_DSV41_HEADERS_FULL", full);
+        run.has_side_effects = true;
+    }
     b.step("test-dsv41-shared", "Shared DeepSeek checkpoint host tests, no GPU dependencies").dependOn(&run.step);
     const linux_target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu });
     const cross = b.addTest(.{ .root_module = module(b, linux_target, "shared_test.zig") });
