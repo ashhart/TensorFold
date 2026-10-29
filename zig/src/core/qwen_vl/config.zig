@@ -23,9 +23,9 @@ pub const Config = struct {
     mean: [3]f32,
     std: [3]f32,
 
-    /// The processor's settings as core/picture/patches takes them: Pillow's bicubic, normalized after the rescale.
+    /// The processor's settings for core/picture/patches: Qwen2VLImageProcessorFast's (torchvision, fused).
     pub fn patches(c: Config) @import("../picture/patches.zig").Patches {
-        return .{ .patch = c.patch, .temporal = c.temporal, .merge = c.merge, .min_pixels = c.min_pixels, .max_pixels = c.max_pixels, .rescale = c.rescale, .mean = c.mean, .std = c.std };
+        return .{ .patch = c.patch, .temporal = c.temporal, .merge = c.merge, .min_pixels = c.min_pixels, .max_pixels = c.max_pixels, .rescale = c.rescale, .mean = c.mean, .std = c.std, .resize = .torch, .fused = true };
     }
 
     pub fn headDim(c: Config) u32 {
@@ -149,6 +149,9 @@ test "the 27B's files parse to its tower, markers and pixel bounds" {
     try std.testing.expectEqual(@as(u64, 16777216), c.max_pixels);
     try std.testing.expectEqual(@as(f64, 1.0 / 255.0), c.rescale); // the JSON's shortest repr of 1/255
     try std.testing.expectEqual([3]f32{ 0.5, 0.5, 0.5 }, c.mean);
+    // picture/patches_test.zig's goldens: transformers 5.19's Qwen2VLImageProcessor on these files gives the same bits
+    try std.testing.expectEqual(.torch, c.patches().resize);
+    try std.testing.expect(c.patches().fused);
     try std.testing.expect((try Config.parse(a, "{\"model_type\": \"qwen3_5\"}", null, null)) == null);
 }
 
