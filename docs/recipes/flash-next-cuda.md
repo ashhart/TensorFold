@@ -19,6 +19,28 @@ contract receipts. Compile success and host tests do not establish checkpoint fi
 limits must be measured with the exact checkpoint, binary, device topology and request settings. Prefix retention
 with MTP is outside this path's qualified scope; evaluate with `--prompt-cache-gib 0`.
 
+### NVIDIA's NVFP4 checkpoint on two GB10s
+
+`nvidia/Qwen3.8-Flash-Next-NVFP4` (the checkpoint SGLang's Flash Next recipes serve) loads as stored: NVFP4 routed
+experts with plain scales, BF16 attention, DeltaNet and shared-expert projections, its n-gram table as E4M3 rows
+times one BF16 scale (`bf16(e4m3 * scale)`, as SGLang computes it), and its MTP head's routed experts as E4M3 with
+BF16 128x128 block scales on the block-FP8 expert kernels (BF16 activations). Two ranks, one a host, rank 1 first:
+
+```bash
+# on rank 1
+tensorfold-native serve nvidia/Qwen3.8-Flash-Next-NVFP4 --tp 2 --rank 1 --master 192.0.2.1 --context 65536 --prompt-cache-gib 0
+# on rank 0 (192.0.2.1), which serves HTTP
+tensorfold-native serve nvidia/Qwen3.8-Flash-Next-NVFP4 --tp 2 --rank 0 --master 192.0.2.1 --context 65536 --prompt-cache-gib 0
+```
+
+- Both ranks run the same executable (they compare it) and need NCCL 2.30 or later; set `NCCL_SOCKET_IFNAME` and
+  `NCCL_IB_HCA` for the link between the hosts. `--master-port` (default 29551) names rank 0's control port.
+- Each rank sends a digest of every checkpoint byte, cached after the first read (about 2 minutes for this
+  checkpoint's 124 GiB on a GB10), and both wait up to 30 minutes for the other. `TENSORFOLD_CHECKPOINT_SHA256`, when
+  set the same on both ranks, replaces the digest and keeps the wait at a minute.
+- `--prompt-cache-gib 0` is required with drafts at `--tp 2`, and `--idle-unload` is refused with `--tp`.
+- At `--tp 2` each stream's window verifies alone, so concurrent streams do not yet share a verify pass.
+
 ## Experimental K32 prompt experts
 
 `TF_FLASHNEXT_PROMPT_EXPERT_TILE=1` selects the K32 staging pipeline for NVFP4 prompt gate-up;
