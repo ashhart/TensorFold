@@ -38,6 +38,7 @@ atc release ISSUE --json
 ```
 
 Use `reviewing` or `blocked` when appropriate, land the session when it stops, and resolve overlaps before opening a pull request.
+Before opening a pull request, have the agent run the [pull request skill](docs/pr/SKILL.md); agents that support skills can install it as `tensorfold-pull-request`.
 
 ## Quick start
 
