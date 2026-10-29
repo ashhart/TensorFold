@@ -77,7 +77,7 @@ fn free(ptr: abi.DevicePtr) callconv(.c) abi.Result {
     return 0;
 }
 fn copy(dst: abi.DevicePtr, src: ?*const anyopaque, n: usize) callconv(.c) abi.Result {
-    if (n <= 1024) @memcpy(memory[dst / 256][0..n], @as([*]const u8, @ptrCast(src.?))[0..n]);
+    if (n <= 1024) @memcpy(memory[dst / 256][dst % 256 ..][0..n], @as([*]const u8, @ptrCast(src.?))[0..n]);
     pending = true;
     return if (fail_copy) abi.error_not_ready else 0;
 }
