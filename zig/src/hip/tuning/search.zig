@@ -31,8 +31,6 @@ const routed_bounds = [_]Bound{
     .{ .id = "mlx.routed.prefill.kp3", .kind = .pairs_per_item },
     .{ .id = "mlx.routed.prefill.kp1", .kind = .pairs_per_item },
 };
-/// A served plan holds fewer than 8 pairs an item, so 8 admits every one.
-const most_pairs_per_item = 8;
 
 pub const Search = struct {
     gpa: std.mem.Allocator,
@@ -117,20 +115,22 @@ pub const Search = struct {
     }
 
     /// Each plain bound in turn, then the routed ones together, to the least loss, most saving, nearest gfx1100's.
-    pub fn propose(s: *Search, print: bool) void {
-        for (plain_bounds) |bd| s.proposeOne(bd, print);
-        s.proposeRouted(print);
+    pub fn propose(s: *Search, print: bool) !void {
+        for (plain_bounds) |bd| try s.proposeOne(bd, print);
+        try s.proposeRouted(print);
     }
 
-    fn proposeOne(s: *Search, bd: Bound, print: bool) void {
+    fn proposeOne(s: *Search, bd: Bound, print: bool) !void {
         const at = rowIndex(s.rows[0..s.n_rows], bd.id) orelse return;
         // each candidate starts from the row as it was, so an off value keeps its other fields
         const orig = s.rows[at];
         const old_v = field(tuning.find(&tuning.gfx1100, bd.id).?, bd.kind);
         var best_v = field(orig, bd.kind);
         var best: Score = s.score(&s.proposal(), .project) orelse .{ .loss = 0, .saving = 0, .changed = 0 };
-        var values: [1024]u32 = undefined;
-        for (s.candidates(bd.kind, &values)) |v| {
+        const values = try s.candidates(bd.kind);
+        defer s.gpa.free(values);
+        for (values) |n| {
+            const v: f64 = @floatFromInt(n);
             s.rows[at] = orig;
             setField(&s.rows[at], bd.kind, v);
             const sc = s.score(&s.proposal(), .project) orelse continue;
@@ -146,10 +146,10 @@ pub const Search = struct {
         });
     }
 
-    fn proposeRouted(s: *Search, print: bool) void {
+    fn proposeRouted(s: *Search, print: bool) !void {
         var at: [routed_bounds.len]usize = undefined;
-        var old_v: [routed_bounds.len]u32 = undefined;
-        var best_v: [routed_bounds.len]u32 = undefined;
+        var old_v: [routed_bounds.len]f64 = undefined;
+        var best_v: [routed_bounds.len]f64 = undefined;
         for (routed_bounds, 0..) |bd, i| {
             at[i] = rowIndex(s.rows[0..s.n_rows], bd.id) orelse return;
             old_v[i] = field(tuning.find(&tuning.gfx1100, bd.id).?, bd.kind);
@@ -157,16 +157,17 @@ pub const Search = struct {
         }
         const began = nowNs();
         var best: Score = s.score(&s.proposal(), .routed) orelse .{ .loss = 0, .saving = 0, .changed = 0 };
-        var items_buf: [1025]u32 = undefined;
-        var items = s.candidates(.items, items_buf[0..1024]);
-        // the row's own value too, so a pairs bound can move without the items
-        if (std.mem.indexOfScalar(u32, items, best_v[0]) == null) {
-            items_buf[items.len] = best_v[0];
-            items = items_buf[0 .. items.len + 1];
-        }
-        var v: [routed_bounds.len]u32 = undefined;
-        for (items) |n| for (0..most_pairs_per_item + 1) |p3| for (0..most_pairs_per_item + 1) |p1| {
-            v = .{ n, @intCast(p3), @intCast(p1) };
+        // the row's own items too, so a pairs bound can move without them
+        const items = try s.candidatesWith(.items, @intFromFloat(best_v[0]));
+        defer s.gpa.free(items);
+        const kp3_pairs = try s.pairCandidates(std.math.maxInt(u32));
+        defer s.gpa.free(kp3_pairs);
+        // kp1 takes no plan past its own items, so only those plans' bounds can change what it takes
+        const kp1_pairs = try s.pairCandidates(s.rows[at[2]].items);
+        defer s.gpa.free(kp1_pairs);
+        var v: [routed_bounds.len]f64 = undefined;
+        for (items) |n| for (kp3_pairs) |p3| for (kp1_pairs) |p1| {
+            v = .{ @floatFromInt(n), p3, p1 };
             s.setRouted(at, v);
             const sc = s.score(&s.proposal(), .routed) orelse continue;
             if (better(sc, sumDist(v, old_v), best, sumDist(best_v, old_v))) {
@@ -183,27 +184,66 @@ pub const Search = struct {
         }
     }
 
-    fn setRouted(s: *Search, at: [routed_bounds.len]usize, v: [routed_bounds.len]u32) void {
+    fn setRouted(s: *Search, at: [routed_bounds.len]usize, v: [routed_bounds.len]f64) void {
         for (routed_bounds, at, v) |bd, i, x| setField(&s.rows[i], bd.kind, x);
     }
 
+    /// Pairs bounds to try on the routed cells of at most `most` items: off, each one's least admitting, one below all.
+    fn pairCandidates(s: *const Search, most: u32) ![]f64 {
+        // off, one a cell at most, and the one below all
+        const buf = try s.gpa.alloc(f64, s.cells.items.len + 2);
+        errdefer s.gpa.free(buf);
+        buf[0] = 0;
+        var len: usize = 1;
+        for (s.cells.items) |c| {
+            if (c.op != .routed or c.shape.plan_pairs == 0 or c.shape.items == 0 or c.shape.items > most) continue;
+            const b: f64 = leastAdmitting(c.shape.plan_pairs, c.shape.items);
+            if (std.mem.indexOfScalar(f64, buf[0..len], b) == null) {
+                buf[len] = b;
+                len += 1;
+            }
+        }
+        std.mem.sort(f64, buf[0..len], {}, std.sort.asc(f64));
+        // and one that refuses them all, just below the least of their bounds
+        if (len > 1) {
+            const below = std.math.nextAfter(f32, @floatCast(buf[1]), 0);
+            if (below > 0) {
+                std.mem.copyBackwards(f64, buf[2 .. len + 1], buf[1..len]);
+                buf[1] = below;
+                len += 1;
+            }
+        }
+        return s.gpa.realloc(buf, len);
+    }
+
     /// Bound values to try: off for a gate, and the rows or items of timed cells whose both sides are sampled.
-    fn candidates(s: *const Search, kind: Kind, buf: []u32) []u32 {
+    fn candidates(s: *const Search, kind: Kind) ![]u32 {
+        return s.candidatesWith(kind, null);
+    }
+
+    /// `candidates`, and `extra` too when given.
+    fn candidatesWith(s: *const Search, kind: Kind, extra: ?u32) ![]u32 {
         const routed = kind == .items;
+        const buf = try s.gpa.alloc(u32, s.cells.items.len + 2);
+        errdefer s.gpa.free(buf);
         var len: usize = 0;
         if (kind == .gate_rows) {
             buf[0] = 0;
             len = 1;
         }
         for (s.cells.items) |c| {
-            if ((c.op == .routed) != routed or !c.bound or len == buf.len) continue;
+            if ((c.op == .routed) != routed or !c.bound) continue;
             const v: u32 = if (routed) c.shape.items else @intCast(c.count);
             if (std.mem.indexOfScalar(u32, buf[0..len], v) == null) {
                 buf[len] = v;
                 len += 1;
             }
         }
-        return buf[0..len];
+        if (extra) |v| if (std.mem.indexOfScalar(u32, buf[0..len], v) == null) {
+            buf[len] = v;
+            len += 1;
+        };
+        return s.gpa.realloc(buf, len);
     }
 
     /// Whether the choice between two timed counts of a class changes, under gfx1100's table or the proposal.
@@ -249,33 +289,47 @@ fn rowIndex(rows: []const tuning.Row, id: []const u8) ?usize {
     return null;
 }
 
-fn better(a: Score, a_dist: u32, b: Score, b_dist: u32) bool {
+/// The least `f32` bound under which a plan of `pairs` pairs over `items` items is taken, as the registry compares.
+pub fn leastAdmitting(pairs: u32, items: u32) f32 {
+    const p: f64 = @floatFromInt(pairs);
+    const n: f64 = @floatFromInt(items);
+    var b: f32 = @floatCast(p / n);
+    while (@as(f64, b) * n < p) b = std.math.nextAfter(f32, b, std.math.inf(f32));
+    while (true) {
+        const lower = std.math.nextAfter(f32, b, 0);
+        if (lower <= 0 or @as(f64, lower) * n < p) break;
+        b = lower;
+    }
+    return b;
+}
+
+fn better(a: Score, a_dist: f64, b: Score, b_dist: f64) bool {
     return a.loss < b.loss or (a.loss == b.loss and (a.saving > b.saving or (a.saving == b.saving and a_dist < b_dist)));
 }
 
-fn field(r: tuning.Row, kind: Kind) u32 {
+fn field(r: tuning.Row, kind: Kind) f64 {
     return switch (kind) {
-        .rows => r.rows,
-        .gate_rows => if (r.plain) r.rows else 0,
-        .items => r.items,
+        .rows => @floatFromInt(r.rows),
+        .gate_rows => if (r.plain) @floatFromInt(r.rows) else 0,
+        .items => @floatFromInt(r.items),
         .pairs_per_item => r.pairs_per_item,
     };
 }
 
-fn setField(r: *tuning.Row, kind: Kind, v: u32) void {
+fn setField(r: *tuning.Row, kind: Kind, v: f64) void {
     switch (kind) {
-        .rows => r.rows = v,
+        .rows => r.rows = @intFromFloat(v),
         .gate_rows => {
             r.plain = v != 0;
-            if (v != 0) r.rows = v;
+            if (v != 0) r.rows = @intFromFloat(v);
         },
-        .items => r.items = v,
-        .pairs_per_item => r.pairs_per_item = v,
+        .items => r.items = @intFromFloat(v),
+        .pairs_per_item => r.pairs_per_item = @floatCast(v),
     }
 }
 
-fn dist(a: u32, b: u32) u32 {
-    return if (a > b) a - b else b - a;
+fn dist(a: f64, b: f64) f64 {
+    return @abs(a - b);
 }
 
 fn nowNs() u64 {
@@ -284,8 +338,8 @@ fn nowNs() u64 {
     return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
 }
 
-fn sumDist(a: [routed_bounds.len]u32, b: [routed_bounds.len]u32) u32 {
-    var d: u32 = 0;
+fn sumDist(a: [routed_bounds.len]f64, b: [routed_bounds.len]f64) f64 {
+    var d: f64 = 0;
     for (a, b) |x, y| d += dist(x, y);
     return d;
 }
@@ -316,17 +370,25 @@ fn routedRow(s: *const Search, id: []const u8) tuning.Row {
     return s.rows[rowIndex(s.rows[0..s.n_rows], id).?];
 }
 
+/// Whether a row's bounds take a plan of `items` items and `pairs` pairs, as the registry compares.
+fn takes(r: tuning.Row, items: u32, pairs: u32) bool {
+    if (r.items != 0 and items > r.items) return false;
+    return r.pairs_per_item == 0 or @as(f64, @floatFromInt(pairs)) <= @as(f64, r.pairs_per_item) * @as(f64, @floatFromInt(items));
+}
+
 test "the routed bounds move together: more items, and a pairs bound that keeps the full plans off kp3" {
     var s = Search.init(t.allocator, rdna4, &tuning.gfx1201);
     defer s.deinit();
     try plan(&s, 33, 329, 297, 5, 6, 10, 0.01); // 0.9 pairs an item: kp3 wins
     try plan(&s, 129, 320, 774, 8, 9, 10, 0.01); // 2.42: kp3 wins
     try plan(&s, 256, 320, 1536, 12, 13, 10, 0.01); // 4.8: kp3 loses
-    s.propose(false);
+    try s.propose(false);
     const kp3 = routedRow(&s, "mlx.routed.prefill.kp3");
     try t.expectEqual(@as(u32, 329), kp3.items);
-    try t.expectEqual(@as(u32, 3), kp3.pairs_per_item);
-    try t.expectEqual(@as(u32, 0), routedRow(&s, "mlx.routed.prefill.kp1").pairs_per_item);
+    try t.expect(takes(kp3, 329, 297) and takes(kp3, 320, 774) and !takes(kp3, 320, 1536));
+    // the tightest such bound: the 129-token cell's own
+    try t.expectEqual(leastAdmitting(774, 320), kp3.pairs_per_item);
+    try t.expectEqual(@as(f32, 0), routedRow(&s, "mlx.routed.prefill.kp1").pairs_per_item);
 }
 
 test "a plan kp3 refuses passes kp1 by on the way to the GEMM tile, so both bounds move in one step" {
@@ -334,11 +396,11 @@ test "a plan kp3 refuses passes kp1 by on the way to the GEMM tile, so both boun
     defer s.deinit();
     try plan(&s, 33, 329, 297, 5, 6, 10, 0.01);
     try plan(&s, 128, 224, 768, 12, 14, 10, 0.01); // kp3 today; kp1 is slower still
-    s.propose(false);
-    const p3 = routedRow(&s, "mlx.routed.prefill.kp3").pairs_per_item;
-    const p1 = routedRow(&s, "mlx.routed.prefill.kp1").pairs_per_item;
-    try t.expect(p3 >= 1 and p3 <= 3);
-    try t.expect(p1 >= 1 and p1 <= 3);
+    try s.propose(false);
+    const kp3 = routedRow(&s, "mlx.routed.prefill.kp3");
+    const kp1 = routedRow(&s, "mlx.routed.prefill.kp1");
+    try t.expect(takes(kp3, 329, 297) and !takes(kp3, 224, 768));
+    try t.expect(kp1.pairs_per_item != 0 and !takes(kp1, 224, 768));
     const sc = s.score(&s.proposal(), .routed).?;
     try t.expectEqual(@as(usize, 2), sc.changed);
 }
@@ -348,8 +410,9 @@ test "a noisy cell keeps its choice" {
     defer s.deinit();
     try plan(&s, 33, 329, 297, 5, 6, 10, 0.01);
     try plan(&s, 60, 329, 600, 5, 6, 10, 0.2); // 1.82 pairs an item, too noisy to move
-    s.propose(false);
-    try t.expectEqual(@as(u32, 1), routedRow(&s, "mlx.routed.prefill.kp3").pairs_per_item);
+    try s.propose(false);
+    const kp3 = routedRow(&s, "mlx.routed.prefill.kp3");
+    try t.expect(takes(kp3, 329, 297) and !takes(kp3, 329, 600));
 }
 
 test "a cell timed after a proposal can veto it" {
@@ -358,12 +421,13 @@ test "a cell timed after a proposal can veto it" {
     try plan(&s, 33, 329, 297, 5, 6, 10, 0.01);
     try plan(&s, 129, 320, 774, 8, 9, 10, 0.01);
     try plan(&s, 256, 320, 1536, 12, 13, 10, 0.01);
-    s.propose(false);
-    try t.expectEqual(@as(u32, 3), routedRow(&s, "mlx.routed.prefill.kp3").pairs_per_item);
+    try s.propose(false);
+    try t.expect(takes(routedRow(&s, "mlx.routed.prefill.kp3"), 329, 600));
     try plan(&s, 60, 329, 600, 11, 12, 10, 0.01); // 1.82 pairs an item, and kp3 loses here
     s.reset();
-    s.propose(false);
-    try t.expectEqual(@as(u32, 1), routedRow(&s, "mlx.routed.prefill.kp3").pairs_per_item);
+    try s.propose(false);
+    const kp3 = routedRow(&s, "mlx.routed.prefill.kp3");
+    try t.expect(takes(kp3, 329, 297) and !takes(kp3, 329, 600));
     try t.expect(s.score(&s.proposal(), .routed).?.loss == 0);
 }
 
@@ -373,6 +437,28 @@ test "an unqualified cell keeps its choice, however fast its times say the chang
     try plan(&s, 33, 329, 297, 5, 6, 10, 0.01);
     try plan(&s, 60, 329, 600, 5, 6, 10, 0.01); // 1.82 pairs an item, but its reads stay in the caches
     s.cells.items[s.cells.items.len - 1].qualified = false;
-    s.propose(false);
-    try t.expectEqual(@as(u32, 1), routedRow(&s, "mlx.routed.prefill.kp3").pairs_per_item);
+    try s.propose(false);
+    const kp3 = routedRow(&s, "mlx.routed.prefill.kp3");
+    try t.expect(takes(kp3, 329, 297) and !takes(kp3, 329, 600));
+}
+
+test "a cell's own bound takes it, where its ratio rounded to an f32 would not" {
+    // Nemotron at 186 tokens: 1,116 pairs over 320 items, 3.4875, whose nearest f32 is just below
+    const near: f32 = @floatCast(@as(f64, 1116) / 320);
+    try t.expect(@as(f64, near) * 320 < 1116);
+    const b = leastAdmitting(1116, 320);
+    try t.expect(@as(f64, b) * 320 >= 1116);
+    try t.expect(@as(f64, std.math.nextAfter(f32, b, 0)) * 320 < 1116);
+    try t.expectEqual(@as(f32, 3.5), leastAdmitting(350, 100));
+}
+
+test "every routed cell's bound is a candidate, however many there are" {
+    var s = Search.init(t.allocator, rdna4, &tuning.gfx1201);
+    defer s.deinit();
+    for (0..1100) |i| try plan(&s, i + 1, 2000, @intCast(i + 1), 5, 6, 10, 0.01);
+    const all = try s.pairCandidates(std.math.maxInt(u32));
+    defer t.allocator.free(all);
+    // off, the one below them all, and one a cell
+    try t.expectEqual(@as(usize, 1102), all.len);
+    try t.expect(all[1] < all[2] and @as(f64, all[1]) * 2000 < 1);
 }

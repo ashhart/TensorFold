@@ -4,6 +4,8 @@ const std = @import("std");
 const tuning = @import("../../tuning/tuning.zig");
 const moe = @import("../../moe.zig");
 const cases = @import("cases.zig");
+const affine = @import("../../launches/affine.zig");
+const registry = @import("core").registry;
 
 /// A product geometry on the prompt path: dense, or a served model's routed gate and up (or up) or down.
 pub const Class = struct {
@@ -130,19 +132,54 @@ pub fn coarse(c: Class, list: *std.ArrayList(usize), gpa: std.mem.Allocator) !vo
             if (sides(c, b, &two)) for (two) |v| try put(list, v, gpa);
         }
     };
-    // a routed class: both sides of every pairs-per-item bound the search may try, in each bucket
-    if (c.routed) for (1..9) |b| for (1..sampledMax(c)) |t| {
-        if (admits(c, b, t) and !admits(c, b, t + 1)) {
-            try put(list, t, gpa);
-            try put(list, t + 1, gpa);
+    // a routed class: both sides of the whole pairs-per-item bounds and either table's, wherever they change answer
+    if (c.routed) {
+        var bs: [8 + 2 * tuning.gfx1201.rows.len]f32 = undefined;
+        var n: usize = 0;
+        for (1..9) |b| {
+            bs[n] = @floatFromInt(b);
+            n += 1;
         }
-    };
+        for ([_]*const tuning.Table{ &tuning.gfx1100, &tuning.gfx1201 }) |tb| for (tb.rows) |r| if (r.pairs_per_item != 0) {
+            bs[n] = r.pairs_per_item;
+            n += 1;
+        };
+        for (bs[0..n]) |b| for (1..sampledMax(c)) |t| {
+            if (admits(c, b, t) != admits(c, b, t + 1)) {
+                try put(list, t, gpa);
+                try put(list, t + 1, gpa);
+            }
+        };
+    }
     std.mem.sort(usize, list.items, {}, std.sort.asc(usize));
 }
 
-/// Whether a pairs-per-item bound `b` takes `tokens` tokens of a routed class.
-fn admits(c: Class, b: usize, tokens: usize) bool {
-    return tokens * c.slots <= b * selectorCount(c, tokens);
+/// Whether a pairs-per-item bound `b` takes `tokens` tokens of a routed class, as the registry compares.
+fn admits(c: Class, b: f32, tokens: usize) bool {
+    const pairs: f64 = @floatFromInt(tokens * c.slots);
+    return pairs <= @as(f64, b) * @as(f64, @floatFromInt(selectorCount(c, tokens)));
+}
+
+/// The shape serving asks the registry about for `tokens` tokens of a routed class, from one of its timed shapes.
+pub fn routedShape(c: Class, template: registry.Shape, tokens: usize) registry.Shape {
+    var s = template;
+    s.items = @intCast(selectorCount(c, tokens));
+    s.plan_pairs = @intCast(tokens * c.slots);
+    s.m = @intCast(@min(moe.tileOf(tokens, false), tokens));
+    return s;
+}
+
+/// Both sides of every pair of adjacent token counts, up to `sampledMax`, whose routed choice under `reg` differs.
+pub fn edges(c: Class, template: registry.Shape, reg: *const affine.Registry, env: registry.Env, list: *std.ArrayList(usize), gpa: std.mem.Allocator) !void {
+    var last: ?*const affine.Entry = null;
+    for (1..sampledMax(c) + 1) |t| {
+        const e = reg.select(env, .mlx, .routed, .prefill, routedShape(c, template, t));
+        if (t > 1 and e != last) {
+            try put(list, t - 1, gpa);
+            try put(list, t, gpa);
+        }
+        last = e;
+    }
 }
 
 /// A table row of the prompt path of the plain (dense) or routed op.
@@ -152,4 +189,29 @@ pub fn isPrompt(id: []const u8, routed_op: bool) bool {
 
 fn put(list: *std.ArrayList(usize), v: usize, gpa: std.mem.Allocator) !void {
     if (std.mem.indexOfScalar(usize, list.items, v) == null) try list.append(gpa, v);
+}
+
+test "an exact plan's choice can change at every token, and the edges hold each change" {
+    const search = @import("../../tuning/search.zig");
+    const mlx_entries = @import("../../launches/mlx_entries.zig");
+    const flash = routed[4];
+    // kp3 at 1,921 items and the least bound that takes 11,264 pairs over them
+    var table_rows: [tuning.gfx1201.rows.len]tuning.Row = undefined;
+    for (tuning.gfx1201.rows, 0..) |r, i| table_rows[i] = r;
+    for (&table_rows) |*r| if (std.mem.eql(u8, r.id, "mlx.routed.prefill.kp3")) {
+        r.items = 1921;
+        r.pairs_per_item = search.leastAdmitting(11264, 1921);
+    };
+    const table: tuning.Table = .{ .gfx = "gfx1201", .rows = &table_rows };
+    const reg = affine.Registry.init(&table, &mlx_entries.all);
+    const env: registry.Env = .{ .bf16 = true, .matrix = false, .matrix_on = false, .stream_on = true, .gemm_on = true };
+    const template: registry.Shape = .{ .m = 8, .n = flash.n, .k = flash.k, .bits = flash.bits, .group = flash.group, .fp16 = false };
+    var list: std.ArrayList(usize) = .empty;
+    defer list.deinit(std.testing.allocator);
+    try edges(flash, template, &reg, env, &list, std.testing.allocator);
+    for ([_]usize{ 1022, 1023, 1024, 1025 }) |n| try std.testing.expect(std.mem.indexOfScalar(usize, list.items, n) != null);
+    // the choices alternate there: kp3, GEMM, kp3, GEMM
+    for ([_]usize{ 1022, 1023, 1024, 1025 }, [_][]const u8{ "kp3", "gemm", "kp3", "gemm" }) |n, id| {
+        try std.testing.expect(std.mem.endsWith(u8, reg.select(env, .mlx, .routed, .prefill, routedShape(flash, template, n)).?.id, id));
+    }
 }

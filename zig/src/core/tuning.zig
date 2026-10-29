@@ -11,7 +11,7 @@ pub const Row = struct {
     min_rows: u32 = 0,
     items: u32 = 0,
     /// The most pairs a routed plan holds per item: more than `pairs_per_item * items` is refused (0: any).
-    pairs_per_item: u32 = 0,
+    pairs_per_item: f32 = 0,
     plain: bool = true,
     routed: bool = true,
 };
