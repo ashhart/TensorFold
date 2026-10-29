@@ -104,13 +104,14 @@ test "exl3: two-chunk arenas retain hidden and deferred HC operands without alia
 }
 
 test "exl3: two-chunk memory refusal performs no CUDA allocation" {
-    const saved_deep = state.deep;
-    const saved_options = state.options;
+    var runtime: state.Runtime = .{};
+    const graph = @import("../graph/cuda_exl3_graph.zig");
+    const saved_force = graph.force;
     defer {
-        state.deep = saved_deep;
-        state.options = saved_options;
+        graph.force = saved_force;
     }
-    state.options = .{ .two_chunk = true };
+    graph.force = .off;
+    runtime.options = .{ .two_chunk = true };
     var driver: cuda.Driver = undefined;
     var buffers: Deep = undefined;
     buffers.dev = .{ .d = &driver, .ptr = 0x100000, .len = 1 };
@@ -118,8 +119,8 @@ test "exl3: two-chunk memory refusal performs no CUDA allocation" {
     buffers.rows = 4096;
     buffers.lay = Layout.of(4096, 2);
     buffers.second = null;
-    state.deep = &buffers;
-    try std.testing.expectEqual(@as(u64, 0), try reserveTwoChunk(&driver, Persistent.of(4096).total - 1, 0));
+    runtime.deep = &buffers;
+    try std.testing.expectEqual(@as(u64, 0), try reserveTwoChunk(&runtime, &driver, Persistent.of(4096).total - 1, 0, 0));
     try std.testing.expect(buffers.second == null);
 }
 
@@ -237,9 +238,10 @@ test "exl3: prefetch history follows deep engine ownership reuse replacement and
         fn refuse(_: *cuda.abi.DevicePtr, _: usize) callconv(.c) cuda.abi.Result {
             return cuda.abi.error_not_ready;
         }
-        fn install(driver: *const cuda.Driver, owner: *const anyopaque) !*Deep {
+        fn install(runtime: *state.Runtime, driver: *const cuda.Driver, owner: *const anyopaque) !*Deep {
             const buffers = try std.testing.allocator.create(Deep);
             buffers.* = .{
+                .runtime = runtime,
                 .gpa = std.testing.allocator,
                 .owner = owner,
                 .rows = 4096,
@@ -251,12 +253,13 @@ test "exl3: prefetch history follows deep engine ownership reuse replacement and
                 .aux = .{ .d = driver, .handle = null },
             };
             buffers.kern.mod = .{ .d = driver, .handle = null };
-            state.deep = buffers;
+            runtime.deep = buffers;
             return buffers;
         }
     };
-    try std.testing.expect(state.deep == null);
-    defer release();
+    var runtime: state.Runtime = .{};
+    try std.testing.expect(runtime.deep == null);
+    defer release(&runtime);
     var driver: cuda.Driver = undefined;
     driver.api.cuModuleUnload = Fixture.unload;
     driver.api.cuStreamSynchronize = Fixture.stream;
@@ -264,28 +267,38 @@ test "exl3: prefetch history follows deep engine ownership reuse replacement and
     driver.api.cuMemFreeHost = Fixture.freeHost;
     driver.api.cuMemAlloc_v2 = Fixture.refuse;
     var owners: [2]u8 = .{ 0, 0 };
-    const first = try Fixture.install(&driver, &owners[0]);
+    const first = try Fixture.install(&runtime, &driver, &owners[0]);
     first.history[3] = .{ .rows = 4096, .used = 80 };
     first.history_shape = .{ .sub = 256, .lo = 0, .hi = 256 };
-    releaseFor(&owners[1]);
-    try std.testing.expect(state.deep.? == first);
-    try reserveAt(std.testing.allocator, &driver, &owners[0], 2048, 1);
-    try std.testing.expectEqual(@as(usize, 96), history_.want(state.deep.?.history[3], 4096, 400, routed_n_));
-    try std.testing.expectError(error.NotReady, reserveAt(std.testing.allocator, &driver, &owners[1], 4096, 1));
-    try std.testing.expect(state.deep == null);
-    const second = try Fixture.install(&driver, &owners[1]);
+    releaseFor(&runtime, &owners[1]);
+    try std.testing.expect(runtime.deep.? == first);
+    try reserveAt(std.testing.allocator, &driver, &runtime, &owners[0], 2048, 1);
+    try std.testing.expectEqual(@as(usize, 96), history_.want(runtime.deep.?.history[3], 4096, 400, routed_n_));
+    try std.testing.expectError(error.NotReady, reserveAt(std.testing.allocator, &driver, &runtime, &owners[1], 4096, 1));
+    try std.testing.expect(runtime.deep == null);
+    const second = try Fixture.install(&runtime, &driver, &owners[1]);
     try std.testing.expectEqual(@as(usize, 416), history_.want(second.history[3], 4096, 400, routed_n_));
     try std.testing.expect(second.history_shape == null);
     second.history[3] = .{ .rows = 4096, .used = 80 };
-    try std.testing.expectError(error.NotReady, reserveAt(std.testing.allocator, &driver, &owners[1], 4096, 2));
-    try std.testing.expect(state.deep == null);
-    const third = try Fixture.install(&driver, &owners[1]);
+    try std.testing.expectError(error.NotReady, reserveAt(std.testing.allocator, &driver, &runtime, &owners[1], 4096, 2));
+    try std.testing.expect(runtime.deep == null);
+    const third = try Fixture.install(&runtime, &driver, &owners[1]);
     try std.testing.expectEqual(@as(usize, 416), history_.want(third.history[3], 4096, 400, routed_n_));
     third.history[3] = .{ .rows = 4096, .used = 80 };
-    releaseFor(&owners[1]);
-    try std.testing.expect(state.deep == null);
-    const fourth = try Fixture.install(&driver, &owners[1]);
+    releaseFor(&runtime, &owners[1]);
+    try std.testing.expect(runtime.deep == null);
+    const fourth = try Fixture.install(&runtime, &driver, &owners[1]);
     try std.testing.expectEqual(@as(usize, 416), history_.want(fourth.history[3], 4096, 400, routed_n_));
+    var other_runtime: state.Runtime = .{};
+    defer release(&other_runtime);
+    const other = try Fixture.install(&other_runtime, &driver, &owners[0]);
+    releaseFor(&runtime, &owners[1]);
+    try std.testing.expect(runtime.deep == null);
+    try std.testing.expect(other_runtime.deep.? == other);
+    releaseFor(&other_runtime, &owners[1]);
+    try std.testing.expect(other_runtime.deep.? == other);
+    releaseFor(&other_runtime, &owners[0]);
+    try std.testing.expect(other_runtime.deep == null);
 }
 
 test "exl3: the prefill tiles cut K as decode does at Flash Next's shapes, and the two expert groups split at 256" {

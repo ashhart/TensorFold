@@ -61,14 +61,6 @@ pub fn optionsFromEnv() Options {
     return o;
 }
 
-/// The options every call reads (a test may change them between calls).
-pub var options: ?Options = null;
-
-pub fn opts() Options {
-    if (options == null) options = optionsFromEnv();
-    return options.?;
-}
-
 /// What the last deep forward did (read by tf-cuda-test exl3-prefill engine).
 pub const Stats = struct {
     chunks: u64 = 0,
@@ -83,7 +75,17 @@ pub const Stats = struct {
     reduce_ns: u64 = 0, // their combine + all-reduce + place, measured only with TF_FLASHNEXT_PROFILE=1 (a wait each)
     head_rows: u64 = 0, // MTP head rows run expert-major (`head`)
 };
-pub var stats: Stats = .{};
+pub const Runtime = struct {
+    options: ?Options = null,
+    stats: Stats = .{},
+    deep: ?*Deep = null,
+    agree_buf: ?cuda.DeviceBuffer = null,
+    tiles_on: bool = false,
+
+    pub fn opts(runtime: *const Runtime) Options {
+        return runtime.options orelse optionsFromEnv();
+    }
+};
 
 /// Device bytes of a deep chunk's own rows: streams, sums, gates, mixed rows, slot outputs, picks, n-gram rows, and
 pub fn deviceBytes(rows: usize) usize {
@@ -216,6 +218,7 @@ pub const Persistent = struct {
 };
 
 pub const Deep = struct {
+    runtime: *Runtime = undefined,
     gpa: std.mem.Allocator,
     owner: *const anyopaque,
     rows: usize,
@@ -251,6 +254,7 @@ pub const Deep = struct {
     history_shape: ?history_.Shape = null,
     second: ?*Deep = null,
     shared: ?*const Deep = null,
+    window_graph_reservation: u64 = 0,
 
     pub fn dptr(dp: *const Deep, off: usize) u64 {
         if (dp.shared) |source| {
@@ -268,12 +272,10 @@ pub const Deep = struct {
     }
 };
 
-pub var deep: ?*Deep = null;
-
 pub const RingTelemetry = struct { owner: u64, copies: u64, dma_requested_bytes: u64, unused_copies: u64, hit_picks: u64, miss_picks: u64, hit_expert_requests: u64, miss_expert_requests: u64, attribution: ?@import("cuda_exl3_prefill_attribution.zig").Totals };
 
-pub fn ringTelemetry(owner: *const anyopaque) ?RingTelemetry {
-    const buffers = deep orelse return null;
+pub fn ringTelemetry(runtime: *const Runtime, owner: *const anyopaque) ?RingTelemetry {
+    const buffers = runtime.deep orelse return null;
     if (buffers.owner != owner) return null;
     const ring = buffers.ring orelse return null;
     return .{ .owner = ring.telemetry_id, .copies = ring.stats.copies, .dma_requested_bytes = ring.stats.dma_requested_bytes, .unused_copies = ring.stats.wasted, .hit_picks = ring.stats.hit_picks, .miss_picks = ring.stats.miss_picks, .hit_expert_requests = ring.stats.hit_expert_requests, .miss_expert_requests = ring.stats.miss_expert_requests, .attribution = if (ring.attribution) |state| state.totals else null };

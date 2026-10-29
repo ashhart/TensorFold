@@ -95,16 +95,16 @@ const Eng = struct {
         g.seq = try g.e.newSeq(cap);
         try gpu.d.check(gpu.d.api.cuMemGetInfo_v2(&free[2], &total), "cuMemGetInfo");
         g.out = try cuda.DeviceBuffer.alloc(gpu.d, vocab * 2);
-        if (deep_rows > 0) try xpre.reserveAt(gpu.gpa, gpu.d, g.e, deep_rows, world);
+        if (deep_rows > 0) try xpre.reserveAt(gpu.gpa, gpu.d, &g.e.exl3_prefill, g.e, deep_rows, world);
         try gpu.d.check(gpu.d.api.cuMemGetInfo_v2(&free[3], &total), "cuMemGetInfo");
-        g.attached = try xpass.attach(gpu.gpa, gpu.io, gpu.d, g.stream, g.e.layers[0..g.e.n_layers], null, g.e.chunk, try xpass.budgetFromEnv(0), null);
+        g.attached = try xpass.attach(gpu.gpa, gpu.io, gpu.d, g.stream, &g.e.exl3_prefill, g.e.layers[0..g.e.n_layers], null, g.e.chunk, try xpass.budgetFromEnv(0), null);
         try gpu.d.check(gpu.d.api.cuMemGetInfo_v2(&free[4], &total), "cuMemGetInfo");
         std.debug.print("MEM rank {d}/{d}: loaded in {d:.1} s; card {d:.2} GiB; free after weights {d:.2}; pass scratch (chunk {d}) + scores {d:.2} GiB; caches for {d} tokens {d:.2} GiB; deep chunks of {d} rows {d:.2} GiB (layout {d:.2}); pool {d} lines a layer x {d} layers = {d:.2} GiB (line {d:.2} MiB, ring {d} slots); {d:.2} GiB free after; head columns {d}\n", .{ rank, world, ms(t0, check.now(gpu.io)) / 1e3, gib(total), gib(free[0]), g.e.chunk, gib(free[0] - free[1]), cap, gib(free[1] - free[2]), deep_rows, gib(free[2] - free[3]), gib(xpre.deviceBytesAt(deep_rows, world)), g.attached.lines, g.attached.layers, gib(g.attached.device_bytes), @as(f64, @floatFromInt(g.attached.line_bytes)) / (1 << 20), g.attached.lines * 48, gib(free[4]), g.e.head_q.n });
         return g;
     }
 
     fn deinit(g: *Eng) void {
-        xpre.release();
+        xpre.release(&g.e.exl3_prefill);
         g.out.free();
         g.seq.deinit(g.gpu.gpa);
         g.e.deinit();
@@ -191,14 +191,14 @@ fn once(g: *Eng, ids: []const u32, deep: bool, rows: usize, steps: usize) !Run {
     var o = xpre.optionsFromEnv();
     o.enabled = deep;
     o.rows = rows;
-    xpre.state.options = o;
-    xpre.state.stats = .{};
+    g.e.exl3_prefill.options = o;
+    g.e.exl3_prefill.stats = .{};
     try g.reset();
     _ = try g.swap(ids.len);
     const t0 = check.now(g.gpu.io);
     try g.forward(ids);
     const t = ms(t0, check.now(g.gpu.io));
-    const st = xpre.state.stats;
+    const st = g.e.exl3_prefill.stats;
     const logits = try a.alloc(u16, vocab);
     @memcpy(std.mem.sliceAsBytes(logits), g.seq.logits);
     const greedy = try a.alloc(u32, steps + 1);

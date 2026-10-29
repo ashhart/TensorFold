@@ -21,7 +21,6 @@ const Options = state.Options;
 const Pass = state.Pass;
 const now = state.now;
 const profile = state.profile;
-const stats = &state.stats;
 const upload = state.upload;
 
 /// Lines a pass may fill: half the layer's lines (the other half holds the previous pass, still computing).
@@ -51,9 +50,9 @@ pub fn moe(comptime Tri: type, dp: *Deep, p: *batch.Pass(Tri), lw: *const @impor
     try upload(st, dp.dptr(dp.lay.members), std.mem.sliceAsBytes(members[0..counts.members]));
     try upload(st, dp.dptr(dp.lay.items), std.mem.sliceAsBytes(items[0 .. 3 * counts.items]));
     const t2 = now(p.io);
-    stats.host_wait_ns += @intCast(t1 - t0);
-    stats.plan_ns += @intCast(t2 - t1);
-    stats.members += counts.members;
+    dp.runtime.stats.host_wait_ns += @intCast(t1 - t0);
+    dp.runtime.stats.plan_ns += @intCast(t2 - t1);
+    dp.runtime.stats.members += counts.members;
     const pool = x.pool;
     var fake_rows: usize = 0;
     for (dp.passes[0..dp.n_passes]) |ps| {
@@ -65,20 +64,20 @@ pub fn moe(comptime Tri: type, dp: *Deep, p: *batch.Pass(Tri), lw: *const @impor
                 r = try pl.planUnobserved(dp.fake[0 .. fake_rows * slots], fake_rows);
                 if (r.?.n_passes != 1) return error.Exl3PrefillPass;
                 try pl.stage(r.?, 0, st);
-                stats.copies += r.?.misses_();
+                dp.runtime.stats.copies += r.?.misses_();
             }
         }
         const l = if (pool) |pl| pl.tables() else x.layer;
         if (o.slots_kernel) {
             try slotsPass(dp, x, st, l, host_picks, ps, n);
             if (r) |rr| try pool.?.release(rr, 0, st);
-            stats.passes += 1;
+            dp.runtime.stats.passes += 1;
             continue;
         }
         const dv: pk.Device = .{ .members = dp.dptr(dp.lay.members) + ps.m_lo * 4, .items = dp.dptr(dp.lay.items) + ps.i_lo * 12, .scratch = dp.dptr(dp.lay.kscratch) };
         try pk.run(&dp.kern, st, l, dp.dptr(dp.lay.mixed), dims, dp.dptr(dp.lay.picks), slots, ps.m_n, ps.i_n, dv, dp.dptr(dp.lay.y));
         if (r) |rr| try pool.?.release(rr, 0, st);
-        stats.passes += 1;
+        dp.runtime.stats.passes += 1;
     }
     // the next layer's first pass, staged on the copy engine while this layer's experts and the next blocks run
     if (o.prefetch and layer + 1 < p.m.layers.len) {
@@ -137,9 +136,9 @@ pub fn rankSum(dp: *Deep, p: anytype, x: *const load.Experts, n: usize, sub: usi
     if (profile()) {
         if (dp.red) |rs| try c.finish(rs);
         try c.finish(st);
-        stats.reduce_ns += @intCast(now(p.io) - t0);
+        dp.runtime.stats.reduce_ns += @intCast(now(p.io) - t0);
     }
-    stats.reduces += 1;
+    dp.runtime.stats.reduces += 1;
 }
 
 fn overlap() bool {
@@ -183,8 +182,8 @@ pub fn prefetch(dp: *Deep, pool: *pool_.Pool, own: ?tp_.Rank, o: Options) !void 
     // the copies wait for nothing on the compute stream: the aux stream takes the gates and the release
     try pool.stage(r, 0, dp.aux);
     try pool.release(r, 0, dp.aux);
-    stats.prefetched += r.misses_();
-    stats.copies += r.misses_();
+    dp.runtime.stats.prefetched += r.misses_();
+    dp.runtime.stats.copies += r.misses_();
 }
 
 /// The layer's passes: pass 0 the shared expert and every expert the pool holds (no copy), then the others in id

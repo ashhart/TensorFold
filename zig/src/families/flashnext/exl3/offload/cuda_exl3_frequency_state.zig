@@ -18,7 +18,7 @@ pub const State = struct {
     }
 
     pub fn save(state: *State, own: anytype) void {
-        const counts = snapshot(own) catch |err| {
+        const counts = snapshot(own, @import("../dplan/cuda_exl3_dplan.zig").current(&own.engine.exl3_dplan)) catch |err| {
             std.log.err("EXL3 placement profile rank {d}: unsafe snapshot skipped ({s})", .{ state.identity.rank, @errorName(err) });
             return;
         };
@@ -190,10 +190,20 @@ fn decayRow(row: *[512]u32) void {
     }
 }
 
-fn snapshot(own: anytype) !codec.Counts {
+fn snapshot(own: anytype, planner: anytype) !codec.Counts {
     const layers = own.engine.layers[0..own.engine.n_layers];
     if (!available(layers)) return error.ProfileUnavailable;
     try own.stream.synchronize();
+    if (planner) |current| {
+        if (current.indexOf(layers[0].exl3.?.pool.?) != null) {
+            for (current.pools) |pool| {
+                var ours = pool == mtpPool(own.head);
+                for (layers) |layer| ours = ours or pool == layer.exl3.?.pool.?;
+                if (!ours) return error.ProfilePlannerOwnerMismatch;
+            }
+            try current.toHost();
+        }
+    }
     var counts: codec.Counts = .{};
     for (layers, 0..) |layer, index| {
         const pool = layer.exl3.?.pool.?;
@@ -299,6 +309,21 @@ const Mock = struct {
     }
 };
 
+const MockPlan = struct {
+    pools: []const *MockPool,
+    pulls: usize = 0,
+    fail: bool = false,
+    pub fn indexOf(plan: *MockPlan, pool: *const MockPool) ?usize {
+        for (plan.pools, 0..) |held, index| if (held == pool) return index;
+        return null;
+    }
+    pub fn toHost(plan: *MockPlan) !void {
+        if (plan.fail) return error.MockCudaPullFailure;
+        plan.pulls += 1;
+        for (plan.pools, 0..) |pool, index| pool.counts[pool.opt.layer][7] = @intCast(100 + index);
+    }
+};
+
 const test_identity: codec.Identity = .{ .model = @splat(42), .world = 2, .rank = 0 };
 
 test "exl3: placement state lifetime lock conflicts, rank separation and private storage" {
@@ -387,7 +412,7 @@ test "exl3: placement state decay and replacement snapshot do not add imported p
     for (mock.pools) |pool| try std.testing.expectEqual(@as(usize, 1), pool.warm_calls);
     mock.decoder[0][1] += 8;
     mock.mtp[0][1] += 2;
-    const saved = try snapshot(&own);
+    const saved = try snapshot(&own, @as(?*MockPlan, null));
     try codec.write(allocator, io, state.path, state.identity, &saved);
     const disk = try codec.read(allocator, io, state.path, state.identity);
     try std.testing.expectEqual(@as(u32, 9), disk.decoder[0][1]);
@@ -401,20 +426,35 @@ test "exl3: placement state decay and replacement snapshot do not add imported p
     try std.testing.expectError(error.FileNotFound, codec.write(allocator, io, missing, state.identity, &saved));
 }
 
-test "exl3: placement state snapshot synchronizes once and drains decoder and MTP counts" {
+test "exl3: placement state pulls only owning planner before copying decoder and MTP counts" {
     if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
     var mock: Mock = undefined;
     mock.init();
     var own = mock.owner(true);
-    for (&mock.pools, 0..) |*pool, index| pool.counts[pool.opt.layer][7] = @intCast(100 + index);
-    const counts = try snapshot(&own);
+    var owned: [49]*MockPool = undefined;
+    for (&mock.pools, &owned) |*pool, *target| target.* = pool;
+    var plan: MockPlan = .{ .pools = &owned };
+    const counts = try snapshot(&own, @as(?*MockPlan, &plan));
     try std.testing.expectEqual(@as(usize, 1), own.stream.syncs);
+    try std.testing.expectEqual(@as(usize, 1), plan.pulls);
     try std.testing.expectEqual(@as(u32, 100), counts.decoder[0][7]);
     try std.testing.expectEqual(@as(u32, 147), counts.decoder[47][7]);
     try std.testing.expectEqual(@as(u32, 148), counts.mtp[7]);
     for (mock.pools) |pool| try std.testing.expect(pool.lines.drained);
+    plan.fail = true;
+    try std.testing.expectError(error.MockCudaPullFailure, snapshot(&own, @as(?*MockPlan, &plan)));
     own.stream.fail = true;
-    try std.testing.expectError(error.MockCudaSyncFailure, snapshot(&own));
+    try std.testing.expectError(error.MockCudaSyncFailure, snapshot(&own, @as(?*MockPlan, &plan)));
+    own.stream.fail = false;
+    var other: Mock = undefined;
+    other.init();
+    const foreign = [_]*MockPool{&other.pools[0]};
+    var unrelated: MockPlan = .{ .pools = &foreign, .fail = true };
+    _ = try snapshot(&own, @as(?*MockPlan, &unrelated));
+    try std.testing.expectEqual(@as(usize, 0), unrelated.pulls);
+    const mixed = [_]*MockPool{ &mock.pools[0], &other.pools[0] };
+    unrelated.pools = &mixed;
+    try std.testing.expectError(error.ProfilePlannerOwnerMismatch, snapshot(&own, @as(?*MockPlan, &unrelated)));
 }
 
 test "exl3: prepared placement counts import and warm only after pools attach" {

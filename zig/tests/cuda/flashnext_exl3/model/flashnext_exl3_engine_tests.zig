@@ -52,7 +52,7 @@ const Eng = struct {
         g.out = try cuda.DeviceBuffer.alloc(gpu.d, out_rows * vocab * 2);
         var b = try xpass.budgetFromEnv(0);
         if (lines) |n| b.lines = n;
-        g.attached = try xpass.attach(gpu.gpa, gpu.io, gpu.d, g.stream, g.e.layers[0..g.e.n_layers], null, g.e.chunk, b, null);
+        g.attached = try xpass.attach(gpu.gpa, gpu.io, gpu.d, g.stream, &g.e.exl3_prefill, g.e.layers[0..g.e.n_layers], null, g.e.chunk, b, null);
         const t2 = check.now(gpu.io);
         g.load_s = ms(t0, t2) / 1e3;
         var free: usize = 0;
@@ -350,7 +350,7 @@ fn tfMode(gpu: Gpu, dir: []const u8, golden_path: []const u8, lines: ?usize) !vo
 fn printPool(g: *Eng, what: []const u8) void {
     const s = g.stats();
     const routed = s.hit_slots + s.miss_slots;
-    std.debug.print("pool {s}: {d} rounds, {d} passes, hit rate {d:.1}% ({d}/{d} routed slots), {d} copies, {d} evictions; host cut {d:.1} ms over {d} blocks, plan {d:.1} ms\n", .{ what, s.rounds, s.passes, 100 * @as(f64, @floatFromInt(s.hit_slots)) / @as(f64, @floatFromInt(@max(routed, 1))), s.hit_slots, routed, s.misses, s.evictions, @as(f64, @floatFromInt(xpass.pool_time.cut_ns)) / 1e6, xpass.pool_time.blocks, @as(f64, @floatFromInt(xpass.pool_time.plan_ns)) / 1e6 });
+    std.debug.print("pool {s}: {d} rounds, {d} passes, hit rate {d:.1}% ({d}/{d} routed slots), {d} copies, {d} evictions; host cut {d:.1} ms over {d} blocks, plan {d:.1} ms\n", .{ what, s.rounds, s.passes, 100 * @as(f64, @floatFromInt(s.hit_slots)) / @as(f64, @floatFromInt(@max(routed, 1))), s.hit_slots, routed, s.misses, s.evictions, @as(f64, @floatFromInt(s.cut_ns)) / 1e6, s.blocks, @as(f64, @floatFromInt(s.plan_ns)) / 1e6 });
 }
 
 /// Greedy `steps` tokens after `ids`: the prefill's last row, then a decode round a token.

@@ -270,7 +270,13 @@ pub fn moe(p: anytype, lw: anytype, x: *const load.Experts) !void {
         const xin = s.mixed + r0 * dims * 2;
         // offloaded: the rank's own pool plans on the rank's masked picks (the other rank's slots are -1)
         if (x.pool) |pool| {
-            try @import("../model/cuda_exl3_pass.zig").pooled(st, x.ops, pool, ex, x.layer, xin, mp + r0 * slots * 4, rows, sc, 0, 0);
+            const dplan = @import("../dplan/cuda_exl3_dplan.zig");
+            const plans = p.m.dplan;
+            if (plans) |state| if (state.active) |dp| if (dp.indexOf(pool)) |i| { // a decode round planned on the device (no host cut)
+                try dplan.runLayer(dp, st, i, ex, x.layer, xin, mp + r0 * slots * 4, rows, sc, 0, 0);
+                continue;
+            };
+            try @import("../model/cuda_exl3_pass.zig").pooled(st, x.ops, pool, plans, ex, x.layer, xin, mp + r0 * slots * 4, rows, sc, 0, 0);
             continue;
         }
         try ex.runSlots(st, x.layer, xin, dims, .bf16, mp + r0 * slots * 4, rows, sc);

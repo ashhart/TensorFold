@@ -43,12 +43,12 @@ const Eng = struct {
         g.seq = try g.e.newSeq(cap);
         var free2: usize = 0;
         try gpu.d.check(gpu.d.api.cuMemGetInfo_v2(&free2, &total), "cuMemGetInfo");
-        if (deep_rows > 0) try xpre.reserve(gpu.gpa, gpu.d, g.e, deep_rows);
+        if (deep_rows > 0) try xpre.reserve(gpu.gpa, gpu.d, &g.e.exl3_prefill, g.e, deep_rows);
         var free3: usize = 0;
         try gpu.d.check(gpu.d.api.cuMemGetInfo_v2(&free3, &total), "cuMemGetInfo");
         var b = try xpass.budgetFromEnv(0);
         if (lines) |n| b.lines = n;
-        g.attached = try xpass.attach(gpu.gpa, gpu.io, gpu.d, g.stream, g.e.layers[0..g.e.n_layers], null, g.e.chunk, b, null);
+        g.attached = try xpass.attach(gpu.gpa, gpu.io, gpu.d, g.stream, &g.e.exl3_prefill, g.e.layers[0..g.e.n_layers], null, g.e.chunk, b, null);
         var free4: usize = 0;
         try gpu.d.check(gpu.d.api.cuMemGetInfo_v2(&free4, &total), "cuMemGetInfo");
         const gib = struct {
@@ -61,7 +61,7 @@ const Eng = struct {
     }
 
     pub fn deinit(g: *Eng) void {
-        xpre.release();
+        xpre.release(&g.e.exl3_prefill);
         g.seq.deinit(g.gpu.gpa);
         g.e.deinit();
         g.glue.deinit();
@@ -109,7 +109,7 @@ fn prefillOnce(g: *Eng, ids: []const u32, deep_on: bool, out: []u16) !f64 {
     var o = xpre.optionsFromEnv();
     o.enabled = deep_on;
     if (rows_override) |r| o.rows = r;
-    xpre.state.options = o;
+    g.e.exl3_prefill.options = o;
     try g.reset();
     const t0 = check.now(g.gpu.io);
     try g.e.forward(flash.Tri, g.tri(), &g.seq, ids, .{ .logits = .last });
@@ -200,10 +200,10 @@ pub fn engineRun(gpu: Gpu, dir: []const u8, rest: []const [:0]const u8) !void {
         if (rr != 0) std.debug.print("deep chunk rows {d}:\n", .{rr});
         const ids = all_ids[0..n];
         const p0 = g.poolStats();
-        xpre.state.stats = .{};
+        g.e.exl3_prefill.stats = .{};
         const t_new = try prefillOnce(g, ids, o.enabled, new);
         const p1 = g.poolStats();
-        const xs_ = xpre.state.stats;
+        const xs_ = g.e.exl3_prefill.stats;
         std.debug.print("PREFILL {d:6} tokens ({s}): {d:9.1} ms = {d:7.1} rows/s; pool copies {d} ({d:.1} GiB, {d:.2} a layer per 1k rows), deep chunks {d}, passes {d}, prefetched {d}, members {d}; host: picks wait {d:.1} ms, plan {d:.1} ms\n", .{ n, if (o.enabled) "expert-major deep" else "batched pass", t_new, @as(f64, @floatFromInt(n)) / (t_new / 1e3), p1.misses - p0.misses, @as(f64, @floatFromInt(p1.misses - p0.misses)) * 1.758 / 1024, @as(f64, @floatFromInt(p1.misses - p0.misses)) / 48 / (@as(f64, @floatFromInt(n)) / 1000), xs_.chunks, xs_.passes, xs_.prefetched, xs_.members, @as(f64, @floatFromInt(xs_.host_wait_ns)) / 1e6, @as(f64, @floatFromInt(xs_.plan_ns)) / 1e6 });
         // decode after the prefill: the pools were left empty by the ring (or hold the batched pass's lines)
         if (decode_steps > 0) try decodeAfter(g, n);

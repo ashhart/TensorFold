@@ -101,7 +101,7 @@ pub const Eng = struct {
         g.seq = try g.e.newSeq(cap_default);
         g.seq_live = true;
         g.out = try cuda.DeviceBuffer.alloc(gpu.d, out_rows * vocab * 2);
-        g.attached = try xpass.attach(gpu.gpa, gpu.io, gpu.d, g.stream, g.e.layers[0..g.e.n_layers], null, g.e.chunk, try xpass.budgetFromEnv(0), null);
+        g.attached = try xpass.attach(gpu.gpa, gpu.io, gpu.d, g.stream, &g.e.exl3_prefill, g.e.layers[0..g.e.n_layers], null, g.e.chunk, try xpass.budgetFromEnv(0), null);
         const t2 = check.now(gpu.io);
         var free: usize = 0;
         var total: usize = 0;
@@ -160,7 +160,7 @@ pub const Eng = struct {
 pub fn printPool(g: *Eng, what: []const u8) void {
     const s = g.stats();
     const routed = s.hit_slots + s.miss_slots;
-    std.debug.print("RESULT rank {d}/{d} pool {s}: {d} rounds, {d} passes, hit rate {d:.1}% ({d}/{d} routed slots of this rank), {d} copies, {d} evictions; host cut {d:.1} ms over {d} blocks, plan {d:.1} ms\n", .{ g.rank, g.world, what, s.rounds, s.passes, 100 * @as(f64, @floatFromInt(s.hit_slots)) / @as(f64, @floatFromInt(@max(routed, 1))), s.hit_slots, routed, s.misses, s.evictions, @as(f64, @floatFromInt(xpass.pool_time.cut_ns)) / 1e6, xpass.pool_time.blocks, @as(f64, @floatFromInt(xpass.pool_time.plan_ns)) / 1e6 });
+    std.debug.print("RESULT rank {d}/{d} pool {s}: {d} rounds, {d} passes, hit rate {d:.1}% ({d}/{d} routed slots of this rank), {d} copies, {d} evictions; host cut {d:.1} ms over {d} blocks, plan {d:.1} ms\n", .{ g.rank, g.world, what, s.rounds, s.passes, 100 * @as(f64, @floatFromInt(s.hit_slots)) / @as(f64, @floatFromInt(@max(routed, 1))), s.hit_slots, routed, s.misses, s.evictions, @as(f64, @floatFromInt(s.cut_ns)) / 1e6, s.blocks, @as(f64, @floatFromInt(s.plan_ns)) / 1e6 });
 }
 
 // -- golden ---------------------------------------------------------------------------------------------------------

@@ -238,13 +238,18 @@ pub const Session = struct {
 
     /// Both ranks keep their own recurrent window; only the leader consumes draft scores and hidden rows.
     pub fn verify(s: *Session, comptime Tri: type, tri: Tri, q: *prompt.Seq, d: *mtp.Draft, ids: []const u32) !void {
-        if (!s.drafting or ids.len == 0 or ids.len > mtp.max_rows or q.fed + ids.len > q.cap) return error.UnsupportedRankOperation;
+        return s.verifyWithTail(Tri, tri, q, d, ids, null);
+    }
+
+    pub fn verifyWithTail(session: *Session, comptime Tri: type, tri: Tri, seq: *prompt.Seq, draft_state: *mtp.Draft, ids: []const u32, tail: ?prompt.batch.Hooks.OutputTail) !void {
+        if (tail != null and session.rank != 0) return error.UnsupportedRankOperation;
+        if (!session.drafting or ids.len == 0 or ids.len > mtp.max_rows or seq.fed + ids.len > seq.cap) return error.UnsupportedRankOperation;
         try tokenIds(ids);
-        const h = try s.command(.{ .kind = .verify, .object = q.rank_id, .bytes = @intCast(ids.len * 4) }, std.mem.sliceAsBytes(ids));
-        errdefer s.poison();
-        const ops: mtp.Ops(Tri) = .{ .e = s.engine, .tri = tri, .h = undefined };
-        try ops.verify(q, d, ids);
-        try s.ack(h);
+        const header = try session.command(.{ .kind = .verify, .object = seq.rank_id, .bytes = @intCast(ids.len * 4) }, std.mem.sliceAsBytes(ids));
+        errdefer session.poison();
+        const ops: mtp.Ops(Tri) = .{ .e = session.engine, .tri = tri, .h = undefined };
+        try ops.verifyWithTail(seq, draft_state, ids, tail);
+        try session.ack(header);
     }
 
     pub fn keep(s: *Session, comptime Tri: type, tri: Tri, q: *prompt.Seq, d: *mtp.Draft, count: usize) !void {
@@ -383,6 +388,8 @@ pub const Session = struct {
             },
             .drop_seq => {
                 s.engine.round_graph.clear();
+                const sequence = s.seqs.get(h.object) orelse return error.UnknownRankSequence;
+                if (sequence.paged != null) @import("exl3/graph/cuda_exl3_graph.zig").releaseDecodeSeq(sequence);
                 if (s.windows.fetchRemove(h.object)) |entry| {
                     var d = entry.value;
                     d.deinit();

@@ -20,7 +20,6 @@ const shared_id = wt.experts_n;
 const Deep = state.Deep;
 const Options = state.Options;
 const now = state.now;
-const stats = &state.stats;
 const upload = state.upload;
 const build = experts.build;
 const maskOwned = experts.maskOwned;
@@ -155,9 +154,9 @@ pub fn ringMoe(comptime Tri: type, dp: *Deep, r: *ring_.Ring, p: *batch.Pass(Tri
     try upload(st, dp.dptr(dp.lay.members), std.mem.sliceAsBytes(members_h[0..counts.members]));
     try upload(st, dp.dptr(dp.lay.items), std.mem.sliceAsBytes(items_h[0 .. 3 * counts.items]));
     const t2 = now(p.io);
-    stats.host_wait_ns += @intCast(t1 - t0);
-    stats.plan_ns += @intCast(t2 - t1 - staging_ns);
-    stats.members += counts.members;
+    dp.runtime.stats.host_wait_ns += @intCast(t1 - t0);
+    dp.runtime.stats.plan_ns += @intCast(t2 - t1 - staging_ns);
+    dp.runtime.stats.members += counts.members;
     const l = pool.tables();
     // the first two passes' copies, then each pass: the next pass's copies, the gate, the kernel, the release
     for (dp.passes[0..dp.n_passes], 0..) |ps, j| {
@@ -172,9 +171,9 @@ pub fn ringMoe(comptime Tri: type, dp: *Deep, r: *ring_.Ring, p: *batch.Pass(Tri
             try pk.run(&dp.kern, st, l, dp.dptr(dp.lay.mixed), dims, dp.dptr(dp.lay.picks), slots, ps.m_n, ps.i_n, dv, dp.dptr(dp.lay.y));
         }
         try r.release(st, layer, ids_);
-        stats.passes += 1;
+        dp.runtime.stats.passes += 1;
     }
-    stats.copies += r.stats.copies - copies0;
+    dp.runtime.stats.copies += r.stats.copies - copies0;
     dp.history[layer] = .{ .rows = n, .used = used };
     const c1 = r.stats.copies;
     for (1..o.ring_ahead + 1) |ahead| {
@@ -182,8 +181,8 @@ pub fn ringMoe(comptime Tri: type, dp: *Deep, r: *ring_.Ring, p: *batch.Pass(Tri
         if (nl >= wt.layers_n) break;
         _ = try r.prefetch(nl, history_.want(dp.history[nl], n, used, routed_n_), keepFree(r, o), .cross_layer_prefetch);
     }
-    stats.prefetched += r.stats.copies - c1;
-    stats.copies += r.stats.copies - c1;
+    dp.runtime.stats.prefetched += r.stats.copies - c1;
+    dp.runtime.stats.copies += r.stats.copies - c1;
     p.pending = layer;
 }
 

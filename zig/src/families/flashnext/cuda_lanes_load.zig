@@ -112,7 +112,9 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     try @import("exl3/kv/cuda_exl3_kv.zig").logStream(own.engine, window, stream_bytes); // K10: what a stream holds, by piece
     own.exl3 = mode == .exl3;
     own.stream_bytes = stream_bytes;
-    const pool_budget = try exl3_pass.budgetForStreams(stream_bytes, o.lanes);
+    var pool_budget = try exl3_pass.budgetForStreams(stream_bytes, o.lanes);
+    if (mode == .exl3 and @import("exl3/graph/cuda_exl3_graph.zig").enabled()) pool_budget.graph_reservation = try @import("exl3/graph/cuda_exl3_graph_memory.zig").startupReservationForStreams(o.lanes);
+    own.graph_reservation = pool_budget.graph_reservation;
     const placement = @import("exl3/offload/cuda_exl3_frequency_state.zig");
     if (try placement.prepare(gpa, io, dir, own.engine.layers[0..own.engine.n_layers], own.head, @intCast(o.tp), @intCast(o.rank))) |prepared| {
         own.profile = prepared.state;
@@ -120,7 +122,10 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     }
     errdefer if (own.profile) |*profile| profile.deinit();
     const profile_counts = if (own.profile_counts) |*counts| &counts.decoder else null;
-    const attached = try exl3_pass.attach(gpa, io, driver, own.stream, own.engine.layers[0..own.engine.n_layers], if (own.head) |h| &h.layer else null, own.engine.chunk, pool_budget, profile_counts);
+    const attached = try exl3_pass.attach(gpa, io, driver, own.stream, &own.engine.exl3_prefill, own.engine.layers[0..own.engine.n_layers], if (own.head) |h| &h.layer else null, own.engine.chunk, pool_budget, profile_counts);
+    own.graph_reservation = attached.graph_reservation;
+    own.engine.exl3_dplan.mtp_pool = attached.mtp_pool;
+    if (own.graph_reservation != 0) std.log.info("flashnext rank {d}: pools and lanes keep {d} bytes free for the retained graphs (measured exec memory of a full run: under 64 MiB a stream; captures draw on the device reserve)", .{ o.rank, own.graph_reservation });
     if (own.profile_counts) |*counts| try placement.finish(own, counts);
     const ledger: memory.Ledger = .{
         .persistent = persistent_bytes,
@@ -128,9 +133,9 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
         .deep_prefill = try std.math.add(u64, deep_bytes, attached.prefill_window_bytes),
         .pool_scratch = attached.scratch_bytes,
         .expert_pools = attached.device_bytes,
-        .reservation = .{ .stream_bytes = stream_bytes, .streams = if (stream_bytes == 0) 0 else pool_budget.other / stream_bytes },
+        .reservation = .{ .stream_bytes = stream_bytes, .streams = if (stream_bytes == 0) 0 else pool_budget.other / stream_bytes, .graph_bytes = attached.graph_reservation, .after_pool_bytes = attached.after_pool_bytes },
     };
-    std.log.info("flashnext rank {d} memory ledger: persistent={d} scratch={d} deep_prefill={d} pool_scratch={d} expert_pools={d} stream_bytes={d} streams={d} planned_total={d} free_after_pools={d}", .{ o.rank, ledger.persistent, ledger.scratch, ledger.deep_prefill, ledger.pool_scratch, ledger.expert_pools, stream_bytes, ledger.reservation.streams, try ledger.total(), attached.free_after });
+    std.log.info("flashnext rank {d} memory ledger: persistent={d} scratch={d} deep_prefill={d} pool_scratch={d} expert_pools={d} stream_bytes={d} streams={d} graph_reservation={d} planned_total={d} free_after_pools={d}", .{ o.rank, ledger.persistent, ledger.scratch, ledger.deep_prefill, ledger.pool_scratch, ledger.expert_pools, stream_bytes, ledger.reservation.streams, pool_budget.graph_reservation, try ledger.total(), attached.free_after });
     return .{
         .layout = own.kv.layout,
         .vision = own.vision,

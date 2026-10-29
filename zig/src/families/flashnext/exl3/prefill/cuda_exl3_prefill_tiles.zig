@@ -4,13 +4,11 @@ const cuda = @import("cuda");
 const wt = @import("../../cuda_prompt_wt.zig");
 const prompt = @import("../../cuda_prompt.zig");
 
-/// Set while a deep prefill runs with Options.tiles: cuda_exl3_pass.part sends prompt rows to Dense.prompt on tiles.
-pub var tiles_on: bool = false;
 /// Rows below which a projection keeps the reference kernels (tiles lose at a few rows).
 const tiles_min_rows: usize = 64;
 
 /// The hook in cuda_exl3_pass.part: true when it ran the part on the tiles (bf16 or fp32 out).
-pub fn tilesPart(de: *cuda.exl3.Dense, s: cuda.Stream, w: cuda.exl3.Weight, x: u64, m: usize, y: u64, f32_out: bool) !bool {
+pub fn tilesPart(tiles_on: bool, de: *cuda.exl3.Dense, s: cuda.Stream, w: cuda.exl3.Weight, x: u64, m: usize, y: u64, f32_out: bool) !bool {
     if (!tiles_on or m < tiles_min_rows) return false;
     _ = cuda.exl3.Dense.candidateWeight(w) catch return false;
     if (de.candidate_k == null or de.candidate_k.?.k_max < w.k) return false;
