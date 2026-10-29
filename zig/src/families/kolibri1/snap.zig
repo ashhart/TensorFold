@@ -28,6 +28,18 @@ fn each(m: *const fwd.Model, slot: usize, at: usize, ctx: anytype, comptime f: f
     var off: usize = 0;
     for (0..m.c.layers) |i| for ([_][]u64{ m.k, m.v }) |cache| {
         const full = m.c.full[i];
+        if (full and m.paged) { // pages: p in page p / page_tokens of the slot's row, a copy a run within one
+            var p: usize = 0;
+            while (p < at) {
+                const into = p % fwd.page_tokens;
+                const run = @min(at - p, fwd.page_tokens - into);
+                const row = @as(usize, m.ids[slot * m.perSlot() + p / fwd.page_tokens]) * fwd.page_tokens + into;
+                try f(ctx, cache[i] + row * rb, off, run * rb);
+                off += run * rb;
+                p += run;
+            }
+            continue;
+        }
         const len = if (full) m.context else m.ring;
         const base = cache[i] + slot * len * rb;
         var p = if (full) 0 else at - tail(m, at);
@@ -92,6 +104,7 @@ test "a state holds full layers' positions and each sliding ring's window, wrapp
     m.c = c;
     m.context = 64;
     m.ring = 8;
+    m.paged = false;
     m.k = &k;
     m.v = &v;
     const rb = 256;
@@ -106,4 +119,32 @@ test "a state holds full layers' positions and each sliding ring's window, wrapp
         .{ (2 << 20) + 64 * rb, 8 * rb, 10 * rb },     .{ (4 << 20) + 64 * rb, 18 * rb, 10 * rb },
     };
     try testing.expectEqualSlices([3]usize, &want, runs.items);
+}
+
+test "a paged state takes a full layer's positions through the slot's pages, a run a page, in position order" {
+    const Config = @import("config.zig").Config;
+    var c: Config = .{ .layers = 2, .hidden = 128, .heads = 4, .kv_heads = 1, .head_dim = 128, .vocab = 8, .experts = 2, .top_k = 1, .moe_width = 128, .shared_width = 128, .window = 5, .rope_theta = 1e4, .eps = 1e-6 };
+    c.full[1] = true;
+    var k = [_]u64{ 1 << 30, 2 << 30 };
+    var v = [_]u64{ 3 << 30, 4 << 30 };
+    var ids = [_]u32{ 0, 0, 0, 5, 1, 0 }; // slot 1's row: pages 5, 1, then unmapped
+    var m: fwd.Model = undefined;
+    m.c = c;
+    m.context = 3 * fwd.page_tokens;
+    m.ring = 8;
+    m.paged = true;
+    m.ids = &ids;
+    m.k = &k;
+    m.v = &v;
+    const rb = 256;
+    const pt = fwd.page_tokens;
+    const at = pt + 7; // page 5 whole, then 7 rows of page 1
+    var runs: std.ArrayList([3]usize) = .empty;
+    defer runs.deinit(testing.allocator);
+    try each(&m, 1, at, Count{ .runs = &runs }, Count.add);
+    try testing.expectEqual(@as(usize, 2 * 1 + 2 * 2), runs.items.len); // sliding K and V: one run each
+    const kr = runs.items[2..4];
+    try testing.expectEqual([3]usize{ (2 << 30) + 5 * pt * rb, 8 * rb, pt * rb }, kr[0]);
+    try testing.expectEqual([3]usize{ (2 << 30) + 1 * pt * rb, 8 * rb + pt * rb, 7 * rb }, kr[1]);
+    try testing.expectEqual([3]usize{ (4 << 30) + 1 * pt * rb, bytes(&m, at) - 7 * rb, 7 * rb }, runs.items[5]);
 }
