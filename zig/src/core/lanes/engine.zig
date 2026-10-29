@@ -69,6 +69,7 @@ pub const Engine = struct {
                 .mtp_step_ms = cfg.mtp_step_ms,
                 .draft_step_ms = cfg.draft_step_ms,
                 .plain_guard = cfg.plain_guard,
+                .rate_guard = cfg.rate_guard,
                 .node_probabilities = cfg.node_probabilities,
                 .confidence_floor = cfg.draft_confidence,
                 .batch_rows = cfg.batch_rows,
@@ -228,6 +229,7 @@ pub const Engine = struct {
                 const first = s.rounds == 1; // a stream's first round carries the prefill-to-decode switch
                 try trail.event(e, &.{ f("ev", str("cost")), f("stream", str(s.id)), f("drafts", int(rows - 1)), f("init", .{ .bool = first }), f("ms", ev.bits(ms)) });
                 try e.rule.observeCost(@intCast(rows - 1), ms, first, win.who(s));
+                if (e.cfg.rate_guard and !first) try e.rule.observeRate(win.who(s), o.got.len, ms);
                 lone_costs.observe(s, plan.cost_probe_rows, rows, ms);
             }
         }
@@ -263,6 +265,7 @@ pub const Engine = struct {
         var total: u64 = 0;
         for (plans, windows, out) |p, *w, *o| {
             w.* = try win.build(e, p, false);
+            if (e.cfg.rate_guard and w.rows() == 1) w.hidden = e.rule.rowsWanted(win.who(p.stream));
             o.* = .{ .sampled = try a.alloc(u32, w.rows()), .drafts = try a.alloc(u32, w.rows() - 1), .rows = if (p.stream.logprobs != null) try a.alloc(LogRow, w.rows()) else &.{} };
             total += w.rows();
         }
@@ -305,6 +308,8 @@ pub const Engine = struct {
             };
         };
         try e.backend.keep(windows, paths);
+        // the guard's samples: each stream's tokens over the shared round's ms (a first round carries the switch)
+        if (e.cfg.rate_guard and e.cfg.timed) for (heads.items) |i| if (plans[i].stream.rounds > 1) try e.rule.observeRate(win.who(plans[i].stream), outcomes[i].got.len, e.clock.elapsedMs(.cost));
         if (e.cfg.timed) {
             // the drafts budgets priced past each stream's first are no part of the round's overhead
             var steps: i64 = 0;

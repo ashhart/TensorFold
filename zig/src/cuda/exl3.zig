@@ -243,19 +243,34 @@ pub const Dense = struct {
         return m;
     }
 
-    fn tiles(de: *Dense, s: Stream, w: Weight, x: u64, xd: DType, rows: usize, y: u64, yd: DType, prompt_path: bool) !void {
+    /// Prompt rows on the tensor units with `matmul`'s bytes: the decode kernel's rotation, chains and epilogue.
+    pub fn promptExact(de: *Dense, s: Stream, w: Weight, x: u64, rows: usize, y: u64, yd: DType) !void {
         const m = try candidateWeight(w);
-        if (xd != .bf16 or yd == .f16) return error.CandidateFormat;
-        if (de.candidate_k == null or de.candidate_k.?.k_max < w.k) {
+        if (yd == .f16) return error.CandidateFormat;
+        const p = plan(w.k, w.n, 192, 8);
+        if (variantIndex(w.halves, w.codebook, p.wk) == null) return error.UnsupportedExl3Width;
+        try de.candidates(w.k);
+        return de.candidate_k.?.promptExact(s, de.lin.rot_in, x, m, y, rows, yd == .f32, p.sk, p.wk);
+    }
+
+    /// Loads the candidate module's kernels (fp16 rotated rows for inputs up to `k_in`) if not loaded wide enough.
+    pub fn candidates(de: *Dense, k_in: usize) !void {
+        if (de.candidate_k == null or de.candidate_k.?.k_max < k_in) {
             if (!kernels.available) return error.BuiltWithoutKernels;
             var mod = try Module.load(de.d, kernels.exl3_candidate);
             errdefer mod.unload();
-            const replacement = try candidate.Kernels.resolve(de.d, mod, w.k);
+            const replacement = try candidate.Kernels.resolve(de.d, mod, k_in);
             if (de.candidate_k) |*k| k.deinit();
             if (de.candidate_mod) |*old| old.unload();
             de.candidate_mod = mod;
             de.candidate_k = replacement;
         }
+    }
+
+    fn tiles(de: *Dense, s: Stream, w: Weight, x: u64, xd: DType, rows: usize, y: u64, yd: DType, prompt_path: bool) !void {
+        const m = try candidateWeight(w);
+        if (xd != .bf16 or yd == .f16) return error.CandidateFormat;
+        try de.candidates(w.k);
         const k = &de.candidate_k.?;
         if (prompt_path) return k.prompt(s, x, w.k, m, y, rows, yd == .f32);
         return k.rows(s, x, w.k, m, y, rows, yd == .f32);

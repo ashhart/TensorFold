@@ -32,7 +32,8 @@ const registry = .{ nemotron.native, nemotron.omni, glm.native, qwen35.native, q
 /// --record opens here (engines.zig refuses it for a backend without this).
 pub const records = true;
 pub const backends: []const []const u8 = &.{"cuda"};
-pub const serves: []const []const u8 = &.{ "--mtp-drafts", "--mtp-confidence", "--policy", "--checkpoint-slots", "--spill-gib" };
+// --tp and the flags it places ranks with: a Flash Next EXL3 pack only (cuda_refusal.packRanks)
+pub const serves: []const []const u8 = &.{ "--tp", "--mtp-drafts", "--mtp-confidence", "--policy", "--checkpoint-slots", "--spill-gib" };
 pub const families: []const api.Family = blk: {
     var out: [registry.len + 4]api.Family = undefined;
     for (registry, 0..) |F, i| out[i] = .{ .model_type = F.model_type, .formats = F.formats };
@@ -205,7 +206,8 @@ const no_stream = "the CUDA memory budget fits no stream: one at a {d}-token win
 const too_many = "--parallel {d} needs {d:.2} GiB for its streams at a {d}-token window, " ++
     "and the CUDA memory budget leaves {d:.2} GiB{s}: serve --parallel {d}, or lower --context";
 fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
-    if (refusals.family(F, o)) |why| {
+    const exl3_pack = if (comptime @hasDecl(F, "exl3_pack")) o.tp > 1 and F.exl3_pack(gpa, io, o.dir) else false;
+    if (refusals.admitted(F, o, exl3_pack) orelse refusals.packRanks(F, o, exl3_pack)) |why| {
         problem.* = why;
         return null;
     }
@@ -358,7 +360,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         low = try std.fmt.allocPrint(a, " on rank {d}, the smallest room of the ranks", .{pr.rank});
     };
     const free = loaded.free_streams;
-    const grow = budget.growRoom(room, !@hasField(F.Options, "lanes"));
+    const preallocates_lanes = if (@hasDecl(F, "preallocates_lanes")) F.preallocates_lanes else @hasField(F.Options, "lanes");
+    const grow = budget.growRoom(room, !preallocates_lanes);
     const wrapped = kv_pages.wrapped(F, loaded, free, served.stream_bytes, room);
     const layout = wrapped.layout;
     var paged: ?kv_pages.Plan = null;
@@ -412,7 +415,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         // rules and budget from the family's snap_* declarations (cuda_snaps.zig)
         const image: ?*const pc.rows.Image = if (F == nemotron.native) &cuda_disk.image else if (comptime cuda_disk.keptDisk(F)) |K| &K.image else null;
         const copies: pc.Snapshots = .{ .ptr = loaded.target, .vtable = &snaps.Snaps(F, image).vtable };
-        store.* = pc.Store.init(gpa, copies, snaps.passRules(F, @import("cuda_startup.zig").rows(F, loaded)), if (@hasDecl(F, "snap_slots")) cache else try snaps.cacheBudget(F, loaded.target, cache));
+        store.* = pc.Store.init(gpa, copies, snaps.passRules(F, @import("cuda_startup.zig").rows(F, loaded), snaps.loadedGrid(loaded)), if (@hasDecl(F, "snap_slots")) cache else try snaps.cacheBudget(F, loaded.target, cache));
         errdefer {
             const disk = store.disk;
             store.deinit();
@@ -528,6 +531,10 @@ test "family readiness reaches production lane admission without binding CUDA" {
 
 test "Flash Next refuses tensor-rank draft caching before files or CUDA" {
     try @import("cuda_flashnext_refusal_test.zig").cache(openWith);
+}
+
+test "Flash Next serves --tp for EXL3 packs only and keeps the tensor-rank draft refusal for any other pack" {
+    try @import("cuda_flashnext_refusal_test.zig").packs();
 }
 
 test "Flash Next takes --vision at family admission" {

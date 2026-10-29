@@ -90,6 +90,9 @@ test "draft sources: CUDA Qwen dense and MoE share copy-only target facts" {
 
 test "draft sources: CUDA Flash Next follows the loaded checkpoint head" {
     var b: @import("flashnext").native.Cuda = undefined;
+    var engine: @typeInfo(@TypeOf(b.engine)).pointer.child = undefined;
+    engine.n_layers = 0;
+    b.engine = &engine;
     b.head = null;
     b.depth = 8;
     try check(b.facts(), null, true, false);

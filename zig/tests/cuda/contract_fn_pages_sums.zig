@@ -22,7 +22,7 @@ const keys = 2048;
 const blocks = 600;
 const eps: f32 = 1e-6;
 
-pub const Mode = enum { prep, prep_media, pool, pool_media, scores, ahead, one, fused };
+pub const Mode = enum { prep, prep_media, pool, pool_media, scores, ahead, one, fused, prep_planes, prep_media_planes, pool_planes, pool_media_planes, scores_planes };
 const modes = std.enums.values(Mode);
 const vt = g.hooks(Runner);
 const rms_why = "BF16 RMS output rounding can hide a BF16 sum error; FP16 overflow is proved; BF16 margins are printed";
@@ -31,10 +31,29 @@ fn depth(s: c.Shape) usize {
     return s.k + 32;
 }
 
-pub fn spec(mode: Mode) c.Spec {
+/// The one-plane mode a planes mode checks the same sums as.
+fn baseOf(mode: Mode) Mode {
+    return switch (mode) {
+        .prep_planes => .prep,
+        .prep_media_planes => .prep_media,
+        .pool_planes => .pool,
+        .pool_media_planes => .pool_media,
+        .scores_planes => .scores,
+        else => mode,
+    };
+}
+
+pub fn spec(full: Mode) c.Spec {
+    const mode = baseOf(full);
     const norm = mode == .prep or mode == .prep_media or mode == .pool or mode == .pool_media;
     return .{
-        .name = switch (mode) {
+        .name = if (mode != full) switch (full) {
+            .prep_planes => "cuda planes fn_attn_prep FP32 norms",
+            .prep_media_planes => "cuda planes fn_attn_prep_media FP32 norms",
+            .pool_planes => "cuda planes fn_qsa_pool FP32 pool and norms",
+            .pool_media_planes => "cuda planes fn_qsa_pool_media FP32 pool and norms",
+            else => "cuda planes fn_qsa_scores FP32 dots",
+        } else switch (mode) {
             .prep => "cuda paged fn_attn_prep FP32 norms",
             .prep_media => "cuda paged fn_attn_prep_media FP32 norms",
             .pool => "cuda paged fn_qsa_pool FP32 pool and norms",
@@ -43,6 +62,7 @@ pub fn spec(mode: Mode) c.Spec {
             .ahead => "cuda paged fn_attn_chunks_ahead FP32 attention",
             .one => "cuda paged fn_attn_chunks_one FP32 attention",
             .fused => "cuda paged fn_attn_fused FP32 attention",
+            .prep_planes, .prep_media_planes, .pool_planes, .pool_media_planes, .scores_planes => unreachable,
         },
         .accum = .f32,
         .depth = depth,
@@ -103,6 +123,15 @@ const Runner = struct {
     terms: []f64 = &.{},
     dev: [16]u64 = @splat(0),
     pg: flash.Pg = .{},
+    itab: []u32 = &.{}, // a planes mode: the index plane's table, the page ids in order
+
+    fn base(self: *const Runner) Mode {
+        return baseOf(self.mode);
+    }
+
+    fn planes(self: *const Runner) bool {
+        return self.base() != self.mode;
+    }
 
     fn deinit(self: *Runner) void {
         cuda.completion.drain(self.rig.gpu.d, self.rig.s, "paged sum checks did not drain before buffer release");
@@ -121,9 +150,9 @@ const Runner = struct {
         const a = self.arena.?.allocator();
         self.rows = shape.rows;
         self.dev = @splat(0);
-        const pos: i32 = if (self.mode == .scores) 4 * blocks - 1 else if (self.isAttention()) 4095 else 0;
+        const pos: i32 = if (self.base() == .scores) 4 * blocks - 1 else if (self.isAttention()) 4095 else 0;
         self.dev[0] = try self.rig.input(std.mem.asBytes(&pos));
-        const cap = if (self.mode == .scores) 4 * blocks else if (self.isAttention()) 4096 + self.rows else ptok;
+        const cap = if (self.base() == .scores) 4 * blocks else if (self.isAttention()) 4096 + self.rows else ptok;
         const np = (cap + ptok - 1) / ptok;
         const table = try a.alloc(u32, np);
         for (table, 0..) |*id, i| id.* = @intCast(np - 1 - i);
@@ -131,6 +160,13 @@ const Runner = struct {
         self.kv = try a.alloc(u16, np * page_elems);
         @memset(self.kv, 0);
         self.pg = .{ .pt = try self.rig.input(std.mem.sliceAsBytes(table)), .ps = @intCast(page_elems), .ptok = ptok };
+        if (self.planes()) {
+            // the indexer keys by logical page, the K/V rows by (reversed) frame: two tables over the one buffer
+            self.itab = try a.alloc(u32, np);
+            for (self.itab, 0..) |*id, i| id.* = @intCast(i);
+            self.pg.ips = @intCast(page_elems);
+            self.pg.ipt = try self.rig.input(std.mem.sliceAsBytes(self.itab));
+        }
         if (self.isAttention()) {
             self.q = try a.alloc(u16, self.rows * qh * hd);
             @memset(self.q, 0);
@@ -154,7 +190,7 @@ const Runner = struct {
             self.dev[6] = try self.rig.scratch(self.rows * 5 * qh * 4);
             self.dev[7] = try self.rig.scratch(self.rows * 5 * qh * 4);
             self.dev[8] = try self.rig.output(self.count() * 2);
-        } else if (self.mode == .scores) {
+        } else if (self.base() == .scores) {
             self.q = try a.alloc(u16, self.rows * ih * di);
             for (self.q, 0..) |*v, i| v.* = c.toBf16(if (i % di < di / 2) 127 else 126);
             self.terms = try a.alloc(f64, di);
@@ -171,7 +207,7 @@ const Runner = struct {
     }
 
     const Part = enum { key, value, index, pooled };
-    fn pageAt(_: *const Runner, table: []const u32, row: usize, part: Part) usize {
+    fn pageAt(self: *const Runner, table: []const u32, row: usize, part: Part) usize {
         const stride = ptok * (2 * kh * hd + di) + ptok / 4 * di;
         const per: usize = if (part == .pooled) ptok / 4 else ptok;
         const row_len: usize = if (part == .key or part == .value) kh * hd else di;
@@ -181,11 +217,12 @@ const Runner = struct {
             .index => 2 * ptok * kh * hd,
             .pooled => ptok * (2 * kh * hd + di),
         };
-        return table[row / per] * stride + off + row % per * row_len;
+        const id = if (self.planes() and (part == .index or part == .pooled)) self.itab[row / per] else table[row / per];
+        return id * stride + off + row % per * row_len;
     }
 
     fn isAttention(self: *const Runner) bool {
-        return self.mode == .ahead or self.mode == .one or self.mode == .fused;
+        return self.base() == .ahead or self.base() == .one or self.base() == .fused;
     }
 
     fn prepareNorm(self: *Runner, a: std.mem.Allocator, table: []const u32) !void {
@@ -202,7 +239,7 @@ const Runner = struct {
                 for (0..di) |d| proj[row * pw + qh * 2 * hd + 2 * kh * hd + h * di + d] = c.toBf16(@floatCast(normValue(d)));
             }
         }
-        if (self.mode == .pool or self.mode == .pool_media) {
+        if (self.base() == .pool or self.base() == .pool_media) {
             for (0..4) |j| {
                 for (0..di) |d| self.kv[self.pageAt(table, j, .index) + d] = c.toBf16(@floatCast(normValue(d)));
             }
@@ -215,7 +252,7 @@ const Runner = struct {
         self.dev[3] = try self.rig.input(std.mem.asBytes(&inv));
         const rope: [12]i32 = @splat(0);
         self.dev[4] = try self.rig.input(std.mem.asBytes(&rope));
-        if (self.mode == .prep or self.mode == .prep_media) {
+        if (self.base() == .prep or self.base() == .prep_media) {
             self.dev[8] = try self.rig.output(self.rows * qh * hd * 2);
             self.dev[10] = try self.rig.output(self.rows * ih * di * 2);
         } else {
@@ -233,10 +270,10 @@ const Runner = struct {
         const vc = kc + ptok * kh * hd * 2;
         const ikc = kc + 2 * ptok * kh * hd * 2;
         const pooled = ikc + ptok * di * 2;
-        if (self.mode == .scores) {
+        if (self.base() == .scores) {
             try self.glue.qsaScores(self.rig.s, p[1], pooled, p[0], p[8], blocks, self.rows, blocks, self.pg);
         } else if (self.isAttention()) {
-            if (self.mode == .fused) {
+            if (self.base() == .fused) {
                 try self.glue.attnFused(self.rig.s, p[1], kc, vc, p[0], p[8], p[2], p[3], p[4], self.rows, kh, self.pg);
             } else {
                 var args: cuda.Args = .{};
@@ -245,16 +282,16 @@ const Runner = struct {
                 args.add(@as(f32, 0.0625));
                 args.add(@as(c_int, idw));
                 args.add(@as(c_int, 1));
-                args.add(self.pg);
-                const ahead = self.mode == .ahead;
+                args.add(self.pg.main());
+                const ahead = self.base() == .ahead;
                 const shared: usize = (16 + (if (ahead) @as(usize, 128) else 32)) * (hd + 8) * 2 + 16 * 40 * 2;
                 try self.launch(if (ahead) self.glue.f.chunks_ahead_paged else self.glue.f.chunks_one_paged, .{ self.rows, kh, 4 }, 128, shared, &args);
                 try self.glue.attnMerge(self.rig.s, p[5], p[6], p[7], p[0], p[8], p[3], p[4], self.rows, kh, true);
             }
         } else {
             var args: cuda.Args = .{};
-            const prep = self.mode == .prep or self.mode == .prep_media;
-            const media = self.mode == .prep_media or self.mode == .pool_media;
+            const prep = self.base() == .prep or self.base() == .prep_media;
+            const media = self.base() == .prep_media or self.base() == .pool_media;
             if (prep) {
                 for ([_]u64{ p[1], p[0], p[2], p[2], p[2], p[3], p[8], kc, vc, p[10], ikc }) |v| args.add(v);
                 args.add(eps);
@@ -269,8 +306,11 @@ const Runner = struct {
                 args.add(@as(c_int, 4));
                 args.add(@as(c_int, -1));
             }
-            args.add(self.pg);
-            const f = if (prep) (if (media) self.glue.f.prep_media_paged else self.glue.f.prep_paged) else (if (media) self.glue.f.pool_media_paged else self.glue.f.pool_paged);
+            if (self.planes()) args.add(self.pg) else args.add(self.pg.main());
+            const f = if (self.planes())
+                (if (prep) (if (media) self.glue.f.prep_media_planes else self.glue.f.prep_planes) else (if (media) self.glue.f.pool_media_planes else self.glue.f.pool_planes))
+            else
+                (if (prep) (if (media) self.glue.f.prep_media_paged else self.glue.f.prep_paged) else (if (media) self.glue.f.pool_media_paged else self.glue.f.pool_paged));
             try self.launch(f, if (prep) .{ self.rows, qh + kh + ih + 1, 1 } else .{ 1, 1, 1 }, if (prep) hd else di, 0, &args);
             if (!prep) {
                 const np = self.kv.len / @as(usize, @intCast(self.pg.ps));
@@ -282,7 +322,7 @@ const Runner = struct {
     }
 
     pub fn count(self: *const Runner) usize {
-        return if (self.isAttention()) self.rows * qh * hd else if (self.mode == .scores) self.rows * blocks else if (self.mode == .pool or self.mode == .pool_media) di else self.rows * (qh * hd + ih * di);
+        return if (self.isAttention()) self.rows * qh * hd else if (self.base() == .scores) self.rows * blocks else if (self.base() == .pool or self.base() == .pool_media) di else self.rows * (qh * hd + ih * di);
     }
 
     pub fn load(self: *Runner, i: usize, head: *attn.Head) !void {
@@ -301,7 +341,7 @@ const Runner = struct {
 
     pub fn reference(self: *Runner, want: []f64, mag: []f64) !void {
         if (self.isAttention()) return self.r.?.reference(self, self.rows * qh, 0.0625, want, mag);
-        if (self.mode == .scores) {
+        if (self.base() == .scores) {
             var dot: f64 = 0;
             var abs: f64 = 0;
             for (self.terms) |v| {
@@ -312,7 +352,7 @@ const Runner = struct {
             @memset(mag, abs * ih / @sqrt(@as(f64, di)));
             return;
         }
-        const prep = self.mode == .prep or self.mode == .prep_media;
+        const prep = self.base() == .prep or self.base() == .prep_media;
         for (want, mag, 0..) |*w, *m, i| {
             const width: usize = if (!prep or i >= self.rows * qh * hd) di else hd;
             w.* = normReference(width, i % width);
@@ -322,7 +362,7 @@ const Runner = struct {
 
     pub fn simulate(self: *Runner, acc: c.Accum, order: g.Order, out: []f64) !void {
         if (self.isAttention()) return self.r.?.simulate(self, self.rows * qh, 0.0625, acc, order, out);
-        if (self.mode == .scores) {
+        if (self.base() == .scores) {
             const dot = sums.sumIn(acc, order, self.terms);
             const terms: [ih]f64 = @splat(@max(dot, 0));
             @memset(out, sums.sumIn(acc, order, &terms) / @sqrt(@as(f64, di)));
@@ -331,7 +371,7 @@ const Runner = struct {
         const a = self.arena.?.allocator();
         const wide = try normalized(a, hd, acc, order);
         const narrow = try normalized(a, di, acc, order);
-        const prep = self.mode == .prep or self.mode == .prep_media;
+        const prep = self.base() == .prep or self.base() == .prep_media;
         for (out, 0..) |*o, i| o.* = if (!prep or i >= self.rows * qh * hd) narrow[i % di] else wide[i % hd];
     }
 };

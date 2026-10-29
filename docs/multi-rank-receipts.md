@@ -13,7 +13,8 @@ Each path places its ranks its own way:
 | Native ROCm build | `--tp`, `--rank`, `--master` | [Native ROCm placement](../zig/src/native/hip.zig) |
 | The `fabric/tp` transport's harness | `TF_TP_WORLD`, `TF_TP_RANK`, `TF_TP_MASTER` | [The transport's README](../zig/src/fabric/tp/README.md) |
 
-The native CUDA build serves neither `--tp` nor `--rank`: a family's own variables place its ranks. `tf-tp-test` is
+The native CUDA build serves neither `--tp` nor `--rank` for a checkpoint other than a Flash Next EXL3 pack, which they
+place across two GPUs (`--tp 2 --rank N --master HOST`): a family's own variables place its ranks. `tf-tp-test` is
 the transport's harness rather than a server. `tensorfold benchmark` accepts no group placement flags and records 1
 for a managed run. Its child inherits the parent's rank environment, so start managed runs from a single-rank
 configuration. Measure a group as an attached server: start the group, then point the client at the rank that serves.
