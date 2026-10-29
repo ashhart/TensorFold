@@ -12,6 +12,12 @@ namespace tf_ck4 {
 
 __device__ __forceinline__ float bf(float v) { return __bfloat162float(__float2bfloat16_rn(v)); }
 
+// v < 0 ? 0 : v, not fmaxf, which would make a NaN 0.
+__device__ __forceinline__ float relu(float v) { return v < 0.0f ? 0.0f : v; }
+
+// The larger, or a NaN when either is (fmaxf drops it): a block holding a NaN gets a NaN scale.
+__device__ __forceinline__ float max_nan(float a, float b) { return (a > b || a != a) ? a : b; }
+
 __device__ __forceinline__ void unpack8(const uint4 u, float (&f)[8]) {
     const __nv_bfloat162* p = reinterpret_cast<const __nv_bfloat162*>(&u);
 #pragma unroll
@@ -37,7 +43,7 @@ extern "C" __global__ void __launch_bounds__(128)
     tf_ck4::unpack8(src[1], *reinterpret_cast<float(*)[8]>(f + 8));
     float amax = 0.0f;
 #pragma unroll
-    for (int i = 0; i < 16; ++i) amax = fmaxf(amax, fabsf(f[i]));
+    for (int i = 0; i < 16; ++i) amax = tf_ck4::max_nan(amax, fabsf(f[i]));
     const nvfp4q::Scale sc = nvfp4q::block_scale(amax, g);
     uint32_t w[2] = {0u, 0u};
 #pragma unroll
@@ -146,7 +152,7 @@ __device__ __forceinline__ void grouped(const uint8_t* __restrict__ codes, const
                 if constexpr (EPI == 0) {
                     *reinterpret_cast<float2*>(reinterpret_cast<float*>(out) + row + col) = make_float2(a0, a1);
                 } else {
-                    const float u0 = fmaxf(tf_ck4::bf(a0), 0.0f), u1 = fmaxf(tf_ck4::bf(a1), 0.0f);
+                    const float u0 = tf_ck4::relu(tf_ck4::bf(a0)), u1 = tf_ck4::relu(tf_ck4::bf(a1));
                     *reinterpret_cast<__nv_bfloat162*>(reinterpret_cast<__nv_bfloat16*>(out) + row + col) =
                         __floats2bfloat162_rn(u0 * u0, u1 * u1);
                 }
@@ -296,12 +302,12 @@ __device__ __forceinline__ void grouped_prompt(const uint8_t* __restrict__ codes
                             float f[4], amax = 0.0f;
 #pragma unroll
                             for (int c = 0; c < 4; ++c) {
-                                const float u = fmaxf(tf_ck4::bf(sum[i][2 * bk + c / 2][2 * h + c % 2]), 0.0f);
+                                const float u = tf_ck4::relu(tf_ck4::bf(sum[i][2 * bk + c / 2][2 * h + c % 2]));
                                 f[c] = tf_ck4::bf(u * u);
-                                amax = fmaxf(amax, fabsf(f[c]));
+                                amax = tf_ck4::max_nan(amax, fabsf(f[c]));
                             }
-                            amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, 1));
-                            amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, 2));
+                            amax = tf_ck4::max_nan(amax, __shfl_xor_sync(0xffffffffu, amax, 1));
+                            amax = tf_ck4::max_nan(amax, __shfl_xor_sync(0xffffffffu, amax, 2));
                             const nvfp4q::Scale sc = nvfp4q::block_scale(amax, g_out);
                             // lane t holds inputs 2t, 2t + 1 of each 8: byte t of the block's two code words
                             uint32_t lo = (nvfp4q::e2m1(f[0] * sc.mul) | nvfp4q::e2m1(f[1] * sc.mul) << 4) << (8 * t);
