@@ -276,7 +276,7 @@ pub const Gemma = struct {
         l.images = buf;
     }
 
-    const image_pool = @import("cuda_image.zig").pool;
+    const image_pool = @import("image.zig").pool;
 
     /// Whether position `p` cuts through an image (strictly inside its rows).
     fn insideImage(s: *const Stream, p: usize) bool {
