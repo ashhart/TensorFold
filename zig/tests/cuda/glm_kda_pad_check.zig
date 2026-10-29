@@ -1,7 +1,4 @@
-//! glm-kda-pad-split (GPU): TF_GLM_KDA_PAD's padding of a KDA input stack at TP=3's 22 and 21 heads, the bf16 stack
-//! and FP4-Local's split stack (MXFP8 [q | k | v], bf16 rest): the bf16 rows move to a buffer of the padded width,
-//! their true rows then zeros, owned by the weights. The split stack's rest used to keep its unpadded buffer, read at
-//! the padded width by the packer: a load-time CUDA_ERROR_INVALID_VALUE on a FP4-Local checkpoint at TP=3.
+//! glm-kda-pad-split (GPU): TF_GLM_KDA_PAD pads the bf16 KDA stack and the split stack's bf16 rest at TP=3.
 const std = @import("std");
 const cuda = @import("cuda");
 const check = @import("check.zig");
