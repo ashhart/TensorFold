@@ -8,8 +8,10 @@ const g = core.gates;
 const records = core.vulkan_records;
 
 pub fn main(init: std.process.Init) !u8 {
-    var rt = try vk.Runtime.open(); defer rt.close();
-    var dev = try vk.Device.open(&rt, .{ .features = .{ .storage16 = true } }); defer dev.close();
+    var rt = try vk.Runtime.open();
+    defer rt.close();
+    var dev = try vk.Device.open(&rt, .{ .features = .{ .storage16 = true } });
+    defer dev.close();
     const props = dev.properties;
     const lim = props.limits;
     const name = std.mem.sliceTo(&props.deviceName, 0);
@@ -35,24 +37,37 @@ pub fn main(init: std.process.Init) !u8 {
             }
         }
     }
-    var cmds = try vk.Commands.init(&dev); defer cmds.deinit();
-    var staging = try vk.Buffer.init(&dev, .staging, 64 << 10); defer staging.deinit();
+    var cmds = try vk.Commands.init(&dev);
+    defer cmds.deinit();
+    var staging = try vk.Buffer.init(&dev, .staging, 64 << 10);
+    defer staging.deinit();
     const layout: vk.dispatch.Layout = .{ .bindings = 5, .push_bytes = @sizeOf(fx.Params), .writes = 1 << 4 };
-    var pipeline = try vk.dispatch.Pipeline.init(&dev, &shaders.qmm_bf16, layout); defer pipeline.deinit();
+    var pipeline = try vk.dispatch.Pipeline.init(&dev, &shaders.qmm_bf16, layout);
+    defer pipeline.deinit();
     if (!std.mem.eql(u32, &pipeline.local, &.{ fx.local_size_x, 1, 1 })) return error.LocalSizeMismatch;
-    var fixture = fx.Fixture.init(init.gpa, &dev, &cmds, staging, &pipeline); defer fixture.deinit();
+    var fixture = fx.Fixture.init(init.gpa, &dev, &cmds, staging, &pipeline);
+    defer fixture.deinit();
     const control_layout: vk.dispatch.Layout = .{ .bindings = 3, .push_bytes = 8, .writes = 1 << 2 };
-    var p_fmax = try vk.dispatch.Pipeline.init(&dev, &shaders.qmm_fmax, control_layout); defer p_fmax.deinit();
-    var p_atomic = try vk.dispatch.Pipeline.init(&dev, &shaders.atomic_sum, control_layout); defer p_atomic.deinit();
-    var p_scribble = try vk.dispatch.Pipeline.init(&dev, &shaders.scribble_sum, control_layout); defer p_scribble.deinit();
-    var p_tail = try vk.dispatch.Pipeline.init(&dev, &shaders.drop_tail, control_layout); defer p_tail.deinit();
-    var p_fp16 = try vk.dispatch.Pipeline.init(&dev, &shaders.fp16_accum, control_layout); defer p_fp16.deinit();
+    var p_fmax = try vk.dispatch.Pipeline.init(&dev, &shaders.qmm_fmax, control_layout);
+    defer p_fmax.deinit();
+    var p_atomic = try vk.dispatch.Pipeline.init(&dev, &shaders.atomic_sum, control_layout);
+    defer p_atomic.deinit();
+    var p_scribble = try vk.dispatch.Pipeline.init(&dev, &shaders.scribble_sum, control_layout);
+    defer p_scribble.deinit();
+    var p_tail = try vk.dispatch.Pipeline.init(&dev, &shaders.drop_tail, control_layout);
+    defer p_tail.deinit();
+    var p_fp16 = try vk.dispatch.Pipeline.init(&dev, &shaders.fp16_accum, control_layout);
+    defer p_fp16.deinit();
     // Planted gate 2 controls on the real kernel: a write to its weights and to its biases (the last input) after the dispatch.
-    var p_w = try vk.dispatch.Pipeline.init(&dev, &shaders.qmm_bf16, layout); defer p_w.deinit();
-    var p_b = try vk.dispatch.Pipeline.init(&dev, &shaders.qmm_bf16, layout); defer p_b.deinit();
-    var writes_w = fx.Fixture.init(init.gpa, &dev, &cmds, staging, &p_w); defer writes_w.deinit();
+    var p_w = try vk.dispatch.Pipeline.init(&dev, &shaders.qmm_bf16, layout);
+    defer p_w.deinit();
+    var p_b = try vk.dispatch.Pipeline.init(&dev, &shaders.qmm_bf16, layout);
+    defer p_b.deinit();
+    var writes_w = fx.Fixture.init(init.gpa, &dev, &cmds, staging, &p_w);
+    defer writes_w.deinit();
     writes_w.corrupt = 1;
-    var writes_b = fx.Fixture.init(init.gpa, &dev, &cmds, staging, &p_b); defer writes_b.deinit();
+    var writes_b = fx.Fixture.init(init.gpa, &dev, &cmds, staging, &p_b);
+    defer writes_b.deinit();
     writes_b.corrupt = 3;
     var controls = [_]fx.Control{
         fx.Control.init(init.gpa, &dev, &cmds, staging, &p_fmax, .qmm_fmax),
