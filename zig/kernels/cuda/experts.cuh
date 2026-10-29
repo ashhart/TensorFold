@@ -61,8 +61,9 @@ __device__ __forceinline__ float swiglu(float g, float u, float limit) {
   return bf(gv / (1.f + expf(-gv))) * uv;
 }
 
+// a < 0 ? 0 : a, not fmaxf, which would make a NaN sum 0.
 __device__ __forceinline__ float relu2(float a) {
-  const float u = fmaxf(bf(a), 0.f);
+  const float b = bf(a), u = b < 0.f ? 0.f : b;
   return u * u;
 }
 
