@@ -13,8 +13,8 @@ const wa = cuda.window_attention;
 /// Why the split decode (fp32 weights) runs attention_ref's bound: a score's rounding reaches its weight through exp.
 const split_why = "a score's absolute rounding error is its weight's relative error: gates 1 and 3 hold outputs to attention_ref's bound";
 
-/// A decode or prompt call's fixed heads, window and ring (the variant), and which kernels it runs.
-pub const Cfg = struct { name: []const u8, h: usize, hk: usize, d: usize, win: usize, ring: usize, streams: usize = 1, prompt: bool = false, served: []const c.Shape };
+/// A call's fixed heads, window and ring, and its kernels; `pages`: prompt keys in shuffled pages (_pg kernels).
+pub const Cfg = struct { name: []const u8, h: usize, hk: usize, d: usize, win: usize, ring: usize, streams: usize = 1, prompt: bool = false, pages: usize = 0, stale: bool = false, served: []const c.Shape };
 
 pub const cfgs = [_]Cfg{
     // Kolibri's sliding layers (48 heads over 4, window 513): decode on tensor cores, prompt rows 4 heads a block
@@ -23,6 +23,11 @@ pub const cfgs = [_]Cfg{
     .{ .name = "cuda window decode tf_window_part + tf_window_merge, 8/2 heads of 64, window 100, ring 128", .h = 8, .hk = 2, .d = 64, .win = 100, .ring = 128, .streams = 3, .served = &.{ .{ .rows = 16, .n = 8, .k = 3000 }, .{ .rows = 64, .n = 8, .k = 1000 } } },
     .{ .name = "cuda window prompt wattn_kernel<128, 8, 4, 8>, 48/4 heads, window 513, ring 2624", .h = 48, .hk = 4, .d = 128, .win = 513, .ring = 2624, .prompt = true, .served = &.{ .{ .rows = 128, .n = 48, .k = 0 }, .{ .rows = 96, .n = 48, .k = 2600 } } },
     .{ .name = "cuda window prompt wattn_kernel<128, 8, 8, 8>, 16/2 heads, no window, a row a position", .h = 16, .hk = 2, .d = 128, .win = 0, .ring = 0, .prompt = true, .served = &.{ .{ .rows = 64, .n = 16, .k = 100 }, .{ .rows = 48, .n = 16, .k = 0 } } },
+    // Kolibri's full layers over pages of the core pool: a key's page from the stream's table row
+    .{ .name = "cuda window prompt tf_window_prompt_h4_pg, 48/4 heads, no window, pages of 512", .h = 48, .hk = 4, .d = 128, .win = 0, .ring = 0, .prompt = true, .pages = 512, .served = &.{ .{ .rows = 128, .n = 48, .k = 0 }, .{ .rows = 96, .n = 48, .k = 1500 } } },
+    .{ .name = "cuda window prompt tf_window_prompt_h4_pg, 48/4 heads, no window, pages of 37", .h = 48, .hk = 4, .d = 128, .win = 0, .ring = 0, .prompt = true, .pages = 37, .served = &.{ .{ .rows = 128, .n = 48, .k = 0 }, .{ .rows = 96, .n = 48, .k = 700 } } },
+    .{ .name = "cuda window prompt tf_window_prompt_h8_pg, 16/2 heads, no window, pages of 64", .h = 16, .hk = 2, .d = 128, .win = 0, .ring = 0, .prompt = true, .pages = 64, .served = &.{ .{ .rows = 64, .n = 16, .k = 100 }, .{ .rows = 48, .n = 16, .k = 0 } } },
+    .{ .name = "control: paged prompt rows whose first page id is a spare page's (all NaN)", .h = 48, .hk = 4, .d = 128, .win = 0, .ring = 0, .prompt = true, .pages = 37, .stale = true, .served = &.{ .{ .rows = 128, .n = 48, .k = 0 }, .{ .rows = 96, .n = 48, .k = 700 } } },
 };
 
 /// The P x V chain of a row: its window's keys, a tile at a time, then the tiles' fold.
@@ -58,6 +63,7 @@ pub const Window = struct {
     kc: std.ArrayList(u16) = .empty,
     vc: std.ArrayList(u16) = .empty,
     dev: [5]u64 = @splat(0),
+    table: u64 = 0, // paged: the stream's row of page ids
     scratch: u64 = 0,
     out: u64 = 0,
 
@@ -69,14 +75,15 @@ pub const Window = struct {
     }
 
     pub fn kernel(self: *Window) g.Kernel {
-        return .{ .spec = spec(self.f), .ctx = self, .vt = &vt };
+        return .{ .spec = spec(self.f), .ctx = self, .vt = &vt, .control = if (self.f.stale) .shapes else null };
     }
 
     const vt = g.hooks(Window);
 
     fn win(self: *const Window) wa.Window {
         const f = self.f;
-        return .{ .h = f.h, .hk = f.hk, .d = f.d, .win = f.win, .ring = f.ring, .scale = @floatCast(1 / @sqrt(@as(f64, @floatFromInt(f.d)))) };
+        const pg: ?wa.Pages = if (f.pages > 0) .{ .table = self.table, .page_elems = 2 * f.pages * f.hk * f.d, .tokens = f.pages } else null;
+        return .{ .h = f.h, .hk = f.hk, .d = f.d, .win = f.win, .ring = f.ring, .scale = @floatCast(1 / @sqrt(@as(f64, @floatFromInt(f.d)))), .pg = pg };
     }
 
     /// A row's position and its cache's first row (stream slot * ring; a prompt's cache holds one stream).
@@ -132,9 +139,35 @@ pub const Window = struct {
             .stress => try self.stress(rng),
         }
         for ([_][]const u8{ std.mem.sliceAsBytes(self.q.items), std.mem.sliceAsBytes(self.kc.items), std.mem.sliceAsBytes(self.vc.items), std.mem.sliceAsBytes(self.pos.items), std.mem.sliceAsBytes(self.slot.items) }, &self.dev) |bytes, *p| p.* = try self.rig.input(bytes);
+        if (f.pages > 0) try self.paged(rng, crow);
         self.scratch = if (f.prompt) 0 else try self.rig.scratch(wa.WindowAttention.scratchBytes(self.win(), n));
         self.out = try self.rig.output(n * f.h * f.d * 2);
         return true;
+    }
+
+    /// The caches' rows in shuffled pages (keys, then values, a page), two spare pages; NaN in every unused slot.
+    fn paged(self: *Window, rng: std.Random, crow: usize) !void {
+        const a = self.rig.gpu.gpa;
+        const f = self.f;
+        const row = f.hk * f.d;
+        const per = (crow + f.pages - 1) / f.pages;
+        const pool = try a.alloc(i32, per + 2);
+        defer a.free(pool);
+        for (pool, 0..) |*x, i| x.* = @intCast(i);
+        rng.shuffle(i32, pool);
+        const elems = 2 * f.pages * row;
+        const arena = try a.alloc(u16, pool.len * elems);
+        defer a.free(arena);
+        @memset(arena, c.toBf16(std.math.nan(f32)));
+        for (0..crow) |i| {
+            const o = @as(usize, @intCast(pool[i / f.pages])) * elems + i % f.pages * row;
+            @memcpy(arena[o..][0..row], self.kc.items[i * row ..][0..row]);
+            @memcpy(arena[o + f.pages * row ..][0..row], self.vc.items[i * row ..][0..row]);
+        }
+        if (f.stale) pool[0] = pool[per]; // the control reads a spare page for the first keys
+        self.table = try self.rig.input(std.mem.sliceAsBytes(pool[0..per]));
+        self.dev[1] = try self.rig.input(std.mem.sliceAsBytes(arena));
+        self.dev[2] = self.dev[1] + f.pages * row * 2;
     }
 
     fn cell(self: *Window, x: []u16, r: usize, key: usize, kh: usize, e: usize) *u16 {
