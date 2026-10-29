@@ -106,6 +106,19 @@ pub fn tf_moe_combine(l: *const Launcher, y: CF, wts: CF, out: P, kind: c_int, r
     try l.go(l.moe_combine[tri(kind)], dim(cdiv(d, 256), r, 1), dim(256, 1, 1), 0, s, &a);
 }
 
+/// The slots' sum plus a shared expert run beside the stack, weighted by wts' last slot; `shared` null adds nothing.
+pub fn tf_moe_combine_gate(l: *const Launcher, y: CF, wts: CF, shared: CF, out: P, kind: c_int, r: c_int, slots: c_int, d: c_int, s: S) Error!void {
+    var a: Args = .{};
+    try a.add(ad(y));
+    try a.add(ad(wts));
+    try a.add(ad(shared));
+    try a.add(ad(out));
+    try a.add(kind);
+    try a.add(slots);
+    try a.add(d);
+    try l.go(l.moe_combine_gate, dim(cdiv(d, 256), r, 1), dim(256, 1, 1), 0, s, &a);
+}
+
 pub fn tf_moe_route(l: *const Launcher, picks: CI, pairs: c_int, experts: c_int, tile: c_int, members: I, items: I, capacity: c_int, s: S) Error!void {
     var a: Args = .{};
     try a.add(ad(picks));

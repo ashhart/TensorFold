@@ -54,8 +54,12 @@ pub fn forward(ops: Ops, m: *const view.Model, r: Round, trace: ?fwd.Trace) fwd.
             .full => |f| try attentionRows(o, m, f, r, index, normed),
             .linear => |l| try linearRows(o, m, l, r, index, normed),
         };
-        // the launches of a layer's two tails merge when the rows stay on this rank
-        const merge = o.fused() and y.kind == m.act;
+        // the launches of a layer's two tails merge when the rows stay on this rank and every slot is in `y`
+        const stacked = switch (mlp) {
+            .moe => |rt| rt.experts.shared == null,
+            .dense => true,
+        };
+        const merge = o.fused() and y.kind == m.act and stacked;
         const last = index + 1 == m.layers.len;
         const next_norm = if (last) m.final_norm else inputNorm(m.layers[index + 1]);
         const dest = if (last) out else normed;
