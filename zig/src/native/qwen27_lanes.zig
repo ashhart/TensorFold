@@ -87,7 +87,7 @@ pub const Metal = struct {
         if (runner.slots == 0 or runner.slots > max_streams or runner.model.frame.capacity < batch_rows) return error.TargetBinding;
         const device = runner.model.device;
         const window = try windowRows(device.tensorUnits());
-        const copies = try @import("qwen27_window.zig").copyPolicy(device.tensorUnits(), if (platform.c.getenv("TF_QWEN27_COPIES")) |v| std.mem.span(v) else null);
+        const copies = try @import("qwen27_window.zig").copyPolicy(device.tensorUnits(), window, if (platform.c.getenv("TF_QWEN27_COPIES")) |v| std.mem.span(v) else null);
         const ops = try tf.tree_round_gpu.Ops.init(device);
         errdefer ops.deinit();
         const picks = try device.buffer(batch_rows * @sizeOf(contract.Pick), opts);

@@ -305,7 +305,7 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
         why.* = policy.problem(err) orelse why.*;
         return err;
     };
-    _ = policy.copyPolicy(units, if (platform.c.getenv("TF_QWEN27_COPIES")) |v| std.mem.span(v) else null) catch |err| {
+    _ = policy.copyPolicy(units, window, if (platform.c.getenv("TF_QWEN27_COPIES")) |v| std.mem.span(v) else null) catch |err| {
         why.* = policy.problem(err) orelse why.*;
         return err;
     };
