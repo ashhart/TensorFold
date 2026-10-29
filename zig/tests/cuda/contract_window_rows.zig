@@ -81,6 +81,15 @@ const paged = [_]Cfg{
     .{ .name = "cuda window_pages prompt tf_wrows_prompt_256_pg (P as bf16), 16/4 heads, no window, pages of 1024", .h = 16, .hk = 4, .win = 0, .ring = 0, .prompt = true, .pages = 1024, .served = paged_prompt },
     .{ .name = "control: paged decode whose first two streams' tables are swapped", .h = 16, .hk = 4, .win = 0, .ring = 32768, .streams = 2, .pages = 256, .ctl = .swap, .served = paged_decode },
     .{ .name = "control: paged prompt rows whose first page id is a later page's", .h = 16, .hk = 4, .win = 0, .ring = 0, .prompt = true, .pages = 256, .ctl = .stale, .served = paged_prompt },
+    // Gemma 4's global layers (head dim 512) over pages: the decode looks up each key's page, a prompt tile one
+    .{ .name = "cuda window_pages decode tf_wrows_part_512_pg + tf_wrows_merge_512_pg, 16/1 heads of 512, pages of 256", .h = 16, .hk = 1, .d = 512, .win = 0, .ring = 32768, .streams = 2, .pages = 256, .served = global_decode },
+    .{ .name = "cuda window_pages decode tf_wrows_part_512_pg + tf_wrows_merge_512_pg, 16/1 heads of 512, pages of 37", .h = 16, .hk = 1, .d = 512, .win = 0, .ring = 32768, .streams = 2, .pages = 37, .served = global_decode },
+    .{ .name = "cuda window_pages decode tf_wrows_part_512_pg + tf_wrows_merge_512_pg, 10/2 heads of 512 (GQA 5), pages of 256", .h = 10, .hk = 2, .d = 512, .win = 0, .ring = 32768, .streams = 2, .pages = 256, .served = gqa5_decode },
+    .{ .name = "cuda window_pages prompt tf_wrows_prompt_512_p32_pg, 16/1 heads of 512, pages of 256", .h = 16, .hk = 1, .d = 512, .win = 0, .ring = 0, .prompt = true, .p32 = true, .pages = 256, .served = global_prompt },
+    .{ .name = "cuda window_pages prompt tf_wrows_prompt_512_pg (P as bf16), 32/4 heads of 512, pages of 64", .h = 32, .hk = 4, .d = 512, .win = 0, .ring = 0, .prompt = true, .pages = 64, .served = global31_prompt },
+    .{ .name = "cuda window_pages prompt tf_wrows_prompt_512_p32_pg, 10/2 heads of 512 (GQA 5), pages of 32", .h = 10, .hk = 2, .d = 512, .win = 0, .ring = 0, .prompt = true, .p32 = true, .pages = 32, .served = gqa5_prompt },
+    .{ .name = "control: head dim 512 paged decode whose first two streams' tables are swapped", .h = 16, .hk = 1, .d = 512, .win = 0, .ring = 32768, .streams = 2, .pages = 37, .ctl = .swap, .served = global_decode },
+    .{ .name = "control: head dim 512 paged prompt rows whose first page id is a later page's", .h = 16, .hk = 1, .d = 512, .win = 0, .ring = 0, .prompt = true, .p32 = true, .pages = 256, .ctl = .stale, .served = global_prompt },
 };
 
 fn decodeAt(comptime h: usize) []const c.Shape {
