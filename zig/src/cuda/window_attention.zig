@@ -92,13 +92,13 @@ pub const WindowAttention = struct {
         }, .prompt_fns = p, .rows = rows, .wide_fns = wf };
     }
 
-    /// Loads window_pages.cu: decode, prompt rows and `put` over caches in pages (head dims 256 and 512; P32 at 512).
+    /// Loads window_pages.cu: decode, prompt rows (bf16 P and P32) and `put` over caches in pages (head dims 256, 512).
     pub fn loadPages(g: *WindowAttention, d: *const Driver) !void {
         if (g.pages != null) return;
         var pages = try Module.load(d, kernels.window_pages);
         errdefer pages.unload();
-        const p: Paged = .{ .part = try pages.function("tf_wrows_part_256_pg"), .merge = try pages.function("tf_wrows_merge_256_pg"), .prompt = .{ try pages.function("tf_wrows_prompt_256_pg"), null } };
-        try p.prompt[0].?.allowDynamicShared(rows_smem[0]);
+        const p: Paged = .{ .part = try pages.function("tf_wrows_part_256_pg"), .merge = try pages.function("tf_wrows_merge_256_pg"), .prompt = .{ try pages.function("tf_wrows_prompt_256_pg"), try pages.function("tf_wrows_prompt_256_p32_pg") } };
+        for (p.prompt) |pf| try pf.?.allowDynamicShared(rows_smem[0]);
         const p512: Paged = .{ .part = try pages.function("tf_wrows_part_512_pg"), .merge = try pages.function("tf_wrows_merge_512_pg"), .prompt = .{ try pages.function("tf_wrows_prompt_512_pg"), try pages.function("tf_wrows_prompt_512_p32_pg") } };
         try p512.part.allowDynamicShared(staged_smem);
         for (p512.prompt) |pf| try pf.?.allowDynamicShared(rows_smem[1]);
