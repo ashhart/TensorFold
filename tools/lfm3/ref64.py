@@ -4,6 +4,7 @@
 The stored weights are dequantized exactly and every op runs in float64:
   nvfp4  ModelOpt NVFP4 (U8 two E2M1 a byte, low nibble first; e4m3 scale per 16 values; f32 weight_scale_2)
   mlx    MLX affine (bits and group size from config.json "quantization", per-module overrides)
+  fp8    compressed-tensors block FP8 (e4m3; a bf16 scale per 128 x 128 block)
   bf16   plain bf16 weights
 The math follows modeling_lfm3.py: sandwich norms (h += post_norm(mixer(norm(h)))), RMSNorm w * x * rsqrt(ms + eps);
 conv y = C * causal_depthwise_conv(B * x) with the last tap on the current row; attention with per-head q/k RMSNorm,
@@ -148,6 +149,9 @@ class Model:
             codes = torch.stack([w & 0xF, w >> 4], dim=-1).reshape(n, -1).long()
             v = E2M1[codes].view(n, -1, 16) * sc.to(F64)[..., None]
             return (v * self.raw(p + ".weight_scale_2").to(F64)).reshape(n, -1)
+        if w.dtype == torch.float8_e4m3fn:
+            sc = self.raw(p + ".weight_scale").to(F64).repeat_interleave(128, 0).repeat_interleave(128, 1)
+            return w.to(F64) * (sc if rows is None else sc[rows])
         return w.to(F64)
 
     def W(self, name):
