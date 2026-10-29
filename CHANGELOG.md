@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Nemotron on CUDA: the MoE residual's norm, Mamba's group norm, the MTP input norms and the bf16 token rows run on the shared norm and embedding kernels instead of Nemotron's own copies, which are removed. The shared kernels keep Nemotron's summation order, so replies are the same tokens as before, and one fewer CUDA image loads (#1353, step 1 of #548). Thanks to @jschmied.
+
 - Qwen3.8-27B on two Macs, first step: the pair seam's Metal kernels, which exchange whole output rows between the two Macs as bf16 copies, so every sum stays on one Mac and no partial sum crosses the link, plus a one-Mac loopback peer and six kernel-contract controls that each go red as planted (#1432). Nothing serves through it yet, and one Mac's projections keep the same reduction order, so replies are byte-identical. Thanks to @akol1.
 
 - CUDA: with DFlash2 beside the dense Qwen3.8-27B, a context copy now needs 20 matching tokens instead of 5, so short matches no longer take the place of DFlash2's drafts. On an RTX 3090 Ti with the MLX 4-bit 27B, decode after two long prompts is up 12.8% sampled and 18.5% greedy, and up to 6.3% on the code and chat cells; replies are token-identical to before and to `"draft": false`. Without a draft model the 27B keeps 5 and runs as before (#1477). Thanks to @diwakergupta.
