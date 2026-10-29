@@ -118,7 +118,7 @@ pub const kernels = [_]Kernel{
     .{ .name = "torch_movement", .src = "torch_ops/movement", .flags = torch_ops },
     .{ .name = "torch_nemotron_constants", .src = "torch_ops/nemotron_constants", .flags = torch_ops },
     .{ .name = "roce_gather", .src = "roce_gather", .flags = &.{"-O3"} }, // b12x's one-shot RoCE all-gather, two ranks
-    .{ .name = "l2pf", .src = "deepseek_v41/l2pf", .flags = &.{"-O3"} }, // DeepSeek V4.1's L2 prefetch of a weight table, as GLM's too; cc-defer: no contract records yet, before a PR
+    .{ .name = "l2pf", .src = "deepseek_v41/l2pf", .flags = &.{"-O3"} }, // DeepSeek V4.1's L2 prefetch of a weight table, as GLM's too (records: glm_l2pf_pending.zig)
     .{ .name = "l2pace", .src = "deepseek_v41/l2pace", .flags = &.{"-O3"} }, // and its paced form
     .{ .name = "drama3_staged_gemv", .flags = glue },
     .{ .name = "drama3", .flags = &.{"-O3"} },
