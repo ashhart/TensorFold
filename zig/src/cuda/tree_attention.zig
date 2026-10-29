@@ -23,18 +23,21 @@ const slices = 4;
 /// (row, key head, group) items one-warp blocks may take: their slices' partials sit apart from the combined ones.
 pub const slice_items = 1024;
 
-/// row_stream [n], streams [s, 4] (committed at [2]), offs [s, 2] (K, V from origin), paths [n, max_depth], depths.
-pub const Rows = struct { row_stream: u64, streams: u64, offs: u64, origin: u64, paths: u64, depths: u64 };
+/// row_stream [n], streams [s, 4] (committed at [2]), offs [s, 2] (K, V from origin, or their pools'), paths, depths.
+pub const Rows = struct { row_stream: u64, streams: u64, offs: u64, origin: u64, paths: u64, depths: u64, pages: ?Pages = null };
+
+/// int32 page ids [streams, stride] (a stream's row), elements a page id steps in each cache, positions a page.
+pub const Pages = struct { table: u64, page: u64, tok: usize, stride: usize };
+
+/// The kernels of one addressing: head dims 128, 256; one-warp blocks by [2 stages, 3 stages][head dim].
+const Kernels = struct { part: [2]Function, shared: [2]Function, part_w1: [2][2]Function, shared_w1: [2][2]Function };
 
 pub const Scratch = struct { o: u64, m: u64, l: u64, so: u64, sm: u64, sl: u64 };
 
 pub const TreeAttention = struct {
     mod: Module,
     paths_fn: Function,
-    part_fns: [2]Function, // head dim 128, 256
-    shared_fns: [2]Function,
-    part_w1: [2][2]Function, // the same slices, one warp a block: [2 stages, 3 stages][head dim]
-    shared_w1: [2][2]Function,
+    fns: [2]Kernels, // contiguous, paged
     merge_fn: Function,
     /// The shared kernel's blocks a key head: a fixed grid walking every (row, group) (bits do not depend on it).
     shared_blocks: usize = 96,
@@ -45,17 +48,25 @@ pub const TreeAttention = struct {
         if (!kernels.available) return error.BuiltWithoutKernels;
         var mod = try Module.load(d, kernels.tree_attention);
         errdefer mod.unload();
-        var parts: [2]Function = .{ try mod.function("tf_tree_part"), try mod.function("tf_tree_part_256") };
-        for (&parts, part_smem) |*f, b| try f.allowDynamicShared(b);
-        var shared: [2]Function = .{ try mod.function("tf_tree_shared"), try mod.function("tf_tree_shared_256") };
-        for (&shared, part_smem) |*f, b| try f.allowDynamicShared(b);
-        var parts1: [2][2]Function = .{ .{ try mod.function("tf_tree_part_w1"), try mod.function("tf_tree_part_256_w1") }, .{ try mod.function("tf_tree_part_w1s3"), try mod.function("tf_tree_part_256_w1s3") } };
-        var shared1: [2][2]Function = .{ .{ try mod.function("tf_tree_shared_w1"), try mod.function("tf_tree_shared_256_w1") }, .{ try mod.function("tf_tree_shared_w1s3"), try mod.function("tf_tree_shared_256_w1s3") } };
-        for (0..2) |st| for (0..2) |which| {
-            try parts1[st][which].allowDynamicShared(smemW1(@intCast(st + 2), which));
-            try shared1[st][which].allowDynamicShared(smemW1(@intCast(st + 2), which));
+        return .{ .mod = mod, .paths_fn = try mod.function("tf_tree_paths"), .fns = .{ try kernelsOf(&mod, ""), try kernelsOf(&mod, "_pg") }, .merge_fn = try mod.function("tf_tree_merge") };
+    }
+
+    fn kernelsOf(mod: *Module, comptime sfx: []const u8) !Kernels {
+        var k: Kernels = .{
+            .part = .{ try mod.function("tf_tree_part" ++ sfx), try mod.function("tf_tree_part_256" ++ sfx) },
+            .shared = .{ try mod.function("tf_tree_shared" ++ sfx), try mod.function("tf_tree_shared_256" ++ sfx) },
+            .part_w1 = .{ .{ try mod.function("tf_tree_part_w1" ++ sfx), try mod.function("tf_tree_part_256_w1" ++ sfx) }, .{ try mod.function("tf_tree_part_w1s3" ++ sfx), try mod.function("tf_tree_part_256_w1s3" ++ sfx) } },
+            .shared_w1 = .{ .{ try mod.function("tf_tree_shared_w1" ++ sfx), try mod.function("tf_tree_shared_256_w1" ++ sfx) }, .{ try mod.function("tf_tree_shared_w1s3" ++ sfx), try mod.function("tf_tree_shared_256_w1s3" ++ sfx) } },
         };
-        return .{ .mod = mod, .paths_fn = try mod.function("tf_tree_paths"), .part_fns = parts, .shared_fns = shared, .part_w1 = parts1, .shared_w1 = shared1, .merge_fn = try mod.function("tf_tree_merge") };
+        for (&k.part, &k.shared, part_smem) |*p, *sh, b| {
+            try p.allowDynamicShared(b);
+            try sh.allowDynamicShared(b);
+        }
+        for (0..2) |st| for (0..2) |which| {
+            try k.part_w1[st][which].allowDynamicShared(smemW1(@intCast(st + 2), which));
+            try k.shared_w1[st][which].allowDynamicShared(smemW1(@intCast(st + 2), which));
+        };
+        return k;
     }
 
     pub fn unload(g: *TreeAttention) void {
@@ -110,14 +121,21 @@ pub const TreeAttention = struct {
         c.add(@as(i32, @intCast(ng)));
         c.add(@as(i32, @intCast(n)));
         c.add(kn); // the replay of a NaN or infinite partial weighs a row's path keys too
+        if (rows.pages) |pg| for ([_]*launch_.Args{ &a, &c }) |x| {
+            x.add(pg.table);
+            x.add(@as(i64, @intCast(pg.page)));
+            x.add(@as(i32, @intCast(pg.tok)));
+            x.add(@as(i32, @intCast(pg.stride)));
+        };
+        const k = &g.fns[@intFromBool(rows.pages != null)];
         const per: usize = if (one) slices else 1;
         const block: u32 = if (one) 32 else 128;
         // three stages where the one-warp grid fits one wave of the SMs (a block each), else two (two blocks an SM)
         const deep: usize = if (@min(n * ng, g.shared_blocks) * slices * hk <= g.sms) 1 else 0;
         const smem = if (one) smemW1(@intCast(deep + 2), which) else part_smem[which];
-        try launch_.launch(if (one) g.shared_w1[deep][which] else g.shared_fns[which], .{ .grid = .{ .x = @intCast(@min(n * ng, g.shared_blocks) * per), .y = @intCast(hk), .z = 1 }, .block = .{ .x = block }, .shared = smem }, s, &c);
+        try launch_.launch(if (one) k.shared_w1[deep][which] else k.shared[which], .{ .grid = .{ .x = @intCast(@min(n * ng, g.shared_blocks) * per), .y = @intCast(hk), .z = 1 }, .block = .{ .x = block }, .shared = smem }, s, &c);
         // a row's own block: its boundary group and at most the next (a path is at most 128 keys)
-        try launch_.launch(if (one) g.part_w1[deep][which] else g.part_fns[which], .{ .grid = .{ .x = @intCast(n), .y = @intCast(hk), .z = @intCast(@min(ng, 2) * per) }, .block = .{ .x = block }, .shared = smem }, s, &a);
+        try launch_.launch(if (one) k.part_w1[deep][which] else k.part[which], .{ .grid = .{ .x = @intCast(n), .y = @intCast(hk), .z = @intCast(@min(ng, 2) * per) }, .block = .{ .x = block }, .shared = smem }, s, &a);
         var b: launch_.Args = .{};
         for ([_]u64{ o[0], o[1], o[2], rows.row_stream, rows.streams, rows.depths, out }) |v| b.add(v);
         b.add(@as(i32, @intCast(h)));
