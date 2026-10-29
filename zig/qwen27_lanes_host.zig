@@ -3,10 +3,10 @@ const std = @import("std");
 const lanes = @import("lanes");
 const a = std.testing.allocator;
 
-fn run(prompt: []const u32, depth: u32, restored: usize, neighbors: usize, seed: ?u64) ![]u32 {
-    var costs: [16]lanes.config.Cost = undefined;
-    for (&costs, 1..) |*c, width| c.* = .{ .width = @intCast(width), .ms = 5 + @as(f64, @floatFromInt(width)) };
-    var cfg = try lanes.Config.init(a, .{ .exact_width = 16, .mtp = depth > 0, .speculate = true, .speculate_early = false, .drafts = depth, .window_costs = &costs, .mtp_step_ms = 0.1, .hidden_rows = true, .batch_rows = 128, .max_streams = 128, .draft_streams = true }, 16, depth);
+fn run(prompt: []const u32, depth: u32, restored: usize, neighbors: usize, seed: ?u64, width: u32) ![]u32 {
+    var costs: [64]lanes.config.Cost = undefined;
+    for (&costs, 1..) |*c, count| c.* = .{ .width = @intCast(count), .ms = 5 + @as(f64, @floatFromInt(count)) };
+    var cfg = try lanes.Config.init(a, .{ .exact_width = width, .mtp = depth > 0, .speculate = true, .speculate_early = false, .drafts = depth, .window_costs = costs[0..width], .allocate_shared_drafts = true, .mtp_step_ms = 0.1, .hidden_rows = true, .batch_rows = 128, .max_streams = 128, .draft_streams = true }, width, depth);
     defer cfg.deinit(a);
     cfg.timed = false;
     var target = lanes.fake.Fake{ .gpa = a };
@@ -35,14 +35,27 @@ fn run(prompt: []const u32, depth: u32, restored: usize, neighbors: usize, seed:
 test "qwen27 speed: shared scheduler drafted plain resumed fresh concurrent solo token identities" {
     const prompt = [_]u32{ 7, 1, 2, 3, 4, 5, 6, 8, 9, 7, 1, 2, 3, 4 };
     for ([_]?u64{ null, 17, 91 }) |seed| {
-        const plain = try run(&prompt, 0, 0, 0, seed);
+        const plain = try run(&prompt, 0, 0, 0, seed, 16);
         defer a.free(plain);
         for ([_]u32{ 0, 1, 4, 15 }) |depth| for ([_]usize{ 0, 5, 13 }) |restore| {
             for ([_]usize{ 0, 1, 7, 8, 63, 64, 112, 113, 127 }) |neighbors| {
-                const got = try run(&prompt, depth, restore, neighbors, seed);
+                const got = try run(&prompt, depth, restore, neighbors, seed, 16);
                 defer a.free(got);
                 try std.testing.expectEqualSlices(u32, plain, got);
             }
+        };
+    }
+}
+
+test "qwen27 speed: every verification width through 64 equals serial with resumed and concurrent streams" {
+    const prompt = [_]u32{ 7, 1, 2, 3, 4, 5, 6, 8, 9, 7, 1, 2, 3, 4 };
+    for ([_]?u64{ null, 17 }) |seed| {
+        const plain = try run(&prompt, 0, 0, 0, seed, 1);
+        defer a.free(plain);
+        for (1..65) |width| for ([_]usize{ 0, 2 }) |neighbors| {
+            const got = try run(&prompt, @intCast(@min(31, width - 1)), 5, neighbors, seed, @intCast(width));
+            defer a.free(got);
+            try std.testing.expectEqualSlices(u32, plain, got);
         };
     }
 }

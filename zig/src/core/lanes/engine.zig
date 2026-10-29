@@ -284,7 +284,10 @@ pub const Engine = struct {
         for (whos, heads.items) |*w, i| w.* = win.who(plans[i].stream);
         const budgets = try a.alloc(i64, heads.items.len);
         const sampled = win.anySampled(plans);
-        try e.rule.budgets(whos, win.probe(e), sampled, budgets);
+        if (e.cfg.allocate_shared_drafts)
+            try @import("shared_drafts.zig").budgets(e, plans, heads.items, budgets)
+        else
+            try e.rule.budgets(whos, win.probe(e), sampled, budgets);
         const ids = try a.alloc(ev.Value, heads.items.len);
         for (ids, heads.items) |*id, i| id.* = str(plans[i].stream.id);
         try trail.event(e, &.{ f("ev", str("budgets")), f("streams", .{ .list = ids }), f("depths", .{ .i64s = budgets }) });

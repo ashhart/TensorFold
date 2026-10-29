@@ -11,7 +11,6 @@ const resume_rules = @import("qwen27_resume.zig");
 const Metal = lb.Metal;
 const Ring = q.tap_ring.Ring;
 const Context = q.dflash.runtime_model.Context;
-const max_rows = lb.max_rows;
 
 /// A prompt pass under way in `slot`: where its next chunk starts, where its restore ended, and its encoded images.
 pub const Fill = struct { slot: u32, at: usize, from: usize, images: ?q.image_rows.Images, checkpoint: u32 = 0, rewind: u32 = 0 }; // rewind: slot 0's point
@@ -26,7 +25,7 @@ pub fn prefill(b: *Metal, s: *lanes.Stream, slot: u32) !void {
 /// A prompt pass begins in `slot`: its kept state restored and its images encoded (one image prompt fills at a time).
 pub fn opening(b: *Metal, s: *lanes.Stream, slot: u32) !Fill {
     const ids = s.prompt();
-    if (ids.len == 0 or ids.len + s.max_new + max_rows > b.runner.capacity) return error.PromptTooLong;
+    if (ids.len == 0 or ids.len + s.max_new + b.window > b.runner.capacity) return error.PromptTooLong;
     if (s.yields()) return error.Yielded; // a background pass steps aside before it touches the slot
     // as does one over the conversation slot 0 holds when the cache cannot keep its end: it would leave nothing there
     if (slot == 0 and s.yield_check != null and s.max_new == 0 and !keepsEnd(s) and resumable(b, s, 0) != .none) return error.Yielded;
@@ -478,7 +477,7 @@ pub fn lone(b: *Metal, s: *lanes.Stream, hooks: api.LoneHooks) !bool {
         const room: u32 = @intCast(s.max_new - s.emitted().len);
         copies.history = s.context.items;
         const before = b.runner.gpu_seconds;
-        const result = try g.runRound(room, b.nodes, s.eos, true, if (extra > 0) .{ .ptr = &copies, .call = Copies.call } else null, extra);
+        const result = try g.runRound(room, @min(b.nodes, 15), s.eos, true, if (extra > 0) .{ .ptr = &copies, .call = Copies.call } else null, extra);
         defer b.gpa.free(result.tokens);
         charge(b, s, before);
         if (result.extended > 0) {

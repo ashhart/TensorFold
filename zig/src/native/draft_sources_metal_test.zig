@@ -35,6 +35,8 @@ test "draft sources: Metal Qwen27 copies and DFlash2 use actual slot and head fa
     b.runner = &runner;
     b.draft = null;
     b.timed = 0;
+    b.window = 16;
+    b.copies = false;
     b.nodes = 15;
     b.draft_slots = 1;
     runner.slots = 1;
@@ -110,4 +112,26 @@ test "draft sources: Metal Flash Next replay and shared rounds name the checkpoi
     b.sessions = &.{};
     b.serial_drafts = false;
     try check(b.facts(), null, true, true);
+}
+
+test "qwen27 window: native facts expose device width, node budget and hybrid copy policy" {
+    const q = @import("qwen27_lanes.zig");
+    const policy = @import("qwen27_window.zig");
+    var runner: tf.qwen27.decode_round.Runner = undefined;
+    var b: q.Metal = undefined;
+    b.runner = &runner;
+    b.draft = present(@TypeOf(b.draft.?));
+    b.timed = 0;
+    b.draft_slots = 1;
+    runner.slots = 1;
+    for ([_]bool{ false, true }) |units| for ([_]bool{ false, true }) |copies| {
+        b.window = policy.rows(units);
+        b.nodes = policy.nodes(b.window, copies);
+        b.copies = copies;
+        const facts = b.facts();
+        try std.testing.expectEqual(@as(u32, if (units) 16 else 64), facts.exact_width);
+        try std.testing.expectEqual(@as(u32, if (units or copies) 15 else 31), facts.drafts);
+        try std.testing.expectEqual(copies, facts.lone_copies);
+        try std.testing.expectEqual(copies, facts.context_copies);
+    };
 }

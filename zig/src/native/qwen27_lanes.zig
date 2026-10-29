@@ -18,13 +18,23 @@ const Landing = @import("qwen27_landing.zig").Landing;
 const contract = tf.tree_round;
 
 /// A window's rows at most: the pending row and a DFlash2 tree.
-pub const max_rows = 16;
+pub const max_rows = @import("qwen27_window.zig").capacity;
+pub fn windowRows(units: bool) !u32 {
+    return @import("qwen27_window.zig").requested(units, if (platform.c.getenv("TF_QWEN27_WINDOW")) |v| std.mem.span(v) else null);
+}
 /// A shared round's rows at most: the frame's.
 pub const batch_rows = 128;
 /// Streams a runner holds at most (the attention plan's).
 pub const max_streams = q.attention_plan.max_streams;
 const ring = 64;
 pub const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
+
+comptime {
+    std.debug.assert(@import("qwen27_window.zig").nodes(max_rows, false) <= q.dflash.runtime_model.max_nodes);
+    std.debug.assert(max_rows <= contract.max_rows and max_rows <= ring);
+    std.debug.assert(max_rows <= q.attention_plan.max_rows and max_rows <= q.attention_plan.path_width);
+    std.debug.assert(max_rows <= q.gpu_frame.logit_rows and batch_rows <= q.gpu_frame.max_rows);
+}
 
 pub const Release = @import("qwen27_hooks.zig").Release;
 pub const Grow = @import("qwen27_hooks.zig").Grow;
@@ -35,7 +45,9 @@ pub const Metal = struct {
     runner: *q.decode_round.Runner,
     draft: ?*Draft,
     chunk: usize = 128, // prompt rows a pass
-    nodes: u32 = max_rows - 1, // a tree's drafts at most
+    window: u32 = 16, // the device per-stream verification width
+    copies: bool = false, // lone context copies leave room past a 15-node tree
+    nodes: u32 = 15, // a tree's drafts at most
     owners: [max_streams]?*lanes.Stream = @splat(null), // the stream each runner slot holds
     contexts: [max_streams]?*Context = @splat(null), // slots past 0: their taps (a kept state carries them) and drafter state
     draft_slots: u32 = 1, // slots below this draft their own trees while no more streams are live (TF_Q27_DRAFT_SLOTS)
@@ -74,6 +86,8 @@ pub const Metal = struct {
     pub fn init(gpa: std.mem.Allocator, runner: *q.decode_round.Runner, draft: ?*Draft) !*Metal {
         if (runner.slots == 0 or runner.slots > max_streams or runner.model.frame.capacity < batch_rows) return error.TargetBinding;
         const device = runner.model.device;
+        const window = try windowRows(device.tensorUnits());
+        const copies = @import("qwen27_window.zig").copyPolicy(device.tensorUnits(), if (platform.c.getenv("TF_QWEN27_COPIES")) |v| std.mem.span(v) else null);
         const ops = try tf.tree_round_gpu.Ops.init(device);
         errdefer ops.deinit();
         const picks = try device.buffer(batch_rows * @sizeOf(contract.Pick), opts);
@@ -82,7 +96,7 @@ pub const Metal = struct {
         errdefer kept.deinit();
         const b = try gpa.create(Metal);
         errdefer gpa.destroy(b);
-        b.* = .{ .gpa = gpa, .runner = runner, .draft = draft, .ops = ops, .picks = picks, .kept = kept, .draft_slots = draftSlots(), .slot_resume = slots.slotResumeEnv() };
+        b.* = .{ .gpa = gpa, .runner = runner, .draft = draft, .window = window, .copies = copies, .nodes = @import("qwen27_window.zig").nodes(window, copies), .ops = ops, .picks = picks, .kept = kept, .draft_slots = draftSlots(), .slot_resume = slots.slotResumeEnv() };
         errdefer b.freeContexts();
         if (draft) |d| {
             const g = d.model.ring();
@@ -121,19 +135,19 @@ pub const Metal = struct {
     const ringChunk = slots.ringChunk;
     const unbind = slots.unbind;
     const ready = slots.ready;
-    const refill = slots.refill;
+    pub const refill = slots.refill;
 
     pub fn backend(b: *Metal) be.Backend {
-        return .{ .ptr = b, .vtable = &.{ .prefill = prefillFn, .prefill_step = slots.prefillStep, .cancel_prefill = slots.cancelPrefill, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draft_fns.draftFn, .probabilities = draft_fns.probabilitiesFn, .tree = draft_fns.treeFn, .release = releaseFn, .reports_fill = true } };
+        return .{ .ptr = b, .vtable = &.{ .prefill = prefillFn, .prefill_step = slots.prefillStep, .cancel_prefill = slots.cancelPrefill, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draft_fns.draftFn, .draft_capacity = draft_fns.capacityFn, .probabilities = draft_fns.probabilitiesFn, .tree = draft_fns.treeFn, .release = releaseFn, .reports_fill = true } };
     }
 
     /// What the round loop reads at setup: slot 0's stream drafts trees; every stream verifies copies.
     pub fn facts(b: *const Metal) lanes.Model {
         const drafting = b.draft != null;
         const shared = b.runner.slots > 1;
-        // a lone stream drafts DFlash2 trees, as in 1.0.5: copies land less often there (TF_QWEN27_COPIES=1 opts in)
-        const lone_copies = if (platform.c.getenv("TF_QWEN27_COPIES")) |v| std.mem.eql(u8, std.mem.span(v), "1") else false;
-        return .{ .exact_width = if (drafting or shared) max_rows else 1, .mtp = drafting, .speculate = drafting, .speculate_early = false, .drafts = b.nodes, .draft_probabilities = true, .window_costs = b.costs[0..b.timed], .hidden_rows = shared, .streams_exact = true, .batch_rows = if (shared) batch_rows else max_rows, .max_streams = b.runner.slots, .lone_copies = lone_copies, .draft_streams = drafting and b.draft_slots > 1 };
+        // Pre-tensor lanes match serial context copies by default; TF_QWEN27_COPIES=0 opts out.
+        const lone_copies = b.copies;
+        return .{ .exact_width = if (drafting or shared) b.window else 1, .mtp = drafting, .speculate = drafting, .speculate_early = false, .drafts = b.nodes, .draft_probabilities = true, .window_costs = b.costs[0..b.timed], .hidden_rows = shared, .streams_exact = true, .batch_rows = if (shared) batch_rows else b.window, .max_streams = b.runner.slots, .lone_copies = lone_copies, .context_copies = lone_copies, .allocate_shared_drafts = drafting, .draft_streams = drafting and b.draft_slots > 1 };
     }
 
     /// The slot holding `s`.
@@ -160,66 +174,9 @@ pub const Metal = struct {
         return slot < b.draft_slots and live <= b.draft_slots and x.caches.len > 0;
     }
 
-    /// Each window width's ms (verify, draws, keep) on a scratch context in slot 0; resets it. Kept per build.
+    /// Price only this device's active window widths; cache records carry that width.
     pub fn measure(b: *Metal, io: std.Io) !void {
-        const r = b.runner;
-        if (b.owners[0] != null or r.active != null) return error.StreamBusy;
-        var shape: [128]u8 = undefined;
-        const parts = [_][]const u8{ "qwen27-lanes", std.mem.span(r.model.device.name()), try q.widths.costShape(r.model.config, r.model.widths_tag, &shape, max_rows, b.draft != null) };
-        const k = lanes.cost_cache.key(b.gpa, io, &parts) catch null;
-        if (k) |key| if (lanes.cost_cache.load([max_rows]lanes.config.Cost, b.gpa, io, key)) |kept| {
-            b.costs = kept;
-            b.timed = max_rows;
-            return;
-        };
-        if (r.capacity <= max_rows) return error.ContextFull;
-        defer {
-            if (b.draft) |d| d.reset() catch {} else r.reset(0) catch {};
-        }
-        var ids: [192]u32 = undefined;
-        for (&ids, 0..) |*t, i| t.* = @intCast((i * 7919 + 13) % r.model.config.vocab);
-        const prompt = ids[0..@min(ids.len, r.capacity - max_rows)]; // a small --context still holds a window past it
-        try b.refill(prompt);
-        var s = try lanes.Stream.init(b.gpa, .{ .id = "timing", .prompt = prompt, .max_new = 1 });
-        defer s.deinit(b.gpa);
-        const timer: WindowTimer = .{ .b = b, .s = &s, .prompt = prompt };
-        for (0..5) |_| _ = try timer.time(max_rows - 1); // the widest window first, while the GPU's clocks ramp up
-        var ms: [max_rows]f64 = undefined;
-        for (&ms, 0..) |*m, i| m.* = try lanes.cost_rule.fastest(timer, i);
-        try lanes.cost_rule.smooth(timer, &ms);
-        const ref = lanes.cost_cache.referenceKey(&parts);
-        if (lanes.cost_cache.load([max_rows]f64, b.gpa, io, ref)) |reference| if (lanes.cost_rule.drifted(&ms, &reference)) try lanes.cost_rule.again(timer, &ms);
-        for (&b.costs, ms, 0..) |*cost, m, i| cost.* = .{ .width = @intCast(i + 1), .ms = m };
-        b.timed = max_rows;
-        if (k) |key| lanes.cost_cache.save([max_rows]lanes.config.Cost, b.gpa, io, key, b.costs);
-        lanes.cost_cache.save([max_rows]f64, b.gpa, io, ref, ms);
-    }
-
-    /// Window entry `i` is `i + 1` rows, timed once; each keeps a row, so a full slot is refilled first.
-    const WindowTimer = struct {
-        b: *Metal,
-        s: *lanes.Stream,
-        prompt: []const u32,
-        pub fn time(t: WindowTimer, i: usize) !f64 {
-            if (t.b.runner.offsets[0] + i + 1 > t.b.runner.capacity) try t.b.refill(t.prompt);
-            return t.b.timeWindow(t.s, i + 1);
-        }
-    };
-
-    fn timeWindow(b: *Metal, s: *lanes.Stream, rows: usize) !f64 {
-        const t0 = mtl.clock.seconds();
-        const positions: [max_rows]u64 = @splat(0);
-        const drafts: [max_rows]u32 = @splat(1);
-        var sampled: [max_rows]u32 = undefined;
-        var echoed: [max_rows]u32 = undefined;
-        b.owners[0] = s;
-        defer b.owners[0] = null;
-        const w = be.Window{ .stream = s, .pending = 0, .held = 0, .tokens = drafts[0 .. rows - 1], .parents = null, .positions = positions[0..rows] };
-        var out = [_]be.Verified{.{ .sampled = sampled[0..rows], .drafts = echoed[0 .. rows - 1] }};
-        try verifyFn(b, &.{w}, &out);
-        var path = [_]u32{0};
-        try b.keepPaths(&.{&path});
-        return (mtl.clock.seconds() - t0) * 1e3;
+        return @import("qwen27_costs.zig").measure(b, io);
     }
 
     pub fn self(ptr: *anyopaque) *Metal {
@@ -338,7 +295,7 @@ pub const Metal = struct {
         @memcpy(base[0..bytes], base[@as(usize, last) * bytes ..][0..bytes]);
     }
 
-    /// Every window's kept rows' taps in one gather, then into its slot's ring.
+    /// Completed tap bytes enter each slot's ring without a second GPU gather submission.
     fn gatherTaps(b: *Metal, paths: []const []const u32) !void {
         const r = b.runner;
         const round = &b.round.?;
@@ -352,13 +309,8 @@ pub const Metal = struct {
             }
         }
         const out = b.gathered_taps.?;
-        const cb = r.model.queue.commandBuffer();
-        const e = cb.compute(.serial);
-        try r.taps.accepted(r.model.glue, e, rows[0..n], .{ .buffer = b.kept }, .{ .buffer = out });
-        e.end();
-        cb.commit();
-        cb.wait();
-        if (q.decode_round.gpuFailed(cb, "a taps gather")) return error.DraftTapGpuFailure;
+        try r.taps.complete();
+        try q.tap_gather.gather(r.taps.buffer.contents()[0..r.taps.buffer.length()], r.taps.capacity, r.taps.width, rows[0..n], out.contents()[0..out.length()]);
         var at: usize = 0;
         for (paths, b.windows[0..b.count]) |path, slot| {
             const g = b.ringOf(slot).?;
@@ -484,7 +436,7 @@ pub const Metal = struct {
             const rows = w.rows();
             const words = (r.model.config.vocab + 31) / 32;
             if (w.masks.len != 0 and w.masks.len != rows * words) return error.InvalidQwenMasks;
-            if (rows > max_rows or total + rows > batch_rows) return error.WindowTooWide;
+            if (rows > b.window or total + rows > batch_rows) return error.WindowTooWide;
             const ids = b.ids[total..][0..rows];
             ids[0] = w.pending;
             if (w.held > 0) b.heldChain(slot, ids[1..], w.pending) else @memcpy(ids[1..], w.tokens);

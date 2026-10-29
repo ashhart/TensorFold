@@ -106,6 +106,7 @@ pub const Backend = struct {
         keep: *const fn (ptr: *anyopaque, windows: []const Window, paths: []const []const u32) anyerror!void,
         /// Absorb kept rows and hold drafts for the next round (one batch for a shared round).
         draft: *const fn (ptr: *anyopaque, requests: []const DraftRequest) anyerror!void,
+        draft_capacity: ?*const fn (*anyopaque, *Stream) u32 = null, // current per-stream proposal capacity
         proposal_draft: ?*const fn (*anyopaque, []const DraftRequest) anyerror!void = null,
         clear_proposals: ?*const fn (*anyopaque, *Stream) void = null,
         /// Undo an early speculation whose round was cut (the drafts come from a late request instead).

@@ -234,6 +234,7 @@ pub const Stream = struct {
     served: ?u64 = null,
     proposal_depth: ?u32 = null, // null: legacy; otherwise the last routed request, zero until it succeeds
     granted: ?u32 = null,
+    draft_chances: std.ArrayList(f64) = .empty, // last full head prices, retained through zero-row rounds
     copy_width: ?u32 = null,
 
     pub fn init(gpa: Allocator, spec: Spec) !Stream {
@@ -302,6 +303,8 @@ pub const Stream = struct {
         s.inflight = null;
         s.served = null;
         s.granted = null;
+        s.draft_chances.deinit(gpa);
+        s.draft_chances = .empty;
         s.copy_width = null;
         s.proposal_depth = null;
     }

@@ -35,19 +35,31 @@ const Oracle = struct {
     }
 };
 
-const Run = struct { tokens: []const u32, rounds: u64, drafted: u64, accepted: u64 };
+const Run = struct { tokens: []const u32, rounds: u64, drafted: u64, accepted: u64, widest: usize };
 
 fn run(a: std.mem.Allocator, io: std.Io, b: *lb.Metal, prompt: []const u32, count: u32, drafts: bool, sampling: ?lanes.Sampling) !Run {
-    var cfg = try lanes.Config.init(a, b.facts(), lb.max_rows, lb.max_rows - 1);
+    return runWidth(a, io, b, prompt, count, drafts, sampling, false);
+}
+
+// The oracle gate forces the requested shape; ordinary drafted checks keep their production pricing policy.
+fn runWidth(a: std.mem.Allocator, io: std.Io, b: *lb.Metal, prompt: []const u32, count: u32, drafts: bool, sampling: ?lanes.Sampling, force: bool) !Run {
+    var facts = b.facts();
+    if (force) facts.draft_confidence = 0;
+    var cfg = try lanes.Config.init(a, facts, lb.max_rows, lb.max_rows - 1);
     defer cfg.deinit(a);
+    if (force) cfg.timed = false;
     var clock = lanes.backend.WallClock{ .io = io };
     var engine = lanes.Engine.init(a, &cfg, b.backend(), clock.clock());
     defer engine.deinit();
     var s = try lanes.Stream.init(a, .{ .id = "q27", .prompt = prompt, .max_new = count, .drafts = drafts, .sampling = sampling });
     defer s.deinit(a);
     try engine.addStream(&s);
-    while (engine.activeCount() > 0) try engine.step();
-    return .{ .tokens = try a.dupe(u32, s.emitted()), .rounds = s.rounds, .drafted = s.drafted, .accepted = s.accepted };
+    var widest: usize = 0;
+    while (engine.activeCount() > 0) {
+        try engine.step();
+        if (b.rows <= b.window) widest = @max(widest, b.rows);
+    }
+    return .{ .tokens = try a.dupe(u32, s.emitted()), .rounds = s.rounds, .drafted = s.drafted, .accepted = s.accepted, .widest = widest };
 }
 
 /// A stream whose next round fails as a failed command buffer leaves the runner (or the drafter), then is discarded.
@@ -90,8 +102,8 @@ pub fn main(init: std.process.Init) !void {
     var prompt: [130]u32 = undefined;
     for (&prompt, 0..) |*id, i| id.* = @intCast((i * 17 + 7) % 96);
     try direct.prefill(&prompt, 16);
-    var expected: [34]u32 = undefined;
-    var states: [35][32]u8 = undefined;
+    var expected: [66]u32 = undefined;
+    var states: [67][32]u8 = undefined;
     states[0] = try direct.fingerprint();
     for (&expected, 0..) |*id, i| {
         id.* = try direct.greedy();
@@ -102,6 +114,21 @@ pub fn main(init: std.process.Init) !void {
     defer draft.deinit();
     const drafted = try lb.Metal.init(a, &runner, draft);
     defer drafted.deinit();
+    var oracle = Oracle{ .a = a, .runner = &runner, .tokens = &expected, .prompt = prompt.len };
+    draft.generation.proposer = .{ .ptr = &oracle, .call = Oracle.propose };
+    const device_width = drafted.window;
+    const device_nodes = drafted.nodes;
+    for (1..device_width + 1) |width| {
+        drafted.window = @intCast(width);
+        drafted.nodes = @intCast(width - 1);
+        const shaped = try runWidth(a, io, drafted, &prompt, 65, true, null, true);
+        if (shaped.widest != width) return error.LaneWidthNotExercised;
+        try same(shaped, &runner, prompt.len, &expected, &states, 65);
+    }
+    draft.generation.proposer = null;
+    drafted.window = device_width;
+    drafted.nodes = device_nodes;
+    std.debug.print("lane core widths 1..{d}: every token and final recurrent/KV/logit state equal plain greedy\n", .{device_width});
     const plain = try lb.Metal.init(a, &runner, null);
     defer plain.deinit();
     const counts = [_]u32{ 1, 2, 7, 16, 17, 33 };
@@ -125,7 +152,6 @@ pub fn main(init: std.process.Init) !void {
         for (counts) |count| try same(try run(a, io, back4, &prompt, count, true, null), &runner, prompt.len, &expected, &states, count);
     }
     std.debug.print("a q4 drafter opened from its file (each linear read once, into its q4 copy) drafts streams equal to plain greedy\n", .{});
-    var oracle = Oracle{ .a = a, .runner = &runner, .tokens = &expected, .prompt = prompt.len };
     draft.generation.proposer = .{ .ptr = &oracle, .call = Oracle.propose };
     defer draft.generation.proposer = null;
     for ([_]bool{ false, true }) |branch| {

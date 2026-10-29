@@ -303,3 +303,21 @@ test "tiny conditional score differences collapse before sibling selection" {
     try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2, 3 }, tree.tokens);
     try std.testing.expectEqualSlices(i32, &.{ -1, -1, -1, -1 }, tree.parents);
 }
+
+test "qwen27 window: 31 selected nodes fit a 32-row verify from the existing drafter lattice" {
+    const a = std.testing.allocator;
+    var store = try fixtures.Store.init(a);
+    defer store.deinit();
+    var graph = try store.graph(a);
+    defer graph.deinit();
+    var fake: Fake = .{};
+    var lattice = try execution.forward(fake.ops(), &graph, .{ .mode = .bf16_reference }, .{ .cache = 1, .begin = 0, .end = 1 }, 3);
+    defer lattice.deinit();
+    var tree = try selector.propose(a, &graph, lattice, 3, 2, .{ .nodes = 31, .children = 2 });
+    defer tree.deinit();
+    try std.testing.expectEqual(@as(usize, 31), tree.tokens.len);
+    const parents = try tree.verifyParents(a);
+    defer a.free(parents);
+    try std.testing.expectEqual(@as(usize, 32), parents.len);
+    for (parents[1..], 1..) |parent, i| try std.testing.expect(parent >= 0 and parent < i);
+}
