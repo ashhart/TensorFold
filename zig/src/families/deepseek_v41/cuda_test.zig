@@ -2,6 +2,7 @@ const std = @import("std");
 const dk = @import("dsv41_kernels");
 test {
     _ = @import("load_test.zig");
+    _ = @import("load_chunk_test.zig");
     _ = @import("named.zig");
     inline for (.{ @import("cuda_weights.zig"), @import("cuda_weights.zig").Weights, @import("forms.zig"), @import("forms_inplace.zig"), @import("ex_stacks.zig"), @import("triton_capture.zig"), @import("host_stage.zig").Stage }) |m| std.testing.refAllDecls(m);
     _ = @import("block_test.zig");

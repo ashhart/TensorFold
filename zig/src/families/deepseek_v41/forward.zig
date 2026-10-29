@@ -133,9 +133,14 @@ pub const Forward = struct {
     }
 
     pub fn upload(f: *Forward, destination: u64, bytes: []const u8) !void {
-        const owned = try f.uploads.take(f.runner.d, bytes.len);
-        @memcpy(owned, bytes);
-        try f.uploads.copyTo(.{ .d = f.runner.d, .ptr = destination, .len = bytes.len }, 0, f.runner.stream);
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            const len = @min(bytes.len - offset, @import("host_stage.zig").upload_chunk);
+            const owned = try f.uploads.take(f.runner.d, len);
+            @memcpy(owned, bytes[offset..][0..len]);
+            try f.uploads.copyTo(.{ .d = f.runner.d, .ptr = destination, .len = bytes.len }, offset, f.runner.stream);
+            offset += len;
+        }
         try f.uploads.wait();
     }
     pub fn drain(f: *Forward) !void {
