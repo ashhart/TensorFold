@@ -488,12 +488,12 @@ pub const Draft = struct {
     }
 };
 
-/// Acceptance by depth until a stream has its own (the reference's chat text: measured, see the commit).
 /// The copy match beside DFlash2: the dense 27B leaves short copies to its drafts and copies after long_match (20).
 pub fn copyMatch(g: anytype) i64 {
     return if (@import("cuda_geometry.zig").dense27(g)) lanes.windows.long_match else 0;
 }
 
+/// Acceptance by depth until a stream has its own (the reference's chat text: measured, see the commit).
 const prior = [_]f64{ 0.75, 0.65, 0.58, 0.52, 0.47, 0.43, 0.4, 0.37, 0.35, 0.33, 0.31, 0.29, 0.28, 0.27, 0.26 };
 
 /// TF_TIMING=1: each call's wall time on stderr.
