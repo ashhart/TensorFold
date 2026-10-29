@@ -25,6 +25,7 @@ const Pass = struct {
 
     /// out = x w: FP4 prompt rows on the prompt GEMM, the rest on the lane a round at a time (bits free of chunk cuts).
     fn project(p: Pass, w: wts.Proj, x: u64, out: u64, rows: usize) !void {
+        if (w == .affine4) return affine(p.m, p.k, p.s, w.affine4, x, out, rows, p.prompt);
         const lin = p.k.linear();
         const in: cuda.qlinear.Rows = .{ .x = x, .part = p.m.s.part };
         if (p.prompt and w == .nvfp4) return lin.prompt(p.s, w, in, out, rows);
@@ -60,7 +61,7 @@ const Pass = struct {
         const m = p.m;
         const qw = c.query_heads * c.head_dim;
         try p.project(a.qkvg, x.x, x.wide, p.rows);
-        const ld: i64 = wts.qkvg_rows;
+        const ld: i64 = @intCast(a.qkvg.outputs());
         const dh: i64 = c.head_dim;
         const src: cuda.qk_rows.Src = .{ .q = x.wide, .q_ld = ld, .q_hs = dh, .k = x.wide + qw * 2, .k_ld = ld, .k_hs = dh, .v = x.wide + (qw + mdl.kv_width) * 2, .v_ld = ld, .v_hs = dh };
         const shape: cuda.qk_rows.Shape = .{ .norms = a.norms, .norms_bf16 = true, .inv = m.inv[@intFromBool(a.sliding)], .rot = c.head_dim, .eps = c.eps, .round = true };
@@ -72,8 +73,15 @@ const Pass = struct {
         }
         try p.k.qk.rowsFrom(p.s, src, .{ .h = c.query_heads, .hk = c.kv_heads, .dim = c.head_dim }, shape, x.pos, x.slot, out, p.rows);
         if (a.sliding) try p.sliding(sliding_at) else try p.full(full_at);
-        // HF's gate: bf16(o * bf16(sigmoid(gate_proj(x)))), one scalar a query head
-        try p.k.act.headGate(p.s, x.att, x.wide + (qw + 2 * mdl.kv_width) * 2, wts.qkvg_rows, x.y, null, p.rows, c.query_heads, c.head_dim);
+        // HF's gate: bf16(o * bf16(sigmoid(gate_proj(x)))), one scalar a query head; on its own, into the merge's sums
+        var gate = x.wide + (qw + 2 * mdl.kv_width) * 2;
+        var gate_ld = a.qkvg.outputs();
+        if (a.gate) |g| {
+            try p.project(g, x.x, x.xs, p.rows);
+            gate = x.xs;
+            gate_ld = c.query_heads;
+        }
+        try p.k.act.headGate(p.s, x.att, gate, gate_ld, x.y, null, p.rows, c.query_heads, c.head_dim);
         try p.project(a.out, x.y, x.r, p.rows);
     }
 
@@ -147,7 +155,9 @@ pub fn forward(m: *const Model, k: *const Kernels, s: Stream, chains: []const Ch
     try upload(m, s, chains, rows);
     const p: Pass = .{ .m = m, .k = k, .s = s, .chains = chains, .rows = rows, .prompt = prompt };
     const x = m.s;
-    try k.embed.bf16(s, x.ids, m.w.embed, x.h, rows, c.hidden);
+    if (m.w.embed_affine) |e| {
+        try k.embed.affine4(s, x.ids, e[0], e[1], e[2], x.h, rows, c.hidden);
+    } else try k.embed.bf16(s, x.ids, m.w.embed, x.h, rows, c.hidden);
     var conv_at: usize = 0;
     var full_at: usize = 0;
     var sliding_at: usize = 0;
@@ -171,8 +181,21 @@ pub fn forward(m: *const Model, k: *const Kernels, s: Stream, chains: []const Ch
     try p.norm(post, m.w.final_norm);
     try commitAll(m, k, s, chains, prompt);
     if (heads == 0) return;
-    const lin = k.linear();
-    try lin.decode(s, m.w.head, .{ .x = x.x + head0 * c.hidden * 2, .part = x.part }, x.logits, heads);
+    const hx = x.x + head0 * c.hidden * 2;
+    if (m.w.head == .affine4) return affine(m, k, s, m.w.head.affine4, hx, x.logits, heads, false);
+    try k.linear().decode(s, m.w.head, .{ .x = hx, .part = x.part }, x.logits, heads);
+}
+
+/// out = x q for MLX affine-4: a prompt chunk's GEMM, or decode rows on their 64-value sums, a verify tile at a time.
+fn affine(m: *const Model, k: *const Kernels, s: Stream, q: cuda.qlinear.Affine4, x: u64, out: u64, rows: usize, prompt: bool) !void {
+    if (prompt) return k.affine.prompt(s, x, q, out, rows);
+    try k.act.groupSums(s, x, q.k, m.s.sums, rows, q.k);
+    const tile = k.affine.verifyRows();
+    var at: usize = 0;
+    while (at < rows) : (at += tile) {
+        const n = @min(tile, rows - at);
+        try k.affine.verify(s, x + at * q.k * 2, m.s.sums + at * (q.k / 64) * 4, q, out + at * q.n * 2, n);
+    }
 }
 
 /// Each stream's conv states (slots[i]) set to its state after snapshot row rows[i]; a row < 0 keeps them.
