@@ -6,11 +6,13 @@
 #include <stdint.h>
 
 #include "attn_odd.cuh"
+#include "common/kv_pages.cuh"
 #include "common/qmm_frag.cuh"
 #include "common/cp_async.cuh"
 
 namespace tf_tree {
 
+using tf_common::Pg;
 using qmm_frag::commit;
 using qmm_frag::cp16z;
 using qmm_frag::ldmatrix4;
@@ -55,13 +57,13 @@ extern "C" __global__ void tf_tree_paths(const int* __restrict__ parents, int* _
 }
 
 // Group gi of key head kh for 16 (row, head) pairs from pf (m: row rq + m / G, head m % G); !ODD true: run tree_odd.
-template <int D, int HB, int W, int ST, bool ODD>
+template <int D, int HB, int W, int ST, bool ODD, typename... P>
 __device__ __forceinline__ bool tree_group(
     const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kn, const __nv_bfloat16* __restrict__ vn,
     const __nv_bfloat16* __restrict__ origin, const long long* __restrict__ offs, const int* __restrict__ row_stream,
     const int* __restrict__ streams, const int* __restrict__ paths, const int* __restrict__ depths,
     float* __restrict__ po, float* __restrict__ pm, float* __restrict__ pl, int h, int hk, float scale, int gi, int ng,
-    int64_t rq, int pf, int npairs, int64_t row, int slice) {
+    int64_t rq, int pf, int npairs, int64_t row, int slice, const P&... pg) {
     constexpr int C = D / 8, K16 = D / 16, NB = D / 8, NT8 = HB / 8, PK = HB / 16;
     constexpr bool QREG = D <= 128;
     extern __shared__ uint4 smem[];
@@ -75,6 +77,14 @@ __device__ __forceinline__ bool tree_group(
     if (k0 >= total) return false; // the merge reads only the row's own groups
     const __nv_bfloat16* kc = origin + offs[2 * s];
     const __nv_bfloat16* vc = origin + offs[2 * s + 1];
+    // committed key `key` of K or V part c: in its stream's run, or (PG) at its page's slot of the stream's table row
+    const auto committed = [&](const __nv_bfloat16* c, int key) {
+        if constexpr (sizeof...(P) != 0) {
+            const Pg& t = (pg, ...);
+            return c + (int64_t)t.tab[s * t.stride + key / t.tok] * t.page + ((int64_t)(key % t.tok) * hk + kh) * D;
+        } else
+            return c + ((int64_t)key * hk + kh) * D;
+    };
     // ST tile stages: a one-warp block fetches ST - 1 tiles ahead while it computes one (stages never change bits)
     uint4* const kv0 = smem + warp * ST * 2 * HB * C;
     uint4* ks = kv0;
@@ -117,8 +127,8 @@ __device__ __forceinline__ bool tree_group(
             const __nv_bfloat16* ksrc;
             const __nv_bfloat16* vsrc;
             if (key < p) {
-                ksrc = kc + ((int64_t)key * hk + kh) * D;
-                vsrc = vc + ((int64_t)key * hk + kh) * D;
+                ksrc = committed(kc, key);
+                vsrc = committed(vc, key);
             } else { // the row's own path: key p + j is path row j
                 const int node = in ? paths[r * MAXD + (key - p)] : 0;
                 ksrc = kn + ((int64_t)node * hk + kh) * D;
@@ -240,12 +250,18 @@ __device__ __forceinline__ bool tree_group(
     } else {
         // key k of the group's row: committed, then the row's path; pair m: row rq + (pf + m) / G, head (pf + m) % G
         const auto at = [&](const __nv_bfloat16* c, const __nv_bfloat16* n, int k) {
-            return k < p ? c + ((int64_t)k * hk + kh) * D : n + ((int64_t)paths[r * MAXD + (k - p)] * hk + kh) * D;
+            if constexpr (sizeof...(P) != 0) // the replay's own expressions when not paged: its code as before
+                return k < p ? committed(c, k) : n + ((int64_t)paths[r * MAXD + (k - p)] * hk + kh) * D;
+            else
+                return k < p ? c + ((int64_t)k * hk + kh) * D : n + ((int64_t)paths[r * MAXD + (k - p)] * hk + kh) * D;
         };
         const auto qrow = [&](int m) { return q + ((rq + (pf + m) / G) * h + kh * G + (pf + m) % G) * D; };
         const auto each = [&](int m, auto f) { // pair m's keys: its stream's committed ones, then its own row's path
             const int64_t pr = rq + (pf + m) / G;
-            for (int k = 0; k < p; ++k) f(kc + ((int64_t)k * hk + kh) * D);
+            if constexpr (sizeof...(P) != 0)
+                for (int k = 0; k < p; ++k) f(committed(kc, k));
+            else
+                for (int k = 0; k < p; ++k) f(kc + ((int64_t)k * hk + kh) * D);
             for (int j = 0; j < depths[pr]; ++j) f(kn + ((int64_t)paths[pr * MAXD + j] * hk + kh) * D);
         };
         auto w = attn_odd::weights<D>(qrow, each, scale, lane);
@@ -318,25 +334,29 @@ __device__ __forceinline__ bool tree_group(
 }
 
 // A block with a NaN or infinite partial, again as ODD: those values out of the mma, added back at float64's weights.
-template <int D, int HB, int W, int ST>
+template <int D, int HB, int W, int ST, typename... P>
 __device__ __noinline__ void tree_odd(
     const __nv_bfloat16* q, const __nv_bfloat16* kn, const __nv_bfloat16* vn, const __nv_bfloat16* origin,
     const long long* offs, const int* row_stream, const int* streams, const int* paths, const int* depths, float* po,
     float* pm, float* pl, int h, int hk, float scale, int gi, int ng, int64_t rq, int pf, int npairs, int64_t row,
-    int slice) {
+    int slice, P... pg) {
     tree_group<D, HB, W, ST, true>(q, kn, vn, origin, offs, row_stream, streams, paths, depths, po, pm, pl, h, hk, scale,
-                                   gi, ng, rq, pf, npairs, row, slice);
+                                   gi, ng, rq, pf, npairs, row, slice, pg...);
 }
 
 // A stream's full committed groups once for its rows, 16 (row, head) pairs a block: each partial a row block's bits.
-template <int D, int HB, int W, int ST>
+template <int D, int HB, int W, int ST, typename... P>
 __device__ __forceinline__ void tree_shared(
     const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ origin, const long long* __restrict__ offs,
     const int* __restrict__ row_stream, const int* __restrict__ streams, const int* __restrict__ paths,
     const int* __restrict__ depths, float* __restrict__ po, float* __restrict__ pm, float* __restrict__ pl, int h, int hk,
-    float scale, int ng, int n, const __nv_bfloat16* __restrict__ kn) {
+    float scale, int ng, int n, const __nv_bfloat16* __restrict__ kn, P... pg) {
     const int G = h / hk;
     const int per = W == 4 ? 1 : 4; // slices an item takes a block
+    const auto odd = [&](const __nv_bfloat16* v, int gi, int64_t rq, int pf, int npairs, int64_t row, int slice) {
+        tree_odd<D, HB, W, ST>(q, kn, v, origin, offs, row_stream, streams, paths, depths, po, pm, pl, h, hk, scale, gi, ng,
+                               rq, pf, npairs, row, slice, pg...);
+    };
     for (int item = blockIdx.x; item < n * ng * per; item += gridDim.x) { // (row, group[, slice]): a fixed grid
         const int64_t r = item / per / ng;
         const int gi = item / per % ng;
@@ -347,22 +367,26 @@ __device__ __forceinline__ void tree_shared(
         if (tile * 16 >= pairs || (gi + 1) * SPAN > p) continue;
         // vn: never read, a full committed group has no path keys (the replay weighs them, from kn)
         if (tree_group<D, HB, W, ST, false>(q, kn, q, origin, offs, row_stream, streams, paths, depths, po, pm, pl, h, hk,
-                                            scale, gi, ng, r0, tile * 16, pairs, r, item % per))
-            tree_odd<D, HB, W, ST>(q, kn, q, origin, offs, row_stream, streams, paths, depths, po, pm, pl, h, hk, scale, gi,
-                                   ng, r0, tile * 16, pairs, r, item % per);
+                                            scale, gi, ng, r0, tile * 16, pairs, r, item % per, pg...))
+            odd(q, gi, r0, tile * 16, pairs, r, item % per);
         __syncthreads();
     }
 }
 
+#define TF_TREE_SHARED_ARGS                                                                                     \
+    const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ origin, const long long* __restrict__ offs, \
+        const int* __restrict__ row_stream, const int* __restrict__ streams, const int* __restrict__ paths,          \
+        const int* __restrict__ depths, float* __restrict__ po, float* __restrict__ pm, float* __restrict__ pl, int h, \
+        int hk, float scale, int ng, int n, const __nv_bfloat16* __restrict__ kn
 #define TF_TREE_SHARED(NAME, D, HB, W, ST)                                                                              \
-    extern "C" __global__ void __launch_bounds__(32 * W) NAME(                                                           \
-        const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ origin,                                \
-        const long long* __restrict__ offs, const int* __restrict__ row_stream, const int* __restrict__ streams,      \
-        const int* __restrict__ paths, const int* __restrict__ depths, float* __restrict__ po,                        \
-        float* __restrict__ pm, float* __restrict__ pl, int h, int hk, float scale, int ng, int n,                    \
-        const __nv_bfloat16* __restrict__ kn) {                                                                       \
+    extern "C" __global__ void __launch_bounds__(32 * W) NAME(TF_TREE_SHARED_ARGS) {                                  \
         tree_shared<D, HB, W, ST>(q, origin, offs, row_stream, streams, paths, depths, po, pm, pl, h, hk, scale, ng, n, \
                                   kn);                                                                                \
+    }                                                                                                                 \
+    extern "C" __global__ void __launch_bounds__(32 * W)                                                              \
+        NAME##_pg(TF_TREE_SHARED_ARGS, const int* __restrict__ tab, long long page, int tok, int stride) {           \
+        tree_shared<D, HB, W, ST>(q, origin, offs, row_stream, streams, paths, depths, po, pm, pl, h, hk, scale,        \
+                                        ng, n, kn, Pg{tab, page, tok, stride});                                       \
     }
 
 TF_TREE_SHARED(tf_tree_shared, 128, 32, 4, 1)
@@ -373,33 +397,42 @@ TF_TREE_SHARED(tf_tree_shared_w1s3, 128, 32, 1, 3)
 TF_TREE_SHARED(tf_tree_shared_256_w1s3, 256, 16, 1, 3)
 
 // Block (row, key head, group slot): the row's groups past its stream's full committed ones, slot, slot + slots, ...
-template <int D, int HB, int W, int ST>
+template <int D, int HB, int W, int ST, typename... P>
 __device__ __forceinline__ void tree_part(
     const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kn, const __nv_bfloat16* __restrict__ vn,
     const __nv_bfloat16* __restrict__ origin, const long long* __restrict__ offs, const int* __restrict__ row_stream,
     const int* __restrict__ streams, const int* __restrict__ paths, const int* __restrict__ depths,
-    float* __restrict__ po, float* __restrict__ pm, float* __restrict__ pl, int h, int hk, float scale, int ng) {
+    float* __restrict__ po, float* __restrict__ pm, float* __restrict__ pl, int h, int hk, float scale, int ng, P... pg) {
     const int64_t r = blockIdx.x;
     const int p = streams[4 * row_stream[r] + 2], total = p + depths[r];
     const int per = W == 4 ? 1 : 4, slot = blockIdx.z / per, slots = gridDim.z / per;
+    const auto odd = [&](const __nv_bfloat16* v, int gi, int64_t rq, int pf, int npairs, int64_t row, int slice) {
+        tree_odd<D, HB, W, ST>(q, kn, v, origin, offs, row_stream, streams, paths, depths, po, pm, pl, h, hk, scale, gi, ng,
+                               rq, pf, npairs, row, slice, pg...);
+    };
     for (int gi = slot + p / SPAN; gi < ng && gi * SPAN < total; gi += slots) { // full committed: shared
         if (tree_group<D, HB, W, ST, false>(q, kn, vn, origin, offs, row_stream, streams, paths, depths, po, pm, pl, h, hk,
-                                            scale, gi, ng, r, 0, h / hk, r, blockIdx.z % per))
-            tree_odd<D, HB, W, ST>(q, kn, vn, origin, offs, row_stream, streams, paths, depths, po, pm, pl, h, hk, scale, gi,
-                                   ng, r, 0, h / hk, r, blockIdx.z % per);
+                                            scale, gi, ng, r, 0, h / hk, r, blockIdx.z % per, pg...))
+            odd(vn, gi, r, 0, h / hk, r, blockIdx.z % per);
         __syncthreads(); // the next group's tiles reuse the partials' shared memory
     }
 }
 
-#define TF_TREE_PART(NAME, D, HB, W, ST)                                                                              \
-    extern "C" __global__ void __launch_bounds__(32 * W) NAME(                                                           \
-        const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kn,                                    \
-        const __nv_bfloat16* __restrict__ vn, const __nv_bfloat16* __restrict__ origin,                               \
-        const long long* __restrict__ offs, const int* __restrict__ row_stream, const int* __restrict__ streams,      \
-        const int* __restrict__ paths, const int* __restrict__ depths, float* __restrict__ po,                        \
-        float* __restrict__ pm, float* __restrict__ pl, int h, int hk, float scale, int ng) {                         \
+#define TF_TREE_PART_ARGS                                                                                       \
+    const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kn, const __nv_bfloat16* __restrict__ vn,  \
+        const __nv_bfloat16* __restrict__ origin, const long long* __restrict__ offs,                                 \
+        const int* __restrict__ row_stream, const int* __restrict__ streams, const int* __restrict__ paths,          \
+        const int* __restrict__ depths, float* __restrict__ po, float* __restrict__ pm, float* __restrict__ pl, int h, \
+        int hk, float scale, int ng
+#define TF_TREE_PART(NAME, D, HB, W, ST)                                                                                \
+    extern "C" __global__ void __launch_bounds__(32 * W) NAME(TF_TREE_PART_ARGS) {                                    \
         tree_part<D, HB, W, ST>(q, kn, vn, origin, offs, row_stream, streams, paths, depths, po, pm, pl, h, hk, scale, \
-                            ng);                                                                                    \
+                                ng);                                                                                  \
+    }                                                                                                                 \
+    extern "C" __global__ void __launch_bounds__(32 * W)                                                              \
+        NAME##_pg(TF_TREE_PART_ARGS, const int* __restrict__ tab, long long page, int tok, int stride) {             \
+        tree_part<D, HB, W, ST>(q, kn, vn, origin, offs, row_stream, streams, paths, depths, po, pm, pl, h, hk,         \
+                                      scale, ng, Pg{tab, page, tok, stride});                                         \
     }
 
 TF_TREE_PART(tf_tree_part, 128, 32, 4, 1)

@@ -6,6 +6,7 @@
 #include <math.h>
 #include <stdint.h>
 
+#include "common/kv_pages.cuh"
 #include "common/qmm_frag.cuh"
 #include "common/cp_async.cuh"
 #include "window_fallback.h"
@@ -29,13 +30,7 @@ enum Fault : int {
     TRUNC = 4,   // the merge's output rounded toward zero
 };
 
-// A paged cache's address: a stream's table row of page ids, elements a page holds across its caches, positions a page.
-struct Pg {
-    const int* tab;
-    long long page;
-    int tok;
-    int stride; // table entries a slot (decode); a prompt kernel is given its stream's row
-};
+using tf_common::Pg; // common/kv_pages.cuh
 
 using qmm_frag::commit;
 using qmm_frag::cp16z;
