@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash on CUDA takes `--mtp-confidence F` (off by default), as Nemotron does: each MTP draft carries its chance, read from the ranks' greedy pick with their softmax sums, and a chain stops where that chance falls under F. On GB10 at TP=3 with 0.5, decode went from 51.6 to 54.1 tok/s (+4.9%), greedy chat at one stream from 45.0 to 47.9 tok/s, and four distinct prompts at once from 70.6 to 75.0 tok/s, with the same tokens. At TP=2 four greedy code streams were 3.7% slower with it, so a code-heavy TP=2 server is better off without it. Under any `--mtp-confidence` floor, Nemotron's included, a sampled stream now drafts its rates' depth instead of the deepest window. Without the flag every path is unchanged, and `tf_glm_top1` compiles to the same code (#1585). Thanks to @Bizuayeu.
+
 - LFM2.5-24B-A2B on Metal can hand an external drafter the rows of the layers it reads (its taps), copied on the GPU by a new kernel, `lfm2_tap`, that the kernel contract checks bit for bit with two planted controls (#1390, part of #1374). A drafting stream resumes a kept prompt state only when it also holds the drafter's context. Nothing uses the taps yet: without a drafter none are kept and every forward runs as before. Thanks to @BlivionIaG.
 
 - Nemotron on CUDA: the MoE residual's norm, Mamba's group norm, the MTP input norms and the bf16 token rows run on the shared norm and embedding kernels instead of Nemotron's own copies, which are removed. The shared kernels keep Nemotron's summation order, so replies are the same tokens as before, and one fewer CUDA image loads (#1353, step 1 of #548). Thanks to @jschmied.
