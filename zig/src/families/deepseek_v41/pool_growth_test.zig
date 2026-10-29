@@ -116,3 +116,31 @@ test "pool growth: an unadmitted caller cannot consume another active request's 
     try growth.reserve(null, &.{.{ .slot = other, .end = 512 }});
     _ = try other.releaseAll();
 }
+
+test "pool growth: a need within mapped pages skips the rank vote and leaves ownership, quota and overage as they were" {
+    var pool = try sessions.Pool.init(t.allocator, .{ .families = &fams, .page = 16 }, 512, 2, 0);
+    defer pool.deinit();
+    const slot = try pool.newSlot(512);
+    try slot.ensure(100);
+    const Count = struct {
+        n: u32 = 0,
+        fn all(ptr: *anyopaque, ok: bool) anyerror!bool {
+            const c: *@This() = @ptrCast(@alignCast(ptr));
+            c.n += 1;
+            return ok;
+        }
+    };
+    var votes: Count = .{};
+    const agree: @import("lockstep.zig").Agree = .{ .ctx = &votes, .all = Count.all };
+    const free = pool.freePages();
+    for ([_]u64{ 1, 100, 112 }) |end| try growth.reserve(agree, &.{.{ .slot = slot, .end = end }});
+    try t.expectEqual(@as(u32, 0), votes.n);
+    try t.expectEqual(@as(u32, 7), slot.len);
+    try t.expect(slot.quota == null);
+    try t.expectEqual(@as(u32, 0), slot.over);
+    try t.expectEqual(free, pool.freePages());
+    try growth.reserve(agree, &.{.{ .slot = slot, .end = 113 }});
+    try t.expectEqual(@as(u32, 1), votes.n);
+    try t.expectEqual(@as(u32, 8), slot.len);
+    _ = try slot.releaseAll();
+}
