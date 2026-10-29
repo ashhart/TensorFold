@@ -71,6 +71,21 @@ What remains of the gap between sampled and greedy cells is the host-side sampli
 at a time: the score-row download and top-k scan for each draft (79,591 columns) and for each verify row
 (248,320 columns). Moving those candidates to the device and waiting once a window is separate work.
 
+## Prompt speed
+
+`tools/bench_cache.py http://127.0.0.1:30001 Qwen3.8-Flash-Next --tokens 64 --repeats 2 --streams 2 --require-cold --prompt-file long12k.json`, the prompt being the 12,001 token ids of `zig/tests/cuda/flashnext/lr7/long12k.ids`, a fresh
+server for each side so the first request is cold; both runs qualified ([prefill-baseline.json](prefill-baseline.json),
+[prefill-this-pr.json](prefill-this-pr.json)).
+
+| request (12,001-token prompt, 64 tokens) | baseline | this PR |
+| --- | ---: | ---: |
+| cold first request, `ttft_s` (mean of the two cold requests) | 7.22 s (7.39, 7.05) | 7.22 s (7.29, 7.14) |
+| prompt tokens over that time | 1,662 tok/s | 1,663 tok/s |
+| repeated request on the kept prompt, `ttft_s` | 0.088 s | 0.092 s |
+| two concurrent requests on the kept prompt, `ttft_s` | 0.084 s, 0.258 s | 0.091 s, 0.238 s |
+| decode, first request | 39.8 tok/s | 39.5 tok/s |
+| repeated and concurrent replies equal to the first | 4 of 4 | 4 of 4 |
+
 ## Memory
 
 Available host memory did not fall below 22.6 GiB during the window. The server's admission and reserve are
