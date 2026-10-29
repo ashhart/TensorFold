@@ -604,11 +604,12 @@ cap below needs their room. After a restart, a crash or an eviction from RAM, th
 instead of reading the conversation again from its first token. Qwen3.8-27B, Nemotron, Flash Next and GLM-5.3-Flash on
 one Mac and Nemotron on CUDA keep them; other engines refuse the flag at startup.
 
-The engine stages an owned copy between rounds, and an I/O thread writes and fsyncs it. Staging has a 1 GiB byte
-permit and at most eight jobs. A save that finds either full but would fit alone waits in the queue until a write
-finishes; one that cannot fit even then is skipped, as is a save made at an eviction (below) that finds the permit full.
-A block still being written is charged and copied once, however many saves name it. The copy waits for its GPU producers
-before RAM can be reused. A state becomes available for reuse only after all its files have been written and synced.
+The engine stages an owned copy between rounds, and an I/O thread writes and fsyncs it. Staging has a 1 GiB byte permit
+and at most eight jobs. A save that finds either full but would fit alone waits in the queue until a write finishes; one
+that cannot fit even then is skipped. So is a waiting save whose state leaves RAM, unless `--spill-gib` copies it then
+(below); that copy, like any made at an eviction, is skipped when the permit is full. A block still being written is
+charged and copied once, however many saves name it. The copy waits for its GPU producers before RAM can be reused. A
+state becomes available for reuse only after all its files have been written and synced.
 A planned stop (SIGTERM or SIGINT) drains writes for up to 20 seconds, then cancels the remainder; a blocked syscall
 can finish later using only its private temporary files and staged bytes. A killed server loses unfinished saves.
 Rows a stored state already holds for the same tokens are written once, so ten

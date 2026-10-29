@@ -112,7 +112,7 @@ pub const Rows = struct {
     stopped: bool = false,
     flush_clock: ?u64 = null, // a close protects states touched after this clock from older queued saves
     next_job: u64 = 0,
-    waiting: ?*pc.Entry = null, // the queued save the jobs in flight left no room for (a reap lets it try again)
+    waiting: ?*pc.Entry = null, // the newest save refused room; while it is next, step waits for a reap
     failures: write.Failures = .{},
     fetch: ?*@import("rows_prefetch.zig").Prefetch = null, // states read ahead for queued requests (a lane host's)
 
