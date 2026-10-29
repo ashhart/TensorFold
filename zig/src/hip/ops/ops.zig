@@ -86,6 +86,7 @@ pub const Ops = struct {
     pub const copyCols = elementwise.copyCols;
     pub const moeTail = moe.moeTail;
     pub const moeRouter = moe.moeRouter;
+    pub const moeRouterRows = moe.moeRouterRows;
     pub const moeSelect = moe.moeSelect;
     pub const moeRoute = moe.moeRoute;
     pub const moeAct = moe.moeAct;

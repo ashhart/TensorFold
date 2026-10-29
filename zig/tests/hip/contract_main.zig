@@ -19,6 +19,8 @@ const kv_k = @import("contract_kv_write.zig");
 const argmax_k = @import("contract_argmax.zig");
 const pair_k = @import("contract_relu2_pair.zig");
 const gate_k = @import("contract_moe_gate.zig");
+const router_k = @import("contract_router.zig");
+const kit = @import("contract_kit.zig");
 
 const g = core.contract.gates;
 
@@ -150,6 +152,11 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     for (&gates, std.enums.values(gate_k.Which)) |*m, w| m.* = .init(a, &r, s, &l, w);
     defer for (&gates) |*m| m.deinit();
     for (&gates) |*m| try kernels.append(a, m.kernel());
+    // both activation kinds: the rows are bf16 whichever one the chip's activations are
+    var routers: [2]router_k.Router = undefined;
+    for (&routers, [_]kit.Kind{ .f16, .bf16 }) |*x, k| x.* = router_k.Router.init(a, &r, s, &l, k);
+    defer for (&routers) |*x| x.deinit();
+    for (&routers) |*x| try kernels.append(a, x.kernel());
     var t: g.Tally = .{};
     const t0 = ms(io);
     try g.runAll(a, kernels.items, 0x6b63, &t);
