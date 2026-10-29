@@ -62,7 +62,7 @@ fn layerLinears(gpa: std.mem.Allocator, l: *Layer, list: *std.ArrayList(Lin)) !v
 }
 
 /// Move an uneven fused KDA stack into an eight-aligned buffer so tiledInput() passes; pad columns are ignored.
-fn padKdaInputs(w: *Weights, d: *const cuda.Driver, s: cuda.Stream) !void {
+pub fn padKdaInputs(w: *Weights, d: *const cuda.Driver, s: cuda.Stream) !void {
     for (w.layers) |*l| switch (l.mixer) {
         .kda => |*x| try padOneKdaInput(w, d, s, x),
         else => {},
@@ -74,22 +74,28 @@ fn padKdaInputs(w: *Weights, d: *const cuda.Driver, s: cuda.Stream) !void {
     };
 }
 
-/// One KDA layer's fused input stack, moved to an eight-aligned buffer when TF_GLM_KDA_PAD asks for it.
+/// One KDA layer's bf16 input rows (the whole stack, or a split stack's rest) moved to an eight-aligned buffer.
 fn padOneKdaInput(w: *Weights, d: *const cuda.Driver, s: cuda.Stream, x: *@import("cuda_kda_block.zig").Layer) !void {
     const np = x.matWidth();
     if (np == x.width()) return; // already aligned, or the pad is off
+    // a split stack's MXFP8 [q | k | v] keeps its width (3 * heads * dk, aligned); its bf16 rest carries the pad
+    const fa: usize = if (x.proj == .split) 3 * x.heads * @import("cuda_kda.zig").dk else 0;
     const src = switch (x.proj) {
         .bf16 => |ptr| ptr,
-        else => return, // the MXFP8 split stack pads its bf16 rest separately
+        .split => |sp| sp.rest,
     };
-    const n = x.width();
+    const n = x.width() - fa;
+    const m = np - fa;
     const k = x.dims;
-    var buf = try cuda.DeviceBuffer.alloc(d, np * k * 2);
+    var buf = try cuda.DeviceBuffer.alloc(d, m * k * 2);
     errdefer buf.free();
     try d.check(d.api.cuMemcpyDtoDAsync_v2(buf.ptr, src, n * k * 2, s.handle), "cuMemcpyDtoDAsync");
-    try d.check(d.api.cuMemsetD8Async(buf.ptr + n * k * 2, 0, (np - n) * k * 2, s.handle), "cuMemsetD8Async");
+    try d.check(d.api.cuMemsetD8Async(buf.ptr + n * k * 2, 0, (m - n) * k * 2, s.handle), "cuMemsetD8Async");
     try s.synchronize();
-    x.proj = .{ .bf16 = buf.ptr };
+    switch (x.proj) {
+        .bf16 => x.proj = .{ .bf16 = buf.ptr },
+        .split => |*sp| sp.rest = buf.ptr,
+    }
     try w.buffers.append(w.gpa, buf);
 }
 
