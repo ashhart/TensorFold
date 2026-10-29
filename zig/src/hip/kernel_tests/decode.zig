@@ -123,6 +123,83 @@ test "the merged router launch is no further from float64 than twice the launch 
     for ([_]usize{ 1, 2, 4, 8 }) |rows| try router(t, &rng, rows, 2048, 257);
 }
 
+/// The router over the stored bf16 rows and over the fp32 rows widened from them: the same logits' bits.
+fn routerRows(t: *Rig, rng: *rig.Rng, kind: c_int, rows: usize, d: usize, experts: usize, planted: bool) !void {
+    const fits = struct {
+        fn bits(k: c_int, v: f32) u16 {
+            return if (k == 1) rig.f16Bits(v) else rig.bf16Bits(v);
+        }
+        fn value(k: c_int, b: u16) f64 {
+            return if (k == 1) rig.f16Value(b) else rig.bf16Value(b);
+        }
+    };
+    const hx = try gpa.alloc(u16, rows * d);
+    defer gpa.free(hx);
+    for (hx) |*v| v.* = fits.bits(kind, rng.unit());
+    const hw16 = try gpa.alloc(u16, experts * d);
+    defer gpa.free(hw16);
+    for (hw16) |*v| v.* = rig.bf16Bits(rng.unit() / 8.0);
+    const hw32 = try gpa.alloc(f32, experts * d);
+    defer gpa.free(hw32);
+    for (hw16, hw32) |b, *v| v.* = @as(f32, @bitCast(@as(u32, b) << 16));
+    // a checkpoint's rows are the widened bf16 ones; a plant the same in both, so the sums must still match bit for bit
+    if (planted) {
+        hx[d / 2] = fits.bits(kind, 1.0);
+        hw16[d] = rig.bf16Bits(-0.0);
+        hw32[d] = -0.0;
+        hw16[2 * d + 1] = 0x7f80;
+        hw32[2 * d + 1] = @bitCast(@as(u32, 0x7f80) << 16);
+    }
+    var x = try t.upload(hx);
+    defer x.free();
+    var w16 = try t.upload(hw16);
+    defer w16.free();
+    var w32 = try t.upload(hw32);
+    defer w32.free();
+    const size = rows * experts * 4;
+    var got: [2]@import("../memory.zig").DeviceBuffer = .{ try t.alloc(size), try t.alloc(size) };
+    defer for (&got) |*b| b.free();
+    // over the fp32 rows widened from the same bf16 values, and over the bf16 rows themselves
+    const s = t.stream.handle;
+    const rows_c, const d_c, const ex_c = .{ @as(c_int, @intCast(rows)), @as(c_int, @intCast(d)), @as(c_int, @intCast(experts)) };
+    try std.testing.expect(try t.on.routerWindow(p(x), kind, @ptrFromInt(at(w32)), @ptrFromInt(at(got[0])), rows_c, d_c, ex_c, s));
+    try std.testing.expect(try t.on.routerBf16(p(x), p(w16), kind, @ptrFromInt(at(got[1])), rows_c, d_c, ex_c, s));
+    try t.stream.synchronize();
+    const a = try rig.download(u8, got[0]);
+    defer gpa.free(a);
+    const b = try rig.download(u8, got[1]);
+    defer gpa.free(b);
+    try std.testing.expectEqualSlices(u8, a, b);
+    if (planted) return;
+    // and both are the float64 sum of the same values: the comparison above is not two equally empty buffers
+    const logits = std.mem.bytesAsSlice(f32, b);
+    for (0..rows) |r| for (0..experts) |e| {
+        var y: f64 = 0;
+        var norm: f64 = 0;
+        for (0..d) |i| {
+            const term = fits.value(kind, hx[r * d + i]) * @as(f64, hw32[e * d + i]);
+            y += term;
+            norm += @abs(term);
+        }
+        try std.testing.expect(@abs(@as(f64, logits[r * experts + e]) - y) / norm <= 1e-5);
+    };
+}
+
+test "the router over the stored bf16 rows writes the bits the router over the fp32 rows writes" {
+    const t = try Rig.open(1 << 20);
+    defer t.close();
+    var rng: rig.Rng = .{ .state = 0x9E3779B97F4A7C15 };
+    // both activation kinds: the weights are bf16 whichever one the chip's activations are
+    for ([_]c_int{ 1, 2 }) |kind| for ([_]usize{ 1, 2, 4, 8, 16 }) |rows| {
+        try routerRows(t, &rng, kind, rows, 2048, 257, false);
+    };
+    for ([_]c_int{ 1, 2 }) |kind| {
+        try routerRows(t, &rng, kind, 4, 2560, 513, false);
+        try routerRows(t, &rng, kind, 3, 2560, 513, true);
+        try routerRows(t, &rng, kind, 16, 2048, 257, true);
+    }
+}
+
 test "the merged residual-and-norm tails are no further from float64 than twice the launches they replace" {
     const t = try Rig.open(1 << 20);
     defer t.close();
