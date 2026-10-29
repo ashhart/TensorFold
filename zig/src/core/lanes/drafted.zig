@@ -91,7 +91,7 @@ pub const Drafted = struct {
         try target.vtable.cancel_prefill.?(target.ptr, s);
     }
 
-    /// The target's facts with the drafter's depth, step cost, prior, plain guard, batching and copy match; chains late.
+    /// The target's facts with the drafter's depth, step cost, prior, guard, batching and copy match; chains late.
     pub fn facts(x: *const Drafted, target: Model) Model {
         const d = x.drafter.facts();
         var m = target;
