@@ -16,18 +16,18 @@ const Collector = struct {
     }
 };
 
-test "Nemotron experts contract: all eighteen pipelines and two controls reach the actual collector" {
+test "Nemotron experts contract: all twenty pipelines and two controls reach the actual collector" {
     var found: Collector = .{ .a = a };
     defer found.list.deinit(a);
     try cases.visit(&found, null);
-    try std.testing.expectEqual(@as(usize, 20), found.list.items.len);
+    try std.testing.expectEqual(@as(usize, 22), found.list.items.len);
     var plain: usize = 0;
     for (found.list.items, 0..) |v, i| {
         if (v.fault != .none) continue;
         plain += 1;
         for (found.list.items[i + 1 ..]) |w| if (w.fault == .none) try std.testing.expect(!std.mem.eql(u8, v.symbol, w.symbol));
     }
-    try std.testing.expectEqual(@as(usize, 18), plain);
+    try std.testing.expectEqual(@as(usize, 20), plain);
     for (found.list.items) |v| if (!v.geo) {
         const tag = try std.fmt.allocPrint(a, "[[host_name(\"{s}\")]]", .{v.symbol});
         defer a.free(tag);
@@ -122,7 +122,9 @@ test "Nemotron experts contract: the reference sums x as tf_load16 does, in bf16
 }
 
 test "Nemotron experts contract: the fp32 x-sum control leaves w3's float64 bound at a served window" {
-    const v = cases.entries[19];
+    const v = for (cases.entries) |e| {
+        if (e.fault == .fp32_sums) break e;
+    } else unreachable;
     try std.testing.expectEqual(cases.Fault.fp32_sums, v.fault);
     const served = cases.served(v);
     const s = cases.spec(v, "control", &served);

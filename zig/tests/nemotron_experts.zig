@@ -85,7 +85,7 @@ const mix_source =
     \\
 ;
 
-/// Shapes the engine's source already instantiates (tf_xup_rows2/4, tf_xdown_rows2/4, tf_xup_w3, tf_xdown_w3).
+/// Shapes the engine's source already instantiates (tf_xup_rows2/4/2r8, tf_xdown_rows2/4/2r8, tf_xup_w3, tf_xdown_w3).
 fn builtIn(v: Variant) bool {
     if (v.words) return v.mb == 3 and v.rps == 4 and v.sg == 4;
     return !v.mix and v.sg == 2 and ((v.rps == 4 and (v.mb == 2 or v.mb == 4)) or (v.rps == 8 and v.mb == 2));
