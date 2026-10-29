@@ -165,14 +165,14 @@
 #pragma unroll
         for (int i = 0; i < NB; i += 2) {
             uint32_t b[4];
-            ldmatrix4t(b, sl + sw<8 * CS>(8 * (mt % 2) + lane % 8, i + mt / 2));
+            ldmatrix4t(b, sl + sw<8 * CS>(8 * (mt % 2) + lane % 8, (i + mt / 2) ^ PATTN_VLANE));
             mma(o[i], pa0, b[0], b[1]);
             mma(o[i + 1], pa0, b[2], b[3]);
         }
 #pragma unroll
         for (int i = 0; i < NB; i += 2) {
             uint32_t b[4];
-            ldmatrix4t(b, sl + sw<8 * CS>(16 + 8 * (mt % 2) + lane % 8, i + mt / 2));
+            ldmatrix4t(b, sl + sw<8 * CS>(16 + 8 * (mt % 2) + lane % 8, (i + mt / 2) ^ PATTN_VLANE));
             mma(o[i], pa1, b[0], b[1]);
             mma(o[i + 1], pa1, b[2], b[3]);
         }
