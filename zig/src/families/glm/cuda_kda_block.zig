@@ -28,16 +28,40 @@ pub const Layer = struct {
     lower: f32,
     heads: usize,
     dims: usize,
+    max_heads: usize = 0, // the widest rank's KDA head count: the pad target, so every rank carries one row width
 
     pub fn width(l: Layer) usize {
         return 3 * l.heads * kda.dk + 2 * kda.dk + l.heads;
     }
 
+    /// The width the input stack's rows actually carry (TF_GLM_KDA_PAD): the COMMON width, so every rank agrees.
+    pub fn matWidth(l: Layer) usize {
+        return rowWidth(l.heads, l.max_heads);
+    }
+
     /// The input stack and its two views need glm_mm's eight-column output and row stride.
     pub fn tiledInput(l: Layer) bool {
-        return l.width() % 8 == 0;
+        return l.matWidth() % 8 == 0;
     }
 };
+
+/// Whether the pad is asked for (TF_GLM_KDA_PAD unset or 0: no padding anywhere).
+pub fn padOn() bool {
+    const v = std.c.getenv("TF_GLM_KDA_PAD") orelse return false;
+    const t = std.mem.trim(u8, std.mem.span(v), " ");
+    return !(t.len == 0 or std.mem.eql(u8, t, "0"));
+}
+
+/// The fused input's row width: one eight-aligned width for every rank when TF_GLM_KDA_PAD is set.
+pub var pad_to: usize = 0;
+
+pub fn rowWidth(own_heads: usize, max_heads: usize) usize {
+    if (pad_to != 0) return pad_to;
+    const heads = @max(own_heads, max_heads);
+    const raw = 3 * heads * kda.dk + 2 * kda.dk + heads;
+    if (!padOn()) return 3 * own_heads * kda.dk + 2 * kda.dk + own_heads;
+    return std.mem.alignForward(usize, raw, 8);
+}
 
 /// The block's scratch for `rows` rows: projection, decay and gate rows, chain saves, B16 partials, a split's tmp.
 pub const Scratch = struct { p: u64, ka: u64, kg: u64, saves: kda.Saves, wide: kda.Wide, mm_part: u64, tmp: u64 = 0 };
@@ -66,7 +90,7 @@ pub fn bodyProfile(set: glue.Set, ks: *const kda.Kernels, stream: cuda.Stream, l
     stamp = prof.span(profile, stream, .kda);
     defer stamp.end();
     try chainRows(ks, stream, l, s, rows, conv_state, state_in, wide);
-    if (prompt) try glue.convShift(set, stream, conv_state, s.p, rows, rows * l.width(), l.width(), 1, 3 * l.heads * kda.dk);
+    if (prompt) try glue.convShift(set, stream, conv_state, s.p, rows, rows * l.matWidth(), l.matWidth(), 1, 3 * l.heads * kda.dk);
 }
 
 /// The projections of `rows` rows into s.p, s.ka (decay) and s.kg (gate), row by row so segments share one call.
@@ -74,7 +98,7 @@ pub fn project(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, x: u64,
     var selected = set;
     if (!l.tiledInput()) selected.mm = null;
     const n = l.heads * kda.dk;
-    const w = l.width();
+    const w = l.matWidth();
     const fa = 3 * n;
     switch (l.proj) {
         .bf16 => |p| try b16.matmul(selected, stream, x, x_stride, p, s.p, s.mm_part, rows, w, l.dims, false),
@@ -109,7 +133,7 @@ fn columns(set: glue.Set, stream: cuda.Stream, src: u64, cols: usize, dst: u64, 
 pub fn chainRows(ks: *const kda.Kernels, stream: cuda.Stream, l: Layer, s: Scratch, rows: usize, conv_state: u64, state_in: u64, wide: bool) !void {
     const n = l.heads * kda.dk;
     const fa = 3 * n;
-    const c: kda.Chain = .{ .p = s.p, .p_stride = l.width(), .b_off = fa + 2 * kda.dk, .a = s.ka, .a_stride = n, .g = s.kg, .g_stride = n, .conv_state = conv_state, .conv_w = l.conv_w, .state_in = state_in, .a_log = l.a_log, .dt_bias = l.dt_bias, .norm_w = l.norm_w, .eps = l.eps, .lower = l.lower, .heads = l.heads };
+    const c: kda.Chain = .{ .p = s.p, .p_stride = l.matWidth(), .b_off = fa + 2 * kda.dk, .a = s.ka, .a_stride = n, .g = s.kg, .g_stride = n, .conv_state = conv_state, .conv_w = l.conv_w, .state_in = state_in, .a_log = l.a_log, .dt_bias = l.dt_bias, .norm_w = l.norm_w, .eps = l.eps, .lower = l.lower, .heads = l.heads };
     try kda.chain(ks, stream, c, rows, s.saves, if (wide or rows >= kda.wide_rows) s.wide else null);
 }
 
