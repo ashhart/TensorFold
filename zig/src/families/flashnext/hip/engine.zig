@@ -121,10 +121,12 @@ pub const Engine = struct {
         e.keep = .init(gpa);
         errdefer e.keep.deinit();
         const rank: ?core.quant.Rank = if (o.world > 1) .{ .rank = o.rank, .world = o.world } else null;
-        e.weights = try loader.load(gpa, &e.driver, &e.ck, &e.cfg, rank, e.act);
+        // the index drives both the MTP head's root (oMLX keeps it outside language_model) and the shard spelling
+        const map = try weightMapOf(e.keep.allocator(), io, dir);
+        e.weights = try loader.load(gpa, &e.driver, &e.ck, &e.cfg, rank, e.act, index.mtpRoot(map));
         errdefer e.weights.deinit();
         e.weights.model.tp = e.comm;
-        const spelling = try spellingOf(e.keep.allocator(), io, dir);
+        const spelling = index.ngramSpelling(map);
         e.tables = try tables.Tables.init(e.keep.allocator(), &e.ck, &e.cfg, e.weights.model.ple.layer, spelling);
         const c = mixers.qkConstants(e.cfg.key_dim);
         var w: [2]hip.DeviceBuffer = undefined;
@@ -410,11 +412,10 @@ fn nowNs(io: std.Io) i96 {
     return std.Io.Timestamp.now(io, .awake).nanoseconds;
 }
 
-/// The index's spelling of its n-gram shards (`shard_` or oMLX's `shards.`).
-fn spellingOf(a: std.mem.Allocator, io: std.Io, dir: []const u8) ![]const u8 {
+/// The checkpoint index's weight_map, read from `dir` (the answer and everything it points at live on `a`).
+fn weightMapOf(a: std.mem.Allocator, io: std.Io, dir: []const u8) !std.json.ObjectMap {
     const path = try std.fs.path.join(a, &.{ dir, "model.safetensors.index.json" });
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 26));
     const doc = try std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{});
-    const map = try core.safetensors.index.weightMap(doc);
-    return index.ngramSpelling(map);
+    return core.safetensors.index.weightMap(doc);
 }

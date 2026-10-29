@@ -38,6 +38,8 @@ const Loader = struct {
     rank: ?Rank,
     /// The checkpoint stores centred norms as gamma (true) or as gamma - 1 (false).
     around_one: bool,
+    /// Where the index keeps the MTP head: `language_model.mtp` (mlx-lm), else oMLX's top-level `mtp`.
+    mtp_root: []const u8,
 
     fn key(l: *const Loader, comptime fmt: []const u8, args: anytype) ![]const u8 {
         return std.fmt.allocPrint(l.a, fmt, args);
@@ -318,14 +320,14 @@ test "Flash Next proposal: HIP IDs and contiguous stored-row spans retain the or
     try std.testing.expectEqual(ids.len, at);
 }
 
-/// One rank's weights (`rank` null: the whole model) from the mapped checkpoint `ck`; rank 0 also holds the MTP head.
-pub fn load(gpa: Allocator, d: *const hip.Runtime, ck: *core.checkpoint.Checkpoint, c: *const config.Config, rank: ?Rank, act: model.Kind) !Weights {
+/// One rank's weights (`rank` null: the whole model) from `ck`; rank 0 also holds the MTP head under `mtp_root`.
+pub fn load(gpa: Allocator, d: *const hip.Runtime, ck: *core.checkpoint.Checkpoint, c: *const config.Config, rank: ?Rank, act: model.Kind, mtp_root: []const u8) !Weights {
     var w: Weights = .{ .gpa = gpa };
     errdefer w.deinit();
     const tables: Tables = .{ .ck = ck, .cfg = c };
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
-    const l: Loader = .{ .a = arena.allocator(), .t = &tables, .up = .{ .r = d, .buffers = &w.buffers, .gpa = gpa }, .rank = rank, .around_one = try aroundOne(arena.allocator(), &tables, c.layers) };
+    const l: Loader = .{ .a = arena.allocator(), .t = &tables, .up = .{ .r = d, .buffers = &w.buffers, .gpa = gpa }, .rank = rank, .around_one = try aroundOne(arena.allocator(), &tables, c.layers), .mtp_root = mtp_root };
     const world_n: usize = if (rank) |r| r.world else 1;
     const dims = try model.Dims.of(c, world_n);
     const head = try l.proj(tensors.lm_head);
@@ -352,12 +354,12 @@ pub fn load(gpa: Allocator, d: *const hip.Runtime, ck: *core.checkpoint.Checkpoi
         _ = arena.reset(.retain_capacity);
         const draft_rows = try quant.sliceRows(l.a, head, try draftSpans(l.a));
         w.model.mtp = .{
-            .e_norm = try l.scale(tensors.mtp.norm_embedding),
-            .h_norm = try l.scale(tensors.mtp.norm_hidden),
-            .fc_e = try l.put(try l.proj(tensors.mtp.fc_embedding), false),
-            .fc_h = try l.put(try l.proj(tensors.mtp.fc_hidden), false),
-            .layer = try l.layer(tensors.mtp.layer0, c, c.mtp.kinds[0], true),
-            .mix = try l.hc(tensors.mtp.mixer, false),
+            .e_norm = try l.scale(try l.named(l.mtp_root, tensors.mtp.norm_embedding)),
+            .h_norm = try l.scale(try l.named(l.mtp_root, tensors.mtp.norm_hidden)),
+            .fc_e = try l.put(try l.proj(try l.named(l.mtp_root, tensors.mtp.fc_embedding)), false),
+            .fc_h = try l.put(try l.proj(try l.named(l.mtp_root, tensors.mtp.fc_hidden)), false),
+            .layer = try l.layer(try l.named(l.mtp_root, tensors.mtp.layer0), c, c.mtp.kinds[0], true),
+            .mix = try l.hc(try l.named(l.mtp_root, tensors.mtp.mixer), false),
             .dims = try model.Dims.of(c, 1),
             .draft = try l.put(draft_rows, false),
         };
