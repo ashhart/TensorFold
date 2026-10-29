@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Vulkan: the first part of an opt-in Vulkan backend for Linux GPUs, built only with `-Dvulkan=true`: the runtime (loader, device, buffers, fenced submits) and one kernel, the MLX affine 4-bit group-64 projection, registered in the kernel contract with its float64 cases, planted controls and measured per-chip limits. `zig build vulkan-kernel-contract -Dvulkan=true` runs it; the author's runs pass gates 1 to 4 and catch all 8 controls on Apple M1, M1 Max and M2 Max under Mesa Honeykrisp. No model runs on it yet, and default builds are unchanged (#1526, for #1420). Thanks to @joshuaswarren.
+
 - Multirank RoCE (`TF_COMM_BACKEND=roce` at three ranks or more) now connects over a switchless ring: each peer's stripes go over the ports on the /24 it shares, so three GB10s cabled in a ring connect where they used to refuse, and pass `tf-tp-test suite` exactly, with an 8 KiB exchange taking 10.7 µs against NCCL's 26.3 µs. A switch pairs the ports as before, two ranks are unchanged, and a ring of four still refuses and falls back to NCCL (#1516, for #1288). Thanks to @Bizuayeu.
 
 - Gemma 4: Metal and CUDA now prepare images from one shared source file instead of a CUDA copy kept equal by a test (#1589). The patches and image hashes each step produces are unchanged. Thanks to @jschmied.
