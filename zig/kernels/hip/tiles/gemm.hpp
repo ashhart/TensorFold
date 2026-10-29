@@ -16,6 +16,18 @@ constexpr int kGemmM = 128;
 constexpr int kGemmN = 128;
 constexpr int kGemmK = 32;
 constexpr int kGemmLd = kGemmK + 8;  // 20 words a row: 16-byte aligned, eight 16-byte readers hit eight bank groups
+constexpr int kGemmBand = 4;  // row blocks a band of the matrix tile's launch order walks the column blocks with
+
+// Block (x, y) in launch order takes tile (bx, by): bands of kGemmBand row blocks share each column block's weights.
+__device__ __forceinline__ void band_tile(int& bx, int& by) {
+    const int cols = gridDim.x, rows = gridDim.y;
+    const int b = blockIdx.y * cols + blockIdx.x;
+    const int first = b / (kGemmBand * cols) * kGemmBand;
+    const int in_band = b % (kGemmBand * cols);
+    const int height = min(kGemmBand, rows - first);
+    by = first + in_band % height;
+    bx = in_band / height;
+}
 
 // Rows of x a lane keeps: 16 where dot2 takes x from a quad lane by DPP (RDNA2 FP16), 8 where it has none (gfx11 BF16).
 template <typename T>

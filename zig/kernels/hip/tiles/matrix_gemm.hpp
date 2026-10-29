@@ -14,8 +14,9 @@ template <class Dec, class Act, class T, class Epi>
 __device__ __forceinline__ void wmma_gemm_tile(typename Dec::Args& a) {
 #if TF_DEVICE_WMMA_GFX11
     if (!Dec::take_item(a, blockIdx.z)) return;
-    const int bx = blockIdx.x;
-    const int m0 = blockIdx.y * kGemmM;
+    int bx, by;
+    band_tile(bx, by);
+    const int m0 = by * kGemmM;
     if (m0 >= a.m) return;
     constexpr int kLdw = kGemmLd / 2;
     __shared__ __attribute__((aligned(16))) uint32_t xs[2][kGemmM * kLdw];
