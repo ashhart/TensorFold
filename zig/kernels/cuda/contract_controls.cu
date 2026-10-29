@@ -351,3 +351,17 @@ TF_CTL_SWIGLU_L2(tf_ctl_swiglu_l2_drop_gs, tf_act_l2::US | tf_act_l2::PROD)
 TF_CTL_SWIGLU_L2(tf_ctl_swiglu_l2_drop_us, tf_act_l2::GS | tf_act_l2::PROD)
 TF_CTL_SWIGLU_L2(tf_ctl_swiglu_l2_drop_prod, tf_act_l2::GS | tf_act_l2::US)
 #undef TF_CTL_SWIGLU_L2
+
+// Gate 1: tf_pocket_in (a warp a neuron, act rows 64 wide) with relu as fmaxf(s, 0), which turns a NaN sum into 0.
+extern "C" __global__ void __launch_bounds__(128) tf_ctl_pocket_in_fmax(const __nv_bfloat16* y, int d, const float* up,
+                                                                       const int* used, float* act, int rows) {
+    const int lane = threadIdx.x & 31, j = blockIdx.x * 4 + (threadIdx.x >> 5), r = blockIdx.y;
+    if (j >= *used || r >= rows) return;
+    float s = 0.0f;
+    for (int i = lane; i < d; i += 32) s += up[static_cast<int64_t>(j) * d + i] * tf_ctl_x(y, static_cast<int64_t>(r) * d + i);
+    for (int o = 16; o > 0; o >>= 1) s += __shfl_xor_sync(0xffffffffu, s, o);
+    if (lane == 0) {
+        const float z = fmaxf(s, 0.0f);
+        act[static_cast<int64_t>(r) * 64 + j] = z * z;
+    }
+}

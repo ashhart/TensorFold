@@ -203,6 +203,10 @@ CUDA also checks the affine-3 experts' split decode pair, bit-equal to the pair 
 one dropping a last round of K groups short of the warps, one chaining the groups in reverse).
 CUDA also checks Flash Next's NVFP4 experts on prompt tiles with the decode form's sums (SwiGLU gate-up and fp32
 down, each bit-equal to the decode instance it replaces; the scaled-code prompt tile is the planted control).
+CUDA also checks Nemotron's pocket (`nemotron_ops.cu`, the learned neurons the living-weights learner adds beside the
+shared expert): relu^2 up into act rows and down added into the shared expert's slot, a block row a row and tiled, the
+down to fp32 and bf16, against float64, the neurons past the count NaN so a read of one shows (two controls: the up's
+relu by `fmaxf`, and the down launched one neuron short).
 
 ## CUDA records per nvcc release
 
