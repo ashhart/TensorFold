@@ -309,7 +309,7 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
         why.* = policy.problem(err) orelse why.*;
         return err;
     };
-    const serial = policy.serialPolicy(units, if (platform.c.getenv("TF_QWEN27_LANES")) |v| std.mem.span(v) else null) catch |err| {
+    const serial = policy.serial(units, window, if (platform.c.getenv("TF_QWEN27_LANES")) |v| std.mem.span(v) else null) catch |err| {
         why.* = policy.problem(err) orelse why.*;
         return err;
     };
@@ -372,7 +372,7 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
     h.host.memory = .{ .ctx = h, .read = readMemory };
     h.host.explain = .{ .text = words };
     h.host.decoded_rows = true; // a reply's rows prefill with the bits decoding gave them, with the cache on or off
-    // a lone greedy request takes the serial loop on tensor units, where it is faster (TF_QWEN27_LANES overrides)
+    // The narrow tensor window retains the serial loop; wide windows use the priced lane path.
     if (h.draft != null and serial) h.host.lone = .{ .ctx = h, .run = Host.lone };
     var loop_text: [160]u8 = undefined;
     std.log.info("qwen27: {s}", .{try policy.describe(&loop_text, serial, window, h.draft != null, h.back.copies)});

@@ -125,13 +125,20 @@ test "qwen27 window: native facts expose device width, node budget and hybrid co
     b.draft_slots = 1;
     runner.slots = 1;
     for ([_]bool{ false, true }) |units| for ([_]bool{ false, true }) |copies| {
-        b.window = policy.rows(units);
-        b.nodes = policy.nodes(b.window, copies);
-        b.copies = copies;
-        const facts = b.facts();
-        try std.testing.expectEqual(@as(u32, 16), facts.exact_width);
-        try std.testing.expectEqual(@as(u32, 15), facts.drafts);
-        try std.testing.expectEqual(copies, facts.lone_copies);
-        try std.testing.expectEqual(copies, facts.context_copies);
+        for ([_][]const u8{ "16", "32", "64" }, [_]u32{ 16, 32, 64 }) |text, width| {
+            b.window = try policy.requested(units, text);
+            b.nodes = policy.nodes(b.window, copies);
+            b.copies = copies;
+            b.timed = width;
+            for (b.costs[0..width], 0..) |*cost, i| cost.* = .{ .width = @intCast(i + 1), .ms = 20 };
+            const facts = b.facts();
+            try std.testing.expectEqual(width, facts.exact_width);
+            try std.testing.expectEqual(@as(u32, if (width == 16 or copies) 15 else 31), facts.drafts);
+            try std.testing.expectEqual(width, facts.batch_rows);
+            try std.testing.expectEqual(width, facts.window_costs.len);
+            try std.testing.expectEqual(width, facts.window_costs[width - 1].width);
+            try std.testing.expectEqual(copies, facts.lone_copies);
+            try std.testing.expectEqual(copies, facts.context_copies);
+        }
     };
 }
