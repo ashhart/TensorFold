@@ -30,7 +30,7 @@ Server: `tensorfold-native serve CHECKPOINT --context 131072 --parallel 5 --kv-c
 - `zig build test-cuda-host`: all host tests pass, including the new `drawPick` test. `zig fmt --check` is clean.
   `tools/zig/lean_check.py`: 428 problems, the same 428 as 1.1.8 (inherited; none added). Every file stays within
   600 lines.
-- Served: in every cell of all four runs below, `--alone` found every concurrent reply's token hash equal to its lone
+- Served: in every cell of the four runs below (baseline and this PR, two each), `--alone` found every concurrent reply's token hash equal to its lone
   run's, and `--serial` found every lone run equal to `"draft": false` (0 unequal, 0 failed, 0 unmeasured over the
   64 cells).
 
@@ -38,11 +38,13 @@ Server: `tensorfold-native serve CHECKPOINT --context 131072 --parallel 5 --kv-c
 
 `tools/bench_concurrent.py http://127.0.0.1:30001 Qwen3.8-Flash-Next --levels 1,2,4,5 --tokens 256 --reps 3
 --temperatures 1.0,0 --seed 1234 --alone --serial`, one binary, four runs alternated on one machine in one
-session: A = `TF_FLASHNEXT_SAMPLED_HEADS=0` (the previous behaviour), B = the default. Aggregate tok/s, the
-median of three repeats; the tool's full reports are [A1.json](A1.json), [A2.json](A2.json), [B1.json](B1.json) and
-[B2.json](B2.json). The last column is the two B runs over the two A runs.
+session: **baseline** is `TF_FLASHNEXT_SAMPLED_HEADS=0`, the behaviour before this change; **this PR** is the change (on
+by default); the order was baseline, this PR, baseline, this PR. Aggregate tok/s, the median of three repeats; the
+tool's full reports are [baseline-1.json](baseline-1.json), [baseline-2.json](baseline-2.json),
+[this-pr-1.json](this-pr-1.json) and [this-pr-2.json](this-pr-2.json). The last column is the two this-PR runs over
+the two baseline runs.
 
-| cell | streams | A1 | A2 | B1 | B2 | B/A |
+| cell | streams | baseline run 1 | baseline run 2 | this PR run 1 | this PR run 2 | this PR / baseline |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | code, T=1 | 1 | 66.5 | 67.7 | 67.8 | 67.0 | +0% |
 | code, T=1 | 2 | 77.5 | 77.9 | 82.7 | 82.3 | +6% |
