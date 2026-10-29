@@ -8,11 +8,13 @@ namespace tf_wrows {
 // part's arithmetic for head dim 512: a block 4 heads, K and V tiles in shared memory, a warp a key run.
 constexpr int TK = 32, NSG = 2;
 
-template <int D, int FAULT>
+// P: empty, or one Pg (window_pages.cu): key k of slot s at its page, tab[s * stride + k / tok] (no window).
+template <int D, int FAULT, typename... P>
 __device__ __forceinline__ void part_staged(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc,
                                             const __nv_bfloat16* __restrict__ vc, const int* __restrict__ pos,
                                             const int* __restrict__ slot, float* __restrict__ po, float* __restrict__ pm,
-                                            float* __restrict__ pl, int h, int hk, int win, long long ring, float scale) {
+                                            float* __restrict__ pl, int h, int hk, int win, long long ring, float scale,
+                                            P... pg) {
     constexpr int DPL = D / 32, HW = 4, C = D / 8; // a lane's dims and columns, heads a block (and warp), uint4 a key
     extern __shared__ uint4 tiles[];                       // [NSG][TK][C] K or V tiles; then the runs' partial o
     __shared__ float sp[CK * SP];
@@ -42,9 +44,17 @@ __device__ __forceinline__ void part_staged(const __nv_bfloat16* __restrict__ q,
         uint4* dst = tiles + (t % NSG) * TK * C;
         for (int i = threadIdx.x; i < TK * C; i += NT) {
             const int jj = t * TK + i / C;
-            int64_t row = r0 + min(jj, nk - 1);
-            if (row >= ring) row -= ring;
-            cp16z(dst + i, cache + ((base + row) * hk + kh) * D + (i % C) * 8, jj < nk);
+            if constexpr (sizeof...(P) != 0) { // a page a key: any tok, a tile may cross pages
+                const Pg& g = (pg, ...);
+                const int key = k0 + min(jj, nk - 1);
+                const int64_t id = g.tab[(slot != nullptr ? slot[r] : 0) * g.stride + key / g.tok];
+                cp16z(dst + i, cache + id * g.page + (static_cast<int64_t>(key % g.tok) * hk + kh) * D + (i % C) * 8,
+                      jj < nk);
+            } else {
+                int64_t row = r0 + min(jj, nk - 1);
+                if (row >= ring) row -= ring;
+                cp16z(dst + i, cache + ((base + row) * hk + kh) * D + (i % C) * 8, jj < nk);
+            }
         }
         commit();
     };
