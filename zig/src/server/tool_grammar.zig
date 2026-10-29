@@ -200,9 +200,9 @@ fn parameters(a: Allocator, tool: Value) Allocator.Error!Value {
     return .{ .object = empty };
 }
 
-/// A tool that is not strict takes any JSON object as its arguments.
+/// A tool that is not strict takes any JSON object, open explicitly: structural tags compile schemas in strict mode.
 fn anyObject(a: Allocator) Allocator.Error!Value {
-    return node(a, "object", &.{});
+    return node(a, "object", &.{.{ "additionalProperties", .{ .bool = true } }});
 }
 
 fn arguments(a: Allocator, schema: Value, style_name: []const u8) Allocator.Error!Value {

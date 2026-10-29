@@ -5,7 +5,8 @@ const grammar = @import("tool_grammar.zig");
 const parse = @import("tool_parse.zig");
 const Value = json.Value;
 
-const offered =
+/// Strict lookup(q, n) beside non-strict now(tz), also walked through a real libtfgrammar.
+pub const offered =
     \\[{"type":"function","function":{"name":"lookup","strict":true,"parameters":{"type":"object","properties":{"q":{"type":"string"},"n":{"type":"integer"}},"required":["q","n"],"additionalProperties":false}}},{"type":"function","function":{"name":"now","parameters":{"type":"object","properties":{"tz":{"type":"string"}},"required":["tz"]}}}]
 ;
 
@@ -60,6 +61,7 @@ test "auto tools: DeepSeek's optional call block holds the strict tool to its sc
         const free = schemaOf(choices[1]);
         try std.testing.expectEqualStrings("object", free.strField("type").?);
         try std.testing.expect(free.get("properties") == null and free.get("required") == null);
+        try std.testing.expect(free.get("additionalProperties").?.bool);
     }
     const held = try value(a, try grammar.optional(a, .deepseek, tools, true, true));
     const choices = held.get("format").?.get("tags").?.array[0].get("content").?.get("elements").?.array[1].get("elements").?.array;
