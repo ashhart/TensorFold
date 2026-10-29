@@ -9,6 +9,7 @@ pub const runtime = @import("runtime.zig");
 pub const resample = @import("resample.zig");
 pub const tags = @import("tags.zig");
 pub const identity = @import("identity.zig");
+pub const patches = @import("patches.zig");
 
 pub const Error = error{ Invalid, Oversized, Animated, CmykJpeg, NoJpegLibrary, JpegLibraryVersion, NoWebpLibrary, WebpLibraryVersion, OutOfMemory };
 
@@ -135,5 +136,6 @@ test {
     _ = resample;
     _ = tags;
     _ = identity;
+    _ = patches;
     _ = @import("picture_test.zig");
 }
