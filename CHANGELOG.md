@@ -26,6 +26,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - `tools/zig/cuda_sass_identity.py` builds an image that differs again from both trees, one build at a time. A function counts as changed only if it differs again, and a tree whose two builds disagree fails the check as unstable instead of passing or failing by chance (#1532). `--no-recheck` keeps the old count. Thanks to @jschmied.
 
+- The CUDA kernels' `cp.async` group commit and wait come from one shared header, `zig/kernels/cuda/common/cp_async.cuh`, instead of eleven local copies under five names, in the attention, expert, EXL3 prompt and GLM indexer kernels. All 2,245 kernel functions in the 27 CUDA images it reaches compile to the same code as before at sm_80, sm_86, sm_89, sm_120 and sm_121 (#1588). Thanks to @jschmied.
+
 - More CUDA kernels take their helpers from the shared headers in `zig/kernels/cuda/common`: the warp sum in the Flash Next and Qwen4 gated delta kernels, the FP4 and FP8 pair conversions, and the activations (`sigmoid`, `softplus`, `silu` and its gradient). All 1,866 kernel functions in the 104 CUDA images compile to the same code as before at sm_121 and sm_80 (#1550, #1555, #1556). Thanks to @jschmied.
 
 - After a tool reply, the prompt cache resumes the next turn at the part of the conversation that turn repeats. A chat template that closes a tool reply's turn only when nothing follows (Gemma 4's) used to put the resume point past it, so the next turn resumed one turn late; on an Arc Pro B70 with Gemma 4 E4B, those turns reached their first token in 0.8 to 1.4 s instead of 1.7 to 2.7 s (#1551). Other templates resume exactly as before. Thanks to @Mirrdhyn.
