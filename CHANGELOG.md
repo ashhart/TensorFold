@@ -4,6 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- HIP: `-Dhip-relax-branches=true` (off by default) lets gfx1100 build the dot2 prompt tiles with Ubuntu's clang 21, which otherwise stops on a branch out of range (#1542, for #1521). It has not run on a gfx1100 GPU yet; with it off, every compile command is the same as before. Thanks to @AbrahamCete.
 - Ling 3.1: a host-only family package that the Metal and CUDA engines will share: config parsing and its refusals, the weight map checked against the published index, a float64 reference and small fixtures (#1541, for #1247). Nothing is served yet. Thanks to @ThinkOffApp and @jschmied.
 - `tools/zig/cuda_sass_identity.py` builds an image that differs again from both trees, one build at a time. A function counts as changed only if it differs again, and a tree whose two builds disagree fails the check as unstable instead of passing or failing by chance (#1532). `--no-recheck` keeps the old count. Thanks to @jschmied.
 
