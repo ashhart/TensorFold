@@ -417,14 +417,14 @@ test "a routed prompt past its pairs per item leaves the K-parallel tiles for th
     };
     const table: tuning.Table = .{ .gfx = "gfx1201", .rows = &bounded };
     const r = affine.Registry.init(&table, &all);
-    const shipped = kernelsOn("gfx1201");
+    const unbounded = kernelsOn("gfx1100");
     const env = envOn("gfx1201", true, true, false);
     var shape: Shape = .{ .m = 8, .n = 1024, .k = 2048, .bits = 4, .group = 64, .fp16 = false, .items = 300 };
-    for ([_]struct { u32, []const u8 }{ .{ 0, "kp3" }, .{ 900, "kp3" }, .{ 901, "gemm" } }) |w| {
+    for ([_]struct { u32, []const u8 }{ .{ 0, "kp3" }, .{ 900, "kp3" }, .{ 901, "gemm" }, .{ 2400, "gemm" } }) |w| {
         shape.plan_pairs = w[0];
         try std.testing.expect(std.mem.endsWith(u8, r.select(env, .mlx, .routed, .prefill, shape).?.id, w[1]));
-        // the shipped table bounds no pairs
-        try std.testing.expect(std.mem.endsWith(u8, shipped.select(env, .mlx, .routed, .prefill, shape).?.id, "kp3"));
+        // a table without the field bounds no pairs, up to 8 an item
+        try std.testing.expect(std.mem.endsWith(u8, unbounded.select(env, .mlx, .routed, .prefill, shape).?.id, "kp3"));
     }
     // a fractional bound: 3.5 pairs an item takes 1,050 pairs over 300 items and refuses 1,051
     var half = bounded;

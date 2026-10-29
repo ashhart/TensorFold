@@ -347,7 +347,7 @@ fn sumDist(a: [routed_bounds.len]f64, b: [routed_bounds.len]f64) f64 {
 // ---- the search on synthetic times, no device
 
 const t = std.testing;
-/// RDNA4's environment: bf16, no matrix tile, the stream and GEMM tiles on.
+/// RDNA4's environment: bf16, no matrix tile, the stream and GEMM tiles on; searches start from gfx1100's rows.
 const rdna4: registry.Env = .{ .bf16 = true, .matrix = false, .matrix_on = false, .stream_on = true, .gemm_on = true };
 
 fn entryOf(id: []const u8) usize {
@@ -377,7 +377,7 @@ fn takes(r: tuning.Row, items: u32, pairs: u32) bool {
 }
 
 test "the routed bounds move together: more items, and a pairs bound that keeps the full plans off kp3" {
-    var s = Search.init(t.allocator, rdna4, &tuning.gfx1201);
+    var s = Search.init(t.allocator, rdna4, &tuning.gfx1100);
     defer s.deinit();
     try plan(&s, 33, 329, 297, 5, 6, 10, 0.01); // 0.9 pairs an item: kp3 wins
     try plan(&s, 129, 320, 774, 8, 9, 10, 0.01); // 2.42: kp3 wins
@@ -392,7 +392,7 @@ test "the routed bounds move together: more items, and a pairs bound that keeps 
 }
 
 test "a plan kp3 refuses passes kp1 by on the way to the GEMM tile, so both bounds move in one step" {
-    var s = Search.init(t.allocator, rdna4, &tuning.gfx1201);
+    var s = Search.init(t.allocator, rdna4, &tuning.gfx1100);
     defer s.deinit();
     try plan(&s, 33, 329, 297, 5, 6, 10, 0.01);
     try plan(&s, 128, 224, 768, 12, 14, 10, 0.01); // kp3 today; kp1 is slower still
@@ -406,7 +406,7 @@ test "a plan kp3 refuses passes kp1 by on the way to the GEMM tile, so both boun
 }
 
 test "a noisy cell keeps its choice" {
-    var s = Search.init(t.allocator, rdna4, &tuning.gfx1201);
+    var s = Search.init(t.allocator, rdna4, &tuning.gfx1100);
     defer s.deinit();
     try plan(&s, 33, 329, 297, 5, 6, 10, 0.01);
     try plan(&s, 60, 329, 600, 5, 6, 10, 0.2); // 1.82 pairs an item, too noisy to move
@@ -416,7 +416,7 @@ test "a noisy cell keeps its choice" {
 }
 
 test "a cell timed after a proposal can veto it" {
-    var s = Search.init(t.allocator, rdna4, &tuning.gfx1201);
+    var s = Search.init(t.allocator, rdna4, &tuning.gfx1100);
     defer s.deinit();
     try plan(&s, 33, 329, 297, 5, 6, 10, 0.01);
     try plan(&s, 129, 320, 774, 8, 9, 10, 0.01);
@@ -432,7 +432,7 @@ test "a cell timed after a proposal can veto it" {
 }
 
 test "an unqualified cell keeps its choice, however fast its times say the change is" {
-    var s = Search.init(t.allocator, rdna4, &tuning.gfx1201);
+    var s = Search.init(t.allocator, rdna4, &tuning.gfx1100);
     defer s.deinit();
     try plan(&s, 33, 329, 297, 5, 6, 10, 0.01);
     try plan(&s, 60, 329, 600, 5, 6, 10, 0.01); // 1.82 pairs an item, but its reads stay in the caches
@@ -453,7 +453,7 @@ test "a cell's own bound takes it, where its ratio rounded to an f32 would not" 
 }
 
 test "every routed cell's bound is a candidate, however many there are" {
-    var s = Search.init(t.allocator, rdna4, &tuning.gfx1201);
+    var s = Search.init(t.allocator, rdna4, &tuning.gfx1100);
     defer s.deinit();
     for (0..1100) |i| try plan(&s, i + 1, 2000, @intCast(i + 1), 5, 6, 10, 0.01);
     const all = try s.pairCandidates(std.math.maxInt(u32));

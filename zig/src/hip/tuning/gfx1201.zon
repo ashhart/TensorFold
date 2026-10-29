@@ -9,7 +9,8 @@
 //   plain, routed   whether it takes plain products, routed plans (both by default)
 // The decode rows are gfx1100's, so decode choices are the same; the matrix rows are gfx1100's too, and never run here.
 // The prompt rows keep gfx1100's bounds, which `zig build hip-affine-tune` measures against on a gfx1201 card, but
-// the routed K-parallel tile's: its items and pairs per item are the tuner's, checked served on Qwen3.6 and Nemotron.
+// the routed K-parallel tile's: its items are the tuner's, its pairs per item lowered from the tuner's 4.14 to 3.5 by
+// served runs on Qwen3.6 and Nemotron, whose routers fill items more than the tuner's uniform picks.
 .{
     .gfx = "gfx1201",
     .entries = .{
