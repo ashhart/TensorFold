@@ -11,10 +11,16 @@ const Tree = q.dflash.selector.Tree;
 const Proposal = q.dflash.runtime_model.Model.Proposal;
 
 /// Only slots that currently draft compete for rows in the next shared allocation.
+fn live(b: *const Metal) usize {
+    var n: usize = 0;
+    for (b.owners[0..b.runner.slots]) |owner| n += @intFromBool(owner != null);
+    return n;
+}
+
 pub fn capacityFn(ptr: *anyopaque, s: *lanes.Stream) u32 {
     const b = Metal.self(ptr);
     const slot = b.slotOf(s) orelse return 0;
-    return if (b.draftsOwn(slot)) b.nodes else 0;
+    return if (b.draftsOwn(slot)) @import("qwen27_window.zig").proposal(b.window, b.copies, b.nodes, b.window + 1, live(b) == 1) else 0;
 }
 
 /// Each drafting slot proposes its next tree, up to eight in one drafter pass; a shared round's kept taps first.
@@ -24,6 +30,12 @@ pub fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void
     var batch: [8]Proposal = undefined;
     var owners: [8]u32 = undefined;
     var n: usize = 0;
+    const lone = live(b) == 1;
+    var costs: [lb.max_rows]f64 = undefined;
+    if (lone) {
+        if (b.timed != b.window) return error.UntimedDraftWindow;
+        for (costs[0..b.timed], b.costs[0..b.timed]) |*ms, cost| ms.* = cost.ms;
+    }
     for (requests) |r| {
         const slot = try b.slotFor(r.stream);
         if (!b.draftsOwn(slot)) continue;
@@ -41,12 +53,12 @@ pub fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void
         const room = b.runner.capacity - stands;
         if (r.depth == 0 or room < 2) continue;
         const pending = if (r.rows != null) r.follow[r.follow.len - 1] else try b.value(r.first orelse return error.NoFirstToken);
-        const nodes: u32 = @intCast(@min(@min(r.depth, b.nodes), room - 1));
+        const nodes = @import("qwen27_window.zig").proposal(b.window, b.copies, r.depth, @intCast(room), lone);
         if (slot == 0) if (g.proposer) |p| {
             b.trees[0] = try p.call(p.ptr, pending, nodes);
             continue;
         };
-        batch[n] = .{ .context = if (slot == 0) null else b.contexts[slot].?, .pending = pending, .nodes = nodes };
+        batch[n] = .{ .context = if (slot == 0) null else b.contexts[slot].?, .pending = pending, .nodes = nodes, .costs = if (lone) costs[0..b.timed] else &.{}, .overhead_ms = if (lone) @max(0, r.stream.tree_over orelse r.stream.round_over orelse 0) else 0 };
         owners[n] = slot;
         n += 1;
         if (n == batch.len) {
@@ -72,12 +84,12 @@ fn proposeAll(b: *Metal, batch: []const Proposal, owners: []const u32) !void {
     if (batch.len == 1) {
         const p = batch[0];
         const x = p.context orelse {
-            b.trees[owners[0]] = try m.propose(p.pending, p.nodes);
+            b.trees[owners[0]] = try m.proposeOptions(p.pending, q.dflash.runtime_model.Model.selection(p));
             return;
         };
         // the shared drafter takes the slot's context for one proposal, then hands it back
         try m.swap(x);
-        const tree = m.propose(p.pending, p.nodes);
+        const tree = m.proposeOptions(p.pending, q.dflash.runtime_model.Model.selection(p));
         m.swap(x) catch {
             m.backend.failed = true; // slot 0's context is parked in this slot's: recovery resets both
             return error.DraftContextSwap;
