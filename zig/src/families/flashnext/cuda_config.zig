@@ -130,17 +130,30 @@ fn modeloptMismatch(text: std.json.ObjectMap, quant: std.json.ObjectMap) ?[]cons
         if (!projection(entries, routed, "NVFP4", 16)) return "quantization_config.routed_experts";
         const p = object(entries, routed).?;
         if (given(p, "weight_scale_encoding")) |encoding| if (!holds(encoding, .{ .word = "csf" })) return "quantization_config.weight_scale_encoding";
+        // each projection MXFP8/32 (FP4-Local) or unlisted (BF16, NVIDIA's NVFP4); a stitched group one or the other
         for ([_][]const u8{ "gate_proj", "up_proj", "down_proj" }) |part| {
-            const name = std.fmt.bufPrint(&buf, "model.language_model.layers.{d}.mlp.shared_expert.{s}", .{ layer, part }) catch unreachable;
-            if (!projection(entries, name, "MXFP8", 32)) return "quantization_config.shared_expert";
+            if (declared(entries, layer, "mlp.shared_expert", &.{part}) == null) return "quantization_config.shared_expert";
         }
-        const parts: []const []const u8 = if (wt.linearLayer(layer)) &.{ "in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a", "out_proj" } else &.{ "q_proj", "k_proj", "v_proj", "indexer.index_qk_proj", "o_proj" };
-        for (parts) |part| {
-            const name = std.fmt.bufPrint(&buf, "model.language_model.layers.{d}.{s}.{s}", .{ layer, if (wt.linearLayer(layer)) "linear_attn" else "self_attn", part }) catch unreachable;
-            if (!projection(entries, name, "MXFP8", 32)) return "quantization_config.attention_projection";
-        }
+        const linear = wt.linearLayer(layer);
+        const prefix = if (linear) "linear_attn" else "self_attn";
+        const stitched: []const []const u8 = if (linear) &.{ "in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a" } else &.{ "q_proj", "k_proj", "v_proj", "indexer.index_qk_proj" };
+        if (declared(entries, layer, prefix, stitched) == null) return "quantization_config.attention_projection";
+        if (declared(entries, layer, prefix, &.{if (linear) "out_proj" else "o_proj"}) == null) return "quantization_config.attention_projection";
     }
     return null;
+}
+
+/// One loaded projection's parts: all MXFP8/32, or none listed (BF16); null when mixed or another format.
+fn declared(entries: std.json.ObjectMap, layer: usize, prefix: []const u8, parts: []const []const u8) ?enum { mxfp8, bf16 } {
+    var listed: usize = 0;
+    var buf: [256]u8 = undefined;
+    for (parts) |part| {
+        const name = std.fmt.bufPrint(&buf, "model.language_model.layers.{d}.{s}.{s}", .{ layer, prefix, part }) catch unreachable;
+        if (entries.get(name) == null) continue;
+        if (!projection(entries, name, "MXFP8", 32)) return null;
+        listed += 1;
+    }
+    return if (listed == 0) .bf16 else if (listed == parts.len) .mxfp8 else null;
 }
 
 /// The neurons a Living Weights pocket adds to each shared expert (living's Keys.pocket).
@@ -413,9 +426,49 @@ test "mixed precision requires every routed, shared and attention declaration an
     try std.testing.expectEqualStrings("quantization_config.kv_cache_quant_algo", modeloptMismatch(text, quant).?);
     try quant.put(a, "kv_cache_quant_algo", .null);
     try std.testing.expect(modeloptMismatch(text, quant) == null);
+    // a projection loaded alone may be BF16 (unlisted); a stitched group may not mix MXFP8 and BF16 parts
     _ = entries.swapRemove("model.language_model.layers.47.self_attn.o_proj");
+    _ = entries.swapRemove("model.language_model.layers.3.mlp.shared_expert.up_proj");
+    try quant.put(a, "quantized_layers", .{ .object = entries });
+    try std.testing.expect(modeloptMismatch(text, quant) == null);
+    _ = entries.swapRemove("model.language_model.layers.47.self_attn.k_proj");
     try quant.put(a, "quantized_layers", .{ .object = entries });
     try std.testing.expectEqualStrings("quantization_config.attention_projection", modeloptMismatch(text, quant).?);
+    try addMxfp8(a, &entries, 47, "self_attn", "k_proj");
+    _ = entries.swapRemove("model.language_model.layers.0.linear_attn.in_proj_a");
+    try quant.put(a, "quantized_layers", .{ .object = entries });
+    try std.testing.expectEqualStrings("quantization_config.attention_projection", modeloptMismatch(text, quant).?);
+}
+
+test "NVIDIA's NVFP4 layout passes: routed experts NVFP4 with plain scales, every other projection BF16 (unlisted)" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var text: std.json.ObjectMap = .empty;
+    var rope_params: std.json.ObjectMap = .empty;
+    var mtp: std.json.ObjectMap = .empty;
+    var kinds: std.json.Array = .init(a);
+    var ple: std.json.Array = .init(a);
+    try served(a, &text, &rope_params, &mtp, &kinds, &ple);
+    var quant: std.json.ObjectMap = .empty;
+    try quant.put(a, "quant_method", .{ .string = "modelopt" });
+    try quant.put(a, "quant_algo", .{ .string = "MIXED_PRECISION" });
+    var entries: std.json.ObjectMap = .empty;
+    for (0..wt.layers_n) |layer| {
+        var nv: std.json.ObjectMap = .empty;
+        try nv.put(a, "quant_algo", .{ .string = "NVFP4" });
+        try nv.put(a, "group_size", .{ .integer = 16 });
+        try entries.put(a, try std.fmt.allocPrint(a, "model.language_model.layers.{d}.mlp.experts", .{layer}), .{ .object = nv });
+    }
+    try quant.put(a, "quantized_layers", .{ .object = entries });
+    try std.testing.expect(modeloptMismatch(text, quant) == null);
+    // one shared projection declared in another format is still refused
+    var nv: std.json.ObjectMap = .empty;
+    try nv.put(a, "quant_algo", .{ .string = "NVFP4" });
+    try nv.put(a, "group_size", .{ .integer = 16 });
+    try entries.put(a, "model.language_model.layers.5.mlp.shared_expert.gate_proj", .{ .object = nv });
+    try quant.put(a, "quantized_layers", .{ .object = entries });
+    try std.testing.expectEqualStrings("quantization_config.shared_expert", modeloptMismatch(text, quant).?);
 }
 
 fn addMxfp8(a: std.mem.Allocator, entries: *std.json.ObjectMap, layer: usize, prefix: []const u8, part: []const u8) !void {
