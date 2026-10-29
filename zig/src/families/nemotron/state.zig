@@ -282,6 +282,10 @@ pub const Scratch = struct {
     ucount: mtl.Buffer,
     act: mtl.Buffer, // [rows*K, W]
     ey: mtl.Buffer, // [rows*K, D]
+    // nemotron_h_puzzle only (null for Lightning, which allocates nothing new):
+    x_lat: ?mtl.Buffer, // [rows, latent] the normed input projected into the latent (into)
+    ey_lat: ?mtl.Buffer, // [rows*K, latent] each pick's routed-expert output in the latent
+    ones: ?mtl.Buffer, // f32 [rows] of 1: add_norm's one pick of weight 1 for the projected MoE output
     sh_act: mtl.Buffer, // [rows, SW]
     sh_xs: mtl.Buffer, // [SW/64, MP]
     sh: mtl.Buffer, // [rows, D]
@@ -340,6 +344,13 @@ pub const Scratch = struct {
             .ucount = try B.make(device, 16),
             .act = try B.make(device, pairs * c.expert_width * 2),
             .ey = try B.make(device, pairs * c.hidden * 2),
+            .x_lat = if (c.bolt) try B.make(device, rows * c.latent * 2) else null,
+            .ey_lat = if (c.bolt) try B.make(device, pairs * c.latent * 2) else null,
+            .ones = if (c.bolt) blk: {
+                const b = try B.make(device, @max(rows, 16) * 4);
+                @memset(b.slice(f32, @max(rows, 16)), 1.0);
+                break :blk b;
+            } else null,
             .sh_act = try B.make(device, rows * c.shared_width * 2),
             .sh_xs = try B.make(device, c.shared_width / 64 * mp * 4),
             .sh = try B.make(device, rows * c.hidden * 2),
@@ -367,6 +378,7 @@ pub const Scratch = struct {
         const info = @typeInfo(Scratch).@"struct";
         inline for (info.field_names, info.field_types) |name, T| {
             if (T == mtl.Buffer) @field(self, name).deinit();
+            if (T == ?mtl.Buffer) if (@field(self, name)) |b| b.deinit();
         }
     }
 };

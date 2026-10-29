@@ -67,3 +67,6 @@ template <int D, int T, int E>
 }
 
 template [[host_name("custom_kernel_nemotron_add_norm_moe_xs_a50e79554f8d9c70__2688_896_6_bfloat16_t_bfloat16_t_float_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_bfloat16_t_float")]] [[kernel]] decltype(custom_kernel_nemotron_add_norm_moe_xs_a50e79554f8d9c70__2688_896_6_bfloat16_t_bfloat16_t_float_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_bfloat16_t_float<2688, 896, 6>) custom_kernel_nemotron_add_norm_moe_xs_a50e79554f8d9c70__2688_896_6_bfloat16_t_bfloat16_t_float_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_bfloat16_t_float<2688, 896, 6>;
+
+// nemotron_h_puzzle (Bolt): hidden 4096 (512 divides it), one pick of weight 1, the projected MoE (hand-authored)
+template [[host_name("tf_nemotron_add_norm_moe_xs_bolt")]] [[kernel]] decltype(custom_kernel_nemotron_add_norm_moe_xs_a50e79554f8d9c70__2688_896_6_bfloat16_t_bfloat16_t_float_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_bfloat16_t_float<4096, 512, 1>) custom_kernel_nemotron_add_norm_moe_xs_a50e79554f8d9c70__2688_896_6_bfloat16_t_bfloat16_t_float_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_bfloat16_t_float<4096, 512, 1>;
