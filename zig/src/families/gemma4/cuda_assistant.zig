@@ -254,7 +254,7 @@ pub const Drafter = struct {
         try x.k.qk.rowsFrom(x.s, src, .{ .h = c.heads, .hk = 1, .dim = dh }, shape, s.pos, null, .{ .q = s.q, .k = s.kj, .v = 0 }, rows);
         const t = x.sources[@intFromBool(global)];
         const len = x.m.cacheLen(t);
-        const w: Window = .{ .h = c.heads, .hk = geo.kvHeads(t), .d = dh, .win = if (global) 0 else cfg.window, .ring = len, .scale = 1 };
+        const w: Window = .{ .h = c.heads, .hk = geo.kvHeads(t), .d = dh, .win = if (global) 0 else cfg.window, .ring = len, .scale = 1, .pg = if (global) x.m.pagesFor(null) else null };
         var r: usize = 0;
         while (r < rows) : (r += 16) {
             const n = @min(16, rows - r);

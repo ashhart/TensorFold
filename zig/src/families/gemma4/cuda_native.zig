@@ -11,6 +11,7 @@ const asst = @import("cuda_assistant.zig");
 const cv = @import("cuda_vision.zig");
 const tw = @import("cuda_tower.zig");
 const dfl = @import("cuda_dflash.zig");
+const kv = @import("core").kv_pool;
 
 /// The registry's entry for one model_type: gemma4_unified (12B) or gemma4 (31B).
 pub fn Family(comptime name: []const u8) type {
@@ -36,6 +37,10 @@ pub fn Family(comptime name: []const u8) type {
         pub const snap_restore = native.snap_restore;
         pub const snap_drop = native.snap_drop;
         pub const explain = native.explain;
+        /// A request's last verify window: its pages hold that many rows past its prompt and reply.
+        pub const window_rows: u32 = be.max_window;
+        pub const attach = native.attach;
+        pub const fits = native.fits;
     };
 }
 
@@ -43,8 +48,8 @@ const native = @This();
 
 /// The server's reading of the room left after the weights; null if unreadable.
 pub const Room = struct { ctx: *anyopaque, read: *const fn (*anyopaque) ?u64 };
-/// No `precision` field: the server refuses --precision for this family by name. --vision: the 12B's image embedder.
-pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, lanes: u32 = 8, lanes_fixed: bool = false, room: ?Room = null, vision: ?cv.Limits = null, drafter: ?[]const u8 = null };
+/// No `precision` field (refused by name). --vision: the 12B's embedder. kv_pages false, or the env =0: linear caches.
+pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, lanes: u32 = 8, lanes_fixed: bool = false, room: ?Room = null, vision: ?cv.Limits = null, drafter: ?[]const u8 = null, kv_pages: bool = true };
 
 pub const Loaded = struct {
     backend: lanes.backend.Backend,
@@ -57,6 +62,10 @@ pub const Loaded = struct {
     target: *be.Gemma,
     /// --vision: what the server's image requests reach (native/cuda_vision_offer.zig).
     vision: ?*cv.Vision = null,
+    /// The global layers' caches as pages of the core pool (null: every stream's linear, made at open).
+    layout: ?kv.Layout = null,
+    /// With a layout: the first stream's global rows are pages too, a window of them set aside by the plan.
+    engine_paged: bool = true,
 };
 
 const Owned = struct { gpa: std.mem.Allocator, w: wts.Weights, k: kern.Kernels, s: cuda.Stream, m: fwd.Model, gb: be.Gemma, v: ?*cv.Vision = null, room: ?Room = null };
@@ -72,18 +81,43 @@ fn fit(room: u64, asked: u32, fixed: bool, plan: anytype) !usize {
     return n;
 }
 
+/// The device bytes `n` streams take (paged: the first's rings and a round's slot buffers, no pages).
 const Plan = struct {
     own: *const Owned,
     d: *const cuda.Driver,
     context: usize,
     /// What open allocates beside the streams: the vision workspace and the drafter's weights.
     beside: u64,
+    paged: bool,
 
     fn bytes(p: Plan, n: usize) !u64 {
         const o = p.own;
-        return try fwd.Model.openBytes(o.gpa, p.d, o.s, &o.w, p.context, n) + be.Gemma.openBytes(n) + p.beside;
+        return try fwd.Model.openBytes(o.gpa, p.d, o.s, &o.w, p.context, n, p.paged) + be.Gemma.openBytes(if (p.paged) be.round_rows else n) + p.beside;
     }
 };
+
+/// Whether the global layers' caches lease the pool's pages: asked, and not turned off by TENSORFOLD_GEMMA4_KV_PAGES=0.
+fn pagesOn(o: Options) bool {
+    return o.kv_pages and !envOff("TENSORFOLD_GEMMA4_KV_PAGES");
+}
+
+/// Paged: the first stream's rings and the scratch must fit; the host plans the pool after.
+fn fitFirst(room: u64, plan: anytype) !usize {
+    if (try plan.bytes(1) > room) return error.NoStreamFits;
+    return 1;
+}
+
+/// The pool: `streams` more slots beside the first and an arena of `n` pages.
+pub fn attach(p: *anyopaque, streams: u32, n: usize) !void {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    try own.gb.attach(streams, n);
+}
+
+/// Whether a request's caches could start now (the lane host's admission, on its engine thread).
+pub fn fits(p: *anyopaque, prompt: u32, max_tokens: u32) bool {
+    const own: *const Owned = @ptrCast(@alignCast(p));
+    return own.gb.admits(prompt, max_tokens);
+}
 
 /// The device bytes of the image path's workspace (the 31B's tower or the 12B's embedder), 0 without --vision.
 fn visionBytes(vision: bool, tower: bool) u64 {
@@ -122,17 +156,18 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer own.w.deinit();
     const context = @min(positions(o.context), own.w.config.context);
     const beside = visionBytes(o.vision != null, own.w.tower != null) + if (o.drafter) |dd| (if (o.drafts) try drafterBytes(gpa, io, dd) else 0) else 0;
-    const plan: Plan = .{ .own = own, .d = ctx.d, .context = context, .beside = beside };
+    const paged = pagesOn(o);
+    const plan: Plan = .{ .own = own, .d = ctx.d, .context = context, .beside = beside, .paged = paged };
     own.room = o.room;
     const room: u64 = if (o.room) |r| r.read(r.ctx) orelse 0 else std.math.maxInt(u64);
-    const n = fit(room, o.lanes, o.lanes_fixed, plan) catch |e| {
+    const n = if (paged) try fitFirst(room, plan) else fit(room, o.lanes, o.lanes_fixed, plan) catch |e| {
         if (e == error.ParallelPastMemory) {
             const most = fit(room, o.lanes, false, plan) catch 0;
             std.log.err("--parallel {d} needs {d:.2} GiB at a {d}-token window and the CUDA memory budget leaves {d:.2} GiB after the weights: {d} stream{s} fit", .{ o.lanes, gib(try plan.bytes(o.lanes)), context, gib(room), most, if (most == 1) "" else "s" });
         }
         return e;
     };
-    own.m = try fwd.Model.init(gpa, ctx.d, own.s, &own.w, context, n);
+    own.m = try fwd.Model.init(gpa, ctx.d, own.s, &own.w, context, n, paged);
     errdefer own.m.deinit();
     own.m.graphed = !envOff("TENSORFOLD_GEMMA4_GRAPHS"); // =0: every decode forward eager
     own.gb = try be.Gemma.init(gpa, ctx.d, &own.m, &own.k, own.s);
@@ -154,6 +189,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .deinit = release,
         .target = &own.gb,
         .vision = own.v,
+        .layout = if (paged) own.m.layout() else null,
     };
 }
 

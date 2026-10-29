@@ -7,6 +7,7 @@ const fwd = @import("cuda_forward.zig");
 const kern = @import("cuda_kernels.zig");
 const snap = @import("cuda_snap.zig");
 const cv = @import("cuda_vision.zig");
+const kv = @import("core").kv_pool;
 
 const be = lanes.backend;
 const Stream = lanes.Stream;
@@ -33,7 +34,18 @@ const Lane = struct {
     mark: ?usize = null, // a stepped pass's mark kept at its next step, after the drafter absorbed the chunk
     tap: Tap = .{},
     images: ?cuda.DeviceBuffer = null, // the prompt's images through the embedder, while its pass runs
+    lease: kv.Lease = .{}, // paged: the global layers' pages it holds and is promised
 };
+
+/// Pages a request holds at most: its prompt, its reply and one last verify window.
+pub fn pagesFor(prompt: usize, max_new: usize) usize {
+    return pagesOf(prompt + max_new + max_window);
+}
+
+/// Pages that hold positions [0, positions).
+fn pagesOf(positions: usize) usize {
+    return (positions + fwd.page_tokens - 1) / fwd.page_tokens;
+}
 
 /// A drafter's context beside a kept state: its bytes at a position, and its copy into the state.
 pub const Keeper = struct { ctx: *anyopaque, bytes: *const fn (*anyopaque, usize) u64, keep: *const fn (*anyopaque, *const Stream, *snap.Saved) anyerror!void };
@@ -60,6 +72,7 @@ pub const Gemma = struct {
     vision: ?*cv.Vision = null, // --vision: the embedder a prompt's images go through
     keeper: ?Keeper = null, // a drafter whose context a kept prompt state carries (DFlash's)
     bits: ?cuda.DeviceBuffer = null, // structured output's allowed-token words, a round's rows, at first use
+    pool: ?kv.Pool = null, // paged: the pages every slot leases (attach)
 
     /// The device bytes `init` allocates: the token and pick rings, metas, each slot's last row and rule.
     pub fn openBytes(slots: usize) usize {
@@ -67,7 +80,7 @@ pub const Gemma = struct {
     }
 
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, m: *fwd.Model, k: *const kern.Kernels, s: cuda.Stream) !Gemma {
-        const free = try gpa.alloc(bool, m.slots);
+        const free = try gpa.alloc(bool, m.slotCap());
         errdefer gpa.free(free);
         @memset(free, true);
         const greedy = try gpa.alloc(bool, ring + round_rows);
@@ -79,7 +92,7 @@ pub const Gemma = struct {
         errdefer picks.free();
         var meta = try cuda.DeviceBuffer.alloc(d, round_rows * 16);
         errdefer meta.free();
-        const bufs = try gpa.alloc(cuda.DeviceBuffer, 2 * m.slots);
+        const bufs = try gpa.alloc(cuda.DeviceBuffer, 2 * m.slotCap());
         errdefer gpa.free(bufs);
         var made: usize = 0;
         errdefer for (bufs[0..made]) |*b| b.free();
@@ -90,9 +103,25 @@ pub const Gemma = struct {
         return .{ .gpa = gpa, .d = d, .m = m, .k = k, .s = s, .free = free, .tok = tok, .picks = picks, .greedy = greedy, .meta = meta, .slot_bufs = bufs };
     }
 
+    /// Makes a paged model's arena of `pages` pages for `extra + 1` slots, and the pool that leases them.
+    pub fn attach(x: *Gemma, extra: usize, pages: usize) !void {
+        try x.m.attach(x.s, extra, pages);
+        x.pool = try kv.Pool.init(x.gpa, pages, x.m.pageBytes());
+    }
+
+    /// The pool's free pages in a seeded random order, leased in that order (a check's hook).
+    pub fn shufflePages(x: *Gemma, seed: u64) void {
+        var prng = std.Random.DefaultPrng.init(seed);
+        if (x.pool) |*p| prng.random().shuffle(u32, p.free[0..p.nfree]);
+    }
+
     pub fn deinit(x: *Gemma) void {
         var it = x.lanes.valueIterator();
-        while (it.next()) |l| l.rows.deinit(x.gpa);
+        while (it.next()) |l| {
+            if (x.pool) |*p| p.finish(&l.lease);
+            l.rows.deinit(x.gpa);
+        }
+        if (x.pool) |*p| p.deinit();
         x.lanes.deinit(x.gpa);
         for (x.slot_bufs) |*b| b.free();
         x.gpa.free(x.slot_bufs);
@@ -165,7 +194,7 @@ pub const Gemma = struct {
 
     /// The round loop's facts: no draft head; host copies verified in windows up to 16 rows, streams sharing a forward.
     pub fn facts(x: *const Gemma) lanes.Model {
-        return .{ .exact_width = max_window, .gpu_tokens = false, .mtp = false, .speculate = false, .hidden_rows = true, .batch_rows = round_rows, .max_streams = @intCast(@min(x.m.slots, round_rows)) };
+        return .{ .exact_width = max_window, .gpu_tokens = false, .mtp = false, .speculate = false, .hidden_rows = true, .batch_rows = round_rows, .max_streams = @intCast(@min(x.m.slotCap(), round_rows)) };
     }
 
     fn self(ptr: *anyopaque) *Gemma {
@@ -261,24 +290,62 @@ pub const Gemma = struct {
     }
 
     fn freeSlot(x: *const Gemma) ?usize {
-        return std.mem.indexOfScalar(bool, x.free, true);
+        return std.mem.indexOfScalar(bool, x.free[0..x.m.slots], true);
+    }
+
+    fn fitsContext(x: *const Gemma, prompt: usize, max_new: usize) bool {
+        return prompt + max_new + max_window <= x.m.context;
+    }
+
+    /// Whether a request could start now: a free slot and (paged) its pages; one that never fits passes.
+    pub fn admits(x: *const Gemma, prompt: usize, max_new: usize) bool {
+        if (!x.fitsContext(prompt, max_new)) return true; // its prompt pass refuses it by name
+        const p = x.pool orelse return x.freeSlot() != null;
+        return x.freeSlot() != null and p.fits(pagesFor(prompt, max_new));
+    }
+
+    const Map = struct {
+        x: *Gemma,
+        slot: usize,
+        fn write(ctx: *anyopaque, ids: []const u32, from: usize) anyerror!void {
+            const m: *const Map = @ptrCast(@alignCast(ctx));
+            try m.x.m.mapPages(m.x.s, m.slot, ids[from..], from);
+        }
+    };
+
+    /// The lane's pages cover positions [0, end): pages taken from its promise as its context grows.
+    fn reach(x: *Gemma, l: *Lane, end: usize) !void {
+        const p = if (x.pool) |*p| p else return;
+        const n = pagesOf(end);
+        if (n <= l.lease.ids.items.len) return;
+        var map: Map = .{ .x = x, .slot = l.slot };
+        try p.cover(&l.lease, n, .{ .ctx = &map, .write = Map.write });
+    }
+
+    /// A free slot for the request, its pages promised now (taken as its rows need them); LaneMemory: not yet.
+    fn takeSlot(x: *Gemma, lease: *kv.Lease, prompt: usize, max_new: usize) !usize {
+        const slot = x.freeSlot() orelse return error.NoFreeSlot;
+        if (x.pool) |*p| try p.promise(lease, pagesFor(prompt, max_new));
+        return slot;
     }
 
     /// A prompt pass begins: a slot, the stream's rule, a kept state restored; where its first chunk starts.
     fn opening(x: *Gemma, s: *Stream) !*Lane {
         const p = s.prompt();
         if (p.len == 0) return error.EmptyPrompt;
-        if (p.len + @as(usize, s.max_new) + max_window > x.m.context) return error.PastContext;
+        if (!x.fitsContext(p.len, s.max_new)) return error.PastContext;
         const got = try x.lanes.getOrPut(x.gpa, s);
         if (!got.found_existing) {
-            const slot = x.freeSlot() orelse {
+            var lease: kv.Lease = .{};
+            const slot = x.takeSlot(&lease, p.len, s.max_new) catch |e| {
                 x.lanes.removeByPtr(got.key_ptr);
-                return error.NoFreeSlot;
+                return e;
             };
             x.free[slot] = false;
-            got.value_ptr.* = .{ .slot = slot, .last = x.slot_bufs[2 * slot].ptr, .rule = x.slot_bufs[2 * slot + 1].ptr };
+            got.value_ptr.* = .{ .slot = slot, .last = x.slot_bufs[2 * slot].ptr, .rule = x.slot_bufs[2 * slot + 1].ptr, .lease = lease };
         }
         const l = got.value_ptr;
+        try x.reach(l, p.len); // the prompt's pages (a kept state's restore writes into them too)
         l.sampled = false;
         l.mark = null;
         if (s.sampling) |sp| if (sp.temperature > 0) {
@@ -450,6 +517,7 @@ pub const Gemma = struct {
         const l = x.lanes.getPtr(s) orelse return error.UnknownStream;
         const t = try x.value(feed);
         if (position != l.len + 1) return error.PositionMismatch;
+        try x.reach(l, l.len + 1);
         try x.run(&.{.{ .slot = l.slot, .p0 = l.len, .tokens = &.{t} }}, false, 0, 1);
         l.tap = .{ .row = 0, .start = l.len, .rows = 1, .gen = x.gen };
         l.len += 1;
@@ -481,6 +549,7 @@ pub const Gemma = struct {
             try l.rows.append(x.gpa, w.pending);
             try l.rows.appendSlice(x.gpa, w.tokens);
             for (w.positions, 0..) |pos, r| if (pos != l.base + r + 1) return error.PositionMismatch;
+            try x.reach(l, l.base + l.rows.items.len);
             c.* = .{ .slot = l.slot, .p0 = l.base, .tokens = l.rows.items };
             total += l.rows.items.len;
         }
@@ -524,15 +593,29 @@ pub const Gemma = struct {
     }
 
     fn dropLane(x: *Gemma, s: *const Stream) void {
-        if (x.lanes.fetchRemove(s)) |kv| {
-            var l = kv.value;
+        if (x.lanes.fetchRemove(s)) |entry| {
+            var l = entry.value;
+            if (x.pool) |*p| { // one CUDA stream: a later lease's writes queue behind this stream's last reads
+                p.finish(&l.lease);
+                x.m.unmapPages(l.slot);
+            }
             x.free[l.slot] = true;
             l.rows.deinit(x.gpa);
             if (l.images) |*b| {
                 x.s.synchronize() catch {};
                 b.free();
             }
+            if (x.lanes.count() == 0) x.report();
         }
+    }
+
+    /// The idle server's line: nothing promised, every page free (kept states are copies, not pages).
+    fn report(x: *const Gemma) void {
+        if (@import("builtin").is_test) return;
+        const p = x.pool orelse return;
+        const c = p.census();
+        const ok = p.idle() and c.free == c.total;
+        std.log.info("kv pool idle{s}: promised {d}, free {d} + store {d} == total {d}", .{ if (ok) "" else " (UNEVEN)", c.promised, c.free, c.kept, c.total });
     }
 
     fn release(ptr: *anyopaque, s: *Stream) void {
@@ -589,4 +672,11 @@ test "shared head costs: Gemma CUDA assistant and DFlash retain costed copy gran
     var b: Gemma = undefined;
     b.m = &m;
     try @import("cuda_head_cost_test.zig").check(b.facts());
+}
+
+test "a request holds its prompt, its reply and one verify window in whole pages of 256 positions" {
+    try std.testing.expectEqual(@as(usize, 1), pagesFor(1, 1));
+    try std.testing.expectEqual(@as(usize, 1), pagesFor(200, 40));
+    try std.testing.expectEqual(@as(usize, 2), pagesFor(200, 41));
+    try std.testing.expectEqual(@as(usize, 129), pagesFor(32768, 0));
 }
