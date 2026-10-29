@@ -174,7 +174,7 @@ pub const Engine = struct {
         e.m.mm.prompt_fixed_k = o.settings.prompt_fixed_k;
         e.m.tiled = o.settings.tiled;
         if (o.settings.tiled) e.m.packs = &e.packs;
-        if (o.settings.l2pf.on) e.l2pf = try l2pf_mod.L2pf.init(gpa, d, &e.w, o.settings.l2pf);
+        if (o.settings.l2pf.want(try ctx.capability())) e.l2pf = try l2pf_mod.L2pf.init(gpa, d, &e.w, o.settings.l2pf);
         errdefer if (e.l2pf) |*p| p.deinit();
         if (o.settings.pages) try pages_mod.ownSequence(e) else try e.bind(0); // on pages: no window, its pool places it
         errdefer {
