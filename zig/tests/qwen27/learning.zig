@@ -3,6 +3,7 @@ const std = @import("std");
 const tf = @import("tensorfold");
 const mtl = @import("metal");
 const q = tf.qwen27;
+const identity = @import("learning_identity.zig");
 const graph = @import("synthetic_graph.zig");
 
 fn write(a: std.mem.Allocator, io: std.Io, dir: []const u8, m: *q.model.Model) !void {
@@ -116,6 +117,8 @@ pub fn run(a: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
         try t.forwardRow(&runner, 0, row, ids[row..][0..1], true);
         if (!std.mem.eql(u16, &baseline[row], q.train.slice(u16, m.frame.get(.logits), 96))) return error.UntaughtPocketDiffers;
     }
+    // Poison skipped prompt-head storage so a stale value can never accidentally satisfy the identity gate.
+    @memset(q.train.slice(u16, t.logits, (seq.start - 1) * m.config.vocab), 0x7fc1);
     // The pocket input backward and the scaled entry run through the production trainer, too.
     try t.pass(&.{nudged}, .target, turn, &results);
     for (t.pushAt(0, 0, 0)) |value| if (!std.math.isFinite(value)) return error.NonFinitePocketGradient;
@@ -125,7 +128,9 @@ pub fn run(a: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
     for (0..3) |row| {
         try t.forwardRow(&runner, 0, row, ids[row..][0..1], true);
         const kept = q.train.slice(u16, .{ .buffer = t.logits.buffer, .offset = row * 96 * 2 }, 96);
-        if (!std.mem.eql(u16, kept, q.train.slice(u16, m.frame.get(.logits), 96))) return error.TaughtTrainerForwardDiffers;
+        const hidden = q.train.slice(u16, .{ .buffer = t.final_h.buffer, .offset = row * m.config.hidden * 2 }, m.config.hidden);
+        // The native layer program finishes in frame.hidden after its two residual swaps per block.
+        try identity.check(row, seq.start, hidden, q.train.slice(u16, m.frame.get(.hidden), m.config.hidden), kept, q.train.slice(u16, m.frame.get(.logits), 96));
     }
-    std.debug.print("Q27_TRAIN native_logits_equal=true packed_loss_equal=true repeat=5 nonzero_gradient_norm={d:.9} target_residuals=true greedy_checked=true scaled_zero_equal=true untaught_equal=true pocket_backward=true taught_logits_equal=true\n", .{@sqrt(norm)});
+    std.debug.print("Q27_TRAIN native_logits_equal=true packed_loss_equal=true repeat=5 nonzero_gradient_norm={d:.9} target_residuals=true greedy_checked=true scaled_zero_equal=true untaught_equal=true pocket_backward=true taught_logits_equal=true prompt_hidden_equal=true\n", .{@sqrt(norm)});
 }

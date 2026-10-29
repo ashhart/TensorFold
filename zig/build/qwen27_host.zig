@@ -19,6 +19,8 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     const allocated = b.createModule(.{ .root_source_file = b.path("zig/qwen27_allocation_host.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = pricing_lanes }} });
     const window_step = b.step("test-qwen27-window-host", "Device width, copied trees and counted zero-grant drafting without shaders");
     for ([_]*std.Build.Module{ window, taps, allocated }) |m| window_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
+    const identity = b.createModule(.{ .root_source_file = b.path("zig/tests/qwen27/learning_identity.zig"), .target = b.graph.host });
+    b.step("test-qwen27-learning-identity-host", "Poisoned skipped-head storage and strict produced-row identity without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = identity })).step);
     const living = b.createModule(.{ .root_source_file = b.path("zig/src/living/living.zig"), .target = b.graph.host, .link_libc = true });
     const pocket = b.createModule(.{ .root_source_file = b.path("zig/qwen27_pocket_host.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "living", .module = living }} });
     pocket.addImport("core", pocket);
