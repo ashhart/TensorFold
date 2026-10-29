@@ -210,13 +210,7 @@ pub fn Ops(comptime Tri: type) type {
             }
             const row = d.host[0..n];
             try download(o.stream(), std.mem.sliceAsBytes(row), d.dlogits.ptr);
-            const tok = try drawRow(o.e.gpa, row, h.ids, position, sm);
-            const col = std.sort.binarySearch(u32, h.ids, tok, struct {
-                fn order(t: u32, x: u32) std.math.Order {
-                    return std.math.order(t, x);
-                }
-            }.order) orelse return .{ .token = tok, .prob = 0 };
-            return .{ .token = tok, .prob = @exp(@as(f64, promote(row[col])) - @as(f64, lse)) };
+            return mtp.drawPick(o.e.gpa, row, h.ids, lse, position, sm);
         }
 
         /// Python decode.draft: absorb the kept rows, then chain up to `count` drafts, the first always kept.
@@ -350,8 +344,8 @@ pub fn Ops(comptime Tri: type) type {
             for (ds, 0..) |d, i| try p.copy(d.dlogits.ptr, s.head_local + i * n_ids * 2, n_ids * 2);
         }
 
-        /// draft over several greedy drafts: kept rows in one pass, then a pass a step, each chaining as it would alone
-        pub fn draftMany(o: Self, ds: []const *Draft, nexts: []const []const u32, rows: []const u64, counts: []const usize, confidence: f64, outs: []const *Chain) !void {
+        /// draft over several drafts, greedy or sampled: kept rows in one pass, then one a step, each as it would alone
+        pub fn draftMany(o: Self, ds: []const *Draft, nexts: []const []const u32, rows: []const u64, counts: []const usize, positions: []const u64, sms: []const ?Sampling, confidence: f64, outs: []const *Chain) !void {
             const h = o.h;
             const n_l = ds.len;
             for (ds, outs) |d, out| {
@@ -384,7 +378,12 @@ pub fn Ops(comptime Tri: type) type {
                     const top = best_host[r * 4];
                     const lse = best_host[r * 4 + 1];
                     const col: usize = @intCast(@as(i32, @bitCast(best_host[r * 4 + 2])));
-                    const got: Pick = .{ .token = h.ids[col], .prob = @exp(@as(f64, top) - @as(f64, lse)) };
+                    // a sampled lane draws from its own row, as its lone pick does; a greedy one takes its best column
+                    const got: Pick = if (mtp.isSampled(sms[i])) sampled: {
+                        const row = ds[i].host[0..h.view().logical];
+                        try download(o.stream(), std.mem.sliceAsBytes(row), ds[i].dlogits.ptr);
+                        break :sampled try mtp.drawPick(o.e.gpa, row, h.ids, lse, positions[i] + j, sms[i]);
+                    } else .{ .token = h.ids[col], .prob = @exp(@as(f64, top) - @as(f64, lse)) };
                     const out = outs[i];
                     const low = confidence > 0 and got.prob < confidence;
                     if (low and j > 0) continue;
