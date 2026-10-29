@@ -437,3 +437,22 @@ test "a routed prompt past its pairs per item leaves the K-parallel tiles for th
     shape.plan_pairs = 1051;
     try std.testing.expect(std.mem.endsWith(u8, h.select(env, .mlx, .routed, .prefill, shape).?.id, "gemm"));
 }
+
+test "gfx1201 takes the K-parallel tile for short routed prompts, up to its items and pairs per item" {
+    const r = kernelsOn("gfx1201");
+    const env = envOn("gfx1201", true, true, false);
+    // each model's served plans on both sides of a bound: n, k, group, items, pairs and the tile
+    const want = [_]struct { u32, u32, u16, u32, u32, []const u8 }{
+        .{ 1024, 2048, 64, 401, 1152, "kp3" }, // Qwen3.6, 128 tokens
+        .{ 1024, 2048, 64, 545, 1161, "gemm" }, // 129
+        .{ 1856, 2688, 64, 224, 768, "kp3" }, // Nemotron, 128 tokens, as before
+        .{ 1856, 2688, 64, 320, 1116, "kp3" }, // 186
+        .{ 1856, 2688, 64, 320, 1122, "gemm" }, // 187
+        .{ 1280, 2560, 32, 507, 451, "kp3" }, // Flash Next, 41 rows
+        .{ 1280, 2560, 32, 519, 462, "gemm" }, // 42
+    };
+    for (want) |w| {
+        const shape: Shape = .{ .m = 128, .n = w[0], .k = w[1], .bits = 4, .group = w[2], .fp16 = false, .items = w[3], .plan_pairs = w[4] };
+        try std.testing.expect(std.mem.endsWith(u8, r.select(env, .mlx, .routed, .prefill, shape).?.id, w[5]));
+    }
+}
