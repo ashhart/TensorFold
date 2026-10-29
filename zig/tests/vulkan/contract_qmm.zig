@@ -39,8 +39,7 @@ comptime {
 fn depth(s: c.Shape) usize {
     return s.k + 2;
 }
-// The shapes the Qwen3.5-2B engine calls the projection at (K 2048 and 6144, N from the 16-wide gates up to the
-// 248320-row head, M = 1 for decode and up to 32 rows for a prefill chunk), plus the small fixture shapes.
+// Qwen3.5-2B's projection shapes (K 2048/6144, N 16 to 248320, M 1 to 32) and the small fixture shapes.
 const served = [_]c.Shape{
     .{ .rows = 1, .n = 16, .k = 64 },      .{ .rows = 2, .n = 257, .k = 128 },
     .{ .rows = 1, .n = 16, .k = 2048 },    .{ .rows = 2, .n = 16, .k = 6144 },
@@ -76,9 +75,7 @@ const Rig = struct {
     }
 };
 
-// Caps on what prepare() will build on the host (codes are one byte each, so the largest served shape,
-// the 248320-row head at K 2048, takes 0.5 GB of codes plus 0.25 GB of packed words). A served shape over a cap would be
-// refused and fail gate 3; the caps exist only to bound the host allocation of the generated edge shapes.
+// Host caps for prepare() (the 248320x2048 head: 0.5 GB of codes, 0.25 GB packed); they bound only edge shapes.
 const max_weights: usize = 520_000_000;
 const max_outputs: usize = 300_000;
 
@@ -102,8 +99,7 @@ pub const Fixture = struct {
     buffers: [5]vk.Buffer = undefined,
     made: usize = 0,
     bindings: [5]dispatch.Binding = undefined,
-    /// Planted control: after the dispatch, overwrite this input buffer (0 x, 1 w, 2 scales, 3 biases) as a kernel that
-    /// writes through its readonly input would; gate 2 must catch it now that the inputs are read back from the device.
+    /// Planted control: overwrite input buffer i (x, w, scales, biases) after dispatch; gate 2 must catch it.
     corrupt: ?usize = null,
 
     pub fn init(a: std.mem.Allocator, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, pipeline: *dispatch.Pipeline) Fixture {
@@ -133,7 +129,7 @@ pub const Fixture = struct {
         f.input_snapshot = &.{};
         f.rig = .{};
     }
-    // The table is a comptime constant: `&g.hooks(Fixture)` would point at a stack temporary that dies when kernel() returns.
+    // A comptime table: `&g.hooks(Fixture)` would point at a stack temporary that dies when kernel() returns.
     const vt = g.hooks(Fixture);
     const corrupt_names = [4][]const u8{ "control: qmm writes its activations", "control: qmm writes its weights", "control: qmm writes its scales", "control: qmm writes its biases" };
     pub fn kernel(f: *Fixture) g.Kernel {
@@ -230,8 +226,7 @@ pub const Fixture = struct {
             try vk.orExit(vk.upload(f.cmds, f.buffers[i], 0, f.staging, bad, timeout_ns));
         }
         try vk.orExit(vk.download(f.cmds, f.buffers[4], 0, f.staging, std.mem.sliceAsBytes(f.out), timeout_ns));
-        // Gate 2 compares the inputs before and after the runs, so what it sees must be what the device holds now:
-        // read the four input buffers back into the snapshot (the host copy taken at upload would make the check vacuous).
+        // Gate 2 needs the device's inputs now: read the four buffers back (the upload copy would make it vacuous).
         var at: usize = 0;
         for (f.bindings[0..4]) |b| {
             try vk.orExit(vk.download(f.cmds, b.buffer.*, 0, f.staging, f.input_snapshot[at..][0..b.len], timeout_ns));

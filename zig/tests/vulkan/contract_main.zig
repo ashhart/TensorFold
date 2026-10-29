@@ -58,7 +58,7 @@ pub fn main(init: std.process.Init) !u8 {
     defer p_tail.deinit();
     var p_fp16 = try vk.dispatch.Pipeline.init(&dev, &shaders.fp16_accum, control_layout);
     defer p_fp16.deinit();
-    // Planted gate 2 controls on the real kernel: a write to its weights and to its biases (the last input) after the dispatch.
+    // Planted gate 2 controls on the real kernel: a write after dispatch to its weights, then to its biases.
     var p_w = try vk.dispatch.Pipeline.init(&dev, &shaders.qmm_bf16, layout);
     defer p_w.deinit();
     var p_b = try vk.dispatch.Pipeline.init(&dev, &shaders.qmm_bf16, layout);
