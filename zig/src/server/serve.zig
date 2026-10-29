@@ -159,6 +159,10 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         std.debug.print("tensorfold: TF_SSE_KEEPALIVE_S: seconds, a number >= 0\n", .{});
         return 1;
     };
+    const spark_stats = @import("spark_wire.zig").enabled(s.model_type, env(s, "TENSORFOLD_WIRE")) orelse {
+        std.debug.print("tensorfold: TENSORFOLD_WIRE: expected spark or native\n", .{});
+        return 1;
+    };
     const config: server_mod.Config = .{
         .browser = .{ .allowed_hosts = args.allowed_host, .allowed_origins = args.allowed_origin },
         .allowed_controls = args.allowed_controls,
@@ -189,6 +193,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .prompt_seed = args.prompt_seed,
         .sse_keepalive_s = keepalive_s,
         .request_log = env(s, "TENSORFOLD_REQUEST_LOG"),
+        .spark_stats = spark_stats,
         .dashboard = args.dashboard,
         .compact_at = if (args.compact_auto) .{ .auto = {} } else if (args.compact_fraction) |f| .{ .fraction = f } else null,
         .compact_keep = args.compact_keep,
