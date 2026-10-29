@@ -94,6 +94,10 @@ pub const Kolibri = struct {
     /// Makes a paged model's arena of `pages` pages for `extra + 1` slots, and the pool that leases them.
     pub fn attach(x: *Kolibri, extra: usize, pages: usize) !void {
         try x.m.attach(x.s, extra, pages);
+        for (x.steps) |*g| if (g.*) |*e| { // a step captured before the arena reads the linear caches attach freed
+            e.exec.deinit();
+            g.* = null;
+        };
         x.pool = try kv.Pool.init(x.gpa, pages, x.m.pageBytes());
     }
 
