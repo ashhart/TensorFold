@@ -42,12 +42,23 @@ pub fn problem(err: anyerror) ?[]const u8 {
 
 /// transformers' smart_resize: sides multiples of `factor` (Python's round, halves to even), the area in the bounds.
 pub fn smartResize(height: u32, width: u32, factor: u32, min_pixels: u64, max_pixels: u64) error{AspectRatio}!Size {
+    return smartResizeWith(height, width, factor, min_pixels, max_pixels, .{});
+}
+
+/// Where processors' smart_resize copies part: LFM2-VL's keeps a side at least one factor and has no aspect bound.
+pub const Variant = struct { at_least_factor: bool = false, max_aspect: ?f64 = 200 };
+
+pub fn smartResizeWith(height: u32, width: u32, factor: u32, min_pixels: u64, max_pixels: u64, v: Variant) error{AspectRatio}!Size {
     const h: f64 = @floatFromInt(height);
     const w: f64 = @floatFromInt(width);
-    if (@max(h, w) / @min(h, w) > 200) return error.AspectRatio;
+    if (v.max_aspect) |most| if (@max(h, w) / @min(h, w) > most) return error.AspectRatio;
     const f: f64 = @floatFromInt(factor);
     var hb = roundEven(h / f) * f;
     var wb = roundEven(w / f) * f;
+    if (v.at_least_factor) {
+        hb = @max(f, hb);
+        wb = @max(f, wb);
+    }
     if (hb * wb > @as(f64, @floatFromInt(max_pixels))) {
         const beta = @sqrt(h * w / @as(f64, @floatFromInt(max_pixels)));
         hb = @max(f, @floor(h / beta / f) * f);
@@ -129,6 +140,9 @@ test "smart_resize as the processor rounds, grows and shrinks" {
     const big = try smartResize(3000, 4000, 32, 65536, 256 * 1024);
     try std.testing.expect(@as(u64, big.h) * big.w <= 256 * 1024 and big.h % 32 == 0 and big.w % 32 == 0);
     try std.testing.expectError(error.AspectRatio, smartResize(10, 2010, 32, 65536, 4096 * 1024));
+    // LFM2-VL's variant: no aspect bound, a side at least one factor
+    const lfm2: Variant = .{ .at_least_factor = true, .max_aspect = null };
+    try std.testing.expectEqual(Size{ .h = 32, .w = 3648 }, try smartResizeWith(10, 2010, 32, 65536, 262144, lfm2));
     try std.testing.expectEqual(@as(f64, 2), roundEven(2.5));
     try std.testing.expectEqual(@as(f64, 4), roundEven(3.5));
     try std.testing.expectEqual(@as(f64, 3), roundEven(2.75));
