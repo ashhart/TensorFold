@@ -195,7 +195,7 @@ fn start(state: *State, srv: *Server, a: Allocator, id: []const u8, input: *chat
         .state = state,
         .id = id,
         .task = task,
-        .goal = latest[0..@min(latest.len, 4000)],
+        .goal = latest[0..@import("html.zig").cutAt(latest, 4000)], // the cap does not split a character
         .research = fresh_turn and latest_task.frontier and std.mem.trim(u8, latest, " \t\r\n").len >= 12,
         .client_tools = input.tools.len > 0,
         .user_key = try memory.userKey(a, spliced),

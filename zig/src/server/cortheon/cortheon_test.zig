@@ -416,6 +416,27 @@ test "the web budget ends the research and the reply still comes back without Co
     try std.testing.expect(std.mem.indexOf(u8, m.strField("content").?, "cortheon_search") == null);
 }
 
+test "the research task keeps a character that straddles the goal cap whole" {
+    var rig: Rig = .{ .eng = .{ .script = &.{ "Zig latest release notes", "The latest is 0.17." } } };
+    try rig.start(true);
+    defer rig.stop();
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var words: std.ArrayList(u8) = .empty;
+    try words.appendSlice(a, "What is the latest release of Zig? ");
+    while (words.items.len < 3999) try words.append(a, 'x');
+    try words.appendSlice(a, "\u{20ac} tail");
+    const content = try json.quote(a, words.items, .{});
+    const body = try std.fmt.allocPrint(a, "{{\"messages\":[{{\"role\":\"user\",\"content\":{s}}}]}}", .{content});
+    _ = try rig.ask(a, body);
+    try std.testing.expect(rig.eng.saw(0, "You write web search queries"));
+    const prompt = rig.eng.prompts.items[0];
+    try std.testing.expect(std.unicode.utf8ValidateSlice(prompt));
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "What is the latest release of Zig?") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "\u{20ac}") == null);
+}
+
 test "research expansion keeps a context-window refusal streamed" {
     for ([_]u32{ 2000, 2400 }) |window| {
         var rig: Rig = .{ .eng = .{ .script = &.{"Zig latest release notes"} } };
