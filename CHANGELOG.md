@@ -50,6 +50,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - A conversation state on disk that its model refuses while reading it back is forgotten after one recall, as a file that fails its own checks already is, so later turns stop reading it again (#1543, for #1539). Thanks to @wojo.
 
+- GLM on CUDA: as the load packs each layer, 8 reader threads read that layer's weights into the page cache ahead of it, so GLM-5.3-Flash XSFP4 loads in about 155 s instead of 327 s on two GB10s (TP=2) and 123 s instead of 268 s on three (TP=3), with the same replies and the same memory free at serving (#1616). A rank now reads its layers whole from the disk, its unkept expert rows included, and still drops each layer's pages once it is packed. `TF_GLM_LOAD_PREFETCH` sets the count (`0` turns the readers off, at most 16); they run only on Linux. Thanks to @Bizuayeu.
+
 ## 1.1.9
 
 - Kolibri-1 on CUDA, and Drama 3 with prompt chunks of more than one row (`TF_DRAMA_PREFILL_ROWS`): the block-FP8 routed experts' prompt kernels copy their weights into shared memory in stored order, so each 32-byte sector is read from L2 once instead of twice (#1460). The matrix multiplies read the same values in the same order, so outputs are the same bytes. On a GB10, Kolibri-1's prompts ran 13% faster at 2k tokens and 3 to 4% faster from 8k to 64k, with the same tokens. The kernel contract now records the register and shared-memory limits of Kolibri-1's three prompt launches. Thanks to @jschmied.
