@@ -367,7 +367,7 @@ pub const Model = struct {
             // the drafter's blocks (the snapshot carries their rows: the RAM tier's measure)
             var dsb: [8]u32 = undefined;
             const ds_blocks: u32 = if (o.drafts) @intCast(dspark_emit.blocks(&m.cfg, &dsb).len) else 0;
-            m.sessions = try sg.Sessions.init(gpa, io, &m.f, &bp, so, .{ .slots = m.slots, .ds_blocks = ds_blocks, .checkpoint = if (so.disk != null) try prepared.packDigest(io, &m.pack) else null });
+            m.sessions = try sg.Sessions.init(gpa, io, &m.f, &bp, so, .{ .slots = m.slots, .ds_blocks = ds_blocks, .checkpoint = if (so.disk != null) try prepared.packIdentity(io, &m.pack, if (cache) |*c| c else null) else null });
         }
         tr.step("engram host and sessions", cuda.usage(false));
         m.gt = .{ .f = &m.f, .prefill_rows = o.prefill_rows, .max_rows = nb, .own_prefill = o.own_prefill, .sessions = m.sessions };
