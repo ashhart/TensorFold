@@ -1,17 +1,5 @@
-// Finite scan for the stage-2 greedy draw, phase 0 of the argreduce pipeline.
-// One pass over one BF16 logits row: sets word 0 to nonzero when ANY element
-// is NaN or infinity (winner or not — the Ash q.backend.draw rule rejects the
-// whole row) and word 1 to the lowest index of the first offending element.
-// All three result words are device-filled per call (flag 0, first_bad and
-// index 0xffffffff), so the atomics accumulate one clean row's verdict and an
-// unwritten token can never pass. The argreduce phase behind this scan
-// carries mlx NaN-wins semantics, which is unreachable here: with the flag
-// clear no NaN exists in the row, so its strict-compare, lowest-index tie rule
-// (identical to the draw rule for finite values, +0/-0 included) decides.
-//
-// Coverage mirrors argreduce_chunk.comp: 256 lanes x 16 values = one 4096-wide
-// window per workgroup, so the greedy host dispatches the same group count for
-// both phases. Grid: x = ceil(count / 4096) (at most 256).
+// Finite scan for the stage-2 greedy draw, phase 0 of the argreduce pipeline. One pass over one BF16 logits row: sets word 0 to nonzero when ANY element is NaN or infinity (winner or not — the Ash q.backend.draw rule rejects the whole row) and word 1 to the lowest index of the first offending element. All three result words are device-filled per call (flag 0, first_bad and index 0xffffffff), so the atomics accumulate one clean row's verdict and an unwritten token can never pass. The argreduce phase behind this scan carries mlx NaN-wins semantics, which is unreachable here: with the flag clear no NaN exists in the row, so its strict-compare, lowest-index tie rule (identical to the draw rule for finite values, +0/-0 included) decides.
+//  Coverage mirrors argreduce_chunk.comp: 256 lanes x 16 values = one 4096-wide window per workgroup, so the greedy host dispatches the same group count for both phases. Grid: x = ceil(count / 4096) (at most 256).
 #version 460
 
 #extension GL_EXT_shader_16bit_storage : require
@@ -38,8 +26,7 @@ void main() {
   uint thread = gl_LocalInvocationID.x;
   uint begin = gl_WorkGroupID.x * 4096u;
   uint end = min(begin + 4096u, params.count);
-  // Non-finite BF16: exponent all ones — 0x7f80 is +/-inf, 0x7f81..0x7fff NaN,
-  // the sign bit rides in front of both. Every finite value stays below.
+  // Non-finite BF16: exponent all ones — 0x7f80 is +/-inf, 0x7f81..0x7fff NaN, the sign bit rides in front of both. Every finite value stays below.
   uint local_bad = 0xffffffffu;
   uint local_flag = 0u;
   for (uint k = 0u; k < 16u; ++k) {
