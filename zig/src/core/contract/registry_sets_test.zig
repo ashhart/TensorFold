@@ -54,4 +54,5 @@ test {
     _ = @import("exl3_grouped_records.zig");
     _ = @import("proposal_sampling_records.zig");
     _ = @import("pocket_records.zig");
+    _ = @import("experts_bf16_records.zig");
 }
