@@ -209,6 +209,11 @@ one dropping a last round of K groups short of the warps, one chaining the group
 CUDA also checks Flash Next's NVFP4 experts on prompt tiles with the decode form's sums (SwiGLU gate-up and fp32
 down, each bit-equal to the decode instance it replaces; the scaled-code prompt tile is the planted control).
 
+Metal also checks DeepSeek V4.1's CSA2 attention (`csa2_attn.metal`): decode rows (ring or linear windows) and prompt rows
+(16-key tiles at absolute positions), fp32 and bf16 out, against float64's softmax over the window, the selected rows and
+the sink with the inverse RoPE, and a row's bytes equal across chunk splits and between the two launches (four controls,
+each one planted fault, and one on the row bytes).
+
 ## CUDA records per nvcc release
 
 nvcc allocates registers differently from one release to the next, so the CUDA records are kept per release.

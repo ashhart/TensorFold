@@ -40,6 +40,8 @@ pub const core_exlr8_prompt = @embedFile("core/exlr8_prompt.metal");
 pub const core_exlr8_dense_prompt = @embedFile("core/exlr8_dense_prompt.metal");
 /// DeepSeek V4.1 release FP8 dense projections: 32x32 blocks and split-invariant row sums.
 pub const deepseek_v41_fp8_rows = @embedFile("deepseek_v41/fp8_rows.metal");
+/// DeepSeek V4.1 CSA2 attention: window, selected compressed rows and the sink over one shared latent row.
+pub const deepseek_v41_csa2_attn = @embedFile("deepseek_v41/csa2_attn.metal");
 pub const core_pair = @embedFile("core/pair.metal");
 /// Kimi K3's MXFP4 routed experts (header, then plan/up/down/combine), which DeepSeek V4.1's expert kernel includes.
 pub const kimi_common = @embedFile("kimi/kimi_common.h");

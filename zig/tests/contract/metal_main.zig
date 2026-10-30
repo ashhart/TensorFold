@@ -424,6 +424,8 @@ pub fn main(init: std.process.Init) !u8 {
     defer dsv41_fp8.destroy();
     const dsv41_fp8_mma = try @import("metal_dsv41_fp8_mma.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer dsv41_fp8_mma.destroy();
+    const dsv41_attn = try @import("metal_dsv41_attn.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer dsv41_attn.destroy();
     const dsv41_experts = try @import("metal_dsv41_experts.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer dsv41_experts.destroy();
     const dsv41_xmma = try @import("metal_dsv41_xmma.zig").Suite.create(a, device, queue, &kernels, o.only);
@@ -442,6 +444,8 @@ pub fn main(init: std.process.Init) !u8 {
         t.failed += try dsv41_fp8_mma.invariance(o.seed);
         t.failed += try dsv41_fp8_mma.accuracy(o.seed);
         if (std.c.getenv("TF_DSV41_TIME") != null) try dsv41_fp8_mma.timing(init.io);
+        try dsv41_attn.invariance(init.io, o.seed, &t);
+        if (std.c.getenv("TF_DSV41_TIME") != null) try dsv41_attn.timing(init.io);
     }
     const t1 = std.Io.Clock.awake.now(init.io);
     var lim: usize = 0;
