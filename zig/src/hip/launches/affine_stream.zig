@@ -1,4 +1,4 @@
-//! The stream tile's launch: the column rule (tiles/stream.hpp).
+//! The stream tile's launch: the column rule, the held-codes tile and the routed work lists (tiles/stream.hpp).
 
 const std = @import("std");
 const abi = @import("../abi.zig");
@@ -28,6 +28,32 @@ pub const stream_routed_cb_top = [stream_rows.len]c_int{ 8, 4, 4 };
 pub const stream_list_blocks = 16;
 /// The columns below which one row of a plain product takes one column a lane; wider heads keep the waves rule.
 pub const stream_one_col_n = 20_000;
+
+/// Where an unrouted 4-bit plain product takes the held-codes tile: 3-4 rows on the rule's columns, 5-8 rows by width.
+pub const HeldPick = struct { r: usize, c: usize, rows: c_int };
+pub const held_wide_n = 16_000;
+pub const held_narrow_lo = 1_000;
+pub const held_narrow_hi = 4_096;
+pub fn heldPick(bits: c_int, m: c_int, total_n: c_int, cb: c_int) ?HeldPick {
+    if (bits != 4 or m < 3 or m > 8) return null;
+    const ci = std.mem.indexOfScalar(c_int, &stream_cbs, cb) orelse return null;
+    if (m <= 4) return if (cb <= 4) .{ .r = 0, .c = ci, .rows = 4 } else null;
+    if (total_n >= held_wide_n) return .{ .r = 1, .c = 2, .rows = 8 };
+    if (total_n > held_narrow_lo and total_n <= held_narrow_hi) return .{ .r = 1, .c = 1, .rows = 8 };
+    return null;
+}
+
+test "heldPick: the held tile at 3 and 4 rows on the rule's columns, at 5 to 8 rows by width" {
+    try std.testing.expectEqual(@as(?HeldPick, null), heldPick(4, 1, 16480, 1));
+    try std.testing.expectEqual(@as(?HeldPick, null), heldPick(4, 2, 248320, 8));
+    try std.testing.expectEqual(@as(?HeldPick, .{ .r = 0, .c = 0, .rows = 4 }), heldPick(4, 3, 2560, 1));
+    try std.testing.expectEqual(@as(?HeldPick, .{ .r = 0, .c = 2, .rows = 4 }), heldPick(4, 4, 16480, 4));
+    try std.testing.expectEqual(@as(?HeldPick, .{ .r = 1, .c = 2, .rows = 8 }), heldPick(4, 6, 16480, 4));
+    try std.testing.expectEqual(@as(?HeldPick, .{ .r = 1, .c = 1, .rows = 8 }), heldPick(4, 8, 2560, 1));
+    try std.testing.expectEqual(@as(?HeldPick, null), heldPick(4, 5, 13952, 4));
+    try std.testing.expectEqual(@as(?HeldPick, null), heldPick(4, 7, 324, 1));
+    try std.testing.expectEqual(@as(?HeldPick, null), heldPick(8, 3, 2560, 1));
+}
 
 pub fn streamWith(
     k: *const Kernels,
@@ -64,6 +90,11 @@ pub fn streamWith(
     for (stream_cbs, 0..) |cb, i| {
         if (cb != k.stream_cb_force or cb * stream_rows[ri] > 16 or cb * a.bits > stream_code_words or (cb < 2 and (pair_div == 2 or relu2))) continue;
         pick = i;
+    }
+    if (a.route.items == 0 and pair_div == 1 and !relu2) {
+        if (heldPick(a.bits, a.m, total_n, stream_cbs[pick])) |hp| {
+            if (k.held[hp.r][hp.c]) |f| return heldGo(r, f, a, sides_in, total_n, items, s, lpc_log2, hp.rows, stream_cbs[hp.c]);
+        }
     }
     const per_block: c_int = stream_waves * (@as(c_int, 32) >> lpc_log2) * @divExact(stream_cbs[pick], pair_div);
     var blocks: c_uint = cdiv(total_n, per_block);
@@ -112,4 +143,30 @@ pub fn streamWith(
     else
         .{ .x = blocks, .y = row_blocks, .z = @intCast(items) };
     try go(r, f, grid, .{ .x = 32 * stream_waves }, s, &args);
+}
+
+/// A plain product on the held-codes tile: `rows` rows a block (every row of the launch in one row block at 5-8).
+fn heldGo(r: *const runtime.Runtime, f: Function, a: Arg, sides_in: StreamSides, total_n: c_int, items: c_int, s: abi.Stream, lpc_log2: u5, rows: c_int, cb: c_int) Error!void {
+    const per_block: c_int = stream_waves * (@as(c_int, 32) >> lpc_log2) * cb;
+    var sides = sides_in;
+    var blocks: c_uint = cdiv(total_n, per_block);
+    if (sides.count > 0) {
+        blocks = 0;
+        for (0..@intCast(sides.count)) |i| {
+            sides.first[i] = @intCast(blocks);
+            blocks += cdiv(sides.n[i], per_block);
+        }
+        sides.first[@intCast(sides.count)] = @intCast(blocks);
+    }
+    sides.row_blocks = 0;
+    var args: hl.Args = .{};
+    try args.add(a);
+    try args.add(sides);
+    try args.add(@as(c_int, lpc_log2));
+    try args.add(@as(c_int, switch (a.group) {
+        32 => 0,
+        64 => 1,
+        else => 2,
+    }));
+    try go(r, f, .{ .x = blocks, .y = cdiv(a.m, rows), .z = @intCast(items) }, .{ .x = 32 * stream_waves }, s, &args);
 }

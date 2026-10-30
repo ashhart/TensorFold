@@ -52,8 +52,15 @@ __device__ inline void stream_dots(const typename T::pair (&xp)[RG][16], const u
      ...);
 }
 
-// Epi::kPair: a lane's CB columns are CB / 2 gate columns and the same up columns; out is silu(gate) * up.
-template <class Dec, class Act, class T, class Epi, int R, int CB, bool WIDE>
+// One column's chunk as its 16 code pairs, each made once (HELD: they stay while every row's x is dotted with them).
+template <class Dec, typename T, int... I>
+__device__ inline void stream_code_pairs(const uint32_t (&w)[Dec::kWords], typename T::pair (&qp)[16],
+                                         std::integer_sequence<int, I...>) {
+    ((qp[I] = Dec::template stream_pair<T, I>(w)), ...);
+}
+
+// Epi::kPair: CB / 2 gate columns and the same up columns, out silu(gate) * up; HELD: a round's code pairs made once.
+template <class Dec, class Act, class T, class Epi, int R, int CB, bool WIDE, bool HELD = false>
 __device__ inline void stream_body(const typename Dec::Args& a, int lpc_log2, int gshift, int bx, int by, int pair_cols,
                                    float limit) {
     using pair = typename T::pair;
@@ -129,6 +136,35 @@ __device__ inline void stream_body(const typename Dec::Args& a, int lpc_log2, in
         for (int c = 0; c < CB; ++c) {
             sc[c] = live ? terms.widen(sr[c]) : 0.f;
             bi[c] = live ? terms.widen(br[c]) : 0.f;
+        }
+        if constexpr (HELD) {
+            pair qp[CB][16];
+#pragma unroll
+            for (int c = 0; c < CB; ++c) {
+                stream_code_pairs<Dec, T>(w[c], qp[c], std::make_integer_sequence<int, 16>{});
+            }
+#pragma unroll
+            for (int r = 0; r < R; ++r) {
+                if (row0 + r >= a.m) break;
+                uint32_t xn[16];
+                xload(base, xn, r);
+                float s = 0.f;
+#pragma unroll
+                for (int i = 0; i < 16; ++i) {
+                    s = T::dot(__builtin_bit_cast(pair, xn[i]), __builtin_bit_cast(pair, kOne), s);
+                }
+                pair xp[16];
+                stream_x_pairs<Dec, T>(xn, xp, std::make_integer_sequence<int, 16>{});
+#pragma unroll
+                for (int c = 0; c < CB; ++c) {
+                    float d = 0.f;
+#pragma unroll
+                    for (int i = 0; i < 16; ++i) d = T::dot(xp[i], qp[c][i], d);
+                    acc[r][c] = Dec::fold_scale(acc[r][c], d, sc[c]);
+                    acc[r][c] = Dec::fold_bias(acc[r][c], s, bi[c]);
+                }
+            }
+            return;
         }
 #pragma unroll
         for (int g = 0; g < NG; ++g) {
@@ -266,7 +302,7 @@ __device__ inline void stream_body(const typename Dec::Args& a, int lpc_log2, in
 }
 
 // Item z of the plan (or plain product, or a group's side) at CB columns a lane, R rows; chunk group is q >> gshift.
-template <class Dec, class Act, class T, class Epi, int R, int CB, class Sides>
+template <class Dec, class Act, class T, class Epi, int R, int CB, bool HELD = false, class Sides>
 __device__ inline void stream_tile(typename Dec::Args& a, const Sides& sides, int lpc_log2, int gshift) {
     // row_blocks > 1: row blocks on the grid's x, so a column block's row blocks run together, its codes in cache
     const bool rows_on_x = sides.row_blocks > 1;
@@ -286,13 +322,13 @@ __device__ inline void stream_tile(typename Dec::Args& a, const Sides& sides, in
     }
     if (!Dec::take_item(a, blockIdx.z) || by * R >= a.m) return;
     if constexpr (Dec::kWideBytes == 4) {
-        stream_body<Dec, Act, T, Epi, R, CB, false>(a, lpc_log2, gshift, bx, by, sides.pair_cols, sides.limit);
+        stream_body<Dec, Act, T, Epi, R, CB, false, HELD>(a, lpc_log2, gshift, bx, by, sides.pair_cols, sides.limit);
     } else {
         // every chunk is wide-aligned when the words and the row stride are
         if (Dec::wide_aligned(a)) {
-            stream_body<Dec, Act, T, Epi, R, CB, true>(a, lpc_log2, gshift, bx, by, sides.pair_cols, sides.limit);
+            stream_body<Dec, Act, T, Epi, R, CB, true, HELD>(a, lpc_log2, gshift, bx, by, sides.pair_cols, sides.limit);
         } else {
-            stream_body<Dec, Act, T, Epi, R, CB, false>(a, lpc_log2, gshift, bx, by, sides.pair_cols, sides.limit);
+            stream_body<Dec, Act, T, Epi, R, CB, false, HELD>(a, lpc_log2, gshift, bx, by, sides.pair_cols, sides.limit);
         }
     }
 }

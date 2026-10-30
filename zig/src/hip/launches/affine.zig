@@ -101,6 +101,11 @@ pub const stream_pair_code_words = affine_stream.stream_pair_code_words;
 pub const stream_routed_cb_top = affine_stream.stream_routed_cb_top;
 pub const stream_list_blocks = affine_stream.stream_list_blocks;
 pub const stream_one_col_n = affine_stream.stream_one_col_n;
+pub const HeldPick = affine_stream.HeldPick;
+pub const held_wide_n = affine_stream.held_wide_n;
+pub const held_narrow_lo = affine_stream.held_narrow_lo;
+pub const held_narrow_hi = affine_stream.held_narrow_hi;
+pub const heldPick = affine_stream.heldPick;
 
 /// The K-parallel tiles of a short prompt: cb columns a lane set, r rows a pass over up to rb row blocks.
 pub const KpTile = struct { cb: c_int, r: c_int, waves: c_int, rb: c_int, loop: bool = true };
@@ -146,6 +151,8 @@ pub const Kernels = struct {
     stream_on: bool,
     /// A test's forced columns a lane (a stream_cbs value; 0: the rule), where the shape takes it.
     stream_cb_force: c_int,
+    /// The held-codes 4-bit plain tile (stream.hpp HELD) by rows (4, 8) and columns a lane; `heldPick` picks it.
+    held: [2][stream_cbs.len]?Function,
     block: [bit_widths.len]Function,
     gemm: [bit_widths.len]Function,
     wmma_gemm: [bit_widths.len]Function,

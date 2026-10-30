@@ -47,6 +47,14 @@ pub fn load(tiles_obj: Module, dot2_obj: Module, caps: Caps, choices: Choices) E
 
 fn resolve(k: *Kernels, comptime dot: []const u8, comptime shape: []const u8, m: Module) Error!void {
     @setEvalBranchQuota(400_000);
+    inline for (.{ 4, 8 }, 0..) |rows, r| {
+        inline for (stream_cbs, 0..) |cb, c| {
+            k.held[r][c] = if ((rows == 4 and cb <= 4) or (rows == 8 and (cb == 2 or cb == 4)))
+                try m.function(std.fmt.comptimePrint("_ZN2tf4rocm23affine_dot2_stream_heldINS0_{s}ELi4ELi{d}ELi{d}EEEvNS0_6AffineENS0_11StreamSidesEii", .{ dot, rows, cb }))
+            else
+                null;
+        }
+    }
     k.stream_list = .{
         try m.function(std.fmt.comptimePrint("_ZN2tf4rocm23affine_dot2_stream_listINS0_{s}ELi4ELi4ELi2ELb1EEEvNS0_6AffineENS0_11StreamSidesEiii", .{dot})),
         try m.function(std.fmt.comptimePrint("_ZN2tf4rocm23affine_dot2_stream_listINS0_{s}ELi4ELi4ELi4ELb0EEEvNS0_6AffineENS0_11StreamSidesEiii", .{dot})),
