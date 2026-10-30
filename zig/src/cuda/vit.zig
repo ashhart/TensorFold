@@ -272,10 +272,11 @@ const Full = struct {
     }
 };
 
-/// A tower's attention by head dim: SigLIP2's 72, and RADIO's 80 (full_kernel's bits in one barrier a tile).
+/// Full attention by head dim: SigLIP2's 72, RADIO's 80 (full_kernel's bits in one barrier a tile), MOSS-Image's 128.
 const fulls = [_]Full{
     .{ .dim = 72, .warps = 8, .slots = 8 },
     .{ .dim = 80, .warps = 8 },
+    .{ .dim = 128, .warps = 8 },
 };
 
 /// Every row of a picture over every key (no mask), a block a head and 128 rows.
