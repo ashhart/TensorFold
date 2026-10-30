@@ -53,6 +53,10 @@ pub const deepseek_v41_xmma = @embedFile("deepseek_v41/experts_mma.metal");
 /// DeepSeek-V4.1 sparse-attention indexer top-512 over fp32 score rows.
 pub const deepseek_v41_topk512 = @embedFile("deepseek_v41/topk512.metal");
 pub const deepseek_v41_glue = @embedFile("deepseek_v41/glue.metal");
+/// DeepSeek V4.1 decode launches that split or fuse the phase-1 glue at the same bits (deepseek_v41/fused.metal).
+pub const deepseek_v41_fused = @embedFile("deepseek_v41/fused.metal");
+/// DeepSeek V4.1 decode kernels that fold a dependent glue launch into its neighbour (deepseek_v41/fold.metal).
+pub const deepseek_v41_fold = @embedFile("deepseek_v41/fold.metal");
 pub const deepseek_v41_compress = @embedFile("deepseek_v41/compress.metal");
 /// DeepSeek-V4.1 router, indexer, compressor and head matvecs: lane chains over K, one butterfly, any row count.
 pub const deepseek_v41_mv = @embedFile("deepseek_v41/mv.metal");
@@ -229,6 +233,9 @@ pub const drama3 = struct {
 
 /// DeepSeek-V4.1's MoE route: the top-k of sqrt(softplus(logit)) + bias, per row (deepseek_v41/route.metal).
 pub const dsv41_route = @embedFile("deepseek_v41/route.metal");
+
+/// DeepSeek-V4.1's hyper-connection boundary (deepseek_v41/hc.metal): the mixes, the collapse, the expand.
+pub const deepseek_v41_hc = @embedFile("deepseek_v41/hc.metal");
 
 /// DeepSeek-V4.1's phase-1 glue (deepseek_v41/glue_tmp.metal): the reference bits of the registered glue kernels.
 pub const deepseek_v41_glue_tmp = @embedFile("deepseek_v41/glue_tmp.metal");

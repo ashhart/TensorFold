@@ -88,6 +88,8 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
     if (std.mem.startsWith(u8, d.name, "dsv41 cand ")) return .{ .decl = d, .function = fun, .here = sources.deepseek_v41_cand, .pre_m5 = sources.deepseek_v41_cand };
     if (std.mem.startsWith(u8, d.name, "dsv41 compress ")) return .{ .decl = d, .function = fun, .here = sources.deepseek_v41_compress, .pre_m5 = sources.deepseek_v41_compress };
     if (std.mem.startsWith(u8, d.name, "dsv41 mv ")) return .{ .decl = d, .function = fun, .here = sources.deepseek_v41_mv, .pre_m5 = sources.deepseek_v41_mv };
+    if (std.mem.startsWith(u8, d.name, "dsv41 fold ")) return .{ .decl = d, .function = fun, .here = sources.deepseek_v41_fold, .pre_m5 = sources.deepseek_v41_fold };
+    if (std.mem.startsWith(u8, d.name, "dsv41 hc ")) return .{ .decl = d, .function = fun, .here = sources.deepseek_v41_hc, .pre_m5 = sources.deepseek_v41_hc };
     if (std.mem.startsWith(u8, d.name, "dsv41 fp8 rows ")) {
         text = sources.deepseek_v41_fp8_rows;
     } else if (std.mem.startsWith(u8, fun, "tf_ctl_")) {

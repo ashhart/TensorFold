@@ -454,6 +454,10 @@ pub fn main(init: std.process.Init) !u8 {
     defer dsv41_compress.destroy();
     const dsv41_mv = try @import("metal_dsv41_mv.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer dsv41_mv.destroy();
+    const dsv41_hc = try @import("metal_dsv41_hc.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer dsv41_hc.destroy();
+    const dsv41_fold = try @import("metal_dsv41_fold.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer dsv41_fold.destroy();
     var t: g.Tally = .{};
     const t0 = std.Io.Clock.awake.now(init.io);
     if (o.gates) {
@@ -486,6 +490,8 @@ pub fn main(init: std.process.Init) !u8 {
         t.failed += try dsv41_glue.tables();
         t.failed += try dsv41_compress.invariance(o.seed);
         t.failed += try dsv41_compress.equality(o.seed);
+        t.failed += try dsv41_hc.invariance(o.seed);
+        t.failed += try dsv41_fold.invariance(o.seed);
         if (std.c.getenv("TF_DSV41_TIME") != null) try dsv41_ix.timing(init.io);
     }
     const t1 = std.Io.Clock.awake.now(init.io);
