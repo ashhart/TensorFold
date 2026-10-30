@@ -326,7 +326,7 @@ __global__ void __launch_bounds__(256, 1) affine_dot2_block(Affine a) {
 #pragma unroll
         for (int j = 0; j < 8; ++j) {
             const int col = n0 + tx + 16 * j;
-            if (col < a.n) a.out[out_row(a, row) * a.n + col] = acc[i][j];
+            if (col < a.n) GemmOut<T>::store(a, row, col, acc[i][j]);
         }
     }
 }
