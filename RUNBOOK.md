@@ -394,3 +394,4 @@ Python 0.6.6 remains a separate release line.
 | Packed Metal runtime compilation fails | 1.0.0 probes and selects its prebuilt fallback; include chip, macOS version and startup error in a report. |
 
 For a bug report, include the version, checkpoint revision, public reproducing request, exact command and relevant startup/request logs.
+`TENSORFOLD_LOG_TIME=1` starts each server log line, the `[tensorfold]` lines and every engine's warnings, with its UTC time (`2026-10-30T18:54:04.123Z [tensorfold] ...`), to match the log against other records.

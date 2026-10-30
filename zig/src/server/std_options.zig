@@ -1,9 +1,11 @@
-//! The std options a server binary takes from its backend: the backend's own when it declares them, else the defaults.
+//! A server binary's std options: its backend's own when it declares them, else the defaults, with the server's log.
 
 const std = @import("std");
 
 pub fn of(comptime Backend: type) std.Options {
-    return if (@hasDecl(Backend, "std_options")) Backend.std_options else .{};
+    var o: std.Options = if (@hasDecl(Backend, "std_options")) Backend.std_options else .{};
+    o.logFn = @import("log.zig").stdLog;
+    return o;
 }
 
 test "a backend's std options pass through, and a backend without them keeps the defaults" {
