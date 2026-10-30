@@ -380,7 +380,7 @@ fn binop(c: *Ctx, op: ast.BinOp, l: Value, r: Value) Error!Value {
         return .{ .str = out };
     }
     if (op == .add and l == .list and r == .list and l.list.seq == r.list.seq and (l.list.seq == .list or l.list.seq == .tuple))
-        return rt.list(try std.mem.concat(rt.a, Value, &.{ l.list.items, r.list.items }), l.list.seq);
+        return .{ .list = try l.list.concat(rt.a, r.list) };
     if (op == .mul and (l == .str or l == .list or r == .str or r == .list) and (isNum(l) or isNum(r)) and l != .float and r != .float) {
         const seq = if (isNum(l)) r else l;
         const n = @max(0, intOf(if (isNum(l)) l else r));
@@ -393,7 +393,7 @@ fn binop(c: *Ctx, op: ast.BinOp, l: Value, r: Value) Error!Value {
         }
         if (seq.list.seq == .list or seq.list.seq == .tuple) {
             var out: std.ArrayList(Value) = .empty;
-            for (0..@intCast(n)) |_| try out.appendSlice(rt.a, seq.list.items);
+            for (0..@intCast(n)) |_| try out.appendSlice(rt.a, try seq.list.values(rt.a));
             return rt.list(out.items, seq.list.seq);
         }
     }
