@@ -18,6 +18,12 @@ pub const formats: []const []const u8 = &.{ "mlx-q3g32", "mlx-q4g32", "mlx-q6g32
 pub const default_context: i64 = 32768;
 /// The engine cuts prompts itself.
 pub const prefill_step: u32 = 0;
+/// Flash Next's HIP prompt chunk where the policy names none: a 20K prompt in one pass, each expert's rows one launch.
+pub const policy_prefill_step: u32 = 20480;
+/// Drafts a verify window holds at most past its pending token (`--mtp-drafts` above it is refused before the load).
+pub const max_drafts: u32 = lanes_mod.max_depth;
+/// Flash Next's HIP MTP policy where no flag or mtp_depth key names one: a chain gated to 7 drafts, under 0.9 the last.
+pub const policy_mtp: struct { drafts: u8, confidence: f64, depth: hip.policy.MtpDepth } = .{ .drafts = 7, .confidence = 0.9, .depth = .gated };
 /// Device bytes a rank keeps for the forward's scratch until the engine counts its own.
 pub const scratch_bytes: u64 = 2 << 30;
 
@@ -214,6 +220,15 @@ fn lanesOf(gpa: std.mem.Allocator, dev: hip.Device, o: anytype, p: Prepared, str
     errdefer fx.deinit();
     // kept prompt states live in host memory: --prompt-cache-gib, else 16 GiB
     fx.keepPrompts(@intFromFloat((o.cache_gib orelse 16.0) * (1 << 30)));
+    // one rank: the depth rule's costs timed now (a group's ranks would have to run the timing rounds together)
+    if (o.world == 1 and fx.facts().mtp) {
+        fx.measure() catch |err| std.log.warn("lane costs not timed: {t}", .{err});
+        const c = &fx.costs;
+        var line: [512]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&line);
+        for (c.window[0..c.windows]) |x| w.print(" {d}:{d:.2}", .{ x.width, x.ms }) catch {};
+        std.log.info("lane costs ms by window rows{s}; head step {d:.3}", .{ w.buffered(), c.step_ms });
+    }
     const startup = try std.fmt.allocPrint(
         gpa,
         "HIP {s} device {d}, rank {d} of {d}: Flash Next, {d:.2} GiB on the device, " ++
@@ -277,7 +292,7 @@ pub fn open(
     };
 }
 
-/// Device bytes a stream takes at `cap` positions: its caches, window snapshots, the head's caches and its rows.
+/// Device bytes of a stream at `cap` positions: caches, window conv snapshots and DeltaNet inputs, head caches, rows.
 fn streamBytes(e: *const Engine, cap: usize) usize {
     var buf: [config.max_layers]bool = undefined;
     const kinds = e.kinds(&buf) catch return std.math.maxInt(usize);

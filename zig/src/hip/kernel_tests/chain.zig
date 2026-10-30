@@ -168,6 +168,87 @@ fn conv(t: *Rig, rng: *rig.Rng, rows: usize) !void {
     if (rows > 1) try same(bufs[0][3], bufs[1][3]);
 }
 
+/// A prompt's conv chain against tf_gdn_prompt_prep: q, k, v, gate, beta and conv state, byte for byte.
+fn promptPrep(t: *Rig, rng: *rig.Rng, rows: usize, with_state: bool) !void {
+    const kw: usize = 2048;
+    const vw: usize = 6144;
+    const ch = 2 * kw + vw;
+    const kernel: usize = 4;
+    const eps: f32 = 1e-6;
+    const vheads: usize = 48;
+    const hx = try gpa.alloc(u16, rows * ch);
+    defer gpa.free(hx);
+    for (hx) |*v| v.* = t.bits(rng.unit() * 2.0);
+    const hw = try gpa.alloc(f32, ch * kernel);
+    defer gpa.free(hw);
+    for (hw) |*v| v.* = rng.unit() / 2.0;
+    const hs = try gpa.alloc(f32, (kernel - 1) * ch);
+    defer gpa.free(hs);
+    for (hs) |*v| v.* = rng.unit();
+    const hn = try gpa.alloc(f32, 128 * 2);
+    defer gpa.free(hn);
+    for (hn) |*v| v.* = 1.0 + rng.unit() / 4.0;
+    const ha = try gpa.alloc(u16, rows * vheads);
+    defer gpa.free(ha);
+    for (ha) |*v| v.* = t.bits(rng.unit() * 3.0);
+    const hb = try gpa.alloc(u16, rows * vheads);
+    defer gpa.free(hb);
+    for (hb) |*v| v.* = t.bits(rng.unit() * 3.0);
+    const hlog = try gpa.alloc(f32, vheads * 2);
+    defer gpa.free(hlog);
+    for (hlog) |*v| v.* = rng.unit();
+    var x = try t.upload(hx);
+    defer x.free();
+    var weight = try t.upload(hw);
+    defer weight.free();
+    var state = try t.upload(hs);
+    defer state.free();
+    var norm = try t.upload(hn);
+    defer norm.free();
+    var dev_a = try t.upload(ha);
+    defer dev_a.free();
+    var dev_b = try t.upload(hb);
+    defer dev_b.free();
+    var dev_log = try t.upload(hlog);
+    defer dev_log.free();
+    var mixed = try t.alloc(rows * ch * 4);
+    defer mixed.free();
+    var qc = try t.alloc(rows * kw * 4);
+    defer qc.free();
+    var kc = try t.alloc(rows * kw * 4);
+    defer kc.free();
+    var bufs: [2][6]DeviceBuffer = undefined; // q, k, v, gate, beta, new state
+    for (0..2) |v| bufs[v] = .{ try t.alloc(rows * kw * 4), try t.alloc(rows * kw * 4), try t.alloc(rows * vw * 4), try t.alloc(rows * vheads * 4), try t.alloc(rows * vheads * 4), try t.alloc((kernel - 1) * ch * 4) };
+    defer for (&bufs) |*set| for (set) |*b| b.free();
+    const s = t.stream.handle;
+    const l = &t.on;
+    const kind = t.kind();
+    const st: ?*anyopaque = if (with_state) ptr(at(state)) else null;
+    {
+        const b = bufs[0];
+        try l.tf_conv_prefill(ptr(at(x)), kind, @ptrFromInt(at(weight)), @ptrCast(@alignCast(st)), @ptrFromInt(at(mixed)), @ptrFromInt(at(b[5])), @intCast(rows), @intCast(ch), @intCast(kernel), s);
+        try l.tf_copy_cols(ptr(at(mixed)), @intCast(ch), 0, ptr(at(qc)), 0, @intCast(rows), @intCast(kw), s);
+        try l.tf_copy_cols(ptr(at(mixed)), @intCast(ch), @intCast(kw), ptr(at(kc)), 0, @intCast(rows), @intCast(kw), s);
+        try l.tf_copy_cols(ptr(at(mixed)), @intCast(ch), @intCast(2 * kw), ptr(at(b[2])), 0, @intCast(rows), @intCast(vw), s);
+        try l.tf_rms(ptr(at(qc)), @ptrFromInt(at(norm)), ptr(at(b[0])), 0, @intCast(rows * (kw / 128)), 128, eps, s);
+        try l.tf_rms(ptr(at(kc)), @ptrFromInt(at(norm) + 512), ptr(at(b[1])), 0, @intCast(rows * (kw / 128)), 128, eps, s);
+        try l.tf_gdn_gate_prefill(ptr(at(dev_a)), ptr(at(dev_b)), kind, @ptrFromInt(at(dev_log)), @ptrFromInt(at(dev_log) + vheads * 4), @ptrFromInt(at(b[3])), @ptrFromInt(at(b[4])), @intCast(rows), @intCast(vheads), s);
+    }
+    {
+        const b = bufs[1];
+        try l.tf_gdn_prompt_prep(ptr(at(x)), kind, @ptrFromInt(at(weight)), @ptrCast(@alignCast(st)), @ptrFromInt(at(b[5])), @ptrFromInt(at(b[0])), @ptrFromInt(at(b[1])), @ptrFromInt(at(b[2])), @ptrFromInt(at(norm)), @ptrFromInt(at(norm) + 512), eps, @intCast(rows), @intCast(kw), @intCast(vw), @intCast(kernel), ptr(at(dev_a)), ptr(at(dev_b)), @ptrFromInt(at(dev_log)), @ptrFromInt(at(dev_log) + vheads * 4), @ptrFromInt(at(b[3])), @ptrFromInt(at(b[4])), @intCast(vheads), s);
+    }
+    try t.stream.synchronize();
+    for (0..6) |i| try same(bufs[0][i], bufs[1][i]);
+}
+
+test "the prompt's merged conv, split, norms and gates write the chain's q, k, v, gate, beta and conv state" {
+    const t = try Rig.open(1 << 20);
+    defer t.close();
+    var rng: rig.Rng = .{ .state = 0x6D3 };
+    for ([_]usize{ 1, 15, 16, 40, 300 }) |rows| for ([_]bool{ true, false }) |with_state| try promptPrep(t, &rng, rows, with_state);
+}
+
 /// The linear attention's gated norm: rms then gnorm_silu against one launch; the sigmoid gate against the host's too.
 fn gnorm(t: *Rig, rng: *rig.Rng, rows: usize, sigmoid: c_int) !void {
     const n = rows * 32 * 128;

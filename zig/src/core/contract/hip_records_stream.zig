@@ -18,5 +18,20 @@ pub fn tile(comptime bits: u32, comptime rows: u32, comptime cb: u32, comptime p
     };
 }
 
+/// The held-codes plain tile (stream_body's HELD), 4-bit only: `rows` rows, `cb` columns a lane.
+pub fn held(comptime rows: u32, comptime cb: u32) limits.HipLaunch {
+    @setEvalBranchQuota(300_000);
+    const fmt = "_ZN2tf4rocm23affine_dot2_stream_heldINS0_{s}ELi4ELi{d}ELi{d}EEEvNS0_6AffineENS0_11StreamSidesEii";
+    const half = std.fmt.comptimePrint(fmt, .{ "6DotF16", rows, cb });
+    const brain = std.fmt.comptimePrint(fmt, .{ "7DotBF16", rows, cb });
+    return .{
+        .name = std.fmt.comptimePrint("held stream tile 4-bit {d}x{d}", .{ rows, cb }),
+        .symbol = brain,
+        .image = "affine_tiles",
+        .threads = 128,
+        .symbols = .{ half, brain, brain, brain },
+    };
+}
+
 pub const records = @import("hip_records_stream_plain.zig").records ++
-    @import("hip_records_stream_swiglu.zig").records;
+    @import("hip_records_stream_swiglu.zig").records ++ @import("hip_records_stream_held.zig").records;

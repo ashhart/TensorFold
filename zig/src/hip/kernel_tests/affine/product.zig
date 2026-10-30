@@ -303,7 +303,8 @@ pub fn shapeOf(p: *const Product, e: *const Entry) registry.Shape {
 /// Whether `e` is an entry of the launch's (op, path) that the GPU has and whose shape takes it.
 pub fn takesArg(k: *const Kernels, e: *const Entry, a: affine.Arg, items: usize, pairs: usize, path: registry.Path) bool {
     const op: registry.Op = if (a.route.items != 0) .routed else .project;
-    if (e.format != .mlx or e.op != op or e.path != path) return false;
+    // the exact-class bounds and byte rules: an inexact entry has its own test against float64
+    if (e.format != .mlx or e.op != op or e.path != path or !e.exact) return false;
     var env = k.env();
     env.matrix_on = env.matrix;
     return e.caps(env) and e.fits(shapeFor(a, items, pairs, e));

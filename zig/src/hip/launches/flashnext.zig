@@ -1,5 +1,6 @@
 //! Flash Next's launches: stream norms, gates and mixes, the n-gram gate, conv and hashes, indexer, sparse attention.
 
+const std = @import("std");
 const Launcher = @import("../launches.zig").Launcher;
 const Module = @import("../module.zig").Module;
 const Function = @import("../module.zig").Function;
@@ -19,32 +20,56 @@ const cdiv = util.cdiv;
 
 pub const Fns = struct {
     hc_norm: Function,
+    hc_norm_moe: Function,
+    hc_norm_v: Function, // bf16 streams of 2,560, one rank: 128 threads a block, 16-byte accesses, the same bits
+    hc_norm_moe_v: Function, // hc_norm_v with the MoE combine as the branch, a block a row (a prompt's rows)
     hc_gates: Function,
     rms_wide: Function,
     hc_mix: Function,
+    hc_mix8: Function, // bf16 activations, g bf16 or fp32: 8 outputs a thread, the same bits
+    hc_up_mix: Function,
     ple_gate: Function,
     ple_conv: Function,
     ngram_ids: Function,
     idx_pool: Function,
+    qsa_prep: Function,
     idx_scores: Function,
+    idx_scores_quad: Function,
+    idx_scores8: Function, // a verify window's 5-15 rows: 8 rows' dots a wave at once, the same scores
+    idx_scores_mma: Function, // a prompt slice's scores on the gfx11 matrix cores (numerics=inexact)
     idx_select: Function,
     sparse_parts: [2]Function, // groups of up to 6 and up to 12 query heads
     sparse_merge: Function,
+    sparse_prompt: [3]Function, // q bf16-exact, q any fp32 (hi + lo), q bf16-exact with p in bf16 once
+    sparse_tile_parts: [2]Function, // the same tile over parts of each row's keys
+    sparse_merge_gate: Function,
 
     pub fn load(m: Module) Error!Fns {
         return .{
             .hc_norm = try m.function("tf_fn_hc_norm"),
+            .hc_norm_moe = try m.function("tf_fn_hc_norm_moe"),
+            .hc_norm_v = try m.function("tf_fn_hc_norm_v"),
+            .hc_norm_moe_v = try m.function("tf_fn_hc_norm_moe_v"),
             .hc_gates = try m.function("tf_fn_hc_gates"),
             .rms_wide = try m.function("tf_fn_rms_wide"),
             .hc_mix = try m.function("tf_fn_hc_mix"),
+            .hc_mix8 = try m.function("tf_fn_hc_mix8"),
+            .hc_up_mix = try m.function("tf_fn_hc_up_mix"),
             .ple_gate = try m.function("tf_fn_ple_gate"),
             .ple_conv = try m.function("tf_fn_ple_conv"),
             .ngram_ids = try m.function("tf_fn_ngram_ids"),
             .idx_pool = try m.function("tf_fn_idx_pool"),
+            .qsa_prep = try m.function("tf_fn_qsa_prep"),
             .idx_scores = try m.function("tf_fn_idx_scores"),
+            .idx_scores_quad = try m.function("tf_fn_idx_scores_quad"),
+            .idx_scores8 = try m.function("tf_fn_idx_scores8"),
+            .idx_scores_mma = try m.function("tf_fn_idx_scores_mma"),
             .idx_select = try m.function("tf_fn_idx_select"),
             .sparse_parts = .{ try m.function("tf_fn_sparse_parts6"), try m.function("tf_fn_sparse_parts12") },
             .sparse_merge = try m.function("tf_fn_sparse_merge"),
+            .sparse_prompt = .{ try m.function("tf_fn_sparse_prompt"), try m.function("tf_fn_sparse_prompt_split"), try m.function("tf_fn_sparse_prompt_hi") },
+            .sparse_tile_parts = .{ try m.function("tf_fn_sparse_tile_parts"), try m.function("tf_fn_sparse_tile_parts_split") },
+            .sparse_merge_gate = try m.function("tf_fn_sparse_merge_gate"),
         };
     }
 };
@@ -72,6 +97,52 @@ pub fn hcNorm(
     return hcNormShares(l, h, branch, inject, h_out, x_out, scale, kind, rows, streams, dims, eps, 0, 0, s);
 }
 
+/// hcNorm with the MoE's combine of fp32 expert rows `y` [rows, slots, dims] by `wts` [rows, slots] as the branch.
+pub fn hcNormMoe(
+    l: *const Launcher,
+    h: C,
+    y: CF,
+    wts: CF,
+    inject: C,
+    h_out: P,
+    x_out: P,
+    scale: CF,
+    kind: c_int,
+    rows: c_int,
+    streams: c_int,
+    dims: c_int,
+    eps: f32,
+    slots: c_int,
+    s: S,
+) Error!void {
+    if (dims > most_dims or slots < 1) return util.invalid("hcNormMoe");
+    var a: Args = .{};
+    inline for (.{ ad(h), ad(y), ad(wts), ad(inject), ad(h_out), ad(x_out), ad(scale), kind, streams, dims, eps, slots }) |v| try a.add(v);
+    try l.go(l.fnx.hc_norm_moe, dim(streams, rows, 1), dim(1024, 1, 1), 0, s, &a);
+}
+
+/// hcNormMoe for a prompt's bf16 streams of 2,560 on one rank, a block a row, same bits; the caller checks the shape.
+pub fn hcNormMoeV(
+    l: *const Launcher,
+    h: C,
+    y: CF,
+    wts: CF,
+    inject: C,
+    h_out: P,
+    x_out: P,
+    scale: CF,
+    rows: c_int,
+    streams: c_int,
+    eps: f32,
+    slots: c_int,
+    s: S,
+) Error!void {
+    if (streams < 1 or streams > 4 or slots < 1) return util.invalid("hcNormMoeV");
+    var a: Args = .{};
+    inline for (.{ ad(h), ad(y), ad(wts), ad(inject), ad(h_out), ad(x_out), ad(scale), streams, eps, slots }) |v| try a.add(v);
+    try l.go(l.fnx.hc_norm_moe_v, dim(1, rows, 1), dim(128 * streams, 1, 1), 0, s, &a);
+}
+
 /// hcNorm with the branch as `world` fp32 shares `stride` values apart (a tensor-parallel gather), summed in order.
 pub fn hcNormShares(
     l: *const Launcher,
@@ -91,6 +162,11 @@ pub fn hcNormShares(
     s: S,
 ) Error!void {
     if (dims > most_dims) return util.invalid("hcNorm");
+    if (world == 0 and kind == 2 and dims == 2560) {
+        var v: Args = .{};
+        inline for (.{ ad(h), ad(branch), ad(inject), ad(h_out), ad(x_out), ad(scale), streams, eps }) |x| try v.add(x);
+        return l.go(l.fnx.hc_norm_v, dim(streams, rows, 1), dim(128, 1, 1), 0, s, &v);
+    }
     var a: Args = .{};
     inline for (.{
         ad(h),
@@ -147,7 +223,8 @@ pub fn rmsWide(
 /// The block input: the mean over the streams of sigmoid(g) times the normed stream.
 pub fn hcMix(
     l: *const Launcher,
-    g: CF,
+    g: C,
+    gkind: c_int,
     x: C,
     mixed: P,
     kind: c_int,
@@ -156,9 +233,39 @@ pub fn hcMix(
     dims: c_int,
     s: S,
 ) Error!void {
+    if (kind == 2 and (gkind == 0 or gkind == 2) and @rem(dims, 8) == 0) {
+        var v: Args = .{};
+        inline for (.{ ad(g), gkind, ad(x), ad(mixed), rows, streams, dims }) |w| try v.add(w);
+        return l.flat(l.fnx.hc_mix8, @divExact(@as(i64, rows) * dims, 8), s, &v);
+    }
+    return hcMixScalar(l, g, gkind, x, mixed, kind, rows, streams, dims, s);
+}
+
+/// hcMix on the per-element kernel (any kinds): the reference the bf16 path's bytes are tested against.
+pub fn hcMixScalar(l: *const Launcher, g: C, gkind: c_int, x: C, mixed: P, kind: c_int, rows: c_int, streams: c_int, dims: c_int, s: S) Error!void {
     var a: Args = .{};
-    inline for (.{ ad(g), ad(x), ad(mixed), kind, rows, streams, dims }) |v| try a.add(v);
+    inline for (.{ ad(g), gkind, ad(x), ad(mixed), kind, rows, streams, dims }) |v| try a.add(v);
     try l.flat(l.fnx.hc_mix, @as(i64, rows) * dims, s, &a);
+}
+
+/// The shape tf_fn_hc_up_mix is compiled for: 4 streams of 2,560, low rank 320, 4-bit groups of 32, bf16.
+pub const hc_up = struct {
+    pub const streams = 4;
+    pub const hidden = 2560;
+    pub const low = 320;
+    pub const rows = 8; // rows a block
+    pub const cols = 32; // hidden columns a block
+    /// Rows the launch takes at most: decode and verify windows (a prompt's rows take the products).
+    pub const most_rows = 16;
+};
+
+/// Hyper-connection read gates, up projection and mix in one launch: z [rows, n] fp32, n 324 with inject, else 320.
+pub fn hcUpMix(l: *const Launcher, z: CF, n: c_int, words: C, scales: C, biases: C, x: C, mixed: P, inject: P, rows: c_int, s: S) Error!void {
+    if (rows <= 0) return;
+    if (rows > hc_up.most_rows or (n != hc_up.low and n != hc_up.low + hc_up.streams)) return util.invalid("hcUpMix");
+    var a: Args = .{};
+    inline for (.{ ad(z), n, ad(words), ad(scales), ad(biases), ad(x), ad(mixed), ad(inject), rows }) |v| try a.add(v);
+    try l.go(l.fnx.hc_up_mix, dim(hc_up.hidden / hc_up.cols, cdiv(rows, hc_up.rows), 1), dim(threads, 1, 1), 0, s, &a);
 }
 
 /// The n-gram gate of every stream; `normed` is the conv's input rows.
@@ -314,6 +421,53 @@ pub fn idxPoolAt(
     try l.go(l.fnx.idx_pool, dim(rows, 1, 1), dim(threads, 1, 1), 0, s, &a);
 }
 
+/// flashnext/indexer.hpp's QsaRope and QsaPrep: a QSA layer's decode prep at device positions in one launch.
+pub const QsaRope = extern struct { src: u64 = 0, s_row: c_longlong = 0, s_head: c_int = 0, heads: c_int = 0, width: c_int = 0, weight: u64 = 0, wide: u64 = 0, cache: u64 = 0 };
+pub const QsaPrep = extern struct {
+    q: QsaRope = .{},
+    iq: QsaRope = .{},
+    k: QsaRope,
+    v: u64,
+    v_cache: u64,
+    v_width: c_int,
+    raw: u64,
+    raw_stride: c_longlong,
+    raw_offset: c_int,
+    raw_cache: u64,
+    raw_width: c_int,
+    pooled: u64,
+    pool_scale: u64,
+    ratio: c_int,
+    pos: u64,
+    seg_pos: u64,
+    rows: c_int,
+    n: c_int,
+    total: c_int,
+    kind: c_int,
+    eps: f32,
+    rotary: c_int,
+    theta: f32,
+};
+
+comptime {
+    std.debug.assert(@sizeOf(QsaRope) == 56 and @sizeOf(QsaPrep) == 304);
+}
+
+/// tf_fn_qsa_prep: a QSA layer's q/k rope, v and raw index key cache writes and completed-block pools in one launch.
+pub fn qsaPrep(l: *const Launcher, a: QsaPrep, s: S) Error!void {
+    if (a.n < 1 or a.k.width > 512 or a.q.width > 512 or a.iq.width > 512 or a.raw_width > threads or a.kind == 0) return util.invalid("qsaPrep");
+    const qt: c_int = if (a.q.src != 0) a.rows * (a.q.heads + a.iq.heads) else 0;
+    const tasks: c_int = qt + a.n * a.k.heads;
+    var args: Args = .{};
+    try args.add(a);
+    try l.go(l.fnx.qsa_prep, dim(cdiv(tasks, threads / 32) + 1, 1, 1), dim(threads, 1, 1), 0, s, &args);
+}
+
+/// Rows from which the block scores take tf_fn_idx_scores_quad (fewer: a verify window's, a wave a block).
+pub const quad_rows = 16;
+/// Rows from which (to quad_rows) the block scores take tf_fn_idx_scores8; fewer rows keep the plain kernel.
+pub const scores8_rows = 5;
+
 /// Every row's score of each of `blocks` pooled blocks it has complete, for rows past `top` complete blocks.
 pub fn idxScores(
     l: *const Launcher,
@@ -332,6 +486,18 @@ pub fn idxScores(
 ) Error!void {
     if (blocks == 0) return;
     if (dims > threads) return util.invalid("idxScores");
+    // a prompt slice of Flash Next's 4 x 128 index heads: 4 lanes a score, the same sums (indexer.hpp)
+    if (rows >= quad_rows and heads == 4 and dims == 128) {
+        var b: Args = .{};
+        inline for (.{ ad(q), ad(pooled), ad(complete), ad(scores), kind, rows, blocks, stride, top }) |v| try b.add(v);
+        return l.go(l.fnx.idx_scores_quad, dim(cdiv(blocks, 64), cdiv(rows, 32), 1), dim(128, 1, 1), 0, s, &b);
+    }
+    // a verify window's rows of the same heads: a wave's 8 rows' dots at once, the same sums (indexer.hpp)
+    if (rows >= scores8_rows and heads == 4 and dims == 128) {
+        var c: Args = .{};
+        inline for (.{ ad(q), ad(pooled), ad(complete), ad(scores), kind, rows, blocks, stride, top }) |v| try c.add(v);
+        return l.go(l.fnx.idx_scores8, dim(cdiv(blocks, threads / 32), cdiv(rows, 8), 1), dim(threads, 1, 1), 0, s, &c);
+    }
     var a: Args = .{};
     inline for (.{
         ad(q),
@@ -347,6 +513,14 @@ pub fn idxScores(
         top,
     }) |v| try a.add(v);
     try l.go(l.fnx.idx_scores, dim(cdiv(blocks, 8), cdiv(rows, 8), 1), dim(threads, 1, 1), 0, s, &a);
+}
+
+/// A prompt slice's 4 x 128 index head scores on gfx11 matrix cores (tf_fn_idx_scores_mma); numerics=inexact only.
+pub fn idxScoresMma(l: *const Launcher, q: CF, pooled: C, complete: CI, scores: F, rows: c_int, blocks: c_int, stride: i64, top: c_int, s: S) Error!void {
+    if (blocks == 0 or rows == 0) return;
+    var a: Args = .{};
+    inline for (.{ ad(q), ad(pooled), ad(complete), ad(scores), rows, blocks, stride, top }) |v| try a.add(v);
+    return l.go(l.fnx.idx_scores_mma, dim(cdiv(blocks, 64), cdiv(rows, 64), 1), dim(128, 1, 1), 0, s, &a);
 }
 
 /// Each row's keys: its `top` best blocks and its tail past `top` complete blocks, else its first ends[r] keys.
@@ -381,53 +555,11 @@ pub fn idxSelect(
     try l.go(l.fnx.idx_select, dim(rows, 1, 1), dim(1024, 1, 1), 0, s, &a);
 }
 
-/// Attention of each row's heads over its listed keys (or its first count[r] keys) in `parts` parts, then merged.
-pub fn sparseAttention(
-    l: *const Launcher,
-    q: CF,
-    k: C,
-    v: C,
-    cache_kind: c_int,
-    ids: CI,
-    id_stride: i64,
-    count: CI,
-    sparse: CI,
-    parts_o: F,
-    parts_ms: F,
-    out: F,
-    rows: c_int,
-    heads: c_int,
-    kv_heads: c_int,
-    dims: c_int,
-    cap: i64,
-    scale: f32,
-    parts: c_int,
-    s: S,
-) Error!void {
-    if (dims > 256 or @rem(heads, kv_heads) != 0 or @divExact(heads, kv_heads) > 12)
-        return util.invalid("sparseAttention");
-    var a: Args = .{};
-    inline for (.{
-        ad(q),
-        ad(k),
-        ad(v),
-        cache_kind,
-        ad(ids),
-        id_stride,
-        ad(count),
-        ad(sparse),
-        ad(parts_o),
-        ad(parts_ms),
-        heads,
-        kv_heads,
-        dims,
-        cap,
-        scale,
-        parts,
-    }) |x| try a.add(x);
-    const wide: usize = if (@divExact(heads, kv_heads) <= 6) 0 else 1;
-    try l.go(l.fnx.sparse_parts[wide], dim(kv_heads, rows, parts), dim(256, 1, 1), 0, s, &a);
-    var b: Args = .{};
-    inline for (.{ ad(parts_o), ad(parts_ms), ad(out), heads, dims, parts }) |x| try b.add(x);
-    try l.go(l.fnx.sparse_merge, dim(heads, rows, 1), dim(256, 1, 1), 0, s, &b);
-}
+const sparse_attn = @import("flashnext_sparse.zig");
+pub const sparseAttention = sparse_attn.sparseAttention;
+pub const prompt_heads = sparse_attn.prompt_heads;
+pub const prompt_kv_heads = sparse_attn.prompt_kv_heads;
+pub const prompt_dims = sparse_attn.prompt_dims;
+pub const promptOnMatrix = sparse_attn.promptOnMatrix;
+pub const sparsePrompt = sparse_attn.sparsePrompt;
+pub const sparseDecode = sparse_attn.sparseDecode;

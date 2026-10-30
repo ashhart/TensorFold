@@ -124,17 +124,32 @@ __device__ __forceinline__ uint32_t order_key(uint16_t bits) {
     return (bits & 0x8000) ? (~bits & 0xffffu) : (bits | 0x8000u);
 }
 
-// Row r's ks[r] largest by (value desc, id asc): two histograms of the k-th key, then one ordered compaction.
-extern "C" __global__ void tf_topk(const uint16_t* logits, int n, const int* ks, int stride, int* ids, uint16_t* values) {
-    const int r = blockIdx.x, k = ks[r];
-    if (k <= 0) return;
-    const uint16_t* row = logits + static_cast<long long>(r) * n;
-    __shared__ int hist[256];
-    __shared__ int pick[4];  // high byte, low byte, count above, count of the k-th key to take
-    __shared__ int wave_gt[kWaves], wave_eq[kWaves];
+// A row's entries for the top-k: `has(i)` for i < n, their 16-bit values and ids.
+struct RowEntries {
+    const uint16_t* row;  // the slice's first value
+    int base, n;          // the slice's first id and length
+    __device__ bool has(int i) const { return i < n; }
+    __device__ uint16_t bits(int i) const { return row[i]; }
+    __device__ int id(int i) const { return base + i; }
+};
+
+// tf_topk_part's candidates of a row: `parts` lists of `stride` slots, an absent slot's id -1.
+struct Candidates {
+    const int* ids;
+    const uint16_t* vals;
+    int n;
+    __device__ bool has(int i) const { return i < n && ids[i] >= 0; }
+    __device__ uint16_t bits(int i) const { return vals[i]; }
+    __device__ int id(int i) const { return ids[i]; }
+};
+
+// The k-th largest key by two 8-bit histograms: pick = {high byte, low byte, keys above it, how many of it to take}.
+template <class E>
+__device__ void topk_kth(const E& e, int k, int* hist, int* pick) {
     for (int i = threadIdx.x; i < 256; i += kThreads) hist[i] = 0;
     __syncthreads();
-    for (int i = threadIdx.x; i < n; i += kThreads) atomicAdd(&hist[order_key(row[i]) >> 8], 1);
+    for (int i = threadIdx.x; i < e.n; i += kThreads)
+        if (e.has(i)) atomicAdd(&hist[order_key(e.bits(i)) >> 8], 1);
     __syncthreads();
     if (threadIdx.x == 0) {
         int above = 0, b = 255;
@@ -146,8 +161,9 @@ extern "C" __global__ void tf_topk(const uint16_t* logits, int n, const int* ks,
     for (int i = threadIdx.x; i < 256; i += kThreads) hist[i] = 0;
     __syncthreads();
     const uint32_t high = pick[0];
-    for (int i = threadIdx.x; i < n; i += kThreads) {
-        uint32_t key = order_key(row[i]);
+    for (int i = threadIdx.x; i < e.n; i += kThreads) {
+        if (!e.has(i)) continue;
+        uint32_t key = order_key(e.bits(i));
         if ((key >> 8) == high) atomicAdd(&hist[key & 255u], 1);
     }
     __syncthreads();
@@ -155,19 +171,27 @@ extern "C" __global__ void tf_topk(const uint16_t* logits, int n, const int* ks,
         int above = pick[2], b = 255;
         for (; b > 0 && above + hist[b] < k; --b) above += hist[b];
         pick[1] = b;
-        pick[2] = above;       // the keys above the k-th
-        pick[3] = k - above;   // how many of the k-th's to take, lowest ids first
+        pick[2] = above;      // the keys above the k-th
+        pick[3] = k - above;  // how many of the k-th's to take, lowest ids first
     }
     __syncthreads();
-    const uint32_t kth = (high << 8) | static_cast<uint32_t>(pick[1]);
+}
+
+// Row r's ks[r] largest by (value desc, id asc) in one ordered compaction: keys above the k-th, then its lowest ids.
+__device__ void topk_slice(const RowEntries& e, int k, int* ids, uint16_t* values) {
+    __shared__ int hist[256];
+    __shared__ int pick[4];
+    __shared__ int wave_gt[kWaves], wave_eq[kWaves];
+    topk_kth(e, k, hist, pick);
+    const uint32_t kth = (static_cast<uint32_t>(pick[0]) << 8) | static_cast<uint32_t>(pick[1]);
     const int above = pick[2], take = pick[3];
     int seen_gt = 0, seen_eq = 0;
     const int lane = threadIdx.x & 31, wave = threadIdx.x >> 5;
-    for (int base = 0; base < n; base += kThreads) {
+    for (int base = 0; base < e.n; base += kThreads) {
         int i = base + threadIdx.x;
-        uint16_t bits = i < n ? row[i] : 0;
+        uint16_t bits = i < e.n ? e.bits(i) : 0;
         uint32_t key = order_key(bits);
-        bool gt = i < n && key > kth, eq = i < n && key == kth;
+        bool gt = i < e.n && key > kth, eq = i < e.n && key == kth;
         unsigned long long mg = __ballot(gt), me = __ballot(eq);
         unsigned long long below = (1ull << lane) - 1;
         if (lane == 0) {
@@ -182,14 +206,14 @@ extern "C" __global__ void tf_topk(const uint16_t* logits, int n, const int* ks,
         }
         if (gt) {
             int slot = gt_before + __popcll(mg & below);
-            ids[r * stride + slot] = i;
-            values[r * stride + slot] = bits;
+            ids[slot] = e.id(i);
+            values[slot] = bits;
         }
         if (eq) {
             int rank = eq_before + __popcll(me & below);
             if (rank < take) {
-                ids[r * stride + above + rank] = i;
-                values[r * stride + above + rank] = bits;
+                ids[above + rank] = e.id(i);
+                values[above + rank] = bits;
             }
         }
         for (int w = 0; w < kWaves; ++w) {
@@ -198,6 +222,64 @@ extern "C" __global__ void tf_topk(const uint16_t* logits, int n, const int* ks,
         }
         __syncthreads();
         if (seen_eq >= take && seen_gt >= above) break;
+    }
+}
+
+extern "C" __global__ void tf_topk(const uint16_t* logits, int n, const int* ks, int stride, int* ids, uint16_t* values) {
+    const int r = blockIdx.x, k = ks[r];
+    if (k <= 0) return;
+    topk_slice({logits + static_cast<long long>(r) * n, 0, n}, k, ids + r * stride, values + r * stride);
+}
+
+// tf_topk over part blockIdx.x of row blockIdx.y: the part's own top min(ks[r], length) into `stride` slots (rest -1).
+extern "C" __global__ void tf_topk_part(const uint16_t* logits, int n, const int* ks, int per, int stride, int* cand_ids,
+                                        uint16_t* cand_vals) {
+    const int r = blockIdx.y, p = blockIdx.x, k = ks[r];
+    if (k <= 0) return;
+    const int base = p * per, len = max(0, min(per, n - base)), own = min(k, len);
+    const long long at = (static_cast<long long>(r) * gridDim.x + p) * stride;
+    for (int i = own + threadIdx.x; i < stride; i += kThreads) cand_ids[at + i] = -1;
+    if (own > 0) topk_slice({logits + static_cast<long long>(r) * n + base, base, len}, own, cand_ids + at, cand_vals + at);
+}
+
+// Candidates a row's join holds in shared memory at most (tf_topk_parts' parts * stride).
+constexpr int kJoinMost = 4096;
+
+// Row r's tf_topk from its parts' candidates: the same k-th key, then the same order, slots counted in shared memory.
+extern "C" __global__ void tf_topk_join(const int* cand_ids, const uint16_t* cand_vals, int parts, const int* ks, int stride,
+                                        int* ids, uint16_t* values) {
+    const int r = blockIdx.x, k = ks[r];
+    if (k <= 0) return;
+    const long long at = static_cast<long long>(r) * parts * stride;
+    const Candidates e{cand_ids + at, cand_vals + at, parts * stride};
+    __shared__ int hist[256];
+    __shared__ int pick[4];
+    __shared__ int sid[kJoinMost];
+    __shared__ uint32_t skey[kJoinMost];
+    topk_kth(e, k, hist, pick);
+    const uint32_t kth = (static_cast<uint32_t>(pick[0]) << 8) | static_cast<uint32_t>(pick[1]);
+    const int above = pick[2], take = pick[3];
+    // each candidate's id and class: 2 above the k-th, 1 the k-th's, 0 neither (or absent)
+    for (int i = threadIdx.x; i < e.n; i += kThreads) {
+        const uint32_t key = e.has(i) ? order_key(e.bits(i)) : 0u;
+        sid[i] = e.ids[i];
+        skey[i] = !e.has(i) ? 0u : key > kth ? 2u : key == kth ? 1u : 0u;
+    }
+    __syncthreads();
+    for (int i = threadIdx.x; i < e.n; i += kThreads) {
+        const uint32_t cls = skey[i];
+        if (cls == 0) continue;
+        const bool gt = cls == 2;
+        const int id = sid[i];
+        int before = 0;  // the candidates of the same class with lower ids
+        for (int j = 0; j < e.n; ++j) before += skey[j] == cls && sid[j] < id;
+        if (gt) {
+            ids[r * stride + before] = id;
+            values[r * stride + before] = e.bits(i);
+        } else if (before < take) {
+            ids[r * stride + above + before] = id;
+            values[r * stride + above + before] = e.bits(i);
+        }
     }
 }
 

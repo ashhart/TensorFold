@@ -10,8 +10,17 @@ pub const Attention = enum { auto, f32 };
 /// One kernel family switched to its reference, apart from `kernels=reference` that switches them all.
 pub const Pick = enum { auto, reference };
 
+/// Where one rank reads host-held row tables (n-gram rows): a resident copy made at load (no faults), or the mapping.
+pub const Rows = enum { resident, mapped };
+
+/// `exact` runs only kernels whose bytes equal the reference path's; `inexact` adds faster ones (rounding, sum order).
+pub const Numerics = enum { exact, inexact };
+
 /// MTP drafting: `--mtp-drafts` and `--mtp-confidence`.
 pub const Mtp = struct { drafts: u8 = 3, confidence: f64 = 0.3 };
+
+/// MTP depth: `rule` prices each depth (lanes/depth.zig); `gated` drafts to the cap until a draft under the confidence.
+pub const MtpDepth = enum { rule, gated };
 
 /// A path a rank reads locally (it never travels with the policy).
 pub const Path = struct {
@@ -38,6 +47,9 @@ pub const Policy = struct {
     stream: Pick = .auto,
     gemm: Pick = .auto,
     fuse: Pick = .auto,
+    rows: Rows = .resident,
+    numerics: Numerics = .exact,
+    mtp_depth: MtpDepth = .rule,
     prefill_step: u32 = 1024,
     /// Prompt rows a chunk while other streams decode: a multiple of 64 dividing 1024 (the idle chunk).
     fill_rows: u32 = 512,
@@ -67,6 +79,11 @@ pub const Policy = struct {
         return p.kernels != .reference and p.fuse != .reference;
     }
 
+    /// Whether the kernels that change a result's bits (rounding, sum order) may run.
+    pub fn inexact(p: *const Policy) bool {
+        return p.numerics == .inexact;
+    }
+
     /// What the kernel launches choose under this policy.
     pub fn choices(p: *const Policy) Launcher.Choices {
         const matrix: affine.Matrix = switch (p.matrix) {
@@ -74,7 +91,7 @@ pub const Policy = struct {
             .on => .on,
             .off => .off,
         };
-        return .{ .fuse = p.fused(), .wide = p.wideAttention(), .products = .{ .matrix = matrix, .stream = p.streamOn(), .gemm = p.gemmOn() } };
+        return .{ .fuse = p.fused(), .inexact = p.inexact(), .wide = p.wideAttention(), .products = .{ .matrix = matrix, .stream = p.streamOn(), .gemm = p.gemmOn(), .inexact = p.inexact() } };
     }
 
     /// Whether the 64-row prefill attention tile is on.
@@ -107,7 +124,7 @@ pub const Policy = struct {
 
     fn set(p: *Policy, key: []const u8, value: []const u8) Error!void {
         const eql = std.mem.eql;
-        if (eql(u8, key, "matrix")) p.matrix = try parseEnum(Choice, value) else if (eql(u8, key, "attention")) p.attention = try parseEnum(Attention, value) else if (eql(u8, key, "kernels")) p.kernels = try parseEnum(Pick, value) else if (eql(u8, key, "graphs")) p.graphs = try parseEnum(Choice, value) else if (eql(u8, key, "stream")) p.stream = try parseEnum(Pick, value) else if (eql(u8, key, "gemm")) p.gemm = try parseEnum(Pick, value) else if (eql(u8, key, "fuse")) p.fuse = try parseEnum(Pick, value) else if (eql(u8, key, "prefill_step")) {
+        if (eql(u8, key, "matrix")) p.matrix = try parseEnum(Choice, value) else if (eql(u8, key, "attention")) p.attention = try parseEnum(Attention, value) else if (eql(u8, key, "kernels")) p.kernels = try parseEnum(Pick, value) else if (eql(u8, key, "graphs")) p.graphs = try parseEnum(Choice, value) else if (eql(u8, key, "stream")) p.stream = try parseEnum(Pick, value) else if (eql(u8, key, "gemm")) p.gemm = try parseEnum(Pick, value) else if (eql(u8, key, "fuse")) p.fuse = try parseEnum(Pick, value) else if (eql(u8, key, "rows")) p.rows = try parseEnum(Rows, value) else if (eql(u8, key, "numerics")) p.numerics = try parseEnum(Numerics, value) else if (eql(u8, key, "mtp_depth")) p.mtp_depth = try parseEnum(MtpDepth, value) else if (eql(u8, key, "prefill_step")) {
             p.prefill_step = std.fmt.parseInt(u32, value, 10) catch return error.BadValue;
         } else if (eql(u8, key, "fill_rows")) {
             p.fill_rows = std.fmt.parseInt(u32, value, 10) catch return error.BadValue;
@@ -123,9 +140,12 @@ pub const Policy = struct {
     /// One line for the start-up log and server info; default and local fields are left out of the keys.
     pub fn format(p: Policy, w: *std.Io.Writer) std.Io.Writer.Error!void {
         try w.print("matrix={t},attention={t},kernels={t},graphs={t},prefill_step={d},fill_rows={d}", .{ p.matrix, p.attention, p.kernels, p.graphs, p.prefill_step, p.fill_rows });
+        try w.print(",numerics={t}", .{p.numerics});
         if (p.stream != .auto) try w.print(",stream={t}", .{p.stream});
         if (p.gemm != .auto) try w.print(",gemm={t}", .{p.gemm});
         if (p.fuse != .auto) try w.print(",fuse={t}", .{p.fuse});
+        if (p.rows != .resident) try w.print(",rows={t}", .{p.rows});
+        if (p.mtp_depth != .rule) try w.print(",mtp_depth={t}", .{p.mtp_depth});
         if (p.graph_fail >= 0) try w.print(",graph_fail={d}", .{p.graph_fail});
         if (p.rccl_lib.slice()) |path| try w.print(",rccl_lib={s}", .{path});
         try w.print("; mtp drafts {d} under {d}, {d} snapshots", .{ p.mtp.drafts, p.mtp.confidence, p.slots });
@@ -137,8 +157,9 @@ pub const Policy = struct {
     pub fn words(p: Policy) [word_count]u32 {
         const conf: u64 = @bitCast(p.mtp.confidence);
         const pack = [_]u32{
-            @backingInt(p.matrix), @backingInt(p.attention), @backingInt(p.kernels), @backingInt(p.graphs),
-            @backingInt(p.stream), @backingInt(p.gemm),      @backingInt(p.fuse),
+            @backingInt(p.matrix),   @backingInt(p.attention), @backingInt(p.kernels), @backingInt(p.graphs),
+            @backingInt(p.stream),   @backingInt(p.gemm),      @backingInt(p.fuse),    @backingInt(p.rows),
+            @backingInt(p.numerics), @backingInt(p.mtp_depth),
         };
         var nibbles: [2]u32 = .{ 0, 0 };
         for (pack, 0..) |v, i| nibbles[i / 8] |= v << @intCast(4 * (i % 8));
@@ -148,7 +169,7 @@ pub const Policy = struct {
     /// `local` with every field rank 0 sent; a rank keeps its own graph fault and library path.
     pub fn fromWords(w: [word_count]u32, local: Policy) Policy {
         var p = local;
-        var vals: [7]u32 = undefined;
+        var vals: [10]u32 = undefined;
         for (&vals, 0..) |*v, i| v.* = (w[i / 8] >> @intCast(4 * (i % 8))) & 0xf;
         p.matrix = @fromBackingInt(@intCast(vals[0]));
         p.attention = @fromBackingInt(@intCast(vals[1]));
@@ -157,6 +178,9 @@ pub const Policy = struct {
         p.stream = @fromBackingInt(@intCast(vals[4]));
         p.gemm = @fromBackingInt(@intCast(vals[5]));
         p.fuse = @fromBackingInt(@intCast(vals[6]));
+        p.rows = @fromBackingInt(@intCast(vals[7]));
+        p.numerics = @fromBackingInt(@intCast(vals[8]));
+        p.mtp_depth = @fromBackingInt(@intCast(vals[9]));
         p.mtp = .{ .drafts = @truncate(w[1] >> 24), .confidence = @bitCast(@as(u64, w[3]) | @as(u64, w[4]) << 32) };
         p.prefill_step = w[2];
         p.slots = w[5];
@@ -195,6 +219,21 @@ pub const Policy = struct {
         }
     };
 
+    /// Whether `flags` (`--policy`) or TF_POLICY names `key`: a family's own default applies only where neither does.
+    pub fn names(flags: []const u8, env: Env, key: []const u8) bool {
+        if (namesIn(flags, key)) return true;
+        return if (env.get("TF_POLICY")) |text| namesIn(text, key) else false;
+    }
+
+    fn namesIn(text: []const u8, key: []const u8) bool {
+        var it = std.mem.tokenizeAny(u8, text, ", ");
+        while (it.next()) |pair| {
+            const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
+            if (std.mem.eql(u8, pair[0..eq], key)) return true;
+        }
+        return false;
+    }
+
     /// The policy: defaults, then `flags` (`--policy`), then TF_POLICY; `notes` says when TF_POLICY acted.
     pub fn resolve(flags: []const u8, env: Env, notes: *Notes) Error!Policy {
         var p: Policy = .{};
@@ -223,9 +262,17 @@ test "apply sets fields and refuses what it does not know" {
     try std.testing.expectEqual(@as(u32, 256), p.fill_rows);
 }
 
+test "names sees a key in the flags or in TF_POLICY, and only as a key" {
+    try std.testing.expect(Policy.names("matrix=on,prefill_step=1024", .none, "prefill_step"));
+    try std.testing.expect(!Policy.names("matrix=on", .none, "prefill_step"));
+    try std.testing.expect(!Policy.names("graphs=off", .none, "prefill"));
+    try std.testing.expect(Policy.names("", .{ .vars = &.{.{ "TF_POLICY", "prefill_step=4096" }} }, "prefill_step"));
+    try std.testing.expect(!Policy.names("", .{ .vars = &.{.{ "TF_POLICY", "fill_rows=256" }} }, "prefill_step"));
+}
+
 test "a policy survives its words" {
     var p: Policy = .{ .mtp = .{ .drafts = 2, .confidence = 0.25 }, .slots = 4, .graph_fail = 1 };
-    try p.apply("matrix=on,attention=f32,graphs=off,fuse=reference,fill_rows=128");
+    try p.apply("matrix=on,attention=f32,graphs=off,fuse=reference,fill_rows=128,rows=mapped,mtp_depth=gated");
     const back = Policy.fromWords(p.words(), .{ .graph_fail = 1 });
     try std.testing.expectEqualDeep(p, back);
 }
@@ -250,4 +297,23 @@ test "graphs are on at any world size unless the policy turns them off" {
     try std.testing.expect(p.graphsOn());
     try p.apply("graphs=off");
     try std.testing.expect(!p.graphsOn());
+}
+
+test "numerics: exact by default, inexact on the key, refused otherwise; the launcher's choice, the words and the line" {
+    var p: Policy = .{};
+    try std.testing.expectEqual(Numerics.exact, p.numerics);
+    try std.testing.expect(!p.inexact() and !p.choices().inexact);
+    try p.apply("prefill_step=8192,numerics=inexact");
+    try std.testing.expect(p.inexact() and p.choices().inexact);
+    try std.testing.expectEqual(@as(u32, 8192), p.prefill_step);
+    try std.testing.expectError(error.BadValue, p.apply("numerics=fast"));
+    try std.testing.expect(p.inexact());
+    try std.testing.expectEqual(Numerics.inexact, Policy.fromWords(p.words(), .{}).numerics);
+    var buf: [256]u8 = undefined;
+    try std.testing.expect(std.mem.indexOf(u8, try std.fmt.bufPrint(&buf, "{f}", .{p}), ",numerics=inexact") != null);
+    try std.testing.expect(std.mem.indexOf(u8, try std.fmt.bufPrint(&buf, "{f}", .{Policy{}}), ",numerics=exact") != null);
+    var notes: Policy.Notes = .{};
+    const env: Policy.Env = .{ .vars = &.{.{ "TF_POLICY", "numerics=exact" }} };
+    try std.testing.expect(!(try Policy.resolve("numerics=inexact", env, &notes)).inexact());
+    try std.testing.expect((try Policy.resolve("matrix=auto,numerics=inexact", .none, &notes)).inexact());
 }

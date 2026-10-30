@@ -29,18 +29,30 @@ constexpr int kRouterWaves = 4;
 constexpr int kRouterSteps = 16;  // float4 loads a lane keeps in flight
 constexpr int kRouterRows = 16;
 
-// logits[r, e] = x[r] . rows[e], 16 rows a block, a wave an expert; d is a multiple of 4, weight rows 16-byte aligned.
-template <int KIND>
-__device__ void router_decode(const void* x, const float* rows, float* logits, int r, int d, int e) {
+// Four router weights at `at` of row `w`: fp32 rows as stored, or bf16 rows (ROWS16) widened, which is exact.
+template <bool ROWS16>
+__device__ __forceinline__ float4 router_weights(const void* w, int at) {
+    if constexpr (ROWS16) {
+        const uint2 v = *reinterpret_cast<const uint2*>(static_cast<const uint16_t*>(w) + at);
+        return make_float4(bf16_up(v.x & 0xffffu), bf16_up(v.x >> 16), bf16_up(v.y & 0xffffu), bf16_up(v.y >> 16));
+    } else {
+        return *reinterpret_cast<const float4*>(static_cast<const float*>(w) + at);
+    }
+}
+
+// logits[r, e] = x[r] . rows[e], 16 rows a block, a wave an expert; d % 4 == 0; rows 16B aligned (8B ROWS16); x staged.
+template <int KIND, bool ROWS16 = false>
+__device__ void router_decode(const void* x, const void* rows, float* logits, int r, int d, int e, bool staged = false) {
     const int lane = threadIdx.x & 31;
     const int expert = blockIdx.x * kRouterWaves + (threadIdx.x >> 5);
     if (expert >= e) return;
     // blockIdx.y picks a block of 16 rows: a row's sums are the same whichever block it is in
     const int first = blockIdx.y * kRouterRows;
-    x = static_cast<const uint16_t*>(x) + static_cast<long long>(first) * d;
+    if (!staged) x = static_cast<const uint16_t*>(x) + static_cast<long long>(first) * d;
     logits += static_cast<long long>(first) * e;
     r = r - first < kRouterRows ? r - first : kRouterRows;
-    const float* w = rows + static_cast<long long>(expert) * d;
+    const void* w = ROWS16 ? static_cast<const void*>(static_cast<const uint16_t*>(rows) + static_cast<long long>(expert) * d)
+                           : static_cast<const void*>(static_cast<const float*>(rows) + static_cast<long long>(expert) * d);
     float acc[kRouterRows];
 #pragma unroll
     for (int k = 0; k < kRouterRows; ++k) acc[k] = 0.f;
@@ -49,7 +61,7 @@ __device__ void router_decode(const void* x, const float* rows, float* logits, i
 #pragma unroll
         for (int s = 0; s < kRouterSteps; ++s) {
             const int at = base + (lane + 32 * s) * 4;
-            wv[s] = at < d ? *reinterpret_cast<const float4*>(w + at) : make_float4(0.f, 0.f, 0.f, 0.f);
+            wv[s] = at < d ? router_weights<ROWS16>(w, at) : make_float4(0.f, 0.f, 0.f, 0.f);
         }
 #pragma unroll
         for (int k = 0; k < kRouterRows; ++k) {
@@ -166,6 +178,9 @@ struct ConvArgs {
     // A round's plan (plan.count null: the launch's own rows and state): a grid row a slot, rows and state from it.
     PlanArgs plan;
     int layer;
+    int slots;  // the launcher's grid rows (the grid says it here)
+    // f >= 0 here: the window starts from the last window's snapshot after its row f; null or -1: from `state`
+    const int* from;
 };
 
 // The conv for a window's rows split into q, k, v: taps in order, then silu; q, k heads rms-normed; gate and beta last.
@@ -211,9 +226,12 @@ __device__ void conv_split_body(const ConvArgs& launch) {
     const float* taps = c.weight + static_cast<long long>(live ? channel : 0) * c.kernel;
     const int kept = c.kernel - 1;
     float history[7];
+    const int f = c.from != nullptr && c.states != nullptr ? *c.from : -1;
+    const float* start = f >= 0 ? c.states + static_cast<long long>(f) * kept * c.channels : c.state;
     if (live) {
-        for (int tap = 0; tap < kept; ++tap) history[tap] = c.state[static_cast<long long>(tap) * c.channels + channel];
+        for (int tap = 0; tap < kept; ++tap) history[tap] = start[static_cast<long long>(tap) * c.channels + channel];
     }
+    __atomic_signal_fence(__ATOMIC_SEQ_CST);  // the start is read before any snapshot store (it may be one of them)
     for (int r = 0; r < c.rows; ++r) {
         float y = 0.f;
         float sample = 0.f;
@@ -328,65 +346,21 @@ __device__ void
     }
 }
 
-constexpr int kSelectThreads = 512;
-constexpr int kSelectMax = 1024;
+}  // namespace
 
-__device__ __forceinline__ float round_bf16_f(float v) { return round_kind(v, 2); }
+#include "decode/select.hpp"
 
-// act.hip's moe_select with picks by rank: expert i is in the top k when fewer than k beat it; `items` writes the plan.
-__device__ void select_body(const float* logits, int* pick, float* wts, int* items, int* members, int capacity,
-                            int experts, int top_k) {
-    __shared__ float v[kSelectMax];
-    __shared__ float top_v[32];
-    __shared__ int top_i[32];
-    const int row = blockIdx.x;
-    const int slots = top_k + 1;
-    const float* l = logits + static_cast<long long>(row) * (experts + 1);
-    for (int i = threadIdx.x; i < experts; i += kSelectThreads) v[i] = l[i];
-    __syncthreads();
-    for (int i = threadIdx.x; i < experts; i += kSelectThreads) {
-        const float vi = v[i];
-        int rank = 0;
-#pragma unroll 16
-        for (int j = 0; j < experts; ++j) {
-            const float vj = v[j];
-            rank += (vj > vi) || (vj == vi && j < i);
-        }
-        if (rank < top_k) {
-            top_v[rank] = vi;
-            top_i[rank] = i;
-        }
-    }
-    __syncthreads();
-    if (threadIdx.x == 0) {
-        const float top = top_v[0];
-        float ex[32];
-        float total = 0.f;
-        for (int k = 0; k < top_k; ++k) {
-            ex[k] = expf(top_v[k] - top);
-            total += ex[k];
-        }
-        for (int k = 0; k < top_k; ++k) {
-            pick[row * slots + k] = top_i[k];
-            wts[row * slots + k] = round_bf16_f(ex[k] / total);
-        }
-        const float gate = round_bf16_f(l[experts]);
-        pick[row * slots + top_k] = experts;
-        wts[row * slots + top_k] = round_bf16_f(1.f / (1.f + expf(-gate)));
-    }
-    if (items != nullptr) {
-        __syncthreads();
-        for (int k = threadIdx.x; k < capacity; k += kSelectThreads) {
-            const bool real = k < slots;
-            items[3 * k] = real ? pick[k] : 0;
-            items[3 * k + 1] = real ? k : 0;
-            items[3 * k + 2] = real ? 1 : 0;
-            if (real) members[k] = k;
-        }
-    }
+extern "C" __global__ void __launch_bounds__(32 * kRouterWaves)
+    tf_router_select_f16(const void* x, const void* rows, float* logits, int r, int d, int e, int* pick, float* wts,
+                         int* items, int* members, int capacity, int top_k, int tile, int staged, unsigned* done) {
+    router_select<1>(x, rows, logits, r, d, e, pick, wts, items, members, capacity, top_k, tile, staged, done);
 }
 
-}  // namespace
+extern "C" __global__ void __launch_bounds__(32 * kRouterWaves)
+    tf_router_select_bf16(const void* x, const void* rows, float* logits, int r, int d, int e, int* pick, float* wts,
+                          int* items, int* members, int capacity, int top_k, int tile, int staged, unsigned* done) {
+    router_select<2>(x, rows, logits, r, d, e, pick, wts, items, members, capacity, top_k, tile, staged, done);
+}
 
 extern "C" __global__ void __launch_bounds__(32 * kRouterWaves)
     tf_router_decode_f16(const void* x, const float* rows, float* logits, int r, int d, int e) {
@@ -418,8 +392,55 @@ extern "C" __global__ void __launch_bounds__(256)
     gnorm_out_body(y, weight, z, out, kind, rows, width, eps, sigmoid_gate);
 }
 
+// A prompt's picks (no plan), a wave a row, 4 rows a block, select_body's bytes; a NaN row: select_row's rank loop.
+extern "C" __global__ void __launch_bounds__(32 * kRouterWaves)
+    tf_select_rows(const float* logits, int* pick, float* wts, int rows, int experts, int top_k) {
+    __shared__ int fallback[kRouterWaves];
+    const int wave = threadIdx.x >> 5;
+    const int first = blockIdx.x * kRouterWaves;
+    const int row = first + wave;
+    const bool live = row < rows;
+    const bool bad = experts <= 16 * 32 ? select_row_lanes<16, 32>(logits, row, live, pick, wts, experts, top_k)
+                                        : select_row_lanes<kSelectMax / 32, 32>(logits, row, live, pick, wts, experts, top_k);
+    if ((threadIdx.x & 31) == 0) fallback[wave] = live && bad;
+    __syncthreads();
+    for (int w = 0; w < kRouterWaves; ++w)
+        if (fallback[w]) select_row(logits, first + w, pick, wts, nullptr, nullptr, 0, experts, top_k);
+}
+
 extern "C" __global__ void __launch_bounds__(kSelectThreads)
     tf_select_decode(const float* logits, int* pick, float* wts, int* items, int* members, int capacity, int experts,
                      int top_k) {
     select_body(logits, pick, wts, items, members, capacity, experts, top_k);
+}
+
+// Reads the live items' experts' down codes (at most cap_bytes) into the caches for the down; the store never runs.
+constexpr int kPrefetchItems = 64;
+extern "C" __global__ void __launch_bounds__(256)
+    tf_moe_prefetch(const int* items, int count, const uint4* words, long long expert_bytes, int experts,
+                    long long cap_bytes) {
+    __shared__ int ids[kPrefetchItems];
+    __shared__ int live;
+    if (threadIdx.x == 0) live = 0;
+    __syncthreads();
+    // the live items in any order (each block its own list; the order only changes which codes are read first)
+    for (int k = threadIdx.x; k < count; k += blockDim.x) {
+        const int e = items[3 * k];
+        if (items[3 * k + 2] > 0 && e >= 0 && e < experts) {
+            const int at = atomicAdd(&live, 1);
+            if (at < kPrefetchItems) ids[at] = e;
+        }
+    }
+    __syncthreads();
+    const int n_ids = live < kPrefetchItems ? live : kPrefetchItems;
+    const long long per = expert_bytes / 16;
+    long long left = cap_bytes / 16;
+    unsigned acc = 0;
+    for (int k = 0; k < n_ids && left > 0; ++k) {
+        const long long n = per < left ? per : left;
+        const uint4* w = words + static_cast<long long>(ids[k]) * per;
+        for (long long j = blockIdx.x * 256ll + threadIdx.x; j < n; j += gridDim.x * 256ll) acc ^= w[j].x;
+        left -= n;
+    }
+    if (count < 0 && acc == 0x9e3779b9u) *const_cast<int*>(items) = static_cast<int>(acc);
 }

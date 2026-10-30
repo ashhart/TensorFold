@@ -32,6 +32,8 @@
         .{ .id = "mlx.project.prefill.kp3", .cost = 2, .items = 300, .plain = false },
         .{ .id = "mlx.project.prefill.kp1", .cost = 3, .rows = 4, .items = 300 },
         .{ .id = "mlx.project.prefill.kp2", .cost = 4, .rows = 32, .routed = false },
+        .{ .id = "mlx.project.prefill.dense_inexact", .cost = 8 },
+        .{ .id = "mlx.project.prefill.dense", .cost = 9 },
         .{ .id = "mlx.project.prefill.matrix", .cost = 10 },
         .{ .id = "mlx.project.prefill.gemm", .cost = 11 },
         .{ .id = "mlx.project.prefill.block", .cost = 12 },

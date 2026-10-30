@@ -40,6 +40,7 @@ test "draft sources: HIP Flash Next checkpoint head and explicit zero" {
     var e: f.engine.Engine = undefined;
     var b: f.lanes.Fx = undefined;
     b.e = &e;
+    b.costs = .{};
     b.streams = 4;
     b.drafts = 3;
     e.weights.model.mtp = null;

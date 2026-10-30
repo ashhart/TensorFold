@@ -13,6 +13,7 @@ const elementwise = @import("elementwise.zig");
 const moe = @import("moe.zig");
 const draw = @import("draw.zig");
 const tp = @import("tp.zig");
+const side_stream = @import("../side.zig");
 pub const mamba = @import("mamba.zig");
 
 pub const Kind = types.Kind;
@@ -33,9 +34,23 @@ pub const Ops = struct {
     prefill: bool = false,
     /// A lane round's forward: decode tiles at any row count, so a row's bits ignore the rows it shares a round with.
     window: bool = false,
+    /// A stream beside `stream` and its events (none: `fork` and `join` do nothing).
+    side: side_stream.Side = .{},
+
+    /// Later work on `side` starts after this stream's work so far.
+    pub fn fork(o: Ops) Error!void {
+        return o.side.fork(o.stream);
+    }
+
+    /// Later work on this stream starts after `side`'s work so far.
+    pub fn join(o: Ops) Error!void {
+        return o.side.join(o.stream);
+    }
 
     pub const project = products.project;
     pub const projectGroup = products.projectGroup;
+    pub const hcUpMix = products.hcUpMix;
+    pub const hcUpMixAffine = products.hcUpMixAffine;
     pub const projectRoutedAct = products.projectRoutedAct;
     pub const projectRouted = products.projectRouted;
     pub const projectRelu2 = products.projectRelu2;
@@ -52,6 +67,11 @@ pub const Ops = struct {
     /// Whether decode.hip's merged launches are on.
     pub fn fused(o: Ops) bool {
         return o.l.fuse;
+    }
+
+    /// Whether the kernels that change a result's bits may run (policy numerics=inexact).
+    pub fn inexact(o: Ops) bool {
+        return o.l.inexact;
     }
 
     pub const attnGate = attention.attnGate;
@@ -72,6 +92,7 @@ pub const Ops = struct {
     pub const gdnGatePrefill = recurrence.gdnGatePrefill;
     pub const gdnGate = recurrence.gdnGate;
     pub const gatedDelta = recurrence.gatedDelta;
+    pub const gatedDeltaHold = recurrence.gatedDeltaHold;
     pub const rms = norms.rms;
     pub const rms2 = norms.rms2;
     pub const gnormOut = norms.gnormOut;
@@ -86,10 +107,13 @@ pub const Ops = struct {
     pub const copyCols = elementwise.copyCols;
     pub const moeTail = moe.moeTail;
     pub const moeRouter = moe.moeRouter;
+    pub const moeRouterPrompt = moe.moeRouterPrompt;
     pub const moeSelect = moe.moeSelect;
+    pub const moeRouterSelect = moe.moeRouterSelect;
     pub const moeRoute = moe.moeRoute;
     pub const moeAct = moe.moeAct;
     pub const moeCombine = moe.moeCombine;
+    pub const moePrefetch = moe.moePrefetch;
     pub const argmaxRows = draw.argmaxRows;
     pub const topkRows = draw.topkRows;
     pub const tokenProb = draw.tokenProb;
