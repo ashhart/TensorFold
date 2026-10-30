@@ -176,7 +176,10 @@ pub const Picker = struct {
         var m: f64 = -std.math.inf(f64);
         for (stats) |st| m = @max(m, st[0]);
         var z: f64 = 0;
-        for (stats) |st| z += st[1] * exp(st[0] / t - m / t);
+        // a rank whose every logit is -inf (a grammar masked its whole slice) adds nothing; its own sum is NaN
+        for (stats) |st| if (st[0] != -std.math.inf(f64)) {
+            z += st[1] * exp(st[0] / t - m / t);
+        };
         const top: f64 = valueOf(keys[0]);
         if (n < 2 or !std.math.isFinite(top) or !std.math.isFinite(z) or z <= 0) return null;
         if (top != m) return null; // the candidates' best is not the row's max

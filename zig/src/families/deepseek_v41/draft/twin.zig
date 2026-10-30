@@ -17,6 +17,7 @@ const Slot = struct {
     parents: std.ArrayList(i32) = .empty,
     taps: std.ArrayList(f32) = .empty,
     live: bool = false,
+    first: []const u32 = &.{}, // the next prompt's last row's grammar bits (Target.first_mask); empty: none
 
     fn deinit(s: *Slot, gpa: Allocator) void {
         s.k.deinit(gpa);
@@ -125,7 +126,10 @@ pub const Twin = struct {
         return @intCast(try lanes.sampling.choose(scratch, vals, ids, draw, smp));
     }
 
-    fn rowsOf(t: *Twin, s: *Slot, tokens: []const u32, parents: ?[]const i32, start: u64, draws: []const u64, smp: ?lanes.Sampling, choices: []u32) !void {
+    /// Grammar bits for a forward's last rows: rows [from, n) take `rows` in order (empty: none), as Segment.masks.
+    const Bits = struct { rows: []const u32 = &.{}, from: usize = 0 };
+
+    fn rowsOf(t: *Twin, s: *Slot, tokens: []const u32, parents: ?[]const i32, start: u64, draws: []const u64, smp: ?lanes.Sampling, choices: []u32, bits: Bits) !void {
         const d = t.dims.dim;
         const a = t.gpa;
         s.rows.clearRetainingCapacity();
@@ -171,6 +175,13 @@ pub const Twin = struct {
             @memcpy(h, x[0..d]);
             t.attend(q[0..d], keys[0 .. committed + depth], vals[0 .. committed + depth], h);
             t.logits(h, tokens[r], row);
+            if (bits.rows.len > 0 and r >= bits.from) {
+                const words = bits.rows.len / (n - bits.from);
+                const allowed = bits.rows[(r - bits.from) * words ..][0..words];
+                for (row, 0..) |*o, i| if (!lanes.grammar.allows(allowed, i)) {
+                    o.* = -std.math.inf(f32);
+                };
+            }
             choices[r] = try t.choose(a, row, draws[r], smp);
         }
         s.base = committed;
@@ -182,7 +193,11 @@ pub const Twin = struct {
     }
 
     pub fn target(t: *Twin) iface.Target {
-        return .{ .ptr = t, .vtable = &.{ .prefill = prefill, .window = window, .keep = keep, .taps = taps, .release = release } };
+        return .{ .ptr = t, .vtable = &.{ .prefill = prefill, .window = window, .keep = keep, .taps = taps, .release = release, .first_mask = firstMask } };
+    }
+
+    fn firstMask(ptr: *anyopaque, slot: u32, bits: []const u32) void {
+        self(ptr).slots[slot].first = bits;
     }
 
     fn self(ptr: *anyopaque) *Twin {
@@ -202,7 +217,8 @@ pub const Twin = struct {
         draws[ids.len - 1] = draw;
         const choices = try t.gpa.alloc(u32, ids.len);
         defer t.gpa.free(choices);
-        try t.rowsOf(s, ids, null, 0, draws, smp, choices);
+        defer s.first = &.{};
+        try t.rowsOf(s, ids, null, 0, draws, smp, choices, .{ .rows = s.first, .from = ids.len - 1 });
         return choices[ids.len - 1];
     }
 
@@ -214,7 +230,7 @@ pub const Twin = struct {
         for (segments, choices) |g, c| {
             const s = &t.slots[g.slot];
             if (!s.live or g.start != s.len(t.dims.dim)) return error.PositionMismatch;
-            try t.rowsOf(s, g.tokens, g.parents, g.start, g.draws, g.sampling, c);
+            try t.rowsOf(s, g.tokens, g.parents, g.start, g.draws, g.sampling, c, .{ .rows = g.masks });
         }
     }
 

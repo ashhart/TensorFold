@@ -243,7 +243,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     };
     srv.release(preparing, null); // a background request waits only while a foreground one prepares
     preparing = false;
-    var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .reply_id = input.id, .seed = if (request.sampling) |v| v.seed else null, .sink = sink, .thinking = thinking or reply_text.isChannel(srv.markers), .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools, .token_ids = prepared.token_ids, .lp = if (request.logprobs != null) .{} else null, .loop_stop = request.loop_stop };
+    var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .reply_id = input.id, .seed = if (request.sampling) |v| v.seed else null, .sink = sink, .thinking = thinking or reply_text.isChannel(srv.markers), .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .grammar = if (request.structure) |st| (if (st.after) |t| .{ .after = t } else .on) else .none, .max_tokens = request.max_tokens, .tools = input.tools, .token_ids = prepared.token_ids, .lp = if (request.logprobs != null) .{} else null, .loop_stop = request.loop_stop };
     defer srv.noteRequest(prepared.prompt_len, box.cached orelse 0, gen.collected.items.len, box.stats.drafted, box.stats.accepted, box.stats.rounds, received, gen.first_ns, gen.last_ns, box.stats.prefill_seconds);
     errdefer if (!gen.engine_done) gen.cancel(); // the engine writes to the mailbox until it says finished
     const result: Failure!Reply = blk: {
@@ -285,6 +285,7 @@ const Generation = struct {
     thinking: bool,
     stops: reply_text.Stops,
     ignore_eos: bool,
+    grammar: union(enum) { none, after: u32, on } = .none, // the request's grammar; .after: it starts after that token
     max_tokens: u32,
     token_ids: bool, // "return_token_ids": the response's tensorfold block carries the reply's token ids
     tools: []const Value,
@@ -305,8 +306,9 @@ const Generation = struct {
     lp: ?@import("logprobs.zig").Stream = null, // the request asked for logprobs: its rows, copied with each round
     loop_stop: bool = false, // --loop-guard-stop: the engine ends the reply where the loop guard fires
 
+    /// An end token that ends the reply. With ignore_eos only the grammar's stop token does: an end token under it.
     fn eos(g: *const Generation, t: u32) bool {
-        return !g.ignore_eos and std.mem.indexOfScalar(u32, g.srv.eos, t) != null;
+        return (!g.ignore_eos or g.grammar == .on) and std.mem.indexOfScalar(u32, g.srv.eos, t) != null;
     }
 
     /// Close a tool call left open at the model end token, except when another stop condition ended the reply.
@@ -339,6 +341,7 @@ const Generation = struct {
                 g.reason = "stop";
                 g.srv.engine.cancel(g.id); // the engine ends EOS and length itself; a stop string is the server's
             } else if (g.collected.items.len >= g.max_tokens) g.reason = "length";
+            if (g.grammar == .after and g.grammar.after == t) g.grammar = .on; // it takes the reply from the next token
         }
         if (landed == 0) return;
         const arrived = nowNs(g.srv.io);
@@ -346,15 +349,9 @@ const Generation = struct {
         g.last_ns = arrived;
         const sink = g.sink orelse return;
         if (g.streaming_done) return;
-        var fresh: std.ArrayList(u32) = .empty;
-        for (chunk[0..landed]) |t| {
-            if (g.eos(t)) {
-                g.streaming_done = true;
-                break;
-            }
-            try fresh.append(g.a, t);
-        }
-        const all = try g.visible.extend(g.a, g.srv.text, reply_text.decodeText, fresh.items);
+        const ended = g.eos(chunk[landed - 1]); // an end token that ends the reply lands last and does not stream
+        if (ended) g.streaming_done = true;
+        const all = try g.visible.extend(g.a, g.srv.text, reply_text.decodeText, chunk[0 .. landed - @intFromBool(ended)]);
         const text = g.stops.visible(all, true);
         if (g.visible.pending()) return; // a character still split across tokens
         var answer = text;
@@ -475,7 +472,7 @@ const Generation = struct {
         const stopped: ?u32 = if (g.loop_stop) m.stats.loop_period else null;
         const reason = if (stopped != null) @import("loop_stop.zig").finish_reason else ended;
         const finished_ns = nowNs(g.srv.io);
-        const content_tokens = if (g.ignore_eos) g.collected.items else reply_text.stripTrailing(g.collected.items, g.srv.eos);
+        const content_tokens = if (g.ignore_eos and g.grammar != .on) g.collected.items else reply_text.stripTrailing(g.collected.items, g.srv.eos);
         const raw = try g.srv.text.decode(a, content_tokens);
         const visible = g.stops.visible(raw, false);
         // closed before the think split, so a call ending an unclosed think block is the answer
