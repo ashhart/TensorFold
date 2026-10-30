@@ -1,0 +1,24 @@
+base 465e48b62420 head fad7e142cf48; 11 files changed under zig/kernels; Build cuda_13.0.r13.0/compiler.36424714_0
+lfm2_moe: in one catalog only
+lfm3: in one catalog only
+contract_controls: 265 functions over sm_120,sm_121,sm_80,sm_86,sm_89; changed 0 added 45 removed 0
+    sm_80 tf_ctl_pattn_128
+    sm_80 tf_ctl_pattn_64
+    sm_80 tf_ctl_paged_attn_merge_segs_64
+    sm_80 tf_ctl_paged_attn_chunk_segs_64
+    sm_80 tf_ctl_lfm2m_route
+nemotron_attention: 45 functions over sm_120,sm_121,sm_80,sm_86,sm_89; changed 0 added 10 removed 0
+    sm_80 tf_paged_attn_merge_segs_64
+    sm_80 tf_paged_attn_chunk_segs_64
+    sm_86 tf_paged_attn_merge_segs_64
+    sm_86 tf_paged_attn_chunk_segs_64
+    sm_89 tf_paged_attn_merge_segs_64
+prefill_attention: 50 functions over sm_120,sm_121,sm_80,sm_86,sm_89; changed 0 added 10 removed 0
+    sm_80 _ZN20tf_prefill_attention12pattn_kernelILi64ELi8ELi4ELi8EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifPKix
+    sm_80 _ZN20tf_prefill_attention12pattn_kernelILi128ELi8ELi4ELi8EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifPKix
+    sm_86 _ZN20tf_prefill_attention12pattn_kernelILi64ELi8ELi4ELi8EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifPKix
+    sm_86 _ZN20tf_prefill_attention12pattn_kernelILi128ELi8ELi4ELi8EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifPKix
+    sm_89 _ZN20tf_prefill_attention12pattn_kernelILi64ELi8ELi4ELi8EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifPKix
+images 3 functions 360 differing 65
+control fp4pair constant: 0 functions changed in 0 of 2 images
+control warp_sum order: 10 functions changed in 1 of 2 images
