@@ -3,6 +3,8 @@
 const Launcher = @import("../launches.zig").Launcher;
 const Module = @import("../module.zig").Module;
 const Function = @import("../module.zig").Function;
+const std = @import("std");
+const kernels = @import("../kernels.zig");
 const util = @import("util.zig");
 const S = util.S;
 const P = util.P;
@@ -21,6 +23,8 @@ pub const Fns = struct {
     hc_norm: Function,
     hc_gates: Function,
     rms_wide: Function,
+    rms_wide_waves: Function,
+    rms_wide_apply: Function,
     hc_mix: Function,
     ple_gate: Function,
     ple_conv: Function,
@@ -36,6 +40,8 @@ pub const Fns = struct {
             .hc_norm = try m.function("tf_fn_hc_norm"),
             .hc_gates = try m.function("tf_fn_hc_gates"),
             .rms_wide = try m.function("tf_fn_rms_wide"),
+            .rms_wide_waves = try m.function("tf_fn_rms_wide_waves"),
+            .rms_wide_apply = try m.function("tf_fn_rms_wide_apply"),
             .hc_mix = try m.function("tf_fn_hc_mix"),
             .ple_gate = try m.function("tf_fn_ple_gate"),
             .ple_conv = try m.function("tf_fn_ple_conv"),
@@ -126,12 +132,25 @@ pub fn hcGates(
     try l.flat(l.fnx.hc_gates, @as(i64, rows) * (low + if (inject != null) streams else 0), s, &a);
 }
 
-/// Each of `rows` rows normed over its whole `width` (any width) times the fp32 `scale`.
+/// streams.hpp's split wide norm: bf16 width, a row's waves (scratch floats), apply group, rows it takes on gfx1201.
+pub const wide_width = 10240;
+pub const wide_waves = 8;
+const wide_apply = 64;
+pub const wide_rows = 16;
+const wide_arch = std.mem.eql(u8, kernels.arch, "gfx1201");
+
+/// The split wide norm serves this call: gfx1201, alternates on, bf16 MTP width, scratch, at most wide_rows rows.
+pub fn wideSplit(l: *const Launcher, waves: F, kind: c_int, rows: c_int, width: c_int) bool {
+    return wide_arch and l.fuse and kind == 2 and width == wide_width and waves != null and rows <= wide_rows;
+}
+
+/// Each row normed over its whole `width` times the fp32 `scale`; `waves` scratch lets the split take its bits.
 pub fn rmsWide(
     l: *const Launcher,
     x: C,
     scale: CF,
     y: P,
+    waves: F,
     kind: c_int,
     rows: c_int,
     width: c_int,
@@ -139,6 +158,14 @@ pub fn rmsWide(
     s: S,
 ) Error!void {
     if (rows == 0) return;
+    if (wideSplit(l, waves, kind, rows, width)) {
+        var a: Args = .{};
+        inline for (.{ ad(x), ad(waves) }) |v| try a.add(v);
+        try l.go(l.fnx.rms_wide_waves, dim(wide_waves, rows, 1), dim(32, 1, 1), 0, s, &a);
+        var b: Args = .{};
+        inline for (.{ ad(x), ad(waves), ad(scale), ad(y), width, eps }) |v| try b.add(v);
+        return l.go(l.fnx.rms_wide_apply, dim(rows * (wide_width / wide_apply), 1, 1), dim(wide_apply, 1, 1), 0, s, &b);
+    }
     var a: Args = .{};
     inline for (.{ ad(x), ad(scale), ad(y), kind, width, eps }) |v| try a.add(v);
     try l.go(l.fnx.rms_wide, dim(rows, 1, 1), dim(threads, 1, 1), 0, s, &a);

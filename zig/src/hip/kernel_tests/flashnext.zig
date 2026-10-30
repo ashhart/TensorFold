@@ -253,6 +253,7 @@ test "the wide norm over a row of every stream, and the gates without inject gat
         ptr(?*const anyopaque, x),
         ptr(?[*]const f32, sc),
         ptr(?*anyopaque, y),
+        null,
         t.kind(),
         rows,
         w,
@@ -279,6 +280,54 @@ test "the wide norm over a row of every stream, and the gates without inject gat
     for (0..rows * low) |i| {
         const v = rnd(t, rnd(t, zh[i]) / 4.0);
         try rig.expect(close(t, value(t, ga[i]), rnd(t, v * sigmoid(v)), 1), "gate {d}", .{i});
+    }
+}
+
+test "the MTP wide norm's two launches store tf_fn_rms_wide's bytes at rows 1 to 17" {
+    const t = try Rig.open(1 << 20);
+    defer t.close();
+    const wide = @import("../launches/flashnext.zig");
+    if (!wide.wideSplit(&t.on, @ptrFromInt(64), t.kind(), 1, wide.wide_width)) return error.SkipZigTest; // gfx1201, bf16
+    var rng: rig.Rng = .{ .state = 0x7A1D };
+    const w = wide.wide_width;
+    const rows = 17;
+    const eps: f32 = 1e-6;
+    const hx = try acts(t, &rng, rows * w, 2.0);
+    defer gpa.free(hx);
+    @memset(hx[0..w], 0);
+    for (0..w) |i| { // row 1 spans 2^-20 to 2^19; row 5's squares overflow fp32
+        const e: i32 = @intCast(i % 200);
+        hx[w + i] = t.bits(std.math.pow(f32, 2, @floatFromInt(@rem(e, 40) - 20)));
+        hx[5 * w + i] = t.bits(std.math.pow(f32, 2, @floatFromInt(e - 100)));
+    }
+    hx[2 * w + 77] = t.bits(std.math.nan(f32));
+    hx[3 * w + 5000] = t.bits(std.math.inf(f32));
+    hx[4 * w + 9] = t.bits(-std.math.inf(f32));
+    hx[4 * w + 10230] = t.bits(std.math.inf(f32));
+    const scale = try gpa.alloc(f32, w);
+    defer gpa.free(scale);
+    for (scale) |*x| x.* = 1.0 + rng.unit() * 0.5;
+    var x = try t.upload(hx);
+    defer x.free();
+    var sc = try t.upload(scale);
+    defer sc.free();
+    var want = try t.alloc(rows * w * 2);
+    defer want.free();
+    var got = try t.alloc(rows * w * 2);
+    defer got.free();
+    var waves = try t.alloc(rows * wide.wide_waves * 4);
+    defer waves.free();
+    const st = t.stream.handle;
+    try t.off.fn_rms_wide(ptr(?*const anyopaque, x), ptr(?[*]const f32, sc), ptr(?*anyopaque, want), ptr(?[*]f32, waves), t.kind(), rows, w, eps, st);
+    try t.stream.synchronize();
+    const base = try rig.download(u16, want);
+    defer gpa.free(base);
+    for (1..rows + 1) |m| {
+        try t.on.fn_rms_wide(ptr(?*const anyopaque, x), ptr(?[*]const f32, sc), ptr(?*anyopaque, got), ptr(?[*]f32, waves), t.kind(), @intCast(m), w, eps, st);
+        try t.stream.synchronize();
+        const gy = try rig.download(u16, got);
+        defer gpa.free(gy);
+        try std.testing.expectEqualSlices(u16, base[0 .. m * w], gy[0 .. m * w]);
     }
 }
 
