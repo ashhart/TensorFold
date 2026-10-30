@@ -1,16 +1,8 @@
-// Copied verbatim from mlx-omarchy shaders/argreduce_combine.comp (same SHA-256,
-// aa68bee3…) for the stage-2 greedy draw; the greedy host drives it with
-// operation = 1 (max), one row, output_offset = 2 in the shared result words.
+// Reused from mlx-omarchy shaders/argreduce_combine.comp (MIT), comments condensed; driven at operation = 1 (max), one row, output_offset = 2.
 
 // Copyright © 2026 Joshua Warren / mlx-omarchy contributors.
 // SPDX-License-Identifier: MIT
-//
-// ArgMin/ArgMax phase 2 of 2: one workgroup per row combines the
-// (value, index) pairs that argreduce_chunk.comp wrote (`matrix_n` pairs per
-// row, at most 256) with the same tree and the same rule as
-// argreduce_suffix.comp: a strictly better value wins, equal values keep the
-// lower index, a NaN beats any non-NaN and the first NaN index wins. Lanes
-// past the pair count hold the never-winning pair (infinity, 0).
+// ArgMin/ArgMax phase 2 of 2: one workgroup per row combines chunk.comp's (value, index) pairs (at most 256) by the same rule: strictly better wins, ties keep the lower index, first NaN wins; lanes past the count hold (infinity, 0).
 #version 460
 
 #define ACC_LOWEST uintBitsToFloat(0xff800000u)
