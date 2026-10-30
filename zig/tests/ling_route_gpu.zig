@@ -6,7 +6,7 @@ const route = @import("route");
 const source = @import("ling_metal").route;
 const Args = extern struct { rows: i32, ne: i32, topk: i32, ng: i32, keep: i32, scale: f32 };
 
-fn run(s: route.Shape, rows: u32, seed: u64) !void {
+fn run(s: route.Shape, rows: u32, seed: u64, bias_shift: f32) !void {
     const a = std.testing.allocator;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
@@ -27,7 +27,7 @@ fn run(s: route.Shape, rows: u32, seed: u64) !void {
     var prng = std.Random.DefaultPrng.init(seed);
     const rng = prng.random();
     for (logits) |*v| v.* = rng.float(f32) * 4 - 2;
-    for (bias) |*v| v.* = rng.float(f32) - 0.5;
+    for (bias) |*v| v.* = rng.float(f32) + bias_shift;
 
     const x = try device.buffer(n * 4, mtl.ResourceOptions.shared);
     defer x.deinit();
@@ -70,16 +70,22 @@ fn run(s: route.Shape, rows: u32, seed: u64) !void {
     for (0..rows) |r| {
         route.selectF32(logits[r * s.experts ..][0..s.experts], bias, want[0..s.topk], s);
         for (0..s.topk) |k| {
-            try std.testing.expectEqual(want[k].id, @as(u32, @intCast(ids[r * s.topk + k])));
-            try std.testing.expect(@abs(got[r * s.topk + k] - want[k].wt) < 1e-5);
+            const got_id = ids[r * s.topk + k];
+            try std.testing.expect(got_id >= 0 and @as(u32, @intCast(got_id)) < s.experts);
+            try std.testing.expectEqual(want[k].id, @as(u32, @intCast(got_id)));
+            try std.testing.expect(@abs(got[r * s.topk + k] - want[k].wt) < 1e-6);
         }
     }
 }
 
 test "tiny: 128 experts, 8 groups of 16, keep 4" {
-    try run(.{ .experts = 128, .topk = 8, .n_group = 8, .topk_group = 4, .scale = 2.5 }, 8, 1);
+    try run(.{ .experts = 128, .topk = 8, .n_group = 8, .topk_group = 4, .scale = 2.5 }, 8, 1, -0.5);
 }
 
 test "flash: 512 experts, 8 groups of 64, keep 4" {
-    try run(.{ .experts = 512, .topk = 8, .n_group = 8, .topk_group = 4, .scale = 2.5 }, 4, 2);
+    try run(.{ .experts = 512, .topk = 8, .n_group = 8, .topk_group = 4, .scale = 2.5 }, 4, 2, -0.5);
+}
+
+test "tiny: all choices negative, padded slots stay out of the picks" {
+    try run(.{ .experts = 128, .topk = 8, .n_group = 8, .topk_group = 4, .scale = 2.5 }, 4, 3, -2.0);
 }
