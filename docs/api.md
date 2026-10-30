@@ -602,7 +602,9 @@ store for each model and build. That store takes the place of `--learn`'s store 
 with the flag neither reads nor writes the prefix files a plain `--learn` server keeps, and they stay on disk until the
 cap below needs their room. After a restart, a crash or an eviction from RAM, the next turn reads the latest state back
 instead of reading the conversation again from its first token. Qwen3.8-27B, Nemotron, Flash Next and GLM-5.3-Flash on
-one Mac and Nemotron on CUDA keep them; other engines refuse the flag at startup.
+one Mac, and Nemotron, the Qwen3.5 hybrids, Flash Next on one rank and GLM-5.3-Flash on CUDA keep them; other engines
+refuse the flag at startup. GLM-5.3-Flash on CUDA across ranks writes every rank's part to rank 0's disk, so a state is
+read back on every rank or on none; it takes neither `--spill-gib` nor `--checkpoint-slots`.
 
 The engine stages an owned copy between rounds, and an I/O thread writes and fsyncs it. Staging has a 1 GiB byte permit
 and at most eight jobs. A save that finds either full but would fit alone waits in the queue until a write finishes; one

@@ -39,12 +39,15 @@ fn capacity(s: *const pc.Store, have: ?*pc.Entry) ?u64 {
     var protected: usize = 0;
     const f = s.family.vtable;
     for (s.entries.items) |e| {
-        if (e == have or e.borrowers > 0) protected += 1 else if (f.spare == null or f.trim != null) {
+        if (e == have or e.borrowers > 0) protected += 1 else if (f.spare == null or f.trim != null or f.reuses != null) {
             reclaimable +|= e.bytes;
         }
     }
+    if (protected >= s.most) return null;
+    // a pool that reuses spare storage without trimming it (GLM's snapshot pages): a read takes spare or evicted pages
+    if (f.reuses != null and f.trim == null) return s.spare() +| reclaimable;
     const fixed = (s.held -| reclaimable) +| if (f.trim == null) s.spare() else 0;
-    if (protected >= s.most or fixed > s.budget) return null;
+    if (fixed > s.budget) return null;
     return s.budget - fixed;
 }
 

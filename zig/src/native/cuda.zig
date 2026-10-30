@@ -24,6 +24,7 @@ const lane_backend = @import("cuda_bound.zig");
 const snaps = @import("cuda_snaps.zig");
 const slide_adapter = @import("slide_adapter.zig");
 const cuda_disk = @import("cuda_disk.zig");
+const glm_disk = @import("cuda_glm_disk.zig");
 const vision_offer = @import("cuda_vision_offer.zig");
 const drafted = @import("cuda_drafted.zig");
 const kv_pages = @import("cuda_kv_pool.zig");
@@ -418,7 +419,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         const store = try gpa.create(pc.Store);
         errdefer gpa.destroy(store);
         // rules and budget from the family's snap_* declarations (cuda_snaps.zig)
-        const image: ?*const pc.rows.Image = if (F == nemotron.native) &cuda_disk.image else if (comptime cuda_disk.keptDisk(F)) |K| &K.image else null;
+        const image: ?*const pc.rows.Image = if (F == nemotron.native) &cuda_disk.image else if (F == glm.native) &glm_disk.image else if (comptime cuda_disk.keptDisk(F)) |K| &K.image else null;
         const copies: pc.Snapshots = .{ .ptr = loaded.target, .vtable = &snaps.Snaps(F, image).vtable };
         store.* = pc.Store.init(gpa, copies, snaps.passRules(F, @import("cuda_startup.zig").rows(F, loaded)), if (@hasDecl(F, "snap_slots")) cache else try snaps.cacheBudget(F, loaded.target, cache));
         errdefer {
@@ -431,6 +432,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         h.store = store;
         if (o.learn_conversations) if (o.learn) |root| {
             if (F == nemotron.native) try cuda_disk.attach(a, io, &g.ctx, o, root, kernels, loaded, store);
+            if (F == glm.native) try glm_disk.attach(a, io, &g.ctx, o, root, kernels, loaded, store);
             if (comptime cuda_disk.keptDisk(F)) |K| try cuda_disk.attachKept(K, F.model_type, a, io, &g.ctx, o, root, kernels, loaded, store);
         };
     }

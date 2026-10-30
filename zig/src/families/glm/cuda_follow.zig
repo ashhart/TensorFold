@@ -12,7 +12,7 @@ const pages_mod = @import("cuda_pages.zig");
 const sparse = @import("cuda_sparse.zig");
 const Engine = engine.Engine;
 
-pub const Kind = enum(u32) { begin = 1, prefill, verify, keep, draft, end, drop, release, chunk, shared, image, block, many, redraw, idle, snapshots, pool };
+pub const Kind = enum(u32) { begin = 1, prefill, verify, keep, draft, end, drop, release, chunk, shared, image, block, many, redraw, idle, snapshots, pool, disk };
 
 /// One step as it crosses: 64 bytes, then `n` u32 ids.
 pub const Header = extern struct {
@@ -104,6 +104,14 @@ pub const Link = struct {
     pub fn rows(l: *Link, ptr: u64, bytes: usize) !void {
         if (bytes == 0) return;
         try l.lib.check(l.lib.api.ncclBroadcast(ptr, ptr, bytes, .u8, 0, l.comm, l.stream.handle), "ncclBroadcast");
+    }
+
+    /// `bytes` after the header from rank `root` into every rank's buffer (a disk step's take: cuda_disk_ranks).
+    pub fn from(l: *Link, root: u32, bytes: usize) !void {
+        if (bytes == 0) return;
+        if (64 + bytes > l.buf.len) return error.TooManyIds;
+        try l.lib.check(l.lib.api.ncclBroadcast(l.buf.ptr + 64, l.buf.ptr + 64, bytes, .u8, @intCast(root), l.comm, l.stream.handle), "ncclBroadcast");
+        try l.stream.synchronize();
     }
 
     /// Other ranks: the next step and its ids (valid until the next receive).
@@ -292,6 +300,14 @@ pub const Leader = struct {
         try x.e.draftBlock(reqs);
     }
 
+    /// A kept state's disk step (cuda_disk_ranks): its op and ids to every rank.
+    pub fn disk(x: Leader, h: Header, ids: []const u32) !void {
+        try x.flush();
+        var hh = h;
+        hh.kind = @backingInt(Kind.disk);
+        try x.send(hh, ids);
+    }
+
     /// The other ranks leave their loops.
     pub fn end(x: Leader) !void {
         try x.send(.{ .kind = @backingInt(Kind.end) }, &.{});
@@ -326,7 +342,7 @@ pub fn follow(e: *Engine, link: *Link) !void {
         const step = try link.receive();
         const h = step.h;
         const kind: Kind = @fromBackingInt(@intCast(h.kind));
-        if (kind != .end and kind != .drop and kind != .shared and kind != .block and kind != .many and kind != .idle and kind != .snapshots and kind != .pool) try e.bind(h.slot);
+        if (kind != .end and kind != .drop and kind != .shared and kind != .block and kind != .many and kind != .idle and kind != .snapshots and kind != .pool and kind != .disk) try e.bind(h.slot);
         e.prompt_logprobs = if (promptRows(h)) .{} else null;
         e.structured = structuredStep(h); // rank 0 alone masks them
         switch (kind) {
@@ -400,6 +416,7 @@ pub fn follow(e: *Engine, link: *Link) !void {
                 try link.rows(v.rows.ptr, v.rowCount() * vcfg.out_hidden * 2);
             },
             .snapshots => try @import("cuda_snapshots.zig").agree(e, h.a),
+            .disk => try @import("cuda_disk_ranks.zig").step(e, link, h, step.ids),
             .drop => for (step.ids) |id| e.dropState(id),
             .release => e.release(h.slot),
             .idle => cuda.tp_watch.sleep(e.io),

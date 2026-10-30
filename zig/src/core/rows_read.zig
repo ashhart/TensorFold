@@ -109,9 +109,10 @@ pub fn recall(s: *pc.Store, prompt: []const u32, born: u32, starts: []const u32,
     const name = r.states.items[chosen].name;
     const bytes = s.family.vtable.bytes(s.family.ptr, r.states.items[chosen].at);
     if (bytes > s.budget or s.most == 0) return have;
-    if (!ready(s, bytes)) present(r, chosen) catch return have; // nothing goes to make room for a state whose file is gone
+    const at = r.states.items[chosen].at;
+    if (!ready(s, at, bytes)) present(r, chosen) catch return have; // nothing goes to make room for a state whose file is gone
     if (r.spill != .off) r.touch(chosen); // the newest: the spills that make room for it push older states off first
-    while (!ready(s, bytes)) {
+    while (!ready(s, at, bytes)) {
         if (s.family.vtable.trim) |trim| {
             const spare = s.spare();
             trim(s.family.ptr, s.budget -| s.held -| bytes);
@@ -146,8 +147,11 @@ pub fn recall(s: *pc.Store, prompt: []const u32, born: u32, starts: []const u32,
     return e;
 }
 
-fn ready(s: *const pc.Store, bytes: u64) bool {
+fn ready(s: *const pc.Store, at: u32, bytes: u64) bool {
     if (s.held > s.budget or s.entries.items.len >= s.most) return false;
+    const f = s.family.vtable;
+    // a pool without trim reads into spare storage that takes the state, as a keep would
+    if (f.trim == null) if (f.reuses) |reuses| if (reuses(s.family.ptr, at)) return true;
     const room = s.budget - s.held;
     const spare = s.spare();
     return spare <= room and bytes <= room - spare;

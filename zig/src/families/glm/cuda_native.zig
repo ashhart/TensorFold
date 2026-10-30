@@ -270,6 +270,7 @@ fn finishRank(a: OpenArgs) !Loaded {
     own.e.group = &own.group;
     own.link = try follow.Link.init(gpa, ctx.d, &own.group.lib, own.group.comm, own.e.stream, try linkCapacity(cap, o.vision));
     errdefer own.link.deinit();
+    if (p.rank == 0 and p.world > 1) own.e.link = &own.link; // its disk steps (cuda_disk_ranks) cross on the link
     own.e.snap_setup = .{ .ptr = own, .run = readySnapshots };
     // Rank 0 admits by the smallest room of the ranks; its sizes are the largest (the first ranks take the remainder).
     const rooms = try gpa.alloc(u64, p.world);
