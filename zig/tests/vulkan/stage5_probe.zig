@@ -1,4 +1,4 @@
-// Vulkan stage 5 bring-up: greedy token selection over one BF16 logits row at the real Qwen3.5 vocab (248320) through the production Greedy.select, on a real GPU. Exit 0 pass, 1 fail, 2 usage, 124 fence timeout. Bring-up only: no model, no performance claim. The acceptance is exact, from the fixture's independent CPU reference (never oracle tokens): the selected u32 equals the reference (max wins, ties to the lowest index, +0/-0 equal), a planted non-winning non-finite (-inf/+inf/NaN, including at the would-be winner) is refused as NonFinite with the first offending index as evidence read back from the production Result, inputs and poison guards are unchanged, and three repeats select the same token. Every GPU call after submit goes through vk.orExit; the expected NonFinite is caught explicitly and never reported as a GPU failure.
+// Greedy.select vs CPU max (248320 BF16; low-index ties, ±0 equal); NonFinite first-bad index; exit codes 0/1/2/124.
 const std = @import("std");
 const vk = @import("vulkan");
 const shaders = @import("stage5_shaders");
@@ -116,7 +116,7 @@ fn refFail(gate: []const u8, e: anyerror) bool {
     return false;
 }
 
-// The row's poisoned shell uploaded whole; the caller owns the buffer and builds the view in its own scope (the view keeps the buffer's address).
+// Upload the full poisoned row; caller owns the buffer and creates its address-stable view.
 fn uploadRow(gate: []const u8, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, row: fx.Row, timeout: u64) ?vk.Buffer {
     var b = vk.Buffer.init(dev, .device, std.mem.sliceAsBytes(row.bits).len) catch |e| {
         _ = gpuFail(gate, e);
@@ -130,7 +130,7 @@ fn uploadRow(gate: []const u8, dev: *const vk.Device, cmds: *vk.Commands, stagin
     return b;
 }
 
-// Three selects through orExit; the token must be identical every repeat. The repeat mismatch prints its own FAIL line; GPU errors propagate raw.
+// Run 3 selects via orExit; tokens must match, mismatches print FAIL, and GPU errors propagate raw.
 fn selectRepeat(gate: []const u8, g: *vk.Greedy, cmds: *vk.Commands, staging: vk.Buffer, view: vk.tensor.View, timeout: u64) !u32 {
     var first: ?u32 = null;
     for (0..repeats) |rep| {
@@ -150,7 +150,7 @@ fn repeatFail(gate: []const u8, e: anyerror) bool {
     return false;
 }
 
-// Download the whole shell back and demand it bit-identical: guards still poisoned, logits unchanged.
+// Download the full shell and require bit identity: poisoned guards and logits remain unchanged.
 fn shellChecked(gate: []const u8, a: std.mem.Allocator, cmds: *vk.Commands, staging: vk.Buffer, row: fx.Row, buf: vk.Buffer, timeout: u64) bool {
     const back = a.alloc(u16, row.bits.len) catch |e| return gpuFail(gate, e);
     defer a.free(back);
@@ -231,7 +231,7 @@ fn zeroGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *
     return true;
 }
 
-// Non-winning -inf/+inf/NaN (the +inf sits on the would-be winner): every row must come back as NonFinite through orExit — never a token, never another GPU error — with the planted index as the first-bad evidence, decoded by the production decode() itself.
+// Non-winning -inf/+inf/NaN (even at winner) must refuse; decode() reports first-bad index, not GPU failure.
 fn nonFiniteGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, timeout: u64) !bool {
     const gate = "nonfinite-refused";
     const cases = [_]struct { kind: fx.NonFinite, bad: usize, label: []const u8 }{
@@ -267,7 +267,7 @@ fn nonFiniteGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cm
                 return false;
             }
         }
-        // The expected refusal is not a GPU failure: read the production Result back and demand the planted index as the first offender.
+        // Refusal is not GPU failure: read production Result and require the planted first-offender index.
         var ev: vk.greedy.Result = undefined;
         vk.orExit(vk.download(cmds, g.results, 0, staging, std.mem.asBytes(&ev), timeout)) catch |e2| {
             std.debug.print("FAIL greedy gate=\"{s}\" kind=\"{s}\": evidence download: {s}\n", .{ gate, cs.label, @errorName(e2) });
@@ -301,7 +301,7 @@ fn minCountGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmd
     return singleRowGate(a, clock, dev, cmds, staging, gate, row, timeout);
 }
 
-// An odd bf16 count has no legal view: the upload succeeds, the view refuses with Misaligned before any dispatch.
+// Odd bf16 count uploads but View refuses with Misaligned before dispatch.
 fn oddCountGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, timeout: u64) !bool {
     const gate = "odd-count-refused";
     var row = fx.random(a, 7, 0x57ad) catch |e| return gpuFail(gate, e);
