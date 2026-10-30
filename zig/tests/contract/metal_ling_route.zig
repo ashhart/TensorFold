@@ -140,7 +140,7 @@ pub const Route = struct {
                 if (got_id != want[k].id)
                     return try std.fmt.bufPrint(&t.msg, "row {d} pick {d}: id {d}, host {d}", .{ r, k, got_id, want[k].id });
                 const got_w = wts[r * topk + k];
-                if (@abs(got_w - want[k].wt) > 1e-5)
+                if (@abs(got_w - want[k].wt) > 1e-6)
                     return try std.fmt.bufPrint(&t.msg, "row {d} pick {d}: wt {e:.6}, host {e:.6}", .{ r, k, got_w, want[k].wt });
             }
             var nf: bool = false;
