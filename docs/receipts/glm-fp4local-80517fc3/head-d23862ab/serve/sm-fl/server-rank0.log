@@ -1,0 +1,27 @@
+info: checkpoint digest: 0.0 GiB read in 0.2 s, 42/42 cached files
+info: RoCE all-gather: 2 HCA(s), shards up to 4096 KiB by RDMA writes
+[tensorfold] CUDA sm_121 device 0 (NVIDIA GB10, memory shared with the host): model 90.27 GiB; 4 streams at once, 0.67 GiB each at a 40960-token window, of 11.9 GiB left after a 12.2 GiB reserve; prompts in passes of up to 2048 rows, a 9.9 GiB prompt cache; own glue kernels
+[tensorfold] serving local-model at http://127.0.0.1:8095/v1 (sampling: temperature 1.0, top_p 0.95; drafts: on; context: 40960; loaded in 313.1s)
+[tensorfold] 127.0.0.1 "GET /health HTTP/1.1" 200 -
+info: prompt cache: 2066 tokens, resumed at 0, kept 0; 0 states, 0 MiB and 0 MiB spare of 10096 MiB (hits 0, misses 1, evicted 0, refused 0, failed 0)
+[tensorfold] done cmpl-f4b409e39c0b5f3eaf42478a1aff7f72 prompt=2066 cached=0 thinking=False effort=none tokens=512 sha=ba28cfb7c5b9 finish=length rounds=157 accepted=354/394 ttft=1.525 decode=10.423 elapsed=11.948 queued=0.000 tok/s=49.0
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+info: prompt cache: 2066 tokens, resumed at 0, kept 0; 0 states, 0 MiB and 0 MiB spare of 10096 MiB (hits 0, misses 2, evicted 0, refused 0, failed 0)
+[tensorfold] done cmpl-d122305c99c69d2997f3121cc84084da prompt=2066 cached=0 thinking=False effort=none tokens=512 sha=ba28cfb7c5b9 finish=length rounds=511 accepted=0/0 ttft=1.525 decode=21.347 elapsed=22.871 queued=0.000 tok/s=23.9
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+info: prompt cache: 2108 tokens, resumed at 0, kept 0; 0 states, 0 MiB and 0 MiB spare of 10096 MiB (hits 0, misses 3, evicted 0, refused 0, failed 0)
+[tensorfold] done cmpl-647fe681b13ce0925e36e897b939ac8b prompt=2108 cached=0 thinking=False effort=none tokens=512 sha=dae7e2a5c84e finish=length rounds=281 accepted=230/377 ttft=1.629 decode=14.793 elapsed=16.422 queued=0.000 tok/s=34.5
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+info: prompt cache: 2108 tokens, resumed at 0, kept 0; 0 states, 0 MiB and 0 MiB spare of 10096 MiB (hits 0, misses 4, evicted 0, refused 0, failed 0)
+[tensorfold] done cmpl-e772124d47a205da73b5bd165ae02fb5 prompt=2108 cached=0 thinking=False effort=none tokens=512 sha=dae7e2a5c84e finish=length rounds=511 accepted=0/0 ttft=1.620 decode=21.250 elapsed=22.870 queued=0.000 tok/s=24.0
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+info: prompt cache: 2089 tokens, resumed at 0, kept 0; 0 states, 0 MiB and 0 MiB spare of 10096 MiB (hits 0, misses 5, evicted 0, refused 0, failed 0)
+[tensorfold] done cmpl-529b6a6d41363e556e20c2b37a5bf667 prompt=2089 cached=0 thinking=False effort=none tokens=512 sha=db45a54eb863 finish=length rounds=188 accepted=323/438 ttft=1.608 decode=12.081 elapsed=13.689 queued=0.000 tok/s=42.3
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+info: prompt cache: 2089 tokens, resumed at 0, kept 0; 0 states, 0 MiB and 0 MiB spare of 10096 MiB (hits 0, misses 6, evicted 0, refused 0, failed 0)
+[tensorfold] done cmpl-67a30536ac7fd7a0db3f867b7af53611 prompt=2089 cached=0 thinking=False effort=none tokens=512 sha=db45a54eb863 finish=length rounds=511 accepted=0/0 ttft=1.593 decode=21.382 elapsed=22.975 queued=0.000 tok/s=23.9
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] shutting down (SIGTERM): draining: new requests get 503; 0 request(s) in progress may finish within 20.0 s
+[tensorfold] shutting down: drained
+[tensorfold] shutting down: stopped
+exit 0

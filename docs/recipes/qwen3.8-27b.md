@@ -4,13 +4,22 @@ The native engine serves `TensorFold/Qwen3.8-27B-MLX-4bit` on Metal, qualified o
 `zig/src/families/qwen27/`. It drafts with DFlash2 (`zig/src/families/qwen27/dflash/`) only when `--drafter` names
 the drafter; without it the model decodes plain. On CUDA the native engine serves the MLX affine checkpoints (2, 3,
 4, 5, 6 and 8 bits in groups of 64) from `zig/src/families/qwen3_5/cuda_*.zig`, with DFlash2 drafts and
-`--kv-cache fp8`; it reads no NVFP4 or EXL3 checkpoint yet.
+`--kv-cache fp8`. It also reads ModelOpt NVFP4 and FP8 exports, and turboderp's EXL3 packs (`mul1` codebook) with
+DFlash2 drafts through the shared EXL3 module, on one GPU.
 
 ```bash
 tensorfold pull TensorFold/Qwen3.8-27B-MLX-4bit
 tensorfold pull z-lab/Qwen3.8-27B-DFlash2
 tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --drafter z-lab/Qwen3.8-27B-DFlash2 --name bench
 ```
+
+On Metal, M5 prompt passes request 2,048 rows when no other request is decoding; earlier chips keep the 512-row
+default. The larger frame must fit the configured context and all streams beside loaded weights and the 8 GiB
+margin, otherwise M5 keeps 512 rows. Startup reserves the actual prompt scratch sizes as well as stream caches.
+Wide prompt frames keep separate 512-row activation scratch for small rounds, so decoding binds the small buffers.
+Admission counts both banks.
+`TF_QWEN27_WORKING_SET_BYTES` can lower the device working-set budget for admission checks. `TF_PROMPT_ROWS` selects another multiple of 16 from 16 to 2,048. Each chunk takes at most 512 rows beside
+a decoding request, including with an override, and still respects the frame, attention and request boundaries.
 
 Measured on an M5 Ultra (macOS 27) through the served API against mlx-lm 0.32.0 on the same checkpoint, raw prompts
 from this repository's docs, 100 greedy tokens, prefill from the time to the first token:
@@ -72,6 +81,12 @@ least 256 tokens beyond the previous chunk start, or after 2,048 tokens if no ea
 Prefix reuse resumes only at these chunk starts, so a follow-up can reuse the state before its previous
 reply. The plan comes from rendered tokens; a template without detected markers uses 2,048-token chunks.
 
+On the native pre-M5 lane loop, `TF_QWEN27_WINDOW=32` or `64` requests an experimental wider window and
+`TF_QWEN27_COPIES=1` enables lane context copies. Defaults remain 16 and copies off until served qualification.
+`TF_QWEN27_LANES=0` selects the legacy lone serial loop; its 16-row width and copy policy remain independent of
+those lane switches. Startup logs the effective lone loop and width beside the configured lane window and copies.
+The lane switch accepts only 0 or 1; the copy switch accepts only 0 or 1. Invalid settings name their variable.
+
 ## Weights other than 4-bit
 
 The M5 lane kernels accept MLX affine 2-, 3-, 4-, 5-, 6- and 8-bit projections in groups of 64.
@@ -90,9 +105,9 @@ quality comparisons are TBD [release-0.3.5].
 
 ## CUDA
 
-This section is the Python engine's (0.6.6). The native CUDA engine reads only MLX affine checkpoints so far: the
-NVFP4 and EXL3 readers below have not been ported to it (1.1.0 carries the shared EXL3 module of #832, which the
-27B does not read through yet).
+This section is the Python engine's (0.6.6). The native CUDA engine reads the MLX affine checkpoints, ModelOpt
+NVFP4 and FP8 exports, and turboderp's EXL3 packs through the shared EXL3 module of #832; its own measurements are
+not the ones below.
 
 On CUDA the 27B serves NVFP4 and EXL3 checkpoints, and the MLX 4-bit checkpoint as the portable option: the same
 files a Mac serves, and the only format two ranks read. `tensorfold serve` loads the checkpoint you name; it picks
@@ -291,3 +306,14 @@ provenance object with `--source` to
 Kernel tests check rows alone and in windows, tree paths and committed state. Release checks must also
 compare drafted/serial, resumed/fresh and concurrent/solo requests with thinking on and off and tools.
 Decode rate, prefill, concurrency and peak-memory results are TBD [release-0.3.5].
+
+### Long-document prompt reuse
+
+The lane cache can keep one additional state inside a final user message of at least 8,192 tokens. It leaves
+at least 2,048 tokens outside the snapshot key for a different question following the same document. Qwen27
+Metal chooses an existing request chunk start, so the optional prompt bank and its fallback both already
+cut there. A direct caller supplying no chunk starts skips this optional state instead of guessing a cut.
+Endpoint, rewind and shared states have priority within the same byte and slot caps. Retained-state occupancy
+is published in `tensorfold:prompt_cache_states` and `tensorfold:prompt_cache_bytes`; restored tokens also count
+in `tensorfold:prompt_tokens_cached_total`. Synthetic host checks cover the two-request pattern and exact
+output. Real-model parity and TTFT for this state still need the Metal gate.

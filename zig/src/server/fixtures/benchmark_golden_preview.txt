@@ -73,6 +73,7 @@
   "schema_version": 1,
   "settings": {
     "context_tokens": null,
+    "kv_cache": null,
     "managed": false,
     "rank_count": null,
     "repetitions": 1,

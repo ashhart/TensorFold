@@ -121,6 +121,34 @@ struct MlxDecoder {
     __device__ static float fold_scale(float acc, float dot, float scale) { return fmaf(dot, scale, acc); }
     __device__ static float fold_bias(float acc, float sum_x, float bias) { return fmaf(sum_x, bias, acc); }
 
+    // A non-finite stream sum: replay full groups only when an actual operand is non-finite.
+    template <typename T>
+    __device__ __attribute__((always_inline)) static inline float repair_stream(const Args& a, const typename T::elem* x,
+                                                                   int col, float original) {
+        const int groups = a.k / a.group;
+        const int words_row = row_words<int>(a);
+        const uint32_t* w = a.words + static_cast<long long>(col) * words_row;
+        bool exceptional = false;
+        double y = 0.0;
+        for (int g = 0; g < groups; ++g) {
+            const long long at = static_cast<long long>(col) * groups + g;
+            const double scale = a.scale[at];
+            const double bias = a.bias[at];
+            exceptional |= !__builtin_isfinite(scale) || !__builtin_isfinite(bias);
+            double qx = 0.0;
+            double xs = 0.0;
+            for (int k = g * a.group; k < (g + 1) * a.group; ++k) {
+                const double v = static_cast<float>(x[k]);
+                const double q = affine_code(w, k, BITS, words_row);
+                exceptional |= !__builtin_isfinite(v);
+                qx += q * v;
+                xs += v;
+            }
+            y += scale * qx + bias * xs;
+        }
+        return exceptional ? static_cast<float>(y) : original;
+    }
+
     // ---- the decode stream tile: a lane owns a 32-code chunk, its pairs are made with a few bit operations ----
 
     // Bytes the chunk's loads are aligned to when they are wide (16 for 4-word multiples, 8 for even, else by word).

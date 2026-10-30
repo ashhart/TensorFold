@@ -67,10 +67,28 @@ fn role(m: Value) []const u8 {
     return m.strField("role") orelse "";
 }
 
-/// A message's text: its content string, or its text parts joined.
-pub fn text(m: Value) []const u8 {
+/// A message's words: its content string, or its text parts joined with nothing between them.
+pub fn text(a: Allocator, m: Value) Allocator.Error![]const u8 {
     const c = m.get("content") orelse return "";
-    return if (c == .string) c.string else "";
+    if (c == .string) return c.string;
+    if (c != .array) return "";
+    var buf: std.ArrayList(u8) = .empty;
+    var one: ?[]const u8 = null;
+    for (c.array) |part| {
+        if (part != .object) continue;
+        const kind = part.get("type") orelse continue;
+        if (kind != .string or !std.mem.eql(u8, kind.string, "text")) continue;
+        const t = part.get("text") orelse continue;
+        if (t != .string) continue;
+        if (one == null and buf.items.len == 0) {
+            one = t.string;
+            continue;
+        }
+        if (buf.items.len == 0) if (one) |s| try buf.appendSlice(a, s);
+        one = null;
+        try buf.appendSlice(a, t.string);
+    }
+    return if (buf.items.len > 0) buf.items else one orelse "";
 }
 
 /// Folds `s` into `h` with runs of whitespace as one space and the ends trimmed, as clients reshape whitespace.
@@ -126,15 +144,19 @@ fn sorted(a: Allocator, v: Value) Allocator.Error!Value {
 }
 
 /// The key of the assistant reply at `i`: the user turn before it, its prose, and its first call.
-pub fn replyKey(a: Allocator, messages: []const Value, i: usize) u64 {
+pub fn replyKey(a: Allocator, messages: []const Value, i: usize) Allocator.Error!u64 {
     var h: std.hash.Wyhash = .init(0x636f727468656f6e);
+    var user: []const u8 = "";
     var j = i;
-    const user = while (j > 0) {
+    while (j > 0) {
         j -= 1;
-        if (std.mem.eql(u8, role(messages[j]), "user")) break text(messages[j]);
-    } else "";
+        if (std.mem.eql(u8, role(messages[j]), "user")) {
+            user = try text(a, messages[j]);
+            break;
+        }
+    }
     foldText(&h, user);
-    foldText(&h, text(messages[i]));
+    foldText(&h, try text(a, messages[i]));
     if (messages[i].get("tool_calls")) |calls| if (calls == .array and calls.array.len > 0) {
         const f = calls.array[0].get("function") orelse Value.null;
         h.update(f.strField("name") orelse "");
@@ -145,7 +167,7 @@ pub fn replyKey(a: Allocator, messages: []const Value, i: usize) u64 {
 }
 
 /// The key of the latest user turn: its text and position, so a check runs once per turn.
-pub fn userKey(messages: []const Value) u64 {
+pub fn userKey(a: Allocator, messages: []const Value) Allocator.Error!u64 {
     var h: std.hash.Wyhash = .init(0x75736572);
     var n: usize = 0;
     for (messages) |m| if (std.mem.eql(u8, role(m), "user")) {
@@ -155,7 +177,7 @@ pub fn userKey(messages: []const Value) u64 {
     while (j > 0) {
         j -= 1;
         if (std.mem.eql(u8, role(messages[j]), "user")) {
-            foldText(&h, text(messages[j]));
+            foldText(&h, try text(a, messages[j]));
             break;
         }
     }
@@ -168,7 +190,7 @@ pub fn splice(a: Allocator, store: *Store, messages: []const Value) Allocator.Er
     var out: std.ArrayList(Value) = .empty;
     var found = false;
     for (messages, 0..) |m, i| {
-        if (std.mem.eql(u8, role(m), "assistant")) if (store.get(a, replyKey(a, messages, i))) |stored| {
+        if (std.mem.eql(u8, role(m), "assistant")) if (store.get(a, try replyKey(a, messages, i))) |stored| {
             switch (json.parseText(a, stored) catch return error.OutOfMemory) {
                 .ok => |v| if (v == .array) {
                     if (!found) try out.appendSlice(a, messages[0..i]);
@@ -197,7 +219,7 @@ test "a kept exchange goes back in front of its reply, whitespace and argument o
     var store: Store = .{ .gpa = std.testing.allocator, .io = std.testing.io };
     defer store.deinit();
     const turn = [_]Value{ try msg(a, "user", "What changed in Zig 0.17?"), try msg(a, "assistant", "It added  std.Io.\n") };
-    store.put(replyKey(a, &turn, 1), "[{\"role\": \"tool\", \"content\": \"notes\"}]");
+    store.put(try replyKey(a, &turn, 1), "[{\"role\": \"tool\", \"content\": \"notes\"}]");
     const later = [_]Value{ try msg(a, "system", "s"), try msg(a, "user", "What changed in Zig 0.17?"), try msg(a, "assistant", " It added std.Io."), try msg(a, "user", "And 0.16?") };
     const out = try splice(a, &store, &later);
     try std.testing.expectEqual(@as(usize, 5), out.len);
@@ -208,7 +230,72 @@ test "a kept exchange goes back in front of its reply, whitespace and argument o
     const call_a = (try json.parseText(a, "{\"role\": \"assistant\", \"content\": \"\", \"tool_calls\": [{\"id\": \"c1\", \"function\": {\"name\": \"bash\", \"arguments\": \"{\\\"b\\\": 1, \\\"a\\\": 2}\"}}]}")).ok;
     const call_b = (try json.parseText(a, "{\"role\": \"assistant\", \"content\": null, \"tool_calls\": [{\"id\": \"zz\", \"function\": {\"name\": \"bash\", \"arguments\": {\"a\": 2, \"b\": 1}}}]}")).ok;
     const u = try msg(a, "user", "run it");
-    try std.testing.expectEqual(replyKey(a, &.{ u, call_a }, 1), replyKey(a, &.{ u, call_b }, 1));
+    try std.testing.expectEqual(try replyKey(a, &.{ u, call_a }, 1), try replyKey(a, &.{ u, call_b }, 1));
+}
+
+fn textPart(a: Allocator, words: []const u8) !Value {
+    const p = try json.newObject(a);
+    try p.put(a, "type", .{ .string = "text" });
+    try p.put(a, "text", .{ .string = words });
+    return .{ .object = p };
+}
+
+fn imagePart(a: Allocator) !Value {
+    const url = try json.newObject(a);
+    try url.put(a, "url", .{ .string = "https://images.example/pic.png" });
+    const p = try json.newObject(a);
+    try p.put(a, "type", .{ .string = "image_url" });
+    try p.put(a, "image_url", .{ .object = url });
+    return .{ .object = p };
+}
+
+fn contentMessage(a: Allocator, r: []const u8, parts: []const Value) !Value {
+    const o = try json.newObject(a);
+    try o.put(a, "role", .{ .string = r });
+    const owned = try a.alloc(Value, parts.len);
+    @memcpy(owned, parts);
+    try o.put(a, "content", .{ .array = owned });
+    return .{ .object = o };
+}
+
+test "text joins well-formed text parts in order with nothing between them" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const message = try contentMessage(a, "user", &.{
+        try textPart(a, "PART-ONE-"),
+        try textPart(a, "PART-TWO-"),
+    });
+    try std.testing.expectEqualStrings("PART-ONE-PART-TWO-", try text(a, message));
+}
+
+test "an image part adds no words beside the text parts" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const message = try contentMessage(a, "user", &.{
+        try textPart(a, "PART-ONE-"),
+        try imagePart(a),
+        try textPart(a, "PART-TWO-"),
+    });
+    const words = try text(a, message);
+    try std.testing.expectEqualStrings("PART-ONE-PART-TWO-", words);
+    try std.testing.expect(std.mem.indexOf(u8, words, "https://images.example/pic.png") == null);
+}
+
+test "a content-part user turn keys the same reply and check as its joined string" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const words = "What changed in Zig 0.17?";
+    const parts = try contentMessage(a, "user", &.{
+        try textPart(a, "What changed in "),
+        try textPart(a, "Zig 0.17?"),
+    });
+    const plain = try msg(a, "user", words);
+    const assistant = try msg(a, "assistant", "It added std.Io.");
+    try std.testing.expectEqual(try replyKey(a, &.{ plain, assistant }, 1), try replyKey(a, &.{ parts, assistant }, 1));
+    try std.testing.expectEqual(try userKey(a, &.{plain}), try userKey(a, &.{parts}));
 }
 
 test "the store drops its oldest entries and checks run once a turn" {

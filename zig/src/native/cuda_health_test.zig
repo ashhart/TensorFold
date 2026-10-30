@@ -87,3 +87,68 @@ fn eager(comptime Host: type, comptime serve: anytype) !void {
     try std.testing.expect(status.healthy and !status.warming);
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
 }
+
+/// Real native readiness composes the context fault with family readiness and the LaneHost admission check.
+pub fn context(comptime H: type, comptime serve: anytype) !void {
+    const cuda = @import("cuda");
+    const Gpu = @import("cuda_load_gpu.zig").Gpu;
+    const Fake = struct {
+        fn device(out: *cuda.abi.Device, _: c_int) callconv(.c) cuda.abi.Result {
+            out.* = 0;
+            return 0;
+        }
+        fn retain(out: *cuda.abi.Context, _: cuda.abi.Device) callconv(.c) cuda.abi.Result {
+            out.* = @ptrFromInt(0x3254);
+            return 0;
+        }
+        fn current(_: cuda.abi.Context) callconv(.c) cuda.abi.Result {
+            return 0;
+        }
+        fn release(_: cuda.abi.Device) callconv(.c) cuda.abi.Result {
+            return 0;
+        }
+        fn sync() callconv(.c) cuda.abi.Result {
+            return 0;
+        }
+        fn event(_: *anyopaque, _: api.Id, _: *const api.Event) void {
+            @panic("faulted CUDA must refuse queue admission");
+        }
+    };
+    var gpu: Gpu = undefined;
+    gpu.driver.api.cuDeviceGet = Fake.device;
+    gpu.driver.api.cuDevicePrimaryCtxRetain = Fake.retain;
+    gpu.driver.api.cuCtxSetCurrent = Fake.current;
+    gpu.driver.api.cuDevicePrimaryCtxRelease_v2 = Fake.release;
+    gpu.driver.api.cuCtxSynchronize = Fake.sync;
+    const previous = cuda.copy_source.current();
+    defer cuda.copy_source.setCurrent(previous);
+    gpu.ctx = try cuda.Context.init(&gpu.driver, 0);
+    defer gpu.ctx.deinit();
+    const a = std.testing.allocator;
+    var backend: lanes.fake.Fake = .{ .gpa = a };
+    defer backend.deinit();
+    var dummy: u8 = 0;
+    var h: H = .{ .gpa = a, .gpu = &gpu, .family = &dummy, .release = undefined, .inner = backend.backend(), .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined };
+    try serve(&h, std.testing.io, .{}, 1, .{ .lanes = 1 }, null);
+    defer {
+        h.host.stop();
+        h.core.deinit();
+        h.cfg.deinit(a);
+    }
+    const engine = h.host.engine();
+    var status: api.Status = .{};
+    engine.status(&status, &.{});
+    try std.testing.expect(status.healthy);
+    try std.testing.expectError(error.CudaContextLost, gpu.driver.result(700));
+    try gpu.driver.result(0); // a later successful query cannot repair the context
+    engine.status(&status, &.{});
+    try std.testing.expect(!status.healthy);
+    const request: api.Request = .{ .prompt = &.{1}, .max_tokens = 1 };
+    try std.testing.expectError(error.Closed, engine.submit(1, &request, .{ .ctx = &dummy, .event = Fake.event }));
+    try std.testing.expectEqual(@as(usize, 0), h.host.queued.items.len);
+}
+
+test "CUDA context health: sticky driver failure reaches native status and refuses admission" {
+    const Host = @import("cuda.zig").Host;
+    try context(Host, Host.serve);
+}

@@ -37,6 +37,7 @@ pub const quant = @import("core").quant;
 pub const registry = @import("core").registry;
 pub const collective = @import("collective.zig");
 pub const moe = @import("moe.zig");
+pub const moe_nemotron = @import("moe_nemotron.zig");
 pub const reduce = @import("reduce.zig");
 /// Joins this rank's tensor-parallel group: RCCL's (comm/), behind collective.zig.
 pub const joinGroup = @import("comm/group.zig").join;
@@ -57,6 +58,7 @@ test {
     _ = collective;
     _ = graph_cache;
     _ = moe;
+    _ = moe_nemotron;
     _ = reduce;
     _ = @import("comm/rccl.zig");
     _ = @import("comm/link.zig");
@@ -67,4 +69,6 @@ test {
     _ = @import("startup.zig");
     _ = @import("vote.zig");
     _ = @import("comm/loopback.zig");
+    _ = @import("tuning/search.zig");
+    _ = @import("kernel_tests/affine/cells.zig");
 }

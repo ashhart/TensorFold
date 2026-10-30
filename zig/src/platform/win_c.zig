@@ -105,7 +105,7 @@ extern "kernel32" fn CreateHardLinkW(new: [*:0]const u16, existing: [*:0]const u
 extern "kernel32" fn CreateSymbolicLinkW(link: [*:0]const u16, target: [*:0]const u16, flags: u32) callconv(.winapi) u8;
 extern "kernel32" fn CloseHandle(h: HANDLE) callconv(.winapi) BOOL;
 
-extern "c" fn _errno() *c_int;
+pub extern "c" fn _errno() *c_int;
 extern "c" fn _open_osfhandle(h: isize, flags: c_int) c_int;
 extern "c" fn _get_osfhandle(fd: c_int) isize;
 extern "c" fn _close(fd: c_int) c_int;

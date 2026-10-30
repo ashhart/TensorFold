@@ -337,7 +337,7 @@ const Ds = struct {
             try e.glue("exchange_f32", &.{ try e.buf("L.moe", .{}, .f32, &.{ n, D }), try e.buf("w.recv.moe", .{}, .bf16, &.{ e.o.world, n, D }) });
         }
         try d.final();
-        const V: i64 = d.cfg().vocab / e.o.world;
+        const V: i64 = (try @import("partition.zig").share(d.cfg().vocab, e.o.rank, e.o.world)).len;
         const logits = try e.buf("w.ds.logits", .{}, .f32, &.{ n, V });
         try e.upstream("head", try e.buf("w.out", .{}, .bf16, &.{ n, D }), D, V, logits);
         try e.glue("ds_out", &.{ logits, try e.buf("L.mhc.c", .{}, .bf16, &.{ n, D }) });

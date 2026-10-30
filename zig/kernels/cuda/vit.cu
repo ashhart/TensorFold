@@ -4,7 +4,9 @@
 #include <math.h>
 #include <stdint.h>
 
-#include "glue_math.cuh"
+#include "common/glue_math.cuh"
+#include "vit_norm.cuh"
+#include "vit_gemma.cuh"
 
 using namespace tf_glue;
 
@@ -12,17 +14,7 @@ namespace {
 
 constexpr int NT = 256;    // threads a row block
 constexpr int MAXE = 8;    // elements a thread holds: LayerNorm rows up to NT * MAXE = 2048 wide
-
-// A block's values summed: warp butterflies, then the warps in order; every thread gets the sum.
-__device__ __forceinline__ float block_sum(float v, float* red) {
-    v = warp_sum(v);
-    if ((threadIdx.x & 31) == 0) red[threadIdx.x >> 5] = v;
-    __syncthreads();
-    float s = red[0];
-    for (int w = 1; w < NT / 32; ++w) s = __fadd_rn(s, red[w]);
-    __syncthreads();
-    return s;
-}
+constexpr int MAXE_WIDE = 32;
 
 // torch's GELU kernels in fp32: the tanh approximation, and the exact form through erf.
 __device__ __forceinline__ float gelu_tanh(float x) {
@@ -38,41 +30,31 @@ __device__ __forceinline__ float gelu_erf(float x) {
     return __fmul_rn(__fmul_rn(x, 0.5f), __fadd_rn(1.0f, erff(__fmul_rn(x, alpha))));
 }
 
+// bf16(act(v)), then bf16(R[at] + v) when R; v is already rounded to bf16.
+__device__ __forceinline__ __nv_bfloat16 pointwise_at(float v, const __nv_bfloat16* R, int64_t at, int act) {
+    if (act == 1) v = rbf(gelu_tanh(v));
+    if (act == 2) v = rbf(gelu_erf(v));
+    if (act == 3) v = rbf(v > 0.0f ? __fmul_rn(v, v) : 0.0f);
+    return __float2bfloat16_rn(R ? __fadd_rn(bf(R[at]), v) : v);
+}
+
 }  // namespace
 
-// Block a row: y = bf16((x - mean) * rstd * w + b), mean and variance in two fixed-order passes.
+// Block a row: y = bf16((x - mean) * rstd * w + b), mean and variance in two fixed-order passes (vit_norm.cuh).
 extern "C" __global__ void __launch_bounds__(NT) tf_vit_layer_norm(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ W,
                                                                        const __nv_bfloat16* __restrict__ B, __nv_bfloat16* __restrict__ Y, int D,
                                                                        float eps) {
-    __shared__ float red[NT / 32];
-    const int64_t at = static_cast<int64_t>(blockIdx.x) * D;
-    float x[MAXE];
-    float acc = 0.0f;
-#pragma unroll
-    for (int k = 0; k < MAXE; ++k) {
-        const int i = threadIdx.x + k * NT;
-        if (i >= D) continue;
-        x[k] = bf(X[at + i]);
-        acc = __fadd_rn(acc, x[k]);
-    }
-    const float mean = __fdiv_rn(block_sum(acc, red), static_cast<float>(D));
-    acc = 0.0f;
-#pragma unroll
-    for (int k = 0; k < MAXE; ++k) {
-        if (threadIdx.x + k * NT >= D) continue;
-        x[k] = __fsub_rn(x[k], mean);
-        acc = __fadd_rn(acc, __fmul_rn(x[k], x[k]));
-    }
-    const float var = __fdiv_rn(block_sum(acc, red), static_cast<float>(D));
-    const float rstd = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(var, eps)));
-#pragma unroll
-    for (int k = 0; k < MAXE; ++k) {
-        const int i = threadIdx.x + k * NT;
-        if (i < D) Y[at + i] = __float2bfloat16_rn(__fadd_rn(__fmul_rn(__fmul_rn(x[k], rstd), bf(W[i])), bf(B[i])));
-    }
+    tf_vit_norm::layer_norm<MAXE>(X, W, B, Y, D, eps, tf_vit_norm::ALL);
 }
 
-// Block (row, column block): o = bf16(acc + bias), for a Linear whose cuBLASLt algorithm cannot fuse its bias.
+// The same rows up to NT * MAXE_WIDE = 8192 wide (Gemma 4 12B's image embedder: 6912 and 3840).
+extern "C" __global__ void __launch_bounds__(NT) tf_vit_layer_norm_wide(const __nv_bfloat16* __restrict__ X,
+                                                                            const __nv_bfloat16* __restrict__ W,
+                                                                            const __nv_bfloat16* __restrict__ B,
+                                                                            __nv_bfloat16* __restrict__ Y, int D, float eps) {
+    tf_vit_norm::layer_norm<MAXE_WIDE>(X, W, B, Y, D, eps, tf_vit_norm::ALL);
+}
+
 extern "C" __global__ void __launch_bounds__(NT) tf_vit_bias(const float* __restrict__ ACC, const __nv_bfloat16* __restrict__ BIAS,
                                                                  __nv_bfloat16* __restrict__ O, int N) {
     const int c = blockIdx.y * NT + threadIdx.x;
@@ -86,11 +68,16 @@ extern "C" __global__ void __launch_bounds__(NT) tf_vit_pointwise(const __nv_bfl
                                                                       int64_t count, int act) {
     const int64_t at = static_cast<int64_t>(blockIdx.x) * NT + threadIdx.x;
     if (at >= count) return;
-    float v = bf(X[at]);
-    if (act == 1) v = rbf(gelu_tanh(v));
-    if (act == 2) v = rbf(gelu_erf(v));
-    if (act == 3) v = rbf(v > 0.0f ? __fmul_rn(v, v) : 0.0f);
-    O[at] = __float2bfloat16_rn(R ? __fadd_rn(bf(R[at]), v) : v);
+    O[at] = pointwise_at(bf(X[at]), R, at, act);
+}
+
+// Block (row, column block): bias then pointwise, keeping the intermediate bf16 rounding in a register.
+extern "C" __global__ void __launch_bounds__(NT) tf_vit_bias_act(const float* __restrict__ ACC, const __nv_bfloat16* __restrict__ BIAS,
+                                                                 const __nv_bfloat16* R, __nv_bfloat16* O, int N, int act) {
+    const int c = blockIdx.y * NT + threadIdx.x;
+    if (c >= N) return;
+    const int64_t at = static_cast<int64_t>(blockIdx.x) * N + c;
+    O[at] = pointwise_at(rbf(__fadd_rn(ACC[at], bf(BIAS[c]))), R, at, act);
 }
 
 // Block an output row (i, j) of an h x w grid: rows (2i, 2j), (2i, 2j+1), (2i+1, 2j), (2i+1, 2j+1) side by side.
@@ -146,4 +133,22 @@ extern "C" __global__ void __launch_bounds__(NT) tf_vit_position_add(const __nv_
         const float p = __fadd_rn(__fmul_rn(bf(t00[c]), w00), __fadd_rn(__fmul_rn(bf(t01[c]), w01), far));
         O[at + c] = __float2bfloat16_rn(__fadd_rn(rbf(p), bf(X[at + c])));
     }
+}
+
+// Gemma 4 31B's tower glue (vit_gemma.cuh): q, k, v norms and the 2D RoPE in place, torch's GeGLU, pooling.
+extern "C" __global__ void __launch_bounds__(32) tf_vit_g4_qkv(__nv_bfloat16* qkv, const __nv_bfloat16* qw, const __nv_bfloat16* kw,
+                                                            const __nv_bfloat16* cs, const __nv_bfloat16* sn, int P, int H, int D,
+                                                            float eps) {
+    tf_vit_g4::qkv_norm_rope(qkv, qw, kw, cs, sn, P, H, D, eps, tf_vit_g4::QKV_ALL);
+}
+
+extern "C" __global__ void __launch_bounds__(NT) tf_vit_g4_gelu_mul(const __nv_bfloat16* gate, const __nv_bfloat16* up,
+                                                                    __nv_bfloat16* out, long long count) {
+    tf_vit_g4::gelu_mul(gate, up, out, count, tf_vit_g4::GELU_ALL);
+}
+
+extern "C" __global__ void __launch_bounds__(NT) tf_vit_g4_pool(const __nv_bfloat16* x, const __nv_bfloat16* bias,
+                                                                const __nv_bfloat16* scale, __nv_bfloat16* out, int gw, int C,
+                                                                float root) {
+    tf_vit_g4::pool_std(x, bias, scale, out, gw, C, root, tf_vit_g4::POOL_ALL);
 }

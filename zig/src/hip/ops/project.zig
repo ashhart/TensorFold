@@ -58,6 +58,136 @@ pub fn projectRoutedAct(o: Ops, x: Tensor, proj: Projection, items: u64, count: 
     }
 }
 
+/// `project` (fp32) then tf_nemo_relu2 into `out`, in one launch; false where another tile takes the product.
+pub fn projectRelu2(o: Ops, x: Tensor, proj: Projection, m: usize, out: Tensor) Error!bool {
+    const h = switch (proj.handle) {
+        .mlx => |h| h,
+        .dense => return false,
+    };
+    const w = affineOf(proj, h);
+    try w.check();
+    if (o.prefill or !o.fused() or m == 0 or x.kind == .f32 or out.kind != x.kind) return false;
+    const fp16 = x.kind == .f16;
+    if ((fp16 and o.bf16) or (!fp16 and !o.bf16)) return false;
+    const tile = o.l.affine.choose(.project, .decode, shapeOf(o, x, w, m)) orelse return false;
+    if (tile.family != .stream) return false;
+    const kind = w.tables.table();
+    try o.l.affine.relu2Go(o.l.r, .{
+        .x = x.ptr,
+        .words = w.words,
+        .scale = .{ .p = w.scale, .kind = kind },
+        .bias = .{ .p = w.bias, .kind = kind },
+        .out = 0,
+        .m = int(m),
+        .n = int(w.n),
+        .k = int(w.k),
+        .bits = w.bits,
+        .group = w.group,
+        .fp16 = @intFromBool(fp16),
+        .out16 = out.ptr,
+    }, 1, o.stream);
+    return true;
+}
+
+/// `projectRouted` then tf_nemo_relu2 into `out` (pairs, N), in one launch; false where another tile takes it.
+pub fn projectRoutedRelu2(
+    o: Ops,
+    x: Tensor,
+    proj: Projection,
+    items: u64,
+    count: usize,
+    members: u64,
+    x_div: usize,
+    rows: usize,
+    out: Tensor,
+) Error!bool {
+    const h = switch (proj.handle) {
+        .mlx => |h| h,
+        .dense => return false,
+    };
+    const w = affineOf(proj, h);
+    try w.check();
+    if (o.prefill or !o.fused() or x.kind == .f32 or out.kind != x.kind) return false;
+    return o.l.affine.routedRelu2(o.l.r, .{
+        .x = x.ptr,
+        .words = w.words,
+        .scale = .{ .p = w.scale, .kind = w.tables.table() },
+        .bias = .{ .p = w.bias, .kind = w.tables.table() },
+        .out = 0,
+        .m = int(rows),
+        .n = int(w.n),
+        .k = int(w.k),
+        .bits = w.bits,
+        .group = w.group,
+        .fp16 = @intFromBool(x.kind == .f16),
+        .route = .{ .items = items, .members = members, .x_div = int(x_div) },
+        .out16 = out.ptr,
+    }, int(count), o.stream);
+}
+
+/// `projectRoutedRelu2` into `out` and `projectRelu2` of `plain` into `plain_out` in one launch; false where it can't.
+pub fn projectRoutedPlainRelu2(
+    o: Ops,
+    x: Tensor,
+    routed: Projection,
+    items: u64,
+    count: usize,
+    members: u64,
+    x_div: usize,
+    rows: usize,
+    out: Tensor,
+    plain: Projection,
+    plain_out: Tensor,
+) Error!bool {
+    const ha = switch (routed.handle) {
+        .mlx => |h| h,
+        .dense => return false,
+    };
+    const hb = switch (plain.handle) {
+        .mlx => |h| h,
+        .dense => return false,
+    };
+    const wa = affineOf(routed, ha);
+    const wb = affineOf(plain, hb);
+    try wa.check();
+    try wb.check();
+    if (o.prefill or !o.window or !o.fused() or x.kind == .f32) return false;
+    if (out.kind != x.kind or plain_out.kind != x.kind) return false;
+    if (rows != 1) return false;
+    const fp16 = x.kind == .f16;
+    if ((fp16 and o.bf16) or (!fp16 and !o.bf16)) return false;
+    const a: affine_launch.Arg = .{
+        .x = x.ptr,
+        .words = wa.words,
+        .scale = .{ .p = wa.scale, .kind = wa.tables.table() },
+        .bias = .{ .p = wa.bias, .kind = wa.tables.table() },
+        .out = 0,
+        .m = 1,
+        .n = int(wa.n),
+        .k = int(wa.k),
+        .bits = wa.bits,
+        .group = wa.group,
+        .fp16 = @intFromBool(fp16),
+        .route = .{ .items = items, .members = members, .x_div = int(x_div) },
+        .out16 = out.ptr,
+    };
+    const b: affine_launch.Arg = .{
+        .x = x.ptr,
+        .words = wb.words,
+        .scale = .{ .p = wb.scale, .kind = wb.tables.table() },
+        .bias = .{ .p = wb.bias, .kind = wb.tables.table() },
+        .out = 0,
+        .m = 1,
+        .n = int(wb.n),
+        .k = int(wb.k),
+        .bits = wb.bits,
+        .group = wb.group,
+        .fp16 = @intFromBool(fp16),
+        .out16 = plain_out.ptr,
+    };
+    return @import("../launches/affine_pair.zig").relu2PairGo(&o.l.affine, o.l.r, a, b, int(count), o.stream);
+}
+
 /// matmul_routed on a stack of experts: every item in one launch; out (pairs, N) fp32.
 pub fn projectRouted(o: Ops, x: Tensor, proj: Projection, items: u64, count: usize, members: u64, pairs: usize, x_div: usize, rows: usize) Error!u64 {
     switch (proj.handle) {
@@ -204,7 +334,7 @@ pub fn affineRouted(o: Ops, x: Tensor, w: Affine, items: u64, count: usize, memb
     if (o.prefill) {
         const z = o.l;
         const kind = w.tables.table();
-        try z.affine.prefillLaunch(z.r, .{ .x = x.ptr, .words = w.words, .scale = .{ .p = w.scale, .kind = kind }, .bias = .{ .p = w.bias, .kind = kind }, .out = out, .m = int(rows), .n = int(w.n), .k = int(w.k), .bits = int(w.bits), .group = int(w.group), .fp16 = @intFromBool(x.kind == .f16), .route = .{ .items = items, .members = members, .x_div = int(x_div) } }, o.stream, int(count));
+        try z.affine.prefillLaunch(z.r, .{ .x = x.ptr, .words = w.words, .scale = .{ .p = w.scale, .kind = kind }, .bias = .{ .p = w.bias, .kind = kind }, .out = out, .m = int(rows), .n = int(w.n), .k = int(w.k), .bits = int(w.bits), .group = int(w.group), .fp16 = @intFromBool(x.kind == .f16), .route = .{ .items = items, .members = members, .x_div = int(x_div) } }, o.stream, int(count), int(pairs));
         return out;
     }
     try o.l.tf_affine_routed(p(x.ptr), p(w.words), p(w.scale), p(w.bias), w.tables.table(), p(out), i(items), int(count), i(members), int(x_div), int(rows), int(w.n), int(w.k), w.bits, w.group, @intFromBool(x.kind == .f16), o.stream);

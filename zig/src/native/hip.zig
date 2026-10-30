@@ -6,12 +6,13 @@ const api = @import("engine_api");
 const lanes = @import("lanes");
 const qwen35 = @import("qwen3_5");
 const flashnext = @import("flashnext");
+const nemotron = @import("nemotron");
 const Allocator = std.mem.Allocator;
 const admission = hip.admission;
 const modelContext = admission.modelContext;
 
 /// The HIP families: namespaces with `model_type`, `formats`, `default_context`, `prefill_step`, `open` and `follow`.
-const registry = .{ qwen35.native, qwen35.native_moe, flashnext.native };
+const registry = .{ qwen35.native, qwen35.native_moe, flashnext.native, nemotron.native };
 
 pub const backends: []const []const u8 = &.{"hip"};
 /// No per-thread alternate signal stack: its thread-local leaves RCCL's and HIP's threads too little stack to start.
@@ -79,9 +80,19 @@ const Ready = struct {
     }
 };
 
+/// Why the HIP engines cannot keep fp8 caches yet: every family's caches stay 16-bit.
+const kv8_refusal = "--kv-cache fp8 keeps fp8 caches on CUDA; the HIP engines keep 16-bit caches: serve without it";
+
+/// The cache flags this backend cannot honour, refused on every rank before a family loads.
+fn cacheRefused(o: api.Open) ?[]const u8 {
+    if (o.loops != null) return "--loops sets Dory's recurrent passes, served on CUDA: the HIP engines run no looped model";
+    return if (o.kv8) kv8_refusal else null;
+}
+
 /// Resolves the policy on rank 0 (defaults, flags, old variables, TF_POLICY), joins the group, sends it to the others.
 fn ready(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) (Refused || Allocator.Error)!Ready {
     try checkGroup(a, o, problem);
+    if (cacheRefused(o)) |why| return refuse(a, problem, "{s}", .{why});
     const native = modelContext(a, io, o.dir);
     const window = admission.contextWindow(o.context, native, F.default_context) catch |err| return switch (err) {
         error.Negative => refuse(a, problem, "--context {d}: a token count, or 0 for the model's window", .{o.context.?}),
@@ -175,6 +186,13 @@ fn join(
     };
 }
 
+/// The family's refusal of --slide or --mtp-confidence, when it names one.
+fn flagRefused(comptime F: type, o: api.Open) ?[]const u8 {
+    if (o.slide and @hasDecl(F, "slide_refusal")) return F.slide_refusal;
+    if (o.mtp_confidence != null and @hasDecl(F, "confidence_refusal")) return F.confidence_refusal;
+    return null;
+}
+
 /// One loaded model behind the lane host: everything the engine thread reads lives here.
 const Host = struct {
     gpa: Allocator,
@@ -209,6 +227,10 @@ fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const report = @import("sys").optional_libraries.atBoundary();
     defer report.deinit();
+    if (o.fsrRefusal("hip")) |why| {
+        problem.* = why;
+        return null;
+    }
     inline for (registry) |F| {
         if (std.mem.eql(u8, o.model_type, F.model_type)) return openWith(F, a, gpa, io, o, problem);
     }
@@ -217,6 +239,10 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
 }
 
 fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (flagRefused(F, o)) |why| {
+        problem.* = why;
+        return null;
+    }
     const r = ready(F, a, gpa, io, o, problem) catch |err| switch (err) {
         error.Refused => return null,
         else => |x| return x,
@@ -253,6 +279,10 @@ pub fn follow(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[
     defer report.deinit();
     inline for (registry) |F| {
         if (std.mem.eql(u8, o.model_type, F.model_type)) {
+            if (flagRefused(F, o)) |why| {
+                problem.* = why;
+                return false;
+            }
             const r = ready(F, a, gpa, io, o, problem) catch |err| switch (err) {
                 error.Refused => return false,
                 else => |x| return x,
@@ -274,6 +304,34 @@ test "every registered family is listed for capabilities" {
     try std.testing.expectEqualStrings("qwen3_5", families[0].model_type);
     try std.testing.expectEqualStrings("qwen3_5_moe", families[1].model_type);
     try std.testing.expectEqualStrings("qwen4_exp", families[2].model_type);
+    try std.testing.expectEqualStrings("nemotron_h", families[3].model_type);
+}
+
+test "Nemotron refuses --slide and --mtp-confidence on HIP before it loads, and keeps a cap" {
+    const o: api.Open = .{ .dir = "d", .model_type = "nemotron_h", .slide = true };
+    try std.testing.expect(std.mem.indexOf(u8, flagRefused(nemotron.native, o).?, "--slide") != null);
+    const sure: api.Open = .{ .dir = "d", .model_type = "nemotron_h", .mtp_confidence = 0.5 };
+    try std.testing.expect(std.mem.indexOf(u8, flagRefused(nemotron.native, sure).?, "--mtp-confidence") != null);
+    const capped: api.Open = .{ .dir = "d", .model_type = "nemotron_h", .mtp_drafts = 1 };
+    try std.testing.expect(flagRefused(nemotron.native, capped) == null);
+    try std.testing.expect(flagRefused(nemotron.native, .{ .dir = "d", .model_type = "nemotron_h" }) == null);
+}
+
+test "a family that names a --slide or --mtp-confidence refusal is refused before it loads; the others are not" {
+    const Refuses = struct {
+        pub const slide_refusal = "--slide: this family does not learn on HIP";
+        pub const confidence_refusal = "--mtp-confidence: this family drafts by its costs on HIP";
+    };
+    const slid: api.Open = .{ .dir = "d", .model_type = "m", .slide = true };
+    const sure: api.Open = .{ .dir = "d", .model_type = "m", .mtp_confidence = 0.5 };
+    try std.testing.expectEqualStrings(Refuses.slide_refusal, flagRefused(Refuses, slid).?);
+    try std.testing.expectEqualStrings(Refuses.confidence_refusal, flagRefused(Refuses, sure).?);
+    try std.testing.expect(flagRefused(Refuses, .{ .dir = "d", .model_type = "m", .mtp_drafts = 2 }) == null);
+    try std.testing.expect(flagRefused(Refuses, .{ .dir = "d", .model_type = "m" }) == null);
+    inline for (.{ qwen35.native, qwen35.native_moe, flashnext.native }) |F| {
+        try std.testing.expect(flagRefused(F, slid) == null);
+        try std.testing.expect(flagRefused(F, sure) == null);
+    }
 }
 
 test "the group flags: one rank source, a supported world, a master past one rank, a rank inside the world" {
@@ -320,6 +378,12 @@ test "--drafter is refused before any load, on every rank, until the HIP engine 
     try std.testing.expectError(error.Refused, checkGroup(a, follower, &problem));
 }
 
+test "--kv-cache fp8 is refused by name on HIP; bf16 caches are not" {
+    const fp8: api.Open = .{ .dir = "d", .model_type = "qwen3_5", .kv8 = true };
+    try std.testing.expectEqualStrings(kv8_refusal, cacheRefused(fp8).?);
+    try std.testing.expect(cacheRefused(.{ .dir = "d", .model_type = "qwen3_5" }) == null);
+}
+
 test "matrix=on runs only where the matrix-core tiles exist; auto runs everywhere" {
     var on: hip.Policy = .{};
     try on.apply("matrix=on");
@@ -329,4 +393,8 @@ test "matrix=on runs only where the matrix-core tiles exist; auto runs everywher
     try std.testing.expect(matrixRefused(on, hip.Caps.of("gfx1030").?) != null);
     const auto: hip.Policy = .{};
     for ([_][]const u8{ "gfx1030", "gfx1100", "gfx1151", "gfx1200", "gfx1201" }) |name| try std.testing.expect(matrixRefused(auto, hip.Caps.of(name).?) == null);
+}
+
+test {
+    _ = @import("draft_sources_hip_test.zig");
 }

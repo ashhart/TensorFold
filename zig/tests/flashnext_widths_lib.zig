@@ -264,6 +264,13 @@ pub fn poisoned(device: mtl.Device, n: usize) !mtl.Buffer {
     return b;
 }
 
+/// The row limit an ungated launch reads, as rows_load's no_limit: i32 1 << 20 in 16 bytes, which no window reaches.
+pub fn noLimit(device: mtl.Device) !mtl.Buffer {
+    const b = try device.buffer(16, opts);
+    b.slice(i32, 1)[0] = 1 << 20;
+    return b;
+}
+
 /// A device buffer holding `bytes`.
 pub fn upload(device: mtl.Device, bytes: []const u8) !mtl.Buffer {
     const b = try device.buffer(@max(bytes.len, 16), opts);

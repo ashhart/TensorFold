@@ -6,10 +6,10 @@ Its CUDA EXL3 reader, two-rank flags and DFlash2 policies do not apply to the na
 Nor do its Mac settings. The native binary refuses `--ssd-experts` and reads `GLM_LOAD_LIMIT_GB` (in GB) where this
 page uses `TENSORFOLD_MEMORY_LIMIT_GB` (in GiB); the `TF_GLM_*` variables and the Python paths and modules below are
 that engine's too.
-The native binary serves GLM on two M5 Ultra Macs with MLX affine 4-bit/group-64 weights; it has no GLM CUDA backend yet.
-That is not an engine-only replacement for a CUDA EXL3 deployment.
-For native serving, use the [qualified model table](../../README.md#qualified-models) and
-[paired Metal runbook](../../RUNBOOK.md#flash-next-and-paired-metal-serving).
+The native binary serves GLM on two M5 Ultra Macs with MLX affine 4-bit/group-64 weights, and on CUDA ranks from
+NVIDIA's NVFP4 checkpoint and the EXL3/TR3 checkpoint ([GLM-5.3-Flash on CUDA](glm-5.3-flash-cuda.md)).
+For native serving, use the [qualified model table](../../README.md#pick-a-model), the
+[paired Metal runbook](../../RUNBOOK.md#flash-next-and-paired-metal-serving) and that page.
 @chadhurley25075-png wrote the Mac family in [#9](https://github.com/ashhart/TensorFold/pull/9), with fixes from
 @kingjamez, and its prompt path in [#39](https://github.com/ashhart/TensorFold/pull/39); the native engine runs
 the decode kernels of #9. [Credits](../credits.md) names the contributors to the CUDA engine and the Mac options below.
@@ -100,8 +100,8 @@ conversation takes the attention caches, a kept prompt's rows are saved. Kept st
 when it is less, and the memory estimate includes it. Earlier turns keep their reasoning in the prompt
 (`clear_thinking` false, zai-org's default), so an agent's next user message resumes from its previous tool loop
 instead of filling it again; `TF_GLM_CLEAR_THINKING=1` drops it, as the TR3 checkpoint's template does by default,
-and a request's `chat_template_kwargs.clear_thinking` wins over either. It serves one request at a time. Both ranks
-finish a started reply after a client disconnects.
+and a request's `chat_template_kwargs.clear_thinking` overrides either for that request. It serves one request at a
+time. Both ranks finish a started reply after a client disconnects.
 
 DFlash2 attends only its 2,048-row sliding window: a block pass reads only the window's tiles, and the drafter keeps
 its context in a ring of that window, its block and a tile (2,176 rows, 21 MiB a rank whatever the window, instead

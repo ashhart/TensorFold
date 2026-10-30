@@ -143,7 +143,7 @@ fn openLanes(gpa: Allocator, io: std.Io, runner: *xq.Runner, drafter: ?*Drafter,
     h.core = lanes.Engine.init(gpa, &h.cfg, h.back.backend(), h.wall.clock());
     errdefer h.core.deinit();
     // the engine cuts its prompts on its own grid from position 0 (prefill_step 0): the same ids give the same bits
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "qwen27-xpu", .lanes = slots, .context_window = context, .prefill_step = 0, .structures = true });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "qwen27-xpu", .draft_sources = .{ .drafter = if (drafter != null) .{ .kind = "DFlash2", .name = o.drafter_name orelse o.drafter orelse "" } else null }, .lanes = slots, .context_window = context, .prefill_step = 0, .structures = true });
     if (drafter != null) {
         h.back.initDrafts();
         h.host.lone = .{ .ctx = &h.back, .run = XpuLanes.lone, .resumes = true, .sampled = true };
@@ -162,6 +162,10 @@ fn openLanes(gpa: Allocator, io: std.Io, runner: *xq.Runner, drafter: ?*Drafter,
 }
 
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (o.fsrRefusal("xpu")) |why| {
+        problem.* = why;
+        return null;
+    }
     if (nem.serves(o.model_type)) return nem.open(a, gpa, io, o, problem);
     if (!std.mem.eql(u8, o.model_type, "qwen3_5")) {
         problem.* = try std.fmt.allocPrint(a, "the XPU engine serves Qwen3.8-27B (qwen3_5, MLX affine 4/64 or symmetric GPTQ 4/128) and Nemotron-H (nemotron_h, MLX 4/64), not {s}", .{o.model_type});

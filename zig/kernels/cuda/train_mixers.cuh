@@ -126,7 +126,7 @@ extern "C" __global__ void __launch_bounds__(1024) tf_train_ssm_back(const bf16*
             column_sums(v, scratch, lane, w, t, s.n, db_part + ((size_t)r * s.heads + h) * s.n);
             dx = row_sum(dx);
             if (lane % 16 == 0) dact[(size_t)r * s.conv + h * s.dh + p] = d * dx + d_skip[h] * gy;
-            dd = block_sum(dd, scratch, 32);
+            dd = block_sum_tree(dd, scratch, 32);
             if (t == 0) ddt[r * s.heads + h] = dd;
             for (int i = 0; i < 8; i++) ds[i] *= a;
         }
@@ -157,8 +157,8 @@ extern "C" __global__ void __launch_bounds__(256) tf_train_gate_back(const float
         sq += gated * gated;
         dot += f32(w[j]) * dn[(size_t)r * s.inner + j] * gated;
     }
-    sq = block_sum(sq, scratch, 8);
-    dot = block_sum(dot, scratch, 8);
+    sq = block_sum_tree(sq, scratch, 8);
+    dot = block_sum_tree(dot, scratch, 8);
     const float inv = rsqrtf(sq / (float)width + eps), k = inv * inv * inv * dot / (float)width;
     for (int j = j0 + t; j < j0 + width; j += 256) {
         const float z = f32(proj[(size_t)r * s.proj + j]), yv = y[(size_t)r * s.inner + j];
@@ -228,11 +228,11 @@ extern "C" __global__ void __launch_bounds__(256) tf_train_attn_q(const bf16* qk
         score = sc * a.scale;
         dp = dv;
     }
-    const float top = block_max(score, scratch, 8);
+    const float top = block_max_tree(score, scratch, 8);
     const float e = live ? expf(score - top) : 0.0f;
-    const float total = block_sum(e, scratch, 8);
+    const float total = block_sum_tree(e, scratch, 8);
     const float pr = e / total;
-    const float mix = block_sum(pr * dp, scratch, 8);
+    const float mix = block_sum_tree(pr * dp, scratch, 8);
     const float g = pr * (dp - mix);
     ds[t] = g;
     if (t < keys) {

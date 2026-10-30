@@ -1,13 +1,15 @@
-import { OriginalDiagnostic } from './OriginalDiagnostic'
-import { useAuthoredText } from '../lib/preferences/useAuthoredText'
+import { authoredText } from '../lib/preferences/language-packs'
+import { currentUiLanguage } from '../lib/preferences/current-locale'
 // Pairing screen (VST-035): shown when this page is served by a TensorFold host but the
 // browser holds no working device token. Redeeming a one-time credential (from the host's
 // Settings → Orchestrator → Paired devices) mints this device's own revocable session.
 import { useState } from 'react'
 import { redeemPairingCredential } from '../lib/remote-pairing'
 
+// No store or ipc imports here: ipc.ts picks its transport at import time and an unpaired page has none yet.
+const tx = (source: string) => authoredText(currentUiLanguage(), source)
+
 export function PairingGate() {
-  const tx = useAuthoredText()
   const [code, setCode] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -48,7 +50,7 @@ export function PairingGate() {
           placeholder={tx("Pairing link or code")}
           className="mb-2 w-full rounded-lg border border-line bg-card-2 px-3 py-2 text-[13px] text-ink placeholder:text-ink-4 focus:border-ink-3 focus:outline-none"
         />
-        {error && <p className="mb-2 text-[13px] text-danger">{<OriginalDiagnostic>{error}</OriginalDiagnostic>}</p>}
+        {error && <p dir="auto" className="mb-2 text-[13px] text-danger">{error}</p>}
         <button
           onClick={() => void pair()}
           disabled={!code.trim() || busy}

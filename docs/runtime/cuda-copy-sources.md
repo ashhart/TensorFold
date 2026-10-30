@@ -20,6 +20,10 @@ The legacy allocator argument and Stage.gpa field remain source compatible. They
 Quarantinable Node and CPU data allocations always use the core's process-lifetime page allocator. Pinned data is
 owned by the driver until its completion and disposal callbacks return. Caller arenas may end after submission.
 
+The RADIO tower owns one pixel Stage, reserved with its scratch for the largest image. Each image waits on the
+previous copy's event before refilling it, so tower uploads neither allocate nor free pinned memory and never compete
+for temporary-upload spares.
+
 The graph wrappers track up to 64 simultaneous captures by driver, context, stream and capture mode across threads.
 Temporary synchronous/default-stream and asynchronous uploaders refuse while a wrapper capture applies. A global
 capture guards all contexts of that driver; other modes guard its saved context. A failed begin removes its scope.

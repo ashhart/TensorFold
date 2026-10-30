@@ -10,8 +10,8 @@ pub fn check(a: std.mem.Allocator) !void {
     defer dev.deinit();
     const lib = try mtl.Library.fromSource(dev, @import("kernel_sources").nemotron_sample, mtl.CompileOptions.mlx());
     defer lib.deinit();
-    const pipe = try mtl.Pipeline.init(dev, lib, "tf_sample_full", false);
-    defer pipe.deinit();
+    const draws = try sample.Draws.init(dev, lib, fz.MAXR);
+    defer draws.deinit();
     const q = try dev.queue();
     defer q.deinit();
     const logits = try dev.buffer(fz.MAXR * fz.VOCAB * 2, fz.opts);
@@ -47,7 +47,7 @@ pub fn check(a: std.mem.Allocator) !void {
     for (settings, 0..) |setting, i| if (setting) |p| {
         const start = plan.starts[i];
         const end = if (i + 1 < settings.len) plan.starts[i + 1] else plan.total;
-        sample.encode(enc, pipe, .{ .b = logits }, .{ .b = positions }, .{ .b = picks }, start, end - start, p);
+        sample.encode(enc, &draws, .{ .b = logits }, .{ .b = positions }, .{ .b = picks }, start, end - start, p);
     };
     enc.end();
     cb.commit();

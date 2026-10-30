@@ -35,6 +35,9 @@ pub const Probe = struct {
     pub const Part = struct { cache: *Cache, rows: usize };
     window_rows: usize = 64,
     n_taps: usize = 0,
+    /// The served target's query and KV heads: the 27B's 24 over 4, an even group the prompt tiles take.
+    q_heads: usize = 24,
+    kv_heads: usize = 4,
     temporary: usize = 0,
     freed: usize = 0,
     fail_at: usize = 0,
@@ -52,6 +55,8 @@ pub const Probe = struct {
         cache.len = 0;
         var engine: E.Engine = undefined;
         engine.g.vocab = 1;
+        engine.g.q_heads = p.q_heads;
+        engine.g.kv_heads = p.kv_heads;
         engine.learning = null;
         engine.verify_rows = 128;
         try engine.admit(&.{.{ .cache = &cache, .rows = parts[0].rows }}, ids, keep);
@@ -91,4 +96,16 @@ pub fn failure() !void {
     try std.testing.expectEqual(@as(usize, 0), probe.count);
     try std.testing.expectEqual(@as(usize, 1), probe.freed);
     try std.testing.expectEqual(@as(usize, 32), cache.cap);
+}
+
+/// The admission guard refuses a window past the partials' rows, and a group the prompt tiles cannot take.
+pub fn refusal() !void {
+    var costs: [64]Cost = undefined;
+    var probe: Probe = .{ .costs = &costs };
+    var cache: Probe.Cache = .{ .cap = 256 };
+    const ids: [E.most_verify + 1]u32 = @splat(0);
+    const part = [_]Probe.Part{.{ .cache = &cache, .rows = ids.len }};
+    try std.testing.expectError(error.UnsupportedQwenGeometry, probe.forward(&part, &ids, .logits));
+    var odd: Probe = .{ .costs = &costs, .q_heads = 1, .kv_heads = 1 };
+    try std.testing.expectError(error.UnsupportedQwenGeometry, odd.forward(&part, &ids, .logits));
 }

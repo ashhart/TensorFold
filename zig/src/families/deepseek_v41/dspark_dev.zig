@@ -35,6 +35,7 @@ pub const Dev = struct {
     k: usize,
     world: usize,
     hidden: usize,
+    vocab_lo: u32,
     /// rows of every pass of a round together (the regions' size)
     rows_max: usize,
     conf: bool,
@@ -56,7 +57,7 @@ pub const Dev = struct {
     /// TF_DSV41_DRAFT_CHAIN=1: the chain on the device (Chain); null: the host's
     chain: ?*Chain = null,
 
-    pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, comm: tp.collective.Collective, stream: cuda.Stream, want: Mode, k: usize, hidden: usize, rows_max: usize, conf: bool, region_bytes: usize, regions: usize) !*Dev {
+    pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, comm: tp.collective.Collective, stream: cuda.Stream, want: Mode, k: usize, hidden: usize, rows_max: usize, conf: bool, region_bytes: usize, regions: usize, vocab_lo: u32) !*Dev {
         const x = try gpa.create(Dev);
         errdefer gpa.destroy(x);
         const W: usize = comm.world();
@@ -85,6 +86,7 @@ pub const Dev = struct {
             .k = k,
             .world = W,
             .hidden = hidden,
+            .vocab_lo = vocab_lo,
             .rows_max = rows_max,
             .conf = conf,
             .send = send,
@@ -144,7 +146,7 @@ pub const Dev = struct {
         const ops = r.kernels.others(r.stream);
         const send = x.send.ptr + at * 2 * k * 4;
         const dst = x.gathered.ptr + at * 2 * k * 4 * x.world;
-        try ops.dsCandidates(try r.tensorAddr(logits_t), V, rows, V, k, @intCast(x.comm.rank() * V), send);
+        try ops.dsCandidates(try r.tensorAddr(logits_t), V, rows, V, k, x.vocab_lo, send);
         try x.comm.allGather(send, dst, rows * 2 * k, .f32, r.stream.handle);
         if (x.chain) |ch| try ch.layout(r, x.gathered.ptr, x.world, rows, k, at, try r.tensorAddr(hid_t));
         try r.d.check(r.d.api.cuMemcpyDtoHAsync_v2(x.host.bytes.ptr + at * 2 * k * 4 * x.world, dst, pk * x.world, r.stream.handle), "cuMemcpyDtoHAsync");
@@ -194,7 +196,7 @@ pub const Dev = struct {
         const rank = x.comm.rank();
         const all: []const f32 = @alignCast(std.mem.bytesAsSlice(f32, x.host.bytes[at * 2 * k * 4 * x.world ..][0 .. rows * 2 * k * 4 * x.world]));
         for (0..rows) |i| {
-            try dspark.candidates(x.gpa, host[i * V ..][0..V], @intCast(rank * V), ids, vals);
+            try dspark.candidates(x.gpa, host[i * V ..][0..V], x.vocab_lo, ids, vals);
             const got = all[(rank * rows + i) * 2 * k ..][0 .. 2 * k];
             for (0..k) |j| {
                 const gid: i32 = @bitCast(got[k + j]);

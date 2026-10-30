@@ -153,10 +153,12 @@ pub const Builder = struct {
     /// The rank's slice of a native tensor, as stored.
     fn raw(b: *Builder, v: plan.NativePlan, rank: u32, world: u32) ![]u8 {
         const whole = v.slice == .whole;
-        const len = if (whole) v.info.nbytes else v.info.nbytes / world;
+        const s = if (v.slice == .vocab_rows) try @import("partition.zig").share(@intCast(v.info.shape[0]), rank, world) else null;
+        const len = if (s) |part| v.info.nbytes / v.info.shape[0] * part.len else if (whole) v.info.nbytes else v.info.nbytes / world;
+        const offset = if (s) |part| v.info.nbytes / v.info.shape[0] * part.lo else if (whole) 0 else rank * len;
         const bytes = try b.gpa.alloc(u8, @intCast(len));
         errdefer b.gpa.free(bytes);
-        try b.pack.read(b.io, v.info, .{ .offset = if (whole) 0 else rank * len, .len = len }, bytes);
+        try b.pack.read(b.io, v.info, .{ .offset = offset, .len = len }, bytes);
         return bytes;
     }
 
@@ -165,7 +167,7 @@ pub const Builder = struct {
         var shape: [4]usize = @splat(1);
         const dims = v.info.dims();
         @memcpy(shape[0..dims.len], dims);
-        if (v.slice != .whole) shape[0] /= world;
+        if (v.slice == .vocab_rows) shape[0] = (try @import("partition.zig").share(@intCast(shape[0]), rank, world)).len else if (v.slice != .whole) shape[0] /= world;
         if (v.info.dtype != .f32 and v.info.dtype != .bf16 and v.info.dtype != .f16) return error.UnexpectedTensor;
         if (b.metadata_only) {
             if (rule.out == .qk and std.mem.endsWith(u8, v.name, "q_weight")) return;
@@ -344,5 +346,30 @@ test "Engram qk decodes stored F32 BF16 F16 before an independently widened prod
         pending = try a.alloc(f32, 2);
         try testing.expectError(error.UnexpectedTensor, b.native("qk", .{ .name = "qk", .out = .qk }, tensor, 0, 1, &pending));
         try testing.expect(pending == null);
+    }
+}
+
+test "an F16 router bias and confidence head reach the forward as exactly widened fp32" {
+    const a = testing.allocator;
+    const values = [_]f16{ 0.333251953125, -2.5, 65504, 0x1p-24, -0.0 };
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data = try @import("pack.zig").image(a, &.{.{ .name = "b", .dtype = "F16", .shape = &.{values.len} }});
+    defer a.free(data);
+    for (values, 0..) |v, i| std.mem.writeInt(u16, data[data.len - 2 * values.len ..][2 * i ..][0..2], @bitCast(v), .little);
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "model.safetensors", .data = data });
+    const dir = try tmp.dir.realPathFileAlloc(testing.io, ".", a);
+    defer a.free(dir);
+    var p = try Pack.open(a, testing.io, dir);
+    defer p.deinit();
+    var b: Builder = .{ .gpa = a, .io = testing.io, .pack = &p };
+    defer b.deinit();
+    var none: ?[]f32 = null;
+    const tensor: plan.NativePlan = .{ .name = "b", .info = p.get("b").?, .slice = .whole, .bytes = 2 * values.len };
+    try b.native("L0.moe.bias", rules.get("ffn.gate.bias").?, tensor, 0, 1, &none);
+    try b.native("dspark.conf", .{ .name = "dspark.conf", .out = .f32 }, tensor, 0, 1, &none);
+    for (b.out.items) |n| {
+        try testing.expectEqual(Kind.f32, n.kind);
+        for (values, 0..) |v, i| try testing.expectEqual(@as(u32, @bitCast(@as(f32, v))), std.mem.readInt(u32, n.bytes[4 * i ..][0..4], .little));
     }
 }

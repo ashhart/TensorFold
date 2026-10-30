@@ -14,7 +14,7 @@ const a = std.testing.allocator;
 const specs = "[{\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"parameters\":{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"}},\"required\":[\"q\"]}}},{\"type\":\"function\",\"function\":{\"name\":\"now\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}}]";
 
 const Text = struct {
-    form: enum { xml, json, gemma, unknown } = .json,
+    form: enum { xml, json, gemma, lfm2, unknown } = .json,
     fn text(t: *Text) mt.Text {
         return .{ .ctx = t, .vtable = &.{ .encode = encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocab, .eos_ids = eos, .render = render, .template_source = source } };
     }
@@ -49,6 +49,7 @@ const Text = struct {
             .xml => "<tool_call><function=tfprobe_fn><parameter=tfprobe_k>v</parameter></function></tool_call>",
             .json => "<tool_call>{\"name\":\"tfprobe_fn\",\"arguments\":{\"tfprobe_k\":\"v\"}}</tool_call>",
             .gemma => "<|tool_call>call:tfprobe_fn{tfprobe_k:<|\"|>v<|\"|>}<tool_call|>",
+            .lfm2 => "<|tool_call_start|>[tfprobe_fn(tfprobe_k='v')]<|tool_call_end|>",
             .unknown => "prompt",
         })) };
     }
@@ -134,6 +135,32 @@ test "required tools: Gemma and unknown templates can constrain required calls o
         try srv.checkFeatures(&cx, try value(g, "{\"tool_call_required\":true}"), true, false, &.{1}, (try value(g, specs)).array, &request);
         try std.testing.expect(request.structure != null);
     }
+}
+
+test "required tools: an LFM2 template gets the Pythonic grammar, one call or several, and other forms do not" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const g = arena.allocator();
+    var stub: Stub = .{};
+    var compile: Compile = .{};
+    var compiler = compile.compiler();
+    for ([_]@FieldType(Text, "form"){ .json, .lfm2 }) |form| for ([_]bool{ false, true }) |single| {
+        var text: Text = .{ .form = form };
+        const srv = try Server.init(a, std.testing.io, stub.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"} }, null);
+        defer srv.deinit();
+        srv.info.structures = true;
+        srv.grammars = &compiler;
+        var cx: errors.Cx = .{ .a = g };
+        const fields = try value(g, if (single) "{\"tool_call_required\":true,\"tool_call_single\":true}" else "{\"tool_call_required\":true}");
+        var request: api.Request = .{ .prompt = &.{1}, .max_tokens = 200 };
+        try srv.checkFeatures(&cx, fields, true, false, &.{1}, (try value(g, specs)).array, &request);
+        const structure = request.structure.?;
+        try std.testing.expectEqualStrings("structural_tag", @tagName(structure.kind));
+        const python = std.mem.indexOf(u8, structure.text, "<|tool_call_start|>") != null;
+        try std.testing.expectEqual(form == .lfm2, python);
+        try std.testing.expectEqual(form == .lfm2 and !single, std.mem.indexOf(u8, structure.text, "(\\\", \\\" call)*") != null);
+        if (form == .lfm2) try std.testing.expect(std.mem.indexOf(u8, structure.text, "q=\\\" (py_str)") != null);
+    };
 }
 
 fn body(cx: *errors.Cx, response: bool, choice: []const u8) !json.Value {
@@ -294,4 +321,96 @@ test "qwen27 tool calls: required and named calls use the masked lane fake throu
             try std.testing.expectEqualStrings(if (named) "now" else "lookup", result.calls.?[0].get("function").?.strField("name").?);
         }
     };
+}
+
+// The server's compile is the engine's too: a request keeps the handle until release, and frees each one once.
+test "a request's compiled grammar is kept for the engine, freed once at release, and an overridden one at once" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const g = arena.allocator();
+    const fake = lanes.grammar_fake;
+    const old = fake.install();
+    defer _ = lanes.grammar.swapLibrary(old);
+    var compiler = fake.compiler();
+    var text: Text = .{};
+    var stub: Stub = .{};
+    const srv = try Server.init(a, std.testing.io, stub.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"} }, null);
+    defer srv.deinit();
+    srv.info.structures = true;
+    srv.grammars = &compiler;
+    var cx: errors.Cx = .{ .a = g };
+    const offered = (try value(g, specs)).array;
+    var one: api.Request = .{ .prompt = &.{1}, .max_tokens = 200 };
+    try srv.checkFeatures(&cx, try value(g, "{\"response_format\":{\"type\":\"json_object\"}}"), false, false, &.{1}, &.{}, &one);
+    try std.testing.expect(one.structure.?.compiled != null);
+    try std.testing.expectEqual(@as(usize, 1), fake.compiles);
+    try std.testing.expectEqual(@as(usize, 0), fake.frees);
+    srv.release(false, one);
+    try std.testing.expectEqual(@as(usize, 1), fake.frees);
+    // a required tool's grammar, then response_format's: the first is freed when the second replaces it
+    var both: api.Request = .{ .prompt = &.{1}, .max_tokens = 200 };
+    const fields = try value(g, "{\"tool_call_required\":true,\"response_format\":{\"type\":\"json_object\"}}");
+    try srv.checkFeatures(&cx, fields, true, false, &.{1}, offered, &both);
+    try std.testing.expectEqual(@as(usize, 3), fake.compiles);
+    try std.testing.expectEqual(@as(usize, 2), fake.frees);
+    srv.release(false, both);
+    try std.testing.expectEqual(@as(usize, 3), fake.frees);
+    // a refused second grammar frees the first
+    var refused: api.Request = .{ .prompt = &.{1}, .max_tokens = 200 };
+    const bad = try value(g, "{\"tool_call_required\":true,\"guided_regex\":\"bad\"}");
+    try std.testing.expectError(error.Refused, srv.checkFeatures(&cx, bad, true, false, &.{1}, offered, &refused));
+    try std.testing.expectEqual(@as(usize, 4), fake.compiles);
+    try std.testing.expectEqual(@as(usize, 4), fake.frees);
+}
+
+fn never(_: *anyopaque) callconv(.c) c_int {
+    return 0;
+}
+
+test "grammar_budget: a boolean that marks a covered grammar, refused when malformed, unbuilt or not covered" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const g = arena.allocator();
+    const fake = lanes.grammar_fake;
+    const old = fake.install();
+    defer _ = lanes.grammar.swapLibrary(old);
+    var compiler = fake.compiler();
+    var text: Text = .{};
+    var stub: Stub = .{};
+    const srv = try Server.init(a, std.testing.io, stub.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"} }, null);
+    defer srv.deinit();
+    srv.info.structures = true;
+    srv.grammars = &compiler;
+    const offered = (try value(g, specs)).array;
+    const Want = struct { fields: []const u8, budget: ?bool, refusal: []const u8 = "" };
+    const cases = [_]Want{
+        .{ .fields = "{\"response_format\":{\"type\":\"json_object\"},\"grammar_budget\":true}", .budget = true },
+        .{ .fields = "{\"tool_call_required\":true,\"grammar_budget\":true}", .budget = true },
+        .{ .fields = "{\"response_format\":{\"type\":\"json_object\"},\"grammar_budget\":false}", .budget = false },
+        .{ .fields = "{\"response_format\":{\"type\":\"json_object\"}}", .budget = false },
+        .{ .fields = "{\"grammar_budget\":true}", .budget = null }, // no grammar: nothing to keep
+        .{ .fields = "{\"response_format\":{\"type\":\"json_object\"},\"grammar_budget\":\"yes\"}", .budget = null, .refusal = "must be a boolean" },
+    };
+    for (cases) |c| {
+        var cx: errors.Cx = .{ .a = g };
+        var request: api.Request = .{ .prompt = &.{1}, .max_tokens = 64 };
+        const result = srv.checkFeatures(&cx, try value(g, c.fields), true, false, &.{1}, offered, &request);
+        if (c.refusal.len > 0) { // a refusal frees what it compiled
+            try std.testing.expectError(error.Refused, result);
+            try std.testing.expect(std.mem.indexOf(u8, cx.message, c.refusal) != null);
+            continue;
+        }
+        try result;
+        defer srv.release(false, request);
+        if (c.budget) |want| try std.testing.expectEqual(want, request.structure.?.budget) else try std.testing.expect(request.structure == null);
+    }
+    for ([_]?*const fn (*anyopaque) callconv(.c) c_int{ null, never }, [_][]const u8{ "libtfgrammar", "cannot be kept" }) |ready, why| {
+        compiler.f.budget_ready = ready;
+        var cx: errors.Cx = .{ .a = g };
+        var request: api.Request = .{ .prompt = &.{1}, .max_tokens = 64 };
+        try std.testing.expectError(error.Refused, srv.checkFeatures(&cx, try value(g, cases[0].fields), true, false, &.{1}, offered, &request));
+        try std.testing.expectEqual(@as(u16, 400), cx.status());
+        try std.testing.expect(std.mem.indexOf(u8, cx.message, why) != null);
+    }
+    try std.testing.expectEqual(fake.compiles, fake.frees); // refused requests free what they compiled
 }

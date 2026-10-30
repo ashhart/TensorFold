@@ -1,0 +1,128 @@
+[
+ {
+  "label": "sp3-fl",
+  "prompt": "fibonacci-raw",
+  "temperature": 0.0,
+  "tokens": 256,
+  "decode_tps_median": 31.557364967941773,
+  "decode_tps_all": [
+   31.57,
+   31.57,
+   31.56,
+   31.54,
+   31.52
+  ],
+  "ttft_s_median": 0.08718458603834733,
+  "evidence": [
+   {
+    "prompt_tokens": 14,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "7cd4ab7084c3",
+    "output_sha256": "54564454ce945beb5e2fb0bb5b5751dc02e1b91acf05d996e04eec2b0e0fbcea"
+   },
+   {
+    "prompt_tokens": 14,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "7cd4ab7084c3",
+    "output_sha256": "54564454ce945beb5e2fb0bb5b5751dc02e1b91acf05d996e04eec2b0e0fbcea"
+   },
+   {
+    "prompt_tokens": 14,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "7cd4ab7084c3",
+    "output_sha256": "54564454ce945beb5e2fb0bb5b5751dc02e1b91acf05d996e04eec2b0e0fbcea"
+   },
+   {
+    "prompt_tokens": 14,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "7cd4ab7084c3",
+    "output_sha256": "54564454ce945beb5e2fb0bb5b5751dc02e1b91acf05d996e04eec2b0e0fbcea"
+   },
+   {
+    "prompt_tokens": 14,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "7cd4ab7084c3",
+    "output_sha256": "54564454ce945beb5e2fb0bb5b5751dc02e1b91acf05d996e04eec2b0e0fbcea"
+   }
+  ],
+  "sample": " Fibonacci sequence: 0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597, 2584, 4181, 6765, 10946, 17711, 28657, 46368, 75025, 121393, 196418"
+ },
+ {
+  "label": "sp3-fl",
+  "prompt": "gpu-chat-no-think",
+  "temperature": 0.0,
+  "tokens": 256,
+  "decode_tps_median": 31.449406565505008,
+  "decode_tps_all": [
+   31.45,
+   31.45,
+   31.45,
+   31.44,
+   31.44
+  ],
+  "ttft_s_median": 0.13533464801730588,
+  "evidence": [
+   {
+    "prompt_tokens": 32,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "e9d7ec75c808",
+    "output_sha256": "07b6346864cb7697bc6bd87c00b3e7489a99d687d024e29dc7a4f4a9d95bf5b1"
+   },
+   {
+    "prompt_tokens": 32,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "e9d7ec75c808",
+    "output_sha256": "07b6346864cb7697bc6bd87c00b3e7489a99d687d024e29dc7a4f4a9d95bf5b1"
+   },
+   {
+    "prompt_tokens": 32,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "e9d7ec75c808",
+    "output_sha256": "07b6346864cb7697bc6bd87c00b3e7489a99d687d024e29dc7a4f4a9d95bf5b1"
+   },
+   {
+    "prompt_tokens": 32,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "e9d7ec75c808",
+    "output_sha256": "07b6346864cb7697bc6bd87c00b3e7489a99d687d024e29dc7a4f4a9d95bf5b1"
+   },
+   {
+    "prompt_tokens": 32,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "e9d7ec75c808",
+    "output_sha256": "07b6346864cb7697bc6bd87c00b3e7489a99d687d024e29dc7a4f4a9d95bf5b1"
+   }
+  ],
+  "sample": "# Matrix Multiplication on a GPU\n\n## The Plain English Explanation\n\nImagine you have a huge stack of worksheets where every page needs the same kind of math don"
+ }
+]

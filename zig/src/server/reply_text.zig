@@ -8,12 +8,25 @@ pub const think_markers: Markers = .{ .open = "", .close = "</think>" };
 /// The opener a reply writes itself when its template leaves the think block to it (Kolibri 1's does).
 const think_open = "<think>";
 pub const channel_markers: Markers = .{ .open = "<|channel>thought", .close = "<channel|>" };
-/// (opener, closer) of a tool call's markup: Qwen's, Gemma 4's, DeepSeek-V4's DSML block.
+/// (opener, closer) of a tool call's markup: Qwen's, Gemma 4's, DeepSeek-V4's DSML block, LFM2's, V4.1's spaced DSML.
 pub const calls = [_][2][]const u8{
     .{ "<tool_call>", "</tool_call>" },
     .{ "<|tool_call>", "<tool_call|>" },
     .{ "<\u{ff5c}DSML\u{ff5c}tool_calls>", "</\u{ff5c}DSML\u{ff5c}tool_calls>" },
+    .{ "<|tool_call_start|>", "<|tool_call_end|>" },
+    .{ "<\u{ff5c}DSML\u{ff5c} calls>", "</\u{ff5c}DSML\u{ff5c} calls>" },
 };
+/// Each opener's payload lead: Gemma 4's ``call:`` (26B: ``:``), DSML's invoke; ``<tool_call>`` and LFM2 have none.
+const leads = [calls.len][]const []const u8{ &.{}, &.{ "call:", ":" }, &.{"<\u{ff5c}DSML\u{ff5c}invoke"}, &.{}, &.{"<\u{ff5c}DSML\u{ff5c} invoke"} };
+
+/// Whether the text after an opener is a call's payload, may still become one, or is prose that names the opener.
+fn payloadOf(rest: []const u8, which: usize, finished: bool) enum { call, wait, prose } {
+    if (leads[which].len == 0) return .call;
+    const body = std.mem.trimStart(u8, rest, " \t\r\n");
+    for (leads[which]) |lead| if (std.mem.startsWith(u8, body, lead)) return .call;
+    if (!finished) for (leads[which]) |lead| if (std.mem.startsWith(u8, lead, body)) return .wait;
+    return .prose;
+}
 
 /// ``text.find(tag, from)`` led by a vector scan for the tag's first byte: markup is rare in prose, so it is fast.
 pub fn findTag(text: []const u8, from: usize, tag: []const u8) ?usize {
@@ -154,11 +167,11 @@ pub fn splitThinkingAt(a: Allocator, full: []const u8, finished: bool, m: Marker
 /// Hides tool-call blocks and partial opening tags while streaming, so calls arrive as deltas instead.
 pub fn hideToolCalls(a: Allocator, text: []const u8, finished: bool) Allocator.Error![]const u8 {
     var out: std.ArrayList(u8) = .empty;
-    return hideInto(a, &out, text, finished);
+    return hideInto(a, &out, text, finished, false);
 }
 
 /// ``hideToolCalls`` into ``out`` (cleared first); text without a call block comes back as a slice of ``text``.
-pub fn hideInto(a: Allocator, out: *std.ArrayList(u8), text: []const u8, finished: bool) Allocator.Error![]const u8 {
+pub fn hideInto(a: Allocator, out: *std.ArrayList(u8), text: []const u8, finished: bool, defer_closed: bool) Allocator.Error![]const u8 {
     out.clearRetainingCapacity();
     var pos: usize = 0;
     var next: [calls.len]?usize = undefined; // each opener at or after `pos`, searched again only once `pos` passes it
@@ -184,20 +197,46 @@ pub fn hideInto(a: Allocator, out: *std.ArrayList(u8), text: []const u8, finishe
             return out.items;
         }
         try out.appendSlice(a, text[pos..start.?]);
-        const opener = calls[which][0];
-        const end = findTag(text, start.? + opener.len, calls[which][1]) orelse return out.items;
+        const after = start.? + calls[which][0].len;
+        switch (payloadOf(text[after..], which, finished)) {
+            .call => {},
+            .wait => return out.items,
+            .prose => {
+                try out.appendSlice(a, text[start.?..after]);
+                pos = after;
+                continue;
+            },
+        }
+        const end = findTag(text, after, calls[which][1]) orelse {
+            // a finished reply's envelope that never closed is text, as tool_parse.parse keeps it in the content
+            if (finished) try out.appendSlice(a, text[start.?..]);
+            return out.items;
+        };
+        // Final parsing may retain this envelope, so later prose must not overtake it.
+        if (defer_closed) return out.items;
         pos = end + calls[which][1].len;
     }
 }
 
 /// With tools, a stream holds trailing whitespace back until more text comes: a reply with a call does not show it.
 pub fn heldBack(text: []const u8, tools: bool) []const u8 {
+    // Only final call acceptance decides whether leading whitespace survives.
+    if (tools and pyLstrip(text).len != text.len) return text[0..0];
     return if (tools) text[0..pyRstrip(text).len] else text; // a prefix, so the stream's pointer checks still hold
 }
 
-/// ``hideToolCalls`` of a finished reply; once a call is hidden, the prose's trailing whitespace stays unsent too.
+/// Prose safe to send before final parsing settles the first hidden closed envelope.
 pub fn finishedProse(a: Allocator, text: []const u8) Allocator.Error![]const u8 {
-    const prose = try hideToolCalls(a, text, true);
+    // attachCalls has not yet decided whether to strip the reply's content.
+    if (pyLstrip(text).len != text.len) return text[0..0];
+    var out: std.ArrayList(u8) = .empty;
+    const prose = try hideInto(a, &out, text, true, true);
+    return if (prose.len != text.len) prose[0..pyRstrip(prose).len] else prose;
+}
+
+/// A reply max_tokens cut inside a call it returns: the open envelope is that call, not text (#1238).
+pub fn cutProse(a: Allocator, text: []const u8) Allocator.Error![]const u8 {
+    const prose = try hideToolCalls(a, text, false);
     return if (prose.len != text.len) prose[0..pyRstrip(prose).len] else prose;
 }
 
@@ -298,7 +337,7 @@ pub fn isSpaceByte(ch: u8) bool {
     return ch == ' ' or (ch >= 0x09 and ch <= 0x0d) or (ch >= 0x1c and ch <= 0x1f);
 }
 
-fn spaceAt(s: []const u8, i: usize) usize {
+pub fn spaceAt(s: []const u8, i: usize) usize {
     const c = s[i];
     if (c == ' ' or (c >= 0x09 and c <= 0x0d) or (c >= 0x1c and c <= 0x1f)) return 1;
     if (c < 0x80) return 0;
@@ -417,6 +456,11 @@ pub const Incremental = struct {
     }
 };
 
+/// The decode callback `Incremental.extend` takes: any tokenizer's text decode, as `decode(ctx, a, tokens)`.
+pub fn decodeText(t: anytype, a: Allocator, tokens: []const u32) ![]u8 {
+    return t.decode(a, tokens);
+}
+
 test "splits and holds" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -449,4 +493,30 @@ test "a reply that writes its own think opener keeps the tag out of its reasonin
         try std.testing.expectEqualStrings("Plan.\n", s.reasoning);
         try std.testing.expectEqualStrings("Done.", s.answer);
     }
+}
+
+test "an opener the reply names in prose keeps the text after it, streamed and whole" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const prose = "Gemma writes <|tool_call>call:f{...} and DSML uses <\u{ff5c}DSML\u{ff5c}tool_calls>. The rest of my answer.";
+    try std.testing.expectEqualStrings(prose, try finishedProse(a, prose));
+    const named = "Gemma opens a call with <|tool_call> and DSML with <\u{ff5c}DSML\u{ff5c}tool_calls> too.";
+    try std.testing.expectEqualStrings(named, try hideToolCalls(a, named, false));
+    const spaced = "DeepSeek-V4.1 opens its block with <\u{ff5c}DSML\u{ff5c} calls> instead.";
+    try std.testing.expectEqualStrings(spaced, try hideToolCalls(a, spaced, false));
+    try std.testing.expectEqualStrings("x ", try hideToolCalls(a, "x <\u{ff5c}DSML\u{ff5c} calls>\n<\u{ff5c}DSML\u{ff5c} inv", false));
+    try std.testing.expectEqualStrings("x ", try hideToolCalls(a, "x <\u{ff5c}DSML\u{ff5c} ca", false));
+    for ([_][]const u8{ prose, named, spaced, "a <tool_call>{\"name\"", "a <|tool_call>call:f{x:1}<tool_call|>b" }) |reply| {
+        const whole = try hideToolCalls(a, reply, true);
+        for (0..reply.len + 1) |n| try std.testing.expect(std.mem.startsWith(u8, whole, try hideToolCalls(a, reply[0..n], false)));
+    }
+    // a call being written still hides: its payload's lead, a partial lead, or a <tool_call> block that has not closed
+    try std.testing.expectEqualStrings("x ", try hideToolCalls(a, "x <|tool_call>call:f{", false));
+    try std.testing.expectEqualStrings("x ", try hideToolCalls(a, "x <|tool_call> ca", false));
+    try std.testing.expectEqualStrings("x ", try hideToolCalls(a, "x <\u{ff5c}DSML\u{ff5c}tool_calls>\n<\u{ff5c}DSML\u{ff5c}inv", false));
+    try std.testing.expectEqualStrings("a ", try hideToolCalls(a, "a <tool_call>{\"name\"", false));
+    try std.testing.expectEqualStrings("a b", try hideToolCalls(a, "a <|tool_call>call:f{x:1}<tool_call|>b", false));
+    // a finished reply's unclosed envelope is text, as tool_parse.parse keeps it in the content
+    try std.testing.expectEqualStrings("a <tool_call>{\"name\"", try finishedProse(a, "a <tool_call>{\"name\""));
 }

@@ -14,6 +14,24 @@ test "glm dflash: gather and read fit for every supported rank count" {
     };
 }
 
+test "glm dflash: the raw scratch holds every 4-bit linear's words, scales and biases at every rank count" {
+    const df = glm.dflash;
+    var short: usize = 0;
+    for (1..17) |world| {
+        const ff = if (world == 2) df.FF / 2 else df.FF; // two ranks split gate and up by rows; any other world loads them whole
+        // dflash_load's 4-bit linears, rows by columns: qkv, kv, o, gate and up, the kernel projections, fc
+        const linears = [_][2]usize{ .{ df.QKV, df.D }, .{ 2 * df.KVW, df.D }, .{ df.D, df.D }, .{ 2 * ff, df.D }, .{ df.KVW, df.D }, .{ df.D, 5 * df.D } };
+        for (linears) |shape| {
+            const nk = shape[0] * shape[1];
+            const need = std.mem.alignForward(usize, nk / 2, 256) + std.mem.alignForward(usize, nk / 32, 256) + nk / 32;
+            if (need <= df.rawBytes(4, world)) continue;
+            std.debug.print("world {d}: a {d}x{d} linear needs {d} raw bytes, the scratch has {d}\n", .{ world, shape[0], shape[1], need, df.rawBytes(4, world) });
+            short += 1;
+        }
+    }
+    try t.expectEqual(@as(usize, 0), short);
+}
+
 const Resources = struct {
     pred: []u16 = &.{},
     succ: []u16 = &.{},

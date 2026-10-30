@@ -255,7 +255,7 @@ pub const Strict = struct {
 };
 
 pub const Mode = enum { plain, wrapped, wrapped_early };
-const Case = struct { root_copies: bool = false, prompt: []const u32, max_new: u32 = 40, sampling: ?Sampling = null, drafts: bool = true, restored: u32 = 0, grammar: ?*grammar.Constraint = null };
+pub const Case = struct { root_copies: bool = false, prompt: []const u32, max_new: u32 = 40, sampling: ?Sampling = null, drafts: bool = true, restored: u32 = 0, grammar: ?*grammar.Constraint = null };
 pub const Out = struct {
     tokens: [][]u32,
     drafted: u64 = 0,
@@ -267,7 +267,7 @@ pub const Out = struct {
 
 var costs: [16]Cost = undefined;
 
-fn base() Model {
+pub fn base() Model {
     for (&costs, 1..) |*c, w| c.* = .{ .width = @intCast(w), .ms = 5.0 + 0.8 * @as(f64, @floatFromInt(w)) };
     return .{ .exact_width = 16, .gpu_tokens = true, .window_costs = &costs, .hidden_rows = true, .batch_rows = 32, .max_streams = 8 };
 }
@@ -280,9 +280,11 @@ pub fn run(cases: []const Case, mode: Mode, batched: bool) !Out {
     defer strict.deinit();
     var target_backend = strict.backend();
     target_backend.first_before_draft = mode == .wrapped_early;
+    target_backend.penalties = mode == .wrapped_early;
     var wrapped = try Drafted.init(gpa, target_backend, head.drafter());
     defer wrapped.deinit();
     try std.testing.expectEqual(mode == .wrapped_early, wrapped.backend().first_before_draft);
+    try std.testing.expectEqual(mode == .wrapped_early, wrapped.backend().penalties);
     var m = base();
     m.root_copies = cases[0].root_copies;
     var cfg = try Config.init(gpa, if (mode != .plain) wrapped.facts(m) else m, 16, 15);
@@ -393,6 +395,9 @@ test "the depth rule reads the drafter's facts, not the target's" {
     try std.testing.expect(m.plain_guard and m.draft_streams and m.mtp and !m.speculate_early);
     try std.testing.expectEqualSlices(f64, &prior, m.draft_prior);
     try std.testing.expectEqual(@as(u32, 3), m.drafts);
+    try std.testing.expectEqual(t.copy_match, m.copy_match); // 0: the target's
+    head.facts_.copy_match = 20;
+    try std.testing.expectEqual(@as(i64, 20), wrapped.facts(t).copy_match);
     head.facts_.stream_bytes = 4096;
     try std.testing.expectEqual(@as(usize, 1000 + 4096), wrapped.streamBytes(1000)); // admission counts both
 }
@@ -562,35 +567,8 @@ test "the early first token equals the late one after a complete prompt restore"
     }
 }
 
-test "the drafter wrapper sees the committed callback before its first hold" {
-    var target: fake.Fake = .{ .gpa = gpa };
-    defer target.deinit();
-    var seen = false;
-    var head: FakeDrafter = .{ .observe_first = &seen };
-    defer head.deinit();
-    var backend = target.backend();
-    backend.first_before_draft = true;
-    var wrapped = try Drafted.init(gpa, backend, head.drafter());
-    defer wrapped.deinit();
-    try std.testing.expect(wrapped.backend().first_before_draft);
-    var cfg = try Config.init(gpa, wrapped.facts(base()), 16, 15);
-    defer cfg.deinit(gpa);
-    var clock: fake.FixedClock = .{};
-    var engine = Engine.init(gpa, &cfg, wrapped.backend(), clock.clock());
-    defer engine.deinit();
-    var stream = try sm.Stream.init(gpa, .{ .id = "order", .prompt = &p1, .max_new = 8 });
-    defer stream.deinit(gpa);
-    const Hook = struct {
-        fn call(ptr: *anyopaque) void {
-            const flag: *bool = @ptrCast(@alignCast(ptr));
-            flag.* = true;
-        }
-    };
-    try engine.addStreamCommitted(&stream, .{ .ptr = &seen, .call = Hook.call });
-    try std.testing.expect(seen and head.ordered and head.holds > 0);
-    engine.discard(&stream);
-}
-
 test {
     _ = @import("drafted_role_test.zig");
+    _ = @import("drafted_step_test.zig");
+    _ = @import("drafted_held_test.zig");
 }

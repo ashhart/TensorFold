@@ -34,12 +34,14 @@ pub const drafted = @import("drafted.zig");
 pub const recorder = @import("recorder.zig");
 pub const logprob = @import("logprob.zig");
 pub const grammar = @import("grammar.zig");
+pub const grammar_fake = @import("grammar_fake.zig"); // a stand-in libtfgrammar for tests
 
 pub const Engine = engine.Engine;
 pub const Config = config.Config;
 pub const Model = config.Model;
 pub const Stream = stream.Stream;
 pub const Sampling = sampling.Sampling;
+pub const Penalties = sampling.Penalties;
 pub const SuffixLookup = proposer.SuffixLookup;
 pub const LogprobRow = logprob.Row;
 pub const Trim = trim.Trim;
@@ -49,6 +51,7 @@ test {
     _ = @import("engine_test.zig");
     _ = @import("long_loop.zig");
     _ = @import("long_loop_test.zig");
+    _ = @import("loop_stop_test.zig");
     _ = @import("handover_test.zig");
     _ = @import("open_first_test.zig");
     _ = @import("recorder_test.zig");
@@ -65,6 +68,7 @@ test {
     _ = @import("fill_test.zig");
     _ = @import("fill_trim_test.zig");
     _ = @import("fair_turns_test.zig");
+    _ = @import("copied_rate_test.zig");
 }
 
 pub const learned_disk = @import("learned_disk.zig");

@@ -15,10 +15,12 @@ struct Stack {
         v[0] = x;                                         // c == 31: the root, kept in v[0]
     }
 };
-template <int R, int HI>
-__global__ void __launch_bounds__(256) scores(const __nv_bfloat16* __restrict__ IQ, const __nv_bfloat16* __restrict__ POOLED,
-                                              const int* __restrict__ POS0, float* __restrict__ SC, int NB, int RATIO, int TOP,
-                                              int rows) {
+// PAGED: POOLED is the arena's slot in page 0, a block's row in its page (fn_attn's Pg): one lookup a thread.
+template <int R, int HI, bool PAGED>
+__device__ __forceinline__ void scores_body(const __nv_bfloat16* __restrict__ IQ,
+                                            const __nv_bfloat16* __restrict__ POOLED, const int* __restrict__ POS0,
+                                            float* __restrict__ SC, int NB, int RATIO, int TOP, int rows,
+                                            const Pg& pg) {
     __shared__ float4 qs[R][HI][DI / 4];
     const int r0 = blockIdx.x * R, b = blockIdx.y * 256 + threadIdx.x;
     const int pos0 = POS0[0];
@@ -34,7 +36,7 @@ __global__ void __launch_bounds__(256) scores(const __nv_bfloat16* __restrict__ 
     __syncthreads();
     if (b >= cmax) return;
     Stack st[R][HI];
-    const __nv_bfloat16* kb = POOLED + static_cast<long long>(b) * DI;
+    const __nv_bfloat16* kb = POOLED + (PAGED ? page_row(pg, b, pg.ptok / RATIO, DI) : static_cast<long long>(b) * DI);
 #pragma unroll
     for (int half = 0; half < 2; ++half) {
         float k[16][4];                                   // the 16 lanes l (bit 0 == half) a half's leaves read
@@ -75,5 +77,11 @@ __global__ void __launch_bounds__(256) scores(const __nv_bfloat16* __restrict__ 
         for (int h = 0; h < HI; ++h) total = __fadd_rn(total, fmaxf(st[ri][h].v[0], 0.0f));
         SC[static_cast<long long>(r) * NB + b] = __fdiv_rn(total, scale);
     }
+}
+template <int R, int HI>
+__global__ void __launch_bounds__(256) scores(const __nv_bfloat16* __restrict__ IQ,
+                                              const __nv_bfloat16* __restrict__ POOLED, const int* __restrict__ POS0,
+                                              float* __restrict__ SC, int NB, int RATIO, int TOP, int rows) {
+    scores_body<R, HI, false>(IQ, POOLED, POS0, SC, NB, RATIO, TOP, rows, Pg{});
 }
 }  // namespace qsa_tile

@@ -9,7 +9,7 @@ const latent = @import("cuda_latent.zig");
 const kda_block = @import("cuda_kda_block.zig");
 const dsa_block = @import("cuda_dsa_block.zig");
 const glue = @import("cuda_glue.zig");
-const b16 = @import("cuda_b16.zig");
+const projection = @import("cuda_proj.zig");
 
 /// Checks a shared window's segments (a prompt buffer's: whole prompts) against its `rows` rows; each holds its own.
 pub fn begin(r: fw.Rank, rows: usize, stream: cuda.Stream) !void {
@@ -33,7 +33,7 @@ pub fn heads(f: *const fw.Forward, r: fw.Rank) !void {
     const D = r.w.config.hidden;
     const b = r.b;
     for (r.segs, 0..) |g, k| try f.d.check(f.d.api.cuMemcpyDtoDAsync_v2(b.normed + k * D * 2, b.fnormed + (g.row0 + g.rows - 1) * D * 2, D * 2, f.stream.handle), "cuMemcpyDtoDAsync");
-    try b16.matmul(f.set(), f.stream, b.normed, D, r.w.head, b.logits, b.kda.mm_part, r.segs.len, r.w.share.vocab.len(), D, false);
+    try projection.matmul(f.set(), f.stream, r.w.head, b.normed, D, b.logits, b.kda.mm_part, r.segs.len, r.w.share.vocab.len(), D, false);
 }
 
 /// Forward.mixer on a shared window: all rows' projections, each segment's chain or attention, o_proj (null: pieced).

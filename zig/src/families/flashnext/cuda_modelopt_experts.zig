@@ -5,6 +5,7 @@ const cuda = @import("cuda");
 const wt = @import("cuda_prompt_wt.zig");
 const ex = cuda.experts.Nvfp4Experts;
 const slice = core.nvfp4_slice;
+const threads = @import("cuda_modelopt_threads.zig");
 
 pub const Cut = struct {
     from: usize,
@@ -66,6 +67,11 @@ pub fn load(a: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, prefix: []c
 pub fn loadShape(a: std.mem.Allocator, d: *const cuda.Driver, store: anytype, prefix: []const u8, world: usize, rank: usize, dims: usize, full_width: usize, count: usize) !Owned {
     const cut = try Cut.init(full_width, world, rank);
     if (dims == 0 or dims % 32 != 0 or count == 0) return error.UnexpectedTensor;
+    // one GPU and the weight store: packed on threads (cuda_modelopt_threads.zig); other readers or 1 thread: this loop
+    if (comptime @typeInfo(@TypeOf(store)).pointer.child == wt.Store) {
+        const n = try threads.configured();
+        if (world == 1 and n > 1) return threads.load(a, d, store, prefix, dims, cut.width(), count, n);
+    }
     const width = cut.width();
     const up_bytes = try packedBytes(width, dims, 2);
     const down_bytes = try packedBytes(dims, width, 1);
@@ -120,7 +126,7 @@ test "intermediate-channel cuts cover the source once and preserve 32-input kern
     try std.testing.expectError(error.UnevenExpertSplit, Cut.init(640, 32, 0));
 }
 
-fn packedBytes(n: usize, k: usize, parts: usize) !usize {
+pub fn packedBytes(n: usize, k: usize, parts: usize) !usize {
     var size = std.math.mul(usize, n / ex.cols, k / 32) catch return error.UnexpectedTensor;
     for ([_]usize{ parts, ex.words, 4 }) |factor| size = std.math.mul(usize, size, factor) catch return error.UnexpectedTensor;
     return size;

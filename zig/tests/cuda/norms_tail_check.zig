@@ -24,12 +24,42 @@ pub const Case = struct {
     r: ?[]const u16 = null,
     wb: ?[]const u16 = null,
     sc: ?u16 = null,
+    moe: ?Moe = null,
+    /// Group sums as one chain of 64 in order (norms_strided.cuh's rows), where false takes groupSum's tree.
+    chain_sums: bool = false,
 
     /// The kernel writes h when the tail has a residual, a branch norm or a scalar.
     pub fn writesH(k: Case) bool {
-        return k.r != null or k.wb != null or k.sc != null;
+        return k.r != null or k.moe != null or k.wb != null or k.sc != null;
     }
 };
+
+/// tf_moe_add_rms_rows_bf16h's residual: slots [rows, slots, width] by weights [rows, slots], summed, to bf16.
+pub const Moe = struct { slots: usize, ys: []const f64, wt: []const f32 };
+
+/// Row `row`'s combine as stored: bf16 of the exact sum, or (ranged) of its ends over a `slots`-step fp32 fma chain.
+pub fn combine(a: std.mem.Allocator, k: Case, m: Moe, row: usize, ranged: bool) !struct { lo: []f64, hi: ?[]f64 } {
+    const lo = try a.alloc(f64, k.width);
+    const hi = if (ranged) try a.alloc(f64, k.width) else null;
+    const e = c.gamma(@floatFromInt(m.slots), 0x1p-24);
+    for (0..k.width) |i| {
+        var sum: f64 = 0;
+        var mag: f64 = 0;
+        for (0..m.slots) |s| {
+            const t = @as(f64, m.wt[row * m.slots + s]) * m.ys[(row * m.slots + s) * k.width + i];
+            sum += t;
+            mag += @abs(t);
+        }
+        if (hi == null or !std.math.isFinite(sum)) {
+            lo[i] = bfr.bf16(sum);
+            if (hi) |h| h[i] = lo[i];
+        } else {
+            lo[i] = bfr.bf16(sum - e * mag);
+            hi.?[i] = bfr.bf16(sum + e * mag);
+        }
+    }
+    return .{ .lo = lo, .hi = hi };
+}
 
 /// What a check saw: outputs whose float64 range is one value, a range, and outputs non-finite in float64.
 pub const Stats = struct { decided: usize = 0, ranged: usize = 0, nonfinite: usize = 0, sums: usize = 0 };
@@ -48,10 +78,12 @@ pub fn point(a: std.mem.Allocator, k: Case, row: usize, h: []f64, y: []f64) !voi
 /// Row `row` of `k` as core/norms_ref.zig's tail and its float64 x and w, the inverse's spread `spread_`.
 pub fn tailOf(a: std.mem.Allocator, k: Case, row: usize, spread_: f64) !struct { t: ref.Tail, x: []f64, w: []f64 } {
     const at = row * k.width;
+    const moe = if (k.moe) |m| try combine(a, k, m, row, spread_ != 0) else null;
     return .{
         .t = .{
             .round = k.round,
-            .residual = if (k.r) |r| try vals(a, r[at..][0..k.width]) else null,
+            .residual = if (moe) |m| m.lo else if (k.r) |r| try vals(a, r[at..][0..k.width]) else null,
+            .residual_hi = if (moe) |m| m.hi else null,
             .branch = if (k.wb) |wb| try vals(a, wb) else null,
             .scalar = if (k.sc) |s| bfr.value(s) else null,
             .spread = spread_,
@@ -85,6 +117,13 @@ fn sameBits(a: f64, b: f64) bool {
 /// a <= b with -0 below +0 (false for NaN).
 fn atMost(a: f64, b: f64) bool {
     return a < b or (a == b and (std.math.signbit(a) or !std.math.signbit(b)));
+}
+
+/// The 64 stored values summed in order in fp32.
+pub fn groupChain(y: []const u16) f32 {
+    var s: f32 = 0;
+    for (y) |h| s += bfr.value(h);
+    return s;
 }
 
 /// norms_tail.cuh's group_sum8 over stored outputs: each thread's 8 in order from 0, then 8 lanes' xor tree 4, 2, 1.
@@ -123,11 +162,11 @@ pub fn verify(a: std.mem.Allocator, k: Case, h: []const u16, y: []const u16, xs:
                 return try std.fmt.bufPrint(msg, "row {d} y[{d}] = {e} outside float64's [{e}, {e}]", .{ row, i, bfr.value(y[at + i]), y_lo[i], y_hi[i] });
         }
         if (xs) |sums| for (0..n / 64) |g| {
-            const want = groupSum(y[at + 64 * g ..][0..64]);
+            const want = if (k.chain_sums) groupChain(y[at + 64 * g ..][0..64]) else groupSum(y[at + 64 * g ..][0..64]);
             const got = sums[row * (n / 64) + g];
             stats.sums += 1;
             const same = @as(u32, @bitCast(got)) == @as(u32, @bitCast(want)) or (std.math.isNan(got) and std.math.isNan(want));
-            if (!same) return try std.fmt.bufPrint(msg, "row {d} sum {d} = {e} where the fp32 tree of the stored y gives {e}", .{ row, g, got, want });
+            if (!same) return try std.fmt.bufPrint(msg, "row {d} sum {d} = {e} where the fp32 {s} of the stored y gives {e}", .{ row, g, got, if (k.chain_sums) "chain" else "tree", want });
         };
     }
     return null;

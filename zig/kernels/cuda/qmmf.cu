@@ -6,7 +6,7 @@
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
 
-#include "qmm_frag.cuh"
+#include "common/qmm_frag.cuh"
 
 namespace tf_qmmf {
 
@@ -15,14 +15,6 @@ using namespace qmm_frag;
 enum Mode : int { FP4 = 0, FP8 = 1, MXFP8 = 2, FP8G = 3, BF16 = 4 };
 
 constexpr int GS = 64;
-
-__device__ __forceinline__ uint32_t fp4pair(uint32_t w, int s) {
-    const uint32_t v = w >> s;
-    const uint32_t t = ((v & 0x00070007u) << 6) | ((v & 0x00080008u) << 12);
-    uint32_t r;
-    asm("fma.rn.bf16x2 %0, %1, %2, %3;\n" : "=r"(r) : "r"(t), "r"(0x7E807E80u), "r"(0x80008000u));
-    return r;
-}
 
 __device__ __forceinline__ uint32_t fp8pair(uint32_t w) {
     const uint32_t x = (w & 0xFFu) | ((w & 0xFF00u) << 8);
@@ -64,7 +56,7 @@ __global__ void __launch_bounds__(WM * WN * 32) qmmf_kernel(
         float scale, void* __restrict__ out, float* __restrict__ part, int M, int N, int K, int SK, int npad, int ldx,
         int group) {
     using T = Tile<MODE, BM, BN, WM, WN, STAGES>;
-    static_assert(BN == 64, "a block reads one 64-column tile of words and scales");
+    static_assert(BN == 64 || BN == 32, "a block reads one 64-column tile of words and scales, or its half");
     extern __shared__ __align__(128) unsigned char buf[];
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
     const int wm = warp / WN, wn = warp % WN;
@@ -83,6 +75,17 @@ __global__ void __launch_bounds__(WM * WN * 32) qmmf_kernel(
         }
         unsigned char* pw = p + T::X;
         constexpr int TILE_BYTES = MODE == FP4 ? 64 * GS / 2 : MODE == BF16 ? 64 * GS * 2 : 64 * GS;
+        if constexpr (BN == 32) {
+            // half a packed 64-column tile: its n8 tiles 0-3 or 4-7, contiguous in every format's word order
+            const int half = (n0 % 64) / 32;
+            for (int c = tid; c < T::W / 16; c += T::THREADS)
+                cp16(pw + c * 16, w + (static_cast<size_t>(n0 / 64) * KG + g) * TILE_BYTES + half * (TILE_BYTES / 2) + c * 16);
+            if constexpr (T::S > 0) {
+                unsigned char* ps = pw + T::W;
+                for (int c = tid; c < T::S / 16; c += T::THREADS)
+                    cp16(ps + c * 16, bs + (static_cast<size_t>(n0 / 64) * KG + g) * (2 * T::S) + half * T::S + c * 16);
+            }
+        } else {
         for (int c = tid; c < T::W / 16; c += T::THREADS) {
             const int t = c / (TILE_BYTES / 16), off = c % (TILE_BYTES / 16);
             cp16(pw + c * 16, w + (static_cast<size_t>(n0 / 64 + t) * KG + g) * TILE_BYTES + off * 16);
@@ -91,6 +94,7 @@ __global__ void __launch_bounds__(WM * WN * 32) qmmf_kernel(
             unsigned char* ps = pw + T::W;
             for (int c = tid; c < T::S / 16; c += T::THREADS)
                 cp16(ps + c * 16, bs + (static_cast<size_t>(n0 / 64) * KG + g) * T::S + c * 16);
+        }
         }
     };
 
@@ -386,6 +390,17 @@ template __global__ void qmmf_kernel<FP8, 64, 64, 1, 4, 4, true, true, false>(co
 template __global__ void qmmf_kernel<FP8, 64, 64, 1, 4, 4, true, false, true>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
 template __global__ void qmmf_kernel<BF16, 16, 64, 1, 4, 4, true, false, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
 template __global__ void qmmf_kernel<BF16, 16, 64, 1, 4, 4, true, true, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+
+// Half tiles (32 columns a block) of the 16-row tile: the 64-column tile's sums, twice the blocks for a small grid.
+template __global__ void qmmf_kernel<MXFP8, 16, 32, 1, 4, 4, false, false, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+template __global__ void qmmf_kernel<MXFP8, 16, 32, 1, 4, 4, false, true, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+template __global__ void qmmf_kernel<MXFP8, 16, 32, 1, 4, 4, true, false, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+template __global__ void qmmf_kernel<MXFP8, 16, 32, 1, 4, 4, true, true, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+template __global__ void qmmf_kernel<BF16, 16, 32, 1, 4, 4, false, false, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+template __global__ void qmmf_kernel<BF16, 16, 32, 1, 4, 4, false, true, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+template __global__ void qmmf_kernel<BF16, 16, 32, 1, 4, 4, true, false, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+template __global__ void qmmf_kernel<BF16, 16, 32, 1, 4, 4, true, true, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+
 template __global__ void qmmf_kernel<BF16, 32, 64, 1, 4, 4, true, false, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
 template __global__ void qmmf_kernel<BF16, 32, 64, 1, 4, 4, true, true, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
 template __global__ void qmmf_kernel<BF16, 64, 64, 1, 4, 4, true, false, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);

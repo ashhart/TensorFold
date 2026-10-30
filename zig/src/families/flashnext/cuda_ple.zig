@@ -5,6 +5,8 @@ const cuda = @import("cuda");
 const core = @import("core");
 const embed = @import("cuda_embed.zig");
 const hc = @import("cuda_hc.zig");
+const ple_pool = @import("cuda_ple_pool.zig");
+const ple_reader = @import("cuda_ple_reader.zig");
 
 const golden: u64 = 0x9E3779B97F4A7C15;
 const mix1: u64 = 0xBF58476D1CE4E5B9;
@@ -343,6 +345,10 @@ pub const Ngram = struct {
     b: [max_shards][]const u8 = undefined,
     format: enum { mlx, nvfp4 } = .mlx,
     tables: [max_shards]core.nvfp4_rows.Table = undefined,
+    readers: [max_shards]ple_reader.Reader = undefined,
+    read_mode: ple_reader.Mode = .mmap,
+    warm_ahead: bool = false,
+    pool: ?*ple_pool.Pool = null, // the gather's parked workers (null: every row on the caller's thread)
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, model_dir: []const u8) !Ngram {
         const cfg = try readSpec(gpa, io, model_dir);
@@ -369,6 +375,8 @@ pub const Ngram = struct {
         const first = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.weight";
         const modelopt = wm.contains(first);
         g.format = if (modelopt) .nvfp4 else .mlx;
+        if (modelopt) g.read_mode = try ple_reader.mode(if (std.c.getenv("TF_FLASHNEXT_PLE_IO")) |v| std.mem.span(v) else null);
+        g.warm_ahead = @import("cuda_ple_ahead.zig").enabled(if (std.c.getenv("TF_FLASHNEXT_WARM_AHEAD")) |v| std.mem.span(v) else null);
         g.scale = if (modelopt)
             try readScale(gpa, io, model_dir, wm, "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.weight_scale_2", true)
         else
@@ -400,6 +408,7 @@ pub const Ngram = struct {
                 const table = try core.nvfp4_rows.Table.init(w, sc, g.scale);
                 if (table.width != dh) return error.UnexpectedTensor;
                 g.tables[shard] = table;
+                g.readers[shard] = ple_reader.Reader.init(&file.file, io, table);
             } else {
                 const sc = try file.tensor(try partNameFor(&key, shard, nested, "scales", false), .bf16);
                 const bias = try file.tensor(try partNameFor(&key, shard, nested, "biases", false), .bf16);
@@ -410,10 +419,12 @@ pub const Ngram = struct {
                 g.b[shard] = bias.bytes;
             }
         }
+        g.pool = try ple_pool.Pool.create(gpa, io);
         return g;
     }
 
     pub fn deinit(g: *Ngram) void {
+        if (g.pool) |p| p.destroy();
         for (g.files.items) |*o| o.close(g.gpa);
         g.files.deinit(g.gpa);
     }
@@ -424,23 +435,36 @@ pub const Ngram = struct {
     }
 
     /// Rows [lo, hi) of a chunk's token-major row ids `ids`, each dequantized into its head's slice of `out`.
-    fn fill(g: *const Ngram, ids: []const i64, out: []u16, lo: usize, hi: usize) !void {
+    pub fn fill(g: *const Ngram, ids: []const i64, out: []u16, lo: usize, hi: usize) !void {
         const dh = g.hash.dh;
         for (lo..hi) |i| {
             const loc = try g.hash.locate(ids[i]);
             const row = out[i * dh ..][0..dh];
             switch (g.format) {
                 .mlx => try embed.dequant(g.w[loc.shard], g.s[loc.shard], g.b[loc.shard], dh, loc.local, row),
-                .nvfp4 => try g.tables[loc.shard].gather(&.{loc.local}, row),
+                .nvfp4 => if (g.read_mode == .pread)
+                    try g.readers[loc.shard].read(g.gpa, g.tables[loc.shard], loc.local, row)
+                else
+                    try g.tables[loc.shard].gather(&.{loc.local}, row),
             }
         }
     }
 
-    fn worker(g: *const Ngram, ids: []const i64, out: []u16, lo: usize, hi: usize, failed: *?anyerror) void {
-        g.fill(ids, out, lo, hi) catch |err| {
-            failed.* = err;
-        };
-    }
+    /// One call's rows split into `parts` equal ranges, part i filling [i * per, (i + 1) * per).
+    const Split = struct {
+        g: *const Ngram,
+        ids: []const i64,
+        out: []u16,
+        per: usize,
+
+        fn part(ctx: *const anyopaque, i: usize) anyerror!void {
+            const s: *const Split = @ptrCast(@alignCast(ctx));
+            const lo = @min(s.ids.len, i * s.per);
+            try s.g.fill(s.ids, s.out, lo, @min(s.ids.len, lo + s.per));
+        }
+    };
+
+    pub const warmAhead = @import("cuda_ple_ahead.zig").warm;
 
     /// `embedding` for each token after `history` (moved past the chunk) into out and xs, read by up to 128 threads.
     pub fn rows(g: *const Ngram, history: []i64, tokens: []const u32, out: []u16, xs: []f32) !void {
@@ -457,25 +481,14 @@ pub const Ngram = struct {
             for (0..history.len - 1) |i| hist[i] = hist[i + 1];
             hist[history.len - 1] = token;
         }
-        const max_threads = 128;
-        const n_threads = @min(max_threads, items / 4);
-        if (n_threads <= 1) {
+        const n_threads = @min(ple_pool.max_parts, items / 4);
+        if (g.format == .nvfp4 and items > 1) {
+            try @import("cuda_ple_gather.zig").run(g, ids, out);
+        } else if (n_threads <= 1 or g.pool == null) {
             try g.fill(ids, out, 0, items);
         } else {
-            var threads: [max_threads]std.Thread = undefined;
-            var failed: [max_threads]?anyerror = @splat(null);
-            var spawned: usize = 0;
-            defer for (threads[0..spawned]) |th| th.join();
-            const per = (items + n_threads - 1) / n_threads;
-            for (0..n_threads) |i| {
-                const lo = @min(items, i * per);
-                const hi = @min(items, lo + per);
-                threads[i] = try std.Thread.spawn(.{}, worker, .{ g, ids, out, lo, hi, &failed[i] });
-                spawned += 1;
-            }
-            for (threads[0..spawned]) |th| th.join();
-            spawned = 0;
-            for (failed[0..n_threads]) |f| if (f) |err| return err;
+            const split: Split = .{ .g = g, .ids = ids, .out = out, .per = (items + n_threads - 1) / n_threads };
+            try g.pool.?.run(n_threads, .{ .ctx = &split, .run = Split.part });
         }
         for (0..tokens.len) |t| {
             const row = out[t * w ..][0..w];
@@ -517,4 +530,15 @@ test "a fresh window hashes token 7 into sixteen rows" {
 
 test {
     _ = @import("cuda_ple_nvfp4_test.zig");
+    _ = @import("cuda_ple_pool.zig");
+    _ = @import("cuda_ple_pool_gather_test.zig");
+}
+
+test {
+    _ = @import("cuda_ple_gather.zig");
+}
+
+test {
+    _ = ple_reader;
+    _ = @import("cuda_ple_ahead.zig");
 }

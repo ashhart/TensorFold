@@ -95,3 +95,11 @@ test "CUDA startup: every other registered family retains its declared pass size
         try std.testing.expectEqual(F.prompt_rows, startup.rows(F, loaded));
     }
 }
+
+test "CUDA startup: Flash Next cache cuts use the loaded cold pass size" {
+    var loaded: flash.native.Loaded = undefined;
+    loaded.prompt_rows = 4096;
+    const rules = @import("cuda_snaps.zig").passRules(flash.native, startup.rows(flash.native, loaded));
+    try std.testing.expectEqual(@as(u32, 4096), rules.chunk);
+    try std.testing.expect(!rules.chunk_starts and rules.lookahead == 1);
+}

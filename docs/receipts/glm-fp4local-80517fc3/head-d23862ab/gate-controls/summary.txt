@@ -1,0 +1,5 @@
+tamper bin-d23862ab rc=0 29s PASS glm-loader-gate: TF_GATE_TAMPER=head.codes red as planted, 1 copies caught
+tamper bin-80517fc3 rc=1 28s FAIL glm-loader-gate: TestFailed
+none bin-d23862ab rc=1 1s FAIL glm-loader-gate: TestFailed
+none bin-80517fc3 rc=0 1s
+after: engines 0 apps 0, guard stops 0

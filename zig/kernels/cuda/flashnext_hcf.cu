@@ -1,6 +1,6 @@
 // #952's hyper-connection read-out (fn_hc_down / fn_hc_upmix bits) on prompt tiles: factored groups, norm in smem.
-#include "qmm_frag.cuh"
-#include "glue_math.cuh"
+#include "common/qmm_frag.cuh"
+#include "common/glue_math.cuh"
 
 namespace hcf {
 using namespace qmm_frag;

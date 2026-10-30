@@ -85,7 +85,7 @@ pub fn parseQueries(a: Allocator, text: []const u8) Allocator.Error![]const []co
         if (out.items.len >= max_queries) break;
         const line = std.mem.trim(u8, unmark(unmark(std.mem.trim(u8, raw, " \t\r"))), " \"'`");
         if (line.len < 3 or line[0] == '<' or std.ascii.eqlIgnoreCase(line, "none")) continue;
-        const q = line[0..@min(line.len, 200)];
+        const q = line[0..@import("html.zig").cutAt(line, 200)]; // the cap does not split a character
         for (out.items) |seen| {
             if (std.ascii.eqlIgnoreCase(seen, q)) break;
         } else try out.append(a, q);
@@ -217,6 +217,20 @@ test "planner replies become clean queries; a goal becomes one when the planner 
     const f = try fallback(a, "```\n\nImplement a client for the latest Stripe API, with retries and idempotency keys and good tests please thanks\n");
     try std.testing.expectEqualStrings("Implement a client for the latest Stripe API, with retries and idempotency", f[0]);
     try std.testing.expectEqualStrings("What are the main changes in the latest Zig release", (try fallback(a, "What are the main changes in the latest Zig release? Name the version."))[0]);
+}
+
+test "a planner query cut at the cap keeps the character whole" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var words: std.ArrayList(u8) = .empty;
+    while (words.items.len < 199) try words.append(a, 'x');
+    try words.appendSlice(a, "\u{20ac} tail");
+    const qs = try parseQueries(a, words.items);
+    try std.testing.expectEqual(@as(usize, 1), qs.len);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(qs[0]));
+    try std.testing.expect(std.mem.indexOf(u8, qs[0], "\u{20ac}") == null);
+    try std.testing.expectEqual(@as(usize, 199), qs[0].len);
 }
 
 test "pages are picked by rank across queries, without repeats or video hosts" {

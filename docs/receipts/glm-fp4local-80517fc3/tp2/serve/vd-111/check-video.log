@@ -1,0 +1,28 @@
+     h264-444.mp4: HTTP 400 0 ids against 63, first difference at 0: [] vs [154822, 154824, 154826, 25062, 287, 29905] {'message': 'libtfvideo.so is required for video inputs (--vision); build the optional zig build video -Dffmpeg=PREFIX runtime against FFmpeg 9.0.2 and place it in lib beside the server; see packaging/RUNTIME.md', 'type': 'invalid_request_error'}
+     h264-709.mov: HTTP 400 0 ids against 627, first difference at 0: [] vs [154822, 154824, 154826, 25062, 287, 29905] {'message': 'libtfvideo.so is required for video inputs (--vision); build the optional zig build video -Dffmpeg=PREFIX runtime against FFmpeg 9.0.2 and place it in lib beside the server; see packaging/RUNTIME.md', 'type': 'invalid_request_error'}
+     h264-full.mp4: HTTP 400 0 ids against 83, first difference at 0: [] vs [154822, 154824, 154826, 25062, 287, 29905] {'message': 'libtfvideo.so is required for video inputs (--vision); build the optional zig build video -Dffmpeg=PREFIX runtime against FFmpeg 9.0.2 and place it in lib beside the server; see packaging/RUNTIME.md', 'type': 'invalid_request_error'}
+     h264-hd.mp4: HTTP 400 0 ids against 3623, first difference at 0: [] vs [154822, 154824, 154826, 25062, 287, 29905] {'message': 'libtfvideo.so is required for video inputs (--vision); build the optional zig build video -Dffmpeg=PREFIX runtime against FFmpeg 9.0.2 and place it in lib beside the server; see packaging/RUNTIME.md', 'type': 'invalid_request_error'}
+     h264-odd.mp4: HTTP 400 0 ids against 197, first difference at 0: [] vs [154822, 154824, 154826, 25062, 287, 29905] {'message': 'libtfvideo.so is required for video inputs (--vision); build the optional zig build video -Dffmpeg=PREFIX runtime against FFmpeg 9.0.2 and place it in lib beside the server; see packaging/RUNTIME.md', 'type': 'invalid_request_error'}
+     h264.mp4: HTTP 400 0 ids against 287, first difference at 0: [] vs [154822, 154824, 154826, 25062, 287, 29905] {'message': 'libtfvideo.so is required for video inputs (--vision); build the optional zig build video -Dffmpeg=PREFIX runtime against FFmpeg 9.0.2 and place it in lib beside the server; see packaging/RUNTIME.md', 'type': 'invalid_request_error'}
+     hevc.mp4: HTTP 400 0 ids against 245, first difference at 0: [] vs [154822, 154824, 154826, 25062, 287, 29905] {'message': 'libtfvideo.so is required for video inputs (--vision); build the optional zig build video -Dffmpeg=PREFIX runtime against FFmpeg 9.0.2 and place it in lib beside the server; see packaging/RUNTIME.md', 'type': 'invalid_request_error'}
+     hevc10.mov: HTTP 400 0 ids against 131, first difference at 0: [] vs [154822, 154824, 154826, 25062, 287, 29905] {'message': 'libtfvideo.so is required for video inputs (--vision); build the optional zig build video -Dffmpeg=PREFIX runtime against FFmpeg 9.0.2 and place it in lib beside the server; see packaging/RUNTIME.md', 'type': 'invalid_request_error'}
+     long.mp4: HTTP 400 0 ids against 1553, first difference at 0: [] vs [154822, 154824, 154826, 25062, 287, 29905] {'message': 'libtfvideo.so is required for video inputs (--vision); build the optional zig build video -Dffmpeg=PREFIX runtime against FFmpeg 9.0.2 and place it in lib beside the server; see packaging/RUNTIME.md', 'type': 'invalid_request_error'}
+     mpeg4.mp4: HTTP 400 0 ids against 166, first difference at 0: [] vs [154822, 154824, 154826, 25062, 287, 29905] {'message': 'libtfvideo.so is required for video inputs (--vision); build the optional zig build video -Dffmpeg=PREFIX runtime against FFmpeg 9.0.2 and place it in lib beside the server; see packaging/RUNTIME.md', 'type': 'invalid_request_error'}
+     vp8.mkv: HTTP 400 0 ids against 137, first difference at 0: [] vs [154822, 154824, 154826, 25062, 287, 29905] {'message': 'libtfvideo.so is required for video inputs (--vision); build the optional zig build video -Dffmpeg=PREFIX runtime against FFmpeg 9.0.2 and place it in lib beside the server; see packaging/RUNTIME.md', 'type': 'invalid_request_error'}
+     vp9.webm: HTTP 400 0 ids against 197, first difference at 0: [] vs [154822, 154824, 154826, 25062, 287, 29905] {'message': 'libtfvideo.so is required for video inputs (--vision); build the optional zig build video -Dffmpeg=PREFIX runtime against FFmpeg 9.0.2 and place it in lib beside the server; see packaging/RUNTIME.md', 'type': 'invalid_request_error'}
+FAIL a video request's prompt ids equal the processor's: 0 of 12 clips
+FAIL a video conversation's later turn resumes past its video: cached -1 of None; the text alone is 1458
+FAIL another video under the same text resumes only the text before it: cached -1 of None
+FAIL a video request answers: HTTP 500/500 {'message': 'libtfvideo.so is required for video inputs (--vision); build the optional zig build video -Dffmpeg=PREFIX runtime against FFmpeg 9.0.2 and place it in lib beside the server; see packaging/RUNTIME.md'}
+Traceback (most recent call last):
+  File "<workspace>/tools/video_http.py", line 152, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "<workspace>/tools/video_http.py", line 121, in main
+    alone = [reply(ask(m)[1]) for m in runs]
+             ^^^^^^^^^^^^^^^^
+  File "<workspace>/tools/video_http.py", line 71, in reply
+    return r["choices"][0]["message"].get("content") or ""
+           ~^^^^^^^^^^^
+KeyError: 'choices'
+exit 1

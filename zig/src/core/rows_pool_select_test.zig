@@ -30,7 +30,7 @@ const Image = struct {
     }
 };
 fn options(root: []const u8) rows.Options {
-    return .{ .root = root, .identity = 1691, .cap = 1 << 20, .floor = 0, .daily = 1 << 20, .lookahead = 1 };
+    return .{ .sync_writes = true, .root = root, .identity = 1691, .cap = 1 << 20, .floor = 0, .daily = 1 << 20, .lookahead = 1 };
 }
 test "restore selection: pooled buffers trim only when supported and never steal a borrowed state" {
     for ([_]bool{ false, true }) |can_trim| {

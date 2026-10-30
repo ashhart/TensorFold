@@ -53,8 +53,8 @@ whose CUDA engine reads it declares `EXL3_VARIANT = "any"`, and TensorFold check
 downloading. The dense linear layer, its plan and its measured throughput are in [EXL3 weights](exl3.md);
 `python -m tensorfold.cuda.exl3.inspect MODEL_DIR` prints what a checkpoint holds.
 The module is at the [`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6/src/tensorfold/cuda/exl3)
-([#42](https://github.com/ashhart/TensorFold/pull/42)). The native engine serves no EXL3 pack yet; its reference
-decoder is `zig/src/core/exl3_format.zig`.
+([#42](https://github.com/ashhart/TensorFold/pull/42)). The native engine's EXL3 path is in
+[EXL3 weights](exl3.md#native-cuda-zig); its reference decoder is `zig/src/core/exl3_format.zig`.
 
 ## Checkpoints
 
@@ -194,6 +194,15 @@ counterpart.
 This section and the next describe the Python 0.6.6 engine; the native binary refuses `--prefill-fp8`,
 `--no-prefill-fp8` and `--precision`.
 
+The native Qwen3.5 engine has its own switch, `--prompt-precision int8` (bf16 by default). Prompt passes past 16 rows
+quantize each MLX affine 4-bit projection's inputs to int8, one scale (amax / 127) a 64-input group, and run the int8
+mma (`cuda.w4a8`, `w4a8_prefill.cu`). The per-64 integer dot is exact int32. Group sums and the scaled epilogue add in
+fp32 and can round; weights of other widths keep the bf16 prompt GEMM. The quantized inputs take 76.5 MiB of device memory, only with the switch on.
+Qualification requires kernel-contract receipts and same-build bf16 controls. Record revision, binary, model,
+fixture, compiler, flags and fatbin hashes with the quality and timing results. The input commit's performance and
+quality measurements are contributor observations until those receipts and the chunk, cache, draft and concurrency
+comparisons are complete.
+
 Prompt matmuls take bf16 activations by default. `--prefill-fp8` switches the ones that have an FP8 kernel (the
 27B's and Qwen3.6's MLX 4-bit projections, and the FP8, NVFP4 and MXFP8 layers of NVFP4 checkpoints) to e4m3
 activations with one scale a row, the arithmetic of TensorFold 0.5.0's prompts; `--no-prefill-fp8` asks for bf16 by
@@ -325,6 +334,27 @@ collective sequence aligned. MLX disk snapshots and cache-budget flags do not co
 caches. The CUDA CLI also does not apply `--alias`; use `--name` for the served model ID. `--thinking`,
 `--reasoning-effort` and `--thinking-budget` set the defaults a request's `chat_template_kwargs.enable_thinking`,
 `reasoning_effort` and `thinking_budget` override, as on the Mac.
+
+## Multi-GPU P2P startup report
+
+With two or more CUDA ranks, each rank logs `p2p:` lines once its NCCL communicator is up: its GPU and PCI bus id,
+the driver, CUDA driver API and NCCL versions, each other GPU's NVML P2P read and write status and PCIe path
+(`nvidia-smi topo -m`'s names), CUDA's peer access when the process sees more than one device, the values of
+`NCCL_P2P_DISABLE`, `NCCL_P2P_LEVEL`, `NCCL_P2P_READ_ENABLE`, `NCCL_SHM_DISABLE`, `NCCL_ALGO`, `NCCL_PROTO` and
+`CUDA_VISIBLE_DEVICES` that are set, and the transport NCCL chose for this rank's connections (P2P read or write, SHM
+or NET). The transport comes from NCCL's own INFO log, written to a private temporary file during init and removed
+after it is read; the capture is skipped when `NCCL_DEBUG`, `NCCL_DEBUG_SUBSYS` or `NCCL_DEBUG_FILE` is set. NCCL
+connects peers on first use unless `NCCL_RUNTIME_CONNECT=0`, which GLM sets when it is unset: GLM reports the transport
+after init, Nemotron when its ranks are ready, and DeepSeek and Flash Next say `transport not reported` unless a
+connection was made by then (on DeepSeek the probe makes one). A P2P status other than OK adds one warning naming
+what NVML or CUDA reported.
+
+TensorFold never enables peer access itself; NCCL sets up its own peers. The report changes no driver, BIOS or IOMMU
+setting and overrides no NCCL setting the user made. NVML (`libnvidia-ml.so.1`) is optional. One rank logs nothing
+new, and `TENSORFOLD_P2P_DIAGNOSTICS=0` turns the report off. `TENSORFOLD_P2P_PROBE=1` (GLM, Nemotron and DeepSeek)
+times a 32 MiB-a-rank NCCL all-gather after init and logs its bus bandwidth; set it on every rank or none, since a rank
+without it leaves the others waiting in the probe. `capabilities --json` adds a `p2p` object with NVML's GPUs and
+every pair's status on a host with two or more GPUs.
 
 ## Measuring
 

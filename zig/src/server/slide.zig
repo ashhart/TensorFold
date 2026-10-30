@@ -138,6 +138,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         srv.slide.asked(id, expected(a, plan));
         const result = rounds(srv, a, &cx, plan, gone, id, &out);
         const back = result.recalled.len == 1 and result.recalled[0];
+        srv.teacher.ended(back); // a lesson given up leaves the next one's checks as if it never ran
         if (!back) putBack(srv, a, gave, id);
         if (back) slide_teacher.refresh(srv, &cx, &srv.teacher, plan.stale, gone) catch srv.teacher.forgetAnswers(srv.io);
         if (result.why) |why| srv.slide.note(id, why);

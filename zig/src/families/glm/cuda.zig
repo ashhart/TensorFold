@@ -13,6 +13,7 @@ pub const kda = @import("cuda_kda.zig");
 pub const b16 = @import("cuda_b16.zig");
 pub const latent = @import("cuda_latent.zig");
 pub const sparse = @import("cuda_sparse.zig");
+pub const index = @import("cuda_index.zig");
 pub const moe = @import("cuda_moe.zig");
 pub const kda_block = @import("cuda_kda_block.zig");
 pub const dsa_block = @import("cuda_dsa_block.zig");
@@ -29,6 +30,9 @@ pub const sampler = @import("cuda_sampler.zig");
 pub const prompt_sink = @import("cuda_prompt_sink.zig");
 pub const prompt_logprobs = @import("cuda_prompt_logprobs.zig");
 pub const engine = @import("cuda_engine.zig");
+pub const pages = @import("cuda_pages.zig");
+pub const open_owner = @import("cuda_open_owner.zig");
+pub const images = @import("cuda_images.zig");
 pub const follow = @import("cuda_follow.zig");
 pub const lanes = @import("cuda_lanes.zig");
 pub const native = @import("cuda_native.zig");
@@ -41,9 +45,12 @@ test {
     _ = @import("cuda_prof.zig");
     _ = @import("cuda_load_owner.zig");
     _ = @import("cuda_images_interleave_test.zig");
+    _ = @import("cuda_pages_test.zig");
+    _ = @import("cuda_ranks_test.zig");
     _ = experts;
     _ = exl3;
     _ = vision;
+    _ = @import("vision_names.zig");
     _ = mm;
     _ = image_core;
     _ = glue;
@@ -51,6 +58,7 @@ test {
     _ = b16;
     _ = latent;
     _ = sparse;
+    _ = index;
     _ = moe;
     _ = kda_block;
     _ = dsa_block;
@@ -69,6 +77,7 @@ test {
     _ = lanes;
     _ = native;
     _ = @import("cuda_qpack.zig");
+    _ = @import("cuda_mtp_chance.zig");
     _ = @import("cuda_tile.zig");
     _ = @import("heat"); // upstream's heat bands, run where the GLM ranks use them
 }

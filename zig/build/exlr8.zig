@@ -84,6 +84,7 @@ pub fn glmTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
         .{ "tf-glm-dsa-tp-check", "zig/tests/glm_dsa_tp_check.zig", "Two ranks of one GLM-5.3 layer on one Mac, summed, against the reference (MODEL_DIR REF_DIR)" },
         .{ "tf-glm-dsa-run", "zig/tests/glm_dsa_run.zig", "GLM-5.3 on the pair without the server: a prompt's greedy reply (MODEL_DIR SETTINGS IDS_FILE)" },
         .{ "tf-glm-dsa-bench", "zig/tests/glm_dsa_bench.zig", "One rank's share of a GLM-5.3 layer timed piece by piece on the GPU (MODEL_DIR LAYER)" },
+        .{ "tf-glm-dsa-index-check", "zig/tests/glm_dsa_index_check.zig", "The DSA indexer's Metal scan on synthetic keys: the blocked kernel against the row kernel" },
         .{ "tf-exlr8-prompt-check", "zig/tests/exlr8_prompt_check.zig", "The tensor-unit prompt kernel against the lane kernel on real expert halves (MODEL_DIR)" },
         .{ "tf-glm-dsa-prompt-check", "zig/tests/glm_dsa_prompt_check.zig", "A prompt window's experts against the decode path's 16-row windows (MODEL_DIR)" },
     }) |p| {

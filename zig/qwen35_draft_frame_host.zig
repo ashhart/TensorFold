@@ -8,6 +8,30 @@ pub fn config() q.draft.Config {
     return .{ .hidden = 256, .intermediate = 256, .layers = 1, .vocab = 256, .heads = 2, .kv_heads = 1, .head_dim = 128, .block = 8, .mask = 255, .window = 2048, .group = 16, .rank = 2, .topk = 2, .eps = 1e-6, .theta = 10000000, .taps = @splat(0), .n_taps = 1 };
 }
 
+test "Draft frames: a grown tree's node budget past the block (TF_DRAFT_NODES) stages; a chain keeps one row a depth" {
+    const F = q.draft.frame;
+    var c = config();
+    c.block = 16;
+    var storage: [F.stagedLen(2)]u8 align(8) = undefined;
+    var ctx: q.draft.Ctx = .{ .ring = .{ .d = undefined, .ptr = 0x1000, .len = 1 }, .begin = 0, .end = 100 };
+    var refs = [_]*q.draft.Ctx{&ctx};
+    var items = [_]lanes.drafter.Hold{.{ .stream = @ptrFromInt(0x1000), .pending = 1, .position = 101, .depth = 15 }};
+    try F.stage(c, &items, &refs, &storage);
+    items[0].depth = 16;
+    try std.testing.expectError(error.BadDraftFrame, F.stage(c, &items, &refs, &storage));
+    _ = setenv("TF_DRAFT_NODES", "24", 1);
+    defer _ = unsetenv("TF_DRAFT_NODES");
+    items[0].depth = 24;
+    try F.stage(c, &items, &refs, &storage);
+    items[0].depth = 25;
+    try std.testing.expectError(error.BadDraftFrame, F.stage(c, &items, &refs, &storage));
+    items[0].depth = 24;
+    try std.testing.expectError(error.BadDraftFrame, F.stage(config(), &items, &refs, &storage));
+}
+
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+
 test "Draft frames: the actual drafter advertises batched holds" {
     var d: q.draft.Draft = undefined;
     d.projection_role = .proposal;
@@ -68,7 +92,7 @@ const Record = struct {
         if (id == 13) last_norm_input = @as(*const u64, @ptrCast(@alignCast(args.?[0].?))).*;
         if (id == 1) max_rows = @max(max_rows, x);
         if (id == 5) {
-            std.debug.assert(z == 9 and threads == 32);
+            std.debug.assert(z == 9 and threads == 128);
             if (fail) return cuda.abi.error_not_ready;
         }
         return cuda.abi.success;
@@ -116,6 +140,7 @@ fn actualFrame(block: usize) !void {
     driver.api.cuMemcpyDtoHAsync_v2 = Record.download;
     driver.api.cuStreamSynchronize = Record.wait;
     var e: q.engine.Engine = undefined;
+    e.kit = null;
     e.d = &driver;
     e.g.hidden = 256;
     e.stream = .{ .d = &driver, .handle = null };
@@ -128,6 +153,7 @@ fn actualFrame(block: usize) !void {
     e.affine.prefill_fn = function(&driver, 11);
     e.affine.group_fn = function(&driver, 10);
     e.affine.pdl = false;
+    e.affine.wide_verify = false;
     e.fns.norm = function(&driver, 13);
     e.head = .{ .a4 = weight() };
     e.draws.logprob_rows_fn = function(&driver, 9);
@@ -202,7 +228,11 @@ fn actualFrame(block: usize) !void {
         try std.testing.expectEqual(@as(usize, 2), Record.downloads);
         try std.testing.expectEqual(@as(usize, 1), Record.waits);
         for (contexts[0..count], holds[0..count], 0..) |ctx, it, i| {
-            try std.testing.expectEqual(@as(usize, if (it.lanes != null) 7 else it.depth), ctx.held_n);
+            // the production adapter: a grown tree holds the budget it grew, a chain the requested depth
+            const limit = if (block == 16) q.draft.tree.nodes() else 0;
+            const held: usize = if (it.lanes != null) 7 else if (limit > 0) ctx.grown else @min(it.depth, block - 1);
+            try std.testing.expectEqual(held, ctx.held_n);
+            if (limit > 0 and it.lanes == null and it.depth > 0) try std.testing.expect(ctx.grown > 0);
             for (ctx.held[0..ctx.held_n], 0..) |token, row| {
                 if (it.lanes == null and ctx.grown > 0) {
                     try std.testing.expect(token == 17 + i or token == 128 + i);
@@ -230,13 +260,14 @@ test "Draft frames: combined target rows above capacity refuse before even settl
     var driver: cuda.Driver = undefined;
     driver.api.cuLaunchKernel = Record.launch;
     var e: q.engine.Engine = undefined;
+    e.kit = null;
     e.d = &driver;
     e.stream = .{ .d = &driver, .handle = null };
     e.verify_rows = 64;
     e.learning = null;
     e.n_taps = 0;
     e.kv8 = false;
-    e.g = .{ .hidden = 256, .intermediate = 256, .layers = 1, .vocab = 256, .k_heads = 1, .v_heads = 1, .q_heads = 1, .kv_heads = 1, .eps = 1e-6, .tied = true, .context = 256, .linear = @splat(true) };
+    e.g = .{ .hidden = 256, .intermediate = 256, .layers = 1, .vocab = 256, .k_heads = 1, .v_heads = 1, .q_heads = 2, .kv_heads = 1, .eps = 1e-6, .tied = true, .context = 256, .linear = @splat(true) };
     e.geo = .{ .hid = 256, .nk = 1, .nv = 1, .qh = 1, .kvh = 1, .nl = 1 };
     e.keeps = .{ .apply = function(&driver, 10), .conv = function(&driver, 10), .compact = function(&driver, 10) };
     const b: cuda.DeviceBuffer = .{ .d = &driver, .ptr = 1, .len = 1 << 20 };
@@ -253,6 +284,70 @@ test "Draft frames: combined target rows above capacity refuse before even settl
     try std.testing.expectError(error.InvalidQwenSegments, e.admit(&.{ .{ .cache = &caches[0], .rows = 1 }, .{ .cache = &caches[0], .rows = 1 } }, ids[0..2], .logits));
 }
 
+test "Draft frames: an unsupported prompt geometry is refused at admission" {
+    var driver: cuda.Driver = undefined;
+    driver.api.cuLaunchKernel = Record.launch;
+    var e: q.engine.Engine = undefined;
+    e.d = &driver;
+    e.stream = .{ .d = &driver, .handle = null };
+    e.verify_rows = 64;
+    e.learning = null;
+    e.n_taps = 0;
+    e.kv8 = false;
+    e.g = .{ .hidden = 256, .intermediate = 256, .layers = 1, .vocab = 256, .k_heads = 1, .v_heads = 1, .q_heads = 1, .kv_heads = 1, .eps = 1e-6, .tied = true, .context = 256, .linear = @splat(true) };
+    e.geo = .{ .hid = 256, .nk = 1, .nv = 1, .qh = 1, .kvh = 1, .nl = 1 };
+    e.keeps = .{ .apply = function(&driver, 10), .conv = function(&driver, 10), .compact = function(&driver, 10) };
+    const b: cuda.DeviceBuffer = .{ .d = &driver, .ptr = 1, .len = 1 << 20 };
+    var caches: [1]q.engine.Cache = @splat(.{ .state = b, .kv = b, .log = b, .cap = 256, .len = 2, .logits = &.{} });
+    const ids: [129]u32 = @splat(1);
+    const parts = [_]q.engine.Part{.{ .cache = &caches[0], .rows = 129 }};
+    // an odd query/KV group has no prompt tiles: the chunk's rows must fit the decode partials
+    try std.testing.expectError(error.UnsupportedQwenGeometry, e.admit(&parts, &ids, .last));
+    // an even group takes the prompt tiles: the same rows are admitted
+    e.g.q_heads = 2;
+    try e.admit(&parts, &ids, .last);
+    e.g.q_heads = 1;
+    // the partials' rows: a verify window past them is refused
+    e.verify_rows = 256;
+    try std.testing.expectError(error.UnsupportedQwenGeometry, e.admit(&parts, &ids, .logits));
+    // the partials' groups: a group outside 2 to 16 is refused, whatever the rows
+    const few: [64]u32 = @splat(1);
+    const few_parts = [_]q.engine.Part{.{ .cache = &caches[0], .rows = 64 }};
+    e.g.q_heads = 1;
+    try std.testing.expectError(error.UnsupportedQwenGeometry, e.admit(&few_parts, &few, .logits));
+    e.g.q_heads = 32;
+    try std.testing.expectError(error.UnsupportedQwenGeometry, e.admit(&few_parts, &few, .logits));
+    e.g.q_heads = 2;
+    try e.admit(&few_parts, &few, .logits);
+}
+
+test "Draft frames: the geometry refusal precedes the request's own state" {
+    var driver: cuda.Driver = undefined;
+    driver.api.cuLaunchKernel = Record.launch;
+    var e: q.engine.Engine = undefined;
+    e.d = &driver;
+    e.stream = .{ .d = &driver, .handle = null };
+    e.verify_rows = 64;
+    e.learning = null;
+    e.n_taps = 0;
+    e.kv8 = false;
+    e.g = .{ .hidden = 256, .intermediate = 256, .layers = 1, .vocab = 256, .k_heads = 1, .v_heads = 1, .q_heads = 1, .kv_heads = 1, .eps = 1e-6, .tied = true, .context = 256, .linear = @splat(true) };
+    e.geo = .{ .hid = 256, .nk = 1, .nv = 1, .qh = 1, .kvh = 1, .nl = 1 };
+    e.keeps = .{ .apply = function(&driver, 10), .conv = function(&driver, 10), .compact = function(&driver, 10) };
+    const b: cuda.DeviceBuffer = .{ .d = &driver, .ptr = 1, .len = 1 << 20 };
+    var caches: [1]q.engine.Cache = @splat(.{ .state = b, .kv = b, .log = b, .cap = 256, .len = 2, .logits = &.{} });
+    caches[0].last = .{ .start = 0, .rows = 2 };
+    const ids: [129]u32 = @splat(1);
+    const parts = [_]q.engine.Part{.{ .cache = &caches[0], .rows = 129 }};
+    // the cache is full: the geometry is refused before the request's own state is read
+    caches[0].cap = 1;
+    Record.counts = @splat(0);
+    try std.testing.expectError(error.UnsupportedQwenGeometry, e.admit(&parts, &ids, .last));
+    // nothing was queued and the earlier round was not settled
+    try std.testing.expectEqual(@as(usize, 0), Record.counts[10]);
+    try std.testing.expect(caches[0].last != null);
+}
+
 test "Draft frames: enlarged frame byte counts reject overflow" {
     try std.testing.expectError(error.Overflow, q.draft.frame.stagedBytes(std.math.maxInt(usize)));
     var d: q.draft.Draft = undefined;
@@ -263,4 +358,18 @@ test "Draft frames: enlarged frame byte counts reject overflow" {
     d.c = config();
     d.c.rank = std.math.maxInt(usize);
     try std.testing.expectError(error.Overflow, d.layout(false));
+}
+
+test "Draft frames: an EXL3 head's span views plan their K split as the whole head does" {
+    const x3 = cuda.exl3;
+    const F = q.draft.frame;
+    for ([_]bool{ false, true }) |strips| {
+        const st = x3.strides(5120, 248320, 12, strips);
+        const w: x3.Weight = .{ .trellis = 0x1000, .suh = 0x2000, .svh = 0x3000, .k = 5120, .n = 248320, .halves = 12, .codebook = .mul1, .stride_k = st.k, .stride_nb = st.nb };
+        const v = try F.x3Views(w);
+        const whole = x3.plan(w.k, w.n, 192, 8);
+        try std.testing.expectEqual(whole, x3.plan(v.first.k, v.first.n, 192, 8));
+        try std.testing.expectEqual(whole, x3.plan(v.tail.k, v.tail.n, 192, 8));
+        try std.testing.expect(F.x3_tail_at <= 248032 and F.x3_tail_at + v.tail.n == w.n);
+    }
 }

@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { constants as fsConstants, promises as fs } from 'node:fs'
 import path from 'node:path'
 import { discardResponseBody, pinnedFetch, type PinnedHostResolver } from './pinned-fetch'
-import { resolveFetchableUrl } from './tool-web'
+import { resolveUpdateHost } from './update-network'
 import type { AppUpdateChecksum } from './types'
 
 export const MAX_UPDATE_ARTIFACT_BYTES = 1024 * 1024 * 1024
@@ -145,7 +145,7 @@ export async function downloadVerifiedUpdate(
   let partialPath: string | null = null
   try {
     for (let redirects = 0; ; redirects++) {
-      const target = await resolveFetchableUrl(current.toString(), deps.lookup)
+      const target = await resolveUpdateHost(current.toString(), deps.lookup)
       response = await pinnedFetch(target, {
         redirect: 'manual',
         signal: input.signal,
@@ -158,7 +158,7 @@ export async function downloadVerifiedUpdate(
         const next = new URL(location, current)
         await discardResponseBody(response)
         response = null
-        // The next loop's resolveFetchableUrl is the authoritative string + DNS + pin check.
+        // The next loop's resolveUpdateHost is the authoritative string + DNS + pin check.
         current = next
         continue
       }

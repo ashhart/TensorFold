@@ -11,27 +11,68 @@ import urllib.error
 import urllib.request
 
 
+def spawn_server(argv, **kwargs):
+    # Keep unread lines in the pipe so selectors sees the PORT line after a warning.
+    return subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0, **kwargs)
+
+
+def listener_port(proc, timeout=10):
+    deadline = time.monotonic() + timeout
+    with selectors.DefaultSelector() as selector:
+        selector.register(proc.stdout, selectors.EVENT_READ)
+        while time.monotonic() < deadline:
+            if not selector.select(max(0, deadline - time.monotonic())):
+                break
+            line = proc.stdout.readline()
+            if line.startswith(b"PORT "):
+                return int(line.split()[1])
+            if not line:
+                break
+    raise RuntimeError("fake server did not announce its listener")
+
+
+class ListenerStartup(unittest.TestCase):
+    def child(self, output, wait=True):
+        code = f"import os,sys; os.write(1, {output!r}); "
+        if wait:
+            code += "sys.stdin.buffer.read()"
+        proc = spawn_server([sys.executable, "-c", code], stdin=subprocess.PIPE)
+        self.addCleanup(self.stop_child, proc)
+        return proc
+
+    @staticmethod
+    def stop_child(proc):
+        proc.terminate()
+        try:
+            proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate(timeout=5)
+
+    def test_warning_and_port_in_one_write(self):
+        proc = self.child(b"warning: fixture\nPORT 12345\n")
+        self.assertEqual(listener_port(proc, timeout=1), 12345)
+
+    def test_eof_without_port_is_refused(self):
+        proc = self.child(b"warning: fixture\n", wait=False)
+        with self.assertRaisesRegex(RuntimeError, "did not announce"):
+            listener_port(proc, timeout=1)
+
+    def test_silent_child_times_out(self):
+        proc = self.child(b"")
+        with self.assertRaisesRegex(RuntimeError, "did not announce"):
+            listener_port(proc, timeout=0.1)
+
+
 class MemoryHTTP(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.proc = subprocess.Popen([str(BINARY), "serve", str(FIXTURES), "--name", "fixture", "--port", "0",
+        cls.proc = spawn_server([str(BINARY), "serve", str(FIXTURES), "--name", "fixture", "--port", "0",
                                      "--host", "127.0.0.1", "--api-key", "public-test-key", "--metrics-open",
-                                     "--keep-warm", "0"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                     "--keep-warm", "0"],
                                     env={**os.environ, "TF_FAKE_CONTEXT": "8192", "TENSORFOLD_NO_LIVE": "1"})
         cls.addClassCleanup(cls.stop)
-        deadline = time.monotonic() + 10
-        with selectors.DefaultSelector() as selector:
-            selector.register(cls.proc.stdout, selectors.EVENT_READ)
-            while time.monotonic() < deadline:
-                if not selector.select(max(0, deadline - time.monotonic())):
-                    break
-                line = cls.proc.stdout.readline()
-                if line.startswith(b"PORT "):
-                    cls.base = "http://127.0.0.1:" + str(int(line.split()[1]))
-                    return
-                if not line:
-                    break
-        raise RuntimeError("fake server did not announce its listener")
+        cls.base = "http://127.0.0.1:" + str(listener_port(cls.proc))
 
     @classmethod
     def stop(cls):

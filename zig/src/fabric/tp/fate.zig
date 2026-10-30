@@ -35,7 +35,7 @@ pub const Fate = struct {
     n_hooks: std.atomic.Value(u32) = .init(0),
     dead: std.atomic.Value(bool) = .init(false),
     closing: std.atomic.Value(bool) = .init(false),
-    /// Set once the exit was asked for (tests read it; the process is gone in serving).
+    /// The exit callback returned and the failure owner stopped using this; serving exits inside the callback.
     exited: std.atomic.Value(bool) = .init(false),
     reason_buf: [512]u8 = undefined,
     reason_len: usize = 0,
@@ -45,6 +45,7 @@ pub const Fate = struct {
     peer_mem_at: [max_ranks]std.atomic.Value(u64) = @splat(.init(0)),
     wake: [2]sock.Fd = .{ -1, -1 },
     thread: ?std.Thread = null,
+    hook_thread: ?std.Thread = null,
 
     /// The channel over the bootstrap's sockets (`Bootstrap.release`); `start` runs its thread.
     pub fn init(cfg: Config, fds: [max_ranks]sock.Fd) Fate {
@@ -110,12 +111,15 @@ pub const Fate = struct {
         };
     }
 
-    /// A normal stop: the thread ends and the sockets close.
+    /// Joins the watcher, any returning failure owner and its hooks before the sockets or callback owners go away.
     pub fn close(f: *Fate) void {
         f.closing.store(true, .release);
         if (f.wake[1] >= 0) _ = std.c.write(f.wake[1], "x", 1);
         if (f.thread) |t| t.join();
         f.thread = null;
+        while (f.dead.load(.acquire) and !f.exited.load(.acquire)) sock.sleepNs(std.time.ns_per_ms);
+        if (f.hook_thread) |t| t.join();
+        f.hook_thread = null;
         for (&f.fds) |*fd| if (fd.* >= 0) {
             sock.close(fd.*);
             fd.* = -1;
@@ -144,6 +148,14 @@ pub const Fate = struct {
     }
 
     fn die(f: *Fate, why: []const u8, own: bool) void {
+        f.dieWith(why, own, spawnHooks);
+    }
+
+    fn spawnHooks(f: *Fate, r: []const u8) !std.Thread {
+        return std.Thread.spawn(.{}, runHooks, .{ f, r });
+    }
+
+    fn dieWith(f: *Fate, why: []const u8, own: bool, spawn: anytype) void {
         if (f.dead.swap(true, .acq_rel)) {
             // the first caller exits the process; a second (the fate thread or a round thread) waits for it
             while (!f.exited.load(.acquire)) sock.sleepNs(10 * std.time.ns_per_ms);
@@ -155,7 +167,9 @@ pub const Fate = struct {
         const r = f.reason();
         log.warn("[tensorfold] tp fail-fast: rank {d}: {s}; exiting ({d}) in {d} ms so every rank restarts", .{ f.rank, r, exit_code, f.grace_ns / std.time.ns_per_ms });
         // aborts first: kernels waiting on the dead peer end now; a hook that blocks cannot hold the exit
-        if (std.Thread.spawn(.{}, runHooks, .{ f, r })) |t| t.detach() else |_| runHooks(f, r);
+        if (spawn(f, r)) |t| f.hook_thread = t else |err| {
+            log.warn("[tensorfold] tp fail-fast: abort hooks could not start ({t}); the exit deadline still applies", .{err});
+        }
         if (!f.closing.load(.acquire)) {
             const head: Frame = .{ .magic = magic, .kind = kind_fail, .value = @intCast(r.len) };
             f.lock();
@@ -169,8 +183,8 @@ pub const Fate = struct {
             f.unlock();
         }
         sock.sleepNs(f.grace_ns);
-        f.exited.store(true, .release);
         f.exit_fn(exit_code);
+        f.exited.store(true, .release);
     }
 
     fn runHooks(f: *Fate, r: []const u8) void {
@@ -284,4 +298,29 @@ test "Failure boundaries: a failed watcher start gives back its wake pipe" {
     defer f.close();
     try std.testing.expectError(error.OutOfMemory, f.startWith(Fail.spawn));
     try std.testing.expectEqual(@as([2]sock.Fd, .{ -1, -1 }), f.wake);
+}
+
+test "Failure boundaries: an abort worker that cannot start never runs a blocking hook inline" {
+    const Fail = struct {
+        var exits: u32 = 0;
+        fn spawn(_: *Fate, _: []const u8) !std.Thread {
+            return error.OutOfMemory;
+        }
+        fn hook(_: *anyopaque, _: []const u8) void {
+            @panic("an abort hook must not block the exit thread");
+        }
+        fn exit(code: u8) void {
+            std.debug.assert(code == exit_code);
+            exits += 1;
+        }
+    };
+    var f = Fate.init(.{ .world = 1, .grace_ns = 0 }, @splat(-1));
+    defer f.close();
+    Fail.exits = 0;
+    f.exit_fn = Fail.exit;
+    f.onFail(.{ .ctx = &f, .call = Fail.hook });
+    f.dieWith("failed abort start", true, Fail.spawn);
+    try std.testing.expectEqual(@as(u32, 1), Fail.exits);
+    try std.testing.expect(f.exited.load(.acquire));
+    try std.testing.expect(f.hook_thread == null);
 }

@@ -14,7 +14,7 @@ pub const served_name = ".tensorfold-benchmark";
 const serving_prefix = "[tensorfold] serving " ++ served_name ++ " at http://127.0.0.1:";
 
 /// What the child serves: this executable, the checkpoint directory and the benchmark's settings.
-pub const Plan = struct { exe: []const u8, dir: []const u8, backend: []const u8, tokens: u32, context: ?i64, drafter_dir: ?[]const u8, serial: bool };
+pub const Plan = struct { exe: []const u8, dir: []const u8, backend: []const u8, tokens: u32, context: ?i64, drafter_dir: ?[]const u8, serial: bool, kv_cache: []const u8 = "bf16" };
 
 /// ``argv`` replaces the child's command line (tests use a stand-in); ``tail`` gets an exited child's last log lines.
 pub const Options = struct { startup_timeout_s: f64, grace_ms: u32 = 10_000, bench_dir: []const u8, argv: ?[]const []const u8 = null, tail: ?*[]const []const u8 = null };
@@ -41,6 +41,7 @@ pub fn argv(a: Allocator, plan: Plan) ![]const []const u8 {
     try out.appendSlice(a, &.{ "--max-tokens", try std.fmt.allocPrint(a, "{d}", .{plan.tokens}) });
     if (plan.drafter_dir) |d| try out.appendSlice(a, &.{ "--drafter", d });
     if (plan.context) |c| try out.appendSlice(a, &.{ "--context", try std.fmt.allocPrint(a, "{d}", .{c}) });
+    try out.appendSlice(a, &.{ "--kv-cache", plan.kv_cache });
     if (plan.serial) try out.append(a, "--no-drafts");
     return out.items;
 }

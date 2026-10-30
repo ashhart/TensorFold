@@ -3,72 +3,13 @@
 const std = @import("std");
 const hip = @import("hip");
 const view = @import("../model/view.zig");
+const shared = @import("hip_serve").pages;
 const Allocator = std.mem.Allocator;
 
 /// Positions a page holds: the chunk of the recurrence, so a page edge is a chunk edge.
-pub const tokens = 64;
-
-/// Pages that hold `n` positions.
-pub fn pagesFor(n: usize) usize {
-    return (n + tokens - 1) / tokens;
-}
-
-/// Which page ids are free and how many holders each has: host bookkeeping only.
-pub const Ids = struct {
-    refs: []u32,
-    free: std.ArrayList(u32) = .empty,
-    /// Pages promised to streams that have not taken them yet.
-    reserved: usize = 0,
-
-    pub fn init(gpa: Allocator, count: usize) !Ids {
-        const refs = try gpa.alloc(u32, count);
-        errdefer gpa.free(refs);
-        @memset(refs, 0);
-        var ids: Ids = .{ .refs = refs };
-        errdefer ids.free.deinit(gpa);
-        try ids.free.ensureTotalCapacity(gpa, count);
-        // the lowest id is taken first
-        var i: u32 = @intCast(count);
-        while (i > 0) {
-            i -= 1;
-            ids.free.appendAssumeCapacity(i);
-        }
-        return ids;
-    }
-
-    pub fn deinit(ids: *Ids, gpa: Allocator) void {
-        ids.free.deinit(gpa);
-        gpa.free(ids.refs);
-    }
-
-    /// A free page, now held once; null when none is free.
-    pub fn take(ids: *Ids) ?u32 {
-        const id = ids.free.pop() orelse return null;
-        ids.refs[id] = 1;
-        return id;
-    }
-
-    pub fn retain(ids: *Ids, id: u32) void {
-        std.debug.assert(ids.refs[id] > 0);
-        ids.refs[id] += 1;
-    }
-
-    /// One holder less; the page is free again when none is left.
-    pub fn release(ids: *Ids, id: u32) void {
-        std.debug.assert(ids.refs[id] > 0);
-        ids.refs[id] -= 1;
-        if (ids.refs[id] == 0) ids.free.appendAssumeCapacity(id);
-    }
-
-    /// Pages free and not promised.
-    pub fn available(ids: *const Ids) usize {
-        return ids.free.items.len -| ids.reserved;
-    }
-
-    pub fn used(ids: *const Ids) usize {
-        return ids.refs.len - ids.free.items.len;
-    }
-};
+pub const tokens = shared.tokens;
+pub const pagesFor = shared.pagesFor;
+pub const Ids = shared.Ids;
 
 /// Each attention layer's key and value pools and their ids: `kv_heads` runs of `count` pages, contiguous in order.
 pub const Pool = struct {
@@ -185,32 +126,6 @@ pub const Pool = struct {
     }
 };
 
-test "ids hand out the lowest page and free it when its last holder lets go" {
-    var ids = try Ids.init(std.testing.allocator, 3);
-    defer ids.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(?u32, 0), ids.take());
-    try std.testing.expectEqual(@as(?u32, 1), ids.take());
-    ids.retain(0);
-    ids.release(0);
-    try std.testing.expectEqual(@as(usize, 1), ids.available());
-    ids.release(0);
-    try std.testing.expectEqual(@as(usize, 2), ids.available());
-    try std.testing.expectEqual(@as(?u32, 0), ids.take());
-    try std.testing.expectEqual(@as(?u32, 2), ids.take());
-    try std.testing.expectEqual(@as(?u32, null), ids.take());
-}
-
-test "reserved pages are not available" {
-    var ids = try Ids.init(std.testing.allocator, 4);
-    defer ids.deinit(std.testing.allocator);
-    ids.reserved = 3;
-    try std.testing.expectEqual(@as(usize, 1), ids.available());
-    ids.reserved = 9;
-    try std.testing.expectEqual(@as(usize, 0), ids.available());
-}
-
-test "pages cover positions by 64" {
-    try std.testing.expectEqual(@as(usize, 0), pagesFor(0));
-    try std.testing.expectEqual(@as(usize, 1), pagesFor(64));
-    try std.testing.expectEqual(@as(usize, 2), pagesFor(65));
+test {
+    _ = shared;
 }

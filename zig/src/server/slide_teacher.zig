@@ -37,11 +37,21 @@ pub const Teacher = struct {
     turn_end: ?[]const u32 = null,
     thinks: ?bool = null, // whether the template opens the model's reasoning in its prompt
     languages: std.StringHashMapUnmanaged(Local) = .empty, // keep and personal prompts in each other language told so far
-    lessons: usize = 0, // lessons so far, which picks the questions about the user a check asks
+    lessons: usize = 0, // lessons kept so far, which picks the questions about the user a check asks
     told: std.ArrayList(Told) = .empty, // learned document facts' answers, which later lessons on their subject keep
 
     pub fn init(gpa: Allocator) Teacher {
         return .{ .arena = .init(gpa) };
+    }
+
+    /// A lesson ended: kept, it counts; given up, the next lesson picks its checks as this one did (none of it stays).
+    pub fn ended(t: *Teacher, kept: bool) void {
+        if (kept) t.lessons += 1;
+    }
+
+    /// The number a lesson being written picks its checks by: one past the lessons kept.
+    pub fn nth(t: *const Teacher) usize {
+        return t.lessons + 1;
     }
 
     /// A kept document lesson's held question and answer, by the subject its edit keys on (copied into the arena).

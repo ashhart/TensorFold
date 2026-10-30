@@ -77,6 +77,59 @@ pub fn probe(e: anytype, p: anytype) ?u32 {
 
 pub const Cooldown = struct { after: u64 = 8, spacing: u64 = 8, retry: bool = false };
 
+/// Kept calibrations a context band: a long prompt's round times would hold a short stream off its wide windows.
+pub const bands = 6;
+
+/// A context's band: under 8,192 tokens, then one a doubling, the last from 131,072 on.
+pub fn band(len: usize) usize {
+    return if (len < 8192) 0 else @min(bands - 1, 1 + std.math.log2_int(usize, len / 8192));
+}
+
+/// The furthest a kept deadline or spacing reaches into the next stream: carried doublings would end every re-check.
+pub const carry_most: u64 = 256;
+
+/// The kept calibration a stream starts from and leaves: its sampling mode's, at its context's band.
+pub fn slot(kept: *[2][bands]?Kept, s: anytype) *?Kept {
+    return &kept[@intFromBool(s.sampling != null)][band(s.context.items.len)];
+}
+
+/// A finished lone stream's calibration, so the next stream starts priced instead of probing every width again.
+pub const Kept = struct {
+    ms: Table = .{},
+    probes: [129]Cooldown = @splat(.{}),
+    after: u64 = 8,
+    spacing: u64 = 8,
+    rounds: u64 = 0, // the stream's rounds when kept: its deadlines rebase from here
+
+    pub fn deinit(k: *Kept, gpa: std.mem.Allocator) void {
+        k.ms.deinit(gpa);
+    }
+};
+
+/// Keep a stream's prices and deadlines when every round it ran was its own (shared rounds price others' rows).
+pub fn keep(gpa: std.mem.Allocator, kept: *?Kept, s: anytype) !void {
+    if (s.shared_round) return;
+    const ms = observed(s);
+    if (ms.empty()) return;
+    const slots = try gpa.dupe(?f64, ms.slots);
+    if (kept.*) |*k| k.deinit(gpa);
+    kept.* = .{ .ms = .{ .slots = slots }, .probes = s.cost_probes, .after = s.cost_probe_after, .spacing = s.cost_probe_spacing, .rounds = s.rounds };
+}
+
+/// Start a stream's own prices from the newest kept calibration, the deadlines counted from its first round.
+pub fn seed(gpa: std.mem.Allocator, kept: ?Kept, s: anytype) !void {
+    const k = kept orelse return;
+    const state = if (s.depth) |*d| d else return;
+    if (state.ms) |*own| {
+        if (!own.empty()) return;
+        own.deinit(gpa);
+    }
+    state.ms = .{ .slots = try gpa.dupe(?f64, k.ms.slots) };
+    for (&s.cost_probes, k.probes) |*cd, old| cd.* = .{ .after = s.rounds + @min(carry_most, old.after -| k.rounds), .spacing = @min(carry_most, old.spacing), .retry = old.retry };
+    s.cost_probe_after = s.rounds + @min(carry_most, k.after -| k.rounds);
+    s.cost_probe_spacing = @min(carry_most, k.spacing);
+}
+
 pub const Trial = struct {
     rows: u32,
     expected: f64,

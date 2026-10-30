@@ -17,6 +17,14 @@ const threads = 1024;
 /// norms.cu's 16-byte forms: VNT threads, VEC_MOST loads of 8 a thread.
 const vec_threads = 256;
 const vec_most = 4;
+/// norms_strided.cuh's rows: the MoE form's widest row and slots, and the parts' widest by form.
+const strided_most = 4096;
+const strided_slots = 8;
+
+/// The parts' widest row: 128 threads of 8 (MLX's steps), 256 of 16 (rounded once); the threads are part of the order.
+pub fn partsMost(round: bool) usize {
+    return if (round) 128 * 8 else 256 * 16;
+}
 
 /// The 16-byte forms take a bf16 row by its width alone: a multiple of 8 within VEC_MOST * 8 * VNT.
 fn vectorWidth(width: usize) bool {
@@ -51,9 +59,13 @@ pub const Norms = struct {
     add_rms_bf16_fn: Function,
     add_rms_h_fn: Function,
     add_rms_h_f32w_fn: Function,
+    moe_add_rms_h_fn: Function, // the expert slots' sum added to the residual, then the strided norm
     gated_fns: [3]Function, // head dim 64, 128, 256
     rms_sums_fn: Function,
     tail_fns: [2]Function, // each norm rounded once, MLX's bf16 steps
+    l2_fn: Function,
+    slerp_fn: Function,
+    parts_fns: [2]Function, // the strided norm on parts of rows: rounded once, MLX's bf16 steps
 
     pub fn load(d: *const Driver) !Norms {
         if (!kernels.available) return error.BuiltWithoutKernels;
@@ -67,9 +79,13 @@ pub const Norms = struct {
             .add_rms_bf16_fn = try mod.function("tf_add_rms_rows_bf16"),
             .add_rms_h_fn = try mod.function("tf_add_rms_rows_bf16h"),
             .add_rms_h_f32w_fn = try mod.function("tf_add_rms_rows_bf16h_f32w"),
+            .moe_add_rms_h_fn = try mod.function("tf_moe_add_rms_rows_bf16h"),
             .gated_fns = .{ try mod.function("tf_gated_rms_rows_64"), try mod.function("tf_gated_rms_rows_128"), try mod.function("tf_gated_rms_rows_256") },
             .rms_sums_fn = try mod.function("tf_rms_rows_sums"),
             .tail_fns = .{ try mod.function("tf_add_rms_rows_bf16h_tail"), try mod.function("tf_add_rms_rows_bf16h_tail_round") },
+            .l2_fn = try mod.function("tf_l2_rows"),
+            .slerp_fn = try mod.function("tf_slerp_rows"),
+            .parts_fns = .{ try mod.function("tf_rms_rows_bf16h_parts"), try mod.function("tf_rms_rows_bf16h_parts_round") },
         };
     }
 
@@ -155,6 +171,21 @@ pub const Norms = struct {
         try launch_.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = vec_threads } }, s, &a);
     }
 
+    /// h = bf16(x + bf16(the `routed` slots' fma chain by wt + the rest's sum)), y = rms(h) w, xs: moe_row's order.
+    pub fn moeAddRmsH(n: *const Norms, s: Stream, x: u64, ys: u64, ys_kind: Kind, wt: u64, routed: usize, slots: usize, w: u64, h: u64, y: u64, xs: u64, rows: usize, width: usize, eps: f32) !void {
+        if (width % 64 != 0 or width > strided_most or ys_kind == .f16) return error.RowShape;
+        if (slots > strided_slots or routed > slots) return error.TooManySlots;
+        if (rows == 0) return;
+        var a: launch_.Args = .{};
+        a.add(x);
+        a.add(ys);
+        a.add(@as(i32, @intFromBool(ys_kind == .f32)));
+        for ([_]u64{ wt, w, h, y, xs }) |v| a.add(v);
+        a.add(eps);
+        for ([_]usize{ width, routed, slots }) |v| a.add(@as(i32, @intCast(v)));
+        try launch_.launch(n.moe_add_rms_h_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = threads } }, s, &a);
+    }
+
     /// addRmsH with bf16 weights and a tail's options; with none set it is addRmsH itself, the same kernel and bits.
     pub fn addRmsTail(n: *const Norms, s: Stream, x: u64, r: ?u64, w: u64, h: u64, y: u64, xs: ?u64, rows: usize, width: usize, eps: f32, t: Tail) !void {
         if (!t.round and t.branch == null and t.scalar == null) return n.addRmsH(s, x, r, w, .bf16, h, y, xs, rows, width, eps);
@@ -166,6 +197,49 @@ pub const Norms = struct {
         a.add(eps);
         const f = n.tail_fns[@intFromBool(t.round)];
         try launch_.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = vec_threads } }, s, &a);
+    }
+
+    /// The strided norm of part p of row i at x + i x_ld + p x_part (signed parts; MLX's bf16 steps with `round`).
+    pub fn rmsParts(n: *const Norms, s: Stream, x: u64, x_ld: usize, x_part: isize, w: u64, w_part: isize, y: u64, y_ld: usize, y_part: usize, xs: ?u64, rows: usize, parts: usize, width: usize, eps: f32, round: bool) !void {
+        if (width % 64 != 0 or width > partsMost(round) or (xs != null and (y_ld | y_part) % 64 != 0)) return error.RowShape;
+        if (rows == 0 or parts == 0) return;
+        var a: launch_.Args = .{};
+        a.add(x);
+        a.add(@as(i64, @intCast(x_ld)));
+        a.add(@as(i64, x_part));
+        a.add(w);
+        a.add(@as(i64, w_part));
+        a.add(y);
+        for ([_]usize{ y_ld, y_part }) |v| a.add(@as(i64, @intCast(v)));
+        a.add(xs orelse 0);
+        a.add(@as(i32, @intCast(width)));
+        a.add(eps);
+        const block: u32 = if (round) 128 else 256;
+        try launch_.launch(n.parts_fns[@intFromBool(round)], .{ .grid = .{ .x = @intCast(rows), .y = @intCast(parts), .z = 1 }, .block = .{ .x = block } }, s, &a);
+    }
+
+    /// nGPT rows: y = bf16(s / sqrt(sum(s^2) + eps)), s = x, or bf16(x + r) with r; width % 64, at most 8,192.
+    pub fn l2(n: *const Norms, s: Stream, x: u64, r: ?u64, y: u64, rows: usize, width: usize, eps: f32) !void {
+        if (width % 64 != 0 or !vectorOk(width, &.{ x, r orelse 0, y })) return error.RowShape;
+        if (rows == 0) return;
+        var a: launch_.Args = .{};
+        for ([_]u64{ x, r orelse 0, y }) |v| a.add(v);
+        a.add(@as(i32, @intCast(width)));
+        a.add(eps);
+        try launch_.launch(n.l2_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = vec_threads } }, s, &a);
+    }
+
+    /// The nGPT residual: h = bf16(l2(a + |alpha scale| (b - a))), a = bf16(l2(res)), b = bf16(l2(out)); bf16 alpha.
+    pub fn slerp(n: *const Norms, s: Stream, res: u64, out: u64, alpha: u64, scale: f32, h: u64, rows: usize, width: usize, eps: f32) !void {
+        if (width % 64 != 0 or !vectorOk(width, &.{ res, out, alpha, h })) return error.RowShape;
+        if (rows == 0) return;
+        var a: launch_.Args = .{};
+        for ([_]u64{ res, out, alpha }) |v| a.add(v);
+        a.add(scale);
+        a.add(h);
+        a.add(@as(i32, @intCast(width)));
+        a.add(eps);
+        try launch_.launch(n.slerp_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = vec_threads } }, s, &a);
     }
 
     /// Per head (dv 64/128/256): out = bf16(silu(z) * rms(y) * w), y/z rows at strides y_ld/z_ld; xs: 64-value sums.

@@ -126,7 +126,7 @@ pub fn hold(h: anytype, io: std.Io) !void {
     defer list.deinit(h.gpa);
     for (h.model.checkpoint.shards.items) |s| try list.append(h.gpa, s.buffer);
     try list.appendSlice(h.gpa, h.model.weights.owned.items);
-    try fields.append(h.gpa, &list, &h.model.frame);
+    try h.model.frame.appendBuffers(h.gpa, &list);
     if (h.model.ane) |share| {
         var buffers: ShareBuffers = undefined;
         try list.appendSlice(h.gpa, try shareBuffers(share, &buffers));

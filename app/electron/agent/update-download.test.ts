@@ -33,6 +33,32 @@ async function assertNoArtifacts(root: string): Promise<void> {
 async function main() {
   {
     const root = await tempRoot()
+    try {
+      const result = await downloadVerifiedUpdate({
+        downloadUrl: 'https://download.example/TensorFold-Studio.dmg', checksum,
+        manifestSignatureVerified: true, downloadRoot: root,
+      }, {
+        lookup: async () => [{ address: '198.18.0.90', family: 4 }],
+        fetchImpl: (async () => response(bytes, { headers: { 'content-length': String(bytes.length) } })) as typeof fetch,
+      })
+      assert.equal(result.sha256, checksum.value, 'a proxy placeholder address reaches the signed download')
+    } finally { await fs.rm(root, { recursive: true, force: true }) }
+  }
+  {
+    const root = await tempRoot()
+    try {
+      await assert.rejects(() => downloadVerifiedUpdate({
+        downloadUrl: 'https://private.example/artifact', checksum,
+        manifestSignatureVerified: true, downloadRoot: root,
+      }, {
+        lookup: resolver(),
+        fetchImpl: (async () => response(bytes)) as typeof fetch,
+      }), /private or non-public address/i)
+      await assertNoArtifacts(root)
+    } finally { await fs.rm(root, { recursive: true, force: true }) }
+  }
+  {
+    const root = await tempRoot()
     const progress: Array<{ receivedBytes: number; totalBytes: number | null }> = []
     try {
       await downloadVerifiedUpdate({ downloadUrl: 'https://example.com/update.zip', checksum, manifestSignatureVerified: true, downloadRoot: root, onProgress: (p) => progress.push(p) }, {

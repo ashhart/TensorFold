@@ -19,7 +19,7 @@ For an archive installation, download the arm64 asset and its companion checksum
 [latest release](https://github.com/ashhart/TensorFold/releases/latest), with `V` set to its version:
 
 ```sh
-V=1.1.3
+V=1.1.9
 curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-macos-arm64.tar.gz
 curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-macos-arm64.tar.gz.sha256
 shasum -a 256 -c tensorfold-$V-macos-arm64.tar.gz.sha256
@@ -134,6 +134,37 @@ and `live.waiting`, the queued requests. Subtract waiting from connections to ge
 For example, 8 connections with 4 waiting means 4 active and 4 queued.
 When API authentication is enabled, `/health` returns only status.
 
+## Prompt prefill share and budget
+
+The native server reads two environment variables when it opens its lane host.
+Both are optional. Set them before starting the server.
+`TENSORFOLD_PREFILL_SHARE` takes a number from 0.01 to 1.
+The default is 1. Any other text gives the default.
+It is the share of wall time long prompt steps get while other streams are decoding.
+A step of length t at share p owes the decoders t (1 - p) / p of decode time.
+The debt grows after each step and falls after each decode round.
+A long prompt's next step runs only when no debt is owed or no stream can decode.
+At the default 1 no debt is recorded, so the only waiting is the ordinary turn-taking: the host runs at most one step of a long prompt each time it turns to it, and chunked prompts still interleave with the decoding streams' rounds.
+Lower values add that debt, finish the long prompt later and leave more time for decoding streams.
+A prompt whose whole uncached pass is at most 512 rows runs outside the share as one call.
+The check compares the prompt's length with the cached state, not how far the fill has reached, so a long prompt whose last rows remain does not become exempt when its unfilled tail is small.
+
+`TENSORFOLD_PREFILL_BUDGET` takes a whole number of prompt rows from 1 to 4,294,967,295.
+The default is 0, which means none.
+Empty text, 0, a negative number, a fractional form, a value above the range or any other text gives 0, which removes the cap.
+It caps the prompt rows filled in one pass while a stream is ready to decode.
+The cap counts only rows filled while such a stream waits.
+A call that reports no progress spends the allowance anyway and yields, so unknown or stale progress never holds the cap open.
+When a cap is set, one step of a long prompt that has waited long enough goes first.
+When the cap is reached the host stops prompt work for that pass.
+The decoders then take their next round before more prompt rows are filled.
+A single prompt call is never split, so one call can pass the cap.
+Raising the cap lets more prompt work run per pass.
+That delays the decoding streams' next round.
+Lowering it gives those streams their next round sooner.
+That costs more passes to finish the prompts.
+With the default 0 no cap applies: short prompts run as one burst beside decoders, bounded at a lane's worth of newly begun prompts while other work waits.
+
 ## Linux and CUDA
 
 For source builds with `zig build native` (including `--prefix` installs): Structured output and required tool calls need the release archive's `lib/` or `zig build grammar -Dxgrammar=DIR`; prepare DIR with `git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar` (use the native build's same `--prefix` for grammar).
@@ -149,7 +180,7 @@ Flash Next also serves on CUDA from its MLX 4-bit checkpoint, on the built-in ke
 On a GB10 arm64 host (an x86_64 host uses `linux-x86_64` in the same commands):
 
 ```sh
-V=1.1.3
+V=1.1.9
 curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-linux-aarch64.tar.gz
 curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-linux-aarch64.tar.gz.sha256
 sha256sum -c tensorfold-$V-linux-aarch64.tar.gz.sha256
@@ -176,6 +207,10 @@ request with the cache off. `--prompt-cache-gib` sizes the kept states (16 GiB b
 them off. A state kept inside a prompt chunk costs no extra prompt call. A Nemotron 3.5 Lightning state takes 48 MiB plus
 7 KiB a prompt token, in whole 2 MiB pages (62 MiB at 2,048 tokens), and the cache keeps four 48 MiB buffers of its
 budget free for the next states.
+Prompts fill a chunk at a time between decode rounds, so requests that arrive together on a new system prompt would each
+compute it. A request whose prompt shares a cut another prompt is still filling, which its own lookup would resume, waits
+in the queue until that fill stands there, then resumes the cut. `TENSORFOLD_PREFIX_WAIT_MS` bounds the wait (60000 by
+default; 0 turns it off).
 `TF_HEAT_HIGH` and `TF_HEAT_LOW`, in degrees Celsius and set together, make each prompt chunk wait while the hottest
 thermal zone (under `/sys/class/thermal`, or `TF_HEAT_ROOT`) is above the high band, until it is at or under the low one.
 The server logs `heat_wait_s`, a cancel ends the wait, and the reply's tokens do not change.
@@ -287,6 +322,29 @@ The default keep-warm window is 900 seconds, and `--keep-warm 0` disables it.
 Later buffers join through their owners while they fit the same bound, and leave before they are freed or replaced.
 The bound reserves 2 GiB inside a validated family load limit, or 70% of known RAM by default.
 Neural Engine program weights are separate from Metal buffers and are outside this set.
+
+### Memory pressure on a shared Mac
+
+Engines served through the shared lane host, including Flash Next with `--parallel` above one, Qwen3.8-27B and GLM, read the macOS memory pressure level (`kern.memorystatus_vm_pressure_level`).
+The engine thread reads it at most four times a second and acts on the level:
+
+- Warning: a queued request starts only when no other stream runs, so the server serves one stream at a time.
+  New prompt states are not kept.
+  The prompt cache gives back kept states, least valuable first and one per round, until it holds no more than its soft watermark.
+  With `--spill-gib` each state is written to disk before it goes.
+  A state that a request is restoring is never dropped.
+- Critical: as warning, and new requests get 503 with a message saying the Mac is under critical memory pressure.
+  Requests already queued or running continue.
+- Normal: admission and kept states behave as before.
+
+A rise takes effect at the next reading; a fall waits for five seconds of lower readings, so admission does not flap near a threshold.
+Each change of level is logged once.
+At normal pressure the server behaves exactly as it does without the governor.
+Under pressure only admission and kept states change: every request served returns the same tokens, and a resumed request equals a fresh one.
+
+`TENSORFOLD_PRESSURE_CACHE_PERCENT=N` sets the soft watermark to N% of the prompt cache budget (default 50; 0 sheds every state not being restored).
+`TENSORFOLD_MEMORY_PRESSURE=0` (or `off`) disables the governor.
+Flash Next's single-reply driver (`--parallel 1` or `auto`) does not read pressure yet, and Linux and Windows builds never do.
 
 
 ## Access, context and updates

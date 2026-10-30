@@ -9,6 +9,7 @@ pub const Engine = struct {
     original: *base.Eng,
     at: ?usize = null,
     delay_ms: ?u32 = null,
+    hold: bool = false,
     disconnect: ?*Conn = null,
     fail: bool = false,
     submissions: usize = 0,
@@ -43,11 +44,18 @@ pub const Engine = struct {
         e.held = .{ .id = id, .request = request, .sink = sink };
         e.active.store(true, .release);
         if (e.disconnect) |conn| conn.broken = true;
+        if (e.hold) return;
         e.worker = std.Thread.spawn(.{}, watch, .{e}) catch {
             e.held = null;
             e.active.store(false, .release);
             return error.Busy;
         };
+    }
+    /// The HTTP observer releases a held turn only after the keepalive crossed the socket.
+    pub fn releaseHeld(e: *Engine) !void {
+        const h = e.take() orelse return error.NoHeldRequest;
+        const b = e.original.engine();
+        try b.vtable.submit(b.ctx, h.id, h.request, h.sink);
     }
     fn take(e: *Engine) ?Held {
         e.mutex.lockUncancelable(io);

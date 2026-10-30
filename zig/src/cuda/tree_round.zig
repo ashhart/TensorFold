@@ -36,9 +36,22 @@ pub const Kernels = struct {
     keep_fn: Function,
     gather_fn: Function,
     head_fn: Function,
+    ids_fn: Function,
 
     pub fn resolve(mod: Module) !Kernels {
-        return .{ .argmax_fn = try mod.function("tf_round_bf16_argmax"), .match_fn = try mod.function("tf_tree_round_match"), .keep_fn = try mod.function("tf_round_keep_rows"), .gather_fn = try mod.function("tf_round_gather_rows"), .head_fn = try mod.function("tf_round_keep_head") };
+        return .{ .argmax_fn = try mod.function("tf_round_bf16_argmax"), .match_fn = try mod.function("tf_tree_round_match"), .keep_fn = try mod.function("tf_round_keep_rows"), .gather_fn = try mod.function("tf_round_gather_rows"), .head_fn = try mod.function("tf_round_keep_head"), .ids_fn = try mod.function("tf_round_pick_ids") };
+    }
+
+    /// ids i32 [rows]: each pick's token, or `fallback` for one with none (its flag stays in the picks).
+    pub fn pickIds(g: *const Kernels, s: Stream, picks: u64, ids: u64, rows: usize, vocab: usize, fallback: u32) !void {
+        if (rows == 0) return;
+        var a: launch_.Args = .{};
+        a.add(picks);
+        a.add(ids);
+        a.add(@as(u32, @intCast(rows)));
+        a.add(@as(u32, @intCast(vocab)));
+        a.add(@as(i32, @intCast(fallback)));
+        try launch_.launch(g.ids_fn, .{ .grid = .{ .x = @intCast((rows + 255) / 256), .y = 1, .z = 1 }, .block = .{ .x = 256 } }, s, &a);
     }
 
     /// picks[r] for every row of a round's trees: the first largest finite bf16 logit, or none.

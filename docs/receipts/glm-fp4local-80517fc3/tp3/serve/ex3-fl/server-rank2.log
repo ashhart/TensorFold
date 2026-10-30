@@ -1,0 +1,8 @@
+info: rank 2: TF_GLM_NCCL_ID_FILE <workspace>/serve111/ex3-fl/nccl-id; NCCL_COMM_ID <ring-a>:29583 leaves NCCL's environment
+TF_MEMORY {"schema":1,"pid":986,"rank":2,"phase":"load_begin","reset":true,"monotonic_ns":468163407687208,"scope":"process_owned_cuda_buffers","usage":{"device":0,"host":0,"peak":0,"host_peak":0,"allocs":0}}
+info: checkpoint digest: 0.0 GiB read in 0.2 s, 42/42 cached files
+TF_MEMORY {"schema":1,"pid":986,"rank":2,"phase":"load_end","reset":false,"monotonic_ns":468448381503770,"scope":"process_owned_cuda_buffers","usage":{"device":61999297544,"host":26624,"peak":61999297568,"host_peak":26624,"allocs":1396}}
+info: rank 2: rank 0 ended; leaving
+TF_MEMORY {"schema":1,"pid":986,"rank":2,"phase":"cleanup_begin","reset":false,"monotonic_ns":468816280109895,"scope":"process_owned_cuda_buffers","usage":{"device":62667190024,"host":34816,"peak":64670867464,"host_peak":34816,"allocs":1397}}
+TF_MEMORY {"schema":1,"pid":986,"rank":2,"phase":"cleanup_end","reset":false,"monotonic_ns":468817607991787,"scope":"process_owned_cuda_buffers","usage":{"device":0,"host":12288,"peak":64670867464,"host_peak":34816,"allocs":0}}
+exit 0

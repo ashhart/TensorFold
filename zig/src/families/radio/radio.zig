@@ -75,4 +75,5 @@ test {
 
 test {
     _ = @import("video_test.zig");
+    _ = @import("upload_test.zig");
 }

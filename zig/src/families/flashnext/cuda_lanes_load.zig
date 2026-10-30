@@ -17,10 +17,13 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     if ((o.tp != 1 and o.tp != 2) or o.rank >= o.tp) return error.BadRank;
     // refused before the stream, the glue or a captured set loads
     const chunk = try prompt.chunkRows();
+    _ = try @import("cuda_modelopt_threads.zig").configured(); // TF_FLASHNEXT_LOAD_THREADS, refused before any load
     const mode = try config.mode(gpa, io, dir);
     if (o.tp != 1 and (mode != .modelopt or captured != null)) return error.UnsupportedQuantization;
     if (o.slide and (mode != .affine or o.tp != 1)) return error.UnsupportedLearningFormat;
     if (o.slide and captured != null) return error.TrainingOnCapturedGlue;
+    const page_tokens = try @import("cuda_kv_lanes.zig").paging();
+    if (page_tokens > 0 and (o.tp != 1 or o.slide or captured != null)) return error.FlashNextPagesUnsupported;
     const driver: *cuda.Driver = @constCast(ctx.d);
     const own = try gpa.create(Cuda);
     errdefer gpa.destroy(own);
@@ -54,7 +57,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     errdefer own.engine.deinit();
     if (o.vision) |limits| {
         if (own.set != null) return error.VisionCapturedSetUnsupported;
-        own.vision = try images.Vision.load(gpa, io, driver, own.stream, dir, limits, o.rank, own.glue.f.prep_media, own.glue.f.pool_media);
+        own.vision = try images.Vision.load(gpa, io, driver, own.stream, dir, limits, o.rank, own.glue.f.prep_media, own.glue.f.pool_media, own.glue.f.prep_media_paged, own.glue.f.pool_media_paged);
         own.engine.image_factory = own.vision;
     }
     errdefer if (own.vision) |v| v.deinit();
@@ -70,17 +73,26 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     const window = @min(o.context + mtp.max_rows, prompt.max_tokens);
     // and an attention block's block scores at the window (64 MiB at 262,144 tokens)
     _ = try own.engine.reserveScores(window, @min(o.context, own.engine.chunk));
-    own.logits = try cuda.DeviceBuffer.alloc(driver, round_streams * prompt.vocabulary * 2);
+    // a shared round's or a shared verify's scores: up to a drafting round's rows (facts' batch_rows)
+    own.logits = try cuda.DeviceBuffer.alloc(driver, @max(round_streams, mtp.round_rows) * prompt.vocabulary * 2);
     errdefer own.logits.free();
     own.lanes = .empty;
     own.next = 0;
     if (o.slide) own.lay = try @import("cuda_slide.zig").layoutOf(gpa, io, dir);
-    var stream_bytes = prompt.seqBytes(window);
+    const own_seq_bytes = try prompt.seqBytesPaged(window, try @import("cuda_pages.zig").pageTest());
+    var stream_bytes = own_seq_bytes;
     if (own.head) |h| {
         stream_bytes += mtp.Draft.bytes(window, h.ids.len, own.engine.chunk);
     } else if (o.drafts and o.tp == 2) stream_bytes += mtp.Draft.bytes(window, 1, own.engine.chunk);
     if (o.vision) |v| stream_bytes += @as(usize, v.image_tokens) * @import("cuda_prompt_wt.zig").dims * 2 + 16 * o.context;
+    if (page_tokens > 0) {
+        // the lane's head runs at the engine's chunk: its cache on the stream's pages, its buffers in the run
+        own.kv.head = if (own.head) |h| .{ .draft_n = h.ids.len, .rows = own.engine.chunk } else null;
+        const head_bytes = if (own.head) |h| mtp.Draft.bytes(window, h.ids.len, own.engine.chunk) else 0;
+        own.kv.layout = @import("cuda_kv_lanes.zig").layout(o.context, page_tokens, own.kv.head, stream_bytes - own_seq_bytes - head_bytes);
+    }
     return .{
+        .layout = own.kv.layout,
         .vision = own.vision,
         .backend = own.backend(),
         .facts = own.facts(),
@@ -95,4 +107,18 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
         .own_glue = own.set == null,
         .follow = if (o.rank != 0) F.follow else null,
     };
+}
+
+/// A captured set must provide every launch before it can replace the owned glue.
+pub fn comparison(gpa: std.mem.Allocator, io: std.Io, driver: *cuda.Driver, ctx: *const cuda.Context, dir: []const u8, drafts: bool, entries: []const []const u8, head_entries: []const []const u8) !?cuda.aot.Set {
+    var set = try cuda.aot.Set.load(gpa, io, driver, ctx.device, dir);
+    const holds = for (entries) |name| {
+        if (!set.has(name)) break false;
+    } else for (head_entries) |name| {
+        if (drafts and !set.has(name)) break false;
+    } else true;
+    if (holds) return set;
+    set.deinit();
+    std.log.info("flashnext: the captured set at {s} lacks Flash Next's kernels; its own glue runs", .{dir});
+    return null;
 }

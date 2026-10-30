@@ -15,7 +15,9 @@ pub fn health(srv: *Server, conn: *Conn, a: Allocator) !void {
     // draining: the engine is not asked, it may be stopping
     if (srv.draining.load(.seq_cst)) return routes.sendDraining(conn, try std.fmt.allocPrint(a, "{{\"status\": \"draining\", \"requests_in_progress\": {d}}}", .{srv.generating.load(.seq_cst)}));
     var status: api.Status = .{};
-    srv.engine.status(&status, &.{});
+    if (srv.idle_manager) |m| {
+        m.readStatus(srv, &status, &.{}); // the manager lock guards the read: no closed-engine race with a park
+    } else srv.engine.status(&status, &.{});
     if (!status.healthy) return conn.sendJson(503, "{\"status\": \"unavailable\"}");
     if (srv.keys) |k| if (k.enabled()) return conn.sendJson(200, "{\"status\": \"ok\"}");
     routes.sendValue(conn, a, 200, try openHealth(srv, a, false));
@@ -29,20 +31,29 @@ pub fn openHealth(srv: *Server, a: Allocator, reset_peak: bool) !Value {
     const ids = try a.alloc(Value, srv.config.model_ids.len);
     for (srv.config.model_ids, ids) |id, *slot| slot.* = .{ .string = id };
     try o.put(a, "model_ids", .{ .array = ids });
-    try o.put(a, "max_batch_size", try json.intValue(a, srv.info.lanes));
-    if (srv.info.policy.len > 0) try o.put(a, "policy", .{ .string = srv.info.policy });
+    const info_early: api.Info = if (srv.idle_manager) |m| m.readInfo(srv) else srv.info;
+    try o.put(a, "max_batch_size", try json.intValue(a, info_early.lanes));
+    if (info_early.policy.len > 0) try o.put(a, "policy", .{ .string = info_early.policy });
     var status: api.Status = .{};
-    srv.engine.status(&status, &.{});
-    try o.put(a, "warming", .{ .bool = status.warming });
+    var device: ?api.Memory = null;
+    if (srv.idle_manager) |m| {
+        // one lock pass reads status and memory, so the park cannot close the engine between the checks
+        m.readStatus(srv, &status, &.{});
+        device = m.readMemory(srv, reset_peak);
+    } else {
+        srv.engine.status(&status, &.{});
+        device = srv.engine.memory(reset_peak);
+    }
+    try o.put(a, "warming", .{ .bool = status.warming }); // a parked stub reports unhealthy: warming false, honestly
     const memory = try json.newObject(a);
-    if (srv.engine.memory(reset_peak)) |mem| {
+    if (device) |mem| {
         try memory.put(a, "active", try json.intValue(a, mem.active));
         try memory.put(a, "cache", try json.intValue(a, mem.cache));
         try memory.put(a, "peak", try json.intValue(a, mem.peak));
         if (mem.limit) |limit| try memory.put(a, "limit", try json.intValue(a, limit));
     }
     try o.put(a, "memory", .{ .object = memory });
-    try o.put(a, "live", try live.snapshot(a, srv.engine));
+    try o.put(a, "live", try live.snapshot(a, status));
     const ident = srv.config.identity;
     for ([_][2][]const u8{
         .{ "version", ident.version },
@@ -116,7 +127,23 @@ fn reasoningValue(
 /// Prometheus text, version 0.0.4.
 pub fn metrics(srv: *Server, conn: *Conn, a: Allocator) void {
     var out: std.Io.Writer.Allocating = .init(a);
-    srv.metrics.render(srv.io, &out.writer, srv.engine, srv.info.context_window) catch return;
+    if (srv.idle_manager) |m| {
+        var status: api.Status = .{};
+        var streams: [512]u32 = undefined;
+        m.readStatus(srv, &status, &streams); // the manager lock guards the read; the render below writes no engine
+        const info = m.readInfo(srv);
+        const memory = m.readMemory(srv, false);
+        // parked: no engine holds counters; the HTTP and process families still render
+        if (status.healthy) {
+            srv.metrics.render(srv.io, &out.writer, status, streams[0..@min(status.streams, streams.len)], info, memory, info.context_window) catch return;
+        } else srv.metrics.renderParked(srv.io, &out.writer, srv.info.context_window) catch return;
+    } else {
+        var status: api.Status = .{};
+        var streams: [512]u32 = undefined;
+        srv.engine.status(&status, &streams);
+        srv.metrics.render(srv.io, &out.writer, status, streams[0..@min(status.streams, streams.len)], srv.info, srv.engine.memory(false), srv.info.context_window) catch return;
+    }
+    if (srv.config.admission.enabled()) @import("metrics.zig").renderAdmission(&out.writer, srv.admission.snapshot(srv.io)) catch return;
     const body = out.written();
     conn.startResponse(200, null) catch return;
     conn.addHeader("Content-Type", "text/plain; version=0.0.4; charset=utf-8") catch return;
@@ -137,8 +164,14 @@ pub fn dashboard(srv: *Server, conn: *Conn, a: Allocator) void {
 pub fn stats(srv: *Server, conn: *Conn, a: Allocator) void {
     if (!srv.config.dashboard) return routes.unknown(conn, a);
     var status: api.Status = .{};
-    srv.engine.status(&status, &.{});
-    const memory = srv.engine.memory(false);
+    var memory: ?api.Memory = null;
+    if (srv.idle_manager) |m| {
+        m.readStatus(srv, &status, &.{}); // the manager lock guards both reads against a concurrent park
+        memory = m.readMemory(srv, false);
+    } else {
+        srv.engine.status(&status, &.{});
+        memory = srv.engine.memory(false);
+    }
     srv.metrics.mutex.lockUncancelable(srv.io);
     const prompt = srv.metrics.prompt;
     const generation = srv.metrics.generation;

@@ -4,6 +4,7 @@ const cuda = @import("cuda");
 const lanes = @import("lanes");
 const geometry = @import("cuda_geometry.zig");
 const engine = @import("cuda_engine.zig");
+const caches = @import("cuda_cache.zig");
 
 const Engine = engine.Engine;
 const Cache = engine.Cache;
@@ -38,13 +39,14 @@ pub const Target = struct {
     e: *Engine,
     caches: *std.AutoHashMapUnmanaged(*lanes.Stream, *Cache),
     seen: *std.AutoHashMapUnmanaged(*lanes.Stream, []Seen),
+    ctx: ?*const cuda.Context = null, // --learn-conversations: made current where the disk tier allocates copies
 };
 
 /// One piece of a stream's state: its offset in the state or key/value buffer, its length.
-const Piece = struct { kv: bool, off: usize, len: usize };
+pub const Piece = struct { kv: bool, off: usize, len: usize };
 
 /// A state's pieces by index, any geometry: the state, then each (layer, key/value, head)'s first `at` rows.
-const Layout = struct {
+pub const Layout = struct {
     g: Geometry,
     format: Format,
     cap: usize,
@@ -54,12 +56,12 @@ const Layout = struct {
         return if (l.format == .fp8) 2 else 1;
     }
 
-    fn count(l: Layout) usize {
+    pub fn count(l: Layout) usize {
         return 1 + l.g.attentions() * 2 * l.g.kv_heads * l.parts();
     }
 
     /// Piece `i`: qwen35.cu's layout (a layer's keys then values, kv_heads blocks of cap rows), or qwen35_kv8.cu's.
-    fn piece(l: Layout, i: usize) Piece {
+    pub fn piece(l: Layout, i: usize) Piece {
         if (i == 0) return .{ .kv = false, .off = 0, .len = l.g.stateBytes() };
         const j = (i - 1) / l.parts();
         const kvh = l.g.kv_heads;
@@ -78,7 +80,7 @@ const Layout = struct {
     }
 
     /// The bytes a save at `at` takes.
-    fn total(l: Layout) u64 {
+    pub fn total(l: Layout) u64 {
         var n: u64 = 0;
         for (0..l.count()) |i| n += l.piece(i).len;
         return n;
@@ -87,6 +89,42 @@ const Layout = struct {
     /// The key/value buffer's bytes at `cap` (Geometry.kvBytes).
     fn kvBytes(l: Layout) usize {
         return l.g.attentions() * 2 * l.g.kv_heads * l.cap * @as(usize, if (l.format == .fp8) head_dim + 4 else head_dim * 2);
+    }
+};
+
+/// A piece's device spans: one, or with a page table a run a page (the host copy keeps the contiguous order).
+const Runs = struct {
+    base: u64,
+    pages: ?caches.Paged,
+    page_bytes: usize,
+    in_page: usize,
+    span: usize = 0, // a full page's run of the piece
+    len: usize,
+    page: usize = 0,
+    done: usize = 0,
+
+    const Run = struct { dev: u64, at: usize, len: usize };
+
+    fn of(cache: *const Cache, l: Layout, i: usize, p: Piece) Runs {
+        if (!p.kv or cache.paged == null) return .{ .base = (if (p.kv) cache.kv.ptr else cache.state.ptr) + p.off, .pages = null, .page_bytes = 0, .in_page = 0, .len = p.len };
+        const pg = cache.paged.?;
+        // the piece's offset inside a page: its layout at cap = tokens (Layout.piece), a run of tokens rows a page
+        const in_page: Layout = .{ .g = l.g, .format = l.format, .cap = pg.tokens, .at = pg.tokens };
+        const q = in_page.piece(i);
+        return .{ .base = pg.base, .pages = pg, .page_bytes = in_page.kvBytes(), .in_page = q.off, .span = q.len, .len = p.len };
+    }
+
+    fn next(r: *Runs) ?Run {
+        if (r.done >= r.len) return null;
+        const pg = r.pages orelse {
+            r.done = r.len;
+            return .{ .dev = r.base, .at = 0, .len = r.len };
+        };
+        const n = @min(r.span, r.len - r.done);
+        const run: Run = .{ .dev = r.base + pg.ids[r.page] * r.page_bytes + r.in_page, .at = r.done, .len = n };
+        r.page += 1;
+        r.done += n;
+        return run;
     }
 };
 
@@ -99,6 +137,11 @@ pub fn sameImages(kept: []const Seen, request: []const Seen, at: usize) bool {
         n += 1;
     }
     return n == kept.len;
+}
+
+/// The pieces a host copy at `at` holds in the engine's cache format.
+pub fn layoutOf(e: *const Engine, at: usize) Layout {
+    return .{ .g = e.g, .format = formatOf(e), .cap = 0, .at = at };
 }
 
 /// Host bytes a save at `at` takes.
@@ -135,8 +178,8 @@ pub fn saveCache(e: *Engine, cache: *const Cache, at: usize, seen: []const Seen)
     var off: usize = 0;
     for (0..l.count()) |i| {
         const p = l.piece(i);
-        const dev = (if (p.kv) cache.kv.ptr else cache.state.ptr) + p.off;
-        if (p.len > 0) try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(copy.host.bytes.ptr + off, dev, p.len, e.stream.handle), "cuMemcpyDtoHAsync");
+        var it = Runs.of(cache, l, i, p);
+        while (it.next()) |r| try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(copy.host.bytes.ptr + off + r.at, r.dev, r.len, e.stream.handle), "cuMemcpyDtoHAsync");
         off += p.len;
     }
     try e.stream.synchronize();
@@ -174,8 +217,8 @@ pub fn restoreCache(e: *Engine, cache: *Cache, saved: *anyopaque, seen: []const 
     var off: usize = 0;
     for (0..l.count()) |i| {
         const p = l.piece(i);
-        const dev = (if (p.kv) cache.kv.ptr else cache.state.ptr) + p.off;
-        if (p.len > 0) try e.d.check(e.d.api.cuMemcpyHtoDAsync_v2(dev, copy.host.bytes.ptr + off, p.len, e.stream.handle), "cuMemcpyHtoDAsync");
+        var it = Runs.of(cache, l, i, p);
+        while (it.next()) |r| try e.d.check(e.d.api.cuMemcpyHtoDAsync_v2(r.dev, copy.host.bytes.ptr + off + r.at, r.len, e.stream.handle), "cuMemcpyHtoDAsync");
         off += p.len;
     }
     try e.stream.synchronize(); // the host copy may be dropped once this returns
@@ -290,10 +333,12 @@ test "a state resumes only a request with the same images before its position" {
 
 test "a restore refuses another cache format, another length, a position past the cache and other images" {
     var e: Engine = undefined;
+    e.kit = null;
     e.g = testGeometry(8, 4, 4);
     if (comptime @hasField(Engine, "kv8")) e.kv8 = false;
     var cache: Cache = undefined;
     cache.cap = 64;
+    cache.paged = null; // contiguous: restoreCache reads it, and undefined bytes can read as a page table
     const d: u64 = 9;
     var images = [_]Seen{.{ .at = 2, .id = d }};
     const l: Layout = .{ .g = e.g, .format = .bf16, .cap = 64, .at = 10 };
@@ -345,6 +390,7 @@ test "a failed restore's host copy stays through a drop until a wait, the restor
     api.cuMemFreeHost = RestoreFake.freeHost;
     const d: cuda.Driver = .{ .lib = undefined, .api = api };
     var e: Engine = undefined;
+    e.kit = null;
     e.gpa = std.testing.allocator;
     e.d = &d;
     e.g = testGeometry(8, 4, 4);
@@ -352,6 +398,7 @@ test "a failed restore's host copy stays through a drop until a wait, the restor
     if (comptime @hasField(Engine, "kv8")) e.kv8 = false;
     var cache: Cache = undefined;
     cache.cap = 64;
+    cache.paged = null; // contiguous: restoreCache reads it, and undefined bytes can read as a page table
     cache.kv = .{ .d = &d, .ptr = 0x10000, .len = 0 };
     cache.state = .{ .d = &d, .ptr = 0x20000, .len = 0 };
     const l: Layout = .{ .g = e.g, .format = .bf16, .cap = 64, .at = 10 };

@@ -6,6 +6,49 @@ const Usage = cli.Usage;
 const parse = cli.parse;
 const request = cli.request;
 const capabilities = cli.capabilities;
+const Args = cli.Args;
+const parallelFixed = cli.parallelFixed;
+const cuda_build = cli.Test.cuda_build;
+const native_serves = cli.Test.native_serves;
+const servedBy = cli.Test.servedBy;
+const cudaFlag = cli.Test.cudaFlag;
+const gpuFlag = cli.Test.gpuFlag;
+const ranks = cli.Test.ranks;
+const spillWith = cli.Test.spillWith;
+
+test "max frames CLI bounds and engine request preserve the default" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var u: Usage = .{};
+    const defaults = try parse(a, &.{"m"}, &u);
+    try std.testing.expectEqual(@as(?u32, null), defaults.max_frames);
+    try std.testing.expectEqual(@as(?u32, null), (try request(a, "d", "fish_omni", defaults)).max_frames);
+    for ([_][]const u8{ "1", "1024", "4096", "8190" }) |value| {
+        const args = try parse(a, &.{ "m", "--max-frames", value }, &u);
+        const expected = try std.fmt.parseInt(u32, value, 10);
+        try std.testing.expectEqual(@as(?u32, expected), args.max_frames);
+        try std.testing.expectEqual(args.max_frames, (try request(a, "d", "fish_omni", args)).max_frames);
+    }
+    for ([_][]const u8{ "0", "-1", "8191", "4294967296", "nan", "1.5" }) |value| {
+        try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--max-frames", value }, &u));
+    }
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--max-frames" }, &u));
+}
+
+test "voices: CLI defaults and explicit catalog" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var u: Usage = .{};
+    const defaults = try parse(a, &.{"m"}, &u);
+    try std.testing.expect(defaults.voices == null);
+    try std.testing.expectEqualStrings("default", defaults.default_voice);
+    const named = try parse(a, &.{ "m", "--voices", "catalog", "--default-voice=tone" }, &u);
+    try std.testing.expectEqualStrings("catalog", named.voices.?);
+    try std.testing.expectEqualStrings("tone", named.default_voice);
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--default-voice=../tone" }, &u));
+}
 
 test "vision image budget: explicit large budgets reach the engine, with bounded CLI inputs" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -31,6 +74,85 @@ test "vision image budget: explicit large budgets reach the engine, with bounded
         try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--vision", "--vision-image-tokens", bad }, &u));
 }
 
+test "allowed controls CLI is opt-in and validates name syntax only" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var u: Usage = .{};
+    try std.testing.expect((try parse(a, &.{"m"}, &u)).allowed_controls == null);
+    const on = try parse(a, &.{ "m", "--allowed-controls", "sighs, laughs" }, &u);
+    try std.testing.expectEqualDeep(try @import("drama_allow.zig").parse("sighs, laughs"), on.allowed_controls.?);
+    const empty = try parse(a, &.{ "m", "--allowed-controls=" }, &u);
+    try std.testing.expectEqualDeep(try @import("drama_allow.zig").parse(""), empty.allowed_controls.?);
+    const open = try parse(a, &.{ "m", "--allowed-controls", "whisper,unknown,gentle robot" }, &u);
+    try std.testing.expectEqualStrings("whisper,unknown,gentle robot", open.allowed_controls.?.list);
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--allowed-controls", "[whisper]" }, &u));
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--allowed-controls" }, &u));
+    var out: std.Io.Writer.Allocating = .init(a);
+    try capabilities(&out.writer, .{ .version = "test" });
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"--allowed-controls\": {}") != null);
+}
+
+test "silence redraw flags are opt-in and need a redraw count and the guard" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var u: Usage = .{};
+    try std.testing.expectEqualDeep(@import("speech_redraw.zig").Policy{}, (try parse(a, &.{"m"}, &u)).redraw);
+    const guard = [_][]const u8{ "m", "--silence-floor-dbfs=-60", "--silence-seconds=1" };
+    const on = try parse(a, &(guard ++ .{ "--silence-redraws", "2", "--silence-redraw-budget-s=30", "--silence-redraw-controls=", "--short-reply-ratio=0.25", "--short-reply-chars-per-s", "12" }), &u);
+    try std.testing.expectEqual(@as(?u8, 2), on.redraw.max);
+    try std.testing.expectEqual(@as(?f64, 30), on.redraw.budget_s);
+    try std.testing.expectEqualStrings("", on.redraw.controls.?.list);
+    try std.testing.expectEqual(@as(?f64, 0.25), on.redraw.short_ratio);
+    try std.testing.expectEqual(@as(?f64, 12), on.redraw.short_chars_per_s);
+    try std.testing.expect(on.redraw.refusal("nemotron_h") != null);
+    const zero = try parse(a, &.{ "m", "--silence-redraws=0" }, &u);
+    try std.testing.expect(zero.redraw.refusal("nemotron_h") != null);
+    try std.testing.expect(zero.redraw.refusal("fish_omni") == null);
+    for ([_][]const []const u8{
+        &.{ "m", "--silence-redraws", "1" },
+        &(guard ++ .{ "--silence-redraw-budget-s", "30" }),
+        &(guard ++ .{ "--silence-redraw-controls", "sighs" }),
+        &(guard ++ .{ "--silence-redraws", "256" }),
+        &(guard ++ .{ "--silence-redraws", "1", "--silence-redraw-budget-s", "0" }),
+        &(guard ++ .{ "--silence-redraws", "1", "--silence-redraw-controls", "[sighs]" }),
+        &(guard ++ .{ "--short-reply-ratio", "0.25", "--short-reply-chars-per-s", "12" }),
+        &(guard ++ .{ "--silence-redraws", "1", "--short-reply-ratio", "0.25" }),
+        &(guard ++ .{ "--silence-redraws", "1", "--short-reply-chars-per-s", "12" }),
+        &(guard ++ .{ "--silence-redraws", "1", "--short-reply-ratio", "1", "--short-reply-chars-per-s", "12" }),
+        &(guard ++ .{ "--silence-redraws", "1", "--short-reply-ratio", "0.25", "--short-reply-chars-per-s", "0" }),
+    }) |bad| try std.testing.expectError(error.Usage, parse(a, bad, &u));
+    var out: std.Io.Writer.Allocating = .init(a);
+    try capabilities(&out.writer, .{ .version = "test" });
+    for ([_][]const u8{ "--silence-redraws", "--silence-redraw-budget-s", "--silence-redraw-controls", "--short-reply-ratio", "--short-reply-chars-per-s" }) |flag|
+        try std.testing.expect(std.mem.indexOf(u8, out.written(), try std.fmt.allocPrint(a, "\"{s}\": {{}}", .{flag})) != null);
+}
+
+test "register flags are opt-in, all or none, and may set a redraw budget without silence redraws" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var u: Usage = .{};
+    try std.testing.expect(!(try parse(a, &.{"m"}, &u)).redraw.register.on());
+    const rule = [_][]const u8{ "m", "--register-redraw-st", "6", "--register-redraw-high=50", "--register-high-hz", "300" };
+    const on = try parse(a, &(rule ++ .{ "--silence-redraw-budget-s", "30" }), &u);
+    try std.testing.expectEqualDeep(@import("speech_register.zig").Rule{ .st = 6, .high = 50, .high_hz = 300 }, on.redraw.register);
+    try std.testing.expectEqual(@as(?f64, 30), on.redraw.budget_s);
+    for ([_][]const []const u8{
+        &.{ "m", "--register-redraw-st", "6" },
+        &.{ "m", "--register-redraw-high", "50", "--register-high-hz", "300" },
+        rule[0..4],
+        &(rule ++ .{ "--register-redraw-st", "0" }),
+        &(rule ++ .{ "--register-high-hz", "700" }),
+        &(rule ++ .{ "--silence-redraw-controls", "sighs" }),
+    }) |bad| try std.testing.expectError(error.Usage, parse(a, bad, &u));
+    var out: std.Io.Writer.Allocating = .init(a);
+    try capabilities(&out.writer, .{ .version = "test" });
+    for ([_][]const u8{ "--register-redraw-st", "--register-redraw-high", "--register-high-hz" }) |flag|
+        try std.testing.expect(std.mem.indexOf(u8, out.written(), try std.fmt.allocPrint(a, "\"{s}\": {{}}", .{flag})) != null);
+}
+
 test "parse and capabilities share the table" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -46,6 +168,8 @@ test "parse and capabilities share the table" {
     try std.testing.expectEqualStrings("/r", (try parse(a, &.{ "m", "--record", "/r" }, &u)).record.?);
     try std.testing.expectEqualStrings("fp8", (try parse(a, &.{ "m", "--kv-cache", "fp8" }, &u)).kv_cache);
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--kv-cache", "int4" }, &u));
+    try std.testing.expectEqualStrings("int8", (try parse(a, &.{ "m", "--prompt-precision", "int8" }, &u)).prompt_precision);
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--prompt-precision", "fp4" }, &u));
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--reasoning-effort", "max" }, &u));
     try std.testing.expectEqual(@as(?f64, 12.5), (try parse(a, &.{ "m", "--prompt-cache-gib", "12.5" }, &u)).prompt_cache_gib);
     try std.testing.expectEqual(@as(?f64, 0), (try parse(a, &.{ "m", "--prompt-cache-gib", "0" }, &u)).prompt_cache_gib);
@@ -121,8 +245,110 @@ test "an engine is asked for what the flags say, and the defaults of the flags n
     try std.testing.expectEqual(@as(u16, 29600), gpu.master_port);
     try std.testing.expectEqual(@as(?u32, 2), gpu.mtp_drafts);
     try std.testing.expectEqual(@as(?f64, 0.5), gpu.mtp_confidence);
-    try std.testing.expectEqual(@as(?i64, 3), gpu.keep);
+    try std.testing.expectEqual(@as(i64, 3), gpu.keep);
     try std.testing.expectEqualStrings("matrix=off", gpu.policy);
+}
+
+test "--device and --segments: CUDA builds serve them, values checked; --speed-up is the Mac build's" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var u: Usage = .{};
+    if (cuda_build) {
+        const args = try parse(a, &.{ "m", "--device", "1", "--segments=2" }, &u);
+        try std.testing.expectEqual(@as(?u32, 1), args.device);
+        try std.testing.expectEqual(@as(?u32, 2), args.segments);
+    } else try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--device", "1" }, &u));
+    if (cuda_build) try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--speed-up", "pair.json" }, &u)) else try std.testing.expectEqualStrings("pair.json", (try parse(a, &.{ "m", "--speed-up", "pair.json" }, &u)).speed_up.?);
+    var out: Args = .{};
+    try std.testing.expect(try cudaFlag(a, &out, "--device", "0", &u));
+    try std.testing.expectEqual(@as(?u32, 0), out.device);
+    try std.testing.expectError(error.Usage, cudaFlag(a, &out, "--device", "-1", &u));
+    try std.testing.expectError(error.Usage, cudaFlag(a, &out, "--segments", "0", &u));
+    try std.testing.expect(try cudaFlag(a, &out, "--segments", "4", &u));
+    try std.testing.expectEqual(@as(?u32, 4), out.segments);
+    try std.testing.expect(!try cudaFlag(a, &out, "--port", "1", &u));
+    try std.testing.expect(try cudaFlag(a, &out, "--loops", "4", &u));
+    try std.testing.expectEqual(@as(?u32, 4), (try request(a, "d", "dory", out)).loops);
+    try std.testing.expectError(error.Usage, cudaFlag(a, &out, "--loops", "-1", &u));
+    try std.testing.expect(parallelFixed("3") and !parallelFixed("auto") and !parallelFixed("x"));
+}
+
+test "the GPU engine's flags: refused and unlisted unless the backend serves them, values checked" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var u: Usage = .{};
+    // each flag, a value, and the `serves` entry that turns it on
+    const gated = [_][3][]const u8{ .{ "--tp", "2", "--tp" }, .{ "--rank", "0", "--tp" }, .{ "--master", "node0", "--tp" }, .{ "--master-port", "29600", "--tp" }, .{ "--policy", "matrix=off", "--policy" }, .{ "--mtp-drafts", "2", "--mtp-drafts" }, .{ "--mtp-confidence", "0.5", "--mtp-confidence" }, .{ "--checkpoint-slots", "3", "--checkpoint-slots" }, .{ "--spill-gib", "2", "--spill-gib" } };
+    var out: std.Io.Writer.Allocating = .init(a);
+    try capabilities(&out.writer, .{ .version = "0" });
+    for (gated) |g| {
+        const listed = std.mem.indexOf(u8, out.written(), try std.fmt.allocPrint(a, "\"{s}\"", .{g[0]})) != null;
+        try std.testing.expectEqual(servedBy(native_serves, g[2]), listed);
+        if (!listed) try std.testing.expectError(error.Usage, parse(a, &.{ "m", g[0], g[1] }, &u));
+    }
+    try std.testing.expect(servedBy(&.{ "--tp", "--policy" }, "--tp") and !servedBy(&.{"--tp"}, "--policy") and !servedBy(&.{}, "--tp"));
+    var args: Args = .{};
+    for ([_][2][]const u8{ .{ "--tp", "4" }, .{ "--rank", "2" }, .{ "--master", "node0" }, .{ "--master-port", "29600" }, .{ "--mtp-drafts", "2" }, .{ "--mtp-confidence", "0.5" }, .{ "--checkpoint-slots", "3" }, .{ "--spill-gib", "1.5" }, .{ "--policy", "matrix=off" }, .{ "--policy", "kernels=reference" } }) |g| try std.testing.expect(try gpuFlag(a, &args, g[0], g[1], &u));
+    try std.testing.expectEqual(@as(?f64, 1.5), args.spill_gib);
+    try std.testing.expectEqual(@as(u32, 4), args.tp);
+    try std.testing.expectEqual(@as(u32, 2), args.rank);
+    try std.testing.expectEqualStrings("node0", args.master);
+    try std.testing.expectEqual(@as(u16, 29600), args.master_port);
+    try std.testing.expectEqual(@as(?u32, 2), args.mtp_drafts);
+    try std.testing.expectEqual(@as(?f64, 0.5), args.mtp_confidence);
+    try std.testing.expectEqual(@as(?i64, 3), args.checkpoint_slots);
+    try std.testing.expectEqualStrings("matrix=off,kernels=reference", args.policy);
+    try ranks(&u, a, args);
+    args.rank = 4;
+    try std.testing.expectError(error.Usage, ranks(&u, a, args));
+    for ([_][2][]const u8{ .{ "--rank", "-1" }, .{ "--master-port", "70000" }, .{ "--mtp-drafts", "65" }, .{ "--mtp-confidence", "1.5" }, .{ "--checkpoint-slots", "-1" }, .{ "--spill-gib", "-1" }, .{ "--spill-gib", "nan" }, .{ "--policy", "matrix" } }) |g| try std.testing.expectError(error.Usage, gpuFlag(a, &args, g[0], g[1], &u));
+    try std.testing.expect(!try gpuFlag(a, &args, "--port", "1", &u));
+}
+
+test "--spill-gib asks the engine for the conversation store, spilling only what RAM evicts, and is off without it" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var u: Usage = .{};
+    const plain = try request(a, "d", "t", .{});
+    try std.testing.expect(plain.spill == .off and plain.learn == null and !plain.learn_conversations and plain.learn_gib == 32);
+    const zero = try request(a, "d", "t", .{ .spill_gib = 0 });
+    try std.testing.expect(zero.spill == .off and zero.learn == null and !zero.learn_conversations and zero.learn_gib == 32);
+    const alone = try request(a, "d", "t", .{ .spill_gib = 2, .checkpoint_slots = 3 });
+    try std.testing.expect(alone.spill == .evicted and alone.learn_conversations and alone.learn_gib == 2);
+    try std.testing.expectStringEndsWith(alone.learn.?, "/.cache/tensorfold/spilled");
+    try std.testing.expectEqual(@as(?i64, 3), alone.keep);
+    const both = try request(a, "d", "t", .{ .spill_gib = 8, .learn = true, .learn_conversations = true, .learn_dir = "/x" });
+    try std.testing.expect(both.spill == .finish and both.learn_conversations and both.learn_gib == 8);
+    try std.testing.expectEqualStrings("/x", both.learn.?);
+    const capped = try request(a, "d", "t", .{ .spill_gib = 64, .learn = true, .learn_conversations = true, .learn_gib = 16 });
+    try std.testing.expect(capped.spill == .finish and capped.learn_gib == 16); // the smaller cap
+    try spillWith(&u, a, .{ .spill_gib = 2 });
+    try spillWith(&u, a, .{ .spill_gib = 2, .learn = true, .learn_conversations = true });
+    try spillWith(&u, a, .{ .learn = true });
+    try std.testing.expectError(error.Usage, spillWith(&u, a, .{ .spill_gib = 2, .learn = true }));
+    try std.testing.expectStringStartsWith(u.message, "--spill-gib writes evicted states to the conversation store");
+}
+
+test "silence guard flags are opt-in and reach native open options" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var usage: Usage = .{};
+    try std.testing.expect(!(try parse(a, &.{"m"}, &usage)).silence.enabled());
+    try std.testing.expect((try parse(a, &.{ "m", "--silence-seconds=0" }, &usage)).silence.refusal("nemotron_h") != null);
+    const args = try parse(a, &.{ "m", "--silence-floor-dbfs=-80", "--silence-seconds", "0.5" }, &usage);
+    const opened = try request(a, "m", "drama3", args);
+    try std.testing.expectEqual(args.silence, opened.silence);
+    try std.testing.expect(opened.silence.enabled());
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--silence-seconds", "1" }, &usage));
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--silence-seconds", "nan" }, &usage));
+    const onset = try parse(a, &.{ "m", "--silence-floor-dbfs=-80", "--silence-seconds", "2", "--silence-onset-s", "1", "--silence-onset-voiced-s", "0.5" }, &usage);
+    try std.testing.expectEqual(api.speech_guard.Config{ .floor_dbfs = -80, .seconds = 2, .onset_seconds = 1, .onset_voiced_seconds = 0.5 }, (try request(a, "m", "drama3", onset)).silence);
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--silence-floor-dbfs=-80", "--silence-seconds", "2", "--silence-onset-s", "1" }, &usage));
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--silence-onset-s=0" }, &usage));
 }
 
 test "runtime library: capabilities serializes found and missing dependencies with escaped descriptions" {
@@ -147,4 +373,45 @@ test "runtime library: capabilities serializes found and missing dependencies wi
     try std.testing.expect(values[0].object.get("usable").? == .null);
     try std.testing.expect(!values[1].object.get("usable").?.bool);
     try std.testing.expectEqualStrings(rows[1].problem.?, values[1].object.get("problem").?.string);
+}
+
+test "capabilities: a p2p summary appears only when the engine gives one, as its own object" {
+    var none: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer none.deinit();
+    try capabilities(&none.writer, .{ .version = "test" });
+    try std.testing.expect(std.mem.indexOf(u8, none.written(), "p2p") == null);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try capabilities(&out.writer, .{ .version = "test", .p2p = "{\"driver\":\"580.65.06\",\"gpus\":[],\"pairs\":[]}" });
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, out.written(), .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("580.65.06", parsed.value.object.get("p2p").?.object.get("driver").?.string);
+}
+
+test "--silence-mid-s is opt-in, needs the tail guard and reaches native open options" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var u: Usage = .{};
+    try std.testing.expectEqual(@as(?f64, null), (try parse(a, &.{"m"}, &u)).silence.mid_seconds);
+    const args = try parse(a, &.{ "m", "--silence-floor-dbfs=-80", "--silence-seconds", "10", "--silence-mid-s", "3", "--silence-mid-min-voiced-s", "1" }, &u);
+    try std.testing.expectEqual(@as(?f64, 3), (try request(a, "m", "drama3", args)).silence.mid_seconds);
+    try std.testing.expectEqual(@as(?f64, 1), (try request(a, "m", "drama3", args)).silence.mid_min_voiced_s);
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--silence-floor-dbfs=-80", "--silence-seconds", "10", "--silence-mid-s", "3" }, &u));
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--silence-floor-dbfs=-80", "--silence-mid-s", "3" }, &u));
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--silence-floor-dbfs=-80", "--silence-seconds", "3", "--silence-mid-s", "3" }, &u));
+}
+
+test "prompt precision: parsing and request forwarding cover defaults, explicit modes and refusals" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var usage: Usage = .{};
+    for ([_][]const []const u8{ &.{"m"}, &.{ "m", "--prompt-precision", "bf16" }, &.{ "m", "--prompt-precision", "int8" } }, 0..) |argv, i| {
+        const args = try parse(a, argv, &usage);
+        try std.testing.expectEqualStrings(if (i == 2) "int8" else "bf16", args.prompt_precision);
+        try std.testing.expectEqual(i == 2, (try request(a, "d", "t", args)).prompt_int8);
+    }
+    for ([_][]const []const u8{ &.{ "m", "--prompt-precision" }, &.{ "m", "--prompt-precision", "unknown" }, &.{ "m", "--prompt-precision", "fp4" } }) |argv|
+        try std.testing.expectError(error.Usage, parse(a, argv, &usage));
 }

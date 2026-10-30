@@ -159,11 +159,14 @@ test "a stage whose copy is still in flight is never handed to another upload" {
     try t.expectEqual(@as(usize, 0), Fake.early);
 }
 
-test "a stage whose completion failed is quarantined, never kept for reuse" {
+test "CUDA context health: a failed event is quarantined and marks its context unhealthy" {
     var d = Fake.init();
     spares();
     defer settle(&d);
     source.setCurrent(@ptrFromInt(9));
+    const health = @import("context_health.zig");
+    try health.retain(&d, @ptrFromInt(9));
+    defer health.release(&d, @ptrFromInt(9));
     const stream: streams.Stream = .{ .d = &d, .handle = @ptrFromInt(2) };
     try source.enqueue(&d, 256, &@as([16]u8, @splat(1)), stream);
     Fake.query_result = 700; // the copy's event reports a fault
@@ -172,9 +175,11 @@ test "a stage whose completion failed is quarantined, never kept for reuse" {
     try t.expectEqual(@as(usize, 1), Fake.allocs);
     try t.expectEqual(@as(usize, 1), source.retained());
     try t.expectEqual(@as(usize, 0), source.spareCount());
+    try t.expect(!health.healthy(&d, @ptrFromInt(9)));
     Fake.query_result = 0;
     Fake.sync_result = 0;
     try source.synchronizeContext(&d);
+    try t.expect(!health.healthy(&d, @ptrFromInt(9)));
     try t.expectEqual(@as(usize, 0), source.retained());
     try t.expectEqual(@as(usize, 0), source.spareCount());
     try t.expectEqual(@as(usize, 1), Fake.frees);

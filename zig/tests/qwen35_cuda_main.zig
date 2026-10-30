@@ -1,4 +1,4 @@
-//! `tf-qwen35-cuda <model> <step|window|tree|prompt|mrope|probe|mtp|vision> ...`: rows to compare; usage below.
+//! `tf-qwen35-cuda <model> <step|window|tree|prompt|state|mrope|probe|mtp|vision> ...`: rows to compare; usage below.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -7,19 +7,21 @@ const E = q.engine;
 const vl = core.qwen_vl;
 
 const usage =
-    \\usage: tf-qwen35-cuda <model dir> <step|window|tree|prompt|mrope> <ids> <out> [fp8]
+    \\usage: tf-qwen35-cuda <model dir> <step|window|tree|prompt|state|mrope> <ids> <out> [fp8]
     \\       tf-qwen35-cuda <model dir> probe <ids> <layer>: a routed model's routing and rows at that layer
     \\       tf-qwen35-cuda <model dir> mtp <ids> <out>: the MTP drafter's tree regressions after a prompt
     \\       tf-qwen35-cuda <model dir> vision <out dir> <tokens> [--bound MEAN WORST] <picture or NAME.f32@HxW>...
     \\vision prepares each picture with core/qwen_vl under a <tokens> budget and runs the CUDA tower twice: <out dir>
     \\gets NAME.pixels.f32, NAME.rows.f32 (bf16 widened) and meta.json; NAME.ref.f32 there (float32 reference rows) is
     \\compared row by row (relative L2, worst and mean); --bound needs every reference and exits 1 past either bound.
+    \\state: raw GDN/conv and active KV bytes; TF_Q35_STATE_STEPS=N settles N decode rows first.
     \\fp8: the attention caches as e4m3 rows (--kv-cache fp8); TF_Q35_PREFILL, _BESIDE, _DELTA, _RESUME, _SHIFT: below.
     \\TF_Q35_WINDOW=N fixes window/tree width (tree: at least 2); 0 keeps growing widths.
-    \\       tf-qwen35-cuda <model dir> kl <ids file> <out.json> <skip> <rows> [control]
+    \\       tf-qwen35-cuda <model dir> kl <ids file> <out.json> <skip> <rows> [control|int8]
     \\kl: bf16 caches against fp8 ones, teacher-forced: the first <skip> ids as prompt chunks, then <rows> ids in
     \\windows, each row's KL(bf16 || fp8) of the next-token distributions, top-1 agreement and both losses on the next
     \\id; control: bf16 against bf16 whose every other window rotates three positions on (a uniform shift cancels).
+    \\int8: fp8 caches on both sides, the second's prompt chunks through int8 activations (w4a8_prefill.cu).
     \\
 ;
 
@@ -43,7 +45,8 @@ pub fn main(init: std.process.Init) !u8 {
         }
         const skip = try std.fmt.parseInt(usize, args[5], 10);
         const control = args.len == 8 and std.mem.eql(u8, args[7], "control");
-        return kl(init, a, args[1], args[3], args[4], skip, try std.fmt.parseInt(usize, args[6], 10), control);
+        const int8 = args.len == 8 and std.mem.eql(u8, args[7], "int8");
+        return kl(init, a, args[1], args[3], args[4], skip, try std.fmt.parseInt(usize, args[6], 10), control, int8);
     }
     if (args.len != 5 and !(args.len == 6 and std.mem.eql(u8, args[5], "fp8"))) {
         std.debug.print("{s}", .{usage});
@@ -67,9 +70,10 @@ pub fn main(init: std.process.Init) !u8 {
     try fill(e, &cache, ids.items, prefill);
     // TF_Q35_DELTA=d: the rows after the prefill rotate at position + d, as an image prompt's reply does
     if (std.c.getenv("TF_Q35_DELTA")) |v| cache.delta = try std.fmt.parseInt(i32, std.mem.span(v), 10);
-    // TF_Q35_RESUME=1: the stream goes on from a kept copy of its state, restored into another (poisoned) cache
+    // TF_Q35_RESUME=K: continue from a kept copy at K, restored into another poisoned cache
     const resume_at = try envCount("TF_Q35_RESUME");
-    if (resume_at > 0 and !std.mem.eql(u8, args[2], "prompt") and !std.mem.eql(u8, args[2], "mrope")) try resumeFrom(init.gpa, e, &cache);
+    const state = std.mem.eql(u8, args[2], "state");
+    if (resume_at > 0 and !std.mem.eql(u8, args[2], "prompt") and !state and !std.mem.eql(u8, args[2], "mrope")) try resumeFrom(init.gpa, e, &cache);
     var other = try E.Cache.init(init.gpa, e, 4096 + beside);
     defer other.deinit(init.gpa);
     try fill(e, &other, ids.items, beside);
@@ -193,17 +197,31 @@ pub fn main(init: std.process.Init) !u8 {
         const p0 = cache.len;
         var at: usize = 0;
         while (at < n_ids) {
-            const n = @min(E.max_rows, n_ids - at);
+            var n = @min(E.max_rows, n_ids - at);
+            if (resume_at > cache.len and resume_at < cache.len + n) {
+                n = @intCast(resume_at - cache.len);
+            }
             if (table) {
                 // the table's rows are the prompt's from position p0: shift it so row `at` is the cache's next
                 const part: E.Images = .{ .features = im.features, .src = try padded(a, src, p0), .pos = try paddedPos(a, pos, p0, n_ids) };
                 try e.forward(&.{.{ .cache = &cache, .rows = n, .images = &part }}, ids.items[at..][0..n], .last);
             } else try e.forward(&.{.{ .cache = &cache, .rows = n }}, ids.items[at..][0..n], .last);
             at += n;
-            // TF_Q35_RESUME=K in prompt and mrope: the pass goes on from a kept copy at position K
+            // TF_Q35_RESUME=K in prompt, state and mrope: the pass goes on from a kept copy at position K
             if (resume_at > 0 and cache.len == resume_at) try resumeFrom(init.gpa, e, &cache);
         }
-        try out.appendSlice(a, std.mem.sliceAsBytes(cache.logits));
+        if (state) {
+            const steps = try envCount("TF_Q35_STATE_STEPS");
+            if (steps > 0 and ids.items.len == 0) return error.NoStateTokens;
+            for (0..steps) |i| {
+                const token = [_]u32{ids.items[i % ids.items.len]};
+                try e.forward(&.{.{ .cache = &cache, .rows = 1 }}, &token, .logits);
+                try cache.settle(e);
+            }
+            const copy = try q.reuse.saveCache(e, &cache, cache.len, &.{});
+            defer q.reuse.dropCopy(e, copy);
+            try out.appendSlice(a, copy.host.bytes[0..@intCast(copy.len)]);
+        } else try out.appendSlice(a, std.mem.sliceAsBytes(cache.logits));
     }
     try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = args[4], .data = out.items });
     return 0;
@@ -338,7 +356,7 @@ fn vision(init: std.process.Init, a: std.mem.Allocator, model: []const u8, out: 
 }
 
 /// bf16 caches against fp8 ones (or a control) on the same ids: each window row's KL and top-1, summed up into `out`.
-fn kl(init: std.process.Init, a: std.mem.Allocator, model: []const u8, ids_path: []const u8, out: []const u8, skip: usize, rows: usize, control: bool) !u8 {
+fn kl(init: std.process.Init, a: std.mem.Allocator, model: []const u8, ids_path: []const u8, out: []const u8, skip: usize, rows: usize, control: bool, int8: bool) !u8 {
     const io = init.io;
     var ids: std.ArrayList(u32) = .empty;
     var it = std.mem.tokenizeAny(u8, try std.Io.Dir.cwd().readFileAlloc(io, ids_path, a, .limited(64 << 20)), ", \n");
@@ -348,16 +366,23 @@ fn kl(init: std.process.Init, a: std.mem.Allocator, model: []const u8, ids_path:
     defer driver.close();
     var ctx = try cuda.Context.init(&driver, 0);
     defer ctx.deinit();
-    const eb = try E.Engine.init(init.gpa, io, &ctx, model, false);
+    const eb = try E.Engine.init(init.gpa, io, &ctx, model, int8);
     defer eb.deinit();
-    const e8 = try E.Engine.init(init.gpa, io, &ctx, model, !control);
-    defer e8.deinit();
+    // int8: one engine (two would not fit), fp8 caches, the second cache's prompt chunks through int8 activations
+    const e8 = if (int8) eb else try E.Engine.init(init.gpa, io, &ctx, model, !control);
+    defer if (!int8) e8.deinit();
     var cb = try E.Cache.init(init.gpa, eb, skip + rows + 64);
     defer cb.deinit(init.gpa);
     var c8 = try E.Cache.init(init.gpa, e8, skip + rows + 64);
     defer c8.deinit(init.gpa);
+    if (int8) try eb.int8.enable(eb);
+    eb.int8.on = false;
     try fill(eb, &cb, ids.items[0..skip], skip);
+    e8.int8.on = int8;
     try fill(e8, &c8, ids.items[0..skip], skip);
+    e8.int8.on = false;
+    // the first side's logits rows, kept while one engine computes both
+    const kept = try a.alloc(u16, eb.window_rows * eb.g.vocab);
     const kls = try a.alloc(f64, rows);
     var top1: usize = 0;
     var loss: [2]f64 = .{ 0, 0 };
@@ -366,9 +391,10 @@ fn kl(init: std.process.Init, a: std.mem.Allocator, model: []const u8, ids_path:
         const n = @min(eb.window_rows, rows - at);
         const w = ids.items[skip + at ..][0..n];
         try eb.forward(&.{.{ .cache = &cb, .rows = n }}, w, .logits);
+        for (0..n) |r| @memcpy(kept[r * eb.g.vocab ..][0..eb.g.vocab], eb.rowLogits(r));
         try e8.forward(&.{.{ .cache = &c8, .rows = n }}, w, .logits);
         for (0..n) |r| {
-            const d = divergence(eb.rowLogits(r), e8.rowLogits(r), ids.items[skip + at + r + 1]);
+            const d = divergence(kept[r * eb.g.vocab ..][0..eb.g.vocab], e8.rowLogits(r), ids.items[skip + at + r + 1]);
             kls[at + r] = d.kl;
             top1 += @intFromBool(d.same_top);
             for (&loss, d.loss) |*l, x| l.* += x;
@@ -380,7 +406,7 @@ fn kl(init: std.process.Init, a: std.mem.Allocator, model: []const u8, ids_path:
     for (kls) |x| sum += x;
     std.mem.sort(f64, kls, {}, std.sort.asc(f64));
     const nr: f64 = @floatFromInt(rows);
-    const report = try std.fmt.allocPrint(a, "{{\"rows\": {d}, \"skip\": {d}, \"control\": {}, \"kl_mean\": {d:.6}, \"kl_p99\": {d:.6}, \"kl_max\": {d:.6}, \"top1\": {d:.5}, \"loss_bf16\": {d:.5}, \"loss_other\": {d:.5}}}\n", .{ rows, skip, control, sum / nr, kls[(rows * 99) / 100], kls[rows - 1], @as(f64, @floatFromInt(top1)) / nr, loss[0] / nr, loss[1] / nr });
+    const report = try std.fmt.allocPrint(a, "{{\"rows\": {d}, \"skip\": {d}, \"control\": {}, \"int8\": {}, \"kl_mean\": {d:.6}, \"kl_p99\": {d:.6}, \"kl_max\": {d:.6}, \"top1\": {d:.5}, \"loss_bf16\": {d:.5}, \"loss_other\": {d:.5}}}\n", .{ rows, skip, control, int8, sum / nr, kls[(rows * 99) / 100], kls[rows - 1], @as(f64, @floatFromInt(top1)) / nr, loss[0] / nr, loss[1] / nr });
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out, .data = report });
     std.debug.print("{s}", .{report});
     return 0;

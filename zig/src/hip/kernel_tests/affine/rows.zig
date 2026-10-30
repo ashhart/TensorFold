@@ -279,10 +279,12 @@ fn tierProduct(t: *Rig, m: usize, n: usize, k: usize, bits: c_int, group: c_int,
     const k_ptr = t.kernels;
     var set: std.ArrayList(*const Entry) = .empty;
     defer set.deinit(gpa);
-    try prod.pickable(k_ptr, arg, item_count, .prefill, k_ptr.env(), &set, gpa);
+    // a routed plan's pairs are its members, one a row
+    const plan_pairs: usize = if (routed) m else 0;
+    try prod.pickable(k_ptr, arg, item_count, plan_pairs, .prefill, k_ptr.env(), &set, gpa);
     var ids: [registry.max_entries]*const Entry = undefined;
     var n_ids: usize = 0;
-    for (set.items) |e| if (prod.takesArg(k_ptr, e, arg, item_count, .prefill)) {
+    for (set.items) |e| if (prod.takesArg(k_ptr, e, arg, item_count, plan_pairs, .prefill)) {
         ids[n_ids] = e;
         n_ids += 1;
     };
@@ -301,7 +303,7 @@ fn tierProduct(t: *Rig, m: usize, n: usize, k: usize, bits: c_int, group: c_int,
         try ids[i % n_ids].launch(k_ptr, .{ .r = &t.base.r, .s = t.base.stream.handle, .arg = arg, .items = @intCast(item_count) });
     }
     arg.out = outs[2 * n_ids].ptr;
-    try k_ptr.prefillLaunch(&t.base.r, arg, t.base.stream.handle, @intCast(item_count));
+    try k_ptr.prefillLaunch(&t.base.r, arg, t.base.stream.handle, @intCast(item_count), @intCast(plan_pairs));
     try t.base.stream.synchronize();
     const written = try gpa.alloc(u8, bytes);
     defer gpa.free(written);

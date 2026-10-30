@@ -1,0 +1,10 @@
+2026-10-20 15:28:06 bin-b10231b9 b10231b9 bui /hub/models--nvidia--GLM-5.3-Flash-NVFP4/snapshots/423acf37583782c51c142d145aef733d72943d93 parallel 4 context 40960 --vision ; drop cache: host-a advised 54863 files; Cached 2.2 GiB / host-b advised 528 files; Cached 2.7 GiB
+2026-10-20 15:33:40 health 200 after 332 s
+host-a used 101 available 19 GiB
+host-b used 100 available 21 GiB
+info: checkpoint digest: 0.0 GiB read in 0.1 s, 33/33 cached files
+[tensorfold] CUDA sm_121 device 0 (NVIDIA GB10, memory shared with the host): model 94.78 GiB; 4 streams at once, 0.83 GiB each at a 40960-token window, of 7.6 GiB left after a 12.2 GiB reserve; prompts in passes of up to 2048 rows, a 5.1 GiB prompt cache; own glue kernels
+[tensorfold] serving local-model at http://127.0.0.1:8095/v1 (sampling: temperature 1.0, top_p 0.95; drafts: on; context: 40960; loaded in 328.8s)
+2026-10-20 15:33:50 stop: rank 0 'exit 0', rank 1 'exit 0'
+guard 0: MemAvailable lowest 19 GiB, hottest 57.0 C, 0 stops
+guard 1: MemAvailable lowest 20 GiB, hottest 60.0 C, 0 stops

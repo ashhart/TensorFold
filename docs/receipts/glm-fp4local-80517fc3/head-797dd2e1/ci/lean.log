@@ -1,0 +1,11 @@
+sed: can't read STO]-stream.json: No such file or directory
+sed: can't read STO].json: No such file or directory
+sed: can't read STOP]-stream.json: No such file or directory
+sed: can't read STOP].json: No such file or directory
+sed: can't read %22lookup%22}}.json: No such file or directory
+sed: can't read %22nope%22}}.json: No such file or directory
+sed: can't read %22function%22}.json: No such file or directory
+  445 <home>/zt/lean-base111.txt
+  445 <home>/zt/lean-head-pr111.txt
+lean: 444 problems, 444 on the base, 0 new
+lean_new rc=0

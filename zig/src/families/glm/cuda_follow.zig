@@ -8,16 +8,18 @@ const vcfg = @import("vision_config.zig");
 const sampler = @import("cuda_sampler.zig");
 const prompt_wire = @import("cuda_prompt_wire.zig");
 const dflash = @import("dflash.zig");
+const pages_mod = @import("cuda_pages.zig");
+const sparse = @import("cuda_sparse.zig");
 const Engine = engine.Engine;
 
-pub const Kind = enum(u32) { begin = 1, prefill, verify, keep, draft, end, drop, release, chunk, shared, image, block, many, redraw, idle, snapshots };
+pub const Kind = enum(u32) { begin = 1, prefill, verify, keep, draft, end, drop, release, chunk, shared, image, block, many, redraw, idle, snapshots, pool };
 
 /// One step as it crosses: 64 bytes, then `n` u32 ids.
 pub const Header = extern struct {
     kind: u32,
     n: u32 = 0, // ids that follow
     depth: u32 = 0, // draft: drafts to chain; chunk: where it starts; shared: its parts
-    flags: u32 = 0, // begin: sampled; draft: from the prompt; prefill, chunk: prompt_logprobs; verify, shared: whole rows
+    flags: u32 = 0, // begin: sampled; draft: from the prompt (1), chances (2); prefill, chunk: prompt_logprobs (1); chunk: indexer rows split (2); verify, shared: whole rows
     a: u64 = 0, // keep: rows; prefill, chunk: the kept state it resumes (0: none); redraw: the prompt's length
     seed: u64 = 0, // begin: the sampling seed; prefill, chunk: the kept state's position
     temperature: f64 = 0,
@@ -170,6 +172,11 @@ pub const Leader = struct {
     }
 
     pub fn begin(x: Leader, s: ?sampler.Sampling) !void {
+        return x.beginOn(s, &.{});
+    }
+
+    /// `begin` on a paged sequence: the page ids it maps (rank 0's lease) go with the step, to every rank's table.
+    pub fn beginOn(x: Leader, s: ?sampler.Sampling, pages: []const u32) !void {
         try x.flush();
         const c = sampler.check(s);
         var h: Header = .{ .kind = @backingInt(Kind.begin) };
@@ -181,7 +188,7 @@ pub const Leader = struct {
             h.min_p = v.min_p;
             h.top_k = v.top_k;
         }
-        try x.send(h, &.{});
+        try x.send(h, pages);
         try x.e.begin(c);
     }
 
@@ -189,6 +196,11 @@ pub const Leader = struct {
     pub fn snapshots(x: Leader, budget: u64) !void {
         try x.send(.{ .kind = @backingInt(Kind.snapshots), .a = budget }, &.{});
         try @import("cuda_snapshots.zig").agree(x.e, budget);
+    }
+
+    /// The other ranks make rank 0's pool: `streams` paged sequences and `pages` pages, each page's bytes checked.
+    pub fn pool(x: Leader, streams: u32, pages: usize, page_bytes: u64) !void {
+        try x.send(.{ .kind = @backingInt(Kind.pool), .depth = streams, .a = pages, .seed = page_bytes }, &.{});
     }
 
     /// The prompt pass's image rows (rank 0 encoded them for the bound slot) to every rank: spans, then the rows.
@@ -212,7 +224,9 @@ pub const Leader = struct {
         if (start >= ids.len) return error.BadChunk;
         try x.flush();
         const part = ids[start..@min(ids.len, start + engine.prompt_rows + 1)];
-        try x.send(.{ .kind = @backingInt(Kind.chunk), .flags = x.rows(), .a = if (from) |r| r.id else 0, .seed = if (from) |r| r.at else 0, .depth = @intCast(start), .top_k = @intCast(ids.len) }, part);
+        const split = sparse.splitAt(start, x.e.settings.index_split, x.e.share.world);
+        try x.send(.{ .kind = @backingInt(Kind.chunk), .flags = x.rows() | @as(u32, @intFromBool(split)) << 1, .a = if (from) |r| r.id else 0, .seed = if (from) |r| r.at else 0, .depth = @intCast(start), .top_k = @intCast(ids.len) }, part);
+        x.e.index_split = split;
         return x.e.prefillChunk(part, start, ids.len, from, cancel, marks);
     }
 
@@ -261,10 +275,11 @@ pub const Leader = struct {
         return x.e.redrawFirst(len, bits);
     }
 
-    pub fn draft(x: Leader, from_prompt: bool, follow_ids: []const u32, depth: usize, out: []u32) !void {
+    /// With `chances` every rank picks with its softmax sum, so rank 0 reads each draft's chance (--mtp-confidence).
+    pub fn draft(x: Leader, from_prompt: bool, follow_ids: []const u32, depth: usize, out: []u32, chances: ?[]f64) !void {
         try x.flush();
-        try x.send(.{ .kind = @backingInt(Kind.draft), .depth = @intCast(depth), .flags = @intFromBool(from_prompt) }, follow_ids);
-        try x.e.draft(from_prompt, follow_ids, depth, out);
+        try x.send(.{ .kind = @backingInt(Kind.draft), .depth = @intCast(depth), .flags = @intFromBool(from_prompt) | @as(u32, @intFromBool(chances != null)) << 1 }, follow_ids);
+        try x.e.draft(from_prompt, follow_ids, depth, out, chances);
     }
 
     /// DFlash2's round on every rank (Engine.draftBlock): each stream's slot, kept rows and anchor.
@@ -289,6 +304,12 @@ fn promptRows(h: Header) bool {
     return (kind == .prefill or kind == .chunk) and h.flags & 1 != 0;
 }
 
+/// A prompt chunk whose indexer rows split across the ranks (Leader.chunk): this rank picks for its block of rows.
+fn indexSplit(h: Header) bool {
+    const kind: Kind = @fromBackingInt(@intCast(h.kind));
+    return kind == .chunk and h.flags & 2 != 0;
+}
+
 /// A verify step under a grammar (Engine.structured): this rank's columns join the gather of each draw's whole rows.
 fn structuredStep(h: Header) bool {
     const kind: Kind = @fromBackingInt(@intCast(h.kind));
@@ -298,17 +319,25 @@ fn structuredStep(h: Header) bool {
 /// A rank other than 0 runs rank 0's steps until it ends; a cancelled prefill is error.Cancelled and the loop goes on.
 pub fn follow(e: *Engine, link: *Link) !void {
     var drafts: [engine.max_drafts]u32 = undefined;
+    var chances: [engine.max_drafts]f64 = undefined;
     var sampled: [16]u32 = undefined;
     cuda.tp_watch.sleep(e.io); // rank 0 starts with no stream: its first step wakes this rank
     while (true) {
         const step = try link.receive();
         const h = step.h;
         const kind: Kind = @fromBackingInt(@intCast(h.kind));
-        if (kind != .end and kind != .drop and kind != .shared and kind != .block and kind != .many and kind != .idle and kind != .snapshots) try e.bind(h.slot);
+        if (kind != .end and kind != .drop and kind != .shared and kind != .block and kind != .many and kind != .idle and kind != .snapshots and kind != .pool) try e.bind(h.slot);
         e.prompt_logprobs = if (promptRows(h)) .{} else null;
         e.structured = structuredStep(h); // rank 0 alone masks them
         switch (kind) {
-            .begin => try e.beginFollowing(if (h.flags & 1 != 0) .{ .seed = h.seed, .temperature = h.temperature, .top_p = h.top_p, .min_p = h.min_p, .top_k = h.top_k } else null),
+            .begin => {
+                if (step.ids.len > 0) try (e.pages orelse return error.BadStep).map(h.slot, step.ids);
+                try e.beginFollowing(if (h.flags & 1 != 0) .{ .seed = h.seed, .temperature = h.temperature, .top_p = h.top_p, .min_p = h.min_p, .top_k = h.top_k } else null);
+            },
+            .pool => {
+                if (e.pages != null) return error.BadStep;
+                e.pages = try pages_mod.Pages.follow(e.gpa, e, h.depth, @intCast(h.a), h.seed);
+            },
             .prefill => {
                 const ids = try e.gpa.dupe(u32, step.ids);
                 defer e.gpa.free(ids);
@@ -322,6 +351,7 @@ pub fn follow(e: *Engine, link: *Link) !void {
                 const ids = try e.gpa.dupe(u32, step.ids);
                 defer e.gpa.free(ids);
                 const from: ?engine.Resume = if (h.a != 0) .{ .id = h.a, .at = h.seed } else null;
+                e.index_split = indexSplit(h);
                 _ = e.prefillChunk(ids, h.depth, h.top_k, from, null, null) catch |err| switch (err) {
                     error.Cancelled => {},
                     else => return err,
@@ -355,7 +385,7 @@ pub fn follow(e: *Engine, link: *Link) !void {
             .draft => {
                 const ids = try e.gpa.dupe(u32, step.ids);
                 defer e.gpa.free(ids);
-                try e.draft(h.flags & 1 != 0, ids, h.depth, &drafts);
+                try e.draft(h.flags & 1 != 0, ids, h.depth, &drafts, if (h.flags & 2 != 0) &chances else null);
             },
             .block => {
                 const k = h.depth;
@@ -458,4 +488,12 @@ test "flag 1 on verify and shared steps draws from whole rows; a prompt step's f
     try std.testing.expect(!structuredStep(.{ .kind = @backingInt(Kind.verify), .n = 4 }));
     try std.testing.expect(!structuredStep(.{ .kind = @backingInt(Kind.chunk), .flags = 1, .depth = 2048 }));
     try std.testing.expect(!structuredStep(.{ .kind = @backingInt(Kind.begin), .flags = 1 }));
+}
+
+test "flag 2 on a chunk splits its indexer rows across the ranks, beside flag 1's prompt rows; elsewhere it does not" {
+    try std.testing.expect(indexSplit(.{ .kind = @backingInt(Kind.chunk), .flags = 2, .depth = 65536, .top_k = 70000 }));
+    try std.testing.expect(indexSplit(.{ .kind = @backingInt(Kind.chunk), .flags = 3, .depth = 65536, .top_k = 70000 }));
+    try std.testing.expect(promptRows(.{ .kind = @backingInt(Kind.chunk), .flags = 3, .depth = 65536, .top_k = 70000 }));
+    try std.testing.expect(!indexSplit(.{ .kind = @backingInt(Kind.chunk), .flags = 1, .depth = 65536, .top_k = 70000 }));
+    try std.testing.expect(!indexSplit(.{ .kind = @backingInt(Kind.prefill), .flags = 2 }));
 }

@@ -1,4 +1,4 @@
-//! Pending 13.0 launch records never qualify without that compiler's resources.
+//! Missing 13.0 resources still refuse qualification after measured rows are restored.
 const std = @import("std");
 const registry = @import("registry.zig");
 const limits = @import("limits.zig");
@@ -9,19 +9,27 @@ const cuda = registry.cuda;
 const checkCuda = registry.checkCuda;
 const targetDecision = registry.targetDecision;
 const TargetDecision = registry.TargetDecision;
-test "pending 13.0 CUDA launches have no invented usage and cannot pass the measured gate" {
+test "CUDA lane resources distinguish recorded launches from missing receipts" {
     for (cuda_pending) |r| {
         try std.testing.expect(r.launch.threads > 0);
-        try std.testing.expectEqual(none, r.usage);
-        try std.testing.expectEqual(limits.sms.len, try checkCuda(std.testing.allocator, &.{r}, true));
+        var missing: usize = 0;
+        for (limits.sms, r.usage) |sm, usage| {
+            if (usage.regs == 0) missing += 1 else {
+                var text: std.ArrayList(u8) = .empty;
+                defer text.deinit(std.testing.allocator);
+                try std.testing.expectEqual(@as(usize, 0), try limits.cuda(r.launch, usage, sm, &text, std.testing.allocator));
+            }
+        }
+        try std.testing.expectEqual(missing, try checkCuda(std.testing.allocator, &.{r}, true));
         for (cuda) |measured| try std.testing.expect(!std.mem.eql(u8, r.launch.symbol, measured.launch.symbol));
     }
 }
 
-test "DeepSeek pending 13.0 records never count as compiled resource qualification" {
+test "DeepSeek recorded resources fit and missing applicable receipts still refuse" {
     for (dsv41_pending) |record| {
         const applicable = targetDecision(record, limits.sms[4], record.usage[4]) == .applicable;
-        try std.testing.expectEqual(applicable, (try checkCuda(std.testing.allocator, &.{record}, true)) > 0);
+        const missing = std.meta.eql(none, record.usage);
+        try std.testing.expectEqual(applicable and missing, (try checkCuda(std.testing.allocator, &.{record}, true)) > 0);
     }
 }
 
@@ -37,5 +45,17 @@ test "optional shared-memory variants are N/A while supported variants still req
     try std.testing.expectEqual(@as(usize, 7), oversized);
     const supported = dsv41_pending[0];
     try std.testing.expectEqual(TargetDecision.applicable, targetDecision(supported, t, supported.usage[4]));
-    try std.testing.expect(try checkCuda(a, &.{supported}, true) > 0);
+    try std.testing.expectEqual(@as(usize, 0), try checkCuda(a, &.{supported}, true));
+    var unmeasured = supported;
+    unmeasured.usage = none;
+    try std.testing.expect(try checkCuda(a, &.{unmeasured}, true) > 0);
+}
+
+test "Dory resources qualify all five measured SMs and preserve pending later compilers" {
+    for (@import("dory_cuda_records.zig").cuda) |r| {
+        try std.testing.expectEqual(@as(usize, 0), try checkCuda(std.testing.allocator, &.{r}, true));
+        try std.testing.expectEqual(r.usage, registry.usageFor(r, .{ .major = 13, .minor = 0 }));
+        for ([_]limits.Nvcc{ .{ .major = 13, .minor = 2 }, .{ .major = 14, .minor = 0 } }) |version|
+            try std.testing.expectEqual(none, registry.usageFor(r, version));
+    }
 }

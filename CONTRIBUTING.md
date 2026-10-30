@@ -31,6 +31,7 @@ The `apple_m1` CPU target keeps the macOS binary compatible with M1 through M5.
 Run the full suite on an isolated machine when the local GPU is serving a model.
 `test-golden` compares the frozen server corpus and records known differences separately.
 These results do not substitute for an actual checkpoint/model gate.
+On macOS, `zig build dev-tools` compiles and links every `tf-*` developer tool without running one; run it after changing an API they call.
 
 For the CUDA host-test subset without the macOS Metal family tests:
 
@@ -39,6 +40,17 @@ zig build test-cuda-host
 ```
 
 This subset does not replace the complete `test` suite.
+
+HIP is an explicit build opt-in. Add `-Dhip=true` to enable its host tests and named HIP targets:
+
+```sh
+zig build test -Dhip=true
+zig build native-hip -Dhip=true -Dhipcc=/opt/rocm/bin/hipcc -Dhip-arch=gfx1100
+```
+
+The default graph omits HIP. Enabling it does not select another backend or change CUDA, Metal or XPU runtime options.
+The HIP backend uses the same shared core and serving contracts. Device qualification remains specific to its
+checkpoint, compiler, runtime and architecture; a host build does not establish those receipts.
 
 Linux release builds use the CUDA backend and qualified GPU kernel assets.
 [Packaging](packaging/README.md) lists the flat fatbin set and optional captured CUDA files required by `dist`.

@@ -1,0 +1,20 @@
+{
+ "closed": "open",
+ "replies": [
+  {
+   "status": "HTTP/1.1 200 OK",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "496"
+    ]
+   ],
+   "body": "{\"object\": \"list\", \"data\": [{\"id\": \"fake-model\", \"object\": \"model\", \"created\": <ts>, \"owned_by\": \"tensorfold\", \"context_length\": 1024, \"max_model_len\": 1024, \"reasoning\": {\"default_enabled\": true, \"supported_efforts\": [\"xhigh\", \"medium\", \"low\", \"none\"]}}, {\"id\": \"fake-alias\", \"object\": \"model\", \"created\": <ts>, \"owned_by\": \"tensorfold\", \"context_length\": 1024, \"max_model_len\": 1024, \"reasoning\": {\"default_enabled\": true, \"supported_efforts\": [\"xhigh\", \"medium\", \"low\", \"none\"]}}]}",
+   "interim": ""
+  }
+ ]
+}

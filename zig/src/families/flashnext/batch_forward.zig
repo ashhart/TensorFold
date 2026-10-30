@@ -14,6 +14,10 @@ pub fn encode(e: *Engine, segs: []const Seg, rows: usize, ids: Buf, masks: ?*con
     const m = e.m;
     const t = &m.t;
     if (r.tp != null or r.gpu_round) return error.BatchModeUnsupported;
+    if (r.fsr) |stream| stream.trace_streams = segs.len;
+    defer if (r.fsr) |stream| {
+        stream.trace_streams = 1;
+    };
     r.rows = rows;
     try @import("rotary_cache.zig").prepare(r, t.log2base, t.pos8, rows);
     var cur: usize = 0;
@@ -29,16 +33,30 @@ pub fn encode(e: *Engine, segs: []const Seg, rows: usize, ids: Buf, masks: ?*con
             tabs[0] = t.ple_ids;
             tabs[1] = p.starts;
             for (p.tables, 0..) |b, j| tabs[2 + j] = b;
+            if (r.fsr) |stream| if (try stream.tables(r, t.ple_ids, rows)) |staged| {
+                tabs = staged;
+            };
             var cp: [2]variants.Const = undefined;
             try variants.callAs(r, "qa_ple_lookup@ple", rows, &tabs, &.{t.emb}, variants.width(&cp, "BITS", "GS", p.w));
             if (p.scale) |sc| sc.apply(r.enc, t.emb, rows * fz.D, r.serial);
             try m.lane(t.emb, fz.D, p.kv, "lane_qmm_bytes_grouped@ple.kv", t.kvp);
+            const apart = together(r);
             for (segs) |g| {
                 const v = view(t.*, g.row0);
                 r.rows = g.rows;
                 const pp = &g.s.m.ple;
                 try r.call("q4_ple_gate@ple", &.{ v.kvp, v.h[cur], pp.ks, pp.qs, pp.cs, t.eps }, &.{ v.gated, pp.cin.at(fz.PLE_TAIL * fz.WIDE * 2) });
-                try r.call("q4_ple_conv@ple", &.{ pp.cin, pp.conv, v.gated, v.h[cur] }, &.{v.hout});
+                if (!apart) try r.call("q4_ple_conv@ple", &.{ pp.cin, pp.conv, v.gated, v.h[cur] }, &.{v.hout});
+            }
+            if (apart) {
+                r.enc.barrier();
+                for (segs) |g| {
+                    const v = view(t.*, g.row0);
+                    r.rows = g.rows;
+                    const pp = &g.s.m.ple;
+                    try r.call("q4_ple_conv@ple", &.{ pp.cin, pp.conv, v.gated, v.h[cur] }, &.{v.hout});
+                }
+                apartEnd(r);
             }
             r.rows = rows;
             try r.call("q4_hc_norm_none#[10240]", &.{t.hout}, &.{ t.h[1 - cur], t.ssp });
@@ -48,6 +66,8 @@ pub fn encode(e: *Engine, segs: []const Seg, rows: usize, ids: Buf, masks: ?*con
         try m.lane(t.mixed, fz.D, l.proj, if (l.linear) "lane_qmm_bytes_grouped@gdn.in" else "lane_qmm_bytes_grouped@att.proj", t.p);
         @import("lane_w.zig").touch(r, l.out);
         if (l.linear) {
+            const apart = r.gdn_pipe == null and together(r);
+            defer if (apart) apartEnd(r);
             for (segs) |g| {
                 const v = view(t.*, g.row0);
                 const sl = &g.s.m.layers[i];
@@ -69,7 +89,9 @@ pub fn encode(e: *Engine, segs: []const Seg, rows: usize, ids: Buf, masks: ?*con
         r.touch(l.router);
         try m.hcProject(t.h[cur], l.mhc, "qa_hc_down@mhc", "qa_hc_up@mhc", t.inj_m);
         try r.router("q4_router_float@moe", t.mixed, l.router, t.rows, t.lg, rows);
+        if (r.fsr) |stream| try stream.prepare(r, i, t.lg, t.rows, t.pick, t.wts, rows, t.mixed, if (i + 1 < fz.LAYERS) m.layers[i + 1].router else null, @import("fsr_runtime.zig").guarded(l.xw));
         if (l.xw) |w| try variants.experts(r, "qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, l.ex, t.act, t.pick, t.wts, t.rows, t.ydown, w) else try r.experts("qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, l.ex, t.act, t.pick, t.wts, t.rows, t.ydown);
+        if (r.fsr) |stream| try stream.after(r);
     }
     try m.grouped(t.h[cur], t.h[1 - cur]);
     cur = 1 - cur;
@@ -84,6 +106,18 @@ pub fn encode(e: *Engine, segs: []const Seg, rows: usize, ids: Buf, masks: ?*con
     for ([_]Buf{ t.logits, t.picks, t.vocab }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
     r.enc.dispatchThreads(mtl.Size.of(1024 * rows, 1, 1), mtl.Size.of(1024, 1, 1));
     if (!r.serial) r.enc.barrier();
+}
+
+/// On a concurrent encoder, the sessions' launches that follow write only their own rows: no barrier until `apartEnd`.
+fn together(r: *fz.Run) bool {
+    if (r.serial) return false;
+    r.serial = true;
+    return true;
+}
+
+fn apartEnd(r: *fz.Run) void {
+    r.serial = false;
+    r.enc.barrier();
 }
 
 fn attention(e: *Engine, g: Seg, i: usize) !void {

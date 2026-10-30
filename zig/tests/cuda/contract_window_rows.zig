@@ -1,0 +1,442 @@
+//! window_rows.cu under the contract: Gemma 4's sliding (256) and global (512) layers, outputs in float64's range.
+const std = @import("std");
+const cuda = @import("cuda");
+const core = @import("core");
+const rig_ = @import("contract_rig.zig");
+const wc = @import("window_rows_check.zig");
+const wt = @import("window_rows_tests.zig");
+
+const contract = core.contract;
+const c = contract.spec;
+const g = contract.gates;
+const rows = contract.rows;
+const ar = core.attention_range;
+const bfr = core.bf16_round;
+const wa = cuda.window_attention;
+const WA = wa.WindowAttention;
+
+/// A planted fault, from contract_controls.cu (window_rows.cuh's Fault), or the served bf16-P kernel (p16).
+pub const Ctl = enum { none, edge, rescale, trunc, prompt_edge, last, p16, rescale512, swap, stale };
+
+/// A call's fixed heads, window and ring, and which kernels it runs.
+pub const Cfg = struct {
+    name: []const u8,
+    h: usize,
+    hk: usize,
+    d: usize = 256,
+    win: usize = 1024,
+    ring: usize = 1536,
+    streams: usize = 3,
+    prompt: bool = false,
+    p32: bool = false,
+    image: bool = false,
+    ctl: Ctl = .none,
+    /// Positions a page, when the caches are pages (tf_wrows_*_pg after tf_wrows_put placed them in a shuffled arena).
+    pages: usize = 0,
+    served: []const c.Shape,
+};
+
+const decode_served = &[_]c.Shape{ .{ .rows = 16, .n = 16, .k = 40000 }, .{ .rows = 64, .n = 16, .k = 3000 }, .{ .rows = 1, .n = 16, .k = 1100 } };
+const prompt_served = &[_]c.Shape{ .{ .rows = 512, .n = 16, .k = 0 }, .{ .rows = 512, .n = 16, .k = 5000 }, .{ .rows = 96, .n = 16, .k = 1300 } };
+const global_decode = &[_]c.Shape{ .{ .rows = 4, .n = 16, .k = 32768 }, .{ .rows = 16, .n = 16, .k = 3000 }, .{ .rows = 1, .n = 16, .k = 300 } };
+const global_prompt = &[_]c.Shape{ .{ .rows = 256, .n = 16, .k = 0 }, .{ .rows = 128, .n = 16, .k = 4096 }, .{ .rows = 32, .n = 16, .k = 1000 } };
+const global31_prompt = &[_]c.Shape{ .{ .rows = 128, .n = 32, .k = 0 }, .{ .rows = 64, .n = 32, .k = 3000 } };
+const gqa5_decode = &[_]c.Shape{ .{ .rows = 4, .n = 10, .k = 32768 }, .{ .rows = 16, .n = 10, .k = 3000 }, .{ .rows = 1, .n = 10, .k = 300 } };
+const gqa5_prompt = &[_]c.Shape{ .{ .rows = 128, .n = 10, .k = 0 }, .{ .rows = 64, .n = 10, .k = 3000 } };
+
+/// Gemma 4 12B's sliding layers (16 query heads over 8 of 256, window 1024, ring 1536); controls each plant one fault.
+pub const cfgs = [_]Cfg{
+    .{ .name = "cuda window_rows decode tf_wrows_part_256 + tf_wrows_merge_256, 16/8 heads, window 1024, ring 1536", .h = 16, .hk = 8, .served = decode_served },
+    .{ .name = "cuda window_rows prompt tf_wrows_prompt_256_p32, 16/8 heads, window 1024, ring 1536, image rows", .h = 16, .hk = 8, .prompt = true, .p32 = true, .image = true, .served = prompt_served },
+    .{ .name = "cuda window_rows prompt tf_wrows_prompt_256 (P as bf16), 16/8 heads, window 1024, ring 1536", .h = 16, .hk = 8, .prompt = true, .served = prompt_served },
+    .{ .name = "control: decode partials whose window starts a key early", .h = 16, .hk = 8, .ctl = .edge, .served = decode_served },
+    .{ .name = "control: decode merge without each chunk's exp(m_c - M)", .h = 16, .hk = 8, .ctl = .rescale, .served = decode_served },
+    .{ .name = "control: decode merge rounding its output toward zero", .h = 16, .hk = 8, .ctl = .trunc, .served = decode_served },
+    .{ .name = "control: P32 prompt rows whose window starts a key early", .h = 16, .hk = 8, .prompt = true, .p32 = true, .ctl = .prompt_edge, .served = prompt_served },
+    .{ .name = "control: P32 prompt rows ignoring an image's last key", .h = 16, .hk = 8, .prompt = true, .p32 = true, .image = true, .ctl = .last, .served = prompt_served },
+    .{ .name = "control: P rounded to bf16 under the P32 range", .h = 16, .hk = 8, .prompt = true, .p32 = true, .ctl = .p16, .served = prompt_served },
+    // Gemma 4's global layers (head dim 512, no window over a linear cache): 12B 16 query heads over 1, 31B 32 over 4
+    .{ .name = "cuda window_rows decode tf_wrows_part_512 + tf_wrows_merge_512, 16/1 heads, no window, linear 32768", .h = 16, .hk = 1, .d = 512, .win = 0, .ring = 32768, .streams = 1, .served = global_decode },
+    .{ .name = "cuda window_rows prompt tf_wrows_prompt_512_p32, 16/1 heads, no window, linear cache", .h = 16, .hk = 1, .d = 512, .win = 0, .ring = 0, .prompt = true, .p32 = true, .served = global_prompt },
+    .{ .name = "cuda window_rows prompt tf_wrows_prompt_512 (P as bf16), 32/4 heads, no window, linear cache", .h = 32, .hk = 4, .d = 512, .win = 0, .ring = 0, .prompt = true, .served = global31_prompt },
+    .{ .name = "control: head dim 512 merge over up to 128 chunks without exp(m_c - M)", .h = 16, .hk = 1, .d = 512, .win = 0, .ring = 32768, .streams = 1, .ctl = .rescale512, .served = global_decode },
+    // an odd ratio at 512: 10 query heads over 2 (GQA 5), so each key head's second block holds one query head
+    .{ .name = "cuda window_rows decode tf_wrows_part_512 + tf_wrows_merge_512, 10/2 heads (GQA 5), no window, linear 32768", .h = 10, .hk = 2, .d = 512, .win = 0, .ring = 32768, .streams = 1, .served = gqa5_decode },
+    .{ .name = "cuda window_rows prompt tf_wrows_prompt_512_p32, 10/2 heads (GQA 5), no window, linear cache", .h = 10, .hk = 2, .d = 512, .win = 0, .ring = 0, .prompt = true, .p32 = true, .served = gqa5_prompt },
+    .{ .name = "cuda window_rows prompt tf_wrows_prompt_512 (P as bf16), 10/2 heads (GQA 5), no window, linear cache", .h = 10, .hk = 2, .d = 512, .win = 0, .ring = 0, .prompt = true, .served = gqa5_prompt },
+    .{ .name = "control: head dim 512 merge without exp(m_c - M), 10/2 heads (GQA 5)", .h = 10, .hk = 2, .d = 512, .win = 0, .ring = 32768, .streams = 1, .ctl = .rescale512, .served = gqa5_decode },
+} ++ ratio(12, 4) ++ ratio(20, 4) ++ ratio(32, 4) ++ ratio(32, 2) ++ [_]Cfg{
+    .{ .name = "control: decode merge without each chunk's exp(m_c - M), 20/4 heads (GQA 5)", .h = 20, .hk = 4, .ctl = .rescale, .served = decodeAt(20) },
+    .{ .name = "control: P32 prompt rows whose window starts a key early, 20/4 heads (GQA 5)", .h = 20, .hk = 4, .prompt = true, .p32 = true, .ctl = .prompt_edge, .served = promptAt(20) },
+} ++ @import("window_rows_shapes.zig").cases(Cfg) ++ paged;
+
+const paged_decode = &[_]c.Shape{ .{ .rows = 4, .n = 16, .k = 32768 }, .{ .rows = 16, .n = 16, .k = 3000 }, .{ .rows = 1, .n = 16, .k = 257 } };
+const paged_prompt = &[_]c.Shape{ .{ .rows = 256, .n = 16, .k = 0 }, .{ .rows = 128, .n = 16, .k = 4096 }, .{ .rows = 32, .n = 16, .k = 1000 } };
+
+/// Dory's full-attention layers (16 query heads over 4 of 256, no window): caches in pages of 256 or 1,024 positions.
+const paged = [_]Cfg{
+    .{ .name = "cuda window_pages decode tf_wrows_part_256_pg + tf_wrows_merge_256_pg, 16/4 heads, no window, pages of 256", .h = 16, .hk = 4, .win = 0, .ring = 32768, .streams = 2, .pages = 256, .served = paged_decode },
+    .{ .name = "cuda window_pages decode tf_wrows_part_256_pg + tf_wrows_merge_256_pg, 16/4 heads, no window, pages of 1024", .h = 16, .hk = 4, .win = 0, .ring = 32768, .streams = 2, .pages = 1024, .served = paged_decode },
+    .{ .name = "cuda window_pages prompt tf_wrows_prompt_256_pg (P as bf16), 16/4 heads, no window, pages of 256", .h = 16, .hk = 4, .win = 0, .ring = 0, .prompt = true, .pages = 256, .served = paged_prompt },
+    .{ .name = "cuda window_pages prompt tf_wrows_prompt_256_pg (P as bf16), 16/4 heads, no window, pages of 1024", .h = 16, .hk = 4, .win = 0, .ring = 0, .prompt = true, .pages = 1024, .served = paged_prompt },
+    .{ .name = "control: paged decode whose first two streams' tables are swapped", .h = 16, .hk = 4, .win = 0, .ring = 32768, .streams = 2, .pages = 256, .ctl = .swap, .served = paged_decode },
+    .{ .name = "control: paged prompt rows whose first page id is a later page's", .h = 16, .hk = 4, .win = 0, .ring = 0, .prompt = true, .pages = 256, .ctl = .stale, .served = paged_prompt },
+    // Gemma 4's global layers (head dim 512) over pages: the decode looks up each key's page, a prompt tile one
+    .{ .name = "cuda window_pages decode tf_wrows_part_512_pg + tf_wrows_merge_512_pg, 16/1 heads of 512, pages of 256", .h = 16, .hk = 1, .d = 512, .win = 0, .ring = 32768, .streams = 2, .pages = 256, .served = global_decode },
+    .{ .name = "cuda window_pages decode tf_wrows_part_512_pg + tf_wrows_merge_512_pg, 16/1 heads of 512, pages of 37", .h = 16, .hk = 1, .d = 512, .win = 0, .ring = 32768, .streams = 2, .pages = 37, .served = global_decode },
+    .{ .name = "cuda window_pages decode tf_wrows_part_512_pg + tf_wrows_merge_512_pg, 10/2 heads of 512 (GQA 5), pages of 256", .h = 10, .hk = 2, .d = 512, .win = 0, .ring = 32768, .streams = 2, .pages = 256, .served = gqa5_decode },
+    .{ .name = "cuda window_pages prompt tf_wrows_prompt_512_p32_pg, 16/1 heads of 512, pages of 256", .h = 16, .hk = 1, .d = 512, .win = 0, .ring = 0, .prompt = true, .p32 = true, .pages = 256, .served = global_prompt },
+    .{ .name = "cuda window_pages prompt tf_wrows_prompt_512_pg (P as bf16), 32/4 heads of 512, pages of 64", .h = 32, .hk = 4, .d = 512, .win = 0, .ring = 0, .prompt = true, .pages = 64, .served = global31_prompt },
+    .{ .name = "cuda window_pages prompt tf_wrows_prompt_512_p32_pg, 10/2 heads of 512 (GQA 5), pages of 32", .h = 10, .hk = 2, .d = 512, .win = 0, .ring = 0, .prompt = true, .p32 = true, .pages = 32, .served = gqa5_prompt },
+    .{ .name = "control: head dim 512 paged decode whose first two streams' tables are swapped", .h = 16, .hk = 1, .d = 512, .win = 0, .ring = 32768, .streams = 2, .pages = 37, .ctl = .swap, .served = global_decode },
+    .{ .name = "control: head dim 512 paged prompt rows whose first page id is a later page's", .h = 16, .hk = 1, .d = 512, .win = 0, .ring = 0, .prompt = true, .p32 = true, .pages = 256, .ctl = .stale, .served = global_prompt },
+};
+
+fn decodeAt(comptime h: usize) []const c.Shape {
+    return &[_]c.Shape{ .{ .rows = 16, .n = h, .k = 3000 }, .{ .rows = 1, .n = h, .k = 1100 } };
+}
+
+fn promptAt(comptime h: usize) []const c.Shape {
+    return &[_]c.Shape{ .{ .rows = 512, .n = h, .k = 5000 }, .{ .rows = 96, .n = h, .k = 1300 } };
+}
+
+/// The API's other query-to-key-head ratios (3 and 5 odd, 8 and 16): decode, and prompt rows with P as bf16 and P32.
+fn ratio(comptime h: usize, comptime hk: usize) [3]Cfg {
+    const heads = std.fmt.comptimePrint("{d}/{d} heads (GQA {d}), window 1024, ring 1536", .{ h, hk, h / hk });
+    return .{
+        .{ .name = "cuda window_rows decode tf_wrows_part_256 + tf_wrows_merge_256, " ++ heads, .h = h, .hk = hk, .served = decodeAt(h) },
+        .{ .name = "cuda window_rows prompt tf_wrows_prompt_256_p32, " ++ heads, .h = h, .hk = hk, .prompt = true, .p32 = true, .served = promptAt(h) },
+        .{ .name = "cuda window_rows prompt tf_wrows_prompt_256 (P as bf16), " ++ heads, .h = h, .hk = hk, .prompt = true, .served = promptAt(h) },
+    };
+}
+
+/// The control kernel's symbol in contract_controls.cu, if it has one.
+pub fn symbol(ctl: Ctl) ?[:0]const u8 {
+    return switch (ctl) {
+        .none, .p16, .swap, .stale => null,
+        .edge => "tf_ctl_wrows_part_edge",
+        .rescale => "tf_ctl_wrows_merge_rescale",
+        .rescale512 => "tf_ctl_wrows_merge_rescale_512",
+        .trunc => "tf_ctl_wrows_merge_trunc",
+        .prompt_edge => "tf_ctl_wrows_prompt_edge",
+        .last => "tf_ctl_wrows_prompt_last",
+    };
+}
+
+/// The longest chain: a chunk's keys and the chunks (decode), or the tiles' folds (prompt), as the range counts them.
+fn depth(s: c.Shape) usize {
+    return 256 + s.k / 32 + 16;
+}
+
+const why = "all keys alike make every weight exactly 1: o is a plain sum of V's integers, exact in fp32 (any order); fp16 sums overflow, bf16 ones lose its low bits";
+
+pub fn spec(f: Cfg) c.Spec {
+    const tiles: [3]c.Tile = if (f.prompt) .{ .{ .size = 16 }, .{}, .{ .size = 32, .min = 0 } } else .{ .{}, .{}, .{ .size = 256 } };
+    return .{ .name = f.name, .accum = .f32, .depth = depth, .ops = 4, .out = .bf16, .tiles = tiles, .served = f.served, .sums = .{ .f16 = 100, .bf16 = 0, .why = why } };
+}
+
+pub const Rows = struct {
+    rig: rig_.Rig,
+    f: Cfg,
+    g: *const WA,
+    /// The controls' image (contract_controls.cu), when this registration runs one.
+    ctl: ?cuda.Module = null,
+    arena: std.heap.ArenaAllocator,
+    call: wc.Call = undefined,
+    fns: WA.Wide = undefined,
+    dev: [6]u64 = @splat(0),
+    table: u64 = 0, // paged: the attention kernels' table (stream rows of `per` page ids)
+    per: usize = 0,
+    placed: ?[]const u8 = null, // paged: what tf_wrows_put got wrong, if anything
+    scratch: u64 = 0,
+    out: u64 = 0,
+    half: []f64 = &.{},
+    msg: [240]u8 = undefined,
+
+    pub fn deinit(self: *Rows) void {
+        self.arena.deinit();
+        self.rig.deinit();
+    }
+
+    pub fn kernel(self: *Rows) g.Kernel {
+        return .{ .spec = spec(self.f), .ctx = self, .vt = &vt, .control = if (self.f.ctl != .none) .shapes else null };
+    }
+
+    const vt = g.hooks(Rows);
+
+    fn win(self: *const Rows) wa.Window {
+        const f = self.f;
+        const pg: ?wa.Pages = if (f.pages > 0) .{ .table = self.table, .page_elems = 2 * f.pages * f.hk * f.d, .tokens = f.pages, .stride = self.per } else null;
+        return .{ .h = f.h, .hk = f.hk, .d = f.d, .win = f.win, .ring = f.ring, .scale = 1, .p32 = f.p32 and f.ctl != .p16, .pg = pg };
+    }
+
+    /// Paged: tf_wrows_put places the caches in a shuffled arena (bit for bit, or `placed` says); the kernels read it.
+    fn place(self: *Rows, a: std.mem.Allocator, rng: std.Random, kc: []const u16, vc: []const u16) !void {
+        const f = self.f;
+        const row = f.hk * f.d;
+        const n = kc.len / row;
+        const span = if (f.prompt) n else f.ring;
+        const streams = if (f.prompt) 1 else f.streams;
+        self.per = (span + f.pages - 1) / f.pages;
+        const ids = try a.alloc(i32, streams * self.per);
+        for (ids, 0..) |*x, i| x.* = @intCast(i);
+        rng.shuffle(i32, ids);
+        const pos = try a.alloc(i32, n);
+        const slot = try a.alloc(i32, n);
+        const elems = 2 * f.pages * row;
+        const want = try a.alloc(u16, ids.len * elems);
+        @memset(want, 0);
+        for (pos, slot, 0..) |*p, *sl, i| {
+            p.* = @intCast(i % span);
+            sl.* = @intCast(i / span);
+            const at = @as(usize, @intCast(ids[@as(usize, @intCast(sl.*)) * self.per + i % span / f.pages])) * elems + i % span % f.pages * row;
+            @memcpy(want[at..][0..row], kc[i * row ..][0..row]);
+            @memcpy(want[at + f.pages * row ..][0..row], vc[i * row ..][0..row]);
+        }
+        const arena = try self.rig.scratch(want.len * 2);
+        self.table = try self.rig.input(std.mem.sliceAsBytes(ids));
+        const dpos = try self.rig.input(std.mem.sliceAsBytes(pos));
+        const dslot = try self.rig.input(std.mem.sliceAsBytes(slot));
+        const vcache = arena + f.pages * row * 2;
+        try self.g.put(self.rig.s, self.dev[1], self.dev[2], arena, vcache, dpos, dslot, self.win(), n);
+        const got = try self.rig.bytes(arena, want.len * 2);
+        self.placed = if (std.mem.eql(u8, got, std.mem.sliceAsBytes(want))) null else "tf_wrows_put placed rows differently from the table's pages";
+        self.dev[1] = arena;
+        self.dev[2] = vcache;
+        switch (f.ctl) { // the attention reads a table that is not the one the rows were placed by
+            .swap => for (0..self.per) |i| std.mem.swap(i32, &ids[i], &ids[self.per + i]),
+            .stale => if (ids.len > 1) { // one page has no later page: planted from the next shape on
+                ids[0] = ids[1];
+            } else return,
+            else => return,
+        }
+        self.table = try self.rig.input(std.mem.sliceAsBytes(ids));
+    }
+
+    /// The kernels a run launches: the served ones, one of them swapped for its control.
+    fn kernels(self: *Rows) !WA.Wide {
+        var k = self.g.wideFns(self.f.d).*;
+        const sym = symbol(self.f.ctl) orelse return k;
+        const fun = try self.ctl.?.function(sym);
+        switch (self.f.ctl) {
+            .edge => k.part = fun,
+            .rescale, .trunc, .rescale512 => k.merge = fun,
+            else => {
+                try fun.allowDynamicShared(WA.promptShared(self.f.d));
+                k.prompt[1] = fun;
+            },
+        }
+        return k;
+    }
+
+    pub fn prepare(self: *Rows, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
+        self.rig.reset();
+        _ = self.arena.reset(.retain_capacity);
+        const f = self.f;
+        if (shape.n != f.h or shape.rows == 0 or (!f.prompt and shape.k == 0)) return false;
+        if (f.prompt and f.ring > 0 and shape.rows + f.win > f.ring) return false; // chunk + window fit the ring
+        const a = self.arena.allocator();
+        var prng = std.Random.DefaultPrng.init(seed);
+        const rng = prng.random();
+        const n = shape.rows;
+        // gate 4 without a window: at most 1,000 keys, so the mirrored integers' partial sums stay exact in fp32
+        const at = if (fill == .stress and f.win == 0) @min(shape.k, 1000) else shape.k;
+        const crow = if (f.prompt) (if (f.ring > 0) f.ring else at + n) else f.streams * f.ring;
+        const q = try a.alloc(u16, n * f.h * f.d);
+        const kc = try a.alloc(u16, crow * f.hk * f.d);
+        const vc = try a.alloc(u16, kc.len);
+        wt.fill(rng, q, kc, vc, f.d);
+        const pos = try a.alloc(i32, n);
+        const slot = try a.alloc(i32, n);
+        const hi = try a.alloc(i32, n);
+        for (pos, slot, hi, 0..) |*p, *sl, *x, i| {
+            p.* = @intCast(position(f.prompt, fill == .stress, shape.k, at, n, i));
+            sl.* = @intCast(if (fill == .stress) 0 else i % f.streams);
+            x.* = @intCast(at + i);
+        }
+        if (f.image and fill != .stress and n > 8) { // an image: rows n/8 .. n/2 see each other
+            for (n / 8..n / 2) |i| hi[i] = @intCast(shape.k + n / 2 - 1);
+        }
+        self.call = .{ .h = f.h, .hk = f.hk, .d = f.d, .win = f.win, .ring = f.ring, .scale = 1, .prompt = f.prompt, .p32 = f.p32, .rows = n, .q = q, .kc = kc, .vc = vc, .pos = pos, .slot = slot, .p0 = at, .hi = if (f.image) hi else null };
+        if (fill == .random) {
+            var r: usize = 0;
+            while (r < n) : (r += 3) {
+                const w = self.call.at(r);
+                const lo = self.call.first(w.p);
+                for (0..f.hk) |kh| wt.sharpen(self.call, kc, r, lo + (r * 31 + kh * 7) % (w.last + 1 - lo), kh);
+            }
+        }
+        switch (fill) {
+            .random => {},
+            .nonfinite => self.plant(q, kc, vc),
+            .stress => try self.stress(rng, kc, vc),
+        }
+        for ([_][]const u8{ std.mem.sliceAsBytes(q), std.mem.sliceAsBytes(kc), std.mem.sliceAsBytes(vc), std.mem.sliceAsBytes(pos), std.mem.sliceAsBytes(slot), std.mem.sliceAsBytes(hi) }, &self.dev) |bytes, *p| p.* = try self.rig.input(bytes);
+        self.placed = null;
+        if (f.pages > 0) try self.place(a, rng, kc, vc);
+        self.scratch = if (f.prompt) 0 else try self.rig.scratch(WA.scratchBytes(self.win(), n));
+        self.out = try self.rig.output(n * f.h * f.d * 2);
+        self.fns = try self.kernels();
+        self.half = try a.alloc(f64, self.count());
+        return true;
+    }
+
+    fn cell(self: *Rows, x: []u16, r: usize, key: usize, kh: usize) []u16 {
+        const w = self.call.at(r);
+        return x[(self.call.cacheRow(w.base, key) * self.f.hk + kh) * self.f.d ..][0..self.f.d];
+    }
+
+    /// NaN in q and a key; +inf in a later row's value; +-inf in a column; +inf at float64 weight e^-200 (row 4).
+    fn plant(self: *Rows, q: []u16, kc: []u16, vc: []u16) void {
+        const f = self.f;
+        const n = self.call.rows;
+        const nan = bfr.bits(std.math.nan(f32));
+        const inf = bfr.bits(std.math.inf(f32));
+        q[3] = nan; // row 0, head 0
+        self.cell(vc, 1, self.call.at(1).p, 1 % f.hk)[7] = inf;
+        if (n > 2) {
+            const p = self.call.at(2).p;
+            self.cell(vc, 2, p, 2 % f.hk)[11] = inf;
+            if (p > self.call.first(p)) self.cell(vc, 2, p - 1, 2 % f.hk)[11] = bfr.bits(-std.math.inf(f32));
+        }
+        if (n > 3) self.cell(kc, 3, self.call.at(3).p, 3 % f.hk)[0] = nan;
+        if (n > 4) {
+            const r = 4;
+            const kh = 4 % f.hk;
+            const w = self.call.at(r);
+            const grp = f.h / f.hk;
+            for (0..grp) |hh| @memset(q[(r * f.h + kh * grp + hh) * f.d ..][0..f.d], bfr.bits(0.625));
+            for (self.call.first(w.p)..w.last + 1) |key| {
+                const k = self.cell(kc, r, key, kh);
+                @memset(k, bfr.bits(if (key == w.p) 0.625 else -0.625));
+                if (key != w.p) self.cell(vc, r, key, kh)[21] = inf;
+            }
+        }
+    }
+
+    /// Gate 4: every key alike (each weight 1); values mirrored over the keys every row sees, 0 elsewhere.
+    fn stress(self: *Rows, rng: std.Random, kc: []u16, vc: []u16) !void {
+        const a = self.arena.allocator();
+        const f = self.f;
+        const kv = f.hk * f.d;
+        for (1..kc.len / kv) |i| @memcpy(kc[i * kv ..][0..kv], kc[0..kv]); // the rows after the first take its keys
+        @memset(vc, 0);
+        const n = self.call.rows;
+        const lo = self.call.first(self.call.at(n - 1).p);
+        const hi = self.call.at(0).last;
+        const col = try a.alloc(f32, hi + 1 - lo);
+        for (0..f.hk) |kh| for (0..f.d) |e| {
+            mirrored(rng, col);
+            for (col, lo..) |y, k| self.cell(vc, 0, k, kh)[e] = bfr.bits(y);
+        };
+    }
+
+    pub fn run(self: *Rows) !void {
+        const n = self.call.rows;
+        const w = self.win();
+        if (self.f.prompt) {
+            try WA.promptWith(&self.fns, self.rig.s, self.dev[0], self.dev[1], self.dev[2], self.out, self.call.p0, n, w, if (self.f.image) self.dev[5] else null);
+        } else try WA.decodeWith(&self.fns, self.rig.s, self.dev[0], self.dev[1], self.dev[2], self.out, self.dev[3], self.dev[4], w, self.scratch, n);
+        try self.rig.s.synchronize();
+    }
+
+    pub fn count(self: *Rows) usize {
+        return self.call.rows * self.f.h * self.f.d;
+    }
+
+    /// Every output in its float64 range (gates 1 and 3); at gate 1 some, not all, of float64's outputs non-finite.
+    pub fn check(self: *Rows, at: g.Gate) !?[]const u8 {
+        if (self.placed) |why_| return why_;
+        const a = self.arena.allocator();
+        const out = try a.alloc(u16, self.count());
+        @memcpy(std.mem.sliceAsBytes(out), try self.rig.outputBytes());
+        var st: ar.Stats = .{};
+        if (try wc.verify(self.rig.gpu.gpa, self.call, out, &st, &self.msg)) |why_| return why_;
+        if (at == .nonfinite and (st.nonfinite == 0 or st.nonfinite == out.len)) return try std.fmt.bufPrint(&self.msg, "the planted values make {d} of {d} reference outputs non-finite: no proof", .{ st.nonfinite, out.len });
+        return null;
+    }
+
+    pub fn reference(self: *Rows, want: []f64, mag: []f64) !void {
+        try wc.reference(self.rig.gpu.gpa, self.call, want, self.half);
+        for (mag, want) |*m, w| m.* = @abs(w);
+    }
+
+    /// The range's half width, then the output's own rounding at its far end.
+    pub fn bounds(self: *Rows, want: []const f64, _: []const f64, allow: []f64) !void {
+        for (allow, want, self.half) |*l, w, h| l.* = h + 0x1p-8 * (@abs(w) + h) + 0x1p-133;
+    }
+
+    /// Gate 4's sums in an accumulator and order: every weight is 1, so o is V's column sum over l's count of ones.
+    pub fn simulate(self: *Rows, acc: c.Accum, order: g.Order, out: []f64) !void {
+        const a = self.arena.allocator();
+        const call = self.call;
+        const d = call.d;
+        const grp = call.h / call.hk;
+        for (0..call.rows) |r| {
+            const w = call.at(r);
+            const lo = call.first(w.p);
+            const n = w.last + 1 - lo;
+            const terms = try a.alloc(f64, n);
+            const ones = try a.alloc(f64, n);
+            @memset(ones, 1);
+            const l = rows.sumIn(acc, order, ones);
+            for (0..call.hk) |kh| for (0..d) |e| {
+                for (terms, lo..) |*t, key| t.* = bfr.value(call.vc[(call.cacheRow(w.base, key) * call.hk + kh) * d + e]);
+                const o = rows.sumIn(acc, order, terms) / l;
+                for (0..grp) |hh| out[(r * call.h + kh * grp + hh) * d + e] = o;
+            };
+        }
+    }
+};
+
+/// Gate 4's values: odd integers, every other one times 64 (bf16-exact), the second half cancelling the first.
+fn mirrored(rng: std.Random, out: []f32) void {
+    const h = out.len / 2;
+    for (0..h) |i| {
+        const v: f32 = @floatFromInt((1 + 2 * rng.uintLessThan(u32, 128)) * @as(u32, if (i % 2 == 1) 64 else 1));
+        out[i] = v;
+        out[h + i] = (if (i < 8) @as(f32, 1) else 0) - v;
+    }
+    if (out.len % 2 == 1) out[out.len - 1] = 0;
+}
+
+test "every control names a kernel of contract_controls.cu, or runs the served bf16-P kernel" {
+    for (cfgs) |f| if (f.ctl != .none) {
+        try std.testing.expect(symbol(f.ctl) != null or f.ctl == .p16 or f.pages > 0);
+        try std.testing.expect(std.mem.startsWith(u8, f.name, "control: "));
+    };
+}
+
+test {
+    _ = wc;
+    _ = @import("window_rows_bufs_test.zig");
+}
+
+test "wide branch registrations cover every admitted GQA ratio and prompt mode" {
+    const extra = comptime @import("window_rows_shapes.zig").cases(Cfg);
+    for ([_]usize{ 256, 512 }) |d| for (1..17) |ratio_| for (0..3) |mode| {
+        var count: usize = 0;
+        for (extra) |f| if (f.d == d and f.h / f.hk == ratio_ and f.prompt == (mode != 0) and f.p32 == (mode == 2)) {
+            count += 1;
+            try std.testing.expectEqual(@as(usize, 17), f.served[0].rows);
+            try std.testing.expectEqual(f.h, f.served[0].n);
+        };
+        try std.testing.expectEqual(@as(usize, 1), count);
+    };
+}
+
+/// Row i: a prompt row at at + i as Call.at reads it (#1316: no modulo of an empty prefix); decode as before.
+fn position(prompt: bool, stress: bool, k: usize, at: usize, n: usize, i: usize) usize {
+    if (prompt) return at + i;
+    if (stress or i == n - 1) return at -| 1;
+    return if (i % 4 == 0) i % @min(40, k) else (i * 7919) % k;
+}
+
+test "window_rows fixture positions: prompts with an empty or a long prefix, decode rows unchanged" {
+    for (0..8) |i| try std.testing.expectEqual(i, position(true, false, 0, 0, 8, i));
+    for (0..8) |i| try std.testing.expectEqual(300 + i, position(true, false, 300, 300, 8, i));
+    try std.testing.expectEqual(@as(usize, 299), position(false, false, 300, 300, 8, 7));
+    try std.testing.expectEqual(@as(usize, 4), position(false, false, 300, 300, 8, 4));
+    try std.testing.expectEqual((5 * 7919) % 300, position(false, false, 300, 300, 8, 5));
+    try std.testing.expectEqual(@as(usize, 299), position(false, true, 300, 300, 8, 2));
+}

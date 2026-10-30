@@ -19,6 +19,11 @@ pub fn capabilities(a: Allocator) cli.Engines {
     return .{ .version = @import("build_options").version, .chip = if (native.families.len > 0) native.chip(a) else null, .backends = native.backends, .families = native.families };
 }
 
+/// ``capabilities --json``'s NVML P2P summary when the backend has one (CUDA, two or more GPUs); else null.
+pub fn p2p(a: Allocator) ?[]const u8 {
+    return if (@hasDecl(native, "p2p")) native.p2p(a) else null;
+}
+
 /// What the open /health names: this release, the built-in backend and the GPU a serve with ``args`` opens.
 pub fn identity(a: Allocator, args: cli.Args) build_identity.Identity {
     return build_identity.of(native, a, @import("build_options").version, args.device);
@@ -26,6 +31,13 @@ pub fn identity(a: Allocator, args: cli.Args) build_identity.Identity {
 
 /// The engine for the checkpoint in ``dir``, or null with ``problem`` set.
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, dir: []const u8, model_type: []const u8, args: cli.Args, problem: *[]const u8) !?Opened {
+    if (args.idle_unload > 0) {
+        const world = if (std.c.getenv("TF_GLM_WORLD")) |value| std.mem.span(value) else null;
+        if (@import("idle_unload_policy.zig").refusal(native.backends, model_type, args.idle_unload, world)) |why| {
+            problem.* = why;
+            return null;
+        }
+    }
     if (args.record != null and !@hasDecl(native, "records")) {
         problem.* = "--record writes rows from the CUDA engine only so far: serve without --record";
         return null;

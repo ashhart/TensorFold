@@ -1,0 +1,8 @@
+TF_MEMORY {"schema":1,"pid":2866,"rank":1,"phase":"load_begin","reset":true,"monotonic_ns":480764895273613,"scope":"process_owned_cuda_buffers","usage":{"device":0,"host":0,"peak":0,"host_peak":0,"allocs":0}}
+info: checkpoint digest: 0.0 GiB read in 0.1 s, 33/33 cached files
+info: RoCE all-gather: 2 HCA(s), shards up to 4096 KiB by RDMA writes
+TF_MEMORY {"schema":1,"pid":2866,"rank":1,"phase":"load_end","reset":false,"monotonic_ns":481093321745634,"scope":"process_owned_cuda_buffers","usage":{"device":100578814420,"host":16804480,"peak":100578814436,"host_peak":16804480,"allocs":1178}}
+info: rank 1: rank 0 ended; leaving
+TF_MEMORY {"schema":1,"pid":2866,"rank":1,"phase":"cleanup_begin","reset":false,"monotonic_ns":481142643694804,"scope":"process_owned_cuda_buffers","usage":{"device":100578814420,"host":16820864,"peak":102362199508,"host_peak":16820864,"allocs":1178}}
+TF_MEMORY {"schema":1,"pid":2866,"rank":1,"phase":"cleanup_end","reset":false,"monotonic_ns":481144315423928,"scope":"process_owned_cuda_buffers","usage":{"device":0,"host":20480,"peak":102362199508,"host_peak":16820864,"allocs":0}}
+exit 0

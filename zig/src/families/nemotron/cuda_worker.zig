@@ -126,7 +126,7 @@ pub fn serve(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: 
     try k.loadModelopt(ctx);
     try k.loadLatent();
     if (c.ck) try k.loadCk(ctx);
-    var g = try cuda.tp_group.Group.open(c.rank, c.world);
+    var g = try cuda.tp_group.Group.open(ctx.d, c.rank, c.world);
     defer g.close();
     try latent.agree(gpa, io, c, &g, ctx.d, stream, dir);
     var content: ?*identity.Content = try identity.Content.start(gpa, io, dir, c.held != null); // compared at ready

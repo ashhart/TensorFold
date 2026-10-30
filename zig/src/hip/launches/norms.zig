@@ -35,6 +35,40 @@ pub fn tf_rms(l: *const Launcher, x: C, weight: CF, y: P, kind: c_int, rows: c_i
     try l.go(l.rms[tri(kind)], dim(rows, 1, 1), dim(256, 1, 1), 0, s, &a);
 }
 
+/// act.hip's AddRmsIn: what the residual adds, y in the activation type, fp32 y, or the MoE's rows to sum.
+pub const AddRmsIn = extern struct {
+    y: u64,
+    mode: c_int,
+    wts: u64 = 0,
+    shared: u64 = 0,
+    slots: c_int = 0,
+};
+
+/// tf_add (or tf_add_wide, or tf_nemo_combine and tf_add), then tf_rms over rows wider than 1024: a block a row.
+pub fn tf_add_rms(
+    l: *const Launcher,
+    x: P,
+    in: AddRmsIn,
+    weight: CF,
+    normed: P,
+    kind: c_int,
+    rows: c_int,
+    width: c_int,
+    eps: f32,
+    s: S,
+) Error!void {
+    if (width <= 1024 or width > 8192 or rows < 1 or (kind != 1 and kind != 2)) return invalid("add rms");
+    if (in.mode < 0 or in.mode > 2 or (in.mode == 2 and (in.slots < 1 or in.wts == 0))) return invalid("add rms");
+    var a: Args = .{};
+    try a.add(ad(x));
+    try a.add(in);
+    try a.add(ad(weight));
+    try a.add(ad(normed));
+    try a.add(width);
+    try a.add(eps);
+    try l.go(l.add_rms[@intCast(kind - 1)], dim(rows, 1, 1), dim(1024, 1, 1), 0, s, &a);
+}
+
 /// Two sets of fp32 rows of `width` (at most 1024), each with its own weight, normed in one launch.
 pub fn tf_rms2(l: *const Launcher, x0: CF, w0: CF, y0: F, x1: CF, w1: CF, y1: F, rows: c_int, width: c_int, eps: f32, s: S) Error!void {
     if (width > 1024) return invalid("rms2");

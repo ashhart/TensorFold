@@ -119,7 +119,7 @@ test "a leader whose peer leaves after the image broadcast is enqueued drains be
     const plan = try shared.media.Plan.init(a, 12, &.{.{ .at = 2, .gh = 4, .gw = 6 }}, .{});
     var q: prompt.Seq = undefined;
     q.rank_id = 1;
-    q.media = .{ .image = try shared.media.Media.allocate(plan, encoder(&d, stream)), .prep = .{ .d = &d, .handle = null }, .pool = .{ .d = &d, .handle = null } };
+    q.media = .{ .image = try shared.media.Media.allocate(plan, encoder(&d, stream)), .prep = .{ .d = &d, .handle = null }, .pool = .{ .d = &d, .handle = null }, .prep_paged = .{ .d = &d, .handle = null }, .pool_paged = .{ .d = &d, .handle = null } };
     try std.testing.expectError(error.RankDisconnected, media.send(&s, &q));
     try std.testing.expect(!Fake.pending);
     q.media.?.deinit();
@@ -140,6 +140,8 @@ test "a follower whose image broadcast fails after it is enqueued keeps the feat
     v.encoder = encoder(&d, stream);
     v.prep = .{ .d = &d, .handle = null };
     v.pool = .{ .d = &d, .handle = null };
+    v.prep_paged = .{ .d = &d, .handle = null };
+    v.pool_paged = .{ .d = &d, .handle = null };
     engine.image_factory = &v;
     var pair: [2]c_int = undefined;
     var s = try session(&engine, 1, &pair);

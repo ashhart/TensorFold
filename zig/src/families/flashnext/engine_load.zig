@@ -48,12 +48,14 @@ pub fn loadConfigured(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_di
     try load_admission.check(gpa, io, model_dir);
     const memory = @import("flashnext_memory");
     const weights = try memory.weightBytes(@import("core").checkpoint_host, gpa, io, model_dir);
-    const inventory = try memory.weights_plan.read(@import("core").checkpoint_host.Checkpoint, @import("core").quant.mlx, gpa, io, model_dir);
+    var inventory = try memory.weights_plan.read(@import("core").checkpoint_host.Checkpoint, @import("core").quant.mlx, gpa, io, model_dir);
+    const placement = try @import("fsr_layout.zig").of(inventory, window);
+    inventory.raw = placement.raw;
     const home = if (platform.c.getenv("HOME")) |v| std.mem.span(v) else "";
     const route = try @import("pack_route.zig").plan(gpa, io, model_dir, dump_dir, home);
     defer route.deinit(gpa);
     const paired = speed_up != null or platform.c.getenv("TF_FLASHNEXT_TP") != null;
-    const requested = try std.math.add(u64, window.startup_extra, if (paired) fz.Tp2.startupBytes() else 0);
+    const requested = try std.math.add(u64, try std.math.add(u64, window.startup_extra, placement.extra), if (paired) fz.Tp2.startupBytes() else 0);
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const device = try mtl.Device.init();
@@ -76,6 +78,8 @@ pub fn loadConfigured(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_di
         }
         return err;
     };
+    if (placement.pool) |p| std.log.info("flash next FSR plan: {d} expert slots, {d} stored bytes/slot, {d} pool bytes, {d} metadata bytes, {d} unused tail bytes; steady {d} bytes, ceiling {d}; uncached pread", .{ p.slots, p.stride, p.slabs, p.metadata + placement.extra, p.unused, startup.steady, load_limit });
+    if (window.ple_on_ssd) std.log.info("flash next FSR plan: PLE rows on SSD, bounded staging charge {d} bytes; uncached pread", .{placement.ple.?});
     // Pack construction has no engine buffers or numerical pipelines live beside its host work.
     const built_dir = if (route.needs_build) try pack_cache.ensure(gpa, io, model_dir, route.root.?, route.identity, PackBuilder{}) else null;
     defer if (built_dir) |dir| gpa.free(dir);
@@ -86,7 +90,7 @@ pub fn loadConfigured(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_di
     e.copy = true;
     e.copy_min = 3;
     e.copy_long = 6;
-    e.segments = true;
+    e.segments = window.ssd_experts == null and !window.ple_on_ssd and window.fsr_trace == null;
     e.mark_taps = true;
     e.pair_min = tp_settings.pairMin(if (platform.c.getenv("FZ_PAIR_MIN")) |v| std.mem.span(v) else null, PAIR_MIN); // rank 1 takes rank 0's
     e.call_log = platform.c.getenv("FZ_CALL_LOG") != null;
@@ -98,6 +102,8 @@ pub fn loadConfigured(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_di
     e.peer_budget = 0;
     e.peer_held = 0;
     e.identity_hash = 0;
+    e.tree = null;
+    e.gate = null;
     e.arena_state = std.heap.ArenaAllocator.init(gpa);
     errdefer e.arena_state.deinit();
     const arena = e.arena_state.allocator();
@@ -132,9 +138,13 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
     r.xnew = true;
     r.dense = true;
     r.hc_up = true;
-    r.event = try r.ownResource(try device.sharedEvent());
+    r.event = try r.ownResource(try device.event());
     if (dump_dir) |d| try r.compile(d) else try r.compileChecked();
     r.sel = try Select.init(r, MAXR);
+    if (r.tp == null and !std.mem.eql(u8, std.mem.span(platform.c.getenv("FZ_ATTN2") orelse @as([*:0]const u8, "on")), "off")) { // two heads a threadgroup, checked
+        r.attn2 = try @import("attn2.zig").init(r, "q4_attn_parts#[24, 256]");
+        r.attn2_mtp = try @import("attn2.zig").init(r, "mtp:q4_attn_parts#[24, 256]");
+    }
     r.lane_new = platform.c.getenv("FZ_LANE") != null; // core lane and fz_gdn on the target (the recorded bits)
     if (platform.c.getenv("FZ_GDN")) |v| {
         r.gdn_pipe = try fz.gdn_step.compile(r, false);
@@ -162,6 +172,13 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
     var ple_values: config.PleRef = undefined;
     var attention_scale: f64 = undefined;
     var cfg = try config.Config.read(arena, io, model_dir); // read once: the reference values and the widths
+    r.ngram = @import("index.zig").ngramSpelling(index.object.get("weight_map").?.object);
+    if (r.window.ssd_experts != null or r.window.ple_on_ssd or r.window.fsr_trace != null) {
+        var widths = try @import("widths.zig").Widths.init(arena, &cfg);
+        defer widths.deinit();
+        const direct = try @import("engine_widths.zig").read(&cfg, &widths, r.ngram);
+        r.fsr = try @import("fsr_runtime.zig").Runtime.init(r, @import("index.zig").mtpRoot(index.object.get("weight_map").?.object), direct.ple, e.identity_hash);
+    }
     if (dump_dir) |d| {
         const ref_file = try r.mapFile(try std.fmt.allocPrintSentinel(arena, "{s}/ref.json", .{d}, 0));
 
@@ -212,7 +229,7 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
         }
         for (expert_projs, 0..) |proj, j| {
             for ([_][]const u8{ "weight", "scales", "biases" }, 0..) |suffix, k| {
-                L.ex[j * 3 + k] = try r.loadf("language_model.model.layers.{d}.mlp.{s}.{s}", .{ i, proj, suffix });
+                L.ex[j * 3 + k] = if (try @import("fsr_storage.zig").expert(r, j, k)) |buffer| buffer else try r.loadf("language_model.model.layers.{d}.mlp.{s}.{s}", .{ i, proj, suffix });
             }
         }
         if (r.xpack) try r.repack(&L.ex);
@@ -243,9 +260,13 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
     }
     r.ngram = @import("index.zig").ngramSpelling(index.object.get("weight_map").?.object);
     for (0..GROUPS) |g| {
-        m.ple.tables[3 * g + 0] = try r.group(16 * g, 16, "weight");
-        m.ple.tables[3 * g + 1] = try r.group(16 * g, 16, "scales");
-        m.ple.tables[3 * g + 2] = try r.group(16 * g, 16, "biases");
+        if (r.fsr != null and r.fsr.?.ple != null) {
+            for (0..3) |k| m.ple.tables[3 * g + k] = r.fsr.?.ple.?.buffers[k];
+        } else {
+            m.ple.tables[3 * g + 0] = try r.group(16 * g, 16, "weight");
+            m.ple.tables[3 * g + 1] = try r.group(16 * g, 16, "scales");
+            m.ple.tables[3 * g + 2] = try r.group(16 * g, 16, "biases");
+        }
     }
     m.ple.scale = try fz.ple_scale.of(r, index.object.get("weight_map").?.object);
     const B = struct {
@@ -297,13 +318,15 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
         .vocab = try i32Buf(r, &.{VOCAB}),
     };
     {
-        const ids_n = try fz.draftCount((try r.entry("mtp.draft_ids")).len);
+        const ids_all = try fz.draftCount((try r.entry("mtp.draft_ids")).len);
+        const keep = if (platform.c.getenv("FZ_DRAFT_N")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else ids_all; // dev
+        const ids_n = @max(64, @min(ids_all, keep) / 64 * 64); // FZ_DRAFT_N: the head scores the first ids only
         const ids = try r.load("mtp.draft_ids");
         const mtp_root = @import("index.zig").mtpRoot(index.object.get("weight_map").?.object);
         var ex: [18]Buf = undefined;
         for (expert_projs, 0..) |proj, j| {
             for ([_][]const u8{ "weight", "scales", "biases" }, 0..) |suffix, k| {
-                ex[j * 3 + k] = try r.loadf("{s}.layers.0.mlp.{s}.{s}", .{ mtp_root, proj, suffix });
+                ex[j * 3 + k] = if (try @import("fsr_storage.zig").expert(r, j, k)) |buffer| buffer else try r.loadf("{s}.layers.0.mlp.{s}.{s}", .{ mtp_root, proj, suffix });
             }
         }
         if (r.xpack) try r.repack(&ex);
@@ -377,6 +400,32 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
         m,
         @import("index.zig").mtpRoot(index.object.get("weight_map").?.object),
     );
+    if (r.fsr != null and platform.c.getenv("FZ_GX") != null) return error.FsrGroupedOverrideUnsupported;
+    if (r.tp == null) if (platform.c.getenv("FZ_GX")) |v| { // dev: windows from this many rows on the grouped experts
+        r.gx = try @import("gx.zig").init(r, try std.fmt.parseInt(usize, std.mem.span(v), 10));
+        std.log.info("flash next: grouped experts from {d} rows", .{r.gx.?.min_rows});
+    };
+    if (platform.c.getenv("FZ_SKIP")) |v| r.skip = try std.fmt.parseInt(u32, std.mem.span(v), 10); // dev: knock-outs by Run.class bit
+    // GPU-gated lanes at this probability product: 0.4 without tensor units (FZ_GATE=tau sets it, FZ_GATE=off none)
+    const gate_tau: ?[]const u8 = if (platform.c.getenv("FZ_GATE")) |v| std.mem.span(v) else if (!r.device.tensorUnits()) "0.4" else null;
+    if (r.tp == null) if (gate_tau) |v| if (!std.mem.eql(u8, v, "off")) {
+        const tau = try std.fmt.parseFloat(f32, v);
+        const width = if (platform.c.getenv("FZ_GATE_ROWS")) |w| try std.fmt.parseInt(usize, std.mem.span(w), 10) else @import("gate.zig").WMAX; // dev
+        e.gate = try @import("gate.zig").init(r, tau, m.mtp.ids_n, width);
+        std.log.info("flash next: gated lanes, up to {d} rows while the drafts' probability stays >= {d}", .{ width, tau });
+    };
+    if (r.tp == null) if (platform.c.getenv("FZ_TREE")) |v| { // dev: a,b (the branch from FZ_FEED) or a,k,sib (head siblings)
+        var it = std.mem.tokenizeScalar(u8, std.mem.span(v), ',');
+        const a = try std.fmt.parseInt(usize, it.next() orelse "0", 10);
+        const b = try std.fmt.parseInt(usize, it.next() orelse "0", 10);
+        const sib: usize = if (it.next()) |w| (if (std.mem.eql(u8, w, "sib")) b else return error.TreeShape) else 0;
+        const feed: ?[]const u8 = if (platform.c.getenv("FZ_FEED")) |f| blk: {
+            const file = try r.mapFile(std.mem.span(f));
+            break :blk file.bytes[0..file.size];
+        } else null;
+        e.tree = try @import("tree.zig").init(r, a, if (sib > 0) a * sib else b, feed, sib);
+        if (sib > 0) std.log.info("flash next: tree rounds, a head chain of {d} and {d} head siblings a depth", .{ a, sib }) else std.log.info("flash next: tree rounds, a head chain of {d} and a branch of {d}", .{ a, b });
+    };
     return e;
 }
 

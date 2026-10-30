@@ -1,10 +1,8 @@
 //! An image's bytes to Gemma 4's tower inputs, as transformers' Gemma4ImageProcessorPil makes them (the 12B: merged).
 const std = @import("std");
-const picture = @import("../../core/picture/picture.zig");
 
-/// The shared decoder's refusals, and sizes or budgets the processor cannot take.
-pub const Error = picture.Error || error{ ImageTooSmall, ImageTooLarge, TooFewTokens };
-pub const decoderProblem = picture.decoderProblem;
+/// Sizes or budgets the processor cannot take.
+pub const SizeError = error{ ImageTooSmall, ImageTooLarge, TooFewTokens };
 
 /// The processor's constants: patch side, the pooling kernel, and the soft-token budgets it accepts.
 pub const patch = 16;
@@ -26,7 +24,7 @@ pub const Layout = enum { patches, merged };
 pub const Prepared = struct { pixels: []f32, gh: u32, gw: u32, tokens: u32, hash: u64 };
 
 /// get_aspect_ratio_preserving_size: the largest sides, multiples of 48, whose patches fit `max_patches`.
-pub fn targetSize(height: u32, width: u32, max_patches: u32) Error![2]u32 {
+pub fn targetSize(height: u32, width: u32, max_patches: u32) SizeError![2]u32 {
     const h: f64 = @floatFromInt(height);
     const w: f64 = @floatFromInt(width);
     const factor = @sqrt(@as(f64, @floatFromInt(max_patches * patch * patch)) / (h * w));
@@ -46,7 +44,7 @@ pub fn targetSize(height: u32, width: u32, max_patches: u32) Error![2]u32 {
 }
 
 /// The largest budget the processor takes within `max_tokens` (the server's share an image), up to the checkpoint's.
-pub fn budget(max_tokens: u32) Error!u32 {
+pub fn budget(max_tokens: u32) SizeError!u32 {
     var best: ?u32 = null;
     for (budgets) |b| if (b <= @min(max_tokens, max_budget)) {
         best = b;
@@ -54,34 +52,43 @@ pub fn budget(max_tokens: u32) Error!u32 {
     return best orelse error.TooFewTokens;
 }
 
-/// Bytes to patches (core's picture decoder, Pillow's bicubic resize, [0, 1]); the hash covers the bytes and the grid.
-pub fn prepare(io: std.Io, gpa: std.mem.Allocator, bytes: []const u8, max_tokens: u32, layout: Layout) Error!Prepared {
-    const max_patches = try budget(max_tokens) * pool * pool;
-    var src = try picture.decode(io, gpa, bytes);
-    defer src.deinit(gpa);
-    const size = try targetSize(@intCast(src.height), @intCast(src.width), max_patches);
-    const resized = try picture.resample.resize(gpa, .pillow, .of(src.pixels, src.width, src.height), size[1], size[0]);
-    defer gpa.free(resized);
-    const gh = size[0] / patch;
-    const gw = size[1] / patch;
-    const grid = [2]u32{ gh, gw };
-    const hash = picture.identity.withGrid(picture.identity.ofBytes(if (layout == .patches) 0x6e34 else 0x6e35, bytes), grid);
-    const side: usize = if (layout == .patches) patch else side_mult;
-    const rgb: picture.Rgb = .{ .width = size[1], .height = size[0], .pixels = resized };
-    return .{ .pixels = try patches(gpa, rgb, side), .gh = gh, .gw = gw, .tokens = gh * gw / (pool * pool), .hash = hash };
-}
+/// The steps over core/picture (decoder, resize, identity) as the backend imports it: Metal by path, CUDA by name.
+pub fn For(comptime picture: type) type {
+    return struct {
+        /// The shared decoder's refusals, and sizes or budgets the processor cannot take.
+        pub const Error = picture.Error || SizeError;
+        pub const decoderProblem = picture.decoderProblem;
 
-/// convert_image_to_patches after np_rescale at `side` px (48: patches_merge's order): pixels in row order, RGB.
-fn patches(gpa: std.mem.Allocator, src: picture.Rgb, side: usize) Error![]f32 {
-    const gh = src.height / side;
-    const gw = src.width / side;
-    const width = 3 * side * side;
-    const out = try gpa.alloc(f32, gh * gw * width);
-    for (0..gh) |py| for (0..gw) |px| for (0..side) |y| for (0..side) |x| for (0..3) |c| {
-        const v = src.pixels[((py * side + y) * src.width + px * side + x) * 3 + c];
-        out[(py * gw + px) * width + (y * side + x) * 3 + c] = @floatCast(@as(f64, @floatFromInt(v)) * (1.0 / 255.0));
+        /// Bytes to patches (the decoder, Pillow's bicubic resize, [0, 1]); the hash covers the bytes and the grid.
+        pub fn prepare(io: std.Io, gpa: std.mem.Allocator, bytes: []const u8, max_tokens: u32, layout: Layout) Error!Prepared {
+            const max_patches = try budget(max_tokens) * pool * pool;
+            var src = try picture.decode(io, gpa, bytes);
+            defer src.deinit(gpa);
+            const size = try targetSize(@intCast(src.height), @intCast(src.width), max_patches);
+            const resized = try picture.resample.resize(gpa, .pillow, .of(src.pixels, src.width, src.height), size[1], size[0]);
+            defer gpa.free(resized);
+            const gh = size[0] / patch;
+            const gw = size[1] / patch;
+            const grid = [2]u32{ gh, gw };
+            const hash = picture.identity.withGrid(picture.identity.ofBytes(if (layout == .patches) 0x6e34 else 0x6e35, bytes), grid);
+            const side: usize = if (layout == .patches) patch else side_mult;
+            const rgb: picture.Rgb = .{ .width = size[1], .height = size[0], .pixels = resized };
+            return .{ .pixels = try patches(gpa, rgb, side), .gh = gh, .gw = gw, .tokens = gh * gw / (pool * pool), .hash = hash };
+        }
+
+        /// convert_image_to_patches after np_rescale at `side` px (48: patches_merge's order): row order, RGB.
+        fn patches(gpa: std.mem.Allocator, src: picture.Rgb, side: usize) Error![]f32 {
+            const gh = src.height / side;
+            const gw = src.width / side;
+            const width = 3 * side * side;
+            const out = try gpa.alloc(f32, gh * gw * width);
+            for (0..gh) |py| for (0..gw) |px| for (0..side) |y| for (0..side) |x| for (0..3) |c| {
+                const v = src.pixels[((py * side + y) * src.width + px * side + x) * 3 + c];
+                out[(py * gw + px) * width + (y * side + x) * 3 + c] = @floatCast(@as(f64, @floatFromInt(v)) * (1.0 / 255.0));
+            };
+            return out;
+        }
     };
-    return out;
 }
 
 test "target sizes as the processor sizes the fixtures" {

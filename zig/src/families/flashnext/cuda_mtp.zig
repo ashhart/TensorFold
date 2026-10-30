@@ -27,14 +27,16 @@ const HcW = wt.HcW;
 
 pub const Sampling = lanes.sampling.Sampling;
 
-/// Drafts a verify window can hold beside its pending token.
-pub const max_chain: usize = max_rows - 1;
+/// Drafts an MTP chain holds at most beside its pending token.
+pub const max_chain: usize = 15;
 /// Preserve the existing recipe unless an explicit depth is selected.
 pub const default_depth: usize = 6;
 /// The live recipe's --mtp-confidence (Python's CONFIDENCE default is 0.7).
 pub const default_confidence: f64 = 0.6;
 /// A verify window's rows at most: the pending token and a chain, or a copied continuation.
-pub const max_rows: usize = 16;
+pub const max_rows: usize = 32;
+/// A drafting round's rows at most: a shared verify's (TF_FLASHNEXT_WINDOW_ROWS lowers it; 0: each alone).
+pub const round_rows: usize = 64;
 /// qmm.split_for(2560, 2560): fc_embedding and fc_hidden sum K in four slices, in order.
 pub const fc_sk: usize = 4;
 /// Head rows one launch takes at most (a prompt's rows go through in pieces).
@@ -130,6 +132,22 @@ pub fn drawRow(gpa: std.mem.Allocator, row: []const u16, ids: ?[]const u32, posi
     return @intCast(try lanes.sampling.choose(gpa, vals, keys, position, s));
 }
 
+/// Whether a stream's rule draws its drafts (a temperature above zero) rather than taking each row's best column.
+pub fn isSampled(sm: ?Sampling) bool {
+    return if (sm) |s| s.temperature > 0 else false;
+}
+
+/// A draft drawn from a downloaded score row (column j is token ids[j]) and its probability under the row's lse.
+pub fn drawPick(gpa: std.mem.Allocator, row: []const u16, ids: []const u32, lse: f32, position: u64, sm: ?Sampling) !Pick {
+    const tok = try drawRow(gpa, row, ids, position, sm);
+    const col = std.sort.binarySearch(u32, ids, tok, struct {
+        fn order(t: u32, x: u32) std.math.Order {
+            return std.math.order(t, x);
+        }
+    }.order) orelse return .{ .token = tok, .prob = 0 };
+    return .{ .token = tok, .prob = @exp(@as(f64, promote(row[col])) - @as(f64, lse)) };
+}
+
 // ---- the head's weights --------------------------------------------------------------------------------------------
 
 pub const Head = struct {
@@ -178,6 +196,7 @@ pub const Head = struct {
             const pack_fn = try pack_mod.function(wt.pack_symbol);
             h.layer = try load.loadLayerAt(gpa, driver, stream, &store, pack_fn, "language_model.mtp.layers.0", false, false);
         }
+        store.dropStaging(); // the head's experts are on the device
         errdefer h.layer.free(gpa);
         const ids = try draftIds(gpa);
         defer gpa.free(ids);
@@ -285,6 +304,28 @@ test "a keyed draw over the top-k columns is the draw over every column" {
     try std.testing.expectEqual(@as(u32, @intCast(argmaxRow(&row))), try drawRow(gpa, &row, null, 0, null));
 }
 
+test "a drawn pick is the row's keyed draw with its probability under the row's log-sum-exp" {
+    const gpa = std.testing.allocator;
+    var row: [300]u16 = undefined;
+    var prng = std.Random.DefaultPrng.init(7);
+    for (&row) |*v| v.* = @as(u16, 0x3f00) + prng.random().int(u8);
+    var ids: [300]u32 = undefined;
+    for (&ids, 0..) |*t, i| t.* = @intCast(3 * i + 1); // a sorted map of columns to tokens, as the draft head's
+    var sum: f64 = 0;
+    for (row) |b| sum += @exp(@as(f64, promote(b)));
+    const lse: f32 = @floatCast(@log(sum));
+    for (0..32) |position| {
+        const s: Sampling = .{ .seed = 19, .temperature = 1.0, .top_k = 20, .top_p = 0.95 };
+        const got = try drawPick(gpa, &row, &ids, lse, position, s);
+        try std.testing.expectEqual(try drawRow(gpa, &row, &ids, position, s), got.token);
+        const col = (got.token - 1) / 3;
+        try std.testing.expectEqual(@exp(@as(f64, promote(row[col])) - @as(f64, lse)), got.prob);
+    }
+    const best = try drawPick(gpa, &row, &ids, lse, 0, null);
+    try std.testing.expectEqual(@as(u32, @intCast(3 * argmaxRow(&row) + 1)), best.token);
+    try std.testing.expect(best.prob > 0 and best.prob <= 1);
+}
+
 test "a masked row draws only allowed tokens, greedy the best of them" {
     const gpa = std.testing.allocator;
     var prng = std.Random.DefaultPrng.init(5);
@@ -308,6 +349,8 @@ test "a masked row draws only allowed tokens, greedy the best of them" {
 
 test "draft chains fit one verify window while the default stays six" {
     try std.testing.expectEqual(@as(usize, 16), max_chain + 1);
+    try std.testing.expectEqual(@as(usize, 32), max_rows);
+    try std.testing.expect(max_chain < max_rows and max_rows <= round_rows);
     try std.testing.expectEqual(@as(usize, 6), default_depth);
     try std.testing.expect(default_depth <= max_chain);
 }

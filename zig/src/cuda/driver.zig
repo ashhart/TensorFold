@@ -4,7 +4,7 @@ const std = @import("std");
 const platform = @import("sys");
 const abi = @import("abi.zig");
 
-pub const Error = error{ CopySourceLimit, StageBusy, StageUnprepared, UnownedCaptureSource, OutOfMemory, DriverUnavailable, MissingSymbol, CudaFailed, OutOfDeviceMemory, NotReady, NotFound, Invalid };
+pub const Error = error{ CopySourceLimit, StageBusy, StageUnprepared, UnownedCaptureSource, OutOfMemory, DriverUnavailable, MissingSymbol, CudaFailed, CudaContextLost, GraphNotPermitted, OutOfDeviceMemory, NotReady, NotFound, Invalid };
 
 pub const Driver = struct {
     lib: platform.DynLib,
@@ -47,12 +47,21 @@ pub const Driver = struct {
     pub fn check(self: *const Driver, res: abi.Result, what: []const u8) Error!void {
         if (res == abi.success) return;
         if (res == abi.error_not_ready) return error.NotReady;
+        _ = self.result(res) catch {}; // publish a sticky fault before logging or caller cleanup
         std.log.err("{s}: {s} ({d}) {s}{s}", .{ what, self.errorName(res), res, self.errorText(res), shutdownNote(res) });
+        return errorOf(res);
+    }
+
+    /// Classifies a driver result and publishes sticky execution faults for the calling thread's context.
+    pub fn result(self: *const Driver, res: abi.Result) Error!void {
+        if (res == abi.success) return;
+        @import("context_health.zig").observe(self, @import("copy_source.zig").current(), res);
         return errorOf(res);
     }
 
     /// The error a failed call returns (`check` without its log line, for callers that log more).
     pub fn errorOf(res: abi.Result) Error {
+        if (@import("context_health.zig").sticky(res)) return error.CudaContextLost;
         return switch (res) {
             2 => error.OutOfDeviceMemory,
             abi.error_not_found => error.NotFound,
@@ -139,6 +148,7 @@ pub fn knownName(res: abi.Result) ?[]const u8 {
         715 => "CUDA_ERROR_ILLEGAL_INSTRUCTION",
         716 => "CUDA_ERROR_MISALIGNED_ADDRESS",
         719 => "CUDA_ERROR_LAUNCH_FAILED",
+        800 => "CUDA_ERROR_NOT_PERMITTED",
         999 => "CUDA_ERROR_UNKNOWN",
         else => null,
     };

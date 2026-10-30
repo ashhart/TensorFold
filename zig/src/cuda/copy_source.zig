@@ -566,6 +566,7 @@ fn reap(d: *const Driver) void {
         const p = n.data.pinned;
         const result = p.query.?(p.event.?);
         if (result == 0) releaseTracked(n) else {
+            @import("context_health.zig").observe(d, n.context, result);
             lock();
             if (result != abi.error_not_ready) n.failed = true;
             n.busy = false;

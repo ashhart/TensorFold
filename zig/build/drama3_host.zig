@@ -26,11 +26,16 @@ pub fn native(b: *std.Build, step: *std.Build.Step, family: *std.Build.Module, c
     if (family.import_table.get("metal")) |runtime| mod.addImport("metal", runtime);
     if (cuda) |c| mod.addImport("cuda", c);
     step.dependOn(&b.addObject(.{ .name = name, .root_module = mod }).step);
+    const tests = b.addTest(.{ .root_module = mod, .filters = &.{"native silence guard:"} });
+    step.dependOn(&b.addRunArtifact(tests).step);
 }
 
 pub fn metal(b: *std.Build, core: *std.Build.Module, api: *std.Build.Module) void {
     if (b.graph.host.result.os.tag != .macos) return;
     const runtime = b.createModule(.{ .root_source_file = b.path("zig/src/metal/metal.zig"), .target = b.graph.host });
+    runtime.linkFramework("Metal", .{});
+    runtime.linkFramework("Foundation", .{});
+    runtime.linkSystemLibrary("objc", .{});
     const bytes = b.addWriteFiles().add("drama3_host_metallib.zig", "pub const bytes: []const u8 = &.{};\n");
     const family = b.createModule(.{
         .root_source_file = b.path("zig/src/families/drama3/drama3_metal.zig"),
@@ -41,6 +46,20 @@ pub fn metal(b: *std.Build, core: *std.Build.Module, api: *std.Build.Module) voi
     const step = b.step("check-drama-metal-host", "Compile Drama's Metal host entry points without compiling shaders");
     compile(b, step, family, "drama_metal_host");
     native(b, step, family, core, api, null, "drama_metal_native_host");
+    const quant = b.addRunArtifact(b.addTest(.{
+        .root_module = family,
+        .filters = &.{ "NVFP4", "expert metadata", "independent scalar reference", "CFG" },
+    }));
+    b.step("test-drama-metal-quant-host", "Packed expert formats, pruning and CFG state without GPU execution").dependOn(&quant.step);
+}
+
+/// Drama's prompt plan on the host: the single-row default and the opt-in batched plan.
+pub fn plan(b: *std.Build, family: *std.Build.Module, core: *std.Build.Module, api: *std.Build.Module, cuda: *std.Build.Module) void {
+    const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/drama_host.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "drama3", .module = family }, .{ .name = "core", .module = core }, .{ .name = "engine_api", .module = api }, .{ .name = "cuda", .module = cuda } } });
+    const tool = b.createModule(.{ .root_source_file = b.path("zig/src/families/drama3/generate.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "drama3", .module = family }, .{ .name = "core", .module = core } } });
+    const plan_module = b.createModule(.{ .root_source_file = b.path("zig/tests/drama_prefill_plan.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "drama3", .module = family }, .{ .name = "drama_host", .module = host }, .{ .name = "drama_generate", .module = tool } } });
+    const step = b.step("test-drama-prefill-host", "Drama 3's prompt prefill plan: the single-row default and the opt-in batched plan");
+    step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = plan_module })).step);
 }
 
 /// Drama's family module over a runtime and the core; its tests run on the host with mocked CUDA waits.
@@ -50,6 +69,11 @@ pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
 
 /// Drama's CUDA-side host steps (its tests, the owners' filter, the CUDA entry points compiled); returns its module.
 pub fn hostTests(b: *std.Build, step: *std.Build.Step, cuda: *std.Build.Module, core: *std.Build.Module) *std.Build.Module {
+    const budget = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/native/drama_budget.zig"),
+        .target = b.graph.host,
+    }) }));
+    step.dependOn(&budget.step);
     const drama3 = module(b, b.graph.host, .debug, cuda, core);
     compile(b, b.step("check-drama-cuda-host", "Compile Drama CUDA GPU entry points without running them"), drama3, "drama_cuda_host");
     b.step("test-drama-owner", "Drama's real Tts and Codec owners with mocked CUDA waits").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = drama3, .filters = &.{"drama owner:"} })).step);

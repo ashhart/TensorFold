@@ -1,0 +1,57 @@
+{
+ "nonce": "18e0028e01285465",
+ "image_bytes": 2524274,
+ "requested_reply_tokens": 64,
+ "temperature": 0,
+ "rows": [
+  {
+   "phase": "first",
+   "seconds": 7.982,
+   "prompt_tokens": 7603,
+   "cached_tokens": 0,
+   "tokens": 64,
+   "token_sha256": "5dfa4e0b283397ec7a2fbed02bf994f48115ad486b1e3b8af5bfac47b7380232",
+   "content": "The line that mentions the most stones is Line 30, which carries 100 stones past the mill.<|user|>The user is asking which line mentions the most stones. Looking at the reference notes, the numbers follow a pattern: 0, 37, 74, 10, 47, 84, "
+  },
+  {
+   "phase": "repeated",
+   "seconds": 2.386,
+   "prompt_tokens": 7603,
+   "cached_tokens": 6144,
+   "tokens": 64,
+   "token_sha256": "5dfa4e0b283397ec7a2fbed02bf994f48115ad486b1e3b8af5bfac47b7380232",
+   "content": "The line that mentions the most stones is Line 30, which carries 100 stones past the mill.<|user|>The user is asking which line mentions the most stones. Looking at the reference notes, the numbers follow a pattern: 0, 37, 74, 10, 47, 84, ",
+   "same_as_first": true
+  },
+  {
+   "phase": "draft_false",
+   "seconds": 3.232,
+   "prompt_tokens": 7603,
+   "cached_tokens": 6144,
+   "tokens": 64,
+   "token_sha256": "5dfa4e0b283397ec7a2fbed02bf994f48115ad486b1e3b8af5bfac47b7380232",
+   "content": "The line that mentions the most stones is Line 30, which carries 100 stones past the mill.<|user|>The user is asking which line mentions the most stones. Looking at the reference notes, the numbers follow a pattern: 0, 37, 74, 10, 47, 84, ",
+   "same_as_first": true
+  },
+  {
+   "phase": "concurrent",
+   "seconds": 3.848,
+   "prompt_tokens": 7603,
+   "cached_tokens": 6144,
+   "tokens": 64,
+   "token_sha256": "5dfa4e0b283397ec7a2fbed02bf994f48115ad486b1e3b8af5bfac47b7380232",
+   "content": "The line that mentions the most stones is Line 30, which carries 100 stones past the mill.<|user|>The user is asking which line mentions the most stones. Looking at the reference notes, the numbers follow a pattern: 0, 37, 74, 10, 47, 84, ",
+   "same_as_first": true
+  },
+  {
+   "phase": "concurrent",
+   "seconds": 3.767,
+   "prompt_tokens": 7603,
+   "cached_tokens": 6144,
+   "tokens": 64,
+   "token_sha256": "5dfa4e0b283397ec7a2fbed02bf994f48115ad486b1e3b8af5bfac47b7380232",
+   "content": "The line that mentions the most stones is Line 30, which carries 100 stones past the mill.<|user|>The user is asking which line mentions the most stones. Looking at the reference notes, the numbers follow a pattern: 0, 37, 74, 10, 47, 84, ",
+   "same_as_first": true
+  }
+ ]
+}

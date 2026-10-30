@@ -8,6 +8,8 @@ const engine = @import("cuda_engine.zig");
 const branch = 4;
 const edge_weight = 0.6;
 const scale = 1.5;
+/// A sampled stream's candidates carry the draw's own Gumbel noise at this weight (the 27B engine's draft_tree).
+const noise_weight = 0.7;
 const default_nodes = 15;
 const lp_top = 20;
 const lp_words = 3 + 2 * lp_top;
@@ -20,7 +22,17 @@ pub const Candidates = struct {
     rank: usize,
     predecessor: []const u16, // (vocab, rank) bf16
     successor: []const u16,
+    // a sampled stream's rule and its first draft's position: row r's candidates scored as the target's draw at r
+    sampling: ?lanes.Sampling = null,
+    position: u64 = 0,
 };
+
+/// A candidate's score as the target's draw sees it: its logit at the stream's temperature plus the draw's noise.
+fn drawn(c: Candidates, r: usize, token: u32, logit: f64) f64 {
+    const s = c.sampling orelse return logit;
+    const u = @min(lanes.gpu_rule.uniform24(s.seed, @intCast(c.position + r), token), @as(f32, @bitCast(@as(u32, 0x3F7FFFFF))));
+    return logit / @max(s.temperature, 1e-6) + noise_weight * -@log(-@log(@as(f64, u)));
+}
 
 /// A grown tree's nodes at most: 0 when the drafter drafts chains and lane trees (TF_NO_TREES, TF_DRAFT_NODES=0).
 pub fn nodes() usize {
@@ -76,7 +88,7 @@ fn choice(c: Candidates, r: usize, pred: u32, rank: usize) u32 {
     for (0..c.topk) |j| {
         var edge: f32 = 0;
         for (0..c.rank) |k| edge += bf32(c.predecessor[pred * c.rank + k]) * bf32(hp[k]) * bf32(c.successor[w[2 + j] * c.rank + k]);
-        scores[j] = @as(f32, @bitCast(w[2 + lp_top + j])) + edge;
+        scores[j] = @floatCast(drawn(c, r, w[2 + j], @as(f32, @bitCast(w[2 + lp_top + j])) + edge));
     }
     var taken: [lp_top]bool = @splat(false);
     var pick: usize = 0;
@@ -121,7 +133,7 @@ fn chancesAfter(c: Candidates, r: usize, pred: u32, out: *[lp_top]f64) void {
     for (0..c.topk) |j| {
         var edge: f64 = 0;
         for (0..c.rank) |k| edge += bf16(c.predecessor[pred * c.rank + k]) * bf16(hp[k]) * bf16(c.successor[w[2 + j] * c.rank + k]);
-        out[j] = (@as(f64, @as(f32, @bitCast(w[2 + lp_top + j]))) + edge_weight * edge) / scale;
+        out[j] = drawn(c, r, w[2 + j], @as(f64, @as(f32, @bitCast(w[2 + lp_top + j]))) + edge_weight * edge) / scale;
         most = @max(most, out[j]);
     }
     var total: f64 = 0;

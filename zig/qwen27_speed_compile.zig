@@ -16,3 +16,13 @@ export fn qwen27SpeedServedCompile(init: *std.process.Init) u8 {
     @import("tests/qwen27/speed_served.zig").main(init.*) catch return 1;
     return 0;
 }
+
+export fn qwen27DraftRuntimeCompile(init: *std.process.Init) u8 {
+    @import("tests/qwen27/dflash_runtime.zig").main(init.*) catch return 1;
+    return 0;
+}
+
+export fn qwen27WidthsCompile(init: *std.process.Init) u8 {
+    @import("tests/qwen27/lanes_check.zig").main(init.*) catch return 1;
+    return 0;
+}

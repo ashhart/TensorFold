@@ -356,3 +356,235 @@ template <bool MAP>
 
 template [[host_name("tf_sample_full")]] [[kernel]] decltype(tf_sample_full<false>) tf_sample_full<false>;
 template [[host_name("tf_sample_full_ids")]] [[kernel]] decltype(tf_sample_full<true>) tf_sample_full<true>;
+
+// tf_sample_full's token for top_k 1 to KMAX from the row's top_k alone: tf_topk_slices, then tf_topk_race (MAP: ids)
+constant constexpr uint PG = 32;   // slices a row (tf_topk_race merges them one a lane)
+constant constexpr uint PT = 512;  // threads a slice
+constant constexpr uint PSG = PT / 32;
+constant constexpr uint EMAX = 16; // values a thread: rows up to PG * PT * EMAX = 262,144 wide
+constant constexpr uint KMAX = 64; // the widest top_k drawn this way
+
+// (ka, ia) before (kb, ib) in (value desc, id asc); END comes after every token.
+inline bool first_of(uint ka, uint ia, uint kb, uint ib) { return ka > kb || (ka == kb && ia < ib); }
+
+// Slice g of row y: its top_k sorted into CK / CI [(y * PG + g) * KMAX ..], none past its kc-th best lane best
+[[max_total_threads_per_threadgroup(512)]]
+[[kernel]] void tf_topk_slices(
+  const device bfloat* L [[buffer(0)]],
+  const device float* cfg [[buffer(3)]],
+  const device uint* kcap [[buffer(4)]],
+  constant uint& V [[buffer(7)]],
+  device uint* CK [[buffer(8)]],
+  device uint* CI [[buffer(9)]],
+  uint sg [[simdgroup_index_in_threadgroup]],
+  uint lane [[thread_index_in_simdgroup]],
+  uint3 tpos [[thread_position_in_threadgroup]],
+  uint3 gpos [[threadgroup_position_in_grid]]) {
+  threadgroup uint lbk[PSG * 32]; // each simdgroup's lane bests, sorted
+  threadgroup uint lbi[PSG * 32];
+  threadgroup uint cck[EMAX * KMAX]; // the tokens at or before the bound
+  threadgroup uint cci[EMAX * KMAX];
+  threadgroup atomic_uint count;
+  threadgroup uint bound[2];
+  const uint t = tpos.x, g = gpos.x, row = gpos.y;
+  const uint kc = kcap[row];
+  const uint span = (V + PG - 1) / PG;
+  const uint b = min(g * span, V), e = min(b + span, V);
+  const float inv_t = cfg[4 * row];
+  const size_t base = size_t(row) * V;
+  bfloat raw[EMAX];
+  for (uint q = 0; q < EMAX; q++) raw[q] = L[base + min(b + t + PT * q, e - 1u)]; // every load in flight at once
+  uint keys[EMAX];
+  uint sk = END.key, si = END.id;
+  for (uint q = 0; q < EMAX; q++) {
+    const uint i = b + t + PT * q;
+    keys[q] = i < e ? tf_key(float(raw[q]) * inv_t) : END.key;
+    if (i < e && first_of(keys[q], i, sk, si)) { sk = keys[q]; si = i; }
+  }
+  for (uint size = 2; size <= 32; size <<= 1) { // the simdgroup's lane bests sorted across lanes (bitonic)
+    for (uint stride = size >> 1; stride > 0; stride >>= 1) {
+      const uint ok = simd_shuffle_xor(sk, ushort(stride)), oi = simd_shuffle_xor(si, ushort(stride));
+      const bool mine = first_of(sk, si, ok, oi);
+      if ((((lane & stride) == 0) == ((lane & size) == 0)) != mine) { sk = ok; si = oi; }
+    }
+  }
+  lbk[sg * 32 + lane] = sk;
+  lbi[sg * 32 + lane] = si;
+  if (t == 0) atomic_store_explicit(&count, 0u, memory_order_relaxed);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (sg == 0) { // the kc-th best lane best: lane l < PSG walks simdgroup l's sorted list, its next one loaded ahead
+    uint p = 0u;
+    uint hk = lane < PSG ? lbk[lane * 32] : END.key, hi = lane < PSG ? lbi[lane * 32] : END.id;
+    uint nk = lane < PSG ? lbk[lane * 32 + 1] : END.key, ni = lane < PSG ? lbi[lane * 32 + 1] : END.id;
+    for (uint n = 0; n < kc; n++) {
+      const uint mk = simd_max(hi == END.id ? END.key : hk);
+      const uint mi = simd_min(hi != END.id && hk == mk ? hi : END.id);
+      if (n + 1 == kc && lane == 0) { bound[0] = mk; bound[1] = mi; }
+      if (hi == mi && hi != END.id) {
+        p++;
+        hk = nk;
+        hi = ni;
+        nk = p + 1 < 32u ? lbk[lane * 32 + p + 1] : END.key;
+        ni = p + 1 < 32u ? lbi[lane * 32 + p + 1] : END.id;
+      }
+    }
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  const uint tk = bound[0], ti = bound[1];
+  for (uint q = 0; q < EMAX; q++) {
+    const uint i = b + t + PT * q;
+    if (i < e && !first_of(tk, ti, keys[q], i)) {
+      const uint at = atomic_fetch_add_explicit(&count, 1u, memory_order_relaxed);
+      cck[at] = keys[q];
+      cci[at] = i;
+    }
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  const uint nc = atomic_load_explicit(&count, memory_order_relaxed);
+  const size_t out = (size_t(row) * PG + g) * KMAX;
+  for (uint x = t; x < nc; x += PT) { // a candidate's place among them
+    const uint k = cck[x], i = cci[x];
+    uint rank = 0u;
+    for (uint y = 0; y < nc; y++) rank += first_of(cck[y], cci[y], k, i) ? 1u : 0u;
+    if (rank < kc) { CK[out + rank] = k; CI[out + rank] = i; }
+  }
+  for (uint j = min(kc, nc) + t; j < kc; j += PT) { CK[out + j] = END.key; CI[out + j] = END.id; }
+}
+
+// Row y from its slices' sorted top_k: the row's top_k, then tf_sample_full's mass sum, nucleus cut, min_p and race.
+template <bool MAP>
+[[max_total_threads_per_threadgroup(1024)]]
+[[kernel]] void tf_topk_race(
+  const device bfloat* L [[buffer(0)]],
+  const device uint* seeds [[buffer(1)]],
+  const device uint* positions [[buffer(2)]],
+  const device float* cfg [[buffer(3)]],
+  const device uint* kcap [[buffer(4)]],
+  device uint* TOK [[buffer(5)]],
+  const device uint* IDS [[buffer(6)]],
+  constant uint& V [[buffer(7)]],
+  const device uint* CK [[buffer(8)]],
+  const device uint* CI [[buffer(9)]],
+  uint sg [[simdgroup_index_in_threadgroup]],
+  uint lane [[thread_index_in_simdgroup]],
+  uint3 tpos [[thread_position_in_threadgroup]],
+  uint3 gpos [[threadgroup_position_in_grid]]) {
+  threadgroup float fsh[NSG];
+  threadgroup float fsh2[NSG];
+  threadgroup uint ush[NSG];
+  threadgroup uint ush2[NSG];
+  threadgroup uint st[4];
+  threadgroup uint ck[KMAX]; // the row's top_k, sorted
+  threadgroup uint ci[KMAX];
+  threadgroup uint sk[PG * KMAX]; // the slices' lists (then mass's per-thread sums)
+  threadgroup uint si[PG * KMAX];
+  const Shared s = {fsh, fsh2, ush, ush2, nullptr, st, ck, ci, nullptr};
+  const uint row = gpos.x, t = tpos.x;
+  const Row r = {L, size_t(row) * V, V, cfg[4 * row], t, lane, sg};
+  const float top_p = cfg[4 * row + 1];
+  const float min_log = cfg[4 * row + 3];
+  const uint kc = kcap[row];
+  const ulong seed = ulong(seeds[2 * row]) | (ulong(seeds[2 * row + 1]) << 32);
+  const uint position = positions[row];
+  for (uint x = t; x < PG * kc; x += TG) {
+    const uint at = (x / kc) * KMAX + x % kc;
+    const size_t from = size_t(row) * PG * KMAX + at;
+    sk[at] = CK[from];
+    si[at] = CI[from];
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (sg == 0) { // the row's top_k: lane l walks slice l's sorted list, its next one loaded ahead
+    uint p = 0u;
+    uint hk = sk[lane * KMAX], hi = si[lane * KMAX];
+    uint nk = kc > 1u ? sk[lane * KMAX + 1] : END.key, ni = kc > 1u ? si[lane * KMAX + 1] : END.id;
+    for (uint n = 0; n < kc; n++) {
+      const uint mk = simd_max(hi == END.id ? END.key : hk);
+      const uint mi = simd_min(hi != END.id && hk == mk ? hi : END.id);
+      if (hi == mi && hi != END.id) {
+        ck[n] = hk;
+        ci[n] = hi;
+        p++;
+        hk = nk;
+        hi = ni;
+        nk = p + 1 < kc ? sk[lane * KMAX + p + 1] : END.key;
+        ni = p + 1 < kc ? si[lane * KMAX + p + 1] : END.id;
+      }
+    }
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  const float m = tf_val(ck[0]); // row_max: the row's largest value
+  const float lo = max(m + min_log, m - NEVER);
+  uint n_race = kc; // the nucleus's members: all of the top_k unless the sorted sum reaches top_p inside them
+  if (top_p > 0.0f && top_p < 1.0f) {
+    // mass(r, m, 1, -inf, before all, top, END): each id residue's least member sums it in id order, then group_sum
+    threadgroup float* part = reinterpret_cast<threadgroup float*>(sk);
+    part[t] = 0.0f;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (t < kc) {
+      const uint cls = ci[t] % TG;
+      bool least = true;
+      for (uint j = 0; j < kc; j++) if (ci[j] % TG == cls && ci[j] < ci[t]) least = false;
+      if (least) {
+        float x = 0.0f;
+        uint prev = 0u;
+        bool any = false;
+        while (true) {
+          uint i = END.id;
+          for (uint j = 0; j < kc; j++) {
+            const uint c = ci[j];
+            if (c % TG == cls && (!any || c > prev) && c < i) i = c;
+          }
+          if (i == END.id) break;
+          prev = i;
+          any = true;
+          const float norm1 = 1.0f, lo1 = -INFINITY;
+          const float v = r.v(i);
+          if (!(v >= lo1)) continue;
+          x += metal::exp(v - m) / norm1;
+        }
+        part[cls] = x;
+      }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const float norm = group_sum(part[t], r, s);
+    if (t == 0) { // nucleus's sequential sum over the sorted members
+      float cum = 0.0f;
+      uint keep = 0u;
+      for (uint j = 0; j < kc; j++) {
+        cum += metal::exp(tf_val(s.ck[j]) - m) / norm;
+        if (cum >= top_p) { keep = j + 1; break; }
+      }
+      s.st[0] = keep;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (s.st[0] > 0u) n_race = s.st[0];
+  }
+  // race's body over the kept members
+  float bs = -INFINITY;
+  uint bk = 0u, bi = 0xFFFFFFFFu;
+  for (uint j = t; j < n_race; j += TG) {
+    const uint i = ci[j];
+    const float v = r.v(i);
+    if (!(v >= lo)) continue;
+    const uint k = tf_key(v);
+    const float score = v - metal::log(-metal::log(race_uniform(seed, position, MAP ? IDS[i] : i)));
+    if (beats(score, k, i, bs, bk, bi)) { bs = score; bk = k; bi = i; }
+  }
+  for (ushort off = 16; off > 0; off >>= 1) {
+    const float os = simd_shuffle_xor(bs, off);
+    const uint ok = simd_shuffle_xor(bk, off), oi = simd_shuffle_xor(bi, off);
+    if (beats(os, ok, oi, bs, bk, bi)) { bs = os; bk = ok; bi = oi; }
+  }
+  if (lane == 0) { s.fsh[sg] = bs; s.ush[sg] = bk; s.ush2[sg] = bi; }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (t == 0) {
+    for (uint g = 0; g < NSG; g++) {
+      if (beats(s.fsh[g], s.ush[g], s.ush2[g], bs, bk, bi)) { bs = s.fsh[g]; bk = s.ush[g]; bi = s.ush2[g]; }
+    }
+    const uint pick = min(bi, V - 1u);
+    TOK[row] = MAP ? IDS[pick] : pick;
+  }
+}
+
+template [[host_name("tf_topk_race")]] [[kernel]] decltype(tf_topk_race<false>) tf_topk_race<false>;
+template [[host_name("tf_topk_race_ids")]] [[kernel]] decltype(tf_topk_race<true>) tf_topk_race<true>;

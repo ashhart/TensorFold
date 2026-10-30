@@ -14,7 +14,8 @@ const R = state.chunk_rows;
 const private = mtl.ResourceOptions.private | mtl.ResourceOptions.untracked;
 const shared = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
-const Q = @import("weights.zig").Mlx;
+const weights = @import("weights.zig");
+const Q = weights.Mlx;
 
 pub const Scratch = struct {
     ids: mtl.Buffer,
@@ -142,8 +143,7 @@ pub fn run(m: *Model, s: *Scratch, c: *state.Cache, ids: []const u32, images: []
         cur = 1 - cur;
     }
     // the head on the last row only (the lane kernel's one-row bits), soft-capped
-    const head = try m.projections.get(m.gpa, m.device, w.head);
-    try head.encode(e, .{ .buf = s.normed[cur], .off = (rows - 1) * geo.hidden * 2 }, .{ .buf = w.head.w }, .{ .buf = w.head.sb }, .{ .buf = s.logits }, 1);
+    try projectHead(m.gpa, m.device, &m.projections, e, w.head, s.normed[cur], s.logits, rows);
     e.setPipeline(ks.softcap);
     bind(e, &.{s.logits}, 0);
     e.setValue(cfg.softcap, 1);
@@ -156,6 +156,18 @@ pub fn run(m: *Model, s: *Scratch, c: *state.Cache, ids: []const u32, images: []
         return error.GpuFailed;
     }
     c.len += rows;
+}
+
+/// The prompt head reads only the last normalized row, on either projection path.
+pub fn projectHead(gpa: std.mem.Allocator, device: mtl.Device, ps: *weights.Projections, e: mtl.ComputeEncoder, l: weights.Linear, x: mtl.Buffer, y: mtl.Buffer, rows: usize) !void {
+    if (rows == 0) return error.BadChunk;
+    const last: Ref = .{ .buf = x, .off = (rows - 1) * l.k * 2 };
+    if (l.raw) |raw| {
+        try weights.projectRow(ps, device, e, raw, l, last, y, 1);
+    } else {
+        const head = try ps.get(gpa, device, l);
+        try head.encode(e, last, .{ .buf = l.w }, .{ .buf = l.sb }, .{ .buf = y }, 1);
+    }
 }
 
 /// Which of a layer's dispatches to encode: a chunk takes them all; the bench times the stages apart.

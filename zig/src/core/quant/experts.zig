@@ -72,24 +72,30 @@ fn pair(t: anytype, stack_key: []const u8, shared: []const u8, suffix: []const u
 
 /// `fused` words, scales and biases of `srcs` stacked per expert, each expert's slices side by side along N.
 fn stack(a: Allocator, srcs: []const Pair, dtype: DType) !Tensor {
-    const count = srcs[0].mine.shape[0] + 1;
+    const count = std.math.add(usize, srcs[0].mine.shape[0], 1) catch return error.UnexpectedTensor;
     const rest = srcs[0].mine.shape[2];
     var rows: usize = 0;
-    for (srcs) |s| rows += s.mine.shape[1];
+    for (srcs) |s| rows = std.math.add(usize, rows, s.mine.shape[1]) catch return error.UnexpectedTensor;
+    _ = std.math.cast(u32, rows) orelse return error.UnexpectedTensor;
     const size = dtype.size();
-    const out = try a.alloc(u8, count * rows * rest * size);
+    const values = try mlx.geometry.product(try mlx.geometry.product(count, rows), rest);
+    const out = try a.alloc(u8, try mlx.geometry.product(values, size));
     var at: usize = 0;
     for (0..count) |e| for (srcs) |s| {
         const n = s.mine.shape[1] * rest;
+        const tensor = if (e + 1 < count) s.mine else s.one;
         const src = if (e + 1 < count)
-            s.mine.bytes[e * n * s.mine.dtype.size() ..][0 .. n * s.mine.dtype.size()]
+            tensor.bytes[e * n * tensor.dtype.size() ..][0 .. n * tensor.dtype.size()]
         else
-            s.one.bytes;
-        if (s.mine.dtype == dtype) {
+            tensor.bytes;
+        if (tensor.dtype == dtype) {
             @memcpy(out[at..][0..src.len], src);
-        } else for (0..n) |i| {
-            std.mem.writeInt(u32, out[at + 4 * i ..][0..4], @bitCast(convert.load(s.mine.dtype, src, i)), .little);
-        }
+        } else try convert.widenInto(out[at..][0 .. n * size], .{
+            .dtype = tensor.dtype,
+            .rank = 1,
+            .shape = .{ n, 1, 1, 1, 1 },
+            .bytes = src,
+        });
         at += n * size;
     };
     return .{ .dtype = dtype, .rank = 3, .shape = .{ count, rows, rest, 1, 1 }, .bytes = out };
@@ -113,12 +119,10 @@ fn part(t: anytype, stack_key: []const u8, shared: []const u8, w: mlx.Width) !Pa
         .scales = try pair(t, stack_key, shared, ".scales"),
         .biases = try pair(t, stack_key, shared, ".biases"),
     };
-    const words, const scale, const bias = .{ p.words.mine, p.scales.mine, p.biases.mine };
-    if (words.dtype != .i32 or scale.rank != 3 or !std.mem.eql(usize, scale.shape[0..3], bias.shape[0..3]))
-        return refuse(stack_key, "not an MLX affine expert stack");
-    const k = scale.shape[2] * w.group;
-    if (words.shape[2] != k * w.bits / 32 or !std.mem.eql(usize, words.shape[0..2], scale.shape[0..2]))
-        return refuse(stack_key, "packed stack does not fit K, bits and group");
+    _ = mlx.geometry.shape(p.words.mine, p.scales.mine, p.biases.mine, w.bits, w.group, true) catch
+        return refuse(stack_key, "packed stack has incompatible or unrepresentable geometry");
+    _ = mlx.geometry.shape(p.words.one, p.scales.one, p.biases.one, w.bits, w.group, false) catch
+        return refuse(shared, "shared expert has incompatible or unrepresentable geometry");
     return p;
 }
 

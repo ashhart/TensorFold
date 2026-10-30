@@ -1,0 +1,41 @@
+{
+ "count": {
+  "n": 512,
+  "token_sha256": "6835af3a11c0b3e66e9cbe9d36c08fa5ea2cbb7289319a765fdd7ef5571f4840",
+  "text": "Count 1..N upward. Ambiguous length; produce a reasonable list, say 1 to 100? \"Count upward from one, one number per line.\" I'll do 1–100.</think>1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n14\n15\n16\n17\n18\n19\n20\n21\n22\n23\n24\n25\n26\n27\n28\n29\n30\n31\n32\n33\n34\n35\n36\n37\n38\n39\n40\n41\n42\n43\n44\n45\n46\n47\n48\n49\n50\n51\n52\n53\n54\n55\n56\n57\n58\n59\n60\n61\n62\n63\n64\n65\n66\n67\n68\n69\n70\n71\n72\n73\n74\n75\n76\n77\n78\n79\n80\n81\n82\n83\n84\n85\n86\n87\n88\n89\n90\n91\n92\n93\n94\n95\n96\n97\n98\n99\n100<|user|>The user wants me to count upward from one, one number per line. The previous response went from 1 to 100. Now the user seems to want me to continue or provide a similar response. Let me provide a fresh count from 1 upward, one number per line.\n\nActually, looking at the conversation, the user's last message is just the original prompt again. Let me provide the count from 1 to 100 again, or perhaps continue from where we left off. Since the instruction says \"Count upward from one,\" I should start from 1.\n\nLet me provide 1 to 100, one number per line.</think>1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n14\n15\n16\n17\n18\n19\n20\n21\n22\n23\n24\n25\n26\n27\n28\n29\n30\n31\n32\n33\n34\n35\n36\n37\n38\n39\n40\n41\n42\n43\n44\n45\n46\n47\n48\n49\n50\n51\n52\n53\n54\n55\n56\n57\n58\n59\n60\n61\n62\n63\n64\n65\n66\n67\n68\n69\n70",
+  "seconds": {
+   "drafts": 11.23,
+   "plain": 24.97
+  },
+  "drafts": {
+   "per_round": 3.3684210526315788,
+   "accepted": 0.8674698795180723
+  }
+ },
+ "prose": {
+  "n": 512,
+  "token_sha256": "d22f429e247f196fa767ef4432eecf068eb50be231f8135c48bbf5f32895e79c",
+  "text": "</think># 古代の道と現代の物流 ― 繋がる日本の動脈\n\n日本の国土を流れる「モノ」と「人」の流れは、時代を超えて驚くほど似た経路を辿ってきました。古代の道路網と現代の物流網を重ね合わせてみると、私たちの祖先が歩いた道の上を、今日、トラックやコンテナが走っているのです。\n\n## 東海道という永遠の幹線\n\n最も分かりやすい例は東海道でしょう。奈良・平安時代には、都と地方を結ぶ官道として整備され、諸国からの貢納品や使者が行き交いました。江戸時代には五街道の筆頭として参勤交代の大名行列や飛脚が往来し、現代では国道1号線、東海道新幹線、そして東名高速道路がほぼ同じ経路を通っています。\n\n京都から大阪、名古屋、浜松、静岡を経て東京へ至るこの回廊は、地形が決定づけた道です。富士山や箱根の峠、濃尾平野、伊勢湾岸といった地理的制約は千年経っても変わらず、結果として古代の旅人が通った場所に、今日も物流トラックが渋滞に巻き込まれているのです。近年の伊勢湾岸自動車道の整備も、湾岸を通る「海道」の伝統を現代に引き継いだものと言えます。\n\n## 北前船と日本海物流\n\n海の道にも同様の連続性があります。江戸時代、北前船は日本海側を南下し、北海道の昆布や鮭、大坂へは米や木材を運びました。敦賀、小浜、伏木、酒田、秋田、青森といった港町は繁栄し、その繁栄の記憶は今も町並みに残っています。\n\n現代、この日本海物流は形を変えて復権しつつあります。ロシアや韓国、中国との貿易港として敦賀港や伏木富山港が整備され、上越新",
+  "seconds": {
+   "drafts": 17.02,
+   "plain": 25.09
+  },
+  "drafts": {
+   "per_round": 1.7902097902097902,
+   "accepted": 0.6215469613259669
+  }
+ },
+ "code": {
+  "n": 512,
+  "token_sha256": "3dd2e6dd1afd23cfa107f528f70cf49a326a4faf36bf7ece3e6ee585d24ab60a",
+  "text": "Write a module with TTL LRU cache and tests.</think>```python\n\"\"\"\nttl_lru_cache.py\n\nA thread-safe LRU cache with per-entry TTL (time-to-live) expiry.\n\nFeatures\n--------\n- Fixed maximum size with least-recently-used eviction.\n- Per-entry TTL: entries expire after `ttl` seconds (default: no expiry).\n- Thread-safe via a re-entrant lock.\n- Full type hints and docstrings.\n- Self-contained unit tests (run with `python ttl_lru_cache.py`).\n\nRequires Python 3.9+ (uses `dict` ordering for LRU bookkeeping).\n\"\"\"\n\nfrom __future__ import annotations\n\nimport threading\nimport time\nimport unittest\nfrom collections import OrderedDict\nfrom typing import Callable, Hashable, Optional\n\n\nclass TTLCache:\n    \"\"\"A thread-safe LRU cache whose entries expire after a TTL.\n\n    Combines two eviction policies:\n\n    * **LRU** — when the cache exceeds ``maxsize``, the least recently\n      used (get or set) entry is evicted.\n    * **TTL** — an entry is considered expired once it has been stored\n      for longer than ``ttl`` seconds. Expired entries are purged\n      lazily on access and opportunistically on write.\n\n    Args:\n        maxsize: Maximum number of entries. Must be >= 1.\n        ttl: Default time-to-live in seconds. ``None`` means entries\n            never expire (pure LRU behaviour).\n\n    Example:\n        >>> cache = TTLCache(maxsize=2, ttl=10)\n        >>> cache.put(\"a\", 1)\n        >>> cache.get(\"a\")\n        1\n    \"\"\"\n\n    def __init__(self, maxsize: int = 128, ttl: Optional[float] = None) -> None:\n        if maxsize < 1:\n            raise ValueError(\"maxsize must be >= 1\")\n        if ttl is not None and ttl <= 0:\n            raise ValueError(\"ttl must be positive or None\")\n        self._maxsize = maxsize\n        self._ttl = ttl\n        # key -> (value, expiry_timestamp or None)\n        self._data: \"OrderedDict[Hashable, tuple[object, Optional[float]]]\" = OrderedDict()\n        self._lock = threading.RLock()\n        # Statistics\n        self._hits = 0\n        self._misses = 0\n        self._evictions = 0\n        self._expirations = ",
+  "seconds": {
+   "drafts": 12.95,
+   "plain": 25.11
+  },
+  "drafts": {
+   "per_round": 2.8444444444444446,
+   "accepted": 0.775175644028103
+  }
+ }
+}

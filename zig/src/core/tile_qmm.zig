@@ -125,6 +125,8 @@ pub const twin_rows = 32;
 pub const window_slots = 4 * twin_rows;
 /// Rows from which a dense twin call takes the MMA window kernel over the scalar twin.
 pub const window_rows = 8;
+/// Outputs from which a matrix takes that window kernel: narrower ones keep the scalar passes' threadgroups.
+pub const window_n = 4096;
 /// Window rows from which the by-expert twin (each picked expert read once) beats a threadgroup row a slot.
 pub const group_rows = 16;
 /// Columns a scalar twin threadgroup (2 simdgroups of 4) and a window threadgroup (2 simdgroups of 8, one MMA block).
@@ -168,7 +170,7 @@ pub fn encodeTwin(
 ) !void {
     const i = try width(m);
     if (rows == 0 or rows > twin_rows) return error.NoRows;
-    const window = rows >= window_rows;
+    const window = rows >= window_rows and m.n >= window_n;
     e.setPipeline(if (window) p.rows[i] else if (rows > 1) p.twin_few[i] else p.twin[i]);
     bind(e, m, .{ .k = @intCast(m.k), .n = @intCast(m.n), .r = @intCast(rows) }, x, x_off, y, y_off);
     if (window) return e.dispatchGroups(.{ .width = m.n / window_columns }, .{ .width = 64 });

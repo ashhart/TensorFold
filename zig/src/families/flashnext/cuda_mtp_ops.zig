@@ -7,6 +7,15 @@ const batch = @import("cuda_batch.zig");
 const prompt = @import("cuda_prompt.zig");
 const gdn = @import("cuda_gdn.zig");
 const mtp = @import("cuda_mtp.zig");
+const plan = @import("cuda_mtp_plan.zig");
+
+/// One group of lanes in the batched head's pass: the lanes' drafts, their rows and whether the head scores.
+const Group = struct {
+    ds: []const *Draft,
+    nexts: []const []const u32,
+    rows: []const u64,
+    scores: bool,
+};
 
 const dims = wt.dims;
 const streams = wt.streams;
@@ -30,6 +39,8 @@ const proj_bytes = mtp.proj_bytes;
 const fc_sk = mtp.fc_sk;
 const piece_rows = mtp.piece_rows;
 const pss_n = mtp.pss_n;
+/// Streams one batched head pass drafts for at most.
+pub const max_lanes: usize = 16;
 const Head = mtp.Head;
 const Draft = mtp.Draft;
 const Chain = mtp.Chain;
@@ -125,7 +136,7 @@ pub fn Ops(comptime Tri: type) type {
                 .k = &e.batch_k,
                 .s = s,
                 .m = .{ .table_w = e.table.w.ptr, .table_s = e.table.s.ptr, .table_b = e.table.b.ptr, .table_dense = e.table.dense, .layers = (&h.layer)[0..1], .mixer = h.mixer, .head = h.draft, .ngram = &e.ngram },
-                .seq = .{ .media = d.media, .conv = &.{}, .state = &.{}, .kc = (&d.kc)[0..1], .vc = (&d.vc)[0..1], .ikc = (&d.ikc)[0..1], .pooled = (&d.pooled)[0..1], .tail = d.kc, .history = &d.unused_history, .cap = d.cap, .scores = score_rows },
+                .seq = .{ .media = d.media, .conv = &.{}, .state = &.{}, .kc = (&d.kc)[0..1], .vc = (&d.vc)[0..1], .ikc = (&d.ikc)[0..1], .pooled = (&d.pooled)[0..1], .pg = d.pg, .tail = d.kc, .history = &d.unused_history, .cap = d.cap, .scores = score_rows },
                 .hooks = .{ .logits = .none },
             };
             var at: usize = 0;
@@ -199,13 +210,7 @@ pub fn Ops(comptime Tri: type) type {
             }
             const row = d.host[0..n];
             try download(o.stream(), std.mem.sliceAsBytes(row), d.dlogits.ptr);
-            const tok = try drawRow(o.e.gpa, row, h.ids, position, sm);
-            const col = std.sort.binarySearch(u32, h.ids, tok, struct {
-                fn order(t: u32, x: u32) std.math.Order {
-                    return std.math.order(t, x);
-                }
-            }.order) orelse return .{ .token = tok, .prob = 0 };
-            return .{ .token = tok, .prob = @exp(@as(f64, promote(row[col])) - @as(f64, lse)) };
+            return mtp.drawPick(o.e.gpa, row, h.ids, lse, position, sm);
         }
 
         /// Python decode.draft: absorb the kept rows, then chain up to `count` drafts, the first always kept.
@@ -228,6 +233,183 @@ pub fn Ops(comptime Tri: type) type {
             }
         }
 
+        /// forwardHead over several drafts in one pass, a lane each: every row's ops and sums as a lone forwardHead's.
+        pub fn forwardHeadMany(o: Self, ds: []const *Draft, nexts: []const []const u32, rows: []const u64, scores: bool) !void {
+            const e = o.e;
+            const n_l = ds.len;
+            if (n_l == 0) return;
+            var total: usize = 0;
+            var cap: usize = 0;
+            for (ds, nexts) |d, nx| {
+                if (nx.len == 0 or nx.len > piece_rows or d.media != null) return error.UnexpectedTensor;
+                if (d.len + nx.len > d.cap) return error.PromptTooLong;
+                total += nx.len;
+                cap = @max(cap, d.cap);
+            }
+            if (n_l > max_lanes) return error.UnexpectedTensor;
+            // the head's plan: the admitted capacity bounds the pass's rows, so the head never grows the shared scratch
+            const pl = plan.plan(e.admittedRows(), total);
+            const s = try e.reserve(pl.pass_rows);
+            // the engine's block scores, priced to the piece (the single-stream head's rule)
+            const score_rows = try e.reserveScores(cap, pl.score_rows);
+            // the lanes in groups whose rows fit the piece
+            var lane_rows: [max_lanes]usize = undefined;
+            for (nexts, 0..) |nx, i| lane_rows[i] = nx.len;
+            var group_sizes: [max_lanes]usize = undefined;
+            const n_groups = plan.groups(lane_rows[0..n_l], pl.piece, group_sizes[0..]);
+            var at: usize = 0;
+            for (group_sizes[0..n_groups]) |g| {
+                try o.headGroup(.{ .ds = ds[at..][0..g], .nexts = nexts[at..][0..g], .rows = rows[at..][0..g], .scores = scores }, s, score_rows);
+                at += g;
+            }
+        }
+
+        /// One group of lanes' rows in one pass: the head's rows beside the others', each lane's last row its own.
+        fn headGroup(o: Self, group: Group, s: *batch.Scratch, score_rows: u64) !void {
+            const e = o.e;
+            const tri = o.tri;
+            const h = o.h;
+            const ds = group.ds;
+            const nexts = group.nexts;
+            const n_l = ds.len;
+            var total: usize = 0;
+            var lane_buf: [max_lanes]batch.Lane = undefined;
+            var ids_buf: [max_lanes * piece_rows]u32 = undefined;
+            var at: usize = 0;
+            for (ds, nexts, 0..) |d, nx, i| {
+                total += nx.len;
+                lane_buf[i] = .{ .seq = .{ .media = null, .conv = &.{}, .state = &.{}, .kc = (&d.kc)[0..1], .vc = (&d.vc)[0..1], .ikc = (&d.ikc)[0..1], .pooled = (&d.pooled)[0..1], .tail = d.kc, .history = &d.unused_history, .cap = d.cap, .scores = score_rows }, .pos = d.len, .rows = nx.len };
+                @memcpy(ids_buf[at..][0..nx.len], nx);
+                at += nx.len;
+            }
+            if (total > s.cap) return error.UnexpectedTensor;
+            var p: batch.Pass(Tri) = .{
+                .gpa = e.gpa,
+                .io = e.io,
+                .stream = e.stream.*,
+                .tri = tri,
+                .k = &e.batch_k,
+                .s = s,
+                .m = .{ .table_w = e.table.w.ptr, .table_s = e.table.s.ptr, .table_b = e.table.b.ptr, .table_dense = e.table.dense, .layers = (&h.layer)[0..1], .mixer = h.mixer, .head = h.draft, .ngram = &e.ngram },
+                .seq = lane_buf[0].seq,
+                .hooks = .{ .logits = .none },
+                .lanes = lane_buf[0..n_l],
+            };
+            p.rows = total;
+            p.pos0 = 0;
+            p.pending = null;
+            try p.stage(ids_buf[0..total]);
+            if (e.table.dense) {
+                try tri.embedDense(s.ids, e.table.w.ptr, s.ple_keys, dims, streams, total);
+            } else {
+                try tri.embed(s.ids, e.table.w.ptr, e.table.s.ptr, e.table.b.ptr, s.ple_keys, dims, streams, total);
+            }
+            try tri.rmsnorm(s.ple_keys, h.norm_e.ptr, s.mixed, s.xsm, eps, wide, total, dims, dims);
+            const esk = try p.lane(s.mixed, s.xsm, h.fc_e, s.dummy, s.part, total, fc_sk);
+            try p.sumSlices(s.part, s.branch, true, total * dims, esk);
+            // each lane's rows of main-model streams, side by side (the head reads them as one block of rows)
+            at = 0;
+            for (group.rows, nexts) |r, nx| {
+                try p.copy(s.ple_nrow + at * wide * 2, r, nx.len * wide * 2);
+                at += nx.len;
+            }
+            try tri.rmsnorm(s.ple_nrow, h.norm_h.ptr, s.norm, s.gq, eps, wide, total, wide, wide);
+            const hsk = try p.lane(s.norm, s.gq, h.fc_h, s.dummy, s.part, streams * total, fc_sk);
+            try p.sumSlices(s.part, s.ple_gated, true, streams * total * dims, hsk);
+            try tri.addStreams(s.branch, s.ple_gated, s.h, total, dims, streams);
+            try p.writeback(0, total);
+            try p.readout(h.layer.attn_hc, 0, total);
+            try p.attnBlock(&h.layer, 0);
+            try tri.hcWriteback(s.h, s.h, s.pss, s.part, "*fp32", s.inj, s.dummy, "*bf16", s.dummy, "*bf16", total * dims, total, dims, streams, 4, 1, 1, p.out_slices);
+            try p.readout(h.layer.mlp_hc, 0, total);
+            try p.moeBlock(&h.layer);
+            p.pending = 0;
+            try p.writeback(0, total);
+            // each lane's last row: its d.out, and gathered to row i for the draft head (row i <= its last row)
+            at = 0;
+            for (ds, nexts, 0..) |d, nx, i| {
+                const last = at + nx.len - 1;
+                try p.copy(d.out.ptr, s.h + last * wide * 2, wide * 2);
+                if (group.scores and last != i) {
+                    try p.copy(s.h + i * wide * 2, s.h + last * wide * 2, wide * 2);
+                    try p.copy(s.pss + i * pss_n * 4, s.pss + last * pss_n * 4, pss_n * 4);
+                }
+                d.len += nx.len;
+                at += nx.len;
+            }
+            if (!group.scores) return;
+            try p.readout(h.mixer, 0, n_l);
+            const n_ids = h.ids.len;
+            _ = try p.lane(s.mixed, s.xsm, h.draft, s.head_local, s.dummy, n_l, 1);
+            for (ds, 0..) |d, i| try p.copy(d.dlogits.ptr, s.head_local + i * n_ids * 2, n_ids * 2);
+        }
+
+        /// draft over several drafts, greedy or sampled: kept rows in one pass, then one a step, each as it would alone
+        pub fn draftMany(o: Self, ds: []const *Draft, nexts: []const []const u32, rows: []const u64, counts: []const usize, positions: []const u64, sms: []const ?Sampling, confidence: f64, outs: []const *Chain) !void {
+            const h = o.h;
+            const n_l = ds.len;
+            for (ds, outs) |d, out| {
+                out.n = 0;
+                if (d.drafted > 0) {
+                    d.len -= d.drafted;
+                    d.drafted = 0;
+                }
+            }
+            try o.forwardHeadMany(ds, nexts, rows, true);
+            var act: [max_lanes]usize = undefined;
+            var n_act: usize = 0;
+            for (counts, 0..) |c, i| if (c > 0) {
+                act[n_act] = i;
+                n_act += 1;
+            };
+            var j: usize = 0;
+            var best_host: [max_lanes * 4]f32 = undefined;
+            var step_ds: [max_lanes]*Draft = undefined;
+            var step_next: [max_lanes][1]u32 = undefined;
+            var step_nexts: [max_lanes][]const u32 = undefined;
+            var step_rows: [max_lanes]u64 = undefined;
+            while (n_act > 0 and j < max_chain) : (j += 1) {
+                // every active lane's best draft (fn_row_best on its own scores), then one download of all of them
+                for (act[0..n_act], 0..) |i, r| try h.best(o.stream(), ds[i].dlogits.ptr, h.ids.len, h.ids.len, 1, ds[0].best.ptr + r * 16);
+                try download(o.stream(), std.mem.sliceAsBytes(best_host[0 .. n_act * 4]), ds[0].best.ptr);
+                var next_act: usize = 0;
+                var n_step: usize = 0;
+                for (act[0..n_act], 0..) |i, r| {
+                    const top = best_host[r * 4];
+                    const lse = best_host[r * 4 + 1];
+                    const col: usize = @intCast(@as(i32, @bitCast(best_host[r * 4 + 2])));
+                    // a sampled lane draws from its own row, as its lone pick does; a greedy one takes its best column
+                    const got: Pick = if (mtp.isSampled(sms[i])) sampled: {
+                        const row = ds[i].host[0..h.view().logical];
+                        try download(o.stream(), std.mem.sliceAsBytes(row), ds[i].dlogits.ptr);
+                        break :sampled try mtp.drawPick(o.e.gpa, row, h.ids, lse, positions[i] + j, sms[i]);
+                    } else .{ .token = h.ids[col], .prob = @exp(@as(f64, top) - @as(f64, lse)) };
+                    const out = outs[i];
+                    const low = confidence > 0 and got.prob < confidence;
+                    if (low and j > 0) continue;
+                    out.tokens[out.n] = got.token;
+                    out.probs[out.n] = got.prob;
+                    out.n += 1;
+                    if (low) continue;
+                    if (j + 1 < @min(counts[i], max_chain)) {
+                        step_ds[n_step] = ds[i];
+                        step_next[n_step] = .{got.token};
+                        step_nexts[n_step] = &step_next[n_step];
+                        step_rows[n_step] = ds[i].out.ptr;
+                        n_step += 1;
+                        act[next_act] = i;
+                        next_act += 1;
+                    }
+                }
+                if (n_step > 0) {
+                    try o.forwardHeadMany(step_ds[0..n_step], step_nexts[0..n_step], step_rows[0..n_step], true);
+                    for (step_ds[0..n_step]) |d| d.drafted += 1;
+                }
+                n_act = next_act;
+            }
+            _ = n_l;
+        }
+
         /// One forward over the window `ids` from seq.fed: each row's scores in d.logits, its streams in d.streams.
         pub fn verify(o: Self, seq: *prompt.Seq, d: *Draft, ids: []const u32) !void {
             if (o.main) |m| return m.verify(m.ptr, seq, d, ids);
@@ -245,6 +427,38 @@ pub fn Ops(comptime Tri: type) type {
             try o.e.forward(Tri, o.tri, seq, ids, .{ .logits = .all, .logits_out = d.logits.ptr, .keep = if (keeps) &d.keep else null, .streams = d.streams.ptr });
             if (keeps) try copyAsync(o.stream(), d.saved.ptr + Draft.nrow_at, o.e.batch_s.?.ple_nrow, n * wide * 2);
             d.open = keeps;
+        }
+
+        /// Several streams' windows in one forward, each left as its `verify` leaves it; `out` takes all rows' scores.
+        pub fn verifyMany(o: Self, seqs: []const *prompt.Seq, ds: []const *Draft, idss: []const []const u32, out: u64) !void {
+            if (o.main != null) return error.UnsupportedRankOperation;
+            // every window refused before any stream's state moves
+            for (seqs, idss) |seq, ids| {
+                if (ids.len == 0 or ids.len > max_rows) return error.WindowTooWide;
+                if (seq.fed + ids.len > seq.cap) return error.PromptTooLong;
+            }
+            o.e.round_graph.clear();
+            const wins = try o.e.gpa.alloc(prompt.Engine.Window, seqs.len);
+            defer o.e.gpa.free(wins);
+            for (seqs, ds, idss, wins) |seq, d, ids, *w| {
+                const n = ids.len;
+                d.settle(seq);
+                d.fed0 = seq.fed;
+                d.rows = n;
+                d.history = seq.history;
+                @memcpy(d.ids[0..n], ids);
+                const keeps = n > 1;
+                if (keeps) try copyAsync(o.stream(), d.saved.ptr + Draft.tail_at, seq.tail.ptr, ple_tail_n * wide * 2);
+                w.* = .{ .seq = seq, .ids = ids, .keep = if (keeps) &d.keep else null, .streams = d.streams.ptr, .logits = d.logits.ptr };
+            }
+            try o.e.windows(Tri, o.tri, wins, out);
+            var row0: usize = 0;
+            for (ds, idss) |d, ids| {
+                const keeps = ids.len > 1;
+                if (keeps) try copyAsync(o.stream(), d.saved.ptr + Draft.nrow_at, o.e.batch_s.?.ple_nrow + row0 * wide * 2, ids.len * wide * 2);
+                d.open = keeps;
+                row0 += ids.len;
+            }
         }
 
         /// The window's rows drawn at their keyed positions (fed0 + 1 + r), each within its `masks` row if any.

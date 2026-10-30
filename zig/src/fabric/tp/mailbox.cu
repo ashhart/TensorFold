@@ -562,3 +562,6 @@ extern "C" __global__ void __launch_bounds__(512) tp_roce(RoceArgs a) {
         }
     }
 }
+
+// The versioned multirank gather protocol leaves the two-rank kernel unchanged.
+#include "roce_device.cuh"

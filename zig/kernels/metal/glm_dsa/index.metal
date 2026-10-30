@@ -90,6 +90,60 @@ kernel void glm_index_scores(const device float* q [[buffer(0)]], const device f
   score[ulong(r) * a.score_stride + k] = s;
 }
 
+// The keys a thread scores at once: the query is read once for the block, not once a key.
+constant constexpr uint BLOCK = 2;
+constant constexpr uint THREADS = 128;
+
+// Row r's score for each of the thread's keys: the head, dimension and sum order are the row kernel's.
+kernel void glm_index_scores_block(const device float* q [[buffer(0)]], const device float* proj [[buffer(1)]],
+                                   const device bfloat* cache [[buffer(2)]], const device IndexRow* rows [[buffer(3)]],
+                                   constant IndexArgs& a [[buffer(4)]], device float* score [[buffer(5)]],
+                                   const device float* inv [[buffer(6)]], uint2 tg [[threadgroup_position_in_grid]],
+                                   uint t [[thread_index_in_threadgroup]]) {
+  threadgroup float qs[IH * ID];
+  threadgroup float ws[IH];
+  const uint r = tg.y;
+  const IndexRow row = rows[r];
+  const device float* qr = q + ulong(r) * a.q_stride;
+  for (uint i = t; i < IH * ID; i += THREADS) {
+    const uint h = i / ID, c = i % ID;
+    if (c >= IROPE) {
+      qs[i] = qr[i];
+    } else if (c < IROPE / 2) {
+      const float2 o = glm_index_rope(qr[h * ID + 2 * c], qr[h * ID + 2 * c + 1], row.pos, inv, c);
+      qs[h * ID + c] = o.x;
+      qs[h * ID + IROPE / 2 + c] = o.y;
+    }
+  }
+  if (t < IH) ws[t] = proj[ulong(r) * a.proj_stride + a.w_col + t] * a.head_scale;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  const uint kbase = tg.x * (THREADS * BLOCK) + t;
+  float d[BLOCK][IH];
+  for (uint b = 0; b < BLOCK; ++b)
+    for (uint h = 0; h < IH; ++h) d[b][h] = 0.0f;
+  float kv[BLOCK];
+  const device bfloat* kb[BLOCK];
+  uint kk[BLOCK];
+  for (uint b = 0; b < BLOCK; ++b) {
+    kk[b] = kbase + b * THREADS;
+    kb[b] = cache + (ulong(row.slot) * a.slot_keys + kk[b]) * ID;
+  }
+  for (uint i = 0; i < ID; ++i) {
+    for (uint b = 0; b < BLOCK; ++b) kv[b] = kk[b] <= row.pos ? float(kb[b][i]) : 0.0f;
+    for (uint h = 0; h < IH; ++h) {
+      const float qv = qs[h * ID + i];
+      for (uint b = 0; b < BLOCK; ++b) d[b][h] = fma(qv, kv[b], d[b][h]);
+    }
+  }
+  for (uint b = 0; b < BLOCK; ++b) {
+    const uint k = kk[b];
+    if (k > row.pos) continue;
+    float s = 0.0f;
+    for (uint h = 0; h < IH; ++h) s = fma(ws[h], max(d[b][h] * a.key_scale, 0.0f), s);
+    score[ulong(r) * a.score_stride + k] = s;
+  }
+}
+
 // fp32 as an unsigned key whose order is the floats' order.
 inline uint glm_order(float f) {
   const uint u = as_type<uint>(f);

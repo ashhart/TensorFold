@@ -31,6 +31,23 @@ pub fn residual(o: Ops, tp: ?collective.Comm, x: Tensor, y: Tensor, n: usize) Er
     try o.addWide(x, total, x, n);
 }
 
+/// `residual`, then normed = rms(x) * weight, the add and the norm in one launch where `residualRms` takes them.
+pub fn residualNorm(
+    o: Ops,
+    tp: ?collective.Comm,
+    x: Tensor,
+    y: Tensor,
+    weight: u64,
+    normed: Tensor,
+    rows: usize,
+    width: usize,
+    eps: f32,
+) Error!void {
+    if (y.kind != .f32) return o.residualRms(x, y, weight, normed, rows, width, eps);
+    const total = try sum(o, tp.?, y.ptr, rows * width);
+    try o.residualRms(x, .{ .ptr = total, .kind = .f32 }, weight, normed, rows, width, eps);
+}
+
 /// The ranks' logits slices (world, rows, width) of the activation dtype, gathered into `out`.
 pub fn gather(o: Ops, c: collective.Comm, slice: Tensor, out: u64, n: usize) Error!void {
     const dtype: collective.Dtype = if (slice.kind == .f16) .f16 else .bf16;

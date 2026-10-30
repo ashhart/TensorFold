@@ -56,6 +56,11 @@ pub fn acceptPath(gpa: Allocator, tokens: []const u32, parents: []const i32, pic
     return path.toOwnedSlice(gpa);
 }
 
+/// The target's pick at an accepted row's parent: the reply's token, never the draft's proposal.
+pub fn targetPick(picks: []const u32, parents: []const i32, row: u32) u32 {
+    return picks[@intCast(parents[@intCast(row)])];
+}
+
 pub const Tree = struct { tokens: []u32, parents: []i32 };
 
 /// The first `budget` nodes, dropping orphaned subtrees and nodes whose parents do not precede them.

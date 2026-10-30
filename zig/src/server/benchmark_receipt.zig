@@ -46,6 +46,8 @@ pub const Settings = struct {
     managed: bool,
     /// 1 or 2 when attested. A managed run is one rank. An attached run stays null until the server manifest names it.
     rank_count: ?u8 = null,
+    /// The cache format the run used (bf16 or fp8); null for an attached run, whose own format is not known.
+    kv_cache: ?[]const u8 = null,
 };
 
 const Builder = struct {
@@ -124,6 +126,7 @@ pub fn value(a: Allocator, run_id: []const u8, created_at: []const u8, model: Mo
     try st.put("temperatures", .{ .array = temps });
     try st.put("serial", .{ .bool = settings.serial });
     try st.int("context_tokens", settings.context_tokens);
+    try st.str("kv_cache", settings.kv_cache);
     try st.put("managed", .{ .bool = settings.managed });
     try st.int("rank_count", settings.rank_count orelse if (settings.managed) @as(?u8, 1) else null);
     try top.put("settings", st.value());

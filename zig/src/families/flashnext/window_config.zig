@@ -6,7 +6,11 @@ pub const Settings = struct {
     capacity: usize = trained,
     factor: f64 = 0,
     startup_extra: u64 = 0,
+    ssd_experts: ?u64 = null,
+    ple_on_ssd: bool = false,
+    fsr_trace: ?[]const u8 = null,
     pub fn validate(s: Settings, paired: bool) !void {
+        if (paired and (s.ssd_experts != null or s.ple_on_ssd or s.fsr_trace != null)) return error.FsrNeedsSingleMetalDevice;
         if (s.capacity < trained or s.capacity > maximum or s.capacity % 4 != 0) return error.ContextTooLong;
         if (s.factor != (if (s.capacity > trained) @as(f64, 4) else 0)) return error.BadRotaryPolicy;
         if (paired and s.factor > 0) return error.LongWindowPairUnsupported;

@@ -8,6 +8,7 @@ const dense = fz.dense;
 const lane_w = fz.lane_w;
 const rows_load = fz.rows_load;
 const variants = fz.variants;
+const gx_mod = @import("gx.zig");
 const gdn_step = fz.gdn_step;
 const vis_prompt = fz.vis_prompt;
 const D = fz.D;
@@ -167,22 +168,24 @@ pub const Model = struct {
         for (0..MAXR) |i| ids[i] = if (i < rows) tokens[i] else 0;
         m.pleIds(tokens);
         const cb = r.queue.commandBuffer();
-        r.enc = cb.compute(if (r.serial) .serial else .concurrent);
+        r.begin(cb, if (r.serial) .serial else .concurrent);
+        errdefer if (r.fsr != null) r.abort();
         try m.windowEncode(rows, t.ids8);
         try m.finish(cb);
         @memcpy(picks[0..rows], t.picks.b.slice(u32, rows));
     }
 
     pub fn finish(m: *Model, cb: mtl.CommandBuffer) !void {
-        m.r.enc.end();
-        cb.commit();
-        cb.wait();
-        if (cb.failure()) |msg| {
+        const final = try m.r.finishEncoding(cb);
+        final.commit();
+        final.wait();
+        if (m.r.fsr) |stream| m.gpu_seconds += try stream.commands.completed();
+        if (final.failure()) |msg| {
             std.log.err("command buffer failed: {s}", .{msg});
             return error.GpuFailed;
         }
         if (m.r.tp) |tp| if (tp.failed.load(.acquire)) return error.TpLinkFailed;
-        m.gpu_seconds += cb.gpuSeconds();
+        m.gpu_seconds += final.gpuSeconds();
     }
 
     /// The n-gram ids of the window in `ids` hashed on the GPU (the window's drafts never reach the host).
@@ -239,12 +242,15 @@ pub const Model = struct {
                 tabs[0] = t.ple_ids;
                 tabs[1] = p.starts;
                 for (0..3 * GROUPS) |j| tabs[2 + j] = p.tables[j];
+                if (r.fsr) |stream| if (try stream.tables(r, t.ple_ids, rows)) |staged| {
+                    tabs = staged;
+                };
                 var cp: [2]variants.Const = undefined;
                 try variants.callAs(r, "qa_ple_lookup@ple", rows, &tabs, &.{t.emb}, variants.width(&cp, "BITS", "GS", p.w));
                 if (p.scale) |sc| sc.apply(r.enc, t.emb, rows * D, r.serial);
                 try m.lane(t.emb, D, p.kv, "lane_qmm_bytes_grouped@ple.kv", t.kvp);
                 try r.call("q4_ple_gate@ple", &.{ t.kvp, t.h[cur], p.ks, p.qs, p.cs, t.eps }, &.{ t.gated, .{ .b = p.cin.b, .off = PLE_TAIL * WIDE * 2 } });
-                try r.call("q4_ple_conv@ple", &.{ p.cin, p.conv, t.gated, t.h[cur] }, &.{t.hout});
+                if (r.tree) |tr| try tr.pleConv(r, &.{ p.cin, p.conv, t.gated, t.h[cur] }, &.{t.hout}) else try r.call("q4_ple_conv@ple", &.{ p.cin, p.conv, t.gated, t.h[cur] }, &.{t.hout});
                 try r.call("q4_hc_norm_none#[10240]", &.{t.hout}, &.{ t.h[1 - cur], t.ssp });
             } else if (pending == .none) {
                 try r.call("q4_hc_norm_none#[10240]", &.{t.h[cur]}, &.{ t.h[1 - cur], t.ssp });
@@ -285,7 +291,9 @@ pub const Model = struct {
                 lane_w.touch(r, L.out);
                 const gins = [_]Buf{ t.p, cs_in, so_in, L.conv, L.alog, L.dt, L.norm, t.eps, t.rows };
                 const gouts = [_]Buf{ t.gout, L.cs[1 - a], L.so[1 - a] };
-                if (m.keptState()) |recs| {
+                if (r.tree) |tr| {
+                    gdn_step.stepTree(r, tr.gdn, &gins, &gouts, tr.table, 0, 48);
+                } else if (m.keptState()) |recs| {
                     const li = i - i / 4;
                     gdn_step.stepKept(r, r.gdn_kept.?, &gins, gouts[0..2], recs[1 - m.rec_slot].at(li * gdn_step.RECORD), recs[m.rec_slot].at(li * gdn_step.RECORD), r.ar, 0, 48);
                 } else if (r.gdn_pipe) |pipe| gdn_step.step(r, pipe, &gins, &gouts, 0, 48) else try r.callAs("q4_gdn@gdn", if (r.gdn_step and rows > 1) 8 else rows, &gins, &gouts);
@@ -318,16 +326,18 @@ pub const Model = struct {
                     if (!r.serial) r.enc.barrier();
                     const dense_ids = r.shapes.get("IDS_shape").?;
                     try r.shapes.put(r.arena, "IDS_shape", g.ids_shape[rows]);
-                    try r.call("q4_attn_parts#[24, 256]", &.{ t.q, L.keys, L.vals, g.keys, g.view(2 * MAXR), g.view(3 * MAXR), t.scale }, &.{ t.po, t.pm });
+                    try r.attnParts("q4_attn_parts#[24, 256]", r.attn2, &.{ t.q, L.keys, L.vals, g.keys, g.view(2 * MAXR), g.view(3 * MAXR), t.scale }, &.{ t.po, t.pm });
                     try r.shapes.put(r.arena, "IDS_shape", dense_ids);
                 } else if (r.sel != null and !r.gpu_round and r.sel.?.meta(m.pos, rows)) {
                     var sl = &r.sel.?;
                     try sl.encode(r, L, t.iq, t.eps, t.log2base, m.pos, rows);
                     const dense_ids = r.shapes.get("IDS_shape").?;
                     try r.shapes.put(r.arena, "IDS_shape", sl.ids_shape);
-                    try r.call("q4_attn_parts#[24, 256]", &.{ t.q, L.keys, L.vals, sl.keys, sl.counts, sl.sparse, t.scale }, &.{ t.po, t.pm });
+                    try r.attnParts("q4_attn_parts#[24, 256]", r.attn2, &.{ t.q, L.keys, L.vals, sl.keys, sl.counts, sl.sparse, t.scale }, &.{ t.po, t.pm });
                     try r.shapes.put(r.arena, "IDS_shape", dense_ids);
-                } else try r.call("q4_attn_parts#[24, 256]", &.{ t.q, L.keys, L.vals, t.ids81, t.nk8, t.zero8, t.scale }, &.{ t.po, t.pm });
+                } else if (r.tree) |tr| {
+                    try tr.attnParts(r, &.{ t.q, L.keys, L.vals, t.ids81, t.nk8, t.zero8, t.scale }, &.{ t.po, t.pm });
+                } else try r.attnParts("q4_attn_parts#[24, 256]", r.attn2, &.{ t.q, L.keys, L.vals, t.ids81, t.nk8, t.zero8, t.scale }, &.{ t.po, t.pm });
                 try r.call("q4_attn_merge_gate#[24, 16, 256]", &.{ t.po, t.pm, t.p }, &.{t.aout});
                 try m.lane(t.aout, 6144, L.out, "lane_qmm_bytes_grouped@att.o", t.branch);
             }
@@ -336,8 +346,11 @@ pub const Model = struct {
             r.touch(L.router);
             try m.hcProject(t.h[cur], L.mhc, "qa_hc_down@mhc", "qa_hc_up@mhc", t.inj_m);
             try r.router("q4_router_float@moe", t.mixed, L.router, t.rows, t.lg, rows);
+            if (r.fsr) |stream| try stream.prepare(r, i, t.lg, t.rows, t.pick, t.wts, rows, t.mixed, if (i + 1 < LAYERS) m.layers[i + 1].router else null, @import("fsr_runtime.zig").guarded(L.xw));
             r.tp_layer = true;
-            if (L.xw) |w| try variants.experts(r, "qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, L.ex, t.act, t.pick, t.wts, t.rows, t.ydown, w) else try r.experts("qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, L.ex, t.act, t.pick, t.wts, t.rows, t.ydown);
+            const by_expert = if (r.gx) |g| rows >= g.min_rows and r.tp == null and L.xw != null and gx_mod.applies(L.xw.?) else false;
+            if (by_expert) r.gx.?.encode(r, t.mixed, t.lg, L.ex, t.act, t.pick, t.wts, t.rows, t.ydown, rows) else if (L.xw) |w| try variants.experts(r, "qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, L.ex, t.act, t.pick, t.wts, t.rows, t.ydown, w) else try r.experts("qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, L.ex, t.act, t.pick, t.wts, t.rows, t.ydown);
+            if (r.fsr) |stream| try stream.after(r);
             r.tp_layer = false;
             if (r.tp) |tp| if (r.skip & TP_CLASS == 0) tp.exchange(r.enc, t.ydown, t.wts, t.lg, rows);
             if (r.probe) |pb| r.copyKept(t.pick, .{ .b = pb.b, .off = pb.off + i * MAXR * 10 * 4 }, rows * 10, 0, 0, 0, 1, -1);
@@ -357,12 +370,7 @@ pub const Model = struct {
             return;
         }
         try m.lane(t.mixed, D, m.head, "lane_qmm_bytes_grouped@head", t.logits);
-        r.enc.setPipeline(r.argmax_pipe);
-        r.enc.setBuffer(t.logits.b, 0, 0);
-        r.enc.setBuffer(t.picks.b, 0, 1);
-        r.enc.setBuffer(t.vocab.b, 0, 2);
-        r.enc.dispatchThreads(mtl.Size.of(1024 * rows, 1, 1), mtl.Size.of(1024, 1, 1));
-        if (!r.serial) r.enc.barrier();
+        r.argmax(.{ .b = t.logits.b }, .{ .b = t.vocab.b }, .{ .b = t.picks.b }, null, rows);
     }
 
     /// The MTP head on `rows` rows: each row's next token and the streams it follows (target or head output, row by...

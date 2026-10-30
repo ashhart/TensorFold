@@ -1,0 +1,12 @@
+Build Summary: 11/11 steps succeeded; 65/65 tests passed
+test-kernel-contract success
++- run test 46 pass (46 total) 592ms MaxRSS:9M
+|  +- compile test debug native success 3s MaxRSS:166M
++- test-gemma4-contract-host success
+|  +- run test 9 pass (9 total) 23s MaxRSS:14M
+|     +- compile test debug native success 908ms MaxRSS:224M
+|        +- WriteFile gemma4-host-empty.metallib success
++- run test 3 pass (3 total) 12ms MaxRSS:6M
+|  +- compile test debug native success 751ms MaxRSS:147M
++- run test 7 pass (7 total) 787ms MaxRSS:55M
+   +- compile test debug native success 749ms MaxRSS:147M

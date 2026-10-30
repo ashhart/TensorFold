@@ -13,12 +13,10 @@ pub const step = pages.tokens;
 pub const chunk = 1024;
 
 /// Rows from which a prompt pass synchronizes and asks its cancel after every layer (fewer: it runs through).
-pub const poll_rows = 512;
+pub const poll_rows = @import("hip_serve").prefix.poll_rows;
 
 /// Single ranks poll layer edges from poll_rows; TP ranks stop together between chunks.
-pub fn pollsLayers(world: usize, rows: usize) bool {
-    return world == 1 and rows >= poll_rows;
-}
+pub const pollsLayers = @import("hip_serve").prefix.pollsLayers;
 
 /// Where the step from `at` ends: the next multiple of `rows`, or `limit` when that comes first.
 pub fn chunkEnd(at: usize, limit: usize, rows: usize) usize {

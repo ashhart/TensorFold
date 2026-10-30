@@ -5,7 +5,7 @@ const cuda = @import("cuda");
 const lanes = @import("lanes");
 const engine = @import("cuda_engine.zig");
 const weights = @import("cuda_draft_weights.zig");
-const tree = @import("cuda_draft_tree.zig");
+pub const tree = @import("cuda_draft_tree.zig");
 const profile = @import("cuda_startup_profile.zig");
 pub const precision = @import("cuda_draft_precision.zig");
 
@@ -15,7 +15,7 @@ const dr = lanes.drafter;
 const Stream = lanes.Stream;
 
 /// Rows an absorb runs at once (the target's prompt chunks are at most this).
-const max_rows = engine.max_rows;
+const max_rows = engine.most_verify; // taps absorbed at most this many rows a call (a prompt chunk's in pieces)
 /// The logprob row's words (sample.cu's LP_WORDS) and its best-token capacity.
 const lp_words = 3 + 2 * 20;
 /// A hold's rows: the reference's 16-row blocks (dflash2.block), past the 8 the checkpoint was trained with.
@@ -40,6 +40,9 @@ pub const Ctx = struct {
     parents: [engine.most_window]i32 = undefined,
     own: [engine.most_window]f64 = undefined,
     grown: usize = 0,
+    // the stream's tokens draft_frame has read, and whether one lay outside its spans (then drafts take the whole head)
+    scanned: usize = 0,
+    wide: bool = false,
 };
 
 pub const Draft = struct {
@@ -53,6 +56,7 @@ pub const Draft = struct {
     fns: Fns,
     scratch: DeviceBuffer,
     selection_base: usize = 0,
+    drawn: struct { sampling: ?lanes.Sampling = null, position: u64 = 0 } = .{},
     segments: u64 = 0,
     pm: u64 = 0,
     pl: u64 = 0,
@@ -102,6 +106,10 @@ pub const Draft = struct {
     frame_streams: usize = 1,
     scratch_one: usize = 0,
     target_taps: usize = 0,
+    /// TF_QWEN_KV_PAGES: a stream's ring is a view of its target lane's run (null: the contexts own theirs).
+    ring_of: ?RingOf = null,
+
+    pub const RingOf = struct { ctx: *anyopaque, ring: *const fn (*anyopaque, *Stream) ?u64 };
 
     const words_at = frame.words_at;
     const hp_at = frame.hp_at;
@@ -237,8 +245,9 @@ pub const Draft = struct {
         const started = profile.now(d.io);
         const previous_times = d.startup;
         try memory.resize(d, n);
-        try d.pool.ensureTotalCapacity(d.gpa, n);
-        while (d.pool.items.len < n) d.pool.appendAssumeCapacity(try d.create());
+        const own = if (d.ring_of != null) @min(n, 1) else n; // with a pool the other streams' rings are lane runs
+        try d.pool.ensureTotalCapacity(d.gpa, own);
+        while (d.pool.items.len < own) d.pool.appendAssumeCapacity(try d.create());
         d.startup.reserve += profile.elapsed(d.io, started) - (d.startup.warmups - previous_times.warmups) - (d.startup.reserve - previous_times.reserve);
     }
 
@@ -258,6 +267,19 @@ pub const Draft = struct {
     /// proj over the x of an earlier proj or norm (nothing between writing x or xs): its group sums are in xs.
     pub fn projAgain(d: *Draft, l: cuda.qlinear.Affine4, x: u64, out: u64, rows: usize) !void {
         return d.projSums(l, x, out, rows, false);
+    }
+
+    /// proj of each of `ls` into `outs` over one x, its group sums taken once; decode() keeps each one's bits.
+    pub fn projMany(d: *Draft, ls: []const cuda.qlinear.Affine4, x: u64, outs: []const u64, rows: usize) !void {
+        const e = d.e;
+        if (rows > 16 or ls.len > cuda.qlinear.Affine4Kernels.segs_max) {
+            for (ls, outs, 0..) |l, out, i| try d.projSums(l, x, out, rows, i == 0);
+            return;
+        }
+        try e.run(e.fns.sums, .{ rows, (ls[0].k / 64 + 63) / 64, 1 }, .{ 64, 1, 1 }, .{ x, d.xs, @as(c_int, @intCast(ls[0].k)), @as(u64, 0) });
+        var many: [cuda.qlinear.Affine4Kernels.segs_max]cuda.qlinear.Affine4Kernels.Out = undefined;
+        for (ls, outs, many[0..ls.len]) |l, out, *m| m.* = .{ .q = l, .out = out };
+        try e.affine.decodeMany(e.stream, x, d.xs, many[0..ls.len], rows);
     }
 
     pub fn projSums(d: *Draft, l: cuda.qlinear.Affine4, x: u64, out: u64, rows: usize, sums: bool) !void {
@@ -326,7 +348,7 @@ pub const Draft = struct {
 
     fn candidates(d: *const Draft, rows: usize) tree.Candidates {
         const base = d.selection_base;
-        return .{ .words = d.staged.bytes[words_at + base * lp_words * 4 ..][0 .. rows * lp_words * 4], .projected = d.staged.bytes[hp_at + base * d.c.rank * 2 ..][0 .. rows * d.c.rank * 2], .topk = d.c.topk, .rank = d.c.rank, .predecessor = d.w.predecessor, .successor = d.w.successor };
+        return .{ .words = d.staged.bytes[words_at + base * lp_words * 4 ..][0 .. rows * lp_words * 4], .projected = d.staged.bytes[hp_at + base * d.c.rank * 2 ..][0 .. rows * d.c.rank * 2], .topk = d.c.topk, .rank = d.c.rank, .predecessor = d.w.predecessor, .successor = d.w.successor, .sampling = d.drawn.sampling, .position = d.drawn.position };
     }
 
     pub fn select(d: *Draft, ctx: *Ctx, pending: u32, rows: usize) void {
@@ -342,10 +364,14 @@ pub const Draft = struct {
     pub fn selectHold(d: *Draft, ctx: *Ctx, it: dr.Hold) !void {
         const rows = d.c.block - 1;
         ctx.grown = 0;
+        // a sampled hold's candidates ranked as its target draw ranks them (its seed, each draft's position)
+        d.drawn = .{ .sampling = it.sampling, .position = it.position };
+        defer d.drawn = .{};
         if (it.lanes) |shape| return d.selectLanes(ctx, it.pending, rows, shape);
         const limit = if (d.c.block == 16) tree.nodes() else 0;
         if (limit > 0) {
-            const n = @min(it.depth, limit);
+            // the whole budget whenever drafts are asked: the block's forward costs the same at any depth
+            const n = if (it.depth == 0) 0 else limit;
             ctx.grown = tree.grow(d.candidates(rows), it.pending, rows, n, &ctx.held, &ctx.parents, &ctx.own);
             ctx.held_n = ctx.grown;
         } else {
@@ -357,7 +383,7 @@ pub const Draft = struct {
     // the Drafter contract
 
     pub fn drafter(d: *Draft) dr.Drafter {
-        return .{ .ptr = d, .vtable = &.{ .taps = tapsFn, .facts = factsFn, .open = openFn, .absorb = absorbFn, .hold = holdFn, .held = heldFn, .release = releaseFn, .tree = treeFn, .chances = chancesFn } };
+        return .{ .kind = "DFlash2", .ptr = d, .vtable = &.{ .taps = tapsFn, .facts = factsFn, .open = openFn, .absorb = absorbFn, .hold = holdFn, .held = heldFn, .release = releaseFn, .tree = treeFn, .chances = chancesFn } };
     }
 
     fn cast(p: *anyopaque) *Draft {
@@ -372,12 +398,18 @@ pub const Draft = struct {
     fn factsFn(p: *anyopaque) dr.Facts {
         const d = cast(p);
         // TF_NO_TREES=1: chains only (for comparing)
-        return .{ .depth = @intCast(d.c.block - 1), .step_ms = d.step_ms, .prior = &prior, .plain_guard = true, .batched = true, .stream_bytes = d.c.ringBytes() + d.target_taps + d.scratch_one, .trees = platform.c.getenv("TF_NO_TREES") == null, .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs], .tree_nodes = @intCast(if (d.c.block == 16) tree.nodes() else 0) };
+        return .{ .depth = @intCast(d.c.block - 1), .step_ms = d.step_ms, .prior = &prior, .plain_guard = true, .batched = true, .stream_bytes = d.c.ringBytes() + d.target_taps + d.scratch_one, .trees = platform.c.getenv("TF_NO_TREES") == null, .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs], .copy_match = copyMatch(d.e.g), .tree_nodes = @intCast(if (d.c.block == 16) tree.nodes() else 0) };
     }
 
     fn openFn(p: *anyopaque, s: *Stream) anyerror!void {
         const d = cast(p);
         if (d.streams.contains(s)) return error.StreamOpen;
+        if (d.ring_of) |r| if (r.ring(r.ctx, s)) |ptr| { // the lane's run holds it: a context borrowing it
+            const ctx = try d.gpa.create(Ctx);
+            errdefer d.gpa.destroy(ctx);
+            ctx.* = .{ .ring = .{ .d = d.e.d, .ptr = ptr, .len = d.c.ringBytes(), .borrowed = true } };
+            return d.streams.put(d.gpa, s, ctx);
+        };
         const ctx = d.pool.pop() orelse try d.create();
         errdefer d.pool.append(d.gpa, ctx) catch d.drop(ctx);
         ctx.* = .{ .ring = ctx.ring };
@@ -412,7 +444,10 @@ pub const Draft = struct {
         if (items.len == 0) return;
         if (items.len > d.frame_streams) return error.BadDraftFrame;
         var contexts: [frame.max_streams]*Ctx = undefined;
-        for (items, contexts[0..items.len]) |it, *ctx| ctx.* = d.streams.get(it.stream) orelse return error.UnknownStream;
+        for (items, contexts[0..items.len]) |it, *ctx| {
+            ctx.* = d.streams.get(it.stream) orelse return error.UnknownStream;
+            frame.scan(ctx.*, it.tokens);
+        }
         try frame.forward(d, items, contexts[0..items.len]);
     }
 
@@ -446,9 +481,17 @@ pub const Draft = struct {
 
     fn releaseFn(p: *anyopaque, s: *Stream) void {
         const d = cast(p);
-        if (d.streams.fetchRemove(s)) |kv| d.pool.append(d.gpa, kv.value) catch d.drop(kv.value);
+        if (d.streams.fetchRemove(s)) |kv| {
+            if (kv.value.ring.borrowed) return d.gpa.destroy(kv.value); // its lane's run goes back with the lane
+            d.pool.append(d.gpa, kv.value) catch d.drop(kv.value);
+        }
     }
 };
+
+/// The copy match beside DFlash2: the dense 27B leaves short copies to its drafts and copies after long_match (20).
+pub fn copyMatch(g: anytype) i64 {
+    return if (@import("cuda_geometry.zig").dense27(g)) lanes.windows.long_match else 0;
+}
 
 /// Acceptance by depth until a stream has its own (the reference's chat text: measured, see the commit).
 const prior = [_]f64{ 0.75, 0.65, 0.58, 0.52, 0.47, 0.43, 0.4, 0.37, 0.35, 0.33, 0.31, 0.29, 0.28, 0.27, 0.26 };

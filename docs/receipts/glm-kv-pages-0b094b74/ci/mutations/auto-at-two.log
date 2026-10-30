@@ -1,0 +1,110 @@
+discovery verbs: retained through TLS, atexit and destructor; child exit 0
+discovery grammar: retained through TLS, atexit and destructor; child exit 0
+test-cuda-host
++- run test 0 pass, 1 fail (1 total)
+error: 'cuda_cost_identity.test.cost identity: stable reads reuse a drafter, while a changed payload at the same path invalidates it' failed:
+       <home>/.local/share/zig/0.17.0/lib/std/testing.zig:584:14: 0x123efa9 in expect (std.zig)
+           if (!ok) return error.TestUnexpectedResult;
+                    ^
+       <home>/zt/kvp-mut/zig/src/families/qwen3_5/cuda_cost_identity.zig:67:5: 0x123fa53 in test.cost identity: stable reads reuse a drafter, while a changed payload at the same path invalidates it (cuda_cost_identity.zig)
+           try std.testing.expect(!std.mem.eql(u8, &first, &changed));
+           ^
+failed command: ./.zig-cache/o/5e598aff1d4f9edbdfba42f5b9bf1824/test --cache-dir=./.zig-cache --seed=0x9f516834 --listen=-
+
+test-glm-snapshots-host
++- run test w
+GLM snapshot sizing rank=0 world=2 at=2048 bytes=203423744 arena=7034250752
+GLM snapshot sizing rank=0 world=2 at=34816 bytes=643825664 arena=7034250752
+GLM snapshot sizing rank=0 world=2 at=266240 bytes=3665821696 arena=7034250752
+failed command: ./.zig-cache/o/9764124df67e11b91f84062f64593ae1/test --cache-dir=./.zig-cache --seed=0x9f516834 --listen=-
+
+test-cuda-host
++- run test 83 pass, 1 fail (84 total)
+error: 'cuda_native.test.TF_KV_PAGES: auto pages from three ranks, off and 0 give windows, all pages every stream, other values page' failed:
+       GLM_KV_BYTES context=8192 capacity=8256 main_layers=11 bf16=296101376 fp8=245772800
+       GLM_KV_BYTES context=65536 capacity=65600 main_layers=11 bf16=1044784640 fp8=644887040
+       GLM_KV_BYTES context=199307 capacity=199360 main_layers=11 bf16=2791155200 fp8=1575856640
+       GLM_KV_BYTES context=245760 capacity=245824 main_layers=11 bf16=3397789184 fp8=1899246080
+       REFUSE TF_GLM_PREFILL_REDUCE=split: rank 0 cannot exchange with rank 2; split sends every rank's rows to every other, and a fabric where some ranks reach only their neighbours (a ring of four without a switch) needs TF_GLM_PREFILL_REDUCE=ring or gather
+       REFUSE TF_GLM_PREFILL_REDUCE=split: rank 1 cannot exchange with rank 3; split sends every rank's rows to every other, and a fabric where some ranks reach only their neighbours (a ring of four without a switch) needs TF_GLM_PREFILL_REDUCE=ring or gather
+       REFUSE TF_GLM_PREFILL_REDUCE=split: rank 2 cannot exchange with rank 0; split sends every rank's rows to every other, and a fabric where some ranks reach only their neighbours (a ring of four without a switch) needs TF_GLM_PREFILL_REDUCE=ring or gather
+       REFUSE TF_GLM_PREFILL_REDUCE=split: rank 3 cannot exchange with rank 1; split sends every rank's rows to every other, and a fabric where some ranks reach only their neighbours (a ring of four without a switch) needs TF_GLM_PREFILL_REDUCE=ring or gather
+       expected .off, found .on
+       <home>/.local/share/zig/0.17.0/lib/std/testing.zig:93:17: 0x1289c04 in expectEqualInner__func_1028 (std.zig)
+                       return error.TestExpectedEqual;
+                       ^
+       <home>/.local/share/zig/0.17.0/lib/std/testing.zig:57:5: 0x128f867 in expectEqual (cuda.zig)
+           return expectEqualInner(T, expected, actual);
+           ^
+       <home>/zt/kvp-mut/zig/src/families/glm/cuda_native.zig:373:9: 0x128f8c0 in test.TF_KV_PAGES: auto pages from three ranks, off and 0 give windows, all pages every stream, other values page (cuda.zig)
+               try std.testing.expectEqual(Paging.off, try paging(null, w, false));
+               ^
+failed command: ./.zig-cache/o/c6d111b79f49b2a17b6edb5ea777e7a3/test --cache-dir=./.zig-cache --seed=0x9f516834 --listen=-
+
+test-cuda-host
++- run test w
+tf_h3_forward: BadH3Dimensions
+tf_h3_forward_host: BadH3Dimensions
+tf_h3_forward: BadH3Dimensions
+tf_h3_forward_host: BadH3Dimensions
+tf_h3_forward: BadH3Dimensions
+tf_h3_forward_host: BadH3Dimensions
+tf_h3_forward: BadH3Rotary
+tf_h3_forward_host: BadH3Rotary
+tf_h3_forward: BadH3Rotary
+tf_h3_forward_host: BadH3Rotary
+tf_h3_forward: BadH3Keep
+tf_h3_forward_host: BadH3Keep
+tf_h3_forward: BadH3Keep
+tf_h3_forward_host: BadH3Keep
+tf_h3_forward: BadH3Blocks
+tf_h3_forward_host: BadH3Blocks
+tf_h3_forward: BadH3Scalar
+tf_h3_forward_host: BadH3Scalar
+tf_h3_forward: BadH3Scalar
+tf_h3_forward_host: BadH3Scalar
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward_host: BadH3Scalar
+H3 model retained at close: NotReady
+H3 geometry retained: NotReady
+tensor blocks.0.norm1.weight: MissingTensor
+tensor blocks.1.attn.qkv_proj.weight: MissingTensor
+tensor blocks.1.norm1.weight: MissingTensor
+failed command: ./.zig-cache/o/4a85b2029e4b8e63dee66758ecdc52ac/test --cache-dir=./.zig-cache --seed=0x9f516834 --listen=-
+
+test-cuda-host
++- run test w
+GLM_KV_BYTES context=8192 capacity=8256 main_layers=11 bf16=296101376 fp8=245772800
+GLM_KV_BYTES context=65536 capacity=65600 main_layers=11 bf16=1044784640 fp8=644887040
+GLM_KV_BYTES context=199307 capacity=199360 main_layers=11 bf16=2791155200 fp8=1575856640
+GLM_KV_BYTES context=245760 capacity=245824 main_layers=11 bf16=3397789184 fp8=1899246080
+failed command: ./.zig-cache/o/745541c8bb8aa10067244b3b31f01b3a/test --cache-dir=./.zig-cache --seed=0x9f516834 --listen=-
+
+test-cuda-host
++- run test w
+[default] (warn): Drama readback drain failed: retaining its buffers and engine owner
+[default] (warn): Drama readback drain failed: retaining its buffers and engine owner
+codec requested 1, actual sizes { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
+codec requested 1, actual sizes { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
+codec requested 4, actual sizes { 4, 4, 4, 4, 1 }
+codec requested 16, actual sizes { 16, 1 }
+codec requested 1, actual sizes { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
+Drama replay passed: eager/graphs, poison/reset, codec chunks and interleaved state
+[default] (warn): drama3: config hidden_size = 4096, the kernels need 2048
+[default] (warn): codec.pth pickle names os.system, outside the tensor state-dict allow-list
+failed command: ./.zig-cache/o/03f27579295a599769f8c15e2a5c8c7e/test --cache-dir=./.zig-cache --seed=0x9f516834 --listen=-
+
+Build Summary: 160/163 steps succeeded (2 failed); 253/255 tests passed (2 failed)
+test-cuda-host transitive failure
++- run test 0 pass, 1 fail (1 total)
++- run test 83 pass, 1 fail (84 total)

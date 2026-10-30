@@ -19,7 +19,10 @@ pub const Vision = struct {
     mark_ids: [3]u32,
     prep: cuda.Function,
     pool: cuda.Function,
-    pub fn load(a: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.Stream, dir: []const u8, limits: Limits, rank: usize, prep: cuda.Function, pool: cuda.Function) !*Vision {
+    /// prep and pool through a stream's page table (TF_FLASHNEXT_KV_PAGES).
+    prep_paged: cuda.Function,
+    pool_paged: cuda.Function,
+    pub fn load(a: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.Stream, dir: []const u8, limits: Limits, rank: usize, prep: cuda.Function, pool: cuda.Function, prep_paged: cuda.Function, pool_paged: cuda.Function) !*Vision {
         try shared.media.checkLimits(limits);
         const settings = (try shared.Settings.read(a, io, dir)) orelse return error.NoVisionTower;
         const c = settings.tower;
@@ -42,7 +45,7 @@ pub const Vision = struct {
         var module: ?cuda.Module = if (t == null) try cuda.Module.load(d, cuda.kernels.qwen_vision) else null;
         errdefer if (module) |*m| m.unload();
         const splice = try (if (t) |x| &x.mod else &module.?).function("tf_qv_splice");
-        self.* = .{ .a = a, .io = io, .tower = t, .processor = settings.processor, .module = module, .limits = limits, .marks = .{ .open = c.vision_start, .image = c.image_token, .close = c.vision_end }, .mark_ids = .{ c.vision_start, c.image_token, c.vision_end }, .prep = prep, .pool = pool, .encoder = .{ .ctx = self, .config = c, .driver = d, .stream = s, .splice = splice, .encode = encode } };
+        self.* = .{ .a = a, .io = io, .tower = t, .processor = settings.processor, .module = module, .limits = limits, .marks = .{ .open = c.vision_start, .image = c.image_token, .close = c.vision_end }, .mark_ids = .{ c.vision_start, c.image_token, c.vision_end }, .prep = prep, .pool = pool, .prep_paged = prep_paged, .pool_paged = pool_paged, .encoder = .{ .ctx = self, .config = c, .driver = d, .stream = s, .splice = splice, .encode = encode } };
         return self;
     }
     fn encode(ptr: *anyopaque, pixels: []const f32, grids: []const shared.Grid, out: u64) anyerror!void {
@@ -67,11 +70,11 @@ pub const Vision = struct {
         return .{ .pixels = p.pixels, .gh = p.gh, .gw = p.gw, .tokens = p.tokens, .hash = p.hash };
     }
     pub fn state(v: *Vision, ids: []const u32, images: []const @import("lanes").stream.Image) !media.State {
-        return .{ .image = try shared.media.Media.init(v.a, v.encoder, ids, images, v.limits), .prep = v.prep, .pool = v.pool };
+        return .{ .image = try shared.media.Media.init(v.a, v.encoder, ids, images, v.limits), .prep = v.prep, .pool = v.pool, .prep_paged = v.prep_paged, .pool_paged = v.pool_paged };
     }
     pub fn receive(v: *Vision, n: usize, runs: []const shared.media.Run) !media.State {
         const p = try shared.media.Plan.init(v.a, n, runs, v.limits);
-        return .{ .image = try shared.media.Media.allocate(p, v.encoder), .prep = v.prep, .pool = v.pool };
+        return .{ .image = try shared.media.Media.allocate(p, v.encoder), .prep = v.prep, .pool = v.pool, .prep_paged = v.prep_paged, .pool_paged = v.pool_paged };
     }
     pub fn explain(err: anyerror) ?[]const u8 {
         return switch (err) {

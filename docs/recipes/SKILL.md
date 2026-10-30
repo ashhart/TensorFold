@@ -84,8 +84,8 @@ Declare real served shapes, tile edges, output type, accumulation and rounding d
 A bit-preserving replacement declares `replaces` and supplies the `replaced` hook on identical inputs; its contract requires byte equality.
 If an intended reduction reorder changes bytes, stop treating it as that drop-in replacement and resolve the arithmetic/comparison contract with the maintainer before landing it.
 An improved FP64 error alone does not waive replacement equality, authorize a new serial baseline or justify renaming the kernel to evade the gate.
-Register the operator in [the Metal runner](../../zig/tests/contract/metal_main.zig) or [the CUDA runner](../../zig/tests/cuda/contract_tests.zig), as appropriate.
-Register its launch limits and compile records separately in [registry.zig](../../zig/src/core/contract/registry.zig).
+Register the operator in [the Metal runner](../../zig/tests/contract/metal_main.zig), [the CUDA runner](../../zig/tests/cuda/contract_tests.zig) or [the HIP runner](../../zig/tests/hip/contract_main.zig), as appropriate.
+Register its launch limits and compile records separately in [registry.zig](../../zig/src/core/contract/registry.zig), or [hip_records.zig](../../zig/src/core/contract/hip_records.zig) for HIP.
 
 | Gate | Required evidence |
 | --- | --- |
@@ -100,7 +100,7 @@ Every planted control must fail its intended gate; a control error, skip or unex
 Attach the backend's complete `SUMMARY`, exit status, known findings and unrun chips.
 Diagnostic `--only`, `--no-gates` or `--no-limits` runs are not the full qualification receipt.
 Do not add a `known` entry to conceal a new regression; an existing known finding must remain reproducible until its fix removes the entry.
-Metal/CUDA runner coverage does not establish HIP/XPU correctness; name missing backend coverage and agree its checks separately.
+Metal, CUDA or HIP runner coverage does not establish another backend's correctness, nor XPU's; name missing backend coverage and agree its checks separately.
 
 Keep checkpoint activation precision and the required accumulation precision.
 Do not add FP8/int8 activations, lossy caches, reduced-precision sums or fast-math changes merely to clear a speed gate.
@@ -184,7 +184,14 @@ zig build fatbins kernel-contract-fatbins -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=8
 zig-out/bin/tf-cuda-test kernel-contract-limits zig-out/fatbin
 ```
 
-Inspect [kernel-contract build registration](../../zig/build/kernel_contract.zig) and the target's build options before running a platform command.
+On an AMD test machine, on a GPU of the chip named, and for the records of every served RDNA chip without a GPU:
+
+```sh
+zig build hip-kernel-contract -Dhip-arch=gfx1100 -Dhipcc=/opt/rocm/bin/hipcc
+zig build hip-kernel-contract-limits -Dhipcc=/opt/rocm/bin/hipcc
+```
+
+Inspect [kernel-contract build registration](../../zig/build/kernel_contract.zig) ([HIP's](../../zig/build/hip_contract.zig)) and the target's build options before running a platform command.
 Host tests, compile-limit records, a host-only archive and a fake-engine golden corpus do not prove real-model inference on a GPU.
 Documentation-only changes need link/claim checks, not an invented model receipt or a new GPU workload.
 

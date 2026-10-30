@@ -152,13 +152,14 @@ fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value) errors.Refused!Plan {
         input.temperature = if (t == .float) t.float else std.fmt.parseFloat(f64, t.int) catch 0;
     };
     const sampling = try json.newObject(cx.a);
-    for ([_][]const u8{ "temperature", "top_p", "top_k", "min_p", "seed", "priority", "draft", "thinking_budget", "ignore_eos", "stop" } ++ grammar.fields) |k| if (body.get(k)) |v| try sampling.put(cx.a, k, v);
+    for ([_][]const u8{ "temperature", "top_p", "top_k", "min_p", "presence_penalty", "frequency_penalty", "seed", "priority", "model", "draft", "thinking_budget", "ignore_eos", "return_token_ids", "stop", "grammar_budget" } ++ grammar.fields) |k| if (body.get(k)) |v| try sampling.put(cx.a, k, v);
     try grammar.refusal(cx, body);
     if (input.tools.len > 0 and try tool_specs.choiceRequiresCall(cx.a, body.get("tool_choice"))) try sampling.put(cx.a, "tool_call_required", .{ .bool = true });
     if (body.field("parallel_tool_calls")) |p| if (p == .bool and !p.bool) try sampling.put(cx.a, "tool_call_single", .{ .bool = true });
     const thinking = try fields.thinkingFields(cx, body, srv.effort_levels);
     if (thinking.effort) |e| try sampling.put(cx.a, "reasoning_effort", .{ .string = e });
     if (thinking.enable) |on| try sampling.put(cx.a, "enable_thinking", .{ .bool = on });
+    if (thinking.clear) |c| try sampling.put(cx.a, "clear_thinking", .{ .bool = c });
     input.fields = .{ .object = sampling };
     const streamed = if (body.get("stream")) |s| s.truthy() else false;
     input.prompt_logprobs = try fields.promptLogprobs(cx, body, !is_chat, streamed, srv.info.prompt_logprobs);
@@ -333,10 +334,15 @@ const Run = struct {
         if (tools.len == 0) return null;
         const parsed = try tool_parse.parse(r.a, reply.content, tools, r.plan.policy.maxCalls());
         if (parsed.rejected_envelopes > 0) log.line("warning: kept {d} malformed or unoffered tool envelopes as content", .{parsed.rejected_envelopes});
-        const calls = (if (r.turn != null) cortheon.clientCalls(parsed.calls) else parsed.calls) orelse {
+        // max_tokens cut a call the stream had begun: the whole reply returns it cut too, as the stream did (#1238)
+        const cut = if (!r.plan.policy.single and std.mem.eql(u8, reply.finish_reason, "length")) try tool_stream.cutCalls(r.a, reply.content, tools) else null;
+        if (cut != null) reply.content = try @import("reply_text.zig").cutProse(r.a, reply.content);
+        const found = cut orelse parsed.calls;
+        const calls = (if (r.turn != null) cortheon.clientCalls(found) else found) orelse {
             if (r.plan.policy.single or parsed.calls != null) reply.content = try r.plan.policy.parsedContent(r.a, parsed.content);
             return null;
         };
+        if (cut != null) return calls;
         reply.content = try r.plan.policy.parsedContent(r.a, parsed.content);
         reply.finish_reason = "tool_calls";
         if (r.plan.policy.single) reply.tool_calls_streamed = false;
@@ -427,6 +433,7 @@ const Run = struct {
         try o.put(a, "choices", .{ .array = list });
         try o.put(a, "usage", try r.usage(reply));
         try r.extras(o, reply);
+        if (reply.loop_stop) |period| try o.put(a, "error", try @import("loop_stop.zig").errorBody(a, period));
     }
 
     const StreamSink = struct {
@@ -514,7 +521,7 @@ const Run = struct {
             break :blk ready.prepared;
         };
         var handed = false; // generate gives the preparing count back from here on
-        defer if (!handed) chat.release(r.srv, prepared.preparing);
+        defer if (!handed) r.srv.release(prepared.preparing, prepared.request);
         var sink_state: StreamSink = .{ .run = r, .tools = tools, .prompt_len = prepared.prompt_len };
         handed = true;
         const sink: chat.Sink = .{ .ctx = &sink_state, .call = StreamSink.call, .begin = StreamSink.begin };
@@ -560,7 +567,10 @@ const Run = struct {
                 r.emit(r.chunk(roleDelta(a) catch return, null) catch return) catch return;
                 const deltas = tool_parse.deltas(a, calls.?) catch return;
                 for (deltas) |d| r.emit(r.chunk(d, null) catch return) catch return;
-            } else if (reply.content.len > 0 and !r.streamed_prose) {
+            }
+            // Replaying calls does not account for envelopes retained as content.
+            if (reply.content.len > 0 and r.prose_sent.items.len == 0) {
+                if (calls == null) r.prose() catch return;
                 r.emit(r.chunk(.{ .string = reply.content }, null) catch return) catch return;
             } else if (r.plan.policy.kept(reply.content, r.prose_sent.items)) |rest| {
                 r.emit(r.chunk(.{ .string = rest }, null) catch return) catch return;
@@ -578,6 +588,7 @@ const Run = struct {
             u.object.put(a, "usage", use) catch return;
             r.emit(u) catch return;
         }
+        if (reply.loop_stop) |period| r.emit(wrapError(a, @import("loop_stop.zig").errorBody(a, period) catch return) catch return) catch return;
         r.out.vt.event(r.out.ctx, null) catch {};
         r.warmNext(&reply, calls);
     }

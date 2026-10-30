@@ -15,16 +15,15 @@ const Check = struct {
     worst: f64 = 1.0,
     n: usize = 0,
     fails: usize = 0,
+    prompt_at: ?usize = null,
     // frame 0's heads (0: the candidate logits, 1 + i: codebook head i): both sides' top two
     tops: [10]?[2]Top2 = @splat(null),
 
     fn refF32(c: *Check, name: []const u8, rows: usize, width: usize) !?[]f32 {
         const t = c.ref.get(name) orelse return null;
         const n = t.numel();
-        // the oracle's decode0 rows are [width]; prompt rows [rows, width]: compare the last `rows * width` values
-        if (n < rows * width) return null;
+        const skip = try d3.common.referenceOffset(n, rows, width, c.prompt_at);
         const out = try c.gpa.alloc(f32, rows * width);
-        const skip = n - rows * width;
         switch (t.dtype) {
             .bf16 => {
                 const v = std.mem.bytesAsSlice(u16, @as([]align(1) const u8, t.bytes));
@@ -116,6 +115,11 @@ const Check = struct {
         const ok = worst_row >= 0.999;
         if (!ok) c.fails += 1;
         std.debug.print("  {s:<36} rows {d:>4} cos {d:.6} worst-row {d:.6} (row {d}) max|d| {d:.4} (max|ref| {d:.2}) {s}\n", .{ name, rows, cos, worst_row, wr, maxd, maxr, if (ok) "ok" else "LOW" });
+        if (c.prompt_at) |at| {
+            std.debug.print("PREFILL {s} start={d} rows={d} worst_cos={e} max_abs={e}\n", .{
+                name, at, rows, worst_row, maxd,
+            });
+        }
     }
 };
 
@@ -133,18 +137,30 @@ pub fn check(gpa: std.mem.Allocator, io: std.Io, a: Args, dir: []const u8) !u8 {
         x.* = @intCast(v[j * W + c]);
     };
     var opts = a.opts;
+    try opts.validatePrefill();
     opts.max_rows = @max(opts.max_rows, n);
     const e = try d3.Engine.create(gpa, io, a.model, opts);
     defer e.destroy();
     var c: Check = .{ .gpa = gpa, .e = e, .ref = &ref };
     const probe: d3.engine.Probe = .{ .ctx = &c, .f = Check.probe };
     std.debug.print("drama3 check: {d} prompt rows from {s}\n", .{ n, vpath });
-    try e.prefill(rows, probe);
+    try e.startPrompt(rows);
+    var at: usize = 0;
+    while (at < n) {
+        const count = a.opts.promptRows(n - at);
+        c.prompt_at = at;
+        try e.promptChunk(n, at, count, probe);
+        at += count;
+    }
+    c.prompt_at = null;
+    try e.finishPrompt(rows);
     if (ref.get("backbone_final_norm")) |hf| if (hf.dtype == .bf16 and hf.dim(0) == n) {
         std.debug.print("  -- the tower prefill again from the oracle's backbone_final_norm rows:\n", .{});
         try e.towerOnly(n, hf.bytes, probe);
+        e.o.max_rows = a.opts.max_rows;
         try e.prefill(rows, null); // restore my own state for the decode comparison
     };
+    e.o.max_rows = a.opts.max_rows;
     // frame 0 with the probe (tower_decode0.*), then greedy frames against the oracle's
     const smp: d3.Sampling = .{ .temperature = 0, .top_k = 1 };
     const oref = ref.get("frames_all") orelse ref.get("frames") orelse return error.NoFrames;

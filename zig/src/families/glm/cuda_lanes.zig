@@ -34,7 +34,7 @@ const Lane = struct {
     slot: u32,
     pending_rows: ?usize = null,
     held: [max_held]u32 = undefined,
-    chances: [max_held]f64 = undefined, // DFlash2's: each held draft's chance from the selector
+    chances: [max_held]f64 = undefined, // each held draft's chance: DFlash2's selector's, or the MTP head's (--mtp-confidence)
     held_n: usize = 0,
     first: ?u64 = null,
     fill: ?usize = null, // a prompt pass going a chunk at a time: where its next chunk starts
@@ -44,6 +44,7 @@ pub const Lanes = struct {
     x: follow.Leader,
     whole: bool = false, // prompt passes run whole (TF_GLM_PROMPT_STEPS=0): no other stream's round between chunks
     alone: bool = false, // each window in its own forward (TF_GLM_SHARED=0)
+    mtp_confidence: ?f64 = null, // --mtp-confidence: the MTP head's chains stop where their chance falls under it
     shared: u64 = 0, // forwards that held several streams' windows (checks read it)
     lanes: std.AutoHashMapUnmanaged(*const lanes.Stream, Lane) = .empty,
     drawn: [ring]u32 = undefined,
@@ -93,6 +94,7 @@ pub const Lanes = struct {
     const steps_vt: be.Backend.VTable = vt: {
         var v = whole_vt;
         v.prefill_step = prefillStepFn;
+        v.cancel_prefill = cancelPrefillFn;
         v.prefill_many = null;
         v.many_rows = 0;
         break :vt v;
@@ -113,7 +115,8 @@ pub const Lanes = struct {
             .drafts = if (block) max_held else engine.max_drafts,
             .draft_streams = block, // one block pass drafts every stream of the round
             .mtp_step_ms = if (block) 1.6 / @as(f64, max_held) else 0, // a block's 7 drafts in one pass (about 1.6 ms)
-            .draft_probabilities = block, // the selector's chances size each window against the costs below
+            .draft_probabilities = block or self.mtp_confidence != null, // chances size each window (DFlash2's by the costs)
+            .draft_confidence = if (block) null else self.mtp_confidence,
             .window_costs = if (block) &gb10_window_costs else &.{},
             .shared_costs = if (block) &gb10_shared_costs else &.{},
             .hidden_rows = sharing,
@@ -221,7 +224,7 @@ pub const Lanes = struct {
         for (ss, firsts) |s, t| self.lanes.getPtr(s).?.first = self.take(t);
     }
 
-    /// One chunk of the stream's prompt pass (fillOne runs other rounds between); true once the first token is drawn.
+    /// One chunk of the stream's prompt pass (other rounds run between); true once the first token is drawn.
     fn prefillStepFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!bool {
         const self = of(ptr);
         const going: ?usize = if (self.lanes.getPtr(s)) |l| l.fill else null;
@@ -241,24 +244,71 @@ pub const Lanes = struct {
             return true;
         }
         l.fill = at + engine.prompt_rows;
+        if (s.settle_step) try self.x.e.stream.synchronize(); // its tail would land in the next decode round's time
         return false;
+    }
+
+    fn cancelPrefillFn(ptr: *anyopaque, s: *lanes.Stream) !void {
+        const self = of(ptr);
+        const l = self.lanes.getPtr(s) orelse return;
+        const at = l.fill orelse return;
+        if (at <= s.cached or s.reuse.hook == null) return;
+        try self.x.bind(l.slot);
+        _ = self.x.chunk(s.prompt(), at, null, .{ .ptr = null, .check = cancelNow }, marksOf(s)) catch |err| {
+            if (err == error.Cancelled) return;
+            return err;
+        };
+        return error.CancellationIgnored;
+    }
+
+    fn cancelNow(_: ?*anyopaque) bool {
+        return true;
     }
 
     /// A prompt pass begins: the stream's slot bound and its sequence fresh; where the pass resumes (a kept state).
     fn opening(self: *Lanes, s: *lanes.Stream) !?engine.Resume {
         const ids = s.prompt();
         if (ids.len + s.max_new + max_rows >= self.x.e.capacity) return error.PromptTooLong;
+        const pages = try self.seat(s, ids.len, s.max_new);
+        errdefer {
+            self.x.e.release(self.lanes.get(s).?.slot);
+            _ = self.lanes.remove(s);
+        }
+        if (self.x.e.images) |v| v.clear(); // no earlier request's rows splice into this one
+        try self.x.beginOn(s.sampling, pages);
+        s.cached = 0;
+        s.prompt_rows.clearRetainingCapacity();
+        return if (s.prompt_logprobs != null) null else self.resumeFrom(s, ids.len); // prompt rows need every row
+    }
+
+    /// The stream's slot, its pages, then its sequence: a slot past the paged ones waits before binding makes a window.
+    pub fn seat(self: *Lanes, s: *const lanes.Stream, prompt: usize, max_new: usize) ![]const u32 {
         const l = try self.claim(s);
         l.pending_rows = null;
         l.held_n = 0;
         l.fill = null;
         l.first = null;
+        errdefer {
+            if (self.x.e.pages) |p| p.close(l.slot);
+            _ = self.lanes.remove(s);
+        }
+        const pages = try self.pagesFor(l.slot, prompt, max_new);
         try self.x.bind(l.slot);
-        if (self.x.e.images) |v| v.clear(); // no earlier request's rows splice into this one
-        try self.x.begin(s.sampling);
-        s.cached = 0;
-        s.prompt_rows.clearRetainingCapacity();
-        return if (s.prompt_logprobs != null) null else self.resumeFrom(s, ids.len); // prompt rows need every row
+        return pages;
+    }
+
+    /// A slot's pages for a prompt and its reply (none without a pool); LaneMemory: the pool lacks them now.
+    fn pagesFor(self: *Lanes, slot: u32, prompt: usize, max_new: usize) ![]const u32 {
+        const p = self.x.e.pages orelse return &.{};
+        if (!p.paged(slot)) return error.LaneMemory; // every paged sequence is taken
+        p.close(slot); // a stream that opens again gives its earlier pages back first
+        return p.open(slot, prompt, max_new);
+    }
+
+    /// The lane host's admission: with a pool, a paged sequence and the request's pages are free.
+    pub fn fits(self: *const Lanes, prompt: usize, max_tokens: usize) bool {
+        const p = self.x.e.pages orelse return true;
+        return p.fits(prompt, max_tokens);
     }
 
     /// A prompt pass with images: rank 0's tower encodes those past `from`, then every rank holds their rows.
@@ -271,7 +321,12 @@ pub const Lanes = struct {
     const Sink = @import("cuda_prompt_sink.zig").Sink;
 
     fn marksOf(s: *lanes.Stream) ?engine.Marks {
-        return if (s.reuse.marks.len == 0) null else .{ .at = s.reuse.marks, .ctx = s, .call = keptAt };
+        return if (s.reuse.hook == null) null else .{
+            .at = s.reuse.marks,
+            .ctx = s,
+            .call = keptAt,
+            .interrupted = keptInterrupted,
+        };
     }
 
     /// The stream's kept state, where its prompt pass starts (null: none, off the chunk grid, or no longer held).
@@ -291,6 +346,11 @@ pub const Lanes = struct {
     fn keptAt(ctx: *anyopaque, at: u32) void {
         const s: *lanes.Stream = @ptrCast(@alignCast(ctx));
         if (s.reuse.hook) |k| k.at(k.ptr, s, at);
+    }
+
+    fn keptInterrupted(ctx: *anyopaque, at: u32) void {
+        const s: *lanes.Stream = @ptrCast(@alignCast(ctx));
+        s.keepInterruptedPrefill(at);
     }
 
     fn firstFn(ptr: *anyopaque, s: *lanes.Stream, position: u64) anyerror!u64 {
@@ -415,12 +475,13 @@ pub const Lanes = struct {
             if (r.position != self.x.e.pos() + 1) return error.PositionMismatch;
             if (r.lanes != null) return error.TreesNotBuilt;
             const depth = @min(r.depth, engine.max_drafts);
+            const chances: ?[]f64 = if (self.mtp_confidence != null) l.chances[0..depth] else null;
             if (r.rows) |rows| {
                 for (rows, 0..) |row, i| if (row != i) return error.TreesNotBuilt;
-                try self.x.draft(false, r.follow[0..rows.len], depth, &l.held);
+                try self.x.draft(false, r.follow[0..rows.len], depth, &l.held, chances);
             } else {
                 const first = self.value(r.first orelse return error.NoFirstToken);
-                try self.x.draft(true, &.{first}, depth, &l.held);
+                try self.x.draft(true, &.{first}, depth, &l.held, chances);
             }
             l.held_n = depth;
         }
@@ -463,10 +524,10 @@ pub const Lanes = struct {
         return std.fmt.parseFloat(f64, std.mem.span(v)) catch 0.7;
     }
 
-    /// DFlash2's chance for each held draft (the MTP head gives none: the lane core's per-depth rates stand).
+    /// Each held draft's chance, DFlash2's or the MTP head's under --mtp-confidence (else the per-depth rates stand).
     fn chancesFn(ptr: *anyopaque, s: *lanes.Stream, out: []f64) anyerror!bool {
         const self = of(ptr);
-        if (self.x.e.drafter == null) return false;
+        if (self.x.e.drafter == null and self.mtp_confidence == null) return false;
         const l = self.lanes.getPtr(s) orelse return false;
         if (l.held_n == 0) return false;
         const n = @min(out.len, l.held_n);
@@ -479,7 +540,7 @@ pub const Lanes = struct {
         return true;
     }
 
-    /// The stream left the rounds: its sequence is freed on every rank (slot 0 stays for the next stream).
+    /// The stream left the rounds: its sequence is freed, or its pages given back, on every rank (slot 0 stays).
     fn releaseFn(ptr: *anyopaque, s: *lanes.Stream) void {
         const self = of(ptr);
         const kv = self.lanes.fetchRemove(s) orelse return;

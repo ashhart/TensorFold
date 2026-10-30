@@ -3,10 +3,18 @@ const std = @import("std");
 const cuda = @import("cuda");
 const dr = @import("lanes").drafter;
 const draft = @import("cuda_draft.zig");
+const tree = @import("cuda_draft_tree.zig");
+const layers = @import("cuda_layers.zig");
+const sig = @import("cuda_signatures.zig");
 pub const max_streams = @import("cuda_engine.zig").max_segs;
 pub const max_rows = max_streams * 16;
 pub const chunks = 9;
 const lp_words = 43;
+/// DFlash2's draft vocabulary as the Metal drafter and qwen27 engine read it: the head's first 98,304 rows, last 288.
+const spans = [2][2]usize{ .{ 0, 98304 }, .{ 248032, 248320 } };
+const span_width = spans[0][1] + spans[1][1] - spans[1][0];
+/// The tail span's 64-row tile: projected from row 248,000, its first 32 columns dropped.
+const tail_tile = spans[1][0] / 64 * 64;
 pub const Segment = extern struct { ring: u64, begin: i64, position: i64 };
 pub const segments_at = max_rows * 4;
 pub const words_at = segments_at + max_streams * @sizeOf(Segment);
@@ -24,7 +32,9 @@ pub fn stage(c: draft.Config, items: []const dr.Hold, contexts: []const *draft.C
     if (items.len == 0 or items.len > max_streams or contexts.len != items.len or (c.block != 8 and c.block != 16) or st.len < try stagedBytes(c.rank) or @intFromPtr(st.ptr) % 8 != 0) return error.BadDraftFrame;
     for (items, contexts, 0..) |it, ctx, index| {
         if (it.position == 0 or it.position > std.math.maxInt(i64) - c.block or ctx.end != it.position - 1 or ctx.begin > ctx.end) return error.DraftContextBehind;
-        if (it.pending >= c.vocab or it.depth > c.block - 1) return error.BadDraftFrame;
+        // a chain drafts a row a depth; a grown tree's depth is its node budget (tree.nodes(), up to the window)
+        const most = if (c.block == 16 and it.lanes == null) @max(c.block - 1, tree.nodes()) else c.block - 1;
+        if (it.pending >= c.vocab or it.depth > most) return error.BadDraftFrame;
         for (contexts[0..index]) |prior| if (ctx == prior or ctx.ring.ptr == prior.ring.ptr) return error.OverlappingDraftContexts;
         if (it.lanes) |shape| {
             if (shape.parents.len > ctx.held.len or shape.parents.len != shape.depths.len or shape.parents.len != shape.ranks.len) return error.BadLanes;
@@ -41,16 +51,23 @@ pub fn stage(c: draft.Config, items: []const dr.Hold, contexts: []const *draft.C
         sg[i] = .{ .ring = ctx.ring.ptr, .begin = @intCast(ctx.begin), .position = @intCast(ctx.end) };
     }
 }
+/// A launch whose arguments are checked against the kernel's .cu signature: a wrong count or kind does not build.
+fn launch(d: anytype, f: cuda.Function, comptime s: sig.Sig, grid: [3]usize, block: [3]usize, args: anytype) !void {
+    sig.check(s, @TypeOf(args));
+    return d.e.run(f, grid, block, args);
+}
 fn conv(d: anytype, x: u64, base: u64, res: u64, out: u64, rows: usize, branch: c_int) !void {
-    try d.e.run(d.fns.dyn_conv_batch, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ x, d.dyn, base, res, out, @as(c_int, @intCast(d.c.hidden)), @as(c_int, @intCast(d.c.group)), branch, @as(c_int, @intCast(d.c.block)) });
+    try d.e.run(d.fns.dyn_conv_batch, .{ rows, (d.c.hidden + 255) / 256, 1 }, .{ 256, 1, 1 }, .{ x, d.dyn, base, res, out, @as(c_int, @intCast(d.c.hidden)), @as(c_int, @intCast(d.c.group)), branch, @as(c_int, @intCast(d.c.block)) });
 }
 fn rope(d: anytype, x: u64, w: u64, out: u64, rows: usize, heads: usize) !void {
     try d.e.run(d.fns.norm_rope_batch, .{ rows * heads, 1, 1 }, .{ 32, 1, 1 }, .{ x, w, out, @as(c_int, @intCast(heads)), @as(c_int, @intCast(heads * 128)), d.segments, @as(c_int, @intCast(d.c.block)), d.c.eps, d.c.theta });
 }
 pub fn attention(d: anytype, rows: usize, layer: usize) !void {
     const c = d.c;
-    try d.e.run(d.fns.attn_partial, .{ rows, c.heads, chunks }, .{ 32, 1, 1 }, .{ d.q, d.kb, d.vb, d.segments, @as(c_int, @intCast(c.block)), @as(c_int, @intCast(c.heads)), @as(c_int, @intCast(c.kv_heads)), @as(c_int, @intCast(c.ringRows())), @as(c_int, @intCast(c.window)), @as(c_int, @intCast(layer)), d.pm, d.pl, d.po });
-    try d.e.run(d.fns.attn_merge, .{ rows, c.heads, 1 }, .{ 32, 1, 1 }, .{ d.pm, d.pl, d.po, @as(c_int, @intCast(c.heads)), d.att });
+    const partial = .{ d.q, d.kb, d.vb, d.segments, @as(c_int, @intCast(c.block)), @as(c_int, @intCast(c.heads)), @as(c_int, @intCast(c.kv_heads)), @as(c_int, @intCast(c.ringRows())), @as(c_int, @intCast(c.window)), @as(c_int, @intCast(layer)), d.pm, d.pl, d.po };
+    try launch(d, d.fns.attn_partial, sig.draft_partial, .{ rows, c.heads, chunks }, .{ 128, 1, 1 }, partial);
+    const merge = .{ d.pm, d.pl, d.po, @as(c_int, @intCast(c.heads)), d.att };
+    try launch(d, d.fns.attn_merge, sig.draft_merge, .{ rows, c.heads, 1 }, .{ 32, 1, 1 }, merge);
 }
 pub fn publish(d: anytype, items: []const dr.Hold, contexts: []const *draft.Ctx) !void {
     defer d.selection_base = 0;
@@ -77,9 +94,7 @@ pub fn forward(d: anytype, items: []const dr.Hold, contexts: []const *draft.Ctx)
         try d.norm(d.h, l.input_norm, d.x, B);
         try d.projAgain(l.attn_conv, d.x, d.dyn, B);
         try conv(d, d.x, l.attn_base, 0, d.xin, B, 0);
-        try d.proj(l.q, d.xin, d.qraw, B);
-        try d.projAgain(l.k, d.xin, d.kraw, B);
-        try d.projAgain(l.v, d.xin, d.vb, B);
+        try d.projMany(&.{ l.q, l.k, l.v }, d.xin, &.{ d.qraw, d.kraw, d.vb }, B);
         try rope(d, d.qraw, l.q_norm, d.q, B, c.heads);
         try rope(d, d.kraw, l.k_norm, d.kb, B, c.kv_heads);
         try attention(d, B, i);
@@ -90,8 +105,8 @@ pub fn forward(d: anytype, items: []const dr.Hold, contexts: []const *draft.Ctx)
         try conv(d, d.x, l.mlp_base, 0, d.xin, B, 0);
         try d.proj(l.gate, d.xin, d.gate, B);
         try d.projAgain(l.up, d.xin, d.up, B);
-        try e.run(e.fns.mlp_act, .{ (B * c.intermediate + 255) / 256, 1, 1 }, .{ 256, 1, 1 }, .{ d.gate, d.up, d.act, @as(c_longlong, @intCast(B * c.intermediate)), @as(u64, 0), @as(c_int, @intCast(c.intermediate)) });
-        try d.proj(l.down, d.act, d.o, B);
+        try e.run(e.fns.mlp_act, .{ (B * c.intermediate + 1023) / 1024, 1, 1 }, .{ 256, 1, 1 }, .{ d.gate, d.up, d.act, @as(c_longlong, @intCast(B * c.intermediate)), @as(u64, 0), @as(c_int, @intCast(c.intermediate)), d.xs });
+        try d.projAgain(l.down, d.act, d.o, B);
         try conv(d, d.o, l.mlp_base, d.h2, d.h, B, 1);
     }
     const rows = items.len * (c.block - 1);
@@ -101,11 +116,81 @@ pub fn forward(d: anytype, items: []const dr.Hold, contexts: []const *draft.Ctx)
         masked = d.h2;
     }
     try d.norm(masked, d.w.final_norm, d.x, rows);
-    try draft.precision.project(e, e.head, d.x, d.xs, d.logits, rows, .proposal, draft.precision.dflash_projection_prompt_cutoff);
-    try e.draws.topkRows(e.stream, d.logits, c.vocab, @intCast(c.topk), d.parts, d.words, rows);
+    const spanned = if (narrow(contexts)) try head(d, rows) else try full(d, rows);
+    try e.draws.topkRows(e.stream, spanned orelse d.logits, if (spanned != null) span_width else c.vocab, @intCast(c.topk), d.parts, d.words, rows);
     try d.proj(d.w.selector, d.x, d.hp, rows);
     try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(st.ptr + words_at, d.words, rows * lp_words * 4, e.stream.handle), "cuMemcpyDtoHAsync");
     try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(st.ptr + hp_at, d.hp, rows * c.rank * 2, e.stream.handle), "cuMemcpyDtoHAsync");
     try e.stream.synchronize();
+    if (spanned != null) for (0..rows) |r| {
+        const w = std.mem.bytesAsSlice(u32, st[words_at + r * lp_words * 4 ..][0 .. lp_words * 4]);
+        for (w[2..][0..c.topk]) |*id| if (id.* >= spans[0][1]) {
+            id.* += @intCast(spans[1][0] - spans[0][1]);
+        };
+    };
     try publish(d, items, contexts);
+}
+
+/// A lane stream's prompt and reply tokens since the last scan: one outside the spans marks the stream wide.
+pub fn scan(ctx: *draft.Ctx, toks: []const u32) void {
+    if (!ctx.wide) for (toks[@min(ctx.scanned, toks.len)..]) |t| if (t >= spans[0][1] and t < spans[1][0]) {
+        ctx.wide = true;
+        break;
+    };
+    ctx.scanned = toks.len;
+}
+
+/// Whether every stream's tokens so far keep to the spans (a warmup's or standalone hold's context reads none).
+fn narrow(contexts: []const *draft.Ctx) bool {
+    for (contexts) |ctx| if (ctx.wide) return false;
+    return true;
+}
+
+/// An EXL3 head's tail view: the last wide_blocks blocks (from row 240,128), so it plans as the whole head does.
+pub const x3_tail_at = spans[1][1] - cuda.exl3.wide_blocks * 128;
+
+/// An EXL3 head's first span and the blocks holding its tail span, as views that keep the whole head's bits.
+pub fn x3Views(q: cuda.exl3.Weight) !struct { first: cuda.exl3.Weight, tail: cuda.exl3.Weight } {
+    return .{ .first = try q.columns(0, spans[0][1]), .tail = try q.columns(x3_tail_at, spans[1][1] - x3_tail_at) };
+}
+
+/// The rows' draft logits over the spans' columns, packed in d.logits after the two projections (null: not this head).
+fn head(d: anytype, rows: usize) !?u64 {
+    const e = d.e;
+    // the head's first span and the whole tiles holding its tail span, as views of the stored matrix
+    const first: layers.Proj, const tail: layers.Proj, const tail_at: usize = switch (e.head) {
+        .a4 => |q| blk: {
+            if (q.n != spans[1][1] or q.k % 64 != 0) return full(d, rows);
+            break :blk .{
+                .{ .a4 = .{ .w = q.w, .s = q.s, .b = q.b, .n = spans[0][1], .k = q.k, .npad = q.npad } },
+                .{ .a4 = .{ .w = q.w + tail_tile * q.k / 2, .s = q.s + tail_tile * 2, .b = q.b + tail_tile * 2, .n = q.n - tail_tile, .k = q.k, .npad = q.npad } },
+                tail_tile,
+            };
+        },
+        .x3 => |q| blk: {
+            if (q.n != spans[1][1] or q.k % 128 != 0) return full(d, rows);
+            const v = try x3Views(q);
+            break :blk .{ .{ .x3 = v.first }, .{ .x3 = v.tail }, x3_tail_at };
+        },
+        .an, .ql, .bf => return full(d, rows),
+    };
+    const tail_n = spans[1][1] - tail_at;
+    const a = d.logits; // rows x 98,304, then rows x the tail's columns, then the packed rows x 98,592
+    const b = a + rows * spans[0][1] * 2;
+    const out = b + rows * tail_n * 2;
+    try draft.precision.project(e, first, d.x, d.xs, a, rows, .proposal, draft.precision.dflash_projection_prompt_cutoff);
+    try draft.precision.project(e, tail, d.x, d.xs, b, rows, .proposal, draft.precision.dflash_projection_prompt_cutoff);
+    const skip = spans[1][0] - tail_at;
+    const copies = [2]cuda.abi.Memcpy2D{
+        .{ .src = a, .src_pitch = spans[0][1] * 2, .dst = out, .dst_pitch = span_width * 2, .width = spans[0][1] * 2, .height = rows },
+        .{ .src = b + skip * 2, .src_pitch = tail_n * 2, .dst = out + spans[0][1] * 2, .dst_pitch = span_width * 2, .width = (tail_n - skip) * 2, .height = rows },
+    };
+    for (&copies) |*m| try e.d.check(e.d.api.cuMemcpy2DAsync_v2(m, e.stream.handle), "cuMemcpy2DAsync");
+    return out;
+}
+
+/// The rows' draft logits over the whole vocabulary, in d.logits.
+fn full(d: anytype, rows: usize) !?u64 {
+    try draft.precision.project(d.e, d.e.head, d.x, d.xs, d.logits, rows, .proposal, draft.precision.dflash_projection_prompt_cutoff);
+    return null;
 }

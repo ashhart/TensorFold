@@ -37,7 +37,7 @@ const usage =
     \\                   recipe/triton_fill.py compile; SIGS from its `sigs`)
     \\       tf-dsv41 kv paged|split|compact|park PACK REF OUT (a rank of TP=2 on the paged pool vs the pool reference)
     \\       tf-dsv41 forward-digests PACK REF OUT (our forward vs recipe/dsv41_forward_digests.py's run, one GPU)
-    \\       tf-dsv41 decode-tp PACK REF OUT (a rank of TP=2 over NCCL vs recipe/dsv41_decode_ref.py; TF_TP_RANK ...)
+    \\       tf-dsv41 decode-tp PACK REF OUT (one NCCL rank, against matching-world reference tokens and digests)
     \\       tf-dsv41 follow PACK ASSETS (a served model's rank > 0: rank 0's forward operations until it stops)
     \\       tf-dsv41 generate PACK ASSETS TRACE (rank 0: TRACE's prompts through the served engine, ids == recorded)
     \\       tf-dsv41 slot-drafts PACK ASSETS TRACE... (rank 0: drafts over several live slots, batched == alone == recorded)

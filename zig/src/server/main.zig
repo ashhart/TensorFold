@@ -17,16 +17,23 @@ const checkpoint_cli = @import("checkpoint_cli");
 
 const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--name NAME] [--chat-template FILE]" ++
     " [--alias ALIAS] [--allowed-host NAME] [--allowed-origin ORIGIN] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard]" ++
+    " [--max-inflight N] [--max-inflight-per-key N] [--requests-per-second N] [--request-burst N]" ++
     " [--context CONTEXT] [--speed-up SETTINGS] [--prompt-cache-gib PROMPT_CACHE_GIB]" ++
     " [--prompt-cache-over-cap] [--learn] [--learn-dir LEARN_DIR] [--learn-gib LEARN_GIB]" ++
     " [--learn-conversations] [--learn-daily-gib LEARN_DAILY_GIB] [--recall] [--recall-dir RECALL_DIR]" ++
     " [--recall-gib RECALL_GIB] [--recall-read-only] [--max-tokens MAX_TOKENS]" ++
     " [--temperature TEMPERATURE] [--top-p TOP_P] [--top-k TOP_K] [--min-p MIN_P] [--prompt-seed]" ++
     " [--thinking | --no-thinking] [--reasoning-effort {low,medium,high,xhigh}]" ++
-    " [--thinking-budget THINKING_BUDGET] [--thinking-reserve THINKING_RESERVE] [--loop-guard] [--no-drafts]" ++
+    " [--thinking-budget THINKING_BUDGET] [--thinking-reserve THINKING_RESERVE] [--loop-guard] [--loop-guard-stop] [--no-drafts]" ++
     " [--drafter DRAFTER]" ++
-    " [--drafter-bits {0,4}] [--record RECORD] [--keep-warm SECONDS] [--compact-at COMPACT_AT]" ++
-    " [--compact-keep COMPACT_KEEP]" ++
+    " [--drafter-bits {0,4}] [--record RECORD] [--keep-warm SECONDS] [--idle-unload SECONDS]" ++
+    " [--silence-floor-dbfs DBFS] [--silence-seconds SECONDS]" ++
+    " [--silence-onset-s SECONDS] [--silence-onset-voiced-s SECONDS]" ++
+    " [--silence-mid-s SECONDS] [--silence-mid-min-voiced-s SECONDS] [--silence-redraws N]" ++
+    " [--silence-redraw-budget-s SECONDS] [--silence-redraw-controls LIST]" ++
+    " [--short-reply-ratio R] [--short-reply-chars-per-s CPS]" ++
+    " [--register-redraw-st ST] [--register-redraw-high PERCENT] [--register-high-hz HZ]" ++
+    " [--compact-at COMPACT_AT] [--compact-keep COMPACT_KEEP]" ++
     " [--compact-memory COMPACT_MEMORY] [--slide] [--slide-graph SLIDE_GRAPH] [--parallel PARALLEL]" ++
     " [--cortheon] [--no-update-check] [--backend {auto,mlx,cuda}] [--device DEVICE]" ++
     " [--segments SEGMENTS] model\n";
@@ -67,6 +74,7 @@ pub fn main(init: std.process.Init) !u8 {
         var out: std.Io.Writer.Allocating = .init(a);
         var caps = engines.capabilities(a);
         caps.optional_libraries = try @import("core").picture.runtime.probe(a, io);
+        caps.p2p = engines.p2p(a);
         try cli.capabilities(&out.writer, caps);
         try std.Io.File.stdout().writeStreamingAll(io, out.written());
         return 0;
@@ -101,11 +109,13 @@ pub fn main(init: std.process.Init) !u8 {
     var problem: []const u8 = "";
     const dir = try hub.resolve(a, io, init.environ_map, args.model, &problem) orelse return fail(problem);
     // A drafter is named like a model: a directory, or a repo id `tensorfold pull` cached.
+    args.drafter_name = args.drafter;
     if (args.drafter) |d| args.drafter = try hub.resolve(a, io, init.environ_map, d, &problem) orelse return fail(problem);
     const model_type = modelType(a, io, dir, &problem) catch |e| {
         if (e == error.OutOfMemory) return e;
         return fail(problem);
     };
+    if (args.silence.refusal(model_type) orelse args.redraw.refusal(model_type)) |why| return fail(why);
     // the model folder held while this process reads it, so a rollback refuses it: exclusive with --slide, else shared
     var unheld: []const u8 = "";
     const held = api.originals.serving(a, dir, args.slide, &unheld) catch |e| switch (e) {
@@ -130,7 +140,7 @@ pub fn main(init: std.process.Init) !u8 {
     var record: ?*@import("engine_api").recall_store.Store = null;
     defer if (record) |r| r.close(); // after the engine below has stopped reading it
     var closer: Closer = .{ .opened = up.engine };
-    defer closer.closeOnce();
+    defer closer.deinit();
     const served = hub.servedName(args.name, args.model, dir);
     problem = "";
     record = recall_open.open(gpa, io, a, args, up.text, served, &problem) catch |e| {
@@ -144,6 +154,8 @@ pub fn main(init: std.process.Init) !u8 {
         .served = served,
         .recall = record,
         .model_dir = dir,
+        .model_type = model_type,
+        .reopen = .{ .ctx = &closer, .open = Reopen.open, .close_held = Reopen.closeHeld, .halt_held = Closer.halt, .replace = Reopen.replace },
         .sampling = try sampling(a, io, dir, args),
         .environ = init.environ_map,
         .started = started,
@@ -151,6 +163,22 @@ pub fn main(init: std.process.Init) !u8 {
         .forget_fail = if (comptime @import("build_options").slide_test_hooks) forgetFail(init.environ_map) else 0,
     });
 }
+
+/// The reopen path the idle unload takes: the same open calls `main` made at startup.
+const Reopen = struct {
+    fn open(ctx: *anyopaque, a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dir: []const u8, mt: []const u8, cargs: cli.Args, problem: *[]const u8) anyerror!?api.Opened {
+        _ = ctx;
+        return engines.open(a, gpa, io, dir, mt, cargs, problem);
+    }
+    fn closeHeld(ctx: *anyopaque) void {
+        const c: *Closer = @ptrCast(@alignCast(ctx));
+        c.closeOnce();
+    }
+    fn replace(ctx: *anyopaque, opened: api.Opened, scratch: *std.heap.ArenaAllocator) void {
+        const c: *Closer = @ptrCast(@alignCast(ctx));
+        c.adopt(opened, scratch);
+    }
+};
 
 /// TF_SLIDE_FORGET_FAIL in a -Dslide-test-hooks build: the fact whose check a delete fails, so its put-back is seen.
 fn forgetFail(env: *const std.process.Environ.Map) u32 {
@@ -199,22 +227,4 @@ fn sampling(a: std.mem.Allocator, io: std.Io, dir: []const u8, args: cli.Args) !
     return if (out.count() > 0) json.Value{ .object = out } else null;
 }
 
-const Closer = struct {
-    opened: api.Opened,
-    closed: bool = false,
-    fn closeOnce(c: *Closer) void {
-        if (c.closed) return;
-        c.closed = true;
-        c.opened.close(c.opened.ctx);
-    }
-    fn close(p: *anyopaque) void {
-        const c: *Closer = @ptrCast(@alignCast(p));
-        c.closeOnce();
-    }
-    fn halt(p: *anyopaque, reason: []const u8) void {
-        const c: *Closer = @ptrCast(@alignCast(p));
-        if (comptime @hasField(api.Opened, "halt")) {
-            if (c.opened.halt) |f| f(c.opened.ctx, reason);
-        }
-    }
-};
+const Closer = @import("idle_unload_closer.zig").Closer;

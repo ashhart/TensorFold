@@ -12,7 +12,7 @@ pub const Agree = struct {
 };
 
 /// Faults no request recovers from: the transport (tp.collective.Error), the device (cuda's driver errors), memory.
-const fatal = [_][]const u8{ "Aborted", "PeerFailed", "Timeout", "BackendFailed", "CudaFailed", "OutOfDeviceMemory", "DriverUnavailable", "MissingSymbol", "OutOfMemory" };
+const fatal = [_][]const u8{ "Aborted", "PeerFailed", "Timeout", "BackendFailed", "CudaFailed", "CudaContextLost", "OutOfDeviceMemory", "DriverUnavailable", "MissingSymbol", "OutOfMemory" };
 
 pub fn isFatal(err: anyerror) bool {
     for (fatal) |name| if (std.mem.eql(u8, @errorName(err), name)) return true;

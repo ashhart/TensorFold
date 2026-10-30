@@ -85,7 +85,7 @@ const Box = struct {
 };
 
 /// One host over the fake backend with a prompt cache and a rows store under `root`; `turns` run in order.
-fn session(root: []const u8, comptime check: fn (h: *LaneHost, r: *pc.rows.Rows, t: *lanes.fake.Fake) anyerror!void) !void {
+fn session(root: []const u8, spill: pc.rows.Spill, comptime check: fn (h: *LaneHost, r: *pc.rows.Rows, t: *lanes.fake.Fake) anyerror!void) !void {
     const gpa = std.testing.allocator;
     var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
     defer cfg.deinit(gpa);
@@ -95,7 +95,7 @@ fn session(root: []const u8, comptime check: fn (h: *LaneHost, r: *pc.rows.Rows,
     var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
     defer core.deinit();
     const family: pc.Snapshots = .{ .ptr = &target, .vtable = &Snaps.vtable };
-    const rows = try pc.rows.Rows.open(gpa, family, .{ .root = root, .identity = 5, .cap = 1 << 30, .floor = 0, .daily = 1 << 30 });
+    const rows = try pc.rows.Rows.open(gpa, family, .{ .root = root, .identity = 5, .cap = 1 << 30, .floor = 0, .daily = 1 << 30, .spill = spill });
     defer rows.deinit();
     var store = pc.Store.init(gpa, family, .{ .min_gap = 4, .min_prompt = 0 }, 1 << 20);
     defer store.deinit();
@@ -176,6 +176,99 @@ test "a host writes its kept states while idle and on its stop; the next host re
             try std.testing.expect(gone.freed > 0 and r.states.items.len == 0 and r.blocks.count() == 0);
         }
     };
-    try session(root, S.one);
-    try session(root, S.two);
+    try session(root, .off, S.one);
+    try session(root, .off, S.two);
+}
+
+test "rows I/O: a host serves another turn while its disk writer is blocked" {
+    const Fixture = @import("rows_async_fixture.zig");
+    const Check = struct {
+        fn run(h: *LaneHost, r: *pc.rows.Rows, _: *lanes.fake.Fake) !void {
+            var gate: Fixture.Gate = .{};
+            var first: Box = .{};
+            var second: Box = .{};
+            defer {
+                gate.release.store(true, .release);
+                h.engine().drain();
+                first.tokens.deinit(std.testing.allocator);
+                second.tokens.deinit(std.testing.allocator);
+            }
+            r.file_io = gate.io();
+            const p = prompt(31);
+            const req: api.Request = .{ .prompt = &p, .max_tokens = 6, .history_len = 600 };
+            try h.engine().submit(31, &req, .{ .ctx = &first, .event = Box.event });
+            try Fixture.Gate.wait(&gate.entered);
+            const q = prompt(32);
+            const next: api.Request = .{ .prompt = &q, .max_tokens = 6, .history_len = 600 };
+            try h.engine().submit(32, &next, .{ .ctx = &second, .event = Box.event });
+            const end = pc.rows.write.nowNs() + 3 * std.time.ns_per_s;
+            var result: ?Reason = null;
+            while (pc.rows.write.nowNs() < end) {
+                second.mutex.lockUncancelable(std.testing.io);
+                result = second.done;
+                second.mutex.unlock(std.testing.io);
+                if (result != null) break;
+                pc.rows.write.io.nap();
+            }
+            gate.release.store(true, .release);
+            _ = first.wait();
+            _ = second.wait();
+            try std.testing.expectEqual(@as(?Reason, .length), result);
+            try std.testing.expectEqual(@as(usize, 6), second.tokens.items.len);
+        }
+    };
+    const root = try std.fmt.allocPrint(std.testing.allocator, "{s}/tf-host-io-{d}", .{ if (platform.c.getenv("TMPDIR")) |p| std.mem.span(p) else ".", platform.c.getpid() });
+    defer std.testing.allocator.free(root);
+    defer rmTree(root);
+    try session(root, .off, Check.run);
+}
+
+test "rows close: a spill-only host wakes with its RAM conversation on disk and replies exactly as a fresh host" {
+    const S = struct {
+        var history: [706]u32 = undefined;
+        var resumed: [8]u32 = undefined;
+        fn one(h: *LaneHost, _: *pc.rows.Rows, _: *lanes.fake.Fake) !void {
+            const p = prompt(71);
+            var b: Box = .{};
+            defer b.tokens.deinit(std.testing.allocator);
+            const req: api.Request = .{ .prompt = &p, .max_tokens = 6, .history_len = 600 };
+            try h.engine().submit(71, &req, .{ .ctx = &b, .event = Box.event });
+            try std.testing.expectEqual(Reason.length, b.wait());
+            @memcpy(history[0..700], &p);
+            @memcpy(history[700..], b.tokens.items);
+            var ask: api.ImprintAsk = .{ .op = .where, .prompt = &history };
+            try std.testing.expect(h.engine().imprintAsk(&ask));
+            try std.testing.expect(ask.wait(std.testing.io, 5000));
+            try std.testing.expectEqual(@as(u32, 600), ask.out.ram);
+            try std.testing.expectEqual(@as(u32, 0), ask.out.disk);
+        }
+        fn two(h: *LaneHost, r: *pc.rows.Rows, _: *lanes.fake.Fake) !void {
+            try std.testing.expectEqual(@as(usize, 1), r.states.items.len);
+            try turn(h, r, true);
+        }
+        fn fresh(h: *LaneHost, r: *pc.rows.Rows, _: *lanes.fake.Fake) !void {
+            try turn(h, r, false);
+        }
+        fn turn(h: *LaneHost, r: *pc.rows.Rows, wake: bool) !void {
+            var b: Box = .{};
+            defer b.tokens.deinit(std.testing.allocator);
+            const req: api.Request = .{ .prompt = &history, .max_tokens = 8, .history_len = 704 };
+            try h.engine().submit(72, &req, .{ .ctx = &b, .event = Box.event });
+            try std.testing.expectEqual(Reason.length, b.wait());
+            try std.testing.expectEqual(@as(?u32, if (wake) 600 else 0), b.cached);
+            try std.testing.expectEqual(@as(u64, if (wake) 1 else 0), r.counts.reads);
+            if (wake) @memcpy(&resumed, b.tokens.items) else try std.testing.expectEqualSlices(u32, &resumed, b.tokens.items);
+        }
+    };
+    const a = std.testing.allocator;
+    const tmp = if (platform.c.getenv("TMPDIR")) |p| std.mem.span(p) else ".";
+    const root = try std.fmt.allocPrint(a, "{s}/tf-host-wake-{d}", .{ tmp, platform.c.getpid() });
+    defer a.free(root);
+    defer rmTree(root);
+    const fresh = try std.fmt.allocPrint(a, "{s}-fresh", .{root});
+    defer a.free(fresh);
+    defer rmTree(fresh);
+    try session(root, .evicted, S.one);
+    try session(root, .evicted, S.two);
+    try session(fresh, .evicted, S.fresh);
 }

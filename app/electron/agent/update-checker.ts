@@ -1,6 +1,6 @@
 import { verify } from 'node:crypto'
 import type { AppUpdateChecksum, AppUpdateStatus } from './types'
-import { resolveFetchableUrl } from './tool-web'
+import { resolveUpdateHost } from './update-network'
 import { discardResponseBody, pinnedFetch, type PinnedHostResolver } from './pinned-fetch'
 import { assertUpdateFeedUrl } from './security'
 import { updateTrustRootPublicKey } from './update-trust'
@@ -98,7 +98,7 @@ export async function checkUpdateFeed(
   deps: UpdateCheckDependencies = {},
 ): Promise<AppUpdateStatus> {
   assertUpdateFeedUrl(feedUrl)
-  const target = await resolveFetchableUrl(feedUrl, deps.lookup)
+  const target = await resolveUpdateHost(feedUrl, deps.lookup)
   const res = await pinnedFetch(target, {
     headers: { Accept: 'application/json, application/rss+xml, application/xml, text/xml, */*' },
     signal,

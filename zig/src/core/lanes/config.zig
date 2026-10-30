@@ -12,8 +12,10 @@ pub const default_prior = [_]f64{ 0.85, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5, 0.5, 0.
 
 /// What a backend reports about its loaded model: the attributes the Python engine reads at setup.
 pub const Model = struct {
+    allocate_shared_drafts: bool = false, // reserve useful shared head rows before a proposal pass
     root_copies: bool = false, // verified context copies precede head drafts and skip their proposal pass
     copy_drafts: bool = true, // global serving switch, independent of shared verification capacity
+    own_copy_rates: bool = false, // a copy window is priced by its stream's own copies, not copy_rate's prior
 
     exact_width: u32 = 1, // the widest window that reproduces one-token steps bit for bit
     first_copy_rows: u32 = 0, // a lone stream's first copy window (0: the exact width)
@@ -49,9 +51,11 @@ pub const Model = struct {
 };
 
 pub const Config = struct {
+    allocate_shared_drafts: bool = false, // reserve useful shared head rows before a proposal pass
     root_copies: bool = false,
     family_width: u32,
     max_copy: u32,
+    own_copy_rates: bool = false, // Model.own_copy_rates
     first_copy: u32,
     base_width: u32,
     family_mtp: bool,
@@ -127,6 +131,7 @@ pub const Config = struct {
         const depth_prior = try gpa.dupe(f64, prior);
         errdefer gpa.free(depth_prior);
         return .{
+            .allocate_shared_drafts = m.allocate_shared_drafts,
             .root_copies = m.root_copies and m.copy_drafts,
             .context_copies = m.context_copies and m.copy_drafts,
             .enter_match = @max(1, m.copy_match),
@@ -134,6 +139,7 @@ pub const Config = struct {
             .lone_cost_tile = m.lone_cost_tile,
             .family_width = width,
             .max_copy = max_copy,
+            .own_copy_rates = m.own_copy_rates,
             .first_copy = first_copy,
             .base_width = @min(width, first_copy + 1),
             .family_mtp = m.mtp and width >= 2 and m.speculate,

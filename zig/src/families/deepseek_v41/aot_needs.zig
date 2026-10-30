@@ -179,7 +179,7 @@ pub const Served = struct {
     /// The engine's knobs as it reads them (PF_DENSE is CUDA, so the `_gemm` variants it replaces are listed too).
     pub fn fromEnv() !Served {
         const knobs = @import("serve_knobs.zig");
-        var o: block.Options = .{ .world = @intCast(try envInt("TF_TP_WORLD", 2)), .r1 = knobs.r1(&knobs.env) };
+        var o: block.Options = .{ .world = @intCast(try envInt("TF_TP_WORLD", 2)), .rank = @intCast(try envInt("TF_TP_RANK", 0)), .r1 = knobs.r1(&knobs.env) };
         if (std.c.getenv("TF_DSV41_EXPERT_TOPP")) |v| o.expert_topp = try std.fmt.parseFloat(f64, std.mem.span(v));
         o.limit = try envInt("TF_DSV41_CONTEXT", o.limit);
         o.rope_rows = o.limit + 2048;

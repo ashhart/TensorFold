@@ -1,5 +1,5 @@
 // Prompt GEMM on #952's factored arithmetic (qmm_kernel's bits): 2 groups a stage, mma per group then fp32 fmas.
-#include "qmm_frag.cuh"
+#include "common/qmm_frag.cuh"
 
 namespace fact {
 using namespace qmm_frag;

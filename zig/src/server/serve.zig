@@ -10,6 +10,8 @@ const live = @import("live.zig");
 const listener_mod = @import("listener.zig");
 const model_text = @import("model_text.zig");
 const server_mod = @import("server.zig");
+const idle_unload = @import("idle_unload.zig");
+const hf_text = @import("hf_text.zig");
 const routes = @import("routes.zig");
 const recall_routes = @import("recall_routes.zig");
 const Allocator = std.mem.Allocator;
@@ -82,6 +84,10 @@ pub const Setup = struct {
     served: []const u8,
     /// The checkpoint's folder (structured output reads its tokenizer.json and config.json, /slide shows its shards).
     model_dir: []const u8 = "",
+    /// The checkpoint's model_type, as `engines.open` read at startup; the idle reload opens with it.
+    model_type: []const u8 = "",
+    /// How the idle unload reopens the engine and its text; null keeps the manager off even with --idle-unload.
+    reopen: ?idle_unload.Reopen = null,
     /// Sampling defaults from generation_config.json and the flags, as a JSON object; null: greedy.
     sampling: ?json.Value = null,
     environ: ?*const std.process.Environ.Map = null,
@@ -133,6 +139,14 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
             if (std.mem.eql(u8, seen, id)) break;
         } else ids.append(a, id) catch return 1;
     };
+    var bad_id: []const u8 = "";
+    const backgrounds = namedBackgrounds(a, args.name_priority, ids.items, &bad_id) catch |err| switch (err) {
+        error.OutOfMemory => return 1,
+        error.UnknownId => {
+            std.debug.print("tensorfold: --name-priority names '{s}', not --name or an --alias\n", .{bad_id});
+            return 1;
+        },
+    };
     const salt = if (env(s, "TENSORFOLD_SEED_SALT")) |t| std.fmt.parseInt(i64, std.mem.trim(u8, t, " "), 10) catch {
         std.debug.print("tensorfold: TENSORFOLD_SEED_SALT={s}: an integer\n", .{t});
         return 1;
@@ -147,20 +161,31 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     };
     const config: server_mod.Config = .{
         .browser = .{ .allowed_hosts = args.allowed_host, .allowed_origins = args.allowed_origin },
+        .allowed_controls = args.allowed_controls,
+        .redraw = args.redraw,
         .served_name = s.served,
         .model_dir = s.model_dir,
+        .voices_dir = args.voices,
+        .default_voice = args.default_voice,
         .model_ids = ids.items,
+        .background_ids = backgrounds,
         .default_max_tokens = args.max_tokens,
         .enable_thinking = args.thinking,
         .reasoning_effort = args.reasoning_effort,
         .thinking_budget = args.thinking_budget,
         .thinking_reserve = args.thinking_reserve,
-        .loop_guard = args.loop_guard,
+        .loop_guard = args.loop_guard or args.loop_guard_stop,
+        .loop_stop = args.loop_guard_stop,
         .keep_warm_s = args.keep_warm,
+        .idle_unload_s = args.idle_unload,
+        .admission = args.admission,
         .default_sampling = s.sampling,
         .use_drafts = !args.no_drafts,
         .vision_urls = args.vision_urls,
         .seed_salt = salt,
+        .silence_mid = args.silence.mid_seconds != null,
+        .silence_guard = args.silence.enabled(),
+        .cfg = args.cfg.options(),
         .prompt_seed = args.prompt_seed,
         .sse_keepalive_s = keepalive_s,
         .request_log = env(s, "TENSORFOLD_REQUEST_LOG"),
@@ -180,13 +205,19 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         if (err == error.InvalidVisionMarkers)
             std.debug.print("tensorfold: --vision requires added-token markers; image and video input cannot be served safely with this tokenizer\n", .{})
         else
-            std.debug.print("tensorfold: the server could not start\n", .{});
+            std.debug.print("tensorfold: the server could not start: {s}\n", .{@errorName(err)});
         return 1;
     };
     defer srv.deinit();
     srv.recall = s.recall;
-    if (args.loop_guard and !srv.info.loop_guard) {
-        std.debug.print("tensorfold: --loop-guard is not supported by this native engine\n", .{});
+    switch (idle_unload.startServer(srv, args, s.reopen, s.model_dir, s.model_type)) {
+        .disabled, .enabled => {},
+        .no_reopen => log.line("idle unload off: this server has no reopen path", .{}),
+        .out_of_memory => log.line("out of memory: idle unload stays off", .{}),
+    }
+    defer idle_unload.stopServer(srv);
+    if (srv.config.loop_guard and !srv.info.loop_guard) {
+        std.debug.print("tensorfold: {s} is not supported by this native engine\n", .{if (args.loop_guard_stop) "--loop-guard-stop" else "--loop-guard"});
         return 2;
     }
     if (raiseOpenFileLimit()) |r| log.line("open-file limit raised: soft {d} -> {d}", .{ r[0], r[1] });
@@ -207,18 +238,19 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     const now = std.Io.Clock.awake.now(io).toNanoseconds();
     const loaded = if (s.started > 0) @as(f64, @floatFromInt(now - s.started)) / 1e9 else 0;
     var window_text: [24]u8 = undefined;
-    log.line("serving {s} at http://{s}:{d}/v1 (sampling: {s}; drafts: {s}; context: {s}; loaded in {d:.1}s)", .{
-        s.served,                                                   args.host,                                                                                   port,   shownSampling(a, s.sampling),
-        if (args.no_drafts or srv.info.plain_only) "off" else "on", if (window > 0) std.fmt.bufPrint(&window_text, "{d}", .{window}) catch "?" else "unlimited", loaded,
+    log.line("serving {s} at http://{s}:{d}/v1 (sampling: {s}; drafts: {f}; context: {s}; loaded in {d:.1}s)", .{
+        s.served,                                                  args.host,                                                                                   port,   shownSampling(a, s.sampling),
+        @import("draft_line.zig").shown(args.no_drafts, srv.info), if (window > 0) std.fmt.bufPrint(&window_text, "{d}", .{window}) catch "?" else "unlimited", loaded,
     });
     const reserved = args.thinking_reserve > 0 and srv.info.answer_limit;
     if (args.thinking_reserve > 0 and !srv.info.answer_limit) log.line("--thinking-reserve is not applied: this engine cannot limit the answer apart from the reasoning", .{});
     if (args.thinking and std.mem.indexOf(u8, s.text.templateSource(), "enable_thinking") != null)
         log.line("thinking on (the chat template's default): replies reason in reasoning_content before the answer in content, and max_tokens {s}. --no-thinking turns it off; a request can send chat_template_kwargs {{\"enable_thinking\": false}}", .{if (reserved) "limits the answer, the reasoning taking up to --thinking-reserve tokens more" else "counts both"});
     if (s.recall) |r| recall_routes.line(r);
+    if (srv.idle_manager != null) log.line("idle unload on: the engine closes after {d} s idle and the next request reloads it (a full model load)", .{args.idle_unload});
     if (srv.cortheon) |c| log.line("cortheon on: chat requests get Cortheon's reasoning program, web research before building, and cortheon_search/cortheon_fetch run here ({s}); a request can send \"cortheon\": false", .{c.engine});
     live.columns_env = env(s, "COLUMNS");
-    var ticker: live.Ticker = .{ .engine = s.engine };
+    var ticker: live.Ticker = .{ .read_status = readCurrentStatus, .ctx = srv };
     const drawing = live.wanted(io, if (env(s, "TENSORFOLD_NO_LIVE")) |v| std.mem.eql(u8, v, "1") else false);
     if (drawing) ticker.start();
     // the listener stays open through the drain: new requests get 503 + Retry-After, /health "draining"
@@ -230,7 +262,8 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     accept.join();
     lis.close();
     if (drawing) ticker.finish();
-    s.engine.drain(); // kept states waiting for disk are written (under the engine's deadline) before the engine closes
+    if (srv.idle_manager) |m| idle_unload.stopTimer(m);
+    srv.engine.drain(); // the current engine's disk writes finish (the idle unload may have swapped engines) before it closes
     var waited: u32 = 0;
     while (srv.open_connections.load(.acquire) > 0 and waited < 40) : (waited += 1) std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
     if (!closeIdle(srv, s.stop)) {
@@ -257,7 +290,10 @@ fn drain(srv: *server_mod.Server, io: std.Io, stop: ?EngineStop, drain_s: f64) v
     }
     const cut = if (stop_count.load(.acquire) != signals) "a second stop signal" else "the drain deadline (TF_DRAIN_S)";
     log.line("shutting down: {s}: {d} request(s) still in progress end \"{s}\" at the next round boundary", .{ cut, left, routes.restarting });
-    if (stop) |st| if (st.halt) |h| h(st.ctx, routes.restarting);
+    if (stop) |st| if (st.halt) |h| {
+        // a halt goes only to a resident engine: the park closed the startup one, a reload's Closer owns the rest
+        if (srv.idle_manager) |m| idle_unload.haltHeld(m, routes.restarting) else h(st.ctx, routes.restarting);
+    };
     var waited: u32 = 0;
     while (srv.generating.load(.seq_cst) > 0 and waited < 100) : (waited += 1) std.Io.sleep(io, .fromMilliseconds(20), .awake) catch {};
 }
@@ -300,6 +336,13 @@ fn shownSampling(a: Allocator, sampling: ?json.Value) []const u8 {
         parts.append(a, std.fmt.allocPrint(a, "{s} {s}", .{ k, text }) catch return "greedy") catch return "greedy";
     }
     return std.mem.join(a, ", ", parts.items) catch "greedy";
+}
+
+/// The live ticker's status reader: the CURRENT engine (the idle unload swaps engines; a captured handle would dangle).
+fn readCurrentStatus(ctx: *anyopaque, out: *api.Status, stream_tokens: []u32) void {
+    const srv: *server_mod.Server = @ptrCast(@alignCast(ctx));
+    if (srv.idle_manager) |m| return m.readStatus(srv, out, stream_tokens); // the manager lock guards the closed-engine race
+    srv.engine.status(out, stream_tokens);
 }
 
 test "the targets are the hard limit, or the fallbacks under an unlimited one" {
@@ -354,4 +397,32 @@ test "Failure boundaries: engine close waits for handlers and connections to lea
     server.generating.store(0, .seq_cst);
     try std.testing.expect(closeIdle(&server, stop));
     try std.testing.expectEqual(@as(usize, 1), count);
+}
+
+test "idle deadline: a counted request waits for reload before its drain halt on every cycle" {
+    try @import("idle_unload_deadline_test.zig").loadingDrain(drain);
+}
+
+/// --name-priority's ids that name a served id, in order; the first unknown one is named in `bad`.
+pub fn namedBackgrounds(allocator: std.mem.Allocator, entries: []const []const u8, ids: []const []const u8, bad: *[]const u8) error{ UnknownId, OutOfMemory }![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    errdefer out.deinit(allocator);
+    for (entries) |entry| {
+        const eq = std.mem.indexOfScalar(u8, entry, '=') orelse {
+            bad.* = entry;
+            return error.UnknownId;
+        };
+        const id = std.mem.trim(u8, entry[0..eq], " \t");
+        var known = false;
+        for (ids) |seen| if (std.mem.eql(u8, seen, id)) {
+            known = true;
+            break;
+        };
+        if (!known) {
+            bad.* = id;
+            return error.UnknownId;
+        }
+        try out.append(allocator, id);
+    }
+    return out.toOwnedSlice(allocator);
 }

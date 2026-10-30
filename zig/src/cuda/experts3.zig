@@ -18,12 +18,15 @@ fn int(x: usize) c_int {
 
 pub const Affine3Experts = struct {
     pair_fn: Function,
+    split_fn: Function, // the pair form with a column block a CTA and its groups shared by the CTA's warps
     down_fn: Function,
     pre_pair_fn: Function,
     pre_down_fn: Function,
     widen_fn: Function,
     planes_fn: Function,
     resident: [2]usize, // blocks the decode pair and down kernels fill: per SM times SMs
+    split_resident: usize, // blocks split_fn fills
+    split_below: usize, // pair column blocks below which split_fn runs: 7/8 of the warps pair_fn keeps resident
 
     pub const words = 224; // uint32 a 3-bit block: a 2-bit plane (128), a 1-bit plane (64), then scales and biases (32)
     /// The prompt kernels' dynamic shared bytes: the larger of the 3-bit and 4-bit (shared expert) stage sets.
@@ -32,6 +35,7 @@ pub const Affine3Experts = struct {
 
     pub const symbols = struct {
         pub const pair = "_ZN11tf_experts313expert_kernelILi2ELi2ELi2ELi4EEEvPK13__nv_bfloat16iiPK5uint4iiPKiS8_S8_PvifS6_i";
+        pub const split = "_ZN11tf_experts312split_kernelILi2ELi2ELi2ELi4EEEvPK13__nv_bfloat16iiPK5uint4iiPKiS8_S8_PvifS6_i";
         pub const down = "_ZN11tf_experts313expert_kernelILi1ELi0ELi2ELi4EEEvPK13__nv_bfloat16iiPK5uint4iiPKiS8_S8_PvifS6_i";
         pub const pre_pair = "_ZN19tf_experts3_prefill14prefill_kernelILi2ELi2ELi2ELi2ELi4EEEvPK13__nv_bfloat16iiPK5uint4iiPKiS8_S8_PvifS6_i";
         pub const pre_down = "_ZN19tf_experts3_prefill14prefill_kernelILi1ELi3ELi2ELi2ELi4EEEvPK13__nv_bfloat16iiPK5uint4iiPKiS8_S8_PvifS6_i";
@@ -43,6 +47,7 @@ pub const Affine3Experts = struct {
     pub fn resolve(decode_mod: Module, prompt_mod: Module, sms: usize) !Affine3Experts {
         var a: Affine3Experts = undefined;
         a.pair_fn = try decode_mod.function(symbols.pair);
+        a.split_fn = try decode_mod.function(symbols.split);
         a.down_fn = try decode_mod.function(symbols.down);
         a.widen_fn = try decode_mod.function(symbols.widen);
         a.planes_fn = try decode_mod.function(symbols.planes);
@@ -51,6 +56,8 @@ pub const Affine3Experts = struct {
         try a.pre_pair_fn.allowDynamicShared(pair_prompt_smem);
         try a.pre_down_fn.allowDynamicShared(prompt_smem);
         a.resident = .{ @max(1, try a.pair_fn.occupancy(128, 0)) * sms, @max(1, try a.down_fn.occupancy(128, 0)) * sms };
+        a.split_resident = @max(1, try a.split_fn.occupancy(128, 0)) * sms;
+        a.split_below = 4 * a.resident[0] * 7 / 8;
         return a;
     }
 
@@ -73,11 +80,13 @@ pub const Affine3Experts = struct {
     /// Decode rows: `pair` takes token rows through SwiGLU over the pair tables, else pair rows down to fp32 sums.
     pub fn run(e: *const Affine3Experts, s: Stream, pair: bool, in: experts.Rows, l: experts.Layer, p: Plan, out: u64, items: usize) !void {
         const v = view(l, pair);
-        const grid = @min((items * v.nb + 3) / 4, e.resident[@intFromBool(!pair)]);
+        const units = items * v.nb;
+        const split = pair and units < e.split_below;
+        const grid = if (split) @min(units, e.split_resident) else @min((units + 3) / 4, e.resident[@intFromBool(!pair)]);
         if (grid < 1) return;
         var a = args(in.x, in.stride, if (pair) in.slots else 0, v.w, v.kg, v.nb, p, out, v.n, v.w4, l.shared);
         const cfg: launch_.Config = .{ .grid = .{ .x = @intCast(grid), .y = 1, .z = 1 }, .block = .{ .x = 128 }, .shared = 0 };
-        try launch_.launch(if (pair) e.pair_fn else e.down_fn, cfg, s, &a);
+        try launch_.launch(if (split) e.split_fn else if (pair) e.pair_fn else e.down_fn, cfg, s, &a);
     }
 
     /// Prompt rows, 64 pairs x 128 columns a CTA: `pair` SwiGLU over the pair tables, else down to bf16 sums.

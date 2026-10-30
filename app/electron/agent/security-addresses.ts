@@ -125,6 +125,13 @@ export function isBenchmarkIp(ip: string): boolean {
   return family === 4 ? BENCHMARK_IPS.check(address, 'ipv4') : family === 6 && BENCHMARK_IPS.check(address, 'ipv6')
 }
 
+// A placeholder address a TUN proxy hands out is admitted for a pinned, certificate-checked host; every other private address stays refused.
+export function isAdmissiblePinnedIp(ip: string): boolean {
+  if (String(ip || '').includes('%')) return false
+  if (isAlwaysForbiddenConnectorIp(ip)) return false
+  return isGloballyRoutableIp(ip) || isBenchmarkIp(ip)
+}
+
 export function isLinkLocalOrMetadataHost(hostname: string): boolean {
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/%.*$/, '')
   if (host === 'metadata.google.internal' || isKnownMetadataIp(host)) return true

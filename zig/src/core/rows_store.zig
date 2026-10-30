@@ -22,7 +22,7 @@ pub const block_tokens = 256;
 pub const Image = struct {
     /// A state's image at `at`, its parts in order, appended to `out`.
     parts: *const fn (ptr: *anyopaque, at: u32, out: *std.ArrayList(image.Part), a: Allocator) anyerror!void,
-    /// Copy `ranges` of `saved`'s image into `out`, back to back.
+    /// Copy into owned `out`; all GPU producers and copies must complete before returning.
     gather: *const fn (ptr: *anyopaque, saved: pc.Saved, ranges: []const image.Range, out: []u8) anyerror!void,
     /// A new kept state of `at` tokens, its image filled by `scatter` and then restored as any other.
     blank: *const fn (ptr: *anyopaque, at: u32) anyerror!pc.Saved,
@@ -50,6 +50,9 @@ pub const Block = struct { bytes: u64, refs: u32 = 0 };
 
 pub const Counts = struct { written: u64 = 0, read: u64 = 0, reads: u64 = 0, writes: u64 = 0, skipped: u64 = 0, failed: u64 = 0, evicted: u64 = 0, verified: u64 = 0, differed: u64 = 0 };
 
+/// --spill-gib: off (every keep written behind), evicted (evictions and close), finish (both: evictions finish).
+pub const Spill = enum { off, evicted, finish };
+
 pub const Options = struct {
     root: []const u8,
     identity: u64, // the family's identity (weights, arithmetic, build); the store's directory is its own hash of it
@@ -58,7 +61,26 @@ pub const Options = struct {
     daily: u64, // --learn-daily-gib: bytes written a day under the root
     lookahead: u32 = 0,
     planned: bool = false,
+    grid: u32 = 0, // a planned family's zero-anchored chunk rows: its starts where a request names none
+    spill: Spill = .off,
+    sync_writes: bool = false,
+    staging_bytes: u64 = 1 << 30,
+    slots: ?usize = null, // --checkpoint-slots: the RAM store's states at most, beside this one (null: the family's)
 };
+
+/// The store under `o`, the RAM store's disk: `o.slots` bounds what it keeps in RAM.
+pub fn attach(gpa: Allocator, store: *pc.Store, o: Options) !*Rows {
+    const r = try Rows.open(gpa, store.family, o);
+    store.disk = r;
+    if (o.slots) |n| store.most = n;
+    return r;
+}
+
+/// Where --spill-gib's states live: $HOME/.cache/tensorfold/spilled, beside the learned states' root.
+pub fn spillRoot(a: Allocator) ![]const u8 {
+    const home = platform.c.getenv("HOME") orelse return error.RowsDir;
+    return std.fmt.allocPrint(a, "{s}/.cache/tensorfold/spilled", .{std.mem.span(home)});
+}
 
 pub const Rows = struct {
     gpa: Allocator,
@@ -67,13 +89,14 @@ pub const Rows = struct {
     root: []u8,
     dir: [:0]u8,
     keying: chain.Keying,
+    grid: u32 = 0,
     cap: u64,
     daily: u64,
     admission: Admission = .{},
     states: std.ArrayList(State) = .empty,
     blocks: std.AutoHashMapUnmanaged(chain.Stem, Block) = .empty,
     queue: std.ArrayList(write.Queued) = .empty, // kept states waiting to be written, newest last (written first)
-    job: ?*write.Job = null, // the state being written, a block a step
+    job: ?*write.Job = null, // the synchronous writer's borrowed entry
     stage: file.Stage = &.{},
     clock: u64 = 0,
     read_rate: f64 = 2e9, // bytes a second, measured as states are read
@@ -81,6 +104,17 @@ pub const Rows = struct {
     counts: Counts = .{},
     turn: u64 = 0, // bytes written since the last report line
     verify: bool = false, // TF_IMPRINT_VERIFY=1: each state written is read back and compared with the RAM state
+    spill: Spill = .off,
+    file_io: file.IO = .{},
+    worker: ?*write.io.Worker = null,
+    staging_bytes: u64 = 1 << 30,
+    sync_writes: bool = false,
+    stopped: bool = false,
+    flush_clock: ?u64 = null, // a close protects states touched after this clock from older queued saves
+    next_job: u64 = 0,
+    waiting: ?*pc.Entry = null, // the newest save refused room; while it is next, step waits for a reap
+    failures: write.Failures = .{},
+    fetch: ?*@import("rows_prefetch.zig").Prefetch = null, // states read ahead for queued requests (a lane host's)
 
     /// The store under `o.root` for `o.identity` (made 0700 when missing); its files are read, unreferenced blocks go.
     pub fn open(gpa: Allocator, family: pc.Snapshots, o: Options) !*Rows {
@@ -90,6 +124,9 @@ pub const Rows = struct {
         try r.scan();
         r.settle();
         r.stamp();
+        r.sync_writes = o.sync_writes or (if (platform.c.getenv("TENSORFOLD_ROWS_SYNC")) |v| std.mem.eql(u8, std.mem.span(v), "1") else false);
+        r.staging_bytes = o.staging_bytes;
+        r.next_job = @truncate(@as(u128, @intCast(write.nowNs())));
         r.verify = if (platform.c.getenv("TF_IMPRINT_VERIFY")) |v| v[0] == '1' else false;
         return r;
     }
@@ -105,11 +142,13 @@ pub const Rows = struct {
         const root = try gpa.dupe(u8, o.root);
         errdefer gpa.free(root);
         const dir = try std.fmt.allocPrintSentinel(gpa, "{s}/{x:0>16}", .{ o.root, id }, 0);
-        r.* = .{ .gpa = gpa, .family = family, .img = img, .root = root, .dir = dir, .keying = .{ .identity = id, .block = block_tokens, .lookahead = o.lookahead, .planned = o.planned }, .cap = o.cap, .daily = o.daily, .admission = .{ .floor = o.floor } };
+        r.* = .{ .gpa = gpa, .family = family, .img = img, .root = root, .dir = dir, .keying = .{ .identity = id, .block = block_tokens, .lookahead = o.lookahead, .planned = o.planned }, .grid = o.grid, .cap = o.cap, .daily = o.daily, .admission = .{ .floor = o.floor }, .spill = o.spill };
         return r;
     }
 
     pub fn deinit(r: *Rows) void {
+        write.stop(r, write.nowNs());
+        if (r.fetch) |f| f.destroy();
         if (r.job) |j| write.abort(r, j);
         for (r.queue.items) |q| r.gpa.free(q.starts);
         for (r.states.items) |*s| freeState(r.gpa, s);
@@ -198,6 +237,7 @@ pub const Rows = struct {
 
     /// State `i` forgotten: its file, and every block no other state names.
     pub fn remove(r: *Rows, i: usize) void {
+        write.fence(r);
         var s = r.states.orderedRemove(i);
         defer freeState(r.gpa, &s);
         unlinkName(r.dir, s.name, ".st");
@@ -214,6 +254,7 @@ pub const Rows = struct {
         defer gone.deinit(r.gpa);
         var it = r.blocks.iterator();
         while (it.next()) |kv| if (kv.value_ptr.refs == 0 and !write.wanted(r, kv.key_ptr.*)) gone.append(r.gpa, kv.key_ptr.*) catch {};
+        if (gone.items.len > 0) write.fence(r);
         for (gone.items) |n| {
             unlinkName(r.dir, n, ".blk");
             _ = r.blocks.remove(n);
@@ -235,6 +276,7 @@ pub const Rows = struct {
     pub fn matches(r: *const Rows, s: *const State, prompt: []const u32, starts: []const u32, spans: []const Span) bool {
         if (s.tokens.len > prompt.len or s.at >= prompt.len) return false;
         if (!std.mem.eql(u32, prompt[0..s.tokens.len], s.tokens) or !modes.equal(s.spans, spans, s.at)) return false;
+        if (r.keying.planned and starts.len == 0 and r.grid > 0) return s.at % r.grid == 0 and onGrid(s.starts, s.at, r.grid);
         return !r.keying.planned or sameBelow(starts, s.starts, s.at);
     }
 
@@ -265,6 +307,7 @@ pub const Rows = struct {
         for (olds.items) |o| {
             if (over == 0) break;
             const b = dirs.otherBytes(r.root, r.dir, o.id) catch continue;
+            write.fence(r);
             dirs.removeOther(r.root, r.dir, o.id) catch continue;
             over -|= b;
         }
@@ -281,10 +324,18 @@ pub const Rows = struct {
     /// The state worth least: tokens saved per byte only it holds (its file, blocks no other names), over 1 + its age.
     fn victim(r: *const Rows) ?usize {
         var out: ?usize = null;
+        if (r.spill == .evicted) { // --spill-gib alone: the least recently used first
+            for (r.states.items, 0..) |s, i| {
+                if (r.flush_clock) |cut| if (s.used > cut) continue;
+                if (out == null or s.used < r.states.items[out.?].used) out = i;
+            }
+            return out;
+        }
         var worst: f64 = std.math.inf(f64);
         var wants: std.ArrayList(write.Want) = .empty;
         defer wants.deinit(r.gpa);
         for (r.states.items, 0..) |*s, i| {
+            if (r.flush_clock) |cut| if (s.used > cut) continue;
             wants.clearRetainingCapacity();
             r.wantsOf(r.gpa, s, &wants) catch {};
             var only = s.own;
@@ -337,6 +388,7 @@ pub const Rows = struct {
 
     /// Every state and block of this identity forgotten (DELETE /v1/imprint); the queue too. The bytes freed.
     pub fn forgetAll(r: *Rows) u64 {
+        write.fence(r);
         if (r.job) |j| write.abort(r, j);
         for (r.queue.items) |q| r.gpa.free(q.starts);
         r.queue.clearRetainingCapacity();
@@ -444,6 +496,26 @@ fn sameBelow(starts: []const u32, kept: []const u32, at: u32) bool {
     return std.mem.eql(u32, starts[0..n], kept) and std.mem.indexOfScalar(u32, starts, at) != null;
 }
 
+/// A planned request's chunk starts below `at`: its own, else its family's grid's (from `grid`) when it names none.
+pub fn startsBelow(r: *const Rows, a: Allocator, starts: []const u32, at: u32) ![]u32 {
+    if (!r.keying.planned) return a.alloc(u32, 0);
+    if (starts.len == 0 and r.grid > 0) {
+        const out = try a.alloc(u32, (at -| 1) / r.grid);
+        for (out, 1..) |*x, i| x.* = @intCast(i * r.grid);
+        return out;
+    }
+    var n: usize = 0;
+    while (n < starts.len and starts[n] < at) n += 1;
+    return a.dupe(u32, starts[0..n]);
+}
+
+/// Whether `kept` are the grid's starts below `at`.
+fn onGrid(kept: []const u32, at: u32, grid: u32) bool {
+    if (kept.len != (at -| 1) / grid) return false;
+    for (kept, 1..) |k, i| if (k != i * grid) return false;
+    return true;
+}
+
 /// A planned state's starts with its own position last: its blocks' last chunk ends by it.
 pub fn withAt(a: Allocator, starts: []const u32, at: u32, planned: bool) ![]u32 {
     if (!planned) return a.alloc(u32, 0);
@@ -512,8 +584,16 @@ test {
     _ = image;
     _ = chain;
     _ = file;
+    _ = write.io;
     _ = @import("rows_test.zig");
+    _ = @import("rows_spill_test.zig");
+    _ = @import("rows_async_test.zig");
+    _ = @import("rows_close_test.zig");
+    _ = @import("rows_stage_test.zig");
     _ = @import("rows_select_test.zig");
     _ = @import("rows_recall_select_test.zig");
     _ = @import("rows_pool_select_test.zig");
+    _ = @import("rows_prefetch.zig");
+    _ = @import("rows_prefetch_stack_test.zig");
+    _ = @import("rows_refusal_test.zig");
 }

@@ -51,6 +51,12 @@ pub const Storage = struct {
 };
 
 pub const Attention = struct { keys: mtl.Buffer, values: mtl.Buffer };
+/// Layers a drafter reads at most (each layer's output, hidden wide).
+pub const max_taps = 8;
+/// The drafter's layers in its order and every forward row's outputs of them, [rows][count][hidden] bf16.
+pub const Taps = struct { layers: [max_taps]u32 = @splat(0), count: u32 = 0, buf: mtl.Buffer };
+/// Where a stream's latest tapped rows sit in the scratch: cache rows [start, start + rows) from scratch row `row`.
+pub const TapRows = struct { start: usize, row: usize, rows: usize, gen: u64 };
 pub const Mixer = union(enum) { conv: mtl.Buffer, attention: Attention };
 
 pub const Cache = struct {
@@ -60,6 +66,9 @@ pub const Cache = struct {
     last: ?struct { start: usize, base: usize, rows: usize } = null,
     blocks: [c.layers]Mixer,
     logits: mtl.Buffer,
+    /// The stream's latest tapped rows in the scratch, and its prompt's last row's taps (kept for the first draft).
+    tap: ?TapRows = null,
+    last_tap: ?mtl.Buffer = null,
 
     pub fn init(gpa: std.mem.Allocator, device: mtl.Device, attention: *const [c.layers]bool, capacity: usize) !Cache {
         var out: Cache = .{ .memory = .{ .gpa = gpa, .device = device }, .capacity = capacity, .blocks = undefined, .logits = undefined };
@@ -141,7 +150,15 @@ pub const Scratch = struct {
     /// A projection's input rows' group sums for the tiles and their twin (f32 [rows, k / 64]).
     sums: mtl.Buffer,
     logits: mtl.Buffer,
+    /// Each head row's greedy pick and nonfinite flag (u32 pairs), from a forward whose head takes every row.
+    best: mtl.Buffer,
     snapshots: [c.layers]?mtl.Buffer = @splat(null),
+    /// A recorded call's streams at every layer, each row's stream and the attention's row tiles (segments.zig).
+    segs: mtl.Buffer,
+    rowseg: mtl.Buffer,
+    tiles: mtl.Buffer,
+    /// A drafter's taps of every row, once the backend is told its layers (null: none kept).
+    taps: ?Taps = null,
 
     pub fn init(gpa: std.mem.Allocator, device: mtl.Device, attention: *const [c.layers]bool, rows: usize) !Scratch {
         var out: Scratch = undefined;
@@ -149,6 +166,7 @@ pub const Scratch = struct {
         errdefer out.memory.deinit();
         out.rows = rows;
         out.snapshots = @splat(null);
+        out.taps = null;
         const mem = &out.memory;
         const slots = rows * c.topk;
         out.ids = try mem.alloc(rows * 4);
@@ -157,8 +175,7 @@ pub const Scratch = struct {
         out.bcx = try mem.alloc(rows * 3 * c.hidden * 2);
         out.k = try mem.alloc(rows * c.kv_heads * c.head_dim * 2);
         out.v = try mem.alloc(rows * c.kv_heads * c.head_dim * 2);
-        const slice_rows: usize = @min(rows, attn_slice);
-        const partials = @max(slice_rows, split_rows * subs) * c.query_heads * chunks;
+        const partials = partialCount(rows);
         out.pm = try mem.alloc(partials * 4);
         out.pl = try mem.alloc(partials * 4);
         out.po = try mem.alloc(partials * c.head_dim * 4);
@@ -179,6 +196,10 @@ pub const Scratch = struct {
         out.sums = try mem.alloc(@max(rows * (c.intermediate / 64), slots * (c.hidden / 64)) * 4);
         const logit_rows: usize = @min(rows, batch_rows);
         out.logits = try mem.alloc(logit_rows * c.vocab * 2);
+        out.best = try mem.alloc(logit_rows * 2 * 4);
+        out.segs = try mem.alloc(c.layers * batch_rows * @sizeOf(@import("segments.zig").Seg));
+        out.rowseg = try mem.alloc(batch_rows * 4);
+        out.tiles = try mem.alloc(batch_rows * 4);
         for (&out.snapshots, attention) |*s, a| if (!a) { // a recorded window's rows, or a prompt call's last row
             s.* = try mem.alloc(logit_rows * conv_bytes);
         };
@@ -190,11 +211,26 @@ pub const Scratch = struct {
     }
 };
 
+/// Attention partials a scratch of `rows` holds: a prompt slice's, and a recorded call's streams kept apart.
+pub fn partialCount(rows: usize) usize {
+    const slice_rows: usize = @min(rows, attn_slice);
+    // usize: @min with a constant narrows its type, and `most * subs` would overflow it.
+    const most: usize = @min(rows, batch_rows);
+    return @max(slice_rows, split_rows * subs, most * subs) * c.query_heads * chunks;
+}
+
 /// The served window: --context, else the checkpoint's, never past `max_context`; null when --context is outside it.
 pub fn window(checkpoint: usize, requested: ?i64) ?usize {
     const most = @min(checkpoint, max_context);
     const w = requested orelse return most;
     return if (w >= 1 and w <= most) @as(usize, @intCast(w)) else null;
+}
+
+test "a shared round's 32 rows keep their attention partials apart" {
+    // 32 rows of 8 sub-spans each, every row's 32 heads over 32 chunks; a prompt chunk's rows hold more.
+    try std.testing.expectEqual(@as(usize, 32 * subs * c.query_heads * chunks), partialCount(32));
+    try std.testing.expectEqual(@as(usize, split_rows * subs * c.query_heads * chunks), partialCount(1));
+    try std.testing.expectEqual(@as(usize, 2048 * c.query_heads * chunks), partialCount(2048));
 }
 
 test "the served window stays inside the attention's 131,072 positions" {
@@ -206,4 +242,19 @@ test "the served window stays inside the attention's 131,072 positions" {
     try std.testing.expectEqual(@as(?usize, null), window(131074, 131073));
     try std.testing.expectEqual(@as(?usize, null), window(8192, 8193));
     try std.testing.expectEqual(@as(?usize, null), window(131072, 0));
+}
+
+/// Bytes a stream's Cache takes at `capacity` rows: its logits, conv layers' windows, attention layers' KV.
+pub fn cacheBytes(attention: *const [c.layers]bool, capacity: usize) u64 {
+    var bytes: u64 = c.vocab * 2;
+    for (attention) |a| bytes += if (a) 2 * capacity * c.kv_heads * c.head_dim * 2 else conv_bytes;
+    return bytes;
+}
+
+test "a stream's cache bytes: logits and conv windows at any length, keys and values a row on attention layers" {
+    var attention: [c.layers]bool = @splat(false);
+    try std.testing.expectEqual(@as(u64, c.vocab * 2 + c.layers * conv_bytes), cacheBytes(&attention, 4096));
+    attention[1] = true;
+    attention[3] = true;
+    try std.testing.expectEqual(@as(u64, 2 * 2 * c.kv_heads * c.head_dim * 2), cacheBytes(&attention, 1) - cacheBytes(&attention, 0));
 }

@@ -1,5 +1,6 @@
 //! Warm each captured launch shape, then measure every live width with a freshly reset cache.
 const std = @import("std");
+const lanes = @import("lanes");
 const E = @import("cuda_engine.zig");
 pub const profile = @import("cuda_startup_profile.zig");
 
@@ -50,17 +51,34 @@ fn timed(io: std.Io, e: anytype, d: anytype, cache: anytype, warmed: *Seen, phas
             warmed.mark(shape);
             warm_ns += profile.elapsed(io, warm_start);
         }
-        try cache.reset(e);
-        const t0 = std.Io.Clock.awake.now(io);
-        try e.forward(&.{.{ .cache = cache, .rows = rows }}, ids[0..rows], .{ .draws = picks[0..rows] });
-        const ms = @as(f64, @floatFromInt(t0.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds())) / 1e6;
-        if (ms <= 0 or !std.math.isFinite(ms)) return error.InvalidWindowMeasurement;
-        measured[rows - 1] = .{ .rows = @intCast(rows), .ms = ms };
+        measured[rows - 1] = .{ .rows = @intCast(rows), .ms = try timeWidth(io, e, cache, rows, &ids, &picks) };
     }
     try cache.reset(e);
     for (measured[0..e.window_rows]) |m| d.setCost(m.rows, m.ms);
     phases.warmups += warm_ns;
     phases.calibration += profile.elapsed(io, started) - warm_ns;
+}
+
+/// One width's cost: the fastest of its timed runs, so one slow run cannot set the table.
+fn timeWidth(io: std.Io, e: anytype, cache: anytype, rows: usize, ids: []const u32, picks: []const E.Draw) !f64 {
+    var runs: [lanes.cost_rule.reps]f64 = undefined;
+    for (&runs) |*entry| {
+        try cache.reset(e);
+        const t0 = std.Io.Clock.awake.now(io);
+        try e.forward(&.{.{ .cache = cache, .rows = rows }}, ids[0..rows], .{ .draws = picks[0..rows] });
+        const ms = @as(f64, @floatFromInt(t0.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds())) / 1e6;
+        if (ms <= 0 or !std.math.isFinite(ms)) return error.InvalidWindowMeasurement;
+        entry.* = ms;
+    }
+    return lanes.cost_rule.keepFastest(&runs);
+}
+
+/// One width's quick check against a kept table: the middle width, whose cost the window choice turns on.
+pub fn probeWidth(io: std.Io, e: anytype, cache: anytype, rows: usize) !f64 {
+    var ids: [E.most_window]u32 = @splat(0);
+    var picks: [E.most_window]E.Draw = undefined;
+    for (&picks) |*pk| pk.* = .{ .rule = null, .position = 1 };
+    return timeWidth(io, e, cache, rows, ids[0..rows], picks[0..rows]);
 }
 
 pub fn prepare(gpa: std.mem.Allocator, io: std.Io, e: anytype, d: anytype, cache: anytype, warmed: *Seen) !void {

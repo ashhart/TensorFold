@@ -4,44 +4,18 @@
 
 #include <cuda_bf16.h>
 #include <stdint.h>
+#include "common/reduce.cuh"
 
 namespace tf_act {
 
 constexpr int NT = 256;
 
-__device__ __forceinline__ void unpack8(const uint4& u, float* f) {
-    const __nv_bfloat162* h = reinterpret_cast<const __nv_bfloat162*>(&u);
-#pragma unroll
-    for (int i = 0; i < 4; ++i) {
-        const float2 t = __bfloat1622float2(h[i]);
-        f[2 * i] = t.x;
-        f[2 * i + 1] = t.y;
-    }
-}
-
-__device__ __forceinline__ uint4 pack8(const float* f) {
-    uint4 u;
-    __nv_bfloat162* h = reinterpret_cast<__nv_bfloat162*>(&u);
-#pragma unroll
-    for (int i = 0; i < 4; ++i) h[i] = __floats2bfloat162_rn(f[2 * i], f[2 * i + 1]);
-    return u;
-}
+using tf_common::unpack8;
+using tf_common::pack8;
+using tf_common::group_sum8;
 
 // Exactly rounded division on purpose: the same bits on every GPU, where div.full and ex2.approx are not.
 __device__ __forceinline__ float sigmoid(float x) { return __fdiv_rn(1.f, __fadd_rn(1.f, expf(-x))); }
-
-// A thread's 8 stored values in order, then the group's 8 lanes in a fixed tree (every lane of the warp calls).
-__device__ __forceinline__ float group_sum8(const uint4& packed, bool live) {
-    float f[8];
-    unpack8(packed, f);
-    float s = 0.f;
-    if (live)
-#pragma unroll
-        for (int i = 0; i < 8; ++i) s = __fadd_rn(s, f[i]);
-    s = __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, 4));
-    s = __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, 2));
-    return __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, 1));
-}
 
 }  // namespace tf_act
 
@@ -157,4 +131,44 @@ extern "C" __global__ void __launch_bounds__(NT) tf_swiglu_rows_round(const __nv
                                                                       const __nv_bfloat16* up, long long u_ld,
                                                                       __nv_bfloat16* out, float* xs, int n) {
     tf_act_round::rows<false>(gate, g_ld, up, u_ld, out, xs, n, tf_act_round::SWIGLU_ALL);
+}
+
+// out = bf16(cap * tanh(x / cap)) in MLX's bf16 steps: a soft-capped head's logits (final_logit_softcapping).
+extern "C" __global__ void __launch_bounds__(NT) tf_softcap_rows(const __nv_bfloat16* x, __nv_bfloat16* out, int n,
+                                                                 float cap) {
+    tf_act_round::softcap_rows(x, out, n, cap, tf_act_round::SOFTCAP_ALL);
+}
+
+// Spark2.5's head gate: out[r, h d + e] = bf16(o * bf16(sigmoid(g[r * g_ld + h]))) (d % 64 == 0); xs: out's sums.
+extern "C" __global__ void __launch_bounds__(NT) tf_head_gate_rows(const __nv_bfloat16* __restrict__ o,
+                                                                   const __nv_bfloat16* __restrict__ g, long long g_ld,
+                                                                   __nv_bfloat16* __restrict__ out,
+                                                                   float* __restrict__ xs, int heads, int d) {
+    tf_act_round::head_gate_rows(o, g, g_ld, out, xs, heads, d, tf_act_round::HEAD_GATE_ALL);
+}
+
+// out = bf16(bf16(gelu(gate)) * up), PyTorch's exact erf GELU in fp32 (Spark2.5's MLP); xs (or null) out's sums.
+extern "C" __global__ void __launch_bounds__(NT) tf_gelu_erf_rows(const __nv_bfloat16* __restrict__ gate, long long g_ld,
+                                                                  const __nv_bfloat16* __restrict__ up, long long u_ld,
+                                                                  __nv_bfloat16* __restrict__ out, float* __restrict__ xs,
+                                                                  int n) {
+    tf_act_round::gelu_erf_rows(gate, g_ld, up, u_ld, out, xs, n, tf_act_round::GELU_ERF_ALL);
+}
+
+// Dory's nGPT activations (act_l2.cuh): a scaled sigmoid gate and a scaled SwiGLU, each row then L2-normed.
+#include "act_l2.cuh"
+
+// out = bf16(l2(bf16(o * sigmoid(g * sg)))) over a row's n values (all heads), sg fp32 [n]: dory.py's output gate.
+extern "C" __global__ void __launch_bounds__(tf_act_l2::NT) tf_gate_l2_rows(const __nv_bfloat16* o, const __nv_bfloat16* g,
+                                                                           long long g_ld, const float* sg, __nv_bfloat16* out,
+                                                                           int n, float eps) {
+    tf_act_l2::gate_rows<tf_act_l2::GATED>(o, g, g_ld, sg, out, n, eps);
+}
+
+// out = bf16(l2(bf16(silu(bf16(g * sug)) * bf16(u * suu)))), sug and suu fp32 [n]: dory.py's MLP before down.
+extern "C" __global__ void __launch_bounds__(tf_act_l2::NT) tf_swiglu_l2_rows(const __nv_bfloat16* g, long long g_ld,
+                                                                             const __nv_bfloat16* u, long long u_ld,
+                                                                             const float* sug, const float* suu,
+                                                                             __nv_bfloat16* out, int n, float eps) {
+    tf_act_l2::swiglu_rows<tf_act_l2::GS | tf_act_l2::US | tf_act_l2::PROD>(g, g_ld, u, u_ld, sug, suu, out, n, eps);
 }

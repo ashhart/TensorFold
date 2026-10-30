@@ -17,6 +17,7 @@ pub const Facts = struct {
     trees: bool = false, // hold() takes a tree of lanes (Hold.lanes), each lane its parent's rank-r token
     window_costs: []const Cost = &.{}, // the target's window ms by rows (timed at load), for the depth rule
     lane_costs: []const Cost = &.{}, // the same for the lane planner (Model.lane_costs)
+    copy_match: i64 = 0, // matching tokens a copy needs beside this drafter's proposals (0: the target's copy_match)
     tree_nodes: u32 = 0, // hold() without lanes grows its own tree of up to `depth` nodes, at most this many (tree, chances)
 };
 
@@ -31,10 +32,11 @@ pub const Absorb = struct {
     offered: u32 = 0, // the drafter's grown tree's first nodes the verified window carried (0: none of its own)
 };
 
-/// `depth` drafts after `pending` at `position`; with `lanes` a tree, lane i the rank-r choice after its parent.
-pub const Hold = struct { stream: *Stream, pending: u32, position: u64, depth: u32, plan: ?*const @import("proposal_head.zig").Plan = null, lanes: ?*const Shape = null };
+/// `depth` drafts after `pending` at `position`; `lanes`: a tree's ranks; `tokens`, `sampling`: the stream's, if given.
+pub const Hold = struct { stream: *Stream, pending: u32, position: u64, depth: u32, plan: ?*const @import("proposal_head.zig").Plan = null, lanes: ?*const Shape = null, tokens: []const u32 = &.{}, sampling: ?@import("sampling.zig").Sampling = null };
 
 pub const Drafter = struct {
+    kind: []const u8 = "draft model", // descriptive only; the loader identifies the implementation it attached
     proposal_head: ?*const @import("proposal_head.zig").Service = null,
     ptr: *anyopaque,
     vtable: *const VTable,

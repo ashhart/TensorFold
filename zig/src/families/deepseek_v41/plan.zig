@@ -8,6 +8,8 @@ const exl3 = @import("core").exl3_layout;
 const names = @import("names.zig");
 const Pack = @import("pack.zig").Pack;
 const Info = @import("pack.zig").Info;
+const partition = @import("partition.zig");
+const testing = std.testing;
 
 /// One EXL3 group of the rank: its stored name and the rank's part.
 pub const GroupPlan = struct {
@@ -136,10 +138,7 @@ const Builder = struct {
     }
 
     fn group(b: *Builder, proj: names.Proj, prefix: []const u8, split: exl3.Split, k: u32, n: u32) !GroupPlan {
-        var shared = try CheckpointPlan.init(b.a, b.pack, &.{prefix});
-        defer shared.deinit();
-        const storage = shared.projections[0].storage;
-        const g = try storage.cudaGroup();
+        const g = try b.pack.group(prefix, &b.buf);
         if ((k != 0 and g.k() != k) or (n != 0 and g.n() != n)) {
             if (!quiet) log.warn("{s}: K={d} N={d}, expected K={d} N={d}", .{ prefix, g.k(), g.n(), k, n });
             return error.UnexpectedShape;
@@ -147,7 +146,7 @@ const Builder = struct {
         inline for (.{ "trellis", "suh", "svh" }) |part| try b.mark(try std.fmt.bufPrint(&b.buf, "{s}." ++ part, .{prefix}));
         const marker = try b.pack.marker(prefix, &b.buf);
         if (marker) |m| try b.mark(m);
-        return .{ .proj = proj, .prefix = try b.dupe(prefix), .split = split, .full = g, .part = try g.part(split, b.o.rank, b.o.world), .marker = if (marker) |m| try b.dupe(m) else null };
+        return .{ .proj = proj, .prefix = try b.dupe(prefix), .split = split, .full = g, .part = try partition.group(g, split, b.o.rank, b.o.world), .marker = if (marker) |m| try b.dupe(m) else null };
     }
 
     fn native(b: *Builder, name: []const u8, spec: names.NativeSpec) !NativePlan {
@@ -164,7 +163,8 @@ const Builder = struct {
         try b.mark(name);
         const bytes = switch (spec.slice) {
             .whole => info.nbytes,
-            .heads, .vocab_rows => blk: {
+            .vocab_rows => info.nbytes / info.shape[0] * (try partition.share(@intCast(info.shape[0]), b.o.rank, b.o.world)).len,
+            .heads => blk: {
                 if (info.shape[0] % b.o.world != 0) return error.SplitNotEven;
                 break :blk info.nbytes / b.o.world;
             },
@@ -257,7 +257,8 @@ const Builder = struct {
             const info = try b.pack.need(name);
             var n: u64 = 1;
             for (info.dims()) |d| n *= d;
-            if (info.dtype != .f32 and info.dtype != .bf16 or n != b.c.hidden + b.c.dspark_markov_rank) return error.UnexpectedTensor;
+            if (info.dtype != .f32 and info.dtype != .bf16 and info.dtype != .f16 or n != b.c.hidden + b.c.dspark_markov_rank)
+                return error.UnexpectedTensor;
             try b.mark(name);
             confidence = .{ .name = try b.dupe(name), .info = info, .slice = .whole, .bytes = info.nbytes };
         }
@@ -265,9 +266,11 @@ const Builder = struct {
     }
 };
 
-/// The rank's plan; heads, groups and the vocabulary must split over `world` (blocks of 128).
+/// Heads and groups split evenly; expert and vocabulary slices retain whole 128-column blocks.
 pub fn build(gpa: std.mem.Allocator, c: *const Config, pack: *const Pack, o: Options) !Plan {
-    if (o.world == 0 or o.rank >= o.world or c.heads % o.world != 0 or c.o_groups % o.world != 0 or c.vocab % (128 * o.world) != 0) return error.BadWorld;
+    if (o.world == 0 or o.rank >= o.world or c.heads % o.world != 0 or c.o_groups % o.world != 0) return error.BadWorld;
+    _ = partition.share(c.vocab, o.rank, o.world) catch return error.BadWorld;
+    _ = partition.share(c.expert_width, o.rank, o.world) catch return error.BadWorld;
     var arena = std.heap.ArenaAllocator.init(gpa);
     errdefer arena.deinit();
     var b: Builder = .{ .a = arena.allocator(), .c = c, .pack = pack, .o = o };
@@ -314,3 +317,72 @@ pub const CheckpointPlan = struct {
         p.* = undefined;
     }
 };
+
+test "an F16 router bias plans as its stored slice; an F16 sink is still refused" {
+    const a = testing.allocator;
+    const c: Config = .{};
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const count = c.expertsOf(42).count;
+    const data = try @import("pack.zig").image(a, &.{
+        .{ .name = "mtp.0.ffn.gate.bias", .dtype = "F16", .shape = &.{count} },
+        .{ .name = "mtp.0.attn.attn_sink", .dtype = "F16", .shape = &.{c.heads} },
+    });
+    defer a.free(data);
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "model.safetensors", .data = data });
+    const dir = try tmp.dir.realPathFileAlloc(testing.io, ".", a);
+    defer a.free(dir);
+    var p = try Pack.open(a, testing.io, dir);
+    defer p.deinit();
+    var b: Builder = .{ .a = arena.allocator(), .c = &c, .pack = &p, .o = .{ .rank = 0, .world = 1 } };
+    var bias: ?names.NativeSpec = null;
+    var sink: ?names.NativeSpec = null;
+    for ((try names.blockNatives(&c, 42)).items()) |s| {
+        if (std.mem.eql(u8, s.suffix, "ffn.gate.bias")) bias = s;
+        if (std.mem.eql(u8, s.suffix, "attn.attn_sink")) sink = s;
+    }
+    const v = try b.native("mtp.0.ffn.gate.bias", bias.?);
+    try testing.expectEqual(@as(u64, 2 * count), v.bytes);
+    try testing.expectError(error.UnexpectedTensor, b.native("mtp.0.attn.attn_sink", sink.?));
+}
+
+test "CUDA rank planning selects EXL3 over a kept dense sibling from headers alone" {
+    const a = testing.allocator;
+    const prefix = "layers.2.attn.compressor.wkv";
+    var p = Pack.init(a);
+    defer p.deinit();
+    const dense = "{\"layers.2.attn.compressor.wkv.weight\":{\"dtype\":\"BF16\",\"shape\":[512,5120],\"data_offsets\":[0,5242880]}}";
+    const quant = "{\"layers.2.attn.compressor.wkv.trellis\":{\"dtype\":\"I16\",\"shape\":[320,32,80],\"data_offsets\":[0,1638400]}," ++
+        "\"layers.2.attn.compressor.wkv.suh\":{\"dtype\":\"F16\",\"shape\":[5120],\"data_offsets\":[1638400,1648640]}," ++
+        "\"layers.2.attn.compressor.wkv.svh\":{\"dtype\":\"F16\",\"shape\":[512],\"data_offsets\":[1648640,1649664]}}";
+    try p.addHeader("native.safetensors", dense, 5242880);
+    try p.addHeader("layer-02.safetensors", quant, 1649664);
+    const c: Config = .{};
+    for ([_]u32{ 0, 1 }) |rank| {
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        var b: Builder = .{ .a = arena.allocator(), .c = &c, .pack = &p, .o = .{ .rank = rank, .world = 2 } };
+        const g = try b.group(.wq_a, prefix, .whole, 5120, 512);
+        try testing.expectEqual(@as(u32, 10), g.full.k2());
+        try testing.expectEqual(@as(u64, 1638400), g.part.trellis.bytes());
+        try testing.expect(!b.used.contains("layers.2.attn.compressor.wkv.weight"));
+        try testing.expect(names.ignored("layers.2.attn.compressor.wkv.weight", &p));
+    }
+    try testing.expect((try p.projection(prefix)) == .dense);
+    var reversed = Pack.init(a);
+    defer reversed.deinit();
+    try reversed.addHeader("layer-02.safetensors", quant, 1649664);
+    try reversed.addHeader("native.safetensors", dense, 5242880);
+    var buf: [256]u8 = undefined;
+    try testing.expectEqual(@as(u32, 10), (try reversed.group(prefix, &buf)).k2());
+    reversed.names.getPtr("layers.2.attn.compressor.wkv.trellis").?.dtype = .f16;
+    try testing.expectError(error.BadTrellis, reversed.group(prefix, &buf));
+    _ = p.names.swapRemove("layers.2.attn.compressor.wkv.weight");
+    try testing.expectEqual(@as(u32, 10), (try p.group(prefix, &buf)).k2());
+    _ = p.names.swapRemove("layers.2.attn.compressor.wkv.trellis");
+    try testing.expectError(error.MissingTensor, p.group(prefix, &buf));
+    try p.addHeader("dense-only.safetensors", dense, 5242880);
+    try testing.expectError(error.UnsupportedDenseProjection, p.group(prefix, &buf));
+}

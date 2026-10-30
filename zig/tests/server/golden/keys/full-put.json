@@ -1,0 +1,24 @@
+{
+ "closed": "closed",
+ "replies": [
+  {
+   "status": "HTTP/1.1 501 Unsupported method ('PUT')",
+   "headers": [
+    [
+     "Connection",
+     "close"
+    ],
+    [
+     "Content-Type",
+     "text/html;charset=utf-8"
+    ],
+    [
+     "Content-Length",
+     "481"
+    ]
+   ],
+   "body": "<!DOCTYPE HTML>\n<html lang=\"en\">\n    <head>\n        <meta charset=\"utf-8\">\n        <style type=\"text/css\">\n            :root {\n                color-scheme: light dark;\n            }\n        </style>\n        <title>Error response</title>\n    </head>\n    <body>\n        <h1>Error response</h1>\n        <p>Error code: 501</p>\n        <p>Message: Unsupported method ('PUT').</p>\n        <p>Error code explanation: 501 - Server does not support this operation.</p>\n    </body>\n</html>\n",
+   "interim": ""
+  }
+ ]
+}

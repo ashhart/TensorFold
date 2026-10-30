@@ -42,7 +42,7 @@ pub const Gpu = struct {
     }
 
     pub fn device(g: *Gpu) pipe.Device {
-        return .{ .ptr = g, .vtable = &.{ .top = top, .stats = stats, .scratch = scratch, .download = download, .stream = streamOf } };
+        return .{ .ptr = g, .vtable = &.{ .top = top, .stats = stats, .scratch = scratch, .download = download, .stream = streamOf, .pad = pad } };
     }
 
     fn self_(p: *anyopaque) *Gpu {
@@ -83,5 +83,11 @@ pub const Gpu = struct {
 
     fn streamOf(p: *anyopaque) cuda.abi.Stream {
         return self_(p).stream.handle;
+    }
+
+    fn pad(p: *anyopaque, src: u64, cols: usize, stride: usize, out: u64) anyerror!void {
+        const g = self_(p);
+        try g.d.check(g.d.api.cuMemsetD32Async(out, @bitCast(-std.math.inf(f32)), stride, g.stream.handle), "cuMemsetD32Async");
+        try g.d.check(g.d.api.cuMemcpyDtoDAsync_v2(out, src, 4 * cols, g.stream.handle), "cuMemcpyDtoDAsync");
     }
 };

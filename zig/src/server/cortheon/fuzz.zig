@@ -8,6 +8,7 @@ const live = @import("live.zig");
 const seen = @import("seen.zig");
 const web = @import("web.zig");
 const Budget = @import("budget.zig").Budget;
+const linear_time = @import("../linear_time.zig");
 const Allocator = std.mem.Allocator;
 const Smith = std.testing.Smith;
 
@@ -284,10 +285,6 @@ test "cortheon fuzz: a fixed run of structure-aware edits" {
     }
 }
 
-fn now() u64 {
-    return @intCast(std.Io.Clock.awake.now(std.testing.io).nanoseconds);
-}
-
 const Reader = struct { name: []const u8, run: *const fn (Allocator, []const u8) anyerror!void };
 
 fn readText(a: Allocator, in: []const u8) anyerror!void {
@@ -325,22 +322,24 @@ const readers = [_]Reader{
     .{ .name = "search", .run = readSearch },   .{ .name = "read", .run = readPage },
 };
 
-/// The fastest of three runs of `r` on `head` then `unit` repeated to `size` bytes, in nanoseconds.
-fn fastest(r: Reader, head: []const u8, unit: []const u8, size: usize) !u64 {
+/// `head` then `unit` repeated to `size` bytes; the caller frees it.
+fn longPage(head: []const u8, unit: []const u8, size: usize) ![]u8 {
     const page = try std.testing.allocator.alloc(u8, size);
-    defer std.testing.allocator.free(page);
     @memcpy(page[0..head.len], head);
     for (page[head.len..], 0..) |*b, i| b.* = unit[i % unit.len];
-    var best: u64 = std.math.maxInt(u64);
-    for (0..3) |_| {
+    return page;
+}
+
+/// One reader and a shape's two long pages, the shorter first.
+const Timed = struct {
+    r: Reader,
+    pages: [2][]const u8,
+    fn run(t: *const Timed, i: usize) anyerror!void {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const start = now();
-        try r.run(arena.allocator(), page);
-        best = @min(best, now() - start);
+        try t.r.run(arena.allocator(), t.pages[i]);
     }
-    return best;
-}
+};
 
 /// Long pages a seed repeated cannot make: one head, then a unit with none of the byte a reader searches back for.
 const long_pages = [_][2][]const u8{
@@ -357,18 +356,21 @@ const shapes = blk: {
 
 test "cortheon fuzz: every reader takes linear time on long inputs" {
     const small: usize = if (builtin.mode == .debug) 16 << 10 else 128 << 10;
+    const ms = std.time.ns_per_ms;
     var slow: usize = 0;
-    for (shapes) |shape| for (readers) |r| {
-        const t1 = try fastest(r, shape[0], shape[1], small);
-        const t8 = try fastest(r, shape[0], shape[1], 8 * small);
-        if (t8 <= 20 * std.time.ns_per_ms or t8 <= 24 * t1) continue; // 8x the bytes: near 8x the time, not 64x
-        const ms = std.time.ns_per_ms;
-        const what = "\nfuzz: {s} took {d} ms on {d} KiB and {d} ms on {d} KiB of \"";
-        std.debug.print(what, .{ r.name, t1 / ms, small >> 10, t8 / ms, (8 * small) >> 10 });
-        show(shape[0]);
-        show(shape[1][0..@min(shape[1].len, 120)]);
-        std.debug.print("\" repeated\n", .{});
-        slow += 1;
-    };
+    for (shapes) |shape| {
+        const pages = [2][]u8{ try longPage(shape[0], shape[1], small), try longPage(shape[0], shape[1], 8 * small) };
+        defer for (pages) |p| std.testing.allocator.free(p);
+        for (readers) |r| {
+            const ns = try linear_time.fastest(3, &Timed{ .r = r, .pages = .{ pages[0], pages[1] } }, Timed.run);
+            if (ns[1] <= 20 * ms or ns[1] <= 24 * ns[0]) continue; // 8x the bytes: near 8x the time, not 64x
+            const what = "\nfuzz: {s} took {d} ms on {d} KiB and {d} ms on {d} KiB of \"";
+            std.debug.print(what, .{ r.name, ns[0] / ms, small >> 10, ns[1] / ms, (8 * small) >> 10 });
+            show(shape[0]);
+            show(shape[1][0..@min(shape[1].len, 120)]);
+            std.debug.print("\" repeated\n", .{});
+            slow += 1;
+        }
+    }
     try std.testing.expectEqual(@as(usize, 0), slow);
 }

@@ -4,6 +4,8 @@ const mtl = @import("metal");
 const cfg = @import("config.zig");
 const fwd = @import("forward.zig");
 const lesson_route = @import("living").lesson_route;
+const kv_pool = @import("../../core/kv_pool.zig");
+const kvp = @import("../../core/metal_kv_pages.zig");
 
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
@@ -18,6 +20,11 @@ pub const tree_saves = 64;
 
 /// Head levels whose best tokens a stream keeps.
 pub const max_levels = 72;
+
+/// Mamba slots for streams: slot 0, two per stream (state and pending forward), a lone round's third, and a spare.
+pub fn poolSlots(streams: usize) usize {
+    return 2 * streams + 3;
+}
 
 /// Mamba states by slot (slot 0: the zero state, never written), and by replay id a stream's last rows' raw inputs.
 pub const Pool = struct {
@@ -50,17 +57,28 @@ pub const Pool = struct {
         try list.append(gpa, self.tree);
     }
 
+    /// Bytes Pool.init's conv, ssm and replay buffers take at `slots` slots and `streams` replay ids (its tree aside).
+    pub fn bytes(c: cfg.Config, slots: usize, streams: usize) u64 {
+        const slot: u64 = (c.conv_kernel - 1) * c.convDim() * 2 + c.mamba_heads * c.mamba_head_dim * c.state * 4;
+        const replay: u64 = 2 * replay_rows * (c.convDim() * 2 + c.mamba_heads * 2);
+        return c.count(.mamba) * (slots * slot + streams * replay);
+    }
+
     pub fn init(gpa: std.mem.Allocator, device: mtl.Device, c: cfg.Config, slots: usize, streams: usize) !Pool {
         var p = Pool{ .layers = c.count(.mamba), .slots = slots, .gpa = gpa };
         const conv_bytes = slots * (c.conv_kernel - 1) * c.convDim() * 2;
         const ssm_bytes = slots * c.mamba_heads * c.mamba_head_dim * c.state * 4;
+        const raw_bytes = streams * 2 * replay_rows * c.convDim() * 2;
+        const dtraw_bytes = streams * 2 * replay_rows * c.mamba_heads * 2;
         for (0..p.layers) |m| {
             p.conv[m] = try device.buffer(conv_bytes, opts);
             p.ssm[m] = try device.buffer(ssm_bytes, opts);
-            p.raw[m] = try device.buffer(streams * 2 * replay_rows * c.convDim() * 2, opts);
-            p.dtraw[m] = try device.buffer(streams * 2 * replay_rows * c.mamba_heads * 2, opts);
-            @memset(p.conv[m].contents()[0 .. conv_bytes / slots], 0);
-            @memset(p.ssm[m].contents()[0 .. ssm_bytes / slots], 0);
+            p.raw[m] = try device.buffer(raw_bytes, opts);
+            p.dtraw[m] = try device.buffer(dtraw_bytes, opts);
+            @memset(p.conv[m].contents()[0..conv_bytes], 0);
+            @memset(p.ssm[m].contents()[0..ssm_bytes], 0);
+            @memset(p.raw[m].contents()[0..raw_bytes], 0);
+            @memset(p.dtraw[m].contents()[0..dtraw_bytes], 0);
         }
         p.tree = try device.buffer(tree_saves * c.mamba_heads * c.mamba_head_dim * c.state * 4, opts);
         var s = slots;
@@ -107,11 +125,56 @@ pub const Pool = struct {
     }
 };
 
-/// One attention cache: [KVH, capacity, HD] bf16 keys and values, `len` rows written.
+/// TF_NEMOTRON_METAL_KV_PAGES=1: a page holds 256 rows of every attention layer's keys then values, the head's last.
+pub fn pagedLayout(c: cfg.Config, head: bool) kv_pool.Layout {
+    const caches = c.count(.attention) + @intFromBool(head);
+    return .{ .fixed_bytes = Cache.bytes(c, 0, head) + Pool.bytes(c, 2, 1), .token_bytes = caches * 2 * c.kv_heads * c.head_dim * 2, .page_tokens = kvp.page_tokens, .snap_bytes = 0 };
+}
+
+/// A stream's lease of pages: the pool, and the lane whose table maps its rows.
+pub const Lease = struct { pages: *kvp.Pages, lane: usize };
+
+/// A paged cache's rows: cache `index`'s keys and values in every page of the arena, by the lane's table.
+pub const Paged = struct {
+    lease: Lease,
+    k_off: usize, // cache `index`'s keys in a page
+    v_off: usize,
+
+    pub fn arena(p: Paged) mtl.Buffer {
+        return p.lease.pages.arena.buf.?;
+    }
+
+    pub fn table(p: Paged) mtl.Buffer {
+        return p.lease.pages.tables.buf.?;
+    }
+
+    pub fn tableOff(p: Paged) usize {
+        return p.lease.pages.tables.offset(p.lease.lane);
+    }
+
+    pub fn pageBytes(p: Paged) u64 {
+        return p.lease.pages.arena.page_bytes;
+    }
+
+    /// The stream's page ids in row order (all its rows' pages, covered when it opened).
+    pub fn ids(p: Paged) []const u32 {
+        return p.lease.pages.ids(p.lease.lane);
+    }
+};
+
+/// One attention cache: [KVH, capacity, HD] bf16 keys and values, `len` rows written; or its rows in pages.
 pub const Kv = struct {
-    k: mtl.Buffer,
+    k: mtl.Buffer, // paged: the arena (`paged` says where its rows are)
     v: mtl.Buffer,
     capacity: usize,
+    paged: ?Paged = null,
+
+    /// Cache `index` of `caches` over the lease's pages, `capacity` rows covered.
+    fn initPaged(c: cfg.Config, lease: Lease, index: usize, capacity: usize) Kv {
+        const half = c.kv_heads * kvp.page_tokens * c.head_dim * 2;
+        const arena = lease.pages.arena.buf.?;
+        return .{ .k = arena, .v = arena, .capacity = capacity, .paged = .{ .lease = lease, .k_off = 2 * index * half, .v_off = (2 * index + 1) * half } };
+    }
 
     fn init(device: mtl.Device, c: cfg.Config, capacity: usize) !Kv {
         const bytes = c.kv_heads * capacity * c.head_dim * 2;
@@ -121,6 +184,7 @@ pub const Kv = struct {
     }
 
     fn deinit(self: Kv) void {
+        if (self.paged != null) return; // the pool's arena
         self.k.deinit();
         self.v.deinit();
     }
@@ -166,17 +230,22 @@ pub const Cache = struct {
 
     fn followBuffers(self: *Cache, hook: mtl.ResidencySet.Follow, joining: bool) void {
         mtl.resident.fields.apply(self, hook, joining);
-        for (self.kv[0..self.attentions]) |*kv| mtl.resident.fields.apply(kv, hook, joining);
-        if (self.mtp) |*kv| mtl.resident.fields.apply(kv, hook, joining);
+        for (self.kv[0..self.attentions]) |*kv| if (kv.paged == null) mtl.resident.fields.apply(kv, hook, joining);
+        if (self.mtp) |*kv| if (kv.paged == null) mtl.resident.fields.apply(kv, hook, joining);
     }
 
     pub fn appendBuffers(self: *const Cache, gpa: std.mem.Allocator, list: *std.ArrayList(mtl.Buffer)) !void {
         try mtl.resident.fields.append(gpa, list, self);
-        for (self.kv[0..self.attentions]) |*kv| try mtl.resident.fields.append(gpa, list, kv);
-        if (self.mtp) |*kv| try mtl.resident.fields.append(gpa, list, kv);
+        for (self.kv[0..self.attentions]) |*kv| if (kv.paged == null) try mtl.resident.fields.append(gpa, list, kv);
+        if (self.mtp) |*kv| if (kv.paged == null) try mtl.resident.fields.append(gpa, list, kv);
     }
 
     pub fn init(device: mtl.Device, c: cfg.Config, capacity: usize, head: bool) !Cache {
+        return initPaged(device, c, capacity, head, null);
+    }
+
+    /// `lease`: every cache's rows in the lease's pages (covered for `capacity` rows), no buffers of its own.
+    pub fn initPaged(device: mtl.Device, c: cfg.Config, capacity: usize, head: bool, lease: ?Lease) !Cache {
         const first = try device.buffer(max_rows * 4, opts);
         errdefer first.deinit();
         const second = try device.buffer(max_rows * 4, opts);
@@ -194,11 +263,17 @@ pub const Cache = struct {
         var made: usize = 0;
         errdefer for (s.kv[0..made]) |kv| kv.deinit();
         for (0..s.attentions) |a| {
-            s.kv[a] = try Kv.init(device, c, capacity);
+            s.kv[a] = if (lease) |l| Kv.initPaged(c, l, a, capacity) else try Kv.init(device, c, capacity);
             made += 1;
         }
-        if (head) s.mtp = try Kv.init(device, c, capacity);
+        if (head) s.mtp = if (lease) |l| Kv.initPaged(c, l, s.attentions, capacity) else try Kv.init(device, c, capacity);
         return s;
+    }
+
+    /// Bytes one stream's KV caches and token windows take on its first prompt.
+    pub fn bytes(c: cfg.Config, capacity: usize, head: bool) u64 {
+        const kv: u64 = (c.count(.attention) + @intFromBool(head)) * 2 * c.kv_heads * capacity * c.head_dim * 2;
+        return kv + 3 * max_rows * 4 + 2 * max_levels * 4 * 4;
     }
 
     /// After a prompt chunk of `rows` rows whose last row's Mamba states went to `slot` (nothing left to replay).
@@ -229,6 +304,7 @@ pub const Cache = struct {
         if (self.pending) |p| if (p.slot) |s| pool.give(s);
         pool.give(self.slot);
         pool.giveRid(self.rid);
+        if (self.attentions > 0) if (self.kv[0].paged) |p| p.lease.pages.finish(p.lease.lane); // its promise and pages
         for (0..self.attentions) |a| self.kv[a].deinit();
         if (self.mtp) |m| m.deinit();
         for (self.windows) |w| w.deinit();
@@ -290,7 +366,10 @@ pub const Scratch = struct {
         const chunks = (capacity + 511) / 512;
         const B = struct {
             fn make(d: mtl.Device, bytes: usize) !mtl.Buffer {
-                return d.buffer(@max(bytes, 64), opts);
+                const n = @max(bytes, 64);
+                const b = try d.buffer(n, opts);
+                @memset(b.contents()[0..n], 0);
+                return b;
             }
         };
         return .{
@@ -352,4 +431,47 @@ fn partCols(c: cfg.Config) usize {
     var most: usize = 0;
     for (shapes) |nk| most = @max(most, fwd.splitK(nk[0], nk[1]) * nk[0]);
     return most;
+}
+
+test "Cache.bytes matches the Metal buffers Cache.init allocates" {
+    var why: cfg.Why = .{};
+    const c = try cfg.parse(std.testing.allocator, cfg.lightning, &why);
+    var device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    var pool = try Pool.init(std.testing.allocator, device, c, 3, 2);
+    defer pool.deinit();
+    for ([_]bool{ false, true }) |head| {
+        var cache = try Cache.init(device, c, 4096, head);
+        defer cache.deinit(&pool);
+        var actual: u64 = cache.windows[0].length() + cache.windows[1].length() + cache.follow.length() + cache.topk.length();
+        for (cache.kv[0..cache.attentions]) |kv| actual += kv.k.length() + kv.v.length();
+        if (cache.mtp) |m| actual += m.k.length() + m.v.length();
+        try std.testing.expectEqual(actual, Cache.bytes(c, 4096, head));
+    }
+}
+
+test "Pool.bytes matches the Metal buffers Pool.init allocates, its tree aside" {
+    var why: cfg.Why = .{};
+    const c = try cfg.parse(std.testing.allocator, cfg.lightning, &why);
+    var device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    var pool = try Pool.init(std.testing.allocator, device, c, 7, 3);
+    defer pool.deinit();
+    var actual: u64 = 0;
+    for (0..pool.layers) |m| actual += pool.conv[m].length() + pool.ssm[m].length() + pool.raw[m].length() + pool.dtraw[m].length();
+    try std.testing.expectEqual(actual, Pool.bytes(c, 7, 3));
+}
+
+test "a pool of poolSlots holds every stream's state and pending forward, a lone round's third, and one spare" {
+    var why: cfg.Why = .{};
+    const c = try cfg.parse(std.testing.allocator, cfg.lightning, &why);
+    var device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    for ([_]usize{ 1, 2, 4, 8 }) |streams| {
+        var pool = try Pool.init(std.testing.allocator, device, c, poolSlots(streams), streams + 2);
+        defer pool.deinit();
+        for (0..2 * streams + 1) |_| _ = try pool.take();
+        _ = try pool.take();
+        try std.testing.expectError(error.StateSlotsFull, pool.take());
+    }
 }

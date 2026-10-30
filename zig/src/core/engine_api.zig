@@ -3,11 +3,14 @@ const std = @import("std");
 const lanes = @import("lanes");
 const Allocator = std.mem.Allocator;
 pub const tfvideo = @import("tfvideo.zig");
+pub const DraftSources = @import("draft_sources.zig").Sources;
 /// The server's name for one request, unique while the process lives.
 pub const Id = u64;
 
 /// One request's sampling (Python's exact_sampling.Sampling); a request without one decodes greedily.
 pub const Sampling = lanes.Sampling;
+/// presence_penalty and frequency_penalty, applied where ``Info.penalties``.
+pub const Penalties = lanes.Penalties;
 pub const EmbeddingInfo = lanes.embedding.Info;
 pub const EmbeddingBatch = lanes.embedding.Batch;
 pub const embedding_vector = @import("embedding_vector.zig");
@@ -48,6 +51,14 @@ pub const Structure = struct {
     after: ?u32 = null,
     /// The server's compiler, which has compiled `text` once already (the engine's compile is then a cache hit).
     compiler: ?*grammar.Compiler = null,
+    /// That compile, which the engine reads instead of compiling again; the server frees it after `finished`.
+    compiled: ?grammar.Compiled = null,
+    /// grammar_budget: mask tokens after which the reply could no longer complete within its token limits.
+    budget: bool = false,
+
+    pub fn free(st: Structure) void {
+        if (st.compiled) |g| g.free();
+    }
 };
 
 pub const grammar = lanes.grammar;
@@ -58,6 +69,7 @@ pub const Request = struct {
     embedding: ?lanes.embedding.Batch = null,
     max_tokens: u32,
     sampling: ?Sampling = null,
+    penalties: Penalties = .{},
     /// Tokens that end the reply as ``stop`` (the token is delivered); empty when the request ignores EOS.
     eos: []const u32 = &.{},
     stop: ?Stop = null,
@@ -72,6 +84,8 @@ pub const Request = struct {
     shared_prefixes: []const u32 = &.{},
     /// Where the latest user message's text starts: a state kept before it lets an edit of that turn resume (0: none).
     rewind_len: u32 = 0,
+    /// End of the latest user message in this prompt (0: unknown); background reply passes leave it unknown.
+    user_end: u32 = 0,
     /// Prompt chunk starts after 0 (Python PrefillPlan); empty selects the engine's plan.
     chunks: []const u32 = &.{},
     /// Decoded intervals [start,end), sorted, nonempty and strictly separated; an empty list uses prompt arithmetic.
@@ -89,6 +103,8 @@ pub const Request = struct {
     structure: ?Structure = null,
     /// Stop a short exact cycle while the think block is open.
     loop_guard: bool = false,
+    /// With ``loop_guard``: the reply ends where the guard fires, with no forced close and no answer after it.
+    loop_stop: bool = false,
     /// The prompt row (the assistant header's last) where routed lessons decide whether they act (null: none acts).
     decide: ?u32 = null,
     /// The model as shipped: no learned neuron acts on its rows, no prompt state is kept or reused (a lesson's writer).
@@ -129,7 +145,8 @@ pub const SpeechResult = @import("speech_api.zig").SpeechResult;
 pub const SpeechInfo = @import("speech_api.zig").SpeechInfo;
 pub const SpeechSubmitError = error{ Closed, Busy, InvalidRequest, Unsupported };
 
-pub const Reason = enum { stop, length, cancelled, failed };
+pub const Reason = enum { stop, length, cancelled, failed, silence };
+pub const speech_guard = @import("speech_guard.zig");
 
 /// What a finished reply's rounds did, for its runtime fields and /metrics.
 pub const Stats = struct {
@@ -144,6 +161,8 @@ pub const Stats = struct {
     loop_period: ?u32 = null,
     /// Prompt prefill duration measured by the engine host, in seconds.
     prefill_seconds: ?f64 = null,
+    /// The GPU-busy seconds of the forward passes the reply ran in, where profiling times them (TF_Q27_PROFILE).
+    gpu_seconds: ?f64 = null,
     /// Seconds from engine submission to first admission; an engine that admits immediately leaves zero.
     queued_seconds: f64 = 0,
     /// The drafter's own counters as a JSON object, or empty.
@@ -191,12 +210,16 @@ pub const Info = struct {
     structures: bool = false,
     /// Requests may ask for ``logprobs`` (the engine's lanes give the target's rows).
     logprobs: bool = false,
+    /// Requests' presence_penalty and frequency_penalty change the draws (false: they are ignored, and logged once).
+    penalties: bool = false,
     /// Requests may ask for ``prompt_logprobs`` (a prompt pass from 0 that reads every row).
     prompt_logprobs: bool = false,
     /// Prompt rows a prefill chunk at most, for the server's chunk starts (0: the engine cuts prompts itself).
     prefill_step: u32 = 0,
     /// The engine keeps prompt states between requests, so ``prefilled`` counts the tokens it restored.
     prompt_cache: bool = false,
+    /// Startup cache budget and the smallest state admitted by the family's existing keep plan.
+    prompt_cache_capacity: ?PromptCacheCapacity = null,
     /// The policy the engine runs under, one line (`/health` shows it); empty: none.
     policy: []const u8 = "",
     /// A line the server prints once at startup (the engine's memory plan); empty: none.
@@ -205,6 +228,8 @@ pub const Info = struct {
     warm_turns: bool = false,
     /// The engine decodes plain whatever a request asks: no drafter loaded, or this chip is faster plain.
     plain_only: bool = false,
+    /// Available proposals, independent of a request's choice to use them.
+    draft_sources: DraftSources = .{},
     /// The immutable retained-prefix plan applied at startup, not a process memory limit or current cache occupancy.
     prompt_cache_plan: ?PromptCachePlan = null,
     /// The engine scores decisions (`score`) and writes no text: the server refuses text requests.
@@ -234,6 +259,8 @@ pub const Admit = struct {
     fits: *const fn (ctx: *anyopaque, prompt: u32, max_tokens: u32) bool,
 };
 
+pub const PromptCacheCapacity = struct { budget_bytes: u64, minimum_state_bytes: u64 };
+
 pub const PromptCachePlan = struct {
     source: enum { physical_footprint, explicit, metal_working_set },
     budget_bytes: u64,
@@ -254,21 +281,40 @@ pub const Precision = enum { checkpoint, full };
 
 /// What a server asks of the engine it opens: the checkpoint, and the serve flags an engine reads.
 pub const Open = struct {
+    pub fn fsrRefusal(o: Open, backend: []const u8) ?[]const u8 {
+        if (o.ssd_experts_gib == null and !o.ple_on_ssd and o.fsr_trace == null) return null;
+        if (!std.mem.eql(u8, backend, "metal") or !std.mem.eql(u8, o.model_type, "qwen4_exp"))
+            return "--ssd-experts, --ple-on-ssd and --fsr-route-trace require Flash Next (qwen4_exp) on Metal";
+        if (o.speed_up != null) return "FSR SSD residency requires one Metal device; --speed-up is unsupported";
+        if (o.ssd_experts_gib) |g| if (!std.math.isFinite(g) or g <= 0 or g >= 0x1p33)
+            return "--ssd-experts requires a positive finite GiB budget below 2^33";
+        return null;
+    }
     dir: []const u8,
     model_type: []const u8,
     context: ?i64 = null,
+    max_frames: ?u32 = null,
+    silence: speech_guard.Config = .{},
+    /// Allocate an independent backbone state per speech lane; Metal Drama only.
+    cfg_enabled: bool = false,
+    /// Submit the two independent CFG sequences in one Metal command buffer, not vectorized GEMM.
+    cfg_batched: bool = false,
     lanes: u32 = 8,
     /// --parallel named a number: an engine whose memory fits fewer streams refuses instead of serving fewer.
     lanes_fixed: bool = false,
     drafts: bool = true,
     /// --drafter: a draft model's directory (Qwen3.8-27B's DFlash2; null: none), and --drafter-bits: 4, or 0 for bf16.
     drafter: ?[]const u8 = null,
+    drafter_name: ?[]const u8 = null, // the supplied --drafter name, before resolving its directory
     drafter_bits: u8 = 4,
     /// --record: each stream's committed rows and tapped features written under this folder, for drafter training.
     record: ?[]const u8 = null,
     speed_up: ?[]const u8 = null,
     prompt_cache_gib: ?f64 = null,
     prompt_cache_over_cap: bool = false,
+    ssd_experts_gib: ?f64 = null,
+    ple_on_ssd: bool = false,
+    fsr_trace: ?[]const u8 = null,
     /// --learn: where shared prompt states are kept on disk for later sessions and servers (null: off).
     learn: ?[]const u8 = null,
     /// --learn-min-free-gib: filesystem space kept free before any learned-state write.
@@ -279,11 +325,14 @@ pub const Open = struct {
     learn_conversations: bool = false,
     /// --learn-daily-gib: what learned states may write a day under the root, every model together.
     learn_daily_gib: f64 = 32,
+    /// --spill-gib: states evicted from RAM go to the store `learn_conversations` opens (off: written behind).
+    spill: prompt_cache.rows.Spill = .off,
     /// --slide: Sliding Weights learns into the served weights, live (off: learn requests are refused).
     slide: bool = false,
     /// --recall: the server attaches Recall's record once the engine loads; an engine that reads none refuses first.
     recall: bool = false,
     kv8: bool = false, // --kv-cache fp8: e4m3 attention caches, an fp32 scale a row (families whose Options take kv8)
+    prompt_int8: bool = false, // --prompt-precision int8: prompt matmuls on int8 activations (Options taking prompt_int8)
     /// --device and --segments (CUDA); null: the backend's environment fallback, then its default.
     device: ?u32 = null,
     segments: ?u32 = null,
@@ -303,6 +352,8 @@ pub const Open = struct {
     policy: []const u8 = "",
     /// --vision: load the checkpoint's image tower (null: text only; an engine without one refuses).
     vision: ?VisionOpen = null,
+    /// --loops: passes over a looped model's recurrent block (Dory's; null: the checkpoint's own count).
+    loops: ?u32 = null,
 };
 
 /// A packed decision: a trunk (pictures expand at `at`), a branch a question, and each branch's labels (`counts`).
@@ -346,7 +397,10 @@ pub const MemorySource = struct {
 pub const HealthSource = @import("engine_status.zig").HealthSource;
 pub const Status = @import("engine_status.zig").Status;
 
-pub const SubmitError = error{ Closed, Busy, InvalidSpans, Stale, InvalidRequest }; // Stale: put-back has not reached the device
+pub const SubmitError = error{ Closed, Busy, InvalidSpans, Stale, InvalidRequest, MemoryPressure }; // Stale: put-back has not reached the device
+
+/// What a request refused under critical memory pressure says (a 503).
+pub const pressure_message = "this Mac is under critical memory pressure: the server takes no new requests until it eases; retry shortly";
 
 /// What a reply refused or ended for `Stale` says, a submit's error and a queued job's failure alike.
 pub const stale_message = "a Living Weights delete could not be put back on the device: send the delete again to retry it, or restart the server";
@@ -523,6 +577,7 @@ pub const save_guard = @import("save_guard");
 
 test {
     _ = @import("lane_embedding_test.zig");
+    _ = speech_guard;
     _ = @import("lane_host.zig");
     _ = @import("lane_host_test.zig");
     _ = @import("lane_root_copy_test.zig");

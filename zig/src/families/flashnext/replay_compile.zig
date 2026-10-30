@@ -102,6 +102,9 @@ pub fn compileGlue(r: *Run) !void {
     r.argmax_pipe = try r.ownResource(try mtl.Pipeline.init(r.device, glue, "fz_argmax", false));
     r.add_pipe = try r.ownResource(try mtl.Pipeline.init(r.device, glue, "fz_bcast_add", false));
     r.argids_pipe = try r.ownResource(try mtl.Pipeline.init(r.device, glue, "fz_argmax_ids", false));
+    r.argpart_pipe = try r.ownResource(try mtl.Pipeline.init(r.device, glue, "fz_argmax_part", false));
+    r.argjoin_pipe = try r.ownResource(try mtl.Pipeline.init(r.device, glue, "fz_argmax_join", false));
+    r.arg_parts = .{ .b = try r.buffer(MAXR * 64 * 2 * 4) };
     r.pleids_pipe = try r.ownResource(try mtl.Pipeline.init(r.device, glue, "fz_ple_ids", false));
     r.copy_pipe = try r.ownResource(try mtl.Pipeline.init(r.device, glue, "fz_copy_kept", false));
     const verdict = try r.ownResource(try mtl.Library.fromSource(r.device, verdict_kernels.source, mtl.CompileOptions.mlx()));
@@ -111,7 +114,9 @@ pub fn compileGlue(r: *Run) !void {
     r.span_pipe = try r.ownResource(try mtl.Pipeline.init(r.device, verdict, "fz_span", false));
     r.positions_pipe = try r.ownResource(try mtl.Pipeline.init(r.device, verdict, "fz_positions", false));
     const draws = try r.ownResource(try mtl.Library.fromSource(r.device, ks.nemotron_sample, mtl.CompileOptions.mlx()));
-    r.draw_pipe = try r.ownResource(try mtl.Pipeline.init(r.device, draws, "tf_sample_full", false));
+    r.draws = try @import("sample.zig").Draws.init(r.device, draws, MAXR);
+    for ([_]mtl.Pipeline{ r.draws.full, r.draws.full_ids, r.draws.slices, r.draws.race, r.draws.race_ids }) |p| _ = try r.ownResource(p);
+    for ([_]mtl.Buffer{ r.draws.ck, r.draws.ci }) |b| _ = try r.ownResource(b);
     r.take_pipe = try r.ownResource(try mtl.Pipeline.init(r.device, glue, "fz_mtp_take", false));
     r.repack_w = try r.ownResource(try mtl.Pipeline.init(r.device, glue, "fz_repack_w", false));
     r.repack_s = try r.ownResource(try mtl.Pipeline.init(r.device, glue, "fz_repack_s", false));
@@ -127,7 +132,8 @@ pub fn compileGlue(r: *Run) !void {
 pub fn compileXnew(r: *Run, text: []const u8) !void {
     const cut = std.mem.indexOf(u8, text, "[[kernel]]") orelse return error.NoKernel;
     const define: []const u8 = if (r.xpack) "#define FZ_PACKED 1\n" else "#define FZ_PACKED 0\n";
-    const full = try std.mem.concat(r.arena, u8, &.{ define, text[0..cut], xnew_source });
+    const expert_source = if (r.window.ssd_experts != null) try @import("fsr_xnew_source.zig").patch(r.arena, xnew_source) else xnew_source;
+    const full = try std.mem.concat(r.arena, u8, &.{ define, text[0..cut], expert_source });
     r.xnew_header = try std.mem.concat(r.arena, u8, &.{ define, text[0..cut] });
     const lib = try r.ownResource(try mtl.Library.fromSource(r.device, full, mtl.CompileOptions.mlx()));
     r.xgu_pipe = try r.ownResource(try mtl.Pipeline.init(r.device, lib, "fz_xgu", false));

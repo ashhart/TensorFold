@@ -5,6 +5,7 @@ const driver = @import("driver.zig");
 const stream_ = @import("stream.zig");
 const memory = @import("memory.zig");
 const roce = @import("roce.zig");
+const p2p_report = @import("p2p_report.zig");
 
 const Stream = stream_.Stream;
 
@@ -17,19 +18,23 @@ pub const Group = struct {
     fast: ?*roce.Gather = null, // two ranks' small all-gathers by RoCE writes (openRoce), when both ranks brought it up
 
     /// Rank `rank` of `world` (NCCL opened at run time; NCCL_COMM_ID names rank 0's address, every rank the same).
-    pub fn open(rank: usize, world: usize) !Group {
+    pub fn open(d: *const driver.Driver, rank: usize, world: usize) !Group {
         if (std.c.getenv("NCCL_COMM_ID") == null) return error.NoCommId;
         var lib = try nccl.Library.open();
         errdefer lib.close();
         try lib.requireSupportedVersion();
+        var diag = p2p_report.begin(rank, world);
+        defer diag.end();
         var id: nccl.UniqueId = undefined;
         try lib.check(lib.api.ncclGetUniqueId(&id), "ncclGetUniqueId");
         var comm: nccl.Comm = null;
         try lib.check(lib.api.ncclCommInitRank(&comm, @intCast(world), id, @intCast(rank)), "ncclCommInitRank");
+        p2p_report.afterInit(&diag, .{ .lib = &lib, .comm = comm, .d = d, .later = true });
         return .{ .lib = lib, .comm = comm, .rank = rank, .world = world };
     }
 
     pub fn close(g: *Group) void {
+        p2p_report.ready(); // a transport line still owed is reported before the communicator goes
         if (g.fast) |f| f.deinit();
         g.destroyComm();
         g.lib.close();

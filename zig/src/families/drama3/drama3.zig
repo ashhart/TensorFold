@@ -3,6 +3,7 @@ pub const completion = @import("completion.zig");
 pub const speech_decode = @import("speech_decode.zig");
 pub const model = @import("model.zig");
 pub const kv_state = @import("kv_state.zig");
+pub const reference_cache = @import("reference_cache.zig");
 pub const codec_load = @import("codec_load.zig");
 pub const speed_probe = @import("cuda/speed_probe.zig");
 pub const replay = @import("replay.zig").Replay(@This());
@@ -22,12 +23,14 @@ pub const Sampling = engine.Sampling;
 pub const Options = engine.Options;
 
 test {
+    _ = common;
     _ = completion;
     _ = speech_decode;
     _ = @import("replay_test.zig");
     _ = config;
     _ = speed_probe;
     _ = model;
+    _ = reference_cache;
     _ = kv_state;
     _ = @import("codec_map.zig");
     _ = @import("codec_schema.zig");

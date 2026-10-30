@@ -132,6 +132,8 @@ class AuthTests(unittest.TestCase):
                     else:
                         self.assertEqual(code, 0)
                         self.assertTrue(all(cell["failed"] == 2 for cell in json.loads(report)["cells"]))
+                if isinstance(error, urllib.error.HTTPError):
+                    error.close()  # an unclosed one warns with its reason text, the key here, when it is collected
 
     def test_stream_error_payload_does_not_expose_credentials(self):
         wire = b"data: " + json.dumps({"error": {"message": KEY}}).encode() + b"\n\n"

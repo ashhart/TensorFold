@@ -1,0 +1,6 @@
+first: prompt 7604 cached 0 tokens 64 9.626 s sha256 aae9fc02ce96
+repeated: prompt 7604 cached 6144 tokens 64 3.132 s sha256 aae9fc02ce96 same_as_first True
+draft_false: prompt 7604 cached 6144 tokens 64 4.035 s sha256 aae9fc02ce96 same_as_first True
+concurrent: prompt 7604 cached 6144 tokens 64 4.686 s sha256 aae9fc02ce96 same_as_first True
+concurrent: prompt 7604 cached 6144 tokens 64 4.748 s sha256 aae9fc02ce96 same_as_first True
+exit 0

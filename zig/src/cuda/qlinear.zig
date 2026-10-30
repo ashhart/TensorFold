@@ -155,7 +155,7 @@ pub const Linear = struct {
         }
     }
 
-    /// Decode rows to FP32 without the output BF16 cast (NVFP4 and EXL3), including TP partial rows.
+    /// Decode rows to FP32 without the output BF16 cast (NVFP4, block FP8, MXFP8 and EXL3), including TP partial rows.
     pub fn decodeF32(l: Linear, s: Stream, w: Weight, in: Rows, out: u64, rows: usize) !void {
         const q = switch (w) {
             .exl3 => |q| {
@@ -163,13 +163,15 @@ pub const Linear = struct {
                 if (in.ldx != 0 and in.ldx != q.k) return error.RowStride;
                 return e.decode(s, q, in.x, .bf16, rows, out, .f32);
             },
+            .fp8g => |q| return l.onLaneAs(s, q, .fp8g, in, out, .f32, rows),
+            .mxfp8 => |q| return l.onLaneAs(s, q, .mxfp8, in, out, .f32, rows),
             .nvfp4 => |q| q,
             else => return error.EpilogueNotBuilt,
         };
         return l.onLaneAs(s, q, .fp4, in, out, .f32, rows);
     }
 
-    /// Prompt rows to FP32 without the output BF16 cast (NVFP4 and EXL3).
+    /// Prompt rows to FP32 without the output BF16 cast (NVFP4, EXL3; block FP8 and MXFP8 on the lane, as prompt()).
     pub fn promptF32(l: Linear, s: Stream, w: Weight, in: Rows, out: u64, rows: usize) !void {
         const q = switch (w) {
             .exl3 => |q| {
@@ -177,6 +179,8 @@ pub const Linear = struct {
                 if (in.ldx != 0 and in.ldx != q.k) return error.RowStride;
                 return e.prompt(s, q, in.x, .bf16, rows, out, .f32);
             },
+            .fp8g => |q| return l.onLaneAs(s, q, .fp8g, in, out, .f32, rows),
+            .mxfp8 => |q| return l.onLaneAs(s, q, .mxfp8, in, out, .f32, rows),
             .nvfp4 => |q| q,
             else => return error.EpilogueNotBuilt,
         };
@@ -229,8 +233,11 @@ pub const symbols = struct {
     pub const verify64 = "_ZN12tf_qmm_group12group_kernelILi64ELi64ELi64ELi1ELi4ELi4ELb0ELb0ELb0ELb0EEEvPK13__nv_bfloat16PKfNS_5PartsEiiiii";
     pub const verify128 = "_ZN12tf_qmm_group12group_kernelILi64ELi128ELi64ELi1ELi4ELi3ELb0ELb0ELb0ELb0EEEvPK13__nv_bfloat16PKfNS_5PartsEiiiii";
     pub const prefill = "_ZN14tf_qmm_prefill14prefill_kernelILi64ELi128ELi128ELi2ELi4ELi3ELb0EEEvPK13__nv_bfloat16PKjS3_S3_Pviiiiii";
+    pub const prefill22 = "_ZN14tf_qmm_prefill14prefill_kernelILi64ELi128ELi128ELi2ELi2ELi2ELb0EEEvPK13__nv_bfloat16PKjS3_S3_Pviiiiii";
+    pub const prefill_many = "tf_qmm_prefill_many";
     pub const gemv = "_ZN12tf_lane_gemv11gemv_kernelILi64ELi64ELi8EEEvPK13__nv_bfloat16PKfNS_4PartEiii";
     pub const gemv_split = "tf_lane_gemv_split";
+    pub const gemv_seg = "tf_lane_gemv_seg";
     pub const pack_words = "tf_pack_dense";
     pub const pack_scales = "tf_transpose_pad16";
 };
@@ -239,11 +246,21 @@ pub const symbols = struct {
 pub const Part = extern struct { w: u64, scales: u64, biases: u64, out: u64, n: c_int, npad: c_int, sk: c_int, tiles: c_int, first: c_int };
 pub const Parts = extern struct { p: [4]Part, count: c_int };
 
+/// qmm_prefill.cu's projection descriptors for one prompt grid over a shared bf16 input.
+pub const PrefillPart = extern struct { w: u64, scales: u64, biases: u64, out: u64, n: c_int, npad: c_int, first: c_int };
+pub const PrefillParts = extern struct { p: [4]PrefillPart, count: c_int };
+
 /// lane_gemv.cu's Part: one projection whose column tiles the CTAs share out.
 pub const GemvPart = extern struct { w: u64, scales: u64, biases: u64, out: u64, n: c_int, npad: c_int, sk: c_int, tiles: c_int };
 
+/// lane_gemv.cu's Seg and Segs: projections of one input, each at its first block, partials and tickets.
+pub const Seg = extern struct { p: GemvPart, first: c_int, work_at: c_int, tick_at: c_int, pad: c_int = 0 };
+pub const Segs = extern struct { s: [4]Seg, count: c_int };
+
 comptime {
     std.debug.assert(@sizeOf(Part) == 56 and @sizeOf(Parts) == 232 and @sizeOf(GemvPart) == 48);
+    std.debug.assert(@sizeOf(PrefillPart) == 48 and @sizeOf(PrefillParts) == 200);
+    std.debug.assert(@sizeOf(Seg) == 64 and @sizeOf(Segs) == 264);
 }
 
 pub const group_smem: u32 = 35328; // LaneTile<64, 16, 64, 1, 4, 8>::SMEM
@@ -252,6 +269,7 @@ pub const verify64_smem: u32 = 43008; // LaneTile<64, 64, 64, 1, 4, 4>::SMEM
 pub const verify128_smem: u32 = 57600; // LaneTile<64, 128, 64, 1, 4, 3>::SMEM
 pub const split_smem: u32 = 17664; // LaneTile<64, 16, 64, 1, 4, 4>::SMEM: four stages, so more split CTAs fit an SM
 pub const prefill_smem: u32 = 62976; // Tile<64, 128, 128, 2, 4, 3>::SMEM
+pub const prefill22_smem: u32 = 41984; // Tile<64, 128, 128, 2, 2, 2>::SMEM
 
 /// Split-K lane_gemv's fp32 slice partials and per-tile tickets: splitK keeps tiles * sk under 384 and tiles under 192.
 pub const Split = struct {
@@ -262,11 +280,16 @@ pub const Split = struct {
     const work_bytes = 384 * 16 * 64 * 4;
 
     pub fn init(d: *const Driver) !Split {
-        var work = try memory.DeviceBuffer.alloc(d, work_bytes);
+        return initFor(d, 1);
+    }
+
+    /// Room for `parts` split projections at once (one segmented launch).
+    pub fn initFor(d: *const Driver, parts: usize) !Split {
+        var work = try memory.DeviceBuffer.alloc(d, parts * work_bytes);
         errdefer work.free();
-        var tickets = try memory.DeviceBuffer.alloc(d, tiles_max * 4);
+        var tickets = try memory.DeviceBuffer.alloc(d, parts * tiles_max * 4);
         errdefer tickets.free();
-        try d.check(d.api.cuMemsetD32_v2(tickets.ptr, 0, tiles_max), "cuMemsetD32");
+        try d.check(d.api.cuMemsetD32_v2(tickets.ptr, 0, parts * tiles_max), "cuMemsetD32");
         return .{ .work = work, .tickets = tickets };
     }
 

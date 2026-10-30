@@ -1,0 +1,4 @@
+info: rank 1: TF_GLM_NCCL_ID_FILE <workspace>/serve111/sp3-fl/nccl-id; NCCL_COMM_ID <ring-a>:29583 leaves NCCL's environment
+info: checkpoint digest: 0.0 GiB read in 0.2 s, 42/42 cached files
+error: rank 1: another rank's process ended (its line closed); this rank stops instead of waiting on it
+exit 1

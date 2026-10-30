@@ -17,6 +17,8 @@ const fwd = @import("forward.zig");
 /// One stream's window and a shared forward's rows, ms on one M5 Ultra (a pair times its own at load: timing.zig).
 const one_mac_window_costs = costTable(13.0, 4.1);
 const one_mac_shared_costs = costTable(8.4 + 4.1, 4.1);
+/// The acceptance estimates' rate, below the core's 0.15: a stream takes about twice the misses in a row to go plain.
+const depth_rate = 0.08;
 
 fn costTable(comptime one: f64, comptime row: f64) [st.max_rows]lanes.config.Cost {
     var c: [st.max_rows]lanes.config.Cost = undefined;
@@ -61,7 +63,7 @@ pub const Backend = struct {
             .drafts = 4,
             .window_costs = if (b.costs) |*c| &c.window else if (b.sl.e.ep == null) &one_mac_window_costs else &.{},
             .mtp_step_ms = if (b.costs) |c| c.head_ms else 1.3,
-            .depth_rate = if (b.costs != null) timing.depth_rate else 0,
+            .depth_rate = depth_rate,
             .streams_exact = true,
             .hidden_rows = true,
             .batch_rows = st.max_rows,
@@ -108,17 +110,18 @@ pub const Backend = struct {
         const i = b.sl.pick(reuse) orelse return error.NoFreeSlot;
         try b.by.put(b.gpa, s, i);
         errdefer release(b, s);
-        try pool.reserve(b.sl, i, need(prompt.len, s.max_new), reuse); // pooled: its share (admission checked it fits)
+        // Admission can precede other fills' reservations; temporary exhaustion waits for a lane to finish.
+        pool.reserve(b.sl, i, need(prompt.len, s.max_new), reuse) catch |err| return switch (err) {
+            error.PoolFull => error.LaneMemory,
+            else => err,
+        };
         b.words.clearRetainingCapacity();
         try b.words.appendSlice(b.gpa, &.{ i, @intFromBool(s.drafts) });
         try b.words.appendSlice(b.gpa, prompt);
         try mirror.send(e, .begin, b.words.items);
         try b.sl.begin(i, prompt, s.drafts);
         s.cached = 0;
-        if (s.images.len > 0) { // the images through the tower first: the chunks inject their rows
-            if (e.ep != null) return error.VisionOnPair;
-            try @import("prompt_images.zig").prepare(b, s, i);
-        }
+        if (s.images.len > 0 and e.ep != null) return error.VisionOnPair;
         var at: u32 = 0;
         if (s.reuse.saved) |saved| { // a kept state of this prompt's prefix: the pass starts there
             const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
@@ -135,6 +138,8 @@ pub const Backend = struct {
                 s.reuse_error = if (snap.at >= prompt.len) error.SnapshotNotPrefix else if (snap.stale) error.SnapshotStale else error.SnapshotMissing;
             }
         }
+        // the images the restored state does not hold through the tower: the chunks inject their rows
+        if (s.images.len > 0) try @import("prompt_images.zig").prepare(b, s, i);
         s.fill_at.store(at, .monotonic);
         return .{ .stream = s, .slot = i, .at = at };
     }

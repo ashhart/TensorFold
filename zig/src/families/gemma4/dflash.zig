@@ -85,6 +85,8 @@ pub const Drafter = struct {
     knr: mtl.Buffer,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, target: *Model, dir: []const u8, options: Options) !*Drafter {
+        // the draft's own weights are the lane layout: M5 only. The target's row path does not serve them.
+        if (!target.device.tensorUnits()) return error.GemmaDraftNeedsTensorUnits;
         const d = try gpa.create(Drafter);
         errdefer gpa.destroy(d);
         d.* = undefined;
@@ -156,7 +158,7 @@ pub const Drafter = struct {
     }
 
     pub fn drafter(d: *Drafter) dr.Drafter {
-        return .{ .ptr = d, .vtable = &.{ .taps = tapsFn, .facts = factsFn, .open = openFn, .absorb = absorbFn, .hold = holdFn, .held = heldFn, .release = releaseFn } };
+        return .{ .kind = "DFlash", .ptr = d, .vtable = &.{ .taps = tapsFn, .facts = factsFn, .open = openFn, .absorb = absorbFn, .hold = holdFn, .held = heldFn, .release = releaseFn } };
     }
 
     fn cast(ptr: *anyopaque) *Drafter {

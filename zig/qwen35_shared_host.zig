@@ -43,6 +43,7 @@ fn engine(d: *cuda.Driver) q.engine.Engine {
     d.api.cuMemcpyDtoDAsync_v2 = Driver.copyAsync;
     d.api.cuLaunchKernel = Driver.launch;
     var e: q.engine.Engine = undefined;
+    e.kit = null;
     e.d = d;
     e.stream = .{ .d = d, .handle = null };
     e.g = .{ .hidden = 256, .intermediate = 256, .layers = 1, .vocab = 32, .k_heads = 1, .v_heads = 1, .q_heads = 1, .kv_heads = 1, .eps = 1e-6, .tied = true, .context = 256, .linear = @splat(true) };
@@ -123,6 +124,7 @@ const Owners = struct {
     var fail_alloc: usize = 0;
     var fail_clear: usize = 0;
     var live: [8]bool = @splat(false);
+    var pending = false;
     fn alloc(ptr: *u64, _: usize) callconv(.c) cuda.abi.Result {
         allocations += 1;
         if (allocations == fail_alloc) return cuda.abi.error_not_ready;
@@ -132,6 +134,7 @@ const Owners = struct {
     }
     fn free(ptr: u64) callconv(.c) cuda.abi.Result {
         const slot = ptr / 256;
+        std.debug.assert(!pending);
         std.debug.assert(live[slot]);
         live[slot] = false;
         return cuda.abi.success;
@@ -140,7 +143,22 @@ const Owners = struct {
         clears += 1;
         return if (clears == fail_clear) cuda.abi.error_not_ready else cuda.abi.success;
     }
+    fn clearAsync(ptr: u64, value: u8, bytes: usize, stream: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+        std.debug.assert(stream != null);
+        const result = clear(ptr, value, bytes);
+        if (result == cuda.abi.success) pending = true;
+        return result;
+    }
+    fn wait(_: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+        pending = false;
+        return cuda.abi.success;
+    }
+    fn context() callconv(.c) cuda.abi.Result {
+        pending = false;
+        return cuda.abi.success;
+    }
     fn setup(d: *cuda.Driver, fail_alloc_: usize, fail_clear_: usize) void {
+        std.debug.assert(!pending);
         allocations = 0;
         clears = 0;
         fail_alloc = fail_alloc_;
@@ -149,8 +167,12 @@ const Owners = struct {
         d.api.cuMemAlloc_v2 = alloc;
         d.api.cuMemFree_v2 = free;
         d.api.cuMemsetD8_v2 = clear;
+        d.api.cuMemsetD8Async = clearAsync;
+        d.api.cuStreamSynchronize = wait;
+        d.api.cuCtxSynchronize = context;
     }
     fn balanced() !void {
+        try std.testing.expect(!pending);
         for (live) |owner| try std.testing.expect(!owner);
     }
 };
@@ -158,6 +180,9 @@ const Owners = struct {
 test "Shared verification: the actual cache constructor unwinds the before bank and every later failure" {
     var d: cuda.Driver = undefined;
     var e = engine(&d);
+    e.stream.handle = @ptrFromInt(17);
+    e.rec_scratch = q.engine.recurrent.Pool.init(a, @intFromPtr(&e));
+    defer q.engine.recurrent.shutdown(&e);
     e.n_taps = 1;
     e.g.layers = 2;
     e.g.linear[1] = false;

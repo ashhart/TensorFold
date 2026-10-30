@@ -17,6 +17,7 @@ pub const Tower = struct {
     g: vit.Gemms,
     norms: cuda.norms.Norms,
     scratch: cuda.DeviceBuffer,
+    stage: cuda.copy_source.Stage,
     b: Buffers,
     bytes: u64, // on the device: weights, scratch and the Linears' workspace
 
@@ -45,6 +46,9 @@ pub const Tower = struct {
         for (sizes) |sz| total += std.mem.alignForward(usize, sz, 256);
         var scratch = try cuda.DeviceBuffer.alloc(d, total);
         errdefer scratch.free();
+        var stage: cuda.copy_source.Stage = .{};
+        errdefer stage.deinit();
+        _ = try stage.take(d, n * c.patchWidth() * @sizeOf(f32));
         var ptrs: [sizes.len]u64 = undefined;
         var off: usize = 0;
         for (sizes, &ptrs) |sz, *p| {
@@ -60,12 +64,14 @@ pub const Tower = struct {
             .g = g,
             .norms = norms,
             .scratch = scratch,
+            .stage = stage,
             .b = .{ .px = ptrs[0], .h = ptrs[1], .x = ptrs[2], .wide = ptrs[3], .a = ptrs[4], .acc = ptrs[5] },
             .bytes = w.bytes + total + g.workspace.len,
         };
     }
 
     pub fn deinit(t: *Tower) void {
+        t.stage.deinit();
         t.scratch.free();
         t.norms.unload();
         t.g.deinit();
@@ -111,7 +117,9 @@ pub const Tower = struct {
         if (img.pixels.len != values or values > room) return error.ImageShape;
         const hd = c.hidden;
         // the float patches land in the f32 products' room (the patch Linear has no bias), cast to bf16 on the GPU
-        try t.scratch.uploadAsync(b.acc - t.scratch.ptr, std.mem.sliceAsBytes(img.pixels), s.handle);
+        const pixels = std.mem.sliceAsBytes(img.pixels);
+        @memcpy(try t.stage.take(s.d, pixels.len), pixels);
+        try t.stage.copyTo(t.scratch, b.acc - t.scratch.ptr, s);
         try k.cast(s, b.acc, b.px, n * pw);
         // the cls and register rows, then each patch's projection plus its position row
         const rows = n + c.prefix;
@@ -125,13 +133,10 @@ pub const Tower = struct {
             try k.layerNorm(s, b.h, l.norm1, l.norm1_bias, b.x, rows, hd, c.eps);
             try vit.linear(g, k, s, b.acc, b.x, l.qkv, l.qkv_bias, b.wide, rows, 3 * hd, hd);
             try t.at.full(s, b.wide, b.a, rows, c.heads, dim, scale);
-            try vit.linear(g, k, s, b.acc, b.a, l.proj, l.proj_bias, b.x, rows, hd, hd);
-            try k.pointwise(s, b.x, b.h, b.h, rows * hd, .none);
+            try vit.linearAct(g, k, s, b.acc, b.a, l.proj, l.proj_bias, b.x, rows, hd, hd, b.h, b.h, .none);
             try k.layerNorm(s, b.h, l.norm2, l.norm2_bias, b.x, rows, hd, c.eps);
-            try vit.linear(g, k, s, b.acc, b.x, l.fc1, l.fc1_bias, b.wide, rows, c.ffn, hd);
-            try k.pointwise(s, b.wide, null, b.wide, rows * c.ffn, .gelu);
-            try vit.linear(g, k, s, b.acc, b.wide, l.fc2, l.fc2_bias, b.x, rows, hd, c.ffn);
-            try k.pointwise(s, b.x, b.h, b.h, rows * hd, .none);
+            try vit.linearAct(g, k, s, b.acc, b.x, l.fc1, l.fc1_bias, b.wide, rows, c.ffn, hd, null, b.wide, .gelu);
+            try vit.linearAct(g, k, s, b.acc, b.wide, l.fc2, l.fc2_bias, b.x, rows, hd, c.ffn, b.h, b.h, .none);
         }
         if (!c.final_norm) return feats; // the patch rows: cls and registers dropped
         try k.layerNorm(s, feats, w.final, w.final_bias, b.x, n, hd, c.eps);

@@ -85,6 +85,7 @@ pub const Pipelines = struct {
     merge: mtl.Pipeline,
     index_key: mtl.Pipeline,
     index_scores: mtl.Pipeline,
+    index_scores_block: mtl.Pipeline,
     topk: mtl.Pipeline,
     embed: mtl.Pipeline,
     add_rms: mtl.Pipeline,
@@ -120,6 +121,7 @@ pub const Pipelines = struct {
         p.merge = try mtl.Pipeline.init(device, mla, "glm_mla_merge", false);
         p.index_key = try mtl.Pipeline.init(device, idx, "glm_index_key", false);
         p.index_scores = try mtl.Pipeline.init(device, idx, "glm_index_scores", false);
+        p.index_scores_block = try mtl.Pipeline.init(device, idx, "glm_index_scores_block", false);
         p.topk = try mtl.Pipeline.init(device, idx, "glm_index_topk", false);
         p.embed = try mtl.Pipeline.init(device, glue, "glm_embed", false);
         p.add_rms = try mtl.Pipeline.init(device, glue, "glm_add_rms", false);
@@ -135,7 +137,7 @@ pub const Pipelines = struct {
     pub fn deinit(p: *Pipelines) void {
         p.prep.deinit();
         for (p.absorb) |q| q.deinit();
-        inline for (.{ p.attend, p.merge, p.index_key, p.index_scores, p.topk, p.embed, p.add_rms, p.silu_mul, p.gather, p.select, p.moe_jobs, p.moe_jobs_prompt }) |q| q.deinit();
+        inline for (.{ p.attend, p.merge, p.index_key, p.index_scores, p.index_scores_block, p.topk, p.embed, p.add_rms, p.silu_mul, p.gather, p.select, p.moe_jobs, p.moe_jobs_prompt }) |q| q.deinit();
     }
 };
 
@@ -194,24 +196,42 @@ pub fn indexKey(p: *const Pipelines, e: mtl.ComputeEncoder, proj: Ref, w: Ref, b
     e.dispatchGroups(.{ .width = a.rows }, .{ .width = 32 });
 }
 
-/// Every row's top-k list in position order; scores are needed only past the all-visible prefix.
-pub fn indexTopk(p: *const Pipelines, e: mtl.ComputeEncoder, q: Ref, proj: Ref, cache: Ref, rows: Ref, a: IndexArgs, score: Ref, inv: Ref, keys: Ref, last_pos: u32) void {
-    // last_pos is the maximum zero-based position; top-k keeps every visible key through position 2047.
-    if (last_pos >= 2048) {
-        e.setPipeline(p.index_scores);
-        inline for (.{ q, proj, cache, rows }, 0..) |r, i| bind(e, i, r);
-        e.setValue(a, 4);
-        bind(e, 5, score);
-        bind(e, 6, inv);
-        e.dispatchGroups(.{ .width = last_pos / 256 + 1, .height = a.rows }, .{ .width = 256 });
-    }
-    e.barrier();
+/// The row kernel's scores: the scan before the block, one key a thread.
+pub fn indexScoresRows(p: *const Pipelines, e: mtl.ComputeEncoder, q: Ref, proj: Ref, cache: Ref, rows: Ref, a: IndexArgs, score: Ref, inv: Ref, last_pos: u32) void {
+    e.setPipeline(p.index_scores);
+    inline for (.{ q, proj, cache, rows }, 0..) |r, i| bind(e, i, r);
+    e.setValue(a, 4);
+    bind(e, 5, score);
+    bind(e, 6, inv);
+    e.dispatchGroups(.{ .width = last_pos / 256 + 1, .height = a.rows }, .{ .width = 256 });
+}
+
+/// The blocked scan's scores: the query read once for a block of keys, not once a key.
+pub fn indexScoresBlock(p: *const Pipelines, e: mtl.ComputeEncoder, q: Ref, proj: Ref, cache: Ref, rows: Ref, a: IndexArgs, score: Ref, inv: Ref, last_pos: u32) void {
+    e.setPipeline(p.index_scores_block);
+    inline for (.{ q, proj, cache, rows }, 0..) |r, i| bind(e, i, r);
+    e.setValue(a, 4);
+    bind(e, 5, score);
+    bind(e, 6, inv);
+    e.dispatchGroups(.{ .width = last_pos / 512 + 1, .height = a.rows }, .{ .width = 128 });
+}
+
+/// The rows' top-k lists from the scores.
+pub fn indexTopkOnly(p: *const Pipelines, e: mtl.ComputeEncoder, rows: Ref, a: IndexArgs, score: Ref, keys: Ref) void {
     e.setPipeline(p.topk);
     bind(e, 0, score);
     bind(e, 1, rows);
     e.setValue(a, 2);
     bind(e, 3, keys);
     e.dispatchGroups(.{ .width = a.rows }, .{ .width = 1024 });
+}
+
+/// Every row's top-k list in position order; scores are needed only past the all-visible prefix.
+pub fn indexTopk(p: *const Pipelines, e: mtl.ComputeEncoder, q: Ref, proj: Ref, cache: Ref, rows: Ref, a: IndexArgs, score: Ref, inv: Ref, keys: Ref, last_pos: u32) void {
+    // last_pos is the maximum zero-based position; top-k keeps every visible key through position 2047.
+    if (last_pos >= 2048) indexScoresBlock(p, e, q, proj, cache, rows, a, score, inv, last_pos);
+    e.barrier();
+    indexTopkOnly(p, e, rows, a, score, keys);
 }
 
 /// Hidden rows from token ids: an FP8 row times its scale.

@@ -92,7 +92,8 @@ fn project(r: *Run, s: Streams, w: Weights, which: []const u8, start: usize, row
             mixed,
             inj,
             false,
-            true,
+            sh.hc_tiles,
+            sh.hc_act,
         );
     }
     const down = try std.fmt.bufPrint(&role, "qa_hc_down@{s}", .{which});
@@ -263,7 +264,8 @@ fn upCheck(t: *lib.Tally, r: *Run, s: Streams, which: []const u8, nd: usize, dow
 /// The checks on the per-row kernels: float64, row bits at 1-16 rows, the 6/32 recode's bits on the same values.
 pub fn runRows(t: *lib.Tally, r: *Run) !void {
     const sh = try a.create(tf.flashnext_rows.rows_w.Shared);
-    sh.* = .{ .a = a, .device = r.device, .sums = undefined };
+    const limit: Buf = .{ .b = try lib.noLimit(r.device) };
+    sh.* = .{ .a = a, .device = r.device, .sums = undefined, .no_limit = limit, .limit = limit };
     rows_mode = sh;
     defer rows_mode = null;
     try run(t, r);

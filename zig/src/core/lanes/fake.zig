@@ -40,6 +40,7 @@ const Lane = struct {
     rows: std.ArrayList(u32) = .empty, // the last verify's row tokens
     filled: usize = 0, // prompt chunks a stepped prefill has run
     filling: bool = false,
+    restored: u32 = 0, // prompt rows a kept state stood in for
 };
 
 /// Where a lane's caches come from: taken before its prompt goes in, given back once it is released.
@@ -50,6 +51,9 @@ pub const Reserve = struct {
 };
 
 pub const Fake = struct {
+    /// A ring slot: the draw it holds (null: free) and whether it still blocks a queued draw.
+    const Slot = struct { handle: ?u64 = null, blocking: bool = false };
+
     gpa: Allocator,
     lanes: std.AutoHashMapUnmanaged(*Stream, Lane) = .empty,
     drawn: std.ArrayList(u32) = .empty, // handle -> token
@@ -72,6 +76,10 @@ pub const Fake = struct {
     memory_lanes: ?usize = null, // prefill past this many live lanes fails with error.LaneMemory (no room yet)
     reserve: ?Reserve = null, // a new lane's caches come from here first (LaneMemory: no room yet); release gives them back
     fail_round: ?u64 = null, // this round's verify fails with error.GpuFailed, as a round the GPU fails does
+    ring_len: ?usize = null, // a finite ring of draws (GLM's): a slot still holding an unread draw refuses the next one
+    ring: std.ArrayList(Slot) = .empty, // the ring's slots (the draw each holds)
+    ring_at: usize = 0, // the slot the next draw takes
+    fail_read: ?u64 = null, // this handle's read fails with error.GpuFailed, as a failed buffer's does
     last_rows: usize = 0, // the last verify's rows, for test clocks
     last_sampled: bool = false, // and whether one of its streams drew keyed samples
     pieces_run: usize = 0, // prompt pieces run (`pieceBackend`)
@@ -80,12 +88,16 @@ pub const Fake = struct {
     drafts_most: usize = 0,
     fail_runs: usize = 0, // the next this many `pieces` calls fail with error.Unbound (`runBackend`)
     runs: usize = 0, // `pieces` calls that ran
+    image_words: bool = false, // an image row feeds a word of its image's identity, as a tower's row would
+    image_rows: usize = 0, // image rows fed (`image_words`): the rows a tower had to make
+    gpu_charge: ?f64 = null, // each verify and step charges its streams this many GPU seconds, as a timed backend does
 
     pub fn deinit(x: *Fake) void {
         var it = x.lanes.valueIterator();
         while (it.next()) |l| freeLane(x.gpa, l);
         x.lanes.deinit(x.gpa);
         x.drawn.deinit(x.gpa);
+        x.ring.deinit(x.gpa);
     }
 
     fn freeLane(gpa: Allocator, l: *Lane) void {
@@ -176,7 +188,7 @@ pub const Fake = struct {
         }
         const h = &x.lane(s).history;
         if (h.items.len != start or end + 1 > s.prompt_len) return error.PositionMismatch;
-        try h.appendSlice(x.gpa, s.prompt()[start..end]);
+        for (start..end) |at| try h.append(x.gpa, x.word(s, at));
         x.pieces_run += 1;
     }
 
@@ -184,7 +196,17 @@ pub const Fake = struct {
         const x = self(ptr);
         const h = &x.lane(s).history;
         if (h.items.len + 1 != s.prompt_len) return error.PositionMismatch;
-        try h.append(x.gpa, s.prompt()[s.prompt_len - 1]);
+        try h.append(x.gpa, x.word(s, s.prompt_len - 1));
+    }
+
+    /// What prompt row `at` feeds: its token, or with `image_words` inside an image a word of that image and row.
+    fn word(x: *Fake, s: *const Stream, at: usize) u32 {
+        if (x.image_words) for (s.images) |img| if (at >= img.at and at < @as(usize, img.at) + img.tokens) {
+            x.image_rows += 1;
+            const row: u64 = at - img.at;
+            return 0x4000_0000 | @as(u32, @truncate(std.hash.Wyhash.hash(img.hash, std.mem.asBytes(&row)) & 0x3fff_ffff));
+        };
+        return s.prompt()[at];
     }
 
     fn self(ptr: *anyopaque) *Fake {
@@ -195,10 +217,39 @@ pub const Fake = struct {
         return x.lanes.getPtr(s).?;
     }
 
-    fn draw(x: *Fake, l: *Lane, s: *Stream, position: u64) !u64 {
+    fn draw(x: *Fake, l: *Lane, s: *Stream, position: u64, blocking: bool) !u64 {
         if (position != l.history.items.len) return error.PositionMismatch;
         try x.drawn.append(x.gpa, x.targetNext(l.history.items, s.sampling, position));
-        return x.drawn.items.len - 1;
+        const h = x.drawn.items.len - 1;
+        try x.ringTake(h, blocking);
+        return h;
+    }
+
+    /// GLM's ring: a draw takes a slot until its handle is read; a queued draw on a taken slot refuses.
+    fn ringTake(x: *Fake, h: u64, blocking: bool) !void {
+        const len = x.ring_len orelse return;
+        if (x.ring.items.len != len) try x.ring.resize(x.gpa, len);
+        const slot = &x.ring.items[x.ring_at];
+        if (blocking and slot.blocking) return error.HandleOutOfStep;
+        slot.* = .{ .handle = h, .blocking = blocking };
+        x.ring_at = (x.ring_at + 1) % len;
+    }
+
+    /// The slot a draw's handle took (its token is free again).
+    fn ringFree(x: *Fake, h: u64) void {
+        for (x.ring.items) |*slot| if (slot.handle == h) {
+            slot.* = .{};
+            return;
+        };
+    }
+
+    /// The queued draws the ring still holds unread (a released stream's draw stays one).
+    pub fn ringHeld(x: *const Fake) usize {
+        var n: usize = 0;
+        for (x.ring.items) |slot| if (slot.blocking) {
+            n += 1;
+        };
+        return n;
     }
 
     fn targetNext(x: *Fake, history: []const u32, sampling: ?Sampling, position: u64) u32 {
@@ -256,7 +307,10 @@ pub const Fake = struct {
         if (x.prefill_hook) |hook| hook(x.prefill_hook_ctx.?, s, l.filled);
         if (s.isCancelled()) return error.Cancelled;
         l.filled += 1;
-        s.fill_at.store(@intCast(s.prompt_len * l.filled / @max(1, x.prefill_chunks)), .monotonic);
+        const at = s.prompt_len * l.filled / @max(1, x.prefill_chunks);
+        s.fill_at.store(@intCast(at), .monotonic);
+        try x.seed(l, s); // the kept rows are held from the first step, as the steps' features are asked for them
+        try x.grow(l, s, at);
         if (l.filled < @max(1, x.prefill_chunks)) return false;
         l.filling = false;
         try x.fillPrompt(l, s);
@@ -276,15 +330,27 @@ pub const Fake = struct {
 
     /// The pass's end: the cache holds the prompt, from a kept state where one was restored.
     fn fillPrompt(x: *Fake, l: *Lane, s: *Stream) !void {
+        try x.seed(l, s);
+        s.cached = l.restored;
+        try x.grow(l, s, s.prompt().len);
+    }
+
+    /// The kept state's tokens, which stand in for the prompt's first `at`, into an empty history.
+    fn seed(x: *Fake, l: *Lane, s: *Stream) !void {
+        const saved = s.reuse.saved orelse return; // the host drops it once the pass has restored it
+        if (l.history.items.len > 0) return;
+        const kept: *std.ArrayList(u32) = @ptrCast(@alignCast(saved));
+        try l.history.appendSlice(x.gpa, kept.items);
+        l.restored = s.reuse.at;
+    }
+
+    /// The prompt's tokens into the lane's history up to `to`, a mark's hook at each one passed.
+    fn grow(x: *Fake, l: *Lane, s: *Stream, to: usize) !void {
         const h = &l.history;
-        s.cached = 0;
-        if (s.reuse.saved) |saved| { // the kept state's tokens stand in for the prompt's first `at`
-            const kept: *std.ArrayList(u32) = @ptrCast(@alignCast(saved));
-            try h.appendSlice(x.gpa, kept.items);
-            s.cached = s.reuse.at;
-        }
-        for (s.prompt()[h.items.len..], h.items.len + 1..) |t, at| {
-            try h.append(x.gpa, t);
+        if (to <= h.items.len) return;
+        for (h.items.len..to) |row| {
+            try h.append(x.gpa, x.word(s, row));
+            const at = row + 1;
             if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(at)) != null) if (s.reuse.hook) |k| k.at(k.ptr, s, @intCast(at));
         }
     }
@@ -307,12 +373,12 @@ pub const Fake = struct {
 
     fn first(ptr: *anyopaque, s: *Stream, position: u64) anyerror!u64 {
         const x = self(ptr);
-        return x.draw(x.lane(s), s, position);
+        return x.draw(x.lane(s), s, position, false);
     }
 
     fn firstMasked(ptr: *anyopaque, s: *Stream, position: u64, mask: []const u32) anyerror!u64 {
         const x = self(ptr);
-        const h = try x.draw(x.lane(s), s, position);
+        const h = try x.draw(x.lane(s), s, position, false);
         x.drawn.items[h] = try allowed(x.drawn.items[h], mask);
         return h;
     }
@@ -352,11 +418,15 @@ pub const Fake = struct {
         const x = self(ptr);
         const l = x.lane(s);
         try l.history.append(x.gpa, x.value(feed));
-        return x.draw(l, s, position);
+        if (x.gpu_charge) |g| s.chargeGpu(g);
+        return x.draw(l, s, position, true);
     }
 
     fn read(ptr: *anyopaque, handle: u64) anyerror!u32 {
-        return self(ptr).drawn.items[handle];
+        const x = self(ptr);
+        x.ringFree(handle);
+        if (x.fail_read == handle) return error.GpuFailed;
+        return x.drawn.items[handle];
     }
 
     fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) anyerror!void {
@@ -365,6 +435,7 @@ pub const Fake = struct {
         if (x.fail_round == x.rounds) return error.GpuFailed;
         x.last_rows = 0;
         x.last_sampled = false;
+        if (x.gpu_charge) |g| for (windows) |w| w.stream.chargeGpu(g);
         for (windows, out) |w, o| {
             x.last_rows += w.rows();
             x.last_sampled = x.last_sampled or w.stream.sampling != null;

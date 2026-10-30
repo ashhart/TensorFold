@@ -1,0 +1,33 @@
+info: checkpoint digest: 0.0 GiB read in 0.1 s, 33/33 cached files
+info: RoCE all-gather: 2 HCA(s), shards up to 4096 KiB by RDMA writes
+[tensorfold] CUDA sm_121 device 0 (NVIDIA GB10, memory shared with the host): model 94.78 GiB; 4 streams at once, 0.83 GiB each at a 40960-token window, of 7.6 GiB left after a 12.2 GiB reserve; prompts in passes of up to 2048 rows, a 5.1 GiB prompt cache; own glue kernels
+[tensorfold] serving local-model at http://127.0.0.1:8095/v1 (sampling: temperature 1.0, top_p 0.95; drafts: on; context: 40960; loaded in 328.8s)
+[tensorfold] 127.0.0.1 "GET /health HTTP/1.1" 200 -
+[tensorfold] 127.0.0.1 "GET /v1/models HTTP/1.1" 200 -
+warning: libtfvideo.so is required for video inputs (--vision); build the optional zig build video -Dffmpeg=PREFIX runtime against FFmpeg 9.0.2 and place it in lib beside the server; see packaging/RUNTIME.md
+[tensorfold] 127.0.0.1 "POST /tokenize HTTP/1.1" 400 -
+[tensorfold] 127.0.0.1 "POST /tokenize HTTP/1.1" 400 -
+[tensorfold] 127.0.0.1 "POST /tokenize HTTP/1.1" 400 -
+[tensorfold] 127.0.0.1 "POST /tokenize HTTP/1.1" 400 -
+[tensorfold] 127.0.0.1 "POST /tokenize HTTP/1.1" 400 -
+[tensorfold] 127.0.0.1 "POST /tokenize HTTP/1.1" 400 -
+[tensorfold] 127.0.0.1 "POST /tokenize HTTP/1.1" 400 -
+[tensorfold] 127.0.0.1 "POST /tokenize HTTP/1.1" 400 -
+[tensorfold] 127.0.0.1 "POST /tokenize HTTP/1.1" 400 -
+[tensorfold] 127.0.0.1 "POST /tokenize HTTP/1.1" 400 -
+[tensorfold] 127.0.0.1 "POST /tokenize HTTP/1.1" 400 -
+[tensorfold] 127.0.0.1 "POST /tokenize HTTP/1.1" 400 -
+info: prompt cache: 1458 tokens, resumed at 0, kept 0; 0 states, 0 MiB and 0 MiB spare of 5227 MiB (hits 0, misses 1, evicted 0, refused 0, failed 0)
+[tensorfold] done chatcmpl-16bd445df28eaacbee5165dcb8041bcf prompt=1458 cached=0 thinking=False effort=none tokens=1 sha=9e04a49e5786 finish=length rounds=0 accepted=0/0 ttft=1.035 decode=0.000 elapsed=1.035 queued=0.000 tok/s=0.0
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 500 -
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 500 -
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 500 -
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 500 -
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 500 -
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 500 -
+[tensorfold] 127.0.0.1 "GET /health HTTP/1.1" 200 -
+[tensorfold] shutting down (SIGTERM): draining: new requests get 503; 0 request(s) in progress may finish within 20.0 s
+[tensorfold] shutting down: drained
+[tensorfold] shutting down: stopped
+exit 0

@@ -38,8 +38,55 @@ pub fn planKvWrite(l: *const Launcher, keys: u64, values: u64, kind: c_int, p: P
     try l.flat(l.plan.kv_write, @intCast(p.rows * kv_heads * d), s, &a);
 }
 
+/// `planKvWrite` with the keys in the activation kind: the cache bytes of the fp32 keys a cast gives.
+pub fn planKvWriteAct(
+    l: *const Launcher,
+    keys: u64,
+    values: u64,
+    kind: c_int,
+    p: PlanRef,
+    layer: usize,
+    kv_heads: usize,
+    d: usize,
+    s: S,
+) Error!void {
+    if (kind < 1 or kind > 2) return invalid("planned keys");
+    var a: Args = .{};
+    try a.add(keys);
+    try a.add(values);
+    try a.add(kind);
+    try a.add(@as(c_int, @intCast(p.rows)));
+    try a.add(@as(c_int, @intCast(kv_heads)));
+    try a.add(@as(c_int, @intCast(d)));
+    try a.add(p.args);
+    try a.add(@as(c_int, @intCast(layer)));
+    try l.flat(l.plan.kv_write_act, @intCast(p.rows * kv_heads * d), s, &a);
+}
+
 /// One query a row (rows, heads, d) fp32 over its slot's caches up to its position; the walk covers `span` keys.
 pub fn planCausal(l: *const Launcher, q: u64, out: u64, scores: u64, stats: u64, partials: u64, p: PlanRef, layer: usize, heads: usize, kv_heads: usize, d: usize, span: usize, scale: f32, kind: c_int, s: S) Error!void {
+    return planCausalAs(l, q, out, scores, stats, partials, p, layer, heads, kv_heads, d, span, scale, kind, false, s);
+}
+
+/// `planCausal` with q and out in the cache's activation kind when `act`: the bytes of the casts around it.
+pub fn planCausalAs(
+    l: *const Launcher,
+    q: u64,
+    out: u64,
+    scores: u64,
+    stats: u64,
+    partials: u64,
+    p: PlanRef,
+    layer: usize,
+    heads: usize,
+    kv_heads: usize,
+    d: usize,
+    span: usize,
+    scale: f32,
+    kind: c_int,
+    act: bool,
+    s: S,
+) Error!void {
     if (d > 256 or heads < 1 or kv_heads < 1 or @rem(heads, kv_heads) != 0 or kind < 1 or kind > 2) return invalid("planned attention");
     const which: usize = @intCast(kind - 1);
     const rows = p.rows;
@@ -64,7 +111,8 @@ pub fn planCausal(l: *const Launcher, q: u64, out: u64, scores: u64, stats: u64,
     try a.add(p.args);
     try a.add(layer_c);
     // a warp scores a key for the block's heads: four warps a block, the heads' queries in shared memory
-    try l.go(l.plan.score[which], dim(cdiv(span, 4), blocks, rows), dim(128, 1, 1), @intCast(group * d * 4), s, &a);
+    const score = if (act) l.plan.score_act[which] else l.plan.score[which];
+    try l.go(score, dim(cdiv(span, 4), blocks, rows), dim(128, 1, 1), @intCast(group * d * 4), s, &a);
     var b: Args = .{};
     try b.add(scores);
     try b.add(stats);
@@ -82,13 +130,63 @@ pub fn planCausal(l: *const Launcher, q: u64, out: u64, scores: u64, stats: u64,
     try c.add(d_c);
     try c.add(p.args);
     try c.add(layer_c);
-    try l.go(l.plan.apply[which], dim(tiles, blocks, rows), dim(256, 1, 1), 0, s, &c);
+    const apply = @divExact(heads, applyGroup(group, @intCast(tiles), heads, rows));
+    try l.go(l.plan.apply[which], dim(tiles, apply, rows), dim(256, 1, 1), 0, s, &c);
     var e: Args = .{};
     try e.add(partials);
     try e.add(out);
     try e.add(tiles);
     try e.add(d_c);
-    try l.go(l.sum_partials, dim(heads, rows, 1), dim(256, 1, 1), 0, s, &e);
+    if (act) try e.add(kind);
+    try l.go(if (act) l.plan.sum_act else l.sum_partials, dim(heads, rows, 1), dim(256, 1, 1), 0, s, &e);
+}
+
+/// Keys the one-block walk (`planAttend`) takes at most.
+pub const attend_span = 4096;
+
+/// `planCausalAs` as one launch a (row, query head), q and out fp32 (kind 0) or the cache's kind; false past its shape.
+pub fn planAttend(
+    l: *const Launcher,
+    q: u64,
+    q_kind: c_int,
+    out: u64,
+    out_kind: c_int,
+    p: PlanRef,
+    layer: usize,
+    heads: usize,
+    kv_heads: usize,
+    d: usize,
+    span: usize,
+    scale: f32,
+    kind: c_int,
+    s: S,
+) Error!bool {
+    if (span > attend_span or d > 128 or heads < 1 or kv_heads < 1 or @rem(heads, kv_heads) != 0) return false;
+    if (kind < 1 or kind > 2) return false;
+    var a: Args = .{};
+    try a.add(q);
+    try a.add(q_kind);
+    try a.add(out);
+    try a.add(out_kind);
+    try a.add(@as(c_int, @intCast(span)));
+    try a.add(@as(c_int, @intCast(heads)));
+    try a.add(@as(c_int, @intCast(kv_heads)));
+    try a.add(@as(c_int, @intCast(d)));
+    try a.add(scale);
+    try a.add(p.args);
+    try a.add(@as(c_int, @intCast(layer)));
+    try l.go(l.plan.attend[@intCast(kind - 1)], dim(heads, p.rows, 1), dim(1024, 1, 1), 0, s, &a);
+    return true;
+}
+
+/// Blocks under which the values' walk splits a KV head's query heads over more blocks.
+const apply_blocks = 128;
+
+/// Query heads an apply block takes: fewer while the grid is small (a head's sums do not depend on its block).
+fn applyGroup(group: usize, tiles: usize, heads: usize, rows: usize) usize {
+    var g = group;
+    while (g > 1 and tiles * @divExact(heads, g) * rows < apply_blocks) g = @divExact(g, smallestFactor(g));
+    return g;
 }
 
 fn smallestFactor(n: usize) usize {
@@ -185,4 +283,12 @@ pub fn planGdnReplay(l: *const Launcher, keep: u64, p: PlanRef, key_heads: usize
     try a.add(@as(c_int, @intCast(p.slots)));
     const wide: usize = if (dk == 128) 0 else 1;
     try l.go(l.plan.gdn_replay[wide], dim(@divExact(dv, 8), value_heads, p.slots * layers), dim(32, 8, 1), 0, s, &a);
+}
+
+test "a small walk splits the heads of a KV head, a wide one keeps them together" {
+    const std = @import("std");
+    try std.testing.expectEqual(@as(usize, 1), applyGroup(16, 1, 32, 1));
+    try std.testing.expectEqual(@as(usize, 4), applyGroup(16, 2, 32, 8));
+    try std.testing.expectEqual(@as(usize, 16), applyGroup(16, 256, 32, 1));
+    try std.testing.expectEqual(@as(usize, 3), applyGroup(6, 16, 24, 1));
 }

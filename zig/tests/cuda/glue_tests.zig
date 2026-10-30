@@ -505,10 +505,10 @@ pub fn run(gpu: Gpu) !void {
     var arena: std.heap.ArenaAllocator = .init(gpu.gpa);
     defer arena.deinit();
     const kk = cuda.kernels;
-    var mods: [5]cuda.Module = undefined;
+    var mods: [4]cuda.Module = undefined;
     var loaded: usize = 0;
     defer for (mods[0..loaded]) |*m| m.unload();
-    for ([_][]const u8{ kk.nemotron_norms, kk.nemotron_route, kk.nemotron_mamba, kk.nemotron_attention, kk.nemotron_keyed }, 0..) |img, i| {
+    for ([_][]const u8{ kk.nemotron_route, kk.nemotron_mamba, kk.nemotron_attention, kk.nemotron_keyed }, 0..) |img, i| {
         mods[i] = try cuda.Module.load(gpu.d, img);
         loaded += 1;
     }

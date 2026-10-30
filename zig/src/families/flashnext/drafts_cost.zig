@@ -31,17 +31,23 @@ pub const CostDepth = struct {
         self.ms[drafts] = if (before == 0) ms else before + cost_rate * (ms - before);
     }
 
-    /// A round's time at `drafts` as 0.6.5's extend_costs: measured, interpolated, else at the widest's time a row.
+    /// A round's time at `drafts`: measured, interpolated, else past the widest along its two widest widths' slope.
     pub fn cost(self: *const CostDepth, drafts: usize) ?f64 {
         if (self.ms[drafts] > 0) return self.ms[drafts];
         var below: ?usize = null;
+        var next_below: ?usize = null;
         var above: ?usize = null;
         for (0..top + 1) |d| if (self.ms[d] > 0) {
-            if (d < drafts) below = d else if (above == null) above = d;
+            if (d < drafts) {
+                next_below = below;
+                below = d;
+            } else if (above == null) above = d;
         };
         const hi = above orelse {
             const w = below orelse return null;
-            return self.ms[w] * @as(f64, @floatFromInt(drafts + 1)) / @as(f64, @floatFromInt(w + 1));
+            const past: f64 = @floatFromInt(drafts - w);
+            if (next_below) |l| if (self.ms[w] > self.ms[l]) return self.ms[w] + past * (self.ms[w] - self.ms[l]) / @as(f64, @floatFromInt(w - l));
+            return self.ms[w] * @as(f64, @floatFromInt(drafts + 1)) / @as(f64, @floatFromInt(w + 1)); // one width: a row's share
         };
         const lo = below orelse return self.ms[hi];
         const f = @as(f64, @floatFromInt(drafts - lo)) / @as(f64, @floatFromInt(hi - lo));
@@ -105,6 +111,17 @@ test "depth by cost: unmeasured depths first, then the most expected tokens a ms
     for (1..4) |d| c.ms[d] = 20 + @as(f64, @floatFromInt(d));
     c.rounds = 1;
     try std.testing.expectEqual(@as(usize, 3), c.pick());
+}
+
+test "past the widest measured width a round costs its slope a row, so copies that land open wide windows" {
+    var c: CostDepth = .{};
+    c.time(1, 11.9); // gated head rounds measured at 2, 3 and 4 rows
+    c.time(2, 14.3);
+    c.time(3, 17.2);
+    try std.testing.expectApproxEqAbs(@as(f64, 17.2 + 12 * 2.9), c.cost(15).?, 1e-9);
+    const wide = c.copyDrafts(0.97);
+    try std.testing.expect(wide >= 8 and wide <= 12);
+    try std.testing.expect(c.copyDrafts(0.6) <= 3);
 }
 
 test "landing rates move toward kept drafts; costs extend past the widest by rows" {

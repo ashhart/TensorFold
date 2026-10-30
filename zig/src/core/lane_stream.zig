@@ -24,7 +24,7 @@ pub fn open(h: *LaneHost, job: *Job) bool {
             job.key[0] = 0x8000_0000 | @as(u32, @truncate(std.hash.Wyhash.hash(f, std.mem.asBytes(&job.key[0])) & 0x7fff_ffff));
         }
     };
-    if (h.cache) |store| if (r.embedding == null and r.prompt_logprobs == null and !r.untaught) if (store.lookupRewind(h.gpa, job.cacheKey(), r.bornLen(), r.history_len, r.rewind_len, r.shared_prefixes, r.chunks, h.spans(r))) |l| {
+    if (h.cache) |store| if (r.embedding == null and r.prompt_logprobs == null and !r.untaught) if (store.lookupUser(h.gpa, job.cacheKey(), r.bornLen(), r.history_len, r.rewind_len, r.user_end, r.shared_prefixes, r.chunks, h.spans(r))) |l| {
         job.entry = l.entry;
         job.kept0 = store.counts.kept;
         job.marks = l.marks;
@@ -41,6 +41,7 @@ pub fn open(h: *LaneHost, job: *Job) bool {
         .max_new = r.max_tokens,
         .eos = r.eos,
         .sampling = r.sampling,
+        .penalties = r.penalties,
         .drafts = r.drafts,
         .proposer = job.custom orelse job.proposer.proposer(),
         .recall = recall,
@@ -54,6 +55,7 @@ pub fn open(h: *LaneHost, job: *Job) bool {
         .logprobs = r.logprobs,
         .prompt_logprobs = r.prompt_logprobs,
         .loop_guard = r.loop_guard,
+        .loop_stop = r.loop_stop,
         .chunks = r.chunks,
         .history_len = r.history_len,
         .shared_prefixes = r.shared_prefixes,

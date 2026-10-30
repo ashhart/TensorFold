@@ -33,6 +33,8 @@ const Walk = struct {
             m.addImport("sys", w.sys(target));
         if (m.root_source_file) |root| if (root == .src_path) {
             const path = root.src_path.sub_path;
+            if ((std.mem.endsWith(u8, path, "native/metal.zig") or std.mem.endsWith(u8, path, "tests/contract/metal_main.zig")) and !m.import_table.contains("qwen4"))
+                @import("qwen4.zig").metalNative(w.b, target, m);
             const needs_memory = std.mem.indexOf(u8, path, "flashnext") != null or
                 std.mem.indexOf(u8, path, "residency") != null or std.mem.endsWith(u8, path, "cli/tests.zig") or
                 std.mem.endsWith(u8, path, "src/tensorfold.zig") or std.mem.endsWith(u8, path, "cli/cli.zig") or

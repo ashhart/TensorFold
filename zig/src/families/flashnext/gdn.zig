@@ -18,6 +18,25 @@ pub fn compile(r: *Run, kept: bool) !mtl.Pipeline {
     return r.ownResource(try mtl.Pipeline.init(r.device, lib, "fz_gdn", false));
 }
 
+/// fz_gdn for tree windows: every row's state stored, rows following a tree table (tree.zig) instead of the chain.
+pub fn compileTree(r: *Run) !mtl.Pipeline {
+    const text = try std.mem.concat(r.arena, u8, &.{ r.xnew_header, "#define FZ_GDN_REPLAY 0\n#define FZ_GDN_TREE 1\n", ks.flashnext_gdn });
+    const lib = try r.ownResource(try mtl.Library.fromSource(r.device, text, mtl.CompileOptions.mlx()));
+    return r.ownResource(try mtl.Pipeline.init(r.device, lib, "fz_gdn", false));
+}
+
+/// step for a tree window: the tree table after the head offset.
+pub fn stepTree(r: *Run, pipe: mtl.Pipeline, ins: []const Buf, outs: []const Buf, table: Buf, h0: u32, heads: usize) void {
+    if (r.skip & Run.class("gdn") != 0) return;
+    r.enc.setPipeline(pipe);
+    for (ins, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
+    for (outs, 0..) |b, j| r.enc.setBuffer(b.b, b.off, ins.len + j);
+    r.enc.setBytes(std.mem.asBytes(&h0), ins.len + outs.len);
+    r.enc.setBuffer(table.b, table.off, ins.len + outs.len + 1);
+    r.enc.dispatchThreads(mtl.Size.of(heads * 1024, 1, 1), mtl.Size.of(1024, 1, 1));
+    if (!r.serial) r.enc.barrier();
+}
+
 /// The step over value heads [h0, h0 + heads) for the rows `ins`' rows buffer holds; inputs and outputs as q4_gdn's.
 pub fn step(r: *Run, pipe: mtl.Pipeline, ins: []const Buf, outs: []const Buf, h0: u32, heads: usize) void {
     if (r.skip & Run.class("gdn") != 0) return;

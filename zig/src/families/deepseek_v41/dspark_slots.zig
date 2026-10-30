@@ -133,7 +133,7 @@ pub const SlotPass = struct {
         const Rr = n * @max(group, nslots);
         const c: usize = f.comm.world() * one.k;
         const lay = emit.Layout.of(group, @intCast(n), f.cfg.window);
-        const V: usize = f.cfg.vocab / f.comm.world();
+        const V: usize = (try @import("partition.zig").share(f.cfg.vocab, f.opts.rank, f.comm.world())).len;
         const valid = try gpa.alloc(u64, nslots);
         errdefer if (!assembled) gpa.free(valid);
         const h64 = try gpa.alloc(i64, @intCast(lay.len64));
@@ -199,7 +199,7 @@ pub const SlotPass = struct {
                 if (!quiet) std.log.scoped(.dsv41).warn("draft graphs: TF_DSV41_DRAFT_GRAPHS set, but the glue fatbin has no ds_cands kernel: the host step", .{});
             } else {
                 _ = try x.device(&x.send, 2 * R * f.cfg.hidden); // the embedding's and exchanges' send, at its largest
-                x.dev = try dsd.Dev.init(gpa, r.d, f.comm, r.stream, mode, one.k, f.cfg.hidden, n * nslots, one.conf != null, @intCast(8 * lay.len64 + 4 * lay.len32), nslots);
+                x.dev = try dsd.Dev.init(gpa, r.d, f.comm, r.stream, mode, one.k, f.cfg.hidden, n * nslots, one.conf != null, @intCast(8 * lay.len64 + 4 * lay.len32), nslots, (try @import("partition.zig").share(f.cfg.vocab, f.opts.rank, f.comm.world())).lo);
                 // the speculative round from the row window's device pick: this pass takes the forward's hook over
                 const ko = r.kernels.others(r.stream).f;
                 if (ko.ds_accept_rows != null and ko.ds_stage_rows != null and nslots <= 16) {

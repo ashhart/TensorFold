@@ -97,7 +97,8 @@ fn windowMs(b: anytype, s: *Session, rows: usize) !f64 {
     for (pos8[0..rows], 0..) |*p, j| p.* = @intCast(s.m.pos + j);
     const segs = [1]forward.Seg{.{ .s = s, .row0 = 0, .rows = rows }};
     const cb = b.e.r.queue.commandBuffer();
-    b.e.r.enc = cb.compute(.serial);
+    b.e.r.begin(cb, .serial);
+    errdefer if (b.e.r.fsr != null) b.e.r.abort();
     try forward.encode(b.e, &segs, rows, t.ids8, null);
     try b.primary.finish(cb);
     return (mtl.clock.seconds() - t0) * 1e3;
@@ -114,9 +115,10 @@ fn chainMs(b: anytype, s: *Session, depth: usize) !f64 {
     const follow = [1]u32{tokenAt(PROMPT)};
     const t0 = mtl.clock.seconds();
     const cb = b.e.r.queue.commandBuffer();
-    b.e.r.enc = cb.compute(if (b.e.r.serial) .serial else .concurrent);
+    b.e.r.begin(cb, if (b.e.r.serial) .serial else .concurrent);
+    errdefer if (b.e.r.fsr != null) b.e.r.abort();
     s.encodeDrafts(&follow, s.last, depth) catch |err| {
-        b.e.r.enc.end();
+        b.e.r.abort();
         return err;
     };
     try s.m.finish(cb);

@@ -139,7 +139,7 @@ pub const Kernels = struct {
         if (p.raw) |raw| if (raw.bits == 4 and raw.group == 64 and raw.sum == .f32 and raw.n % 8 == 0) {
             const m = row.simd.Matrix{ .w = raw.w, .w_off = raw.w_off, .scales = raw.scales, .s_off = raw.s_off, .biases = raw.biases, .b_off = raw.b_off, .n = raw.n, .k = raw.k };
             const scalar = try k.twin(m); // loads the tiles before they're read
-            const call = try row.simd.call(&k.simd.?, raw.n, raw.k, rows, scalar, try k.pairTwin(m));
+            const call = try row.simd.call(&k.simd.?, raw.n, raw.k, rows, scalar, try k.pairTwin(m), 0);
             row.simd.encode(e, call, m, x.buffer, x.offset, y.buffer, y.offset);
             e.barrier();
             try span.end();

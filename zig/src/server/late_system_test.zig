@@ -8,6 +8,10 @@ const model_text = @import("model_text.zig");
 const routes = @import("routes.zig");
 const Conn = @import("http_conn.zig").Conn;
 
+comptime {
+    _ = @import("late_system_retained_test.zig");
+}
+
 const openai_body =
     \\{"model":"m","max_tokens":4,"messages":[{"role":"system","content":"lead"},{"role":"user","content":"hi"},{"role":"system","content":"be brief"},{"role":"assistant","content":"ok"},{"role":"user","content":"go"}]}
 ;
@@ -22,8 +26,8 @@ const misplaced_body =
 ;
 
 /// Drops a system message after the first, so the late-system probe comes back as user.
-const DropLate = struct {
-    fn text(t: *@This()) model_text.Text {
+pub const DropLate = struct {
+    pub fn text(t: *@This()) model_text.Text {
         return .{ .ctx = t, .vtable = &.{ .encode = encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource } };
     }
 
@@ -78,13 +82,13 @@ const DropLate = struct {
     }
 };
 
-fn textOf(v: json.Value, key: []const u8) []const u8 {
+pub fn textOf(v: json.Value, key: []const u8) []const u8 {
     const x = v.get(key) orelse return "";
     return if (x == .string) x.string else "";
 }
 
 /// Copies the prompt the server submits, then finishes at once.
-const Capture = struct {
+pub const Capture = struct {
     prompt: []u32 = &.{},
     background_prompt: []u32 = &.{},
     background_born: u32 = 0,
@@ -92,7 +96,7 @@ const Capture = struct {
     warm_turns: bool = false,
     telemetry: []const u8 = "", // the finished event's drafter counters
 
-    fn engine(e: *@This()) api.Engine {
+    pub fn engine(e: *@This()) api.Engine {
         return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
     }
 
@@ -137,7 +141,7 @@ const Capture = struct {
 
 const Reply = struct { status: u16, body: []u8 };
 
-fn exchange(srv: *server.Server, path: []const u8, body: []const u8) !Reply {
+pub fn exchange(srv: *server.Server, path: []const u8, body: []const u8) !Reply {
     return exchangeAs(srv, "POST", path, body);
 }
 
@@ -273,7 +277,7 @@ const prose_call = "<tool_call>{\"name\":\"lookup\",\"arguments\":{\"q\":\"a\"}}
 const prose_reply = "Before.\n" ++ prose_call ++ "\nAfter.";
 const retained_prose = "Before.\n\nAfter.";
 const chat_tools = "\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"parameters\":{\"type\":\"object\"}}}]";
-const prose_chat = "{\"model\":\"m\",\"max_tokens\":256,\"messages\":[{\"role\":\"user\",\"content\":\"go\"}]," ++ chat_tools;
+pub const prose_chat = "{\"model\":\"m\",\"max_tokens\":256,\"messages\":[{\"role\":\"user\",\"content\":\"go\"}]," ++ chat_tools;
 
 // Route adapters return prose and one call; warming submits both to the engine.
 test "tool reply prose survives whole chat, Messages and Responses and their warm prompts" {

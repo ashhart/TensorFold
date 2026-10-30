@@ -1,0 +1,94 @@
+{
+ "ref": "video-ref-nvidia.json",
+ "checks": [
+  {
+   "label": "a video request's prompt ids equal the processor's",
+   "ok": true,
+   "detail": "12 of 12 clips"
+  },
+  {
+   "label": "a video conversation's later turn resumes past its video",
+   "ok": true,
+   "detail": "cached 2048 of 2271; the text alone is 1458"
+  },
+  {
+   "label": "another video under the same text resumes only the text before it",
+   "ok": true,
+   "detail": "cached 0 of 2181"
+  },
+  {
+   "label": "a video request answers",
+   "ok": true,
+   "detail": "HTTP 200/200 "
+  },
+  {
+   "label": "drafted equals \"draft\": false with a video",
+   "ok": true,
+   "detail": "'The video shows a colorful background with diagonal stripes '"
+  },
+  {
+   "label": "a video request repeated answers the same",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "label": "concurrent video requests equal their runs alone",
+   "ok": true,
+   "detail": "4 of 4"
+  },
+  {
+   "label": "a video and an image in one request answer",
+   "ok": true,
+   "detail": "HTTP 200 "
+  },
+  {
+   "label": "refused three videos",
+   "ok": true,
+   "detail": "HTTP 400 'a request supports at most 2 videos'"
+  },
+  {
+   "label": "refused a video in an assistant message",
+   "ok": true,
+   "detail": "HTTP 400 'video_url parts are supported only in user messages'"
+  },
+  {
+   "label": "refused a video in a tool result",
+   "ok": true,
+   "detail": "HTTP 400 'video_url parts are supported only in user messages'"
+  },
+  {
+   "label": "refused a clip too short to sample",
+   "ok": true,
+   "detail": "HTTP 400 'video 1 is too short: sampled at 2 frames a second it gives no frame; send at least half a second'"
+  },
+  {
+   "label": "refused bytes that aren't a video",
+   "ok": true,
+   "detail": "HTTP 400 \"video 1: the video's bytes are invalid or unsupported; use MP4 or WebM (H.264, HEVC, VP8, VP9 or MPEG-4)\""
+  },
+  {
+   "label": "refused a URL without --vision-urls",
+   "ok": true,
+   "detail": "HTTP 400 'video URLs are off on this server; send the video as a data URL, or start the server with --vision-urls'"
+  },
+  {
+   "label": "refused another scheme",
+   "ok": true,
+   "detail": "HTTP 400 'videos require data URLs or public HTTPS URLs'"
+  },
+  {
+   "label": "refused a video_url without a url",
+   "ok": true,
+   "detail": "HTTP 400 'video_url must contain a non-empty url string'"
+  }
+ ],
+ "replies": {
+  "describe": "The video shows a colorful background with diagonal stripes of different colors, including blue, green, yellow, orange, and pink. Two yellow squares appear in the center",
+  "alone": [
+   "The video shows a colorful background with diagonal stripes of various colors, including blue, green, yellow, orange, pink, and purple. Two yellow squares appear in",
+   "Yes, the two yellow squares move diagonally across the screen from the upper left toward the lower right, while the colorful diagonal stripes in the background also shift position",
+   "The video shows a colorful background with diagonal stripes of blue, green, yellow, orange, red, and pink/magenta. In the center, there is a",
+   "Yes, the yellow rectangle moves diagonally across the screen from the lower left toward the upper right between the two frames."
+  ]
+ }
+}

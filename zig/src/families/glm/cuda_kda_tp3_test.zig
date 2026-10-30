@@ -36,7 +36,7 @@ fn function(d: *const cuda.Driver, id: usize) cuda.Function {
     return .{ .d = d, .handle = @ptrFromInt(id) };
 }
 fn layer(heads: usize, dims: usize) kda.Layer {
-    return .{ .proj = 0x100000000, .fb = 0x200000000, .gb = 0x300000000, .o = 0x400000000, .conv_w = 0, .a_log = 0, .dt_bias = 0, .norm_w = 0, .eps = 1e-6, .lower = -5, .heads = heads, .dims = dims };
+    return .{ .proj = .{ .bf16 = 0x100000000 }, .fb = 0x200000000, .gb = 0x300000000, .o = .{ .bf16 = 0x400000000 }, .conv_w = 0, .a_log = 0, .dt_bias = 0, .norm_w = 0, .eps = 1e-6, .lower = -5, .heads = heads, .dims = dims };
 }
 test "GLM TP3: real KDA projections accept uneven shares and retain aligned tiled dispatch" {
     const c = Config{};
@@ -58,7 +58,7 @@ test "GLM TP3: real KDA projections accept uneven shares and retain aligned tile
         for ([_]usize{ 1, 17, 64, 65, 127, 128, 2066 }) |rows| for ([_]bool{ false, true }) |prompt| {
             Capture.count = 0;
             try kda.project(.{ .glue = &raw, .mm = &kernels, .prompt = prompt }, stream, l, scratch, 0x900000000, c.hidden, rows);
-            const weights = [_]u64{ l.proj, l.fb, l.gb };
+            const weights = [_]u64{ l.proj.bf16, l.fb, l.gb };
             const xs = [_]u64{ 0x900000000, scratch.p + 3 * l.heads * 128 * 2, scratch.p + (3 * l.heads * 128 + 128) * 2 };
             const strides = [_]usize{ c.hidden, width, width };
             const ns = [_]usize{ width, l.heads * 128, l.heads * 128 };

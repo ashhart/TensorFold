@@ -38,9 +38,26 @@ pub fn run(a: Allocator, io: std.Io, out: *std.Io.Writer, env: ?*const std.proce
     };
     const flash_metal = @import("builtin").os.tag == .macos and std.mem.eql(u8, model_type, "qwen4_exp");
     const weights = if (flash_metal) try @import("flashnext_memory").weightBytes(checkpoint, a, io, dir) else try hub.sizeOf(a, io, dir);
-    try out.print("family: {s} ({s})\n", .{ family.title, family.model_type });
+    const details = hub.configDetails(a, io, dir);
+    defer if (details.modelopt_formats) |formats| {
+        for (formats) |format| a.free(format);
+        a.free(formats);
+    };
+    const title = if (details.is_bolt) "Nemotron 3.5 Bolt" else family.title;
+    try out.print("family: {s} ({s})\n", .{ title, family.model_type });
     if (hub.quantization(a, io, dir)) |q| {
         try out.print("format: {d}-bit, group {d}\n", .{ q.bits, q.group });
+    } else if (details.modelopt_formats) |formats| {
+        if (formats.len == 1) {
+            try out.print("format: modelopt {s}\n", .{formats[0]});
+        } else {
+            try out.writeAll("format: modelopt mixed precision (");
+            for (formats, 0..) |format, i| {
+                if (i != 0) try out.writeAll(", ");
+                try out.writeAll(format);
+            }
+            try out.writeAll(")\n");
+        }
     } else {
         try out.print("format: full precision\n", .{});
     }
@@ -107,6 +124,108 @@ fn has(text: []const u8, needle: []const u8) bool {
     if (std.mem.indexOf(u8, text, needle) != null) return true;
     std.debug.print("missing \"{s}\" in:\n{s}\n", .{ needle, text });
     return false;
+}
+
+fn runConfig(a: Allocator, io: std.Io, config: []const u8) ![]const u8 {
+    if (hub.family("nemotron_h_omni") == null) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = config });
+    var out: std.Io.Writer.Allocating = .init(a);
+    try std.testing.expectEqual(@as(u8, 0), try run(a, io, &out.writer, null, null, dir));
+    return out.toOwnedSlice();
+}
+
+test "info names Bolt and its sorted modelopt formats" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const output = try runConfig(arena.allocator(), std.testing.io,
+        \\{
+        \\  "model_type": "nemotron_h_omni",
+        \\  "llm_config": {"model_type": "nemotron_h_puzzle"},
+        \\  "quantization_config": {
+        \\    "quant_algo": "MIXED_PRECISION",
+        \\    "quantized_layers": {
+        \\      "language_model.layers.0": {"quant_algo": "Q8_0"},
+        \\      "language_model.layers.1": {"quant_algo": "IQ2_XXS"},
+        \\      "language_model.layers.2": {"quant_algo": "W4A16_NVFP4"},
+        \\      "language_model.lm_head": {"quant_algo": "Q8_0"}
+        \\    },
+        \\    "config_groups": {
+        \\      "group_0": {"quant_algo": "Q8_0", "targets": ["*lm_head*"]},
+        \\      "group_1": {"weights": {"dynamic": false, "num_bits": 4, "type": "float", "group_size": 16}, "targets": ["*mlp*"]},
+        \\      "group_2": {"quant_algo": "IQ2_XXS", "targets": ["*experts*"]}
+        \\    }
+        \\  }
+        \\}
+    );
+    try std.testing.expect(has(output, "family: Nemotron 3.5 Bolt (nemotron_h_omni)"));
+    try std.testing.expect(has(output, "format: modelopt mixed precision (IQ2_XXS, Q8_0, W4A16_NVFP4)"));
+}
+
+test "info reads one modelopt algorithm without quantized layers" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const output = try runConfig(arena.allocator(), std.testing.io,
+        \\{"model_type":"nemotron_h_omni","quantization_config":{"quant_algo":"NVFP4"}}
+    );
+    try std.testing.expect(has(output, "format: modelopt NVFP4"));
+}
+
+test "info treats an empty modelopt layer algorithm as full precision" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const output = try runConfig(arena.allocator(), std.testing.io,
+        \\{"model_type":"nemotron_h_omni","quantization_config":{"quantized_layers":{"layer":{"quant_algo":""}}}}
+    );
+    try std.testing.expect(has(output, "format: full precision"));
+}
+
+test "info treats an empty modelopt config algorithm as full precision" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const output = try runConfig(arena.allocator(), std.testing.io,
+        \\{"model_type":"nemotron_h_omni","quantization_config":{"quant_algo":""}}
+    );
+    try std.testing.expect(has(output, "format: full precision"));
+}
+
+test "info treats malformed modelopt metadata as full precision" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    for ([_][]const u8{
+        \\{"model_type":"nemotron_h_omni","quantization_config":{"quantized_layers":[]}}
+        ,
+        \\{"model_type":"nemotron_h_omni","quantization_config":{"quantized_layers":{"layer":{}}}}
+        ,
+        \\{"model_type":"nemotron_h_omni","quantization_config":{"quant_algo":4}}
+        ,
+    }) |config| {
+        const output = try runConfig(a, io, config);
+        try std.testing.expect(has(output, "format: full precision"));
+    }
+}
+
+test "info keeps the Super VL title" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const output = try runConfig(arena.allocator(), std.testing.io,
+        \\{"model_type":"nemotron_h_omni","llm_config":{"model_type":"nemotron_h"}}
+    );
+    try std.testing.expect(has(output, "family: Nemotron 3.5 Super VL (nemotron_h_omni)"));
+    try std.testing.expect(has(output, "format: full precision"));
+}
+
+test "info keeps MLX format precedence over modelopt" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const output = try runConfig(arena.allocator(), std.testing.io,
+        \\{"model_type":"nemotron_h_omni","quantization":{"bits":4,"group_size":64},"quantization_config":{"quant_algo":"NVFP4"}}
+    );
+    try std.testing.expect(has(output, "format: 4-bit, group 64"));
 }
 
 test "issue 934: info reads the same large config and reports an oversized config with its limit" {

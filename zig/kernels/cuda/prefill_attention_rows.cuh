@@ -1,4 +1,4 @@
-// The kernels' body; in scope: q, kc, vc, out, p0, W, H, HK, G, HO, scale, skip, causal, PT, PS and first_row().
+// Row attention body; caller supplies tensors, geometry, layout constants, and first_row.
     constexpr int C = D / 8, K16 = (D + 15) / 16, NB = 2 * K16;  // the head's 16-byte chunks, 16-dim steps, 8-dim tiles
     constexpr int CS = (NB + 7) / 8 * 8, RB = WARPS / HPC, THREADS = 32 * WARPS;  // CS: a staged key row's chunks
     constexpr bool QREG = D <= 128;               // the queries' fragments stay in registers, else in shared memory
@@ -10,17 +10,82 @@
     const int row0 = first_row(), last = min(row0 + 16 * RB, W) - 1;
     const int head = hk * G + hg * HPC + warp % HPC, wrow = row0 + (warp / HPC) * 16;
     const int tiles = (p0 + (causal ? last : W - 1)) / BN + 1, items = 4 * tiles, limit = p0 + W;
+    // HM: head-major caches (a head's CAP rows in a run, or PT's pages of PTOK rows a head, PS apart); else row-major
+    auto row_of = [&](int row) -> int64_t {
+        if constexpr (HPAGED) return HM ? (PT ? (int64_t)hk * PTOK + row % PTOK : (int64_t)hk * CAP + row) : (int64_t)row * HK + hk;
+        else return HM ? (int64_t)hk * CAP + row : (int64_t)row * HK + hk;
+    };
+    auto page_of = [&](int row) -> int64_t { return HM && PT ? (int64_t)PT[row / PTOK] * PS : 0; };
+    static_assert(!F8 || (NB == C && CS == C), "an fp8 cache: whole 16-dim steps");
+    // F8: fetch loads an item's e4m3 words and scales a step ahead, put widens them into its slot, hiding the loads
+    constexpr int PER = F8 ? (HALF * C + THREADS - 1) / THREADS : 1;
+    uint2 pre[PER];
+    float pre_s[PER];
+    auto fetch = [&](int item) {
+        if constexpr (F8) {
+            const uint8_t* src = reinterpret_cast<const uint8_t*>(item % 4 < 2 ? kc : vc);
+            const float* sc = item % 4 < 2 ? ks : vs;
+            const int key0 = (item / 4) * BN + (item % 2) * HALF;
+#pragma unroll
+            for (int j = 0; j < PER; ++j) {
+                const int i = threadIdx.x + j * THREADS, key = key0 + i / C;
+                pre[j] = make_uint2(0u, 0u);
+                pre_s[j] = 0.0f;
+                if (i < HALF * C && key < limit) {
+                    if constexpr (HPAGED) {
+                        const int row = key + (key < p0 ? 0 : skip);
+                        const int64_t r = row_of(row), pg = page_of(row);
+                        pre[j] = __ldg(reinterpret_cast<const uint2*>(src + pg + r * D + (i % C) * 8));
+                        pre_s[j] = __ldg(reinterpret_cast<const float*>(reinterpret_cast<const uint8_t*>(sc) + pg) + r);
+                    } else {
+                        const int64_t r = row_of(key + (key < p0 ? 0 : skip));
+                        pre[j] = __ldg(reinterpret_cast<const uint2*>(src + r * D + (i % C) * 8));
+                        pre_s[j] = __ldg(sc + r);
+                    }
+                }
+            }
+        }
+    };
+    auto put = [&](int item) {
+        if constexpr (F8) {
+            uint4* dst = slots + (item % NS) * HALF * CS;
+#pragma unroll
+            for (int j = 0; j < PER; ++j) {
+                const int i = threadIdx.x + j * THREADS;
+                if (i >= HALF * C) continue;
+                uint4 w;
+                const __nv_fp8x2_storage_t* e = reinterpret_cast<const __nv_fp8x2_storage_t*>(&pre[j]);
+                uint32_t* o = reinterpret_cast<uint32_t*>(&w);
+#pragma unroll
+                for (int k = 0; k < 4; ++k) {
+                    const float2 x = __half22float2(__half2(__nv_cvt_fp8x2_to_halfraw2(e[k], __NV_E4M3)));
+                    o[k] = pack(__fmul_rn(x.x, pre_s[j]), __fmul_rn(x.y, pre_s[j]));
+                }
+                dst[sw<8 * CS>(i / C, i % C)] = w;
+            }
+        }
+    };
     auto stage = [&](int item) {
-        const __nv_bfloat16* src = item % 4 < 2 ? kc : vc;
-        const int key0 = (item / 4) * BN + (item % 2) * HALF;
-        uint4* dst = slots + (item % NS) * HALF * CS;
-        for (int i = threadIdx.x; i < HALF * NB; i += THREADS) {
-            const int key = key0 + i / NB, chunk = i % NB;
-            const bool in = key < limit && (NB == C || chunk < C);  // past the filled keys or the head dim: zeros
-            const int row = in ? key + (key < p0 ? 0 : skip) : 0;
-            // a page's rows are contiguous: PT names each 512-row page, PS elements apart (null PT: one run of rows)
-            const int64_t at = PT ? (int64_t)PT[row / 512] * PS + (int64_t)(row % 512) * HK * D : (int64_t)row * HK * D;
-            cp16z(dst + sw<8 * CS>(i / NB, chunk), src + at + hk * D + chunk * 8, in);
+        if constexpr (F8) {
+            fetch(item);
+            put(item);
+        } else {
+            const __nv_bfloat16* src = reinterpret_cast<const __nv_bfloat16*>(item % 4 < 2 ? kc : vc);
+            const int key0 = (item / 4) * BN + (item % 2) * HALF;
+            uint4* dst = slots + (item % NS) * HALF * CS;
+            for (int i = threadIdx.x; i < HALF * NB; i += THREADS) {
+                const int key = key0 + i / NB, chunk = i % NB;
+                const bool in = key < limit && (NB == C || chunk < C);  // past the filled keys or the head dim: zeros
+                const int row = in ? key + (key < p0 ? 0 : skip) : 0;
+                if constexpr (HM) {
+                    if constexpr (HPAGED) cp16z(dst + sw<8 * CS>(i / NB, chunk), src + page_of(row) + row_of(row) * D + chunk * 8, in);
+                    else cp16z(dst + sw<8 * CS>(i / NB, chunk), src + row_of(row) * D + chunk * 8, in);
+                } else {
+                    // a page's rows are contiguous: PT names each 512-row page, PS elements apart (null PT: one run)
+                    const int64_t at = PT ? (int64_t)PT[row / 512] * PS + (int64_t)(row % 512) * HK * D : (int64_t)row * HK * D;
+                    cp16z(dst + sw<8 * CS>(i / NB, chunk), src + at + hk * D + chunk * 8, in);
+                }
+            }
         }
     };
     uint32_t qa[QREG ? K16 : 1][4];
@@ -48,6 +113,9 @@
         if (i < items) stage(i);
         commit();
     }
+    if constexpr (F8) {
+        if (NS < items) fetch(NS);
+    }
     float o[NB][4];
 #pragma unroll
     for (int i = 0; i < NB; ++i) o[i][0] = o[i][1] = o[i][2] = o[i][3] = 0.0f;
@@ -56,13 +124,18 @@
     float m0 = -INFINITY, m1 = -INFINITY, l0 = 0.0f, l1 = 0.0f;
     const int pos0 = causal ? p0 + wrow + g : limit - 1, pos1 = causal ? pos0 + 8 : pos0;
     auto take = [&](int it) -> const uint4* {           // item it's slot, once every thread's copy has landed
-        wait_group<NS - 1>();
+        cp_wait<NS - 1>();
         __syncthreads();
         return slots + (it % NS) * HALF * CS;
     };
     auto done = [&](int it) {                            // the slot is free: stage the item NS ahead into it
         __syncthreads();
-        if (it + NS < items) stage(it + NS);
+        if constexpr (F8) {
+            if (it + NS < items) {
+                put(it + NS);
+                if (it + NS + 1 < items) fetch(it + NS + 1);
+            }
+        } else if (it + NS < items) stage(it + NS);
         commit();
     };
     auto scores = [&](float (&s)[4][4], const uint4* sl) {
@@ -166,7 +239,7 @@
         values(pa[2], pa[3], take(it + 3));
         done(it + 3);
     }
-    wait_group<0>();
+    cp_wait<0>();
     const int r0 = wrow + g, r1 = r0 + 8;
 #pragma unroll
     for (int i = 0; i < C; ++i) {

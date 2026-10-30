@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { createPublicKey, generateKeyPairSync, sign } from 'node:crypto'
+import { isIP } from 'node:net'
 import releaseTrust from '../../build/release-trust.json'
 import { checkUpdateFeed, compareVersions, emptyUpdateStatus, MAX_UPDATE_MANIFEST_BYTES } from './update-checker'
 import {
@@ -191,6 +192,29 @@ async function main() {
     })) as typeof fetch,
   }), new RegExp(`exceeds the ${MAX_UPDATE_MANIFEST_BYTES}-byte limit`, 'i'), 'chunked oversized manifests are capped while streaming')
   assert.equal(chunkedCancelled, true, 'oversized chunked manifest body is cancelled')
+
+  // A TUN proxy's placeholder address is admitted for the app's own feed, as it is for the Hub.
+  {
+    const release = signedJsonRelease({
+      version: '0.3.0',
+      downloadUrl: 'https://example.com/vontra.dmg',
+      sha256: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+    })
+    const status = await checkUpdateFeed('https://example.com/feed.json', '0.1.0', undefined, {
+      publicKey: publicPem,
+      lookup: async () => [{ address: '198.18.0.90', family: 4 }],
+      fetchImpl: (async () => response(release)) as typeof fetch,
+    })
+    assert.equal(status.state, 'available', 'a proxy placeholder address reaches the signed update feed')
+  }
+  // Private, link-local and metadata answers still refuse the app's own feed.
+  for (const address of ['10.0.0.1', '127.0.0.1', '169.254.169.254', '168.63.129.16', '::1', 'fd00::1', 'fe80::1']) {
+    await assert.rejects(() => checkUpdateFeed('https://example.com/feed.json', '0.1.0', undefined, {
+      publicKey: publicPem,
+      lookup: async () => [{ address, family: isIP(address) }],
+      fetchImpl: (async () => response({})) as typeof fetch,
+    }), /private or non-public address/, `${address} still refuses the update feed`)
+  }
 
   console.log('mandatory signed update checker tests passed')
 }

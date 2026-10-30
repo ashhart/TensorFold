@@ -22,12 +22,17 @@ pub fn takeCancels(h: *LaneHost) void {
         };
         if (found == null) for (h.admitted.items, 0..) |job, i| if (job.id == id) {
             fill.unfill(h, job);
-            if (job.started and !job.stream.finished) h.core.discard(&job.stream);
             found = h.admitted.orderedRemove(i);
             break;
         };
         h.unlock();
         if (found) |job| {
+            if (job.fill_began and job.prefilled == null and !job.stream.finished) if (h.core.backend.vtable.cancel_prefill) |keep_prefix| {
+                keep_prefix(h.core.backend.ptr, &job.stream) catch |err| {
+                    _ = h.drop(job, h.words(err));
+                    continue;
+                };
+            };
             if (job.started and !job.stream.finished) h.core.discard(&job.stream);
             h.finish(job, .cancelled, "");
         }
@@ -69,4 +74,8 @@ pub fn closeAll(h: *LaneHost) void {
         h.finish(job, .cancelled, "");
     }
     for (queued.items) |job| h.finish(job, .cancelled, "");
+}
+
+test {
+    _ = @import("lane_host_interrupted_test.zig");
 }

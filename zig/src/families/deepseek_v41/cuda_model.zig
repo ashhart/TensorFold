@@ -35,6 +35,14 @@ const dspark_slots = @import("dspark_slots.zig");
 const l2pf_mod = @import("l2pf.zig");
 const iface = @import("draft/iface.zig");
 
+/// The files `boot` opens under TF_DSV41_ASSETS, and the refusal that names them when it is unset (serve_engine.zig).
+pub const asset_names = struct {
+    pub const rope = "rope.bin";
+    pub const token_map = "engram-token-map.bin";
+    pub const aot = "aot";
+    pub const unset = "TF_DSV41_ASSETS: the dir with " ++ rope ++ ", " ++ token_map ++ " and " ++ aot ++ "/ (cuda_model.zig)";
+};
+
 pub const Options = struct {
     drafts: bool = true,
     /// rows a prefill window takes (the decode buckets the plan sizes for) when the prompt runs as decode windows
@@ -188,6 +196,7 @@ pub const Model = struct {
         const comm = m.session.comm();
         const world: u32 = @intCast(comm.world());
         m.cfg = try Config.read(gpa, io, pack_dir);
+        if (o.own_prefill) try @import("block_admission.zig").nativePrefill(&m.cfg, world);
         m.pack = try Pack.open(gpa, io, pack_dir);
         const backbone = if (o.layers) |ls| try a.dupe(u32, ls) else blk: {
             const all = try a.alloc(u32, m.cfg.layers);
@@ -255,7 +264,7 @@ pub const Model = struct {
         }.of;
         if (cache) |c| std.log.info("dsv41 load: weights {d:.0} ms ({d:.0} ms images, {d:.0} ms upload + digest), {d:.1} GiB; prepared {s}: {d} read ({d:.1} GiB in {d:.0} ms), {d} built, {d} written ({d:.0} ms)", .{ ms(std.Io.Clock.awake.now(io).toNanoseconds() - t_load), ms(t_build), ms(t_upload), @as(f64, @floatFromInt(m.weights.bytes)) / (1 << 30), c.root, c.stats.hits, @as(f64, @floatFromInt(c.stats.read_bytes)) / (1 << 30), ms(c.stats.read_ns), c.stats.misses, c.stats.written, ms(c.stats.write_ns) }) else std.log.info("dsv41 load: weights {d:.0} ms ({d:.0} ms images from the pack, {d:.0} ms upload + digest), {d:.1} GiB; TF_DSV41_PREPARED unset", .{ ms(std.Io.Clock.awake.now(io).toNanoseconds() - t_load), ms(t_build), ms(t_upload), @as(f64, @floatFromInt(m.weights.bytes)) / (1 << 30) });
         tr.step("weights", cuda.usage(false));
-        m.aot = try cuda.aot.Set.load(gpa, io, &m.driver, m.ctx.device, try std.fs.path.join(a, &.{ assets, "aot" }));
+        m.aot = try cuda.aot.Set.load(gpa, io, &m.driver, m.ctx.device, try std.fs.path.join(a, &.{ assets, asset_names.aot }));
         try @import("aot_trace.zig").attach(gpa, io, &m.aot, @import("aot_trace.zig").pathFromEnv());
         m.widths = try gate_forward.widths(a, &m.weights, &m.pl);
         m.runner = .{ .gpa = gpa, .d = &m.driver, .stream = m.stream, .kernels = &m.kernels, .triton = &m.aot, .weights = &m.weights };
@@ -264,7 +273,7 @@ pub const Model = struct {
         const topp: ?f64 = if (std.c.getenv("TF_DSV41_EXPERT_TOPP")) |v| try std.fmt.parseFloat(f64, std.mem.span(v)) else null;
         // TF_DSV41_R1=1, or the eight separate R1 knobs (the knob reader's r1)
         const r1 = @import("serve_knobs.zig").r1(&@import("serve_knobs.zig").env);
-        m.f = fwd.Forward.init(gpa, &m.cfg, &m.widths, .{ .world = world, .expert_topp = topp, .r1 = r1, .taps = o.drafts }, &m.runner, comm);
+        m.f = fwd.Forward.init(gpa, &m.cfg, &m.widths, .{ .world = world, .rank = m.tcfg.rank, .expert_topp = topp, .r1 = r1, .taps = o.drafts }, &m.runner, comm);
         try @import("engine_hooks.zig").open(&m.f); // the forward's later-layer hooks and prefill state
         m.f.layers = backbone;
         // the rope tables cover the limit + a prefill segment (the assets' rope.bin)
@@ -341,9 +350,9 @@ pub const Model = struct {
                 try s.m.driver.synchronize();
             }
         };
-        try boot_mem.uploadRope(gpa, io, try std.fs.path.join(a, &.{ assets, "rope.bin" }), want, RopeSink{ .m = m });
+        try boot_mem.uploadRope(gpa, io, try std.fs.path.join(a, &.{ assets, asset_names.rope }), want, RopeSink{ .m = m });
         tr.step("l2pf and rope", cuda.usage(false));
-        const ehb = try cwd.readFileAllocOptions(io, try std.fs.path.join(a, &.{ assets, "engram-token-map.bin" }), a, .limited(1 << 26), .@"4", null);
+        const ehb = try cwd.readFileAllocOptions(io, try std.fs.path.join(a, &.{ assets, asset_names.token_map }), a, .limited(1 << 26), .@"4", null);
         m.host = try eh.Host.load(ehb, m.cfg.engram_heads, m.cfg.engram_pad, m.cfg.engram_vocab, &m.lbuf);
         m.f.engram = &m.host;
         if (world > 1) m.f.link = &m.session.plan;
@@ -358,7 +367,7 @@ pub const Model = struct {
             // the drafter's blocks (the snapshot carries their rows: the RAM tier's measure)
             var dsb: [8]u32 = undefined;
             const ds_blocks: u32 = if (o.drafts) @intCast(dspark_emit.blocks(&m.cfg, &dsb).len) else 0;
-            m.sessions = try sg.Sessions.init(gpa, io, &m.f, &bp, so, .{ .slots = m.slots, .ds_blocks = ds_blocks, .checkpoint = if (so.disk != null) try prepared.packDigest(io, &m.pack) else null });
+            m.sessions = try sg.Sessions.init(gpa, io, &m.f, &bp, so, .{ .slots = m.slots, .ds_blocks = ds_blocks, .checkpoint = if (so.disk != null) try prepared.packIdentity(io, &m.pack, if (cache) |*c| c else null) else null });
         }
         tr.step("engram host and sessions", cuda.usage(false));
         m.gt = .{ .f = &m.f, .prefill_rows = o.prefill_rows, .max_rows = nb, .own_prefill = o.own_prefill, .sessions = m.sessions };

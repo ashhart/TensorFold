@@ -1,0 +1,41 @@
+{
+ "count": {
+  "n": 512,
+  "token_sha256": "a8ed8c47d24b2adcc8f6877a04de01d7904c6e6e20192612b8cb52602e3ef3d6",
+  "text": "Count 1..204.</think>1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n14\n15\n16\n17\n18\n19\n20\n21\n22\n23\n24\n25\n26\n27\n28\n29\n30\n31\n32\n33\n34\n35\n36\n37\n38\n39\n40\n41\n42\n43\n44\n45\n46\n47\n48\n49\n50\n51\n52\n53\n54\n55\n56\n57\n58\n59\n60\n61\n62\n63\n64\n65\n66\n67\n68\n69\n70\n71\n72\n73\n74\n75\n76\n77\n78\n79\n80\n81\n82\n83\n84\n85\n86\n87\n88\n89\n90\n91\n92\n93\n94\n95\n96\n97\n98\n99\n100\n101\n102\n103\n104\n105\n106\n107\n108\n109\n110\n111\n112\n113\n114\n115\n116\n117\n118\n119\n120\n121\n122\n123\n124\n125\n126\n127\n128\n129\n130\n131\n132\n133\n134\n135\n136\n137\n138\n139\n140\n141\n142\n143\n144\n145\n146\n147\n148\n149\n150\n151\n152\n153\n154\n155\n156\n157\n158\n159\n160\n161\n162\n163\n164\n165\n166\n167\n168\n169\n170\n171\n172\n173\n174\n175\n176\n177\n178\n179\n180\n181\n182\n183\n184\n185\n186\n187\n188\n189\n190\n191\n192\n193\n194\n195\n196\n197\n198\n199\n200\n201\n202\n203\n204<|user|>The user wants me to count upward from one, one number per line. The previous turn shows a pattern of \"measurement line N of the fixed decode prompt\" repeated 204 times, followed by the instruction \"Count upward from one, one number per line.\"\n\nSo I need to output numbers 1 through 204, one per line.</think>1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n",
+  "seconds": {
+   "drafts": 8.67,
+   "plain": 17.91
+  },
+  "drafts": {
+   "per_round": 3.683453237410072,
+   "accepted": 0.9185185185185185
+  }
+ },
+ "prose": {
+  "n": 512,
+  "token_sha256": "60dbaafbf819d3edefdb853aa1baa398f0e5d5a9e589b2c709488a80e4d8945a",
+  "text": "</think># 古代の道と現代の物流――日本の道筋に刻まれた記憶\n\n日本の国土を眺めると、そこには何百年、何千年と受け継がれてきた「道の記憶」が刻まれていることに気づく。古代の道路網と現代の物流網は、単なる歴史的な興味の対象ではなく、私たちの生活や経済活動の根底に流れる持続的な流れなのである。本稿では、その関係をいくつかの具体例を通じて考察してみたい。\n\n## 東海道という永遠の幹線\n\n最も分かりやすい例は、いうまでもなく東海道であろう。奈良時代に整備された東海道駅路は、京都と鎌倉・江戸を結ぶ日本の背骨ともいうべき存在だった。江戸時代の五街道として整備され、参勤交代の大名行列や飛脚が行き交ったこの道筋は、明治以降の東海道本線、東海道新幹線、そして国道1号線、さらに名神・東名高速道路へと、ほぼそのままのルートで受け継がれてきた。\n\nなぜこうも同じ道筋が選ばれ続けたのか。それは地形という不変の条件があるからだ。富士山の裾を回り、浜名湖の西を渡り、尾張平野を通る――この自然の制約が、人々の移動と物資の流れを同じ経路へと導いてきたのである。現代のコンテナトラックが東名高速を走り、新幹線が貨物列車と線路を共有する光景は、古代の駅路を駆けた飛脚の系譜として捉えることができる。\n\n## 駅制と物流拠点の連続性\n\n古代の駅制に注目すると、その面白さがさらに増す。律令国家は七道に駅を約四百置き、人馬を継ぎ立てて公文や貢納物を運んだ。この駅は単なる休憩所ではなく、物流の中継拠点であり、情報伝達の結節点であった",
+  "seconds": {
+   "drafts": 12.94,
+   "plain": 17.98
+  },
+  "drafts": {
+   "per_round": 1.8091872791519434,
+   "accepted": 0.6010498687664042
+  }
+ },
+ "code": {
+  "n": 512,
+  "token_sha256": "a8f8a004eb975f880b6671eebdb647110bd813242333f58798592c4bb91af57f",
+  "text": "Write a module with TTL LRU cache + tests.</think>```python\n\"\"\"\nttl_lru_cache.py\n\nA thread-safe LRU cache with per-entry TTL (time-to-live) expiry.\n\nFeatures\n--------\n- Least-Recently-Used eviction when the capacity is exceeded.\n- Per-entry time-to-live: expired entries are treated as misses and purged.\n- Thread safety via a single re-entrant lock (safe for re-entrant calls).\n- Full type hints and docstrings.\n- Self-contained unit tests runnable via `python ttl_lru_cache.py`.\n\nRequires Python 3.9+ (uses `dict` ordering for LRU bookkeeping).\n\"\"\"\n\nfrom __future__ import annotations\n\nimport threading\nimport time\nimport unittest\nfrom collections import OrderedDict\nfrom typing import Any, Callable, Hashable, Optional\n\n\nclass TTLCache:\n    \"\"\"A fixed-capacity, thread-safe LRU cache with per-entry TTL expiry.\n\n    Each entry stores a value along with an absolute expiration timestamp.\n    On lookup, expired entries are removed and reported as misses. When the\n    cache exceeds ``maxsize``, the least-recently-used entry is evicted.\n\n    Args:\n        maxsize: Maximum number of entries. Must be >= 1.\n        default_ttl: Default time-to-live in seconds for entries inserted\n            without an explicit TTL. Use ``None`` for no expiry.\n\n    Raises:\n        ValueError: If ``maxsize`` is less than 1.\n    \"\"\"\n\n    def __init__(self, maxsize: int = 128, default_ttl: Optional[float] = None) -> None:\n        if maxsize < 1:\n            raise ValueError(\"maxsize must be at least 1\")\n        self._maxsize: int = maxsize\n        self._default_ttl: Optional[float] = default_ttl\n        self._store: \"OrderedDict[Hashable, tuple[Any, Optional[float]]]\" = OrderedDict()\n        # (value, expiry_timestamp); expiry_timestamp is None => never expires\n        self._lock = threading.RLock()\n        self._hits: int = 0\n        self._misses: int = 0\n        self._evictions: int = 0\n\n    # ------------------------------------------------------------------ #\n    # Public API\n    # ------------------------------------------------------------------ #\n\n    def get(self, key: Hashable, default: Any = None) -> Any:\n        \"\"\"Return the value for ``key``, or ``default`` if absent/expired.\n\n        A successful lookup refreshes the key's",
+  "seconds": {
+   "drafts": 10.46,
+   "plain": 18.01
+  },
+  "drafts": {
+   "per_round": 2.782608695652174,
+   "accepted": 0.7534562211981567
+  }
+ }
+}

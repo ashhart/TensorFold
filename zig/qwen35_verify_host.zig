@@ -22,6 +22,14 @@ pub const Trace = struct {
         var out: u64 = 0;
         var sk: c_int = 0;
         var tiles: c_int = 1;
+        if (id == 8) {
+            const segs = @as(*const cuda.qlinear.Segs, @ptrCast(@alignCast(a[2].?))).*;
+            for (segs.s[0..@intCast(segs.count)]) |seg| {
+                calls[count] = .{ .id = id, .x = x, .xs = xs, .out = seg.p.out, .rows = rows, .sk = seg.p.sk, .row_tiles = 1, .grid = gx, .shared = shared };
+                count += 1;
+            }
+            return 0;
+        }
         if (id == 2) {
             const p = @as(*const cuda.qlinear.GemvPart, @ptrCast(@alignCast(a[2].?))).*;
             out = p.out;
@@ -47,21 +55,29 @@ fn function(d: *const cuda.Driver, id: usize) cuda.Function {
     return .{ .d = d, .handle = @ptrFromInt(id) };
 }
 pub fn engine(d: *cuda.Driver, gb10: bool) q.engine.Engine {
+    return device(d, gb10, false);
+}
+fn device(d: *cuda.Driver, gb10: bool, wide: bool) q.engine.Engine {
     d.api.cuLaunchKernel = Trace.launch;
     d.api.cuLaunchKernelEx = Trace.launchEx;
     var e: q.engine.Engine = undefined;
+    e.int8 = .{};
+    e.kit = null;
     e.d = d;
     e.stream = .{ .d = d, .handle = null };
     e.fns.sums = function(d, 1);
     e.affine.gemv_fn = function(d, 2);
     e.affine.group_fn = function(d, 3);
     e.affine.prefill_fn = function(d, 4);
+    e.affine.prefill22_fn = function(d, 4);
+    e.affine.half_prompt = false;
     if (@hasField(cuda.qlinear.Affine4Kernels, "verify_fn")) e.affine.verify_fn = function(d, 5);
     if (@hasField(cuda.qlinear.Affine4Kernels, "verify64_fn")) e.affine.verify64_fn = function(d, 6);
     if (@hasField(cuda.qlinear.Affine4Kernels, "verify128_fn")) e.affine.verify128_fn = function(d, 7);
     e.affine.gemv_blocks = 1;
     e.affine.split = null;
     e.affine.pdl = gb10;
+    e.affine.wide_verify = wide;
     return e;
 }
 fn project(e: *q.engine.Engine, rows: usize, n: usize) !void {
@@ -126,6 +142,19 @@ test "verify matmuls: graph row buckets and segment counts do not multiply proje
     try project(&e, 32, 17408);
     try t.expectEqual(@as(usize, 1), Trace.count);
     try t.expectEqual(@as(c_int, 1), Trace.calls[0].sk);
+}
+
+test "verify matmuls: sm_120 takes the 32-row tile without programmatic dependent launch" {
+    var d: cuda.Driver = undefined;
+    var e = device(&d, false, true);
+    for (17..33) |rows| {
+        try project(&e, rows, 4096);
+        try t.expectEqual(@as(usize, 1), Trace.count);
+        try t.expectEqual(@as(usize, 5), Trace.calls[0].id);
+        try t.expectEqual(rows, @as(usize, @intCast(Trace.calls[0].rows)));
+    }
+    try project(&e, 16, 4096);
+    try t.expectEqual(@as(usize, 2), Trace.calls[0].id);
 }
 
 test "verify matmuls: other devices retain the original sixteen-row dispatch" {

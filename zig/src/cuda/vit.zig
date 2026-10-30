@@ -24,8 +24,13 @@ pub const Act = enum(i32) { none = 0, gelu_tanh = 1, gelu = 2, relu2 = 3 };
 pub const Kernels = struct {
     mod: module.Module,
     layer_norm_fn: module.Function,
+    layer_norm_wide_fn: module.Function,
+    g4_qkv_fn: module.Function,
+    g4_gelu_fn: module.Function,
+    g4_pool_fn: module.Function,
     pointwise_fn: module.Function,
     bias_fn: module.Function,
+    bias_act_fn: module.Function,
     unshuffle_fn: module.Function,
     cast_fn: module.Function,
     position_fn: module.Function,
@@ -37,8 +42,13 @@ pub const Kernels = struct {
         return .{
             .mod = mod,
             .layer_norm_fn = try mod.function("tf_vit_layer_norm"),
+            .layer_norm_wide_fn = try mod.function("tf_vit_layer_norm_wide"),
+            .g4_qkv_fn = try mod.function("tf_vit_g4_qkv"),
+            .g4_gelu_fn = try mod.function("tf_vit_g4_gelu_mul"),
+            .g4_pool_fn = try mod.function("tf_vit_g4_pool"),
             .pointwise_fn = try mod.function("tf_vit_pointwise"),
             .bias_fn = try mod.function("tf_vit_bias"),
+            .bias_act_fn = try mod.function("tf_vit_bias_act"),
             .unshuffle_fn = try mod.function("tf_vit_unshuffle"),
             .cast_fn = try mod.function("tf_vit_cast"),
             .position_fn = try mod.function("tf_vit_position_add"),
@@ -59,6 +69,46 @@ pub const Kernels = struct {
         try go(k.layer_norm_fn, s, rows, 1, &a);
     }
 
+    /// layerNorm over rows up to 8192 wide (tf_vit_layer_norm_wide: the same sums, 32 values a thread).
+    pub fn layerNormWide(k: *const Kernels, s: Stream, x: u64, w: u64, b: u64, y: u64, rows: usize, width: usize, eps: f32) !void {
+        if (width > 4 * norm_most) return error.RowShape;
+        var a: Args = .{};
+        for ([_]u64{ x, w, b, y }) |p| a.add(p);
+        a.add(int(width));
+        a.add(eps);
+        try go(k.layer_norm_wide_fn, s, rows, 1, &a);
+    }
+
+    /// Gemma 4's tower: qkv [P, 3 H D] in place, q and k RMSNorm and 2D RoPE (cos, sin [P, D]), v weightless; D <= 96.
+    pub fn g4Qkv(k: *const Kernels, s: Stream, qkv: u64, qw: u64, kw: u64, cs: u64, sn: u64, rows: usize, heads: usize, dim: usize, eps: f32) !void {
+        if (!g4QkvShape(heads, dim)) return error.RowShape;
+        if (rows == 0) return;
+        var a: Args = .{};
+        for ([_]u64{ qkv, qw, kw, cs, sn }) |p| a.add(p);
+        for ([_]usize{ rows, heads, dim }) |n| a.add(int(n));
+        a.add(eps);
+        try launch_.launch(k.g4_qkv_fn, .{ .grid = .{ .x = @intCast(rows * heads * 3), .y = 1, .z = 1 }, .block = .{ .x = 32 } }, s, &a);
+    }
+
+    /// out [count] = bf16(bf16(gelu_tanh(gate)) up), torch's GeGLU on bf16 rows.
+    pub fn g4GeluMul(k: *const Kernels, s: Stream, gate: u64, up: u64, out: u64, count: usize) !void {
+        var a: Args = .{};
+        for ([_]u64{ gate, up, out }) |p| a.add(p);
+        a.add(@as(i64, @intCast(count)));
+        try go(k.g4_gelu_fn, s, blocks(count, threads), 1, &a);
+    }
+
+    /// out [gh gw / 9, C]: x [gh, gw, C]'s 3 x 3 block means, times sqrt(C), standardized by bias and scale.
+    pub fn g4Pool(k: *const Kernels, s: Stream, x: u64, b: u64, scale: u64, out: u64, gh: usize, gw: usize, c: usize) !void {
+        if (gh % 3 != 0 or gw % 3 != 0) return error.RowShape;
+        var a: Args = .{};
+        for ([_]u64{ x, b, scale, out }) |p| a.add(p);
+        a.add(int(gw));
+        a.add(int(c));
+        a.add(@as(f32, @floatCast(@sqrt(@as(f64, @floatFromInt(c))))));
+        try go(k.g4_pool_fn, s, gh * gw / 9, 1, &a);
+    }
+
     /// o [count] = x (a Linear's bf16 output) through `act`, then plus r when given; x or r may be o.
     pub fn pointwise(k: *const Kernels, s: Stream, x: u64, r: ?u64, o: u64, count: usize, act: Act) !void {
         var a: Args = .{};
@@ -74,6 +124,15 @@ pub const Kernels = struct {
         for ([_]u64{ acc, b, o }) |p| a.add(p);
         a.add(int(n));
         try go(k.bias_fn, s, rows, blocks(n, threads), &a);
+    }
+
+    /// o [rows, n] = bf16(act(bf16(acc + b)) + r), acc f32; r may be o.
+    pub fn biasAct(k: *const Kernels, s: Stream, acc: u64, b: u64, r: ?u64, o: u64, rows: usize, n: usize, act: Act) !void {
+        var a: Args = .{};
+        for ([_]u64{ acc, b, r orelse 0, o }) |p| a.add(p);
+        a.add(int(n));
+        a.add(@backingInt(act));
+        try go(k.bias_act_fn, s, rows, blocks(n, threads), &a);
     }
 
     /// y [h/2 * w/2, 4c] = the projector's pixel unshuffle of x [h * w, c], an even grid.
@@ -107,6 +166,17 @@ pub const Kernels = struct {
 
 fn int(x: usize) i32 {
     return @intCast(x);
+}
+
+fn g4QkvShape(heads: usize, dim: usize) bool {
+    return heads > 0 and dim > 0 and dim <= 96 and dim % 4 == 0;
+}
+
+test "tower QKV rejects zero heads and dimensions before a launch" {
+    for ([_]usize{ 0, 1, 3, 4, 72, 96, 100 }) |dim| {
+        try std.testing.expectEqual(dim > 0 and dim <= 96 and dim % 4 == 0, g4QkvShape(16, dim));
+        try std.testing.expect(!g4QkvShape(0, dim));
+    }
 }
 
 fn blocks(n: usize, by: usize) usize {
@@ -166,6 +236,17 @@ pub fn linear(g: *Gemms, k: *const Kernels, s: Stream, acc: u64, x: u64, w: u64,
     if (p.epilogue == .bias) return p.runBias(x, w, b, y, g.workspace.ptr, workspace_bytes, s.handle);
     try g.run(s, x, w, acc, rows, n, kk, .f32);
     try k.bias(s, acc, b, y, rows, n);
+}
+
+/// out = bf16(act(bf16(x . w^T + b)) + r); y holds the intermediate only when the GEMM fuses bias.
+pub fn linearAct(g: *Gemms, k: *const Kernels, s: Stream, acc: u64, x: u64, w: u64, b: u64, y: u64, rows: usize, n: usize, kk: usize, r: ?u64, out: u64, act: Act) !void {
+    const p = try g.plan(rows, n, kk, .bf16, .bias);
+    if (p.epilogue == .bias) {
+        try p.runBias(x, w, b, y, g.workspace.ptr, workspace_bytes, s.handle);
+        return k.pointwise(s, y, r, out, rows * n, act);
+    }
+    try g.run(s, x, w, acc, rows, n, kk, .f32);
+    try k.biasAct(s, acc, b, r, out, rows, n, act);
 }
 
 /// prefill_attention.cu's full_kernel<D, WARPS, slots>, or vision_kernel<D, WARPS> without slots: 16 rows a warp.

@@ -24,6 +24,7 @@ pub fn offer(v: anytype, open: ?api.VisionOpen) ?api.Vision {
     // a template that writes each image's begin and end itself: the server expands the image token alone
     const wrap: ?[2]u32 = if (@hasDecl(T, "template_wraps")) null else .{ x.marks.open, x.marks.close };
     var out: api.Vision = .{ .ctx = x, .prepare = prepare, .image_token = x.marks.image, .markers = &x.mark_ids, .wrap = wrap, .image_tokens = x.limits.image_tokens, .max_images = x.limits.max_images, .explain = T.explain };
+    if (comptime @hasDecl(T, "part_type")) out.part_type = T.part_type; // the template's name for an image part
     if (comptime T == nemotron.native.vision.Vision) {
         // video: the checkpoint's temporal projection, and a reserved token for the template's `<video>`
         if (x.cfg.video_temporal == 2 and x.marks.video != null) if (open) |o| {
@@ -134,6 +135,7 @@ test "a tower whose template writes its own markers gets no wrapper; other tower
     };
     const Wraps = struct {
         pub const template_wraps = true;
+        pub const part_type = "image";
         marks: Marks = .{},
         mark_ids: [3]u32 = .{ 1, 2, 3 },
         limits: Limits = .{},
@@ -146,6 +148,8 @@ test "a tower whose template writes its own markers gets no wrapper; other tower
     };
     var plain: Plain = .{};
     var own: Wraps = .{};
+    try std.testing.expectEqualStrings("image_url", offer(@as(?*Plain, &plain), null).?.part_type);
+    try std.testing.expectEqualStrings("image", offer(@as(?*Wraps, &own), null).?.part_type);
     try std.testing.expectEqual([2]u32{ 1, 3 }, offer(@as(?*Plain, &plain), null).?.wrap.?);
     try std.testing.expect(offer(@as(?*Wraps, &own), null).?.wrap == null);
     try std.testing.expectEqual(@as(u32, 2), offer(@as(?*Wraps, &own), null).?.image_token);
@@ -165,6 +169,7 @@ test "actual offer prepares bounded video and plans mixed rows through the share
     v.mark_ids = v.marks.markers();
     v.limits = .{ .image_tokens = 256, .video_tokens = 512, .max_images = 1 };
     const held = offer(@as(?*nemotron.native.vision.Vision, &v), .{ .image_tokens = 256, .video_tokens = 512, .max_frames = 257, .max_videos = 17 }).?;
+    try std.testing.expectEqualStrings("image_url", held.part_type);
     try std.testing.expectEqual(@as(u32, 256), held.video.?.max_frames);
     try std.testing.expectEqual(@as(u32, 16), held.video.?.max_videos);
     try std.testing.expectEqual(@as(u32, 512), held.video.?.video_tokens);
@@ -220,4 +225,16 @@ fn allocationVideo(a: Allocator) !void {
 }
 test "offer conversion unwinds every allocation failure" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationVideo, .{});
+}
+
+test "actual Qwen offer keeps its image_url type and template-owned markers" {
+    var q: qwen35.native.vision.Vision = undefined;
+    q.shared.image_token = 57;
+    q.markers = .{ 56, 57, 58 };
+    q.limits = .{ .image_tokens = 64, .max_images = 2 };
+    const held = offer(@as(?*qwen35.native.vision.Vision, &q), null).?;
+    try std.testing.expectEqualStrings("image_url", held.part_type);
+    try std.testing.expectEqual(@as(u32, 57), held.image_token);
+    try std.testing.expectEqualSlices(u32, &q.markers, held.markers);
+    try std.testing.expect(held.wrap == null and held.video == null);
 }

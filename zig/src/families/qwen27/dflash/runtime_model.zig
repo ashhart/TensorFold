@@ -14,6 +14,7 @@ const selector = @import("selector.zig");
 const backend_mod = @import("runtime_backend.zig");
 const Cache = backend_mod.Cache;
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
+pub const max_nodes = 31; // selected tree nodes, independent of the unchanged 16-row drafter block
 pub const Model = struct {
     allocator: std.mem.Allocator,
     checkpoint: core.checkpoint_metal.Checkpoint,
@@ -134,7 +135,7 @@ pub const Model = struct {
         var caches: [8][]Cache = undefined;
         var news: [8]?Fresh = @splat(null);
         for (entries, 0..) |en, k| {
-            if (en.pending >= c.vocab or en.nodes == 0 or en.nodes > 15) return error.BadDraftOptions;
+            if (en.pending >= c.vocab or en.nodes == 0 or en.nodes > max_nodes) return error.BadDraftOptions;
             if (en.context) |x| try m.swap(x);
             news[k] = m.fresh();
             const flushed: anyerror!void = if (news[k] == null) m.flush() else {};
@@ -189,23 +190,18 @@ pub const Model = struct {
     const Fresh = struct { ring: mtl.Buffer, slot: u32, rows: u32, first: u64, next: op.Context };
     fn fresh(m: *const Model) ?Fresh {
         const window = m.graph.config.window;
-        if (!m.session.ready or m.committed_end <= m.session.context.end) return null;
-        const behind = m.committed_end - m.session.context.end;
-        const slot: u32 = @intCast(m.session.context.end % window);
-        if (behind > 128 or slot + behind > window or m.session.context.end < m.committed_end -| (@as(u64, window) - 1)) return null;
-        const begin = @max(m.session.context.begin, m.committed_end -| (@as(u64, window) - 1));
-        return .{ .ring = m.pending, .slot = slot, .rows = @intCast(behind), .first = m.session.context.end, .next = .{ .cache = m.session.context.cache, .begin = begin, .end = m.committed_end } };
+        const span = @import("catchup.zig").fresh(m.session.ready, m.session.context.begin, m.session.context.end, m.committed_end, window) orelse return null;
+        return .{ .ring = m.pending, .slot = span.slot, .rows = span.rows, .first = span.first, .next = .{ .cache = m.session.context.cache, .begin = span.begin, .end = m.committed_end } };
     }
     pub fn propose(m: *Model, pending: u32, nodes: u32) !@import("selector.zig").Tree {
-        if (m.backend.failed or m.backend.frame.active or m.backend.transaction != null or pending >= m.graph.config.vocab or nodes > 15 or m.tree_block == 0 or m.tree_block > 16) return error.BadDraftOptions;
+        if (m.backend.failed or m.backend.frame.active or m.backend.transaction != null or pending >= m.graph.config.vocab or nodes > max_nodes or m.tree_block == 0 or m.tree_block > 16) return error.BadDraftOptions;
         if (m.committed_end == 0) return error.DraftContextNotReady;
         const block = @min(m.tree_block, nodes + 1);
         if (block < 2) return .{ .gpa = m.allocator, .tokens = &.{}, .parents = &.{}, .scores = &.{} };
         const window = m.graph.config.window;
-        const behind = m.committed_end - m.session.context.end;
-        const slot: u32 = @intCast(m.session.context.end % window);
-        if (m.session.ready and behind > 0 and behind <= 128 and slot + behind <= window and m.session.context.end >= m.committed_end -| (@as(u64, window) - 1)) {
-            const rows: u32 = @intCast(behind);
+        if (@import("catchup.zig").fresh(m.session.ready, m.session.context.begin, m.session.context.end, m.committed_end, window)) |span| {
+            const rows = span.rows;
+            const slot = span.slot;
             var positions: [128]u64 = undefined;
             for (positions[0..rows], 0..) |*position, i| position.* = m.session.context.end + i;
             const stride = @as(usize, m.graph.config.tapWidth()) * 2;

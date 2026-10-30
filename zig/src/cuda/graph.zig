@@ -99,7 +99,10 @@ pub const Graph = struct {
 
     pub fn instantiate(self: Graph) Error!Exec {
         var e: abi.GraphExec = null;
-        try self.d.check(self.d.api.cuGraphInstantiateWithFlags(&e, self.handle, 0), "cuGraphInstantiateWithFlags");
+        const res = self.d.api.cuGraphInstantiateWithFlags(&e, self.handle, 0);
+        // A capture-policy refusal is recoverable: callers can execute the same body eagerly.
+        if (res == 800) return error.GraphNotPermitted;
+        try self.d.check(res, "cuGraphInstantiateWithFlags");
         return .{ .d = self.d, .handle = e };
     }
 };

@@ -18,8 +18,6 @@ const room = 112;
 const warm = 6;
 /// Head chains of 1 and 8 levels: their difference over 7 is a level's ms.
 const levels = [2]u32{ 1, 8 };
-/// Depths priced at timed costs sit within a few percent: the acceptance estimates move slower so noise picks no depth.
-pub const depth_rate = 0.08;
 
 /// The depth rule's costs: timed now (both Macs time, rank 0 keeps them) or kept from an earlier load of this build.
 pub fn measure(sl: *Slots, gpa: std.mem.Allocator, io: std.Io) !?Costs {

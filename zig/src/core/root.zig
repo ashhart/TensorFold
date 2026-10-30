@@ -1,5 +1,6 @@
 //! Backend-neutral engine parts: checkpoint files, the CUDA draft-depth rule, the copy index, the tokenizer.
 
+pub const weight_only = @import("weight_only.zig");
 pub const safetensors = @import("safetensors.zig");
 pub const npy = @import("npy.zig");
 pub const exl3_format = @import("exl3_format.zig");
@@ -30,6 +31,7 @@ pub const nvfp4_slice = @import("nvfp4_slice.zig");
 pub const registry = @import("registry.zig");
 pub const tuning = @import("tuning.zig");
 pub const norms_ref = @import("norms_ref.zig");
+pub const l2_ref = @import("l2_ref.zig");
 pub const act_ref = @import("act_ref.zig");
 pub const bf16_round = @import("bf16_round.zig");
 pub const embed_ref = @import("embed_ref.zig");
@@ -46,6 +48,7 @@ pub const drafter_release = @import("drafter_release.zig");
 pub const drafter_layout = @import("drafter_layout.zig");
 pub const tree_round = @import("tree_round.zig");
 pub const attention_ref = @import("attention_ref.zig");
+pub const attention_range = @import("attention_range.zig");
 pub const gdn_prep_ref = @import("gdn_prep_ref.zig");
 pub const qk_ref = @import("qk_ref.zig");
 pub const moe_ref = @import("moe_ref.zig");
@@ -69,12 +72,14 @@ test {
     _ = registry;
     _ = tuning;
     _ = norms_ref;
+    _ = l2_ref;
     _ = act_ref;
     _ = bf16_round;
     _ = embed_ref;
     _ = contract;
     _ = tree_round;
     _ = attention_ref;
+    _ = attention_range;
     _ = gdn_prep_ref;
     _ = qk_ref;
     _ = moe_ref;
@@ -86,6 +91,7 @@ test {
     _ = exl3_load;
     _ = @import("exl3_rect_test.zig");
     _ = checkpoint;
+    _ = @import("checkpoint_prefetch.zig");
     _ = checkpoint_identity;
     _ = direct_io;
     _ = frame_rounds;
@@ -110,3 +116,15 @@ pub const tree_slots = @import("tree_slots.zig");
 pub const exl3_layout = @import("exl3_layout.zig");
 
 pub const exl3_prepare = @import("exl3_prepare.zig");
+
+pub const weight_only_contract = @import("contract/weight_only.zig");
+pub const weight_only_cuda_adapter = @import("weight_only_cuda_impl.zig").Adapter;
+pub const weight_only_metal_adapter = @import("weight_only_metal_impl.zig").Adapter;
+pub const hc_activation = @import("hc_activation.zig");
+pub const hc_activation_contract = @import("contract/hc_activation.zig");
+pub const hc_activation_cuda_adapter = @import("hc_activation_cuda_impl.zig").Adapter;
+pub const hc_activation_metal_adapter = @import("hc_activation_metal_impl.zig").Adapter;
+pub const hc_pointwise = @import("hc_pointwise.zig");
+pub const hc_pointwise_cuda_adapter = @import("hc_pointwise_cuda_impl.zig").Adapter;
+pub const hc_pointwise_metal_adapter = @import("hc_pointwise_metal_impl.zig").Adapter;
+pub const hc_pointwise_contract = @import("contract/hc_pointwise.zig");

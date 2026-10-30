@@ -8,13 +8,14 @@ const geometry = @import("cuda_geometry.zig");
 const weights = @import("cuda_mtp_weights.zig");
 const timing = @import("cuda_draft.zig").timing;
 const precision = @import("cuda_draft_precision.zig");
+const batched = @import("cuda_mtp_batch.zig");
 
 const E = engine.Engine;
 const DeviceBuffer = cuda.DeviceBuffer;
 const dr = lanes.drafter;
 const Stream = lanes.Stream;
 const head_dim = geometry.head_dim;
-const max_rows = engine.max_rows;
+const max_rows = engine.most_verify; // taps absorbed at most this many rows a call (a prompt chunk's in pieces)
 const most_window = engine.most_window;
 
 /// Drafts a round at most (the frozen engine's DEPTH); TF_MTP_DRAFTS=N sets it, up to a window's rows less one.
@@ -25,15 +26,16 @@ const ranks = lanes.shape.ranks;
 /// The logprob row's words (sample.cu's LP_WORDS): the ids of a row's best tokens sit at words 2 onward.
 const lp_words = 3 + 2 * 20;
 
-const Fns = struct { norm_rope: cuda.Function, attn: cuda.Function, attn_tree: cuda.Function };
+const Fns = struct { norm_rope: cuda.Function, attn: cuda.Function, attn_tree: cuda.Function, attn_rows: cuda.Function };
 /// qwen35_draft.cu's ring kernels, shared with the DFlash2 drafter.
 const Ring = struct { gather_taps: cuda.Function, gather_rows: cuda.Function, ring_put: cuda.Function };
-const TapRows = extern struct { n: c_int, rows: [most_window]c_int };
+pub const TapRows = extern struct { n: c_int, rows: [most_window]c_int };
 
 /// A stream's context: its ring of keys and values over [begin, end), the newest row's state, and its held drafts.
 pub const Ctx = struct {
     ring: DeviceBuffer,
     last: DeviceBuffer, // the newest absorbed row's normed output (bf16 hidden): the first draft row's state
+    step: DeviceBuffer, // a batched chain's previous draft level's normed output (cuda_mtp_batch.zig)
     begin: u64 = 0,
     end: u64 = 0,
     cands: [ranks]u32 = @splat(0), // the newest absorbed row's best tokens by rank (rank 0: its chain draft)
@@ -43,6 +45,9 @@ pub const Ctx = struct {
 
 /// How a layer pass attends: absorbed or chained rows over the ring and the block's earlier rows, into the ring too.
 const Pass = union(enum) { ring, tree: u64 };
+
+/// Where a stream's ring and state are when its target lane's run holds them (Mtp.ring_of).
+pub const RingOf = struct { ctx: *anyopaque, area: *const fn (*anyopaque, *Stream) ?u64 };
 
 pub const Mtp = struct {
     gpa: std.mem.Allocator,
@@ -86,9 +91,14 @@ pub const Mtp = struct {
     ids: u64, // u32 the rows' tokens
     tok: u64, // u32 the drawn token
     staged: cuda.HostBuffer, // pinned: the ids and ancestors up, the token and words down
+    tab: u64, // a batched pass's RingRow table (cuda_mtp_batch.zig)
+    batch: bool = true, // shared rounds draft every stream in one pass a level; TF_MTP_BATCH=0 keeps one at a time
+    batch_passes: u64 = 0, // batched passes run, for the GPU check
     streams: std.AutoHashMapUnmanaged(*Stream, *Ctx) = .empty,
     /// Contexts between streams, allocated and run once (`reserve`), as the driver stalls a buffer's first kernel.
     pool: std.ArrayList(*Ctx) = .empty,
+    /// TF_QWEN_KV_PAGES: a stream's ring and state are views of its target lane's run (null: the contexts own theirs).
+    ring_of: ?RingOf = null,
     /// One draft level's cost (timed at load): a chained row, or a tree's rows at one depth.
     step_ms: f64 = 1.0,
     /// The target's window ms by rows (cuda_native.zig times them), for the round loop's prices.
@@ -97,18 +107,21 @@ pub const Mtp = struct {
 
     const anc_stride = 1 + max_lanes;
     const ids_at = 0;
-    const tok_at = max_rows * 4;
+    pub const tok_at = max_rows * 4;
     const words_at = tok_at + 64;
     const anc_at = words_at + max_lanes * lp_words * 4;
-    const staged_len = anc_at + max_lanes * anc_stride * 4;
+    pub const bids_at = anc_at + max_lanes * anc_stride * 4; // a batched pass's ids, then its ring table
+    pub const btab_at = bids_at + batched.most * 4;
+    const staged_len = btab_at + batched.most * @sizeOf(batched.RingRow);
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, e: *E, dir: []const u8, capacity: usize) !*Mtp {
         if (!e.g.moe()) return error.NotRouted;
         const d = try gpa.create(Mtp);
         errdefer gpa.destroy(d);
-        d.* = .{ .gpa = gpa, .io = io, .e = e, .w = undefined, .mod = undefined, .dmod = undefined, .fns = undefined, .ring_fns = undefined, .scratch = undefined, .capacity = capacity, .depth = default_depth, .trees = platform.c.getenv("TF_MTP_TREES") != null, .tap = .{@intCast(e.g.layers - 1)}, .taps_in = 0, .hin = 0, .hn = 0, .emb = 0, .en = 0, .h = 0, .r = 0, .x = 0, .qraw = 0, .q = 0, .kraw = 0, .kb = 0, .vb = 0, .att = 0, .xs = 0, .logits = 0, .words = 0, .picks = 0, .lane_state = 0, .lane_k = 0, .lane_v = 0, .anc = 0, .ids = 0, .tok = 0, .staged = undefined };
+        d.* = .{ .gpa = gpa, .io = io, .e = e, .w = undefined, .mod = undefined, .dmod = undefined, .fns = undefined, .ring_fns = undefined, .scratch = undefined, .capacity = capacity, .depth = default_depth, .trees = platform.c.getenv("TF_MTP_TREES") != null, .tap = .{@intCast(e.g.layers - 1)}, .taps_in = 0, .hin = 0, .hn = 0, .emb = 0, .en = 0, .h = 0, .r = 0, .x = 0, .qraw = 0, .q = 0, .kraw = 0, .kb = 0, .vb = 0, .att = 0, .xs = 0, .logits = 0, .words = 0, .picks = 0, .lane_state = 0, .lane_k = 0, .lane_v = 0, .anc = 0, .ids = 0, .tok = 0, .staged = undefined, .tab = 0 };
         if (platform.c.getenv("TF_MTP_DRAFTS")) |v| d.depth = std.fmt.parseInt(u32, std.mem.span(v), 10) catch default_depth;
         d.depth = @min(@max(d.depth, 1), most_window - 1);
+        if (platform.c.getenv("TF_MTP_BATCH")) |v| d.batch = !std.mem.eql(u8, std.mem.span(v), "0");
         d.mod = try cuda.Module.load(e.d, cuda.kernels.qwen36_mtp);
         errdefer d.mod.unload();
         d.dmod = try cuda.Module.load(e.d, cuda.kernels.qwen35_draft);
@@ -172,8 +185,17 @@ pub const Mtp = struct {
         return d.e.g.kv_heads * head_dim;
     }
 
-    fn ringBytes(d: *const Mtp) usize {
+    pub fn ringBytes(d: *const Mtp) usize {
         return 2 * d.capacity * d.kvWidth() * 2;
+    }
+
+    /// A stream's buffers in a pool lane's run: ring, newest row's state, then chain step state, each 256-aligned.
+    pub fn areaBytes(d: *const Mtp) usize {
+        return d.stepOffset() + d.e.g.hidden * 2;
+    }
+
+    fn stepOffset(d: *const Mtp) usize {
+        return std.mem.alignForward(usize, std.mem.alignForward(usize, d.ringBytes(), 256) + d.e.g.hidden * 2, 256);
     }
 
     fn scratchBytes(d: *Mtp) usize {
@@ -189,12 +211,13 @@ pub const Mtp = struct {
         const aw = g.attnWidth();
         const kw = d.kvWidth();
         const sizes = .{
-            .{ "taps_in", R * g.hidden * 2 }, .{ "hin", R * g.hidden * 2 },   .{ "hn", R * g.hidden * 2 },                  .{ "emb", R * g.hidden * 2 },
-            .{ "en", R * g.hidden * 2 },      .{ "h", R * g.hidden * 2 },     .{ "r", R * g.hidden * 2 },                   .{ "x", R * g.hidden * 2 },
-            .{ "qraw", R * 2 * aw * 2 },      .{ "q", R * aw * 2 },           .{ "kraw", R * kw * 2 },                      .{ "kb", R * kw * 2 },
-            .{ "vb", R * kw * 2 },            .{ "att", R * aw * 2 },         .{ "xs", R * (@max(g.hidden, aw) / 64) * 4 }, .{ "logits", L * g.vocab * 2 },
-            .{ "words", L * lp_words * 4 },   .{ "picks", L * 4 },            .{ "lane_state", L * g.hidden * 2 },          .{ "lane_k", L * kw * 2 },
-            .{ "lane_v", L * kw * 2 },        .{ "anc", L * anc_stride * 4 }, .{ "ids", R * 4 },                            .{ "tok", 64 },
+            .{ "taps_in", R * g.hidden * 2 },                    .{ "hin", R * g.hidden * 2 },   .{ "hn", R * g.hidden * 2 },                  .{ "emb", R * g.hidden * 2 },
+            .{ "en", R * g.hidden * 2 },                         .{ "h", R * g.hidden * 2 },     .{ "r", R * g.hidden * 2 },                   .{ "x", R * g.hidden * 2 },
+            .{ "qraw", R * 2 * aw * 2 },                         .{ "q", R * aw * 2 },           .{ "kraw", R * kw * 2 },                      .{ "kb", R * kw * 2 },
+            .{ "vb", R * kw * 2 },                               .{ "att", R * aw * 2 },         .{ "xs", R * (@max(g.hidden, aw) / 64) * 4 }, .{ "logits", L * g.vocab * 2 },
+            .{ "words", L * lp_words * 4 },                      .{ "picks", L * 4 },            .{ "lane_state", L * g.hidden * 2 },          .{ "lane_k", L * kw * 2 },
+            .{ "lane_v", L * kw * 2 },                           .{ "anc", L * anc_stride * 4 }, .{ "ids", R * 4 },                            .{ "tok", 64 },
+            .{ "tab", batched.most * @sizeOf(batched.RingRow) },
         };
         var total: usize = 0;
         inline for (sizes) |s| {
@@ -206,6 +229,7 @@ pub const Mtp = struct {
     }
 
     pub fn drop(d: *Mtp, ctx: *Ctx) void {
+        ctx.step.free();
         ctx.last.free();
         ctx.ring.free();
         d.gpa.destroy(ctx);
@@ -213,17 +237,20 @@ pub const Mtp = struct {
 
     fn resetCtx(d: *Mtp, ctx: *Ctx) void {
         _ = d;
-        ctx.* = .{ .ring = ctx.ring, .last = ctx.last };
+        ctx.* = .{ .ring = ctx.ring, .last = ctx.last, .step = ctx.step };
     }
 
     /// A new context, touched once (an absorb, then a chain), so no request pays the driver's stall.
     pub fn create(d: *Mtp) !*Ctx {
         const ctx = try d.gpa.create(Ctx);
         errdefer d.gpa.destroy(ctx);
-        ctx.* = .{ .ring = try DeviceBuffer.alloc(d.e.d, d.ringBytes()), .last = undefined };
+        ctx.* = .{ .ring = try DeviceBuffer.alloc(d.e.d, d.ringBytes()), .last = undefined, .step = undefined };
         errdefer ctx.ring.free();
         ctx.last = try DeviceBuffer.alloc(d.e.d, d.e.g.hidden * 2);
         errdefer ctx.last.free();
+        ctx.step = try DeviceBuffer.alloc(d.e.d, d.e.g.hidden * 2);
+        errdefer ctx.step.free();
+        try ctx.step.fill8(0, null);
         try ctx.ring.fill8(0, null);
         try ctx.last.fill8(0, null);
         try d.absorb(ctx, d.taps_in, 0, 1, null, &.{0}); // any tap rows do: the drafter's own zeroed staging
@@ -234,8 +261,9 @@ pub const Mtp = struct {
 
     /// `n` contexts ready in the pool, for the streams the server admits.
     pub fn reserve(d: *Mtp, n: usize) !void {
-        try d.pool.ensureTotalCapacity(d.gpa, n);
-        while (d.pool.items.len < n) d.pool.appendAssumeCapacity(try d.create());
+        const own = if (d.ring_of != null) @min(n, 1) else n; // with a pool the other streams' buffers are lane runs
+        try d.pool.ensureTotalCapacity(d.gpa, own);
+        while (d.pool.items.len < own) d.pool.appendAssumeCapacity(try d.create());
     }
 
     pub fn ringK(d: *Mtp, ctx: *Ctx) u64 {
@@ -256,8 +284,13 @@ pub const Mtp = struct {
         return precision.routed(d.e, router, experts, x, out, rows, d.projection_role);
     }
 
+    /// The layer's actual grouped Q/K/V dispatch, sharing only the input sums.
+    pub fn projQkv(d: *Mtp, rows: usize) !void {
+        try d.e.projManySums(&.{ d.w.q, d.w.k, d.w.v }, d.x, d.xs, &.{ d.qraw, d.kraw, d.vb }, rows, precision.prompt(d.projection_role, rows, precision.mtp_projection_prompt_cutoff), 0);
+    }
+
     /// out = norm(h + r) with w; h takes the sum (r 0: no residual).
-    fn norm(d: *Mtp, h: u64, r: u64, w: u64, out: u64, rows: usize) !void {
+    pub fn norm(d: *Mtp, h: u64, r: u64, w: u64, out: u64, rows: usize) !void {
         const e = d.e;
         try e.run(e.fns.norm, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ h, r, w, out, e.g.eps, @as(c_int, @intCast(e.g.hidden)), @as(u64, 0), @as(u64, 0) });
     }
@@ -278,9 +311,7 @@ pub const Mtp = struct {
         try d.proj(.{ .a4 = w.fc_e }, d.en, d.h, rows);
         try d.proj(.{ .a4 = w.fc_h }, d.hn, d.r, rows);
         try d.norm(d.h, d.r, w.input_norm, d.x, rows);
-        try d.proj(w.q, d.x, d.qraw, rows);
-        try d.proj(w.k, d.x, d.kraw, rows);
-        try d.proj(w.v, d.x, d.vb, rows);
+        try d.projQkv(rows);
         try e.run(d.fns.norm_rope, .{ rows * g.q_heads, 1, 1 }, .{ 32, 1, 1 }, .{ d.qraw, w.q_norm, d.q, @as(c_int, @intCast(g.q_heads)), @as(c_int, @intCast(2 * aw)), @as(c_int, 2 * head_dim), p0, step, g.eps, geometry.theta });
         try e.run(d.fns.norm_rope, .{ rows * g.kv_heads, 1, 1 }, .{ 32, 1, 1 }, .{ d.kraw, w.k_norm, d.kb, @as(c_int, @intCast(g.kv_heads)), @as(c_int, @intCast(kw)), @as(c_int, head_dim), p0, step, g.eps, geometry.theta });
         const heads: c_int = @intCast(g.q_heads);
@@ -332,7 +363,7 @@ pub const Mtp = struct {
         return d.absorbRole(ctx, tap_ring, start_, n_, rows_, follow, true);
     }
 
-    fn absorbRole(d: *Mtp, ctx: *Ctx, tap_ring: u64, start_: u64, n_: usize, rows_: ?[]const u32, follow: []const u32, prompt: bool) !void {
+    pub fn absorbRole(d: *Mtp, ctx: *Ctx, tap_ring: u64, start_: u64, n_: usize, rows_: ?[]const u32, follow: []const u32, prompt: bool) !void {
         const previous = d.projection_role;
         defer d.projection_role = previous;
         d.projection_role = if (prompt) .prompt else .live;
@@ -345,7 +376,7 @@ pub const Mtp = struct {
         if (rows_) |rs| if (rs.len != n or n > most_window) return error.BadDraftRows;
         if (start < ctx.end) ctx.end = start;
         if (start > ctx.end) ctx.begin = start; // a gap (a prompt restored from a cache): the context starts here
-        const held = engine.tap_rows - max_rows; // the target's ring holds this many rows behind its newest
+        const held = engine.tap_rows - engine.max_rows; // the target's ring holds this many rows behind its newest chunk
         if (n > held) {
             fi = n - held;
             start += n - held;
@@ -377,7 +408,7 @@ pub const Mtp = struct {
     }
 
     /// `depth` drafts after `pending` at pos0 (the pending token's slot): a chain, or the planner's tree of lanes.
-    fn hold(d: *Mtp, ctx: *Ctx, pending: u32, pos0: u64, depth: usize, lanes_: ?*const lanes.shape.Shape) !void {
+    pub fn hold(d: *Mtp, ctx: *Ctx, pending: u32, pos0: u64, depth: usize, lanes_: ?*const lanes.shape.Shape) !void {
         _ = pending; // the newest absorbed row's follow token, whose candidates ctx.cands are
         if (ctx.end != pos0) return error.DraftContextBehind;
         if (lanes_) |l| return d.holdTree(ctx, pos0, l);
@@ -472,7 +503,7 @@ pub const Mtp = struct {
     // the Drafter contract
 
     pub fn drafter(d: *Mtp) dr.Drafter {
-        return .{ .ptr = d, .vtable = &.{ .taps = tapsFn, .facts = factsFn, .open = openFn, .absorb = absorbFn, .hold = holdFn, .held = heldFn, .release = releaseFn } };
+        return .{ .kind = "MTP", .ptr = d, .vtable = &.{ .taps = tapsFn, .facts = factsFn, .open = openFn, .absorb = absorbFn, .hold = holdFn, .held = heldFn, .release = releaseFn } };
     }
 
     fn cast(p: *anyopaque) *Mtp {
@@ -485,12 +516,19 @@ pub const Mtp = struct {
 
     fn factsFn(p: *anyopaque) dr.Facts {
         const d = cast(p);
-        return .{ .depth = d.depth, .step_ms = d.step_ms, .prior = &prior, .plain_guard = true, .batched = false, .stream_bytes = d.ringBytes() + d.e.g.hidden * 2, .trees = d.trees, .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs] };
+        return .{ .depth = d.depth, .step_ms = d.step_ms, .prior = &prior, .plain_guard = true, .batched = !d.trees, .stream_bytes = d.ringBytes() + 2 * d.e.g.hidden * 2, .trees = d.trees, .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs] };
     }
 
     fn openFn(p: *anyopaque, s: *Stream) anyerror!void {
         const d = cast(p);
         if (d.streams.contains(s)) return error.StreamOpen;
+        if (d.ring_of) |r| if (r.area(r.ctx, s)) |base| { // the lane's run holds them, zeroed: a context borrowing it
+            const ctx = try d.gpa.create(Ctx);
+            errdefer d.gpa.destroy(ctx);
+            const last = base + std.mem.alignForward(usize, d.ringBytes(), 256);
+            ctx.* = .{ .ring = .{ .d = d.e.d, .ptr = base, .len = d.ringBytes(), .borrowed = true }, .last = .{ .d = d.e.d, .ptr = last, .len = d.e.g.hidden * 2, .borrowed = true }, .step = .{ .d = d.e.d, .ptr = base + d.stepOffset(), .len = d.e.g.hidden * 2, .borrowed = true } };
+            return d.streams.put(d.gpa, s, ctx);
+        };
         const ctx = d.pool.pop() orelse try d.create();
         errdefer d.pool.append(d.gpa, ctx) catch d.drop(ctx);
         d.resetCtx(ctx);
@@ -501,20 +539,26 @@ pub const Mtp = struct {
         const d = cast(p);
         const t0 = std.Io.Clock.awake.now(d.io);
         defer timing("mtp absorb", d.io, t0);
-        for (items) |it| {
-            const ctx = d.streams.get(it.stream) orelse return error.UnknownStream;
-            if (it.features.space != .device or it.features.dtype != .bf16) return error.UnsupportedFeatures;
-            // the target's features: its ring, `offset` the first row's position (cuda_native.zig's featuresFn)
-            if (it.rows) |rs| {
-                try d.absorbRole(ctx, it.features.buffer, it.features.offset, rs.len, rs, it.follow, it.prompt);
-            } else try d.absorbRole(ctx, it.features.buffer, it.features.offset, it.features.rows, null, it.follow, it.prompt);
-        }
+        // a shared round's streams in passes; one stream alone runs the same bits without the batch's copies
+        if (d.batch and !d.trees and items.len > 1) return batched.absorb(d, items);
+        for (items) |it| try d.absorbOne(it);
+    }
+
+    /// One stream's absorb, as the serial path runs it.
+    pub fn absorbOne(d: *Mtp, it: dr.Absorb) !void {
+        const ctx = d.streams.get(it.stream) orelse return error.UnknownStream;
+        if (it.features.space != .device or it.features.dtype != .bf16) return error.UnsupportedFeatures;
+        // the target's features: its ring, `offset` the first row's position (cuda_native.zig's featuresFn)
+        if (it.rows) |rs| {
+            try d.absorbRole(ctx, it.features.buffer, it.features.offset, rs.len, rs, it.follow, it.prompt);
+        } else try d.absorbRole(ctx, it.features.buffer, it.features.offset, it.features.rows, null, it.follow, it.prompt);
     }
 
     fn holdFn(p: *anyopaque, items: []const dr.Hold) anyerror!void {
         const d = cast(p);
         const t0 = std.Io.Clock.awake.now(d.io);
         defer timing("mtp hold", d.io, t0);
+        if (d.batch and !d.trees and items.len > 1) return batched.hold(d, items);
         for (items) |it| {
             const ctx = d.streams.get(it.stream) orelse return error.UnknownStream;
             try d.hold(ctx, it.pending, it.position - 1, it.depth, it.lanes);
@@ -532,7 +576,10 @@ pub const Mtp = struct {
 
     fn releaseFn(p: *anyopaque, s: *Stream) void {
         const d = cast(p);
-        if (d.streams.fetchRemove(s)) |kv| d.pool.append(d.gpa, kv.value) catch d.drop(kv.value);
+        if (d.streams.fetchRemove(s)) |kv| {
+            if (kv.value.ring.borrowed) return d.gpa.destroy(kv.value); // its lane's run goes back with the lane
+            d.pool.append(d.gpa, kv.value) catch d.drop(kv.value);
+        }
     }
 };
 

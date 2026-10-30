@@ -1,0 +1,2 @@
+info: checkpoint digest: 0.0 GiB read in 0.1 s, 33/33 cached files
+PASS rank 1 made rank 0's pool and mapped its pages through every step

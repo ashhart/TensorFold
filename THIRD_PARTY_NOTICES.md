@@ -16,6 +16,14 @@ The native engine carries that adaptation. `zig/kernels/metal/qwen3_5/gdn_pre.me
 `zig/kernels/metal/core/deltanet.metal` and Flash Next's `zig/kernels/metal/flashnext/q4_gdn_*.metal` run the same
 model math.
 
+## Vulkan affine projections
+
+`zig/kernels/vulkan/qmm.comp` adapts the GLSL shader from
+[mlx-omarchy](https://github.com/joshuaswarren/omarchy-mlx), MIT License,
+Copyright © 2026 Joshua Warren and mlx-omarchy contributors.
+Its arithmetic is unchanged; the native Vulkan path does not link MLX.
+See [the license text](LICENSES/mlx-omarchy-MIT.txt).
+
 ## Qwen Flash Next
 
 The n-gram ID helpers translate Hugging Face transformers' `models/qwen4_exp/modeling_qwen4_exp.py` with renamed
@@ -350,3 +358,16 @@ No external reference, captured cubin, model shard or CUDA compiler is bundled b
 
 The shared EXL3 resolver split and CUDA lane option forwarding retain work from PR #728 by @ajensenwaud,
 with the common EXL3 and DeepSeek contributor credits preserved.
+
+## MiaAI-Lab Flash Next prompt expert staging
+
+`zig/kernels/cuda/nvfp4_experts_tile.cu` adapts the K32 shared-memory pipeline in patch0014 of
+[MiaAI-Lab's Flash Next recipe](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark),
+recipe commit e1f564eb915bb5272474b6c1c527aec3b9ed3de6. It credits TensorFold Contributors for the expert
+arithmetic and staging design. Copyright (c) 2026 MiaAI-Lab and Copyright (c) 2026 TensorFold contributors.
+The complete original MIT notices and permission text are retained in [Mia-FlashNext-MIT.txt](LICENSES/Mia-FlashNext-MIT.txt).
+
+## Ling-3.0-tiny and Ling-3.1-flash
+
+Ling-3.0-tiny and Ling-3.1-flash are MIT licensed by inclusionAI. The host family package
+(`zig/src/families/ling/`) is a port of @jschmied's ling-tiny branch (98026d35). TensorFold ships no Ling weights.

@@ -1,0 +1,2 @@
+v1.1.1 release tensorfold-1.1.1-linux-aarch64.tar.gz sha256 2e0103a544e64354bfec65bd8a052ede17aa9be1f6a56d8e37c868af9139cb39, lib/libtfgrammar.so
+801c4c3434251eecc572b753edeb79162866a0063f3850e73b8a21471b6e284e

@@ -61,6 +61,43 @@ pub const text =
     \\  }
     \\  if (lane == 0) out[0] = ids[at];
     \\}
+    \\// fz_argmax in two launches: threadgroup (p, row) keeps its slice's first largest (index and value bits)
+    \\kernel void fz_argmax_part(device const bfloat* logits [[buffer(0)]], device uint* part [[buffer(1)]],
+    \\    constant uint& n [[buffer(2)]], uint2 tg [[threadgroup_position_in_grid]], uint2 ng [[threadgroups_per_grid]],
+    \\    uint t [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    \\    uint sg [[simdgroup_index_in_threadgroup]]) {
+    \\  const uint p = tg.x, row = tg.y, parts = ng.x, chunk = (n + parts - 1) / parts, lo = p * chunk, hi = min(n, lo + chunk);
+    \\  device const bfloat* x = logits + row * n;
+    \\  float best = -INFINITY; uint at = 0xffffffffu;
+    \\  for (uint i = lo + t; i < hi; i += 256) { const float v = float(x[i]); if (v > best) { best = v; at = i; } }
+    \\  for (ushort o = 16; o > 0; o >>= 1) {
+    \\    const float ob = simd_shuffle_xor(best, o); const uint oa = simd_shuffle_xor(at, o);
+    \\    if (ob > best || (ob == best && oa < at)) { best = ob; at = oa; }
+    \\  }
+    \\  threadgroup float vb[8]; threadgroup uint va[8];
+    \\  if (lane == 0) { vb[sg] = best; va[sg] = at; }
+    \\  threadgroup_barrier(mem_flags::mem_threadgroup);
+    \\  if (t != 0) return;
+    \\  for (uint k = 1; k < 8; k++) if (vb[k] > best || (vb[k] == best && va[k] < at)) { best = vb[k]; at = va[k]; }
+    \\  part[(row * parts + p) * 2] = as_type<uint>(best);
+    \\  part[(row * parts + p) * 2 + 1] = at;
+    \\}
+    \\// the parts' winners, the largest and the lowest index among equals: fz_argmax's pick (ids[pick] when map)
+    \\kernel void fz_argmax_join(device const uint* part [[buffer(0)]], device uint* out [[buffer(1)]],
+    \\    constant uint& parts [[buffer(2)]], device const uint* ids [[buffer(3)]], constant uint& map [[buffer(4)]],
+    \\    uint row [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+    \\  float best = -INFINITY; uint at = 0xffffffffu;
+    \\  for (uint q = lane; q < parts; q += 32) {
+    \\    const float v = as_type<float>(part[(row * parts + q) * 2]);
+    \\    const uint a = part[(row * parts + q) * 2 + 1];
+    \\    if (v > best || (v == best && a < at)) { best = v; at = a; }
+    \\  }
+    \\  for (ushort o = 16; o > 0; o >>= 1) {
+    \\    const float ob = simd_shuffle_xor(best, o); const uint oa = simd_shuffle_xor(at, o);
+    \\    if (ob > best || (ob == best && oa < at)) { best = ob; at = oa; }
+    \\  }
+    \\  if (lane == 0) out[row] = map != 0 ? ids[at] : at;
+    \\}
     \\// NGramEmbedding.ids for a window: pm = history (2), eos, unused, multipliers (3), head sizes (16), offsets (16)
     \\kernel void fz_ple_ids(device const uint* tok [[buffer(0)]], device const long* pm [[buffer(1)]],
     \\    device uint* out [[buffer(2)]], constant uint& rows [[buffer(3)]], uint i [[thread_position_in_grid]]) {

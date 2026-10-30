@@ -11,6 +11,7 @@ pub const Proposer = struct {
         propose: *const fn (ptr: *anyopaque, context: []const u32, max_draft: i64) anyerror![]const u32,
         propose_after: ?*const fn (ptr: *anyopaque, history: []const u32, tail: []const u32, max_draft: i64) anyerror![]const u32 = null,
         last_match: *const fn (ptr: *anyopaque) i64,
+        last_end: ?*const fn (ptr: *anyopaque) usize = null,
         observe: ?*const fn (ptr: *anyopaque, proposed: i64, accepted: i64) void = null,
         /// The proposer prices its own drafts: `propose`'s result is taken as is, no width, length or match gate.
         priced: bool = false,
@@ -33,6 +34,11 @@ pub const Proposer = struct {
         return p.vtable.last_match(p.ptr);
     }
 
+    /// Where the last match's continuation starts in the history it searched (null: the proposer does not say).
+    pub fn lastEnd(p: Proposer) ?usize {
+        return if (p.vtable.last_end) |f| f(p.ptr) else null;
+    }
+
     pub fn observe(p: Proposer, proposed: i64, accepted: i64) void {
         if (p.vtable.observe) |f| f(p.ptr, proposed, accepted);
     }
@@ -49,12 +55,13 @@ pub const Params = struct {
     ngram: usize = 3,
     min_match: i64 = 6,
     max_extension: i64 = 64,
+    /// Asks (`propose` or `proposeAfter` calls with room) left empty after `window` rejected proposals in a row.
     silence_rounds: i64 = 16,
     window: usize = 4,
     confident_match: i64 = 24,
 };
 
-/// Continuations backed by enough matching context; silent for a while after a run of rejected proposals.
+/// Continuations backed by enough matching context; silent for `silence_rounds` asks (not rounds) after rejections.
 pub const SuffixLookup = struct {
     gpa: Allocator,
     params: Params,
@@ -68,9 +75,10 @@ pub const SuffixLookup = struct {
     proposed_tokens: i64 = 0,
     judged_tokens: i64 = 0,
     accepted_tokens: i64 = 0,
-    silenced_rounds: i64 = 0,
+    silenced_rounds: i64 = 0, // asks the silence answered empty (Python's name: a round may ask more than once)
     last_match: i64 = 0,
     last_confident: bool = false,
+    last_end: usize = 0, // the history index the last match's continuation starts at
 
     pub fn init(gpa: Allocator, params: Params) !SuffixLookup {
         if (params.ngram < 1 or params.ngram > max_ngram) return error.BadNgram;
@@ -91,7 +99,7 @@ pub const SuffixLookup = struct {
         return .{ .ptr = s, .vtable = &vtable };
     }
 
-    pub const vtable: Proposer.VTable = .{ .propose = proposeFn, .propose_after = afterFn, .last_match = lastMatchFn, .observe = observeFn };
+    pub const vtable: Proposer.VTable = .{ .propose = proposeFn, .propose_after = afterFn, .last_match = lastMatchFn, .last_end = lastEndFn, .observe = observeFn };
 
     fn proposeFn(ptr: *anyopaque, context: []const u32, max_draft: i64) anyerror![]const u32 {
         const s: *SuffixLookup = @ptrCast(@alignCast(ptr));
@@ -106,6 +114,11 @@ pub const SuffixLookup = struct {
     fn lastMatchFn(ptr: *anyopaque) i64 {
         const s: *SuffixLookup = @ptrCast(@alignCast(ptr));
         return s.last_match;
+    }
+
+    fn lastEndFn(ptr: *anyopaque) usize {
+        const s: *SuffixLookup = @ptrCast(@alignCast(ptr));
+        return s.last_end;
     }
 
     fn observeFn(ptr: *anyopaque, proposed: i64, accepted: i64) void {
@@ -181,6 +194,7 @@ pub const SuffixLookup = struct {
             }
         }
         s.last_match = best_len;
+        s.last_end = best_end;
         if (best_len < s.params.min_match) return s.out.items;
         s.last_confident = best_len >= s.params.confident_match;
         const count = @min(history.len - best_end, @as(usize, @intCast(max_draft)));
@@ -232,4 +246,24 @@ test "a drafted tail continues the history's copy, and history alone is indexed"
     try std.testing.expectEqual(@as(i64, 5), s.last_match);
     try std.testing.expectEqual(history.len, s.indexed);
     try std.testing.expectEqual(@as(usize, 0), (try s.proposeAfter(&history, &.{ 2, 3, 9 }, 3)).len);
+}
+
+test "silence lasts silence_rounds asks however many a round makes; round() and an ask without room leave it" {
+    const gpa = std.testing.allocator;
+    var s = try SuffixLookup.init(gpa, .{ .ngram = 2, .min_match = 2, .silence_rounds = 3, .window = 2 });
+    defer s.deinit();
+    const p = s.proposer();
+    const ctx = [_]u32{ 1, 2, 3, 4, 5, 9, 1, 2, 3 };
+    try s.observe(3, 0);
+    try s.observe(3, 0);
+    try std.testing.expectEqual(@as(i64, 3), s.silent_for);
+    p.round(4, 0); // the round hook: SuffixLookup has none, so rounds never shorten the silence
+    try std.testing.expectEqual(@as(usize, 0), (try p.proposeAfter(&ctx, &.{}, 0)).len); // no room: not an ask
+    try std.testing.expectEqual(@as(i64, 3), s.silent_for);
+    try std.testing.expectEqual(@as(usize, 0), (try p.proposeAfter(&ctx, &.{3}, 3)).len); // root copies' first ask
+    try std.testing.expectEqual(@as(usize, 0), (try p.propose(&ctx, 3)).len);
+    p.round(4, 0);
+    try std.testing.expectEqual(@as(usize, 0), (try p.propose(&ctx, 3)).len);
+    try std.testing.expectEqual(@as(i64, 3), s.silenced_rounds);
+    try std.testing.expectEqualSlices(u32, &.{ 4, 5, 9 }, try p.propose(&ctx, 3));
 }

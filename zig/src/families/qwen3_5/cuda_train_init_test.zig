@@ -140,6 +140,7 @@ const F = struct {
 };
 fn model(d: *cuda.Driver) engine.Engine {
     var e: engine.Engine = undefined;
+    e.kit = null;
     e.d = d;
     e.stream = .{ .d = d, .handle = @ptrFromInt(1) };
     e.n_taps = 0;

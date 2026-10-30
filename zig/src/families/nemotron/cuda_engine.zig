@@ -157,7 +157,7 @@ pub const Engine = struct {
         if (e.c.ck) try e.k.loadCk(ctx);
         // the ranks' lines first: a rank that never comes, refuses, fails or dies is named, not waited on
         if (e.c.world > 1) try cuda.tp_watch.start(io, e.c.rank, e.c.world); // the caller tells the others a failure
-        if (e.c.world > 1) e.tp = try cuda.tp_group.Group.open(e.c.rank, e.c.world);
+        if (e.c.world > 1) e.tp = try cuda.tp_group.Group.open(ctx.d, e.c.rank, e.c.world);
         errdefer if (!keep_owner) if (e.tp) |*g| g.close();
         if (e.tp) |*g| try latent.agree(gpa, io, e.c, g, ctx.d, e.stream, model_dir);
         // every byte this rank holds, hashed while the weights load; the ranks compare the digests at ready

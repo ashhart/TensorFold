@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #include "mma4.cuh"
-#include "qmm_frag.cuh"
+#include "common/qmm_frag.cuh"
 
 using namespace qmm_frag;
 using namespace mma4;

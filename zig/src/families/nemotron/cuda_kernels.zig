@@ -44,7 +44,7 @@ pub const Snaps = extern struct {
 
 pub const Kernels = struct {
     d: *const cuda.Driver,
-    mods: [22]cuda.Module,
+    mods: [21]cuda.Module,
     triton: ?cuda.aot.Set, // a captured Triton set for the glue (GB10's qualified one); null: our own glue kernels
     glue: glue.Fns,
     emb: cuda.embed_rows.EmbedRows,
@@ -82,7 +82,7 @@ pub const Kernels = struct {
         var k: Kernels = undefined;
         k.d = d;
         const kk = cuda.kernels;
-        const images = [_][]const u8{ kk.qmm_group, kk.qmm_prefill, kk.experts, kk.experts_prefill, kk.experts_pack, kk.prefill_attention, kk.scan_rows, kk.nemotron_ops, kk.torch_argmax, kk.torch_topk, kk.torch_pointwise, kk.torch_indexing, kk.torch_movement, kk.torch_nemotron_constants, kk.sample, kk.lane_gemv, kk.nemotron_norms, kk.nemotron_route, kk.nemotron_mamba, kk.nemotron_attention, kk.nemotron_keyed, kk.affine4_pack };
+        const images = [_][]const u8{ kk.qmm_group, kk.qmm_prefill, kk.experts, kk.experts_prefill, kk.experts_pack, kk.prefill_attention, kk.scan_rows, kk.nemotron_ops, kk.torch_argmax, kk.torch_topk, kk.torch_pointwise, kk.torch_indexing, kk.torch_movement, kk.torch_nemotron_constants, kk.sample, kk.lane_gemv, kk.nemotron_route, kk.nemotron_mamba, kk.nemotron_attention, kk.nemotron_keyed, kk.affine4_pack };
         var loaded: usize = 0;
         errdefer for (k.mods[0..loaded]) |*m| m.unload();
         for (images, 0..) |img, i| {
@@ -104,7 +104,7 @@ pub const Kernels = struct {
         k.splice_rows = try k.mods[7].function("tf_splice_rows");
         k.torch = try torch_ops.Functions.resolve(k.mods[8..14]);
         k.draws = try cuda.sample.Draws.resolve(k.mods[14]);
-        k.glue = try glue.Fns.resolve(k.mods[16..21]);
+        k.glue = try glue.Fns.resolve(k.mods[16..20]);
         k.emb = try cuda.embed_rows.EmbedRows.load(d);
         errdefer k.emb.unload();
         k.norms = try cuda.norms.Norms.load(d);
@@ -125,7 +125,7 @@ pub const Kernels = struct {
         const minor = try ctx.attribute(.compute_capability_minor);
         k.gb10 = major == 12 and minor == 1;
         k.discrete = try ctx.attribute(.integrated) == 0;
-        k.affine = try cuda.qlinear.Affine4Kernels.resolve(d, k.mods[0], k.mods[1], k.mods[15], k.mods[21], sms, k.gb10);
+        k.affine = try cuda.qlinear.Affine4Kernels.resolve(d, k.mods[0], k.mods[1], k.mods[15], k.mods[20], sms, k.gb10);
         return k;
     }
 

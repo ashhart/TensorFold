@@ -37,6 +37,7 @@ fn tokenize(srv: *Server, cx: *Cx, body: Value) errors.Refused!Value {
         };
         const thinking = try fields.thinkingFields(cx, body, srv.effort_levels);
         const on = thinking.enable orelse srv.config.enable_thinking;
+        cx.clear_thinking = thinking.clear;
         ids = prompt.renderIds(srv, cx, msgs, tools, on, srv.effortFor(thinking.effort), generation) catch |e| switch (e) {
             error.Refused => return cx.other(cx.message),
             else => |x| return x,

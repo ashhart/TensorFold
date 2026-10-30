@@ -23,7 +23,7 @@ pub const Case = struct {
 };
 
 /// A test grammar: `length` tokens, the i-th of class i % 3 (any but 96 when `free`), then 96; it starts after `after`.
-const Classes = struct {
+pub const Classes = struct {
     length: u32 = 12,
     after: ?u32 = null,
     free: bool = false,
@@ -31,7 +31,7 @@ const Classes = struct {
     at: u32 = 0,
     done: bool = false,
 
-    fn rules(c: *Classes) grammar.Rules {
+    pub fn rules(c: *Classes) grammar.Rules {
         return .{ .ptr = c, .vtable = &.{ .accept = acceptFn, .rollback = rollbackFn, .terminated = terminatedFn, .fill = fillFn, .drafts = draftsFn, .free = freeFn } };
     }
 

@@ -99,24 +99,27 @@ test "a reply of many calls searches each opener once, not again after every cal
     const a = arena.allocator();
     const tools = (try json.parse(a, "[{\"type\":\"function\",\"function\":{\"name\":\"lookup\"}}]")).ok.array;
     const call = "<tool_call>{\"name\":\"lookup\",\"arguments\":{\"n\":1}}</tool_call>";
-    var ns: [2]u64 = undefined;
-    for ([_]usize{ 400, 3200 }, &ns) |n, *best| {
-        const reply = try a.alloc(u8, n * call.len);
-        for (0..n) |i| @memcpy(reply[i * call.len ..][0..call.len], call);
-        best.* = std.math.maxInt(u64);
-        for (0..3) |_| {
-            var run: std.heap.ArenaAllocator = .init(std.testing.allocator);
-            defer run.deinit();
-            const start = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
-            const r = try parse(run.allocator(), reply, tools, null);
-            try std.testing.expectEqualStrings("", try closeCall(run.allocator(), reply, tools));
-            try std.testing.expectEqualStrings("", try @import("reply_text.zig").hideToolCalls(run.allocator(), reply, false));
-            best.* = @min(best.*, @as(u64, @intCast(std.Io.Clock.awake.now(std.testing.io).nanoseconds - start)));
-            try std.testing.expectEqual(n, r.calls.?.len);
-        }
+    const sizes = [_]usize{ 200, 6400 };
+    var replies: [2][]u8 = undefined;
+    for (sizes, &replies) |n, *reply| {
+        reply.* = try a.alloc(u8, n * call.len);
+        for (0..n) |i| @memcpy(reply.*[i * call.len ..][0..call.len], call);
     }
-    // 8x the calls: near 8x the time, not 64x
-    try std.testing.expect(ns[1] <= 20 * std.time.ns_per_ms or ns[1] <= 24 * ns[0]);
+    var ns = [_]u64{ std.math.maxInt(u64), std.math.maxInt(u64) };
+    const clock = @import("linear_time.zig").clock(std.testing.io); // the thread's CPU time where it has one
+    // the sizes alternate, so a runner busy with other tests slows both alike; each keeps its best of five
+    for (0..5) |_| for (sizes, replies, &ns) |n, reply, *best| {
+        var run: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer run.deinit();
+        const start = clock.now(std.testing.io).nanoseconds;
+        const r = try parse(run.allocator(), reply, tools, null);
+        try std.testing.expectEqualStrings("", try closeCall(run.allocator(), reply, tools));
+        try std.testing.expectEqualStrings("", try @import("reply_text.zig").hideToolCalls(run.allocator(), reply, false));
+        best.* = @min(best.*, @as(u64, @intCast(clock.now(std.testing.io).nanoseconds - start)));
+        try std.testing.expectEqual(n, r.calls.?.len);
+    };
+    // 32x the calls: at most 32x the time (15x in a Debug build on an M3 Ultra), not 1024x
+    try std.testing.expect(ns[1] <= 64 * ns[0]);
 }
 
 test "a call the end token left open closes when it parses whole" {
@@ -212,29 +215,39 @@ test "a call to a tool the request did not declare stays text" {
     try std.testing.expect((try parse(a, "{\"name\":\"launch\",\"arguments\":{}}", tools, null)).calls == null);
 }
 
+/// Two replies, the second of 8x the first's pieces, parsed in turn; `want` is the first call's arguments, or no call.
+const Timed = struct {
+    replies: [2][]const u8,
+    tools: []const json.Value,
+    want: ?[]const u8,
+    fn run(t: *const Timed, i: usize) anyerror!void {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const r = try parse(arena.allocator(), t.replies[i], t.tools, null);
+        const want = t.want orelse return std.testing.expect(r.calls == null);
+        try std.testing.expectEqualStrings(want, r.calls.?[0].get("function").?.get("arguments").?.string);
+    }
+    /// Within 24x (or 20 ms) for the bigger reply; each size keeps its fastest of five.
+    fn linear(t: *const Timed) !void {
+        const ns = try @import("linear_time.zig").fastest(5, t, run);
+        try std.testing.expect(ns[1] <= 20 * std.time.ns_per_ms or ns[1] <= 24 * ns[0]);
+    }
+};
+
 test "a GLM call's keys without values search their key and value ends once" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     const tools = (try json.parse(a, "[{\"type\":\"function\",\"function\":{\"name\":\"lookup\"}}]")).ok.array;
-    var ns: [2]u64 = undefined;
-    for ([_]usize{ 800, 6400 }, &ns) |n, *best| {
-        var reply: std.ArrayList(u8) = .empty;
-        try reply.appendSlice(a, "<tool_call>lookup");
-        for (0..n) |_| try reply.appendSlice(a, "<arg_key>n</arg_key>");
-        try reply.appendSlice(a, "</tool_call>");
-        best.* = std.math.maxInt(u64);
-        for (0..3) |_| {
-            var run: std.heap.ArenaAllocator = .init(std.testing.allocator);
-            defer run.deinit();
-            const start = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
-            const r = try parse(run.allocator(), reply.items, tools, null);
-            best.* = @min(best.*, @as(u64, @intCast(std.Io.Clock.awake.now(std.testing.io).nanoseconds - start)));
-            try std.testing.expectEqualStrings("{}", r.calls.?[0].get("function").?.get("arguments").?.string);
-        }
+    var t: Timed = .{ .replies = undefined, .tools = tools, .want = "{}" };
+    for (&t.replies, [_]usize{ 800, 6400 }) |*reply, n| {
+        var r: std.ArrayList(u8) = .empty;
+        try r.appendSlice(a, "<tool_call>lookup");
+        for (0..n) |_| try r.appendSlice(a, "<arg_key>n</arg_key>");
+        try r.appendSlice(a, "</tool_call>");
+        reply.* = r.items;
     }
-    // 8x the keys: near 8x the time, not 64x
-    try std.testing.expect(ns[1] <= 20 * std.time.ns_per_ms or ns[1] <= 24 * ns[0]);
+    try t.linear(); // 8x the keys: near 8x the time, not 64x
 }
 
 test "GLM calls keep a declared name with spaces, dots, colons or unicode; an undeclared one stays text" {
@@ -268,9 +281,11 @@ test "GLM calls keep a declared name with spaces, dots, colons or unicode; an un
     try std.testing.expect((try parse(a, prose, tools, null)).calls == null);
 }
 
-const dsml_prefix = "<｜DSML｜tool_calls><｜DSML｜invoke name=\"lookup\">" ++
-    "<｜DSML｜parameter name=\"q\" string=\"true\">";
-const dsml_suffix = "</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>";
+/// (prefix, suffix) of a DSML call around its ``q`` value: ``tool_calls``, and V4.1's spaced ``calls``.
+const dsml = [_][2][]const u8{
+    .{ "<｜DSML｜tool_calls><｜DSML｜invoke name=\"lookup\"><｜DSML｜parameter name=\"q\" string=\"true\">", "</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>" },
+    .{ "<｜DSML｜ calls><｜DSML｜ invoke name=\"lookup\"><｜DSML｜ parameter name=\"q\" string=\"true\">", "</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>" },
+};
 const nested_calls = [_][]const u8{
     "<tool_call><function=lookup></function></tool_call>",
     "<tool_call><function=lookup></function>",
@@ -285,22 +300,13 @@ test "namespaced openers without closers read in linear time" {
     const tools = (try json.parse(a, "[{\"type\":\"function\",\"function\":{\"name\":\"lookup\"}}]")).ok.array;
     // one namespace repeated, then a new namespace per opener
     for ([_]bool{ false, true }) |distinct| {
-        var ns: [2]u64 = undefined;
-        for ([_]usize{ 1000, 8000 }, &ns) |n, *best| {
-            var reply: std.ArrayList(u8) = .empty;
-            for (0..n) |i| try reply.print(a, "<ns{d}:tool_call>", .{if (distinct) i else 0});
-            best.* = std.math.maxInt(u64);
-            for (0..3) |_| {
-                var run: std.heap.ArenaAllocator = .init(std.testing.allocator);
-                defer run.deinit();
-                const start = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
-                const r = try parse(run.allocator(), reply.items, tools, null);
-                best.* = @min(best.*, @as(u64, @intCast(std.Io.Clock.awake.now(std.testing.io).nanoseconds - start)));
-                try std.testing.expect(r.calls == null);
-            }
+        var t: Timed = .{ .replies = undefined, .tools = tools, .want = null };
+        for (&t.replies, [_]usize{ 1000, 8000 }) |*reply, n| {
+            var r: std.ArrayList(u8) = .empty;
+            for (0..n) |i| try r.print(a, "<ns{d}:tool_call>", .{if (distinct) i else 0});
+            reply.* = r.items;
         }
-        // 8x the openers: near 8x the time, not 64x
-        try std.testing.expect(ns[1] <= 20 * std.time.ns_per_ms or ns[1] <= 24 * ns[0]);
+        try t.linear(); // 8x the openers: near 8x the time, not 64x
     }
 }
 
@@ -330,8 +336,8 @@ test "DSML parameters contain complete and unfinished legacy calls without consu
     const a = arena.allocator();
     const tools = (try json.parse(a, "[{\"type\":\"function\",\"function\":{\"name\":\"lookup\"}}]")).ok.array;
     const adjacent = "<tool_call>{\"name\":\"lookup\",\"arguments\":{\"n\":7}}</tool_call>";
-    for (nested_calls) |literal| {
-        const text = try std.mem.concat(a, u8, &.{ "Before.", dsml_prefix, literal, dsml_suffix, adjacent, "After." });
+    for (dsml) |sp| for (nested_calls) |literal| {
+        const text = try std.mem.concat(a, u8, &.{ "Before.", sp[0], literal, sp[1], adjacent, "After." });
         for ([_]?usize{ null, 1 }) |quota| {
             const parsed = try parse(a, text, tools, quota);
             try std.testing.expectEqual(@as(usize, if (quota == null) 2 else 1), parsed.calls.?.len);
@@ -345,7 +351,7 @@ test "DSML parameters contain complete and unfinished legacy calls without consu
             try std.testing.expectEqualStrings("Before.After.", parsed.content);
             try std.testing.expectEqualStrings("", try closeCall(a, text, tools));
         }
-    }
+    };
 }
 
 test "an unfinished DSML envelope never parses or autocompletes its nested legacy call" {
@@ -353,15 +359,15 @@ test "an unfinished DSML envelope never parses or autocompletes its nested legac
     defer arena.deinit();
     const a = arena.allocator();
     const tools = (try json.parse(a, "[{\"type\":\"function\",\"function\":{\"name\":\"lookup\"}}]")).ok.array;
-    for (nested_calls) |literal| {
-        const text = try std.mem.concat(a, u8, &.{ "Before.", dsml_prefix, literal });
+    for (dsml) |sp| for (nested_calls) |literal| {
+        const text = try std.mem.concat(a, u8, &.{ "Before.", sp[0], literal });
         for ([_]?usize{ null, 1 }) |quota| {
             const parsed = try parse(a, text, tools, quota);
             try std.testing.expect(parsed.calls == null);
             try std.testing.expectEqualStrings(text, parsed.content);
         }
         try std.testing.expectEqualStrings("", try closeCall(a, text, tools));
-    }
+    };
 }
 
 test "closeCall skips a closed DSML parameter's unfinished legacy opener and completes the adjacent call" {
@@ -369,13 +375,14 @@ test "closeCall skips a closed DSML parameter's unfinished legacy opener and com
     defer arena.deinit();
     const a = arena.allocator();
     const tools = (try json.parse(a, "[{\"type\":\"function\",\"function\":{\"name\":\"lookup\"}}]")).ok.array;
-    const text = dsml_prefix ++ "<tool_call><function=lookup></function>" ++ dsml_suffix ++
-        "<tool_call>{\"name\":\"lookup\",\"arguments\":{\"n\":7}";
-    const tail = try closeCall(a, text, tools);
-    try std.testing.expectEqualStrings("}</tool_call>", tail);
-    const parsed = try parse(a, try std.mem.concat(a, u8, &.{ text, tail }), tools, null);
-    try std.testing.expectEqual(@as(usize, 2), parsed.calls.?.len);
-    try std.testing.expectEqualStrings("{\"n\":7}", parsed.calls.?[1].get("function").?.strField("arguments").?);
+    inline for (dsml) |sp| {
+        const text = sp[0] ++ "<tool_call><function=lookup></function>" ++ sp[1] ++ "<tool_call>{\"name\":\"lookup\",\"arguments\":{\"n\":7}";
+        const tail = try closeCall(a, text, tools);
+        try std.testing.expectEqualStrings("}</tool_call>", tail);
+        const parsed = try parse(a, try std.mem.concat(a, u8, &.{ text, tail }), tools, null);
+        try std.testing.expectEqual(@as(usize, 2), parsed.calls.?.len);
+        try std.testing.expectEqualStrings("{\"n\":7}", parsed.calls.?[1].get("function").?.strField("arguments").?);
+    }
 }
 
 test "bare JSON calls keep literal unfinished DSML markers as argument data" {
@@ -383,15 +390,17 @@ test "bare JSON calls keep literal unfinished DSML markers as argument data" {
     defer arena.deinit();
     const a = arena.allocator();
     const tools = (try json.parse(a, "[{\"type\":\"function\",\"function\":{\"name\":\"lookup\"}}]")).ok.array;
-    const call = "{\"name\":\"lookup\",\"arguments\":{\"q\":\"<｜DSML｜tool_calls>\"}}";
-    const inputs = [_][]const u8{ call, "[" ++ call ++ "]", "```json\n" ++ call ++ "\n```" };
-    for (inputs) |text| for ([_]?usize{ null, 1 }) |quota| {
-        const parsed = try parse(a, text, tools, quota);
-        try std.testing.expectEqual(@as(usize, 1), parsed.calls.?.len);
-        const arguments = (try json.parse(a, parsed.calls.?[0].get("function").?.strField("arguments").?)).ok;
-        try std.testing.expectEqualStrings("<｜DSML｜tool_calls>", arguments.strField("q").?);
-        try std.testing.expectEqualStrings("", parsed.content);
-    };
+    inline for (.{ "<｜DSML｜tool_calls>", "<｜DSML｜ calls>" }) |opener| {
+        const call = "{\"name\":\"lookup\",\"arguments\":{\"q\":\"" ++ opener ++ "\"}}";
+        const inputs = [_][]const u8{ call, "[" ++ call ++ "]", "```json\n" ++ call ++ "\n```" };
+        for (inputs) |text| for ([_]?usize{ null, 1 }) |quota| {
+            const parsed = try parse(a, text, tools, quota);
+            try std.testing.expectEqual(@as(usize, 1), parsed.calls.?.len);
+            const arguments = (try json.parse(a, parsed.calls.?[0].get("function").?.strField("arguments").?)).ok;
+            try std.testing.expectEqualStrings(opener, arguments.strField("q").?);
+            try std.testing.expectEqualStrings("", parsed.content);
+        };
+    }
 }
 
 test "a GLM call whose <arg_key> the model wrote as whitespace gets it back" {
@@ -473,38 +482,20 @@ test "a GLM call the end token left open closes as #285 closed it" {
     for (left_open) |text| try std.testing.expectEqualStrings("", try closeCall(a, text, tools));
 }
 
-fn now() u64 {
-    return @intCast(std.Io.Clock.awake.now(std.testing.io).nanoseconds);
-}
-
-/// The fastest of three parses of one Gemma call to `lookup` that holds `n` strings, in nanoseconds.
-fn gemmaParse(tools: []const json.Value, n: usize) !u64 {
-    const gpa = std.testing.allocator;
-    var reply: std.ArrayList(u8) = .empty;
-    defer reply.deinit(gpa);
-    try reply.appendSlice(gpa, "<|tool_call>call:lookup{");
-    for (0..n) |_| try reply.appendSlice(gpa, "q:<|\"|>a<|\"|>,");
-    try reply.appendSlice(gpa, "n:1}<tool_call|>");
-    var best: u64 = std.math.maxInt(u64);
-    for (0..3) |_| {
-        var arena: std.heap.ArenaAllocator = .init(gpa);
-        defer arena.deinit();
-        const start = now();
-        const r = try parse(arena.allocator(), reply.items, tools, null);
-        best = @min(best, now() - start);
-        try std.testing.expectEqualStrings("{\"q\":\"a\",\"n\":1}", r.calls.?[0].get("function").?.get("arguments").?.string);
-    }
-    return best;
-}
-
 test "a Gemma call's strings go back in one pass" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const tools = (try json.parse(arena.allocator(), "[{\"type\":\"function\",\"function\":{\"name\":\"lookup\"}}]")).ok.array;
-    const t1 = try gemmaParse(tools, 1200);
-    const t8 = try gemmaParse(tools, 8 * 1200);
-    // 8x the strings: near 8x the time, not 64x
-    try std.testing.expect(t8 <= 20 * std.time.ns_per_ms or t8 <= 24 * t1);
+    const a = arena.allocator();
+    const tools = (try json.parse(a, "[{\"type\":\"function\",\"function\":{\"name\":\"lookup\"}}]")).ok.array;
+    var t: Timed = .{ .replies = undefined, .tools = tools, .want = "{\"q\":\"a\",\"n\":1}" };
+    for (&t.replies, [_]usize{ 1200, 9600 }) |*reply, n| {
+        var r: std.ArrayList(u8) = .empty;
+        try r.appendSlice(a, "<|tool_call>call:lookup{");
+        for (0..n) |_| try r.appendSlice(a, "q:<|\"|>a<|\"|>,");
+        try r.appendSlice(a, "n:1}<tool_call|>");
+        reply.* = r.items;
+    }
+    try t.linear(); // 8x the strings: near 8x the time, not 64x
 }
 
 test "putBack gives the text that replacing the marks in turn gives" {

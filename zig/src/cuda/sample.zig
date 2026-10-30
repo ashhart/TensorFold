@@ -56,12 +56,29 @@ pub const Draws = struct {
     logprob_rows_fn: Function,
     topk_slices_fn: Function,
     topk_merge_fn: Function,
+    /// tf_draw_rows; null in a kernel set built before it, where drawRows falls back to one launch a row.
+    draw_rows_fn: ?Function = null,
+    /// tf_draw_slice_top and tf_draw_rows_finish: a window's rows over slices (null: one block a row).
+    slices: ?[2]Function = null,
+    /// tf_penalize_rows; null in a kernel set built before it, where penalties are not offered.
+    penalize_fn: ?Function = null,
+
+    /// sample.cu's SW: a slice's entries.
+    pub const draw_slice = 8192;
+    /// The scratch bytes drawRows' slices take a row: its candidates' keys and ids.
+    pub const row_scratch = 2 * 1024 * 4;
 
     /// tf_topk_slices' slice: a row's entries a block in topkRows' first stage.
     pub const topk_slice = 4096;
 
     pub fn resolve(mod: Module) !Draws {
-        return .{ .draw_fn = try mod.function("tf_draw"), .draw_ids_fn = try mod.function("tf_draw_ids"), .logprob_rows_fn = try mod.function("tf_logprob_rows"), .topk_slices_fn = try mod.function("tf_topk_slices"), .topk_merge_fn = try mod.function("tf_topk_merge") };
+        return .{ .draw_fn = try mod.function("tf_draw"), .draw_ids_fn = try mod.function("tf_draw_ids"), .logprob_rows_fn = try mod.function("tf_logprob_rows"), .topk_slices_fn = try mod.function("tf_topk_slices"), .topk_merge_fn = try mod.function("tf_topk_merge"), .draw_rows_fn = mod.function("tf_draw_rows") catch null, .slices = slicesOf(mod), .penalize_fn = mod.function("tf_penalize_rows") catch null };
+    }
+
+    fn slicesOf(mod: Module) ?[2]Function {
+        var out: [2]Function = undefined;
+        for (&out, [_][:0]const u8{ "tf_draw_slice_top", "tf_draw_rows_finish" }) |*f, name| f.* = mod.function(name) catch return null;
+        return out;
     }
 
     /// Resolve the opt-in pitched entry separately; old images keep the exact legacy symbol lookups.
@@ -110,6 +127,42 @@ pub const Draws = struct {
         a.add(ids orelse 0);
         a.add(prob orelse 0);
         try launch_.launch(f, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 } }, s, &a);
+    }
+
+    /// `rows` consecutive bf16 logits rows, row r under the rule at rule_ptr + r and the position at meta + r (plus 1).
+    pub fn drawRows(d: *const Draws, s: Stream, logits: u64, vocab: usize, rule_ptr: u64, meta: u64, out: u64, rows: usize, scratch: ?u64) !void {
+        if (rows == 0) return;
+        if (d.slices) |f| if (scratch) |ck| {
+            // each slice's top_k over (slices, rows), then a block a row sorts them and draws
+            const ci = ck + rows * 1024 * 4;
+            var a: launch_.Args = .{};
+            inline for (.{ logits, @as(u32, @intCast(vocab)), rule_ptr, ck, ci }) |v| a.add(v);
+            try launch_.launch(f[0], .{ .grid = .{ .x = @intCast((vocab + draw_slice - 1) / draw_slice), .y = @intCast(rows), .z = 1 }, .block = .{ .x = 256 } }, s, &a);
+            var b: launch_.Args = .{};
+            inline for (.{ logits, @as(u32, @intCast(vocab)), rule_ptr, meta, ck, ci, out }) |v| b.add(v);
+            try launch_.launch(f[1], .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = 1024 } }, s, &b);
+            return;
+        };
+        const f = d.draw_rows_fn orelse {
+            for (0..rows) |i| try d.draw(s, logits + i * vocab * 2, vocab, rule_ptr + i * @sizeOf(Rule), meta + i * 4, 0, out + i * 4, 1, null, null);
+            return;
+        };
+        var a: launch_.Args = .{};
+        a.add(logits);
+        a.add(@as(u32, @intCast(vocab)));
+        a.add(rule_ptr);
+        a.add(meta);
+        a.add(out);
+        try launch_.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = 1024 } }, s, &a);
+    }
+
+    /// `n` entries at `entries` (n rows, n tokens, then n fp32 amounts): each takes its amount from its row's logit.
+    pub fn penalize(d: *const Draws, s: Stream, logits: u64, vocab: usize, entries: u64, n: usize) !void {
+        if (n == 0) return;
+        const f = d.penalize_fn orelse return error.PenaltiesUnsupported;
+        var a: launch_.Args = .{};
+        inline for (.{ logits, @as(u32, @intCast(vocab)), entries, entries + n * 4, entries + n * 8, @as(u32, @intCast(n)) }) |v| a.add(v);
+        try launch_.launch(f, .{ .grid = .{ .x = @intCast((n + 255) / 256), .y = 1, .z = 1 }, .block = .{ .x = 256 } }, s, &a);
     }
 
     /// Each bf16 logits row's logprob words at `out`: its pick in `picks`, its `k` best tokens, its rank if `rank`.

@@ -1,0 +1,20 @@
+tested implementation: 0b094b74546d6ca06f84a729ea8c9e7bfbdb80b9 (commit 11)
+implementation tree: aa6b53d45e0a57b0a1808ff33ca211dd6c1b555e
+base: main after v1.1.2 f8d254c5e0f9ab91eb325a2e7c28d2e5cb07c94d
+the kernel contract: on 3b41fd7c7e4a7dfe9a92b876c35f1a05a57a6e9c (commit 10); commit 11 changes no kernel
+the no-GPU CI and the mutations: on commit 11
+after it: cbe29802b0133aefb3dfe9f59671f5b450ff910a (commit 12) puts a comment on one line, and the receipt's commit adds this folder
+TP=3's ranks: abc83c3d2dacfb33ef8473ebec6f6c2c82c991d7, b7fecb3d with the two commits in tp3/ring.patch and commit 11's change
+
+2671de386d3d67788e92d7b851d98b81c9821631 kv pool: a family without snapshot slots keeps its whole prompt cache as copied rows
+2ee34d6bd559c3c53ba63a5f4cf15c861afcc56c glm cuda: the latent and pooled-key kernels take a stream's page table
+ff3078188342cb3bcc804b6821dcd8bae9a2d65d glm cuda: a sequence's latent rows and pooled keys can live on a pool's pages
+804c4da39a629901c8299463b6647559541f40ec glm cuda: streams past the engine's own take their KV pages from the core pool
+8e279c850e947217f903906cbd7e384067fb5630 glm cuda tests: a paged stream against its whole-window twin, byte for byte
+ae8a5a622dd1a8d61959c863fe2d74ce5f0fe5b3 glm cuda: a follower makes rank 0's pool through Pages.follow, under a host test
+b7fecb3dd726b0c22572b4e0f2b86ec8a499b5f0 glm cuda: on pages too the chunk kernels read keys in main's loop: a dense chunk's page once a block, a sparse key's row from the token list
+786fabe8950cf37bdb1416f303ecef8188feefb0 glm cuda tests: the page kernels under the kernel contract, on a page table out of order
+c38f6d0b1e9f3beb588763f9df5627d78c12362b glm cuda: gate 5's records for the six KV page launches, from nvcc 13.0 and 13.3 on every SM
+3b41fd7c7e4a7dfe9a92b876c35f1a05a57a6e9c glm cuda tests: a kept prefix's piece inside a page's span, and its size while a paged stream is current
+0b094b74546d6ca06f84a729ea8c9e7bfbdb80b9 glm cuda: a stream takes its pages before its sequence is bound, so a slot past the paged sequences waits
+cbe29802b0133aefb3dfe9f59671f5b450ff910a glm cuda: Lanes.seat's comment on one line, as the lean check asks

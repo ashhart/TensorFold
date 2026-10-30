@@ -1,0 +1,254 @@
+[
+ {
+  "label": "sp2-nv",
+  "prompt": "fibonacci-raw",
+  "temperature": 1.0,
+  "tokens": 256,
+  "decode_tps_median": 35.92904223989117,
+  "decode_tps_all": [
+   39.16,
+   29.81,
+   34.94,
+   41.56,
+   35.93
+  ],
+  "ttft_s_median": 0.14672690798761323,
+  "evidence": [
+   {
+    "prompt_tokens": 14,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "950590a0cb84",
+    "output_sha256": "c8b307fa0becb67c39cbc61f6f8b51c31e2b6443a00c7e9da3fffacb9eace78b"
+   },
+   {
+    "prompt_tokens": 14,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "b94a7bd1b3ff",
+    "output_sha256": "057a28544e2fc7a06bb968e33dbbc69ccdeb08c0aea2cfb7c5242bfc565741ff"
+   },
+   {
+    "prompt_tokens": 14,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "6642e40d33c3",
+    "output_sha256": "9d0023c5324bb8e6900942c44c0a37965e9fc2d645b9518524537872f67501d9"
+   },
+   {
+    "prompt_tokens": 14,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "6c97574b6d3c",
+    "output_sha256": "4ee8febba1190b3a6850eb3bf5cdbe758c8886ce7f0432c7ec212b409895d692"
+   },
+   {
+    "prompt_tokens": 14,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "41cceaa658ee",
+    "output_sha256": "5409991172e33f5ee4d2401c4e17ad48143504333c1b9bd5b686b85d05b92aaf"
+   }
+  ],
+  "sample": " Also, write a function that returns the first n Fibonacci numbers.\n\n```python\ndef fibonacci(n):\n    \"\"\"Compute the nth Fibonacci number.\n\n    The Fibonacci seq"
+ },
+ {
+  "label": "sp2-nv",
+  "prompt": "gpu-chat-no-think",
+  "temperature": 1.0,
+  "tokens": 256,
+  "decode_tps_median": 28.374353669963234,
+  "decode_tps_all": [
+   29.17,
+   28.37,
+   28.48,
+   26.5,
+   27.82
+  ],
+  "ttft_s_median": 0.21504078002180904,
+  "evidence": [
+   {
+    "prompt_tokens": 32,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "9842a795db37",
+    "output_sha256": "c011c3d752c75b46f47a102d07b0f71f7597c16a461092666c264bec03bb652b"
+   },
+   {
+    "prompt_tokens": 32,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "8f747a2ab066",
+    "output_sha256": "1764ae38fb3853bf0f0d7b3e45fd02c8ba77a94f745ef870544646bd00d8f7f2"
+   },
+   {
+    "prompt_tokens": 32,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "2b7ba7cd6cfa",
+    "output_sha256": "ebfeac9a42128c436ff3c32932ced9fc509581937b284e8fc7d528f3a5e35752"
+   },
+   {
+    "prompt_tokens": 32,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "2e4cb369c515",
+    "output_sha256": "72c8213eefa4e151211840ebce85e09f240020fed0baf5b966c29b3b64be1bf8"
+   },
+   {
+    "prompt_tokens": 32,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "f1f4a2917caa",
+    "output_sha256": "fcf43ac18f57b0f4536b3e70892848455858947bb58c1649d115f203f1a24edb"
+   }
+  ],
+  "sample": "Here's how a GPU handles matrix multiplication, starting with the big picture.\n\n## The Big Picture\n\nA GPU is like a stadium full of workers, while a CPU is like"
+ },
+ {
+  "label": "sp2-nv",
+  "prompt": "fibonacci-raw",
+  "temperature": 0.0,
+  "tokens": 256,
+  "decode_tps_median": 56.036526179581855,
+  "decode_tps_all": [
+   56.02,
+   56.06,
+   56.03,
+   56.04,
+   56.07
+  ],
+  "ttft_s_median": 0.1460020020022057,
+  "evidence": [
+   {
+    "prompt_tokens": 14,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "f1f736f680e3",
+    "output_sha256": "5bb6f2535458db4bcfe375c6786a1734ecf4505d923cfdbe2ddc3d93d4e29553"
+   },
+   {
+    "prompt_tokens": 14,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "f1f736f680e3",
+    "output_sha256": "5bb6f2535458db4bcfe375c6786a1734ecf4505d923cfdbe2ddc3d93d4e29553"
+   },
+   {
+    "prompt_tokens": 14,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "f1f736f680e3",
+    "output_sha256": "5bb6f2535458db4bcfe375c6786a1734ecf4505d923cfdbe2ddc3d93d4e29553"
+   },
+   {
+    "prompt_tokens": 14,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "f1f736f680e3",
+    "output_sha256": "5bb6f2535458db4bcfe375c6786a1734ecf4505d923cfdbe2ddc3d93d4e29553"
+   },
+   {
+    "prompt_tokens": 14,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "f1f736f680e3",
+    "output_sha256": "5bb6f2535458db4bcfe375c6786a1734ecf4505d923cfdbe2ddc3d93d4e29553"
+   }
+  ],
+  "sample": " Fibonacci sequence: 0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, ... Each number is the sum of the two preceding ones. The sequence starts with 0 and 1. The F"
+ },
+ {
+  "label": "sp2-nv",
+  "prompt": "gpu-chat-no-think",
+  "temperature": 0.0,
+  "tokens": 256,
+  "decode_tps_median": 30.592421200089316,
+  "decode_tps_all": [
+   30.59,
+   30.58,
+   30.67,
+   30.7,
+   30.58
+  ],
+  "ttft_s_median": 0.21447492897277698,
+  "evidence": [
+   {
+    "prompt_tokens": 32,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "0c5820aa8286",
+    "output_sha256": "88df3a840ebfd834afb178433102979253113dc3c306a55b5c490836521167f2"
+   },
+   {
+    "prompt_tokens": 32,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "0c5820aa8286",
+    "output_sha256": "88df3a840ebfd834afb178433102979253113dc3c306a55b5c490836521167f2"
+   },
+   {
+    "prompt_tokens": 32,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "0c5820aa8286",
+    "output_sha256": "88df3a840ebfd834afb178433102979253113dc3c306a55b5c490836521167f2"
+   },
+   {
+    "prompt_tokens": 32,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "0c5820aa8286",
+    "output_sha256": "88df3a840ebfd834afb178433102979253113dc3c306a55b5c490836521167f2"
+   },
+   {
+    "prompt_tokens": 32,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "0c5820aa8286",
+    "output_sha256": "88df3a840ebfd834afb178433102979253113dc3c306a55b5c490836521167f2"
+   }
+  ],
+  "sample": "# Matrix Multiplication on a GPU\n\n## The Plain English Explanation\n\nImagine you have a huge stack of homework to grade, where each problem is completely indepen"
+ }
+]

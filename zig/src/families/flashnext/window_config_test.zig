@@ -75,14 +75,13 @@ test "Flash Next context: shared metadata uses each live engine's capacity after
     try t.expectEqual(@as(usize, 2), (try meta.forBackend(&lb, &rows)).total);
 }
 
-test "Flash Next context: every changed rotary path has a pending resource record" {
+test "Flash Next context: every changed rotary path has a measured resource record" {
     const registry = @import("contract").registry;
     for ([_][]const u8{ "flashnext vision fn_attn_prep_mrope", "flashnext rotary target ", "flashnext rotary mtp ", "flashnext rotary pooled ", "flashnext rotary absolute " }) |prefix| {
         var found = false;
         for (registry.all_metal) |r| if (std.mem.startsWith(u8, r.name, prefix)) {
             found = true;
-            try t.expectEqual(@as(u32, 0), r.m1);
-            try t.expectEqual(@as(u32, 0), r.m2);
+            try t.expect(r.m1 > 0 and r.m2 > 0); // recorded in e08019c9a
         };
         try t.expect(found);
     }

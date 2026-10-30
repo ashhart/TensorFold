@@ -42,6 +42,19 @@ pub fn changed(ms: f64, reference: f64) bool {
     return @abs(ms - reference) > drift * reference;
 }
 
+/// A window table's entry from its timed runs: the fastest, so one slow run cannot set the table.
+pub fn keepFastest(runs: []const f64) f64 {
+    var best = std.math.inf(f64);
+    for (runs) |v| best = @min(best, v);
+    return best;
+}
+
+/// A kept table's spot check: one width's quick reading against the stored entry.
+pub fn entryHolds(stored: f64, probed: f64) bool {
+    if (!(stored > 0) or !std.math.isFinite(stored)) return false;
+    return !changed(probed, stored);
+}
+
 /// Whether entries `at` and the head (sampled as `measure` does) time within drift, a drifted reading timed twice.
 pub fn probeHolds(windows: anytype, heads: anytype, at: []const usize, reference: []const f64, head: ?f64) !bool {
     var best = std.math.inf(f64);

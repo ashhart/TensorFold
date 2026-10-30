@@ -123,8 +123,19 @@ const World = struct {
             seen[id] = true;
         }
         var zero: usize = 0;
-        for (refs[0..n]) |r| zero += @intFromBool(r == 0);
+        var kept: usize = 0;
+        var mapped: usize = 0;
+        var reclaimable: usize = 0;
+        for (refs[0..n], leased[0..n]) |r, l| {
+            zero += @intFromBool(r == 0);
+            kept += @intFromBool(r > l);
+            mapped += @intFromBool(l > 0);
+            reclaimable += @intFromBool(r == 1 and l == 0);
+        }
         try expectEqual(zero, w.pool.nfree);
+        try expectEqual(kv.Census{ .total = n, .free = zero, .promised = promised, .kept = kept, .leased = mapped }, w.pool.census());
+        try expectEqual(reclaimable, w.pool.reclaimable());
+        for (0..n + 1) |need| try expectEqual(zero - promised + reclaimable >= need, w.pool.fits(need));
     }
 
     fn held(node: *const radix.Node, refs: *[64]u32) void {
@@ -176,7 +187,7 @@ fn run(w: *World, seed: u64, pages: usize) !void {
     }
 }
 
-test "random admits, keeps, resumes, finishes, cancels and failures: every page free or the store's, then all free" {
+test "page accounting: random admits, keeps, resumes, finishes, cancels and failures agree with store ownership" {
     var refused: usize = 0;
     var failed: usize = 0;
     var adopted: usize = 0;

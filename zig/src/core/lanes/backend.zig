@@ -76,6 +76,8 @@ pub const Backend = struct {
     proposal_head: ?*const @import("proposal_head.zig").Service = null,
     round_observer: ?RoundObserver = null,
     first_before_draft: bool = false,
+    /// Every draw (first, queue and verify rows) takes `Stream.penalties` from the reply's tokens; wrappers copy it.
+    penalties: bool = false,
     ptr: *anyopaque,
     vtable: *const VTable,
 
@@ -86,6 +88,8 @@ pub const Backend = struct {
         prefill: *const fn (ptr: *anyopaque, s: *Stream) anyerror!void,
         /// One chunk of the prompt pass, false while chunks remain; null: the pass runs whole.
         prefill_step: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!bool = null,
+        /// Keep a cancelled partial prompt before release, between prefill_step calls; no prompt work may run.
+        cancel_prefill: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!void = null,
         /// Several prompts in one pass, each as after `prefill`; false or an error leaves none prefilled.
         prefill_many: ?*const fn (ptr: *anyopaque, ss: []const *Stream) anyerror!bool = null,
         /// Prompts of at most this many tokens prefill_many takes while prompts otherwise fill by chunks (0: none).
@@ -102,6 +106,7 @@ pub const Backend = struct {
         keep: *const fn (ptr: *anyopaque, windows: []const Window, paths: []const []const u32) anyerror!void,
         /// Absorb kept rows and hold drafts for the next round (one batch for a shared round).
         draft: *const fn (ptr: *anyopaque, requests: []const DraftRequest) anyerror!void,
+        draft_capacity: ?*const fn (*anyopaque, *Stream) u32 = null, // current per-stream proposal capacity
         proposal_draft: ?*const fn (*anyopaque, []const DraftRequest) anyerror!void = null,
         clear_proposals: ?*const fn (*anyopaque, *Stream) void = null,
         /// Undo an early speculation whose round was cut (the drafts come from a late request instead).
@@ -120,6 +125,8 @@ pub const Backend = struct {
         prefill_features: ?*const fn (ptr: *anyopaque, s: *Stream, taps: []const u32, sink: FeatureSink) anyerror!void = null,
         /// The first token's logprob row (the prompt's last row) for a stream with `logprobs`; null: not given.
         first_row: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!Row = null,
+        /// One logit per label at the row after `prompt` and, when `mass`, the vocabulary's logsumexp (decisions).
+        score: ?*const fn (ptr: *anyopaque, prompt: []const u32, labels: []const u32, logits: []f64, mass: bool) anyerror!f64 = null,
         /// `first` with the first token drawn among `mask`'s allowed tokens (structured output).
         first_masked: ?*const fn (ptr: *anyopaque, s: *Stream, position: u64, mask: []const u32) anyerror!u64 = null,
         /// The stream's held drafts as host tokens in window order, waiting for the draft (a grammar walks them).

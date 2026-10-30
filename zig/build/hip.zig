@@ -1,11 +1,38 @@
-//! HIP: mock-backed admission tests join `zig build test`; GPU builds and runs are opt-in steps (-Dhipcc, -Dhip-include, -Dhip-arch).
+//! HIP, built only with -Dhip=true: admission tests in `test`, GPU steps; options on every target (#1165).
 
 const std = @import("std");
 const caps = @import("../src/hip/caps.zig");
 const exlr8_build = @import("exlr8.zig");
+const LazyPath = std.Build.LazyPath;
+
+/// HIP's options as given, declared whether or not -Dhip=true builds anything with them.
+pub const Options = struct { hipcc: ?[]const u8, hip_include: ?[]const u8, hip_arch: ?[]const u8, device_lib: ?[]const u8, relax_branches: bool };
+
+pub fn options(b: *std.Build) Options {
+    return .{
+        .hipcc = b.option([]const u8, "hipcc", "HIP compiler for model-free tests"),
+        .hip_include = b.option([]const u8, "hip-include", "HIP header directory"),
+        .hip_arch = b.option([]const u8, "hip-arch", "Exact GPU architecture for the probe code object"),
+        .device_lib = b.option([]const u8, "hip-device-lib", "ROCm device bitcode directory (default <rocm>/lib/llvm/amdgcn/bitcode; Arch: <rocm>/amdgcn/bitcode)"),
+        .relax_branches = b.option(bool, "hip-relax-branches", "Relax gfx1100 branches earlier (-amdgpu-s-branch-bits=15), for clang 21 (#1521)") orelse false,
+    };
+}
+
+/// The Qwen3.5 / 3.6 checkpoint loader tests: part of `test` on every build, HIP or not.
+pub fn loaderTests(b: *std.Build, test_step: *std.Build.Step) void {
+    const loader = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/families/qwen3_5/loader.zig"),
+        .target = b.graph.host,
+        .link_libc = true,
+        .imports = &.{.{ .name = "core", .module = coreModule(b, b.graph.host) }},
+    }) }));
+    loader.has_side_effects = true; // TF_QWEN_DIR is not a cached input
+    test_step.dependOn(&loader.step);
+    b.step("test-qwen35", "Qwen3.5 / 3.6 checkpoint loader tests; TF_QWEN_DIR indexes a real checkpoint").dependOn(&loader.step);
+}
 
 /// hip-host-test (part of `test`), hip-gpu-build and hip-gpu-test, hip-affine-build and hip-affine-test.
-pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, build_options: *std.Build.Step.Options, test_step: *std.Build.Step) void {
+pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, build_options: *std.Build.Step.Options, test_step: *std.Build.Step, o: Options) void {
     const hip_fixtures = b.addOptions();
     for ([_][]const u8{ "success", "failed", "missing" }) |kind| {
         const fixture_module = b.createModule(.{ .target = b.graph.host, .link_libc = true });
@@ -28,20 +55,11 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const run_hip_tests = b.addRunArtifact(hip_tests);
     test_step.dependOn(&run_hip_tests.step);
     b.step("hip-host-test", "HIP admission tests without GPU work").dependOn(&run_hip_tests.step);
-    const loader = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("zig/src/families/qwen3_5/loader.zig"),
-        .target = b.graph.host,
-        .link_libc = true,
-        .imports = &.{.{ .name = "core", .module = coreModule(b, b.graph.host) }},
-    }) }));
-    loader.has_side_effects = true; // TF_QWEN_DIR is not a cached input
-    test_step.dependOn(&loader.step);
-    b.step("test-qwen35", "Qwen3.5 / 3.6 checkpoint loader tests; TF_QWEN_DIR indexes a real checkpoint").dependOn(&loader.step);
-    const hipcc = b.option([]const u8, "hipcc", "HIP compiler for model-free tests") orelse "hipcc";
+    const hipcc = o.hipcc orelse "hipcc";
     const hipcc_resolved = b.findProgram(.{ .names = &.{hipcc} }) orelse hipcc;
-    const hip_include = b.option([]const u8, "hip-include", "HIP header directory") orelse
+    const hip_include = o.hip_include orelse
         b.pathResolve(&.{ std.fs.path.dirname(hipcc_resolved) orelse "/opt/rocm/bin", "..", "include" });
-    const hip_arch = b.option([]const u8, "hip-arch", "Exact GPU architecture for the probe code object") orelse "gfx1151";
+    const hip_arch = o.hip_arch orelse "gfx1151";
     if (caps.Caps.of(hip_arch) == null or std.mem.indexOfScalar(u8, hip_arch, ':') != null)
         std.debug.panic("-Dhip-arch {s} is not an exact name in the caps table (zig/src/hip/caps.zig)", .{hip_arch});
     const hip_compile = b.addSystemCommand(&.{ hipcc, "--genco", b.fmt("--offload-arch={s}", .{hip_arch}), "-O2", "-ffp-contract=off" });
@@ -75,8 +93,8 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const affine_test = b.addTest(.{ .root_module = affine_module });
     b.step("hip-affine-build", "Compile affine golden GPU test without executing").dependOn(&affine_test.step);
     b.step("hip-affine-test", "Run exact affine golden GPU regression").dependOn(&b.addRunArtifact(affine_test).step);
-    const device_lib = b.option([]const u8, "hip-device-lib", "ROCm device bitcode directory (default <rocm>/lib/llvm/amdgcn/bitcode; Arch: <rocm>/amdgcn/bitcode)");
-    const objects = kernelObjects(b, hipcc, hipcc_resolved, device_lib, hip_arch);
+    const device_lib = o.device_lib;
+    const objects = kernelObjects(b, hipcc, hipcc_resolved, device_lib, o.relax_branches, hip_arch);
     const kernel_module = b.createModule(.{ .root_source_file = b.path("zig/src/hip/kernel_tests.zig"), .target = target, .link_libc = true });
     kernel_module.addIncludePath(.{ .cwd_relative = hip_include });
     kernel_module.addCSourceFile(.{ .file = b.path("zig/src/hip/device_arch.c"), .flags = &.{"-D__HIP_PLATFORM_AMD__"} });
@@ -85,14 +103,26 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const kernel_test = b.addTest(.{ .root_module = kernel_module });
     b.step("hip-kernel-build", "Compile the model-free kernels and their GPU tests without running them").dependOn(&kernel_test.step);
     b.step("hip-kernel-test", "Every model-free kernel against its host reference on the GPU").dependOn(&b.addRunArtifact(kernel_test).step);
+    const tune_module = b.createModule(.{ .root_source_file = b.path("zig/src/hip/affine_tune.zig"), .target = target, .link_libc = true });
+    tune_module.addIncludePath(.{ .cwd_relative = hip_include });
+    tune_module.addCSourceFile(.{ .file = b.path("zig/src/hip/device_arch.c"), .flags = &.{"-D__HIP_PLATFORM_AMD__"} });
+    tune_module.addImport("hip_kernels", objects);
+    tune_module.addImport("core", coreModule(b, target));
+    const tune_test = b.addTest(.{ .root_module = tune_module });
+    b.step("hip-affine-tune-build", "Compile the MLX affine prompt-tile timing step without running it").dependOn(&tune_test.step);
+    const tune_run = b.addRunArtifact(tune_test);
+    tune_run.has_side_effects = true; // timings: run every time, never from the cache
+    b.step("hip-affine-tune", "Time every MLX affine prompt tile the GPU has and propose table rows (-Dhip-arch)").dependOn(&tune_run.step);
     const stub_kernels = b.createModule(.{ .root_source_file = b.addWriteFiles().add("kernels.zig", stub) });
     const host = engineModules(b, b.graph.host, .Debug, stub_kernels, null);
+    b.step("test-draft-hip-host", "HIP draft source metadata without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native, .filters = &.{"draft sources:"} })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.hip })).step);
     const family_host = b.addRunArtifact(b.addTest(.{ .root_module = host.family }));
     test_step.dependOn(&family_host.step);
     b.step("test-qwen35-hip-host", "Qwen HIP family CPU tests with inert kernels").dependOn(&family_host.step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.flashnext })).step);
     b.step("test-flashnext-proposal-hip-host", "Original Flash Next HIP IDs and head-row spans without device runtime").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.flashnext, .filters = &.{"Flash Next proposal:"} })).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.nemotron })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.serve })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native })).step);
     // the GPU programs compile on any host against stub kernels, so `test` catches what only they reach
@@ -118,8 +148,31 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         "tf-flashnext-hip-test",
         "Flash Next model checks on the GPU (-Dhip-arch)",
     ).dependOn(&b.addInstallArtifact(fx_test, .{}).step);
+    const nem_test = b.addExecutable(.{ .name = "tf-nemotron-hip-test", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/nemotron_hip/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "hip", .module = gpu.hip },
+            .{ .name = "nemotron", .module = gpu.nemotron },
+        },
+    }) });
+    b.step(
+        "tf-nemotron-hip-test",
+        "Nemotron-H load and skeleton checks on the GPU (-Dhip-arch)",
+    ).dependOn(&b.addInstallArtifact(nem_test, .{}).step);
     const native = server(b, target, gpu, build_options);
     b.step("native-hip", "tensorfold-native with the HIP engines into zig-out/native-hip/bin (-Dhip-arch)").dependOn(&b.addInstallArtifact(native, .{ .dest_dir = .{ .override = .{ .custom = "native-hip/bin" } } }).step);
+    @import("hip_contract.zig").steps(b, .{
+        .target = target,
+        .optimize = optimize,
+        .hipcc = .{ .name = hipcc, .resolved = hipcc_resolved, .device_lib = device_lib, .relax_branches = o.relax_branches },
+        .arch = hip_arch,
+        .gpu = gpu.hip,
+        .host = host.hip,
+        .test_step = test_step,
+    });
 }
 
 /// `tf-qwen35-test`: the model checks on a real checkpoint and GPU.
@@ -133,7 +186,16 @@ fn checksExe(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     }) });
 }
 
-const Engine = struct { hip: *std.Build.Module, lanes: *std.Build.Module, api: *std.Build.Module, serve: *std.Build.Module, family: *std.Build.Module, flashnext: *std.Build.Module, native: *std.Build.Module };
+const Engine = struct {
+    hip: *std.Build.Module,
+    lanes: *std.Build.Module,
+    api: *std.Build.Module,
+    serve: *std.Build.Module,
+    family: *std.Build.Module,
+    flashnext: *std.Build.Module,
+    nemotron: *std.Build.Module,
+    native: *std.Build.Module,
+};
 
 /// The HIP backend, the Qwen3.5 family over it and the native engines, on `kernels` (a stub on the host).
 fn engineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, kernels: *std.Build.Module, hip_include: ?[]const u8) Engine {
@@ -153,7 +215,11 @@ fn engineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{ .{ .name = "hip", .module = hip }, .{ .name = "lanes", .module = lanes } },
+        .imports = &.{
+            .{ .name = "hip", .module = hip },
+            .{ .name = "lanes", .module = lanes },
+            .{ .name = "engine_api", .module = api },
+        },
     });
     const family = b.createModule(.{
         .root_source_file = b.path("zig/src/families/qwen3_5/hip.zig"),
@@ -181,14 +247,43 @@ fn engineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
             .{ .name = "hip_serve", .module = serve },
         },
     });
+    const nemotron = b.createModule(.{
+        .root_source_file = b.path("zig/src/families/nemotron/hip.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "hip", .module = hip },
+            .{ .name = "lanes", .module = lanes },
+            .{ .name = "core", .module = core },
+            .{ .name = "engine_api", .module = api },
+            .{ .name = "hip_serve", .module = serve },
+        },
+    });
     const native = b.createModule(.{
         .root_source_file = b.path("zig/src/native/hip.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{ .{ .name = "hip", .module = hip }, .{ .name = "engine_api", .module = api }, .{ .name = "lanes", .module = lanes }, .{ .name = "qwen3_5", .module = family }, .{ .name = "flashnext", .module = flashnext } },
+        .imports = &.{
+            .{ .name = "hip", .module = hip },
+            .{ .name = "engine_api", .module = api },
+            .{ .name = "lanes", .module = lanes },
+            .{ .name = "qwen3_5", .module = family },
+            .{ .name = "flashnext", .module = flashnext },
+            .{ .name = "nemotron", .module = nemotron },
+        },
     });
-    return .{ .hip = hip, .lanes = lanes, .api = api, .serve = serve, .family = family, .flashnext = flashnext, .native = native };
+    return .{
+        .hip = hip,
+        .lanes = lanes,
+        .api = api,
+        .serve = serve,
+        .family = family,
+        .flashnext = flashnext,
+        .nemotron = nemotron,
+        .native = native,
+    };
 }
 
 /// The server over the HIP engines, as the CUDA build makes it: the HTTP side keeps its safety checks.
@@ -213,7 +308,7 @@ fn server(b: *std.Build, target: std.Build.ResolvedTarget, e: Engine, build_opti
 const groups = [_][]const u8{
     "ops/ops.hip",           "ops/act.hip",             "attention/attention.hip", "recurrence/gated_delta.hip",
     "attention/prefill.hip", "decode/decode.hip",       "decode/plan.hip",         "tiles/dot2_tiles.hip",
-    "tiles/dot2.hip",        "flashnext/flashnext.hip",
+    "tiles/dot2.hip",        "flashnext/flashnext.hip", "recurrence/mamba.hip",
 };
 
 /// What the group sources include, so an edit to one rebuilds them.
@@ -226,42 +321,63 @@ const headers = [_][]const u8{
     "quant/mlx_tiles.hpp",        "tiles/dot2.hpp",        "tiles/epilogue.hpp",    "tiles/gemm.hpp",
     "tiles/gemm_kp.hpp",          "tiles/matrix_gemm.hpp", "tiles/plan.hpp",        "tiles/stream.hpp",
     "flashnext/streams.hpp",      "flashnext/ngram.hpp",   "flashnext/indexer.hpp", "flashnext/sparse.hpp",
+    "ops/nemotron_moe.hpp",
 };
 
 /// The flags of the kernels' first build: no contraction, wave32 on RDNA, C++20.
 const flags = [_][]const u8{ "-D__HIP_PLATFORM_AMD__=1", "-DUSE_ROCM=1", "-DHIPBLAS_V2", "-fPIC", "-DCUDA_HAS_FP16=1", "-DHIP_ENABLE_WARP_SYNC_BUILTINS=1", "-std=c++20", "-fno-gpu-rdc", "-mno-wavefrontsize64", "-ffp-contract=off" };
 
-const stub = "pub const arch = \"\";\npub const images: [10][]align(8) const u8 = @splat(&.{});\n";
+const stub = "pub const arch = \"\";\npub const images: [11][]align(8) const u8 = @splat(&.{});\n";
 
 /// One code object a group for `arch`, built with the caps table's instruction switches, as the `hip_kernels` module.
-fn kernelObjects(b: *std.Build, hipcc: []const u8, hipcc_resolved: []const u8, device_lib: ?[]const u8, arch: []const u8) *std.Build.Module {
-    const c = caps.Caps.of(arch).?;
-    const root = std.fs.path.dirname(std.fs.path.dirname(hipcc_resolved) orelse ".") orelse ".";
-    const files = b.addWriteFiles();
+fn kernelObjects(b: *std.Build, hipcc: []const u8, hipcc_resolved: []const u8, device_lib: ?[]const u8, relax_branches: bool, arch: []const u8) *std.Build.Module {
+    const files = objectFiles(b, .{ .name = hipcc, .resolved = hipcc_resolved, .device_lib = device_lib, .relax_branches = relax_branches }, arch);
     var decls: []const u8 = "";
     var refs: []const u8 = "";
-    for (groups, 0..) |source, i| {
-        const run = b.addSystemCommand(&.{ hipcc, "--genco" });
-        run.addArgs(&flags);
-        run.addArg(b.fmt("-DTF_WAVE={d}", .{c.wave}));
-        run.addArg(b.fmt("-DTF_DOT2_F16={d}", .{@intFromBool(c.dot2_f16)}));
-        run.addArg(b.fmt("-DTF_DOT2_BF16={d}", .{@intFromBool(c.dot2_bf16)}));
-        run.addArg(b.fmt("-DTF_SDOT4={d}", .{@intFromBool(c.sdot4)}));
-        run.addArg(b.fmt("-DTF_SDOT8={d}", .{@intFromBool(c.sdot8)}));
-        run.addArg(b.fmt("-DTF_MATRIX={d}", .{@intFromBool(c.matrix != .none)}));
-        run.addArg(b.fmt("--rocm-path={s}", .{root}));
-        run.addArg(b.fmt("--rocm-device-lib-path={s}", .{device_lib orelse b.fmt("{s}/lib/llvm/amdgcn/bitcode", .{root})}));
-        run.addArg(b.fmt("--offload-arch={s}", .{arch}));
-        run.addPrefixedDirectoryArg("-I", b.path("zig/kernels/hip"));
-        for (headers) |h| run.addFileInput(b.path(b.fmt("zig/kernels/hip/{s}", .{h})));
-        run.addArg("-o");
-        const object = run.addOutputFileArg(b.fmt("group{d}.hsaco", .{i}));
-        run.addFileArg(b.path(b.fmt("zig/kernels/hip/{s}", .{source})));
-        _ = files.addCopyFile(object, b.fmt("group{d}.hsaco", .{i}));
+    for (0..groups.len) |i| {
         decls = b.fmt("{s}const g{d} align(8) = @embedFile(\"group{d}.hsaco\").*;\n", .{ decls, i, i });
         refs = b.fmt("{s}&g{d}, ", .{ refs, i });
     }
     return b.createModule(.{ .root_source_file = files.add("kernels.zig", b.fmt("pub const arch = \"{s}\";\n{s}pub const images = [_][]align(8) const u8{{ {s}}};\n", .{ arch, decls, refs })) });
+}
+
+/// The HIP compiler as the build found it, the device bitcode it links, and whether gfx1100 relaxes branches earlier.
+pub const Hipcc = struct { name: []const u8, resolved: []const u8, device_lib: ?[]const u8, relax_branches: bool = false };
+
+/// The groups' code objects for `arch` in one directory, group0.hsaco onward.
+pub fn objectFiles(b: *std.Build, cc: Hipcc, arch: []const u8) *std.Build.Step.WriteFile {
+    const files = b.addWriteFiles();
+    for (groups, 0..) |source, i| {
+        const name = b.fmt("group{d}.hsaco", .{i});
+        _ = files.addCopyFile(compile(b, cc, arch, b.path(b.fmt("zig/kernels/hip/{s}", .{source})), name), name);
+    }
+    return files;
+}
+
+/// One source's code object for `arch`, with the kernels' flags and the caps table's instruction switches.
+pub fn compile(b: *std.Build, cc: Hipcc, arch: []const u8, source: std.Build.LazyPath, out: []const u8) LazyPath {
+    const c = caps.Caps.of(arch).?;
+    const root = std.fs.path.dirname(std.fs.path.dirname(cc.resolved) orelse ".") orelse ".";
+    const run = b.addSystemCommand(&.{ cc.name, "--genco" });
+    run.addArgs(&flags);
+    run.addArg(b.fmt("-DTF_WAVE={d}", .{c.wave}));
+    run.addArg(b.fmt("-DTF_DOT2_F16={d}", .{@intFromBool(c.dot2_f16)}));
+    run.addArg(b.fmt("-DTF_DOT2_BF16={d}", .{@intFromBool(c.dot2_bf16)}));
+    run.addArg(b.fmt("-DTF_SDOT4={d}", .{@intFromBool(c.sdot4)}));
+    run.addArg(b.fmt("-DTF_SDOT8={d}", .{@intFromBool(c.sdot8)}));
+    run.addArg(b.fmt("-DTF_MATRIX={d}", .{@intFromBool(c.matrix != .none)}));
+    run.addArg(b.fmt("--rocm-path={s}", .{root}));
+    const lib = cc.device_lib orelse b.fmt("{s}/lib/llvm/amdgcn/bitcode", .{root});
+    run.addArg(b.fmt("--rocm-device-lib-path={s}", .{lib}));
+    run.addArg(b.fmt("--offload-arch={s}", .{arch}));
+    // clang 21 leaves a branch of affine_dot2_stream_relu2_pair<Dot, 6, 1, 8> past simm16 on gfx1100 (#1521)
+    if (cc.relax_branches and std.mem.eql(u8, arch, "gfx1100")) run.addArgs(&.{ "-mllvm", "-amdgpu-s-branch-bits=15" });
+    run.addPrefixedDirectoryArg("-I", b.path("zig/kernels/hip"));
+    for (headers) |h| run.addFileInput(b.path(b.fmt("zig/kernels/hip/{s}", .{h})));
+    run.addArg("-o");
+    const object = run.addOutputFileArg(out);
+    run.addFileArg(source);
+    return object;
 }
 
 /// The backend-neutral core (checkpoint formats, the kernel registry), as the other backends import it.

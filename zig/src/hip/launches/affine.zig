@@ -88,11 +88,11 @@ const piece_counts = [_]u8{ 1, 2, 4 };
 pub const lane_rows = 8; // kLaneRows
 pub const lane_group_max = 128;
 const fast_n = 256;
-const stream_cbs = [_]c_int{ 2, 4, 8 }; // columns a lane carries in the stream tile
-const stream_rows = [_]u8{ 1, 2, 4 }; // its row counts: columns * rows <= 16
-const stream_waves = 4; // kStreamWaves
-const streams_wanted = 3000; // kStreamWavesWanted
-const stream_code_words = 32; // kStreamCodeWords
+pub const stream_cbs = [_]c_int{ 2, 4, 8 }; // columns a lane carries in the stream tile
+pub const stream_rows = [_]u8{ 1, 2, 4 }; // its row counts: columns * rows <= 16
+pub const stream_waves = 4; // kStreamWaves
+pub const streams_wanted = 3000; // kStreamWavesWanted
+pub const stream_code_words = 32; // kStreamCodeWords
 
 /// The K-parallel tiles of a short prompt: cb columns a lane set, r rows a pass over up to rb row blocks.
 pub const KpTile = struct { cb: c_int, r: c_int, waves: c_int, rb: c_int, loop: bool = true };
@@ -129,6 +129,9 @@ pub const Kernels = struct {
     stream: [bit_widths.len][stream_rows.len][stream_cbs.len]?Function,
     /// The same tile with the (gate | up) activation as its epilogue.
     pairs: [bit_widths.len][stream_rows.len][stream_cbs.len]?Function,
+    /// The same tile with Nemotron's relu^2 as its epilogue, and with two such products in one launch.
+    relu2: [bit_widths.len][stream_rows.len][stream_cbs.len]?Function,
+    relu2_pair: [bit_widths.len][stream_rows.len][stream_cbs.len]?Function,
     /// Off keeps the decode tiles before the stream tile (the policy's reference switch).
     stream_on: bool,
     block: [bit_widths.len]Function,
@@ -168,7 +171,7 @@ pub const Kernels = struct {
     }
 
     fn resolve(k: *Kernels, comptime dot: []const u8, comptime shape: []const u8, m: Module) Error!void {
-        @setEvalBranchQuota(200_000);
+        @setEvalBranchQuota(300_000);
         inline for (bit_widths, 0..) |bits, b| {
             k.block[b] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm17affine_dot2_blockINS0_{s}ELi{d}EEEvNS0_6AffineE", .{ dot, bits }));
             if (k.matrix) k.wmma_gemm[b] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm16affine_wmma_gemmILi{d}EEEvNS0_6AffineE", .{bits}));
@@ -190,6 +193,20 @@ pub const Kernels = struct {
                         null;
                     k.pairs[b][r][c] = if (cb * rows <= 16)
                         try m.function(std.fmt.comptimePrint("_ZN2tf4rocm18affine_dot2_streamINS0_{s}ELi{d}ELi{d}ELi{d}ELb1EEEvNS0_6AffineENS0_11StreamSidesEii", .{ dot, bits, rows, cb }))
+                    else
+                        null;
+                    k.relu2[b][r][c] = if (cb * rows <= 16)
+                        try m.function(
+                            std.fmt.comptimePrint("_ZN2tf4rocm24affine_dot2_stream_relu2INS0_{s}" ++
+                                "ELi{d}ELi{d}ELi{d}EEEvNS0_6AffineENS0_11StreamSidesEii", .{ dot, bits, rows, cb }),
+                        )
+                    else
+                        null;
+                    k.relu2_pair[b][r][c] = if (cb * rows <= 16)
+                        try m.function(
+                            std.fmt.comptimePrint("_ZN2tf4rocm29affine_dot2_stream_relu2_pairINS0_{s}" ++
+                                "ELi{d}ELi{d}ELi{d}EEEvNS0_6AffineES3_iii", .{ dot, bits, rows, cb }),
+                        )
                     else
                         null;
                 }
@@ -268,11 +285,12 @@ pub const Kernels = struct {
         return k.reg.select(k.env(), .mlx, op, path, shape);
     }
 
-    /// The costs of the GPU's generation: RDNA2's, or the gfx11 ones (RDNA4 takes them for its dot2 tiles).
-    fn tableFor(caps: Caps) *const tuning.Table {
+    /// The costs of the GPU's generation: RDNA2's, the gfx11 ones for RDNA3 and RDNA3.5, RDNA4's own.
+    pub fn tableFor(caps: Caps) *const tuning.Table {
         return switch (caps.generation) {
             .rdna2 => &tuning.gfx1030,
-            .rdna3, .rdna3_5, .rdna4 => &tuning.gfx1100,
+            .rdna3, .rdna3_5 => &tuning.gfx1100,
+            .rdna4 => &tuning.gfx1201,
         };
     }
 
@@ -302,6 +320,25 @@ pub const Kernels = struct {
 
     /// The stream tile on `total_n` columns (a group's sum); `sides` counts them off block by block when it has any.
     pub fn streamGo(k: *const Kernels, r: *const runtime.Runtime, a: Arg, sides_in: StreamSides, total_n: c_int, items: c_int, s: abi.Stream) Error!void {
+        return k.streamWith(r, a, sides_in, total_n, items, s, false);
+    }
+
+    /// `streamGo` with Nemotron's relu^2 as the epilogue: `a.out16` takes relu(round(sum))^2 in the activation type.
+    pub fn relu2Go(k: *const Kernels, r: *const runtime.Runtime, a: Arg, items: c_int, s: abi.Stream) Error!void {
+        if (a.out16 == 0 or a.out != 0) return refuse("relu2 output");
+        return k.streamWith(r, a, .{}, a.n, items, s, true);
+    }
+
+    fn streamWith(
+        k: *const Kernels,
+        r: *const runtime.Runtime,
+        a: Arg,
+        sides_in: StreamSides,
+        total_n: c_int,
+        items: c_int,
+        s: abi.Stream,
+        relu2: bool,
+    ) Error!void {
         const b = bitIndex(a.bits).?;
         var sides = sides_in;
         // a pair's lane carries half as many output columns: a gate column and its up column make one
@@ -338,7 +375,8 @@ pub const Kernels = struct {
             64 => 1,
             else => 2,
         }));
-        const f = (if (sides.pair_cols > 0) k.pairs[b][ri][pick] else k.stream[b][ri][pick]).?;
+        const table = if (sides.pair_cols > 0) &k.pairs else if (relu2) &k.relu2 else &k.stream;
+        const f = table[b][ri][pick].?;
         try go(r, f, .{ .x = blocks, .y = cdiv(a.m, stream_rows[ri]), .z = @intCast(items) }, .{ .x = 32 * stream_waves }, s, &args);
     }
 
@@ -427,9 +465,11 @@ pub const Kernels = struct {
     // ---- the entry points ----
 
     /// Prefill's tile, same bits however a prompt is cut: matrix on gfx11 unless off, else dot2 GEMM; few rows K-split.
-    pub fn prefillLaunch(k: *const Kernels, r: *const runtime.Runtime, a: Arg, s: abi.Stream, items: c_int) Error!void {
+    pub fn prefillLaunch(k: *const Kernels, r: *const runtime.Runtime, a: Arg, s: abi.Stream, items: c_int, pairs: c_int) Error!void {
         const op: registry.Op = if (a.route.items != 0) .routed else .project;
-        const e = k.choose(op, .prefill, shapeOf(a, items)) orelse return refuse("prefill shape");
+        var shape = shapeOf(a, items);
+        shape.plan_pairs = @intCast(@max(pairs, 0));
+        const e = k.choose(op, .prefill, shape) orelse return refuse("prefill shape");
         try e.launch(k, .{ .r = r, .s = s, .arg = a, .items = items });
     }
 
@@ -466,6 +506,18 @@ pub const Kernels = struct {
         environment.gemm_on = tile == .gemm;
         const e = k.reg.select(environment, .mlx, .routed, .decode, shapeOf(arg, items)) orelse return refuse("no tile takes this plan");
         try e.launch(k, .{ .r = r, .s = s, .arg = arg, .items = items });
+    }
+
+    /// `routed` with relu(round(y))^2 into `arg.out16` as the stream tile's epilogue; false where another tile runs.
+    pub fn routedRelu2(k: *const Kernels, r: *const runtime.Runtime, arg: Arg, items: c_int, s: abi.Stream) Error!bool {
+        if ((arg.fp16 != 0) == k.wmma or items < 1) return false;
+        if (arg.route.items == 0 or arg.route.members == 0 or arg.route.x_div < 1) return false;
+        var plain = arg;
+        plain.out16 = 0;
+        const e = k.reg.select(k.env(), .mlx, .routed, .decode, shapeOf(plain, items)) orelse return false;
+        if (e.family != .stream) return false;
+        try k.relu2Go(r, arg, items, s);
+        return true;
     }
 
     /// The stacked (gate | up) product as silu(gate) * up into `out16`, clamped by `limit` above 0; false if not taken.

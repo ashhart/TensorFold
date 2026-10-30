@@ -17,12 +17,11 @@ pub const Shard = struct {
     pub fn open(gpa: std.mem.Allocator, io: Io, path: []const u8) !Shard {
         var file = try Io.Dir.cwd().openFile(io, path, .{});
         errdefer file.close(io);
-        const len: usize = @intCast(try file.length(io));
+        const len = std.math.cast(usize, try file.length(io)) orelse return error.BadSafetensors;
         if (len < 8) return error.BadSafetensors;
         var map = try Io.File.MemoryMap.create(io, file, .{ .len = len, .protection = .{ .read = true, .write = false }, .populate = false });
         errdefer map.destroy(io);
-        const header_len: usize = @intCast(std.mem.readInt(u64, map.memory[0..8], .little));
-        if (header_len > len - 8) return error.BadSafetensors;
+        const header_len = try st.headerSize(std.mem.readInt(u64, map.memory[0..8], .little), len);
         var arena: std.heap.ArenaAllocator = .init(gpa);
         errdefer arena.deinit();
         const names = try parse(arena.allocator(), map.memory[8..][0..header_len], len - 8 - header_len);
@@ -38,7 +37,8 @@ pub const Shard = struct {
 
     /// Drops data bytes [begin, end) (their whole pages) from this mapping; the page cache keeps them, a read refaults.
     pub fn release(s: *const Shard, begin: usize, end: usize) void {
-        if (builtin.os.tag != .linux or end <= begin) return;
+        // a map that fell back to a heap copy (no mmap) holds the only bytes: DONTNEED would zero them
+        if (builtin.os.tag != .linux or s.map.section == null or end <= begin) return;
         const page = std.heap.pageSize();
         const lo = std.mem.alignBackward(usize, s.data + begin, page);
         const hi = @min(std.mem.alignForward(usize, s.data + end, page), s.map.memory.len);
@@ -52,30 +52,13 @@ pub const Shard = struct {
     }
 };
 
-/// core's `parseHeader` without its refusals of rank and dtype; sizes and ranges are still checked.
+/// core's header checks, with an unnamed dtype or a rank past core's maximum left out of the index instead of refused.
 fn parse(arena: std.mem.Allocator, json: []const u8, data_len: usize) !st.Header {
-    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena, json, .{});
-    var out: st.Header = .empty;
-    var it = parsed.object.iterator();
-    while (it.next()) |kv| {
-        if (std.mem.eql(u8, kv.key_ptr.*, "__metadata__")) continue;
-        const o = kv.value_ptr.object;
-        const dtype = st.DType.parse(o.get("dtype").?.string) orelse continue;
-        const shape = o.get("shape").?.array.items;
-        if (shape.len > st.max_rank) continue;
-        var e: st.Entry = .{ .dtype = dtype, .rank = @intCast(shape.len), .shape = @splat(1), .begin = 0, .end = 0 };
-        var n: usize = dtype.size();
-        for (shape, 0..) |d, i| {
-            e.shape[i] = @intCast(d.integer);
-            n *= e.shape[i];
-        }
-        const offs = o.get("data_offsets").?.array.items;
-        e.begin = @intCast(offs[0].integer);
-        e.end = @intCast(offs[1].integer);
-        if (e.end < e.begin or e.end - e.begin != n or e.end > data_len) return error.BadSafetensors;
-        try out.put(arena, kv.key_ptr.*, e);
-    }
-    return out;
+    return st.parseHeaderOptions(arena, json, data_len, .{ .unsupported = .omit });
+}
+
+test {
+    _ = @import("shard_integrity_test.zig");
 }
 
 test "a tensor above the max rank and an unknown dtype are left out" {

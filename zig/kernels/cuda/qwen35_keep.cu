@@ -44,14 +44,13 @@ extern "C" __global__ void tf_q35k_conv(Geo geo, Seg sg, int last) {
 extern "C" __global__ void __launch_bounds__(256) tf_q35k_compact(Geo geo, Seg sg, Path path) {
     const int KVH = geo.kvh;
     const int layer = blockIdx.x, h = blockIdx.y;
-    __nv_bfloat16* keys = reinterpret_cast<__nv_bfloat16*>(sg.kv) + ((size_t)layer * 2 * KVH + h) * sg.cap * HD;
-    __nv_bfloat16* values = keys + (size_t)KVH * sg.cap * HD;
+    __nv_bfloat16* kv = reinterpret_cast<__nv_bfloat16*>(sg.kv);
     const int d = threadIdx.x;
     for (int j = 0; j < path.n; j++) {
         const int from = sg.len + path.rows[j], to = sg.len + j;
         if (from != to) {
-            keys[(size_t)to * HD + d] = keys[(size_t)from * HD + d];
-            values[(size_t)to * HD + d] = values[(size_t)from * HD + d];
+            kv[kv_row(sg, KVH, layer, 0, h, to) + d] = kv[kv_row(sg, KVH, layer, 0, h, from) + d];
+            kv[kv_row(sg, KVH, layer, 1, h, to) + d] = kv[kv_row(sg, KVH, layer, 1, h, from) + d];
         }
         __syncthreads();
     }

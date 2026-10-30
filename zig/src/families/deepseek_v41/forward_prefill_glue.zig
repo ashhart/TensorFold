@@ -174,6 +174,7 @@ pub fn glueFn(ctx: *anyopaque, r: *run.Runner, c: *const calls.Call) anyerror!vo
 }
 
 pub fn glueOne(ctx: *anyopaque, r: *run.Runner, c: *const calls.Call) anyerror!void {
+    if (try @import("prefill_heads.zig").glue(r, c)) return;
     const f: *Forward = @ptrCast(@alignCast(ctx));
     const st = pf.state(f);
     const step = c.name["glue.".len..];

@@ -12,6 +12,7 @@ const pieceAt = prefill.Seg.pieceAt;
 const selection = prefill.Seg.selection;
 const rowsOf = prefill.Seg.rowsOf;
 const stashArgs = prefill.stashArgs;
+const pf_heads = @import("prefill_heads.zig");
 
 // -- attention -----------------------------------------------------------------------------------------------
 
@@ -218,16 +219,17 @@ pub fn attention(s: *Seg, L: u32) !void {
     }
     // the CSA2 steps a segment at a time, into the group-major core output
     const groups: i64 = e.cfg.o_groups / e.o.world;
-    if (@mod(H, bmq) != 0 or @mod(H, groups) != 0) return error.Unsupported;
+    if ((H != 16 and @mod(H, bmq) != 0) or @mod(H, groups) != 0) return error.Unsupported;
+    const core_q = if (H == 16) try pf_heads.query(e, q, hd) else q;
     const hg = @divExact(H, groups);
     const o = try e.buf("L.o", .{}, .bf16, &.{ groups, n, hg * hd });
     if (s.multi) |segs| {
         for (segs, 0..) |sp, j| {
             try s.enter(sp, j);
-            try s.core(L, q, kv, cproj, own_kv, indexer, o, n);
+            try s.core(L, core_q, kv, cproj, own_kv, indexer, o, n);
         }
         try s.leave(n);
-    } else try s.core(L, q, kv, cproj, own_kv, indexer, o, n);
+    } else try s.core(L, core_q, kv, cproj, own_kv, indexer, o, n);
     // _out_pf: each wo_a group's GEMM over its contiguous slice into its columns of z, then wo_b (bf16 partial)
     const ol: i64 = e.cfg.o_lora;
     const gk = hg * hd;
@@ -270,10 +272,11 @@ pub fn core(s: *Seg, L: u32, q: Arg, kv: Arg, cproj: Arg, own_kv: bool, indexer:
     const e = s.e;
     const n = e.n;
     const ratio: i64 = e.cfg.compressRatio(L);
-    const H: i64 = e.cfg.heads / e.o.world;
+    const real_heads: i64 = e.cfg.heads / e.o.world;
+    const H: i64 = if (real_heads == 16) 32 else real_heads;
     const hd: i64 = e.cfg.head_dim;
     const groups: i64 = e.cfg.o_groups / e.o.world;
-    const hg = @divExact(H, groups);
+    const hg = @divExact(real_heads, groups);
     // blocks._segment: a segment the slot's ring cannot hold runs on the staging ring, the window before it in
     const rows = try s.swa(L);
     const slot = try slotRing(e, L);
@@ -310,6 +313,10 @@ pub fn core(s: *Seg, L: u32, q: Arg, kv: Arg, cproj: Arg, own_kv: bool, indexer:
             fpg = try e.paging(e.cfg.compressRatio(src), false);
         }
     }
+    const real_sink = try e.weight("L{d}.attn.sink", .{L}, .f32, &.{real_heads});
+    const sink = if (real_heads == 16) try pf_heads.sink(e, real_sink) else real_sink;
+    const output = if (real_heads == 16) try e.buf("L.pf.o32", .{}, .bf16, &.{ 2 * groups, total, hg * hd }) else o;
+    const out_view = try e.view(output.t.role, .bf16, &.{ @divExact(H, hg), n, hg * hd }, &.{ total * hg * hd, hg * hd, 1 }, e.row0 * hg * hd * 2);
     try e.triton("_fused", .{ n, @divExact(H, bmq), 1 }, &.{
         .{ .name = "Q", .arg = try e.view(q.t.role, .bf16, &.{ n, H, hd }, &.{ H * hd, hd, 1 }, e.row0 * H * hd * 2) },
         .{ .name = "CV", .arg = cv },
@@ -325,10 +332,10 @@ pub fn core(s: *Seg, L: u32, q: Arg, kv: Arg, cproj: Arg, own_kv: bool, indexer:
         .{ .name = "sss", .arg = .{ .i = 8 } },
         .{ .name = "LO", .arg = lo },
         .{ .name = "POS", .arg = try pos(e) },
-        .{ .name = "SINK", .arg = try e.weight("L{d}.attn.sink", .{L}, .f32, &.{H}) },
+        .{ .name = "SINK", .arg = sink },
         .{ .name = "CS", .arg = try e.ropeTable() },
         .{ .name = "cs_stride", .arg = .{ .i = 64 } },
-        .{ .name = "OUT", .arg = try e.view(o.t.role, .bf16, &.{ groups, n, hg * hd }, &.{ total * hg * hd, hg * hd, 1 }, e.row0 * hg * hd * 2) },
+        .{ .name = "OUT", .arg = out_view },
         .{ .name = "H", .arg = .{ .i = H } },
         .{ .name = "KT", .arg = .{ .i = kt } },
         .{ .name = "BMQ", .arg = .{ .i = bmq } },
@@ -342,5 +349,6 @@ pub fn core(s: *Seg, L: u32, q: Arg, kv: Arg, cproj: Arg, own_kv: bool, indexer:
         .{ .name = "HG", .arg = .{ .i = hg } },
         .{ .name = "OR", .arg = .{ .i = total } },
     });
+    if (real_heads == 16) try pf_heads.extract(e, out_view, try e.view(o.t.role, .bf16, &.{ groups, n, hg * hd }, &.{ total * hg * hd, hg * hd, 1 }, e.row0 * hg * hd * 2));
     if (s.staged) try e.glue("stage_out", &.{ slot[0], slot[1], .{ .i = ring0 }, rows[0], rows[1], .{ .i = s.ring }, .{ .i = @max(0, e.end() - W) }, .{ .i = e.end() } });
 }

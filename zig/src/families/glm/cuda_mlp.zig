@@ -4,11 +4,13 @@ const std = @import("std");
 const cuda = @import("cuda");
 const glue = @import("cuda_glue.zig");
 const b16 = @import("cuda_b16.zig");
+const projection = @import("cuda_proj.zig");
 
-/// A dense layer's weights: NVFP4 as Fp4Linear holds them, or the checkpoint's bf16 (an EXL3 checkpoint's).
+/// A dense layer's weights: NVFP4 as Fp4Linear holds them, an EXL3 checkpoint's bf16, or FP4-Local's MXFP8.
 pub const Weights = union(enum) {
     nvfp4: struct { gate: cuda.qmmf.Weight, up: cuda.qmmf.Weight, down: cuda.qmmf.Weight },
     bf16: struct { gu: u64, down: u64 }, // [gate | up] rows [2 width][dims], down [dims][width]
+    mxfp8: struct { gu: cuda.qmmf.Weight, down: cuda.qmmf.Weight }, // the same two, packed for the lane
 };
 
 /// One dense layer on a rank: gate and up [width][dims] and down [dims][width].
@@ -41,6 +43,7 @@ pub fn fill(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, lo: usize, hi
     switch (l.w) {
         .nvfp4 => |w| try mm(k, stream, w.down, s.act + lo * l.width * 2, l.width, hi - lo, out, true, prompt),
         .bf16 => |w| try b16.matmul(k.set, stream, s.act + lo * l.width * 2, l.width, w.down, out, s.mm_part, hi - lo, l.dims, l.width, true),
+        .mxfp8 => |w| try projection.matmul(k.set, stream, .{ .mxfp8 = w.down }, s.act + lo * l.width * 2, l.width, out, s.mm_part, hi - lo, l.dims, l.width, true),
     }
 }
 
@@ -51,6 +54,10 @@ pub fn body(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_str
         .nvfp4 => |q| q,
         .bf16 => |b| { // [gate | up] in one matmul, as the shared expert's
             try b16.matmul(k.set, stream, x, x_stride, b.gu, s.gu, s.mm_part, rows, 2 * w, l.dims, false);
+            return glue.swiglu(k.set, stream, s.gu, s.act, s.xs_act, l.limit, rows, w);
+        },
+        .mxfp8 => |m| { // [gate | up] stacked on the lane, its rows straight into s.gu
+            try projection.matmul(k.set, stream, .{ .mxfp8 = m.gu }, x, x_stride, s.gu, s.mm_part, rows, 2 * w, l.dims, false);
             return glue.swiglu(k.set, stream, s.gu, s.act, s.xs_act, l.limit, rows, w);
         },
     };

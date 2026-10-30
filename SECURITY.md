@@ -29,6 +29,8 @@ more work than its machine can do.
 
 When API keys are configured, private native HTTP routes require a valid key by default. Only GET root, `/health`, `/slide`, its eight embedded scripts,
 and GET metrics explicitly opened by `--metrics-open` are public exceptions. Public health never resets memory peaks. This policy includes `/systemone` aliases.
+Every valid key reaches every private route, Living Weights, Recall and the stored Responses included, unless the key file
+gives it [scopes](docs/api.md#key-scopes): an `inference` or `read` key reaches only its exact routes and keeps no Responses.
 
 A loopback listener refuses a Host outside localhost and loopback IP names, preventing a DNS-rebinding site from
 using its own hostname to read the local API. `--allowed-host NAME` is repeatable and adds an explicit trusted name

@@ -1,0 +1,8 @@
+head: d23862ab7d93638fa29eaa488bc47a7d147e1885
+head tree: 3400484ce1e9c35eed23abceea27e9a73386de74
+tested implementation: 80517fc36ea6ee9183c5237ae92b1abd70619f75 (receipt: c595d643019b5590c97746463a08fbbb18844f4b)
+
+commits above the receipt:
+d23862ab7d93638fa29eaa488bc47a7d147e1885 glm/cuda: capabilities list modelopt-mixed, and the refusal and log texts name what the loader reads
+12389501b61afa8d8ba0a8c2c8d25c644029ccc8 glm-loader-gate: a tamper run passes only red as planted, and a run that compares nothing fails
+6beac759acb8375eadeef473901ccf8582997928 glm/cuda: comments and docs say what the code and the receipt hold, with no host number or local label

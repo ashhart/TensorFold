@@ -41,7 +41,7 @@ test "GLM structured: a follower redraw returns a defined unused token" {
     try std.testing.expectEqual(@as(usize, 1), e.projections);
 }
 
-test "GLM structured: sampling launches have pending resource records" {
+test "GLM structured: sampling launches retain independent compiler receipts" {
     const registry = @import("core").contract.registry;
     const cases = .{ .{ "tf_draw", 1024 }, .{ "tf_logprob_rows", 1024 }, .{ "tf_grammar_mask", 256 }, .{ "tf_glm_top1", 1024 } };
     inline for (cases) |c| {
@@ -49,7 +49,13 @@ test "GLM structured: sampling launches have pending resource records" {
         for (registry.all_cuda) |r| if (std.mem.eql(u8, r.launch.symbol, c[0])) {
             found = true;
             try std.testing.expectEqual(@as(u32, c[1]), r.launch.threads);
-            for (r.usage) |u| try std.testing.expectEqual(@as(u32, 0), u.regs);
+            for (r.usage) |u| try std.testing.expect(u.regs > 0);
+            try std.testing.expectEqualDeep(r.usage, registry.usageFor(r, .{ .major = 13, .minor = 0 }));
+            var without_base = r;
+            without_base.usage = registry.none;
+            try std.testing.expectEqualDeep(registry.usageFor(without_base, .{ .major = 13, .minor = 3 }), registry.usageFor(r, .{ .major = 13, .minor = 3 }));
+            without_base.launch.name = "sample no compiler receipt";
+            for (registry.usageFor(without_base, .{ .major = 13, .minor = 3 })) |u| try std.testing.expectEqual(@as(u32, 0), u.regs);
         };
         try std.testing.expect(found);
     }

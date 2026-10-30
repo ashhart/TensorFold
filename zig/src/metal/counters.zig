@@ -178,6 +178,10 @@ pub const Fence = struct {
         objc.msg(void, encoder.id, "updateFence:", .{self.id});
     }
 
+    pub fn updateBlit(self: Fence, encoder: command.BlitEncoder) void {
+        objc.msg(void, encoder.id, "updateFence:", .{self.id});
+    }
+
     pub fn waitCompute(self: Fence, encoder: command.ComputeEncoder) void {
         objc.msg(void, encoder.id, "waitForFence:", .{self.id});
     }

@@ -199,11 +199,11 @@ test "identity: a dangling symlink in OUT, or in SHIPPED, fails the gate" {
     try std.testing.expectEqual(@as(u8, 0), (try fx.merge(&s, base, adapter, &buf)).code);
     var big: [16384]u8 = undefined;
     try std.testing.expect((try fx.gates(&s, base, adapter, &big)).ok);
-    try Io.Dir.cwd().symLink(io, "no-such-file", try s.path(&.{ "merged", "extra.bin" }), .{});
+    Io.Dir.cwd().symLink(io, "no-such-file", try s.path(&.{ "merged", "extra.bin" }), .{}) catch |e| return if (e == error.PermissionDenied and @import("builtin").os.tag == .windows) error.SkipZigTest else e; // symlinks need privilege on Windows
     var g = try fx.gates(&s, base, adapter, &big);
     try std.testing.expect(!g.ok and contains(g.out, "extra.bin"));
     try Io.Dir.cwd().deleteFile(io, try s.path(&.{ "merged", "extra.bin" }));
-    try Io.Dir.cwd().symLink(io, "no-such-file", try s.path(&.{ "base", "extra.bin" }), .{});
+    Io.Dir.cwd().symLink(io, "no-such-file", try s.path(&.{ "base", "extra.bin" }), .{}) catch |e| return if (e == error.PermissionDenied and @import("builtin").os.tag == .windows) error.SkipZigTest else e; // symlinks need privilege on Windows
     g = try fx.gates(&s, base, adapter, &big);
     try std.testing.expect(!g.ok and contains(g.out, "extra.bin"));
 }

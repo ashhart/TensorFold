@@ -25,18 +25,25 @@ pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, file: []const u8,
     dk.addOptions("dsv41_kernel_options", opts);
     const empty = b.addWriteFiles().add("compile-only-dsv41.fatbin", "SYNTHETIC-COMPILE-ONLY");
     for (units.units ++ units.optional) |k| dk.addAnonymousImport(b.fmt("dsv41_fatbin_{s}", .{k.name}), .{ .root_source_file = empty });
-    const m = shared.module(b, target, file);
+    return assemble(b, target, .Debug, file, cuda, dk);
+}
+/// The family's root `file` over the runtime `cuda` and kernel module `dk`, every family module at `optimize`.
+pub fn assemble(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, file: []const u8, cuda: *std.Build.Module, dk: *std.Build.Module) *std.Build.Module {
+    const m = shared.moduleAt(b, target, optimize, file);
     m.addImport("cuda", cuda);
     m.addImport("dsv41_kernels", dk);
-    const tp = @import("tp.zig").module(b, target, .Debug, cuda);
+    const tp = @import("tp.zig").module(b, target, optimize, cuda);
     m.addImport("tp", tp);
-    m.addImport("kv", @import("dsv41_state.zig").kvModule(b, target, cuda, tp));
-    @import("dsv41_draft.zig").addImports(b, m, target);
+    m.addImport("kv", @import("dsv41_state.zig").kvModuleAt(b, target, optimize, cuda, tp));
+    @import("dsv41_draft.zig").addImportsAt(b, m, target, optimize);
     return m;
 }
 pub fn steps(b: *std.Build) void {
     _ = @import("dsv41_images.zig").images(b, b.option([]const u8, "dsv41-nvcc", "Optional family nvcc compiler"), b.option([]const u8, "dsv41-fatbins", "Optional complete family prebuilt image directory"));
     _ = @import("dsv41_images.zig").module(b, b.graph.host, .Debug, runtime(b, b.graph.host, false), null);
+    const check_target = b.resolveTargetQuery(.{ .cpu_arch = b.graph.host.result.cpu.arch, .os_tag = .linux, .abi = .gnu });
+    const heads_check = b.addExecutable(.{ .name = "tf-dsv41-prefill-heads", .root_module = module(b, check_target, "prefill_heads_check.zig", false) });
+    b.step("dsv41-prefill-heads", "Build the AOT-only padded attention comparison for Linux, never run").dependOn(&b.addInstallArtifact(heads_check, .{}).step);
     const planner = module(b, b.graph.host, "cuda_test.zig", false);
     b.step("test-dsv41-bounds-host", "DeepSeek resource bounds and real wrapper controls without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = planner, .filters = &.{"DeepSeek bounds:"} })).step);
     const binding_tests = b.addRunArtifact(b.addTest(.{ .root_module = planner.import_table.get("dsv41_kernels").? }));

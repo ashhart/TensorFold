@@ -10,6 +10,7 @@ const kernels = tf.glm.kernels;
 const Ref = affine.Ref;
 const cand = @import("glm_rows_speed_cand.zig");
 const speed_prompt = @import("glm_rows_speed_prompt.zig");
+const speed_rows = @import("glm_rows_speed_rows.zig");
 const Affine = affine.Affine;
 
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
@@ -428,6 +429,7 @@ pub fn main() !void {
     for (0..TOPK) |u| io.umem.slice(i32, 128 * 16)[u * 16] = @intCast(u); // unique id u: row 0's pick u
     io.ucount.slice(i32, 1)[0] = TOPK;
     var b = Bench{ .device = device, .queue = queue, .k = k, .io = io };
+    if (std.c.getenv("GLM_SPEED_ROWS") != null) return speed_rows.multi(&b, p);
     std.debug.print(
         "GPU {s}, tensor units {}; one row, {d} launches a command buffer, median of {d}\n",
         .{ device.name(), device.tensorUnits(), reps, runs },

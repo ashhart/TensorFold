@@ -37,7 +37,8 @@ const staged = q.residency.stage;
 /// Ranges of a kept state's image into `out`: one blit pass on the model's queue (the engine thread's, while it idles).
 fn gather(ptr: *anyopaque, saved: api.prompt_cache.Saved, ranges: []const rows.image.Range, out: []u8) anyerror!void {
     const h = host(ptr);
-    const st: *const State = @ptrCast(@alignCast(saved));
+    const st: *State = @ptrCast(@alignCast(saved));
+    try st.landed(); // a fresh save's blit wrote it: it lands before this one reads it
     const stage = try staged(h, out.len);
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
@@ -100,7 +101,7 @@ fn probe(h: *Host, io: std.Io) !struct { hash: u64, rate: f64 } {
         fn at(ptr: *anyopaque, s: *lanes.Stream, mark: u32) void {
             const p: *@This() = @ptrCast(@alignCast(ptr));
             const slot = p.h.back.slotOf(s) orelse return;
-            p.saved = q.snapshot.saveSlot(p.h.gpa, &p.h.runner, slot, p.h.back.ringOf(slot), mark) catch |e| {
+            p.saved = q.snapshot.saveSlot(p.h.gpa, &p.h.runner, slot, p.h.back.ringOf(slot), mark, null) catch |e| {
                 p.failed = e;
                 return;
             };
@@ -131,11 +132,10 @@ fn probe(h: *Host, io: std.Io) !struct { hash: u64, rate: f64 } {
 pub fn attach(h: *Host, io: std.Io, a: Allocator, o: Learn) !void {
     const store = &(h.cache orelse return std.log.warn("Qwen3.8-27B: --learn-conversations needs the prompt cache, which --prompt-cache-gib 0 turned off", .{}));
     const id = try identity(h, io, a, o.dir, o.drafter);
-    const r = try rows.Rows.open(h.gpa, store.family, .{ .root = o.root, .identity = id.id, .cap = o.cap, .floor = o.floor, .daily = o.daily, .lookahead = store.rules.lookahead, .planned = store.rules.planned });
+    const r = try rows.attach(h.gpa, store, .{ .root = o.root, .identity = id.id, .cap = o.cap, .floor = o.floor, .daily = o.daily, .lookahead = store.rules.lookahead, .planned = store.rules.planned, .spill = o.spill, .slots = o.slots });
     r.prefill_rate = id.rate;
-    store.disk = r;
     std.log.info("Qwen3.8-27B: conversation states on disk in {s} ({d} states, {d} MiB of {d} MiB)", .{ r.dir, r.states.items.len, r.held() >> 20, o.cap >> 20 });
 }
 
-/// --learn-conversations' settings, as the server read them.
-pub const Learn = struct { root: []const u8, dir: []const u8, drafter: ?[]const u8, cap: u64, floor: u64, daily: u64 };
+/// --learn-conversations' settings, as the server read them (--spill-gib's too, and --checkpoint-slots beside them).
+pub const Learn = struct { root: []const u8, dir: []const u8, drafter: ?[]const u8, cap: u64, floor: u64, daily: u64, spill: rows.Spill = .off, slots: ?usize = null };

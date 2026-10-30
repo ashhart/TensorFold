@@ -54,8 +54,13 @@ pub fn capacity(pairs: usize, experts: usize) usize {
 }
 
 /// tile_for: the decode tile below BLOCK_FROM rows, the GEMM tile from there; a lane round's rows keep the decode tile.
-fn tileFor(o: Ops, rows: usize) usize {
-    return if (rows < BLOCK_FROM or o.window) LANE_ROWS else BLOCK_ROWS;
+pub fn tileFor(o: Ops, rows: usize) usize {
+    return tileOf(rows, o.window);
+}
+
+/// tile_for's rule on its own, for a fixture that plans as serving does.
+pub fn tileOf(rows: usize, window: bool) usize {
+    return if (rows < BLOCK_FROM or window) LANE_ROWS else BLOCK_ROWS;
 }
 
 /// `x` (rows, D) to (rows, D) in its dtype: the top-k experts plus the shared one; a tp rank returns its fp32 share.
@@ -149,4 +154,16 @@ test "buffer sizes follow moe.run and max_items" {
     try std.testing.expectEqual(@as(usize, 32), bucket(17));
     try std.testing.expectEqual(@as(usize, 2048), bucket(2048));
     try std.testing.expectEqual(@as(usize, 129 + 16 * 9 / 8), capacity(16 * 9, 129));
+}
+
+test "the routed products take the decode tile below 64 rows and in a lane round, the GEMM tile from 64 rows" {
+    const o: Ops = .{ .l = undefined, .bf16 = true, .stream = undefined, .arena = undefined };
+    var round = o;
+    round.window = true;
+    try std.testing.expectEqual(@as(usize, LANE_ROWS), tileFor(o, 1));
+    try std.testing.expectEqual(@as(usize, LANE_ROWS), tileFor(o, BLOCK_FROM - 1));
+    try std.testing.expectEqual(@as(usize, BLOCK_ROWS), tileFor(o, BLOCK_FROM));
+    try std.testing.expectEqual(@as(usize, BLOCK_ROWS), tileFor(o, 2048));
+    try std.testing.expectEqual(@as(usize, LANE_ROWS), tileFor(round, BLOCK_FROM));
+    try std.testing.expectEqual(@as(usize, LANE_ROWS), tileFor(round, 2048));
 }

@@ -259,7 +259,7 @@ pub fn decode(comptime Tri: type, gpa: std.mem.Allocator, driver: *cuda.Driver, 
     defer ik_b.free();
     var dummy = try cuda.DeviceBuffer.alloc(driver, 256);
     defer dummy.free();
-    try tri.attnPrep(pa_b.ptr, pos_b.ptr, qw_b.ptr, kw_b.ptr, iw_b.ptr, inv_b.ptr, q_b.ptr, kc_b.ptr, vc_b.ptr, iq_b.ptr, ik_b.ptr, dummy.ptr, dummy.ptr, eps, 1, 0);
+    try tri.attnPrep(pa_b.ptr, pos_b.ptr, qw_b.ptr, kw_b.ptr, iw_b.ptr, inv_b.ptr, q_b.ptr, kc_b.ptr, vc_b.ptr, iq_b.ptr, ik_b.ptr, dummy.ptr, dummy.ptr, eps, 1, 0, .{});
 
     var po_b = try cuda.DeviceBuffer.alloc(driver, nch * q_heads * head_dim * 4);
     defer po_b.free();
@@ -269,7 +269,7 @@ pub fn decode(comptime Tri: type, gpa: std.mem.Allocator, driver: *cuda.Driver, 
     defer pl_b.free();
     var o_b = try cuda.DeviceBuffer.alloc(driver, out_k * 2);
     defer o_b.free();
-    try tri.attnChunks(q_b.ptr, kc_b.ptr, vc_b.ptr, pos_b.ptr, po_b.ptr, pm_b.ptr, pl_b.ptr, dummy.ptr, dummy.ptr, dummy.ptr, 1, kv_heads, 1, false);
+    try tri.attnChunks(q_b.ptr, kc_b.ptr, vc_b.ptr, pos_b.ptr, po_b.ptr, pm_b.ptr, pl_b.ptr, dummy.ptr, dummy.ptr, dummy.ptr, 1, kv_heads, 1, false, .{});
     try tri.attnMerge(po_b.ptr, pm_b.ptr, pl_b.ptr, pos_b.ptr, o_b.ptr, dummy.ptr, dummy.ptr, 1, kv_heads, false);
 
     var gated_b = try cuda.DeviceBuffer.alloc(driver, out_k * 2);
