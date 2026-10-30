@@ -577,14 +577,7 @@ pub fn run(gpu: check.Gpu) !void {
     try @import("contract_dump.zig").run(a, kernels.items);
     const t0 = check.now(gpu.io);
     try g.runAll(a, kernels.items, 0x6b63, &t);
-    try @import("gdn_back_tests.zig").run(gpu);
-    try @import("q4_back_tests.zig").run(gpu);
-    try @import("moe_back_tests.zig").run(gpu);
-    try @import("attn_back_tests.zig").run(gpu);
-    try @import("fn_hc_back_tests.zig").run(gpu);
-    try @import("fn_moe_back_tests.zig").run(gpu);
-    try @import("fn_pocket_tests.zig").run(gpu, 0);
-    std.debug.print("PASS gradient component suites (FP64 and finite-difference checks); resource receipts still required\n", .{});
+    try @import("contract_back_suites.zig").run(gpu);
     const t1 = check.now(gpu.io);
     try @import("contract_qwen_served.zig").run(gpu);
     try @import("contract_qwen_pages.zig").run(gpu);
