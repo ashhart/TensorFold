@@ -5,11 +5,19 @@ const json = @import("json");
 const errors = @import("errors.zig");
 const images = @import("images.zig");
 const image_key = @import("image_key.zig");
+const http_body = @import("http_body.zig");
 const Value = json.Value;
 const Cx = errors.Cx;
 
-/// A clip's encoded bytes at most (a request's body limit bounds them all: about 12 minutes of 16-bit 16 kHz WAV).
-pub const max_audio_bytes = 32 << 20;
+/// A request body at most when the engine takes audio: an hour of 16-bit 16 kHz WAV (115.2 MB) in base64, and its text.
+pub const body_limit = 160 << 20;
+/// A clip's encoded bytes at most (the body limit bounds them all).
+pub const max_audio_bytes = body_limit;
+
+/// The body limit of a route that reads chat messages: an hour of audio when the engine takes it.
+pub fn bodyLimit(info: api.Info) usize {
+    return if (info.audio != null) body_limit else http_body.limit;
+}
 
 /// The audio token: the locator the template writes must be one added token, the one a clip's rows take.
 pub fn bindLocator(info: *api.Info, text: @import("model_text.zig").Text) error{InvalidAudioLocator}!void {
@@ -149,7 +157,7 @@ pub fn expand(offer: ?api.AudioOffer, cx: *Cx, messages: Value, ids: []const u32
 fn refusal(cx: *Cx, i: usize, err: anyerror, budget: u32) errors.Refused {
     return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
-        error.AudioTooLong => cx.refuse(try std.fmt.allocPrint(cx.a, "audio {d} is longer than this request's audio budget of {d} rows ({d:.0} seconds)", .{ i + 1, budget, @as(f64, @floatFromInt(budget)) * 0.08 })),
+        error.AudioTooLong => cx.refuse(try std.fmt.allocPrint(cx.a, "audio {d} is longer than this request's audio budget of {d} rows ({d:.1} seconds)", .{ i + 1, budget, @as(f64, @floatFromInt(budget)) * 0.08 })),
         error.WavNot16k => cx.refuse(try std.fmt.allocPrint(cx.a, "audio {d} must be sampled at 16 kHz", .{i + 1})),
         error.WavNotFinite => cx.refuse(try std.fmt.allocPrint(cx.a, "audio {d} has a sample that is NaN or infinite", .{i + 1})),
         error.WavNotMono => cx.refuse(try std.fmt.allocPrint(cx.a, "audio {d} must be mono", .{i + 1})),
@@ -244,7 +252,7 @@ test "a clip past the request's remaining rows, or one clip too many, is refused
     var small = test_offer;
     small.audio_tokens = 12;
     try std.testing.expectError(error.Refused, expand(small, &cx, msgs, &[_]u32{ 1, L, 2, L }, 0));
-    try std.testing.expectEqualStrings("audio 2 is longer than this request's audio budget of 4 rows (0 seconds)", cx.message);
+    try std.testing.expectEqualStrings("audio 2 is longer than this request's audio budget of 4 rows (0.3 seconds)", cx.message);
     var one = test_offer;
     one.max_audios = 1;
     try std.testing.expectError(error.Refused, expand(one, &cx, msgs, &[_]u32{ 1, L, 2, L }, 0));
