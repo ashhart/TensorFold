@@ -4,14 +4,18 @@ const rowtab = @import("rowtab.zig");
 const iface = @import("draft/iface.zig");
 const samp = @import("sampling_gpu.zig");
 const batch = @import("batch.zig");
+const gg = @import("grammar_gpu.zig");
 const Batch = batch.Batch;
 
 /// Target.window: the segments as one round (several forwards past the cap); each row's greedy or keyed choice.
-pub fn targetWindow(b: *Batch, segments: []const iface.Segment, choices: [][]u32, sampler: ?*samp.GpuSampler) !void {
+pub fn targetWindow(b: *Batch, segments: []const iface.Segment, choices: [][]u32, sampler: ?*samp.GpuSampler, grammar: ?*gg.Masks) !void {
     if (segments.len == 0 or segments.len > 16) return error.Slots;
     var mix: [16]rowtab.Seg = undefined;
+    var masked: [gg.max_rows]gg.Row = undefined;
     for (segments, mix[0..segments.len]) |sg, *m| {
         if (sg.parents != null) return error.TreeWindow;
+        // structured output: each segment's bits checked before the first forward goes out
+        if ((try gg.segmentRows(&masked, &.{sg})).len > 0 and grammar == null) return error.StructuresUnsupported;
         if (samp.sampled(sg.sampling) and sampler == null) return error.Sampling;
         if (sg.slot >= b.ss.n) return error.Slots;
         // a pending window must end where the segment starts (a chain never kept keeps every row)
@@ -28,6 +32,7 @@ pub fn targetWindow(b: *Batch, segments: []const iface.Segment, choices: [][]u32
             @memcpy(ids[n..][0..sg.tokens.len], sg.tokens);
             n += sg.tokens.len;
         }
+        if (grammar) |g| try g.stage(try gg.segmentRows(&masked, segments[rg[0]..rg[1]]));
         try b.window(mix[rg[0]..rg[1]], ids[0..n], j > 0);
         var greedy_rows = false;
         for (segments[rg[0]..rg[1]]) |sg| greedy_rows = greedy_rows or !samp.sampled(sg.sampling);

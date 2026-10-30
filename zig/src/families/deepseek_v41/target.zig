@@ -12,6 +12,7 @@ const branches = @import("draft/branches.zig");
 const pk = @import("serve_knobs.zig");
 const ced = @import("ced.zig");
 const pf = @import("forward_prefill.zig");
+const gg = @import("grammar_gpu.zig");
 
 pub const Error = error{ TreeWindow, Sampling, Slots, NotAChain, WindowRows };
 
@@ -33,6 +34,13 @@ pub const GpuTarget = struct {
     rows: ?*batch.Batch = null,
     /// the keyed sampler (model.zig makes it on every rank): sampled choices; null refuses them (error.Sampling)
     sampler: ?*samp.GpuSampler = null,
+    /// structured output (grammar_gpu.zig, every rank): masked rows staged before their picks; null refuses them
+    grammar: ?*gg.Masks = null,
+    /// each slot's next first token's bits (`first_mask`, taken by its prefill / finish / tail); empty: none
+    first_bits: [16][]const u32 = @splat(&.{}),
+    /// a tree window's masks (its rows') while the resolver runs its chains
+    tree_masks: []const u32 = &.{},
+    tree_rows: usize = 0,
     /// draft trees (`parents`): resolved as chain windows on the slot (draft/branches.zig), the last one kept by path
     tree: branches.Resolver = .{},
     /// the DSpark pass the lanes drive: with `.verify`, the prefilled tail's taps go to it before the first window
@@ -61,11 +69,34 @@ pub const GpuTarget = struct {
         return .{ .ptr = t, .vtable = &vtable };
     }
 
-    const vtable: iface.Target.VTable = .{ .prefill = prefill, .window = window, .keep = keep, .taps = taps, .release = release, .release_checked = releaseChecked, .available = available, .admit = admit, .begin = begin, .piece = piece, .finish = finish, .tail = tail, .pieces = pieces, .replays = replays, .warm = warm };
+    const vtable: iface.Target.VTable = .{ .prefill = prefill, .window = window, .keep = keep, .taps = taps, .release = release, .release_checked = releaseChecked, .available = available, .admit = admit, .begin = begin, .piece = piece, .finish = finish, .tail = tail, .pieces = pieces, .replays = replays, .warm = warm, .first_mask = firstMask };
 
     fn admit(p: *anyopaque, slot: u32, max_new: u64) void {
         const t = self_(p);
         if (slot < t.max_new.len) t.max_new[slot] = max_new;
+    }
+
+    fn firstMask(p: *anyopaque, slot: u32, bits: []const u32) void {
+        const t = self_(p);
+        if (slot < t.first_bits.len) t.first_bits[slot] = bits;
+    }
+
+    /// The slot's first token's bits, once (empty: none).
+    fn takeFirst(t: *GpuTarget, slot: u32) []const u32 {
+        if (slot >= t.first_bits.len) return &.{};
+        defer t.first_bits[slot] = &.{};
+        return t.first_bits[slot];
+    }
+
+    /// Rank 0, before a forward's picks: its masked rows; none clears what an earlier forward staged.
+    fn stage(t: *GpuTarget, rows: []const gg.Row) !void {
+        const g = t.grammar orelse return if (rows.len > 0) error.StructuresUnsupported else {};
+        try g.stage(rows);
+    }
+
+    /// Before a prompt's pick: its last row `row` drawn among `bits` (empty: unmasked).
+    fn stageLast(t: *GpuTarget, row: u32, bits: []const u32) !void {
+        return t.stage(if (bits.len > 0) &.{.{ .row = row, .bits = bits }} else &.{});
     }
 
     fn self_(p: *anyopaque) *GpuTarget {
@@ -74,6 +105,7 @@ pub const GpuTarget = struct {
 
     fn prefill(p: *anyopaque, slot: u32, ids: []const u32, sampling: ?lanes.Sampling, draw: u64) anyerror!u32 {
         const t = self_(p);
+        const bits = t.takeFirst(slot);
         if (!available(p, slot)) return error.SlotUnavailable;
         if (t.rows) |b| try b.beginPrefill(slot) else if (slot != 0) return error.Slots;
         _ = t.takeReplayed(slot);
@@ -106,7 +138,7 @@ pub const GpuTarget = struct {
             try t.handTaps(slot);
             var one: [1]u32 = undefined;
             var out = [_][]u32{&one};
-            try window(p, &.{.{ .slot = slot, .start = ids.len - sp.window, .tokens = ids[ids.len - sp.window ..], .parents = null, .draws = &.{draw}, .sampling = sampling }}, &out);
+            try window(p, &.{.{ .slot = slot, .start = ids.len - sp.window, .tokens = ids[ids.len - sp.window ..], .parents = null, .draws = &.{draw}, .sampling = sampling, .masks = bits }}, &out);
             return one[0];
         }
         if (t.own_prefill) {
@@ -114,6 +146,7 @@ pub const GpuTarget = struct {
             try t.f.prefill(rest);
             const seg: usize = @import("forward_prefill.zig").segmentRows(t.f);
             const last = if (rest.len % seg == 0) seg else rest.len % seg;
+            try t.stageLast(@intCast(last - 1), bits);
             if (keyed) |s| return t.pickOne(@intCast(last - 1), s, draw);
             const picks = try t.f.gpa.alloc(u32, last);
             defer t.f.gpa.free(picks);
@@ -127,6 +160,7 @@ pub const GpuTarget = struct {
             try t.f.window(ids[at_ .. at_ + n]);
             if (at_ + n == ids.len) {
                 // the keyed choice after the prompt's last row: the last row's greedy pick, or its sampled one
+                try t.stageLast(@intCast(n - 1), bits);
                 if (keyed) |s| choice[0] = try t.pickOne(@intCast(n - 1), s, draw) else {
                     var rows: [64]u32 = undefined;
                     try t.f.greedy(rows[0..n]);
@@ -196,6 +230,7 @@ pub const GpuTarget = struct {
 
     fn finish(p: *anyopaque, slot: u32, ids: []const u32, sampling: ?lanes.Sampling, draw: u64) anyerror!u32 {
         const t = self_(p);
+        const bits = t.takeFirst(slot);
         try t.onSlot(slot);
         if (ids.len == 0 or t.f.slot.pos != ids.len - 1) return error.NotAChain;
         if (pf.state(t.f).mode == .replay and !t.takeReplayed(slot)) {
@@ -206,7 +241,7 @@ pub const GpuTarget = struct {
         }
         var one: [1]u32 = undefined;
         var out = [_][]u32{&one};
-        try window(p, &.{.{ .slot = slot, .start = ids.len - 1, .tokens = ids[ids.len - 1 ..], .parents = null, .draws = &.{draw}, .sampling = sampling }}, &out);
+        try window(p, &.{.{ .slot = slot, .start = ids.len - 1, .tokens = ids[ids.len - 1 ..], .parents = null, .draws = &.{draw}, .sampling = sampling, .masks = bits }}, &out);
         return one[0];
     }
 
@@ -258,6 +293,7 @@ pub const GpuTarget = struct {
     fn tail(p: *anyopaque, slot: u32, ids: []const u32, sampling: ?lanes.Sampling, draw: u64) anyerror!?u32 {
         _ = draw;
         const t = self_(p);
+        _ = t.takeFirst(slot); // the first token comes from the round's window, its bits the lane core's
         try t.onSlot(slot);
         if (ids.len == 0 or t.f.slot.pos != ids.len - 1) return error.NotAChain;
         _ = try t.keyedOf(sampling); // refused here as `finish` would, not in the round
@@ -280,11 +316,16 @@ pub const GpuTarget = struct {
 
     fn window(p: *anyopaque, segments: []const iface.Segment, choices: [][]u32) anyerror!void {
         const t = self_(p);
-        if (t.rows) |b| return b.targetWindow(segments, choices, t.sampler);
+        if (t.rows) |b| return b.targetWindow(segments, choices, t.sampler, t.grammar);
         if (segments.len != 1) return error.Slots;
         const s = segments[0];
         if (s.slot != 0) return error.Slots;
-        if (s.parents != null) return t.tree.window(.{ .ptr = t, .vtable = &chains }, s, choices[0]);
+        if (s.parents != null) {
+            t.tree_masks = s.masks;
+            t.tree_rows = s.tokens.len;
+            defer t.tree_masks = &.{};
+            return t.tree.window(.{ .ptr = t, .vtable = &chains }, s, choices[0]);
+        }
         t.tree.clear();
         const keyed = try t.keyedOf(s.sampling);
         // a chain window never kept keeps every row: the lanes' undrafted step sends the next row without a keep
@@ -294,6 +335,8 @@ pub const GpuTarget = struct {
         }
         if (s.start != t.f.slot.pos) return error.NotAChain;
         if (s.tokens.len > t.max_rows) return error.WindowRows;
+        var masked: [gg.max_rows]gg.Row = undefined;
+        try t.stage(try gg.segmentRows(&masked, &.{s}));
         try t.f.window(s.tokens);
         if (keyed) |smp| return t.sampler.?.choose(0, @intCast(s.tokens.len), smp, s.draws, choices[0][0..s.tokens.len]);
         try t.f.greedy(choices[0][0..s.tokens.len]);
@@ -404,8 +447,21 @@ pub const GpuTarget = struct {
     const chains: branches.Chains.VTable = .{ .run = chainRun, .drop = chainDrop };
 
     fn chainRun(p: *anyopaque, slot: u32, start: u64, tokens: []const u32, draws: []const u64, sampling: ?lanes.Sampling, out: []u32) anyerror!void {
+        const t = self_(p);
         var one = [_][]u32{out};
-        return window(p, &.{.{ .slot = slot, .start = start, .tokens = tokens, .parents = null, .draws = draws, .sampling = sampling }}, &one);
+        const masks = try t.chainMasks(tokens.len);
+        defer t.f.gpa.free(masks);
+        return window(p, &.{.{ .slot = slot, .start = start, .tokens = tokens, .parents = null, .draws = draws, .sampling = sampling, .masks = masks }}, &one);
+    }
+
+    /// A tree chain's bits: chain row i takes the tree row the resolver put there (empty without a grammar).
+    fn chainMasks(t: *GpuTarget, n: usize) ![]u32 {
+        if (t.tree_masks.len == 0) return &.{};
+        if (t.tree_rows == 0 or t.tree_masks.len % t.tree_rows != 0) return error.InvalidGrammarMasks;
+        const words = t.tree_masks.len / t.tree_rows;
+        const out = try t.f.gpa.alloc(u32, n * words);
+        for (t.tree.rows[0..n], 0..) |row, i| @memcpy(out[i * words ..][0..words], t.tree_masks[@as(usize, row) * words ..][0..words]);
+        return out;
     }
 
     fn chainDrop(p: *anyopaque, slot: u32) anyerror!void {
