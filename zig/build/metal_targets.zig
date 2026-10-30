@@ -329,6 +329,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .{ .name = "tf-gemma4-bench", .path = "zig/tests/gemma4/bench.zig", .about = "Gemma 4 dense step costs: projections alone by rows against whole forwards" },
         .{ .name = "tf-gemma4-no-tensor", .path = "zig/tests/gemma4/no_tensor.zig", .about = "Gemma 4's Metal kernels on a Mac without tensor units: what builds, and the row path's bits" },
         .{ .name = "tf-spark-run", .path = "zig/tests/spark25/run.zig", .about = "Spark2.5 on Metal: greedy tokens, every position's logits or a prompt's last logits, for the reference's check" },
+        .{ .name = "tf-llama-run", .path = "zig/tests/llama/run.zig", .about = "Llama on Metal: greedy tokens, every position's logits or a prompt's last logits, for the reference's check" },
         .{ .name = "tf-qwen36-row-seam", .path = "zig/tests/qwen36_row_seam.zig", .about = "Model-free fixture: the row projection's bias sums stay fp32 at every width" },
     };
     for (engine_programs) |p| {
