@@ -58,6 +58,7 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
         text = tf.flashnext_vision_contract.source(w);
         return .{ .decl = d, .function = fun, .here = text, .pre_m5 = text };
     }
+    if (std.mem.startsWith(u8, d.name, "dsv41 xmma ")) { const b = try tf.dsv41_xmma.source(a, "", &.{}); return .{ .decl = d, .function = fun, .here = b, .pre_m5 = b }; }
     if (std.mem.startsWith(u8, d.name, "dsv41 fp8 mma ")) {
         text = sources.deepseek_v41_fp8_mma;
         return .{ .decl = d, .function = fun, .here = text, .pre_m5 = text };

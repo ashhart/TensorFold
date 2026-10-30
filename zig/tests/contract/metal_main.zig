@@ -426,12 +426,16 @@ pub fn main(init: std.process.Init) !u8 {
     defer dsv41_fp8_mma.destroy();
     const dsv41_experts = try @import("metal_dsv41_experts.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer dsv41_experts.destroy();
+    const dsv41_xmma = try @import("metal_dsv41_xmma.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer dsv41_xmma.destroy();
     var t: g.Tally = .{};
     const t0 = std.Io.Clock.awake.now(init.io);
     if (o.gates) {
         try g.runAll(a, kernels.items, o.seed, &t);
         if (dsv41_experts.probes.items.len > 0) t.failed += try dsv41_experts.pipeline(o.seed);
         if (std.c.getenv("TF_DSV41_EXPERTS_TIME") != null) try dsv41_experts.timing(init.io);
+        if (dsv41_xmma.probes.items.len > 0) t.failed += try dsv41_xmma.equality(o.seed);
+        if (std.c.getenv("TF_DSV41_XMMA_TIME") != null) try dsv41_xmma.timing(init.io);
         for (flash_list[0..flash_made]) |*probe| try probe.rowCountInvariant();
         t.failed += try dsv41_fp8.invariance(o.seed);
         if (std.c.getenv("TF_DSV41_TIME") != null) try dsv41_fp8.timing(init.io);
