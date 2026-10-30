@@ -69,7 +69,7 @@ const Tally = struct {
 
     fn now(s: *const se.Served) Tally {
         const p = s.m.slot_pass;
-        return .{ .drafted = s.core.drafted, .accepted = s.core.accepted, .passes = if (p) |x| x.stats.passes else 0, .pass_slots = if (p) |x| x.stats.slots else 0, .digest = if (p) |x| x.digest else 0 };
+        return .{ .drafted = s.inner.core.drafted, .accepted = s.inner.core.accepted, .passes = if (p) |x| x.stats.passes else 0, .pass_slots = if (p) |x| x.stats.slots else 0, .digest = if (p) |x| x.digest else 0 };
     }
 
     fn since(t: Tally, s: *const se.Served) Tally {

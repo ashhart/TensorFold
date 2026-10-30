@@ -8,3 +8,8 @@ test {
 test {
     _ = @import("draft/review_release_test.zig");
 }
+
+test {
+    _ = @import("serve_lanes.zig");
+    _ = @import("serve_lanes_test.zig");
+}

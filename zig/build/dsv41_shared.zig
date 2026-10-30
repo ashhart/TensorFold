@@ -7,7 +7,8 @@ pub fn moduleAt(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
     core.addImport("gpu_memory", @import("gpu_memory.zig").module(b, target));
     core.addImport("tokenizer", tok);
-    return b.createModule(.{ .root_source_file = b.path(b.fmt("zig/src/families/deepseek_v41/{s}", .{file})), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "core", .module = core }} });
+    const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    return b.createModule(.{ .root_source_file = b.path(b.fmt("zig/src/families/deepseek_v41/{s}", .{file})), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "core", .module = core }, .{ .name = "lanes", .module = lanes } } });
 }
 pub fn steps(b: *std.Build) void {
     const host = b.addTest(.{ .root_module = module(b, b.graph.host, "shared_test.zig") });

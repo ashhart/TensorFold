@@ -14,8 +14,13 @@ pub const Result = drive.Result;
 
 /// DSpark's shape at this world (candidates a position: every rank's best min(64, 128 / world), gathered).
 pub fn shapeOf(f: *const fwd.Forward) dspark.Shape {
-    const w = f.comm.world();
-    return .{ .block = f.cfg.dspark_block, .noise = f.cfg.dspark_noise_token, .window = f.cfg.window, .rank = f.cfg.dspark_markov_rank, .hidden = f.cfg.hidden, .candidates = w * @min(64, 128 / w) };
+    return shapeOfCfg(f.cfg, f.comm.world());
+}
+
+/// DSpark's shape from the checkpoint config and the world, for a backend without a CUDA Forward.
+pub fn shapeOfCfg(cfg: *const @import("config.zig").Config, world: u32) dspark.Shape {
+    const w = world;
+    return .{ .block = cfg.dspark_block, .noise = cfg.dspark_noise_token, .window = cfg.window, .rank = cfg.dspark_markov_rank, .hidden = cfg.hidden, .candidates = w * @min(64, 128 / w) };
 }
 
 /// Rank 0: `max_new` tokens after `prompt` (already in the slot) through lanes with `pass`; `max_rows` the plan's.
