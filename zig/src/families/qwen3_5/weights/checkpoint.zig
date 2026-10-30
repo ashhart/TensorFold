@@ -160,9 +160,19 @@ fn subConv(a: std.mem.Allocator, t: *const Table, base: []const u8) !Tensor {
     return projection.conv(a, t, projection.join(&buf, &.{ base, "conv1d.weight" }));
 }
 
+/// A layer's routed experts, refusing one whose shared expert runs beside the stack: this bridge stacks it in `fused`.
+fn expertStack(a: std.mem.Allocator, t: *const Table, mlp: []const u8, s: config.Spec) !host.Routed {
+    const r = try experts.routed(a, t, mlp, .{ .experts = s.experts, .hidden = s.hidden, .top_k = s.top_k });
+    if (r.experts.separate != null) {
+        std.log.warn("{s}: a shared expert beside the routed stack is unsupported here", .{mlp});
+        return error.UnexpectedTensor; // this bridge stacks the shared expert
+    }
+    return r;
+}
+
 /// The routed MLP when the config has experts, else gate, up and down.
 fn readMlp(a: std.mem.Allocator, t: *const Table, mlp: []const u8, s: config.Spec) !host.Mlp {
-    if (s.experts != 0) return .{ .routed = try experts.routed(a, t, mlp, .{ .experts = s.experts, .hidden = s.hidden, .top_k = s.top_k }) };
+    if (s.experts != 0) return .{ .routed = try expertStack(a, t, mlp, s) };
     return .{ .dense = .{
         .gate = try sub(a, t, mlp, "gate_proj"),
         .up = try sub(a, t, mlp, "up_proj"),
@@ -217,7 +227,7 @@ fn readMtp(a: std.mem.Allocator, t: *const Table, s: config.Spec) !host.Mtp {
         .head = head,
         .input_norm = try projection.float(a, t, layer ++ "input_layernorm.weight"),
         .post_norm = try projection.float(a, t, layer ++ "post_attention_layernorm.weight"),
-        .mlp = if (routed) .{ .routed = try experts.routed(a, t, mlp, .{ .experts = s.experts, .hidden = s.hidden, .top_k = s.top_k }) } else .{ .dense = .{
+        .mlp = if (routed) .{ .routed = try expertStack(a, t, mlp, s) } else .{ .dense = .{
             .gate = try projection.projection(a, t, mlp ++ "gate_proj"),
             .up = try projection.projection(a, t, mlp ++ "up_proj"),
             .down = try projection.projection(a, t, mlp ++ "down_proj"),
