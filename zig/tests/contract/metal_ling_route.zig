@@ -3,7 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const contract = @import("contract");
 const rig_ = @import("rig.zig");
-const route = @import("../../src/families/ling/route.zig");
+const route = @import("ling_route");
 
 const c = contract.spec;
 const g = contract.gates;
