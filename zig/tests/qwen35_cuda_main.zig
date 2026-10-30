@@ -59,7 +59,7 @@ pub fn main(init: std.process.Init) !u8 {
     defer driver.close();
     var ctx = try cuda.Context.init(&driver, 0);
     defer ctx.deinit();
-    const e = try E.Engine.init(init.gpa, init.io, &ctx, args[1], args.len == 6);
+    const e = try E.Engine.init(init.gpa, init.io, &ctx, args[1], args.len == 6, null);
     defer e.deinit();
     if (std.mem.eql(u8, args[2], "mtp")) return mtpCheck(init.gpa, init.io, e, args[1], ids.items);
     // TF_Q35_PREFILL=N starts the stream after N cycled ids; TF_Q35_BESIDE=N steps an N-token stream beside it
@@ -366,10 +366,10 @@ fn kl(init: std.process.Init, a: std.mem.Allocator, model: []const u8, ids_path:
     defer driver.close();
     var ctx = try cuda.Context.init(&driver, 0);
     defer ctx.deinit();
-    const eb = try E.Engine.init(init.gpa, io, &ctx, model, int8);
+    const eb = try E.Engine.init(init.gpa, io, &ctx, model, int8, null);
     defer eb.deinit();
     // int8: one engine (two would not fit), fp8 caches, the second cache's prompt chunks through int8 activations
-    const e8 = if (int8) eb else try E.Engine.init(init.gpa, io, &ctx, model, !control);
+    const e8 = if (int8) eb else try E.Engine.init(init.gpa, io, &ctx, model, !control, null);
     defer if (!int8) e8.deinit();
     var cb = try E.Cache.init(init.gpa, eb, skip + rows + 64);
     defer cb.deinit(init.gpa);

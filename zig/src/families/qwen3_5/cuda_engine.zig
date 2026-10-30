@@ -12,6 +12,7 @@ const pocket = @import("cuda_pocket.zig");
 const profile = @import("cuda_startup_profile.zig");
 const modelopt = @import("cuda_modelopt.zig");
 const x3w = @import("cuda_exl3_weights.zig");
+const hosted = @import("cuda_host_embed.zig");
 pub const recurrent = @import("cuda_recurrent.zig");
 
 pub const Geometry = geometry.Geometry;
@@ -107,6 +108,7 @@ pub const Engine = struct {
     embed_s: u64,
     embed_b: u64,
     embed_bits: u8, // the embedding's rows' width: 4 or 8 (16: bf16 rows, an EXL3 checkpoint's)
+    host_embed: ?cuda.HostBuffer = null, // an EXL3 checkpoint's rows in mapped host memory: the card had no room
     kit: ?*x3w.Kit = null, // an EXL3 checkpoint's kernels (g.exl3)
     head: Proj,
     final_norm: u64,
@@ -171,7 +173,7 @@ pub const Engine = struct {
     pub const mpos_at = Round.mpos_at;
     const tables_len = Round.bytes;
 
-    pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kv8: bool) !*Engine {
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kv8: bool, fit: ?hosted.Fit) !*Engine {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
         const started = profile.now(io);
         const g = try Geometry.read(gpa, io, dir);
@@ -209,7 +211,8 @@ pub const Engine = struct {
         var ck = try core.Checkpoint.openModel(gpa, io, dir);
         defer ck.close();
         // an EXL3 checkpoint's weights are sized by a dry run of its loader (trellis widths come from the tensors)
-        const wbytes = if (g.exl3) try x3w.measure(e, &ck) else weights.total(g);
+        const wbytes = try hosted.measure(e, io, ctx, &ck, fit);
+        errdefer if (e.host_embed) |*h| h.free();
         e.arena = try DeviceBuffer.alloc(d, wbytes + try e.scratch(.measure));
         errdefer e.arena.free();
         try e.arena.fill8(0, null); // touched once now: the driver commits memory on first touch, slowly
@@ -290,6 +293,7 @@ pub const Engine = struct {
         recurrent.shutdown(e);
         @import("cuda_rope_table.zig").free(e);
         if (e.kit) |k| k.deinit(e.gpa);
+        if (e.host_embed) |*h| h.free();
         e.pockets.deinit();
         var it = e.graphs.valueIterator();
         while (it.next()) |x| x.deinit();

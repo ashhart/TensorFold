@@ -232,12 +232,12 @@ fn all(s: *Sink, ck: *core.Checkpoint) !void {
     const g = e.g;
     const kit = e.kit;
     const m = "model.language_model.";
-    // embeddings stay bf16 rows (embedRows); the head is an EXL3 projection
-    const embed = try plain(s, ck, "{s}embed_tokens.weight", .{m}, .bf16, &.{ g.vocab, g.hidden });
+    // embeddings stay bf16 rows (embedRows), mapped from host memory when the card has no room; the head is EXL3
+    const embed: u64 = if (e.host_embed != null) 0 else try plain(s, ck, "{s}embed_tokens.weight", .{m}, .bf16, &.{ g.vocab, g.hidden });
     const head = try dense(s, kit, ck, "", "lm_head", g.vocab, g.hidden);
     const final = try norm1(s, ck, "{s}norm.weight", .{m}, g.hidden);
     if (!s.measure) {
-        e.embed_w = embed;
+        e.embed_w = if (e.host_embed) |h| try mappedEmbed(e, ck, h) else embed;
         e.embed_s = 0;
         e.embed_b = 0;
         e.embed_bits = 16;
@@ -283,6 +283,13 @@ fn all(s: *Sink, ck: *core.Checkpoint) !void {
             .down = try dense(s, kit, ck, p, "mlp.down_proj", g.hidden, g.intermediate),
         } };
     }
+}
+
+/// The embedding rows copied into the engine's mapped host memory.
+fn mappedEmbed(e: *Engine, ck: *core.Checkpoint, host: cuda.HostBuffer) !u64 {
+    var buf: [200]u8 = undefined;
+    const t = try ck.expect(try name(&buf, "model.language_model.embed_tokens.weight", .{}), .bf16, &.{ e.g.vocab, e.g.hidden });
+    return @import("cuda_host_embed.zig").rows(host, t.bytes);
 }
 
 /// The arena bytes the weights take (the scratch is added by the caller).
