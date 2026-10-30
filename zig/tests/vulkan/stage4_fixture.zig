@@ -1,5 +1,5 @@
-// Stage 4 fixture: the GatedDeltaNet closure at the real model geometry (16 heads, head_dim 128, 6144 conv channels, 4 taps) on a controlled small token count, against independent f64 host references. Host-checkable only.
-//  Acceptance (fixed bring-up budgets, stated; NOT cross-backend bitexact claims; inputs are exactly-bf16-representable dyadics so operand widening is exact and every budget below is dominated by its stated rounding depth): - split: SiLU/L2-norm/V/gate chain with the Metal-oracle bf16 roundings; budget depth=40 (the 32-lane norm sum), ops=5, mids=3, magnitude scale max|vals|^2. The gate's g is f32, budget ops=4, mids=2, at |g|. - conv: 4 ascending taps on exact operands: budget depth=4, no mids; one bf16 store. - prefill recurrence: serial f64 gated-delta walk from h0 over the ACTUAL soa/g/beta bits the GPU produced; budget depth = tokens*(130) + 130 at the largest intermediate state magnitude the walk saw, ops=4, no mids (state stays f32 end to end; y is one bf16 store, budgeted by outUnit). chunk=4 and chunk=8 must agree with the SAME serial reference. - decode: one raw-gates step (g/beta from a/b/A_log/dt) from state_in; same budget form as the recurrence's single token. - gated norm: budget depth=128 (the row mean), ops=1 (inversesqrt), mids=2, magnitude scale max|x|^2 * row length. Every finite reference demands a finite output; planted wrong finite and nonfinite outputs must be refused by the same checkers.
+// Stage 4 fixture: the GatedDeltaNet closure, 16 heads, head_dim 128, 6144 conv channels, 4 taps, vs f64 host refs.
+// depth/ops/mids budgets, mag: split max|vals|^2, gate |g|, recur max state, norm max|x|^2*len; chunk=4/8 one ref
 const std = @import("std");
 const contract = @import("contract");
 pub const c = contract.spec;
@@ -14,7 +14,7 @@ pub const tokens: u64 = 8;
 /// `worst` is |got - want| OVER its budget (a ratio; >1 fails), with `where`.
 pub const Report = struct { worst: f64 = 0, where: usize = 0 };
 
-// The first element that failed a check, for the probe's failure print. `want` is the HOST Ash-chain reference (recomputable; sp/exp are NOT stored by either side and are never invented). Checkers only fill this on the real failure path; negative plants pass null and stay silent.
+// First failing element, probe print. `want` = HOST Ash-chain ref; sp/exp never stored; negative plants pass null.
 pub const Output = enum { soa, g, beta, y, state, snapshot };
 pub const Violation = struct {
     index: usize,
@@ -23,7 +23,7 @@ pub const Violation = struct {
     got: f64 = 0,
     bound: f64 = 0,
     ratio: f64 = 0,
-    // The want value's f32 bits where the reference is an f32 scalar (g): lets the diagnostic show f32 class (subnormal/underflow) without pretending anything about unstored GPU intermediates.
+    // The want value's f32 bits where the reference is an f32 scalar (g): shows f32 class (subnormal/underflow) only.
     want_f32_bits: u32 = 0,
 };
 
@@ -39,7 +39,7 @@ fn violated(v: ?*Violation, output: Output, index: usize, want: f64, got: f64, b
     };
 }
 
-// Stated fixed bring-up budget: a depth-deep f32 sum at its magnitude scale, `ops` further f32 roundings and `mids` bf16 roundings at the value's scale, one final bf16 store. Never a sum of squares of outputs; always finite and positive (the 2^-133 floor), so dividing into a ratio is safe. Fixed bring-up acceptance: never enlarged after a GPU run without a new stated derivation.
+// budget: depth f32 sum@mag, ops f32 + mids bf16 rounds, 1 store; not sum-of-squares; never enlarge after GPU runs
 pub fn budget(depth: f64, ops: f64, mids: f64, want: f64, mag: f64) f64 {
     const u: f64 = 0x1p-24;
     const g = if (depth > 1) depth * u / (1 - depth * u) else 0;
@@ -70,12 +70,12 @@ fn f32Of(pairs: []const u16, word: usize) f64 {
     return @as(f32, @bitCast(@as(u32, pairs[2 * word]) | (@as(u32, pairs[2 * word + 1]) << 16)));
 }
 
-// The g/beta gate chain in f64 (the split's lane-0 chain and the decode prologue's raw-gates chain share this formula). NOTE: f64-idealized — it omits the shader's bf16 roundings on s and sp, which exp(a_log) amplifies by up to ~20x at this fixture's ranges. Use `gateRefAsh` for checker references; this stays for the amplification evidence test.
+// f64 chain shared by split lane-0 and decode raw-gates; omits bf16 rounds (~20x); kept for amplification test
 pub fn gateRef(a_in: f64, b_in: f64, a_log: f64, dt: f64) gdn_mod.GateF64 {
     return gdn_mod.gateReferenceF64(a_in, b_in, a_log, dt);
 }
 
-// The ASH gate chain EXACTLY as the shaders compute it (gdn_split.comp ash_gate and gated_delta_decode's ASH_QWEN35 prologue): s = BF16(a+dt); sp = BF16(max(s,0)+log(1+exp(-|s|))) with the DIRECT log; g = exp(-exp(A_log_f32)*sp) kept f32; beta = BF16(sigmoid(b)). Every bf16 rounding and f32 op of the shader, on the host — the residual vs the GPU is f32 exp/log ulps, what the unchanged ops budget covers.
+// ASH: s=BF16(a+dt); sp=BF16(max(s,0)+log(1+exp(-|s|))); g f32; beta=BF16(sigmoid(b)); residual = exp/log ulps
 pub fn gateRefAsh(a_in: u16, b_in: u16, a_log: f64, dt_in: u16) gdn_mod.GateF64 {
     const a = c.fromBf16(a_in);
     const dt = c.fromBf16(dt_in);
@@ -89,9 +89,9 @@ pub fn gateRefAsh(a_in: u16, b_in: u16, a_log: f64, dt_in: u16) gdn_mod.GateF64 
     return .{ .g = @floatCast(g), .beta = @floatCast(c.fromBf16(c.toBf16(beta_raw))) };
 }
 
-// --------------------------------------------------------------------------- Split ---------------------------------------------------------------------------
+// ---- Split ----
 
-// The gate split at T=tokens. conv_out/a/b/dt/a_log are the uploaded inputs; check consumes the downloaded soa (bf16), g (f32) and beta (bf16) bits.
+// Gate split at T=tokens: conv_out/a/b/dt/a_log uploaded; check reads downloaded soa (bf16), g (f32), beta (bf16) bits.
 pub const Split = struct {
     a: std.mem.Allocator,
     conv_out_bits: []u16,
@@ -216,9 +216,9 @@ pub const Split = struct {
     }
 };
 
-// --------------------------------------------------------------------------- SplitOne: the gate split at exactly ONE token (the convDecodeStep tail) ---------------------------------------------------------------------------
+// ---- SplitOne: the gate split at exactly ONE token (the convDecodeStep tail) ----
 
-// The gate split's T=1 geometry: soa [3*2048], g/beta [16], conv_out [6144]. `check` consumes the downloaded outputs; assign the ACTUAL activated conv bits into `conv_out_bits` (pub, 6144 elements) before checking so the reference reads what the GPU's decode conv produced.
+// Split T=1: soa[3*2048], g/beta[16], conv_out[6144]; ACTUAL activated conv bits in `conv_out_bits`[6144] before check.
 pub const SplitOne = struct {
     a: std.mem.Allocator,
     conv_out_bits: []u16,
@@ -345,9 +345,9 @@ pub const SplitOne = struct {
     }
 };
 
-// --------------------------------------------------------------------------- Conv prefill ---------------------------------------------------------------------------
+// ---- Conv prefill ----
 
-// The prefill conv: the fixture states the conv input it expects the copies to assemble (state rows then qkv), the weight, and checks the conv output.
+// Prefill conv: fixture states the assembled input (state rows then qkv), weight, and checked output.
 pub const Conv = struct {
     a: std.mem.Allocator,
     state_bits: []u16, // [3, C]
@@ -408,10 +408,10 @@ pub const Conv = struct {
     }
 };
 
-// --------------------------------------------------------------------------- Prefill recurrence and decode: one serial f64 walker ---------------------------------------------------------------------------
+// ---- Prefill recurrence and decode: one serial f64 walker ----
 
 pub const RecurWalk = struct {
-    // state[head][row][dk]; y[token][head*128+row]. When `snap_after` is non-null, `want_snap` receives the FULL state after token `snap_after.? - 1` (the shader's interior chunk boundary): the snapshot slot the prefill scan stores there.
+    // state[head][row][dk]; y[token][head*128+row]; want_snap = FULL state after snap_after-1 (scan's snapshot slot)
     pub fn run(
         soa_bits: []const u16,
         g_pairs: []const u16, // f32 as u16 pairs [T*16*2]
@@ -469,14 +469,14 @@ pub const RecurWalk = struct {
     }
 };
 
-// The prefill recurrence gate: reference inputs are the ACTUAL soa/g/beta bits the GPU produced (the probe downloads them first).
+// Prefill recurrence gate: reference inputs are the ACTUAL soa/g/beta bits the GPU produced (downloaded first).
 pub const Recur = struct {
     a: std.mem.Allocator,
     h0_bits: []u16, // f32 pairs
     want_y: []f64,
     want_state: []f64,
     max_state: f64,
-    // The interior chunk boundary's reference snapshot: non-null exactly when the gate runs chunked (0 < chunk < tokens, chunks >= 2, one interior boundary at token `chunk`).
+    // Chunk boundary reference snapshot: non-null iff chunked (0 < chunk < tokens, chunks >= 2; boundary at `chunk`).
     want_snap: ?[]f64,
 
     pub fn init(a: std.mem.Allocator, soa_bits: []const u16, g_pairs: []const u16, beta_bits: []const u16, seed: u64, chunk: u64) !Recur {
@@ -516,7 +516,7 @@ pub const Recur = struct {
         if (f.want_snap) |ws| f.a.free(ws);
     }
 
-    // The snapshot slot against its boundary reference; poison and partial writes are refused by the same finite/budget gates as hf.
+    // Snapshot slot vs boundary reference; poison and partial writes are refused by the same finite/budget gates as hf.
     pub fn checkSnap(f: Recur, snap_pairs: []const u16, violation: ?*Violation) !Report {
         const ws = f.want_snap orelse return error.NoSnapshotExpected;
         var r: Report = .{};
@@ -574,7 +574,7 @@ pub const Recur = struct {
     }
 };
 
-// The decode gate: one raw-gates token from state_in. The g/beta reference comes from a/b/A_log/dt directly (the kernel's own prologue inputs).
+// Decode gate: one raw-gates token from state_in; g/beta reference comes from a/b/A_log/dt (kernel prologue inputs).
 pub const Decode = struct {
     a: std.mem.Allocator,
     soa_bits: []u16, // [3*2048]
@@ -716,9 +716,9 @@ pub const Decode = struct {
     }
 };
 
-// --------------------------------------------------------------------------- Gated norm ---------------------------------------------------------------------------
+// ---- Gated norm ----
 
-// gatedNorm at tokens=4: PER-HEAD 128-wide RMS (Ash gdn_post), head-major [4, 16, 128]; out = bf16(silu_div(z) * bf16(w * (x * inv))).
+// gatedNorm tokens=4: PER-HEAD 128-wide RMS (Ash gdn_post), [4,16,128]; out=bf16(silu_div(z)*bf16(w*(x*inv))).
 pub const Norm = struct {
     a: std.mem.Allocator,
     y_bits: []u16, // norm input
@@ -748,7 +748,7 @@ pub const Norm = struct {
         f.a.free(f.w_bits);
     }
 
-    // Per-head-row reference (tokens=4, 16 heads, width 128): each (token, head) row of 128 reduces its OWN mean square; the weight indexes the column within the head and repeats across heads. Association and budget unchanged.
+    // Per-head-row ref (tokens=4, 16 heads, width 128): each row of 128 has its OWN mean square; weight = column index.
     pub fn check(f: Norm, bits: []const u16) !Report {
         var r: Report = .{};
         const width: usize = @intCast(Model.head_dim);
@@ -781,7 +781,7 @@ pub const Norm = struct {
     }
 };
 
-// Replay the exact decode fixture seed through the production gate checker. Report old-reference drift; it is not assumed to explain the GPU failure.
+// Replay the decode seed through the production gate checker; report old-reference drift, not a GPU-failure cause.
 test "gateRefAsh replays the fixture seed and diagnoses g and beta separately" {
     const a = testing.allocator;
     const f = try SplitOne.init(a, 0x57ac);
@@ -829,7 +829,7 @@ test "gateRefAsh replays the fixture seed and diagnoses g and beta separately" {
     try testing.expectEqual(Output.beta, diag.output);
     try testing.expectEqual(@as(usize, 0), diag.index);
     beta_bits[0] = beta0;
-    // f32-subnormal census over the EXACT seed (log-only, no acceptance change): with a_log up to 3 and sp up to ~4.5, g can reach exp(-20.085*4.5) ≈ 5.6e-40 — f32 subnormal territory. A flush-to-zero device would produce g=0 for these; if a diagnostic ever shows want_f32_bits subnormal with got=0, that is THIS and Main decides on the measured data. No FTZ assumption is baked into the host ref.
+    // subnormal census (log-only): a_log<=3, sp<=~4.5 => g~exp(-20.085*4.5)~5.6e-40; FTZ=>g=0; host ref:no FTZ.
     var min_g: f32 = std.math.floatMax(f32);
     var subnormals: usize = 0;
     for (0..@intCast(Model.heads)) |hv| {
@@ -867,7 +867,7 @@ test "sampleDyadic is exactly bf16" {
     }
 }
 
-// Negative plants against the PRODUCTION Norm checker: the honest output passes; a wrong finite and every nonfinite class are refused.
+// Negative plants vs PRODUCTION Norm checker: honest output passes; a wrong finite and every nonfinite class refused.
 test "norm checker refuses planted outputs" {
     const a = testing.allocator;
     const f = try Norm.init(a, 0x18);
@@ -900,7 +900,7 @@ test "norm checker refuses planted outputs" {
     try testing.expectError(error.NonFiniteOutput, f.check(good));
 }
 
-// Checker self-tests for the state carry-out path: a correctly reference-rounded state PASSES, a poisoned (0xffff = NaN) carry-out is REJECTED, and a dead store (all-poison state) cannot pass.
+// Carry-out self-tests: rounded state PASSES; poisoned (0xffff=NaN) carry-out REJECTED; dead store (all-poison) fails.
 test "recur checker accepts rounded state and refuses poisoned carry-out" {
     const a = testing.allocator;
     // fabricate the split's outputs as dyadic bits (the walker reads them)

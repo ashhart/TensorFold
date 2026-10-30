@@ -1,4 +1,4 @@
-// The Vulkan Qwen3.5-2B core behind the lane engine's backend interface: one engine state, one stream at a time, GPU-greedy draws, an append-only sequence with no rewind — a new prompt or a release resets the engine's buffers for real.
+// Vulkan Qwen3.5-2B backend owns one stream and sequence; greedy decode has no rewind, so reset clears state.
 const std = @import("std");
 const lanes = @import("lanes");
 const engine_mod = @import("engine.zig");
@@ -7,13 +7,13 @@ const pinned = @import("../../config.zig");
 const Engine = engine_mod.Engine;
 const be = lanes.backend;
 
-// The advertised scheduling step: the engine cuts each prompt pass into chunks of at most this many rows (per dispatch activation chunk cap).
+// Each prompt pass uses chunks of at most 32 rows.
 pub const max_prompt_rows: usize = 32;
 
 /// The SDPA arm's visible-key limit, the state's capacity ceiling (state.zig).
 pub const max_capacity = @import("state.zig").max_capacity;
 
-// A prompt the core takes: at most `max_capacity` ids (the state ceiling; the reply's decodes are admitted against it separately), each a real id.
+// A prompt accepts at most max_capacity real token ids; reply decodes are admitted separately.
 pub fn validPrompt(ids: []const u32) bool {
     if (ids.len == 0 or ids.len > max_capacity) return false;
     for (ids) |id| if (id >= pinned.vocab) return false;
@@ -38,7 +38,7 @@ pub const Vulkan = struct {
         return out;
     }
 
-    // The backend's own state only: the engine (device, weights, sequence) outlives it and its owner deinits it quiescent.
+    // The engine (device, weights, sequence) outlives this backend; its owner deinits it once quiescent.
     pub fn deinit(self: *Vulkan) void {
         self.gpa.destroy(self);
     }
@@ -96,7 +96,7 @@ pub const Vulkan = struct {
         self.owner = stream;
     }
 
-    // One 32-row chunk of the prompt pass per call; false while chunks remain. The first call validates the whole request (ids, capacity footprint with the reply's decodes) before any reset or write; later calls resume at the engine's committed visible count, so `visible()` is the progress and no cursor state exists.
+    // Each 32-row call checks ids and capacity before reset; visible() tracks progress.
     fn prefillStepFn(ptr: *anyopaque, stream: *lanes.Stream) !bool {
         const self = cast(ptr);
         if (self.owner) |o| {
@@ -120,7 +120,7 @@ pub const Vulkan = struct {
         return filled == ids.len;
     }
 
-    // A cancelled partial prompt: the engine holds a single sequence with no rewind, so keeping a prefix is impossible — a real reset releases the partially-prefilled state and the stream's ownership instead. A later release of the same stream is then a no-op.
+    // Cancellation cannot keep a partial prefix; reset clears state and ownership, so later release is a no-op.
     fn cancelPrefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {
         const self = cast(ptr);
         if (self.owner != stream) return error.UnknownQwenStream;
