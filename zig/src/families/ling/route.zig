@@ -128,7 +128,8 @@ pub fn selectF32(logits: []const f32, bias: []const f32, out: []Pick, s: Shape) 
         }
         out[k] = .{ .id = id, .wt = if (id < ne) score[id] else 0 };
         total += out[k].wt;
-        if (id < ne) choice[id] = -std.math.inf(f32);
+        // NaN, not -inf: a picked -inf slot would match the next -inf tie and repeat the id.
+        if (id < ne) choice[id] = std.math.nan(f32);
     }
     const den = total + 1e-20;
     for (out[0..s.topk]) |*p| p.wt = (p.wt / den) * s.scale;
@@ -158,7 +159,7 @@ pub fn selectF64(logits: []const f32, bias: []const f32, out: []Pick64, s: Shape
         }
         out[k] = .{ .id = id, .wt = if (id < ne) score[id] else 0 };
         total += out[k].wt;
-        if (id < ne) choice[id] = -std.math.inf(f64);
+        if (id < ne) choice[id] = std.math.nan(f64);
     }
     const den = total + 1e-20;
     for (out[0..s.topk]) |*p| p.wt = (p.wt / den) * @as(f64, s.scale);
@@ -188,7 +189,8 @@ test "tiny's 8 groups of 16 keeping 4: experts outside the kept groups never win
 
 test "ties on group scores keep the lower group" {
     const s = Shape{ .experts = 8, .topk = 2, .n_group = 4, .topk_group = 1, .scale = 1 };
-    var logits: [8]f32 = @splat(1);
+    // Global top-2 sit in groups 0 and 1; keep 1 must still stay in group 0.
+    const logits = [_]f32{ 3, 0, 3, 0, 0, 0, 0, 0 };
     var bias: [8]f32 = @splat(0);
     var out: [2]Pick = undefined;
     selectF32(&logits, &bias, &out, s);
@@ -313,4 +315,46 @@ test "negative kept choices still beat masked experts" {
     selectF32(&logits, &bias, &out, s);
     try t.expectEqual(@as(u32, 0), out[0].id);
     try t.expectEqual(@as(u32, 1), out[1].id);
+}
+
+fn expectDistinct(out: []const Pick) !void {
+    for (0..out.len) |i| for (0..i) |j| try t.expect(out[i].id != out[j].id);
+}
+
+test "a NaN as the last expert of a winning group does not drop that group" {
+    const s = Shape{ .experts = 128, .topk = 8, .n_group = 8, .topk_group = 4, .scale = 2.5 };
+    var logits: [128]f32 = @splat(0);
+    var bias: [128]f32 = @splat(0);
+    logits[0] = 2;
+    logits[1] = 2;
+    logits[15] = std.math.nan(f32);
+    var out: [8]Pick = undefined;
+    selectF32(&logits, &bias, &out, s);
+    for (0..8) |k| try t.expectEqual(@as(u32, @intCast(k)), out[k].id);
+}
+
+test "ids in a row are distinct, including all-NaN and one finite per group" {
+    const s = Shape{ .experts = 128, .topk = 8, .n_group = 8, .topk_group = 4, .scale = 2.5 };
+    var bias: [128]f32 = @splat(0);
+    var out: [8]Pick = undefined;
+    var all_nan: [128]f32 = @splat(std.math.nan(f32));
+    selectF32(&all_nan, &bias, &out, s);
+    try expectDistinct(&out);
+    var one: [128]f32 = @splat(std.math.nan(f32));
+    for (0..8) |g| one[g * 16 + 3] = 1;
+    selectF32(&one, &bias, &out, s);
+    try expectDistinct(&out);
+    for (out[0..4]) |p| try t.expect(p.id % 16 == 3 and p.id / 16 < 4);
+}
+
+test "equal tiny scores renormalize to 0.3125; all -100 stays 0" {
+    const s = Shape{ .experts = 128, .topk = 8, .n_group = 8, .topk_group = 4, .scale = 2.5 };
+    var bias: [128]f32 = @splat(0);
+    var out: [8]Pick = undefined;
+    var ten: [128]f32 = @splat(-10);
+    selectF32(&ten, &bias, &out, s);
+    for (out) |p| try t.expect(@abs(p.wt - 0.3125) < 1e-5);
+    var dead: [128]f32 = @splat(-100);
+    selectF32(&dead, &bias, &out, s);
+    for (out) |p| try t.expect(@abs(p.wt) < 1e-6);
 }
