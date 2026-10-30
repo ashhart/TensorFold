@@ -14,6 +14,18 @@ pub fn sharing() !usize {
     return std.fmt.parseInt(usize, std.mem.span(v), 10) catch error.BadGlmKvShare;
 }
 
+/// Below 4 states a stream, live streams evict each other's before a resume reaches them.
+pub fn fewStates(states: usize, parallel: usize) bool {
+    return states > 0 and states < 4 * parallel;
+}
+
+test "TF_GLM_KV_SHARE below 4 states a stream is too few; off is not" {
+    try std.testing.expect(fewStates(4, 4));
+    try std.testing.expect(fewStates(15, 4));
+    try std.testing.expect(!fewStates(16, 4));
+    try std.testing.expect(!fewStates(0, 4));
+}
+
 /// The store's rules: 512-row pages, states on the 2,048-row prompt grid, the MTP head's row at-1 keyed by token at.
 pub fn rules(grid: u32) radix.Rules {
     return .{ .page = page_rows, .planned = true, .grid = grid, .lookahead = 1, .min_prompt = 0, .tail = true };
