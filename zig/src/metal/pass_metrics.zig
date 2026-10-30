@@ -38,15 +38,17 @@ pub fn begin(enabled: bool, label: []const u8, window: u32, now: *const fn () f6
     changed = started;
 }
 pub const Scope = struct {
-    previous: Phase,
+    previous: ?Phase = null,
     pub fn end(s: Scope) void {
+        const previous = s.previous orelse return;
         if (active) {
             charge();
-            current = s.previous;
+            current = previous;
         }
     }
 };
 pub fn phase(p: Phase) Scope {
+    if (!active) return .{};
     const old = current;
     if (active) {
         charge();
@@ -158,5 +160,18 @@ test "pass metrics: a deferred keep may close the previous pass before the next 
     begin(true, "next", 32, testClock);
     try std.testing.expectEqual(@as(u32, 32), width);
     try std.testing.expectEqual(@as(u64, 0), buckets[0].allocations);
+    end();
+}
+
+test "pass metrics: a disabled scope cannot charge or redirect a later recording" {
+    const idle = phase(.keep);
+    begin(true, "later", 16, testClock);
+    const verify = phase(.verify);
+    test_time += 0.001;
+    idle.end();
+    test_time += 0.002;
+    verify.end();
+    try std.testing.expectApproxEqAbs(@as(f64, 3), buckets[@backingInt(Phase.verify)].ms, 1e-8);
+    try std.testing.expectEqual(@as(f64, 0), buckets[@backingInt(Phase.keep)].ms);
     end();
 }
