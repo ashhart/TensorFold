@@ -11,4 +11,13 @@ pub const records = [_]Record{
             .{ .vgprs = 184, .sgprs = 20, .lds = 32772, .private = 0, .bound = 128, .wave = 32 },
         },
     },
+    .{
+        .launch = .{ .name = "Flash Next index scores, 8 rows a wave", .symbol = "tf_fn_idx_scores8", .image = "flashnext", .threads = 256 },
+        .usage = .{
+            .{ .vgprs = 79, .sgprs = 26, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 93, .sgprs = 26, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 93, .sgprs = 26, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 93, .sgprs = 44, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
+        },
+    },
 };

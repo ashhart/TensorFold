@@ -1,5 +1,6 @@
 //! Flash Next's launches: stream norms, gates and mixes, the n-gram gate, conv and hashes, indexer, sparse attention.
 
+const std = @import("std");
 const Launcher = @import("../launches.zig").Launcher;
 const Module = @import("../module.zig").Module;
 const Function = @import("../module.zig").Function;
@@ -26,8 +27,10 @@ pub const Fns = struct {
     ple_conv: Function,
     ngram_ids: Function,
     idx_pool: Function,
+    qsa_prep: Function,
     idx_scores: Function,
     idx_scores_quad: Function,
+    idx_scores8: Function, // a verify window's 5-15 rows: 8 rows' dots a wave at once, the same scores
     idx_select: Function,
     sparse_parts: [2]Function, // groups of up to 6 and up to 12 query heads
     sparse_merge: Function,
@@ -42,8 +45,10 @@ pub const Fns = struct {
             .ple_conv = try m.function("tf_fn_ple_conv"),
             .ngram_ids = try m.function("tf_fn_ngram_ids"),
             .idx_pool = try m.function("tf_fn_idx_pool"),
+            .qsa_prep = try m.function("tf_fn_qsa_prep"),
             .idx_scores = try m.function("tf_fn_idx_scores"),
             .idx_scores_quad = try m.function("tf_fn_idx_scores_quad"),
+            .idx_scores8 = try m.function("tf_fn_idx_scores8"),
             .idx_select = try m.function("tf_fn_idx_select"),
             .sparse_parts = .{ try m.function("tf_fn_sparse_parts6"), try m.function("tf_fn_sparse_parts12") },
             .sparse_merge = try m.function("tf_fn_sparse_merge"),
@@ -317,8 +322,52 @@ pub fn idxPoolAt(
     try l.go(l.fnx.idx_pool, dim(rows, 1, 1), dim(threads, 1, 1), 0, s, &a);
 }
 
+/// flashnext/indexer.hpp's QsaRope and QsaPrep: a QSA layer's decode prep at device positions in one launch.
+pub const QsaRope = extern struct { src: u64 = 0, s_row: c_longlong = 0, s_head: c_int = 0, heads: c_int = 0, width: c_int = 0, weight: u64 = 0, wide: u64 = 0, cache: u64 = 0 };
+pub const QsaPrep = extern struct {
+    q: QsaRope = .{},
+    iq: QsaRope = .{},
+    k: QsaRope,
+    v: u64,
+    v_cache: u64,
+    v_width: c_int,
+    raw: u64,
+    raw_stride: c_longlong,
+    raw_offset: c_int,
+    raw_cache: u64,
+    raw_width: c_int,
+    pooled: u64,
+    pool_scale: u64,
+    ratio: c_int,
+    pos: u64,
+    seg_pos: u64,
+    rows: c_int,
+    n: c_int,
+    total: c_int,
+    kind: c_int,
+    eps: f32,
+    rotary: c_int,
+    theta: f32,
+};
+
+comptime {
+    std.debug.assert(@sizeOf(QsaRope) == 56 and @sizeOf(QsaPrep) == 304);
+}
+
+/// tf_fn_qsa_prep: a QSA layer's q/k rope, v and raw index key cache writes and completed-block pools in one launch.
+pub fn qsaPrep(l: *const Launcher, a: QsaPrep, s: S) Error!void {
+    if (a.n < 1 or a.k.width > 512 or a.q.width > 512 or a.iq.width > 512 or a.raw_width > threads or a.kind == 0) return util.invalid("qsaPrep");
+    const qt: c_int = if (a.q.src != 0) a.rows * (a.q.heads + a.iq.heads) else 0;
+    const tasks: c_int = qt + a.n * a.k.heads;
+    var args: Args = .{};
+    try args.add(a);
+    try l.go(l.fnx.qsa_prep, dim(cdiv(tasks, threads / 32) + 1, 1, 1), dim(threads, 1, 1), 0, s, &args);
+}
+
 /// Rows from which the block scores take tf_fn_idx_scores_quad (fewer: a verify window's, a wave a block).
 pub const quad_rows = 16;
+/// Rows from which (to quad_rows) the block scores take tf_fn_idx_scores8; fewer rows keep the plain kernel.
+pub const scores8_rows = 5;
 
 /// Every row's score of each of `blocks` pooled blocks it has complete, for rows past `top` complete blocks.
 pub fn idxScores(
@@ -343,6 +392,12 @@ pub fn idxScores(
         var b: Args = .{};
         inline for (.{ ad(q), ad(pooled), ad(complete), ad(scores), kind, rows, blocks, stride, top }) |v| try b.add(v);
         return l.go(l.fnx.idx_scores_quad, dim(cdiv(blocks, 64), cdiv(rows, 32), 1), dim(128, 1, 1), 0, s, &b);
+    }
+    // a verify window's rows of the same heads: a wave's 8 rows' dots at once, the same sums (indexer.hpp)
+    if (rows >= scores8_rows and heads == 4 and dims == 128) {
+        var c: Args = .{};
+        inline for (.{ ad(q), ad(pooled), ad(complete), ad(scores), kind, rows, blocks, stride, top }) |v| try c.add(v);
+        return l.go(l.fnx.idx_scores8, dim(cdiv(blocks, threads / 32), cdiv(rows, 8), 1), dim(threads, 1, 1), 0, s, &c);
     }
     var a: Args = .{};
     inline for (.{

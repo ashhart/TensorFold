@@ -1,4 +1,4 @@
-//! Flash Next's index block scores under the contract on HIP: the quad form.
+//! Flash Next's index block scores under the contract on HIP: the quad and window forms.
 const std = @import("std");
 const hip = @import("hip");
 const core = @import("core");
@@ -16,7 +16,7 @@ const dims = 128;
 /// Rows past `top` complete blocks score them; every row here completes every block, so every score is written.
 const top = 0;
 
-pub const Which = enum { quad };
+pub const Which = enum { quad, eight };
 
 const relu_nan = "relu is fmaxf(x, 0): a NaN head dot scores 0 where float64 keeps the NaN";
 
@@ -25,18 +25,24 @@ fn laneDepth(_: c.Shape) usize {
     return 1 + dims / 32 + 5 + heads;
 }
 
-const names = [1][2][]const u8{
+const names = [2][2][]const u8{
     .{ "hip flashnext tf_fn_idx_scores_quad (fp16 keys)", "hip flashnext tf_fn_idx_scores_quad (bf16 keys)" },
+    .{ "hip flashnext tf_fn_idx_scores8 (fp16 keys)", "hip flashnext tf_fn_idx_scores8 (bf16 keys)" },
 };
 
-/// A prompt slice's rows (16 and up).
+/// A prompt slice's rows (16 and up) and a verify window's (5 to 15).
 const quad_served = [_]c.Shape{
     .{ .rows = 32, .n = 1100, .k = dims },
     .{ .rows = 64, .n = 300, .k = dims },
     .{ .rows = 16, .n = 2048, .k = dims },
 };
+const eight_served = [_]c.Shape{
+    .{ .rows = 5, .n = 1100, .k = dims },
+    .{ .rows = 8, .n = 2048, .k = dims },
+    .{ .rows = 15, .n = 300, .k = dims },
+};
 
-/// rows x blocks scores of shape.k = 128 dims; the quad form must equal tf_fn_idx_scores bit for bit.
+/// rows x blocks scores of shape.k = 128 dims; the quad and window forms must equal tf_fn_idx_scores bit for bit.
 pub fn spec(w: Which, k: kit.Kind) c.Spec {
     var s: c.Spec = .{
         .name = names[@backingInt(w)][@intFromBool(k == .bf16)],
@@ -51,6 +57,11 @@ pub fn spec(w: Which, k: kit.Kind) c.Spec {
         .quad => {
             s.replaces = "tf_fn_idx_scores";
             s.tiles = .{ .{ .size = 32 }, .{ .size = 64 }, .{} };
+        },
+        .eight => {
+            s.replaces = "tf_fn_idx_scores";
+            s.tiles = .{ .{ .size = 8 }, .{ .size = 8 }, .{} };
+            s.served = &eight_served;
         },
     }
     return s;
@@ -171,6 +182,11 @@ pub const Scores = struct {
                 inline for (.{ self.dq, self.dk, self.dc, out, kind, n, blocks, stride, t }) |v| try a.add(v);
                 const grid: hip.launch.Dim3 = .{ .x = @intCast(bx), .y = @intCast((s.rows + 31) / 32) };
                 try hip.launch.launch(f.idx_scores_quad, .{ .grid = grid, .block = .{ .x = 128 } }, st, &a);
+            },
+            .eight => {
+                inline for (.{ self.dq, self.dk, self.dc, out, kind, n, blocks, stride, t }) |v| try a.add(v);
+                const grid: hip.launch.Dim3 = .{ .x = @intCast((s.n + 7) / 8), .y = @intCast((s.rows + 7) / 8) };
+                try hip.launch.launch(f.idx_scores8, .{ .grid = grid, .block = .{ .x = 256 } }, st, &a);
             },
         }
     }

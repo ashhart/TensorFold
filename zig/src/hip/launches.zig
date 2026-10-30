@@ -38,7 +38,7 @@ const plan = @import("launches/plan.zig");
 const elementwise = @import("launches/elementwise.zig");
 const draw = @import("launches/draw.zig");
 const tp = @import("launches/tp.zig");
-const flashnext = @import("launches/flashnext.zig");
+pub const flashnext = @import("launches/flashnext.zig");
 const mamba = @import("launches/mamba.zig");
 const nemotron_moe = @import("launches/nemotron_moe.zig");
 
@@ -374,6 +374,7 @@ pub const Launcher = struct {
     pub const fn_ngram_ids = flashnext.ngramIds;
     pub const fn_idx_pool = flashnext.idxPool;
     pub const fn_idx_pool_at = flashnext.idxPoolAt;
+    pub const fn_qsa_prep = flashnext.qsaPrep;
     pub const fn_idx_scores = flashnext.idxScores;
     pub const fn_idx_select = flashnext.idxSelect;
     pub const fn_sparse_attention = flashnext.sparseAttention;

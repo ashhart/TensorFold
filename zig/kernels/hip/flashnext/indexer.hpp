@@ -1,6 +1,7 @@
 #pragma once
 
 #include "streams.hpp"
+#include "../ops/qk_rope_wave.hpp"
 
 // The sparse attention's indexer: pooled block keys, each row's block scores, and the blocks a row attends.
 
@@ -9,17 +10,11 @@ namespace {
 constexpr int kSelectThreads = 1024;
 constexpr int kSelectWaves = kSelectThreads / 32;
 
-// Block b: the mean of its ratio raw keys, RMS-normed with scale and rotated at its first position, as tf_qk_rope.
-extern "C" __global__ void __launch_bounds__(kFnThreads)
-tf_fn_idx_pool(const void* raw, void* pooled, const float* scale, int kind, int first, const int* pos, int dims,
-               int ratio, int rotary, float theta, float eps) {
-    __shared__ float scratch[kFnWaves];
-    __shared__ float normed[kFnThreads];
-    // With `pos`, launch x is a row whose completed block (if any) fills slot b; else block first + x fills slot x.
-    const int end = pos ? pos[blockIdx.x] + 1 : 0;
-    if (pos && end % ratio != 0) return;
-    const int b = pos ? end / ratio - 1 : first + blockIdx.x, d = threadIdx.x;
-    const long long slot = pos ? b : blockIdx.x;
+// Block b (kFnThreads): the mean of its ratio raw keys, normed and rotated as tf_qk_rope, into slot `slot` of pooled.
+__device__ __forceinline__ void fn_idx_pool_block(const void* raw, void* pooled, const float* scale, int kind, int b,
+                                                  long long slot, int dims, int ratio, int rotary, float theta, float eps,
+                                                  float* scratch, float* normed) {
+    const int d = threadIdx.x;
     float x = 0.f;
     if (d < dims) {
         float m = 0.f;
@@ -40,6 +35,110 @@ tf_fn_idx_pool(const void* raw, void* pooled, const float* scale, int kind, int 
         y = d < half ? normed[f] * c - normed[f + half] * s : normed[f] * s + normed[f + half] * c;
     }
     store(pooled, kind, slot * dims + d, rounded(y, kind));
+}
+
+// Block b: the mean of its ratio raw keys, RMS-normed with scale and rotated at its first position, as tf_qk_rope.
+extern "C" __global__ void __launch_bounds__(kFnThreads)
+tf_fn_idx_pool(const void* raw, void* pooled, const float* scale, int kind, int first, const int* pos, int dims,
+               int ratio, int rotary, float theta, float eps) {
+    __shared__ float scratch[kFnWaves];
+    __shared__ float normed[kFnThreads];
+    // With `pos`, launch x is a row whose completed block (if any) fills slot b; else block first + x fills slot x.
+    const int end = pos ? pos[blockIdx.x] + 1 : 0;
+    if (pos && end % ratio != 0) return;
+    const int b = pos ? end / ratio - 1 : first + blockIdx.x;
+    fn_idx_pool_block(raw, pooled, scale, kind, b, pos ? b : blockIdx.x, dims, ratio, rotary, theta, eps, scratch, normed);
+}
+
+// A QSA layer's decode prep in one launch: q, index q and k as tf_qk_rope, v and the raw index key cached, the pools.
+struct QsaRope {
+    const void* src;
+    long long s_row;
+    int s_head;
+    int heads;
+    int width;
+    const float* weight;
+    float* wide;   // fp32 rows (heads x width a row), or null
+    void* cache;   // the cache's heads of `total` slots of width, or null
+};
+struct QsaPrep {
+    QsaRope q, iq, k;
+    const void* v;          // the segment's v rows (k.heads x v_width)
+    void* v_cache;
+    int v_width;
+    const void* raw;        // the index projection rows; the raw key at raw_offset, rows raw_stride apart
+    long long raw_stride;
+    int raw_offset;
+    void* raw_cache;        // one head of `total` slots of raw_width
+    int raw_width;
+    void* pooled;
+    const float* pool_scale;
+    int ratio;
+    const int* pos;         // q and index q rows' positions (rows)
+    const int* seg_pos;     // the segment's rows' positions (n)
+    int rows;
+    int n;
+    int total;
+    int kind;
+    float eps;
+    int rotary;
+    float theta;
+};
+
+extern "C" __global__ void __launch_bounds__(kFnThreads) tf_fn_qsa_prep(QsaPrep a) {
+    const int tq = a.q.src ? a.rows * a.q.heads : 0;
+    const int tiq = a.q.src ? a.rows * a.iq.heads : 0;
+    const int tasks = tq + tiq + a.n * a.k.heads;
+    const int rope_blocks = (tasks + kFnWaves - 1) / kFnWaves;
+    if (static_cast<int>(blockIdx.x) < rope_blocks) {
+        __shared__ float row_v[kFnWaves][512];
+        const int wave = threadIdx.x >> 5;
+        const int g = blockIdx.x * kFnWaves + wave;
+        const bool live = g < tasks;
+        const int which = !live || g < tq ? 0 : g < tq + tiq ? 1 : 2;
+        const QsaRope& t = which == 0 ? a.q : which == 1 ? a.iq : a.k;
+        const int gi = !live ? 0 : which == 0 ? g : which == 1 ? g - tq : g - tq - tiq;
+        const int r = gi / t.heads, h = gi % t.heads;
+        qk_rope_norm(t.src, a.kind, r * t.s_row + static_cast<long long>(h) * t.s_head, t.weight, a.eps, t.width, live,
+                     row_v[wave]);
+        __syncthreads();
+        if (!live) return;
+        const int p = (which == 2 ? a.seg_pos : a.pos)[r];
+        qk_rope_put(a.kind, t.width, a.rotary, a.theta, p, row_v[wave],
+                    t.wide ? t.wide + static_cast<long long>(gi) * t.width : nullptr, t.cache,
+                    (static_cast<long long>(h) * a.total + p) * t.width);
+        return;
+    }
+    // the last block: v and the raw index key into their caches (16-bit or fp32 values copied), then the pools
+    const int first = a.seg_pos[0];
+    const long long nv = static_cast<long long>(a.n) * a.k.heads * a.v_width;
+    for (long long i = threadIdx.x; i < nv; i += kFnThreads) {
+        const int j = static_cast<int>(i % a.v_width);
+        const int h = static_cast<int>((i / a.v_width) % a.k.heads);
+        const int r = static_cast<int>(i / (static_cast<long long>(a.v_width) * a.k.heads));
+        const long long to = (static_cast<long long>(h) * a.total + first + r) * a.v_width + j;
+        if (a.kind == 0) static_cast<float*>(a.v_cache)[to] = static_cast<const float*>(a.v)[i];
+        else static_cast<uint16_t*>(a.v_cache)[to] = static_cast<const uint16_t*>(a.v)[i];
+    }
+    const long long nr = static_cast<long long>(a.n) * a.raw_width;
+    for (long long i = threadIdx.x; i < nr; i += kFnThreads) {
+        const long long r = i / a.raw_width;
+        const int c = static_cast<int>(i % a.raw_width);
+        const long long from = r * a.raw_stride + a.raw_offset + c;
+        const long long to = (first + r) * a.raw_width + c;
+        if (a.kind == 0) static_cast<float*>(a.raw_cache)[to] = static_cast<const float*>(a.raw)[from];
+        else static_cast<uint16_t*>(a.raw_cache)[to] = static_cast<const uint16_t*>(a.raw)[from];
+    }
+    __shared__ float scratch[kFnWaves];
+    __shared__ float normed[kFnThreads];
+    for (int r = 0; r < a.n; ++r) {
+        __syncthreads();
+        const int end = a.seg_pos[r] + 1;
+        if (end % a.ratio != 0) continue;
+        const int b = end / a.ratio - 1;
+        fn_idx_pool_block(a.raw_cache, a.pooled, a.pool_scale, a.kind, b, b, a.raw_width, a.ratio, a.rotary, a.theta,
+                          a.eps, scratch, normed);
+    }
 }
 
 // Wave w of block (x, y) scores block 8 x + w for rows 8 y ..: the sum over heads of relu(q . key) / sqrt(dims).
@@ -75,6 +174,51 @@ tf_fn_idx_scores(const float* q, const void* pooled, const int* complete, float*
             for (int mask = 16; mask > 0; mask >>= 1) dot += __shfl_xor(dot, mask, 32);
             total += fmaxf(dot, 0.f);
         }
+        if (lane == 0) scores[r * stride + b] = total / norm;
+    }
+}
+
+// tf_fn_idx_scores for 4 x 128 index heads at a window's rows: a wave's 8 rows' dots before the butterflies: same bits.
+extern "C" __global__ void __launch_bounds__(kFnThreads)
+tf_fn_idx_scores8(const float* q, const void* pooled, const int* complete, float* scores, int kind, int rows,
+                  int blocks, long long stride, int top) {
+    constexpr int R = 8, H = 4, D = 128, I = D / 32;
+    const int lane = threadIdx.x & 31;
+    const int b = blockIdx.x * kFnWaves + (threadIdx.x >> 5);
+    const int r0 = blockIdx.y * R, r1 = min(rows, r0 + R);
+    bool wanted = false;  // a graph launches over a bound of blocks: those no row scores read nothing
+    for (int r = r0; r < r1; ++r) wanted = wanted || (complete[r] > top && b < complete[r]);
+    if (b >= blocks || !wanted) return;
+    float key[I];
+#pragma unroll
+    for (int i = 0; i < I; ++i) key[i] = load(pooled, kind, static_cast<long long>(b) * D + lane + 32 * i);
+    float dot[R][H];
+#pragma unroll
+    for (int j = 0; j < R; ++j) {
+        const int r = min(r0 + j, rows - 1);
+#pragma unroll
+        for (int h = 0; h < H; ++h) {
+            const float* qh = q + (static_cast<long long>(r) * H + h) * D;
+            float x = 0.f;
+#pragma unroll
+            for (int i = 0; i < I; ++i) x += qh[lane + 32 * i] * key[i];
+            dot[j][h] = x;
+        }
+    }
+#pragma unroll
+    for (int mask = 16; mask > 0; mask >>= 1)
+#pragma unroll
+        for (int j = 0; j < R; ++j)
+#pragma unroll
+            for (int h = 0; h < H; ++h) dot[j][h] += __shfl_xor(dot[j][h], mask, 32);
+    const float norm = sqrtf(static_cast<float>(D));
+#pragma unroll
+    for (int j = 0; j < R; ++j) {
+        const int r = r0 + j;
+        if (r >= r1 || complete[r] <= top || b >= complete[r]) continue;
+        float total = 0.f;
+#pragma unroll
+        for (int h = 0; h < H; ++h) total += fmaxf(dot[j][h], 0.f);
         if (lane == 0) scores[r * stride + b] = total / norm;
     }
 }
@@ -179,6 +323,7 @@ extern "C" __global__ void __launch_bounds__(kSelectThreads)
 tf_fn_idx_select(const float* scores, long long stride, const int* complete, const int* ends, int* keys,
                  long long key_stride, int* count, int* sparse, int top, int ratio) {
     __shared__ int hist[256];
+    __shared__ int suf[256];
     __shared__ int waves[kSelectWaves];
     __shared__ unsigned cut_s;
     __shared__ int need_s;
@@ -202,11 +347,32 @@ tf_fn_idx_select(const float* scores, long long stride, const int* complete, con
             if ((k & mask) == prefix) atomicAdd(&hist[(k >> shift) & 255u], 1);
         }
         __syncthreads();
-        if (t == 0) {
-            int above = 0, bin = 255;
-            while (above + hist[bin] < need) above += hist[bin--];
-            cut_s = prefix | (static_cast<unsigned>(bin) << shift);
-            need_s = need - above;
+        // suf[i]: the count in bins 255 - i .. 255 (8 waves of 32 bins: a wave's scan, then the waves above it)
+        if (t < 256) {
+            const int lane = t & 31;
+            int x = hist[255 - t];
+#pragma unroll
+            for (int off = 1; off < 32; off <<= 1) {
+                const int y = __shfl_up(x, off, 32);
+                if (lane >= off) x += y;
+            }
+            if (lane == 31) waves[t >> 5] = x;
+            suf[t] = x;
+        }
+        __syncthreads();
+        if (t < 256) {
+            int add = 0;
+            for (int w = 0; w < (t >> 5); ++w) add += waves[w];
+            suf[t] += add;
+        }
+        __syncthreads();
+        // the cut: the one i with suf[i] >= need and the bins above it under need (the bins hold at least need)
+        if (t < 256) {
+            const int above = t > 0 ? suf[t - 1] : 0;
+            if (suf[t] >= need && above < need) {
+                cut_s = prefix | (static_cast<unsigned>(255 - t) << shift);
+                need_s = need - above;
+            }
         }
         __syncthreads();
         prefix = cut_s;

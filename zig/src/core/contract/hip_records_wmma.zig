@@ -1,4 +1,4 @@
-//! Gate 5's records of the gfx11 matrix-core prompt tiles.
+//! Gate 5's records of the gfx11 matrix-core prompt tiles and Flash Next's attention launches.
 const limits = @import("limits.zig");
 const Record = @import("hip_records.zig").Record;
 
@@ -64,6 +64,15 @@ pub const records = [_]Record{
             .{ .vgprs = 246, .sgprs = 22, .lds = 39936, .private = 0, .bound = 256, .wave = 32 },
             .{ .vgprs = 246, .sgprs = 22, .lds = 39936, .private = 0, .bound = 256, .wave = 32 },
             .{ .vgprs = 0, .sgprs = 0, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
+        },
+    },
+    .{
+        .launch = .{ .name = "Flash Next QSA decode prep", .symbol = "tf_fn_qsa_prep", .image = "flashnext", .threads = 256 },
+        .usage = .{
+            .{ .vgprs = 36, .sgprs = 50, .lds = 17440, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 43, .sgprs = 50, .lds = 17440, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 34, .sgprs = 52, .lds = 17440, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 34, .sgprs = 51, .lds = 17440, .private = 0, .bound = 256, .wave = 32 },
         },
     },
 };

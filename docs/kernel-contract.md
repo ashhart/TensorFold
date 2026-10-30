@@ -224,9 +224,12 @@ CUDA also checks Nemotron's pocket (`nemotron_ops.cu`, the learned neurons the l
 shared expert): relu^2 up into act rows and down added into the shared expert's slot, a block row a row and tiled, the
 down to fp32 and bf16, against float64, the neurons past the count NaN so a read of one shows (two controls: the up's
 relu by `fmaxf`, and the down launched one neuron short).
-HIP also checks Flash Next's index block scores over 4 heads of 128: `tf_fn_idx_scores_quad` (4 lanes a score),
-bit-equal to `tf_fn_idx_scores`. Its relu is `fmaxf(x, 0)`: a NaN head dot scores 0 where float64 keeps the NaN, a
-known finding as `tf_glm_scores`'s is.
+HIP also checks Flash Next's index block scores over 4 heads of 128: `tf_fn_idx_scores_quad` (4 lanes a score) and
+`tf_fn_idx_scores8` (8 rows a wave), each bit-equal to `tf_fn_idx_scores`. Their relu is `fmaxf(x, 0)`: a NaN head
+dot scores 0 where float64 keeps the NaN, a known finding as `tf_glm_scores`'s is.
+HIP also checks Flash Next's QSA decode prep, `tf_fn_qsa_prep`, bit-equal to the seven launches it replaces (`tf_qk_rope`
+for q, the index q and k, `tf_kv_write_at` for v and the raw index key, `tf_copy_cols` and `tf_fn_idx_pool_at`) on 1 to
+15 rows, its fp32 rows and its caches and pools each registered, the caches' earlier contents prepared.
 
 ## CUDA records per nvcc release
 
