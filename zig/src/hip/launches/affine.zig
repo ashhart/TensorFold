@@ -14,6 +14,7 @@ const registry = @import("core").registry;
 const quant = @import("core").quant;
 const tuning = @import("../tuning/tuning.zig");
 const mlx_entries = @import("mlx_entries.zig");
+const stream_layout = @import("stream_layout.zig");
 
 const Error = runtime.Error;
 
@@ -42,19 +43,7 @@ pub const Arg = extern struct {
     out16: u64 = 0,
 };
 
-/// quant/mlx_tiles.hpp's StreamSides: up to four products that share x, K, width and group in one launch.
-pub const StreamSides = extern struct {
-    words: [4]u64 = @splat(0),
-    scale: [4]u64 = @splat(0),
-    bias: [4]u64 = @splat(0),
-    out: [4]u64 = @splat(0),
-    n: [4]c_int = @splat(0),
-    first: [5]c_int = @splat(0),
-    count: c_int = 0,
-    out_half: c_int = 0,
-    pair_cols: c_int = 0,
-    limit: f32 = 0,
-};
+pub const StreamSides = stream_layout.StreamSides;
 
 /// One side of a group: its matrix and where its (rows, n) output goes.
 pub const Side = struct { words: u64, scale: u64, bias: u64, n: c_int, out: u64 };
@@ -134,6 +123,8 @@ pub const Kernels = struct {
     relu2_pair: [bit_widths.len][stream_rows.len][stream_cbs.len]?Function,
     /// Off keeps the decode tiles before the stream tile (the policy's reference switch).
     stream_on: bool,
+    /// Off lays a round's stream row blocks on the grid's y: the reference layout the interleaved one must equal.
+    stream_interleave: bool,
     block: [bit_widths.len]Function,
     gemm: [bit_widths.len]Function,
     wmma_gemm: [bit_widths.len]Function,
@@ -156,6 +147,7 @@ pub const Kernels = struct {
         k.mode = choices.matrix;
         k.tile = if (choices.gemm) .gemm else .block;
         k.stream_on = choices.stream;
+        k.stream_interleave = true;
         k.reg = Registry.init(tableFor(caps), &mlx_entries.all);
         k.reg.verify(k.env(), .mlx) catch return error.Invalid;
         // the GEMM tile's rows of x a lane keeps (tiles/gemm.hpp GemmShape): 8 for BF16, 16 for FP16
@@ -377,7 +369,9 @@ pub const Kernels = struct {
         }));
         const table = if (sides.pair_cols > 0) &k.pairs else if (relu2) &k.relu2 else &k.stream;
         const f = table[b][ri][pick].?;
-        try go(r, f, .{ .x = blocks, .y = cdiv(a.m, stream_rows[ri]), .z = @intCast(items) }, .{ .x = 32 * stream_waves }, s, &args);
+        // a column block's row blocks run next to each other on x, so the later ones read its weights from cache
+        const grid = stream_layout.grid(k.stream_interleave, blocks, cdiv(a.m, stream_rows[ri]), items);
+        try go(r, f, grid, .{ .x = 32 * stream_waves }, s, &args);
     }
 
     /// One row on the row tile: a lane owns a group, a wave reads a column's row in one run.
@@ -596,4 +590,5 @@ test "the lane groups of a row tile" {
 
 test {
     _ = mlx_entries;
+    _ = stream_layout;
 }
