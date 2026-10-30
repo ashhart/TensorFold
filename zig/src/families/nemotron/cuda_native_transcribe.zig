@@ -3,7 +3,9 @@ const native = @import("cuda_native.zig");
 
 pub const model_type = "nemo_speechlm";
 pub const formats = native.formats;
-pub const default_context = native.default_context;
+/// The card's trained window: llm_config's 262144 is the backbone's, which this speech model was not trained to.
+pub const trained_context: i64 = 65536;
+pub const default_context = trained_context;
 pub const max_segments = native.max_segments;
 pub const prompt_rows = native.prompt_rows;
 pub const Options = native.Options;

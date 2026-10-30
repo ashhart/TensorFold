@@ -25,6 +25,11 @@ pub fn limit() u32 {
     return nemo_audio.Config.limit();
 }
 
+/// The rows buffer for a `context`-token window: an hour of audio, or the window when it holds less.
+pub fn limitFor(context: usize) u32 {
+    return @intCast(@min(context, limit()));
+}
+
 /// A WAV file's samples and rows; error.AudioTooShort or error.AudioTooLong past what the encoder takes.
 pub fn prepare(a: std.mem.Allocator, data: []const u8) !Prepared {
     const samples = try nemo_audio.wav.decode(a, data);
@@ -66,14 +71,14 @@ pub const Audio = struct {
         return a;
     }
 
-    /// The checkpoint's audio encoder and a rows buffer for an hour of audio in the language model's width.
-    pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []const u8, hidden: usize) !*Audio {
+    /// The checkpoint's audio encoder and a rows buffer of `rows_limit` rows in the language model's width.
+    pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []const u8, rows_limit: u32, hidden: usize) !*Audio {
         const enc = try gpa.create(nemo_audio.Encoder);
         errdefer gpa.destroy(enc);
         enc.* = try nemo_audio.Encoder.init(gpa, io, d, dir);
         errdefer enc.deinit();
         if (enc.c.output != hidden) return error.AudioWidth;
-        const a = try init(gpa, d, limit(), hidden);
+        const a = try init(gpa, d, rows_limit, hidden);
         a.encoder = enc;
         return a;
     }
@@ -149,6 +154,8 @@ test "audio plan: clips in prompt order, rows back to back, a restored prefix's 
 
 test "audio limit: an hour of audio's rows" {
     try std.testing.expectEqual(@as(u32, 45000), limit());
+    try std.testing.expectEqual(@as(u32, 32768), limitFor(32768));
+    try std.testing.expectEqual(@as(u32, 45000), limitFor(65536));
 }
 
 test "audio begin: a pass refused after planning leaves no spans for the next one" {
