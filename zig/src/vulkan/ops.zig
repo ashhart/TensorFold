@@ -173,8 +173,7 @@ pub const Ops = struct {
         try pipe.run(cmds, std.mem.asBytes(&p), dispatchGroups(count, pipe.local[0]), timeout_ns);
     }
 
-    /// gather_take with u32 indices: out element t reads table[id * window + s]; an out-of-range id gathers zero.
-    /// The caller owns index validation (see ops_q4.checkIds); the zero write is the shader's documented read.
+    // gather_take with u32 indices: out element t reads table[id * window + s]; an out-of-range id gathers zero. The caller owns index validation (see ops_q4.checkIds); the zero write is the shader's documented read.
     pub fn gather(o: *Ops, cmds: *Commands, out: tensor.View, table: tensor.View, ids: tensor.View, rows: u64, timeout_ns: u64) Error!void {
         if (ids.kind != .u32 or table.kind != out.kind) return error.Invalid;
         const pipe = switch (out.kind) {

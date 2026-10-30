@@ -1,75 +1,12 @@
 // Copyright © 2026 Joshua Warren / mlx-omarchy contributors.
 // SPDX-License-Identifier: MIT
-//
-// Fused rotary embedding matching mlx::core::fast::RoPE (mlx/fast.cpp, pinned
-// 0.32.2) whose upstream Metal reference is rope.metal. No shared memory,
-// no barriers.
-//
-// Contract cases the kernel implements:
-//   - traditional (interleaved pairs, flags bit 1) and half-split layouts
-//   - forward and inverse (flags bit 0; the inverse form serves the VJP)
-//   - inv_freqs from the base, exp((-i) * log(base)/(dims/2)) with beta
-//     precomputed on the host in float, or from a float32 freqs buffer
-//     (USE_FREQS: 1/freqs[i], matching reciprocal() = 1.0f/x)
-//   - per-batch int32 offsets read from device memory (stride matrix_m; 0
-//     for a scalar offset), positions = (t + offset) * scale in float32
-//   - float32, float16, bfloat16 storage; each intermediate rounds once to
-//     storage precision exactly like the eager elementwise/cast kernels the
-//     fallback composition dispatches, so the fused output matches the
-//     composed path bit for bit in float16 and bfloat16. Float32 lands
-//     within an absolute 1e-6: the driver may contract x*y - z*w into a
-//     fused multiply-add and the composed path can never do that because
-//     its intermediates cross kernel boundaries; cancellation can amplify
-//     the round-off to many ulps while the absolute error stays at or
-//     below ~1e-8 (observed; pinned at 1e-6 in the value tests).
-//   - strided inputs: row-contiguous, 3D strided, and the 4D head/sequence
-//     transposed layout (flags bit 4) read through their strides; partial
-//     rotation (flags bit 3) also writes the passthrough tail from the
-//     input; anything else the host materializes into a temporary first
-//
-// The bfloat16 branch deliberately avoids a 16-bit-typed storage block: a
-// uint16_t block compiled from this exact source returns recycled-memory
-// garbage on llvmpipe (observed 2026-09-03, stable across -Os/-O0 and
-// across arithmetic changes, while the float16 twin of the same shader is
-// bit-exact). The workaround is the repo's proven form - 32-bit word IO
-// with constant shifts and select chains only, as in reduce_general's
-// load_truthy fix (commit cf68e7d) - not a new 16-bit form. The two lanes
-// of one output word can belong to different invocations, so the packed
-// output store is a disjoint-half atomicOr pair, not a read-modify-write.
-//
-// The input and output bindings are readonly and writeonly and never alias:
-// the host rotates into a fresh output buffer instead of updating the input
-// in place. Binding one buffer readonly in one slot and writeonly in
-// another and then aliasing them drops stores on llvmpipe (observed
-// 2026-09-03: the even outputs kept their stale copy-in values), so no
-// path may rely on that form. scatter.comp's in-place output stays a
-// single binding for the same reason.
-//
-// Sin/cos are the GLSL built-ins, the same calls the eager composition makes
-// through elementwise.comp cases 11/12. The kTrigArgumentLimit gate (1e5,
-// primitives.cpp) ran per eager Sin/Cos primitive; fusion removes those
-// primitive sites while the theta construction is unchanged, so the trusted
-// envelope documented there applies verbatim. RoPE::eval_gpu carries an
-// equivalent magnitude gate; see rope_trig_gate in primitives.cpp.
-//
-// No data-dependent shift-and-mask appears anywhere: the only shifts are
-// the constant 16-lane shifts of the bf16 word IO and the even/odd pair
-// split, the device-probed select-chain form (commit cf68e7d).
-//
-// Push-constant mapping (ComputeParams fields):
-//   count        B*N*T*(dims/2), or B*N*T*D with the passthrough flag
-//   alpha        scale
-//   beta         float(log(base)/(dims/2)), base variant only
-//   flags        bit0 forward, bit1 traditional, bit2 head-seq transpose,
-//                bit3 passthrough (dims < D)
-//   dims         dims/2
-//   shape[0]     N, the product of the middle dimensions
-//   shape[1]     T
-//   shape[2]     D, the rotated-axis extent (passthrough only)
-//   matrix_m     offset stride, 0 for a scalar offset
-//   lhs/output/rhs/aux_offset   item offsets of input/output/offset/freqs
-//   in_strides   input strides (head matrix, time, feature)
-//   out_strides  output strides (head matrix, time, feature)
+//  Fused rotary embedding matching mlx::core::fast::RoPE (mlx/fast.cpp, pinned 0.32.2) whose upstream Metal reference is rope.metal. No shared memory, no barriers.
+//  Contract cases the kernel implements: - traditional (interleaved pairs, flags bit 1) and half-split layouts - forward and inverse (flags bit 0; the inverse form serves the VJP) - inv_freqs from the base, exp((-i) * log(base)/(dims/2)) with beta precomputed on the host in float, or from a float32 freqs buffer (USE_FREQS: 1/freqs[i], matching reciprocal() = 1.0f/x) - per-batch int32 offsets read from device memory (stride matrix_m; 0 for a scalar offset), positions = (t + offset) * scale in float32 - float32, float16, bfloat16 storage; each intermediate rounds once to storage precision exactly like the eager elementwise/cast kernels the fallback composition dispatches, so the fused output matches the composed path bit for bit in float16 and bfloat16. Float32 lands within an absolute 1e-6: the driver may contract x*y - z*w into a fused multiply-add and the composed path can never do that because its intermediates cross kernel boundaries; cancellation can amplify the round-off to many ulps while the absolute error stays at or below ~1e-8 (observed; pinned at 1e-6 in the value tests). - strided inputs: row-contiguous, 3D strided, and the 4D head/sequence transposed layout (flags bit 4) read through their strides; partial rotation (flags bit 3) also writes the passthrough tail from the input; anything else the host materializes into a temporary first
+//  The bfloat16 branch deliberately avoids a 16-bit-typed storage block: a uint16_t block compiled from this exact source returns recycled-memory garbage on llvmpipe (observed 2026-09-03, stable across -Os/-O0 and across arithmetic changes, while the float16 twin of the same shader is bit-exact). The workaround is the repo's proven form - 32-bit word IO with constant shifts and select chains only, as in reduce_general's load_truthy fix (commit cf68e7d) - not a new 16-bit form. The two lanes of one output word can belong to different invocations, so the packed output store is a disjoint-half atomicOr pair, not a read-modify-write.
+//  The input and output bindings are readonly and writeonly and never alias: the host rotates into a fresh output buffer instead of updating the input in place. Binding one buffer readonly in one slot and writeonly in another and then aliasing them drops stores on llvmpipe (observed 2026-09-03: the even outputs kept their stale copy-in values), so no path may rely on that form. scatter.comp's in-place output stays a single binding for the same reason.
+//  Sin/cos are the GLSL built-ins, the same calls the eager composition makes through elementwise.comp cases 11/12. The kTrigArgumentLimit gate (1e5, primitives.cpp) ran per eager Sin/Cos primitive; fusion removes those primitive sites while the theta construction is unchanged, so the trusted envelope documented there applies verbatim. RoPE::eval_gpu carries an equivalent magnitude gate; see rope_trig_gate in primitives.cpp.
+//  No data-dependent shift-and-mask appears anywhere: the only shifts are the constant 16-lane shifts of the bf16 word IO and the even/odd pair split, the device-probed select-chain form (commit cf68e7d).
+//  Push-constant mapping (ComputeParams fields): count B*N*T*(dims/2), or B*N*T*D with the passthrough flag alpha scale beta float(log(base)/(dims/2)), base variant only flags bit0 forward, bit1 traditional, bit2 head-seq transpose, bit3 passthrough (dims < D) dims dims/2 shape[0] N, the product of the middle dimensions shape[1] T shape[2] D, the rotated-axis extent (passthrough only) matrix_m offset stride, 0 for a scalar offset lhs/output/rhs/aux_offset item offsets of input/output/offset/freqs in_strides input strides (head matrix, time, feature) out_strides output strides (head matrix, time, feature)
 
 #version 460
 
@@ -93,34 +30,12 @@ void rope_store(uint abs_index, float value) {
   output_data.values[abs_index] = float16_t(value);
 }
 float rope_round(float value) {
-  // Round to storage precision and back to float: the eager composition
-  // stores every intermediate at storage precision and the next kernel
-  // loads it back, so every intermediate here passes through rope_round
-  // the same way. That is what makes float16 match the composed path bit
-  // for bit.
+  // Round to storage precision and back to float: the eager composition stores every intermediate at storage precision and the next kernel loads it back, so every intermediate here passes through rope_round the same way. That is what makes float16 match the composed path bit for bit.
   return float(float16_t(value));
 }
 #elif defined(USE_BF16)
 #extension GL_EXT_shader_16bit_storage : require
-// The input rides 32-bit words, two bf16 lanes per word, constant shifts
-// and selects only: a uint16_t-typed block compiled from this exact source
-// returns recycled-memory garbage on llvmpipe (observed 2026-09-03, stable
-// across -Os/-O0 and across arithmetic changes, while the float16 twin of
-// the same shader is bit-exact), so the loads take the repo's proven
-// reduce_general form. The in-register rope_round calls reproduce the
-// composition's intermediate roundings and the store applies the one
-// final rounding, so bfloat16 stays bit-exact against the composed path.
-// The output binding stores packed bf16 words. The rotate writes the
-// repo's proven constant-shift form; every element is written exactly
-// once but the two lanes of one word can belong to different
-// invocations, so the lane stores are disjoint-half atomicOr - each
-// word receives exactly two ORs (one zeroing the high half, one
-// zeroing the low half), so the OR result is the correct packed value
-// regardless of initial memory content or arrival order. The store
-// applies the RNE float32->bf16 rounding the cast kernel applied in
-// the old float32-temporary path, and the rope_round intermediates
-// already are exact bf16 values, so output bits are identical to the
-// composed path's final cast.
+// The input rides 32-bit words, two bf16 lanes per word, constant shifts and selects only: a uint16_t-typed block compiled from this exact source returns recycled-memory garbage on llvmpipe (observed 2026-09-03, stable across -Os/-O0 and across arithmetic changes, while the float16 twin of the same shader is bit-exact), so the loads take the repo's proven reduce_general form. The in-register rope_round calls reproduce the composition's intermediate roundings and the store applies the one final rounding, so bfloat16 stays bit-exact against the composed path. The output binding stores packed bf16 words. The rotate writes the repo's proven constant-shift form; every element is written exactly once but the two lanes of one word can belong to different invocations, so the lane stores are disjoint-half atomicOr - each word receives exactly two ORs (one zeroing the high half, one zeroing the low half), so the OR result is the correct packed value regardless of initial memory content or arrival order. The store applies the RNE float32->bf16 rounding the cast kernel applied in the old float32-temporary path, and the rope_round intermediates already are exact bf16 values, so output bits are identical to the composed path's final cast.
 layout(set = 0, binding = 0, std430) readonly buffer Input {
   uint values[];
 } input_data;
@@ -138,12 +53,7 @@ uint bf16_bits(float value) {
       ? ((bits >> 16u) | 0x40u)
       : ((bits + 0x7fffu + ((bits >> 16u) & 1u)) >> 16u);
 }
-// ASH_QWEN35 (dense Qwen3.5-2B Metal oracle, zig/kernels/metal/qwen3_5/
-// layout.metal qwen35_rotate): Metal computes angle, cos, sin and both
-// products in f32 and rounds once at the bfloat store, so the oracle
-// variant skips every intermediate bf16 rounding. The final store still
-// goes through bf16_bits's RNE, matching Metal's bfloat() conversion.
-// Default (MLX composed path) keeps the rope_round chain.
+// ASH_QWEN35 (dense Qwen3.5-2B Metal oracle, zig/kernels/metal/qwen3_5/ layout.metal qwen35_rotate): Metal computes angle, cos, sin and both products in f32 and rounds once at the bfloat store, so the oracle variant skips every intermediate bf16 rounding. The final store still goes through bf16_bits's RNE, matching Metal's bfloat() conversion. Default (MLX composed path) keeps the rope_round chain.
 float rope_round(float value) {
 #ifdef ASH_QWEN35
   return value;
@@ -183,9 +93,7 @@ layout(set = 0, binding = 3, std430) readonly buffer Freqs {
 } freqs_data;
 #endif
 
-// ASH_QWEN35: Metal builds the inverse frequency as
-// pow(10000000.0f, -i/32) rather than exp(-i*log(base)/(dims/2)); keep
-// the exact expression. i is always < 32 here (the half-split pair).
+// ASH_QWEN35: Metal builds the inverse frequency as pow(10000000.0f, -i/32) rather than exp(-i*log(base)/(dims/2)); keep the exact expression. i is always < 32 here (the half-split pair).
 float rope_inv_freq(uint i) {
 #if defined(ASH_QWEN35)
   return pow(1.0e7f, -float(i) / 32.0f);
@@ -224,16 +132,7 @@ layout(push_constant) uniform Params {
 
 void main() {
 #ifdef USE_BF16
-  // Pair-granular bf16 main: each invocation owns whole 32-bit output
-  // words (two adjacent elements of one row) and computes both lanes
-  // itself, so plain stores replace the atomicOr pair that proved
-  // lane-lossy on Apple-hardware Vulkan (see
-  // receipts/2026-09-21-decode-kv-direct). Requires an even rotation
-  // half (dims % 4 == 0), an even passthrough extent, and even kv
-  // window element offsets - all host-guarded. params.count enumerates
-  // output WORDS: the host halves the element count for the
-  // passthrough branch only (the rotated branch already enumerates
-  // half_dims threads per row, each of which now emits two words).
+  // Pair-granular bf16 main: each invocation owns whole 32-bit output words (two adjacent elements of one row) and computes both lanes itself, so plain stores replace the atomicOr pair that proved lane-lossy on Apple-hardware Vulkan (see receipts/2026-09-21-decode-kv-direct). Requires an even rotation half (dims % 4 == 0), an even passthrough extent, and even kv window element offsets - all host-guarded. params.count enumerates output WORDS: the host halves the element count for the passthrough branch only (the rotated branch already enumerates half_dims threads per row, each of which now emits two words).
   uint index = gl_GlobalInvocationID.x;
   uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
   uint half_dims = params.dims;
@@ -259,13 +158,9 @@ void main() {
         float offset = float(
             offset_data.values[params.rhs_offset + b * params.matrix_m]);
         float position = params.alpha * (float(t) + offset);
-        // k < half_dims/2 owns the r1 word for elements 2k, 2k+1;
-        // k >= half_dims/2 owns the r2 word for the mirrored pair in
-        // the second half of the row.
+        // k < half_dims/2 owns the r1 word for elements 2k, 2k+1; k >= half_dims/2 owns the r2 word for the mirrored pair in the second half of the row.
         bool r1_side = k < (half_dims >> 1u);
-        // Element index j0/j1; the theta and the rotation operands
-        // always use the mirrored position i = element - half_dims on
-        // the r2 side (the std kernel's i, see out_index_2 there).
+        // Element index j0/j1; the theta and the rotation operands always use the mirrored position i = element - half_dims on the r2 side (the std kernel's i, see out_index_2 there).
         uint j0 = r1_side ? (2u * k)
                           : (half_dims + 2u * (k - (half_dims >> 1u)));
         uint j1 = j0 + 1u;
@@ -317,8 +212,7 @@ void main() {
             bf16_bits(v0) | (bf16_bits(v1) << 16u);
       }
     } else {
-      // Traditional half-split (elements 2i, 2i+1 already form one
-      // word) and the passthrough branch (one word per d pair).
+      // Traditional half-split (elements 2i, 2i+1 already form one word) and the passthrough branch (one word per d pair).
       uint row_words = passthrough ? (params.shape[2] >> 1u) : half_dims;
       uint k = index % row_words;
       t = (index / row_words) % time;
@@ -362,8 +256,7 @@ void main() {
         output_data.values[word_base + k] =
             bf16_bits(r1) | (bf16_bits(r2) << 16u);
       } else {
-        // Passthrough pair: two adjacent d, both rotated (d < dims)
-        // or both tail.
+        // Passthrough pair: two adjacent d, both rotated (d < dims) or both tail.
         uint d0 = 2u * k;
         uint d1 = d0 + 1u;
         float v0;
@@ -458,8 +351,7 @@ void main() {
           : (x1_index + half_dims * params.in_strides[2]);
       uint out_index = out_base + d * params.out_strides[2];
       if (d >= 2u * half_dims) {
-        // Passthrough tail: the rotated range ends at dims; the rest of
-        // the axis carries the input through untouched.
+        // Passthrough tail: the rotated range ends at dims; the rest of the axis carries the input through untouched.
         rope_store(
             params.output_offset + out_index,
             rope_load(params.lhs_offset + in_base + d * params.in_strides[2]));
@@ -518,9 +410,7 @@ void main() {
       }
       float x1 = rope_load(params.lhs_offset + in_index_1);
       float x2 = rope_load(params.lhs_offset + in_index_2);
-      // The eager composition rounds every intermediate to storage
-      // precision (one elementwise or cast kernel per op). Reproduce those
-      // roundings exactly; float32 storage is transparent.
+      // The eager composition rounds every intermediate to storage precision (one elementwise or cast kernel per op). Reproduce those roundings exactly; float32 storage is transparent.
       float xa = rope_round(x1 * cos_t);
       float xb = rope_round(x2 * sin_t);
       float xc = rope_round(x1 * sin_t);

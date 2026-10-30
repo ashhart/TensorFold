@@ -1,23 +1,11 @@
 // Copyright © 2026 Joshua Warren / mlx-omarchy contributors.
 // SPDX-License-Identifier: MIT
-//
-// Reused from mlx-omarchy shaders/binary_vec.comp (MIT), comment-condensed.
-//
-// Four-wide bf16/f16 binary add/mul/div/sub: float math on widened
-// operands, one round to storage, dims == 0 modulo addressing
-// (size == count: direct, else index % size). A thread moves four
-// elements per 8-byte vector load. Host gate: count and both operand
-// sizes multiples of four (an 8-byte load would run past a smaller
-// scalar operand's binding) and every element offset 4-aligned.
+//  Reused from mlx-omarchy shaders/binary_vec.comp (MIT), comment-condensed.
+//  Four-wide bf16/f16 binary add/mul/div/sub: float math on widened operands, one round to storage, dims == 0 modulo addressing (size == count: direct, else index % size). A thread moves four elements per 8-byte vector load. Host gate: count and both operand sizes multiples of four (an 8-byte load would run past a smaller scalar operand's binding) and every element offset 4-aligned.
 
 #version 460
 
-// -DPRESERVE_F32: keep subnormal f32 intermediates instead of the default
-// flush-to-zero, per OpExecutionMode DenormPreserve (4459, width 32); needs
-// the SPV_KHR_float_controls extension and the DenormPreserve capability
-// (4464), and the host must gate it on the device's
-// shaderDenormPreserveFloat32 feature. Signed zero is the only other result
-// class this mode allows to differ.
+// -DPRESERVE_F32: keep subnormal f32 intermediates instead of the default flush-to-zero, per OpExecutionMode DenormPreserve (4459, width 32); needs the SPV_KHR_float_controls extension and the DenormPreserve capability (4464), and the host must gate it on the device's shaderDenormPreserveFloat32 feature. Signed zero is the only other result class this mode allows to differ.
 #ifdef PRESERVE_F32
 #extension GL_EXT_spirv_intrinsics : require
 spirv_execution_mode(extensions = ["SPV_KHR_float_controls"], capabilities = [4464], 4459, 32);
@@ -57,9 +45,7 @@ layout(set = 0, binding = 2, std430) writeonly buffer Output {
   STORAGE_VEC values[];
 } output_data;
 
-// Same push-constant block as elementwise.comp; only the first nine
-// words are read. count, sizes and offsets arrive in elements, divided
-// by four here.
+// Same push-constant block as elementwise.comp; only the first nine words are read. count, sizes and offsets arrive in elements, divided by four here.
 layout(push_constant) uniform Params {
   uint count;
   uint operation;

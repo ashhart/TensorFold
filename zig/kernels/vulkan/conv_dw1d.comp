@@ -1,33 +1,11 @@
 // Copyright © 2026 Joshua Warren / mlx-omarchy contributors.
 // SPDX-License-Identifier: MIT
-//
-// Copied from mlx-omarchy shaders/conv_dw1d.comp (MIT), comments condensed.
-// Depthwise 1-D conv, channels-last [N,L_in,C], weight [C,K], stride 1, no
-// padding/flip: the Qwen3.5 GDN prefill conv. One thread per output, the K
-// taps accumulate ascending from 0.0 on widened operands, one RNE store.
-// Push constants: count=N*L_out*C, operation=K taps, lhs_size=L_in,
-// rhs_size=L_out, reduce_size=C, lhs/rhs/output offsets (words 6..8).
+//  Copied from mlx-omarchy shaders/conv_dw1d.comp (MIT), comments condensed. Depthwise 1-D conv, channels-last [N,L_in,C], weight [C,K], stride 1, no padding/flip: the Qwen3.5 GDN prefill conv. One thread per output, the K taps accumulate ascending from 0.0 on widened operands, one RNE store. Push constants: count=N*L_out*C, operation=K taps, lhs_size=L_in, rhs_size=L_out, reduce_size=C, lhs/rhs/output offsets (words 6..8).
 #version 460
 
-// Depthwise 1-D convolution over channels-last input [N, L_in, C] with weight
-// [C, K, 1] and output [N, L_out, C] (groups == C, stride 1, dilation 1, no
-// padding, no flip): the Qwen3.5/3.8 GatedDeltaNet prefill conv. conv.comp is
-// the fully general 1-D/2-D/3-D kernel (dilation, padding, flip, chunked
-// partial reductions) and ran this shape at ~6% of the memory roofline
-// (2.9 ms for 12.6M outputs at T=2048); this kernel is straight-line.
-//
-// Bit-exact to conv.comp on this shape: one thread per output element, the
-// K taps accumulate in ascending order from 0.0 with the same
-// `accumulator += x * w` expression on widened operands, one RNE store.
-//
-// Push constants (the fixed omarchy::ComputeParams layout, first words):
-//   count        N * L_out * C output elements
-//   operation    K taps
-//   lhs_size     L_in
-//   rhs_size     L_out
-//   reduce_size  C channels
-//   lhs_offset   input element offset, rhs_offset weight offset,
-//   output_offset output offset (words 6..8)
+// Depthwise 1-D convolution over channels-last input [N, L_in, C] with weight [C, K, 1] and output [N, L_out, C] (groups == C, stride 1, dilation 1, no padding, no flip): the Qwen3.5/3.8 GatedDeltaNet prefill conv. conv.comp is the fully general 1-D/2-D/3-D kernel (dilation, padding, flip, chunked partial reductions) and ran this shape at ~6% of the memory roofline (2.9 ms for 12.6M outputs at T=2048); this kernel is straight-line.
+//  Bit-exact to conv.comp on this shape: one thread per output element, the K taps accumulate in ascending order from 0.0 with the same `accumulator += x * w` expression on widened operands, one RNE store.
+//  Push constants (the fixed omarchy::ComputeParams layout, first words): count N * L_out * C output elements operation K taps lhs_size L_in rhs_size L_out reduce_size C channels lhs_offset input element offset, rhs_offset weight offset, output_offset output offset (words 6..8)
 
 #ifdef USE_FP16
 #extension GL_EXT_shader_16bit_storage : require

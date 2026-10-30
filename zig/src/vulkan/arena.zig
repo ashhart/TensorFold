@@ -1,5 +1,4 @@
-//! One bounded device-local allocation a caller suballocates into aligned, checked tensor views.
-//! An arena must not move once a view exists: views point back at its buffer field.
+// One bounded device-local allocation a caller suballocates into aligned, checked tensor views. An arena must not move once a view exists: views point back at its buffer field.
 const std = @import("std");
 const memory = @import("memory.zig");
 const tensor = @import("tensor.zig");
@@ -29,8 +28,7 @@ pub const Arena = struct {
         a.buffer.deinit();
     }
 
-    /// An aligned, validated view of `elements` of `kind`, or the named reason it cannot fit; the
-    /// aligned cursor only advances once the whole allocation fits, so a failure wastes nothing.
+    // An aligned, validated view of `elements` of `kind`, or the named reason it cannot fit; the aligned cursor only advances once the whole allocation fits, so a failure wastes nothing.
     pub fn alloc(a: *Arena, kind: tensor.Kind, elements: u64) Error!tensor.View {
         if (elements == 0) return error.Invalid;
         const start = std.mem.alignForward(u64, a.next, a.alignment);
