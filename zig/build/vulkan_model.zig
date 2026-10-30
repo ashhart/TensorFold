@@ -1,7 +1,4 @@
-//! The native Vulkan model build, opt-in with -Dvulkan=true: the real tf-qwen35-model
-//! probe compile, the tensorfold-native server over the Vulkan engines, and the GPU-free
-//! host tests. Mirrors the CUDA native server's wiring (cuda.zig nativeServer) over the
-//! shared qwen3.5 Vulkan factory; no shader-define lists and no scheduler of its own.
+//! The native Vulkan model build, opt-in with -Dvulkan=true: the tf-qwen35-model probe, the native server over the Vulkan engines, GPU-free host tests.
 
 const std = @import("std");
 const vulkan_build = @import("vulkan.zig");
@@ -33,8 +30,7 @@ pub fn steps(
     }) });
     b.step("vulkan-model-probe-build", "Build zig-out/bin/tf-qwen35-model without running GPU work").dependOn(&b.addInstallArtifact(probe, .{}).step);
 
-    // (b) the server over the Vulkan engines: the same entry point and checkpoint CLI the
-    // CUDA native server uses, with the factory's engine_api/core instances (type identity).
+    // (b) the server over the Vulkan engines: the CUDA native server's entry point and checkpoint CLI, the factory's engine_api/core instances.
     const template = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
     const server = b.addExecutable(.{ .name = "tensorfold-native-vulkan", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/server/main.zig"),
@@ -56,9 +52,7 @@ pub fn steps(
     b.step("compile-native-vulkan-server", "Compile the actual server entry point over the Vulkan engines without installing or running").dependOn(&server.step);
     b.step("native-vulkan", "tensorfold-native with the Vulkan engines into zig-out/native/bin").dependOn(&b.addInstallArtifact(server, .{ .dest_dir = .{ .override = .{ .custom = "native/bin" } } }).step);
 
-    // (c) GPU-free host admission: the native adapter's own tests, the family
-    // backend/engine/forward test decls, and the probe's parseArgs/parseNpy
-    // tests. No test here opens a loader, device or model.
+    // (c) GPU-free host admission: the native adapter's own tests, the family backend/engine/forward test decls, the probe's parse tests.
     const host = b.graph.host;
     const h = vulkan_build.serverModules(b, host, .debug, o, lanesModule(b, host, .debug));
     const all = b.step("qwen35-model-host-test", "Qwen3.5 Vulkan engine/forward/native-backend and probe argument parser host tests, without GPU work");
@@ -99,8 +93,7 @@ pub fn steps(
             .{ .name = "core", .module = h.core },
         },
     }) });
-    // TF_VULKAN_LOAD_DIR is not a cached input: the opt-in engine load reruns
-    // whenever the env changes, like TF_QWEN_DIR's loader in hip.zig.
+    // TF_VULKAN_LOAD_DIR is not a cached input: the opt-in engine load reruns whenever the env changes, like TF_QWEN_DIR's loader.
     const probe_run = b.addRunArtifact(probe_tests);
     probe_run.has_side_effects = true;
     all.dependOn(&probe_run.step);

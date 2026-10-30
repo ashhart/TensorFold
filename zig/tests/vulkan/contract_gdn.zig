@@ -998,7 +998,7 @@ pub const Gdn = struct {
                 // the chain: each step taps the carried state then shifts it
                 for (0..T) |t| {
                     const ctx: DecodeInput = .{ .state_bits = f.state_bits, .x_bits = f.qkv_bits, .t = t };
-                    convReference(1, f.weight_bits, ctx, f.want[t * channels ..][0 .. channels], f.mag[t * channels ..][0 .. channels], null);
+                    convReference(1, f.weight_bits, ctx, f.want[t * channels ..][0..channels], f.mag[t * channels ..][0..channels], null);
                     for (0..2) |r| @memcpy(f.state_bits[r * channels ..][0..channels], f.state_bits[(r + 1) * channels ..][0..channels]);
                     @memcpy(f.state_bits[2 * channels ..][0..channels], f.qkv_bits[t * channels ..][0..channels]);
                 }

@@ -535,11 +535,11 @@ test "gated references are finite off the controls, and the zero token wants exa
             try testing.expectEqual(@as(f64, 0), @abs(w));
         }
     }
-    for (gated_width + gated_head_dim .. 2 * gated_width) |i| // token 1, heads 1..15
+    for (gated_width + gated_head_dim..2 * gated_width) |i| // token 1, heads 1..15
         try testing.expect(std.math.isFinite(g.want[i]));
-    for (2 * gated_width .. 2 * gated_width + gated_head_dim) |i| // token 2, head 0: all nan
+    for (2 * gated_width..2 * gated_width + gated_head_dim) |i| // token 2, head 0: all nan
         try testing.expect(std.math.isNan(g.want[i]));
-    for (2 * gated_width + gated_head_dim .. 3 * gated_width) |i| // token 2, heads 1..15
+    for (2 * gated_width + gated_head_dim..3 * gated_width) |i| // token 2, heads 1..15
         try testing.expect(std.math.isFinite(g.want[i]));
 }
 
