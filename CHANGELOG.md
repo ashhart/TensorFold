@@ -104,6 +104,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - DeepSeek V4.1 on CUDA (experimental) copies its weights and persistent forms to the GPU through one reusable 64 MiB pinned stage instead of a host copy of the whole image, so the public Flash-1017 EXL3 pack no longer stops at boot with `CopySourceLimit` at TP=2; with it, a rank loaded all 95.1 GiB of its weights. The bytes on the GPU, their addresses and their digests are unchanged, a failed later chunk keeps the same cleanup, and uploads under 64 MiB make the same single copy as before (#1643). Thanks to @jayleaton.
 
 - Nemotron 3.5 on Metal: the decode attention kernel on M3-class GPUs and the experts' 2-row tiles unroll their fixed loops, with bit-identical outputs. On an M3 Ultra, Nemotron 3.5 Lightning decodes 1.8% faster at one stream (0.8% at 4 streams), and 0.8% and 1.5% faster after 2k and 8k prompts, with the same tokens (#1621).
+- GLM shared MTP and DFlash2 rounds preserve committed context while skipping proposals with no verify rows.
 
 
 - Qwen3.6 MTP and external draft adapters reserve shared verify rows before proposing. A zero-row budget keeps committed context current without running the proposal pass (#1621).
