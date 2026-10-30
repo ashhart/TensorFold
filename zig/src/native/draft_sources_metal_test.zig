@@ -129,8 +129,8 @@ test "qwen27 window: native facts expose device width, node budget and hybrid co
         b.nodes = policy.nodes(b.window, copies);
         b.copies = copies;
         const facts = b.facts();
-        try std.testing.expectEqual(@as(u32, if (units) 16 else 64), facts.exact_width);
-        try std.testing.expectEqual(@as(u32, if (units or copies) 15 else 31), facts.drafts);
+        try std.testing.expectEqual(@as(u32, 16), facts.exact_width);
+        try std.testing.expectEqual(@as(u32, 15), facts.drafts);
         try std.testing.expectEqual(copies, facts.lone_copies);
         try std.testing.expectEqual(copies, facts.context_copies);
     };
