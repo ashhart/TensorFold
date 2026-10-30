@@ -20,6 +20,20 @@ const vec_most = 4;
 /// norms_strided.cuh's rows: the MoE form's widest row and slots, and the parts' widest by form.
 const strided_most = 4096;
 const strided_slots = 8;
+/// rms_tiles.cuh's shape: Flash Next's MTP row of four 2,560-value streams, sums of 32, 256 threads a tile.
+pub const tiles_width = 10240;
+const tiles_group = 32;
+const tiles_threads = 256;
+
+/// rms_tiles.cuh's tiles a row on an SM at a row count (measured at rows 1, 4, 16); null keeps tf_rms_rows_sums.
+pub fn sumsTiles(sm: u32, rows: usize) ?u32 {
+    if (rows == 0 or rows > 16) return null;
+    return switch (sm) {
+        120 => if (rows == 1) 40 else 10,
+        121 => if (rows <= 4) 10 else 1,
+        else => null,
+    };
+}
 
 /// The parts' widest row: 128 threads of 8 (MLX's steps), 256 of 16 (rounded once); the threads are part of the order.
 pub fn partsMost(round: bool) usize {
@@ -62,6 +76,9 @@ pub const Norms = struct {
     moe_add_rms_h_fn: Function, // the expert slots' sum added to the residual, then the strided norm
     gated_fns: [3]Function, // head dim 64, 128, 256
     rms_sums_fn: Function,
+    rms_sums_tiles_fn: Function,
+    /// The current context's device's compute capability (10 * major + minor): it picks sumsTiles' row.
+    sm: u32,
     tail_fns: [2]Function, // each norm rounded once, MLX's bf16 steps
     l2_fn: Function,
     slerp_fn: Function,
@@ -82,6 +99,8 @@ pub const Norms = struct {
             .moe_add_rms_h_fn = try mod.function("tf_moe_add_rms_rows_bf16h"),
             .gated_fns = .{ try mod.function("tf_gated_rms_rows_64"), try mod.function("tf_gated_rms_rows_128"), try mod.function("tf_gated_rms_rows_256") },
             .rms_sums_fn = try mod.function("tf_rms_rows_sums"),
+            .rms_sums_tiles_fn = try mod.function("tf_rms_rows_sums_tiles"),
+            .sm = try d.currentCapability(),
             .tail_fns = .{ try mod.function("tf_add_rms_rows_bf16h_tail"), try mod.function("tf_add_rms_rows_bf16h_tail_round") },
             .l2_fn = try mod.function("tf_l2_rows"),
             .slerp_fn = try mod.function("tf_slerp_rows"),
@@ -121,6 +140,9 @@ pub const Norms = struct {
     pub fn rmsSums(n: *const Norms, s: Stream, x: u64, x_ld: usize, w: u64, y: u64, xs: u64, rows: usize, width: usize, group: usize, eps: f32) !void {
         if (group == 0 or width % group != 0 or x_ld < width) return error.RowShape;
         if (rows == 0) return;
+        if (width == tiles_width and group == tiles_group) {
+            if (sumsTiles(n.sm, rows)) |t| return n.rmsSumsTiles(s, x, x_ld, w, y, xs, rows, t, eps);
+        }
         var a: launch_.Args = .{};
         a.add(x);
         a.add(@as(i64, @intCast(x_ld)));
@@ -129,6 +151,19 @@ pub const Norms = struct {
         a.add(@as(i32, @intCast(group)));
         a.add(eps);
         try launch_.launch(n.rms_sums_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = threads } }, s, &a);
+    }
+
+    /// rmsSums at rms_tiles.cuh's shape over `tiles` blocks a row (1, 10 or 40): tf_rms_rows_sums' bytes.
+    pub fn rmsSumsTiles(n: *const Norms, s: Stream, x: u64, x_ld: usize, w: u64, y: u64, xs: u64, rows: usize, tiles: u32, eps: f32) !void {
+        if ((tiles != 1 and tiles != 10 and tiles != 40) or x_ld < tiles_width) return error.RowShape;
+        if (rows == 0) return;
+        var a: launch_.Args = .{};
+        a.add(x);
+        a.add(@as(i64, @intCast(x_ld)));
+        for ([_]u64{ w, y, xs }) |v| a.add(v);
+        a.add(@as(i32, @intCast(tiles)));
+        a.add(eps);
+        try launch_.launch(n.rms_sums_tiles_fn, .{ .grid = .{ .x = tiles, .y = @intCast(rows), .z = 1 }, .block = .{ .x = tiles_threads } }, s, &a);
     }
 
     /// The residual step: res (fp32, in place) += rms(x) * w1 (w1 null: res += x), then y = rms(res) * w2.

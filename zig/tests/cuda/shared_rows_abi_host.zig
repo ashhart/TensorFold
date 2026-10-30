@@ -15,6 +15,7 @@ const R = struct {
             7, 8, 9 => &.{ 8, 8, 8, 8, 8, 8, 8, 4, 4 },
             10 => &.{ 8, 8, 8, 8, 8, 4, 4, 4 },
             11, 12 => &.{ 8, 8, 8, 8, 8, 8, 8, 8, 4, 4 },
+            13 => &.{ 8, 8, 8, 8, 8, 4, 4 },
             20, 24, 25 => &.{ 8, 8, 8, 8, 8, 8, 4 },
             21 => &.{ 8, 8, 8, 8, 8, 8, 4, 4 },
             22 => &.{ 8, 8, 8, 4 },
@@ -53,6 +54,8 @@ fn norms(d: *const cuda.Driver) cuda.norms.Norms {
     for (&n.gated_fns, 0..) |*v, i| v.* = f(d, 7 + i);
     n.rms_sums_fn = f(d, 10);
     n.tail_fns = .{ f(d, 11), f(d, 12) };
+    n.rms_sums_tiles_fn = f(d, 13);
+    n.sm = 121;
     return n;
 }
 fn acts(d: *const cuda.Driver) cuda.act_rows.ActRows {
@@ -118,4 +121,52 @@ test "shared row launches retain the release argument bytes and geometry" {
     R.hash.final(&digest);
     try t.expectEqualStrings("f562c5d490b5d1aed8cb10a28a1162d9b30fed969adec3727cfbd8fedaf06a69", &std.fmt.bytesToHex(digest, .lower));
     try t.expectEqual(@as(usize, 136), R.count);
+}
+
+/// The last launch's kernel id and geometry.
+const Last = struct {
+    var id: usize = 0;
+    var grid: [2]c_uint = .{ 0, 0 };
+    var block: c_uint = 0;
+    var count: usize = 0;
+    fn launch(kernel: cuda.abi.Function, gx: c_uint, gy: c_uint, _: c_uint, bx: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, _: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
+        id = @intFromPtr(kernel);
+        grid = .{ gx, gy };
+        block = bx;
+        count += 1;
+        return 0;
+    }
+};
+
+test "the MTP wide norm takes its tiles by SM and row count, and every other shape the one-block row" {
+    const sums = cuda.norms.sumsTiles;
+    for ([_]u32{ 80, 86, 89, 90, 100 }) |sm| for ([_]usize{ 1, 4, 16 }) |rows| try t.expectEqual(@as(?u32, null), sums(sm, rows));
+    const want = [_]struct { usize, ?u32, ?u32 }{ .{ 0, null, null }, .{ 1, 40, 10 }, .{ 2, 10, 10 }, .{ 4, 10, 10 }, .{ 5, 10, 1 }, .{ 16, 10, 1 }, .{ 17, null, null } };
+    for (want) |w| {
+        try t.expectEqual(w[1], sums(120, w[0]));
+        try t.expectEqual(w[2], sums(121, w[0]));
+    }
+    var d: cuda.Driver = undefined;
+    d.api.cuLaunchKernel = Last.launch;
+    const s: cuda.Stream = .{ .d = &d, .handle = @ptrFromInt(0x1800) };
+    var n = norms(&d);
+    const wide = cuda.norms.tiles_width;
+    try n.rmsSums(s, 0x1000, wide + 64, 0x3000, 0x2000, 0x7000, 4, wide, 32, 1e-6);
+    try t.expectEqual(@as(usize, 13), Last.id);
+    try t.expectEqual([2]c_uint{ 10, 4 }, Last.grid);
+    try t.expectEqual(@as(c_uint, 256), Last.block);
+    try n.rmsSums(s, 0x1000, wide, 0x3000, 0x2000, 0x7000, 16, wide, 32, 1e-6);
+    try t.expectEqual([2]c_uint{ 1, 16 }, Last.grid);
+    const keep = [_]struct { usize, usize, usize, u32 }{ .{ 17, wide, 32, 121 }, .{ 4, 2560, 32, 121 }, .{ 4, wide, 64, 121 }, .{ 4, wide, 32, 89 } };
+    for (keep) |k| {
+        n.sm = k[3];
+        try n.rmsSums(s, 0x1000, wide, 0x3000, 0x2000, 0x7000, k[0], k[1], k[2], 1e-6);
+        try t.expectEqual(@as(usize, 10), Last.id);
+        try t.expectEqual([2]c_uint{ @intCast(k[0]), 1 }, Last.grid);
+    }
+    const before = Last.count;
+    try n.rmsSums(s, 0x1000, wide, 0x3000, 0x2000, 0x7000, 0, wide, 32, 1e-6);
+    try t.expectEqual(before, Last.count);
+    for ([_]u32{ 0, 2, 20, 160 }) |tiles| try t.expectError(error.RowShape, n.rmsSumsTiles(s, 0x1000, wide, 0x3000, 0x2000, 0x7000, 1, tiles, 1e-6));
+    try t.expectError(error.RowShape, n.rmsSumsTiles(s, 0x1000, wide - 1, 0x3000, 0x2000, 0x7000, 1, 10, 1e-6));
 }

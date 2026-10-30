@@ -258,6 +258,42 @@ fn rmsSums(r: *Rig, n: *const cuda.norms.Norms, width: usize, x_ld: usize, group
     }
 }
 
+/// rms_tiles.cuh at tiles 1, 10, 40 and rows 1-17 against tf_rms_rows_sums' bytes; odd rows, NaN between rows.
+fn rmsSumsTiles(r: *Rig, n: *const cuda.norms.Norms) !void {
+    const width = cuda.norms.tiles_width;
+    const x_ld = width + 64;
+    const rows = 17;
+    const groups = width / 32;
+    const x = r.bfs(rows * x_ld, 1);
+    for (0..rows) |row| @memset(x[row * x_ld + width ..][0..64], 0x7fc0);
+    @memset(x[0..width], 0);
+    for (0..width) |i| { // row 1 spans 2^-20 to 2^19; row 5's squares overflow fp32
+        const e: i32 = @intCast(i % 200);
+        x[x_ld + i] = bf16(std.math.pow(f32, 2, @floatFromInt(@rem(e, 40) - 20)));
+        x[5 * x_ld + i] = bf16(std.math.pow(f32, 2, @floatFromInt(e - 100)));
+    }
+    x[2 * x_ld + 77] = 0x7fc0;
+    x[3 * x_ld + 5000] = 0x7f80;
+    x[4 * x_ld + 9] = 0xff80;
+    x[4 * x_ld + 10230] = 0x7f80;
+    const dx = try r.dev(std.mem.sliceAsBytes(x));
+    const dw = try r.dev(std.mem.sliceAsBytes(r.weights(width)));
+    var base = n.*;
+    base.sm = 0; // no table row: tf_rms_rows_sums
+    const yb = try r.out(rows * width * 2);
+    const xb = try r.out(rows * groups * 4);
+    try base.rmsSums(r.s, dx, x_ld, dw, yb, xb, rows, width, 32, eps);
+    const want_y = try r.back(u16, yb, rows * width);
+    const want_xs = try r.back(f32, xb, rows * groups);
+    for ([_]u32{ 1, 10, 40 }) |tiles| for (1..rows + 1) |m| {
+        const y = try r.out(m * width * 2);
+        const xs = try r.out(m * groups * 4);
+        try n.rmsSumsTiles(r.s, dx, x_ld, dw, y, xs, m, tiles, eps);
+        try check.sameBytes("rms tiles", std.mem.sliceAsBytes(try r.back(u16, y, m * width)), std.mem.sliceAsBytes(want_y[0 .. m * width]));
+        try check.sameBytes("rms tiles group sums", std.mem.sliceAsBytes(try r.back(f32, xs, m * groups)), std.mem.sliceAsBytes(want_xs[0 .. m * groups]));
+    };
+}
+
 pub fn run(gpu: check.Gpu) !void {
     var arena: std.heap.ArenaAllocator = .init(gpu.gpa);
     defer arena.deinit();
@@ -285,5 +321,6 @@ pub fn run(gpu: check.Gpu) !void {
     try embed(&r, 96, 32, 1);
     try rmsSums(&r, &n, 2560, 10240, 32); // Flash Next's MTP head: the embedding, its first stream of four
     try rmsSums(&r, &n, 10240, 10240, 32); // and the four streams normed as one row
-    check.pass("norm rows: add_rms_h, gated rms, rms with group sums, embed rows within float64 tolerance (worst {d:.3}), group sums of the stored outputs, every row count's bits equal", .{r.worst});
+    try rmsSumsTiles(&r, &n);
+    check.pass("norm rows: add_rms_h, gated rms, rms with group sums, embed rows within float64 tolerance (worst {d:.3}), group sums of the stored outputs, every row count's bits equal, the MTP tiles' bits tf_rms_rows_sums' at tiles 1, 10, 40 and rows 1-17", .{r.worst});
 }
