@@ -24,6 +24,13 @@ Copyright © 2026 Joshua Warren and mlx-omarchy contributors.
 Its arithmetic is unchanged; the native Vulkan path does not link MLX.
 See [the license text](LICENSES/mlx-omarchy-MIT.txt).
 
+## Strata HIP kernels
+
+`zig/kernels/hip/common/tsum.hpp` ports `src/kernels/cuda/s26_tsum.cuh` from
+[Strata](https://github.com/Niko1221/Strata) at 4b9e05a2, MIT License,
+Copyright (c) 2026 Niko1221 and the Strata contributors.
+See [the license text](LICENSES/Strata-MIT.txt).
+
 ## Qwen Flash Next
 
 The n-gram ID helpers translate Hugging Face transformers' `models/qwen4_exp/modeling_qwen4_exp.py` with renamed

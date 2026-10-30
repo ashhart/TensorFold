@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "common/dot2.hpp"
+#include "common/tsum.hpp"
 #include "common/vec.hpp"
 #include "tiles/plan.hpp"
 
@@ -197,6 +198,33 @@ __device__ inline void stream_body(const typename Dec::Args& a, int lpc_log2, in
         }
     }
 
+    if (lpc == 32) {
+        // CH sums and up sums each in a transposing butterfly; lane (c << (5 - log2 CH)) holds column c's, stores it
+        constexpr int L = tsum_log2(CH);
+        const int c = lane >> (5 - L);
+#pragma unroll
+        for (int r = 0; r < R; ++r) {
+            float g[CH];
+#pragma unroll
+            for (int k = 0; k < CH; ++k) g[k] = acc[r][k];
+            float pv[PAIR ? 2 : 1];
+            pv[0] = tsum<CH>(g, lane);
+            if constexpr (PAIR) {
+                float u[CH];
+#pragma unroll
+                for (int k = 0; k < CH; ++k) u[k] = acc[r][k + CH];
+                pv[1] = tsum<CH>(u, lane);
+            }
+            const int col = col0 + c;
+            if ((lane & ((32 >> L) - 1)) != 0 || row0 + r >= a.m || col >= cols) continue;
+            if (!__builtin_isfinite(pv[0])) pv[0] = Dec::template repair_stream<T>(a, xr[r], col, pv[0]);
+            if constexpr (PAIR) {
+                if (!__builtin_isfinite(pv[1])) pv[1] = Dec::template repair_stream<T>(a, xr[r], col + pair_cols, pv[1]);
+            }
+            Epi::put(a, out_row(a, row0 + r), col, pv, 0, pair_cols, limit);
+        }
+        return;
+    }
 #pragma unroll
     for (int r = 0; r < R; ++r) {
         float v[CB];
