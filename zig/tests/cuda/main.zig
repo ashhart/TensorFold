@@ -239,6 +239,7 @@ const usage =
     \\  qwen-pages                qwen35.cu's attention cache through a page table: paged == contiguous, float64, red controls
     \\  rope-yarn                 YaRN rope in tf_q35_rope, tf_q35_rope8 and tf_q36m_norm_rope against float64, to 1M
     \\  kernel-contract-limits DIR   each registered launch against sm_80/86/89/120/121 from the fatbins in DIR
+    \\  nemo-audio-contract       Nemotron 3.5 Transcribe's audio encoder kernels through gates 1-4, controls red
     \\  pocket-contract           Nemotron's pocket kernels (learned neurons) through gates 1-4, controls red
     \\  minimax-contract          MiniMax-M3.1-Flash's indexer and block-sparse attention through gates 1-4, controls red
     \\  moss-contract             MOSS-Image's own kernels and its full attention through gates 1-4, controls red
@@ -468,6 +469,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "minimax-contract")) return @import("contract_minimax.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "rope-yarn")) return @import("contract_qwen_rope_yarn.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "kernel-contract-limits")) return contract_tests.fatbins(gpu, try arg(rest, 0));
+    if (std.mem.eql(u8, cmd, "nemo-audio-contract")) return @import("contract_nemo_audio.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "pocket-contract")) return @import("contract_pocket.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "moss-contract")) return @import("contract_moss_image.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "tree")) return tree_tests.run(gpu);
