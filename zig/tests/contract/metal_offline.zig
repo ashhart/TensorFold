@@ -102,16 +102,22 @@ const Builds = struct {
     }
 };
 
-/// The most threads (a multiple of 32) whose build equals the plain one: what the plain pipeline runs at.
-fn limitOn(x: Ctx, lib: []const u8, fun: []const u8, arch: []const u8) !u32 {
+/// A reserved source must match that exact descriptor; otherwise find the largest matching multiple of 32.
+fn limitOn(x: Ctx, lib: []const u8, fun: []const u8, arch: []const u8, reserved: u32) !u32 {
     const plain = try native(x, lib, fun, arch, 0);
     defer x.a.free(plain);
+    if (reserved > 0) {
+        const bounded = try native(x, lib, fun, arch, reserved);
+        defer x.a.free(bounded);
+        if (!std.mem.eql(u8, try code(plain), try code(bounded))) return error.ReservationCodeMismatch;
+        return reserved;
+    }
     return limits.plainLimit(Builds{ .x = x, .lib = lib, .fun = fun, .arch = arch, .plain = try code(plain) });
 }
 
-fn familyLimit(x: Ctx, lib: []const u8, fun: []const u8, archs: []const []const u8) !u32 {
+fn familyLimit(x: Ctx, lib: []const u8, fun: []const u8, archs: []const []const u8, reserved: u32) !u32 {
     var least: u32 = 1024;
-    for (archs) |arch| least = @min(least, try limitOn(x, lib, fun, arch));
+    for (archs) |arch| least = @min(least, try limitOn(x, lib, fun, arch, reserved));
     return least;
 }
 
@@ -130,13 +136,14 @@ pub fn run(a: std.mem.Allocator, io: std.Io, dir: []const u8, list: []const limi
         const safe = d.adapts or d.reserved >= d.threads or (!d.offline and d.threads <= 256);
         const got = blk: {
             const lib = library(x, l.pre_m5) catch |err| break :blk err;
-            const m1 = familyLimit(x, lib, l.function, &m1_archs) catch |err| break :blk err;
-            const m2 = familyLimit(x, lib, l.function, &m2_archs) catch |err| break :blk err;
+            const m1 = familyLimit(x, lib, l.function, &m1_archs, d.reserved) catch |err| break :blk err;
+            const m2 = familyLimit(x, lib, l.function, &m2_archs, d.reserved) catch |err| break :blk err;
             break :blk [2]u32{ m1, m2 };
         };
         const m = got catch |err| {
-            const word = if (control) "RED " else if (safe) "N/A " else "FAIL";
-            if (!control and !safe) n += 1;
+            const unmeasured = safe and err != error.ReservationCodeMismatch;
+            const word = if (control) "RED " else if (unmeasured) "N/A " else "FAIL";
+            if (!control and !unmeasured) n += 1;
             std.debug.print("{s} offline {s}: no M1/M2 build ({t}); {d} threads a group\n", .{ word, d.name, err, d.threads });
             continue;
         };

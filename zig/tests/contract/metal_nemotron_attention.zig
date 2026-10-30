@@ -106,7 +106,7 @@ fn stressValue(j: usize, n: usize) f32 {
 /// A library's text as the engine builds it on this GPU, then the control's edit when asked.
 fn built(a: std.mem.Allocator, device: mtl.Device, w: Which, text: []const u8, control: bool) ![]u8 {
     const src = switch (w) {
-        .decode => if (device.tensorUnits() or std.mem.indexOf(u8, text, "partial_direct") == null) try a.dupe(u8, text) else try tf.nemotron.simd_attention.rewrite(a, text),
+        .decode => if (device.tensorUnits() or std.mem.indexOf(u8, text, "partial_direct") == null) try a.dupe(u8, text) else try tf.nemotron.simd_attention.forGeneration(a, device.generation(), text),
         .tree, .compact => if (device.tensorUnits()) try a.dupe(u8, text) else try std.mem.concat(a, u8, &.{ "#define TF_SIMD_LAYOUT 1\n", text }),
         .prompt, .put => try tf.frags.source(device, a, text),
         .write => try a.dupe(u8, text),
