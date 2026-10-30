@@ -270,6 +270,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "exl3-midm")) return exl3_plan_bench.midm(gpu);
     if (std.mem.eql(u8, cmd, "exl3-plans")) return exl3_plan_bench.run(gpu, if (rest.len > 0) rest[0] else null);
     if (std.mem.eql(u8, cmd, "exl3-contract")) return @import("contract_exl3.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "exl3-prompt-k6")) return @import("exl3_prompt_k6_tests.zig").run(gpu, if (rest.len > 0) rest[0] else "none", if (rest.len > 1) rest[1] else null);
     if (std.mem.eql(u8, cmd, "exl3-tp2")) return @import("exl3_tp2_tests.zig").run(gpu, try arg(rest, 0), try arg(rest, 1), if (rest.len > 2) rest[2] else "none");
     if (std.mem.eql(u8, cmd, "qwen35-tp-cut")) return @import("qwen35_tp_cut_tests.zig").run(gpu, try arg(rest, 0), if (rest.len > 1) rest[1] else "1");
     if (std.mem.eql(u8, cmd, "sample")) return sample_tests.draws(gpu);
