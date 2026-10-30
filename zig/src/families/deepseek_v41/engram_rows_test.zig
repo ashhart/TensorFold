@@ -66,7 +66,11 @@ fn sha(out: []const u16) [32]u8 {
 
 /// How a test reads: serially on the calling thread, by the reader threads (no io_uring), or by io_uring.
 const Mode = enum { sync, pool, uring, aio, aio_poll };
-const modes = [_]Mode{ .sync, .pool, .uring, .aio, .aio_poll };
+// Darwin has no io_uring or native AIO: serial and the reader threads only.
+const modes = if (@import("builtin").os.tag == .linux)
+    [_]Mode{ .sync, .pool, .uring, .aio, .aio_poll }
+else
+    [_]Mode{ .sync, .pool };
 
 fn openRows(a: std.mem.Allocator, io: std.Io, tmp: *testing.TmpDir, mode: Mode) !*er.Rows {
     const root = try tmp.dir.realPathFileAlloc(io, ".", a);

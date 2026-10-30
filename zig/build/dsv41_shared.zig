@@ -33,4 +33,14 @@ pub fn steps(b: *std.Build) void {
     b.step("test-dsv41-token-map", "PCG64 and Unicode normalization without Metal").dependOn(&token_tests.step);
     const tool = b.addExecutable(.{ .name = "tf-dsv41-token-map", .root_module = builder });
     b.step("compile-dsv41-token-map", "Compile actual token-map CLI without running or Metal").dependOn(&tool.step);
+    const pack_host = moduleAt(b, b.graph.host, .ReleaseSafe, "neutral.zig");
+    @import("dsv41_draft.zig").addImportsAt(b, pack_host, b.graph.host, .ReleaseSafe);
+    const pack_tool = b.addExecutable(.{ .name = "tf-dsv41-engram-pack", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tools/dsv41_engram_pack.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+        .imports = &.{.{ .name = "dsv41", .module = pack_host }},
+    }) });
+    b.step("dsv41-engram-pack", "Build and install tf-dsv41-engram-pack (release Engram tables to packed row shards)").dependOn(&b.addInstallArtifact(pack_tool, .{}).step);
 }
