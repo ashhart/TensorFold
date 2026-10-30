@@ -11,6 +11,7 @@ fn zeModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
 pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, build_options: *std.Build.Step.Options) void {
     const ocloc = b.option([]const u8, "ocloc", "Intel offline compiler") orelse "ocloc";
     const device = b.option([]const u8, "xpu-device", "ocloc device for the XPU kernels") orelse "bmg";
+    const dpas = b.option(bool, "xpu-dpas", "The device has DPAS (XMX); off: plain fallbacks (default off for Gen12LP: tgllp, rkl, adl-*, dg1)") orelse hasDpas(device);
     const ngen_include = b.option([]const u8, "ngen-include", "nGEN header directory (oneDNN)") orelse "ngen";
     const files = b.addWriteFiles();
     const opts = "-cl-std=CL3.0 -cl-intel-256-GRF-per-thread";
@@ -106,9 +107,14 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const host = b.graph.host.result;
     if (target.result.cpu.arch == host.cpu.arch and target.result.os.tag == host.os.tag) tests_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = qwen27 })).step);
     const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = target, .optimize = optimize, .link_libc = true });
-    const nem = nemotronModules(b, target, optimize, ocloc, device, ze_mod, lanes);
+    const nem = nemotronModules(b, target, optimize, ocloc, device, dpas, ze_mod, lanes);
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
-    const engines = b.createModule(.{ .root_source_file = b.path("zig/src/native/xpu.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "xpu_qwen27", .module = qwen27 }, .{ .name = "lanes", .module = lanes }, .{ .name = "xpu", .module = nem.xpu }, .{ .name = "nemotron_xpu", .module = nem.nemotron } } });
+    const engines = b.createModule(.{ .root_source_file = b.path("zig/src/native/xpu.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "lanes", .module = lanes }, .{ .name = "xpu", .module = nem.xpu }, .{ .name = "nemotron_xpu", .module = nem.nemotron }, .{ .name = "lfm3_xpu", .module = lfm3Module(b, target, optimize, nem.xpu) } } });
+    // the Qwen3.8-27B runner (DPAS, nGEN) only where the device has DPAS: a Gen12LP server serves Nemotron and LFM3
+    const engine_options = b.addOptions();
+    engine_options.addOption(bool, "qwen27", dpas);
+    engines.addOptions("xpu_engine_options", engine_options);
+    if (dpas) engines.addImport("xpu_qwen27", qwen27);
     const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
     const template = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
     const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
@@ -147,13 +153,17 @@ const kernels = [_]Kernel{
     .{ .name = "nem_rows_r4", .src = "nem_rows", .options = cl3 ++ " -DMAXR=4" },
     .{ .name = "nem_rows_r8", .src = "nem_rows", .options = cl3 ++ " -DMAXR=8" },
     .{ .name = "nem_prow", .options = cl3 },
+    .{ .name = "nem_prow_gen12", .src = "nem_prow", .options = cl3 ++ " -DPO=4" },
     .{ .name = "nem_attn_dec", .options = cl3 },
+    .{ .name = "lfm3", .options = cl3 },
+    .{ .name = "lfm3_mv", .options = cl3 },
 };
 
 /// The runtime module; `with_kernels` false builds it host-only (empty images).
-fn runtime(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, images: []const std.Build.LazyPath, ze: *std.Build.Module) *std.Build.Module {
+fn runtime(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, images: []const std.Build.LazyPath, ze: *std.Build.Module, dpas: bool) *std.Build.Module {
     const options = b.addOptions();
     options.addOption(bool, "with_kernels", images.len == kernels.len);
+    options.addOption(bool, "dpas", dpas);
     const xpu = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
     xpu.addOptions("kernel_options", options);
     xpu.addImport("ze", ze);
@@ -174,10 +184,10 @@ fn family(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
 }
 
 /// Nemotron's SPIR-V images (built only when a step needs them), its runtime and its family module.
-fn nemotronModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ocloc: []const u8, device: []const u8, ze: *std.Build.Module, lanes: *std.Build.Module) Modules {
+fn nemotronModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ocloc: []const u8, device: []const u8, dpas: bool, ze: *std.Build.Module, lanes: *std.Build.Module) Modules {
     var images: [kernels.len]std.Build.LazyPath = undefined;
-    for (kernels, &images) |k, *image| image.* = spirv(b, ocloc, device, k);
-    var m = family(b, target, optimize, runtime(b, target, optimize, &images, ze), lanes);
+    for (kernels, &images) |k, *image| image.* = spirv(b, ocloc, device, dpas, k);
+    var m = family(b, target, optimize, runtime(b, target, optimize, &images, ze, dpas), lanes);
     m.images = images;
     return m;
 }
@@ -191,10 +201,11 @@ fn cliModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
 }
 
 /// ocloc -spv_only on one kernel source: `name`.spv in its own output directory.
-fn spirv(b: *std.Build, ocloc: []const u8, device: []const u8, k: Kernel) std.Build.LazyPath {
+fn spirv(b: *std.Build, ocloc: []const u8, device: []const u8, dpas: bool, k: Kernel) std.Build.LazyPath {
     const run = b.addSystemCommand(&.{ ocloc, "compile", "-device", device, "-spv_only", "-output", k.name, "-output_no_suffix", "-q" });
     // ocloc builds from a copy of the source, so the header directory is named (the Run step's cwd is the build root)
-    if (k.options.len > 0) run.addArgs(&.{ "-options", if (k.include) b.fmt("{s} -I zig/kernels/xpu", .{k.options}) else k.options });
+    const options = if (dpas) k.options else b.fmt("{s} -DTF_XPU_NO_DPAS", .{k.options}); // Gen12LP: the kernels' plain fallbacks
+    if (options.len > 0) run.addArgs(&.{ "-options", if (k.include) b.fmt("{s} -I zig/kernels/xpu", .{options}) else options });
     _ = k.include;
     run.addArg("-file");
     run.addFileArg(b.path(b.fmt("zig/kernels/xpu/{s}.cl", .{k.src orelse k.name})));
@@ -203,9 +214,22 @@ fn spirv(b: *std.Build, ocloc: []const u8, device: []const u8, k: Kernel) std.Bu
     return out.path(b, b.fmt("{s}.spv", .{k.name}));
 }
 
+/// Whether ocloc's `device` has DPAS (XMX): not Gen12LP (Tiger Lake, Rocket Lake, Alder Lake, DG1).
+fn hasDpas(device: []const u8) bool {
+    for ([_][]const u8{ "tgllp", "rkl", "adl", "dg1", "gen12lp" }) |p| if (std.mem.startsWith(u8, device, p)) return false;
+    return true;
+}
+
+/// LFM3's forward and engine on the runtime module `xpu`.
+fn lfm3Module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, xpu: *std.Build.Module) *std.Build.Module {
+    const m = b.createModule(.{ .root_source_file = b.path("zig/src/families/lfm3/xpu.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    m.addImport("xpu", xpu);
+    return m;
+}
+
 /// The standalone op and model tests, each its own program `tf-xpu-<name>-test` (step `xpu-tests`).
 const test_programs = [_][]const u8{
-    "panic", "nem_rows", "nem_prefill", "nem_gen", "nem_mtp", "nem_kl", "nem_norm_bench", "nem_mv_bench", "nem_slot", "nem_format", "nem_seam", "nem_attn_dec", "nem_fp64",
+    "panic", "nem_rows", "nem_prefill", "nem_gen", "nem_mtp", "nem_kl", "nem_norm_bench", "nem_mv_bench", "nem_slot", "nem_format", "nem_seam", "nem_attn_dec", "nem_fp64", "memory", "lfm3_conv", "lfm3_rope", "lfm3_attn", "lfm3_norm", "lfm3_fwd", "lfm3_bench",
 };
 
 /// `-Dxpu` (Linux): Nemotron's SPIR-V images, `tensorfold-xpu` and `tf-xpu-test`; needs ocloc, not nvcc or CUDA.
@@ -222,11 +246,13 @@ fn nemotronSteps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
     runner.addImport("nemotron_xpu", mods.nemotron);
     b.installArtifact(b.addExecutable(.{ .name = "tf-xpu-test", .root_module = runner }));
     const tests_step = b.step("xpu-tests", "Build the standalone Intel GPU op and model tests (tf-xpu-<name>-test)");
+    const lfm3 = lfm3Module(b, target, optimize, xpu);
     for (test_programs) |name| {
         const mod = b.createModule(.{ .root_source_file = b.path(b.fmt("zig/tests/xpu/{s}.zig", .{name})), .target = target, .optimize = optimize, .link_libc = true });
         mod.addImport("xpu", xpu);
         mod.addImport("core", mods.core);
         mod.addImport("nemotron_xpu", mods.nemotron);
+        mod.addImport("lfm3_xpu", lfm3);
         tests_step.dependOn(&b.addInstallArtifact(b.addExecutable(.{ .name = b.fmt("tf-xpu-{s}-test", .{name}), .root_module = mod }), .{}).step);
     }
 }
@@ -234,7 +260,7 @@ fn nemotronSteps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
 /// Host unit tests of the Intel GPU runtime, the Nemotron family on it and its CLI (no GPU, no ocloc), on any host.
 pub fn hostTests(b: *std.Build, step: *std.Build.Step) void {
     const host = b.graph.host;
-    const xpu = runtime(b, host, .debug, &.{}, zeModule(b, host, .debug));
+    const xpu = runtime(b, host, .debug, &.{}, zeModule(b, host, .debug), true);
     const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = host, .optimize = .debug, .link_libc = true });
     const mods = family(b, host, .debug, xpu, lanes);
     const ze = xpu.import_table.get("ze").?;
