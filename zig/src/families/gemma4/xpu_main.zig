@@ -76,7 +76,7 @@ fn teacher(r: *fwd.Runner, ref_dir: []const u8, out_dir: []const u8, only: ?[]co
 fn windows(r: *fwd.Runner, ids: []const u32) !void {
     var first: ?u64 = null;
     var all_equal = true;
-    for ([_]u32{ 1, 2, 4, 8, 16, 17, 64, 100, 128, 256, 16, 16 }) |w| {
+    for ([_]u32{ 1, 2, 4, 8, 16, 17, 64, 100, 128, 256, 512, 1024, 16, 16 }) |w| {
         r.reset();
         r.window = w;
         try r.feed(ids, true);
@@ -89,6 +89,21 @@ fn windows(r: *fwd.Runner, ids: []const u32) !void {
         std.debug.print("window {d:2}: next token {d}, logits hash {x:0>16}{s}\n", .{ w, r.last, h, if (h == first.?) "" else "  DIFFERENT" });
     }
     std.debug.print("{s}\n", .{if (all_equal) "windows == rows: identical logits" else "windows differ"});
+}
+
+/// Prompts cut from the ids file at each length: the next-token logits hash of every length, for comparing two builds.
+fn lengths(r: *fwd.Runner, ids: []const u32, list: []const u8) !void {
+    var it = std.mem.tokenizeScalar(u8, list, ',');
+    while (it.next()) |tok| {
+        const n = try std.fmt.parseInt(usize, tok, 10);
+        if (n == 0 or n > ids.len) return error.Usage;
+        r.reset();
+        try r.feed(ids[0..n], true);
+        const raw = try alloc.alloc(u8, cfg.vocab * 2);
+        defer alloc.free(raw);
+        try r.d.read(raw, r.a.logits);
+        std.debug.print("length {d:5}: next token {d}, logits hash {x:0>16}\n", .{ n, r.last, std.hash.Wyhash.hash(0, raw) });
+    }
 }
 
 /// The card's top-64 of each step's logits against the host's, over a prompt and 24 greedy steps; and its time.
@@ -139,6 +154,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("loaded in {d:.1} s, {d:.2} GB on the card\n", .{ now() - t_load, @as(f64, @floatFromInt(r.d.allocated)) / 1e9 });
     if (std.mem.eql(u8, argv[2], "--topk-test")) return topkTest(r, try readIds(argv[3]));
     if (std.mem.eql(u8, argv[2], "--windows")) return windows(r, try readIds(argv[3]));
+    if (std.mem.eql(u8, argv[2], "--lengths")) return lengths(r, try readIds(argv[3]), argv[4]);
     if (std.mem.eql(u8, argv[2], "--gemm-test")) return gemm_test.gemmTest(r);
     if (std.mem.eql(u8, argv[2], "--ple-check")) {
         const ids = try alloc.alloc(u32, argv.len - 3);
