@@ -76,16 +76,20 @@ pub fn attach(p: *anyopaque, streams: u32, pages: usize) !void {
     const l = own.layout orelse return error.NoPages;
     try own.lanes.x.pool(streams + 1, pages, l.pageBytes());
     own.e.pages = try pages_mod.Pages.init(own.gpa, own.e, l, streams + 1, pages, true);
-    if (own.share > 0) try share(own);
+    if (own.share > 0) try share(own, streams + 1);
 }
 
 /// TF_GLM_KV_SHARE: the pool's prompt cache, its `own.share` snapshots sized at the window's last mark (rings whole).
-fn share(own: *Owned) !void {
+fn share(own: *Owned, parallel: u32) !void {
     const e = own.e;
     e.share_pages = true;
     // cc-defer: the snapshots take the room set aside for --prompt-cache-gib; from the plan once it plans them
     try readySnapshots(own, own.share * e.stateBytes(e.capacity - e.capacity % snap_grid));
     own.lanes.prefix = try prefix_mod.Prefix.init(e.gpa, e, e.pages.?, snap_grid, own.share);
+    if (prefix_mod.fewStates(own.share, parallel)) std.log.warn(
+        "TF_GLM_KV_SHARE={d} keeps under 4 states a stream at --parallel {d}: live streams evict each other's before a resume; set it to {d} or more",
+        .{ own.share, parallel, 4 * parallel },
+    );
 }
 
 /// Whether a request's caches fit now (the lane host's admission, on its engine thread).
