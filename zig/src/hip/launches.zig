@@ -131,6 +131,8 @@ pub const Launcher = struct {
         argmax_part: Function,
         argmax_join: Function,
         topk: Function,
+        topk_part: Function,
+        topk_join: Function,
         conv_prefill: Function,
         gdn_gate_prefill: Function,
         dense_rows: Function,
@@ -203,6 +205,8 @@ pub const Launcher = struct {
             .argmax_part = try ops.function("tf_argmax_part"),
             .argmax_join = try ops.function("tf_argmax_join"),
             .topk = try ops.function("tf_topk"),
+            .topk_part = try ops.function("tf_topk_part"),
+            .topk_join = try ops.function("tf_topk_join"),
             .conv_prefill = try ops.function("tf_conv_prefill"),
             .gdn_gate_prefill = try ops.function("tf_gdn_gate_prefill"),
             .dense_rows = try ops.function("tf_dense_rows"),
@@ -319,6 +323,7 @@ pub const Launcher = struct {
     pub const tf_argmax_rows = draw.tf_argmax_rows;
     pub const tf_argmax_parts = draw.tf_argmax_parts;
     pub const tf_topk_rows = draw.tf_topk_rows;
+    pub const tf_topk_parts = draw.tf_topk_parts;
     pub const tf_add_wide = tp.tf_add_wide;
     pub const tf_moe_localize = tp.tf_moe_localize;
     pub const tf_moe_foreign_items = tp.tf_moe_foreign_items;

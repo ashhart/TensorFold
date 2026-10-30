@@ -8,7 +8,7 @@ const ops = @import("../ops/ops.zig");
 const Tensor = ops.Tensor;
 const Kind = ops.Kind;
 
-fn act(t: *const Rig) Kind {
+pub fn act(t: *const Rig) Kind {
     return if (t.bf16) .bf16 else .f16;
 }
 
@@ -21,7 +21,7 @@ fn round(t: *const Rig, v: f64) u16 {
     return @intCast((u + 0x7fff + ((u >> 16) & 1)) >> 16);
 }
 
-fn tensor(b: anytype, kind: Kind) Tensor {
+pub fn tensor(b: anytype, kind: Kind) Tensor {
     return .{ .ptr = at(b), .kind = kind };
 }
 
@@ -516,4 +516,8 @@ test "the linear attention's prompt conv and DeltaNet gates sit within 1e-5 of f
         try std.testing.expect(@abs(gg[i] - want_gate) <= 1e-5 * @max(want_gate, 1e-3));
         try std.testing.expect(@abs(gb[i] - sigmoid(t.value(hb[i]))) < 1e-6);
     }
+}
+
+test {
+    _ = @import("ops_flashnext.zig");
 }

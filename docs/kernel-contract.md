@@ -184,6 +184,8 @@ each row then L2-normed, against float64's ranges at their bf16 points and expf'
 CUDA also checks `dense_rows`' scaled epilogue (Dory's logits, fp32(bf16(x . w)) times a per-column scale), bit-equal to its
 unscaled tile's outputs rounded and scaled on the host.
 HIP: the RMS norm rows, a wave a row (fp32, fp16 and bf16 out) and a block a row (fp16 and bf16 out).
+HIP's top-k in parts (`tf_topk_part`, `tf_topk_join`) is bit-equal to `tf_topk` and checked against its key order: a
+positive NaN above +Inf, a negative NaN below -Inf, -0 equal to +0, ties to the lower id.
 
 RADIO's fused bias, activation and residual (`tf_vit_bias_act`) replaces `tf_vit_bias` then
 `tf_vit_pointwise`, byte for byte.
