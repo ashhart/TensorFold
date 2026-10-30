@@ -112,7 +112,8 @@ inline void tf_tq_mmas(thread simdgroup_matrix<float, 8, 8> (*P)[TJ], const thre
   #pragma unroll
   for (int kk = 0; kk < 32; kk += 8) {
     simdgroup_matrix<bfloat, 8, 8> a[TI], b[TJ];
-    // Each lane's pair (row fm, columns fn, fn + 1) stored whole, as lfm2_mma (element stores crawl on an M1).
+#if TF_TQ_WHOLE_FRAGMENTS
+    // M1 and M2: each lane's pair (row fm, columns fn, fn + 1) stored whole, as lfm2_mma; element stores crawl there.
     for (int i = 0; i < TI; ++i) {
       const threadgroup bfloat* ap = xb + (sr + 8 * i + fm) * TP + kk + fn;
       reinterpret_cast<thread vec<bfloat, 2>&>(a[i].thread_elements()) = *(const threadgroup vec<bfloat, 2>*)ap;
@@ -129,6 +130,21 @@ inline void tf_tq_mmas(thread simdgroup_matrix<float, 8, 8> (*P)[TJ], const thre
         simdgroup_multiply_accumulate(c, a[i], b[j], c);
         p = reinterpret_cast<thread float2&>(c.thread_elements());
       }
+#else
+    // Each lane's two elements (row fm, columns fn and fn + 1) read directly: A along k, B down its two columns.
+    for (int i = 0; i < TI; ++i) {
+      const threadgroup bfloat* ap = xb + (sr + 8 * i + fm) * TP + kk + fn;
+      a[i].thread_elements()[0] = ap[0];
+      a[i].thread_elements()[1] = ap[1];
+    }
+    for (int j = 0; j < TJ; ++j) {
+      const threadgroup bfloat* bp = wb + (tf_tq_col<GLU>(sc, j) + fn) * TP + kk + fm;
+      b[j].thread_elements()[0] = bp[0];
+      b[j].thread_elements()[1] = bp[TP];
+    }
+    for (int i = 0; i < TI; ++i)
+      for (int j = 0; j < TJ; ++j) simdgroup_multiply_accumulate(P[i][j], a[i], b[j], P[i][j]);
+#endif
   }
 }
 
