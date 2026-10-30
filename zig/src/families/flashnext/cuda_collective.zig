@@ -17,6 +17,8 @@ pub const Collective = struct {
     link: wire.Link,
     timeout_ms: u64,
     failed: bool = false,
+    /// How long a wait polls before it sleeps between polls (0: sleeps from the first poll); an EXL3 engine sets it.
+    spin_ns: u64 = 0,
 
     /// `link` has completed the source/settings handshake; it stays owned by the caller.
     pub fn init(link: wire.Link, rank: usize, timeout_ms: u64) !Collective {
@@ -63,6 +65,7 @@ pub const Collective = struct {
 
     fn wait(c: *Collective, stream: ?cuda.Stream, until: u64) !void {
         errdefer c.abort();
+        var spin_until: u64 = 0;
         while (true) {
             try c.link.checkPeer();
             if (wire.now() >= until) return error.RankTimeout;
@@ -73,6 +76,13 @@ pub const Collective = struct {
                 if (stream) |s| {
                     if (try s.done()) return;
                 } else return;
+            }
+            if (c.spin_ns != 0) {
+                if (spin_until == 0) spin_until = wire.now() + c.spin_ns;
+                if (wire.now() < spin_until) {
+                    std.atomic.spinLoopHint();
+                    continue;
+                }
             }
             wire.pause();
         }
@@ -91,6 +101,16 @@ pub const Collective = struct {
         errdefer c.abort();
         try c.link.checkPeer();
         try c.submitted(c.lib.api.ncclAllGather(local, out, count, .bf16, c.comm, stream.handle));
+        try c.wait(null, wire.deadline(c.timeout_ms));
+    }
+
+    /// Every rank's `count` fp32 values side by side in `out` (rank r at r * count); `local` may sit there already.
+    pub fn gatherF32(c: *Collective, stream: cuda.Stream, local: u64, out: u64, count: usize) !void {
+        if (c.failed or c.comm == null) return error.RankDisconnected;
+        if (count == 0) return;
+        errdefer c.abort();
+        try c.link.checkPeer();
+        try c.submitted(c.lib.api.ncclAllGather(local, out, count, .f32, c.comm, stream.handle));
         try c.wait(null, wire.deadline(c.timeout_ms));
     }
 

@@ -102,7 +102,7 @@ pub fn Ops(comptime Tri: type) type {
             try o.forwardMain(seq, ids[at..stop], .{ .logits = if (last) .last else .none, .streams = d.streams.ptr });
             const head_to = @min(stop, ids.len - 1);
             if (head_to > at) try o.forwardHead(d, ids[at + 1 .. head_to + 1], d.streams.ptr, false);
-            if (last) d.prompt_last = d.streams.ptr + (stop - 1 - at) * wide * 2;
+            d.prompt_last = d.streams.ptr + (stop - 1 - at) * wide * 2;
         }
 
         /// The whole prompt a chunk of the engine's rows at a time, from an empty head cache.
@@ -413,6 +413,8 @@ pub fn Ops(comptime Tri: type) type {
 
         /// One forward over the window `ids` from seq.fed: each row's scores in d.logits, its streams in d.streams.
         pub fn verify(o: Self, seq: *prompt.Seq, d: *Draft, ids: []const u32) !void {
+            const telemetry_scope = o.e.telemetry.enter(.verify);
+            defer telemetry_scope.restore();
             if (o.main) |m| return m.verify(m.ptr, seq, d, ids);
             o.e.round_graph.clear();
             const n = ids.len;
