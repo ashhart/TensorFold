@@ -122,6 +122,7 @@ test {
     _ = @import("pdf_flags_test.zig");
     _ = @import("jpeg_out.zig");
     _ = @import("images.zig");
+    _ = @import("audio.zig");
     _ = @import("images_video_marker_test.zig");
     _ = @import("chat_ocr_test.zig");
     _ = @import("image_key.zig");

@@ -42,5 +42,6 @@ pub fn media(srv: anytype) @import("messages.zig").Media {
     result.images = taken.image;
     result.videos = taken.video;
     result.native_deepseek = srv.text.native_deepseek;
+    result.audio = srv.info.audio != null;
     return result;
 }

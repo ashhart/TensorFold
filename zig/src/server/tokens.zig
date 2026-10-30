@@ -42,6 +42,7 @@ fn messageIds(srv: *Server, cx: *Cx, body: Value) errors.Refused![]const u32 {
     };
     // media expanded as the chat route expands them: each image's tokens, each video's frame groups
     if (try images.expand(srv.info.vision, if (srv.config.vision_urls) images.Fetch.network(srv.io) else null, srv.text, cx, msgs, ids, 0)) |x| return x.ids;
+    if (try @import("audio.zig").expand(srv.info.audio, cx, msgs, ids, 0)) |x| return x.ids;
     return ids;
 }
 
