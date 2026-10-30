@@ -117,8 +117,7 @@ inline void k3_xp_chains(thread float (&acc)[NW][RP], threadgroup const bfloat* 
       }
     }
     for (int v = 0; v < NW; ++v) {
-      const float sc = k3_e8m0(ws[v][g]);
-      for (int r = 0; r < RP; ++r) acc[v][r] = fma(p[v][r], sc, acc[v][r]);
+      for (int r = 0; r < RP; ++r) acc[v][r] = k3_scaled_fma(p[v][r], ws[v][g], acc[v][r]);
     }
   }
 }

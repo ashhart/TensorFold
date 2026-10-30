@@ -424,10 +424,14 @@ pub fn main(init: std.process.Init) !u8 {
     defer dsv41_fp8.destroy();
     const dsv41_fp8_mma = try @import("metal_dsv41_fp8_mma.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer dsv41_fp8_mma.destroy();
+    const dsv41_experts = try @import("metal_dsv41_experts.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer dsv41_experts.destroy();
     var t: g.Tally = .{};
     const t0 = std.Io.Clock.awake.now(init.io);
     if (o.gates) {
         try g.runAll(a, kernels.items, o.seed, &t);
+        if (dsv41_experts.probes.items.len > 0) t.failed += try dsv41_experts.pipeline(o.seed);
+        if (std.c.getenv("TF_DSV41_EXPERTS_TIME") != null) try dsv41_experts.timing(init.io);
         for (flash_list[0..flash_made]) |*probe| try probe.rowCountInvariant();
         t.failed += try dsv41_fp8.invariance(o.seed);
         if (std.c.getenv("TF_DSV41_TIME") != null) try dsv41_fp8.timing(init.io);

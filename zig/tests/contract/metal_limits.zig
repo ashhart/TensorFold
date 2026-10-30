@@ -69,6 +69,10 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
         const text_d3 = try @import("metal_drama3.zig").source(a, d.name);
         return .{ .decl = d, .function = fun, .here = text_d3, .pre_m5 = text_d3 };
     }
+    if (std.mem.startsWith(u8, d.name, "dsv41 experts ")) {
+        const body = try tf.dsv41_experts.source(a, "", &.{});
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
     if (std.mem.startsWith(u8, d.name, "dsv41 fp8 rows ")) {
         text = sources.deepseek_v41_fp8_rows;
     } else if (std.mem.startsWith(u8, fun, "tf_ctl_")) {

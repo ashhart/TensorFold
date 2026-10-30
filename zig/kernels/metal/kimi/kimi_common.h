@@ -24,6 +24,14 @@ inline float k3_e8m0(uchar e) {
   return as_type<float>((uint(e) + 14u) << 23);
 }
 
+// fma(p * 2^14 * 2^(e-127), 1, acc) with the scale split in two normal floats: exact for every E8M0 byte but 255 (NaN).
+inline float k3_scaled_fma(float p, uchar e, float acc) {
+  if (e - 1u < 240u) return fma(p, k3_e8m0(e), acc);
+  if (e == 255u) return NAN;
+  const int d = int(e) - 127, d1 = d / 2;
+  return fma(p * 16384.0f * as_type<float>(uint(d1 + 127) << 23), as_type<float>(uint(d - d1 + 127) << 23), acc);
+}
+
 // fma chain over the 16 E2M1 codes of 8 bytes against 16 activations, in code order.
 inline float k3_fp4_dot16(float p, const thread float* x, uint2 w) {
   for (int b = 0; b < 8; ++b) {

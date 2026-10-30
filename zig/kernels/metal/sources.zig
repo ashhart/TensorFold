@@ -41,6 +41,11 @@ pub const core_exlr8_dense_prompt = @embedFile("core/exlr8_dense_prompt.metal");
 /// DeepSeek V4.1 release FP8 dense projections: 32x32 blocks and split-invariant row sums.
 pub const deepseek_v41_fp8_rows = @embedFile("deepseek_v41/fp8_rows.metal");
 pub const core_pair = @embedFile("core/pair.metal");
+/// Kimi K3's MXFP4 routed experts (header, then plan/up/down/combine), which DeepSeek V4.1's expert kernel includes.
+pub const kimi_common = @embedFile("kimi/kimi_common.h");
+pub const kimi_experts = @embedFile("kimi/experts.metal");
+/// DeepSeek V4.1's routed-expert gate/up (clamped SwiGLU, the reference's activation rounding) over Kimi's kernels.
+pub const deepseek_v41_experts = @embedFile("deepseek_v41/experts.metal");
 /// The row-split seam's kernels (see `pair_rows.zig`): `pair.metal` above stays as it is for glm_dsa.
 pub const core_pair_rows = @embedFile("core/pair_rows.metal");
 
