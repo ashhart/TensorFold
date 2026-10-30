@@ -49,6 +49,8 @@ pub const kimi_experts = @embedFile("kimi/experts.metal");
 /// DeepSeek V4.1's routed-expert gate/up (clamped SwiGLU, the reference's activation rounding) over Kimi's kernels.
 pub const deepseek_v41_experts = @embedFile("deepseek_v41/experts.metal");
 pub const deepseek_v41_xmma = @embedFile("deepseek_v41/experts_mma.metal");
+/// DeepSeek-V4.1 router, indexer, compressor and head matvecs: lane chains over K, one butterfly, any row count.
+pub const deepseek_v41_mv = @embedFile("deepseek_v41/mv.metal");
 /// The row-split seam's kernels (see `pair_rows.zig`): `pair.metal` above stays as it is for glm_dsa.
 pub const core_pair_rows = @embedFile("core/pair_rows.metal");
 
@@ -212,6 +214,10 @@ pub const drama3 = struct {
     pub const sample = @embedFile("drama3/sample.metal");
     pub const codec = @embedFile("drama3/codec.metal");
 };
+
+
+/// DeepSeek-V4.1's phase-1 glue (deepseek_v41/glue_tmp.metal): the reference bits of the registered glue kernels.
+pub const deepseek_v41_glue_tmp = @embedFile("deepseek_v41/glue_tmp.metal");
 
 pub const core_weight_only_body = @embedFile("core/weight_only.h");
 pub const core_weight_only = @embedFile("core/weight_only.metal");

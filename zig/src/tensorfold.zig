@@ -119,7 +119,9 @@ pub const tree_round_gpu = @import("tree_round_gpu");
 pub const dsv41_fp8_rows = @import("families/deepseek_v41/metal/fp8_rows.zig");
 pub const dsv41_attn = @import("families/deepseek_v41/metal/csa2_attn.zig");
 pub const dsv41_experts = @import("families/deepseek_v41/metal/experts.zig");
+pub const dsv41_mv = @import("families/deepseek_v41/metal/mv.zig");
 pub const dsv41_xmma = @import("families/deepseek_v41/metal/experts_mma.zig");
+pub const dsv41_glue_tmp = @import("families/deepseek_v41/metal/glue.zig");
 pub const bf16_topk = @import("bf16_topk");
 pub const bf16_topk_gpu = @import("bf16_topk_gpu");
 
