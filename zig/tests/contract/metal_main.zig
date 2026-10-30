@@ -6,6 +6,7 @@ const contract = @import("contract");
 const rows_k = @import("metal_rows.zig");
 const affine_k = @import("metal_affine.zig");
 const topk_k = @import("metal_topk.zig");
+const ling_route = @import("metal_ling_route.zig");
 const tile_k = @import("metal_tile.zig");
 const limits_k = @import("metal_limits.zig");
 const h3_k = @import("metal_h3.zig");
@@ -335,6 +336,12 @@ pub fn main(init: std.process.Init) !u8 {
     if (wanted(o, topk_k.spec().name)) {
         topk = try topk_k.TopK.init(a, device, queue);
         try kernels.append(a, topk.?.kernel());
+    }
+    var ling: ?ling_route.Route = null;
+    defer if (ling) |*x| x.deinit();
+    if (wanted(o, ling_route.spec().name)) {
+        ling = try ling_route.Route.init(a, device, queue);
+        try kernels.append(a, ling.?.kernel());
     }
     for ([_][]const Reg{ &common, if (tensor) &m5_only else &.{} }) |list| for (list) |v| {
         if (!wanted(o, v.name)) continue;
