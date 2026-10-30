@@ -22,18 +22,22 @@ pub const page_unit = chunk_keys;
 /// Keys a prompt tile (window_rows.cuh's BN): a paged tile takes one page base, so prompt pages hold whole tiles.
 pub const prompt_tile = 32;
 
+/// Pages any paged kernel reads or `put` writes: no window, a wide head dim, a position count, i64 page steps.
+fn pageShape(w: Window) bool {
+    const p = w.pg orelse return true;
+    return w.win == 0 and wide(w.d) and p.tokens > 0 and p.page_elems <= std.math.maxInt(i63);
+}
+
 /// Head dim 256 decode pages hold whole chunks; 512's decode looks up each key's page (prompt rows: promptShape).
 fn pagedShape(w: Window) bool {
     const p = w.pg orelse return true;
-    if (w.win != 0 or p.tokens == 0 or p.page_elems > std.math.maxInt(i63)) return false;
-    return if (w.d == 256) p.tokens % page_unit == 0 else w.d == 512;
+    return pageShape(w) and (w.d != 256 or p.tokens % page_unit == 0);
 }
 
 /// Prompt rows at either head dim: a 32-key tile takes one page base, so pages hold whole tiles (prompt_tile).
 fn promptShape(w: Window) bool {
     const p = w.pg orelse return true;
-    if (w.win != 0 or p.tokens == 0 or p.page_elems > std.math.maxInt(i63)) return false;
-    return wide(w.d) and p.tokens % prompt_tile == 0;
+    return pageShape(w) and p.tokens % prompt_tile == 0;
 }
 
 /// Head dims window_rows.cu serves, with any query heads a key head up to 16.
@@ -234,7 +238,7 @@ pub const WindowAttention = struct {
     /// n rows k, v [n, hk * d] bf16 into the paged caches kc/vc (a layer's part of page 0) at pos/slot (int32 [n]).
     pub fn put(g: *const WindowAttention, s: Stream, k: u64, v: u64, kc: u64, vc: u64, pos: u64, slot: u64, w: Window, n: usize) !void {
         const p = w.pg orelse return error.WindowShape;
-        if (!pagedShape(w)) return error.WindowShape;
+        if (!pageShape(w)) return error.WindowShape; // a block a row: its page from the table, any position count
         if (n == 0) return;
         var a: launch_.Args = .{};
         for ([_]u64{ k, v, kc, vc, pos, slot, p.table }) |x| a.add(x);
@@ -314,7 +318,7 @@ test "paged prompt rows: pages of whole 32-key tiles at head dims 256 and 512, n
     var w: Window = .{ .h = 16, .hk = 4, .d = 256, .win = 0, .ring = 0, .scale = 1, .pg = .{ .table = 0, .page_elems = 32 * 1024, .tokens = 32 } };
     try std.testing.expect(promptShape(w) and !pagedShape(w));
     w.pg.?.tokens = 48;
-    try std.testing.expect(!promptShape(w));
+    try std.testing.expect(!promptShape(w) and pageShape(w)); // `put` places rows in pages of any count
     w.pg.?.tokens = 64;
     w.d = 512;
     try std.testing.expect(promptShape(w));
