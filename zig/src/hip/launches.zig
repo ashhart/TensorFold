@@ -148,7 +148,7 @@ pub const Launcher = struct {
         token_prob: Function,
     };
 
-    /// Which kernels a run takes where two give the same bits; every one defaults on.
+    /// Which kernels a run takes: fuse and wide give the same bits and default on; sparse_wmma changes bits and is opt-in.
     pub const Choices = struct { fuse: bool = true, wide: bool = true, sparse_wmma: bool = false, products: affine.Choices = .{} };
 
     /// Loads the code objects on the current device and resolves every kernel the launchers use.
