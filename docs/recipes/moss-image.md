@@ -19,6 +19,8 @@ It is a denoiser, not a token family. It does not register with the lane engine,
 
 It runs on the M5's tensor units alone, the only chip it was checked on: `Model.load` refuses a GPU without them.
 
+The same transformer runs on CUDA too: [moss-image-cuda.md](moss-image-cuda.md).
+
 ## Checkpoint
 
 `OpenMOSS-Team/MOSS-Image-Base` at `85975793d8b3d432f1b6e27f352abaa4c2a4c0d3`, Apache 2.0. `transformer/config.json`

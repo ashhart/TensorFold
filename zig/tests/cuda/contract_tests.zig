@@ -573,6 +573,8 @@ pub fn run(gpu: check.Gpu) !void {
     defer mtp_rows.destroy();
     const weight_only = try @import("contract_weight_only_suite.zig").Suite.create(a, gpu, s, &kernels);
     defer weight_only.destroy(a);
+    const moss = try @import("contract_moss_image.zig").Set.init(gpu, s, a, &kernels);
+    defer moss.deinit();
     var t: g.Tally = .{};
     try @import("contract_dump.zig").run(a, kernels.items);
     const t0 = check.now(gpu.io);

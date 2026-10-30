@@ -207,7 +207,7 @@ pub const cuda = @import("flashnext_cuda_records.zig").cuda ++ [_]CudaRecord{
     .{ .launch = .{ .name = "experts3_prefill down", .symbol = "_ZN19tf_experts3_prefill14prefill_kernelILi1ELi3ELi2ELi2ELi4EEEvPK13__nv_bfloat16iiPK5uint4iiPKiS8_S8_PvifS6_i", .image = "experts3_prefill", .threads = 256, .dynamic = 47104, .opt_in = true }, .usage = .{ .{ .regs = 128, .static = 0, .bound = 256 }, .{ .regs = 128, .static = 0, .bound = 256 }, .{ .regs = 128, .static = 0, .bound = 256 }, .{ .regs = 98, .static = 0, .bound = 256 }, .{ .regs = 98, .static = 0, .bound = 256 } } },
     .{ .launch = .{ .name = "experts3 tf_experts3_widen", .symbol = "tf_experts3_widen", .image = "experts3", .threads = 256 }, .usage = .{ .{ .regs = 32, .static = 0, .bound = 0 }, .{ .regs = 36, .static = 0, .bound = 0 }, .{ .regs = 36, .static = 0, .bound = 0 }, .{ .regs = 32, .static = 0, .bound = 0 }, .{ .regs = 32, .static = 0, .bound = 0 } } },
     .{ .launch = .{ .name = "experts3 tf_experts3_planes", .symbol = "tf_experts3_planes", .image = "experts3", .threads = 256 }, .usage = .{ .{ .regs = 26, .static = 0, .bound = 0 }, .{ .regs = 28, .static = 0, .bound = 0 }, .{ .regs = 28, .static = 0, .bound = 0 }, .{ .regs = 36, .static = 0, .bound = 0 }, .{ .regs = 36, .static = 0, .bound = 0 } } },
-} ++ @import("registry_media.zig").cuda ++ @import("nemotron_prompt_records.zig").cuda ++ @import("glm_cuda_records.zig").cuda ++ @import("registry_shared_attention.zig").records(CudaRecord) ++ @import("gemma_cuda_records.zig").cuda ++ @import("spark_cuda_records.zig").cuda ++ @import("row_cuda_records.zig").cuda ++ @import("flashnext_tile_records.zig").cuda ++ @import("window_rows_records.zig").cuda ++ @import("modelopt_lane_records.zig").cuda ++ @import("nvfp4_fact_records.zig").cuda ++ @import("lane_half_records.zig").cuda;
+} ++ @import("registry_media.zig").cuda ++ @import("nemotron_prompt_records.zig").cuda ++ @import("glm_cuda_records.zig").cuda ++ @import("registry_shared_attention.zig").records(CudaRecord) ++ @import("gemma_cuda_records.zig").cuda ++ @import("spark_cuda_records.zig").cuda ++ @import("row_cuda_records.zig").cuda ++ @import("flashnext_tile_records.zig").cuda ++ @import("window_rows_records.zig").cuda ++ @import("modelopt_lane_records.zig").cuda ++ @import("nvfp4_fact_records.zig").cuda ++ @import("lane_half_records.zig").cuda ++ @import("moss_image_cuda_records.zig").cuda;
 
 /// The nvcc release `cuda`'s usage records come from: the compiler that builds the release fatbins.
 pub const cuda_release: limits.Nvcc = .{ .major = 13, .minor = 0 };
@@ -586,6 +586,7 @@ pub const all_cuda = @import("nvfp4_tile_pending.zig").records ++ landed_cuda ++
 pub const dsv41_pending = @import("registry_union.zig").extra(landed_cuda, @import("dsv41_pending_1.zig").records ++ @import("dsv41_pending_2.zig").records);
 test {
     _ = @import("qwen4_cuda_receipts_test.zig");
+    _ = @import("moss_image_cuda_records.zig");
     _ = @import("glm_kv_pending.zig");
     _ = @import("glm_f32w_pending.zig");
     _ = @import("registry_pending_test.zig");
