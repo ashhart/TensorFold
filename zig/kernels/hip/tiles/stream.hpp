@@ -103,9 +103,22 @@ __device__ inline void stream_body(const typename Dec::Args& a, int lpc_log2, in
             br[c] = terms.bias_raw(at);
         }
     };
-    // The dots of one round. A lane past the row's last chunk read the last one: its scale and bias are zero.
+    // One row's x chunk of a round, loaded before the next round's codes so the dots wait for this round alone
+    auto xload = [&](int base, uint32_t (&xn)[16], int r) {
+        const int q = base + j < nch ? base + j : nch - 1;
+        const u32x4* src = reinterpret_cast<const u32x4*>(xr[r] + static_cast<long long>(q) * 32);
+#pragma unroll
+        for (int v = 0; v < 4; ++v) {
+            const u32x4 t = src[v];
+            xn[4 * v] = t.x;
+            xn[4 * v + 1] = t.y;
+            xn[4 * v + 2] = t.z;
+            xn[4 * v + 3] = t.w;
+        }
+    };
+    // The dots of one round (a lane past the row's last chunk reads it with zero terms); x1: R = 1's x chunk
     auto work = [&](int base, const uint32_t (&w)[CB][Dec::kWords], const unsigned short (&sr)[CB],
-                    const unsigned short (&br)[CB]) {
+                    const unsigned short (&br)[CB], const uint32_t (&x1)[16]) {
         const bool live = base + j < nch;
         const int q = live ? base + j : nch - 1;
         float sc[CB];
@@ -123,15 +136,11 @@ __device__ inline void stream_body(const typename Dec::Args& a, int lpc_log2, in
 #pragma unroll
             for (int r = 0; r < RG; ++r) {
                 uint32_t xn[16];
-                const u32x4* src =
-                    reinterpret_cast<const u32x4*>(xr[g * RG + r] + static_cast<long long>(q) * 32);
+                if constexpr (R == 1) {
 #pragma unroll
-                for (int v = 0; v < 4; ++v) {
-                    const u32x4 t = src[v];
-                    xn[4 * v] = t.x;
-                    xn[4 * v + 1] = t.y;
-                    xn[4 * v + 2] = t.z;
-                    xn[4 * v + 3] = t.w;
+                    for (int i = 0; i < 16; ++i) xn[i] = x1[i];
+                } else {
+                    xload(base, xn, g * RG + r);
                 }
                 float s = 0.f;
 #pragma unroll
@@ -168,19 +177,23 @@ __device__ inline void stream_body(const typename Dec::Args& a, int lpc_log2, in
     if constexpr (R == 1) {
         uint32_t wb[CB][Dec::kWords];
         unsigned short sbb[CB], bbb[CB];
+        uint32_t xn[16];
         fetch(at(0), wa, sa, ba);
         for (int r = 0; r < rounds; r += 2) {
+            xload(at(r), xn, 0);
             if (r + 1 < rounds) fetch(at(r + 1), wb, sbb, bbb);
-            work(at(r), wa, sa, ba);
+            work(at(r), wa, sa, ba, xn);
             if (r + 1 >= rounds) break;
+            xload(at(r + 1), xn, 0);
             if (r + 2 < rounds) fetch(at(r + 2), wa, sa, ba);
-            work(at(r + 1), wb, sbb, bbb);
+            work(at(r + 1), wb, sbb, bbb, xn);
         }
     } else {
         // several rows: the dots cover the loads' latency, and registers go to the rows' x
+        const uint32_t none[16] = {};
         for (int r = 0; r < rounds; ++r) {
             fetch(at(r), wa, sa, ba);
-            work(at(r), wa, sa, ba);
+            work(at(r), wa, sa, ba, none);
         }
     }
 
