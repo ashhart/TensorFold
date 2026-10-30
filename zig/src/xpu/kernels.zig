@@ -24,4 +24,6 @@ pub const nem_rows: []const u8 = if (available) &Blob("spv_nem_rows").bytes else
 /// nem_rows built for windows of at most 1, 2, 4 and 8 rows (fewer registers a lane).
 pub const nem_rows_r: [4][]const u8 = if (available) .{ &Blob("spv_nem_rows_r1").bytes, &Blob("spv_nem_rows_r2").bytes, &Blob("spv_nem_rows_r4").bytes, &Blob("spv_nem_rows_r8").bytes } else .{ &.{}, &.{}, &.{}, &.{} };
 pub const nem_prow: []const u8 = if (available) &Blob("spv_nem_prow").bytes else &.{};
+/// nem_prow with 4 x 4 tiles (prompt rows x outputs a sub-group): no register spills to speak of on Gen12LP.
+pub const nem_prow_t4: []const u8 = if (available) &Blob("spv_nem_prow_t4").bytes else &.{};
 pub const nem_attn_dec: []const u8 = if (available) &Blob("spv_nem_attn_dec").bytes else &.{};
