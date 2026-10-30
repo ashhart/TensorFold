@@ -117,6 +117,7 @@ pub const Engine = struct {
     benchmark_group: ?[]const u8 = null,
     tp: ?cuda.tp_group.Group = null, // a latent MoE over ranks (TF_NEMOTRON_RANK of TF_NEMOTRON_WORLD)
     vision: ?*@import("cuda_vision.zig").Vision = null, // --vision: the tower and a prompt pass's image rows
+    audio: ?*@import("cuda_audio.zig").Audio = null, // a Transcribe checkpoint's audio rows for the prompt pass
     snap_host: bool = false, // kept prompt states in pinned host memory (cuda_reuse.zig), set when the host opens the engine
     load_pending: ?*weights.PendingLoad = null,
     load_has_weights: bool = false,
@@ -156,6 +157,7 @@ pub const Engine = struct {
             if (opts.slide) return error.SlideNeedsMlx; // the learner reads MLX 4-bit projections
             try e.k.loadModelopt(ctx);
         }
+        if (e.c.salm) try e.k.loadBf16Experts(ctx);
         if (e.c.latent > 0) try e.k.loadLatent();
         if (e.c.ck) try e.k.loadCk(ctx);
         // the ranks' lines first: a rank that never comes, refuses, fails or dies is named, not waited on
@@ -330,6 +332,7 @@ pub const Engine = struct {
         e.side.join.deinit();
         if (e.tp) |*g| g.close();
         if (e.vision) |v| v.deinit();
+        if (e.audio) |a| a.deinit();
         e.stream.deinit();
         if (e.benchmark_group) |b| e.gpa.free(b);
         e.gpa.destroy(e);
@@ -415,6 +418,7 @@ pub const Engine = struct {
         f.untaught = e.bound.untaught;
         f.tp = if (e.tp) |*g| g else null;
         f.vision = e.vision;
+        f.audio = e.audio;
         if (dump == null and (e.c.latent > 0 or (e.c.experts <= 128 and e.c.slots() <= 8))) f.side = e.side; // tf_plan_routed's bounds; a latent MoE plans without it
         return f;
     }
