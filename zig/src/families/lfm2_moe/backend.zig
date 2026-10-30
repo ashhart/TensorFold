@@ -453,3 +453,7 @@ test "a masked draw is the full-vocabulary draw with the other tokens at -inf" {
     @memset(&mask, 0);
     try std.testing.expectError(error.NoAllowedLfmToken, draw(gpa, words, null, 0, &mask));
 }
+
+test "zero grant: an attached LFM2 drafter retains committed taps and resumes after a long shared skip" {
+    try lanes.shared_draft_check.check(factsFor(st.window_rows, 16, &.{}), true);
+}

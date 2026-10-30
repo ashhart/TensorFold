@@ -106,6 +106,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Nemotron 3.5 on Metal: the decode attention kernel on M3-class GPUs and the experts' 2-row tiles unroll their fixed loops, with bit-identical outputs. On an M3 Ultra, Nemotron 3.5 Lightning decodes 1.8% faster at one stream (0.8% at 4 streams), and 0.8% and 1.5% faster after 2k and 8k prompts, with the same tokens (#1621).
 - GLM shared MTP and DFlash2 rounds preserve committed context while skipping proposals with no verify rows.
 - Gemma 4 assistant and DFlash attachments price shared proposals before running them; assistants skip unused row norms.
+- Attached LFM2 drafters use the shared zero-row budget while retaining context needed by later proposals.
 
 
 - Qwen3.6 MTP and external draft adapters reserve shared verify rows before proposing. A zero-row budget keeps committed context current without running the proposal pass (#1621).
