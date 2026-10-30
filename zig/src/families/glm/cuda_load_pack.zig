@@ -13,8 +13,47 @@ pub const max_packers = 16;
 /// The packed layer, `count` experts in a row: gate and up interleaved, down, and each matrix's global scale.
 pub const Out = struct { up: []u32, down: []u32, up_scale: []f32, down_scale: []f32 };
 
-/// Layer `index`'s rank cut: hidden `d`, the rank's `ni` expert rows from `lo`, and `per` scale bytes a whole matrix.
-pub const Cut = struct { index: u32, d: usize, ni: usize, lo: usize, per: usize };
+/// Layer `index`'s cut: hidden `d`, the rank's `ni` rows from `lo`, `per` scale bytes a matrix, expert `first` on.
+pub const Cut = struct { index: u32, d: usize, ni: usize, lo: usize, per: usize, first: usize = 0 };
+
+/// The pinned staging's most, as Flash Next's threaded loader stages its experts.
+pub const staging_bytes: usize = 192 << 20;
+
+/// Pinned memory mapped into the device, reused piece to piece: the packers write a piece's experts, the GPU copies it.
+pub const Staging = struct {
+    buf: ?cuda.HostBuffer = null,
+    cap: usize = staging_bytes,
+
+    /// Experts in a piece under `cap`: a multiple of the packers when that many fit, and at least one.
+    pub fn per(s: Staging, up_len: usize, down_len: usize, threads: usize) usize {
+        const fit = s.cap / ((up_len + down_len) * 4);
+        return if (fit >= threads) fit - fit % threads else @max(1, fit);
+    }
+
+    /// `m` experts' up and down words in the mapped memory, taken anew when a piece needs more than the last one did.
+    pub fn words(s: *Staging, d: *const cuda.Driver, m: usize, up_len: usize, down_len: usize) ![2][]u32 {
+        const n = m * (up_len + down_len);
+        if (s.buf) |b| if (b.bytes.len < n * 4) s.deinit();
+        if (s.buf == null) s.buf = try cuda.HostBuffer.allocMapped(d, n * 4);
+        const w = s.buf.?.slice(u32);
+        return .{ w[0 .. m * up_len], w[m * up_len ..][0 .. m * down_len] };
+    }
+
+    /// The piece's `m` experts copied by the GPU into `up` and `down` from expert `first` on: done when it returns.
+    pub fn send(s: *const Staging, stream: cuda.Stream, up: cuda.DeviceBuffer, down: cuda.DeviceBuffer, first: usize, m: usize, up_len: usize, down_len: usize) !void {
+        const b = s.buf orelse return error.Invalid;
+        const base = try b.device();
+        errdefer stream.synchronize() catch {}; // no copy may still write a buffer freed after an error
+        try up.copyFrom(first * up_len * 4, base, m * up_len * 4, stream.handle);
+        try down.copyFrom(first * down_len * 4, base + m * up_len * 4, m * down_len * 4, stream.handle);
+        try stream.synchronize(); // the next piece packs into the same memory
+    }
+
+    pub fn deinit(s: *Staging) void {
+        if (s.buf) |*b| b.free();
+        s.buf = null;
+    }
+};
 
 /// TF_GLM_LOAD_PACK as a packer count: unset for `default_packers`, 1 for the loader's thread alone.
 pub fn packers(value: ?[]const u8) !usize {
@@ -32,6 +71,22 @@ pub fn pack(gpa: std.mem.Allocator, pending: []const [3]formats.Pending, cut: Cu
     run(gpa, pending, cut, out, part(pending.len, n, 0), &failed[0]);
     for (spawned[1..n], 1..) |thread, t| if (thread) |x| x.join() else run(gpa, pending, cut, out, part(pending.len, n, t), &failed[t]);
     for (failed[0..n]) |f| if (f) |err| return err;
+}
+
+/// A layer's experts packed into `s` a piece at a time, each piece copied into `up` and `down` before the next packs.
+pub fn pieces(gpa: std.mem.Allocator, s: *Staging, d: *const cuda.Driver, stream: cuda.Stream, pending: []const [3]formats.Pending, cut: Cut, up: cuda.DeviceBuffer, down: cuda.DeviceBuffer, up_scale: []f32, down_scale: []f32, threads: usize) !void {
+    const up_len = X.bytes(1, cut.ni, cut.d, 2) / 4;
+    const down_len = X.bytes(1, cut.d, cut.ni, 1) / 4;
+    const m = s.per(up_len, down_len, threads);
+    var first: usize = 0;
+    while (first < pending.len) : (first += m) {
+        const k = @min(m, pending.len - first);
+        const w = try s.words(d, k, up_len, down_len);
+        var at = cut;
+        at.first = first;
+        try pack(gpa, pending[first..][0..k], at, .{ .up = w[0], .down = w[1], .up_scale = up_scale[2 * first ..][0 .. 2 * k], .down_scale = down_scale[first..][0..k] }, threads);
+        try s.send(stream, up, down, first, k, up_len, down_len);
+    }
 }
 
 /// Thread `t`'s experts of `count` split `n` ways, as [from, to).
@@ -62,7 +117,7 @@ fn share(gpa: std.mem.Allocator, pending: []const [3]formats.Pending, cut: Cut, 
         var ls: [3]core.nvfp4.Linear = undefined;
         for (&ls, pending[e], [_][]const u8{ "gate_proj", "up_proj", "down_proj" }, 0..) |*l, p, proj, m| {
             l.* = p.linear(decoded[m * cut.per ..][0..cut.per]) catch |err| {
-                std.log.err("layers.{d}.mlp.experts.{d}.{s}: its csf_32x2_v1 scales do not decode ({t})", .{ cut.index, e, proj, err });
+                std.log.err("layers.{d}.mlp.experts.{d}.{s}: its csf_32x2_v1 scales do not decode ({t})", .{ cut.index, cut.first + e, proj, err });
                 return err;
             };
         }
@@ -89,7 +144,7 @@ test "TF_GLM_LOAD_PACK: 8 when unset, the loader alone at 1, a count up to the l
     for ([_][]const u8{ "0", "17", "eight", "" }) |bad| try std.testing.expectError(error.BadSetting, packers(bad));
 }
 
-test "packers pack the same bytes as the loader's one thread, the csf scales decoded by whichever packs the expert" {
+test "packers pack the same bytes as the loader's one thread, whole or a piece at a time through the mapped staging" {
     const gpa = std.testing.allocator;
     const experts = 5;
     const inter = 64; // the experts' rows; this rank holds the second half
@@ -166,9 +221,75 @@ test "packers pack the same bytes as the loader's one thread, the csf scales dec
         try pack(gpa, &pending, cut, layout(got, experts, up_len, down_len), threads);
         try std.testing.expectEqualSlices(u32, want, got);
     }
+    const R = cuda.abi.Result;
+    const F = struct { // the mapped staging and the device as host memory: the GPU's copies done as memcpy
+        var host: [2048]u32 align(16) = undefined;
+        var dev: [8192]u32 = undefined;
+        var next: u64 = 0;
+        var waits: usize = 0;
+        const host_at: u64 = 0x9000_0000;
+        const dev_at: u64 = 0x1000_0000;
+        fn hostAlloc(p: *?*anyopaque, len: usize, _: c_uint) callconv(.c) R {
+            std.debug.assert(len <= @sizeOf(@TypeOf(host)));
+            p.* = &host;
+            return cuda.abi.success;
+        }
+        fn hostFree(_: ?*anyopaque) callconv(.c) R {
+            return cuda.abi.success;
+        }
+        fn mapped(p: *u64, _: ?*anyopaque, _: c_uint) callconv(.c) R {
+            p.* = host_at;
+            return cuda.abi.success;
+        }
+        fn alloc(p: *u64, len: usize) callconv(.c) R {
+            std.debug.assert(next + len <= @sizeOf(@TypeOf(dev)));
+            p.* = dev_at + next;
+            next += len;
+            return cuda.abi.success;
+        }
+        fn free(_: u64) callconv(.c) R {
+            return cuda.abi.success;
+        }
+        fn copy(dst: u64, src: u64, len: usize, _: cuda.abi.Stream) callconv(.c) R {
+            @memcpy(std.mem.asBytes(&dev)[dst - dev_at ..][0..len], std.mem.asBytes(&host)[src - host_at ..][0..len]);
+            return cuda.abi.success;
+        }
+        fn wait(_: cuda.abi.Stream) callconv(.c) R {
+            waits += 1;
+            return cuda.abi.success;
+        }
+    };
+    var dr: cuda.Driver = undefined;
+    dr.api.cuMemHostAlloc = F.hostAlloc;
+    dr.api.cuMemFreeHost = F.hostFree;
+    dr.api.cuMemHostGetDevicePointer_v2 = F.mapped;
+    dr.api.cuMemAlloc_v2 = F.alloc;
+    dr.api.cuMemFree_v2 = F.free;
+    dr.api.cuMemcpyDtoDAsync_v2 = F.copy;
+    dr.api.cuStreamSynchronize = F.wait;
+    const w = layout(want, experts, up_len, down_len);
+    for ([_]usize{ 1, 2, 3 }) |threads| {
+        F.next = 0;
+        F.waits = 0;
+        @memset(&F.dev, 0);
+        var s: Staging = .{ .cap = 2 * (up_len + down_len) * 4 }; // two experts a piece
+        defer s.deinit();
+        var up = try cuda.DeviceBuffer.alloc(&dr, experts * up_len * 4);
+        defer up.free();
+        var down = try cuda.DeviceBuffer.alloc(&dr, experts * down_len * 4);
+        defer down.free();
+        const up_scale = try a.alloc(f32, experts * 2);
+        const down_scale = try a.alloc(f32, experts);
+        try pieces(gpa, &s, &dr, .{ .d = &dr, .handle = null }, &pending, cut, up, down, up_scale, down_scale, threads);
+        try std.testing.expectEqualSlices(u32, w.up, F.dev[0..w.up.len]);
+        try std.testing.expectEqualSlices(u32, w.down, F.dev[w.up.len..][0..w.down.len]);
+        try std.testing.expectEqualSlices(f32, w.up_scale, up_scale);
+        try std.testing.expectEqualSlices(f32, w.down_scale, down_scale);
+        try std.testing.expectEqual(@as(usize, 3), F.waits); // five experts in pieces of two, two and one
+    }
 }
 
-/// One buffer cut as `Out` for `count` experts (the test's: one slice to compare).
+/// `words` as `Out` for `count` experts: their up, their down, then each one's two up scales, then the down scales.
 fn layout(words: []u32, count: usize, up_len: usize, down_len: usize) Out {
     const scales: []f32 = @ptrCast(words[count * (up_len + down_len) ..]);
     return .{ .up = words[0 .. count * up_len], .down = words[count * up_len ..][0 .. count * down_len], .up_scale = scales[0 .. count * 2], .down_scale = scales[count * 2 ..][0..count] };

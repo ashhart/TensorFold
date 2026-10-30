@@ -86,6 +86,7 @@ const Loader = struct {
     host: std.ArrayList(u8) = .empty,
     name_buf: [192]u8 = undefined,
     last: []const u8 = "", // the tensor `get` read last, named when its values are refused
+    staging: @import("cuda_load_pack.zig").Staging = .{}, // the packed experts' mapped pinned memory, piece to piece
     recipes: ?*const core.modelopt.Recipes = null, // MIXED_PRECISION's table; null: the tensors decide (NVFP4)
 
     pub fn get(L: *Loader, comptime fmt: []const u8, args: anytype) !Tensor {
@@ -471,17 +472,24 @@ const Loader = struct {
         const count: usize = c.experts;
         const up_len = X.bytes(1, ni, d, 2) / 4;
         const down_len = X.bytes(1, d, ni, 1) / 4;
-        const up = try L.gpa.alloc(u32, count * up_len);
-        defer L.gpa.free(up);
-        const down = try L.gpa.alloc(u32, count * down_len);
-        defer L.gpa.free(down);
+        const keep = @import("cuda_upload_owner.zig").keep;
+        const up = try cuda.DeviceBuffer.alloc(L.d, count * up_len * 4);
+        const up_at = try keep(L, up, "layers.{d}.moe.experts.up", .{i});
+        const down = try cuda.DeviceBuffer.alloc(L.d, count * down_len * 4);
+        const down_at = try keep(L, down, "layers.{d}.moe.experts.down", .{i});
         const up_scale = try L.gpa.alloc(f32, count * 2);
         defer L.gpa.free(up_scale);
         const down_scale = try L.gpa.alloc(f32, count);
         defer L.gpa.free(down_scale);
         // the MTP layer's experts: bf16 (nvidia's), quantized here, or W4A16_NVFP4 (FP4-Local's), read as stored
         const bf16 = i == c.layers and (try L.get("layers.{d}.mlp.experts.0.gate_proj.weight", .{i})).dtype == .bf16;
-        if (bf16) try L.quantizedExperts(i, up, down, up_scale, down_scale) else {
+        if (bf16) {
+            const words = try L.gpa.alloc(u32, count * (up_len + down_len));
+            defer L.gpa.free(words);
+            try L.quantizedExperts(i, words[0 .. count * up_len], words[count * up_len ..], up_scale, down_scale);
+            try up.upload(0, std.mem.sliceAsBytes(words[0 .. count * up_len]));
+            try down.upload(0, std.mem.sliceAsBytes(words[count * up_len ..]));
+        } else {
             const packing = @import("cuda_load_pack.zig");
             const threads = packing.packers(@import("cuda_ranks.zig").environment("TF_GLM_LOAD_PACK")) catch |err| {
                 std.log.err("TF_GLM_LOAD_PACK: 1 to {d} packer threads", .{packing.max_packers});
@@ -493,14 +501,11 @@ const Loader = struct {
                 p[m] = try formats.expert(L, try std.fmt.bufPrint(&L.name_buf, prefix ++ "layers.{d}.mlp.experts.{d}." ++ proj, .{ i, e }));
             };
             const at: packing.Cut = .{ .index = i, .d = d, .ni = ni, .lo = cut.lo, .per = c.moe_inter * d / 16 };
-            try packing.pack(L.gpa, pending, at, .{ .up = up, .down = down, .up_scale = up_scale, .down_scale = down_scale }, threads);
+            try packing.pieces(L.gpa, &L.staging, L.d, L.stream, pending, at, up, down, up_scale, down_scale, threads);
         }
-        var ptrs: [4]u64 = undefined;
-        for (&ptrs, [_][]const u8{ std.mem.sliceAsBytes(up), std.mem.sliceAsBytes(down), std.mem.sliceAsBytes(up_scale), std.mem.sliceAsBytes(down_scale) }, [_][]const u8{ "up", "down", "up_scale", "down_scale" }) |*p, bytes, what| {
-            try L.host.appendSlice(L.gpa, bytes);
-            p.* = try L.put("layers.{d}.moe.experts.{s}", .{ i, what });
-        }
-        return .{ .format = .nvfp4, .up = ptrs[0], .down = ptrs[1], .up_scale = ptrs[2], .down_scale = ptrs[3], .width = ni, .dims = d, .experts = count, .limit = c.swiglu_limit };
+        const us = try keep(L, try cuda.DeviceBuffer.fromHost(L.d, std.mem.sliceAsBytes(up_scale)), "layers.{d}.moe.experts.up_scale", .{i});
+        const ds = try keep(L, try cuda.DeviceBuffer.fromHost(L.d, std.mem.sliceAsBytes(down_scale)), "layers.{d}.moe.experts.down_scale", .{i});
+        return .{ .format = .nvfp4, .up = up_at, .down = down_at, .up_scale = us, .down_scale = ds, .width = ni, .dims = d, .experts = count, .limit = c.swiglu_limit };
     }
 
     pub fn layer(L: *Loader, i: u32) !Layer {
@@ -536,6 +541,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, stream: c
     defer head_ck.close();
     var L: Loader = .{ .gpa = gpa, .d = d, .stream = stream, .pack_dense = tools.pack_dense, .tools = tools, .w = &w, .ck = &ck };
     defer L.host.deinit(gpa);
+    defer L.staging.deinit();
     var recipes = try formats.readRecipes(gpa, io, dir);
     defer if (recipes) |*r| r.deinit();
     if (recipes) |*r| L.recipes = recipeTable(r);
