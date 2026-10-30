@@ -44,7 +44,7 @@ pub const Out = struct {
 /// POST /v1/chat/completions or /v1/completions, read from the client and answered to it.
 pub fn post(srv: *Server, conn: *Conn, a: Allocator, is_chat: bool) void {
     var cx: Cx = .{ .a = a };
-    const body = http_body.readJson(conn, &cx) catch {
+    const body = http_body.readJsonMax(conn, &cx, @import("audio.zig").bodyLimit(srv.info)) catch {
         const err = errorBody(a, &cx, if (is_chat) "messages" else "prompt") catch return;
         return routes.sendValue(conn, a, cx.status(), wrapError(a, err) catch return);
     };
