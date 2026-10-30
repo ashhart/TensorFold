@@ -74,3 +74,21 @@ MLX-4bit: prompt rows 825/829, reply rows 128/128.
 | items | prompt | 61 | 41501 " Item" | 29155 " Question" | 0.0042 |
 | items | prompt | 595 | 27 "3" | 1035 "14" | 0.0300 |
 | items | prompt | 748 | 34 ":" | 10494 " holds" | 0.0848 |
+
+## Without torch: the numpy path and the XPU's bf16 points
+
+`ref64.py` runs on numpy when torch is not installed (or with `--numpy`): MLX affine and bf16 weights are dequantized
+exactly as on the torch path; NVFP4 and FP8 exports are refused by name and need torch. `--bf16-points` replaces the
+`--bf16` pass with the Intel GPU (XPU) engine's storage points: the embedding rows and RoPE cos/sin rounded to bf16 too,
+attention P and the logits never. `dump` writes the float64 hidden state after every layer for the XPU forward's
+layer-by-layer check, and `check` replays an engine's greedy replies teacher-forced:
+
+```
+python -I tools/lfm3/ref64.py dump MODEL_DIR OUT_DIR
+python -I tools/lfm3/ref64.py check MODEL_DIR tokens.json      # {"name": {"prompt": [...], "reply": [...]}}
+python -I tools/lfm3/ref64.py MODEL_DIR engine.json --bf16-points
+```
+
+On LiquidAI/LFM3-1.7B-MLX-4bit (Python 3.12, numpy 2.5, no torch; 3 min 14 s and 4.1 GB for `dump`): the three
+prompts' bf16-points gap reaches 0.041 (capitals), 0.025 (chat) and 0.111 (items, worst row of any layer), and the
+XPU engine's 64-token greedy replies agree with the float64 top-1 at 192 of 192 positions.

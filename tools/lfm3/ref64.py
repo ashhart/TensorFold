@@ -25,9 +25,18 @@ unrounded on full-attention decode rows, taken against the row's final max (the 
 replayed). Greedy over bf16 logits breaks ties to the lower id, as the engine does. This pass shows which side of a
 miss rounding alone lands on; it is not bit-exact.
 
+Without torch (or with --numpy) the forward runs on numpy: MLX affine and bf16 weights are dequantized exactly; NVFP4
+and FP8 stay torch-only and are refused by name. --bf16-points rounds where the XPU kernels store bf16 instead of the
+CUDA engine: the embedding rows and RoPE cos and sin as well, attention P and the logits never (numpy path).
+
 usage:
   ref64.py collect URL MODEL_DIR ENGINE_JSON   the greedy rows of prompts() from a server at URL
-  ref64.py MODEL_DIR ENGINE_JSON [--bf16]       prints the miss table (markdown) and the agreement totals
+  ref64.py MODEL_DIR ENGINE_JSON [--bf16 | --bf16-points] [--numpy]
+                                               prints the miss table (markdown) and the agreement totals
+  ref64.py dump MODEL_DIR OUT_DIR              capitals, chat, items: ids, the hidden state after every layer and
+                                               the final norm (f32), float64 top-1 per row, and the bf16-points
+                                               pass's per-layer gap (meta.json); numpy path
+  ref64.py check MODEL_DIR TOKENS_JSON         teacher-forced float64 top-1 of {name: {prompt, reply}}; numpy path
 """
 import json
 import math
@@ -36,12 +45,20 @@ import re
 import sys
 import urllib.request
 
-import torch
-from safetensors import safe_open
+import struct
 
-torch.set_default_dtype(torch.float64)
-F64 = torch.float64
-E2M1 = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6], dtype=F64)
+import numpy as np
+
+try:
+    import torch
+    from safetensors import safe_open
+except ImportError:  # the numpy path: MLX affine and bf16 weights
+    torch = None
+
+if torch is not None:
+    torch.set_default_dtype(torch.float64)
+    F64 = torch.float64
+    E2M1 = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6], dtype=F64)
 
 
 def complete(url, ids, n):
@@ -218,13 +235,218 @@ class Model:
                           for a in range(0, V, 16000)], -1)
 
 
+def torch_logits(self, ids, P, points=None):
+    """Logits [T, V] as a numpy array: float64, or the CUDA engine's bf16 points (points == "engine")."""
+    return self.forward(ids, P, bf16 if points else same).numpy()
+
+
+Model.logits = torch_logits
+
+
 def greedy(lg):
     """argmax in (value desc, id asc) order, as the engine picks over its bf16 logits."""
-    return int((lg == lg.max()).nonzero()[0])
+    return int(np.flatnonzero(lg == lg.max())[0])
 
 
-def main(model_dir, engine_path, with_bf16):
-    mdl = Model(model_dir)
+def npbf16(x):
+    """Nearest bf16 (ties to even) of float64 values, kept as float64."""
+    m, e = np.frexp(x)
+    return np.ldexp(np.round(m * 256.0), e - 8)
+
+
+class NpModel:
+    """The float64 forward on numpy: MLX affine and bf16 weights read from the safetensors bytes, exactly."""
+
+    def __init__(self, d):
+        root = json.load(open(f"{d}/config.json"))
+        self.cfg = root.get("text_config", root)
+        idx = f"{d}/model.safetensors.index.json"
+        shards = sorted(set(json.load(open(idx))["weight_map"].values())) if os.path.exists(idx) else ["model.safetensors"]
+        self.hdr = {}
+        for s in shards:
+            with open(f"{d}/{s}", "rb") as f:
+                n = struct.unpack("<Q", f.read(8))[0]
+                h = json.loads(f.read(n))
+            h.pop("__metadata__", None)
+            mm = np.memmap(f"{d}/{s}", dtype=np.uint8, mode="r")
+            for k, v in h.items():
+                self.hdr[k] = (mm, 8 + n, v)
+        self.prefix = "language_model.model." if "language_model.model.embed_tokens.weight" in self.hdr else "model."
+        self.mlx = root.get("quantization") if root.get("quantization", {}).get("mode", "affine") == "affine" else None
+
+    def raw(self, k):
+        mm, base, h = self.hdr[k]
+        a, b = h["data_offsets"]
+        buf = mm[base + a: base + b]
+        if h["dtype"] == "BF16":
+            return (buf.view(np.uint16).astype(np.uint32) << 16).view(np.float32).reshape(h["shape"]).astype(np.float64)
+        if h["dtype"] == "F32":
+            return buf.view(np.float32).reshape(h["shape"]).astype(np.float64)
+        if h["dtype"] == "U32":
+            return buf.view(np.uint32).reshape(h["shape"])
+        raise SystemExit(f"ref64.py: {k} is {h['dtype']}; NVFP4 and FP8 weights need torch and safetensors "
+                         "(the numpy path reads MLX affine and bf16)")
+
+    def vec(self, name):
+        return self.raw(self.prefix + name)
+
+    def lin(self, name, rows=None):
+        """A Linear weight [out, in] in float64: MLX q * scale + bias per group, element j of a word in bits j*b."""
+        p = self.prefix + name
+        if p + ".weight_scale_2" in self.hdr or p + ".weight_scale" in self.hdr:
+            raise SystemExit(f"ref64.py: {p} is NVFP4 or FP8; those need torch and safetensors")
+        w = self.raw(p + ".weight")
+        if rows is not None:
+            w = w[rows]
+        if not (self.mlx and p + ".scales" in self.hdr):
+            return w
+        s, b = self.raw(p + ".scales"), self.raw(p + ".biases")
+        if rows is not None:
+            s, b = s[rows], b[rows]
+        bits = next((v["bits"] for k, v in self.mlx.items() if isinstance(v, dict) and strip(k) == strip(p)),
+                    self.mlx["bits"])
+        n = w.shape[0]
+        if bits == 4:
+            q = (w[..., None] >> (np.arange(8, dtype=np.uint32) * 4)) & 15
+        else:
+            bit = np.unpackbits(np.ascontiguousarray(w).view(np.uint8), axis=-1, bitorder="little")
+            nb = bit.shape[-1] // bits * bits
+            q = bit[..., :nb].reshape(n, -1, bits).astype(np.int64) @ (1 << np.arange(bits))
+        q = q.reshape(n, s.shape[-1], -1).astype(np.float64)
+        return (q * s[..., None] + b[..., None]).reshape(n, -1)
+
+    def logits(self, ids, P, points=None, dump=None):
+        """Logits [T, V] in float64; points None, "engine" (--bf16) or "xpu" (--bf16-points); dump(L, h) per layer."""
+        cfg, T = self.cfg, len(ids)
+        D, H, HK, hd = cfg["hidden_size"], cfg["num_attention_heads"], cfg["num_key_value_heads"], cfg["head_dim"]
+        bf = npbf16 if points else same
+        xpu = points == "xpu"
+
+        def rms(h, w):
+            return bf(w * bf(h / np.sqrt((h * h).mean(-1, keepdims=True) + cfg["norm_eps"])))
+
+        def mm(x, name):
+            return x @ self.lin(name).T
+
+        tabs = {}
+        for kind, rp in cfg["rope_parameters"].items():
+            angles = int(rp.get("partial_rotary_factor", 1.0) * hd) // 2
+            inv = 1.0 / rp["rope_theta"] ** (np.arange(0, 2 * angles, 2, dtype=np.float64) / hd)
+            inv = np.concatenate([inv, np.zeros(hd // 2 - angles)])
+            ang = np.arange(T, dtype=np.float64)[:, None] * inv[None]
+            cos, sin = np.concatenate([np.cos(ang)] * 2, -1), np.concatenate([np.sin(ang)] * 2, -1)
+            tabs[kind] = (bf(cos), bf(sin)) if xpu else (cos, sin)
+        i, j = np.arange(T)[:, None], np.arange(T)[None]
+        masks = {"full_attention": j > i, "sliding_attention": (j > i) | (i - j >= cfg["sliding_window"])}
+        h = self.lin("embed_tokens", rows=np.array(ids))
+        if xpu:
+            h = bf(h)
+        for L, kind in enumerate(cfg["layer_types"]):
+            p = f"layers.{L}."
+            x = rms(h, self.vec(p + "operator_norm.weight"))
+            if kind == "conv":
+                B, C, xx = np.split(bf(mm(x, p + "conv.in_proj")), 3, -1)
+                bx = bf(B * xx)
+                w = self.vec(p + "conv.conv.weight").reshape(D, -1)
+                taps = w.shape[1]
+                pad = np.concatenate([np.zeros((taps - 1, D)), bx])
+                acc = np.zeros((T, D))
+                for k in range(taps):
+                    acc = acc + pad[k:k + T] * w[:, k]
+                o = bf(mm(bf(C * bf(acc)), p + "conv.out_proj"))
+            else:
+                q, k, v = (bf(mm(x, p + f"self_attn.{n}_proj")) for n in "qkv")
+                g = bf(mm(x, p + "self_attn.gate_proj"))
+                q = rms(q.reshape(T, H, hd), self.vec(p + "self_attn.q_norm.weight")).transpose(1, 0, 2)
+                k = rms(k.reshape(T, HK, hd), self.vec(p + "self_attn.k_norm.weight")).transpose(1, 0, 2)
+                cos, sin = tabs[kind]
+                q = bf(q * cos + np.concatenate([-q[..., hd // 2:], q[..., : hd // 2]], -1) * sin)
+                k = bf(k * cos + np.concatenate([-k[..., hd // 2:], k[..., : hd // 2]], -1) * sin)
+                k = np.repeat(k, H // HK, 0)
+                v = np.repeat(v.reshape(T, HK, hd).transpose(1, 0, 2), H // HK, 0)
+                s = (q @ k.transpose(0, 2, 1)) / math.sqrt(hd)
+                s[:, masks[kind]] = -np.inf
+                e = np.exp(s - s.max(-1, keepdims=True))
+                pv = e
+                if points == "engine":
+                    pv = bf(e)
+                    if kind == "full_attention":
+                        pv[:, P:] = e[:, P:]  # full-attention decode keeps P unrounded
+                a = bf((pv @ v) / e.sum(-1, keepdims=True)).transpose(1, 0, 2)
+                a = bf(a * bf(1.0 / (1.0 + np.exp(-g)))[..., None])
+                o = bf(mm(a.reshape(T, H * hd), p + "self_attn.o_proj"))
+            h = bf(h + rms(o, self.vec(p + "post_operator_norm.weight")))
+            x = rms(h, self.vec(p + "ffn_norm.weight"))
+            f = p + "feed_forward."
+            a1 = bf(mm(x, f + "w1"))
+            act = bf(bf(a1 / (1.0 + np.exp(-a1))) * bf(mm(x, f + "w3")))
+            h = bf(h + rms(bf(mm(act, f + "w2")), self.vec(p + "post_ffn_norm.weight")))
+            if dump:
+                dump(L, h)
+        x = rms(h, self.vec("embedding_norm.weight"))
+        if dump:
+            dump(-1, x)
+        V = cfg["vocab_size"]
+        return np.concatenate([x @ self.lin("embed_tokens", rows=np.arange(a, min(a + 8000, V))).T
+                               for a in range(0, V, 8000)], -1)
+
+
+def rel_rows(a, b):
+    """Per-row ||a - b|| / ||b||: mean and max."""
+    r = np.linalg.norm(a - b, axis=-1) / np.linalg.norm(b, axis=-1)
+    return float(r.mean()), float(r.max())
+
+
+def dump(model_dir, out):
+    """capitals, chat, items (BOS, no added specials): float64 hidden states per layer, top-1, bf16-points gaps."""
+    from tokenizers import Tokenizer
+    tok = Tokenizer.from_file(f"{model_dir}/tokenizer.json")
+    m = NpModel(model_dir)
+    bos = m.cfg["bos_token_id"]
+    summary = {}
+    for name, text in [p for p in prompts(60) if p[0] != "code"]:
+        ids = [bos] + tok.encode(text, add_special_tokens=False).ids
+        d = f"{out}/{name}"
+        os.makedirs(d, exist_ok=True)
+        f64h, xph = {}, {}
+
+        def keep(L, h):
+            f64h[L] = h.copy()
+            h.astype(np.float32).tofile(f"{d}/h{L:02d}.f32" if L >= 0 else f"{d}/final.f32")
+
+        lf = m.logits(ids, len(ids), None, keep)
+        lb = m.logits(ids, len(ids), "xpu", lambda L, h: xph.__setitem__(L, h.copy()))
+        gap = {L: rel_rows(xph[L], f64h[L]) for L in f64h}
+        top = lf.argmax(-1)
+        np.asarray(top, dtype=np.int32).tofile(f"{d}/top1.i32")
+        lf[-1].astype(np.float32).tofile(f"{d}/logits_last.f32")
+        agree = int((lb.argmax(-1) == top).sum())
+        json.dump({"ids": ids, "T": len(ids), "top1": top.tolist(), "bf16_gap": {str(L): v for L, v in gap.items()},
+                   "bf16_top1_agree": agree}, open(f"{d}/meta.json", "w"))
+        summary[name] = {"T": len(ids), "bf16_gap_max": max(v[1] for v in gap.values()), "next": int(top[-1]),
+                         "bf16_top1_agree": f"{agree}/{len(ids)}"}
+        print(name, json.dumps(summary[name]), file=sys.stderr, flush=True)
+    json.dump(summary, open(f"{out}/summary.json", "w"), indent=1)
+
+
+def check(model_dir, path):
+    """Teacher-forced: the float64 top-1 after each prefix of prompt + reply against the reply's own next token."""
+    m = NpModel(model_dir)
+    res = {}
+    for name, c in json.load(open(path)).items():
+        P, reply = len(c["prompt"]), c["reply"]
+        lf = m.logits(c["prompt"] + reply[:-1], P)[P - 1:]
+        picks = lf.argmax(-1)
+        miss = [{"j": j, "engine": int(reply[j]), "f64": int(picks[j]),
+                 "margin": float(lf[j].max() - lf[j, reply[j]])} for j in range(len(reply)) if picks[j] != reply[j]]
+        res[name] = {"agree": f"{len(reply) - len(miss)}/{len(reply)}", "misses": miss}
+        print(name, json.dumps(res[name]), file=sys.stderr, flush=True)
+    return res
+
+
+def main(model_dir, engine_path, points, numpy_path):
+    mdl = NpModel(model_dir) if numpy_path or torch is None or points == "xpu" else Model(model_dir)
+    with_bf16 = points is not None
     try:
         from tokenizers import Tokenizer
         tok = Tokenizer.from_file(f"{model_dir}/tokenizer.json")
@@ -240,9 +462,9 @@ def main(model_dir, engine_path, with_bf16):
         P = len(c["prompt"])
         ids = c["prompt"] + c["reply"][:-1]
         print(f"{c['name']}: {len(ids)} rows", file=sys.stderr, flush=True)
-        lf = mdl.forward(ids, P, same)
-        lb_pre = mdl.forward(ids, P, bf16) if with_bf16 else None
-        lb = bf16(lb_pre) if with_bf16 else None
+        lf = mdl.logits(ids, P)
+        lb_pre = mdl.logits(ids, P, points) if with_bf16 else None
+        lb = (npbf16(lb_pre) if points == "engine" else lb_pre) if with_bf16 else None
         rows = [("prompt", t, tk) for t, tk in enumerate(c["prompt_picks"])]
         rows += [("reply", P - 1 + j, tk) for j, tk in enumerate(c["reply"])]
         for kind, t, eng in rows:
@@ -283,9 +505,17 @@ def main(model_dir, engine_path, with_bf16):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 5 and sys.argv[1] == "collect":
-        collect(*sys.argv[2:])
-    elif len(sys.argv) in (3, 4) and sys.argv[3:] in ([], ["--bf16"]):
-        main(sys.argv[1], sys.argv[2], len(sys.argv) == 4)
+    a = sys.argv[1:]
+    flags = a[2:]
+    if len(a) == 4 and a[0] == "collect":
+        collect(*a[1:])
+    elif len(a) == 3 and a[0] == "dump":
+        dump(a[1], a[2])
+    elif len(a) == 3 and a[0] == "check":
+        json.dump(check(a[1], a[2]), sys.stdout, indent=1)
+    elif len(a) >= 2 and set(flags) <= {"--bf16", "--bf16-points", "--numpy"} and len(set(flags)) == len(flags) \
+            and not {"--bf16", "--bf16-points"} <= set(flags):
+        pts = "engine" if "--bf16" in flags else "xpu" if "--bf16-points" in flags else None
+        main(a[0], a[1], pts, "--numpy" in flags)
     else:
         sys.exit(__doc__)
