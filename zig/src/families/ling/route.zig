@@ -261,5 +261,56 @@ test "float64 reference keeps the same picks as the fp32 formula on tiny's shape
     var b: [8]Pick64 = undefined;
     selectF32(&logits, &bias, &a, s);
     selectF64(&logits, &bias, &b, s);
-    for (a, b) |p, q| try t.expectEqual(p.id, q.id);
+    for (a, b) |p, q| {
+        try t.expectEqual(p.id, q.id);
+        try t.expect(@abs(@as(f64, p.wt) - q.wt) < 1e-6);
+    }
+}
+
+test "nonzero bias: weights are sigmoid(logit), not choice, with a hand-computed pair" {
+    const s = Shape{ .experts = 2, .topk = 2, .n_group = 1, .topk_group = 1, .scale = 1 };
+    const logits = [_]f32{ 0, 1 };
+    const bias = [_]f32{ 0.4, 0 };
+    var out: [2]Pick = undefined;
+    selectF32(&logits, &bias, &out, s);
+    try t.expectEqual(@as(u32, 0), out[0].id);
+    try t.expectEqual(@as(u32, 1), out[1].id);
+    // sigmoid(0)=1/2, sigmoid(1)=1/(1+e^{-1}). Weights ignore bias.
+    try t.expect(@abs(out[0].wt - 0.406154515) < 1e-6);
+    try t.expect(@abs(out[1].wt - 0.593845485) < 1e-6);
+}
+
+test "group score is the top-2 sum: top-1 ranking disagrees" {
+    const s = Shape{ .experts = 8, .topk = 2, .n_group = 4, .topk_group = 1, .scale = 1 };
+    // Group 0: one large expert. Group 1: two medium. Top-1 keeps 0; top-2 sum keeps 1.
+    const logits = [_]f32{ 4, -4, 1, 0.8, 0, 0, 0, 0 };
+    var bias: [8]f32 = @splat(0);
+    var out: [2]Pick = undefined;
+    selectF32(&logits, &bias, &out, s);
+    try t.expectEqual(@as(u32, 1), out[0].id / 2);
+    try t.expectEqual(@as(u32, 1), out[1].id / 2);
+}
+
+test "a 5th group does not win a pick when keep is 4" {
+    const s = Shape{ .experts = 16, .topk = 4, .n_group = 8, .topk_group = 4, .scale = 1 };
+    var logits: [16]f32 = @splat(0);
+    var bias: [16]f32 = @splat(0);
+    for (0..4) |g| {
+        logits[g * 2] = 2;
+        logits[g * 2 + 1] = 2;
+    }
+    logits[8] = 8; // group 4: would be pick 0 if keep were 5
+    var out: [4]Pick = undefined;
+    selectF32(&logits, &bias, &out, s);
+    for (out) |p| try t.expect(p.id != 8);
+}
+
+test "negative kept choices still beat masked experts" {
+    const s = Shape{ .experts = 4, .topk = 2, .n_group = 2, .topk_group = 1, .scale = 1 };
+    const logits = [_]f32{ 2, 2, 0, 0 };
+    const bias = [_]f32{ -2, -2, -3, -3 };
+    var out: [2]Pick = undefined;
+    selectF32(&logits, &bias, &out, s);
+    try t.expectEqual(@as(u32, 0), out[0].id);
+    try t.expectEqual(@as(u32, 1), out[1].id);
 }
