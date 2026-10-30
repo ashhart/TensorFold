@@ -113,6 +113,7 @@ pub const Lanes = struct {
         const block = self.x.e.drafter != null;
         const sharing = drafting and !self.alone;
         return .{
+            .allocate_shared_drafts = drafting,
             .exact_width = if (drafting) max_rows else 1,
             .first_copy_rows = mtp_rows, // a first copy as wide as a head round; it grows as its tokens land
             .gpu_tokens = false,
@@ -547,7 +548,7 @@ pub const Lanes = struct {
                 n = rows.len;
                 break :a r.follow[rows.len - 1];
             } else self.value(r.first orelse return error.NoFirstToken);
-            reqs[i] = .{ .slot = l.slot, .pos = 0, .n = n, .anchor = anchor, .out = &l.held, .probs = &l.chances };
+            reqs[i] = .{ .slot = l.slot, .pos = 0, .n = n, .anchor = anchor, .propose = r.depth > 0, .out = &l.held, .probs = &l.chances };
             held[i] = l;
         }
         try self.x.block(reqs[0..requests.len]);

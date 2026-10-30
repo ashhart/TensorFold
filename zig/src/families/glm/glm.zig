@@ -22,6 +22,7 @@ pub const image = @import("image.zig");
 pub const video = @import("video.zig");
 
 test {
+    _ = backend;
     _ = config;
     _ = state;
     _ = ep;

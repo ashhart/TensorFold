@@ -85,7 +85,7 @@ pub const Slot = struct {
 };
 
 /// One stream's request: `n` rows of its last verify into its context first (0: none), the anchor, rank 0's `out`.
-pub const Req = struct { slot: u32, pos: i64, n: usize, anchor: u32, out: ?[]u32 = null, probs: ?[]f64 = null };
+pub const Req = struct { slot: u32, pos: i64, n: usize, anchor: u32, propose: bool = true, out: ?[]u32 = null, probs: ?[]f64 = null };
 
 /// Context runs: `n` tap rows at `taps` (consecutive), positions pos0.., into `ring`.
 pub const Run = struct { ring: u64, taps: u64, n: usize, pos0: i64 };
@@ -266,8 +266,11 @@ pub const Drafter = struct {
         }
         try dr.ingest(e, runs[0..nr]);
         tm = try dr.mark(e, .{ tm, 0 });
-        const S = reqs.len;
-        for (reqs, 0..) |q, i| {
+        var chosen: [MAX_S]Req = undefined;
+        const active = @import("dflash_proposals.zig").active(reqs, &chosen);
+        if (active.len == 0) return;
+        const S = active.len;
+        for (active, 0..) |q, i| {
             const s = &dr.slots.items[q.slot];
             dr.h_rings[i] = s.ring.?.ptr;
             dr.h_starts[i] = q.pos;
@@ -283,15 +286,15 @@ pub const Drafter = struct {
         try block.upload(dr, e, dr.rings, std.mem.sliceAsBytes(dr.h_rings[0..S]));
         try block.upload(dr, e, dr.starts, std.mem.sliceAsBytes(dr.h_starts[0..S]));
         try block.upload(dr, e, dr.froms, std.mem.sliceAsBytes(dr.h_froms[0..S]));
-        const rank0 = reqs[0].out != null;
+        const rank0 = active[0].out != null;
         tm = try dr.mark(e, .{ tm, 1 });
         try block.pass(dr, e, S, rank0);
         tm = try dr.mark(e, .{ tm, 2 });
         if (rank0) {
             try block.download(dr, e, std.mem.sliceAsBytes(dr.cand[0..@import("dflash_candidates.zig").Layout.init(dr.world, M, CW).read]), dr.gtk);
             try block.download(dr, e, std.mem.sliceAsBytes(dr.gh[0 .. M * RANK]), dr.g);
-            for (reqs, 0..) |q, i| select.select(dr, i, M, q);
-            if (dr.log > dr.calls) for (reqs) |q| std.log.info("dflash2 round {d}: slot {d} pos {d} kept {d} anchor {d} drafts {any}", .{ dr.calls, q.slot, q.pos, q.n, q.anchor, q.out.?[0 .. BLOCK - 1] });
+            for (active, 0..) |q, i| select.select(dr, i, M, q);
+            if (dr.log > dr.calls) for (active) |q| std.log.info("dflash2 round {d}: slot {d} pos {d} kept {d} anchor {d} drafts {any}", .{ dr.calls, q.slot, q.pos, q.n, q.anchor, q.out.?[0 .. BLOCK - 1] });
             if (dr.calls % 256 == 255) std.log.info("dflash2: {d} rounds, {d} contexts restarted", .{ dr.calls + 1, dr.lost });
         }
         _ = try dr.mark(e, .{ tm, 3 });
