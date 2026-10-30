@@ -117,7 +117,7 @@ pub fn getitem(rt: *Rt, obj: Value, key: Value) Error!Value {
     switch (obj) {
         .dict => |d| if (key == .str) if (d.map.get(key.str.s)) |item| return item,
         .list => |l| if (l.seq == .list or l.seq == .tuple or l.seq == .range) if (intKey(key)) |i| {
-            if (index(i, l.items.len)) |k| return l.items[k];
+            if (index(i, l.count())) |k| return l.at(k);
         },
         .str => |s| if (intKey(key)) |i| {
             if (index(i, uni.count(s.s))) |k| {
@@ -146,7 +146,7 @@ fn bound(rt: *Rt, x: Value) Error!?i64 {
 }
 
 /// Python slice.indices: the positions a slice selects from a sequence of length `n`.
-pub fn sliceIndices(rt: *Rt, n_: usize, start_: Value, stop_: Value, step_: Value) Error![]usize {
+fn sliceBounds(rt: *Rt, n_: usize, start_: Value, stop_: Value, step_: Value) Error![3]i64 {
     const n: i64 = @intCast(n_);
     const step = (try bound(rt, step_)) orelse 1;
     if (step == 0) return rt.fail("slice step cannot be zero", .{});
@@ -160,6 +160,11 @@ pub fn sliceIndices(rt: *Rt, n_: usize, start_: Value, stop_: Value, step_: Valu
         stop += n;
         if (stop < 0) stop = if (step < 0) -1 else 0;
     } else if (stop >= n) stop = if (step < 0) n - 1 else n;
+    return .{ start, stop, step };
+}
+
+pub fn sliceIndices(rt: *Rt, n: usize, start_: Value, stop_: Value, step_: Value) Error![]usize {
+    const start, const stop, const step = try sliceBounds(rt, n, start_, stop_, step_);
     var out: std.ArrayList(usize) = .empty;
     var i = start;
     while (if (step > 0) i < stop else i > stop) : (i += step) try out.append(rt.a, @intCast(i));
@@ -178,9 +183,11 @@ pub fn slice(rt: *Rt, obj: Value, start: Value, stop: Value, step: Value) Error!
             return .{ .str = text };
         },
         .list => |l| if (l.seq == .list or l.seq == .tuple or l.seq == .range) {
-            const picks = try sliceIndices(rt, l.items.len, start, stop, step);
+            const bounds = try sliceBounds(rt, l.count(), start, stop, step);
+            if (bounds[2] == 1) return .{ .list = try l.slice(rt.a, @intCast(bounds[0]), @intCast(@max(bounds[0], bounds[1]))) };
+            const picks = try sliceIndices(rt, l.count(), start, stop, step);
             const items = try rt.a.alloc(Value, picks.len);
-            for (picks, items) |k, *x| x.* = l.items[k];
+            for (picks, items) |k, *x| x.* = l.at(k);
             return rt.list(items, if (l.seq == .tuple) .tuple else .list);
         },
         else => {},
@@ -217,7 +224,7 @@ pub fn iterate(rt: *Rt, x: Value) Error![]const Value {
             for (parts, items) |p, *it| it.* = .{ .str = p };
             break :blk items;
         },
-        .list => |l| l.items,
+        .list => |l| l.values(rt.a),
         .dict => |d| blk: {
             const items = try rt.a.alloc(Value, d.map.count());
             for (d.map.keys(), items) |k, *it| it.* = try v.key(rt, d, k);

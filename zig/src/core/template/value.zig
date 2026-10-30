@@ -10,7 +10,7 @@ pub const Map = std.array_hash_map.String(Value);
 /// How a sequence prints: Python lists, tuples, ranges and dict views share one representation.
 pub const Seq = enum { list, tuple, range, items, keys, values };
 
-pub const List = struct { items: []const Value, seq: Seq = .list, range: [3]i64 = .{ 0, 0, 1 } };
+pub const List = @import("sequence.zig").List;
 
 pub const Dict = struct {
     map: Map,
@@ -140,7 +140,7 @@ pub fn truthy(v: Value) bool {
         .big => true,
         .float => |f| f != 0,
         .str => |s| s.s.len > 0,
-        .list => |l| l.items.len > 0,
+        .list => |l| l.count() > 0,
         .dict => |d| d.map.count() > 0,
         .loop => |l| l.items.len > 0,
         .ns, .macro, .method, .func, .iter => true,
@@ -152,7 +152,7 @@ pub fn len(v: Value) ?usize {
     return switch (v) {
         .missing, .undef => 0,
         .str => |s| uni.count(s.s),
-        .list => |l| l.items.len,
+        .list => |l| l.count(),
         .dict => |d| d.map.count(),
         .loop => |l| l.items.len,
         else => null,
@@ -215,8 +215,8 @@ fn seqEql(a: *const List, b: *const List) bool {
             };
         }
     };
-    if (kind.of(a.seq) != kind.of(b.seq) or a.items.len != b.items.len) return false;
-    for (a.items, b.items) |p, q| if (!eql(p, q)) return false;
+    if (kind.of(a.seq) != kind.of(b.seq) or a.count() != b.count()) return false;
+    for (0..a.count()) |i| if (!eql(a.at(i), b.at(i))) return false;
     return true;
 }
 
@@ -248,8 +248,8 @@ pub fn order(rt: *Rt, op: []const u8, x: Value, y: Value) Error!?std.math.Order 
     };
     if (x == .str and y == .str) return std.mem.order(u8, x.str.s, y.str.s);
     if (x == .list and y == .list and x.list.seq == y.list.seq and (x.list.seq == .list or x.list.seq == .tuple)) {
-        const a = x.list.items;
-        const b = y.list.items;
+        const a = try x.list.values(rt.a);
+        const b = try y.list.values(rt.a);
         for (a[0..@min(a.len, b.len)], b[0..@min(a.len, b.len)]) |p, q| if (!eql(p, q)) return order(rt, op, p, q);
         return std.math.order(a.len, b.len);
     }
@@ -345,8 +345,8 @@ fn requestAt(x: Value, depth: usize) bool {
         .ns => |n| n.request_keys or for (n.map.values()) |item| {
             if (requestAt(item, depth + 1)) break true;
         } else false,
-        .list => |l| for (l.items) |item| {
-            if (requestAt(item, depth + 1)) break true;
+        .list => |l| for (0..l.count()) |i| {
+            if (requestAt(l.at(i), depth + 1)) break true;
         } else false,
         .iter => |it| for (it.items) |item| {
             if (requestAt(item, depth + 1)) break true;
@@ -432,19 +432,19 @@ fn write(rt: *Rt, out: *std.ArrayList(u8), v: Value, quoted: bool) Error!void {
         .list => |l| switch (l.seq) {
             .list => {
                 try out.append(a, '[');
-                try writeItems(rt, out, l.items);
+                try writeItems(rt, out, try l.values(a));
                 try out.append(a, ']');
             },
             .tuple => {
                 try out.append(a, '(');
-                try writeItems(rt, out, l.items);
-                if (l.items.len == 1) try out.append(a, ',');
+                try writeItems(rt, out, try l.values(a));
+                if (l.count() == 1) try out.append(a, ',');
                 try out.append(a, ')');
             },
             .range => if (l.range[2] == 1) try out.print(a, "range({d}, {d})", .{ l.range[0], l.range[1] }) else try out.print(a, "range({d}, {d}, {d})", .{ l.range[0], l.range[1], l.range[2] }),
             .items, .keys, .values => {
                 try out.print(a, "dict_{s}([", .{@tagName(l.seq)});
-                try writeItems(rt, out, l.items);
+                try writeItems(rt, out, try l.values(a));
                 try out.appendSlice(a, "])");
             },
         },

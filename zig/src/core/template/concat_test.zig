@@ -82,3 +82,73 @@ test "appending forks old aliases without changing their text or provenance" {
         try std.testing.expectEqual(byte == 's', marked);
     }
 }
+
+test "namespace list append and prefix replacement use linear memory" {
+    const a = std.testing.allocator;
+    var data = std.heap.ArenaAllocator.init(a);
+    defer data.deinit();
+    const d = data.allocator();
+    const content = try d.alloc(u8, 256);
+    @memset(content, 'x');
+    var messages = std.json.Array.init(d);
+    for (0..2000) |_| try messages.append(.{ .string = content });
+    const sources = [_][]const u8{
+        "{% set ns=namespace(xs=[]) %}{% for m in messages %}" ++
+            "{% set ns.xs=ns.xs+[m] %}{% endfor %}{{ ns.xs|join('') }}",
+        "{% set ns=namespace(xs=messages) %}{% for m in messages %}" ++
+            "{% set ns.xs=ns.xs[:-1]+[m] %}{% endfor %}{{ ns.xs|join('') }}",
+    };
+    const budget = try a.alloc(u8, 16 << 20);
+    defer a.free(budget);
+    for (sources) |source| {
+        var fba = std.heap.FixedBufferAllocator.init(budget);
+        const out = try template.renderChat(fba.allocator(), source, .{ .array = messages }, .null, .null, false, null);
+        try std.testing.expectEqual(@as(usize, 512_000), out.len);
+        for (out) |byte| try std.testing.expectEqual(@as(u8, 'x'), byte);
+    }
+}
+
+test "list concatenation and slice forks preserve saved elements and provenance" {
+    const a = std.testing.allocator;
+    var context: std.json.ObjectMap = .empty;
+    defer context.deinit(a);
+    try context.put(a, "seed", .{ .string = "s" });
+    const source = "{% set ns=namespace(xs=[seed]) %}{% set saved=ns.xs %}" ++
+        "{% set ns.xs=ns.xs+['a'] %}{% set prefix=ns.xs[:-1] %}" ++
+        "{% set fork=prefix+['b'] %}{% set ns.xs=ns.xs[:-1]+['c'] %}" ++
+        "{% set doubled=ns.xs+ns.xs %}{{ saved|join }}|{{ prefix|join }}|" ++
+        "{{ fork|join }}|{{ ns.xs|join }}|{{ doubled|join }}|{{ doubled[::-1]|join }}|" ++
+        "{{ doubled[1::2]|join }}|{{ doubled[9:1]|length }}|{{ (1,)+(2,) }}";
+    var compiled = try template.compile(a, source, null);
+    defer compiled.deinit();
+    const out = try template.renderProvenance(a, &compiled, .null, .null, .{ .object = context }, false, null);
+    defer a.free(out.s);
+    defer a.free(out.spans);
+    try std.testing.expectEqualStrings("s|s|sb|sc|scsc|cscs|cc|0|(1, 2)", out.s);
+    for (out.s, 0..) |byte, i| {
+        var marked = false;
+        for (out.spans) |span| if (span[0] <= i and i < span[1]) {
+            marked = true;
+            break;
+        };
+        try std.testing.expectEqual(byte == 's', marked);
+    }
+}
+
+test "deep sequence concatenations flatten without using the call stack" {
+    const v = @import("value.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var rt: v.Rt = .{ .a = arena.allocator() };
+    var xs = try rt.list(&.{}, .list);
+    for (0..20_000) |i| {
+        const items = try rt.a.alloc(v.Value, 1);
+        items[0] = .{ .int = @intCast(i) };
+        const next = try rt.list(items, .list);
+        xs = .{ .list = try xs.list.concat(rt.a, next.list) };
+    }
+    try std.testing.expectEqual(@as(i64, 19_999), xs.list.at(19_999).int);
+    const values = try xs.list.values(rt.a);
+    for (values, 0..) |item, i| try std.testing.expectEqual(@as(i64, @intCast(i)), item.int);
+    try std.testing.expectEqual(@intFromPtr(values.ptr), @intFromPtr((try xs.list.values(rt.a)).ptr));
+}

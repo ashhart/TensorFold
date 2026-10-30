@@ -91,7 +91,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - The GLM CUDA matrix multiply kernels take their copy, ldmatrix, mma and nibble helpers from the shared `zig/kernels/cuda/common/qmm_frag.cuh`, and their 117-line private copy of it is gone. All 110 functions in the `glm_mm` image compile to the same code as before at sm_80, sm_86, sm_89, sm_120 and sm_121 (#1564). Thanks to @jschmied.
 
 - Kernel contract: the CUDA runner now loads fp8_experts' image, so a `zig build kernel-contract` run on a CUDA machine no longer stops at its first fp8_experts record (about 90 minutes in on a GB10) and makes all 1,325 live-limit checks through to its `SUMMARY` line. A host test now fails if any registered CUDA launch or control names an image the runner cannot load (#1579). Inference kernels are unchanged. Thanks to @Bizuayeu.
-- Chat templates: interleaved string accumulators grow in linear memory while preserving rendered bytes and request provenance (#1633). Thanks to @fche for the report.
+
+- Chat templates that build the prompt by appending to a string with other joins in between, as DeepSeek-V4.1's does, no longer copy the whole prompt at every turn, so memory grows with the prompt's length instead of its square: a 2,000-message chat through DeepSeek-V4.1's template peaks at 15 MB instead of 154 MB (53 MB instead of 152 MB with tools). Every rendered prompt is byte-identical to before (#1633). Thanks to @fche for the report.
 
 - Cortheon: a research planner query longer than 200 bytes is now cut on a character boundary, so a multi-byte character at the cap is left out whole instead of being split into invalid UTF-8 in the search query (#1610). Thanks to @ppardus.
 

@@ -29,7 +29,7 @@ fn checkValue(rt: *v.Rt, value: v.Value) anyerror!void {
             try checkValue(rt, try v.key(rt, d, key));
             try checkValue(rt, item);
         },
-        .list => |l| for (l.items) |item| try checkValue(rt, item),
+        .list => |l| for (try l.values(rt.a)) |item| try checkValue(rt, item),
         .iter => |it| {
             try t.expect(it.err == null);
             for (it.items) |item| try checkValue(rt, item);
