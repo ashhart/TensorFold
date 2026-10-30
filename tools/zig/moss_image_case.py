@@ -18,6 +18,7 @@ USAGE = """\
   exact MODEL_DIR CASE_DIR                 the case's schedule with a float32 transformer: CASE_DIR/exact.png
   decode MODEL_DIR LATENTS.f32 PNG         raw float32 latents (rows x columns x 128) from tf-moss-image to a picture
   compare A.png B.png [SIDE.png]           PSNR and mean absolute difference of two pictures, optionally side by side
+  noise OUT.json                           torch.randn's starting latents for many seeds and sizes, as sha256s (x86)
 MODEL_DIR is the OpenMOSS-Team/MOSS-Image-Base folder. The case runs the card's defaults: 50 Euler steps, CFG 3, an
 empty negative prompt whose branch skips block 22, the bf16 transformer and text encoder, the float32 decoder.
 """
@@ -226,6 +227,30 @@ def compare(args) -> int:
     return 0
 
 
+# Every size's latents for the first three seeds; the rest at two sizes. Seeds past 32 bits keep their low 32 bits.
+NOISE_SEEDS = [0, 42, 2**64 - 1, 1, 2, 7, 123, 1234, 31337, 65535, 65536, 2**31 - 1, 2**31, 2**32 - 1, 2**32, 2**32 + 42,
+               2**53 + 1, 2**63 - 1, 2**63, 271828, 314159, 1000003, 2718281828, 3141592653]
+NOISE_SIZES = [(16, 16), (256, 256), (512, 512), (768, 1344), (1344, 768), (1200, 880), (1024, 1024), (1536, 1536), (2048, 2048)]
+
+
+def noise(args) -> int:
+    """sha256 of the starting latents (rows x columns x 128, float32) the pipeline's seeded CPU generator gives."""
+    import torch
+    cpu = torch.backends.cpu.get_cpu_capability()
+    if cpu not in ("AVX2", "AVX512"):
+        sys.exit(f"torch's CPU capability here is {cpu}: only x86 torch (AVX2 or AVX512) takes the path moss_image matches")
+    cases = []
+    for i, seed in enumerate(NOISE_SEEDS):
+        for width, height in NOISE_SIZES if i < 3 else [(512, 512), (1344, 768)]:
+            x = torch.randn((1, 128, height // 16, width // 16), generator=torch.Generator("cpu").manual_seed(seed),
+                            dtype=torch.float32)
+            data = x[0].permute(1, 2, 0).contiguous().numpy().tobytes()
+            cases.append({"seed": seed, "width": width, "height": height, "sha256": hashlib.sha256(data).hexdigest()})
+    Path(args.out).write_text(json.dumps({"torch": torch.__version__, "cpu": cpu, "cases": cases}, indent=1) + "\n")
+    print(f"{len(cases)} cases from torch {torch.__version__} ({cpu}) in {args.out}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, epilog=USAGE, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="mode", required=True)
@@ -265,8 +290,10 @@ def main() -> int:
     p.add_argument("a")
     p.add_argument("b")
     p.add_argument("side", nargs="?")
+    n = sub.add_parser("noise")
+    n.add_argument("out")
     args = parser.parse_args()
-    return {"case": case, "start": start, "exact": exact, "decode": decode, "compare": compare}[args.mode](args)
+    return {"case": case, "start": start, "exact": exact, "decode": decode, "compare": compare, "noise": noise}[args.mode](args)
 
 
 if __name__ == "__main__":

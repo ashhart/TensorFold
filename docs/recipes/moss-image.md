@@ -90,6 +90,13 @@ runs the whole guided schedule from the starting latents, times it, and writes t
 On MPS, which has no float64, the case tool computes the time sinusoid on the host in float64 and moves its float32
 result to the GPU; every other step of the publisher's code runs unchanged.
 
+`moss_image.noise` makes the starting latents natively, as the pipeline's `torch.randn` on a seeded CPU generator does.
+torch's own bits depend on the CPU. x86 torch (AVX2 or AVX512) computes them with `avx_mathfun.h`'s log and sincos;
+ARM torch (a Mac, a GB10) calls its libm instead. For seed 42 at 1024x1024, a Mac's latents differ from x86 torch's in
+200,873 of 524,288 values, by at most 2.2e-6. The native generator matches x86 torch byte for byte on any CPU.
+`moss_image_case.py noise` records sha256s of x86 torch's latents (torch 2.13.0) for 24 seeds and 9 sizes, and
+`zig build test` checks them. A case made on a Mac holds the Mac's noise, not these.
+
 ## Measured
 
 Setup:
