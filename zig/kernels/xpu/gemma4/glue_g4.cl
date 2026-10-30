@@ -522,65 +522,7 @@ KERNEL(256) void g4_attn_dp_part(global const ushort *Q, global const ushort *KC
     }
 }
 
-// Prompt rows: the tile function over every tile of the block's rows in order, folded into (m, l, o) as g4_attn_merge.
-KERNEL(256) void g4_attn_dp_rows(global const ushort *Q, global const ushort *KC, global const ushort *VC, int p0, int T, int window, int ring, int krows,
-                                 global half *H) {
-  local ushort Pl[16 * KEYS];
-  local float MX[NSG * 16], SM[NSG * 16], OM[16], OL[16], FA[16], FB[16], LF[16];
-  local int FS[16];
-  const int kvh = get_group_id(0), t0 = get_group_id(1) * 4, lane = get_sub_group_local_id(), sg = get_sub_group_id();
-  const int min_first = first_tile(p0 + t0, window), max_last = (p0 + min(t0 + 3, T - 1)) / KEYS;
-  const int token = t0 + lane / 4, qpos = p0 + token;
-  const bool qok = token < T;
-  const int first_l = first_tile(qpos, window), last_l = qpos / KEYS;
-  float mrun = -INFINITY, lrun = 0.0f;
-  float8 orun[2][DTS];
-  for (int h = 0; h < 2; h++)
-    for (int j = 0; j < DTS; j++) orun[h][j] = 0.0f;
-  for (int tile = min_first; tile <= max_last; tile++) {
-    float8 ot[2][DTS];
-    dp_tile(Q, KC, VC, t0, T, p0, kvh, ring, krows, window, tile, Pl, MX, SM, OM, OL, ot);
-    const float m = OM[lane], l = OL[lane];
-    int st = 0;
-    float a = 1.0f, b = 0.0f;
-    if (qok && tile >= first_l && tile <= last_l) {
-      if (tile == first_l) {
-        st = 1;
-        mrun = m;
-        lrun = l;
-      } else {
-        st = 2;
-        const float mm = fmax(mrun, m);
-        a = exp(mrun - mm);
-        b = exp(m - mm);
-        lrun = lrun * a + l * b;
-        mrun = mm;
-      }
-    }
-    if (sg == 0) {
-      FA[lane] = a;
-      FB[lane] = b;
-      FS[lane] = st;
-    }
-    barrier(CLK_LOCAL_MEM_FENCE);
-    for (int h = 0; h < 2; h++)
-      for (int j = 0; j < DTS; j++)
-        for (int i = 0; i < 8; i++) {
-          const int s = FS[8 * h + i];
-          if (s == 1) orun[h][j][i] = ot[h][j][i];
-          else if (s == 2) orun[h][j][i] = orun[h][j][i] * FA[8 * h + i] + ot[h][j][i] * FB[8 * h + i];
-        }
-    barrier(CLK_LOCAL_MEM_FENCE);
-  }
-  if (sg == 0) LF[lane] = lrun;
-  barrier(CLK_LOCAL_MEM_FENCE);
-  for (int h = 0; h < 2; h++)
-    for (int i = 0; i < 8; i++) {
-      const int slot = 8 * h + i, tok = t0 + slot / 4, head = kvh * 4 + slot % 4;
-      if (tok >= T) continue;
-      for (int j = 0; j < DTS; j++) H[(long)tok * 8 * HD + head * HD + (sg * DTS + j) * 16 + lane] = convert_half_rte(rbf(orun[h][j][i] / LF[slot]));
-    }
-}
+#include "attn_rows_g4.cl"
 
 // The group sums of an attention output H [T, 8 HD] (g4_attn_merge's, from memory): grid (8 heads, T).
 KERNEL(128) void g4_attn_sums(global const half *H, global half *AHI, global half *ALO) {

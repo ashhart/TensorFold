@@ -14,6 +14,8 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const ngen_include = b.option([]const u8, "ngen-include", "nGEN header directory (oneDNN)") orelse "ngen";
     const files = b.addWriteFiles();
     const opts = "-cl-std=CL3.0 -cl-intel-256-GRF-per-thread";
+    // the Gemma 4 prompt-rows attention: 128 registers a thread, twice the resident threads to hide latency
+    const opts_rows = "-cl-std=CL3.0 -cl-intel-128-GRF-per-thread";
     for ([_]struct { []const u8, []const u8, []const u8 }{
         .{ "glue", "zig/kernels/xpu/qwen27/glue.cl", "" },
         .{ "decode", "zig/kernels/xpu/qwen27/decode.cl", "" },
@@ -21,13 +23,16 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .{ "gemm128", "zig/kernels/xpu/qwen27/gemm.cl", " -DGSZ=128" },
         .{ "gdn", "zig/kernels/xpu/qwen27/gdn_chunk.cl", "" },
         .{ "drafter", "zig/kernels/xpu/qwen27/drafter.cl", "" },
-        .{ "glue_g4s", "zig/kernels/xpu/gemma4/glue_g4.cl", "" },
-        .{ "glue_g4g", "zig/kernels/xpu/gemma4/glue_g4.cl", " -DHD=512" },
+        .{ "glue_g4s", "zig/kernels/xpu/gemma4/glue_g4.cl", " -I zig/kernels/xpu/gemma4" },
+        .{ "glue_g4g", "zig/kernels/xpu/gemma4/glue_g4.cl", " -DHD=512 -I zig/kernels/xpu/gemma4" },
+        .{ "rows_g4s", "zig/kernels/xpu/gemma4/glue_g4.cl", " -I zig/kernels/xpu/gemma4" },
+        .{ "rows_g4g", "zig/kernels/xpu/gemma4/glue_g4.cl", " -DHD=512 -I zig/kernels/xpu/gemma4" },
     }) |k| {
         const c = b.addSystemCommand(&.{ ocloc, "compile", "-q", "-file" });
         c.addFileArg(b.path(k[1]));
-        c.addArgs(&.{ "-device", device, "-options", b.fmt("{s}{s} -I zig/kernels/xpu/qwen27", .{ opts, k[2] }), "-output_no_suffix", "-output", k[0], "-out_dir" });
+        c.addArgs(&.{ "-device", device, "-options", b.fmt("{s}{s} -I zig/kernels/xpu/qwen27", .{ if (std.mem.startsWith(u8, k[0], "rows_")) opts_rows else opts, k[2] }), "-output_no_suffix", "-output", k[0], "-out_dir" });
         c.setCwd(b.path("."));
+        c.addFileInput(b.path("zig/kernels/xpu/gemma4/attn_rows_g4.cl"));
         for ([_][]const u8{ "glue.cl", "glue_attn.cl", "glue_quant.cl" }) |part| c.addFileInput(b.path(b.fmt("zig/kernels/xpu/qwen27/{s}", .{part})));
         const dir = c.addOutputDirectoryArg(b.fmt("ocloc-{s}", .{k[0]}));
         _ = files.addCopyFile(dir.path(b, b.fmt("{s}.bin", .{k[0]})), b.fmt("{s}.bin", .{k[0]}));
@@ -77,6 +82,8 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const embedded_g4 = b.createModule(.{ .root_source_file = files.add("xpu_gemma4_kernels.zig",
         \\pub const glue align(8) = @embedFile("glue_g4s.bin").*; // head 256: the sliding layers
         \\pub const glue_g align(8) = @embedFile("glue_g4g.bin").*; // head 512: the global layers
+        \\pub const rows align(8) = @embedFile("rows_g4s.bin").*; // the same at 128 registers: the prompt-rows attention only
+        \\pub const rows_g align(8) = @embedFile("rows_g4g.bin").*;
         \\pub const gemm align(8) = @embedFile("gemm.bin").*;
         \\pub const ngen_wide align(8) = @embedFile("ngen_wide.zebin").*;
         \\pub const ngen_narrow align(8) = @embedFile("ngen_narrow.zebin").*;
