@@ -242,14 +242,20 @@ pub const Gpu = struct {
         errdefer lib.close();
         const api = try resolve(Api, &lib);
         try check(api.zeInit(1)); // ZE_INIT_FLAG_GPU_ONLY
-        var nd: u32 = 8;
+        var nd: u32 = 0;
+        try check(api.zeDriverGet(&nd, null));
         var drivers: [8]H = @splat(null);
+        nd = @min(nd, drivers.len);
         try check(api.zeDriverGet(&nd, &drivers));
         for (drivers[0..nd]) |drv| {
-            var nv: u32 = 8;
+            if (drv == null) continue;
+            var nv: u32 = 0; // the count first, as context.enumerate (a padded list holds nulls)
+            try check(api.zeDeviceGet(drv, &nv, null));
             var devs: [8]H = @splat(null);
+            nv = @min(nv, devs.len);
             try check(api.zeDeviceGet(drv, &nv, &devs));
             for (devs[0..nv]) |dev| {
+                if (dev == null) continue;
                 var p: DeviceProperties = .{};
                 try check(api.zeDeviceGetProperties(dev, &p));
                 if (p.deviceId != device_id) continue;
