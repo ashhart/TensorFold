@@ -64,6 +64,14 @@ __global__ void __launch_bounds__(32 * kStreamWaves) affine_dot2_stream(Affine a
     stream_tile<MlxDecoder<BITS>, IdentityAct<T>, T, Epi, R, CB>(a, sides, lpc_log2, gshift);
 }
 
+// A routed plan of 5 to 8 rows as a work list (stream_list): grid z blocks walk `items`; 16-byte code loads, so 4-bit.
+template <typename T, int BITS, int R, int CB, bool PAIR>
+__global__ void __launch_bounds__(32 * kStreamWaves) affine_dot2_stream_list(Affine a, StreamSides sides, int lpc_log2,
+                                                                            int gshift, int items) {
+    using Epi = std::conditional_t<PAIR, StreamSwiglu<T>, StreamRound<T>>;
+    stream_list<MlxDecoder<BITS>, IdentityAct<T>, T, Epi, R, CB>(a, sides.pair_cols, sides.limit, lpc_log2, gshift, items);
+}
+
 // The plain product (or plan item) with Nemotron's relu^2 as the epilogue, into a.out16 in the activation type.
 template <typename T, int BITS, int R, int CB>
 __global__ void __launch_bounds__(32 * kStreamWaves) affine_dot2_stream_relu2(Affine a, StreamSides sides, int lpc_log2,

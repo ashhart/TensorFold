@@ -99,6 +99,7 @@ pub const streams_wanted = 3000; // kStreamWavesWanted
 pub const stream_code_words = 32; // kStreamCodeWords
 pub const stream_pair_code_words = affine_stream.stream_pair_code_words;
 pub const stream_routed_cb_top = affine_stream.stream_routed_cb_top;
+pub const stream_list_blocks = affine_stream.stream_list_blocks;
 pub const stream_one_col_n = affine_stream.stream_one_col_n;
 
 /// The K-parallel tiles of a short prompt: cb columns a lane set, r rows a pass over up to rb row blocks.
@@ -139,6 +140,8 @@ pub const Kernels = struct {
     /// The same tile with Nemotron's relu^2 as its epilogue, and with two such products in one launch.
     relu2: [bit_widths.len][stream_rows.len][stream_cbs.len]?Function,
     relu2_pair: [bit_widths.len][stream_rows.len][stream_cbs.len]?Function,
+    /// The 5- to 8-row routed 4-bit work lists (stream.hpp stream_list), 4-row tile: [0] pair CB 2, [1] plain CB 4.
+    stream_list: [2]Function,
     /// Off keeps the decode tiles before the stream tile (the policy's reference switch).
     stream_on: bool,
     /// A test's forced columns a lane (a stream_cbs value; 0: the rule), where the shape takes it.

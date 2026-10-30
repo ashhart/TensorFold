@@ -372,6 +372,10 @@ using Dot = DotF16;
     TF_STREAM(BITS, 4, 2) TF_STREAM(BITS, 4, 4)                                               \
     TF_WMMA(BITS)
 
+// the 5- to 8-row routed work lists: Flash Next's gate+up (CB 2) and down (CB 4) at 4-bit
+template __global__ void affine_dot2_stream_list<Dot, 4, 4, 2, true>(Affine, StreamSides, int, int, int);
+template __global__ void affine_dot2_stream_list<Dot, 4, 4, 4, false>(Affine, StreamSides, int, int, int);
+
 TF_TILES(2)
 TF_TILES(3)
 TF_TILES(4)

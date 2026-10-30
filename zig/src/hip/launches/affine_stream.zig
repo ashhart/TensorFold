@@ -24,6 +24,8 @@ const stream_code_words = affine.stream_code_words;
 pub const stream_pair_code_words = 8;
 /// The widest columns a lane of a routed plain product (the experts' down) takes, by row tile (stream_rows).
 pub const stream_routed_cb_top = [stream_rows.len]c_int{ 8, 4, 4 };
+/// The blocks on z of a routed work list (stream_list): each walks about live items / 16 of the plan's items
+pub const stream_list_blocks = 16;
 /// The columns below which one row of a plain product takes one column a lane; wider heads keep the waves rule.
 pub const stream_one_col_n = 20_000;
 
@@ -76,6 +78,24 @@ pub fn streamWith(
     // rows past the tile's: row blocks on x, column blocks on y (at most 65,535), so a column block reads codes once
     const row_blocks = cdiv(a.m, stream_rows[ri]);
     sides.row_blocks = if (row_blocks > 1 and blocks <= 65535) @intCast(row_blocks) else 0;
+    // 5 to 8 rows of a routed 4-bit plan on the 4-row tile: the work list, no block for a dead item or a dead row block
+    const list_cb: c_int = if (pair_div == 2) 2 else 4;
+    if (a.route.items != 0 and !relu2 and sides.count == 0 and a.m > 4 and a.bits == 4 and ri == 2 and
+        stream_cbs[pick] == list_cb and ((a.words | @as(u64, @intCast(@divExact(a.k * a.bits, 8)))) & 15) == 0)
+    {
+        var la: hl.Args = .{};
+        try la.add(a);
+        try la.add(sides);
+        try la.add(@as(c_int, lpc_log2));
+        try la.add(@as(c_int, switch (a.group) {
+            32 => 0,
+            64 => 1,
+            else => 2,
+        }));
+        try la.add(items);
+        const lf = k.stream_list[if (pair_div == 2) 0 else 1];
+        return go(r, lf, .{ .x = blocks, .y = 1, .z = @intCast(@min(items, stream_list_blocks)) }, .{ .x = 32 * stream_waves }, s, &la);
+    }
     var args: hl.Args = .{};
     try args.add(a);
     try args.add(sides);

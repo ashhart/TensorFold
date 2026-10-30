@@ -47,6 +47,10 @@ pub fn load(tiles_obj: Module, dot2_obj: Module, caps: Caps, choices: Choices) E
 
 fn resolve(k: *Kernels, comptime dot: []const u8, comptime shape: []const u8, m: Module) Error!void {
     @setEvalBranchQuota(400_000);
+    k.stream_list = .{
+        try m.function(std.fmt.comptimePrint("_ZN2tf4rocm23affine_dot2_stream_listINS0_{s}ELi4ELi4ELi2ELb1EEEvNS0_6AffineENS0_11StreamSidesEiii", .{dot})),
+        try m.function(std.fmt.comptimePrint("_ZN2tf4rocm23affine_dot2_stream_listINS0_{s}ELi4ELi4ELi4ELb0EEEvNS0_6AffineENS0_11StreamSidesEiii", .{dot})),
+    };
     inline for (bit_widths, 0..) |bits, b| {
         k.block[b] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm17affine_dot2_blockINS0_{s}ELi{d}EEEvNS0_6AffineE", .{ dot, bits }));
         if (k.matrix) k.wmma_gemm[b] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm16affine_wmma_gemmILi{d}EEEvNS0_6AffineE", .{bits}));

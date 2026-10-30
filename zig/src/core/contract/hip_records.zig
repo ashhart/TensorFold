@@ -9,8 +9,41 @@ pub const Record = struct { launch: limits.HipLaunch, usage: [limits.rdna.len]U 
 
 const rms_ns = "_ZN2tf4rocm10rms_kernelI";
 
+/// The 4-bit work list of 5 to 8 rows (4-row tile): SwiGLU pair at CB 2, plain at CB 4; DotF16 on RDNA2, else DotBF16.
+fn listTile(comptime pair: bool) limits.HipLaunch {
+    const fmt = "_ZN2tf4rocm23affine_dot2_stream_listINS0_{s}ELi4ELi4ELi{d}ELb{d}EEEvNS0_6AffineENS0_11StreamSidesEiii";
+    const cb: u32 = if (pair) 2 else 4;
+    const half = std.fmt.comptimePrint(fmt, .{ "6DotF16", cb, @intFromBool(pair) });
+    const brain = std.fmt.comptimePrint(fmt, .{ "7DotBF16", cb, @intFromBool(pair) });
+    return .{
+        .name = std.fmt.comptimePrint("{s} stream work list 4-bit 4x{d}", .{ if (pair) "swiglu" else "plain", cb }),
+        .symbol = brain,
+        .image = "affine_tiles",
+        .threads = 128,
+        .symbols = .{ half, brain, brain, brain },
+    };
+}
+
 /// HIP kernels as launched; tf-hip-kernel-contract limits DIR re-derives the usage records from the code objects.
 const own_records = [_]Record{
+    .{
+        .launch = listTile(true),
+        .usage = .{
+            .{ .vgprs = 161, .sgprs = 102, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 163, .sgprs = 102, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 163, .sgprs = 102, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 163, .sgprs = 105, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        },
+    },
+    .{
+        .launch = listTile(false),
+        .usage = .{
+            .{ .vgprs = 194, .sgprs = 107, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 220, .sgprs = 107, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 220, .sgprs = 107, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 220, .sgprs = 107, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        },
+    },
     .{
         .launch = .{ .name = "RMS norm tf_rms_rows", .symbol = "tf_rms_rows", .image = "ops", .threads = 256 },
         .usage = .{
