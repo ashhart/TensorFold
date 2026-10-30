@@ -23,7 +23,7 @@ pub const sample_names = [_][:0]const u8{ "tf_sample_full", "tf_sample_full_ids"
 pub const train_names = [_][:0]const u8{ "tf_train_head_t", "tf_train_softmax", "tf_train_dequant_t", "tf_train_narrow", "tf_train_add", "tf_train_experts_tiles", "tf_train_experts_mm", "tf_train_rms_back", "tf_train_lora_in", "tf_train_gate", "tf_lesson_latch", "tf_train_project", "tf_train_lora_out", "tf_train_lora_db", "tf_train_lora_dxa", "tf_train_lora_dx", "tf_train_sketch", "tf_train_relu2_back", "tf_train_pairs_in", "tf_train_pairs_out", "tf_train_adam", "tf_train_zero", "tf_train_widen", "tf_residual", "tf_train_route_back", "tf_train_rest_back", "tf_train_nudge", "tf_pocket_relu2", "tf_pocket_relu2_rows", "tf_train_copy_cols", "tf_pocket_in" };
 pub const mixer_names = [_][:0]const u8{ "tf_train_dt", "tf_train_ssm_fwd", "tf_train_ssm_back", "tf_train_ssm_bc", "tf_train_gate_back", "tf_train_conv_back", "tf_train_dt_back", "tf_train_attn_q", "tf_train_attn_kv" };
 
-/// Routed experts taking an expert's member rows two or four at a time (nemotron_experts.metal); rows2r8 at 8 rows a simdgroup.
+/// Routed experts taking member rows 2 or 4 at a time (nemotron_experts.metal); rows2r8: 8 rows a simdgroup.
 pub const rows_names = [_][:0]const u8{ "tf_xup_rows2", "tf_xdown_rows2", "tf_xup_rows4", "tf_xdown_rows4", "tf_xup_w3", "tf_xdown_w3", "tf_xup_rows2r8", "tf_xdown_rows2r8" };
 
 /// Routed-expert kernels at other (rows a simdgroup, simdgroups a threadgroup): each row's arithmetic is unchanged.
