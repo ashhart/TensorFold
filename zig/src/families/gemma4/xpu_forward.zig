@@ -12,7 +12,7 @@ const alloc = dev.alloc;
 const off = dev.off;
 
 pub const ROWS = 16; // rows of a decode or verification window
-pub const MAXT = 256; // rows of a prompt forward at most
+pub const MAXT = 1024; // rows of a prompt forward at most
 pub const KEYS = 128;
 pub const MAXK = 64; // candidates the device keeps of a row of logits (top_k above it: the host draws from all)
 const EPS: f32 = cfg.eps;
