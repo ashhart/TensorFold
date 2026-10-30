@@ -78,7 +78,7 @@ pub fn finishPrompt(f: *Forward) !void {
     if (f.leads()) try f.link.?.send(&.{ op_ced_finish, @intCast(f.slot.pos) });
     return h.finish(f);
 }
-/// 28: [op, sub (bind / step / release), ...] (grammar_gpu.zig; ops 28-31)
+/// 28: [op, rows, words, row ids..., bits two to a word] the next picks' masked rows (grammar_gpu.zig; ops 28-31)
 pub const op_grammar: i64 = 28;
 
 /// 64: [op] every rank syncs its device and reads its clock; 65: [op, n] samples all-gathered (ops 64-67: calib)
