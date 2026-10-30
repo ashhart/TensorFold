@@ -1,32 +1,8 @@
-//! The Qwen3.5-2B Vulkan forward composition: one single-sequence pass over
-//! the pinned 24-layer tower (eighteen linear GatedDeltaNet layers, six full
-//! attention layers every 4th), matching the unchanged Ash8c Metal oracle
-//! (zig/src/families/qwen3_5/forward.zig in the ash tree) op for op.
-//!
-//! The oracle's fused norm kernel adds first (`h = bf16(H + R)` written back,
-//! then `x = bf16(gain * rmsnorm(h))`), so this composition is an explicit
-//! bf16 residual add followed by the raw-BF16-gain RMSNorm — never a `1 + w`
-//! gain and never a norm-then-add. Every mixer writes its output into the
-//! residual companion the next add consumes; the residual ring never aliases
-//! a read with a write. The final norm touches only the last row; the tied
-//! or untied head projects that one row onto the full vocab.
-//!
-//! Full attention reads the oracle's interleaved Q layout: the Q projection
-//! holds [M, 4096] rows of 8 interleaved `[q 256 | gate 256]` halves; Q is
-//! extracted strided on the GPU through the existing copy_u16 pipeline before
-//! the per-head RMS gamma (256). RoPE, the flat KV cache write, causal GQA
-//! SDPA and the sigmoid output gate ride the admitted attention operator.
-//!
-//! The linear layers use one GDN graph for every row count: 4-tap conv over
-//! raw BF16 taps, gate split (g F32, beta BF16), prefill recurrence, and gated
-//! RMSNorm. Decode uses the same arithmetic as a one-row prefill.
-//! Conv state and recurrence state are the caller's ping-pong halves; the
-//! caller flips only after the writes' fences and commits visible length only
-//! after the whole forward.
-//!
-//! Every GPU call is routed through `vk.orExit` at the call site: a Timeout
-//! or InFlight ends the process before any destructor can free a resource the
-//! GPU may still be using. Nothing here falls back to the CPU.
+// The Qwen3.5-2B Vulkan forward composition: one single-sequence pass over the pinned 24-layer tower (eighteen linear GatedDeltaNet layers, six full attention layers every 4th), matching the unchanged Ash8c Metal oracle (zig/src/families/qwen3_5/forward.zig in the ash tree) op for op.
+//  The oracle's fused norm kernel adds first (`h = bf16(H + R)` written back, then `x = bf16(gain * rmsnorm(h))`), so this composition is an explicit bf16 residual add followed by the raw-BF16-gain RMSNorm — never a `1 + w` gain and never a norm-then-add. Every mixer writes its output into the residual companion the next add consumes; the residual ring never aliases a read with a write. The final norm touches only the last row; the tied or untied head projects that one row onto the full vocab.
+//  Full attention reads the oracle's interleaved Q layout: the Q projection holds [M, 4096] rows of 8 interleaved `[q 256 | gate 256]` halves; Q is extracted strided on the GPU through the existing copy_u16 pipeline before the per-head RMS gamma (256). RoPE, the flat KV cache write, causal GQA SDPA and the sigmoid output gate ride the admitted attention operator.
+//  The linear layers use one GDN graph for every row count: 4-tap conv over raw BF16 taps, gate split (g F32, beta BF16), prefill recurrence, and gated RMSNorm. Decode uses the same arithmetic as a one-row prefill. Conv state and recurrence state are the caller's ping-pong halves; the caller flips only after the writes' fences and commits visible length only after the whole forward.
+//  Every GPU call is routed through `vk.orExit` at the call site: a Timeout or InFlight ends the process before any destructor can free a resource the GPU may still be using. Nothing here falls back to the CPU.
 const std = @import("std");
 const vk = @import("vulkan");
 const pinned = @import("../../config.zig");
@@ -36,8 +12,7 @@ const state = @import("state.zig");
 const Arena = vk.arena.Arena;
 const View = vk.tensor.View;
 
-/// Per-dispatch activation chunk cap: a whole-prompt pass cuts its rows into
-/// forward chunks of at most this many (the persistent windows are sized for it).
+// Per-dispatch activation chunk cap: a whole-prompt pass cuts its rows into forward chunks of at most this many (the persistent windows are sized for it).
 pub const max_prefill_rows: usize = 32;
 /// The GDN prefill scan's chunk cap (chunks of 1 when a prefill fits one).
 pub const max_gdn_chunk: u64 = 32;
@@ -57,10 +32,7 @@ pub const Acc = struct {
     gdn: *vk.Gdn,
 };
 
-/// Everything one forward pass needs beyond the weights and state: the
-/// command stream, the shared staging buffer, the operators, the scratch
-/// arena and the fence timeout. The arena and every view are the owner's;
-/// this struct only borrows them.
+// Everything one forward pass needs beyond the weights and state: the command stream, the shared staging buffer, the operators, the scratch arena and the fence timeout. The arena and every view are the owner's; this struct only borrows them.
 pub const Core = struct {
     cmds: *vk.Commands,
     staging: vk.Buffer,
@@ -73,9 +45,7 @@ pub const Core = struct {
         try vk.orExit(vk.ops_q4.project(c.acc.ops, c.cmds, out, x, q.w, q.scales, q.biases, q.k, c.scratch, c.timeout_ns));
     }
 
-    /// The oracle's fused norm, split into its two exact roundings: first
-    /// the bf16 residual add (`h = bf16(H + R)`, written out of place into
-    /// `sum`), then the raw-gain RMSNorm into `out`.
+    // The oracle's fused norm, split into its two exact roundings: first the bf16 residual add (`h = bf16(H + R)`, written out of place into `sum`), then the raw-gain RMSNorm into `out`.
     pub fn addNorm(c: *const Core, out: View, sum: View, h: View, r: View, gain: View, rows: usize) !void {
         try vk.orExit(c.acc.norm.add(c.cmds, sum, h, r, c.timeout_ns));
         try vk.orExit(c.acc.norm.rmsNorm(c.cmds, out, sum, gain, rows, pinned.hidden, pinned.eps, c.timeout_ns));
@@ -86,9 +56,7 @@ pub const Core = struct {
         try vk.orExit(c.acc.norm.rmsNorm(c.cmds, out, h, gain, rows, pinned.hidden, pinned.eps, c.timeout_ns));
     }
 
-    /// Q extraction from the interleaved qraw: out element (d, k) reads
-    /// qraw[d + k * 512], k = row * 8 + head, exactly the oracle's
-    /// qwen35_head_norm source indexing, as one 2D strided copy.
+    // Q extraction from the interleaved qraw: out element (d, k) reads qraw[d + k * 512], k = row * 8 + head, exactly the oracle's qwen35_head_norm source indexing, as one 2D strided copy.
     pub fn extractQueries(c: *const Core, q_out: View, qraw: View, rows: usize) !void {
         const plan = extractQPlan(rows, q_out.elements, qraw.elements) orelse return error.Invalid;
         try c.acc.ops.copy_u16.bind(&.{ qraw.bind(), c.acc.ops.dummyBinding(), q_out.bind(), c.acc.ops.dummyBinding() });
@@ -102,10 +70,7 @@ pub const Core = struct {
         try vk.orExit(c.acc.ops.copy_u16.run(c.cmds, std.mem.asBytes(&p), vk.ops.dispatchGroups(plan.count, c.acc.ops.copy_u16.local[0]), c.timeout_ns));
     }
 
-    /// One full-attention layer: Q/K/V projections, interleaved-Q extraction,
-    /// per-head RMS gamma (256), RoPE, the flat KV write at `base`, causal
-    /// GQA SDPA over the visible prefix, the output gate and the O projection
-    /// into `r_out`. `r_out` must not alias anything read here.
+    // One full-attention layer: Q/K/V projections, interleaved-Q extraction, per-head RMS gamma (256), RoPE, the flat KV write at `base`, causal GQA SDPA over the visible prefix, the output gate and the O projection into `r_out`. `r_out` must not alias anything read here.
     pub fn fullLayer(c: *const Core, x: View, layer: weights.FullLayer, s: *state.State, slot: usize, rows: usize, r_out: View, base: u64) !void {
         const mark = c.scratch.mark();
         errdefer c.scratch.reset(mark) catch {};
@@ -134,11 +99,7 @@ pub const Core = struct {
         c.scratch.reset(mark) catch {};
     }
 
-    /// One linear GatedDeltaNet layer: qkv/z/a/b projections, raw-BF16 conv,
-    /// gate split, prefill recurrence, gated RMSNorm and out projection.
-    /// The same graph handles one row so the prefill/decode split cannot
-    /// choose a different gate or recurrent rounding path. Conv and recurrence
-    /// are the state's ping-pong pair; the slot flips after the writes.
+    // One linear GatedDeltaNet layer: qkv/z/a/b projections, raw-BF16 conv, gate split, prefill recurrence, gated RMSNorm and out projection. The same graph handles one row so the prefill/decode split cannot choose a different gate or recurrent rounding path. Conv and recurrence are the state's ping-pong pair; the slot flips after the writes.
     pub fn linearLayer(c: *const Core, x: View, layer: weights.LinearLayer, s: *state.State, slot: usize, rows: usize, r_out: View) !void {
         const mark = c.scratch.mark();
         errdefer c.scratch.reset(mark) catch {};
@@ -166,8 +127,7 @@ pub const Core = struct {
         c.scratch.reset(mark) catch {};
     }
 
-    /// The dense MLP: Q4 gate and up projections, the ASH single-round
-    /// SwiGLU, and the Q4 down projection into `r_out`.
+    // The dense MLP: Q4 gate and up projections, the ASH single-round SwiGLU, and the Q4 down projection into `r_out`.
     pub fn mlp(c: *const Core, x: View, rows: usize, m: weights.DenseMlp, r_out: View) !void {
         const mark = c.scratch.mark();
         errdefer c.scratch.reset(mark) catch {};
@@ -181,9 +141,7 @@ pub const Core = struct {
         c.scratch.reset(mark) catch {};
     }
 
-    /// The last row only: the final residual add, the final raw-gain norm,
-    /// and the head projection (tied embedding or separate lm_head) onto the
-    /// full vocab row the greedy draw reads.
+    // The last row only: the final residual add, the final raw-gain norm, and the head projection (tied embedding or separate lm_head) onto the full vocab row the greedy draw reads.
     pub fn finish(c: *const Core, sum: View, h: View, r: View, x: View, final_norm: View, head: weights.Quant, logits: View, rows: usize) !void {
         try vk.orExit(c.acc.norm.add(c.cmds, sum, h, r, c.timeout_ns));
         const last = (rows - 1) * pinned.hidden;
@@ -195,9 +153,7 @@ pub const Core = struct {
     }
 };
 
-/// The Q extraction's derived geometry, or null when any view is torn; pure
-/// and host-tested. `dim` = head_dim, `heads_rows` = rows * query_heads,
-/// `in_head_stride` = the interleaved half pitch 2 * head_dim.
+// The Q extraction's derived geometry, or null when any view is torn; pure and host-tested. `dim` = head_dim, `heads_rows` = rows * query_heads, `in_head_stride` = the interleaved half pitch 2 * head_dim.
 pub const ExtractQPlan = struct { count: u32, dim: u32, heads_rows: u32, in_head_stride: u32 };
 
 pub fn extractQPlan(rows: usize, out_elements: u64, in_elements: u64) ?ExtractQPlan {
