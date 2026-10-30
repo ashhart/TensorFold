@@ -126,6 +126,7 @@ pub fn fallback(a: Allocator, goal: []const u8) Allocator.Error![]const []const 
             if (words.items.len > 0) try words.append(a, ' ');
             try words.appendSlice(a, w);
         }
+        if (words.items.len == 0) continue; // a word that does not fit is not a query
         const one = try a.alloc([]const u8, 1);
         one[0] = words.items;
         return one;
@@ -223,6 +224,15 @@ test "planner replies become clean queries; a goal becomes one when the planner 
     const f = try fallback(a, "```\n\nImplement a client for the latest Stripe API, with retries and idempotency keys and good tests please thanks\n");
     try std.testing.expectEqualStrings("Implement a client for the latest Stripe API, with retries and idempotency", f[0]);
     try std.testing.expectEqualStrings("What are the main changes in the latest Zig release", (try fallback(a, "What are the main changes in the latest Zig release? Name the version."))[0]);
+}
+
+test "a fallback query is omitted when its first word does not fit" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var words: std.ArrayList(u8) = .empty;
+    while (words.items.len < 121) try words.append(a, 'x');
+    try std.testing.expectEqual(@as(usize, 0), (try fallback(a, words.items)).len);
 }
 
 test "a progress clip keeps a character on the cap whole" {
