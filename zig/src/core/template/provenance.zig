@@ -18,8 +18,8 @@ pub const Str = struct {
     s: []const u8,
     safe: bool = false,
     spans: []const Span = &.{},
-    /// Only evaluator concatenations attach an arena-owned builder; slices remain immutable snapshots.
-    builder: ?*Buffer = null,
+    /// One-based index into the current evaluator's arena-owned builders; zero means none.
+    builder_id: u32 = 0,
 
     pub fn request(a: Allocator, s: []const u8) Allocator.Error!Str {
         return derived(a, s, s.len > 0);

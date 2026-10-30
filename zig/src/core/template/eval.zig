@@ -24,6 +24,7 @@ pub const Ctx = struct {
     vars: *const v.Map,
     out: *v.Buffer,
     depth: usize = 0,
+    builders: std.ArrayList(*v.Buffer) = .empty,
 
     fn resolve(c: *Ctx, name: []const u8) Error!Value {
         if (c.vars.get(name)) |x| return x;
@@ -41,21 +42,29 @@ fn isAcc(b: *const v.Buffer, s: v.Str) bool {
 
 fn join(c: *Ctx, l: v.Str, r: v.Str) Error!v.Str {
     const a = c.rt.a;
-    const current = if (l.builder) |b| (if (isAcc(b, l)) b else null) else null;
+    const current = if (l.builder_id > 0 and l.builder_id <= c.builders.items.len) current: {
+        const b = c.builders.items[l.builder_id - 1];
+        break :current if (isAcc(b, l)) b else null;
+    } else null;
     if (l.s.len < acc_min and current == null) {
         var out: v.Buffer = .{};
         try out.append(a, l);
         try out.append(a, r);
         return out.str();
     }
-    const b = current orelse try a.create(v.Buffer);
-    if (current == null) {
-        b.* = .{};
-        try b.appendRetained(a, l);
-    }
+    var id = l.builder_id;
+    const b = current orelse new: {
+        if (c.builders.items.len >= std.math.maxInt(u32)) return error.OutOfMemory;
+        const created = try a.create(v.Buffer);
+        created.* = .{};
+        try c.builders.append(a, created);
+        id = @intCast(c.builders.items.len);
+        try created.appendRetained(a, l);
+        break :new created;
+    };
     try b.appendRetained(a, r);
     var out = b.str();
-    out.builder = b;
+    out.builder_id = id;
     return out;
 }
 
@@ -513,4 +522,43 @@ pub fn eval(c: *Ctx, act: *Activation, e: *const ast.Expr) Error!Value {
 
 pub fn root(c: *Ctx, t: ast.Template) Error!void {
     _ = try exec(c, try enter(c, null, t.frame), t.body);
+}
+
+test "builder indices validate context and both snapshot slices" {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var vars: v.Map = .empty;
+    var first_out: v.Buffer = .{};
+    var second_out: v.Buffer = .{};
+    var first: Ctx = .{ .rt = .{ .a = a }, .vars = &vars, .out = &first_out };
+    var second: Ctx = .{ .rt = .{ .a = a }, .vars = &vars, .out = &second_out };
+    const input = try a.alloc(u8, acc_min);
+    @memset(input, 'x');
+    const original = try join(&first, try v.Str.request(a, input), .{ .s = "A" });
+    const newer = try join(&first, original, .{ .s = "B" });
+    const fork = try join(&first, original, .{ .s = "C" });
+    try t.expectEqual(@as(usize, 2), first.builders.items.len);
+    try t.expectEqual(@as(u8, 'A'), original.s[acc_min]);
+    try t.expectEqual(@as(u8, 'B'), newer.s[acc_min + 1]);
+    try t.expectEqual(@as(u8, 'C'), fork.s[acc_min + 1]);
+    try t.expectEqualSlices(v.Span, &.{.{ 0, acc_min }}, fork.spans);
+    const current = try join(&first, newer, .{ .s = "D" });
+    var different_spans = current;
+    different_spans.spans = &.{};
+    _ = try join(&first, different_spans, .{ .s = "E" });
+    try t.expectEqual(@as(usize, 3), first.builders.items.len);
+    const distinct = try a.dupe(u8, input);
+    @memset(distinct, 'y');
+    _ = try join(&second, try v.Str.request(a, distinct), .{ .s = "Q" });
+    const foreign = try join(&second, current, .{ .s = "F" });
+    try t.expectEqual(@as(usize, 2), second.builders.items.len);
+    try t.expectEqual(@as(u8, 'x'), foreign.s[0]);
+    try t.expectEqualSlices(v.Span, current.spans, foreign.spans);
+    var invalid = original;
+    invalid.builder_id = std.math.maxInt(u32);
+    const recovered = try join(&second, invalid, .{ .s = "G" });
+    try t.expectEqual(@as(usize, 3), second.builders.items.len);
+    try t.expectEqual(@as(u8, 'G'), recovered.s[acc_min + 1]);
 }

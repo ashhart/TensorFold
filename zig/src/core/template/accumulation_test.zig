@@ -286,3 +286,49 @@ test "identical request and literal spelling keeps distinct provenance" {
         try testing.expectEqual(wanted, covered);
     }
 }
+
+test "compact builder indices retain layout and never escape a render" {
+    const v = @import("value.zig");
+    if (@sizeOf(usize) == 8) {
+        try testing.expectEqual(@as(usize, 40), @sizeOf(v.Str));
+        try testing.expectEqual(@as(usize, 48), @sizeOf(v.Value));
+    }
+    const a = testing.allocator;
+    const body = try a.alloc(u8, 4096);
+    defer a.free(body);
+    @memset(body, 'x');
+    var context: std.json.ObjectMap = .empty;
+    defer context.deinit(a);
+    try context.put(a, "x", .{ .string = body });
+    const source = "{% macro rhs() %}{% set n = namespace(v='') %}" ++
+        "{% for i in range(32) %}{% set n.v = x ~ i %}{% endfor %}Z{% endmacro %}" ++
+        "{% set ns = namespace(a=x ~ '!') %}{% set saved = ns.a %}" ++
+        "{% set ns.a = ns.a ~ rhs() %}{{ saved }}|{{ ns.a }}";
+    var compiled = try template.compile(a, source, null);
+    defer compiled.deinit();
+    for (0..2) |_| {
+        const result = try template.renderProvenance(a, &compiled, .null, .null, .{ .object = context }, false, null);
+        defer a.free(result.s);
+        defer a.free(result.spans);
+        try testing.expectEqual(@as(u32, 0), result.builder_id);
+        try testing.expectEqual(2 * body.len + 4, result.s.len);
+        try testing.expectEqualSlices(u8, body, result.s[0..body.len]);
+        try testing.expectEqualStrings("!|", result.s[body.len..][0..2]);
+        try testing.expectEqualSlices(u8, body, result.s[body.len + 2 ..][0..body.len]);
+        try testing.expectEqualStrings("!Z", result.s[result.s.len - 2 ..]);
+        const expected = [_]template.Span{ .{ 0, body.len }, .{ body.len + 2, 2 * body.len + 2 } };
+        for (result.s, 0..) |_, i| {
+            var actual = false;
+            for (result.spans) |span| if (span[0] <= i and i < span[1]) {
+                actual = true;
+                break;
+            };
+            var wanted = false;
+            for (expected) |span| if (span[0] <= i and i < span[1]) {
+                wanted = true;
+                break;
+            };
+            try testing.expectEqual(wanted, actual);
+        }
+    }
+}
