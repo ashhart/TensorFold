@@ -75,7 +75,7 @@ def validate_response(client: Any, run: dict[str, Any], key: tuple, draft: bool)
                 math.isclose(value, expected, rel_tol=1e-9, abs_tol=1e-8), 'arithmetic_' + field)
     pieces = run.get('pieces')
     require(isinstance(pieces, list) and 4 <= len(pieces) <= TOKENS, 'stream_chunks')
-    require(all(isinstance(p, list) and len(p) == 2 and type(p[0]) in (int, float) and
+    require(all(isinstance(p, (tuple, list)) and len(p) == 2 and type(p[0]) in (int, float) and
                 math.isfinite(p[0]) and type(p[1]) is int and p[1] > 0 for p in pieces), 'chunk_shape')
     times = [p[0] for p in pieces]
     require(times == sorted(times) and times[0] == run['first'] and times[-1] == run['last'], 'chunk_order')
@@ -143,7 +143,42 @@ def run_client(args: argparse.Namespace, shared: Any) -> int:
     return 0 if client.report['qualified'] else 1
 
 
-def self_test(shared: Any) -> dict[str, Any]:
+def shared_stream_test(shared: Any, tools: Path) -> dict[str, Any]:
+    """Run the unchanged HTTP streaming implementation through synthetic SSE without a network."""
+    import io
+    import itertools
+    import tempfile
+    from unittest.mock import patch
+
+    ids = list(range(TOKENS))
+    token_digest = shared.token_hash(ids)
+    chunks = [{'choices': [{'delta': {'content': text}}]}
+              for text in ('synthetic ', 'SSE ', 'tuple ', 'probe')]
+    chunks.append({'choices': [], 'usage': {'prompt_tokens': 100, 'completion_tokens': TOKENS,
+                   'prompt_tokens_details': {'cached_tokens': 0}},
+                   'tensorfold': {'token_ids': ids, 'token_sha256': token_digest, 'token_sha': token_digest[:12]}})
+    payload = b''.join(('data: ' + json.dumps(chunk) + '\n\n').encode() for chunk in chunks)
+    payload += b'data: [DONE]\n\n'
+    with tempfile.TemporaryDirectory() as temporary:
+        args = argparse.Namespace(url='http://synthetic.invalid', output=Path(temporary) / 'unused.json',
+                                  tools=tools, model='synthetic', api_key_env=None)
+        client = shared.Client(args)
+        client.prompt_counts = {'multiturn': 100}
+        with patch.object(shared.urllib.request, 'urlopen', return_value=io.BytesIO(payload)) as opened:
+            with patch.object(shared.time, 'perf_counter', side_effect=itertools.count(10.0, 0.25)):
+                run = client.stream('multiturn', 0.0, 1234, True)
+        require(opened.call_count == 1, 'synthetic_stream_request_count')
+        require(all(isinstance(piece, tuple) for piece in run['pieces']), 'shared_stream_tuple_regression')
+        validate_response(client, run, KEYS[0], True)
+        serialized = json.loads(json.dumps(run))
+        require(all(isinstance(piece, list) for piece in serialized['pieces']), 'json_list_regression')
+        validate_response(client, serialized, KEYS[0], True)
+        require(fingerprint(run) == fingerprint(serialized), 'stream_roundtrip_fingerprint')
+    return {'actual_shared_stream_tuple_chunks': 4, 'json_list_roundtrip_validated': True,
+            'synthetic_sse_only_no_network': True}
+
+
+def self_test(shared: Any, tools: Path) -> dict[str, Any]:
     """Exercise the complete eighteen-response schedule and malformed evidence offline."""
     import copy
 
@@ -182,7 +217,7 @@ def self_test(shared: Any) -> dict[str, Any]:
                                                      hashlib.sha256(b'').digest()).hexdigest(),
                     'sent': sent, 'first': sent + 1, 'last': sent + 3, 'completed': sent + 3.1,
                     'ttft_s': 1.0, 'decode_tps': 127.5, 'elapsed_s': sent + 3.1 - sent,
-                    'pieces': [[at, 1] for at in times], 'chunk_offsets_s': [at - sent for at in times]}
+                    'pieces': [(at, 1) for at in times], 'chunk_offsets_s': [at - sent for at in times]}
 
     fake = Fake()
     collect(fake)
@@ -191,7 +226,8 @@ def self_test(shared: Any) -> dict[str, Any]:
     valid = fake.report['pairs'][0]['drafted']
     failures = ({'cached_tokens': 1}, {'tokens': 255}, {'token_sha256': 'f' * 64},
                 {'output_sha256': 'f' * 64}, {'complete': False}, {'first': valid['last']},
-                {'chunk_offsets_s': []}, {'draft': False}, {'token_ids': [True] * TOKENS})
+                {'chunk_offsets_s': []}, {'draft': False}, {'token_ids': [True] * TOKENS},
+                {'pieces': [(1.0, True)] * 4}, {'pieces': [(1.0, 1, 1)] * 4})
     for changes in failures:
         try:
             validate_response(fake, {**copy.deepcopy(valid), **changes}, KEYS[0], True)
@@ -218,7 +254,7 @@ def self_test(shared: Any) -> dict[str, Any]:
     else:
         raise AssertionError('mismatch_accepted')
     return {'status': 'passed', 'responses': 18, 'keys': 9, 'malformed_rejections': len(failures),
-            'complete_pair_captured_before_mismatch_stop': True}
+            'complete_pair_captured_before_mismatch_stop': True, **shared_stream_test(shared, tools)}
 
 
 def main() -> int:
@@ -236,7 +272,9 @@ def main() -> int:
     args = parser.parse_args()
     shared = load_shared(args.shared_client.resolve(strict=True))
     if args.self_test:
-        print(json.dumps(self_test(shared), sort_keys=True))
+        if args.tools is None:
+            parser.error('--tools is required to test the actual shared streaming implementation')
+        print(json.dumps(self_test(shared, args.tools.resolve(strict=True)), sort_keys=True))
         return 0
     if any(value is None for value in (args.url, args.output, args.tools, args.block, args.side)):
         parser.error('--url, --output, --tools, --block 0 and --side P are required')

@@ -13,8 +13,8 @@ from typing import Any
 HERE = Path(__file__).resolve().parent
 BASE = 'f350cd3ea253a042e205746928271f9d8f71a82d'
 CANDIDATE = '8d00b490f5ddf45721546e9b9816a083a46e5fa2'
-PROTOCOL_SHA256 = '9ca41d2821a178fc1d4324c06f028180ef0dddcde2c609e43ca14792ee19c29c'
-PARITY_SHA256 = '86df3c9474abab6ec5a0443f035d727c1811e42660072c06677c587b3fb5f977'
+PROTOCOL_SHA256 = '175a60d4809e4be585e555b991d86ae7f7c40126db304474b3a9d08bc6c1c2a2'
+PARITY_SHA256 = 'c2ddeefbdc938118f229c60c088dbbaee1da230edf4624002a1dab787a06e5e5'
 PINS = {
     'decode-equivalence/client.py': '0fcbb2f52a94a88e74a34bacb232ed0d729a72e5261136280277f4b37ce2db0b',
     'decode-equivalence/compare.py': '3f32ac9f64dabedb967912eb6876e2cc892efbd7cbb8749b3e05c9d644d12a02',

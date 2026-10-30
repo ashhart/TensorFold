@@ -115,5 +115,17 @@
     "decode-equivalence/protocol.json": "f86dae04e9f80398d198204380048b5efeaebf828bf71866bf0c077d313ff181",
     "model/client.py": "e3e531b83e5099c223d984a9f5b7879df6e856e77ac7e6fc4274c7dc177bde92"
   },
-  "parity_client_sha256": "86df3c9474abab6ec5a0443f035d727c1811e42660072c06677c587b3fb5f977"
+  "parity_client_sha256": "c2ddeefbdc938118f229c60c088dbbaee1da230edf4624002a1dab787a06e5e5",
+  "aborted_prequalification_attempt": {
+    "protocol_sha256": "9ca41d2821a178fc1d4324c06f028180ef0dddcde2c609e43ca14792ee19c29c",
+    "parity_client_sha256": "86df3c9474abab6ec5a0443f035d727c1811e42660072c06677c587b3fb5f977",
+    "inference_responses": 1,
+    "completed_parity_pairs": 0,
+    "decode_responses": 0,
+    "statistical_observations": 0,
+    "data_reused": false,
+    "reason": "The parity client required list chunks, but the unchanged shared streaming client emits tuple chunks in memory. JSON converts these to lists. Validation stopped before the first plain request or any paired decode observation.",
+    "correction": "Accept tuple or list pairs with identical shape/type/arithmetic checks; test actual shared Client.stream using synthetic SSE and JSON roundtrip.",
+    "restart": "Use a fresh qualification session and all18 parity responses plus all480 decode responses. Fixed schedule, sample size, measurement and statistical rules are unchanged."
+  }
 }
