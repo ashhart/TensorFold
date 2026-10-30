@@ -46,7 +46,14 @@ pub const Target = struct {
         replays: ?*const fn (ptr: *anyopaque, list: []const Final) anyerror!void = null,
         /// Engram reads ahead of the next window (TF_DSV41_ENGRAM_WARM); reads only, window bits are unaffected.
         warm: ?*const fn (ptr: *anyopaque, asks: []const Warm) void = null,
+        /// After `prefill`: the prompt rows the slot took from kept state (its first row computed is this one).
+        resumed: ?*const fn (ptr: *anyopaque, slot: u32) u64 = null,
     };
+
+    /// The prompt rows the slot's last `prefill` took from kept state (0: none, or a target that keeps none).
+    pub fn resumedRows(t: Target, slot: u32) u64 {
+        return if (t.vtable.resumed) |f| f(t.ptr, slot) else 0;
+    }
 
     /// A slot's whole prompt whose rows but the last are in (its `finish` / `tail` follows).
     pub const Final = struct { slot: u32, ids: []const u32 };
