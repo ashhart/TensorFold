@@ -136,7 +136,11 @@ pub const Server = struct {
             return error.InvalidVisionMarkers;
         };
         srv.video_decoder = @import("input_types.zig").decodes(srv.info.vision); // no decoder: video parts are a 400, never a 500
-        try @import("speech_voices.zig").start(srv, gpa, io, config);
+        try @import("audio.zig").bindLocator(&srv.info, text);
+        srv.voices = .{ .gpa = gpa, .io = io, .dir = config.voice.dir };
+        if (srv.info.speech == null and (config.voice.dir != null or config.voice.inline_voices or config.voice.manage)) return error.VoicesRequireSpeech;
+        if (config.voice.dir) |dir| try srv.voices.load(dir);
+        _ = try srv.voices.select(srv.arena.allocator(), config.voice.default, "default");
         if (!srv.info.capability(.text_generation)) {
             if (config.cortheon) return error.CortheonRequiresTextGeneration;
             return srv;
