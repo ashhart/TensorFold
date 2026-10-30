@@ -192,6 +192,11 @@ const Loader = struct {
                 .count = r.experts.count,
                 .width = r.experts.width,
                 .dims = r.experts.dims,
+                // a shared expert of another width than the stack: its own projections, run beside the routed launch
+                .shared = if (r.experts.separate) |s| hip.moe.Shared{
+                    .gate_up = try quant.view(try quant.upload(u, .{ .mlx = s.gate_up }), false),
+                    .down = try quant.view(try quant.upload(u, .{ .mlx = s.down }), false),
+                } else null,
             },
         };
     }
