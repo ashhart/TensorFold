@@ -303,6 +303,10 @@ pub const Mtp = struct {
 
     /// The layer over `rows` rows at slots pos0..: d.ids their tokens, d.hin their states; x gets their normed outputs.
     pub fn layer(d: *Mtp, ctx: *Ctx, rows: usize, pos0: u64, pass: Pass) !void {
+        return d.layerMode(ctx, rows, pos0, pass, true);
+    }
+
+    pub fn layerMode(d: *Mtp, ctx: *Ctx, rows: usize, pos0: u64, pass: Pass, propose: bool) !void {
         const e = d.e;
         const g = e.g;
         const w = &d.w;
@@ -320,6 +324,10 @@ pub const Mtp = struct {
         try d.projQkv(rows);
         try d.normRope(d.qraw, w.q_norm, d.q, g.q_heads, 2 * aw, 2 * head_dim, p0, step, rows);
         try d.normRope(d.kraw, w.k_norm, d.kb, g.kv_heads, kw, head_dim, p0, step, rows);
+        if (!propose) {
+            try d.putRing(ctx, rows, p0);
+            return;
+        }
         const heads: c_int = @intCast(g.q_heads);
         const kvh: c_int = @intCast(g.kv_heads);
         const cap: c_int = @intCast(d.capacity);
@@ -332,11 +340,15 @@ pub const Mtp = struct {
         try d.norm(d.h, d.r, w.post_norm, d.x, rows);
         try d.routed(w.mlp.moe.router, w.mlp.moe.experts, d.x, d.r, rows);
         try d.norm(d.h, d.r, w.norm, d.x, rows);
-        if (pass == .ring) try e.run(d.ring_fns.ring_put, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ d.kb, d.vb, d.ringK(ctx), d.ringV(ctx), @as(c_int, @intCast(kw)), p0, cap });
+        if (pass == .ring) try d.putRing(ctx, rows, p0);
+    }
+
+    fn putRing(d: *Mtp, ctx: *Ctx, rows: usize, p0: c_longlong) !void {
+        try d.e.run(d.ring_fns.ring_put, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ d.kb, d.vb, d.ringK(ctx), d.ringV(ctx), @as(c_int, @intCast(d.kvWidth())), p0, @as(c_int, @intCast(d.capacity)) });
     }
 
     /// Rows [first, first + n) of x through the target's head: their logits and best tokens' words, row 0's pick.
-    fn draw(d: *Mtp, first: usize, n: usize, cands: bool) !void {
+    pub fn draw(d: *Mtp, first: usize, n: usize, cands: bool) !void {
         const e = d.e;
         try d.proj(e.head, d.x + first * e.g.hidden * 2, d.logits, n);
         try e.run(e.fns.argmax, .{ 1, 1, 1 }, .{ 1024, 1, 1 }, .{ d.logits, @as(c_int, @intCast(e.g.vocab)), d.tok });
@@ -344,7 +356,7 @@ pub const Mtp = struct {
     }
 
     /// The drawn token, and the first `n` rows' candidates by rank, after a draw.
-    fn fetch(d: *Mtp, n: usize, cands: [][ranks]u32) !u32 {
+    pub fn fetch(d: *Mtp, n: usize, cands: [][ranks]u32) !u32 {
         const e = d.e;
         const st = d.staged.bytes;
         try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(st.ptr + tok_at, d.tok, 4, e.stream.handle), "cuMemcpyDtoHAsync");
@@ -366,52 +378,10 @@ pub const Mtp = struct {
 
     /// Target rows [start, start + n) from the tap ring with the token after each; `rows`, when given, picks them.
     pub fn absorb(d: *Mtp, ctx: *Ctx, tap_ring: u64, start_: u64, n_: usize, rows_: ?[]const u32, follow: []const u32) !void {
-        return d.absorbRole(ctx, tap_ring, start_, n_, rows_, follow, true);
+        return d.absorbRole(ctx, tap_ring, start_, n_, rows_, follow, true, true);
     }
 
-    pub fn absorbRole(d: *Mtp, ctx: *Ctx, tap_ring: u64, start_: u64, n_: usize, rows_: ?[]const u32, follow: []const u32, prompt: bool) !void {
-        const previous = d.projection_role;
-        defer d.projection_role = previous;
-        d.projection_role = if (prompt) .prompt else .live;
-        const e = d.e;
-        const g = e.g;
-        var start = start_;
-        var n = n_;
-        var fi: usize = 0;
-        if (follow.len < n) return error.BadDraftRows;
-        if (rows_) |rs| if (rs.len != n or n > most_window) return error.BadDraftRows;
-        if (start < ctx.end) ctx.end = start;
-        if (start > ctx.end) ctx.begin = start; // a gap (a prompt restored from a cache): the context starts here
-        const held = engine.tap_rows - engine.max_rows; // the target's ring holds this many rows behind its newest chunk
-        if (n > held) {
-            fi = n - held;
-            start += n - held;
-            n = held;
-            ctx.begin = start;
-        }
-        ctx.end = start;
-        while (n > 0) {
-            const rows = @min(n, max_rows);
-            if (rows_) |rs| {
-                var tr: TapRows = .{ .n = @intCast(rows), .rows = @splat(0) };
-                for (rs, 0..) |r, i| tr.rows[i] = @intCast(r);
-                try e.run(d.ring_fns.gather_rows, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ tap_ring, @as(c_int, engine.tap_rows), @as(c_longlong, @intCast(start)), tr, @as(c_int, @intCast(g.hidden)), d.taps_in });
-            } else try e.run(d.ring_fns.gather_taps, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ tap_ring, @as(c_int, engine.tap_rows), @as(c_longlong, @intCast(start)), @as(c_int, @intCast(g.hidden)), d.taps_in });
-            try d.norm(d.taps_in, 0, e.final_norm, d.hin, rows); // the target's final norm: the rows the head read
-            try d.putIds(follow[fi..][0..rows]);
-            try d.layer(ctx, rows, start, .ring);
-            start += rows;
-            n -= rows;
-            fi += rows;
-            ctx.end = start;
-            // the newest row: its state kept for the drafts, its best tokens drawn
-            try ctx.last.copyFrom(0, d.x + (rows - 1) * g.hidden * 2, g.hidden * 2, e.stream.handle);
-            try d.draw(rows - 1, 1, true);
-        }
-        var cands: [1][ranks]u32 = undefined;
-        ctx.cands[0] = try d.fetch(1, &cands);
-        if (d.trees) ctx.cands = cands[0];
-    }
+    pub const absorbRole = @import("cuda_mtp_absorb.zig").absorbRole;
 
     /// `depth` drafts after `pending` at pos0 (the pending token's slot): a chain, or the planner's tree of lanes.
     pub fn hold(d: *Mtp, ctx: *Ctx, pending: u32, pos0: u64, depth: usize, lanes_: ?*const lanes.shape.Shape) !void {
@@ -556,8 +526,8 @@ pub const Mtp = struct {
         if (it.features.space != .device or it.features.dtype != .bf16) return error.UnsupportedFeatures;
         // the target's features: its ring, `offset` the first row's position (cuda_native.zig's featuresFn)
         if (it.rows) |rs| {
-            try d.absorbRole(ctx, it.features.buffer, it.features.offset, rs.len, rs, it.follow, it.prompt);
-        } else try d.absorbRole(ctx, it.features.buffer, it.features.offset, it.features.rows, null, it.follow, it.prompt);
+            try d.absorbRole(ctx, it.features.buffer, it.features.offset, rs.len, rs, it.follow, it.prompt, it.propose);
+        } else try d.absorbRole(ctx, it.features.buffer, it.features.offset, it.features.rows, null, it.follow, it.prompt, it.propose);
     }
 
     fn holdFn(p: *anyopaque, items: []const dr.Hold) anyerror!void {

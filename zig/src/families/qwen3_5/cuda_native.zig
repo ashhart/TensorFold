@@ -187,6 +187,10 @@ pub fn laneFacts(window: u32, verify: u32) lanes.Model {
     return .{ .exact_width = window, .hidden_rows = true, .batch_rows = verify, .max_streams = E.max_segs, .streams_exact = true, .copy_match = 5, .context_copies = true, .lone_cost_tile = 16 };
 }
 
+test "zero grant: Qwen MTP and DFlash wrappers keep their absorbed history through a long skip" {
+    try lanes.shared_draft_check.check(laneFacts(16, 32), true);
+}
+
 fn reserve(p: *anyopaque, streams: u32) anyerror!void {
     const l: *Lanes = @ptrCast(@alignCast(p));
     try reservation.target(E.Cache, E.Part, l, streams); // with a pool: the first window, the shapes on its lanes
@@ -593,4 +597,8 @@ test "Qwen share faults: --parallel N admits N streams at once with every stream
 
 test "Qwen stepped prefill: cancel between host iterations retains only the last completed cut" {
     try @import("cuda_prefill_test.zig").cancelled(Lanes, Lanes.backend);
+}
+
+test {
+    _ = @import("cuda_mtp_budget.zig");
 }
