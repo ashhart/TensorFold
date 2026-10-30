@@ -63,3 +63,46 @@ test "lane activity: a real blocked prefill is owned until completion and idle s
     stopped = true;
     try t.expectEqual(@as(u32, 0), c.active.load(.acquire));
 }
+const Failed = struct {
+    calls: u32 = 0,
+    err: ?anyerror = null,
+    done: std.atomic.Value(bool) = .init(false),
+    message: [32]u8 = undefined,
+    len: usize = 0,
+    fn heard(ctx: *anyopaque, err: anyerror) void {
+        const f: *Failed = @ptrCast(@alignCast(ctx));
+        f.calls += 1;
+        f.err = err;
+    }
+    fn explain(_: ?*anyopaque, _: anyerror) ?[]const u8 {
+        return "a family's words";
+    }
+    fn event(ctx: *anyopaque, _: api.Id, ev: *const api.Event) void {
+        const f: *Failed = @ptrCast(@alignCast(ctx));
+        if (ev.* != .finished) return;
+        f.len = @min(f.message.len, ev.finished.message.len);
+        @memcpy(f.message[0..f.len], ev.finished.message[0..f.len]);
+        f.done.store(true, .release);
+    }
+};
+test "lane activity: a failed round reaches the failure hook while its streams keep the error's name" {
+    var cfg = try lanes.Config.init(t.allocator, .{ .exact_width = 8, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(t.allocator);
+    var fake: lanes.fake.Fake = .{ .gpa = t.allocator, .fail_round = 3 };
+    defer fake.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(t.allocator, &cfg, fake.backend(), clock.clock());
+    defer core.deinit();
+    var f: Failed = .{};
+    var host = api.LaneHost.init(t.allocator, t.io, &core, .{ .lanes = 1 });
+    host.explain = .{ .text = Failed.explain };
+    host.failure = .{ .ctx = &f, .call = Failed.heard };
+    try host.start();
+    defer host.stop();
+    const request: api.Request = .{ .prompt = &.{ 2, 7, 1, 8 }, .max_tokens = 48 };
+    try host.engine().submit(1, &request, .{ .ctx = &f, .event = Failed.event });
+    try wait(&f.done);
+    try t.expectEqualStrings("GpuFailed", f.message[0..f.len]);
+    try t.expectEqual(@as(u32, 1), f.calls);
+    try t.expectEqual(error.GpuFailed, f.err.?);
+}
