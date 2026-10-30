@@ -30,6 +30,7 @@ const lfm2_argmax = @import("metal_lfm2_argmax.zig");
 const lfm2_streams = @import("metal_lfm2_streams.zig");
 const lfm2_tap = @import("metal_lfm2_tap.zig");
 const lfm2_controls = @import("metal_lfm2_controls.zig");
+const llama_k = @import("metal_llama_all.zig");
 const g = contract.gates;
 const usage = "usage: tf-kernel-contract [--only TEXT] [--no-gates] [--no-limits] [--offline DIR] [--seed N] [--repro] [--rotary-long] [--rotary-accuracy FILE]";
 
@@ -343,6 +344,9 @@ pub fn main(init: std.process.Init) !u8 {
     };
     var h3_list: std.ArrayList(*h3_k.H3) = .empty;
     defer for (h3_list.items) |x| x.deinit();
+    var llama_set = llama_k.Set{};
+    defer llama_set.deinit(a);
+    try llama_set.collect(a, device, queue, tensor, &kernels, o.only);
     if (tensor) for (std.enums.values(h3_k.Which)) |w| {
         if (!wanted(o, h3_k.spec(w).name)) continue;
         const x = try a.create(h3_k.H3);
@@ -433,6 +437,7 @@ pub fn main(init: std.process.Init) !u8 {
         lim += try gemma.limits(a, device, o.only);
         lim += try gemma_embed.limits(a, device, o.only);
         lim += try gemma_mixed.limits(a, device, o.only);
+        lim += try llama_k.limits(a, device, tensor, o.only);
     }
     const t2 = std.Io.Clock.awake.now(init.io);
     const ms = struct {
