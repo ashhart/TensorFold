@@ -141,7 +141,7 @@ pub const Policy = struct {
         const conf: u64 = @bitCast(p.mtp.confidence);
         const pack = [_]u32{
             @backingInt(p.matrix), @backingInt(p.attention), @backingInt(p.kernels), @backingInt(p.graphs),
-            @backingInt(p.stream), @backingInt(p.gemm),      @backingInt(p.fuse),   @backingInt(p.sparse),
+            @backingInt(p.stream), @backingInt(p.gemm),      @backingInt(p.fuse),    @backingInt(p.sparse),
         };
         var nibbles: [2]u32 = .{ 0, 0 };
         for (pack, 0..) |v, i| nibbles[i / 8] |= v << @intCast(4 * (i % 8));
