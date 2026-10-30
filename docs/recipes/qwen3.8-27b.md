@@ -21,7 +21,9 @@ A lone lane request may propose up to 15/31/63 tree nodes at 16/32/64 rows, incl
 by expected accepted tokens per measured millisecond in the common lane allocator, using its calibrated landing rates.
 The proposal keeps every candidate available until that decision. Copies compete for the same verification window;
 `TF_QWEN27_COPIES=0` disables them. The narrow tensor-unit default keeps copies off.
-The masked drafter block is unchanged. Wide lone streams use the lane loop; `TF_QWEN27_LANES=1` also selects it at 16 rows.
+The masked drafter block is unchanged. Both device classes use the lane loop by default, including at 16 rows.
+`TF_QWEN27_LANES=0` selects the legacy greedy shortcut; sampled requests retain the shared lane loop.
+Startup names the selected lone loop and width beside the lane window and copy policy.
 `tf-qwen27-bench --model DIR --widths costs` measures rows 1 through 64, with GPU and wall time including keep.
 The wall price excludes the diagnostic's host logit hash and scan.
 

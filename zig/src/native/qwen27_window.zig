@@ -54,9 +54,9 @@ fn flag(value: ?[]const u8, fallback: bool, comptime bad: anyerror) !bool {
     if (std.mem.eql(u8, v, "1")) return true;
     return bad;
 }
-/// Wide tensor-unit requests use lanes; explicit checked overrides select either loop.
-pub fn serial(tensor_units: bool, window: u32, value: ?[]const u8) !bool {
-    return !try flag(value, !(tensor_units and window == 16), error.BadQwenLanes);
+/// Both device classes use lanes by default; checked overrides retain the legacy greedy shortcut.
+pub fn serial(_: bool, _: u32, value: ?[]const u8) !bool {
+    return !try flag(value, true, error.BadQwenLanes);
 }
 pub fn serialPolicy(tensor_units: bool, value: ?[]const u8) !bool {
     return serial(tensor_units, 16, value);
@@ -77,7 +77,7 @@ test "qwen27 window: unknown switches refuse by their startup variable names" {
     try std.testing.expectEqualStrings("TF_QWEN27_COPIES must be 0 or 1", problem(error.BadQwenCopies).?);
     try std.testing.expect(std.mem.startsWith(u8, problem(error.BadQwenWindow).?, "TF_QWEN27_WINDOW"));
     try std.testing.expect(std.mem.startsWith(u8, problem(error.BadQwenLanes).?, "TF_QWEN27_LANES"));
-    try std.testing.expect(try serialPolicy(true, null));
+    try std.testing.expect(!try serialPolicy(true, null));
     try std.testing.expect(!try serialPolicy(false, null));
     try std.testing.expect(try serialPolicy(false, "0"));
     try std.testing.expect(!try serialPolicy(true, "1"));
@@ -95,12 +95,13 @@ test "qwen27 window: startup reports the effective lone width beside the lane po
     var buf: [160]u8 = undefined;
     try std.testing.expectEqualStrings("lone loop=serial width=16; lane window=64, lane copies=on", try describe(&buf, true, 64, true, true));
     try std.testing.expectEqualStrings("lone loop=lanes width=32; lane window=32, lane copies=off", try describe(&buf, false, 32, true, false));
+    try std.testing.expectEqualStrings("lone loop=lanes width=16; lane window=16, lane copies=off", try describe(&buf, try serial(true, 16, null), 16, true, false));
     try std.testing.expect(std.mem.startsWith(u8, try describe(&buf, false, 64, false, false), "lone loop=plain width=1;"));
 }
 
-test "qwen27 window: wide tensor lone rounds reach the checked lane policy" {
+test "qwen27 window: all widths use lanes by default and retain the checked serial override" {
     for ([_]u32{ 16, 32, 64 }) |width| {
-        try std.testing.expectEqual(width == 16, try serial(true, width, null));
+        try std.testing.expect(!try serial(true, width, null));
         try std.testing.expect(!try serial(false, width, null));
         try std.testing.expect(!try serial(true, width, "1"));
         try std.testing.expect(try serial(true, width, "0"));
