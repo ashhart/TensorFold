@@ -109,6 +109,7 @@ pub fn build(b: *std.Build) void {
         @import("zig/build/fsr.zig").deviceSteps(b, budget_mods.metal, budget_mods.engine, budget_mods.sources);
         @import("zig/build/flashnext_budget.zig").compileHost(b, budget_mods.metal, budget_mods.engine, budget_mods.lanes);
         @import("zig/build/residency_host.zig").compileHost(b, budget_mods.metal, budget_mods.engine, budget_mods.lanes);
+        @import("zig/build/dsv41_metal.zig").steps(b, budget_mods.metal, budget_mods.sources, test_step);
     }
     // every tracked path checks out on Windows too
     const names_run = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/portable_names.zig"), .target = target }) }));
