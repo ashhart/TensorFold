@@ -183,3 +183,17 @@ test "qwen27 window: an early keep refuses prompts, unrelated rounds and absent 
     early_runner.accepted_chain = true;
     try std.testing.expectError(error.RoundNotReady, early_runner.prepareDeviceKeep(&early_round, undefined, undefined, undefined));
 }
+
+test "qwen27 window: tensor-unit admission publishes the first token before preparing drafts" {
+    const native = @import("qwen27_lanes.zig");
+    var runner: tf.qwen27.decode_round.Runner = undefined;
+    var backend: native.Metal = undefined;
+    backend.runner = &runner;
+    for ([_]u32{ 1, 16 }) |slots| {
+        runner.slots = slots;
+        for ([_]bool{ false, true }) |units| {
+            backend.tensor_units = units;
+            try std.testing.expectEqual(units, backend.backend().first_before_draft);
+        }
+    }
+}
