@@ -141,7 +141,9 @@ fn openFamily(comptime S: type, a: Allocator, gpa: Allocator, io: std.Io, o: api
     h.backend.halt = &stopping;
     h.backend.started = chainStopHandlers;
     try h.backend.measure();
-    if (h.backend.facts().exact_width > 1) h.backend.streams = @max(1, o.lanes); // drafted windows: up to --parallel streams a round
+    const seq_only = lane.Xpu(S).seq_only;
+    // drafted windows, or one-row windows on sequences: up to --parallel streams a round
+    if (h.backend.facts().exact_width > 1 or seq_only) h.backend.streams = @max(1, o.lanes);
     const facts = h.backend.facts();
     h.cfg = try lanes.Config.init(gpa, facts, facts.exact_width, facts.exact_width - 1);
     h.clock = .{ .io = io };
@@ -149,16 +151,20 @@ fn openFamily(comptime S: type, a: Allocator, gpa: Allocator, io: std.Io, o: api
     const note = try S.note(a, h.engine);
     h.startup = try std.fmt.allocPrint(gpa, "Intel GPU engine: {s}, {d:.2} GB on the device, context {d}{s}; {d} stream(s) a round on the lane core, sampling on the host", .{ h.ctx.name(), @as(f64, @floatFromInt(xpu.rt.alloc_now)) / 1e9, window, note, h.backend.streams });
     const drafted = facts.exact_width > 1;
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = S.name, .lanes = h.backend.streams, .context_window = @intCast(window), .context_fitted = true, .startup = h.startup, .prefill_step = if (drafted) S.promptRows(h.engine) else 0 });
+    const sequenced = drafted or seq_only;
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = S.name, .lanes = h.backend.streams, .context_window = @intCast(window), .context_fitted = true, .startup = h.startup, .prefill_step = if (sequenced) S.promptRows(h.engine) else 0 });
     // kept prompt states (with sequences): --prompt-cache-gib, else 4 GiB, inside the device memory left past 2 GiB
     const want: u64 = @intFromFloat((o.prompt_cache_gib orelse 4) * (1 << 30));
     // Sysman only when a cache can use it: zesInit faults inside the driver under WSL2 (Iris Xe, NEO 23.43)
-    const free = if (drafted) freeMemory(&h.ctx) else 0;
+    const free = if (sequenced) freeMemory(&h.ctx) else 0;
     const budget: u64 = if (free > 2 << 30) @min(want, free - (2 << 30)) else 0;
     h.cache = null;
-    if (drafted and budget > 0) {
-        h.cache = api.prompt_cache.Store.init(gpa, h.backend.snapshots(), .{ .lookahead = 1, .planned = true }, budget);
+    if (sequenced and budget > 0) {
+        // a head keys row at-1 with token at (lookahead 1); without one, states sit on the 64-row prompt grid
+        const rules: api.prompt_cache.Rules = if (drafted) .{ .lookahead = 1, .planned = true } else .{ .planned = true, .grid = S.promptRows(h.engine) };
+        h.cache = api.prompt_cache.Store.init(gpa, h.backend.snapshots(), rules, budget);
         h.host.cache = &h.cache.?;
+        std.log.info("{s}: prompt cache of {d:.2} GiB ({d:.2} GiB free on the device)", .{ S.name, @as(f64, @floatFromInt(budget)) / (1 << 30), @as(f64, @floatFromInt(free)) / (1 << 30) });
     }
     h.host.memory = .{ .read = readMemory };
     h.host.explain = .{ .text = lane.explain };

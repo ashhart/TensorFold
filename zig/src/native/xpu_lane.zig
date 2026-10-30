@@ -47,9 +47,13 @@ pub fn Xpu(comptime S: type) type {
         const Self = @This();
         /// The family's engine has drafted rounds (Nemotron: verifyRows, keepRows, draftKept, draftFirst).
         const has_head = @hasDecl(S.Engine, "verifyRows");
+        /// The family's engine keeps one sequence a stream (newSeq, bind, prompt states); with a head it also drafts.
+        const has_seq = @hasDecl(S.Engine, "Sequence");
+        /// Sequences without a head (LFM3): up to `streams` one-row windows a round, a prompt cache, no drafts.
+        pub const seq_only = has_seq and !has_head;
         /// A stream's sequence, its held drafts, its last window's unkept rows and where that window started.
         const Lane = struct { seq: *Seq, held: [max_rows]u32 = undefined, held_n: usize = 0, pending: ?u32 = null, start: u32 = 0 };
-        const Seq = if (has_head) S.Engine.Sequence else void;
+        const Seq = if (has_seq) S.Engine.Sequence else void;
         gpa: std.mem.Allocator,
         e: *S.Engine,
         logits: []f32,
@@ -78,7 +82,7 @@ pub fn Xpu(comptime S: type) type {
         }
 
         pub fn deinit(self: *Self) void {
-            if (comptime has_head) {
+            if (comptime has_seq) {
                 var it = self.lane_of.valueIterator();
                 while (it.next()) |l| self.e.freeSeq(l.seq);
             }
@@ -112,6 +116,7 @@ pub fn Xpu(comptime S: type) type {
 
         /// What the round loop reads at setup: one stream; with a head, drafted windows of up to 16 rows.
         pub fn facts(self: *const Self) lanes.Model {
+            if (comptime seq_only) return .{ .exact_width = 1, .gpu_tokens = false, .mtp = false, .speculate = false, .speculate_early = false, .hidden_rows = self.streams > 1, .batch_rows = self.streams, .max_streams = self.streams };
             if (!self.drafting()) return .{ .exact_width = 1, .gpu_tokens = false, .mtp = false, .speculate = false, .speculate_early = false, .max_streams = 1 };
             return .{
                 .exact_width = max_rows,
@@ -131,7 +136,7 @@ pub fn Xpu(comptime S: type) type {
 
         /// A one-row round on the decode step (a one-row window's bits): greedy on the device, else drawn on the host.
         fn stepOne(self: *Self, token: u32, sampling: ?lanes.Sampling, position: u64) !u32 {
-            if (comptime !has_head) unreachable;
+            if (comptime !has_seq) unreachable;
             try self.e.stepRow(token);
             const greedy = if (sampling) |s| s.temperature <= 0 else true;
             if (greedy) return self.e.argmax();
@@ -141,7 +146,7 @@ pub fn Xpu(comptime S: type) type {
 
         /// The window's rows drawn: greedy on the device, else each row's logits drawn at its keyed position.
         fn drawRows(self: *Self, rows: usize, sampling: ?lanes.Sampling, positions: []const u64, out: []u32) !void {
-            if (comptime !has_head) unreachable;
+            if (comptime !has_seq) unreachable;
             const greedy = if (sampling) |s| s.temperature <= 0 else true;
             if (greedy) {
                 var g: [max_rows]i32 = undefined;
@@ -150,13 +155,14 @@ pub fn Xpu(comptime S: type) type {
                 return;
             }
             const v = self.e.vocab();
-            try self.e.rowLogits(self.row_logits[0 .. rows * v]);
-            for (0..rows) |r| out[r] = try draw(self.gpa, self.row_logits[r * v ..][0..v], sampling.?, positions[r]);
+            const all = if (rows == 1) self.logits else self.row_logits[0 .. rows * v];
+            try self.e.rowLogits(all);
+            for (0..rows) |r| out[r] = try draw(self.gpa, all[r * v ..][0..v], sampling.?, positions[r]);
         }
 
         /// The stream's lane with its sequence bound to the model.
         fn bound(self: *Self, s: *const lanes.Stream) !*Lane {
-            if (comptime !has_head) unreachable;
+            if (comptime !has_seq) unreachable;
             const l = self.lane_of.getPtr(s) orelse return error.UnknownStream;
             self.e.bind(l.seq);
             return l;
@@ -203,7 +209,7 @@ pub fn Xpu(comptime S: type) type {
             }
             const ids = s.prompt();
             if (ids.len == 0 or ids.len + s.max_new + 1 > e.max_len) return error.PromptTooLong;
-            if (comptime has_head) if (self.drafting()) {
+            if (comptime has_seq) if (seq_only or self.drafting()) {
                 // the stream's sequence (the engine's own while free), then the prompt in prompt windows
                 const gop = try self.lane_of.getOrPut(self.gpa, s);
                 if (gop.found_existing) self.dropSeq(gop.value_ptr.seq);
@@ -241,7 +247,7 @@ pub fn Xpu(comptime S: type) type {
 
         /// A bound sequence's prompt pass: from a kept state if the cache has one, planned chunks, the cache's marks.
         fn prefillPlanned(self: *Self, s: *lanes.Stream, ids: []const u32) !void {
-            if (comptime !has_head) unreachable;
+            if (comptime !has_seq) unreachable;
             const e = self.e;
             const rows = S.promptRows(e);
             s.cached = 0;
@@ -275,12 +281,12 @@ pub fn Xpu(comptime S: type) type {
         }
 
         fn snapBytes(ptr: *anyopaque, at: u32) u64 {
-            if (comptime !has_head) return 0;
+            if (comptime !has_seq) return 0;
             return of(ptr).e.snapBytes(at);
         }
 
         fn snapSave(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
-            if (comptime !has_head) return error.NoSnapshots;
+            if (comptime !has_seq) return error.NoSnapshots;
             const self = of(ptr);
             const l = try self.bound(@ptrCast(@alignCast(owner orelse return error.NoStream)));
             if (l.pending != null) return error.SnapshotOutOfStep;
@@ -288,14 +294,14 @@ pub fn Xpu(comptime S: type) type {
         }
 
         fn snapRestore(ptr: *anyopaque, owner: ?*anyopaque, saved: *anyopaque) anyerror!void {
-            if (comptime !has_head) return error.NoSnapshots;
+            if (comptime !has_seq) return error.NoSnapshots;
             const self = of(ptr);
             _ = try self.bound(@ptrCast(@alignCast(owner orelse return error.NoStream)));
             try self.e.snapRestore(@ptrCast(@alignCast(saved)));
         }
 
         fn snapDrop(ptr: *anyopaque, saved: *anyopaque) void {
-            if (comptime !has_head) return;
+            if (comptime !has_seq) return;
             of(ptr).e.snapDrop(@ptrCast(@alignCast(saved)));
         }
 
@@ -319,12 +325,25 @@ pub fn Xpu(comptime S: type) type {
         fn verifyFn(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) anyerror!void {
             const self = of(ptr);
             if (self.stopped()) return error.ShuttingDown;
+            if (comptime seq_only) return self.verifySeq(windows, out);
             if (comptime has_head) if (self.drafting()) return self.verifyWindow(windows, out);
             if (windows.len != 1) return error.WindowTooWide;
             const w = windows[0];
             if (w.rows() != 1 or w.parents != null) return error.WindowTooWide;
             if (w.positions[0] != self.e.m.pos + 1) return error.PositionMismatch;
             out[0].sampled[0] = try self.step(w.pending, w.stream.sampling, w.positions[0]);
+        }
+
+        /// Sequences without a head: each stream's one-row window on its own sequence, one after another.
+        fn verifySeq(self: *Self, windows: []const be.Window, out: []be.Verified) !void {
+            if (comptime !has_seq) unreachable;
+            if (windows.len > self.streams) return error.WindowTooWide;
+            for (windows, out) |w, *o| {
+                if (w.rows() != 1 or w.parents != null) return error.WindowTooWide;
+                _ = try self.bound(w.stream);
+                if (w.positions[0] != self.e.m.pos + 1) return error.PositionMismatch;
+                o.sampled[0] = try self.stepOne(w.pending, w.stream.sampling, w.positions[0]);
+            }
         }
 
         /// Every stream's window in turn, each on its own sequence (a stream's bits never depend on the others').
@@ -399,12 +418,12 @@ pub fn Xpu(comptime S: type) type {
         fn releaseFn(ptr: *anyopaque, s: *lanes.Stream) void {
             const self = of(ptr);
             self.e.sync() catch {};
-            if (comptime has_head) if (self.lane_of.fetchRemove(s)) |kv| self.dropSeq(kv.value.seq);
+            if (comptime has_seq) if (self.lane_of.fetchRemove(s)) |kv| self.dropSeq(kv.value.seq);
         }
 
         /// A stream's sequence back: the engine's own is free again, another is freed.
         fn dropSeq(self: *Self, seq: *Seq) void {
-            if (comptime !has_head) return;
+            if (comptime !has_seq) return;
             if (seq == &self.e.own) self.own_free = true else self.e.freeSeq(seq);
         }
     };
