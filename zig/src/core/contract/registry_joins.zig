@@ -66,6 +66,7 @@ pub const all_metal = @import("lane_q8_records.zig").records ++
     @import("hc_activation_records.zig").metal ++
     @import("qwen4_records.zig").metal ++
     @import("lfm2_records.zig").records ++
+    @import("lfm3_omni_metal_records.zig").records ++
     @import("nemotron_experts_records.zig").records ++
     @import("nemotron_pages_records.zig").records ++
     @import("nemotron_attention_records.zig").records ++
