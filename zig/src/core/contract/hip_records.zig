@@ -240,6 +240,20 @@ const own_records = [_]Record{
         },
     },
     .{
+        .launch = .{
+            .name = "moe shared gate tf_moe_combine_gate",
+            .symbol = "tf_moe_combine_gate",
+            .image = "act",
+            .threads = 256,
+        },
+        .usage = .{
+            .{ .vgprs = 9, .sgprs = 23, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 10, .sgprs = 23, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 9, .sgprs = 23, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 9, .sgprs = 20, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+        },
+    },
+    .{
         .launch = .{ .name = "add rms tf_add_rms_f16", .symbol = "tf_add_rms_f16", .image = "act", .threads = 1024 },
         .usage = .{
             .{ .vgprs = 43, .sgprs = 40, .lds = 32772, .private = 0, .bound = 1024, .wave = 32 },
