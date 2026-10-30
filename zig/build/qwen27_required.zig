@@ -3,12 +3,13 @@ const std = @import("std");
 pub const Modules = struct { fake: *std.Build.Module, masks: *std.Build.Module, draw: *std.Build.Module };
 pub fn modules(b: *std.Build, lanes: *std.Build.Module) Modules {
     const masks = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_masks.zig"), .target = b.graph.host });
-    const draw = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/draw.zig"), .target = b.graph.host, .imports = &.{.{ .name = "lanes", .module = lanes }} });
+    const draw = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/draw.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const fake = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_mask_fake.zig"), .target = b.graph.host, .imports = &.{ .{ .name = "lanes", .module = lanes }, .{ .name = "qwen27_masks", .module = masks }, .{ .name = "qwen_draw", .module = draw } } });
     return .{ .fake = fake, .masks = masks, .draw = draw };
 }
 pub fn tests(b: *std.Build, lanes: *std.Build.Module) void {
     const m = modules(b, lanes);
+    b.step("test-qwen-draw-host", "Exact BF16 keyed draws and bounded top-k allocation counts without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m.draw })).step);
     const errors = b.addRunArtifact(b.addTest(.{ .root_module = lanes, .filters = &.{"grammar errors:"} }));
     errors.has_side_effects = true;
     b.step("test-grammar-error-host", "Constraint fill-error allocation balance without shaders").dependOn(&errors.step);

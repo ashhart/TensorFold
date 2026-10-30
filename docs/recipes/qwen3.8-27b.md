@@ -44,6 +44,11 @@ requests retain their existing scheduling.
 calls on the serving thread. The `q27_offer` and `q27_keep` lines show verified tree and copy rows and the kept path.
 It preserves command boundaries. Leave it unset for throughput measurements.
 
+The legacy lone shortcut handles greedy requests; sampled requests use the shared lane loop.
+For bounded top-k requests, the BF16 host draw validates and selects candidates in one scan, using owned stack
+scratch. The same FP64 keyed sampler applies temperature, top-p and min-p to the same ordered candidates.
+Larger or unbounded cuts keep the general draw. Sampling time has its own pass-profile phase.
+
 On Metal, M5 prompt passes request 2,048 rows when no other request is decoding; earlier chips keep the 512-row
 default. The larger frame must fit the configured context and all streams beside loaded weights and the 8 GiB
 margin, otherwise M5 keeps 512 rows. Startup reserves the actual prompt scratch sizes as well as stream caches.
