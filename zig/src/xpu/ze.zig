@@ -43,6 +43,26 @@ pub const Api = struct {
     zeContextDestroy: *const fn (H) callconv(.c) u32,
 };
 
+/// The core memory table, Gpu.memory's fallback where Sysman cannot run.
+pub const MemApi = struct {
+    zeDeviceGetMemoryProperties: *const fn (H, *u32, ?[*]DeviceMemoryProperties) callconv(.c) u32,
+};
+/// ze_device_memory_properties_t.
+pub const DeviceMemoryProperties = extern struct {
+    stype: u32 = 0x5, // ZE_STRUCTURE_TYPE_DEVICE_MEMORY_PROPERTIES
+    pNext: ?*anyopaque = null,
+    flags: u32 = 0,
+    max_clock_rate: u32 = 0,
+    max_bus_width: u32 = 0,
+    total_size: u64 = 0,
+    name: [256]u8 = @splat(0),
+};
+
+/// Sysman needs DRM: under WSL2 (/dev/dxg, no /dev/dri) NEO 23.43's zesInit faults in libze_intel_gpu (C2 receipt).
+fn sysmanUsable() bool {
+    return std.c.access("/dev/dri", 0) == 0 or std.c.access("/dev/dxg", 0) != 0;
+}
+
 /// Sysman, for the free memory of the device's own memory modules (Gpu.freeMemory).
 pub const SysApi = struct {
     zesInit: *const fn (u32) callconv(.c) u32,
@@ -267,8 +287,12 @@ pub const Gpu = struct {
         return error.NoDevice;
     }
 
-    /// On-board bytes free and in all by Sysman (device matched by UUID); an allocation leaves `free` once written.
+    /// On-board bytes free and in all by Sysman (by UUID); without Sysman (WSL2) both are the core total, less nothing.
     pub fn memory(g: *Gpu) Error!struct { free: u64, size: u64 } {
+        if (!sysmanUsable()) {
+            const total = try g.coreMemory();
+            return .{ .free = total, .size = total };
+        }
         const sys = try resolve(SysApi, &g.lib);
         try check(sys.zesInit(0));
         var nd: u32 = 0; // counts first: loader 1.16 + NEO 23.43 keep a larger count as asked, padded with nulls
@@ -309,6 +333,17 @@ pub const Gpu = struct {
             }
         }
         return error.NoDevice;
+    }
+
+    /// The memory modules' total by the core API, asked with room for 8 (NEO answers a count query with 0).
+    pub fn coreMemory(g: *Gpu) Error!u64 {
+        const mem = try resolve(MemApi, &g.lib);
+        var props: [8]DeviceMemoryProperties = @splat(.{});
+        var n: u32 = props.len;
+        try check(mem.zeDeviceGetMemoryProperties(g.device, &n, &props));
+        var total: u64 = 0;
+        for (props[0..@min(n, props.len)]) |m| total += m.total_size;
+        return total;
     }
 
     pub fn deviceAlloc(g: *Gpu, size: usize) Error!*anyopaque {
