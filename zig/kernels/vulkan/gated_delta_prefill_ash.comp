@@ -1,17 +1,6 @@
 // Copyright © 2026 Joshua Warren / mlx-omarchy contributors.
 // SPDX-License-Identifier: MIT
-//
-// ASH arm of gated_delta_prefill.comp: the copied file with the u8 mask
-// binding removed. A uint8_t SSBO requires storageBuffer8BitAccess, which
-// the Device does not enable (storage16/int16 only). The Ash8c Metal oracle
-// never passes a mask, so this fixed variant compiles the declaration and
-// read out and the host rejects flag bit 1 before dispatch. The copied
-// default (gated_delta_prefill.comp) is unchanged.
-// Bindings: 0 q, 1 k, 2 v, 3 g (bf16, unused with bit2), 4 beta, 5 h0 (f32),
-// 6 y, 7 hf (f32), 8 g f32 (bit2, read at shape[0]), 9 snapshot (f32).
-// Push: 120 B; dims=T, chunk=C, chunks, matrix_m=DK, matrix_n=Dv,
-// matrix_k=Hv; shape[0]=g offset, [1]=h0, [2]=hf; flags bit2 g f32, bit3
-// output pass; bit1 (mask) is refused by the host.
+//  ASH arm of gated_delta_prefill.comp: the copied file with the u8 mask binding removed. A uint8_t SSBO requires storageBuffer8BitAccess, which the Device does not enable (storage16/int16 only). The Ash8c Metal oracle never passes a mask, so this fixed variant compiles the declaration and read out and the host rejects flag bit 1 before dispatch. The copied default (gated_delta_prefill.comp) is unchanged. Bindings: 0 q, 1 k, 2 v, 3 g (bf16, unused with bit2), 4 beta, 5 h0 (f32), 6 y, 7 hf (f32), 8 g f32 (bit2, read at shape[0]), 9 snapshot (f32). Push: 120 B; dims=T, chunk=C, chunks, matrix_m=DK, matrix_n=Dv, matrix_k=Hv; shape[0]=g offset, [1]=h0, [2]=hf; flags bit2 g f32, bit3 output pass; bit1 (mask) is refused by the host.
 #version 460
 
 #extension GL_EXT_shader_16bit_storage : require
@@ -90,8 +79,7 @@ float load_g_scalar(uint t, uint head, uint hv) {
   return bf16_load(g_buf.v[params.shape[0] + t * hv + head]);
 }
 
-// Broadcast lane LANES-1's value to the LANES lanes of its row (two
-// uniform relative shuffles; LANES == 4).
+// Broadcast lane LANES-1's value to the LANES lanes of its row (two uniform relative shuffles; LANES == 4).
 float row_total(float acc, uint sub) {
   float d1 = subgroupShuffleDown(acc, 1u);
   acc = (sub == 2u) ? d1 : acc;
@@ -99,10 +87,7 @@ float row_total(float acc, uint sub) {
   return (sub < 2u) ? d2 : acc;
 }
 
-// One token's recurrence on the register-resident state slice |st|
-// (elements sub*SLICE .. sub*SLICE+SLICE-1 of the row). The two dot
-// products chain lane to lane in ascending Dk order. Arithmetic mirrors
-// the ops path elementwise rounding.
+// One token's recurrence on the register-resident state slice |st| (elements sub*SLICE .. sub*SLICE+SLICE-1 of the row). The two dot products chain lane to lane in ascending Dk order. Arithmetic mirrors the ops path elementwise rounding.
 void token_step(
     inout float st[SLICE],
     uint sub,
@@ -118,9 +103,7 @@ void token_step(
     return;
   }
   uint k0 = sub * SLICE;
-  // precise: the ops reference rounds each product and each add
-  // separately (elementwise kernels then a sequential sum); NoContraction
-  // keeps the driver from fusing these into FMAs.
+  // precise: the ops reference rounds each product and each add separately (elementwise kernels then a sequential sum); NoContraction keeps the driver from fusing these into FMAs.
   precise float acc = 0.0f;
   for (uint j = 0u; j < LANES; ++j) {
     precise float prev = subgroupShuffleUp(acc, 1u);
@@ -139,15 +122,12 @@ void token_step(
   for (uint i = 0u; i < SLICE; ++i) {
     precise float gi = (params.flags & 1u) != 0u ? sg[buf][k0 + i] : g;
     precise float dec = st[i] * gi;
-    // The ops reference stores the decayed state, then its eager-fused
-    // add(state, k*delta) elementwise kernel contracts the multiply-add;
-    // mirror that with an explicit fma.
+    // The ops reference stores the decayed state, then its eager-fused add(state, k*delta) elementwise kernel contracts the multiply-add; mirror that with an explicit fma.
     precise float ns = fma(delta, sk[buf][k0 + i], dec);
     st[i] = ns;
   }
   if (compute_o) {
-    // Output pass only: the prefix scan never reads o_acc, so the
-    // ns*q dot is skipped there (state arithmetic is untouched).
+    // Output pass only: the prefix scan never reads o_acc, so the ns*q dot is skipped there (state arithmetic is untouched).
     acc = 0.0f;
     for (uint j = 0u; j < LANES; ++j) {
       precise float prev = subgroupShuffleUp(acc, 1u);
@@ -184,8 +164,7 @@ void main() {
 
   float st[SLICE];
 
-  // Restore this slice's chunk-initial state: chunk 0 reads h0, later
-  // chunks read the prefix scan's snapshot slot (chunk c stores at c-1).
+  // Restore this slice's chunk-initial state: chunk 0 reads h0, later chunks read the prefix scan's snapshot slot (chunk c stores at c-1).
   if (chunk == 0u) {
     for (uint i = 0u; i < SLICE; ++i) {
       st[i] = s_in.v[params.shape[1] + slice_base + i];
@@ -203,14 +182,9 @@ void main() {
 
   for (uint t = t_begin; t < t_end; ++t) {
     uint t_head = t * hv + head;
-    // ASH arm: no mask binding; the host rejects flag bit 1, so every
-    // token is valid.
+    // ASH arm: no mask binding; the host rejects flag bit 1, so every token is valid.
     bool tok = true;
-    // Parallel shared load: thread i stages k/q (and per-Dk g when
-    // present) into this token's double-buffer slot, then one barrier
-    // orders the load before every thread's token_step. The second slot
-    // lets the next iteration's writes (two steps later) safely wait on
-    // the single per-iteration barrier.
+    // Parallel shared load: thread i stages k/q (and per-Dk g when present) into this token's double-buffer slot, then one barrier orders the load before every thread's token_step. The second slot lets the next iteration's writes (two steps later) safely wait on the single per-iteration barrier.
     uint buf = t & 1u;
     sk[buf][tid] = bf16_load(k_buf.v[params.rhs_offset + t_head * DK + tid]);
     sq[buf][tid] = bf16_load(q_buf.v[params.lhs_offset + t_head * DK + tid]);
@@ -234,16 +208,13 @@ void main() {
             tok ? bf16_store(o_acc) : bf16_store(0.0f);
       }
     } else if ((t + 1u) % C == 0u && t + 1u < T) {
-      // Chunk boundary: snapshot the slice for pass 1's chunk t/C + 1
-      // (slot index t/C).
+      // Chunk boundary: snapshot the slice for pass 1's chunk t/C + 1 (slot index t/C).
       uint snap_base = ((t / C) * hv) * dv * DK + slice_base;
       for (uint i = 0u; i < SLICE; ++i) {
         snap.v[snap_base + i] = st[i];
       }
     }
-    // No trailing barrier: the next iteration reads the other shared
-    // slot, and its load barrier orders the slot reuse after every
-    // thread's reads from two slots ago.
+    // No trailing barrier: the next iteration reads the other shared slot, and its load barrier orders the slot reuse after every thread's reads from two slots ago.
   }
 
   if (out_pass && chunk + 1u == params.chunks) {
