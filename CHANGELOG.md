@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA EXL3: the dense projections zero their split-K counters only when the buffer grows, on the calls' stream, instead of before every 128-row block of every call; each block's last program already resets its own counter. Replies are token-identical, and on a GB10 with the Qwen3.8-27B 3.50 bpw pack decode is 0.4% to 0.9% faster (#1475). Thanks to @diwakergupta.
+
 - Qwen3.6-35B-A3B on CUDA serves NVIDIA's NVFP4 checkpoint (`nvidia/Qwen3.6-35B-A3B-NVFP4`) as downloaded: W4A16 NVFP4 routed and shared experts, FP8 attention and DeltaNet projections and the NVFP4 head run as stored, and `--drafter` naming the same checkpoint drafts with its bf16 MTP layer, quantized to affine-4 at load. One GB10 decodes 66 tok/s without drafts and 112 to 125 tok/s with them; drafted, concurrent and resumed replies equal their plain runs. The rules come from @gilby's #345.
 
 - DeepSeek-V4.1 on CUDA no longer stays up unable to answer after a sticky CUDA context fault: a host monitor sends the fault to fail-fast at once instead of waiting for a health poll, and with `TF_TP_FAILFAST=0` the process exits with status 70 rather than waiting on communicator teardown. Under fail-fast, a round error the ranks cannot recover from (such as `CudaFailed` or `Timeout`) now takes every rank down instead of leaving them out of step. A stall watchdog, off by default, withdraws readiness and exits when a round, snapshot, KV union or follower step makes no progress for `TF_DSV41_STALL_EXIT_S` seconds; off, it costs one null check per launch, and replies are unchanged (#1646). Thanks to @jayleaton.
