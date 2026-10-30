@@ -463,7 +463,7 @@ const own_records = [_]Record{
     },
 } ++ @import("hip_records_pair.zig").records;
 
-pub const records = own_records ++ @import("hip_records_stream.zig").records;
+pub const records = own_records ++ @import("hip_records_stream.zig").records ++ @import("hip_records_item.zig").records;
 
 /// Gate 5's planted HIP controls: a launch past its __launch_bounds__, and 72 KiB of LDS where a workgroup has 64.
 pub const controls = [_]Record{
