@@ -1,0 +1,24 @@
+Compact CUDA receipt: final local static checks
+
+Branch source: a5d2863cd98bc91f6834f7fe9b2c5be2216526cc
+Comparison base: f350cd3ea253a042e205746928271f9d8f71a82d
+Zig: 0.17.0
+
+PASS: git diff --name-only f350cd3ea -- '*.zig' | xargs zig fmt --check
+All eight changed Zig files passed formatting.
+
+PASS: git diff --check
+PASS: git diff --check f350cd3ea
+
+python3 tools/zig/lean_check.py
+Branch: 4,579 files, 426 findings, exit 1 because inherited findings remain.
+Previously captured base: 4,578 files, 426 findings. Comparing the finding sets
+shows zero added and zero removed. The existing findings are not described as clean.
+
+The compact-cuda Python sources were checked separately against the same 600-line
+and single-line, 120-column comment/docstring rules:
+compare.py: 402 lines, zero findings.
+parity.py: 247 lines, zero findings.
+verify_template.py: 72 lines, zero findings.
+
+No host test suite was rerun for this static-only check.
