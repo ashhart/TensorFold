@@ -218,6 +218,10 @@ sm_121 load a warp's next k tile while the current one decodes: each bit-equal t
 EXL3 pack's widths (two controls: the next load reading tile i + 2, the last tile decoding the words before it).
 Older SMs build main's loop, and their records are main's.
 
+CUDA also checks MOSS-Image's glue (`moss_image.cu`: the norm, plain and modulated; q/k norm and rotary into packed
+rows; situ; the gated add), each output within float64's range at its torch bf16 points (five controls, each dropping
+one point), and `vision_kernel` at head dim 128 against `contract_attn.zig`'s float64 reference (`moss-contract`).
+
 ## CUDA records per nvcc release
 
 nvcc allocates registers differently from one release to the next, so the CUDA records are kept per release.

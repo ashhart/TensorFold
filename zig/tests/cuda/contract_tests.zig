@@ -577,6 +577,8 @@ pub fn run(gpu: check.Gpu) !void {
     defer weight_only.destroy(a);
     const families = try @import("contract_family_sets.zig").Sets.init(gpu, s, a, &kernels);
     defer families.deinit();
+    const moss = try @import("contract_moss_image.zig").Set.init(gpu, s, a, &kernels);
+    defer moss.deinit();
     var t: g.Tally = .{};
     try @import("contract_dump.zig").run(a, kernels.items);
     const t0 = check.now(gpu.io);
