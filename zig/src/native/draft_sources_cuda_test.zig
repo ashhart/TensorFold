@@ -57,6 +57,7 @@ test "draft sources: CUDA Gemma, Spark, Kolibri and Dory have copy windows and n
     var sb: s.backend.Spark = undefined;
     var sm: @typeInfo(@TypeOf(sb.m)).pointer.child = undefined;
     sm.slots = 4;
+    sm.paged = false;
     sb.m = &sm;
     try check(sb.facts(), null, true, false);
     const k = @import("kolibri1");
