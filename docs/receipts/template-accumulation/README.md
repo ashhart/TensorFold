@@ -28,6 +28,10 @@ The [Qwen chat model receipt](model/README.md) records an alternating baseline/P
 
 A subsequent [fixed decode-equivalence test](decode-equivalence/README.md) uses six matched fresh-server pairs and 256-token replies. All twelve per-cell 95% intervals lie wholly inside the prespecified ±2% tolerance; their endpoints range from −1.680% to +1.073%. All 480 responses match exactly across builds and concurrency. This establishes practical equivalence for the tested checkpoint/settings, rather than inferring it from small point estimates.
 
+## Exact reported DeepSeek template
+
+A later [exact-template follow-up](deepseek-template/README.md) passes all 168 processes and 840 full-output comparisons, including 2,001 seeded filler messages. Both revisions fit the 240 MiB cap, so this shape does not reproduce the reported allocation failure. At 2,001 messages without tools, candidate render scratch is 15.2% higher and the descriptive single-ABBA render time is 10.3% longer. The original tool schemas and private tool-heavy conversation were unavailable. The synthetic string-accumulation gains above remain separate evidence; the PR stays draft without claiming that this follow-up proves resolution of the production incident.
+
 ## Design choices required for exactness
 
 Only concatenation results carry an arena-owned builder. An append can reuse that builder only when both the text and provenance slices identify its current complete value. Older snapshots and derived strings start a new builder, so evaluating the right operand cannot silently change the already-evaluated left operand.
