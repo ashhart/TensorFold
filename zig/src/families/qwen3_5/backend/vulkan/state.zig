@@ -1,6 +1,4 @@
-// The native Vulkan Qwen3.5-2B single-sequence state: the flat KV caches of the six full-attention layers, and the conv windows and gated-delta-net recurrence states of the eighteen linear layers, each as checked typed views over stable heap-owned device buffers.
-//  Every region is real zeroed device memory: construction and `reset` write zeros on the GPU through the existing staged transfer (`commands.upload` through the caller's staging buffer) — never a metadata-only reset and no new kernel. The decode and prefill operators read one state half and write a disjoint other half (ping-pong), so no read aliases a write under the pipeline's validation; `flip` swaps the halves between steps.
-//  Capacity is bounded by the SDPA arm's visible-key limit (7168): a context beyond that is refused at construction, never silently truncated. Length commits only through `append`, after the writes that produced the rows completed; `deinit` is legal only when no submission touching any view can still be pending; `reset`'s transfers route in-flight errors through `commands.orExit` inside this module, before any unwind can free.
+// Qwen3.5-2B state stores six full-attention KV caches and eighteen linear-layer conv/GDN states in typed device views.
 const std = @import("std");
 const vk = @import("vulkan");
 const pinned = @import("../../config.zig");
@@ -13,11 +11,11 @@ const View = vk.tensor.View;
 
 pub const Error = vk.runtime.Error || error{ContextTooLong};
 
-// Full-attention layers are every 4th (indices 3, 7, ...): the pinned config's `full_attention_interval`, checked against the family constants.
+// Full-attention layers are indices 3, 7, ...; divide by four after checking the pinned interval.
 pub const full_layers: usize = pinned.layers / 4;
 pub const linear_layers: usize = pinned.layers - full_layers;
 
-// The SDPA decode arm stages the whole visible key prefix in shared memory; this is the hard capacity it admits (attention.zig's limit).
+// SDPA shared memory admits visible prefixes up to 7168 keys.
 pub const max_capacity: usize = 7168;
 
 pub const kv_heads: usize = pinned.kv_heads; // 2
@@ -45,7 +43,7 @@ pub fn linearSlot(index: usize) ?usize {
     return index - index / 4;
 }
 
-// One sequence's whole state. Every buffer is heap-owned and never moved, so all views stay valid for the state's lifetime; `parity` selects which ping-pong half each linear layer's operators read and write next.
+// Heap-owned buffers keep views stable; parity selects each linear layer's ping-pong input half.
 pub const State = struct {
     gpa: Allocator,
     dev: *const Device,
@@ -62,7 +60,7 @@ pub const State = struct {
     // How many of `buffers` hold real created buffers; init's error path frees exactly this prefix.
     created: usize,
 
-    // Allocates and really zeroes every region for a context of `min(context, max_capacity)` positions. `staging` is the caller's staging buffer (any nonempty size; transfers chunk through it).
+    // Allocate and zero min(context, max_capacity) positions; staged transfers chunk through caller storage.
     pub fn init(
         gpa: Allocator,
         dev: *const Device,
@@ -87,7 +85,7 @@ pub const State = struct {
         };
         errdefer s.deinit();
 
-        // every allocation is recorded in `created` as it completes, so the single error path frees exactly what was created
+        // Record each completed allocation so the error path frees exactly the created prefix.
         s.buffers = try gpa.alloc(*Buffer, 2 * full_layers + 4 * linear_layers);
         s.keys = try gpa.alloc(View, full_layers);
         s.values = try gpa.alloc(View, full_layers);
@@ -123,7 +121,7 @@ pub const State = struct {
         return s;
     }
 
-    // One heap-owned device buffer with a typed whole-buffer view. The slot registers in `created` as soon as the Vk allocation exists, so exactly one owner (State.deinit) ever frees it.
+    // Register the buffer as soon as Vulkan allocates it; State.deinit remains its sole owner.
     fn region(s: *State, at: usize, kind: vk.tensor.Kind, elements: u64) (Allocator.Error || vk.runtime.Error)!View {
         const bytes = try vk.tensor.extent(kind, elements);
         const ptr = try s.gpa.create(Buffer);
@@ -136,7 +134,7 @@ pub const State = struct {
         return View.init(ptr, kind, 0, elements);
     }
 
-    // Writes actual zero bytes over every region on the GPU through the staged transfer; a 16 MiB zero page bounds host memory.
+    // Zero every device region through staged transfer using at most a 16 MiB host buffer.
     pub fn reset(s: *State, cmds: *Commands, staging: Buffer, timeout_ns: u64) Error!void {
         const zeros = try s.gpa.alloc(u8, @min(1 << 24, staging.len));
         defer s.gpa.free(zeros);
@@ -194,7 +192,7 @@ pub const State = struct {
         return s.committed;
     }
 
-    // Commits `rows` freshly written cache positions; refuses to pass the capacity — the KV caches have no room past it. There is no rewind: lowering the committed length after recurrence updates would leave the conv and GDN states silently wrong, so a future caller that needs speculation or prefix reuse must restore state for real (this module provides only a full `reset`).
+    // Append refuses capacity overflow; recurrence makes rewind invalid, so speculation requires restoring state.
     pub fn append(s: *State, rows: u64) Error!void {
         if (rows > s.capacity - s.committed) return error.ContextTooLong;
         s.committed += rows;
@@ -239,7 +237,7 @@ fn fakeState(gpa: Allocator, capacity: usize) !State {
     @memset(s.parity, 0);
     const conv_bytes = 2 * conv_elements;
     const gdn_bytes = 4 * gdn_elements;
-    // one shared fake buffer value per region; views only read geometry, and it must be large enough for the biggest region (the F32 GDN state) two distinct fakes so ping-pong halves sit on different buffers, as production does; the larger F32 geometry bounds both lengths
+    // Fake views use two buffers sized for the largest F32 GDN region, preserving ping-pong separation.
     const fakes: [2]*Buffer = .{ try gpa.create(Buffer), try gpa.create(Buffer) };
     defer for (fakes) |ptr| gpa.destroy(ptr);
     for (fakes) |ptr| ptr.* = .{ .dev = undefined, .handle = null, .memory = null, .len = gdn_bytes, .kind = .device, .mapped = null, .coherent = false };

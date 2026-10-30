@@ -1,4 +1,4 @@
-// Vulkan stage 4 bring-up: the GatedDeltaNet closure (conv prefill + gate split, the gated-delta prefill recurrence in one and multiple chunks, the raw-gates decode step and the gated RMSNorm epilogue) through the production Gdn operator at the real model geometry, checked on a real GPU. Exit 0 pass, 1 fail, 2 usage, 124 fence timeout. Operator bring-up only: no model, no performance claim, no cross-backend bitexact claim — the fixture states each gate's budget.
+// Stage 4: GatedDeltaNet (conv prefill, gate split, recurrence, raw-gates decode, RMSNorm) via Gdn; exits 0/1/2/124.
 const std = @import("std");
 const vk = @import("vulkan");
 const shaders = @import("stage4_shaders");
@@ -179,7 +179,7 @@ fn plantRefuse2(f: anytype, good: []const u16, extra: []const u16, name: []const
     return true;
 }
 
-// convPrefill end to end: the assembled conv input (state then qkv) and the conv state carry-out are BIT-EXACT checks, the conv output and the split's soa/g/beta go against the f64 references, three byte-identical repeats, planted refusals, inputs unchanged.
+// convPrefill: conv input + state carry-out BIT-EXACT; conv output and split soa/g/beta vs f64; repeats and refusals.
 fn convSplitGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, m: *vk.Gdn, timeout: u64) !bool {
     const T = fx.tokens;
     const C: u64 = fx.Model.conv_channels;
@@ -338,7 +338,7 @@ fn convSplitGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cm
     try fetch(cmds, staging, conv_out, std.mem.sliceAsBytes(conv_out_bits), timeout);
     try fetch(cmds, staging, state_out, std.mem.sliceAsBytes(state_out_bits), timeout);
 
-    // The split's reference must read the ACTUAL conv output the kernel produced (the composite's split input), not the fixture's synthetic conv_out_bits — those were never uploaded in this gate.
+    // The split's reference reads the ACTUAL conv output the kernel produced, not the synthetic conv_out_bits.
     @memcpy(f.conv_out_bits[0..conv_out_bits.len], conv_out_bits);
     var sr_diag: fx.Violation = undefined;
     const sr = fx.Split.check(f, soa_bits, g_pairs, beta_bits, &sr_diag) catch |e| {
@@ -433,12 +433,12 @@ const SharedSplit = struct {
     }
 };
 
-// Runs the split standalone into a caller-owned struct (the views point into it, so it must outlive every use) so the recurrence gates read real GPU-produced soa/g/beta.
+// The split runs standalone into a caller-owned struct (its views must outlive it); the gates read real GPU soa/g/beta.
 fn runSplit(s: *SharedSplit, a: std.mem.Allocator, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, m: *vk.Gdn, timeout: u64) !void {
     const T = fx.tokens;
     const soa_elems: u64 = 3 * T * fx.Model.linear_dim;
     const gate_elems: u64 = T * fx.Model.heads;
-    // staged construction: each field owns its own errdefer, so a failure at any point never runs deinit on still-undefined handles
+    // staged construction: each field owns its errdefer, so a failure never runs deinit on undefined handles
     s.a = a;
     s.f = try fx.Split.init(a, 0x57a4);
     errdefer s.f.deinit();
@@ -470,7 +470,7 @@ fn runSplit(s: *SharedSplit, a: std.mem.Allocator, dev: *const vk.Device, cmds: 
     s.beta_view = try vk.tensor.View.init(&s.beta_buf, .bf16, 0, gate_elems);
     var conv_out_buf = try uploadShell(dev, cmds, staging, s.f.conv_out_bits, timeout);
     defer conv_out_buf.deinit();
-    // poison ALL THREE split outputs before the dispatch: a dead or partial write of g/beta fails the fixture check instead of inheriting zeros
+    // poison ALL THREE split outputs before the dispatch: a dead or partial g/beta write fails the check.
     const poison = try a.alloc(u16, @intCast(soa_elems));
     defer a.free(poison);
     @memset(poison, fx.poison16);
@@ -496,7 +496,7 @@ fn runSplit(s: *SharedSplit, a: std.mem.Allocator, dev: *const vk.Device, cmds: 
     std.debug.print("MILESTONE split-standalone worst={e} of bound\n", .{srep.worst});
 }
 
-// One prefill recurrence gate at chunk size `chunk` (snap slots when >1), against the serial f64 reference over the same GPU-produced soa/g/beta.
+// One prefill recurrence gate at chunk size `chunk` (snap slots when >1) vs the f64 reference over GPU soa/g/beta.
 fn prefillGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, m: *vk.Gdn, chunk: u64, snap_chunks: ?u64, timeout: u64) !bool {
     const T = fx.tokens;
     const section: u64 = T * fx.Model.linear_dim;
@@ -523,7 +523,7 @@ fn prefillGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds
     const snap_view: ?vk.tensor.View = if (snap) |*s| try vk.tensor.View.init(s, .f32, 0, snap_chunks.? * state_elems) else null;
 
     var r_diag: fx.Violation = undefined;
-    // poison y AND hf/snap before EVERY repeat: a dead or partial state-store leaves poison behind and fails; the hf/snap readback is compared against the independent f64 reference, never against pre-seeded values
+    // poison y and hf/snap before EVERY repeat: a dead or partial store leaves poison and fails; readback vs f64.
     const poison = try a.alloc(u16, @intCast(section));
     defer a.free(poison);
     @memset(poison, fx.poison16);
@@ -549,7 +549,7 @@ fn prefillGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds
         try vk.orExit(m.prefillRecur(cmds, split.soa_view, split.g_view, split.beta_view, h0_view, y_view, hf_view, snap_view, T, chunk, timeout));
         try fetch(cmds, staging, y, std.mem.sliceAsBytes(ybits), timeout);
         try fetch(cmds, staging, hf, std.mem.sliceAsBytes(hfpairs), timeout);
-        // EVERY repeat: y byte-equal to the first AND hf re-checked against the independent f64 reference (poison or partial write fails here)
+        // EVERY repeat: y byte-equal to the first AND hf re-checked against the f64 reference.
         if (first) |x| {
             if (std.mem.indexOfDiff(u16, x, ybits)) |at| {
                 std.debug.print("FAIL prefill chunk={d}: repeat {d} y differs at element {d}\n", .{ chunk, rep, at });
@@ -603,7 +603,7 @@ fn prefillGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds
     return true;
 }
 
-// The raw-gates decode step: one token, state in/out and y against the serial reference computed from the kernel's own raw inputs.
+// The raw-gates decode step: one token, state in/out and y vs the serial reference from the kernel's raw inputs.
 fn decodeGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, m: *vk.Gdn, timeout: u64) !bool {
     const linear: u64 = fx.Model.linear_dim;
     const f = try fx.Decode.init(a, 0x57a8);
@@ -637,7 +637,7 @@ fn decodeGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds:
     const poison = try a.alloc(u16, @intCast(linear));
     defer a.free(poison);
     @memset(poison, fx.poison16);
-    // poison state_out before EVERY repeat: a dead store leaves poison and the f64-reference comparison refuses it; never pre-seed with the reference
+    // poison state_out before EVERY repeat: a dead store leaves poison, which the f64 comparison refuses.
     const poison_state = try a.alloc(u16, @intCast(2 * state_elems));
     defer a.free(poison_state);
     @memset(poison_state, 0xffff);
@@ -726,7 +726,7 @@ fn printRecurInputs(f: fx.Split, v: fx.Violation, final_token: u64) void {
     printGateInputs(f.a_bits, f.b_bits, f.a_log_bits, f.dt_bits, token * 16 + head);
 }
 
-// The compound convDecodeStep gate: one token's concat(state, x) 4-tap conv (raw bf16 store — the split owns the single SiLU) against an independent f64 reference, the carry-out state bit-exact, then the split on the ACTUAL activated bits against SplitOne. Repeats, guards, unchanged inputs, negative controls on both stages.
+// convDecodeStep: 4-tap conv vs f64 (raw store; split owns SiLU); carry-out bit-exact; split ACTUAL bits vs SplitOne.
 fn convDecodeGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, m: *vk.Gdn, timeout: u64) !bool {
     const C: u64 = fx.Model.conv_channels;
     const linear: u64 = fx.Model.linear_dim;

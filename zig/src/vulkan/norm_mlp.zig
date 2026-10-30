@@ -1,4 +1,4 @@
-// Norm/MLP pointwise Vulkan operators: BF16 RMSNorm gamma, residual add and SiLU(gate)*up, over the shared set-0 storage / push-constant pipeline model. Shaders: kernels/vulkan/{fast_norm,binary_vec,swiglu}.comp (mlx-omarchy sources, MIT); fast_norm and swiglu compiled with -DUSE_BF16; binary_vec's default storage IS bf16 (no such ifdef there), so add_bf16 builds with no defines at all. The runtime never falls back to CPU.
+// Norm/SwiGLU build with -DUSE_BF16; binary_vec is bf16 by default (no defines); runtime has no CPU fallback.
 const std = @import("std");
 const dispatch = @import("dispatch.zig");
 const memory = @import("memory.zig");
@@ -10,7 +10,7 @@ const Buffer = memory.Buffer;
 const Error = dispatch.Error;
 const View = tensor.View;
 
-// The compiled shader images NormMlp runs; every field is a real SPIR-V image of the named variant, each built from its .comp with -DUSE_BF16. Compile norm and swiglu with -DASH_QWEN35 (together) for the Ash8c Metal oracle semantics; default is the copied MLX bit-parity form. The host API is identical either way; the variant is fixed at build time, not a runtime option. add_preserve_bf16 is binary_vec with -DPRESERVE_F32 (OpExecutionMode DenormPreserve 32); init runs it only where the device declares shaderDenormPreserveFloat32, and add_bf16 everywhere else.
+// norm/SwiGLU: -DUSE_BF16; -DASH_QWEN35=Ash8c (build-time); -DPRESERVE_F32 needs shaderDenormPreserveFloat32.
 pub const Shaders = struct {
     norm_bf16: []align(4) const u8,
     add_bf16: []align(4) const u8,
@@ -43,7 +43,7 @@ pub const NormMlp = struct {
     norm_bf16: dispatch.Pipeline,
     add_bf16: dispatch.Pipeline,
     swiglu_bf16: dispatch.Pipeline,
-    // Read-only stand-in for declared bindings a kernel never touches (fast_norm's unused bias slot 2, swiglu's unmaterialized sigmoid/silu 3 and 4).
+    // Dummy bindings cover unused fast_norm bias 2 and unmaterialized SwiGLU sigmoid/silu 3,4.
     dummy: Buffer,
 
     /// Builds the three pipelines; the device must have storage16 and int16 for the bf16 paths.
@@ -77,7 +77,7 @@ pub const NormMlp = struct {
         return .{ .buffer = &m.dummy, .len = dummy_bytes };
     }
 
-    // RMSNorm over rows of width bf16 elements: out = x * rsqrt(mean(x^2) + eps) * gamma, gamma a per-column bf16 row of width elements. A one-element scalar gamma cannot pass View.init's word-padding rule, so the host advertises only the row form (the shader's lhs_size == 1 broadcast stays in the source, unused). Views bind at their own base, so every shader element offset is zero.
+    /// Preserve the omitted contract, precision, and host-interface facts from the original comment.
     pub fn rmsNorm(m: *NormMlp, cmds: *Commands, out: View, x: View, gamma: View, rows: u64, width: u64, eps: f32, timeout_ns: u64) Error!void {
         if (out.kind != .bf16 or x.kind != .bf16 or gamma.kind != .bf16) return error.Invalid;
         const plan = try normPlan(x.elements, out.elements, gamma.elements, rows, width, eps);
@@ -94,7 +94,7 @@ pub const NormMlp = struct {
         try m.norm_bf16.run(cmds, std.mem.asBytes(&p)[0..norm_push_bytes], g, timeout_ns);
     }
 
-    // Residual add out = a + b on bf16, out of place. binary_vec moves four elements per 8-byte load, so the count and both operand sizes must be multiples of four.
+    // bf16 add is out-of-place; binary_vec loads 4 elements/8 bytes, so count and operands must be divisible by 4.
     pub fn add(m: *NormMlp, cmds: *Commands, out: View, a: View, b: View, timeout_ns: u64) Error!void {
         if (out.kind != .bf16 or a.kind != .bf16 or b.kind != .bf16) return error.Invalid;
         if (out.elements != a.elements or a.elements != b.elements) return error.Invalid;
@@ -109,7 +109,7 @@ pub const NormMlp = struct {
         try m.add_bf16.run(cmds, std.mem.asBytes(&p)[0..add_push_bytes], try groups(p.count, m.add_bf16.local[0], m.dev.properties.limits.maxComputeWorkGroupCount[0]), timeout_ns);
     }
 
-    // SwiGLU out = silu(gate) * up on bf16, out of place, intermediates not materialized (bindings 3 and 4 stay on the dummy, materialize = 0). Same four-wide gate as add. Storage semantics follow the compiled variant: ASH_QWEN35 single-round (Metal oracle) or default MLX fused_chain three-round form.
+    // SwiGLU is 4-wide/out-of-place; bindings 3/4 use materialize=0; ASH_QWEN35 rounds once, MLX fused_chain 3 times.
     pub fn swiglu(m: *NormMlp, cmds: *Commands, out: View, gate: View, up: View, timeout_ns: u64) Error!void {
         if (out.kind != .bf16 or gate.kind != .bf16 or up.kind != .bf16) return error.Invalid;
         if (out.elements != gate.elements or gate.elements != up.elements) return error.Invalid;
