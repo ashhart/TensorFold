@@ -3,6 +3,7 @@
 const std = @import("std");
 const registry = @import("core").registry;
 const affine = @import("affine.zig");
+const item = @import("matrix_item.zig");
 
 const Entry = affine.Entry;
 const Shape = registry.Shape;
@@ -247,6 +248,14 @@ fn launchKp(comptime tier: usize) Launch {
     }.f;
 }
 
+fn launchItem(comptime tier: usize) Launch {
+    return struct {
+        fn f(k: *const Kernels, c: Call) Error!void {
+            try item.go(k, c, tier);
+        }
+    }.f;
+}
+
 // ---- the entries
 
 /// What an entry is besides its op, path and name.
@@ -317,7 +326,12 @@ fn prefill(comptime op: Op) [7]Entry {
     };
 }
 
-pub const all = project_decode ++ routed_decode ++ other_decode ++ prefill(.project) ++ prefill(.routed);
+/// The routed prompt's matrix-core tile of 64 rows an item, the 128-row tile's bits for items of few rows.
+const routed_item = [_]Entry{
+    entry(.routed, .prefill, "item64", .{ .family = .gemm, .fits = &fitsPrefillMatrix, .launch = launchItem(0), .caps = &matrixCores, .policy = &matrixOn }),
+};
+
+pub const all = project_decode ++ routed_decode ++ other_decode ++ prefill(.project) ++ prefill(.routed) ++ routed_item;
 
 // ---- the choices on the GPUs' tables
 
