@@ -251,6 +251,8 @@ const usage =
     \\  exl3-contract             EXL3's replacements of linear_body through gates 1-4, each control red (kernel-contract's subset)
     \\  exl3-tp2 <rank> <host:port> [dir]  EXL3 tensor parallel: rank shards vs the Python engine's, all-gathered (dir none skips them)
     \\  exl3-tiles [DIR]          EXL3's tile candidate: codebooks and tiles bit-equal, FP64, rows through qlinear and Dense
+    \\  exl3-prompt-k6 [DIR|none] [BASE]  EXL3 prompt kernels at 3 and 4 bits, GLM's shapes: runSlots, FP64, row bytes, time;
+    \\                            DIR adds a real layer, BASE (an earlier exl3_experts fatbin) its 4-bit bytes
     \\  train-pack MODEL EXAMPLES [COUNT]   training passes holding several sequences against one a pass: differences, time
     \\  kernel-contract [WORD...]  the contract's gates, each planted control red (-Dnvcc); WORDs: kernels named so
     \\  qmm-prefill-many-contract the GB10 bit-exact multi-projection prompt launch against separate launches
@@ -466,6 +468,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "exl3-midm")) return exl3_plan_bench.midm(gpu);
     if (std.mem.eql(u8, cmd, "exl3-plans")) return exl3_plan_bench.run(gpu, if (rest.len > 0) rest[0] else null);
     if (std.mem.eql(u8, cmd, "exl3-contract")) return exl3_contract.run(gpu);
+    if (std.mem.eql(u8, cmd, "exl3-prompt-k6")) return @import("exl3_prompt_k6_tests.zig").run(gpu, if (rest.len > 0) rest[0] else "none", if (rest.len > 1) rest[1] else null);
     if (std.mem.eql(u8, cmd, "exl3-tp2")) return exl3_tp2_tests.run(gpu, try arg(rest, 0), try arg(rest, 1), if (rest.len > 2) rest[2] else "none");
     if (std.mem.eql(u8, cmd, "sample")) return sample_tests.draws(gpu);
     if (std.mem.eql(u8, cmd, "topk")) return sample_tests.topk(gpu);
