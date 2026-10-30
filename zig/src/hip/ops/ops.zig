@@ -13,6 +13,7 @@ const elementwise = @import("elementwise.zig");
 const moe = @import("moe.zig");
 const draw = @import("draw.zig");
 const tp = @import("tp.zig");
+const side_stream = @import("../side.zig");
 pub const mamba = @import("mamba.zig");
 
 pub const Kind = types.Kind;
@@ -33,6 +34,18 @@ pub const Ops = struct {
     prefill: bool = false,
     /// A lane round's forward: decode tiles at any row count, so a row's bits ignore the rows it shares a round with.
     window: bool = false,
+    /// A stream beside `stream` and its events (none: `fork` and `join` do nothing).
+    side: side_stream.Side = .{},
+
+    /// Later work on `side` starts after this stream's work so far.
+    pub fn fork(o: Ops) Error!void {
+        return o.side.fork(o.stream);
+    }
+
+    /// Later work on this stream starts after `side`'s work so far.
+    pub fn join(o: Ops) Error!void {
+        return o.side.join(o.stream);
+    }
 
     pub const project = products.project;
     pub const projectGroup = products.projectGroup;

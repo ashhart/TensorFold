@@ -52,6 +52,9 @@ pub const Engine = struct {
     ctx: hip.Context,
     lib: hip.Launcher,
     stream: hip.Stream,
+    /// A stream beside `stream` and the events its forks and joins take.
+    side: hip.Stream,
+    ring: hip.side.Ring,
     o: Options,
     cfg: config.Config,
     ck: core.checkpoint.Checkpoint,
@@ -108,6 +111,10 @@ pub const Engine = struct {
         e.act = if (caps.act == .f16) .f16 else .bf16;
         e.stream = try hip.Stream.init(&e.driver);
         errdefer e.stream.deinit();
+        e.side = try hip.Stream.init(&e.driver);
+        errdefer e.side.deinit();
+        e.ring = try hip.side.Ring.init(&e.driver);
+        errdefer e.ring.deinit();
         e.comm = null;
         // RCCL's init waits for every rank: none enters it unless every rank got this far
         _ = try steps.done(.{ 0, 0 }, .first);
@@ -190,6 +197,9 @@ pub const Engine = struct {
         e.ck.close();
         e.cfg.deinit();
         if (e.comm) |c| c.close();
+        e.side.synchronize() catch {};
+        e.ring.deinit();
+        e.side.deinit();
         e.stream.deinit();
         e.lib.unload();
         e.ctx.deinit();
@@ -202,7 +212,7 @@ pub const Engine = struct {
     }
 
     pub fn ops(e: *Engine, arena: *hip.Arena) hip.ops.Ops {
-        return .{ .l = &e.lib, .bf16 = e.act == .bf16, .stream = e.stream.handle, .arena = arena };
+        return .{ .l = &e.lib, .bf16 = e.act == .bf16, .stream = e.stream.handle, .arena = arena, .side = .{ .stream = e.side.handle, .ring = &e.ring } };
     }
 
     /// The layer kinds as the caches lay them out: true for a DeltaNet layer.
