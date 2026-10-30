@@ -1,21 +1,5 @@
-//! The stage 4 GatedDeltaNet shaders under the kernel contract: the gate
-//! split (soa+beta and g), the prefill conv and the decode conv step (raw
-//! output and state carry), the chunked prefill recurrence (y and
-//! hf+snapshots) and the raw-gates decode step (y and state), each dispatched
-//! through the production Gdn wrapper at the fixed Qwen3.5 geometry (16
-//! heads, head_dim 128, 6144 conv channels, 4 taps). f32 state flows in and
-//! out of place, the interior chunk snapshot is bound exactly when the
-//! prefill's chunks exceed one, and the wrapper owns every binding table, so
-//! the dummy and read-only slots stay exactly as it declares them.
-//!
-//! References are the stage 4 fixture's f64 serial walkers made parametric in
-//! the token count; every depth a spec states is a function of the shape's
-//! token count, because a recurrence's rounding chain grows by one full state
-//! update (about 130 f32 roundings deep, the stage 4 fixture's stated
-//! per-token derivation) per token. Decode loops the one-token step, so its
-//! depth grows the same way. The gate formula's own correctness is the split
-//! kernels' business: the recurrence kernels read g and beta as inputs, as
-//! the production graph feeds them.
+// The stage 4 GatedDeltaNet shaders under the kernel contract: the gate split (soa+beta and g), the prefill conv and the decode conv step (raw output and state carry), the chunked prefill recurrence (y and hf+snapshots) and the raw-gates decode step (y and state), each dispatched through the production Gdn wrapper at the fixed Qwen3.5 geometry (16 heads, head_dim 128, 6144 conv channels, 4 taps). f32 state flows in and out of place, the interior chunk snapshot is bound exactly when the prefill's chunks exceed one, and the wrapper owns every binding table, so the dummy and read-only slots stay exactly as it declares them.
+//  References are the stage 4 fixture's f64 serial walkers made parametric in the token count; every depth a spec states is a function of the shape's token count, because a recurrence's rounding chain grows by one full state update (about 130 f32 roundings deep, the stage 4 fixture's stated per-token derivation) per token. Decode loops the one-token step, so its depth grows the same way. The gate formula's own correctness is the split kernels' business: the recurrence kernels read g and beta as inputs, as the production graph feeds them.
 const std = @import("std");
 const vk = @import("vulkan");
 const contract = @import("contract");
@@ -33,8 +17,7 @@ const channels: usize = @intCast(Model.conv_channels); // 6144
 const taps: usize = @intCast(Model.taps); // 4
 const state_elems: usize = @intCast(Model.state_elements); // 262144 f32
 
-/// The served prefill chunk: snapshots appear from 9 tokens on, one interior
-/// boundary per additional chunk.
+// The served prefill chunk: snapshots appear from 9 tokens on, one interior boundary per additional chunk.
 pub const chunk_fixed: u64 = 8;
 const timeout_ns: u64 = 30 * std.time.ns_per_s;
 const poison: u16 = 0xffff;
@@ -52,25 +35,21 @@ fn gateDepth(_: c.Shape) usize {
 fn tapsDepth(_: c.Shape) usize {
     return taps;
 }
-/// A recurrence's chain grows one state update (about 130 f32 roundings, the
-/// stage 4 fixture's per-token derivation) per token, plus its own output
-/// dot's depth once at the end.
+// A recurrence's chain grows one state update (about 130 f32 roundings, the stage 4 fixture's per-token derivation) per token, plus its own output dot's depth once at the end.
 fn recurYDepth(s: c.Shape) usize {
     return s.rows * 130 + 130;
 }
 fn recurStateDepth(s: c.Shape) usize {
     return s.rows * 130 + 2;
 }
-/// Decode loops the one-token step: the same per-token growth as the prefill,
-/// with the raw-gates prologue's chain (4 ops) inside each token's 130.
+// Decode loops the one-token step: the same per-token growth as the prefill, with the raw-gates prologue's chain (4 ops) inside each token's 130.
 fn decodeYDepth(s: c.Shape) usize {
     return s.rows * 260 + 130;
 }
 fn decodeStateDepth(s: c.Shape) usize {
     return s.rows * 132 + 2;
 }
-/// A snapshot slot's depth: `chunk_fixed` tokens from the chunk's start, plus
-/// the store.
+// A snapshot slot's depth: `chunk_fixed` tokens from the chunk's start, plus the store.
 fn snapDepth() f64 {
     return @floatFromInt(@as(usize, @intCast(chunk_fixed)) * 130 + 2);
 }
@@ -195,15 +174,7 @@ fn putF32(pairs: []u16, word: usize, v: f32) void {
     pairs[2 * word + 1] = @truncate(bits >> 16);
 }
 
-/// The stage 4 fixture's serial gated-delta walk, parametric in `tokens`,
-/// with each row's kv and output dots replayable in a contract accumulator
-/// (`acc` null: the fixture's sequential f64 sum, bit-identical to
-/// fx.RecurWalk and fx.Decode). Reads soa bf16, g f32 pairs and beta bf16
-/// bits; fills y, the terminal state and every interior chunk boundary's
-/// snapshot slot ((t+1)/chunk - 1) when `snap_chunk` is given — the shader
-/// stores one slot per interior boundary, not just the first. `max_state`
-/// tracks the largest pre-update state magnitude, the fixture's magnitude
-/// scale.
+// The stage 4 fixture's serial gated-delta walk, parametric in `tokens`, with each row's kv and output dots replayable in a contract accumulator (`acc` null: the fixture's sequential f64 sum, bit-identical to fx.RecurWalk and fx.Decode). Reads soa bf16, g f32 pairs and beta bf16 bits; fills y, the terminal state and every interior chunk boundary's snapshot slot ((t+1)/chunk - 1) when `snap_chunk` is given — the shader stores one slot per interior boundary, not just the first. `max_state` tracks the largest pre-update state magnitude, the fixture's magnitude scale.
 pub fn walk(
     tokens: usize,
     soa_bits: []const u16,
@@ -263,9 +234,7 @@ fn seq(terms: []const f64) f64 {
     return sum;
 }
 
-/// The fixture Split checker's math as want/mag: the soa section then beta,
-/// both bf16-kind outputs; mag is vmax^2 per head row for soa and |want| for
-/// beta, exactly the fixture budget's arguments.
+// The fixture Split checker's math as want/mag: the soa section then beta, both bf16-kind outputs; mag is vmax^2 per head row for soa and |want| for beta, exactly the fixture budget's arguments.
 pub fn splitReference(
     tokens: usize,
     conv_out_bits: []const u16,
@@ -308,9 +277,7 @@ pub fn splitReference(
     }
 }
 
-/// The fixture Conv checker's math for one conv: `in_word` reads the assembled
-/// input (state rows then projection rows) at (input row, channel); outputs
-/// T rows then, when `want_state` is given, the shifted carry window.
+// The fixture Conv checker's math for one conv: `in_word` reads the assembled input (state rows then projection rows) at (input row, channel); outputs T rows then, when `want_state` is given, the shifted carry window.
 pub fn convReference(
     tokens: usize,
     weight_bits: []const u16,
@@ -334,8 +301,7 @@ pub fn convReference(
     }
 }
 
-/// The prefill conv's assembled-input reader: rows 0..2 are the stored conv
-/// state, rows 3.. the projection output.
+// The prefill conv's assembled-input reader: rows 0..2 are the stored conv state, rows 3.. the projection output.
 const PrefillInput = struct {
     state_bits: []const u16,
     qkv_bits: []const u16,
@@ -344,8 +310,7 @@ const PrefillInput = struct {
     }
 };
 
-/// The decode conv's assembled-input reader at token `t`: rows 0..2 of that
-/// step's carried state, row 3 the token's x.
+// The decode conv's assembled-input reader at token `t`: rows 0..2 of that step's carried state, row 3 the token's x.
 const DecodeInput = struct {
     state_bits: []const u16,
     x_bits: []const u16,
@@ -355,8 +320,7 @@ const DecodeInput = struct {
     }
 };
 
-/// The g/beta pair one decode token's raw-gates prologue produces (the Ash
-/// chain), as the walk reads them.
+// The g/beta pair one decode token's raw-gates prologue produces (the Ash chain), as the walk reads them.
 fn decodeGates(a_bits: []const u16, b_bits: []const u16, a_log_bits: []const u16, dt_bits: []const u16, t: usize, g_pairs: []u16, beta_bits: []u16) void {
     for (0..heads) |h| {
         const ref = fx.gateRefAsh(a_bits[t * heads + h], b_bits[t * heads + h], f32Of(a_log_bits, h), dt_bits[h]);
@@ -365,8 +329,7 @@ fn decodeGates(a_bits: []const u16, b_bits: []const u16, a_log_bits: []const u16
     }
 }
 
-/// The shared gate harness expects a rig object; as in HIP, it exposes bytes
-/// while the fixture owns device buffers.
+// The shared gate harness expects a rig object; as in HIP, it exposes bytes while the fixture owns device buffers.
 const Rig = struct {
     output: []const u8 = &.{},
     inputs: []const u8 = &.{},
@@ -485,8 +448,7 @@ pub const Gdn = struct {
         return f.arena.allocator().alloc(f64, n);
     }
 
-    /// One device buffer uploaded from `bytes` (an input) or poisoned to
-    /// `poison_bytes` (an output), registered for cleanup; returns its index.
+    // One device buffer uploaded from `bytes` (an input) or poisoned to `poison_bytes` (an output), registered for cleanup; returns its index.
     fn devBuf(f: *Gdn, bytes: []const u8) !usize {
         const b = try vk.Buffer.init(f.dev, .device, bytes.len);
         f.bufs[f.made] = b;
@@ -499,8 +461,7 @@ pub const Gdn = struct {
         return vk.tensor.View.init(&f.bufs[idx], kind, 0, elements);
     }
 
-    /// The fixture's dyadic sampler so gate 3's inputs sit inside the ranges
-    /// the stated budgets were derived over.
+    // The fixture's dyadic sampler so gate 3's inputs sit inside the ranges the stated budgets were derived over.
     fn fillDyadic(rng: std.Random, v: []u16, lo: i32, hi: i32) void {
         for (v) |*x| x.* = fx.sampleDyadic(rng, lo, hi);
     }
@@ -513,9 +474,7 @@ pub const Gdn = struct {
         }
     }
 
-    /// Gate 1's plants: token row 1 of the per-token inputs carries a NaN and
-    /// both infinities; shared per-head parameters (a_log, dt, weight) stay
-    /// finite, so a planted class cannot swallow every output.
+    // Gate 1's plants: token row 1 of the per-token inputs carries a NaN and both infinities; shared per-head parameters (a_log, dt, weight) stay finite, so a planted class cannot swallow every output.
     fn plantNonfinite(f: *Gdn, rng: std.Random) !void {
         const T = f.tokens;
         const word = [_]u16{ 0x7fc0, 0x7f80, 0xff80 }; // NaN, +inf, -inf
@@ -566,10 +525,7 @@ pub const Gdn = struct {
         _ = rng;
     }
 
-    /// Gate 4's stress fill: integer-dyadic inputs whose f32 sums are exact in
-    /// any order (partials under 2^24) while fp16 overflows or loses by
-    /// thousands, and whose recurrence state stays pinned (v mirrors the f32
-    /// kv dot as closely as bf16 stores it, so delta is a tiny exact drift).
+    // Gate 4's stress fill: integer-dyadic inputs whose f32 sums are exact in any order (partials under 2^24) while fp16 overflows or loses by thousands, and whose recurrence state stays pinned (v mirrors the f32 kv dot as closely as bf16 stores it, so delta is a tiny exact drift).
     fn fillStress(f: *Gdn) void {
         const T = f.tokens;
         switch (f.which) {
@@ -616,18 +572,13 @@ pub const Gdn = struct {
                 }
             },
             .prefill_y, .prefill_state => {
-                // state 2^12 + small; k = 1, q = alternating +-1; g = 1 and
-                // beta = 2^-10, a convergent feedback gain (1.0 would collapse
-                // the state onto v and blow the kv dot's partials past 2^24);
-                // v mirrors the f32 kv dot as bf16 stores it, so delta is a
-                // tiny exact drift and the state stays pinned near 2^12
+                // state 2^12 + small; k = 1, q = alternating +-1; g = 1 and beta = 2^-10, a convergent feedback gain (1.0 would collapse the state onto v and blow the kv dot's partials past 2^24); v mirrors the f32 kv dot as bf16 stores it, so delta is a tiny exact drift and the state stays pinned near 2^12
                 for (0..state_elems) |i| putF32(f.h0_bits, i, @floatFromInt(4096 + i % 7));
                 for (0..3 * T * linear_dim) |i| f.soa_bits[i] = c.toBf16(1); // q, k
                 for (0..T * linear_dim) |i| {
                     if (i % dk % 2 == 1) f.soa_bits[i] = c.toBf16(-1); // q alternates
                 }
-                // the kv dot is the same 524667-ish integer for every head and
-                // row: k = 1 and the pinned state differ only in i % 7
+                // the kv dot is the same 524667-ish integer for every head and row: k = 1 and the pinned state differ only in i % 7
                 var kv: f64 = 0;
                 for (0..dk) |i| kv += @as(f64, @floatFromInt(4096 + i % 7));
                 for (0..T * linear_dim) |i| f.soa_bits[2 * T * linear_dim + i] = c.toBf16(@floatCast(kv));
@@ -660,9 +611,7 @@ pub const Gdn = struct {
         }
     }
 
-    /// The host half of prepare: refuse, generate, reference. Null: the shape
-    /// is refused. Callable without a device, which is how the host tests
-    /// prove the generated fills against the references before any GPU runs.
+    // The host half of prepare: refuse, generate, reference. Null: the shape is refused. Callable without a device, which is how the host tests prove the generated fills against the references before any GPU runs.
     fn prepareHost(f: *Gdn, shape: c.Shape, fill: g.Fill, seed: u64) !?usize {
         if (shape.rows == 0 or shape.n != heads or shape.k != dk or shape.rows > max_tokens) return null;
         f.reset();
@@ -724,8 +673,7 @@ pub const Gdn = struct {
             },
         }
 
-        // fills: the fixture's dyadic ranges for gate 3, engineered integers
-        // for gate 4, planted classes for gate 1
+        // fills: the fixture's dyadic ranges for gate 3, engineered integers for gate 4, planted classes for gate 1
         switch (fill) {
             .random => switch (f.which) {
                 .split_soa, .split_g => {
@@ -733,10 +681,7 @@ pub const Gdn = struct {
                     fillDyadic(rng, f.a_bits, -3, 2);
                     fillDyadic(rng, f.b_bits, -3, 2);
                     fillDyadic(rng, f.dt_bits, -4, 1);
-                    // served a_log keeps g a normal f32; a_log above ~2.4
-                    // drives g subnormal, which the device flushes - the
-                    // stage 4 fixture's census case, Main's call, not a
-                    // random-fill failure
+                    // served a_log keeps g a normal f32; a_log above ~2.4 drives g subnormal, which the device flushes - the stage 4 fixture's census case, Main's call, not a random-fill failure
                     fillDyadicF32(rng, f.a_log_bits, -6, 0);
                 },
                 .conv_prefill, .conv_decode => {
@@ -749,9 +694,7 @@ pub const Gdn = struct {
                     fillDyadicF32(rng, f.a_log_bits, -6, 0);
                 },
                 .prefill_y, .prefill_state => {
-                    // 130 tokens must stay inside f32: g <= 2^-3, beta and the
-                    // whole soa <= 2^-3, so the state's per-token factor is
-                    // well under one and the walk decays to the delta floor
+                    // 130 tokens must stay inside f32: g <= 2^-3, beta and the whole soa <= 2^-3, so the state's per-token factor is well under one and the walk decays to the delta floor
                     fillDyadic(rng, f.soa_bits, -6, -3);
                     fillDyadicF32(rng, f.g_pairs, -6, -3);
                     fillDyadic(rng, f.beta_bits, -6, -4);
@@ -773,10 +716,7 @@ pub const Gdn = struct {
                     fillDyadic(rng, f.a_bits, -3, 2);
                     fillDyadic(rng, f.b_bits, -3, 2);
                     fillDyadic(rng, f.dt_bits, -4, 1);
-                    // served a_log keeps g a normal f32; a_log above ~2.4
-                    // drives g subnormal, which the device flushes - the
-                    // stage 4 fixture's census case, Main's call, not a
-                    // random-fill failure
+                    // served a_log keeps g a normal f32; a_log above ~2.4 drives g subnormal, which the device flushes - the stage 4 fixture's census case, Main's call, not a random-fill failure
                     fillDyadicF32(rng, f.a_log_bits, -6, 0);
                 },
                 .conv_prefill, .conv_decode => {
@@ -789,9 +729,7 @@ pub const Gdn = struct {
                     fillDyadicF32(rng, f.a_log_bits, -6, 0);
                 },
                 .prefill_y, .prefill_state => {
-                    // 130 tokens must stay inside f32: g <= 2^-3, beta and the
-                    // whole soa <= 2^-3, so the state's per-token factor is
-                    // well under one and the walk decays to the delta floor
+                    // 130 tokens must stay inside f32: g <= 2^-3, beta and the whole soa <= 2^-3, so the state's per-token factor is well under one and the walk decays to the delta floor
                     fillDyadic(rng, f.soa_bits, -6, -3);
                     fillDyadicF32(rng, f.g_pairs, -6, -3);
                     fillDyadic(rng, f.beta_bits, -6, -4);
@@ -811,9 +749,7 @@ pub const Gdn = struct {
         // the decode loops' uploaded initial state: the FINAL generated bits
         if (f.state_init_bits.len != 0) @memcpy(f.state_init_bits, f.state_bits);
 
-        // host outputs (poisoned, guarded) and the f64 references. out is
-        // sized in u16 WORDS (an f32 output takes two), the reference count in
-        // OUTPUT ELEMENTS: the harness reads spec.out over count elements.
+        // host outputs (poisoned, guarded) and the f64 references. out is sized in u16 WORDS (an f32 output takes two), the reference count in OUTPUT ELEMENTS: the harness reads spec.out over count elements.
         const out_len: usize = switch (f.which) {
             .split_soa => 3 * T * linear_dim + T * heads,
             .split_g => 2 * T * heads,
@@ -844,8 +780,7 @@ pub const Gdn = struct {
         const out_len = (try f.prepareHost(shape, fill, seed)) orelse return false;
         const a = f.arena.allocator();
 
-        // device buffers at per-which fixed indices; inputs are uploaded from
-        // the bits, outputs from out's poisoned regions (or scratch poison)
+        // device buffers at per-which fixed indices; inputs are uploaded from the bits, outputs from out's poisoned regions (or scratch poison)
         var input_slices: [8][]u16 = undefined;
         const inputs = f.inputList(&input_slices);
         var input_total: usize = 0;
@@ -874,8 +809,7 @@ pub const Gdn = struct {
                 buf[0..7].* = .{ f.state_bits, f.qkv_bits, f.weight_bits, f.a_bits, f.b_bits, f.dt_bits, f.a_log_bits };
                 return buf[0..7];
             },
-            // the initial state rides its own never-written buffer, so the
-            // unchanged check sees it exactly as the first step consumed it
+            // the initial state rides its own never-written buffer, so the unchanged check sees it exactly as the first step consumed it
             .conv_decode => {
                 buf[0..7].* = .{ f.state_init_bits, f.qkv_bits, f.weight_bits, f.a_bits, f.b_bits, f.dt_bits, f.a_log_bits };
                 return buf[0..7];
@@ -891,20 +825,14 @@ pub const Gdn = struct {
         }
     }
 
-    /// One output's uploaded words: out's region at `start` when the fetch
-    /// downloads that output there, else fresh poison scratch (an output no
-    /// fetch reads). out is sliced only where prepare sized it, so a
-    /// mismatch is an error the gate reports, not a panic.
+    // One output's uploaded words: out's region at `start` when the fetch downloads that output there, else fresh poison scratch (an output no fetch reads). out is sliced only where prepare sized it, so a mismatch is an error the gate reports, not a panic.
     fn outWords(f: *Gdn, checked: bool, start: usize, words: usize) ![]u16 {
         if (!checked) return f.allocU16(words, poison);
         if (start > f.out_words or words > f.out_words - start) return error.OutputRegionOutOfRange;
         return f.out[start .. start + words];
     }
 
-    /// The words each device buffer takes, in buffer order: the inputs' bits
-    /// and the outputs' poison. The checked output of a kernel takes its
-    /// region of out, which prepare sized for it; every other output takes
-    /// fresh poison scratch, so out is only ever sliced where it was sized.
+    // The words each device buffer takes, in buffer order: the inputs' bits and the outputs' poison. The checked output of a kernel takes its region of out, which prepare sized for it; every other output takes fresh poison scratch, so out is only ever sliced where it was sized.
     fn uploadWords(f: *Gdn, buf: *[16][]u16) !usize {
         const T = f.tokens;
         var n: usize = 0;
@@ -919,8 +847,7 @@ pub const Gdn = struct {
                 n += 3;
             },
             .conv_prefill => {
-                // 0 state_in, 1 qkv, 2 weight, 3 a, 4 b, 5 dt, 6 a_log,
-                // 7 conv_input, 8 conv_out, 9 soa, 10 g, 11 beta, 12 state_out
+                // 0 state_in, 1 qkv, 2 weight, 3 a, 4 b, 5 dt, 6 a_log, 7 conv_input, 8 conv_out, 9 soa, 10 g, 11 beta, 12 state_out
                 buf[0..7].* = .{ f.state_bits, f.qkv_bits, f.weight_bits, f.a_bits, f.b_bits, f.dt_bits, f.a_log_bits };
                 n = 7;
                 buf[n] = try f.outWords(false, 0, (T + 3) * channels);
@@ -932,8 +859,7 @@ pub const Gdn = struct {
                 n += 6;
             },
             .conv_decode => {
-                // 0 state_init, 1 state_a, 2 state_b, 3 x, 4 weight, 5 a, 6 b,
-                // 7 dt, 8 a_log, 9 activated, 10 soa, 11 g, 12 beta
+                // 0 state_init, 1 state_a, 2 state_b, 3 x, 4 weight, 5 a, 6 b, 7 dt, 8 a_log, 9 activated, 10 soa, 11 g, 12 beta
                 buf[0..9].* = .{ f.state_init_bits, f.state_swap_bits, f.state_swap_bits, f.qkv_bits, f.weight_bits, f.a_bits, f.b_bits, f.dt_bits, f.a_log_bits };
                 n = 9;
                 buf[n] = try f.outWords(true, 0, T * channels);
@@ -955,8 +881,7 @@ pub const Gdn = struct {
                 }
             },
             .decode_y, .decode_state => {
-                // 0 soa, 1 a, 2 b, 3 a_log, 4 dt, 5 state_init, 6 state_a,
-                // 7 state_b, 8 y
+                // 0 soa, 1 a, 2 b, 3 a_log, 4 dt, 5 state_init, 6 state_a, 7 state_b, 8 y
                 buf[0..8].* = .{ f.soa_bits, f.a_bits, f.b_bits, f.a_log_bits, f.dt_bits, f.state_init_bits, f.state_swap_bits, f.state_swap_bits };
                 n = 8;
                 buf[n] = try f.outWords(f.which == .decode_y, 0, T * linear_dim);
@@ -966,18 +891,14 @@ pub const Gdn = struct {
         return n;
     }
 
-    /// Device buffers at per-which fixed indices (uploadWords and run agree).
-    /// Inputs upload from the generated bits; a checked output uploads poison
-    /// from out's own region, so a dead store survives as NaN into every gate,
-    /// and an output no fetch reads uploads fresh poison scratch.
+    // Device buffers at per-which fixed indices (uploadWords and run agree). Inputs upload from the generated bits; a checked output uploads poison from out's own region, so a dead store survives as NaN into every gate, and an output no fetch reads uploads fresh poison scratch.
     fn uploadBuffers(f: *Gdn) !void {
         var words: [16][]u16 = undefined;
         const n = try f.uploadWords(&words);
         for (words[0..n]) |w| _ = try f.devBuf(std.mem.sliceAsBytes(w));
     }
 
-    /// The f64 references over the generated bits, into want/mag, before any
-    /// device work; reference() hands the harness the prepared copy.
+    // The f64 references over the generated bits, into want/mag, before any device work; reference() hands the harness the prepared copy.
     fn computeWant(f: *Gdn) !void {
         const T = f.tokens;
         switch (f.which) {
@@ -1030,8 +951,7 @@ pub const Gdn = struct {
                     if (f.which == .decode_y) {
                         @memcpy(f.want[t * linear_dim ..][0..linear_dim], y_t);
                     } else {
-                        // only the final carry is checked; the chain still
-                        // walks every step
+                        // only the final carry is checked; the chain still walks every step
                         @memcpy(f.want[0..state_elems], st_out);
                     }
                     // the next step reads the f32 state this one left
@@ -1128,8 +1048,7 @@ pub const Gdn = struct {
         return soa_v.slice(t * 3 * linear_dim, 3 * linear_dim);
     }
 
-    /// Download every checked output into out's regions, then every input for
-    /// the unchanged check, and verify the guard words.
+    // Download every checked output into out's regions, then every input for the unchanged check, and verify the guard words.
     fn fetchOutputs(f: *Gdn) !void {
         const T = f.tokens;
         switch (f.which) {
@@ -1208,9 +1127,7 @@ pub const Gdn = struct {
         }
     }
 
-    /// The sums replay gate 4 runs: every dot in the op re-summed in `accum`
-    /// in `order`, everything else in float64, into `out` in the output
-    /// layout reference() uses.
+    // The sums replay gate 4 runs: every dot in the op re-summed in `accum` in `order`, everything else in float64, into `out` in the output layout reference() uses.
     pub fn simulate(f: *Gdn, accum: c.Accum, order: g.Order, out: []f64) !void {
         const T = f.tokens;
         switch (f.which) {
@@ -1294,10 +1211,7 @@ pub const Gdn = struct {
         }
     }
 
-    /// The stage 4 fixture's stated budgets as per-output allowances: the
-    /// same depth/ops/mids derivation and the same magnitude scale the
-    /// fixture's checkers use (max_state for the recurrence, the head row's
-    /// vmax^2 for the split, |acc| for the conv, |want| for the gate).
+    // The stage 4 fixture's stated budgets as per-output allowances: the same depth/ops/mids derivation and the same magnitude scale the fixture's checkers use (max_state for the recurrence, the head row's vmax^2 for the split, |acc| for the conv, |want| for the gate).
     pub fn bounds(f: *Gdn, want: []const f64, mag: []const f64, allow: []f64) !void {
         switch (f.which) {
             .split_soa => for (want, mag, allow) |w, m, *l| {
@@ -1336,9 +1250,7 @@ pub const Gdn = struct {
 
 const testing = std.testing;
 
-/// A fixture good enough for the host half of prepare: the arena needs a real
-/// allocator, but no device field is touched before uploadBuffers, which the
-/// host tests never call.
+// A fixture good enough for the host half of prepare: the arena needs a real allocator, but no device field is touched before uploadBuffers, which the host tests never call.
 fn hostFixture(which: Which) Gdn {
     return Gdn.init(testing.allocator, undefined, undefined, undefined, undefined, which);
 }
@@ -1373,9 +1285,7 @@ test "gdn contract prepareHost random fill: finite references within fixture bud
             const allow = try f.arena.allocator().alloc(f64, f.want.len);
             try f.bounds(f.want, f.mag, allow);
             for (allow) |l| try testing.expect(std.math.isFinite(l) and l > 0);
-            // every output word is still the poison it was uploaded from,
-            // because no run happened: the walker's want is what the GPU must
-            // meet, so a reference of the wrong length would show here
+            // every output word is still the poison it was uploaded from, because no run happened: the walker's want is what the GPU must meet, so a reference of the wrong length would show here
             for (f.out[f.want.len..]) |w| try testing.expectEqual(poison, w);
         }
     }
@@ -1386,16 +1296,13 @@ test "gdn contract prepareHost stress fill: bounded state, planted mirror, fp16-
         var f = hostFixture(which);
         defer f.deinit();
         _ = (try f.prepareHost(.{ .rows = 4, .n = heads, .k = dk }, .stress, 0x6764)) orelse return error.Refused;
-        // g and beta are 1.0-ish small: g exactly 1.0, beta 2^-10 (prefill) or
-        // sigmoid(-10) rounded (decode), so the state feedback converges
+        // g and beta are 1.0-ish small: g exactly 1.0, beta 2^-10 (prefill) or sigmoid(-10) rounded (decode), so the state feedback converges
         const state_src = if (which == .prefill_y or which == .prefill_state) f.h0_bits else f.state_init_bits;
         for (0..state_elems) |i| {
             const v = f32Of(state_src, i);
             try testing.expect(v >= 4096 and v < 4104);
         }
-        // the mirror: v = bf16 of the pinned kv dot, so delta is tiny (scan
-        // every soa word: the prefill's v section is contiguous, the decode's
-        // is per token)
+        // the mirror: v = bf16 of the pinned kv dot, so delta is tiny (scan every soa word: the prefill's v section is contiguous, the decode's is per token)
         var mirror_ok = false;
         for (f.soa_bits) |bits| {
             const v = bf(bits);
@@ -1429,8 +1336,7 @@ test "gdn contract conv prefill reference reproduces the fixture Conv checker's 
     _ = (try f.prepareHost(.{ .rows = @intCast(fx.tokens), .n = heads, .k = dk }, .random, 0x57a5)) orelse return error.Refused;
     const cf = try fx.Conv.init(testing.allocator, 0x57a4 + 1);
     defer cf.deinit();
-    // same seed family as the fixture: check MY reference math against a
-    // directly computed conv over MY generated bits
+    // same seed family as the fixture: check MY reference math against a directly computed conv over MY generated bits
     const C: usize = channels;
     for (0..@intCast(fx.tokens)) |t| {
         for (0..C) |ch| {
@@ -1538,8 +1444,7 @@ test "gdn contract split reference replays clean through the fixture Split check
     const T8: usize = @intCast(fx.tokens); // the fixture checker's comptime shape
     var f = try fx.Split.init(a, 0x9e); // the fixture generates its own inputs
     defer f.deinit();
-    // my reference over the SAME bits, rendered to bits, through the
-    // PRODUCTION fixture checker
+    // my reference over the SAME bits, rendered to bits, through the PRODUCTION fixture checker
     const want8 = try a.alloc(f64, 3 * T8 * linear_dim + T8 * heads);
     defer a.free(want8);
     const mag8 = try a.alloc(f64, want8.len);
@@ -1570,8 +1475,7 @@ test "gdn contract split g reference equals the fixture's Ash chain" {
     const a = testing.allocator;
     const f = try fx.SplitOne.init(a, 0x57ac);
     defer f.deinit();
-    // splitReference computes g nowhere; the split_g kernel checks g through
-    // the same gateRefAsh the fixture's checker uses, so replay it here
+    // splitReference computes g nowhere; the split_g kernel checks g through the same gateRefAsh the fixture's checker uses, so replay it here
     for (0..heads) |h| {
         const ref = fx.gateRefAsh(f.a_bits[h], f.b_bits[h], f32Of(f.a_log_bits, h), f.dt_bits[h]);
         try testing.expect(ref.g > 0 and ref.g < 1);
@@ -1603,9 +1507,7 @@ test "gdn contract stress keeps f32 sums exact and makes fp16 miss by over 100x"
         putF32(g_pairs, i, 1.0);
         beta_bits[i] = c.toBf16(0x1p-10);
     }
-    // f32 sums: within the state budget in every order (the dyadic feedback
-    // denominators grow past 24 bits after a couple of tokens, which is what
-    // the depth term of the budget is for)
+    // f32 sums: within the state budget in every order (the dyadic feedback denominators grow past 24 bits after a couple of tokens, which is what the depth term of the budget is for)
     const want_y = try ar.alloc(f64, T * linear_dim);
     const want_state = try ar.alloc(f64, state_elems);
     const st = try ar.alloc(f64, state_elems);
@@ -1621,8 +1523,7 @@ test "gdn contract stress keeps f32 sums exact and makes fp16 miss by over 100x"
             try testing.expect(@abs(gv - wv) <= allow);
         }
     }
-    // fp16: the kv dot's partial sums pass 65504, so the state and y blow
-    // past the budget by orders of magnitude
+    // fp16: the kv dot's partial sums pass 65504, so the state and y blow past the budget by orders of magnitude
     const allow = fx.budget(@floatFromInt(T * 130 + 2), 2, 0, want_state[0], max_state);
     var worst: f64 = 0;
     walk(T, soa_bits, g_pairs, beta_bits, h0_bits, st, sim_y, sim_state, &sim_max, null, null, .f16, .sequential);
@@ -1636,8 +1537,7 @@ test "gdn contract stress keeps f32 sums exact and makes fp16 miss by over 100x"
     try testing.expect(worst >= 100);
 }
 
-/// Whether the device buffer at `i` must take its words from out: the
-/// checked outputs the fetch downloads there, and nothing else.
+// Whether the device buffer at `i` must take its words from out: the checked outputs the fetch downloads there, and nothing else.
 fn expectOut(which: Which, i: usize, chunks: usize) bool {
     return switch (which) {
         .split_soa => i == 5 or i == 7,
@@ -1651,8 +1551,7 @@ fn expectOut(which: Which, i: usize, chunks: usize) bool {
     };
 }
 
-/// The device buffers every which uploads, so the fixed indices run() binds
-/// stay the ones uploadWords hands the device.
+// The device buffers every which uploads, so the fixed indices run() binds stay the ones uploadWords hands the device.
 fn expectCount(which: Which, chunks: usize) usize {
     return switch (which) {
         .split_soa, .split_g => 8,
@@ -1667,8 +1566,7 @@ test "gdn contract upload words: every upload inside the region prepare sized" {
         var f = hostFixture(which);
         defer f.deinit();
         const s = spec(which);
-        // the shape sequence the gates drive: gate 1 and 2's small() shape,
-        // gate 3's served and edge shapes, gate 4's stress shape
+        // the shape sequence the gates drive: gate 1 and 2's small() shape, gate 3's served and edge shapes, gate 4's stress shape
         var steps: [16]struct { shape: c.Shape, fill: rows.Fill } = undefined;
         var ns: usize = 0;
         var one = s.served[0];
@@ -1692,8 +1590,7 @@ test "gdn contract upload words: every upload inside the region prepare sized" {
 
         for (steps[0..ns]) |step| {
             const prepared = f.prepareHost(step.shape, step.fill, 0x6764) catch |err| switch (err) {
-                // the fixture refuses this fill before any upload; the gate
-                // reports the error and the upload path is not reached
+                // the fixture refuses this fill before any upload; the gate reports the error and the upload path is not reached
                 error.NonFiniteReference => continue,
                 else => return err,
             };

@@ -1,19 +1,5 @@
-//! The greedy draw under the kernel contract on Vulkan: the GPU greedy token
-//! selection of zig/src/vulkan/greedy.zig, checked by the gates against the
-//! host greedyRef. One registration, the composed draw: the harness's run hook
-//! is one prepared input set and one call, and the draw's three passes share
-//! one submission and its internal scratch (partials, the 12-byte readback) —
-//! finite_logits alone writes only verdict words, argreduce_chunk/combine
-//! alone write (value, index) pairs meaningful only to the fold and the
-//! decode. HIP registers its tf_argmax_parts+join the same way, so the three
-//! launches ride inside run() instead of three registrations.
-//!
-//! The stated rule the check hook enforces (greedy.zig's, unchanged Ash
-//! q.backend.draw): any non-finite anywhere in the row refuses it, winner or
-//! not; the largest value wins; exact ties (including +0/-0) go to the lowest
-//! index. The planted control that breaks exactly this rule is
-//! zig/kernels/vulkan/contract_controls_greedy.comp, registered from the main
-//! with control = .nonfinite.
+// The greedy draw under the kernel contract on Vulkan: the GPU greedy token selection of zig/src/vulkan/greedy.zig, checked by the gates against the host greedyRef. One registration, the composed draw: the harness's run hook is one prepared input set and one call, and the draw's three passes share one submission and its internal scratch (partials, the 12-byte readback) — finite_logits alone writes only verdict words, argreduce_chunk/combine alone write (value, index) pairs meaningful only to the fold and the decode. HIP registers its tf_argmax_parts+join the same way, so the three launches ride inside run() instead of three registrations.
+//  The stated rule the check hook enforces (greedy.zig's, unchanged Ash q.backend.draw): any non-finite anywhere in the row refuses it, winner or not; the largest value wins; exact ties (including +0/-0) go to the lowest index. The planted control that breaks exactly this rule is zig/kernels/vulkan/contract_controls_greedy.comp, registered from the main with control = .nonfinite.
 const std = @import("std");
 const vk = @import("vulkan");
 const contract = @import("contract");
@@ -22,20 +8,17 @@ const fx = @import("stage5_fixture.zig");
 const c = contract.spec;
 const g = contract.gates;
 
-/// The guarded shell's data window: 256 bytes in, the largest
-/// minStorageBufferOffsetAlignment Vulkan allows (the stage fixture's rule).
+// The guarded shell's data window: 256 bytes in, the largest minStorageBufferOffsetAlignment Vulkan allows (the stage fixture's rule).
 pub const guard: usize = fx.at * 2;
 const pattern: u8 = 0xa5;
 
-/// The combine folds one row in a single workgroup: greedy.zig's private
-/// max_chunks, mirrored here as the fixture mirrors block_elements.
+// The combine folds one row in a single workgroup: greedy.zig's private max_chunks, mirrored here as the fixture mirrors block_elements.
 const max_chunks: usize = 256;
 
 /// A row the combine folds in its single workgroup cannot exceed.
 const max_row: usize = max_chunks * fx.chunk;
 
-/// The word a refused row leaves: the reset fills the index word with it, so
-/// an unwritten or refused run can never pass as token 0.
+// The word a refused row leaves: the reset fills the index word with it, so an unwritten or refused run can never pass as token 0.
 pub const refused: u32 = std.math.maxInt(u32);
 
 pub const rule = "any non-finite anywhere in the row refuses it, winner or not; the largest value wins; " ++
@@ -45,9 +28,7 @@ fn flat(_: c.Shape) usize {
     return 0;
 }
 
-/// The served vocab, a draft window's rows and the combine's max_chunks edge;
-/// the tiled edges ride the 4096-wide chunk at one row: the 2-element minimum
-/// and the chunk boundary at 4094, 4096 and 4098.
+// The served vocab, a draft window's rows and the combine's max_chunks edge; the tiled edges ride the 4096-wide chunk at one row: the 2-element minimum and the chunk boundary at 4094, 4096 and 4098.
 pub fn spec() c.Spec {
     return .{
         .name = "vulkan greedy draw: finite_logits, argreduce_chunk, argreduce_combine (bf16)",
@@ -77,16 +58,14 @@ pub fn controlSpec() c.Spec {
     };
 }
 
-/// The contract's input shell: the rows between guard bytes, downloaded back
-/// for the repeat gate's unchanged-inputs and untouched-guards checks.
+// The contract's input shell: the rows between guard bytes, downloaded back for the repeat gate's unchanged-inputs and untouched-guards checks.
 pub const Rig = struct {
     a: std.mem.Allocator,
     dev: *const vk.Device,
     cmds: *vk.Commands,
     staging: vk.Buffer,
     timeout: u64,
-    /// The current prepare's guarded shell; the test's views keep their own
-    /// handle copy for the bindings and never deinit it — the rig owns it.
+    // The current prepare's guarded shell; the test's views keep their own handle copy for the bindings and never deinit it — the rig owns it.
     shell: ?vk.Buffer = null,
     data_bytes: usize = 0,
     seen: std.ArrayList(u8) = .empty,
@@ -109,8 +88,7 @@ pub const Rig = struct {
         r.outs.clearRetainingCapacity();
     }
 
-    /// The uploaded shell: pattern, data, pattern. The pattern must ride the upload —
-    /// fresh device memory reads as zeros, not as the pattern intact() demands.
+    // The uploaded shell: pattern, data, pattern. The pattern must ride the upload — fresh device memory reads as zeros, not as the pattern intact() demands.
     pub fn shellFor(r: *Rig, data: []const u8) ![]u8 {
         const all = try r.a.alloc(u8, data.len + 2 * guard);
         errdefer r.a.free(all);
@@ -156,17 +134,13 @@ pub const Rig = struct {
         return r.outs.items;
     }
 
-    /// The draw's outputs are its internal results and partials buffers (reset
-    /// per call, never bound as inputs); the control's maxima is its own
-    /// allocation. No output shares the input shell's range.
+    // The draw's outputs are its internal results and partials buffers (reset per call, never bound as inputs); the control's maxima is its own allocation. No output shares the input shell's range.
     pub fn overlap(_: *Rig) bool {
         return false;
     }
 };
 
-/// The composed draw's contract test, and (with a control SPIR-V) the planted
-/// control: same shapes, same fill, same check — only the run differs, so the
-/// control goes red at exactly the gate the draw's rule names.
+// The composed draw's contract test, and (with a control SPIR-V) the planted control: same shapes, same fill, same check — only the run differs, so the control goes red at exactly the gate the draw's rule names.
 pub const Greedy = struct {
     a: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
@@ -321,8 +295,7 @@ pub const Greedy = struct {
         @memset(mag, 0);
     }
 
-    /// The stated rule, at the gates that ask: a planted row refuses and names
-    /// its first offender; a finite row picks exactly greedyRef's token.
+    // The stated rule, at the gates that ask: a planted row refuses and names its first offender; a finite row picks exactly greedyRef's token.
     pub fn check(self: *Greedy, at: g.Gate) !?[]const u8 {
         const n = self.shape.n;
         const rows = self.shape.rows;
@@ -356,14 +329,12 @@ pub const Greedy = struct {
     }
 };
 
-/// Logits in eighths, as the shared kit fills them: 256 distinct values, so
-/// ties are common and the lowest-index rule decides across the chunk fold.
+// Logits in eighths, as the shared kit fills them: 256 distinct values, so ties are common and the lowest-index rule decides across the chunk fold.
 fn fillRow(data: []u16, rng: std.Random) void {
     for (data) |*d| d.* = c.toBf16(@as(f32, @floatFromInt(rng.uintLessThan(u32, 256))) / 8 - 16);
 }
 
-/// Every row: a finite would-be winner, then a losing NaN, +inf and -inf;
-/// every third row loses its winner to a NaN too.
+// Every row: a finite would-be winner, then a losing NaN, +inf and -inf; every third row loses its winner to a NaN too.
 fn plantNonFinite(bits: []u16, rows: usize, n: usize) void {
     for (0..rows) |r| {
         const row = bits[r * n ..][0..n];
@@ -463,7 +434,6 @@ test "the input shell uploads the pattern intact() checks; fresh device memory r
     for (all[0..guard]) |v| try testing.expectEqual(pattern, v);
     for (all[guard + data.len ..]) |v| try testing.expectEqual(pattern, v);
     try testing.expectEqualSlices(u8, &data, all[guard..][0..data.len]);
-    // intact() skips exactly the data window between the two patterned spans, so an
-    // uploaded shell without the pattern could only ever fail the repeat gate.
+    // intact() skips exactly the data window between the two patterned spans, so an uploaded shell without the pattern could only ever fail the repeat gate.
     try testing.expect(all[0] == pattern and all[guard - 1] == pattern);
 }

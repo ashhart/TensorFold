@@ -1,5 +1,4 @@
-//! The engines a native server opens on Vulkan: one Qwen3.5-2B dense model behind the lane host,
-//! one stream at a time, greedy only.
+// The engines a native server opens on Vulkan: one Qwen3.5-2B dense model behind the lane host, one stream at a time, greedy only.
 const std = @import("std");
 const api = @import("engine_api");
 const lanes = @import("lanes");
@@ -16,8 +15,7 @@ pub const families: []const api.Family = &.{
     .{ .model_type = "qwen3_5", .formats = &.{"mlx-q4g64"} },
 };
 
-/// The GPU family gate entries name a chip class; the Vulkan device admission names none yet,
-/// so `capabilities` reports no chip and every eligible device opens.
+// The GPU family gate entries name a chip class; the Vulkan device admission names none yet, so `capabilities` reports no chip and every eligible device opens.
 pub fn chip(a: Allocator) ?[]const u8 {
     _ = a;
     return null;
@@ -63,8 +61,7 @@ fn modelContext(a: Allocator, io: std.Io, dir: []const u8) i64 {
     return if (limit == .integer and limit.integer > 0) limit.integer else 0;
 }
 
-/// The context this open serves: an explicit `--context` must fit the model's own window and
-/// the SDPA arm's visible keys; the default is the model's own, capped at the arm's keys.
+// The context this open serves: an explicit `--context` must fit the model's own window and the SDPA arm's visible keys; the default is the model's own, capped at the arm's keys.
 fn contextFor(a: Allocator, o: api.Open, native: i64, problem: *[]const u8) error{Refused}!usize {
     if (o.context) |asked| {
         if (asked < 1) return refuse(a, problem, "--context {d}: give a positive token count", .{asked});

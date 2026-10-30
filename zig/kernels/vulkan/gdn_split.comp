@@ -1,48 +1,9 @@
 // Copyright © 2026 Joshua Warren / mlx-omarchy contributors.
 // SPDX-License-Identifier: MIT
-//
-// GDN pre-stage split for the Ash8c Metal oracle (gdn_pre.metal, post-conv
-// half): the depthwise conv has already run (conv_dw1d.comp over the
-// [T+3, C] conv input), so this kernel reads the raw conv output and does
-// the rest of gdn_pre: SiLU, the Q/K L2 norm split, the V passthrough and
-// the a/b gate from A_log / dt_bias. One workgroup of 32 lanes per
-// (token, head) mirrors Metal exactly: each lane owns 4 contiguous
-// channels (PER = 128/32), the row sum is a 32-lane reduction over the
-// per-lane partials, and every intermediate the Metal kernel rounds to
-// bf16 is rounded here too.
-//
-// Math per (t, head), C = 6144, DK = 128, NK = NV = 16:
-//   conv   = widen(conv_out[t*C + head*DK + lane*4 + j])     (already bf16)
-//   sig    = bf16(1/(1+exp(-conv)));  vals[j] = bf16(conv*sig)
-//   q (head < 16) / k (16..31):  inv = rsqrt(sum(vals^2)/128 + 1e-6/128),
-//       scale = bf16(1/128) for q, bf16(rsqrt(128)) for k,
-//       out = bf16(scale * bf16(vals[j]*inv))
-//   v (head 32..47): out = vals[j]
-//   lane 0:  s  = bf16(a[t,hv] + widen(dt[hv]))
-//            sp = bf16(max(s,0) + log(1+exp(-|s|)))
-//            g  = exp(-exp(A_log_f32[hv]) * sp)            (f32, like Metal)
-//            beta = bf16(1/(1+exp(-b[t,hv])))
-//
-// The reduction order differs from Metal's hardware simd_sum (documented in
-// gdn.zig; not claimed bit-exact). The gate chain is the same expression
-// sequence gated_delta_decode.comp's raw-gates prologue uses.
-//
-// Bindings (views bind at their base, so shader offsets start at zero):
-//   0 conv_out  bf16 [T, 6144]            readonly
-//   1 a         bf16 [T, 16]              readonly
-//   2 b         bf16 [T, 16]              readonly
-//   3 a_log     f32  [16]                 readonly
-//   4 dt_bias   bf16 [16]                 readonly
-//   5 qkv       bf16 SoA [3, T, 16, 128]  writeonly (q | k | v sections,
-//                                           each T*2048 elements)
-//   6 g         f32  [T, 16]              writeonly
-//   7 beta      bf16 [T, 16]              writeonly
-// Push (the standard Params prefix; only these fields are read):
-//   count       = T (tokens; grid x)
-//   lhs_size    = C (conv row stride, 6144)
-//   rhs_size    = T (SoA section stride in head-rows: T*16 heads * 128)
-//   output_size = 48 (heads; grid y)
-// Local size 32x1x1; grid (T, 48, 1). Shared memory: 32 f32 (128 B).
+//  GDN pre-stage split for the Ash8c Metal oracle (gdn_pre.metal, post-conv half): the depthwise conv has already run (conv_dw1d.comp over the [T+3, C] conv input), so this kernel reads the raw conv output and does the rest of gdn_pre: SiLU, the Q/K L2 norm split, the V passthrough and the a/b gate from A_log / dt_bias. One workgroup of 32 lanes per (token, head) mirrors Metal exactly: each lane owns 4 contiguous channels (PER = 128/32), the row sum is a 32-lane reduction over the per-lane partials, and every intermediate the Metal kernel rounds to bf16 is rounded here too.
+//  Math per (t, head), C = 6144, DK = 128, NK = NV = 16: conv = widen(conv_out[t*C + head*DK + lane*4 + j]) (already bf16) sig = bf16(1/(1+exp(-conv))); vals[j] = bf16(conv*sig) q (head < 16) / k (16..31): inv = rsqrt(sum(vals^2)/128 + 1e-6/128), scale = bf16(1/128) for q, bf16(rsqrt(128)) for k, out = bf16(scale * bf16(vals[j]*inv)) v (head 32..47): out = vals[j] lane 0: s = bf16(a[t,hv] + widen(dt[hv])) sp = bf16(max(s,0) + log(1+exp(-|s|))) g = exp(-exp(A_log_f32[hv]) * sp) (f32, like Metal) beta = bf16(1/(1+exp(-b[t,hv])))
+//  The reduction order differs from Metal's hardware simd_sum (documented in gdn.zig; not claimed bit-exact). The gate chain is the same expression sequence gated_delta_decode.comp's raw-gates prologue uses.
+//  Bindings (views bind at their base, so shader offsets start at zero): 0 conv_out bf16 [T, 6144] readonly 1 a bf16 [T, 16] readonly 2 b bf16 [T, 16] readonly 3 a_log f32 [16] readonly 4 dt_bias bf16 [16] readonly 5 qkv bf16 SoA [3, T, 16, 128] writeonly (q | k | v sections, each T*2048 elements) 6 g f32 [T, 16] writeonly 7 beta bf16 [T, 16] writeonly Push (the standard Params prefix; only these fields are read): count = T (tokens; grid x) lhs_size = C (conv row stride, 6144) rhs_size = T (SoA section stride in head-rows: T*16 heads * 128) output_size = 48 (heads; grid y) Local size 32x1x1; grid (T, 48, 1). Shared memory: 32 f32 (128 B).
 
 #version 460
 
@@ -96,8 +57,7 @@ uint16_t bf16_store(float value) {
   return uint16_t((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16);
 }
 
-// The a/b gate exactly as the Ash8c Metal gdn_pre lane 0 runs it: bf16
-// roundings on s and softplus, g kept f32 (exp(-exp(A_log) * sp)).
+// The a/b gate exactly as the Ash8c Metal gdn_pre lane 0 runs it: bf16 roundings on s and softplus, g kept f32 (exp(-exp(A_log) * sp)).
 vec2 ash_gate(float a_in, float b_in, float a_log, float dt_in) {
   float s = bf16_load(bf16_store(a_in + dt_in));
   float sp = bf16_load(bf16_store(max(s, 0.0f) + log(1.0f + exp(-abs(s)))));

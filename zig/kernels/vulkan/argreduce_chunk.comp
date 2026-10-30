@@ -1,28 +1,10 @@
-// Copied verbatim from mlx-omarchy shaders/argreduce_chunk.comp (same SHA-256,
-// 120d1171…) for the stage-2 greedy draw; the greedy host drives it with
-// operation = 1 (max), one row, matrix_m = 4096.
+// Reused from mlx-omarchy shaders/argreduce_chunk.comp (MIT), comments condensed; driven at operation = 1 (max), one row, matrix_m = 4096.
 
 // Copyright © 2026 Joshua Warren / mlx-omarchy contributors.
 // SPDX-License-Identifier: MIT
-//
-// ArgMin/ArgMax over the last axis of a long float row, phase 1 of 2. The
-// single-workgroup kernel (argreduce_suffix.comp) walks a 248320-wide logits
-// row with 256 lanes and takes about 0.4 ms on an M2 Max. Here the row is cut
-// into `matrix_n` contiguous chunks of `matrix_m` elements (at most 4096, so
-// a lane holds at most 16 values), one workgroup per (row, chunk), and each
-// workgroup writes its (value, index) pair to a partial buffer. Phase 2
-// (argreduce_combine.comp) combines the pairs of one row.
-//
-// The rule is the one of argreduce_suffix.comp, so the final index is the same
-// for every input: the first index of the extreme value; a NaN wins over any
-// non-NaN and the FIRST NaN index wins; the running pair starts at the type's
-// infinity with index 0, so an element that equals that infinity never wins
-// and a row with no winner returns 0. A pair is an element of a total
-// preorder (value, then lower index), so cutting and combining in any order
-// gives the same pair.
-//
-// Variants: float32 (default), -DUSE_FP16, -DUSE_BF16. Floats compare in
-// float32. Grid: x = rows * chunks (at most 65535).
+// ArgMin/ArgMax phase 1 of 2: one workgroup per (row, chunk of matrix_m, at most 4096 = 16 values a lane) writes its (value, index) pair.
+// The argreduce_suffix.comp rule, so every input gets the same index: extreme wins, first index on ties, first NaN wins, pairs start at (infinity, 0); a total preorder (value, then lower index) makes cutting and combining order-free.
+//  Variants: float32 (default), -DUSE_FP16, -DUSE_BF16. Floats compare in float32. Grid: x = rows * chunks (at most 65535).
 #version 460
 
 #ifdef USE_FP16

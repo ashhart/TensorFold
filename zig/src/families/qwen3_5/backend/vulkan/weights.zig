@@ -1,23 +1,5 @@
-//! The native Vulkan Qwen3.5-2B weights: every checkpoint tensor of the one
-//! supported configuration uploaded as typed device views over stable,
-//! heap-owned buffers. The oracle is the unchanged Metal native loader (raw
-//! BF16 norm gains passed through untouched — no `1 + w`, no F32 norm
-//! conversion); the shared HIP loader's F32-norm policy is deliberately not
-//! used. Admission is fail-closed: the pinned Qwen3.5-2B geometry, affine Q4
-//! group-64 quantization, dense MLP, and every tensor's exact dtype and shape
-//! are checked before any byte is read; anything else is refused, never
-//! silently adapted. `Model.load` keeps its errors inferred, so config and
-//! checkpoint I/O errors reach the caller as themselves, not translated.
-//! Weights are streamed through a small staging buffer with
-//! the existing checked uploads; no CPU dequantization and no inference here.
-//!
-//! Views point into buffers this module allocated on the heap and owns until
-//! `deinit`, so no view ever dangles behind a moved or stack-allocated buffer.
-//! Every load-time GPU operation (the staged uploads) runs through `Commands`
-//! and completes before `load` returns; a `Timeout` or `InFlight` at any
-//! point goes through `commands.orExit` inside the loader — exiting the
-//! process rather than unwinding into the frees of a load whose submissions
-//! may still be in flight.
+// The native Vulkan Qwen3.5-2B weights: every checkpoint tensor of the one supported configuration uploaded as typed device views over stable, heap-owned buffers. The oracle is the unchanged Metal native loader (raw BF16 norm gains passed through untouched — no `1 + w`, no F32 norm conversion); the shared HIP loader's F32-norm policy is deliberately not used. Admission is fail-closed: the pinned Qwen3.5-2B geometry, affine Q4 group-64 quantization, dense MLP, and every tensor's exact dtype and shape are checked before any byte is read; anything else is refused, never silently adapted. `Model.load` keeps its errors inferred, so config and checkpoint I/O errors reach the caller as themselves, not translated. Weights are streamed through a small staging buffer with the existing checked uploads; no CPU dequantization and no inference here.
+//  Views point into buffers this module allocated on the heap and owns until `deinit`, so no view ever dangles behind a moved or stack-allocated buffer. Every load-time GPU operation (the staged uploads) runs through `Commands` and completes before `load` returns; a `Timeout` or `InFlight` at any point goes through `commands.orExit` inside the loader — exiting the process rather than unwinding into the frees of a load whose submissions may still be in flight.
 const std = @import("std");
 const vk = @import("vulkan");
 const pinned = @import("../../config.zig");
@@ -37,8 +19,7 @@ pub const Error = loader.table.Error || pinned.Error || vk.runtime.Error ||
 /// The text tower's key prefix, as the shared loader names it.
 const prefix = loader.checkpoint.prefix;
 
-/// One quantized projection on the device: packed affine words, per-group
-/// scales and biases, and the row/column geometry the qmm kernel checks.
+// One quantized projection on the device: packed affine words, per-group scales and biases, and the row/column geometry the qmm kernel checks.
 pub const Quant = struct {
     w: View,
     scales: View,
@@ -49,9 +30,7 @@ pub const Quant = struct {
 
 pub const DenseMlp = struct { gate: Quant, up: Quant, down: Quant };
 
-/// A full-attention layer: Q4 projections and raw BF16 norms. `q` holds the
-/// interleaved query and output-gate rows (4096 rows for 8 query heads of
-/// 256); the split is the forward's job, exactly as the Metal oracle reads it.
+// A full-attention layer: Q4 projections and raw BF16 norms. `q` holds the interleaved query and output-gate rows (4096 rows for 8 query heads of 256); the split is the forward's job, exactly as the Metal oracle reads it.
 pub const FullLayer = struct {
     input_norm: View,
     post_norm: View,
@@ -64,11 +43,7 @@ pub const FullLayer = struct {
     mlp: DenseMlp,
 };
 
-/// A linear (GatedDeltaNet) layer: everything as the checkpoint stores it.
-/// The conv taps stay raw BF16 for both decode and prefill — conv_dw1d reads
-/// a uint16 storage type and widens inside the kernel, the same raw taps the
-/// Metal oracle passes. Norm gains stay raw BF16; A_log stays raw F32;
-/// dt_bias stays raw BF16.
+// A linear (GatedDeltaNet) layer: everything as the checkpoint stores it. The conv taps stay raw BF16 for both decode and prefill — conv_dw1d reads a uint16 storage type and widens inside the kernel, the same raw taps the Metal oracle passes. Norm gains stay raw BF16; A_log stays raw F32; dt_bias stays raw BF16.
 pub const LinearLayer = struct {
     input_norm: View,
     post_norm: View,
@@ -86,8 +61,7 @@ pub const LinearLayer = struct {
 
 pub const Layer = union(enum) { full: FullLayer, linear: LinearLayer };
 
-/// The one supported model, checked field by field against the pinned family
-/// constants before anything is trusted.
+// The one supported model, checked field by field against the pinned family constants before anything is trusted.
 pub fn expectPinnedModel(s: loader.config.Spec) Error!void {
     const expected = .{
         .hidden = pinned.hidden,
@@ -141,9 +115,7 @@ fn expectTensor(key: []const u8, t: Tensor, dt: loader.table.DType, shape: []con
     }
 }
 
-/// One whole-model upload in progress. Every device buffer it creates is
-/// heap-owned and recorded; `deinit` frees exactly what was created, also on
-/// the error path, so a partial load never leaks or double-frees.
+// One whole-model upload in progress. Every device buffer it creates is heap-owned and recorded; `deinit` frees exactly what was created, also on the error path, so a partial load never leaks or double-frees.
 const Builder = struct {
     gpa: Allocator,
     dev: *const Device,
@@ -187,13 +159,8 @@ const Builder = struct {
         return t;
     }
 
-    /// A device buffer holding `t`'s bytes exactly, streamed through the
-    /// staging buffer; the returned view is typed and word-padded by `View`.
-    ///
-    /// Ownership transfers exactly once: until the slot is registered in
-    /// `keep`, this function alone cleans up (slot plus the Vk allocation) on
-    /// every failure; after registration only `Builder.deinit` frees it, so a
-    /// failed upload never double-frees or leaves a dangling slot.
+    // A device buffer holding `t`'s bytes exactly, streamed through the staging buffer; the returned view is typed and word-padded by `View`.
+    //  Ownership transfers exactly once: until the slot is registered in `keep`, this function alone cleans up (slot plus the Vk allocation) on every failure; after registration only `Builder.deinit` frees it, so a failed upload never double-frees or leaves a dangling slot.
     fn tensor(b: *Builder, t: Tensor) !View {
         const kind = kindOf(t.dtype) orelse return error.UnsupportedModel;
         const elements: u64 = @intCast(t.numel());
@@ -209,8 +176,7 @@ const Builder = struct {
             b.gpa.destroy(ptr);
             return e;
         };
-        // registered: in-flight failures exit the process here (orExit),
-        // never unwinding into the frees below this load's scope
+        // registered: in-flight failures exit the process here (orExit), never unwinding into the frees below this load's scope
         try vk.orExit(vk.upload(b.cmds, ptr.*, 0, b.staging, t.bytes, b.timeout_ns));
         return View.init(ptr, kind, 0, elements);
     }
@@ -222,8 +188,7 @@ const Builder = struct {
         return b.tensor(t);
     }
 
-    /// A packed affine projection of `n` rows over `k` inputs, group 64:
-    /// U32 words [n, k/8] plus BF16 scales and biases [n, k/64], all checked.
+    // A packed affine projection of `n` rows over `k` inputs, group 64: U32 words [n, k/8] plus BF16 scales and biases [n, k/64], all checked.
     fn quant(b: *Builder, name: []const u8, n: usize, k: usize) !Quant {
         var buf: [192]u8 = undefined;
         const w = try b.raw(try key(&buf, "{s}.weight", .{name}), .u32, &.{ n, k / 8 });
@@ -232,8 +197,7 @@ const Builder = struct {
         return .{ .w = w, .scales = scales, .biases = biases, .n = n, .k = k };
     }
 
-    /// A raw BF16 norm gain, passed through byte for byte (the Metal oracle's
-    /// semantics: the kernel multiplies the gain directly, no `1 + w`).
+    // A raw BF16 norm gain, passed through byte for byte (the Metal oracle's semantics: the kernel multiplies the gain directly, no `1 + w`).
     fn norm(b: *Builder, name: []const u8, elements: usize) !View {
         return b.raw(name, .bf16, &.{elements});
     }
@@ -285,8 +249,7 @@ const Builder = struct {
     }
 };
 
-/// The loaded text tower: typed views over this module's own heap buffers,
-/// the head tied to the embedding exactly when the checkpoint says so.
+// The loaded text tower: typed views over this module's own heap buffers, the head tied to the embedding exactly when the checkpoint says so.
 pub const Model = struct {
     gpa: Allocator,
     spec: loader.config.Spec,
@@ -297,17 +260,11 @@ pub const Model = struct {
     buffers: []*Buffer,
     embed: Quant,
     final_norm: View,
-    /// `null` when tied; `outputHead` returns `embed` in that case. A missing
-    /// separate head on an untied checkpoint is a refused load, never an
-    /// assumed tie.
+    // `null` when tied; `outputHead` returns `embed` in that case. A missing separate head on an untied checkpoint is a refused load, never an assumed tie.
     head: ?Quant,
     layers: []Layer,
 
-    /// Loads the checkpoint directory `dir` onto `dev` through `cmds`.
-    /// `staging` is the caller's staging buffer (any nonempty size; transfers
-    /// chunk through it). Admission runs first, so an unsupported checkpoint
-    /// is refused before any GPU work. All returned views stay valid for the
-    /// model's lifetime: every backing buffer is heap-owned and never moved.
+    // Loads the checkpoint directory `dir` onto `dev` through `cmds`. `staging` is the caller's staging buffer (any nonempty size; transfers chunk through it). Admission runs first, so an unsupported checkpoint is refused before any GPU work. All returned views stay valid for the model's lifetime: every backing buffer is heap-owned and never moved.
     pub fn load(
         gpa: Allocator,
         dev: *const Device,
@@ -317,8 +274,7 @@ pub const Model = struct {
         staging: Buffer,
         timeout_ns: u64,
     ) !Model {
-        // pinned admission: model type, geometry, quantization and tying,
-        // straight from config.json — before anything else is read
+        // pinned admission: model type, geometry, quantization and tying, straight from config.json — before anything else is read
         const cfg = pinned.Config.read(gpa, io, dir) catch |err| {
             std.debug.print("Vulkan weights config.json admission: {s}\n", .{@errorName(err)});
             return err;
@@ -343,14 +299,12 @@ pub const Model = struct {
         var layers: std.ArrayList(Layer) = .empty;
         errdefer layers.deinit(gpa);
 
-        // the output head: tied means the embedding; untied means a real
-        // lm_head that must exist — a missing one refuses the load
+        // the output head: tied means the embedding; untied means a real lm_head that must exist — a missing one refuses the load
         const head: ?Quant = if (cfg.tied) null else try b.quant("language_model.lm_head", pinned.vocab, pinned.hidden);
 
         const embed = try b.quant(prefix ++ "embed_tokens", pinned.vocab, pinned.hidden);
         const final_norm = try b.norm(prefix ++ "norm.weight", pinned.hidden);
-        // each part's mapped pages go once it is up: host RSS holds one layer
-        // of the checkpoint at a time, not the whole file set
+        // each part's mapped pages go once it is up: host RSS holds one layer of the checkpoint at a time, not the whole file set
         ck.release(null);
         for (0..pinned.layers) |i| {
             try layers.append(gpa, try b.layer(i));
@@ -379,8 +333,7 @@ pub const Model = struct {
         return m.head orelse m.embed;
     }
 
-    /// Frees every device buffer. Call only when no submission touching any
-    /// view can still be pending; in-flight errors already exited via orExit.
+    // Frees every device buffer. Call only when no submission touching any view can still be pending; in-flight errors already exited via orExit.
     pub fn deinit(m: *Model) void {
         for (m.buffers) |ptr| {
             var buf = ptr.*;

@@ -1,22 +1,6 @@
-// Attention output gate for the dense Qwen3.5-2B Metal oracle, replacing
-// zig/kernels/metal/qwen3_5/layout.metal's qwen35_attention_gate on
-// Vulkan. No existing house shader reads the oracle's interleaved q/gate
-// projection layout or computes sigmoid(gate)*ctx, so this kernel is new.
-//
-// Per token the q projection emits 16 interleaved 256-wide head blocks:
-// q head h at h*512, its gate at h*512 + 256 (qraw row stride 4096).
-// The Metal op is, per output element d of row r:
-//   gate = qraw[r*4096 + (d/256)*512 + 256 + d%256]
-//   s    = bfloat(1 / (1 + exp(-gate)))        -- one RNE bf16 rounding
-//   out  = bfloat(float(ctx[r*2048 + d]) * float(s))
-// This kernel reproduces exactly that: f32 sigmoid rounded to bf16 once,
-// f32 multiply, one RNE bf16 store per lane. Each thread owns one whole
-// output word (two adjacent elements, same head, word-aligned gate pair).
-//
-// Bindings (all bound at their base, element offsets zero):
-//   0 ctx   readonly packed bf16 words, rows*1024 words
-//   1 qraw  readonly packed bf16 words, rows*2048 words
-//   2 out   writeonly packed bf16 words, rows*1024 words
+// Attention output gate for the dense Qwen3.5-2B Metal oracle, replacing zig/kernels/metal/qwen3_5/layout.metal's qwen35_attention_gate on Vulkan. No existing house shader reads the oracle's interleaved q/gate projection layout or computes sigmoid(gate)*ctx, so this kernel is new.
+//  Per token the q projection emits 16 interleaved 256-wide head blocks: q head h at h*512, its gate at h*512 + 256 (qraw row stride 4096). The Metal op is, per output element d of row r: gate = qraw[r*4096 + (d/256)*512 + 256 + d%256] s = bfloat(1 / (1 + exp(-gate))) -- one RNE bf16 rounding out = bfloat(float(ctx[r*2048 + d]) * float(s)) This kernel reproduces exactly that: f32 sigmoid rounded to bf16 once, f32 multiply, one RNE bf16 store per lane. Each thread owns one whole output word (two adjacent elements, same head, word-aligned gate pair).
+//  Bindings (all bound at their base, element offsets zero): 0 ctx readonly packed bf16 words, rows*1024 words 1 qraw readonly packed bf16 words, rows*2048 words 2 out writeonly packed bf16 words, rows*1024 words
 //
 // Copyright © 2026 Joshua Warren / mlx-omarchy contributors.
 // SPDX-License-Identifier: MIT
