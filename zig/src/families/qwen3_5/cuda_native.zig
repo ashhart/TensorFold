@@ -47,7 +47,10 @@ pub const kept_disk = @import("cuda_disk.zig");
 /// explain() words open refusals too (--vision on a checkpoint without a tower it reads).
 pub const explains_open = true;
 
-pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, vision: ?vision.Limits = null, kv8: bool = false, prompt_int8: bool = false, precision: ?enum { full } = null };
+/// The server's reading of the room left now; null if unreadable.
+pub const Room = struct { ctx: *anyopaque, read: *const fn (*anyopaque) ?u64 };
+/// `room` and `drafter` size an EXL3 checkpoint's load: its embedding rows go to host memory when the card is short.
+pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, vision: ?vision.Limits = null, kv8: bool = false, prompt_int8: bool = false, precision: ?enum { full } = null, room: ?Room = null, drafter: ?[]const u8 = null };
 
 /// What the native server drives: the lane backend, the facts its round loop reads, and how to free it.
 pub const Loaded = struct {
@@ -112,7 +115,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     const page_test = try cache_mod.pageTest();
     _ = try cache_mod.cacheRows(o.context, page_test);
     if (page_tokens > 0 and o.slide) return error.QwenPagesNoLearner;
-    const e = try E.Engine.init(gpa, io, ctx, dir, o.kv8);
+    const e = try E.Engine.initFit(gpa, io, ctx, dir, o.kv8, fitOf(o));
     errdefer e.deinit();
     if (o.prompt_int8) try e.int8.enable(e); // --prompt-precision int8: prompt projections quantize their inputs
     if (e.g.vocab != c.vocab) return error.UnsupportedQwenVocab; // draw.zig's masks are sized by the 2B's vocabulary
@@ -140,6 +143,13 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .target = &l.target,
         .layout = if (page_tokens > 0) pages_mod.layout(e, o.context, page_tokens, 0, 0) else null,
     };
+}
+
+/// What an EXL3 load must leave room for: one stream at the asked window, and the drafter that loads beside it.
+fn fitOf(o: Options) ?@import("cuda_host_embed.zig").Fit {
+    const r = o.room orelse return null;
+    const room = r.read(r.ctx) orelse return null;
+    return .{ .room = room, .context = o.context, .drafter = if (o.drafts) o.drafter else null };
 }
 
 pub fn learnModel(p: *anyopaque, dir: []const u8) slide.Model {
