@@ -97,6 +97,7 @@ pub const stream_rows = [_]u8{ 1, 2, 4 }; // its row counts: columns * rows <= 1
 pub const stream_waves = 4; // kStreamWaves
 pub const streams_wanted = 3000; // kStreamWavesWanted
 pub const stream_code_words = 32; // kStreamCodeWords
+pub const stream_pair_code_words = affine_stream.stream_pair_code_words;
 
 /// The K-parallel tiles of a short prompt: cb columns a lane set, r rows a pass over up to rb row blocks.
 pub const KpTile = struct { cb: c_int, r: c_int, waves: c_int, rb: c_int, loop: bool = true };
@@ -138,6 +139,8 @@ pub const Kernels = struct {
     relu2_pair: [bit_widths.len][stream_rows.len][stream_cbs.len]?Function,
     /// Off keeps the decode tiles before the stream tile (the policy's reference switch).
     stream_on: bool,
+    /// A test's forced columns a lane (a stream_cbs value; 0: the rule), where the shape takes it.
+    stream_cb_force: c_int,
     block: [bit_widths.len]Function,
     gemm: [bit_widths.len]Function,
     wmma_gemm: [bit_widths.len]Function,

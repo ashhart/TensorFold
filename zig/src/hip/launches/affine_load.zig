@@ -30,6 +30,7 @@ pub fn load(tiles_obj: Module, dot2_obj: Module, caps: Caps, choices: Choices) E
     k.mode = choices.matrix;
     k.tile = if (choices.gemm) .gemm else .block;
     k.stream_on = choices.stream;
+    k.stream_cb_force = 0;
     k.reg = Registry.init(tableFor(caps), &mlx_entries.all);
     k.reg.verify(k.env(), .mlx) catch return error.Invalid;
     // the GEMM tile's rows of x a lane keeps (tiles/gemm.hpp GemmShape): 8 for BF16, 16 for FP16

@@ -20,6 +20,9 @@ const stream_waves = affine.stream_waves;
 const streams_wanted = affine.streams_wanted;
 const stream_code_words = affine.stream_code_words;
 
+/// A SwiGLU pair's lane carries at most this many code words (at least 2 columns): more waves in flight, same sums.
+pub const stream_pair_code_words = 8;
+
 pub fn streamWith(
     k: *const Kernels,
     r: *const runtime.Runtime,
@@ -44,9 +47,14 @@ pub fn streamWith(
         c -= 1;
         // one column a lane is the plain product's only (a pair's gate and up need two; relu^2 keeps its tiles)
         if (stream_cbs[c] * stream_rows[ri] > 16 or stream_cbs[c] * a.bits > stream_code_words or (stream_cbs[c] < 2 and (pair_div == 2 or relu2))) continue;
+        if (pair_div == 2 and stream_cbs[c] > 2 and stream_cbs[c] * a.bits > stream_pair_code_words) continue;
         pick = c;
         const per_block: c_int = stream_waves * (@as(c_int, 32) >> lpc_log2) * @divExact(stream_cbs[c], pair_div);
         if (@as(u64, cdiv(total_n, per_block)) * stream_waves * @as(u64, @intCast(items)) * cdiv(a.m, stream_rows[ri]) >= streams_wanted) break;
+    }
+    for (stream_cbs, 0..) |cb, i| {
+        if (cb != k.stream_cb_force or cb * stream_rows[ri] > 16 or cb * a.bits > stream_code_words or (cb < 2 and (pair_div == 2 or relu2))) continue;
+        pick = i;
     }
     const per_block: c_int = stream_waves * (@as(c_int, 32) >> lpc_log2) * @divExact(stream_cbs[pick], pair_div);
     var blocks: c_uint = cdiv(total_n, per_block);

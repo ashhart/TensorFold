@@ -138,7 +138,7 @@ const affine = @import("../launches/affine.zig");
 const ref = @import("affine/reference.zig");
 
 /// A random packed product on the host and the device: (n, k) at `bits` and `group`, bf16 tables, `experts` stacked.
-const Matrix = struct {
+pub const Matrix = struct {
     n: usize,
     k: usize,
     bits: usize,
@@ -148,7 +148,7 @@ const Matrix = struct {
     bias: []u16,
     dev: [3]@import("../memory.zig").DeviceBuffer,
 
-    fn init(t: *Rig, rng: *rig.Rng, n: usize, k: usize, bits: usize, group_size: usize, experts: usize) !Matrix {
+    pub fn init(t: *Rig, rng: *rig.Rng, n: usize, k: usize, bits: usize, group_size: usize, experts: usize) !Matrix {
         var m: Matrix = .{ .n = n, .k = k, .bits = bits, .group = group_size, .words = undefined, .scale = undefined, .bias = undefined, .dev = undefined };
         m.words = try gpa.alloc(u32, experts * n * k * bits / 32);
         m.scale = try gpa.alloc(u16, experts * n * k / group_size);
@@ -160,18 +160,18 @@ const Matrix = struct {
         return m;
     }
 
-    fn deinit(m: *Matrix) void {
+    pub fn deinit(m: *Matrix) void {
         gpa.free(m.words);
         gpa.free(m.scale);
         gpa.free(m.bias);
         for (&m.dev) |*b| b.free();
     }
 
-    fn problem(m: Matrix, t: *const Rig, x: []const u16) ref.Problem {
+    pub fn problem(m: Matrix, t: *const Rig, x: []const u16) ref.Problem {
         return .{ .fp16 = !t.bf16, .n = m.n, .k = m.k, .bits = m.bits, .group = m.group, .x = x, .words = m.words, .scale = m.scale, .bias = m.bias };
     }
 
-    fn arg(m: Matrix, t: *const Rig, x: u64, rows: usize, out: u64) affine.Arg {
+    pub fn arg(m: Matrix, t: *const Rig, x: u64, rows: usize, out: u64) affine.Arg {
         return .{
             .x = x,
             .words = at(m.dev[0]),
@@ -304,4 +304,5 @@ test "the routed gate and up with its activation in one launch is no further fro
 
 test {
     _ = @import("decode_route.zig");
+    _ = @import("decode_products.zig");
 }
