@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { syntheticBenchmarkReceipt } from './fixtures'
-import { parseBenchmarkReceipt, benchmarkCells, benchmarkProtocolComplete } from './receipt'
+import { parseBenchmarkReceipt, benchmarkCells, benchmarkProtocolComplete, LEGACY_BENCHMARK_SUITE_SHA } from './receipt'
 import { assertBundledBenchmarkVersion, BENCHMARK_ENGINE_VERSION } from './version'
 
 const receipt = syntheticBenchmarkReceipt()
@@ -12,11 +12,28 @@ assert.equal(benchmarkCells(parsed)[0].successful, 5)
 assert.equal(benchmarkCells(parsed)[0].deliveryTokensPerSecond?.median, 100)
 assert.equal(benchmarkCells(parsed)[0].firstTextSeconds?.median, 0.30000000000000004)
 assert.equal(parsed.samples[0].server_decode_seconds, null, 'missing engine duration stays unknown')
-const current = structuredClone(receipt); current.runtime.tensorfold_version = '1.1.0'
-assert.equal(parseBenchmarkReceipt(JSON.stringify(current), { model: current.model.repo_id, serial: false, engineVersion: '1.1.0' }).runtime.tensorfold_version, '1.1.0')
-const historical = structuredClone(receipt); historical.runtime.tensorfold_version = '1.0.12'
-assert.equal(parseBenchmarkReceipt(JSON.stringify(historical)).runtime.tensorfold_version, '1.0.12', 'reviewed historical receipts remain readable after the engine update')
-assert.throws(() => parseBenchmarkReceipt(JSON.stringify(historical), { model: historical.model.repo_id, serial: false, engineVersion: '1.1.0' }), /invalid|unsupported/, 'a historical receipt cannot substitute for a live run on the new engine')
+assert.equal(parseBenchmarkReceipt(JSON.stringify(receipt), { model: receipt.model.repo_id, serial: false, engineVersion: BENCHMARK_ENGINE_VERSION }).suite.id, 'community-v2')
+for (const version of ['1.0.12', '1.1.0']) {
+  const historical = structuredClone(receipt)
+  historical.runtime.tensorfold_version = version
+  historical.suite = { id: 'community-v1', sha256: LEGACY_BENCHMARK_SUITE_SHA }
+  delete historical.settings.kv_cache
+  for (const sample of historical.samples) { delete sample.finish_reason; delete sample.route }
+  assert.equal(benchmarkProtocolComplete(parseBenchmarkReceipt(JSON.stringify(historical))), true, 'reviewed historical receipts remain readable after the engine update')
+  assert.throws(() => parseBenchmarkReceipt(JSON.stringify(historical), { model: historical.model.repo_id, serial: false, engineVersion: BENCHMARK_ENGINE_VERSION }), /invalid|unsupported/, 'a historical receipt cannot substitute for a live run on the new engine')
+  historical.runtime.tensorfold_version = BENCHMARK_ENGINE_VERSION
+  assert.throws(() => parseBenchmarkReceipt(JSON.stringify(historical)), /invalid|unsupported/, 'the current engine must emit its reviewed v2 schema')
+}
+for (const count of [128, 200, 255]) {
+  const natural = structuredClone(receipt)
+  Object.assign(natural.samples[0], { finish_reason: 'stop', completion_tokens: count, delivery_seconds: (count - 1) / 100 })
+  assert.equal(benchmarkProtocolComplete(parseBenchmarkReceipt(JSON.stringify(natural))), true, 'v2 permits sampled natural stops from 128 tokens')
+}
+const chatOnly = structuredClone(receipt)
+for (const sample of chatOnly.samples) sample.route = '/v1/chat/completions'
+assert.equal(benchmarkProtocolComplete(parseBenchmarkReceipt(JSON.stringify(chatOnly))), true, 'chat-only models may consistently use the chat route for code')
+const fp8 = structuredClone(receipt); fp8.settings.kv_cache = 'fp8'
+assert.equal(parseBenchmarkReceipt(JSON.stringify(fp8)).settings.kv_cache, 'fp8')
 for (const mutate of [
   (value: any) => { value.prompt = 'SYNTHETIC_PRIVATE_PROMPT' },
   (value: any) => { value.model.repo_id = '/private/operator/model' },
@@ -32,6 +49,20 @@ for (const mutate of [
   (value: any) => { value.runtime.dependencies.private_path = '/private/operator' },
   (value: any) => { value.runtime.tensorfold_version = '9.9.9' },
   (value: any) => { value.runtime.tensorfold_version = '1.1.0-preview' },
+  (value: any) => { value.runtime.tensorfold_version = '1.1.0' },
+  (value: any) => { delete value.settings.kv_cache },
+  (value: any) => { value.settings.kv_cache = null },
+  (value: any) => { value.settings.kv_cache = 'fp16' },
+  (value: any) => { delete value.samples[0].route },
+  (value: any) => { value.samples[0].route = '/private/path' },
+  (value: any) => { value.samples[5].route = '/v1/completions' },
+  (value: any) => { value.samples[1].route = '/v1/chat/completions' },
+  (value: any) => { delete value.samples[0].finish_reason },
+  (value: any) => { value.samples[0].finish_reason = null },
+  (value: any) => { value.samples[0].finish_reason = 'unknown' },
+  (value: any) => { Object.assign(value.samples[0], { finish_reason: 'stop', completion_tokens: 127, delivery_seconds: 1.26 }) },
+  (value: any) => { Object.assign(value.samples[0], { finish_reason: 'length', completion_tokens: 128, delivery_seconds: 1.27 }) },
+  (value: any) => { Object.assign(value.samples[10], { finish_reason: 'stop', completion_tokens: 128, delivery_seconds: 1.27 }) },
 ]) {
   const invalid = structuredClone(receipt); mutate(invalid)
   assert.throws(() => parseBenchmarkReceipt(JSON.stringify(invalid)), /invalid|unsupported/)
