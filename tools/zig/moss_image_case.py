@@ -14,9 +14,18 @@ from pathlib import Path
 
 USAGE = """\
   case MODEL_DIR OUT_DIR --prompt-file F   prompt rows, timesteps, start latents, each step's inputs and both velocities
-  start MODEL_DIR OUT_DIR --prompt-file F  only what a picture needs: both prompts' rows, the schedule, the noise
-  exact MODEL_DIR CASE_DIR                 the case's schedule with a float32 transformer: CASE_DIR/exact.png
+  start MODEL_DIR OUT_DIR --prompt-file F  only what a picture needs: both prompts' rows, the schedule, the noise;
+                                           with --no-encoder, the schedule and the noise alone
+  exact MODEL_DIR CASE_DIR                 the case's schedule with a float32 transformer: CASE_DIR/exact.png;
+                                           with --fp32-encoder F, F's rows from a float32 encoder too
+                                           (CASE_DIR/exact_fp32_encoder.png)
   decode MODEL_DIR LATENTS.f32 PNG         raw float32 latents (rows x columns x 128) from tf-moss-image to a picture
+  vae MODEL_DIR LATENTS.f32 OUT.f64 TORCH.f32  the same decode in float64 on the CPU and in float32 as the
+                                           pipeline runs it, each output before the clamp [height, width, 3] raw,
+                                           for tf-moss-image-decoder
+  encode MODEL_DIR OUT_DIR [--prompt-file F]  the prompt encoder alone: token ids, embedding rows, and every layer's
+                                           output and the final rows in bf16 and in float32, and
+                                           each step alone in bf16 on the float32 run's input
   compare A.png B.png [SIDE.png]           PSNR and mean absolute difference of two pictures, optionally side by side
 MODEL_DIR is the OpenMOSS-Team/MOSS-Image-Base folder. The case runs the card's defaults: 50 Euler steps, CFG 3, an
 empty negative prompt whose branch skips block 22, the bf16 transformer and text encoder, the float32 decoder.
@@ -72,19 +81,24 @@ def rows(x):
     return x[0].float().permute(1, 2, 0).contiguous().cpu()
 
 
-def to_png(pipe, latents, path: str) -> None:
-    """Latents [1, 128, H, W] through the pipeline's own decode path (its batch-norm undo, unpack, VAE) to a PNG."""
+def decoded(vae, latents):
+    """Latents [1, 128, H, W] through the pipeline's own decode path (its batch-norm undo, unpack, VAE), unclamped."""
     import torch
 
     with torch.no_grad():
-        z = latents.to(device=pipe.vae.device, dtype=pipe.vae.dtype)
-        bn = pipe.vae.bn
-        eps = pipe.vae.config.batch_norm_eps
+        z = latents.to(device=vae.device, dtype=vae.dtype)
+        bn = vae.bn
+        eps = vae.config.batch_norm_eps
         z = z * (bn.running_var + eps).sqrt().to(z).view(1, -1, 1, 1) + bn.running_mean.to(z).view(1, -1, 1, 1)
         b, c, h, w = z.shape
         z = z.reshape(b, c // 4, 2, 2, h, w).permute(0, 1, 4, 2, 5, 3).reshape(b, c // 4, 2 * h, 2 * w)
-        image = pipe.vae.decode(z, return_dict=False)[0].clamp(-1, 1)
-        pipe.image_processor.postprocess(image, output_type="pil")[0].save(path)
+        return vae.decode(z, return_dict=False)[0]
+
+
+def to_png(pipe, latents, path: str) -> None:
+    """Latents [1, 128, H, W] decoded as the pipeline does, clamped, to a PNG."""
+    image = decoded(pipe.vae, latents).clamp(-1, 1)
+    pipe.image_processor.postprocess(image, output_type="pil")[0].save(path)
 
 
 def case(args) -> int:
@@ -157,24 +171,29 @@ def case(args) -> int:
 
 
 def start(args) -> int:
-    """What tf-moss-image needs to make a picture: both prompts' encoder rows, the schedule and the seeded noise."""
+    """What tf-moss-image needs for a picture: both prompts' rows (unless --no-encoder), the schedule, the noise."""
     import torch
     from safetensors.torch import save_file
 
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    pipe, _ = pipeline(args.model_dir, args.device, dit=False)
-    positive, _ = pipe.encode_prompt(Path(args.prompt_file).read_text().strip())
-    negative, _ = pipe.encode_prompt(args.negative)
+    if not args.no_encoder and not args.prompt_file:
+        sys.exit("start needs --prompt-file unless --no-encoder")
+    pipe, _ = pipeline(args.model_dir, args.device, text=not args.no_encoder, dit=False)
     h, w = args.height // 16, args.width // 16
     noise = torch.randn((1, 128, h, w), generator=torch.Generator("cpu").manual_seed(args.seed), dtype=torch.float32)
     pipe.scheduler.set_timesteps(args.steps)
-    save_file({"prompt": positive[0].cpu().contiguous(), "negative": negative[0].cpu().contiguous(),
-               "timesteps": pipe.scheduler.timesteps.float().cpu().contiguous(),
+    tensors = {"timesteps": pipe.scheduler.timesteps.float().cpu().contiguous(),
                "sigmas": pipe.scheduler.sigmas.float().cpu().contiguous(),
-               "latents": noise[0].permute(1, 2, 0).contiguous()}, str(out / "case.safetensors"))
-    print(json.dumps({"width": args.width, "height": args.height, "seed": args.seed, "steps": args.steps,
-                      "prompt_rows": int(positive.shape[1]), "negative_rows": int(negative.shape[1])}))
+               "latents": noise[0].permute(1, 2, 0).contiguous()}
+    meta = {"width": args.width, "height": args.height, "seed": args.seed, "steps": args.steps}
+    if not args.no_encoder:
+        positive, _ = pipe.encode_prompt(Path(args.prompt_file).read_text().strip())
+        negative, _ = pipe.encode_prompt(args.negative)
+        tensors.update(prompt=positive[0].cpu().contiguous(), negative=negative[0].cpu().contiguous())
+        meta.update(prompt_rows=int(positive.shape[1]), negative_rows=int(negative.shape[1]))
+    save_file(tensors, str(out / "case.safetensors"))
+    print(json.dumps(meta))
     return 0
 
 
@@ -185,15 +204,21 @@ def exact(args) -> int:
 
     case_dir = Path(args.case_dir)
     case = load_file(str(case_dir / "case.safetensors"))
+    rows = {"prompt": case["prompt"], "negative": case["negative"]}
+    if args.fp32_encoder:
+        # the prompt encoder in float32 too: both prompts' rows as exact arithmetic gives them
+        prompt = Path(args.fp32_encoder).read_text().strip()
+        rows = {key: encoder_rows(args.model_dir, text, torch.float32, args.device) for key, text in (("prompt", prompt), ("negative", ""))}
     pipe, _ = pipeline(args.model_dir, args.device, text=False)
     pipe.transformer.float()
     h, w, _ = case["latents"].shape
-    image = pipe(prompt_embeds=case["prompt"][None].float().to(args.device),
-                 negative_prompt_embeds=case["negative"][None].float().to(args.device), height=16 * h, width=16 * w,
+    image = pipe(prompt_embeds=rows["prompt"][None].float().to(args.device),
+                 negative_prompt_embeds=rows["negative"][None].float().to(args.device), height=16 * h, width=16 * w,
                  num_inference_steps=args.steps, latents=case["latents"].permute(2, 0, 1)[None].to(args.device),
                  output_type="latent").images
-    image.float().cpu().permute(0, 2, 3, 1).contiguous().numpy().tofile(case_dir / "exact.latents.f32")
-    to_png(pipe, image, str(case_dir / "exact.png"))
+    name = "exact_fp32_encoder" if args.fp32_encoder else "exact"
+    image.float().cpu().permute(0, 2, 3, 1).contiguous().numpy().tofile(case_dir / f"{name}.latents.f32")
+    to_png(pipe, image, str(case_dir / f"{name}.png"))
     return 0
 
 
@@ -207,6 +232,28 @@ def decode(args) -> int:
         sys.exit(f"{args.latents} holds {raw.size} values; {args.width}x{args.height} needs {h * w * 128}")
     pipe, _ = pipeline(args.model_dir, args.device, text=False, dit=False)
     to_png(pipe, torch.from_numpy(raw).reshape(1, h, w, 128).permute(0, 3, 1, 2), args.png)
+    return 0
+
+
+def vae(args) -> int:
+    import numpy as np
+    import torch
+    from diffusers import AutoencoderKLFlux2
+
+    raw = np.fromfile(args.latents, dtype=np.float32)
+    h, w = args.height // 16, args.width // 16
+    if raw.size != h * w * 128:
+        sys.exit(f"{args.latents} holds {raw.size} values; {args.width}x{args.height} needs {h * w * 128}")
+    latents = torch.from_numpy(raw).reshape(1, h, w, 128).permute(0, 3, 1, 2)
+    model = AutoencoderKLFlux2.from_pretrained(Path(args.model_dir) / "vae", torch_dtype=torch.float32).eval()
+    torch_rows = decoded(model.to(args.device), latents)[0].permute(1, 2, 0).contiguous().cpu().numpy()
+    torch_rows.astype(np.float32).tofile(args.torch_out)
+    model = model.cpu().double()
+    mark = time.perf_counter()
+    out = decoded(model, latents)[0].permute(1, 2, 0).contiguous().numpy()
+    out.astype(np.float64).tofile(args.out)
+    print(json.dumps({"out": args.out, "torch_out": args.torch_out, "shape": list(out.shape),
+                      "decode_s": round(time.perf_counter() - mark, 1)}))
     return 0
 
 
@@ -226,6 +273,95 @@ def compare(args) -> int:
     return 0
 
 
+def encoder_rows(model_dir: str, prompt: str, dtype, device: str):
+    """One prompt's final rows from the text encoder in `dtype`, formatted and tokenized as the pipeline does."""
+    import torch
+    from transformers import AutoModel, AutoTokenizer
+
+    root = Path(model_dir)
+    tokenizer = AutoTokenizer.from_pretrained(root / "tokenizer")
+    formatted = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], tokenize=False,
+                                              add_generation_prompt=True, enable_thinking=True)
+    inputs = tokenizer(formatted, return_tensors="pt", truncation=True, max_length=4096).to(device)
+    encoder = AutoModel.from_pretrained(root / "text_encoder", dtype=dtype).eval().to(device)
+    with torch.no_grad():
+        rows = encoder(**inputs, use_cache=False, return_dict=True).last_hidden_state[0].cpu()
+    del encoder
+    if device == "mps":
+        torch.mps.empty_cache()
+    return rows
+
+
+def given(rows, device: str):
+    """A forward pre-hook that hands a layer `rows` in place of its input."""
+    def hook(module, args, kwargs):
+        x = rows.to(device).unsqueeze(0)
+        if "hidden_states" in kwargs:
+            kwargs["hidden_states"] = x
+            return args, kwargs
+        return (x,) + tuple(args[1:]), kwargs
+    return hook
+
+
+def encode(args) -> int:
+    """The prompt encoder as the pipeline runs it, in float32 and bf16, every layer's rows kept; each step alone too."""
+    import torch
+    from safetensors.torch import save_file
+    from transformers import AutoModel, AutoTokenizer
+
+    root = Path(args.model_dir)
+    out = Path(args.out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    tokenizer = AutoTokenizer.from_pretrained(root / "tokenizer")
+    prompt = Path(args.prompt_file).read_text().strip() if args.prompt_file else ""
+    # as MOSSImagePipeline.encode_prompt formats and tokenizes it
+    formatted = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], tokenize=False,
+                                              add_generation_prompt=True, enable_thinking=True)
+    inputs = tokenizer(formatted, return_tensors="pt", truncation=True, max_length=4096)
+    tensors = {"ids": inputs["input_ids"][0].to(torch.int32).contiguous()}
+    for dtype in (torch.float32, torch.bfloat16):
+        encoder = AutoModel.from_pretrained(root / "text_encoder", dtype=dtype).eval().to(args.device)
+        text = encoder.language_model
+        kept = []
+        hooks = [text.embed_tokens.register_forward_hook(lambda mod, a, o: kept.append(o))]
+        hooks += [layer.register_forward_hook(lambda mod, a, o: kept.append(o[0] if isinstance(o, tuple) else o))
+                  for layer in text.layers]
+        with torch.no_grad():
+            final = encoder(**inputs.to(args.device), use_cache=False, return_dict=True).last_hidden_state[0]
+        for h in hooks:
+            h.remove()
+        if dtype is torch.float32:
+            for i, rows in enumerate(kept[1:]):
+                tensors[f"layer_fp32.{i}"] = rows[0].cpu().contiguous()
+            tensors["final_fp32"] = final.cpu().contiguous()
+        else:
+            tensors["embed"] = kept[0][0].cpu().contiguous()
+            for i, rows in enumerate(kept[1:]):
+                tensors[f"layer.{i}"] = rows[0].cpu().contiguous()
+            tensors["final"] = final.cpu().contiguous()
+            # each step alone on the float32 run's input in bf16: torch bf16's own error at that step
+            steps = [tensors["embed"]] + [tensors[f"layer_fp32.{i}"].to(dtype) for i in range(len(text.layers))]
+            alone = []
+            hooks = [layer.register_forward_pre_hook(given(steps[i], args.device), with_kwargs=True)
+                     for i, layer in enumerate(text.layers)]
+            hooks += [layer.register_forward_hook(lambda mod, a, o: alone.append(o[0] if isinstance(o, tuple) else o))
+                      for layer in text.layers]
+            with torch.no_grad():
+                encoder(**inputs.to(args.device), use_cache=False, return_dict=True)
+                alone.append(text.norm(steps[-1].to(args.device).unsqueeze(0)))
+            for h in hooks:
+                h.remove()
+            for i, rows in enumerate(alone[:-1]):
+                tensors[f"alone.{i}"] = rows[0].cpu().contiguous()
+            tensors["alone.final"] = alone[-1][0].cpu().contiguous()
+        del encoder, text, kept
+        if args.device == "mps":
+            torch.mps.empty_cache()
+    save_file(tensors, str(out / "encoder.safetensors"))
+    print(json.dumps({"rows": int(tensors["ids"].numel()), "prompt": prompt[:60]}))
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, epilog=USAGE, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="mode", required=True)
@@ -242,7 +378,8 @@ def main() -> int:
     s = sub.add_parser("start")
     s.add_argument("model_dir")
     s.add_argument("out_dir")
-    s.add_argument("--prompt-file", required=True)
+    s.add_argument("--prompt-file")
+    s.add_argument("--no-encoder", action="store_true", help="no prompt rows: tf-moss-image --prompt encodes them")
     s.add_argument("--negative", default="", help="the negative prompt (the card's default: empty)")
     s.add_argument("--width", type=int, default=1024)
     s.add_argument("--height", type=int, default=1024)
@@ -253,6 +390,7 @@ def main() -> int:
     x.add_argument("model_dir")
     x.add_argument("case_dir")
     x.add_argument("--steps", type=int, default=50)
+    x.add_argument("--fp32-encoder", metavar="PROMPT_FILE", help="the prompt encoder in float32 too, on this prompt")
     x.add_argument("--device", default="mps")
     d = sub.add_parser("decode")
     d.add_argument("model_dir")
@@ -261,12 +399,25 @@ def main() -> int:
     d.add_argument("--width", type=int, default=1024)
     d.add_argument("--height", type=int, default=1024)
     d.add_argument("--device", default="mps")
+    n = sub.add_parser("encode")
+    n.add_argument("model_dir")
+    n.add_argument("out_dir")
+    n.add_argument("--prompt-file", help="the prompt (default: the empty negative prompt)")
+    n.add_argument("--device", default="mps")
+    v = sub.add_parser("vae")
+    v.add_argument("model_dir")
+    v.add_argument("latents")
+    v.add_argument("out")
+    v.add_argument("torch_out")
+    v.add_argument("--device", default="mps", help="where the float32 decode runs, as the pipeline would")
+    v.add_argument("--width", type=int, default=1024)
+    v.add_argument("--height", type=int, default=1024)
     p = sub.add_parser("compare")
     p.add_argument("a")
     p.add_argument("b")
     p.add_argument("side", nargs="?")
     args = parser.parse_args()
-    return {"case": case, "start": start, "exact": exact, "decode": decode, "compare": compare}[args.mode](args)
+    return {"case": case, "start": start, "exact": exact, "decode": decode, "encode": encode, "vae": vae, "compare": compare}[args.mode](args)
 
 
 if __name__ == "__main__":

@@ -1,16 +1,20 @@
-//! tf-moss-image: MOSS-Image's transformer on a case from tools/zig/moss_image_case.py, compared and timed.
+//! tf-moss-image: MOSS-Image on a moss_image_case.py case, the transformer compared and timed, then decoded.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
 const mi = tf.moss_image;
+const tokenizer = @import("tokenizer");
 
 const usage =
-    \\tf-moss-image TRANSFORMER_DIR CASE OUT_DIR
+    \\tf-moss-image TRANSFORMER_DIR CASE OUT_DIR [--prompt FILE [--negative FILE]]
     \\CASE (tools/zig/moss_image_case.py) holds the prompt's and the empty negative prompt's encoder rows, the timesteps
     \\and noise levels and the starting latents. A `case` also holds a reference run (each step's input and both
     \\branches' velocities): each step then runs both branches on the reference's input and compares them (max |diff|,
     \\cosine, worst row). Then the whole schedule runs from the starting latents with the card's guidance (scale 3, the
-    \\negative branch skipping block 22), timed, and OUT_DIR gets latents.f32 (rows x columns x 128) and run.json.
+    \\negative branch skipping block 22), timed. The transformer is then freed and the checkpoint's image decoder (the
+    \\vae/ folder beside TRANSFORMER_DIR) turns the latents into the picture. OUT_DIR gets latents.f32 (rows x columns x
+    \\128), picture.png and run.json. With --prompt, the encoder in TRANSFORMER_DIR's checkpoint folder makes both
+    \\prompts' rows (the negative from --negative's file, else empty) in place of the case's.
 ;
 
 /// The card's sampling defaults: the guidance scale, and the block the negative branch skips.
@@ -113,40 +117,97 @@ fn teacher(a: std.mem.Allocator, case: *const tf.safetensors.File, model: *mi.Mo
     return repeat;
 }
 
+/// A prompt file's text, trimmed as the case tool trims it.
+fn read(a: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
+    return std.mem.trim(u8, try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20)), " \t\r\n");
+}
+
 pub fn main(init: std.process.Init) !u8 {
     const a = init.arena.allocator();
     const io = init.io;
     const args = try init.minimal.args.toSlice(a);
-    if (args.len != 4) {
+    var prompt_file: ?[]const u8 = null;
+    var negative_file: ?[]const u8 = null;
+    var i: usize = 4;
+    while (i + 1 < args.len) : (i += 2) {
+        if (std.mem.eql(u8, args[i], "--prompt")) prompt_file = args[i + 1] else if (std.mem.eql(u8, args[i], "--negative")) negative_file = args[i + 1] else break;
+    }
+    if (args.len < 4 or i != args.len or (negative_file != null and prompt_file == null)) {
         std.debug.print("{s}\n", .{usage});
         return 2;
     }
     var case = try tf.safetensors.File.open(a, io, args[2]);
     defer case.close(io);
-    const grid = try dims(&case, "latents");
-    if (grid.len != 3 or grid[2] != mi.config.channels) return error.BadCaseTensor;
-    const rows = grid[0] * grid[1];
-    const count = rows * mi.config.channels;
-    const text = (try dims(&case, "prompt"))[0];
-    const negative_rows = (try dims(&case, "negative"))[0];
-    const prompt = try take(u16, a, &case, "prompt", .bf16);
-    const negative = try take(u16, a, &case, "negative", .bf16);
-    const timesteps = try take(f32, a, &case, "timesteps", .f32);
-    const sigmas = try take(f32, a, &case, "sigmas", .f32);
-    const start = try take(f32, a, &case, "latents", .f32);
-    const steps = timesteps.len;
-    if (sigmas.len != steps + 1 or start.len != count) return error.BadCaseTensor;
-
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const device = try mtl.Device.init();
+    const checkpoint = std.fs.path.dirname(args[1]) orelse ".";
+    const prompts = if (prompt_file) |file| try encode(a, io, device, checkpoint, file, negative_file) else Prompts{ .rows = .{ try take(u16, a, &case, "prompt", .bf16), try take(u16, a, &case, "negative", .bf16) }, .encode_s = null };
+    var out: std.ArrayList(u8) = .empty;
+    const run = try denoise(a, io, device, args[1], &case, prompts, &out);
+
+    const width = run.columns * 16;
+    const height = run.rows * 16;
     const loading = mtl.clock.seconds();
-    const model = try mi.Model.load(std.heap.page_allocator, io, device, args[1], @max(text, negative_rows), grid[1] * 16, grid[0] * 16);
+    const vae = try std.fs.path.join(a, &.{ checkpoint, "vae" });
+    const decoder = try mi.Decoder.load(std.heap.page_allocator, io, device, vae, width, height);
+    defer decoder.deinit();
+    const decoder_load_s = mtl.clock.seconds() - loading;
+    const rgb = try a.alloc(u8, width * height * 3);
+    const t = try decoder.decode(run.latents, rgb);
+    std.debug.print("decoded {d}x{d}: {d:.3} s ({d:.3} s on the GPU), the decoder loaded in {d:.2} s\n", .{ width, height, t.wall, t.gpu, decoder_load_s });
+    try print(&out, a, ", \"decoder_load_s\": {d:.3}, \"decode_s\": {d:.4}}}\n", .{ decoder_load_s, t.wall });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "{s}/latents.f32", .{args[3]}), .data = std.mem.sliceAsBytes(run.latents) });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "{s}/picture.png", .{args[3]}), .data = try mi.png.encode(a, rgb, width, height) });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "{s}/run.json", .{args[3]}), .data = out.items });
+    return if (run.repeat) 0 else 1;
+}
+
+const Prompts = struct { rows: [2][]u16, encode_s: ?f64 };
+
+/// Both prompts' rows from the checkpoint's own encoder, which is freed before this returns.
+fn encode(a: std.mem.Allocator, io: std.Io, device: mtl.Device, checkpoint: []const u8, prompt_file: []const u8, negative_file: ?[]const u8) !Prompts {
+    const texts = [2][]const u8{ try read(a, io, prompt_file), if (negative_file) |n| try read(a, io, n) else "" };
+    const enc = try mi.Encoder.load(std.heap.page_allocator, io, device, checkpoint);
+    defer enc.deinit();
+    var tok = try tokenizer.loadTokenizer(io, a, try std.fs.path.join(a, &.{ checkpoint, "tokenizer", "tokenizer.json" }));
+    defer tok.deinit();
+    const encoding = mtl.clock.seconds();
+    var made: [2][]u16 = undefined;
+    for (texts, &made) |t, *m| {
+        const ids = try mi.encoder.ids(&tok, a, t);
+        m.* = try a.alloc(u16, ids.len * mi.encoder_config.hidden);
+        try enc.rows(ids, m.*, null);
+    }
+    const encode_s = mtl.clock.seconds() - encoding;
+    std.debug.print("both prompts encoded natively: {d:.3} s\n", .{encode_s});
+    return .{ .rows = made, .encode_s = encode_s };
+}
+
+const Run = struct { latents: []f32, rows: usize, columns: usize, repeat: bool };
+
+/// The case's schedule on `prompts` through the transformer of `dir`, freed before this returns; timings into `out`.
+fn denoise(a: std.mem.Allocator, io: std.Io, device: mtl.Device, dir: []const u8, case: *const tf.safetensors.File, prompts: Prompts, out: *std.ArrayList(u8)) !Run {
+    const grid = try dims(case, "latents");
+    if (grid.len != 3 or grid[2] != mi.config.channels) return error.BadCaseTensor;
+    const rows = grid[0] * grid[1];
+    const count = rows * mi.config.channels;
+    const prompt = prompts.rows[0];
+    const negative = prompts.rows[1];
+    const text = prompt.len / mi.config.context;
+    const negative_rows = negative.len / mi.config.context;
+    const timesteps = try take(f32, a, case, "timesteps", .f32);
+    const sigmas = try take(f32, a, case, "sigmas", .f32);
+    const start = try take(f32, a, case, "latents", .f32);
+    const steps = timesteps.len;
+    if (sigmas.len != steps + 1 or start.len != count) return error.BadCaseTensor;
+
+    const loading = mtl.clock.seconds();
+    const model = try mi.Model.load(std.heap.page_allocator, io, device, dir, @max(text, negative_rows), grid[1] * 16, grid[0] * 16);
     defer model.deinit();
     const load_s = mtl.clock.seconds() - loading;
     std.debug.print("{s}: {d} image rows, prompts of {d} and {d} rows, {d} steps; loaded in {d:.1} s\n", .{ device.name(), rows, text, negative_rows, steps, load_s });
 
-    var out: std.ArrayList(u8) = .empty;
     const refining = mtl.clock.seconds();
     var branches: [2]mi.Prompt = undefined;
     branches[0] = try model.prompt(prompt);
@@ -155,9 +216,10 @@ pub fn main(init: std.process.Init) !u8 {
     defer branches[1].deinit();
     const refine_s = mtl.clock.seconds() - refining;
     std.debug.print("both prompts refined: {d:.3} s\n", .{refine_s});
-    try print(&out, a, "{{\"device\": \"{s}\", \"image_rows\": {d}, \"prompt_rows\": {d}, \"negative_rows\": {d}, \"load_s\": {d:.2}, \"refine_s\": {d:.4}", .{ device.name(), rows, text, negative_rows, load_s, refine_s });
-    const repeat = if (case.get("inputs") == null) true else try teacher(a, &case, model, &branches, timesteps, count, &out);
-    try print(&out, a, ", \"run\": [", .{});
+    try print(out, a, "{{\"device\": \"{s}\", \"image_rows\": {d}, \"prompt_rows\": {d}, \"negative_rows\": {d}, \"load_s\": {d:.2}, \"refine_s\": {d:.4}", .{ device.name(), rows, text, negative_rows, load_s, refine_s });
+    if (prompts.encode_s) |s| try print(out, a, ", \"native_encoder\": true, \"encode_s\": {d:.4}", .{s});
+    const repeat = if (case.get("inputs") == null) true else try teacher(a, case, model, &branches, timesteps, count, out);
+    try print(out, a, ", \"run\": [", .{});
 
     const x = try a.dupe(f32, start);
     const cond = try a.alloc(f32, count);
@@ -171,11 +233,9 @@ pub fn main(init: std.process.Init) !u8 {
         const wall = c.wall + u.wall;
         total += wall;
         std.debug.print("step {d}/{d}: {d:.3} s ({d:.3} s on the GPU, {d:.3} s modulation on the host)\n", .{ s + 1, steps, wall, c.gpu + u.gpu, c.host + u.host });
-        try print(&out, a, "{s}{{\"wall_s\": {d:.4}, \"gpu_s\": {d:.4}, \"host_s\": {d:.4}}}", .{ if (s == 0) "" else ", ", wall, c.gpu + u.gpu, c.host + u.host });
+        try print(out, a, "{s}{{\"wall_s\": {d:.4}, \"gpu_s\": {d:.4}, \"host_s\": {d:.4}}}", .{ if (s == 0) "" else ", ", wall, c.gpu + u.gpu, c.host + u.host });
     }
-    try print(&out, a, "], \"denoise_s\": {d:.3}}}\n", .{total});
+    try print(out, a, "], \"denoise_s\": {d:.3}", .{total});
     std.debug.print("denoise: {d:.2} s for {d} steps ({d} forwards)\n", .{ total, steps, 2 * steps });
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "{s}/latents.f32", .{args[3]}), .data = std.mem.sliceAsBytes(x) });
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "{s}/run.json", .{args[3]}), .data = out.items });
-    return if (repeat) 0 else 1;
+    return .{ .latents = x, .rows = grid[0], .columns = grid[1], .repeat = repeat };
 }
