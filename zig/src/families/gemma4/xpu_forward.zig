@@ -89,6 +89,7 @@ pub const Want = enum { none, last, rows };
 pub const Runner = struct {
     d: *Dev,
     k: Kernels,
+    kp: Kernels, // prompt rows (more than ROWS): the glue kernels that gain from 128 registers a thread
     m: load_mod.Model,
     a: Acts,
     kc: [24]*anyopaque,
@@ -174,6 +175,17 @@ pub const Runner = struct {
             .topk_part = try d.kernel(mg, "g4_topk_part", 256),
             .topk_merge = try d.kernel(mg, "g4_topk_merge", 256),
         };
+        // the same source at 128 registers a thread: twice the resident threads for the memory-bound glue of prompts
+        r.kp = r.k;
+        r.kp.embed = try d.kernel(mr, "g4_embed", 256);
+        r.kp.x2h = try d.kernel(mr, "g4_x2h", 256);
+        r.kp.ple_tok = try d.kernel(mr, "g4_ple_tok", 256);
+        r.kp.resid = try d.kernel(mr, "g4_resid", 512);
+        r.kp.geglu = try d.kernel(mr, "g4_geglu", 256);
+        r.kp.ple_mid = try d.kernel(mr, "g4_ple_mid", 64);
+        r.kp.attn_prep = .{ try d.kernel(mr, "g4_attn_prep", 256), try d.kernel(mrg, "g4_attn_prep", 256) };
+        r.kp.dp_sums = .{ try d.kernel(mr, "g4_attn_sums", 128), try d.kernel(mrg, "g4_attn_sums", 128) };
+        r.kp.dense_b = try d.kernel(mr, "g4_dense_b", 256);
         if (std.c.getenv("XPU_PROFILE") != null) try d.profOn();
         const prof = d.prof_on;
         d.prof_on = false;
@@ -360,7 +372,7 @@ pub const Runner = struct {
         const K: i32 = @intCast(w.k);
         const G: i32 = @intCast(w.k / 64);
         const mp: i32 = @intCast((m + 7) / 8 * 8);
-        const k = r.k;
+        const k = if (m > ROWS) r.kp else r.k;
         if (w.dense) { // a bf16 weight (the per-layer linears)
             try r.d.launch(k.dense_b, .{ .x = (m + 15) / 16, .y = w.n / 16 }, .{ h, w.w, out, M, N, K });
             return;
@@ -452,8 +464,8 @@ pub const Runner = struct {
         const d = r.d;
         const a = &r.a;
         const m = &r.m;
-        const k = r.k;
         const T: u32 = @intCast(ids.len);
+        const k = if (T > ROWS) r.kp else r.k;
         if (T == 0 or T > MAXT or (T > ROWS and want == .rows)) return error.BadWindow;
         try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, a.ids, ids.ptr, ids.len * 4, null, 0, null));
         errdefer d.settle(); // the queued copy reads the caller's ids
