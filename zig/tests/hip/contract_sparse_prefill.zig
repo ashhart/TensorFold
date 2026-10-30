@@ -25,7 +25,7 @@ const names = [2][]const u8{
     "hip tf_fn_sparse_prefill_wmma_bf16 and tf_fn_sparse_merge",
 };
 const rule = "a NaN a row did not select never reaches it; a selected value reaches its dim, a selected key the head";
-const why = "the matrix cores' fp32 accumulation is not IEEE-rounded, so the sums are held to the fp32 bound only";
+const why = "q and P stay fp32 as three 16-bit parts, but the matrix cores accumulate in their own order: the fp32 bound";
 
 pub fn spec(k: kit.Kind) c.Spec {
     return .{
@@ -63,7 +63,6 @@ pub const SparsePrefill = struct {
     counts: []i32 = &.{},
     sparse: []i32 = &.{},
     ends: []i32 = &.{},
-    eps: []f64 = &.{},
     dev: [9]u64 = @splat(0),
     out: u64 = 0,
     msg: [200]u8 = undefined,
@@ -149,7 +148,6 @@ pub const SparsePrefill = struct {
         };
         try self.select(a);
         if (fill == .nonfinite) try self.plant(kb, vb);
-        self.eps = try a.alloc(f64, shape.rows * shape.n);
         const ids = try self.rig.input(std.mem.sliceAsBytes(self.ids));
         const cnt = try self.rig.input(std.mem.sliceAsBytes(self.counts));
         const sparse = try self.rig.input(std.mem.sliceAsBytes(self.sparse));
@@ -217,7 +215,6 @@ pub const SparsePrefill = struct {
     /// fp64 attention over the selected keys only; a NaN score zeroes the head, as the merge does.
     pub fn reference(self: *SparsePrefill, want: []f64, mag: []f64) !void {
         const a = self.arena.allocator();
-        const u: f64 = if (self.k == .bf16) 0x1p-8 else 0x1p-11;
         const w = try a.alloc(f64, @intCast(std.mem.max(i32, self.counts)));
         defer a.free(w);
         for (0..self.rows()) |r| for (0..self.heads) |h| {
@@ -225,25 +222,19 @@ pub const SparsePrefill = struct {
             const n: usize = @intCast(self.counts[r]);
             var top = -std.math.inf(f64);
             var nan = false;
-            var dq: f64 = 0;
             for (0..n) |j| {
                 w[j] = std.math.nan(f64);
                 const t = self.key(r, j) orelse continue;
                 var s: f64 = 0;
-                var m: f64 = 0;
                 for (0..dims) |d| {
                     const kv: f64 = self.kc[(kvh * self.shape.k + t) * dims + d];
                     const p = @as(f64, self.q[(r * self.heads + h) * dims + d]) * scale * kv;
                     s += p;
-                    m += @abs(p);
                 }
-                dq = @max(dq, m);
                 w[j] = s;
                 nan = nan or std.math.isNan(s);
                 top = @max(top, s);
             }
-            const e = if (self.fill == .stress) 0 else std.math.exp(2 * u * dq) * (1 + u) * (1 + u) - 1;
-            self.eps[r * self.heads + h] = e;
             var total: f64 = 0;
             for (0..n) |j| {
                 if (self.key(r, j) == null) {
@@ -272,11 +263,6 @@ pub const SparsePrefill = struct {
                 mag[i] = m / total;
             }
         };
-    }
-
-    /// 16-bit q and P change each weight by at most eps (relative), so the row moves by 2 eps of its term magnitude.
-    pub fn bounds(self: *SparsePrefill, _: []const f64, mag: []const f64, allow: []f64) !void {
-        for (allow, mag, 0..) |*l, m, i| l.* += 2 * self.eps[i / dims] * m;
     }
 
     /// Every sum is exact when every weight is 1 and the values are integers, in any order and either accumulator.

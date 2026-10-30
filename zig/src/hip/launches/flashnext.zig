@@ -29,7 +29,7 @@ pub const Fns = struct {
     idx_scores: Function,
     idx_select: Function,
     sparse_parts: [2]Function, // groups of up to 6 and up to 12 query heads
-    /// The WMMA prefill tile over 4 query rows and a kv head's query heads, by cache kind (bf16, fp16).
+    /// The WMMA prefill tile over 4 rows and a kv head's query heads, q and P kept fp32; by cache kind (fp16, bf16).
     sparse_prefill_wmma: [2]Function,
     sparse_merge: Function,
 
@@ -445,7 +445,7 @@ pub fn sparseAttention(
         try l.go(
             l.fnx.sparse_prefill_wmma[@intFromBool(cache_kind == 2)],
             dim(cdiv(rows, 4), kv_heads, parts),
-            dim(256, 1, 1),
+            dim(512, 1, 1),
             0,
             s,
             &a,

@@ -8,6 +8,7 @@
 #include "../ops/common.hpp"
 
 // Sparse prefill attention on gfx11 WMMA: a tile of query rows times a kv head's heads shares every gathered key.
+// q and P stay fp32: each is carried as three 16-bit parts and the products take one matrix op a part.
 
 namespace {
 
@@ -21,14 +22,17 @@ constexpr int kFxKeyBlocks = kFxKeys / kFxRatio;
 constexpr int kFxMostDims = 256;                  // the sparse attention's head dim, as sparse.hpp's
 constexpr int kFxKSteps = kFxMostDims / 16;
 constexpr int kFxDimTiles = kFxMostDims / 16;
-constexpr int kFxThreads = 256;
+constexpr int kFxThreads = 512;
 constexpr int kFxWaves = kFxThreads / 32;
-constexpr int kFxKStepsPerWave = kFxKSteps / 2; // two waves split one S tile's head dimension
+constexpr int kFxHeadSplit = 4;                 // waves that split one S tile's head dimension
+constexpr int kFxKStepsPerWave = kFxKSteps / kFxHeadSplit;
+constexpr int kFxDimsPerWave = kFxDimTiles / kFxWaves;  // output dimension tiles a wave owns
 constexpr int kFxSoftLanes = 4;                  // threads a probability row, one selection block apiece
 constexpr int kFxKStride = kFxMostDims + 8;      // staged key rows, so 16-byte fragment reads miss no bank group
 constexpr int kFxVtStride = kFxKeys + 8;          // V transposed: a dimension's row of keys, padded for the reads
 constexpr int kFxPStride = kFxKeys + 8;
 constexpr int kFxScoreStride = kFxKeys + 4;      // a float4 of scores per softmax lane
+constexpr int kFxSplit = 3;                      // 16-bit parts a q or P value is carried in
 constexpr int kFxMostWords = 160;                // a part's block range: 5,120 blocks, 20,480 tokens at ratio 4
 
 typedef _Float16 f16x16 __attribute__((ext_vector_type(16)));
@@ -57,6 +61,7 @@ template <>
 struct FxWmma<1> {
     using frag = f16x16;
     static __device__ __forceinline__ uint16_t near(float v) { return __half_as_ushort(__float2half_rn(v)); }
+    static __device__ __forceinline__ float wide(uint16_t b) { return __half2float(__ushort_as_half(b)); }
     static __device__ __forceinline__ bool finite(uint16_t b) { return (b & 0x7c00u) != 0x7c00u; }
     static __device__ __forceinline__ f32x8 mma(frag a, frag b, f32x8 c) {
 #if TF_DEVICE_WMMA_GFX11
@@ -72,6 +77,7 @@ template <>
 struct FxWmma<2> {
     using frag = bf16x16;
     static __device__ __forceinline__ uint16_t near(float v) { return float_to_bf16(v); }
+    static __device__ __forceinline__ float wide(uint16_t b) { return __uint_as_float(static_cast<unsigned>(b) << 16); }
     static __device__ __forceinline__ bool finite(uint16_t b) { return (b & 0x7f80u) != 0x7f80u; }
     static __device__ __forceinline__ f32x8 mma(frag a, frag b, f32x8 c) {
 #if TF_DEVICE_WMMA_GFX11
@@ -82,6 +88,17 @@ struct FxWmma<2> {
     }
     static __device__ __forceinline__ frag load(const uint16_t* p) { return fxfrag16bf(p); }
 };
+
+// x as kFxSplit 16-bit parts, largest first: their fp32 sum is x, as three parts hold all 24 bits of a mantissa.
+template <int KIND>
+__device__ __forceinline__ void fxSplit(float x, uint16_t* out) {
+    float rest = x;
+#pragma unroll
+    for (int i = 0; i < kFxSplit; ++i) {
+        out[i] = FxWmma<KIND>::near(rest);
+        rest -= FxWmma<KIND>::wide(out[i]);
+    }
+}
 
 // WMMA column c is query row c % kFxRowsPer and head c / kFxRowsPer; on a tail tile live columns are scattered.
 __device__ __forceinline__ int fxCol(int i, int rows_in) { return (i / rows_in) * kFxRowsPer + (i % rows_in); }
@@ -119,8 +136,8 @@ __device__ void sparsePrefillWmma(const float* __restrict__ q, const uint16_t* _
     __shared__ unsigned maps[kFxRowsPer * kFxMostWords];  // the tile's rows' blocks, always kFxMostWords apart
     __shared__ unsigned uni[kFxMostWords];                 // their union: the key walk
     __shared__ alignas(16) uint16_t stage[kFxMostDims * kFxVtStride];  // K row-major, then V transposed: one buffer
-    __shared__ alignas(16) uint16_t p_lds[kFxRows * kFxPStride];
-    __shared__ alignas(16) float s_lds[2][kFxRowTiles][16][kFxScoreStride];
+    __shared__ alignas(16) uint16_t p_lds[kFxSplit][kFxRows * kFxPStride];
+    __shared__ alignas(16) float s_lds[kFxHeadSplit][kFxRowTiles][16][kFxScoreStride];
     __shared__ float row_max[kFxRows], row_sum[kFxRows], row_scale[kFxRows];
     __shared__ unsigned sel_keys[kFxRows];                 // per column: the tile keys it selected, one bit each
     __shared__ unsigned v_bad[kFxMostDims];                // per dim: the tile keys whose V there is not finite
@@ -132,7 +149,9 @@ __device__ void sparsePrefillWmma(const float* __restrict__ q, const uint16_t* _
 
     for (int i = t; i < kFxRowsPer * kFxMostWords; i += kFxThreads) maps[i] = 0u;
     // p_lds' padded columns feed P V too: they hold probability zero, so a masked-out key contributes nothing
-    for (int i = t; i < tiles * 16 * kFxPStride; i += kFxThreads) p_lds[i] = 0u;
+    for (int i = t; i < tiles * 16 * kFxPStride; i += kFxThreads) {
+        for (int n = 0; n < kFxSplit; ++n) p_lds[n][i] = 0u;
+    }
     for (int i = t; i < kFxRows; i += kFxThreads) {
         row_max[i] = -INFINITY;
         row_sum[i] = 0.f;
@@ -171,9 +190,9 @@ __device__ void sparsePrefillWmma(const float* __restrict__ q, const uint16_t* _
     }
     __syncthreads();
 
-    // Q into fragments: wave w scores row tile w / 2 over head dimension half w % 2; its A row is sub, its k the half.
-    const int rb = wave >> 1, dh = wave & 1;
-    typename T::frag q_frag[kFxKStepsPerWave];
+    // Q into fragments: wave w scores row tile w / 4 over head dimension quarter w % 4; its A row is sub.
+    const int rb = wave / kFxHeadSplit, dh = wave % kFxHeadSplit;
+    typename T::frag q_frag[kFxSplit][kFxKStepsPerWave];
     {
         const int c = rb * 16 + sub;
         const bool live = (c % kFxRowsPer) < rows_in && c / kFxRowsPer < group;  // not c < cols: see fxCol
@@ -183,21 +202,25 @@ __device__ void sparsePrefillWmma(const float* __restrict__ q, const uint16_t* _
 #pragma unroll
         for (int ks = 0; ks < kFxKStepsPerWave; ++ks) {
             const int d0 = (dh * kFxKStepsPerWave + ks) * 16;
-            alignas(16) uint16_t tmp[16];  // T::load reads it as two uint4: 16 bytes, so it must be aligned
+            alignas(16) uint16_t tmp[kFxSplit][16];  // T::load reads it as two uint4: 16 bytes, so it must be aligned
 #pragma unroll
             for (int i = 0; i < 16; ++i) {
                 const int d = d0 + i;
-                tmp[i] = (live && d < dims) ? T::near(qrow[d] * scale) : static_cast<uint16_t>(0);
+                uint16_t part[kFxSplit];
+                fxSplit<KIND>((live && d < dims) ? qrow[d] * scale : 0.f, part);
+#pragma unroll
+                for (int n = 0; n < kFxSplit; ++n) tmp[n][i] = part[n];
             }
-            q_frag[ks] = T::load(&tmp[0]);
+#pragma unroll
+            for (int n = 0; n < kFxSplit; ++n) q_frag[n][ks] = T::load(&tmp[n][0]);
         }
     }
 
-    f32x8 o_acc[kFxRowTiles][2];
+    f32x8 o_acc[kFxRowTiles][kFxDimsPerWave];
 #pragma unroll
     for (int rt = 0; rt < kFxRowTiles; ++rt)
 #pragma unroll
-        for (int dt = 0; dt < 2; ++dt) o_acc[rt][dt] = f32x8{0, 0, 0, 0, 0, 0, 0, 0};
+        for (int dt = 0; dt < kFxDimsPerWave; ++dt) o_acc[rt][dt] = f32x8{0, 0, 0, 0, 0, 0, 0, 0};
 
     // The union walk, uniform across the block: set bits of uni in increasing block order, [blo, bhi) only.
     int cw = 0;
@@ -243,7 +266,7 @@ __device__ void sparsePrefillWmma(const float* __restrict__ q, const uint16_t* _
         }
         __syncthreads();
 
-        // S = Q K^T: wave w scores row tile rb against the 16 keys over head half dh.
+        // S = Q K^T: wave w scores row tile rb against the 16 keys over head quarter dh.
         if (rb < tiles) {
             f32x8 s_acc = f32x8{0, 0, 0, 0, 0, 0, 0, 0};
 #pragma unroll
@@ -251,7 +274,8 @@ __device__ void sparsePrefillWmma(const float* __restrict__ q, const uint16_t* _
                 const int d0 = (dh * kFxKStepsPerWave + ks) * 16;
                 if (d0 >= dims) break;
                 const auto kf = T::load(&k_lds[sub * kFxKStride + d0]);
-                s_acc = T::mma(q_frag[ks], kf, s_acc);
+#pragma unroll
+                for (int n = kFxSplit - 1; n >= 0; --n) s_acc = T::mma(q_frag[n][ks], kf, s_acc);  // smallest first
             }
 #pragma unroll
             for (int i = 0; i < 8; ++i) s_lds[dh][rb][2 * i + half][sub] = s_acc[i];
@@ -274,7 +298,9 @@ __device__ void sparsePrefillWmma(const float* __restrict__ q, const uint16_t* _
                 const int kpos = (b << 2) + m;
                 chosen |= (marked && kpos < ends[r]) ? 1u << (seg * kFxSoftLanes + m) : 0u;
                 vals[m] = (marked && kpos < ends[r])
-                            ? s_lds[0][rt][row][seg * kFxSoftLanes + m] + s_lds[1][rt][row][seg * kFxSoftLanes + m]
+                            ? ((s_lds[0][rt][row][seg * kFxSoftLanes + m] + s_lds[1][rt][row][seg * kFxSoftLanes + m]) +
+                               s_lds[2][rt][row][seg * kFxSoftLanes + m]) +
+                                  s_lds[3][rt][row][seg * kFxSoftLanes + m]
                             : -INFINITY;
             }
             float pmax = -INFINITY;
@@ -290,7 +316,10 @@ __device__ void sparsePrefillWmma(const float* __restrict__ q, const uint16_t* _
             for (int m = 0; m < kFxSoftLanes; ++m) {
                 const float e = vals[m] == -INFINITY ? 0.f : expf(vals[m] - top);
                 psum += e;
-                p_lds[c * kFxPStride + seg * kFxSoftLanes + m] = T::near(e);
+                uint16_t part[kFxSplit];
+                fxSplit<KIND>(e, part);
+#pragma unroll
+                for (int n = 0; n < kFxSplit; ++n) p_lds[n][c * kFxPStride + seg * kFxSoftLanes + m] = part[n];
             }
 #pragma unroll
             for (int off = 1; off < kFxSoftLanes; off <<= 1) psum += __shfl_xor(psum, off, kFxSoftLanes);
@@ -331,26 +360,29 @@ __device__ void sparsePrefillWmma(const float* __restrict__ q, const uint16_t* _
         }
         __syncthreads();
 
-        // O = P V on the accumulator rescaled by the tile factors; wave w takes dim tiles w and w + 8.
+        // O = P V on the accumulator rescaled by the tile factors; wave w takes dim tile w.
 #pragma unroll
         for (int rt = 0; rt < kFxRowTiles; ++rt) {
 #pragma unroll
             for (int i = 0; i < 8; ++i) {
                 const float f = row_scale[rt * 16 + 2 * i + half];
-                o_acc[rt][0][i] *= f;
-                o_acc[rt][1][i] *= f;
+#pragma unroll
+                for (int dt = 0; dt < kFxDimsPerWave; ++dt) o_acc[rt][dt][i] *= f;
             }
         }
 #pragma unroll
-        for (int dt = 0; dt < 2; ++dt) {
+        for (int dt = 0; dt < kFxDimsPerWave; ++dt) {
             const int dim_tile = wave + dt * kFxWaves;
             if (dim_tile * 16 >= dims) continue;
             const auto vf = T::load(&v_lds[(dim_tile * 16 + sub) * kFxVtStride]);
 #pragma unroll
             for (int rt = 0; rt < kFxRowTiles; ++rt) {
                 if (rt >= tiles) continue;
-                const auto pf = T::load(&p_lds[(rt * 16 + sub) * kFxPStride]);
-                o_acc[rt][dt] = T::mma(pf, vf, o_acc[rt][dt]);
+#pragma unroll
+                for (int n = kFxSplit - 1; n >= 0; --n) {
+                    const auto pf = T::load(&p_lds[n][(rt * 16 + sub) * kFxPStride]);
+                    o_acc[rt][dt] = T::mma(pf, vf, o_acc[rt][dt]);
+                }
             }
             const unsigned bad = v_bad[dim_tile * 16 + sub];
             if (bad != 0u) {  // a row that selected a non-finite V gets NaN in that dim, as the scalar kernel's 0 * NaN
@@ -368,7 +400,7 @@ __device__ void sparsePrefillWmma(const float* __restrict__ q, const uint16_t* _
 
     // The part's unnormalized output and its (max, sum) for tf_fn_sparse_merge; an empty part stores zeros, -inf, 0.
 #pragma unroll
-    for (int dt = 0; dt < 2; ++dt) {
+    for (int dt = 0; dt < kFxDimsPerWave; ++dt) {
         const int dim_tile = wave + dt * kFxWaves;
         if (dim_tile * 16 >= dims) continue;
 #pragma unroll
@@ -397,26 +429,20 @@ __device__ void sparsePrefillWmma(const float* __restrict__ q, const uint16_t* _
 }
 
 // The two 16-bit cache kinds; cache_kind stays in the signature so the argument list matches tf_fn_sparse_parts.
-extern "C" __global__ void __launch_bounds__(kFxThreads)
-tf_fn_sparse_prefill_wmma_bf16(const float* __restrict__ q, const void* __restrict__ k, const void* __restrict__ v,
-                                int cache_kind, const int* __restrict__ ids, long long id_stride,
-                                const int* __restrict__ count, const int* __restrict__ sparse,
-                                const int* __restrict__ ends, float* __restrict__ parts_o, float* __restrict__ parts_ms,
-                                int rows, int heads, int kv_heads, int dims, long long cap, float scale, int parts) {
-    (void)cache_kind;
-    sparsePrefillWmma<2>(q, static_cast<const uint16_t*>(k), static_cast<const uint16_t*>(v), ids, id_stride, count,
-                        sparse, ends, parts_o, parts_ms, rows, heads, kv_heads, dims, cap, scale, parts);
-}
+#define TF_FX_ENTRY(NAME, KIND)                                                                        \
+    extern "C" __global__ void __launch_bounds__(kFxThreads) NAME(                                     \
+        const float* __restrict__ q, const void* __restrict__ k, const void* __restrict__ v,          \
+        int cache_kind, const int* __restrict__ ids, long long id_stride, const int* __restrict__ count, \
+        const int* __restrict__ sparse, const int* __restrict__ ends, float* __restrict__ parts_o,     \
+        float* __restrict__ parts_ms, int rows, int heads, int kv_heads, int dims, long long cap,      \
+        float scale, int parts) {                                                                      \
+        (void)cache_kind;                                                                              \
+        sparsePrefillWmma<KIND>(q, static_cast<const uint16_t*>(k), static_cast<const uint16_t*>(v),   \
+                                ids, id_stride, count, sparse, ends, parts_o, parts_ms, rows, heads,   \
+                                kv_heads, dims, cap, scale, parts);                                    \
+    }
 
-extern "C" __global__ void __launch_bounds__(kFxThreads)
-tf_fn_sparse_prefill_wmma_f16(const float* __restrict__ q, const void* __restrict__ k, const void* __restrict__ v,
-                               int cache_kind, const int* __restrict__ ids, long long id_stride,
-                               const int* __restrict__ count, const int* __restrict__ sparse,
-                               const int* __restrict__ ends, float* __restrict__ parts_o, float* __restrict__ parts_ms,
-                               int rows, int heads, int kv_heads, int dims, long long cap, float scale, int parts) {
-    (void)cache_kind;
-    sparsePrefillWmma<1>(q, static_cast<const uint16_t*>(k), static_cast<const uint16_t*>(v), ids, id_stride, count,
-                        sparse, ends, parts_o, parts_ms, rows, heads, kv_heads, dims, cap, scale, parts);
-}
+TF_FX_ENTRY(tf_fn_sparse_prefill_wmma_bf16, 2)
+TF_FX_ENTRY(tf_fn_sparse_prefill_wmma_f16, 1)
 
 }  // namespace
