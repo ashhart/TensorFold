@@ -17,6 +17,15 @@ pub const Landing = struct {
         }
     }
 
+    /// A cost-pruned lone proposal's observations do not describe an unpriced shared tree or its lone tail.
+    pub fn observeFor(l: *Landing, shared: bool, keyed: bool, own: f64, landed: bool) void {
+        if (!shared) l.observe(keyed, own, landed);
+    }
+
+    pub fn chanceFor(l: *const Landing, shared: bool, keyed: bool, own: f64) f64 {
+        return if (shared) @exp(own) else l.chance(keyed, own);
+    }
+
     /// A node's chance of landing given its parent: its bucket's counts, e^own as the prior.
     pub fn chance(l: *const Landing, keyed: bool, own: f64) f64 {
         const x = l.counts[@intFromBool(keyed)][bucket(own)];
@@ -34,4 +43,15 @@ test "sampled rounds' landings move sampled streams' chances alone" {
     try std.testing.expectEqual(greedy, l.chance(false, -0.2));
     try std.testing.expect(l.chance(true, -0.2) < 0.1 * greedy);
     try std.testing.expectEqual(@as(usize, 15), Landing.bucket(-30.0));
+}
+
+test "shared tails do not train the lone proposal's landing counts" {
+    var l: Landing = .{};
+    l.observeFor(false, false, -0.25, true);
+    const before = l;
+    for ([_]bool{ false, true }) |keyed| for (0..200) |_| l.observeFor(true, keyed, -0.25, false);
+    try std.testing.expectEqualDeep(before, l);
+    l.observeFor(false, true, -0.25, false);
+    try std.testing.expectEqual(before.chance(false, -0.25), l.chance(false, -0.25));
+    try std.testing.expect(l.chance(true, -0.25) < before.chance(true, -0.25));
 }

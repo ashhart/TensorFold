@@ -19,6 +19,7 @@ the selected width, in a width-tagged cache.
 Tensor-unit servers with several slots also measure wider unfused row shapes, through 64 rows when the context fits.
 Shared allocation uses those prices beyond the lone window; the lone window retains its own measured prices.
 Shared DFlash2 proposals use the allocator's grants before their batched pass, on both projection paths.
+Lone, cost-pruned trees keep their learned landing counts; shared requests and their tails use the node log-probability prior.
 Wide tensor-unit windows enable context copies by default; earlier chips keep copies opt-in.
 A lone lane request may propose up to 15/31/63 tree nodes at 16/32/64 rows, including the drafter's next-most-likely siblings at each depth. It chooses a parent-closed prefix
 by expected accepted tokens per measured millisecond in the common lane allocator, using its calibrated landing rates.
