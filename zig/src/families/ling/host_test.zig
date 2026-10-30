@@ -8,6 +8,7 @@ test {
     _ = @import("names_test.zig");
     _ = @import("tiny_test.zig");
     _ = @import("synth.zig");
+    _ = @import("route.zig");
 }
 
 test "the float64 oracle handles tiny's null SwiGLU lists" {
