@@ -16,7 +16,7 @@ const n = 1024;
 const k_dim = 2048;
 const group = 64;
 
-const Kind = enum { plain, relu2, pair, routed, group };
+const Kind = enum { plain, relu2, pair, routed, uneven, group };
 
 /// The tables of `experts` stacked products of `rows` columns each, on the device.
 const Tables = struct {
@@ -55,7 +55,7 @@ fn launch(t: *Rig, k: *const Kernels, kind: Kind, arg: affine.Arg, sides: []cons
         .plain => try k.streamGo(r, arg, .{}, arg.n, 1, s),
         .relu2 => try k.relu2Go(r, arg, 1, s),
         .pair => try k.streamGo(r, arg, .{ .pair_cols = @divExact(arg.n, 2) }, @divExact(arg.n, 2), 1, s),
-        .routed => try k.routed(r, arg, items, s),
+        .routed, .uneven => try k.routed(r, arg, items, s),
         .group => try k.groupGo(r, arg, sides, false, s),
     }
     try t.base.stream.synchronize();
@@ -65,7 +65,8 @@ fn launch(t: *Rig, k: *const Kernels, kind: Kind, arg: affine.Arg, sides: []cons
 fn compare(t: *Rig, rng: *data.Rng, kind: Kind, bits: c_int) !usize {
     var reference = t.kernels.*;
     reference.stream_interleave = false;
-    const experts: usize = if (kind == .routed) 2 else 1;
+    const two = kind == .routed or kind == .uneven;
+    const experts: usize = if (two) 2 else 1;
     var tables = try Tables.init(t, rng, experts * n, bits);
     defer tables.deinit();
     const hx = try data.fill(gpa, u16, most_rows * k_dim, rng, if (t.fp16) data.makeX16 else data.makeXB);
@@ -73,7 +74,7 @@ fn compare(t: *Rig, rng: *data.Rng, kind: Kind, bits: c_int) !usize {
     var x = try Buffer.fromHost(t.base, hx);
     defer x.free();
     // a routed round sends each row to both experts, so its output holds two pairs a row
-    const bytes = @as(usize, if (kind == .routed) 2 else 1) * most_rows * n * 4;
+    const bytes = @as(usize, if (two) 2 else 1) * most_rows * n * 4;
     var outs: [2]Buffer = .{ try Buffer.alloc(t.base, bytes), undefined };
     defer outs[0].free();
     outs[1] = try Buffer.alloc(t.base, bytes);
@@ -86,17 +87,16 @@ fn compare(t: *Rig, rng: *data.Rng, kind: Kind, bits: c_int) !usize {
         // the launch reaches the interleaved grid only past one row block
         const block_rows = affine.stream_rows[affine.stream_rows.len - 1];
         try base.expect(m > block_rows, "stream layout: {d} rows fit one row block", .{m});
-        // top-2 routing: every row goes to both experts, pair 2r to the first and 2r + 1 to the second
+        // pair 2r of every row goes to the first expert, 2r + 1 to the second (the first half of the rows when uneven)
         const rows: c_int = @intCast(m);
-        const plan = [_]c_int{ 0, 0, rows, 1, rows, rows };
+        const second: usize = if (kind == .uneven) m / 2 else m;
+        const plan = [_]c_int{ 0, 0, rows, 1, rows, @intCast(second) };
         var members: [2 * most_rows]c_int = undefined;
-        for (0..m) |i| {
-            members[i] = @intCast(2 * i);
-            members[m + i] = @intCast(2 * i + 1);
-        }
+        for (0..m) |i| members[i] = @intCast(2 * i);
+        for (0..second) |i| members[m + i] = @intCast(2 * i + 1);
         var items = try Buffer.fromHost(t.base, @as([]const c_int, &plan));
         defer items.free();
-        var mem = try Buffer.fromHost(t.base, @as([]const c_int, members[0 .. 2 * m]));
+        var mem = try Buffer.fromHost(t.base, @as([]const c_int, members[0 .. m + second]));
         defer mem.free();
         for (outs, [_]*const Kernels{ t.kernels, &reference }) |out, kern| {
             try out.fill8(0xA5, null);
@@ -114,7 +114,7 @@ fn compare(t: *Rig, rng: *data.Rng, kind: Kind, bits: c_int) !usize {
                 .group = group,
                 .fp16 = @intFromBool(t.fp16),
             };
-            if (kind == .routed) arg.route = .{ .items = items.ptr, .members = mem.ptr, .x_div = 2 };
+            if (two) arg.route = .{ .items = items.ptr, .members = mem.ptr, .x_div = 2 };
             // three sides of unequal widths over one x, each writing its own stretch of the output
             const sides = [_]affine.Side{
                 .{ .words = tables.words.ptr, .scale = tables.scale.ptr, .bias = tables.bias.ptr, .n = 512, .out = out.ptr },
@@ -136,7 +136,7 @@ test "a stream product writes the bytes of the reference layout with its row blo
     var rig = Rig.open(b);
     var rng: data.Rng = .{ .state = 0x2545F4914F6CDD1D };
     var diff: usize = 0;
-    for ([_]Kind{ .plain, .relu2, .pair, .routed, .group }) |kind| diff += try compare(&rig, &rng, kind, 4);
+    for ([_]Kind{ .plain, .relu2, .pair, .routed, .uneven, .group }) |kind| diff += try compare(&rig, &rng, kind, 4);
     diff += try compare(&rig, &rng, .plain, 3);
     try base.expect(diff == 0, "stream layout: {d} words differ from the reference layout", .{diff});
 }
