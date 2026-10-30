@@ -18,6 +18,7 @@ pub const qwen4_gdn: []const u8 = if (available) &Blob("fatbin_qwen4_gdn").bytes
 pub const qwen4_projection: []const u8 = if (available) &Blob("fatbin_qwen4_projection").bytes else &.{};
 pub const gdn: []const u8 = if (available) &Blob("fatbin_gdn").bytes else &.{};
 pub const flashnext_gdn: []const u8 = if (available) &Blob("fatbin_flashnext_gdn").bytes else &.{};
+pub const flashnext_exl3: []const u8 = if (available) &Blob("fatbin_flashnext_exl3").bytes else &.{};
 pub const flashnext_batch: []const u8 = if (available) &Blob("fatbin_flashnext_batch").bytes else &.{};
 pub const flashnext_mtp: []const u8 = if (available) &Blob("fatbin_flashnext_mtp").bytes else &.{};
 pub const probe: []const u8 = if (available) &Blob("fatbin_probe").bytes else &.{};
