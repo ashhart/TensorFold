@@ -18,6 +18,8 @@ pub const Str = struct {
     s: []const u8,
     safe: bool = false,
     spans: []const Span = &.{},
+    /// Render-arena owner; reuse requires the exact current text and span slices.
+    accumulator: ?*Buffer = null,
 
     pub fn request(a: Allocator, s: []const u8) Allocator.Error!Str {
         return derived(a, s, s.len > 0);
@@ -107,7 +109,28 @@ pub const Buffer = struct {
         }
     }
 
+    /// Retains every previous text and span slice until the render's arena is released.
+    pub fn appendRetained(b: *Buffer, a: Allocator, s: Str) Allocator.Error!void {
+        try retainCapacity(u8, &b.text, a, s.s.len);
+        try retainCapacity(Span, &b.spans, a, s.spans.len);
+        const offset = b.text.items.len;
+        b.text.appendSliceAssumeCapacity(s.s);
+        for (s.spans) |p| {
+            b.spans.appendAssumeCapacity(.{ offset + p[0], offset + p[1] });
+            b.span_steps += 1;
+        }
+    }
+
     pub fn str(b: *const Buffer) Str {
         return .{ .s = b.text.items, .spans = b.spans.items };
     }
 };
+
+fn retainCapacity(comptime T: type, list: *std.ArrayList(T), a: Allocator, extra: usize) Allocator.Error!void {
+    const needed = std.math.add(usize, list.items.len, extra) catch return error.OutOfMemory;
+    if (needed <= list.capacity) return;
+    const memory = try a.alloc(T, std.ArrayList(T).growCapacity(needed));
+    @memcpy(memory[0..list.items.len], list.items);
+    list.items = memory[0..list.items.len];
+    list.capacity = memory.len;
+}
