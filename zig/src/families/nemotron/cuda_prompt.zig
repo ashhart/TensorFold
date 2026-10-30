@@ -161,7 +161,7 @@ pub const Pass = struct {
         e.pos += @intCast(chunk.len);
         const known = @min(chunk.len, prompt.len - 1 - s);
         if (e.prompt_rows) |pr| try prompt_rows.run(e, pr, prompt[s + 1 ..][0..known]);
-        if (p.head) |h| if (known > 0) try h.absorb(e.b.p_hidden, prompt[s + 1 ..][0..known]);
+        if (p.head) |h| if (known > 0) try h.absorb(e.b.p_hidden, prompt[s + 1 ..][0..known], s + 1);
         if (e.taps) |t| try t.call(t.ctx, e.b.p_hidden, s, chunk.len);
         try reuse.finish(.{ .e = e, .head = p.head });
         p.s = end;
