@@ -39,8 +39,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     test_step.dependOn(host);
     b.step("stage1-host-test", "Stage 1 tensor, arena, params and operator-plan host tests, plus the qmm fixture suite").dependOn(host);
 
-    // Stage 2 host admission: the vulkan module's own tests (norm_mlp's operator-plan cases among
-    // them) plus the stage 2 fixture suite, without GPU work.
+    // Stage 2 host admission: the vulkan module's own tests plus the stage 2 fixture suite, without GPU work.
     const stage2_fixture = b.createModule(.{
         .root_source_file = b.path("zig/tests/vulkan/stage2_fixture.zig"),
         .target = b.graph.host,
@@ -52,8 +51,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const stage2_host = b.step("stage2-host-test", "Stage 2 norm/MLP operator-plan host tests and the stage 2 fixture suite, without GPU work");
     stage2_host.dependOn(&b.addRunArtifact(vk_host_tests).step);
     stage2_host.dependOn(&b.addRunArtifact(stage2_fixture_tests).step);
-    // The stage 2 probe's host tests: the Bound16 view-derivation regression (binding lifetime),
-    // pure host. `shaders` and `main` stay unanalyzed here; the SPIR-V assets belong to the GPU build.
+    // The stage 2 probe's host tests (the Bound16 view regression), pure host; `shaders` and `main` stay unanalyzed.
     const stage2_probe_host_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/vulkan/stage2_probe.zig"),
         .target = b.graph.host,
@@ -66,9 +64,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     stage2_host.dependOn(&b.addRunArtifact(stage2_probe_host_tests).step);
     host.dependOn(&b.addRunArtifact(stage2_probe_host_tests).step);
 
-    // Stages 3 and 4 host admission: the vulkan module's own tests (attention's
-    // and gdn's plan cases among them) plus each stage's fixture suite, without
-    // GPU work.
+    // Stages 3 and 4 host admission: the vulkan module's own tests plus each stage's fixture suite, without GPU work.
     const stage3_fixture_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/vulkan/stage3_fixture.zig"),
         .target = b.graph.host,
@@ -94,10 +90,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     stage4_host.dependOn(&b.addRunArtifact(vk_host_tests).step);
     stage4_host.dependOn(&b.addRunArtifact(stage4_fixture_tests).step);
 
-    // Stage 5 host admission: the vulkan module's own tests (greedy's plan
-    // cases among them) plus the stage 5 fixture suite, without GPU
-    // work. The fixture file lands with its owner; the step fails honestly until
-    // then, and no other step waits on it.
+    // Stage 5 host admission: the vulkan module's own tests plus its fixture suite; fails honestly until the fixture lands.
     const stage5_fixture_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/vulkan/stage5_fixture.zig"),
         .target = b.graph.host,
@@ -144,7 +137,6 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const run = b.addRunArtifact(probe);
     run.addPassthruArgs();
     b.step("vulkan-probe", "Run the Vulkan qmm probe on the chosen GPU (args after --)").dependOn(&run.step);
-
 
     // Stage 1: the operator variants as SPIR-V assets, and the GPU probe from the fixture owner's root.
     const stage1_files = b.addWriteFiles();
@@ -205,9 +197,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     });
     host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = datamove_host_module })).step);
 
-    // Stage 2: the norm/MLP pointwise variants — norm and swiglu compiled as the Ash8c
-    // Metal-oracle form (ASH_QWEN35), add the plain bf16 form; all with -DUSE_BF16 —
-    // and the GPU probe over the production NormMlp operator. Compile only: no GPU work.
+    // Stage 2: norm/swiglu as the ASH_QWEN35 oracle form, add plain bf16, all -DUSE_BF16; the NormMlp probe. Compile only.
     const stage2_files = b.addWriteFiles();
     const stage2_build = b.step("stage2-gpu-build", "Compile the stage 2 SPIR-V variants, install them under stage2/, and build the stage 2 GPU probe without running it");
     const stage2_run = b.step("stage2-gpu-run", "Run the stage 2 GPU probe on the chosen device (args after --)");
@@ -237,11 +227,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     stage2_probe_run.addPassthruArgs();
     stage2_run.dependOn(&stage2_probe_run.step);
 
-    // Stages 3 and 4: attention (half-split RoPE, causal GQA SDPA, output gate)
-    // and the GatedDeltaNet closure. Each stage compiles its SPIR-V variants
-    // (vulkan1.2 -> SPIR-V 1.5), installs them under stageN/, and builds its
-    // GPU probe without running it. The compile runs from the kernel directory
-    // with -I. so fast_rope's repo-local #include "omarchy_trig.h" resolves.
+    // Stages 3 and 4: attention and GatedDeltaNet; compiles run from the kernel dir with -I. for fast_rope's #include.
     const kernel_dir = b.path("zig/kernels/vulkan");
     const stage3_files = b.addWriteFiles();
     const stage3_build = b.step("stage3-gpu-build", "Compile the stage 3 attention SPIR-V variants, install them under stage3/, and build the stage 3 GPU probe without running it");
@@ -274,12 +260,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     stage3_probe_run.addPassthruArgs();
     stage3_run.dependOn(&stage3_probe_run.step);
 
-    // The attention contract (group `attention`): rope_bf16 and sdpa_rows_bf16
-    // against stage3_fixture's f64 references over the served shapes (decode
-    // rows 1, prefill rows <= 32, visible keys 1..7168 on the shader's
-    // reduction edges). Host half runs with the fixture suite; the GPU half
-    // is its own probe embedding the SAME SPIR-V images the stage 3 probe
-    // uses, plus the sdpa source text the depth derivation is pinned to.
+    // The attention contract: rope and sdpa_rows against the fixture's f64 references; the GPU probe reuses the stage 3 images.
     const attention_files = b.addWriteFiles();
     _ = attention_files.addCopyFile(b.path("zig/kernels/vulkan/sdpa_decode_native.comp"), "sdpa_decode_native.comp");
     const attention_sources = b.createModule(.{ .root_source_file = attention_files.add("attention_sources.zig",
@@ -345,9 +326,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     stage4_probe_run.addPassthruArgs();
     stage4_run.dependOn(&stage4_probe_run.step);
 
-    // Stage 5: the greedy gate (finite logits, chunked argreduce, combine).
-    // The probe root lands with its owner; the target fails honestly until
-    // then, no other step waits on it.
+    // Stage 5: the greedy gate (finite logits, chunked argreduce, combine); fails honestly until its probe root lands.
     const stage5_files = b.addWriteFiles();
     const stage5_build = b.step("stage5-gpu-build", "Compile the stage 5 greedy SPIR-V variants, install them under stage5/, and build the stage 5 GPU probe without running it");
     const stage5_run = b.step("stage5-gpu-run", "Run the stage 5 GPU probe on the chosen device (args after --)");
@@ -378,19 +357,13 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     stage5_probe_run.addPassthruArgs();
     stage5_run.dependOn(&stage5_probe_run.step);
 
-    // The greedy contract (group `greedy`): the composed draw — finite_logits,
-    // argreduce_chunk and argreduce_combine behind one submission — through
-    // gates 1-4, plus the planted control (a row max that drops a NaN)
-    // required to go red on the nonfinite gate. Host half runs with the
-    // fixture suite; the GPU half is its own probe embedding the SAME stage 5
-    // images plus the control's SPIR-V.
+    // The greedy contract: the composed draw through gates 1-4 plus the NaN control; the GPU probe reuses the stage 5 images.
     const greedy_files = b.addWriteFiles();
     const greedy_ctl_cmd = b.addSystemCommand(&.{ glslang, "-V", "--target-env", "vulkan1.2", "-S", "comp", "-o" });
     const greedy_ctl_spv = greedy_ctl_cmd.addOutputFileArg("contract_controls_greedy.spv");
     greedy_ctl_cmd.addFileArg(b.path("zig/kernels/vulkan/contract_controls_greedy.comp"));
     _ = greedy_files.addCopyFile(greedy_ctl_spv, "contract_controls_greedy.spv");
-    const greedy_controls = b.createModule(.{ .root_source_file = greedy_files.add("greedy_controls.zig",
-        "pub const fmax_max align(4) = @embedFile(\"contract_controls_greedy.spv\").*;\n") });
+    const greedy_controls = b.createModule(.{ .root_source_file = greedy_files.add("greedy_controls.zig", "pub const fmax_max align(4) = @embedFile(\"contract_controls_greedy.spv\").*;\n") });
     const greedy_contract_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/vulkan/contract_greedy.zig"),
         .target = b.graph.host,
@@ -429,9 +402,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         },
     });
     host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = contract_fixture })).step);
-    // the gdn group's host-checkable proofs: its walker against the stage 4
-    // fixture's, the depth functions' shape honesty and the stress sums' f32
-    // exactness and fp16 margins, without GPU work
+    // The gdn group's host proofs: walker vs the stage 4 fixture's, depth shape honesty, stress sums' f32 and fp16 margins
     const contract_gdn_fixture = b.createModule(.{
         .root_source_file = b.path("zig/tests/vulkan/contract_gdn.zig"),
         .target = b.graph.host,
@@ -442,9 +413,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         },
     });
     host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = contract_gdn_fixture })).step);
-    // The pointwise contract: all six pointwise closures (stage 2's three plus the preserve
-    // add, the attention output gate and the gated RMSNorm) against one GPU probe, and the
-    // fixtures' host suite in `test`.
+    // The pointwise contract: all six closures against one GPU probe, plus the fixtures' host suite in `test`.
     const pointwise_fixture_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/vulkan/contract_pointwise.zig"),
         .target = b.graph.host,
@@ -503,8 +472,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     inline for (variants, 0..) |variant, i| {
         _ = contract_files.addCopyFile(controls[i], variant[0] ++ ".spv");
     }
-    const contract_shaders = b.createModule(.{ .root_source_file = contract_files.add("vulkan_contract_shaders.zig",
-        "pub const qmm_bf16 align(4) = @embedFile(\"qmm_bf16.spv\").*;\n" ++
+    const contract_shaders = b.createModule(.{ .root_source_file = contract_files.add("vulkan_contract_shaders.zig", "pub const qmm_bf16 align(4) = @embedFile(\"qmm_bf16.spv\").*;\n" ++
         "pub const qmm_fmax align(4) = @embedFile(\"qmm_fmax.spv\").*;\n" ++
         "pub const atomic_sum align(4) = @embedFile(\"atomic_sum.spv\").*;\n" ++
         "pub const scribble_sum align(4) = @embedFile(\"scribble_sum.spv\").*;\n" ++
@@ -533,13 +501,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     b.step("tf-vulkan-kernel-contract", "Build Vulkan QMM contract runner and planted control shaders without running them").dependOn(&contract_install.step);
     b.step("vulkan-kernel-contract", "Run Vulkan QMM contract gates and planted controls on the selected device").dependOn(&b.addRunArtifact(contract_exe).step);
 
-    // The qwen3.5 Vulkan family weights/state host admission (auditable in this
-    // tree, unlike a child harness): refAllDeclsRecursive over the family
-    // modules, with the production vulkan module. The house wires (sys,
-    // checkpoint_config, save_guard) attach to this root module in build.zig's
-    // post-declaration walk, so they are not named here. The shared loader's
-    // TF_QWEN_DIR real test stays skipped: the parent runs the step with
-    // `env -u TF_QWEN_DIR`. No engine/native adapter import (unfinished).
+    // Family host admission: refAllDeclsRecursive over the family modules; house wires attach in build.zig.
     const model_host_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/vulkan_model_host_tests.zig"),
         .target = b.graph.host,
@@ -579,10 +541,7 @@ const stage1_shaders_src =
     \\pub const copy_u16 align(4) = @embedFile("copy_u16.spv").*;
 ;
 
-/// The stage 2 closure's shader images: norm and swiglu carry the Ash8c Metal-oracle variant
-/// (single store rounding; weight applied to the product); add is the plain bf16 form and
-/// add_preserve_bf16 the same shader with the DenormPreserve (f32) execution mode (binary_vec.comp
-/// has no USE_BF16 ifdef — its default storage IS bf16, so the two add builds differ only there).
+/// Stage 2's images: norm/swiglu in the ASH_QWEN35 oracle form; add_preserve_bf16 is add plus DenormPreserve (f32).
 const stage2_variants = [_]ShaderVariant{
     .{ .name = "norm_bf16", .src = "zig/kernels/vulkan/fast_norm.comp", .defines = &.{ "-DUSE_BF16", "-DASH_QWEN35" } },
     .{ .name = "add_bf16", .src = "zig/kernels/vulkan/binary_vec.comp", .defines = &.{} },
@@ -597,9 +556,7 @@ const stage2_shaders_src =
     \\pub const swiglu_bf16 align(4) = @embedFile("swiglu_bf16.spv").*;
 ;
 
-/// The stage 3 closure's shader images: the ASH_QWEN35 rope variant (Metal-oracle
-/// inverse frequencies, no intermediate bf16 rounding), the causal multi-row SDPA
-/// decode arm and the attention output gate.
+/// Stage 3's images: the ASH_QWEN35 rope variant, the causal multi-row SDPA decode arm and the attention output gate.
 const stage3_variants = [_]ShaderVariant{
     .{ .name = "rope_bf16", .src = "zig/kernels/vulkan/fast_rope.comp", .defines = &.{ "-DUSE_BF16", "-DASH_QWEN35" } },
     .{ .name = "sdpa_rows_bf16", .src = "zig/kernels/vulkan/sdpa_decode_native.comp", .defines = &.{ "-DBF16_IO", "-DSDPA_DIM=256", "-DSDPA_ROWS" } },
@@ -612,9 +569,7 @@ const stage3_shaders_src =
     \\pub const gate_bf16 align(4) = @embedFile("gate_bf16.spv").*;
 ;
 
-/// The stage 4 closure's shader images: the GatedDeltaNet conv, gate split,
-/// gated-delta prefill scan (u8 mask binding removed) and decode, the gated
-/// RMSNorm epilogue and the contiguous bf16 copy, all -DUSE_BF16.
+/// Stage 4's images: GDN conv, gate split, prefill scan, decode, RMSNorm epilogue and the bf16 copy, all -DUSE_BF16.
 const stage4_variants = [_]ShaderVariant{
     .{ .name = "conv_dw1d_bf16", .src = "zig/kernels/vulkan/conv_dw1d.comp", .defines = &.{"-DUSE_BF16"} },
     .{ .name = "gdn_conv_decode_bf16", .src = "zig/kernels/vulkan/gdn_conv_decode.comp", .defines = &.{"-DUSE_BF16"} },
@@ -635,11 +590,7 @@ const stage4_shaders_src =
     \\pub const copy_u16 align(4) = @embedFile("copy_u16.spv").*;
 ;
 
-/// The stage 5 closure's shader images: the greedy gate's three passes.
-/// argreduce_chunk reads the bf16 logits (-DUSE_BF16; the default float32
-/// build would read the wrong dtype and run out of bounds); finite_logits is
-/// plain bf16-widening and needs no define; argreduce_combine reduces the f32
-/// partials with no bf16 specialization.
+/// Stage 5's images: the greedy gate's three passes; argreduce_chunk is -DUSE_BF16, combine reduces the f32 partials.
 const stage5_variants = [_]ShaderVariant{
     .{ .name = "finite_logits", .src = "zig/kernels/vulkan/finite_logits.comp", .defines = &.{} },
     .{ .name = "argreduce_chunk", .src = "zig/kernels/vulkan/argreduce_chunk.comp", .defines = &.{"-DUSE_BF16"} },
@@ -652,10 +603,7 @@ const stage5_shaders_src =
     \\pub const argreduce_combine align(4) = @embedFile("argreduce_combine.spv").*;
 ;
 
-/// The qwen3.5 Vulkan server's modules: the thin family root, the embedded
-/// SPIR-V bundle (one decl per shader image, names the adapter's bundle()
-/// reads), and the native_engines registry root. The caller (the server
-/// target's build site) attaches them; nothing here builds a server binary.
+/// The qwen3.5 Vulkan server's modules: the thin family root, the embedded SPIR-V bundle and the native_engines root; the build site attaches them.
 pub fn serverModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.Optimize, o: Options, lanes: *std.Build.Module) struct { qwen35_vulkan: *std.Build.Module, qwen35_shaders: *std.Build.Module, native_engines: *std.Build.Module, engine_api: *std.Build.Module, core: *std.Build.Module } {
     const vulkan = module(b, target, optimize, o);
     const core = coreModule(b, target, optimize);
@@ -690,16 +638,10 @@ pub fn serverModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: 
     return .{ .qwen35_vulkan = qwen35_vulkan, .qwen35_shaders = qwen35_shaders, .native_engines = native_engines, .engine_api = engine_api, .core = core };
 }
 
-/// Every SPIR-V image the server bundle embeds: the REAL stage variant arrays,
-/// concatenated (stage4's trailing copy_u16 skipped — the bundle needs ONE
-/// copy_u16 decl, already present from stage1; names are exactly what the
-/// adapter's bundle() reads). Reusing the arrays means a define change (e.g.
-/// cast's source/dest variants, argreduce_chunk's bf16) cannot drift between
-/// the probe builds and the server bundle.
+/// Every image the bundle embeds: the real stage arrays, concatenated; names are what the adapter's bundle() reads.
 const server_shader_images = shader_variants ++ stage2_variants ++ stage3_variants ++ stage4_variants[0 .. stage4_variants.len - 1] ++ stage5_variants;
 
-/// The house core module (core/root.zig) the family loader's config/shard/
-/// slicing/table imports resolve through, built exactly as cuda.zig builds it.
+/// The house core module the family loader's config/shard imports resolve through, built exactly as cuda.zig builds it.
 fn coreModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.Optimize) *std.Build.Module {
     const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
@@ -719,10 +661,7 @@ fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
     const m = b.createModule(.{ .root_source_file = b.path("zig/src/vulkan/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
     m.addImport("vk", vk.createModule());
     m.addImport("stage1_params", b.createModule(.{ .root_source_file = b.path("zig/src/vulkan/params.zig"), .target = target, .optimize = optimize }));
-    // Host-test-only .comp sources (exl3's kernel_sources pattern): the
-    // flag-pin tests match push flags against the literal masks in this
-    // text. Only test blocks reference it, so shipped ELFs keep embedding
-    // SPIR-V alone.
+    // Host-test-only .comp sources: flag-pin tests match push flags against literal masks here; shipped ELFs embed SPIR-V alone.
     const comp_files = b.addWriteFiles();
     inline for (.{ "gated_delta_decode", "gated_delta_prefill_ash", "fast_rope", "gdn_conv_decode" }) |name|
         _ = comp_files.addCopyFile(b.path("zig/kernels/vulkan/" ++ name ++ ".comp"), name ++ ".comp");
