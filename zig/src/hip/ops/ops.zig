@@ -87,6 +87,7 @@ pub const Ops = struct {
     pub const moeTail = moe.moeTail;
     pub const moeRouter = moe.moeRouter;
     pub const moeSelect = moe.moeSelect;
+    pub const moeRouterSelect = moe.moeRouterSelect;
     pub const moeRoute = moe.moeRoute;
     pub const moeAct = moe.moeAct;
     pub const moeCombine = moe.moeCombine;

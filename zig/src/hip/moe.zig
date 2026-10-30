@@ -29,6 +29,10 @@ pub const Routed = struct {
     remap: u64 = 0,
     /// Plan the rows' own pairs, not a power-of-two bucket's (no graph replays the launches at other row counts).
     exact: bool = false,
+    /// The router's rows in bf16 (E + 1, D), as `rows32`: one router-and-pick launch reads them (0: two over `rows32`).
+    rows16: u64 = 0,
+    /// A u32, zero between launches, that the one-launch router and pick counts its finished blocks in.
+    done: u64 = 0,
 
     /// Routed experts, the shared one not counted.
     pub fn count(r: Routed) usize {
@@ -76,10 +80,10 @@ pub fn run(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, prefill: bool)
     const wts = try o.arena.of(f32, size * slots);
     const items = try o.arena.of(i32, cap * 3);
     const members = try o.arena.of(i32, size * slots);
-    try o.moeRouter(x, r.rows32, logits, rows, ex.dims, r.rows);
     const count: usize = cap;
     var tile: usize = undefined;
     if (r.remap != 0) {
+        try o.moeRouter(x, r.rows32, logits, rows, ex.dims, r.rows);
         // every rank picks the same pairs, runs the ones it holds (the others group under an id past its experts)
         try o.moeSelect(logits, pick, wts, null, 0, rows, r.count(), r.top_k);
         const local = try o.arena.of(i32, size * slots);
@@ -115,7 +119,6 @@ pub fn parts(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize) ops.Error!Pa
     const wts = try o.arena.of(f32, size * slots);
     const items = try o.arena.of(i32, cap * 3);
     const members = try o.arena.of(i32, size * slots);
-    try o.moeRouter(x, r.rows32, logits, rows, r.experts.dims, r.rows);
     const p = try expertParts(o, kind, r, x, rows, logits, pick, wts, items, members, cap);
     return .{ .y = p.y, .wts = wts, .slots = slots };
 }
@@ -128,13 +131,24 @@ fn expertParts(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, logits: u6
     var count: usize = cap;
     var tile: usize = undefined;
     if (rows == 1) {
-        try o.moeSelect(logits, pick, wts, .{ .items = items, .members = members }, cap, 1, r.count(), r.top_k);
+        // the router and the pick (and the plan) in one launch where the decode kernels take it
+        if (!try o.moeRouterSelect(x, r.rows16, r.done, logits, pick, wts, .{ .items = items, .members = members }, cap, 1, ex.dims, r.rows, r.top_k, 0)) {
+            try o.moeRouter(x, r.rows32, logits, rows, ex.dims, r.rows);
+            try o.moeSelect(logits, pick, wts, .{ .items = items, .members = members }, cap, 1, r.count(), r.top_k);
+        }
         tile = 1;
         count = slots;
     } else {
-        try o.moeSelect(logits, pick, wts, null, 0, rows, r.count(), r.top_k);
         tile = tileFor(o, rows);
-        try o.moeRoute(pick, pairs, r.rows, tile, members, items, cap);
+        // a verify window's 2 to 8 rows: the router, the pick and tf_moe_route's plan in one launch
+        const planned = rows <= 8 and try o.moeRouterSelect(x, r.rows16, r.done, logits, pick, wts, .{ .items = items, .members = members }, cap, rows, ex.dims, r.rows, r.top_k, tile);
+        if (!planned) {
+            if (!try o.moeRouterSelect(x, r.rows16, r.done, logits, pick, wts, null, 0, rows, ex.dims, r.rows, r.top_k, 0)) {
+                try o.moeRouter(x, r.rows32, logits, rows, ex.dims, r.rows);
+                try o.moeSelect(logits, pick, wts, null, 0, rows, r.count(), r.top_k);
+            }
+            try o.moeRoute(pick, pairs, r.rows, tile, members, items, cap);
+        }
     }
     // the gate and up's activation is the launch's epilogue when the tile takes the shape
     const act_t: Tensor = if (try o.projectRoutedAct(x, ex.fused, items, count, members, pairs, slots, @min(tile, rows), ex.limit)) |t| t else blk: {

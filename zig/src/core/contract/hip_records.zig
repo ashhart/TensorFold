@@ -376,6 +376,42 @@ const own_records = [_]Record{
             .{ .vgprs = 36, .sgprs = 32, .lds = 50688, .private = 0, .bound = 1024, .wave = 32 },
         },
     },
+    .{
+        .launch = .{ .name = "MoE router (decode, fp32 rows) tf_router_decode_f16", .symbol = "tf_router_decode_f16", .image = "decode", .threads = 128 },
+        .usage = .{
+            .{ .vgprs = 106, .sgprs = 75, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 90, .sgprs = 75, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 90, .sgprs = 75, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 90, .sgprs = 76, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        },
+    },
+    .{
+        .launch = .{ .name = "MoE router (decode, fp32 rows) tf_router_decode_bf16", .symbol = "tf_router_decode_bf16", .image = "decode", .threads = 128 },
+        .usage = .{
+            .{ .vgprs = 106, .sgprs = 75, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 91, .sgprs = 75, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 91, .sgprs = 75, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 91, .sgprs = 76, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        },
+    },
+    .{
+        .launch = .{ .name = "MoE router and pick in one launch (decode, bf16 rows) tf_router_select_f16", .symbol = "tf_router_select_f16", .image = "decode", .threads = 128, .dynamic = 2 * 2560 * 2 },
+        .usage = .{
+            .{ .vgprs = 135, .sgprs = 86, .lds = 5456, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 135, .sgprs = 82, .lds = 5456, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 135, .sgprs = 82, .lds = 5456, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 135, .sgprs = 83, .lds = 5456, .private = 0, .bound = 128, .wave = 32 },
+        },
+    },
+    .{
+        .launch = .{ .name = "MoE router and pick in one launch (decode, bf16 rows) tf_router_select_bf16", .symbol = "tf_router_select_bf16", .image = "decode", .threads = 128, .dynamic = 2 * 2560 * 2 },
+        .usage = .{
+            .{ .vgprs = 135, .sgprs = 86, .lds = 5456, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 135, .sgprs = 82, .lds = 5456, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 135, .sgprs = 82, .lds = 5456, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 135, .sgprs = 83, .lds = 5456, .private = 0, .bound = 128, .wave = 32 },
+        },
+    },
 } ++ @import("hip_records_pair.zig").records;
 
 pub const records = own_records ++ @import("hip_records_stream.zig").records;

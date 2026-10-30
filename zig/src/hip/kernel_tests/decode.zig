@@ -6,7 +6,7 @@ const gpa = rig.gpa;
 const at = rig.at;
 const Launcher = @import("../launches.zig").Launcher;
 
-fn p(b: anytype) ?*anyopaque {
+pub fn p(b: anytype) ?*anyopaque {
     return @ptrFromInt(at(b));
 }
 
@@ -300,4 +300,8 @@ test "the routed gate and up with its activation in one launch is no further fro
     for ([_]usize{ 1, 2, 4 }) |rows| try pair(t, &rng, rows, 512, 2048, 4, 64);
     try pair(t, &rng, 1, 768, 2048, 6, 64);
     try pair(t, &rng, 1, 512, 2048, 4, 128);
+}
+
+test {
+    _ = @import("decode_route.zig");
 }

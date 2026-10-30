@@ -29,18 +29,30 @@ constexpr int kRouterWaves = 4;
 constexpr int kRouterSteps = 16;  // float4 loads a lane keeps in flight
 constexpr int kRouterRows = 16;
 
-// logits[r, e] = x[r] . rows[e], 16 rows a block, a wave an expert; d is a multiple of 4, weight rows 16-byte aligned.
-template <int KIND>
-__device__ void router_decode(const void* x, const float* rows, float* logits, int r, int d, int e) {
+// Four router weights at `at` of row `w`: fp32 rows as stored, or bf16 rows (ROWS16) widened, which is exact.
+template <bool ROWS16>
+__device__ __forceinline__ float4 router_weights(const void* w, int at) {
+    if constexpr (ROWS16) {
+        const uint2 v = *reinterpret_cast<const uint2*>(static_cast<const uint16_t*>(w) + at);
+        return make_float4(bf16_up(v.x & 0xffffu), bf16_up(v.x >> 16), bf16_up(v.y & 0xffffu), bf16_up(v.y >> 16));
+    } else {
+        return *reinterpret_cast<const float4*>(static_cast<const float*>(w) + at);
+    }
+}
+
+// logits[r, e] = x[r] . rows[e], 16 rows a block, a wave an expert; d % 4 == 0; rows 16B aligned (8B ROWS16); x staged.
+template <int KIND, bool ROWS16 = false>
+__device__ void router_decode(const void* x, const void* rows, float* logits, int r, int d, int e, bool staged = false) {
     const int lane = threadIdx.x & 31;
     const int expert = blockIdx.x * kRouterWaves + (threadIdx.x >> 5);
     if (expert >= e) return;
     // blockIdx.y picks a block of 16 rows: a row's sums are the same whichever block it is in
     const int first = blockIdx.y * kRouterRows;
-    x = static_cast<const uint16_t*>(x) + static_cast<long long>(first) * d;
+    if (!staged) x = static_cast<const uint16_t*>(x) + static_cast<long long>(first) * d;
     logits += static_cast<long long>(first) * e;
     r = r - first < kRouterRows ? r - first : kRouterRows;
-    const float* w = rows + static_cast<long long>(expert) * d;
+    const void* w = ROWS16 ? static_cast<const void*>(static_cast<const uint16_t*>(rows) + static_cast<long long>(expert) * d)
+                           : static_cast<const void*>(static_cast<const float*>(rows) + static_cast<long long>(expert) * d);
     float acc[kRouterRows];
 #pragma unroll
     for (int k = 0; k < kRouterRows; ++k) acc[k] = 0.f;
@@ -49,7 +61,7 @@ __device__ void router_decode(const void* x, const float* rows, float* logits, i
 #pragma unroll
         for (int s = 0; s < kRouterSteps; ++s) {
             const int at = base + (lane + 32 * s) * 4;
-            wv[s] = at < d ? *reinterpret_cast<const float4*>(w + at) : make_float4(0.f, 0.f, 0.f, 0.f);
+            wv[s] = at < d ? router_weights<ROWS16>(w, at) : make_float4(0.f, 0.f, 0.f, 0.f);
         }
 #pragma unroll
         for (int k = 0; k < kRouterRows; ++k) {
@@ -332,6 +344,17 @@ __device__ void
 
 #include "decode/select.hpp"
 
+extern "C" __global__ void __launch_bounds__(32 * kRouterWaves)
+    tf_router_select_f16(const void* x, const void* rows, float* logits, int r, int d, int e, int* pick, float* wts,
+                         int* items, int* members, int capacity, int top_k, int tile, int staged, unsigned* done) {
+    router_select<1>(x, rows, logits, r, d, e, pick, wts, items, members, capacity, top_k, tile, staged, done);
+}
+
+extern "C" __global__ void __launch_bounds__(32 * kRouterWaves)
+    tf_router_select_bf16(const void* x, const void* rows, float* logits, int r, int d, int e, int* pick, float* wts,
+                          int* items, int* members, int capacity, int top_k, int tile, int staged, unsigned* done) {
+    router_select<2>(x, rows, logits, r, d, e, pick, wts, items, members, capacity, top_k, tile, staged, done);
+}
 
 extern "C" __global__ void __launch_bounds__(32 * kRouterWaves)
     tf_router_decode_f16(const void* x, const float* rows, float* logits, int r, int d, int e) {

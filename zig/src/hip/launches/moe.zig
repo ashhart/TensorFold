@@ -53,6 +53,49 @@ pub fn routerWindow(l: *const Launcher, x: C, kind: c_int, rows: CF, logits: F, 
     return true;
 }
 
+/// Decode router logits, row picks and (with `items`) plan in one launch; false where the shape keeps them apart.
+pub fn routerSelect(l: *const Launcher, x: C, kind: c_int, rows16: C, logits: F, pick: I, wts: F, items: I, members: I, capacity: c_int, r: c_int, d: c_int, e: c_int, top_k: c_int, tile: c_int, done: u64, s: S) Error!bool {
+    if (!l.fuse or done == 0 or r < 1 or r > 16 or @rem(d, 4) != 0 or ad(rows16) % 8 != 0 or ad(x) % 8 != 0) return false;
+    if (e - 1 > 1024 or top_k < 1 or top_k > 31) return false;
+    // the plan in the launch: one row, or 2 to 8 rows of at most plan_pairs pairs (route_plan's pair a thread)
+    if (items != null and r != 1 and (r > 8 or r * (top_k + 1) > plan_pairs or tile < 1)) return false;
+    var a: Args = .{};
+    try a.add(ad(x));
+    try a.add(ad(rows16));
+    try a.add(ad(logits));
+    try a.add(r);
+    try a.add(d);
+    try a.add(e);
+    try a.add(ad(pick));
+    try a.add(ad(wts));
+    try a.add(ad(items));
+    try a.add(ad(members));
+    try a.add(capacity);
+    try a.add(top_k);
+    try a.add(tile);
+    const sh = routerShared(ad(x), r, d, e, items != null);
+    try a.add(@as(c_int, @intFromBool(sh.staged)));
+    try a.add(done);
+    try l.go(l.dec.router_select[if (kind == 1) 0 else 1], dim(cdiv(e, 4), 1, 1), dim(128, 1, 1), sh.bytes, s, &a);
+    return true;
+}
+
+/// The most bytes of x tf_router_select stages: 2 rows of 2560 bf16; more rows cost blocks a WGP than they save in L2.
+const STAGED = 2 * 2560 * 2;
+
+/// decode/select.hpp's kPlanPairs: the pairs route_plan takes in the router launch, a thread each (32 * kRouterWaves).
+const plan_pairs = 128;
+
+/// tf_router_select's dynamic shared memory: max of staged rows and (2 to 8 rows) top lists plus plan pool; 1 row: 0.
+fn routerShared(x: usize, r: c_int, d: c_int, e: c_int, plan: bool) struct { bytes: u32, staged: bool } {
+    if (r < 2 or r > 8) return .{ .bytes = 0, .staged = false };
+    const staged = @rem(d, 8) == 0 and x % 16 == 0 and r * d * 2 <= STAGED;
+    const rows: c_int = if (staged) r * d * 2 else 0;
+    // the waves' top values and indices (32 each a wave), then route_plan's counts, starts and ends, scans and pairs
+    const ints: c_int = if (e - 1 <= 1024) 2 * 32 * 4 + (if (plan) 3 * e + 2 * 128 + plan_pairs else 0) else 0;
+    return .{ .bytes = @intCast(@max(rows, ints * 4)), .staged = staged };
+}
+
 pub fn tf_moe_router(l: *const Launcher, x: C, kind: c_int, rows: CF, logits: F, r: c_int, d: c_int, e: c_int, s: S) Error!void {
     // a prompt's rows take the 64 x 64 tiles, a round's few rows a wave an expert; each logit's sum is the same
     var a: Args = .{};
