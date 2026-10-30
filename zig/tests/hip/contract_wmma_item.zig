@@ -14,7 +14,7 @@ const Entry = @typeInfo(@FieldType(@FieldType(Kernels, "reg"), "entries")).point
 const Call = @typeInfo(@typeInfo(@FieldType(Entry, "launch")).pointer.child).@"fn".param_types[1].?;
 
 const Case = struct { tile: []const u8, rows: usize, group: usize, name: []const u8 };
-const tiles = [_]struct { []const u8, usize }{ .{ "item64", 64 } };
+const tiles = [_]struct { []const u8, usize }{.{ "item64", 64 }};
 
 pub const cases = blk: {
     var out: [2 * tiles.len]Case = undefined;
@@ -52,17 +52,21 @@ pub const Item = struct {
     pub fn kernel(self: *Item) g.Kernel {
         const cfg = cases[self.index];
         const flash: c.Shape = .{ .rows = 22, .n = 1280, .k = 2560 };
-        return .{ .spec = .{
-            .name = cfg.name,
-            .accum = .f32,
-            .depth = depth,
-            .out = .f32,
-            .replaces = "affine_wmma_gemm",
-            .nan = .{ .stated = "the 128-row tile's bytes" },
-            // a prompt's routed items: about 22 rows at 1,024 tokens a step, 88 at 4,096
-            .served = &.{ flash, .{ .rows = 88, .n = 1280, .k = 2560 }, .{ .rows = 5, .n = 1024, .k = 2048 } },
-            .tiles = .{ .{ .size = cfg.rows }, .{ .size = 128 }, .{ .size = 256, .step = cfg.group, .min = cfg.group } },
-        }, .ctx = self, .vt = &vt };
+        return .{
+            .spec = .{
+                .name = cfg.name,
+                .accum = .f32,
+                .depth = depth,
+                .out = .f32,
+                .replaces = "affine_wmma_gemm",
+                .nan = .{ .stated = "the 128-row tile's bytes" },
+                // a prompt's routed items: about 22 rows at 1,024 tokens a step, 88 at 4,096
+                .served = &.{ flash, .{ .rows = 88, .n = 1280, .k = 2560 }, .{ .rows = 5, .n = 1024, .k = 2048 } },
+                .tiles = .{ .{ .size = cfg.rows }, .{ .size = 128 }, .{ .size = 256, .step = cfg.group, .min = cfg.group } },
+            },
+            .ctx = self,
+            .vt = &vt,
+        };
     }
 
     const vt = g.hooks(Item);
