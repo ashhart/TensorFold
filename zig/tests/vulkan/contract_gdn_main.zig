@@ -1,4 +1,4 @@
-// Vulkan contract entry point for the gdn group: the stage 4 GatedDeltaNet shaders (the conv prefill and decode, the gate split, the chunked prefill recurrence and the raw-gates decode) through the production Gdn wrapper, plus the shared planted controls. Same shape as contract_main.zig: the LIMITS lines name the live device, the records audit is gate 5's evidence, and runAll prints the tally. Build and run it on its own with `-Dcontract-root=zig/tests/vulkan/contract_gdn_main.zig`.
+// Stage 4 GDN contract uses production Gdn and planted controls; gate 5 checks live device limits and records.
 const std = @import("std");
 const vk = @import("vulkan");
 const shaders = @import("vulkan_shaders");
@@ -9,7 +9,7 @@ const fx = @import("contract_gdn.zig");
 const g = core.gates;
 const records = core.vulkan_records;
 
-// Shared-memory bytes each pipeline's shader source declares (the stage 4 module doc block, plus the prefill scan's [2][DK] staging the doc block predates): conv 0, conv decode 256*4, split 32*4, prefill scan 6*128*4, decode 3*128*4 + 32*129*4, norm 1 KiB, copy 0.
+// Shared bytes as each shader source declares (stage 4 doc block + prefill [2][DK] staging); values on the next line
 const shared_bytes = [7]u64{ 0, 1024, 128, 3072, 3 * 128 * 4 + 32 * 129 * 4, 1024, 0 };
 const shared_names = [7][]const u8{ "copy_u16", "conv_dw1d_bf16", "gdn_conv_decode_bf16", "gdn_split_bf16", "prefill_recur_bf16", "gated_delta_decode_bf16", "fast_norm_gated_bf16" };
 
@@ -61,7 +61,7 @@ pub fn main(init: std.process.Init) !u8 {
         .copy_u16 = &shaders4.copy_u16,
     });
     defer m.deinit();
-    // gate 5's live evidence for the group: every reflected local size against this device, and each shader's declared shared bytes against its limit
+    // Gate 5 checks every reflected local size and each shader's declared shared bytes against this device's limits.
     const locals = [7][3]u32{ m.copy_u16.local, m.conv_bf16.local, m.conv_decode_bf16.local, m.split_bf16.local, m.prefill_bf16.local, m.decode_bf16.local, m.norm_bf16.local };
     for (locals, shared_bytes, shared_names) |local, shared, sname| {
         const invocations: u64 = @as(u64, local[0]) * local[1] * local[2];
