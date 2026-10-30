@@ -1,12 +1,4 @@
-// The greedy draw's planted control for the kernel contract on Vulkan: the
-// mirror of HIP's tf_ctl_fmax_max (zig/kernels/hip/contract_controls.hip,
-// gate 1). A row max over bf16 logits by GLSL max() — OpFMax returns the other
-// operand when one is NaN — so a row holding NaN or infinity reads as its
-// largest number. The draw's stated rule refuses any non-finite row (winner or
-// not), this control never refuses, so the contract's nonfinite gate must go
-// red when the run is registered with control = .nonfinite. Same traversal as
-// finite_logits.comp: one workgroup a row, 256 lanes, a 16-value stride folded
-// through shared memory. Grid: x = rows.
+// The greedy draw's planted control for the kernel contract on Vulkan: the mirror of HIP's tf_ctl_fmax_max (zig/kernels/hip/contract_controls.hip, gate 1). A row max over bf16 logits by GLSL max() — OpFMax returns the other operand when one is NaN — so a row holding NaN or infinity reads as its largest number. The draw's stated rule refuses any non-finite row (winner or not), this control never refuses, so the contract's nonfinite gate must go red when the run is registered with control = .nonfinite. Same traversal as finite_logits.comp: one workgroup a row, 256 lanes, a 16-value stride folded through shared memory. Grid: x = rows.
 #version 460
 
 #extension GL_EXT_shader_16bit_storage : require

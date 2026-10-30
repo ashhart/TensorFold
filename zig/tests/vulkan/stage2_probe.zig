@@ -1,8 +1,4 @@
-//! Vulkan stage 2 bring-up: BF16 residual add, SwiGLU and RMSNorm (Metal-oracle ASH_QWEN35
-//! semantics) through the production NormMlp operator, checked on a real GPU.
-//! Exit 0 pass, 1 fail, 2 usage, 124 fence timeout.
-//! Operator bring-up only: no model, no performance claim, and no cross-backend bitexact claim —
-//! the fixture states each gate's numerical acceptance.
+// Vulkan stage 2 bring-up: BF16 residual add, SwiGLU and RMSNorm (Metal-oracle ASH_QWEN35 semantics) through the production NormMlp operator, checked on a real GPU. Exit 0 pass, 1 fail, 2 usage, 124 fence timeout. Operator bring-up only: no model, no performance claim, and no cross-backend bitexact claim — the fixture states each gate's numerical acceptance.
 const std = @import("std");
 const vk = @import("vulkan");
 const shaders = @import("stage2_shaders");
@@ -140,15 +136,13 @@ fn bitsBuffer(a: std.mem.Allocator, shell: []const u16) ![]u16 {
     return a.alloc(u16, shell.len);
 }
 
-/// One bf16 binding's shell uploaded at its fixture offsets; the view is derived against the
-/// caller-resident Bound16 (a stored View would point at boundShell's dead stack frame).
+// One bf16 binding's shell uploaded at its fixture offsets; the view is derived against the caller-resident Bound16 (a stored View would point at boundShell's dead stack frame).
 const Bound16 = struct {
     buf: vk.Buffer,
     byte_offset: u64,
     elements: u64,
 
-    /// The checked window over this binding's own buffer, derived against caller storage
-    /// (a stored View would point at boundShell's dead stack frame).
+    // The checked window over this binding's own buffer, derived against caller storage (a stored View would point at boundShell's dead stack frame).
     fn view(b: *const Bound16) !vk.tensor.View {
         return vk.tensor.View.init(&b.buf, .bf16, b.byte_offset, b.elements);
     }
@@ -167,9 +161,7 @@ fn checkUnchanged(a: std.mem.Allocator, cmds: *vk.Commands, staging: vk.Buffer, 
     return std.mem.indexOfDiff(u8, std.mem.sliceAsBytes(shell), back) == null;
 }
 
-/// Out = a + b matching the shader's own pipeline bit for bit (host f32 add, one RNE bf16
-/// store): three byte-identical repeats, planted nonfinite refused at a finite element, inputs
-/// and poison guards unchanged.
+// Out = a + b matching the shader's own pipeline bit for bit (host f32 add, one RNE bf16 store): three byte-identical repeats, planted nonfinite refused at a finite element, inputs and poison guards unchanged.
 fn addGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, m: *vk.norm_mlp.NormMlp, case: fx.AddCase, timeout: u64) !bool {
     var f = try fx.Add.init(a, case, 0x57a9);
     defer f.deinit();
@@ -225,8 +217,7 @@ fn addGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *v
     return true;
 }
 
-/// Out = silu(gate) * up within the stated bound: three byte-identical repeats, unchanged inputs
-/// and guards, planted nonfinite refused.
+// Out = silu(gate) * up within the stated bound: three byte-identical repeats, unchanged inputs and guards, planted nonfinite refused.
 fn swigluGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, m: *vk.norm_mlp.NormMlp, case: fx.SwigluCase, timeout: u64) !bool {
     const f = try fx.Swiglu.init(a, case, 0x57aa);
     defer f.deinit();
@@ -246,8 +237,7 @@ fn swigluGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds:
         try vk.orExit(m.swiglu(cmds, try out.view(), try gate.view(), try up.view(), timeout));
         try fetch(cmds, staging, out.buf, std.mem.sliceAsBytes(bits), timeout);
         r = f.check(bits) catch |e| {
-            // No cached worst/position here: r belongs to the last PASSING repeat, and printing
-            // it after a failure would misreport. The fixture error names the gate that failed.
+            // No cached worst/position here: r belongs to the last PASSING repeat, and printing it after a failure would misreport. The fixture error names the gate that failed.
             std.debug.print("FAIL swiglu case=\"{s}\" repeat={d}: {s}\n", .{ case.name, rep, @errorName(e) });
             return false;
         };
@@ -279,9 +269,7 @@ fn swigluGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds:
     return true;
 }
 
-/// RMSNorm through the production rmsNorm (which runs normPlan): contract bound with the named
-/// f32 reduction budget, three byte-identical repeats, unchanged inputs and guards, planted
-/// nonfinite refused, and the zero row's outputs exactly zero.
+// RMSNorm through the production rmsNorm (which runs normPlan): contract bound with the named f32 reduction budget, three byte-identical repeats, unchanged inputs and guards, planted nonfinite refused, and the zero row's outputs exactly zero.
 fn rmsGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, m: *vk.norm_mlp.NormMlp, case: fx.RmsCase, timeout: u64) !bool {
     const f = try fx.Rms.init(a, case, 0x57ab);
     defer f.deinit();
@@ -301,8 +289,7 @@ fn rmsGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *v
         try vk.orExit(m.rmsNorm(cmds, try out.view(), try x.view(), try gamma.view(), case.rows, case.width, fx.rms_eps, timeout));
         try fetch(cmds, staging, out.buf, std.mem.sliceAsBytes(bits), timeout);
         r = f.check(bits) catch |e| {
-            // No cached worst/position here: r belongs to the last PASSING repeat, and printing
-            // it after a failure would misreport. The fixture error names the gate that failed.
+            // No cached worst/position here: r belongs to the last PASSING repeat, and printing it after a failure would misreport. The fixture error names the gate that failed.
             std.debug.print("FAIL rms-norm case=\"{s}\" repeat={d}: {s}\n", .{ case.name, rep, @errorName(e) });
             return false;
         };
@@ -341,8 +328,7 @@ fn rmsGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *v
     return true;
 }
 
-/// A host-only stand-in for a device buffer: View.init reads only `len`, and this regression
-/// exists to prove the view derivation stays on caller storage, not to touch the driver.
+// A host-only stand-in for a device buffer: View.init reads only `len`, and this regression exists to prove the view derivation stays on caller storage, not to touch the driver.
 fn hostBuffer(len: u64) vk.Buffer {
     return .{ .dev = undefined, .handle = null, .memory = null, .len = len, .kind = .device, .mapped = null, .coherent = false };
 }
