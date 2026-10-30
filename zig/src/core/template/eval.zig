@@ -24,7 +24,6 @@ pub const Ctx = struct {
     vars: *const v.Map,
     out: *v.Buffer,
     depth: usize = 0,
-    acc: v.Buffer = .{},
 
     fn resolve(c: *Ctx, name: []const u8) Error!Value {
         if (c.vars.get(name)) |x| return x;
@@ -35,24 +34,29 @@ pub const Ctx = struct {
 
 const acc_min = 4096;
 
-fn isAcc(c: *const Ctx, s: []const u8) bool {
-    return s.len > 0 and s.ptr == c.acc.text.items.ptr and s.len == c.acc.text.items.len;
+fn isAcc(b: *const v.Buffer, s: v.Str) bool {
+    return s.s.ptr == b.text.items.ptr and s.s.len == b.text.items.len and
+        s.spans.ptr == b.spans.items.ptr and s.spans.len == b.spans.items.len;
 }
 
 fn join(c: *Ctx, l: v.Str, r: v.Str) Error!v.Str {
     const a = c.rt.a;
-    if (l.s.len < acc_min and !isAcc(c, l.s)) {
+    const current = if (l.builder) |b| (if (isAcc(b, l)) b else null) else null;
+    if (l.s.len < acc_min and current == null) {
         var out: v.Buffer = .{};
         try out.append(a, l);
         try out.append(a, r);
         return out.str();
     }
-    if (!isAcc(c, l.s)) {
-        c.acc = .{};
-        try c.acc.append(a, l);
+    const b = current orelse try a.create(v.Buffer);
+    if (current == null) {
+        b.* = .{};
+        try b.appendRetained(a, l);
     }
-    try c.acc.append(a, r);
-    return c.acc.str();
+    try b.appendRetained(a, r);
+    var out = b.str();
+    out.builder = b;
+    return out;
 }
 
 const Flow = enum { normal, brk, cont };

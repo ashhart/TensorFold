@@ -18,6 +18,8 @@ pub const Str = struct {
     s: []const u8,
     safe: bool = false,
     spans: []const Span = &.{},
+    /// Only evaluator concatenations attach an arena-owned builder; slices remain immutable snapshots.
+    builder: ?*Buffer = null,
 
     pub fn request(a: Allocator, s: []const u8) Allocator.Error!Str {
         return derived(a, s, s.len > 0);
@@ -107,7 +109,29 @@ pub const Buffer = struct {
         }
     }
 
+    /// Arena-owned builders retain old arrays because earlier string values may still borrow them.
+    pub fn appendRetained(b: *Buffer, a: Allocator, s: Str) Allocator.Error!void {
+        const offset = b.text.items.len;
+        try reserveRetained(u8, &b.text, a, s.s.len);
+        try reserveRetained(Span, &b.spans, a, s.spans.len);
+        b.text.appendSliceAssumeCapacity(s.s);
+        for (s.spans) |p| {
+            b.spans.appendAssumeCapacity(.{ offset + p[0], offset + p[1] });
+            b.span_steps += 1;
+        }
+    }
+
     pub fn str(b: *const Buffer) Str {
         return .{ .s = b.text.items, .spans = b.spans.items };
     }
 };
+
+fn reserveRetained(comptime T: type, list: *std.ArrayList(T), a: Allocator, extra: usize) Allocator.Error!void {
+    const needed = std.math.add(usize, list.items.len, extra) catch return error.OutOfMemory;
+    if (needed <= list.capacity) return;
+    const doubled = std.math.mul(usize, list.capacity, 2) catch needed;
+    const storage = try a.alloc(T, @max(needed, @max(8, doubled)));
+    @memcpy(storage[0..list.items.len], list.items);
+    list.items = storage[0..list.items.len];
+    list.capacity = storage.len;
+}
