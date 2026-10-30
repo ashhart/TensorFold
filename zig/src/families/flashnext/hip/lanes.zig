@@ -63,6 +63,8 @@ pub const Fx = struct {
     ones: hip.DeviceBuffer,
     draft_ids: []u32,
     drafts: u32,
+    /// The window forwards and a head step timed at load (measure): the depth rule's costs; none untimed.
+    costs: serve.costs.Costs = .{},
     /// The kept prompt states (null: no reuse), and the slot the next one takes on every rank.
     store: ?pc.Store = null,
     next_slot: u32 = 0,
@@ -205,8 +207,80 @@ pub const Fx = struct {
         } };
     }
 
+    /// One stream's window forwards (1 row to the cap's window) and a head step, timed at load: the depth rule's costs.
+    pub fn measure(f: *Fx) !void {
+        const e = f.e;
+        var rig: Rig = .{ .f = f, .c = try e.lease(0) };
+        defer e.unlease(rig.c);
+        try serve.costs.forwards(&rig, cache.max_window, 1, cache.max_window, &f.costs);
+        if (e.weights.model.mtp != null) f.costs.step_ms = try rig.step();
+    }
+
+    const Rig = struct {
+        f: *Fx,
+        c: cache.Caches,
+        tokens: [cache.max_window]u32 = @splat(1),
+
+        /// One verify's work for one stream of `widths[0]` rows: the round and the greedy draw of every row.
+        pub fn time(r: *Rig, widths: []const usize) !f64 {
+            if (widths.len != 1) return error.OneStreamTimed;
+            return serve.costs.mean(Window{ .r = r, .w = widths[0] }, Window.go);
+        }
+
+        const Window = struct {
+            r: *Rig,
+            w: usize,
+
+            fn go(x: Window) anyerror!void {
+                const e = x.r.f.e;
+                // each round from an empty stream: nothing is kept
+                x.r.c.len = 0;
+                const segs = [_]forward.Seg{.{ .c = &x.r.c, .tokens = x.r.tokens[0..x.w], .pos = 0 }};
+                const done = try e.round(&segs, try e.choose(&segs));
+                var reqs: [cache.max_window]draw.Request = undefined;
+                var out: [cache.max_window]u32 = undefined;
+                for (reqs[0..x.w], 0..) |*q, i| q.* = .{ .sampling = null, .position = 1 + i };
+                try e.drawer.draw(e.ops(&e.arena), e.stream, done.logits, reqs[0..x.w], out[0..x.w], false);
+            }
+        };
+
+        /// One chained head step: the head's forward over one row and its draft's draw.
+        fn step(r: *Rig) !f64 {
+            const f = r.f;
+            const e = f.e;
+            const m = &e.weights.model;
+            var hc = try head_mod.caches(f.gpa, &e.driver, &m.mtp.?, 64, e.act, e.eos);
+            defer hc.deinit(f.gpa);
+            var streams = try hip.DeviceBuffer.alloc(&e.driver, m.dims.wide() * m.act.size());
+            defer streams.free();
+            return serve.costs.mean(Head{ .r = r, .hc = &hc, .streams = streams }, Head.go);
+        }
+
+        const Head = struct {
+            r: *Rig,
+            hc: *cache.Caches,
+            streams: hip.DeviceBuffer,
+
+            fn go(x: Head) anyerror!void {
+                const f = x.r.f;
+                const e = f.e;
+                const m = &e.weights.model;
+                try e.stream.synchronize();
+                e.host.used = 0;
+                e.arena.reset();
+                const o = e.ops(&e.arena);
+                const out = try head_mod.run(o, m, &e.host, x.hc, .{ .ptr = x.streams.base(), .kind = m.act }, x.r.tokens[0..1], 0, f.ones);
+                var tok: [1]u32 = undefined;
+                var prob: [1]f32 = undefined;
+                try head_mod.draws(o, m, &e.host, e.stream, out.mixed, 1, f.draft_ids, &tok, &prob);
+            }
+        };
+    };
+
     pub fn facts(f: *const Fx) lanes.Model {
         const drafting = f.e.weights.model.mtp != null and f.drafts > 0;
+        // plain rounds compete with drafted ones once the forwards are timed
+        const timed = drafting and f.costs.windows > 0;
         return .{
             .exact_width = cache.max_window,
             .gpu_tokens = false,
@@ -218,6 +292,10 @@ pub const Fx = struct {
             .batch_rows = @intCast(cache.max_window * f.streams),
             .max_streams = @intCast(f.streams),
             .draft_streams = false,
+            .plain_guard = timed,
+            .window_costs = f.costs.window[0..f.costs.windows],
+            .shared_costs = f.costs.shared[0..f.costs.shareds],
+            .mtp_step_ms = f.costs.step_ms,
         };
     }
 

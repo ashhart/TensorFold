@@ -216,6 +216,15 @@ fn lanesOf(gpa: std.mem.Allocator, dev: hip.Device, o: anytype, p: Prepared, str
     errdefer fx.deinit();
     // kept prompt states live in host memory: --prompt-cache-gib, else 16 GiB
     fx.keepPrompts(@intFromFloat((o.cache_gib orelse 16.0) * (1 << 30)));
+    // one rank: the depth rule's costs timed now (a group's ranks would have to run the timing rounds together)
+    if (o.world == 1 and fx.facts().mtp) {
+        fx.measure() catch |err| std.log.warn("lane costs not timed: {t}", .{err});
+        const c = &fx.costs;
+        var line: [512]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&line);
+        for (c.window[0..c.windows]) |x| w.print(" {d}:{d:.2}", .{ x.width, x.ms }) catch {};
+        std.log.info("lane costs ms by window rows{s}; head step {d:.3}", .{ w.buffered(), c.step_ms });
+    }
     const startup = try std.fmt.allocPrint(
         gpa,
         "HIP {s} device {d}, rank {d} of {d}: Flash Next, {d:.2} GiB on the device, " ++
