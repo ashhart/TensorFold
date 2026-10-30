@@ -194,6 +194,10 @@ HIP also checks Flash Next's hyper-connection kernels. On gfx11, `tf_affine_dens
 with the HC mix as its epilogue) is bit-equal to the tile's bf16 product then `tf_fn_hc_mix`, and its gate table
 `tf_hc_gate_fill` holds, for all 65,536 bf16 g, float64's sigmoid rounded to bf16 within expf's 2^-20 and
 `tf_fn_hc_mix`'s gate bit for bit.
+`tf_fn_hc_mix8`, the bf16 mix at 8 outputs a thread, is bit-equal to `tf_fn_hc_mix` over fp32 and bf16 g.
+`tf_fn_hc_norm_v` (bf16 streams of 2,560 in 16-byte accesses, with and without a branch) is bit-equal to
+`tf_fn_hc_norm`, and the MoE combine inside the norm (`tf_fn_hc_norm_moe`, and `tf_fn_hc_norm_moe_v` a block a row)
+to `tf_moe_combine` then `tf_fn_hc_norm`.
 HIP also checks the DeltaNet prompt recurrence at half a value head a block (`tf_gdn_prompt_128`, its y and state),
 bit-equal to the plain window scan `gated_delta_tile` on the same tokens.
 Its prompt prework in one launch (`tf_gdn_prompt_prep`: conv, q and k head norms, v, gate, beta and the new conv state)

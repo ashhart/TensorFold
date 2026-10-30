@@ -167,6 +167,17 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     var hc_table = hc_mix_k.Table.init(a, &r, s, &l);
     defer hc_table.deinit();
     if (l.affine.matrix) try kernels.appendSlice(a, &.{ hc_dense.kernel(), hc_table.kernel() });
+    const hc_bf16 = @import("contract_kit.zig").act() == .bf16;
+    const hc_mix8_k = @import("contract_hc_mix8.zig");
+    var hc_mix8: [2]hc_mix8_k.Mix8 = undefined;
+    for (&hc_mix8, std.enums.values(hc_mix8_k.Gkind)) |*m, gk| m.* = .init(a, &r, s, &l, gk);
+    defer for (&hc_mix8) |*m| m.deinit();
+    if (hc_bf16) for (&hc_mix8) |*m| try kernels.append(a, m.kernel());
+    const hc_norm_k = @import("contract_hc_norm.zig");
+    var hc_norms: [4]hc_norm_k.Norm = undefined;
+    for (&hc_norms, std.enums.values(hc_norm_k.Mode)) |*m, w| m.* = .init(a, &r, s, &l, w);
+    defer for (&hc_norms) |*m| m.deinit();
+    for (&hc_norms) |*m| if (hc_bf16 or m.mode == .moe) try kernels.append(a, m.kernel());
     const gdn_k = @import("contract_gdn.zig");
     var gdn_prompts: [2]gdn_k.Prompt = undefined;
     for (&gdn_prompts, std.enums.values(gdn_k.Part)) |*m, p| m.* = .init(a, &r, s, &l, p);

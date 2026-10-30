@@ -386,9 +386,19 @@ pub fn run(ops: Ops, m: *const model.Model, host: *Host, segs: []const Seg, wind
         };
         try hcBranch(o, m, h, branch, inject, x, layer.mhc.scale, rows);
         const mixed2 = try hcPre(o, m, layer.mhc, x, rows, inject);
-        const y = try hip.moe.run(o, m.act, layer.moe, mixed2, rows, !window);
         const next = if (i + 1 < m.layers.len) m.layers[i + 1].ahc.scale else m.mix.scale;
-        try hcBranch(o, m, h, y, inject, x, next, rows);
+        if (window and m.tp == null) {
+            // a window's MoE combine inside the next HC norm: the experts' rows and weights, one launch for both
+            const p = try hip.moe.parts(o, m.act, layer.moe, mixed2, rows);
+            try o.l.fn_hc_norm_moe(@ptrFromInt(h.ptr), @ptrFromInt(p.y), @ptrFromInt(p.wts), @ptrFromInt(inject.ptr), @ptrFromInt(h.ptr), @ptrFromInt(x.ptr), @ptrFromInt(next), @backingInt(m.act), @intCast(rows), @intCast(d.streams), @intCast(d.hidden), d.eps, @intCast(p.slots), o.stream);
+        } else if (m.tp == null and m.act == .bf16 and d.hidden == 2560 and d.streams <= 4) {
+            // a prompt's MoE combine inside the next HC norm, a block a row: the combined rows never written
+            const p = try hip.moe.parts(o, m.act, layer.moe, mixed2, rows);
+            try o.l.fn_hc_norm_moe_v(@ptrFromInt(h.ptr), @ptrFromInt(p.y), @ptrFromInt(p.wts), @ptrFromInt(inject.ptr), @ptrFromInt(h.ptr), @ptrFromInt(x.ptr), @ptrFromInt(next), @intCast(rows), @intCast(d.streams), d.eps, @intCast(p.slots), o.stream);
+        } else {
+            const y = try hip.moe.run(o, m.act, layer.moe, mixed2, rows, !window);
+            try hcBranch(o, m, h, y, inject, x, next, rows);
+        }
     }
     // a window's count moves in `Engine.round`, which a replay runs too: the launches change nothing on the host
     if (!window) for (segs) |g| {

@@ -250,7 +250,7 @@ pub const Dense = struct {
         try self.l.affine.denseGo(self.l.r, plain, st);
         const m: c_int = @intCast(self.shape.rows);
         const d: c_int = @intCast(self.dims());
-        try self.l.fn_hc_mix(kit.ptr(C, self.g16), 2, kit.ptr(C, self.xs), kit.ptr(P, self.base), 2, m, streams, d, st);
+        try self.l.fn_hc_mix_scalar(kit.ptr(C, self.g16), 2, kit.ptr(C, self.xs), kit.ptr(P, self.base), 2, m, streams, d, st);
         return self.rig.bytes(self.base, self.count() * 2);
     }
 
@@ -420,7 +420,7 @@ pub const Table = struct {
         const a = self.arena.allocator();
         const got = try a.dupe(u8, try self.rig.bytes(self.out, entries * 2));
         const st = self.rig.s.handle;
-        try self.l.fn_hc_mix(kit.ptr(C, self.gs), 2, kit.ptr(C, self.ones), kit.ptr(P, self.base), 2, 1, 1, entries, st);
+        try self.l.fn_hc_mix_scalar(kit.ptr(C, self.gs), 2, kit.ptr(C, self.ones), kit.ptr(P, self.base), 2, 1, 1, entries, st);
         const mix = try self.rig.bytes(self.base, entries * 2);
         for (0..entries) |h| {
             const v: f64 = c.fromBf16(@intCast(h));
