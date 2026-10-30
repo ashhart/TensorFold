@@ -200,6 +200,16 @@ pub const drama3 = struct {
     pub const codec = @embedFile("drama3/codec.metal");
 };
 
+/// LFM3-Omni's kernels (lfm3_omni.metallib is built ahead of time); the kernel contract compiles them from this text.
+pub const lfm3_omni = struct {
+    pub const common = @embedFile("lfm3_omni/om_common.h");
+    pub const omni = @embedFile("lfm3_omni/omni.metal");
+    pub const gemm = @embedFile("lfm3_omni/omni_gemm.metal");
+    pub const rows = @embedFile("lfm3_omni/omni_rows.metal");
+    pub const nax = @embedFile("lfm3_omni/omni_nax.metal");
+    pub const gemm_nax = @embedFile("prefill/gemm_nax.metal");
+};
+
 pub const core_weight_only_body = @embedFile("core/weight_only.h");
 pub const core_weight_only = @embedFile("core/weight_only.metal");
 pub const core_hc_activation_body = @embedFile("core/hc_activation.h");
