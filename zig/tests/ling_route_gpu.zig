@@ -6,8 +6,8 @@ const route = @import("route");
 const source = @import("ling_metal").route;
 const Args = extern struct { rows: i32, ne: i32, topk: i32, ng: i32, keep: i32, scale: f32 };
 
-fn run(s: route.Shape, rows: u32, seed: u64, bias_shift: f32) !void {
-    const a = std.testing.allocator;
+fn check(s: route.Shape, rows: u32, logits: []const f32, bias: []const f32) !void {
+    const n = rows * s.experts;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const device = try mtl.Device.init();
@@ -18,16 +18,6 @@ fn run(s: route.Shape, rows: u32, seed: u64, bias_shift: f32) !void {
     defer pipe.deinit();
     const queue = try device.queue();
     defer queue.deinit();
-
-    const n = rows * s.experts;
-    var logits = try a.alloc(f32, n);
-    defer a.free(logits);
-    const bias = try a.alloc(f32, s.experts);
-    defer a.free(bias);
-    var prng = std.Random.DefaultPrng.init(seed);
-    const rng = prng.random();
-    for (logits) |*v| v.* = rng.float(f32) * 4 - 2;
-    for (bias) |*v| v.* = rng.float(f32) + bias_shift;
 
     const x = try device.buffer(n * 4, mtl.ResourceOptions.shared);
     defer x.deinit();
@@ -78,6 +68,31 @@ fn run(s: route.Shape, rows: u32, seed: u64, bias_shift: f32) !void {
     }
 }
 
+fn run(s: route.Shape, rows: u32, seed: u64, bias_shift: f32) !void {
+    const a = std.testing.allocator;
+    const n = rows * s.experts;
+    const logits = try a.alloc(f32, n);
+    defer a.free(logits);
+    const bias = try a.alloc(f32, s.experts);
+    defer a.free(bias);
+    var prng = std.Random.DefaultPrng.init(seed);
+    const rng = prng.random();
+    for (logits) |*v| v.* = rng.float(f32) * 4 - 2;
+    for (bias) |*v| v.* = rng.float(f32) + bias_shift;
+    try check(s, rows, logits, bias);
+}
+
+fn runTied(s: route.Shape, rows: u32) !void {
+    const a = std.testing.allocator;
+    const logits = try a.alloc(f32, rows * s.experts);
+    defer a.free(logits);
+    const bias = try a.alloc(f32, s.experts);
+    defer a.free(bias);
+    @memset(logits, 0);
+    @memset(bias, 0);
+    try check(s, rows, logits, bias);
+}
+
 test "tiny: 128 experts, 8 groups of 16, keep 4" {
     try run(.{ .experts = 128, .topk = 8, .n_group = 8, .topk_group = 4, .scale = 2.5 }, 8, 1, -0.5);
 }
@@ -88,4 +103,28 @@ test "flash: 512 experts, 8 groups of 64, keep 4" {
 
 test "tiny: all choices negative, padded slots stay out of the picks" {
     try run(.{ .experts = 128, .topk = 8, .n_group = 8, .topk_group = 4, .scale = 2.5 }, 4, 3, -2.0);
+}
+
+const tiny = route.Shape{ .experts = 128, .topk = 8, .n_group = 8, .topk_group = 4, .scale = 2.5 };
+const flash = route.Shape{ .experts = 512, .topk = 8, .n_group = 8, .topk_group = 4, .scale = 2.5 };
+
+test "tiny: tied group scores keep the lower groups" {
+    try runTied(tiny, 4);
+}
+
+test "flash: tied group scores keep the lower groups" {
+    try runTied(flash, 2);
+}
+
+test "flash: planted NaN never wins a group or a pick" {
+    const a = std.testing.allocator;
+    const rows: u32 = 2;
+    const logits = try a.alloc(f32, rows * flash.experts);
+    defer a.free(logits);
+    const bias = try a.alloc(f32, flash.experts);
+    defer a.free(bias);
+    @memset(logits, 0);
+    @memset(bias, 0);
+    logits[64] = std.math.nan(f32);
+    try check(flash, rows, logits, bias);
 }
