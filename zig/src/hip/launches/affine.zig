@@ -98,6 +98,7 @@ pub const stream_waves = 4; // kStreamWaves
 pub const streams_wanted = 3000; // kStreamWavesWanted
 pub const stream_code_words = 32; // kStreamCodeWords
 pub const stream_pair_code_words = affine_stream.stream_pair_code_words;
+pub const stream_routed_cb_top = affine_stream.stream_routed_cb_top;
 
 /// The K-parallel tiles of a short prompt: cb columns a lane set, r rows a pass over up to rb row blocks.
 pub const KpTile = struct { cb: c_int, r: c_int, waves: c_int, rb: c_int, loop: bool = true };
