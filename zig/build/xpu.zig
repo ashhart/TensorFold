@@ -49,6 +49,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .{ "ngen_narrow128", "128", &.{ "s4", "asplit" } },
         .{ "ngen_swiglu", "64", &.{ "b3", "swiglu" } },
         .{ "ngen_swiglu128", "128", &.{ "b3", "swiglu" } },
+        .{ "ngen_geglu", "64", &.{ "b3", "geglu" } },
         .{ "ngen_a8", "128", &.{"a8"} },
         .{ "ngen_a8_swiglu", "128", &.{ "a8", "swiglu" } },
         .{ "ngen_a4", "128", &.{"a4"} },
@@ -87,6 +88,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         \\pub const gemm align(8) = @embedFile("gemm.bin").*;
         \\pub const ngen_wide align(8) = @embedFile("ngen_wide.zebin").*;
         \\pub const ngen_narrow align(8) = @embedFile("ngen_narrow.zebin").*;
+        \\pub const ngen_geglu align(8) = @embedFile("ngen_geglu.zebin").*; // gate_up with the GeGLU epilogue
         \\
     ) });
     const ze_mod = zeModule(b, target, optimize);
