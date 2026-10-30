@@ -159,6 +159,27 @@ KERNEL(256) void g4_geglu(global const half *GU, global half *H, global half *AH
   }
 }
 
+// bf16(gelu_tanh(x)) for every bf16 x, from the code g4_geglu runs: the table the GEMM's GeGLU epilogue reads.
+KERNEL(256) void g4_geglu_tab(global ushort *T) {
+  const int i = get_global_id(0);
+  T[i] = f2bf(gelu_tanh(bf2f((ushort)i)));
+}
+
+// The group sums of the GEMM-fused GeGLU's activation H [T, 10240], summed as g4_geglu does; (T, 10).
+KERNEL(256) void g4_geglu_sums(global const half *H, global half *AHI, global half *ALO) {
+  const int t = get_group_id(0), blk = get_group_id(1), lid = get_local_id(0);
+  const half4 hv = vload4(0, H + (long)t * FF4 + blk * 1024 + lid * 4);
+  float s = 0.0f;
+  for (int k = 0; k < 4; k++) s += (float)hv[k];
+  s = sub_group_reduce_add(s) * (1.0f / 64);
+  if (get_sub_group_local_id() == 0) {
+    const int g = get_sub_group_id();
+    const half hi = convert_half_rte(s * ASC);
+    AHI[(long)t * (FF4 / 64) + blk * 16 + g] = hi;
+    ALO[(long)t * (FF4 / 64) + blk * 16 + g] = convert_half_rte(s * ASC - (float)hi);
+  }
+}
+
 // Per-layer gate: h = fp16(bf16(gelu_bf(gate) · pli_l)) [T, 256] and its sums; GO bf16 in fp16, PLI bf16 [T,42,256].
 KERNEL(64) void g4_ple_mid(global const half *GO, global const ushort *PLI, int layer, global half *H, global half *AHI, global half *ALO) {
   local half hl[PLE];

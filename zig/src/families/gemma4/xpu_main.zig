@@ -5,6 +5,7 @@ const cfg = @import("xpu_config.zig");
 const fwd = @import("xpu_forward.zig");
 const gemm_test = @import("xpu_gemm_test.zig");
 const ple_check = @import("xpu_ple_check.zig");
+const geglu_check = @import("xpu_geglu_check.zig");
 const alloc = dev.alloc;
 const now = dev.now;
 
@@ -156,6 +157,7 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, argv[2], "--windows")) return windows(r, try readIds(argv[3]));
     if (std.mem.eql(u8, argv[2], "--lengths")) return lengths(r, try readIds(argv[3]), argv[4]);
     if (std.mem.eql(u8, argv[2], "--gemm-test")) return gemm_test.gemmTest(r);
+    if (std.mem.eql(u8, argv[2], "--geglu-check")) return geglu_check.run(r);
     if (std.mem.eql(u8, argv[2], "--ple-check")) {
         const ids = try alloc.alloc(u32, argv.len - 3);
         for (argv[3..], ids) |a, *o| o.* = try std.fmt.parseInt(u32, a, 10);
