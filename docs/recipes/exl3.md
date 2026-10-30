@@ -195,6 +195,7 @@ row's bits match it:
   for 1 to 128 rows, every codebook and width (the `mul1` half steps included), with the K split planned from the
   layer's shape alone. `exl3.Dense` runs prompt rows in 128-row blocks of the same kernel, so a prompt row's bits
   equal its decode-row bits wherever its chunk starts; `qlinear.Weight` has an `.exl3` arm for both.
+  The split counters are zeroed on the calls' stream when they grow, and each block's last program resets its own.
 - `zig/kernels/cuda/exl3_experts.cu`, `zig/src/cuda/exl3_experts.zig`: grouped routed experts (member lists,
   each expert's rotation, gate and up, GLM's SwiGLU roundings, down and the weighted combine), widths mixed within
   a layer; an expert's member count never changes a row's bits.

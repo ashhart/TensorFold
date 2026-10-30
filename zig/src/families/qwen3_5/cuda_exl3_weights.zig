@@ -142,7 +142,7 @@ fn dense(s: *Sink, kit: ?*Kit, ck: *core.Checkpoint, prefix: []const u8, mod: []
         .stride_k = st.k,
         .stride_nb = st.nb,
     };
-    if (kit) |x| try x.dense.reserve(w);
+    if (kit) |x| try x.dense.reserve(s.e.stream, w);
     return .{ .x3 = w };
 }
 

@@ -20,7 +20,7 @@ struct LinearArgs {
     const half* bias;        // fp16 [n] or null
     void* y;                 // output
     float* z;                // fp32 split partials [sk, m, n] or null
-    int* counters;           // per (pass, block) arrival counts, zeroed before the launch
+    int* counters;           // per (pass, block) arrival counts: zero at launch, reset by the block's last program
     int y_dtype;
     int n, sk, m, k;
 };
