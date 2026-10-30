@@ -174,3 +174,19 @@ test "qwen27 window: every actual width 1 through 64 keeps serial greedy and key
         }
     }
 }
+
+test "qwen27 window: a copy round clears head chances before later shared pricing" {
+    var cfg = try lanes.Config.init(a, .{ .exact_width = 4, .drafts = 3, .allocate_shared_drafts = true, .batch_rows = 4 }, 4, 3);
+    defer cfg.deinit(a);
+    var fake: lanes.fake.Fake = .{ .gpa = a };
+    defer fake.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var e = lanes.Engine.init(a, &cfg, fake.backend(), clock.clock());
+    defer e.deinit();
+    var s = try lanes.Stream.init(a, .{ .id = "copied", .prompt = &.{1}, .max_new = 8 });
+    defer s.deinit(a);
+    try s.draft_chances.appendSlice(a, &.{ 0.9, 0.7 });
+    var plans = [_]lanes.windows.Plan{.{ .stream = &s, .position = 1, .kind = .copy, .tokens = &.{ 2, 3 } }};
+    try lanes.windows.allocate(&e, &plans);
+    try std.testing.expectEqual(@as(usize, 0), s.draft_chances.items.len);
+}

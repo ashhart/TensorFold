@@ -258,6 +258,10 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
         }
     }
     if (e.cfg.allocate_shared_drafts) for (plans, probs) |p, chances| {
+        if (p.kind == .copy or p.context_copy) {
+            p.stream.draft_chances.clearRetainingCapacity();
+            continue;
+        }
         if (p.kind != .head or chances.len == 0) continue;
         p.stream.draft_chances.clearRetainingCapacity();
         try p.stream.draft_chances.appendSlice(e.gpa, chances);
