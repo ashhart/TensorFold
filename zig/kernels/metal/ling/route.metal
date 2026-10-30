@@ -125,7 +125,7 @@ inline void keep_groups(thread float* choice, int lane, int ne, int gs, int ng, 
     for (int i = 0; i < MAXE; ++i)
       if (i * 32 + int(lane) == id) {
         sk = score[i];
-        choice[i] = -INFINITY;
+        choice[i] = NAN;
       }
     sk = simd_shuffle(sk, uint(id & 31));
     total = total + sk;

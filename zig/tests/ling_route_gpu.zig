@@ -63,7 +63,10 @@ fn check(s: route.Shape, rows: u32, logits: []const f32, bias: []const f32) !voi
             const got_id = ids[r * s.topk + k];
             try std.testing.expect(got_id >= 0 and @as(u32, @intCast(got_id)) < s.experts);
             try std.testing.expectEqual(want[k].id, @as(u32, @intCast(got_id)));
-            try std.testing.expect(@abs(got[r * s.topk + k] - want[k].wt) < 1e-6);
+            const gw = got[r * s.topk + k];
+            const nan_ok = std.math.isNan(gw) and std.math.isNan(want[k].wt);
+            try std.testing.expect(nan_ok or @abs(gw - want[k].wt) <= 1e-6);
+            for (0..k) |j| try std.testing.expect(ids[r * s.topk + j] != got_id);
         }
     }
 }
@@ -127,4 +130,51 @@ test "flash: planted NaN never wins a group or a pick" {
     @memset(bias, 0);
     logits[64] = std.math.nan(f32);
     try check(flash, rows, logits, bias);
+}
+
+fn oneRow(s: route.Shape, fill: f32, plants: []const struct { at: u32, v: f32 }) !void {
+    const a = std.testing.allocator;
+    const logits = try a.alloc(f32, s.experts);
+    defer a.free(logits);
+    const bias = try a.alloc(f32, s.experts);
+    defer a.free(bias);
+    @memset(logits, fill);
+    @memset(bias, 0);
+    for (plants) |p| logits[p.at] = p.v;
+    try check(s, 1, logits, bias);
+}
+
+test "tiny: NaN last in the winning group keeps picks 0..7" {
+    try oneRow(tiny, 0, &.{ .{ .at = 0, .v = 2 }, .{ .at = 1, .v = 2 }, .{ .at = 15, .v = std.math.nan(f32) } });
+}
+
+test "flash: NaN last in the winning group keeps picks 0..7" {
+    try oneRow(flash, 0, &.{ .{ .at = 0, .v = 2 }, .{ .at = 1, .v = 2 }, .{ .at = 63, .v = std.math.nan(f32) } });
+}
+
+test "flash: odd-column NaN with a high even-column neighbour" {
+    try oneRow(flash, 0, &.{ .{ .at = 17, .v = 3 }, .{ .at = 33, .v = std.math.nan(f32) } });
+}
+
+test "tiny and flash: all-NaN row, ids stay in range and distinct" {
+    try oneRow(tiny, std.math.nan(f32), &.{});
+    try oneRow(flash, std.math.nan(f32), &.{});
+}
+
+test "tiny: one finite logit per group" {
+    try oneRow(tiny, std.math.nan(f32), &.{
+        .{ .at = 3, .v = 1 },
+        .{ .at = 19, .v = 1 },
+        .{ .at = 35, .v = 1 },
+        .{ .at = 51, .v = 1 },
+        .{ .at = 67, .v = 1 },
+        .{ .at = 83, .v = 1 },
+        .{ .at = 99, .v = 1 },
+        .{ .at = 115, .v = 1 },
+    });
+}
+
+test "tiny: all -10 weights are 0.3125; all -100 weights are 0" {
+    try oneRow(tiny, -10, &.{});
+    try oneRow(tiny, -100, &.{});
 }
