@@ -168,9 +168,9 @@ Embeddings and norms stay whole on both Macs, so the 248,320-row table is not sp
 thing on both ranks.
 At each decided token each rank takes the argmax over its own half of the 248,320 logits, and `pair_pick` chooses
 between the two half-vocab winners; the pair never merges the two halves into one 248,320-row argmax.
-A logit that is not finite on either rank is flagged by `pair_argmax` and `pair_pick` answers its sentinel, which
-`error.PairFailed` reports: the pair fails closed rather than letting a half-vocab argmax stand in for the whole
-vocabulary's.
+A logit that is not finite on either rank is flagged by `pair_argmax` and `pair_pick` answers its sentinel: the request
+fails with `error.NonfiniteLogits`, as on one Mac, and a dropped link fails it with `error.PairFailed` rather than
+letting a half-vocab argmax stand in for the whole vocabulary's.
 
 The pair refuses what needs one Mac's whole state rather than quietly serving without it: `--drafter`, because rank 1
 has no drafter checkpoint, and `--prompt-cache-gib` and `--learn`, because each Mac holds only its own halves of a

@@ -40,10 +40,9 @@ release fixes it, and the release notes say which one.
 - Qwen3.8-27B in speed-up mode, two Macs over Thunderbolt: a pair serves one greedy stream, drafts nothing, keeps no
   prompt cache and does not learn, because rank 1 has no drafter checkpoint and each Mac holds only its own halves of a
   slot's state. `--drafter`, `--prompt-cache-gib`, `--learn`, `--vision` and `--parallel` above 1 are refused, and a
-  request that samples or carries a grammar is refused by name at the head of prefill. Each output projection splits
-  by output rows: each rank reads the whole input K
-  and reduces its rows as one Mac does, and a `pair_gather` joins the two bf16 halves with no arithmetic between them:
-  pair logits are byte-identical to one Mac's on the recorded fixtures.
+  request that samples or carries a grammar is refused by name at the head of prefill. Each output projection splits by
+  output rows: each rank reads the whole input K and reduces its rows as one Mac does, and a `pair_gather` joins the two
+  bf16 halves with no arithmetic between them: pair logits are byte-identical to one Mac's on the recorded fixtures.
 
 ## HIP builds
 
