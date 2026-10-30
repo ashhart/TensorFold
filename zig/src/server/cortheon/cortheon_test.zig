@@ -134,6 +134,7 @@ pub const Web = struct {
     searches: usize = 0,
     observer: ?Observer = null,
     empty: bool = false,
+    fetch_chars: ?usize = null,
     on_search: ?struct { ctx: *anyopaque, call: *const fn (*anyopaque) void } = null,
     pub fn web(w: *Web) tools.Web {
         return .{ .ctx = w, .search = searchFn, .fetch = fetchFn };
@@ -148,7 +149,9 @@ pub const Web = struct {
         rs[0] = .{ .title = try std.fmt.allocPrint(a, "Docs for {s}", .{query}), .url = "https://docs.example/x", .snippet = "about x" };
         return .{ .engine = "Stand-in", .results = rs };
     }
-    fn fetchFn(_: *anyopaque, _: Allocator, url: []const u8, _: usize, _: []const u8) anyerror!tools.Page {
+    fn fetchFn(ctx: *anyopaque, _: Allocator, url: []const u8, max_chars: usize, _: []const u8) anyerror!tools.Page {
+        const w: *Web = @ptrCast(@alignCast(ctx));
+        w.fetch_chars = max_chars;
         return .{ .url = url, .status = 200, .kind = "text/html", .title = "X docs", .text = "Zig 0.17 adds std.Io." };
     }
 };
@@ -435,6 +438,30 @@ test "the research task keeps a character that straddles the goal cap whole" {
     try std.testing.expect(std.unicode.utf8ValidateSlice(prompt));
     try std.testing.expect(std.mem.indexOf(u8, prompt, "What is the latest release of Zig?") != null);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "\u{20ac}") == null);
+}
+
+fn refuseImage(_: *anyopaque, _: Allocator, _: []const u8, _: u32) anyerror!api.PreparedImage {
+    return error.Unsupported;
+}
+
+test "a turn of text parts is counted in the page budget" {
+    var rig: Rig = .{ .eng = .{ .script = &.{ "Zig latest release notes", "The latest is 0.17." } } };
+    try rig.start(true);
+    defer rig.stop();
+    rig.srv.info.context_window = 10000;
+    rig.srv.info.vision = .{ .ctx = &rig, .prepare = refuseImage, .image_token = 9, .image_tokens = 4, .max_images = 1 };
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var words: std.ArrayList(u8) = .empty;
+    try words.appendSlice(a, "What is the latest release of Zig? ");
+    while (words.items.len < 21000) try words.append(a, 'x');
+    const mid = words.items.len / 2;
+    const left = try json.quote(a, words.items[0..mid], .{});
+    const right = try json.quote(a, words.items[mid..], .{});
+    const body = try std.fmt.allocPrint(a, "{{\"messages\":[{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":{s}}},{{\"type\":\"image_url\",\"image_url\":{{\"url\":\"https://images.example/pic.png\"}}}},{{\"type\":\"text\",\"text\":{s}}}]}}]}}", .{ left, right });
+    _ = try rig.ask(a, body);
+    try std.testing.expectEqual(@as(?usize, 600), rig.web.fetch_chars);
 }
 
 test "research expansion keeps a context-window refusal streamed" {
