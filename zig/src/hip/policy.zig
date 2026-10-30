@@ -3,6 +3,7 @@
 const std = @import("std");
 const Launcher = @import("launches.zig").Launcher;
 const affine = @import("launches/affine.zig");
+const Caps = @import("caps.zig").Caps;
 
 pub const Choice = enum { auto, on, off };
 /// The prefill attention tile: `f32` keeps the one-row kernel.
@@ -51,6 +52,11 @@ pub const Policy = struct {
     rccl_lib: Path = .{},
 
     pub const Error = error{ UnknownKey, BadValue, StepNotAligned };
+
+    /// The defaults of a GPU: the iGPUs of the RDNA 3.5 generation fill prompts in larger chunks.
+    pub fn forCaps(caps: Caps) Policy {
+        return .{ .prefill_step = if (caps.generation == .rdna3_5) 4096 else 1024 };
+    }
 
     /// Whether the decode stream tile is on.
     pub fn streamOn(p: *const Policy) bool {
@@ -197,7 +203,12 @@ pub const Policy = struct {
 
     /// The policy: defaults, then `flags` (`--policy`), then TF_POLICY; `notes` says when TF_POLICY acted.
     pub fn resolve(flags: []const u8, env: Env, notes: *Notes) Error!Policy {
-        var p: Policy = .{};
+        return resolveFrom(.{}, flags, env, notes);
+    }
+
+    /// `resolve` over `base` (a GPU's defaults) in place of the plain defaults.
+    pub fn resolveFrom(base: Policy, flags: []const u8, env: Env, notes: *Notes) Error!Policy {
+        var p = base;
         try p.apply(flags);
         if (env.get("TF_POLICY")) |text| {
             notes.add("TF_POLICY={s}; ", .{text});
@@ -221,6 +232,17 @@ test "apply sets fields and refuses what it does not know" {
     try std.testing.expectEqual(@as(u32, 256), p.fill_rows);
     for ([_][]const u8{ "fill_rows=0", "fill_rows=100", "fill_rows=384", "fill_rows=2048" }) |bad| try std.testing.expectError(error.StepNotAligned, p.apply(bad));
     try std.testing.expectEqual(@as(u32, 256), p.fill_rows);
+}
+
+test "the RDNA 3.5 iGPUs default to larger prompt chunks and every flag still overrides" {
+    var notes: Policy.Notes = .{};
+    const igpu = Policy.forCaps(Caps.of("gfx1151").?);
+    try std.testing.expectEqual(@as(u32, 4096), igpu.prefill_step);
+    try std.testing.expectEqual(@as(u32, 1024), Policy.forCaps(Caps.of("gfx1100").?).prefill_step);
+    try std.testing.expectEqual(@as(u32, 4096), (try Policy.resolveFrom(igpu, "", .none, &notes)).prefill_step);
+    try std.testing.expectEqual(@as(u32, 1024), (try Policy.resolveFrom(igpu, "prefill_step=1024", .none, &notes)).prefill_step);
+    const env: Policy.Env = .{ .vars = &.{.{ "TF_POLICY", "prefill_step=2048" }} };
+    try std.testing.expectEqual(@as(u32, 2048), (try Policy.resolveFrom(igpu, "", env, &notes)).prefill_step);
 }
 
 test "a policy survives its words" {
