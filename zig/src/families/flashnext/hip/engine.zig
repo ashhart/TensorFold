@@ -261,28 +261,14 @@ pub const Engine = struct {
         return .{ .ptr = out, .kind = y.kind };
     }
 
-    /// The first `kept` rows of a window from `c.len` become the stream's: DeltaNet states, n-gram tail and history.
+    /// A window's first `kept` rows become the stream's: states run through them, a dropped row's conv tail named.
     pub fn keepWindow(e: *Engine, c: *cache.Caches, tokens: []const u32, kept: usize) !void {
         if (kept == 0 or kept > tokens.len) return error.BadKeep;
         const l = c.layout;
         const s = e.stream.handle;
-        if (kept < tokens.len) for (c.linear, 0..) |linear, i| {
-            if (!linear) continue;
-            const from = c.snapshot(i, kept - 1);
-            const to = c.linearAt(i);
-            try hip.runtime.check(e.driver.api.hipMemcpyDtoDAsync(
-                @ptrFromInt(to.conv),
-                @ptrFromInt(from.conv),
-                l.conv_bytes,
-                s,
-            ));
-            try hip.runtime.check(e.driver.api.hipMemcpyDtoDAsync(
-                @ptrFromInt(to.state),
-                @ptrFromInt(from.state),
-                l.state_bytes,
-                s,
-            ));
-        };
+        // a window of one row stored its states (mixers.recur): nothing to run
+        if (tokens.len > 1) try c.keepStates(&e.lib, kept, e.stream);
+        try c.startAt(if (kept < tokens.len) kept - 1 else null, e.stream);
         const row = l.tail_bytes / l.tail_rows;
         try hip.runtime.check(e.driver.api.hipMemcpyDtoDAsync(
             @ptrFromInt(c.tail()),
@@ -302,6 +288,7 @@ pub const Engine = struct {
         try e.stream.synchronize();
         e.host.used = 0;
         e.arena.reset();
+        try c.settle(e.stream);
         const segs = [_]forward.Seg{.{ .c = c, .tokens = tokens, .pos = c.len }};
         const staged = try forward.stage(&e.weights.model, &e.host, &segs, false);
         const out = try forward.run(e.ops(&e.arena), &e.weights.model, &e.host, &segs, false, staged);

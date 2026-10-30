@@ -165,6 +165,11 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     var gdn_prep = @import("contract_gdn_prep.zig").Prep.init(a, &r, s, &l);
     defer gdn_prep.deinit();
     try kernels.append(a, gdn_prep.kernel());
+    const hold_k = @import("contract_gdn_hold.zig");
+    var gdn_windows: [4]hold_k.Window = undefined;
+    for (&gdn_windows, 0..) |*m, i| m.* = .init(a, &r, s, &l, if (i < 2) .hold else .keep, if (i % 2 == 0) 128 else 16);
+    defer for (&gdn_windows) |*m| m.deinit();
+    for (&gdn_windows) |*m| try kernels.append(a, m.kernel());
     var t: g.Tally = .{};
     const t0 = ms(io);
     try g.runAll(a, kernels.items, 0x6b63, &t);

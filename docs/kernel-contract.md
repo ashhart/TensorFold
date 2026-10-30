@@ -198,6 +198,9 @@ HIP also checks the DeltaNet prompt recurrence at half a value head a block (`tf
 bit-equal to the plain window scan `gated_delta_tile` on the same tokens.
 Its prompt prework in one launch (`tf_gdn_prompt_prep`: conv, q and k head norms, v, gate, beta and the new conv state)
 is bit-equal to the chain it replaces (`tf_conv_prefill`, `tf_copy_cols`, `tf_rms`, `tf_gdn_gate_prefill`).
+A verify window that holds its state (`tf_gdn_hold_128` and `_16`: y only, the state an input left unchanged) and the
+keep that replays it (`tf_gdn_keep_128` and `_16`: two layers' states after their kept rows) are each bit-equal to
+`gated_delta_tile` over the same rows.
 
 RADIO's fused bias, activation and residual (`tf_vit_bias_act`) replaces `tf_vit_bias` then
 `tf_vit_pointwise`, byte for byte.

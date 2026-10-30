@@ -134,6 +134,7 @@ pub const Fx = struct {
     fn snapSave(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!pc.Saved {
         const f = of(ptr);
         const lane: *Lane = @ptrCast(@alignCast(owner orelse return error.NoOwner));
+        try lane.caches.settle(f.e.stream);
         const saved = try snapshot.save(
             f.gpa,
             &f.e.driver,

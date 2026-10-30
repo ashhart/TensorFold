@@ -178,6 +178,9 @@ struct ConvArgs {
     // A round's plan (plan.count null: the launch's own rows and state): a grid row a slot, rows and state from it.
     PlanArgs plan;
     int layer;
+    int slots;  // the launcher's grid rows (the grid says it here)
+    // f >= 0 here: the window starts from the last window's snapshot after its row f; null or -1: from `state`
+    const int* from;
 };
 
 // The conv for a window's rows split into q, k, v: taps in order, then silu; q, k heads rms-normed; gate and beta last.
@@ -223,9 +226,12 @@ __device__ void conv_split_body(const ConvArgs& launch) {
     const float* taps = c.weight + static_cast<long long>(live ? channel : 0) * c.kernel;
     const int kept = c.kernel - 1;
     float history[7];
+    const int f = c.from != nullptr && c.states != nullptr ? *c.from : -1;
+    const float* start = f >= 0 ? c.states + static_cast<long long>(f) * kept * c.channels : c.state;
     if (live) {
-        for (int tap = 0; tap < kept; ++tap) history[tap] = c.state[static_cast<long long>(tap) * c.channels + channel];
+        for (int tap = 0; tap < kept; ++tap) history[tap] = start[static_cast<long long>(tap) * c.channels + channel];
     }
+    __atomic_signal_fence(__ATOMIC_SEQ_CST);  // the start is read before any snapshot store (it may be one of them)
     for (int r = 0; r < c.rows; ++r) {
         float y = 0.f;
         float sample = 0.f;

@@ -34,6 +34,14 @@ const Host = struct {
         @memset(@as([*]u8, @ptrCast(dst.?))[0..n], @intCast(value));
         return 0;
     }
+    fn set32(dst: abi.DevicePtr, value: c_int, n: usize, _: abi.Stream) callconv(.c) abi.Result {
+        @memset(@as([*]c_int, @ptrCast(@alignCast(dst.?)))[0..n], value);
+        return 0;
+    }
+    fn dtod(dst: abi.DevicePtr, src: abi.DevicePtr, n: usize, _: abi.Stream) callconv(.c) abi.Result {
+        @memcpy(@as([*]u8, @ptrCast(dst.?))[0..n], @as([*]const u8, @ptrCast(src.?))[0..n]);
+        return 0;
+    }
     fn sync(_: abi.Stream) callconv(.c) abi.Result {
         return @intFromBool(fail_sync);
     }
@@ -52,6 +60,8 @@ const Host = struct {
         r.api.hipMemcpyHtoD = htod;
         r.api.hipMemcpyDtoH = dtoh;
         r.api.hipMemset = set;
+        r.api.hipMemsetD32Async = set32;
+        r.api.hipMemcpyDtoDAsync = dtod;
         r.api.hipStreamSynchronize = sync;
         r.api.hipMalloc = malloc;
         r.api.hipFree = free;
@@ -131,9 +141,12 @@ const Saved = struct {
     }
 };
 
-/// Caches are a new stream's: every byte zero, no positions, eos before any row.
+/// Caches are a new stream's: every byte zero, no positions, eos before any row, the start word -1 (no snapshot row).
 fn expectFresh(c: *const cache.Caches) !void {
     for (bytes(c)) |b| try std.testing.expectEqual(@as(u8, 0), b);
+    const word = @as([*]const u8, @ptrCast(c.window.ptr.?))[c.layout.windowBytes()..][0..4];
+    try std.testing.expectEqualSlices(u8, &.{ 0xff, 0xff, 0xff, 0xff }, word);
+    try std.testing.expectEqual(@as(?usize, null), c.pending);
     try std.testing.expectEqual(@as(usize, 0), c.len);
     try std.testing.expectEqual(@as(usize, 0), c.pooled);
     try std.testing.expectEqual([2]i64{ eos, eos }, c.history);
@@ -339,4 +352,67 @@ test "a round's graph is chosen for the pool's caches only: caches made elsewher
     c = try e.pool.lease(std.testing.allocator, 0, s, eos, cap, &maker);
     try std.testing.expectEqual(engine.Pick.capture, try e.choose(&.{.{ .c = &c, .tokens = &step, .pos = 0 }}));
     e.pool.unlease(c);
+}
+
+/// The device word at `start()`: the snapshot row a window's conv tails start from, -1 for their places.
+fn startWord(c: *const cache.Caches) i32 {
+    return std.mem.readInt(i32, @as([*]const u8, @ptrCast(c.window.ptr.?))[c.layout.windowBytes()..][0..4], .little);
+}
+
+test "a keep that names a snapshot row: a save refuses until the conv tails settle, then saves the row's tails" {
+    var r = Host.runtime();
+    const s: hip.Stream = .{ .r = &r, .handle = null };
+    var c = try caches(&r);
+    defer c.deinit(std.testing.allocator);
+    c.len = at;
+    c.pooled = at / ratio;
+    // a window of four rows kept two: its conv tails wait in snapshot row 1, the word names it
+    const linear = 1;
+    const row = 1;
+    const snap: [*]u8 = @ptrFromInt(c.snapshot(linear, row));
+    for (snap[0..c.layout.conv_bytes], 0..) |*b, i| b.* = @truncate(i *% 3 +% 1);
+    try c.startAt(row, s);
+    try std.testing.expectEqual(@as(i32, row), startWord(&c));
+    try std.testing.expectError(error.SnapshotUnsettled, snapshot.save(std.testing.allocator, &r, s, &c, null, at, ratio));
+    try c.settle(s);
+    try std.testing.expectEqual(@as(?usize, null), c.pending);
+    try std.testing.expectEqual(@as(i32, -1), startWord(&c));
+    const conv: [*]const u8 = @ptrFromInt(c.linearAt(linear).conv);
+    try std.testing.expectEqualSlices(u8, snap[0..c.layout.conv_bytes], conv[0..c.layout.conv_bytes]);
+    const copy = try snapshot.save(std.testing.allocator, &r, s, &c, null, at, ratio);
+    snapshot.drop(std.testing.allocator, copy);
+}
+
+test "a restore over caches whose last keep named a snapshot row resumes from the copy's own places" {
+    var r = Host.runtime();
+    const s: hip.Stream = .{ .r = &r, .handle = null };
+    var src = try Saved.init(&r, 11);
+    defer src.deinit();
+    var c = try caches(&r);
+    defer c.deinit(std.testing.allocator);
+    try c.startAt(3, s);
+    try snapshot.restoreAgreed(std.testing.allocator, &r, s, src.copy, &c, null, ratio, eos, null);
+    try expectRestored(&c, &src.main);
+    try std.testing.expectEqual(@as(?usize, null), c.pending);
+    try std.testing.expectEqual(@as(i32, -1), startWord(&c));
+}
+
+test "a stream cancelled or ended inside a window: its slot leased again starts fresh, no snapshot row named" {
+    var r = Host.runtime();
+    const s: hip.Stream = .{ .r = &r, .handle = null };
+    var pool: cache.Pool = .{};
+    defer pool.deinit(std.testing.allocator);
+    var maker: Maker = .{ .r = &r };
+    for ([_]?usize{ null, 0, 6 }) |row| {
+        var c = try pool.lease(std.testing.allocator, 0, s, eos, cap, &maker);
+        for (bytes(&c), 0..) |*b, i| b.* = @truncate(i *% 13 +% 5);
+        c.len = 17;
+        // the window's last keep (kept all, one, or seven of eight rows), then the stream goes
+        try c.startAt(row, s);
+        pool.unlease(c);
+        c = try pool.lease(std.testing.allocator, 0, s, eos, cap, &maker);
+        try expectFresh(&c);
+        pool.unlease(c);
+    }
+    try std.testing.expectEqual(@as(usize, 1), maker.made);
 }

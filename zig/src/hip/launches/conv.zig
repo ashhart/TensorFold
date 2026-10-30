@@ -45,6 +45,8 @@ pub const ConvArgs = extern struct {
     plan: PlanArgs = .{},
     layer: c_int = 0,
     slots: c_int = 1,
+    /// A device i32: with row f >= 0, a window's start is the last window's snapshot after row f (states must be set).
+    from: u64 = 0,
 };
 
 pub fn tf_conv_decode(l: *const Launcher, x: CF, weight: CF, state: F, y: F, batch: c_int, channels: c_int, kernel: c_int, s: S) Error!void {

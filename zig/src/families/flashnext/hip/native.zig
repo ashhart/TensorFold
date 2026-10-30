@@ -279,7 +279,7 @@ pub fn open(
     };
 }
 
-/// Device bytes a stream takes at `cap` positions: its caches, window snapshots, the head's caches and its rows.
+/// Device bytes of a stream at `cap` positions: caches, window conv snapshots and DeltaNet inputs, head caches, rows.
 fn streamBytes(e: *const Engine, cap: usize) usize {
     var buf: [config.max_layers]bool = undefined;
     const kinds = e.kinds(&buf) catch return std.math.maxInt(usize);

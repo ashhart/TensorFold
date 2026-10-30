@@ -43,20 +43,22 @@ pub fn linear(
     const gate = try o.arena.of(f32, rows * d.value_heads);
     const beta = try o.arena.of(f32, rows * d.value_heads);
     if (window) {
-        // a window's conv, split, q and k norms and gates in one launch a stream, each row's conv state kept aside
+        // a window's conv, split, norms and gates in one launch a stream; k, v, gate and beta into its window inputs
         var at_row: usize = 0;
         for (segs) |g| {
             const n = g.tokens.len;
             const nh = n * d.value_heads;
+            const in = g.c.inputs(index);
             try o.l.tf_conv_split(.{
                 .x = forward.at(qkv, at_row * ch).ptr,
                 .kind = @backingInt(m.act),
                 .weight = l.conv,
                 .state = g.c.linearAt(index).conv,
-                .states = g.c.snapshot(index, 0).conv,
+                .states = g.c.snapshot(index, 0),
+                .from = g.c.start(),
                 .qn = q + at_row * kw * 4,
-                .kn = k + at_row * kw * 4,
-                .v = v + at_row * vw * 4,
+                .kn = in.k,
+                .v = in.v,
                 .channels = @intCast(ch),
                 .kernel = @intCast(d.conv),
                 .rows = @intCast(n),
@@ -70,8 +72,8 @@ pub fn linear(
                 .gb = forward.at(b, at_row * d.value_heads).ptr,
                 .a_log = l.a_log,
                 .dt_bias = l.dt_bias,
-                .gate = gate + at_row * d.value_heads * 4,
-                .beta = beta + at_row * d.value_heads * 4,
+                .gate = in.gate,
+                .beta = in.beta,
                 .gcount = @intCast(nh),
                 .heads = @intCast(d.value_heads),
             }, o.stream);
@@ -183,13 +185,25 @@ fn recur(
     var off: usize = 0;
     for (segs) |g| {
         const n = g.tokens.len;
-        const snaps: ?u64 = if (window) g.c.snapshot(index, 0).state else null;
+        // a window's k, v, gate and beta are in the stream's window inputs (linear's conv and split wrote them there)
+        const in: cache.WindowInputs = if (window) g.c.inputs(index) else .{
+            .k = k + off * kw * 4,
+            .v = v + off * vw * 4,
+            .gate = gate + off * d.value_heads * 4,
+            .beta = beta + off * d.value_heads * 4,
+        };
+        if (window and n > 1) {
+            // the window holds the state (its keep runs it); a one-row window takes the plain scan, which stores it
+            try o.gatedDeltaHold(q + off * kw * 4, in.k, in.v, in.gate, in.beta, g.c.linearAt(index).state, y + off * vw * 4, n, d.key_heads, d.value_heads, d.key_dim, d.value_dim);
+            off += n;
+            continue;
+        }
         try o.gatedDelta(
             q + off * kw * 4,
-            k + off * kw * 4,
-            v + off * vw * 4,
-            gate + off * d.value_heads * 4,
-            beta + off * d.value_heads * 4,
+            in.k,
+            in.v,
+            in.gate,
+            in.beta,
             g.c.linearAt(index).state,
             y + off * vw * 4,
             n,
@@ -197,7 +211,8 @@ fn recur(
             d.value_heads,
             d.key_dim,
             d.value_dim,
-            snaps,
+            null,
+            0,
         );
         off += n;
     }

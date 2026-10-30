@@ -74,6 +74,7 @@ pub const Ops = struct {
     pub const gdnGatePrefill = recurrence.gdnGatePrefill;
     pub const gdnGate = recurrence.gdnGate;
     pub const gatedDelta = recurrence.gatedDelta;
+    pub const gatedDeltaHold = recurrence.gatedDeltaHold;
     pub const rms = norms.rms;
     pub const rms2 = norms.rms2;
     pub const gnormOut = norms.gnormOut;

@@ -63,6 +63,8 @@ pub const Launcher = struct {
     gdn_gate: Triple,
     gated_delta_tile: [2]Function, // dk 128, 16
     gated_delta_wave: [2]Function,
+    gdn_hold: [2]Function, // dk 128, 16: a verify window that holds its state (no snapshot, no store)
+    gdn_keep: [2]Function, // dk 128, 16: a keep's run of every DeltaNet layer's state through its kept rows
     gdn_prompt: Function, // dk = dv = 128, a prompt's rows, half a value head a block
     score_keys: Triple, // by cache kind
     apply_values: Triple,
@@ -255,13 +257,15 @@ pub const Launcher = struct {
             try act.function(ns ++ "15gdn_gate_kernelI12hip_bfloat16EEvPKT_S5_PKfS7_PfS8_ii"),
         };
         l.gated_delta_tile = .{
-            try gd.function(ns ++ "16gated_delta_tileILi128ELi8ELi16EEEvPKfS3_S3_S3_S3_PfS4_iiiiS4_"),
-            try gd.function(ns ++ "16gated_delta_tileILi16ELi8ELi16EEEvPKfS3_S3_S3_S3_PfS4_iiiiS4_"),
+            try gd.function(ns ++ "16gated_delta_tileILi128ELi8ELi16EEEvPKfS3_S3_S3_S3_PfS4_iiiiS4_PKi"),
+            try gd.function(ns ++ "16gated_delta_tileILi16ELi8ELi16EEEvPKfS3_S3_S3_S3_PfS4_iiiiS4_PKi"),
         };
+        l.gdn_hold = .{ try gd.function("tf_gdn_hold_128"), try gd.function("tf_gdn_hold_16") };
+        l.gdn_keep = .{ try gd.function("tf_gdn_keep_128"), try gd.function("tf_gdn_keep_16") };
         l.gdn_prompt = try gd.function("tf_gdn_prompt_128");
         l.gated_delta_wave = .{
-            try gd.function(ns ++ "18gated_delta_kernelILi128EEEvPKfS3_S3_S3_S3_PfS4_iiiiS4_"),
-            try gd.function(ns ++ "18gated_delta_kernelILi16EEEvPKfS3_S3_S3_S3_PfS4_iiiiS4_"),
+            try gd.function(ns ++ "18gated_delta_kernelILi128EEEvPKfS3_S3_S3_S3_PfS4_iiiiS4_PKi"),
+            try gd.function(ns ++ "18gated_delta_kernelILi16EEEvPKfS3_S3_S3_S3_PfS4_iiiiS4_PKi"),
         };
         l.score_keys = .{
             try att.function("_Z10score_keysI6__halfEvPKfPKT_PfiiiifixxxPKi"),
@@ -338,6 +342,8 @@ pub const Launcher = struct {
     pub const pagedCausal = attention.pagedCausal;
     pub const tf_gdn_gate = recurrence.tf_gdn_gate;
     pub const tf_gated_delta = recurrence.tf_gated_delta;
+    pub const tf_gdn_hold = recurrence.tf_gdn_hold;
+    pub const tf_gdn_keep = recurrence.tf_gdn_keep;
     pub const planKvWrite = plan.planKvWrite;
     pub const planCausal = plan.planCausal;
     pub const planCausalAs = plan.planCausalAs;
