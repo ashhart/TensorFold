@@ -1,4 +1,4 @@
-// Vulkan stage 3 bring-up: half-split RoPE, the flat KV cache write, causal GQA SDPA and the attention output gate through the production Attention operator, checked on a real GPU. Exit 0 pass, 1 fail, 2 usage, 124 fence timeout. Operator bring-up only: no model, no performance claim, no cross-backend bitexact claim — the fixture states each gate's budget.
+// Stage 3 GPU bring-up: RoPE/KV/GQA SDPA/gate; exits 0/1/2/124; no model, perf or cross-backend bitexact claim.
 const std = @import("std");
 const vk = @import("vulkan");
 const shaders = @import("stage3_shaders");
@@ -22,7 +22,7 @@ const Elapsed = struct {
 };
 
 const repeats = 3;
-// Large FINITE bf16 (≈ max) planted over non-visible keys: an uncausal read turns every poisoned row's output into ±inf/huge and fails every check.
+// Large FINITE bf16 (≈ max) poisons non-visible keys; uncausal reads produce ±inf/huge and fail checks.
 const finite_poison: u16 = 0x7f7f;
 
 pub fn main(init: std.process.Init) !u8 {
@@ -126,7 +126,7 @@ fn unchanged(a: std.mem.Allocator, cmds: *vk.Commands, staging: vk.Buffer, shell
     return std.mem.indexOfDiff(u16, shell, back) == null;
 }
 
-// The rope gates: dispatch, three byte-identical repeats, the fixture's f64 check, planted wrong-finite and nonfinite refusals, input unchanged.
+// Rope checks dispatch, 3 bit-identical repeats, f64 reference, wrong-finite/nonfinite refusals, and unchanged input.
 fn ropeGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, attn: *vk.Attention, case: fx.RopeCase, timeout: u64) !bool {
     const f = try fx.Rope.init(a, case, 0x57a3);
     defer f.deinit();
@@ -149,7 +149,7 @@ fn ropeGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *
     defer a.free(full_bits);
     const bits = full_bits[0..f.want.len];
     for (0..repeats) |rep| {
-        // re-upload the all-poison shell before every dispatch: the kernel must write every output word itself — a no-op or partially-writing kernel leaves poison (NaN) behind and fails the finite-output check.
+        // Re-upload poison before each dispatch; unwritten output words stay NaN and fail finite-output checks.
         try vk.orExit(vk.upload(cmds, out, 0, staging, std.mem.sliceAsBytes(out_shell), timeout));
         try vk.orExit(attn.ropeQueries(cmds, out_view, q_view, rows, timeout));
         try fetch(cmds, staging, out, std.mem.sliceAsBytes(full_bits), timeout);
@@ -181,7 +181,7 @@ fn ropeGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *
     return true;
 }
 
-// Mutates a downloaded GOOD output copy (wrong finite, then nan/+inf/-inf at the first finite-want element); every plant must be refused.
+// Poison a downloaded GOOD copy with wrong finite then nan/+inf/-inf at the first finite-want element; refuse all.
 fn plantRefuse(f: anytype, good: []const u16, name: []const u8, gate: []const u8) !bool {
     const mutated = try f.a.dupe(u16, good);
     defer f.a.free(mutated);
@@ -208,7 +208,7 @@ fn plantRefuse(f: anytype, good: []const u16, name: []const u8, gate: []const u8
     return true;
 }
 
-// The cache + causal SDPA gate on one shared cache: cacheKV against the f64 rope reference and the bit-exact V transport, then SDPA per row with known visible counts, three-way causality (NaN poison vs large-finite vs zeroed future keys must give bit-identical outputs), repeats, planted refusals, inputs unchanged.
+// CacheKV checks f64 rope/V bits; SDPA checks counts, NaN/finite/zero causality, repeats, refusals, unchanged inputs.
 fn attendGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, attn: *vk.Attention, timeout: u64) !bool {
     const ac = fx.attend_case;
     const cc = fx.cache_case;
@@ -305,7 +305,7 @@ fn attendGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds:
         return false;
     };
 
-    // Causality WITHOUT a budget — strong per-row form. For EVERY row r and EVERY poison variant, upload a FRESH key cache in which exactly that row's non-visible keys (keys >= prefix+r+1) are poisoned, run attend for ONLY that row (rows=1, prefix=prefix+r) on the row's q/out slices, and require bit-identical output to the baseline's row-r slice. A kernel reading one key past its row's bound flips this immediately.
+    // Fresh cache per row poisons keys >= prefix+r+1; rows=1/prefix=prefix+r must bit-match baseline without budget.
     const alt_keys = try a.alloc(u16, @intCast(cache_elems));
     defer a.free(alt_keys);
     const y_row_bits = try a.alloc(u16, @intCast(qrow_elems));
@@ -349,7 +349,7 @@ fn attendGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds:
     return true;
 }
 
-// The interleaved output gate: three byte-identical repeats, the fixture's f64 check, planted refusals, both inputs unchanged.
+// Interleaved output repeats 3 times, matches f64, refuses plants, and leaves both inputs unchanged.
 fn gateGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, attn: *vk.Attention, timeout: u64) !bool {
     const case = fx.gate_case;
     const f = try fx.Gate.init(a, case, 0x57a6);

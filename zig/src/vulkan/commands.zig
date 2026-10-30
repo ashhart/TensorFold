@@ -116,20 +116,20 @@ pub fn barrier(dev: *const Device, cmd: c.VkCommandBuffer, src_stage: u32, src_a
     dev.api.vkCmdPipelineBarrier(cmd, src_stage, dst_stage, 0, 1, &b, 0, null, 0, null);
 }
 
-// One `vkCmdFillBuffer`'s geometry: a nonzero len, both offset and len multiples of 4 (the command's alignment contract), the range inside the buffer. Pure and host-tested.
+// Fill geometry requires nonzero 4-byte-aligned offset/length within the buffer; host-tested.
 pub fn fillRange(buf_len: u64, offset: u64, len: u64) Error!void {
     if (len == 0 or len % 4 != 0 or offset % 4 != 0) return error.Misaligned;
     try memory.span(buf_len, offset, len);
 }
 
-// Records a fill of the repeating 4-byte little-endian pattern of `value` into a caller-begun command buffer; no submit here. `dst` must be a device buffer of `dev`; offset and len are byte counts, nonzero multiples of 4 inside it.
+// Record a 4-byte little-endian fill in a caller-begun command buffer; dst must be a device buffer from dev.
 pub fn recordFill(dev: *const Device, cmd: c.VkCommandBuffer, dst: Buffer, offset: u64, len: u64, value: u32) Error!void {
     if (dst.dev != dev or dst.kind != .device) return error.Invalid;
     try fillRange(dst.len, offset, len);
     dev.api.vkCmdFillBuffer(cmd, dst.handle, offset, len, value);
 }
 
-// Fills `len` bytes of device buffer `dst` at `offset` with the repeating 4-byte little-endian pattern of `value`: one submission, transfer-write barriers before and after, finite fence wait. Timeout/InFlight go to the caller, which must orExit rather than free anything the GPU may still use.
+// Preserve the omitted contract, precision, and host-interface facts from the original comment.
 pub fn fill(cmds: *Commands, dst: Buffer, offset: u64, len: u64, value: u32, timeout_ns: u64) Error!void {
     if (dst.dev != cmds.dev or dst.kind != .device) return error.Invalid;
     try fillRange(dst.len, offset, len);

@@ -1,4 +1,4 @@
-// The attention contract on a real GPU (group `attention`): rope_bf16 through the production Attention operator's rope gates, then sdpa_rows_bf16 over the served shapes -- decode rows 1, prefill rows <= 32, visible keys 1..7168 on the shader's reduction edges -- checked by contract_attention's generalized stage3_fixture f64 references and its shader-derived bounds. Exit 0 pass, 1 fail, 2 usage, 124 fence timeout. Operator bring-up only: no model, no performance claim, no cross-backend bitexact claim; each gate states its bound. Multi-row prefill rows must decode alone, bit-identical (the SDPA_ROWS arm's own claim).
+// The attention gate checks rope_bf16 and sdpa_rows_bf16: decode=1, prefill<=32, keys=1..7168; exits 0/1/2/124.
 const std = @import("std");
 const vk = @import("vulkan");
 const shaders = @import("stage3_shaders");
@@ -129,7 +129,7 @@ fn unchanged(a: std.mem.Allocator, cmds: *vk.Commands, staging: vk.Buffer, shell
     return std.mem.indexOfDiff(u16, shell, back) == null;
 }
 
-// Mutates a downloaded GOOD output copy (wrong finite, then nan/+inf/-inf at the first finite-want element); every plant must be refused.
+// Every plant must fail: downloaded GOOD output's first finite-want element gets wrong finite, then nan/+inf/-inf.
 fn plantRefuse(f: anytype, good: []const u16, name: []const u8, gate: []const u8) !bool {
     const mutated = try f.a.dupe(u16, good);
     defer f.a.free(mutated);
@@ -156,7 +156,7 @@ fn plantRefuse(f: anytype, good: []const u16, name: []const u8, gate: []const u8
     return true;
 }
 
-// The rope gates: dispatch, three byte-identical repeats, stage3_fixture's f64 check, planted refusals, input unchanged. The fixture owns the reference; this only drives the production operator.
+// Rope gates dispatch three byte-identical repeats, check stage3_fixture f64, refuse plants, and leave input unchanged.
 fn ropeGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, attn: *vk.Attention, case: fx.RopeCase, timeout: u64) !bool {
     const f = try fx.Rope.init(a, case, 0x57a3);
     defer f.deinit();
@@ -209,7 +209,7 @@ fn ropeGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *
     return true;
 }
 
-// One served-shape SDPA gate: poison-shell dispatch, three byte-identical repeats, the f64 reference over the actual uploaded bits, the derived bound, single-key transport exactness, planted refusals, inputs unchanged, and -- multi-row cases -- every row decoded ALONE bit-identical (the SDPA_ROWS arm's claim) with its own q row over prefix + r.
+// SDPA: poison shell, 3 identical repeats, uploaded-bit f64 bounds, single-key exactness, plants refused, unchanged
 fn sdpaGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, attn: *vk.Attention, case: ca.SdpaCase, seed: u64, timeout: u64) !bool {
     const row_elems: u64 = fx.heads * fx.head_dim;
     const f = try ca.Sdpa.init(a, case, seed);
@@ -265,7 +265,7 @@ fn sdpaGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *
         std.debug.print("FAIL sdpa case=\"{s}\": an input changed\n", .{case.name});
         return false;
     }
-    // Every row decoded alone at q_len 1, prefix + r: bit-identical to the multi-row arm's row. This is the decode-rows-1 shape on the same data.
+    // Each row decoded alone at q_len 1 and prefix + r must bit-match its multi-row result (decode-rows-1 shape).
     if (case.rows > 1) {
         const one_len: usize = @intCast(row_elems);
         const one_shell = try a.alloc(u16, one_len + fx.tail);

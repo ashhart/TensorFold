@@ -1,5 +1,4 @@
-// Stage 2 fixture: residual-add, SwiGLU and RMSNorm cases against the Metal-oracle (ASH_QWEN35) semantics, host-checkable; no device code here. Stage 2 operator bring-up only: no model, no performance claim, and NO cross-backend bitexact claim — only the bounds stated per gate.
-//  Acceptance, stated plainly (fixed bring-up budgets, NOT Vulkan-spec proofs, NOT full kernel-contract bounds): - Residual add: outputs must match the shader's own pipeline bit for bit — the host computes the scalar f32 add and applies the contract's RNE bf16 cast (the same bit formula as the shader's bf16_store). Finite outputs compare by bits; nonfinite outputs by class (a driver may raise a different NaN payload). Only the three subnormal-class results may instead be signed zero when the device reports no f32 denormal preservation. No FP64 add claim. - SwiGLU: |got - want| <= c.boundExact: an independent FP64 reference, the output's own bf16 rounding, and a FIXED budget of 8*2^-24 relative for the f32 exp/1+/div/mul chain. The 8-op figure is an acceptance choice (exp is transcendental; no per-op error bound is proven here and none is guaranteed by the Vulkan spec). - RMSNorm: |got - want| <= c.bound(rms_spec, shape, want, |want|): the reduction sums only squares (a positive sum), so its relative error stays under gamma(20) in ANY order (<= 10 roundings at width 256, 16 at 2048 — 20 is conservative), sqrt halves it, and inversesqrt plus two f32 multiplies plus one bf16 store fit in ops 4 + outUnit. The norm's output error is relative for EVERY element because the large-magnitude sum enters only through the normalized denominator, so the output's own magnitude is the budget's magnitude scale. want == 0 demands an exactly-zero output (a small nonzero is rejected outright). Every finite reference demands a finite output (planted nan/+inf/-inf must be refused); the nonfinite controls compare value CLASSES against the FP64 reference. The probe records the actual float-control properties and selected class policy; normal and signed-zero checks remain strict. A preserving device must request DenormPreserve and pass the exact reference.
+// ASH_QWEN35 add/SwiGLU/RMSNorm fixtures under fixed budgets; nonfinite by class (drivers vary NaN payloads).
 const std = @import("std");
 const contract = @import("contract");
 const c = contract.spec;
@@ -49,15 +48,15 @@ fn sampleBits(rng: std.Random, scale: f32) u16 {
     return c.toBf16(v);
 }
 
-// --------------------------------------------------------------------------- Residual add: matches the shader pipeline (f32 add + one RNE bf16 store) bit for bit ---------------------------------------------------------------------------
+// ---- Residual add: the shader pipeline (f32 add + one RNE bf16 store), bit for bit ----
 
 pub const AddFill = enum { random, cancel, classes };
 
 pub const AddCase = struct { name: []const u8, elems: usize, at: Offsets = .{}, fill: AddFill = .random };
 
-// Every count is a multiple of four (binary_vec moves four elements per 8-byte load) and every offset is 256-byte aligned (128 bf16 elements), the largest minStorageBufferOffsetAlignment Vulkan allows.
+// Counts %4==0 (binary_vec moves 4/8-byte load); offsets 256B aligned, the largest minStorageBufferOffsetAlignment.
 
-// Add classes pairs: 0x0001..0x007f are bf16 SUBNORMALS (0x0080 is the smallest NORMAL). The measured device properties, never a vendor name, qualify the three subnormal-class rows for signed-zero results when f32 preservation is unsupported.
+// 0x0001..0x007f SUBNORMALs (0x0080 smallest NORMAL); measured properties, never vendor names, allow signed zero.
 pub const add_cases = [_]AddCase{
     .{ .name = "random 512", .elems = 512, .at = .{ .a = 128, .b = 256, .out = 384 } },
     .{ .name = "cancel 512", .elems = 512, .at = .{ .a = 128, .b = 256, .out = 384 }, .fill = .cancel },
@@ -95,7 +94,7 @@ pub const Add = struct {
     a_bits: []u16,
     b_bits: []u16,
     out: []u16,
-    // The exact bits the shader pipeline (f32 add, one RNE bf16 store) must produce; a nonfinite result carries its class bits and is checked by class only.
+    // The exact bits the shader pipeline (f32 add, one RNE bf16 store) must produce; nonfinite by class only.
     want: []u16,
     allow_subnormal_flush: bool = false,
 
@@ -138,7 +137,7 @@ pub const Add = struct {
         f.a.free(f.want);
     }
 
-    // The first mismatch under the exact check acceptance (class-vs-bit), or null when the whole window matches. Length/guard failures stay errors: the caller names them.
+    // First mismatch under the exact check (class-vs-bit), or null when the window matches; guard failures are errors.
     pub const Mismatch = struct { kind: error{ NonFiniteMismatch, BitMismatch }, index: usize, a: u16, b: u16, want: u16, got: u16 };
 
     pub fn firstMismatch(f: Add, got: []const u16) !?Mismatch {
@@ -161,9 +160,9 @@ pub const Add = struct {
     }
 };
 
-// --------------------------------------------------------------------------- SwiGLU: one bf16 store plus a documented f32 budget ---------------------------------------------------------------------------
+// ---- SwiGLU: one bf16 store plus a documented f32 budget ----
 
-// ops = 8: a FIXED BRING-UP ACCEPTANCE BUDGET for the f32 chain exp -> 1+ -> divide -> multiply. exp is transcendental: no per-op error bound is proven here and none is guaranteed by the Vulkan spec; 8*2^-24 is an acceptance choice, and boundExact adds the output's own bf16 rounding on top. This is not a full kernel-contract bound.
+// The f32 exp/1+/divide/multiply chain uses 8 ops and a fixed 8*2^-24 budget; exp has no Vulkan-spec per-op bound.
 const swiglu_spec: c.Spec = .{ .name = "vulkan swiglu bf16 (ASH_QWEN35 one-store)", .accum = .none, .depth = no_depth, .ops = 8, .out = .bf16, .served = &[_]c.Shape{} };
 fn no_depth(_: c.Shape) usize {
     return 0; // elementwise: boundExact never calls depth
@@ -219,7 +218,7 @@ pub const Swiglu = struct {
         f.a.free(f.want);
     }
 
-    // Finite wants: within boundExact (one bf16 rounding + the fixed f32 budget). want == 0 demands an exactly-zero output. Nonfinite wants: the output's class must equal the reference's class exactly.
+    // Finite wants: within boundExact (bf16 rounding + f32 budget); want == 0 demands exactly-zero; nonfinite: classes.
     pub fn check(f: Swiglu, got: []const u16) !Report {
         if (got.len != f.out.len) return error.LengthMismatch;
         const at = f.case.at.out;
@@ -249,9 +248,9 @@ pub const Swiglu = struct {
     }
 };
 
-// --------------------------------------------------------------------------- RMSNorm: contract bound with the reduction budget named ---------------------------------------------------------------------------
+// ---- RMSNorm: contract bound with the reduction budget named ----
 
-// depth = 20 f32 reduction roundings, CONSERVATIVE at every served width: at 2048 the strided partials take 8 adds and the 256-wide tree 8 levels (16 roundings); at 256 only 1 + 8. The budget applies to the output RELATIVELY (see check): the sum is positive, so gamma(20) bounds its relative error in any order. ops = 4: inversesqrt (<= 2 ulp) and the two f32 multiplies of weight * (value * norm).
+// depth = 20: 2048 takes 8 adds + 8 levels (16), 256 1 + 8; the sum is positive, so gamma(20) is relative in any order.
 const rms_depth = 20;
 const rms_spec: c.Spec = .{
     .name = "vulkan fast_norm bf16 rms (ASH_QWEN35 weight*(x*inv))",
@@ -323,7 +322,7 @@ pub const Rms = struct {
             for (0..case.width) |i| {
                 const bits: u16 = if (case.zero_row and row + 1 == case.rows) 0x0000 else switch (case.fill) {
                     .flat => sampleBits(rng, 1),
-                    // Large and tiny magnitudes interleaved: the norm is dominated by the large squares while the small entries must still round on their own scale.
+                    // Large and tiny magnitudes interleaved: large squares dominate, small ones round on their scale.
                     .dynamic => sampleBits(rng, if (i % 4 == 0) 0x1p10 else if (i % 4 == 2) 0x1p-10 else 1),
                 };
                 x[base + i] = bits;
@@ -347,7 +346,7 @@ pub const Rms = struct {
         f.a.free(f.want);
     }
 
-    // Fixed bring-up budget, NOT a Vulkan-spec proof: |got - want| <= c.bound with the output's own magnitude as the summed magnitude. The reduction sums squares (positive), so its relative error stays under gamma(depth) in any order; the norm divides by that sum's square root (relative sensitivity ~1/2, kept at gamma(20) conservatively), so the output error is relative for every element and never inherits the sum's absolute scale. A deliberately-absolute sum-of-squares budget here would allow ~1e3 of output error on dynamic rows and nonzero outputs on the zero row — that was wrong and is not this.
+    // Fixed budget, NOT a spec proof: |got - want| <= c.bound with the output's own magnitude, gamma(depth) relative.
     pub fn check(f: Rms, got: []const u16) !Report {
         if (got.len != f.out.len) return error.LengthMismatch;
         const at = f.case.at.out;
@@ -596,7 +595,7 @@ fn rmsAllocRun(a: std.mem.Allocator, case: RmsCase) !void {
 }
 
 test "every fixture init survives each single allocation failure without leaking" {
-    // checkAllAllocationFailures counts init's allocations, then fails each one in turn and requires error.OutOfMemory with every earlier byte freed; the staged errdefers pay for this.
+    // checkAllAllocationFailures fails each init allocation; error.OutOfMemory required; errdefers free earlier bytes.
     try std.testing.checkAllAllocationFailures(testing.allocator, addAllocRun, .{add_cases[0]});
     try std.testing.checkAllAllocationFailures(testing.allocator, addAllocRun, .{add_cases[2]});
     try std.testing.checkAllAllocationFailures(testing.allocator, swigluAllocRun, .{swiglu_cases[0]});

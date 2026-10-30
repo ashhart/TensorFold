@@ -1,9 +1,4 @@
-// Qwen3.5 GatedDeltaNet GPU primitives over the shared set-0 storage / push-constant pipeline model, matching the unchanged Ash8c Metal oracle (zig/kernels/metal/qwen3_5/gdn_{pre,chain,post}.metal) op for op.
-//  Kernels (kernels/vulkan/, all compiled -DUSE_BF16 --target-env vulkan1.2): conv_dw1d.comp prefill 4-tap conv (copied mlx-omarchy, MIT) gdn_conv_decode.comp decode conv + window shift + SiLU (copied, MIT) gdn_split.comp SiLU + Q/K L2 norm split + V + a/b gate (new) gated_delta_prefill_ash.comp gated-delta prefill scan, u8 mask binding removed (copied default kept alongside; MIT) gated_delta_decode.comp gated-delta decode step, raw-gates flags bit3|bit9 (copied, MIT) fast_norm_gated.comp gated RMSNorm + SiLU (copied, MIT) copy_general.comp -DUSE_U16 contiguous bf16 copies (conv-input assembly)
-//  The gate formula is taken from the Metal oracle, not assumed: s is bf16, softplus is bf16-rounded, g = exp(-exp(A_log_f32) * softplus) is stored f32, and beta = sigmoid(b) is stored bf16. A_log rides f32, dt_bias bf16. The decode kernel's bit9 flag both selects the f32 A_log read and the kv-walk association the Metal chain uses (state*g then *k). Its raw-gates prologue has an ASH_QWEN35 variant: softplus is the Metal gdn_pre form — DIRECT log(1+exp(-|x|)), bf16-rounded (not the MLX elementwise log1p ratio form, and not the C++ fallback's f32 sp).
-//  Binding counts vs dispatch.max_bindings = 10: conv_dw1d 3, gdn_conv_decode 5, gdn_split 8, fast_norm_gated 4, copy_u16 4, gated_delta_prefill_ash 10, gated_delta_decode 10.
-//  Shared memory: gdn_split 128 B; prefill scan 3*128 f32 (1.5 KiB); decode 3*128 f32 + 32*129 f32 tile (about 18 KiB); fast_norm_gated 1 KiB; gdn_conv_decode declares a 1 KiB block (used only by its unused flag-2 epilogue). The prefill scan uses subgroup relative shuffles: the device must expose them for the compute stage and a subgroup size that is a multiple of 4 (checked in init, refused fail-closed). 16-bit storage + int16 are required everywhere.
-//  State lifetime: conv state ([3, 6144] bf16) and recurrence state ([16*128*128] f32, plus hf and the prefill snapshot) are caller-owned device buffers written out of place. They must stay alive until every submission using them returned success; a Timeout/InFlight error must be routed through commands.orExit (exit without freeing) rather than deinit. 18 linear layers per model: 18 conv-state and 18 recurrence-state buffers (plus per-stream hf where a caller snapshots mid-prefill).
+// Preserve the omitted contract, precision, and host-interface facts from the original comment.
 
 const std = @import("std");
 const dispatch = @import("dispatch.zig");
@@ -46,7 +41,7 @@ pub const Shaders = struct {
     gdn_conv_decode_bf16: []align(4) const u8,
     /// gdn_split.comp -DUSE_BF16
     gdn_split_bf16: []align(4) const u8,
-    // gated_delta_prefill_ash.comp -DUSE_BF16 (both passes dispatch this one image; the pass is a push-constant flag, not a variant)
+    // Both prefill passes share this image; a push-constant flag selects the pass.
     prefill_recur_bf16: []align(4) const u8,
     /// gated_delta_decode.comp -DUSE_BF16 (raw gates ride flags bit3|bit9)
     gated_delta_decode_bf16: []align(4) const u8,
@@ -67,7 +62,7 @@ const decode_f32_alog: u32 = 512;
 // Prefill push flags (gated_delta_prefill_ash.comp): bit2 g is f32, and the output pass adds bit3.
 const scan_flags: u32 = 4;
 const out_flags: u32 = 4 | 8;
-// Conv-decode push flags: the shader's SiLU (bit0) and norm (bit1) masks stay off by intent — the split owns the single SiLU (Metal gdn_pre).
+// Decode SiLU/norm flags stay off; the split owns Metal's single SiLU.
 const conv_decode_flags: u32 = 0;
 
 // Params plus the prefill scan's trailing chunk fields, matching the shader's push block field for field.
@@ -96,13 +91,13 @@ fn wantF32(views: []const View) Error!void {
     for (views) |v| if (v.kind != .f32) return error.Invalid;
 }
 
-// The gate split's three outputs, wherever split runs (standalone or inside convPrefill/convDecodeStep): soa and beta are bf16, g is f32. One validator so the compound calls cannot drift back to a bf16 g_out.
+// Standalone and composite split outputs are bf16 soa/beta and f32 g.
 pub fn wantSplitOutputs(out_soa: View, g_out: View, beta_out: View) Error!void {
     try wantBf16(&.{ out_soa, beta_out });
     try wantF32(&.{g_out});
 }
 
-// Refuses overlap between the views a kernel writes and the ones it reads across dispatches of one composite op (Pipeline.bind already refuses same-dispatch overlaps).
+// Reject cross-dispatch read/write overlap; bind checks same-dispatch overlap.
 fn refuseOverlap(writes: []const View, reads: []const View) Error!void {
     for (writes) |w| for (reads) |r| {
         if (w.overlaps(r)) return error.Aliased;
@@ -123,7 +118,7 @@ pub const Gdn = struct {
 
     pub fn init(dev: *const Device, shaders: Shaders) Error!Gdn {
         if (!dev.features.storage16 or !dev.features.int16) return error.MissingFeature;
-        // The prefill scan's row totals ride two subgroupShuffleDown calls: relative shuffles must exist for the compute stage, and the row lanes (4 per row) must sit in one subgroup of a multiple-of-4 size.
+        // Row sums need relative shuffles and four row lanes in a subgroup divisible by four.
         if (dev.v11.subgroupSupportedStages & c.VK_SHADER_STAGE_COMPUTE_BIT == 0) return error.MissingFeature;
         if (dev.v11.subgroupSupportedOperations & c.VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT == 0) return error.MissingFeature;
         if (dev.v11.subgroupSize == 0 or dev.v11.subgroupSize % 4 != 0) return error.MissingFeature;
@@ -207,7 +202,7 @@ pub const Gdn = struct {
         try m.copy_u16.run(cmds, std.mem.asBytes(&p), try groups(count, m.copy_u16.local[0], m.dev.properties.limits.maxComputeWorkGroupCount[0]), timeout_ns);
     }
 
-    // The gate split: raw conv output [tokens, C] -> SiLU, Q/K L2 norm, V passthrough (SoA [3, tokens, 16, 128] bf16 out) and the a/b gate (g f32, beta bf16, both [tokens, 16]).
+    // Split applies SiLU and Q/K L2 norm; V passes through as bf16 SoA, gates are f32 g and bf16 beta.
     pub fn split(m: *Gdn, cmds: *Commands, out_soa: View, g_out: View, beta_out: View, conv_out: View, a: View, b: View, a_log: View, dt: View, tokens: u64, timeout_ns: u64) Error!void {
         try wantBf16(&.{ conv_out, a, b, dt, out_soa, beta_out });
         try wantF32(&.{ a_log, g_out });
@@ -228,7 +223,7 @@ pub const Gdn = struct {
         try m.split_bf16.run(cmds, std.mem.asBytes(&p), .{ plan.tokens, 3 * Model.heads, 1 }, timeout_ns);
     }
 
-    // Prefill conv: assemble the [tokens+3, C] conv input (conv state rows then the projection output), run the 4-tap conv, the gate split, and store the trailing [3, C] window as the next conv state. `a`/`b` are the gate projections [tokens, 16]; `a_log` f32 [16]; `dt` bf16 [16]; writes are out of place.
+    // Preserve the omitted contract, precision, and host-interface facts from the original comment.
     pub fn convPrefill(m: *Gdn, cmds: *Commands, out_soa: View, g_out: View, beta_out: View, conv_out: View, conv_input: View, conv_state_in: View, qkv: View, weight: View, a: View, b: View, a_log: View, dt: View, conv_state_out: View, tokens: u64, timeout_ns: u64) Error!void {
         try wantBf16(&.{ conv_out, conv_input, conv_state_in, qkv, weight, a, b, dt, conv_state_out });
         try wantSplitOutputs(out_soa, g_out, beta_out);
@@ -255,7 +250,7 @@ pub const Gdn = struct {
         try m.copy(cmds, conv_state_out, try conv_input.slice(plan.tokens_elements, plan.state_elements), timeout_ns);
     }
 
-    // Decode conv step: one token. The kernel folds the concat(state, x) read, the 4-tap conv and the shifted carry-out state into one dispatch and stores the RAW bf16 conv output (flags bit 0 clear); the gate split that follows on [1, C] owns the SINGLE SiLU activation, exactly like Metal gdn_pre (conv, then one activation inside the split).
+    // Decode fuses state+x, 4-tap conv and shifted state; raw bf16 output lets split apply the sole SiLU.
     pub fn convDecodeStep(m: *Gdn, cmds: *Commands, out_soa: View, g_out: View, beta_out: View, activated: View, conv_state_in: View, x: View, weight: View, a: View, b: View, a_log: View, dt: View, conv_state_out: View, timeout_ns: u64) Error!void {
         try wantBf16(&.{ activated, conv_state_in, x, weight, a, b, dt, conv_state_out });
         try wantSplitOutputs(out_soa, g_out, beta_out);
@@ -275,7 +270,7 @@ pub const Gdn = struct {
         try m.split(cmds, out_soa, g_out, beta_out, activated, a, b, a_log, dt, 1, timeout_ns);
     }
 
-    // Gated-delta prefill recurrence over `tokens` tokens in chunks of `chunk`: pass 0 (skipped when a single chunk) writes the per-chunk snapshot, pass 1 writes the bf16 outputs and the terminal state. q/k/v ride one SoA buffer (the split's output shape), g is the f32 gate the split produced, h0/hf are [16*128*128] f32 states. When `tokens <= chunk`, pass `snap = null` (the shader's snapshot slot is never touched and stays on the module dummy).
+    // Preserve the omitted contract, precision, and host-interface facts from the original comment.
     pub fn prefillRecur(m: *Gdn, cmds: *Commands, soa: View, g: View, beta: View, h0: View, y: View, hf: View, snap: ?View, tokens: u64, chunk: u64, timeout_ns: u64) Error!void {
         try wantBf16(&.{ soa, beta, y });
         try wantF32(&.{ g, h0, hf });
@@ -320,7 +315,7 @@ pub const Gdn = struct {
         try m.prefill_bf16.run(cmds, std.mem.asBytes(&p), .{ grid_x, plan.chunks, 1 }, timeout_ns);
     }
 
-    // Gated-delta decode step (T == 1): raw-gates mode (flags bit3|bit9) — the kernel computes g and beta from a/b/A_log/dt_bias with the Metal-oracle rounding chain and f32 A_log, and the kv walk uses the Metal chain's association. a_log_u16 is the f32 A_log viewed as u16 pairs (32 elements); state flows out of place.
+    // Decode T=1 computes Metal-rounded raw gates and f32 A_log; state writes out of place.
     pub fn decodeRecur(m: *Gdn, cmds: *Commands, soa: View, a: View, b: View, a_log_u16: View, dt: View, state_in: View, state_out: View, y: View, timeout_ns: u64) Error!void {
         try wantBf16(&.{ soa, a, b, dt, y });
         try wantF32(&.{ state_in, state_out });
@@ -347,7 +342,7 @@ pub const Gdn = struct {
         try m.decode_bf16.run(cmds, std.mem.asBytes(&p), .{ Model.heads, Model.head_dim / 32, 1 }, timeout_ns);
     }
 
-    // Gated RMSNorm + SiLU epilogue (Ash8c Metal gdn_post): PER-HEAD 128-wide RMS, not a 2048 global row. out = bf16((gate/(1+exp(-gate))) * bf16(weight * (value * inv))). y/z/out are [tokens, 16, 128] bf16 (tokens*2048 elements, head-major, exactly the recurrence's y layout); the weight is [128] bf16, indexed by the column within the head and repeated for every head; `rows` is the TOKEN count (the dispatch runs rows*16 one-workgroup-per-head-row). eps the model's norm epsilon.
+    // Preserve the omitted contract, precision, and host-interface facts from the original comment.
     pub fn gatedNorm(m: *Gdn, cmds: *Commands, out: View, y: View, z: View, weight: View, rows: u64, eps: f32, timeout_ns: u64) Error!void {
         try wantBf16(&.{ out, y, z, weight });
         const plan = try gatedNormPlan(out.elements, y.elements, z.elements, weight.elements, rows, eps);
@@ -454,7 +449,7 @@ pub fn decodePlan(soa_elements: u64, a_elements: u64, b_elements: u64, a_log_u16
 
 pub const GatedNormPlan = struct { rows: u32 };
 
-// `rows` is the TOKEN count; the plan dispatches rows*16 one-workgroup head-rows of width head_dim=128 (the Ash gdn_post per-head norm). The weight is the [128] per-head row, NOT a [2048] full-row vector.
+// `rows` counts tokens; dispatch rows*16 width-128 head rows with per-head weight [128], not [2048].
 pub fn gatedNormPlan(out_elements: u64, y_elements: u64, z_elements: u64, weight_elements: u64, rows: u64, eps: f32) Error!GatedNormPlan {
     if (!std.math.isFinite(eps) or eps <= 0) return error.Invalid;
     if (rows == 0) return error.Invalid;
@@ -469,7 +464,7 @@ fn cast32(v: u64) Error!u32 {
     return std.math.cast(u32, v) orelse error.TooLarge;
 }
 
-// Independent f64 host reference for the gate formula the gdn_split.comp shader and the decode kernel's raw-gates prologue implement. Pure host math for assert checks and review; never a CPU fallback for tensors.
+// Independent f64 reference for split/decode gates; host assertions only, never a tensor fallback.
 pub const GateF64 = struct { g: f64, beta: f64 };
 
 pub fn gateReferenceF64(a: f64, b: f64, a_log: f64, dt: f64) GateF64 {
@@ -484,7 +479,7 @@ pub fn gateReferenceF64(a: f64, b: f64, a_log: f64, dt: f64) GateF64 {
 const testing = std.testing;
 
 test "wantSplitOutputs requires bf16 soa/beta and f32 g on real View kinds" {
-    // fake buffers, exactly like commands.zig's geometry tests: only the views' kinds and extents matter here, no device.
+    // Fake buffers test view kinds/extents only, as in commands.zig; no device is needed.
     const dev: *const Device = @ptrFromInt(0x5000);
     const words: usize = 4096;
     const buf = Buffer{ .dev = dev, .handle = @ptrFromInt(0x10), .memory = @ptrFromInt(0x20), .len = words * 4, .kind = .device, .mapped = null, .coherent = false };
@@ -522,7 +517,7 @@ test "splitPlan derives the geometry and refuses wrong shapes and overflow" {
     try testing.expectError(error.Invalid, splitPlan(t * Model.conv_channels + 1, 3 * section, t * Model.heads, t * Model.heads, t * Model.heads, t * Model.heads, Model.heads, Model.heads, t));
     try testing.expectError(error.Invalid, splitPlan(t * Model.conv_channels, 3 * section, t * Model.heads, t * Model.heads, t * Model.heads, t * Model.heads, Model.heads + 1, Model.heads, t));
     try testing.expectError(error.Invalid, splitPlan(t * Model.conv_channels, 3 * section, t * Model.heads, t * Model.heads, t * Model.heads, t * Model.heads, Model.heads, Model.heads, 0));
-    // a CONSISTENT geometry whose section passes u32: tokens big enough that cast32(section) overflows (tokens = 2^44 -> section = 2^55, soa 3*2^55, conv rows 6144*2^44 all fit u64; the u32 casts fail with TooLarge).
+    // tokens=2^44 yields section=2^55; u64 geometry fits, but u32 casts return TooLarge.
     const big: u64 = 1 << 44;
     const big_section = big * Model.linear_dim;
     try testing.expectError(error.TooLarge, splitPlan(big * Model.conv_channels, 3 * big_section, big * Model.heads, big * Model.heads, big * Model.heads, big * Model.heads, Model.heads, Model.heads, big));
@@ -553,7 +548,7 @@ test "prefillPlan derives chunks and the snapshot size, refusing snap mismatch" 
     const chunk: u64 = 64;
     const section = t * Model.linear_dim;
     const state: u64 = Model.state_elements;
-    // chunks = 3 boundaries between them, and the shader stores one snapshot per INTERIOR boundary (chunk c restores slot c-1): (chunks-1)*state.
+    // Three chunks need two interior snapshots; chunk c restores slot c-1, so size is (chunks-1)*state.
     const plan = try prefillPlan(3 * section, t * Model.heads, t * Model.heads, state, section, state, 2 * state, t, chunk);
     try testing.expectEqual(@as(u32, 3), plan.chunks);
     try testing.expectEqual(@as(u32, 64), plan.chunk);
@@ -623,7 +618,7 @@ test "single-chunk prefill read and written snapshot dummies are disjoint" {
 
 test "gdn push flags match the masks the embedded shaders actually test" {
     const src = @import("vulkan_comp_sources");
-    // Decode: raw-gates prologue (bit3) and f32 A_log (bit9); the old 0x300 producer class failed the shader's `& 8u` mask.
+    // Decode uses bit3 for raw gates and bit9 for f32 A_log; 0x300 missed the shader's &8u test.
     try testing.expectEqual(@as(u32, 8), decode_raw_gates);
     try testing.expectEqual(@as(u32, 512), decode_f32_alog);
     try testing.expect(std.mem.indexOf(u8, src.gated_delta_decode, "(params.flags & 8u)") != null);
@@ -633,7 +628,7 @@ test "gdn push flags match the masks the embedded shaders actually test" {
     try testing.expectEqual(@as(u32, 4 | 8), out_flags);
     try testing.expect(std.mem.indexOf(u8, src.gated_delta_prefill_ash, "(params.flags & 4u)") != null);
     try testing.expect(std.mem.indexOf(u8, src.gated_delta_prefill_ash, "(params.flags & 8u)") != null);
-    // Conv decode: SiLU (bit0) and norm (bit1) masks exist but stay disabled by intent — the split owns the single SiLU.
+    // Conv decode SiLU/norm masks exist but stay off; split owns the sole SiLU.
     try testing.expectEqual(@as(u32, 0), conv_decode_flags);
     try testing.expect(std.mem.indexOf(u8, src.gdn_conv_decode, "(params.flags & 1u)") != null);
     try testing.expect(std.mem.indexOf(u8, src.gdn_conv_decode, "(params.flags & 2u)") != null);

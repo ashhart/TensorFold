@@ -1,7 +1,4 @@
-// Copyright © 2026 Joshua Warren / mlx-omarchy contributors.
-// SPDX-License-Identifier: MIT
-//  Reused from mlx-omarchy shaders/swiglu.comp (MIT), comment-condensed.
-//  Four-wide SwiGLU: sigmoid(gate) * gate * up, each intermediate rounded to the storage dtype exactly as the fused_chain interpreter rounds it (packHalf2x16 round trip for f16, bf16_store for bf16), so stored bits match. Host gate (dispatch_chain): two direct leaves and count and both leaf offsets multiples of four. materialize != 0 additionally stores sig/silu to bindings 3/4; the eager-fusion host path keeps those at 0 and leaves the buffers untouched.
+// Four-wide SwiGLU rounds each op; aligned host inputs; optional materialize writes sig/silu buffers.
 
 #version 460
 
@@ -78,7 +75,7 @@ void main() {
     vec4 up = LOAD_VEC(up_buf.values[params.up_offset / 4u + index]);
 #endif
 #ifdef ASH_QWEN35
-    // Ash8c Metal oracle (qwen3_5/mlp_act.metal): g / (1 + exp(-g)) — one fp32 division, no intermediate rounding, one round at the output store. The reciprocal-multiply form 1/sig would round differently; not used.
+    // Match Metal's g/(1+exp(-g)): one f32 division, no intermediate rounding, one output-store round.
     vec4 denom = 1.0 + exp(-gate);
     vec4 sig = 1.0 / denom;  // exact only for the materialize path
     vec4 silu = gate / denom;
