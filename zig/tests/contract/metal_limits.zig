@@ -65,17 +65,26 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
     }
     if (std.mem.startsWith(u8, d.name, "dsv41 attn ")) return .{ .decl = d, .function = fun, .here = sources.deepseek_v41_csa2_attn, .pre_m5 = sources.deepseek_v41_csa2_attn };
     if (std.mem.startsWith(u8, d.name, "metal lfm2 ")) return .{ .decl = d, .function = fun, .here = sources.lfm2, .pre_m5 = sources.lfm2 };
+    if (std.mem.startsWith(u8, d.name, "dsv41 topk512 ")) return .{ .decl = d, .function = fun, .here = sources.deepseek_v41_topk512, .pre_m5 = sources.deepseek_v41_topk512 };
     if (std.mem.startsWith(u8, d.name, "nemotron paged ")) return pagedLaunch(a, device, d, fun);
     if (std.mem.startsWith(u8, d.name, "nemotron attention ")) return attentionLaunch(a, device, d, fun);
     if (std.mem.startsWith(u8, d.name, "drama3 ")) {
         const text_d3 = try @import("metal_drama3.zig").source(a, d.name);
         return .{ .decl = d, .function = fun, .here = text_d3, .pre_m5 = text_d3 };
     }
+    if (std.mem.startsWith(u8, d.name, "dsv41 ix ")) return .{ .decl = d, .function = fun, .here = sources.deepseek_v41_index, .pre_m5 = sources.deepseek_v41_index };
     if (std.mem.startsWith(u8, d.name, "dsv41 experts ")) {
         const body = try tf.dsv41_experts.source(a, "", &.{});
         return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
     }
+    if (std.mem.startsWith(u8, d.name, "dsv41 route ")) {
+        const e: usize = if (std.mem.indexOf(u8, d.name, "backbone") != null) 384 else 128;
+        const k: usize = if (e == 384) 6 else 3;
+        const body = try std.fmt.allocPrint(a, "#define TF_DSV41_E {d}\n#define TF_DSV41_TOPK {d}\n{s}", .{ e, k, sources.dsv41_route });
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
     if (std.mem.startsWith(u8, d.name, "dsv41 glue ")) return .{ .decl = d, .function = fun, .here = sources.deepseek_v41_glue, .pre_m5 = sources.deepseek_v41_glue };
+    if (std.mem.startsWith(u8, d.name, "dsv41 cand ")) return .{ .decl = d, .function = fun, .here = sources.deepseek_v41_cand, .pre_m5 = sources.deepseek_v41_cand };
     if (std.mem.startsWith(u8, d.name, "dsv41 mv ")) return .{ .decl = d, .function = fun, .here = sources.deepseek_v41_mv, .pre_m5 = sources.deepseek_v41_mv };
     if (std.mem.startsWith(u8, d.name, "dsv41 fp8 rows ")) {
         text = sources.deepseek_v41_fp8_rows;

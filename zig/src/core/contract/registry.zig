@@ -538,6 +538,8 @@ pub const metal = @import("fsr_records.zig").metal ++ [_]M{
     .{ .name = "drama3 codec c_snake", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "drama3 codec c_dwconv7", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "drama3 codec c_copy", .threads = 256, .tg_memory = 0, .reserved = 256 },
+    .{ .name = "dsv41 route backbone tf_dsv41_route_select", .threads = 32, .tg_memory = 0, .m1 = 832, .m2 = 832 },
+    .{ .name = "dsv41 route drafter tf_dsv41_route_select", .threads = 32, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
 };
 /// Gate 5's planted Metal controls: a launch past M1/M2's compiled limit (#708's class), 36 KiB of threadgroup memory.
 pub const metal_controls = [_]M{
@@ -572,7 +574,7 @@ test {
 }
 /// The Metal collector keeps measured slots and the restored vision declarations.
 pub const all_metal = metal ++ @import("delta_slots_records.zig").records ++ @import("flashnext_pending.zig").records ++ @import("simd_pairs_records.zig").records ++ @import("metal_pair_records.zig").records ++ @import("glm_rows_records.zig").records ++ @import("weight_only_records.zig").metal ++ @import("hc_activation_records.zig").metal ++ @import("qwen4_records.zig").metal ++ @import("lfm2_records.zig").records ++ @import("nemotron_experts_records.zig").records ++ @import("nemotron_pages_records.zig").records ++ @import("nemotron_attention_records.zig").records ++
-    @import("moss_image_records.zig").records ++ @import("dsv41_fp8_records.zig").records ++ @import("dsv41_fp8_mma_records.zig").records ++ @import("dsv41_attn_records.zig").records ++ @import("dsv41_experts_records.zig").records ++ @import("dsv41_glue_records.zig").records ++ @import("dsv41_xmma_records.zig").records ++ @import("dsv41_mv_records.zig").records;
+    @import("moss_image_records.zig").records ++ @import("dsv41_fp8_records.zig").records ++ @import("dsv41_fp8_mma_records.zig").records ++ @import("dsv41_topk512_records.zig").records ++ @import("dsv41_attn_records.zig").records ++ @import("dsv41_experts_records.zig").records ++ @import("dsv41_index_records.zig").records ++ @import("dsv41_glue_records.zig").records ++ @import("dsv41_cand_records.zig").records ++ @import("dsv41_xmma_records.zig").records ++ @import("dsv41_mv_records.zig").records;
 const learning = @import("registry_learning.zig");
 pub const gradient_pending = learning.gradient_pending;
 pub const qwen_learning_pending = learning.qwen_learning_pending;

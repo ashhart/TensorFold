@@ -49,9 +49,15 @@ pub const kimi_experts = @embedFile("kimi/experts.metal");
 /// DeepSeek V4.1's routed-expert gate/up (clamped SwiGLU, the reference's activation rounding) over Kimi's kernels.
 pub const deepseek_v41_experts = @embedFile("deepseek_v41/experts.metal");
 pub const deepseek_v41_xmma = @embedFile("deepseek_v41/experts_mma.metal");
+
+/// DeepSeek-V4.1 sparse-attention indexer top-512 over fp32 score rows.
+pub const deepseek_v41_topk512 = @embedFile("deepseek_v41/topk512.metal");
 pub const deepseek_v41_glue = @embedFile("deepseek_v41/glue.metal");
 /// DeepSeek-V4.1 router, indexer, compressor and head matvecs: lane chains over K, one butterfly, any row count.
 pub const deepseek_v41_mv = @embedFile("deepseek_v41/mv.metal");
+
+/// DeepSeek-V4.1 candidate blocks: block maxima, the newest block pinned, an exact top-2048 as a byte mask.
+pub const deepseek_v41_cand = @embedFile("deepseek_v41/cand.metal");
 /// The row-split seam's kernels (see `pair_rows.zig`): `pair.metal` above stays as it is for glm_dsa.
 pub const core_pair_rows = @embedFile("core/pair_rows.metal");
 
@@ -198,6 +204,8 @@ pub const spark25_attention_nax = @embedFile("spark25/attention_nax.metal");
 pub const spark25_gemm = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("spark25/gemm.metal");
 /// The kernel contract's planted controls: one kernel breaking each gate (zig/tests/contract/).
 pub const core_contract_controls = @embedFile("core/contract_controls.metal");
+/// DeepSeek V4.1's indexer scores: FP4 query and key dots in one stated order, causal and block masks.
+pub const deepseek_v41_index = @embedFile("deepseek_v41/index.metal");
 
 /// Gemma-only rounded weights and fused lane arithmetic; shared sources retain the released bytes.
 pub const gemma4_affine_mm = @embedFile("gemma4/affine_mm.metal");
@@ -216,6 +224,8 @@ pub const drama3 = struct {
     pub const codec = @embedFile("drama3/codec.metal");
 };
 
+/// DeepSeek-V4.1's MoE route: the top-k of sqrt(softplus(logit)) + bias, per row (deepseek_v41/route.metal).
+pub const dsv41_route = @embedFile("deepseek_v41/route.metal");
 
 /// DeepSeek-V4.1's phase-1 glue (deepseek_v41/glue_tmp.metal): the reference bits of the registered glue kernels.
 pub const deepseek_v41_glue_tmp = @embedFile("deepseek_v41/glue_tmp.metal");

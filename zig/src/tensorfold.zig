@@ -36,6 +36,8 @@ pub const exlr8_prompt = @import("core/exlr8_prompt.zig");
 /// The two-Mac pair seam's row split: the transport, its layout and the one-Mac Loopback the stage-2 checks use.
 pub const pair_rows = @import("core/pair_rows.zig");
 pub const glm_dsa = @import("families/glm_dsa/glm_dsa.zig");
+/// DeepSeek V4.1's indexer scores on Metal (families/deepseek_v41/metal/index.zig).
+pub const dsv41_index = @import("families/deepseek_v41/metal/index.zig");
 pub const nemotron = @import("families/nemotron/nemotron.zig");
 pub const flashnext_vision_contract = @import("families/flashnext/vision_contract.zig");
 pub const flashnext_fsr_fixture = @import("families/flashnext/fsr_gpu_fixture.zig");

@@ -13,6 +13,7 @@ const h3_topk = @import("metal_h3_topk.zig");
 const drama3_k = @import("metal_drama3.zig");
 const drama_nvfp4 = @import("metal_drama3_nvfp4.zig");
 const drama_router = @import("metal_drama_router.zig");
+const dsv41_route = @import("metal_dsv41_route.zig");
 const drama_combine = @import("metal_drama_combine.zig");
 const drama_cfg = @import("metal_drama_cfg.zig");
 const glm_eh_k = @import("metal_glm_eh.zig");
@@ -304,6 +305,15 @@ pub fn main(init: std.process.Init) !u8 {
         d3router_count += 1;
         try kernels.append(a, d3routers[d3router_count - 1].kernel());
     }
+    var dsv41_routes: [std.enums.values(dsv41_route.Variant).len]dsv41_route.Route = undefined;
+    var dsv41_route_count: usize = 0;
+    defer for (dsv41_routes[0..dsv41_route_count]) |*p| p.deinit();
+    for (std.enums.values(dsv41_route.Variant)) |v| {
+        if (!wanted(o, dsv41_route.spec(v).name)) continue;
+        dsv41_routes[dsv41_route_count] = try dsv41_route.Route.init(a, device, queue, v);
+        dsv41_route_count += 1;
+        try kernels.append(a, dsv41_routes[dsv41_route_count - 1].kernel());
+    }
     var d3combines: [std.enums.values(drama_combine.Variant).len]drama_combine.Combine = undefined;
     var d3combine_count: usize = 0;
     defer for (d3combines[0..d3combine_count]) |*p| p.deinit();
@@ -424,12 +434,18 @@ pub fn main(init: std.process.Init) !u8 {
     defer dsv41_fp8.destroy();
     const dsv41_fp8_mma = try @import("metal_dsv41_fp8_mma.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer dsv41_fp8_mma.destroy();
+    const dsv41_topk = try @import("metal_dsv41_topk512.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer dsv41_topk.destroy();
+    const dsv41_cand = try @import("metal_dsv41_cand.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer dsv41_cand.destroy();
     const dsv41_attn = try @import("metal_dsv41_attn.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer dsv41_attn.destroy();
     const dsv41_experts = try @import("metal_dsv41_experts.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer dsv41_experts.destroy();
     const dsv41_xmma = try @import("metal_dsv41_xmma.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer dsv41_xmma.destroy();
+    const dsv41_ix = try @import("metal_dsv41_index.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer dsv41_ix.destroy();
     const dsv41_glue = try @import("metal_dsv41_glue.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer dsv41_glue.destroy();
     const dsv41_mv = try @import("metal_dsv41_mv.zig").Suite.create(a, device, queue, &kernels, o.only);
@@ -448,8 +464,14 @@ pub fn main(init: std.process.Init) !u8 {
         t.failed += try dsv41_fp8_mma.invariance(o.seed);
         t.failed += try dsv41_fp8_mma.accuracy(o.seed);
         if (std.c.getenv("TF_DSV41_TIME") != null) try dsv41_fp8_mma.timing(init.io);
+        t.failed += try dsv41_topk.invariance(o.seed);
+        if (std.c.getenv("TF_DSV41_TIME") != null) try dsv41_topk.timing(init.io);
+        t.failed += try dsv41_cand.invariance(o.seed);
+        t.failed += try dsv41_cand.equality(o.seed);
+        if (std.c.getenv("TF_DSV41_TIME") != null) try dsv41_cand.timing(init.io);
         try dsv41_attn.invariance(init.io, o.seed, &t);
         if (std.c.getenv("TF_DSV41_TIME") != null) try dsv41_attn.timing(init.io);
+        t.failed += try dsv41_ix.invariance(o.seed);
         t.failed += try dsv41_glue.invariance(o.seed);
         if (dsv41_mv.probes.items.len > 0) {
             t.failed += try dsv41_mv.invariance(o.seed);
@@ -457,6 +479,7 @@ pub fn main(init: std.process.Init) !u8 {
             t.failed += try dsv41_mv.head(init.io, o.seed, std.c.getenv("TF_DSV41_TIME") != null);
         }
         t.failed += try dsv41_glue.tables();
+        if (std.c.getenv("TF_DSV41_TIME") != null) try dsv41_ix.timing(init.io);
     }
     const t1 = std.Io.Clock.awake.now(init.io);
     var lim: usize = 0;
