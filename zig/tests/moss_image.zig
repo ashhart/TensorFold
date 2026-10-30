@@ -3,14 +3,17 @@ const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
 const mi = tf.moss_image;
+const tokenizer = @import("tokenizer");
 
 const usage =
-    \\tf-moss-image TRANSFORMER_DIR CASE OUT_DIR
+    \\tf-moss-image TRANSFORMER_DIR CASE OUT_DIR [--prompt FILE [--negative FILE]]
     \\CASE (tools/zig/moss_image_case.py) holds the prompt's and the empty negative prompt's encoder rows, the timesteps
     \\and noise levels and the starting latents. A `case` also holds a reference run (each step's input and both
     \\branches' velocities): each step then runs both branches on the reference's input and compares them (max |diff|,
     \\cosine, worst row). Then the whole schedule runs from the starting latents with the card's guidance (scale 3, the
     \\negative branch skipping block 22), timed, and OUT_DIR gets latents.f32 (rows x columns x 128) and run.json.
+    \\With --prompt, the encoder in TRANSFORMER_DIR's checkpoint folder makes both prompts' rows (the negative from
+    \\--negative's file, else empty) in place of the case's.
 ;
 
 /// The card's sampling defaults: the guidance scale, and the block the negative branch skips.
@@ -113,11 +116,22 @@ fn teacher(a: std.mem.Allocator, case: *const tf.safetensors.File, model: *mi.Mo
     return repeat;
 }
 
+/// A prompt file's text, trimmed as the case tool trims it.
+fn read(a: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
+    return std.mem.trim(u8, try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20)), " \t\r\n");
+}
+
 pub fn main(init: std.process.Init) !u8 {
     const a = init.arena.allocator();
     const io = init.io;
     const args = try init.minimal.args.toSlice(a);
-    if (args.len != 4) {
+    var prompt_file: ?[]const u8 = null;
+    var negative_file: ?[]const u8 = null;
+    var i: usize = 4;
+    while (i + 1 < args.len) : (i += 2) {
+        if (std.mem.eql(u8, args[i], "--prompt")) prompt_file = args[i + 1] else if (std.mem.eql(u8, args[i], "--negative")) negative_file = args[i + 1] else break;
+    }
+    if (args.len < 4 or i != args.len or (negative_file != null and prompt_file == null)) {
         std.debug.print("{s}\n", .{usage});
         return 2;
     }
@@ -127,10 +141,30 @@ pub fn main(init: std.process.Init) !u8 {
     if (grid.len != 3 or grid[2] != mi.config.channels) return error.BadCaseTensor;
     const rows = grid[0] * grid[1];
     const count = rows * mi.config.channels;
-    const text = (try dims(&case, "prompt"))[0];
-    const negative_rows = (try dims(&case, "negative"))[0];
-    const prompt = try take(u16, a, &case, "prompt", .bf16);
-    const negative = try take(u16, a, &case, "negative", .bf16);
+    var encode_s: ?f64 = null;
+    const both: [2][]u16 = if (prompt_file) |file| blk: {
+        const texts = [2][]const u8{ try read(a, io, file), if (negative_file) |n| try read(a, io, n) else "" };
+        const device = try mtl.Device.init();
+        const dir = std.fs.path.dirname(args[1]) orelse ".";
+        const enc = try mi.Encoder.load(std.heap.page_allocator, io, device, dir);
+        defer enc.deinit();
+        var tok = try tokenizer.loadTokenizer(io, a, try std.fs.path.join(a, &.{ dir, "tokenizer", "tokenizer.json" }));
+        defer tok.deinit();
+        const encoding = mtl.clock.seconds();
+        var made: [2][]u16 = undefined;
+        for (texts, &made) |t, *m| {
+            const ids = try mi.encoder.ids(&tok, a, t);
+            m.* = try a.alloc(u16, ids.len * mi.encoder_config.hidden);
+            try enc.rows(ids, m.*, null);
+        }
+        encode_s = mtl.clock.seconds() - encoding;
+        std.debug.print("both prompts encoded natively: {d:.3} s\n", .{encode_s.?});
+        break :blk made;
+    } else .{ try take(u16, a, &case, "prompt", .bf16), try take(u16, a, &case, "negative", .bf16) };
+    const prompt = both[0];
+    const negative = both[1];
+    const text = prompt.len / mi.config.context;
+    const negative_rows = negative.len / mi.config.context;
     const timesteps = try take(f32, a, &case, "timesteps", .f32);
     const sigmas = try take(f32, a, &case, "sigmas", .f32);
     const start = try take(f32, a, &case, "latents", .f32);
@@ -156,6 +190,7 @@ pub fn main(init: std.process.Init) !u8 {
     const refine_s = mtl.clock.seconds() - refining;
     std.debug.print("both prompts refined: {d:.3} s\n", .{refine_s});
     try print(&out, a, "{{\"device\": \"{s}\", \"image_rows\": {d}, \"prompt_rows\": {d}, \"negative_rows\": {d}, \"load_s\": {d:.2}, \"refine_s\": {d:.4}", .{ device.name(), rows, text, negative_rows, load_s, refine_s });
+    if (encode_s) |s| try print(&out, a, ", \"native_encoder\": true, \"encode_s\": {d:.4}", .{s});
     const repeat = if (case.get("inputs") == null) true else try teacher(a, &case, model, &branches, timesteps, count, &out);
     try print(&out, a, ", \"run\": [", .{});
 
