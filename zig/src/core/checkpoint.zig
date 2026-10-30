@@ -149,7 +149,23 @@ pub const Checkpoint = struct {
 
     /// Every file's pages out of the page cache (safetensors.File.release).
     pub fn release(self: *const Checkpoint) void {
-        for (self.files.items) |*f| f.release();
+        for (self.files.items) |*f| f.release(self.gpa);
+    }
+
+    /// `release`, leaving `keep`'s bytes (parts of these files read later) in the pages they live in.
+    pub fn releaseExcept(self: *const Checkpoint, keep: []const []const u8) void {
+        for (self.files.items) |*f| f.releaseExcept(keep, self.gpa);
+    }
+
+    /// `short`'s bytes marked read in no order (safetensors.File.adviseRandom): a table's rows, not its file.
+    pub fn adviseRandom(self: *Checkpoint, short: []const u8) !void {
+        var buf: [320]u8 = undefined;
+        const name = try self.scoped(&buf, short);
+        for (self.files.items) |*f| if (f.get(name)) |t| {
+            f.adviseRandom(t.bytes);
+            return;
+        };
+        return error.MissingTensor;
     }
 
     /// Every tensor named `short`... read into the page cache by `readers` threads of their own until `join`.
@@ -302,6 +318,61 @@ test "has finds a name without taking it; skip marks a prefix used" {
     try std.testing.expectEqual(@as(usize, 0), ck.unused());
 }
 
+/// Whether the smaps block holding `at` is marked read in no order (`rr`, MADV_RANDOM); null with no such block.
+fn randomAdviceAt(gpa: std.mem.Allocator, io: Io, at: usize) !?bool {
+    // procfs reports size 0: read the stream, not the length
+    var file = try Io.Dir.cwd().openFile(io, "/proc/self/smaps", .{});
+    defer file.close(io);
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(gpa);
+    var buf: [64 << 10]u8 = undefined;
+    while (true) {
+        const got = file.readStreaming(io, &.{&buf}) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        if (got == 0) break;
+        try text.appendSlice(gpa, buf[0..got]);
+    }
+    var lines = std.mem.splitScalar(u8, text.items, '\n');
+    var inside = false;
+    while (lines.next()) |line| {
+        if (std.mem.indexOfScalar(u8, line, '-')) |dash| {
+            const sp = std.mem.indexOfScalarPos(u8, line, dash, ' ') orelse continue;
+            const lo = std.fmt.parseInt(usize, line[0..dash], 16) catch continue;
+            const hi = std.fmt.parseInt(usize, line[dash + 1 .. sp], 16) catch continue;
+            inside = at >= lo and at < hi;
+        } else if (inside and std.mem.startsWith(u8, line, "VmFlags:")) {
+            var flags = std.mem.tokenizeAny(u8, line["VmFlags:".len..], " ");
+            while (flags.next()) |flag| if (std.mem.eql(u8, flag, "rr")) return true;
+            return false;
+        }
+    }
+    return null;
+}
+
+test "adviseRandom marks the mapping's pages as read in no order, and leaves the bytes alone" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const image = try testImage(gpa, "x", 64 << 10);
+    defer gpa.free(image);
+    for (image[image.len - (64 << 10) ..], 0..) |*b, i| b.* = @truncate(i * 7 + 1);
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = image });
+    var path: [64]u8 = undefined;
+    var ck = try Checkpoint.openModel(gpa, io, try std.fmt.bufPrint(&path, ".zig-cache/tmp/{s}", .{tmp.sub_path}));
+    defer ck.close();
+    const t = try ck.get("x");
+    const at = @intFromPtr(t.bytes.ptr);
+    // a fresh mapping: the kernel has not been told how it will be read
+    try std.testing.expectEqual(@as(?bool, false), try randomAdviceAt(gpa, io, at));
+    try ck.adviseRandom("x");
+    try std.testing.expectEqual(@as(?bool, true), try randomAdviceAt(gpa, io, at));
+    try std.testing.expectEqualSlices(u8, image[image.len - (64 << 10) ..], t.bytes);
+}
+
 test "after release the mapping stays readable: a later read faults the same bytes back in" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
@@ -318,6 +389,28 @@ test "after release the mapping stays readable: a later read faults the same byt
     try std.testing.expectEqualSlices(u8, image[image.len - 4096 ..], t.bytes);
     ck.release();
     try std.testing.expectEqualSlices(u8, image[image.len - 4096 ..], t.bytes);
+}
+
+test "releaseExcept keeps the kept tensor's bytes where they are, and a read of them is unchanged" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const image = try testImage(gpa, "x", 1 << 20);
+    defer gpa.free(image);
+    for (image[image.len - (1 << 20) ..], 0..) |*b, i| b.* = @truncate(i * 13 + 3);
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = image });
+    var path: [64]u8 = undefined;
+    var ck = try Checkpoint.openModel(gpa, io, try std.fmt.bufPrint(&path, ".zig-cache/tmp/{s}", .{tmp.sub_path}));
+    defer ck.close();
+    const t = try ck.get("x");
+    // a middle span, so bytes are dropped on both sides of it and the mapping stays readable either way
+    const keep = t.bytes[4096 .. 4096 + 8192];
+    const copy = try gpa.dupe(u8, keep);
+    defer gpa.free(copy);
+    ck.releaseExcept(&.{keep});
+    try std.testing.expectEqualSlices(u8, copy, keep);
+    try std.testing.expectEqualSlices(u8, image[image.len - (1 << 20) ..], t.bytes);
 }
 
 test "release keeps a map that fell back to reads (no mmap): its heap copy is the only one" {
