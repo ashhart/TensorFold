@@ -309,8 +309,11 @@ pub const Metal = struct {
             }
         }
         const out = b.gathered_taps.?;
+        // Runner.keep waited on this queue and checked its completion before clearing active, covering the tap writes.
+        std.debug.assert(r.active == null);
+        if (r.active != null) return error.RoundNotReady;
         try r.taps.complete();
-        try q.tap_gather.gather(r.taps.buffer.contents()[0..r.taps.buffer.length()], r.taps.capacity, r.taps.width, rows[0..n], out.contents()[0..out.length()]);
+        try q.tap_gather.gather(r.taps.buffer.contents()[0..r.taps.buffer.length()], r.taps.capacity, r.taps.rows, r.taps.width, rows[0..n], out.contents()[0..out.length()]);
         var at: usize = 0;
         for (paths, b.windows[0..b.count]) |path, slot| {
             const g = b.ringOf(slot).?;
