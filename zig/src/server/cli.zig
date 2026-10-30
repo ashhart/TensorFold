@@ -19,7 +19,7 @@ pub const Flag = struct {
     /// The values it honours when only some of the choices.
     native_values: ?[]const []const u8 = null,
 };
-const backend_values: []const []const u8 = if (builtin.os.tag == .macos) &.{ "auto", "mlx" } else if (served("--backend=rocm")) &.{ "auto", "rocm" } else &.{ "auto", "cuda" };
+const backend_values: []const []const u8 = if (builtin.os.tag == .macos) &.{ "auto", "mlx" } else if (served("--backend=vulkan")) &.{ "auto", "vulkan" } else if (served("--backend=rocm")) &.{ "auto", "rocm" } else &.{ "auto", "cuda" };
 
 /// The flags past the common ones the binary's backend serves, from its root's `serves` (test roots: none).
 const native_serves: []const []const u8 = if (@hasDecl(@import("root"), "serves")) @import("root").serves else &.{};
@@ -122,7 +122,7 @@ pub const flags = [_]Flag{
     .{ .name = "--ple-on-ssd", .kind = .store_true, .native = builtin.os.tag == .macos },
     .{ .name = "--fsr-route-trace", .native = builtin.os.tag == .macos },
     .{ .name = "--no-update-check", .kind = .store_true, .native = true },
-    .{ .name = "--backend", .choices = &.{ "auto", "mlx", "cuda", "rocm" }, .native = true, .native_values = backend_values },
+    .{ .name = "--backend", .choices = &.{ "auto", "mlx", "cuda", "rocm", "vulkan" }, .native = true, .native_values = backend_values },
     .{ .name = "--tp", .choices = &.{ "1", "2", "4", "8" }, .native = served("--tp") },
     .{ .name = "--rank", .native = served("--tp") },
     .{ .name = "--master", .native = served("--tp") },

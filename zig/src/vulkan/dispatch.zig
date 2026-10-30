@@ -10,7 +10,7 @@ const check = runtime.check;
 
 pub const Error = runtime.Error || error{ BadSpirv, NoLocalSize, TooManyBindings, BadPushSize, BadWorkgroup, BadGroupCount, BadBindings, Aliased };
 
-pub const max_bindings = 8;
+pub const max_bindings = 10;
 
 /// The shader's set 0: storage buffers 0..bindings-1, its push bytes, and a mask of the bindings it writes.
 pub const Layout = struct { bindings: u32, push_bytes: u32, writes: u32 };
@@ -314,7 +314,17 @@ test "device limits refuse bindings, push bytes, workgroups and group counts pas
     try std.testing.expectError(error.BadWorkgroup, fits(l, qmm, .{ 512, 1, 1 }));
     l.maxComputeWorkGroupInvocations = 128;
     try std.testing.expectError(error.BadWorkgroup, fits(l, qmm, .{ 256, 1, 1 }));
+    // restore the limit the negative case reduced, before the positive cases
+    l.maxComputeWorkGroupInvocations = 256;
     try std.testing.expectError(error.BadGroupCount, counts(.{ 65535, 65535, 65535 }, .{ 0, 1, 1 }));
     try std.testing.expectError(error.BadGroupCount, counts(.{ 65535, 65535, 65535 }, .{ 65536, 1, 1 }));
     try counts(.{ 65535, 65535, 65535 }, .{ 2, 1, 1 });
+    // The 10-binding GDN prefill/decode closures fit; 11 do not; fewer offered still refuses (real capacity).
+    l.maxPerStageDescriptorStorageBuffers = 10;
+    l.maxDescriptorSetStorageBuffers = 10;
+    l.maxPerStageResources = 10;
+    try fits(l, .{ .bindings = max_bindings, .push_bytes = 120, .writes = 1 << 9 }, .{ 256, 1, 1 });
+    try std.testing.expectError(error.TooManyBindings, fits(l, .{ .bindings = max_bindings + 1, .push_bytes = 120, .writes = 1 << 10 }, .{ 256, 1, 1 }));
+    l.maxPerStageDescriptorStorageBuffers = 8;
+    try std.testing.expectError(error.TooManyBindings, fits(l, .{ .bindings = max_bindings, .push_bytes = 120, .writes = 1 << 9 }, .{ 256, 1, 1 }));
 }

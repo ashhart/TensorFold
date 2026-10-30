@@ -1,0 +1,177 @@
+// Preserve the omitted contract, precision, and host-interface facts from the original comment.
+#version 460
+#ifdef APPLE_REDUCTION
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#endif
+
+// Preserve the omitted contract, precision, and host-interface facts from the original comment.
+
+#ifdef USE_BF16
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#define STORAGE_TYPE uint16_t
+#define LOAD_VALUE(x) uintBitsToFloat(uint(x) << 16u)
+uint16_t bf16_store(float value) {
+  uint bits = floatBitsToUint(value);
+  if (isnan(value)) {
+    return uint16_t((bits >> 16) | 0x40u);
+  }
+  return uint16_t((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16);
+}
+#define STORE_VALUE(f) bf16_store(f)
+#else
+#define STORAGE_TYPE float
+#define LOAD_VALUE(x) float(x)
+#define STORE_VALUE(f) STORAGE_TYPE(f)
+#endif
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer InState {
+  STORAGE_TYPE values[];
+} in_state;
+layout(set = 0, binding = 1, std430) readonly buffer InX {
+  STORAGE_TYPE values[];
+} in_x;
+layout(set = 0, binding = 2, std430) readonly buffer Weight {
+  STORAGE_TYPE values[];
+} weight;
+layout(set = 0, binding = 3, std430) writeonly buffer Output {
+  STORAGE_TYPE values[];
+} output_data;
+layout(set = 0, binding = 4, std430) buffer StateOut {
+  STORAGE_TYPE values[];
+} state_out;
+
+// Preserve the omitted contract, precision, and host-interface facts from the original comment.
+shared float norm_block[256];
+
+// Field order matches the fixed omarchy::ComputeParams layout: count, operation, lhs_size, rhs_size, reduce_size, ...
+layout(push_constant) uniform Params {
+  uint count;
+  uint operation;
+  uint lhs_size;
+  uint rhs_size;
+  uint reduce_size;
+  uint output_size;
+  uint lhs_offset;
+  uint rhs_offset;
+  uint output_offset;
+  uint aux_size;
+  uint aux_offset;
+  uint matrix_m;
+  uint matrix_n;
+  uint matrix_k;
+  uint flags;
+} params;
+
+void main() {
+  const uint channels = params.reduce_size;
+  const uint km1 = params.lhs_size;
+  uint stride_threads = gl_NumWorkGroups.x * 256u;
+  for (uint work_index = gl_GlobalInvocationID.x;
+       work_index < params.count;
+       work_index += stride_threads) {
+    uint batch = work_index / channels;
+    uint channel = work_index % channels;
+    uint state_base = batch * km1 * channels;
+    uint x_base = batch * channels;
+    float accumulator = 0.0;
+    for (uint tap = 0u; tap < params.operation; ++tap) {
+      float value = tap < km1
+          ? LOAD_VALUE(
+                in_state.values[state_base + tap * channels + channel])
+          : LOAD_VALUE(in_x.values[x_base + channel]);
+      accumulator += value *
+          LOAD_VALUE(weight.values[channel * params.operation + tap]);
+    }
+    // Flag 0 (`activate`): match swiglu.comp SILU_ONLY with storage rounding after conv, sigmoid, and multiply.
+    STORAGE_TYPE conv_out = STORE_VALUE(accumulator);
+    STORAGE_TYPE activated = conv_out;
+    if ((params.flags & 1u) != 0u) {
+      // Flag 0 (`activate`): match swiglu.comp SILU_ONLY with storage rounding after conv, sigmoid, and multiply.
+      float value = LOAD_VALUE(conv_out);
+      float sigmoid_value = 1.0 / (1.0 + exp(-value));
+      STORAGE_TYPE sig_b = STORE_VALUE(sigmoid_value);
+      float silu = value * LOAD_VALUE(sig_b);
+      activated = STORE_VALUE(silu);
+    }
+    if ((params.flags & 2u) != 0u) {
+      // Preserve the omitted contract, precision, and host-interface facts from the original comment.
+#ifdef APPLE_REDUCTION
+      uint thread = gl_LocalInvocationID.x;
+      uint half_id = thread / 128u;
+      float norm_value = LOAD_VALUE(activated);
+      float subgroup_sum = subgroupAdd(norm_value * norm_value);
+      if (gl_SubgroupInvocationID == 0u) {
+        norm_block[gl_SubgroupID] = subgroup_sum;
+      }
+      barrier();
+      float partial = gl_SubgroupID == half_id * 4u &&
+              gl_SubgroupInvocationID < 4u
+          ? norm_block[half_id * 4u + gl_SubgroupInvocationID]
+          : 0.0;
+      float row_sum = subgroupAdd(partial);
+      if (gl_SubgroupID == half_id * 4u &&
+          gl_SubgroupInvocationID == 0u) {
+        float eps = uintBitsToFloat(params.matrix_k);
+        norm_block[8u + half_id] =
+            inversesqrt(row_sum / 128.0 + eps);
+      }
+      barrier();
+      float norm = norm_block[8u + half_id];
+      barrier();
+      uint channel_head = channel / 128u;
+      if (channel_head < params.rhs_size / 128u * 2u) {
+        uint scale_bits = (channel_head < params.rhs_size / 128u)
+            ? params.matrix_m
+            : params.matrix_n;
+        float scale =
+            LOAD_VALUE(bf16_store(uintBitsToFloat(scale_bits)));
+        precise float result = norm_value * (norm * 1.0);
+        float normed = LOAD_VALUE(bf16_store(result));
+        activated = bf16_store(normed * scale);
+      }
+#else
+      uint thread = gl_LocalInvocationID.x;
+      uint half_id = thread / 128u;
+      uint slot = thread % 128u;
+      float norm_value = LOAD_VALUE(activated);
+      norm_block[thread] = norm_value * norm_value;
+      barrier();
+      for (uint stride = 64u; stride > 0u; stride >>= 1u) {
+        if (slot < stride) {
+          norm_block[half_id * 128u + slot] +=
+              norm_block[half_id * 128u + slot + stride];
+        }
+        barrier();
+      }
+      uint channel_head = channel / 128u;
+      if (channel_head < params.rhs_size / 128u * 2u) {
+        float eps = uintBitsToFloat(params.matrix_k);
+        float mean_square = norm_block[half_id * 128u] / 128.0;
+        float norm = inversesqrt(mean_square + eps);
+        uint scale_bits = (channel_head < params.rhs_size / 128u)
+            ? params.matrix_m
+            : params.matrix_n;
+        // Round f32 scale to storage, then widen, as the composed promote cast does.
+        float scale =
+            LOAD_VALUE(bf16_store(uintBitsToFloat(scale_bits)));
+        // Match FastNormGatedBF16: value * (norm * dummy weight 1.0).
+        precise float result = norm_value * (norm * 1.0);
+        // Round the normed result to storage, then widen as the composed path does.
+        float normed = LOAD_VALUE(bf16_store(result));
+        activated = bf16_store(normed * scale);
+      }
+#endif
+    }
+    output_data.values[work_index] = activated;
+    for (uint row = 0u; row + 1u < km1; ++row) {
+      state_out.values[state_base + row * channels + channel] =
+          in_state.values[state_base + (row + 1u) * channels + channel];
+    }
+    state_out.values[state_base + (km1 - 1u) * channels + channel] =
+        in_x.values[x_base + channel];
+  }
+}

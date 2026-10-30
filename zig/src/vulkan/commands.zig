@@ -116,6 +116,35 @@ pub fn barrier(dev: *const Device, cmd: c.VkCommandBuffer, src_stage: u32, src_a
     dev.api.vkCmdPipelineBarrier(cmd, src_stage, dst_stage, 0, 1, &b, 0, null, 0, null);
 }
 
+// Fill geometry requires nonzero 4-byte-aligned offset/length within the buffer; host-tested.
+pub fn fillRange(buf_len: u64, offset: u64, len: u64) Error!void {
+    if (len == 0 or len % 4 != 0 or offset % 4 != 0) return error.Misaligned;
+    try memory.span(buf_len, offset, len);
+}
+
+// Record a 4-byte little-endian fill in a caller-begun command buffer; dst must be a device buffer from dev.
+pub fn recordFill(dev: *const Device, cmd: c.VkCommandBuffer, dst: Buffer, offset: u64, len: u64, value: u32) Error!void {
+    if (dst.dev != dev or dst.kind != .device) return error.Invalid;
+    try fillRange(dst.len, offset, len);
+    dev.api.vkCmdFillBuffer(cmd, dst.handle, offset, len, value);
+}
+
+// Preserve the omitted contract, precision, and host-interface facts from the original comment.
+pub fn fill(cmds: *Commands, dst: Buffer, offset: u64, len: u64, value: u32, timeout_ns: u64) Error!void {
+    if (dst.dev != cmds.dev or dst.kind != .device) return error.Invalid;
+    try fillRange(dst.len, offset, len);
+    const cmd = try cmds.begin();
+    barrier(cmds.dev, cmd, gpu_stages, gpu_writes, transfer, transfer_write);
+    cmds.dev.api.vkCmdFillBuffer(cmd, dst.handle, offset, len, value);
+    barrier(cmds.dev, cmd, transfer, transfer_write, gpu_stages, gpu_access);
+    try cmds.submit(timeout_ns);
+}
+
+/// fill(..., value = 0): the real device-side zero every family state uses.
+pub fn zero(cmds: *Commands, dst: Buffer, offset: u64, len: u64, timeout_ns: u64) Error!void {
+    try fill(cmds, dst, offset, len, 0, timeout_ns);
+}
+
 const gpu_stages: u32 = c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | c.VK_PIPELINE_STAGE_TRANSFER_BIT;
 const gpu_writes: u32 = c.VK_ACCESS_SHADER_WRITE_BIT | c.VK_ACCESS_TRANSFER_WRITE_BIT;
 const gpu_access: u32 = gpu_writes | c.VK_ACCESS_SHADER_READ_BIT | c.VK_ACCESS_TRANSFER_READ_BIT;
@@ -179,6 +208,16 @@ test "only a successful submit and a signalled fence let the caller free a submi
     try std.testing.expectError(error.InFlight, waited(c.VK_ERROR_OUT_OF_HOST_MEMORY));
     try std.testing.expectError(error.InFlight, waited(c.VK_ERROR_DEVICE_LOST));
     try std.testing.expectError(error.InFlight, waited(c.VK_NOT_READY));
+}
+
+test "fill geometry refuses torn, empty and out-of-range fills" {
+    try fillRange(4096, 0, 4096);
+    try fillRange(4096, 12, 1024);
+    try std.testing.expectError(error.Misaligned, fillRange(4096, 0, 0)); // empty
+    try std.testing.expectError(error.Misaligned, fillRange(4096, 2, 1024));
+    try std.testing.expectError(error.Misaligned, fillRange(4096, 0, 6));
+    try std.testing.expectError(error.OutOfRange, fillRange(4096, 8, 4096));
+    try std.testing.expectError(error.OutOfRange, fillRange(0, 0, 4));
 }
 
 test "staged transfers refuse foreign devices, wrong kinds, aliasing and ranges past the buffer" {
