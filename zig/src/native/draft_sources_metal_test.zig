@@ -136,8 +136,7 @@ test "qwen27 window: native facts expose device width, node budget and hybrid co
             for (b.costs[0..width], 0..) |*cost, i| cost.* = .{ .width = @intCast(i + 1), .ms = 20 };
             const facts = b.facts();
             try std.testing.expectEqual(width, facts.exact_width);
-            // Both projection paths still draft; their shared budget policies are qualified independently.
-            try std.testing.expectEqual(!units, facts.allocate_shared_drafts);
+            try std.testing.expect(facts.allocate_shared_drafts);
             try std.testing.expect(facts.mtp and facts.speculate);
             try std.testing.expectEqual(width - 1, facts.drafts);
             try std.testing.expectEqual(width, facts.batch_rows);
