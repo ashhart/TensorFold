@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek V4.1 on CUDA (experimental) copies its weights and persistent forms to the GPU through one reusable 64 MiB pinned stage instead of a host copy of the whole image, so the public Flash-1017 EXL3 pack no longer stops at boot with `CopySourceLimit` at TP=2; with it, a rank loaded all 95.1 GiB of its weights. The bytes on the GPU, their addresses and their digests are unchanged, a failed later chunk keeps the same cleanup, and uploads under 64 MiB make the same single copy as before (#1643). Thanks to @jayleaton.
+
 - DeepSeek-V4.1-Flash on CUDA (experimental) plans EXL3 packs that keep a BF16 `.weight` beside a projection's EXL3 trellis, such as `jayleaton/DeepSeek-V4.1-Flash-1017-EXL3-2.8bpw`, which used to stop at planning with `UnsupportedDenseProjection` (booting that pack also needs the upload-stage change, #1643): the CUDA rank planner takes the stored trellis, still checked by the shared trellis validator, and still refuses dense-only and malformed projections. Metal and every other family keep reading the dense weight first, and packs without a dense sibling plan as before. Thanks to @jayleaton.
 
 - DeepSeek-V4.1 (experimental, behind `TF_EXPERIMENTAL=deepseek`) admits EXL3 checkpoints whose `quantization_config` declares the dsq-1 format, with or without a producer note in brackets, such as the public Flash-1017 2.8 bpw pack, which main refused before reading any tensor. Only the `inst3`, `mcg` and `mul1` codebooks with `out_scales` `always` are admitted; 1.x metadata is admitted as before, and the loader's geometry, trellis, scale and marker checks still apply (#1641). Thanks to @jayleaton.
