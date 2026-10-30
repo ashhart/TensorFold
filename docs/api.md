@@ -597,7 +597,9 @@ An engine on the shared lane host adds these groups, each complete or absent:
 
 In the requests group, `requests_running`, `requests_waiting` and their vLLM mirrors take the ledger's values.
 While the engine is parked, none of these engine values is shown: neither the groups nor `requests_running`,
-`requests_waiting` and `generation_tokens_running`. A missing group means unknown, never zero.
+`requests_waiting` and `generation_tokens_running`. A missing group means unknown, never zero. While the idle
+unload closes the engine, the engine values are already gone and `engine_parked` is still 0, since a request then
+gets 503 with a retry; it turns 1 once a request can reload the engine.
 
 `GET /v1/load` returns the same ledger as one JSON object from one read: `instance`, `timestamp` (the read's wall
 time), `model`, `parked`, `lanes`, `http_active` by route group, and, when present, the request counts,

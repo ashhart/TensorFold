@@ -103,6 +103,7 @@ pub const Harness = struct {
             .teacher = .init(gpa),
         };
         self.srv = srv;
+        srv.load.attach(srv.engine); // as serve does: the resident engine is the ledger's producer
         var args: cli.Args = .{};
         args.idle_unload = idle_s;
         if (idle_unload.startServer(srv, args, self.reopen(), "d", "t") != .enabled)
