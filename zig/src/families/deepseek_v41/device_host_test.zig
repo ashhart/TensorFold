@@ -21,3 +21,8 @@ test {
 test {
     _ = @import("review_handoff_test.zig");
 }
+
+test {
+    _ = @import("session_restore_test.zig");
+    _ = @import("session_protocol.zig");
+}
