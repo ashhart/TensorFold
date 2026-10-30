@@ -352,17 +352,33 @@ __device__ __forceinline__ bool rows(const __nv_bfloat16* __restrict__ q, const 
     __syncthreads();
     const int kfirst = first(p0 + row0), klast = kmax, limit = p0 + W;
     const int t0 = kfirst / BN, tiles = klast / BN + 1 - t0, items = 2 * tiles;
-    auto stage = [&](int item) { // item 2t: tile t's keys, 2t + 1: its values
+    int pk = 0, nxt = 0; // PG: the staged tile's first key's row in its page, the next page's id (a page early)
+    int64_t pb = 0;      // PG: the staged tile's base, stepped a tile at a time (pages hold whole tiles)
+    const int* tp = pg.tab + (PG ? t0 * BN / pg.tok : 0);
+    if constexpr (PG) {
+        pk = t0 * BN % pg.tok;
+        pb = static_cast<int64_t>(*tp) * pg.page + static_cast<int64_t>(pk) * HK * D;
+        if (t0 * BN - pk + pg.tok <= klast) nxt = tp[1];
+    }
+    auto stage = [&](int item) { // item 2t: tile t's keys, 2t + 1: its values (items staged in order)
         const __nv_bfloat16* src = item % 2 == 0 ? kc : vc;
         const int key0 = (t0 + item / 2) * BN;
         uint4* dst = slots + (item % NS) * K::SLOT;
-        int64_t pb = 0; // a paged tile lies in one page (pages hold whole tiles)
-        if constexpr (PG) pb = static_cast<int64_t>(pg.tab[key0 / pg.tok]) * pg.page + static_cast<int64_t>(key0 % pg.tok) * HK * D;
+        if (PG && item % 2 == 0 && item > 0) { // the next tile: a tile on, or at a page end the id loaded a page ago
+            pb += BN * HK * D;
+            if ((pk += BN) == pg.tok) {
+                pk = 0;
+                pb = static_cast<int64_t>(nxt) * pg.page;
+                ++tp;
+                if (key0 + pg.tok <= klast) nxt = tp[1];
+            }
+        }
         for (int i = threadIdx.x; i < BN * C; i += NT) {
             const int key = key0 + i / C;
             const bool in = key >= kfirst && key <= klast && key < limit; // outside every row's keys: zeros
-            if constexpr (PG) {
-                cp16z(dst + sw<D>(i / C, i % C), in ? src + pb + ((int64_t)(i / C) * HK + hk) * D + (i % C) * 8 : src, in);
+            if constexpr (PG) { // the linear form below with the tile's row at pb
+                const int row = in ? i / C : 0;
+                cp16z(dst + sw<D>(i / C, i % C), src + (pb + ((int64_t)row * HK + hk) * D + (i % C) * 8), in);
             } else {
                 const int row = in ? (ring > 0 ? key % ring : key) : 0;
                 cp16z(dst + sw<D>(i / C, i % C), src + ((int64_t)row * HK + hk) * D + (i % C) * 8, in);
