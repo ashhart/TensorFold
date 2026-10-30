@@ -24,6 +24,7 @@ const kit = @import("contract_kit.zig");
 const ocr_ops = @import("glm_ocr_ops").Ops;
 const ocr_points = @import("contract_glm_ocr_ops.zig");
 const ocr_norms = @import("contract_glm_ocr_norm.zig");
+const item_k = @import("contract_wmma_item.zig");
 
 const g = core.contract.gates;
 
@@ -160,6 +161,12 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     for (&routers, [_]kit.Kind{ .f16, .bf16 }) |*x, k| x.* = router_k.Router.init(a, &r, s, &l, k);
     defer for (&routers) |*x| x.deinit();
     for (&routers) |*x| try kernels.append(a, x.kernel());
+    // the few-row matrix-core tiles run on gfx11's matrix cores only
+    const matrix = if (hip.Caps.of(arch)) |v| v.matrix == .wmma11 else false;
+    var items: [item_k.cases.len]item_k.Item = undefined;
+    for (&items, 0..) |*x, i| x.* = .init(a, &r, s, &l, i);
+    defer for (&items) |*x| x.deinit();
+    if (matrix) for (&items) |*x| try kernels.append(a, x.kernel());
     var t: g.Tally = .{};
     var ocr = try ocr_ops.load(&r);
     defer ocr.unload();
