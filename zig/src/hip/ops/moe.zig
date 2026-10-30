@@ -2,6 +2,7 @@
 
 const t = @import("types.zig");
 const Ops = @import("ops.zig").Ops;
+const Launcher = @import("../launches.zig").Launcher;
 const Error = t.Error;
 const Tensor = t.Tensor;
 const p = t.p;
@@ -35,8 +36,10 @@ pub fn moeSelect(o: Ops, logits: u64, pick: u64, wts: u64, plan: ?struct { items
     try o.l.tf_moe_select(f(logits), i(pick), f(wts), if (plan) |pl| i(pl.items) else null, if (plan) |pl| i(pl.members) else null, int(capacity), int(r), int(experts), int(top_k), o.stream);
 }
 
+/// The plan: tf_moe_route's members and items; a prompt's many pairs in three launches over arena scratch.
 pub fn moeRoute(o: Ops, picks: u64, pairs: usize, experts: usize, tile: usize, members: u64, items: u64, capacity: usize) Error!void {
-    try o.l.tf_moe_route(@ptrFromInt(picks), int(pairs), int(experts), int(tile), i(members), i(items), int(capacity), o.stream);
+    const scratch: u64 = if (pairs >= 4 * Launcher.route_seg) try o.arena.take(Launcher.routeScratch(pairs, experts)) else 0;
+    try o.l.tf_moe_route_wide(@ptrFromInt(picks), int(pairs), int(experts), int(tile), i(members), i(items), int(capacity), scratch, o.stream);
 }
 
 pub fn moeAct(o: Ops, both: u64, out: Tensor, pairs: usize, width: usize, limit: f32) Error!void {

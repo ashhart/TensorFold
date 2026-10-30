@@ -63,3 +63,41 @@ test "top-k in parts gives tf_topk's ids, values and order byte for byte (Flash 
         };
     };
 }
+
+test "the prompt router tile: every logit one fp32 fma chain over k in order, the bytes of the host's chain" {
+    const t = try Rig.open(1 << 20);
+    defer t.close();
+    var o = t.ops(&t.on);
+    o.prefill = true;
+    var rng: rig.Rng = .{ .state = 0x7071E };
+    const d: usize = 2560;
+    const e: usize = 513;
+    // the rows: two tiles and a part, and one row past a full tile of 128
+    for ([_]usize{ 300, 129 }) |rows| {
+        const hx = try gpa.alloc(u16, rows * d);
+        defer gpa.free(hx);
+        for (hx) |*v| v.* = t.bits(rng.unit() * 2.0);
+        const hw = try gpa.alloc(f32, e * d);
+        defer gpa.free(hw);
+        for (hw) |*v| v.* = @bitCast(@as(u32, rig.bf16Bits(rng.unit() / 8.0)) << 16);
+        var x = try t.upload(hx);
+        defer x.free();
+        var w = try t.upload(hw);
+        defer w.free();
+        var out = try t.alloc(rows * e * 4);
+        defer out.free();
+        try o.moeRouter(tensor(x, act(t)), at(w), at(out), rows, d, e);
+        try t.stream.synchronize();
+        const got = try rig.download(f32, out);
+        defer gpa.free(got);
+        // every expert of a sample of rows (each tile's first and last, every 37th, the last three): the host is slow
+        for (0..rows) |r| if (r % 37 == 0 or r % 128 == 0 or r % 128 == 127 or r + 3 >= rows) for (0..e) |c| {
+            var acc: f32 = 0;
+            for (0..d) |k| acc = @mulAdd(f32, @floatCast(t.value(hx[r * d + k])), hw[c * d + k], acc);
+            if (@as(u32, @bitCast(acc)) != @as(u32, @bitCast(got[r * e + c]))) {
+                std.debug.print("router tile rows={d}: logit ({d}, {d}) {e} where the chain gives {e}\n", .{ rows, r, c, got[r * e + c], acc });
+                return error.TestUnexpectedResult;
+            }
+        };
+    }
+}

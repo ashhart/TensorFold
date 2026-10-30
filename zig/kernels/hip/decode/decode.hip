@@ -392,6 +392,22 @@ extern "C" __global__ void __launch_bounds__(256)
     gnorm_out_body(y, weight, z, out, kind, rows, width, eps, sigmoid_gate);
 }
 
+// A prompt's picks (no plan), a wave a row, 4 rows a block, select_body's bytes; a NaN row: select_row's rank loop.
+extern "C" __global__ void __launch_bounds__(32 * kRouterWaves)
+    tf_select_rows(const float* logits, int* pick, float* wts, int rows, int experts, int top_k) {
+    __shared__ int fallback[kRouterWaves];
+    const int wave = threadIdx.x >> 5;
+    const int first = blockIdx.x * kRouterWaves;
+    const int row = first + wave;
+    const bool live = row < rows;
+    const bool bad = experts <= 16 * 32 ? select_row_lanes<16, 32>(logits, row, live, pick, wts, experts, top_k)
+                                        : select_row_lanes<kSelectMax / 32, 32>(logits, row, live, pick, wts, experts, top_k);
+    if ((threadIdx.x & 31) == 0) fallback[wave] = live && bad;
+    __syncthreads();
+    for (int w = 0; w < kRouterWaves; ++w)
+        if (fallback[w]) select_row(logits, first + w, pick, wts, nullptr, nullptr, 0, experts, top_k);
+}
+
 extern "C" __global__ void __launch_bounds__(kSelectThreads)
     tf_select_decode(const float* logits, int* pick, float* wts, int* items, int* members, int capacity, int experts,
                      int top_k) {

@@ -116,6 +116,7 @@ pub const Launcher = struct {
         rms2: Function,
         gnorm_out: Function,
         select: Function,
+        select_rows: Function,
     };
 
     const Ops = struct {
@@ -141,6 +142,9 @@ pub const Launcher = struct {
         gdn_gate_prefill: Function,
         dense_rows: Function,
         moe_route: Function,
+        route_count: Function,
+        route_scan: Function,
+        route_scatter: Function,
         router_rows: [2]Function, // fp16, bf16
         router_tile: [2]Function,
         router_small: [2]Function,
@@ -175,7 +179,7 @@ pub const Launcher = struct {
         const pl = l.mods[@backingInt(kernels.Group.plan)];
         l.fuse = choices.fuse;
         l.wide = choices.wide;
-        l.dec = .{ .router = .{ try dec.function("tf_router_decode_f16"), try dec.function("tf_router_decode_bf16") }, .router_select = .{ try dec.function("tf_router_select_f16"), try dec.function("tf_router_select_bf16") }, .tail = try dec.function("tf_tail"), .conv_split = try dec.function("tf_conv_split"), .rms2 = try dec.function("tf_rms2"), .gnorm_out = try dec.function("tf_gnorm_out"), .select = try dec.function("tf_select_decode") };
+        l.dec = .{ .router = .{ try dec.function("tf_router_decode_f16"), try dec.function("tf_router_decode_bf16") }, .router_select = .{ try dec.function("tf_router_select_f16"), try dec.function("tf_router_select_bf16") }, .tail = try dec.function("tf_tail"), .conv_split = try dec.function("tf_conv_split"), .rms2 = try dec.function("tf_rms2"), .gnorm_out = try dec.function("tf_gnorm_out"), .select = try dec.function("tf_select_decode"), .select_rows = try dec.function("tf_select_rows") };
         l.plan = .{
             .kv_write = try pl.function("tf_plan_kv_write"),
             .kv_write_act = try pl.function("tf_plan_kv_write_act"),
@@ -216,6 +220,9 @@ pub const Launcher = struct {
             .gdn_gate_prefill = try ops.function("tf_gdn_gate_prefill"),
             .dense_rows = try ops.function("tf_dense_rows"),
             .moe_route = try ops.function("tf_moe_route"),
+            .route_count = try ops.function("tf_route_count"),
+            .route_scan = try ops.function("tf_route_scan"),
+            .route_scatter = try ops.function("tf_route_scatter"),
             .router_rows = .{ try ops.function("tf_router_rows_f16"), try ops.function("tf_router_rows_bf16") },
             .router_tile = .{ try ops.function("tf_router_tile_f16"), try ops.function("tf_router_tile_bf16") },
             .router_small = .{ try ops.function("tf_router_small_f16"), try ops.function("tf_router_small_bf16") },
@@ -326,6 +333,9 @@ pub const Launcher = struct {
     pub const tf_moe_act = moe.tf_moe_act;
     pub const tf_moe_combine = moe.tf_moe_combine;
     pub const tf_moe_route = moe.tf_moe_route;
+    pub const tf_moe_route_wide = moe.tf_moe_route_wide;
+    pub const routeScratch = moe.routeScratch;
+    pub const route_seg = moe.route_seg;
     pub const tf_causal = attention.tf_causal;
     pub const tf_attn_gate = attention.tf_attn_gate;
     pub const tf_kv_write = attention.tf_kv_write;

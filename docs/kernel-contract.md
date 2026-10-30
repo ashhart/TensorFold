@@ -188,6 +188,13 @@ HIP also checks Qwen3.8-Flash-Next's gfx11 matrix-core prompt tiles: the dense t
 2560, 6144 and 10240, fp32 out and bf16 out, bit-equal to the matrix tile `affine_wmma_gemm` (then `tf_cast`).
 Its routed expert tiles take a prompt's plan: gate and up with silu(g) u in bf16 (`affine_wmma_moe_gu`) and down in fp32
 (`affine_wmma_moe_down`), bit-equal to `affine_wmma_gemm` over the same plan (then `tf_moe_act`).
+HIP also checks a prompt's MoE plan in three launches (`tf_route_count`, `tf_route_scan`, `tf_route_scatter`),
+bit-equal to `tf_moe_route`, and its stated plan: the pairs stably sorted by expert, each expert's pairs cut into tiles.
+HIP's MoE picks: `tf_select_rows`, bit-equal to `select_body`, and `tf_router_select_*` (router logits, picks and plan in
+one launch), bit-equal to `tf_router_decode`, the pick and `tf_moe_route`, its logits' sums proven fp32. Both check the
+pick's stated rule (a NaN below every number, ties to the lower id, every slot written) and carry a known finding at
+gate 1: upstream's `select_body` ranks a NaN level with the top number, so slot 0 races, and a row of fewer than k
+numbers leaves slots unwritten. Their bytes stay equal to upstream's.
 HIP's top-k in parts (`tf_topk_part`, `tf_topk_join`) is bit-equal to `tf_topk` and checked against its key order: a
 positive NaN above +Inf, a negative NaN below -Inf, -0 equal to +0, ties to the lower id.
 HIP also checks Flash Next's hyper-connection kernels. On gfx11, `tf_affine_dense_hcmix` (hc up's dense K 320 tile

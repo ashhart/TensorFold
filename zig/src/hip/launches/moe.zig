@@ -36,7 +36,7 @@ pub fn routerWith(l: *const Launcher, x: C, kind: c_int, rows: CF, logits: F, r:
     try a.add(e);
     const k: usize = if (kind == 1) 0 else 1;
     if (small) return l.go(l.op.router_small[k], dim(cdiv(e, 8), cdiv(r, 32), 1), dim(256, 1, 1), 0, s, &a);
-    try l.go(l.op.router_tile[k], dim(cdiv(e, 64), cdiv(r, 64), 1), dim(256, 1, 1), 0, s, &a);
+    try l.go(l.op.router_tile[k], dim(cdiv(e, 64), cdiv(r, 128), 1), dim(256, 1, 1), 0, s, &a);
 }
 
 /// A lane round's router at any row count; false (nothing launched) where the shape keeps the other kernels.
@@ -109,7 +109,7 @@ pub fn tf_moe_router(l: *const Launcher, x: C, kind: c_int, rows: CF, logits: F,
     if (l.fuse and r <= 16 and @rem(d, 4) == 0 and ad(rows) % 16 == 0 and ad(x) % 8 == 0) {
         return l.go(l.dec.router[k], dim(cdiv(e, 4), 1, 1), dim(128, 1, 1), 0, s, &a);
     }
-    if (r >= 64 and @rem(d, 32) == 0) return l.go(l.op.router_tile[k], dim(cdiv(e, 64), cdiv(r, 64), 1), dim(256, 1, 1), 0, s, &a);
+    if (r >= 64 and @rem(d, 32) == 0) return l.go(l.op.router_tile[k], dim(cdiv(e, 64), cdiv(r, 128), 1), dim(256, 1, 1), 0, s, &a);
     try l.go(l.op.router_rows[k], dim(cdiv(e, 8), cdiv(r, 8), 1), dim(256, 1, 1), 0, s, &a);
 }
 
@@ -124,6 +124,17 @@ pub fn tf_moe_select(l: *const Launcher, logits: CF, pick: I, wts: F, items: I, 
     try a.add(capacity);
     try a.add(experts);
     try a.add(top_k);
+    // a prompt's rows (no plan): a wave a row, 4 rows a block, select_body's bytes (tf_select_rows)
+    if (l.fuse and items == null) {
+        var b: Args = .{};
+        try b.add(ad(logits));
+        try b.add(ad(pick));
+        try b.add(ad(wts));
+        try b.add(r);
+        try b.add(experts);
+        try b.add(top_k);
+        return l.go(l.dec.select_rows, dim(cdiv(r, 4), 1, 1), dim(128, 1, 1), 0, s, &b);
+    }
     if (l.fuse) return l.go(l.dec.select, dim(r, 1, 1), dim(512, 1, 1), 0, s, &a);
     try l.go(l.moe_select, dim(r, 1, 1), dim(32, 1, 1), 0, s, &a);
 }
@@ -147,6 +158,42 @@ pub fn tf_moe_combine(l: *const Launcher, y: CF, wts: CF, out: P, kind: c_int, r
     try a.add(slots);
     try a.add(d);
     try l.go(l.moe_combine[tri(kind)], dim(cdiv(d, 256), r, 1), dim(256, 1, 1), 0, s, &a);
+}
+
+/// decode.hip / moe.hpp kRouteSeg: the pairs a block of tf_route_count and tf_route_scatter takes.
+pub const route_seg = 512;
+
+/// The bytes of tf_moe_route_wide's scratch for `pairs` pairs over `experts` experts.
+pub fn routeScratch(pairs: usize, experts: usize) usize {
+    return (std.math.divCeil(usize, pairs, route_seg) catch unreachable) * experts * 4 + experts * 4;
+}
+
+/// tf_moe_route's members and items in three launches over 512-pair segments; a few pairs keep tf_moe_route.
+pub fn tf_moe_route_wide(l: *const Launcher, picks: CI, pairs: c_int, experts: c_int, tile: c_int, members: I, items: I, capacity: c_int, scratch: u64, s: S) Error!void {
+    if (pairs < 4 * route_seg or experts > 1024 or scratch == 0) return tf_moe_route(l, picks, pairs, experts, tile, members, items, capacity, s);
+    const segs: c_int = @intCast(cdiv(pairs, route_seg));
+    var a: Args = .{};
+    try a.add(ad(picks));
+    try a.add(pairs);
+    try a.add(experts);
+    try a.add(scratch);
+    try l.go(l.op.route_count, dim(segs, 1, 1), dim(256, 1, 1), 0, s, &a);
+    var b: Args = .{};
+    try b.add(scratch);
+    try b.add(segs);
+    try b.add(experts);
+    try b.add(tile);
+    try b.add(ad(items));
+    try b.add(capacity);
+    try l.go(l.op.route_scan, dim(1, 1, 1), dim(1024, 1, 1), 0, s, &b);
+    var c: Args = .{};
+    try c.add(ad(picks));
+    try c.add(pairs);
+    try c.add(segs);
+    try c.add(experts);
+    try c.add(scratch);
+    try c.add(ad(members));
+    try l.go(l.op.route_scatter, dim(segs, 1, 1), dim(route_seg, 1, 1), 0, s, &c);
 }
 
 pub fn tf_moe_route(l: *const Launcher, picks: CI, pairs: c_int, experts: c_int, tile: c_int, members: I, items: I, capacity: c_int, s: S) Error!void {

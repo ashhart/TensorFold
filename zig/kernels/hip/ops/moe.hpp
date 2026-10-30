@@ -86,6 +86,90 @@ extern "C" __global__ void tf_moe_route(const int* picks, int pairs, int experts
     }
 }
 
+// tf_moe_route's plan of a prompt's many pairs in three launches (count, scan, scatter); `offs` is scratch. Same plan.
+constexpr int kRouteSeg = 512;
+constexpr int kRouteMaxExperts = 1024;
+
+extern "C" __global__ void __launch_bounds__(256) tf_route_count(const int* picks, int pairs, int experts, int* offs) {
+    __shared__ int counts[kRouteMaxExperts];
+    for (int e = threadIdx.x; e < experts; e += blockDim.x) counts[e] = 0;
+    __syncthreads();
+    const int from = blockIdx.x * kRouteSeg;
+    for (int p = from + threadIdx.x; p < pairs && p < from + kRouteSeg; p += blockDim.x) atomicAdd(&counts[picks[p]], 1);
+    __syncthreads();
+    for (int e = threadIdx.x; e < experts; e += blockDim.x) offs[static_cast<long long>(blockIdx.x) * experts + e] = counts[e];
+}
+
+extern "C" __global__ void __launch_bounds__(1024) tf_route_scan(int* offs, int segs, int experts, int tile, int* items,
+                                                                 int capacity) {
+    __shared__ int counts[kRouteMaxExperts];
+    __shared__ int starts[kRouteMaxExperts];
+    __shared__ int ends[kRouteMaxExperts];
+    __shared__ int scan_c[1024];
+    __shared__ int scan_n[1024];
+    const int t = threadIdx.x;
+    // an expert's segments in order: each one's place within the expert, and the expert's total
+    if (t < experts) {
+        int run = 0;
+        for (int g = 0; g < segs; ++g) {
+            int* at = offs + static_cast<long long>(g) * experts + t;
+            const int c = *at;
+            *at = run;
+            run += c;
+        }
+        counts[t] = run;
+    }
+    // starts: the counts' exclusive sums; ends: the tiles' inclusive sums (an expert a thread)
+    const int own_c = t < experts ? counts[t] : 0;
+    const int own_n = t < experts ? (counts[t] + tile - 1) / tile : 0;
+    scan_c[t] = own_c;
+    scan_n[t] = own_n;
+    __syncthreads();
+    for (int off = 1; off < static_cast<int>(blockDim.x); off <<= 1) {
+        const int vc = t >= off ? scan_c[t - off] : 0, vn = t >= off ? scan_n[t - off] : 0;
+        __syncthreads();
+        scan_c[t] += vc;
+        scan_n[t] += vn;
+        __syncthreads();
+    }
+    if (t < experts) {
+        starts[t] = scan_c[t] - own_c;
+        ends[t] = scan_n[t];
+        offs[static_cast<long long>(segs) * experts + t] = starts[t];
+    }
+    __syncthreads();
+    for (int slot = t; slot < capacity; slot += blockDim.x) {
+        int lo = 0, hi = experts;
+        while (lo < hi) {  // searchsorted(ends, slot, right=True)
+            int mid = (lo + hi) / 2;
+            if (ends[mid] <= slot) lo = mid + 1;
+            else hi = mid;
+        }
+        int e = lo < experts - 1 ? lo : experts - 1;
+        int reps = (counts[e] + tile - 1) / tile;
+        int within = slot - (ends[e] - reps);
+        int count = counts[e] - within * tile;
+        items[slot * 3] = e;
+        items[slot * 3 + 1] = starts[e] + within * tile;
+        items[slot * 3 + 2] = count < 0 ? 0 : (count > tile ? tile : count);
+    }
+}
+
+extern "C" __global__ void __launch_bounds__(kRouteSeg) tf_route_scatter(const int* picks, int pairs, int segs, int experts,
+                                                                         const int* offs, int* members) {
+    __shared__ int pk[kRouteSeg];
+    const int from = blockIdx.x * kRouteSeg;
+    const int t = threadIdx.x;
+    const int p = from + t;
+    pk[t] = p < pairs ? picks[p] : -1;
+    __syncthreads();
+    if (p >= pairs) return;
+    const int e = pk[t];
+    int before = 0;
+    for (int q = 0; q < t; ++q) before += pk[q] == e;
+    members[offs[static_cast<long long>(segs) * experts + e] + offs[static_cast<long long>(blockIdx.x) * experts + e] + before] = p;
+}
+
 // moe_router_kernel's logits with a wave's expert row read once for 8 token rows; each logit keeps its bits.
 __device__ __forceinline__ float router_sum(float x) {
 #pragma unroll
@@ -127,52 +211,58 @@ __device__ void router_rows(const void* x, const float* rows, float* logits, int
     }
 }
 
-// The router's logits for many rows: a 64 x 64 tile of (row, expert) a block, 4 x 4 a thread, in fp32.
+// The router's logits for many rows, 128 x 64 a block, 8 x 4 a thread: one fmaf chain over k from 0, so the same bits.
+constexpr int kRouterTileRows = 128;
+constexpr int kRouterTileExperts = 64;
+
 template <int KIND>
 __device__ void router_tile(const void* x, const float* rows, float* logits, int r, int d, int e) {
-    constexpr int kTile = 64, kStep = 32, kLd = kTile + 4;
-    __shared__ alignas(16) float xs[kStep][kLd];
-    __shared__ alignas(16) float ws[kStep][kLd];
-    const int row0 = blockIdx.y * kTile, expert0 = blockIdx.x * kTile;
+    constexpr int RT = 8, CT = 4, TR = 16 * RT, TC = 16 * CT, kStep = 32;
+    static_assert(TR == kRouterTileRows && TC == kRouterTileExperts, "the launch's tile");
+    __shared__ alignas(16) float xs[kStep][TR + 4];
+    __shared__ alignas(16) float ws[kStep][TC + 4];
+    const int row0 = blockIdx.y * TR, expert0 = blockIdx.x * TC;
     const int ty = threadIdx.x / 16, tx = threadIdx.x % 16;
-    // the staging: activation row ar at steps ak .. ak + 7, router rows wr and wr + 32 at steps wk .. wk + 3
-    const int ar = threadIdx.x / 4, ak = (threadIdx.x % 4) * 8;
-    const int wr = threadIdx.x / 8, wk = (threadIdx.x % 8) * 4;
     const uint16_t* xh = static_cast<const uint16_t*>(x);
-    float acc[4][4] = {};
+    float acc[RT][CT] = {};
     for (int base = 0; base < d; base += kStep) {
-        uint4 xv = {0, 0, 0, 0};
-        if (row0 + ar < r) xv = *reinterpret_cast<const uint4*>(xh + static_cast<long long>(row0 + ar) * d + base + ak);
-        float4 w0 = {0, 0, 0, 0}, w1 = {0, 0, 0, 0};
-        if (expert0 + wr < e) w0 = *reinterpret_cast<const float4*>(rows + static_cast<long long>(expert0 + wr) * d + base + wk);
-        if (expert0 + wr + 32 < e)
-            w1 = *reinterpret_cast<const float4*>(rows + static_cast<long long>(expert0 + wr + 32) * d + base + wk);
         __syncthreads();
-        const uint16_t* h = reinterpret_cast<const uint16_t*>(&xv);
+        // the staging: 8 activations of a row a load, 4 router weights of an expert a load
+        for (int q = threadIdx.x; q < TR * kStep / 8; q += 256) {
+            const int rr = q / (kStep / 8), kk = (q % (kStep / 8)) * 8;
+            uint4 v = {0, 0, 0, 0};
+            if (row0 + rr < r) v = *reinterpret_cast<const uint4*>(xh + static_cast<long long>(row0 + rr) * d + base + kk);
+            const uint16_t* h = reinterpret_cast<const uint16_t*>(&v);
 #pragma unroll
-        for (int j = 0; j < 8; ++j) xs[ak + j][ar] = KIND == 1 ? __half2float(__ushort_as_half(h[j])) : bf16_to_float(h[j]);
-        const float a0[4] = {w0.x, w0.y, w0.z, w0.w}, a1[4] = {w1.x, w1.y, w1.z, w1.w};
-#pragma unroll
-        for (int j = 0; j < 4; ++j) ws[wk + j][wr] = a0[j], ws[wk + j][wr + 32] = a1[j];
+            for (int j = 0; j < 8; ++j) xs[kk + j][rr] = KIND == 1 ? __half2float(__ushort_as_half(h[j])) : bf16_to_float(h[j]);
+        }
+        for (int q = threadIdx.x; q < TC * kStep / 4; q += 256) {
+            const int cc = q / (kStep / 4), kk = (q % (kStep / 4)) * 4;
+            float4 v = {0, 0, 0, 0};
+            if (expert0 + cc < e) v = *reinterpret_cast<const float4*>(rows + static_cast<long long>(expert0 + cc) * d + base + kk);
+            ws[kk][cc] = v.x, ws[kk + 1][cc] = v.y, ws[kk + 2][cc] = v.z, ws[kk + 3][cc] = v.w;
+        }
         __syncthreads();
-#pragma unroll
+#pragma unroll 4
         for (int i = 0; i < kStep; ++i) {
-            const float4 a = *reinterpret_cast<const float4*>(&xs[i][4 * ty]);
-            const float4 b = *reinterpret_cast<const float4*>(&ws[i][4 * tx]);
-            const float av[4] = {a.x, a.y, a.z, a.w}, bv[4] = {b.x, b.y, b.z, b.w};
+            float av[RT], bv[CT];
 #pragma unroll
-            for (int u = 0; u < 4; ++u)
+            for (int u = 0; u < RT; ++u) av[u] = xs[i][ty * RT + u];
 #pragma unroll
-                for (int w = 0; w < 4; ++w) acc[u][w] = fmaf(av[u], bv[w], acc[u][w]);
+            for (int w = 0; w < CT; ++w) bv[w] = ws[i][tx * CT + w];
+#pragma unroll
+            for (int u = 0; u < RT; ++u)
+#pragma unroll
+                for (int w = 0; w < CT; ++w) acc[u][w] = fmaf(av[u], bv[w], acc[u][w]);
         }
     }
 #pragma unroll
-    for (int u = 0; u < 4; ++u) {
-        const int row = row0 + 4 * ty + u;
+    for (int u = 0; u < RT; ++u) {
+        const int row = row0 + ty * RT + u;
         if (row >= r) continue;
 #pragma unroll
-        for (int w = 0; w < 4; ++w) {
-            const int expert = expert0 + 4 * tx + w;
+        for (int w = 0; w < CT; ++w) {
+            const int expert = expert0 + tx * CT + w;
             if (expert < e) logits[static_cast<long long>(row) * e + expert] = acc[u][w];
         }
     }

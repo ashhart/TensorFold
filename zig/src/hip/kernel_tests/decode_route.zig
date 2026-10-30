@@ -232,3 +232,48 @@ test "the router and the pick in one launch give a served plan's picks and items
     }
     for (seen[1..]) |n| try std.testing.expect(n == 3);
 }
+
+test "a prompt's picks a wave a row (tf_select_rows) are select_body's bytes, ties included" {
+    const t = try Rig.open(1 << 20);
+    defer t.close();
+    var rng: rig.Rng = .{ .state = 0x5E1EC7 };
+    const top_k: usize = 10;
+    const slots = top_k + 1;
+    for ([_][2]usize{ .{ 4099, 512 }, .{ 37, 512 }, .{ 1029, 1024 }, .{ 6, 64 } }) |shape| {
+        const rows = shape[0];
+        const experts = shape[1];
+        const h = try gpa.alloc(f32, rows * (experts + 1));
+        defer gpa.free(h);
+        for (h) |*v| v.* = rng.unit() * 4.0;
+        // ties: three experts copy expert 0's logit in every row, and in odd rows expert 5 copies expert 1's
+        for (0..rows) |r| {
+            const row = h[r * (experts + 1) ..][0 .. experts + 1];
+            for ([_]usize{ 3, 9, experts / 2 }) |c| row[c] = row[0];
+            if (r % 2 == 1) row[5] = row[1];
+        }
+        var logits = try t.upload(h);
+        defer logits.free();
+        var got: [2][2][]u8 = undefined;
+        for (0..2) |v| {
+            var pick = try t.alloc(rows * slots * 4);
+            defer pick.free();
+            var wts = try t.alloc(rows * slots * 4);
+            defer wts.free();
+            var items = try t.alloc(slots * 12);
+            defer items.free();
+            var members = try t.alloc(slots * 4);
+            defer members.free();
+            // 0: select_body (tf_select_decode, taken where a plan is asked for); 1: tf_select_rows
+            const it: ?[*]i32 = if (v == 0) @ptrFromInt(at(items)) else null;
+            const mem: ?[*]i32 = if (v == 0) @ptrFromInt(at(members)) else null;
+            try t.on.tf_moe_select(@ptrFromInt(at(logits)), @ptrFromInt(at(pick)), @ptrFromInt(at(wts)), it, mem, @intCast(slots), @intCast(rows), @intCast(experts), @intCast(top_k), t.stream.handle);
+            try t.stream.synchronize();
+            got[v] = .{ try rig.download(u8, pick), try rig.download(u8, wts) };
+        }
+        defer for (&got) |*g| for (g) |b| gpa.free(b);
+        for (0..2) |k| if (!std.mem.eql(u8, got[0][k], got[1][k])) {
+            std.debug.print("select rows={d} experts={d}: {s} differ\n", .{ rows, experts, if (k == 0) "picks" else "weights" });
+            return error.TestUnexpectedResult;
+        };
+    }
+}
