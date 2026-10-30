@@ -140,8 +140,13 @@ pub const Route = struct {
                 if (got_id != want[k].id)
                     return try std.fmt.bufPrint(&t.msg, "row {d} pick {d}: id {d}, host {d}", .{ r, k, got_id, want[k].id });
                 const got_w = wts[r * topk + k];
-                if (@abs(got_w - want[k].wt) > 1e-6)
+                const nan_ok = std.math.isNan(got_w) and std.math.isNan(want[k].wt);
+                if (!nan_ok and !(@abs(got_w - want[k].wt) <= 1e-6))
                     return try std.fmt.bufPrint(&t.msg, "row {d} pick {d}: wt {e:.6}, host {e:.6}", .{ r, k, got_w, want[k].wt });
+                for (0..k) |j| {
+                    if (ids[r * topk + j] == ids[r * topk + k])
+                        return try std.fmt.bufPrint(&t.msg, "row {d}: id {d} picked twice", .{ r, got_id });
+                }
             }
             var nf: bool = false;
             for (row) |v| nf = nf or !std.math.isFinite(v);
