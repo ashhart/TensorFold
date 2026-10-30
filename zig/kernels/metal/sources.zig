@@ -49,6 +49,7 @@ pub const kimi_experts = @embedFile("kimi/experts.metal");
 /// DeepSeek V4.1's routed-expert gate/up (clamped SwiGLU, the reference's activation rounding) over Kimi's kernels.
 pub const deepseek_v41_experts = @embedFile("deepseek_v41/experts.metal");
 pub const deepseek_v41_xmma = @embedFile("deepseek_v41/experts_mma.metal");
+pub const deepseek_v41_glue = @embedFile("deepseek_v41/glue.metal");
 /// DeepSeek-V4.1 router, indexer, compressor and head matvecs: lane chains over K, one butterfly, any row count.
 pub const deepseek_v41_mv = @embedFile("deepseek_v41/mv.metal");
 /// The row-split seam's kernels (see `pair_rows.zig`): `pair.metal` above stays as it is for glm_dsa.
