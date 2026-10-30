@@ -271,23 +271,32 @@ pub const Gpu = struct {
     pub fn memory(g: *Gpu) Error!struct { free: u64, size: u64 } {
         const sys = try resolve(SysApi, &g.lib);
         try check(sys.zesInit(0));
-        var nd: u32 = 8;
+        var nd: u32 = 0; // counts first: loader 1.16 + NEO 23.43 keep a larger count as asked, padded with nulls
+        try check(sys.zesDriverGet(&nd, null));
         var drivers: [8]H = @splat(null);
+        nd = @min(nd, drivers.len);
         try check(sys.zesDriverGet(&nd, &drivers));
         for (drivers[0..nd]) |drv| {
-            var nv: u32 = 8;
+            if (drv == null) continue;
+            var nv: u32 = 0;
+            try check(sys.zesDeviceGet(drv, &nv, null));
             var devs: [8]H = @splat(null);
+            nv = @min(nv, devs.len);
             try check(sys.zesDeviceGet(drv, &nv, &devs));
             for (devs[0..nv]) |dev| {
+                if (dev == null) continue;
                 var p: SysDeviceProperties = .{};
                 try check(sys.zesDeviceGetProperties(dev, &p));
                 if (!std.mem.eql(u8, &p.core.uuid, &g.props.uuid)) continue;
-                var nm: u32 = 16;
+                var nm: u32 = 0;
+                try check(sys.zesDeviceEnumMemoryModules(dev, &nm, null));
                 var mods: [16]H = @splat(null);
+                nm = @min(nm, mods.len);
                 try check(sys.zesDeviceEnumMemoryModules(dev, &nm, &mods));
                 var left: u64 = 0;
                 var all: u64 = 0;
                 for (mods[0..nm]) |m| {
+                    if (m == null) continue;
                     var mp: MemProperties = .{};
                     try check(sys.zesMemoryGetProperties(m, &mp));
                     if (mp.location != 1) continue;
