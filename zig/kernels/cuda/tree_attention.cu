@@ -121,12 +121,23 @@ __device__ __forceinline__ bool tree_group(
     // tile t's keys and values into stage st (committed keys, then the row's path), one cp.async group
     auto load = [&](int t, int st) {
         uint4* const kd = kv0 + st * 2 * HB * C;
+        // PG: a tile's committed keys in one page take its row once a tile (the same addresses as committed())
+        const int kt = t * HB;
+        int64_t tile = -1;
+        if constexpr (sizeof...(P) != 0) {
+            const Pg& g = (pg, ...);
+            if (kt < p && kt % g.tok + HB <= g.tok)
+                tile = (int64_t)g.tab[s * g.stride + kt / g.tok] * g.page + ((int64_t)(kt % g.tok) * hk + kh) * D;
+        }
         for (int i = lane; i < HB * C; i += 32) {
             const int key = t * HB + i / C;
             const bool in = key < k1;
             const __nv_bfloat16* ksrc;
             const __nv_bfloat16* vsrc;
-            if (key < p) {
+            if (key < p && tile >= 0) {
+                ksrc = kc + tile + (int64_t)(key - kt) * hk * D;
+                vsrc = vc + tile + (int64_t)(key - kt) * hk * D;
+            } else if (key < p) {
                 ksrc = committed(kc, key);
                 vsrc = committed(vc, key);
             } else { // the row's own path: key p + j is path row j
