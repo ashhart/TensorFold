@@ -72,6 +72,7 @@ pub fn live(a: std.mem.Allocator, r: *const hip.Runtime, ctx: hip.Context, arch:
         std.debug.print(say, .{ word, arch, d[0], got, d[2] });
     }
     for (all) |rec| {
+        if (!rec.launch.chips[at]) continue;
         const bytes = try image(rec.launch.image);
         const listed = try hsaco.kernels(a, bytes);
         defer a.free(listed);
@@ -108,6 +109,7 @@ pub fn objects(a: std.mem.Allocator, io: std.Io, dir: []const u8) !usize {
         var line: std.ArrayList(u8) = .empty;
         defer line.deinit(a);
         for (limits.rdna, 0..) |t, i| {
+            if (!rec.launch.chips[i]) continue;
             const path = try file(a, dir, t.name, rec.launch.image);
             defer a.free(path);
             const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 28)) catch |err| {

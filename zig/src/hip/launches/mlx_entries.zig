@@ -39,6 +39,11 @@ fn matrixOn(e: Env) bool {
     return e.matrix and e.matrix_on and e.gemm_on;
 }
 
+/// The dequantizing prompt tile: the matrix cores, over weights rounded to bf16 once.
+fn dqOn(e: Env) bool {
+    return e.matrix and e.matrix_on and e.gemm_on and e.dq_on;
+}
+
 // ---- the shapes the tiles have code for
 
 fn groupOk(s: Shape) bool {
@@ -185,6 +190,14 @@ fn fitsPrefillMatrix(s: Shape) bool {
     return prefillOk(s) and !s.fp16 and gemmFits(s);
 }
 
+/// The K stage of the dequantizing prompt tile (tiles/gemm.hpp kGemmK): a stage is a group.
+const dq_group = 32;
+
+/// The prompt tile staged as dequantized BF16 weights: it folds no group terms, so a stage is a group on both sides.
+fn fitsPrefillDq(s: Shape) bool {
+    return fitsPrefillMatrix(s) and s.group == dq_group;
+}
+
 fn fitsPrefillGemm(s: Shape) bool {
     return prefillOk(s) and gemmFits(s);
 }
@@ -303,12 +316,13 @@ const other_decode = [_]Entry{
     entry(.routed_act, .decode, "stream", .{ .family = .stream, .fits = &fitsPair, .launch = &launchPair, .policy = &streamOn }),
 };
 
-fn prefill(comptime op: Op) [7]Entry {
+fn prefill(comptime op: Op) [8]Entry {
     return .{
         entry(op, .prefill, "kp0", .{ .family = .gemm, .fits = kpFits(0), .launch = launchKp(0), .policy = &gemmOn }),
         entry(op, .prefill, "kp1", .{ .family = .gemm, .fits = kpFits(1), .launch = launchKp(1), .policy = &gemmOn }),
         entry(op, .prefill, "kp2", .{ .family = .gemm, .fits = kpFits(2), .launch = launchKp(2), .policy = &gemmOn }),
         entry(op, .prefill, "kp3", .{ .family = .gemm, .fits = kpFits(3), .launch = launchKp(3), .policy = &gemmOn }),
+        entry(op, .prefill, "matrix_dq", .{ .family = .gemm, .fits = &fitsPrefillDq, .launch = launchBlock(.matrix_dq), .caps = &matrixCores, .policy = &dqOn }),
         entry(op, .prefill, "matrix", .{ .family = .gemm, .fits = &fitsPrefillMatrix, .launch = launchBlock(.matrix), .caps = &matrixCores, .policy = &matrixOn }),
         entry(op, .prefill, "gemm", .{ .family = .gemm, .fits = &fitsPrefillGemm, .launch = launchBlock(.gemm), .policy = &gemmOn }),
         entry(op, .prefill, "block", .{ .family = .gemm, .fits = &fitsPrefillBlock, .launch = launchBlock(.block) }),
@@ -326,16 +340,42 @@ fn kernelsOn(gfx: []const u8) affine.Registry {
 }
 
 fn envOn(gfx: []const u8, stream_on: bool, gemm_on: bool, matrix_on: bool) Env {
+    return envDq(gfx, stream_on, gemm_on, matrix_on, false);
+}
+
+fn envDq(gfx: []const u8, stream_on: bool, gemm_on: bool, matrix_on: bool, dq_on: bool) Env {
     const caps = Caps.of(gfx).?;
     const matrix = caps.act == .bf16 and caps.matrix == .wmma11;
-    return .{ .bf16 = caps.act == .bf16, .matrix = matrix, .matrix_on = matrix and matrix_on, .stream_on = stream_on, .gemm_on = gemm_on };
+    return .{ .bf16 = caps.act == .bf16, .matrix = matrix, .matrix_on = matrix and matrix_on, .stream_on = stream_on, .gemm_on = gemm_on, .dq_on = matrix and matrix_on and gemm_on and dq_on };
 }
 
 test "a lane round and a prompt each keep one family at every row count, on every GPU and policy" {
     for ([_][]const u8{ "gfx1030", "gfx1100", "gfx1151", "gfx1201" }) |gfx| {
         const r = kernelsOn(gfx);
-        for ([_]bool{ true, false }) |matrix_on| try r.verify(envOn(gfx, true, true, matrix_on), .mlx);
+        for ([_]bool{ true, false }) |matrix_on| for ([_]bool{ true, false }) |dq_on| {
+            try r.verify(envDq(gfx, true, true, matrix_on, dq_on), .mlx);
+        };
     }
+}
+
+test "the dequantizing prompt tile is a prompt tile only, and takes a plan's items as it takes rows" {
+    const r = kernelsOn("gfx1151");
+    const off = envOn("gfx1151", true, true, true);
+    const on = envDq("gfx1151", true, true, true, true);
+    const at: Shape = .{ .m = 512, .n = 2560, .k = 2560, .bits = 4, .group = 32, .fp16 = false };
+    try std.testing.expectEqualStrings("mlx.project.prefill.matrix", r.select(off, .mlx, .project, .prefill, at).?.id);
+    try std.testing.expectEqualStrings("mlx.project.prefill.matrix_dq", r.select(on, .mlx, .project, .prefill, at).?.id);
+    // a stage is not a group: the folding tile keeps every other group
+    var wide = at;
+    wide.group = 64;
+    try std.testing.expectEqualStrings("mlx.project.prefill.matrix", r.select(on, .mlx, .project, .prefill, wide).?.id);
+    // a plan over stacked experts takes it as a plan, past the item counts the K-parallel tiles stop at
+    var plan = at;
+    plan.items = 400;
+    try std.testing.expectEqualStrings("mlx.routed.prefill.matrix_dq", r.select(on, .mlx, .routed, .prefill, plan).?.id);
+    // the RDNA2 build has no matrix cores, so neither entry can take anything
+    try std.testing.expect(r.select(envDq("gfx1030", true, true, true, true), .mlx, .project, .prefill, at) != null);
+    try std.testing.expect(!std.mem.endsWith(u8, r.select(envDq("gfx1030", true, true, true, true), .mlx, .project, .prefill, at).?.id, "matrix_dq"));
 }
 
 test "the previous decode tiles take over where the stream tile stops" {

@@ -52,6 +52,8 @@ pub const Env = struct {
     stream_on: bool,
     /// The GEMM tile (else the reference one) takes the products.
     gemm_on: bool,
+    /// ...and the prompt's matrix-core tile dequantizes its weights at the stage instead of folding group terms.
+    dq_on: bool,
 };
 
 /// Whether an entry writes the activation type itself instead of fp32.
@@ -235,7 +237,7 @@ fn toy(id: []const u8, path: Path, family: Family, round_any: bool) ToyEntry {
     return .{ .id = id, .format = .mlx, .op = .project, .path = path, .family = family, .caps = &anyEnv, .policy = &anyEnv, .fits = &anyShape, .round_any = round_any, .launch = &nothing };
 }
 
-const toy_env: Env = .{ .bf16 = true, .matrix = true, .matrix_on = true, .stream_on = true, .gemm_on = true };
+const toy_env: Env = .{ .bf16 = true, .matrix = true, .matrix_on = true, .stream_on = true, .gemm_on = true, .dq_on = false };
 const toy_shape: Shape = .{ .m = 1, .n = 64, .k = 64, .bits = 4, .group = 32, .fp16 = false };
 
 test "the cheapest entry that has room for the rows runs" {

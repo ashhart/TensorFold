@@ -10,6 +10,7 @@
 #include "tiles/epilogue.hpp"
 #include "tiles/gemm.hpp"
 #include "tiles/gemm_kp.hpp"
+#include "tiles/matrix_dq.hpp"
 #include "tiles/matrix_gemm.hpp"
 #include "tiles/stream.hpp"
 
@@ -30,11 +31,17 @@ __global__ void __launch_bounds__(32 * WAVES) affine_gemm_kp(Affine a) {
     gemm_kp_tile<MlxDecoder<BITS>, IdentityAct<T>, T, F32Out, CB, R, WAVES, RB, LOOP>(a);
 }
 
-// ---- the prefill GEMM tile on the matrix cores of gfx11 ----
+// ---- The prefill GEMM tile on the matrix cores of gfx11 ----
 
 template <int BITS>
 __global__ void __launch_bounds__(256) affine_wmma_gemm(Affine a) {
     wmma_gemm_tile<MlxDecoder<BITS>, BF16Act, WmmaBF16, F32Out>(a);
+}
+
+// The same tile over weights dequantized to BF16 at the stage: it sums the whole K extent in fp32 without group folds.
+template <int BITS>
+__global__ void __launch_bounds__(256) affine_wmma_gemm_dq(Affine a) {
+    wmma_gemm_dq_tile<MlxDecoder<BITS>, BF16Act, WmmaBF16, F32Out>(a);
 }
 
 // ---- the decode stream tile ----

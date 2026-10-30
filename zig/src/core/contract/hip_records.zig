@@ -463,7 +463,7 @@ const own_records = [_]Record{
     },
 } ++ @import("hip_records_pair.zig").records;
 
-pub const records = own_records ++ @import("hip_records_stream.zig").records;
+pub const records = own_records ++ @import("hip_records_stream.zig").records ++ @import("hip_records_mdq.zig").records;
 
 /// Gate 5's planted HIP controls: a launch past its __launch_bounds__, and 72 KiB of LDS where a workgroup has 64.
 pub const controls = [_]Record{
@@ -503,7 +503,14 @@ pub fn check(a: std.mem.Allocator, list: []const Record, quiet: bool) !usize {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(a);
     var n: usize = 0;
-    for (list) |r| for (limits.rdna, r.usage) |t, u| {
+    for (list) |r| for (limits.rdna, r.usage, 0..) |t, u, i| {
+        if (!r.launch.chips[i]) {
+            if (u.vgprs != 0) {
+                try out.print(a, "{s} on {s}: a usage recorded where the chip has no kernel\n", .{ r.launch.name, t.name });
+                n += 1;
+            }
+            continue;
+        }
         if (u.vgprs == 0) {
             try out.print(a, "{s} on {s}: no compiled usage recorded\n", .{ r.launch.name, t.name });
             n += 1;

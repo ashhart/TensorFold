@@ -204,7 +204,7 @@ test "an exact plan's choice can change at every token, and the edges hold each 
     };
     const table: tuning.Table = .{ .gfx = "gfx1201", .rows = &table_rows };
     const reg = affine.Registry.init(&table, &mlx_entries.all);
-    const env: registry.Env = .{ .bf16 = true, .matrix = false, .matrix_on = false, .stream_on = true, .gemm_on = true };
+    const env: registry.Env = .{ .bf16 = true, .matrix = false, .matrix_on = false, .stream_on = true, .gemm_on = true, .dq_on = false };
     const template: registry.Shape = .{ .m = 8, .n = flash.n, .k = flash.k, .bits = flash.bits, .group = flash.group, .fp16 = false };
     var list: std.ArrayList(usize) = .empty;
     defer list.deinit(std.testing.allocator);

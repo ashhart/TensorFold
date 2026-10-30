@@ -300,13 +300,13 @@ pub fn shapeOf(p: *const Product, e: *const Entry) registry.Shape {
     return shapeFor(p.arg(0, 0), p.items, p.pairCount(), e);
 }
 
-/// Whether `e` is an entry of the launch's (op, path) that the GPU has and whose shape takes it.
+/// Whether `e` is an entry of the launch's (op, path) that the GPU has, the run allows and whose shape takes it.
 pub fn takesArg(k: *const Kernels, e: *const Entry, a: affine.Arg, items: usize, pairs: usize, path: registry.Path) bool {
     const op: registry.Op = if (a.route.items != 0) .routed else .project;
     if (e.format != .mlx or e.op != op or e.path != path) return false;
     var env = k.env();
     env.matrix_on = env.matrix;
-    return e.caps(env) and e.fits(shapeFor(a, items, pairs, e));
+    return e.caps(env) and e.policy(env) and e.fits(shapeFor(a, items, pairs, e));
 }
 
 /// Entries of the product's (op, path) that the GPU has and whose shapes take it.
