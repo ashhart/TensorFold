@@ -70,7 +70,7 @@ pub fn main(init: std.process.Init) !void {
         const host_taps = try a.alloc(u8, bytes);
         for (0..5) |_| {
             @memset(host_taps, 0xab);
-            try q.tap_gather.gather(runner.taps.buffer.contents()[0..runner.taps.buffer.length()], runner.taps.capacity, runner.taps.width, path[0..rows], host_taps);
+            try q.tap_gather.gather(runner.taps.buffer.contents()[0..runner.taps.buffer.length()], runner.taps.capacity, runner.taps.rows, runner.taps.width, path[0..rows], host_taps);
             if (!std.mem.eql(u8, host_taps, accepted.contents()[0..bytes])) return error.HostTapGatherDiffers;
         }
         try draft.absorb(.{ .buf = accepted }, @intCast(rows));
