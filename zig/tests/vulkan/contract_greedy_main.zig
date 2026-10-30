@@ -72,10 +72,10 @@ fn run(a: std.mem.Allocator, vendor: ?u32, timeout: u64) !u8 {
     const v = pr.apiVersion;
     std.debug.print("MILESTONE greedy-contract device-found name=\"{s}\" vendor=0x{x:0>4} device=0x{x:0>4} " ++
         "api={d}.{d}.{d} storage16={} int16={} fence-timeout={d}ms\n", .{
-        name,             pr.vendorID,
-        pr.deviceID,      v >> 22 & 0x7f,
-        v >> 12 & 0x3ff,  v & 0xfff,
-        dev.features.storage16, dev.features.int16,
+        name,                         pr.vendorID,
+        pr.deviceID,                  v >> 22 & 0x7f,
+        v >> 12 & 0x3ff,              v & 0xfff,
+        dev.features.storage16,       dev.features.int16,
         timeout / std.time.ns_per_ms,
     });
     if (pr.deviceType == vk.c.VK_PHYSICAL_DEVICE_TYPE_CPU) {
