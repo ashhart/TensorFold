@@ -22,6 +22,8 @@ pub const prefill_step: u32 = 0;
 pub const policy_prefill_step: u32 = 4096;
 /// Drafts a verify window holds at most past its pending token (`--mtp-drafts` above it is refused before the load).
 pub const max_drafts: u32 = lanes_mod.max_depth;
+/// Flash Next's HIP MTP policy where no flag or mtp_depth key names one: a chain gated to 7 drafts, under 0.9 the last.
+pub const policy_mtp: struct { drafts: u8, confidence: f64, depth: hip.policy.MtpDepth } = .{ .drafts = 7, .confidence = 0.9, .depth = .gated };
 /// Device bytes a rank keeps for the forward's scratch until the engine counts its own.
 pub const scratch_bytes: u64 = 2 << 30;
 

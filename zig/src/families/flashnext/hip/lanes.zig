@@ -293,6 +293,8 @@ pub const Fx = struct {
             .max_streams = @intCast(f.streams),
             .draft_streams = false,
             .plain_guard = timed,
+            // gated: the most drafts every round, the head's per-step confidence (--mtp-confidence) ends the chain
+            .pinned_depth = drafting and f.e.o.policy.mtp_depth == .gated,
             .window_costs = f.costs.window[0..f.costs.windows],
             .shared_costs = f.costs.shared[0..f.costs.shareds],
             .mtp_step_ms = f.costs.step_ms,
