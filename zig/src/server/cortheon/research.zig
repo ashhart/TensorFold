@@ -33,7 +33,7 @@ pub fn run(t: *Turn, srv: *Server, cx: *errors.Cx, input: *chat.Input, sink: ?ch
         const call = try toolCall(a, tools.search_name, "query", q);
         const ran = try tools.run(t.state.web, a, call, t.today, budget, t.goal, &t.seen);
         try t.noteSources(a, ran);
-        if (!ran.ok or ran.sources.len == 0) try t.progress(a, sink, "no results: {s}", .{ran.text[0..@min(ran.text.len, 160)]});
+        if (!ran.ok or ran.sources.len == 0) try t.progress(a, sink, "no results: {s}", .{clip(ran.text, 160)});
         found[i] = ran.sources;
         try calls.append(a, call);
         try results.append(a, try toolMessage(a, call, ran.text));
@@ -52,7 +52,7 @@ pub fn run(t: *Turn, srv: *Server, cx: *errors.Cx, input: *chat.Input, sink: ?ch
         const call = try toolCall(a, tools.fetch_name, "url", url);
         const ran = try tools.run(t.state.web, a, call, t.today, budget, focus, &t.seen);
         try t.noteSources(a, ran);
-        if (!ran.ok) try t.progress(a, sink, "{s}", .{ran.text[0..@min(ran.text.len, 200)]});
+        if (!ran.ok) try t.progress(a, sink, "{s}", .{clip(ran.text, 200)});
         try calls.append(a, call);
         try results.append(a, try toolMessage(a, call, ran.text));
     }
@@ -76,6 +76,11 @@ fn plan(t: *Turn, srv: *Server, a: Allocator, gone: anytype) chat.Failure![]cons
     };
     const list = try parseQueries(a, reply.content);
     return if (list.len > 0) list else fallback(a, t.goal);
+}
+
+/// A slice of at most `max` bytes that ends on a character boundary.
+pub fn clip(text: []const u8, max: usize) []const u8 {
+    return text[0..@import("html.zig").cutAt(text, max)]; // the cap does not split a character
 }
 
 /// Up to three queries from the planner's reply: one a line, list marks and quotes dropped, NONE ignored.
@@ -218,6 +223,17 @@ test "planner replies become clean queries; a goal becomes one when the planner 
     const f = try fallback(a, "```\n\nImplement a client for the latest Stripe API, with retries and idempotency keys and good tests please thanks\n");
     try std.testing.expectEqualStrings("Implement a client for the latest Stripe API, with retries and idempotency", f[0]);
     try std.testing.expectEqualStrings("What are the main changes in the latest Zig release", (try fallback(a, "What are the main changes in the latest Zig release? Name the version."))[0]);
+}
+
+test "a progress clip keeps a character on the cap whole" {
+    var buf: [202]u8 = undefined;
+    @memset(&buf, 'x');
+    buf[199] = 0xe2;
+    buf[200] = 0x82;
+    buf[201] = 0xac;
+    const s = clip(buf[0..202], 200);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(s));
+    try std.testing.expectEqual(@as(usize, 199), s.len);
 }
 
 test "a planner query cut at the cap keeps the character whole" {
