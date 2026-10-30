@@ -1,4 +1,4 @@
-// The datamove group's contract runner: the stage 1 exact kernels through gates 1-4 on a real GPU. Exit 0 pass, 1 fail, 2 usage; every gate prints its own line.
+// GPU runner for stage 1 datamove gates 1-4; each gate prints a line. Exit 0/1/2 = pass/fail/usage.
 const std = @import("std");
 const vk = @import("vulkan");
 const shaders = @import("stage1_shaders");

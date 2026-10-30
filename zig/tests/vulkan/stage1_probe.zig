@@ -1,4 +1,4 @@
-// Vulkan stage 1 bring-up: typed views, arena, BF16 cast/copy, quantized embedding and BF16 Q4 affine g64, checked on a real GPU. Exit 0 pass, 1 fail, 2 usage, 124 fence timeout. Operator bring-up only: no model, no performance claim.
+// Stage 1 GPU checks typed views, arena, BF16 cast/copy and Q4 embed/affine; no model claim. Exit 0/1/2/124.
 const std = @import("std");
 const vk = @import("vulkan");
 const shaders = @import("stage1_shaders");
@@ -332,7 +332,7 @@ fn checkIdsGate(clock: Elapsed) !bool {
     return true;
 }
 
-// The quantized embedding: packed rows gathered by ids then dequantized to bf16 within the contract's bf16 output bound, with the table unchanged.
+// Embedding gathers packed rows by IDs into bounded bf16 output without changing the table.
 fn embedGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, o: *vk.ops.Ops, scratch: *vk.arena.Arena, case: fx.EmbedCase, timeout: u64) !bool {
     var t = try fx.EmbedTable.init(a, case, 0x57a4);
     defer t.deinit();
@@ -382,7 +382,7 @@ fn embedGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: 
     return true;
 }
 
-// BF16 Q4 projection against FP64: contract-bounded outputs, three byte-identical repeats, unchanged inputs and guards, and planted nonfinite outputs refused by the checker.
+// BF16 Q4 projection checks FP64 bounds, three identical repeats, unchanged inputs/guards and nonfinite rejection.
 fn projectGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, o: *vk.ops.Ops, scratch: *vk.arena.Arena, case: fx.Case, seed: u64, timeout: u64) !bool {
     const f = try fx.Fixture.init(a, case, seed);
     defer f.deinit();
