@@ -371,3 +371,14 @@ The complete original MIT notices and permission text are retained in [Mia-Flash
 
 Ling-3.0-tiny and Ling-3.1-flash are MIT licensed by inclusionAI. The host family package
 (`zig/src/families/ling/`) is a port of @jschmied's ling-tiny branch (98026d35). TensorFold ships no Ling weights.
+
+## MOSS-Image seeded noise
+
+`zig/src/families/moss_image/noise.zig` is an altered port, to Zig, of the code x86 PyTorch runs for `torch.randn` on a
+seeded CPU generator, so that it makes the same latents bit for bit:
+
+- PyTorch's mt19937 engine and `normal_fill` (BSD-3-Clause, Copyright (c) 2016- Facebook, Inc. and the other holders
+  listed in `LICENSES/PyTorch-BSD-3.txt`).
+- `log256_ps` and `sincos256_ps` from `avx_mathfun.h`, which PyTorch includes (zlib license, Copyright (C) 2012 Giovanni
+  Garberoglio, based on Julien Pommier's `sse_mathfun.h`, Copyright (C) 2007; the license is in
+  `LICENSES/avx_mathfun-zlib.txt`).
