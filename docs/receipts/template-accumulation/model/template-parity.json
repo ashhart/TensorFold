@@ -1,0 +1,82 @@
+{
+  "template_sha256": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
+  "cases": 6,
+  "revisions": {
+    "base": [
+      {
+        "id": "multiturn-history",
+        "equal": true,
+        "bytes": 3374,
+        "sha256": "c4319e5a76b44eb737443eb6147878d0cc82851e68309244b841fbdf52771688"
+      },
+      {
+        "id": "multiturn-generation",
+        "equal": true,
+        "bytes": 3415,
+        "sha256": "6213290144d6d98eef797863116230a291a4f426fe56ae5d0a93db65700749aa"
+      },
+      {
+        "id": "prose-history",
+        "equal": true,
+        "bytes": 91,
+        "sha256": "2fe769dc4cdedf103c2550c68f9607b362bc6e95e097e08b447cd41bb52e3233"
+      },
+      {
+        "id": "prose-generation",
+        "equal": true,
+        "bytes": 132,
+        "sha256": "4755fa9a0b198def929aa71a4eda57c677898860f96f542d8cb13586bba9d7b2"
+      },
+      {
+        "id": "code-history",
+        "equal": true,
+        "bytes": 83,
+        "sha256": "550299cb517f1732dd0e451593874ad79d042482cd150c8a8b630597500d73c1"
+      },
+      {
+        "id": "code-generation",
+        "equal": true,
+        "bytes": 124,
+        "sha256": "5f60ab1e4ec84bb931d98bfdb5cf68a27048a1f8e9e593be9b75b11b81fe4a0b"
+      }
+    ],
+    "candidate": [
+      {
+        "id": "multiturn-history",
+        "equal": true,
+        "bytes": 3374,
+        "sha256": "c4319e5a76b44eb737443eb6147878d0cc82851e68309244b841fbdf52771688"
+      },
+      {
+        "id": "multiturn-generation",
+        "equal": true,
+        "bytes": 3415,
+        "sha256": "6213290144d6d98eef797863116230a291a4f426fe56ae5d0a93db65700749aa"
+      },
+      {
+        "id": "prose-history",
+        "equal": true,
+        "bytes": 91,
+        "sha256": "2fe769dc4cdedf103c2550c68f9607b362bc6e95e097e08b447cd41bb52e3233"
+      },
+      {
+        "id": "prose-generation",
+        "equal": true,
+        "bytes": 132,
+        "sha256": "4755fa9a0b198def929aa71a4eda57c677898860f96f542d8cb13586bba9d7b2"
+      },
+      {
+        "id": "code-history",
+        "equal": true,
+        "bytes": 83,
+        "sha256": "550299cb517f1732dd0e451593874ad79d042482cd150c8a8b630597500d73c1"
+      },
+      {
+        "id": "code-generation",
+        "equal": true,
+        "bytes": 124,
+        "sha256": "5f60ab1e4ec84bb931d98bfdb5cf68a27048a1f8e9e593be9b75b11b81fe4a0b"
+      }
+    ]
+  }
+}

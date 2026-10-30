@@ -1,0 +1,152 @@
+{
+  "cleanup_errors": [],
+  "ended": 1793350747.7385094,
+  "failure": null,
+  "memory_samples": [
+    {
+      "MemAvailable_bytes": 35522367488,
+      "MemFree_bytes": 7014891520,
+      "SwapFree_bytes": 15293636608,
+      "label": "A1",
+      "phase": "healthy",
+      "server_memory": {
+        "gauges": {
+          "device_memory_bytes": 78654874080.0,
+          "device_memory_peak_bytes": 78654874080.0,
+          "pinned_memory_bytes": 8390672.0,
+          "process_resident_bytes": 311160832.0,
+          "process_resident_peak_bytes": 5254488064.0
+        },
+        "status": "recorded"
+      },
+      "time": 1793349887.322205
+    },
+    {
+      "MemAvailable_bytes": 34126225408,
+      "MemFree_bytes": 7912951808,
+      "SwapFree_bytes": 15293693952,
+      "label": "A1",
+      "phase": "client_finished",
+      "server_memory": {
+        "gauges": {
+          "device_memory_bytes": 78654874080.0,
+          "device_memory_peak_bytes": 79342702460.0,
+          "pinned_memory_bytes": 12851216.0,
+          "process_resident_bytes": 353370112.0,
+          "process_resident_peak_bytes": 5254488064.0
+        },
+        "status": "recorded"
+      },
+      "time": 1793349993.945858
+    },
+    {
+      "MemAvailable_bytes": 35358351360,
+      "MemFree_bytes": 8611864576,
+      "SwapFree_bytes": 15329107968,
+      "label": "B1",
+      "phase": "healthy",
+      "server_memory": {
+        "gauges": {
+          "device_memory_bytes": 78654874080.0,
+          "device_memory_peak_bytes": 78654874080.0,
+          "pinned_memory_bytes": 8390672.0,
+          "process_resident_bytes": 383008768.0,
+          "process_resident_peak_bytes": 5256142848.0
+        },
+        "status": "recorded"
+      },
+      "time": 1793350116.4663177
+    },
+    {
+      "MemAvailable_bytes": 33984909312,
+      "MemFree_bytes": 7092494336,
+      "SwapFree_bytes": 15331971072,
+      "label": "B1",
+      "phase": "client_finished",
+      "server_memory": {
+        "gauges": {
+          "device_memory_bytes": 78654874080.0,
+          "device_memory_peak_bytes": 79342702460.0,
+          "pinned_memory_bytes": 12851216.0,
+          "process_resident_bytes": 434417664.0,
+          "process_resident_peak_bytes": 5256142848.0
+        },
+        "status": "recorded"
+      },
+      "time": 1793350221.9368374
+    },
+    {
+      "MemAvailable_bytes": 34789658624,
+      "MemFree_bytes": 8789766144,
+      "SwapFree_bytes": 15345516544,
+      "label": "A2",
+      "phase": "healthy",
+      "server_memory": {
+        "gauges": {
+          "device_memory_bytes": 78654874080.0,
+          "device_memory_peak_bytes": 78654874080.0,
+          "pinned_memory_bytes": 8390672.0,
+          "process_resident_bytes": 373882880.0,
+          "process_resident_peak_bytes": 5256511488.0
+        },
+        "status": "recorded"
+      },
+      "time": 1793350340.0647805
+    },
+    {
+      "MemAvailable_bytes": 34045616128,
+      "MemFree_bytes": 7931727872,
+      "SwapFree_bytes": 15345553408,
+      "label": "A2",
+      "phase": "client_finished",
+      "server_memory": {
+        "gauges": {
+          "device_memory_bytes": 78654874080.0,
+          "device_memory_peak_bytes": 79342702460.0,
+          "pinned_memory_bytes": 12851216.0,
+          "process_resident_bytes": 425299968.0,
+          "process_resident_peak_bytes": 5256511488.0
+        },
+        "status": "recorded"
+      },
+      "time": 1793350446.3551445
+    },
+    {
+      "MemAvailable_bytes": 35387105280,
+      "MemFree_bytes": 7359840256,
+      "SwapFree_bytes": 15346601984,
+      "label": "B2",
+      "phase": "healthy",
+      "server_memory": {
+        "gauges": {
+          "device_memory_bytes": 78654874080.0,
+          "device_memory_peak_bytes": 78654874080.0,
+          "pinned_memory_bytes": 8390672.0,
+          "process_resident_bytes": 389201920.0,
+          "process_resident_peak_bytes": 5255016448.0
+        },
+        "status": "recorded"
+      },
+      "time": 1793350564.0012183
+    },
+    {
+      "MemAvailable_bytes": 34031792128,
+      "MemFree_bytes": 7762898944,
+      "SwapFree_bytes": 15347392512,
+      "label": "B2",
+      "phase": "client_finished",
+      "server_memory": {
+        "gauges": {
+          "device_memory_bytes": 78654874080.0,
+          "device_memory_peak_bytes": 79342702460.0,
+          "pinned_memory_bytes": 12851216.0,
+          "process_resident_bytes": 440713216.0,
+          "process_resident_peak_bytes": 5255016448.0
+        },
+        "status": "recorded"
+      },
+      "time": 1793350670.3557174
+    }
+  ],
+  "success": true
+}

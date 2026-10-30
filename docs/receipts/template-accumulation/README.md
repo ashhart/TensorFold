@@ -2,7 +2,7 @@
 
 For [#1633](https://github.com/ashhart/TensorFold/issues/1633), interleaved large string concatenations no longer repeatedly copy the growing prompt. Saved strings also keep their bytes and request provenance when an accumulator grows or branches.
 
-Base: `f350cd3ea253a042e205746928271f9d8f71a82d`. Candidate implementation and regression tests: `78b0a0399545c680d2af887980e8f2ccfd2a24f8`. These measurements use synthetic host inputs on Apple M5 Pro, 48 GiB RAM, macOS 27.0, Zig 0.17.0, Python 3.11.16 and Jinja2 3.1.6. No checkpoint, inference backend, rank group or GPU workload is involved.
+Base: `f350cd3ea253a042e205746928271f9d8f71a82d`. Candidate implementation and regression tests: `78b0a0399545c680d2af887980e8f2ccfd2a24f8`. The memory and correctness measurements below use synthetic host inputs on Apple M5 Pro, 48 GiB RAM, macOS 27.0, Zig 0.17.0, Python 3.11.16 and Jinja2 3.1.6. Those measurements involve no checkpoint, inference backend, rank group or GPU workload.
 
 ## Memory and correctness
 
@@ -17,6 +17,14 @@ The public renderer accumulates 1,024-byte messages plus literal separators whil
 The [base scaling test](baseline-scaling.txt) fails its linear memory bound after checking every rendered byte and request/literal provenance offset. The [expanded base run](baseline-regressions.txt) has three failures: interleaved allocation growth, corruption of saved string bytes, and the bound for two growing chains with a grouped long right operand. Its other 29 tests pass. The final [candidate template suite](template-tests.txt) passes all 35 tests, including both doubling checks, saved aliases, branching, self-concatenation, separate text/span relocations, and identical 4,096-byte request/literal fragments with distinct provenance.
 
 An independent Jinja2 oracle covers nine families at four sizes, including macros that mutate the same namespace while an outer expression holds its earlier left operand. The [base](baseline-parity.json) matches 29/36 cases; the [candidate](parity-summary.json) matches all 36 across 2,530,055 output bytes in each of two runs. The candidate runs have identical corpus and result bytes. A separate [ReleaseFast run](releasefast-parity.json) also matches all 36 cases and produces byte-identical results to Debug. Seven baseline mismatches are saved-branch, self-concatenation and macro-mutation cases. This fixes existing corruption; it does not claim equality to corrupted baseline output.
+
+## Host rendering speed
+
+A separate [ReleaseFast benchmark](host-speed/README.md) alternates five ABBA/BAAB blocks and validates output bytes and provenance on every render. The median of ten per-run medians falls from 0.949 ms to 0.196 ms at 128 interleaved messages (−79.3%) and from 3.597 ms to 0.474 ms at 256 messages (−86.8%). The short-chat control is effectively unchanged: 8.35 µs versus 8.38 µs. The base exceeds the 240 MiB scratch cap at 512 messages in ReleaseFast, so that cell has no paired speed comparison. These are host-render times, not model throughput.
+
+## CUDA model gate
+
+The [Qwen chat model receipt](model/README.md) records an alternating baseline/PR/baseline/PR run on one DGX Spark GB10 with identical GPU assets, an 8,192-token context and two lanes. All 292 responses match exactly across drafted/plain, solo/concurrent, repeated and cross-build checks; all reported cached-token counts are zero. Decode changes are +0.01% to +0.80%, and fresh-server first-request TTFT is 575.50 ms versus 575.82 ms (+0.06%). These ordinary-template measurements establish no large observed regression, not a meaningful model-speed gain. The targeted host-render improvement is measured separately above.
 
 ## Design choices required for exactness
 
@@ -47,8 +55,10 @@ The standalone scaling test can run against the base evaluator without the new r
 - Formatting and `git diff --check` passed. Lean: 426 findings on base and branch, zero new; inherited findings are not called clean.
 - The initial sandboxed aggregate run could not bind loopback test servers or query macOS memory pressure. Two waiting server-test controllers were stopped, then the successful aggregate ran with those accesses available. That interrupted attempt is not a pass.
 - Plain `zig build -j2 --summary all` was attempted but failed because the installed Xcode lacks the Metal compiler component. `xcrun -sdk macosx metal -v` confirms the same error outside the sandbox. The default build and Metal-dependent tools are not qualified by the host checks.
-- Full macOS `zig build test` was not run because it includes GPU device checks. GPU/model, served decode, and cold-prefill/TTFT receipts were not run; this receipt establishes bounded host allocation and rendered bytes, not served speed or full-model token parity. The reported multi-rank million-token request was not replayed. No GPU kernel changed, so a new device-contract `SUMMARY` is not applicable.
+- Full macOS `zig build test` was not run because it includes GPU device checks. The bounded CUDA Qwen gate above covers model token parity, served decode and fresh-server TTFT. Resumed-cache equality, the reported multi-rank million-token request, other checkpoints and Metal model/device gates were not run. No GPU kernel changed, so a new device-contract `SUMMARY` is not applicable.
 
 ## Coordination
 
 ATC check was complete and free before claiming #1633. ATC overlap reported `pullFilesLimit`: its fallback covers at most 300 files and open PR #1446 contained 301. An independent paginated audit at `2026-10-30T07:44:45Z` covered all 96 open PRs and 4,618 changed-file entries, with a second inventory confirming every head and base. None touched the four changed source/test files. ATC also reported conflicts involving the separate sampled-heads PR #1609; those are not changes on this branch. No touching PR required a merge-tree check.
+
+Before this receipt update, ATC check was complete with advice `yours` and PR #1652 as the only linked implementation. ATC overlap still reported `pullFilesLimit`; its global coverage is not claimed complete. A fresh independent paginated audit covered 100 open PRs and 4,691 changed-file entries, checking all 30 branch and receipt paths and excluding this PR. A second inventory confirmed stable PR heads and bases, and the local target list stayed unchanged. No other PR touched these paths, so no touching PR required a merge-tree check.

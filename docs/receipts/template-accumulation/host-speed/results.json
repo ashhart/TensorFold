@@ -1,0 +1,522 @@
+[
+  {
+    "block": 0,
+    "position": 0,
+    "revision": "base",
+    "returncode": 1,
+    "ns": {
+      "short 8": [
+        8167,
+        8500,
+        7416
+      ],
+      "interleaved 128": [
+        1451917,
+        1275167,
+        1236500
+      ],
+      "interleaved 256": [
+        3229875,
+        3068625,
+        3694625
+      ],
+      "interleaved 512": []
+    }
+  },
+  {
+    "block": 0,
+    "position": 1,
+    "revision": "candidate",
+    "returncode": 0,
+    "ns": {
+      "short 8": [
+        1708,
+        8208,
+        8625
+      ],
+      "interleaved 128": [
+        258000,
+        299042,
+        338375
+      ],
+      "interleaved 256": [
+        513792,
+        529167,
+        631000
+      ],
+      "interleaved 512": [
+        729000,
+        997750,
+        719208
+      ]
+    }
+  },
+  {
+    "block": 0,
+    "position": 2,
+    "revision": "candidate",
+    "returncode": 0,
+    "ns": {
+      "short 8": [
+        2208,
+        11166,
+        11542
+      ],
+      "interleaved 128": [
+        216833,
+        219167,
+        202792
+      ],
+      "interleaved 256": [
+        443500,
+        350917,
+        405375
+      ],
+      "interleaved 512": [
+        942291,
+        1492750,
+        1062709
+      ]
+    }
+  },
+  {
+    "block": 0,
+    "position": 3,
+    "revision": "base",
+    "returncode": 1,
+    "ns": {
+      "short 8": [
+        10625,
+        10833,
+        10292
+      ],
+      "interleaved 128": [
+        952250,
+        842084,
+        758000
+      ],
+      "interleaved 256": [
+        3151750,
+        3016083,
+        2786875
+      ],
+      "interleaved 512": []
+    }
+  },
+  {
+    "block": 1,
+    "position": 0,
+    "revision": "candidate",
+    "returncode": 0,
+    "ns": {
+      "short 8": [
+        2625,
+        10750,
+        10042
+      ],
+      "interleaved 128": [
+        345667,
+        587833,
+        404167
+      ],
+      "interleaved 256": [
+        607458,
+        481125,
+        630792
+      ],
+      "interleaved 512": [
+        852125,
+        887583,
+        739833
+      ]
+    }
+  },
+  {
+    "block": 1,
+    "position": 1,
+    "revision": "base",
+    "returncode": 1,
+    "ns": {
+      "short 8": [
+        8875,
+        8375,
+        7875
+      ],
+      "interleaved 128": [
+        922917,
+        1127041,
+        880459
+      ],
+      "interleaved 256": [
+        4018959,
+        3745917,
+        3341583
+      ],
+      "interleaved 512": []
+    }
+  },
+  {
+    "block": 1,
+    "position": 2,
+    "revision": "base",
+    "returncode": 1,
+    "ns": {
+      "short 8": [
+        7625,
+        8750,
+        7459
+      ],
+      "interleaved 128": [
+        823750,
+        902458,
+        1272583
+      ],
+      "interleaved 256": [
+        3003000,
+        2953792,
+        4615459
+      ],
+      "interleaved 512": []
+    }
+  },
+  {
+    "block": 1,
+    "position": 3,
+    "revision": "candidate",
+    "returncode": 0,
+    "ns": {
+      "short 8": [
+        1625,
+        7916,
+        8417
+      ],
+      "interleaved 128": [
+        210208,
+        176209,
+        185291
+      ],
+      "interleaved 256": [
+        357375,
+        408083,
+        355333
+      ],
+      "interleaved 512": [
+        656041,
+        768750,
+        693584
+      ]
+    }
+  },
+  {
+    "block": 2,
+    "position": 0,
+    "revision": "base",
+    "returncode": 1,
+    "ns": {
+      "short 8": [
+        7917,
+        9792,
+        11167
+      ],
+      "interleaved 128": [
+        887250,
+        975375,
+        1235333
+      ],
+      "interleaved 256": [
+        3078959,
+        3828083,
+        3653083
+      ],
+      "interleaved 512": []
+    }
+  },
+  {
+    "block": 2,
+    "position": 1,
+    "revision": "candidate",
+    "returncode": 0,
+    "ns": {
+      "short 8": [
+        1500,
+        8542,
+        8416
+      ],
+      "interleaved 128": [
+        183250,
+        191417,
+        161125
+      ],
+      "interleaved 256": [
+        304208,
+        310000,
+        315041
+      ],
+      "interleaved 512": [
+        770416,
+        973000,
+        826375
+      ]
+    }
+  },
+  {
+    "block": 2,
+    "position": 2,
+    "revision": "candidate",
+    "returncode": 0,
+    "ns": {
+      "short 8": [
+        1833,
+        8667,
+        10209
+      ],
+      "interleaved 128": [
+        188208,
+        174542,
+        187875
+      ],
+      "interleaved 256": [
+        319917,
+        315333,
+        316958
+      ],
+      "interleaved 512": [
+        788333,
+        1056125,
+        826042
+      ]
+    }
+  },
+  {
+    "block": 2,
+    "position": 3,
+    "revision": "base",
+    "returncode": 1,
+    "ns": {
+      "short 8": [
+        8000,
+        8541,
+        7833
+      ],
+      "interleaved 128": [
+        770542,
+        784833,
+        748458
+      ],
+      "interleaved 256": [
+        3089416,
+        2812875,
+        2607500
+      ],
+      "interleaved 512": []
+    }
+  },
+  {
+    "block": 3,
+    "position": 0,
+    "revision": "candidate",
+    "returncode": 0,
+    "ns": {
+      "short 8": [
+        1583,
+        7500,
+        7583
+      ],
+      "interleaved 128": [
+        188959,
+        171250,
+        167417
+      ],
+      "interleaved 256": [
+        428958,
+        876833,
+        598125
+      ],
+      "interleaved 512": [
+        891208,
+        817959,
+        712834
+      ]
+    }
+  },
+  {
+    "block": 3,
+    "position": 1,
+    "revision": "base",
+    "returncode": 1,
+    "ns": {
+      "short 8": [
+        11292,
+        8334,
+        7416
+      ],
+      "interleaved 128": [
+        845708,
+        1264791,
+        1015625
+      ],
+      "interleaved 256": [
+        3034792,
+        4010500,
+        3605958
+      ],
+      "interleaved 512": []
+    }
+  },
+  {
+    "block": 3,
+    "position": 2,
+    "revision": "base",
+    "returncode": 1,
+    "ns": {
+      "short 8": [
+        8542,
+        9125,
+        7292
+      ],
+      "interleaved 128": [
+        892833,
+        748500,
+        736958
+      ],
+      "interleaved 256": [
+        3642917,
+        3587750,
+        2977917
+      ],
+      "interleaved 512": []
+    }
+  },
+  {
+    "block": 3,
+    "position": 3,
+    "revision": "candidate",
+    "returncode": 0,
+    "ns": {
+      "short 8": [
+        1584,
+        7750,
+        19042
+      ],
+      "interleaved 128": [
+        204292,
+        190833,
+        235167
+      ],
+      "interleaved 256": [
+        426750,
+        396417,
+        454125
+      ],
+      "interleaved 512": [
+        1119166,
+        1276375,
+        992750
+      ]
+    }
+  },
+  {
+    "block": 4,
+    "position": 0,
+    "revision": "base",
+    "returncode": 1,
+    "ns": {
+      "short 8": [
+        7750,
+        7792,
+        7458
+      ],
+      "interleaved 128": [
+        1112292,
+        1277792,
+        1323125
+      ],
+      "interleaved 256": [
+        3883500,
+        4232833,
+        4337166
+      ],
+      "interleaved 512": []
+    }
+  },
+  {
+    "block": 4,
+    "position": 1,
+    "revision": "candidate",
+    "returncode": 0,
+    "ns": {
+      "short 8": [
+        1750,
+        8334,
+        9125
+      ],
+      "interleaved 128": [
+        175250,
+        190000,
+        185916
+      ],
+      "interleaved 256": [
+        420542,
+        651666,
+        563417
+      ],
+      "interleaved 512": [
+        1187625,
+        1004584,
+        910875
+      ]
+    }
+  },
+  {
+    "block": 4,
+    "position": 2,
+    "revision": "candidate",
+    "returncode": 0,
+    "ns": {
+      "short 8": [
+        3875,
+        9167,
+        11083
+      ],
+      "interleaved 128": [
+        257917,
+        249208,
+        350708
+      ],
+      "interleaved 256": [
+        750167,
+        520333,
+        504291
+      ],
+      "interleaved 512": [
+        883875,
+        866166,
+        874250
+      ]
+    }
+  },
+  {
+    "block": 4,
+    "position": 3,
+    "revision": "base",
+    "returncode": 1,
+    "ns": {
+      "short 8": [
+        8834,
+        8875,
+        7917
+      ],
+      "interleaved 128": [
+        1032083,
+        1283208,
+        977625
+      ],
+      "interleaved 256": [
+        4358375,
+        4150791,
+        3906958
+      ],
+      "interleaved 512": []
+    }
+  }
+]
