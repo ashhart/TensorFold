@@ -1,6 +1,7 @@
 //! Actual HfText and OpenAI HTTP-handler EOS paths with an inert scripted engine, without sockets or a GPU.
 const std = @import("std");
 const api = @import("engine_api");
+const lanes = @import("lanes");
 const json = @import("json");
 const HfText = @import("hf_text.zig").HfText;
 const fixture = @import("hf_eos_fixture.zig");
@@ -14,6 +15,10 @@ const Script = struct {
     a: Allocator,
     ids: []const u32,
     seen_eos: []const u32 = &.{},
+    reason: api.Reason = .length,
+    one: bool = false, // one token an event
+    structured: bool = false, // the request carried a grammar
+    after: ?u32 = null, // the token the grammar starts after
 
     fn engine(s: *Script) api.Engine {
         return .{ .ctx = s, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
@@ -24,9 +29,13 @@ const Script = struct {
     fn submit(ctx: *anyopaque, id: api.Id, request: *const api.Request, sink: api.Sink) api.SubmitError!void {
         const s: *Script = @ptrCast(@alignCast(ctx));
         s.seen_eos = s.a.dupe(u32, request.eos) catch return error.Busy;
+        s.structured = request.structure != null;
+        if (request.structure) |st| s.after = st.after;
         sink.event(sink.ctx, id, &.{ .prefilled = 0 });
-        sink.event(sink.ctx, id, &.{ .tokens = s.ids });
-        sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .length } });
+        if (s.one) {
+            for (s.ids) |*t| sink.event(sink.ctx, id, &.{ .tokens = t[0..1] });
+        } else sink.event(sink.ctx, id, &.{ .tokens = s.ids });
+        sink.event(sink.ctx, id, &.{ .finished = .{ .reason = s.reason } });
     }
     fn cancel(_: *anyopaque, _: api.Id) void {}
     fn status(_: *anyopaque, out: *api.Status, _: []u32) void {
@@ -135,6 +144,86 @@ test "EOS policy: HTTP ignore_eos preserves tokens and a pad not declared as EOS
 test "EOS policy: HTTP preserves ordinary answer text before either declared EOS" {
     for ([_]u32{ 127906, 127901 }) |first| for ([_]bool{ false, true }) |streaming|
         try check(first, true, false, streaming, true);
+}
+
+/// One structured chat reply with ignore_eos, on the DeepSeek-V4.1 test tokenizer.
+fn grammarStop(thinking: bool, streaming: bool, one: bool) !void {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try fixture.Fixture.init(gpa, io, null);
+    defer f.deinit();
+    const vocab = try std.Io.Dir.cwd().readFileAlloc(io, "zig/src/families/deepseek_v41/fixtures/serve/mini_tokenizer.json", a, .limited(1 << 20));
+    // a Fuse decoder: without one its pieces decode joined by spaces
+    const fused = try std.mem.replaceOwned(u8, a, vocab, "{\"version\": \"1.0\",", "{\"version\": \"1.0\", \"decoder\": {\"type\": \"Fuse\"},");
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "tokenizer.json", .data = fused });
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = "{\"model_type\":\"deepseek_v41\"}" });
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "tokenizer_config.json", .data = "{\"eos_token\":\"<｜end▁of▁sentence｜>\"}" });
+    var problem: []const u8 = "";
+    const text = try HfText.load(gpa, io, f.path, null, a, &problem);
+    defer text.deinit();
+    const fake = lanes.grammar_fake;
+    const old = fake.install();
+    defer _ = lanes.grammar.swapLibrary(old);
+    var compiler = fake.compiler();
+    // the lane core ends the reply on the grammar's stop token; with thinking on, an end token before `</think>` stays
+    const end = text.text().tokenId("<｜end▁of▁sentence｜>").?;
+    const close = text.text().tokenId("</think>").?;
+    const reply = [_]u32{ 'h', 'm', end, 'o', 'k', close, '{', '}', end };
+    const ids: []const u32 = if (thinking) &reply else reply[6..];
+    var script = Script{ .a = a, .ids = ids, .reason = .stop, .one = one };
+    const srv = try Server.init(gpa, io, script.engine(), text.text(), .{
+        .served_name = "m",
+        .model_ids = &.{"m"},
+        .enable_thinking = thinking,
+        .use_drafts = false,
+    }, null);
+    defer srv.deinit();
+    srv.info.structures = true;
+    srv.grammars = &compiler;
+    const body = (try json.parse(a, try std.fmt.allocPrint(a, "{{\"model\":\"m\",\"messages\":[{{\"role\":\"user\",\"content\":\"H\"}}],\"max_tokens\":{d},\"stream\":{},\"ignore_eos\":true,\"response_format\":{{\"type\":\"json_object\"}}}}", .{ ids.len, streaming }))).ok;
+    var conn = Conn{ .fd = -1, .peer = "", .buf = &.{}, .gpa = a };
+    var response = Reply{ .a = a };
+    openai.run(srv, a, response.out(), .{ .conn = &conn }, true, body);
+    var content: std.ArrayList(u8) = .empty;
+    var reasoning: std.ArrayList(u8) = .empty;
+    var final: ?json.Value = response.whole;
+    if (streaming) {
+        try std.testing.expect(response.opened and response.done and response.whole == null);
+        for (response.events.items) |value| {
+            const choices = value.get("choices") orelse continue;
+            if (choices.array.len == 0) continue;
+            const choice = choices.array[0];
+            if (choice.get("delta")) |d| {
+                try content.appendSlice(a, d.strField("content") orelse "");
+                try reasoning.appendSlice(a, d.strField("reasoning_content") orelse "");
+            }
+            if (choice.get("finish_reason")) |reason| {
+                if (reason == .string) final = value;
+            }
+        }
+    } else {
+        try std.testing.expectEqual(@as(?u16, 200), response.status);
+        const message = response.whole.?.get("choices").?.array[0].get("message").?;
+        try content.appendSlice(a, message.strField("content") orelse "");
+        try reasoning.appendSlice(a, message.strField("reasoning_content") orelse "");
+    }
+    const value = final orelse return error.MissingFinalReply;
+    try std.testing.expect(script.structured);
+    try std.testing.expectEqual(@as(?u32, if (thinking) close else null), script.after);
+    try std.testing.expectEqualSlices(u32, &.{}, script.seen_eos);
+    try std.testing.expectEqualSlices(u32, &.{end}, srv.eos);
+    try std.testing.expectEqualStrings("{}", content.items);
+    try std.testing.expectEqualStrings(if (thinking) "hm<｜end▁of▁sentence｜>ok" else "", reasoning.items);
+    try std.testing.expectEqualStrings("stop", json.strOr(value.get("choices").?.array[0].get("finish_reason")));
+    try std.testing.expectEqual(@as(i64, @intCast(ids.len)), value.get("usage").?.get("completion_tokens").?.int64().?);
+}
+
+test "EOS policy: with ignore_eos a grammar's stop token ends the reply outside its text, and an earlier end token stays" {
+    for ([_]bool{ false, true }) |thinking| for ([_]bool{ false, true }) |streaming| for ([_]bool{ false, true }) |one|
+        try grammarStop(thinking, streaming, one);
 }
 
 fn tokenIds(streaming: bool, asked: bool) !void {

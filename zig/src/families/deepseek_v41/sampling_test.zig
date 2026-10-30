@@ -41,6 +41,32 @@ test "world four: uneven candidate and whole-row sampling match one rank" {
     }
 }
 
+test "a nucleus row whose grammar masks one rank's whole slice picks from its candidates, as one rank and a whole row do" {
+    const vocab = 1280;
+    const n = 2;
+    const a = testing.allocator;
+    const logits = try a.alloc(f32, n * vocab);
+    defer a.free(logits);
+    @memset(logits, -std.math.inf(f32));
+    var random = std.Random.DefaultPrng.init(847);
+    // row 0 allows 12 tokens in rank 0's 640 columns only, row 1 12 tokens in rank 1's only
+    for (0..12) |j| {
+        logits[3 + 17 * j] = random.random().float(f32) * 4 - 2;
+        logits[vocab + 700 + 31 * j] = random.random().float(f32) * 4 - 2;
+    }
+    const positions = [_]u64{ 5, 6 };
+    const s: pipe.Sampling = .{ .seed = 847, .temperature = 0.8, .top_k = 0, .top_p = 0.9 };
+    var got: [3][n]u32 = undefined;
+    var whole: [3][1]usize = undefined;
+    for ([_]u32{ 1, 2, 2 }, [_]u32{ 64, 64, 0 }, 0..) |world, nucleus, i| {
+        var c: Case = .{ .logits = logits, .world = world, .uneven = true, .rows = n, .sampling = s, .nucleus = nucleus, .positions = &positions, .got = &got[i], .whole = &whole[i] };
+        try run(&c);
+    }
+    try testing.expectEqualSlices(u32, &got[0], &got[1]);
+    try testing.expectEqualSlices(u32, &got[2], &got[1]); // nucleus 0: every row picked from all its tokens
+    try testing.expectEqual(@as(usize, 0), whole[1][0]); // the empty slice's (-inf, NaN) statistics gather no whole row
+}
+
 const Case = struct {
     logits: []const f32,
     world: u32,
