@@ -5,7 +5,9 @@ const radio = @import("radio");
 const nemo_audio = @import("nemo_audio");
 
 /// A clip in a prompt: its samples (16 kHz mono) and the prompt position of its first `<|audio|>` row.
-pub const Clip = struct { samples: []const f32, at: u32 };
+pub const Clip = @import("lanes").stream.Audio;
+/// Clips a request may hold.
+pub const max_clips = 8;
 
 /// A WAV file as the encoder reads it: its samples, the rows it takes, a hash of the samples for the prompt cache.
 pub const Prepared = struct {
@@ -133,7 +135,7 @@ test "audio plan: clips in prompt order, rows back to back, a restored prefix's 
     const a = std.testing.allocator;
     const one: [30560]f32 = @splat(0); // 24 rows
     const two: [56080]f32 = @splat(0); // 44 rows
-    const clips = [_]Clip{ .{ .samples = &one, .at = 43 }, .{ .samples = &two, .at = 80 } };
+    const clips = [_]Clip{ .{ .samples = &one, .at = 43, .tokens = 24 }, .{ .samples = &two, .at = 80, .tokens = 44 } };
     const all = try plan(a, &clips, 0);
     defer a.free(all);
     try std.testing.expectEqual(@as(usize, 2), all.len);
@@ -141,7 +143,7 @@ test "audio plan: clips in prompt order, rows back to back, a restored prefix's 
     const later = try plan(a, &clips, 67);
     defer a.free(later);
     try std.testing.expectEqual(radio.Span{ .at = 80, .n = 44, .row = 0, .image = 1 }, later[0]);
-    const overlapping = [_]Clip{ .{ .samples = &one, .at = 43 }, .{ .samples = &two, .at = 50 } };
+    const overlapping = [_]Clip{ .{ .samples = &one, .at = 43, .tokens = 24 }, .{ .samples = &two, .at = 50, .tokens = 44 } };
     try std.testing.expectError(error.AudioSpans, plan(a, &overlapping, 0));
 }
 
@@ -153,7 +155,7 @@ test "audio begin: a pass refused after planning leaves no spans for the next on
     var enc: nemo_audio.Encoder = undefined;
     var a: Audio = .{ .gpa = std.testing.allocator, .rows = .{ .d = undefined, .buf = undefined, .hidden = 8, .limit = 10 }, .encoder = &enc };
     const one: [30560]f32 = @splat(0); // 24 rows, over the limit of 10
-    const clips = [_]Clip{.{ .samples = &one, .at = 43 }};
+    const clips = [_]Clip{.{ .samples = &one, .at = 43, .tokens = 24 }};
     try std.testing.expectError(error.AudioRows, a.begin(undefined, &clips, 0));
     try std.testing.expectEqual(@as(usize, 0), a.spans.len);
 }

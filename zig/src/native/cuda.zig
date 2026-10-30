@@ -462,6 +462,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         .penalties = served.backend.penalties,
         .structures = served.backend.vtable.first_masked != null,
         .vision = if (@hasField(@TypeOf(loaded), "vision")) vision_offer.offer(loaded.vision, o.vision) else null,
+        .audio = if (@hasField(@TypeOf(loaded), "audio")) vision_offer.audio(loaded.audio) else null,
         .admit = admit,
         .ledger = @import("cuda_ledger.zig").info(if (h.kv_plan) |*p| p else null),
         .slide_conversations = conversations,
