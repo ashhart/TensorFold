@@ -1,5 +1,7 @@
 # Independent template accumulators
 
+**Current revision:** [compact builder handles](value-layout-followup/README.md) restore the original value layout and the plain filler memory peak while retaining large-tool gains. The [new fixed host timings](value-layout-timing/README.md) cover implementation `8d00b490f`. Earlier measurements below retain their original revision identities, including the GPU/model receipts.
+
 For [#1633](https://github.com/ashhart/TensorFold/issues/1633), interleaved large string concatenations no longer repeatedly copy the growing prompt. Saved strings also keep their bytes and request provenance when an accumulator grows or branches.
 
 Base: `f350cd3ea253a042e205746928271f9d8f71a82d`. Candidate implementation and regression tests: `78b0a0399545c680d2af887980e8f2ccfd2a24f8`. The memory and correctness measurements below use synthetic host inputs on Apple M5 Pro, 48 GiB RAM, macOS 27.0, Zig 0.17.0, Python 3.11.16 and Jinja2 3.1.6. Those measurements involve no checkpoint, inference backend, rank group or GPU workload.
@@ -32,7 +34,7 @@ A subsequent [fixed decode-equivalence test](decode-equivalence/README.md) uses 
 
 A later [exact-template follow-up](deepseek-template/README.md) passes all 168 processes and 840 full-output comparisons, including 2,001 seeded filler messages. Both revisions fit the 240 MiB cap, so this shape does not reproduce the reported allocation failure. At 2,001 messages without tools, candidate render scratch is 15.2% higher and the descriptive single-ABBA render time is 10.3% longer. The original tool schemas and private tool-heavy conversation were unavailable. The synthetic string-accumulation gains above remain separate evidence; the PR stays draft without claiming that this follow-up proves resolution of the production incident.
 
-A subsequent [allocation diagnostic](allocation-diagnostic/README.md) identifies the input-dependent mechanism: on the same exact template, repeated 8 KiB tool arguments trigger baseline prefix copying. At 64 cycles, ReleaseSafe render scratch falls from 117.87 MiB to 17.53 MiB; at 128 cycles, three baseline cases hit the fixed cap while the candidate completes. It also measures `Value` growing from 48 to 56 bytes, adding 16,024,008 bytes of list-copy payload to the 2,001-message filler. The PR remains draft because the original incident is not reproduced and the value-size regression needs attention. These are allocation diagnostics, not new timing results.
+A subsequent [allocation diagnostic](allocation-diagnostic/README.md) identifies the input-dependent mechanism: on the same exact template, repeated 8 KiB tool arguments trigger baseline prefix copying. At 64 cycles, ReleaseSafe render scratch falls from 117.87 MiB to 17.53 MiB; at 128 cycles, three baseline cases hit the fixed cap while the candidate completes. It also measures `Value` growing from 48 to 56 bytes, adding 16,024,008 bytes of list-copy payload to the 2,001-message filler. The PR remains draft because the original incident is not reproduced and at that stage the value-size regression needed attention. These are allocation diagnostics, not new timing results.
 
 ## Design choices required for exactness
 
