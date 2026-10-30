@@ -24,6 +24,8 @@ const stream_code_words = affine.stream_code_words;
 pub const stream_pair_code_words = 8;
 /// The widest columns a lane of a routed plain product (the experts' down) takes, by row tile (stream_rows).
 pub const stream_routed_cb_top = [stream_rows.len]c_int{ 8, 4, 4 };
+/// The columns below which one row of a plain product takes one column a lane; wider heads keep the waves rule.
+pub const stream_one_col_n = 20_000;
 
 pub fn streamWith(
     k: *const Kernels,
@@ -51,6 +53,8 @@ pub fn streamWith(
         if (stream_cbs[c] * stream_rows[ri] > 16 or stream_cbs[c] * a.bits > stream_code_words or (stream_cbs[c] < 2 and (pair_div == 2 or relu2))) continue;
         if (pair_div == 2 and stream_cbs[c] > 2 and stream_cbs[c] * a.bits > stream_pair_code_words) continue;
         if (a.route.items != 0 and pair_div == 1 and !relu2 and stream_cbs[c] > stream_routed_cb_top[ri]) continue;
+        // one row of an unrouted plain product under stream_one_col_n columns: one column a lane; wider keeps the rule
+        if (ri == 0 and a.route.items == 0 and pair_div == 1 and !relu2 and total_n < stream_one_col_n and stream_cbs[c] > 1) continue;
         pick = c;
         const per_block: c_int = stream_waves * (@as(c_int, 32) >> lpc_log2) * @divExact(stream_cbs[c], pair_div);
         if (@as(u64, cdiv(total_n, per_block)) * stream_waves * @as(u64, @intCast(items)) * cdiv(a.m, stream_rows[ri]) >= streams_wanted) break;

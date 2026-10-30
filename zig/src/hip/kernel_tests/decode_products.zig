@@ -92,3 +92,42 @@ test "the routed gate+up and down write the same bytes at every columns a lane a
         try windowBytes(t, &rng, down, 8, 22);
     }
 }
+
+/// A plain product (one matrix, fp32 out) at every columns-a-lane count against the launcher's pick: the same bytes.
+fn plainBytes(t: *Rig, rng: *rig.Rng, n: usize, k: usize, rows: usize) !void {
+    var m = try Matrix.init(t, rng, n, k, 4, 32, 1);
+    defer m.deinit();
+    const kernels = &t.on.affine;
+    defer kernels.stream_cb_force = 0;
+    const hx = try gpa.alloc(u16, rows * k);
+    defer gpa.free(hx);
+    for (hx) |*v| v.* = t.bits(rng.unit());
+    var x = try t.upload(hx);
+    defer x.free();
+    var want: ?[]u8 = null;
+    defer if (want) |w| gpa.free(w);
+    for ([_]c_int{ 0, 1, 2, 4, 8 }) |cb| {
+        var out = try t.alloc(rows * n * 4);
+        defer out.free();
+        const a = m.arg(t, at(x), rows, at(out));
+        kernels.stream_cb_force = cb;
+        try kernels.streamGo(&t.r, a, .{}, a.n, 1, t.stream.handle);
+        try t.stream.synchronize();
+        const got = try rig.download(u8, out);
+        if (want) |w| {
+            defer gpa.free(got);
+            try std.testing.expectEqualSlices(u8, w, got);
+        } else want = got;
+    }
+}
+
+test "a plain product writes the same bytes at every columns a lane (Flash Next's in-proj K, out-proj, a ragged N; 1 to 4 rows)" {
+    const t = try Rig.open(1 << 20);
+    defer t.close();
+    var rng: rig.Rng = .{ .state = 0x9E3779B97F4A7C15 };
+    for ([_]usize{ 1, 2, 4 }) |rows| {
+        try plainBytes(t, &rng, 4096, 2560, rows);
+        try plainBytes(t, &rng, 2560, 6144, rows);
+        try plainBytes(t, &rng, 4099, 2560, rows);
+    }
+}
