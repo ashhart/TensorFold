@@ -5,6 +5,8 @@ const model = @import("model.zig");
 const cache = @import("cache.zig");
 const forward = @import("forward.zig");
 const mixers = @import("mixers.zig");
+const lanes = @import("lanes");
+const serve = @import("hip_serve");
 
 const Ops = hip.ops.Ops;
 const Tensor = hip.ops.Tensor;
@@ -153,4 +155,51 @@ pub fn draws(
         t.* = ids[i];
         p.* = @bitCast(f);
     }
+}
+
+/// Candidates a keyed draft downloads at most (top_k + MARGIN); a request asking for more drafts its argmax.
+pub const max_keyed = 64;
+
+/// A sampled stream's draft: the target's keyed Gumbel-max over the head's survivors; null if greedy or past max_keyed.
+pub fn keyed(
+    o: Ops,
+    m: *const model.Model,
+    host: *forward.Host,
+    s: hip.Stream,
+    mixed: Tensor,
+    ids: []const u32,
+    sampling: lanes.Sampling,
+    position: u64,
+    prob: ?*f32,
+) !?u32 {
+    if (sampling.temperature <= 0 or sampling.top_k == 0) return null;
+    const w = &m.mtp.?;
+    const n = w.draft.n;
+    const stride: usize = @min(n, @as(usize, sampling.top_k) + serve.sample.MARGIN);
+    if (stride > max_keyed) return null;
+    const logits = try o.project(mixed, w.draft, 1, false);
+    const k: i32 = @intCast(stride);
+    const ks = try host.put(o, std.mem.asBytes(&k));
+    // argmax, its probability, then the candidates' ids and values: one download
+    const dev = try o.arena.take(8 + stride * 6);
+    if (prob != null) {
+        try o.argmaxRows(logits, 1, n, dev);
+        try o.tokenProb(logits, 1, n, dev, dev + 4);
+    }
+    try o.topkRows(logits, 1, n, ks, stride, dev + 8, dev + 8 + stride * 4);
+    const at = std.mem.alignForward(usize, host.used, 16);
+    const bytes = host.staging.bytes[at..][0 .. 8 + stride * 6];
+    try hip.runtime.check(host.d.api.hipMemcpyDtoHAsync(bytes.ptr, @ptrFromInt(dev), bytes.len, s.handle));
+    try s.synchronize();
+    const words = std.mem.bytesAsSlice(u32, @as([]align(4) u8, @alignCast(bytes[0 .. 8 + stride * 4])));
+    if (prob) |q| q.* = @bitCast(words[1]);
+    const vals = std.mem.bytesAsSlice(u16, @as([]align(2) u8, @alignCast(bytes[8 + stride * 4 ..])));
+    var values: [max_keyed]f64 = undefined;
+    var tokens: [max_keyed]u64 = undefined;
+    const dtype: serve.sample.Dtype = if (m.act == .f16) .f16 else .bf16;
+    for (0..stride) |j| {
+        values[j] = serve.sample.widen(vals, dtype, j);
+        tokens[j] = ids[words[2 + j]];
+    }
+    return @intCast(try lanes.sampling.choose(host.gpa, values[0..stride], tokens[0..stride], position, sampling));
 }

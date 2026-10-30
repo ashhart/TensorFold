@@ -146,8 +146,13 @@ pub fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void
         var chained: usize = 0;
         while (d < depth) : (d += 1) {
             var tok: [1]u32 = undefined;
-            var prob: [1]f32 = undefined;
-            try head_mod.draws(o, m, &e.host, e.stream, mixed, 1, f.draft_ids, &tok, &prob);
+            var prob: [1]f32 = .{1.0};
+            // a sampled stream drafts the target's keyed choice (head.keyed), its probability only for the gate
+            const keyed = if (sampling(r.stream)) |sm|
+                try head_mod.keyed(o, m, &e.host, e.stream, mixed, f.draft_ids, sm, r.position + d, if (stop_under > 0) &prob[0] else null)
+            else
+                null;
+            if (keyed) |t| tok[0] = t else try head_mod.draws(o, m, &e.host, e.stream, mixed, 1, f.draft_ids, &tok, &prob);
             lane.held[d] = tok[0];
             chained = d + 1;
             if (d + 1 == depth or prob[0] < stop_under) break;
