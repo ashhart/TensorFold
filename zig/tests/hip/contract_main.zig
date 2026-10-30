@@ -162,6 +162,9 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     for (&gdn_prompts, std.enums.values(gdn_k.Part)) |*m, p| m.* = .init(a, &r, s, &l, p);
     defer for (&gdn_prompts) |*m| m.deinit();
     for (&gdn_prompts) |*m| try kernels.append(a, m.kernel());
+    var gdn_prep = @import("contract_gdn_prep.zig").Prep.init(a, &r, s, &l);
+    defer gdn_prep.deinit();
+    try kernels.append(a, gdn_prep.kernel());
     var t: g.Tally = .{};
     const t0 = ms(io);
     try g.runAll(a, kernels.items, 0x6b63, &t);

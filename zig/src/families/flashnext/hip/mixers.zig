@@ -79,6 +79,44 @@ pub fn linear(
         }
         return recur(o, m, l, segs, index, q, k, v, gate, beta, z, rows, true);
     }
+    if (o.fused() and d.key_dim == 128 and d.conv <= 8) {
+        // a stream's conv, split, q and k norms and gates in one launch (tf_gdn_prompt_prep: the chain's values)
+        var at_row: usize = 0;
+        for (segs) |g| {
+            const n = g.tokens.len;
+            const st = g.c.linearAt(index);
+            const conv_bytes = (d.conv - 1) * ch * 4;
+            const next = try o.arena.take(conv_bytes);
+            try o.l.tf_gdn_prompt_prep(
+                @ptrFromInt(forward.at(qkv, at_row * ch).ptr),
+                @backingInt(m.act),
+                @ptrFromInt(l.conv),
+                @ptrFromInt(st.conv),
+                @ptrFromInt(next),
+                @ptrFromInt(q + at_row * kw * 4),
+                @ptrFromInt(k + at_row * kw * 4),
+                @ptrFromInt(v + at_row * vw * 4),
+                @ptrFromInt(m.qk.q),
+                @ptrFromInt(m.qk.k),
+                m.qk.eps,
+                @intCast(n),
+                @intCast(kw),
+                @intCast(vw),
+                @intCast(d.conv),
+                @ptrFromInt(forward.at(a, at_row * d.value_heads).ptr),
+                @ptrFromInt(forward.at(b, at_row * d.value_heads).ptr),
+                @ptrFromInt(l.a_log),
+                @ptrFromInt(l.dt_bias),
+                @ptrFromInt(gate + at_row * d.value_heads * 4),
+                @ptrFromInt(beta + at_row * d.value_heads * 4),
+                @intCast(d.value_heads),
+                o.stream,
+            );
+            if (o.stream != hip.counting) try hip.runtime.check(o.l.r.api.hipMemcpyDtoDAsync(@ptrFromInt(st.conv), @ptrFromInt(next), conv_bytes, o.stream));
+            at_row += n;
+        }
+        return recur(o, m, l, segs, index, q, k, v, gate, beta, z, rows, false);
+    }
     const mixed = try o.arena.of(f32, rows * ch);
     var off: usize = 0;
     for (segs) |g| {
