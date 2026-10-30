@@ -463,6 +463,15 @@ const own_records = [_]Record{
             .{ .vgprs = 135, .sgprs = 83, .lds = 5456, .private = 0, .bound = 128, .wave = 32 },
         },
     },
+    .{
+        .launch = .{ .name = "MoE down codes read beside the gate and up (side stream) tf_moe_prefetch", .symbol = "tf_moe_prefetch", .image = "decode", .threads = 256 },
+        .usage = .{
+            .{ .vgprs = 11, .sgprs = 20, .lds = 260, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 11, .sgprs = 20, .lds = 260, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 11, .sgprs = 20, .lds = 260, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 11, .sgprs = 18, .lds = 260, .private = 0, .bound = 256, .wave = 32 },
+        },
+    },
 } ++ @import("hip_records_wmma.zig").records ++ @import("hip_records_pair.zig").records;
 
 pub const records = own_records ++ @import("hip_records_stream.zig").records ++ @import("hip_records_route.zig").records ++

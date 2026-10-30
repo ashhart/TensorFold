@@ -3,6 +3,7 @@
 const t = @import("types.zig");
 const Ops = @import("ops.zig").Ops;
 const Launcher = @import("../launches.zig").Launcher;
+const util = @import("../launches/util.zig");
 const Error = t.Error;
 const Tensor = t.Tensor;
 const p = t.p;
@@ -48,4 +49,11 @@ pub fn moeAct(o: Ops, both: u64, out: Tensor, pairs: usize, width: usize, limit:
 
 pub fn moeCombine(o: Ops, y: u64, wts: u64, out: Tensor, r: usize, slots: usize, d: usize) Error!void {
     try o.l.tf_moe_combine(f(y), f(wts), p(out.ptr), @backingInt(out.kind), int(r), int(slots), int(d), o.stream);
+}
+
+/// After a fork, read the live `items`' experts' down codes into the caches on the side stream, at most `cap` bytes.
+pub fn moePrefetch(o: Ops, items: u64, count: usize, words: u64, expert_bytes: usize, experts: usize, cap: usize) Error!void {
+    if (o.side.stream == null or o.side.ring == null or o.stream == util.counting) return;
+    try o.fork();
+    try o.l.tf_moe_prefetch(@ptrFromInt(items), int(count), words, @intCast(expert_bytes), int(experts), @intCast(cap), o.side.stream);
 }

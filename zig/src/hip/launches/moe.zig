@@ -150,6 +150,22 @@ pub fn tf_moe_act(l: *const Launcher, both: CF, out: P, kind: c_int, pairs: c_in
     try l.go(l.moe_act[if (kind == 1) 0 else 1], dim(cdiv(total, 256), 1, 1), dim(256, 1, 1), 0, s, &a);
 }
 
+/// The prefetch's blocks: 16 of 256 threads finish a one-row call's down codes about when its down starts.
+pub const prefetch_blocks = 16;
+
+/// tf_moe_prefetch on side stream `s`: reads the live items' experts' down codes, at most `cap_bytes`; writes nothing.
+pub fn tf_moe_prefetch(l: *const Launcher, items: CI, count: c_int, words: u64, expert_bytes: i64, experts: c_int, cap_bytes: i64, s: S) Error!void {
+    if (count <= 0 or expert_bytes <= 0 or @rem(expert_bytes, 16) != 0) return invalid("moe prefetch");
+    var a: Args = .{};
+    try a.add(ad(items));
+    try a.add(count);
+    try a.add(words);
+    try a.add(expert_bytes);
+    try a.add(experts);
+    try a.add(cap_bytes);
+    try l.go(l.dec.prefetch, dim(prefetch_blocks, 1, 1), dim(256, 1, 1), 0, s, &a);
+}
+
 pub fn tf_moe_combine(l: *const Launcher, y: CF, wts: CF, out: P, kind: c_int, r: c_int, slots: c_int, d: c_int, s: S) Error!void {
     var a: Args = .{};
     try a.add(ad(y));

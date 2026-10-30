@@ -117,6 +117,8 @@ pub const Launcher = struct {
         gnorm_out: Function,
         select: Function,
         select_rows: Function,
+        /// A MoE call's live experts' down codes read beside its gate and up (tf_moe_prefetch).
+        prefetch: Function,
     };
 
     const Ops = struct {
@@ -179,7 +181,7 @@ pub const Launcher = struct {
         const pl = l.mods[@backingInt(kernels.Group.plan)];
         l.fuse = choices.fuse;
         l.wide = choices.wide;
-        l.dec = .{ .router = .{ try dec.function("tf_router_decode_f16"), try dec.function("tf_router_decode_bf16") }, .router_select = .{ try dec.function("tf_router_select_f16"), try dec.function("tf_router_select_bf16") }, .tail = try dec.function("tf_tail"), .conv_split = try dec.function("tf_conv_split"), .rms2 = try dec.function("tf_rms2"), .gnorm_out = try dec.function("tf_gnorm_out"), .select = try dec.function("tf_select_decode"), .select_rows = try dec.function("tf_select_rows") };
+        l.dec = .{ .router = .{ try dec.function("tf_router_decode_f16"), try dec.function("tf_router_decode_bf16") }, .router_select = .{ try dec.function("tf_router_select_f16"), try dec.function("tf_router_select_bf16") }, .tail = try dec.function("tf_tail"), .conv_split = try dec.function("tf_conv_split"), .rms2 = try dec.function("tf_rms2"), .gnorm_out = try dec.function("tf_gnorm_out"), .select = try dec.function("tf_select_decode"), .select_rows = try dec.function("tf_select_rows"), .prefetch = try dec.function("tf_moe_prefetch") };
         l.plan = .{
             .kv_write = try pl.function("tf_plan_kv_write"),
             .kv_write_act = try pl.function("tf_plan_kv_write_act"),
@@ -331,6 +333,7 @@ pub const Launcher = struct {
     pub const routerSelect = moe.routerSelect;
     pub const tf_moe_select = moe.tf_moe_select;
     pub const tf_moe_act = moe.tf_moe_act;
+    pub const tf_moe_prefetch = moe.tf_moe_prefetch;
     pub const tf_moe_combine = moe.tf_moe_combine;
     pub const tf_moe_route = moe.tf_moe_route;
     pub const tf_moe_route_wide = moe.tf_moe_route_wide;

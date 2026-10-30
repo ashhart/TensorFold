@@ -40,6 +40,9 @@ pub const Routed = struct {
     }
 };
 
+/// Most rows a call has to read its live experts' down codes on the side stream beside its gate and up (more: no gain).
+pub const prefetch_rows = 1;
+
 /// experts.py: the decode tile's most rows, the GEMM tile's rows and where it starts, items' pair cap.
 const LANE_ROWS = 8;
 const BLOCK_ROWS = 128;
@@ -107,13 +110,13 @@ pub fn run(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, prefill: bool)
         try o.moeCombine(y, wts, .{ .ptr = share, .kind = .f32 }, rows, slots, ex.dims);
         return .{ .ptr = share, .kind = .f32 };
     }
-    const p = try expertParts(o, kind, r, x, rows, logits, pick, wts, items, members, cap);
+    const p = try expertParts(o, kind, r, x, rows, logits, pick, wts, items, members, cap, false);
     const out = try o.arena.take(rows * ex.dims * kind.size());
     try o.moeCombine(p.y, wts, .{ .ptr = out, .kind = kind }, rows, slots, ex.dims);
     return .{ .ptr = out, .kind = kind };
 }
 
-/// The routed slots a row (fp32) and their weights before the sum: a single rank only.
+/// The routed slots a row (fp32) and their weights before the sum, single rank: join the side stream before reading y.
 pub const Parts = struct { y: u64, wts: u64, slots: usize };
 
 pub fn parts(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize) ops.Error!Parts {
@@ -125,12 +128,12 @@ pub fn parts(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize) ops.Error!Pa
     const wts = try o.arena.of(f32, size * slots);
     const items = try o.arena.of(i32, cap * 3);
     const members = try o.arena.of(i32, size * slots);
-    const p = try expertParts(o, kind, r, x, rows, logits, pick, wts, items, members, cap);
+    const p = try expertParts(o, kind, r, x, rows, logits, pick, wts, items, members, cap, true);
     return .{ .y = p.y, .wts = wts, .slots = slots };
 }
 
 /// Select, plan, gate and up, the activation and down: the rows' slots before the combine.
-fn expertParts(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, logits: u64, pick: u64, wts: u64, items: u64, members: u64, cap: usize) ops.Error!struct { y: u64 } {
+fn expertParts(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, logits: u64, pick: u64, wts: u64, items: u64, members: u64, cap: usize, prefetch: bool) ops.Error!struct { y: u64 } {
     const ex = r.experts;
     const slots = r.top_k + 1;
     const pairs = rows * slots;
@@ -158,6 +161,14 @@ fn expertParts(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, logits: u6
             if (tile == BLOCK_ROWS) count = @min(cap, planItems(pairs, r.rows, tile));
         }
     }
+    // the live experts' down codes into the caches on the side stream while the gate and up run
+    if (prefetch and rows <= prefetch_rows and !o.prefill) switch (ex.down.handle) {
+        .mlx => |h| {
+            const expert_bytes = @as(usize, ex.down.n) * @as(usize, ex.down.k) * @as(usize, h.bits) / 8;
+            try o.moePrefetch(items, count, h.words, expert_bytes, r.rows, count * expert_bytes);
+        },
+        .dense => {},
+    };
     // the gate and up's activation is the launch's epilogue when the tile takes the shape
     const act_t: Tensor = if (try o.projectRoutedAct(x, ex.fused, items, count, members, pairs, slots, @min(tile, rows), ex.limit)) |t| t else blk: {
         const both = try o.projectRouted(x, ex.fused, items, count, members, pairs, slots, @min(tile, rows));

@@ -197,6 +197,8 @@ gate 1: upstream's `select_body` ranks a NaN level with the top number, so slot 
 numbers leaves slots unwritten. Their bytes stay equal to upstream's.
 HIP's top-k in parts (`tf_topk_part`, `tf_topk_join`) is bit-equal to `tf_topk` and checked against its key order: a
 positive NaN above +Inf, a negative NaN below -Inf, -0 equal to +0, ties to the lower id.
+`tf_moe_prefetch` writes nothing: gates 1 to 3 check that every buffer and guard stays as prepared, and gate 5 holds
+its launch. It has no float output for gates 1 and 3 to class or bound, and no sums for gate 4.
 HIP also checks Flash Next's hyper-connection kernels. On gfx11, `tf_affine_dense_hcmix` (hc up's dense K 320 tile
 with the HC mix as its epilogue) is bit-equal to the tile's bf16 product then `tf_fn_hc_mix`, and its gate table
 `tf_hc_gate_fill` holds, for all 65,536 bf16 g, float64's sigmoid rounded to bf16 within expf's 2^-20 and

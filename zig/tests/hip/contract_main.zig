@@ -21,6 +21,7 @@ const wmma_moe_k = @import("contract_wmma_moe.zig");
 const route_k = @import("contract_route.zig");
 const select_k = @import("contract_select.zig");
 const topk_k = @import("contract_topk.zig");
+const prefetch_k = @import("contract_prefetch.zig");
 const fn_scores_k = @import("contract_fn_scores.zig");
 const fn_qsa_k = @import("contract_fn_qsa.zig");
 
@@ -161,6 +162,9 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     var topk = topk_k.Topk.init(a, &r, s, &l);
     defer topk.deinit();
     try kernels.append(a, topk.kernel());
+    var prefetch = prefetch_k.Prefetch.init(a, &r, s, &l);
+    defer prefetch.deinit();
+    try kernels.append(a, prefetch.kernel());
     var fn_scores: [2]fn_scores_k.Scores = undefined;
     for (&fn_scores, std.enums.values(fn_scores_k.Which)) |*x, w| x.* = .init(a, &r, s, &l, w);
     defer for (&fn_scores) |*x| x.deinit();
