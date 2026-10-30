@@ -42,11 +42,25 @@ __device__ __forceinline__ void part_staged(const __nv_bfloat16* __restrict__ q,
     constexpr bool busy = true;
     const auto stage = [&](const __nv_bfloat16* cache, int t) {
         uint4* dst = tiles + (t % NSG) * TK * C;
+        // PG: a tile's keys in one page take its row once a tile (the same addresses as a page a key)
+        int64_t tile = -1;
+        if constexpr (sizeof...(P) != 0) {
+            const Pg& g = (pg, ...);
+            const int a = k0 + t * TK, b = k0 + min(t * TK + TK - 1, nk - 1);
+            if (a / g.tok == b / g.tok)
+                tile = g.tab[(slot != nullptr ? slot[r] : 0) * g.stride + a / g.tok] * g.page +
+                       (static_cast<int64_t>(a % g.tok) * hk + kh) * D;
+        }
         for (int i = threadIdx.x; i < TK * C; i += NT) {
             const int jj = t * TK + i / C;
             if constexpr (sizeof...(P) != 0) { // a page a key: any tok, a tile may cross pages
                 const Pg& g = (pg, ...);
                 const int key = k0 + min(jj, nk - 1);
+                if (tile >= 0) {
+                    cp16z(dst + i, cache + tile + (static_cast<int64_t>(key - k0 - t * TK) * hk * D) + (i % C) * 8,
+                          jj < nk);
+                    continue;
+                }
                 const int64_t id = g.tab[(slot != nullptr ? slot[r] : 0) * g.stride + key / g.tok];
                 cp16z(dst + i, cache + id * g.page + (static_cast<int64_t>(key % g.tok) * hk + kh) * D + (i % C) * 8,
                       jj < nk);
