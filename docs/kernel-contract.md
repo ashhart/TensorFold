@@ -252,6 +252,11 @@ unsplit K, `linear_wc`'s tiles); a host test sweeps K and N to 16384 through `ex
 form no registration runs. A fixed plan keeps the linear. Gate 4 proves an fp16 sum would overflow on a constant-weight
 stress input (all-ones states: one weight at every width). Six controls: another K split (3, 4 and 5 bits; `linear_wc`),
 swapped scales, a swapped suh.
+CUDA also checks Nemotron 3.5 Transcribe's audio encoders (`nemo_audio.cu`): the ASR encoder's q/k LayerNorm with
+RoPE on 64 of 128 channels and the Sortformer's RoPE alone (each output within float64's bound at its three bf16
+points), attention over a window's valid keys (core/attention_range.zig's range, P as bf16), and the Sortformer head's
+im2col, padding and relu rows, exact (five controls: a one-pass variance, a key short of the window, a padding row read
+or kept, and a relu by `fmaxf`).
 HIP: the RMS norm rows, a wave a row (fp32, fp16 and bf16 out) and a block a row (fp16 and bf16 out).
 HIP also checks the 64-row prompt attention tile (`prefill.hip`): `tf_fa_paged_bf16` and `tf_fa_paged_f16` over a
 permuted page table at the 27B's, the 35B-A3B's and Nemotron's head counts, each output within attention_ref's float64

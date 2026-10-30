@@ -5,6 +5,7 @@ pub const Config = @import("config.zig");
 pub const mel = @import("mel.zig");
 pub const sortformer = @import("sortformer.zig");
 pub const Dump = @import("dump.zig").Dump;
+pub const kernels = @import("kernels.zig");
 const W = @import("weights.zig");
 const enc = @import("encoder.zig");
 const Allocator = std.mem.Allocator;
