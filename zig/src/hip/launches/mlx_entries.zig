@@ -304,14 +304,16 @@ const other_decode = [_]Entry{
 };
 
 fn prefill(comptime op: Op) [7]Entry {
+    // a plain prompt product rounds into out16 when asked; a routed one writes fp32 for the expert combine
+    const r: registry.Rounds = if (op == .project) .always else .never;
     return .{
-        entry(op, .prefill, "kp0", .{ .family = .gemm, .fits = kpFits(0), .launch = launchKp(0), .policy = &gemmOn }),
-        entry(op, .prefill, "kp1", .{ .family = .gemm, .fits = kpFits(1), .launch = launchKp(1), .policy = &gemmOn }),
-        entry(op, .prefill, "kp2", .{ .family = .gemm, .fits = kpFits(2), .launch = launchKp(2), .policy = &gemmOn }),
-        entry(op, .prefill, "kp3", .{ .family = .gemm, .fits = kpFits(3), .launch = launchKp(3), .policy = &gemmOn }),
-        entry(op, .prefill, "matrix", .{ .family = .gemm, .fits = &fitsPrefillMatrix, .launch = launchBlock(.matrix), .caps = &matrixCores, .policy = &matrixOn }),
-        entry(op, .prefill, "gemm", .{ .family = .gemm, .fits = &fitsPrefillGemm, .launch = launchBlock(.gemm), .policy = &gemmOn }),
-        entry(op, .prefill, "block", .{ .family = .gemm, .fits = &fitsPrefillBlock, .launch = launchBlock(.block) }),
+        entry(op, .prefill, "kp0", .{ .family = .gemm, .fits = kpFits(0), .launch = launchKp(0), .policy = &gemmOn, .rounds = r }),
+        entry(op, .prefill, "kp1", .{ .family = .gemm, .fits = kpFits(1), .launch = launchKp(1), .policy = &gemmOn, .rounds = r }),
+        entry(op, .prefill, "kp2", .{ .family = .gemm, .fits = kpFits(2), .launch = launchKp(2), .policy = &gemmOn, .rounds = r }),
+        entry(op, .prefill, "kp3", .{ .family = .gemm, .fits = kpFits(3), .launch = launchKp(3), .policy = &gemmOn, .rounds = r }),
+        entry(op, .prefill, "matrix", .{ .family = .gemm, .fits = &fitsPrefillMatrix, .launch = launchBlock(.matrix), .caps = &matrixCores, .policy = &matrixOn, .rounds = r }),
+        entry(op, .prefill, "gemm", .{ .family = .gemm, .fits = &fitsPrefillGemm, .launch = launchBlock(.gemm), .policy = &gemmOn, .rounds = r }),
+        entry(op, .prefill, "block", .{ .family = .gemm, .fits = &fitsPrefillBlock, .launch = launchBlock(.block), .rounds = r }),
     };
 }
 
