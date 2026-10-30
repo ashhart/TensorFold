@@ -32,6 +32,8 @@ A subsequent [fixed decode-equivalence test](decode-equivalence/README.md) uses 
 
 A later [exact-template follow-up](deepseek-template/README.md) passes all 168 processes and 840 full-output comparisons, including 2,001 seeded filler messages. Both revisions fit the 240 MiB cap, so this shape does not reproduce the reported allocation failure. At 2,001 messages without tools, candidate render scratch is 15.2% higher and the descriptive single-ABBA render time is 10.3% longer. The original tool schemas and private tool-heavy conversation were unavailable. The synthetic string-accumulation gains above remain separate evidence; the PR stays draft without claiming that this follow-up proves resolution of the production incident.
 
+A subsequent [allocation diagnostic](allocation-diagnostic/README.md) identifies the input-dependent mechanism: on the same exact template, repeated 8 KiB tool arguments trigger baseline prefix copying. At 64 cycles, ReleaseSafe render scratch falls from 117.87 MiB to 17.53 MiB; at 128 cycles, three baseline cases hit the fixed cap while the candidate completes. It also measures `Value` growing from 48 to 56 bytes, adding 16,024,008 bytes of list-copy payload to the 2,001-message filler. The PR remains draft because the original incident is not reproduced and the value-size regression needs attention. These are allocation diagnostics, not new timing results.
+
 ## Design choices required for exactness
 
 Only concatenation results carry an arena-owned builder. An append can reuse that builder only when both the text and provenance slices identify its current complete value. Older snapshots and derived strings start a new builder, so evaluating the right operand cannot silently change the already-evaluated left operand.
