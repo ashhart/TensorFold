@@ -11,6 +11,8 @@ const pipelines = @import("pipelines.zig");
 const ps = @import("prompt_scratch.zig");
 const pb = @import("prompt_bufs.zig");
 const pl = @import("prompt_layer.zig");
+const vrows = @import("vision_rows.zig");
+const prep = @import("vision_prep.zig");
 
 const Config = host.config.Config;
 const ced = host.ced;
@@ -93,6 +95,8 @@ pub const Prompt = struct {
     /// rows of logits and taps the last finish wrote (the prompt's last rows)
     head: u32 = 0,
     taps: u32 = 0,
+    /// the image rows of the prompt being run (null: text only); its image positions carry virtual ids
+    images: ?*const vrows.Rows = null,
     prof: Prof = .{},
 
     pub fn init(device: mtl.Device, c: *const Config, o: Opts, limit: u32) !Prompt {
@@ -158,9 +162,12 @@ pub const Prompt = struct {
         }
     }
 
-    /// The end of the chunk starting at `a`: `chunk` rows, at most `upto`.
+    /// The end of the chunk starting at `a`: `chunk` rows, cut so an image's span runs inside one chunk.
     fn chunkEnd(p: *const Prompt, a: u32, upto: u32) !u32 {
-        return @min(upto, a + p.o.chunk);
+        var b = @min(upto, a + p.o.chunk);
+        if (p.images) |im| b = try im.chunkEnd(a, b);
+        if (b > upto) return error.ImageSpanSplit;
+        return b;
     }
 
     /// Commits the chunk [a, b) reading input set `set` (prepared); the caller waits on the command buffer.
@@ -190,6 +197,7 @@ pub const Prompt = struct {
         const x = p.px(env, slot, a, b);
         const bb = &p.b;
         g.embed(&env.p.glue, e, env.model.top.embed, bb.ids, bb.streams[0], bb.pres[0], rows, c.hidden);
+        if (p.images) |im| im.merge(e, bb.streams[0], a, b);
         for (0..p.d) |i| {
             const w = &env.model.layers[i];
             if (w.layer != i) return error.LayerOrder;
@@ -326,12 +334,13 @@ pub const Prompt = struct {
         return .{ .x = p.b.streams[at], .pre = p.b.pres[at], .x_out = p.b.streams[1 - at], .pre_out = p.b.pres[1 - at] };
     }
 
-    /// Each row's image flag (the route's bias_vl) for rows [a, b): text rows, all clear.
+    /// Each row's image flag (the route's bias_vl) for rows [a, b), and the merge's sources.
     fn imageFlags(p: *const Prompt, a: u32, b: u32) void {
-        @memset(p.s.bytes(p.s.image, b - a), 0);
+        const flags = p.s.bytes(p.s.image, b - a);
+        if (p.images) |im| im.describe(a, b, flags) else @memset(flags, 0);
     }
 
-    /// The chunk's ids (every row's Engram gate open) and Engram rows.
+    /// The chunk's ids (image positions embed the image token, the Engram gate shuts there) and Engram rows.
     fn prepare(p: *const Prompt, env: Env, hist: []const u32, a: u32, b: u32, set: usize) !void {
         const c = env.c;
         const ids = hist[a..b];
@@ -339,9 +348,11 @@ pub const Prompt = struct {
         const emb: []u32 = @alignCast(std.mem.bytesAsSlice(u32, p.b.bytes(st.ids, 4 * ids.len)));
         const mask = p.b.bytes(st.mask, ids.len);
         for (ids, emb, mask) |id, *o, *m| {
-            if (id >= c.vocab) return error.BadToken;
-            o.* = id;
-            m.* = 1;
+            const image = prep.isVid(id);
+            if (image and p.images == null) return error.BadToken;
+            if (!image and id >= c.vocab) return error.BadToken;
+            o.* = if (image) p.images.?.embed_id else id;
+            m.* = @intFromBool(!image);
         }
         if (c.engram_layers.len == 0) return;
         const l = env.lookup orelse return error.EngramLookupMissing;

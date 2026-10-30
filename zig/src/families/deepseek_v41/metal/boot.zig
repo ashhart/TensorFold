@@ -10,6 +10,8 @@ const scratch = @import("scratch.zig");
 const forward = @import("forward.zig");
 const serve = @import("serve.zig");
 const target_ = @import("target.zig");
+const vision = @import("vision.zig");
+const vw = @import("vision_weights.zig");
 
 const Config = host.config.Config;
 const eh = host.engram_host;
@@ -29,6 +31,11 @@ pub const Options = struct {
     small: bool = false,
     /// Engram row shards (null: TF_DSV41_ENGRAM_DIR, else the config's engram_table_dir beside the checkpoint)
     engram_dir: ?[]const u8 = null,
+    /// --vision: load the checkpoint's image tower (its tensors read beside the backbone)
+    vision: bool = false,
+    /// a request's image tokens in all, and its images (--vision-image-tokens, --vision-max-images)
+    image_tokens: u32 = 4096,
+    max_images: u32 = 4,
 };
 
 /// Everything a served model borrows, owned here and closed after the model's target and pass.
@@ -46,6 +53,8 @@ pub const Boot = struct {
     lbuf: [eh.max_layers]u32 = undefined,
     eng: eh.Host = undefined,
     rows: ?*er.Rows = null,
+    kit: ?vision.Kit = null,
+    vw: ?vw.Weights = null,
 
     /// The checkpoint in `dir` loaded and served by a `serve.Metal` (the caller's `serve_lanes.Served` closes it).
     pub fn open(a: Allocator, io: std.Io, dir: []const u8, o: Options) !*serve.Metal {
@@ -55,6 +64,8 @@ pub const Boot = struct {
         b.ds = null;
         b.map_bytes = &.{};
         b.rows = null;
+        b.kit = null;
+        b.vw = null;
         b.c = try readConfig(a, io, dir, o.small);
         const c = &b.c;
         const limit: u32 = @intCast(@min(o.context orelse 262144, c.rope.max_positions));
@@ -70,6 +81,8 @@ pub const Boot = struct {
         errdefer b.w.deinit();
         if (o.drafts and c.mtp_layers > 0) b.ds = try dspark.loadWeights(a, io, b.device, &pack, c);
         errdefer if (b.ds) |*w| w.deinit();
+        try b.loadVision(io, dir, &pack, o);
+        errdefer b.closeVision();
         b.tables = try rope.Tables.init(b.device, c, limit);
         errdefer b.tables.deinit();
         b.s = try scratch.Scratch.init(b.device, c, limit);
@@ -78,8 +91,34 @@ pub const Boot = struct {
         errdefer b.closeEngram();
         const r = b.w.report();
         std.log.info("dsv41 metal: {d} layers, {d} shards ({d} MiB mapped, {d} MiB copied), {d} slots of {d} positions, DSpark {s}", .{ c.layers, r.shards, r.shard_bytes >> 20, r.arena_bytes >> 20, o.slots, limit, if (b.ds != null) "on" else "off" });
-        const env: target_.Env = .{ .device = b.device, .queue = b.queue, .c = c, .p = &b.p, .tables = &b.tables, .s = &b.s, .model = b.w.view(), .lookup = lookup };
-        return serve.Metal.open(a, .{ .env = env, .top = &b.w.top, .dspark = if (b.ds) |*w| w else null, .owner = .{ .ctx = b, .close = close } }, .{ .slots = o.slots, .limit = limit, .drafts = o.drafts, .cache_bytes = o.cache_bytes });
+        const env: target_.Env = .{ .device = b.device, .queue = b.queue, .c = c, .p = &b.p, .tables = &b.tables, .s = &b.s, .model = b.w.view(), .lookup = lookup, .vision = if (b.vw) |*w| .{ .kit = &b.kit.?, .w = w } else null };
+        return serve.Metal.open(a, .{ .env = env, .top = &b.w.top, .dspark = if (b.ds) |*w| w else null, .owner = .{ .ctx = b, .close = close }, .images = if (b.vw != null) .{ .io = io, .tokens = o.image_tokens, .count = o.max_images } else null }, .{ .slots = o.slots, .limit = limit, .drafts = o.drafts, .cache_bytes = o.cache_bytes });
+    }
+
+    /// The tower's kernels and weights, and each layer's image routing bias attached to the backbone's layers.
+    fn loadVision(b: *Boot, io: std.Io, dir: []const u8, pack: *const host.pack.Pack, o: Options) !void {
+        if (!o.vision) return;
+        if (!vw.Weights.present(pack)) {
+            std.log.err("dsv41 metal: --vision, but {s} has no vision tower (no vision.* tensors)", .{dir});
+            return error.NoVisionTower;
+        }
+        const path = try std.fs.path.join(b.a, &.{ dir, "config.json" });
+        defer b.a.free(path);
+        const text = try std.Io.Dir.cwd().readFileAlloc(io, path, b.a, .limited(1 << 24));
+        defer b.a.free(text);
+        const cfg = (try vision.Config.parse(b.a, text, b.c.hidden)) orelse vision.Config{ .out_dim = b.c.hidden };
+        b.kit = try vision.Kit.load(b.device);
+        errdefer b.closeVision();
+        b.vw = try vw.Weights.load(b.a, io, b.device, pack, cfg, b.c.layers, b.c.experts);
+        for (b.w.layers, b.vw.?.bias_vl) |*l, r| l.gate_bvl = r;
+        std.log.info("dsv41 metal: vision tower on ({d} blocks of {d}, patches of {d}, up to {d} tokens an image)", .{ cfg.layers, cfg.dim, cfg.patch, cfg.max_tokens });
+    }
+
+    fn closeVision(b: *Boot) void {
+        if (b.vw) |*w| w.deinit();
+        if (b.kit) |*k| k.deinit();
+        b.vw = null;
+        b.kit = null;
     }
 
     fn readConfig(a: Allocator, io: std.Io, dir: []const u8, small: bool) !Config {
@@ -135,6 +174,7 @@ pub const Boot = struct {
         b.s.deinit();
         b.tables.deinit();
         if (b.ds) |*w| w.deinit();
+        b.closeVision();
         b.w.deinit();
         b.p.deinit();
         b.queue.deinit();

@@ -38,6 +38,7 @@ pub fn renderIds(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, t
         .enable_thinking = thinking,
         .reasoning_effort = if (thinking) effort else null,
         .clear_thinking = cx.clear_thinking,
+        .images = srv.info.vision != null,
     };
     var ids = render(srv, cx.a, normalized, options, &problem) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,

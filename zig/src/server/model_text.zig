@@ -12,6 +12,8 @@ pub const RenderOptions = struct {
     reasoning_effort: ?[]const u8 = null,
     /// A request's ``clear_thinking``; a GLM-5.3 template takes it over the server's.
     clear_thinking: ?bool = null,
+    /// The engine reads images (--vision): a native template writes its image token for an image part, else refuses it.
+    images: bool = false,
 };
 
 pub const Error = error{ Template, OutOfMemory };

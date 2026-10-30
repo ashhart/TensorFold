@@ -14,6 +14,7 @@ const seed = 71;
 
 test {
     _ = @import("boot_test.zig");
+    _ = @import("vision_boot_test.zig");
 }
 
 /// A reply's tokens and finish, written on LaneHost's thread and read on the test's.

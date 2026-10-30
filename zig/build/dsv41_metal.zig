@@ -13,6 +13,7 @@ pub fn package(b: *std.Build, metal: *std.Build.Module, sources: *std.Build.Modu
         .link_libc = true,
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "dsv41", .module = host } },
     });
+    pkg.addImport("core", host.import_table.get("core").?); // the picture decoder image input reads
     return .{ .pkg = pkg, .host = host };
 }
 
@@ -45,6 +46,11 @@ pub fn steps(b: *std.Build, metal: *std.Build.Module, sources: *std.Build.Module
     const run = b.addRunArtifact(b.addTest(.{ .root_module = tests }));
     run.has_side_effects = true; // a device run: never cached
     step.dependOn(&run.step);
+    const vis_run = b.addRunArtifact(b.addTest(.{ .root_module = tests, .filters = &.{"dsv41 metal vision"} }));
+    vis_run.has_side_effects = true;
+    b.step("test-dsv41-metal-vision", "DeepSeek-V4.1 Metal vision: the tower against float64, image rows in prompts").dependOn(&vis_run.step);
+    const prepare_run = b.addRunArtifact(b.addTest(.{ .root_module = p.pkg, .filters = &.{"prepare"} }));
+    b.step("test-dsv41-metal-prepare", "DeepSeek-V4.1 Metal: image bytes to patches").dependOn(&prepare_run.step);
     // the served engine over the tiny model: LaneHost replies, drafts, the prompt cache, seeds, cancels
     const serve = b.createModule(.{
         .root_source_file = b.path("zig/tests/dsv41_metal/serve_test.zig"),
@@ -82,6 +88,17 @@ pub fn steps(b: *std.Build, metal: *std.Build.Module, sources: *std.Build.Module
     const timing_run = b.addRunArtifact(b.addTest(.{ .root_module = timing }));
     timing_run.has_side_effects = true;
     b.step("time-dsv41-metal-real", "DeepSeek-V4.1 Metal: one release layer's decode timed at 1 and 4 rows").dependOn(&timing_run.step);
+    // the release's own vision tower (TF_DSV41_REAL_VISION) against float64
+    const vreal = b.createModule(.{
+        .root_source_file = b.path("zig/tests/dsv41_metal/vision_real_test.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "dsv41_metal", .module = fast.pkg }, .{ .name = "metal", .module = metal }, .{ .name = "dsv41", .module = fast.host } },
+    });
+    const vreal_run = b.addRunArtifact(b.addTest(.{ .root_module = vreal }));
+    vreal_run.has_side_effects = true;
+    b.step("test-dsv41-metal-vision-real", "DeepSeek-V4.1 Metal: the release's vision tower (TF_DSV41_REAL_VISION) against float64").dependOn(&vreal_run.step);
     const ptime = b.createModule(.{
         .root_source_file = b.path("zig/tests/dsv41_metal/prompt_time.zig"),
         .target = b.graph.host,
