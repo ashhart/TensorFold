@@ -139,6 +139,13 @@ pub const Ledger = struct {
         l.parked = parked;
     }
 
+    /// The idle unload's close is done and a request can reload the engine: only now does the ledger read parked.
+    pub fn markParked(l: *Ledger) void {
+        l.mutex.lockUncancelable(l.io);
+        defer l.mutex.unlock(l.io);
+        if (l.attached == null) l.parked = true;
+    }
+
     /// A model request of `g` starts; `leave` ends it.
     pub fn enter(l: *Ledger, g: RouteGroup) void {
         l.mutex.lockUncancelable(l.io);
