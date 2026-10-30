@@ -3,7 +3,6 @@ pub const Activity = struct {
     ctx: *anyopaque,
     begin: *const fn (*anyopaque) void,
     end: *const fn (*anyopaque) void,
-    failed: ?*const fn (*anyopaque, anyerror) void = null,
 
     pub const Scope = struct {
         activity: ?Activity,
@@ -16,4 +15,10 @@ pub const Activity = struct {
         if (activity) |a| a.begin(a.ctx);
         return .{ .activity = activity };
     }
+};
+
+/// A backend hears the error that failed a round or request; the message each stream receives does not depend on it.
+pub const Failure = struct {
+    ctx: *anyopaque,
+    call: *const fn (*anyopaque, anyerror) void,
 };

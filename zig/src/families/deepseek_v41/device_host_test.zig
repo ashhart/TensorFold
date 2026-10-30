@@ -37,3 +37,7 @@ test {
 test {
     _ = @import("union_stall_test.zig");
 }
+
+test {
+    _ = @import("model_health_test.zig");
+}

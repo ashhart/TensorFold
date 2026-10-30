@@ -29,7 +29,7 @@ pub fn takeCancels(h: *LaneHost) void {
         if (found) |job| {
             if (job.fill_began and job.prefilled == null and !job.stream.finished) if (h.core.backend.vtable.cancel_prefill) |keep_prefix| {
                 keep_prefix(h.core.backend.ptr, &job.stream) catch |err| {
-                    _ = h.drop(job, h.words(err));
+                    _ = dropFailed(h, job, err);
                     continue;
                 };
             };
@@ -37,6 +37,23 @@ pub fn takeCancels(h: *LaneHost) void {
             h.finish(job, .cancelled, "");
         }
     }
+}
+
+/// The backend's failure hook hears a round's or request's error; the caller chooses the message.
+pub fn failed(h: *const LaneHost, err: anyerror) void {
+    if (h.failure) |f| f.call(f.ctx, err);
+}
+
+/// A request the backend failed: the failure hook hears the error and the request ends with the backend's words.
+pub fn dropFailed(h: *LaneHost, job: *Job, err: anyerror) bool {
+    failed(h, err);
+    return h.drop(job, h.words(err));
+}
+
+/// A round the backend failed: the failure hook hears the error and every admitted stream gets its name.
+pub fn failRound(h: *LaneHost, err: anyerror) void {
+    failed(h, err);
+    failAll(h, @errorName(err));
 }
 
 /// A failed round ends every job it admitted, with the backend's error; the list is taken whole, not copied.

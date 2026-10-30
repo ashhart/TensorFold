@@ -74,6 +74,7 @@ pub fn run(h: *LaneHost, job: *Job, began: i96, resumed: bool) bool {
         if (!job.prefill_sent) LaneHost.emit(job, .{ .prefilled = 0 });
         if (e == error.Cancelled) return h.cancel(job);
         h.remove(job);
+        @import("lane_host_end.zig").failed(h, e);
         h.finish(job, .failed, h.words(e));
         return true;
     };

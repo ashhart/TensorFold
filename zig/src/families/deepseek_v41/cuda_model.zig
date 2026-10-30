@@ -179,7 +179,7 @@ pub const Model = struct {
         else
             &.{};
         try m.session.open(&m.driver, m.tcfg, image);
-        m.supervisor = .{ .io = io, .ctx = m, .healthy = @import("model_health.zig").context, .fail = @import("model_health.zig").failed, .progress = &m.progress, .stall_ns = stall_ns };
+        m.supervisor = .{ .io = io, .ctx = m, .healthy = @import("model_health.zig").context, .fail = @import("model_health.zig").failed, .progress = if (stall_ns > 0) &m.progress else null, .stall_ns = stall_ns };
         m.supervisor.?.start() catch |err| {
             m.session.bootFailed(err);
             return err;
@@ -192,16 +192,19 @@ pub const Model = struct {
         m.dev_arena = try @import("dev_arena.zig").install(gpa, &m.ctx, m.tcfg.rank);
         // a failure from here to serving: every rank down with its reason, the session closed before `m` is freed
         m.boot(gpa, io, pack_dir, assets, o) catch |err| {
-            _ = m.supervisor.?.check();
-            if (m.ctx.synchronize()) |_| {
-                m.session.bootFailed(err);
-            } else |_| {}
+            m.bootAborted(err);
             return err;
         };
-        m.runner.progress = &m.progress;
-        m.f.progress = &m.progress;
+        @import("model_health.zig").watch(m);
         m.boot_complete = true;
         return m;
+    }
+
+    /// A boot that failed under the supervisor: it reports a lost context, then joins before the session closes.
+    pub fn bootAborted(m: *Model, err: anyerror) void {
+        _ = m.supervisor.?.check();
+        m.supervisor.?.stop();
+        if (m.ctx.synchronize()) |_| m.session.bootFailed(err) else |_| {}
     }
 
     /// `open` from the session up: the pack, weights, forward, buffers, assets and serving parts of this rank.

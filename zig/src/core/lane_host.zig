@@ -83,7 +83,8 @@ pub const LaneHost = struct {
     prefix: @import("lane_host_prefix.zig").Wait = .{}, // a request's wait for a cut another prompt is filling
     finals: std.ArrayList(usize) = .empty,
     pressure: ?@import("memory_pressure.zig").Governor = null, // macOS memory pressure (lane_host_pressure.zig); null: off
-    activity: ?@import("lane_activity.zig").Activity = null,
+    activity: ?@import("lane_activity.zig").Activity = null, // owned work scopes for a backend's watchdog; null: off
+    failure: ?@import("lane_activity.zig").Failure = null, // hears a round's or request's error; null: off
 
     pub const ThreadInit = struct { ctx: *anyopaque, run: *const fn (ctx: *anyopaque) anyerror!void };
 
@@ -361,7 +362,7 @@ pub const LaneHost = struct {
         return switch (e) {
             error.Cancelled => h.cancel(job),
             error.LaneMemory => h.requeue(job),
-            else => h.drop(job, h.words(e)),
+            else => ends.dropFailed(h, job, e),
         };
     }
 
@@ -377,7 +378,7 @@ pub const LaneHost = struct {
                     fill.unfill(h, job);
                     break :blk h.requeue(job);
                 },
-                else => h.drop(job, h.words(e)),
+                else => ends.dropFailed(h, job, e),
             };
             return;
         };
@@ -437,7 +438,7 @@ pub const LaneHost = struct {
         const be = h.core.backend;
         if (h.cache) |store| if (job.marks.len == 0 and (job.request.untaught or store.rules.lookahead > 0)) return h.cancel(job); // it would keep nothing
         be.prefill(&job.stream) catch |e| { // a yield ends it like a cancel: what it prefilled is kept
-            if (e != error.Cancelled and e != error.Yielded) return h.drop(job, h.words(e));
+            if (e != error.Cancelled and e != error.Yielded) return ends.dropFailed(h, job, e);
             be.release(&job.stream);
             return h.cancel(job);
         };
@@ -450,7 +451,6 @@ pub const LaneHost = struct {
     }
 
     pub fn words(h: *const LaneHost, e: anyerror) []const u8 {
-        if (h.activity) |activity| if (activity.failed) |failed| failed(activity.ctx, e);
         const x = h.explain orelse return @errorName(e);
         return x.text(x.ctx, e) orelse @errorName(e);
     }
@@ -546,7 +546,7 @@ pub const LaneHost = struct {
             while (h.admitOne()) {}
             fill.run(h);
             h.core.sweep() catch |err| {
-                ends.failAll(h, h.words(err));
+                ends.failRound(h, err);
                 continue;
             };
             h.deliverPending();
@@ -584,7 +584,7 @@ pub const LaneHost = struct {
             const owed = h.share.debt_ns > 0; // a round is timed only while it pays a prompt step's debt down
             const r0 = if (owed) std.Io.Clock.awake.now(h.io) else std.Io.Timestamp.zero;
             h.core.step() catch |e| {
-                ends.failAll(h, h.words(e));
+                ends.failRound(h, e);
                 continue;
             };
             if (owed) h.share.rounded(@intCast(r0.durationTo(std.Io.Clock.awake.now(h.io)).toNanoseconds()));
