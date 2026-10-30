@@ -59,10 +59,11 @@ pub fn fillTable(t: *[65536]u16) void {
     }
 }
 
-pub const Rows = if (@import("builtin").os.tag == .linux)
-    @import("engram_rows_linux.zig").Rows
-else
-    @import("engram_rows_portable.zig").Rows;
+pub const Rows = switch (@import("builtin").os.tag) {
+    .linux => @import("engram_rows_linux.zig").Rows,
+    .macos => @import("engram_rows_darwin.zig").Rows,
+    else => @import("engram_rows_portable.zig").Rows,
+};
 
 /// UE8M0, including its minimum exponent and reserved NaN, as the #826 reference equations.
 pub fn scale(code: u8) f32 {
