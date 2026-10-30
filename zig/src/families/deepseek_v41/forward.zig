@@ -395,14 +395,16 @@ pub const Forward = struct {
     /// A workstream's follower side: rank 0's message of an operation number this file does not know.
     pub const Ext = struct { ptr: *anyopaque, run: *const fn (ptr: *anyopaque, msg: []const i64) anyerror!void };
 
-    /// The session store's side: `commit` hears every committed id; `save` / `restore` run in the leader's order.
+    pub const Want = @import("kv").sessions.restore.Want;
+
+    /// The session store's side: commits and restores run in the leader's order.
     pub const Sess = struct {
         ptr: *anyopaque,
         commit: *const fn (ptr: *anyopaque, ids: []const u32) anyerror!void,
         reserve: ?*const fn (ptr: *anyopaque, ids: []const u32) anyerror!void = null,
         save: *const fn (ptr: *anyopaque) anyerror!void,
         /// `ids`: an NVMe entry's ids (the leader's prompt prefix: its tokens are not indexed)
-        restore: *const fn (ptr: *anyopaque, id: u32, ids: []const i64) anyerror!void,
+        restore: *const fn (ptr: *anyopaque, id: u32, want: Want, ids: []const i64) anyerror!void,
         /// CED replay's prompt snapshot: an entry at the slot's position, the slot keeps going (sessions_gpu.zig)
         prompt: *const fn (ptr: *anyopaque) anyerror!void,
         /// the slot empty: its pages back, the committed ids cleared
