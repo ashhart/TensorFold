@@ -1,6 +1,4 @@
-//! The datamove group's Vulkan contract: stage 1's exact data-movement and format kernels —
-//! cast_f32_bf16, cast_bf16_f32, copy_u32, copy_u16, gather_u32, gather_u16 and dequant_bf16 —
-//! checked bit for bit against a host model (the argmax rule: the output equals the reference bytes).
+// The datamove group's Vulkan contract: stage 1's exact data-movement and format kernels — cast_f32_bf16, cast_bf16_f32, copy_u32, copy_u16, gather_u32, gather_u16 and dequant_bf16 — checked bit for bit against a host model (the argmax rule: the output equals the reference bytes).
 const std = @import("std");
 const vk = @import("vulkan");
 const contract = @import("contract");
@@ -13,8 +11,7 @@ const g = contract.gates;
 pub const guard = 256;
 const pattern = 0xa5;
 
-/// One call's Vulkan buffers: inputs uploaded, outputs poisoned 0xff, every payload between guard
-/// bytes. The gates read a kernel test's outputs, inputs and guards through its `rig` field.
+// One call's Vulkan buffers: inputs uploaded, outputs poisoned 0xff, every payload between guard bytes. The gates read a kernel test's outputs, inputs and guards through its `rig` field.
 pub const Rig = struct {
     a: std.mem.Allocator,
     dev: *const vk.Device,
@@ -141,8 +138,7 @@ fn gatherIds(ids: []u32, table_rows: usize) void {
     }
 }
 
-/// The dequant's exact model: bf16 widen, one fp32 multiply-add (the q4 product is exact, so one
-/// rounding either way), then the contract's RNE.
+// The dequant's exact model: bf16 widen, one fp32 multiply-add (the q4 product is exact, so one rounding either way), then the contract's RNE.
 fn dequantBits(scale_bits: u16, q: u4, bias_bits: u16) u16 {
     const s: f32 = c.fromBf16(scale_bits);
     const b: f32 = c.fromBf16(bias_bits);
@@ -150,8 +146,7 @@ fn dequantBits(scale_bits: u16, q: u4, bias_bits: u16) u16 {
     return c.toBf16(v);
 }
 
-/// The dequant's random scale or bias: normal bf16 magnitudes from about 2^-113 up, so no fp32
-/// subnormal result an FTZ device could flush where the host does not.
+// The dequant's random scale or bias: normal bf16 magnitudes from about 2^-113 up, so no fp32 subnormal result an FTZ device could flush where the host does not.
 fn randomBf16(rng: std.Random) u16 {
     const sign: u16 = rng.int(u1);
     const exp: u16 = 14 + rng.uintLessThan(u8, 113);
@@ -163,8 +158,7 @@ fn buf(msg: *[160]u8, comptime fmt: []const u8, args: anytype) ?[]const u8 {
     return std.fmt.bufPrint(msg, fmt, args) catch "message too long";
 }
 
-/// One cast direction: f32 -> bf16 is the contract's RNE (a NaN keeps its class), bf16 -> f32 is
-/// exact widening; both outputs must equal the reference bytes.
+// One cast direction: f32 -> bf16 is the contract's RNE (a NaN keeps its class), bf16 -> f32 is exact widening; both outputs must equal the reference bytes.
 pub fn Cast(comptime to_bf16: bool) type {
     return struct {
         const Self = @This();
@@ -214,8 +208,7 @@ pub fn Cast(comptime to_bf16: bool) type {
         pub fn prepare(self: *Self, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
             if (shape.rows == 0 or shape.n == 0) return false;
             const elements = std.math.mul(usize, shape.rows, shape.n) catch return false;
-            // A 16-bit range with an odd element count is not bindable (dispatch.bind needs whole 32-bit words;
-            // View.init refuses the same tail): the kernel refuses that edge shape, it is not a served shape.
+            // A 16-bit range with an odd element count is not bindable (dispatch.bind needs whole 32-bit words; View.init refuses the same tail): the kernel refuses that edge shape, it is not a served shape.
             if (elements % 2 != 0 and (in_kind.size() == 2 or esz == 2)) return false;
             self.rig.reset();
             _ = self.arena.reset(.retain_capacity);
@@ -382,8 +375,7 @@ pub fn Copy(comptime kind: vk.tensor.Kind) type {
     };
 }
 
-/// gather_take on u32 or u16 rows: valid ids copy their row bit for bit, an out-of-range id
-/// gathers zeros (the rule documented at ops_q4.zig), never another row.
+// gather_take on u32 or u16 rows: valid ids copy their row bit for bit, an out-of-range id gathers zeros (the rule documented at ops_q4.zig), never another row.
 pub fn Gather(comptime kind: vk.tensor.Kind) type {
     return struct {
         const Self = @This();
@@ -502,8 +494,7 @@ pub fn Gather(comptime kind: vk.tensor.Kind) type {
     };
 }
 
-/// The Q4 g64 dequant: one fp32 expression scale*q + bias per code, then the contract's RNE;
-/// the output equals that model bit for bit, and a non-finite scale or bias gives its class.
+// The Q4 g64 dequant: one fp32 expression scale*q + bias per code, then the contract's RNE; the output equals that model bit for bit, and a non-finite scale or bias gives its class.
 pub const Dequant = struct {
     const group: u64 = 64;
 
