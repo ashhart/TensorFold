@@ -29,6 +29,7 @@ pub const Absorb = struct {
     follow: []const u32,
     rows: ?[]const u32 = null,
     prompt: bool = true, // prompt ingestion keeps its historical arithmetic; accepted live rows set false
+    propose: bool = true, // false: retain committed context without computing unused proposal outputs
     offered: u32 = 0, // the drafter's grown tree's first nodes the verified window carried (0: none of its own)
 };
 

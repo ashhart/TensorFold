@@ -141,6 +141,7 @@ pub const Metal = struct {
             .exact_width = if (drafting) max_window else 1,
             .gpu_tokens = true,
             .mtp = drafting,
+            .allocate_shared_drafts = drafting,
             .speculate = drafting,
             .speculate_early = false,
             .draft_prior = &nemotron_config.draft_prior,

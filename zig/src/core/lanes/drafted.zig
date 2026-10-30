@@ -98,6 +98,7 @@ pub const Drafted = struct {
         m.mtp = true;
         m.speculate = true;
         m.speculate_early = false;
+        m.allocate_shared_drafts = true;
         m.drafts = @min(d.depth, if (target.exact_width > 1) target.exact_width - 1 else 0);
         m.mtp_step_ms = d.step_ms;
         m.draft_prior = d.prior;
@@ -286,7 +287,7 @@ pub const Drafted = struct {
                 for (rows, 0..) |row, i| prefix = prefix and row == i;
                 const n: u32 = @intCast(if (prefix) rows.len else rows[rows.len - 1] + 1);
                 const f = try x.target.features(r.stream, x.drafter.taps(), r.start, n);
-                try x.absorbs.append(x.gpa, .{ .stream = r.stream, .features = f, .start = r.start, .follow = r.follow[0..rows.len], .rows = if (prefix) null else rows, .prompt = false, .offered = lane.offered });
+                try x.absorbs.append(x.gpa, .{ .stream = r.stream, .features = f, .start = r.start, .follow = r.follow[0..rows.len], .rows = if (prefix) null else rows, .prompt = false, .propose = r.depth > 0, .offered = lane.offered });
                 lane.offered = 0;
                 pending = r.follow[rows.len - 1];
                 lane.rows = true;
@@ -300,7 +301,7 @@ pub const Drafted = struct {
                 const last = r.stream.prompt_len - 1;
                 if (r.stream.cached <= last) { // the pass computed the prompt's last row (not restored whole)
                     const f = try x.target.features(r.stream, x.drafter.taps(), last, 1);
-                    try x.absorbs.append(x.gpa, .{ .stream = r.stream, .features = f, .start = last, .follow = @as(*const [1]u32, tok) });
+                    try x.absorbs.append(x.gpa, .{ .stream = r.stream, .features = f, .start = last, .follow = @as(*const [1]u32, tok), .propose = r.depth > 0 });
                     lane.rows = true;
                 }
             }
