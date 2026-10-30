@@ -24,7 +24,7 @@ pub fn layers(L: anytype, prefix: []const u8, ids: []const u32, out: anytype) !v
 }
 
 /// Readers when TF_GLM_LOAD_PREFETCH is unset.
-pub const default_readers = 8;
+pub const default_readers = 16;
 
 /// TF_GLM_LOAD_PREFETCH as a reader count: unset for `default_readers`, 0 for none (the loader faults every page in).
 pub fn readers(value: ?[]const u8) !usize {
@@ -32,8 +32,8 @@ pub fn readers(value: ?[]const u8) !usize {
     return if (n <= core.checkpoint.max_readers) n else error.BadSetting;
 }
 
-test "TF_GLM_LOAD_PREFETCH: 8 when unset, none at 0, a count up to the limit, a refusal past it or for a word" {
-    try std.testing.expectEqual(@as(usize, default_readers), try readers(null));
+test "TF_GLM_LOAD_PREFETCH: 16 when unset, none at 0, a count up to the limit, a refusal past it or for a word" {
+    try std.testing.expectEqual(@as(usize, 16), try readers(null));
     try std.testing.expectEqual(@as(usize, 0), try readers("0"));
     try std.testing.expectEqual(@as(usize, 8), try readers("8"));
     try std.testing.expectEqual(@as(usize, 16), try readers("16"));
