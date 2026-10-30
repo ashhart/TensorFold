@@ -341,6 +341,8 @@ fn sparseCase(t: *Rig, comptime heads: usize, comptime kv_heads: usize) !void {
         stride,
         ptr(?[*]const i32, dc),
         ptr(?[*]const i32, ds),
+        // ends: null, so this case stays on the scalar kernel -- its ids are not the indexer's block selections
+        null,
         ptr(?[*]f32, po),
         ptr(?[*]f32, pm),
         ptr(?[*]f32, out),
@@ -362,6 +364,7 @@ fn sparseCase(t: *Rig, comptime heads: usize, comptime kv_heads: usize) !void {
         stride,
         ptr(?[*]const i32, dc),
         ptr(?[*]const i32, ds),
+        null,
         ptr(?[*]f32, po),
         ptr(?[*]f32, pm),
         ptr(?[*]f32, one),

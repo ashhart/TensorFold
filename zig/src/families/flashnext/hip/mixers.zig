@@ -404,6 +404,8 @@ fn attend(
             @intCast(key_stride),
             @ptrFromInt(count),
             if (sparse_flags) |f| @ptrFromInt(f) else null,
+            // a prompt's row ends select the WMMA tile; a lane round's rows keep the scalar kernel's bits
+            if (o.prefill) @ptrFromInt(dev_ends) else null,
             @ptrFromInt(po),
             @ptrFromInt(pm),
             @ptrFromInt(att + r0 * d.heads * hd * 4),

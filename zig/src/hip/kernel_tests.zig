@@ -31,6 +31,7 @@ test {
     _ = @import("kernel_tests/graph_split.zig");
     _ = @import("kernel_tests/flashnext.zig");
     _ = @import("kernel_tests/flashnext_attn.zig");
+    _ = @import("kernel_tests/flashnext_sparse_prefill.zig");
     _ = @import("kernel_tests/nemotron/moe.zig");
     _ = @import("kernel_tests/nemotron/pick.zig");
     _ = @import("kernel_tests/nemotron/attention.zig");

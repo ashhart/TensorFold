@@ -29,6 +29,8 @@ pub const Fns = struct {
     idx_scores: Function,
     idx_select: Function,
     sparse_parts: [2]Function, // groups of up to 6 and up to 12 query heads
+    /// The WMMA prefill tile over 4 rows and a kv head's query heads, q and P kept fp32; by cache kind (fp16, bf16).
+    sparse_prefill_wmma: [2]Function,
     sparse_merge: Function,
 
     pub fn load(m: Module) Error!Fns {
@@ -44,6 +46,10 @@ pub const Fns = struct {
             .idx_scores = try m.function("tf_fn_idx_scores"),
             .idx_select = try m.function("tf_fn_idx_select"),
             .sparse_parts = .{ try m.function("tf_fn_sparse_parts6"), try m.function("tf_fn_sparse_parts12") },
+            .sparse_prefill_wmma = .{
+                try m.function("tf_fn_sparse_prefill_wmma_f16"),
+                try m.function("tf_fn_sparse_prefill_wmma_bf16"),
+            },
             .sparse_merge = try m.function("tf_fn_sparse_merge"),
         };
     }
@@ -381,7 +387,7 @@ pub fn idxSelect(
     try l.go(l.fnx.idx_select, dim(rows, 1, 1), dim(1024, 1, 1), 0, s, &a);
 }
 
-/// Attention of each row's heads over its listed keys (or its first count[r] keys) in `parts` parts, then merged.
+/// Each row's heads over its listed keys (or first count[r]) in `parts` parts, merged; sparse=wmma tiles prefill rows.
 pub fn sparseAttention(
     l: *const Launcher,
     q: CF,
@@ -392,6 +398,7 @@ pub fn sparseAttention(
     id_stride: i64,
     count: CI,
     sparse: CI,
+    ends: CI,
     parts_o: F,
     parts_ms: F,
     out: F,
@@ -406,6 +413,48 @@ pub fn sparseAttention(
 ) Error!void {
     if (dims > 256 or @rem(heads, kv_heads) != 0 or @divExact(heads, kv_heads) > 12)
         return util.invalid("sparseAttention");
+    const wide: usize = if (@divExact(heads, kv_heads) <= 6) 0 else 1;
+    // A part's selection bitmap must fit the kernel's 160 words: its ratio-4 blocks, a word wider at both ends
+    const nblocks: i64 = @divTrunc(cap + 3, @as(i64, 4));
+    const span: i64 = @divTrunc(nblocks, @as(i64, parts)) + 1;
+    const words: i64 = @divTrunc(span + 31, 32) + 1;
+    if (l.sparse_wmma and rows > 1 and ends != null and (cache_kind == 1 or cache_kind == 2) and
+        words <= 160)
+    {
+        var a: Args = .{};
+        inline for (.{
+            ad(q),
+            ad(k),
+            ad(v),
+            cache_kind,
+            ad(ids),
+            id_stride,
+            ad(count),
+            ad(sparse),
+            ad(ends),
+            ad(parts_o),
+            ad(parts_ms),
+            rows,
+            heads,
+            kv_heads,
+            dims,
+            cap,
+            scale,
+            parts,
+        }) |x| try a.add(x);
+        try l.go(
+            l.fnx.sparse_prefill_wmma[@intFromBool(cache_kind == 2)],
+            dim(cdiv(rows, 4), kv_heads, parts),
+            dim(512, 1, 1),
+            0,
+            s,
+            &a,
+        );
+        var b: Args = .{};
+        inline for (.{ ad(parts_o), ad(parts_ms), ad(out), heads, dims, parts }) |x| try b.add(x);
+        try l.go(l.fnx.sparse_merge, dim(heads, rows, 1), dim(256, 1, 1), 0, s, &b);
+        return;
+    }
     var a: Args = .{};
     inline for (.{
         ad(q),
@@ -425,7 +474,6 @@ pub fn sparseAttention(
         scale,
         parts,
     }) |x| try a.add(x);
-    const wide: usize = if (@divExact(heads, kv_heads) <= 6) 0 else 1;
     try l.go(l.fnx.sparse_parts[wide], dim(kv_heads, rows, parts), dim(256, 1, 1), 0, s, &a);
     var b: Args = .{};
     inline for (.{ ad(parts_o), ad(parts_ms), ad(out), heads, dims, parts }) |x| try b.add(x);

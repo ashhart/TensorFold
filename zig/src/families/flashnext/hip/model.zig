@@ -148,6 +148,23 @@ pub const Model = struct {
     mtp: ?Head = null,
 };
 
+/// The WMMA sparse tile is written for the model's compress ratio; any other ratio must keep the scalar kernel.
+pub const sparse_wmma_ratio: usize = 4;
+
+/// Refuses `sparse=wmma` on a model whose indexer compress ratio is not the tile's.
+pub fn checkSparseRatio(wmma: bool, ratio: usize) error{SparseWmmaRatio}!void {
+    if (wmma and ratio != sparse_wmma_ratio) return error.SparseWmmaRatio;
+}
+
+test "sparse=wmma is refused on a compress ratio other than the tile's, and the scalar kernel takes any" {
+    var c = try config.parse(std.testing.allocator, @embedFile("../fixtures/config.json"));
+    defer c.deinit();
+    try checkSparseRatio(true, c.index_ratio);
+    try checkSparseRatio(false, 2);
+    try std.testing.expectError(error.SparseWmmaRatio, checkSparseRatio(true, 2));
+    try std.testing.expectError(error.SparseWmmaRatio, checkSparseRatio(true, 8));
+}
+
 test "a rank's dimensions: heads, value heads and the vocabulary split, the kv heads held two ranks a head" {
     var c = try config.parse(std.testing.allocator, @embedFile("../fixtures/config.json"));
     defer c.deinit();
