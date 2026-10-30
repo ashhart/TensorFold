@@ -12,7 +12,7 @@ fn noSums(_: c.Shape) usize {
     return 0;
 }
 
-const rule = "NaN never wins a group or a pick; +Inf beats every finite; ties go to the lower group then the lower expert id";
+const rule = "NaN never wins a group or a pick; +Inf beats every finite; ties go to the lower group then the lower expert id; a picked slot is marked NaN so ids in a row are distinct; if later picks have NaN scores the row's weights are NaN";
 
 const source = @import("ling_metal").route;
 
