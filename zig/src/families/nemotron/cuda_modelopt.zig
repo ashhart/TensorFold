@@ -322,7 +322,7 @@ fn experts(L: *Loader, ck: *core.Checkpoint, label: []const u8, pre: []const u8,
 /// The bf16 token table as stored.
 pub fn embed(L: *Loader, ck: *core.Checkpoint, c: Config) !W.Embed {
     var buf: [64]u8 = undefined;
-    const t = try ck.expect(try name(&buf, "{s}backbone.embeddings.weight", .{c.prefix()}), .bf16, &.{ c.vocab, c.hidden });
+    const t = try ck.expect(try name(&buf, "{s}{s}", .{ c.prefix(), c.embedName() }), .bf16, &.{ c.vocab, c.hidden });
     return .{ .w = try L.raw("embed.weight", t), .n = c.vocab, .k = c.hidden, .bf16 = true };
 }
 
