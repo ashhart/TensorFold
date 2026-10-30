@@ -66,6 +66,70 @@ fn routerSelect(t: *Rig, rng: *rig.Rng, rows: usize, d: usize, e: usize, top_k: 
     };
 }
 
+/// tf_moe_route's prompt plan puts every live item before planItems(pairs, experts, 128); `bound` routings fill it.
+fn routeLive(t: *Rig, rng: *rig.Rng, rows: usize, bound: bool) !void {
+    const moe = @import("../moe.zig");
+    const experts = 513;
+    const tile = 128;
+    const pairs = rows * 11;
+    const cap = moe.capacity(pairs, experts);
+    const pick = try gpa.alloc(i32, pairs);
+    defer gpa.free(pick);
+    if (bound) {
+        // 128 k + 1 pairs an expert, the pairs past them in whole tiles and one partial spare, in a shuffled order
+        const per = (pairs - experts) / experts / tile;
+        var n: usize = 0;
+        for (0..experts) |e| for (0..tile * per + 1) |_| {
+            pick[n] = @intCast(e);
+            n += 1;
+        };
+        var e: usize = 0;
+        while (pairs - n >= tile) : (e += 1) {
+            for (0..tile) |_| {
+                pick[n] = @intCast(e);
+                n += 1;
+            }
+        }
+        while (n < pairs) : (n += 1) pick[n] = experts - 1;
+        var i: usize = pairs;
+        while (i > 1) : (i -= 1) std.mem.swap(i32, &pick[i - 1], &pick[rng.next() % i]);
+    } else for (pick) |*e| {
+        const r = rng.next();
+        e.* = @intCast(if (r % 2 == 0) r % 8 else r % experts);
+    }
+    var dev_pick = try t.upload(pick);
+    defer dev_pick.free();
+    var members = try t.alloc(pairs * 4);
+    defer members.free();
+    var items = try t.alloc(cap * 12);
+    defer items.free();
+    try items.fill8(0xFF);
+    try t.on.tf_moe_route(@ptrFromInt(at(dev_pick)), @intCast(pairs), experts, tile, @ptrFromInt(at(members)), @ptrFromInt(at(items)), @intCast(cap), t.stream.handle);
+    try t.stream.synchronize();
+    const host = try rig.download(i32, items);
+    defer gpa.free(host);
+    const z = moe.planItems(pairs, experts, tile);
+    var live: usize = 0;
+    var past: usize = 0;
+    var covered: usize = 0;
+    for (0..cap) |slot| if (host[3 * slot + 2] > 0) {
+        live += 1;
+        covered += @intCast(host[3 * slot + 2]);
+        if (slot >= z) past += 1;
+    };
+    std.debug.print("  prompt plan rows {d}{s}: {d} live items, z {d} (capacity {d})\n", .{ rows, if (bound) " at the bound" else "", live, z, cap });
+    try std.testing.expectEqual(@as(usize, 0), past);
+    try std.testing.expectEqual(pairs, covered);
+    if (bound) try std.testing.expectEqual(z, live);
+}
+
+test "a prompt plan's live items come before planItems(pairs, experts, 128), which they fill at 128 k + 1 pairs an expert" {
+    const t = try Rig.open(1 << 20);
+    defer t.close();
+    var rng: rig.Rng = .{ .state = 0x2545F4914F6CDD1D };
+    for ([_]usize{ 8192, 17715, 20480 }) |rows| for ([_]bool{ true, false }) |bound| try routeLive(t, &rng, rows, bound);
+}
+
 test "the router and the pick in one launch give the two launches' bytes (Qwen3.8 Flash Next: 513 x 2560, top 10)" {
     const t = try Rig.open(1 << 20);
     defer t.close();

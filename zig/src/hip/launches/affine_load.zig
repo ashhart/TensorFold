@@ -42,6 +42,8 @@ pub fn load(tiles_obj: Module, dot2_obj: Module, caps: Caps, choices: Choices) E
     k.tiled = try dot2_obj.function(r ++ "17affine_dot2_tiledENS0_6AffineE");
     k.reference = try dot2_obj.function(r ++ "18affine_dot2_kernelENS0_6AffineE");
     k.fill = try dot2_obj.function(r ++ "13fill_byte_lutEP6__half");
+    k.moe_gu = if (k.matrix) try tiles_obj.function(r ++ "18affine_wmma_moe_guILi4EEEvNS0_6AffineEf") else null;
+    k.moe_down = if (k.matrix) try tiles_obj.function(r ++ "20affine_wmma_moe_downILi4EEEvNS0_6AffineE") else null;
     return k;
 }
 

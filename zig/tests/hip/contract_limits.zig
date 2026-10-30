@@ -72,6 +72,10 @@ pub fn live(a: std.mem.Allocator, r: *const hip.Runtime, ctx: hip.Context, arch:
         std.debug.print(say, .{ word, arch, d[0], got, d[2] });
     }
     for (all) |rec| {
+        if (!rec.launch.served[at]) {
+            std.debug.print("N/A  limits live {s}: not launched on {s}\n", .{ rec.launch.name, arch });
+            continue;
+        }
         const bytes = try image(rec.launch.image);
         const listed = try hsaco.kernels(a, bytes);
         defer a.free(listed);
@@ -108,6 +112,14 @@ pub fn objects(a: std.mem.Allocator, io: std.Io, dir: []const u8) !usize {
         var line: std.ArrayList(u8) = .empty;
         defer line.deinit(a);
         for (limits.rdna, 0..) |t, i| {
+            if (!rec.launch.served[i]) {
+                // not launched on this chip: nothing to record, and a recorded usage is stale
+                const none = rec.usage[i].vgprs == 0;
+                if (!none) n += 1;
+                std.debug.print("{s} limits {s} {s}: not launched on this chip\n", .{ if (none) "N/A " else "FAIL", t.name, rec.launch.name });
+                try line.print(a, ".{{ .vgprs = 0, .sgprs = 0, .lds = 0, .private = 0, .bound = {d}, .wave = {d} }}, ", .{ rec.launch.threads, t.wave });
+                continue;
+            }
             const path = try file(a, dir, t.name, rec.launch.image);
             defer a.free(path);
             const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 28)) catch |err| {

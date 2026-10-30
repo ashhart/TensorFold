@@ -1,4 +1,4 @@
-//! Routed and plain products against the launcher's pick: the same bytes.
+//! Routed, plain and prompt products against the launcher's pick and the matrix tile: the same bytes.
 const std = @import("std");
 const rig = @import("rig.zig");
 const Rig = rig.Rig;
@@ -130,4 +130,118 @@ test "a plain product writes the same bytes at every columns a lane (Flash Next'
         try plainBytes(t, &rng, 2560, 6144, rows);
         try plainBytes(t, &rng, 4099, 2560, rows);
     }
+}
+
+/// Flash Next's prompt expert tiles against the 128-row matrix tile: the same bytes.
+fn promptExperts(t: *Rig, rng: *rig.Rng, down: bool, rows: usize, experts: usize, skew: bool, limit: f32) !void {
+    const kernels = &t.on.affine;
+    const sh = if (down) affine.Kernels.moe_down_shape else affine.Kernels.moe_gu_shape;
+    const n: usize = @intCast(sh.n);
+    const k: usize = @intCast(sh.k);
+    const slots = 11;
+    const pairs = rows * slots;
+    const width = if (down) n else n / 2;
+    var m = try Matrix.init(t, rng, n, k, @intCast(sh.bits), @intCast(sh.group), experts);
+    defer m.deinit();
+    const x_rows = if (down) pairs else rows;
+    const hx = try gpa.alloc(u16, x_rows * k);
+    defer gpa.free(hx);
+    for (hx) |*v| v.* = t.bits(rng.unit());
+    var x = try t.upload(hx);
+    defer x.free();
+    // each pair draws an expert; sorted by expert (stable) into items of at most 128 pairs, as moe_route plans a prompt
+    const pick = try gpa.alloc(u32, pairs);
+    defer gpa.free(pick);
+    for (pick) |*e| {
+        const r = rng.next();
+        e.* = @intCast(if (skew and r % 4 != 0) r % 3 else r % experts);
+    }
+    const members = try gpa.alloc(i32, pairs);
+    defer gpa.free(members);
+    var n_members: usize = 0;
+    const items = try gpa.alloc(i32, 3 * (pairs + experts + 8));
+    defer gpa.free(items);
+    @memset(items, 0);
+    var n_items: usize = 0;
+    for (0..experts) |e| {
+        var run: usize = 0;
+        for (0..pairs) |pi| {
+            if (pick[pi] != e) continue;
+            if (run == 0) {
+                items[3 * n_items ..][0..3].* = .{ @intCast(e), @intCast(n_members), 0 };
+                n_items += 1;
+            }
+            members[n_members] = @intCast(pi);
+            n_members += 1;
+            items[3 * (n_items - 1) + 2] += 1;
+            run = if (run + 1 == 128) 0 else run + 1;
+        }
+    }
+    // a plan's capacity holds empty items past the used ones
+    const count = n_items + 8;
+    var dev_items = try t.upload(items[0 .. 3 * count]);
+    defer dev_items.free();
+    var dev_members = try t.upload(members);
+    defer dev_members.free();
+    var sums = [2]@import("../memory.zig").DeviceBuffer{ try t.alloc(pairs * n * 4), try t.alloc(pairs * n * 4) };
+    defer for (&sums) |*b| b.free();
+    var acts: [2]@import("../memory.zig").DeviceBuffer = .{ try t.alloc(pairs * width * 2), try t.alloc(pairs * width * 2) };
+    defer for (&acts) |*b| b.free();
+    try sums[1].fill8(0xA5);
+    var a = m.arg(t, at(x), 128, at(sums[0]));
+    a.route = .{ .items = at(dev_items), .members = at(dev_members), .x_div = if (down) 1 else slots };
+    try kernels.blockGo(&t.r, a, t.stream.handle, @intCast(count), .matrix);
+    if (down) {
+        a.out = at(sums[1]);
+        try std.testing.expect(try kernels.moeDown(&t.r, a, @intCast(count), t.stream.handle));
+    } else {
+        try t.off.tf_moe_act(@ptrFromInt(at(sums[0])), @ptrFromInt(at(acts[0])), t.kind(), @intCast(pairs), @intCast(width), limit, t.stream.handle);
+        a.out = 0;
+        a.out16 = at(acts[1]);
+        try std.testing.expect(try kernels.moeGateUp(&t.r, a, @intCast(count), limit, t.stream.handle));
+    }
+    try t.stream.synchronize();
+    const cmp = if (down) sums else acts;
+    const want = try rig.download(u8, cmp[0]);
+    defer gpa.free(want);
+    const got = try rig.download(u8, cmp[1]);
+    defer gpa.free(got);
+    const size: usize = if (down) 4 else 2;
+    var differ: usize = 0;
+    for (0..want.len / size) |e| if (!std.mem.eql(u8, want[e * size ..][0..size], got[e * size ..][0..size])) {
+        if (differ < 4) std.debug.print("  prompt experts down {} rows {d} skew {}: pair {d} column {d} differs\n", .{ down, rows, skew, e / width, e % width });
+        differ += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 0), differ);
+    // and the matrix tile's sums are float64's within its bound
+    const prob = m.problem(t, hx);
+    const ref_sums = try rig.download(f32, sums[0]);
+    defer gpa.free(ref_sums);
+    for (0..8) |s| {
+        const pi = s * (pairs - 1) / 7;
+        const col = (s * 97) % width;
+        const r = ref.reference(prob, if (down) pi else pi / slots, pick[pi], col);
+        try std.testing.expect(@abs(@as(f64, ref_sums[pi * n + col]) - r.y) <= 1e-5 * r.norm + 1e-7);
+    }
+}
+
+test "Flash Next's prompt gate and up with its activation in one launch writes the bytes of the matrix tile and moe_act" {
+    const t = try Rig.open(1 << 20);
+    defer t.close();
+    if (t.on.affine.moe_gu == null) return error.SkipZigTest;
+    var rng: rig.Rng = .{ .state = 0x9E3779B97F4A7C15 };
+    try promptExperts(t, &rng, false, 300, 24, false, 0);
+    try promptExperts(t, &rng, false, 2048, 24, true, 0);
+    try promptExperts(t, &rng, false, 64, 24, false, 0);
+    try promptExperts(t, &rng, false, 512, 24, false, 7.0);
+}
+
+test "Flash Next's prompt expert down writes the bytes of the matrix tile" {
+    const t = try Rig.open(1 << 20);
+    defer t.close();
+    if (t.on.affine.moe_down == null) return error.SkipZigTest;
+    var rng: rig.Rng = .{ .state = 0x2545F4914F6CDD1D };
+    try promptExperts(t, &rng, true, 300, 24, false, 0);
+    try promptExperts(t, &rng, true, 2048, 24, true, 0);
+    try promptExperts(t, &rng, true, 64, 24, false, 0);
 }

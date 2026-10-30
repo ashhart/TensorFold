@@ -11,6 +11,7 @@
 #include "tiles/gemm.hpp"
 #include "tiles/gemm_kp.hpp"
 #include "tiles/matrix_gemm.hpp"
+#include "tiles/moe_gemm.hpp"
 #include "tiles/stream.hpp"
 
 namespace tf {
@@ -35,6 +36,22 @@ __global__ void __launch_bounds__(32 * WAVES) affine_gemm_kp(Affine a) {
 template <int BITS>
 __global__ void __launch_bounds__(256) affine_wmma_gemm(Affine a) {
     wmma_gemm_tile<MlxDecoder<BITS>, BF16Act, WmmaBF16, F32Out>(a);
+}
+
+// ---- Qwen3.8-Flash-Next's routed expert products of a prompt (tiles/moe_gemm.hpp, gfx11 matrix cores) ----
+
+// 64-wide K windows; each shape's ring depth is its own (MoeGateUp::kAhead, MoeDown::kAhead).
+
+// gate and up with silu(gate) * up as the epilogue, into a.out16 (bf16)
+template <int BITS>
+__global__ void __launch_bounds__(moe_tile::kThreads) affine_wmma_moe_gu(Affine a, float limit) {
+    wmma_moe_tile<MoeGateUp, BITS, 64, MoeGateUp::kAhead>(a, limit);
+}
+
+// down into a.out (fp32)
+template <int BITS>
+__global__ void __launch_bounds__(moe_tile::kThreads) affine_wmma_moe_down(Affine a) {
+    wmma_moe_tile<MoeDown, BITS, 64, MoeDown::kAhead>(a, 0.f);
 }
 
 // ---- the decode stream tile ----

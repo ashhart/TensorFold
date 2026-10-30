@@ -463,7 +463,7 @@ const own_records = [_]Record{
             .{ .vgprs = 135, .sgprs = 83, .lds = 5456, .private = 0, .bound = 128, .wave = 32 },
         },
     },
-} ++ @import("hip_records_pair.zig").records;
+} ++ @import("hip_records_wmma.zig").records ++ @import("hip_records_pair.zig").records;
 
 pub const records = own_records ++ @import("hip_records_stream.zig").records;
 
@@ -505,8 +505,13 @@ pub fn check(a: std.mem.Allocator, list: []const Record, quiet: bool) !usize {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(a);
     var n: usize = 0;
-    for (list) |r| for (limits.rdna, r.usage) |t, u| {
-        if (u.vgprs == 0) {
+    for (list) |r| for (limits.rdna, r.usage, r.launch.served) |t, u, served| {
+        if (!served) {
+            if (u.vgprs != 0) {
+                try out.print(a, "{s} on {s}: usage recorded on a chip that does not launch it\n", .{ r.launch.name, t.name });
+                n += 1;
+            }
+        } else if (u.vgprs == 0) {
             try out.print(a, "{s} on {s}: no compiled usage recorded\n", .{ r.launch.name, t.name });
             n += 1;
         } else n += try limits.hip(r.launch, u, t, &out, a);
@@ -558,4 +563,17 @@ test "a control cannot fit or lack compiled usage on any one chip" {
             try std.testing.expectEqual(@as(usize, 1), try controlProblems(a, missing, true));
         }
     }
+}
+
+test "a chip a launch is not served on records no usage, and recorded usage there is a problem" {
+    const a = std.testing.allocator;
+    var r: Record = .{ .launch = .{ .name = "gfx11 tile", .symbol = "k", .image = "affine_tiles", .threads = 256, .served = limits.gfx11_only }, .usage = undefined };
+    for (limits.rdna, &r.usage) |t, *u| u.* = if (std.mem.startsWith(u8, t.name, "gfx11")) .{ .vgprs = 64, .bound = 256 } else .{ .vgprs = 0 };
+    try std.testing.expectEqual(@as(usize, 0), try check(a, &.{r}, true));
+    r.usage[0] = .{ .vgprs = 64, .bound = 256 };
+    try std.testing.expectEqual(@as(usize, 1), try check(a, &.{r}, true));
+    // served everywhere: each chip without usage is a problem (gfx1030 and gfx1201 here)
+    r.launch.served = @splat(true);
+    r.usage[0] = .{ .vgprs = 0 };
+    try std.testing.expectEqual(@as(usize, 2), try check(a, &.{r}, true));
 }

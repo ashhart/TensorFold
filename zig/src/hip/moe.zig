@@ -57,6 +57,12 @@ pub fn capacity(pairs: usize, experts: usize) usize {
     return @min(pairs, experts) + pairs / @min(TILE, LANE_ROWS);
 }
 
+/// The most live items a prompt plan has at `tile` pairs an item (tf_moe_route puts them first): its launches' z.
+pub fn planItems(pairs: usize, experts: usize, tile: usize) usize {
+    const a = @min(pairs, experts);
+    return a + (pairs - a) / tile;
+}
+
 /// tile_for: the decode tile below BLOCK_FROM rows, the GEMM tile from there; a lane round's rows keep the decode tile.
 pub fn tileFor(o: Ops, rows: usize) usize {
     return tileOf(rows, o.window);
@@ -148,6 +154,8 @@ fn expertParts(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, logits: u6
                 try o.moeSelect(logits, pick, wts, null, 0, rows, r.count(), r.top_k);
             }
             try o.moeRoute(pick, pairs, r.rows, tile, members, items, cap);
+            // a prompt plan's launches cover its live items only (the slots past them are dead)
+            if (tile == BLOCK_ROWS) count = @min(cap, planItems(pairs, r.rows, tile));
         }
     }
     // the gate and up's activation is the launch's epilogue when the tile takes the shape
@@ -168,6 +176,44 @@ test "buffer sizes follow moe.run and max_items" {
     try std.testing.expectEqual(@as(usize, 32), bucket(17));
     try std.testing.expectEqual(@as(usize, 2048), bucket(2048));
     try std.testing.expectEqual(@as(usize, 129 + 16 * 9 / 8), capacity(16 * 9, 129));
+}
+
+test "a prompt plan's live items are at most planItems, equal with every expert at 128 k + 1 pairs" {
+    const items = struct {
+        fn of(counts: []const usize, tile: usize) usize {
+            var n: usize = 0;
+            for (counts) |c| n += (c + tile - 1) / tile;
+            return n;
+        }
+    };
+    var prng = std.Random.DefaultPrng.init(0x5851F42D4C957F2D);
+    const rnd = prng.random();
+    var counts: [513]usize = undefined;
+    // the coding prompt in 8,192-row chunks and in one chunk, 11 slots a row
+    for ([_]usize{ 8192 * 11, 17715 * 11, 20480 * 11 }) |pairs| {
+        // the bound's case: 128 k + 1 pairs an expert, the pairs past them on one expert (fewer than a tile)
+        const per = (pairs - counts.len) / counts.len / BLOCK_ROWS;
+        var used: usize = 0;
+        for (&counts) |*c| {
+            c.* = BLOCK_ROWS * per + 1;
+            used += c.*;
+        }
+        var spare = pairs - used;
+        var e: usize = 0;
+        while (spare >= BLOCK_ROWS) : (e += 1) {
+            counts[e] += BLOCK_ROWS;
+            spare -= BLOCK_ROWS;
+        }
+        counts[counts.len - 1] += spare;
+        try std.testing.expectEqual(planItems(pairs, counts.len, BLOCK_ROWS), items.of(&counts, BLOCK_ROWS));
+        // skewed and sparse routings stay under it
+        for (0..20) |_| {
+            @memset(&counts, 0);
+            for (0..pairs) |_| counts[if (rnd.boolean()) rnd.uintLessThan(usize, 8) else rnd.uintLessThan(usize, counts.len)] += 1;
+            try std.testing.expect(items.of(&counts, BLOCK_ROWS) <= planItems(pairs, counts.len, BLOCK_ROWS));
+        }
+        try std.testing.expect(planItems(pairs, counts.len, BLOCK_ROWS) <= capacity(pairs, counts.len));
+    }
 }
 
 test "the routed products take the decode tile below 64 rows and in a lane round, the GEMM tile from 64 rows" {

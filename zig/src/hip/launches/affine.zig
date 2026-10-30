@@ -16,6 +16,7 @@ const tuning = @import("../tuning/tuning.zig");
 const mlx_entries = @import("mlx_entries.zig");
 const affine_stream = @import("affine_stream.zig");
 const affine_load = @import("affine_load.zig");
+const affine_matrix = @import("affine_matrix.zig");
 
 const Error = runtime.Error;
 
@@ -156,6 +157,10 @@ pub const Kernels = struct {
     block: [bit_widths.len]Function,
     gemm: [bit_widths.len]Function,
     wmma_gemm: [bit_widths.len]Function,
+    /// Qwen3.8-Flash-Next's routed gate and up of a prompt with the activation as epilogue (tiles/moe_gemm.hpp); gfx11.
+    moe_gu: ?Function,
+    /// The same tile's routed down of a prompt, fp32 out.
+    moe_down: ?Function,
     kp: [bit_widths.len][kp_tiles.len]Function,
     span: [2]Function,
     fold: Function,
@@ -344,6 +349,14 @@ pub const Kernels = struct {
         try go(r, f, .{ .x = cdiv(a.n, 128), .y = cdiv(a.m, 128), .z = @intCast(items) }, .{ .x = 256 }, s, &args);
     }
 
+    pub const MoeShape = affine_matrix.MoeShape;
+    pub const moe_gu_shape = affine_matrix.moe_gu_shape;
+    pub const moe_down_shape = affine_matrix.moe_down_shape;
+    pub const moeGateUpTakes = affine_matrix.moeGateUpTakes;
+    pub const moeDownTakes = affine_matrix.moeDownTakes;
+    pub const moeGateUp = affine_matrix.moeGateUp;
+    pub const moeDown = affine_matrix.moeDown;
+
     /// K-parallel tile `tier` (an index of kp_tiles) of a short prompt.
     pub fn kpGo(k: *const Kernels, r: *const runtime.Runtime, a: Arg, s: abi.Stream, items: c_int, tier: usize) Error!void {
         const b = bitIndex(a.bits) orelse return refuse("bits");
@@ -491,4 +504,5 @@ test {
     _ = mlx_entries;
     _ = affine_stream;
     _ = affine_load;
+    _ = affine_matrix;
 }

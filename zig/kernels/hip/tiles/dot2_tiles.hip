@@ -352,6 +352,8 @@ using Dot = DotF16;
     template __global__ void affine_dot2_stream<Dot, BITS, R, 1, false>(Affine, StreamSides, int, int);
 #if TF_MATRIX
 #define TF_WMMA(BITS) template __global__ void affine_wmma_gemm<BITS>(Affine);
+template __global__ void affine_wmma_moe_gu<4>(Affine, float);
+template __global__ void affine_wmma_moe_down<4>(Affine);
 #else
 #define TF_WMMA(BITS)
 #endif
