@@ -153,7 +153,7 @@ const kernels = [_]Kernel{
     .{ .name = "nem_rows_r4", .src = "nem_rows", .options = cl3 ++ " -DMAXR=4" },
     .{ .name = "nem_rows_r8", .src = "nem_rows", .options = cl3 ++ " -DMAXR=8" },
     .{ .name = "nem_prow", .options = cl3 },
-    .{ .name = "nem_prow_t4", .src = "nem_prow", .options = cl3 ++ " -DPR=4 -DPO=4" },
+    .{ .name = "nem_prow_gen12", .src = "nem_prow", .options = cl3 ++ " -DPO=4" },
     .{ .name = "nem_attn_dec", .options = cl3 },
     .{ .name = "lfm3", .options = cl3 },
     .{ .name = "lfm3_mv", .options = cl3 },
