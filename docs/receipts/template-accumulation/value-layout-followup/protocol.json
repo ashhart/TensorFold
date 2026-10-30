@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "question": "Does compact value layout preserve exactness and bounded large-argument completion while removing the added list-copy payload?",
+  "commits": {
+    "base": "f350cd3ea253a042e205746928271f9d8f71a82d",
+    "prior": "d33e5e769d7a4bb801cc39e0a32400488cb89777",
+    "revised": "8d00b490f5ddf45721546e9b9816a083a46e5fa2"
+  },
+  "modes": [
+    "Debug",
+    "ReleaseFast",
+    "ReleaseSafe"
+  ],
+  "version_order": [
+    "base",
+    "prior",
+    "revised"
+  ],
+  "corpus_order": [
+    "allocation",
+    "compatibility"
+  ],
+  "corpora": {
+    "allocation": {
+      "sha256": "f5ac1de9e7226a701beda7887c280ee090c0694d3f6118945e3c39167b78e778",
+      "case_ids": [
+        "reported-2001-no-tools",
+        "catalog-157-240kib-small-dialogue",
+        "tool-cycles-008-object-64",
+        "tool-cycles-008-object-8192",
+        "tool-cycles-008-string-8192",
+        "tool-cycles-064-object-64",
+        "tool-cycles-064-object-8192",
+        "tool-cycles-064-string-8192",
+        "tool-cycles-128-object-64",
+        "tool-cycles-128-object-8192",
+        "tool-cycles-128-string-8192",
+        "tool-cycles-128-object-8192-catalog-240kib",
+        "synthetic-interleaved-breaker-control"
+      ],
+      "cases": 13,
+      "exact_provenance_cases": 0
+    },
+    "compatibility": {
+      "sha256": "f5b8a240a9e852aaad7efbc3335942e8089812a2d7b5e5783b83f3c9dab4b74d",
+      "case_ids": [
+        "scaled-0009-tools-none",
+        "scaled-0129-tools-none",
+        "scaled-0257-tools-none",
+        "scaled-0513-tools-none",
+        "scaled-1001-tools-none",
+        "scaled-2001-tools-none",
+        "scaled-2001-tools-synthetic-157",
+        "features-thinking-0-generation-0",
+        "features-thinking-0-generation-1",
+        "features-thinking-1-generation-0",
+        "features-thinking-1-generation-1",
+        "features-tools-object-thinking-0",
+        "features-tools-object-thinking-1",
+        "features-tools-string-thinking-0",
+        "features-tools-string-thinking-1",
+        "features-mid-system-reminder-thinking-0",
+        "features-mid-system-reminder-thinking-1",
+        "features-json-values-response-format",
+        "features-tools-without-leading-system",
+        "provenance-user-marker-collision",
+        "provenance-reasoning-marker-collision"
+      ],
+      "cases": 21,
+      "exact_provenance_cases": 8
+    }
+  },
+  "planned_processes": 306,
+  "binaries": 9,
+  "renders_per_process": 1,
+  "combined_compile_render_cap_bytes": 251658240,
+  "required_layout": {
+    "base": {
+      "Str": 40,
+      "Value": 48
+    },
+    "prior": {
+      "Str": 48,
+      "Value": 56
+    },
+    "revised": {
+      "Str": 40,
+      "Value": 48
+    }
+  },
+  "allowed_cap_refusals": {
+    "version": "base",
+    "corpus": "allocation",
+    "case_ids": [
+      "tool-cycles-128-object-8192",
+      "tool-cycles-128-string-8192",
+      "tool-cycles-128-object-8192-catalog-240kib"
+    ]
+  },
+  "acceptance": "Complete306process matrix; expected layouts; full Jinja byte equality and canonical span identity on all completed renders; exact request-byte coverage wherever supplied; only listed original-base cap refusals allowed; every prior/revised case completes. Report every remaining peak delta without claiming whole-regression resolution from layout alone.",
+  "memory_scope": "Combined compiled-template plus live render scratch; inputs, oracle and returned outputs outside cap; logical allocator bytes, not RSS.",
+  "failure_scope": "Retain partial failures and every CAP live/request/would-be total; no larger-cap retries or replacement runs.",
+  "timing_scope": "No timing observations or speed claims; root owns a separate unaltered timing protocol.",
+  "runner_sha256": "81c6c3718d81d7c3a1ff4bab32a1bd8298a64d08453ad3e0d48aa9ea0652c994",
+  "harness_sha256": {
+    "render_test.zig": "9110f0b70bc6b82f8e172620b5179c21f0e54b90847adc7ba241232185586b4b",
+    "diagnostics.zig": "9dd133ffa7bea5d34e01ca6c686bb254a8e81207eab0ff2a9edf631238a957f3"
+  }
+}

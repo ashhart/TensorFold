@@ -1,0 +1,18 @@
+{
+  "reason": "Client expected JSON lists for chunk pairs, but the unchanged streaming parser returns tuples in memory. Aborted before the first plain request or any decode timing block.",
+  "client_sha256": "86df3c9474abab6ec5a0443f035d727c1811e42660072c06677c587b3fb5f977",
+  "protocol_commit": "a5d2863cd",
+  "manifest_commit": "61923faff",
+  "attempted_responses": 1,
+  "complete_drafted_responses": 1,
+  "plain_responses": 0,
+  "decode_timing_responses": 0,
+  "parity_compared": false,
+  "guard_events": 0,
+  "production_restored_and_freshly_healthy": true,
+  "cleanup_errors": [],
+  "original_raw_sha256": {
+    "P0.json": "0873cdd693eda77eb06c090f0e80f732aec0cd721f92166ee42b10593b7b62be"
+  },
+  "publication_note": "JSON whitespace compacted; parsed response values unchanged. Outcome records client failure with successful cleanup."
+}

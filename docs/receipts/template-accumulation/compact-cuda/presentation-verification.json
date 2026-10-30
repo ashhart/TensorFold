@@ -1,0 +1,17 @@
+{
+  "status": "passed",
+  "summary_sha256": "6a2102c3c4f3232cdb6c5f98332cb19047209705eed5dd7ebac8d636e23089a8",
+  "readme_sha256": "ea8211927483e8b962b68174c341316f2ef25109122de4084343b0a064a8ada1",
+  "decode_rows": 12,
+  "ttft_rows": 13,
+  "first_cold_decimal": {
+    "base_mean_ms": "572.21919366747898333333333333333333333333333333333",
+    "candidate_mean_ms": "596.91263266662038333333333333333333333333333333333",
+    "change_ms": "24.693438999141400000000000000000000000000000000000",
+    "change_pct": "4.3153811113667307609674400438697974660242341580100"
+  },
+  "presentation_means": "independently recomputed from six reported per-run medians with Decimal",
+  "confidence_intervals": "copied values formatted only; statistical method not recomputed",
+  "method_and_scope_limits_retained": true,
+  "independent_verification_approval_placeholder_retained": true
+}

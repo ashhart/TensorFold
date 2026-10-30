@@ -1,0 +1,131 @@
+{
+  "schema_version": 1,
+  "question": "Is served decode throughput practically equivalent within plus or minus 2 percent on the twelve specified cases?",
+  "base": "f350cd3ea253a042e205746928271f9d8f71a82d",
+  "candidate": "8d00b490f5ddf45721546e9b9816a083a46e5fa2",
+  "blocks": 6,
+  "orders": [
+    "AB",
+    "BA",
+    "BA",
+    "AB",
+    "AB",
+    "BA"
+  ],
+  "windows": [
+    [
+      1,
+      2
+    ],
+    [
+      3,
+      4
+    ],
+    [
+      5,
+      6
+    ]
+  ],
+  "fresh_server_per_run": true,
+  "reply_tokens": 256,
+  "repetitions_per_cell": 2,
+  "fixtures": [
+    "multiturn",
+    "prose",
+    "code"
+  ],
+  "temperatures": [
+    0.0,
+    1.0
+  ],
+  "streams": [
+    1,
+    2
+  ],
+  "seeds": [
+    1234,
+    1235
+  ],
+  "excluded_warmups_per_run": 1,
+  "excluded_sampled_solo_references_per_run": 3,
+  "measured_responses_per_run": 36,
+  "total_responses_per_run": 40,
+  "total_responses": 480,
+  "measurement": "Per-repetition aggregate decode = streams * 255 / (last response chunk - first response chunk). Median of two repetitions per cell per fresh server.",
+  "analysis_unit": "Six paired log ratios of candidate/base per-run medians for each cell; requests, streams and repetitions are not independent sample units.",
+  "confidence_level": 0.95,
+  "degrees_of_freedom": 5,
+  "t_critical": 2.570581835636305,
+  "equivalence_ratio_bounds": [
+    0.98,
+    1.02
+  ],
+  "interval": "exp(mean(log ratios) +/- t_critical * sample_sd(log ratios) / sqrt(6))",
+  "acceptance": "All twelve per-cell confidence intervals wholly inside the bounds, complete fixed sample, and full token/output equality. The global decision is intersection-union; intervals are per-cell, not simultaneous intervals.",
+  "inference_limits": "Paired t intervals assume independent approximately normal block log ratios. Six blocks give limited precision. This is practical equivalence on the tested checkpoint/settings, not exact timing equality or universal equivalence.",
+  "stopping_rule": "Exactly six paired blocks; no early acceptance, no extra runs selected from interval width or direction, no replacement pairs. Any safety or exactness failure stops the experiment. Missing observations cannot qualify.",
+  "inconclusive_rule": "Any interval overlapping a bound is inconclusive. An interval wholly outside the band is not equivalent; do not automatically call this a regression.",
+  "safety": "Existing 6 GiB guard, 9 GiB reserve, 8192 context, two lanes, prompt cache zero. Restore and health-check production after every window, including failure or cancellation. Stop after the first OOM and do not continue later windows.",
+  "scope": "256-token decode equivalence for compact Value layout, plus a separate candidate-only drafted/plain parity gate. TTFT is descriptive. Cached resume is unrun because prompt cache is zero.",
+  "experiment_id": "compact-cuda-8d00b490",
+  "parity": {
+    "window": 0,
+    "label": "P0",
+    "side": "P",
+    "candidate_only": true,
+    "reply_tokens": 256,
+    "streams": 1,
+    "fixtures": [
+      "multiturn",
+      "prose",
+      "code"
+    ],
+    "temperature_seed_pairs": [
+      [
+        0.0,
+        1234
+      ],
+      [
+        1.0,
+        1234
+      ],
+      [
+        1.0,
+        1235
+      ]
+    ],
+    "pairs": 9,
+    "responses": 18,
+    "first_cold_counted_in_pairs": true,
+    "additional_warmups": 0,
+    "order": "Fixture order, then listed temperature/seed order; drafted then plain for each pair. Six tokenizer snapshots follow the first drafted request.",
+    "acceptance": "Complete cold requests with full token and output equality in each pair and against every corresponding candidate decode output; no timing claim."
+  },
+  "artifacts": {
+    "parity": "parity/P0.json",
+    "decode": "decode/{A1,B1,B2,A2,B3,A3,A4,B4,A5,B5,B6,A6}.json",
+    "identity": "environment.json; phase-specific window identity captures retained separately",
+    "decode_responses": 480,
+    "parity_responses": 18,
+    "experiment_responses": 498
+  },
+  "reuse_sha256": {
+    "decode-equivalence/client.py": "0fcbb2f52a94a88e74a34bacb232ed0d729a72e5261136280277f4b37ce2db0b",
+    "decode-equivalence/compare.py": "3f32ac9f64dabedb967912eb6876e2cc892efbd7cbb8749b3e05c9d644d12a02",
+    "decode-equivalence/protocol.json": "f86dae04e9f80398d198204380048b5efeaebf828bf71866bf0c077d313ff181",
+    "model/client.py": "e3e531b83e5099c223d984a9f5b7879df6e856e77ac7e6fc4274c7dc177bde92"
+  },
+  "parity_client_sha256": "c2ddeefbdc938118f229c60c088dbbaee1da230edf4624002a1dab787a06e5e5",
+  "aborted_prequalification_attempt": {
+    "protocol_sha256": "9ca41d2821a178fc1d4324c06f028180ef0dddcde2c609e43ca14792ee19c29c",
+    "parity_client_sha256": "86df3c9474abab6ec5a0443f035d727c1811e42660072c06677c587b3fb5f977",
+    "inference_responses": 1,
+    "completed_parity_pairs": 0,
+    "decode_responses": 0,
+    "statistical_observations": 0,
+    "data_reused": false,
+    "reason": "The parity client required list chunks, but the unchanged shared streaming client emits tuple chunks in memory. JSON converts these to lists. Validation stopped before the first plain request or any paired decode observation.",
+    "correction": "Accept tuple or list pairs with identical shape/type/arithmetic checks; test actual shared Client.stream using synthetic SSE and JSON roundtrip.",
+    "restart": "Use a fresh qualification session and all18 parity responses plus all480 decode responses. Fixed schedule, sample size, measurement and statistical rules are unchanged."
+  }
+}

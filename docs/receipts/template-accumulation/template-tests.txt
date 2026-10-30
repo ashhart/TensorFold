@@ -1,0 +1,42 @@
+1/35 accumulation_test.test.interleaved namespace accumulation keeps render scratch bounded...128 messages: peak scratch 3556664 bytes
+256 messages: peak scratch 5647106 bytes
+512 messages: peak scratch 11949772 bytes
+OK
+2/35 accumulation_test.test.long snapshots, independent branches and self concatenation preserve bytes and provenance...OK
+3/35 accumulation_test.test.two growing chains and a grouped long right operand stay bounded...OK
+4/35 accumulation_test.test.retained buffer text relocation preserves a borrowed snapshot...OK
+5/35 accumulation_test.test.retained buffer span relocation preserves a borrowed snapshot...OK
+6/35 accumulation_test.test.identical request and literal spelling keeps distinct provenance...OK
+7/35 template.test_0...OK
+8/35 value.test.python float repr...OK
+9/35 unicode.test.capitalize as Python's str.capitalize...OK
+10/35 unicode.test.python whitespace, printability and case tables...OK
+11/35 tests.test.feature probes match Python jinja2...OK
+12/35 tests.test.engine bridge: NUL content, merged system prompt and generation prompt...OK
+13/35 tests.test.engine context: thinking switches and effort defaults...OK
+14/35 tests.test.numeric members, undefined tools and documents...OK
+15/35 tests.test.syntax and unknown filters fail at compile time...OK
+16/35 tests.test.fromjson reads a string's JSON into values a template walks...OK
+17/35 tests.test.dynamic keyword mappings feed dict constructors and scoped macros...OK
+18/35 tests.test.dynamic keyword expansion rejects non-mappings and non-string keys...OK
+19/35 tests.test.dynamic keyword expansion rejects duplicate and unknown keyword names...OK
+20/35 tests.test.dynamic keyword mapping must be the final call argument...OK
+21/35 tests.test.appending to a long string in a namespace stays linear in memory...OK
+22/35 tests.test.a render leaves only its text and spans in the caller's allocator...OK
+23/35 provenance_test.test.provenance exact maps for concatenation repetition indexing slicing and string...OK
+24/35 provenance_test.test.provenance exact maps for split strip affix replace and joins...OK
+25/35 provenance_test.test.provenance exact maps through capture scopes namespaces loops and request keys...OK
+26/35 provenance_test.test.provenance mixed dictionary keys retain their individual origins and overwrites...OK
+27/35 provenance_test.test.provenance indent maps request newlines and request padding separately...OK
+28/35 provenance_test.test.provenance property covers every implemented filter...PROVENANCE_FILTERS 30
+OK
+29/35 provenance_test.test.provenance property covers every exposed string dict and list method including refusals...PROVENANCE_METHODS str=47 dict=11 list=11
+OK
+30/35 provenance_test.test.provenance deterministic render fuzz and linear append span work...PROVENANCE_FUZZ 1000; append spans=10000 bytes=90000
+OK
+31/35 provenance_test.test.provenance checkpoint globals are literals and request context overrides them...OK
+32/35 provenance_test.test.provenance empty substrings never retain empty request ranges...OK
+33/35 provenance_test.test.provenance namespace representations retain request dictionary keys...OK
+34/35 provenance_test.test.provenance retains existing markup conversion semantics...OK
+35/35 provenance_test.test.provenance foreign substrings fail safe in both offset helpers...OK
+All 35 tests passed.

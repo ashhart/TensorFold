@@ -1,0 +1,25 @@
+{
+  "harness_sha256": "30ed53c64d00dedada284a3d07db5329ec4c0def2fc42ffb2c80bed2295f781e",
+  "families": 9,
+  "cases": 36,
+  "expected_output_bytes": 2530055,
+  "corpus_sha256": "73d3422396b6a2905f66de50d5ba2dae7a073ad33689494d8b6fc6bf5bcd9306",
+  "candidate_run_1": {
+    "passed": 36,
+    "mismatches": []
+  },
+  "candidate_run_2": {
+    "passed": 36,
+    "mismatches": []
+  },
+  "baseline_passed": 29,
+  "baseline_mismatched": 7,
+  "source_sha256": {
+    "zig/src/core/template/eval.zig": "407556bb292949c9d48d6829cccabf93ad8c969037eeef6ad4be46ffe023535c",
+    "zig/src/core/template/provenance.zig": "ed6f398be974d63e26b28a7c3fa4d4ec81838c99d05d53e56ee68d4072701f10",
+    "zig/src/core/template/template.zig": "cc99501597b9f87dc59df1bc2b30670993dae00b904d5ecf0245e2e037b55325",
+    "zig/src/core/template/parity.zig": "e7e51c88635b0adeb10f5c4742fa7c599372d3e4c0e0ac9aff77e68c1f01853c",
+    "zig/src/platform/sys.zig": "a77246ddd539ccf22d14d57dc737ff03ad6a4c16db4bd68575d4c0ab8bbe3525"
+  },
+  "candidate_results_identical": true
+}

@@ -1,0 +1,103 @@
+1/32 accumulation_test.test.interleaved namespace accumulation keeps render scratch bounded...128 messages: peak scratch 17146558 bytes
+256 messages: peak scratch 74847780 bytes
+512 messages: peak scratch 225995904 bytes
+FAIL (TestUnexpectedResult)
+ZIG_HOME/lib/std/testing.zig:584:14: 0x1042c105f in expect (root)
+    if (!ok) return error.TestUnexpectedResult;
+             ^
+zig/src/core/template/accumulation_test.zig:111:5: 0x1043fec13 in test.interleaved namespace accumulation keeps render scratch bounded (root)
+    try testing.expect(measurements[1] <= 3 * measurements[0] + 4 * 1024 * 1024);
+    ^
+2/32 accumulation_test.test.long snapshots, independent branches and self concatenation preserve bytes and provenance...slices differ. first difference occurs at index 0 (0x0)
+
+============ expected this output: =============  len: 32777 (0x8009)
+
+78 78 78 78 78 78 78 78  78 78 78 78 78 78 78 78  xxxxxxxxxxxxxxxx
+78 78 78 78 78 78 78 78  78 78 78 78 78 78 78 78  xxxxxxxxxxxxxxxx
+78 78 78 78 78 78 78 78  78 78 78 78 78 78 78 78  xxxxxxxxxxxxxxxx
+78 78 78 78 78 78 78 78  78 78 78 78 78 78 78 78  xxxxxxxxxxxxxxxx
+78 78 78 78 78 78 78 78  78 78 78 78 78 78 78 78  xxxxxxxxxxxxxxxx
+78 78 78 78 78 78 78 78  78 78 78 78 78 78 78 78  xxxxxxxxxxxxxxxx
+78 78 78 78 78 78 78 78  78 78 78 78 78 78 78 78  xxxxxxxxxxxxxxxx
+78 78 78 78 78 78 78 78  78 78 78 78 78 78 78 78  xxxxxxxxxxxxxxxx
+78 78 78 78 78 78 78 78  78 78 78 78 78 78 78 78  xxxxxxxxxxxxxxxx
+78 78 78 78 78 78 78 78  78 78 78 78 78 78 78 78  xxxxxxxxxxxxxxxx
+78 78 78 78 78 78 78 78  78 78 78 78 78 78 78 78  xxxxxxxxxxxxxxxx
+78 78 78 78 78 78 78 78  78 78 78 78 78 78 78 78  xxxxxxxxxxxxxxxx
+78 78 78 78 78 78 78 78  78 78 78 78 78 78 78 78  xxxxxxxxxxxxxxxx
+78 78 78 78 78 78 78 78  78 78 78 78 78 78 78 78  xxxxxxxxxxxxxxxx
+78 78 78 78 78 78 78 78  78 78 78 78 78 78 78 78  xxxxxxxxxxxxxxxx
+78 78 78 78 78 78 78 78  78 78 78 78 78 78 78 78  xxxxxxxxxxxxxxxx
+... truncated, indexes [0x100..] not shown, remaining bytes: 0x7F09 ...
+
+============= instead found this: ==============  len: 32777 (0x8009)
+
+AA AA AA AA AA AA AA AA  AA AA AA AA AA AA AA AA  ................
+AA AA AA AA AA AA AA AA  AA AA AA AA AA AA AA AA  ................
+AA AA AA AA AA AA AA AA  AA AA AA AA AA AA AA AA  ................
+AA AA AA AA AA AA AA AA  AA AA AA AA AA AA AA AA  ................
+AA AA AA AA AA AA AA AA  AA AA AA AA AA AA AA AA  ................
+AA AA AA AA AA AA AA AA  AA AA AA AA AA AA AA AA  ................
+AA AA AA AA AA AA AA AA  AA AA AA AA AA AA AA AA  ................
+AA AA AA AA AA AA AA AA  AA AA AA AA AA AA AA AA  ................
+AA AA AA AA AA AA AA AA  AA AA AA AA AA AA AA AA  ................
+AA AA AA AA AA AA AA AA  AA AA AA AA AA AA AA AA  ................
+AA AA AA AA AA AA AA AA  AA AA AA AA AA AA AA AA  ................
+AA AA AA AA AA AA AA AA  AA AA AA AA AA AA AA AA  ................
+AA AA AA AA AA AA AA AA  AA AA AA AA AA AA AA AA  ................
+AA AA AA AA AA AA AA AA  AA AA AA AA AA AA AA AA  ................
+AA AA AA AA AA AA AA AA  AA AA AA AA AA AA AA AA  ................
+AA AA AA AA AA AA AA AA  AA AA AA AA AA AA AA AA  ................
+... truncated, indexes [0x100..] not shown, remaining bytes: 0x7F09 ...
+
+================================================
+
+FAIL (TestExpectedEqual)
+ZIG_HOME/lib/std/testing.zig:346:5: 0x1042c0f17 in expectEqualSlices__func_1000 (root)
+    return error.TestExpectedEqual;
+    ^
+zig/src/core/template/accumulation_test.zig:147:5: 0x1043dc75f in test.long snapshots, independent branches and self concatenation preserve bytes and provenance (root)
+    try testing.expectEqualSlices(u8, expected.items, got.s);
+    ^
+3/32 accumulation_test.test.two growing chains and a grouped long right operand stay bounded...FAIL (TestUnexpectedResult)
+ZIG_HOME/lib/std/testing.zig:584:14: 0x1042c105f in expect (root)
+    if (!ok) return error.TestUnexpectedResult;
+             ^
+zig/src/core/template/accumulation_test.zig:199:5: 0x1042c215f in test.two growing chains and a grouped long right operand stay bounded (root)
+    try testing.expect(peak.peak - base <= 4 * 1024 * 1024 + 32 * expected.items.len);
+    ^
+4/32 template.test_0...OK
+5/32 value.test.python float repr...OK
+6/32 unicode.test.capitalize as Python's str.capitalize...OK
+7/32 unicode.test.python whitespace, printability and case tables...OK
+8/32 tests.test.feature probes match Python jinja2...OK
+9/32 tests.test.engine bridge: NUL content, merged system prompt and generation prompt...OK
+10/32 tests.test.engine context: thinking switches and effort defaults...OK
+11/32 tests.test.numeric members, undefined tools and documents...OK
+12/32 tests.test.syntax and unknown filters fail at compile time...OK
+13/32 tests.test.fromjson reads a string's JSON into values a template walks...OK
+14/32 tests.test.dynamic keyword mappings feed dict constructors and scoped macros...OK
+15/32 tests.test.dynamic keyword expansion rejects non-mappings and non-string keys...OK
+16/32 tests.test.dynamic keyword expansion rejects duplicate and unknown keyword names...OK
+17/32 tests.test.dynamic keyword mapping must be the final call argument...OK
+18/32 tests.test.appending to a long string in a namespace stays linear in memory...OK
+19/32 tests.test.a render leaves only its text and spans in the caller's allocator...OK
+20/32 provenance_test.test.provenance exact maps for concatenation repetition indexing slicing and string...OK
+21/32 provenance_test.test.provenance exact maps for split strip affix replace and joins...OK
+22/32 provenance_test.test.provenance exact maps through capture scopes namespaces loops and request keys...OK
+23/32 provenance_test.test.provenance mixed dictionary keys retain their individual origins and overwrites...OK
+24/32 provenance_test.test.provenance indent maps request newlines and request padding separately...OK
+25/32 provenance_test.test.provenance property covers every implemented filter...PROVENANCE_FILTERS 30
+OK
+26/32 provenance_test.test.provenance property covers every exposed string dict and list method including refusals...PROVENANCE_METHODS str=47 dict=11 list=11
+OK
+27/32 provenance_test.test.provenance deterministic render fuzz and linear append span work...PROVENANCE_FUZZ 1000; append spans=10000 bytes=90000
+OK
+28/32 provenance_test.test.provenance checkpoint globals are literals and request context overrides them...OK
+29/32 provenance_test.test.provenance empty substrings never retain empty request ranges...OK
+30/32 provenance_test.test.provenance namespace representations retain request dictionary keys...OK
+31/32 provenance_test.test.provenance retains existing markup conversion semantics...OK
+32/32 provenance_test.test.provenance foreign substrings fail safe in both offset helpers...OK
+29 passed; 0 skipped; 3 failed.
+error: the following test command failed with exit code 1:
+.zig-cache/o/6a7ff5cdadd46a458100cd2b29a5402e/root --seed=0x89e2d395

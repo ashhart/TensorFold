@@ -1,0 +1,42 @@
+{
+  "source_commit": "8d00b490f5ddf45721546e9b9816a083a46e5fa2",
+  "zig_version": "0.17.0",
+  "focused_template_tests": {
+    "modes": [
+      "Debug",
+      "ReleaseSafe",
+      "ReleaseFast"
+    ],
+    "passed_per_mode": 37,
+    "failed": 0
+  },
+  "host": {
+    "command": "zig build test-cuda-host test-server-cpu test-kernel-contract test-golden fuzz-cortheon -j2 --test-timeout 2m --summary all",
+    "exit_code": 0,
+    "successful_build_steps": 299,
+    "total_build_steps": 299,
+    "tests_passed": 1099,
+    "tests_skipped": 3,
+    "note": "Other groups were cached. Linux-only voice-tool tests skip on macOS.",
+    "wire_goldens": {
+      "equal": 322,
+      "total": 335,
+      "known_differences": 13,
+      "unexpected_differences": 0
+    }
+  },
+  "plain_build": {
+    "command": "zig build -j2",
+    "exit_code": 1,
+    "reason": "Xcode Metal compiler component is unavailable."
+  },
+  "lean": {
+    "base": 426,
+    "branch": 426,
+    "new": 0
+  },
+  "gpu": {
+    "run": false,
+    "note": "No GPU source changed; previous model receipts cover the earlier implementation, not this compact layout revision."
+  }
+}

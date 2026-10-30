@@ -1,0 +1,39 @@
+{
+  "base": "f350cd3ea",
+  "candidate": "a8dd85606",
+  "mode": "Zig 0.17.0 ReleaseFast",
+  "method": "5 alternating ABBA/BAAB blocks, 2 warmup and 3 timed renders per run; median of 10 per-run medians",
+  "cells": {
+    "short 8": {
+      "base_median_ns": 8354.5,
+      "base_runs": 10,
+      "candidate_median_ns": 8375.0,
+      "candidate_runs": 10,
+      "change_pct": 0.2453767430725895
+    },
+    "interleaved 128": {
+      "base_median_ns": 949146.0,
+      "base_runs": 10,
+      "candidate_median_ns": 196083.5,
+      "candidate_runs": 10,
+      "change_pct": -79.34106027945121
+    },
+    "interleaved 256": {
+      "base_median_ns": 3596854.0,
+      "base_runs": 10,
+      "candidate_median_ns": 473541.5,
+      "candidate_runs": 10,
+      "change_pct": -86.83456431648324
+    },
+    "interleaved 512": {
+      "base_median_ns": null,
+      "base_runs": 0,
+      "candidate_median_ns": 839250.0,
+      "candidate_runs": 10
+    }
+  },
+  "base_512": "OutOfMemory at 240 MiB tracked scratch cap, all 10 runs; no paired timing",
+  "measured_harness_sha256": "ba8602598c1a00e04aaf209251e7dc2f839ec73d125001ca2ca88f28b21084c2",
+  "published_harness_sha256": "800199bd54b2d34b44e309e42602f1ccc1840018f922cc77102faa22856e8d2b",
+  "harness_change": "Zig formatting only"
+}
