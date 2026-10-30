@@ -1,0 +1,54 @@
+# Independent template accumulators
+
+For [#1633](https://github.com/ashhart/TensorFold/issues/1633), interleaved large string concatenations no longer repeatedly copy the growing prompt. Saved strings also keep their bytes and request provenance when an accumulator grows or branches.
+
+Base: `f350cd3ea253a042e205746928271f9d8f71a82d`. Candidate implementation and regression tests: `78b0a0399545c680d2af887980e8f2ccfd2a24f8`. These measurements use synthetic host inputs on Apple M5 Pro, 48 GiB RAM, macOS 27.0, Zig 0.17.0, Python 3.11.16 and Jinja2 3.1.6. No checkpoint, inference backend, rank group or GPU workload is involved.
+
+## Memory and correctness
+
+The public renderer accumulates 1,024-byte messages plus literal separators while interleaving a separate 4,096-byte concatenation. The allocator tracks peak live render-scratch allocation, excluding the compiled template's standing allocation, input and returned result. It refuses allocations above 240 MiB. These are allocator bytes, not process RSS or GPU memory.
+
+| Messages | Base peak bytes | Candidate peak bytes | Change |
+| --- | ---: | ---: | ---: |
+| 128 | 17,146,558 | 3,556,664 | −79.3% |
+| 256 | 74,847,780 | 5,647,106 | −92.5% |
+| 512 | 225,995,904 | 11,949,772 | −94.7% |
+
+The [base scaling test](baseline-scaling.txt) fails its linear memory bound after checking every rendered byte and request/literal provenance offset. The [expanded base run](baseline-regressions.txt) has three failures: interleaved allocation growth, corruption of saved string bytes, and the bound for two growing chains with a grouped long right operand. Its other 29 tests pass. The final [candidate template suite](template-tests.txt) passes all 35 tests, including both doubling checks, saved aliases, branching, self-concatenation, separate text/span relocations, and identical 4,096-byte request/literal fragments with distinct provenance.
+
+An independent Jinja2 oracle covers nine families at four sizes, including macros that mutate the same namespace while an outer expression holds its earlier left operand. The [base](baseline-parity.json) matches 29/36 cases; the [candidate](parity-summary.json) matches all 36 across 2,530,055 output bytes in each of two runs. The candidate runs have identical corpus and result bytes. A separate [ReleaseFast run](releasefast-parity.json) also matches all 36 cases and produces byte-identical results to Debug. Seven baseline mismatches are saved-branch, self-concatenation and macro-mutation cases. This fixes existing corruption; it does not claim equality to corrupted baseline output.
+
+## Design choices required for exactness
+
+Only concatenation results carry an arena-owned builder. An append can reuse that builder only when both the text and provenance slices identify its current complete value. Older snapshots and derived strings start a new builder, so evaluating the right operand cannot silently change the already-evaluated left operand.
+
+Text and provenance arrays grow geometrically by allocating and copying, without freeing or remapping their earlier arrays. Arena ownership alone is insufficient: `Allocator.free` can poison an old slice even if the arena retains its physical storage. Appends preserve existing text and span entries, including self-appends. Ordinary buffers do not attach their stack addresses to strings, and public render results contain only caller-owned text and spans.
+
+## Reproduction
+
+From the repository root, with `zig` at 0.17.0 and Python with Jinja2 3.1.6:
+
+```sh
+zig test --dep sys -Mroot=zig/src/core/template/template.zig -Msys=zig/src/platform/sys.zig -lc
+python3 docs/receipts/template-accumulation/verify_parity.py --zig zig --out /tmp/template-parity
+zig build test-server-deepseek-chat-host -j2 --summary all
+zig build test-cuda-host test-server-cpu test-kernel-contract test-golden fuzz-cortheon -j2 --test-timeout 2m --summary all
+zig fmt --check zig/src/core/template/{eval,provenance,template,accumulation_test}.zig
+python3 tools/zig/lean_check.py
+```
+
+The standalone scaling test can run against the base evaluator without the new retained-buffer tests. `baseline-regressions.txt` records that failing stage before the three additional relocation/provenance tests were added. The portable parity verifier writes its synthetic corpus, results, versions and source hashes; it returns nonzero on any byte mismatch.
+
+## Integrated checks and limits
+
+- [Host checks](host-checks.txt): 299/299 build steps succeeded, 1,519 tests passed and three skipped in the final aggregate run. Other test groups were cached; these are executed counts, not a sum across attempts. All five requested targets succeeded.
+- Server CPU tests: 868 passed and three Linux-only voice-tool tests skipped on macOS, including request-field provenance and 178 committed DeepSeek prompt goldens. A separate focused DeepSeek run passed 20/20 tests. Those goldens primarily exercise the native fallback renderer; the independent Jinja corpus exercises the changed evaluator.
+- Server wire goldens: 322/335 equal with 13 known differences and zero unexpected differences; security goldens 55/55 equal. Cortheon fuzz: 16/16 passed.
+- Formatting and `git diff --check` passed. Lean: 426 findings on base and branch, zero new; inherited findings are not called clean.
+- The initial sandboxed aggregate run could not bind loopback test servers or query macOS memory pressure. Two waiting server-test controllers were stopped, then the successful aggregate ran with those accesses available. That interrupted attempt is not a pass.
+- Plain `zig build -j2 --summary all` was attempted but failed because the installed Xcode lacks the Metal compiler component. `xcrun -sdk macosx metal -v` confirms the same error outside the sandbox. The default build and Metal-dependent tools are not qualified by the host checks.
+- Full macOS `zig build test` was not run because it includes GPU device checks. GPU/model, served decode, and cold-prefill/TTFT receipts were not run; this receipt establishes bounded host allocation and rendered bytes, not served speed or full-model token parity. The reported multi-rank million-token request was not replayed. No GPU kernel changed, so a new device-contract `SUMMARY` is not applicable.
+
+## Coordination
+
+ATC check was complete and free before claiming #1633. ATC overlap reported `pullFilesLimit`: its fallback covers at most 300 files and open PR #1446 contained 301. An independent paginated audit at `2026-10-30T07:44:45Z` covered all 96 open PRs and 4,618 changed-file entries, with a second inventory confirming every head and base. None touched the four changed source/test files. ATC also reported conflicts involving the separate sampled-heads PR #1609; those are not changes on this branch. No touching PR required a merge-tree check.

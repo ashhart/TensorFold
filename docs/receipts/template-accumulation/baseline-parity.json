@@ -1,0 +1,80 @@
+{
+  "label": "pinned-before-production-baseline",
+  "cases": 36,
+  "passed": 29,
+  "mismatches": [
+    {
+      "id": "snapshot-branches-96",
+      "ok": true,
+      "expected_bytes": 171688,
+      "actual_bytes": 171688,
+      "first_difference": 0,
+      "expected_sha256": "c203fedad9159909d8453b1fd265781260739ca3c7e7ab51afbc8b00012eef33",
+      "actual_sha256": "e4794d9a203bb08600511dc4e25d2a371d7960cc7b742693900f202a4e5ab22e",
+      "error": ""
+    },
+    {
+      "id": "self-concat-8",
+      "ok": true,
+      "expected_bytes": 21840,
+      "actual_bytes": 21840,
+      "first_difference": 10920,
+      "expected_sha256": "117d5546863617c951419b17bca26a70c10cde774ada018935e03ceace8f7ca3",
+      "actual_sha256": "242b867a1256a6b3be4073919f14306edbd8b79e62ddc1da0950df17d573ae17",
+      "error": ""
+    },
+    {
+      "id": "self-concat-32",
+      "ok": true,
+      "expected_bytes": 174720,
+      "actual_bytes": 174720,
+      "first_difference": 10920,
+      "expected_sha256": "a6f33967dfae4fd5d294da0fa01ec62318c617d7372dab00453380d8b8c119f5",
+      "actual_sha256": "2fdaaa4ba914491a9f552a21a3df5e28e3ccf830568fbf87d2522e2e80f182cb",
+      "error": ""
+    },
+    {
+      "id": "self-concat-96",
+      "ok": true,
+      "expected_bytes": 174720,
+      "actual_bytes": 174720,
+      "first_difference": 10920,
+      "expected_sha256": "a6f33967dfae4fd5d294da0fa01ec62318c617d7372dab00453380d8b8c119f5",
+      "actual_sha256": "2fdaaa4ba914491a9f552a21a3df5e28e3ccf830568fbf87d2522e2e80f182cb",
+      "error": ""
+    },
+    {
+      "id": "macro-mutates-held-lhs-8",
+      "ok": true,
+      "expected_bytes": 5528,
+      "actual_bytes": 5528,
+      "first_difference": 0,
+      "expected_sha256": "c16d81e88bf0bb3ceb95786ee9785b3f6424c3e546d266fe0f03a85a4d0fdc5b",
+      "actual_sha256": "9f2262ed57830b3463fd8e6456c466e9fb025311c64bad836e63227f4e437580",
+      "error": ""
+    },
+    {
+      "id": "macro-mutates-held-lhs-32",
+      "ok": true,
+      "expected_bytes": 5732,
+      "actual_bytes": 5732,
+      "first_difference": 0,
+      "expected_sha256": "bcaac26cb11b4fb76c2fa5b45490b74fe519320b63ffea4df70b6d4f93a4f015",
+      "actual_sha256": "66c15591f07b84a0d70090bba1797a2fcac83bb1b56e55abfaba5360a74f54b6",
+      "error": ""
+    },
+    {
+      "id": "macro-mutates-held-lhs-96",
+      "ok": true,
+      "expected_bytes": 6276,
+      "actual_bytes": 6276,
+      "first_difference": 0,
+      "expected_sha256": "43dc5250b5cd60bbf47d3e29a04be8198d99d0732415b46bf76174d3de09038c",
+      "actual_sha256": "9de4149f0e30162f35d3a18fea57e433f80d10f53057dafeb595b97536afc9b2",
+      "error": ""
+    }
+  ],
+  "expected_output_bytes": 2530055,
+  "corpus_sha256": "73d3422396b6a2905f66de50d5ba2dae7a073ad33689494d8b6fc6bf5bcd9306",
+  "binary_sha256": "de3443cd0bc92f78c49977cb9c298486b2fabbe98fce47b52ba663e978eba807"
+}

@@ -1,0 +1,743 @@
+test-cuda-host
++- run test w
+[default] (warn): Drama readback drain failed: retaining its buffers and engine owner
+[default] (warn): Drama readback drain failed: retaining its buffers and engine owner
+codec requested 1, actual sizes { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
+codec requested 1, actual sizes { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
+codec requested 4, actual sizes { 4, 4, 4, 4, 1 }
+codec requested 16, actual sizes { 16, 1 }
+codec requested 1, actual sizes { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
+Drama replay passed: eager/graphs, poison/reset, codec chunks and interleaved state
+[default] (warn): drama3: config hidden_size = 4096, the kernels need 2048
+[default] (warn): codec.pth pickle names os.system, outside the tensor state-dict allow-list
+failed command: ./.zig-cache/o/74730022c9d317d02acf891482c93656/test --cache-dir=./.zig-cache --seed=0x5b05e2d2 --listen=-
+
+1/7 qwen_cuda_weights_test.test.Qwen tower weights: existing MLX names and every byte match HF in one shard...OK
+2/7 qwen_cuda_weights_test.test.Qwen tower weights: indexed MLX fallback and sharded HF preserve every tensor...OK
+3/7 qwen_cuda_weights_test.test.Qwen tower weights: malformed selected shape and dtype fail without a fallback...model.visual.patch_embed.proj.weight: f16 { 2, 3, 2, 16, 16 }, expected bf16 { 2, 3, 2, 16, 16 }
+model.visual.patch_embed.proj.weight: bf16 { 2, 3, 2, 8, 32 }, expected bf16 { 2, 3, 2, 16, 16 }
+vision_tower.patch_embed.proj.weight: f16 { 2, 2, 16, 16, 3 }, expected bf16 { 2, 2, 16, 16, 3 }
+vision_tower.patch_embed.proj.weight: bf16 { 2, 2, 16, 8, 6 }, expected bf16 { 2, 2, 16, 16, 3 }
+OK
+4/7 qwen_cuda_weights_test.test.Qwen tower weights: missing selected tensor and unused selected tensors fail closed...checkpoint has no tensor vision_tower.blocks.0.mlp.linear_fc1.bias
+unused checkpoint tensor vision_tower.extra
+checkpoint has no tensor model.visual.blocks.0.mlp.linear_fc1.bias
+unused checkpoint tensor model.visual.extra
+OK
+5/7 qwen_cuda_weights_test.test.Qwen tower weights: HF patch keeps the authored precedence when both namespaces exist...OK
+6/7 qwen_cuda_weights_test.test.Qwen tower weights: every copy refusal and MLX retry release their host owners...OK
+7/7 qwen_cuda_weights_test.test.Qwen tower weights: allocation failures balance the fallback reader and transpose scratch...OK
+7 passed; 0 skipped; 0 failed.
+test-cuda-host
++- run test w
+tf_h3_forward: BadH3Dimensions
+tf_h3_forward_host: BadH3Dimensions
+tf_h3_forward: BadH3Dimensions
+tf_h3_forward_host: BadH3Dimensions
+tf_h3_forward: BadH3Dimensions
+tf_h3_forward_host: BadH3Dimensions
+tf_h3_forward: BadH3Rotary
+tf_h3_forward_host: BadH3Rotary
+tf_h3_forward: BadH3Rotary
+tf_h3_forward_host: BadH3Rotary
+tf_h3_forward: BadH3Keep
+tf_h3_forward_host: BadH3Keep
+tf_h3_forward: BadH3Keep
+tf_h3_forward_host: BadH3Keep
+tf_h3_forward: BadH3Blocks
+tf_h3_forward_host: BadH3Blocks
+tf_h3_forward: BadH3Scalar
+tf_h3_forward_host: BadH3Scalar
+tf_h3_forward: BadH3Scalar
+tf_h3_forward_host: BadH3Scalar
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward_host: BadH3Address
+tf_h3_forward_host: BadH3Scalar
+H3 model retained at close: NotReady
+H3 geometry retained: NotReady
+tensor blocks.0.norm1.weight: MissingTensor
+tensor blocks.1.attn.qkv_proj.weight: MissingTensor
+tensor blocks.1.norm1.weight: MissingTensor
+failed command: ./.zig-cache/o/66cd9f24e7c58c9215b3ae7ec6f60486/test --cache-dir=./.zig-cache --seed=0x5b05e2d2 --listen=-
+
+test-cuda-host
++- run test w
+DEEPSEEK_CHAT_GOLDENS 178 committed encoding.py cases
+failed command: ./.zig-cache/o/6e7805f0c58e867345f81b993f9e9d14/test --cache-dir=./.zig-cache --seed=0x5b05e2d2 --listen=-
+
+discovery verbs: retained through TLS, atexit and destructor; child exit 0
+discovery grammar: retained through TLS, atexit and destructor; child exit 0
+warning: libtfgrammar.dylib is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
+warning: libtfgrammar.dylib is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
+warning: libtfgrammar.dylib is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
+warning: libtfgrammar.dylib is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
+warning: libtfgrammar.dylib is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
+warning: libtfgrammar.dylib is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
+warning: libtfgrammar.dylib is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
+warning: libtfgrammar.dylib is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
+warning: libtfgrammar.dylib is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
+        keys    6 equal    0 differ   0 known
+      origin   34 equal    0 differ   0 known
+      scopes   13 equal    0 differ   0 known
+   admission    2 equal    0 differ   0 known
+55/55 equal to server goldens, 0 unexpected differences
+test-cuda-host
++- run test w
+[default] (warn): lane host: stopping at a round boundary: 2 running and 1 queued request(s) end (server restarting: retry shortly)
+[default] (warn): lane host: stopping at a round boundary: 1 running and 0 queued request(s) end (server restarting: retry shortly)
+[default] (warn): lane host: a round failed (GpuFailed): every admitted stream fails
+[default] (warn): lane host: a round failed (GpuFailed): every admitted stream fails
+[default] (warn): 4 prompts together: SamplingRefused; each goes alone
+[default] (warn): lane host: a round failed (the planner refused): every admitted stream fails
+[default] (warn): lane host: a round failed (PlannerFull): every admitted stream fails
+[default] (warn): lane host: a decision score failed (EmptyLabels)
+[default] (warn): lane host: stopping at a round boundary: 1 running and 1 queued request(s) end (drain deadline)
+[default] (warn): lane host: stopping at a round boundary: 0 running and 1 queued request(s) end (NoContext)
+[default] (warn): lane host: a round failed (OutOfMemory): every admitted stream fails
+[default] (warn): lane host: a round failed (AdmittedFailed): every admitted stream fails
+[default] (warn): lane host: a round failed (FinalsFailed): every admitted stream fails
+failed command: ./.zig-cache/o/eefc8fdbf7e0303b300db3ed096ac671/test --cache-dir=./.zig-cache --seed=0x5b05e2d2 --listen=-
+
+warning: libtfgrammar.dylib is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
+warning: libtfgrammar.dylib is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
+warning: libtfgrammar.dylib is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
+KNOWN-DIFFER tools/two_tools-stream
+  reply 0 body differs at 313: golden [content": "\n"}, "finish_reason": null}]}
+
+data: {"id": "<id] zig [tool_calls": [{"index": 0, "id": "<id2>", "type": "function"]
+KNOWN-DIFFER tools/two_tools-single-stream
+  reply 0 body differs at 313: golden [content": "\n"}, "finish_reason": null}]}
+
+data: {"id": "<id] zig [tool_calls": [{"index": 0, "id": "<id2>", "type": "function"]
+KNOWN-DIFFER tools/choice-"required"
+  reply 0 status: golden HTTP/1.1 200 OK, zig HTTP/1.1 400 Bad Request
+  reply 0 body differs at 2: golden [id": "<id1>", "object": "chat.completion", "created": <ts>, ] zig [error": {"message": "backend 'lanes' cannot enforce tool_cho]
+  reply 0 headers differ
+KNOWN-DIFFER tools/choice-{"type": "function", "function": {"name": "lookup"}}
+  reply 0 status: golden HTTP/1.1 200 OK, zig HTTP/1.1 400 Bad Request
+  reply 0 body differs at 2: golden [id": "<id1>", "object": "chat.completion", "created": <ts>, ] zig [error": {"message": "backend 'lanes' cannot enforce tool_cho]
+  reply 0 headers differ
+KNOWN-DIFFER errors/format-json
+  reply 0 body differs at 41: golden [needs the checkpoint's config.json vocab_size", "type": "inv] zig [(response_format and the guided_* fields) is not supported b]
+  reply 0 headers differ
+KNOWN-DIFFER errors/stream-structured
+  connection after: golden closed, zig open
+  reply 0 status: golden HTTP/1.1 200 OK, zig HTTP/1.1 400 Bad Request
+  reply 0 body differs at 0: golden [data: {"id": "<id1>", "object": "chat.completion.chunk", "cr] zig [{"error": {"message": "structured output (response_format an]
+KNOWN-DIFFER anthropic/tool-use-stream
+  reply 0 body differs at 704: golden [\n"}}
+
+event: content_block_stop
+data: {"type": "content_blo] zig ["}}
+
+event: content_block_stop
+data: {"type": "content_block]
+KNOWN-DIFFER anthropic/tool-result
+  reply 0 status: golden HTTP/1.1 200 OK, zig HTTP/1.1 400 Bad Request
+  reply 0 body differs at 2: golden [id": "<id1>", "type": "message", "role": "assistant", "model] zig [type": "error", "error": {"type": "invalid_request_error", "]
+  reply 0 headers differ
+KNOWN-DIFFER anthropic/refuse-format
+  reply 0 body differs at 91: golden [needs the checkpoint's config.json vocab_size"}}] zig [(response_format and the guided_* fields) is not supported b]
+  reply 0 headers differ
+KNOWN-DIFFER cancel/metrics-after
+  reply 0 body differs at 307: golden [prompt_tokens_total Prompt tokens of finished requests.
+# TY] zig [generation_tokens_running Generated tokens held by live stre]
+KNOWN-DIFFER metrics-open/metrics
+  reply 0 body differs at 307: golden [prompt_tokens_total Prompt tokens of finished requests.
+# TY] zig [generation_tokens_running Generated tokens held by live stre]
+KNOWN-DIFFER metrics-open/v1-metrics
+  reply 0 body differs at 487: golden [prompt_tokens_total Prompt tokens of finished requests.
+# TY] zig [generation_tokens_running Generated tokens held by live stre]
+KNOWN-DIFFER keys/metrics-counted
+  reply 0 body differs at 887: golden [prompt_tokens_total Prompt tokens of finished requests.
+# TY] zig [generation_tokens_running Generated tokens held by live stre]
+        chat   16 equal    0 differ   0 known
+    thinking   16 equal    0 differ   0 known
+       stops   13 equal    0 differ   0 known
+       usage   10 equal    0 differ   0 known
+       tools   64 equal    0 differ   4 known
+      errors   37 equal    0 differ   2 known
+ completions   15 equal    0 differ   0 known
+   responses   29 equal    0 differ   0 known
+   anthropic   26 equal    0 differ   3 known
+      tokens   19 equal    0 differ   0 known
+      status   11 equal    0 differ   0 known
+     framing   42 equal    0 differ   0 known
+      cancel    1 equal    0 differ   1 known
+   lifecycle    2 equal    0 differ   0 known
+metrics-open    2 equal    0 differ   2 known
+        keys   19 equal    0 differ   1 known
+322/335 equal to server goldens, 0 unexpected differences
+test-server-cpu
++- run test w
+PROVENANCE_FIELDS fixtures=3 fields=14 plus decision labels
+PROVENANCE_TIMING mode=raw one=0 bytes=409600 added=1000 rounds=12 ns_per=6090177
+PROVENANCE_TIMING mode=masked one=0 bytes=409600 added=1000 rounds=12 ns_per=6199514
+PROVENANCE_MASK_WORK one=0 spans=3 matcher=3 output=409603
+PROVENANCE_TIMING mode=raw one=1 bytes=409600 added=1000 rounds=12 ns_per=6124288
+PROVENANCE_TIMING mode=masked one=1 bytes=409600 added=1000 rounds=12 ns_per=6446169
+PROVENANCE_MASK_WORK one=1 spans=3 matcher=3 output=409603
+[default] (warn): TENSORFOLD_REQUEST_LOG .zig-cache/tmp/3-ud0IcUetKNlL7W/taken.jsonl gets no requests: it is not a regular file only its owner can read
+DEEPSEEK_CHAT_GOLDENS 178 committed encoding.py cases
+VISION_MARKERS all 8 fields refuse plain vocabulary; unflagged additions pass
+[default] (warn): libtfgrammar.dylib is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
+[default] (warn): libtfgrammar.dylib is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
+[default] (warn): libtfgrammar.dylib is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
+[default] (warn): libtfgrammar.dylib is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
+invalid output: first-write inflight=0
+Busy: first-write inflight=0
+Closed: first-write inflight=0
+InvalidRequest: first-write inflight=0
+Unsupported: first-write inflight=0
+completed stream: first-write inflight=0
+[default] (warn): libtfgrammar.dylib is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
+failed command: ./.zig-cache/o/689f2332ef845976272ad78cf6d4c729/test --cache-dir=./.zig-cache --seed=0x5b05e2d2 --listen=-
+
+Build Summary: 299/299 steps succeeded; 1519/1522 tests passed (3 skipped)
+fuzz-cortheon success
++- run test 16 pass (16 total) 10s MaxRSS:8M
+   +- compile test safe native success 7s MaxRSS:461M
+test-golden success
++- run exe golden_check success 1m
+|  +- compile exe golden_check debug native cached 40ms MaxRSS:32M
+|  +- compile exe fake_serve debug native success 7s MaxRSS:1G
++- run exe golden_check success 10s
+   +- compile exe golden_check debug native (reused)
+   +- compile exe fake_serve debug native (reused)
+test-kernel-contract success
++- run test 88 pass (88 total) 388ms MaxRSS:7M
+|  +- compile test debug native cached 39ms MaxRSS:32M
++- test-gemma4-contract-host success
+|  +- run test 9 pass (9 total) 10s MaxRSS:12M
+|  |  +- compile test debug native cached 46ms MaxRSS:32M
+|  |     +- WriteFile gemma4-host-empty.metallib cached
+|  +- test-glm-window-contract-host success
+|     +- run test 17 pass (17 total) 12s MaxRSS:6M
+|        +- compile test debug native cached 56ms MaxRSS:32M
+|           +- WriteFile gemma4-host-empty.metallib (reused)
++- run test cached
+|  +- compile test debug native cached 41ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native cached 38ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native cached 39ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native cached 54ms MaxRSS:32M
++- run test cached
+   +- compile test debug native cached 56ms MaxRSS:32M
+test-server-cpu success
++- run test 868 pass, 3 skip (871 total) 2m MaxRSS:189M
+|  +- compile test debug native cached 89ms MaxRSS:32M
++- run test cached
+   +- compile test debug native cached 78ms MaxRSS:32M
+test-cuda-host success
++- run test cached
+|  +- compile test debug native cached 55ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native cached 58ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native cached 64ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native cached 58ms MaxRSS:32M
++- run exe runtime-discovery-exit success 25ms
+|  +- compile exe runtime-discovery-exit debug native cached 52ms MaxRSS:32M
+|     +- options cached
+|        +- compile lib runtime-discovery-mock debug native cached 56ms MaxRSS:31M
++- run exe rpc-warning-check success 9ms
+|  +- compile exe rpc-warning-check debug native cached 66ms MaxRSS:32M
+|     +- options cached
+|        +- compile lib rpc-mock-complete debug native cached 57ms MaxRSS:31M
+|        +- compile lib rpc-mock-abi debug native cached 57ms MaxRSS:31M
+|        +- compile lib rpc-mock-wait debug native cached 56ms MaxRSS:31M
+|        +- compile lib rpc-mock-store debug native cached 63ms MaxRSS:31M
+|        +- compile lib rpc-mock-wrong debug native cached 63ms MaxRSS:31M
++- run test cached
+|  +- compile test debug native cached 66ms MaxRSS:32M
+|     +- options (+5 more reused dependencies)
++- run exe grammar-warning-check success 14ms
+|  +- compile exe grammar-warning-check debug native cached 54ms MaxRSS:32M
+|     +- options cached
++- run test cached
+|  +- compile test debug native cached 52ms MaxRSS:32M
+|     +- options cached
++- run test cached
+|  +- compile test debug native cached 55ms MaxRSS:32M
+|     +- options cached
+|        +- compile lib picture-codec-wrong debug native cached 63ms MaxRSS:31M
++- run test cached
+|  +- compile test debug native cached 66ms MaxRSS:32M
+|     +- options cached
+|        +- compile lib picture-codec-symbols debug native cached 65ms MaxRSS:31M
++- run test cached
+|  +- compile test debug native cached 59ms MaxRSS:32M
+|     +- options cached
+|        +- compile lib picture-codec-ready debug native cached 50ms MaxRSS:31M
++- run test cached
+|  +- compile test debug native cached 54ms MaxRSS:32M
++- run test 30 pass (30 total) 52ms MaxRSS:4M
+|  +- compile test debug native cached 55ms MaxRSS:32M
+|     +- WriteFile h3-compile-only.fatbin cached
+|     +- options cached
++- run test cached
+|  +- compile test debug native cached 47ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native cached 71ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native cached 67ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native cached 71ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native cached 54ms MaxRSS:32M
+|     +- WriteFile qwen4_projection.fatbin cached
+|     +- WriteFile dsv41_exl3_experts.fatbin cached
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- WriteFile dsv41_exl3_experts.fatbin (reused)
+|     +- options cached
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- options cached
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
+|     +- WriteFile qwen4_projection.fatbin (reused)
++- run test success 1s
+|  +- compile test debug native cached 76ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native cached 76ms MaxRSS:32M
+|     +- WriteFile draft_ids.txt cached
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 81ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 72ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 73ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 68ms MaxRSS:32M
+|     +- options (reused)
++- test-glm-contract-host success
+|  +- run test cached
+|     +- compile test debug native cached 69ms MaxRSS:32M
+|        +- options (reused)
++- run test cached
+|  +- compile test debug native cached 80ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 91ms MaxRSS:32M
+|     +- WriteFile draft_ids.txt (reused)
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 87ms MaxRSS:32M
+|     +- WriteFile draft_ids.txt (reused)
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 87ms MaxRSS:32M
+|     +- options cached
+|     |  +- compile exe qwen-round-timing-probe debug native cached 75ms MaxRSS:32M
+|     |     +- WriteFile draft_ids.txt (reused)
+|     |     +- options (reused)
+|     +- WriteFile draft_ids.txt (reused)
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 78ms MaxRSS:32M
+|     +- WriteFile draft_ids.txt (reused)
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 84ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 80ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 119ms MaxRSS:32M
+|     +- options (reused)
+|     +- WriteFile draft_ids.txt (reused)
++- run test cached
+|  +- compile test debug native cached 73ms MaxRSS:32M
+|     +- options (reused)
+|     +- WriteFile draft_ids.txt (reused)
++- run test cached
+|  +- compile test debug native cached 89ms MaxRSS:32M
+|     +- options (reused)
+|     +- WriteFile draft_ids.txt (reused)
++- run test cached
+|  +- compile test debug native cached 69ms MaxRSS:32M
+|     +- WriteFile draft_ids.txt (reused)
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 73ms MaxRSS:32M
+|     +- WriteFile draft_ids.txt (reused)
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 91ms MaxRSS:32M
+|     +- WriteFile draft_ids.txt (reused)
+|     +- options (reused)
++- compile obj exl3_host_compile debug native cached 73ms MaxRSS:31M
+|  +- options (reused)
++- run test cached
+|  +- compile test debug native cached 78ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 80ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 87ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 79ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 68ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 64ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 67ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 77ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 69ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 73ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 67ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 68ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 63ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 68ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 72ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 69ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 74ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 48ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native cached 54ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native cached 64ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native cached 71ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native cached 73ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 67ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 72ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 67ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 81ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 69ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test fast native cached 85ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test fast native cached 77ms MaxRSS:32M
+|     +- options (reused)
++- compile obj bolt_host_compile debug aarch64-linux-gnu cached 44ms MaxRSS:31M
+|  +- options cached
+|  +- WriteFile draft_ids.txt (reused)
++- run test cached
+|  +- compile test debug native cached 68ms MaxRSS:32M
++- run test 39 pass (39 total) 542ms MaxRSS:7M
+|  +- compile test debug native cached 86ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 56ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native cached 79ms MaxRSS:32M
+|     +- WriteFile draft_ids.txt (reused)
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 81ms MaxRSS:32M
+|     +- options (reused)
+|     +- WriteFile draft_ids.txt (reused)
++- run exe qwen-cost-key-process success 480ms
+|  +- compile exe qwen-cost-key-process debug native cached 90ms MaxRSS:32M
+|  |  +- WriteFile draft_ids.txt (reused)
+|  |  +- options (reused)
+|  +- WriteFile target/config.json cached
++- run test cached
+|  +- compile test debug native cached 59ms MaxRSS:32M
++- compile obj drama_cuda_native_host debug native cached 75ms MaxRSS:31M
+|  +- options (reused)
++- run test cached
+|  +- compile test debug native cached 89ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 106ms MaxRSS:32M
+|     +- options (reused)
+|     +- WriteFile draft_ids.txt (reused)
++- run test cached
+|  +- compile test debug native cached 60ms MaxRSS:32M
++- run test 29 pass (29 total) 6s MaxRSS:11M
+|  +- compile test debug native cached 82ms MaxRSS:32M
+|     +- WriteFile exlr8_alias.zig cached
+|     +- options (reused)
+|     +- WriteFile draft_ids.txt (reused)
++- run test cached
+|  +- compile test debug native cached 53ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native cached 69ms MaxRSS:32M
++- run test (+1 more reused dependencies)
++- run test (+1 more reused dependencies)
++- run test cached
+|  +- compile test debug native cached 73ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 56ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native cached 54ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native cached 74ms MaxRSS:32M
+|     +- WriteFile draft_ids.txt (reused)
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 75ms MaxRSS:32M
+|     +- WriteFile draft_ids.txt (reused)
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 70ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 71ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 77ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 76ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 51ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native cached 63ms MaxRSS:32M
++- run test 403 pass (403 total) 29s MaxRSS:101M
+|  +- compile test debug native cached 49ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native cached 87ms MaxRSS:32M
+|     +- options (reused)
+|     +- WriteFile draft_ids.txt (reused)
++- run test cached
+|  +- compile test debug native cached 60ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native cached 60ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native cached 55ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native cached 83ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 82ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 79ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 78ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 84ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 85ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 74ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 72ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 66ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 66ms MaxRSS:32M
+|     +- options (reused)
++- run test cached
+|  +- compile test debug native cached 52ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native cached 73ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native cached 54ms MaxRSS:32M
++- run test 20 pass (20 total) 77ms MaxRSS:13M
+|  +- compile test debug native cached 63ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native cached 54ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native cached 56ms MaxRSS:32M
++- run test cached
+|  +- compile test debug native cached 93ms MaxRSS:32M
+|     +- options cached
+|     +- options (reused)
+|     +- WriteFile draft_ids.txt (reused)
+|     +- WriteFile exlr8_alias.zig cached
++- run test cached
+   +- compile test debug native cached 77ms MaxRSS:32M
+      +- WriteFile exlr8_alias.zig cached
+      +- options (reused)
+      +- WriteFile draft_ids.txt (reused)
+

@@ -1,0 +1,19 @@
+{
+  "commit": "78b0a0399545c680d2af887980e8f2ccfd2a24f8",
+  "mode": "ReleaseFast",
+  "cases": 36,
+  "passed": 36,
+  "mismatches": [],
+  "expected_output_bytes": 2530055,
+  "corpus_sha256": "73d3422396b6a2905f66de50d5ba2dae7a073ad33689494d8b6fc6bf5bcd9306",
+  "binary_sha256": "64a6cb253f862fd39aa42e38e9619f0760eb315dd11d1aaaf5543040e52acfd1",
+  "source_sha256": {
+    "zig/src/core/template/eval.zig": "407556bb292949c9d48d6829cccabf93ad8c969037eeef6ad4be46ffe023535c",
+    "zig/src/core/template/provenance.zig": "ed6f398be974d63e26b28a7c3fa4d4ec81838c99d05d53e56ee68d4072701f10",
+    "zig/src/core/template/template.zig": "cc99501597b9f87dc59df1bc2b30670993dae00b904d5ecf0245e2e037b55325",
+    "zig/src/core/template/parity.zig": "e7e51c88635b0adeb10f5c4742fa7c599372d3e4c0e0ac9aff77e68c1f01853c",
+    "zig/src/platform/sys.zig": "a77246ddd539ccf22d14d57dc737ff03ad6a4c16db4bd68575d4c0ab8bbe3525"
+  },
+  "runner_log": "36 cases, 0 mismatches",
+  "results_identical_to_debug": true
+}
