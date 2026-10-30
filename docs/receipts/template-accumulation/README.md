@@ -1,6 +1,6 @@
 # Independent template accumulators
 
-**Current revision:** [compact builder handles](value-layout-followup/README.md) restore the original value layout and the plain filler memory peak while retaining large-tool gains. The [new fixed host timings](value-layout-timing/README.md) cover implementation `8d00b490f`. Earlier measurements below retain their original revision identities, including the GPU/model receipts.
+**Current revision:** [compact builder handles](value-layout-followup/README.md) restore the original value layout and the plain filler memory peak while retaining large-tool gains. The [new fixed host timings](value-layout-timing/README.md) cover implementation `8d00b490f`. The [current CUDA qualification](compact-cuda/README.md) now verifies that same implementation: 498 exact responses and all twelve decode confidence intervals within ±2%. First-cold TTFT increased descriptively by 4.32%; it is not claimed equivalent. Earlier measurements below retain their original revision identities, including the older GPU/model receipts.
 
 For [#1633](https://github.com/ashhart/TensorFold/issues/1633), interleaved large string concatenations no longer repeatedly copy the growing prompt. Saved strings also keep their bytes and request provenance when an accumulator grows or branches.
 

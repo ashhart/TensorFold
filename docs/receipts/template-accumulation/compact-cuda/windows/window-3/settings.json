@@ -1,0 +1,1 @@
+{"window":3,"labels":["A5","B5","B6","A6"],"context":8192,"parallel":2,"prompt_cache_gib":0,"memory_reserve_gib":9,"min_available_gib":6,"load_threads":1,"startup_timeout_seconds":600,"overall_timeout_seconds":2700,"client_timeout_seconds":900}
