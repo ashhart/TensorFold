@@ -58,6 +58,9 @@ pub fn streamWith(
         }
         sides.first[@intCast(sides.count)] = @intCast(blocks);
     }
+    // rows past the tile's: row blocks on x, column blocks on y (at most 65,535), so a column block reads codes once
+    const row_blocks = cdiv(a.m, stream_rows[ri]);
+    sides.row_blocks = if (row_blocks > 1 and blocks <= 65535) @intCast(row_blocks) else 0;
     var args: hl.Args = .{};
     try args.add(a);
     try args.add(sides);
@@ -69,5 +72,9 @@ pub fn streamWith(
     }));
     const table = if (sides.pair_cols > 0) &k.pairs else if (relu2) &k.relu2 else &k.stream;
     const f = table[b][ri][pick].?;
-    try go(r, f, .{ .x = blocks, .y = cdiv(a.m, stream_rows[ri]), .z = @intCast(items) }, .{ .x = 32 * stream_waves }, s, &args);
+    const grid: hl.Dim3 = if (sides.row_blocks > 1)
+        .{ .x = row_blocks, .y = blocks, .z = @intCast(items) }
+    else
+        .{ .x = blocks, .y = row_blocks, .z = @intCast(items) };
+    try go(r, f, grid, .{ .x = 32 * stream_waves }, s, &args);
 }

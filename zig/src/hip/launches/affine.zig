@@ -56,6 +56,8 @@ pub const StreamSides = extern struct {
     out_half: c_int = 0,
     pair_cols: c_int = 0,
     limit: f32 = 0,
+    /// > 1: the launch's row blocks are the grid's x and its column blocks its y (stream.hpp stream_tile)
+    row_blocks: c_int = 0,
 };
 
 /// One side of a group: its matrix and where its (rows, n) output goes.
