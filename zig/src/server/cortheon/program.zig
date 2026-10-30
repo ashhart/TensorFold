@@ -212,7 +212,7 @@ pub fn ownWords(a: Allocator, text: []const u8) Allocator.Error![]const u8 {
 
 /// Whether a tool-less request only asks to transform given text (a harness's title, summary or hint).
 pub fn isUtility(text: []const u8) bool {
-    const head = text[0..@min(text.len, 160)];
+    const head = text[0..@import("html.zig").cutAt(text, 160)]; // the cap does not split a character
     var it = std.mem.tokenizeAny(u8, head, " \t\r\n.,;:!?()[]{}\"'`");
     var n: usize = 0;
     while (it.next()) |w| : (n += 1) {
@@ -336,6 +336,11 @@ test "harness context and transform asks do not read as research" {
     try std.testing.expect(isUtility("Compress into one routing hint of at most 12 words: WHEN to use"));
     try std.testing.expect(isUtility("Generate a short title for this conversation"));
     try std.testing.expect(!isUtility("Fix the failing test in src/app.py and explain why it failed"));
+    var glued: std.ArrayList(u8) = .empty;
+    try glued.appendSlice(arena.allocator(), "w w w w w w ");
+    while (glued.items.len < 150) try glued.append(arena.allocator(), ' ');
+    try glued.appendSlice(arena.allocator(), "summarize\u{20ac}");
+    try std.testing.expect(isUtility(glued.items));
 }
 
 test "the note lists the stages in order and adds research for frontier tasks" {
