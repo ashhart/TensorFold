@@ -1,4 +1,4 @@
-//! Nemotron on the XPU server: its lane host (one family behind the lane core, one stream, host sampling).
+//! Nemotron and LFM3 on the XPU server: their lane host (a family behind the lane core, one stream, host sampling).
 const std = @import("std");
 const xpu = @import("xpu");
 const api = @import("engine_api");
@@ -9,6 +9,7 @@ const Allocator = std.mem.Allocator;
 /// The families this host serves, each a file with its table row, loader and prompt window.
 const specs = .{
     @import("xpu_nemotron.zig"),
+    @import("xpu_lfm3.zig"),
 };
 
 /// Prompt plus reply tokens when --context names none (and the model's window is larger).

@@ -50,6 +50,17 @@ Intel Arc Pro B70 Graphics (32.5 GB maximum single allocation), Linux 7.0.0 (`xe
 Nemotron MLX 4-bit checkpoint (`TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit`, revision `d9d758fb83953437f7263256b0d96157e2a348b8`,
 729 tensors, 17.27 GiB of weights). The commit under test is the head of the pull request.
 
+LFM3-1.7B (`LiquidAI/LFM3-1.7B-MLX-4bit`, MLX affine 4-bit, group 64) on an Intel Iris Xe laptop GPU (Gen12LP, `tgllp`, 96 EUs, no
+DPAS) under WSL2 (Ubuntu 24.04, 8 GB given to WSL), Ubuntu's compute runtime 23.43.27642 and Level Zero loader 1.16, Zig 0.17.0,
+`zig build xpu-native -Dxpu-device=tgllp` (DPAS off, so the server is built without the Qwen3.8-27B runner):
+
+| Setup | Decode, c=1 | TTFT, 1,024 tokens | TTFT, 8,192 tokens | Memory (`serve --context 16384`) |
+| --- | ---: | ---: | ---: | --- |
+| Iris Xe, LFM3-1.7B MLX 4-bit | 14.8 to 15.8 tok/s | 13.1 to 14.2 s | 130.8 to 131.3 s | 1.25 GB device allocation, 441 MB host resident |
+
+Decode: 256 greedy tokens after a 64-token prompt; TTFT: prompts of numbered item sentences, one token generated; three runs each,
+through `/v1/completions`. A `/v1/chat/completions` request with the checkpoint's chat template answers (thinking on, `finish_reason` stop).
+
 ## Measurements
 
 Decode, 128 greedy tokens from a 5-token prompt: 5.72 ms/token, 175 tok/s (`tensorfold-xpu run`, five runs on different

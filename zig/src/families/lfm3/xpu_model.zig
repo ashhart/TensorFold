@@ -17,6 +17,9 @@ const HD: u32 = cfg.head_dim;
 const QKV: u32 = (NQ + 2 * NKV) * HD;
 const chunk: u32 = 128; // keys a split-K work-group scans
 const argmax_parts: u32 = 64;
+/// Without DPAS (Gen12LP) prompt projections take nem_prow_t4: 4 x 4 tiles, as 8 x 8 spill on Gen12LP.
+const small_tiles = !xpu.kernels.dpas;
+const ptile: u32 = if (small_tiles) 4 else 8;
 
 pub const Table = struct { w: Buf, s: Buf, b: Buf };
 const Conv = struct { in: Table, out: Table, cw: Buf, state: Buf };
@@ -110,7 +113,7 @@ pub const Model = struct {
         if (max_rows == 0 or max_rows > 256 or cap < max_rows) return error.Invalid;
         var bm = try r.module(xpu.kernels.basic);
         var am = try r.module(xpu.kernels.attn);
-        var pm = try r.module(xpu.kernels.nem_prow);
+        var pm = try r.module(if (small_tiles) xpu.kernels.nem_prow_t4 else xpu.kernels.nem_prow);
         var fm = try r.module(xpu.kernels.lfm3);
         const k: Kernels = .{
             .embed = try bm.kernel("embed4", .{ 64, 1, 1 }),
@@ -118,7 +121,7 @@ pub const Model = struct {
             .head = try am.kernel("qmv4_f32", .{ 64, 1, 1 }),
             .am_part = try am.kernel("argmax_partial", .{ 256, 1, 1 }),
             .am_fin = try am.kernel("argmax_final", .{ 256, 1, 1 }),
-            .pdense = try pm.kernel("pdense", .{ 32, 1, 1 }),
+            .pdense = try pm.kernel("pdense", .{ 16 * (16 / ptile), 1, 1 }),
             .rms = try fm.kernel("lfm3_rmsnorm", .{ 256, 1, 1 }),
             .pan = try fm.kernel("lfm3_post_add_norm", .{ 256, 1, 1 }),
             .conv = try fm.kernel("lfm3_conv_rows", .{ 64, 1, 1 }),
@@ -229,7 +232,7 @@ pub const Model = struct {
     /// y[r * y_stride + y_off + o] = x[r] . W[o] for n rows: the decode matvec for one row, pdense for a window.
     fn proj(m: *Model, t: Table, x: Buf, y: Buf, in_dim: u32, rows: u32, n: u32, y_stride: u32, y_off: u32) !void {
         if (n == 1) return run(&m.k.qmv, .{ (rows + 3) / 4, 1, 1 }, .{ t.w, t.s, t.b, x, y, in_dim, @as(u32, 0), y_off, rows });
-        try run(&m.k.pdense, .{ (rows + 15) / 16, (n + 7) / 8, 1 }, .{ t.w, t.s, t.b, x, y, in_dim, rows, n, y_stride, y_off, @as(u32, 0) });
+        try run(&m.k.pdense, .{ (rows + 15) / 16, (n + ptile - 1) / ptile, 1 }, .{ t.w, t.s, t.b, x, y, in_dim, rows, n, y_stride, y_off, @as(u32, 0) });
     }
 
     fn mixer(m: *Model, ly: *const Layer, n: u32) !void {
