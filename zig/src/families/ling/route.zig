@@ -317,7 +317,7 @@ test "negative kept choices still beat masked experts" {
     try t.expectEqual(@as(u32, 1), out[1].id);
 }
 
-fn expectDistinct(out: []const Pick) !void {
+fn expectDistinct(out: anytype) !void {
     for (0..out.len) |i| for (0..i) |j| try t.expect(out[i].id != out[j].id);
 }
 
@@ -337,13 +337,18 @@ test "ids in a row are distinct, including all-NaN and one finite per group" {
     const s = Shape{ .experts = 128, .topk = 8, .n_group = 8, .topk_group = 4, .scale = 2.5 };
     var bias: [128]f32 = @splat(0);
     var out: [8]Pick = undefined;
+    var out64: [8]Pick64 = undefined;
     var all_nan: [128]f32 = @splat(std.math.nan(f32));
     selectF32(&all_nan, &bias, &out, s);
     try expectDistinct(&out);
+    selectF64(&all_nan, &bias, &out64, s);
+    try expectDistinct(&out64);
     var one: [128]f32 = @splat(std.math.nan(f32));
     for (0..8) |g| one[g * 16 + 3] = 1;
     selectF32(&one, &bias, &out, s);
     try expectDistinct(&out);
+    selectF64(&one, &bias, &out64, s);
+    try expectDistinct(&out64);
     for (out[0..4]) |p| try t.expect(p.id % 16 == 3 and p.id / 16 < 4);
 }
 
