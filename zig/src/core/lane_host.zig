@@ -93,7 +93,7 @@ pub const LaneHost = struct {
     pub fn init(gpa: Allocator, io: std.Io, core: *lanes.Engine, info_: Info) LaneHost {
         var shown = info_.ofLanes();
         shown.draft_sources = shown.draft_sources.ofLanes(core.cfg, shown.lanes);
-        return .{ .gpa = gpa, .io = io, .core = core, .info_ = shown, .share = if (info_.decode_share) |x| fill.Share.fromDecode(x) else .fromEnv(), .decode_cap = info_.decode_share != null, .prefix = .fromEnv(), .pressure = .fromEnv() };
+        return .{ .gpa = gpa, .io = io, .core = core, .info_ = shown, .share = .withDecode(info_.decode_share), .decode_cap = info_.decode_share != null, .prefix = .fromEnv(), .pressure = .fromEnv() };
     }
 
     pub fn start(h: *LaneHost) !void {
