@@ -345,9 +345,9 @@ test "gather: the sizes' fast path copies the same bytes as a shard search for e
     const cases = [_][]const usize{
         &.{},
         &.{97},
-        &.{40, 40, 40, 40},
-        &.{41, 41, 40, 40},
-        &.{40, 39, 41, 40},
+        &.{ 40, 40, 40, 40 },
+        &.{ 41, 41, 40, 40 },
+        &.{ 40, 39, 41, 40 },
         &.{ 250, 250, 250 },
     };
     for (cases) |sizes| {
