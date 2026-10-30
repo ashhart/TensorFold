@@ -28,6 +28,7 @@ USAGE = """\
                                            each step alone in bf16 on the float32 run's input
   compare A.png B.png [SIDE.png]           PSNR and mean absolute difference of two pictures, optionally side by side
   noise OUT.json                           torch.randn's starting latents for many seeds and sizes, as sha256s (x86)
+  schedule MODEL_DIR OUT.json              MOSSImageScheduler's timesteps and sigmas for many step counts and configs
 MODEL_DIR is the OpenMOSS-Team/MOSS-Image-Base folder. The case runs the card's defaults: 50 Euler steps, CFG 3, an
 empty negative prompt whose branch skips block 22, the bf16 transformer and text encoder, the float32 decoder.
 """
@@ -387,6 +388,32 @@ def encode(args) -> int:
     return 0
 
 
+# The released config, then one setting changed at a time; image size does not enter (no dynamic shifting).
+SCHEDULE_CONFIGS = [{}, {"shift": 3.0}, {"shift": 7.5}, {"training_shift": 2.0}, {"num_train_timesteps": 500}]
+SCHEDULE_STEPS = [1, 2, 3, 4, 8, 10, 20, 25, 28, 30, 40, 50, 64, 100, 128, 250, 500, 999, 1000, 1001, 2000]
+
+
+def schedule(args) -> int:
+    """sha256s of the pinned pipeline's MOSSImageScheduler float32 timesteps and sigmas, on the CPU."""
+    import tempfile
+    mod = module(args.model_dir)
+    released = json.loads((Path(args.model_dir) / "scheduler" / "scheduler_config.json").read_text())
+    cases = []
+    for change in SCHEDULE_CONFIGS:
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / "scheduler_config.json").write_text(json.dumps({**released, **change}))
+            sched = mod.MOSSImageScheduler.from_pretrained(folder)
+        for steps in SCHEDULE_STEPS:
+            sched.set_timesteps(steps)
+            t, s = sched.timesteps.float().contiguous(), sched.sigmas.float().contiguous()
+            cases.append({"config": change, "steps": steps, "count": len(t), "first": [t[0].item(), s[1].item()],
+                          "timesteps": hashlib.sha256(t.numpy().tobytes()).hexdigest(),
+                          "sigmas": hashlib.sha256(s.numpy().tobytes()).hexdigest()})
+    Path(args.out).write_text(json.dumps({"config": released, "cases": cases}, indent=1) + "\n")
+    print(f"{len(cases)} schedules in {args.out}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, epilog=USAGE, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="mode", required=True)
@@ -443,8 +470,13 @@ def main() -> int:
     p.add_argument("side", nargs="?")
     n = sub.add_parser("noise")
     n.add_argument("out")
+    q = sub.add_parser("schedule")
+    q.add_argument("model_dir")
+    q.add_argument("out")
     args = parser.parse_args()
-    return {"case": case, "start": start, "exact": exact, "decode": decode, "encode": encode, "vae": vae, "compare": compare, "noise": noise}[args.mode](args)
+    modes = {"case": case, "start": start, "exact": exact, "decode": decode, "encode": encode, "vae": vae,
+             "compare": compare, "noise": noise, "schedule": schedule}
+    return modes[args.mode](args)
 
 
 if __name__ == "__main__":
