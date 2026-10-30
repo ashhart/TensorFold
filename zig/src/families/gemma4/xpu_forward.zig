@@ -160,7 +160,7 @@ pub const Runner = struct {
             .geglu_tab = try d.kernel(mg, "g4_geglu_tab", 256),
             .ple_mid = try d.kernel(mg, "g4_ple_mid", 64),
             .attn_prep = .{ try d.kernel(mg, "g4_attn_prep", 256), try d.kernel(mgg, "g4_attn_prep", 256) },
-            .attn_merge = .{ try d.kernel(mg, "g4_attn_merge", 128), try d.kernel(mgg, "g4_attn_merge", 128) },
+            .attn_merge = .{ try d.kernel(mg, "g4_attn_merge", 64), try d.kernel(mgg, "g4_attn_merge", 64) },
             .argmax_part = try d.kernel(mg, "argmax_part", 256),
             .argmax = try d.kernel(mg, "argmax", 256),
             .dec_wide = try d.kernel(mm, "w4k1_decode", 64),
@@ -535,7 +535,7 @@ pub const Runner = struct {
                 } else { // a window: the tiles in parallel, then the ordered fold
                     const nt: u32 = if (glob) (pt.p0 + pt.t - 1) / KEYS + 1 else 6; // a block's rows may span one tile more than a row's window
                     try d.launch(k.dp_part[g], .{ .x = nt, .y = 2, .z = blocks }, .{ off(a.q, q_off), ca.kc[src], ca.vc[src], a.pm, a.pl, a.po, @as(i32, @intCast(pt.p0)), @as(i32, @intCast(pt.t)), window, ring, krows, @as(i32, @intCast(nt)) });
-                    try d.launch(k.attn_merge[g], .{ .x = 8, .y = pt.t }, .{ a.pm, a.pl, a.po, @as(i32, @intCast(pt.p0)), window, @as(i32, @intCast(nt)), off(a.h, h_off), off(a.ahi, ps_off), off(a.alo, ps_off) });
+                    try d.launch(k.attn_merge[g], .{ .x = 8, .y = pt.t, .z = @as(u32, @intCast(hd / 64)) }, .{ a.pm, a.pl, a.po, @as(i32, @intCast(pt.p0)), window, @as(i32, @intCast(nt)), off(a.h, h_off), off(a.ahi, ps_off), off(a.alo, ps_off) });
                 }
             }
             if (r.dump_dir != null and p0 == 0 and i == 0) {
