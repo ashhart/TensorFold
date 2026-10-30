@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek-V4.1 (experimental, CUDA): `zig build dsv41-assets` installs two CPU-only tools for preparing its serving assets without a GPU: `tf-dsv41-token-map`, which writes the Engram token map from the release tokenizer and config (it now accepts the official unquantized config for this, while serving still refuses that checkpoint), and `tf-dsv41-assets`, which runs the engine's own AOT planner (`aot-needs`) and lists the Engram shards from `model.safetensors.index.json` alone (`engram-list`). The steps are in the new DeepSeek-V4.1 CUDA recipe; serving is unchanged (#1640). Thanks to @jayleaton.
+
 - Qwen3.8-27B EXL3 on CUDA: the DFlash2 drafter projects only the two vocabulary spans it proposes from, as column views of the stored head, instead of all 248,320 columns, skipping about 545 MB of reads a round at a 6-bit head. Both views plan the head's matrix multiply as the whole head does, so replies are the same tokens as before (144 of 144 equal on an RTX 3090 Ti with the 3.50 bpw pack), and single-stream decode there was 0.5 to 1.8% faster in the cells whose tokens per round matched. `qwen3_5` on CUDA now lists `exl3` among the formats it reads (#1507, after #1465). Thanks to @diwakergupta.
 
 - Dory on CUDA with `TENSORFOLD_DORY_KV_PAGES=1` refuses to attach a context that is not a whole number of 256-position pages, takes its slot count from the round geometry instead of a fixed 8, and loads the paged attention kernels only when paging is on, so the default path no longer loads that module (#1387, for #1284). Thanks to @jschmied.
