@@ -282,32 +282,51 @@ extern "C" __global__ void tf_exl3_prompt_rotate(const __nv_bfloat16* __restrict
     for (int j = 0; j < 4; ++j) o[j] = __float2half_rn(v[j] * HAD_SCALE);
 }
 
+// Gate and up of one width K2 (8: 4 bits, 6: 3 bits); smem_raw holds tsmem_bytes<K2>() bytes.
+template <int K2>
+__device__ __forceinline__ void prompt_gu(const half* __restrict__ Xg, const half* __restrict__ Xu, const uint64_t* __restrict__ Tg,
+        const uint64_t* __restrict__ Tu, const int* __restrict__ items, const int* __restrict__ counts, const int* __restrict__ members,
+        const half* __restrict__ svh_g, const half* __restrict__ svh_u, const half* __restrict__ suh_d, half* __restrict__ xd, int K, int N,
+        int xdiv, float limit, int act_mode, unsigned char* smem_raw, int* rows_sh) {
+    if (xdiv > 1) tgateup<TPM, K2>(Xg, Xu, Tg, Tu, items, counts, members, svh_g, svh_u, suh_d, xd, K, N, xdiv, limit, act_mode, smem_raw, rows_sh);
+    else tgateup<2 * TPM, K2>(Xg, Xu, Tg, Tu, items, counts, members, svh_g, svh_u, suh_d, xd, K, N, 1, limit, act_mode, smem_raw, rows_sh);
+}
+
 extern "C" __global__ void __launch_bounds__(256, 2) tf_exl3_prompt_gu(const half* __restrict__ Xg, const half* __restrict__ Xu,
         const uint64_t* __restrict__ Tg, const uint64_t* __restrict__ Tu, const int* __restrict__ items, const int* __restrict__ counts,
         const int* __restrict__ members, const half* __restrict__ svh_g, const half* __restrict__ svh_u, const half* __restrict__ suh_d,
         half* __restrict__ xd, int K, int N, int xdiv, float limit, int act_mode) {
 
-    __shared__ __align__(16) unsigned char smem_raw[tsmem_bytes()];   // one buffer for either instantiation
+    __shared__ __align__(16) unsigned char smem_raw[tsmem_bytes<8>()];   // one buffer for either instantiation
     __shared__ int rows_sh[TPM];
-    if (xdiv > 1) tgateup<TPM>(Xg, Xu, Tg, Tu, items, counts, members, svh_g, svh_u, suh_d, xd, K, N, xdiv, limit, act_mode, smem_raw, rows_sh);
-    else tgateup<2 * TPM>(Xg, Xu, Tg, Tu, items, counts, members, svh_g, svh_u, suh_d, xd, K, N, 1, limit, act_mode, smem_raw, rows_sh);
+    prompt_gu<8>(Xg, Xu, Tg, Tu, items, counts, members, svh_g, svh_u, suh_d, xd, K, N, xdiv, limit, act_mode, smem_raw, rows_sh);
 }
 
-// Block (256 model-width columns, item): y[row][slot][:] = the down epilogue of the item's pairs (this rank's share).
-extern "C" __global__ void __launch_bounds__(256, 2) tf_exl3_prompt_down(const half* __restrict__ Xd, const uint64_t* __restrict__ Td,
-        const int* __restrict__ items, const int* __restrict__ counts, const int* __restrict__ members, const half* __restrict__ svh_d,
-        float* __restrict__ y, int K, int D, int ys) {
+// The same at 3 bits: gate and up both 3-bit mcg (tile_words<6>: 96-byte tiles), the arguments tf_exl3_prompt_gu's.
+extern "C" __global__ void __launch_bounds__(256, 2) tf_exl3_prompt_gu_k6(const half* __restrict__ Xg, const half* __restrict__ Xu,
+        const uint64_t* __restrict__ Tg, const uint64_t* __restrict__ Tu, const int* __restrict__ items, const int* __restrict__ counts,
+        const int* __restrict__ members, const half* __restrict__ svh_g, const half* __restrict__ svh_u, const half* __restrict__ suh_d,
+        half* __restrict__ xd, int K, int N, int xdiv, float limit, int act_mode) {
 
-    __shared__ __align__(16) unsigned char smem_raw[tsmem_bytes()];
+    __shared__ __align__(16) unsigned char smem_raw[tsmem_bytes<6>()];
     __shared__ int rows_sh[TPM];
-    const int cb = blockIdx.x, item = blockIdx.y;
-    if (item >= counts[0]) return;
-    const int e = items[3 * item], first = items[3 * item + 1], cnt = items[3 * item + 2];
-    if (threadIdx.x < TPM) rows_sh[threadIdx.x] = (int)threadIdx.x < cnt ? members[first + threadIdx.x] : -1;
-    __syncthreads();
+    prompt_gu<6>(Xg, Xu, Tg, Tu, items, counts, members, svh_g, svh_u, suh_d, xd, K, N, xdiv, limit, act_mode, smem_raw, rows_sh);
+}
+
+// The kernel reads its item and fills rows_sh itself, so that its launch bound still limits the thread arithmetic.
+#define TF_EXL3_PROMPT_DOWN_HEAD()                                                                                       \
+    const int cb = blockIdx.x, item = blockIdx.y;                                                                        \
+    if (item >= counts[0]) return;                                                                                       \
+    const int e = items[3 * item], first = items[3 * item + 1], cnt = items[3 * item + 2];                               \
+    if (threadIdx.x < TPM) rows_sh[threadIdx.x] = (int)threadIdx.x < cnt ? members[first + threadIdx.x] : -1;            \
+    __syncthreads();                                                                                                     \
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+// Block (256 model-width columns, item): y[row][slot][:] = the down epilogue of the item's pairs (this rank's share).
+template <int K2>
+__device__ __forceinline__ void prompt_down(const half* __restrict__ Xd, const uint64_t* __restrict__ Td, const half* __restrict__ svh_d,
+        float* __restrict__ y, int K, int D, unsigned char* smem_raw, const int* rows_sh, int cb, int e, int cnt, int warp, int lane) {
     float acc[TMT][TNB][4];
-    tmain<1, TPM>(Xd, Xd, Td, Td, rows_sh, cnt, e, K, D >> 4, cb, 1, reinterpret_cast<half*>(smem_raw), acc);
+    tmain<1, TPM, K2>(Xd, Xd, Td, Td, rows_sh, cnt, e, K, D >> 4, cb, 1, reinterpret_cast<half*>(smem_raw), acc);
     float* Ed = reinterpret_cast<float*>(smem_raw);
     for (int hf = 0; hf < 2 && hf * TPH < cnt; ++hf) {
         if (hf) __syncthreads();
@@ -329,3 +348,25 @@ extern "C" __global__ void __launch_bounds__(256, 2) tf_exl3_prompt_down(const h
         }
     }
 }
+
+extern "C" __global__ void __launch_bounds__(256, 2) tf_exl3_prompt_down(const half* __restrict__ Xd, const uint64_t* __restrict__ Td,
+        const int* __restrict__ items, const int* __restrict__ counts, const int* __restrict__ members, const half* __restrict__ svh_d,
+        float* __restrict__ y, int K, int D, int ys) {
+
+    __shared__ __align__(16) unsigned char smem_raw[tsmem_bytes<8>()];
+    __shared__ int rows_sh[TPM];
+    TF_EXL3_PROMPT_DOWN_HEAD()
+    prompt_down<8>(Xd, Td, svh_d, y, K, D, smem_raw, rows_sh, cb, e, cnt, warp, lane);
+}
+
+// The same at 3 bits (3-bit mcg down), the arguments tf_exl3_prompt_down's.
+extern "C" __global__ void __launch_bounds__(256, 2) tf_exl3_prompt_down_k6(const half* __restrict__ Xd, const uint64_t* __restrict__ Td,
+        const int* __restrict__ items, const int* __restrict__ counts, const int* __restrict__ members, const half* __restrict__ svh_d,
+        float* __restrict__ y, int K, int D, int ys) {
+
+    __shared__ __align__(16) unsigned char smem_raw[tsmem_bytes<6>()];
+    __shared__ int rows_sh[TPM];
+    TF_EXL3_PROMPT_DOWN_HEAD()
+    prompt_down<6>(Xd, Td, svh_d, y, K, D, smem_raw, rows_sh, cb, e, cnt, warp, lane);
+}
+#undef TF_EXL3_PROMPT_DOWN_HEAD

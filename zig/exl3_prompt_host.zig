@@ -12,10 +12,10 @@ const Capture = struct {
     var copied: usize = 0;
     fn launch(f: cuda.abi.Function, gx: c_uint, gy: c_uint, gz: c_uint, bx: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, args: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
         calls[count] = .{ .id = @intFromPtr(f), .grid = .{ gx, gy, gz }, .block = bx };
-        if (@intFromPtr(f) >= 11 and @intFromPtr(f) <= 13) {
+        if (@intFromPtr(f) >= 11 and @intFromPtr(f) <= 15) {
             const sizes: []const u8 = switch (@intFromPtr(f)) {
                 11 => &.{ 8, 4, 8, 8, 4 },
-                12 => &.{ 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 4, 4, 4, 4, 4 },
+                12, 14 => &.{ 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 4, 4, 4, 4, 4 },
                 else => &.{ 8, 8, 8, 8, 8, 8, 8, 4, 4, 4 },
             };
             for (sizes, 0..) |size, i| {
@@ -55,7 +55,7 @@ fn run(rows: usize, prompt: bool, shared: bool) !void {
     d.api.cuMemcpy2DAsync_v2 = Capture.copy;
     const s: cuda.Stream = .{ .d = &d, .handle = null };
     var k: ex.Experts = .{ .mod = undefined, .group = function(&d, 1), .rot_in = function(&d, 2), .grouped = @splat(function(&d, 3)), .gateup = function(&d, 4), .down_combine = function(&d, 5) };
-    if (comptime @hasField(ex.Experts, "prompt")) k.prompt = .{ .rotate = function(&d, 11), .gateup = function(&d, 12), .down = function(&d, 13) };
+    if (comptime @hasField(ex.Experts, "prompt")) k.prompt = .{ .rotate = function(&d, 11), .gateup = function(&d, 12), .down = function(&d, 13), .gateup_k6 = function(&d, 14), .down_k6 = function(&d, 15) };
     const ek: glm.experts.Kernels = .{ .nvfp4 = undefined, .b32 = null, .router = .{ .plan_small = function(&d, 20), .plan_rank = function(&d, 21), .plan_offsets = function(&d, 22), .plan_scatter = function(&d, 23), .plan_rows = function(&d, 24), .plan_rank_rows = function(&d, 25), .plan_scatter_rows = function(&d, 26) } };
     const w: glm.exl3.Experts = .{ .gt = 100, .ut = 200, .dt = 300, .k2 = 400, .suh_g = 500, .suh_u = 600, .svh_g = 700, .svh_u = 800, .suh_d = 900, .svh_d = 1000, .shx = shared };
     const sc: glm.exl3.Scratch = .{ .picks = 0x100000000, .xg = 0, .xu = 0, .z = 0 };
@@ -121,14 +121,26 @@ test "exl3 prompt: decode retains the existing split-K launches" {
     try std.testing.expect(Capture.by(1).len > 0 and Capture.by(2).len > 0 and Capture.by(3).len > 0);
 }
 
-test "exl3 prompt: the common dispatch requires verified mcg4 geometry and keeps every fallback" {
+test "exl3 prompt: the common dispatch requires verified mcg3 or mcg4 geometry and keeps every fallback" {
     const P = ex.prompt;
     var l: ex.Layer = .{ .gate = 0, .up = 0, .down = 0, .gate_k2 = 0, .up_k2 = 0, .down_k2 = 0, .suh_g = 0, .suh_u = 0, .svh_g = 0, .svh_u = 0, .suh_d = 0, .svh_d = 0, .dims = 512, .width = 256, .experts = 9, .codebook = .mcg, .uniform_k2 = 8 };
     try std.testing.expect(P.eligible(l));
     l.uniform_k2 = 0;
     try std.testing.expect(!P.eligible(l));
     l.uniform_k2 = 6;
-    try std.testing.expect(!P.eligible(l));
+    try std.testing.expect(P.eligible(l));
+    for ([_]u32{ 4, 5, 7, 10 }) |k2| {
+        l.uniform_k2 = k2;
+        try std.testing.expect(!P.eligible(l));
+    }
+    l.uniform_k2 = 0;
+    for ([_][2]u32{ .{ 6, 0 }, .{ 0, 8 }, .{ 4, 8 }, .{ 6, 10 } }) |w| {
+        l.uniform_k2_gu = w[0];
+        l.uniform_k2_d = w[1];
+        try std.testing.expect(!P.eligible(l));
+    }
+    l.uniform_k2_gu = 0;
+    l.uniform_k2_d = 0;
     l.uniform_k2 = 8;
     for ([_]ex.Codebook{ .inst3, .mul1 }) |cb| {
         l.codebook = cb;
@@ -204,4 +216,42 @@ test "exl3 prompt: GLM admission facts through shared lanes keep drafted plain a
         const plain = try reply(false, 0, seed);
         for ([_]bool{ false, true }) |drafts| for ([_]usize{ 0, 1, 3, 7 }) |others| try std.testing.expectEqual(plain, try reply(drafts, others, seed));
     }
+}
+
+test "exl3 prompt: each projection group launches the kernel of its own verified width, with the same arguments" {
+    var d: cuda.Driver = undefined;
+    d.api.cuLaunchKernel = Capture.launch;
+    const s: cuda.Stream = .{ .d = &d, .handle = null };
+    var k: ex.Experts = .{ .mod = undefined, .group = function(&d, 1), .rot_in = function(&d, 2), .grouped = @splat(function(&d, 3)), .gateup = function(&d, 4), .down_combine = function(&d, 5) };
+    k.prompt = .{ .rotate = function(&d, 11), .gateup = function(&d, 12), .down = function(&d, 13), .gateup_k6 = function(&d, 14), .down_k6 = function(&d, 15) };
+    const router: cuda.grouped.Router = .{ .plan_small = function(&d, 20), .plan_rank = function(&d, 21), .plan_offsets = function(&d, 22), .plan_scatter = function(&d, 23), .plan_rows = function(&d, 24), .plan_rank_rows = function(&d, 25), .plan_scatter_rows = function(&d, 26) };
+    const plan: cuda.grouped.Plan = .{ .items = 10000, .members = 20000, .counts = 30000, .rank = 40000, .hist = 50000 };
+    var l: ex.Layer = .{ .gate = 100, .up = 200, .down = 300, .gate_k2 = 400, .up_k2 = 400, .down_k2 = 400, .suh_g = 500, .suh_u = 600, .svh_g = 700, .svh_u = 800, .suh_d = 900, .svh_d = 1000, .dims = 512, .width = 256, .experts = 9, .codebook = .mcg, .limit = 10, .shared_input = true };
+    var want: [2]Capture.Call = undefined; // the 4-bit gate/up and down launches
+    for ([_][3]u32{ .{ 8, 0, 0 }, .{ 0, 6, 8 }, .{ 0, 6, 6 }, .{ 0, 8, 6 }, .{ 6, 0, 0 }, .{ 8, 8, 8 }, .{ 6, 6, 0 } }) |w| {
+        l.uniform_k2 = w[0];
+        l.uniform_k2_gu = w[1];
+        l.uniform_k2_d = w[2];
+        const sc = try ex.prompt.scratch(0x1000, l, 40, 8);
+        Capture.reset();
+        try k.prompt.run(&k, router, s, l, 0x200000000, 520, 0x300000000, 40, sc, plan);
+        const gu: usize = if ((if (w[1] != 0) w[1] else w[0]) == 6) 14 else 12;
+        const dn: usize = if ((if (w[2] != 0) w[2] else w[0]) == 6) 15 else 13;
+        try std.testing.expectEqual(@as(usize, 1), Capture.by(gu).len);
+        try std.testing.expectEqual(@as(usize, 1), Capture.by(dn).len);
+        try std.testing.expectEqual(@as(usize, 1), Capture.by(11).len);
+        for ([_]usize{ 12, 13, 14, 15 }) |id| if (id != gu and id != dn) try std.testing.expectEqual(@as(usize, 0), Capture.by(id).len);
+        const got = [2]Capture.Call{ Capture.by(gu)[0], Capture.by(dn)[0] };
+        if (w[0] == 8 and w[1] == 0) want = got;
+        for (got, want) |g, x| {
+            try std.testing.expectEqual(x.grid, g.grid);
+            try std.testing.expectEqual(x.block, g.block);
+            try std.testing.expectEqual(x.args, g.args);
+        }
+    }
+    l.uniform_k2 = 8;
+    l.uniform_k2_gu = 6; // disagrees with every projection's 8: not verified, so no prompt launch
+    l.uniform_k2_d = 0;
+    try std.testing.expect(!ex.prompt.eligible(l));
+    try std.testing.expectError(error.Exl3Shape, ex.prompt.scratch(0x1000, l, 40, 8));
 }
