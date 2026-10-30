@@ -1,7 +1,11 @@
 // Nemotron-H prompt rows (any count) with the decode step's arithmetic: each output sums as the one-token path does.
 #define SG 16
+#ifndef PR
 #define PR 8 // prompt rows a sub-group holds
-#define PO 8 // output rows a sub-group holds: one load and one sum of a word's inputs serve all of them
+#endif
+#ifndef PO
+#define PO 8 // output rows a sub-group holds: one load and one sum of a word's inputs serve all (nem_prow_gen12: 4)
+#endif
 #define PSG (16 / PO) // sub-groups a work-group: 16 output rows
 inline float bf(ushort v) { return as_float((uint)v << 16); }
 inline ushort to_bf(float f) {
