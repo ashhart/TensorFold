@@ -86,7 +86,7 @@ pub const Lanes = struct {
         return .{ .ptr = x, .vtable = if (pieces) &vtable_pieces else &vtable };
     }
 
-    const vtable: be.Backend.VTable = .{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .probabilities = probabilities, .tree = heldTree, .release = release };
+    const vtable: be.Backend.VTable = .{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .probabilities = probabilities, .tree = heldTree, .held = heldChain, .release = release, .first_masked = firstMasked };
     /// a target that runs prompts in pieces (iface.Target begin / piece / finish): the round planner may use them
     const vtable_pieces: be.Backend.VTable = blk: {
         var v = vtable;
@@ -188,6 +188,7 @@ pub const Lanes = struct {
         x.policy.depth.reset(slot);
         const ids = s.prompt();
         x.target.admit(slot, s.max_new);
+        try x.target.firstMask(slot, try x.firstBits(s));
         st.first = try x.target.prefill(slot, ids, s.sampling, ids.len);
         st.len = ids.len;
         _ = x.scratch.reset(.retain_capacity);
@@ -263,6 +264,7 @@ pub const Lanes = struct {
         const st = try x.get(s);
         try x.settle();
         const ids = s.prompt();
+        try x.target.firstMask(st.slot, try x.firstBits(s));
         return x.finished(st, ids, try x.target.finish(st.slot, ids, s.sampling, ids.len));
     }
 
@@ -272,6 +274,7 @@ pub const Lanes = struct {
         const st = try x.get(s);
         try x.settle();
         const ids = s.prompt();
+        try x.target.firstMask(st.slot, try x.firstBits(s));
         if (try x.target.tail(st.slot, ids, s.sampling, ids.len)) |first_| {
             try x.finished(st, ids, first_);
             return false;
@@ -297,6 +300,19 @@ pub const Lanes = struct {
         if (position != st.len) return error.PositionMismatch;
         try x.drawn.append(x.gpa, st.first);
         return x.drawn.items.len - 1;
+    }
+
+    /// A grammar stream's first token's bits, as the lane core's own (empty: no grammar, or not started yet).
+    fn firstBits(x: *Lanes, s: *Stream) ![]const u32 {
+        const g = s.grammar orelse return &.{};
+        return (try g.next(x.scratch.allocator())) orelse &.{};
+    }
+
+    /// Backend.first_masked: the prompt's pick ran under the same bits (firstBits); a token outside them is an error.
+    fn firstMasked(ptr: *anyopaque, s: *Stream, position: u64, mask: []const u32) anyerror!u64 {
+        const st = try self(ptr).get(s);
+        if (!lanes.grammar.allows(mask, st.first)) return error.FirstNotMasked;
+        return first(ptr, s, position);
     }
 
     fn queue(ptr: *anyopaque, s: *Stream, feed: be.Feed, position: u64) anyerror!u64 {
@@ -336,7 +352,8 @@ pub const Lanes = struct {
             @memcpy(tokens[1 .. 1 + w.held], st.held[0..w.held]);
             @memcpy(tokens[1 + w.held ..], w.tokens);
             const parents = w.parents; // each row's parent row (row 0: -1)
-            g.* = .{ .slot = st.slot, .start = st.len, .tokens = tokens, .parents = parents, .draws = w.positions, .sampling = w.stream.sampling };
+            if (w.masks.len > 0 and !x.target.masks()) return error.StructuresUnsupported;
+            g.* = .{ .slot = st.slot, .start = st.len, .tokens = tokens, .parents = parents, .draws = w.positions, .sampling = w.stream.sampling, .masks = w.masks };
             c.* = o.sampled;
             @memcpy(o.drafts, tokens[1..]);
         }
@@ -535,6 +552,13 @@ pub const Lanes = struct {
             at += len;
         }
         return .{ .count = total, .tokens = tokens, .parents = parents };
+    }
+
+    /// Backend.held: the held chain's drafts as host tokens, the ones `verify` puts in a window's held rows.
+    fn heldChain(ptr: *anyopaque, s: *Stream, out: []u32) anyerror!void {
+        const st = try self(ptr).get(s);
+        if (out.len > st.n) return error.HeldMismatch;
+        @memcpy(out, st.held[0..out.len]);
     }
 
     /// Each held draft's chance of landing from the raw confidences (the engine's own allocation, without the policy).
