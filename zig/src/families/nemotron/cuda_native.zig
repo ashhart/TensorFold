@@ -63,6 +63,7 @@ pub const Loaded = struct {
     learns: ?*engine.Engine = null, // --slide: the engine its learner trains, whose sites it attached at load
     learn_bytes: usize = 0, // --slide: what its trainer allocates at the first lesson, kept out of the streams' room
     vision: ?*vision.Vision = null, // --vision: the tower the server's image requests reach
+    audio: ?*@import("cuda_audio.zig").Audio = null, // a Transcribe checkpoint's encoder the server's audio requests reach
     taps: []const u32 = &.{}, // the rows a recorder may ask `backend` for (empty: none)
     host_snaps: bool = false, // a discrete card: prompt states go to pinned host memory when the cache does not fit
     /// The other streams' memory as one pool of KV pages (null: each allocates a window at its prefill).
@@ -113,7 +114,8 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer e.deinit();
     if (o.mtp_drafts) |n| if (n >= state.windowRows(e.c)) return error.DraftsPastWindow;
     // Bolt has no MTP weights; copy drafts use the lane core and the target's ordinary verify windows.
-    const head_enabled = o.drafts and !e.c.bolt;
+    // Transcribe decodes plain: its MTP head is not qualified over audio rows, and a copied <|audio|> has no row.
+    const head_enabled = o.drafts and !e.c.bolt and !e.c.salm;
     const head: ?*Head = if (head_enabled) try Head.init(e) else null;
     errdefer if (head) |h| h.deinit();
     if (head) |h| try h.capture();
@@ -128,13 +130,13 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer gpa.destroy(own);
     own.* = .{ .gpa = gpa, .e = e, .head = head, .lanes = try Lanes.init(gpa, e, head), .target = .{ .e = e, .head = head }, .carve = carve };
     errdefer own.lanes.deinit();
-    own.lanes.copy_drafts = o.drafts;
+    own.lanes.copy_drafts = o.drafts and !e.c.salm;
     own.lanes.mtp_drafts = o.mtp_drafts;
     own.lanes.mtp_confidence = o.mtp_confidence;
     own.living = try slide.loadLiving(gpa, io, e, dir); // before the lanes' costs are measured: they decode through it
     errdefer if (own.living) |*s| s.deinit();
     try own.lanes.measure(io, dir);
-    own.taps = .{@import("cuda_lanes.zig").finalTap(e.c)};
+    own.taps = .{engine.finalTap(e.c)};
     return .{
         .backend = own.lanes.backend(),
         .facts = own.lanes.facts(),
@@ -147,6 +149,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .learns = if (o.slide) e else null,
         .learn_bytes = if (o.slide) @import("cuda_train.zig").Trainer.memory(e.c) else 0,
         .vision = e.vision,
+        .audio = e.audio,
         .taps = &own.taps,
         .host_snaps = e.k.discrete, // a card with its own memory may keep prompt states in the host's (GB10 shares one)
         .layout = if (o.slide or e.k.triton != null or paging() == .off) null else pages_mod.layout(e), // our glue pages; the learner reads windows

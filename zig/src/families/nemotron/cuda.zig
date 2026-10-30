@@ -36,6 +36,7 @@ pub const pages = @import("cuda_pages.zig");
 pub const slide = @import("cuda_slide.zig");
 pub const worker = @import("cuda_worker.zig");
 pub const omni = @import("cuda_native_omni.zig");
+pub const transcribe = @import("cuda_native_transcribe.zig");
 pub const identity = @import("core").checkpoint_identity;
 
 test {

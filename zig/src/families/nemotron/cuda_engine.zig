@@ -46,6 +46,11 @@ pub const Cancel = prompt_hooks.Cancel;
 pub const Keep = prompt_hooks.Keep;
 pub const Taps = prompt_hooks.Taps;
 
+/// The one tap Nemotron gives: past its last layer, the final norm's rows its head and MTP head read.
+pub fn finalTap(c: Config) u32 {
+    return @intCast(c.layers);
+}
+
 /// Serial rounds a host keeps queued ahead of the one it reads.
 pub const lookahead = 4;
 
@@ -165,8 +170,9 @@ pub const Engine = struct {
         // every byte this rank holds, hashed while the weights load; the ranks compare the digests at ready
         var content: ?*identity.Content = if (e.tp != null) try identity.Content.start(gpa, io, model_dir, e.c.held != null) else null;
         errdefer if (content) |x| x.abandon();
-        // Bolt (LatentMoE, ggml blocks): no MTP head in the checkpoint; our own glue (captured sets are Lightning's)
-        const mtp = opts.mtp and !e.c.bolt;
+        // Bolt (LatentMoE, ggml blocks): no MTP head in the checkpoint; our own glue (captured sets are Lightning's).
+        // Transcribe's MTP head is not qualified over audio rows yet: it decodes plain.
+        const mtp = opts.mtp and !e.c.bolt and !e.c.salm;
         if (e.c.bolt) {
             if (e.k.triton != null) return error.CapturedGlueIsLightnings;
             try e.k.loadGgml(ctx);
@@ -200,6 +206,12 @@ pub const Engine = struct {
             }) orelse return error.VisionRefused;
         }
         errdefer if (!keep_owner) if (e.vision) |v| v.deinit();
+        // a Transcribe checkpoint's audio encoder and its rows, loaded before the caches plan their memory
+        if (e.c.salm) {
+            const audio = @import("cuda_audio.zig");
+            e.audio = try audio.Audio.init(gpa, io, ctx.d, model_dir, audio.default_rows, e.c.hidden);
+        }
+        errdefer if (!keep_owner) if (e.audio) |a| a.deinit();
         e.b = try state.Buffers.init(ctx.d, e.c, e.max_len, e.nch, e.carve);
         errdefer if (!keep_owner) e.b.deinit();
         try e.b.initShared(e.ops(), e.c);
@@ -446,24 +458,7 @@ pub const Engine = struct {
         return null;
     }
 
-    /// Dev trace (TF_SLIDE_TRACE): the bound sequence's router scores at its decision row and which lessons act on it.
-    pub fn traceLessons(e: *const Engine) void {
-        const ad = e.lessons() orelse return;
-        if (e.decide == lesson_route.none) return;
-        const n = lesson_route.max_blocks;
-        var score: [n]f32 = undefined;
-        var need: [n]f32 = undefined;
-        var flags: [n]u32 = undefined;
-        const o = e.ops();
-        o.download(std.mem.sliceAsBytes(&score), ad.score + e.slot * n * 4) catch return;
-        o.download(std.mem.sliceAsBytes(&need), ad.need) catch return;
-        o.download(std.mem.sliceAsBytes(&flags), ad.latch + e.slot * n * 4) catch return;
-        e.stream.synchronize() catch return;
-        var line: [2048]u8 = undefined;
-        var w: std.Io.Writer = .fixed(&line);
-        for (0..ad.rank / 16) |b| w.print(" {d:.2}/{d:.2}{s}", .{ score[b], need[b], if (flags[b] != 0) "*" else "" }) catch break;
-        std.log.info("slide trace: decision row {d}: scores{s} (* acting)", .{ e.decide, w.buffered() });
-    }
+    pub const traceLessons = @import("cuda_lesson_trace.zig").traceLessons;
 
     pub fn trainOps(e: *const Engine) train_ops.Ops {
         return .{ .k = &e.k.train, .s = e.stream };

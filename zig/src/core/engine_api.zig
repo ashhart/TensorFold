@@ -17,6 +17,7 @@ pub const load_ledger = @import("load_ledger.zig");
 
 /// One image of a request (``Request.images``): the tower's input and the placeholder rows its output replaces.
 pub const Image = lanes.stream.Image;
+pub const Audio = lanes.stream.Audio;
 
 /// A prompt's reproducible seed (``seed_for``), for requests that name none.
 pub const seedFor = lanes.sampling.seedFor;
@@ -24,23 +25,9 @@ pub const seedFor = lanes.sampling.seedFor;
 /// A committed token's log probability under the target's raw distribution, with the best tokens at its position.
 pub const LogprobRow = lanes.LogprobRow;
 
-/// The request's stop strings, checked on the engine's thread after each committed token (the server decodes the tail).
-pub const Stop = struct {
-    ctx: *anyopaque,
-    check: *const fn (ctx: *anyopaque, emitted: []const u32) bool,
-};
-
-/// tool_choice "required" or a named function: outside a think block the answer opens a call to an offered tool.
-pub const CallGate = struct {
-    /// The token that opens a call, the template text before the name, and the mark that ends the name.
-    opener: u32,
-    lead: []const u8 = "",
-    tail: []const u8 = "",
-    /// Offered names (empty: any); the gate completes a name its prefix starts.
-    names: []const []const u8 = &.{},
-    think_open: ?u32 = null,
-    think_end: ?u32 = null,
-};
+/// A request's stop strings and tool-call gate (engine_gates.zig).
+pub const Stop = @import("engine_gates.zig").Stop;
+pub const CallGate = @import("engine_gates.zig").CallGate;
 
 /// response_format and the guided_* fields: every token keeps the reply inside this grammar.
 pub const Structure = struct {
@@ -115,6 +102,8 @@ pub const Request = struct {
     prompt_logprobs: ?u8 = null,
     /// Images whose rows replace placeholder tokens of ``prompt``, in order; only when ``Info.vision`` is set.
     images: []const Image = &.{},
+    /// Audio clips whose rows replace placeholder tokens of ``prompt``, in order; only when ``Info.audio`` is set.
+    audios: []const Audio = &.{},
     /// The prompt as the prompt cache matches it (each image's placeholders by its content); empty: ``prompt``.
     cache_key: []const u32 = &.{},
 
@@ -138,6 +127,8 @@ pub const VideoSource = vision_types.VideoSource;
 pub const FrameSink = vision_types.FrameSink;
 pub const PreparedVideo = vision_types.PreparedVideo;
 pub const VideoOffer = vision_types.VideoOffer;
+pub const PreparedAudio = vision_types.PreparedAudio;
+pub const AudioOffer = vision_types.AudioOffer;
 pub const VisionOpen = vision_types.VisionOpen;
 
 pub const SpeechRequest = @import("speech_api.zig").SpeechRequest;
@@ -240,6 +231,8 @@ pub const Info = struct {
     pictures: bool = false,
     /// Image input (--vision); null: text only.
     vision: ?Vision = null,
+    /// Audio input (a speech model's encoder); null: none.
+    audio: ?AudioOffer = null,
     /// The engine decodes greedily only: the server refuses a request with a temperature before admitting it.
     greedy_only: bool = false,
     /// The learner reads conversation prompts at any length through taps.
