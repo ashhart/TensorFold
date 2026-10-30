@@ -56,10 +56,12 @@ DPAS) under WSL2 (Ubuntu 24.04, 8 GB given to WSL), Ubuntu's compute runtime 23.
 
 | Setup | Decode, c=1 | TTFT, 1,024 tokens | TTFT, 8,192 tokens | Memory (`serve --context 16384`) |
 | --- | ---: | ---: | ---: | --- |
-| Iris Xe, LFM3-1.7B MLX 4-bit | 14.8 to 15.8 tok/s | 13.1 to 14.2 s | 130.8 to 131.3 s | 1.25 GB device allocation, 441 MB host resident |
+| Iris Xe, LFM3-1.7B MLX 4-bit | 16.7 to 16.9 tok/s | 11.7 to 12.2 s | 116.3 to 117.7 s | 1.33 GB device allocation, 448 MB host resident |
 
 Decode: 256 greedy tokens after a 64-token prompt; TTFT: prompts of numbered item sentences, one token generated; three runs each,
 through `/v1/completions`. A `/v1/chat/completions` request with the checkpoint's chat template answers (thinking on, `finish_reason` stop).
+With `--parallel N` each stream has its own sequence (about 196 MiB of KV at 16,384 tokens); a second chat turn over an
+8,037-token document resumes from the prompt cache in 0.80 s instead of 122.6 s, with the same reply.
 
 ## Measurements
 
