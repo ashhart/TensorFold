@@ -11,6 +11,7 @@
 #include "tiles/gemm.hpp"
 #include "tiles/gemm_kp.hpp"
 #include "tiles/matrix_gemm.hpp"
+#include "tiles/matrix_item.hpp"
 #include "tiles/stream.hpp"
 
 namespace tf {
@@ -35,6 +36,13 @@ __global__ void __launch_bounds__(32 * WAVES) affine_gemm_kp(Affine a) {
 template <int BITS>
 __global__ void __launch_bounds__(256) affine_wmma_gemm(Affine a) {
     wmma_gemm_tile<MlxDecoder<BITS>, BF16Act, WmmaBF16, F32Out>(a);
+}
+
+// ---- the same on RM x 16 rows a block, for a routed item of few rows ----
+
+template <int BITS, int RM>
+__global__ void __launch_bounds__(256) affine_wmma_item(Affine a) {
+    wmma_item_tile<MlxDecoder<BITS>, BF16Act, WmmaBF16, F32Out, RM>(a);
 }
 
 // ---- the decode stream tile ----
