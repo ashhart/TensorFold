@@ -266,3 +266,17 @@ test "format coexistence: EXL3 BF16 prompt: existing rows and partial final slic
 test {
     _ = @import("src/families/qwen3_5/cuda_host_embed.zig"); // where an EXL3 checkpoint's embedding rows live
 }
+
+test "format coexistence: disjoint mixer and dense MLP scratch regions share one arena union" {
+    const c = try config(exl3, false, false);
+    defer t.allocator.free(c);
+    var e: Engine = undefined;
+    e.g = try geo.parse(t.allocator, c);
+    e.arena = .{ .d = undefined, .ptr = 0x100000, .len = 1 << 30 };
+    e.arena_at = 0;
+    const measured = try e.scratch(.measure);
+    e.arena_at = 0;
+    try t.expectEqual(measured, try e.scratch(.allocate));
+    try t.expectEqual(e.y, e.gate);
+    try t.expectEqual(e.z, e.qraw);
+}
