@@ -118,3 +118,24 @@ test "a capped fill step advances at most the cap's rows, the rest whole" {
 test "the cap and the short-prompt burst are independent constants" {
     try std.testing.expectEqual(@as(u32, 512), fill.decode_cap_rows); // move Share.short_rows: this literal must not follow it
 }
+
+test "the flag keeps the env's row budget and replaces only the env's share" {
+    const gpa = std.testing.allocator;
+    _ = env.setenv(share_env, "0.5", 1);
+    defer clearShareEnv();
+    _ = env.setenv("TENSORFOLD_PREFILL_BUDGET", "256", 1);
+    defer _ = env.unsetenv("TENSORFOLD_PREFILL_BUDGET");
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer core.deinit();
+    const flagged = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2, .decode_share = 0.25 });
+    try std.testing.expectEqual(@as(f64, 0.75), flagged.share.p); // the flag's share, not the env's 0.5
+    try std.testing.expectEqual(@as(u64, 256), flagged.share.rows); // the budget survives the flag
+    const plain = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2 });
+    try std.testing.expectEqual(@as(f64, 0.5), plain.share.p);
+    try std.testing.expectEqual(@as(u64, 256), plain.share.rows);
+}

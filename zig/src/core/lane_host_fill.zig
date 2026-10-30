@@ -69,6 +69,13 @@ pub const Share = struct {
         return .{ .p = @max(1 - x, min_share) };
     }
 
+    /// The env's share, with --decode-share's p in its place when given; the row budget always comes from the env.
+    pub fn withDecode(decode_share: ?f64) Share {
+        var s = fromEnv();
+        if (decode_share) |x| s.p = fromDecode(x).p;
+        return s;
+    }
+
     pub fn fromEnv() Share {
         var s: Share = if (std.c.getenv("TENSORFOLD_PREFILL_SHARE")) |text| fromText(std.mem.span(text)) else .{};
         if (std.c.getenv("TENSORFOLD_PREFILL_BUDGET")) |text| s.rows = budget(std.mem.span(text));
