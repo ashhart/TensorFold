@@ -210,6 +210,15 @@ ARM torch (a Mac, a GB10) calls its libm instead. For seed 42 at 1024x1024, a Ma
 `moss_image_case.py noise` records sha256s of x86 torch's latents (torch 2.13.0) for 24 seeds and 9 sizes, and
 `zig build test` checks them. A case made on a Mac holds the Mac's noise, not these.
 
+`moss_image.schedule` computes the timesteps and noise levels from `scheduler/scheduler_config.json`, as the
+pipeline's `MOSSImageScheduler` does: a float32 grid shifted by `shift`, snapped to the nearest of the
+`num_train_timesteps` training levels (shifted by `training_shift`), with repeats dropped. It reads those three
+settings. A config that turns on Karras, exponential or beta sigmas, dynamic shifting, `shift_terminal`, inverted
+sigmas or stochastic sampling is refused: diffusers warns that it ignores them, but its base scheduler applies them.
+`moss_image_case.py schedule` records sha256s of the scheduler's own timesteps and sigmas for 21 step counts (1 to 2000)
+and 5 configs. torch gives the same bits on x86, a GB10 and a Mac, and `zig build test` checks all 105. The image size
+does not enter, since the released config has no dynamic shifting.
+
 ## Measured
 
 Setup:
