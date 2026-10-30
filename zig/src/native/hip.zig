@@ -105,6 +105,8 @@ fn ready(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open
     var policy = hip.Policy.resolve(o.policy, .current, &notes) catch |err| return refuse(a, problem, "the policy \"{s}\" is refused ({s})", .{ o.policy, @errorName(err) });
     if (o.mtp_drafts) |n| policy.mtp.drafts = @intCast(n);
     if (o.mtp_confidence) |c| policy.mtp.confidence = c;
+    // a family's own prompt chunk where neither --policy nor TF_POLICY names one; rank 0's policy reaches every rank
+    if (@hasDecl(F, "policy_prefill_step") and !hip.Policy.names(o.policy, .current, "prefill_step")) policy.prefill_step = F.policy_prefill_step;
     if (o.keep) |n| policy.slots = @intCast(@min(n, 1 << 16));
     if (matrixRefused(policy, caps)) |why| return refuse(a, problem, "matrix=on: {s}; matrix=auto runs the dot2 tiles", .{why});
     const group: ?hip.collective.Group = if (o.tp > 1) try join(a, gpa, io, o, caps, &policy, problem) else null;

@@ -201,6 +201,21 @@ pub const Policy = struct {
         }
     };
 
+    /// Whether `flags` (`--policy`) or TF_POLICY names `key`: a family's own default applies only where neither does.
+    pub fn names(flags: []const u8, env: Env, key: []const u8) bool {
+        if (namesIn(flags, key)) return true;
+        return if (env.get("TF_POLICY")) |text| namesIn(text, key) else false;
+    }
+
+    fn namesIn(text: []const u8, key: []const u8) bool {
+        var it = std.mem.tokenizeAny(u8, text, ", ");
+        while (it.next()) |pair| {
+            const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
+            if (std.mem.eql(u8, pair[0..eq], key)) return true;
+        }
+        return false;
+    }
+
     /// The policy: defaults, then `flags` (`--policy`), then TF_POLICY; `notes` says when TF_POLICY acted.
     pub fn resolve(flags: []const u8, env: Env, notes: *Notes) Error!Policy {
         var p: Policy = .{};
@@ -227,6 +242,14 @@ test "apply sets fields and refuses what it does not know" {
     try std.testing.expectEqual(@as(u32, 256), p.fill_rows);
     for ([_][]const u8{ "fill_rows=0", "fill_rows=100", "fill_rows=384", "fill_rows=2048" }) |bad| try std.testing.expectError(error.StepNotAligned, p.apply(bad));
     try std.testing.expectEqual(@as(u32, 256), p.fill_rows);
+}
+
+test "names sees a key in the flags or in TF_POLICY, and only as a key" {
+    try std.testing.expect(Policy.names("matrix=on,prefill_step=1024", .none, "prefill_step"));
+    try std.testing.expect(!Policy.names("matrix=on", .none, "prefill_step"));
+    try std.testing.expect(!Policy.names("graphs=off", .none, "prefill"));
+    try std.testing.expect(Policy.names("", .{ .vars = &.{.{ "TF_POLICY", "prefill_step=4096" }} }, "prefill_step"));
+    try std.testing.expect(!Policy.names("", .{ .vars = &.{.{ "TF_POLICY", "fill_rows=256" }} }, "prefill_step"));
 }
 
 test "a policy survives its words" {
