@@ -83,8 +83,10 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
         const body = try std.fmt.allocPrint(a, "#define TF_DSV41_E {d}\n#define TF_DSV41_TOPK {d}\n{s}", .{ e, k, sources.dsv41_route });
         return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
     }
+    if (std.mem.startsWith(u8, d.name, "dsv41 engram ")) return .{ .decl = d, .function = fun, .here = sources.deepseek_v41_engram, .pre_m5 = sources.deepseek_v41_engram };
     if (std.mem.startsWith(u8, d.name, "dsv41 glue ")) return .{ .decl = d, .function = fun, .here = sources.deepseek_v41_glue, .pre_m5 = sources.deepseek_v41_glue };
     if (std.mem.startsWith(u8, d.name, "dsv41 cand ")) return .{ .decl = d, .function = fun, .here = sources.deepseek_v41_cand, .pre_m5 = sources.deepseek_v41_cand };
+    if (std.mem.startsWith(u8, d.name, "dsv41 compress ")) return .{ .decl = d, .function = fun, .here = sources.deepseek_v41_compress, .pre_m5 = sources.deepseek_v41_compress };
     if (std.mem.startsWith(u8, d.name, "dsv41 mv ")) return .{ .decl = d, .function = fun, .here = sources.deepseek_v41_mv, .pre_m5 = sources.deepseek_v41_mv };
     if (std.mem.startsWith(u8, d.name, "dsv41 fp8 rows ")) {
         text = sources.deepseek_v41_fp8_rows;

@@ -446,8 +446,12 @@ pub fn main(init: std.process.Init) !u8 {
     defer dsv41_xmma.destroy();
     const dsv41_ix = try @import("metal_dsv41_index.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer dsv41_ix.destroy();
+    const dsv41_engram = try @import("metal_dsv41_engram.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer dsv41_engram.destroy();
     const dsv41_glue = try @import("metal_dsv41_glue.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer dsv41_glue.destroy();
+    const dsv41_compress = try @import("metal_dsv41_compress.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer dsv41_compress.destroy();
     const dsv41_mv = try @import("metal_dsv41_mv.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer dsv41_mv.destroy();
     var t: g.Tally = .{};
@@ -472,6 +476,7 @@ pub fn main(init: std.process.Init) !u8 {
         try dsv41_attn.invariance(init.io, o.seed, &t);
         if (std.c.getenv("TF_DSV41_TIME") != null) try dsv41_attn.timing(init.io);
         t.failed += try dsv41_ix.invariance(o.seed);
+        t.failed += try dsv41_engram.invariance(o.seed);
         t.failed += try dsv41_glue.invariance(o.seed);
         if (dsv41_mv.probes.items.len > 0) {
             t.failed += try dsv41_mv.invariance(o.seed);
@@ -479,6 +484,8 @@ pub fn main(init: std.process.Init) !u8 {
             t.failed += try dsv41_mv.head(init.io, o.seed, std.c.getenv("TF_DSV41_TIME") != null);
         }
         t.failed += try dsv41_glue.tables();
+        t.failed += try dsv41_compress.invariance(o.seed);
+        t.failed += try dsv41_compress.equality(o.seed);
         if (std.c.getenv("TF_DSV41_TIME") != null) try dsv41_ix.timing(init.io);
     }
     const t1 = std.Io.Clock.awake.now(init.io);

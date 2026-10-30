@@ -53,6 +53,7 @@ pub const deepseek_v41_xmma = @embedFile("deepseek_v41/experts_mma.metal");
 /// DeepSeek-V4.1 sparse-attention indexer top-512 over fp32 score rows.
 pub const deepseek_v41_topk512 = @embedFile("deepseek_v41/topk512.metal");
 pub const deepseek_v41_glue = @embedFile("deepseek_v41/glue.metal");
+pub const deepseek_v41_compress = @embedFile("deepseek_v41/compress.metal");
 /// DeepSeek-V4.1 router, indexer, compressor and head matvecs: lane chains over K, one butterfly, any row count.
 pub const deepseek_v41_mv = @embedFile("deepseek_v41/mv.metal");
 
@@ -206,6 +207,8 @@ pub const spark25_gemm = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("spa
 pub const core_contract_controls = @embedFile("core/contract_controls.metal");
 /// DeepSeek V4.1's indexer scores: FP4 query and key dots in one stated order, causal and block masks.
 pub const deepseek_v41_index = @embedFile("deepseek_v41/index.metal");
+/// DeepSeek V4.1 Engram: FP8 row dequantisation, F16 wkv, the gate and the residual add.
+pub const deepseek_v41_engram = @embedFile("deepseek_v41/engram.metal");
 
 /// Gemma-only rounded weights and fused lane arithmetic; shared sources retain the released bytes.
 pub const gemma4_affine_mm = @embedFile("gemma4/affine_mm.metal");
