@@ -195,7 +195,6 @@ pub const Core = struct {
     }
 };
 
-
 /// The Q extraction's derived geometry, or null when any view is torn; pure
 /// and host-tested. `dim` = head_dim, `heads_rows` = rows * query_heads,
 /// `in_head_stride` = the interleaved half pitch 2 * head_dim.
