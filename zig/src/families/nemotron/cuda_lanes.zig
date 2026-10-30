@@ -159,6 +159,7 @@ pub const Cuda = struct {
             .copy_drafts = self.copy_drafts,
             .gpu_tokens = false,
             .mtp = drafting,
+            .allocate_shared_drafts = drafting,
             .speculate = drafting,
             .speculate_early = false,
             .draft_prior = &config.draft_prior,
@@ -582,4 +583,18 @@ test "latent Bolt allows copy drafts and shared rounds without an MTP head" {
     try std.testing.expect(f.hidden_rows);
     try std.testing.expect(f.max_streams > 1);
     try std.testing.expect(!f.mtp);
+}
+
+test "zero grant: Nemotron CUDA preserves later drafts through a long shared skip" {
+    var e: Engine = undefined;
+    e.c.latent = 0;
+    var b: Cuda = undefined;
+    b.e = &e;
+    b.head = @ptrFromInt(16);
+    b.copy_drafts = true;
+    b.cost_count = 0;
+    b.mtp_ms = 0;
+    b.mtp_drafts = null;
+    b.mtp_confidence = null;
+    try lanes.shared_draft_check.check(b.facts(), false);
 }

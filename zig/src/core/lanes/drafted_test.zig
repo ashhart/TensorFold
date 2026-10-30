@@ -22,6 +22,7 @@ pub const FakeDrafter = struct {
     facts_: dr.Facts = .{ .depth = 6, .step_ms = 0.5 },
     opens: u32 = 0,
     absorbs: u32 = 0,
+    proposed_absorbs: u32 = 0,
     holds: u32 = 0,
     helds: u32 = 0,
     releases: u32 = 0,
@@ -79,6 +80,7 @@ pub const FakeDrafter = struct {
         x.absorbs += 1;
         if (x.fail == .absorb) return error.Injected;
         for (items) |it| {
+            if (it.propose) x.proposed_absorbs += 1;
             const l = x.lanes.getPtr(it.stream) orelse return error.UnknownStream;
             const f = it.features;
             if (f.space != .host or f.dtype != .u32 or f.row_bytes != 4 or it.follow.len != f.rows or f.ready != .none) return error.Shape;
