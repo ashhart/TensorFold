@@ -78,5 +78,22 @@ pub const VideoOffer = struct {
     max_frames: u32,
 };
 
+/// An audio clip prepared for the engine's encoder (``AudioOffer.prepare``): samples, rows and a content hash.
+pub const PreparedAudio = struct { samples: []f32, tokens: u32, hash: u64 };
+
+/// Audio input an engine serves (``Info.audio``): a clip's bytes to encoder input, and what a request may hold.
+pub const AudioOffer = struct {
+    ctx: *anyopaque,
+    /// The clip's bytes (a WAV file) at most ``max_tokens`` rows; allocated in ``a``.
+    prepare: *const fn (ctx: *anyopaque, a: Allocator, bytes: []const u8, max_tokens: u32) anyerror!PreparedAudio,
+    /// The template's once-a-clip token, expanded to its rows (0 from an engine; the server sets ``locator``'s id).
+    audio_token: u32 = 0,
+    /// The text a user message's content starts with once a clip (vLLM's string form, which the template moves).
+    locator: []const u8,
+    /// Audio rows one request may hold in all, and clips.
+    audio_tokens: u32,
+    max_audios: u32,
+};
+
 /// --vision: image and video input's limits (``Open.vision``); image_tokens_set: the flag given, over a family default.
 pub const VisionOpen = struct { image_tokens: u32 = 4096, image_tokens_set: bool = false, max_images: u32 = 4, video_tokens: u32 = 16384, max_videos: u32 = 2, max_frames: u32 = 256 };

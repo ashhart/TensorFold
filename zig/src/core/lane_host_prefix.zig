@@ -61,7 +61,7 @@ pub fn waits(h: *LaneHost, job: *Job) bool {
 
 /// A request whose states the cache keys by its tokens alone, as the host's lookup does (no pictures).
 fn keyed(r: *const api.Request) bool {
-    return r.embedding == null and r.prompt_logprobs == null and !r.untaught and r.images.len == 0 and r.cacheKey().len > 0;
+    return r.embedding == null and r.prompt_logprobs == null and !r.untaught and r.images.len == 0 and r.audios.len == 0 and r.cacheKey().len > 0;
 }
 
 /// Waiting requests go on in queue order: their fill stood at the cut, left the fills, or the bound passed (lock held).

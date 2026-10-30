@@ -204,12 +204,13 @@ const Planner = struct {
     /// A conv1d weight [o, c, 3] as a GEMM's [o, 3 c]: tap j of channel c at column j c + c.
     fn taps(p: *Planner, name: []const u8, o: usize, c: usize) !u64 {
         const src = std.mem.bytesAsSlice(u16, (try p.get(name, &.{ o, c, 3 })).bytes);
-        const out = try p.gpa.alloc(u16, o * 3 * c);
-        errdefer p.gpa.free(out);
+        const bytes = try p.gpa.alloc(u8, o * 3 * c * 2); // bytes, as the pieces are freed
+        errdefer p.gpa.free(bytes);
+        const out = std.mem.bytesAsSlice(u16, bytes);
         for (0..o) |r| for (0..c) |ch| for (0..3) |j| {
             out[r * 3 * c + j * c + ch] = src[(r * c + ch) * 3 + j];
         };
-        return p.place(std.mem.sliceAsBytes(out), true);
+        return p.place(bytes, true);
     }
 
     fn stack(p: *Planner, s: *Stack, pre: []const u8, c: Config.Encoder, qk_norm: bool) !void {
