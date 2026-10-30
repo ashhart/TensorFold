@@ -202,8 +202,12 @@ pub const Head = struct {
         defer gpa.free(ids);
         const head_load = @import("cuda_mtp_load.zig");
         const role = try head_load.mode();
-        const dtype = (try store.tensor("language_model.lm_head.weight")).dtype;
-        h.artifact = try proposal.legacy.artifact(gpa, ids, .{ .vocab = vocab, .hidden = dims, .format = if (dtype == .bf16) "bf16" else "affine4", .group = if (dtype == .bf16) 0 else 32, .scale_recipe = if (dtype == .bf16) @tagName(role) else "stored affine4 group32" });
+        // an EXL3 pack has no dense lm_head tensor: its draft rows follow the requested head role
+        const bf16 = if (store.tensor("language_model.lm_head.weight")) |tensor| tensor.dtype == .bf16 else |err| switch (err) {
+            error.MissingTensor => role == .bf16,
+            else => return err,
+        };
+        h.artifact = try proposal.legacy.artifact(gpa, ids, .{ .vocab = vocab, .hidden = dims, .format = if (bf16) "bf16" else "affine4", .group = if (bf16) 0 else 32, .scale_recipe = if (bf16) @tagName(role) else "stored affine4 group32" });
         errdefer h.artifact.deinit();
         h.ids = h.artifact.ids();
         h.service = try lanes.proposal_head.Service.legacy(gpa, &h.artifact);

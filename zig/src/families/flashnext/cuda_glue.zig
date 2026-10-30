@@ -27,7 +27,25 @@ fn cdiv(a: usize, b: usize) usize {
 }
 
 /// flashnext_attn.cu's Pg, each cache launch's `pg`: its table, elements and positions a page (pt 0: contiguous).
-pub const Pg = extern struct { pt: u64 = 0, ps: i64 = 0, ptok: c_int = 0 };
+pub const PgMain = extern struct { pt: u64 = 0, ps: i64 = 0, ptok: c_int = 0 };
+
+/// A launch's pages: `PgMain` and (ips, ipt) for indexer keys in their own plane (PgP); one-plane kernels: `PgMain`.
+pub const Pg = extern struct {
+    pt: u64 = 0,
+    ps: i64 = 0,
+    ptok: c_int = 0,
+    ips: i64 = 0,
+    ipt: u64 = 0,
+
+    pub fn main(pg: Pg) PgMain {
+        return .{ .pt = pg.pt, .ps = pg.ps, .ptok = pg.ptok };
+    }
+
+    /// Whether the indexer keys have their own plane: the five kernels that touch them take the whole struct.
+    pub fn planes(pg: Pg) bool {
+        return pg.ips != 0;
+    }
+};
 
 /// The native kernels, by their extern "C" names.
 const Fns = struct {
@@ -63,6 +81,11 @@ const Fns = struct {
     merge: cuda.Function,
     /// The cache entries through a page table (TF_FLASHNEXT_KV_PAGES).
     prep_paged: cuda.Function,
+    prep_planes: cuda.Function,
+    prep_media_planes: cuda.Function,
+    pool_planes: cuda.Function,
+    pool_media_planes: cuda.Function,
+    scores_planes: cuda.Function,
     prep_media_paged: cuda.Function,
     pool_paged: cuda.Function,
     pool_media_paged: cuda.Function,
@@ -149,6 +172,11 @@ pub const Glue = struct {
             .fused = try g.attn.function("fn_attn_fused"),
             .merge = try g.attn.function("fn_attn_merge"),
             .prep_paged = try g.attn.function("fn_attn_prep_paged"),
+            .prep_planes = try g.attn.function("fn_attn_prep_planes"),
+            .prep_media_planes = try g.attn.function("fn_attn_prep_media_planes"),
+            .pool_planes = try g.attn.function("fn_qsa_pool_planes"),
+            .pool_media_planes = try g.attn.function("fn_qsa_pool_media_planes"),
+            .scores_planes = try g.attn.function("fn_qsa_scores_planes"),
             .prep_media_paged = try g.attn.function("fn_attn_prep_media_paged"),
             .pool_paged = try g.attn.function("fn_qsa_pool_paged"),
             .pool_media_paged = try g.attn.function("fn_qsa_pool_media_paged"),
@@ -226,8 +254,8 @@ pub const Glue = struct {
         ptrs(&a, &.{ proj, pos, q_scale, k_scale, i_scale, inv, q, kc, vc, iq, ikc });
         a.add(eps);
         ints(&a, &.{ wt.proj_n, wt.q_heads, wt.kv_heads, wt.index_heads, wt.index_dim, wt.half });
-        if (pg.pt != 0) a.add(pg);
-        const f = if (pg.pt != 0) g.f.prep_paged else g.f.prep;
+        if (pg.pt != 0) if (pg.planes()) a.add(pg) else a.add(pg.main());
+        const f = if (pg.pt != 0) (if (pg.planes()) g.f.prep_planes else g.f.prep_paged) else g.f.prep;
         try go(f, s, .{ rows, wt.q_heads + wt.kv_heads + wt.index_heads + 1, 1 }, tile_head_dim, 0, &a);
     }
 
@@ -240,7 +268,7 @@ pub const Glue = struct {
         ints(&a, &.{ wt.q_heads, kv, group, 512, if (qsa) wt.nch else wt.dense_nch });
         a.add(@as(f32, 0.0625));
         ints(&a, &.{ wt.index_idw, @intFromBool(qsa) });
-        if (pg.pt != 0) a.add(pg);
+        if (pg.pt != 0) a.add(pg.main());
         const ahead = rows <= ahead_rows;
         const f = if (ahead) g.f.chunks_ahead else g.f.chunks_one;
         const paged = if (ahead) g.f.chunks_ahead_paged else g.f.chunks_one_paged;
@@ -256,7 +284,7 @@ pub const Glue = struct {
         ints(&a, &.{ wt.q_heads, kv, group, 512 });
         a.add(@as(f32, 0.0625));
         ints(&a, &.{ wt.index_idw, 1 });
-        if (pg.pt != 0) a.add(pg);
+        if (pg.pt != 0) a.add(pg.main());
         try go(if (pg.pt != 0) g.f.fused_paged else g.f.fused, s, .{ rows, kv, 1 }, 128, oneSmem(), &a);
     }
 
@@ -272,8 +300,8 @@ pub const Glue = struct {
         ptrs(&a, &.{ ikc, pooled, pos, k_scale, inv });
         a.add(eps);
         ints(&a, &.{ rows, wt.index_dim, wt.half, wt.index_ratio });
-        if (pg.pt != 0) a.add(pg);
-        const f = if (pg.pt != 0) g.f.pool_paged else g.f.pool;
+        if (pg.pt != 0) if (pg.planes()) a.add(pg) else a.add(pg.main());
+        const f = if (pg.pt != 0) (if (pg.planes()) g.f.pool_planes else g.f.pool_paged) else g.f.pool;
         try go(f, s, .{ rows / wt.index_ratio + 2, 1, 1 }, wt.index_dim, 0, &a);
     }
 
@@ -284,8 +312,8 @@ pub const Glue = struct {
         if (wt.index_heads == 4) {
             // 8 rows and 256 blocks a CTA, every head, fn_qsa_scores' sums in its order (its bits)
             ints(&a, &.{ nb, wt.index_ratio, wt.index_top, rows });
-            if (pg.pt != 0) a.add(pg);
-            const f = if (pg.pt != 0) g.f.scores_paged else g.f.scores_tile;
+            if (pg.pt != 0) if (pg.planes()) a.add(pg) else a.add(pg.main());
+            const f = if (pg.pt != 0) (if (pg.planes()) g.f.scores_planes else g.f.scores_paged) else g.f.scores_tile;
             return go(f, s, .{ cdiv(rows, 8), cdiv(blocks, 256), 1 }, 256, 0, &a);
         }
         if (pg.pt != 0) return error.RowShape; // pages hold the tiles' four indexer heads only
@@ -452,9 +480,12 @@ test "the attention tiles hold the model's heads" {
 }
 
 test "Pg lays out as flashnext_attn.cu's: the table, elements a page at 8, positions a page at 16, 24 bytes" {
-    try std.testing.expectEqual(@as(usize, 24), @sizeOf(Pg));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PgMain));
+    try std.testing.expectEqual(@as(usize, 40), @sizeOf(Pg));
     try std.testing.expectEqual(@as(usize, 8), @offsetOf(Pg, "ps"));
     try std.testing.expectEqual(@as(usize, 16), @offsetOf(Pg, "ptok"));
+    try std.testing.expectEqual(@as(usize, 24), @offsetOf(Pg, "ips"));
+    try std.testing.expectEqual(@as(usize, 32), @offsetOf(Pg, "ipt"));
 }
 
 test {

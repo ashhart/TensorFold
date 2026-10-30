@@ -3,9 +3,11 @@ const std = @import("std");
 const weights = @import("cuda_prompt_wt.zig");
 const mtp = @import("cuda_mtp.zig");
 const config = @import("cuda_config.zig");
+const exl3_memory = @import("exl3/pack/cuda_exl3_memory.zig");
 
 /// Device bytes of the checkpoint: the n-gram tables stay mapped, the MTP head counts; 0 if unread.
 pub fn deviceWeightBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) u64 {
+    if (exl3_memory.isExl3(gpa, io, dir)) return exl3_memory.weightBytes(gpa, io, dir);
     const main = weights.deviceBytes(gpa, io, dir) catch return 0;
     return main + mtp.headBytes();
 }
@@ -13,6 +15,7 @@ pub fn deviceWeightBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) u6
 pub fn placementWeightBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, world: usize, rank: usize, drafts: bool) !u64 {
     if ((world != 1 and world != 2) or rank >= world) return error.BadRank;
     const mode = try config.mode(gpa, io, dir);
+    if (mode == .exl3) return exl3_memory.placement(gpa, io, dir, world, rank, drafts);
     if (mode == .modelopt) {
         const main = try @import("cuda_rank_memory.zig").estimate(gpa, io, dir, world, rank);
         // Dense draft projections and vocabulary rows exceed the affine head's estimate.

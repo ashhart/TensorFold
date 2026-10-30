@@ -7,6 +7,7 @@ const gdn = @import("cuda_gdn.zig");
 const wt = @import("cuda_prompt_wt.zig");
 const mixed = @import("cuda_mixed_experts.zig");
 const projections = @import("cuda_projection_load.zig");
+const exl3_load = @import("exl3/pack/cuda_exl3_load.zig");
 
 const layers_n = wt.layers_n;
 const dims = wt.dims;
@@ -80,9 +81,12 @@ pub const Layer = struct {
     experts_up: cuda.DeviceBuffer,
     experts_down: cuda.DeviceBuffer,
     native_experts: ?mixed.Owned = null,
+    /// EXL3 routed experts with the shared one as id 512 (cuda_exl3_load.zig).
+    exl3: ?*exl3_load.Experts = null,
 
     pub fn free(self: *Layer, gpa: std.mem.Allocator) void {
         _ = gpa;
+        if (self.exl3) |x| x.destroy();
         self.attn_hc.free();
         self.mlp_hc.free();
         self.proj.free();
@@ -343,7 +347,7 @@ fn loadLayerAtRank(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.S
         proj_q = try projections.loadStitched(gpa, driver, store, lp, &parts, gdn.proj_width, dims);
         out_q = try projections.load(gpa, driver, store, try std.fmt.bufPrint(&buf, "{s}.out_proj", .{lp}), dims, gdn.value_dim);
         const conv = try store.tensor(try std.fmt.bufPrint(&buf, "{s}.conv1d.weight", .{lp}));
-        if (conv.bytes.len != gdn.conv_dim * gdn.taps * 2) return error.UnexpectedTensor;
+        if (conv.dtype != .bf16 or conv.bytes.len != gdn.conv_dim * gdn.taps * 2) return error.UnexpectedTensor;
         cw_b = try cuda.DeviceBuffer.fromHost(driver, conv.bytes);
         const a_log = try asF32(gpa, try store.tensor(try std.fmt.bufPrint(&buf, "{s}.A_log", .{lp})));
         defer gpa.free(a_log);
@@ -384,6 +388,7 @@ fn loadLayerAtRank(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.S
         const pp = pre_buf[0..pre.len];
         key_q = try projections.load(gpa, driver, store, try std.fmt.bufPrint(&buf, "{s}.key_proj", .{pp}), wide, dims);
         val_q = try projections.load(gpa, driver, store, try std.fmt.bufPrint(&buf, "{s}.value_proj", .{pp}), dims, dims);
+        try exl3_load.pleRows(gpa, driver, store, &key_q, &val_q);
         const nk = try store.normScale(gpa, try store.tensor(try std.fmt.bufPrint(&buf, "{s}.norm_key.weight", .{pp})));
         defer gpa.free(nk);
         const nq = try store.normScale(gpa, try store.tensor(try std.fmt.bufPrint(&buf, "{s}.norm_query.weight", .{pp})));
@@ -395,7 +400,7 @@ fn loadLayerAtRank(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.S
         nq_b = try cuda.DeviceBuffer.fromHost(driver, std.mem.sliceAsBytes(nq));
         nc_b = try cuda.DeviceBuffer.fromHost(driver, std.mem.sliceAsBytes(nc));
         const conv = try store.tensor(try std.fmt.bufPrint(&buf, "{s}.conv1d.weight", .{pp}));
-        if (conv.bytes.len != wide * 4 * 2) return error.UnexpectedTensor;
+        if (conv.dtype != .bf16 or conv.bytes.len != wide * 4 * 2) return error.UnexpectedTensor;
         pcw_b = try cuda.DeviceBuffer.fromHost(driver, conv.bytes);
     }
 
@@ -405,7 +410,11 @@ fn loadLayerAtRank(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.S
     errdefer experts_up.free();
     var experts_down = deadBuf(driver);
     errdefer experts_down.free();
-    if (store.has(try std.fmt.bufPrint(&buf, "{s}.experts.0.gate_proj.weight", .{mlp_root}))) {
+    var exl3_experts: ?*exl3_load.Experts = null;
+    errdefer if (exl3_experts) |x| x.destroy();
+    if (exl3_load.hasExperts(store, mlp_root)) {
+        exl3_experts = try exl3_load.experts(gpa, driver, store, mlp_root, world, rank);
+    } else if (store.has(try std.fmt.bufPrint(&buf, "{s}.experts.0.gate_proj.weight", .{mlp_root}))) {
         native_experts = try mixed.load(gpa, driver, store, mlp_root, world, rank);
     } else {
         if (world != 1 or rank != 0) return error.UnsupportedQuantization;
@@ -468,5 +477,6 @@ fn loadLayerAtRank(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.S
         .experts_up = experts_up,
         .experts_down = experts_down,
         .native_experts = native_experts,
+        .exl3 = exl3_experts,
     };
 }

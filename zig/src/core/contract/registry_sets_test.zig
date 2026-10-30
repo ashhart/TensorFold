@@ -39,7 +39,8 @@ test "a compiler's records: its own set, else the newest below it, else 13.0's" 
         .{ .{ .major = 13, .minor = 1 }, .{ .major = 13, .minor = 0 }, 91, 45 },
         .{ .{ .major = 13, .minor = 2 }, .{ .major = 13, .minor = 2 }, 91, 43 },
         .{ .{ .major = 13, .minor = 3 }, .{ .major = 13, .minor = 3 }, 96, 43 },
-        .{ .{ .major = 14, .minor = 0 }, .{ .major = 13, .minor = 3 }, 96, 43 },
+        .{ .{ .major = 13, .minor = 4 }, .{ .major = 13, .minor = 4 }, 96, 43 },
+        .{ .{ .major = 14, .minor = 0 }, .{ .major = 13, .minor = 4 }, 96, 43 },
     };
     for (cases) |c| {
         try std.testing.expectEqual(c[1], setFor(c[0]));
