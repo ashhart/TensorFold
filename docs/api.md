@@ -227,7 +227,9 @@ On CUDA, stop strings are checked after every token on the generated text, reaso
 completes the match. The GLM engine, and Flash Next and Nemotron on two ranks, decode on after a match to an end
 token or the reply limit; the server returns the reply only up to the match. Where a CUDA engine honors
 `ignore_eos`, end tokens inside the reply are decoded into its text, as on MLX, and `finish_reason` is `length`
-unless a stop string or a tool call ended the reply.
+unless a stop string, a tool call or a grammar ended the reply. A grammar's stop token is an end token, and with
+`ignore_eos` it still ends the reply with `finish_reason` `stop` and stays out of the text. End tokens in the
+reasoning, before the grammar starts, stay in it.
 
 On MLX, `--parallel auto` is the default: requests share rounds within the configured concurrency and memory
 budget. Every admitted prompt prefills a chunk at a time beside the others. Each chunk goes to a foreground prompt
@@ -355,6 +357,8 @@ The server does not silently turn a required call into `auto`. Installing the gr
 backend mask hook. A missing library or grammar compilation error is also refused before generation with its reason.
 
 The native GLM CUDA backend also supports token grammars, gathering vocabulary rows before rank 0 masks and draws.
+DeepSeek-V4.1 on CUDA (`dsv41-cuda`, a source build) supports them too: rank 0 sends each pick's grammar rows to the
+other ranks, and every rank masks its own vocabulary columns before the pick.
 
 `grammar_budget: true` (native server, off by default) keeps a constrained reply completable within its token limit, so
 a required tool call or a JSON value cut by `max_tokens` still parses. Before each draw, a token is masked when no
