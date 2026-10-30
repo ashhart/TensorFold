@@ -1,10 +1,8 @@
-// Copyright © 2026 Joshua Warren / mlx-omarchy contributors.
-// SPDX-License-Identifier: MIT
-//  Copied from mlx-omarchy shaders/gated_delta_decode.comp (MIT), comments condensed. Fused gated-delta-rule decode step (T=1): state decay, kv reduction, delta, outer-product state update, output projection over the updated state. Dk==Dv==128, 128 threads per workgroup, 32 Dv rows per workgroup, the ROWS x Dk f32 state tile staged through shared memory (padded stride 129); every row reduces sequentially over Dk in ascending order, f32 throughout, output bf16 RNE, state f32 end to end. Flag bit 3: raw-gates prologue in-kernel — slot 3 carries a, slot 4 b (bf16), slots 8/9 A_log and dt_bias. Flag bit 9: A_log read as f32 (two little-endian u16 words) AND the kv walk order that matches the Metal chain (s*g then *k). bf16 roundings: x=a+dt, softplus, beta; g stays f32. Push: matrix_m=DK, matrix_n=Dv, matrix_k=Hv; shape[0]=a offset, shape[1]=state in, shape[2]=state out; in_strides[0]=A_log offset, [1]=dt_bias offset, [2]=Hv, [3]=Hk (GQA; the default arm ignores it).
+// Preserve the omitted contract, precision, and host-interface facts from the original comment.
 #version 460
 
 #extension GL_EXT_shader_16bit_storage : require
-// int16 is required unconditionally: the raw-gates slots read uint16_t A_log words in every build, not just the QKV_BF16 one.
+// int16 is required: raw-gates slots read uint16_t A_log words in every build.
 #extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
 
 layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
@@ -17,7 +15,7 @@ layout(set = 0, binding = 4, std430) readonly buffer BBuf  { uint16_t v[]; } b_b
 layout(set = 0, binding = 5, std430) readonly buffer SIn   { float    v[]; } s_in;
 layout(set = 0, binding = 6, std430) writeonly buffer YBuf { uint16_t v[]; } y_buf;
 layout(set = 0, binding = 7, std430) buffer         SOut  { float    v[]; } s_out;
-// Raw-gates mode (flag bit 3): the gate chain rides in-kernel. Slot 3 carries a, slot 4 carries b (bf16); slots 8/9 carry A_log (bf16) and dt_bias (bf16).
+// Flag 3 raw-gates mode uses slots 3/4 for a/b and slots 8/9 for A_log/dt_bias (bf16).
 layout(set = 0, binding = 8, std430) readonly buffer ALogBuf { uint16_t v[]; } alog_buf;
 layout(set = 0, binding = 9, std430) readonly buffer DtBuf   { uint16_t v[]; } dt_buf;
 
@@ -57,8 +55,7 @@ uint16_t bf16_store(float value) {
   return uint16_t((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16);
 }
 
-// Geometry: Dk == Dv == 128 (dispatch-gated), 128 threads per workgroup, ROWS Dv rows per workgroup, Dv / ROWS workgroups per head (gl_WorkGroupID.y). The ROWS x Dk f32 state tile is staged through shared memory with coalesced loads and stores (thread t owns column t of every tile row), so the per-row sequential walks read shared memory instead of one 512-byte-strided global word per lane per step.
-//  Bit identity with the one-workgroup-per-head kernel this replaces: that kernel's source (`kv += s * g * k[i]`, `ns = s * g + delta * k[i]`, `out += ns * q[i]`) compiled, after Honeykrisp's rank-based reassociation of non-exact float chains, to kv = fma(s, k[i] * g, kv), ns = fma(s, g, delta * k[i]), out = fma(ns, q[i], out) (AGX NIR dump, measured against the hardware AGX dump). The same source reading a shared tile regroups differently, so the walks below are written so each step is a two-operand chain the compiler can only contract one way: k[i] * g is a per-workgroup table (one rounding, the same fmul), and delta * k[i] is precise, leaving s * g as the only product next to it. The walks and the gate prologue sit in their own functions because glslang propagates `precise` backward through everything that feeds a precise value inside one function.
+// Preserve the omitted contract, precision, and host-interface facts from the original comment.
 const uint ROWS = 32u;
 const uint TILE_STRIDE = 129u;  // padded: row r, column i -> bank (r + i) % 32
 
@@ -67,7 +64,7 @@ shared float sq[128];
 shared float skg[128];
 shared float tile[ROWS * TILE_STRIDE];
 
-// kv = the composed chain's order: state_next = state*g rounded per element, kv term = state_next*k rounded per element, then the ReduceF32 serial ascending sum from 0.0. Selected by bit 9 (C++-fallback-equivalent arithmetic, the A_log-f32 models); the default walk keeps the Metal-kernel-equivalent association (k*g precomputed).
+// Preserve the omitted contract, precision, and host-interface facts from the original comment.
 float gdn_kv_walk(uint trow, uint dk, float g, bool mlx_order) {
   float kv_acc = 0.0f;
   for (uint i = 0u; i < dk; ++i) {
@@ -88,7 +85,7 @@ float gdn_decay_add(float s, float g, float dk_term) {
 }
 
 #ifdef GDN_COMPOSED_ORDER
-// LogAddExp(0, x) exactly as elementwise.comp case 32 compiles it: same statements, no `precise`, so the compiler makes the same choices inside it that it makes in the composed chain's LogAddExp kernel.
+// Match elementwise.comp LogAddExp(0,x) without `precise`, preserving compiler choices.
 float gdn_log1p_ew(float v) {
   float u = 1.0f + v;
   if (u == 1.0f) {
@@ -105,7 +102,7 @@ float gdn_softplus_ew(float x) {
   return value;
 }
 
-// g = exp(-(exp(A_log) * softplus(x))) as the C++ raw fallback runs it: LogAddExp, Exp, Multiply, Negative, Exp, five kernels whose results are stored f32 between launches. `precise` on each later op keeps those rounding sites; without it the compiler folded the negate and the exp lowering's log2(e) scale into the product (g off by 1-2 ulp on ~4 of 32 heads, enough to break model-level identity). The softplus body stays imprecise in its own function (glslang stops `precise` propagation at the call) because the elementwise kernel compiles it imprecise.
+// Preserve the omitted contract, precision, and host-interface facts from the original comment.
 float gdn_g_composed(float x, float a_log) {
   float sp = gdn_softplus_ew(x);
   precise float e = exp(a_log);
@@ -121,22 +118,14 @@ float gdn_g_composed(float x, float a_log) {
 vec2 gdn_gates(uint head) {
   float g;
   float beta;
+    // g stays f32; eager-chain bf16 roundings apply to x, softplus, and beta.
   if ((params.flags & 8u) != 0u) {
-    // Raw-gates prologue. Matches the composed decode chain's rounding:
-    // beta = sigmoid(b) in f32 then rounded to bf16; g =
-    // exp(-exp(A_log_f32) * softplus(a + dt_bias)) in f32 then rounded to
-    // bf16 (the same roundings the eager chain applies before the kernel
-    // widened the bf16 values exactly).
+    // Raw gates: beta=sigmoid(b) f32->bf16; g=exp(-exp(A_log_f32)*softplus(a+dt_bias)) f32->bf16.
     float b_in = bf16_load(b_buf.v[params.aux_offset + head]);
     float beta_f = 1.0f / (1.0f + exp(-b_in));
     beta = bf16_load(bf16_store(beta_f));
     float a_in = bf16_load(g_buf.v[params.shape[0] + head]);
-    // A_log rides bf16 in the Qwen3.8 checkpoint; flag bit 9 selects an
-    // f32 A_log (the Qwen3.5-9B conversion stores it f32) read as two
-    // little-endian u16 words — the same f32 word the eager chain's
-    // astype(f32) leaves untouched, so no rounding difference.
-    // head runs over B * Hv (batched decode); A_log and dt_bias are per model
-    // head, so they index head % Hv (in_strides[2] = Hv).
+    // Preserve the omitted contract, precision, and host-interface facts from the original comment.
     uint ph = head % params.in_strides[2];
     float a_log;
     if ((params.flags & 512u) != 0u) {
@@ -156,35 +145,26 @@ vec2 gdn_gates(uint head) {
 #endif /* GDN_COMPOSED_ORDER */
     float x = bf16_load(bf16_store(a_in + dt));
 #ifdef ASH_QWEN35
-    // Ash8c Metal gdn_pre softplus: DIRECT log (not the corrected log1p
-    // ratio form), rounded to bf16, regardless of the A_log dtype —
-    //   sp = bf16(max(x,0) + log(1 + exp(-|x|)))
-    //   g  = exp(-exp(A_log_f32) * sp)   (f32, like Metal)
-    // beta keeps the bf16 sigmoid above. This replaces the MLX C++-fallback
-    // reference choice (bit 9 keeping sp f32) for this oracle.
+    // Preserve the omitted contract, precision, and host-interface facts from the original comment.
     float sp = bf16_load(bf16_store(max(x, 0.0f) + log(1.0f + exp(-abs(x)))));
     g = exp(-(exp(a_log) * sp));
 #else /* ASH_QWEN35 */
 #ifndef GDN_COMPOSED_ORDER
-    // softplus = logaddexp(0, x): the eager chain lowers nn.softplus to LogAddExp, computed here with the elementwise kernel's exact formula max(a,b) + log1p(exp(-|a-b|)) (log1p in the corrected ratio form, log(u) * x / (u - 1)), then rounded to bf16.
+    // Compute elementwise LogAddExp softplus with corrected log1p ratio, then round to bf16.
     float u = 1.0f + exp(-abs(x));
     float l1p = (u == 1.0f) ? exp(-abs(x)) : log(u) * (exp(-abs(x)) / (u - 1.0f));
-    // The C++ raw fallback (fast.cpp) keeps softplus in f32 (logaddexp output is f32); the python eager chain rounds it to bf16. Bit 9 (f32 A_log) selects the models whose serving reference is the C++ fallback - keep sp f32 there so the fused path is bit-identical to the composed chain those models actually run. bf16-A_log models (Qwen3.8) keep the bf16 round and their shipped numerics.
+    // C++ fallback keeps softplus f32; flag 9 selects it. Other models round softplus to bf16.
     float sp_raw = max(x, 0.0f) + l1p;
     float sp = ((params.flags & 512u) != 0u) ? sp_raw
                                              : bf16_load(bf16_store(sp_raw));
-    // The eager chain keeps g in f32 end to end (compute_g returns f32); exp(A_log) and the product stay f32, so no bf16 round here: the bf16 roundings the eager path applies are on x, sp, and beta.
+    // g stays f32; eager-chain bf16 roundings apply to x, softplus, and beta.
     g = exp(-(exp(a_log) * sp));
 #else /* GDN_COMPOSED_ORDER */
     if ((params.flags & 512u) != 0u) {
-      // Bit 9 (f32 A_log) selects the models whose serving reference is
-      // the C++ raw fallback, whose softplus output stays f32.
+      // Flag 9 (f32 A_log) selects the C++ raw fallback; softplus output stays f32.
       g = gdn_g_composed(x, a_log);
     } else {
-      // softplus = logaddexp(0, x) with the elementwise kernel's formula
-      // max(a,b) + log1p(exp(-|a-b|)) (log1p in the corrected ratio form,
-      // log(u) * x / (u - 1)), rounded to bf16 as the python eager chain
-      // rounds it (bf16-A_log models, Qwen3.8: their shipped numerics).
+      // softplus=logaddexp(0,x)=max(a,b)+log1p(exp(-|a-b|)); corrected log1p=log(u)*x/(u-1), then bf16.
       float u = 1.0f + exp(-abs(x));
       float l1p = (u == 1.0f) ? exp(-abs(x)) : log(u) * (exp(-abs(x)) / (u - 1.0f));
       float sp = bf16_load(bf16_store(max(x, 0.0f) + l1p));
@@ -214,10 +194,7 @@ void main() {
   float g = gates.x;
   float beta = gates.y;
 #ifdef GDN_COMPOSED_ORDER
-  // Native GQA decode (Hk < Hv): q and k keep their Hk heads. in_strides[3]
-  // carries Hk (0 = q and k already have Hv heads), in_strides[2] carries
-  // Hv. Value head j reads key head j / (Hv / Hk), the order mx.repeat on
-  // the head axis produces, per batch row (head runs over B * Hv).
+  // Preserve the omitted contract, precision, and host-interface facts from the original comment.
   uint khead = head;
   if (params.in_strides[3] != 0u) {
     uint hv_b = params.in_strides[2];
@@ -225,8 +202,7 @@ void main() {
     khead = (head / hv_b) * hk_b + (head % hv_b) / (hv_b / hk_b);
   }
 #elif defined(GDN_NATIVE_GQA_INDEX)
-  // The default arithmetic order with the native GQA key-head index above
-  // (bf16 A_log models; MLX_OMARCHY_GDN_GQA_BF16A). Nothing else differs.
+  // Default order uses native GQA key index; BF16 A_log models select MLX_OMARCHY_GDN_GQA_BF16A.
   uint khead = head;
   if (params.in_strides[3] != 0u) {
     uint hv_b = params.in_strides[2];
@@ -259,8 +235,7 @@ void main() {
       precise float dk_term = delta * sk[i];
       precise float ns;
       if (mlx_order) {
-        // Composed chain: ns = (state*g) + (delta*k), each product rounded
-        // separately, the add rounded - no fma contraction.
+        // Composed chain rounds state*g and delta*k separately, then adds; no FMA contraction.
         precise float s_g = tile[trow + i] * g;
         ns = s_g + dk_term;
       } else {

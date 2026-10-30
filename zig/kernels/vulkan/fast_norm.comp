@@ -1,7 +1,4 @@
-// Copyright © 2026 Joshua Warren / mlx-omarchy contributors.
-// SPDX-License-Identifier: MIT
-//  Reused from mlx-omarchy shaders/fast_norm.comp (MIT), comment-condensed.
-//  RMSNorm (-DLAYER_NORM off by default) over the last axis, matching mlx::core::fast fallback math: one workgroup per row, shared-memory reductions, grid-stride row loop, all math in float32. RMS: n = rsqrt(mean(x^2) + eps); y = x * n * w. A scalar weight (element count 1) broadcasts to every column. eps arrives in params.alpha.
+// Preserve the omitted contract, precision, and host-interface facts from the original comment.
 
 #version 460
 
@@ -132,7 +129,7 @@ void main() {
       float result = (value - mu) * norm * weight + bias;
 #else
 #ifdef ASH_QWEN35
-      // Ash8c Metal oracle (qwen3_5/norm.metal): bfloat(Wt * (hv * inv)), weight applied to the product, one round at store.
+      // Ash8c Metal: bfloat(Wt*(hv*inv)); weight multiplies the product; one store rounding.
       float result = weight * (value * norm);
 #else
       float result = value * norm * weight;

@@ -1,4 +1,4 @@
-// tf-contract-pointwise: the pointwise shader contract on a real Vulkan GPU — the six closures of stages 2-4 through their production pipeline shapes: RMSNorm, residual add and SwiGLU through NormMlp; the f32-preserving residual add, the attention output gate and the gated RMSNorm through the same dispatch model their wrappers use (identical binding counts, push-block sizes and group math; the wrappers own the plans via attention.gatePlan and gdn.gatedNormPlan). Exit 0 pass, 1 fail, 2 usage, 124 fence timeout. Acceptance per gate is stated in the fixtures; no model, no performance claim, no cross-backend bitexact claim.
+// Vulkan pointwise contract tests six stage 2-4 operators; exit codes: 0 pass, 1 fail, 2 usage, 124 timeout.
 const std = @import("std");
 const fx = @import("contract_pointwise.zig");
 const fx2 = @import("stage2_fixture.zig");
@@ -101,7 +101,7 @@ fn probe(a: std.mem.Allocator, clock: Elapsed, vendor: ?u32, timeout: u64) !bool
     defer cmds.deinit();
     var staging = try vk.Buffer.init(&dev, .staging, 64 << 10);
     defer staging.deinit();
-    // Stage 2's three through the production operator; the preserve add over the same pipeline's DenormPreserve image (binary_vec.comp + -DPRESERVE_F32, bf16 in and out), the gate and gated norm in the same dispatch shapes their wrappers use.
+    // Stage 2 tests production RMSNorm, residual add, SwiGLU, preserve-add, output gate and gated norm pipelines.
     var m = try vk.norm_mlp.NormMlp.init(&dev, .{
         .norm_bf16 = &shaders2.norm_bf16,
         .add_bf16 = &shaders2.add_bf16,
@@ -144,12 +144,12 @@ fn probe(a: std.mem.Allocator, clock: Elapsed, vendor: ?u32, timeout: u64) !bool
         total += 1;
         passed += @intFromBool(guardedGate("gated-norm", case.name, gatedNormGate, .{ a, clock, &dev, &cmds, staging, &gated, case, timeout }));
     }
-    // The RESULT line always prints: a gate that raises (a refused shape, a plan error) is that case's FAIL, never the run's death.
+    // Each refused shape or plan error counts as that case's failure, not process termination.
     std.debug.print("RESULT contract-pointwise elapsed_ms={d} on \"{s}\": passed={d} known={d} total={d}\n", .{ clock.ms(), name, passed, known_findings, total });
     return passed + known_findings == total;
 }
 
-// One case of one gate: an error the gate raises (a refused shape, a bad plan, a rejected binding) prints that case's FAIL and the run continues to the RESULT line.
+// A gate error prints that case's failure and continues to the final result line.
 fn guardedGate(gate: []const u8, case_name: []const u8, comptime f: anytype, args: anytype) bool {
     return @call(.auto, f, args) catch |e| blk: {
         std.debug.print("FAIL {s} case=\"{s}\": {s}\n", .{ gate, case_name, @errorName(e) });
@@ -179,7 +179,7 @@ fn checkUnchanged(a: std.mem.Allocator, cmds: *vk.Commands, staging: vk.Buffer, 
     return std.mem.indexOfDiff(u8, bytes, back) == null;
 }
 
-// One bf16 binding's shell uploaded at its fixture offsets; the view is derived against the caller-resident Bound16 (a stored View would point at boundShell's dead stack frame).
+// Bind the shell through caller-owned Bound16; storing its view would reference boundShell's dead stack frame.
 const Bound16 = struct {
     buf: vk.Buffer,
     byte_offset: u64,
@@ -201,11 +201,11 @@ fn reportFail(comptime what: []const u8, name: []const u8, e: anyerror) bool {
     return false;
 }
 
-// Stage 2's three: identical to the stage 2 probe's gates (same fixtures, same production operator), so the pointwise contract stands alone on a fresh device.
+// Stage 2 gates share fixtures and production operators with its probe, so this contract runs independently.
 fn addGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, m: *vk.norm_mlp.NormMlp, case: fx2.AddCase, timeout: u64) !bool {
     var f = try fx2.Add.init(a, case, 0x59a9);
     defer f.deinit();
-    // The stage 2 add's measured-property policy: the subnormal classes rows may read as signed zero only where the device reports no f32 denormal preservation. The device line above prints the property, so a strict refusal on a preserving device is a decidable honest finding.
+    // Only devices lacking f32 denormal preservation may flush subnormal classes; report the property and finding.
     f.allow_subnormal_flush = dev.v12.shaderDenormPreserveFloat32 == 0;
     var in_a = try boundShell(a, dev, cmds, staging, f.a_bits, case.at.a, case.elems, timeout);
     defer in_a.buf.deinit();
@@ -346,7 +346,7 @@ fn rmsGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *v
     return true;
 }
 
-// The preserved residual add: the same stage 2 add pipeline (f32 add, one RNE bf16 store) over the DenormPreserve-requesting image, checked STRICTLY — no measured-property qualification. A device that flushes fp32 denormals fails the classes rows HONESTLY (the NOTE prints the finding); the fixture's reference is never fitted to the flush.
+// Preserve-add is strict: denormal-flushing devices fail classes rows; the reference never adapts to the flush.
 fn preserveGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, p: *vk.dispatch.Pipeline, case: fx.PreserveCase, timeout: u64) !bool {
     const f = try fx.PreserveAdd.init(a, case, 0x59ac);
     defer f.deinit();
@@ -375,7 +375,7 @@ fn preserveGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmd
     }
     const mm = f.firstMismatch(bits) catch |e| return reportFail("preserve-add", case.name, e);
     if (mm) |bad| {
-        // A classes mismatch on a device that reports no f32 denormal preservation may be the known finding: every mismatch a subnormal sum read as the same-signed zero. That prints ONLY its KNOWN line (the reasoning folded into it); anything else — a device that claims preservation and flushes, a non-flush mismatch — keeps the FAIL, plus the NOTE when the want is a subnormal.
+        // Same-sign subnormal-to-zero mismatches may be known on non-preserving devices; all others fail.
         if (case.fill == .classes and dev.v12.shaderDenormPreserveFloat32 == 0) {
             var flushes: usize = 0;
             var cur: ?@TypeOf(bad) = bad;
@@ -472,7 +472,7 @@ fn outputGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds:
     return true;
 }
 
-// The gated RMSNorm: the production per-head geometry (gdn.gatedNorm's own dispatch: tokens x 16 one-workgroup head rows of 128, the [128] gain shared by every head), rows-family bound re-derived for the 128-wide reduction plus the stated mid budget.
+// Gated RMSNorm uses 16 heads of width 128 and a shared 128-value gain; bound covers reduction and mid budget.
 fn gatedNormGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, g: *vk.dispatch.Pipeline, case: fx.GatedCase, timeout: u64) !bool {
     const f = try fx.GatedNorm.init(a, case, 0x59ae);
     defer f.deinit();
@@ -493,7 +493,7 @@ fn gatedNormGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cm
     for (0..repeats) |rep| {
         try vk.orExit(vk.upload(cmds, out.buf, 0, staging, std.mem.sliceAsBytes(f.out), timeout));
         try vk.orExit(g.bind(&.{ (try x.view()).bind(), (try weight.view()).bind(), (try z.view()).bind(), (try out.view()).bind() }));
-        // The wrapper's own plan: out/y/z are tokens*2048 elements, the weight the [128] head row, rows = the TOKEN count, plan.rows = tokens*16 head rows.
+        // The wrapper plan uses token rows and 16 heads per token; weights contain one 128-value head row.
         const plan = try vk.gdn.gatedNormPlan(elems, elems, elems, fx.gated_head_dim, case.tokens, fx.gated_eps);
         var push: vk.params.Params = .{
             .operation = 0, // gated mode

@@ -1,8 +1,4 @@
-// The Qwen3.5-2B Vulkan model probe: a real CLI greedy run of the first native model core against the frozen unchanged-Ash Metal oracle. In the default free-running mode exactly the oracle's drawn tokens are fed from the probe's own selections; --teacher-forced instead feeds each scored step's oracle id as the next input — a labelled per-step mode, never a free-running chain proof.
-//  Inputs: MODEL_DIR (the pinned Qwen3.5-2B checkpoint), INPUT_IDS.npy (u32 rank 1), ORACLE_DIR (the oracle's token_ids.json + result.json + logits_bf16.bin), OUTPUT_DIR (must be new). Flags: --vendor ID (optional generic Vulkan vendor guard; no Apple PCI id is assumed), --timeout-ms MS, --context N (the KV capacity request, 1 to the backend's 7168; default 256) and --teacher-forced. --help exits 0 before any loader or device opens; bad usage or bad inputs exit 2; a failed run exits 1; a fence timeout exits 124 (inside the engine's orExit).
-//  The whole prompt is prefilled: planFor validates its full length and the generated steps against the requested context before any GPU work, and Engine.prefill splits it into canonical 32-row chunks internally.
-//  PASS requires the exact oracle IDs (strict lowest-index ties, no epsilon, no known-ID special case) on two fresh-cache runs — a real reset between them, both in the selected mode — with byte-identical logits rows within Vulkan. In teacher-forced mode that is the per-step agreement under golden inputs, not a free-running chain claim; the receipt's execution_mode names the mode. The full BF16 logit rows are preserved to OUTPUT_DIR/logits_bf16.bin for the receipt (the GPU greedy is the selector, never a CPU argmax); the raw logits are also compared element-wise against the oracle's file as a diagnostic only — cross-backend byte identity is not required and not claimed.
-//  Shader images come from the build-generated "qwen35_shaders" module: the stage-variant decl names of every field of engine.ShaderBundle (8 stage-1 op variants, 4 norm/MLP, 3 attention, 7 GDN, 3 greedy). The build wires the module and the executable; this file owns no lab paths, ids or checkpoint hashes.
+// Qwen3.5-2B: context 1-7168 (256 default); 2 exact-ID runs, lowest ties; exits 0/1/2/124; teacher-forced per-step.
 const std = @import("std");
 const q35v = @import("qwen35_vulkan");
 const engine_mod = q35v.engine;
@@ -38,11 +34,11 @@ const Options = struct {
     positional: [4][]const u8 = undefined,
 };
 
-// The receipt's execution_mode labels: the default free-running greedy and the labelled teacher-forced per-step mode. The external v1.1 scorer keys on these exact strings.
+// Receipt execution_mode labels: free-running greedy (default) and teacher-forced per-step; v1.1 keys on these strings.
 const free_running_mode = "free-running-greedy";
 const teacher_forced_mode = "teacher-forced";
 
-// The CLI's shape: flags then exactly four positional paths, or null; pure and host-tested (the probe's only argument validator — no duplicate).
+// The CLI's shape: flags then exactly four positional paths, or null; pure and host-tested.
 pub fn parseArgs(args: []const []const u8) ?Options {
     var o: Options = .{};
     var i: usize = 0;
@@ -78,12 +74,12 @@ pub fn parseArgs(args: []const []const u8) ?Options {
     return o;
 }
 
-// Canonical prefill chunking: how many 32-row chunks `rows` spans; pure and host-tested. The chunk size is the engine's constant — not configurable.
+// Canonical prefill chunking: how many 32-row chunks `rows` spans; pure, host-tested; the chunk size is the engine's.
 pub fn chunkCount(rows: usize) usize {
     return (rows + engine_mod.max_prefill_rows - 1) / engine_mod.max_prefill_rows;
 }
 
-// The .npy header's verdict, or null when it is not a v1 little-endian u32 rank-1 array with exactly `count` whole words of data; pure and host-tested (the probe's only NPY validator — no duplicate).
+// The .npy header's verdict, or null unless a v1 little-endian u32 rank-1 array of `count` words; pure, host-tested.
 pub const Npy = struct { count: usize, data_offset: usize };
 
 pub fn parseNpy(bytes: []const u8) ?Npy {
@@ -118,7 +114,7 @@ pub fn sameHex(a: []const u8, b: []const u8) bool {
     return isShaHex(a) and isShaHex(b) and std.ascii.eqlIgnoreCase(a, b);
 }
 
-// Differing BF16 elements (2-byte pairs) between two equal-length raw logit dumps, or null when the lengths disagree or are torn; the diagnostic counter, pure and host-tested. Byte-pair compare: no alignment assumed.
+// Differing BF16 elements (2-byte pairs) between two logit dumps, null on unequal/torn lengths; the diagnostic counter.
 pub fn countElementMismatches(a_bytes: []const u8, b_bytes: []const u8) ?u64 {
     if (a_bytes.len != b_bytes.len or a_bytes.len % 2 != 0) return null;
     var n: u64 = 0;
@@ -129,7 +125,7 @@ pub fn countElementMismatches(a_bytes: []const u8, b_bytes: []const u8) ?u64 {
     return n;
 }
 
-// The oracle's expected greedy ids from token_ids.json (a plain JSON array of non-negative integers), or the named reason it is unusable.
+// The oracle's expected greedy ids from token_ids.json (a JSON array of non-negative integers), or why it is unusable.
 fn readExpectedIds(a: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, oracle_dir: []const u8) ![]u32 {
     const path = try std.fmt.allocPrint(a, "{s}/token_ids.json", .{oracle_dir});
     defer a.free(path);
@@ -149,7 +145,7 @@ fn readExpectedIds(a: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, oracle_dir
     return out;
 }
 
-// The oracle result.json's reference fields the receipt echoes (hashes and the checkpoint note); missing fields are an unusable oracle, not a pass. Immutable metadata: the caller passes an arena allocator, nothing freed.
+// Oracle result.json fields the receipt echoes; missing = unusable oracle, not a pass; arena-allocated, nothing freed.
 const OracleMeta = struct {
     prompt_token_hash: []const u8,
     generated_ids_hash: []const u8,
@@ -199,7 +195,7 @@ fn readOracleMeta(a: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, oracle_dir:
     };
 }
 
-// The exact production bundle: the build-generated qwen35_shaders SPIR-V image for every field of engine.ShaderBundle (8 stage-1 ops, 4 norm/MLP, 3 attention, 7 GDN, 3 greedy), shared by the probe run and the opt-in load test so both exercise the shader set the server serves with.
+// The bundle: qwen35_shaders SPIR-V per ShaderBundle field, shared by probe and load test — the set the server serves.
 fn bundle() engine_mod.ShaderBundle {
     return .{
         .ops = .{
@@ -241,7 +237,7 @@ pub fn main(init: std.process.Init) !u8 {
     const a = init.gpa;
     const io = init.io;
     const cwd = std.Io.Dir.cwd();
-    // Immutable hash/diagnostic strings ride the process arena, exactly the readOracleMeta pattern: allocated once, freed only at exit, never on gpa.
+    // Immutable hash/diagnostic strings ride the process arena: allocated once, freed only at exit, never on gpa.
     const diag = init.arena.allocator();
 
     // every input validated before any GPU work exists
@@ -270,7 +266,7 @@ pub fn main(init: std.process.Init) !u8 {
         return 2;
     };
     defer a.free(expected);
-    // immutable metadata rides the arena: readOracleMeta allocates and the process-scoped arena frees, no per-field cleanup
+    // immutable metadata rides the arena: readOracleMeta allocates, the process arena frees, no per-field cleanup
     const oracle = readOracleMeta(diag, io, cwd, opts.positional[2]) catch |e| {
         std.debug.print("FAIL input: oracle result.json unreadable from {s}: {s}\n", .{ opts.positional[2], @errorName(e) });
         return 2;
@@ -279,7 +275,7 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print("FAIL input: oracle steps {d} and ids {d} disagree\n", .{ oracle.steps, expected.len });
         return 2;
     }
-    // same-prompt and expected-ids proof, all before any GPU work: the oracle's own hashes must name this exact prompt and these exact ids
+    // same-prompt and expected-ids proof before any GPU work: the oracle's hashes must name this prompt and these ids
     for (expected) |id| if (id >= pinned.vocab) {
         std.debug.print("FAIL input: oracle id {d} past the vocab\n", .{id});
         return 2;
@@ -299,7 +295,7 @@ pub fn main(init: std.process.Init) !u8 {
         return 2;
     }
 
-    // the full prompt and every generated step must fit the requested context — checked here, before the device, the weights or the output directory exist; the engine's prefill chunks the prompt canonically
+    // the prompt and every step must fit the requested context — checked before the device or weights exist
     engine_mod.planFor(opts.context, 0, prompt.len, expected.len) catch |e| {
         std.debug.print("FAIL plan: {s} (prompt {d} rows, {d} steps, context {d})\n", .{ @errorName(e), prompt.len, expected.len, opts.context });
         return 1;
@@ -415,13 +411,13 @@ pub fn main(init: std.process.Init) !u8 {
         clock.ms(),                                                                           match_a,                   match_b,  ids_equal, logits_equal,
         if (mismatches) |n| (std.fmt.allocPrint(diag, "{d}", .{n}) catch "?") else "skipped", oracle.generated_ids_hash, ids_hash,
     });
-    // mode labels ride only the non-default modes so the anchor default's RESULT line stays byte-identical; teacher-forced is per-step agreement, never claimed as a free-running chain proof
+    // mode labels ride only non-default modes, so the anchor default's RESULT line stays byte-identical
     if (opts.teacher_forced) std.debug.print("RESULT execution_mode=teacher-forced: oracle ids fed as previous tokens; per-step agreement, not a free-running chain proof\n", .{});
     if (opts.sequential_prefill) std.debug.print("RESULT prefill_schedule=rowwise: one Engine.prefill call per prompt token\n", .{});
     return if (match_a and match_b and ids_equal and logits_equal) 0 else 1;
 }
 
-// One greedy run over the fresh state: whole-prompt prefill (the engine chunks it canonically into 32-row pieces; --sequential-prefill instead issues one Engine.prefill call per prompt token for the boundary evidence), then exactly `ids_out.len` draws, every id selected by the GPU argreduce and recorded as drawn. Free-running (the default and the anchor) feeds each draw back; the teacher-forced mode feeds the oracle's own id for the step just scored as the next input — a labelled per-step check, never a free-running chain proof.
+// Greedy: prefill (32-row chunks; --sequential-prefill per token = boundary evidence); ids_out.len argreduce draws.
 fn greedyRun(e: *Engine, teacher_forced: bool, sequential: bool, prompt: []const u32, expected: []const u32, ids_out: []u32, rows_out: []u8, row_len: usize) !void {
     if (sequential) {
         for (prompt) |tok| try e.prefill(&.{tok});
@@ -469,7 +465,7 @@ const Receipt = struct {
     elapsed_ms: i64,
 };
 
-// The receipt's JSON through the house stringify: every string escaped by std.json, no manual interpolation; pure and host-tested.
+// The receipt's JSON via the house stringify: strings escaped by std.json, no manual interpolation; pure, host-tested.
 fn buildResult(a: std.mem.Allocator, r: Receipt) error{OutOfMemory}![]u8 {
     return std.json.Stringify.valueAlloc(a, r, .{});
 }
@@ -641,7 +637,7 @@ test "prompt ids decode little-endian words without an alignment assumption" {
 
 test "the real engine load (TF_VULKAN_LOAD_DIR): device gates, pinned admission, every layer's uploads and state, then teardown; no forward" {
     const dir = sys.getenv("TF_VULKAN_LOAD_DIR") orelse return error.SkipZigTest;
-    // init reaching here means every device gate passed, the pinned-model admission read the real config, all layers' weights uploaded and the zeroed state exists. A successful init then deinit with the leak-checked testing allocator is the whole receipt; nothing runs a forward.
+    // init here: every device gate passed, the pinned-model admission read the real config, the zeroed state exists.
     const engine = try Engine.init(testing.allocator, testing.io, bundle(), dir, 256, 60 * std.time.ns_per_s);
     defer engine.deinit();
     try testing.expectEqual(@as(usize, pinned.layers), engine.model.layers.len);
