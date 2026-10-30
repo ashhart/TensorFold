@@ -7,6 +7,6 @@ pub fn tests(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Bu
         .target = target,
     });
     const run = b.addRunArtifact(b.addTest(.{ .root_module = root }));
-    b.step("test-ling-host", "Ling family package: config, names, tiny fixtures, synth JSON").dependOn(&run.step);
+    b.step("test-ling-host", "Ling family package: config, names, tiny fixtures, synth JSON, grouped routing").dependOn(&run.step);
     test_step.dependOn(&run.step);
 }
