@@ -5,8 +5,8 @@ const model = @import("model.zig");
 
 const Dims = model.Dims;
 
-/// Most rows a verified window holds: the pending token and up to three drafts.
-pub const max_window = 4;
+/// Most rows a verified window holds: the pending token and up to seven drafts.
+pub const max_window = 8;
 
 /// Where the bytes of one sparse layer's caches start, and their strides.
 pub const SparseView = struct { k: u64, v: u64, raw: u64, pooled: u64 };

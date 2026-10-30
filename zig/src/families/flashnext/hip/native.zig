@@ -20,6 +20,8 @@ pub const default_context: i64 = 32768;
 pub const prefill_step: u32 = 0;
 /// Flash Next's HIP prompt chunk where the policy names none; prefill_step=20480 trades about 24 GiB for about 3 %.
 pub const policy_prefill_step: u32 = 4096;
+/// Drafts a verify window holds at most past its pending token (`--mtp-drafts` above it is refused before the load).
+pub const max_drafts: u32 = lanes_mod.max_depth;
 /// Device bytes a rank keeps for the forward's scratch until the engine counts its own.
 pub const scratch_bytes: u64 = 2 << 30;
 

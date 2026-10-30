@@ -212,7 +212,7 @@ pub const Fx = struct {
         const e = f.e;
         var rig: Rig = .{ .f = f, .c = try e.lease(0) };
         defer e.unlease(rig.c);
-        try serve.costs.forwards(&rig, cache.max_window, 1, cache.max_window, &f.costs);
+        try serve.costs.forwards(&rig, @min(cache.max_window, f.drafts + 1), 1, cache.max_window, &f.costs);
         if (e.weights.model.mtp != null) f.costs.step_ms = try rig.step();
     }
 

@@ -50,6 +50,18 @@ fn matrixRefused(policy: hip.Policy, caps: hip.Caps) ?[]const u8 {
     };
 }
 
+/// Drafts family `F` verifies at most: its own `max_drafts` (Flash Next 7), else 3 (the other HIP heads' `max_depth`).
+fn draftCap(comptime F: type) u32 {
+    return if (@hasDecl(F, "max_drafts")) F.max_drafts else 3;
+}
+
+/// The widest draft cap of any HIP family: what every rank refuses past before it knows the family.
+const most_drafts: u32 = blk: {
+    var most: u32 = 0;
+    for (registry) |F| most = @max(most, draftCap(F));
+    break :blk most;
+};
+
 /// The tensor-parallel flags as the Python ROCm server checks them, and the flags this engine cannot take.
 fn checkGroup(a: Allocator, o: api.Open, problem: *[]const u8) Refused!void {
     if (o.drafter != null) return refuse(a, problem, "--drafter: the HIP engine runs no DFlash2 drafter yet; serve without --drafter", .{});
@@ -60,7 +72,7 @@ fn checkGroup(a: Allocator, o: api.Open, problem: *[]const u8) Refused!void {
     if (o.tp == 1 and o.rank != 0) return refuse(a, problem, "--rank must be 0 when --tp 1", .{});
     if (o.rank >= o.tp) return refuse(a, problem, "--rank {d} not in [0, --tp {d})", .{ o.rank, o.tp });
     if (o.keep) |n| if (n < 0) return refuse(a, problem, "--checkpoint-slots must be 0 or more", .{});
-    if (o.mtp_drafts) |n| if (n > 3) return refuse(a, problem, "--mtp-drafts {d}: the HIP engine drafts at most 3", .{n});
+    if (o.mtp_drafts) |n| if (n > most_drafts) return refuse(a, problem, "--mtp-drafts {d}: the HIP engine drafts at most {d}", .{ n, most_drafts });
     if (o.mtp_confidence) |c| if (c < 0 or c > 1) return refuse(a, problem, "--mtp-confidence must be from 0 to 1", .{});
     if (o.prompt_cache_gib) |g| if (g < 0) return refuse(a, problem, "--prompt-cache-gib must be 0 or more", .{});
 }
@@ -92,6 +104,7 @@ fn cacheRefused(o: api.Open) ?[]const u8 {
 /// Resolves the policy on rank 0 (defaults, flags, old variables, TF_POLICY), joins the group, sends it to the others.
 fn ready(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) (Refused || Allocator.Error)!Ready {
     try checkGroup(a, o, problem);
+    if (o.mtp_drafts) |n| if (n > draftCap(F)) return refuse(a, problem, "--mtp-drafts {d}: {s} drafts at most {d} on HIP", .{ n, F.model_type, draftCap(F) });
     if (cacheRefused(o)) |why| return refuse(a, problem, "{s}", .{why});
     const native = modelContext(a, io, o.dir);
     const window = admission.contextWindow(o.context, native, F.default_context) catch |err| return switch (err) {
@@ -363,6 +376,20 @@ test "the group flags: one rank source, a supported world, a master past one ran
     var outside = two;
     outside.rank = 2;
     try std.testing.expectError(error.Refused, checkGroup(a, outside, &problem));
+}
+
+test "--mtp-drafts: Flash Next verifies up to 7 drafts on HIP, the other families 3; past 7 every rank refuses" {
+    try std.testing.expectEqual(@as(u32, 7), draftCap(flashnext.native));
+    try std.testing.expectEqual(@as(u32, 3), draftCap(qwen35.native));
+    try std.testing.expectEqual(@as(u32, 3), draftCap(nemotron.native));
+    try std.testing.expectEqual(@as(u32, 7), most_drafts);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var problem: []const u8 = "";
+    try checkGroup(a, .{ .dir = "d", .model_type = "qwen4_exp", .mtp_drafts = 7 }, &problem);
+    try std.testing.expectError(error.Refused, checkGroup(a, .{ .dir = "d", .model_type = "qwen4_exp", .mtp_drafts = 8 }, &problem));
+    try std.testing.expectStringStartsWith(problem, "--mtp-drafts 8: the HIP engine drafts at most 7");
 }
 
 test "--drafter is refused before any load, on every rank, until the HIP engine runs DFlash2" {
