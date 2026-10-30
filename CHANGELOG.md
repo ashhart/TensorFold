@@ -28,6 +28,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - GLM on CUDA loads faster: 8 threads decode and pack each layer's routed experts instead of the loader's one (`TF_GLM_LOAD_PACK`, 1 to 16), the packed experts go up a piece at a time (at most 192 MiB) from pinned memory the GPU copies from, and 16 readers now read ahead of the load instead of 8. GLM-5.3-Flash XSFP4 loads in about 51 s instead of 155 s on two GB10s (TP=2) and 46 s instead of 124 s on three (TP=3), with the same replies and memory free at serving within about 1 GiB (#1636). Thanks to @Bizuayeu.
 
+- Metal Qwen3.8-27B keeps lone cost-pruned proposal estimates out of shared requests and their tails, retaining the shared log-probability prior and lone adaptation (#1621).
+
 - Metal Qwen3.8-27B builds shared DFlash2 proposals within the allocator's grants on tensor units, as on earlier chips. It retains the selected lone window and all admitted drafting streams (#1621).
 
 - Metal Qwen3.8-27B on tensor units measures wider unfused row prices for shared allocation instead of extrapolating every shared row from the lone 16-row window. The lone window keeps its measured prices and its selected width; earlier chips keep their existing timing path (#1621).

@@ -75,3 +75,47 @@ test "qwen27 grants: native shared proposals do not spend nodes beyond the verif
         }
     }
 }
+
+test "qwen27 grants: lone landing history cannot reprice shared proposals or their tails" {
+    var s = try lanes.Stream.init(a, .{ .id = "lone-history", .prompt = &.{1}, .max_new = 64 });
+    defer s.deinit(a);
+    var other = try lanes.Stream.init(a, .{ .id = "shared-peer", .prompt = &.{2}, .max_new = 64 });
+    defer other.deinit(a);
+    var runner: tf.qwen27.decode_round.Runner = undefined;
+    runner.slots = 2;
+    var b: native.Metal = undefined;
+    b.runner = &runner;
+    b.owners = @splat(null);
+    b.owners[0] = &s;
+    b.trees = @splat(null);
+    var tokens = [_]u32{ 10, 11, 12 };
+    var parents = [_]i32{ -1, 0, 0 };
+    var scores = [_]f64{ -0.25, -0.5, -0.75 };
+    b.trees[0] = .{ .gpa = a, .tokens = &tokens, .parents = &parents, .scores = &scores };
+    b.landing = .{};
+    for (0..200) |_| {
+        b.landing.observe(false, -0.25, false);
+        b.landing.observe(false, -0.5, false);
+    }
+    const root = @exp(@as(f64, -0.25));
+    const expected = [_]f64{ root, root * root, root * @exp(@as(f64, -0.5)) };
+    var out: [3]f64 = undefined;
+    for ([_]bool{ false, true }) |keyed| {
+        s.sampling = if (keyed) .{ .seed = 7 } else null;
+        s.shared_round = false;
+        b.owners[1] = null;
+        try std.testing.expect(try @import("qwen27_drafts.zig").probabilitiesFn(&b, &s, &out));
+        try std.testing.expect(out[0] < root / 50);
+        s.shared_round = true;
+        b.owners[1] = &other;
+        try std.testing.expect(try @import("qwen27_drafts.zig").probabilitiesFn(&b, &s, &out));
+        if (!std.mem.eql(f64, &expected, &out)) std.debug.print("shared landing inherited a lone proposal's estimates\n", .{});
+        try std.testing.expectEqualSlices(f64, &expected, &out);
+        b.owners[1] = null; // its last peer ended; this request's proposals still came from shared rounds
+        try std.testing.expect(try @import("qwen27_drafts.zig").probabilitiesFn(&b, &s, &out));
+        try std.testing.expectEqualSlices(f64, &expected, &out);
+        s.shared_round = false;
+        try std.testing.expect(try @import("qwen27_drafts.zig").probabilitiesFn(&b, &s, &out));
+        try std.testing.expect(out[0] < root / 50);
+    }
+}

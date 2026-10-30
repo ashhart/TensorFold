@@ -130,7 +130,7 @@ pub fn probabilitiesFn(ptr: *anyopaque, s: *lanes.Stream, out: []f64) anyerror!b
     const t = b.trees[slot] orelse return false;
     if (out.len > t.scores.len) return false;
     for (out, t.parents[0..out.len], 0..) |*p, parent, i| {
-        p.* = b.landing.chance(s.sampling != null, Metal.local(t, i)) * (if (parent >= 0) out[@intCast(parent)] else 1);
+        p.* = b.landing.chanceFor(s.shared_round, s.sampling != null, Metal.local(t, i)) * (if (parent >= 0) out[@intCast(parent)] else 1);
     }
     return true;
 }
