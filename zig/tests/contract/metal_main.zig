@@ -420,11 +420,20 @@ pub fn main(init: std.process.Init) !u8 {
     defer native_gdn.destroy();
     const moss_image = try @import("metal_moss_image.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer moss_image.destroy();
+    const dsv41_fp8 = try @import("metal_dsv41_fp8_rows.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer dsv41_fp8.destroy();
+    const dsv41_fp8_mma = try @import("metal_dsv41_fp8_mma.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer dsv41_fp8_mma.destroy();
     var t: g.Tally = .{};
     const t0 = std.Io.Clock.awake.now(init.io);
     if (o.gates) {
         try g.runAll(a, kernels.items, o.seed, &t);
         for (flash_list[0..flash_made]) |*probe| try probe.rowCountInvariant();
+        t.failed += try dsv41_fp8.invariance(o.seed);
+        if (std.c.getenv("TF_DSV41_TIME") != null) try dsv41_fp8.timing(init.io);
+        t.failed += try dsv41_fp8_mma.invariance(o.seed);
+        t.failed += try dsv41_fp8_mma.accuracy(o.seed);
+        if (std.c.getenv("TF_DSV41_TIME") != null) try dsv41_fp8_mma.timing(init.io);
     }
     const t1 = std.Io.Clock.awake.now(init.io);
     var lim: usize = 0;

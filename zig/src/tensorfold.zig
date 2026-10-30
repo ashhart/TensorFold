@@ -2,6 +2,7 @@
 const std = @import("std");
 
 pub const safetensors = @import("core/safetensors.zig");
+pub const dsv41_fp8_mma = @import("families/deepseek_v41/metal/fp8_mma.zig");
 pub const Checkpoint = checkpoint_host.Checkpoint;
 pub const checkpoint_host = @import("core/checkpoint.zig");
 pub const checkpoint_metal = checkpoint;
@@ -115,6 +116,7 @@ pub const affine4_lane = @import("core/affine4_lane.zig");
 pub const tree_round = @import("tree_round");
 pub const tree_round_gpu = @import("tree_round_gpu");
 
+pub const dsv41_fp8_rows = @import("families/deepseek_v41/metal/fp8_rows.zig");
 pub const bf16_topk = @import("bf16_topk");
 pub const bf16_topk_gpu = @import("bf16_topk_gpu");
 

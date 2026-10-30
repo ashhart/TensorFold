@@ -1,5 +1,8 @@
 //! Metal kernel sources the engine compiles at run time, embedded in the executable.
 
+/// DeepSeek V4.1's release FP8 dense prompt rows, decoded exactly into fp32 MMA groups.
+pub const deepseek_v41_fp8_mma = @embedFile("deepseek_v41/fp8_mma.metal");
+
 /// Nemotron's generated kernels (tools/zig/gen_nemotron_kernels.py).
 pub const nemotron = @import("nemotron/kernels.zig");
 /// Nemotron's KV in pages of the core pool: twins of its seven K/V kernels, each library beside its original.
@@ -35,6 +38,8 @@ pub const core_exlr8_projection = @embedFile("core/exlr8_projection.metal");
 pub const core_exlr8_dense = @embedFile("core/exlr8_dense.metal");
 pub const core_exlr8_prompt = @embedFile("core/exlr8_prompt.metal");
 pub const core_exlr8_dense_prompt = @embedFile("core/exlr8_dense_prompt.metal");
+/// DeepSeek V4.1 release FP8 dense projections: 32x32 blocks and split-invariant row sums.
+pub const deepseek_v41_fp8_rows = @embedFile("deepseek_v41/fp8_rows.metal");
 pub const core_pair = @embedFile("core/pair.metal");
 /// The row-split seam's kernels (see `pair_rows.zig`): `pair.metal` above stays as it is for glm_dsa.
 pub const core_pair_rows = @embedFile("core/pair_rows.metal");

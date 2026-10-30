@@ -58,6 +58,10 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
         text = tf.flashnext_vision_contract.source(w);
         return .{ .decl = d, .function = fun, .here = text, .pre_m5 = text };
     }
+    if (std.mem.startsWith(u8, d.name, "dsv41 fp8 mma ")) {
+        text = sources.deepseek_v41_fp8_mma;
+        return .{ .decl = d, .function = fun, .here = text, .pre_m5 = text };
+    }
     if (std.mem.startsWith(u8, d.name, "metal lfm2 ")) return .{ .decl = d, .function = fun, .here = sources.lfm2, .pre_m5 = sources.lfm2 };
     if (std.mem.startsWith(u8, d.name, "nemotron paged ")) return pagedLaunch(a, device, d, fun);
     if (std.mem.startsWith(u8, d.name, "nemotron attention ")) return attentionLaunch(a, device, d, fun);
@@ -65,7 +69,9 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
         const text_d3 = try @import("metal_drama3.zig").source(a, d.name);
         return .{ .decl = d, .function = fun, .here = text_d3, .pre_m5 = text_d3 };
     }
-    if (std.mem.startsWith(u8, fun, "tf_ctl_")) {
+    if (std.mem.startsWith(u8, d.name, "dsv41 fp8 rows ")) {
+        text = sources.deepseek_v41_fp8_rows;
+    } else if (std.mem.startsWith(u8, fun, "tf_ctl_")) {
         text = sources.core_contract_controls;
         if (has(fun, "big_tg")) head = "#define TF_CTL_BIG_TG 1\n";
     } else if (std.mem.startsWith(u8, d.name, "h3 gemm ")) {
