@@ -72,6 +72,7 @@ pub const Kernels = struct {
     latent: ?@import("cuda_latent.zig").Fns = null, // a latent MoE's glue (loadLatent), else never
     ck: ?cuda.ck.Ck = null, // the checkpoint's own math (loadCk): FP8 rows and NVFP4 experts, sm_120 on
     ggml: ?cuda.ggml.Kernels = null, // loaded by loadGgml for a checkpoint with ggml blocks (Bolt's IQ2_XXS and Q8_0)
+    bf16x: ?cuda.experts.Bf16Experts = null, // loaded by loadBf16Experts for a bf16 checkpoint's experts (Transcribe)
     gb10: bool,
     discrete: bool, // the card has its own memory: checkpoint bytes reach it through page-locked slots
 
@@ -114,6 +115,7 @@ pub const Kernels = struct {
         k.latent = null;
         k.ck = null;
         k.ggml = null;
+        k.bf16x = null;
         k.triton = if (triton_dir) |dir| try cuda.aot.Set.load(gpa, io, d, ctx.device, dir) else null;
         errdefer if (k.triton) |*t| t.deinit();
         k.train = try train_ops.Kernels.load(d);
@@ -141,6 +143,7 @@ pub const Kernels = struct {
             m.pack.unload();
         }
         if (k.ggml) |*g| g.unload();
+        if (k.bf16x) |*x| x.unload();
         k.affine.deinit();
         k.train.deinit();
         if (k.triton) |*t| t.deinit();
@@ -174,6 +177,12 @@ pub const Kernels = struct {
         var experts = try cuda.experts.Nvfp4Experts.load(k.d, sms);
         errdefer experts.unload();
         k.modelopt = .{ .lane = lane, .gemm = gemm, .experts = experts, .pack = try cuda.modelopt.Packer.load(k.d) };
+    }
+
+    /// The grouped bf16 experts a checkpoint's own bf16 experts run on (Nemotron 3.5 Transcribe).
+    pub fn loadBf16Experts(k: *Kernels, ctx: *const cuda.Context) !void {
+        if (k.bf16x != null) return;
+        k.bf16x = try cuda.experts.Bf16Experts.load(k.d, @intCast(try ctx.attribute(.multiprocessor_count)));
     }
 
     /// The ggml block kernels (IQ2_XXS experts, IQ2_XXS and Q8_0 projections, their repack) Bolt's export needs.
@@ -260,7 +269,7 @@ pub const Ops = struct {
 
     /// Every grouped-expert format the kernels loaded (cuda/experts.zig).
     pub fn grouped(o: Ops) cuda.experts.Grouped {
-        return .{ .affine4 = &o.k.experts, .nvfp4 = if (o.k.modelopt) |*x| &x.experts else null, .iq2xxs = if (o.k.ggml) |*g| g else null };
+        return .{ .affine4 = &o.k.experts, .nvfp4 = if (o.k.modelopt) |*x| &x.experts else null, .iq2xxs = if (o.k.ggml) |*g| g else null, .bf16 = if (o.k.bf16x) |*x| x else null };
     }
 
     /// LatentMoE: z[r] = sum_k wt[r, k] y[r * k_slots + k], rows of `l` bf16 from fp32 pair rows (tf_latent_sum).

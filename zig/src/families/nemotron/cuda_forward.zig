@@ -63,6 +63,7 @@ pub const Forward = struct {
     captures: []const kept.Mark = &.{}, // marks inside the prompt chunk: their Mamba states are copied out as it runs
     tp: ?*const cuda.tp_group.Group = null, // a latent MoE's ranks: their expert rows meet every MoE layer
     vision: ?*const @import("cuda_vision.zig").Vision = null, // a prompt pass's image rows, spliced after its embeds
+    audio: ?*const @import("cuda_audio.zig").Audio = null, // a prompt pass's audio rows, spliced the same way
     page_elems: u64 = 0, // elements between a paged sequence's pages (its layers' K and V of state.chunk_keys rows)
 
     pub fn init(c: Config, w: *const weights.Weights, b: *const state.Buffers, ops: kern.Ops, max_len: usize, nch: usize, sampled: bool) Forward {
@@ -405,6 +406,7 @@ pub const Forward = struct {
         const b = f.b;
         try f.embed(b.p_ids, b.emb, w.rows);
         if (f.vision) |v| try v.splice(f.ops.s, w.pos, w.pos + w.rows, b.emb);
+        if (f.audio) |a| try a.splice(f.ops.s, w.pos, w.pos + w.rows, b.emb);
         w.x = b.emb;
     }
 

@@ -139,7 +139,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_pocket_rows(const __nv_bflo
 #pragma unroll
         for (int o = 16; o > 0; o >>= 1) s += __shfl_xor_sync(0xffffffffu, s, o);
         if (lane == 0) {
-            const float z = fmaxf(s, 0.f);
+            const float z = s < 0.f ? 0.f : s;  // not fmaxf, which would make a NaN 0
             act[j] = z * z;
         }
     }
@@ -194,7 +194,7 @@ __device__ __forceinline__ void pocket_in(const __nv_bfloat16* __restrict__ y, i
 #pragma unroll
             for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
             if (lane == 0 && j0 + q < n && t < tile) {
-                const float z = fmaxf(v, 0.f);
+                const float z = v < 0.f ? 0.f : v;  // not fmaxf, which would make a NaN 0
                 act[static_cast<size_t>(r0 + t) * pocket_width + j0 + q] = z * z;
             }
         }
