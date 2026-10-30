@@ -16,13 +16,33 @@ tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --drafter z-lab/Qwen3.8-27B-DFl
 A lone Metal DFlash2 stream can verify 16, 32 or 64 rows (`TF_QWEN27_WINDOW`), on tensor units and earlier chips.
 Both device classes retain the 16-row default. Startup prices every row count through
 the selected width, in a width-tagged cache.
-Wide tensor-unit windows enable context copies by default; earlier chips keep copies opt-in. A lone lane request may propose up to 15/31/63 tree nodes at
-16/32/64 rows, including the drafter's next-most-likely siblings at each depth. It chooses a parent-closed prefix
-by expected accepted tokens per measured millisecond. Copies compete for the same verification window;
+Wide tensor-unit windows enable context copies by default; earlier chips keep copies opt-in.
+A lone lane request may propose up to 15/31/63 tree nodes at 16/32/64 rows, including the drafter's next-most-likely siblings at each depth. It chooses a parent-closed prefix
+by expected accepted tokens per measured millisecond in the common lane allocator, using its calibrated landing rates.
+The proposal keeps every candidate available until that decision. Copies compete for the same verification window;
 `TF_QWEN27_COPIES=0` disables them. The narrow tensor-unit default keeps copies off.
 The masked drafter block is unchanged. Wide lone streams use the lane loop; `TF_QWEN27_LANES=1` also selects it at 16 rows.
 `tf-qwen27-bench --model DIR --widths costs` measures rows 1 through 64, with GPU and wall time including keep.
 The wall price excludes the diagnostic's host logit hash and scan.
+
+A greedy single-window lane pass gathers its matching taps with its target picks
+in the final verify command buffer. The lane core still chooses
+its authoritative keep. A matching prefix publishes its cache keep behind the next drafter frame; other paths
+keep synchronously. Target-state users drain outstanding keeps before verification, prefill, release or reset.
+The completed shared logit row is restored by an exact host word copy on that prefetched path.
+The cache keep is encoded while the target verify runs, using its existing plans. It remains uncommitted until
+the lane core supplies the authoritative path. Failure or a changed path drops the unused prepared buffer.
+Selector scratch is bounded on the stack; only the three owned result arrays allocate. A full tree that loses
+weak nodes during common pricing can offer context copies into the freed rows and price them once more.
+Drafter scratch reserves 64 KiB chunks, so small context growth reuses its existing buffers.
+On a single-slot server, a lone greedy lane starts its next draft at the following host step. Its target keep
+can finish while the host publishes the current reply chunk, as in the serial loop. The saved request owns
+its row indices and following tokens, and release or handoff cancels it. Shared, sampled and structured
+requests retain their existing scheduling.
+
+`TF_Q27_PASS_PROFILE=1` records host phases, GPU spans, command-buffer waits and commits, and forwarding-allocator
+calls on the serving thread. The `q27_offer` and `q27_keep` lines show verified tree and copy rows and the kept path.
+It preserves command boundaries. Leave it unset for throughput measurements.
 
 On Metal, M5 prompt passes request 2,048 rows when no other request is decoding; earlier chips keep the 512-row
 default. The larger frame must fit the configured context and all streams beside loaded weights and the 8 GiB

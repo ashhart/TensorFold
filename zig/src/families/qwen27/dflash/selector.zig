@@ -77,7 +77,10 @@ fn expand(g: *const weights.Graph, lattice: op.Lattice, options: Options, first:
         }
     };
     std.mem.sort(u32, order[0..lattice.topk], Rank{ .scores = scores[0..lattice.topk] }, Rank.less);
-    for (order[0..@min(options.children, lattice.topk)]) |i| try frontier.append(lattice.gpa, .{ .score = cumulative + scores[i], .parent = parent, .token = lattice.candidates[row + i], .depth = depth });
+    for (order[0..@min(options.children, lattice.topk)]) |i| {
+        std.debug.assert(frontier.items.len < frontier.capacity);
+        frontier.appendAssumeCapacity(.{ .score = cumulative + scores[i], .parent = parent, .token = lattice.candidates[row + i], .depth = depth });
+    }
 }
 pub fn propose(gpa: std.mem.Allocator, g: *const weights.Graph, lattice: op.Lattice, anchor: u32, first_position: u64, options: Options) !Tree {
     try g.config.check();
@@ -89,14 +92,12 @@ pub fn propose(gpa: std.mem.Allocator, g: *const weights.Graph, lattice: op.Latt
         if (options.costs.len <= options.nodes) return error.BadDraftCosts;
         for (options.costs) |ms| if (!std.math.isFinite(ms) or ms <= 0) return error.BadDraftCosts;
     }
-    var frontier: std.ArrayList(Node) = .empty;
-    defer frontier.deinit(lattice.gpa);
-    const tokens = try gpa.alloc(u32, options.nodes);
-    defer gpa.free(tokens);
-    const parents = try gpa.alloc(i32, options.nodes);
-    defer gpa.free(parents);
-    const scores = try gpa.alloc(f64, options.nodes);
-    defer gpa.free(scores);
+    // At most sixteen roots and sixteen children for each of the sixty-three selected nodes.
+    var storage: [16 * 64]Node = undefined;
+    var frontier: std.ArrayList(Node) = .initBuffer(&storage);
+    var tokens: [63]u32 = undefined;
+    var parents: [63]i32 = undefined;
+    var scores: [63]f64 = undefined;
     if (options.nodes > 0) try expand(g, lattice, options, first_position, anchor, -1, 0, 0, &frontier);
     var count: usize = 0;
     while (frontier.items.len > 0 and count < options.nodes) {

@@ -42,6 +42,7 @@ pub const Grow = @import("qwen27_hooks.zig").Grow;
 pub const Metal = struct {
     residency: ?mtl.ResidencySet.Follow = null,
     gpa: std.mem.Allocator,
+    pass_profile: bool = false,
     runner: *q.decode_round.Runner,
     draft: ?*Draft,
     chunk: usize = 128, // prompt rows a pass
@@ -73,6 +74,10 @@ pub const Metal = struct {
     timed: usize = 0,
     from_tree: usize = 0, // the last window's drafts that were the held tree's first nodes
     advanced: bool = false, // the round's rows were kept by its verify (one undrafted row a window): no keep to run
+    prefetched: [max_rows]u32 = undefined, // a greedy pick submission already gathered this complete path
+    prefetched_count: usize = 0,
+    prefetch_encoded: bool = false,
+    prepared_keep: ?mtl.CommandBuffer = null, // encoded during verify, committed only after the core chooses its path
     sampled: [max_rows]u32 = undefined, // the last lone window's draws
     landing: Landing = .{}, // drafted nodes offered with their parent kept, and landed, by own log-probability
     vision: ?*@import("qwen27_images.zig").Vision = null, // --vision: the image tower and a prompt pass's image rows
@@ -97,6 +102,7 @@ pub const Metal = struct {
         const b = try gpa.create(Metal);
         errdefer gpa.destroy(b);
         b.* = .{ .gpa = gpa, .runner = runner, .draft = draft, .window = window, .copies = copies, .nodes = @import("qwen27_window.zig").nodes(window, copies), .ops = ops, .picks = picks, .kept = kept, .draft_slots = draftSlots(), .slot_resume = slots.slotResumeEnv() };
+        b.pass_profile = platform.c.getenv("TF_Q27_PASS_PROFILE") != null;
         errdefer b.freeContexts();
         if (draft) |d| {
             const g = d.model.ring();
@@ -116,6 +122,7 @@ pub const Metal = struct {
     }
 
     pub fn deinit(b: *Metal) void {
+        b.settle() catch {};
         q.residency.setBack(b, null);
         b.standing.deinit(b.gpa);
         if (b.rewind) |x| x.deinit();
@@ -138,7 +145,7 @@ pub const Metal = struct {
     pub const refill = slots.refill;
 
     pub fn backend(b: *Metal) be.Backend {
-        return .{ .ptr = b, .vtable = &.{ .prefill = prefillFn, .prefill_step = slots.prefillStep, .cancel_prefill = slots.cancelPrefill, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draft_fns.draftFn, .draft_capacity = draft_fns.capacityFn, .probabilities = draft_fns.probabilitiesFn, .tree = draft_fns.treeFn, .release = releaseFn, .reports_fill = true } };
+        return .{ .ptr = b, .defer_lone_draft = b.runner.slots == 1, .vtable = &.{ .prefill = prefillFn, .prefill_step = slots.prefillStep, .cancel_prefill = slots.cancelPrefill, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draft_fns.draftFn, .draft_capacity = draft_fns.capacityFn, .probabilities = draft_fns.probabilitiesFn, .tree = draft_fns.treeFn, .release = releaseFn, .reports_fill = true } };
     }
 
     /// What the round loop reads at setup: slot 0's stream drafts trees; every stream verifies copies.
@@ -201,11 +208,15 @@ pub const Metal = struct {
     }
 
     pub fn dropRound(b: *Metal) void {
+        if (b.prepared_keep) |cb| cb.release();
+        b.prepared_keep = null;
         if (b.round) |*r| r.deinit();
         b.round = null;
         b.count = 0;
         b.early = @splat(0);
         b.advanced = false;
+        b.prefetched_count = 0;
+        b.prefetch_encoded = false;
     }
 
     pub fn dropTree(b: *Metal) void {
@@ -243,6 +254,8 @@ pub const Metal = struct {
 
     /// Rows [first, first + rows)'s greedy picks into `picks` at the same rows: one command buffer and one wait.
     fn argmaxRows(b: *Metal, first: usize, rows: usize) !void {
+        const metric = mtl.pass_metrics.phase(.sampling);
+        defer metric.end();
         const logits = b.runner.model.frame.get(.logits);
         const vocab: u32 = @intCast(b.runner.model.config.vocab);
         const pool = mtl.objc.Pool.push();
@@ -271,8 +284,12 @@ pub const Metal = struct {
 
     /// Keep the last verify's rows on `paths`: slot 0 alone keeps on the GPU with its taps, else the runner and rings.
     fn keepPaths(b: *Metal, paths: []const []const u32) !void {
+        defer mtl.pass_metrics.end();
+        const metric = mtl.pass_metrics.phase(.keep);
+        defer metric.end();
         defer b.dropRound();
         if (paths.len != b.count) return error.NothingToKeep;
+        if (b.pass_profile and b.count == 1) std.log.info("q27_keep width={d} rows={d} kept={d}", .{ b.window, b.rows, paths[0].len });
         if (b.advanced) { // the verify kept each window's one row at its position; its logits already sit in row 0
             for (paths) |path| if (path.len != 1) return error.NothingToKeep;
             return;
@@ -281,7 +298,7 @@ pub const Metal = struct {
         defer pool.pop();
         if (b.count == 1 and b.windows[0] == 0) {
             b.observe(paths[0]);
-            if (b.draft) |d| return b.commitDevice(d, paths[0]);
+            if (b.draft) |d| return @import("qwen27_keep.zig").commit(b, d, paths[0]);
         }
         try b.runner.keep(&b.round.?, paths);
         if (b.draft != null) try b.gatherTaps(paths);
@@ -325,42 +342,14 @@ pub const Metal = struct {
         }
     }
 
-    /// One command buffer keeps slot 0's path rows, gathers their taps and moves its last logits to row 0.
-    fn commitDevice(b: *Metal, d: *Draft, path: []const u32) !void {
-        const g = &d.generation;
-        // the result below is host-written, and a pending keep reads it
-        std.debug.assert(g.keep == null);
-        const r = b.runner;
-        const result: *contract.Result = @ptrCast(@alignCast(g.matcher.buffers[4].contents()));
-        result.* = .{ .status = 0, .stop = 0, .nonfinite = 0, .consumed_count = @intCast(path.len), .emitted_count = @intCast(path.len), .matched_count = 0, .bonus_emitted = 0, .pending_valid = 0, .pending_token = 0, .reserved = 0, .path = @splat(0), .tokens = @splat(0) };
-        @memcpy(result.path[0..path.len], path);
-        try r.taps.complete();
-        const ref = tf.tree_commit_gpu.Ref{ .buf = g.matcher.buffers[4] };
-        const logits = r.model.frame.get(.logits);
-        const vocab: u32 = @intCast(r.model.config.vocab);
-        const rows: u32 = @intCast(b.rows);
-        const cb = r.model.queue.commandBuffer();
-        const e = cb.compute(.concurrent);
-        var ended = false;
-        errdefer if (!ended) e.end();
-        try r.keepDevice(&b.round.?, e, g.commit, ref);
-        try g.commit.taps(e, ref, .{ .buf = r.taps.buffer }, .{ .buf = g.taps }, .{ .rows = rows, .width = r.taps.width, .capacity = r.taps.capacity, .planes = 5 });
-        try g.commit.head(e, ref, .{ .buf = logits.buffer, .off = logits.offset }, .{ .rows = rows, .width = vocab, .stride = vocab });
-        e.end();
-        ended = true;
-        cb.commit();
-        cb.wait();
-        if (q.decode_round.gpuFailed(cb, "slot 0's keep")) {
-            r.failed = true;
-            return error.KeepGpuFailure;
-        }
-        try r.completeDeviceKeep(&b.round.?, path);
-        try g.draft.absorb(.{ .buf = g.taps }, @intCast(path.len));
-        if (g.draft.committed_end != r.offsets[0]) return error.BadDraftPosition;
-    }
-
     /// A verify whose rows all stayed keeps them before anything else (keep is called only to drop rows).
     pub fn settle(b: *Metal) !void {
+        try b.settleRound();
+        if (b.draft) |d| try d.generation.settle();
+    }
+
+    /// The next drafter may overlap a submitted keep; every target-state user calls settle instead.
+    pub fn settleRound(b: *Metal) !void {
         if (b.round == null) return;
         var rows: [batch_rows]u32 = undefined;
         for (&rows, 0..) |*p, i| p.* = @intCast(i);
@@ -460,6 +449,12 @@ pub const Metal = struct {
         b.round = try Round.init(b.gpa, inputs[0..windows.len], @intCast(r.model.config.conv_kernel), r.slots, @intCast(r.model.config.vocab));
         b.count = windows.len;
         errdefer b.dropRound();
+        b.rows = total;
+        if (b.pass_profile and windows.len == 1) std.log.info("q27_offer width={d} rows={d} tree_nodes={d} copy_rows={d}", .{ b.window, total, b.from_tree, total - 1 - b.from_tree });
+        const fused = windows.len == 1 and b.windows[0] == 0 and b.draft != null and total > 1 and windows[0].stream.sampling == null and windows[0].masks.len == 0;
+        std.debug.assert(r.tail == null);
+        if (fused) r.tail = .{ .ptr = b, .encode = @import("qwen27_keep.zig").encodeTail };
+        defer r.tail = null;
         const before = r.gpu_seconds;
         if (plain) try r.advance(&b.round.?, .all) else try r.verifyHead(&b.round.?, .all);
         for (windows) |w| slots.charge(b, w.stream, before); // a shared round counts whole in each reply
@@ -468,7 +463,7 @@ pub const Metal = struct {
         // every greedy window's rows from one argmax over the round; a sampled window draws on the host
         var greedy = false;
         for (windows) |w| greedy = greedy or (w.stream.sampling == null and w.masks.len == 0);
-        if (greedy) try b.argmaxRows(0, total);
+        if (fused) try @import("qwen27_keep.zig").finishPrefetch(b) else if (greedy) try b.argmaxRows(0, total);
         for (windows, out, b.round.?.firsts) |w, o, first| {
             const rows = w.rows();
             if (w.stream.sampling != null or w.masks.len > 0) try b.draw(w.stream, first, rows, w.positions, o.sampled, w.masks) else try b.picked(first, rows, o.sampled);
@@ -478,13 +473,17 @@ pub const Metal = struct {
     }
 
     /// How many drafts are the held tree's first nodes with their own parents (0: copies, fills or a chain).
-    fn treeRows(b: *const Metal, w: be.Window) usize {
+    pub fn treeRows(b: *const Metal, w: be.Window) usize {
         const t = b.trees[0] orelse return 0;
-        const n = w.tokens.len;
-        if (w.held > 0 or n == 0 or n > t.tokens.len or !std.mem.eql(u32, w.tokens, t.tokens[0..n])) return 0;
-        const parents = w.parents orelse return if (isChain(t.parents[0..n])) n else 0;
-        for (parents[1..], t.parents[0..n]) |row, node| if (row != node + 1) return 0;
-        return n;
+        if (w.held > 0) return 0;
+        const n = @min(w.tokens.len, t.tokens.len);
+        var prefix: usize = 0;
+        for (w.tokens[0..n], t.tokens[0..n], 0..) |token, draft, i| {
+            const parent = if (w.parents) |ps| ps[i + 1] - 1 else @as(i32, @intCast(i)) - 1;
+            if (token != draft or parent != t.parents[i]) break;
+            prefix += 1;
+        }
+        return prefix;
     }
 
     fn isChain(parents: []const i32) bool {

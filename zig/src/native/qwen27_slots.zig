@@ -337,7 +337,10 @@ const TapGather = struct {
 
 /// `slot` becomes a kept state: the drafter (slot 0) rebuilds its context from the restored taps.
 pub fn restore(b: *Metal, slot: u32, st: *q.snapshot.State) !void {
-    if (b.drafter(slot)) |d| try d.model.reset();
+    if (b.drafter(slot)) |d| {
+        try d.generation.settle();
+        try d.model.reset();
+    }
     try clearContext(b, slot);
     try q.snapshot.restoreSlot(b.gpa, b.runner, slot, b.ringOf(slot), st);
 }
@@ -376,11 +379,12 @@ pub fn free(b: *const Metal) ?u32 {
 
 /// The drafter absorbs nothing more for a stream that is gone; its slot is free once its state is kept.
 pub fn unbind(b: *Metal, s: *lanes.Stream) void {
+    defer mtl.pass_metrics.end();
     const slot = b.slotOf(s) orelse return;
     b.settle() catch {};
     b.dropRound();
     b.dropTreeOf(slot);
-    if (b.release_hook) |hook| if (s.finished and s.reason != .cancelled and s.reason != .@"error") hook.kept(hook.ctx, s, slot);
+    if (b.release_hook) |hook| if (!b.runner.failed and s.finished and s.reason != .cancelled and s.reason != .@"error") hook.kept(hook.ctx, s, slot);
     if (slot == 0) leave(b, s);
     b.owners[slot] = null;
     b.runner.rope[slot] = .{};
@@ -401,6 +405,7 @@ pub fn promoteDue(b: *Metal) void {
 pub fn promote(b: *Metal) void {
     const d = b.draft orelse return;
     if (b.owners[0] != null or b.round != null) return;
+    d.generation.settle() catch return;
     for (1..b.runner.slots) |k| {
         const s = b.owners[k] orelse continue;
         if (s.finished or b.fills.contains(s)) continue; // a prompt pass under way stays in its slot until it is in
@@ -477,6 +482,8 @@ pub fn lone(b: *Metal, s: *lanes.Stream, hooks: api.LoneHooks) !bool {
         const room: u32 = @intCast(s.max_new - s.emitted().len);
         copies.history = s.context.items;
         const before = b.runner.gpu_seconds;
+        mtl.pass_metrics.begin(b.pass_profile, "serial", b.window, mtl.clock.seconds);
+        defer mtl.pass_metrics.end();
         const result = try g.runRound(room, @min(b.nodes, 15), s.eos, true, if (extra > 0) .{ .ptr = &copies, .call = Copies.call } else null, extra);
         defer b.gpa.free(result.tokens);
         charge(b, s, before);

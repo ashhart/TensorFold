@@ -26,6 +26,7 @@ pub fn capacityFn(ptr: *anyopaque, s: *lanes.Stream) u32 {
 /// Each drafting slot proposes its next tree, up to eight in one drafter pass; a shared round's kept taps first.
 pub fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
     const b = Metal.self(ptr);
+    errdefer mtl.pass_metrics.end();
     @import("qwen27_slots.zig").promoteDue(b); // a stream moves into a freed slot 0 before it drafts
     var batch: [8]Proposal = undefined;
     var owners: [8]u32 = undefined;
@@ -46,7 +47,8 @@ pub fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void
         const g = &b.draft.?.generation;
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
-        if (b.count > 1) try absorbEarly(b, slot, r.rows orelse return error.NoKeptRows) else try b.settle();
+        if (b.count > 1) try absorbEarly(b, slot, r.rows orelse return error.NoKeptRows) else try b.settleRound();
+        if (requests.len == 1) mtl.pass_metrics.begin(b.pass_profile, "lanes", b.window, mtl.clock.seconds);
         b.dropTreeOf(slot);
         const stands = b.runner.offsets[slot] + b.early[slot];
         if ((if (slot == 0) g.draft.committed_end else b.contexts[slot].?.committed_end) != stands) return error.BadDraftPosition;
@@ -58,7 +60,7 @@ pub fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void
             b.trees[0] = try p.call(p.ptr, pending, nodes);
             continue;
         };
-        batch[n] = .{ .context = if (slot == 0) null else b.contexts[slot].?, .pending = pending, .nodes = nodes, .costs = if (lone) costs[0..b.timed] else &.{}, .overhead_ms = if (lone) @max(0, r.stream.tree_over orelse r.stream.round_over orelse 0) else 0 };
+        batch[n] = .{ .context = if (slot == 0) null else b.contexts[slot].?, .pending = pending, .nodes = nodes, .costs = if (lone) costs[0..b.timed] else &.{}, .overhead_ms = if (lone) @max(0, r.stream.tree_over orelse r.stream.round_over orelse 0) else 0, .defer_price = lone };
         owners[n] = slot;
         n += 1;
         if (n == batch.len) {
