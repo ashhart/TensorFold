@@ -373,6 +373,8 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
     h.host.decoded_rows = true; // a reply's rows prefill with the bits decoding gave them, with the cache on or off
     // a lone greedy request takes the serial loop on tensor units, where it is faster (TF_QWEN27_LANES overrides)
     if (h.draft != null and serial) h.host.lone = .{ .ctx = h, .run = Host.lone };
+    var loop_text: [160]u8 = undefined;
+    std.log.info("qwen27: {s}", .{try policy.describe(&loop_text, serial, window, h.draft != null, h.back.copies)});
     h.warm = .{ .queue = model.queue };
     // the ready slots are wired before the cache's budget reads the footprint, and the later ones count as taken
     holdResident(h, io) catch |err| std.log.warn("qwen27: no residency set ({s}); the first request after an idle second re-wires the weights", .{@errorName(err)});
