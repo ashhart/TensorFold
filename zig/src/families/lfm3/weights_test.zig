@@ -101,3 +101,32 @@ test "bad dtype, byte range, namespace and unexpected text tensors are rejected"
         try std.testing.expectError(err, w.validate(std.testing.allocator, &cfg, &h));
     }
 }
+
+test "module names of both namespaces are names of the schema" {
+    for ([_]w.Namespace{ .bare, .wrapped }) |namespace| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var cfg = config(4, 64);
+        defer cfg.deinit();
+        var names: std.StringHashMapUnmanaged(void) = .empty;
+        for (try w.schema(arena.allocator(), &cfg, namespace)) |e| try names.put(arena.allocator(), e.name, {});
+        var buf: [128]u8 = undefined;
+        var full: [160]u8 = undefined;
+        for (std.enums.values(w.Module)) |m| {
+            const layer: ?usize = switch (m) {
+                .embed_tokens, .embedding_norm => null,
+                .conv_in, .conv_out, .conv => 0,
+                .q_proj, .k_proj, .v_proj, .o_proj, .gate_proj, .q_norm, .k_norm => 2,
+                else => 23,
+            };
+            const name = try w.moduleName(&buf, namespace, layer, m);
+            const affine = !std.mem.endsWith(u8, name, ".weight");
+            const tensor = if (affine) try std.fmt.bufPrint(&full, "{s}.scales", .{name}) else name;
+            try std.testing.expect(names.contains(tensor));
+        }
+        var e: [64]u8 = undefined;
+        try std.testing.expect(names.contains(try w.embedName(&e, namespace)));
+        try std.testing.expectEqual(namespace, try w.detect(namespace == .bare, namespace == .wrapped));
+    }
+    try std.testing.expectError(error.MixedNamespaces, w.detect(true, true));
+}
