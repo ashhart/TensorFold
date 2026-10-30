@@ -155,7 +155,8 @@ fn openFamily(comptime S: type, a: Allocator, gpa: Allocator, io: std.Io, o: api
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = S.name, .lanes = h.backend.streams, .context_window = @intCast(window), .context_fitted = true, .startup = h.startup, .prefill_step = if (drafted and !@hasDecl(S.Engine, "copy_only")) S.promptRows(h.engine) else 0 });
     // kept prompt states (with sequences): --prompt-cache-gib, else 4 GiB, inside the device memory left past 2 GiB
     const want: u64 = @intFromFloat((o.prompt_cache_gib orelse 4) * (1 << 30));
-    const free = freeMemory(&h.ctx);
+    // Sysman only when a cache can use it: zesInit faults inside the driver under WSL2 (Iris Xe, NEO 23.43)
+    const free = if (drafted) freeMemory(&h.ctx) else 0;
     const budget: u64 = if (free > 2 << 30) @min(want, free - (2 << 30)) else 0;
     h.cache = null;
     std.log.info("xpu: prompt cache budget {d} MiB (free {d} MiB, asked {d} MiB)", .{ budget >> 20, free >> 20, want >> 20 });
