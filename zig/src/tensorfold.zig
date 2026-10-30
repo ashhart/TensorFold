@@ -124,6 +124,7 @@ pub const dsv41_attn = @import("families/deepseek_v41/metal/csa2_attn.zig");
 pub const dsv41_experts = @import("families/deepseek_v41/metal/experts.zig");
 pub const dsv41_mv = @import("families/deepseek_v41/metal/mv.zig");
 pub const dsv41_glue = @import("families/deepseek_v41/metal/glue_k.zig");
+pub const dsv41_vision = @import("families/deepseek_v41/metal/vision.zig");
 pub const dsv41_compress = @import("families/deepseek_v41/metal/compress.zig");
 pub const dsv41_xmma = @import("families/deepseek_v41/metal/experts_mma.zig");
 pub const dsv41_hc = @import("families/deepseek_v41/metal/hc.zig");

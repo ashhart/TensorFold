@@ -60,6 +60,8 @@ pub const deepseek_v41_fold = @embedFile("deepseek_v41/fold.metal");
 pub const deepseek_v41_compress = @embedFile("deepseek_v41/compress.metal");
 /// DeepSeek-V4.1 router, indexer, compressor and head matvecs: lane chains over K, one butterfly, any row count.
 pub const deepseek_v41_mv = @embedFile("deepseek_v41/mv.metal");
+/// DeepSeek V4.1's vision tower: epilogues, RoPE, attention, SwiGLU, the aligner's unshuffle and the stream merge.
+pub const deepseek_v41_vision = @embedFile("deepseek_v41/vision.metal");
 
 /// DeepSeek-V4.1 candidate blocks: block maxima, the newest block pinned, an exact top-2048 as a byte mask.
 pub const deepseek_v41_cand = @embedFile("deepseek_v41/cand.metal");
