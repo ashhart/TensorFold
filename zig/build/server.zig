@@ -75,22 +75,30 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     b.step("test-server-deepseek-chat-host", "Native DeepSeek prompt goldens, provenance and missing-template HTTP refusal").dependOn(&deepseek.step);
 }
 
-/// The CPU-only fake server and the engine-less CLI into zig-out/server/ (zig build server-cpu), for build.sh.
-pub fn cpuArtefacts(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, build_options: *std.Build.Step.Options) void {
-    const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = target, .optimize = optimize, .link_libc = true });
+/// The server tree's module rooted at `root` over no native engines: the fake server's, or a test among its sources.
+pub fn plain(b: *std.Build, root: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, lanes: *std.Build.Module) *std.Build.Module {
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = optimize });
     const template = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = target, .optimize = optimize });
-    const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
-    const none = b.createModule(.{ .root_source_file = b.path("zig/src/native/none.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "engine_api", .module = api }} });
-
-    // the fake server: the server module with no native engines, so addTo takes the plain drama prompt
-    const server_mod = b.createModule(.{ .root_source_file = b.path("zig/src/server/root.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{
+    const m = b.createModule(.{ .root_source_file = b.path(root), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{
         .{ .name = "engine_api", .module = api },
         .{ .name = "tokenizer", .module = tokenizer },
         .{ .name = "template", .module = template },
     } });
-    _ = addTo(b, server_mod, target, optimize);
+    _ = addTo(b, m, target, optimize);
+    return m;
+}
+
+/// The CPU-only fake server and the engine-less CLI into zig-out/server/ (zig build server-cpu), for build.sh.
+pub fn cpuArtefacts(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, build_options: *std.Build.Step.Options) void {
+    const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    // the fake server: the server module with no native engines, so addTo takes the plain drama prompt
+    const server_mod = plain(b, "zig/src/server/root.zig", target, optimize, lanes);
+    const api = server_mod.import_table.get("engine_api").?;
+    const tokenizer = server_mod.import_table.get("tokenizer").?;
+    const template = server_mod.import_table.get("template").?;
+    const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    const none = b.createModule(.{ .root_source_file = b.path("zig/src/native/none.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "engine_api", .module = api }} });
     const fake = b.addExecutable(.{ .name = "fake_serve", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/server/fake_serve.zig"),
         .target = target,

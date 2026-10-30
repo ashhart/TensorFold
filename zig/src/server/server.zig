@@ -295,10 +295,14 @@ pub const Server = struct {
         _ = prompt_ids;
         errdefer srv.release(false, request.*); // a refused request frees what it compiled here
         const required = if (f.get("tool_call_required")) |r| r.truthy() else false;
+        const one_call = if (f.get("tool_call_single")) |x| x.truthy() else false;
+        const all = has_tools and !required and tool_grammar.autoAllEnv();
         if (has_tools and required) {
             if (!srv.info.structures) return cx.fail(.request, "backend '{s}' cannot enforce tool_choice \"required\" or a named function: it has no token grammar support; send \"auto\" or \"none\"", .{srv.backendName()});
-            const one_call = if (f.get("tool_call_single")) |x| x.truthy() else false;
             request.structure = try tool_grammar.structure(srv, cx, tools, !one_call, thinking);
+        } else if (has_tools and srv.info.structures and tool_grammar.autoWanted(tools, all) and srv.grammarCompiler() != null) {
+            // auto with a strict tool (any, TENSORFOLD_TOOL_GRAMMAR=1): text or calls; no grammar library, no grammar
+            request.structure = try tool_grammar.optionalStructure(srv, cx, tools, all, !one_call, thinking);
         }
         if (try grammar.spec(cx, f)) |s| {
             if (!srv.info.structures) return cx.refuse("structured output (response_format and the guided_* fields) is not supported by this engine yet");
