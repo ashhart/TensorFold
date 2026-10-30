@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM on CUDA loads faster: 8 threads decode and pack each layer's routed experts instead of the loader's one (`TF_GLM_LOAD_PACK`, 1 to 16), the packed experts go up a piece at a time (at most 192 MiB) from pinned memory the GPU copies from, and 16 readers now read ahead of the load instead of 8. GLM-5.3-Flash XSFP4 loads in about 51 s instead of 155 s on two GB10s (TP=2) and 46 s instead of 124 s on three (TP=3), with the same replies and memory free at serving within about 1 GiB (#1636). Thanks to @Bizuayeu.
+
 - `--vision-urls`: an HTTPS image or video download now ends at its deadline however the server at the other end behaves. A timer closes the connection when the deadline passes, so a server that never answers the TLS handshake, or sends bytes slowly enough to keep each read alive, no longer holds the request past its download limit (10 seconds for an image, 20 for a video); the request gets the usual "failed or timed out" refusal. The TLS setup moves to its own file, `media_fetch_tls.zig`, with host tests for silent and malformed peers and for simultaneous first downloads loading the CA certificates once. Replies, model paths and images that download normally are unchanged (#1645). Thanks to @jayleaton.
 
 - DeepSeek V4.1 on CUDA: with both `TF_DSV41_PREPARED` and `TF_DSV41_SESSION_DISK` set, boot now hashes the pack once instead of twice; the session store reuses the content digest the prepared cache was keyed with, so a large pack is no longer read a second time from disk before the server is ready. The identity is the same value as before, and without a prepared cache the store still reads the pack once (#1644). Thanks to @jayleaton.
