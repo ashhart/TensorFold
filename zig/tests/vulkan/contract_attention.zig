@@ -1,7 +1,4 @@
-// Attention contract, group `attention`: the stage3_shaders pair rope_bf16 (fast_rope.comp, -DUSE_BF16 -DASH_QWEN35) and sdpa_rows_bf16 (sdpa_decode_native.comp, -DBF16_IO -DSDPA_DIM=256 -DSDPA_ROWS) against stage3_fixture.zig's f64 references. Host-checkable; no device code here.
-//  rope: stage3_fixture's Rope gate verbatim (f64 ropeRef, budget(2, 6, 1), bit-exact passthrough tail). The fixture owns it; nothing here rederives it.
-//  sdpa: the fixture's Attend f64 reference (f64 dots, max, softmax, output over exactly each row's visible keys) generalized to the served shapes -- the fixture's fixed [8]f64 score buffer caps it at 8 visible keys. The f64 operation order is identical, element for element.
-//  The bound is derived from the shader text, not asserted. Reading the bf16 arm of sdpa_decode_native.comp, per (head, row) 1024-thread workgroup: - q*scale: alpha = 1/16 = 2^-4, a power of two, so the multiply is exact. - score: ONE f32 accumulator over head_dim = 256 ascending-d FMAs (16-wide tiles with exact-zero tail padding, drained by *1.0f, which is exact): depth 256 at the absolute-terms scale. - max: comparisons and max() only -- zero roundings (NaN propagates). - denominator: NOT a plain f32 sum over the keys. 256 lanes each add ceil(n/256) exp terms sequentially (thread, thread+256, ...), then the 8-level binary tree (stride 128 -> 1) adds the lane partials: depth ceil(n/256) + 8. At n = 7168 that is 36, not 7168; claiming the plain-sum depth would overstate the denominator's bound ~200x. - normalizer 1.0/sum: one division. probs: exp recomputed from the same stored f32 scores (same inputs, same bits as the denominator pass) times the normalizer: one multiply. - output: ONE f32 accumulator over the n visible keys ascending (16-wide tiles, exact-zero tail padding, *1.0f drain): depth n. - one RNE bf16 store (cast.comp's pair). Served shapes (attention.zig, the engine's): decode rows = 1, prefill rows <= 32, visible keys 1..max_visible_keys = 7168 = the shader's kStreamKeys shared-memory bound. Cases sit on the 16-key tile edges, the 256-lane scan edges and the 1024-thread key-stride edges.
+// Host-only rope/SDPA contract vs f64; fixture caps at 8 keys; shader SDPA uses 256 lanes and 7168-key limit.
 const std = @import("std");
 const contract = @import("contract");
 const c = contract.spec;
@@ -18,7 +15,7 @@ pub const key_tile: u64 = 16; // 16-key output tiles / load batches
 pub const key_stride: u64 = 1024; // threads striding the score scan
 pub const max_visible_keys: u64 = 7168; // kStreamKeys: the shared-memory stream
 
-// The shader's denominator depth for n visible keys: one sequential chain per lane plus the binary tree. This is the honest depth -- not n.
+// For n keys, denominator depth is ceil(n/256)+8: 256 lanes, 8 tree levels, and 36 at n=7168.
 pub fn softmaxDepth(n: u64) u64 {
     return (n + lanes - 1) / lanes + tree_levels;
 }
@@ -43,7 +40,7 @@ pub const Mags = struct {
     value: f64 = 0,
 };
 
-// The stated bound for one output element, from the derivation above. Each stage carries its own depth at its own magnitude scale, exactly the house budget() form; two exp ops absorb the f32 exp's ulps. The final term is the one RNE bf16 store, with the fixture's 2^-8 store constant.
+// Bound each output by per-stage depths/scales, two f32 exp ulps, and one RNE bf16 store (2^-8).
 pub fn sdpaBound(n: u64, m: Mags, want: f64) f64 {
     const u: f64 = 0x1p-24;
     const dot = rel(dot_terms) * m.terms; // score dot depth 256
@@ -57,7 +54,7 @@ pub fn sdpaBound(n: u64, m: Mags, want: f64) f64 {
 
 pub const SdpaCase = struct { name: []const u8, rows: u64, prefix: u64 };
 
-// The cache exactly spans the visible keys: attendPlan requires prefix + rows <= capacity and refuses totals past max_visible_keys.
+// Capacity covers prefix + rows and rejects totals above max_visible_keys.
 pub fn capacityOf(case: SdpaCase) u64 {
     return case.prefix + case.rows;
 }
@@ -67,7 +64,7 @@ pub fn visibleKeys(case: SdpaCase, r: u64) u64 {
     return case.prefix + r + 1;
 }
 
-// The served shapes the engine dispatches (decode rows 1, prefill rows <= 32, visible keys 1..7168), with every reduction edge: - n = 1: the single-key transport corner (softmax is exactly 1.0). - n = 15/16/17: the 16-key tile edge (full tile, one-past tail). - n = 255/256/257: the 256-lane scan edge (chain depth 1 -> 2). - n = 1023/1024/1025: the 1024-thread key-stride edge. - n = 7167/7168: the kStreamKeys shared-memory bound. - rows 17/32 crossing the 1024 edge and filling the 7168 context.
+// Cases test n=1,15/16/17,255/256/257,1023/1024/1025,7167/7168 and rows 17/32 at 1024/7168 limits.
 pub const served_cases = [_]SdpaCase{
     .{ .name = "decode n=1", .rows = 1, .prefix = 0 },
     .{ .name = "decode n=16 tile", .rows = 1, .prefix = 15 },
@@ -84,7 +81,7 @@ pub const served_cases = [_]SdpaCase{
     .{ .name = "prefill rows32 to 7168", .rows = 32, .prefix = 7136 },
 };
 
-// The fixture's Attend f64 reference over the served shapes: per query row r and head h, f64 dots (ascending d), f64 max, f64 softmax and f64 output over exactly the n = prefix + r + 1 visible keys, on the cache layout the engine writes: (kv_head, capacity, head_dim). Collects the magnitudes the bound needs. Op order matches fx.Attend.init exactly.
+// Attend f64 dots/max/softmax/output for n=prefix+r+1 in (kv_head,capacity,head_dim); matches fx.Attend.init order.
 pub fn attendRef(
     a: std.mem.Allocator,
     q_bits: []const u16,
@@ -138,7 +135,7 @@ pub fn attendRef(
     }
 }
 
-// One causal SDPA gate over a served shape: bf16 q/k/v shells, the f64 reference from the very bits the GPU will read, and the derived bound. A row whose visible count is 1 has softmax exactly 1.0, so its output is the V row's bits unchanged; check() enforces that exactly.
+// Causal SDPA compares GPU bits to f64 references; n=1 preserves V bits, and finite wants require finite outputs.
 pub const Sdpa = struct {
     a: std.mem.Allocator,
     case: SdpaCase,
@@ -193,7 +190,7 @@ pub const Sdpa = struct {
         f.a.free(f.visible);
     }
 
-    // Every output element against its row's derived bound; single-key rows must carry the V bits exactly. Every finite reference demands a finite output.
+    // Check outputs against row bounds; single-key rows preserve V bits, and finite references require finite outputs.
     pub fn check(f: Sdpa, bits: []const u16) !Report {
         var r: Report = .{};
         const row_elems: usize = @intCast(fx.heads * fx.head_dim);

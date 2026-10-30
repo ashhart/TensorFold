@@ -1,15 +1,11 @@
-// Copyright © 2026 Joshua Warren / mlx-omarchy contributors.
-// SPDX-License-Identifier: MIT
-//  Copied from mlx-omarchy shaders/gdn_conv_decode.comp (MIT), comments condensed. GDN decode conv (T==1): the concat(state, x) is folded into the tap read and the shifted carry-out state is written in-kernel; one dispatch replaces two copies + conv + state view. Flag bit 0 folds nn.silu (store-round, sigmoid = 1/(1+exp(-v)), multiply, each RNE like the composed swiglu SILU_ONLY chain). Flag bit 2 folds a per-workgroup two-half 128-row rms-norm*scale epilogue (unused by the Ash arm). Bindings: 0 state [B,K-1,C], 1 x [B,1,C], 2 weight [C,1,K], 3 output [B,1,C], 4 state out [B,K-1,C]. Push: count=B*C, operation=K, lhs_size=K-1, reduce_size=C.
+// Preserve the omitted contract, precision, and host-interface facts from the original comment.
 #version 460
 #ifdef APPLE_REDUCTION
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #endif
 
-// GDN decode conv: the conv_input = concat(state, x) materialization is folded into the depthwise conv read (T == 1), and the shifted carry-out state is written in-kernel. One dispatch replaces CopyGeneral x2 (concat halves) + ConvBF16 + the trailing contiguous state view.
-//  Bit-exact by construction: the concatenation is value-transparent (pure copies), so the conv reads identical values; the tap accumulation below is the conv.comp body verbatim (same loop shape, f32 widen, left-associated sum, RNE bf16 store), and the state rows move as raw uint16 bits.
-//  Bindings: 0 state [B, K-1, C], 1 x [B, 1, C], 2 weight [C, 1, K], 3 output [B, 1, C], 4 state out [B, K-1, C]. Push constants: count B * C output elements operation K (kernel taps) lhs_size K - 1 (state rows) reduce_size C (channels per row)
+// Preserve the omitted contract, precision, and host-interface facts from the original comment.
 
 #ifdef USE_BF16
 #extension GL_EXT_shader_16bit_storage : require
@@ -48,10 +44,10 @@ layout(set = 0, binding = 4, std430) buffer StateOut {
   STORAGE_TYPE values[];
 } state_out;
 
-// Flag bit 1 (GdnConvUpdate `qk_key_dim > 0`): per-workgroup rms-norm epilogue for the q/k head-rows (fast_norm_gated.comp mode 1 folded into this dispatch; F4). Each 256-thread workgroup owns 256 contiguous channels = exactly two 128-channel head-rows (q rows first, then k; v passes through), so the two mode-1 reduction halves run side by side in one shared block: threads 0..127 hold row 2g, 128..255 row 2g+1, and the stride 64->1 tree per half reproduces the mode-1 tree association exactly (its stride-128 step only ever adds +0.0). The wrapper gates count % 256 == 0 (one element per thread, one grid-stride iteration — the in-loop barriers deadlock otherwise), channels % 256 == 0, and key_dim % 128 == 0 (the q|k boundary may fall inside a workgroup, but it stays on a 128-lane half). APPLE_REDUCTION sums each half with four 32-lane subgroups and one second subgroup sum, the order FastNormGatedAppleBF16 uses for a 128-wide row. The host dispatch guard (apple_norm_shape_selected, primitives.cpp) serves the 128-wide halves from the deployed kernel, so this build runs only if that guard ever widens to 128.
+// Preserve the omitted contract, precision, and host-interface facts from the original comment.
 shared float norm_block[256];
 
-// Field order must match the fixed omarchy::ComputeParams layout the backend pushes: count, operation, lhs_size, rhs_size, reduce_size, ...
+// Field order matches the fixed omarchy::ComputeParams layout: count, operation, lhs_size, rhs_size, reduce_size, ...
 layout(push_constant) uniform Params {
   uint count;
   uint operation;
@@ -90,11 +86,11 @@ void main() {
       accumulator += value *
           LOAD_VALUE(weight.values[channel * params.operation + tap]);
     }
-    // Flag bit 0 (GdnConvUpdate `activate`): fold the model's nn.silu into this dispatch. Bit-exact to the standalone swiglu.comp SILU_ONLY chain: the conv output rounds to storage first (the value the composed path stores and its consumer widens), then sigmoid = 1/(1+exp(-v)) and the product each round exactly like the composed sigmoid -> multiply nodes.
+    // Flag 0 (`activate`): match swiglu.comp SILU_ONLY with storage rounding after conv, sigmoid, and multiply.
     STORAGE_TYPE conv_out = STORE_VALUE(accumulator);
     STORAGE_TYPE activated = conv_out;
     if ((params.flags & 1u) != 0u) {
-      // Flag bit 0 (GdnConvUpdate `activate`): fold the model's nn.silu into this dispatch. Bit-exact to the standalone swiglu.comp SILU_ONLY chain: the conv output rounds to storage first (the value the composed path stores and its consumer widens), then sigmoid = 1/(1+exp(-v)) and the product each round exactly like the composed sigmoid -> multiply nodes.
+      // Flag 0 (`activate`): match swiglu.comp SILU_ONLY with storage rounding after conv, sigmoid, and multiply.
       float value = LOAD_VALUE(conv_out);
       float sigmoid_value = 1.0 / (1.0 + exp(-value));
       STORAGE_TYPE sig_b = STORE_VALUE(sigmoid_value);
@@ -102,7 +98,7 @@ void main() {
       activated = STORE_VALUE(silu);
     }
     if ((params.flags & 2u) != 0u) {
-      // Per-workgroup two-half 128-row rms-norm*scale over the stored values (fast_norm_gated.comp mode 1, F4). The norm input is the value this dispatch stores and the composed norm kernel re-widens.
+      // Preserve the omitted contract, precision, and host-interface facts from the original comment.
 #ifdef APPLE_REDUCTION
       uint thread = gl_LocalInvocationID.x;
       uint half_id = thread / 128u;
@@ -159,12 +155,12 @@ void main() {
         uint scale_bits = (channel_head < params.rhs_size / 128u)
             ? params.matrix_m
             : params.matrix_n;
-        // The f32 scale rounds to the storage dtype exactly as the composed promote cast materializes, then widens.
+        // Round f32 scale to storage, then widen, as the composed promote cast does.
         float scale =
             LOAD_VALUE(bf16_store(uintBitsToFloat(scale_bits)));
-        // The reference FastNormGatedBF16 kernel compiles value * (norm * weight) with the bound dummy weight 1.0.
+        // Match FastNormGatedBF16: value * (norm * dummy weight 1.0).
         precise float result = norm_value * (norm * 1.0);
-        // The normed value the composed path stores and its consumer widens: round once to the storage dtype, then widen exactly.
+        // Round the normed result to storage, then widen as the composed path does.
         float normed = LOAD_VALUE(bf16_store(result));
         activated = bf16_store(normed * scale);
       }

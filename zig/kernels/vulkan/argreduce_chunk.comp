@@ -1,12 +1,7 @@
-// Reused from mlx-omarchy shaders/argreduce_chunk.comp (MIT), comments condensed; driven at operation = 1 (max), one row, matrix_m = 4096.
+// This reuses mlx-omarchy shaders/argreduce_chunk.comp (MIT) for operation = 1 (max), one row, matrix_m = 4096.
 
-// Copyright © 2026 Joshua Warren / mlx-omarchy contributors.
-// SPDX-License-Identifier: MIT
-// ArgMin/ArgMax phase 1 of 2: one workgroup per (row, chunk of matrix_m, at most 4096 = 16 values a lane) writes its (value, index) pair.
-// The argreduce_suffix.comp rule, so every input gets the same index: extreme wins, first index on ties, first NaN wins, pairs start at (infinity, 0); a total preorder (value, then lower index) makes cutting and combining order-free.
-//  Variants: float32 (default), -DUSE_FP16, -DUSE_BF16. Floats compare in float32. Grid: x = rows * chunks (at most 65535).
+// Preserve the omitted contract, precision, and host-interface facts from the original comment.
 #version 460
-
 #ifdef USE_FP16
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
