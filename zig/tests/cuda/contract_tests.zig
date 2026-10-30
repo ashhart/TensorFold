@@ -7,6 +7,7 @@ const options = @import("contract_options");
 const check = @import("check.zig");
 const rows_k = @import("contract_rows.zig");
 const tail_k = @import("contract_norms_tail.zig");
+const tiles_k = @import("contract_rms_tiles.zig");
 const dory_k = @import("contract_dory.zig");
 const router_k = @import("contract_router.zig");
 const mm_k = @import("contract_mm.zig");
@@ -155,6 +156,9 @@ pub fn run(gpu: check.Gpu) !void {
     for (tail_which, &tails) |w, *t| t.* = .{ .rig = .{ .gpu = gpu, .s = s }, .which = w, .norms = &norms, .ctl = if (tail_k.control(w) != null) try mods[5].function(tail_k.symbol(w)) else null };
     defer for (&tails) |*t| t.deinit();
     for (&tails) |*t| try kernels.append(a, t.kernel());
+    var tiles = [_]tiles_k.Tiles{ tiles_k.init(gpu, s, &norms, .y), tiles_k.init(gpu, s, &norms, .xs) };
+    defer for (&tiles) |*t| t.deinit();
+    for (&tiles) |*t| try kernels.append(a, t.kernel());
     var dory: dory_k.Dory = .{};
     defer dory.deinit();
     try dory.add(gpu, s, &norms, mods[5], &kernels);
