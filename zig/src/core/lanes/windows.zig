@@ -237,6 +237,13 @@ pub fn anySampled(plans: []const Plan) bool {
 
 /// Trim draft prefixes by landing probability to the shared width with the most expected tokens a ms.
 pub fn allocate(e: *Engine, plans: []Plan) !void {
+    if (e.cfg.pinned_depth) {
+        // a pinned depth verifies every draft the head holds: its own confidence gate already ended the chain
+        for (plans) |p| {
+            if (p.kind == .head) p.stream.granted = @intCast(p.count());
+        }
+        return;
+    }
     if (e.trim) |t| return trimmed(e, plans, t);
     const a = e.arena.allocator();
     const fixed = try a.alloc(u32, plans.len);

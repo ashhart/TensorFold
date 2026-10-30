@@ -347,8 +347,22 @@ using Dot = DotF16;
     template __global__ void affine_dot2_stream<Dot, BITS, R, CB, true>(Affine, StreamSides, int, int);  \
     template __global__ void affine_dot2_stream_relu2<Dot, BITS, R, CB>(Affine, StreamSides, int, int);      \
     template __global__ void affine_dot2_stream_relu2_pair<Dot, BITS, R, CB>(Affine, Affine, int, int, int);
+// one column a lane (narrow launches): the plain product only
+#define TF_STREAM1(BITS, R) \
+    template __global__ void affine_dot2_stream<Dot, BITS, R, 1, false>(Affine, StreamSides, int, int);
 #if TF_MATRIX
 #define TF_WMMA(BITS) template __global__ void affine_wmma_gemm<BITS>(Affine);
+template __global__ void affine_wmma_moe_gu<4>(Affine, float);
+template __global__ void affine_wmma_moe_down<4>(Affine);
+template __global__ void affine_wmma_moe_gu_inexact<4>(Affine, float);
+template __global__ void affine_wmma_moe_down_inexact<4>(Affine);
+template __global__ void affine_wmma_dense<320>(Affine);
+template __global__ void affine_wmma_dense<2560>(Affine);
+template __global__ void affine_wmma_dense<6144>(Affine);
+template __global__ void affine_wmma_dense<10240>(Affine);
+template __global__ void affine_wmma_dense_inexact<2560>(Affine);
+template __global__ void affine_wmma_dense_inexact<6144>(Affine);
+template __global__ void affine_wmma_router<2560>(Affine);
 #else
 #define TF_WMMA(BITS)
 #endif
@@ -363,10 +377,20 @@ using Dot = DotF16;
     template __global__ void affine_dot2_row<Dot, BITS, 2>(Affine, int);                     \
     template __global__ void affine_dot2_row<Dot, BITS, 4>(Affine, int);                     \
     TF_LANES(BITS, 1) TF_LANES(BITS, 2) TF_LANES(BITS, 4) TF_LANES(BITS, kLaneRows)          \
+    TF_STREAM1(BITS, 1) TF_STREAM1(BITS, 2) TF_STREAM1(BITS, 4)                              \
     TF_STREAM(BITS, 1, 2) TF_STREAM(BITS, 1, 4) TF_STREAM(BITS, 1, 8)                        \
     TF_STREAM(BITS, 2, 2) TF_STREAM(BITS, 2, 4) TF_STREAM(BITS, 2, 8)                        \
     TF_STREAM(BITS, 4, 2) TF_STREAM(BITS, 4, 4)                                               \
     TF_WMMA(BITS)
+
+// the 5- to 8-row routed work lists: Flash Next's gate+up (CB 2) and down (CB 4) at 4-bit
+template __global__ void affine_dot2_stream_list<Dot, 4, 4, 2, true>(Affine, StreamSides, int, int, int);
+template __global__ void affine_dot2_stream_list<Dot, 4, 4, 4, false>(Affine, StreamSides, int, int, int);
+
+// the held-codes plain tile at 4-bit: 4 rows at the waves rule's columns, 8 rows at CB 2 and 4
+#define TF_HELD(R, CB) template __global__ void affine_dot2_stream_held<Dot, 4, R, CB>(Affine, StreamSides, int, int);
+TF_HELD(4, 1) TF_HELD(4, 2) TF_HELD(4, 4)
+TF_HELD(8, 2) TF_HELD(8, 4)
 
 TF_TILES(2)
 TF_TILES(3)

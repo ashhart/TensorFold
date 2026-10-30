@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "common/dot2.hpp"
+#include "common/tsum.hpp"
 #include "common/vec.hpp"
 #include "tiles/plan.hpp"
 
@@ -51,15 +52,23 @@ __device__ inline void stream_dots(const typename T::pair (&xp)[RG][16], const u
      ...);
 }
 
-// Epi::kPair: a lane's CB columns are CB / 2 gate columns and the same up columns; out is silu(gate) * up.
-template <class Dec, class Act, class T, class Epi, int R, int CB, bool WIDE>
-__device__ inline void stream_body(const typename Dec::Args& a, int lpc_log2, int gshift, int bx, int pair_cols, float limit) {
+// One column's chunk as its 16 code pairs, each made once (HELD: they stay while every row's x is dotted with them).
+template <class Dec, typename T, int... I>
+__device__ inline void stream_code_pairs(const uint32_t (&w)[Dec::kWords], typename T::pair (&qp)[16],
+                                         std::integer_sequence<int, I...>) {
+    ((qp[I] = Dec::template stream_pair<T, I>(w)), ...);
+}
+
+// Epi::kPair: CB / 2 gate columns and the same up columns, out silu(gate) * up; HELD: a round's code pairs made once.
+template <class Dec, class Act, class T, class Epi, int R, int CB, bool WIDE, bool HELD = false>
+__device__ inline void stream_body(const typename Dec::Args& a, int lpc_log2, int gshift, int bx, int by, int pair_cols,
+                                   float limit) {
     using pair = typename T::pair;
     constexpr bool PAIR = Epi::kPair;
     constexpr int RG = R < 4 ? R : 4;  // rows a pass keeps in registers
     constexpr int NG = R / RG;
     constexpr uint32_t kOne = T::ones;
-    const int row0 = blockIdx.y * R;  // a block's rows: more than 8 rows are 8-row blocks on the grid's y
+    const int row0 = by * R;  // a block's rows: row block `by` of R rows
     const int lpc = 1 << lpc_log2;
     const int lane = threadIdx.x & 31;
     const int j = lane & (lpc - 1);
@@ -103,9 +112,22 @@ __device__ inline void stream_body(const typename Dec::Args& a, int lpc_log2, in
             br[c] = terms.bias_raw(at);
         }
     };
-    // The dots of one round. A lane past the row's last chunk read the last one: its scale and bias are zero.
+    // One row's x chunk of a round, loaded before the next round's codes so the dots wait for this round alone
+    auto xload = [&](int base, uint32_t (&xn)[16], int r) {
+        const int q = base + j < nch ? base + j : nch - 1;
+        const u32x4* src = reinterpret_cast<const u32x4*>(xr[r] + static_cast<long long>(q) * 32);
+#pragma unroll
+        for (int v = 0; v < 4; ++v) {
+            const u32x4 t = src[v];
+            xn[4 * v] = t.x;
+            xn[4 * v + 1] = t.y;
+            xn[4 * v + 2] = t.z;
+            xn[4 * v + 3] = t.w;
+        }
+    };
+    // The dots of one round (a lane past the row's last chunk reads it with zero terms); x1: R = 1's x chunk
     auto work = [&](int base, const uint32_t (&w)[CB][Dec::kWords], const unsigned short (&sr)[CB],
-                    const unsigned short (&br)[CB]) {
+                    const unsigned short (&br)[CB], const uint32_t (&x1)[16]) {
         const bool live = base + j < nch;
         const int q = live ? base + j : nch - 1;
         float sc[CB];
@@ -115,23 +137,51 @@ __device__ inline void stream_body(const typename Dec::Args& a, int lpc_log2, in
             sc[c] = live ? terms.widen(sr[c]) : 0.f;
             bi[c] = live ? terms.widen(br[c]) : 0.f;
         }
+        if constexpr (HELD) {
+            pair qp[CB][16];
+#pragma unroll
+            for (int c = 0; c < CB; ++c) {
+                stream_code_pairs<Dec, T>(w[c], qp[c], std::make_integer_sequence<int, 16>{});
+            }
+#pragma unroll
+            for (int r = 0; r < R; ++r) {
+                if (row0 + r >= a.m) break;
+                uint32_t xn[16];
+                xload(base, xn, r);
+                float s = 0.f;
+#pragma unroll
+                for (int i = 0; i < 16; ++i) {
+                    s = T::dot(__builtin_bit_cast(pair, xn[i]), __builtin_bit_cast(pair, kOne), s);
+                }
+                pair xp[16];
+                stream_x_pairs<Dec, T>(xn, xp, std::make_integer_sequence<int, 16>{});
+#pragma unroll
+                for (int c = 0; c < CB; ++c) {
+                    float d = 0.f;
+#pragma unroll
+                    for (int i = 0; i < 16; ++i) d = T::dot(xp[i], qp[c][i], d);
+                    acc[r][c] = Dec::fold_scale(acc[r][c], d, sc[c]);
+                    acc[r][c] = Dec::fold_bias(acc[r][c], s, bi[c]);
+                }
+            }
+            return;
+        }
 #pragma unroll
         for (int g = 0; g < NG; ++g) {
             if (row0 + g * RG >= a.m) break;
+            // a pass with one live row loads and dots that row only; a row's sums do not depend on the rows beside it
+            const bool one = RG > 1 && row0 + g * RG + 1 >= a.m;
             pair xp[RG][16];
             float sx[RG];
 #pragma unroll
             for (int r = 0; r < RG; ++r) {
+                if (one && r > 0) break;
                 uint32_t xn[16];
-                const u32x4* src =
-                    reinterpret_cast<const u32x4*>(xr[g * RG + r] + static_cast<long long>(q) * 32);
+                if constexpr (R == 1) {
 #pragma unroll
-                for (int v = 0; v < 4; ++v) {
-                    const u32x4 t = src[v];
-                    xn[4 * v] = t.x;
-                    xn[4 * v + 1] = t.y;
-                    xn[4 * v + 2] = t.z;
-                    xn[4 * v + 3] = t.w;
+                    for (int i = 0; i < 16; ++i) xn[i] = x1[i];
+                } else {
+                    xload(base, xn, g * RG + r);
                 }
                 float s = 0.f;
 #pragma unroll
@@ -146,6 +196,16 @@ __device__ inline void stream_body(const typename Dec::Args& a, int lpc_log2, in
                 float d[RG];
 #pragma unroll
                 for (int r = 0; r < RG; ++r) d[r] = 0.f;
+                if constexpr (RG > 1) {
+                    if (one) {
+                        stream_dots<Dec, T, 1>(reinterpret_cast<const pair(&)[1][16]>(xp[0]),
+                                               w[c], reinterpret_cast<float(&)[1]>(d[0]),
+                                               std::make_integer_sequence<int, 16>{});
+                        acc[g * RG][c] = Dec::fold_scale(acc[g * RG][c], d[0], sc[c]);
+                        acc[g * RG][c] = Dec::fold_bias(acc[g * RG][c], sx[0], bi[c]);
+                        continue;
+                    }
+                }
                 stream_dots<Dec, T, RG>(xp, w[c], d, std::make_integer_sequence<int, 16>{});
 #pragma unroll
                 for (int r = 0; r < RG; ++r) {
@@ -168,22 +228,53 @@ __device__ inline void stream_body(const typename Dec::Args& a, int lpc_log2, in
     if constexpr (R == 1) {
         uint32_t wb[CB][Dec::kWords];
         unsigned short sbb[CB], bbb[CB];
+        uint32_t xn[16];
         fetch(at(0), wa, sa, ba);
         for (int r = 0; r < rounds; r += 2) {
+            xload(at(r), xn, 0);
             if (r + 1 < rounds) fetch(at(r + 1), wb, sbb, bbb);
-            work(at(r), wa, sa, ba);
+            work(at(r), wa, sa, ba, xn);
             if (r + 1 >= rounds) break;
+            xload(at(r + 1), xn, 0);
             if (r + 2 < rounds) fetch(at(r + 2), wa, sa, ba);
-            work(at(r + 1), wb, sbb, bbb);
+            work(at(r + 1), wb, sbb, bbb, xn);
         }
     } else {
         // several rows: the dots cover the loads' latency, and registers go to the rows' x
+        const uint32_t none[16] = {};
         for (int r = 0; r < rounds; ++r) {
             fetch(at(r), wa, sa, ba);
-            work(at(r), wa, sa, ba);
+            work(at(r), wa, sa, ba, none);
         }
     }
 
+    if (lpc == 32) {
+        // CH sums and up sums each in a transposing butterfly; lane (c << (5 - log2 CH)) holds column c's, stores it
+        constexpr int L = tsum_log2(CH);
+        const int c = lane >> (5 - L);
+#pragma unroll
+        for (int r = 0; r < R; ++r) {
+            float g[CH];
+#pragma unroll
+            for (int k = 0; k < CH; ++k) g[k] = acc[r][k];
+            float pv[PAIR ? 2 : 1];
+            pv[0] = tsum<CH>(g, lane);
+            if constexpr (PAIR) {
+                float u[CH];
+#pragma unroll
+                for (int k = 0; k < CH; ++k) u[k] = acc[r][k + CH];
+                pv[1] = tsum<CH>(u, lane);
+            }
+            const int col = col0 + c;
+            if ((lane & ((32 >> L) - 1)) != 0 || row0 + r >= a.m || col >= cols) continue;
+            if (!__builtin_isfinite(pv[0])) pv[0] = Dec::template repair_stream<T>(a, xr[r], col, pv[0]);
+            if constexpr (PAIR) {
+                if (!__builtin_isfinite(pv[1])) pv[1] = Dec::template repair_stream<T>(a, xr[r], col + pair_cols, pv[1]);
+            }
+            Epi::put(a, out_row(a, row0 + r), col, pv, 0, pair_cols, limit);
+        }
+        return;
+    }
 #pragma unroll
     for (int r = 0; r < R; ++r) {
         float v[CB];
@@ -211,9 +302,12 @@ __device__ inline void stream_body(const typename Dec::Args& a, int lpc_log2, in
 }
 
 // Item z of the plan (or plain product, or a group's side) at CB columns a lane, R rows; chunk group is q >> gshift.
-template <class Dec, class Act, class T, class Epi, int R, int CB, class Sides>
+template <class Dec, class Act, class T, class Epi, int R, int CB, bool HELD = false, class Sides>
 __device__ inline void stream_tile(typename Dec::Args& a, const Sides& sides, int lpc_log2, int gshift) {
-    int bx = blockIdx.x;
+    // row_blocks > 1: row blocks on the grid's x, so a column block's row blocks run together, its codes in cache
+    const bool rows_on_x = sides.row_blocks > 1;
+    int bx = rows_on_x ? static_cast<int>(blockIdx.y) : static_cast<int>(blockIdx.x);
+    const int by = rows_on_x ? static_cast<int>(blockIdx.x) : static_cast<int>(blockIdx.y);
     if (sides.count > 0) {
         int s = 0;
         while (s + 1 < sides.count && bx >= sides.first[s + 1]) ++s;
@@ -226,15 +320,29 @@ __device__ inline void stream_tile(typename Dec::Args& a, const Sides& sides, in
             a.out = static_cast<float*>(sides.out[s]);
         }
     }
-    if (!Dec::take_item(a, blockIdx.z) || static_cast<int>(blockIdx.y) * R >= a.m) return;
+    if (!Dec::take_item(a, blockIdx.z) || by * R >= a.m) return;
     if constexpr (Dec::kWideBytes == 4) {
-        stream_body<Dec, Act, T, Epi, R, CB, false>(a, lpc_log2, gshift, bx, sides.pair_cols, sides.limit);
+        stream_body<Dec, Act, T, Epi, R, CB, false, HELD>(a, lpc_log2, gshift, bx, by, sides.pair_cols, sides.limit);
     } else {
         // every chunk is wide-aligned when the words and the row stride are
         if (Dec::wide_aligned(a)) {
-            stream_body<Dec, Act, T, Epi, R, CB, true>(a, lpc_log2, gshift, bx, sides.pair_cols, sides.limit);
+            stream_body<Dec, Act, T, Epi, R, CB, true, HELD>(a, lpc_log2, gshift, bx, by, sides.pair_cols, sides.limit);
         } else {
-            stream_body<Dec, Act, T, Epi, R, CB, false>(a, lpc_log2, gshift, bx, sides.pair_cols, sides.limit);
+            stream_body<Dec, Act, T, Epi, R, CB, false, HELD>(a, lpc_log2, gshift, bx, by, sides.pair_cols, sides.limit);
+        }
+    }
+}
+
+// A routed plan of 5 to 8 rows as a work list: block z walks items z, z + gridDim.z, ...; a row's sums as on the grid.
+template <class Dec, class Act, class T, class Epi, int R, int CB>
+__device__ inline void stream_list(const typename Dec::Args& a, int pair_cols, float limit, int lpc_log2, int gshift,
+                                   int items) {
+    const int bx = static_cast<int>(blockIdx.x);
+    for (int z = static_cast<int>(blockIdx.z); z < items; z += static_cast<int>(gridDim.z)) {
+        typename Dec::Args b = a;
+        if (!Dec::take_item(b, z)) continue;
+        for (int by = 0; by * R < b.m; ++by) {
+            stream_body<Dec, Act, T, Epi, R, CB, true>(b, lpc_log2, gshift, bx, by, pair_cols, limit);
         }
     }
 }

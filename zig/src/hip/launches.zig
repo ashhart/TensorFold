@@ -8,7 +8,7 @@ const Module = @import("module.zig").Module;
 const Function = @import("module.zig").Function;
 const Stream = @import("stream.zig").Stream;
 const caps = @import("caps.zig");
-const affine = @import("launches/affine.zig");
+pub const affine = @import("launches/affine.zig");
 
 const util = @import("launches/util.zig");
 
@@ -38,7 +38,7 @@ const plan = @import("launches/plan.zig");
 const elementwise = @import("launches/elementwise.zig");
 const draw = @import("launches/draw.zig");
 const tp = @import("launches/tp.zig");
-const flashnext = @import("launches/flashnext.zig");
+pub const flashnext = @import("launches/flashnext.zig");
 const mamba = @import("launches/mamba.zig");
 const nemotron_moe = @import("launches/nemotron_moe.zig");
 
@@ -63,6 +63,10 @@ pub const Launcher = struct {
     gdn_gate: Triple,
     gated_delta_tile: [2]Function, // dk 128, 16
     gated_delta_wave: [2]Function,
+    gdn_hold: [2]Function, // dk 128, 16: a verify window that holds its state (no snapshot, no store)
+    gdn_keep: [2]Function, // dk 128, 16: a keep's run of every DeltaNet layer's state through its kept rows
+    gdn_prompt: Function, // dk = dv = 128, a prompt's rows, half a value head a block
+    gdn_wy: [2]Function, // dk = dv = 128, a prompt's rows in chunks on the gfx11 matrix cores: prep, scan (inexact)
     score_keys: Triple, // by cache kind
     apply_values: Triple,
     causal: Triple,
@@ -78,6 +82,8 @@ pub const Launcher = struct {
     plan: PlanFns,
     /// decode.hip's merged launches are on (off keeps the launches they replace).
     fuse: bool,
+    /// The kernels that change a result's bits may run (policy numerics=inexact); off keeps the exact path's.
+    inexact: bool,
     /// The 64-row prefill attention tile is on.
     wide: bool,
     /// The MLX affine products and the registry that picks their tiles.
@@ -107,11 +113,15 @@ pub const Launcher = struct {
 
     const Decode = struct {
         router: [2]Function, // fp16, bf16
+        router_select: [2]Function, // fp16, bf16 x; bf16 rows
         tail: Function,
         conv_split: Function,
         rms2: Function,
         gnorm_out: Function,
         select: Function,
+        select_rows: Function,
+        /// A MoE call's live experts' down codes read beside its gate and up (tf_moe_prefetch).
+        prefetch: Function,
     };
 
     const Ops = struct {
@@ -130,10 +140,16 @@ pub const Launcher = struct {
         argmax_part: Function,
         argmax_join: Function,
         topk: Function,
+        topk_part: Function,
+        topk_join: Function,
         conv_prefill: Function,
+        gdn_prompt_prep: Function,
         gdn_gate_prefill: Function,
         dense_rows: Function,
         moe_route: Function,
+        route_count: Function,
+        route_scan: Function,
+        route_scatter: Function,
         router_rows: [2]Function, // fp16, bf16
         router_tile: [2]Function,
         router_small: [2]Function,
@@ -146,8 +162,8 @@ pub const Launcher = struct {
         token_prob: Function,
     };
 
-    /// Which kernels a run takes where two give the same bits; every one defaults on.
-    pub const Choices = struct { fuse: bool = true, wide: bool = true, products: affine.Choices = .{} };
+    /// Which kernels a run takes where two give the same bits (default on); `inexact` lets bit-changing ones run.
+    pub const Choices = struct { fuse: bool = true, inexact: bool = false, wide: bool = true, products: affine.Choices = .{} };
 
     /// Loads the code objects on the current device and resolves every kernel the launchers use.
     pub fn load(r: *const runtime.Runtime, choices: Choices, images: [kernels.group_count][]align(8) const u8) Error!Launcher {
@@ -167,8 +183,9 @@ pub const Launcher = struct {
         const dec = l.mods[@backingInt(kernels.Group.decode)];
         const pl = l.mods[@backingInt(kernels.Group.plan)];
         l.fuse = choices.fuse;
+        l.inexact = choices.inexact;
         l.wide = choices.wide;
-        l.dec = .{ .router = .{ try dec.function("tf_router_decode_f16"), try dec.function("tf_router_decode_bf16") }, .tail = try dec.function("tf_tail"), .conv_split = try dec.function("tf_conv_split"), .rms2 = try dec.function("tf_rms2"), .gnorm_out = try dec.function("tf_gnorm_out"), .select = try dec.function("tf_select_decode") };
+        l.dec = .{ .router = .{ try dec.function("tf_router_decode_f16"), try dec.function("tf_router_decode_bf16") }, .router_select = .{ try dec.function("tf_router_select_f16"), try dec.function("tf_router_select_bf16") }, .tail = try dec.function("tf_tail"), .conv_split = try dec.function("tf_conv_split"), .rms2 = try dec.function("tf_rms2"), .gnorm_out = try dec.function("tf_gnorm_out"), .select = try dec.function("tf_select_decode"), .select_rows = try dec.function("tf_select_rows"), .prefetch = try dec.function("tf_moe_prefetch") };
         l.plan = .{
             .kv_write = try pl.function("tf_plan_kv_write"),
             .kv_write_act = try pl.function("tf_plan_kv_write_act"),
@@ -202,10 +219,16 @@ pub const Launcher = struct {
             .argmax_part = try ops.function("tf_argmax_part"),
             .argmax_join = try ops.function("tf_argmax_join"),
             .topk = try ops.function("tf_topk"),
+            .topk_part = try ops.function("tf_topk_part"),
+            .topk_join = try ops.function("tf_topk_join"),
             .conv_prefill = try ops.function("tf_conv_prefill"),
+            .gdn_prompt_prep = try ops.function("tf_gdn_prompt_prep"),
             .gdn_gate_prefill = try ops.function("tf_gdn_gate_prefill"),
             .dense_rows = try ops.function("tf_dense_rows"),
             .moe_route = try ops.function("tf_moe_route"),
+            .route_count = try ops.function("tf_route_count"),
+            .route_scan = try ops.function("tf_route_scan"),
+            .route_scatter = try ops.function("tf_route_scatter"),
             .router_rows = .{ try ops.function("tf_router_rows_f16"), try ops.function("tf_router_rows_bf16") },
             .router_tile = .{ try ops.function("tf_router_tile_f16"), try ops.function("tf_router_tile_bf16") },
             .router_small = .{ try ops.function("tf_router_small_f16"), try ops.function("tf_router_small_bf16") },
@@ -247,12 +270,16 @@ pub const Launcher = struct {
             try act.function(ns ++ "15gdn_gate_kernelI12hip_bfloat16EEvPKT_S5_PKfS7_PfS8_ii"),
         };
         l.gated_delta_tile = .{
-            try gd.function(ns ++ "16gated_delta_tileILi128ELi8ELi16EEEvPKfS3_S3_S3_S3_PfS4_iiiiS4_"),
-            try gd.function(ns ++ "16gated_delta_tileILi16ELi8ELi16EEEvPKfS3_S3_S3_S3_PfS4_iiiiS4_"),
+            try gd.function(ns ++ "16gated_delta_tileILi128ELi8ELi16EEEvPKfS3_S3_S3_S3_PfS4_iiiiS4_PKi"),
+            try gd.function(ns ++ "16gated_delta_tileILi16ELi8ELi16EEEvPKfS3_S3_S3_S3_PfS4_iiiiS4_PKi"),
         };
+        l.gdn_hold = .{ try gd.function("tf_gdn_hold_128"), try gd.function("tf_gdn_hold_16") };
+        l.gdn_keep = .{ try gd.function("tf_gdn_keep_128"), try gd.function("tf_gdn_keep_16") };
+        l.gdn_prompt = try gd.function("tf_gdn_prompt_128");
+        l.gdn_wy = .{ try gd.function("tf_gdn_wy_prep"), try gd.function("tf_gdn_wy_scan") };
         l.gated_delta_wave = .{
-            try gd.function(ns ++ "18gated_delta_kernelILi128EEEvPKfS3_S3_S3_S3_PfS4_iiiiS4_"),
-            try gd.function(ns ++ "18gated_delta_kernelILi16EEEvPKfS3_S3_S3_S3_PfS4_iiiiS4_"),
+            try gd.function(ns ++ "18gated_delta_kernelILi128EEEvPKfS3_S3_S3_S3_PfS4_iiiiS4_PKi"),
+            try gd.function(ns ++ "18gated_delta_kernelILi16EEEvPKfS3_S3_S3_S3_PfS4_iiiiS4_PKi"),
         };
         l.score_keys = .{
             try att.function("_Z10score_keysI6__halfEvPKfPKT_PfiiiifixxxPKi"),
@@ -282,6 +309,7 @@ pub const Launcher = struct {
         const dot2 = l.mods[@backingInt(kernels.Group.affine_dot2)];
         l.affine = try affine.Kernels.load(tiles, dot2, caps.Caps.of(kernels.arch) orelse return error.Invalid, choices.products);
         try l.affine.fillByteLut(r, dot2);
+        try l.affine.fillHcGate(r);
         l.fnx = try flashnext.Fns.load(l.mods[@backingInt(kernels.Group.flashnext)]);
         return l;
     }
@@ -299,6 +327,7 @@ pub const Launcher = struct {
     pub const tf_conv_rows = conv.tf_conv_rows;
     pub const tf_conv_split = conv.tf_conv_split;
     pub const tf_conv_prefill = conv.tf_conv_prefill;
+    pub const tf_gdn_prompt_prep = conv.tf_gdn_prompt_prep;
     pub const tf_qk_rope = rope.tf_qk_rope;
     pub const tf_rope_decode = rope.tf_rope_decode;
     pub const tf_rope_prefill = rope.tf_rope_prefill;
@@ -306,10 +335,15 @@ pub const Launcher = struct {
     pub const routerWith = moe.routerWith;
     pub const routerWindow = moe.routerWindow;
     pub const tf_moe_router = moe.tf_moe_router;
+    pub const routerSelect = moe.routerSelect;
     pub const tf_moe_select = moe.tf_moe_select;
     pub const tf_moe_act = moe.tf_moe_act;
+    pub const tf_moe_prefetch = moe.tf_moe_prefetch;
     pub const tf_moe_combine = moe.tf_moe_combine;
     pub const tf_moe_route = moe.tf_moe_route;
+    pub const tf_moe_route_wide = moe.tf_moe_route_wide;
+    pub const routeScratch = moe.routeScratch;
+    pub const route_seg = moe.route_seg;
     pub const tf_causal = attention.tf_causal;
     pub const tf_attn_gate = attention.tf_attn_gate;
     pub const tf_kv_write = attention.tf_kv_write;
@@ -317,6 +351,7 @@ pub const Launcher = struct {
     pub const tf_argmax_rows = draw.tf_argmax_rows;
     pub const tf_argmax_parts = draw.tf_argmax_parts;
     pub const tf_topk_rows = draw.tf_topk_rows;
+    pub const tf_topk_parts = draw.tf_topk_parts;
     pub const tf_add_wide = tp.tf_add_wide;
     pub const tf_moe_localize = tp.tf_moe_localize;
     pub const tf_moe_foreign_items = tp.tf_moe_foreign_items;
@@ -325,6 +360,12 @@ pub const Launcher = struct {
     pub const pagedCausal = attention.pagedCausal;
     pub const tf_gdn_gate = recurrence.tf_gdn_gate;
     pub const tf_gated_delta = recurrence.tf_gated_delta;
+    pub const tf_gdn_hold = recurrence.tf_gdn_hold;
+    pub const tf_gdn_keep = recurrence.tf_gdn_keep;
+    pub const tf_gdn_wy = recurrence.tf_gdn_wy;
+    pub const gdn_wy_scratch = recurrence.wyScratch;
+    pub const gdn_wy_on = recurrence.wyOnMatrix;
+    pub const gdn_prompt_rows = recurrence.prompt_rows;
     pub const planKvWrite = plan.planKvWrite;
     pub const planCausal = plan.planCausal;
     pub const planCausalAs = plan.planCausalAs;
@@ -347,17 +388,27 @@ pub const Launcher = struct {
     pub const tf_dense_rows = elementwise.tf_dense_rows;
     pub const fn_hc_norm = flashnext.hcNorm;
     pub const fn_hc_norm_shares = flashnext.hcNormShares;
+    pub const fn_hc_norm_moe = flashnext.hcNormMoe;
+    pub const fn_hc_norm_moe_v = flashnext.hcNormMoeV;
     pub const fn_hc_gates = flashnext.hcGates;
     pub const fn_hc_mix = flashnext.hcMix;
+    pub const fn_hc_mix_scalar = flashnext.hcMixScalar;
+    pub const fn_hc_up_mix = flashnext.hcUpMix;
+    pub const fn_hc_up = flashnext.hc_up;
     pub const fn_rms_wide = flashnext.rmsWide;
     pub const fn_ple_gate = flashnext.pleGate;
     pub const fn_ple_conv = flashnext.pleConv;
     pub const fn_ngram_ids = flashnext.ngramIds;
     pub const fn_idx_pool = flashnext.idxPool;
     pub const fn_idx_pool_at = flashnext.idxPoolAt;
+    pub const fn_qsa_prep = flashnext.qsaPrep;
     pub const fn_idx_scores = flashnext.idxScores;
+    pub const fn_idx_scores_mma = flashnext.idxScoresMma;
     pub const fn_idx_select = flashnext.idxSelect;
     pub const fn_sparse_attention = flashnext.sparseAttention;
+    pub const fn_sparse_prompt = flashnext.sparsePrompt;
+    pub const fn_sparse_prompt_on = flashnext.promptOnMatrix;
+    pub const fn_sparse_decode = flashnext.sparseDecode;
     pub const tf_mamba_conv = mamba.tf_mamba_conv;
     pub const tf_mamba_dt = mamba.tf_mamba_dt;
     pub const tf_mamba_scan = mamba.tf_mamba_scan;

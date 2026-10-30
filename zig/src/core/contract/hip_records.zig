@@ -9,13 +9,14 @@ pub const Record = struct { launch: limits.HipLaunch, usage: [limits.rdna.len]U 
 
 const rms_ns = "_ZN2tf4rocm10rms_kernelI";
 
-/// The 4-bit stream tile with the relu^2 epilogue, `rows` rows and `cb` columns a lane: DotF16 on RDNA2, else DotBF16.
-fn relu2Tile(comptime rows: u32, comptime cb: u32) limits.HipLaunch {
-    const fmt = "_ZN2tf4rocm24affine_dot2_stream_relu2INS0_{s}ELi4ELi{d}ELi{d}EEEvNS0_6AffineENS0_11StreamSidesEii";
-    const half = std.fmt.comptimePrint(fmt, .{ "6DotF16", rows, cb });
-    const brain = std.fmt.comptimePrint(fmt, .{ "7DotBF16", rows, cb });
+/// The 4-bit work list of 5 to 8 rows (4-row tile): SwiGLU pair at CB 2, plain at CB 4; DotF16 on RDNA2, else DotBF16.
+fn listTile(comptime pair: bool) limits.HipLaunch {
+    const fmt = "_ZN2tf4rocm23affine_dot2_stream_listINS0_{s}ELi4ELi4ELi{d}ELb{d}EEEvNS0_6AffineENS0_11StreamSidesEiii";
+    const cb: u32 = if (pair) 2 else 4;
+    const half = std.fmt.comptimePrint(fmt, .{ "6DotF16", cb, @intFromBool(pair) });
+    const brain = std.fmt.comptimePrint(fmt, .{ "7DotBF16", cb, @intFromBool(pair) });
     return .{
-        .name = std.fmt.comptimePrint("relu2 stream tile 4-bit {d}x{d}", .{ rows, cb }),
+        .name = std.fmt.comptimePrint("{s} stream work list 4-bit 4x{d}", .{ if (pair) "swiglu" else "plain", cb }),
         .symbol = brain,
         .image = "affine_tiles",
         .threads = 128,
@@ -25,6 +26,24 @@ fn relu2Tile(comptime rows: u32, comptime cb: u32) limits.HipLaunch {
 
 /// HIP kernels as launched; tf-hip-kernel-contract limits DIR re-derives the usage records from the code objects.
 const own_records = [_]Record{
+    .{
+        .launch = listTile(true),
+        .usage = .{
+            .{ .vgprs = 161, .sgprs = 102, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 163, .sgprs = 102, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 163, .sgprs = 102, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 163, .sgprs = 105, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        },
+    },
+    .{
+        .launch = listTile(false),
+        .usage = .{
+            .{ .vgprs = 194, .sgprs = 107, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 220, .sgprs = 107, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 220, .sgprs = 107, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 220, .sgprs = 107, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        },
+    },
     .{
         .launch = .{ .name = "RMS norm tf_rms_rows", .symbol = "tf_rms_rows", .image = "ops", .threads = 256 },
         .usage = .{
@@ -285,78 +304,7 @@ const own_records = [_]Record{
             .{ .vgprs = 131, .sgprs = 52, .lds = 20544, .private = 0, .bound = 128, .wave = 32 },
         },
     },
-    .{
-        .launch = relu2Tile(1, 2),
-        .usage = .{
-            .{ .vgprs = 63, .sgprs = 53, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 65, .sgprs = 54, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 65, .sgprs = 54, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 65, .sgprs = 56, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-        },
-    },
-    .{
-        .launch = relu2Tile(1, 4),
-        .usage = .{
-            .{ .vgprs = 101, .sgprs = 56, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 102, .sgprs = 57, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 102, .sgprs = 57, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 102, .sgprs = 59, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-        },
-    },
-    .{
-        .launch = relu2Tile(1, 8),
-        .usage = .{
-            .{ .vgprs = 181, .sgprs = 59, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 178, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 178, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 178, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-        },
-    },
-    .{
-        .launch = relu2Tile(2, 2),
-        .usage = .{
-            .{ .vgprs = 75, .sgprs = 59, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 68, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 68, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 68, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-        },
-    },
-    .{
-        .launch = relu2Tile(2, 4),
-        .usage = .{
-            .{ .vgprs = 93, .sgprs = 61, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 102, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 102, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 102, .sgprs = 64, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-        },
-    },
-    .{
-        .launch = relu2Tile(2, 8),
-        .usage = .{
-            .{ .vgprs = 157, .sgprs = 65, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 158, .sgprs = 66, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 158, .sgprs = 66, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 158, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-        },
-    },
-    .{
-        .launch = relu2Tile(4, 2),
-        .usage = .{
-            .{ .vgprs = 113, .sgprs = 67, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 114, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 114, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 114, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-        },
-    },
-    .{
-        .launch = relu2Tile(4, 4),
-        .usage = .{
-            .{ .vgprs = 147, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 150, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 150, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 150, .sgprs = 72, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-        },
-    },
+} ++ @import("hip_records_relu2.zig").records ++ [_]Record{
     .{
         .launch = .{
             .name = "planned walk tf_plan_kv_write_act",
@@ -425,6 +373,24 @@ const own_records = [_]Record{
         },
     },
     .{
+        .launch = .{ .name = "top-k tf_topk_part", .symbol = "tf_topk_part", .image = "ops", .threads = 1024 },
+        .usage = .{
+            .{ .vgprs = 33, .sgprs = 36, .lds = 1296, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 78, .sgprs = 36, .lds = 1296, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 78, .sgprs = 36, .lds = 1296, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 78, .sgprs = 36, .lds = 1296, .private = 0, .bound = 1024, .wave = 32 },
+        },
+    },
+    .{
+        .launch = .{ .name = "top-k tf_topk_join", .symbol = "tf_topk_join", .image = "ops", .threads = 1024 },
+        .usage = .{
+            .{ .vgprs = 16, .sgprs = 36, .lds = 33808, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 16, .sgprs = 36, .lds = 33808, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 16, .sgprs = 36, .lds = 33808, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 16, .sgprs = 37, .lds = 33808, .private = 0, .bound = 1024, .wave = 32 },
+        },
+    },
+    .{
         .launch = .{ .name = "argmax tf_argmax_join", .symbol = "tf_argmax_join", .image = "ops", .threads = 256 },
         .usage = .{
             .{ .vgprs = 10, .sgprs = 21, .lds = 2048, .private = 0, .bound = 256, .wave = 32 },
@@ -461,7 +427,52 @@ const own_records = [_]Record{
             .{ .vgprs = 36, .sgprs = 32, .lds = 50688, .private = 0, .bound = 1024, .wave = 32 },
         },
     },
-} ++ @import("hip_records_pair.zig").records;
+    .{
+        .launch = .{ .name = "MoE router (decode, fp32 rows) tf_router_decode_f16", .symbol = "tf_router_decode_f16", .image = "decode", .threads = 128 },
+        .usage = .{
+            .{ .vgprs = 106, .sgprs = 75, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 90, .sgprs = 75, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 90, .sgprs = 75, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 90, .sgprs = 76, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        },
+    },
+    .{
+        .launch = .{ .name = "MoE router (decode, fp32 rows) tf_router_decode_bf16", .symbol = "tf_router_decode_bf16", .image = "decode", .threads = 128 },
+        .usage = .{
+            .{ .vgprs = 106, .sgprs = 75, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 91, .sgprs = 75, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 91, .sgprs = 75, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 91, .sgprs = 76, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        },
+    },
+    .{
+        .launch = .{ .name = "MoE router and pick in one launch (decode, bf16 rows) tf_router_select_f16", .symbol = "tf_router_select_f16", .image = "decode", .threads = 128, .dynamic = 2 * 2560 * 2 },
+        .usage = .{
+            .{ .vgprs = 135, .sgprs = 86, .lds = 5456, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 135, .sgprs = 82, .lds = 5456, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 135, .sgprs = 82, .lds = 5456, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 135, .sgprs = 83, .lds = 5456, .private = 0, .bound = 128, .wave = 32 },
+        },
+    },
+    .{
+        .launch = .{ .name = "MoE router and pick in one launch (decode, bf16 rows) tf_router_select_bf16", .symbol = "tf_router_select_bf16", .image = "decode", .threads = 128, .dynamic = 2 * 2560 * 2 },
+        .usage = .{
+            .{ .vgprs = 135, .sgprs = 86, .lds = 5456, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 135, .sgprs = 82, .lds = 5456, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 135, .sgprs = 82, .lds = 5456, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 135, .sgprs = 83, .lds = 5456, .private = 0, .bound = 128, .wave = 32 },
+        },
+    },
+    .{
+        .launch = .{ .name = "MoE down codes read beside the gate and up (side stream) tf_moe_prefetch", .symbol = "tf_moe_prefetch", .image = "decode", .threads = 256 },
+        .usage = .{
+            .{ .vgprs = 11, .sgprs = 26, .lds = 260, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 11, .sgprs = 26, .lds = 260, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 11, .sgprs = 26, .lds = 260, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 11, .sgprs = 22, .lds = 260, .private = 0, .bound = 256, .wave = 32 },
+        },
+    },
+} ++ @import("hip_records_wmma.zig").records ++ @import("hip_records_pair.zig").records;
 
 pub const records = own_records ++ @import("hip_records_stream.zig").records;
 
@@ -503,8 +514,13 @@ pub fn check(a: std.mem.Allocator, list: []const Record, quiet: bool) !usize {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(a);
     var n: usize = 0;
-    for (list) |r| for (limits.rdna, r.usage) |t, u| {
-        if (u.vgprs == 0) {
+    for (list) |r| for (limits.rdna, r.usage, r.launch.served) |t, u, served| {
+        if (!served) {
+            if (u.vgprs != 0) {
+                try out.print(a, "{s} on {s}: usage recorded on a chip that does not launch it\n", .{ r.launch.name, t.name });
+                n += 1;
+            }
+        } else if (u.vgprs == 0) {
             try out.print(a, "{s} on {s}: no compiled usage recorded\n", .{ r.launch.name, t.name });
             n += 1;
         } else n += try limits.hip(r.launch, u, t, &out, a);
@@ -556,4 +572,17 @@ test "a control cannot fit or lack compiled usage on any one chip" {
             try std.testing.expectEqual(@as(usize, 1), try controlProblems(a, missing, true));
         }
     }
+}
+
+test "a chip a launch is not served on records no usage, and recorded usage there is a problem" {
+    const a = std.testing.allocator;
+    var r: Record = .{ .launch = .{ .name = "gfx11 tile", .symbol = "k", .image = "affine_tiles", .threads = 256, .served = limits.gfx11_only }, .usage = undefined };
+    for (limits.rdna, &r.usage) |t, *u| u.* = if (std.mem.startsWith(u8, t.name, "gfx11")) .{ .vgprs = 64, .bound = 256 } else .{ .vgprs = 0 };
+    try std.testing.expectEqual(@as(usize, 0), try check(a, &.{r}, true));
+    r.usage[0] = .{ .vgprs = 64, .bound = 256 };
+    try std.testing.expectEqual(@as(usize, 1), try check(a, &.{r}, true));
+    // served everywhere: each chip without usage is a problem (gfx1030 and gfx1201 here)
+    r.launch.served = @splat(true);
+    r.usage[0] = .{ .vgprs = 0 };
+    try std.testing.expectEqual(@as(usize, 2), try check(a, &.{r}, true));
 }

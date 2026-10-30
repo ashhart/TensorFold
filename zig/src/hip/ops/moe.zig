@@ -2,6 +2,8 @@
 
 const t = @import("types.zig");
 const Ops = @import("ops.zig").Ops;
+const Launcher = @import("../launches.zig").Launcher;
+const util = @import("../launches/util.zig");
 const Error = t.Error;
 const Tensor = t.Tensor;
 const p = t.p;
@@ -24,13 +26,29 @@ pub fn moeRouter(o: Ops, x: Tensor, rows32: u64, logits: u64, r: usize, d: usize
     try o.l.tf_moe_router(p(x.ptr), @backingInt(x.kind), f(rows32), f(logits), int(r), int(d), int(e), o.stream);
 }
 
+/// A prompt's router logits: bf16 on the matrix cores under numerics=inexact (near ties may flip), else fp32 rows.
+pub fn moeRouterPrompt(o: Ops, x: Tensor, rows32: u64, rows16: u64, logits: u64, r: usize, d: usize, e: usize) Error!void {
+    if (o.prefill and o.inexact() and rows16 != 0 and x.kind == .bf16 and r >= 64) {
+        if (try o.l.affine.routerInexactGo(o.l.r, x.ptr, rows16, logits, int(r), int(e), int(d), o.stream)) return;
+    }
+    try moeRouter(o, x, rows32, logits, r, d, e);
+}
+
+/// Decode router logits (bf16 rows), pick and `plan` (`tile` pairs an item, 0: one row) in one launch; false if not.
+pub fn moeRouterSelect(o: Ops, x: Tensor, rows16: u64, done: u64, logits: u64, pick: u64, wts: u64, plan: ?struct { items: u64, members: u64 }, capacity: usize, r: usize, d: usize, e: usize, top_k: usize, tile: usize) Error!bool {
+    if (o.prefill or rows16 == 0) return false;
+    return o.l.routerSelect(p(x.ptr), @backingInt(x.kind), @ptrFromInt(rows16), f(logits), i(pick), f(wts), if (plan) |pl| i(pl.items) else null, if (plan) |pl| i(pl.members) else null, int(capacity), int(r), int(d), int(e), int(top_k), int(tile), done, o.stream);
+}
+
 /// The pick rule per row; with `plan` (one row) it also writes the plan's items and members.
 pub fn moeSelect(o: Ops, logits: u64, pick: u64, wts: u64, plan: ?struct { items: u64, members: u64 }, capacity: usize, r: usize, experts: usize, top_k: usize) Error!void {
     try o.l.tf_moe_select(f(logits), i(pick), f(wts), if (plan) |pl| i(pl.items) else null, if (plan) |pl| i(pl.members) else null, int(capacity), int(r), int(experts), int(top_k), o.stream);
 }
 
+/// The plan: tf_moe_route's members and items; a prompt's many pairs in three launches over arena scratch.
 pub fn moeRoute(o: Ops, picks: u64, pairs: usize, experts: usize, tile: usize, members: u64, items: u64, capacity: usize) Error!void {
-    try o.l.tf_moe_route(@ptrFromInt(picks), int(pairs), int(experts), int(tile), i(members), i(items), int(capacity), o.stream);
+    const scratch: u64 = if (pairs >= 4 * Launcher.route_seg) try o.arena.take(Launcher.routeScratch(pairs, experts)) else 0;
+    try o.l.tf_moe_route_wide(@ptrFromInt(picks), int(pairs), int(experts), int(tile), i(members), i(items), int(capacity), scratch, o.stream);
 }
 
 pub fn moeAct(o: Ops, both: u64, out: Tensor, pairs: usize, width: usize, limit: f32) Error!void {
@@ -39,4 +57,11 @@ pub fn moeAct(o: Ops, both: u64, out: Tensor, pairs: usize, width: usize, limit:
 
 pub fn moeCombine(o: Ops, y: u64, wts: u64, out: Tensor, r: usize, slots: usize, d: usize) Error!void {
     try o.l.tf_moe_combine(f(y), f(wts), p(out.ptr), @backingInt(out.kind), int(r), int(slots), int(d), o.stream);
+}
+
+/// After a fork, read the live `items`' experts' down codes into the caches on the side stream, at most `cap` bytes.
+pub fn moePrefetch(o: Ops, items: u64, count: usize, words: u64, expert_bytes: usize, experts: usize, cap: usize) Error!void {
+    if (o.side.stream == null or o.side.ring == null or o.stream == util.counting) return;
+    try o.fork();
+    try o.l.tf_moe_prefetch(@ptrFromInt(items), int(count), words, @intCast(expert_bytes), int(experts), @intCast(cap), o.side.stream);
 }

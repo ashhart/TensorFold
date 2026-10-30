@@ -52,6 +52,8 @@ pub const Env = struct {
     stream_on: bool,
     /// The GEMM tile (else the reference one) takes the products.
     gemm_on: bool,
+    /// The tiles that change a product's bits may run (numerics=inexact).
+    inexact: bool = false,
 };
 
 /// Whether an entry writes the activation type itself instead of fp32.
@@ -73,6 +75,8 @@ pub fn Entry(comptime Launch: type) type {
         rounds: Rounds = .never,
         /// A lane round takes it at any row count its shape fits.
         round_any: bool = false,
+        /// Its bytes are the exact path's; an inexact entry runs only under numerics=inexact (Env.inexact).
+        exact: bool = true,
         launch: Launch,
 
         /// Whether the entry writes the activation type at this shape.
@@ -133,6 +137,7 @@ pub fn Registry(comptime Launch: type) type {
             var best_cost: f32 = std.math.inf(f32);
             for (r.entries, 0..) |*e, i| {
                 if (e.format != format or e.op != op or e.path != path or !e.caps(env) or !e.policy(env) or !e.fits(shape)) continue;
+                if (!e.exact and !env.inexact) continue;
                 const c = r.cost(i, shape, env) orelse continue;
                 if (c < best_cost) {
                     best = e;

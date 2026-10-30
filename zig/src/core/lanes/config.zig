@@ -26,6 +26,7 @@ pub const Model = struct {
     depth_rate: f64 = 0, // the newest round's weight in a depth's acceptance estimate (0: the core's)
     plain_guard: bool = false, // plain rounds compete with drafted depths
     draft_confidence: ?f64 = null,
+    pinned_depth: bool = false, // every round asks the head for the most drafts and verifies what it holds (its own gate stops it)
     drafts: u32 = 1, // head drafts a round at most
     window_costs: []const Cost = &.{}, // forward ms by exact window width (timed at load)
     mtp_step_ms: f64 = 0.0, // one chained head step (timed at load)
@@ -62,6 +63,7 @@ pub const Config = struct {
     plain_guard: bool,
     most_drafts: u32,
     draft_confidence: ?f64 = null,
+    pinned_depth: bool = false,
     family_streams: bool,
     batch_rows: u32,
     batch_streams: u32,
@@ -145,6 +147,7 @@ pub const Config = struct {
             .plain_guard = m.plain_guard,
             .most_drafts = @min(m.drafts, @min(width - 1, max_draft)),
             .draft_confidence = m.draft_confidence,
+            .pinned_depth = m.pinned_depth,
             .family_streams = streams,
             .batch_rows = batch_rows,
             .batch_streams = if (streams) (if (m.max_streams != 0) m.max_streams else 32) else 1,

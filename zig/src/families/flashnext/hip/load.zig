@@ -186,6 +186,9 @@ const Loader = struct {
             .rows = r.router.shape[0],
             .remap = if (r.remap) |t| (try u.tensor(t)).ptr else 0,
             .exact = true,
+            // a decode step's router and pick in one launch read the bf16 rows (the same values as rows32)
+            .rows16 = (try u.tensor(r.router)).ptr,
+            .done = (try u.tensor(.{ .dtype = .u32, .rank = 1, .shape = .{ 1, 1, 1, 1, 1 }, .bytes = &[_]u8{ 0, 0, 0, 0 } })).ptr,
             .experts = .{
                 .fused = try quant.view(try quant.upload(u, r.experts.fused), true),
                 .down = try quant.view(try quant.upload(u, r.experts.down), true),

@@ -50,6 +50,26 @@ fn matrixRefused(policy: hip.Policy, caps: hip.Caps) ?[]const u8 {
     };
 }
 
+/// Drafts family `F` verifies at most: its own `max_drafts` (Flash Next 7), else 3 (the other HIP heads' `max_depth`).
+fn draftCap(comptime F: type) u32 {
+    return if (@hasDecl(F, "max_drafts")) F.max_drafts else 3;
+}
+
+/// A family's own MTP policy (`policy_mtp`) where no --mtp-drafts, no --mtp-confidence and no mtp_depth key names one.
+fn familyMtp(comptime F: type, o: api.Open, env: hip.Policy.Env, policy: *hip.Policy) void {
+    if (!@hasDecl(F, "policy_mtp") or o.mtp_drafts != null or o.mtp_confidence != null) return;
+    if (hip.Policy.names(o.policy, env, "mtp_depth")) return;
+    policy.mtp = .{ .drafts = F.policy_mtp.drafts, .confidence = F.policy_mtp.confidence };
+    policy.mtp_depth = F.policy_mtp.depth;
+}
+
+/// The widest draft cap of any HIP family: what every rank refuses past before it knows the family.
+const most_drafts: u32 = blk: {
+    var most: u32 = 0;
+    for (registry) |F| most = @max(most, draftCap(F));
+    break :blk most;
+};
+
 /// The tensor-parallel flags as the Python ROCm server checks them, and the flags this engine cannot take.
 fn checkGroup(a: Allocator, o: api.Open, problem: *[]const u8) Refused!void {
     if (o.drafter != null) return refuse(a, problem, "--drafter: the HIP engine runs no DFlash2 drafter yet; serve without --drafter", .{});
@@ -60,7 +80,7 @@ fn checkGroup(a: Allocator, o: api.Open, problem: *[]const u8) Refused!void {
     if (o.tp == 1 and o.rank != 0) return refuse(a, problem, "--rank must be 0 when --tp 1", .{});
     if (o.rank >= o.tp) return refuse(a, problem, "--rank {d} not in [0, --tp {d})", .{ o.rank, o.tp });
     if (o.keep) |n| if (n < 0) return refuse(a, problem, "--checkpoint-slots must be 0 or more", .{});
-    if (o.mtp_drafts) |n| if (n > 3) return refuse(a, problem, "--mtp-drafts {d}: the HIP engine drafts at most 3", .{n});
+    if (o.mtp_drafts) |n| if (n > most_drafts) return refuse(a, problem, "--mtp-drafts {d}: the HIP engine drafts at most {d}", .{ n, most_drafts });
     if (o.mtp_confidence) |c| if (c < 0 or c > 1) return refuse(a, problem, "--mtp-confidence must be from 0 to 1", .{});
     if (o.prompt_cache_gib) |g| if (g < 0) return refuse(a, problem, "--prompt-cache-gib must be 0 or more", .{});
 }
@@ -92,6 +112,7 @@ fn cacheRefused(o: api.Open) ?[]const u8 {
 /// Resolves the policy on rank 0 (defaults, flags, old variables, TF_POLICY), joins the group, sends it to the others.
 fn ready(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) (Refused || Allocator.Error)!Ready {
     try checkGroup(a, o, problem);
+    if (o.mtp_drafts) |n| if (n > draftCap(F)) return refuse(a, problem, "--mtp-drafts {d}: {s} drafts at most {d} on HIP", .{ n, F.model_type, draftCap(F) });
     if (cacheRefused(o)) |why| return refuse(a, problem, "{s}", .{why});
     const native = modelContext(a, io, o.dir);
     const window = admission.contextWindow(o.context, native, F.default_context) catch |err| return switch (err) {
@@ -103,8 +124,11 @@ fn ready(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open
     const caps = hip.Device.capsOf(index) orelse return refuse(a, problem, "HIP device {d} is not a GPU this engine supports", .{index});
     var notes: hip.Policy.Notes = .{};
     var policy = hip.Policy.resolve(o.policy, .current, &notes) catch |err| return refuse(a, problem, "the policy \"{s}\" is refused ({s})", .{ o.policy, @errorName(err) });
+    familyMtp(F, o, .current, &policy);
     if (o.mtp_drafts) |n| policy.mtp.drafts = @intCast(n);
     if (o.mtp_confidence) |c| policy.mtp.confidence = c;
+    // a family's own prompt chunk where neither --policy nor TF_POLICY names one; rank 0's policy reaches every rank
+    if (@hasDecl(F, "policy_prefill_step") and !hip.Policy.names(o.policy, .current, "prefill_step")) policy.prefill_step = F.policy_prefill_step;
     if (o.keep) |n| policy.slots = @intCast(@min(n, 1 << 16));
     if (matrixRefused(policy, caps)) |why| return refuse(a, problem, "matrix=on: {s}; matrix=auto runs the dot2 tiles", .{why});
     const group: ?hip.collective.Group = if (o.tp > 1) try join(a, gpa, io, o, caps, &policy, problem) else null;
@@ -361,6 +385,40 @@ test "the group flags: one rank source, a supported world, a master past one ran
     var outside = two;
     outside.rank = 2;
     try std.testing.expectError(error.Refused, checkGroup(a, outside, &problem));
+}
+
+test "--mtp-drafts: Flash Next verifies up to 7 drafts on HIP, the other families 3; past 7 every rank refuses" {
+    try std.testing.expectEqual(@as(u32, 7), draftCap(flashnext.native));
+    try std.testing.expectEqual(@as(u32, 3), draftCap(qwen35.native));
+    try std.testing.expectEqual(@as(u32, 3), draftCap(nemotron.native));
+    try std.testing.expectEqual(@as(u32, 7), most_drafts);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var problem: []const u8 = "";
+    try checkGroup(a, .{ .dir = "d", .model_type = "qwen4_exp", .mtp_drafts = 7 }, &problem);
+    try std.testing.expectError(error.Refused, checkGroup(a, .{ .dir = "d", .model_type = "qwen4_exp", .mtp_drafts = 8 }, &problem));
+    try std.testing.expectStringStartsWith(problem, "--mtp-drafts 8: the HIP engine drafts at most 7");
+}
+
+test "Flash Next's own MTP policy (gated, 7 drafts under 0.9) where no flag or key names one; the others keep the HIP default" {
+    const base: api.Open = .{ .dir = "d", .model_type = "qwen4_exp" };
+    var p: hip.Policy = .{};
+    familyMtp(flashnext.native, base, .none, &p);
+    try std.testing.expectEqual(@as(u8, 7), p.mtp.drafts);
+    try std.testing.expectEqual(@as(f64, 0.9), p.mtp.confidence);
+    try std.testing.expectEqual(hip.policy.MtpDepth.gated, p.mtp_depth);
+    for ([_]api.Open{ .{ .dir = "d", .model_type = "qwen4_exp", .mtp_drafts = 3 }, .{ .dir = "d", .model_type = "qwen4_exp", .mtp_confidence = 0 }, .{ .dir = "d", .model_type = "qwen4_exp", .policy = "mtp_depth=rule" } }) |named| {
+        var q: hip.Policy = .{};
+        familyMtp(flashnext.native, named, .none, &q);
+        try std.testing.expectEqualDeep(hip.Policy{}, q);
+    }
+    var env_named: hip.Policy = .{};
+    familyMtp(flashnext.native, base, .{ .vars = &.{.{ "TF_POLICY", "mtp_depth=rule" }} }, &env_named);
+    try std.testing.expectEqualDeep(hip.Policy{}, env_named);
+    var other: hip.Policy = .{};
+    familyMtp(qwen35.native, .{ .dir = "d", .model_type = "qwen3_5" }, .none, &other);
+    try std.testing.expectEqualDeep(hip.Policy{}, other);
 }
 
 test "--drafter is refused before any load, on every rank, until the HIP engine runs DFlash2" {

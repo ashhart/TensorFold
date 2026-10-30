@@ -16,12 +16,13 @@ const group = 64;
 const experts = 8; // the experts the plan's items pick from (a layer has 128; the kernel reads the picked ones)
 const top_k = 6;
 /// launches/affine.zig's stream tile constants: columns a lane, row counts, waves a block, waves wanted, code words.
-const stream_cbs = [_]c_int{ 2, 4, 8 };
-const stream_rows = [_]u8{ 1, 2, 4 };
-const stream_waves = 4;
-const streams_wanted = 3000;
-const stream_code_words = 32;
-const bit_index = 2; // 4 in launches/affine.zig's bit_widths
+const tiles = hip.launches.affine;
+const stream_cbs = tiles.stream_cbs;
+const stream_rows = tiles.stream_rows;
+const stream_waves = tiles.stream_waves;
+const streams_wanted = tiles.streams_wanted;
+const stream_code_words = tiles.stream_code_words;
+const bit_index = std.mem.indexOfScalar(c_int, &tiles.bit_widths, bits).?;
 
 fn depth(s: c.Shape) usize {
     return s.k / 2 + s.k / group + 8;
@@ -160,7 +161,7 @@ pub const Pair = struct {
         while (cbi > 0) {
             cbi -= 1;
             const cb = stream_cbs[cbi];
-            if (cb * stream_rows[ri] > 16 or cb * a.bits > stream_code_words) continue;
+            if (cb < 2 or cb * stream_rows[ri] > 16 or cb * a.bits > stream_code_words) continue;
             pick = cbi;
             const per: c_int = stream_waves * (@as(c_int, 32) >> lpc_log2) * cb;
             const waves = @as(u64, cdiv(a.n, per)) * stream_waves * top_k;

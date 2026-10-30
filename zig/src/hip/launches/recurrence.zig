@@ -28,7 +28,11 @@ pub fn tf_gdn_gate(l: *const Launcher, av: C, bv: C, kind: c_int, a_log: CF, dt_
     try l.go(l.gdn_gate[tri(kind)], dim(cdiv(count, 256), 1, 1), dim(256, 1, 1), 0, s, &a);
 }
 
-pub fn tf_gated_delta(l: *const Launcher, q: CF, k: CF, v: CF, gate: CF, beta: CF, state: F, y: F, batch: c_int, length: c_int, key_heads: c_int, value_heads: c_int, dk: c_int, dv: c_int, s: S, states: F) Error!void {
+/// Rows from which a prompt's recurrence takes tf_gdn_prompt_128 (fewer: a wave a row reads the state faster).
+pub const prompt_rows = 64;
+
+/// `from`: device i32 snapshot row of `states` a lone stream's window starts from, -1 for `state`; 0: none.
+pub fn tf_gated_delta(l: *const Launcher, q: CF, k: CF, v: CF, gate: CF, beta: CF, state: F, y: F, batch: c_int, length: c_int, key_heads: c_int, value_heads: c_int, dk: c_int, dv: c_int, s: S, states: F, from: u64) Error!void {
     if ((dk != 16 and dk != 128) or dv < 1 or key_heads < 1 or @rem(value_heads, key_heads) != 0 or batch < 1 or length < 1) {
         return invalid("gated delta");
     }
@@ -45,6 +49,23 @@ pub fn tf_gated_delta(l: *const Launcher, q: CF, k: CF, v: CF, gate: CF, beta: C
     try a.add(value_heads);
     try a.add(dv);
     try a.add(ad(states));
+    if (from != 0 and batch != 1) return invalid("gated delta start row");
+    try a.add(from);
+    // a prompt's rows (no snapshots): half a value head a block, 4 lanes a row, the same sums (gated_delta.hip)
+    if (dk == 128 and dv == 128 and states == null and length >= prompt_rows) {
+        var b: Args = .{};
+        try b.add(ad(q));
+        try b.add(ad(k));
+        try b.add(ad(v));
+        try b.add(ad(gate));
+        try b.add(ad(beta));
+        try b.add(ad(state));
+        try b.add(ad(y));
+        try b.add(length);
+        try b.add(key_heads);
+        try b.add(value_heads);
+        return l.go(l.gdn_prompt, dim(2, value_heads, batch), dim(32, 4, 1), 0, s, &b);
+    }
     const wide: usize = if (dk == 128) 0 else 1;
     // Eight rows share one k/q tile; a short dv stays on the one-row wave, which is the same scan.
     if (@rem(dv, 8) == 0) {
@@ -52,6 +73,99 @@ pub fn tf_gated_delta(l: *const Launcher, q: CF, k: CF, v: CF, gate: CF, beta: C
     } else {
         try l.go(l.gated_delta_wave[wide], dim(dv, value_heads, batch), dim(32, 1, 1), 0, s, &a);
     }
+}
+
+/// A verify window's recurrence that holds the state: outputs only; tf_gdn_keep then runs the kept rows. dv % 8 == 0.
+pub fn tf_gdn_hold(l: *const Launcher, q: CF, k: CF, v: CF, gate: CF, beta: CF, state: F, y: F, length: c_int, key_heads: c_int, value_heads: c_int, dk: c_int, dv: c_int, s: S) Error!void {
+    if ((dk != 16 and dk != 128) or @rem(dv, 8) != 0 or key_heads < 1 or @rem(value_heads, key_heads) != 0 or length < 1 or length > 16) {
+        return invalid("gated delta hold");
+    }
+    var a: Args = .{};
+    try a.add(ad(q));
+    try a.add(ad(k));
+    try a.add(ad(v));
+    try a.add(ad(gate));
+    try a.add(ad(beta));
+    try a.add(ad(state));
+    try a.add(ad(y));
+    try a.add(length);
+    try a.add(key_heads);
+    try a.add(value_heads);
+    try a.add(dv);
+    try l.go(l.gdn_hold[if (dk == 128) 0 else 1], dim(@divExact(dv, 8), value_heads, 1), dim(32, 8, 1), 0, s, &a);
+}
+
+/// A keep: each of `layers` DeltaNet states (strided) runs through the first `kept` of its window's `rows` input rows.
+pub fn tf_gdn_keep(l: *const Launcher, state: F, state_stride: i64, in: CF, in_stride: i64, rows: c_int, kept: c_int, layers: c_int, key_heads: c_int, value_heads: c_int, dk: c_int, dv: c_int, s: S) Error!void {
+    if ((dk != 16 and dk != 128) or @rem(dv, 8) != 0 or kept < 1 or kept > rows or layers < 1) return invalid("gated delta keep");
+    var a: Args = .{};
+    try a.add(ad(state));
+    try a.add(state_stride);
+    try a.add(ad(in));
+    try a.add(in_stride);
+    try a.add(rows);
+    try a.add(kept);
+    try a.add(key_heads);
+    try a.add(value_heads);
+    try a.add(dv);
+    try l.go(l.gdn_keep[if (dk == 128) 0 else 1], dim(@divExact(dv, 8), value_heads, layers), dim(32, 8, 1), 0, s, &a);
+}
+
+/// Tokens a chunk of tf_gdn_wy and its packed operands (gated_delta_wy.hpp).
+const wy_chunk = 32;
+const wy_pack = 128 * wy_chunk * 2;
+const wy_square = wy_chunk * wy_chunk * 2;
+
+fn wyAlign(n: usize) usize {
+    return (n + 255) & ~@as(usize, 255);
+}
+
+/// tf_gdn_wy's scratch bytes over `length` rows: f16 k^T, q, v^T, T diag(beta e^G), T diag(beta), P; fp32 G.
+pub fn wyScratch(length: usize, key_heads: usize, value_heads: usize) usize {
+    const chunks = (length + wy_chunk - 1) / wy_chunk;
+    return 2 * wyAlign(chunks * key_heads * wy_pack) + wyAlign(chunks * value_heads * wy_pack) +
+        3 * wyAlign(chunks * value_heads * wy_square) + wyAlign(chunks * value_heads * wy_chunk * 4);
+}
+
+/// Whether this build's kernels have the gfx11 matrix-core path of tf_gdn_wy.
+pub fn wyOnMatrix() bool {
+    const c = @import("../caps.zig").Caps.of(@import("../kernels.zig").arch) orelse return false;
+    return c.matrix == .wmma11;
+}
+
+/// A prompt's DeltaNet (dk = dv = 128, batch 1) in 32-token chunks on gfx11 matrix cores; numerics=inexact only.
+pub fn tf_gdn_wy(l: *const Launcher, q: CF, k: CF, v: CF, gate: CF, beta: CF, state: F, y: F, length: c_int, key_heads: c_int, value_heads: c_int, scratch: u64, s: S) Error!void {
+    if (key_heads < 1 or value_heads < 1 or @rem(value_heads, key_heads) != 0 or length < 1) return invalid("gated delta wy");
+    const n: usize = @intCast(length);
+    const kh: usize = @intCast(key_heads);
+    const vh: usize = @intCast(value_heads);
+    const chunks = (n + wy_chunk - 1) / wy_chunk;
+    const kT = scratch;
+    const q16 = kT + wyAlign(chunks * kh * wy_pack);
+    const vT = q16 + wyAlign(chunks * kh * wy_pack);
+    const t1 = vT + wyAlign(chunks * vh * wy_pack);
+    const t2 = t1 + wyAlign(chunks * vh * wy_square);
+    const p = t2 + wyAlign(chunks * vh * wy_square);
+    const g = p + wyAlign(chunks * vh * wy_square);
+    var a: Args = .{};
+    try a.add(ad(q));
+    try a.add(ad(k));
+    try a.add(ad(v));
+    try a.add(ad(gate));
+    try a.add(ad(beta));
+    inline for (.{ kT, q16, vT, t1, t2, p, g }) |x| try a.add(x);
+    try a.add(length);
+    try a.add(key_heads);
+    try a.add(value_heads);
+    try l.go(l.gdn_wy[0], dim(vh, chunks, 1), dim(128, 1, 1), 0, s, &a);
+    var b: Args = .{};
+    inline for (.{ kT, q16, vT, t1, t2, p, g }) |x| try b.add(x);
+    try b.add(ad(state));
+    try b.add(ad(y));
+    try b.add(length);
+    try b.add(key_heads);
+    try b.add(value_heads);
+    try l.go(l.gdn_wy[1], dim(vh, 1, 1), dim(256, 1, 1), 0, s, &b);
 }
 
 pub fn tf_gdn_gate_prefill(l: *const Launcher, av: C, bv: C, kind: c_int, a_log: CF, dt_bias: CF, gate: F, beta: F, count: c_int, heads: c_int, s: S) Error!void {

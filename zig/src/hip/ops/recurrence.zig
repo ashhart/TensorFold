@@ -30,7 +30,12 @@ pub fn gdnGate(o: Ops, a: Tensor, b: Tensor, a_log: u64, dt_bias: u64, gate: u64
     try o.l.tf_gdn_gate(p(a.ptr), p(b.ptr), @backingInt(a.kind), f(a_log), f(dt_bias), f(gate), f(beta), int(elements), int(heads), o.stream);
 }
 
-/// The DeltaNet recurrence in fp32, state in place, the same walk at every length.
-pub fn gatedDelta(o: Ops, q: u64, k: u64, v: u64, gate: u64, beta: u64, state: u64, y: u64, length: usize, key_heads: usize, value_heads: usize, dk: usize, dv: usize, states: ?u64) Error!void {
-    try o.l.tf_gated_delta(f(q), f(k), f(v), f(gate), f(beta), f(state), f(y), 1, int(length), int(key_heads), int(value_heads), int(dk), int(dv), o.stream, if (states) |s| f(s) else null);
+/// The DeltaNet recurrence in fp32, state in place, same walk at every length; `from`: 0 or a device i32 start row.
+pub fn gatedDelta(o: Ops, q: u64, k: u64, v: u64, gate: u64, beta: u64, state: u64, y: u64, length: usize, key_heads: usize, value_heads: usize, dk: usize, dv: usize, states: ?u64, from: u64) Error!void {
+    try o.l.tf_gated_delta(f(q), f(k), f(v), f(gate), f(beta), f(state), f(y), 1, int(length), int(key_heads), int(value_heads), int(dk), int(dv), o.stream, if (states) |s| f(s) else null, from);
+}
+
+/// A verify window's recurrence that holds the state (outputs `y` only); the keep then runs it through the kept rows.
+pub fn gatedDeltaHold(o: Ops, q: u64, k: u64, v: u64, gate: u64, beta: u64, state: u64, y: u64, length: usize, key_heads: usize, value_heads: usize, dk: usize, dv: usize) Error!void {
+    try o.l.tf_gdn_hold(f(q), f(k), f(v), f(gate), f(beta), f(state), f(y), int(length), int(key_heads), int(value_heads), int(dk), int(dv), o.stream);
 }

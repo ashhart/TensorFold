@@ -71,6 +71,41 @@ pub const Tables = struct {
         };
     }
 
+    /// The rows copied once into anonymous memory from `a` (hip.Policy.rows): a round's gather then never faults.
+    pub fn keepResident(t: *Tables, a: std.mem.Allocator, ck: *const core.checkpoint.Checkpoint) !void {
+        for (t.shards) |*s| {
+            inline for (.{ "words", "scales", "biases" }) |f| {
+                const from = @field(s, f);
+                advise(from, std.os.linux.MADV.SEQUENTIAL);
+                const copy = try a.alloc(u8, from.len);
+                @memcpy(copy, from);
+                advise(from, std.os.linux.MADV.DONTNEED);
+                dropCached(ck, from);
+                @field(s, f) = copy;
+            }
+        }
+    }
+
+    fn advise(b: []const u8, advice: u32) void {
+        if (@import("builtin").os.tag != .linux) return;
+        const page = std.heap.pageSize();
+        const from = std.mem.alignBackward(usize, @intFromPtr(b.ptr), page);
+        const to = std.mem.alignForward(usize, @intFromPtr(b.ptr) + b.len, page);
+        _ = std.os.linux.madvise(@ptrFromInt(from), to - from, advice);
+    }
+
+    /// The page cache's copy of `b`'s file range dropped (safetensors.File.release does it for a whole file).
+    fn dropCached(ck: *const core.checkpoint.Checkpoint, b: []const u8) void {
+        if (@import("builtin").os.tag != .linux) return;
+        for (ck.files.items) |*f| {
+            const m = f.map.memory;
+            if (@intFromPtr(b.ptr) < @intFromPtr(m.ptr) or @intFromPtr(b.ptr) + b.len > @intFromPtr(m.ptr) + m.len) continue;
+            const off = @intFromPtr(b.ptr) - @intFromPtr(m.ptr);
+            _ = std.os.linux.fadvise(f.file.handle, @intCast(off), @intCast(b.len), std.os.linux.POSIX_FADV.DONTNEED);
+            return;
+        }
+    }
+
     /// Each id's packed words, scales and biases copied into the three staging slices, in id order.
     pub fn gather(t: *const Tables, ids: []const u32, words: []u8, scales: []u8, biases: []u8) !void {
         const wb = t.wordBytes();
