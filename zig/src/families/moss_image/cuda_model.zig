@@ -49,8 +49,9 @@ pub const Scratch = struct {
 pub const Timing = struct { wall: f64, gpu: f64, host: f64 };
 
 pub fn seconds() f64 {
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    const c = @import("sys").c;
+    var ts: c.timespec = undefined;
+    _ = c.clock_gettime(c.CLOCK.MONOTONIC, &ts);
     return @as(f64, @floatFromInt(ts.sec)) + @as(f64, @floatFromInt(ts.nsec)) * 1e-9;
 }
 
