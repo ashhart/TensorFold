@@ -196,8 +196,10 @@ pub const Drafter = struct {
     /// Each stream's last absorbed row through the target's final norm into its lane, queued on the target's stream.
     fn absorbFn(ptr: *anyopaque, items: []const dr.Absorb) anyerror!void {
         const x = cast(ptr);
+        if (!try @import("assistant_budget.zig").useful(x, items)) return;
         const width = x.m.geo.hidden * 2;
         for (items) |it| {
+            if (!it.propose) continue;
             const l = x.lanes.get(it.stream) orelse return error.DraftStreamUnknown;
             const f = it.features;
             if (f.space != .device or f.dtype != .bf16 or f.row_bytes != width or f.rows == 0 or it.follow.len < f.rows) return error.DraftFeaturesUnsupported;
@@ -378,3 +380,7 @@ pub const Drafter = struct {
         }
     }
 };
+
+test {
+    _ = @import("assistant_budget.zig").Cases(Drafter, Lane);
+}
