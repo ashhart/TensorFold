@@ -380,6 +380,9 @@ pub fn main(init: std.process.Init) !u8 {
     var nemotron_attention: @import("metal_nemotron_attention.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer nemotron_attention.deinit();
     try nemotron_attention.collect(o.only);
+    var nemotron_unroll: @import("metal_nemotron_unroll.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer nemotron_unroll.deinit();
+    try nemotron_unroll.collect(o.only);
     const weight_only = @import("metal_weight_only.zig");
     const weight_source = try weight_only.text(a);
     defer a.free(weight_source);

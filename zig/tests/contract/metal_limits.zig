@@ -133,8 +133,9 @@ fn attentionLaunch(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaun
         const text = for (sources.nemotron.all) |k| {
             if (std.mem.eql(u8, k.function, fun)) break k.source;
         } else return error.UnknownLaunch;
-        const pre = if (std.mem.indexOf(u8, d.name, " partial ") != null) try tf.nemotron.simd_attention.rewrite(a, text) else text;
-        return .{ .decl = d, .function = fun, .here = if (tensor) text else pre, .pre_m5 = pre };
+        const pre = if (std.mem.indexOf(u8, d.name, " partial ") != null) try tf.nemotron.simd_attention.layout(a, text) else text;
+        const here = if (tensor) text else if (std.mem.indexOf(u8, d.name, " partial ") != null) try tf.nemotron.simd_attention.forGeneration(a, device.generation(), text) else pre;
+        return .{ .decl = d, .function = fun, .here = here, .pre_m5 = pre };
     }
     if (std.mem.indexOf(u8, d.name, " tree ") != null) {
         const pre = try std.mem.concat(a, u8, &.{ "#define TF_SIMD_LAYOUT 1\n", sources.nemotron_tree });

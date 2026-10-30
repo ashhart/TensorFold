@@ -49,11 +49,12 @@ fn generated(comptime key: []const u8) sources.nemotron.Kernel {
 
 /// The generated expert source with explicit instantiations at each geometry (template args after RPS, SG).
 fn geoSource(comptime key: []const u8, comptime which: []const u8, comptime head: []const u8, comptime tail: []const u8) []const u8 {
-    const k = generated(key);
-    var text: []const u8 = k.source;
+    const k = comptime generated(key);
+    var text: []const u8 = k.source ++ @import("geo_source.zig").body(k.source, k.function);
     for (geometries) |g| {
         const args = std.fmt.comptimePrint("<{s}, {d}, {d}{s}>", .{ head, g[0], g[1], tail });
-        text = text ++ "\ntemplate [[host_name(\"" ++ geoName(which, g) ++ "\")]] [[kernel]] decltype(" ++ k.function ++ args ++ ") " ++ k.function ++ args ++ ";";
+        const function = if (g[0] == 2) "tf_geo_experts" else k.function;
+        text = text ++ "\ntemplate [[host_name(\"" ++ geoName(which, g) ++ "\")]] [[kernel]] decltype(" ++ function ++ args ++ ") " ++ function ++ args ++ ";";
     }
     return text ++ "\n";
 }
@@ -226,7 +227,7 @@ fn loadWith(allocator: std.mem.Allocator, device: mtl.Device, prebuilt: ?mtl.Lib
     defer for (rewritten) |r| if (r) |text| allocator.free(text);
     if (!device.tensorUnits()) inline for (sources.nemotron.all, 0..) |kernel, i| {
         if (comptime std.mem.startsWith(u8, kernel.key, "attn_partial")) {
-            rewritten[i] = try simd_attention.rewrite(allocator, kernel.source);
+            rewritten[i] = try simd_attention.forGeneration(allocator, device.generation(), kernel.source);
             jobs[i].source = rewritten[i].?;
         }
     };
