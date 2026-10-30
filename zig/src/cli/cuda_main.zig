@@ -9,6 +9,7 @@ const checks = @import("cuda_checks.zig");
 const kernel_checks = @import("cuda_kernel_checks.zig");
 const precision = @import("cuda_precision.zig");
 const kl = @import("cuda_kl.zig");
+const audio_check = @import("cuda_audio_check.zig");
 const shared_checks = @import("cuda_shared_checks.zig");
 const checkpoint_cli = @import("checkpoint_cli");
 const lanes_cli = @import("cuda_lanes.zig");
@@ -44,6 +45,7 @@ const usage =
     \\                (logits rows to FILE, fed --gold then greedy; or FILE's tokens fed: KL, top-1 and NLL against its rows)
     \\       tensorfold widths MODEL --tokens ID,... [--max-tokens N] [--eager] [sampling as run]
     \\                (every verify width, 1-32 for a latent MoE else 1-16, against serial decoding, a wrong draft every third window)
+    \\       tensorfold audio-check MODEL WAV OUT.safetensors   (Transcribe's audio encoder, every stage to OUT)
     \\       tensorfold models
     \\       tensorfold info MODEL
     \\       tensorfold pull REPO[@REVISION]
@@ -188,6 +190,7 @@ pub fn main(init: std.process.Init) !u8 {
             return 2;
         },
     };
+    if (std.mem.eql(u8, args[1], "audio-check")) return audio_check.run(gpa, init.io, &ctx, opts.model, positional.items);
     if (std.mem.eql(u8, args[1], "run") and dory_cli.wants(gpa, init.io, opts.model)) {
         const s: ?lanes.Sampling = if (opts.sampling.temperature > 0) opts.sampling else null;
         return dory_cli.run(gpa, init.io, &ctx, opts.model, .{ .tokens = opts.tokens, .max_tokens = opts.max_tokens, .loops = opts.loops, .context = opts.context, .drafts = opts.drafts, .graphs = opts.graphs, .stop_eos = opts.stop_eos, .sampling = s });

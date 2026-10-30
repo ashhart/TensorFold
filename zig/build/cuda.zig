@@ -32,6 +32,8 @@ fn family(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
     nemotron.addImport("nemotron_draft_ids", draft_ids);
     const radio = radioModule(b, target, optimize, cuda, core, lanes);
     nemotron.addImport("radio", radio);
+    // Nemotron 3.5 Transcribe's audio encoder: the rows its prompt's <|audio|> positions take
+    nemotron.addImport("nemo_audio", b.createModule(.{ .root_source_file = b.path("zig/src/families/nemo_audio/audio.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core } } }));
     nemotron.addImport("living", living);
     const qwen35 = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/cuda.zig"), .target = target, .optimize = optimize, .link_libc = true });
     qwen35.addImport("living", living);
