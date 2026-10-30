@@ -6,6 +6,7 @@ const chat = @import("../chat.zig");
 const ids = @import("../ids.zig");
 const Server = @import("../server.zig").Server;
 const Turn = @import("cortheon.zig").Turn;
+const memory = @import("memory.zig");
 const tools = @import("tools.zig");
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
@@ -158,7 +159,7 @@ fn charBudget(srv: *const Server, input: chat.Input) usize {
     if (window == 0) return 6000;
     var chars: usize = 0;
     if (input.messages == .array) for (input.messages.array) |m| {
-        chars += (m.strField("content") orelse continue).len;
+        chars += memory.textLen(m); // text parts count, as the turn's words do
     };
     const used = chars / 3 + 1024 + @as(usize, @intCast(@max(0, srv.config.default_max_tokens)));
     if (used >= window) return 600;
