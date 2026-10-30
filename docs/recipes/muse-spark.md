@@ -61,6 +61,8 @@ graphed decode equals eager decode, the prompt path equals decode rows, and a re
 - Two Sparks only: rank 1 runs `tf-muse follow PACK` with `TF_TP_WORLD=2 TF_TP_RANK=1 TF_TP_MASTER=<rank 0>
   TF_TP_PORT=<port>`; then rank 0 runs `tensorfold-native serve --model PACK` with the same `TF_TP_*` and
   `TF_TP_RANK=0`. `TF_COMM_BACKEND` picks `roce` (the default) or `nccl` for the gathers; both give the same bytes.
+- The release archive ships only `tensorfold-native`, so build rank 1's `tf-muse` from source on that Spark:
+  `zig build tf-muse -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121 -Doptimize=ReleaseFast` (it lands in `zig-out/bin`).
 - The family is admitted only as it was run: on a GB10 (sm_121) at two ranks. Any other GPU is refused
   (`MuseSparkRequiresSm121`), and so is one rank or any other world size (`MuseSparkRequiresTwoRanks`), at admission
   and in `tf-muse follow`; a malformed `TF_TP_*` is refused (`BadSetting`) rather than sized as one GPU.
@@ -70,7 +72,7 @@ graphed decode equals eager decode, the prompt path equals decode rows, and a re
   running: 108.8 GiB a process, 5.5-5.9 GiB MemAvailable left a node; that run also held the drafter, 1.64 GiB a
   rank, so plain decode holds that much less). The server's default reserve, a tenth of unified memory (12.2 GiB),
   leaves no room for the caches beside it, so give the reserve explicitly, e.g. `TENSORFOLD_MEMORY_RESERVE_GIB=3` on
-  both ranks (the Muspark recipe's setting).
+  both ranks.
 - The KV cache is fp16.
 - The embedding stays in host memory (rows are copied from the pack's mapping each window), the load uses 64 MiB
   arena blocks, and each layer's pages leave the page cache once uploaded.
