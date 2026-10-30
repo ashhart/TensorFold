@@ -262,3 +262,7 @@ test "format coexistence: EXL3 BF16 prompt: 4096 rows reach both GDN scalar proj
 test "format coexistence: EXL3 BF16 prompt: existing rows and partial final slices keep every argument and row" {
     for ([_]usize{ 0, 1, 16, 17, 127, 128, 129, 2049, 4095 }) |rows| try bf16Prompt(rows);
 }
+
+test {
+    _ = @import("src/families/qwen3_5/cuda_host_embed.zig"); // where an EXL3 checkpoint's embedding rows live
+}

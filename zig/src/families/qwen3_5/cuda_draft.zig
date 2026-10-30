@@ -183,6 +183,14 @@ pub const Draft = struct {
         d.gpa.destroy(d);
     }
 
+    /// One stream's bytes, before the drafter loads: its ring, the target's taps of `hidden` and a frame's scratch.
+    pub fn streamBytesFor(c: Config, hidden: usize) !usize {
+        var d: Draft = undefined;
+        d.c = c;
+        d.frame_streams = 1;
+        return c.ringBytes() + engine.tap_rows * c.n_taps * hidden * 2 + try d.layout(false);
+    }
+
     fn scratchBytes(d: *Draft) !usize {
         d.at = 0;
         return d.layout(false);
