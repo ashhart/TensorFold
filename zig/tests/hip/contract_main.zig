@@ -5,6 +5,7 @@ const core = @import("core");
 const controls = @import("hip_controls");
 const gate5 = @import("contract_limits.zig");
 const rows_k = @import("contract_rows.zig");
+const wide_k = @import("contract_rms_wide.zig");
 const stream_k = @import("contract_stream.zig");
 const mamba_k = @import("contract_mamba.zig");
 const scan_k = @import("contract_scan.zig");
@@ -93,6 +94,9 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     for (&moes, [_]moe_k.Which{ .relu2, .combine, .combine_f32 }) |*m, w| m.* = .init(a, &r, s, &l, w);
     defer for (&moes) |*m| m.deinit();
     for (&moes) |*m| try kernels.append(a, m.kernel());
+    var wide = wide_k.Wide.init(a, &r, s, &l);
+    defer wide.deinit();
+    try kernels.append(a, wide.kernel());
     var walk = walk_k.Walk.init(a, &r, s, &l);
     defer walk.deinit();
     try kernels.append(a, walk.kernel());

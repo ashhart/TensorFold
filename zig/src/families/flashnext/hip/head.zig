@@ -57,10 +57,12 @@ pub fn run(
     try o.rms(emb, w.e_norm, en, rows, d.hidden, d.eps);
     const e = try o.project(en, w.fc_e, rows, false);
     const hn = try take(o, m.act, rows * d.wide());
+    const waves = try take(o, .f32, rows * hip.Launcher.fn_wide_waves);
     try o.l.fn_rms_wide(
         @ptrFromInt(streams.ptr),
         @ptrFromInt(w.h_norm),
         @ptrFromInt(hn.ptr),
+        @ptrFromInt(waves.ptr),
         @backingInt(m.act),
         @intCast(rows),
         @intCast(d.wide()),
