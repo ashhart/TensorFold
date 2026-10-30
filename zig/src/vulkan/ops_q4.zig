@@ -19,9 +19,7 @@ pub const bits: u64 = 4;
 /// The device numbers the chunk planner shapes itself around.
 pub const Limits = struct { max_range: u64, alignment: u64 };
 
-/// Rows of n per qmm chunk, or 0 when the whole w view fits one binding. Chunk row counts are
-/// multiples of the least step keeping every chunk's w and scale start byte aligned, and each chunk's
-/// w bytes stay within max_range; k must be a multiple of 64. Pure and host-tested.
+// Rows of n per qmm chunk, or 0 when the whole w view fits one binding. Chunk row counts are multiples of the least step keeping every chunk's w and scale start byte aligned, and each chunk's w bytes stay within max_range; k must be a multiple of 64. Pure and host-tested.
 pub fn chunkRows(l: Limits, k: u64, n: u64) Error!u64 {
     const row_w = k / 2; // k/8 u32 words per row
     const row_s = k / 32; // k/64 bf16 scales (or biases) per row
@@ -66,10 +64,7 @@ fn q4Push(m: u64, n: u64, k: u64) Error!params.Params {
     };
 }
 
-/// Q4 affine projection out[m, n] = x[m, k] . dequant(w, scales, biases)[n, k], group 64, transposed.
-/// One qmm dispatch when the w view fits maxStorageBufferRange; otherwise n-row chunks write packed
-/// blocks to `scratch` and a copy_general scatter places each block's columns. Every range and shape
-/// is validated before the first dispatch; x and out must each fit one binding.
+// Q4 affine projection out[m, n] = x[m, k] . dequant(w, scales, biases)[n, k], group 64, transposed. One qmm dispatch when the w view fits maxStorageBufferRange; otherwise n-row chunks write packed blocks to `scratch` and a copy_general scatter places each block's columns. Every range and shape is validated before the first dispatch; x and out must each fit one binding.
 pub fn project(o: *Ops, cmds: *Commands, out: View, x: View, w: View, scales: View, biases: View, k: u64, scratch: *Arena, timeout_ns: u64) Error!void {
     const g = try projectGeometry(out, x, w, scales, biases, k);
     const limits = o.dev.properties.limits;
@@ -115,15 +110,12 @@ pub fn project(o: *Ops, cmds: *Commands, out: View, x: View, w: View, scales: Vi
     }
 }
 
-/// Host-side token validation: every id must index a table row; call before the ids are uploaded.
-/// Device-side out-of-range ids gather to zero (the shader's documented read), never a wrong row.
+// Host-side token validation: every id must index a table row; call before the ids are uploaded. Device-side out-of-range ids gather to zero (the shader's documented read), never a wrong row.
 pub fn checkIds(ids: []const u32, rows: u64) Error!void {
     for (ids) |id| if (id >= rows) return error.OutOfRange;
 }
 
-/// The embedding's rows and tokens from the views and k, or the named reason it cannot run; pure.
-/// The gathered scale and bias rows ride the 32-bit transport, so tokens * (k / 64) must fill whole
-/// words: k 64 with an odd token count is refused here (a 2B-size k gives even groups for any tokens).
+// The embedding's rows and tokens from the views and k, or the named reason it cannot run; pure. The gathered scale and bias rows ride the 32-bit transport, so tokens * (k / 64) must fill whole words: k 64 with an odd token count is refused here (a 2B-size k gives even groups for any tokens).
 fn embeddingGeometry(out: View, ids: View, table_w: View, table_s: View, table_b: View, k: u64) Error!struct { rows: u64, tokens: u64 } {
     if (out.kind != .bf16 or ids.kind != .u32 or table_w.kind != .u32 or table_s.kind != .bf16 or table_b.kind != .bf16) return error.Invalid;
     if (k < group_size or k % group_size != 0 or ids.elements == 0) return error.Invalid;
@@ -140,9 +132,7 @@ fn embeddingGeometry(out: View, ids: View, table_w: View, table_s: View, table_b
     return .{ .rows = rows, .tokens = tokens };
 }
 
-/// Q4-table embedding: gathers each id's packed weight row and its scale and bias rows into `scratch`,
-/// then dequantizes to bf16 out[tokens, k]. The three table views are single bindings, so each must fit
-/// maxStorageBufferRange whole; anything larger is refused before any dispatch, never silently chunked.
+// Q4-table embedding: gathers each id's packed weight row and its scale and bias rows into `scratch`, then dequantizes to bf16 out[tokens, k]. The three table views are single bindings, so each must fit maxStorageBufferRange whole; anything larger is refused before any dispatch, never silently chunked.
 pub fn embedding(o: *Ops, cmds: *Commands, out: View, ids: View, table_w: View, table_s: View, table_b: View, k: u64, scratch: *Arena, timeout_ns: u64) Error!void {
     const g = try embeddingGeometry(out, ids, table_w, table_s, table_b, k);
     const range = o.dev.properties.limits.maxStorageBufferRange;

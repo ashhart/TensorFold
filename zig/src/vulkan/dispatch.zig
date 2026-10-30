@@ -319,8 +319,7 @@ test "device limits refuse bindings, push bytes, workgroups and group counts pas
     try std.testing.expectError(error.BadGroupCount, counts(.{ 65535, 65535, 65535 }, .{ 0, 1, 1 }));
     try std.testing.expectError(error.BadGroupCount, counts(.{ 65535, 65535, 65535 }, .{ 65536, 1, 1 }));
     try counts(.{ 65535, 65535, 65535 }, .{ 2, 1, 1 });
-    // The 10-binding GDN prefill/decode closures fit; 11 do not, and a device
-    // offering fewer than asked still refuses (real per-stage/set capacity).
+    // The 10-binding GDN prefill/decode closures fit; 11 do not, and a device offering fewer than asked still refuses (real per-stage/set capacity).
     l.maxPerStageDescriptorStorageBuffers = 10;
     l.maxDescriptorSetStorageBuffers = 10;
     l.maxPerStageResources = 10;
