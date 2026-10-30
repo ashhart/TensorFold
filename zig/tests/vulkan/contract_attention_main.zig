@@ -307,7 +307,7 @@ fn sdpaGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *
     }
     std.debug.print("MILESTONE sdpa elapsed_ms={d} case=\"{s}\" rows={d} prefix={d} visible=[{d}..{d}] worst={e} of bound, " ++
         "repeats byte-identical, {s}planted outputs refused, inputs unchanged\n", .{
-        clock.ms(), case.name, case.rows, case.prefix, f.visible[0], f.visible[f.visible.len - 1], rep.worst,
+        clock.ms(),                                                     case.name, case.rows, case.prefix, f.visible[0], f.visible[f.visible.len - 1], rep.worst,
         if (case.rows > 1) "rows decode alone bit-identical, " else "",
     });
     return true;
