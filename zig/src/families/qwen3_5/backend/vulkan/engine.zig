@@ -1,28 +1,6 @@
-//! The native Vulkan Qwen3.5-2B engine: one heap-stable object owning the
-//! runtime, device, command stream, the admitted operators, the loaded
-//! weights, the single-sequence state and the activation windows, with the
-//! real single-sequence forward as small explicit steps (prefill chunk, one
-//! decode, greedy draw).
-//!
-//! Construction order is the safety order: the loader and device open first
-//! (storage16 + int16 only), then every operator's device gates (bf16
-//! storage, the SDPA arm's shared-memory stream, the GDN scan's subgroup
-//! shuffles) fire BEFORE any weight byte is read; the pinned-model admission
-//! runs inside the weights load before any GPU work; the state's real zeroed
-//! regions come last. The engine pointer is stable for its whole life: the
-//! runtime, device and command stream are heap-owned before any view,
-//! pipeline or state exists, so no child pointer can ever dangle behind a
-//! move.
-//!
-//! Every GPU call is routed through `vk.orExit` at the call site: a Timeout
-//! (exit 124) or InFlight (exit 1) ends the process before any destructor
-//! can free a resource a live submission may still touch — no error path
-//! ever tears down in flight. A failure after the first state write poisons
-//! the engine (partial RNN state is never reused): further steps return
-//! error.Poisoned until `reset`, which really zeroes every region on the GPU
-//! and clears the poison. There is no rewind and no metadata rollback
-//! anywhere; bounds are checked before the first write, so a refused call
-//! leaves the state untouched.
+// The native Vulkan Qwen3.5-2B engine: one heap-stable object owning the runtime, device, command stream, the admitted operators, the loaded weights, the single-sequence state and the activation windows, with the real single-sequence forward as small explicit steps (prefill chunk, one decode, greedy draw).
+//  Construction order is the safety order: the loader and device open first (storage16 + int16 only), then every operator's device gates (bf16 storage, the SDPA arm's shared-memory stream, the GDN scan's subgroup shuffles) fire BEFORE any weight byte is read; the pinned-model admission runs inside the weights load before any GPU work; the state's real zeroed regions come last. The engine pointer is stable for its whole life: the runtime, device and command stream are heap-owned before any view, pipeline or state exists, so no child pointer can ever dangle behind a move.
+//  Every GPU call is routed through `vk.orExit` at the call site: a Timeout (exit 124) or InFlight (exit 1) ends the process before any destructor can free a resource a live submission may still touch — no error path ever tears down in flight. A failure after the first state write poisons the engine (partial RNN state is never reused): further steps return error.Poisoned until `reset`, which really zeroes every region on the GPU and clears the poison. There is no rewind and no metadata rollback anywhere; bounds are checked before the first write, so a refused call leaves the state untouched.
 const std = @import("std");
 const vk = @import("vulkan");
 const pinned = @import("../../config.zig");
@@ -35,34 +13,22 @@ const View = vk.tensor.View;
 
 pub const max_prefill_rows = fwd.max_prefill_rows;
 
-/// The canonical 32-row cut: the end index of the chunk starting at `done`
-/// within a `total`-row request. Pure and host-tested (the schedule gates:
-/// 32 ends a full chunk, 33/63/64/65 cut at 32/64/64/65).
+// The canonical 32-row cut: the end index of the chunk starting at `done` within a `total`-row request. Pure and host-tested (the schedule gates: 32 ends a full chunk, 33/63/64/65 cut at 32/64/64/65).
 pub fn chunkEnd(done: usize, total: usize) usize {
     return @min(done +| max_prefill_rows, total);
 }
 
-/// The staged-transfer buffer: 8 MiB so the load's ~27k tensors stream in
-/// large chunks instead of one 64 KiB fence each.
+// The staged-transfer buffer: 8 MiB so the load's ~27k tensors stream in large chunks instead of one 64 KiB fence each.
 pub const staging_bytes: u64 = 8 << 20;
-/// The scratch arena: persistent activation windows plus the worst layer's
-/// transient windows at the prefill cap (about 3.4 MiB), with headroom.
+// The scratch arena: persistent activation windows plus the worst layer's transient windows at the prefill cap (about 3.4 MiB), with headroom.
 pub const arena_bytes: u64 = 8 << 20;
 
-/// Everything a caller's step methods can see fail. Timeout and InFlight
-/// ride dispatch.Error but are never propagated: every GPU call ends the
-/// process inside `vk.orExit` before any destructor can run.
+// Everything a caller's step methods can see fail. Timeout and InFlight ride dispatch.Error but are never propagated: every GPU call ends the process inside `vk.orExit` before any destructor can run.
 pub const Error = vk.dispatch.Error ||
     error{ ContextTooLong, NonFinite, UnsupportedPrompt, Poisoned };
-// Engine.init deliberately has NO explicit error set: it preserves the
-// weights load's inferred platform IO and config errors untouched, instead
-// of collapsing them into a narrow alias. The step methods above never touch
-// the filesystem; their surface is exactly this set (dispatch.Error already
-// carries runtime.Error).
+// Engine.init deliberately has NO explicit error set: it preserves the weights load's inferred platform IO and config errors untouched, instead of collapsing them into a narrow alias. The step methods above never touch the filesystem; their surface is exactly this set (dispatch.Error already carries runtime.Error).
 
-/// The compiled shader images, as real SPIR-V of the named variants; the
-/// build supplies them (norm/swiglu/rope as the ASH_QWEN35 Metal-oracle
-/// forms), the engine only checks and pipelines them.
+// The compiled shader images, as real SPIR-V of the named variants; the build supplies them (norm/swiglu/rope as the ASH_QWEN35 Metal-oracle forms), the engine only checks and pipelines them.
 pub const ShaderBundle = struct {
     ops: vk.ops.Shaders,
     norm: vk.norm_mlp.Shaders,
@@ -71,11 +37,7 @@ pub const ShaderBundle = struct {
     greedy: vk.greedy.Shaders,
 };
 
-/// One engine's sequence plan: checked before any GPU work; pure and
-/// host-tested. `steps` greedy draws need `rows + steps - 1` new positions;
-/// `rows` is a whole request (any length, the pass cuts its own chunks).
-/// `visible` and `steps` arrive from files and callers, so the sum is
-/// computed with checked adds — an extreme value refuses, never wraps.
+// One engine's sequence plan: checked before any GPU work; pure and host-tested. `steps` greedy draws need `rows + steps - 1` new positions; `rows` is a whole request (any length, the pass cuts its own chunks). `visible` and `steps` arrive from files and callers, so the sum is computed with checked adds — an extreme value refuses, never wraps.
 pub fn planFor(capacity: usize, visible: u64, rows: usize, steps: usize) Error!void {
     if (rows == 0 or steps == 0) return error.UnsupportedPrompt;
     if (capacity > state.max_capacity) return error.ContextTooLong;
@@ -84,17 +46,13 @@ pub fn planFor(capacity: usize, visible: u64, rows: usize, steps: usize) Error!v
     if (total - 1 > capacity) return error.ContextTooLong;
 }
 
-/// The logits row's readiness, shared by draw and the readback: a poisoned
-/// engine and a zero visible prefix have no valid logits, so both refuse
-/// before any GPU work; pure and host-tested.
+// The logits row's readiness, shared by draw and the readback: a poisoned engine and a zero visible prefix have no valid logits, so both refuse before any GPU work; pure and host-tested.
 pub fn logitsReady(poisoned: bool, visible: u64) Error!void {
     if (poisoned) return error.Poisoned;
     if (visible == 0) return error.Invalid;
 }
 
-/// The persistent windows' bytes: four hidden rows buffers, the ids row and
-/// the full logits row. Pure and host-tested (the arena must hold this plus
-/// the worst transient layer).
+// The persistent windows' bytes: four hidden rows buffers, the ids row and the full logits row. Pure and host-tested (the arena must hold this plus the worst transient layer).
 pub fn persistentBytes() u64 {
     const rows: u64 = max_prefill_rows;
     return 4 * rows * pinned.hidden * 2 + rows * 4 + pinned.vocab * 2;
@@ -115,8 +73,7 @@ pub const Engine = struct {
     arena: vk.arena.Arena,
     model: weights.Model,
     state: state.State,
-    /// The residual ring: h[0]/h[1] alternate as the add's input and output,
-    /// so no add ever writes the buffer it reads.
+    // The residual ring: h[0]/h[1] alternate as the add's input and output, so no add ever writes the buffer it reads.
     h: [2]View,
     r: View,
     x: View,
@@ -125,10 +82,7 @@ pub const Engine = struct {
     base_mark: u64,
     poisoned: bool,
 
-    /// Opens everything and loads the pinned model; all device gates run
-    /// before the weights, and the weights' admission runs before any GPU
-    /// work. `context` is the capacity request, refused past the SDPA arm's
-    /// 7168; the probe uses the oracle's 256.
+    // Opens everything and loads the pinned model; all device gates run before the weights, and the weights' admission runs before any GPU work. `context` is the capacity request, refused past the SDPA arm's 7168; the probe uses the oracle's 256.
     pub fn init(
         gpa: Allocator,
         io: std.Io,
@@ -159,8 +113,7 @@ pub const Engine = struct {
         e.staging = try vk.Buffer.init(e.dev, .staging, staging_bytes);
         errdefer e.staging.deinit();
 
-        // device gates first: every operator refuses a lacking device before
-        // a single weight byte is read
+        // device gates first: every operator refuses a lacking device before a single weight byte is read
         e.ops = try vk.ops.Ops.init(e.dev, bundle.ops);
         errdefer e.ops.deinit();
         e.norm = try vk.norm_mlp.NormMlp.init(e.dev, bundle.norm);
@@ -189,8 +142,7 @@ pub const Engine = struct {
         return e;
     }
 
-    /// Reverse teardown; legal only when no submission is pending, which the
-    /// orExit discipline guarantees (Timeout/InFlight never return here).
+    // Reverse teardown; legal only when no submission is pending, which the orExit discipline guarantees (Timeout/InFlight never return here).
     pub fn deinit(e: *Engine) void {
         e.state.deinit();
         e.model.deinit();
@@ -211,21 +163,14 @@ pub const Engine = struct {
         gpa.destroy(e);
     }
 
-    /// A real reset: every state region zeroed on the GPU, committed length
-    /// and parities cleared only after the fences, poison cleared, scratch
-    /// cursor rewound to the persistent base.
+    // A real reset: every state region zeroed on the GPU, committed length and parities cleared only after the fences, poison cleared, scratch cursor rewound to the persistent base.
     pub fn reset(e: *Engine) Error!void {
         try vk.orExit(e.state.reset(e.cmds, e.staging, e.timeout_ns));
         e.arena.reset(e.base_mark) catch {};
         e.poisoned = false;
     }
 
-    /// The prompt pass over a whole validated prompt of any length up to the
-    /// state's capacity: every id and the request's whole footprint are
-    /// checked before the first write, then the existing forward runs over
-    /// stable 32-row chunks, the visible count committed after each. A
-    /// failure after the first chunk poisons (the partial RNN state is never
-    /// reused); a refused call leaves the state untouched.
+    // The prompt pass over a whole validated prompt of any length up to the state's capacity: every id and the request's whole footprint are checked before the first write, then the existing forward runs over stable 32-row chunks, the visible count committed after each. A failure after the first chunk poisons (the partial RNN state is never reused); a refused call leaves the state untouched.
     pub fn prefill(e: *Engine, tokens: []const u32) Error!void {
         if (e.poisoned) return error.Poisoned;
         if (tokens.len == 0) return error.UnsupportedPrompt;
@@ -239,8 +184,7 @@ pub const Engine = struct {
         }
     }
 
-    /// One forward chunk of 1..32 checked rows over the current state; the
-    /// logits row afterwards is the next-token distribution past the chunk.
+    // One forward chunk of 1..32 checked rows over the current state; the logits row afterwards is the next-token distribution past the chunk.
     pub fn prefillChunk(e: *Engine, tokens: []const u32) Error!void {
         if (e.poisoned) return error.Poisoned;
         if (tokens.len == 0 or tokens.len > max_prefill_rows) return error.UnsupportedPrompt;
@@ -254,8 +198,7 @@ pub const Engine = struct {
         e.poisoned = false;
     }
 
-    /// One decode step for the fed token: embed, all 24 layers, final norm
-    /// and head; the logits row afterwards covers the next token.
+    // One decode step for the fed token: embed, all 24 layers, final norm and head; the logits row afterwards covers the next token.
     pub fn decode(e: *Engine, token: u32) Error!void {
         if (e.poisoned) return error.Poisoned;
         try vk.ops_q4.checkIds(&.{token}, e.model.embed.n);
@@ -268,11 +211,7 @@ pub const Engine = struct {
         e.poisoned = false;
     }
 
-    /// The GPU greedy draw over the current logits row: the unchanged-Ash
-    /// rule — largest finite logit, exact ties (including +0/-0) to the
-    /// lowest index, any NaN or infinity anywhere in the row refuses. A
-    /// non-finite refusal poisons the engine: no valid continuation exists
-    /// without a real reset.
+    // The GPU greedy draw over the current logits row: the unchanged-Ash rule — largest finite logit, exact ties (including +0/-0) to the lowest index, any NaN or infinity anywhere in the row refuses. A non-finite refusal poisons the engine: no valid continuation exists without a real reset.
     pub fn draw(e: *Engine) Error!u32 {
         try logitsReady(e.poisoned, e.state.visible());
         return vk.orExit(e.greedy.select(e.cmds, e.staging, e.logits, e.timeout_ns)) catch |err| {
@@ -281,8 +220,7 @@ pub const Engine = struct {
         };
     }
 
-    /// The full logits row as bytes (receipt readback; never a CPU argmax).
-    /// A wrong `out.len` is a caller bug, refused without poisoning.
+    // The full logits row as bytes (receipt readback; never a CPU argmax). A wrong `out.len` is a caller bug, refused without poisoning.
     pub fn logitsBytes(e: *Engine, out: []u8) Error!void {
         try logitsReady(e.poisoned, e.state.visible());
         if (out.len != e.logits.byteLen()) return error.Invalid;
@@ -331,9 +269,7 @@ pub const Engine = struct {
         };
     }
 
-    /// All 24 layers over `rows` rows from the embedded hidden in h[0]:
-    /// input norm (plain on layer 0, residual add elsewhere), mixer, post
-    /// norm, MLP; the ring alternates so every add writes a disjoint buffer.
+    // All 24 layers over `rows` rows from the embedded hidden in h[0]: input norm (plain on layer 0, residual add elsewhere), mixer, post norm, MLP; the ring alternates so every add writes a disjoint buffer.
     fn runLayers(e: *Engine, rows: usize) Error!void {
         const cx = e.core();
         const span = rows * pinned.hidden;
@@ -427,8 +363,7 @@ test "the arena holds the persistent windows plus the worst transient layer" {
     const rows: u64 = max_prefill_rows;
     const conv: u64 = pinned.conv_dim;
     const dim: u64 = pinned.linear_heads * pinned.linear_dim;
-    // one linear layer at the cap, term by term in bytes: qkv, z, a, b, soa,
-    // g (f32), beta, conv_out, conv_in, y, mix
+    // one linear layer at the cap, term by term in bytes: qkv, z, a, b, soa, g (f32), beta, conv_out, conv_in, y, mix
     const linear = 2 * rows * (conv + 4 * dim + 3 * conv + dim + dim) +
         7 * rows * pinned.linear_heads + 2 * (rows + state.conv_rows) * conv;
     // one full-attention layer at the cap: qraw, q, qn, k, kn, v, queries, y, mix
