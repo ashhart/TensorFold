@@ -182,6 +182,7 @@ const Loader = struct {
         const u = l.up.uploader();
         return .{
             .rows32 = (try u.tensor(r.rows32)).ptr,
+            .rows16 = (try u.tensor(r.router)).ptr,
             .top_k = r.top_k,
             .rows = r.router.shape[0],
             .remap = if (r.remap) |t| (try u.tensor(t)).ptr else 0,

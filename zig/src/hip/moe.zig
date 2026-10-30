@@ -21,6 +21,8 @@ pub const Experts = struct {
 /// The router's rows in fp32 (E + 1, D), the shared expert's gate last, and the experts.
 pub const Routed = struct {
     rows32: u64,
+    /// The same rows as the bf16 they are held in (the fp32 rows' values widened), which a round reads instead.
+    rows16: u64 = 0,
     experts: Experts,
     top_k: usize,
     /// The router's rows, E + 1: the model's expert count, whatever share of the experts this rank holds.
@@ -76,7 +78,7 @@ pub fn run(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, prefill: bool)
     const wts = try o.arena.of(f32, size * slots);
     const items = try o.arena.of(i32, cap * 3);
     const members = try o.arena.of(i32, size * slots);
-    try o.moeRouter(x, r.rows32, logits, rows, ex.dims, r.rows);
+    try o.moeRouterRows(x, r.rows32, r.rows16, logits, rows, ex.dims, r.rows);
     const count: usize = cap;
     var tile: usize = undefined;
     if (r.remap != 0) {
@@ -115,7 +117,7 @@ pub fn parts(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize) ops.Error!Pa
     const wts = try o.arena.of(f32, size * slots);
     const items = try o.arena.of(i32, cap * 3);
     const members = try o.arena.of(i32, size * slots);
-    try o.moeRouter(x, r.rows32, logits, rows, r.experts.dims, r.rows);
+    try o.moeRouterRows(x, r.rows32, r.rows16, logits, rows, r.experts.dims, r.rows);
     const p = try expertParts(o, kind, r, x, rows, logits, pick, wts, items, members, cap);
     return .{ .y = p.y, .wts = wts, .slots = slots };
 }
