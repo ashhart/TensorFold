@@ -21,8 +21,7 @@ inline float tf_sq_sum8(uint4 v, float one) {
 // 2^-4s: inputs pre-scaled so a nibble masked in place (code * 2^4s) multiplies to the exact product.
 inline float tf_sq_pre(int s) { return as_type<float>(uint(127 - 4 * s) << 23); }
 
-// R rows in 8-row tiles, NT 8-column tiles; simdgroups take K chunks c, c + SGS, ..., summed by a fixed tree.
-// Every tile loop is unrolled: left to the compiler they stay rolled, and the tiles run 15-20% slower on an M3 Ultra.
+// R rows in 8-row tiles, NT 8-column tiles; K chunks c, c + SGS, ... summed by a fixed tree; loops unrolled (+15-20%).
 template <int S, int NT, int RT>
 [[kernel]] void tf_sq_mma(const device uint4* X [[buffer(0)]],
                           const device uint* W [[buffer(1)]],
