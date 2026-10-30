@@ -298,6 +298,8 @@ pub const Cuda = struct {
         const keep: ?engine.Keep = if (s.reuse.marks.len == 0) null else .{ .at = s.reuse.marks, .ctx = s, .call = keptAt };
         if (s.images.len > 0) try (e.vision orelse return error.NoVision).begin(e.stream, s.images, from);
         defer if (e.vision) |v| v.end();
+        if (s.audios.len > 0) try (e.audio orelse return error.NoAudio).begin(e.stream, s.audios, from);
+        defer if (e.audio) |a| a.end();
         var sink: PromptSink = .{ .gpa = self.gpa, .s = s };
         s.prompt_rows.clearRetainingCapacity();
         if (s.prompt_logprobs) |k| {

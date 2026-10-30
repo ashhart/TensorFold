@@ -90,6 +90,7 @@ pub fn prefill(e: *Engine, s: *Segments, prompt: []const u32, head: ?*Head, part
             f.page_elems = e.pageBytes() / 2;
             f.untaught = e.bound.untaught;
             f.vision = e.vision;
+            f.audio = e.audio;
             seg[k] = .{ .f = f, .walk = .{ .rows = rows, .pos = e.pos + k * R } };
         }
         try e.copied.record(e.stream);
@@ -98,7 +99,7 @@ pub fn prefill(e: *Engine, s: *Segments, prompt: []const u32, head: ?*Head, part
         for (0..c.parts) |k| { // the caller's stream has joined every segment
             const start = at + k * R;
             const known = @min(seg[k].walk.rows, prompt.len - 1 - start);
-            if (head) |h| if (known > 0) try h.absorb(bufs[k].p_hidden, prompt[start + 1 ..][0..known]);
+            if (head) |h| if (known > 0) try h.absorb(bufs[k].p_hidden, prompt[start + 1 ..][0..known], start + 1);
         }
         last = c.parts - 1;
         last_rows = seg[last].walk.rows;

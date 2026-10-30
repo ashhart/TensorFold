@@ -173,6 +173,13 @@ pub const Server = struct {
             log.line("--vision: marker token {d} is not an added token in this tokenizer; image and video input cannot be served safely", .{id});
             return error.InvalidVisionMarkers;
         };
+        // audio input: the locator the template writes is one added token, the one a clip's rows take
+        if (srv.info.audio) |*o| {
+            o.audio_token = text.tokenId(o.locator) orelse {
+                log.line("audio input: the tokenizer has no single token {s}; audio cannot be served", .{o.locator});
+                return error.InvalidAudioLocator;
+            };
+        }
         if (config.voices_dir) |dir| {
             if (srv.info.speech == null) return error.VoicesRequireSpeech;
             srv.voices = try @import("drama_voice.zig").load(srv.arena.allocator(), io, dir);

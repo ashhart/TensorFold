@@ -8,6 +8,7 @@ const kern = @import("cuda_kernels.zig");
 const Source = @import("cuda_source.zig").Source;
 const latent = @import("cuda_latent.zig");
 const modelopt = @import("cuda_modelopt.zig");
+const salm = @import("cuda_salm.zig");
 const join = weights.join;
 const Block = weights.Block;
 pub const Pending = struct {
@@ -76,6 +77,12 @@ fn fill(p: *Pending, io: std.Io, dir: []const u8, c: Config, with_mtp: bool) !vo
     var ck = try core.Checkpoint.openModel(gpa, io, dir);
     defer ck.close();
     try src.add(&ck);
+    // a Transcribe checkpoint: the audio encoder and the CTC aligner load apart; TE's _extra_state holds nothing
+    if (c.salm) {
+        for ([_][]const u8{ "perception.", "ctc_timestamp." }) |part| try ck.skip(part);
+        try salm.skipExtraState(&ck);
+        ck.scope = "llm.";
+    }
     const pre = c.prefix();
     w.blocks = try gpa.alloc(Block, c.layers);
     for (c.kinds[0..c.layers], 0..) |kind, i| {
@@ -83,13 +90,13 @@ fn fill(p: *Pending, io: std.Io, dir: []const u8, c: Config, with_mtp: bool) !vo
         var nb: [128]u8 = undefined;
         var pb: [128]u8 = undefined;
         const name = try std.fmt.bufPrint(&nm, "blocks.{d}", .{i});
-        const norm = try ck.expect(try std.fmt.bufPrint(&pb, "{s}backbone.layers.{d}.norm.weight", .{ pre, i }), .bf16, &.{c.hidden});
+        const norm = try ck.expect(try std.fmt.bufPrint(&pb, "{s}{s}{d}.norm.weight", .{ pre, c.layerStem(), i }), .bf16, &.{c.hidden});
         var b: Block = .{ .kind = kind, .norm = try L.raw(try join(&nb, name, ".norm"), norm) };
-        const mixer = try std.fmt.bufPrint(&pb, "{s}backbone.layers.{d}.mixer.", .{ pre, i });
+        const mixer = try std.fmt.bufPrint(&pb, "{s}{s}{d}.mixer.", .{ pre, c.layerStem(), i });
         switch (kind) {
             .mamba => b.mamba = try L.mamba(&ck, try join(&nb, name, ".mamba"), mixer),
             .attention => b.attn = try L.attention(&ck, try join(&nb, name, ".attn"), mixer),
-            .moe => b.moe = if (c.bolt) try modelopt.latent(L, &ck, try join(&nb, name, ".moe"), mixer, c, i) else if (c.latent > 0) try latent.load(L, &ck, try join(&nb, name, ".moe"), mixer, c, @intCast(i)) else try L.moe(&ck, try join(&nb, name, ".moe"), mixer, c),
+            .moe => b.moe = if (c.salm) try salm.moe(L, &ck, try join(&nb, name, ".moe"), mixer, c) else if (c.bolt) try modelopt.latent(L, &ck, try join(&nb, name, ".moe"), mixer, c, i) else if (c.latent > 0) try latent.load(L, &ck, try join(&nb, name, ".moe"), mixer, c, @intCast(i)) else try L.moe(&ck, try join(&nb, name, ".moe"), mixer, c),
         }
         w.blocks[i] = b;
     }
@@ -104,10 +111,10 @@ fn fill(p: *Pending, io: std.Io, dir: []const u8, c: Config, with_mtp: bool) !vo
         };
     }
     var tail: [96]u8 = undefined;
-    w.norm_f = try L.raw("norm_f", try ck.expect(try std.fmt.bufPrint(&tail, "{s}backbone.norm_f.weight", .{pre}), .bf16, &.{c.hidden}));
+    w.norm_f = try L.raw("norm_f", try ck.expect(try std.fmt.bufPrint(&tail, "{s}{s}", .{ pre, c.normName() }), .bf16, &.{c.hidden}));
     w.head = try L.dense(&ck, "head", &.{try std.fmt.bufPrint(&tail, "{s}lm_head", .{pre})});
     // a ModelOpt checkpoint keeps its MTP head in its own shards
-    if (c.format == .modelopt) if (!with_mtp) try ck.skip(try std.fmt.bufPrint(&tail, "{s}mtp.", .{pre})) else if (c.latent > 0) try latent.mtp(L, &ck, c) else try modelopt.mtp(L, &ck, c);
+    if (c.format == .modelopt) if (!with_mtp) try ck.skip(try std.fmt.bufPrint(&tail, "{s}mtp.", .{pre})) else if (c.salm) try salm.mtp(L, &ck, c) else if (c.latent > 0) try latent.mtp(L, &ck, c) else try modelopt.mtp(L, &ck, c);
     // the picture tower and its projector load with the image path (an omni checkpoint's other parts)
     if (c.omni) for ([_][]const u8{ "vision_model.", "mlp1.", "vision_projector." }) |part| try ck.skip(part);
     if (ck.unused() != 0) return error.UnusedCheckpointTensors;

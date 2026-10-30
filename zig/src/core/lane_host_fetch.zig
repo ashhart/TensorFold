@@ -67,7 +67,7 @@ fn named(h: *LaneHost, name: Name) bool {
 
 /// A request the host's lookup keys by its tokens alone (no pictures), as `lane_stream.open` looks it up.
 fn keyed(r: *const api.Request) bool {
-    return r.embedding == null and r.prompt_logprobs == null and !r.untaught and r.images.len == 0 and r.cacheKey().len > 0;
+    return r.embedding == null and r.prompt_logprobs == null and !r.untaught and r.images.len == 0 and r.audios.len == 0 and r.cacheKey().len > 0;
 }
 
 /// A read finished: the engine thread, perhaps idle with every queued request waiting, looks again.
