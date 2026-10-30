@@ -285,6 +285,16 @@ fn writeKeys(
     );
 }
 
+/// A prompt's rows into a sparse layer's caches only (sparse()'s bytes, no attention): the MTP head's prompt rows.
+pub fn sparseKeys(o: Ops, m: *const model.Model, d: model.Dims, s: model.Sparse, g: forward.Seg, layer: usize, x: Tensor, dev_pos: u64) !void {
+    const rows = g.tokens.len;
+    var outs: [4]Tensor = undefined;
+    if (!try o.projectGroup(x, &.{ s.q, s.k, s.v, s.index }, rows, &outs)) {
+        for (&outs, [_]model.Projection{ s.q, s.k, s.v, s.index }) |*t, p| t.* = try o.project(x, p, rows, false);
+    }
+    try writeKeys(o, m, d, s, g, layer, outs[1], outs[2], outs[3], 0, dev_pos);
+}
+
 /// The rows' ends and complete blocks on the device, and the blocks a window's scores walk (see forward.Staged).
 pub const Rows = struct { ends: u64, complete: u64, bound: usize };
 

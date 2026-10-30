@@ -289,7 +289,9 @@ pub const Fx = struct {
         while (f.slotBusy(slot, gop.key_ptr.*)) slot += 1;
         const caches = try e.lease(slot);
         errdefer e.unlease(caches);
-        var head: ?cache.Caches = if (m.mtp) |*h| try head_mod.caches(
+        // the head's caches only for a stream that drafts (not --no-drafts, "draft": false or --mtp-drafts 0)
+        const drafts = s.drafts and f.drafts > 0;
+        var head: ?cache.Caches = if (m.mtp) |*h| if (!drafts) null else try head_mod.caches(
             f.gpa,
             &e.driver,
             h,
@@ -353,9 +355,9 @@ pub const Fx = struct {
         const rows = to - at;
         const row_bytes = m.dims.wide() * m.act.size();
         if (lane.head) |*hc| {
-            // the head's keys for every prompt row with a next token (the last waits for the first draw)
+            // the head's keys for every prompt row with a next token (the last waits for the first draw), caches only
             const n = if (last) rows - 1 else rows;
-            if (n > 0) _ = try head_mod.run(
+            if (n > 0) try head_mod.keys(
                 e.ops(&e.arena),
                 m,
                 &e.host,

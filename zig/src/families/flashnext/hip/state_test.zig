@@ -209,6 +209,45 @@ test "a lone rank's restore that fails at any copy or allocation leaves fresh ca
     try std.testing.expect(k > 1);
 }
 
+test "a state saved without the head (a stream that cannot draft) never resumes a drafting stream; the head's goes unread" {
+    var r = Host.runtime();
+    const s: hip.Stream = .{ .r = &r, .handle = null };
+    // saved by a lane without head caches: no head bytes
+    var main = try caches(&r);
+    defer main.deinit(std.testing.allocator);
+    for (bytes(&main), 0..) |*b, i| b.* = @truncate(i *% 7 +% 9);
+    main.len = at;
+    main.pooled = at / ratio;
+    main.history = .{ 5, 6 };
+    const bare = try snapshot.save(std.testing.allocator, &r, s, &main, null, at, ratio);
+    defer snapshot.drop(std.testing.allocator, bare);
+    try std.testing.expectEqual(@as(usize, 0), bare.head.len);
+    {
+        // a drafting lane: its head would have no state for the prompt, so the restore is refused and both start over
+        var to = try caches(&r);
+        defer to.deinit(std.testing.allocator);
+        var head = try caches(&r);
+        defer head.deinit(std.testing.allocator);
+        try std.testing.expectError(error.RestoreRefused, snapshot.restoreAgreed(std.testing.allocator, &r, s, bare, &to, &head, ratio, eos, null));
+        try expectFresh(&to);
+        try expectFresh(&head);
+    }
+    {
+        // a lane without a head resumes it
+        var to = try caches(&r);
+        defer to.deinit(std.testing.allocator);
+        try snapshot.restoreAgreed(std.testing.allocator, &r, s, bare, &to, null, ratio, eos, null);
+        try expectRestored(&to, &main);
+    }
+    // a state saved with the head resumes a lane without one: its main state alone
+    var src = try Saved.init(&r, 4);
+    defer src.deinit();
+    var to = try caches(&r);
+    defer to.deinit(std.testing.allocator);
+    try snapshot.restoreAgreed(std.testing.allocator, &r, s, src.copy, &to, null, ratio, eos, null);
+    try expectRestored(&to, &src.main);
+}
+
 test "a lone rank whose caches cannot be made fresh after a failed restore stops" {
     var r = Host.runtime();
     const s: hip.Stream = .{ .r = &r, .handle = null };
