@@ -40,3 +40,18 @@ pub fn vision() !void {
     try std.testing.expect(refusals.family(VisionFamily, o) == null);
     try std.testing.expect(refusals.family(F, .{ .dir = "d", .model_type = F.model_type }) == null);
 }
+
+/// --tp opens for an EXL3 pack only: the drafts-with-cache refusal lifts for it, any other Flash Next pack is refused.
+pub fn packs() !void {
+    const o: api.Open = .{ .dir = "/missing-flashnext-test-checkpoint", .model_type = F.model_type, .tp = 2, .rank = 1, .drafts = true, .prompt_cache_gib = 4 };
+    try std.testing.expect(refusals.admitted(F, o, true) == null);
+    try std.testing.expectStringStartsWith(refusals.admitted(F, o, false) orelse "", "Flash Next tensor-rank MTP snapshots are unavailable");
+    try std.testing.expect(refusals.packRanks(F, o, true) == null);
+    try std.testing.expectStringStartsWith(refusals.packRanks(F, o, false) orelse "", "--tp: on CUDA only an EXL3 pack");
+    var one = o;
+    one.tp = 1;
+    try std.testing.expect(refusals.packRanks(F, one, false) == null);
+    try std.testing.expect(refusals.admitted(F, one, false) == null);
+    // a directory that holds no checkpoint is no EXL3 pack
+    try std.testing.expect(!F.exl3_pack(std.testing.allocator, std.testing.io, o.dir));
+}

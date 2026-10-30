@@ -40,6 +40,8 @@ pub const Matrix = struct {
 /// exl3.cu's TfExl3Rows and TfExl3Matrix, passed by value.
 pub const RowsArgs = extern struct { rows: u32, x_stride: u32, y_stride: u32, y_f32: u32 };
 pub const MatrixArgs = extern struct { k: u32, n: u32, bits: u32, tiles_n: u32, split: u32 };
+/// exl3_candidate.cu's TfExl3Chains: where exl3_linear.cu cuts the K sum (k tiles a chain, chains a split).
+pub const ChainsArgs = extern struct { per: u32, wk: u32 };
 
 /// Decode rows a launch; longer decode runs go window by window.
 pub const window = 16;
@@ -63,6 +65,7 @@ pub fn split(k: usize, n: usize) usize {
 pub const Kernels = struct {
     decode_fns: [3]Function, // 1-16 rows on the tensor units, by codebook
     prompt_fns: [3]Function, // 64 rows a block on the tensor units, by codebook
+    promptd_fns: [3]Function, // the same with decode's bytes (exl3_linear.cu's sums), by codebook
     rotate_f_fn: Function, // decode rows, each 128-block in fragment order
     rotate_h_fn: Function, // prompt rows, plain order
     codebook_fn: Function,
@@ -73,11 +76,12 @@ pub const Kernels = struct {
     k_max: usize,
 
     pub fn resolve(d: *const Driver, mod: module.Module, k_max: usize) !Kernels {
-        var k: Kernels = .{ .decode_fns = undefined, .prompt_fns = undefined, .rotate_f_fn = try mod.function("tf_exl3_rotate_f"), .rotate_h_fn = try mod.function("tf_exl3_rotate_h"), .codebook_fn = try mod.function("tf_exl3_codebook"), .unpack_fn = try mod.function("tf_exl3_unpack"), .rotated = undefined, .parts = undefined, .tickets = undefined, .k_max = k_max };
-        for (&k.decode_fns, &k.prompt_fns, 0..) |*f, *p, c| {
+        var k: Kernels = .{ .decode_fns = undefined, .prompt_fns = undefined, .promptd_fns = undefined, .rotate_f_fn = try mod.function("tf_exl3_rotate_f"), .rotate_h_fn = try mod.function("tf_exl3_rotate_h"), .codebook_fn = try mod.function("tf_exl3_codebook"), .unpack_fn = try mod.function("tf_exl3_unpack"), .rotated = undefined, .parts = undefined, .tickets = undefined, .k_max = k_max };
+        for (&k.decode_fns, &k.prompt_fns, &k.promptd_fns, 0..) |*f, *p, *e, c| {
             var name: [32]u8 = undefined;
             f.* = try mod.function(try std.fmt.bufPrintSentinel(&name, "tf_exl3_tc_{d}", .{c}, 0));
             p.* = try mod.function(try std.fmt.bufPrintSentinel(&name, "tf_exl3_prompt_{d}", .{c}, 0));
+            e.* = try mod.function(try std.fmt.bufPrintSentinel(&name, "tf_exl3_promptd_{d}", .{c}, 0));
         }
         k.rotated = try memory.DeviceBuffer.alloc(d, prompt_chunk * k_max * 2);
         errdefer k.rotated.free();
@@ -134,6 +138,36 @@ pub const Kernels = struct {
             a.add(out + at * m.n * elem);
             a.add(@as(u32, @intFromBool(f32_out)));
             try launch_.launch(k.prompt_fns[@backingInt(m.codebook)], .{ .grid = .{ .x = @intCast(m.n / 128), .y = @intCast((r + 63) / 64), .z = 1 }, .block = .{ .x = 256 } }, s, &a);
+        }
+    }
+
+    /// Prompt rows with `Linear.matmul`'s bytes at any row count; plan_sk and plan_wk are exl3.plan(k, n, 192, 8)'s.
+    pub fn promptExact(k: *const Kernels, s: Stream, rot_in: Function, x: u64, m: Matrix, out: u64, count: usize, f32_out: bool, plan_sk: u32, plan_wk: u32) !void {
+        const elem: usize = if (f32_out) 4 else 2;
+        try k.fits(m, m.k);
+        if (plan_sk == 0 or plan_wk == 0 or (m.k / 16) % (plan_sk * plan_wk) != 0) return error.Exl3Shape;
+        const chains: ChainsArgs = .{ .per = @intCast(m.k / 16 / plan_sk / plan_wk), .wk = plan_wk };
+        var at: usize = 0;
+        while (at < count) : (at += prompt_chunk) {
+            const r = @min(prompt_chunk, count - at);
+            var ra: launch_.Args = .{};
+            ra.add(x + at * m.k * 2);
+            ra.add(m.suh);
+            ra.add(k.rotated.ptr);
+            ra.add(@as(i32, 1)); // bf16 rows
+            ra.add(@as(i32, @intCast(r)));
+            ra.add(@as(i32, @intCast(m.k)));
+            try launch_.launch(rot_in, .{ .grid = .{ .x = @intCast((m.k / 128 + 3) / 4), .y = @intCast(r), .z = 1 }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s, &ra);
+            var a: launch_.Args = .{};
+            a.add(k.rotated.ptr);
+            a.add(@as(u32, @intCast(r)));
+            a.add(m.trellis);
+            a.add(m.svh);
+            a.add(m.args());
+            a.add(chains);
+            a.add(out + at * m.n * elem);
+            a.add(@as(u32, @intFromBool(f32_out)));
+            try launch_.launch(k.promptd_fns[@backingInt(m.codebook)], .{ .grid = .{ .x = @intCast(m.n / 128), .y = @intCast((r + 63) / 64), .z = 1 }, .block = .{ .x = 256 } }, s, &a);
         }
     }
 
