@@ -339,6 +339,11 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     for (&skews, 0..) |*x, i| x.* = .init(a, &r, s, &l, i);
     defer for (&skews) |*x| x.deinit();
     if (matrix) for (&skews) |*x| try kernels.append(a, x.kernel());
+    const gdn_k = @import("contract_gdn.zig");
+    var gdn_prompts: [2]gdn_k.Prompt = undefined;
+    for (&gdn_prompts, std.enums.values(gdn_k.Part)) |*m, p| m.* = .init(a, &r, s, &l, p);
+    defer for (&gdn_prompts) |*m| m.deinit();
+    for (&gdn_prompts) |*m| try kernels.append(a, m.kernel());
     var t: g.Tally = .{};
     const t0 = ms(io);
     try g.runAll(a, kernels.items, 0x6b63, &t);
