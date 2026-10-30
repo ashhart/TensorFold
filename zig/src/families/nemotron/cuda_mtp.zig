@@ -459,8 +459,8 @@ pub const Head = struct {
         return .{ .token = tok[0], .prob = prob[0] };
     }
 
-    /// MTPHead.absorb_rows: a prompt chunk's rows into the head's cache, keys and values only.
-    pub fn absorb(h: *Head, hidden: u64, tokens: []const u32) !void {
+    /// MTPHead.absorb_rows: a prompt chunk's keys and values into the head's cache, `tokens` at [at, at + len).
+    pub fn absorb(h: *Head, hidden: u64, tokens: []const u32, at: usize) !void {
         const e = h.e;
         const c = e.c;
         const m = e.w.mtp.?;
@@ -472,8 +472,13 @@ pub const Head = struct {
         try h.copied.synchronize();
         const host = h.pinned.slice(u32)[host_tokens..][0..tokens.len];
         @memcpy(host, tokens);
+        // a speech prompt's <|audio|> placeholders take the clip's rows, as the trunk's embeds do (cuda_audio.zig)
+        if (e.audio != null) for (host) |*t| if (t.* >= c.vocab) {
+            t.* = 0;
+        };
         try o.upload(h.atok, std.mem.sliceAsBytes(host));
         try f.embed(h.atok, h.emb, rows);
+        if (e.audio) |a| try a.splice(o.s, at, at + rows, h.emb);
         try f.glue.concatNorms(h.emb, hidden, m.enorm, m.hnorm, h.cat, h.cxs, rows, c.hidden, c.eps);
         try o.prefillDense(h.cat, m.eh_proj, h.x, rows);
         try f.glue.addRmsnorm(h.x, null, m.attn_norm, h.x, b.y, b.xs, rows, c.hidden, c.eps);

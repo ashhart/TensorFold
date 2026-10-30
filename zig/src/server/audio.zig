@@ -5,11 +5,19 @@ const json = @import("json");
 const errors = @import("errors.zig");
 const images = @import("images.zig");
 const image_key = @import("image_key.zig");
+const http_body = @import("http_body.zig");
 const Value = json.Value;
 const Cx = errors.Cx;
 
-/// A clip's encoded bytes at most (a request's body limit bounds them all: about 12 minutes of 16-bit 16 kHz WAV).
-pub const max_audio_bytes = 32 << 20;
+/// A request body at most when the engine takes audio: an hour of 16-bit 16 kHz WAV (115.2 MB) in base64, and its text.
+pub const body_limit = 160 << 20;
+/// A clip's encoded bytes at most (the body limit bounds them all).
+pub const max_audio_bytes = body_limit;
+
+/// The body limit of a route that reads chat messages: an hour of audio when the engine takes it.
+pub fn bodyLimit(info: api.Info) usize {
+    return if (info.audio != null) body_limit else http_body.limit;
+}
 
 pub const Expanded = struct {
     ids: []const u32,

@@ -5,8 +5,13 @@ const lanes = @import("lanes");
 const radio = @import("radio");
 const nemo_audio = @import("nemo_audio");
 
-/// Audio rows a request may hold by default: about 21 minutes, past what a request body's 32 MiB of WAV carries.
-pub const default_rows = 16384;
+/// Audio rows a request may hold at most: the card's hour of 16 kHz audio (12.5 rows a second).
+pub const hour_rows: u32 = @intCast(nemo_audio.rows(3600 * nemo_audio.Config.sample_rate));
+
+/// The rows buffer for a `context`-token window: an hour of audio, or the window when it holds less.
+pub fn limitFor(context: usize) u32 {
+    return @intCast(@min(context, hour_rows));
+}
 /// Clips a request may hold.
 pub const max_clips = 8;
 

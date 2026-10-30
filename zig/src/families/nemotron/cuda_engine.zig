@@ -170,9 +170,8 @@ pub const Engine = struct {
         // every byte this rank holds, hashed while the weights load; the ranks compare the digests at ready
         var content: ?*identity.Content = if (e.tp != null) try identity.Content.start(gpa, io, model_dir, e.c.held != null) else null;
         errdefer if (content) |x| x.abandon();
-        // Bolt (LatentMoE, ggml blocks): no MTP head in the checkpoint; our own glue (captured sets are Lightning's).
-        // Transcribe's MTP head is not qualified over audio rows yet: it decodes plain.
-        const mtp = opts.mtp and !e.c.bolt and !e.c.salm;
+        // Bolt (LatentMoE, ggml blocks): no MTP head in the checkpoint; our own glue (captured sets are Lightning's)
+        const mtp = opts.mtp and !e.c.bolt;
         if (e.c.bolt) {
             if (e.k.triton != null) return error.CapturedGlueIsLightnings;
             try e.k.loadGgml(ctx);
@@ -209,7 +208,7 @@ pub const Engine = struct {
         // a Transcribe checkpoint's audio encoder and its rows, loaded before the caches plan their memory
         if (e.c.salm) {
             const audio = @import("cuda_audio.zig");
-            e.audio = try audio.Audio.init(gpa, io, ctx.d, model_dir, audio.default_rows, e.c.hidden);
+            e.audio = try audio.Audio.init(gpa, io, ctx.d, model_dir, audio.limitFor(opts.context orelse default_context), e.c.hidden);
         }
         errdefer if (!keep_owner) if (e.audio) |a| a.deinit();
         e.b = try state.Buffers.init(ctx.d, e.c, e.max_len, e.nch, e.carve);

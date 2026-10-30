@@ -107,7 +107,7 @@ pub fn serialChunks(e: *Engine, prompt: []const u32, from: usize, dump: ?*Dump, 
         e.pos += @intCast(chunk.len);
         const known = @min(chunk.len, prompt.len - 1 - s);
         if (e.prompt_rows) |p| try prompt_rows.run(e, p, prompt[s + 1 ..][0..known]);
-        if (head) |h| if (known > 0) try h.absorb(e.b.p_hidden, prompt[s + 1 ..][0..known]);
+        if (head) |h| if (known > 0) try h.absorb(e.b.p_hidden, prompt[s + 1 ..][0..known], s + 1);
         if (e.taps) |t| try t.call(t.ctx, e.b.p_hidden, s, chunk.len);
         try reuse.finish(.{ .e = e, .head = head });
         s = end;
