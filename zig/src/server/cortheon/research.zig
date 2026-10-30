@@ -161,13 +161,17 @@ pub fn pick(a: Allocator, found: []const []const []const u8) Allocator.Error![]c
 
 /// The model's share of the room left in the window for one tool result, in characters.
 fn charBudget(srv: *const Server, input: chat.Input) usize {
-    const window: usize = srv.info.context_window;
+    const max_tokens: usize = @intCast(@max(srv.config.default_max_tokens, 0));
+    return pageBudget(srv.info.context_window, max_tokens, input.messages);
+}
+
+fn pageBudget(window: usize, max_tokens: usize, messages: Value) usize {
     if (window == 0) return 6000;
     var chars: usize = 0;
-    if (input.messages == .array) for (input.messages.array) |m| {
+    if (messages == .array) for (messages.array) |m| {
         chars += memory.textLen(m); // text parts count, as the turn's words do
     };
-    const used = chars / 3 + 1024 + @as(usize, @intCast(@max(0, srv.config.default_max_tokens)));
+    const used = chars / 3 + 1024 + max_tokens;
     if (used >= window) return 600;
     return std.math.clamp((window - used) * 3 / 8, 600, 6000);
 }
@@ -224,6 +228,42 @@ test "planner replies become clean queries; a goal becomes one when the planner 
     const f = try fallback(a, "```\n\nImplement a client for the latest Stripe API, with retries and idempotency keys and good tests please thanks\n");
     try std.testing.expectEqualStrings("Implement a client for the latest Stripe API, with retries and idempotency", f[0]);
     try std.testing.expectEqualStrings("What are the main changes in the latest Zig release", (try fallback(a, "What are the main changes in the latest Zig release? Name the version."))[0]);
+}
+
+fn textPart(a: Allocator, s: []const u8) !Value {
+    const p = try json.newObject(a);
+    try p.put(a, "type", .{ .string = "text" });
+    try p.put(a, "text", .{ .string = s });
+    return .{ .object = p };
+}
+
+test "text beside an image counts in the page budget" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var words: std.ArrayList(u8) = .empty;
+    while (words.items.len < 6000) try words.append(a, 'x');
+    const mid = words.items.len / 2;
+    const parts = try a.alloc(Value, 3);
+    parts[0] = try textPart(a, words.items[0..mid]);
+    const image = try json.newObject(a);
+    try image.put(a, "type", .{ .string = "image_url" });
+    parts[1] = .{ .object = image };
+    parts[2] = try textPart(a, words.items[mid..]);
+    const turn = try json.newObject(a);
+    try turn.put(a, "role", .{ .string = "user" });
+    try turn.put(a, "content", .{ .array = parts });
+    const messages = try a.alloc(Value, 1);
+    messages[0] = .{ .object = turn };
+    try std.testing.expectEqual(@as(usize, 600), pageBudget(5000, 2048, .{ .array = messages }));
+    const only = try a.alloc(Value, 1);
+    only[0] = parts[1];
+    const bare = try json.newObject(a);
+    try bare.put(a, "role", .{ .string = "user" });
+    try bare.put(a, "content", .{ .array = only });
+    const one = try a.alloc(Value, 1);
+    one[0] = .{ .object = bare };
+    try std.testing.expect(pageBudget(5000, 2048, .{ .array = one }) > 600);
 }
 
 test "a fallback query is omitted when its first word does not fit" {
