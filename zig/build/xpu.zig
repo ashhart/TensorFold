@@ -185,9 +185,10 @@ const kernels = [_]Kernel{
 };
 
 /// The runtime module; `with_kernels` false builds it host-only (empty images).
-fn runtime(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, images: []const std.Build.LazyPath, ze: *std.Build.Module) *std.Build.Module {
+fn runtime(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, images: []const std.Build.LazyPath, ze: *std.Build.Module, dpas: bool) *std.Build.Module {
     const options = b.addOptions();
     options.addOption(bool, "with_kernels", images.len == kernels.len);
+    options.addOption(bool, "dpas", dpas);
     const xpu = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
     xpu.addOptions("kernel_options", options);
     xpu.addImport("ze", ze);
@@ -211,7 +212,7 @@ fn family(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
 fn nemotronModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ocloc: []const u8, device: []const u8, dpas: bool, ze: *std.Build.Module, lanes: *std.Build.Module) Modules {
     var images: [kernels.len]std.Build.LazyPath = undefined;
     for (kernels, &images) |k, *image| image.* = spirv(b, ocloc, device, dpas, k);
-    var m = family(b, target, optimize, runtime(b, target, optimize, &images, ze), lanes);
+    var m = family(b, target, optimize, runtime(b, target, optimize, &images, ze, dpas), lanes);
     m.images = images;
     return m;
 }
@@ -275,7 +276,7 @@ fn nemotronSteps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
 /// Host unit tests of the Intel GPU runtime, the Nemotron family on it and its CLI (no GPU, no ocloc), on any host.
 pub fn hostTests(b: *std.Build, step: *std.Build.Step) void {
     const host = b.graph.host;
-    const xpu = runtime(b, host, .debug, &.{}, zeModule(b, host, .debug));
+    const xpu = runtime(b, host, .debug, &.{}, zeModule(b, host, .debug), true);
     const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = host, .optimize = .debug, .link_libc = true });
     const mods = family(b, host, .debug, xpu, lanes);
     const ze = xpu.import_table.get("ze").?;
