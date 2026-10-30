@@ -161,6 +161,12 @@ pub const Kernels = struct {
     moe_gu: ?Function,
     /// The same tile's routed down of a prompt, fp32 out.
     moe_down: ?Function,
+    /// A prompt's plain 4-bit group-32 products at each of dense_ks (tiles/dense_gemm.hpp); gfx11.
+    dense: [dense_ks.len]?Function,
+    /// hc up (K 320) on the dense tile with tf_fn_hc_mix in its epilogue (tf_affine_dense_hcmix); gfx11.
+    dense_hcmix: ?Function,
+    /// Fills the tile's gate table (rnd(sigmoid(g)) for every bf16 g) once a device; gfx11.
+    hc_gate_fill: ?Function,
     kp: [bit_widths.len][kp_tiles.len]Function,
     span: [2]Function,
     fold: Function,
@@ -172,6 +178,7 @@ pub const Kernels = struct {
 
     pub const load = affine_load.load;
     pub const fillByteLut = affine_load.fillByteLut;
+    pub const fillHcGate = affine_load.fillHcGate;
 
     /// Launches on `s`; the counting stream runs nothing.
     pub fn go(r: *const runtime.Runtime, f: Function, grid: hl.Dim3, block: hl.Dim3, s: abi.Stream, args: *hl.Args) Error!void {
@@ -356,6 +363,10 @@ pub const Kernels = struct {
     pub const moeDownTakes = affine_matrix.moeDownTakes;
     pub const moeGateUp = affine_matrix.moeGateUp;
     pub const moeDown = affine_matrix.moeDown;
+    pub const dense_ks = affine_matrix.dense_ks;
+    pub const denseIndex = affine_matrix.denseIndex;
+    pub const denseGo = affine_matrix.denseGo;
+    pub const denseHcMixGo = affine_matrix.denseHcMixGo;
 
     /// K-parallel tile `tier` (an index of kp_tiles) of a short prompt.
     pub fn kpGo(k: *const Kernels, r: *const runtime.Runtime, a: Arg, s: abi.Stream, items: c_int, tier: usize) Error!void {

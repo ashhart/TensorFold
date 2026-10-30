@@ -36,6 +36,8 @@ pub const Ops = struct {
 
     pub const project = products.project;
     pub const projectGroup = products.projectGroup;
+    pub const hcUpMix = products.hcUpMix;
+    pub const hcUpMixAffine = products.hcUpMixAffine;
     pub const projectRoutedAct = products.projectRoutedAct;
     pub const projectRouted = products.projectRouted;
     pub const projectRelu2 = products.projectRelu2;

@@ -16,6 +16,8 @@ const relu2_k = @import("contract_relu2.zig");
 const kv_k = @import("contract_kv_write.zig");
 const argmax_k = @import("contract_argmax.zig");
 const pair_k = @import("contract_relu2_pair.zig");
+const wmma_dense_k = @import("contract_wmma_dense.zig");
+const wmma_moe_k = @import("contract_wmma_moe.zig");
 const topk_k = @import("contract_topk.zig");
 
 const g = core.contract.gates;
@@ -137,9 +139,24 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     var pair = pair_k.Pair.init(a, &r, s, &l);
     defer pair.deinit();
     try kernels.append(a, pair.kernel());
+    var wmma_dense: [wmma_dense_k.cases.len]wmma_dense_k.Dense = undefined;
+    for (&wmma_dense, 0..) |*x, i| x.* = .init(a, &r, s, &l, i);
+    defer for (&wmma_dense) |*x| x.deinit();
+    for (&wmma_dense) |*x| if (x.ready()) try kernels.append(a, x.kernel());
+    var wmma_moe: [2]wmma_moe_k.Moe = undefined;
+    for (&wmma_moe, std.enums.values(wmma_moe_k.Part)) |*x, p| x.* = .init(a, &r, s, &l, p);
+    defer for (&wmma_moe) |*x| x.deinit();
+    for (&wmma_moe) |*x| if (x.ready()) try kernels.append(a, x.kernel());
     var topk = topk_k.Topk.init(a, &r, s, &l);
     defer topk.deinit();
     try kernels.append(a, topk.kernel());
+    // Flash Next's hyper-connection kernels: the dense tile's HC mix and its gate table on the gfx11 matrix cores
+    const hc_mix_k = @import("contract_hc_mix.zig");
+    var hc_dense = hc_mix_k.Dense.init(a, &r, s, &l);
+    defer hc_dense.deinit();
+    var hc_table = hc_mix_k.Table.init(a, &r, s, &l);
+    defer hc_table.deinit();
+    if (l.affine.matrix) try kernels.appendSlice(a, &.{ hc_dense.kernel(), hc_table.kernel() });
     var t: g.Tally = .{};
     const t0 = ms(io);
     try g.runAll(a, kernels.items, 0x6b63, &t);

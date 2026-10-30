@@ -245,3 +245,75 @@ test "Flash Next's prompt expert down writes the bytes of the matrix tile" {
     try promptExperts(t, &rng, true, 2048, 24, true, 0);
     try promptExperts(t, &rng, true, 64, 24, false, 0);
 }
+
+/// A prompt's product on its K's dense tile against the matrix tile: the same fp32 bytes, and tf_cast's bf16 bytes.
+fn promptDense(t: *Rig, rng: *rig.Rng, rows: usize, n: usize, k: usize) !void {
+    const kernels = &t.on.affine;
+    var m = try Matrix.init(t, rng, n, k, 4, 32, 1);
+    defer m.deinit();
+    const hx = try gpa.alloc(u16, rows * k);
+    defer gpa.free(hx);
+    for (hx) |*v| v.* = t.bits(rng.unit());
+    var x = try t.upload(hx);
+    defer x.free();
+    var outs = [2]@import("../memory.zig").DeviceBuffer{ try t.alloc(rows * n * 4), try t.alloc(rows * n * 4) };
+    defer for (&outs) |*b| b.free();
+    try outs[1].fill8(0xA5);
+    var a = m.arg(t, at(x), rows, at(outs[0]));
+    try kernels.blockGo(&t.r, a, t.stream.handle, 1, .matrix);
+    a.out = at(outs[1]);
+    const e = kernels.choose(.project, .prefill, affine.Kernels.shapeOf(a, 1)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("mlx.project.prefill.dense", e.id);
+    try kernels.prefillLaunch(&t.r, a, t.stream.handle, 1, 0);
+    try t.stream.synchronize();
+    const want = try rig.download(u8, outs[0]);
+    defer gpa.free(want);
+    const got = try rig.download(u8, outs[1]);
+    defer gpa.free(got);
+    var differ: usize = 0;
+    for (0..want.len / 4) |i| if (!std.mem.eql(u8, want[i * 4 ..][0..4], got[i * 4 ..][0..4])) {
+        if (differ < 4) std.debug.print("  prompt dense {d}x{d} rows {d}: row {d} column {d} differs\n", .{ n, k, rows, i / n, i % n });
+        differ += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 0), differ);
+    // the BF16 output: the cast of the fp32 sums
+    var halves = [2]@import("../memory.zig").DeviceBuffer{ try t.alloc(rows * n * 2), try t.alloc(rows * n * 2) };
+    defer for (&halves) |*b| b.free();
+    try halves[1].fill8(0xA5);
+    try t.on.tf_cast(@ptrFromInt(at(outs[0])), 0, @ptrFromInt(at(halves[0])), t.kind(), @intCast(rows * n), t.stream.handle);
+    a.out = 0;
+    a.out16 = at(halves[1]);
+    try kernels.prefillLaunch(&t.r, a, t.stream.handle, 1, 0);
+    try t.stream.synchronize();
+    const want16 = try rig.download(u8, halves[0]);
+    defer gpa.free(want16);
+    const got16 = try rig.download(u8, halves[1]);
+    defer gpa.free(got16);
+    for (0..want16.len / 2) |i| if (!std.mem.eql(u8, want16[i * 2 ..][0..2], got16[i * 2 ..][0..2])) {
+        if (differ < 4) std.debug.print("  prompt dense bf16 {d}x{d} rows {d}: row {d} column {d} differs\n", .{ n, k, rows, i / n, i % n });
+        differ += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 0), differ);
+    const prob = m.problem(t, hx);
+    const sums = try rig.download(f32, outs[1]);
+    defer gpa.free(sums);
+    for (0..8) |s| {
+        const r = s * (rows - 1) / 7;
+        const col = (s * 97) % n;
+        const y = ref.reference(prob, r, 0, col);
+        try std.testing.expect(@abs(@as(f64, sums[r * n + col]) - y.y) <= 1e-5 * y.norm + 1e-7);
+    }
+}
+
+test "a prompt's dense products at Flash Next's K write the bytes of the matrix tile, and of tf_cast's rounding in bf16" {
+    const t = try Rig.open(1 << 20);
+    defer t.close();
+    if (t.on.affine.dense[0] == null) return error.SkipZigTest;
+    var rng: rig.Rng = .{ .state = 0x6A09E667F3BCC908 };
+    try promptDense(t, &rng, 300, 640, 2560);
+    try promptDense(t, &rng, 130, 200, 2560);
+    try promptDense(t, &rng, 257, 2560, 6144);
+    try promptDense(t, &rng, 200, 324, 10240);
+    try promptDense(t, &rng, 383, 10240, 320);
+    try promptDense(t, &rng, 1024, 1024, 2560);
+}

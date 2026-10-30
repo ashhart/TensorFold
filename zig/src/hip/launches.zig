@@ -287,6 +287,7 @@ pub const Launcher = struct {
         const dot2 = l.mods[@backingInt(kernels.Group.affine_dot2)];
         l.affine = try affine.Kernels.load(tiles, dot2, caps.Caps.of(kernels.arch) orelse return error.Invalid, choices.products);
         try l.affine.fillByteLut(r, dot2);
+        try l.affine.fillHcGate(r);
         l.fnx = try flashnext.Fns.load(l.mods[@backingInt(kernels.Group.flashnext)]);
         return l;
     }

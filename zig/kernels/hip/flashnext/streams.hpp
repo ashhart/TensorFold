@@ -98,8 +98,8 @@ tf_fn_rms_wide(const void* x, const float* scale, void* y, int kind, int width, 
 }
 
 // mixed[r, d] = mean over the streams (in order) of round(sigmoid(round(g)) * x): g the up projection's fp32 sums.
-extern "C" __global__ void tf_fn_hc_mix(const float* g, const void* x, void* mixed, int kind, int rows, int streams,
-                                        int dims) {
+extern "C" __global__ void tf_fn_hc_mix(const void* g, int gkind, const void* x, void* mixed, int kind, int rows,
+                                        int streams, int dims) {
     const long long i = gid();
     if (i >= static_cast<long long>(rows) * dims) return;
     const long long r = i / dims;
@@ -107,7 +107,7 @@ extern "C" __global__ void tf_fn_hc_mix(const float* g, const void* x, void* mix
     float total = 0.f;
     for (int s = 0; s < streams; ++s) {
         const long long at = (r * streams + s) * dims + d;
-        const float gate = rounded(sigmoid(rounded(g[at], kind)), kind);
+        const float gate = rounded(sigmoid(rounded(load(g, gkind, at), kind)), kind);
         total += rounded(gate * load(x, kind, at), kind);
     }
     store(mixed, kind, i, total / static_cast<float>(streams));

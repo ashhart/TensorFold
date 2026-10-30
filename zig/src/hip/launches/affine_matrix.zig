@@ -1,4 +1,4 @@
-//! The gfx11 matrix-core tiles of a prompt: the routed MoE banks.
+//! The gfx11 matrix-core tiles of a prompt: the routed MoE banks and the dense trunk products.
 
 const abi = @import("../abi.zig");
 const runtime = @import("../runtime.zig");
@@ -52,4 +52,31 @@ pub fn moeDown(k: *const Kernels, r: *const runtime.Runtime, a: Arg, items: c_in
     try args.add(a);
     try go(r, k.moe_down.?, .{ .x = moe_down_shape.blocks, .z = @intCast(items) }, .{ .x = 256 }, s, &args);
     return true;
+}
+
+/// The K tiles/dense_gemm.hpp compiles (affine_wmma_dense): Flash Next's trunk, 4-bit group 32, bf16 x and tables.
+pub const dense_ks = [_]c_int{ 320, 2560, 6144, 10240 };
+
+pub fn denseIndex(k: c_int) ?usize {
+    for (dense_ks, 0..) |d, i| if (d == k) return i;
+    return null;
+}
+
+/// A prompt's plain product on the dense tile of its K: the bytes of the matrix tile.
+pub fn denseGo(k: *const Kernels, r: *const runtime.Runtime, a: Arg, s: abi.Stream) Error!void {
+    const f = k.dense[denseIndex(a.k) orelse return refuse("dense K")] orelse return refuse("dense tile");
+    var args: hl.Args = .{};
+    try args.add(a);
+    try go(r, f, .{ .x = cdiv(a.n, 128) * cdiv(a.m, 128) }, .{ .x = 256 }, s, &args);
+}
+
+/// hc up's product (K 320) on the dense tile with tf_fn_hc_mix's mix as its epilogue: `x` [m, n], `mixed` [m, n / 4].
+pub fn denseHcMixGo(k: *const Kernels, r: *const runtime.Runtime, a: Arg, x: u64, mixed: u64, s: abi.Stream) Error!void {
+    const f = k.dense_hcmix orelse return refuse("hc mix tile");
+    if (a.k != 320 or @rem(a.n, 4 * 32) != 0 or a.fp16 != 0) return refuse("hc mix shape");
+    var args: hl.Args = .{};
+    try args.add(a);
+    try args.add(x);
+    try args.add(mixed);
+    try go(r, f, .{ .x = cdiv(a.n, 128) * cdiv(a.m, 128) }, .{ .x = 256 }, s, &args);
 }

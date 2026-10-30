@@ -354,6 +354,10 @@ using Dot = DotF16;
 #define TF_WMMA(BITS) template __global__ void affine_wmma_gemm<BITS>(Affine);
 template __global__ void affine_wmma_moe_gu<4>(Affine, float);
 template __global__ void affine_wmma_moe_down<4>(Affine);
+template __global__ void affine_wmma_dense<320>(Affine);
+template __global__ void affine_wmma_dense<2560>(Affine);
+template __global__ void affine_wmma_dense<6144>(Affine);
+template __global__ void affine_wmma_dense<10240>(Affine);
 #else
 #define TF_WMMA(BITS)
 #endif

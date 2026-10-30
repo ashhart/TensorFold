@@ -184,8 +184,16 @@ each row then L2-normed, against float64's ranges at their bf16 points and expf'
 CUDA also checks `dense_rows`' scaled epilogue (Dory's logits, fp32(bf16(x . w)) times a per-column scale), bit-equal to its
 unscaled tile's outputs rounded and scaled on the host.
 HIP: the RMS norm rows, a wave a row (fp32, fp16 and bf16 out) and a block a row (fp16 and bf16 out).
+HIP also checks Qwen3.8-Flash-Next's gfx11 matrix-core prompt tiles: the dense tile (`affine_wmma_dense`) at K 320,
+2560, 6144 and 10240, fp32 out and bf16 out, bit-equal to the matrix tile `affine_wmma_gemm` (then `tf_cast`).
+Its routed expert tiles take a prompt's plan: gate and up with silu(g) u in bf16 (`affine_wmma_moe_gu`) and down in fp32
+(`affine_wmma_moe_down`), bit-equal to `affine_wmma_gemm` over the same plan (then `tf_moe_act`).
 HIP's top-k in parts (`tf_topk_part`, `tf_topk_join`) is bit-equal to `tf_topk` and checked against its key order: a
 positive NaN above +Inf, a negative NaN below -Inf, -0 equal to +0, ties to the lower id.
+HIP also checks Flash Next's hyper-connection kernels. On gfx11, `tf_affine_dense_hcmix` (hc up's dense K 320 tile
+with the HC mix as its epilogue) is bit-equal to the tile's bf16 product then `tf_fn_hc_mix`, and its gate table
+`tf_hc_gate_fill` holds, for all 65,536 bf16 g, float64's sigmoid rounded to bf16 within expf's 2^-20 and
+`tf_fn_hc_mix`'s gate bit for bit.
 
 RADIO's fused bias, activation and residual (`tf_vit_bias_act`) replaces `tf_vit_bias` then
 `tf_vit_pointwise`, byte for byte.

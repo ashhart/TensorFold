@@ -29,6 +29,7 @@ See [the license text](LICENSES/mlx-omarchy-MIT.txt).
 `zig/kernels/hip/common/tsum.hpp` ports `src/kernels/cuda/s26_tsum.cuh` from
 [Strata](https://github.com/Niko1221/Strata) at 4b9e05a2, MIT License,
 Copyright (c) 2026 Niko1221 and the Strata contributors.
+The block layout of `zig/kernels/hip/tiles/dense_gemm.hpp` follows Strata's gfx11 WMMA kernels; its arithmetic is TensorFold's.
 See [the license text](LICENSES/Strata-MIT.txt).
 
 ## Qwen Flash Next

@@ -19,6 +19,7 @@ const piece_counts = affine.piece_counts;
 const stream_cbs = affine.stream_cbs;
 const stream_rows = affine.stream_rows;
 const kp_tiles = affine.kp_tiles;
+const dense_ks = Kernels.dense_ks;
 
 /// `tiles` holds dot2_tiles.hip's kernels, `dot2` dot2.hip's; bf16 on the WMMA build, fp16 on RDNA2.
 pub fn load(tiles_obj: Module, dot2_obj: Module, caps: Caps, choices: Choices) Error!Kernels {
@@ -44,6 +45,11 @@ pub fn load(tiles_obj: Module, dot2_obj: Module, caps: Caps, choices: Choices) E
     k.fill = try dot2_obj.function(r ++ "13fill_byte_lutEP6__half");
     k.moe_gu = if (k.matrix) try tiles_obj.function(r ++ "18affine_wmma_moe_guILi4EEEvNS0_6AffineEf") else null;
     k.moe_down = if (k.matrix) try tiles_obj.function(r ++ "20affine_wmma_moe_downILi4EEEvNS0_6AffineE") else null;
+    k.dense_hcmix = if (k.matrix) try tiles_obj.function("tf_affine_dense_hcmix") else null;
+    k.hc_gate_fill = if (k.matrix) try tiles_obj.function("tf_hc_gate_fill") else null;
+    inline for (dense_ks, 0..) |dk, i| {
+        k.dense[i] = if (k.matrix) try tiles_obj.function(std.fmt.comptimePrint(r ++ "17affine_wmma_denseILi{d}EEEvNS0_6AffineE", .{dk})) else null;
+    }
     return k;
 }
 
@@ -110,5 +116,13 @@ pub fn fillByteLut(k: *const Kernels, r: *const runtime.Runtime, dot2_obj: Modul
     var args: hl.Args = .{};
     try args.add(lut.address);
     try hl.launch(k.fill, .{ .grid = .{ .x = 1 }, .block = .{ .x = 256 } }, .{ .r = r, .handle = null }, &args);
+    try runtime.check(r.api.hipStreamSynchronize(null));
+}
+
+/// tf_affine_dense_hcmix's gate table into the tiles module: 65,536 gates, once a device.
+pub fn fillHcGate(k: *const Kernels, r: *const runtime.Runtime) Error!void {
+    const f = k.hc_gate_fill orelse return;
+    var args: hl.Args = .{};
+    try hl.launch(f, .{ .grid = .{ .x = 256 }, .block = .{ .x = 256 } }, .{ .r = r, .handle = null }, &args);
     try runtime.check(r.api.hipStreamSynchronize(null));
 }

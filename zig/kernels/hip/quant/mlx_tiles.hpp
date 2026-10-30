@@ -10,6 +10,7 @@
 #include "tiles/epilogue.hpp"
 #include "tiles/gemm.hpp"
 #include "tiles/gemm_kp.hpp"
+#include "tiles/dense_gemm.hpp"
 #include "tiles/matrix_gemm.hpp"
 #include "tiles/moe_gemm.hpp"
 #include "tiles/stream.hpp"
@@ -52,6 +53,26 @@ __global__ void __launch_bounds__(moe_tile::kThreads) affine_wmma_moe_gu(Affine 
 template <int BITS>
 __global__ void __launch_bounds__(moe_tile::kThreads) affine_wmma_moe_down(Affine a) {
     wmma_moe_tile<MoeDown, BITS, 64, MoeDown::kAhead>(a, 0.f);
+}
+
+// ---- a prompt's plain 4-bit group-32 products at Flash Next's K (tiles/dense_gemm.hpp, gfx11 matrix cores) ----
+
+// K 2560 (the trunk's input projections), 6144 (out), 10240 (hc down), 320 (hc up); the bytes of affine_wmma_gemm
+template <int K>
+__global__ void __launch_bounds__(dense_tile::kThreads) affine_wmma_dense(Affine a) {
+    wmma_dense_tile<K, DenseTune<K>::kAhead>(a);
+}
+
+// hc up (K 320) with tf_fn_hc_mix in the epilogue; tf_hc_gate: its gate rnd(sigmoid(g)) for every bf16 g, filled once.
+__device__ uint16_t tf_hc_gate[1 << 16];
+extern "C" __global__ void __launch_bounds__(256) tf_hc_gate_fill() {
+    const int h = blockIdx.x * 256 + threadIdx.x;
+    const float g = __uint_as_float(static_cast<uint32_t>(h) << 16);
+    tf_hc_gate[h] = __builtin_bit_cast(uint16_t, narrow<WmmaBF16>(1.0f / (1.0f + expf(-g))));
+}
+
+extern "C" __global__ void __launch_bounds__(dense_tile::kThreads) tf_affine_dense_hcmix(Affine a, HcMix mix) {
+    wmma_dense_tile<320, DenseTune<320>::kAhead, true>(a, mix, tf_hc_gate);
 }
 
 // ---- the decode stream tile ----
