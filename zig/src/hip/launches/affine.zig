@@ -90,7 +90,7 @@ pub const piece_counts = [_]u8{ 1, 2, 4 };
 pub const lane_rows = 8; // kLaneRows
 pub const lane_group_max = 128;
 const fast_n = 256;
-pub const stream_cbs = [_]c_int{ 2, 4, 8 }; // columns a lane carries in the stream tile
+pub const stream_cbs = [_]c_int{ 1, 2, 4, 8 }; // columns a lane carries in the stream tile (1: plain products only)
 pub const stream_rows = [_]u8{ 1, 2, 4 }; // its row counts: columns * rows <= 16
 pub const stream_waves = 4; // kStreamWaves
 pub const streams_wanted = 3000; // kStreamWavesWanted

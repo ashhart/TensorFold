@@ -45,7 +45,7 @@ pub fn load(tiles_obj: Module, dot2_obj: Module, caps: Caps, choices: Choices) E
 }
 
 fn resolve(k: *Kernels, comptime dot: []const u8, comptime shape: []const u8, m: Module) Error!void {
-    @setEvalBranchQuota(300_000);
+    @setEvalBranchQuota(400_000);
     inline for (bit_widths, 0..) |bits, b| {
         k.block[b] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm17affine_dot2_blockINS0_{s}ELi{d}EEEvNS0_6AffineE", .{ dot, bits }));
         if (k.matrix) k.wmma_gemm[b] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm16affine_wmma_gemmILi{d}EEEvNS0_6AffineE", .{bits}));
@@ -65,18 +65,18 @@ fn resolve(k: *Kernels, comptime dot: []const u8, comptime shape: []const u8, m:
                     try m.function(std.fmt.comptimePrint("_ZN2tf4rocm18affine_dot2_streamINS0_{s}ELi{d}ELi{d}ELi{d}ELb0EEEvNS0_6AffineENS0_11StreamSidesEii", .{ dot, bits, rows, cb }))
                 else
                     null;
-                k.pairs[b][r][c] = if (cb * rows <= 16)
+                k.pairs[b][r][c] = if (cb * rows <= 16 and cb >= 2)
                     try m.function(std.fmt.comptimePrint("_ZN2tf4rocm18affine_dot2_streamINS0_{s}ELi{d}ELi{d}ELi{d}ELb1EEEvNS0_6AffineENS0_11StreamSidesEii", .{ dot, bits, rows, cb }))
                 else
                     null;
-                k.relu2[b][r][c] = if (cb * rows <= 16)
+                k.relu2[b][r][c] = if (cb * rows <= 16 and cb >= 2)
                     try m.function(
                         std.fmt.comptimePrint("_ZN2tf4rocm24affine_dot2_stream_relu2INS0_{s}" ++
                             "ELi{d}ELi{d}ELi{d}EEEvNS0_6AffineENS0_11StreamSidesEii", .{ dot, bits, rows, cb }),
                     )
                 else
                     null;
-                k.relu2_pair[b][r][c] = if (cb * rows <= 16)
+                k.relu2_pair[b][r][c] = if (cb * rows <= 16 and cb >= 2)
                     try m.function(
                         std.fmt.comptimePrint("_ZN2tf4rocm29affine_dot2_stream_relu2_pairINS0_{s}" ++
                             "ELi{d}ELi{d}ELi{d}EEEvNS0_6AffineES3_iii", .{ dot, bits, rows, cb }),

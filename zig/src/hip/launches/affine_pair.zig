@@ -39,7 +39,7 @@ pub fn relu2PairGo(k: *const Kernels, r: *const runtime.Runtime, a: Arg, b: Arg,
     while (c > 0) {
         c -= 1;
         const cb = affine.stream_cbs[c];
-        if (cb * affine.stream_rows[ri] > 16 or cb * a.bits > affine.stream_code_words) continue;
+        if (cb < 2 or cb * affine.stream_rows[ri] > 16 or cb * a.bits > affine.stream_code_words) continue;
         pick = c;
         const per: c_int = affine.stream_waves * (@as(c_int, 32) >> lpc_log2) * cb;
         const waves = @as(u64, cdiv(a.n, per)) * affine.stream_waves * @as(u64, @intCast(items));

@@ -8,7 +8,7 @@ const Module = @import("module.zig").Module;
 const Function = @import("module.zig").Function;
 const Stream = @import("stream.zig").Stream;
 const caps = @import("caps.zig");
-const affine = @import("launches/affine.zig");
+pub const affine = @import("launches/affine.zig");
 
 const util = @import("launches/util.zig");
 
