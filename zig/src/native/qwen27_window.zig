@@ -74,3 +74,18 @@ test "qwen27 window: unknown switches refuse by their startup variable names" {
     try std.testing.expect(try serialPolicy(false, "0"));
     try std.testing.expect(!try serialPolicy(true, "1"));
 }
+
+pub fn describe(buf: []u8, serial: bool, window: u32, drafting: bool, copies: bool) ![]const u8 {
+    return std.fmt.bufPrint(buf, "lone loop={s} width={d}; lane window={d}, lane copies={s}", .{
+        if (!drafting) "plain" else if (serial) "serial" else "lanes",
+        if (!drafting) @as(u32, 1) else if (serial) @as(u32, 16) else window,
+        window,
+        if (copies) "on" else "off",
+    });
+}
+test "qwen27 window: startup reports the effective lone width beside the lane policy" {
+    var buf: [160]u8 = undefined;
+    try std.testing.expectEqualStrings("lone loop=serial width=16; lane window=64, lane copies=on", try describe(&buf, true, 64, true, true));
+    try std.testing.expectEqualStrings("lone loop=lanes width=32; lane window=32, lane copies=off", try describe(&buf, false, 32, true, false));
+    try std.testing.expect(std.mem.startsWith(u8, try describe(&buf, false, 64, false, false), "lone loop=plain width=1;"));
+}

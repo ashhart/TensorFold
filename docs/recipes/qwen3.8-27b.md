@@ -81,6 +81,12 @@ least 256 tokens beyond the previous chunk start, or after 2,048 tokens if no ea
 Prefix reuse resumes only at these chunk starts, so a follow-up can reuse the state before its previous
 reply. The plan comes from rendered tokens; a template without detected markers uses 2,048-token chunks.
 
+On the native pre-M5 lane loop, `TF_QWEN27_WINDOW=32` or `64` requests an experimental wider window and
+`TF_QWEN27_COPIES=1` enables lane context copies. Defaults remain 16 and copies off until served qualification.
+`TF_QWEN27_LANES=0` selects the legacy lone serial loop; its 16-row width and copy policy remain independent of
+those lane switches. Startup logs the effective lone loop and width beside the configured lane window and copies.
+The lane switch accepts only 0 or 1; the copy switch accepts only 0 or 1. Invalid settings name their variable.
+
 ## Weights other than 4-bit
 
 The M5 lane kernels accept MLX affine 2-, 3-, 4-, 5-, 6- and 8-bit projections in groups of 64.
