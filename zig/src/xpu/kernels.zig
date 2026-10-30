@@ -27,3 +27,4 @@ pub const nem_prow: []const u8 = if (available) &Blob("spv_nem_prow").bytes else
 /// nem_prow with 4 x 4 tiles (prompt rows x outputs a sub-group): no register spills to speak of on Gen12LP.
 pub const nem_prow_t4: []const u8 = if (available) &Blob("spv_nem_prow_t4").bytes else &.{};
 pub const nem_attn_dec: []const u8 = if (available) &Blob("spv_nem_attn_dec").bytes else &.{};
+pub const lfm3: []const u8 = if (available) &Blob("spv_lfm3").bytes else &.{};
