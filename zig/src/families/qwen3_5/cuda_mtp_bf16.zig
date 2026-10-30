@@ -156,7 +156,8 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: *Engine, dir: []const u8) !mt
     defer stage.free();
     const aw = g.attnWidth();
     const kvw = g.kv_heads * head_dim;
-    const values = try gpa.alloc(f32, @max(2 * aw * g.hidden, g.intermediate * g.hidden));
+    // the largest matrix put stages: fc's halves, q (with its gate), k and v, o, or an expert
+    const values = try gpa.alloc(f32, g.hidden * @max(g.hidden, 2 * aw, kvw, g.intermediate));
     defer gpa.free(values);
     var l: Loader = .{ .gpa = gpa, .e = e, .w = &w, .ck = &ck, .stage = &stage, .values = values };
     const fc = try ck.expect("mtp.fc.weight", .bf16, &.{ g.hidden, 2 * g.hidden });
