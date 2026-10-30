@@ -133,10 +133,13 @@ __device__ inline void stream_body(const typename Dec::Args& a, int lpc_log2, in
 #pragma unroll
         for (int g = 0; g < NG; ++g) {
             if (row0 + g * RG >= a.m) break;
+            // a pass with one live row loads and dots that row only; a row's sums do not depend on the rows beside it
+            const bool one = RG > 1 && row0 + g * RG + 1 >= a.m;
             pair xp[RG][16];
             float sx[RG];
 #pragma unroll
             for (int r = 0; r < RG; ++r) {
+                if (one && r > 0) break;
                 uint32_t xn[16];
                 if constexpr (R == 1) {
 #pragma unroll
@@ -157,6 +160,16 @@ __device__ inline void stream_body(const typename Dec::Args& a, int lpc_log2, in
                 float d[RG];
 #pragma unroll
                 for (int r = 0; r < RG; ++r) d[r] = 0.f;
+                if constexpr (RG > 1) {
+                    if (one) {
+                        stream_dots<Dec, T, 1>(reinterpret_cast<const pair(&)[1][16]>(xp[0]),
+                                               w[c], reinterpret_cast<float(&)[1]>(d[0]),
+                                               std::make_integer_sequence<int, 16>{});
+                        acc[g * RG][c] = Dec::fold_scale(acc[g * RG][c], d[0], sc[c]);
+                        acc[g * RG][c] = Dec::fold_bias(acc[g * RG][c], sx[0], bi[c]);
+                        continue;
+                    }
+                }
                 stream_dots<Dec, T, RG>(xp, w[c], d, std::make_integer_sequence<int, 16>{});
 #pragma unroll
                 for (int r = 0; r < RG; ++r) {
