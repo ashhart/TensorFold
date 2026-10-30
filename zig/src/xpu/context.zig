@@ -55,14 +55,20 @@ pub fn entryName(e: *const Entry) []const u8 {
 /// Every device of every driver in the loader's order (at most `max_devices`), with its properties.
 pub fn enumerate(d: *const Driver, out: *[max_devices]Entry) Error![]Entry {
     var n: usize = 0;
-    var nd: u32 = 8;
+    var nd: u32 = 0; // the counts first: a loader can leave a larger count as asked, the rest null (loader 1.16, NEO 23.43)
+    try d.check(d.api.zeDriverGet(&nd, null), "zeDriverGet");
     var drivers: [8]ze.H = @splat(null);
+    nd = @min(nd, drivers.len);
     try d.check(d.api.zeDriverGet(&nd, &drivers), "zeDriverGet");
     for (drivers[0..nd]) |drv| {
-        var count: u32 = max_devices;
+        if (drv == null) continue;
+        var count: u32 = 0;
+        try d.check(d.api.zeDeviceGet(drv, &count, null), "zeDeviceGet");
         var devs: [max_devices]ze.H = @splat(null);
+        count = @min(count, max_devices);
         try d.check(d.api.zeDeviceGet(drv, &count, &devs), "zeDeviceGet");
         for (devs[0..count]) |dev| {
+            if (dev == null) continue;
             if (n == out.len) return out[0..n];
             out[n] = .{ .driver = drv, .device = dev, .props = .{} };
             try d.check(d.api.zeDeviceGetProperties(dev, &out[n].props), "zeDeviceGetProperties");
