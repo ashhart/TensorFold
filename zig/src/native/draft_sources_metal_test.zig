@@ -39,6 +39,7 @@ test "draft sources: Metal Qwen27 copies and DFlash2 use actual slot and head fa
     b.copies = false;
     b.nodes = 15;
     b.draft_slots = 1;
+    b.tensor_units = false;
     runner.slots = 1;
     try check(b.facts(), null, false, false);
     runner.slots = 4;
@@ -123,8 +124,10 @@ test "qwen27 window: native facts expose device width, node budget and hybrid co
     b.draft = present(@TypeOf(b.draft.?));
     b.timed = 0;
     b.draft_slots = 1;
+    b.tensor_units = false;
     runner.slots = 1;
     for ([_]bool{ false, true }) |units| for ([_]bool{ false, true }) |copies| {
+        b.tensor_units = units;
         for ([_][]const u8{ "16", "32", "64" }, [_]u32{ 16, 32, 64 }) |text, width| {
             b.window = try policy.requested(units, text);
             b.nodes = policy.nodes(b.window, copies);
@@ -133,6 +136,9 @@ test "qwen27 window: native facts expose device width, node budget and hybrid co
             for (b.costs[0..width], 0..) |*cost, i| cost.* = .{ .width = @intCast(i + 1), .ms = 20 };
             const facts = b.facts();
             try std.testing.expectEqual(width, facts.exact_width);
+            // Both projection paths still draft; their shared budget policies are qualified independently.
+            try std.testing.expectEqual(!units, facts.allocate_shared_drafts);
+            try std.testing.expect(facts.mtp and facts.speculate);
             try std.testing.expectEqual(width - 1, facts.drafts);
             try std.testing.expectEqual(width, facts.batch_rows);
             try std.testing.expectEqual(width, facts.window_costs.len);

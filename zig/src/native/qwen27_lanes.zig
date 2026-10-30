@@ -43,6 +43,7 @@ pub const Metal = struct {
     residency: ?mtl.ResidencySet.Follow = null,
     gpa: std.mem.Allocator,
     pass_profile: bool = false,
+    tensor_units: bool = false, // shared draft reservation is qualified separately for this projection path
     runner: *q.decode_round.Runner,
     draft: ?*Draft,
     chunk: usize = 128, // prompt rows a pass
@@ -91,8 +92,9 @@ pub const Metal = struct {
     pub fn init(gpa: std.mem.Allocator, runner: *q.decode_round.Runner, draft: ?*Draft) !*Metal {
         if (runner.slots == 0 or runner.slots > max_streams or runner.model.frame.capacity < batch_rows) return error.TargetBinding;
         const device = runner.model.device;
-        const window = try windowRows(device.tensorUnits());
-        const copies = try @import("qwen27_window.zig").copyPolicy(device.tensorUnits(), window, if (platform.c.getenv("TF_QWEN27_COPIES")) |v| std.mem.span(v) else null);
+        const tensor_units = device.tensorUnits();
+        const window = try windowRows(tensor_units);
+        const copies = try @import("qwen27_window.zig").copyPolicy(tensor_units, window, if (platform.c.getenv("TF_QWEN27_COPIES")) |v| std.mem.span(v) else null);
         const ops = try tf.tree_round_gpu.Ops.init(device);
         errdefer ops.deinit();
         const picks = try device.buffer(batch_rows * @sizeOf(contract.Pick), opts);
@@ -101,7 +103,7 @@ pub const Metal = struct {
         errdefer kept.deinit();
         const b = try gpa.create(Metal);
         errdefer gpa.destroy(b);
-        b.* = .{ .gpa = gpa, .runner = runner, .draft = draft, .window = window, .copies = copies, .nodes = @import("qwen27_window.zig").nodes(window, copies), .ops = ops, .picks = picks, .kept = kept, .draft_slots = draftSlots(), .slot_resume = slots.slotResumeEnv() };
+        b.* = .{ .gpa = gpa, .runner = runner, .draft = draft, .tensor_units = tensor_units, .window = window, .copies = copies, .nodes = @import("qwen27_window.zig").nodes(window, copies), .ops = ops, .picks = picks, .kept = kept, .draft_slots = draftSlots(), .slot_resume = slots.slotResumeEnv() };
         b.pass_profile = platform.c.getenv("TF_Q27_PASS_PROFILE") != null;
         errdefer b.freeContexts();
         if (draft) |d| {
@@ -154,7 +156,7 @@ pub const Metal = struct {
         const shared = b.runner.slots > 1;
         // Context copies remain opt-in until their served cost is qualified.
         const lone_copies = b.copies;
-        return .{ .exact_width = if (drafting or shared) b.window else 1, .mtp = drafting, .speculate = drafting, .speculate_early = false, .drafts = b.nodes, .draft_probabilities = true, .window_costs = b.costs[0..b.timed], .hidden_rows = shared, .streams_exact = true, .batch_rows = if (shared) batch_rows else b.window, .max_streams = b.runner.slots, .lone_copies = lone_copies, .context_copies = lone_copies, .allocate_shared_drafts = drafting, .draft_streams = drafting and b.draft_slots > 1 };
+        return .{ .exact_width = if (drafting or shared) b.window else 1, .mtp = drafting, .speculate = drafting, .speculate_early = false, .drafts = b.nodes, .draft_probabilities = true, .window_costs = b.costs[0..b.timed], .hidden_rows = shared, .streams_exact = true, .batch_rows = if (shared) batch_rows else b.window, .max_streams = b.runner.slots, .lone_copies = lone_copies, .context_copies = lone_copies, .allocate_shared_drafts = drafting and !b.tensor_units, .draft_streams = drafting and b.draft_slots > 1 };
     }
 
     /// The slot holding `s`.
