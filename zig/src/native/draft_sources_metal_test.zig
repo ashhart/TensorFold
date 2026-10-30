@@ -149,6 +149,41 @@ test "qwen27 window: native facts expose device width, node budget and hybrid co
     };
 }
 
+test "qwen27 window: measured shared row cliffs retain the lone window's exact prices" {
+    const native = @import("qwen27_lanes.zig");
+    const lanes = @import("lanes");
+    var runner: tf.qwen27.decode_round.Runner = undefined;
+    runner.slots = 4;
+    var b: native.Metal = undefined;
+    b.runner = &runner;
+    b.draft = present(@TypeOf(b.draft.?));
+    b.window = 16;
+    b.nodes = 15;
+    b.copies = false;
+    b.tensor_units = true;
+    b.draft_slots = 8;
+    b.timed = 64;
+    for (&b.costs, 1..) |*cost, rows| cost.* = .{
+        .width = @intCast(rows),
+        .ms = if (rows <= 16) 20 else if (rows <= 32) 28 else 44,
+    };
+    const facts = b.facts();
+    try std.testing.expectEqual(@as(usize, 16), facts.window_costs.len);
+    try std.testing.expectEqual(@as(usize, 48), facts.shared_costs.len);
+    try std.testing.expectEqual(@as(u32, 17), facts.shared_costs[0].width);
+    var cfg = try lanes.Config.init(std.testing.allocator, facts, 16, 15);
+    defer cfg.deinit(std.testing.allocator);
+    for (1..17) |rows| {
+        try std.testing.expectEqual(@as(?f64, 20), cfg.family_costs.get(@intCast(rows)));
+        try std.testing.expectEqual(@as(?f64, 20), cfg.shared_costs.get(@intCast(rows)));
+    }
+    try std.testing.expectEqual(@as(?f64, 28), cfg.shared_costs.get(17));
+    try std.testing.expectEqual(@as(?f64, 28), cfg.shared_costs.get(32));
+    try std.testing.expectEqual(@as(?f64, 44), cfg.shared_costs.get(33));
+    try std.testing.expectEqual(@as(u32, 16), facts.exact_width);
+    try std.testing.expect(facts.mtp and facts.draft_streams);
+}
+
 test "qwen27 window: a copied continuation preserves the matching native tree prefix" {
     const native = @import("qwen27_lanes.zig");
     var copy_stream = try @import("lanes").Stream.init(std.testing.allocator, .{ .id = "copy-prefix", .prompt = &.{1}, .max_new = 32 });

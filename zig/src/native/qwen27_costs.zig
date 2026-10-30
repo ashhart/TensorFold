@@ -5,16 +5,47 @@ const q = @import("tensorfold").qwen27;
 const lanes = @import("tensorfold").lanes;
 const be = lanes.backend;
 pub fn measure(b: anytype, io: std.Io) !void {
-    if (b.window == 16) return sized(b, io, 16);
-    if (b.window == 32) return sized(b, io, 32);
-    if (b.window == 64) return sized(b, io, 64);
-    return error.WindowTooWide;
+    switch (b.window) {
+        16 => try sized(b, io, 16, "qwen27-lanes"),
+        32 => try sized(b, io, 32, "qwen27-lanes"),
+        64 => try sized(b, io, 64, "qwen27-lanes"),
+        else => return error.WindowTooWide,
+    }
+    if (!b.tensor_units or b.runner.slots == 1) return;
+    if (b.window < 64 and b.runner.capacity > 64) return shared(b, io, 64);
+    if (b.window < 32 and b.runner.capacity > 32) return shared(b, io, 32);
 }
-fn sized(b: anytype, io: std.Io, comptime width: usize) !void {
+
+/// Price wider unfused forwards without taking another stream's caches or changing the lone window's prices.
+fn shared(b: anytype, io: std.Io, comptime width: usize) !void {
+    const window = b.window;
+    const draft = b.draft;
+    const profile = b.pass_profile;
+    const costs = b.costs;
+    const timed = b.timed;
+    if (draft) |d| try d.generation.settle();
+    b.window = width;
+    b.draft = null;
+    b.pass_profile = false;
+    defer {
+        b.window = window;
+        b.draft = draft;
+        b.pass_profile = profile;
+        @memcpy(b.costs[0..window], costs[0..window]);
+        if (draft) |d| d.reset() catch {};
+    }
+    errdefer {
+        b.costs = costs;
+        b.timed = timed;
+    }
+    try sized(b, io, width, "qwen27-shared-rows");
+}
+
+fn sized(b: anytype, io: std.Io, comptime width: usize, kind: []const u8) !void {
     const r = b.runner;
     if (b.owners[0] != null or r.active != null) return error.StreamBusy;
     var shape: [128]u8 = undefined;
-    const parts = [_][]const u8{ "qwen27-lanes", std.mem.span(r.model.device.name()), try q.widths.costShape(r.model.config, r.model.widths_tag, &shape, width, b.draft != null) };
+    const parts = [_][]const u8{ kind, std.mem.span(r.model.device.name()), try q.widths.costShape(r.model.config, r.model.widths_tag, &shape, width, r.capture_taps) };
     const k = lanes.cost_cache.key(b.gpa, io, &parts) catch null;
     if (k) |key| if (lanes.cost_cache.load([width]lanes.config.Cost, b.gpa, io, key)) |kept| {
         @memcpy(b.costs[0..width], &kept);

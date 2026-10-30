@@ -34,8 +34,8 @@ pub fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void
     const lone = live(b) == 1;
     var costs: [lb.max_rows]f64 = undefined;
     if (lone) {
-        if (b.timed != b.window) return error.UntimedDraftWindow;
-        for (costs[0..b.timed], b.costs[0..b.timed]) |*ms, cost| ms.* = cost.ms;
+        if (b.timed < b.window) return error.UntimedDraftWindow;
+        for (costs[0..b.window], b.costs[0..b.window]) |*ms, cost| ms.* = cost.ms;
     }
     for (requests) |r| {
         const slot = try b.slotFor(r.stream);
@@ -60,7 +60,7 @@ pub fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void
             b.trees[0] = try p.call(p.ptr, pending, nodes);
             continue;
         };
-        batch[n] = .{ .context = if (slot == 0) null else b.contexts[slot].?, .pending = pending, .nodes = nodes, .costs = if (lone) costs[0..b.timed] else &.{}, .overhead_ms = if (lone) @max(0, r.stream.tree_over orelse r.stream.round_over orelse 0) else 0, .defer_price = lone };
+        batch[n] = .{ .context = if (slot == 0) null else b.contexts[slot].?, .pending = pending, .nodes = nodes, .costs = if (lone) costs[0..b.window] else &.{}, .overhead_ms = if (lone) @max(0, r.stream.tree_over orelse r.stream.round_over orelse 0) else 0, .defer_price = lone };
         owners[n] = slot;
         n += 1;
         if (n == batch.len) {
