@@ -4,9 +4,9 @@ pub const capacity = 64;
 pub fn nodes(window: u32, copies: bool) u32 {
     return @min(window -| 1, if (copies) @as(u32, 15) else 31);
 }
-pub fn copyPolicy(tensor_units: bool, value: ?[]const u8) bool {
+pub fn copyPolicy(tensor_units: bool, value: ?[]const u8) !bool {
     _ = tensor_units;
-    return if (value) |v| std.mem.eql(u8, v, "1") else false;
+    return flag(value, false, error.BadQwenCopies);
 }
 pub fn rows(tensor_units: bool) u32 {
     _ = tensor_units;
@@ -38,8 +38,39 @@ test "qwen27 window: head plus copies matches the 64-row serial layout without e
 }
 
 test "qwen27 window: copies remain off until explicitly requested" {
-    try std.testing.expect(!copyPolicy(false, null));
-    try std.testing.expect(!copyPolicy(true, null));
-    try std.testing.expect(!copyPolicy(false, "0"));
-    try std.testing.expect(copyPolicy(true, "1"));
+    try std.testing.expect(!try copyPolicy(false, null));
+    try std.testing.expect(!try copyPolicy(true, null));
+    try std.testing.expect(!try copyPolicy(false, "0"));
+    try std.testing.expect(try copyPolicy(true, "1"));
+}
+
+fn flag(value: ?[]const u8, fallback: bool, comptime bad: anyerror) !bool {
+    const v = value orelse return fallback;
+    if (std.mem.eql(u8, v, "0")) return false;
+    if (std.mem.eql(u8, v, "1")) return true;
+    return bad;
+}
+pub fn serialPolicy(tensor_units: bool, value: ?[]const u8) !bool {
+    return !try flag(value, !tensor_units, error.BadQwenLanes);
+}
+pub fn problem(err: anyerror) ?[]const u8 {
+    return switch (err) {
+        error.BadQwenWindow => "TF_QWEN27_WINDOW must be 16, 32 or 64 (tensor units currently require 16)",
+        error.BadQwenCopies => "TF_QWEN27_COPIES must be 0 or 1",
+        error.BadQwenLanes => "TF_QWEN27_LANES must be 0 or 1",
+        else => null,
+    };
+}
+test "qwen27 window: unknown switches refuse by their startup variable names" {
+    for ([_][]const u8{ "true", "on", "yes", "", "2" }) |v| {
+        try std.testing.expectError(error.BadQwenCopies, copyPolicy(false, v));
+        try std.testing.expectError(error.BadQwenLanes, serialPolicy(false, v));
+    }
+    try std.testing.expectEqualStrings("TF_QWEN27_COPIES must be 0 or 1", problem(error.BadQwenCopies).?);
+    try std.testing.expect(std.mem.startsWith(u8, problem(error.BadQwenWindow).?, "TF_QWEN27_WINDOW"));
+    try std.testing.expect(std.mem.startsWith(u8, problem(error.BadQwenLanes).?, "TF_QWEN27_LANES"));
+    try std.testing.expect(try serialPolicy(true, null));
+    try std.testing.expect(!try serialPolicy(false, null));
+    try std.testing.expect(try serialPolicy(false, "0"));
+    try std.testing.expect(!try serialPolicy(true, "1"));
 }

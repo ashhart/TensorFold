@@ -298,6 +298,20 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
     defer pool.pop();
     const capacity = if (o.context == 0) @min(model.config.max_position, 32768) else o.context;
     if (capacity == 0 or capacity > model.config.max_position) return error.ContextFull;
+    const policy = @import("qwen27_window.zig");
+    const units = model.device.tensorUnits();
+    const window = lb.windowRows(units) catch |err| {
+        why.* = policy.problem(err) orelse why.*;
+        return err;
+    };
+    _ = policy.copyPolicy(units, if (platform.c.getenv("TF_QWEN27_COPIES")) |v| std.mem.span(v) else null) catch |err| {
+        why.* = policy.problem(err) orelse why.*;
+        return err;
+    };
+    const serial = policy.serialPolicy(units, if (platform.c.getenv("TF_QWEN27_LANES")) |v| std.mem.span(v) else null) catch |err| {
+        why.* = policy.problem(err) orelse why.*;
+        return err;
+    };
     var draft_model = drafter;
     const owns_draft = drafter == null and o.drafter != null;
     if (owns_draft) draft_model = q.dflash.runtime_model.Model.load(gpa, io, model, o.drafter.?, if (o.drafter_bits == 4) .prepared_q4_reference else .bf16_reference) catch |err| {
@@ -307,7 +321,6 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
     var draft_owned = owns_draft;
     errdefer if (draft_owned) draft_model.?.deinit();
     const memory = q.prompt_memory;
-    const window = try lb.windowRows(model.device.tensorUnits());
     const fit_prompt = memory.Fit{ .config = model.config, .context = capacity + window, .slots = @max(o.streams, 1), .shared = model.device.tensorUnits(), .ring = if (draft_model) |d| @as(usize, d.ring().window) * d.ring().stride else 0, .current_rows = model.frame.capacity, .left = room(model) };
     const value = if (std.c.getenv("TF_PROMPT_ROWS")) |v| std.mem.span(v) else null;
     const row_policy = q.prompt_rows;
@@ -359,8 +372,6 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
     h.host.explain = .{ .text = words };
     h.host.decoded_rows = true; // a reply's rows prefill with the bits decoding gave them, with the cache on or off
     // a lone greedy request takes the serial loop on tensor units, where it is faster (TF_QWEN27_LANES overrides)
-    const units = model.device.tensorUnits();
-    const serial = if (platform.c.getenv("TF_QWEN27_LANES")) |v| !std.mem.eql(u8, std.mem.span(v), "1") else units;
     if (h.draft != null and serial) h.host.lone = .{ .ctx = h, .run = Host.lone };
     h.warm = .{ .queue = model.queue };
     // the ready slots are wired before the cache's budget reads the footprint, and the later ones count as taken
