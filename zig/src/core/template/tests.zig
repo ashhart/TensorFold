@@ -2,6 +2,10 @@
 const std = @import("std");
 const template = @import("template.zig");
 
+test {
+    _ = @import("concat_test.zig");
+}
+
 const Outcome = struct { text: ?[]const u8, raised: ?[]const u8 };
 
 fn render(source: []const u8, vars: []const u8, diag: *template.Diag) ![]u8 {
