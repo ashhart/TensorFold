@@ -142,7 +142,6 @@ fn part(t: anytype, stack_key: []const u8, shared: []const u8, w: mlx.Width, sam
     return p;
 }
 
-
 /// Input columns of an MLX host: its group tables' columns times the group.
 fn cols(h: mlx.Host) usize {
     return h.scales.shape[1] * h.group;
@@ -441,8 +440,7 @@ fn affineInto(
     @memset(tables, 0x3f80);
     const tshape = [5]usize{ shape[0], if (stacked) rows / 2 else columns / w.group, columns / w.group, 1, 1 };
     for ([_][]const u8{ "scales", "biases" }) |suffix|
-        try f.map.put(a, try std.fmt.allocPrint(a, "{s}.{s}", .{ key, suffix }),
-            .{ .dtype = .bf16, .rank = rank, .shape = tshape, .bytes = std.mem.sliceAsBytes(tables) });
+        try f.map.put(a, try std.fmt.allocPrint(a, "{s}.{s}", .{ key, suffix }), .{ .dtype = .bf16, .rank = rank, .shape = tshape, .bytes = std.mem.sliceAsBytes(tables) });
     if (w.bits != 4 or w.group != 32) try f.widths.put(a, key, w);
 }
 
@@ -462,12 +460,10 @@ fn routedInto(a: Allocator, f: *Mixed, w: mlx.Width) !void {
 fn routerInto(a: Allocator, f: *Mixed) !void {
     const g = try a.alloc(f32, 2 * 64);
     for (g, 0..) |*x, i| x.* = @as(f32, @floatFromInt(@as(i32, @intCast(i)) - 64));
-    try f.map.put(a, "mlp.gate.weight",
-        .{ .dtype = .f32, .rank = 2, .shape = .{ 2, 64, 1, 1, 1 }, .bytes = std.mem.sliceAsBytes(g) });
+    try f.map.put(a, "mlp.gate.weight", .{ .dtype = .f32, .rank = 2, .shape = .{ 2, 64, 1, 1, 1 }, .bytes = std.mem.sliceAsBytes(g) });
     const s = try a.alloc(f32, 64);
     @memset(s, 0.5);
-    try f.map.put(a, "mlp.shared_expert_gate.weight",
-        .{ .dtype = .f32, .rank = 2, .shape = .{ 1, 64, 1, 1, 1 }, .bytes = std.mem.sliceAsBytes(s) });
+    try f.map.put(a, "mlp.shared_expert_gate.weight", .{ .dtype = .f32, .rank = 2, .shape = .{ 1, 64, 1, 1, 1 }, .bytes = std.mem.sliceAsBytes(s) });
 }
 
 // A layer whose shared expert is 8-bit g64 over 4-bit g32 routed experts: it keeps its own width beside the stack.
