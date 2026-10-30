@@ -7,3 +7,5 @@ pub const engram_host = @import("engram_host.zig");
 pub const engram_rows = @import("engram_rows.zig");
 pub const engram_pack = @import("engram_pack.zig");
 pub const ced = @import("ced.zig");
+/// The drafter's host half: Params, the Markov heads, the candidate lists and the chain.
+pub const dspark = @import("draft/dspark.zig");

@@ -1,4 +1,4 @@
-//! DeepSeek V4.1 on Metal, the backend package: the decode forward (1-16 rows) and the prompt path.
+//! DeepSeek V4.1 on Metal, the backend package: the decode forward (1-16 rows), the prompt path and DSpark.
 const std = @import("std");
 
 pub const host = @import("dsv41");
@@ -20,6 +20,10 @@ pub const forward = @import("forward.zig");
 pub const prompt = @import("prompt.zig");
 pub const prompt_layer = @import("prompt_layer.zig");
 pub const prompt_scratch = @import("prompt_scratch.zig");
+pub const dspark = @import("dspark.zig");
+pub const dspark_plan = @import("dspark_plan.zig");
+pub const dspark_stage = @import("dspark_stage.zig");
+pub const dspark_weights = @import("dspark_weights.zig");
 pub const engram = pipelines.engram;
 
 test {
@@ -28,4 +32,6 @@ test {
     _ = forward;
     _ = prompt;
     _ = prompt_scratch;
+    _ = dspark;
+    _ = dspark_plan;
 }
