@@ -1,14 +1,6 @@
 // Copyright © 2026 Joshua Warren / mlx-omarchy contributors.
 // SPDX-License-Identifier: MIT
-//
-// Copied from mlx-omarchy shaders/fast_norm_gated.comp (MIT), comments condensed.
-// Fused RMSNorm epilogue (bf16). Mode 0: out = bf16(silu_f32(z) * widen(bf16(
-// x * rsqrt(mean(x^2)+eps) * w))); the row reduction, the value*(norm*weight)
-// association (precise) and the single final round match the composed
-// FastRmsNormBF16 -> FusedChainF32(sigmoid, mul, mul) -> CastF32BF16 chain.
-// Mode 1: RMSNorm scaled by the bf16-rounded f32 scalar in beta. One
-// 256-thread workgroup per row, grid-stride row loop; eps rides alpha.
-// Bindings: 0 x, 1 weight, 2 gate (z), 3 output.
+//  Copied from mlx-omarchy shaders/fast_norm_gated.comp (MIT), comments condensed. Fused RMSNorm epilogue (bf16). Mode 0: out = bf16(silu_f32(z) * widen(bf16( x * rsqrt(mean(x^2)+eps) * w))); the row reduction, the value*(norm*weight) association (precise) and the single final round match the composed FastRmsNormBF16 -> FusedChainF32(sigmoid, mul, mul) -> CastF32BF16 chain. Mode 1: RMSNorm scaled by the bf16-rounded f32 scalar in beta. One 256-thread workgroup per row, grid-stride row loop; eps rides alpha. Bindings: 0 x, 1 weight, 2 gate (z), 3 output.
 #version 460
 #ifdef APPLE_REDUCTION
 #extension GL_KHR_shader_subgroup_basic : require
@@ -44,8 +36,7 @@ uint16_t bf16_store(float value) {
 #define WIDEN(x) float(x)
 #endif
 
-// GATED_ONLY builds have no runtime mode branch (the gated kernel used by
-// RMSNormGated); the default build keeps both modes for RMSNormScaled.
+// GATED_ONLY builds have no runtime mode branch (the gated kernel used by RMSNormGated); the default build keeps both modes for RMSNormScaled.
 #ifdef GATED_ONLY
 #define IS_SCALED (false)
 #define IS_GATED (true)
@@ -100,9 +91,7 @@ void store_normed(uint row, uint row_length, uint index, float value,
           ? LOAD_VALUE(weight_data.values[params.rhs_offset])
           : LOAD_VALUE(weight_data.values[params.rhs_offset + index]);
 #ifdef ASH_QWEN35
-  // The Ash8c Metal oracle (gdn_post.metal): the scale rides the value, the
-  // weight the outside — BF16(weight * (value * norm)) — and the gate is
-  // divided, not sigmoid-multiplied: BF16((gate / (1 + exp(-gate))) * normed).
+  // The Ash8c Metal oracle (gdn_post.metal): the scale rides the value, the weight the outside — BF16(weight * (value * norm)) — and the gate is divided, not sigmoid-multiplied: BF16((gate / (1 + exp(-gate))) * normed).
   precise float scaled = value * norm;
   precise float result = weight * scaled;
   float normed = WIDEN(STORE_VALUE(result));
@@ -145,8 +134,7 @@ void main() {
   float eps = params.alpha;
   uint threads = 256u;
 
-  // Mode-1 scalar: round the f32 scale to the storage dtype exactly as
-  // the composed promote cast does, then widen.
+  // Mode-1 scalar: round the f32 scale to the storage dtype exactly as the composed promote cast does, then widen.
   float scale = 0.0;
   if (IS_SCALED) {
 #ifdef USE_BF16
@@ -230,12 +218,10 @@ void main() {
               ? LOAD_VALUE(weight_data.values[params.rhs_offset])
               : LOAD_VALUE(weight_data.values[params.rhs_offset + index]);
 #ifdef ASH_QWEN35
-      // Ash8c Metal gdn_post association: the scale rides the value, the
-      // weight the outside; the gate is divided (see store_normed).
+      // Ash8c Metal gdn_post association: the scale rides the value, the weight the outside; the gate is divided (see store_normed).
       precise float scaled = value * norm;
       precise float result = weight * scaled;
-      // The normed value the composed path stores and its consumers
-      // widen: round once to the storage dtype, then widen exactly.
+      // The normed value the composed path stores and its consumers widen: round once to the storage dtype, then widen exactly.
       float normed = WIDEN(STORE_VALUE(result));
       float out_value;
       if (IS_GATED) {
@@ -248,31 +234,18 @@ void main() {
         out_value = normed * scale;
       }
 #else
-      // The reference FastRmsNormBF16 kernel compiles this product as
-      // value * (norm * weight); the shader compiler is free to reassociate a
-      // plain fmul chain differently in this kernel, which flipped ~5e-6 of
-      // outputs by one bf16 ulp. precise pins the association to the reference's
-      // (measured: 0 mismatches over 5.4M elements; the source order gave 25).
+      // The reference FastRmsNormBF16 kernel compiles this product as value * (norm * weight); the shader compiler is free to reassociate a plain fmul chain differently in this kernel, which flipped ~5e-6 of outputs by one bf16 ulp. precise pins the association to the reference's (measured: 0 mismatches over 5.4M elements; the source order gave 25).
       precise float norm_weight = norm * weight;
       precise float result = value * norm_weight;
-      // The normed value the composed path stores and its consumers
-      // widen: round once to the storage dtype, then widen exactly.
+      // The normed value the composed path stores and its consumers widen: round once to the storage dtype, then widen exactly.
       float normed = WIDEN(STORE_VALUE(result));
       float out_value;
       if (IS_GATED) {
         uint gate_index = params.aux_offset + row * row_length + index;
         float gate = WIDEN(gate_data.values[gate_index]);
-        // silu(gate) then silu * normed, left-associated exactly like the
-        // composed sigmoid -> mul -> mul chain. mlx-lm's _precise_swiglu
-        // (and this primitive's C++ fallback) run that chain in float32
-        // (gate.astype(float32)) and round ONCE at the end, so nothing is
-        // rounded to the storage dtype between the sigmoid and the final
-        // multiply. (An earlier revision of this file rounded sigmoid and
-        // silu to bf16, which flipped ~36% of outputs by one ulp against
-        // the composed path; measured on hardware before the f32 chain landed.)
+        // silu(gate) then silu * normed, left-associated exactly like the composed sigmoid -> mul -> mul chain. mlx-lm's _precise_swiglu (and this primitive's C++ fallback) run that chain in float32 (gate.astype(float32)) and round ONCE at the end, so nothing is rounded to the storage dtype between the sigmoid and the final multiply. (An earlier revision of this file rounded sigmoid and silu to bf16, which flipped ~36% of outputs by one ulp against the composed path; measured on hardware before the f32 chain landed.)
         float sigmoid_value = 1.0 / (1.0 + exp(-gate));
-        // precise: keep the composed chain's association (gate * sigmoid) * normed;
-        // without it the compiler reassociated the product (7e-6 of outputs off).
+        // precise: keep the composed chain's association (gate * sigmoid) * normed; without it the compiler reassociated the product (7e-6 of outputs off).
         precise float silu = gate * sigmoid_value;
         precise float prod = silu * normed;
         out_value = prod;

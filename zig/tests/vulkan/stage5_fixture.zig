@@ -1,12 +1,4 @@
-//! Stage 5 fixture: raw-BF16 greedy argmax rows and the independent CPU
-//! reference (the q.backend.draw rule), host-checkable; no device code here.
-//! Every row is a poisoned bf16 shell (256-byte-aligned data window, 16 tail
-//! elements of 0xffff) so a GPU run must leave guards and data untouched. The
-//! reference deliberately re-walks the widened row itself instead of calling
-//! production host helpers: the largest value wins, exact ties (including
-//! +0/-0, which compare equal) keep the lowest index, and any non-finite
-//! element refuses, naming the first offending index as evidence. No oracle
-//! tokens: every expectation comes from this scan.
+// Stage 5 fixture: raw-BF16 greedy argmax rows and the independent CPU reference (the q.backend.draw rule), host-checkable; no device code here. Every row is a poisoned bf16 shell (256-byte-aligned data window, 16 tail elements of 0xffff) so a GPU run must leave guards and data untouched. The reference deliberately re-walks the widened row itself instead of calling production host helpers: the largest value wins, exact ties (including +0/-0, which compare equal) keep the lowest index, and any non-finite element refuses, naming the first offending index as evidence. No oracle tokens: every expectation comes from this scan.
 const std = @import("std");
 const contract = @import("contract");
 const c = contract.spec;
@@ -19,15 +11,12 @@ pub const poison16: u16 = 0xffff;
 pub const vocab: usize = 248320;
 pub const chunk: usize = 4096;
 
-/// Data window offset in elements: 128 bf16 = 256 bytes, the largest
-/// minStorageBufferOffsetAlignment Vulkan allows (stages 2-4 use the same).
+// Data window offset in elements: 128 bf16 = 256 bytes, the largest minStorageBufferOffsetAlignment Vulkan allows (stages 2-4 use the same).
 pub const at: usize = 128;
 
 pub const ReferenceError = error{ NonFinite, Invalid };
 
-/// The independent CPU reference over raw bf16 bits: any non-finite refuses;
-/// the largest value wins; a strict compare over an ascending walk keeps the
-/// first index, which is the lowest-index tie rule (+0/-0 compare equal).
+// The independent CPU reference over raw bf16 bits: any non-finite refuses; the largest value wins; a strict compare over an ascending walk keeps the first index, which is the lowest-index tie rule (+0/-0 compare equal).
 pub fn referenceBits(data: []const u16) ReferenceError!u32 {
     if (data.len == 0) return error.Invalid;
     var best = -std.math.inf(f32);
@@ -43,8 +32,7 @@ pub fn referenceBits(data: []const u16) ReferenceError!u32 {
     return index;
 }
 
-/// The first non-finite element of a row — the evidence decode() must report;
-/// the caller guarantees one exists.
+// The first non-finite element of a row — the evidence decode() must report; the caller guarantees one exists.
 pub fn firstBadBits(data: []const u16) usize {
     for (data, 0..) |b, i| {
         if (!std.math.isFinite(c.fromBf16(b))) return i;
@@ -77,8 +65,7 @@ pub const Row = struct {
         return firstBadBits(r.data());
     }
 
-    /// The downloaded shell must equal the uploaded one bit for bit: guards
-    /// keep their poison AND the logits are unchanged.
+    // The downloaded shell must equal the uploaded one bit for bit: guards keep their poison AND the logits are unchanged.
     pub fn checkShell(r: Row, got: []const u16) !void {
         if (got.len != r.bits.len) return error.LengthMismatch;
         if (std.mem.indexOfDiff(u16, r.bits, got) != null) return error.Changed;
@@ -91,8 +78,7 @@ fn shell(a: std.mem.Allocator, count: usize) ![]u16 {
     return buf;
 }
 
-/// Random finite bf16 magnitudes in [0.25, cap), signed both ways unless
-/// negative-only; bf16 rounding can never reach or pass `cap`.
+// Random finite bf16 magnitudes in [0.25, cap), signed both ways unless negative-only; bf16 rounding can never reach or pass `cap`.
 fn fillRandom(data: []u16, rng: std.Random, cap: f32, neg_only: bool) void {
     for (data) |*d| {
         const mag = rng.float(f32) * (cap - 0.25) + 0.25;
@@ -101,8 +87,7 @@ fn fillRandom(data: []u16, rng: std.Random, cap: f32, neg_only: bool) void {
     }
 }
 
-/// A realistic full-vocab row: random finite logits with a unique max of
-/// exactly 5.0 at count/2.
+// A realistic full-vocab row: random finite logits with a unique max of exactly 5.0 at count/2.
 pub fn random(a: std.mem.Allocator, count: usize, seed: u64) !Row {
     const bits = try shell(a, count);
     errdefer a.free(bits);
@@ -112,9 +97,7 @@ pub fn random(a: std.mem.Allocator, count: usize, seed: u64) !Row {
     return .{ .a = a, .bits = bits, .count = count };
 }
 
-/// The exact maximum planted at 1 and at several chunk starts, including the
-/// final partial chunk's first element and the row's last element: the lowest
-/// index must win across the chunk/combine fold.
+// The exact maximum planted at 1 and at several chunk starts, including the final partial chunk's first element and the row's last element: the lowest index must win across the chunk/combine fold.
 pub fn ties(a: std.mem.Allocator, count: usize, seed: u64) !Row {
     const bits = try shell(a, count);
     errdefer a.free(bits);
@@ -137,8 +120,7 @@ pub fn negative(a: std.mem.Allocator, count: usize, seed: u64) !Row {
     return .{ .a = a, .bits = bits, .count = count };
 }
 
-/// A -1.0 background with +0 at element 5 and -0 at count-7, in both orders:
-/// the zeros compare equal, so element 5 wins either way.
+// A -1.0 background with +0 at element 5 and -0 at count-7, in both orders: the zeros compare equal, so element 5 wins either way.
 pub fn zero(a: std.mem.Allocator, count: usize, seed: u64, order: ZeroOrder) !Row {
     const bits = try shell(a, count);
     errdefer a.free(bits);
@@ -155,9 +137,7 @@ pub fn zero(a: std.mem.Allocator, count: usize, seed: u64, order: ZeroOrder) !Ro
     return .{ .a = a, .bits = bits, .count = count };
 }
 
-/// A finite row with a unique max at count/2 and one planted non-finite at
-/// `bad` (nan / +inf / -inf). Place `bad` at the max spot to prove a would-be
-/// winner is still refused.
+// A finite row with a unique max at count/2 and one planted non-finite at `bad` (nan / +inf / -inf). Place `bad` at the max spot to prove a would-be winner is still refused.
 pub fn nonFinite(a: std.mem.Allocator, count: usize, seed: u64, kind: NonFinite, bad: usize) !Row {
     const bits = try shell(a, count);
     errdefer a.free(bits);
