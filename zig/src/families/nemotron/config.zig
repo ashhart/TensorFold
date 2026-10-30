@@ -101,6 +101,7 @@ pub const Config = struct {
     eos_count: usize = 0,
     latent: usize = 0, // moe_latent_size: routed experts read and write this width between two bf16 projections
     omni: bool = false, // nemotron_h_omni: the text model's tensors sit under "language_model."
+    salm: bool = false, // nemo_speechlm (Nemotron 3.5 Transcribe): bf16 throughout, NeMo's names under "llm."
     shares: usize = 1, // latent MoE: expert widths cut in this many shares, summed in share order on every TP world
     held: ?usize = null, // a split checkpoint (tensorfold_tp): the one share its expert tensors hold
     rank: usize = 0, // this process's tensor-parallel rank of `world`: set at load, never by config.json
@@ -145,6 +146,24 @@ pub const Config = struct {
     /// Where the text model's tensor names start.
     pub fn prefix(self: Config) []const u8 {
         return if (self.omni) "language_model." else "";
+    }
+
+    /// The stem of layer i's names after prefix(): HF's "backbone.layers.", NeMo's "model.layers." (salm).
+    pub fn layerStem(self: Config) []const u8 {
+        return if (self.salm) "model.layers." else "backbone.layers.";
+    }
+
+    /// The token table, the final norm and a Mamba layer's fp32 parameters by their names after prefix().
+    pub fn embedName(self: Config) []const u8 {
+        return if (self.salm) "model.embed_tokens.weight" else "backbone.embeddings.weight";
+    }
+
+    pub fn normName(self: Config) []const u8 {
+        return if (self.salm) "model.norm.weight" else "backbone.norm_f.weight";
+    }
+
+    pub fn ssmParams(self: Config) []const u8 {
+        return if (self.salm) "_fp32_params." else "";
     }
 
     /// The expert width shares this rank holds and sums before the ranks meet.
@@ -380,9 +399,10 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8, why: *Why) !Config 
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, text, .{});
     defer parsed.deinit();
     const root = parsed.value.object;
-    // nemotron_h_omni (Bolt) wraps the language model's config in llm_config, its quantization at the top
+    // nemotron_h_omni (Bolt, quantization at the top) and nemo_speechlm (Transcribe) wrap theirs in llm_config
     const wrapped = isType(root, "nemotron_h_omni");
-    const o = if (wrapped) (llmConfig(root) orelse return error.BadConfig) else root;
+    const salm = isType(root, "nemo_speechlm");
+    const o = if (wrapped or salm) (llmConfig(root) orelse return error.BadConfig) else root;
     if (!isType(o, "nemotron_h") and !isType(o, "nemotron_h_puzzle")) return error.NotNemotronH;
     var c = Config{
         .hidden = try int(o, "hidden_size"),
@@ -430,7 +450,7 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8, why: *Why) !Config 
         c.layers = blocks.len;
     }
     // generation_config's [2, 11] is the omni wrapper's eos plus the language model's
-    if (wrapped) if (root.get("eos_token_id")) |e| eos(&c, e);
+    if (wrapped or salm) if (root.get("eos_token_id")) |e| eos(&c, e);
     if (o.get("eos_token_id")) |e| eos(&c, e);
     if (o.get("time_step_limit")) |v| if (v == .array and v.array.items.len == 2) {
         c.dt_min = @floatCast(try number(v.array.items[0]));
@@ -443,7 +463,9 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8, why: *Why) !Config 
         if (!c.bolt) c.shares = 2;
         try split(&c, root, why);
     };
-    try quantization(&c, root, why);
+    c.salm = salm;
+    // the published bf16 weights, read per tensor as the ModelOpt loader reads a bf16 projection
+    if (salm) c.format = .modelopt else try quantization(&c, root, why);
     return c;
 }
 

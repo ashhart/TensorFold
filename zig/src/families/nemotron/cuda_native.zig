@@ -27,7 +27,7 @@ pub const slide = @import("cuda_slide.zig");
 pub const model_type = "nemotron_h";
 pub const explains_open = true; // explain() words open refusals too (--vision on a checkpoint without a tower)
 /// Nemotron 3.5 Bolt's config: the language model under llm_config, beside its vision tower's.
-pub const also_model_types: []const []const u8 = &.{"nemotron_h_omni"};
+pub const also_model_types: []const []const u8 = &.{ "nemotron_h_omni", "nemo_speechlm" };
 pub const formats: []const []const u8 = &.{ "mlx-q4g64", "modelopt-nvfp4", "modelopt-ggml" };
 pub const default_context: i64 = engine.default_context;
 pub const max_segments: u32 = @import("cuda_segments.zig").MAX;
