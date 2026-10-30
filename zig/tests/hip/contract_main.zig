@@ -157,6 +157,11 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     var hc_table = hc_mix_k.Table.init(a, &r, s, &l);
     defer hc_table.deinit();
     if (l.affine.matrix) try kernels.appendSlice(a, &.{ hc_dense.kernel(), hc_table.kernel() });
+    const gdn_k = @import("contract_gdn.zig");
+    var gdn_prompts: [2]gdn_k.Prompt = undefined;
+    for (&gdn_prompts, std.enums.values(gdn_k.Part)) |*m, p| m.* = .init(a, &r, s, &l, p);
+    defer for (&gdn_prompts) |*m| m.deinit();
+    for (&gdn_prompts) |*m| try kernels.append(a, m.kernel());
     var t: g.Tally = .{};
     const t0 = ms(io);
     try g.runAll(a, kernels.items, 0x6b63, &t);

@@ -194,6 +194,8 @@ HIP also checks Flash Next's hyper-connection kernels. On gfx11, `tf_affine_dens
 with the HC mix as its epilogue) is bit-equal to the tile's bf16 product then `tf_fn_hc_mix`, and its gate table
 `tf_hc_gate_fill` holds, for all 65,536 bf16 g, float64's sigmoid rounded to bf16 within expf's 2^-20 and
 `tf_fn_hc_mix`'s gate bit for bit.
+HIP also checks the DeltaNet prompt recurrence at half a value head a block (`tf_gdn_prompt_128`, its y and state),
+bit-equal to the plain window scan `gated_delta_tile` on the same tokens.
 
 RADIO's fused bias, activation and residual (`tf_vit_bias_act`) replaces `tf_vit_bias` then
 `tf_vit_pointwise`, byte for byte.

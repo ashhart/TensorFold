@@ -28,6 +28,9 @@ pub fn tf_gdn_gate(l: *const Launcher, av: C, bv: C, kind: c_int, a_log: CF, dt_
     try l.go(l.gdn_gate[tri(kind)], dim(cdiv(count, 256), 1, 1), dim(256, 1, 1), 0, s, &a);
 }
 
+/// Rows from which a prompt's recurrence takes tf_gdn_prompt_128 (fewer: a wave a row reads the state faster).
+pub const prompt_rows = 64;
+
 pub fn tf_gated_delta(l: *const Launcher, q: CF, k: CF, v: CF, gate: CF, beta: CF, state: F, y: F, batch: c_int, length: c_int, key_heads: c_int, value_heads: c_int, dk: c_int, dv: c_int, s: S, states: F) Error!void {
     if ((dk != 16 and dk != 128) or dv < 1 or key_heads < 1 or @rem(value_heads, key_heads) != 0 or batch < 1 or length < 1) {
         return invalid("gated delta");
@@ -45,6 +48,21 @@ pub fn tf_gated_delta(l: *const Launcher, q: CF, k: CF, v: CF, gate: CF, beta: C
     try a.add(value_heads);
     try a.add(dv);
     try a.add(ad(states));
+    // a prompt's rows (no snapshots): half a value head a block, 4 lanes a row, the same sums (gated_delta.hip)
+    if (dk == 128 and dv == 128 and states == null and length >= prompt_rows) {
+        var b: Args = .{};
+        try b.add(ad(q));
+        try b.add(ad(k));
+        try b.add(ad(v));
+        try b.add(ad(gate));
+        try b.add(ad(beta));
+        try b.add(ad(state));
+        try b.add(ad(y));
+        try b.add(length);
+        try b.add(key_heads);
+        try b.add(value_heads);
+        return l.go(l.gdn_prompt, dim(2, value_heads, batch), dim(32, 4, 1), 0, s, &b);
+    }
     const wide: usize = if (dk == 128) 0 else 1;
     // Eight rows share one k/q tile; a short dv stays on the one-row wave, which is the same scan.
     if (@rem(dv, 8) == 0) {

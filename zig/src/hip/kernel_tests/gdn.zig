@@ -221,3 +221,41 @@ test "a prompt cut on either side of 64 rows gives the same rows and state as on
         try std.testing.expectEqualSlices(u32, @ptrCast(ws), @ptrCast(gs));
     }
 }
+
+test "a prompt's recurrence a block a value head gives the bits of a wave a row (Flash Next: 16 key, 48 value heads)" {
+    const t = try Rig.open(1 << 30);
+    defer t.close();
+    for ([_]Shape{
+        .{ .length = 64, .key_heads = 2, .value_heads = 4 },
+        .{ .length = 333, .key_heads = 2, .value_heads = 4 },
+        .{ .length = 300, .key_heads = 16, .value_heads = 48 },
+    }) |sh| {
+        const in = try Inputs.make(sh, 0xB10C + sh.length);
+        defer in.free();
+        var bufs: [5]DeviceBuffer = undefined;
+        for (&bufs, [_][]f32{ in.q, in.k, in.v, in.gate, in.beta }) |*b, a| b.* = try t.upload(a);
+        defer for (&bufs) |*b| b.free();
+        const state_bytes = sh.value_heads * d * d * 4;
+        var got: [2][2][]u8 = undefined;
+        for (0..2) |w| {
+            var state = try t.upload(in.state);
+            defer state.free();
+            var y = try t.alloc(sh.length * sh.value_heads * d * 4);
+            defer y.free();
+            try y.fill8(0xff);
+            // a wave a row: the same launch with snapshots asked for; a block a value head: none
+            var snaps = try t.alloc(if (w == 0) sh.length * state_bytes else 4);
+            defer snaps.free();
+            const F = ?[*]f32;
+            try t.on.tf_gated_delta(@ptrFromInt(rig.at(bufs[0])), @ptrFromInt(rig.at(bufs[1])), @ptrFromInt(rig.at(bufs[2])), @ptrFromInt(rig.at(bufs[3])), @ptrFromInt(rig.at(bufs[4])), @ptrFromInt(rig.at(state)), @ptrFromInt(rig.at(y)), 1, @intCast(sh.length), @intCast(sh.key_heads), @intCast(sh.value_heads), d, d, t.stream.handle, if (w == 0) @as(F, @ptrFromInt(rig.at(snaps))) else null);
+            try t.stream.synchronize();
+            got[w][0] = try rig.download(u8, y);
+            got[w][1] = try rig.download(u8, state);
+        }
+        defer for (&got) |*g| for (g) |b| gpa.free(b);
+        for (0..2) |k| if (!std.mem.eql(u8, got[0][k], got[1][k])) {
+            std.debug.print("gdn prompt length={d} heads={d}: buffer {d} differs\n", .{ sh.length, sh.value_heads, k });
+            return error.TestUnexpectedResult;
+        };
+    }
+}
