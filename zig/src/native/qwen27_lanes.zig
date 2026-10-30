@@ -240,6 +240,8 @@ pub const Metal = struct {
         const width = (@as(usize, vocab) + 31) / 32;
         if (masks.len != 0 and masks.len != rows * width) return error.InvalidQwenMasks;
         if (s.sampling != null or masks.len > 0) {
+            const metric = mtl.pass_metrics.phase(.sampling);
+            defer metric.end();
             const words: [*]const u16 = @ptrCast(@alignCast(logits.buffer.contents() + logits.offset));
             // the 2B's draw: top-k candidates, then the shared keyed sampler (the whole row's token)
             for (out[0..rows], positions[0..rows], 0..) |*t, p, row| {
