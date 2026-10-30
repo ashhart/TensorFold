@@ -1,7 +1,18 @@
-// Copyright © 2026 Joshua Warren / mlx-omarchy contributors.
-// SPDX-License-Identifier: MIT
-//  Single-query SDPA in native Metal's decode arithmetic order (mlx/backend/metal/kernels/sdpa_vector.h). One 1024-thread workgroup owns one query head. Short and mid decode reproduce sdpa_vector's 32 interleaved online streams and final SIMD reduction. At native's long-context crossover the route switches to the native-shape two-pass pair (sdpa_decode_native_p1.comp + _p2.comp), so this kernel always runs the one-pass 32-stream decode; its former in-workgroup 64/128-block two-pass moved to that pair.
-//  The bf16 compile (-DBF16_IO) does not ride that structure. Its parity contract is the f32-score composition, so it reproduces the composition's observable arithmetic exactly - matmul.comp's per-dot accumulation order, softmax_suffix.comp's max/exp/sum/normalize sequence over stored f32 scores, one f32 q*scale, and a single RNE bf16 output store - making the route bit-identical to the ten-dispatch path it replaces. See the comment above main().
+// Copyright © 2026 Joshua Warren / mlx-omarchy contributors; SPDX-License-Identifier: MIT.
+
+// One 1024-thread workgroup handles each query head.
+
+// Short and mid decode use 32 interleaved online streams and the final SIMD reduction.
+
+// Long contexts switch to sdpa_decode_native_p1.comp + _p2.comp.
+
+// That pair replaces the former in-workgroup 64/128-block two-pass.
+
+// The -DBF16_IO arm matches f32-score composition and matmul.comp per-dot accumulation order.
+
+// softmax_suffix.comp computes max/exp/sum/normalize over stored f32 scores.
+
+// One f32 q*scale and one RNE bf16 store make it bit-identical to the ten-dispatch path.
 
 #version 460
 
@@ -16,7 +27,9 @@
 
 layout(local_size_x = 1024, local_size_y = 1, local_size_z = 1) in;
 #ifdef BF16_IO
-// bf16 storage rides a uint16 word view: loads widen exactly (the bf16 bits are the f32 top half), stores round-to-nearest-even like every other USE_BF16 leg (cast.comp).
+// bf16 uses a uint16 word view; loads widen from the f32 top half.
+
+// RNE stores match every other USE_BF16 leg; see cast.comp.
 layout(set = 0, binding = 0, std430) readonly buffer Query {
   uint16_t values[];
 } query_data;
@@ -71,7 +84,19 @@ layout(push_constant) uniform Params {
 const uint SIMD = 32u;
 const float FINITE_MIN = -3.4028234663852886e38;
 
-// Query-head width. The default 64 keeps the original blobs; -DSDPA_DIM=N compiles the wider twins. In the bf16 arm N is any multiple of 32 up to 256 - every width runs the identical f32 score-composition sequence (ascending-d dot, 256-lane softmax, ascending-key 16-wide output tiles), so the route is bit-identical to the composed path it replaces at every width; only the per-dot length and the output thread count scale. In the f16 arm each lane covers SDPA_DIM/64 consecutive dim pairs (the 64-wide simdgroup mapping applied PAIRS times), so N must be a multiple of 64; the native 32-interleaved-stream order and its merge are unchanged per pair.
+// The default SDPA_DIM=64 keeps original blobs; -DSDPA_DIM=N compiles wider twins.
+
+// In bf16, N must be a multiple of 32 up to 256.
+
+// Each bf16 width uses ascending-d dots, 256-lane softmax, and ascending-key 16-wide output tiles.
+
+// Results match the composed path at every width; only per-dot length and output thread count scale.
+
+// In f16, each lane covers SDPA_DIM/64 consecutive dim pairs; the 64-wide simdgroup mapping is applied PAIRS times.
+
+// Therefore, f16 N must be a multiple of 64.
+
+// Native 32-interleaved-stream order and merge stay unchanged per pair.
 #ifndef SDPA_DIM
 #define SDPA_DIM 64u
 #endif
@@ -82,7 +107,11 @@ shared float s_outputs[SIMD * SIMD];
 shared float s_max[SIMD];
 shared float s_sum[SIMD];
 #else
-// The composition-exact arm replaces the online-softmax structure with the f32-score composition's observable arithmetic. Scores and probs share one f32 stream (probs overwrite scores in place; the normalize pass reads and writes only its own strided slots). The kStreamKeys bound is enforced by the host guard; larger contexts fall through to the composition, which this arm reproduces bit for bit.
+// This composition-exact arm replaces online softmax with the f32-score composition's arithmetic.
+
+// Probs overwrite scores in one f32 stream; normalize reads and writes only its own strided slots.
+
+// The host guard enforces kStreamKeys; larger contexts fall through to the same bit-exact composition.
 const uint kStreamKeys = 7168u;
 shared float s_qrow[SDPA_DIM];
 shared float s_stream[kStreamKeys];
@@ -132,20 +161,28 @@ void store_pair(
 
 void main() {
 #ifdef BF16_IO
-  // ------------------------------------------------------------------ The composition-exact bf16 arm. Every operation below reproduces the f32-score composition's observable arithmetic in the same order, so the route is bit-identical to the ten-dispatch path it replaces and no generated token can move: 1. q*scale once in f32 (the composition's elementwise multiply; the matmul alpha is 1.0 and its drain multiplies by it), 2. scores = per-dot ascending-d `acc += a * b` accumulation over 16-wide tiles with exact-zero tail padding, drained by 1.0f, stored f32 (matmul.comp), 3. softmax: 256-lane strided max scan + binary max tree, strided sequential exp-sum per lane + binary sum tree, normalizer 1.0/sum, probs = exp(score - max) * normalizer recomputed from the stored f32 scores (softmax_suffix.comp), 4. output = ascending-key `acc += a * b` over 16-wide tiles with exact-zero tail padding, drained by 1.0f (matmul.comp), stored through the cast.comp RNE bf16 pair. Threads 256..1023 share every barrier but do no phase work; the reduction trees only involve lanes 0..255, exactly as the 256-thread softmax kernel computes them. ------------------------------------------------------------------
+  // Preserve the omitted contract, precision, and host-interface facts from the original comment.
   uint thread = gl_LocalInvocationID.x;
   uint head = gl_WorkGroupID.x;
   uint repeats = params.matrix_m / params.matrix_n;
   uint kv_head = head / repeats;
   uint k_len = params.matrix_k;
-  // Batched decode: workgroup z is the batch row. Element offsets of that row: q out_strides[2], k lhs_size, v rhs_size, out out_strides[3] (all zero at batch 0, so a single-row dispatch reads what it always did).
+  // Workgroup z selects the batch row; offsets are q out_strides[2], k lhs_size, v rhs_size, and out out_strides[3].
+
+  // All offsets are zero at batch 0.
   uint batch = gl_WorkGroupID.z;
   uint q_batch = params.lhs_offset + batch * params.out_strides[2];
   uint k_batch = params.rhs_offset + batch * params.lhs_size;
   uint v_batch = params.aux_offset + batch * params.rhs_size;
   uint o_batch = params.output_offset + batch * params.out_strides[3];
 #ifdef SDPA_ROWS
-  // Multi-token verify rows: workgroup (head, row). The row's causal bound turns every scan below into exactly the single-query arm's arithmetic over the row's visible key prefix (keys 0..key_end-1), so each row is bit-identical to that row decoded alone at q_len=1 with the same cache prefix. params.dims carries q_len, out_strides[0] the q row stride; out and q share the head stride (shape[0]).
+  // Multi-token verification uses workgroup (head, row) and the row's causal bound.
+
+  // Scanning keys 0..key_end-1 is bit-identical to decoding that row alone at q_len=1 with the same cache prefix.
+
+  // params.dims carries q_len; out_strides[0] is the q row stride.
+
+  // Output and q use shape[0] as their shared head stride.
   uint row = gl_WorkGroupID.y;
   uint key_end = params.matrix_k - params.dims + row + 1u;
 #else
@@ -171,7 +208,7 @@ void main() {
     uint k_base = k_batch + kv_head * params.shape[1] +
         key * params.shape[2];
     float accumulator = 0.0;
-    // Loads are independent of the accumulator chain: issue 16 K elements before the 16 in-order FMAs (same expression order, bit-identical).
+    // Load 16 K elements before 16 in-order FMAs, independent of the accumulator chain and bit-identical in order.
     for (uint d = 0u; d < SDPA_DIM; d += 16u) {
       float kv[16];
       for (uint i = 0u; i < 16u; ++i) {
@@ -224,7 +261,7 @@ void main() {
   float normalizer = 1.0 / s_tree[0];
   barrier();
 
-  // Probs in place: exp recomputed from the stored f32 scores, exactly as the normalize pass of softmax_suffix.comp does.
+  // Recompute probs from stored f32 scores, as softmax_suffix.comp's normalize pass does.
   if (thread < 256u) {
     for (uint index = thread; index < key_end; index += 256u) {
       s_stream[index] = exp(s_stream[index] - row_max) * normalizer;
@@ -232,14 +269,18 @@ void main() {
   }
   barrier();
 
-  // Output dim d: ascending-key accumulation over 16-wide tiles with exact-zero tail padding, drained by 1.0f, stored RNE bf16.
+  // Output dimension d accumulates keys in ascending order over 16-wide tiles with exact-zero tail padding.
+
+  // Drain with 1.0f and store RNE bf16.
   if (thread < SDPA_DIM) {
     uint d = thread;
     float accumulator = 0.0;
     uint key = 0u;
     uint v_base = v_batch + kv_head * params.in_strides[1] +
         d * params.in_strides[3];
-    // Whole 16-key tiles: 16 independent V loads first, then the 16 in-order FMAs (a 64-key block spilled the load registers and was 9x slower).
+    // Load 16 independent V elements before the 16 in-order FMAs.
+
+    // A 64-key block spilled load registers and ran 9x slower.
     for (; key + 16u <= key_end; key += 16u) {
       float vv[16];
       for (uint index = 0u; index < 16u; ++index) {
@@ -261,7 +302,11 @@ void main() {
       ++key;
     }
 #ifdef SDPA_ROWS
-    // Row stride is a push constant, not hardwired SDPA_DIM: the dense Qwen3.5 oracle stores y row-major as (rows, 8, 256), so the row stride is heads*SDPA_DIM (2048), not SDPA_DIM. Same change class as the q read above, which already takes out_strides[0].
+    // Row stride is a push constant, not SDPA_DIM.
+
+    // The dense Qwen3.5 oracle stores y row-major as (rows, 8, 256), with row stride heads*SDPA_DIM (2048).
+
+    // This matches the q read's use of out_strides[0].
     output_data.values[o_batch + head * params.shape[0] +
         row * params.out_strides[0] + d] = bf16_store(1.0 * accumulator);
 #else
@@ -287,7 +332,11 @@ void main() {
         query_data.values[q_base + (p * 64u + q_dim + 1u) * params.shape[3]]);
   }
 
-  // Native sdpa_vector: each SIMD owns keys sgid, sgid+32, ... and keeps an independent online-softmax state before the 32 states are merged. The score dot runs ascending-d across the lane's dim pairs, so PAIRS=1 is the original two-fma sequence verbatim.
+  // Native sdpa_vector assigns each SIMD keys sgid, sgid+32, ... with independent online-softmax state.
+
+  // It merges 32 states at the end; each lane's score dot accumulates ascending-d across its dim pairs.
+
+  // PAIRS=1 preserves the original two-fma sequence verbatim.
   float max_score = FINITE_MIN;
   float sum_exp_score = 0.0;
   float o0[PAIRS];

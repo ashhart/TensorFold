@@ -1,4 +1,4 @@
-// Stage 1 fixture: BF16 RNE cast vectors, copy/gather layouts, quantized-embedding cases and Q4 affine g64 cases against the contract's FP64 bound. Host-checkable; no device code here. Stage 1 bring-up only: no model-support or performance claim anywhere.
+// Host fixtures cover BF16 RNE, copy/gather, quantized embeddings, and Q4 affine g64; no device/model claims.
 const std = @import("std");
 const contract = @import("contract");
 const c = contract.spec;
@@ -29,7 +29,7 @@ pub const Fill = enum { random, cancel };
 pub const Offsets = struct { x: usize = 0, w: usize = 0, scales: usize = 0, biases: usize = 0, out: usize = 0 };
 pub const Case = struct { name: []const u8, shape: c.Shape, fill: Fill = .random, at: Offsets = .{} };
 
-// Small real shapes: one and two rows, one output per 256-thread group and one past it, one and two groups per row, offsets, and a cancel fill. Every m*n is even (word-padded bf16 views). Binding bases sit at 256-byte multiples — the largest minStorageBufferOffsetAlignment Vulkan allows — so the offsets exercise the production aligned-binding contract on any device, not arbitrary offsets; Views guarantee only 4-byte alignment.
+// Shapes cover 1-2 rows/groups, boundary outputs, offsets, and cancel fill; 256-byte bases test Vulkan alignment.
 pub const cases = [_]Case{
     .{ .name = "m1 n8 k64", .shape = .{ .rows = 1, .n = 8, .k = 64 } },
     .{ .name = "m2 n257 k128", .shape = .{ .rows = 2, .n = 257, .k = 128 } },
@@ -46,7 +46,7 @@ const served = blk: {
 /// One f32 input and the exact bf16 bits a round-to-nearest-even cast must store.
 pub const Bf16Vec = struct { in: f32, want: u16, why: []const u8 };
 
-// Ties (to even, both signs), exact grid points, above/below half, negatives, bf16 subnormals and the nonfinite controls. 18 entries; with the 128 randoms the cast views stay word-padded.
+// BF16 vectors cover ties, grid points, negatives, subnormals, and nonfinites: 18 entries plus 128 randoms.
 pub const bf16_vectors = [_]Bf16Vec{
     .{ .in = 1.0, .want = 0x3f80, .why = "exact" },
     .{ .in = -1.0, .want = 0xbf80, .why = "negative exact" },
@@ -73,7 +73,7 @@ comptime {
         @compileError("bf16 vector disagrees with the contract's RNE cast: " ++ v.why);
 }
 
-// Random u32 words (and a u16 variant) uploaded at fixed offsets with guard tails on both sides. Offsets are 256-byte multiples (the largest minStorageBufferOffsetAlignment Vulkan allows): the copy exercises the production aligned-binding contract, not arbitrary offsets.
+// Random u32/u16 copies use guarded tails and 256-byte offsets to test production aligned bindings.
 pub const copy_words = 9;
 pub const copy_half_elements = 22;
 pub const copy_u32_src = 64; // words (256 bytes)
@@ -85,7 +85,7 @@ pub const copy_u16_dst = 256; // elements (512 bytes)
 pub const EmbedCase = struct { name: []const u8, tokens: usize, rows: usize, k: usize };
 
 pub const embed_cases = [_]EmbedCase{
-    // tokens are even in every case: each gathered token contributes k/64 bf16 scales, and a ragged tail element would be refused by the typed view before any GPU work.
+    // Tokens are even; each contributes k/64 bf16 scales, while ragged tails fail typed-view checks before GPU work.
     .{ .name = "6 tok 8 rows k64", .tokens = 6, .rows = 8, .k = 64 },
     .{ .name = "3 tok 4 rows k128 repeats", .tokens = 3, .rows = 4, .k = 128 },
 };
