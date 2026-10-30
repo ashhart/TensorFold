@@ -111,6 +111,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - CUDA EXL3: the trellis weight loads in the expert, linear, segmented and unpack kernels skip L1 allocation (`ld.global.nc.L1::no_allocate`), since each word is read once a token; the values read are the same, so replies are unchanged. On three GB10s at TP=3 with GLM-5.3-Flash EXL3 4bpw, decode rose 2.3% on one stream and 0.5 to 2.3% from 2 to 8 streams (#1534). Thanks to @BadAd84.
 
 - Qwen3.8-27B on Metal keeps 16-row windows and lane copies off by default. On pre-M5 chips, `TF_QWEN27_WINDOW=32` or `64` opts into a wider lane window, and `TF_QWEN27_COPIES=1` opts into lane context copies; served qualification remains pending (#1621).
+- Metal Qwen3.8-27B: align calibrated lane proposals, fuse target picks into verification, overlap cache keeps with drafting, reuse growing scratch, and expose passive pass timings (#1621).
+
 - Qwen3.8-27B on Metal: lone lane requests can fill 32/64-row windows with up to 31/63 DFlash2 tree nodes, choosing siblings and the useful prefix from the drafter probabilities and measured verification costs (#1621). The masked block and target sampling are unchanged.
 
 - Qwen3.8-27B on Metal: tensor-unit lanes can verify 32 or 64 rows for one DFlash2 stream, with context copies beside its tree and costs measured through the selected width (`TF_QWEN27_WINDOW`, `TF_QWEN27_COPIES`, #1621). The 16-row tensor-unit default is retained.

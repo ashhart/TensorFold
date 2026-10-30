@@ -45,6 +45,7 @@ pub const Runner = struct {
     active: ?[32]u8 = null,
     failed: bool = false,
     capture_taps: bool = false,
+    tail: ?forward.Tail = null,
     accepted_chain: bool = false,
     last_gpu_seconds: f64 = 0,
     gpu_seconds: f64 = 0, // with a trace attached: every pass's GPU-busy seconds, its spans' and share's buffers too
@@ -206,7 +207,11 @@ pub const Runner = struct {
     }
 
     fn verifyImpl(r: *Runner, round: *const Round, head: forward.Head, accepted: bool) !void {
+        const metric = mtl.pass_metrics.phase(.verify);
+        defer metric.end();
         if (r.failed or r.active != null or round.ids.len > r.model.frame.capacity) return error.RoundNotReady;
+        mtl.pass_metrics.rows(round.ids.len);
+        if (r.tail != null and (accepted or head != .all)) return error.BadVerifyTail;
         for (round.slots, round.windows) |slot, window| if (slot >= r.ready or r.offsets[slot] != window.start) return error.CachePositionDiffers;
         const paths = try r.allocator.alloc([]const u32, round.windows.len);
         defer r.allocator.free(paths);
@@ -248,7 +253,7 @@ pub const Runner = struct {
         defer pool.pop();
         const spanned = if (r.trace) |t| t.spanned else 0; // a profiled pass's spans commit buffers of their own
         const handed = if (r.model.ane) |share| share.gpu_seconds else 0;
-        var stages = forward.Stages{ .model = r.model, .rows = @intCast(round.ids.len), .hooks = .{ .ptr = r, .gdn = gdnForward, .attention = attentionForward, .tap = if (r.capture_taps) tap else null }, .head = head, .images = placed.images };
+        var stages = forward.Stages{ .model = r.model, .rows = @intCast(round.ids.len), .hooks = .{ .ptr = r, .gdn = gdnForward, .attention = attentionForward, .tap = if (r.capture_taps) tap else null }, .head = head, .tail = r.tail, .images = placed.images };
         r.last_gpu_seconds = @import("core").segments.runCommitting(r.model.device, &.{r.model.queue}, r.model.config.layers, .concurrent, &stages, commit_every) catch |err| {
             r.failed = true;
             return err;
@@ -306,14 +311,32 @@ pub const Runner = struct {
 
     /// A validated single-window round consumes authoritative GPU keep metadata without host path selection.
     pub fn keepDevice(r: *Runner, round: *const Round, e: mtl.ComputeEncoder, ops: @import("core").tree_commit_gpu.Ops, result: @import("core").tree_commit_gpu.Ref) !void {
-        const active = r.active orelse return error.RoundNotReady;
-        if (r.failed or round.windows.len != 1 or round.ids.len > @import("core").tree_round.max_rows or !std.mem.eql(u8, &active, &fingerprint(round))) return error.RoundNotReady;
+        try r.checkDeviceKeep(round);
         var recurrent = try round.recurrent(try r.params(round.ids.len), &.{&.{}});
         defer recurrent.deinit();
         var attention_plan = try r.attentionPlan(round);
         defer attention_plan.deinit();
         const m = r.metadata();
         try m.upload(recurrent);
+        return r.encodeDeviceKeep(round, recurrent, attention_plan, e, ops, result);
+    }
+
+    pub fn checkDeviceKeep(r: *const Runner, round: *const Round) !void {
+        const active = r.active orelse return error.RoundNotReady;
+        if (r.failed or round.windows.len != 1 or round.ids.len > @import("core").tree_round.max_rows or !std.mem.eql(u8, &active, &fingerprint(round))) return error.RoundNotReady;
+    }
+
+    /// Encode only: the caller commits after the lane core publishes its authoritative path.
+    pub fn prepareDeviceKeep(r: *Runner, round: *const Round, e: mtl.ComputeEncoder, ops: @import("core").tree_commit_gpu.Ops, result: @import("core").tree_commit_gpu.Ref) !void {
+        if (r.failed or r.accepted_chain or r.current_round != round or r.tail == null) return error.RoundNotReady;
+        if (round.windows.len != 1) return error.RoundNotReady;
+        const recurrent = r.current_gdn orelse return error.RoundNotReady;
+        const attention_plan = r.current_attention orelse return error.RoundNotReady;
+        return r.encodeDeviceKeep(round, recurrent.*, attention_plan.*, e, ops, result);
+    }
+
+    fn encodeDeviceKeep(r: *Runner, round: *const Round, recurrent: GdnPlan, attention_plan: attn.Plan, e: mtl.ComputeEncoder, ops: @import("core").tree_commit_gpu.Ops, result: @import("core").tree_commit_gpu.Ref) !void {
+        const m = r.metadata();
         const p = @import("core").tree_commit_gpu.Meta{ .rows = @intCast(round.ids.len), .slot = round.slots[0] };
         const keep_ref = @import("core").tree_commit_gpu.Ref{ .buf = m.keeps.buffer, .off = m.keeps.offset };
         const rows = @import("core").tree_commit_gpu.Ref{ .buf = m.kept_rows.buffer, .off = m.kept_rows.offset };

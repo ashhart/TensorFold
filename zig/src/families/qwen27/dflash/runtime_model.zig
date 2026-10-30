@@ -125,9 +125,17 @@ pub const Model = struct {
         std.mem.swap(op.Context, &m.backend.context, &x.context);
     }
     /// One stream of a batch: its parked context (null: the model's own), pending token and node budget.
-    pub const Proposal = struct { context: ?*Context, pending: u32, nodes: u32, costs: []const f64 = &.{}, overhead_ms: f64 = 0 };
+    pub const Proposal = struct {
+        context: ?*Context,
+        pending: u32,
+        nodes: u32,
+        costs: []const f64 = &.{},
+        overhead_ms: f64 = 0,
+        defer_price: bool = true,
+    };
+    /// The lane core prices complete candidate prefixes with its calibrated landing rates.
     pub fn selection(p: Proposal) selector.Options {
-        return .{ .nodes = p.nodes, .children = if (p.costs.len > 0) 16 else 4, .costs = p.costs, .overhead_ms = p.overhead_ms };
+        return .{ .nodes = p.nodes, .children = if (p.costs.len > 0) 16 else 4, .costs = if (p.defer_price) &.{} else p.costs, .overhead_ms = if (p.defer_price) 0 else p.overhead_ms };
     }
     /// Trees for 2 to 8 streams from one frame: each stream's new taps into its own caches, then one block pass.
     pub fn proposeBatch(m: *Model, entries: []const Proposal, out: []selector.Tree) !void {
@@ -201,6 +209,8 @@ pub const Model = struct {
     }
     /// A costed tree grows siblings from the same masked block, then keeps the most useful prefix.
     pub fn proposeOptions(m: *Model, pending: u32, options: selector.Options) !selector.Tree {
+        const metric = mtl.pass_metrics.phase(.drafter);
+        defer metric.end();
         const nodes = options.nodes;
         if (m.backend.failed or m.backend.frame.active or m.backend.transaction != null or pending >= m.graph.config.vocab or nodes > max_nodes or m.tree_block == 0 or m.tree_block > 16) return error.BadDraftOptions;
         if (m.committed_end == 0) return error.DraftContextNotReady;

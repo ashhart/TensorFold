@@ -35,6 +35,7 @@ pub const Options = struct {
 
 pub const Host = struct {
     gpa: Allocator,
+    counted: mtl.pass_metrics.Counting,
     model: *q.model.Model,
     owns_model: bool,
     runner: q.decode_round.Runner,
@@ -159,6 +160,7 @@ const Snaps = struct {
             const need: usize = if (h.spares.fits(n)) 0 else q.snapshot.Spares.size(n);
             if (need > room(h.model) -| h.runner.gdn.missingBeforeBytes()) return error.LaneMemory;
         }
+        if (h.draft) |d| try d.generation.finishKeep();
         h.spares.follow = h.runner.residency;
         const st = try q.snapshot.saveSlot(h.gpa, &h.runner, slot, h.back.ringOf(slot), at, &h.spares);
         return @ptrCast(st);
@@ -294,7 +296,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
 }
 
 /// A loaded model served as `open` serves one, `drafter` bound in place of `o.drafter`; both stay the caller's.
-pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.dflash.runtime_model.Model, o: Options, a: Allocator, why: *[]const u8) !*Host {
+pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.dflash.runtime_model.Model, o: Options, a: Allocator, why: *[]const u8) !*Host {
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const capacity = if (o.context == 0) @min(model.config.max_position, 32768) else o.context;
@@ -313,6 +315,11 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
         why.* = policy.problem(err) orelse why.*;
         return err;
     };
+    const h = try parent.create(Host);
+    errdefer parent.destroy(h);
+    h.counted = .{ .parent = parent };
+    const profiling = platform.c.getenv("TF_Q27_PASS_PROFILE") != null;
+    const gpa = if (profiling) h.counted.allocator() else parent;
     var draft_model = drafter;
     const owns_draft = drafter == null and o.drafter != null;
     if (owns_draft) draft_model = q.dflash.runtime_model.Model.load(gpa, io, model, o.drafter.?, if (o.drafter_bits == 4) .prepared_q4_reference else .bf16_reference) catch |err| {
@@ -336,8 +343,6 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
         model.frame = next;
     }
     std.log.info("qwen27: prompt capacity={d} rows, startup stream and scratch reserve={d} bytes", .{ rows, try memory.runnerBytes(model.config, capacity + window, slots, rows, model.device.tensorUnits(), fit_prompt.ring) });
-    const h = try gpa.create(Host);
-    errdefer gpa.destroy(h);
     h.gpa = gpa;
     h.model = model;
     h.owns_model = false;

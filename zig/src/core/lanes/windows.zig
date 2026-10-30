@@ -31,6 +31,7 @@ pub const Plan = struct {
     cost_probe_rows: ?u32 = null, // an unseen width selected for calibration, confirmed by a matching completed round
     context_copy: bool = false, // branch_from names a copied continuation appended to the head
     copy_trusted: bool = true, // the copy is priced from cfg.copy_rate's prior (trustedCopy), else from short_rate's
+    deferred_copy: []const u32 = &.{}, // a full priced head may free room for this continuation
     tried: bool = false, // the planner read the head's chain back to graft branches
     lanes: ?*const shape.Shape = null, // the held drafts' tree shape (each lane's depth and rank)
     masks: []const u32 = &.{}, // structured output: the rows' allowed-token bits (constrain)
@@ -98,7 +99,10 @@ pub fn plan(e: *Engine, s: *Stream, copied: ?Copy) !Plan {
                 }
             }
             if (p.count() > 0) p.kind = .head;
-            if (extend and copy.tokens.len > 0) try @import("context_copy.zig").extend(e, &p, copy.tokens);
+            if (extend and copy.tokens.len > 0) {
+                try @import("context_copy.zig").extend(e, &p, copy.tokens);
+                if (!p.context_copy and e.cfg.node_probabilities) p.deferred_copy = try a.dupe(u32, copy.tokens);
+            }
             if (p.context_copy) p.copy_trusted = trustedCopy(s);
         }
     }
@@ -295,6 +299,17 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
         if (p.kind == .head) p.stream.granted = c;
         if (p.kind == .forced or p.count() == 0 or c == p.count()) continue;
         try cut.prefix(a, p, c);
+    }
+    if (plans.len == 1 and plans[0].deferred_copy.len > 0) {
+        const p = &plans[0];
+        const copy = p.deferred_copy;
+        p.deferred_copy = &.{};
+        const before = p.count();
+        if (before > 0) try @import("context_copy.zig").extend(e, p, copy);
+        if (p.context_copy) {
+            p.copy_trusted = trustedCopy(p.stream);
+            return allocate(e, plans);
+        }
     }
     const rows = try a.alloc(Value, plans.len);
     for (rows, plans) |*r, p| {

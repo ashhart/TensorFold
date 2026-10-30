@@ -46,6 +46,7 @@ pub const Engine = struct {
     drafted: u64 = 0,
     accepted: u64 = 0,
     shared_rounds: u64 = 0,
+    late: @import("late_draft.zig").State = .{},
     alone: bool = true, // this step has one live stream: its copies may take their ramp
     lone_kept: [2][lone_costs.bands]?lone_costs.Kept = @splat(@splat(null)), // the newest lone calibrations, greedy then sampled, a band each
     steps: u64 = 0,
@@ -197,6 +198,7 @@ pub const Engine = struct {
     /// One stream's round: verify pending and drafted tokens together, keep drafts to the first mismatch.
     fn familyRound(e: *Engine, s: *Stream, copied: ?win.Copy) !Result {
         e.clock.start();
+        try e.late.flush(e, Engine.askDrafts);
         const priced = s.priced;
         s.priced = null;
         const a = e.arena.allocator();
@@ -253,6 +255,7 @@ pub const Engine = struct {
     /// The stream windows of a shared round in one forward, then each verified, committed and drafted on its own.
     fn roundStreams(e: *Engine, entries: []*Stream) !void {
         e.clock.start();
+        try e.late.flush(e, Engine.askDrafts);
         const a = e.arena.allocator();
         const plans = try a.alloc(Plan, entries.len);
         for (entries, plans) |s, *p| p.* = try win.plan(e, s, null);
@@ -438,7 +441,8 @@ pub const Engine = struct {
     fn draftLate(e: *Engine, s: *Stream, start: u64, follow: []const u32, path: []const u32, budget: ?i64) !void {
         var w = win.who(s);
         const d: u32 = @intCast(try e.rule.headDepth(&w, budget, win.probe(e)));
-        try e.askDrafts(&.{.{ .stream = s, .follow = follow, .rows = path, .start = start, .position = s.cache_len + 1, .depth = d }});
+        const request: be.DraftRequest = .{ .stream = s, .follow = follow, .rows = path, .start = start, .position = s.cache_len + 1, .depth = d };
+        if (!e.late.put(e.backend.defer_lone_draft and e.alone, request)) try e.askDrafts(&.{request});
     }
 
     pub const testing = if (@import("builtin").is_test) struct {
@@ -585,6 +589,7 @@ pub const Engine = struct {
     }
 
     pub fn release(e: *Engine, s: *Stream) void {
+        e.late.cancel(s);
         if (e.cfg.lone_cost_tile > 0) lone_costs.keep(e.gpa, lone_costs.slot(&e.lone_kept, s), s) catch {};
         if (s.inflight) |h| _ = e.backend.read(h) catch 0; // the handle frees the backend's ring slot
         s.dropRoundState(e.gpa);

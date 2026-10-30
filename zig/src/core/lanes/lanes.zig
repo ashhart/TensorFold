@@ -49,6 +49,7 @@ pub const Trim = trim.Trim;
 test {
     std.testing.refAllDecls(@This());
     _ = @import("engine_test.zig");
+    _ = @import("late_draft_test.zig");
     _ = @import("long_loop.zig");
     _ = @import("long_loop_test.zig");
     _ = @import("loop_stop_test.zig");
@@ -73,3 +74,7 @@ test {
 
 pub const learned_disk = @import("learned_disk.zig");
 pub const learned_dirs = @import("learned_dirs.zig");
+
+test {
+    _ = @import("context_copy_price_test.zig");
+}

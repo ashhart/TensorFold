@@ -142,3 +142,38 @@ test "qwen27 window: native facts expose device width, node budget and hybrid co
         }
     };
 }
+
+test "qwen27 window: a copied continuation preserves the matching native tree prefix" {
+    const native = @import("qwen27_lanes.zig");
+    var copy_stream = try @import("lanes").Stream.init(std.testing.allocator, .{ .id = "copy-prefix", .prompt = &.{1}, .max_new = 32 });
+    defer copy_stream.deinit(std.testing.allocator);
+    var copy_backend: native.Metal = undefined;
+    copy_backend.trees = @splat(null);
+    copy_backend.trees[0] = .{ .gpa = std.testing.allocator, .tokens = @constCast(&[_]u32{ 10, 11, 12 }), .parents = @constCast(&[_]i32{ -1, 0, 1 }), .scores = @constCast(&[_]f64{ -0.1, -0.2, -0.3 }) };
+    var up = [_]i32{ -1, 0, 1, 2 };
+    var window: @import("lanes").backend.Window = .{ .stream = &copy_stream, .pending = 1, .held = 0, .tokens = &.{ 10, 11, 99 }, .parents = &up, .positions = &.{ 0, 1, 2, 3 } };
+    try std.testing.expectEqual(@as(usize, 2), copy_backend.treeRows(window));
+    up[2] = 0;
+    try std.testing.expectEqual(@as(usize, 1), copy_backend.treeRows(window));
+    window.tokens = &.{ 99, 11, 12 };
+    try std.testing.expectEqual(@as(usize, 0), copy_backend.treeRows(window));
+}
+
+test "qwen27 window: an early keep refuses prompts, unrelated rounds and absent verify tails" {
+    var early_runner: tf.qwen27.decode_round.Runner = undefined;
+    var early_round: tf.qwen27.round_plan.Round = undefined;
+    var other_round: tf.qwen27.round_plan.Round = undefined;
+    early_runner.failed = false;
+    early_runner.accepted_chain = false;
+    early_runner.current_round = null;
+    early_runner.tail = null;
+    early_runner.active = null;
+    try std.testing.expectError(error.RoundNotReady, early_runner.checkDeviceKeep(&early_round));
+    try std.testing.expectError(error.RoundNotReady, early_runner.prepareDeviceKeep(&early_round, undefined, undefined, undefined));
+    early_runner.current_round = &other_round;
+    try std.testing.expectError(error.RoundNotReady, early_runner.prepareDeviceKeep(&early_round, undefined, undefined, undefined));
+    early_runner.current_round = &early_round;
+    try std.testing.expectError(error.RoundNotReady, early_runner.prepareDeviceKeep(&early_round, undefined, undefined, undefined));
+    early_runner.accepted_chain = true;
+    try std.testing.expectError(error.RoundNotReady, early_runner.prepareDeviceKeep(&early_round, undefined, undefined, undefined));
+}

@@ -17,6 +17,8 @@ pub const Mixer = struct {
 
 /// Serial decode and prompt segments own separate frames and order shared caches at the mixer.
 pub const Head = enum { all, last, none };
+/// A verified head's dependent readback work stays in its final command buffer.
+pub const Tail = struct { ptr: *anyopaque, encode: *const fn (*anyopaque, mtl.ComputeEncoder) anyerror!void };
 pub const Stages = struct {
     model: *Model,
     rows: u32,
@@ -25,6 +27,7 @@ pub const Stages = struct {
     hidden: Ref = undefined,
     residual: Ref = undefined,
     head: Head = .all,
+    tail: ?Tail = null,
     /// An image prompt's rows: the frame's `takes` rows take theirs over their placeholders' embeddings.
     images: ?Ref = null,
     pub fn begin(s: *Stages, lane: *@import("core").segments.Lane) !void {
@@ -134,6 +137,7 @@ pub const Stages = struct {
             try m.kernels.quant(e, m.weights.head, input, head_sums, f.get(.dims), f.get(.logits), if (s.head == .last) 1 else s.rows);
         }
         e.barrier();
+        if (s.tail) |tail| try tail.encode(tail.ptr, e);
     }
 };
 
