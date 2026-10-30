@@ -1,9 +1,8 @@
 //! The pipeline's seeded starting latents: torch.randn on a CPU generator, as torch's x86 AVX2 path computes them.
 const std = @import("std");
 
-// An altered port of PyTorch's mt19937 and normal_fill (BSD-3-Clause, Copyright (c) 2016- Facebook, Inc. and
-// others) and of avx_mathfun.h's log256_ps and sincos256_ps (zlib licence, Copyright (C) 2012 Giovanni Garberoglio,
-// after Julien Pommier's sse_mathfun.h, Copyright (C) 2007); notices in THIRD_PARTY_NOTICES.md and LICENSES/.
+// Altered port of PyTorch's mt19937/normal_fill (BSD-3) and avx_mathfun.h's log/sincos (zlib): THIRD_PARTY_NOTICES.md.
+
 // Multiply-adds are fused as in torch's GCC build; ARM torch's libm path differs from it.
 
 /// torch's mt19937 (ATen's MT19937RNGEngine): the seed's low 32 bits, outputs tempered.
