@@ -79,6 +79,69 @@ tf_fn_idx_scores(const float* q, const void* pooled, const int* complete, float*
     }
 }
 
+// A prompt slice's scores for 4 heads of 128 dims, 4 lanes a score in tf_fn_idx_scores's sum order: the same bits.
+constexpr int kQuadRows = 32, kQuadBlocks = 64, kQuadDims = 128, kQuadHeads = 4;
+
+__device__ __forceinline__ float fn_quad_sum(const float (&part)[8]) {
+    const float a0 = part[0] + part[4], a1 = part[1] + part[5], a2 = part[2] + part[6], a3 = part[3] + part[7];
+    const float b0 = a0 + a2, b1 = a1 + a3;
+    float c = b0 + b1;
+    c = c + __shfl_xor(c, 2, 32);
+    c = c + __shfl_xor(c, 1, 32);
+    return c;
+}
+
+extern "C" __global__ void __launch_bounds__(128)
+tf_fn_idx_scores_quad(const float* q, const void* pooled, const int* complete, float* scores, int kind, int rows,
+                      int blocks, long long stride, int top) {
+    constexpr int D = kQuadDims, H = kQuadHeads;
+    __shared__ __attribute__((aligned(16))) float ks[kQuadBlocks][D];  // transposed: [blk][p * 32 + m] = key[p + 4 m]
+    __shared__ int any;
+    const int lane = threadIdx.x & 31, wave = threadIdx.x >> 5, p = lane & 3;
+    const int r = blockIdx.y * kQuadRows + wave * 8 + (lane >> 2);
+    const int b0 = blockIdx.x * kQuadBlocks;
+    const int lim = r < rows && complete[r] > top ? complete[r] : 0;  // the row scores blocks below lim
+    if (threadIdx.x == 0) any = 0;
+    __syncthreads();
+    if (lim > b0 && (lane & 3) == 0) atomicOr(&any, 1);
+    __syncthreads();
+    if (!any) return;  // no row of this tile scores a block of it
+    for (int e = threadIdx.x; e < kQuadBlocks * D; e += 128) {
+        const int blk = e / D, d = e - blk * D;
+        ks[blk][(d & 3) * 32 + (d >> 2)] = b0 + blk < blocks ? load(pooled, kind, static_cast<long long>(b0 + blk) * D + d) : 0.f;
+    }
+    float qv[H][32];
+#pragma unroll
+    for (int h = 0; h < H; ++h)
+#pragma unroll
+        for (int m = 0; m < 32; ++m) qv[h][m] = r < rows ? q[(static_cast<long long>(r) * H + h) * D + p + 4 * m] : 0.f;
+    __syncthreads();
+    const float norm = sqrtf(static_cast<float>(D));
+    const int n = min(kQuadBlocks, blocks - b0);
+    for (int blk = 0; blk < n; ++blk) {
+        float key[32];
+        const float4* k4 = reinterpret_cast<const float4*>(&ks[blk][p * 32]);
+#pragma unroll
+        for (int c = 0; c < 8; ++c) {
+            const float4 a = k4[c];
+            key[4 * c] = a.x, key[4 * c + 1] = a.y, key[4 * c + 2] = a.z, key[4 * c + 3] = a.w;
+        }
+        float total = 0.f;
+#pragma unroll
+        for (int h = 0; h < H; ++h) {
+            float part[8];
+#pragma unroll
+            for (int j = 0; j < 8; ++j) part[j] = 0.f;
+#pragma unroll
+            for (int i = 0; i < 4; ++i)
+#pragma unroll
+                for (int j = 0; j < 8; ++j) part[j] = part[j] + qv[h][j + 8 * i] * key[j + 8 * i];
+            total += fmaxf(fn_quad_sum(part), 0.f);
+        }
+        if (p == 0 && b0 + blk < lim) scores[r * stride + b0 + blk] = total / norm;
+    }
+}
+
 // An order-keeping unsigned key of a float: larger floats, larger keys.
 __device__ __forceinline__ unsigned fn_order(float v) {
     const unsigned u = __float_as_uint(v);

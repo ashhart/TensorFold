@@ -168,6 +168,60 @@ fn selectRef(scores: []const f32, nb: usize, end: usize, top: usize, ratio: usiz
     for (nb * ratio..end) |k| try out.append(gpa, @intCast(k));
 }
 
+test "a prompt slice's block scores at 4 lanes a score are a wave a block's, bit for bit (Flash Next: 4 x 128)" {
+    const t = try Rig.open(1 << 24);
+    defer t.close();
+    var rng: rig.Rng = .{ .state = 0x9A4D };
+    const heads = 4;
+    const dims = 128;
+    const top = 32;
+    const blocks = 1100;
+    const rows = 64;
+    var complete: [rows]i32 = undefined;
+    // rows past the budget at varied depths, some under it (no scores), one at the last block
+    for (&complete, 0..) |*c, r| c.* = if (r % 9 == 4) 20 else @intCast(@min(blocks, 40 + r * 17));
+    complete[rows - 1] = blocks;
+    const hq = try gpa.alloc(f32, rows * heads * dims);
+    defer gpa.free(hq);
+    for (hq) |*x| x.* = rng.unit();
+    const hp = try fx.acts(t, &rng, blocks * dims, 1.0);
+    defer gpa.free(hp);
+    var q = try t.upload(hq);
+    defer q.free();
+    var pooled = try t.upload(hp);
+    defer pooled.free();
+    var dc = try t.upload(&complete);
+    defer dc.free();
+    var got: [2][]u8 = undefined;
+    for (0..2) |v| {
+        var scores = try t.alloc(rows * blocks * 4);
+        defer scores.free();
+        try scores.fill8(0x7f);
+        const st = t.stream.handle;
+        if (v == 0) {
+            var r0: usize = 0;
+            while (r0 < rows) : (r0 += 8) try t.on.fn_idx_scores(
+                @ptrFromInt(at(q) + r0 * heads * dims * 4),
+                ptr(?*const anyopaque, pooled),
+                @ptrFromInt(at(dc) + r0 * 4),
+                @ptrFromInt(at(scores) + r0 * blocks * 4),
+                t.kind(),
+                8,
+                heads,
+                dims,
+                blocks,
+                blocks,
+                top,
+                st,
+            );
+        } else try t.on.fn_idx_scores(ptr(?[*]const f32, q), ptr(?*const anyopaque, pooled), ptr(?[*]const i32, dc), ptr(?[*]f32, scores), t.kind(), rows, heads, dims, blocks, blocks, top, st);
+        try t.stream.synchronize();
+        got[v] = try rig.download(u8, scores);
+    }
+    defer for (got) |g| gpa.free(g);
+    try std.testing.expectEqualSlices(u8, got[0], got[1]);
+}
+
 test "block scores and selection: relu-summed heads, the best blocks with ties to the lower id, dense rows untouched" {
     const t = try Rig.open(1 << 22);
     defer t.close();

@@ -27,6 +27,7 @@ pub const Fns = struct {
     ngram_ids: Function,
     idx_pool: Function,
     idx_scores: Function,
+    idx_scores_quad: Function,
     idx_select: Function,
     sparse_parts: [2]Function, // groups of up to 6 and up to 12 query heads
     sparse_merge: Function,
@@ -42,6 +43,7 @@ pub const Fns = struct {
             .ngram_ids = try m.function("tf_fn_ngram_ids"),
             .idx_pool = try m.function("tf_fn_idx_pool"),
             .idx_scores = try m.function("tf_fn_idx_scores"),
+            .idx_scores_quad = try m.function("tf_fn_idx_scores_quad"),
             .idx_select = try m.function("tf_fn_idx_select"),
             .sparse_parts = .{ try m.function("tf_fn_sparse_parts6"), try m.function("tf_fn_sparse_parts12") },
             .sparse_merge = try m.function("tf_fn_sparse_merge"),
@@ -315,6 +317,9 @@ pub fn idxPoolAt(
     try l.go(l.fnx.idx_pool, dim(rows, 1, 1), dim(threads, 1, 1), 0, s, &a);
 }
 
+/// Rows from which the block scores take tf_fn_idx_scores_quad (fewer: a verify window's, a wave a block).
+pub const quad_rows = 16;
+
 /// Every row's score of each of `blocks` pooled blocks it has complete, for rows past `top` complete blocks.
 pub fn idxScores(
     l: *const Launcher,
@@ -333,6 +338,12 @@ pub fn idxScores(
 ) Error!void {
     if (blocks == 0) return;
     if (dims > threads) return util.invalid("idxScores");
+    // a prompt slice of Flash Next's 4 x 128 index heads: 4 lanes a score, the same sums (indexer.hpp)
+    if (rows >= quad_rows and heads == 4 and dims == 128) {
+        var b: Args = .{};
+        inline for (.{ ad(q), ad(pooled), ad(complete), ad(scores), kind, rows, blocks, stride, top }) |v| try b.add(v);
+        return l.go(l.fnx.idx_scores_quad, dim(cdiv(blocks, 64), cdiv(rows, 32), 1), dim(128, 1, 1), 0, s, &b);
+    }
     var a: Args = .{};
     inline for (.{
         ad(q),

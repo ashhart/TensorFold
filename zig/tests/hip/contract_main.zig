@@ -19,6 +19,7 @@ const pair_k = @import("contract_relu2_pair.zig");
 const wmma_dense_k = @import("contract_wmma_dense.zig");
 const wmma_moe_k = @import("contract_wmma_moe.zig");
 const topk_k = @import("contract_topk.zig");
+const fn_scores_k = @import("contract_fn_scores.zig");
 
 const g = core.contract.gates;
 
@@ -150,6 +151,10 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     var topk = topk_k.Topk.init(a, &r, s, &l);
     defer topk.deinit();
     try kernels.append(a, topk.kernel());
+    var fn_scores: [1]fn_scores_k.Scores = undefined;
+    for (&fn_scores, std.enums.values(fn_scores_k.Which)) |*x, w| x.* = .init(a, &r, s, &l, w);
+    defer for (&fn_scores) |*x| x.deinit();
+    for (&fn_scores) |*x| try kernels.append(a, x.kernel());
     // Flash Next's hyper-connection kernels: the dense tile's HC mix and its gate table on the gfx11 matrix cores
     const hc_mix_k = @import("contract_hc_mix.zig");
     var hc_dense = hc_mix_k.Dense.init(a, &r, s, &l);
