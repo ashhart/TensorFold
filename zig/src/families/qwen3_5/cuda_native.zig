@@ -80,6 +80,8 @@ pub const Loaded = struct {
     own_prompt_cache: bool = false,
     /// TF_QWEN_KV_SHARE or TF_QWEN_KV_PAGES_ALL: every stream runs on the pool's pages; the engine's window sits idle.
     all_on_pages: bool = false,
+    /// TF_QWEN_KV_PAGES_ALL=1: the engine's own stream takes pages too, a window of them set aside by the plan.
+    engine_paged: bool = false,
 };
 
 pub fn cacheBytes(e: *const E.Engine, cap: usize, test_tokens: usize) !usize {
@@ -96,17 +98,17 @@ pub fn pagedLayout(p: *anyopaque, extra: u64) ?kv_pool.Layout {
     return pages_mod.layout(l.e, l.capacity, l.page_tokens, ring, l.extra);
 }
 
-/// The pool beside the first stream's window: `streams` lanes and `pages` pages, made now.
+/// The pool beside the first stream's window (engine_paged: for it too): `streams` more lanes and `pages` pages.
 pub fn attach(p: *anyopaque, streams: u32, pages: usize) !void {
     const l: *Lanes = @ptrCast(@alignCast(p));
     const ring = l.ringBytes();
-    // checks, and TF_QWEN_KV_SHARE: every stream on pages (each can adopt the kept ones), the window idle: a lane each
-    l.paged_only = (pages_mod.pagedOnly() or l.share_snaps > 0) and streams > 0;
+    // TF_QWEN_KV_SHARE and TF_QWEN_KV_PAGES_ALL: every stream on pages, a lane each (PAGES_ALL: no window reserved)
+    l.paged_only = (l.engine_paged or l.share_snaps > 0) and (streams > 0 or l.engine_paged);
     const pool_lanes = if (l.paged_only) streams + 1 else streams;
     l.pages = try pages_mod.Pages.init(l.gpa, l.e, pages_mod.layout(l.e, l.capacity, l.page_tokens, ring, l.extra), l.capacity, ring, pool_lanes, pages);
-    if (streams > 0) {
-        if (l.draft) |d| d.ring_of = .{ .ctx = l, .ring = Lanes.ringOf };
-        if (l.mtp) |m| m.ring_of = .{ .ctx = l, .area = Lanes.ringOf };
+    if (pool_lanes > 0) {
+        if (l.draft) |d| d.ring_of = .{ .ctx = l, .ring = Lanes.ringOf, .all = l.engine_paged };
+        if (l.mtp) |m| m.ring_of = .{ .ctx = l, .area = Lanes.ringOf, .all = l.engine_paged };
     }
     if (l.share_snaps > 0 and streams > 0) l.prefix = try prefix_mod.Prefix.init(l.gpa, l.e, l.pages.?, l.share_snaps);
     if (l.prefix != null and prefix_mod.fewSnapshots(l.share_snaps, streams + 1)) std.log.warn("TF_QWEN_KV_SHARE={d} keeps under 4 recurrent-state snapshots a stream at --parallel {d}: live streams evict each other's before a resume; set it to {d} or more", .{ l.share_snaps, streams + 1, 4 * (streams + 1) });
@@ -124,6 +126,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     if (kernels != null) return error.QwenHasNoCapturedKernels;
     if (o.slide and o.kv8) return error.UnsupportedLearningFormat;
     const page_tokens = try pages_mod.paging();
+    const engine_paged = page_tokens > 0 and pages_mod.pagedOnly();
     const page_test = try cache_mod.pageTest();
     _ = try cache_mod.cacheRows(o.context, page_test);
     if (page_tokens > 0 and o.slide) return error.QwenPagesNoLearner;
@@ -149,7 +152,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     const trace = try round_timing.Trace.create(gpa, timing_on and e.g.hidden == 5120 and e.g.layers == 64 and e.g.experts == 0);
     errdefer if (trace) |x| gpa.destroy(x);
     const l = try gpa.create(Lanes);
-    l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context, .page_tokens = page_tokens, .page_test = page_test, .share_snaps = share_snaps, .cost_context = ctx, .startup = e.startup, .vision = v, .target = undefined, .timing_on = timing_on, .trace = trace };
+    l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context, .page_tokens = page_tokens, .engine_paged = engine_paged, .page_test = page_test, .share_snaps = share_snaps, .cost_context = ctx, .startup = e.startup, .vision = v, .target = undefined, .timing_on = timing_on, .trace = trace };
     l.target = .{ .e = e, .caches = &l.caches, .seen = &l.seen };
     return .{
         .learns = if (o.slide) e else null,
@@ -165,7 +168,8 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .target = &l.target,
         .layout = if (page_tokens > 0) pages_mod.layout(e, o.context, page_tokens, 0, 0) else null,
         .own_prompt_cache = share_snaps > 0,
-        .all_on_pages = page_tokens > 0 and (share_snaps > 0 or pages_mod.pagedOnly()),
+        .all_on_pages = page_tokens > 0 and share_snaps > 0 and !engine_paged, // the engine's window idle
+        .engine_paged = engine_paged,
     };
 }
 
@@ -243,6 +247,7 @@ pub const Lanes = struct {
     /// TF_QWEN_KV_SHARE's snapshots (0: off) and the prompt cache over the pool's pages `attach` made.
     share_snaps: usize = 0,
     prefix: ?*prefix_mod.Prefix = null,
+    engine_paged: bool = false, // TF_QWEN_KV_PAGES_ALL=1: no window reserved, the engine's own stream a pool lane
     /// The DFlash2 drafter, when one is attached: its rings go into the pool lanes' runs.
     draft: ?*Draft = null,
     /// The MTP drafter (qwen3_5_moe), when attached: its ring and state go into the pool lanes' runs.

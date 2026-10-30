@@ -109,7 +109,8 @@ pub const Draft = struct {
     /// TF_QWEN_KV_PAGES: a stream's ring is a view of its target lane's run (null: the contexts own theirs).
     ring_of: ?RingOf = null,
 
-    pub const RingOf = struct { ctx: *anyopaque, ring: *const fn (*anyopaque, *Stream) ?u64 };
+    /// all: every stream is a pool lane (TF_QWEN_KV_PAGES_ALL), so the drafter keeps no ring of its own.
+    pub const RingOf = struct { ctx: *anyopaque, ring: *const fn (*anyopaque, *Stream) ?u64, all: bool = false };
 
     const words_at = frame.words_at;
     const hp_at = frame.hp_at;
@@ -245,7 +246,8 @@ pub const Draft = struct {
         const started = profile.now(d.io);
         const previous_times = d.startup;
         try memory.resize(d, n);
-        const own = if (d.ring_of != null) @min(n, 1) else n; // with a pool the other streams' rings are lane runs
+        // with a pool the other streams' rings are lane runs (all: every stream's)
+        const own = if (d.ring_of) |r| (if (r.all) 0 else @min(n, 1)) else n;
         try d.pool.ensureTotalCapacity(d.gpa, own);
         while (d.pool.items.len < own) d.pool.appendAssumeCapacity(try d.create());
         d.startup.reserve += profile.elapsed(d.io, started) - (d.startup.warmups - previous_times.warmups) - (d.startup.reserve - previous_times.reserve);
