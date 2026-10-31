@@ -25,8 +25,8 @@ const stress_on = 1024;
 
 /// fn_attn.metal's sparse rows (replay_prompt_segments.zig, while the indexer runs) or qmm6_nax_b.metal's causal chunk.
 pub const Which = enum { sattn, attn256 };
-/// P cut as the tensor units take it; P spread over [0, 1], values in [0, 1); that range without the cut; an edit.
-pub const Case = enum { cut, spread, cutless, edit };
+/// P cut as the tensor units take it; P spread over [0, 1]; that range without the cut; an edit; the known plants.
+pub const Case = enum { cut, spread, cutless, edit, masked };
 
 fn name(w: Which, k: Case) []const u8 {
     return switch (w) {
@@ -42,7 +42,8 @@ fn label(comptime w: Which, comptime k: Case) []const u8 {
         .cut => base ++ " 24 heads over 2, head dim 256",
         .spread => base ++ ", P spread over [0, 1]",
         .cutless => "control: " ++ base ++ ", P spread, its range without the operand cut",
-        .edit => "control: " ++ base ++ (if (w == .sattn) ", the key past a row's last counted" else ", one key past the row seen"),
+        .edit => "control: " ++ base ++ (if (w == .sattn) ", its padding lane counted (key 0 again)" else ", one key past the row seen"),
+        .masked => base ++ ", non-finite values its masked keys reach",
     };
 }
 
@@ -88,7 +89,7 @@ pub fn spec(w: Which, k: Case) c.Spec {
         // sattn: a chunk from the start, one crossing into selected blocks, one deep in the context; attn256 dense
         .served = if (w == .sattn) &sattn_served else &attn_served,
         .sums = .{ .exact = true },
-        .known = if (k == .cut or k == .spread) .{ .gate = .nonfinite, .finding = finding(w) } else null,
+        .known = if (k == .masked) .{ .gate = .nonfinite, .finding = finding(w) } else null,
     };
 }
 
@@ -97,7 +98,8 @@ fn finding(w: Which) []const u8 {
     return switch (w) {
         .sattn => "a non-finite value in key 0's row reaches every row through its padding lanes (key 0 at p = 0: 0 x Inf = NaN), " ++
             "and a row whose every score is -Inf weighs its padding lanes 1 (its max starts at -FLT_MAX), so it gives key 0's values where float64 gives NaN",
-        .attn256 => "a row whose every score is -Inf weighs its masked keys 1 (its max starts at -FLT_MAX), so it averages them where float64 gives NaN",
+        .attn256 => "a non-finite value at a key masked for a row but read in its 32-key block reaches that row as NaN (P = 0 times Inf inside the P x V mma), " ++
+            "and a row whose every score is -Inf weighs its masked keys 1 (its max starts at -FLT_MAX), so it averages them where float64 gives NaN",
     };
 }
 
@@ -239,6 +241,32 @@ pub const Probe = struct {
         @memset(p.gp, c.toBf16(20)); // bsig(20) is 1: the outputs show bf16(o) itself
     }
 
+    /// Plants both agree on: NaN at key 0; infinities at a key no row reads unseen (sattn: key 1); NaN queries and key.
+    fn plants(p: *Probe) void {
+        const inf_key: usize = if (p.which == .sattn) 1 else 0;
+        for (0..KVH) |kv| {
+            p.v[p.at(kv, 0)] = nan16;
+            p.v[p.at(kv, inf_key) + 1] = 0x7f80;
+            p.v[p.at(kv, inf_key) + 2] = 0xff80;
+        }
+        for (1..4) |r| if (r < p.rows) {
+            p.q[(r * H + 5 * r) * D + r] = nan16;
+        };
+        p.k[p.at(1, 2) + 7] = nan16;
+    }
+
+    /// The findings' plants: infinities in key 0's values and at key 5 (masked for rows 0 to 4), a row of -Inf scores.
+    fn knownPlants(p: *Probe) void {
+        p.plants();
+        for (0..KVH) |kv| {
+            p.v[p.at(kv, 0) + 3] = 0x7f80;
+            p.v[p.at(kv, 5) + 4] = 0x7f80;
+        }
+        // row 4's head 0 scores -Inf at every key it sees: q +Inf against keys 0 to 4, each -1 in that dim
+        p.q[(4 * H + 0) * D + 9] = 0x7f80;
+        for (0..5) |key| p.k[p.at(0, key) + 9] = c.toBf16(-1);
+    }
+
     pub fn prepare(p: *Probe, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         if (shape.rows == 0 or shape.n != D) return false;
         if (fill == .stress and shape.k < stress_on) return false;
@@ -268,21 +296,7 @@ pub const Probe = struct {
         fillRandom(rng, p.gp, 4);
         switch (fill) {
             .random => if (p.case == .spread or p.case == .cutless) p.spread(rng),
-            .nonfinite => {
-                // key 0's values, which every row attends; three queries' heads; key 2's key, which rows 2 on see
-                for (0..KVH) |kv| for ([_]u16{ nan16, 0x7f80, 0xff80 }, 0..) |x, d| {
-                    p.v[p.at(kv, 0) + d] = x;
-                };
-                for ([_]u16{ nan16, 0x7f80, 0xff80 }, 1..) |x, r| if (r < p.rows) {
-                    p.q[(r * H + 5 * r) * D + r] = x;
-                };
-                p.k[p.at(1, 2) + 7] = nan16;
-                // row 4's head 0 scores -Inf at every key it sees: q +Inf against keys 0 to 4, each -1 in that dim
-                if (p.rows > 4) {
-                    p.q[(4 * H + 0) * D + 9] = 0x7f80;
-                    for (0..5) |key| p.k[p.at(0, key) + 9] = c.toBf16(-1);
-                }
-            },
+            .nonfinite => if (p.case == .masked) p.knownPlants() else p.plants(),
             .stress => {
                 // keys of 3s or -3s: the first 1,024 score high, the rest probability 0; values cancel but for 8 nudged
                 @memset(p.q, c.toBf16(3));
@@ -435,7 +449,7 @@ pub const Suite = struct {
     kernels: *std.ArrayList(g.Kernel),
     probes: std.ArrayList(*Probe) = .empty,
 
-    /// Only on the tensor units: before the M5, nax.h's fragments keep P whole, and these forms are not run there.
+    /// Only on the tensor units: the operand cut was measured there alone, so these cases register there.
     pub fn collect(s: *Suite, only: ?[]const u8) !void {
         if (!s.device.tensorUnits()) return;
         for (std.enums.values(Which)) |w| for (std.enums.values(Case)) |k| {
