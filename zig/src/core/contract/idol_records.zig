@@ -1,7 +1,8 @@
-//! Idol's launches, each source-reserved: the denoiser's (idol.metal, idol_attention.metal), then idol_decoder.metal's.
+//! Idol's launches, each source-reserved: the denoiser's (idol.metal, idol_attention.metal), then idol_decoder.metal's,
+//! then the image encoder's (idol_vae.metal).
 const std = @import("std");
 const M = @import("limits.zig").MetalLaunch;
-pub const records = denoiser ++ decoder;
+pub const records = denoiser ++ decoder ++ vae;
 
 const denoiser = [_]M{
     .{ .name = "idol id_linear_00", .threads = 256, .tg_memory = 0, .reserved = 256 },
@@ -42,7 +43,18 @@ const decoder = [_]M{
     .{ .name = "idol decoder dec_attention_11", .threads = 128, .tg_memory = 0, .reserved = 128 },
 };
 
+const vae = [_]M{
+    .{ .name = "idol vae iv_conv_in", .threads = 256, .tg_memory = 0, .reserved = 256 },
+    .{ .name = "idol vae iv_conv", .threads = 128, .tg_memory = 26624, .reserved = 128 },
+    .{ .name = "idol vae iv_wino", .threads = 512, .tg_memory = 32768, .reserved = 512 },
+    .{ .name = "idol vae iv_norm", .threads = 256, .tg_memory = 0, .reserved = 256 },
+    .{ .name = "idol vae iv_group_part", .threads = 512, .tg_memory = 2048, .reserved = 512 },
+    .{ .name = "idol vae iv_group_finish", .threads = 1024, .tg_memory = 0, .reserved = 1024 },
+    .{ .name = "idol vae iv_attention", .threads = 128, .tg_memory = 5168, .reserved = 128 },
+    .{ .name = "idol vae iv_tokens", .threads = 256, .tg_memory = 0, .reserved = 256 },
+};
+
 test "the Idol launches fit every Apple family, one record a pipeline" {
     try std.testing.expectEqual(@as(usize, 0), try @import("registry.zig").checkMetal(std.testing.allocator, &records, true));
-    try std.testing.expectEqual(@as(usize, 24 + 9), records.len);
+    try std.testing.expectEqual(@as(usize, 24 + 9 + 8), records.len);
 }

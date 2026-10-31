@@ -137,6 +137,8 @@ pub const moss_image = @embedFile("prefill/attention_nax.metal") ++ @embedFile("
 pub const idol = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("idol.metal") ++ @embedFile("idol_attention.metal");
 /// Idol's decoders' own steps and attention (families/idol/decoder_kernels.zig); projections, norms: the denoiser's.
 pub const idol_decoder = @embedFile("idol_decoder.metal");
+/// Idol's image encoder (FLUX.2's VAE encoder) in fp32.
+pub const idol_vae = @embedFile("idol_vae.metal");
 /// A prompt chunk's KDA layer in three passes, appended to the generated kda_rows source (its helpers).
 pub const glm_kda_prompt = @embedFile("glm_kda_prompt.metal");
 /// GLM-5.3-Flash speed-up mode's exchange kernels (families/glm/ep.zig).
