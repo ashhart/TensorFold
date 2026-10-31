@@ -150,6 +150,14 @@ M5, Nemotron's `tf_attention_nax` and MiniMax-M3.1-Flash's `mm_prompt_attention`
 bf16 output must lie between its range's ends rounded to bf16. Nemotron's adds a case with P spread over about
 [2^-6, 1] and values in [0, 1), where the cut's bias adds up; its control, the same range without the cut, goes red at
 `shapes`. Before the M5, `tf_attention_nax` keeps attention_ref's bound.
+On the M5, Nemotron's SSD steps (`prefill_mixers.zig`'s Mamba mixer) run `gemm_nax`'s five f32 kernels with both
+operands fp32, so each product enters cut, smaller by up to 1 - (1 - 2^-10)^2. Their entries
+(`metal_nemotron_ssd_gemm.zig`, y = sur x dtx and the state dd^T x bh^T a head, at the step's served row counts) state
+it as a one-sided range: float64's value less that share of the positive terms and plus that of the negative, beside
+the fp32 sums' `mma_step` roundings for every k16 step. Gate 4 runs 11-bit integers times 5-bit ones, which the cut
+keeps. Two cases take operands in (0, 1], where the bias adds up; their controls state the operands as fp32 and go red
+at `shapes`, as does a source edit dropping the ragged K tail's last column. Before the M5 they keep fp32 whole and are
+not registered; their launches are in `nemotron_ssd_records.zig`.
 LFM2.5-24B-A2B's shared rounds: the greedy pick (`lfm2_argmax`) and the conv and attention kernels that run every
 stream's rows in one dispatch, each bit-equal to the per-stream kernels it replaces. Four controls edit the source: a tie
 to the highest id, a nonfinite logit not flagged, and every stream reading or writing the first stream's state or cache.
