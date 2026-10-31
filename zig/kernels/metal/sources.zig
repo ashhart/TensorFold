@@ -133,6 +133,10 @@ pub const core_qwen_vision = @embedFile("prefill/gemm_nax.metal") ++ @embedFile(
 pub const qwen_image = @embedFile("prefill/attention_nax.metal") ++ @embedFile("qwen_image.metal");
 /// MOSS-Image's transformer: the prefill attention template, then its own steps (projections: core_qwen_vision).
 pub const moss_image = @embedFile("prefill/attention_nax.metal") ++ @embedFile("moss_image.metal");
+/// Idol's denoiser: the prefill GEMM template, then its own steps and head-64 attention.
+pub const idol = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("idol.metal") ++ @embedFile("idol_attention.metal");
+/// Idol's image encoder (FLUX.2's VAE encoder) in fp32.
+pub const idol_vae = @embedFile("idol_vae.metal");
 /// A prompt chunk's KDA layer in three passes, appended to the generated kda_rows source (its helpers).
 pub const glm_kda_prompt = @embedFile("glm_kda_prompt.metal");
 /// GLM-5.3-Flash speed-up mode's exchange kernels (families/glm/ep.zig).

@@ -4,6 +4,10 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Idol (speridlabs/idol, image to 3D Gaussian splat), first step: its 0.37B denoiser runs natively on M5 Metal from the released checkpoint, the condition refiner once an image and all 50 guided steps on the GPU. On an M5 Ultra a forward takes 0.275 s against the publisher's SDK on torch MPS at 0.939 s, with a 1.84 GB peak footprint. Each step's velocities on the SDK's own input sit as close to an fp32 run as the SDK's own, and each joint block alone passes the same gate; `tf-idol` runs those gates from a case `tools/zig/idol_case.py` records. RePo's fp32 maps run as an fp16 hi/lo split on the tensor units, whose fp32 GEMM truncates its inputs to 10 mantissa bits (#1772). The image encoders and the decoders are not ported yet (#1766, fixes #1757). Thanks to @jayleaton.
+
+- Idol's FLUX.2 VAE image encoder runs natively on Metal in fp32: one 1,024 x 1,024 picture to the denoiser's 4,101 condition rows, with the posterior's noise as an input. It is 0.185 s an encode on an M5 Ultra against 0.095 s for the SDK's bf16 encoder on torch MPS, and lies far closer to a float64 run: worst row 5.1e-5 against the SDK's 2.7e-2. `tf-idol-vae` gates it from a case `tools/zig/idol_case.py vae` records, with the ungated FLUX.2-klein-4B weights (#1774, after #1766, for #1757). Thanks to @jayleaton.
+
 - DeepSeek-V4.x: `tool_choice: "required"` and named tool calls are now constrained to the model's own DSML call markup, so those requests are held to a valid call on DeepSeek too.
 
 - Qwen3.6-35B-A3B on CUDA: `--drafter` also takes a DFlash2 draft model, chosen by the `dflash_config` in its `config.json`; the checkpoint's own directory still drafts with its MTP layer. With `incoai/Qwen3.6-35B-A3B-DFlash2` over `nvidia/Qwen3.6-35B-A3B-NVFP4`, one GB10 decodes 130 tok/s at one stream on a 4.2K-token prompt (MTP: 99), and every drafted reply equals its plain run.
