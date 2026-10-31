@@ -91,7 +91,7 @@ fn enqueue(source: anytype, requests: *[width]Request, count: *usize, run: Reque
     }
 }
 
-fn flush(source: anytype, requests: []const Request, stats: *Stats) !void {
+pub fn flush(source: anytype, requests: []const Request, stats: *Stats) !void {
     if (requests.len == 0) return;
     const T = switch (@typeInfo(@TypeOf(source))) {
         .pointer => |p| p.child,
