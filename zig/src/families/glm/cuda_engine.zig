@@ -342,6 +342,7 @@ pub const Engine = struct {
         var one: [1]fw.Rank = undefined;
         var f = e.view(&e.bp, &one);
         f.index_split = split;
+        if (start + rows <= len -| @as(usize, @intCast(dflash.WIN))) f.taps = null; // none read (dflash.promptRun)
         const as_i32: []const i32 = @ptrCast(part);
         if (marks) |m| if (start > 0 and std.mem.indexOfScalar(u32, m.at, @intCast(start)) != null) m.call(m.ctx, @intCast(start));
         f.prof = e.prompt_profs[if (rows <= 64) 0 else if (rows <= 256) 1 else if (rows <= 1024) 2 else 3];
