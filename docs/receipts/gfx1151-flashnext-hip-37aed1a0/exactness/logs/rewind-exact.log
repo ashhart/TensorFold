@@ -1,0 +1,17 @@
+PASS rewind turn 1, drafts on: 0 prompt tokens from kept states
+PASS rewind turn 2, drafts on: 10176 prompt tokens from kept states
+PASS rewind turn 3, drafts on: 10240 prompt tokens from kept states
+PASS rewind regenerate turn 3, drafts on: 10240 prompt tokens from kept states
+PASS rewind edit turn 3, drafts on: 10240 prompt tokens from kept states
+PASS rewind delete turn 3, then turn 4, drafts on: 10240 prompt tokens from kept states
+PASS rewind edit turn 1, drafts on: 10176 prompt tokens from kept states
+PASS rewind turn 2 again, drafts on: 10240 prompt tokens from kept states
+PASS rewind turn 1, drafts off: 10176 prompt tokens from kept states
+PASS rewind turn 2, drafts off: 10240 prompt tokens from kept states
+PASS rewind turn 3, drafts off: 10240 prompt tokens from kept states
+PASS rewind regenerate turn 3, drafts off: 10240 prompt tokens from kept states
+PASS rewind edit turn 3, drafts off: 10240 prompt tokens from kept states
+PASS rewind delete turn 3, then turn 4, drafts off: 10240 prompt tokens from kept states
+PASS rewind edit turn 1, drafts off: 10176 prompt tokens from kept states
+PASS rewind turn 2 again, drafts off: 10240 prompt tokens from kept states
+rewind PASS: 0 differing replies

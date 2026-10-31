@@ -1,0 +1,22 @@
+{
+ "binaries_sha256": {
+  "new": "02bb6abe0d4d8768fafab0cecdc7c879409b12966eb768d98bb94746d0551ef6",
+  "base": "933ee938de6f9798e53d3a8629723f39cdb6863d7a261dcd0d742624a7a672b7",
+  "flashnext_hip_test": "cc7c2312ce9d59a2b38a23c62ff9e8c029c559ae64ebd47b66cbfcd2d704c565"
+ },
+ "source_commits": {
+  "kit_source": "37aed1a0384625d4ff35c23e7df2b502d2a8b7f6"
+ },
+ "upstream_scripts_sha256": {
+  "tools/bench_openai.py": "d5af4fbb756cdfb573546c0e0017652a4bb8f509d1251af683be7a3cbdd426f6",
+  "tools/bench_concurrent.py": "0e72e26769f082459329fc068c25f6f72a9155e422962ea54cb5d1226227752d",
+  "tools/bench_cache.py": "711cb8abbbbcd1c34ad628ab1cb89161984ecd18c8fb092d10b16b100d33fc3c",
+  "tools/bench_timing.py": "158f636ef0b3bed460ce19ef4872b6d8607ff7a8590562d06bae8bd55e6f44ed",
+  "tools/bench_evidence.py": "54c28474f0804dbd120e3fb5859be0d1667ef21ca502880d0bed098ec9bb42ff",
+  "tools/bench_metrics.py": "26f4c3ecbb03df4f12e24d18840fea989d9ef8c63117ca11eb944ef670458a27",
+  "tools/memory_receipts.py": "9e3681e5223320c4d6b72b9a58f3d0c3e35c48086a0779ef6f5a467c6427909c",
+  "zig/tests/qwen35/serve_check.py": "f4b21cec2b2899d1fd4d284658a4ae054fc1d6e21991538bd91b1207d2896388",
+  "zig/tests/qwen35/serve_cancel.py": "5ce3dd948df1e2089ba8f3a27fe69e2642a3546aa2a734f5aed06afc473cdf58",
+  "zig/tests/flashnext_hip/rewind.py": "64889ccb90b555c74cd284762c955872b938e66eb3e25412ad87e143a9299487"
+ }
+}

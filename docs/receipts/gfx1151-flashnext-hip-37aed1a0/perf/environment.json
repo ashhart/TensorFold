@@ -1,0 +1,7 @@
+{
+ "gpu_arch": "gfx1151",
+ "rocm": "7.15.26333-0000000",
+ "python": "3.13.5",
+ "mem_total_kib": 193548104,
+ "native_window_tokens": 262144
+}

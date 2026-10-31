@@ -1,0 +1,19 @@
+{
+ "expected_prompt_tokens": 65536,
+ "prompt_tokens_match": true,
+ "request_sha256": "dca4cfc4add496bdcdf3a4b48b92dd1b5e03bb739daa767af5eec3c7c1ed1182",
+ "request_matches_file": true,
+ "prompt_tokens": 65536,
+ "cached_tokens": 0,
+ "tokens": 1,
+ "cache_state": "cold",
+ "complete": true,
+ "error": null,
+ "ttft_s": 252.72785130501143,
+ "prefill_tps": 259.3145142555187,
+ "elapsed_s": 252.72799458299414,
+ "token_sha": "7d7e080fddd8",
+ "token_sha256": "7d7e080fddd84e905aec666536218f5b6bb304524ae211000a2cbb045809bf5b",
+ "output_sha256": "30b4c270812473130c98a099b0ea84c00fcdf39c7446527c25b0326a0884b55e",
+ "chunk_gaps_ms": null
+}

@@ -1,0 +1,241 @@
+{
+ "source": "CPython standard library, top-level .py files by name",
+ "python": "3.13.5",
+ "tokenization": "each file alone through /v1/tokenize (add_special_tokens false), ids joined in file order; an array is the first N ids",
+ "lengths": [
+  2048,
+  8192,
+  32768,
+  65536,
+  131072,
+  261888,
+  16384
+ ],
+ "files_used": [
+  {
+   "file": "__future__.py",
+   "sha256": "981d4c398849f9ebcab72300d9c1fe288fd6d7f28957b3b3fa3a493a5836d95c",
+   "bytes": 5218,
+   "tokens": 1414
+  },
+  {
+   "file": "__hello__.py",
+   "sha256": "a8ce70b199497950f0f06def93115a6814daf1f961934457f59046909901487f",
+   "bytes": 227,
+   "tokens": 90
+  },
+  {
+   "file": "_aix_support.py",
+   "sha256": "0982f187c62fbfc1e8d368c8eb4104b56df71009a6b2823565a699e7b4cd945c",
+   "bytes": 4021,
+   "tokens": 1285
+  },
+  {
+   "file": "_android_support.py",
+   "sha256": "2010868fba48f4c92a317e807e34e3a0bd6d383a68f95a07152ad91ed6651636",
+   "bytes": 6895,
+   "tokens": 1738
+  },
+  {
+   "file": "_apple_support.py",
+   "sha256": "3bde7533b66dafa0c755c92bf09b30932a723ca58905a3fac670d53e3149f47b",
+   "bytes": 2256,
+   "tokens": 560
+  },
+  {
+   "file": "_collections_abc.py",
+   "sha256": "2cfe340c4cf54077f054cd366a2c7a515e9ee8da7d8b3fa071251f280034756d",
+   "bytes": 32264,
+   "tokens": 7978
+  },
+  {
+   "file": "_colorize.py",
+   "sha256": "83d39ba60fb9844f2de83a6e19237bb127549809e67bf8752fa67c0ddd227b2a",
+   "bytes": 2848,
+   "tokens": 1037
+  },
+  {
+   "file": "_compat_pickle.py",
+   "sha256": "028d2d9845d7acac2e1ceb565aacaee64e3f8019fba96174d65eff1609b50cd0",
+   "bytes": 8735,
+   "tokens": 2604
+  },
+  {
+   "file": "_compression.py",
+   "sha256": "3ad5d60627477a60939ee44fc1bb3a05dbe8fb52f0f75039b8f5d8f1a278b981",
+   "bytes": 5681,
+   "tokens": 1299
+  },
+  {
+   "file": "_distutils_system_mod.py",
+   "sha256": "c0ed16ad26297815a3a9e5748697d33a58994a6fe411be2e269d61636744e87a",
+   "bytes": 5716,
+   "tokens": 1303
+  },
+  {
+   "file": "_ios_support.py",
+   "sha256": "efaf28205259cb869ba3ca8353f7b69c9d2d6ad465e22904f27122b12ac3f84a",
+   "bytes": 2672,
+   "tokens": 715
+  },
+  {
+   "file": "_markupbase.py",
+   "sha256": "cb14dd6f2e2439eb70b806cd49d19911363d424c2b6b9f4b73c9c08022d47030",
+   "bytes": 14653,
+   "tokens": 3603
+  },
+  {
+   "file": "_opcode_metadata.py",
+   "sha256": "9a27d5830732442110b5945ddac1668db17abb51c44882ba9d4a8536bcc0ea1c",
+   "bytes": 9265,
+   "tokens": 3596
+  },
+  {
+   "file": "_osx_support.py",
+   "sha256": "363d3240acbba18a270bd3161f1ddb478f8492dc14fc451b2dc314db5c5ee09c",
+   "bytes": 22023,
+   "tokens": 5584
+  },
+  {
+   "file": "_py_abc.py",
+   "sha256": "f9c6fe3dd9b51bd7d93f867356e9d362600c924febfd903ee1c6e298860dca92",
+   "bytes": 6189,
+   "tokens": 1406
+  },
+  {
+   "file": "_pydatetime.py",
+   "sha256": "52dae1088217de5f8b7a2c71fb97757daf29cb0679c1140435ff899a17eb8aa2",
+   "bytes": 91990,
+   "tokens": 25453
+  },
+  {
+   "file": "_pydecimal.py",
+   "sha256": "87a3372df4c4269adcdac5725e04675d306abcfa8d65e8dda59c1846e3d202ac",
+   "bytes": 227283,
+   "tokens": 60144
+  },
+  {
+   "file": "_pyio.py",
+   "sha256": "fe5f1eebe5d06333f03440392bb1851a6e7cfa3c7e074a3a65a3bf7c4fe5f4ba",
+   "bytes": 93693,
+   "tokens": 21910
+  },
+  {
+   "file": "_pylong.py",
+   "sha256": "2d078829f36ba378e879fcac388fec443d5dfee7e0061a2656f8703bec124dbb",
+   "bytes": 11830,
+   "tokens": 3574
+  },
+  {
+   "file": "_sitebuiltins.py",
+   "sha256": "b9388bc1d6d12ed6be12da420ab1feca40f99c0e33ec315d92b1e01cb69b25bc",
+   "bytes": 3128,
+   "tokens": 762
+  },
+  {
+   "file": "_strptime.py",
+   "sha256": "5f37a409d545797ab31bed744e7629a78ac65b45eb0f327a8ee8819c52d78f17",
+   "bytes": 29383,
+   "tokens": 7739
+  },
+  {
+   "file": "_sysconfigdata__linux_x86_64-linux-gnu.py",
+   "sha256": "ca73fd2192c8164e4a3a8f314016ebc26c5da41d9dcc41481704c8a0a9ec4537",
+   "bytes": 47376,
+   "tokens": 17987
+  },
+  {
+   "file": "_sysconfigdata__x86_64-linux-gnu.py",
+   "sha256": "ca73fd2192c8164e4a3a8f314016ebc26c5da41d9dcc41481704c8a0a9ec4537",
+   "bytes": 47376,
+   "tokens": 17987
+  },
+  {
+   "file": "_threading_local.py",
+   "sha256": "c28a8fee862741e9173f5a76f0c680761b5f61e1dd9f2ca479b02c69c9ada4e7",
+   "bytes": 4363,
+   "tokens": 1078
+  },
+  {
+   "file": "_weakrefset.py",
+   "sha256": "91895a451d06e9f521a1171b31b9b19bc9740f35af00d4fa106338ab7167c9ac",
+   "bytes": 5893,
+   "tokens": 1469
+  },
+  {
+   "file": "abc.py",
+   "sha256": "e558702a95cdce3febd289da021715d2b92bc43995b8a1bc58dfa1c3d8010287",
+   "bytes": 6538,
+   "tokens": 1487
+  },
+  {
+   "file": "antigravity.py",
+   "sha256": "8a5ee63e1b79ba2733e7ff4290b6eefea60e7f3a1ccb6bb519535aaf92b44967",
+   "bytes": 500,
+   "tokens": 221
+  },
+  {
+   "file": "argparse.py",
+   "sha256": "536e65df75b5dae9d11d0fec05cb1faee86b41cf9fba4e7f2c3f54dbd7405488",
+   "bytes": 102058,
+   "tokens": 21740
+  },
+  {
+   "file": "ast.py",
+   "sha256": "7514eb7df98b1b76eab160ca2a83e6e9a9f3219a4659808cd9fd278b524ede1b",
+   "bytes": 65339,
+   "tokens": 15690
+  },
+  {
+   "file": "base64.py",
+   "sha256": "4899f39b88d4df432713f4a605747b0b737fe8bce3e654b574cad1e1f76c1abe",
+   "bytes": 21629,
+   "tokens": 6407
+  },
+  {
+   "file": "bdb.py",
+   "sha256": "cdc8eb40d7eaa0582f2cc3c1be913a2ced073e1e1f950248ee364b0a9ae271ba",
+   "bytes": 35343,
+   "tokens": 8206
+  },
+  {
+   "file": "bisect.py",
+   "sha256": "f1cf7b85fc36b5da249813fc5ab97d9464f8cc1bc817f7146206fa2713e35999",
+   "bytes": 3423,
+   "tokens": 1002
+  },
+  {
+   "file": "bz2.py",
+   "sha256": "b217459e4c74ccb3da3a44b51dd335cfddcbe9d3014b3279dda1c1a7ca448c08",
+   "bytes": 11969,
+   "tokens": 2930
+  },
+  {
+   "file": "cProfile.py",
+   "sha256": "47d28ebd53a59c77e4f15c9324ea74cfd31e77df09b0a67dc6cbec5e6b51ff72",
+   "bytes": 6623,
+   "tokens": 1572
+  },
+  {
+   "file": "calendar.py",
+   "sha256": "519c59b7a52e45f9c8056ed8cc8cede5be4bfa16d2179c1db1b01688ac1935b3",
+   "bytes": 26077,
+   "tokens": 7197
+  },
+  {
+   "file": "cmd.py",
+   "sha256": "f591b34e16dc6616da89eb79b650e940d6e8b377a898d353ee26cdfcb4d9a033",
+   "bytes": 15316,
+   "tokens": 3465
+  }
+ ],
+ "ids_sha256": {
+  "2048": "2fdb2a6711eb630b72b4ee487e14a35b4a263fc8ac6a4fa353696a6e0fbcf6a7",
+  "8192": "eb626dbfc8b772863e0ea348fbb8b0b79abc445d4064f462f068f3ff205f3f6a",
+  "32768": "df381ccd4605c5a21ee3bd11ad35c94401335b7330bb386b3d133febefd2d38f",
+  "65536": "32115ef49c28df772b603519535f32066fc4fd989358fe51c5424509287ad513",
+  "131072": "7f82e714eb5103e00fc1ba40cd13c5390b2f8183cd625d5f9cf9bc8346000760",
+  "261888": "781dcb2a607908725848a85ed3b84532f58bb3f60e72b549efeae5cf003aab78",
+  "16384": "b79d3f699140c45ecc3b356a998ecaa40d8fd582dbdd4bf534e7201c149df2f2"
+ }
+}

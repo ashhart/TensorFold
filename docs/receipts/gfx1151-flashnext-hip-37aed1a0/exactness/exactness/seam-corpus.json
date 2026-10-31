@@ -1,0 +1,31 @@
+{
+ "python": "3.13.5",
+ "chars": 39999,
+ "files_used": [
+  {
+   "file": "__future__.py",
+   "sha256": "981d4c398849f9ebcab72300d9c1fe288fd6d7f28957b3b3fa3a493a5836d95c"
+  },
+  {
+   "file": "__hello__.py",
+   "sha256": "a8ce70b199497950f0f06def93115a6814daf1f961934457f59046909901487f"
+  },
+  {
+   "file": "_aix_support.py",
+   "sha256": "0982f187c62fbfc1e8d368c8eb4104b56df71009a6b2823565a699e7b4cd945c"
+  },
+  {
+   "file": "_android_support.py",
+   "sha256": "2010868fba48f4c92a317e807e34e3a0bd6d383a68f95a07152ad91ed6651636"
+  },
+  {
+   "file": "_apple_support.py",
+   "sha256": "3bde7533b66dafa0c755c92bf09b30932a723ca58905a3fac670d53e3149f47b"
+  },
+  {
+   "file": "_collections_abc.py",
+   "sha256": "2cfe340c4cf54077f054cd366a2c7a515e9ee8da7d8b3fa071251f280034756d"
+  }
+ ],
+ "text_sha256": "5bbfb9160196d715cf78402a789adf7478eb485477fa4b5390c1707804f620f3"
+}

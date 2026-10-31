@@ -1,0 +1,1 @@
+{"schema_version": 1, "context_window": 10240, "context_fitted": false, "device": {"active_bytes": 83111398848, "cache_bytes": 0, "peak_bytes": 83116795332, "peak_scope": "since_start_or_health_reset"}}

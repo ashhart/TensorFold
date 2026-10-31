@@ -1,0 +1,14 @@
+mem-base-r1 | 76.58 GiB on the device, 1 stream of 20544 positions, 1.14 GiB each; prompts in 1024-row chunks | 84292440064 84332322816 | ttft 46.471027742984006
+mem-base-r2 | 76.58 GiB on the device, 1 stream of 20544 positions, 1.14 GiB each; prompts in 1024-row chunks | 84292440064 84356018176 | ttft 46.46257960499497
+mem-new-default-r1 | 81.82 GiB on the device, 1 stream of 20544 positions, 0.74 GiB each; prompts in 4096-row chunks | 88832692224 112119701504 | ttft 30.735502470983192
+mem-new-default-r2 | 81.82 GiB on the device, 1 stream of 20544 positions, 0.74 GiB each; prompts in 4096-row chunks | 88832692224 112311951360 | ttft 30.823120265005855
+mem-new-mapped-cold-r1 | 81.82 GiB on the device, 1 stream of 20544 positions, 0.74 GiB each; prompts in 4096-row chunks | 88832692224 84365791232 | ttft 46.297117879992584
+mem-new-mapped-cold-r2 | 81.82 GiB on the device, 1 stream of 20544 positions, 0.74 GiB each; prompts in 4096-row chunks | 88832692224 84386779136 | ttft 46.203377994999755
+mem-new-mapped-warm-r1 | 81.82 GiB on the device, 1 stream of 20544 positions, 0.74 GiB each; prompts in 4096-row chunks | 88832692224 84412772352 | ttft 30.92277264900622
+mem-new-mapped-warm-r2 | 81.82 GiB on the device, 1 stream of 20544 positions, 0.74 GiB each; prompts in 4096-row chunks | 88832692224 84432424960 | ttft 30.93969676399138
+mem-new-step1024-mapped-r1 | 77.36 GiB on the device, 1 stream of 20544 positions, 0.74 GiB each; prompts in 1024-row chunks | 84038602752 84413345792 | ttft 34.125737205991754
+mem-new-step1024-mapped-r2 | 77.36 GiB on the device, 1 stream of 20544 positions, 0.74 GiB each; prompts in 1024-row chunks | 84038602752 84431228928 | ttft 34.12385592798819
+mem-new-step1024-r1 | 77.36 GiB on the device, 1 stream of 20544 positions, 0.74 GiB each; prompts in 1024-row chunks | 84038602752 110197727232 | ttft 33.89995566298603
+mem-new-step1024-r2 | 77.36 GiB on the device, 1 stream of 20544 positions, 0.74 GiB each; prompts in 1024-row chunks | 84038602752 111990099968 | ttft 33.83586324600037
+mem-new-step20480-r1 | 105.63 GiB on the device, 1 stream of 20544 positions, 0.74 GiB each; prompts in 20480-row chunks | 114392780800 112203182080 | ttft 29.693808502983302
+mem-new-step20480-r2 | 105.63 GiB on the device, 1 stream of 20544 positions, 0.74 GiB each; prompts in 20480-row chunks | 114392780800 112598904832 | ttft 29.839465764991473

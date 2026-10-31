@@ -1,0 +1,84 @@
+hip-kernel-test
++- run test w
+  argmax in parts: 180 cases, the one-block argmax's ids
+ORDER 27b gate_up m2048 n17408 k5120: 92c5bbcddf208589 92c5bbcddf208589
+ORDER 27b down m2048 n5120 k17408: cd67a9736943678c cd67a9736943678c
+ORDER 27b linear qkv m2048 n10240 k5120: ab09bd787330b565 ab09bd787330b565
+ORDER 27b z m2048 n6144 k5120: b731da1432f3df50 b731da1432f3df50
+ORDER 27b out_proj m2048 n5120 k6144: f6bd1aee7bbe3bbe f6bd1aee7bbe3bbe
+ORDER 27b q gate m2048 n12288 k5120: af06823f408f27d2 af06823f408f27d2
+ORDER 27b kv m2048 n1024 k5120: 35f71217190e92c1 35f71217190e92c1
+ORDER 27b b a m2048 n48 k5120: f4c5b05cb8940587 f4c5b05cb8940587
+ORDER edge rows m1000 n1024 k5120: 1367a2317b13dc43 1367a2317b13dc43
+ORDER edge band m1300 n6144 k5120: 675acd232e9db638 675acd232e9db638
+ORDER edge both m300 n1001 k2112: a037749cdf784c40 a037749cdf784c40
+ORDER edge column m2048 n130 k2048: 6de49bec6f65559f 6de49bec6f65559f
+ORDER one row block m100 n1001 k2112: aea01224bcdbc03c aea01224bcdbc03c
+ORDER one column block m300 n48 k2112: 6bbe77378a8650cf 6bbe77378a8650cf
+ORDER 35b routed gate_up m2048 n1024 k2048: a26e492382043f24 a26e492382043f24
+ORDER 8-bit m1300 n4096 k2048: 7dcfc58f9684ef11 7dcfc58f9684ef11
+  nemotron moe pick (bf16): pick 0.00e0, weight 3.22e-8, out 0.00e0 of bound 1.56e-2, bad 0
+  nemotron moe pick (bf16): pick 0.00e0, weight 3.73e-8, out 0.00e0 of bound 1.56e-2, bad 0
+  nemotron moe pick (bf16): pick 0.00e0, weight 8.02e-8, out 0.00e0 of bound 1.56e-2, bad 0
+  nemotron moe pick (bf16): pick 0.00e0, weight 3.23e-8, out 0.00e0 of bound 1.56e-2, bad 0
+  nemotron moe pick (bf16): pick 0.00e0, weight 1.27e-8, out 0.00e0 of bound 1.56e-2, bad 0
+  nemotron moe layer (bf16): pick 0.00e0, weight 3.07e-8, out 5.47e-3 of bound 1.56e-2, bad 0
+  nemotron moe layer (bf16): pick 0.00e0, weight 8.80e-8, out 5.51e-3 of bound 1.56e-2, bad 0
+  nemotron moe layer lightning (bf16): pick 0.00e0, weight 2.17e-8, out 3.87e-3 of bound 1.56e-2, bad 0
+  nemotron moe no bias (bf16): pick 2.03e-1, weight 3.00e-8, out 4.33e-3 of bound 1.56e-2, bad 0
+  nemotron moe no norm (bf16): pick 0.00e0, weight 7.61e-1, out 3.69e0 of bound 1.56e-2, bad 0
+  nemotron moe: prompt rows equal to decode rows: 13 of 16
+  nemotron moe two ranks: worst 3.00e-3 of the row's largest
+  nemotron rank pick: 144 cases, the same bytes as the pass a pick at a time
+  nemotron pick, 1 rows: rank 3.72 us a launch, pass 5.22 us (back to back)
+  nemotron pick, 4 rows: rank 3.73 us a launch, pass 5.23 us (back to back)
+  nemotron pick, 16 rows: rank 3.74 us a launch, pass 5.24 us (back to back)
+  nemotron pick, 64 rows: rank 4.54 us a launch, pass 5.27 us (back to back)
+nemotron attention q x1: 1 keys: planned 0.00e0, paged tile 0.00e0 of the float64 scale
+nemotron attention q x1: 2 keys: planned 1.14e-7, paged tile 1.37e-3 of the float64 scale
+nemotron attention q x1: 63 keys: planned 3.55e-7, paged tile 1.70e-3 of the float64 scale
+nemotron attention q x1: 64 keys: planned 3.26e-7, paged tile 1.79e-3 of the float64 scale
+nemotron attention q x1: 65 keys: planned 3.79e-7, paged tile 1.92e-3 of the float64 scale
+nemotron attention q x1: 127 keys: planned 4.50e-7, paged tile 1.87e-3 of the float64 scale
+nemotron attention q x1: 128 keys: planned 3.44e-7, paged tile 1.78e-3 of the float64 scale
+nemotron attention q x1: 129 keys: planned 4.12e-7, paged tile 1.90e-3 of the float64 scale
+nemotron attention q x1: 1000 keys: planned 3.13e-7, paged tile 1.78e-3 of the float64 scale
+nemotron attention q x1: 4097 keys: planned 2.78e-7, paged tile 1.61e-3 of the float64 scale
+nemotron attention q x1: 16385 keys: planned 6.60e-7, paged tile 2.47e-3 of the float64 scale
+nemotron attention q x1: 65536 keys: planned 9.68e-7, paged tile 2.01e-3 of the float64 scale
+nemotron attention q x16: 1 keys: planned 0.00e0, paged tile 0.00e0 of the float64 scale
+nemotron attention q x16: 2 keys: planned 1.54e-7, paged tile 5.31e-4 of the float64 scale
+nemotron attention q x16: 63 keys: planned 4.95e-7, paged tile 8.04e-4 of the float64 scale
+nemotron attention q x16: 64 keys: planned 4.29e-7, paged tile 9.19e-4 of the float64 scale
+nemotron attention q x16: 65 keys: planned 5.37e-7, paged tile 1.04e-3 of the float64 scale
+nemotron attention q x16: 127 keys: planned 5.04e-7, paged tile 9.51e-4 of the float64 scale
+nemotron attention q x16: 128 keys: planned 4.29e-7, paged tile 1.03e-3 of the float64 scale
+nemotron attention q x16: 129 keys: planned 5.75e-7, paged tile 1.15e-3 of the float64 scale
+nemotron attention q x16: 1000 keys: planned 5.21e-7, paged tile 8.50e-4 of the float64 scale
+nemotron attention q x16: 4097 keys: planned 5.71e-7, paged tile 8.61e-4 of the float64 scale
+nemotron attention q x16: 16385 keys: planned 7.64e-7, paged tile 1.05e-3 of the float64 scale
+nemotron attention q x16: 65536 keys: planned 1.38e-6, paged tile 6.11e-4 of the float64 scale
+  nemotron planned walk in the activation type and in one block: the casts' bytes
+  nemotron planned key write from the activation type: the cast keys' bytes
+  nemotron moe sum + add + rms: 72 cases, the same bytes as tf_nemo_combine, tf_add and tf_rms
+  nemotron add + rms: 128 cases, the same bytes as tf_add and tf_rms
+  nemotron add + rms, 1 rows: 3.83 us merged, 8.09 us as tf_add and tf_rms, 2.13 and 5.95 alone (back to back)
+  nemotron add + rms, 4 rows: 3.85 us merged, 8.14 us as tf_add and tf_rms, 2.15 and 5.98 alone (back to back)
+  nemotron mamba window: 48 cases, the bytes of the mixer a row at a time
+  nemotron mamba window, 1 rows: 18.55 us the four launches, 16.09 us the window (back to back)
+  nemotron mamba window, 4 rows: 22.10 us the four launches, 19.64 us the window (back to back)
+  nemotron relu2 epilogue: 36 layers and 12 shared ups by the epilogue, the same bytes
+  nemotron moe layer, 1 rows: 228.0 us with the relu^2 epilogue, 241.8 us without (back to back)
+  nemotron moe layer, 2 rows: 404.9 us with the relu^2 epilogue, 404.9 us without (back to back)
+  nemotron moe layer, 3 rows: 519.3 us with the relu^2 epilogue, 518.7 us without (back to back)
+  nemotron moe layer, 4 rows: 643.8 us with the relu^2 epilogue, 644.1 us without (back to back)
+  nemotron moe layer, 8 rows: 1024.1 us with the relu^2 epilogue, 1023.9 us without (back to back)
+  nemotron fc1 and shared up in one launch: 8 rows, the bytes of two launches
+  prompt plan rows 8192 at the bound: 1212 live items, z 1212 (capacity 11777)
+  prompt plan rows 8192: 863 live items, z 1212 (capacity 11777)
+  prompt plan rows 17715 at the bound: 2031 live items, z 2031 (capacity 24871)
+  prompt plan rows 17715: 1790 live items, z 2031 (capacity 24871)
+  prompt plan rows 20480 at the bound: 2268 live items, z 2268 (capacity 28673)
+  prompt plan rows 20480: 1912 live items, z 2268 (capacity 28673)
+failed command: ./.zig-cache/o/0f150f33db2bc1aaa5b5fb6753e51d3c/test --cache-dir=./.zig-cache --seed=0x279f6257 --listen=-
+

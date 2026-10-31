@@ -1,0 +1,1172 @@
+{
+ "replacements_per_file": {
+  "hash-new.log": {
+   "replacements": 0
+  },
+  "hash-base.log": {
+   "replacements": 0
+  },
+  "logs/session-01.log": {
+   "replacements": 0
+  },
+  "environment.json": {
+   "replacements": 0
+  },
+  "provenance.json": {
+   "replacements": 0
+  },
+  "checkpoint.json": {
+   "replacements": 0
+  },
+  "steps.tsv": {
+   "replacements": 0
+  },
+  "summary.json": {
+   "replacements": 0
+  },
+  "summary.md": {
+   "replacements": 0
+  },
+  "logs/session-02.log": {
+   "replacements": 0
+  },
+  "logs/session-03.log": {
+   "replacements": 0
+  },
+  "logs/session-04.log": {
+   "replacements": 0
+  },
+  "logs/session-05.log": {
+   "replacements": 0
+  },
+  "logs/session-06.log": {
+   "replacements": 0
+  },
+  "prompts/corpus.json": {
+   "replacements": 0
+  },
+  "prompts/request-131072.json": {
+   "replacements": 0
+  },
+  "prompts/request-16384.json": {
+   "replacements": 0
+  },
+  "prompts/request-2048.json": {
+   "replacements": 0
+  },
+  "prompts/request-261888.json": {
+   "replacements": 0
+  },
+  "prompts/request-32768.json": {
+   "replacements": 0
+  },
+  "prompts/request-65536.json": {
+   "replacements": 0
+  },
+  "prompts/request-8192.json": {
+   "replacements": 0
+  },
+  "prompts/tokens-131072.json": {
+   "replacements": 0
+  },
+  "prompts/tokens-16384.json": {
+   "replacements": 0
+  },
+  "prompts/tokens-2048.json": {
+   "replacements": 0
+  },
+  "prompts/tokens-261888.json": {
+   "replacements": 0
+  },
+  "prompts/tokens-32768.json": {
+   "replacements": 0
+  },
+  "prompts/tokens-65536.json": {
+   "replacements": 0
+  },
+  "prompts/tokens-8192.json": {
+   "replacements": 0
+  },
+  "runs/cold-new-2048-r1.json": {
+   "replacements": 0
+  },
+  "runs/cold-base-2048-r1.json": {
+   "replacements": 0
+  },
+  "runs/cold-new-2048-r2.json": {
+   "replacements": 0
+  },
+  "runs/cold-base-2048-r2.json": {
+   "replacements": 0
+  },
+  "runs/cold-new-8192-r1.json": {
+   "replacements": 0
+  },
+  "runs/cold-base-8192-r1.json": {
+   "replacements": 0
+  },
+  "runs/cold-new-8192-r2.json": {
+   "replacements": 0
+  },
+  "runs/cold-base-8192-r2.json": {
+   "replacements": 0
+  },
+  "runs/cold-new-32768-r1.json": {
+   "replacements": 0
+  },
+  "runs/cold-base-32768-r1.json": {
+   "replacements": 0
+  },
+  "runs/cold-new-32768-r2.json": {
+   "replacements": 0
+  },
+  "runs/cold-base-32768-r2.json": {
+   "replacements": 0
+  },
+  "runs/cold-new-65536-r1.json": {
+   "replacements": 0
+  },
+  "runs/cold-base-65536-r1.json": {
+   "replacements": 0
+  },
+  "runs/cold-new-65536-r2.json": {
+   "replacements": 0
+  },
+  "runs/cold-base-65536-r2.json": {
+   "replacements": 0
+  },
+  "runs/cold-new-131072-r1.json": {
+   "replacements": 0
+  },
+  "runs/cold-base-131072-r1.json": {
+   "replacements": 0
+  },
+  "runs/cold-new-131072-r2.json": {
+   "replacements": 0
+  },
+  "runs/cold-base-131072-r2.json": {
+   "replacements": 0
+  },
+  "runs/cold-new-261888-r1.json": {
+   "replacements": 0
+  },
+  "runs/cold-base-261888-r1.json": {
+   "replacements": 0
+  },
+  "runs/cold-new-261888-r2.json": {
+   "replacements": 0
+  },
+  "runs/cold-base-261888-r2.json": {
+   "replacements": 0
+  },
+  "runs/decode-new-r1.json": {
+   "replacements": 0
+  },
+  "runs/decode-base-r1.json": {
+   "replacements": 0
+  },
+  "runs/decode-new-r2.json": {
+   "replacements": 0
+  },
+  "runs/decode-base-r2.json": {
+   "replacements": 0
+  },
+  "runs/d16k-serial-new-r1.json": {
+   "replacements": 0
+  },
+  "runs/d16k-serial-base-r1.json": {
+   "replacements": 0
+  },
+  "runs/d16k-drafts-new-r1.json": {
+   "replacements": 0
+  },
+  "runs/d16k-drafts-base-r1.json": {
+   "replacements": 0
+  },
+  "runs/d16k-serial-new-r2.json": {
+   "replacements": 0
+  },
+  "runs/d16k-serial-base-r2.json": {
+   "replacements": 0
+  },
+  "runs/d16k-drafts-new-r2.json": {
+   "replacements": 0
+  },
+  "runs/d16k-drafts-base-r2.json": {
+   "replacements": 0
+  },
+  "runs/mem-new-default-r1.json": {
+   "replacements": 0
+  },
+  "runs/mem-new-step1024-r1.json": {
+   "replacements": 0
+  },
+  "runs/mem-new-step20480-r1.json": {
+   "replacements": 0
+  },
+  "runs/mem-new-mapped-cold-r1.json": {
+   "replacements": 0
+  },
+  "runs/mem-new-mapped-warm-r1.json": {
+   "replacements": 0
+  },
+  "runs/mem-new-step1024-mapped-r1.json": {
+   "replacements": 0
+  },
+  "runs/mem-base-r1.json": {
+   "replacements": 0
+  },
+  "runs/mem-new-default-r2.json": {
+   "replacements": 0
+  },
+  "runs/mem-new-step1024-r2.json": {
+   "replacements": 0
+  },
+  "runs/mem-new-step20480-r2.json": {
+   "replacements": 0
+  },
+  "runs/mem-new-mapped-cold-r2.json": {
+   "replacements": 0
+  },
+  "runs/mem-new-mapped-warm-r2.json": {
+   "replacements": 0
+  },
+  "runs/mem-new-step1024-mapped-r2.json": {
+   "replacements": 0
+  },
+  "runs/mem-base-r2.json": {
+   "replacements": 0
+  },
+  "cold/new-2048-r1.json": {
+   "replacements": 0
+  },
+  "cold/base-2048-r1.json": {
+   "replacements": 0
+  },
+  "cold/new-2048-r2.json": {
+   "replacements": 0
+  },
+  "cold/base-2048-r2.json": {
+   "replacements": 0
+  },
+  "cold/new-8192-r1.json": {
+   "replacements": 0
+  },
+  "cold/base-8192-r1.json": {
+   "replacements": 0
+  },
+  "cold/new-8192-r2.json": {
+   "replacements": 0
+  },
+  "cold/base-8192-r2.json": {
+   "replacements": 0
+  },
+  "cold/new-32768-r1.json": {
+   "replacements": 0
+  },
+  "cold/base-32768-r1.json": {
+   "replacements": 0
+  },
+  "cold/new-32768-r2.json": {
+   "replacements": 0
+  },
+  "cold/base-32768-r2.json": {
+   "replacements": 0
+  },
+  "cold/new-65536-r1.json": {
+   "replacements": 0
+  },
+  "cold/base-65536-r1.json": {
+   "replacements": 0
+  },
+  "cold/new-65536-r2.json": {
+   "replacements": 0
+  },
+  "cold/base-65536-r2.json": {
+   "replacements": 0
+  },
+  "cold/new-131072-r1.json": {
+   "replacements": 0
+  },
+  "cold/base-131072-r1.json": {
+   "replacements": 0
+  },
+  "cold/new-131072-r2.json": {
+   "replacements": 0
+  },
+  "cold/base-131072-r2.json": {
+   "replacements": 0
+  },
+  "cold/new-261888-r1.json": {
+   "replacements": 0
+  },
+  "cold/base-261888-r1.json": {
+   "replacements": 0
+  },
+  "cold/new-261888-r2.json": {
+   "replacements": 0
+  },
+  "cold/base-261888-r2.json": {
+   "replacements": 0
+  },
+  "decode/openai-new-r1.json": {
+   "replacements": 0
+  },
+  "decode/concurrent-new-r1.json": {
+   "replacements": 0
+  },
+  "decode/openai-base-r1.json": {
+   "replacements": 0
+  },
+  "decode/concurrent-base-r1.json": {
+   "replacements": 0
+  },
+  "decode/openai-new-r2.json": {
+   "replacements": 0
+  },
+  "decode/concurrent-new-r2.json": {
+   "replacements": 0
+  },
+  "decode/openai-base-r2.json": {
+   "replacements": 0
+  },
+  "decode/concurrent-base-r2.json": {
+   "replacements": 0
+  },
+  "decode/coding-serial-new-r1.json": {
+   "replacements": 0
+  },
+  "decode/coding-serial-base-r1.json": {
+   "replacements": 0
+  },
+  "decode/coding-drafts-new-r1.json": {
+   "replacements": 0
+  },
+  "decode/coding-drafts-base-r1.json": {
+   "replacements": 0
+  },
+  "decode/coding-serial-new-r2.json": {
+   "replacements": 0
+  },
+  "decode/coding-serial-base-r2.json": {
+   "replacements": 0
+  },
+  "decode/coding-drafts-new-r2.json": {
+   "replacements": 0
+  },
+  "decode/coding-drafts-base-r2.json": {
+   "replacements": 0
+  },
+  "memory-ab/mem-new-default-r1.json": {
+   "replacements": 0
+  },
+  "memory-ab/mem-new-step1024-r1.json": {
+   "replacements": 0
+  },
+  "memory-ab/mem-new-step20480-r1.json": {
+   "replacements": 0
+  },
+  "memory-ab/mem-new-mapped-cold-r1.json": {
+   "replacements": 0
+  },
+  "memory-ab/mem-new-mapped-warm-r1.json": {
+   "replacements": 0
+  },
+  "memory-ab/mem-new-step1024-mapped-r1.json": {
+   "replacements": 0
+  },
+  "memory-ab/mem-base-r1.json": {
+   "replacements": 0
+  },
+  "memory-ab/mem-new-default-r2.json": {
+   "replacements": 0
+  },
+  "memory-ab/mem-new-step1024-r2.json": {
+   "replacements": 0
+  },
+  "memory-ab/mem-new-step20480-r2.json": {
+   "replacements": 0
+  },
+  "memory-ab/mem-new-mapped-cold-r2.json": {
+   "replacements": 0
+  },
+  "memory-ab/mem-new-mapped-warm-r2.json": {
+   "replacements": 0
+  },
+  "memory-ab/mem-new-step1024-mapped-r2.json": {
+   "replacements": 0
+  },
+  "memory-ab/mem-base-r2.json": {
+   "replacements": 0
+  },
+  "memory-ab/summary.txt": {
+   "replacements": 0
+  },
+  "record_http.py": {
+   "replacements": 0
+  },
+  "logs/cold-base-131072-r1.log": {
+   "replacements": 0
+  },
+  "logs/cold-base-131072-r2.log": {
+   "replacements": 0
+  },
+  "logs/cold-base-2048-r1.log": {
+   "replacements": 0
+  },
+  "logs/cold-base-2048-r2.log": {
+   "replacements": 0
+  },
+  "logs/cold-base-261888-r1.log": {
+   "replacements": 0
+  },
+  "logs/cold-base-261888-r2.log": {
+   "replacements": 0
+  },
+  "logs/cold-base-32768-r1.log": {
+   "replacements": 0
+  },
+  "logs/cold-base-32768-r2.log": {
+   "replacements": 0
+  },
+  "logs/cold-base-65536-r1.log": {
+   "replacements": 0
+  },
+  "logs/cold-base-65536-r2.log": {
+   "replacements": 0
+  },
+  "logs/cold-base-8192-r1.log": {
+   "replacements": 0
+  },
+  "logs/cold-base-8192-r2.log": {
+   "replacements": 0
+  },
+  "logs/cold-new-131072-r1.log": {
+   "replacements": 0
+  },
+  "logs/cold-new-131072-r2.log": {
+   "replacements": 0
+  },
+  "logs/cold-new-2048-r1.log": {
+   "replacements": 0
+  },
+  "logs/cold-new-2048-r2.log": {
+   "replacements": 0
+  },
+  "logs/cold-new-261888-r1.log": {
+   "replacements": 0
+  },
+  "logs/cold-new-261888-r2.log": {
+   "replacements": 0
+  },
+  "logs/cold-new-32768-r1.log": {
+   "replacements": 0
+  },
+  "logs/cold-new-32768-r2.log": {
+   "replacements": 0
+  },
+  "logs/cold-new-65536-r1.log": {
+   "replacements": 0
+  },
+  "logs/cold-new-65536-r2.log": {
+   "replacements": 0
+  },
+  "logs/cold-new-8192-r1.log": {
+   "replacements": 0
+  },
+  "logs/cold-new-8192-r2.log": {
+   "replacements": 0
+  },
+  "logs/concurrent-base-r1.log": {
+   "replacements": 0
+  },
+  "logs/concurrent-base-r2.log": {
+   "replacements": 0
+  },
+  "logs/concurrent-new-r1.log": {
+   "replacements": 0
+  },
+  "logs/concurrent-new-r2.log": {
+   "replacements": 0
+  },
+  "logs/d16k-drafts-base-r1.log": {
+   "replacements": 0
+  },
+  "logs/d16k-drafts-base-r2.log": {
+   "replacements": 0
+  },
+  "logs/d16k-drafts-new-r1.log": {
+   "replacements": 0
+  },
+  "logs/d16k-drafts-new-r2.log": {
+   "replacements": 0
+  },
+  "logs/d16k-serial-base-r1.log": {
+   "replacements": 0
+  },
+  "logs/d16k-serial-base-r2.log": {
+   "replacements": 0
+  },
+  "logs/d16k-serial-new-r1.log": {
+   "replacements": 0
+  },
+  "logs/d16k-serial-new-r2.log": {
+   "replacements": 0
+  },
+  "logs/mem-base-r1.log": {
+   "replacements": 0
+  },
+  "logs/mem-base-r2.log": {
+   "replacements": 0
+  },
+  "logs/mem-new-default-r1.log": {
+   "replacements": 0
+  },
+  "logs/mem-new-default-r2.log": {
+   "replacements": 0
+  },
+  "logs/mem-new-mapped-cold-r1.log": {
+   "replacements": 0
+  },
+  "logs/mem-new-mapped-cold-r2.log": {
+   "replacements": 0
+  },
+  "logs/mem-new-mapped-warm-r1.log": {
+   "replacements": 0
+  },
+  "logs/mem-new-mapped-warm-r2.log": {
+   "replacements": 0
+  },
+  "logs/mem-new-step1024-mapped-r1.log": {
+   "replacements": 0
+  },
+  "logs/mem-new-step1024-mapped-r2.log": {
+   "replacements": 0
+  },
+  "logs/mem-new-step1024-r1.log": {
+   "replacements": 0
+  },
+  "logs/mem-new-step1024-r2.log": {
+   "replacements": 0
+  },
+  "logs/mem-new-step20480-r1.log": {
+   "replacements": 0
+  },
+  "logs/mem-new-step20480-r2.log": {
+   "replacements": 0
+  },
+  "logs/openai-base-r1.log": {
+   "replacements": 0
+  },
+  "logs/openai-base-r2.log": {
+   "replacements": 0
+  },
+  "logs/openai-new-r1.log": {
+   "replacements": 0
+  },
+  "logs/openai-new-r2.log": {
+   "replacements": 0
+  },
+  "logs/server-cold-base-131072-r1.log": {
+   "replacements": 0
+  },
+  "memory/cold-base-131072-r1-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/cold-base-131072-r1-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/cold-base-131072-r1-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-cold-base-131072-r2.log": {
+   "replacements": 0
+  },
+  "memory/cold-base-131072-r2-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/cold-base-131072-r2-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/cold-base-131072-r2-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-cold-base-2048-r1.log": {
+   "replacements": 0
+  },
+  "memory/cold-base-2048-r1-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/cold-base-2048-r1-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/cold-base-2048-r1-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-cold-base-2048-r2.log": {
+   "replacements": 0
+  },
+  "memory/cold-base-2048-r2-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/cold-base-2048-r2-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/cold-base-2048-r2-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-cold-base-261888-r1.log": {
+   "replacements": 0
+  },
+  "memory/cold-base-261888-r1-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/cold-base-261888-r1-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/cold-base-261888-r1-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-cold-base-261888-r2.log": {
+   "replacements": 0
+  },
+  "memory/cold-base-261888-r2-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/cold-base-261888-r2-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/cold-base-261888-r2-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-cold-base-32768-r1.log": {
+   "replacements": 0
+  },
+  "memory/cold-base-32768-r1-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/cold-base-32768-r1-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/cold-base-32768-r1-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-cold-base-32768-r2.log": {
+   "replacements": 0
+  },
+  "memory/cold-base-32768-r2-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/cold-base-32768-r2-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/cold-base-32768-r2-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-cold-base-65536-r1.log": {
+   "replacements": 0
+  },
+  "memory/cold-base-65536-r1-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/cold-base-65536-r1-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/cold-base-65536-r1-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-cold-base-65536-r2.log": {
+   "replacements": 0
+  },
+  "memory/cold-base-65536-r2-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/cold-base-65536-r2-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/cold-base-65536-r2-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-cold-base-8192-r1.log": {
+   "replacements": 0
+  },
+  "memory/cold-base-8192-r1-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/cold-base-8192-r1-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/cold-base-8192-r1-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-cold-base-8192-r2.log": {
+   "replacements": 0
+  },
+  "memory/cold-base-8192-r2-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/cold-base-8192-r2-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/cold-base-8192-r2-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-cold-new-131072-r1.log": {
+   "replacements": 0
+  },
+  "memory/cold-new-131072-r1-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/cold-new-131072-r1-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/cold-new-131072-r1-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-cold-new-131072-r2.log": {
+   "replacements": 0
+  },
+  "memory/cold-new-131072-r2-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/cold-new-131072-r2-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/cold-new-131072-r2-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-cold-new-2048-r1.log": {
+   "replacements": 0
+  },
+  "memory/cold-new-2048-r1-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/cold-new-2048-r1-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/cold-new-2048-r1-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-cold-new-2048-r2.log": {
+   "replacements": 0
+  },
+  "memory/cold-new-2048-r2-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/cold-new-2048-r2-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/cold-new-2048-r2-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-cold-new-261888-r1.log": {
+   "replacements": 0
+  },
+  "memory/cold-new-261888-r1-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/cold-new-261888-r1-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/cold-new-261888-r1-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-cold-new-261888-r2.log": {
+   "replacements": 0
+  },
+  "memory/cold-new-261888-r2-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/cold-new-261888-r2-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/cold-new-261888-r2-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-cold-new-32768-r1.log": {
+   "replacements": 0
+  },
+  "memory/cold-new-32768-r1-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/cold-new-32768-r1-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/cold-new-32768-r1-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-cold-new-32768-r2.log": {
+   "replacements": 0
+  },
+  "memory/cold-new-32768-r2-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/cold-new-32768-r2-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/cold-new-32768-r2-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-cold-new-65536-r1.log": {
+   "replacements": 0
+  },
+  "memory/cold-new-65536-r1-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/cold-new-65536-r1-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/cold-new-65536-r1-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-cold-new-65536-r2.log": {
+   "replacements": 0
+  },
+  "memory/cold-new-65536-r2-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/cold-new-65536-r2-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/cold-new-65536-r2-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-cold-new-8192-r1.log": {
+   "replacements": 0
+  },
+  "memory/cold-new-8192-r1-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/cold-new-8192-r1-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/cold-new-8192-r1-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-cold-new-8192-r2.log": {
+   "replacements": 0
+  },
+  "memory/cold-new-8192-r2-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/cold-new-8192-r2-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/cold-new-8192-r2-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-d16k-drafts-base-r1.log": {
+   "replacements": 0
+  },
+  "memory/d16k-drafts-base-r1-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/d16k-drafts-base-r1-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/d16k-drafts-base-r1-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-d16k-drafts-base-r2.log": {
+   "replacements": 0
+  },
+  "memory/d16k-drafts-base-r2-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/d16k-drafts-base-r2-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/d16k-drafts-base-r2-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-d16k-drafts-new-r1.log": {
+   "replacements": 0
+  },
+  "memory/d16k-drafts-new-r1-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/d16k-drafts-new-r1-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/d16k-drafts-new-r1-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-d16k-drafts-new-r2.log": {
+   "replacements": 0
+  },
+  "memory/d16k-drafts-new-r2-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/d16k-drafts-new-r2-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/d16k-drafts-new-r2-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-d16k-serial-base-r1.log": {
+   "replacements": 0
+  },
+  "memory/d16k-serial-base-r1-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/d16k-serial-base-r1-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/d16k-serial-base-r1-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-d16k-serial-base-r2.log": {
+   "replacements": 0
+  },
+  "memory/d16k-serial-base-r2-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/d16k-serial-base-r2-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/d16k-serial-base-r2-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-d16k-serial-new-r1.log": {
+   "replacements": 0
+  },
+  "memory/d16k-serial-new-r1-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/d16k-serial-new-r1-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/d16k-serial-new-r1-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-d16k-serial-new-r2.log": {
+   "replacements": 0
+  },
+  "memory/d16k-serial-new-r2-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/d16k-serial-new-r2-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/d16k-serial-new-r2-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-decode-base-r1.log": {
+   "replacements": 0
+  },
+  "memory/decode-base-r1-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/decode-base-r1-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/decode-base-r1-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-decode-base-r2.log": {
+   "replacements": 0
+  },
+  "memory/decode-base-r2-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/decode-base-r2-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/decode-base-r2-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-decode-new-r1.log": {
+   "replacements": 0
+  },
+  "memory/decode-new-r1-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/decode-new-r1-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/decode-new-r1-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-decode-new-r2.log": {
+   "replacements": 0
+  },
+  "memory/decode-new-r2-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/decode-new-r2-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/decode-new-r2-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-mem-base-r1.log": {
+   "replacements": 0
+  },
+  "memory/mem-base-r1-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/mem-base-r1-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/mem-base-r1-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-mem-base-r2.log": {
+   "replacements": 0
+  },
+  "memory/mem-base-r2-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/mem-base-r2-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/mem-base-r2-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-mem-new-default-r1.log": {
+   "replacements": 0
+  },
+  "memory/mem-new-default-r1-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/mem-new-default-r1-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/mem-new-default-r1-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-mem-new-default-r2.log": {
+   "replacements": 0
+  },
+  "memory/mem-new-default-r2-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/mem-new-default-r2-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/mem-new-default-r2-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-mem-new-mapped-cold-r1.log": {
+   "replacements": 0
+  },
+  "memory/mem-new-mapped-cold-r1-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/mem-new-mapped-cold-r1-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/mem-new-mapped-cold-r1-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-mem-new-mapped-cold-r2.log": {
+   "replacements": 0
+  },
+  "memory/mem-new-mapped-cold-r2-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/mem-new-mapped-cold-r2-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/mem-new-mapped-cold-r2-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-mem-new-mapped-warm-r1.log": {
+   "replacements": 0
+  },
+  "memory/mem-new-mapped-warm-r1-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/mem-new-mapped-warm-r1-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/mem-new-mapped-warm-r1-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-mem-new-mapped-warm-r2.log": {
+   "replacements": 0
+  },
+  "memory/mem-new-mapped-warm-r2-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/mem-new-mapped-warm-r2-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/mem-new-mapped-warm-r2-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-mem-new-step1024-mapped-r1.log": {
+   "replacements": 0
+  },
+  "memory/mem-new-step1024-mapped-r1-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/mem-new-step1024-mapped-r1-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/mem-new-step1024-mapped-r1-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-mem-new-step1024-mapped-r2.log": {
+   "replacements": 0
+  },
+  "memory/mem-new-step1024-mapped-r2-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/mem-new-step1024-mapped-r2-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/mem-new-step1024-mapped-r2-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-mem-new-step1024-r1.log": {
+   "replacements": 0
+  },
+  "memory/mem-new-step1024-r1-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/mem-new-step1024-r1-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/mem-new-step1024-r1-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-mem-new-step1024-r2.log": {
+   "replacements": 0
+  },
+  "memory/mem-new-step1024-r2-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/mem-new-step1024-r2-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/mem-new-step1024-r2-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-mem-new-step20480-r1.log": {
+   "replacements": 0
+  },
+  "memory/mem-new-step20480-r1-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/mem-new-step20480-r1-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/mem-new-step20480-r1-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-mem-new-step20480-r2.log": {
+   "replacements": 0
+  },
+  "memory/mem-new-step20480-r2-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/mem-new-step20480-r2-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/mem-new-step20480-r2-metrics.txt": {
+   "replacements": 0
+  }
+ },
+ "rule": "machine-local paths, host and user names replaced by placeholders; request and reply values, token ids and hashes unchanged"
+}

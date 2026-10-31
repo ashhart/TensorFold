@@ -1,0 +1,146 @@
+{
+ "repo_id": "TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP",
+ "revision": "2b170fa6309d5d1ee380b35636075fac7945f286",
+ "files": {
+  ".gitattributes": {
+   "bytes": 1570,
+   "sha256": "34448b82c17d60fec9b65b1f093c115ddbaadc04beb1b0140b6bfed2e012a930"
+  },
+  "LICENSE": {
+   "bytes": 3235,
+   "sha256": "a0dc422560841fd68e06d974907f8b4c709bca44a67daad2b528437bdf676c08"
+  },
+  "README.md": {
+   "bytes": 10306,
+   "sha256": "06b1d4dea22a71b4848749607b9e511918465821cfe57dd2c0f9ba92bad20883"
+  },
+  "chat_template.jinja": {
+   "bytes": 8952,
+   "sha256": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041"
+  },
+  "config.json": {
+   "bytes": 5361,
+   "sha256": "4efd5f41c47e8de9f55c678df4a237cbbc78e4d517dad42a906889f7d94f79a2"
+  },
+  "generation_config.json": {
+   "bytes": 202,
+   "sha256": "e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e"
+  },
+  "merges.txt": {
+   "bytes": 3353259,
+   "sha256": "a9d356d7bdf1ef4949e3e748e95b8e10ad9d4e2e838eddc38a0a7b6b94d1db8d"
+  },
+  "model-00001-of-00022.safetensors": {
+   "bytes": 5283195887,
+   "sha256": null
+  },
+  "model-00002-of-00022.safetensors": {
+   "bytes": 5250035137,
+   "sha256": null
+  },
+  "model-00003-of-00022.safetensors": {
+   "bytes": 5250035154,
+   "sha256": null
+  },
+  "model-00004-of-00022.safetensors": {
+   "bytes": 5250035160,
+   "sha256": null
+  },
+  "model-00005-of-00022.safetensors": {
+   "bytes": 5250035164,
+   "sha256": null
+  },
+  "model-00006-of-00022.safetensors": {
+   "bytes": 5250035184,
+   "sha256": null
+  },
+  "model-00007-of-00022.safetensors": {
+   "bytes": 5067850140,
+   "sha256": null
+  },
+  "model-00008-of-00022.safetensors": {
+   "bytes": 5337131618,
+   "sha256": null
+  },
+  "model-00009-of-00022.safetensors": {
+   "bytes": 5337131558,
+   "sha256": null
+  },
+  "model-00010-of-00022.safetensors": {
+   "bytes": 4970130103,
+   "sha256": null
+  },
+  "model-00011-of-00022.safetensors": {
+   "bytes": 5341257482,
+   "sha256": null
+  },
+  "model-00012-of-00022.safetensors": {
+   "bytes": 4967968541,
+   "sha256": null
+  },
+  "model-00013-of-00022.safetensors": {
+   "bytes": 5337131651,
+   "sha256": null
+  },
+  "model-00014-of-00022.safetensors": {
+   "bytes": 5337131799,
+   "sha256": null
+  },
+  "model-00015-of-00022.safetensors": {
+   "bytes": 4970130195,
+   "sha256": null
+  },
+  "model-00016-of-00022.safetensors": {
+   "bytes": 5341257440,
+   "sha256": null
+  },
+  "model-00017-of-00022.safetensors": {
+   "bytes": 4967968481,
+   "sha256": null
+  },
+  "model-00018-of-00022.safetensors": {
+   "bytes": 5337131695,
+   "sha256": null
+  },
+  "model-00019-of-00022.safetensors": {
+   "bytes": 5337131801,
+   "sha256": null
+  },
+  "model-00020-of-00022.safetensors": {
+   "bytes": 4970130135,
+   "sha256": null
+  },
+  "model-00021-of-00022.safetensors": {
+   "bytes": 5341257436,
+   "sha256": null
+  },
+  "model-00022-of-00022.safetensors": {
+   "bytes": 3715570974,
+   "sha256": null
+  },
+  "model.safetensors.index.json": {
+   "bytes": 420813,
+   "sha256": "8848503860c7da8619fdc8d5e65201868f8f1d21d69d2e21166c95522379ff77"
+  },
+  "preprocessor_config.json": {
+   "bytes": 390,
+   "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516"
+  },
+  "qwen-logo.png": {
+   "bytes": 11203,
+   "sha256": "e56f3a62991f1d7475f0fd51b742bb293d9a228cd9dcbc1131b118d745e47cf3"
+  },
+  "tokenizer.json": {
+   "bytes": 12809320,
+   "sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3"
+  },
+  "tokenizer_config.json": {
+   "bytes": 17928,
+   "sha256": "b11349aafa7cdc6a320767cf7ceb29ed82f7eda5d65e8e0819e76f0ce947bf27"
+  },
+  "vocab.json": {
+   "bytes": 6722759,
+   "sha256": "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003"
+  }
+ }
+}

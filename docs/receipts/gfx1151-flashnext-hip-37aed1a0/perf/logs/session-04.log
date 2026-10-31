@@ -1,0 +1,85 @@
+pgrep: pattern that searches for process name longer than 15 characters will result in zero matches
+Try `pgrep -f' option to match against the complete command line.
+pgrep: pattern that searches for process name longer than 15 characters will result in zero matches
+Try `pgrep -f' option to match against the complete command line.
+pgrep: pattern that searches for process name longer than 15 characters will result in zero matches
+Try `pgrep -f' option to match against the complete command line.
+pgrep: pattern that searches for process name longer than 15 characters will result in zero matches
+Try `pgrep -f' option to match against the complete command line.
+pgrep: pattern that searches for process name longer than 15 characters will result in zero matches
+Try `pgrep -f' option to match against the complete command line.
+== 2026-10-31T13:53:58Z server decode-new-r1: context 16384, parallel 4, prompt cache 0 GiB 
+== 2026-10-31T13:54:28Z step openai-new-r1
+== 2026-10-31T13:55:03Z step openai-new-r1 rc=0
+== 2026-10-31T13:55:03Z step concurrent-new-r1
+== 2026-10-31T13:56:49Z step concurrent-new-r1 rc=0
+== 2026-10-31T13:56:52Z server decode-base-r1: context 16384, parallel 4, prompt cache 0 GiB 
+== 2026-10-31T13:57:05Z step openai-base-r1
+== 2026-10-31T13:57:52Z step openai-base-r1 rc=0
+== 2026-10-31T13:57:52Z step concurrent-base-r1
+== 2026-10-31T14:00:11Z step concurrent-base-r1 rc=0
+== 2026-10-31T14:00:12Z server decode-new-r2: context 16384, parallel 4, prompt cache 0 GiB 
+== 2026-10-31T14:00:39Z step openai-new-r2
+== 2026-10-31T14:01:15Z step openai-new-r2 rc=0
+== 2026-10-31T14:01:15Z step concurrent-new-r2
+== 2026-10-31T14:03:01Z step concurrent-new-r2 rc=0
+== 2026-10-31T14:03:04Z server decode-base-r2: context 16384, parallel 4, prompt cache 0 GiB 
+== 2026-10-31T14:03:21Z step openai-base-r2
+== 2026-10-31T14:04:09Z step openai-base-r2 rc=0
+== 2026-10-31T14:04:09Z step concurrent-base-r2
+== 2026-10-31T14:06:29Z step concurrent-base-r2 rc=0
+## Cold prefill (max_tokens 1, prompt cache off, fresh server per run)
+| arm | prompt tokens | context | prefill tok/s (median) | per round | TTFT (s) | wall (s) | cached tokens | GTT+VRAM peak over idle (GiB) | RSS peak (GiB) | server |
+|---|---|---|---|---|---|---|---|---|---|---|
+| new | 2,048 | 10240 | 673.7 | 681.4, 666.0 | 3.040 | 3.041 | 0 | 82.45 | 102.9 | ready |
+| base | 2,048 | 10240 | 293.2 | 290.0, 296.4 | 6.986 | 6.996 | 0 | 78.21 | 76.81 | ready |
+| new | 8,192 | 16384 | 558.2 | 559.2, 557.2 | 14.68 | 14.68 | 0 | 82.62 | 105.0 | ready |
+| base | 8,192 | 16384 | 261.3 | 261.3, 261.3 | 31.35 | 31.35 | 0 | 78.39 | 77.56 | ready |
+| new | 32,768 | 40960 | 513.5 | 512.6, 514.5 | 63.81 | 63.81 | 0 | 83.33 | 105.0 | ready |
+| base | 32,768 | 40960 | 260.4 | 260.1, 260.6 | 125.9 | 125.9 | 0 | 79.09 | 79.81 | ready |
+| new | 65,536 | 73728 | 496.7 | 497.2, 496.2 | 132.0 | 132.0 | 0 | 84.27 | 104.3 | ready |
+| base | 65,536 | 73728 | 259.3 | 259.3, 259.3 | 252.7 | 252.7 | 0 | 80.03 | 81.64 | ready |
+| new | 131,072 | 139264 | 471.6 | 471.7, 471.5 | 277.9 | 277.9 | 0 | 86.14 | 103.8 | ready |
+| base | 131,072 | 139264 | 258.0 | 258.1, 257.8 | 508.1 | 508.1 | 0 | 81.91 | 83.66 | ready |
+| new | 261,888 | 262144 | 437.3 | 437.5, 437.1 | 598.8 | 598.8 | 0 | 89.68 | 103.9 | ready |
+| base | 261,888 | 262144 | 244.8 | 245.1, 244.5 | 1,070 | 1,070 | 0 | 85.45 | 86.69 | ready |
+
+new / base, prefill tok/s
+| prompt tokens | new | base | ratio |
+|---|---|---|---|
+| 2,048 | 673.7 | 293.2 | 2.298 |
+| 8,192 | 558.2 | 261.3 | 2.136 |
+| 32,768 | 513.5 | 260.4 | 1.972 |
+| 65,536 | 496.7 | 259.3 | 1.915 |
+| 131,072 | 471.6 | 258.0 | 1.828 |
+| 261,888 | 437.3 | 244.8 | 1.786 |
+
+## Decode, one stream (bench_openai.py, 256 tokens, greedy, drafts on)
+| arm | prompt | decode tok/s (median) | per round | TTFT (s) | wall (s, derived) | spec-decode hit rate | GTT+VRAM peak (GiB) | RSS peak (GiB) |
+|---|---|---|---|---|---|---|---|---|
+| new | fibonacci-raw | 69.04 | 69.15, 68.92 | 0.09908 | 3.793 | 76.2 % | 84.38 | 104.7 |
+| new | gpu-chat-no-think | 55.92 | 55.44, 56.39 | 0.1684 | 4.729 | 76.2 % | 84.38 | 104.7 |
+| base | fibonacci-raw | 50.80 | 50.94, 50.66 | 0.1237 | 5.143 | 70.9 % | 81.33 | 76.80 |
+| base | gpu-chat-no-think | 45.47 | 46.23, 44.70 | 0.2396 | 5.848 | 70.9 % | 81.33 | 76.80 |
+
+## Prefill, serial decode and Default MTP decode (one public-code prompt, greedy, cache off, drafts as stated)
+| arm | decode | output tokens | decode tok/s (median) | every rep | TTFT (s) | wall (s) | spec-decode hit rate | GTT+VRAM peak over idle (GiB) | RSS peak (GiB) | cached tokens |
+|---|---|---|---|---|---|---|---|---|---|---|
+
+| arm | prefill tok/s (cold, 16K) | MTP token hash == serial's |
+|---|---|---|
+| new | - |  |
+| base | - |  |
+
+## Concurrent (bench_concurrent.py --levels 1,4 --alone --serial)
+| arm | prompt | streams | aggregate tok/s | per-stream tok/s | concurrent==alone (eq/ne/failed) | alone==draft:false (eq/ne/failed) | failed requests |
+|---|---|---|---|---|---|---|---|
+| new | chat | 1 | 57.20 | 57.20 | 6/0/0 | 2/0/0 | 0 |
+| new | chat | 4 | 99.75 | 25.85 | 24/0/0 | 2/0/0 | 0 |
+| new | code | 1 | 68.45 | 68.45 | 6/0/0 | 2/0/0 | 0 |
+| new | code | 4 | 117.4 | 30.00 | 24/0/0 | 2/0/0 | 0 |
+| base | chat | 1 | 45.30 | 45.30 | 6/0/0 | 2/0/0 | 0 |
+| base | chat | 4 | 72.95 | 18.65 | 24/0/0 | 2/0/0 | 0 |
+| base | code | 1 | 51.15 | 51.15 | 6/0/0 | 2/0/0 | 0 |
+| base | code | 4 | 89.65 | 22.70 | 24/0/0 | 2/0/0 | 0 |
+== 2026-10-31T14:06:30Z perf done; next: finalize.sh

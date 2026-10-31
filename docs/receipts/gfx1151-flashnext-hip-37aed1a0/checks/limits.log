@@ -1,0 +1,1006 @@
+PASS limits gfx1030 swiglu stream work list 4-bit 4x2: 161 VGPRs, 102 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream work list 4-bit 4x2: 163 VGPRs, 102 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream work list 4-bit 4x2: 163 VGPRs, 102 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream work list 4-bit 4x2: 163 VGPRs, 105 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream work list 4-bit 4x2: .usage = .{ .{ .vgprs = 161, .sgprs = 102, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 163, .sgprs = 102, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 163, .sgprs = 102, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 163, .sgprs = 105, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream work list 4-bit 4x4: 194 VGPRs, 107 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream work list 4-bit 4x4: 220 VGPRs, 107 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream work list 4-bit 4x4: 220 VGPRs, 107 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream work list 4-bit 4x4: 220 VGPRs, 107 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream work list 4-bit 4x4: .usage = .{ .{ .vgprs = 194, .sgprs = 107, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 220, .sgprs = 107, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 220, .sgprs = 107, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 220, .sgprs = 107, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 RMS norm tf_rms_rows: 58 VGPRs, 45 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1100 RMS norm tf_rms_rows: 43 VGPRs, 45 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1151 RMS norm tf_rms_rows: 42 VGPRs, 45 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1201 RMS norm tf_rms_rows: 42 VGPRs, 45 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+RECORD RMS norm tf_rms_rows: .usage = .{ .{ .vgprs = 58, .sgprs = 45, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 43, .sgprs = 45, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 42, .sgprs = 45, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 42, .sgprs = 45, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, }
+PASS limits gfx1030 RMS norm rms_kernel<__half>: 11 VGPRs, 18 SGPRs, 32772 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1100 RMS norm rms_kernel<__half>: 11 VGPRs, 18 SGPRs, 32772 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1151 RMS norm rms_kernel<__half>: 10 VGPRs, 18 SGPRs, 32772 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1201 RMS norm rms_kernel<__half>: 10 VGPRs, 18 SGPRs, 32772 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+RECORD RMS norm rms_kernel<__half>: .usage = .{ .{ .vgprs = 11, .sgprs = 18, .lds = 32772, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 11, .sgprs = 18, .lds = 32772, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 10, .sgprs = 18, .lds = 32772, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 10, .sgprs = 18, .lds = 32772, .private = 0, .bound = 256, .wave = 32 }, }
+PASS limits gfx1030 RMS norm rms_kernel<hip_bfloat16>: 11 VGPRs, 18 SGPRs, 32772 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1100 RMS norm rms_kernel<hip_bfloat16>: 11 VGPRs, 18 SGPRs, 32772 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1151 RMS norm rms_kernel<hip_bfloat16>: 10 VGPRs, 18 SGPRs, 32772 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1201 RMS norm rms_kernel<hip_bfloat16>: 10 VGPRs, 18 SGPRs, 32772 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+RECORD RMS norm rms_kernel<hip_bfloat16>: .usage = .{ .{ .vgprs = 11, .sgprs = 18, .lds = 32772, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 11, .sgprs = 18, .lds = 32772, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 10, .sgprs = 18, .lds = 32772, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 10, .sgprs = 18, .lds = 32772, .private = 0, .bound = 256, .wave = 32 }, }
+PASS limits gfx1030 mamba tf_mamba_conv: 27 VGPRs, 26 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1100 mamba tf_mamba_conv: 26 VGPRs, 26 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1151 mamba tf_mamba_conv: 26 VGPRs, 26 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1201 mamba tf_mamba_conv: 26 VGPRs, 26 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+RECORD mamba tf_mamba_conv: .usage = .{ .{ .vgprs = 27, .sgprs = 26, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 26, .sgprs = 26, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 26, .sgprs = 26, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 26, .sgprs = 26, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, }
+PASS limits gfx1030 mamba tf_mamba_dt: 16 VGPRs, 25 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1100 mamba tf_mamba_dt: 16 VGPRs, 25 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1151 mamba tf_mamba_dt: 16 VGPRs, 25 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1201 mamba tf_mamba_dt: 16 VGPRs, 27 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+RECORD mamba tf_mamba_dt: .usage = .{ .{ .vgprs = 16, .sgprs = 25, .lds = 0, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 16, .sgprs = 25, .lds = 0, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 16, .sgprs = 25, .lds = 0, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 16, .sgprs = 27, .lds = 0, .private = 0, .bound = 1024, .wave = 32 }, }
+PASS limits gfx1030 mamba tf_mamba_scan: 127 VGPRs, 41 SGPRs, 20544 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 mamba tf_mamba_scan: 126 VGPRs, 41 SGPRs, 20544 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 mamba tf_mamba_scan: 125 VGPRs, 42 SGPRs, 20544 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 mamba tf_mamba_scan: 121 VGPRs, 42 SGPRs, 20544 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD mamba tf_mamba_scan: .usage = .{ .{ .vgprs = 127, .sgprs = 41, .lds = 20544, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 126, .sgprs = 41, .lds = 20544, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 125, .sgprs = 42, .lds = 20544, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 121, .sgprs = 42, .lds = 20544, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 mamba tf_mamba_gnorm: 23 VGPRs, 23 SGPRs, 16 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 mamba tf_mamba_gnorm: 23 VGPRs, 24 SGPRs, 16 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 mamba tf_mamba_gnorm: 23 VGPRs, 23 SGPRs, 16 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 mamba tf_mamba_gnorm: 23 VGPRs, 24 SGPRs, 16 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD mamba tf_mamba_gnorm: .usage = .{ .{ .vgprs = 23, .sgprs = 23, .lds = 16, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 23, .sgprs = 24, .lds = 16, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 23, .sgprs = 23, .lds = 16, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 23, .sgprs = 24, .lds = 16, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 nemotron tf_nemo_select: 27 VGPRs, 26 SGPRs, 8320 LDS bytes, 0 scratch bytes, bound 32, wave32 (record current)
+PASS limits gfx1100 nemotron tf_nemo_select: 27 VGPRs, 26 SGPRs, 8320 LDS bytes, 0 scratch bytes, bound 32, wave32 (record current)
+PASS limits gfx1151 nemotron tf_nemo_select: 27 VGPRs, 26 SGPRs, 8320 LDS bytes, 0 scratch bytes, bound 32, wave32 (record current)
+PASS limits gfx1201 nemotron tf_nemo_select: 27 VGPRs, 26 SGPRs, 8320 LDS bytes, 0 scratch bytes, bound 32, wave32 (record current)
+RECORD nemotron tf_nemo_select: .usage = .{ .{ .vgprs = 27, .sgprs = 26, .lds = 8320, .private = 0, .bound = 32, .wave = 32 }, .{ .vgprs = 27, .sgprs = 26, .lds = 8320, .private = 0, .bound = 32, .wave = 32 }, .{ .vgprs = 27, .sgprs = 26, .lds = 8320, .private = 0, .bound = 32, .wave = 32 }, .{ .vgprs = 27, .sgprs = 26, .lds = 8320, .private = 0, .bound = 32, .wave = 32 }, }
+PASS limits gfx1030 nemotron tf_nemo_select_rank: 27 VGPRs, 30 SGPRs, 8320 LDS bytes, 0 scratch bytes, bound 512, wave32 (record current)
+PASS limits gfx1100 nemotron tf_nemo_select_rank: 27 VGPRs, 30 SGPRs, 8320 LDS bytes, 0 scratch bytes, bound 512, wave32 (record current)
+PASS limits gfx1151 nemotron tf_nemo_select_rank: 27 VGPRs, 30 SGPRs, 8320 LDS bytes, 0 scratch bytes, bound 512, wave32 (record current)
+PASS limits gfx1201 nemotron tf_nemo_select_rank: 27 VGPRs, 29 SGPRs, 8320 LDS bytes, 0 scratch bytes, bound 512, wave32 (record current)
+RECORD nemotron tf_nemo_select_rank: .usage = .{ .{ .vgprs = 27, .sgprs = 30, .lds = 8320, .private = 0, .bound = 512, .wave = 32 }, .{ .vgprs = 27, .sgprs = 30, .lds = 8320, .private = 0, .bound = 512, .wave = 32 }, .{ .vgprs = 27, .sgprs = 30, .lds = 8320, .private = 0, .bound = 512, .wave = 32 }, .{ .vgprs = 27, .sgprs = 29, .lds = 8320, .private = 0, .bound = 512, .wave = 32 }, }
+PASS limits gfx1030 nemotron tf_nemo_relu2: 8 VGPRs, 9 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1100 nemotron tf_nemo_relu2: 8 VGPRs, 18 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1151 nemotron tf_nemo_relu2: 8 VGPRs, 10 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1201 nemotron tf_nemo_relu2: 8 VGPRs, 10 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+RECORD nemotron tf_nemo_relu2: .usage = .{ .{ .vgprs = 8, .sgprs = 9, .lds = 0, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 8, .sgprs = 18, .lds = 0, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 8, .sgprs = 10, .lds = 0, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 8, .sgprs = 10, .lds = 0, .private = 0, .bound = 1024, .wave = 32 }, }
+PASS limits gfx1030 nemotron tf_nemo_localize: 4 VGPRs, 10 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1100 nemotron tf_nemo_localize: 4 VGPRs, 18 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1151 nemotron tf_nemo_localize: 4 VGPRs, 10 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1201 nemotron tf_nemo_localize: 4 VGPRs, 9 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+RECORD nemotron tf_nemo_localize: .usage = .{ .{ .vgprs = 4, .sgprs = 10, .lds = 0, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 4, .sgprs = 18, .lds = 0, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 4, .sgprs = 10, .lds = 0, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 4, .sgprs = 9, .lds = 0, .private = 0, .bound = 1024, .wave = 32 }, }
+PASS limits gfx1030 nemotron tf_nemo_combine: 9 VGPRs, 20 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1100 nemotron tf_nemo_combine: 10 VGPRs, 20 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1151 nemotron tf_nemo_combine: 9 VGPRs, 20 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1201 nemotron tf_nemo_combine: 9 VGPRs, 20 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+RECORD nemotron tf_nemo_combine: .usage = .{ .{ .vgprs = 9, .sgprs = 20, .lds = 0, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 10, .sgprs = 20, .lds = 0, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 9, .sgprs = 20, .lds = 0, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 9, .sgprs = 20, .lds = 0, .private = 0, .bound = 1024, .wave = 32 }, }
+PASS limits gfx1030 planned walk tf_plan_score_f16: 17 VGPRs, 34 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 planned walk tf_plan_score_f16: 17 VGPRs, 33 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 planned walk tf_plan_score_f16: 17 VGPRs, 34 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 planned walk tf_plan_score_f16: 17 VGPRs, 29 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD planned walk tf_plan_score_f16: .usage = .{ .{ .vgprs = 17, .sgprs = 34, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 17, .sgprs = 33, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 17, .sgprs = 34, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 17, .sgprs = 29, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 planned walk tf_plan_score_bf16: 17 VGPRs, 34 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 planned walk tf_plan_score_bf16: 17 VGPRs, 33 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 planned walk tf_plan_score_bf16: 17 VGPRs, 34 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 planned walk tf_plan_score_bf16: 17 VGPRs, 29 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD planned walk tf_plan_score_bf16: .usage = .{ .{ .vgprs = 17, .sgprs = 34, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 17, .sgprs = 33, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 17, .sgprs = 34, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 17, .sgprs = 29, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 planned walk tf_softmax_stats: 9 VGPRs, 16 SGPRs, 1024 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1100 planned walk tf_softmax_stats: 9 VGPRs, 18 SGPRs, 1024 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1151 planned walk tf_softmax_stats: 9 VGPRs, 16 SGPRs, 1024 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1201 planned walk tf_softmax_stats: 9 VGPRs, 18 SGPRs, 1024 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+RECORD planned walk tf_softmax_stats: .usage = .{ .{ .vgprs = 9, .sgprs = 16, .lds = 1024, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 9, .sgprs = 18, .lds = 1024, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 9, .sgprs = 16, .lds = 1024, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 9, .sgprs = 18, .lds = 1024, .private = 0, .bound = 1024, .wave = 32 }, }
+PASS limits gfx1030 planned walk tf_plan_apply_f16: 57 VGPRs, 44 SGPRs, 8192 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1100 planned walk tf_plan_apply_f16: 57 VGPRs, 44 SGPRs, 8192 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1151 planned walk tf_plan_apply_f16: 57 VGPRs, 44 SGPRs, 8192 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1201 planned walk tf_plan_apply_f16: 57 VGPRs, 44 SGPRs, 8192 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+RECORD planned walk tf_plan_apply_f16: .usage = .{ .{ .vgprs = 57, .sgprs = 44, .lds = 8192, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 57, .sgprs = 44, .lds = 8192, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 57, .sgprs = 44, .lds = 8192, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 57, .sgprs = 44, .lds = 8192, .private = 0, .bound = 256, .wave = 32 }, }
+PASS limits gfx1030 planned walk tf_plan_apply_bf16: 57 VGPRs, 44 SGPRs, 8192 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1100 planned walk tf_plan_apply_bf16: 57 VGPRs, 44 SGPRs, 8192 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1151 planned walk tf_plan_apply_bf16: 57 VGPRs, 44 SGPRs, 8192 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1201 planned walk tf_plan_apply_bf16: 57 VGPRs, 44 SGPRs, 8192 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+RECORD planned walk tf_plan_apply_bf16: .usage = .{ .{ .vgprs = 57, .sgprs = 44, .lds = 8192, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 57, .sgprs = 44, .lds = 8192, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 57, .sgprs = 44, .lds = 8192, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 57, .sgprs = 44, .lds = 8192, .private = 0, .bound = 256, .wave = 32 }, }
+PASS limits gfx1030 planned walk tf_sum_partials: 5 VGPRs, 14 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1100 planned walk tf_sum_partials: 5 VGPRs, 18 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1151 planned walk tf_sum_partials: 5 VGPRs, 14 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1201 planned walk tf_sum_partials: 5 VGPRs, 16 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+RECORD planned walk tf_sum_partials: .usage = .{ .{ .vgprs = 5, .sgprs = 14, .lds = 0, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 5, .sgprs = 18, .lds = 0, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 5, .sgprs = 14, .lds = 0, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 5, .sgprs = 16, .lds = 0, .private = 0, .bound = 1024, .wave = 32 }, }
+PASS limits gfx1030 add rms tf_add_rms_f16: 43 VGPRs, 40 SGPRs, 32772 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1100 add rms tf_add_rms_f16: 45 VGPRs, 40 SGPRs, 32772 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1151 add rms tf_add_rms_f16: 45 VGPRs, 40 SGPRs, 32772 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1201 add rms tf_add_rms_f16: 44 VGPRs, 40 SGPRs, 32772 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+RECORD add rms tf_add_rms_f16: .usage = .{ .{ .vgprs = 43, .sgprs = 40, .lds = 32772, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 45, .sgprs = 40, .lds = 32772, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 45, .sgprs = 40, .lds = 32772, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 44, .sgprs = 40, .lds = 32772, .private = 0, .bound = 1024, .wave = 32 }, }
+PASS limits gfx1030 add rms tf_add_rms_bf16: 44 VGPRs, 40 SGPRs, 32772 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1100 add rms tf_add_rms_bf16: 45 VGPRs, 40 SGPRs, 32772 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1151 add rms tf_add_rms_bf16: 45 VGPRs, 40 SGPRs, 32772 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1201 add rms tf_add_rms_bf16: 44 VGPRs, 40 SGPRs, 32772 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+RECORD add rms tf_add_rms_bf16: .usage = .{ .{ .vgprs = 44, .sgprs = 40, .lds = 32772, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 45, .sgprs = 40, .lds = 32772, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 45, .sgprs = 40, .lds = 32772, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 44, .sgprs = 40, .lds = 32772, .private = 0, .bound = 1024, .wave = 32 }, }
+PASS limits gfx1030 mamba tf_mamba_conv_window: 32 VGPRs, 42 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1100 mamba tf_mamba_conv_window: 38 VGPRs, 42 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1151 mamba tf_mamba_conv_window: 37 VGPRs, 42 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1201 mamba tf_mamba_conv_window: 37 VGPRs, 44 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+RECORD mamba tf_mamba_conv_window: .usage = .{ .{ .vgprs = 32, .sgprs = 42, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 38, .sgprs = 42, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 37, .sgprs = 42, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 37, .sgprs = 44, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, }
+PASS limits gfx1030 mamba tf_mamba_scan_snap: 137 VGPRs, 50 SGPRs, 20544 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 mamba tf_mamba_scan_snap: 136 VGPRs, 50 SGPRs, 20544 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 mamba tf_mamba_scan_snap: 135 VGPRs, 51 SGPRs, 20544 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 mamba tf_mamba_scan_snap: 131 VGPRs, 52 SGPRs, 20544 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD mamba tf_mamba_scan_snap: .usage = .{ .{ .vgprs = 137, .sgprs = 50, .lds = 20544, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 136, .sgprs = 50, .lds = 20544, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 135, .sgprs = 51, .lds = 20544, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 131, .sgprs = 52, .lds = 20544, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 relu2 stream tile 4-bit 1x2: 79 VGPRs, 54 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 relu2 stream tile 4-bit 1x2: 83 VGPRs, 54 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 relu2 stream tile 4-bit 1x2: 83 VGPRs, 54 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 relu2 stream tile 4-bit 1x2: 83 VGPRs, 56 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD relu2 stream tile 4-bit 1x2: .usage = .{ .{ .vgprs = 79, .sgprs = 54, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 83, .sgprs = 54, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 83, .sgprs = 54, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 83, .sgprs = 56, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 relu2 stream tile 4-bit 1x4: 112 VGPRs, 57 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 relu2 stream tile 4-bit 1x4: 121 VGPRs, 57 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 relu2 stream tile 4-bit 1x4: 121 VGPRs, 57 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 relu2 stream tile 4-bit 1x4: 121 VGPRs, 59 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD relu2 stream tile 4-bit 1x4: .usage = .{ .{ .vgprs = 112, .sgprs = 57, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 121, .sgprs = 57, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 121, .sgprs = 57, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 121, .sgprs = 59, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 relu2 stream tile 4-bit 1x8: 187 VGPRs, 60 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 relu2 stream tile 4-bit 1x8: 186 VGPRs, 60 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 relu2 stream tile 4-bit 1x8: 186 VGPRs, 60 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 relu2 stream tile 4-bit 1x8: 186 VGPRs, 62 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD relu2 stream tile 4-bit 1x8: .usage = .{ .{ .vgprs = 187, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 186, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 186, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 186, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 relu2 stream tile 4-bit 2x2: 93 VGPRs, 59 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 relu2 stream tile 4-bit 2x2: 110 VGPRs, 60 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 relu2 stream tile 4-bit 2x2: 110 VGPRs, 60 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 relu2 stream tile 4-bit 2x2: 110 VGPRs, 62 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD relu2 stream tile 4-bit 2x2: .usage = .{ .{ .vgprs = 93, .sgprs = 59, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 110, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 110, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 110, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 relu2 stream tile 4-bit 2x4: 112 VGPRs, 62 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 relu2 stream tile 4-bit 2x4: 135 VGPRs, 63 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 relu2 stream tile 4-bit 2x4: 135 VGPRs, 63 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 relu2 stream tile 4-bit 2x4: 135 VGPRs, 65 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD relu2 stream tile 4-bit 2x4: .usage = .{ .{ .vgprs = 112, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 135, .sgprs = 63, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 135, .sgprs = 63, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 135, .sgprs = 65, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 relu2 stream tile 4-bit 2x8: 164 VGPRs, 66 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 relu2 stream tile 4-bit 2x8: 248 VGPRs, 90 SGPRs, 0 LDS bytes, 304 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 relu2 stream tile 4-bit 2x8: 248 VGPRs, 90 SGPRs, 0 LDS bytes, 304 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 relu2 stream tile 4-bit 2x8: 248 VGPRs, 86 SGPRs, 0 LDS bytes, 304 scratch bytes, bound 128, wave32 (record current)
+RECORD relu2 stream tile 4-bit 2x8: .usage = .{ .{ .vgprs = 164, .sgprs = 66, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 248, .sgprs = 90, .lds = 0, .private = 304, .bound = 128, .wave = 32 }, .{ .vgprs = 248, .sgprs = 90, .lds = 0, .private = 304, .bound = 128, .wave = 32 }, .{ .vgprs = 248, .sgprs = 86, .lds = 0, .private = 304, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 relu2 stream tile 4-bit 4x2: 146 VGPRs, 67 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 relu2 stream tile 4-bit 4x2: 148 VGPRs, 68 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 relu2 stream tile 4-bit 4x2: 148 VGPRs, 68 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 relu2 stream tile 4-bit 4x2: 148 VGPRs, 70 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD relu2 stream tile 4-bit 4x2: .usage = .{ .{ .vgprs = 146, .sgprs = 67, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 148, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 148, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 148, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 relu2 stream tile 4-bit 4x4: 176 VGPRs, 70 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 relu2 stream tile 4-bit 4x4: 181 VGPRs, 71 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 relu2 stream tile 4-bit 4x4: 181 VGPRs, 71 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 relu2 stream tile 4-bit 4x4: 181 VGPRs, 73 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD relu2 stream tile 4-bit 4x4: .usage = .{ .{ .vgprs = 176, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 181, .sgprs = 71, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 181, .sgprs = 71, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 181, .sgprs = 73, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 planned walk tf_plan_kv_write_act: 20 VGPRs, 26 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1100 planned walk tf_plan_kv_write_act: 20 VGPRs, 26 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1151 planned walk tf_plan_kv_write_act: 20 VGPRs, 26 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1201 planned walk tf_plan_kv_write_act: 20 VGPRs, 28 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+RECORD planned walk tf_plan_kv_write_act: .usage = .{ .{ .vgprs = 20, .sgprs = 26, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 20, .sgprs = 26, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 20, .sgprs = 26, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 20, .sgprs = 28, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, }
+PASS limits gfx1030 planned walk tf_plan_score_act_f16: 17 VGPRs, 32 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 planned walk tf_plan_score_act_f16: 17 VGPRs, 32 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 planned walk tf_plan_score_act_f16: 17 VGPRs, 32 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 planned walk tf_plan_score_act_f16: 17 VGPRs, 28 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD planned walk tf_plan_score_act_f16: .usage = .{ .{ .vgprs = 17, .sgprs = 32, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 17, .sgprs = 32, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 17, .sgprs = 32, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 17, .sgprs = 28, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 planned walk tf_plan_score_act_bf16: 17 VGPRs, 32 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 planned walk tf_plan_score_act_bf16: 17 VGPRs, 32 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 planned walk tf_plan_score_act_bf16: 17 VGPRs, 32 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 planned walk tf_plan_score_act_bf16: 17 VGPRs, 28 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD planned walk tf_plan_score_act_bf16: .usage = .{ .{ .vgprs = 17, .sgprs = 32, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 17, .sgprs = 32, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 17, .sgprs = 32, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 17, .sgprs = 28, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 planned walk tf_sum_partials_act: 7 VGPRs, 16 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1100 planned walk tf_sum_partials_act: 6 VGPRs, 18 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1151 planned walk tf_sum_partials_act: 6 VGPRs, 16 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1201 planned walk tf_sum_partials_act: 6 VGPRs, 18 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+RECORD planned walk tf_sum_partials_act: .usage = .{ .{ .vgprs = 7, .sgprs = 16, .lds = 0, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 6, .sgprs = 18, .lds = 0, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 6, .sgprs = 16, .lds = 0, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 6, .sgprs = 18, .lds = 0, .private = 0, .bound = 1024, .wave = 32 }, }
+PASS limits gfx1030 argmax tf_argmax_part: 8 VGPRs, 17 SGPRs, 2048 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1100 argmax tf_argmax_part: 8 VGPRs, 18 SGPRs, 2048 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1151 argmax tf_argmax_part: 8 VGPRs, 17 SGPRs, 2048 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1201 argmax tf_argmax_part: 8 VGPRs, 16 SGPRs, 2048 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+RECORD argmax tf_argmax_part: .usage = .{ .{ .vgprs = 8, .sgprs = 17, .lds = 2048, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 8, .sgprs = 18, .lds = 2048, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 8, .sgprs = 17, .lds = 2048, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 8, .sgprs = 16, .lds = 2048, .private = 0, .bound = 256, .wave = 32 }, }
+PASS limits gfx1030 top-k tf_topk_part: 33 VGPRs, 36 SGPRs, 1296 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1100 top-k tf_topk_part: 78 VGPRs, 36 SGPRs, 1296 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1151 top-k tf_topk_part: 78 VGPRs, 36 SGPRs, 1296 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1201 top-k tf_topk_part: 78 VGPRs, 36 SGPRs, 1296 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+RECORD top-k tf_topk_part: .usage = .{ .{ .vgprs = 33, .sgprs = 36, .lds = 1296, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 78, .sgprs = 36, .lds = 1296, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 78, .sgprs = 36, .lds = 1296, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 78, .sgprs = 36, .lds = 1296, .private = 0, .bound = 1024, .wave = 32 }, }
+PASS limits gfx1030 top-k tf_topk_join: 16 VGPRs, 36 SGPRs, 33808 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1100 top-k tf_topk_join: 16 VGPRs, 36 SGPRs, 33808 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1151 top-k tf_topk_join: 16 VGPRs, 36 SGPRs, 33808 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1201 top-k tf_topk_join: 16 VGPRs, 37 SGPRs, 33808 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+RECORD top-k tf_topk_join: .usage = .{ .{ .vgprs = 16, .sgprs = 36, .lds = 33808, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 16, .sgprs = 36, .lds = 33808, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 16, .sgprs = 36, .lds = 33808, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 16, .sgprs = 37, .lds = 33808, .private = 0, .bound = 1024, .wave = 32 }, }
+PASS limits gfx1030 argmax tf_argmax_join: 10 VGPRs, 21 SGPRs, 2048 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1100 argmax tf_argmax_join: 10 VGPRs, 21 SGPRs, 2048 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1151 argmax tf_argmax_join: 10 VGPRs, 21 SGPRs, 2048 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1201 argmax tf_argmax_join: 10 VGPRs, 20 SGPRs, 2048 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+RECORD argmax tf_argmax_join: .usage = .{ .{ .vgprs = 10, .sgprs = 21, .lds = 2048, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 10, .sgprs = 21, .lds = 2048, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 10, .sgprs = 21, .lds = 2048, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 10, .sgprs = 20, .lds = 2048, .private = 0, .bound = 256, .wave = 32 }, }
+PASS limits gfx1030 planned walk tf_plan_attend_f16: 38 VGPRs, 32 SGPRs, 50688 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1100 planned walk tf_plan_attend_f16: 38 VGPRs, 32 SGPRs, 50688 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1151 planned walk tf_plan_attend_f16: 38 VGPRs, 32 SGPRs, 50688 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1201 planned walk tf_plan_attend_f16: 38 VGPRs, 32 SGPRs, 50688 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+RECORD planned walk tf_plan_attend_f16: .usage = .{ .{ .vgprs = 38, .sgprs = 32, .lds = 50688, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 38, .sgprs = 32, .lds = 50688, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 38, .sgprs = 32, .lds = 50688, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 38, .sgprs = 32, .lds = 50688, .private = 0, .bound = 1024, .wave = 32 }, }
+PASS limits gfx1030 planned walk tf_plan_attend_bf16: 36 VGPRs, 32 SGPRs, 50688 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1100 planned walk tf_plan_attend_bf16: 37 VGPRs, 32 SGPRs, 50688 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1151 planned walk tf_plan_attend_bf16: 36 VGPRs, 32 SGPRs, 50688 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1201 planned walk tf_plan_attend_bf16: 36 VGPRs, 32 SGPRs, 50688 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+RECORD planned walk tf_plan_attend_bf16: .usage = .{ .{ .vgprs = 36, .sgprs = 32, .lds = 50688, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 37, .sgprs = 32, .lds = 50688, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 36, .sgprs = 32, .lds = 50688, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 36, .sgprs = 32, .lds = 50688, .private = 0, .bound = 1024, .wave = 32 }, }
+PASS limits gfx1030 MoE router (decode, fp32 rows) tf_router_decode_f16: 106 VGPRs, 75 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 MoE router (decode, fp32 rows) tf_router_decode_f16: 90 VGPRs, 75 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 MoE router (decode, fp32 rows) tf_router_decode_f16: 90 VGPRs, 75 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 MoE router (decode, fp32 rows) tf_router_decode_f16: 90 VGPRs, 76 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD MoE router (decode, fp32 rows) tf_router_decode_f16: .usage = .{ .{ .vgprs = 106, .sgprs = 75, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 90, .sgprs = 75, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 90, .sgprs = 75, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 90, .sgprs = 76, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 MoE router (decode, fp32 rows) tf_router_decode_bf16: 106 VGPRs, 75 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 MoE router (decode, fp32 rows) tf_router_decode_bf16: 91 VGPRs, 75 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 MoE router (decode, fp32 rows) tf_router_decode_bf16: 91 VGPRs, 75 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 MoE router (decode, fp32 rows) tf_router_decode_bf16: 91 VGPRs, 76 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD MoE router (decode, fp32 rows) tf_router_decode_bf16: .usage = .{ .{ .vgprs = 106, .sgprs = 75, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 91, .sgprs = 75, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 91, .sgprs = 75, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 91, .sgprs = 76, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 MoE router and pick in one launch (decode, bf16 rows) tf_router_select_f16: 135 VGPRs, 86 SGPRs, 5456 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 MoE router and pick in one launch (decode, bf16 rows) tf_router_select_f16: 135 VGPRs, 82 SGPRs, 5456 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 MoE router and pick in one launch (decode, bf16 rows) tf_router_select_f16: 135 VGPRs, 82 SGPRs, 5456 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 MoE router and pick in one launch (decode, bf16 rows) tf_router_select_f16: 135 VGPRs, 83 SGPRs, 5456 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD MoE router and pick in one launch (decode, bf16 rows) tf_router_select_f16: .usage = .{ .{ .vgprs = 135, .sgprs = 86, .lds = 5456, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 135, .sgprs = 82, .lds = 5456, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 135, .sgprs = 82, .lds = 5456, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 135, .sgprs = 83, .lds = 5456, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 MoE router and pick in one launch (decode, bf16 rows) tf_router_select_bf16: 135 VGPRs, 86 SGPRs, 5456 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 MoE router and pick in one launch (decode, bf16 rows) tf_router_select_bf16: 135 VGPRs, 82 SGPRs, 5456 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 MoE router and pick in one launch (decode, bf16 rows) tf_router_select_bf16: 135 VGPRs, 82 SGPRs, 5456 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 MoE router and pick in one launch (decode, bf16 rows) tf_router_select_bf16: 135 VGPRs, 83 SGPRs, 5456 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD MoE router and pick in one launch (decode, bf16 rows) tf_router_select_bf16: .usage = .{ .{ .vgprs = 135, .sgprs = 86, .lds = 5456, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 135, .sgprs = 82, .lds = 5456, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 135, .sgprs = 82, .lds = 5456, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 135, .sgprs = 83, .lds = 5456, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 MoE down codes read beside the gate and up (side stream) tf_moe_prefetch: 11 VGPRs, 20 SGPRs, 260 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1100 MoE down codes read beside the gate and up (side stream) tf_moe_prefetch: 11 VGPRs, 20 SGPRs, 260 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1151 MoE down codes read beside the gate and up (side stream) tf_moe_prefetch: 11 VGPRs, 20 SGPRs, 260 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1201 MoE down codes read beside the gate and up (side stream) tf_moe_prefetch: 11 VGPRs, 18 SGPRs, 260 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+RECORD MoE down codes read beside the gate and up (side stream) tf_moe_prefetch: .usage = .{ .{ .vgprs = 11, .sgprs = 20, .lds = 260, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 11, .sgprs = 20, .lds = 260, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 11, .sgprs = 20, .lds = 260, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 11, .sgprs = 18, .lds = 260, .private = 0, .bound = 256, .wave = 32 }, }
+N/A  limits gfx1030 prompt expert gate+up tile 4-bit: not launched on this chip
+PASS limits gfx1100 prompt expert gate+up tile 4-bit: 226 VGPRs, 34 SGPRs, 36352 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1151 prompt expert gate+up tile 4-bit: 225 VGPRs, 36 SGPRs, 36352 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+N/A  limits gfx1201 prompt expert gate+up tile 4-bit: not launched on this chip
+RECORD prompt expert gate+up tile 4-bit: .usage = .{ .{ .vgprs = 0, .sgprs = 0, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 226, .sgprs = 34, .lds = 36352, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 225, .sgprs = 36, .lds = 36352, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 0, .sgprs = 0, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, }
+N/A  limits gfx1030 prompt expert down tile 4-bit: not launched on this chip
+PASS limits gfx1100 prompt expert down tile 4-bit: 189 VGPRs, 33 SGPRs, 32256 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1151 prompt expert down tile 4-bit: 189 VGPRs, 34 SGPRs, 32256 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+N/A  limits gfx1201 prompt expert down tile 4-bit: not launched on this chip
+RECORD prompt expert down tile 4-bit: .usage = .{ .{ .vgprs = 0, .sgprs = 0, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 189, .sgprs = 33, .lds = 32256, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 189, .sgprs = 34, .lds = 32256, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 0, .sgprs = 0, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, }
+N/A  limits gfx1030 prompt dense tile 4-bit K 320: not launched on this chip
+PASS limits gfx1100 prompt dense tile 4-bit K 320: 208 VGPRs, 22 SGPRs, 39936 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1151 prompt dense tile 4-bit K 320: 208 VGPRs, 22 SGPRs, 39936 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+N/A  limits gfx1201 prompt dense tile 4-bit K 320: not launched on this chip
+RECORD prompt dense tile 4-bit K 320: .usage = .{ .{ .vgprs = 0, .sgprs = 0, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 208, .sgprs = 22, .lds = 39936, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 208, .sgprs = 22, .lds = 39936, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 0, .sgprs = 0, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, }
+N/A  limits gfx1030 prompt dense tile 4-bit K 320 with the HC mix: not launched on this chip
+PASS limits gfx1100 prompt dense tile 4-bit K 320 with the HC mix: 215 VGPRs, 23 SGPRs, 39936 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1151 prompt dense tile 4-bit K 320 with the HC mix: 215 VGPRs, 23 SGPRs, 39936 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+N/A  limits gfx1201 prompt dense tile 4-bit K 320 with the HC mix: not launched on this chip
+RECORD prompt dense tile 4-bit K 320 with the HC mix: .usage = .{ .{ .vgprs = 0, .sgprs = 0, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 215, .sgprs = 23, .lds = 39936, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 215, .sgprs = 23, .lds = 39936, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 0, .sgprs = 0, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, }
+N/A  limits gfx1030 prompt dense tile 4-bit K 2560: not launched on this chip
+PASS limits gfx1100 prompt dense tile 4-bit K 2560: 208 VGPRs, 22 SGPRs, 39936 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1151 prompt dense tile 4-bit K 2560: 208 VGPRs, 22 SGPRs, 39936 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+N/A  limits gfx1201 prompt dense tile 4-bit K 2560: not launched on this chip
+RECORD prompt dense tile 4-bit K 2560: .usage = .{ .{ .vgprs = 0, .sgprs = 0, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 208, .sgprs = 22, .lds = 39936, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 208, .sgprs = 22, .lds = 39936, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 0, .sgprs = 0, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, }
+N/A  limits gfx1030 prompt dense tile 4-bit K 6144: not launched on this chip
+PASS limits gfx1100 prompt dense tile 4-bit K 6144: 208 VGPRs, 22 SGPRs, 39936 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1151 prompt dense tile 4-bit K 6144: 208 VGPRs, 22 SGPRs, 39936 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+N/A  limits gfx1201 prompt dense tile 4-bit K 6144: not launched on this chip
+RECORD prompt dense tile 4-bit K 6144: .usage = .{ .{ .vgprs = 0, .sgprs = 0, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 208, .sgprs = 22, .lds = 39936, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 208, .sgprs = 22, .lds = 39936, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 0, .sgprs = 0, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, }
+N/A  limits gfx1030 prompt dense tile 4-bit K 10240: not launched on this chip
+PASS limits gfx1100 prompt dense tile 4-bit K 10240: 246 VGPRs, 22 SGPRs, 39936 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1151 prompt dense tile 4-bit K 10240: 246 VGPRs, 22 SGPRs, 39936 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+N/A  limits gfx1201 prompt dense tile 4-bit K 10240: not launched on this chip
+RECORD prompt dense tile 4-bit K 10240: .usage = .{ .{ .vgprs = 0, .sgprs = 0, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 246, .sgprs = 22, .lds = 39936, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 246, .sgprs = 22, .lds = 39936, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 0, .sgprs = 0, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, }
+PASS limits gfx1030 Flash Next QSA decode prep: 36 VGPRs, 50 SGPRs, 17440 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1100 Flash Next QSA decode prep: 43 VGPRs, 50 SGPRs, 17440 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1151 Flash Next QSA decode prep: 34 VGPRs, 52 SGPRs, 17440 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1201 Flash Next QSA decode prep: 34 VGPRs, 51 SGPRs, 17440 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+RECORD Flash Next QSA decode prep: .usage = .{ .{ .vgprs = 36, .sgprs = 50, .lds = 17440, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 43, .sgprs = 50, .lds = 17440, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 34, .sgprs = 52, .lds = 17440, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 34, .sgprs = 51, .lds = 17440, .private = 0, .bound = 256, .wave = 32 }, }
+PASS limits gfx1030 relu2 pair tile 4-bit 1x2: 81 VGPRs, 62 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 relu2 pair tile 4-bit 1x2: 83 VGPRs, 61 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 relu2 pair tile 4-bit 1x2: 83 VGPRs, 61 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 relu2 pair tile 4-bit 1x2: 83 VGPRs, 61 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD relu2 pair tile 4-bit 1x2: .usage = .{ .{ .vgprs = 81, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 83, .sgprs = 61, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 83, .sgprs = 61, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 83, .sgprs = 61, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 relu2 pair tile 4-bit 1x4: 113 VGPRs, 65 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 relu2 pair tile 4-bit 1x4: 121 VGPRs, 64 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 relu2 pair tile 4-bit 1x4: 121 VGPRs, 64 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 relu2 pair tile 4-bit 1x4: 121 VGPRs, 64 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD relu2 pair tile 4-bit 1x4: .usage = .{ .{ .vgprs = 113, .sgprs = 65, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 121, .sgprs = 64, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 121, .sgprs = 64, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 121, .sgprs = 64, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 relu2 pair tile 4-bit 1x8: 187 VGPRs, 68 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 relu2 pair tile 4-bit 1x8: 186 VGPRs, 67 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 relu2 pair tile 4-bit 1x8: 186 VGPRs, 67 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 relu2 pair tile 4-bit 1x8: 186 VGPRs, 67 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD relu2 pair tile 4-bit 1x8: .usage = .{ .{ .vgprs = 187, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 186, .sgprs = 67, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 186, .sgprs = 67, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 186, .sgprs = 67, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 relu2 pair tile 4-bit 2x2: 93 VGPRs, 67 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 relu2 pair tile 4-bit 2x2: 109 VGPRs, 68 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 relu2 pair tile 4-bit 2x2: 109 VGPRs, 68 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 relu2 pair tile 4-bit 2x2: 109 VGPRs, 67 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD relu2 pair tile 4-bit 2x2: .usage = .{ .{ .vgprs = 93, .sgprs = 67, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 109, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 109, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 109, .sgprs = 67, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 relu2 pair tile 4-bit 2x4: 119 VGPRs, 70 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 relu2 pair tile 4-bit 2x4: 135 VGPRs, 71 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 relu2 pair tile 4-bit 2x4: 135 VGPRs, 71 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 relu2 pair tile 4-bit 2x4: 135 VGPRs, 70 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD relu2 pair tile 4-bit 2x4: .usage = .{ .{ .vgprs = 119, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 135, .sgprs = 71, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 135, .sgprs = 71, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 135, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 relu2 pair tile 4-bit 2x8: 164 VGPRs, 74 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 relu2 pair tile 4-bit 2x8: 248 VGPRs, 74 SGPRs, 0 LDS bytes, 416 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 relu2 pair tile 4-bit 2x8: 248 VGPRs, 74 SGPRs, 0 LDS bytes, 416 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 relu2 pair tile 4-bit 2x8: 248 VGPRs, 74 SGPRs, 0 LDS bytes, 416 scratch bytes, bound 128, wave32 (record current)
+RECORD relu2 pair tile 4-bit 2x8: .usage = .{ .{ .vgprs = 164, .sgprs = 74, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 248, .sgprs = 74, .lds = 0, .private = 416, .bound = 128, .wave = 32 }, .{ .vgprs = 248, .sgprs = 74, .lds = 0, .private = 416, .bound = 128, .wave = 32 }, .{ .vgprs = 248, .sgprs = 74, .lds = 0, .private = 416, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 relu2 pair tile 4-bit 4x2: 146 VGPRs, 75 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 relu2 pair tile 4-bit 4x2: 148 VGPRs, 76 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 relu2 pair tile 4-bit 4x2: 148 VGPRs, 76 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 relu2 pair tile 4-bit 4x2: 148 VGPRs, 75 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD relu2 pair tile 4-bit 4x2: .usage = .{ .{ .vgprs = 146, .sgprs = 75, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 148, .sgprs = 76, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 148, .sgprs = 76, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 148, .sgprs = 75, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 relu2 pair tile 4-bit 4x4: 177 VGPRs, 78 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 relu2 pair tile 4-bit 4x4: 181 VGPRs, 79 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 relu2 pair tile 4-bit 4x4: 181 VGPRs, 79 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 relu2 pair tile 4-bit 4x4: 181 VGPRs, 78 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD relu2 pair tile 4-bit 4x4: .usage = .{ .{ .vgprs = 177, .sgprs = 78, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 181, .sgprs = 79, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 181, .sgprs = 79, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 181, .sgprs = 78, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 2-bit 1x1: 57 VGPRs, 55 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 2-bit 1x1: 56 VGPRs, 54 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 2-bit 1x1: 56 VGPRs, 54 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 2-bit 1x1: 56 VGPRs, 56 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 2-bit 1x1: .usage = .{ .{ .vgprs = 57, .sgprs = 55, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 56, .sgprs = 54, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 56, .sgprs = 54, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 56, .sgprs = 56, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 2-bit 1x2: 59 VGPRs, 57 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 2-bit 1x2: 73 VGPRs, 57 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 2-bit 1x2: 73 VGPRs, 57 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 2-bit 1x2: 73 VGPRs, 59 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 2-bit 1x2: .usage = .{ .{ .vgprs = 59, .sgprs = 57, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 73, .sgprs = 57, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 73, .sgprs = 57, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 73, .sgprs = 59, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 2-bit 1x4: 94 VGPRs, 58 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 2-bit 1x4: 94 VGPRs, 58 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 2-bit 1x4: 94 VGPRs, 58 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 2-bit 1x4: 94 VGPRs, 60 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 2-bit 1x4: .usage = .{ .{ .vgprs = 94, .sgprs = 58, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 94, .sgprs = 58, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 94, .sgprs = 58, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 94, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 2-bit 1x8: 154 VGPRs, 62 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 2-bit 1x8: 154 VGPRs, 62 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 2-bit 1x8: 154 VGPRs, 62 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 2-bit 1x8: 154 VGPRs, 64 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 2-bit 1x8: .usage = .{ .{ .vgprs = 154, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 154, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 154, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 154, .sgprs = 64, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 2-bit 2x1: 74 VGPRs, 62 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 2-bit 2x1: 69 VGPRs, 64 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 2-bit 2x1: 69 VGPRs, 64 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 2-bit 2x1: 69 VGPRs, 67 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 2-bit 2x1: .usage = .{ .{ .vgprs = 74, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 69, .sgprs = 64, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 69, .sgprs = 64, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 69, .sgprs = 67, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 2-bit 2x2: 85 VGPRs, 62 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 2-bit 2x2: 108 VGPRs, 63 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 2-bit 2x2: 108 VGPRs, 63 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 2-bit 2x2: 108 VGPRs, 66 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 2-bit 2x2: .usage = .{ .{ .vgprs = 85, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 108, .sgprs = 63, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 108, .sgprs = 63, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 108, .sgprs = 66, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 2-bit 2x4: 112 VGPRs, 63 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 2-bit 2x4: 130 VGPRs, 64 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 2-bit 2x4: 130 VGPRs, 64 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 2-bit 2x4: 130 VGPRs, 67 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 2-bit 2x4: .usage = .{ .{ .vgprs = 112, .sgprs = 63, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 130, .sgprs = 64, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 130, .sgprs = 64, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 130, .sgprs = 67, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 2-bit 2x8: 151 VGPRs, 68 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 2-bit 2x8: 175 VGPRs, 69 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 2-bit 2x8: 175 VGPRs, 69 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 2-bit 2x8: 175 VGPRs, 72 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 2-bit 2x8: .usage = .{ .{ .vgprs = 151, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 175, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 175, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 175, .sgprs = 72, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 2-bit 4x1: 128 VGPRs, 70 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 2-bit 4x1: 119 VGPRs, 72 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 2-bit 4x1: 119 VGPRs, 72 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 2-bit 4x1: 119 VGPRs, 75 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 2-bit 4x1: .usage = .{ .{ .vgprs = 128, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 119, .sgprs = 72, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 119, .sgprs = 72, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 119, .sgprs = 75, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 2-bit 4x2: 143 VGPRs, 70 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 2-bit 4x2: 147 VGPRs, 71 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 2-bit 4x2: 147 VGPRs, 71 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 2-bit 4x2: 147 VGPRs, 74 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 2-bit 4x2: .usage = .{ .{ .vgprs = 143, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 147, .sgprs = 71, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 147, .sgprs = 71, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 147, .sgprs = 74, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 2-bit 4x4: 149 VGPRs, 71 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 2-bit 4x4: 173 VGPRs, 72 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 2-bit 4x4: 173 VGPRs, 72 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 2-bit 4x4: 173 VGPRs, 75 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 2-bit 4x4: .usage = .{ .{ .vgprs = 149, .sgprs = 71, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 173, .sgprs = 72, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 173, .sgprs = 72, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 173, .sgprs = 75, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 3-bit 1x1: 71 VGPRs, 51 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 3-bit 1x1: 58 VGPRs, 50 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 3-bit 1x1: 58 VGPRs, 50 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 3-bit 1x1: 58 VGPRs, 50 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 3-bit 1x1: .usage = .{ .{ .vgprs = 71, .sgprs = 51, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 58, .sgprs = 50, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 58, .sgprs = 50, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 58, .sgprs = 50, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 3-bit 1x2: 70 VGPRs, 53 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 3-bit 1x2: 77 VGPRs, 54 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 3-bit 1x2: 77 VGPRs, 54 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 3-bit 1x2: 77 VGPRs, 54 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 3-bit 1x2: .usage = .{ .{ .vgprs = 70, .sgprs = 53, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 77, .sgprs = 54, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 77, .sgprs = 54, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 77, .sgprs = 54, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 3-bit 1x4: 95 VGPRs, 55 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 3-bit 1x4: 97 VGPRs, 56 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 3-bit 1x4: 97 VGPRs, 56 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 3-bit 1x4: 97 VGPRs, 56 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 3-bit 1x4: .usage = .{ .{ .vgprs = 95, .sgprs = 55, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 97, .sgprs = 56, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 97, .sgprs = 56, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 97, .sgprs = 56, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 3-bit 1x8: 171 VGPRs, 58 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 3-bit 1x8: 165 VGPRs, 59 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 3-bit 1x8: 165 VGPRs, 59 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 3-bit 1x8: 165 VGPRs, 59 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 3-bit 1x8: .usage = .{ .{ .vgprs = 171, .sgprs = 58, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 165, .sgprs = 59, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 165, .sgprs = 59, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 165, .sgprs = 59, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 3-bit 2x1: 83 VGPRs, 57 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 3-bit 2x1: 96 VGPRs, 60 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 3-bit 2x1: 96 VGPRs, 60 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 3-bit 2x1: 96 VGPRs, 61 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 3-bit 2x1: .usage = .{ .{ .vgprs = 83, .sgprs = 57, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 96, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 96, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 96, .sgprs = 61, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 3-bit 2x2: 76 VGPRs, 58 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 3-bit 2x2: 109 VGPRs, 60 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 3-bit 2x2: 109 VGPRs, 60 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 3-bit 2x2: 109 VGPRs, 61 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 3-bit 2x2: .usage = .{ .{ .vgprs = 76, .sgprs = 58, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 109, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 109, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 109, .sgprs = 61, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 3-bit 2x4: 95 VGPRs, 60 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 3-bit 2x4: 133 VGPRs, 62 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 3-bit 2x4: 133 VGPRs, 62 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 3-bit 2x4: 133 VGPRs, 63 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 3-bit 2x4: .usage = .{ .{ .vgprs = 95, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 133, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 133, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 133, .sgprs = 63, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 3-bit 2x8: 143 VGPRs, 64 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 3-bit 2x8: 180 VGPRs, 66 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 3-bit 2x8: 180 VGPRs, 66 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 3-bit 2x8: 180 VGPRs, 67 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 3-bit 2x8: .usage = .{ .{ .vgprs = 143, .sgprs = 64, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 180, .sgprs = 66, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 180, .sgprs = 66, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 180, .sgprs = 67, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 3-bit 4x1: 124 VGPRs, 65 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 3-bit 4x1: 132 VGPRs, 68 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 3-bit 4x1: 132 VGPRs, 68 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 3-bit 4x1: 132 VGPRs, 69 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 3-bit 4x1: .usage = .{ .{ .vgprs = 124, .sgprs = 65, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 132, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 132, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 132, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 3-bit 4x2: 108 VGPRs, 66 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 3-bit 4x2: 146 VGPRs, 68 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 3-bit 4x2: 146 VGPRs, 68 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 3-bit 4x2: 146 VGPRs, 69 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 3-bit 4x2: .usage = .{ .{ .vgprs = 108, .sgprs = 66, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 146, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 146, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 146, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 3-bit 4x4: 142 VGPRs, 68 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 3-bit 4x4: 174 VGPRs, 70 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 3-bit 4x4: 174 VGPRs, 70 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 3-bit 4x4: 174 VGPRs, 71 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 3-bit 4x4: .usage = .{ .{ .vgprs = 142, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 174, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 174, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 174, .sgprs = 71, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 4-bit 1x1: 59 VGPRs, 55 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 4-bit 1x1: 60 VGPRs, 54 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 4-bit 1x1: 60 VGPRs, 54 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 4-bit 1x1: 60 VGPRs, 56 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 4-bit 1x1: .usage = .{ .{ .vgprs = 59, .sgprs = 55, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 60, .sgprs = 54, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 60, .sgprs = 54, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 60, .sgprs = 56, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 4-bit 1x2: 79 VGPRs, 56 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 4-bit 1x2: 83 VGPRs, 56 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 4-bit 1x2: 83 VGPRs, 56 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 4-bit 1x2: 83 VGPRs, 58 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 4-bit 1x2: .usage = .{ .{ .vgprs = 79, .sgprs = 56, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 83, .sgprs = 56, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 83, .sgprs = 56, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 83, .sgprs = 58, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 4-bit 1x4: 112 VGPRs, 59 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 4-bit 1x4: 121 VGPRs, 59 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 4-bit 1x4: 121 VGPRs, 59 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 4-bit 1x4: 121 VGPRs, 61 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 4-bit 1x4: .usage = .{ .{ .vgprs = 112, .sgprs = 59, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 121, .sgprs = 59, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 121, .sgprs = 59, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 121, .sgprs = 61, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 4-bit 1x8: 187 VGPRs, 62 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 4-bit 1x8: 186 VGPRs, 62 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 4-bit 1x8: 186 VGPRs, 62 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 4-bit 1x8: 186 VGPRs, 64 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 4-bit 1x8: .usage = .{ .{ .vgprs = 187, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 186, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 186, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 186, .sgprs = 64, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 4-bit 2x1: 75 VGPRs, 62 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 4-bit 2x1: 98 VGPRs, 64 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 4-bit 2x1: 98 VGPRs, 64 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 4-bit 2x1: 98 VGPRs, 67 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 4-bit 2x1: .usage = .{ .{ .vgprs = 75, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 98, .sgprs = 64, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 98, .sgprs = 64, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 98, .sgprs = 67, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 4-bit 2x2: 88 VGPRs, 61 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 4-bit 2x2: 110 VGPRs, 62 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 4-bit 2x2: 110 VGPRs, 62 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 4-bit 2x2: 110 VGPRs, 65 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 4-bit 2x2: .usage = .{ .{ .vgprs = 88, .sgprs = 61, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 110, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 110, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 110, .sgprs = 65, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 4-bit 2x4: 114 VGPRs, 64 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 4-bit 2x4: 135 VGPRs, 65 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 4-bit 2x4: 135 VGPRs, 65 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 4-bit 2x4: 135 VGPRs, 68 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 4-bit 2x4: .usage = .{ .{ .vgprs = 114, .sgprs = 64, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 135, .sgprs = 65, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 135, .sgprs = 65, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 135, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 4-bit 2x8: 164 VGPRs, 68 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 4-bit 2x8: 188 VGPRs, 69 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 4-bit 2x8: 188 VGPRs, 69 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 4-bit 2x8: 188 VGPRs, 72 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 4-bit 2x8: .usage = .{ .{ .vgprs = 164, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 188, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 188, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 188, .sgprs = 72, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 4-bit 4x1: 126 VGPRs, 70 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 4-bit 4x1: 134 VGPRs, 72 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 4-bit 4x1: 134 VGPRs, 72 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 4-bit 4x1: 134 VGPRs, 75 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 4-bit 4x1: .usage = .{ .{ .vgprs = 126, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 134, .sgprs = 72, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 134, .sgprs = 72, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 134, .sgprs = 75, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 4-bit 4x2: 146 VGPRs, 69 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 4-bit 4x2: 148 VGPRs, 70 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 4-bit 4x2: 148 VGPRs, 70 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 4-bit 4x2: 148 VGPRs, 73 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 4-bit 4x2: .usage = .{ .{ .vgprs = 146, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 148, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 148, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 148, .sgprs = 73, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 4-bit 4x4: 180 VGPRs, 72 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 4-bit 4x4: 181 VGPRs, 73 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 4-bit 4x4: 181 VGPRs, 73 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 4-bit 4x4: 181 VGPRs, 76 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 4-bit 4x4: .usage = .{ .{ .vgprs = 180, .sgprs = 72, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 181, .sgprs = 73, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 181, .sgprs = 73, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 181, .sgprs = 76, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 5-bit 1x1: 74 VGPRs, 51 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 5-bit 1x1: 62 VGPRs, 50 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 5-bit 1x1: 62 VGPRs, 50 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 5-bit 1x1: 62 VGPRs, 50 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 5-bit 1x1: .usage = .{ .{ .vgprs = 74, .sgprs = 51, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 62, .sgprs = 50, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 62, .sgprs = 50, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 62, .sgprs = 50, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 5-bit 1x2: 71 VGPRs, 53 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 5-bit 1x2: 80 VGPRs, 54 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 5-bit 1x2: 80 VGPRs, 54 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 5-bit 1x2: 80 VGPRs, 54 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 5-bit 1x2: .usage = .{ .{ .vgprs = 71, .sgprs = 53, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 80, .sgprs = 54, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 80, .sgprs = 54, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 80, .sgprs = 54, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 5-bit 1x4: 111 VGPRs, 55 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 5-bit 1x4: 113 VGPRs, 56 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 5-bit 1x4: 113 VGPRs, 56 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 5-bit 1x4: 113 VGPRs, 56 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 5-bit 1x4: .usage = .{ .{ .vgprs = 111, .sgprs = 55, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 113, .sgprs = 56, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 113, .sgprs = 56, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 113, .sgprs = 56, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 5-bit 1x8: 202 VGPRs, 58 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 5-bit 1x8: 197 VGPRs, 59 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 5-bit 1x8: 197 VGPRs, 59 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 5-bit 1x8: 197 VGPRs, 59 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 5-bit 1x8: .usage = .{ .{ .vgprs = 202, .sgprs = 58, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 197, .sgprs = 59, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 197, .sgprs = 59, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 197, .sgprs = 59, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 5-bit 2x1: 83 VGPRs, 57 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 5-bit 2x1: 96 VGPRs, 60 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 5-bit 2x1: 96 VGPRs, 60 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 5-bit 2x1: 96 VGPRs, 61 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 5-bit 2x1: .usage = .{ .{ .vgprs = 83, .sgprs = 57, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 96, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 96, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 96, .sgprs = 61, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 5-bit 2x2: 78 VGPRs, 58 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 5-bit 2x2: 113 VGPRs, 60 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 5-bit 2x2: 113 VGPRs, 60 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 5-bit 2x2: 113 VGPRs, 61 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 5-bit 2x2: .usage = .{ .{ .vgprs = 78, .sgprs = 58, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 113, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 113, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 113, .sgprs = 61, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 5-bit 2x4: 106 VGPRs, 60 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 5-bit 2x4: 141 VGPRs, 62 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 5-bit 2x4: 141 VGPRs, 62 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 5-bit 2x4: 141 VGPRs, 63 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 5-bit 2x4: .usage = .{ .{ .vgprs = 106, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 141, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 141, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 141, .sgprs = 63, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 5-bit 2x8: 157 VGPRs, 64 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 5-bit 2x8: 194 VGPRs, 66 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 5-bit 2x8: 194 VGPRs, 66 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 5-bit 2x8: 194 VGPRs, 67 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 5-bit 2x8: .usage = .{ .{ .vgprs = 157, .sgprs = 64, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 194, .sgprs = 66, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 194, .sgprs = 66, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 194, .sgprs = 67, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 5-bit 4x1: 124 VGPRs, 65 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 5-bit 4x1: 132 VGPRs, 68 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 5-bit 4x1: 132 VGPRs, 68 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 5-bit 4x1: 132 VGPRs, 69 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 5-bit 4x1: .usage = .{ .{ .vgprs = 124, .sgprs = 65, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 132, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 132, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 132, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 5-bit 4x2: 115 VGPRs, 66 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 5-bit 4x2: 149 VGPRs, 68 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 5-bit 4x2: 149 VGPRs, 68 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 5-bit 4x2: 149 VGPRs, 69 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 5-bit 4x2: .usage = .{ .{ .vgprs = 115, .sgprs = 66, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 149, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 149, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 149, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 5-bit 4x4: 147 VGPRs, 68 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 5-bit 4x4: 180 VGPRs, 70 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 5-bit 4x4: 180 VGPRs, 70 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 5-bit 4x4: 181 VGPRs, 71 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 5-bit 4x4: .usage = .{ .{ .vgprs = 147, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 180, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 180, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 181, .sgprs = 71, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 6-bit 1x1: 64 VGPRs, 58 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 6-bit 1x1: 64 VGPRs, 57 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 6-bit 1x1: 64 VGPRs, 57 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 6-bit 1x1: 64 VGPRs, 57 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 6-bit 1x1: .usage = .{ .{ .vgprs = 64, .sgprs = 58, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 64, .sgprs = 57, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 64, .sgprs = 57, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 64, .sgprs = 57, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 6-bit 1x2: 74 VGPRs, 60 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 6-bit 1x2: 85 VGPRs, 61 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 6-bit 1x2: 85 VGPRs, 61 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 6-bit 1x2: 85 VGPRs, 61 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 6-bit 1x2: .usage = .{ .{ .vgprs = 74, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 85, .sgprs = 61, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 85, .sgprs = 61, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 85, .sgprs = 61, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 6-bit 1x4: 127 VGPRs, 62 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 6-bit 1x4: 121 VGPRs, 63 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 6-bit 1x4: 121 VGPRs, 63 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 6-bit 1x4: 121 VGPRs, 63 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 6-bit 1x4: .usage = .{ .{ .vgprs = 127, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 121, .sgprs = 63, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 121, .sgprs = 63, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 121, .sgprs = 63, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 6-bit 1x8: 219 VGPRs, 65 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 6-bit 1x8: 213 VGPRs, 66 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 6-bit 1x8: 213 VGPRs, 66 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 6-bit 1x8: 213 VGPRs, 66 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 6-bit 1x8: .usage = .{ .{ .vgprs = 219, .sgprs = 65, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 213, .sgprs = 66, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 213, .sgprs = 66, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 213, .sgprs = 66, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 6-bit 2x1: 86 VGPRs, 65 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 6-bit 2x1: 98 VGPRs, 68 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 6-bit 2x1: 98 VGPRs, 68 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 6-bit 2x1: 98 VGPRs, 69 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 6-bit 2x1: .usage = .{ .{ .vgprs = 86, .sgprs = 65, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 98, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 98, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 98, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 6-bit 2x2: 107 VGPRs, 65 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 6-bit 2x2: 113 VGPRs, 67 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 6-bit 2x2: 113 VGPRs, 67 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 6-bit 2x2: 113 VGPRs, 68 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 6-bit 2x2: .usage = .{ .{ .vgprs = 107, .sgprs = 65, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 113, .sgprs = 67, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 113, .sgprs = 67, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 113, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 6-bit 2x4: 133 VGPRs, 67 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 6-bit 2x4: 143 VGPRs, 69 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 6-bit 2x4: 143 VGPRs, 69 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 6-bit 2x4: 143 VGPRs, 70 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 6-bit 2x4: .usage = .{ .{ .vgprs = 133, .sgprs = 67, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 143, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 143, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 143, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 6-bit 2x8: 193 VGPRs, 71 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 6-bit 2x8: 200 VGPRs, 73 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 6-bit 2x8: 200 VGPRs, 73 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 6-bit 2x8: 200 VGPRs, 74 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 6-bit 2x8: .usage = .{ .{ .vgprs = 193, .sgprs = 71, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 200, .sgprs = 73, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 200, .sgprs = 73, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 200, .sgprs = 74, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 6-bit 4x1: 123 VGPRs, 73 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 6-bit 4x1: 134 VGPRs, 76 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 6-bit 4x1: 134 VGPRs, 76 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 6-bit 4x1: 134 VGPRs, 77 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 6-bit 4x1: .usage = .{ .{ .vgprs = 123, .sgprs = 73, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 134, .sgprs = 76, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 134, .sgprs = 76, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 134, .sgprs = 77, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 6-bit 4x2: 141 VGPRs, 73 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 6-bit 4x2: 148 VGPRs, 75 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 6-bit 4x2: 148 VGPRs, 75 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 6-bit 4x2: 148 VGPRs, 76 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 6-bit 4x2: .usage = .{ .{ .vgprs = 141, .sgprs = 73, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 148, .sgprs = 75, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 148, .sgprs = 75, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 148, .sgprs = 76, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 6-bit 4x4: 175 VGPRs, 75 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 6-bit 4x4: 182 VGPRs, 77 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 6-bit 4x4: 182 VGPRs, 77 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 6-bit 4x4: 182 VGPRs, 78 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 6-bit 4x4: .usage = .{ .{ .vgprs = 175, .sgprs = 75, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 182, .sgprs = 77, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 182, .sgprs = 77, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 182, .sgprs = 78, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 8-bit 1x1: 64 VGPRs, 55 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 8-bit 1x1: 68 VGPRs, 54 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 8-bit 1x1: 68 VGPRs, 54 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 8-bit 1x1: 68 VGPRs, 56 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 8-bit 1x1: .usage = .{ .{ .vgprs = 64, .sgprs = 55, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 68, .sgprs = 54, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 68, .sgprs = 54, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 68, .sgprs = 56, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 8-bit 1x2: 78 VGPRs, 57 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 8-bit 1x2: 95 VGPRs, 57 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 8-bit 1x2: 95 VGPRs, 57 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 8-bit 1x2: 95 VGPRs, 59 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 8-bit 1x2: .usage = .{ .{ .vgprs = 78, .sgprs = 57, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 95, .sgprs = 57, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 95, .sgprs = 57, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 95, .sgprs = 59, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 8-bit 1x4: 136 VGPRs, 59 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 8-bit 1x4: 137 VGPRs, 59 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 8-bit 1x4: 137 VGPRs, 59 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 8-bit 1x4: 137 VGPRs, 61 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 8-bit 1x4: .usage = .{ .{ .vgprs = 136, .sgprs = 59, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 137, .sgprs = 59, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 137, .sgprs = 59, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 137, .sgprs = 61, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 8-bit 1x8: 250 VGPRs, 62 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 8-bit 1x8: 256 VGPRs, 62 SGPRs, 0 LDS bytes, 132 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 8-bit 1x8: 256 VGPRs, 62 SGPRs, 0 LDS bytes, 132 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 8-bit 1x8: 256 VGPRs, 64 SGPRs, 0 LDS bytes, 132 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 8-bit 1x8: .usage = .{ .{ .vgprs = 250, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 256, .sgprs = 62, .lds = 0, .private = 132, .bound = 128, .wave = 32 }, .{ .vgprs = 256, .sgprs = 62, .lds = 0, .private = 132, .bound = 128, .wave = 32 }, .{ .vgprs = 256, .sgprs = 64, .lds = 0, .private = 132, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 8-bit 2x1: 78 VGPRs, 62 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 8-bit 2x1: 96 VGPRs, 64 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 8-bit 2x1: 96 VGPRs, 64 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 8-bit 2x1: 96 VGPRs, 67 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 8-bit 2x1: .usage = .{ .{ .vgprs = 78, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 96, .sgprs = 64, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 96, .sgprs = 64, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 96, .sgprs = 67, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 8-bit 2x2: 98 VGPRs, 62 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 8-bit 2x2: 105 VGPRs, 63 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 8-bit 2x2: 105 VGPRs, 63 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 8-bit 2x2: 105 VGPRs, 66 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 8-bit 2x2: .usage = .{ .{ .vgprs = 98, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 105, .sgprs = 63, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 105, .sgprs = 63, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 105, .sgprs = 66, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 8-bit 2x4: 134 VGPRs, 64 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 8-bit 2x4: 141 VGPRs, 65 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 8-bit 2x4: 141 VGPRs, 65 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 8-bit 2x4: 141 VGPRs, 68 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 8-bit 2x4: .usage = .{ .{ .vgprs = 134, .sgprs = 64, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 141, .sgprs = 65, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 141, .sgprs = 65, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 141, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 8-bit 2x8: 195 VGPRs, 68 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 8-bit 2x8: 205 VGPRs, 69 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 8-bit 2x8: 205 VGPRs, 69 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 8-bit 2x8: 205 VGPRs, 72 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 8-bit 2x8: .usage = .{ .{ .vgprs = 195, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 205, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 205, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 205, .sgprs = 72, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 8-bit 4x1: 114 VGPRs, 70 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 8-bit 4x1: 132 VGPRs, 72 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 8-bit 4x1: 132 VGPRs, 72 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 8-bit 4x1: 132 VGPRs, 75 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 8-bit 4x1: .usage = .{ .{ .vgprs = 114, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 132, .sgprs = 72, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 132, .sgprs = 72, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 132, .sgprs = 75, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 8-bit 4x2: 131 VGPRs, 70 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 8-bit 4x2: 155 VGPRs, 71 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 8-bit 4x2: 155 VGPRs, 71 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 8-bit 4x2: 155 VGPRs, 74 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 8-bit 4x2: .usage = .{ .{ .vgprs = 131, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 155, .sgprs = 71, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 155, .sgprs = 71, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 155, .sgprs = 74, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 plain stream tile 8-bit 4x4: 193 VGPRs, 72 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 plain stream tile 8-bit 4x4: 195 VGPRs, 73 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 plain stream tile 8-bit 4x4: 195 VGPRs, 73 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 plain stream tile 8-bit 4x4: 195 VGPRs, 76 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD plain stream tile 8-bit 4x4: .usage = .{ .{ .vgprs = 193, .sgprs = 72, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 195, .sgprs = 73, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 195, .sgprs = 73, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 195, .sgprs = 76, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 2-bit 1x2: 59 VGPRs, 55 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 2-bit 1x2: 72 VGPRs, 56 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 2-bit 1x2: 72 VGPRs, 56 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 2-bit 1x2: 72 VGPRs, 58 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 2-bit 1x2: .usage = .{ .{ .vgprs = 59, .sgprs = 55, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 72, .sgprs = 56, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 72, .sgprs = 56, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 72, .sgprs = 58, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 2-bit 1x4: 96 VGPRs, 57 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 2-bit 1x4: 91 VGPRs, 58 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 2-bit 1x4: 91 VGPRs, 58 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 2-bit 1x4: 91 VGPRs, 60 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 2-bit 1x4: .usage = .{ .{ .vgprs = 96, .sgprs = 57, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 91, .sgprs = 58, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 91, .sgprs = 58, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 91, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 2-bit 1x8: 158 VGPRs, 59 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 2-bit 1x8: 158 VGPRs, 60 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 2-bit 1x8: 158 VGPRs, 60 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 2-bit 1x8: 158 VGPRs, 62 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 2-bit 1x8: .usage = .{ .{ .vgprs = 158, .sgprs = 59, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 158, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 158, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 158, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 2-bit 2x2: 82 VGPRs, 61 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 2-bit 2x2: 105 VGPRs, 62 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 2-bit 2x2: 105 VGPRs, 62 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 2-bit 2x2: 105 VGPRs, 66 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 2-bit 2x2: .usage = .{ .{ .vgprs = 82, .sgprs = 61, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 105, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 105, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 105, .sgprs = 66, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 2-bit 2x4: 110 VGPRs, 62 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 2-bit 2x4: 128 VGPRs, 63 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 2-bit 2x4: 128 VGPRs, 63 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 2-bit 2x4: 128 VGPRs, 67 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 2-bit 2x4: .usage = .{ .{ .vgprs = 110, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 128, .sgprs = 63, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 128, .sgprs = 63, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 128, .sgprs = 67, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 2-bit 2x8: 147 VGPRs, 65 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 2-bit 2x8: 171 VGPRs, 66 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 2-bit 2x8: 171 VGPRs, 66 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 2-bit 2x8: 171 VGPRs, 70 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 2-bit 2x8: .usage = .{ .{ .vgprs = 147, .sgprs = 65, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 171, .sgprs = 66, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 171, .sgprs = 66, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 171, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 2-bit 4x2: 140 VGPRs, 69 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 2-bit 4x2: 144 VGPRs, 70 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 2-bit 4x2: 144 VGPRs, 70 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 2-bit 4x2: 144 VGPRs, 74 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 2-bit 4x2: .usage = .{ .{ .vgprs = 140, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 144, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 144, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 144, .sgprs = 74, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 2-bit 4x4: 147 VGPRs, 70 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 2-bit 4x4: 171 VGPRs, 71 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 2-bit 4x4: 171 VGPRs, 71 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 2-bit 4x4: 171 VGPRs, 75 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 2-bit 4x4: .usage = .{ .{ .vgprs = 147, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 171, .sgprs = 71, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 171, .sgprs = 71, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 171, .sgprs = 75, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 3-bit 1x2: 67 VGPRs, 52 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 3-bit 1x2: 74 VGPRs, 53 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 3-bit 1x2: 74 VGPRs, 53 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 3-bit 1x2: 74 VGPRs, 53 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 3-bit 1x2: .usage = .{ .{ .vgprs = 67, .sgprs = 52, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 74, .sgprs = 53, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 74, .sgprs = 53, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 74, .sgprs = 53, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 3-bit 1x4: 95 VGPRs, 53 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 3-bit 1x4: 96 VGPRs, 53 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 3-bit 1x4: 96 VGPRs, 53 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 3-bit 1x4: 96 VGPRs, 53 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 3-bit 1x4: .usage = .{ .{ .vgprs = 95, .sgprs = 53, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 96, .sgprs = 53, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 96, .sgprs = 53, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 96, .sgprs = 53, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 3-bit 1x8: 175 VGPRs, 55 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 3-bit 1x8: 169 VGPRs, 56 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 3-bit 1x8: 169 VGPRs, 56 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 3-bit 1x8: 169 VGPRs, 56 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 3-bit 1x8: .usage = .{ .{ .vgprs = 175, .sgprs = 55, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 169, .sgprs = 56, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 169, .sgprs = 56, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 169, .sgprs = 56, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 3-bit 2x2: 73 VGPRs, 58 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 3-bit 2x2: 109 VGPRs, 59 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 3-bit 2x2: 109 VGPRs, 59 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 3-bit 2x2: 109 VGPRs, 61 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 3-bit 2x2: .usage = .{ .{ .vgprs = 73, .sgprs = 58, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 109, .sgprs = 59, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 109, .sgprs = 59, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 109, .sgprs = 61, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 3-bit 2x4: 93 VGPRs, 60 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 3-bit 2x4: 94 VGPRs, 61 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 3-bit 2x4: 94 VGPRs, 61 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 3-bit 2x4: 94 VGPRs, 63 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 3-bit 2x4: .usage = .{ .{ .vgprs = 93, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 94, .sgprs = 61, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 94, .sgprs = 61, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 94, .sgprs = 63, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 3-bit 2x8: 142 VGPRs, 62 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 3-bit 2x8: 176 VGPRs, 63 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 3-bit 2x8: 176 VGPRs, 63 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 3-bit 2x8: 176 VGPRs, 65 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 3-bit 2x8: .usage = .{ .{ .vgprs = 142, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 176, .sgprs = 63, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 176, .sgprs = 63, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 176, .sgprs = 65, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 3-bit 4x2: 111 VGPRs, 66 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 3-bit 4x2: 144 VGPRs, 67 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 3-bit 4x2: 144 VGPRs, 67 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 3-bit 4x2: 144 VGPRs, 69 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 3-bit 4x2: .usage = .{ .{ .vgprs = 111, .sgprs = 66, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 144, .sgprs = 67, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 144, .sgprs = 67, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 144, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 3-bit 4x4: 140 VGPRs, 68 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 3-bit 4x4: 138 VGPRs, 69 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 3-bit 4x4: 138 VGPRs, 69 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 3-bit 4x4: 138 VGPRs, 71 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 3-bit 4x4: .usage = .{ .{ .vgprs = 140, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 138, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 138, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 138, .sgprs = 71, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 4-bit 1x2: 59 VGPRs, 55 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 4-bit 1x2: 75 VGPRs, 56 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 4-bit 1x2: 75 VGPRs, 56 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 4-bit 1x2: 75 VGPRs, 58 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 4-bit 1x2: .usage = .{ .{ .vgprs = 59, .sgprs = 55, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 75, .sgprs = 56, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 75, .sgprs = 56, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 75, .sgprs = 58, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 4-bit 1x4: 112 VGPRs, 57 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 4-bit 1x4: 119 VGPRs, 58 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 4-bit 1x4: 119 VGPRs, 58 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 4-bit 1x4: 119 VGPRs, 60 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 4-bit 1x4: .usage = .{ .{ .vgprs = 112, .sgprs = 57, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 119, .sgprs = 58, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 119, .sgprs = 58, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 119, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 4-bit 1x8: 191 VGPRs, 59 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 4-bit 1x8: 190 VGPRs, 60 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 4-bit 1x8: 190 VGPRs, 60 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 4-bit 1x8: 190 VGPRs, 62 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 4-bit 1x8: .usage = .{ .{ .vgprs = 191, .sgprs = 59, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 190, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 190, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 190, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 4-bit 2x2: 83 VGPRs, 60 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 4-bit 2x2: 106 VGPRs, 61 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 4-bit 2x2: 106 VGPRs, 61 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 4-bit 2x2: 106 VGPRs, 65 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 4-bit 2x2: .usage = .{ .{ .vgprs = 83, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 106, .sgprs = 61, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 106, .sgprs = 61, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 106, .sgprs = 65, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 4-bit 2x4: 116 VGPRs, 63 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 4-bit 2x4: 134 VGPRs, 64 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 4-bit 2x4: 134 VGPRs, 64 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 4-bit 2x4: 134 VGPRs, 68 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 4-bit 2x4: .usage = .{ .{ .vgprs = 116, .sgprs = 63, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 134, .sgprs = 64, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 134, .sgprs = 64, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 134, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 4-bit 2x8: 163 VGPRs, 65 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 4-bit 2x8: 184 VGPRs, 66 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 4-bit 2x8: 184 VGPRs, 66 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 4-bit 2x8: 184 VGPRs, 70 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 4-bit 2x8: .usage = .{ .{ .vgprs = 163, .sgprs = 65, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 184, .sgprs = 66, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 184, .sgprs = 66, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 184, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 4-bit 4x2: 143 VGPRs, 68 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 4-bit 4x2: 145 VGPRs, 69 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 4-bit 4x2: 145 VGPRs, 69 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 4-bit 4x2: 145 VGPRs, 73 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 4-bit 4x2: .usage = .{ .{ .vgprs = 143, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 145, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 145, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 145, .sgprs = 73, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 4-bit 4x4: 174 VGPRs, 71 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 4-bit 4x4: 179 VGPRs, 72 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 4-bit 4x4: 179 VGPRs, 72 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 4-bit 4x4: 179 VGPRs, 76 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 4-bit 4x4: .usage = .{ .{ .vgprs = 174, .sgprs = 71, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 179, .sgprs = 72, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 179, .sgprs = 72, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 179, .sgprs = 76, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 5-bit 1x2: 64 VGPRs, 52 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 5-bit 1x2: 76 VGPRs, 53 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 5-bit 1x2: 76 VGPRs, 53 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 5-bit 1x2: 76 VGPRs, 53 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 5-bit 1x2: .usage = .{ .{ .vgprs = 64, .sgprs = 52, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 76, .sgprs = 53, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 76, .sgprs = 53, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 76, .sgprs = 53, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 5-bit 1x4: 111 VGPRs, 53 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 5-bit 1x4: 112 VGPRs, 53 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 5-bit 1x4: 112 VGPRs, 53 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 5-bit 1x4: 112 VGPRs, 53 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 5-bit 1x4: .usage = .{ .{ .vgprs = 111, .sgprs = 53, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 112, .sgprs = 53, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 112, .sgprs = 53, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 112, .sgprs = 53, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 5-bit 1x8: 206 VGPRs, 55 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 5-bit 1x8: 201 VGPRs, 56 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 5-bit 1x8: 201 VGPRs, 56 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 5-bit 1x8: 201 VGPRs, 56 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 5-bit 1x8: .usage = .{ .{ .vgprs = 206, .sgprs = 55, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 201, .sgprs = 56, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 201, .sgprs = 56, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 201, .sgprs = 56, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 5-bit 2x2: 75 VGPRs, 58 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 5-bit 2x2: 75 VGPRs, 59 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 5-bit 2x2: 75 VGPRs, 59 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 5-bit 2x2: 75 VGPRs, 61 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 5-bit 2x2: .usage = .{ .{ .vgprs = 75, .sgprs = 58, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 75, .sgprs = 59, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 75, .sgprs = 59, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 75, .sgprs = 61, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 5-bit 2x4: 104 VGPRs, 60 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 5-bit 2x4: 104 VGPRs, 61 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 5-bit 2x4: 104 VGPRs, 61 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 5-bit 2x4: 104 VGPRs, 63 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 5-bit 2x4: .usage = .{ .{ .vgprs = 104, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 104, .sgprs = 61, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 104, .sgprs = 61, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 104, .sgprs = 63, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 5-bit 2x8: 158 VGPRs, 62 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 5-bit 2x8: 190 VGPRs, 63 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 5-bit 2x8: 190 VGPRs, 63 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 5-bit 2x8: 190 VGPRs, 65 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 5-bit 2x8: .usage = .{ .{ .vgprs = 158, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 190, .sgprs = 63, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 190, .sgprs = 63, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 190, .sgprs = 65, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 5-bit 4x2: 109 VGPRs, 66 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 5-bit 4x2: 113 VGPRs, 67 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 5-bit 4x2: 113 VGPRs, 67 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 5-bit 4x2: 113 VGPRs, 69 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 5-bit 4x2: .usage = .{ .{ .vgprs = 109, .sgprs = 66, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 113, .sgprs = 67, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 113, .sgprs = 67, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 113, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 5-bit 4x4: 142 VGPRs, 68 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 5-bit 4x4: 143 VGPRs, 69 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 5-bit 4x4: 143 VGPRs, 69 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 5-bit 4x4: 143 VGPRs, 71 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 5-bit 4x4: .usage = .{ .{ .vgprs = 142, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 143, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 143, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 143, .sgprs = 71, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 6-bit 1x2: 71 VGPRs, 59 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 6-bit 1x2: 82 VGPRs, 60 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 6-bit 1x2: 82 VGPRs, 60 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 6-bit 1x2: 82 VGPRs, 60 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 6-bit 1x2: .usage = .{ .{ .vgprs = 71, .sgprs = 59, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 82, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 82, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 82, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 6-bit 1x4: 127 VGPRs, 61 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 6-bit 1x4: 121 VGPRs, 62 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 6-bit 1x4: 121 VGPRs, 62 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 6-bit 1x4: 121 VGPRs, 63 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 6-bit 1x4: .usage = .{ .{ .vgprs = 127, .sgprs = 61, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 121, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 121, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 121, .sgprs = 63, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 6-bit 1x8: 223 VGPRs, 63 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 6-bit 1x8: 217 VGPRs, 64 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 6-bit 1x8: 217 VGPRs, 64 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 6-bit 1x8: 217 VGPRs, 64 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 6-bit 1x8: .usage = .{ .{ .vgprs = 223, .sgprs = 63, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 217, .sgprs = 64, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 217, .sgprs = 64, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 217, .sgprs = 64, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 6-bit 2x2: 100 VGPRs, 65 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 6-bit 2x2: 108 VGPRs, 66 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 6-bit 2x2: 108 VGPRs, 66 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 6-bit 2x2: 108 VGPRs, 68 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 6-bit 2x2: .usage = .{ .{ .vgprs = 100, .sgprs = 65, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 108, .sgprs = 66, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 108, .sgprs = 66, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 108, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 6-bit 2x4: 133 VGPRs, 67 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 6-bit 2x4: 141 VGPRs, 68 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 6-bit 2x4: 141 VGPRs, 68 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 6-bit 2x4: 141 VGPRs, 70 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 6-bit 2x4: .usage = .{ .{ .vgprs = 133, .sgprs = 67, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 141, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 141, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 141, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 6-bit 2x8: 189 VGPRs, 69 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 6-bit 2x8: 196 VGPRs, 70 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 6-bit 2x8: 196 VGPRs, 70 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 6-bit 2x8: 196 VGPRs, 72 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 6-bit 2x8: .usage = .{ .{ .vgprs = 189, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 196, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 196, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 196, .sgprs = 72, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 6-bit 4x2: 138 VGPRs, 73 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 6-bit 4x2: 145 VGPRs, 74 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 6-bit 4x2: 145 VGPRs, 74 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 6-bit 4x2: 145 VGPRs, 76 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 6-bit 4x2: .usage = .{ .{ .vgprs = 138, .sgprs = 73, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 145, .sgprs = 74, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 145, .sgprs = 74, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 145, .sgprs = 76, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 6-bit 4x4: 173 VGPRs, 75 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 6-bit 4x4: 180 VGPRs, 76 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 6-bit 4x4: 180 VGPRs, 76 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 6-bit 4x4: 180 VGPRs, 78 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 6-bit 4x4: .usage = .{ .{ .vgprs = 173, .sgprs = 75, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 180, .sgprs = 76, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 180, .sgprs = 76, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 180, .sgprs = 78, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 8-bit 1x2: 75 VGPRs, 55 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 8-bit 1x2: 94 VGPRs, 56 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 8-bit 1x2: 94 VGPRs, 56 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 8-bit 1x2: 94 VGPRs, 58 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 8-bit 1x2: .usage = .{ .{ .vgprs = 75, .sgprs = 55, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 94, .sgprs = 56, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 94, .sgprs = 56, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 94, .sgprs = 58, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 8-bit 1x4: 136 VGPRs, 57 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 8-bit 1x4: 137 VGPRs, 58 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 8-bit 1x4: 137 VGPRs, 58 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 8-bit 1x4: 137 VGPRs, 60 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 8-bit 1x4: .usage = .{ .{ .vgprs = 136, .sgprs = 57, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 137, .sgprs = 58, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 137, .sgprs = 58, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 137, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 8-bit 1x8: 254 VGPRs, 59 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 8-bit 1x8: 235 VGPRs, 60 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 8-bit 1x8: 235 VGPRs, 60 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 8-bit 1x8: 235 VGPRs, 62 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 8-bit 1x8: .usage = .{ .{ .vgprs = 254, .sgprs = 59, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 235, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 235, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 235, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 8-bit 2x2: 95 VGPRs, 61 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 8-bit 2x2: 102 VGPRs, 62 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 8-bit 2x2: 102 VGPRs, 62 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 8-bit 2x2: 102 VGPRs, 66 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 8-bit 2x2: .usage = .{ .{ .vgprs = 95, .sgprs = 61, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 102, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 102, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 102, .sgprs = 66, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 8-bit 2x4: 132 VGPRs, 63 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 8-bit 2x4: 139 VGPRs, 64 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 8-bit 2x4: 139 VGPRs, 64 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 8-bit 2x4: 139 VGPRs, 68 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 8-bit 2x4: .usage = .{ .{ .vgprs = 132, .sgprs = 63, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 139, .sgprs = 64, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 139, .sgprs = 64, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 139, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 8-bit 2x8: 191 VGPRs, 65 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 8-bit 2x8: 201 VGPRs, 66 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 8-bit 2x8: 201 VGPRs, 66 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 8-bit 2x8: 201 VGPRs, 70 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 8-bit 2x8: .usage = .{ .{ .vgprs = 191, .sgprs = 65, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 201, .sgprs = 66, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 201, .sgprs = 66, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 201, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 8-bit 4x2: 128 VGPRs, 69 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 8-bit 4x2: 152 VGPRs, 70 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 8-bit 4x2: 152 VGPRs, 70 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 8-bit 4x2: 152 VGPRs, 74 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 8-bit 4x2: .usage = .{ .{ .vgprs = 128, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 152, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 152, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 152, .sgprs = 74, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 swiglu stream tile 8-bit 4x4: 191 VGPRs, 71 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 swiglu stream tile 8-bit 4x4: 193 VGPRs, 72 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 swiglu stream tile 8-bit 4x4: 193 VGPRs, 72 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 swiglu stream tile 8-bit 4x4: 193 VGPRs, 76 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD swiglu stream tile 8-bit 4x4: .usage = .{ .{ .vgprs = 191, .sgprs = 71, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 193, .sgprs = 72, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 193, .sgprs = 72, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 193, .sgprs = 76, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 held stream tile 4-bit 4x1: 100 VGPRs, 70 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 held stream tile 4-bit 4x1: 99 VGPRs, 72 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 held stream tile 4-bit 4x1: 99 VGPRs, 72 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 held stream tile 4-bit 4x1: 99 VGPRs, 75 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD held stream tile 4-bit 4x1: .usage = .{ .{ .vgprs = 100, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 99, .sgprs = 72, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 99, .sgprs = 72, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 99, .sgprs = 75, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 held stream tile 4-bit 4x2: 126 VGPRs, 70 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 held stream tile 4-bit 4x2: 128 VGPRs, 71 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 held stream tile 4-bit 4x2: 128 VGPRs, 71 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 held stream tile 4-bit 4x2: 128 VGPRs, 74 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD held stream tile 4-bit 4x2: .usage = .{ .{ .vgprs = 126, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 128, .sgprs = 71, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 128, .sgprs = 71, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 128, .sgprs = 74, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 held stream tile 4-bit 4x4: 180 VGPRs, 72 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 held stream tile 4-bit 4x4: 180 VGPRs, 73 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 held stream tile 4-bit 4x4: 180 VGPRs, 73 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 held stream tile 4-bit 4x4: 180 VGPRs, 76 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD held stream tile 4-bit 4x4: .usage = .{ .{ .vgprs = 180, .sgprs = 72, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 180, .sgprs = 73, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 180, .sgprs = 73, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 180, .sgprs = 76, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 held stream tile 4-bit 8x2: 201 VGPRs, 91 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 held stream tile 4-bit 8x2: 200 VGPRs, 90 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 held stream tile 4-bit 8x2: 200 VGPRs, 90 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 held stream tile 4-bit 8x2: 200 VGPRs, 91 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD held stream tile 4-bit 8x2: .usage = .{ .{ .vgprs = 201, .sgprs = 91, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 200, .sgprs = 90, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 200, .sgprs = 90, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 200, .sgprs = 91, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 held stream tile 4-bit 8x4: 256 VGPRs, 98 SGPRs, 0 LDS bytes, 68 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 held stream tile 4-bit 8x4: 256 VGPRs, 92 SGPRs, 0 LDS bytes, 60 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 held stream tile 4-bit 8x4: 256 VGPRs, 92 SGPRs, 0 LDS bytes, 60 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 held stream tile 4-bit 8x4: 256 VGPRs, 94 SGPRs, 0 LDS bytes, 60 scratch bytes, bound 128, wave32 (record current)
+RECORD held stream tile 4-bit 8x4: .usage = .{ .{ .vgprs = 256, .sgprs = 98, .lds = 0, .private = 68, .bound = 128, .wave = 32 }, .{ .vgprs = 256, .sgprs = 92, .lds = 0, .private = 60, .bound = 128, .wave = 32 }, .{ .vgprs = 256, .sgprs = 92, .lds = 0, .private = 60, .bound = 128, .wave = 32 }, .{ .vgprs = 256, .sgprs = 94, .lds = 0, .private = 60, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 MoE plan count tf_route_count: 7 VGPRs, 13 SGPRs, 4096 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1100 MoE plan count tf_route_count: 7 VGPRs, 18 SGPRs, 4096 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1151 MoE plan count tf_route_count: 7 VGPRs, 13 SGPRs, 4096 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1201 MoE plan count tf_route_count: 7 VGPRs, 12 SGPRs, 4096 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+RECORD MoE plan count tf_route_count: .usage = .{ .{ .vgprs = 7, .sgprs = 13, .lds = 4096, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 7, .sgprs = 18, .lds = 4096, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 7, .sgprs = 13, .lds = 4096, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 7, .sgprs = 12, .lds = 4096, .private = 0, .bound = 256, .wave = 32 }, }
+PASS limits gfx1030 MoE plan scan tf_route_scan: 11 VGPRs, 15 SGPRs, 20480 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1100 MoE plan scan tf_route_scan: 11 VGPRs, 15 SGPRs, 20480 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1151 MoE plan scan tf_route_scan: 10 VGPRs, 16 SGPRs, 20480 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1201 MoE plan scan tf_route_scan: 10 VGPRs, 16 SGPRs, 20480 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+RECORD MoE plan scan tf_route_scan: .usage = .{ .{ .vgprs = 11, .sgprs = 15, .lds = 20480, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 11, .sgprs = 15, .lds = 20480, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 10, .sgprs = 16, .lds = 20480, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 10, .sgprs = 16, .lds = 20480, .private = 0, .bound = 1024, .wave = 32 }, }
+PASS limits gfx1030 MoE plan scatter tf_route_scatter: 14 VGPRs, 14 SGPRs, 2048 LDS bytes, 0 scratch bytes, bound 512, wave32 (record current)
+PASS limits gfx1100 MoE plan scatter tf_route_scatter: 14 VGPRs, 18 SGPRs, 2048 LDS bytes, 0 scratch bytes, bound 512, wave32 (record current)
+PASS limits gfx1151 MoE plan scatter tf_route_scatter: 14 VGPRs, 14 SGPRs, 2048 LDS bytes, 0 scratch bytes, bound 512, wave32 (record current)
+PASS limits gfx1201 MoE plan scatter tf_route_scatter: 14 VGPRs, 12 SGPRs, 2048 LDS bytes, 0 scratch bytes, bound 512, wave32 (record current)
+RECORD MoE plan scatter tf_route_scatter: .usage = .{ .{ .vgprs = 14, .sgprs = 14, .lds = 2048, .private = 0, .bound = 512, .wave = 32 }, .{ .vgprs = 14, .sgprs = 18, .lds = 2048, .private = 0, .bound = 512, .wave = 32 }, .{ .vgprs = 14, .sgprs = 14, .lds = 2048, .private = 0, .bound = 512, .wave = 32 }, .{ .vgprs = 14, .sgprs = 12, .lds = 2048, .private = 0, .bound = 512, .wave = 32 }, }
+PASS limits gfx1030 MoE prompt picks a wave a row tf_select_rows: 135 VGPRs, 49 SGPRs, 5428 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 MoE prompt picks a wave a row tf_select_rows: 135 VGPRs, 46 SGPRs, 5428 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 MoE prompt picks a wave a row tf_select_rows: 135 VGPRs, 50 SGPRs, 5428 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 MoE prompt picks a wave a row tf_select_rows: 135 VGPRs, 52 SGPRs, 5428 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD MoE prompt picks a wave a row tf_select_rows: .usage = .{ .{ .vgprs = 135, .sgprs = 49, .lds = 5428, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 135, .sgprs = 46, .lds = 5428, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 135, .sgprs = 50, .lds = 5428, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 135, .sgprs = 52, .lds = 5428, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 Flash Next index scores, 4 lanes a score: 184 VGPRs, 22 SGPRs, 32772 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 Flash Next index scores, 4 lanes a score: 184 VGPRs, 22 SGPRs, 32772 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 Flash Next index scores, 4 lanes a score: 184 VGPRs, 20 SGPRs, 32772 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 Flash Next index scores, 4 lanes a score: 184 VGPRs, 20 SGPRs, 32772 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD Flash Next index scores, 4 lanes a score: .usage = .{ .{ .vgprs = 184, .sgprs = 22, .lds = 32772, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 184, .sgprs = 22, .lds = 32772, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 184, .sgprs = 20, .lds = 32772, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 184, .sgprs = 20, .lds = 32772, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 Flash Next index scores, 8 rows a wave: 79 VGPRs, 26 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1100 Flash Next index scores, 8 rows a wave: 93 VGPRs, 26 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1151 Flash Next index scores, 8 rows a wave: 93 VGPRs, 26 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1201 Flash Next index scores, 8 rows a wave: 93 VGPRs, 44 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+RECORD Flash Next index scores, 8 rows a wave: .usage = .{ .{ .vgprs = 79, .sgprs = 26, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 93, .sgprs = 26, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 93, .sgprs = 26, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 93, .sgprs = 44, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, }
+N/A  limits gfx1030 Flash Next HC gate table tf_hc_gate_fill: not launched on this chip
+PASS limits gfx1100 Flash Next HC gate table tf_hc_gate_fill: 7 VGPRs, 18 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1151 Flash Next HC gate table tf_hc_gate_fill: 7 VGPRs, 4 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+N/A  limits gfx1201 Flash Next HC gate table tf_hc_gate_fill: not launched on this chip
+RECORD Flash Next HC gate table tf_hc_gate_fill: .usage = .{ .{ .vgprs = 0, .sgprs = 0, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 7, .sgprs = 18, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 7, .sgprs = 4, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 0, .sgprs = 0, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, }
+N/A  limits gfx1030 Flash Next HC mix tf_fn_hc_mix8: not launched on this chip
+PASS limits gfx1100 Flash Next HC mix tf_fn_hc_mix8: 68 VGPRs, 26 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1151 Flash Next HC mix tf_fn_hc_mix8: 68 VGPRs, 26 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1201 Flash Next HC mix tf_fn_hc_mix8: 68 VGPRs, 28 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+RECORD Flash Next HC mix tf_fn_hc_mix8: .usage = .{ .{ .vgprs = 0, .sgprs = 0, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 68, .sgprs = 26, .lds = 0, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 68, .sgprs = 26, .lds = 0, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 68, .sgprs = 28, .lds = 0, .private = 0, .bound = 1024, .wave = 32 }, }
+N/A  limits gfx1030 Flash Next HC norm tf_fn_hc_norm_v: not launched on this chip
+PASS limits gfx1100 Flash Next HC norm tf_fn_hc_norm_v: 77 VGPRs, 22 SGPRs, 128 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 Flash Next HC norm tf_fn_hc_norm_v: 77 VGPRs, 22 SGPRs, 128 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 Flash Next HC norm tf_fn_hc_norm_v: 77 VGPRs, 23 SGPRs, 128 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD Flash Next HC norm tf_fn_hc_norm_v: .usage = .{ .{ .vgprs = 0, .sgprs = 0, .lds = 0, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 77, .sgprs = 22, .lds = 128, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 77, .sgprs = 22, .lds = 128, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 77, .sgprs = 23, .lds = 128, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 Flash Next HC norm with the MoE combine tf_fn_hc_norm_moe: 19 VGPRs, 40 SGPRs, 128 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1100 Flash Next HC norm with the MoE combine tf_fn_hc_norm_moe: 19 VGPRs, 40 SGPRs, 128 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1151 Flash Next HC norm with the MoE combine tf_fn_hc_norm_moe: 19 VGPRs, 40 SGPRs, 128 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+PASS limits gfx1201 Flash Next HC norm with the MoE combine tf_fn_hc_norm_moe: 16 VGPRs, 42 SGPRs, 128 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current)
+RECORD Flash Next HC norm with the MoE combine tf_fn_hc_norm_moe: .usage = .{ .{ .vgprs = 19, .sgprs = 40, .lds = 128, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 19, .sgprs = 40, .lds = 128, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 19, .sgprs = 40, .lds = 128, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 16, .sgprs = 42, .lds = 128, .private = 0, .bound = 1024, .wave = 32 }, }
+N/A  limits gfx1030 Flash Next HC norm with the MoE combine, a block a row tf_fn_hc_norm_moe_v: not launched on this chip
+PASS limits gfx1100 Flash Next HC norm with the MoE combine, a block a row tf_fn_hc_norm_moe_v: 51 VGPRs, 30 SGPRs, 10752 LDS bytes, 0 scratch bytes, bound 512, wave32 (record current)
+PASS limits gfx1151 Flash Next HC norm with the MoE combine, a block a row tf_fn_hc_norm_moe_v: 59 VGPRs, 27 SGPRs, 10752 LDS bytes, 0 scratch bytes, bound 512, wave32 (record current)
+PASS limits gfx1201 Flash Next HC norm with the MoE combine, a block a row tf_fn_hc_norm_moe_v: 59 VGPRs, 30 SGPRs, 10752 LDS bytes, 0 scratch bytes, bound 512, wave32 (record current)
+RECORD Flash Next HC norm with the MoE combine, a block a row tf_fn_hc_norm_moe_v: .usage = .{ .{ .vgprs = 0, .sgprs = 0, .lds = 0, .private = 0, .bound = 512, .wave = 32 }, .{ .vgprs = 51, .sgprs = 30, .lds = 10752, .private = 0, .bound = 512, .wave = 32 }, .{ .vgprs = 59, .sgprs = 27, .lds = 10752, .private = 0, .bound = 512, .wave = 32 }, .{ .vgprs = 59, .sgprs = 30, .lds = 10752, .private = 0, .bound = 512, .wave = 32 }, }
+PASS limits gfx1030 DeltaNet tf_gdn_prompt_128: 175 VGPRs, 40 SGPRs, 20608 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1100 DeltaNet tf_gdn_prompt_128: 185 VGPRs, 39 SGPRs, 20608 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1151 DeltaNet tf_gdn_prompt_128: 185 VGPRs, 38 SGPRs, 20608 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+PASS limits gfx1201 DeltaNet tf_gdn_prompt_128: 185 VGPRs, 38 SGPRs, 20608 LDS bytes, 0 scratch bytes, bound 128, wave32 (record current)
+RECORD DeltaNet tf_gdn_prompt_128: .usage = .{ .{ .vgprs = 175, .sgprs = 40, .lds = 20608, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 185, .sgprs = 39, .lds = 20608, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 185, .sgprs = 38, .lds = 20608, .private = 0, .bound = 128, .wave = 32 }, .{ .vgprs = 185, .sgprs = 38, .lds = 20608, .private = 0, .bound = 128, .wave = 32 }, }
+PASS limits gfx1030 DeltaNet tf_gdn_prompt_prep: 92 VGPRs, 59 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1100 DeltaNet tf_gdn_prompt_prep: 93 VGPRs, 59 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1151 DeltaNet tf_gdn_prompt_prep: 93 VGPRs, 59 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1201 DeltaNet tf_gdn_prompt_prep: 93 VGPRs, 60 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+RECORD DeltaNet tf_gdn_prompt_prep: .usage = .{ .{ .vgprs = 92, .sgprs = 59, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 93, .sgprs = 59, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 93, .sgprs = 59, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 93, .sgprs = 60, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, }
+PASS limits gfx1030 DeltaNet tf_gdn_hold_128: 38 VGPRs, 42 SGPRs, 17024 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1100 DeltaNet tf_gdn_hold_128: 38 VGPRs, 42 SGPRs, 17024 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1151 DeltaNet tf_gdn_hold_128: 38 VGPRs, 38 SGPRs, 17024 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1201 DeltaNet tf_gdn_hold_128: 38 VGPRs, 40 SGPRs, 17024 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+RECORD DeltaNet tf_gdn_hold_128: .usage = .{ .{ .vgprs = 38, .sgprs = 42, .lds = 17024, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 38, .sgprs = 42, .lds = 17024, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 38, .sgprs = 38, .lds = 17024, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 38, .sgprs = 40, .lds = 17024, .private = 0, .bound = 256, .wave = 32 }, }
+PASS limits gfx1030 DeltaNet tf_gdn_hold_16: 31 VGPRs, 36 SGPRs, 2688 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1100 DeltaNet tf_gdn_hold_16: 31 VGPRs, 38 SGPRs, 2688 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1151 DeltaNet tf_gdn_hold_16: 31 VGPRs, 36 SGPRs, 2688 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1201 DeltaNet tf_gdn_hold_16: 31 VGPRs, 38 SGPRs, 2688 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+RECORD DeltaNet tf_gdn_hold_16: .usage = .{ .{ .vgprs = 31, .sgprs = 36, .lds = 2688, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 31, .sgprs = 38, .lds = 2688, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 31, .sgprs = 36, .lds = 2688, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 31, .sgprs = 38, .lds = 2688, .private = 0, .bound = 256, .wave = 32 }, }
+PASS limits gfx1030 DeltaNet tf_gdn_keep_128: 39 VGPRs, 31 SGPRs, 8832 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1100 DeltaNet tf_gdn_keep_128: 39 VGPRs, 31 SGPRs, 8832 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1151 DeltaNet tf_gdn_keep_128: 39 VGPRs, 31 SGPRs, 8832 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1201 DeltaNet tf_gdn_keep_128: 39 VGPRs, 34 SGPRs, 8832 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+RECORD DeltaNet tf_gdn_keep_128: .usage = .{ .{ .vgprs = 39, .sgprs = 31, .lds = 8832, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 39, .sgprs = 31, .lds = 8832, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 39, .sgprs = 31, .lds = 8832, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 39, .sgprs = 34, .lds = 8832, .private = 0, .bound = 256, .wave = 32 }, }
+PASS limits gfx1030 DeltaNet tf_gdn_keep_16: 40 VGPRs, 29 SGPRs, 1664 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1100 DeltaNet tf_gdn_keep_16: 35 VGPRs, 28 SGPRs, 1664 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1151 DeltaNet tf_gdn_keep_16: 35 VGPRs, 28 SGPRs, 1664 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+PASS limits gfx1201 DeltaNet tf_gdn_keep_16: 35 VGPRs, 31 SGPRs, 1664 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current)
+RECORD DeltaNet tf_gdn_keep_16: .usage = .{ .{ .vgprs = 40, .sgprs = 29, .lds = 1664, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 35, .sgprs = 28, .lds = 1664, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 35, .sgprs = 28, .lds = 1664, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 35, .sgprs = 31, .lds = 1664, .private = 0, .bound = 256, .wave = 32 }, }
+RED  limits gfx1030 control: past its bounds: 4 VGPRs, 10 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current): control: past its bounds on gfx1030: launched at 512 threads past its bound 256
+RED  limits gfx1100 control: past its bounds: 4 VGPRs, 18 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current): control: past its bounds on gfx1100: launched at 512 threads past its bound 256
+RED  limits gfx1151 control: past its bounds: 4 VGPRs, 10 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current): control: past its bounds on gfx1151: launched at 512 threads past its bound 256
+RED  limits gfx1201 control: past its bounds: 4 VGPRs, 7 SGPRs, 0 LDS bytes, 0 scratch bytes, bound 256, wave32 (record current): control: past its bounds on gfx1201: launched at 512 threads past its bound 256
+RECORD control: past its bounds: .usage = .{ .{ .vgprs = 4, .sgprs = 10, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 4, .sgprs = 18, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 4, .sgprs = 10, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, .{ .vgprs = 4, .sgprs = 7, .lds = 0, .private = 0, .bound = 256, .wave = 32 }, }
+RED  limits gfx1030 control: 72 KiB of LDS: 6 VGPRs, 9 SGPRs, 40960 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current): control: 72 KiB of LDS on gfx1030: 73728 LDS bytes, the most a workgroup takes is 65536
+RED  limits gfx1100 control: 72 KiB of LDS: 6 VGPRs, 8 SGPRs, 40960 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current): control: 72 KiB of LDS on gfx1100: 73728 LDS bytes, the most a workgroup takes is 65536
+RED  limits gfx1151 control: 72 KiB of LDS: 6 VGPRs, 8 SGPRs, 40960 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current): control: 72 KiB of LDS on gfx1151: 73728 LDS bytes, the most a workgroup takes is 65536
+RED  limits gfx1201 control: 72 KiB of LDS: 6 VGPRs, 8 SGPRs, 40960 LDS bytes, 0 scratch bytes, bound 1024, wave32 (record current): control: 72 KiB of LDS on gfx1201: 73728 LDS bytes, the most a workgroup takes is 65536
+RECORD control: 72 KiB of LDS: .usage = .{ .{ .vgprs = 6, .sgprs = 9, .lds = 40960, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 6, .sgprs = 8, .lds = 40960, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 6, .sgprs = 8, .lds = 40960, .private = 0, .bound = 1024, .wave = 32 }, .{ .vgprs = 6, .sgprs = 8, .lds = 40960, .private = 0, .bound = 1024, .wave = 32 }, }
+PASS kernel-contract-limits: every registered launch fits gfx1030, gfx1100, gfx1151 and gfx1201, every record current, every control red

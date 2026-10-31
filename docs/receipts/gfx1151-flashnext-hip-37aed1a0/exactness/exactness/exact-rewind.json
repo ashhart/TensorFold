@@ -1,0 +1,66 @@
+{
+ "turn 1, drafts on": [
+  "The first note is **note0x0**.",
+  0
+ ],
+ "turn 2, drafts on": [
+  "The second note is **note1x828**.",
+  10176
+ ],
+ "turn 3, drafts on": [
+  "No, **note5x5** is not listed in the provided reference notes.\n\nThe list contains notes with hex suffixes (e.g., `note5x88`, `note5x587`, `note5",
+  10240
+ ],
+ "regenerate turn 3, drafts on": [
+  "No, **note5x5** is not listed in the provided reference notes.\n\nThe list contains notes with hex suffixes (e.g., `note5x88`, `note5x587`, `note5",
+  10240
+ ],
+ "edit turn 3, drafts on": [
+  "No, **note7x7** is not listed in the provided reference notes.\n\nThe notes follow a pattern where the second part (after the 'x') is a hexadecimal number (e.g., `note1x828",
+  10240
+ ],
+ "delete turn 3, then turn 4, drafts on": [
+  "The last note is **note75x247**.",
+  10240
+ ],
+ "edit turn 1, drafts on": [
+  "The third note is **note2x643**.",
+  10176
+ ],
+ "turn 2 again, drafts on": [
+  "The second note is **note1x828**.",
+  10240
+ ],
+ "turn 1, drafts off": [
+  "The first note is **note0x0**.",
+  10176
+ ],
+ "turn 2, drafts off": [
+  "The second note is **note1x828**.",
+  10240
+ ],
+ "turn 3, drafts off": [
+  "No, **note5x5** is not listed in the provided reference notes.\n\nThe list contains notes with hex suffixes (e.g., `note5x88`, `note5x587`, `note5",
+  10240
+ ],
+ "regenerate turn 3, drafts off": [
+  "No, **note5x5** is not listed in the provided reference notes.\n\nThe list contains notes with hex suffixes (e.g., `note5x88`, `note5x587`, `note5",
+  10240
+ ],
+ "edit turn 3, drafts off": [
+  "No, **note7x7** is not listed in the provided reference notes.\n\nThe notes follow a pattern where the second part (after the 'x') is a hexadecimal number (e.g., `note1x828",
+  10240
+ ],
+ "delete turn 3, then turn 4, drafts off": [
+  "The last note is **note75x247**.",
+  10240
+ ],
+ "edit turn 1, drafts off": [
+  "The third note is **note2x643**.",
+  10176
+ ],
+ "turn 2 again, drafts off": [
+  "The second note is **note1x828**.",
+  10240
+ ]
+}
