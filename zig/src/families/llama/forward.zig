@@ -32,9 +32,20 @@ const Enc = struct {
         if (groups) x.e.dispatchGroups(g3, t3) else x.e.dispatchThreads(g3, t3);
     }
 
-    /// y [rows, d.n] (rows `ldy` apart, from byte `out_off`) = x W^T: gemm_nax a prompt chunk, ll_matvec a window.
+    /// y [rows, d.n] (rows `ldy` apart, at byte `out_off`) = x W^T: the GEMM a prompt chunk, the row kernels a window.
     fn dense(x: Enc, d: wts.Dense, in: mtl.Buffer, out: mtl.Buffer, out_off: usize, n_rows: usize, ldy: usize) void {
         const e = x.e;
+        if (d.int4) |q| {
+            const ma = MArgs{ .rows = @intCast(n_rows), .n = @intCast(d.n), .k = @intCast(d.k), .ldy = @intCast(ldy) };
+            if (n_rows <= st.batch_rows) {
+                const variant: Glue = if (n_rows <= 1) .q4_matvec_1 else if (n_rows <= 2) .q4_matvec_2 else if (n_rows <= 4) .q4_matvec_4 else if (n_rows <= 8) .q4_matvec_8 else if (n_rows <= 16) .q4_matvec_16 else .q4_matvec_32;
+                x.glue(variant, ma, &.{ b(in), bo(d.buf, d.off), t(q.scales), t(q.zeros), A, bo(out, out_off) }, .{ (d.n + 7) / 8, 1, 1 }, .{ 256, 1, 1 }, true);
+                return;
+            }
+            // a prompt chunk: W as bf16 (as the decompressor makes it) into the scratch, then the bf16 GEMM on it
+            x.glue(.q4_dequant, ma, &.{ bo(d.buf, d.off), t(q.scales), t(q.zeros), A, b(x.s.wq) }, .{ d.k / 8, d.n, 1 }, .{ 128, 2, 1 }, false);
+            return x.gemmOn(.{ .buf = x.s.wq, .off = 0, .n = d.n, .k = d.k }, in, out, out_off, n_rows, ldy);
+        }
         if (n_rows <= st.batch_rows) {
             // the variant holding the rows in registers: 1, 2, 4, 8, 16 or 32
             const variant: Glue = if (n_rows <= 1) .matvec_1 else if (n_rows <= 2) .matvec_2 else if (n_rows <= 4) .matvec_4 else if (n_rows <= 8) .matvec_8 else if (n_rows <= 16) .matvec_16 else .matvec_32;
@@ -46,6 +57,12 @@ const Enc = struct {
             e.dispatchGroups(mtl.Size.of((d.n + 7) / 8, 1, 1), mtl.Size.of(256, 1, 1));
             return;
         }
+        x.gemmOn(d, in, out, out_off, n_rows, ldy);
+    }
+
+    /// The tensor-unit GEMM of a prompt chunk on bf16 d.
+    fn gemmOn(x: Enc, d: wts.Dense, in: mtl.Buffer, out: mtl.Buffer, out_off: usize, n_rows: usize, ldy: usize) void {
+        const e = x.e;
         const M: usize = n_rows;
         const tn = (d.n + 127) / 128;
         const tm = (M + 63) / 64;

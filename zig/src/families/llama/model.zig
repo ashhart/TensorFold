@@ -8,8 +8,8 @@ const shards = @import("../../core/checkpoint.zig");
 const frags = @import("../../core/frags.zig");
 const weights = @import("weights.zig");
 
-pub const glue_names = [_][:0]const u8{ "ll_embed", "ll_norm", "ll_add", "ll_add_norm", "ll_prep", "ll_silu_gu", "ll_decode_vec", "ll_merge_vec", "ll_argmax", "ll_matvec_1", "ll_matvec_2", "ll_matvec_4", "ll_matvec_8", "ll_matvec_16", "ll_matvec_32" };
-pub const Glue = enum { embed, norm, add, add_norm, prep, silu_gu, decode_vec, merge_vec, argmax, matvec_1, matvec_2, matvec_4, matvec_8, matvec_16, matvec_32 };
+pub const glue_names = [_][:0]const u8{ "ll_embed", "ll_norm", "ll_add", "ll_add_norm", "ll_prep", "ll_silu_gu", "ll_decode_vec", "ll_merge_vec", "ll_argmax", "ll_matvec_1", "ll_matvec_2", "ll_matvec_4", "ll_matvec_8", "ll_matvec_16", "ll_matvec_32", "ll_q4_matvec_1", "ll_q4_matvec_2", "ll_q4_matvec_4", "ll_q4_matvec_8", "ll_q4_matvec_16", "ll_q4_matvec_32", "ll_q4_dequant" };
+pub const Glue = enum { embed, norm, add, add_norm, prep, silu_gu, decode_vec, merge_vec, argmax, matvec_1, matvec_2, matvec_4, matvec_8, matvec_16, matvec_32, q4_matvec_1, q4_matvec_2, q4_matvec_4, q4_matvec_8, q4_matvec_16, q4_matvec_32, q4_dequant };
 
 pub const Model = struct {
     gpa: std.mem.Allocator,

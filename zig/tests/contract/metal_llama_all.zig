@@ -7,11 +7,13 @@ const llama = @import("metal_llama.zig");
 const dense = @import("metal_llama_dense.zig");
 const attention = @import("metal_llama_attention.zig");
 const controls = @import("metal_llama_controls.zig");
+const int4 = @import("metal_llama_int4.zig");
 const g = contract.gates;
 const family = llama.family;
 
 const matvec_rows = [_]u32{ 1, 2, 4, 8, 16, 32 };
 const matvec_names = [_][]const u8{ "ll_matvec_1", "ll_matvec_2", "ll_matvec_4", "ll_matvec_8", "ll_matvec_16", "ll_matvec_32" };
+const q4_names = [_][]const u8{ "ll_q4_matvec_1", "ll_q4_matvec_2", "ll_q4_matvec_4", "ll_q4_matvec_8", "ll_q4_matvec_16", "ll_q4_matvec_32" };
 
 fn wanted(only: ?[]const u8, name: []const u8) bool {
     const text = only orelse return true;
@@ -22,6 +24,8 @@ fn wanted(only: ?[]const u8, name: []const u8) bool {
 pub const Set = struct {
     glue: std.ArrayList(*llama.Glue) = .empty,
     matvec: std.ArrayList(*dense.Matvec) = .empty,
+    q4: std.ArrayList(*int4.Matvec) = .empty,
+    dequant: ?*int4.Dequant = null,
     gemm: std.ArrayList(*dense.Gemm) = .empty,
     argmax: std.ArrayList(*llama.Argmax) = .empty,
     decode: std.ArrayList(*attention.DecodeVec) = .empty,
@@ -38,6 +42,14 @@ pub const Set = struct {
             a.destroy(p);
         }
         for (s.gemm.items) |p| {
+            p.deinit();
+            a.destroy(p);
+        }
+        for (s.q4.items) |p| {
+            p.deinit();
+            a.destroy(p);
+        }
+        if (s.dequant) |p| {
             p.deinit();
             a.destroy(p);
         }
@@ -63,6 +75,7 @@ pub const Set = struct {
         s.glue.deinit(a);
         s.matvec.deinit(a);
         s.gemm.deinit(a);
+        s.q4.deinit(a);
         s.prompt.deinit(a);
     }
 
@@ -116,6 +129,26 @@ pub const Set = struct {
             errdefer a.destroy(p);
             p.* = try dense.Matvec.init(a, device, queue, rows, .none);
             try s.matvec.append(a, p);
+            try kernels.append(a, p.kernel());
+        }
+        for (matvec_rows, q4_names) |rows, fun| {
+            functions[n] = fun;
+            n += 1;
+            var name_buf: [40]u8 = undefined;
+            if (!wanted(only, try std.fmt.bufPrint(&name_buf, "llama glue {s}", .{fun}))) continue;
+            const p = try a.create(int4.Matvec);
+            errdefer a.destroy(p);
+            p.* = try int4.Matvec.init(a, device, queue, rows);
+            try s.q4.append(a, p);
+            try kernels.append(a, p.kernel());
+        }
+        functions[n] = "ll_q4_dequant";
+        n += 1;
+        if (wanted(only, "llama glue ll_q4_dequant")) {
+            const p = try a.create(int4.Dequant);
+            errdefer a.destroy(p);
+            p.* = try int4.Dequant.init(a, device, queue);
+            s.dequant = p;
             try kernels.append(a, p.kernel());
         }
         for ([_][2]bool{ .{ false, false }, .{ false, true }, .{ true, false }, .{ true, true } }) |form| {
@@ -237,6 +270,13 @@ pub fn limits(a: std.mem.Allocator, device: mtl.Device, tensor: bool, only: ?[]c
         .{ .name = "llama glue ll_matvec_8", .threads = 256, .tg = 0 },
         .{ .name = "llama glue ll_matvec_16", .threads = 256, .tg = 0 },
         .{ .name = "llama glue ll_matvec_32", .threads = 256, .tg = 0 },
+        .{ .name = "llama glue ll_q4_matvec_1", .threads = 256, .tg = 0 },
+        .{ .name = "llama glue ll_q4_matvec_2", .threads = 256, .tg = 0 },
+        .{ .name = "llama glue ll_q4_matvec_4", .threads = 256, .tg = 0 },
+        .{ .name = "llama glue ll_q4_matvec_8", .threads = 256, .tg = 0 },
+        .{ .name = "llama glue ll_q4_matvec_16", .threads = 256, .tg = 0 },
+        .{ .name = "llama glue ll_q4_matvec_32", .threads = 256, .tg = 0 },
+        .{ .name = "llama glue ll_q4_dequant", .threads = 256, .tg = 0 },
     };
     for (decls) |d| {
         if (!wanted(only, d.name)) continue;

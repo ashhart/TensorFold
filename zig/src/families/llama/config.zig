@@ -1,4 +1,4 @@
-//! Llama (model_type llama) admission: dense bf16 GQA, 128-wide heads, default RoPE; `qualified` checkpoints only.
+//! Llama (model_type llama) admission: dense GQA, 128-wide heads, default RoPE; `qualified` checkpoints only.
 const std = @import("std");
 
 pub const head_dim = 128;
@@ -20,10 +20,14 @@ pub const Error = error{
 /// What a qualified checkpoint was checked for: served on its own, or drafting for a served one.
 pub const Role = enum { served, drafter };
 
-/// A checkpoint checked on the device, by the geometry its config names.
+/// The projections' storage: bf16, or compressed-tensors' pack-quantized int4 in groups of 32 (weights.zig's Int4).
+pub const Weights = enum { bf16, int4_g32 };
+
+/// A checkpoint checked on the device, by the geometry and weights its config names.
 pub const Qualified = struct {
     name: []const u8,
     role: Role,
+    weights: Weights,
     hidden: usize,
     intermediate: usize,
     layers: usize,
@@ -36,10 +40,14 @@ pub const Qualified = struct {
 
 /// The checkpoints the family serves; another `llama` checkpoint is refused until it has been checked the same way.
 pub const qualified = [_]Qualified{
-    .{ .name = "Nanbeige4.3-33B", .role = .served, .hidden = 7168, .intermediate = 22016, .layers = 52, .heads = 56, .kv_heads = 8, .vocab = 166912, .theta = 120000000, .context = 524288 },
+    .{ .name = "Nanbeige4.3-33B", .role = .served, .weights = .bf16, .hidden = 7168, .intermediate = 22016, .layers = 52, .heads = 56, .kv_heads = 8, .vocab = 166912, .theta = 120000000, .context = 524288 },
+    .{ .name = "Nanbeige4.3-33B-INT4", .role = .served, .weights = .int4_g32, .hidden = 7168, .intermediate = 22016, .layers = 52, .heads = 56, .kv_heads = 8, .vocab = 166912, .theta = 120000000, .context = 524288 },
     // its drafts are checked by the served model's windows, its own logits not against HF
-    .{ .name = "Nanbeige4.1-3B", .role = .drafter, .hidden = 2560, .intermediate = 10496, .layers = 32, .heads = 20, .kv_heads = 4, .vocab = 166144, .theta = 70000000, .context = 262144 },
+    .{ .name = "Nanbeige4.1-3B", .role = .drafter, .weights = .bf16, .hidden = 2560, .intermediate = 10496, .layers = 32, .heads = 20, .kv_heads = 4, .vocab = 166144, .theta = 70000000, .context = 262144 },
 };
+
+/// Weights a group of the int4 projections: one bf16 scale and one 4-bit zero point each.
+pub const int4_group = 32;
 
 /// Attention's score scale, 1 / sqrt(head_dim).
 pub fn headScale() f32 {
@@ -56,6 +64,7 @@ pub const Config = struct {
     eps: f32,
     theta: f64,
     context: usize,
+    weights: Weights = .bf16,
     eos: [max_eos]u32 = @splat(0),
     eos_count: usize = 0,
 
@@ -72,7 +81,7 @@ pub const Config = struct {
     /// The qualified checkpoint this config names.
     pub fn qualification(c: Config) Error!*const Qualified {
         for (&qualified) |*q| {
-            if (c.hidden == q.hidden and c.intermediate == q.intermediate and c.layers == q.layers and c.heads == q.heads and
+            if (c.weights == q.weights and c.hidden == q.hidden and c.intermediate == q.intermediate and c.layers == q.layers and c.heads == q.heads and
                 c.kv_heads == q.kv_heads and c.vocab == q.vocab and c.theta == q.theta and c.context == q.context) return q;
         }
         return error.UnqualifiedLlamaCheckpoint;
@@ -176,6 +185,44 @@ fn eosIds(v: std.json.Value, c: *Config) Error!void {
     }
 }
 
+/// `o[key]` is JSON null, or absent.
+fn isNull(o: std.json.ObjectMap, key: []const u8) bool {
+    const v = o.get(key) orelse return true;
+    return v == .null;
+}
+
+/// quantization_config: compressed-tensors' static asymmetric int4 g32 on every Linear but the head and embedding.
+fn packQuantized(v: std.json.Value) Error!Weights {
+    const bad = error.UnsupportedLlamaPrecision;
+    const q = object(v) catch return bad;
+    if (!isString(q.get("quant_method"), "compressed-tensors") or !isString(q.get("format"), "pack-quantized")) return bad;
+    if (!isNull(q, "kv_cache_scheme")) return bad;
+    if (q.get("quantization_status")) |s| if (!isString(s, "compressed")) return bad;
+    const ignore = q.get("ignore") orelse return bad;
+    if (ignore != .array or ignore.array.items.len != 2) return bad;
+    var head = false;
+    var embed = false;
+    for (ignore.array.items) |x| {
+        if (isString(x, "lm_head")) head = true else if (isString(x, "model.embed_tokens")) embed = true else return bad;
+    }
+    if (!head or !embed) return bad;
+    const groups = object(q.get("config_groups") orelse return bad) catch return bad;
+    if (groups.count() != 1) return bad;
+    const g = object(groups.values()[0]) catch return bad;
+    const targets = g.get("targets") orelse return bad;
+    if (targets != .array or targets.array.items.len != 1 or !isString(targets.array.items[0], "Linear")) return bad;
+    if (!isNull(g, "input_activations") or !isNull(g, "output_activations")) return bad;
+    const w = object(g.get("weights") orelse return bad) catch return bad;
+    const bits = integer(w, "num_bits") catch return bad;
+    const group = integer(w, "group_size") catch return bad;
+    if (bits != 4 or group != int4_group or !isString(w.get("type"), "int") or !isString(w.get("strategy"), "group")) return bad;
+    const symmetric = w.get("symmetric") orelse return bad;
+    if (symmetric != .bool or symmetric.bool or isTrue(w, "dynamic")) return bad;
+    if (!isNull(w, "actorder") or !isNull(w, "block_structure")) return bad;
+    if (w.get("zp_dtype")) |z| if (!isString(z, "torch.int8")) return bad;
+    return .int4_g32;
+}
+
 pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) Error!Config {
     const parsed = try std.json.parseFromSlice(std.json.Value, gpa, bytes, .{});
     defer parsed.deinit();
@@ -184,7 +231,8 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) Error!Config {
     if (isTrue(root, "attention_bias") or isTrue(root, "mlp_bias") or isTrue(root, "tie_word_embeddings")) return error.UnsupportedLlamaGeometry;
     if (root.get("hidden_act")) |act| if (!isString(act, "silu")) return error.UnsupportedLlamaGeometry;
     for ([_][]const u8{ "torch_dtype", "dtype" }) |key| if (root.get(key)) |d| if (!isString(d, "bfloat16")) return error.UnsupportedLlamaPrecision;
-    if (root.get("quantization") != null or root.get("quantization_config") != null) return error.UnsupportedLlamaPrecision;
+    if (root.get("quantization") != null) return error.UnsupportedLlamaPrecision;
+    const weights: Weights = if (root.get("quantization_config")) |q| try packQuantized(q) else .bf16;
     var c: Config = .{
         .hidden = try size(root, "hidden_size"),
         .intermediate = try size(root, "intermediate_size"),
@@ -195,6 +243,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) Error!Config {
         .eps = @floatCast(try number(root.get("rms_norm_eps") orelse return error.BadLlamaConfig)),
         .theta = try number(root.get("rope_theta") orelse .{ .float = 10000.0 }),
         .context = 0,
+        .weights = weights,
     };
     const kv_heads = try integerOr(root, "num_key_value_heads", @intCast(c.heads));
     if (kv_heads < 1 or kv_heads > c.heads) return error.UnsupportedLlamaGeometry;
@@ -299,6 +348,50 @@ test "other layouts are refused by name" {
         defer gpa.free(bytes);
         try std.testing.expect(!std.mem.eql(u8, bytes, fixture));
         try std.testing.expectError(c[2], parse(gpa, bytes));
+    }
+}
+
+const fixture_int4 = @embedFile("fixtures/config-int4.json");
+
+test "Nanbeige4.3-33B-INT4's pack-quantized config is admitted as int4 groups of 32, the bf16 release as bf16" {
+    const gpa = std.testing.allocator;
+    const c = try parse(gpa, fixture_int4);
+    try std.testing.expectEqual(Weights.int4_g32, c.weights);
+    try std.testing.expectEqualStrings("Nanbeige4.3-33B-INT4", (try c.qualification()).name);
+    const r = try parse(gpa, fixture);
+    try std.testing.expectEqual(Weights.bf16, r.weights);
+    // the release's geometry with int4 weights is not the bf16 release, and the reverse
+    var swapped = r;
+    swapped.weights = .int4_g32;
+    try std.testing.expectEqualStrings("Nanbeige4.3-33B-INT4", (try swapped.qualification()).name);
+    swapped.weights = .bf16;
+    swapped.hidden = 4096;
+    try std.testing.expectError(error.UnqualifiedLlamaCheckpoint, swapped.qualification());
+}
+
+test "other compressed-tensors schemes are refused by name" {
+    const gpa = std.testing.allocator;
+    const cases = .{
+        .{ "\"group_size\": 32", "\"group_size\": 128" },
+        .{ "\"num_bits\": 4", "\"num_bits\": 8" },
+        .{ "\"symmetric\": false", "\"symmetric\": true" },
+        .{ "\"dynamic\": false", "\"dynamic\": true" },
+        .{ "\"strategy\": \"group\"", "\"strategy\": \"channel\"" },
+        .{ "\"type\": \"int\"", "\"type\": \"float\"" },
+        .{ "\"actorder\": null", "\"actorder\": \"group\"" },
+        .{ "\"format\": \"pack-quantized\"", "\"format\": \"int-quantized\"" },
+        .{ "\"quant_method\": \"compressed-tensors\"", "\"quant_method\": \"gptq\"" },
+        .{ "\"kv_cache_scheme\": null", "\"kv_cache_scheme\": {\"num_bits\": 8}" },
+        .{ "\"input_activations\": null", "\"input_activations\": {\"num_bits\": 8}" },
+        .{ "\"lm_head\",", "\"lm_head\", \"model.layers.0.mlp.down_proj\"," },
+        .{ "\"lm_head\",", "" },
+        .{ "\"quantization_status\": \"compressed\"", "\"quantization_status\": \"frozen\"" },
+    };
+    inline for (cases) |k| {
+        const bytes = try std.mem.replaceOwned(u8, gpa, fixture_int4, k[0], k[1]);
+        defer gpa.free(bytes);
+        try std.testing.expect(!std.mem.eql(u8, bytes, fixture_int4));
+        try std.testing.expectError(error.UnsupportedLlamaPrecision, parse(gpa, bytes));
     }
 }
 
