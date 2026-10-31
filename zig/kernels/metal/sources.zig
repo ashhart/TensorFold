@@ -135,6 +135,8 @@ pub const qwen_image = @embedFile("prefill/attention_nax.metal") ++ @embedFile("
 pub const moss_image = @embedFile("prefill/attention_nax.metal") ++ @embedFile("moss_image.metal");
 /// Idol's denoiser: the prefill GEMM template, then its own steps and head-64 attention.
 pub const idol = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("idol.metal") ++ @embedFile("idol_attention.metal");
+/// Idol's DINOv3 ViT-H+/16 image encoder: the prefill GEMM template, then its own bf16 steps and attention.
+pub const idol_dino = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("idol_dino.metal");
 /// A prompt chunk's KDA layer in three passes, appended to the generated kda_rows source (its helpers).
 pub const glm_kda_prompt = @embedFile("glm_kda_prompt.metal");
 /// GLM-5.3-Flash speed-up mode's exchange kernels (families/glm/ep.zig).

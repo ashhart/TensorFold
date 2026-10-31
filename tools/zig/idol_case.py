@@ -14,8 +14,13 @@ USAGE = """\
   case WEIGHTS SDK OUT --features F [F]    noise, each step's input and both velocities, the final sample
   blocks WEIGHTS SDK CASE [--step S]       every block's rows at step S, and each block in float32 on its input
   exact WEIGHTS SDK CASE [--steps N]       both velocities in float32 on the case's first N inputs (the ruler)
+  dino DINO SDK OUT --image PNG [--official DIR] [--sdk-features F]
+                                           DINOv3 ViT-H+/16's feature1 for a 1024 x 1024 image as the SDK encodes it
+                                           (bf16), a float32 CPU ruler, every block's rows, and each block in float32
 WEIGHTS is a speridlabs/idol snapshot; SDK an idol-sdk checkout at the pinned commit. F holds feature1 (DINOv3 rows
 [1, 4101, 1280]) and feature2 (FLUX.2 VAE rows [1, 4101, 128]), in one file or two, as the SDK's ImageEncoder returns.
+DINO is timm/vit_huge_plus_patch16_dinov3.lvd1689m (ungated); --official DIR, Meta's gated
+facebook/dinov3-vith16plus-pretrain-lvd1689m, checks that it is the same model, tensor by tensor and feature by feature.
 """
 
 SDK_COMMIT = "4702a7f00850e34b6e83a2170cc123c3e9570744"
@@ -219,6 +224,15 @@ def exact(args) -> int:
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__, epilog=USAGE, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("dino")
+    p.add_argument("weights")
+    p.add_argument("sdk")
+    p.add_argument("out_dir")
+    p.add_argument("--image", required=True)
+    p.add_argument("--official")
+    p.add_argument("--sdk-features")
+    p.add_argument("--device", default="mps", choices=("mps", "cpu", "cuda"))
+    p.add_argument("--no-blocks", action="store_true")
     for name in ("case", "blocks", "exact"):
         p = sub.add_parser(name)
         p.add_argument("weights")
@@ -236,6 +250,10 @@ def main(argv: list[str]) -> int:
         else:
             p.add_argument("--steps", type=int, default=50)
     args = ap.parse_args(argv)
+    if args.cmd == "dino":
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from idol_dino_case import dino
+        return dino(args, sdk_root=args.sdk)
     return {"case": case, "blocks": blocks, "exact": exact}[args.cmd](args)
 
 
