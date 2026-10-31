@@ -520,16 +520,6 @@ pub const LaneHost = struct {
         };
     }
 
-    /// Sends replies and finishes jobs only after the core has reaped terminal streams.
-    fn deliverPending(h: *LaneHost) void {
-        var i: usize = 0;
-        while (i < h.admitted.items.len) {
-            const job = h.admitted.items[i];
-            if (h.deliver(job)) continue;
-            i += 1;
-        }
-    }
-
     fn run(h: *LaneHost) void {
         defer scoring.close(h);
         if (!@import("lane_thread.zig").start(h)) return;
@@ -549,7 +539,7 @@ pub const LaneHost = struct {
                 ends.failRound(h, err);
                 continue;
             };
-            h.deliverPending();
+            ends.deliverPending(h);
             status.noteLive(h);
             h.lock();
             if (h.closing) {
@@ -588,7 +578,7 @@ pub const LaneHost = struct {
                 continue;
             };
             if (owed) h.share.rounded(@intCast(r0.durationTo(std.Io.Clock.awake.now(h.io)).toNanoseconds()));
-            h.deliverPending();
+            ends.deliverPending(h);
             lone.reclaim(h);
         }
     }
