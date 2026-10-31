@@ -13,6 +13,8 @@ const share_fit = @import("qwen27_share_fit.zig");
 const slot_state = @import("qwen27_slots.zig");
 const Resident = @import("resident.zig").Resident;
 const lb = @import("qwen27_lanes.zig");
+const link = @import("qwen27_link.zig");
+const pair_flags = @import("qwen27_pair_flags.zig");
 pub const lanes_backend = lb;
 const disk = @import("qwen27_disk.zig");
 const images = @import("qwen27_images.zig");
@@ -31,6 +33,7 @@ pub const Options = struct {
     learn: ?disk.Learn = null, // --learn-conversations: kept states written behind to disk and read back
     vision: ?api.VisionOpen = null, // --vision: open loads the image tower, and requests may hold images
     images: ?*images.Vision = null, // the loaded tower attach serves (and the host then owns)
+    pair: ?[]const u8 = null, // --speed-up: this rank's settings file; `Pair.init` reads the rank out of it
 };
 
 pub const Host = struct {
@@ -52,6 +55,11 @@ pub const Host = struct {
     disk_stage: ?mtl.Buffer = null, // copies out of private kept states for the disk (qwen27_disk.zig)
     vision: ?*images.Vision = null, // --vision's tower and image rows
     spares: q.snapshot.Spares = .{}, // dropped kept states' buffers, for the next saves
+    pair: ?*lb.Pair = null, // --speed-up: the seam this rank owns; rank 1 follows through it
+    link: ?*lb.Link = null, // rank 0's round sender and rank 1's follower target; `Metal.link` points here
+    hw: ?mtl.Device = null, // the pair's device, opened before the model's so the seam exists for the load
+    picks: ?mtl.Buffer = null, // a round's head-seam picks (one u32 a row), read by the lane backend
+    workers: link.Workers = .{}, // the link watchdog and rank 1's follower, joined by `close` before the pair frees
 
     pub fn engine(h: *Host) api.Engine {
         return h.host.engine();
@@ -120,9 +128,13 @@ fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
 }
 
 /// The words for a request the engine refuses.
-fn words(_: ?*anyopaque, err: anyerror) ?[]const u8 {
+pub fn words(_: ?*anyopaque, err: anyerror) ?[]const u8 {
     return switch (err) {
         error.PromptTooLong => "the prompt and max_tokens do not fit this server's --context",
+        // rank 1 replays rank 0's rounds and owns no request (qwen27_lanes.prefillFn refuses first)
+        error.FollowsPeer => "speed-up mode: this Mac runs rank 0's requests; send requests to rank 0",
+        // a pair's token is the head seam's pick: a sampled or grammar-constrained row is refused at prefill
+        error.PairGreedyOnly => "speed-up mode: a pair answers greedy only; send the request with sampling and grammar off",
         else => null,
     };
 }
@@ -281,22 +293,47 @@ fn laterBytes(h: *const Host) u64 {
     return (h.runner.slots - h.runner.ready) * (h.runner.slotBytes() + ring_bytes) + h.runner.gdn.missingBeforeBytes();
 }
 
+/// The flags a pair refuses, read from `Options` before anything loads: `open` and `attach` both pass theirs here.
+pub fn refusePairFlags(pair: bool, o: Options, bound_drafter: bool, why: *[]const u8) !void {
+    if (!pair) return;
+    return pair_flags.refuse(bound_drafter or o.drafter != null, o.cache_gib != null, o.learn != null, o.vision != null or o.images != null, why);
+}
+
 pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocator, why: *[]const u8) !*Host {
+    try refusePairFlags(o.pair != null, o, false, why); // before the seam, the shard or the vision tower loads
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    const model = try q.model.Model.loadDeferred(gpa, io, dir, 128);
+    // glm_dsa's order: the seam exists before the weights load and ready() comes once every GPU allocation is in.
+    var hw: ?mtl.Device = null;
+    var pair: ?*lb.Pair = null;
+    if (o.pair) |path| {
+        hw = try mtl.Device.init();
+        pair = lb.Pair.init(gpa, io, hw.?, path, lb.pairBytes()) catch |err| {
+            why.* = try std.fmt.allocPrint(a, "the speed-up seam {s} would not open ({s})", .{ path, @errorName(err) });
+            return err;
+        };
+    }
+    errdefer if (pair) |p| p.deinit();
+    errdefer if (hw) |d| d.deinit();
+    const model = if (pair) |p|
+        try q.model.Model.loadShardDeferred(gpa, io, dir, 128, p.rank, 2, .full)
+    else
+        try q.model.Model.loadDeferred(gpa, io, dir, 128);
     errdefer model.deinit();
     var with = o;
     // the tower before the slots: their room and the cache's budget count it as taken
     if (o.vision) |v| with.images = try images.open(gpa, io, model, dir, v, a, why);
     errdefer if (with.images) |v| v.deinit();
-    const h = try attach(gpa, io, model, null, with, a, why);
+    const h = try attach(gpa, io, model, null, with, a, why, pair);
     h.owns_model = true;
+    h.pair = pair;
+    h.hw = hw;
     return h;
 }
 
 /// A loaded model served as `open` serves one, `drafter` bound in place of `o.drafter`; both stay the caller's.
-pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.dflash.runtime_model.Model, o: Options, a: Allocator, why: *[]const u8) !*Host {
+pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.dflash.runtime_model.Model, o: Options, a: Allocator, why: *[]const u8, pair: ?*lb.Pair) !*Host {
+    try refusePairFlags(pair != null, o, drafter != null, why);
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const capacity = if (o.context == 0) @min(model.config.max_position, 32768) else o.context;
@@ -350,10 +387,31 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.cache = null;
     h.resident = null;
     h.disk_stage = null;
+    // create() leaves unnamed Host fields undefined: a debug-filled optional is non-null, so name h.link first.
+    h.link = null;
+    h.hw = null;
+    h.picks = null;
+    h.workers = .{};
     h.vision = o.images; // closed with the host; a failed attach leaves it to the caller
     h.trace = null;
     h.runner = try q.decode_round.Runner.initReady(gpa, model, slots, capacity + window, 1);
     errdefer h.runner.deinit();
+    h.pair = pair;
+    if (pair) |p| {
+        if (slots != 1) {
+            why.* = try std.fmt.allocPrint(a, "--speed-up serves one greedy stream: pass --parallel 1", .{});
+            return error.PairOneStream;
+        }
+        // The picks live where the head seam writes them, so the lane backend reads them rather than a local argmax.
+        const picks = try model.device.buffer(lb.batch_rows * @sizeOf(u32), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+        errdefer picks.deinit();
+        h.picks = picks;
+        h.link = try gpa.create(lb.Link);
+        errdefer gpa.destroy(h.link.?);
+        h.link.?.* = .{ .pair = p, .gpa = gpa };
+        h.runner.reduce = lb.pairReduce(p);
+        h.runner.picks = .{ .buffer = picks, .offset = 0 };
+    }
     if (profileEvery()) |every| {
         h.trace = .{ .queue = model.queue, .report_every = every }; // enabled once measure() has priced the windows
         h.runner.profile(&h.trace.?);
@@ -363,7 +421,12 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     errdefer if (h.draft) |d| d.deinit();
     h.back = try lb.Metal.init(gpa, &h.runner, h.draft);
     errdefer h.back.deinit();
+    h.back.link = h.link;
+    // one Mac keeps `Metal.init`'s switch; a pair turns resume off (rank 1 resets the slot at each round's `begin`)
+    h.back.slot_resume = lb.slotResume(h.back.slot_resume, pair);
     h.back.chunk = h.runner.promptRows(@min(rows, row_policy.requested(model.device.generation(), value)));
+    // a pair stages each chunk's widest seam, so its pass may carry only the window's rows (qwen27_pair.chunk)
+    if (pair != null) h.back.chunk = lb.pairChunk(@intCast(h.back.chunk));
     h.back.grow = .{ .ctx = h, .room = Host.roomFor, .added = Host.added };
     h.back.vision = o.images;
     if (h.draft != null) try h.back.measure(io);
@@ -373,7 +436,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.core = lanes.Engine.init(gpa, &h.cfg, h.back.backend(), h.clock.clock());
     errdefer h.core.deinit();
     const offer: ?api.Vision = if (o.images) |v| .{ .ctx = h, .prepare = Host.prepareImage, .image_token = v.c.image_token, .markers = &v.markers, .image_tokens = v.capacity, .max_images = v.max_images, .explain = tf.qwen_vl.geometry.problem } else null;
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "qwen27", .draft_sources = .{ .drafter = if (h.draft != null) .{ .kind = "DFlash2", .name = o.drafter_name orelse o.drafter orelse "" } else null }, .structures = @import("qwen27_masks.zig").supported, .lanes = slots, .context_window = capacity, .prefill_step = @intCast(h.back.chunk), .decode_share = o.decode_share, .vision = offer });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "qwen27", .draft_sources = .{ .drafter = if (h.draft != null) .{ .kind = "DFlash2", .name = o.drafter_name orelse o.drafter orelse "" } else null }, .structures = @import("qwen27_masks.zig").supported, .lanes = slots, .context_window = capacity, .prefill_step = @intCast(h.back.chunk), .decode_share = o.decode_share, .vision = offer, .policy = pair_flags.healthPolicy(pair != null) });
     h.host.memory = .{ .ctx = h, .read = readMemory };
     h.host.explain = .{ .text = words };
     h.host.decoded_rows = true; // a reply's rows prefill with the bits decoding gave them, with the cache on or off
@@ -394,16 +457,33 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
         };
         if (model.ane) |share| share.footprint_growth = platform.memory_policy.growth(before, cache_fit.footprint());
     }
-    // slot 0's rewind point where the cache cannot keep a whole context, wired before the cache's budget is read
-    const rewind_room = laterRoom(h);
-    if (slot_state.rewindInit(h.back, rewind_room, if (o.cache_gib) |g| gibBytes(g) else @min(rewind_room, cache_fit.DEFAULT_CEILING))) |buf| if (h.resident) |*r| r.addNow(&.{buf});
-    try enableCache(h, o.cache_gib, o.cache_over_cap, a, why);
+    // a pair's prompt states are two Macs' and its slots are one: no reuse in landing 1, and no disk learning
+    if (pair == null) {
+        // slot 0's rewind point where the cache cannot keep a whole context, wired before the cache's budget is read
+        const rewind_room = laterRoom(h);
+        if (slot_state.rewindInit(h.back, rewind_room, if (o.cache_gib) |g| gibBytes(g) else @min(rewind_room, cache_fit.DEFAULT_CEILING))) |buf| if (h.resident) |*r| r.addNow(&.{buf});
+        try enableCache(h, o.cache_gib, o.cache_over_cap, a, why);
+    }
     errdefer if (h.cache) |*store| store.deinit();
-    if (o.learn) |l| try disk.attach(h, io, a, l);
+    if (pair == null) if (o.learn) |l| try disk.attach(h, io, a, l);
     errdefer if (h.cache) |*store| if (store.disk) |r| r.deinit();
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     if (h.trace) |*t| t.enabled = true; // serving rounds count from here: measure() timed whole, unsplit buffers
+    // both Macs are loaded and allocated before either serves: rank 1 may now replay rank 0's rounds
+    if (pair) |p| p.ready() catch |err| {
+        why.* = if (err == error.PairPeerSilent)
+            "the peer never signalled ready in five minutes: start rank 1 first, with the same build on both Macs and each rank's own settings file"
+        else
+            try std.fmt.allocPrint(a, "the pair link was not ready ({s}): restart both ranks", .{@errorName(err)});
+        return err;
+    };
+    // a dead link is not a serving state: exit so a supervisor restarts both ranks, not serve seam errors
+    if (pair) |p| try h.workers.startWatch(p, a, why);
+    errdefer if (pair) |p| h.workers.stop(p); // before `open` frees the pair these threads read
     try h.host.start();
+    // a start-up step that fails after the host is up stops it before `open` frees what it serves
+    errdefer h.host.stop();
+    if (pair) |p| try h.workers.startFollower(p, h.back, a, why);
     std.log.info("Qwen3.8-27B: {d} streams of {d} tokens{s}{s}", .{ slots, capacity, if (h.draft != null) ", DFlash2 drafts for one of them" else "", if (o.images != null) ", images read" else "" });
     return h;
 }
@@ -461,6 +541,14 @@ const holdResident = q.residency.hold;
 pub fn close(ptr: *anyopaque) void {
     const h = Host.of(ptr);
     h.host.stop();
+    // the pair's threads go after the host stops (no round is mid-flight) and before the model frees the device
+    if (h.pair) |p| h.workers.stop(p);
+    if (h.link) |l| {
+        l.deinit();
+        h.gpa.destroy(l);
+    }
+    if (h.pair) |p| p.deinit();
+    if (h.hw) |d| d.deinit();
     const rows = if (h.cache) |*store| store.disk else null;
     if (h.cache) |*store| store.deinit(); // its states leave the set as they go
     h.spares.deinit();
@@ -473,6 +561,7 @@ pub fn close(ptr: *anyopaque) void {
     if (h.draft) |d| d.deinit();
     if (h.trace) |*t| t.reportRest();
     h.runner.deinit();
+    if (h.picks) |b| b.deinit();
     if (h.vision) |v| v.deinit();
     if (h.owns_model) h.model.deinit();
     h.gpa.destroy(h);
@@ -480,6 +569,7 @@ pub fn close(ptr: *anyopaque) void {
 
 test {
     _ = @import("qwen27_share_fit.zig");
+    _ = @import("qwen27_pair_tests.zig");
 }
 
 test "Qwen27 interior state uses a guaranteed cold request cut" {

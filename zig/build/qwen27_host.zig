@@ -61,9 +61,14 @@ pub fn tests(b: *std.Build) void {
     b.step("test-qwen27-resume-host", "Slot 0's in-place resume and rewind point: the cache's rule, with no GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = resume_rules, .filters = &.{"qwen27 resume:"} })).step);
 }
 
-pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module) void {
+pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module) *std.Build.Step {
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_served.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api } } });
+    // pair refusals are decided before a model loads: the host's own tests run on CPU alone
+    const served = b.step("test-qwen27-served-host", "Rank 1's named refusal and the pair's --vision refusal, no shaders or GPU");
+    const served_run = b.addRunArtifact(b.addTest(.{ .root_module = host }));
+    served_run.has_side_effects = true; // a rerun must re-execute the tests, not replay a cached pass
+    served.dependOn(&served_run.step);
     const boundary = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/qwen27_bank_boundary_host.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "tensorfold", .module = engine }, .{ .name = "metal", .module = metal } } }), .filters = &.{"qwen27 bank boundary:"} });
     b.step("test-qwen27-bank-boundary-host", "Runner pending-keep guards with no device or shader execution").dependOn(&b.addRunArtifact(boundary).step);
     const facts = b.createModule(.{ .root_source_file = b.path("zig/src/native/draft_sources_metal_test.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api }, .{ .name = "lanes", .module = lanes } } });
@@ -81,6 +86,7 @@ pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.M
     }) });
     _ = object.getEmittedBin();
     b.step("check-qwen27-speed-host", "Compile the actual Qwen27 startup and encoding without shaders").dependOn(&object.step);
+    return served;
 }
 
 fn tryNames(b: *std.Build, names: *std.ArrayList([]const u8), text: []const u8) void {
