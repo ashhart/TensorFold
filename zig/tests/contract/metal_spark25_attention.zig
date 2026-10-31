@@ -25,8 +25,8 @@ const nan16 = 0x7fc0;
 /// The two pipelines metal_model.zig builds: sliding layers (a 512-key window over a ring) and full layers.
 pub const Layer = enum { sliding, full };
 
-/// The engine's P with the M5's cut; P spread over [0, 1], values in [0, 1); that without the cut; a bad edit.
-const Case = enum { plain, spread, cutless, edit };
+/// The engine's P with the M5's cut; P spread over [0, 1]; that without the cut; a bad edit; a masked key's Inf.
+const Case = enum { plain, spread, cutless, edit, masked };
 
 fn window(l: Layer) usize {
     return if (l == .sliding) cfg.window else 0;
@@ -87,6 +87,7 @@ fn label(comptime l: Layer, comptime k: Case) []const u8 {
         .spread => base ++ ", P spread over [0, 1]",
         .cutless => "control: " ++ base ++ ", P spread, its range without the operand cut",
         .edit => "control: " ++ base ++ (if (l == .sliding) ", a key past the window" else ", a key past the row"),
+        .masked => base ++ ", a non-finite value at a key masked in its tile",
     };
 }
 
@@ -107,20 +108,22 @@ fn spec(l: Layer, case: Case) c.Spec {
         .sliding => &.{ .{ .rows = 64, .n = dh, .k = 700 }, .{ .rows = 33, .n = dh, .k = 0 } },
         .full => &.{ .{ .rows = 64, .n = dh, .k = 1100 }, .{ .rows = 33, .n = dh, .k = 0 } },
     };
+    // one served shape, deep enough for gate 4's high keys
+    const masked_shapes = if (l == .sliding) plain_shapes[0..1] else plain_shapes[3..4];
     const spread = case == .spread or case == .cutless;
     return .{
         .name = name(l, case),
         .accum = .f32,
         .depth = depth,
         .out = .bf16,
-        .tiles = if (spread) .{ .{}, .{}, .{} } else .{ .{ .size = rt, .min = st.window_rows + 1 }, .{}, .{ .size = bkt, .min = 0 } },
-        .served = if (spread) spread_shapes else plain_shapes,
+        .tiles = if (spread or case == .masked) .{ .{}, .{}, .{} } else .{ .{ .size = rt, .min = st.window_rows + 1 }, .{}, .{ .size = bkt, .min = 0 } },
+        .served = if (spread) spread_shapes else if (case == .masked) masked_shapes else plain_shapes,
         .sums = .{ .exact = true },
-        .known = if (case == .plain or case == .spread) masked_key else null,
+        .known = if (case == .masked) masked_key else null,
     };
 }
 
-/// Gate 1's plant at key p0 + 5, which rows 0 to 4 do not see but their tile reads, makes their outputs NaN.
+/// The masked case's gate-1 plant at key p0 + 5, which rows 0 to 4 do not see but their tile reads, makes them NaN.
 const masked_key: c.Known = .{ .gate = .nonfinite, .finding = "a non-finite value at a key masked for a row of its tile reaches that row as NaN (P = 0 times Inf inside the P x V mma)" };
 
 /// sp_prompt_attention over n keys, its counts from the source; `cut` the fp32 P's operand cut into P x V.
@@ -235,13 +238,14 @@ const Probe = struct {
         switch (fill) {
             .random => if (p.case == .spread or p.case == .cutless) p.spread(rng),
             .nonfinite => {
-                // every row sees key p0, rows 2 on key p0 + 2; rows 0 to 4 not key p0 + 5, which their tile reads
+                // every row sees key p0, rows 2 on see key p0 + 2
                 for ([_]usize{ 3, 1 * dh, 2 * dh + 5 }, [_]f32{ std.math.nan(f32), std.math.inf(f32), -std.math.inf(f32) }, 0..) |at, x, r| if (r < p.rows) {
                     p.q[(r * nq + r * grp + 1) * dh + at % dh] = c.toBf16(x);
                 };
                 p.v[p.slot(p.p0) * kw + 0 * dh + 5] = c.toBf16(std.math.inf(f32));
                 p.v[p.slot(p.p0) * kw + 1 * dh + 6] = c.toBf16(std.math.nan(f32));
-                if (p.rows > 5) p.v[p.slot(p.p0 + 5) * kw + 3 * dh + 7] = c.toBf16(std.math.inf(f32));
+                // the masked case: rows 0 to 4 do not see key p0 + 5, yet their tile reads it
+                if (p.case == .masked and p.rows > 5) p.v[p.slot(p.p0 + 5) * kw + 3 * dh + 7] = c.toBf16(std.math.inf(f32));
                 p.k[p.slot(p.p0 + 2) * kw + 2 * dh] = c.toBf16(std.math.nan(f32));
             },
             .stress => try p.stress(rng),
@@ -340,24 +344,15 @@ const Probe = struct {
         @memcpy(p.point, want);
     }
 
-    /// The range's half width and the cut's wider side plus bf16's rounding; gate 4 allows the rounding alone.
+    /// The range's allowance (attention_range.allowBf16); gate 4 allows the rounding alone.
     pub fn bounds(p: *Probe, want: []const f64, _: []const f64, allow: []f64) !void {
-        for (allow, want, p.half, p.down, p.up) |*l, w, h, d, u| {
-            if (p.fill == .stress) {
-                l.* = c.boundExact(spec(p.layer, p.case), w);
-            } else if (!std.math.isFinite(w)) {
-                l.* = 0;
-            } else if (!std.math.isFinite(h)) {
-                l.* = std.math.floatMax(f64); // scores too far apart for the range's first order: any finite value
-            } else l.* = h + @max(d, u) + 0x1p-8 * (@abs(w) + h + @max(d, u)) + 0x1p-133;
-        }
+        for (allow, want, p.half, p.down, p.up) |*l, w, h, d, u| l.* = if (p.fill == .stress) c.boundExact(spec(p.layer, p.case), w) else ar.allowBf16(w, h, d, u);
     }
 
-    /// Each bf16 output within its range's ends as rounded, the cut on its own side; gate 4 and wide ranges are open.
+    /// Each bf16 output within its range's rounded ends (attention_range.intervalBf16); gate 4's are open.
     pub fn intervals(p: *Probe, low: []f64, high: []f64) !void {
         for (low, high, p.point, p.half, p.down, p.up) |*l, *hi, pt, h, d, u| {
-            const open = p.fill == .stress or !std.math.isFinite(pt) or !std.math.isFinite(h);
-            const e = if (open) [2]f64{ -std.math.floatMax(f64), std.math.floatMax(f64) } else ar.ends(pt, h, d, u);
+            const e = if (p.fill == .stress) [2]f64{ -std.math.floatMax(f64), std.math.floatMax(f64) } else ar.intervalBf16(pt, h, d, u);
             l.* = e[0];
             hi.* = e[1];
         }
@@ -383,7 +378,7 @@ fn fillRandom(rng: std.Random, out: []u16, r: f32) void {
     for (out) |*x| x.* = c.toBf16((rng.float(f32) * 2 - 1) * r);
 }
 
-/// Both layers' pipelines with their controls, on the tensor units only: before the M5 the path is not qualified.
+/// Both layers' pipelines with their controls: the cut was measured on the tensor units only, so they register there.
 pub const Suite = struct {
     a: std.mem.Allocator,
     device: mtl.Device,

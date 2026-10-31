@@ -260,6 +260,8 @@ pub const Prompt = struct {
     rows: usize = 0,
     p0: usize = 0,
     fill: g.Fill = .random,
+    /// The masked case's entry (maskedSpec), with its plant.
+    masked: bool = false,
     q: []u16 = &.{},
     k: []u16 = &.{},
     v: []u16 = &.{},
@@ -282,9 +284,17 @@ pub const Prompt = struct {
             // the shortest prompt chunk with selection, a chunk from the start, one deep in the window
             .served = &.{ .{ .rows = st.window_rows + 1, .n = dh, .k = 2100 }, .{ .rows = 256, .n = dh, .k = 0 }, .{ .rows = 64, .n = dh, .k = 32704 } },
             .sums = .{ .exact = true },
-            // gate 1's Inf at key p0 + 1, which row 0 does not see but its tile reads, makes row 0's outputs NaN
-            .known = .{ .gate = .nonfinite, .finding = "a non-finite value at a key masked for a row of its tile reaches that row as NaN (P = 0 times Inf inside the P x V mma)" },
         };
+    }
+
+    /// The masked case: gate 1's Inf at key p0 + 1, unseen by row 0 but read in its tile, makes row 0's outputs NaN.
+    pub fn maskedSpec() c.Spec {
+        var s = spec();
+        s.name = "metal minimax_m3 mm_prompt_attention, a non-finite value at a key masked in its tile";
+        s.served = s.served[0..1];
+        s.tiles = .{ .{}, .{}, .{} };
+        s.known = .{ .gate = .nonfinite, .finding = "a non-finite value at a key masked for a row of its tile reaches that row as NaN (P = 0 times Inf inside the P x V mma)" };
+        return s;
     }
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue) !Prompt {
@@ -311,7 +321,7 @@ pub const Prompt = struct {
         t.pipe.deinit();
     }
     pub fn kernel(t: *Prompt) g.Kernel {
-        return .{ .spec = spec(), .ctx = t, .vt = &vt };
+        return .{ .spec = if (t.masked) maskedSpec() else spec(), .ctx = t, .vt = &vt };
     }
     const vt = g.hooks(Prompt);
 
@@ -381,8 +391,8 @@ pub const Prompt = struct {
                 t.v[t.p0 * kw + 0 * dh + 5] = c.toBf16(std.math.inf(f32));
                 t.v[t.p0 * kw + 1 * dh + 6] = c.toBf16(std.math.nan(f32));
                 t.k[(t.p0 + 2) * kw + 2 * dh] = c.toBf16(std.math.nan(f32));
-                // row 0 does not see key p0 + 1, which its 2-row tile reads
-                if (t.rows > 1) t.v[(t.p0 + 1) * kw + 3 * dh + 7] = c.toBf16(std.math.inf(f32));
+                // the masked case: row 0 does not see key p0 + 1, which its 2-row tile reads
+                if (t.masked and t.rows > 1) t.v[(t.p0 + 1) * kw + 3 * dh + 7] = c.toBf16(std.math.inf(f32));
             },
             .stress => {
                 // keys of 3s or -3s: the first 1,024 score high, the rest probability 0; values cancel but for 8 nudged
