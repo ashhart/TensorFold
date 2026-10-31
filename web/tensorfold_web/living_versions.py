@@ -454,4 +454,3 @@ def fetch(get_manifest, get_file, new: str, origin: str) -> dict:
         living.remove(new)
         raise
     return {"copy": new, "fetched_bytes": fetched, "files": len(m["files"])}
-

@@ -373,4 +373,3 @@ def build_command(binary: str, model: str, s: Settings, *, host: str = "127.0.0.
     if s.api_key:
         env["TENSORFOLD_API_KEY"] = s.api_key
     return cmd, env, notes
-

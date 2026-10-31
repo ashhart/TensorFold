@@ -104,4 +104,3 @@ def test_the_new_agents_are_written_for_the_place_and_window():
     assert 'primary: "tensorfold/Nemo"' in recipes.SNIPPETS["openclaw"](away) and "modelRoles" in recipes.SNIPPETS["omp"](away)
     kinds = {r.id: r.kind for r in recipes.RECIPES}
     assert kinds["openclaw"] == kinds["hermes"] == "assistant" and "continue" not in kinds
-

@@ -1285,4 +1285,3 @@ def receipt(run: dict) -> dict:
     out = {k: v for k, v in run.items() if k != "progress"}
     out["kind"] = "tensorfold-studio-bench-receipt"
     return out
-
