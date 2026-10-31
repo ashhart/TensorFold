@@ -223,7 +223,7 @@ pub const Attention = struct {
         if (a.prompt) |pipes| for (pipes) |pipe| pipe.deinit();
     }
     /// The prompt kernel and its merge; before M5 null without them or without `prompt_threads` a group.
-    fn promptPipelines(device: mtl.Device, library: mtl.Library, units: bool) !?[2]mtl.Pipeline {
+    pub fn promptPipelines(device: mtl.Device, library: mtl.Library, units: bool) !?[2]mtl.Pipeline {
         const chunks = try mtl.Pipeline.init(device, library, if (units) "q27_attn_prompt_8" else "q27_attn_prompt_sg_8", false);
         if (!units and chunks.maxThreads() < prompt_threads) {
             std.log.info("qwen27: the prompt attention kernel runs {d} threads a group here, not {d}; prompt rows take the decode path", .{ chunks.maxThreads(), prompt_threads });

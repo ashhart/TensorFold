@@ -16,6 +16,8 @@ pub const lane_projection = @import("core_lane");
 pub const gpu_profile = @import("src/core/gpu_profile.zig");
 
 pub const row_projection = @import("core_row");
+/// The tensor units' affine products by expert (the routed block's prompt path).
+pub const affine_mm = @import("core_lane").affine_mm;
 pub const quant = @import("src/core/quant/quant.zig");
 
 pub const draft_ops = @import("draft_ops");

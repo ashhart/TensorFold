@@ -20,11 +20,11 @@ test "qwen27 memory: a wide frame preserves all configured slots and the exact w
     const narrow = try f.cost(512, f.slots);
     try std.testing.expect(wide > narrow + (12 << 30));
     f.left = wide;
-    try std.testing.expectEqual(@as(u32, 2048), try f.choose(rows.requested(17, null), false));
+    try std.testing.expectEqual(@as(u32, 2048), try f.choose(rows.requested(17, false, null), false));
     f.left -= 1;
-    try std.testing.expectEqual(@as(u32, 512), try f.choose(rows.requested(17, null), false));
+    try std.testing.expectEqual(@as(u32, 512), try f.choose(rows.requested(17, false, null), false));
     f.left = narrow;
-    try std.testing.expectEqual(@as(u32, 512), try f.choose(rows.requested(17, null), false));
+    try std.testing.expectEqual(@as(u32, 512), try f.choose(rows.requested(17, false, null), false));
     try std.testing.expectEqual(@as(u32, 2), try f.streams(512, true));
     try std.testing.expectError(error.TooManyStreams, f.streams(2048, true));
     f.left = try f.cost(512, 1);
@@ -37,22 +37,22 @@ test "qwen27 memory: overrides keep their width and still refuse an unaffordable
     var f = fixture();
     f.left = try f.cost(512, 2);
     for ([_][]const u8{ "16", "512", "1024", "2048" }, [_]u32{ 16, 512, 1024, 2048 }) |text, width| {
-        try std.testing.expectEqual(width, try f.choose(rows.requested(17, text), rows.override(text) != null));
+        try std.testing.expectEqual(width, try f.choose(rows.requested(17, false, text), rows.override(text) != null));
     }
     try std.testing.expectError(error.TooManyStreams, f.streams(2048, true));
-    try std.testing.expectEqual(@as(u32, 512), try f.choose(rows.requested(17, "invalid"), rows.override("invalid") != null));
+    try std.testing.expectEqual(@as(u32, 512), try f.choose(rows.requested(17, false, "invalid"), rows.override("invalid") != null));
 }
 
 test "qwen27 memory: startup counts shared scratch once and each slot's state, KV, ring and rollback bank" {
     var f = fixture();
-    const narrow = try memory.runnerBytes(f.config, f.context, 1, 512, true, 0);
+    const narrow = try memory.runnerBytes(f.config, f.context, 1, 512, true, 0, 5);
     const old = @as(usize, f.context) * 16 * 2 * 1024 * 2 + (256 << 20);
     try std.testing.expect(narrow > old + (4 << 30));
-    const wide = try memory.runnerBytes(f.config, f.context, 1, 2048, true, 0);
+    const wide = try memory.runnerBytes(f.config, f.context, 1, 2048, true, 0, 5);
     try std.testing.expect(wide > narrow + (12 << 30));
     try std.testing.expectEqual(wide - narrow + memory.frameBytes(f.config, 2048) - memory.frameBytes(f.config, 512), (try f.cost(2048, 1)) - (try f.cost(512, 1)));
     const ring = 2048 * 5 * 5120 * 2;
-    try std.testing.expectEqual(@as(usize, 2 * ring), (try memory.runnerBytes(f.config, f.context, 2, 512, true, ring)) - (try memory.runnerBytes(f.config, f.context, 2, 512, true, 0)));
+    try std.testing.expectEqual(@as(usize, 2 * ring), (try memory.runnerBytes(f.config, f.context, 2, 512, true, ring, 5)) - (try memory.runnerBytes(f.config, f.context, 2, 512, true, 0, 5)));
     f.context = 32768;
     try std.testing.expect(try f.cost(2048, 2) < wide);
     f.shared = false;

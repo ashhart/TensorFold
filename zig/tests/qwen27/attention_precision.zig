@@ -1,13 +1,10 @@
-//! Attention rows against a float64 softmax of the same bf16 inputs; --prompt: 128-row chunks on both paths.
+//! Attention rows against float64 softmax of the same bf16 inputs; --prompt: 128-row chunks; --heads 32 --kv-heads 2.
 const std = @import("std");
 const mtl = @import("metal");
 const q = @import("qwen27");
 const attn = q.attention;
 
-const heads = 24;
-const kv_heads = 4;
 const dim = 256;
-const group = heads / kv_heads;
 const capacity: u32 = 12288;
 const most_rows = 128;
 /// Where a row's key chunk changes in 1.0.13 (128 keys below it, 512 from it); rows from it compare across builds.
@@ -73,7 +70,7 @@ const Tally = struct {
 };
 
 /// One row's float64 attention for query head `h` over keys 0..position (its own key last), as the kernels define it.
-fn reference(keys: []const u16, values: []const u16, query: []const u16, position: u32, h: usize, scores: []f64, out: *[dim]f64) void {
+fn reference(keys: []const u16, values: []const u16, query: []const u16, position: u32, h: usize, group: usize, scores: []f64, out: *[dim]f64) void {
     const g = h / group;
     const qv = query[h * dim ..][0..dim];
     var top = -std.math.inf(f64);
@@ -102,14 +99,42 @@ pub fn main(init: std.process.Init) !void {
     const queue = try device.queue();
     const units = device.tensorUnits();
     const args = try init.minimal.args.toSlice(a);
-    const prompt = args.len > 1 and std.mem.eql(u8, args[1], "--prompt");
+    var prompt = false;
+    // --simd-prompt: the prompt chunks take the kernel chips before M5 run (attention_prompt_sg), here
+    var simd_prompt = false;
+    var heads: u32 = 24;
+    var kv_heads: u32 = 4;
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--prompt")) prompt = true else if (std.mem.eql(u8, arg, "--simd-prompt")) {
+            prompt = true;
+            simd_prompt = true;
+        } else if (i + 1 < args.len and std.mem.eql(u8, arg, "--heads")) {
+            i += 1;
+            heads = try std.fmt.parseInt(u32, args[i], 10);
+        } else if (i + 1 < args.len and std.mem.eql(u8, arg, "--kv-heads")) {
+            i += 1;
+            kv_heads = try std.fmt.parseInt(u32, args[i], 10);
+        } else return error.Usage;
+    }
+    const geometry = attn.planning.Geometry{ .heads = heads, .kv_heads = kv_heads, .shared_prefix = units };
+    try geometry.check();
+    const group = geometry.group();
     // the engine's own build of the kernels: before M5 the tail kernel's results read in the simdgroup layout
     if (!units) try q.simd_attention.check(device, queue);
-    const library = try mtl.Library.fromSource(device, try q.simd_attention.library(a, units, true), mtl.CompileOptions.mlx());
+    const defines = try std.fmt.allocPrint(a, "#define Q27_G {d}\n#define Q27_KVH {d}\n", .{ group, kv_heads });
+    const body = try q.simd_attention.library(a, units, true);
+    const extra: []const u8 = if (simd_prompt and units) q.runtime_sources.attention_prompt_sg else "";
+    const library = try mtl.Library.fromSource(device, try std.mem.concat(a, u8, &.{ defines, body, extra }), mtl.CompileOptions.mlx());
     defer library.deinit();
     var op = try attn.Attention.init(device, library);
     defer op.deinit();
-    const limits = attn.Limits{ .rows = most_rows, .streams = 1, .keys = capacity, .shared_prefix = units };
+    if (simd_prompt and units) {
+        if (op.prompt) |pipes| for (pipes) |pipe| pipe.deinit();
+        op.prompt = try attn.Attention.promptPipelines(device, library, false);
+    }
+    const limits = attn.Limits{ .rows = most_rows, .streams = 1, .keys = capacity, .shared_prefix = units, .geometry = geometry };
     var scratch = try attn.Scratch.init(device, limits);
     defer scratch.deinit();
     var binding = try attn.Binding.init(device, limits);
@@ -151,7 +176,7 @@ pub fn main(init: std.process.Init) !void {
                 @memcpy(val.slice(u16, most_rows * kv_heads * dim)[(r * kv_heads + g) * dim ..][0..dim], values.slice(u16, cache_bytes / 2)[at..][0..dim]);
             };
             @memset(out.slice(u16, most_rows * heads * dim), 0xffff);
-            var plan = try attn.Plan.init(a, &.{.{ .parents = parents[0..c.rows], .start = c.start, .capacity = capacity }}, .{ .shared_prefix = units });
+            var plan = try attn.Plan.init(a, &.{.{ .parents = parents[0..c.rows], .start = c.start, .capacity = capacity }}, geometry);
             defer plan.deinit();
             try scratch.upload(plan);
             try binding.upload(plan, &caches);
@@ -172,7 +197,7 @@ pub fn main(init: std.process.Init) !void {
                 t.bytes.update(std.mem.sliceAsBytes(got[r * heads * dim ..][0 .. heads * dim]));
                 for (0..heads) |h| {
                     const want = &wants[r * heads + h];
-                    if (pass == 0) reference(keys.slice(u16, cache_bytes / 2), values.slice(u16, cache_bytes / 2), query.slice(u16, c.rows * heads * dim)[r * heads * dim ..], position, h, scores, want);
+                    if (pass == 0) reference(keys.slice(u16, cache_bytes / 2), values.slice(u16, cache_bytes / 2), query.slice(u16, c.rows * heads * dim)[r * heads * dim ..], position, h, group, scores, want);
                     for (got[(r * heads + h) * dim ..][0..dim], want) |x, y| t.add(x, y);
                 }
             }

@@ -46,7 +46,9 @@ pub const Geometry = struct {
     }
 
     pub fn check(g: Geometry) !void {
-        if (g.heads != 24 or g.kv_heads != 4 or g.dim != 256 or g.rotary != 64) return error.TargetAttentionShape;
+        // a 16-row tile holds one KV group of up to 16 query heads: the 27B's 24 over 4, Ornith's 32 over 2
+        const grouped = (g.heads == 24 and g.kv_heads == 4) or (g.heads == 32 and g.kv_heads == 2);
+        if (!grouped or g.dim != 256 or g.rotary != 64) return error.TargetAttentionShape;
     }
     pub fn promptRows(g: Geometry, requested: u32) u32 {
         return @min(requested, @as(u32, if (g.shared_prefix and g.fuse_chain) chain_rows else max_rows));
