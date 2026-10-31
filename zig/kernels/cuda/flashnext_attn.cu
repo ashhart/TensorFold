@@ -545,11 +545,10 @@ extern "C" __global__ void __launch_bounds__(128)
 }
 
 // attention._merge, program (row, head) of HD threads: the head's chunk partials merged in chunk order, o / l.
-extern "C" __global__ void __launch_bounds__(256) fn_attn_merge(const float* __restrict__ PO, const float* __restrict__ PM,
-                                                                const float* __restrict__ PL, const int* __restrict__ POS0,
-                                                                __nv_bfloat16* __restrict__ OUT, const int* __restrict__ NKR,
-                                                                const int* __restrict__ SPR, int H, int HK, int G, int CH, int NCH,
-                                                                int QSA) {
+__device__ __forceinline__ void fn_attn_merge_body(const float* __restrict__ PO, const float* __restrict__ PM,
+                                                   const float* __restrict__ PL, const int* __restrict__ POS0,
+                                                   __nv_bfloat16* __restrict__ OUT, const int* __restrict__ NKR,
+                                                   const int* __restrict__ SPR, int H, int HK, int G, int CH, int NCH, int QSA) {
     const int r = blockIdx.x, head = blockIdx.y, d = threadIdx.x;
     int n = POS0[0] + r + 1;
     if (QSA && SPR[r] != 0) n = NKR[r];
@@ -571,6 +570,14 @@ extern "C" __global__ void __launch_bounds__(256) fn_attn_merge(const float* __r
     }
 }
 
+extern "C" __global__ void __launch_bounds__(256) fn_attn_merge(const float* __restrict__ PO, const float* __restrict__ PM,
+                                                                const float* __restrict__ PL, const int* __restrict__ POS0,
+                                                                __nv_bfloat16* __restrict__ OUT, const int* __restrict__ NKR,
+                                                                const int* __restrict__ SPR, int H, int HK, int G, int CH, int NCH,
+                                                                int QSA) {
+    fn_attn_merge_body(PO, PM, PL, POS0, OUT, NKR, SPR, H, HK, G, CH, NCH, QSA);
+}
+
 #include "flashnext_qsa_tile.cuh"
 
 // The indexer scores 8 rows a block, every head, the sums in fn_qsa_scores' order (its bits).
@@ -584,3 +591,5 @@ extern "C" __global__ void __launch_bounds__(256)
                         Pg pg) {
     qsa_tile::scores_body<8, 4, true>(IQ, POOLED, POS0, SC, NB, RATIO, TOP, rows, pg);
 }
+
+#include "flashnext_attn_lanes.cuh"
