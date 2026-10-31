@@ -32,7 +32,7 @@ pub fn note(a: Allocator, e: *const Engine) ![]const u8 {
 pub fn init(a: Allocator, io: std.Io, ctx: *const xpu.Context, o: api.Open, window: usize, problem: *[]const u8) !?*Engine {
     return Engine.init(std.heap.page_allocator, io, ctx, o.dir, .{ .context = window, .window_rows = prompt_rows }) catch |e| {
         problem.* = if (e == error.UnsupportedFormat)
-            try std.fmt.allocPrint(a, "{s}: the Intel GPU engine reads LFM3 text checkpoints in MLX affine 4-bit, group 64", .{o.dir})
+            try std.fmt.allocPrint(a, "{s}: the Intel GPU engine reads LFM3 in MLX affine 4-bit: group 64, or group 32 with an 8-bit embedding (LFM3-VL)", .{o.dir})
         else
             try std.fmt.allocPrint(a, "the Intel GPU engine cannot load {s} ({s})", .{ o.dir, @errorName(e) });
         return null;
