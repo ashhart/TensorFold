@@ -1,5 +1,5 @@
 """A Llama checkpoint's teacher-forced logits in float64 on the CPU, rounded once to bf16: the exact reference."""
-# usage: python3 tools/zig/llama_f64_reference.py MODEL_DIR tokens.json out.bin (raw bf16 [positions, vocab])
+# usage: llama_f64_reference.py MODEL_DIR tokens.json out.bin [--bf16-points]: raw bf16 [positions, vocab]
 import json
 import sys
 import time
@@ -16,7 +16,8 @@ def bf16_once(x: np.ndarray) -> np.ndarray:
     return (y.view(np.uint32) >> 16).astype(np.uint16)
 
 
-def main(model_dir: str, tokens: str, out: str) -> None:
+def main(model_dir: str, tokens: str, out: str, points: bool = False) -> None:
+    """`points`: round to bf16 at every one of the reference's rounding points, each operation exact before it."""
     torch.set_num_threads(24)
     cfg = json.load(open(f"{model_dir}/config.json"))
     index = json.load(open(f"{model_dir}/model.safetensors.index.json"))["weight_map"]
@@ -34,7 +35,7 @@ def main(model_dir: str, tokens: str, out: str) -> None:
         with safe_open(f"{model_dir}/{index[name]}", framework="pt") as f:
             return f.get_tensor(name)
 
-    def w(name):
+    def w(name, mlx=False):
         if not name.endswith(".weight") or name[: -len("weight")] + "scales" not in index:
             return tensor(name).to(f64)
         # mlx_lm's layout: u32 words of `bits`-bit codes, lowest bits first; a scale and a bias a group of codes
@@ -44,10 +45,16 @@ def main(model_dir: str, tokens: str, out: str) -> None:
         q = ((words.unsqueeze(-1) >> shifts) & ((1 << bits) - 1)).reshape(words.shape[0], -1).to(f64)
         scales = tensor(name[: -len("weight")] + "scales").to(f64).repeat_interleave(group, -1)
         biases = tensor(name[: -len("weight")] + "biases").to(f64).repeat_interleave(group, -1)
+        if mlx:  # mlx's dequantize, as an affine embedding's rows are read: bf16(bf16(scale * q) + bias)
+            b16 = lambda t: t.to(torch.bfloat16).to(f64)
+            return b16(b16(scales * q) + biases)
         return scales * q + biases
 
+    def r(x):  # a rounding point: bf16 when `points`, else exact
+        return x.to(torch.bfloat16).to(f64) if points else x
+
     def norm(x, g):
-        return g * (x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps))
+        return r(g * r(x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps)))
 
     def rotate(x):
         return torch.cat((-x[..., dim // 2 :], x[..., : dim // 2]), -1)
@@ -59,20 +66,24 @@ def main(model_dir: str, tokens: str, out: str) -> None:
         inv = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=f64) / dim))
         angle = torch.outer(torch.arange(n, dtype=f64), inv)
         cos, sin = torch.cat((angle, angle), -1).cos(), torch.cat((angle, angle), -1).sin()
-        x = w("model.embed_tokens.weight")[torch.tensor(ids)]
+        if points:  # HF's fp32 angle, its cos and sin rounded to bf16
+            a32 = torch.outer(torch.arange(n, dtype=torch.float32), 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim)))
+            cos, sin = r(torch.cat((a32, a32), -1).cos().to(f64)), r(torch.cat((a32, a32), -1).sin().to(f64))
+        x = w("model.embed_tokens.weight", mlx=points)[torch.tensor(ids)]
         mask = torch.full((n, n), float("-inf"), dtype=f64).triu(1)
         for i in range(layers):
             p = f"model.layers.{i}."
             h = norm(x, w(p + "input_layernorm.weight"))
-            q = (h @ w(p + "self_attn.q_proj.weight").T).view(n, heads, dim).transpose(0, 1)
-            k = (h @ w(p + "self_attn.k_proj.weight").T).view(n, kv, dim).transpose(0, 1)
-            v = (h @ w(p + "self_attn.v_proj.weight").T).view(n, kv, dim).transpose(0, 1)
-            q, k = q * cos + rotate(q) * sin, k * cos + rotate(k) * sin
+            q = r(h @ w(p + "self_attn.q_proj.weight").T).view(n, heads, dim).transpose(0, 1)
+            k = r(h @ w(p + "self_attn.k_proj.weight").T).view(n, kv, dim).transpose(0, 1)
+            v = r(h @ w(p + "self_attn.v_proj.weight").T).view(n, kv, dim).transpose(0, 1)
+            q, k = r(r(q * cos) + r(rotate(q) * sin)), r(r(k * cos) + r(rotate(k) * sin))
             k, v = k.repeat_interleave(heads // kv, 0), v.repeat_interleave(heads // kv, 0)
-            a = torch.softmax(q @ k.transpose(1, 2) / dim**0.5 + mask, -1) @ v
-            x = x + a.transpose(0, 1).reshape(n, heads * dim) @ w(p + "self_attn.o_proj.weight").T
+            a = r(torch.softmax(q @ k.transpose(1, 2) / dim**0.5 + mask, -1) @ v)
+            x = r(x + r(a.transpose(0, 1).reshape(n, heads * dim) @ w(p + "self_attn.o_proj.weight").T))
             h = norm(x, w(p + "post_attention_layernorm.weight"))
-            x = x + (torch.nn.functional.silu(h @ w(p + "mlp.gate_proj.weight").T) * (h @ w(p + "mlp.up_proj.weight").T)) @ w(p + "mlp.down_proj.weight").T
+            act = r(r(torch.nn.functional.silu(r(h @ w(p + "mlp.gate_proj.weight").T))) * r(h @ w(p + "mlp.up_proj.weight").T))
+            x = r(x + r(act @ w(p + "mlp.down_proj.weight").T))
             print(f"layer {i + 1} of {layers}, {time.time() - t0:.0f} s", flush=True)
         h = norm(x, w("model.norm.weight"))
         head = w("lm_head.weight")
@@ -83,4 +94,4 @@ def main(model_dir: str, tokens: str, out: str) -> None:
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:4])
+    main(*sys.argv[1:4], points="--bf16-points" in sys.argv[4:])
