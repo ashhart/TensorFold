@@ -2,6 +2,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const gemma = @import("gemma4");
+const spark = @import("spark25");
 const fixture = @import("qwen35_verify_host.zig");
 const Trace = fixture.Trace;
 const t = std.testing;
@@ -85,4 +86,30 @@ test "GB10 family grouping: Gemma mixed bit widths keep separate projections" {
     try m.projectMany(&k, e.stream, &.{ .{ .a4 = weight }, .{ .an = other } }, x, xs, &.{ out, out + 0x1000000 }, 128, false);
     try t.expectEqual(@as(usize, 0), Trace.grouped);
     try t.expectEqual(@as(usize, 9), Trace.count);
+}
+
+test "GB10 family grouping: Spark MLP preserves prompts and other GPUs" {
+    if (comptime !@hasDecl(spark.forward.Model, "projectMany")) return error.TestExpectedEqual;
+    for ([_]bool{ false, true }) |gb10| {
+        var d: cuda.Driver = undefined;
+        const e = fixture.engine(&d, gb10);
+        var k: spark.kernels.Kernels = undefined;
+        k.affine = e.affine;
+        const m: spark.forward.Model = undefined;
+        const ps = [_]spark.weights.Proj{ .{ .a4 = weight }, .{ .a4 = weight } };
+        for ([_]bool{ false, true }) |prompt| for (rows_set) |rows| {
+            reset();
+            try m.projectMany(&k, e.stream, &ps, x, xs, &.{ out, out + 0x1000000 }, rows, prompt);
+            try check(rows, 2, k.affine.verifyRows(), gb10 and !prompt, prompt);
+        };
+        k.wide.gemv_fns = @splat(e.affine.gemv_fn);
+        k.wide.gemv_blocks = @splat(1);
+        k.wide.pdl = gb10;
+        k.wide.split = null;
+        const other: cuda.qlinear.AffineN = .{ .w = 40, .s = 50, .b = 60, .n = weight.n, .k = weight.k, .npad = weight.npad, .bits = 8 };
+        reset();
+        try m.projectMany(&k, e.stream, &.{ .{ .a4 = weight }, .{ .an = other } }, x, xs, &.{ out, out + 0x1000000 }, 128, false);
+        try t.expectEqual(@as(usize, 0), Trace.grouped);
+        try t.expectEqual(@as(usize, if (gb10) 9 else 16), Trace.count);
+    }
 }
