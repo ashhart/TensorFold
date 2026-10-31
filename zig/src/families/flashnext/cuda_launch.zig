@@ -10,6 +10,8 @@ pub const rank_engine = @import("cuda_rank_engine.zig");
 pub const collective = @import("cuda_collective.zig");
 pub const rank_wire = @import("cuda_rank_wire.zig");
 pub const modelopt_experts = @import("cuda_modelopt_experts.zig");
+/// The MoE pass's native routed experts (NVFP4, block FP8), whose FP8 call a device test takes.
+pub const moe_native = @import("cuda_moe_native.zig");
 pub const hc = @import("cuda_hc.zig");
 pub const draft_affine = @import("cuda_draft_affine.zig");
 pub const qmm = @import("cuda_qmm.zig");
