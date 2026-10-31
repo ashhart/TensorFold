@@ -118,7 +118,17 @@ pub fn matrix(w: row.Weights) tile.Matrix {
     return .{ .w = w.w, .w_off = w.w_off, .scales = w.scales, .s_off = w.s_off, .biases = w.biases, .b_off = w.b_off, .n = w.n, .k = w.k, .bits = w.bits };
 }
 
+/// A window's held drafts on the device: `count` tokens at `src` + `off`, `stride` words apart, into ids from `row`.
+pub const Held = struct { row: usize, src: Buffer, off: usize, stride: u32, count: u32 };
+/// A GPU event the forward waits on before it reads held drafts, and the value it waits for.
+pub const Wait = struct { event: mtl.Event, value: u64 };
+
 pub fn run(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []const u32, record: bool, head: Head) !void {
+    return runHeld(m, s, segments, tokens, record, head, &.{}, null);
+}
+
+/// `run` with held drafts copied into the rows' ids on the GPU first (after `wait`): their host ids are ignored.
+pub fn runHeld(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []const u32, record: bool, head: Head, held: []const Held, wait: ?Wait) !void {
     if (tokens.len == 0 or tokens.len > s.rows or (record and tokens.len > st.batch_rows)) return error.LfmRowsExceeded;
     var total: usize = 0;
     for (segments) |seg| {
@@ -131,10 +141,20 @@ pub fn run(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []const
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const cb = m.queue.commandBuffer();
+    if (wait) |w| cb.waitForEvent(w.event, w.value);
     const prompt = (!record and head == .last) or total >= tile_rows;
     const e = cb.compute(.serial);
     const plan = if (segs.batched(record, segments.len)) segs.prepare(e, s, segments) else null;
     const enc = Encoder{ .e = e, .m = m, .s = s, .prompt = prompt, .record = record, .plan = plan };
+    if (held.len > 0) @memset(s.bad.contents()[0..4], 0);
+    for (held) |h| {
+        enc.pipe("lfm2_draft_ids");
+        e.setBuffer(h.src, h.off, 0);
+        e.setValue([4]u32{ h.stride, h.count, c.vocab, 0 }, 1);
+        e.setBuffer(s.ids, h.row * 4, 2);
+        e.setBuffer(s.bad, 0, 3);
+        enc.threads(.{ h.count, 1, 1 }, .{ 32, 1, 1 });
+    }
     const embedding = m.weights.embedding;
     e.setPipeline(m.kernels.embed(embedding.bits));
     e.setBuffer(s.ids, 0, 0);
@@ -180,6 +200,7 @@ pub fn run(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []const
         std.debug.print("LFM2 forward: {s}\n", .{msg});
         return error.GpuFailed;
     }
+    if (held.len > 0 and std.mem.readInt(u32, s.bad.contents()[0..4], .little) != 0) return error.DraftNonfinite;
     var base: usize = 0;
     for (segments) |seg| {
         const logit_row = if (head == .all) base + seg.rows - 1 else 0;

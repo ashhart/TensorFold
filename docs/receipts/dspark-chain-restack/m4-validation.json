@@ -1,0 +1,3320 @@
+{
+  "code_source": "f9de08d582718fef09fb90a3176eaa8e568a8384",
+  "source_identity": "All Zig/build sources match f73bb5590, reconstructed from public parents 98f5cc72b and d33dcfc76",
+  "hardware": {
+    "gpu": "Apple M4 Pro",
+    "ram_bytes": 51539607552,
+    "macos": "26.5.1 (25F80)",
+    "metal": "32023.883",
+    "zig": "0.17.0"
+  },
+  "build_flags": [
+    "-Dcpu=apple_m1",
+    "-Dversion=1.1.8"
+  ],
+  "no_m5_access": true,
+  "serving_context": 4096,
+  "parallel_capacity": 16,
+  "max_tokens": 64,
+  "validation": {
+    "bf16_functional": "MTL_DEBUG_LAYER=1",
+    "eight_bit": "normal runtime"
+  },
+  "binary_sha256": {
+    "1392": "3a82d6f793b92c4c7a749e226b8f02bc5441979c927138947d3f786384bec51f",
+    "1393": "29f1a35ab1fbccbbd0fcbd20e4c4ac73782a43e7760d9adcdaddbbaa6b8d62b8",
+    "1394": "135dadf0b40f59b2e06d09ee2c2a63d6d866c859c8904de1d26f897384433c76"
+  },
+  "kernel_summary": "SUMMARY 11 kernels: 11 pass gates 1-4, 0 fail, 0 known findings; 17 controls: 17 red as planted, 0 missed; 0 limit problems; gates 79289 ms, limits 2296 ms",
+  "reference_summary": [
+    "steady rounds: 20 rounds of hold, chances, held and a verified absorb: 0 host allocations, 0 resizes, 20 unwaited holds",
+    "the confidences' worst difference from the fp32 reference: 0.00106",
+    "9 of 9 drafts equal the fp32 reference's picks on the same chain (255-token context)"
+  ],
+  "functional": {
+    "resumed": {
+      "usage": {
+        "prompt_tokens": 3605,
+        "completion_tokens": 64,
+        "total_tokens": 3669,
+        "prompt_tokens_details": {
+          "cached_tokens": 3517
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "runtime": {
+        "enable_thinking": false,
+        "reasoning_effort": "none",
+        "engine": "lanes",
+        "tokens_per_second": 79.27275007948603,
+        "seconds": 0.794724542,
+        "prefill_seconds": 0.213224458,
+        "prefill_widths": [],
+        "prefill_raised": [],
+        "time_to_first_token": 0.214454416,
+        "sampling": "greedy",
+        "drafts": true,
+        "token_sha": "a064a0a2711c",
+        "token_sha256": "a064a0a2711ce3e5053bd664c3540fc534b5f6044a0aa69b70bce596081d429e",
+        "token_ids": [22497,267,55911,20,3300,50523,1947,50523,31249,30462,302,92660,1046,1710,30525,342,77,3247,1348,267,229,26,8558,26,467,267,229,26,8558,26,17,309,1413,1030,278,20647,437,6633,20,278,3170,302,278,13723,2045,302,19113,309,17534,20,309,278,2023,1224,22,16322,435,310,734,18068,405,21467,6544,20],
+        "min_rows": 2
+      },
+      "speculative": {
+        "rounds": 32,
+        "drafted": 65,
+        "accepted": 32,
+        "acceptance_rate": 0.49230769230769234,
+        "tokens_per_round": 2.0
+      },
+      "content": "Write a concise, step\u2011by\u2011step illustration of multiplying two small matrices (e.g., a 2\u00d72 by a 2\u00d72) and show how the entries are formed, the role of the dot product of rows and columns, and the final result. Keep it to one paragraph as requested earlier,",
+      "wall": 1.0101584577932954
+    },
+    "resume_request": {
+      "messages": [
+        {
+          "role": "user",
+          "content": "Public cache fixture.\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\nalpha beta gamma delta\n\nExplain matrix multiplication in one paragraph."
+        },
+        {
+          "role": "assistant",
+          "content": "\nMatrix multiplication is an operation that takes two compatible matrices\u2014say an \\(m \\times n\\) matrix \\(A\\) and an \\(n \\times p\\) matrix \\(B\\)\u2014and produces an \\(m \\times p\\) matrix \\(C\\); each entry \\(c_{ij}\\) of \\(C\\) is computed"
+        },
+        {
+          "role": "user",
+          "content": "Give a small numerical example and explain each step."
+        }
+      ],
+      "max_tokens": 64
+    },
+    "stress_reference_hashes": [
+      {
+        "prompt": "quicksort-raw",
+        "sha256": "9e4feb5a9aadd228c02f26c10e22d5a858be52f9690de23130431897ab4a95d0"
+      },
+      {
+        "prompt": "rust-reverse-words",
+        "sha256": "d9499a1af105f9d0477f4fda4f2afde556c782008fe552d4a7cd0ebf71e80101"
+      },
+      {
+        "prompt": "multiply-17-23",
+        "sha256": "3ac253c3ae100e4ca9328988d95e9324ab6de6f85787f191d13c718bfae1f4b4"
+      },
+      {
+        "prompt": "sleep-tips",
+        "sha256": "076c7d4d0802aa0ee09b60f396deab8a6cfc5683e2f17b6b90f587b410d20ba5"
+      },
+      {
+        "prompt": "js-debounce-raw",
+        "sha256": "d80d7a1d94635a9a5ce9305bf22133261181963691b70407d3212b0557e0d458"
+      },
+      {
+        "prompt": "linear-equation",
+        "sha256": "9277e1d182a9cfc39ec6df2bb5f33c9acb4ca3db6922f5113769afeb3c2ee38b"
+      },
+      {
+        "prompt": "fishing-village",
+        "sha256": "522136a9089e45996543679366846beba531361185bdc02baa0f336231b8848e"
+      },
+      {
+        "prompt": "sql-left-join",
+        "sha256": "45afcf2bc8f7bdc6b1a1ae93f7a06c53e7a98db5e4d9f283753159d8e2707a74"
+      }
+    ],
+    "stress": [
+      {
+        "slots": 6,
+        "seconds": 60,
+        "completed": 120,
+        "cancelled": 79,
+        "wrong": 0,
+        "errors": []
+      },
+      {
+        "slots": 16,
+        "seconds": 90,
+        "completed": 250,
+        "cancelled": 132,
+        "wrong": 0,
+        "errors": []
+      }
+    ],
+    "sampled": [
+      {
+        "streams": 1,
+        "hashes": [
+          [
+            "9958f5194528a17558001a973978b8a2e40b11e332c197e750bfbc15c7813a1c",
+            "9958f5194528a17558001a973978b8a2e40b11e332c197e750bfbc15c7813a1c",
+            "9958f5194528a17558001a973978b8a2e40b11e332c197e750bfbc15c7813a1c"
+          ]
+        ]
+      },
+      {
+        "streams": 4,
+        "hashes": [
+          [
+            "9958f5194528a17558001a973978b8a2e40b11e332c197e750bfbc15c7813a1c",
+            "9958f5194528a17558001a973978b8a2e40b11e332c197e750bfbc15c7813a1c",
+            "9958f5194528a17558001a973978b8a2e40b11e332c197e750bfbc15c7813a1c"
+          ],
+          [
+            "6dd87860c3c401b29c868be19918f593428854f18e08fce2d154b368e387bab1",
+            "6dd87860c3c401b29c868be19918f593428854f18e08fce2d154b368e387bab1",
+            "6dd87860c3c401b29c868be19918f593428854f18e08fce2d154b368e387bab1"
+          ],
+          [
+            "aa087fd45921ba6768548dc4aefef6f6e157ec09202a4b93049839b47a42320d",
+            "aa087fd45921ba6768548dc4aefef6f6e157ec09202a4b93049839b47a42320d",
+            "aa087fd45921ba6768548dc4aefef6f6e157ec09202a4b93049839b47a42320d"
+          ],
+          [
+            "8eefe260a824cded48e3c98eed082d0aaf915874a2d9ee331cc4ddf4412a9738",
+            "8eefe260a824cded48e3c98eed082d0aaf915874a2d9ee331cc4ddf4412a9738",
+            "8eefe260a824cded48e3c98eed082d0aaf915874a2d9ee331cc4ddf4412a9738"
+          ]
+        ]
+      },
+      {
+        "streams": 8,
+        "hashes": [
+          [
+            "9958f5194528a17558001a973978b8a2e40b11e332c197e750bfbc15c7813a1c",
+            "9958f5194528a17558001a973978b8a2e40b11e332c197e750bfbc15c7813a1c",
+            "9958f5194528a17558001a973978b8a2e40b11e332c197e750bfbc15c7813a1c"
+          ],
+          [
+            "6dd87860c3c401b29c868be19918f593428854f18e08fce2d154b368e387bab1",
+            "6dd87860c3c401b29c868be19918f593428854f18e08fce2d154b368e387bab1",
+            "6dd87860c3c401b29c868be19918f593428854f18e08fce2d154b368e387bab1"
+          ],
+          [
+            "aa087fd45921ba6768548dc4aefef6f6e157ec09202a4b93049839b47a42320d",
+            "aa087fd45921ba6768548dc4aefef6f6e157ec09202a4b93049839b47a42320d",
+            "aa087fd45921ba6768548dc4aefef6f6e157ec09202a4b93049839b47a42320d"
+          ],
+          [
+            "8eefe260a824cded48e3c98eed082d0aaf915874a2d9ee331cc4ddf4412a9738",
+            "8eefe260a824cded48e3c98eed082d0aaf915874a2d9ee331cc4ddf4412a9738",
+            "8eefe260a824cded48e3c98eed082d0aaf915874a2d9ee331cc4ddf4412a9738"
+          ],
+          [
+            "1330f02fdc900dbab934f2c0097e46a2608c35e620be479bf9819f68c1ad2366",
+            "1330f02fdc900dbab934f2c0097e46a2608c35e620be479bf9819f68c1ad2366",
+            "1330f02fdc900dbab934f2c0097e46a2608c35e620be479bf9819f68c1ad2366"
+          ],
+          [
+            "c83059ed7335ef8175d1f39441293d08ea656914525ec3ac36691e1927b275cf",
+            "c83059ed7335ef8175d1f39441293d08ea656914525ec3ac36691e1927b275cf",
+            "c83059ed7335ef8175d1f39441293d08ea656914525ec3ac36691e1927b275cf"
+          ],
+          [
+            "c590ac015a46de196f04884bcffeb3849d9d68e18ff15f742621253248b7300e",
+            "c590ac015a46de196f04884bcffeb3849d9d68e18ff15f742621253248b7300e",
+            "c590ac015a46de196f04884bcffeb3849d9d68e18ff15f742621253248b7300e"
+          ],
+          [
+            "28a8ff176c5da609ba9614ae38d5bf6cd7d83da8eba6627e93f3cd2a546d4dfb",
+            "28a8ff176c5da609ba9614ae38d5bf6cd7d83da8eba6627e93f3cd2a546d4dfb",
+            "28a8ff176c5da609ba9614ae38d5bf6cd7d83da8eba6627e93f3cd2a546d4dfb"
+          ]
+        ]
+      },
+      {
+        "streams": 16,
+        "hashes": [
+          [
+            "9958f5194528a17558001a973978b8a2e40b11e332c197e750bfbc15c7813a1c",
+            "9958f5194528a17558001a973978b8a2e40b11e332c197e750bfbc15c7813a1c",
+            "9958f5194528a17558001a973978b8a2e40b11e332c197e750bfbc15c7813a1c"
+          ],
+          [
+            "6dd87860c3c401b29c868be19918f593428854f18e08fce2d154b368e387bab1",
+            "6dd87860c3c401b29c868be19918f593428854f18e08fce2d154b368e387bab1",
+            "6dd87860c3c401b29c868be19918f593428854f18e08fce2d154b368e387bab1"
+          ],
+          [
+            "aa087fd45921ba6768548dc4aefef6f6e157ec09202a4b93049839b47a42320d",
+            "aa087fd45921ba6768548dc4aefef6f6e157ec09202a4b93049839b47a42320d",
+            "aa087fd45921ba6768548dc4aefef6f6e157ec09202a4b93049839b47a42320d"
+          ],
+          [
+            "8eefe260a824cded48e3c98eed082d0aaf915874a2d9ee331cc4ddf4412a9738",
+            "8eefe260a824cded48e3c98eed082d0aaf915874a2d9ee331cc4ddf4412a9738",
+            "8eefe260a824cded48e3c98eed082d0aaf915874a2d9ee331cc4ddf4412a9738"
+          ],
+          [
+            "1330f02fdc900dbab934f2c0097e46a2608c35e620be479bf9819f68c1ad2366",
+            "1330f02fdc900dbab934f2c0097e46a2608c35e620be479bf9819f68c1ad2366",
+            "1330f02fdc900dbab934f2c0097e46a2608c35e620be479bf9819f68c1ad2366"
+          ],
+          [
+            "c83059ed7335ef8175d1f39441293d08ea656914525ec3ac36691e1927b275cf",
+            "c83059ed7335ef8175d1f39441293d08ea656914525ec3ac36691e1927b275cf",
+            "c83059ed7335ef8175d1f39441293d08ea656914525ec3ac36691e1927b275cf"
+          ],
+          [
+            "c590ac015a46de196f04884bcffeb3849d9d68e18ff15f742621253248b7300e",
+            "c590ac015a46de196f04884bcffeb3849d9d68e18ff15f742621253248b7300e",
+            "c590ac015a46de196f04884bcffeb3849d9d68e18ff15f742621253248b7300e"
+          ],
+          [
+            "28a8ff176c5da609ba9614ae38d5bf6cd7d83da8eba6627e93f3cd2a546d4dfb",
+            "28a8ff176c5da609ba9614ae38d5bf6cd7d83da8eba6627e93f3cd2a546d4dfb",
+            "28a8ff176c5da609ba9614ae38d5bf6cd7d83da8eba6627e93f3cd2a546d4dfb"
+          ],
+          [
+            "41d624ff3fbe39c070157c12610d6700673ec826973228dfddae8eb6a1cd223c",
+            "41d624ff3fbe39c070157c12610d6700673ec826973228dfddae8eb6a1cd223c",
+            "41d624ff3fbe39c070157c12610d6700673ec826973228dfddae8eb6a1cd223c"
+          ],
+          [
+            "33d1280cae02dd02cfbeeb7de9a33323d9ea23f88247f2a986d03e213a3f8d0b",
+            "33d1280cae02dd02cfbeeb7de9a33323d9ea23f88247f2a986d03e213a3f8d0b",
+            "33d1280cae02dd02cfbeeb7de9a33323d9ea23f88247f2a986d03e213a3f8d0b"
+          ],
+          [
+            "51d5ebc4e7862b6c45c836a85da47074cb651620b0015c91c5d82d3d70ccd6b2",
+            "51d5ebc4e7862b6c45c836a85da47074cb651620b0015c91c5d82d3d70ccd6b2",
+            "51d5ebc4e7862b6c45c836a85da47074cb651620b0015c91c5d82d3d70ccd6b2"
+          ],
+          [
+            "c0afe7bf19f848ac3e8f99531b58d5608aa470f2c03ea63f8298901920a8c3d3",
+            "c0afe7bf19f848ac3e8f99531b58d5608aa470f2c03ea63f8298901920a8c3d3",
+            "c0afe7bf19f848ac3e8f99531b58d5608aa470f2c03ea63f8298901920a8c3d3"
+          ],
+          [
+            "68172f4de066139fda82f3d6eb277ed21660aed3c34d5e488232e41e7ccae9de",
+            "68172f4de066139fda82f3d6eb277ed21660aed3c34d5e488232e41e7ccae9de",
+            "68172f4de066139fda82f3d6eb277ed21660aed3c34d5e488232e41e7ccae9de"
+          ],
+          [
+            "a3c0804235311a54b522bd30daf9126c0ba02cd75f0de742b076ceeeea848e74",
+            "a3c0804235311a54b522bd30daf9126c0ba02cd75f0de742b076ceeeea848e74",
+            "a3c0804235311a54b522bd30daf9126c0ba02cd75f0de742b076ceeeea848e74"
+          ],
+          [
+            "fecd90b849b2fd6c1ec01f018d24f3556603d49132e3935c0abe2cc7a03288c8",
+            "fecd90b849b2fd6c1ec01f018d24f3556603d49132e3935c0abe2cc7a03288c8",
+            "fecd90b849b2fd6c1ec01f018d24f3556603d49132e3935c0abe2cc7a03288c8"
+          ],
+          [
+            "2d8f298739a79e14184852c9c8774acf3746569b579eaa3f1b79e9d096c410d8",
+            "2d8f298739a79e14184852c9c8774acf3746569b579eaa3f1b79e9d096c410d8",
+            "2d8f298739a79e14184852c9c8774acf3746569b579eaa3f1b79e9d096c410d8"
+          ]
+        ]
+      }
+    ],
+    "fresh": {
+      "usage": {
+        "prompt_tokens": 3605,
+        "completion_tokens": 64,
+        "total_tokens": 3669,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "runtime": {
+        "enable_thinking": false,
+        "reasoning_effort": "none",
+        "engine": "lanes",
+        "tokens_per_second": 101.78165688459318,
+        "seconds": 0.618972042,
+        "prefill_seconds": 3.0052185,
+        "prefill_widths": [],
+        "prefill_raised": [],
+        "time_to_first_token": 3.00753575,
+        "sampling": "greedy",
+        "drafts": true,
+        "token_sha": "a064a0a2711c",
+        "token_sha256": "a064a0a2711ce3e5053bd664c3540fc534b5f6044a0aa69b70bce596081d429e",
+        "token_ids": [22497,267,55911,20,3300,50523,1947,50523,31249,30462,302,92660,1046,1710,30525,342,77,3247,1348,267,229,26,8558,26,467,267,229,26,8558,26,17,309,1413,1030,278,20647,437,6633,20,278,3170,302,278,13723,2045,302,19113,309,17534,20,309,278,2023,1224,22,16322,435,310,734,18068,405,21467,6544,20],
+        "min_rows": 2
+      },
+      "speculative": {
+        "rounds": 31,
+        "drafted": 60,
+        "accepted": 33,
+        "acceptance_rate": 0.55,
+        "tokens_per_round": 2.064516129032258
+      },
+      "content": "Write a concise, step\u2011by\u2011step illustration of multiplying two small matrices (e.g., a 2\u00d72 by a 2\u00d72) and show how the entries are formed, the role of the dot product of rows and columns, and the final result. Keep it to one paragraph as requested earlier,",
+      "wall": 3.6279612500220537
+    },
+    "resume_equal": true
+  },
+  "eight_bit_equality": [
+    {
+      "prompt": "code",
+      "streams": 1,
+      "oracle": {
+        "usage": {
+          "prompt_tokens": 14,
+          "completion_tokens": 64,
+          "total_tokens": 78,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        },
+        "runtime": {
+          "enable_thinking": false,
+          "reasoning_effort": "none",
+          "engine": "lanes",
+          "tokens_per_second": 119.67996051214794,
+          "seconds": 0.526403917,
+          "prefill_seconds": 0.088317708,
+          "prefill_widths": [],
+          "prefill_raised": [],
+          "time_to_first_token": 0.088787375,
+          "sampling": "greedy",
+          "drafts": false,
+          "token_sha": "f4703afc84db",
+          "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+          "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+          "min_rows": 1
+        },
+        "speculative": {
+          "rounds": 63,
+          "drafted": 0,
+          "accepted": 0,
+          "acceptance_rate": 0.0,
+          "tokens_per_round": 1.0158730158730158
+        },
+        "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+        "wall": 0.6163800419308245
+      },
+      "solo": {
+        "usage": {
+          "prompt_tokens": 14,
+          "completion_tokens": 64,
+          "total_tokens": 78,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        },
+        "runtime": {
+          "enable_thinking": false,
+          "reasoning_effort": "none",
+          "engine": "lanes",
+          "tokens_per_second": 115.9482705073151,
+          "seconds": 0.54334575,
+          "prefill_seconds": 0.086373209,
+          "prefill_widths": [],
+          "prefill_raised": [],
+          "time_to_first_token": 0.0865375,
+          "sampling": "greedy",
+          "drafts": true,
+          "token_sha": "f4703afc84db",
+          "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+          "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+          "min_rows": 2
+        },
+        "speculative": {
+          "rounds": 31,
+          "drafted": 67,
+          "accepted": 32,
+          "acceptance_rate": 0.47761194029850745,
+          "tokens_per_round": 2.064516129032258
+        },
+        "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+        "wall": 0.6303965412080288
+      },
+      "concurrent": [
+        {
+          "usage": {
+            "prompt_tokens": 14,
+            "completion_tokens": 64,
+            "total_tokens": 78,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 116.8541563473704,
+            "seconds": 0.539133583,
+            "prefill_seconds": 0.08595325,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.086142334,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "f4703afc84db",
+            "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+            "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+            "min_rows": 2
+          },
+          "speculative": {
+            "rounds": 31,
+            "drafted": 67,
+            "accepted": 32,
+            "acceptance_rate": 0.47761194029850745,
+            "tokens_per_round": 2.064516129032258
+          },
+          "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+          "wall": 0.6257830420508981
+        }
+      ]
+    },
+    {
+      "prompt": "code",
+      "streams": 4,
+      "oracle": {
+        "usage": {
+          "prompt_tokens": 14,
+          "completion_tokens": 64,
+          "total_tokens": 78,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        },
+        "runtime": {
+          "enable_thinking": false,
+          "reasoning_effort": "none",
+          "engine": "lanes",
+          "tokens_per_second": 119.67996051214794,
+          "seconds": 0.526403917,
+          "prefill_seconds": 0.088317708,
+          "prefill_widths": [],
+          "prefill_raised": [],
+          "time_to_first_token": 0.088787375,
+          "sampling": "greedy",
+          "drafts": false,
+          "token_sha": "f4703afc84db",
+          "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+          "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+          "min_rows": 1
+        },
+        "speculative": {
+          "rounds": 63,
+          "drafted": 0,
+          "accepted": 0,
+          "acceptance_rate": 0.0,
+          "tokens_per_round": 1.0158730158730158
+        },
+        "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+        "wall": 0.6163800419308245
+      },
+      "solo": {
+        "usage": {
+          "prompt_tokens": 14,
+          "completion_tokens": 64,
+          "total_tokens": 78,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        },
+        "runtime": {
+          "enable_thinking": false,
+          "reasoning_effort": "none",
+          "engine": "lanes",
+          "tokens_per_second": 115.9482705073151,
+          "seconds": 0.54334575,
+          "prefill_seconds": 0.086373209,
+          "prefill_widths": [],
+          "prefill_raised": [],
+          "time_to_first_token": 0.0865375,
+          "sampling": "greedy",
+          "drafts": true,
+          "token_sha": "f4703afc84db",
+          "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+          "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+          "min_rows": 2
+        },
+        "speculative": {
+          "rounds": 31,
+          "drafted": 67,
+          "accepted": 32,
+          "acceptance_rate": 0.47761194029850745,
+          "tokens_per_round": 2.064516129032258
+        },
+        "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+        "wall": 0.6303965412080288
+      },
+      "concurrent": [
+        {
+          "usage": {
+            "prompt_tokens": 14,
+            "completion_tokens": 64,
+            "total_tokens": 78,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 56.33064420762809,
+            "seconds": 1.118396583,
+            "prefill_seconds": 0.088896083,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.264739375,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "f4703afc84db",
+            "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+            "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 62,
+            "drafted": 4,
+            "accepted": 1,
+            "acceptance_rate": 0.25,
+            "tokens_per_round": 1.032258064516129
+          },
+          "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+          "wall": 1.3841529581695795
+        },
+        {
+          "usage": {
+            "prompt_tokens": 14,
+            "completion_tokens": 64,
+            "total_tokens": 78,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 61.201935603890696,
+            "seconds": 1.029379208,
+            "prefill_seconds": 0.089014291,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.353732125,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "f4703afc84db",
+            "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+            "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 62,
+            "drafted": 4,
+            "accepted": 1,
+            "acceptance_rate": 0.25,
+            "tokens_per_round": 1.032258064516129
+          },
+          "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+          "wall": 1.3839738750830293
+        },
+        {
+          "usage": {
+            "prompt_tokens": 14,
+            "completion_tokens": 64,
+            "total_tokens": 78,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 52.18361509034185,
+            "seconds": 1.2072755,
+            "prefill_seconds": 0.089031917,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.17592175,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "f4703afc84db",
+            "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+            "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 62,
+            "drafted": 4,
+            "accepted": 1,
+            "acceptance_rate": 0.25,
+            "tokens_per_round": 1.032258064516129
+          },
+          "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+          "wall": 1.384120041038841
+        },
+        {
+          "usage": {
+            "prompt_tokens": 14,
+            "completion_tokens": 64,
+            "total_tokens": 78,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 48.59994703577772,
+            "seconds": 1.296297709,
+            "prefill_seconds": 0.086684041,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.0868695,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "f4703afc84db",
+            "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+            "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 62,
+            "drafted": 4,
+            "accepted": 1,
+            "acceptance_rate": 0.25,
+            "tokens_per_round": 1.032258064516129
+          },
+          "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+          "wall": 1.384091291576624
+        }
+      ]
+    },
+    {
+      "prompt": "code",
+      "streams": 8,
+      "oracle": {
+        "usage": {
+          "prompt_tokens": 14,
+          "completion_tokens": 64,
+          "total_tokens": 78,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        },
+        "runtime": {
+          "enable_thinking": false,
+          "reasoning_effort": "none",
+          "engine": "lanes",
+          "tokens_per_second": 119.67996051214794,
+          "seconds": 0.526403917,
+          "prefill_seconds": 0.088317708,
+          "prefill_widths": [],
+          "prefill_raised": [],
+          "time_to_first_token": 0.088787375,
+          "sampling": "greedy",
+          "drafts": false,
+          "token_sha": "f4703afc84db",
+          "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+          "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+          "min_rows": 1
+        },
+        "speculative": {
+          "rounds": 63,
+          "drafted": 0,
+          "accepted": 0,
+          "acceptance_rate": 0.0,
+          "tokens_per_round": 1.0158730158730158
+        },
+        "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+        "wall": 0.6163800419308245
+      },
+      "solo": {
+        "usage": {
+          "prompt_tokens": 14,
+          "completion_tokens": 64,
+          "total_tokens": 78,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        },
+        "runtime": {
+          "enable_thinking": false,
+          "reasoning_effort": "none",
+          "engine": "lanes",
+          "tokens_per_second": 115.9482705073151,
+          "seconds": 0.54334575,
+          "prefill_seconds": 0.086373209,
+          "prefill_widths": [],
+          "prefill_raised": [],
+          "time_to_first_token": 0.0865375,
+          "sampling": "greedy",
+          "drafts": true,
+          "token_sha": "f4703afc84db",
+          "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+          "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+          "min_rows": 2
+        },
+        "speculative": {
+          "rounds": 31,
+          "drafted": 67,
+          "accepted": 32,
+          "acceptance_rate": 0.47761194029850745,
+          "tokens_per_round": 2.064516129032258
+        },
+        "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+        "wall": 0.6303965412080288
+      },
+      "concurrent": [
+        {
+          "usage": {
+            "prompt_tokens": 14,
+            "completion_tokens": 64,
+            "total_tokens": 78,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 29.728737655864265,
+            "seconds": 2.119161625,
+            "prefill_seconds": 0.088057458,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.350641959,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "f4703afc84db",
+            "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+            "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 62,
+            "drafted": 4,
+            "accepted": 1,
+            "acceptance_rate": 0.25,
+            "tokens_per_round": 1.032258064516129
+          },
+          "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+          "wall": 2.471280707977712
+        },
+        {
+          "usage": {
+            "prompt_tokens": 14,
+            "completion_tokens": 64,
+            "total_tokens": 78,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 31.022362902149005,
+            "seconds": 2.030793083,
+            "prefill_seconds": 0.088378042,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.438930916,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "f4703afc84db",
+            "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+            "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 62,
+            "drafted": 4,
+            "accepted": 1,
+            "acceptance_rate": 0.25,
+            "tokens_per_round": 1.032258064516129
+          },
+          "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+          "wall": 2.4710012078285217
+        },
+        {
+          "usage": {
+            "prompt_tokens": 14,
+            "completion_tokens": 64,
+            "total_tokens": 78,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 35.676361054844804,
+            "seconds": 1.765875166,
+            "prefill_seconds": 0.088879,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.70380625,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "f4703afc84db",
+            "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+            "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 62,
+            "drafted": 4,
+            "accepted": 1,
+            "acceptance_rate": 0.25,
+            "tokens_per_round": 1.032258064516129
+          },
+          "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+          "wall": 2.4708623751066625
+        },
+        {
+          "usage": {
+            "prompt_tokens": 14,
+            "completion_tokens": 64,
+            "total_tokens": 78,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 28.542765525006846,
+            "seconds": 2.207214292,
+            "prefill_seconds": 0.088131208,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.262512958,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "f4703afc84db",
+            "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+            "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 62,
+            "drafted": 4,
+            "accepted": 1,
+            "acceptance_rate": 0.25,
+            "tokens_per_round": 1.032258064516129
+          },
+          "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+          "wall": 2.4709844160825014
+        },
+        {
+          "usage": {
+            "prompt_tokens": 14,
+            "completion_tokens": 64,
+            "total_tokens": 78,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 33.96693803823949,
+            "seconds": 1.85474475,
+            "prefill_seconds": 0.087848208,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.614954458,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "f4703afc84db",
+            "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+            "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 62,
+            "drafted": 4,
+            "accepted": 1,
+            "acceptance_rate": 0.25,
+            "tokens_per_round": 1.032258064516129
+          },
+          "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+          "wall": 2.470862625166774
+        },
+        {
+          "usage": {
+            "prompt_tokens": 14,
+            "completion_tokens": 64,
+            "total_tokens": 78,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 32.43120321887414,
+            "seconds": 1.942573625,
+            "prefill_seconds": 0.08821225,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.527115375,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "f4703afc84db",
+            "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+            "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 62,
+            "drafted": 4,
+            "accepted": 1,
+            "acceptance_rate": 0.25,
+            "tokens_per_round": 1.032258064516129
+          },
+          "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+          "wall": 2.4707762501202524
+        },
+        {
+          "usage": {
+            "prompt_tokens": 14,
+            "completion_tokens": 64,
+            "total_tokens": 78,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 27.446896748379128,
+            "seconds": 2.295341458,
+            "prefill_seconds": 0.088025083,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.174468625,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "f4703afc84db",
+            "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+            "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 62,
+            "drafted": 4,
+            "accepted": 1,
+            "acceptance_rate": 0.25,
+            "tokens_per_round": 1.032258064516129
+          },
+          "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+          "wall": 2.4709484996274114
+        },
+        {
+          "usage": {
+            "prompt_tokens": 14,
+            "completion_tokens": 64,
+            "total_tokens": 78,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 26.43316069009526,
+            "seconds": 2.383369917,
+            "prefill_seconds": 0.086259,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.086460208,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "f4703afc84db",
+            "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+            "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 62,
+            "drafted": 4,
+            "accepted": 1,
+            "acceptance_rate": 0.25,
+            "tokens_per_round": 1.032258064516129
+          },
+          "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+          "wall": 2.4711873340420425
+        }
+      ]
+    },
+    {
+      "prompt": "code",
+      "streams": 16,
+      "oracle": {
+        "usage": {
+          "prompt_tokens": 14,
+          "completion_tokens": 64,
+          "total_tokens": 78,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        },
+        "runtime": {
+          "enable_thinking": false,
+          "reasoning_effort": "none",
+          "engine": "lanes",
+          "tokens_per_second": 119.67996051214794,
+          "seconds": 0.526403917,
+          "prefill_seconds": 0.088317708,
+          "prefill_widths": [],
+          "prefill_raised": [],
+          "time_to_first_token": 0.088787375,
+          "sampling": "greedy",
+          "drafts": false,
+          "token_sha": "f4703afc84db",
+          "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+          "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+          "min_rows": 1
+        },
+        "speculative": {
+          "rounds": 63,
+          "drafted": 0,
+          "accepted": 0,
+          "acceptance_rate": 0.0,
+          "tokens_per_round": 1.0158730158730158
+        },
+        "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+        "wall": 0.6163800419308245
+      },
+      "solo": {
+        "usage": {
+          "prompt_tokens": 14,
+          "completion_tokens": 64,
+          "total_tokens": 78,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        },
+        "runtime": {
+          "enable_thinking": false,
+          "reasoning_effort": "none",
+          "engine": "lanes",
+          "tokens_per_second": 115.9482705073151,
+          "seconds": 0.54334575,
+          "prefill_seconds": 0.086373209,
+          "prefill_widths": [],
+          "prefill_raised": [],
+          "time_to_first_token": 0.0865375,
+          "sampling": "greedy",
+          "drafts": true,
+          "token_sha": "f4703afc84db",
+          "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+          "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+          "min_rows": 2
+        },
+        "speculative": {
+          "rounds": 31,
+          "drafted": 67,
+          "accepted": 32,
+          "acceptance_rate": 0.47761194029850745,
+          "tokens_per_round": 2.064516129032258
+        },
+        "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+        "wall": 0.6303965412080288
+      },
+      "concurrent": [
+        {
+          "usage": {
+            "prompt_tokens": 14,
+            "completion_tokens": 64,
+            "total_tokens": 78,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 19.620989951652845,
+            "seconds": 3.210847167,
+            "prefill_seconds": 0.08852725,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 1.061002333,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "f4703afc84db",
+            "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+            "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 1,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+          "wall": 4.2745431661605835
+        },
+        {
+          "usage": {
+            "prompt_tokens": 14,
+            "completion_tokens": 64,
+            "total_tokens": 78,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 20.76964901518484,
+            "seconds": 3.03327225,
+            "prefill_seconds": 0.0890955,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 1.238571792,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "f4703afc84db",
+            "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+            "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 1,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+          "wall": 4.27432379219681
+        },
+        {
+          "usage": {
+            "prompt_tokens": 14,
+            "completion_tokens": 64,
+            "total_tokens": 78,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 18.594498437601104,
+            "seconds": 3.388098916,
+            "prefill_seconds": 0.087958959,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.88378875,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "f4703afc84db",
+            "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+            "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 1,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+          "wall": 4.274018832948059
+        },
+        {
+          "usage": {
+            "prompt_tokens": 14,
+            "completion_tokens": 64,
+            "total_tokens": 78,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 22.069646813399167,
+            "seconds": 2.854599375,
+            "prefill_seconds": 0.089081209,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 1.417250667,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "f4703afc84db",
+            "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+            "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 1,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+          "wall": 4.274319208692759
+        },
+        {
+          "usage": {
+            "prompt_tokens": 14,
+            "completion_tokens": 64,
+            "total_tokens": 78,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 16.44833961769693,
+            "seconds": 3.830173833,
+            "prefill_seconds": 0.088790458,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.441954416,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "f4703afc84db",
+            "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+            "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 1,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+          "wall": 4.274753250181675
+        },
+        {
+          "usage": {
+            "prompt_tokens": 14,
+            "completion_tokens": 64,
+            "total_tokens": 78,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 16.83901374965612,
+            "seconds": 3.74131175,
+            "prefill_seconds": 0.088892834,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.530804125,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "f4703afc84db",
+            "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+            "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 1,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+          "wall": 4.273524791933596
+        },
+        {
+          "usage": {
+            "prompt_tokens": 14,
+            "completion_tokens": 64,
+            "total_tokens": 78,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 21.401683743497593,
+            "seconds": 2.943693625,
+            "prefill_seconds": 0.089587458,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 1.328151917,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "f4703afc84db",
+            "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+            "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 1,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+          "wall": 4.274398125242442
+        },
+        {
+          "usage": {
+            "prompt_tokens": 14,
+            "completion_tokens": 64,
+            "total_tokens": 78,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 17.673436139836664,
+            "seconds": 3.564671833,
+            "prefill_seconds": 0.088257792,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.707352875,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "f4703afc84db",
+            "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+            "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 1,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+          "wall": 4.274274167139083
+        },
+        {
+          "usage": {
+            "prompt_tokens": 14,
+            "completion_tokens": 64,
+            "total_tokens": 78,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 16.075701414946725,
+            "seconds": 3.918958083,
+            "prefill_seconds": 0.089218417,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.353173083,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "f4703afc84db",
+            "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+            "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 1,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+          "wall": 4.274291166104376
+        },
+        {
+          "usage": {
+            "prompt_tokens": 14,
+            "completion_tokens": 64,
+            "total_tokens": 78,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 20.177021335198376,
+            "seconds": 3.12236375,
+            "prefill_seconds": 0.088477792,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 1.149490625,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "f4703afc84db",
+            "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+            "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 1,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+          "wall": 4.273835499770939
+        },
+        {
+          "usage": {
+            "prompt_tokens": 14,
+            "completion_tokens": 64,
+            "total_tokens": 78,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 15.376213539921538,
+            "seconds": 4.097237583,
+            "prefill_seconds": 0.0884805,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.174967417,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "f4703afc84db",
+            "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+            "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 1,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+          "wall": 4.273813832551241
+        },
+        {
+          "usage": {
+            "prompt_tokens": 14,
+            "completion_tokens": 64,
+            "total_tokens": 78,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 15.717877734784608,
+            "seconds": 4.008174708,
+            "prefill_seconds": 0.089060083,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.264059417,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "f4703afc84db",
+            "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+            "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 1,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+          "wall": 4.274464833084494
+        },
+        {
+          "usage": {
+            "prompt_tokens": 14,
+            "completion_tokens": 64,
+            "total_tokens": 78,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 18.123979453101107,
+            "seconds": 3.476057792,
+            "prefill_seconds": 0.088639041,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.7958975,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "f4703afc84db",
+            "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+            "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 1,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+          "wall": 4.27419541683048
+        },
+        {
+          "usage": {
+            "prompt_tokens": 14,
+            "completion_tokens": 64,
+            "total_tokens": 78,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 19.0945237942015,
+            "seconds": 3.299375291,
+            "prefill_seconds": 0.088725417,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.972535917,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "f4703afc84db",
+            "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+            "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 1,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+          "wall": 4.27411058312282
+        },
+        {
+          "usage": {
+            "prompt_tokens": 14,
+            "completion_tokens": 64,
+            "total_tokens": 78,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 17.246391416593852,
+            "seconds": 3.652938083,
+            "prefill_seconds": 0.088357792,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.619169208,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "f4703afc84db",
+            "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+            "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 1,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+          "wall": 4.273836750071496
+        },
+        {
+          "usage": {
+            "prompt_tokens": 14,
+            "completion_tokens": 64,
+            "total_tokens": 78,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 15.051193168203598,
+            "seconds": 4.185714667,
+            "prefill_seconds": 0.08626125,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.086583917,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "f4703afc84db",
+            "token_sha256": "f4703afc84db904cdc537b5824699afc179c7360c2df654fdd127d833b9e49ab",
+            "token_ids": [309,278,4695,355,13564,374,278,1008,229,654,20647,302,278,8055,22,440,4695,2997,34,496,29088,278,4695,1976,278,1008,229,654,20647,302,278,8055,8022,1672,278,5141,1252,373,34,440,1008,229,654,20647,437,34,229,24,20,229,25,20,229,25,20,229,26,20,229,27,20,229,29,20],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 1,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " and the user is asking for the first 10 entries of the sequence. The user says: \"Does the user want the first 10 entries of the sequence?\" So the answer should be: The first 10 entries are: 0, 1, 1, 2, 3, 5,",
+          "wall": 4.274295750074089
+        }
+      ]
+    },
+    {
+      "prompt": "prose",
+      "streams": 1,
+      "oracle": {
+        "usage": {
+          "prompt_tokens": 18,
+          "completion_tokens": 64,
+          "total_tokens": 82,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        },
+        "runtime": {
+          "enable_thinking": false,
+          "reasoning_effort": "none",
+          "engine": "lanes",
+          "tokens_per_second": 120.15984119827971,
+          "seconds": 0.524301625,
+          "prefill_seconds": 0.095631792,
+          "prefill_widths": [],
+          "prefill_raised": [],
+          "time_to_first_token": 0.095816792,
+          "sampling": "greedy",
+          "drafts": false,
+          "token_sha": "1956adfee9e5",
+          "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+          "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+          "min_rows": 1
+        },
+        "speculative": {
+          "rounds": 63,
+          "drafted": 0,
+          "accepted": 0,
+          "acceptance_rate": 0.0,
+          "tokens_per_round": 1.0158730158730158
+        },
+        "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+        "wall": 0.6206671250984073
+      },
+      "solo": {
+        "usage": {
+          "prompt_tokens": 18,
+          "completion_tokens": 64,
+          "total_tokens": 82,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        },
+        "runtime": {
+          "enable_thinking": false,
+          "reasoning_effort": "none",
+          "engine": "lanes",
+          "tokens_per_second": 110.1481004502001,
+          "seconds": 0.571957208,
+          "prefill_seconds": 0.094302583,
+          "prefill_widths": [],
+          "prefill_raised": [],
+          "time_to_first_token": 0.094477875,
+          "sampling": "greedy",
+          "drafts": true,
+          "token_sha": "1956adfee9e5",
+          "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+          "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+          "min_rows": 2
+        },
+        "speculative": {
+          "rounds": 34,
+          "drafted": 61,
+          "accepted": 30,
+          "acceptance_rate": 0.4918032786885246,
+          "tokens_per_round": 1.8823529411764706
+        },
+        "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+        "wall": 0.6670095417648554
+      },
+      "concurrent": [
+        {
+          "usage": {
+            "prompt_tokens": 18,
+            "completion_tokens": 64,
+            "total_tokens": 82,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 111.96803506676773,
+            "seconds": 0.562660584,
+            "prefill_seconds": 0.094760125,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.094947583,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "1956adfee9e5",
+            "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+            "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+            "min_rows": 2
+          },
+          "speculative": {
+            "rounds": 34,
+            "drafted": 61,
+            "accepted": 30,
+            "acceptance_rate": 0.4918032786885246,
+            "tokens_per_round": 1.8823529411764706
+          },
+          "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+          "wall": 0.6581565416418016
+        }
+      ]
+    },
+    {
+      "prompt": "prose",
+      "streams": 4,
+      "oracle": {
+        "usage": {
+          "prompt_tokens": 18,
+          "completion_tokens": 64,
+          "total_tokens": 82,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        },
+        "runtime": {
+          "enable_thinking": false,
+          "reasoning_effort": "none",
+          "engine": "lanes",
+          "tokens_per_second": 120.15984119827971,
+          "seconds": 0.524301625,
+          "prefill_seconds": 0.095631792,
+          "prefill_widths": [],
+          "prefill_raised": [],
+          "time_to_first_token": 0.095816792,
+          "sampling": "greedy",
+          "drafts": false,
+          "token_sha": "1956adfee9e5",
+          "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+          "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+          "min_rows": 1
+        },
+        "speculative": {
+          "rounds": 63,
+          "drafted": 0,
+          "accepted": 0,
+          "acceptance_rate": 0.0,
+          "tokens_per_round": 1.0158730158730158
+        },
+        "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+        "wall": 0.6206671250984073
+      },
+      "solo": {
+        "usage": {
+          "prompt_tokens": 18,
+          "completion_tokens": 64,
+          "total_tokens": 82,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        },
+        "runtime": {
+          "enable_thinking": false,
+          "reasoning_effort": "none",
+          "engine": "lanes",
+          "tokens_per_second": 110.1481004502001,
+          "seconds": 0.571957208,
+          "prefill_seconds": 0.094302583,
+          "prefill_widths": [],
+          "prefill_raised": [],
+          "time_to_first_token": 0.094477875,
+          "sampling": "greedy",
+          "drafts": true,
+          "token_sha": "1956adfee9e5",
+          "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+          "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+          "min_rows": 2
+        },
+        "speculative": {
+          "rounds": 34,
+          "drafted": 61,
+          "accepted": 30,
+          "acceptance_rate": 0.4918032786885246,
+          "tokens_per_round": 1.8823529411764706
+        },
+        "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+        "wall": 0.6670095417648554
+      },
+      "concurrent": [
+        {
+          "usage": {
+            "prompt_tokens": 18,
+            "completion_tokens": 64,
+            "total_tokens": 82,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 48.466119441866475,
+            "seconds": 1.299877125,
+            "prefill_seconds": 0.095609416,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.095780167,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "1956adfee9e5",
+            "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+            "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 0,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+          "wall": 1.3965173331089318
+        },
+        {
+          "usage": {
+            "prompt_tokens": 18,
+            "completion_tokens": 64,
+            "total_tokens": 82,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 52.40192468875733,
+            "seconds": 1.202245917,
+            "prefill_seconds": 0.097635667,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.193399625,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "1956adfee9e5",
+            "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+            "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 0,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+          "wall": 1.396625000052154
+        },
+        {
+          "usage": {
+            "prompt_tokens": 18,
+            "completion_tokens": 64,
+            "total_tokens": 82,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 62.56950354531321,
+            "seconds": 1.006880292,
+            "prefill_seconds": 0.098040916,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.388791,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "1956adfee9e5",
+            "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+            "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 0,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+          "wall": 1.3965704580768943
+        },
+        {
+          "usage": {
+            "prompt_tokens": 18,
+            "completion_tokens": 64,
+            "total_tokens": 82,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 57.01692214735232,
+            "seconds": 1.104935125,
+            "prefill_seconds": 0.097309209,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.290724125,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "1956adfee9e5",
+            "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+            "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 0,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+          "wall": 1.3966415002942085
+        }
+      ]
+    },
+    {
+      "prompt": "prose",
+      "streams": 8,
+      "oracle": {
+        "usage": {
+          "prompt_tokens": 18,
+          "completion_tokens": 64,
+          "total_tokens": 82,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        },
+        "runtime": {
+          "enable_thinking": false,
+          "reasoning_effort": "none",
+          "engine": "lanes",
+          "tokens_per_second": 120.15984119827971,
+          "seconds": 0.524301625,
+          "prefill_seconds": 0.095631792,
+          "prefill_widths": [],
+          "prefill_raised": [],
+          "time_to_first_token": 0.095816792,
+          "sampling": "greedy",
+          "drafts": false,
+          "token_sha": "1956adfee9e5",
+          "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+          "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+          "min_rows": 1
+        },
+        "speculative": {
+          "rounds": 63,
+          "drafted": 0,
+          "accepted": 0,
+          "acceptance_rate": 0.0,
+          "tokens_per_round": 1.0158730158730158
+        },
+        "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+        "wall": 0.6206671250984073
+      },
+      "solo": {
+        "usage": {
+          "prompt_tokens": 18,
+          "completion_tokens": 64,
+          "total_tokens": 82,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        },
+        "runtime": {
+          "enable_thinking": false,
+          "reasoning_effort": "none",
+          "engine": "lanes",
+          "tokens_per_second": 110.1481004502001,
+          "seconds": 0.571957208,
+          "prefill_seconds": 0.094302583,
+          "prefill_widths": [],
+          "prefill_raised": [],
+          "time_to_first_token": 0.094477875,
+          "sampling": "greedy",
+          "drafts": true,
+          "token_sha": "1956adfee9e5",
+          "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+          "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+          "min_rows": 2
+        },
+        "speculative": {
+          "rounds": 34,
+          "drafted": 61,
+          "accepted": 30,
+          "acceptance_rate": 0.4918032786885246,
+          "tokens_per_round": 1.8823529411764706
+        },
+        "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+        "wall": 0.6670095417648554
+      },
+      "concurrent": [
+        {
+          "usage": {
+            "prompt_tokens": 18,
+            "completion_tokens": 64,
+            "total_tokens": 82,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 28.75318761546154,
+            "seconds": 2.191061417,
+            "prefill_seconds": 0.096980584,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.483957708,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "1956adfee9e5",
+            "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+            "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 0,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+          "wall": 2.6763683329336345
+        },
+        {
+          "usage": {
+            "prompt_tokens": 18,
+            "completion_tokens": 64,
+            "total_tokens": 82,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 26.418412791345606,
+            "seconds": 2.384700417,
+            "prefill_seconds": 0.096716416,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.290179167,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "1956adfee9e5",
+            "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+            "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 0,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+          "wall": 2.6762186670675874
+        },
+        {
+          "usage": {
+            "prompt_tokens": 18,
+            "completion_tokens": 64,
+            "total_tokens": 82,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 24.42238790623447,
+            "seconds": 2.579600334,
+            "prefill_seconds": 0.094654083,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.094883583,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "1956adfee9e5",
+            "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+            "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 0,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+          "wall": 2.676497041247785
+        },
+        {
+          "usage": {
+            "prompt_tokens": 18,
+            "completion_tokens": 64,
+            "total_tokens": 82,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 33.190914613431865,
+            "seconds": 1.898109791,
+            "prefill_seconds": 0.097713292,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.776979292,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "1956adfee9e5",
+            "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+            "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 0,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+          "wall": 2.6758654173463583
+        },
+        {
+          "usage": {
+            "prompt_tokens": 18,
+            "completion_tokens": 64,
+            "total_tokens": 82,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 31.566605537684513,
+            "seconds": 1.99578,
+            "prefill_seconds": 0.097705209,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.679303375,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "1956adfee9e5",
+            "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+            "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 0,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+          "wall": 2.676042666193098
+        },
+        {
+          "usage": {
+            "prompt_tokens": 18,
+            "completion_tokens": 64,
+            "total_tokens": 82,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 27.535311031552517,
+            "seconds": 2.28797125,
+            "prefill_seconds": 0.096808375,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.386955291,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "1956adfee9e5",
+            "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+            "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 0,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+          "wall": 2.675699040759355
+        },
+        {
+          "usage": {
+            "prompt_tokens": 18,
+            "completion_tokens": 64,
+            "total_tokens": 82,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 30.093535968995305,
+            "seconds": 2.093472833,
+            "prefill_seconds": 0.097658542,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.581572792,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "1956adfee9e5",
+            "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+            "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 0,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+          "wall": 2.6763144158758223
+        },
+        {
+          "usage": {
+            "prompt_tokens": 18,
+            "completion_tokens": 64,
+            "total_tokens": 82,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 25.389972425127752,
+            "seconds": 2.481294542,
+            "prefill_seconds": 0.098633083,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.193487375,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "1956adfee9e5",
+            "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+            "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 0,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+          "wall": 2.6760564581491053
+        }
+      ]
+    },
+    {
+      "prompt": "prose",
+      "streams": 16,
+      "oracle": {
+        "usage": {
+          "prompt_tokens": 18,
+          "completion_tokens": 64,
+          "total_tokens": 82,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        },
+        "runtime": {
+          "enable_thinking": false,
+          "reasoning_effort": "none",
+          "engine": "lanes",
+          "tokens_per_second": 120.15984119827971,
+          "seconds": 0.524301625,
+          "prefill_seconds": 0.095631792,
+          "prefill_widths": [],
+          "prefill_raised": [],
+          "time_to_first_token": 0.095816792,
+          "sampling": "greedy",
+          "drafts": false,
+          "token_sha": "1956adfee9e5",
+          "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+          "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+          "min_rows": 1
+        },
+        "speculative": {
+          "rounds": 63,
+          "drafted": 0,
+          "accepted": 0,
+          "acceptance_rate": 0.0,
+          "tokens_per_round": 1.0158730158730158
+        },
+        "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+        "wall": 0.6206671250984073
+      },
+      "solo": {
+        "usage": {
+          "prompt_tokens": 18,
+          "completion_tokens": 64,
+          "total_tokens": 82,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        },
+        "runtime": {
+          "enable_thinking": false,
+          "reasoning_effort": "none",
+          "engine": "lanes",
+          "tokens_per_second": 110.1481004502001,
+          "seconds": 0.571957208,
+          "prefill_seconds": 0.094302583,
+          "prefill_widths": [],
+          "prefill_raised": [],
+          "time_to_first_token": 0.094477875,
+          "sampling": "greedy",
+          "drafts": true,
+          "token_sha": "1956adfee9e5",
+          "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+          "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+          "min_rows": 2
+        },
+        "speculative": {
+          "rounds": 34,
+          "drafted": 61,
+          "accepted": 30,
+          "acceptance_rate": 0.4918032786885246,
+          "tokens_per_round": 1.8823529411764706
+        },
+        "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+        "wall": 0.6670095417648554
+      },
+      "concurrent": [
+        {
+          "usage": {
+            "prompt_tokens": 18,
+            "completion_tokens": 64,
+            "total_tokens": 82,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 14.00833664441679,
+            "seconds": 4.497321959,
+            "prefill_seconds": 0.131896916,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.640175625,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "1956adfee9e5",
+            "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+            "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 0,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+          "wall": 5.142375708092004
+        },
+        {
+          "usage": {
+            "prompt_tokens": 18,
+            "completion_tokens": 64,
+            "total_tokens": 82,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 14.432386826944487,
+            "seconds": 4.365182333,
+            "prefill_seconds": 0.132125042,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.771581125,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "1956adfee9e5",
+            "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+            "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 0,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+          "wall": 5.140255624894053
+        },
+        {
+          "usage": {
+            "prompt_tokens": 18,
+            "completion_tokens": 64,
+            "total_tokens": 82,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 19.828154945559525,
+            "seconds": 3.177300166,
+            "prefill_seconds": 0.127961708,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 1.957828792,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "1956adfee9e5",
+            "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+            "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 0,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+          "wall": 5.142047999892384
+        },
+        {
+          "usage": {
+            "prompt_tokens": 18,
+            "completion_tokens": 64,
+            "total_tokens": 82,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 13.60915404167372,
+            "seconds": 4.629237042,
+            "prefill_seconds": 0.131488875,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.508231917,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "1956adfee9e5",
+            "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+            "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 0,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+          "wall": 5.140175291802734
+        },
+        {
+          "usage": {
+            "prompt_tokens": 18,
+            "completion_tokens": 64,
+            "total_tokens": 82,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 12.887523658184616,
+            "seconds": 4.888448834,
+            "prefill_seconds": 0.126429375,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.249080875,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "1956adfee9e5",
+            "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+            "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 0,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+          "wall": 5.141679583117366
+        },
+        {
+          "usage": {
+            "prompt_tokens": 18,
+            "completion_tokens": 64,
+            "total_tokens": 82,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 20.655125669841834,
+            "seconds": 3.050090375,
+            "prefill_seconds": 0.127205208,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 2.0850105,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "1956adfee9e5",
+            "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+            "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 0,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+          "wall": 5.140261250082403
+        },
+        {
+          "usage": {
+            "prompt_tokens": 18,
+            "completion_tokens": 64,
+            "total_tokens": 82,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 12.562633178755044,
+            "seconds": 5.014872209,
+            "prefill_seconds": 0.121623291,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.122718292,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "1956adfee9e5",
+            "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+            "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 0,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+          "wall": 5.140725666191429
+        },
+        {
+          "usage": {
+            "prompt_tokens": 18,
+            "completion_tokens": 64,
+            "total_tokens": 82,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 17.039177802873752,
+            "seconds": 3.6973615,
+            "prefill_seconds": 0.132001541,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 1.437714917,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "1956adfee9e5",
+            "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+            "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 0,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+          "wall": 5.1396685829386115
+        },
+        {
+          "usage": {
+            "prompt_tokens": 18,
+            "completion_tokens": 64,
+            "total_tokens": 82,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 16.45201376980906,
+            "seconds": 3.829318458,
+            "prefill_seconds": 0.132648291,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 1.305990708,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "1956adfee9e5",
+            "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+            "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 0,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+          "wall": 5.13737825024873
+        },
+        {
+          "usage": {
+            "prompt_tokens": 18,
+            "completion_tokens": 64,
+            "total_tokens": 82,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 18.352428458353643,
+            "seconds": 3.432788208,
+            "prefill_seconds": 0.127830417,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 1.702307541,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "1956adfee9e5",
+            "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+            "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 0,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+          "wall": 5.139191249851137
+        },
+        {
+          "usage": {
+            "prompt_tokens": 18,
+            "completion_tokens": 64,
+            "total_tokens": 82,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 15.37733915442556,
+            "seconds": 4.096937667,
+            "prefill_seconds": 0.134729125,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 1.038501959,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "1956adfee9e5",
+            "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+            "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 0,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+          "wall": 5.138295667245984
+        },
+        {
+          "usage": {
+            "prompt_tokens": 18,
+            "completion_tokens": 64,
+            "total_tokens": 82,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 19.06056741115705,
+            "seconds": 3.305253125,
+            "prefill_seconds": 0.127534333,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 1.829834917,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "1956adfee9e5",
+            "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+            "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 0,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+          "wall": 5.13809383334592
+        },
+        {
+          "usage": {
+            "prompt_tokens": 18,
+            "completion_tokens": 64,
+            "total_tokens": 82,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 15.901207897322182,
+            "seconds": 3.961963167,
+            "prefill_seconds": 0.134983458,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 1.173586875,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "1956adfee9e5",
+            "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+            "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 0,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+          "wall": 5.139684333931655
+        },
+        {
+          "usage": {
+            "prompt_tokens": 18,
+            "completion_tokens": 64,
+            "total_tokens": 82,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 14.887798872996601,
+            "seconds": 4.231653083,
+            "prefill_seconds": 0.133543542,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.9050825,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "1956adfee9e5",
+            "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+            "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 0,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+          "wall": 5.139725415967405
+        },
+        {
+          "usage": {
+            "prompt_tokens": 18,
+            "completion_tokens": 64,
+            "total_tokens": 82,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 17.693509032746437,
+            "seconds": 3.560627792,
+            "prefill_seconds": 0.136757166,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 1.57498825,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "1956adfee9e5",
+            "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+            "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 0,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+          "wall": 5.139503249898553
+        },
+        {
+          "usage": {
+            "prompt_tokens": 18,
+            "completion_tokens": 64,
+            "total_tokens": 82,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "runtime": {
+            "enable_thinking": false,
+            "reasoning_effort": "none",
+            "engine": "lanes",
+            "tokens_per_second": 13.233313638276668,
+            "seconds": 4.760712375,
+            "prefill_seconds": 0.12774075,
+            "prefill_widths": [],
+            "prefill_raised": [],
+            "time_to_first_token": 0.376741167,
+            "sampling": "greedy",
+            "drafts": true,
+            "token_sha": "1956adfee9e5",
+            "token_sha256": "1956adfee9e52abb66e22666aef4a4e6722e445dcbeb3dddcd6ee73654620bdd",
+            "token_ids": [440,4695,355,13564,374,267,496,24629,20,3547,10,5141,22,1672,522,1094,310,2588,435,55911,63908,21009,5141,34,496,25,19546,8558,19546,25,550,229,25,2426,8,2083,510,735,5668,395,435,589,267,5946,8553,22,1938,278,4695,5250,374,267,2789,20,3547,5141,22,1672,522,510,1303,3118,496,25],
+            "min_rows": 1
+          },
+          "speculative": {
+            "rounds": 63,
+            "drafted": 0,
+            "accepted": 0,
+            "acceptance_rate": 0.0,
+            "tokens_per_round": 1.0158730158730158
+          },
+          "content": " The user is asking for a \"short, simple\" answer. So we need to keep it concise.\n\nThus answer: \"1\u202f\u00d7\u202f1 = 1.\"\n\nWe can also mention that it's a perfect square. But the user asked for a short, simple answer. So we can just give \"1",
+          "wall": 5.140771667007357
+        }
+      ]
+    }
+  ],
+  "shutdowns": {
+    "load-1392.shutdown": {
+      "forced_kill": false,
+      "seconds": 0.4373434172011912,
+      "returncode": 0
+    },
+    "functional-fresh.shutdown": {
+      "forced_kill": false,
+      "seconds": 0.6149736670777202,
+      "returncode": 0
+    },
+    "functional-cache.shutdown": {
+      "forced_kill": false,
+      "seconds": 0.44490270828828216,
+      "returncode": 0
+    },
+    "eight-bit.shutdown": {
+      "forced_kill": false,
+      "seconds": 0.5467857089824975,
+      "returncode": 0
+    },
+    "load-1393.shutdown": {
+      "forced_kill": false,
+      "seconds": 0.5479795830324292,
+      "returncode": 0
+    }
+  },
+  "limits": [
+    "No new performance comparison: prior M5 4/8-stream slowdown remains unresolved",
+    "No new 65k/130k long-context replay in this restack",
+    "No new M1/M2/M3/M5, CUDA or HIP device runs",
+    "Kernel run selects LFM2; it is not the full all-family kernel-contract runner"
+  ]
+}

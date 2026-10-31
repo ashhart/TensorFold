@@ -81,12 +81,17 @@ fn rate(costs: *const Table, timed: bool, total: u64, expected: f64, overhead_ms
 /// A chain's nodes' chances from per-depth acceptance (the j-th lands if every earlier one did). Caller frees.
 pub fn chainProbabilities(gpa: Allocator, rates: []const f64, count: usize) ![]f64 {
     const out = try gpa.alloc(f64, count);
+    chainProbabilitiesInto(rates, out);
+    return out;
+}
+
+/// Fill a caller-owned chain buffer without allocating a second copy.
+pub fn chainProbabilitiesInto(rates: []const f64, out: []f64) void {
     var reach: f64 = 1.0;
     for (out, 0..) |*o, j| {
         reach *= if (j < rates.len) rates[j] else rates[rates.len - 1];
         o.* = reach;
     }
-    return out;
 }
 
 /// Costs for 1..rows: timed widths as measured, interpolated between them, the widest's ms a row past it.

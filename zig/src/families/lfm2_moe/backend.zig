@@ -10,6 +10,14 @@ const snapshot = @import("snapshot.zig");
 const Model = @import("model.zig").Model;
 const be = lanes.backend;
 
+/// Where a drafter holds a stream's drafts on the device, for verify windows that take them there (Window.held).
+pub const HeldSource = struct {
+    ptr: *anyopaque,
+    get: *const fn (ptr: *anyopaque, s: *lanes.Stream) ?Device,
+    host: *const fn (ptr: *anyopaque, s: *lanes.Stream, out: []u32) anyerror!void, // where `get` gives none
+};
+pub const Device = struct { src: mtl.Buffer, off: usize, stride: u32, wait: fwd.Wait };
+
 pub const Options = struct { capacity: usize, chunk: usize = 128, streams: u32 = 8 };
 
 pub const Metal = struct {
@@ -23,8 +31,13 @@ pub const Metal = struct {
     /// Forward ms by window width, timed at load: the lane core weighs drafts against them.
     costs: [st.window_rows]lanes.config.Cost = undefined,
     timed: usize = 0,
+    /// Shared-row increments past the qualified window, anchored at that window's measured cost.
+    shared: [st.batch_rows - st.window_rows]lanes.config.Cost = undefined,
+    shared_timed: usize = 0,
     /// Forwards run so far: a stream's tapped rows in the scratch are current while their gen matches.
     gen: u64 = 0,
+    /// A drafter whose drafts verify windows read on the device (null: windows carry host tokens only).
+    held_source: ?HeldSource = null,
 
     pub fn init(gpa: std.mem.Allocator, model: *Model, options: Options) !*Metal {
         const out = try gpa.create(Metal);
@@ -56,7 +69,9 @@ pub const Metal = struct {
     }
 
     pub fn facts(self: *const Metal) lanes.Model {
-        return factsFor(self.width, self.options.streams, self.costs[0..self.timed]);
+        var out = factsFor(self.width, self.options.streams, self.costs[0..self.timed]);
+        out.shared_costs = self.shared[0..self.shared_timed];
+        return out;
     }
 
     /// Each window width's forward ms on a 256-token history (the fastest of three, after the GPU's clocks ramp up).
@@ -86,6 +101,32 @@ pub const Metal = struct {
             cost.* = .{ .width = @intCast(w), .ms = best };
         }
         std.log.info("LFM2 window ms by width: 1 {d:.1}, 2 {d:.1}, 4 {d:.1}, 8 {d:.1}, 16 {d:.1}", .{ self.costs[0].ms, self.costs[1].ms, self.costs[3].ms, self.costs[7].ms, self.costs[15].ms });
+        // Two qualified windows measure shared-row increments against the same shared shape at 16 rows.
+        var other = try st.Cache.init(self.gpa, self.model.device, &self.model.config.attention, 512);
+        defer other.deinit();
+        try fwd.run(self.model, &self.scratch, &.{.{ .cache = &other, .rows = 256 }}, &ids, false, .last);
+        var shared_base: f64 = 0;
+        for (st.window_rows..st.batch_rows + 1) |rows| {
+            const first = @min(st.window_rows, rows - 1);
+            var best: f64 = std.math.floatMax(f64);
+            for (0..4) |trial| {
+                var t0: platform.c.timespec = undefined;
+                var t1: platform.c.timespec = undefined;
+                _ = platform.c.clock_gettime(platform.c.CLOCK.MONOTONIC, &t0);
+                try fwd.run(self.model, &self.scratch, &.{ .{ .cache = &cache, .rows = first }, .{ .cache = &other, .rows = rows - first } }, ids[0..rows], true, .all);
+                _ = platform.c.clock_gettime(platform.c.CLOCK.MONOTONIC, &t1);
+                const ms = @as(f64, @floatFromInt(t1.sec - t0.sec)) * 1e3 + @as(f64, @floatFromInt(t1.nsec - t0.nsec)) / 1e6;
+                cache.len = base;
+                other.len = base;
+                if (trial > 0) best = @min(best, ms);
+            }
+            if (rows == st.window_rows) {
+                shared_base = best;
+            } else self.shared[rows - st.window_rows - 1] = .{ .width = @intCast(rows), .ms = self.costs[st.window_rows - 1].ms + best - shared_base };
+        }
+        self.shared_timed = self.shared.len;
+        std.log.info("LFM2 shared calibration: window16 {d:.2} ms, shared16 {d:.2} ms", .{ self.costs[st.window_rows - 1].ms, shared_base });
+        std.log.info("LFM2 shared marginal prices by rows: 17 {d:.1}, 24 {d:.1}, 32 {d:.1}", .{ self.shared[0].ms, self.shared[7].ms, self.shared[15].ms });
         return self.costs.len;
     }
 
@@ -246,20 +287,34 @@ pub const Metal = struct {
         const self = cast(ptr);
         var segments: [st.batch_rows]fwd.Segment = undefined;
         var ids: [st.batch_rows]u32 = undefined;
+        var held: [st.batch_rows]fwd.Held = undefined;
+        var count: usize = 0;
+        var wait: ?fwd.Wait = null;
         var total: usize = 0;
         if (windows.len > segments.len or windows.len != out.len) return error.InvalidLfmWindows;
         for (windows, 0..) |w, i| {
             const rows = w.rows();
-            if (w.parents != null or w.held != 0 or rows > st.window_rows or total + rows > st.batch_rows or w.positions.len != rows) return error.UnsupportedLfmWindow;
+            if (w.held != 0) { // the drafter's picks, copied into the window's rows on the GPU
+                const source = self.held_source orelse return error.UnsupportedLfmWindow;
+                if (total + rows > st.batch_rows) return error.UnsupportedLfmWindow;
+                if (source.get(source.ptr, w.stream)) |dev| {
+                    held[count] = .{ .row = total + 1, .src = dev.src, .off = dev.off, .stride = dev.stride, .count = w.held };
+                    count += 1;
+                    wait = if (wait) |x| (if (x.value >= dev.wait.value) x else dev.wait) else dev.wait;
+                    @memset(ids[total + 1 ..][0..w.held], 0);
+                } else try source.host(source.ptr, w.stream, ids[total + 1 ..][0..w.held]);
+            }
+            if (w.parents != null or rows > st.window_rows or total + rows > st.batch_rows or w.positions.len != rows) return error.UnsupportedLfmWindow;
             if (w.masks.len != 0 and w.masks.len != rows * mask_words) return error.InvalidLfmMasks;
             const cache = try self.cacheOf(w.stream);
             for (w.positions, 0..) |p, r| if (p != cache.len + r + 1) return error.InvalidLfmPosition;
             segments[i] = .{ .cache = cache, .rows = rows };
             ids[total] = w.pending;
-            @memcpy(ids[total + 1 ..][0..w.tokens.len], w.tokens);
+            @memcpy(ids[total + 1 + w.held ..][0..w.tokens.len], w.tokens);
             total += rows;
         }
-        try self.run(segments[0..windows.len], ids[0..total], true, .all);
+        self.gen += 1;
+        try fwd.runHeld(self.model, &self.scratch, segments[0..windows.len], ids[0..total], true, .all, held[0..count], wait);
         if (self.scratch.taps != null) for (segments[0..windows.len]) |seg| {
             const last = seg.cache.last.?;
             seg.cache.tap = .{ .start = last.start, .row = last.base, .rows = last.rows, .gen = self.gen };
@@ -268,7 +323,7 @@ pub const Metal = struct {
         const best = self.scratch.best.slice(u32, 2 * total);
         var base: usize = 0;
         for (windows, out) |w, o| {
-            if (o.sampled.len != w.rows() or o.drafts.len != w.tokens.len) return error.InvalidLfmOutputs;
+            if (o.sampled.len != w.rows() or o.drafts.len != w.rows() - 1) return error.InvalidLfmOutputs;
             for (o.sampled, w.positions, 0..) |*t, p, r| {
                 const mask = if (w.masks.len > 0) w.masks[r * mask_words ..][0..mask_words] else &.{};
                 // A greedy row takes the GPU's pick, the host's draw on the same logits; a nonfinite row errors there.
@@ -279,7 +334,7 @@ pub const Metal = struct {
                 }
                 t.* = try draw(self.gpa, logits[(base + r) * c.vocab ..][0..c.vocab], w.stream.sampling, p, mask);
             }
-            @memcpy(o.drafts, w.tokens);
+            @memcpy(o.drafts, self.scratch.ids.slice(u32, base + w.rows())[base + 1 ..][0 .. w.rows() - 1]);
             base += w.rows();
         }
     }
@@ -452,4 +507,16 @@ test "a masked draw is the full-vocabulary draw with the other tokens at -inf" {
     try std.testing.expectEqual(try lanes.sampling.choose(gpa, values, ids, 0, .{ .seed = 1, .temperature = 0 }), try draw(gpa, words, null, 0, &mask));
     @memset(&mask, 0);
     try std.testing.expectError(error.NoAllowedLfmToken, draw(gpa, words, null, 0, &mask));
+}
+
+test "measured shared rows price the batch without widening a stream's qualified window" {
+    var backend_: Metal = .{ .gpa = std.testing.allocator, .model = undefined, .options = .{ .capacity = 512 }, .scratch = undefined, .width = st.window_rows, .timed = 1, .shared_timed = 1 };
+    backend_.costs[0] = .{ .width = 1, .ms = 2 };
+    backend_.shared[0] = .{ .width = 17, .ms = 9 };
+    var cfg = try lanes.Config.init(std.testing.allocator, backend_.facts(), st.window_rows, st.window_rows - 1);
+    defer cfg.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, st.window_rows), cfg.family_width);
+    try std.testing.expectEqual(@as(?f64, 2), cfg.family_costs.get(1));
+    try std.testing.expectEqual(@as(?f64, null), cfg.family_costs.get(17));
+    try std.testing.expectEqual(@as(?f64, 9), cfg.shared_costs.get(17));
 }
