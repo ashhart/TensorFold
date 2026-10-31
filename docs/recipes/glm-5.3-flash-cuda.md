@@ -38,7 +38,9 @@ left after a 12.2 GiB reserve` and a 5.8 GiB prompt cache
 
 - `--vision` on every rank reads images and video: rank 0's tower encodes them and sends their rows and spans to the
   other ranks ([1.1.0](../../CHANGELOG.md#110)). Video needs `libtfvideo`
-  ([video](../vision.md#video-on-the-native-server)).
+  ([video](../vision.md#video-on-the-native-server)). `TF_GLM_VISION_HOST=1` keeps the tower's bf16 weights in pinned
+  host memory and copies each part of a pass into one device slot as it runs (240 MiB for GLM-5.3-Flash's tower instead
+  of its 1.05 GiB), leaving rank 0 that much more room for KV pages. Checked on two RTX PRO 6000 Blackwell cards.
 - Nonstreaming `/v1/completions` requests return `prompt_logprobs`, structured output follows its schema with drafts
   on, and required and named tool calls use the model's tool markup ([1.1.1](../../CHANGELOG.md#111): #1016 to #1018).
 - `--kv-cache fp8` is an opt-in FP8 latent cache. BF16 remains the default, and its native quality and device
