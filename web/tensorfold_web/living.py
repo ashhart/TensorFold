@@ -914,4 +914,3 @@ def card(name: str, *, graph: dict, versions: list[dict], runs: list[dict], engi
                   f"{(str(r['exact']) + ' of ' + str(r['checked'])) if r.get('checked') else '—'} | "
                   f"{_kl_cell(r.get('mean_kl'))} |" for r in runs]
     return "\n".join(lines) + "\n"
-

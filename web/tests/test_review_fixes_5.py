@@ -159,4 +159,3 @@ def test_b19_the_page_and_the_history_keep_their_own_rate_baselines(monkeypatch)
     eng.health(reader="page")
     assert eng._counters["page"]["generation_tokens_total"] == 200.0
     assert eng._counters["history"]["generation_tokens_total"] == 400.0
-
