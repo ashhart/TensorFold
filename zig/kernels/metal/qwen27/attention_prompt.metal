@@ -3,7 +3,7 @@
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
 using namespace metal;
 using namespace mpp::tensor_ops;
-constant constexpr int PG = 6, PD = 256, PH = 128, PCK = 512, PTK = 32;
+constant constexpr int PG = Q27_G, PKVH = Q27_KVH, PD = 256, PH = 128, PCK = 512, PTK = 32; // after attention_mpp.metal's G
 // kv_heads is the rank's, not the model's: a split attention writes local node rows.
 struct Q27PromptArgs { int start, rows, chunks, rp, key_stride, value_stride; float scale2; int kv_heads; };
 typedef vec<float, 8> q27f8;
@@ -171,7 +171,7 @@ kernel void q27_attn_prompt_merge(device const float* PO [[buffer(0)]], device c
   for (int i = 0; i < DP; i++) OUT[at + i] = static_cast<bfloat>(o[i] / l);
 }
 
-// A single Mac's 24 query heads are known at compile time: main's kernel, so one Mac runs unpaired code.
+// A single Mac's query heads (Q27_G * Q27_KVH) are known at compile time: main's kernel, so one Mac runs unpaired code.
 kernel void q27_attn_prompt_merge_single(device const float* PO [[buffer(0)]], device const float* PM [[buffer(1)]], device const float* PL [[buffer(2)]],
     constant Q27PromptArgs& args [[buffer(3)]], device bfloat* OUT [[buffer(4)]],
     uint3 tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
@@ -191,5 +191,5 @@ kernel void q27_attn_prompt_merge_single(device const float* PO [[buffer(0)]], d
     m = nm;
   }
   const int node = r / PG, head = hk * PG + r % PG;
-  for (int i = 0; i < DP; i++) OUT[((int64_t)node * (PG * 4) + head) * PD + lane * DP + i] = static_cast<bfloat>(o[i] / l);
+  for (int i = 0; i < DP; i++) OUT[((int64_t)node * (PG * PKVH) + head) * PD + lane * DP + i] = static_cast<bfloat>(o[i] / l);
 }
