@@ -200,6 +200,7 @@ pub const Runner = struct {
         r.model.glue.profiler = trace;
         r.gdn.profiler = trace;
         r.attention.profiler = trace;
+        if (r.model.moe) |*k| k.profiler = trace;
     }
 
     pub fn verify(r: *Runner, round: *const Round) !void {

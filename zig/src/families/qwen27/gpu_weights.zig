@@ -5,6 +5,7 @@ const cp = @import("core").checkpoint_metal;
 const cfg = @import("config.zig");
 const projection = @import("projection.zig");
 const lane = @import("core").lane_projection;
+const row_gpu = @import("core").row_projection;
 const widths = @import("widths.zig");
 const Width = widths.Width;
 const Ref = projection.Ref;
@@ -13,7 +14,10 @@ pub const Tensor = cp.Tensor;
 
 pub const Gdn = struct { qkv: Linear, zba: Linear, out: Linear, conv: Tensor, a_log: Tensor, dt: Tensor, norm: Tensor };
 pub const Attention = struct { q: Linear, kv: Linear, out: Linear, q_norm: Tensor, k_norm: Tensor };
-pub const Layer = struct { norm: Tensor, post_norm: Tensor, gu: Linear, down: Linear, mixer: union(@import("config.zig").Kind) { linear: Gdn, attention: Attention } };
+/// The routed block: the router (experts, shared gate, zero rows), the stacked experts, the shared expert's matrices.
+pub const Moe = struct { router: row_gpu.Weights, gate: row_gpu.Experts, up: row_gpu.Experts, down: row_gpu.Experts, shared_gate: row_gpu.Weights, shared_up: row_gpu.Weights, shared_down: row_gpu.Weights };
+/// With experts, `gu` and `down` are the shared expert's.
+pub const Layer = struct { norm: Tensor, post_norm: Tensor, gu: Linear, down: Linear, moe: ?Moe = null, mixer: union(@import("config.zig").Kind) { linear: Gdn, attention: Attention } };
 
 pub const Weights = struct {
     allocator: std.mem.Allocator,
@@ -95,6 +99,60 @@ const Builder = struct {
         const scales = try checked(tensors[1], .bf16, &.{ p.n, k / p.w.group });
         const biases = try checked(tensors[2], .bf16, &.{ p.n, k / p.w.group });
         return .{ .weight = try rowView(weight, p.span), .scales = try rowView(scales, p.span), .biases = try rowView(biases, p.span), .bits = p.w.bits, .group = p.w.group, .gn = p.n };
+    }
+
+    /// `experts` [n, k] matrices stacked in `module` at width `w`, borrowed where the files packed them.
+    fn experts(b: Builder, module: []const u8, count: usize, n: usize, k: usize, w: Width, repeat: usize) !row_gpu.Experts {
+        const t = try b.quantAt(module, &.{count}, n, k, w);
+        const out: row_gpu.Experts = .{ .one = weightsOf(t, n, k), .experts = count, .repeat = repeat };
+        try out.validate();
+        return out;
+    }
+
+    /// A quantized module's three tensors of `lead` ++ [n, packed k] shape.
+    fn quantAt(b: Builder, module: []const u8, lead: []const usize, n: usize, k: usize, w: Width) !projection.Triple {
+        if (k * w.bits % 32 != 0 or k % w.group != 0) return error.BadNativeTensor;
+        const suffixes = [_][]const u8{ ".weight", ".scales", ".biases" };
+        var tensors: [3]Tensor = undefined;
+        var shape: [3]usize = undefined;
+        @memcpy(shape[0..lead.len], lead);
+        shape[lead.len] = n;
+        for (suffixes, &tensors, 0..) |suffix, *t, i| {
+            const name = try std.mem.concat(b.allocator, u8, &.{ module, suffix });
+            defer b.allocator.free(name);
+            shape[lead.len + 1] = if (i == 0) k * w.bits / 32 else k / w.group;
+            t.* = try b.tensor(name, if (i == 0) .u32 else .bf16, shape[0 .. lead.len + 2]);
+        }
+        return .{ .weight = tensors[0], .scales = tensors[1], .biases = tensors[2], .bits = w.bits, .group = w.group };
+    }
+
+    /// The router's [experts, k] rows and the shared expert's gate row in one owned matrix of widths.routerRows rows.
+    fn router(b: Builder, prefix: []const u8, c: cfg.Config, w: Width, shared: Width) !row_gpu.Weights {
+        // one matrix holds both: widths.admit refuses a shared gate quantized unlike its router
+        if (shared.bits != w.bits or shared.group != w.group) return error.UnsupportedRouterFormat;
+        const k = c.hidden;
+        const router_name = try std.mem.concat(b.allocator, u8, &.{ prefix, widths.leaf(c, .router) });
+        defer b.allocator.free(router_name);
+        const gate_name = try std.mem.concat(b.allocator, u8, &.{ prefix, widths.leaf(c, .shared_gate) });
+        defer b.allocator.free(gate_name);
+        const r = try b.quantAt(router_name, &.{}, c.experts, k, w);
+        const g = try b.quantAt(gate_name, &.{}, 1, k, shared);
+        const n = widths.routerRows(c.experts);
+        const words = k * w.bits / 32 * 4;
+        const groups = k / w.group * 2;
+        const parts = [3][2]usize{ .{ words, 0 }, .{ groups, words * n }, .{ groups, words * n + groups * n } };
+        const buffer = try b.device.buffer(parts[2][1] + groups * n, mtl.ResourceOptions.shared);
+        errdefer buffer.deinit();
+        const bytes = buffer.slice(u8, parts[2][1] + groups * n);
+        @memset(bytes, 0);
+        for ([_]Tensor{ r.weight, r.scales, r.biases }, [_]Tensor{ g.weight, g.scales, g.biases }, parts) |rt, gt, part| {
+            @memcpy(bytes[part[1]..][0 .. part[0] * c.experts], rt.host(u8)[0 .. part[0] * c.experts]);
+            @memcpy(bytes[part[1] + part[0] * c.experts ..][0..part[0]], gt.host(u8)[0..part[0]]);
+        }
+        try b.owned.append(b.allocator, buffer);
+        const out: row_gpu.Weights = .{ .w = buffer, .w_off = parts[0][1], .scales = buffer, .s_off = parts[1][1], .biases = buffer, .b_off = parts[2][1], .n = n, .k = k, .group = w.group, .bits = w.bits };
+        try out.validate();
+        return out;
     }
 
     /// Parts at their widths and K windows, all staged before any is viewed: the stage is one reused buffer.
@@ -242,12 +300,27 @@ const Builder = struct {
                 .k_norm = try b.tensor(try Name.full(a, prefix, "self_attn.k_norm.weight"), .bf16, &.{c.head_dim}),
             } },
         };
-        const gu = try b.linear(&.{
+        const shared: ?[3]projection.Triple = if (!c.moe()) null else .{
+            try b.quant(try Name.full(a, prefix, widths.leaf(c, .gate)), c.intermediate, c.hidden, w[@backingInt(M.gate)]),
+            try b.quant(try Name.full(a, prefix, widths.leaf(c, .up)), c.intermediate, c.hidden, w[@backingInt(M.up)]),
+            try b.quant(try Name.full(a, prefix, widths.leaf(c, .down)), c.hidden, c.intermediate, w[@backingInt(M.down)]),
+        };
+        const moe: ?Moe = if (!c.moe()) null else .{
+            .shared_gate = weightsOf(shared.?[0], c.intermediate, c.hidden),
+            .shared_up = weightsOf(shared.?[1], c.intermediate, c.hidden),
+            .shared_down = weightsOf(shared.?[2], c.hidden, c.intermediate),
+            .router = try b.router(prefix, c, w[@backingInt(M.router)], w[@backingInt(M.shared_gate)]),
+            .gate = try b.experts(try Name.full(a, prefix, widths.leaf(c, .egate)), c.experts, c.moe_intermediate, c.hidden, w[@backingInt(M.egate)], c.top_k + 1),
+            .up = try b.experts(try Name.full(a, prefix, widths.leaf(c, .eup)), c.experts, c.moe_intermediate, c.hidden, w[@backingInt(M.eup)], c.top_k + 1),
+            .down = try b.experts(try Name.full(a, prefix, widths.leaf(c, .edown)), c.experts, c.hidden, c.moe_intermediate, w[@backingInt(M.edown)], 1),
+        };
+        // with experts the shared expert's lane layouts come from its resident tensors, else the dense MLP's are staged
+        const gu = if (shared) |t| try b.stack(&.{ t[0], t[1] }) else try b.linear(&.{
             .{ .module = try Name.full(a, prefix, "mlp.gate_proj"), .n = g.intermediate, .w = w[@backingInt(M.gate)], .span = s.intermediateRows() },
             .{ .module = try Name.full(a, prefix, "mlp.up_proj"), .n = g.intermediate, .w = w[@backingInt(M.up)], .span = s.intermediateRows() },
         }, g.hidden);
-        const down = try b.linear(&.{.{ .module = try Name.full(a, prefix, "mlp.down_proj"), .n = g.hidden, .w = w[@backingInt(M.down)], .span = s.outputRows() }}, g.intermediate);
-        return .{ .norm = try b.tensor(try Name.full(a, prefix, "input_layernorm.weight"), .bf16, &.{c.hidden}), .post_norm = try b.tensor(try Name.full(a, prefix, "post_attention_layernorm.weight"), .bf16, &.{c.hidden}), .gu = gu, .down = down, .mixer = mixer };
+        const down = if (shared) |t| try b.stack(&.{t[2]}) else try b.linear(&.{.{ .module = try Name.full(a, prefix, "mlp.down_proj"), .n = g.hidden, .w = w[@backingInt(M.down)], .span = s.outputRows() }}, g.intermediate);
+        return .{ .norm = try b.tensor(try Name.full(a, prefix, "input_layernorm.weight"), .bf16, &.{c.hidden}), .post_norm = try b.tensor(try Name.full(a, prefix, "post_attention_layernorm.weight"), .bf16, &.{c.hidden}), .gu = gu, .down = down, .moe = moe, .mixer = mixer };
     }
 };
 
@@ -331,6 +404,11 @@ fn laneOrder(a: std.mem.Allocator, device: mtl.Device, layers: []const Layer, he
 fn regJobs(a: std.mem.Allocator, jobs: *std.ArrayList(lane.Order), p: Linear) std.mem.Allocator.Error!void {
     for (p.runs) |r| try regJobs(a, jobs, r.linear);
     if (p.runs.len == 0 and p.bits == 4 and p.group == 64 and p.n % 32 == 0) try jobs.append(a, .{ .w = .{ .buf = p.words.buffer, .off = p.words.offset }, .n = p.n, .k = p.k });
+}
+
+/// A borrowed quantized tensor as the row kernels' matrix.
+fn weightsOf(t: projection.Triple, n: usize, k: usize) row_gpu.Weights {
+    return .{ .w = t.weight.buffer, .w_off = t.weight.offset, .scales = t.scales.buffer, .s_off = t.scales.offset, .biases = t.biases.buffer, .b_off = t.biases.offset, .n = n, .k = k, .group = t.group, .bits = t.bits };
 }
 
 pub fn ref(t: Tensor) Ref {
