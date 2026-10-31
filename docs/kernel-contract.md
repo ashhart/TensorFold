@@ -163,6 +163,9 @@ the fp32 sums' `mma_step` roundings for every k16 step. Gate 4 runs 11-bit integ
 keeps. Two cases take operands in (0, 1], where the bias adds up; their controls state the operands as fp32 and go red
 at `shapes`, as does a source edit dropping the ragged K tail's last column. Before the M5 they keep fp32 whole and are
 not registered; their launches are in `nemotron_ssd_records.zig`.
+Spark-X2.6-4B's `sp_prompt_attention` registers both pipelines the engine builds (sliding layers over a 512-key window
+in a 2,560-slot ring, and full layers), its fp32 P stated with the cut on the M5 and whole before it, each with a P
+spread case and its cutless control (M5 only), and one source edit each (a key past the window, a key past the row).
 LFM2.5-24B-A2B's shared rounds: the greedy pick (`lfm2_argmax`) and the conv and attention kernels that run every
 stream's rows in one dispatch, each bit-equal to the per-stream kernels it replaces. Four controls edit the source: a tie
 to the highest id, a nonfinite logit not flagged, and every stream reading or writing the first stream's state or cache.
