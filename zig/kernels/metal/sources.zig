@@ -159,6 +159,8 @@ pub const uocr = @embedFile("uocr/vision.metal");
 pub const uocr_decoder = @embedFile("uocr/decoder.metal");
 /// MOSS-Image's image decoder: its own float32 steps, without a template.
 pub const moss_image_decoder = @embedFile("moss_image_decoder.metal");
+/// Idol's decoders' own steps and attention (families/idol/decoder_kernels.zig); projections, norms: the denoiser's.
+pub const idol_decoder = @embedFile("idol_decoder.metal");
 /// A prompt chunk's KDA layer in three passes, appended to the generated kda_rows source (its helpers).
 pub const glm_kda_prompt = @embedFile("glm_kda_prompt.metal");
 /// A decode window's fused KDA step, appended to kda_rows' source too: its arithmetic, rows' independent parts at once.
