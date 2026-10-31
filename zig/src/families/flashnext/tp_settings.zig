@@ -31,7 +31,10 @@ pub fn read(gpa: std.mem.Allocator, bytes: []const u8) !Settings {
             (peer_ports.len == 0 and peer_port > 0 and @as(usize, peer_port) + parts.len > 65536)) return error.BadTpSettings;
         const gid = try int(c_int, o, "gid", if (parts.len > 2) -1 else 1);
         if (gid < -1) return error.BadTpSettings;
-        l.* = .{ .peer = try int(u32, o, "peer", null), .device = device, .via = via, .port = port, .peer_port = peer_port, .name = try text(gpa, o, "name"), .gid = gid, .ports = ports, .peer_ports = peer_ports };
+        // a ConnectX link through a switch may need path MTU 1024; absent, 4096 and whichever kind connects, as before
+        const mtu = try int(c_int, o, "mtu", 4096);
+        if (std.mem.indexOfScalar(c_int, &fabric.mcdma.path_mtus, mtu) == null) return error.BadTpSettings;
+        l.* = .{ .peer = try int(u32, o, "peer", null), .device = device, .via = via, .port = port, .peer_port = peer_port, .name = try text(gpa, o, "name"), .gid = gid, .ports = ports, .peer_ports = peer_ports, .mtu = mtu, .kind = try linkKind(o) };
     }
     return .{ .rank = try int(u32, root.object, "rank", null), .library = try text(gpa, root.object, "library"), .links = links };
 }
@@ -76,6 +79,14 @@ fn int(comptime T: type, o: std.json.ObjectMap, key: []const u8, default: ?T) !T
     return std.math.cast(T, v.integer) orelse error.BadTpSettings;
 }
 
+/// The link kind MCDMA must report, "tb5" or "cx5"; absent takes whichever connects.
+fn linkKind(o: std.json.ObjectMap) !?fabric.rdma.LinkKind {
+    const v = o.get("kind") orelse return null;
+    if (v != .string) return error.BadTpSettings;
+    const kind = std.meta.stringToEnum(fabric.rdma.LinkKind, v.string) orelse return error.BadTpSettings;
+    return if (kind == .tb5 or kind == .cx5) kind else error.BadTpSettings;
+}
+
 fn text(gpa: std.mem.Allocator, o: std.json.ObjectMap, key: []const u8) ![:0]const u8 {
     const v = o.get(key) orelse return error.BadTpSettings;
     if (v != .string) return error.BadTpSettings;
@@ -115,6 +126,22 @@ test "speed-up settings validate N devices, vias, ports and port-range overflow"
     try std.testing.expectEqualStrings("en3+en4+en2", s.links[0].via);
 }
 
+test "speed-up settings carry a ConnectX link's path MTU and kind, and refuse any other" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const s = try read(a,
+        \\{"rank":0,"library":"/opt/mcdma/libmcdma-fabric.dylib","links":[{"peer":1,"device":"rdma_mcrdma0","via":"en0/192.0.2.2","port":7490,"name":"pair","gid":0,"mtu":1024,"kind":"cx5"}]}
+    );
+    try std.testing.expectEqual(@as(c_int, 1024), s.links[0].mtu);
+    try std.testing.expectEqual(@as(?fabric.rdma.LinkKind, .cx5), s.links[0].kind);
+    try std.testing.expectEqual(@as(c_int, 0), s.links[0].gid);
+    for ([_][]const u8{ "\"mtu\":1500", "\"mtu\":\"1024\"", "\"kind\":\"x\"", "\"kind\":2", "\"kind\":\"nccl\"" }) |bad| {
+        const json = try std.fmt.allocPrint(a, "{{\"rank\":0,\"library\":\"/opt/mcdma/libmcdma-fabric.dylib\",\"links\":[{{\"peer\":1,\"name\":\"pair\",\"device\":\"rdma_mcrdma0\",\"via\":\"en0/192.0.2.2\",\"port\":7490,{s}}}]}}", .{bad});
+        try std.testing.expectError(error.BadTpSettings, read(a, json));
+    }
+}
+
 test "speed-up settings read through JSON values, with the link defaults" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -128,6 +155,8 @@ test "speed-up settings read through JSON values, with the link defaults" {
     try std.testing.expectEqual(@as(u16, 7490), s.links[0].port);
     try std.testing.expectEqual(@as(u16, 0), s.links[0].peer_port);
     try std.testing.expectEqual(@as(c_int, 1), s.links[0].gid);
+    try std.testing.expectEqual(@as(c_int, 4096), s.links[0].mtu);
+    try std.testing.expectEqual(@as(?fabric.rdma.LinkKind, null), s.links[0].kind);
     try std.testing.expectError(error.BadTpSettings, read(arena.allocator(), "{\"rank\":1.5,\"library\":\"x\",\"links\":[]}"));
 }
 
