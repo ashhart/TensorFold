@@ -12,6 +12,10 @@ pub const RenderOptions = struct {
     reasoning_effort: ?[]const u8 = null,
     /// A request's ``clear_thinking``; a GLM-5.3 template takes it over the server's.
     clear_thinking: ?bool = null,
+    /// The request's ``response_format`` (DeepSeek-V4.1's encoder shows its schema as ``## Response Format``).
+    response_format: ?json.Value = null,
+    /// The server serves images: a template's image parts render (else a DeepSeek-V4.1 encoder refuses them).
+    images: bool = false,
 };
 
 pub const Error = error{ Template, OutOfMemory };
