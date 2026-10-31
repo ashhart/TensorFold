@@ -61,7 +61,9 @@ struct DecHeads {
     dst[to + 1] = half(a1);
     return;
   }
-  const float n = max(metal::precise::sqrt(simd_sum(a0 * a0 + a1 * a1)), 1e-12f);
+  // torch's clamp_min keeps a NaN norm, which max would drop
+  const float len = metal::precise::sqrt(simd_sum(a0 * a0 + a1 * a1));
+  const float n = isnan(len) ? len : max(len, 1e-12f);
   const uint g = h * 64 + lane * 2;
   dst[to] = half(a0 / n * gamma[g] * 8.0f);
   dst[to + 1] = half(a1 / n * gamma[g + 1] * 8.0f);
@@ -165,6 +167,13 @@ inline void dec_fold(thread const tfp::frag<float>& f, thread float (&r)[2]) {
   }
 }
 
+// v with each infinity at fp16's largest finite value of its sign (P's lo half meets these values).
+inline void dec_finite(thread tfp::frag<half>& v) {
+  thread half4* q = (thread half4*)&v;
+  q[0] = clamp(q[0], half4(-65504.0h), half4(65504.0h));
+  q[1] = clamp(q[1], half4(-65504.0h), half4(65504.0h));
+}
+
 // One 64-query block of one head over 32-key blocks; P and F as Kernels.attention sets them (kernels.zig).
 template <typename T, bool AQ, bool AK>
 inline void dec_attention(const device T* Q, const device T* K, const device T* V, device T* O, const device int* P,
@@ -265,6 +274,9 @@ inline void dec_attention(const device T* Q, const device T* K, const device T* 
           tfp::frag_get(v1, V, D, 16 * k, 16 * d + 16, home);
         }
         tfp::mma_16x32<false, false>(acc[d], acc[d + 1], ph[k], v0, v1);
+        // the lo half meets the values held finite: a 0 or negative lo times an infinite value would make P V NaN
+        dec_finite(v0);
+        dec_finite(v1);
         tfp::mma_16x32<false, false>(acc[d], acc[d + 1], pl[k], v0, v1);
       }
     }
