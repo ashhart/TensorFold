@@ -42,5 +42,14 @@ pub fn main(init: std.process.Init) !void {
         tok = try m.argmax();
     }
     const dec = @as(f64, @floatFromInt(nowNs() - t0)) / 1e9;
+    if (std.c.getenv("LFM3_PROF") != null) { // 16 more steps with a sync around every launch: device time by kernel
+        @import("xpu").rt.prof_on = true;
+        for (0..16) |_| {
+            try m.forward(&.{tok}, true, null);
+            tok = try m.argmax();
+        }
+        @import("xpu").rt.prof_on = false;
+        @import("xpu").rt.profDump("16 decode steps");
+    }
     std.debug.print("prompt {d} tokens in windows of {d}: prefill {d:.2} s ({d:.1} tok/s); decode after it {d:.1} tok/s; device {d:.0} MiB\n", .{ n, w, pre, @as(f64, @floatFromInt(n)) / pre, 64.0 / dec, @as(f64, @floatFromInt(m.device_bytes)) / (1 << 20) });
 }
