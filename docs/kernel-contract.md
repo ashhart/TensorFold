@@ -470,12 +470,13 @@ and the exact sums of gate 4.
 
 Metal also checks Idol (`metal_idol*.zig`, each part's controls in [its recipe](recipes/idol.md)): the denoiser's fp16
 projections and GELU form, split-K fp32 rows, LayerNorms, RePo's angles, heads, elementwise steps and four attention
-forms at idol-sdk's fp16 points, and `id_gemm32`'s true fp32 sums, where the NAX fp32 path is a gate-4 control (19
-controls); the decoders' point embedding, fp16 stem cast, `to_kv`, RMS-normed heads and attention, P V as fp16 P hi +
-lo, which a control without the lo half must fail on heads whose O is that remainder alone (15); the FLUX.2 VAE
-encoder's convolutions (direct, implicit GEMM, Winograd), GroupNorm, 512-wide attention and condition rows in fp32
-against float64 (12); and DINOv3's bf16 projections, LayerNorms, RoPE heads, LayerScale, SwiGLU and attention at
-transformers' bf16 points (11).
+forms at idol-sdk's fp16 points, and `id_gemm32`'s true fp32 sums, the NAX fp32 path a gate-4 control (19 controls); the
+decoders' point embedding, fp16 stem cast, `to_kv`, RMS-normed heads and attention, P V as fp16 P hi + lo, which a
+control without the lo half must fail on heads whose O is that remainder alone (15); the FLUX.2 VAE encoder's
+convolutions (direct, implicit GEMM, Winograd), GroupNorm, 512-wide attention and condition rows in fp32 against float64
+(12); DINOv3's bf16 projections, LayerNorms, RoPE heads, LayerScale, SwiGLU and attention at transformers' bf16 points
+(11); and BiRefNet's fp32 implicit GEMM convolutions in nine served forms, 3x3, LayerNorms, shifted-window attention,
+align_corners resize, patch and tile copies, modulated deformable columns, pool, gate and head against float64 (21).
 
 HIP also checks the DeltaNet prompt recurrence at half a value head a block (`tf_gdn_prompt_128`, its y and state),
 bit-equal to the plain window scan `gated_delta_tile` on the same tokens.
