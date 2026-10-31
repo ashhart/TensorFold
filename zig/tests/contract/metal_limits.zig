@@ -105,7 +105,7 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
     } else if (std.mem.startsWith(u8, d.name, "core deltanet ")) {
         text = sources.core_deltanet;
     } else if (std.mem.startsWith(u8, d.name, "qwen27 ")) {
-        text = if (has(d.name, " copy ")) tf.qwen27.runtime_sources.copy else tf.qwen27.runtime_sources.glue;
+        text = if (has(d.name, " copy ")) tf.qwen27.runtime_sources.copy else if (has(d.name, " moe rows ")) tf.qwen27.moe_gpu.rows_source else if (has(d.name, " moe ")) tf.qwen27.runtime_sources.moe else tf.qwen27.runtime_sources.glue;
     } else if (std.mem.startsWith(u8, d.name, "metal pair ")) {
         text = sources.core_pair_rows;
     } else if (has(d.name, "tile_qmm")) text = sources.core_tile_qmm else if (has(d.name, "softmax")) text = sources.ops_softmax else if (has(d.name, "rms")) text = sources.ops_embed_norm else if (has(d.name, "top-k")) text = topk_text else if (has(d.name, "row projection")) text = sources.core_row_projection else if (has(d.name, "simd_qmm_bits")) text = sources.core_simd_qmm_bits else if (has(d.name, "simd_qmm")) text = sources.core_simd_qmm else if (has(d.name, "affine_mm")) {

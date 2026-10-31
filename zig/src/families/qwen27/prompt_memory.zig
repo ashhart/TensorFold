@@ -15,8 +15,8 @@ pub fn frameBytes(c: Config, rows: u32) usize {
     return buffers(frame.allocationSizes(c, rows)) + (if (rows > frame.small_rows) buffers(frame.decodeSizes(c, rows)) else 0);
 }
 
-/// Frame bytes already belong to the model; these are the runner's future bytes at its peak.
-pub fn runnerBytes(c: Config, context: u32, slots: u32, rows: u32, shared: bool, ring: usize) !usize {
+/// Frame bytes already belong to the model; these are the runner's future bytes at its peak (`planes`: its tap planes).
+pub fn runnerBytes(c: Config, context: u32, slots: u32, rows: u32, shared: bool, ring: usize, planes: usize) !usize {
     var attention: usize = 0;
     for (0..c.layers) |i| attention += @intFromBool(c.kind(i) == .attention);
     const linear = c.layers - attention;
@@ -27,7 +27,7 @@ pub fn runnerBytes(c: Config, context: u32, slots: u32, rows: u32, shared: bool,
     const kv = attention * @as(usize, slots) * buffers([_]usize{ @as(usize, context) * c.kvDim() * 2, @as(usize, context) * c.kvDim() * 2 });
     const bindings = attention * buffers([_]usize{ (planning.global_words + planning.max_streams * planning.stream_words) * 4, planning.max_streams * 16, rows * 16 });
     const before = if (slots > 1) buffers([_]usize{budget.state}) else 0;
-    const taps = buffers([_]usize{@as(usize, rows) * 5 * c.hidden * 2});
+    const taps = buffers([_]usize{@as(usize, rows) * planes * c.hidden * 2});
     return kv + bindings + before + taps + buffers(scratch.sizes) + buffers(budget.allocationSizes()) + slots * (ring + (256 << 20));
 }
 
@@ -37,11 +37,13 @@ pub const Fit = struct {
     slots: u32,
     shared: bool,
     ring: usize = 0,
+    /// The runner's tap planes: the 27B's five, or the drafter's own count.
+    planes: usize = 5,
     current_rows: u32,
     left: usize,
 
     pub fn cost(f: Fit, rows: u32, slots: u32) !usize {
-        return (try runnerBytes(f.config, f.context, slots, rows, f.shared, f.ring)) + (frameBytes(f.config, rows) -| frameBytes(f.config, f.current_rows));
+        return (try runnerBytes(f.config, f.context, slots, rows, f.shared, f.ring, f.planes)) + (frameBytes(f.config, rows) -| frameBytes(f.config, f.current_rows));
     }
 
     pub fn choose(f: Fit, requested: u32, explicit: bool) !u32 {

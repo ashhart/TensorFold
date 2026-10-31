@@ -62,6 +62,39 @@ test "rope parameters preserve precision and section metadata" {
     try std.testing.expectEqualSlices(usize, &.{ 2, 1, 1 }, &c.mrope_section);
 }
 
+test "a routed config reads its experts, the shared expert's width as the layer's and the routing flag" {
+    const a = std.testing.allocator;
+    const json =
+        \\{"model_type":"qwen3_5_moe","text_config":{"model_type":"qwen3_5_moe_text","hidden_size":3072,"intermediate_size":1024,
+        \\"moe_intermediate_size":1024,"shared_expert_intermediate_size":1024,"num_experts":256,"num_experts_per_tok":8,
+        \\"num_hidden_layers":48,"num_attention_heads":32,"num_key_value_heads":2,"head_dim":256,"vocab_size":248320,
+        \\"linear_num_key_heads":16,"linear_num_value_heads":64,"linear_key_head_dim":128,"linear_value_head_dim":128,
+        \\"linear_conv_kernel_dim":4,"partial_rotary_factor":0.25,"eos_token_id":248044}}
+    ;
+    const c = try parse(a, json, null);
+    try std.testing.expect(c.moe());
+    try std.testing.expectEqual(@as(usize, 256), c.experts);
+    try std.testing.expectEqual(@as(usize, 8), c.top_k);
+    try std.testing.expectEqual(@as(usize, 1024), c.moe_intermediate);
+    try std.testing.expectEqual(@as(usize, 1024), c.intermediate);
+    try std.testing.expect(c.renorm); // absent: renormalized
+    try std.testing.expectEqual(Kind.attention, c.kind(3));
+    try std.testing.expectEqual(Kind.linear, c.kind(2));
+    // a routed model type without experts, and a dense one with them, are refused
+    const dense_typed = try std.mem.replaceOwned(u8, a, json, "\"num_experts\":256", "\"num_experts\":0");
+    defer a.free(dense_typed);
+    try std.testing.expectError(error.NotQwenDense, parse(a, dense_typed, null));
+}
+
+test "a routed config refuses a rank split" {
+    var c = model27();
+    c.experts = 256;
+    c.top_k = 8;
+    c.moe_intermediate = c.intermediate;
+    try std.testing.expectError(error.BadShard, split(&c, 0, 2, .full));
+    try std.testing.expectError(error.BadShard, split(&c, 1, 2, .mlp));
+}
+
 test "dense config refuses MoE and tied embedding heads" {
     const a = std.testing.allocator;
     const moe = try edit(a, "num_experts", .{ .integer = 8 });

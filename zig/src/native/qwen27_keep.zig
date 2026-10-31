@@ -42,7 +42,7 @@ const Commit = struct {
         var ended = false;
         errdefer if (!ended) e.end();
         try r.keepDevice(&b.round.?, e, g.commit, ref);
-        if (!ready) try g.commit.taps(e, ref, .{ .buf = r.taps.buffer }, .{ .buf = g.taps }, .{ .rows = rows, .width = r.taps.width, .capacity = r.taps.capacity, .planes = 5 });
+        if (!ready) try g.commit.taps(e, ref, .{ .buf = r.taps.buffer }, .{ .buf = g.taps }, .{ .rows = rows, .width = r.taps.width, .capacity = r.taps.capacity, .planes = @intCast(r.taps.count) });
         if (!ready) try g.commit.head(e, ref, .{ .buf = logits.buffer, .off = logits.offset }, .{ .rows = rows, .width = vocab, .stride = vocab });
         e.end();
         ended = true;
@@ -84,7 +84,7 @@ pub fn encodeTail(ptr: *anyopaque, e: mtl.ComputeEncoder) !void {
     const shape = try g.matcher.encode(e, .{ .buf = logits.buffer, .off = logits.offset }, b.round.?.ids, b.round.?.windows[0].parents, vocab, contract.max_rows, &.{});
     const ref = tf.tree_commit_gpu.Ref{ .buf = g.matcher.buffers[4] };
     try r.taps.complete();
-    try g.commit.taps(e, ref, .{ .buf = r.taps.buffer }, .{ .buf = g.taps }, .{ .rows = shape.rows, .width = r.taps.width, .capacity = r.taps.capacity, .planes = 5 });
+    try g.commit.taps(e, ref, .{ .buf = r.taps.buffer }, .{ .buf = g.taps }, .{ .rows = shape.rows, .width = r.taps.width, .capacity = r.taps.capacity, .planes = @intCast(r.taps.count) });
     const metric = mtl.pass_metrics.phase(.keep);
     defer metric.end();
     std.debug.assert(b.prepared_keep == null);

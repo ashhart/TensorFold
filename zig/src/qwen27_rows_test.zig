@@ -6,16 +6,24 @@ const Stream = @import("core/lanes/stream.zig").Stream;
 const a = std.testing.allocator;
 
 test "qwen27 rows: only the measured generation widens its default" {
-    for ([_]u32{ 0, 13, 14, 15, 16, 18 }) |generation| try std.testing.expectEqual(@as(u32, 512), rows.requested(generation, null));
-    try std.testing.expectEqual(@as(u32, 2048), rows.requested(17, null));
+    for ([_]u32{ 0, 13, 14, 15, 16, 18 }) |generation| try std.testing.expectEqual(@as(u32, 512), rows.requested(generation, false, null));
+    try std.testing.expectEqual(@as(u32, 2048), rows.requested(17, false, null));
+}
+
+test "qwen27 rows: with experts the default is 1,024 on every chip, and overrides stay exact" {
+    for ([_]u32{ 0, 13, 16, 17, 18 }) |generation| {
+        try std.testing.expectEqual(@as(u32, 1024), rows.requested(generation, true, null));
+        try std.testing.expectEqual(@as(u32, 1024), rows.requested(generation, true, "15"));
+        try std.testing.expectEqual(@as(u32, 512), rows.requested(generation, true, "512"));
+    }
 }
 
 test "qwen27 rows: valid overrides stay exact and invalid ones use the chip default" {
     for ([_]u32{ 0, 13, 17, 18 }) |generation| {
         const valid = [_][]const u8{ "16", "128", "512", "1024", "2048" };
-        for (valid, [_]u32{ 16, 128, 512, 1024, 2048 }) |text, want| try std.testing.expectEqual(want, rows.requested(generation, text));
+        for (valid, [_]u32{ 16, 128, 512, 1024, 2048 }) |text, want| try std.testing.expectEqual(want, rows.requested(generation, false, text));
         for ([_][]const u8{ "", "0", "15", "17", "2049", "4096", "-16", "4294967296", " 512", "no" }) |text| {
-            try std.testing.expectEqual(@as(u32, if (generation == 17) 2048 else 512), rows.requested(generation, text));
+            try std.testing.expectEqual(@as(u32, if (generation == 17) 2048 else 512), rows.requested(generation, false, text));
         }
     }
 }

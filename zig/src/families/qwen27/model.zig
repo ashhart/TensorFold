@@ -9,6 +9,7 @@ const widths = @import("widths.zig");
 const wts = @import("gpu_weights.zig");
 const quant = @import("quant_gpu.zig");
 const glue = @import("glue_gpu.zig");
+const moe_gpu = @import("moe_gpu.zig");
 const Frame = @import("gpu_frame.zig").Frame;
 const ane_mlp = @import("ane_mlp.zig");
 
@@ -26,6 +27,8 @@ pub const Model = struct {
     weights: wts.Weights,
     kernels: quant.Kernels,
     glue: glue.Kernels,
+    /// The routed block's kernels, with experts.
+    moe: ?moe_gpu.Kernels = null,
     frame: Frame,
     /// The Neural Engine's share of prompt-chunk MLPs, when it loaded.
     ane: ?*ane_mlp.Share = null,
@@ -116,8 +119,10 @@ pub const Model = struct {
         errdefer m.kernels.deinit();
         m.glue = try glue.Kernels.init(m.device);
         errdefer m.glue.deinit();
+        m.moe = if (c.moe()) try moe_gpu.Kernels.init(a, m.device) else null;
+        errdefer if (m.moe) |*k| k.deinit();
         // Serving defers automatic widening until its context and streams are known; explicit widths stay exact.
-        m.frame = try Frame.init(m.device, shard.local, @max(rows, promptRows(if (later) 0 else m.device.generation())));
+        m.frame = try Frame.init(m.device, shard.local, @max(rows, promptRows(shard.local, if (later) 0 else m.device.generation())));
         errdefer m.frame.deinit();
         m.ane = null;
         m.share_pending = true;
@@ -137,8 +142,10 @@ pub const Model = struct {
         const c = m.config;
         const columns = try ane_policy.columns(if (platform.c.getenv("TF_ANE_COLUMNS")) |v| std.mem.span(v) else null);
         // The share is a whole MLP's columns: a rank holds half of them, so tensor parallel keeps prompts on the GPU.
-        const share = m.shard.ranks == 1 and ane_policy.requestedOnChip(columns, m.device.tensorUnits()) and mtl.ane.available() and m.weights.uniformMlp();
+        const share = m.shard.ranks == 1 and ane_policy.requestedOnChip(columns, m.device.tensorUnits()) and !c.moe() and mtl.ane.available() and m.weights.uniformMlp();
         if (m.shard.ranks != 1) std.log.info("qwen27: tensor parallel rank {d}/{d} runs prompts on the GPU alone", .{ m.shard.rank, m.shard.ranks });
+        // the share and its overhead bound are qualified on the dense 27B's MLP alone: routed prompts stay on the GPU
+        if (columns > 0 and c.moe()) std.log.info("qwen27: the Neural Engine share is not qualified for routed checkpoints; prompts run on the GPU alone", .{});
         const bytes = ane_mlp.Share.bytes(c, columns);
         const slices = (m.frame.capacity + ane_mlp.width - 1) / ane_mlp.width;
         const required: ?u64 = if (share) ane_mlp.Share.totalBytes(c, columns, slices, ane_policy.build_runtime_overhead) catch |err| switch (err) {
@@ -172,6 +179,7 @@ pub const Model = struct {
     pub fn deinit(m: *Model) void {
         if (m.ane) |share| share.deinit();
         m.frame.deinit();
+        if (m.moe) |*k| k.deinit();
         m.glue.deinit();
         m.kernels.deinit();
         m.weights.deinit();
@@ -183,14 +191,17 @@ pub const Model = struct {
 };
 
 /// A prompt pass's requested rows, before the runner's frame and attention limits.
-pub fn promptRows(generation: u32) u32 {
+pub fn promptRows(c: cfg.Config, generation: u32) u32 {
     const value = if (std.c.getenv("TF_PROMPT_ROWS")) |v| std.mem.span(v) else null;
-    return @import("prompt_rows.zig").requested(generation, value);
+    return @import("prompt_rows.zig").requested(generation, c.moe(), value);
 }
 
 /// The qualified shape and layer schedule; per-module widths are admitted by widths.admit once the chip is known.
 pub fn supported(c: cfg.Config) !void {
-    if (c.hidden != 5120 or c.intermediate != 17408 or c.layers != 64 or c.vocab != 248320 or c.heads != 24 or c.kv_heads != 4 or c.head_dim != 256 or c.k_heads != 16 or c.v_heads != 48 or c.dk != 128 or c.dv != 128 or c.conv_kernel != 4 or c.rope_dims != 64) return error.UnqualifiedQwenShape;
+    const dense = c.hidden == 5120 and c.intermediate == 17408 and c.layers == 64 and c.heads == 24 and c.kv_heads == 4 and c.k_heads == 16 and c.v_heads == 48 and !c.moe();
+    // Ornith-1.5-122B: 256 experts of 1,024 and a shared expert of 1,024 over 3,072, 32 heads over 2 of 256
+    const routed = c.hidden == 3072 and c.intermediate == 1024 and c.layers == 48 and c.heads == 32 and c.kv_heads == 2 and c.k_heads == 16 and c.v_heads == 64 and c.experts == 256 and c.top_k == 8 and c.moe_intermediate == 1024;
+    if (!(dense or routed) or c.vocab != 248320 or c.head_dim != 256 or c.dk != 128 or c.dv != 128 or c.conv_kernel != 4 or c.rope_dims != 64) return error.UnqualifiedQwenShape;
     for (c.kinds[0..c.layers], 0..) |kind, i| if (kind != (if ((i + 1) % 4 == 0) cfg.Kind.attention else cfg.Kind.linear)) return error.UnqualifiedLayerSchedule;
 }
 
