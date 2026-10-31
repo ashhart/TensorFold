@@ -36,7 +36,8 @@ This family keeps that split:
 - LayerNorms in fp32, rounded to fp16; the modulation's shift and scale in fp16 ops, as torch's fp16 tensors run them.
 - RePo in fp32: its LayerNorm, both 1,024 to 128 maps, the 128 to 48 map and the angles.
 - Attention: fp16 q, k and v, fp32 scores and sums. q and k are rotated, then L2-normalized and scaled by the
-  checkpoint's gamma times 8.
+  checkpoint's gamma times 8. The tensor units take an fp32 P short, which left outputs 3.5e-4 low on average, so
+  `id_attention` rounds P to fp16 itself and sums the softmax's denominator over those same values.
 - The condition embedding and the output projection in fp32; the time MLP, modulation and camera MLPs on the host.
 
 ### The tensor units' fp32 matmul is not fp32
@@ -116,14 +117,14 @@ Setup:
 Results:
 
 - **Velocity**, both branches of all 50 steps on the SDK's own input (100 of 100 pass):
-  - against the SDK: cosine 0.999997 or better;
-  - against fp32: our worst row over the run 0.0456, the SDK's 0.0398; per step our `1 - cos` is the SDK's within
-    the 2x bound at every step, and the smaller at 40 of the 100.
+  - against the SDK: cosine 0.999998 or better;
+  - against fp32: our worst row over the run 0.0474, the SDK's 0.0398; per step our `1 - cos` is the SDK's within
+    the 2x bound at every step, and the smaller at 75 of the 100.
 - **Blocks**, at steps 1 and 41, each of the 23 joint blocks after the first on the SDK's input: all pass, worst rows
-  0.0007 to 0.0017 against fp32, where the SDK's are 0.0007 to 0.0025.
-- **Sample:** our 50 guided steps from the same noise end at cosine 0.99999 to the SDK's sample.
+  0.0008 to 0.0017 against fp32, where the SDK's are 0.0007 to 0.0025.
+- **Sample:** our 50 guided steps from the same noise end at cosine 0.999993 to the SDK's sample.
 - **Repeat:** identical bytes.
-- **Speed**, one session: 0.273 s a forward (27.3 s for 50 guided steps), 3.4x the SDK's 0.939 s (the median of its
+- **Speed**, one session: 0.275 s a forward (27.5 s for 50 guided steps), 3.4x the SDK's 0.939 s (the median of its
   100). Load 0.2 to 1.6 s; the condition, once an image, 0.07 s.
 - **Memory:** 1.84 GB peak process footprint (`/usr/bin/time -l`, the whole `tf-idol` run with its case), the
   denoiser's fp16 weights in shared Metal buffers.
