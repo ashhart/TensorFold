@@ -390,6 +390,9 @@ pub fn main(init: std.process.Init) !u8 {
     var spark25_attention: @import("metal_spark25_attention.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer spark25_attention.deinit();
     try spark25_attention.collect(o.only);
+    var gemma_attention: @import("metal_gemma4_attention.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer gemma_attention.deinit();
+    try gemma_attention.collect(o.only);
     var nemotron_unroll: @import("metal_nemotron_unroll.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer nemotron_unroll.deinit();
     try nemotron_unroll.collect(o.only);

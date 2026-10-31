@@ -170,6 +170,11 @@ Spark-X2.6-4B's `sp_prompt_attention` registers both pipelines the engine builds
 in a 2,560-slot ring, and full layers), its fp32 P stated with the cut, each with a P spread case
 and its cutless control, and one source edit each (a key past the window, a key past the row); before the M5 they are
 not registered.
+On the M5, Gemma 4's `gemma_prompt_attention` (the 31B's and 12B's sliding and global layers) and
+`gemma_decode_attention` with `gemma_attention_merge` (their global layers; the 12B's assistant launches the 12B's) state
+their fp32 P with the cut too, each form's counts taken from the kernel's own steps, at the sliding ring, image rows and
+decode chunks the engine serves. A P-spread case on the 31B's global prompt and decode has a cutless control each, red at
+`shapes`, and a score edit (2 log2e) in each kernel is a control. Their launches are in `gemma_attention_records.zig`.
 LFM2.5-24B-A2B's shared rounds: the greedy pick (`lfm2_argmax`) and the conv and attention kernels that run every
 stream's rows in one dispatch, each bit-equal to the per-stream kernels it replaces. Four controls edit the source: a tie
 to the highest id, a nonfinite logit not flagged, and every stream reading or writing the first stream's state or cache.
