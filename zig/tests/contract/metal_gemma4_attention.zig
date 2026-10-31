@@ -22,8 +22,8 @@ const decode_rows = tf.gemma4.state.max_rows;
 
 /// A layer kind's gemma_prompt_attention, or a global layer's gemma_decode_attention then gemma_attention_merge.
 const Kind = enum { prompt, decode };
-/// As served; P spread over [0, 1] with values in [0, 1); that case's range without the cut; scores at 2 log2e.
-const Case = enum { plain, spread, cutless, edit };
+/// Served; P spread over [0, 1], values in [0, 1); that range uncut; scores at 2 log2e; +Inf at a masked key.
+const Case = enum { plain, spread, cutless, edit, masked };
 
 const Variant = struct { geo: cfg.Geometry, global: bool, kind: Kind, case: Case = .plain };
 
@@ -41,6 +41,12 @@ const variants = [_]Variant{
     .{ .geo = cfg.dense31b, .global = true, .kind = .decode, .case = .cutless },
     .{ .geo = cfg.dense31b, .global = false, .kind = .prompt, .case = .edit },
     .{ .geo = cfg.dense31b, .global = true, .kind = .decode, .case = .edit },
+    .{ .geo = cfg.dense31b, .global = false, .kind = .prompt, .case = .masked },
+    .{ .geo = cfg.dense31b, .global = true, .kind = .prompt, .case = .masked },
+    .{ .geo = cfg.unified12b, .global = false, .kind = .prompt, .case = .masked },
+    .{ .geo = cfg.unified12b, .global = true, .kind = .prompt, .case = .masked },
+    .{ .geo = cfg.dense31b, .global = true, .kind = .decode, .case = .masked },
+    .{ .geo = cfg.unified12b, .global = true, .kind = .decode, .case = .masked },
 };
 
 fn nameOf(comptime v: Variant) []const u8 {
@@ -51,6 +57,7 @@ fn nameOf(comptime v: Variant) []const u8 {
         .spread => base ++ ", P spread over [0, 1]",
         .cutless => "control: " ++ base ++ ", P spread, its range without the operand cut",
         .edit => "control: " ++ base ++ ", scores at 2 log2e",
+        .masked => base ++ (if (v.kind == .decode) ", a non-finite value at a key masked in its step" else ", a non-finite value at a key masked in its tile"),
     };
 }
 
@@ -241,8 +248,13 @@ const Probe = struct {
         const rows: c.Tile = if (p.v.kind == .decode) .{ .size = 16 / (p.nq() / p.nk()) } else .{ .size = rt };
         const keys: c.Tile = .{ .size = if (p.v.kind == .decode) cd else p.dh() / 2, .min = 0 };
         // ops: gate 4's exact sums meet only the final division's roundings
-        const known: ?c.Known = if (p.v.case == .plain or p.v.case == .spread) .{ .gate = .nonfinite, .finding = if (p.v.kind == .prompt) prompt_finding else decode_finding } else null;
-        return .{ .name = p.name, .accum = .f32, .depth = keysDepth, .ops = 4, .out = .bf16, .tiles = .{ rows, .{}, keys }, .served = served, .known = known };
+        var s: c.Spec = .{ .name = p.name, .accum = .f32, .depth = keysDepth, .ops = 4, .out = .bf16, .tiles = .{ rows, .{}, keys }, .served = served };
+        if (p.v.case == .masked) {
+            const at: usize = if (p.v.kind == .prompt) 1 else 0; // one served shape past key 0, for gate 4's cancelling sums
+            s.served = served[at..][0..1];
+            s.known = .{ .gate = .nonfinite, .finding = if (p.v.kind == .prompt) prompt_finding else decode_finding };
+        }
+        return s;
     }
 
     /// The keys row `r` attends: a sliding row's window up to its last key, else every key up to its own.
@@ -296,8 +308,8 @@ const Probe = struct {
                 p.vp[p.p0 * dh_ + 5] = c.toBf16(std.math.inf(f32));
                 p.vp[p.p0 * dh_ + 6] = c.toBf16(-std.math.inf(f32));
                 if (p.p0 + 2 < n) p.kp[(p.p0 + 2) * dh_] = c.toBf16(std.math.nan(f32));
-                // +Inf at p0 + 1: masked for row 0, yet read in row 0's tile (prompt) or 32-key step (decode)
-                p.vp[(p.p0 + 1) * dh_ + 7] = c.toBf16(std.math.inf(f32));
+                // the masked case: +Inf at p0 + 1, masked for row 0, read in its tile (prompt) or 32-key step (decode)
+                if (p.v.case == .masked) p.vp[(p.p0 + 1) * dh_ + 7] = c.toBf16(std.math.inf(f32));
             },
             .stress => {
                 // every score 0, so every weight 1; the values every row sees cancel but for four ones
@@ -439,25 +451,16 @@ const Probe = struct {
         @memcpy(p.point, want);
     }
 
-    /// The range's half width and the cut's wider side plus bf16's rounding; gate 4's exact sums keep the exact bound.
+    /// The range's allowance (attention_range.allowBf16); gate 4's exact sums keep the exact bound.
     pub fn bounds(p: *Probe, want: []const f64, _: []const f64, allow: []f64) !void {
         const s = p.spec();
-        for (allow, want, p.half, p.down, p.up) |*l, w, h, d, u| {
-            if (p.stress) {
-                l.* = c.boundExact(s, w);
-            } else if (!std.math.isFinite(w)) {
-                l.* = 0;
-            } else if (!std.math.isFinite(h)) {
-                l.* = std.math.floatMax(f64); // scores too far apart for the range's first order: any finite value
-            } else l.* = h + @max(d, u) + 0x1p-8 * (@abs(w) + h + @max(d, u)) + 0x1p-133;
-        }
+        for (allow, want, p.half, p.down, p.up) |*l, w, h, d, u| l.* = if (p.stress) c.boundExact(s, w) else ar.allowBf16(w, h, d, u);
     }
 
-    /// Each bf16 output within its range's ends as rounded, the cut on its own side; gate 4 and wide ranges are open.
+    /// Each bf16 output within its range's rounded ends (attention_range.intervalBf16); gate 4's are open.
     pub fn intervals(p: *Probe, low: []f64, high: []f64) !void {
         for (low, high, p.point, p.half, p.down, p.up) |*l, *hi, pt, h, d, u| {
-            const open = p.stress or !std.math.isFinite(pt) or !std.math.isFinite(h);
-            const e = if (open) [2]f64{ -std.math.floatMax(f64), std.math.floatMax(f64) } else ar.ends(pt, h, d, u);
+            const e = if (p.stress) [2]f64{ -std.math.floatMax(f64), std.math.floatMax(f64) } else ar.intervalBf16(pt, h, d, u);
             l.* = e[0];
             hi.* = e[1];
         }
@@ -493,7 +496,7 @@ pub const Suite = struct {
     kernels: *std.ArrayList(g.Kernel),
     probes: std.ArrayList(*Probe) = .empty,
 
-    /// Only on the tensor units: before the M5 nax.h's fragments keep P whole, a path these ranges do not state.
+    /// Only on the tensor units: the operand cut these ranges state was measured there alone.
     pub fn collect(s: *Suite, only: ?[]const u8) !void {
         if (!s.device.tensorUnits()) return;
         for (variants, names) |v, name| {
