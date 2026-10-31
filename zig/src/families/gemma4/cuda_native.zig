@@ -11,6 +11,7 @@ const asst = @import("cuda_assistant.zig");
 const cv = @import("cuda_vision.zig");
 const tw = @import("cuda_tower.zig");
 const dfl = @import("cuda_dflash.zig");
+const pg = @import("cuda_pages.zig");
 const kv = @import("core").kv_pool;
 
 /// The registry's entry for one model_type: gemma4_unified (12B) or gemma4 (31B).
@@ -110,13 +111,13 @@ fn fitFirst(room: u64, plan: anytype) !usize {
 /// The pool: `streams` more slots beside the first and an arena of `n` pages.
 pub fn attach(p: *anyopaque, streams: u32, n: usize) !void {
     const own: *Owned = @ptrCast(@alignCast(p));
-    try own.gb.attach(streams, n);
+    try pg.attach(&own.gb, streams, n);
 }
 
 /// Whether a request's caches could start now (the lane host's admission, on its engine thread).
 pub fn fits(p: *anyopaque, prompt: u32, max_tokens: u32) bool {
     const own: *const Owned = @ptrCast(@alignCast(p));
-    return own.gb.admits(prompt, max_tokens);
+    return pg.admits(&own.gb, prompt, max_tokens);
 }
 
 /// The device bytes of the image path's workspace (the 31B's tower or the 12B's embedder), 0 without --vision.

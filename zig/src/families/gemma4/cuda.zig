@@ -11,6 +11,7 @@ pub const kernels = @import("cuda_kernels.zig");
 pub const forward = @import("cuda_forward.zig");
 pub const snap = @import("cuda_snap.zig");
 pub const backend = @import("cuda_backend.zig");
+pub const pages = @import("cuda_pages.zig");
 pub const assistant = @import("cuda_assistant.zig");
 pub const vision = @import("cuda_vision.zig");
 pub const dflash = @import("cuda_dflash.zig");
@@ -45,6 +46,7 @@ test {
     _ = @import("cuda_forward.zig");
     _ = @import("cuda_snap.zig");
     _ = @import("cuda_backend.zig");
+    _ = @import("cuda_pages.zig");
     _ = @import("cuda_assistant.zig");
     _ = @import("cuda_assistant_weights.zig");
     _ = @import("cuda_vision.zig");
