@@ -23,8 +23,8 @@ const tile_rows: u32 = 8;
 const tile_outs: u32 = if (gen12) 4 else 8;
 
 pub const Table = struct { w: Buf, s: Buf, b: Buf };
-const Conv = struct { in: Table, out: Table, cw: Buf, state: Buf };
-const Attn = struct { q: Table, k: Table, v: Table, g: Table, o: Table, qn: Buf, kn: Buf, kc: Buf, vc: Buf, ring: u32, window: u32 };
+const Conv = struct { in: Table, out: Table, cw: Buf };
+const Attn = struct { q: Table, k: Table, v: Table, g: Table, o: Table, qn: Buf, kn: Buf, ring: u32, window: u32 };
 const Mixer = union(enum) { conv: Conv, attn: Attn };
 const Layer = struct { op_norm: Buf, post_op: Buf, ffn_norm: Buf, post_ffn: Buf, w1: Table, w3: Table, w2: Table, mixer: Mixer };
 
@@ -44,6 +44,20 @@ const Kernels = struct {
     merge: rt.Kernel,
     swiglu: rt.Kernel,
 };
+
+/// One stream's state: each conv layer's last six B*x rows, each attention layer's KV slots, and its position.
+pub const Seq = struct { conv: [cfg.layers]Buf = undefined, kc: [cfg.layers]Buf = undefined, vc: [cfg.layers]Buf = undefined, pos: u32 = 0 };
+
+/// A kept prompt state at `at`: conv rows, the full layers' first `at` KV slots, the sliding rings, in one buffer.
+pub const Snap = struct { at: u32, buf: Buf };
+
+const conv_bytes: usize = 6 * H * 2;
+const slot_bytes: usize = NKV * HD * 2;
+
+/// `b` from byte `off` on.
+fn from(b: Buf, off: usize) Buf {
+    return .{ .rt = b.rt, .ptr = @ptrFromInt(@intFromPtr(b.ptr.?) + off), .len = b.len - off };
+}
 
 /// Device scratch for a window of up to `max_rows` rows.
 const Scratch = struct { ids: Buf, x: Buf, xn: Buf, d: Buf, proj: Buf, qkv: Buf, g: Buf, q: Buf, att: Buf, a: Buf, b: Buf, act: Buf, po: Buf, pm: Buf, pl: Buf, logits: Buf, am_scratch: Buf, am_out: Buf };
@@ -70,6 +84,7 @@ pub fn invFreq(theta: f32, partial: f32, out: *[HD / 2]f32) void {
 }
 
 pub const Model = struct {
+    gpa: std.mem.Allocator,
     r: *rt.Runtime,
     layers: []Layer,
     emb: Table,
@@ -84,6 +99,9 @@ pub const Model = struct {
     maxc: u32,
     pos: u32 = 0,
     device_bytes: u64 = 0,
+    /// The bound stream's state (`own` until another is bound); `pos` is the bound stream's position.
+    seq: *Seq = undefined,
+    own: *Seq = undefined,
 
     /// The affine tensors of module `m` (in layer `layer`, or a model tensor) by names.zig in namespace `ns`.
     fn table(l: *ld.Loader, ns: names.Namespace, layer: ?usize, m: names.Module) !Table {
@@ -170,7 +188,6 @@ pub const Model = struct {
                     .in = try table(l, ns, i, .conv_in),
                     .out = try table(l, ns, i, .conv_out),
                     .cw = try vec(l, ns, i, .conv),
-                    .state = try l.zeros(6 * H * 2),
                 } } else blk: {
                     const ring: u32 = if (kind == .sliding_attention) cfg.sliding_window + max_rows else cap;
                     break :blk .{ .attn = .{
@@ -181,8 +198,6 @@ pub const Model = struct {
                         .o = try table(l, ns, i, .o_proj),
                         .qn = try vec(l, ns, i, .q_norm),
                         .kn = try vec(l, ns, i, .k_norm),
-                        .kc = try l.empty(@as(usize, ring) * NKV * HD * 2),
-                        .vc = try l.empty(@as(usize, ring) * NKV * HD * 2),
                         .ring = ring,
                         .window = if (kind == .sliding_attention) cfg.sliding_window else 0,
                     } };
@@ -197,7 +212,8 @@ pub const Model = struct {
         invFreq(c.sliding_rotary.theta, c.sliding_rotary.partial, &inv);
         try r.upload(inv_slide, std.mem.sliceAsBytes(&inv));
         try r.sync();
-        return .{
+        var m: Model = .{
+            .gpa = gpa,
             .r = r,
             .layers = layers,
             .emb = try table(l, ns, null, .embed_tokens),
@@ -212,22 +228,114 @@ pub const Model = struct {
             .maxc = maxc,
             .device_bytes = l.total,
         };
+        m.own = try m.newSeq();
+        m.seq = m.own;
+        return m;
     }
 
-    /// Back to position 0: the conv states are zeroed; KV slots are only read once written.
-    pub fn reset(m: *Model) !void {
-        const zero: [6 * 256]u16 = @splat(0);
-        for (m.layers) |ly| switch (ly.mixer) {
-            .conv => |c| {
-                var off: usize = 0;
-                while (off < 6 * H * 2) : (off += zero.len * 2) {
-                    try m.r.upload(.{ .rt = c.state.rt, .ptr = @ptrFromInt(@intFromPtr(c.state.ptr.?) + off), .len = zero.len * 2 }, std.mem.sliceAsBytes(&zero));
-                }
+    /// A new stream state at position 0 (zeroed conv rows; KV slots are only read once written).
+    pub fn newSeq(m: *Model) !*Seq {
+        const q = try m.gpa.create(Seq);
+        errdefer m.gpa.destroy(q);
+        q.* = .{};
+        for (m.layers, 0..) |ly, i| switch (ly.mixer) {
+            .conv => q.conv[i] = try m.r.alloc(conv_bytes),
+            .attn => |a| {
+                q.kc[i] = try m.r.alloc(@as(usize, a.ring) * slot_bytes);
+                q.vc[i] = try m.r.alloc(@as(usize, a.ring) * slot_bytes);
             },
-            .attn => {},
+        };
+        try m.zeroConv(q);
+        return q;
+    }
+
+    pub fn freeSeq(m: *Model, q: *Seq) void {
+        if (q == m.seq) { // `own` bound again with its own position, not the freed stream's
+            m.seq = m.own;
+            m.pos = m.own.pos;
+        }
+        for (m.layers, 0..) |ly, i| switch (ly.mixer) {
+            .conv => q.conv[i].free(),
+            .attn => {
+                q.kc[i].free();
+                q.vc[i].free();
+            },
+        };
+        m.gpa.destroy(q);
+    }
+
+    /// Makes `q` the stream the next forwards read and write.
+    pub fn bind(m: *Model, q: *Seq) void {
+        m.seq.pos = m.pos;
+        m.seq = q;
+        m.pos = q.pos;
+    }
+
+    fn zeroConv(m: *Model, q: *Seq) !void {
+        const zero: [6 * 256]u16 = @splat(0);
+        for (m.layers, 0..) |ly, i| if (ly.mixer == .conv) {
+            var off: usize = 0;
+            while (off < conv_bytes) : (off += zero.len * 2) try m.r.upload(from(q.conv[i], off), std.mem.sliceAsBytes(&zero));
         };
         try m.r.sync();
+    }
+
+    /// The bound stream back to position 0.
+    pub fn reset(m: *Model) !void {
+        try m.zeroConv(m.seq);
         m.pos = 0;
+    }
+
+    /// Bytes of a kept state at position `at`: conv rows, `at` slots of each full layer, each sliding ring whole.
+    pub fn snapBytes(m: *const Model, at: u32) u64 {
+        var n: u64 = 0;
+        for (m.layers) |ly| n += switch (ly.mixer) {
+            .conv => conv_bytes,
+            .attn => |a| 2 * @as(u64, if (a.window == 0) at else a.ring) * slot_bytes,
+        };
+        return n;
+    }
+
+    /// One piece of a kept state at byte `off` of its buffer, to (save) or from it; the next piece's offset.
+    fn piece(m: *Model, sn: *const Snap, save: bool, b: Buf, bytes: usize, off: usize) !usize {
+        if (bytes > 0) {
+            if (save) try m.r.copy(from(sn.buf, off), b, bytes) else try m.r.copy(b, from(sn.buf, off), bytes);
+        }
+        return off + bytes;
+    }
+
+    /// Copies the bound stream's state to (save) or from a kept state's buffer, on the device.
+    fn snapCopy(m: *Model, sn: *const Snap, save: bool) !void {
+        var off: usize = 0;
+        for (m.layers, 0..) |ly, i| switch (ly.mixer) {
+            .conv => off = try m.piece(sn, save, m.seq.conv[i], conv_bytes, off),
+            .attn => |a| {
+                const bytes = @as(usize, if (a.window == 0) sn.at else a.ring) * slot_bytes;
+                off = try m.piece(sn, save, m.seq.kc[i], bytes, off);
+                off = try m.piece(sn, save, m.seq.vc[i], bytes, off);
+            },
+        };
+        try m.r.sync();
+    }
+
+    /// The bound stream's state at its position, kept.
+    pub fn snapSave(m: *Model) !*Snap {
+        const sn = try m.gpa.create(Snap);
+        errdefer m.gpa.destroy(sn);
+        sn.* = .{ .at = m.pos, .buf = try m.r.alloc(@intCast(@max(m.snapBytes(m.pos), 1))) };
+        try m.snapCopy(sn, true);
+        return sn;
+    }
+
+    /// The bound stream continues from a kept state.
+    pub fn snapRestore(m: *Model, sn: *const Snap) !void {
+        m.pos = sn.at;
+        try m.snapCopy(sn, false);
+    }
+
+    pub fn snapDrop(m: *Model, sn: *Snap) void {
+        sn.buf.free();
+        m.gpa.destroy(sn);
     }
 
     /// y[r * y_stride + y_off + o] = x[r] . W[o] for n rows: the decode matvec for one row, pdense for a window.
@@ -236,12 +344,12 @@ pub const Model = struct {
         try run(&m.k.pdense, .{ (rows + 15) / 16, (n + tile_rows - 1) / tile_rows, 1 }, .{ t.w, t.s, t.b, x, y, in_dim, rows, n, y_stride, y_off, @as(u32, 0) });
     }
 
-    fn mixer(m: *Model, ly: *const Layer, n: u32) !void {
+    fn mixer(m: *Model, ly: *const Layer, li: usize, n: u32) !void {
         const s = &m.s;
         switch (ly.mixer) {
             .conv => |c| {
                 try m.proj(c.in, s.xn, s.proj, H, 3 * H, n, 3 * H, 0);
-                try run(&m.k.conv, .{ H / 64, 1, 1 }, .{ s.proj, 3 * H, c.state, c.state, c.cw, s.att, n, H });
+                try run(&m.k.conv, .{ H / 64, 1, 1 }, .{ s.proj, 3 * H, m.seq.conv[li], m.seq.conv[li], c.cw, s.att, n, H });
                 try m.proj(c.out, s.att, s.d, H, H, n, H, 0);
             },
             .attn => |a| {
@@ -251,11 +359,11 @@ pub const Model = struct {
                 try m.proj(a.g, s.xn, s.g, H, NQ, n, NQ, 0);
                 const inv = if (a.window == 0) m.inv_full else m.inv_slide;
                 try run(&m.k.rope, .{ NQ, n, 1 }, .{ s.qkv, QKV, @as(u32, 0), s.q, NQ * HD, a.qn, inv, m.pos, @as(u32, 0), cfg.eps });
-                try run(&m.k.rope, .{ NKV, n, 1 }, .{ s.qkv, QKV, NQ * HD, a.kc, NKV * HD, a.kn, inv, m.pos, a.ring, cfg.eps });
-                try run(&m.k.vst, .{ NKV * HD / 64, n, 1 }, .{ s.qkv, QKV, (NQ + NKV) * HD, a.vc, NKV * HD, m.pos, a.ring });
+                try run(&m.k.rope, .{ NKV, n, 1 }, .{ s.qkv, QKV, NQ * HD, m.seq.kc[li], NKV * HD, a.kn, inv, m.pos, a.ring, cfg.eps });
+                try run(&m.k.vst, .{ NKV * HD / 64, n, 1 }, .{ s.qkv, QKV, (NQ + NKV) * HD, m.seq.vc[li], NKV * HD, m.pos, a.ring });
                 const span = if (a.window == 0) m.pos + n else @min(m.pos + n, a.window);
                 const scale: f32 = 1.0 / @sqrt(@as(f32, HD));
-                try run(&m.k.part, .{ NKV, (span + chunk - 1) / chunk, n }, .{ s.q, a.kc, a.vc, s.po, s.pm, s.pl, m.pos, chunk, a.ring, a.window, NKV, m.maxc, scale });
+                try run(&m.k.part, .{ NKV, (span + chunk - 1) / chunk, n }, .{ s.q, m.seq.kc[li], m.seq.vc[li], s.po, s.pm, s.pl, m.pos, chunk, a.ring, a.window, NKV, m.maxc, scale });
                 try run(&m.k.merge, .{ NQ, n, 1 }, .{ s.po, s.pm, s.pl, s.g, s.att, m.pos, chunk, a.window, NQ, m.maxc });
                 try m.proj(a.o, s.att, s.d, NQ * HD, H, n, H, 0);
             },
@@ -281,7 +389,7 @@ pub const Model = struct {
         try run(&m.k.embed, .{ n, 1, 1 }, .{ m.emb.w, m.emb.s, m.emb.b, s.ids, s.x, H });
         try run(&m.k.rms, .{ n, 1, 1 }, .{ s.x, m.layers[0].op_norm, s.xn, H, cfg.eps });
         for (m.layers, 0..) |*ly, i| {
-            try m.mixer(ly, n);
+            try m.mixer(ly, i, n);
             try run(&m.k.pan, .{ n, 1, 1 }, .{ s.d, s.x, ly.post_op, ly.ffn_norm, s.xn, H, cfg.eps });
             try m.proj(ly.w1, s.xn, s.a, H, FF, n, FF, 0);
             try m.proj(ly.w3, s.xn, s.b, H, FF, n, FF, 0);
