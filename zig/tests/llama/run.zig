@@ -179,11 +179,13 @@ pub fn main(init: std.process.Init) !void {
 fn draft(gpa: std.mem.Allocator, io: std.Io, m: *fl.Model, small: *fl.state.Scratch, cache: *fl.state.Cache, dir: []const u8, prompt: []const u32, steps: usize) !void {
     const vocab = m.config.vocab;
     const dm = try fl.Model.loadOn(gpa, io, dir, m.queue);
-    const d = try fl.drafter.Drafter.init(gpa, dm, .{ .capacity = prompt.len + steps + 2 * fl.state.window_rows, .streams = 1 });
+    var ledger: fl.budget.Ledger = .{ .limit = std.math.maxInt(u64) }; // the tool's one stream: no budget to share
+    const capacity = prompt.len + steps + 2 * fl.state.window_rows;
+    const d = try fl.drafter.Drafter.start(gpa, dm, .{ .capacity = capacity, .streams = 1, .ledger = &ledger });
     defer d.deinit();
-    try d.warm();
     const p = try fl.drafter.Drafter.make(d, gpa, prompt, m.config.eos[0..m.config.eos_count]);
     defer fl.drafter.Drafter.free(d, p);
+    try d.prepare(p, capacity);
     var context: std.ArrayList(u32) = .empty;
     defer context.deinit(gpa);
     try context.appendSlice(gpa, prompt);

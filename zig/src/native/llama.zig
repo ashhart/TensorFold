@@ -29,8 +29,8 @@ const Host = struct {
         h.core.deinit();
         h.config.deinit(h.gpa);
         fl.residency.drop(h);
+        if (h.drafter) |d| d.deinit(); // its slots give their bytes back to the backend's ledger
         h.metal.deinit();
-        if (h.drafter) |d| d.deinit();
         h.model.deinit();
         h.gpa.destroy(h);
     }
@@ -112,11 +112,11 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     try h.metal.warm();
     if (drafter_model) |dm| {
         const capacity: usize = @as(usize, @intCast(window)) + fl.state.window_rows;
-        h.drafter = try fl.drafter.Drafter.init(gpa, dm, .{ .capacity = capacity, .streams = streams });
-        drafter_model = null; // the drafter's now
-        try h.drafter.?.warm();
+        drafter_model = null; // the drafter's now: freed with it, even when its warm-up fails
+        h.drafter = try fl.drafter.Drafter.start(gpa, dm, .{ .capacity = capacity, .streams = streams, .ledger = &h.metal.ledger });
+        h.metal.slots = h.drafter.?.slotsHook(); // its slots grow with their streams' admission, in the same budget
         const dc = &dm.config;
-        std.log.info("llama drafter: {s}: {d} layers, {s}, {d:.2} GiB of weights, {d} caches of {d} tokens ({d:.2} GiB each) as requests take them", .{ o.drafter.?, dc.layers, if (dc.bits == fl.config.bf16) "bf16" else if (dc.bits == 8) "8-bit" else "4-bit", @as(f64, @floatFromInt(dm.checkpoint.residentBytes())) / (1 << 30), streams, capacity, @as(f64, @floatFromInt(fl.state.cacheBytes(dc, capacity))) / (1 << 30) });
+        std.log.info("llama drafter: {s}: {d} layers, {s}, {d:.2} GiB of weights, {d} caches of up to {d} tokens ({d:.2} GiB each), each grown with its stream in the same budget", .{ o.drafter.?, dc.layers, if (dc.bits == fl.config.bf16) "bf16" else if (dc.bits == 8) "8-bit" else "4-bit", @as(f64, @floatFromInt(dm.checkpoint.residentBytes())) / (1 << 30), streams, capacity, @as(f64, @floatFromInt(fl.state.cacheBytes(dc, capacity))) / (1 << 30) });
     }
     errdefer if (h.drafter) |d| d.deinit();
     h.config = try lanes.Config.init(gpa, h.metal.facts(), fl.state.window_rows, fl.state.window_rows - 1);
