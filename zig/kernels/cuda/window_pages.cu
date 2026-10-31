@@ -5,6 +5,22 @@
 
 using namespace tf_wrows;
 
+// merge's replay of head hd of row r, key head kh over the row's pages in float64 (a block; every thread calls it).
+template <int D>
+__device__ __noinline__ void tf_wrows::merge_pg_odd(const __nv_bfloat16* q, const __nv_bfloat16* kc,
+                                                    const __nv_bfloat16* vc, const int* pos, const int* slot, int h,
+                                                    int hk, int win, float scale, Pg pg, __nv_bfloat16* oh, int64_t r,
+                                                    int kh, int hd) {
+    const int p = pos[r], G = h / hk, ts = (slot != nullptr ? slot[r] : 0) * pg.stride;
+    const auto kv = [&](int key, int which) {
+        const int64_t pid = pg.tab[ts + key / pg.tok];
+        return (which == 0 ? kc : vc) + pid * pg.page + (static_cast<int64_t>(key % pg.tok) * hk + kh) * D;
+    };
+    const int c0 = blockIdx.z * NT % D;
+    slow_head<D>(q + (r * h + kh * G + hd) * D, kv, win > 0 ? max(p - win + 1, 0) : 0, p, (double)scale, oh, c0,
+                 c0 + NT);
+}
+
 // Dory's full-attention caches in pages (head dim 256, no window): kc/vc a layer's part of page 0, tab a row of ids.
 extern "C" __global__ void __launch_bounds__(NT) tf_wrows_part_256_pg(
     const __nv_bfloat16* q, const __nv_bfloat16* kc, const __nv_bfloat16* vc, const int* pos, const int* slot,
