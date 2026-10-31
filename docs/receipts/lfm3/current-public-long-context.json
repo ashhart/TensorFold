@@ -1,0 +1,956 @@
+{
+  "schema_version": 1,
+  "scope": "Current public runtime cold long-context HTTP checks. Local48GiB M4 covers text1.7B4bit and VL2B4bit with TEXT prompts; no images in this context experiment.",
+  "status": "All measured context checks passed; no speed or FP64 fidelity acceptance claimed.",
+  "runtime_fix_commit": "dd7263c26",
+  "native_binary_sha256": "3d4a3daeda697420bfbba6d81972896c2bf9e31efaf6f12321ee8487a299354b",
+  "runs": [
+    {
+      "host": {
+        "gpu": "Apple M4 Pro",
+        "gpu_cores": 20,
+        "physical_memory_bytes": 51539607552,
+        "os": "ProductName:\t\tmacOS\nProductVersion:\t\t26.5.1\nBuildVersion:\t\t25F80\n"
+      },
+      "status": {
+        "actual_exit": 0,
+        "requests_completed": 8,
+        "server_legs_completed": 4,
+        "owned_server_exit0": 4,
+        "all_exact_live_prompt_ids": true,
+        "all_completion16_cached0": true,
+        "repeat_cells": 4,
+        "all_repeated_output_token_hashes_equal": true
+      },
+      "provenance": {
+        "source_head_at_preparation": "07a7cb4cbc137259c1f53373e59e6d88d8ff8074",
+        "native_provenance": "Public applied artifact3d4 from attention-range receipt; git diff dd7263c26..07a7cb4 -- zig empty, later commits docs only",
+        "native_artifact": {
+          "public": {
+            "path": "$PACKET/artifacts/tensorfold-native",
+            "sha256": "3d4a3daeda697420bfbba6d81972896c2bf9e31efaf6f12321ee8487a299354b"
+          }
+        },
+        "actual_native_version": {
+          "public": "tensorfold-native 1.1.6"
+        },
+        "client_python_version": "3.13.15 (main, Aug  5 2026, 12:25:43) [Clang 21.0.0 (clang-2100.1.1.101)]",
+        "client_environment_requirements_sha256": "cdede98457af90bb37dc146204af09dc67059ae7829932d7bae76b9185740ee4",
+        "checkpoint_files_and_revisions": {
+          "LFM3-1.7B-MLX-4bit": {
+            "repository": "LiquidAI/LFM3-1.7B-MLX-4bit",
+            "revision": "d0ca73dcfa70ce18733754a492cdc1fb0123262d",
+            "files": {
+              "chat_template.jinja": {
+                "bytes": 12129,
+                "sha256": "f45005c50cd2a97329722bf3a2dee9f16c04cdf825a589b280fb7e99e6827818",
+                "verified_against_pinned_revision": true
+              },
+              "config.json": {
+                "bytes": 2423,
+                "sha256": "7df2ea819f9a31b770192a0a9dc1b7953a7dd8c41b816cc3905bbec99ef332bd",
+                "verified_against_pinned_revision": true
+              },
+              "generation_config.json": {
+                "bytes": 328,
+                "sha256": "0095ba7158e938b1e2d3082d412f00d8be85e42cbbd7608b63866f7a081cf270",
+                "verified_against_pinned_revision": true
+              },
+              "model.safetensors": {
+                "bytes": 973083386,
+                "sha256": "1be5bf672013cd91aa62148f77c5eea8d2784a95845d5fe826e08c7b84823815",
+                "verified_against_pinned_revision": true
+              },
+              "model.safetensors.index.json": {
+                "bytes": 50700,
+                "sha256": "2c8b88e25f6a1055164dd051436b170872200047bce4b3ec5f2a58f6ef929a75",
+                "verified_against_pinned_revision": true
+              },
+              "special_tokens_map.json": {
+                "bytes": 92,
+                "sha256": "7946f864cbfb62a1b041bda937244210a1a87f4a6cab3a48b791131b2cd57f88",
+                "verified_against_pinned_revision": true
+              },
+              "tokenizer.json": {
+                "bytes": 17908634,
+                "sha256": "41927bd314d17d7d7fadb44e10cd0919f7b71528d7741596d8cbd15c6945ec44",
+                "verified_against_pinned_revision": true
+              },
+              "tokenizer_config.json": {
+                "bytes": 1859,
+                "sha256": "b77214b9f12be74b9e5e1dab35d7dace077a31be969314bf38866fd6c8163853",
+                "verified_against_pinned_revision": true
+              }
+            }
+          },
+          "LFM3-VL-2B-MLX-4bit": {
+            "repository": "LiquidAI/LFM3-VL-2B-MLX-4bit",
+            "revision": "c823fade98e35a3d6942ad4d38b1ea15f675cd12",
+            "files": {
+              "chat_template.jinja": {
+                "bytes": 12129,
+                "sha256": "f45005c50cd2a97329722bf3a2dee9f16c04cdf825a589b280fb7e99e6827818",
+                "verified_against_pinned_revision": true
+              },
+              "config.json": {
+                "bytes": 4419,
+                "sha256": "0efb7708e0771e3e104ac628954cdc71070dd436e0b7974615bd1b9eb836f9d9",
+                "verified_against_pinned_revision": true
+              },
+              "generation_config.json": {
+                "bytes": 323,
+                "sha256": "30b1115bcdc4e5671567a5b1255a2f3d2f5a912a79292051c6f1e9db81b5e8c4",
+                "verified_against_pinned_revision": true
+              },
+              "model.safetensors": {
+                "bytes": 1590959088,
+                "sha256": "58268dfdf441ae4020d2a52fc97a814645e8a9624946e2d490403d4dcd71a255",
+                "verified_against_pinned_revision": true
+              },
+              "model.safetensors.index.json": {
+                "bytes": 61256,
+                "sha256": "38b756dbde167ab7c60756af7d5652414c31afdf4e77700b8d3c99395515d639",
+                "verified_against_pinned_revision": true
+              },
+              "processor_config.json": {
+                "bytes": 1254,
+                "sha256": "f183f5a5e5b3a32e666fce05033e6cb7ca496d26e709a2cee611a13eb7d6b610",
+                "verified_against_pinned_revision": true
+              },
+              "tokenizer.json": {
+                "bytes": 17908258,
+                "sha256": "a39eed58008cbcbc09e5b629b81338a654269c64cd13348aaa6090f4db75c7e7",
+                "verified_against_pinned_revision": true
+              },
+              "tokenizer_config.json": {
+                "bytes": 1759,
+                "sha256": "d63d1ce2f332047e398764b4170352b96629a5194643105bfd6d70c90b750396",
+                "verified_against_pinned_revision": true
+              }
+            }
+          }
+        },
+        "runner_sha256": "959eda8cc9ebba01f01d0850c3fb59f1bec26a6b9d288581ecc2f95617febe18",
+        "cold_client_sha256": "7b8ea55aa88834814f95a6f679654e16074b7a8364e34b39a276f009fe0231f2",
+        "guard_sha256": "0caf67448d401704bd849744584248729decf5fd5b994f669a518cb61891df37"
+      },
+      "protocol": {
+        "context": 70000,
+        "configured_parallel": 4,
+        "actual_simultaneous_requests": 1,
+        "prompt_cache_gib": 0,
+        "temperature": 0,
+        "thinking": false,
+        "completion_tokens": 16,
+        "families": [
+          "text",
+          "vl"
+        ],
+        "bits": [
+          4
+        ],
+        "cold_prompt_tokens": [
+          32768,
+          65536
+        ],
+        "fresh_server_order": [
+          "text4",
+          "text4",
+          "VL4",
+          "VL4"
+        ],
+        "fresh_KV_each_request_verified_cached0": true,
+        "draft_field_in_saved_request": "absent; actual runtime draft setting retained per request",
+        "long_draft_false_comparison": false,
+        "long_concurrent_solo_comparison": false,
+        "memory_policy": "Existing native admission unchanged; no memory or wired limits raised. Process footprint measured per server across its32k and64k requests, not per-request GPU allocator peaks.",
+        "lock_events": [
+          {
+            "event": "lock_wait",
+            "time_ns": 1793212362725465000,
+            "path": "/private/tmp/tensorfold-model.lock"
+          },
+          {
+            "event": "lock_acquired",
+            "time_ns": 1793212362725689000,
+            "path": "/private/tmp/tensorfold-model.lock",
+            "pid": 19448,
+            "device": 16777231,
+            "inode": 46835039
+          },
+          {
+            "event": "complete",
+            "time_ns": 1793214795988082000,
+            "legs": 4,
+            "all_lengths_validated": true,
+            "performance_gate_claim": false
+          },
+          {
+            "event": "lock_release",
+            "time_ns": 1793214795988270000,
+            "pid": 19448
+          }
+        ],
+        "owned_load_ready_cleanup_events": [
+          {
+            "event": "owned_model_load_begin",
+            "time_ns": 1793212364432858000,
+            "tag": "text-4-0-public",
+            "pid": 19484,
+            "command": [
+              "$PACKET/artifacts/tensorfold-native",
+              "serve",
+              "$MODELS/LFM3-1.7B-MLX-4bit",
+              "--host",
+              "127.0.0.1",
+              "--port",
+              "18085",
+              "--name",
+              "lfm3-local",
+              "--context",
+              "70000",
+              "--parallel",
+              "4",
+              "--prompt-cache-gib",
+              "0",
+              "--no-thinking",
+              "--temperature",
+              "0",
+              "--no-update-check",
+              "--metrics-open"
+            ],
+            "environment_overrides": {
+              "APC_ENABLED": "0",
+              "APC_DISK_ENABLED": "0",
+              "HF_HUB_OFFLINE": "1",
+              "HF_HUB_DISABLE_TELEMETRY": "1",
+              "MLX_TRUST_REMOTE_CODE": "false"
+            },
+            "removed_preload_or_draft_env_names": [],
+            "explicit_standard_MAX_KV_SIZE": null
+          },
+          {
+            "event": "owned_model_ready",
+            "time_ns": 1793212366601124000,
+            "tag": "text-4-0-public",
+            "api_model": "lfm3-local",
+            "models": [
+              {
+                "id": "lfm3-local",
+                "object": "model",
+                "created": 1793212366,
+                "owned_by": "tensorfold",
+                "context_length": 70000,
+                "max_model_len": 70000,
+                "reasoning": {
+                  "default_enabled": false
+                }
+              }
+            ]
+          },
+          {
+            "event": "owned_cleanup_complete",
+            "time_ns": 1793212982412501000,
+            "tag": "text-4-0-public",
+            "pid": 19484,
+            "exit": 0,
+            "memory": {
+              "max_rss_bytes": 1231667200,
+              "peak_physical_footprint_bytes": 2818033392
+            }
+          },
+          {
+            "event": "owned_model_load_begin",
+            "time_ns": 1793212982639224000,
+            "tag": "text-4-1-public",
+            "pid": 29903,
+            "command": [
+              "$PACKET/artifacts/tensorfold-native",
+              "serve",
+              "$MODELS/LFM3-1.7B-MLX-4bit",
+              "--host",
+              "127.0.0.1",
+              "--port",
+              "18085",
+              "--name",
+              "lfm3-local",
+              "--context",
+              "70000",
+              "--parallel",
+              "4",
+              "--prompt-cache-gib",
+              "0",
+              "--no-thinking",
+              "--temperature",
+              "0",
+              "--no-update-check",
+              "--metrics-open"
+            ],
+            "environment_overrides": {
+              "APC_ENABLED": "0",
+              "APC_DISK_ENABLED": "0",
+              "HF_HUB_OFFLINE": "1",
+              "HF_HUB_DISABLE_TELEMETRY": "1",
+              "MLX_TRUST_REMOTE_CODE": "false"
+            },
+            "removed_preload_or_draft_env_names": [],
+            "explicit_standard_MAX_KV_SIZE": null
+          },
+          {
+            "event": "owned_model_ready",
+            "time_ns": 1793212984797712000,
+            "tag": "text-4-1-public",
+            "api_model": "lfm3-local",
+            "models": [
+              {
+                "id": "lfm3-local",
+                "object": "model",
+                "created": 1793212984,
+                "owned_by": "tensorfold",
+                "context_length": 70000,
+                "max_model_len": 70000,
+                "reasoning": {
+                  "default_enabled": false
+                }
+              }
+            ]
+          },
+          {
+            "event": "owned_cleanup_complete",
+            "time_ns": 1793213588196102000,
+            "tag": "text-4-1-public",
+            "pid": 29903,
+            "exit": 0,
+            "memory": {
+              "max_rss_bytes": 1231994880,
+              "peak_physical_footprint_bytes": 2822227600
+            }
+          },
+          {
+            "event": "owned_model_load_begin",
+            "time_ns": 1793213588433067000,
+            "tag": "vl-4-0-public",
+            "pid": 40856,
+            "command": [
+              "$PACKET/artifacts/tensorfold-native",
+              "serve",
+              "$MODELS/LFM3-VL-2B-MLX-4bit",
+              "--host",
+              "127.0.0.1",
+              "--port",
+              "18085",
+              "--name",
+              "lfm3-local",
+              "--context",
+              "70000",
+              "--parallel",
+              "4",
+              "--prompt-cache-gib",
+              "0",
+              "--no-thinking",
+              "--temperature",
+              "0",
+              "--no-update-check",
+              "--metrics-open"
+            ],
+            "environment_overrides": {
+              "APC_ENABLED": "0",
+              "APC_DISK_ENABLED": "0",
+              "HF_HUB_OFFLINE": "1",
+              "HF_HUB_DISABLE_TELEMETRY": "1",
+              "MLX_TRUST_REMOTE_CODE": "false"
+            },
+            "removed_preload_or_draft_env_names": [],
+            "explicit_standard_MAX_KV_SIZE": null
+          },
+          {
+            "event": "owned_model_ready",
+            "time_ns": 1793213591598905000,
+            "tag": "vl-4-0-public",
+            "api_model": "lfm3-local",
+            "models": [
+              {
+                "id": "lfm3-local",
+                "object": "model",
+                "created": 1793213591,
+                "owned_by": "tensorfold",
+                "context_length": 70000,
+                "max_model_len": 70000,
+                "reasoning": {
+                  "default_enabled": false
+                }
+              }
+            ]
+          },
+          {
+            "event": "owned_cleanup_complete",
+            "time_ns": 1793214192784840000,
+            "tag": "vl-4-0-public",
+            "pid": 40856,
+            "exit": 0,
+            "memory": {
+              "max_rss_bytes": 1850359808,
+              "peak_physical_footprint_bytes": 3478177952
+            }
+          },
+          {
+            "event": "owned_model_load_begin",
+            "time_ns": 1793214193015609000,
+            "tag": "vl-4-1-public",
+            "pid": 51402,
+            "command": [
+              "$PACKET/artifacts/tensorfold-native",
+              "serve",
+              "$MODELS/LFM3-VL-2B-MLX-4bit",
+              "--host",
+              "127.0.0.1",
+              "--port",
+              "18085",
+              "--name",
+              "lfm3-local",
+              "--context",
+              "70000",
+              "--parallel",
+              "4",
+              "--prompt-cache-gib",
+              "0",
+              "--no-thinking",
+              "--temperature",
+              "0",
+              "--no-update-check",
+              "--metrics-open"
+            ],
+            "environment_overrides": {
+              "APC_ENABLED": "0",
+              "APC_DISK_ENABLED": "0",
+              "HF_HUB_OFFLINE": "1",
+              "HF_HUB_DISABLE_TELEMETRY": "1",
+              "MLX_TRUST_REMOTE_CODE": "false"
+            },
+            "removed_preload_or_draft_env_names": [],
+            "explicit_standard_MAX_KV_SIZE": null
+          },
+          {
+            "event": "owned_model_ready",
+            "time_ns": 1793214196162312000,
+            "tag": "vl-4-1-public",
+            "api_model": "lfm3-local",
+            "models": [
+              {
+                "id": "lfm3-local",
+                "object": "model",
+                "created": 1793214196,
+                "owned_by": "tensorfold",
+                "context_length": 70000,
+                "max_model_len": 70000,
+                "reasoning": {
+                  "default_enabled": false
+                }
+              }
+            ]
+          },
+          {
+            "event": "owned_cleanup_complete",
+            "time_ns": 1793214795872074000,
+            "tag": "vl-4-1-public",
+            "pid": 51402,
+            "exit": 0,
+            "memory": {
+              "max_rss_bytes": 1850261504,
+              "peak_physical_footprint_bytes": 3486206112
+            }
+          }
+        ]
+      },
+      "cells": [
+        {
+          "family": "text",
+          "bits": 4,
+          "prompt_tokens": 32768,
+          "fresh_server_repetitions": 2,
+          "all_output_16_cached0": true,
+          "native_live_ids_equal_published": true,
+          "repeated_full_output_token_hash_equal": true,
+          "output_token_sha256": "e15e7490e640d938a0a846dfc9de1dd7a51e50ae97ca4fd42a213cbb633f66f5"
+        },
+        {
+          "family": "text",
+          "bits": 4,
+          "prompt_tokens": 65536,
+          "fresh_server_repetitions": 2,
+          "all_output_16_cached0": true,
+          "native_live_ids_equal_published": true,
+          "repeated_full_output_token_hash_equal": true,
+          "output_token_sha256": "cf6c4062b60dc49e0ca503b7be2aaf3d247d73be037d269cf73e127a5e35aa32"
+        },
+        {
+          "family": "vl",
+          "bits": 4,
+          "prompt_tokens": 32768,
+          "fresh_server_repetitions": 2,
+          "all_output_16_cached0": true,
+          "native_live_ids_equal_published": true,
+          "repeated_full_output_token_hash_equal": true,
+          "output_token_sha256": "f35dfbfd86653608bd3aa0fe6672229ecfe9ec17bf45ebcdb91dc7c7e894af4a"
+        },
+        {
+          "family": "vl",
+          "bits": 4,
+          "prompt_tokens": 65536,
+          "fresh_server_repetitions": 2,
+          "all_output_16_cached0": true,
+          "native_live_ids_equal_published": true,
+          "repeated_full_output_token_hash_equal": true,
+          "output_token_sha256": "6dc17e16c1bdd265cbfecc43f466db1fb29c9240e7818d912ecc773b568b4856"
+        }
+      ],
+      "requests": [
+        {
+          "family": "text",
+          "bits": 4,
+          "leg": 0,
+          "prompt_tokens": 32768,
+          "completion_tokens": 16,
+          "cached_tokens": 0,
+          "native_live_ids_equal_published": true,
+          "published_ids_file": "docs/receipts/lfm3/cold-prompts/text-32768.ids.json",
+          "published_ids_json_sha256": "66a7d4a0c49b2311500556e8e0f56cee9d0ae033f7765736b61d5a9c4e133c9f",
+          "actual_tokenize_response_sha256": "d4bfe4925faa3dc8627a5d23bafd579e19ec435abe5fb7db0df6641b8a155450",
+          "published_body_file": "docs/receipts/lfm3/cold-prompts/text-32768.body.json",
+          "published_body_sha256": "6e4c2ecd84a08e202dddce7f9b50bada5c006f9d529a74177f38dc11c08e0bb4",
+          "actual_sent_body_sha256": "8669dab27e5eb8320e6149804676a48eed58b6f7b2eee972fa92c563e180686d",
+          "output_token_sha256": "e15e7490e640d938a0a846dfc9de1dd7a51e50ae97ca4fd42a213cbb633f66f5",
+          "output_text_sha256": "382055acebd5e91b010ffa41b6497ebdb6d22c9bbdd7a2ab220c18df2e11f6b3",
+          "sampling": "greedy",
+          "runtime_drafts_setting": true,
+          "client_ttft_seconds": 139.58678591717035,
+          "client_elapsed_seconds": 139.8003973751329,
+          "engine_prefill_seconds": 139.575941459,
+          "raw_result_sha256": "8439a265a08546347e4935490734747684565af6f7fd96a1662c87ac3cdbc494"
+        },
+        {
+          "family": "text",
+          "bits": 4,
+          "leg": 0,
+          "prompt_tokens": 65536,
+          "completion_tokens": 16,
+          "cached_tokens": 0,
+          "native_live_ids_equal_published": true,
+          "published_ids_file": "docs/receipts/lfm3/cold-prompts/text-65536.ids.json",
+          "published_ids_json_sha256": "4d92c019e5bc47be53d2d4f9199d416b283fa5b72e746347add288619d48a5ed",
+          "actual_tokenize_response_sha256": "c1f5722c15f4f4ba0f97117e14b8ccda153d4bce407b23ed86f28cb91946a082",
+          "published_body_file": "docs/receipts/lfm3/cold-prompts/text-65536.body.json",
+          "published_body_sha256": "d6dea630f39ee2ddd13e8a88a90050d615d518e21f5a9219e1dc3d2297617b63",
+          "actual_sent_body_sha256": "5dbd5266aa3cd2635ba020f32f85bdb03ae71155c3114601b55cdd0007f5cfb6",
+          "output_token_sha256": "cf6c4062b60dc49e0ca503b7be2aaf3d247d73be037d269cf73e127a5e35aa32",
+          "output_text_sha256": "49b9640f88ffd97f99e1c6a354211b68d7b226874d3d8c1afbc261003f02cb39",
+          "sampling": "greedy",
+          "runtime_drafts_setting": true,
+          "client_ttft_seconds": 474.5117108747363,
+          "client_elapsed_seconds": 474.7762949159369,
+          "engine_prefill_seconds": 474.499127333,
+          "raw_result_sha256": "d09252928059098d7686f05a30c94ae0e3534d6e7905a4b9ec61d6a211fd14b1"
+        },
+        {
+          "family": "text",
+          "bits": 4,
+          "leg": 1,
+          "prompt_tokens": 32768,
+          "completion_tokens": 16,
+          "cached_tokens": 0,
+          "native_live_ids_equal_published": true,
+          "published_ids_file": "docs/receipts/lfm3/cold-prompts/text-32768.ids.json",
+          "published_ids_json_sha256": "66a7d4a0c49b2311500556e8e0f56cee9d0ae033f7765736b61d5a9c4e133c9f",
+          "actual_tokenize_response_sha256": "d4bfe4925faa3dc8627a5d23bafd579e19ec435abe5fb7db0df6641b8a155450",
+          "published_body_file": "docs/receipts/lfm3/cold-prompts/text-32768.body.json",
+          "published_body_sha256": "6e4c2ecd84a08e202dddce7f9b50bada5c006f9d529a74177f38dc11c08e0bb4",
+          "actual_sent_body_sha256": "8669dab27e5eb8320e6149804676a48eed58b6f7b2eee972fa92c563e180686d",
+          "output_token_sha256": "e15e7490e640d938a0a846dfc9de1dd7a51e50ae97ca4fd42a213cbb633f66f5",
+          "output_text_sha256": "382055acebd5e91b010ffa41b6497ebdb6d22c9bbdd7a2ab220c18df2e11f6b3",
+          "sampling": "greedy",
+          "runtime_drafts_setting": true,
+          "client_ttft_seconds": 135.97505516605452,
+          "client_elapsed_seconds": 136.1665180833079,
+          "engine_prefill_seconds": 135.9630235,
+          "raw_result_sha256": "58310c03fccf8cea8286c2d2121aa19f7e7b9e062c07277ce56528d63ffc874d"
+        },
+        {
+          "family": "text",
+          "bits": 4,
+          "leg": 1,
+          "prompt_tokens": 65536,
+          "completion_tokens": 16,
+          "cached_tokens": 0,
+          "native_live_ids_equal_published": true,
+          "published_ids_file": "docs/receipts/lfm3/cold-prompts/text-65536.ids.json",
+          "published_ids_json_sha256": "4d92c019e5bc47be53d2d4f9199d416b283fa5b72e746347add288619d48a5ed",
+          "actual_tokenize_response_sha256": "c1f5722c15f4f4ba0f97117e14b8ccda153d4bce407b23ed86f28cb91946a082",
+          "published_body_file": "docs/receipts/lfm3/cold-prompts/text-65536.body.json",
+          "published_body_sha256": "d6dea630f39ee2ddd13e8a88a90050d615d518e21f5a9219e1dc3d2297617b63",
+          "actual_sent_body_sha256": "5dbd5266aa3cd2635ba020f32f85bdb03ae71155c3114601b55cdd0007f5cfb6",
+          "output_token_sha256": "cf6c4062b60dc49e0ca503b7be2aaf3d247d73be037d269cf73e127a5e35aa32",
+          "output_text_sha256": "49b9640f88ffd97f99e1c6a354211b68d7b226874d3d8c1afbc261003f02cb39",
+          "sampling": "greedy",
+          "runtime_drafts_setting": true,
+          "client_ttft_seconds": 465.85748220793903,
+          "client_elapsed_seconds": 466.141094957944,
+          "engine_prefill_seconds": 465.84401475,
+          "raw_result_sha256": "8877e6ff54c3923bcac03902f521a84967a75ceb72855b6d14318633ec56f671"
+        },
+        {
+          "family": "vl",
+          "bits": 4,
+          "leg": 0,
+          "prompt_tokens": 32768,
+          "completion_tokens": 16,
+          "cached_tokens": 0,
+          "native_live_ids_equal_published": true,
+          "published_ids_file": "docs/receipts/lfm3/cold-prompts/vl-32768.ids.json",
+          "published_ids_json_sha256": "66a7d4a0c49b2311500556e8e0f56cee9d0ae033f7765736b61d5a9c4e133c9f",
+          "actual_tokenize_response_sha256": "d4bfe4925faa3dc8627a5d23bafd579e19ec435abe5fb7db0df6641b8a155450",
+          "published_body_file": "docs/receipts/lfm3/cold-prompts/vl-32768.body.json",
+          "published_body_sha256": "6e4c2ecd84a08e202dddce7f9b50bada5c006f9d529a74177f38dc11c08e0bb4",
+          "actual_sent_body_sha256": "8669dab27e5eb8320e6149804676a48eed58b6f7b2eee972fa92c563e180686d",
+          "output_token_sha256": "f35dfbfd86653608bd3aa0fe6672229ecfe9ec17bf45ebcdb91dc7c7e894af4a",
+          "output_text_sha256": "2acefce2656f36e21405907d799ceb7a85e7557924451ed2c622c79474fa0999",
+          "sampling": "greedy",
+          "runtime_drafts_setting": true,
+          "client_ttft_seconds": 145.4195410842076,
+          "client_elapsed_seconds": 145.65195962507278,
+          "engine_prefill_seconds": 145.406425,
+          "raw_result_sha256": "8328d2302a5fcc44b0c25b9794d6307a0e8493144165e8c46a99c1d6030f4627"
+        },
+        {
+          "family": "vl",
+          "bits": 4,
+          "leg": 0,
+          "prompt_tokens": 65536,
+          "completion_tokens": 16,
+          "cached_tokens": 0,
+          "native_live_ids_equal_published": true,
+          "published_ids_file": "docs/receipts/lfm3/cold-prompts/vl-65536.ids.json",
+          "published_ids_json_sha256": "4d92c019e5bc47be53d2d4f9199d416b283fa5b72e746347add288619d48a5ed",
+          "actual_tokenize_response_sha256": "c1f5722c15f4f4ba0f97117e14b8ccda153d4bce407b23ed86f28cb91946a082",
+          "published_body_file": "docs/receipts/lfm3/cold-prompts/vl-65536.body.json",
+          "published_body_sha256": "d6dea630f39ee2ddd13e8a88a90050d615d518e21f5a9219e1dc3d2297617b63",
+          "actual_sent_body_sha256": "5dbd5266aa3cd2635ba020f32f85bdb03ae71155c3114601b55cdd0007f5cfb6",
+          "output_token_sha256": "6dc17e16c1bdd265cbfecc43f466db1fb29c9240e7818d912ecc773b568b4856",
+          "output_text_sha256": "eb30855e72463651ef28f847b1464ebf1651787ab4add8a37e5bd90565054e97",
+          "sampling": "greedy",
+          "runtime_drafts_setting": true,
+          "client_ttft_seconds": 453.94360912498087,
+          "client_elapsed_seconds": 454.2238815417513,
+          "engine_prefill_seconds": 453.929644125,
+          "raw_result_sha256": "8cc0d5b657dc2494fb1851c41bfb31d86a5fd4795a34bd1ce3d8e62ea7513829"
+        },
+        {
+          "family": "vl",
+          "bits": 4,
+          "leg": 1,
+          "prompt_tokens": 32768,
+          "completion_tokens": 16,
+          "cached_tokens": 0,
+          "native_live_ids_equal_published": true,
+          "published_ids_file": "docs/receipts/lfm3/cold-prompts/vl-32768.ids.json",
+          "published_ids_json_sha256": "66a7d4a0c49b2311500556e8e0f56cee9d0ae033f7765736b61d5a9c4e133c9f",
+          "actual_tokenize_response_sha256": "d4bfe4925faa3dc8627a5d23bafd579e19ec435abe5fb7db0df6641b8a155450",
+          "published_body_file": "docs/receipts/lfm3/cold-prompts/vl-32768.body.json",
+          "published_body_sha256": "6e4c2ecd84a08e202dddce7f9b50bada5c006f9d529a74177f38dc11c08e0bb4",
+          "actual_sent_body_sha256": "8669dab27e5eb8320e6149804676a48eed58b6f7b2eee972fa92c563e180686d",
+          "output_token_sha256": "f35dfbfd86653608bd3aa0fe6672229ecfe9ec17bf45ebcdb91dc7c7e894af4a",
+          "output_text_sha256": "2acefce2656f36e21405907d799ceb7a85e7557924451ed2c622c79474fa0999",
+          "sampling": "greedy",
+          "runtime_drafts_setting": true,
+          "client_ttft_seconds": 132.31399954203516,
+          "client_elapsed_seconds": 132.5132726249285,
+          "engine_prefill_seconds": 132.301139041,
+          "raw_result_sha256": "24b7c72f2e09a206610a182551f143a5a04ef5bcc7f4106d626cc4846ee8b15e"
+        },
+        {
+          "family": "vl",
+          "bits": 4,
+          "leg": 1,
+          "prompt_tokens": 65536,
+          "completion_tokens": 16,
+          "cached_tokens": 0,
+          "native_live_ids_equal_published": true,
+          "published_ids_file": "docs/receipts/lfm3/cold-prompts/vl-65536.ids.json",
+          "published_ids_json_sha256": "4d92c019e5bc47be53d2d4f9199d416b283fa5b72e746347add288619d48a5ed",
+          "actual_tokenize_response_sha256": "c1f5722c15f4f4ba0f97117e14b8ccda153d4bce407b23ed86f28cb91946a082",
+          "published_body_file": "docs/receipts/lfm3/cold-prompts/vl-65536.body.json",
+          "published_body_sha256": "d6dea630f39ee2ddd13e8a88a90050d615d518e21f5a9219e1dc3d2297617b63",
+          "actual_sent_body_sha256": "5dbd5266aa3cd2635ba020f32f85bdb03ae71155c3114601b55cdd0007f5cfb6",
+          "output_token_sha256": "6dc17e16c1bdd265cbfecc43f466db1fb29c9240e7818d912ecc773b568b4856",
+          "output_text_sha256": "eb30855e72463651ef28f847b1464ebf1651787ab4add8a37e5bd90565054e97",
+          "sampling": "greedy",
+          "runtime_drafts_setting": true,
+          "client_ttft_seconds": 465.8405224168673,
+          "client_elapsed_seconds": 466.1292872498743,
+          "engine_prefill_seconds": 465.82749725,
+          "raw_result_sha256": "ed1470fa7ba46b436b662ed9eee87aa39c85634f606c8da363c9935112028e3a"
+        }
+      ],
+      "per_server_footprints": [
+        {
+          "family": "text",
+          "bits": 4,
+          "leg": 0,
+          "max_rss_bytes": 1231667200,
+          "peak_physical_footprint_bytes": 2818033392
+        },
+        {
+          "family": "text",
+          "bits": 4,
+          "leg": 1,
+          "max_rss_bytes": 1231994880,
+          "peak_physical_footprint_bytes": 2822227600
+        },
+        {
+          "family": "vl",
+          "bits": 4,
+          "leg": 0,
+          "max_rss_bytes": 1850359808,
+          "peak_physical_footprint_bytes": 3478177952
+        },
+        {
+          "family": "vl",
+          "bits": 4,
+          "leg": 1,
+          "max_rss_bytes": 1850261504,
+          "peak_physical_footprint_bytes": 3486206112
+        }
+      ],
+      "raw_file_manifest": {
+        "events.json": {
+          "bytes": 9853,
+          "sha256": "8e188ba422d7f63b551c8cc1501dfe377ca60b6e159eb71fe611dd09e51741b8"
+        },
+        "manifest.json": {
+          "bytes": 12583,
+          "sha256": "acc389270cd5420597c41a50d02e402942ce3ff1c059dac988cce2b909da8984"
+        },
+        "records.json": {
+          "bytes": 3876,
+          "sha256": "5f870598f57e044bb2a85d58e498069ea9d2f1250f7ea7dc96558c93db6e9ceb"
+        },
+        "text-4-0-public.after.health": {
+          "bytes": 298,
+          "sha256": "9c1b816b0eb1a525cd199e124a13c970db89bfa5eb3feee98a434be7b6699b1e"
+        },
+        "text-4-0-public.after.metrics": {
+          "bytes": 12200,
+          "sha256": "9a6ecda2d3f4bdf41b592f05939e48a3c615307b8265f190981a97bb13a1eaa3"
+        },
+        "text-4-0-public.after.v1-settings.unavailable": {
+          "bytes": 9,
+          "sha256": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5"
+        },
+        "text-4-0-public.before.health": {
+          "bytes": 296,
+          "sha256": "3ecca835aef6168623e5fd09af1a553676471c6c3d76176c12322725ac4e2881"
+        },
+        "text-4-0-public.before.metrics": {
+          "bytes": 12128,
+          "sha256": "9cc5e25cd64db521fbd3ce28eeff18076a2f4a0f879a19c235cb03562c224102"
+        },
+        "text-4-0-public.before.v1-settings.unavailable": {
+          "bytes": 9,
+          "sha256": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5"
+        },
+        "text-4-0-public.cold-32768.actual-tokenize.json": {
+          "bytes": 229416,
+          "sha256": "d4bfe4925faa3dc8627a5d23bafd579e19ec435abe5fb7db0df6641b8a155450"
+        },
+        "text-4-0-public.cold-32768.client.log": {
+          "bytes": 350,
+          "sha256": "e41c00cb479e1c2fdc415ee729a6348ab4a7441e2f5cbe1334dab6da33f5a322"
+        },
+        "text-4-0-public.cold-32768.json": {
+          "bytes": 204611,
+          "sha256": "8439a265a08546347e4935490734747684565af6f7fd96a1662c87ac3cdbc494"
+        },
+        "text-4-0-public.cold-65536.actual-tokenize.json": {
+          "bytes": 458792,
+          "sha256": "c1f5722c15f4f4ba0f97117e14b8ccda153d4bce407b23ed86f28cb91946a082"
+        },
+        "text-4-0-public.cold-65536.client.log": {
+          "bytes": 349,
+          "sha256": "65446d1f66f538a305f97b7a18d7c19cb01cf69291c2addc6f64146974149bef"
+        },
+        "text-4-0-public.cold-65536.json": {
+          "bytes": 401225,
+          "sha256": "d09252928059098d7686f05a30c94ae0e3534d6e7905a4b9ec61d6a211fd14b1"
+        },
+        "text-4-0-public.server.log": {
+          "bytes": 2863,
+          "sha256": "84b0cf8c09526df94ad38acfab7059ce0f86d27539e8cc1ea5ec439bf04297d9"
+        },
+        "text-4-1-public.after.health": {
+          "bytes": 298,
+          "sha256": "7e994d2238d049d9c0896261bf62aa264236336a7779efe0b06b110bc6f290db"
+        },
+        "text-4-1-public.after.metrics": {
+          "bytes": 12195,
+          "sha256": "68cef663e4ed0b733c6bab028d6707eca56e57b6d00f9a8963d0791cda38341e"
+        },
+        "text-4-1-public.after.v1-settings.unavailable": {
+          "bytes": 9,
+          "sha256": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5"
+        },
+        "text-4-1-public.before.health": {
+          "bytes": 296,
+          "sha256": "3ecca835aef6168623e5fd09af1a553676471c6c3d76176c12322725ac4e2881"
+        },
+        "text-4-1-public.before.metrics": {
+          "bytes": 12128,
+          "sha256": "07dab59d95ce9e3ff675912eda10439f0d5312bf7ff493c2f3b954adb2001ee3"
+        },
+        "text-4-1-public.before.v1-settings.unavailable": {
+          "bytes": 9,
+          "sha256": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5"
+        },
+        "text-4-1-public.cold-32768.actual-tokenize.json": {
+          "bytes": 229416,
+          "sha256": "d4bfe4925faa3dc8627a5d23bafd579e19ec435abe5fb7db0df6641b8a155450"
+        },
+        "text-4-1-public.cold-32768.client.log": {
+          "bytes": 350,
+          "sha256": "9fc3f47eea5f7041ecaa512ffc98f4fc4e113da1a9ecdc235b6fc6434e8cb5b4"
+        },
+        "text-4-1-public.cold-32768.json": {
+          "bytes": 204608,
+          "sha256": "58310c03fccf8cea8286c2d2121aa19f7e7b9e062c07277ce56528d63ffc874d"
+        },
+        "text-4-1-public.cold-65536.actual-tokenize.json": {
+          "bytes": 458792,
+          "sha256": "c1f5722c15f4f4ba0f97117e14b8ccda153d4bce407b23ed86f28cb91946a082"
+        },
+        "text-4-1-public.cold-65536.client.log": {
+          "bytes": 349,
+          "sha256": "2245a3be6b6c94c18056ea94f674285dae8193d649ccbfd06d4bcba3ff838b7b"
+        },
+        "text-4-1-public.cold-65536.json": {
+          "bytes": 401223,
+          "sha256": "8877e6ff54c3923bcac03902f521a84967a75ceb72855b6d14318633ec56f671"
+        },
+        "text-4-1-public.server.log": {
+          "bytes": 2863,
+          "sha256": "2b70209f2525aca2348c9bba24e97491301f35c1e77b6854791514b3ad4f849b"
+        },
+        "vl-4-0-public.after.health": {
+          "bytes": 298,
+          "sha256": "7f5940a84963cdf6dc32d38c332269b420e17dd518e22c258a06f4ca9e637bc4"
+        },
+        "vl-4-0-public.after.metrics": {
+          "bytes": 12200,
+          "sha256": "5acd0131f7f835870f392563a1fd7d8085bbd002e0ebddb2a001324cf51f8fad"
+        },
+        "vl-4-0-public.after.v1-settings.unavailable": {
+          "bytes": 9,
+          "sha256": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5"
+        },
+        "vl-4-0-public.before.health": {
+          "bytes": 296,
+          "sha256": "3ecca835aef6168623e5fd09af1a553676471c6c3d76176c12322725ac4e2881"
+        },
+        "vl-4-0-public.before.metrics": {
+          "bytes": 12128,
+          "sha256": "07419319a246cf380cab00ccb870a7218a0db42c2a37d6062128ad1b591e1df7"
+        },
+        "vl-4-0-public.before.v1-settings.unavailable": {
+          "bytes": 9,
+          "sha256": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5"
+        },
+        "vl-4-0-public.cold-32768.actual-tokenize.json": {
+          "bytes": 229416,
+          "sha256": "d4bfe4925faa3dc8627a5d23bafd579e19ec435abe5fb7db0df6641b8a155450"
+        },
+        "vl-4-0-public.cold-32768.client.log": {
+          "bytes": 350,
+          "sha256": "5819197d4bfa1c0311797a1ada0388dc884658cb8ce00f4192e953abe180a7db"
+        },
+        "vl-4-0-public.cold-32768.json": {
+          "bytes": 204609,
+          "sha256": "8328d2302a5fcc44b0c25b9794d6307a0e8493144165e8c46a99c1d6030f4627"
+        },
+        "vl-4-0-public.cold-65536.actual-tokenize.json": {
+          "bytes": 458792,
+          "sha256": "c1f5722c15f4f4ba0f97117e14b8ccda153d4bce407b23ed86f28cb91946a082"
+        },
+        "vl-4-0-public.cold-65536.client.log": {
+          "bytes": 350,
+          "sha256": "45d3f632481267081e3c53afa0117b8ba63303325432267912b62620973d0074"
+        },
+        "vl-4-0-public.cold-65536.json": {
+          "bytes": 401229,
+          "sha256": "8cc0d5b657dc2494fb1851c41bfb31d86a5fd4795a34bd1ce3d8e62ea7513829"
+        },
+        "vl-4-0-public.server.log": {
+          "bytes": 2864,
+          "sha256": "5912c925ec3d51d41938cd6fd8b8a44d3565dd7b331bb38935284eaf85f20e64"
+        },
+        "vl-4-1-public.after.health": {
+          "bytes": 298,
+          "sha256": "7e994d2238d049d9c0896261bf62aa264236336a7779efe0b06b110bc6f290db"
+        },
+        "vl-4-1-public.after.metrics": {
+          "bytes": 12198,
+          "sha256": "d3a1469bb6833f555a20db304f3f6e289e5d8c30160e579eb075a7b5849d1057"
+        },
+        "vl-4-1-public.after.v1-settings.unavailable": {
+          "bytes": 9,
+          "sha256": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5"
+        },
+        "vl-4-1-public.before.health": {
+          "bytes": 296,
+          "sha256": "3ecca835aef6168623e5fd09af1a553676471c6c3d76176c12322725ac4e2881"
+        },
+        "vl-4-1-public.before.metrics": {
+          "bytes": 12128,
+          "sha256": "e5434eddfcbbf9f7220903f4888446b01bf95fc4676b2e926e205cb73daf5400"
+        },
+        "vl-4-1-public.before.v1-settings.unavailable": {
+          "bytes": 9,
+          "sha256": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5"
+        },
+        "vl-4-1-public.cold-32768.actual-tokenize.json": {
+          "bytes": 229416,
+          "sha256": "d4bfe4925faa3dc8627a5d23bafd579e19ec435abe5fb7db0df6641b8a155450"
+        },
+        "vl-4-1-public.cold-32768.client.log": {
+          "bytes": 350,
+          "sha256": "420ac68f6e0103dab109ab73d7c8b841a9bdf372684bf91972d8aa83e361ce10"
+        },
+        "vl-4-1-public.cold-32768.json": {
+          "bytes": 204612,
+          "sha256": "24b7c72f2e09a206610a182551f143a5a04ef5bcc7f4106d626cc4846ee8b15e"
+        },
+        "vl-4-1-public.cold-65536.actual-tokenize.json": {
+          "bytes": 458792,
+          "sha256": "c1f5722c15f4f4ba0f97117e14b8ccda153d4bce407b23ed86f28cb91946a082"
+        },
+        "vl-4-1-public.cold-65536.client.log": {
+          "bytes": 349,
+          "sha256": "ed726e4880a2b2856ec36560fc411b56ea92a9aba4b11548ff819901f657c26c"
+        },
+        "vl-4-1-public.cold-65536.json": {
+          "bytes": 401228,
+          "sha256": "ed1470fa7ba46b436b662ed9eee87aa39c85634f606c8da363c9935112028e3a"
+        },
+        "vl-4-1-public.server.log": {
+          "bytes": 2864,
+          "sha256": "ef7bdbe921dcd04489196d7e632ec49b0b833aee8e36a80ad5aca39f835159c1"
+        }
+      }
+    }
+  ],
+  "limitations": [
+    "VL checkpoint requests contain text only. No long-context image acceptance or image-throughput claim.",
+    "Repeated replies establish deterministic fresh execution on these exact requests, not an independent FP64 teacher-forced model gate.",
+    "No same-machine standard or before/after timing comparison here; timings are native context diagnostics only.",
+    "This local48GiB run covers4bit only. M5 or larger-memory results do not qualify unmeasured6/8bit memory on this host.",
+    "No128k or maximum native-window/context acceptance from these32k/64k checks.",
+    "Configured parallel4 reserves the serving setting, but these long requests run sequentially; no long-context four-stream concurrency claim."
+  ],
+  "raw_retention": "Full exact native/tokenize responses, public input bodies/arrays, all output/runtime chunks, process logs and model/environment manifests retained privately and hashed. Private paths and request IDs are omitted from publication."
+}

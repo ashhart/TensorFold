@@ -45,6 +45,8 @@ pub const families: []const api.Family = &.{
     .{ .model_type = "qwen4_exp", .formats = affine_widths },
     .{ .model_type = "glm5_next", .formats = &.{"mlx-q4g64"} },
     .{ .model_type = "qwen3_5", .formats = affine_widths },
+    .{ .model_type = "lfm3", .formats = &.{ "mlx-q4g32", "mlx-q4g64", "mlx-q6g64", "mlx-q8g64" } },
+    .{ .model_type = "lfm3_vl", .formats = &.{ "mlx-q4g32", "mlx-q4g64", "mlx-q6g64", "mlx-q8g64" } },
     .{ .model_type = "lfm2_moe", .formats = &.{ "mlx-q4g64", "mlx-q6g64", "mlx-q8g64" } },
     .{ .model_type = "glm_moe_dsa", .formats = &.{"exlr8"} },
     .{ .model_type = "gemma4", .formats = gemma4_widths },
@@ -181,6 +183,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = "--drafter is supported for Qwen3.8-27B-class checkpoints (qwen3_5 with its own output head) and Gemma 4 dense";
         return null;
     }
+    if (std.mem.eql(u8, o.model_type, "lfm3") or std.mem.eql(u8, o.model_type, "lfm3_vl")) return @import("lfm3.zig").open(a, gpa, io, o, problem);
     if (dense) return openQwen27(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "qwen4_exp")) return openFlashNext(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "glm5_next")) return openGlm(a, gpa, io, o, problem);

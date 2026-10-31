@@ -61,10 +61,15 @@ pub const spark25_metal = @import("families/spark25/metal.zig");
 pub const minimax_m3 = @import("families/minimax_m3/minimax_m3.zig");
 pub const lfm2_moe = @import("families/lfm2_moe/lfm2_moe.zig");
 pub const flashnext_pack = @import("families/flashnext/pack.zig");
+pub const lfm3 = @import("families/lfm3/lfm3.zig");
 
 test {
     std.testing.refAllDecls(@This());
     _ = lora_merge;
+    _ = @import("families/lfm3/config_test.zig");
+    _ = @import("families/lfm3/backend.zig");
+    _ = @import("families/lfm3/state.zig");
+    _ = @import("families/lfm3/snapshot.zig");
     _ = @import("families/nemotron/prefill_kernels.zig"); // Compile the prompt-chunk sources in tests.
     _ = @import("families/nemotron/simd_attention.zig"); // The pre-M5 attention rewrite finds its lines.
     _ = @import("families/nemotron/weights.zig");
