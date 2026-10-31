@@ -57,12 +57,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     // refusals that return null free what they hold themselves: errdefer runs only for errors
     var drafter_model: ?*fl.Model = null;
     errdefer if (drafter_model) |dm| dm.deinit();
-    if (o.drafts) if (o.drafter) |dir| {
-        if (o.drafter_bits != 0) {
-            problem.* = try std.fmt.allocPrint(a, "--drafter-bits {d}: a Llama drafter is served from its bf16 release as published, with no copies prepared at load: pass --drafter-bits 0", .{o.drafter_bits});
-            model.deinit();
-            return null;
-        }
+    if (drafterDir(o)) |dir| {
         // a smaller Llama on the model's tokens, its commands on the model's queue (one residency set for both)
         const dm = fl.Model.loadOn(gpa, io, dir, model.queue) catch |err| {
             problem.* = if (err == error.UnsupportedLlamaPrecision)
@@ -72,14 +67,14 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
             model.deinit();
             return null;
         };
+        drafter_model = dm; // before the refusal's message is built, so a failed allocation leaves it to the errdefer
         if (try drafterRefusal(a, dir, &model.config, &dm.config)) |why| {
             problem.* = why;
             dm.deinit();
             model.deinit();
             return null;
         }
-        drafter_model = dm;
-    };
+    }
     var ram: u64 = 0;
     var len: usize = @sizeOf(u64);
     if (std.c.sysctlbyname("hw.memsize", &ram, &len, null, 0) != 0) ram = 0;
@@ -147,7 +142,11 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     errdefer if (h.cache) |*store| store.deinit();
     try fl.residency.hold(h);
     errdefer fl.residency.drop(h);
-    if (h.drafter) |d| h.host.proposers = .{ .ctx = d, .make = fl.drafter.Drafter.make, .free = fl.drafter.Drafter.free };
+    if (h.drafter) |d| {
+        h.host.proposers = .{ .ctx = d, .make = fl.drafter.Drafter.make, .free = fl.drafter.Drafter.free };
+        // the serving line's sources: the drafter proposes through the copy proposer, which ofLanes does not name
+        h.host.info_.draft_sources.drafter = .{ .kind = "Llama drafter", .name = o.drafter_name orelse o.drafter.? };
+    }
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     try h.host.start();
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
@@ -160,6 +159,11 @@ fn qualifiedNames(comptime role: fl.config.Role) []const u8 {
         names = names ++ (if (names.len == 0) "" else ", ") ++ q.name;
     };
     return names;
+}
+
+/// --drafter's directory when drafts are on; one width (bf16 as published), so --drafter-bits is unread, as in Gemma 4.
+fn drafterDir(o: api.Open) ?[]const u8 {
+    return if (o.drafts) o.drafter else null;
 }
 
 /// Why a drafter cannot serve: tokens that are not the model's.
@@ -208,6 +212,18 @@ const CacheFixture = struct {
         return .{ .ptr = self, .vtable = &.{ .bytes = bytes, .save = save, .restore = restore, .drop = drop } };
     }
 };
+
+test "llama host: the default options serve the drafter, whatever --drafter-bits holds" {
+    const plain: api.Open = .{ .dir = "m", .model_type = "llama", .drafter = "d" };
+    try std.testing.expectEqual(@as(u8, 4), plain.drafter_bits); // the shared default, Qwen's DFlash width
+    try std.testing.expectEqualStrings("d", drafterDir(plain).?);
+    var bf16 = plain;
+    bf16.drafter_bits = 0;
+    try std.testing.expectEqualStrings("d", drafterDir(bf16).?);
+    var off = plain;
+    off.drafts = false; // --no-drafts
+    try std.testing.expectEqual(@as(?[]const u8, null), drafterDir(off));
+}
 
 test "llama host: cache callback updates the owned store rather than a temporary value" {
     var f: CacheFixture = .{};
