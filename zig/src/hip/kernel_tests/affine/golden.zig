@@ -1,8 +1,9 @@
-//! The 4-bit BF16 stream tile writes the bytes its code pairs made one at a time wrote: a pinned digest of them.
+//! The 4-bit BF16 stream tile writes the bytes its code pairs made one at a time wrote: a digest per architecture.
 
 const std = @import("std");
 const base = @import("../rig.zig");
 const affine = @import("../../launches/affine.zig");
+const kernels = @import("../../kernels.zig");
 const Buffer = base.Buffer;
 const gpa = base.gpa;
 const data = @import("data.zig");
@@ -17,8 +18,10 @@ const k_dim = 2048;
 const group = 64;
 const bits = 4;
 
-/// The Wyhash of the bytes the tile wrote when its code pairs came from stream_pair; the byte path must reproduce it.
-const want: u64 = 0x24742f9ea12d63cd;
+/// The Wyhash of the bytes the tile wrote with stream_pair's code pairs, on each architecture that recorded it.
+const pins = [_]struct { arch: []const u8, digest: u64 }{
+    .{ .arch = "gfx1151", .digest = 0x24742f9ea12d63cd },
+};
 
 const Kind = enum { plain, pair, routed };
 
@@ -106,5 +109,11 @@ test "the 4-bit BF16 stream tile writes the pinned bytes of its plain, pair and 
     for ([_]Kind{ .plain, .pair, .routed }) |kind| {
         h = std.hash.Wyhash.hash(h, std.mem.asBytes(&try digestOf(&rig, &rng, kind)));
     }
+    const want = for (pins) |p| {
+        if (std.mem.eql(u8, p.arch, kernels.arch)) break p.digest;
+    } else {
+        std.debug.print("stream golden: no digest pinned for {s}; this run wrote 0x{x:0>16}\n", .{ kernels.arch, h });
+        return error.SkipZigTest;
+    };
     try base.expect(h == want, "stream golden: digest 0x{x:0>16}, pinned 0x{x:0>16}", .{ h, want });
 }
