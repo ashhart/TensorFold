@@ -492,7 +492,7 @@ pub const Mtp = struct {
 
     fn factsFn(p: *anyopaque) dr.Facts {
         const d = cast(p);
-        return .{ .depth = d.depth, .step_ms = d.step_ms, .prior = &prior, .plain_guard = true, .batched = !d.trees, .stream_bytes = d.ringBytes() + 2 * d.e.g.hidden * 2, .trees = d.trees, .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs] };
+        return .{ .limit_shared_drafts = true, .depth = d.depth, .step_ms = d.step_ms, .prior = &prior, .plain_guard = true, .batched = !d.trees, .stream_bytes = d.ringBytes() + 2 * d.e.g.hidden * 2, .trees = d.trees, .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs] };
     }
 
     fn openFn(p: *anyopaque, s: *Stream) anyerror!void {
