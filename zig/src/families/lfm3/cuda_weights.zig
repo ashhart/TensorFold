@@ -233,7 +233,8 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.S
     const mlx = w.config.scheme == .mlx_affine;
     if (!@import("builtin").is_test) {
         if (fp8) std.log.info("LFM3 FP8 on CUDA serves weight-only: FP8 weights, bf16 activations; the export's dynamic FP8 input quantization is not applied", .{});
-        if (!fp8) std.log.info("LFM3 NVFP4 on CUDA serves weight-only: FP4 weights, bf16 activations; the export's static FP4 input scales are read and not applied", .{});
+        if (mlx) std.log.info("LFM3 MLX 4-bit on CUDA serves the export as stored: affine-4 weights, bf16 activations", .{});
+        if (!fp8 and !mlx) std.log.info("LFM3 NVFP4 on CUDA serves weight-only: FP4 weights, bf16 activations; the export's static FP4 input scales are read and not applied", .{});
     }
     const h = c.hidden;
     var stage = try DeviceBuffer.alloc(d, stage_bytes);
