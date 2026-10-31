@@ -165,7 +165,7 @@ pub fn build(b: *std.Build) void {
         @import("zig/build/gemma4_host.zig").compileHost(b, gemma4_host_mods.metal, gemma4_host_mods.engine, gemma4_host_mods.lanes, gemma4_host_mods.sources);
         @import("zig/build/qwen27_host.zig").compileHost(b, gemma4_host_mods.metal, gemma4_host_mods.engine, gemma4_host_mods.lanes);
     }
-    @import("zig/build/qwen27_host.zig").tests(b);
+    @import("zig/build/qwen27_host.zig").tests(b, test_step);
     const xgrammar = grammar_build.option(b);
     dist_build.targets(b, draft_ids, build_options, release_version, xgrammar);
     @import("zig/build/release_paths_step.zig").tests(b, test_step);
