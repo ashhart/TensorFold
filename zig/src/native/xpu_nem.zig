@@ -95,13 +95,13 @@ fn Host(comptime S: type) type {
 /// The model types this host reads.
 const served = blk: {
     var s: []const u8 = "";
-    for (specs, 0..) |S, i| s = s ++ (if (i > 0) ", " else "") ++ S.model_type;
+    for (specs, 0..) |S, i| s = s ++ (if (i > 0) ", " else "") ++ S.model_type ++ (if (@hasDecl(S, "vl_model_type")) ", " ++ S.vl_model_type else "");
     break :blk s;
 };
 
 /// The engine for `o.dir`, or null with `problem` set when no Intel GPU engine reads the checkpoint.
 pub fn serves(model_type: []const u8) bool {
-    inline for (specs) |S| if (std.mem.eql(u8, model_type, S.model_type)) return true;
+    inline for (specs) |S| if (reads(S, model_type)) return true;
     return false;
 }
 
@@ -110,9 +110,15 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = why;
         return null;
     }
-    inline for (specs) |S| if (std.mem.eql(u8, o.model_type, S.model_type)) return openFamily(S, a, gpa, io, o, problem);
+    inline for (specs) |S| if (reads(S, o.model_type)) return openFamily(S, a, gpa, io, o, problem);
     problem.* = try std.fmt.allocPrint(a, "the native Intel GPU engine has no backend for {s} checkpoints yet (it reads {s})", .{ o.model_type, served });
     return null;
+}
+
+/// Whether family S reads `model_type` (its own, or its vision-language checkpoints').
+fn reads(comptime S: type, model_type: []const u8) bool {
+    if (@hasDecl(S, "vl_model_type") and std.mem.eql(u8, model_type, S.vl_model_type)) return true;
+    return std.mem.eql(u8, model_type, S.model_type);
 }
 
 fn openFamily(comptime S: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
@@ -157,7 +163,9 @@ fn openFamily(comptime S: type, a: Allocator, gpa: Allocator, io: std.Io, o: api
     const note = try S.note(a, h.engine);
     h.startup = try std.fmt.allocPrint(gpa, "Intel GPU engine: {s}, {d:.2} GB on the device, context {d}{s}; {d} stream(s) a round on the lane core, sampling on the host", .{ h.ctx.name(), @as(f64, @floatFromInt(xpu.rt.alloc_now)) / 1e9, window, note, h.backend.streams });
     const drafted = facts.exact_width > 1;
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = S.name, .lanes = h.backend.streams, .context_window = @intCast(window), .context_fitted = true, .startup = h.startup, .prefill_step = if (drafted and !@hasDecl(S.Engine, "copy_only")) S.promptRows(h.engine) else 0 });
+    // image input (LFM3-VL): the family's tower and processor, its rows spliced in the prompt windows
+    const offer: ?api.Vision = if (@hasDecl(S, "vision")) (try S.vision(a, h.engine, o, problem)) else null;
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = S.name, .lanes = h.backend.streams, .context_window = @intCast(window), .context_fitted = true, .startup = h.startup, .prefill_step = if (drafted and !@hasDecl(S.Engine, "copy_only")) S.promptRows(h.engine) else 0, .vision = offer });
     // kept prompt states (with sequences): --prompt-cache-gib, else 4 GiB, inside the device memory left past 2 GiB
     const want: u64 = @intFromFloat((o.prompt_cache_gib orelse 4) * (1 << 30));
     // Sysman only when a cache can use it: zesInit faults inside the driver under WSL2 (Iris Xe, NEO 23.43)

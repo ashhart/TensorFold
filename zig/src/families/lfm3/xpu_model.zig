@@ -75,6 +75,9 @@ pub const Seg = struct { q: *Seq, ids: []const u32 };
 /// What a forward leaves: nothing, the last row's logits and argmax (a prompt), or every row's (verified windows).
 pub const Out = enum { none, last, rows };
 
+/// A picture's image rows (LFM3-VL), bf16 [n][2048]: they replace the embeddings of prompt positions at .. at + n.
+pub const Image = struct { rows: Buf, at: u32, n: u32 };
+
 /// A kept prompt state at `at`: conv rows, the full layers' first `at` KV slots, the sliding rings, in one buffer.
 pub const Snap = struct { at: u32, buf: Buf };
 
@@ -83,7 +86,7 @@ const ext_bytes: usize = (6 + window_rows) * H * 2;
 const slot_bytes: usize = NKV * HD * 2;
 
 /// `b` from byte `off` on.
-fn from(b: Buf, off: usize) Buf {
+pub fn from(b: Buf, off: usize) Buf {
     return .{ .rt = b.rt, .ptr = @ptrFromInt(@intFromPtr(b.ptr.?) + off), .len = b.len - off };
 }
 
@@ -132,6 +135,8 @@ pub const Model = struct {
     qg: u32 = 64,
     /// An 8-bit embedding (LFM3-VL): the head of every row runs qmv8_f32, as the last row's does.
     emb8: bool = false,
+    /// The bound stream's pictures while its prompt runs (a one-stream forward reads them).
+    images: []const Image = &.{},
 
     /// The affine tensors of module `m` (in layer `layer`, or a model tensor) by names.zig in namespace `ns`.
     fn table(l: *ld.Loader, ns: names.Namespace, layer: ?usize, m: names.Module) !Table {
@@ -491,6 +496,12 @@ pub const Model = struct {
             try m.r.upload(s.ids, std.mem.sliceAsBytes(segs[0].ids));
             try run(&m.k.embed, .{ n, 1, 1 }, .{ m.emb.w, m.emb.s, m.emb.b, s.ids, s.x, H });
         }
+        if (segs.len == 1) for (m.images) |im| { // image rows over the embeddings of their positions
+            const p0 = segs[0].q.pos;
+            const lo = @max(p0, im.at);
+            const hi = @min(p0 + n, im.at + im.n);
+            if (lo < hi) try m.r.copy(from(s.x, (lo - p0) * H * 2), from(im.rows, (lo - im.at) * H * 2), (hi - lo) * H * 2);
+        };
         try run(&m.k.rms, .{ n, 1, 1 }, .{ s.x, m.layers[0].op_norm, s.xn, H, cfg.eps });
         for (m.layers, 0..) |*ly, i| {
             try m.mixer(ly, i, segs, n, hist);
