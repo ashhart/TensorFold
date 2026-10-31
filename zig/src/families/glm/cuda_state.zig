@@ -54,7 +54,7 @@ fn arena(d: *const cuda.Driver, sizes: []const usize, out: []u64) !Arena {
 pub const page_rows = latent.chunk;
 
 /// Where a paged sequence's caches are: the pool's pages at `kv`, `page_bytes` apart, through a table of `pages`.
-pub const Paged = struct { kv: u64, pages: usize, page_bytes: u64 };
+pub const Paged = struct { kv: u64, pages: usize, page_bytes: u64, pk: u64 = 0, pk_page: u64 = 0 }; // pk: TF_GLM_KV_HOST
 
 /// The DSA (MLA) layers among the loaded ones; the MTP layer's caches come after theirs.
 pub fn mlaLayers(w: *const weights.Weights) usize {
@@ -68,6 +68,15 @@ fn pageCacheBytes(c: anytype) usize {
     return page_rows * c.kv_lora * 2 + page_rows / sparse.pool * c.i_dim * 2;
 }
 
+/// TF_GLM_KV_HOST: one cache's pooled keys on a device page of their own, and that page's bytes.
+fn pkCacheBytes(c: anytype) usize {
+    return page_rows / sparse.pool * c.i_dim * 2;
+}
+
+pub fn pkPageBytes(w: *const weights.Weights) u64 {
+    return (mlaLayers(w) + 1) * pkCacheBytes(&w.config);
+}
+
 /// A page's bytes: every DSA layer's part, then the MTP layer's (13,056 a row on GLM-5.3-Flash).
 pub fn pageBytes(w: *const weights.Weights) u64 {
     return (mlaLayers(w) + 1) * pageCacheBytes(&w.config);
@@ -76,7 +85,8 @@ pub fn pageBytes(w: *const weights.Weights) u64 {
 /// Cache `j`'s rows on pages: its part of page 0 at `p.kv`, the others through the table.
 fn onPages(x: *dsa_block.Caches, c: anytype, p: Paged, table: u64, j: usize) void {
     x.lc = p.kv + j * pageCacheBytes(c);
-    x.pk = x.lc + page_rows * c.kv_lora * 2;
+    x.pk = if (p.pk != 0) p.pk + j * pkCacheBytes(c) else x.lc + page_rows * c.kv_lora * 2;
+    x.pks = p.pk_page;
     x.pt = table;
     x.ps = p.page_bytes;
 }

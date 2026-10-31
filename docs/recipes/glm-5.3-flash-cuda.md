@@ -49,6 +49,11 @@ left after a 12.2 GiB reserve` and a 5.8 GiB prompt cache
   long conversation's next turn resumes when the card has no room left for its state (#1510). `--prompt-cache-gib`
   sizes the host cache on each rank (8 GiB unasked, at most half of the available memory), and the KV pool sets no
   device cache aside. Checked on two RTX PRO 6000 Blackwell cards at TP=2 with the EXL3 4bpw checkpoint.
+- `TF_GLM_KV_HOST=1` on every rank (with KV pages, BF16) keeps the KV pages' latent rows in pinned host memory: the
+  device keeps the pooled index keys, and each sparse call copies only the rows it picked into device slots. The KV
+  pool then costs the card 768 bytes a token instead of 13,056, so a 1,048,576-token window fits beside the weights.
+  `TF_GLM_KV_HOST_GIB` sizes the host pages (one full window unasked); `TF_GLM_KV_HOST_SHARED=1` gives the ranks of
+  one host a single copy in `/dev/shm`. Checked on two RTX PRO 6000 Blackwell cards at TP=2.
 
 ## More ranks
 
