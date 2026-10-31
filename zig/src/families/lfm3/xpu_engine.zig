@@ -3,6 +3,7 @@ const std = @import("std");
 const xpu = @import("xpu");
 const cfg = @import("config.zig");
 const model = @import("xpu_model.zig");
+const vision = @import("xpu_vision.zig");
 
 pub const Options = struct { context: usize = 4096, window_rows: u32 = 64 };
 
@@ -25,6 +26,15 @@ pub const Engine = struct {
     own: Sequence,
     /// Each slot's sequence (0 is `own`); verifyMulti names streams by slot.
     slots: [model.max_streams]?*Sequence,
+    io: std.Io,
+    /// LFM3-VL: the tower, the image rows of one prompt's pictures (image_tokens at most) and their prompt spans.
+    tower: ?*vision.Tower = null,
+    image_rows: ?xpu.rt.Buffer = null,
+    image_tokens: u32 = 0,
+    spans: [max_pictures]model.Image = undefined,
+
+    /// Pictures one prompt holds at most.
+    pub const max_pictures = 16;
 
     /// LFM3-1.7B's MLX 4-bit in groups of 64, or LFM3-VL-2B's: 4-bit in groups of 32 with the embedding in 8 bits.
     pub fn readable(c: *const cfg.Config) bool {
@@ -39,6 +49,10 @@ pub const Engine = struct {
         const e = try gpa.create(Engine);
         errdefer gpa.destroy(e);
         e.gpa = gpa;
+        e.io = io;
+        e.tower = null;
+        e.image_rows = null;
+        e.image_tokens = 0;
         e.c = try cfg.Config.read(gpa, io, dir);
         errdefer e.c.deinit();
         if (!readable(&e.c)) return error.UnsupportedFormat;
@@ -67,6 +81,37 @@ pub const Engine = struct {
         e.stream.deinit();
         e.c.deinit();
         e.gpa.destroy(e);
+    }
+
+    /// The tower and image rows for prompts of up to `tokens` image tokens (an LFM3-VL checkpoint).
+    pub fn openVision(e: *Engine, tokens: u32) !void {
+        if (e.c.kind != .vision_language) return error.NoVisionTower;
+        e.tower = try vision.Tower.load(e.gpa, &e.r, &e.loader, tokens * 4);
+        e.image_rows = try e.loader.empty(@as(usize, tokens) * vision.out_width * 2);
+        e.image_tokens = tokens;
+    }
+
+    /// The bound stream's pictures past prompt row `from` through the tower; the next prompt windows read their rows.
+    pub fn pictures(e: *Engine, imgs: anytype, from: usize) !void {
+        e.m.images = &.{};
+        var used: u32 = 0;
+        var n: usize = 0;
+        for (imgs) |im| {
+            if (@as(usize, im.at) + im.tokens <= from) continue;
+            const t = e.tower orelse return error.NoVisionTower;
+            if (n == max_pictures or im.tokens > e.image_tokens - used) return error.ImageTooLarge;
+            const rows = model.from(e.image_rows.?, @as(usize, used) * vision.out_width * 2);
+            try t.image(im.pixels, im.gh, im.gw, rows, null);
+            e.spans[n] = .{ .rows = rows, .at = im.at, .n = im.tokens };
+            n += 1;
+            used += im.tokens;
+        }
+        e.m.images = e.spans[0..n];
+    }
+
+    /// Prompt windows read no pictures again.
+    pub fn clearPictures(e: *Engine) void {
+        e.m.images = &.{};
     }
 
     pub fn deviceBytes(e: *const Engine) u64 {

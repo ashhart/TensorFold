@@ -58,6 +58,8 @@ pub fn Prompt(comptime Self: type, comptime S: type) type {
                 stop = m;
                 break;
             };
+            if (comptime @hasDecl(S.Engine, "pictures")) try e.pictures(s.images, at); // their rows replace image tokens'
+            defer if (comptime @hasDecl(S.Engine, "pictures")) e.clearPictures();
             try e.prefillSpan(ids, at, stop, @intCast(stop - at));
             s.fill_at.store(@intCast(stop), .release);
             const last = stop == ids.len;
