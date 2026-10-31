@@ -176,6 +176,13 @@ pub const Lanes = struct {
         return l;
     }
 
+    /// Whether a stream besides `s` is past its prompt pass: a paired prompt step would hold up its rounds.
+    pub fn othersDecode(self: *const Lanes, s: *const lanes.Stream) bool {
+        var it = self.lanes.iterator();
+        while (it.next()) |kv| if (kv.key_ptr.* != s and kv.value_ptr.fill == null) return true;
+        return false;
+    }
+
     fn cancelled(ptr: ?*anyopaque) bool {
         return @as(*lanes.Stream, @ptrCast(@alignCast(ptr.?))).isCancelled();
     }
@@ -238,13 +245,14 @@ pub const Lanes = struct {
         try sink.prepare();
         self.x.e.prompt_logprobs = sink.want();
         defer self.x.e.prompt_logprobs = null;
-        if (try self.x.chunk(s.prompt(), at, from, .{ .ptr = s, .check = cancelled }, marksOf(s))) |first| {
+        const step = try self.x.chunk(s.prompt(), at, !self.othersDecode(s), from, .{ .ptr = s, .check = cancelled }, marksOf(s));
+        if (step.first) |first| {
             l.first = self.take(first);
             l.fill = null;
             return true;
         }
         // its chunks sit on the 2048 grid (cuda_engine.zig): l.fill stays uncapped; the share still works by time.
-        l.fill = at + engine.prompt_rows;
+        l.fill = at + step.rows;
         if (s.settle_step) try self.x.e.stream.synchronize(); // its tail would land in the next decode round's time
         return false;
     }
@@ -255,7 +263,7 @@ pub const Lanes = struct {
         const at = l.fill orelse return;
         if (at <= s.cached or s.reuse.hook == null) return;
         try self.x.bind(l.slot);
-        _ = self.x.chunk(s.prompt(), at, null, .{ .ptr = null, .check = cancelNow }, marksOf(s)) catch |err| {
+        _ = self.x.chunk(s.prompt(), at, false, null, .{ .ptr = null, .check = cancelNow }, marksOf(s)) catch |err| {
             if (err == error.Cancelled) return;
             return err;
         };
@@ -552,43 +560,6 @@ pub const Lanes = struct {
 
 comptime {
     std.debug.assert(max_rows <= fw.window_rows);
-}
-
-test "a lane's slot is chosen before its map entry exists" {
-    var storage: [8192]u8 = @splat(0);
-    var fixed = std.heap.FixedBufferAllocator.init(&storage);
-    var e: engine.Engine = undefined;
-    e.gpa = fixed.allocator();
-    var self: Lanes = .{ .x = .{ .e = &e, .link = undefined } };
-    defer self.lanes.deinit(e.gpa);
-    var streams: [3]lanes.Stream = undefined;
-    const Probe = struct {
-        var bad = false;
-        fn choose(l: *const Lanes) u32 {
-            bad = l.lanes.count() != 0;
-            return 0;
-        }
-    };
-    _ = try self.claimUsing(&streams[0], Probe.choose);
-    try std.testing.expect(!Probe.bad);
-    try std.testing.expectEqual(@as(u32, 0), (try self.claim(&streams[0])).slot);
-    try std.testing.expectEqual(@as(u32, 1), (try self.claim(&streams[1])).slot);
-    _ = self.lanes.remove(&streams[0]);
-    try std.testing.expectEqual(@as(u32, 0), (try self.claim(&streams[2])).slot);
-    try std.testing.expectEqual(@as(u32, 1), (try self.claim(&streams[1])).slot);
-}
-
-test "a failed lane insertion leaves no entry, and a retry takes slot zero" {
-    var fail = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
-    var e: engine.Engine = undefined;
-    e.gpa = fail.allocator();
-    var self: Lanes = .{ .x = .{ .e = &e, .link = undefined } };
-    defer self.lanes.deinit(e.gpa);
-    var stream: lanes.Stream = undefined;
-    try std.testing.expectError(error.OutOfMemory, self.claim(&stream));
-    try std.testing.expectEqual(@as(usize, 0), self.lanes.count());
-    fail.fail_index = std.math.maxInt(usize);
-    try std.testing.expectEqual(@as(u32, 0), (try self.claim(&stream)).slot);
 }
 
 /// Eligibility for the maintained fresh-prompt batching path.

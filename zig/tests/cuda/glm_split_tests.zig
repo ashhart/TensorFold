@@ -5,7 +5,7 @@ const cuda = @import("cuda");
 const check = @import("check.zig");
 const Gpu = check.Gpu;
 
-/// `glm-split-check`: prompts a chunk at a time, split and not; first token, next window and every state byte equal.
+/// `glm-split-check`: prompts a step at a time, split and not; first token, next window and every state byte equal.
 pub fn splitCheck(gpu: Gpu, checkpoint: []const u8, dc_path: []const u8, rank: c_int, world: c_int, id_path: []const u8) !void {
     const glm = @import("glm_cuda");
     var arena = std.heap.ArenaAllocator.init(gpu.gpa);
@@ -36,10 +36,11 @@ pub fn splitCheck(gpu: Gpu, checkpoint: []const u8, dc_path: []const u8, rank: c
     const x: glm.follow.Leader = .{ .e = e, .link = &link };
     defer x.end() catch {};
     const V = e.share.vocab.len();
-    const from = C; // every chunk from the second on: each holds rows past the dense limit
-    // three chunks and a tail of 300, a tail of 2 (one rank without a row), a tail of 5, two chunks
-    const lens = [_]usize{ 3 * C + 300, 2 * C + 2, 2 * C + 5, 2 * C };
+    const from = C; // every step from the second chunk on: each holds rows past the dense limit
+    // tails of 300, 2 (one rank without a row) and 5, two whole chunks, and a second step paired past `from`
+    const lens = [_]usize{ 3 * C + 300, 2 * C + 2, 2 * C + 5, 2 * C, 3 * C + glm.prompt_pair.min_rows };
     var failed = false;
+    var paired: u64 = 0; // the split twins' paired steps
     for (lens, 0..) |len, i| {
         const ids = try a.alloc(u32, len);
         for (ids, 0..) |*u, j| u.* = @intCast(100 + (j * 7919 + i * 31) % 5000);
@@ -47,20 +48,25 @@ pub fn splitCheck(gpu: Gpu, checkpoint: []const u8, dc_path: []const u8, rank: c
         var outs: [2][4]u32 = undefined;
         var logits: [2][]u16 = undefined;
         var splits: [2]u64 = undefined;
+        var want: u64 = 0; // the steps glm.sparse.splitAt splits over this prompt
         for (0..2) |twin| { // twin 0 whole, twin 1 split from `from`
             e.settings.index_split = if (twin == 1) from else 0;
             try x.bind(@intCast(2 * i + twin));
             try x.begin(null);
             const before = e.index_splits;
+            const steps = if (e.pair) |p| p.steps else 0;
             var at: usize = 0;
-            const t = while (true) : (at += C) {
-                const r = x.chunk(ids, at, null, null, null) catch |err| {
-                    std.debug.print("FAIL split: prompt of {d}, twin {d}: the chunk at {d}: {s}\n", .{ len, twin, at, @errorName(err) });
+            const t = while (true) {
+                if (twin == 1) want += @intFromBool(glm.sparse.splitAt(at, from, e.share.world));
+                const r = x.chunk(ids, at, true, null, null, null) catch |err| {
+                    std.debug.print("FAIL split: prompt of {d}, twin {d}: the step at {d}: {s}\n", .{ len, twin, at, @errorName(err) });
                     return err;
                 };
-                if (r) |f| break f;
+                if (r.first) |f| break f;
+                at += r.rows;
             };
             splits[twin] = e.index_splits - before;
+            if (twin == 1) paired += (if (e.pair) |p| p.steps else 0) - steps;
             firsts[twin] = t;
             const win = [_]u32{ t, 101, 202, 303 };
             try x.verify(&win, &outs[twin], 0);
@@ -68,11 +74,8 @@ pub fn splitCheck(gpu: Gpu, checkpoint: []const u8, dc_path: []const u8, rank: c
             try gpu.d.check(gpu.d.api.cuMemcpyDtoH_v2(logits[twin].ptr, e.bd.logits, win.len * V * 2), "cuMemcpyDtoH");
         }
         e.settings.index_split = 0;
-        var want: u64 = 0; // the chunks glm.sparse.splitAt splits over this prompt
-        var start: usize = 0;
-        while (start < len) : (start += C) want += @intFromBool(glm.sparse.splitAt(start, from, e.share.world));
         if (splits[0] != 0 or splits[1] != want) {
-            std.debug.print("FAIL split: prompt of {d}: {d} split chunks whole, {d} split (want {d})\n", .{ len, splits[0], splits[1], want });
+            std.debug.print("FAIL split: prompt of {d}: {d} split steps whole, {d} split (want {d})\n", .{ len, splits[0], splits[1], want });
             failed = true;
         }
         if (firsts[0] != firsts[1] or !std.mem.eql(u32, &outs[0], &outs[1]) or !std.mem.eql(u16, logits[0], logits[1])) {
@@ -94,5 +97,5 @@ pub fn splitCheck(gpu: Gpu, checkpoint: []const u8, dc_path: []const u8, rank: c
         }
     }
     if (failed) return error.TestFailed;
-    check.pass("split indexer rows at TP={d}: prompts of {any} rows equal their whole twins in the first token, the next window's logits and tokens, and every state byte", .{ world, lens });
+    check.pass("split indexer rows at TP={d}: prompts of {any} rows ({d} paired steps) equal their whole twins in the first token, the next window's logits and tokens, and every state byte", .{ world, lens, paired });
 }
