@@ -68,3 +68,69 @@ def test_upstream_headers_drop_origin_in_any_case():
     p = Proxy(lambda: "http://127.0.0.1:8080")
     out = p.upstream_headers([("Origin", "http://a.test"), ("oRiGiN", "http://b.test"), ("accept", "*/*")])
     assert {k.lower() for k in out} == {"accept", "x-tfs-relayed"}
+
+
+# -- teaching: main refuses `--slide` without a key (zig/src/server/slide_key.zig) ---------------------------------
+
+
+def _slide_keyless(cmd: list[str], env: dict) -> bool:
+    """main.zig's gate before any load: `--slide` with no --api-key, --api-key-file or TENSORFOLD_API_KEY exits 2."""
+
+    if "--slide" not in cmd:
+        return False
+    return not ("--api-key" in cmd or "--api-key-file" in cmd or (env.get("TENSORFOLD_API_KEY") or "").strip(" ,"))
+
+
+def test_starting_a_copy_that_learns_gives_it_a_key_main_accepts(tmp_path, monkeypatch):
+    import json
+
+    from fastapi.testclient import TestClient
+
+    from tensorfold_web import living, native
+    from tensorfold_web import settings as settings_mod
+    from tensorfold_web.catalog import Catalog
+    from tensorfold_web.engine import Engine
+    from tensorfold_web.server import create_app
+    from tensorfold_web.settings import Settings
+
+    monkeypatch.setenv("TENSORFOLD_WEB_LIVING", str(tmp_path / "living"))
+    monkeypatch.setattr(settings_mod, "config_dir", lambda: tmp_path / "conf")
+    monkeypatch.setattr(living, "teachable_here", lambda _b: None)
+    (living.root() / "eden").mkdir(parents=True)
+    (living.root() / "eden" / "config.json").write_text(json.dumps({"model_type": "nemotron_h"}))
+
+    s = Settings(engine_url="http://127.0.0.1:9", remote=False)
+    assert s.api_key is None                                      # sharing is off: until now, no key at all
+    eng = Engine(s)
+    launched = []
+
+    def fake_start(model, *, native_model=False, drafter=None, slide=None, serve=None):
+        caps = {"version": "main", "serve": {"flags": {"--host": {}, "--port": {}, "--slide": {}, "--slide-graph": {}}}}
+        monkeypatch.setattr(native, "capabilities", lambda _b: caps)
+        monkeypatch.setattr(native, "serve_flags", lambda _b: caps["serve"]["flags"])
+        cmd, env, _notes = native.build_command("tensorfold-native", serve or model, s, slide=slide)
+        launched.append((cmd, env))
+        return {}
+
+    eng.start = fake_start
+    cat = Catalog()
+    cat.refresh_sizes_async = lambda: None
+    c = TestClient(create_app(settings=s, engine=eng, catalog=cat))
+    r = c.post("/api/engine/start", json={"model": "living:eden"})
+    assert r.status_code == 200, r.text
+    (cmd, env), = launched
+    assert "--slide" in cmd and not _slide_keyless(cmd, env)
+    assert env["TENSORFOLD_API_KEY"] == s.api_key and s.api_key not in " ".join(cmd)   # never on the command line
+    saved = json.loads((tmp_path / "conf" / "settings.json").read_text())
+    assert saved["api_key"] == s.api_key                         # kept, so the next start and the relay agree
+
+
+def test_a_key_already_set_is_kept_for_learning(monkeypatch):
+    from tensorfold_web import native
+    from tensorfold_web.settings import Settings
+
+    monkeypatch.setattr(native, "capabilities", lambda _b: {"serve": {"flags": {"--slide": {}, "--slide-graph": {}}}})
+    monkeypatch.setattr(native, "serve_flags", lambda _b: {"--slide": {}, "--slide-graph": {}})
+    cmd, env, _ = native.build_command("tensorfold-native", "/x/eden", Settings(api_key="tf-mine"),
+                                       slide="/x/eden.facts.json")
+    assert env["TENSORFOLD_API_KEY"] == "tf-mine" and not _slide_keyless(cmd, env)

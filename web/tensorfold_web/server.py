@@ -396,6 +396,17 @@ def create_app(*, settings: settings_mod.Settings | None = None, engine: Engine 
         async with start_lock:
             return await held_in_thread("an engine start", lambda: _start_held(patch))
 
+    def key_for_learning() -> None:
+        """TensorFold refuses `--slide` without an API key (zig/src/server/slide_key.zig). A copy that learns gets one,
+        kept in Settings as a shared engine's is, so the relay and the lessons present it."""
+
+        if s.api_key:
+            return
+        with eng.target_lock:
+            s.api_key = settings_mod.new_api_key()
+            eng.retargeted()
+        save_settings()
+
     def launch(model: str, entry: Any) -> dict:
         """Start ``model`` on the native engine when it serves it here, else on the Python line. A native engine that
         lists the model's family but refuses this chip (it says so before reading any weight) is remembered for its
@@ -409,6 +420,8 @@ def create_app(*, settings: settings_mod.Settings | None = None, engine: Engine 
             if not path.is_dir() or living.is_unfinished(copy):
                 raise RuntimeError(f"there is no living copy named {copy} on this machine")
             why = living.teachable_here(native.find_binary())
+            if not why:
+                key_for_learning()
             result = eng.start(model, native_model=True, serve=str(path),
                                slide=None if why else str(living.graph_path(copy)))
             if why:
