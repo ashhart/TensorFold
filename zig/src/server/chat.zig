@@ -361,9 +361,9 @@ const Generation = struct {
         if (g.thinking) {
             const close = try g.visible.closeOf(g.a, reply_text.decodeText, g.srv.text, g.srv.close_id);
             const split = try reply_text.splitThinkingAt(g.a, text, false, g.srv.markers, close);
-            const piece = g.streamed_reasoning.after(split.reasoning, true);
+            const piece = g.streamed_reasoning.after(reply_text.pyStrip(split.reasoning), true); // the whole reply strips it
             if (piece.len > 0) {
-                try g.streamed_reasoning.set(g.a, split.reasoning, piece);
+                try g.streamed_reasoning.set(g.a, reply_text.pyStrip(split.reasoning), piece);
                 try g.emit(sink, try deltaOf(g.a, "reasoning_content", piece));
             }
             answer = split.answer;

@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Chat streams with thinking on: the joined `delta.reasoning_content` pieces now equal the finished reply's `reasoning_content` byte for byte. The stream had kept the whitespace the finished reply strips, such as the newline before `</think>`; it now holds whitespace back until more reasoning follows. A streamed `/v1/responses` reasoning item now matches the non-streamed one too. Thanks to @jayleaton.
+
 - Spark 2.5 on CUDA keeps its full-attention layers' K/V (every fourth layer) in pages of the core pool, leased per stream as it grows, while the sliding layers keep their rings; streams no longer reserve a full context each up front. On a GB10 tokens are unchanged and speed is level. `TENSORFOLD_SPARK25_KV_PAGES=0` keeps the linear caches.
 
 - Qwen3.8-27B on M5 Ultra: a prompt chunk of more than 128 rows runs each 4-bit projection in one dispatch instead of 128-row pieces, so each weight matrix is read once per chunk. Replies are token-identical; decode, verify rows and other chips are unchanged (#1738). Thanks to @Nipale-ai.

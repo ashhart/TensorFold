@@ -498,7 +498,9 @@ reports it, less a reserve of a 32nd of the card and at least 1 GiB. `TENSORFOLD
 `choices[0].message.content` holds the answer. Reasoning uses `reasoning_content`, or
 `delta.reasoning_content` while streaming. Tools use `tool_calls` and `finish_reason: "tool_calls"`.
 When a template supplies no think opener, a reply-written leading `<think>` tag is removed from
-`reasoning_content`; the streamed and finished forms use the same split.
+`reasoning_content`; the streamed and finished forms use the same split. Both strip the reasoning's leading and
+trailing whitespace, so the joined `delta.reasoning_content` pieces equal the finished field byte for byte; a stream
+holds whitespace back until more reasoning follows it.
 Every reply's usage, streamed ones included, carries its prompt, completion and total tokens,
 `prompt_tokens_details.cached_tokens` (the prompt tokens found in a backend's prefix cache; native Zig reports
 zero until its prompt cache is enabled) and
