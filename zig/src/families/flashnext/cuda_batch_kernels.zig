@@ -34,6 +34,7 @@ pub const Kernels = struct {
     shift: cuda.Function,
     /// Each sparse row's top blocks (attention._select / _select_tiles), native.
     select: cuda.Function,
+    select_lanes: cuda.Function,
 
     pub fn load(d: *const cuda.Driver) !Kernels {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
@@ -69,6 +70,7 @@ pub const Kernels = struct {
         k.copy_cols = try k.batch.function("fn_copy_cols");
         k.shift = try k.batch.function("fn_shift_window");
         k.select = try k.batch.function("fn_qsa_select");
+        k.select_lanes = try k.batch.function("fn_qsa_select_lanes");
         k.front = try k.batch.function("fn_gdn_front");
         k.chain = try k.batch.function("fn_gdn_rows");
         k.chain_to = try k.batch.function("fn_gdn_rows_to");
