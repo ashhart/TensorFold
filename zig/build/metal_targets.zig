@@ -363,6 +363,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .{ .name = "tf-moss-image-decoder", .path = "zig/tests/moss_image_decoder.zig", .about = "MOSS-Image's image decoder on latents, gated against float64 beside torch float32, then timed" },
         .{ .name = "tf-moss-image-blocks", .path = "zig/tests/moss_image_blocks.zig", .about = "MOSS-Image's transformer on one step, each block alone gated against float32, repeated byte for byte" },
         .{ .name = "tf-moss-image-generate", .path = "zig/tests/moss_image_generate.zig", .about = "MOSS-Image from options alone: prompts, schedule and noise, then the decoder's picture" },
+        .{ .name = "tf-idol", .path = "zig/tests/idol.zig", .about = "Idol's denoiser on a reference case: each step's two branches compared, then the guided schedule timed" },
         .{ .name = "tf-uocr-decode", .path = "zig/tests/uocr/decode.zig", .about = "Unlimited-OCR-2 end to end on a page against a reference dump: prompt, layers, logits, greedy reply" },
         .{ .name = "tf-uocr-vision", .path = "zig/tests/uocr/vision.zig", .about = "Unlimited-OCR-2's image encoder on a reference dump's pixels: SAM gated against float32, CLIP and the projector reported" },
         .{ .name = "tf-uocr-blocks", .path = "zig/tests/uocr/blocks.zig", .about = "Unlimited-OCR-2's image encoder step by step: each SAM block, the neck, CLIP's front, each CLIP layer and the projector alone against float32" },
