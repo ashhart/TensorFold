@@ -6,21 +6,23 @@ const cfg = @import("config.zig");
 const st = @import("state.zig");
 const fwd = @import("forward.zig");
 const snapshot = @import("snapshot.zig");
+const budget = @import("budget.zig");
+const backend = @import("backend.zig");
 const Model = @import("model.zig").Model;
 const Proposer = lanes.proposer.Proposer;
+const pricing = @import("pricing.zig");
+const Fit = pricing.Fit;
+const depth = pricing.depth;
+const depthShared = pricing.depthShared;
+const ema = pricing.ema;
 
-/// Caches of up to `capacity` tokens for `streams` streams (one a request, kept between requests for its prefix).
-pub const Options = struct { capacity: usize, streams: u32 };
-
-/// Rows a slot's cache is made or grown in, so a short chat holds a short cache (the target sizes its own by request).
-const grow = 4096;
+/// Up to `capacity` tokens for each of `streams` caches (one a request, kept for its prefix), in the target's ledger.
+pub const Options = struct { capacity: usize, streams: u32, ledger: *budget.Ledger };
 
 /// Token slots the chained steps draw into; a round takes at most window_rows of them.
 const ring = 4096;
 /// Drafts a round until the rates are measured.
 const first_depth: usize = 6;
-/// The newest sample's weight in the running times.
-const rate = 0.1;
 /// The acceptance prior (two drafts of three) and how much of the history a round keeps.
 const prior_kept = 2.0;
 const prior_tried = 3.0;
@@ -42,7 +44,7 @@ pub const Drafter = struct {
 
     /// A stream's cache and what it holds; a freed slot keeps both for the next request sharing its prefix.
     const Slot = struct {
-        cache: ?st.Cache = null, // made and grown by `grow` rows as the context needs, up to the capacity
+        cache: ?st.Cache = null, // made or grown when its stream is admitted, to that stream's capacity
         seen: std.ArrayList(u32) = .empty, // the tokens whose keys and values the cache holds, in order
         next: ?u32 = null, // the token drawn after `seen` (the last fed row's argmax)
         taken: bool = false,
@@ -63,9 +65,18 @@ pub const Drafter = struct {
         return d;
     }
 
+    /// A drafter for `model`, warmed: it owns the model from the call on, freed with it if the warm-up fails.
+    pub fn start(gpa: std.mem.Allocator, model: *Model, options: Options) !*Drafter {
+        const d = init(gpa, model, options) catch |err| {
+            model.deinit();
+            return err;
+        };
+        return started(Drafter, d);
+    }
+
     pub fn deinit(d: *Drafter) void {
         for (d.slots) |*s| {
-            if (s.cache) |*c| c.deinit();
+            d.drop(s);
             s.seen.deinit(d.gpa);
         }
         d.gpa.free(d.slots);
@@ -121,7 +132,7 @@ pub const Drafter = struct {
         }
         const i = best orelse return error.LlamaDrafterBusy;
         const slot = &d.slots[i];
-        if (prompt.len + 1 > d.options.capacity or !try d.room(slot, @min(prompt.len + grow, d.options.capacity))) return error.LlamaDrafterPromptTooLong;
+        if (prompt.len + 1 > d.options.capacity) return error.LlamaDrafterPromptTooLong;
         const r = try gpa.create(Request);
         r.* = .{ .d = d, .gpa = gpa, .slot = i, .eos = eos };
         slot.taken = true;
@@ -137,30 +148,89 @@ pub const Drafter = struct {
         r.gpa.destroy(r);
     }
 
-    /// More than one stream holds a slot: their rounds are shared, and every stream's step waits on each one's drafts.
-    fn sharing(d: *const Drafter) bool {
+    /// The streams holding a slot: more than one shares each round, every stream's step waiting on each one's drafts.
+    fn sharers(d: *const Drafter) usize {
         var n: usize = 0;
         for (d.slots) |s| n += @intFromBool(s.taken);
-        return n > 1;
+        return n;
     }
 
-    /// The slot's cache holds `needed` rows, made or grown (its state copied) in `grow` rows; false past the capacity.
-    fn room(d: *Drafter, slot: *Slot, needed: usize) !bool {
-        if (slot.cache) |c| if (c.capacity >= needed) return true;
-        if (needed > d.options.capacity) return false;
-        const doubled = if (slot.cache) |c| 2 * c.capacity else 0;
-        const capacity = @min(d.options.capacity, std.mem.alignForward(usize, @max(needed, doubled), grow));
-        var bigger = try st.Cache.init(d.model.device, &d.model.config, capacity);
-        errdefer bigger.deinit();
+    /// The target's admission hooks: a stream's slot grows with it, in its ledger.
+    pub fn slotsHook(d: *Drafter) backend.Slots {
+        return .{ .ctx = d, .growth = growthFn, .prepare = prepareFn, .shed = shedFn };
+    }
+
+    /// The slot `proposer` drafts from (null: something else's proposer, or none).
+    fn slotFor(d: *Drafter, proposer: ?Proposer) ?*Slot {
+        const p = proposer orelse return null;
+        if (p.vtable != &Request.vtable) return null;
+        const r: *Request = @ptrCast(@alignCast(p.ptr));
+        return if (r.d == d) &d.slots[r.slot] else null;
+    }
+
+    /// Rows a stream of `capacity` tokens drafts within: its context, a window of drafts and the draw after them.
+    fn rowsFor(d: *const Drafter, capacity: usize) usize {
+        return @min(capacity + st.window_rows, d.options.capacity);
+    }
+
+    fn growthFn(ctx: *anyopaque, stream: *lanes.Stream, capacity: usize) u64 {
+        const d: *Drafter = @ptrCast(@alignCast(ctx));
+        const slot = d.slotFor(stream.proposer) orelse return 0;
+        return growth(&d.model.config, if (slot.cache) |c| .{ .capacity = c.capacity, .len = c.len } else null, d.rowsFor(capacity));
+    }
+
+    fn prepareFn(ctx: *anyopaque, stream: *lanes.Stream, capacity: usize) anyerror!void {
+        const d: *Drafter = @ptrCast(@alignCast(ctx));
+        try d.prepare(stream.proposer, capacity);
+    }
+
+    /// The proposer's slot grown for a request of `capacity` tokens, as the target's admission grows a stream's.
+    pub fn prepare(d: *Drafter, proposer: ?Proposer, capacity: usize) !void {
+        const slot = d.slotFor(proposer) orelse return;
+        try d.grow(slot, d.rowsFor(capacity));
+    }
+
+    fn shedFn(ctx: *anyopaque, bytes: u64) void {
+        const d: *Drafter = @ptrCast(@alignCast(ctx));
+        for (d.slots) |*s| {
+            if (d.options.ledger.fits(bytes)) return;
+            if (!s.taken) d.drop(s);
+        }
+    }
+
+    /// A slot's cache and what it knew, freed and given back to the ledger.
+    fn drop(d: *Drafter, slot: *Slot) void {
         if (slot.cache) |*c| {
-            var snap = try snapshot.save(d.model.device, d.model.queue, &d.model.config, c);
+            d.options.ledger.give(st.cacheBytes(&d.model.config, c.capacity));
+            c.deinit();
+        }
+        slot.cache = null;
+        slot.seen.clearRetainingCapacity();
+        slot.next = null;
+    }
+
+    /// The slot's cache made or grown to `rows` (its state copied), every byte taken from the ledger as it is held.
+    fn grow(d: *Drafter, slot: *Slot, rows: usize) !void {
+        if (slot.cache) |c| if (c.capacity >= rows) return;
+        const c = &d.model.config;
+        const ledger = d.options.ledger;
+        const made = st.cacheBytes(c, rows);
+        ledger.take(made);
+        errdefer ledger.give(made);
+        var bigger = try st.Cache.init(d.model.device, c, rows);
+        errdefer bigger.deinit();
+        if (slot.cache) |*old| {
+            const copy = snapshot.bytes(c, old.len);
+            ledger.take(copy);
+            defer ledger.give(copy);
+            var snap = try snapshot.save(d.model.device, d.model.queue, c, old);
             defer snap.free();
             try snapshot.restore(d.model.queue, &snap, &bigger);
-            c.deinit();
+            ledger.give(st.cacheBytes(c, old.capacity));
+            old.deinit();
         }
         bigger.setResident(d.follow);
         slot.cache = bigger;
-        return true;
     }
 
     /// `ids` at the cache's end in prompt chunks, waited on, the last chunk's row drawn into `draw` when given.
@@ -210,6 +280,22 @@ pub const Drafter = struct {
     }
 };
 
+/// What a slot's cache holds now: its capacity and the rows written.
+pub const Held = struct { capacity: usize, len: usize };
+
+/// Bytes a slot holding `have` takes to grow to `rows`: the new cache, and the old state's copy while it moves.
+pub fn growth(c: *const cfg.Config, have: ?Held, rows: usize) u64 {
+    if (have) |h| if (h.capacity >= rows) return 0;
+    return st.cacheBytes(c, rows) + if (have) |h| snapshot.bytes(c, h.len) else 0;
+}
+
+/// `d` warmed, or freed when its warm-up fails: nothing made before the warm-up outlives a failed start.
+fn started(comptime D: type, d: *D) !*D {
+    errdefer d.deinit();
+    try d.warm();
+    return d;
+}
+
 /// Wait for every step in flight, oldest first, and release them.
 fn land(flights: []mtl.CommandBuffer) !void {
     var failed = false;
@@ -237,58 +323,6 @@ fn now() f64 {
     return @as(f64, @floatFromInt(ts.sec)) * 1e3 + @as(f64, @floatFromInt(ts.nsec)) * 1e-6;
 }
 
-fn ema(kept: ?f64, sample: f64) f64 {
-    return if (kept) |k| k + rate * (sample - k) else sample;
-}
-
-/// A round's milliseconds by its window's rows, a line fitted to the recent rounds (a window costs more with rows).
-pub const Fit = struct {
-    samples: u32 = 0,
-    x: f64 = 0, // rows
-    y: f64 = 0, // ms
-    xx: f64 = 0,
-    xy: f64 = 0,
-
-    pub fn add(f: *Fit, rows: f64, ms: f64) void {
-        if (f.samples == 0) {
-            f.* = .{ .samples = 1, .x = rows, .y = ms, .xx = rows * rows, .xy = rows * ms };
-            return;
-        }
-        f.samples += 1;
-        f.x = ema(f.x, rows);
-        f.y = ema(f.y, ms);
-        f.xx = ema(f.xx, rows * rows);
-        f.xy = ema(f.xy, rows * ms);
-    }
-
-    /// Milliseconds a window of `rows` takes: the fitted line, or the mean while the rows seen hardly vary.
-    pub fn at(f: Fit, rows: f64) f64 {
-        const spread = f.xx - f.x * f.x;
-        if (spread < 0.25) return f.y;
-        const slope = @max(0, (f.xy - f.x * f.y) / spread);
-        return @max(f.y + slope * (rows - f.x), 0.5 * f.y);
-    }
-};
-
-/// The depth with the most tokens a millisecond: a round lands 1 + p + ... + p^k tokens for k + 1 rows and k steps.
-pub fn depth(p: f64, rounds: Fit, step_ms: f64, most: usize) usize {
-    var best: usize = 1;
-    var best_rate: f64 = 0;
-    var expect: f64 = 1;
-    var pk: f64 = 1;
-    for (1..most + 1) |k| {
-        pk *= p;
-        expect += pk;
-        const kf: f64 = @floatFromInt(k);
-        const r = expect / (rounds.at(kf + 1) + kf * step_ms);
-        if (r > best_rate) {
-            best_rate = r;
-            best = k;
-        }
-    }
-    return best;
-}
-
 /// One stream's proposer: its slot, its acceptance and what the last round asked.
 pub const Request = struct {
     d: *Drafter,
@@ -304,6 +338,7 @@ pub const Request = struct {
     offered: u64 = 0,
     landed: u64 = 0,
     unfit: bool = false, // a context token past the drafter's vocabulary: no proposals for this request
+    alone: bool = true, // the last proposal's round had this stream alone: its time fits the rounds' line
 
     pub fn proposer(r: *Request) Proposer {
         return .{ .ptr = r, .vtable = &vtable };
@@ -327,11 +362,13 @@ pub const Request = struct {
         self(p).round(rows, kept);
     }
 
-    /// Drafts a round at the measured rates (first_depth before they are), within the ask and the window.
+    /// Drafts a round at the measured rates (first_depth before), within the ask and window; shared rounds priced.
     pub fn want(r: *const Request, max_draft: i64) usize {
         const most: usize = @intCast(@min(max_draft, @as(i64, st.window_rows - 1)));
         const step = r.d.step_ms orelse return @min(first_depth, most);
         if (r.d.rounds.samples == 0) return @min(first_depth, most);
+        const streams = r.d.sharers();
+        if (streams > 1) return depthShared(r.kept / r.tried, r.d.rounds, step, most, streams);
         return depth(r.kept / r.tried, r.d.rounds, step, most);
     }
 
@@ -341,11 +378,12 @@ pub const Request = struct {
         r.out.clearRetainingCapacity();
         r.asked = .{ .len = context.len, .max_draft = max_draft };
         r.returned = null; // an empty answer times no round
-        // shared rounds go undrafted: two drafting streams decoded slower together than two plain ones
-        if (max_draft <= 0 or r.unfit or context.len == 0 or r.d.sharing()) return r.out.items;
+        if (max_draft <= 0 or r.unfit or context.len == 0) return r.out.items;
         const d = r.d;
         const slot = &d.slots[r.slot];
         const n = r.want(max_draft);
+        if (n == 0) return r.out.items; // the shared round's drafts cost more than they land
+        r.alone = d.sharers() <= 1;
         // the cache keeps the context's prefix it agrees with (an earlier round's drafts past the context included)
         const shared = commonPrefix(slot.seen.items, context);
         if (shared < context.len and shared < slot.seen.items.len) {
@@ -353,9 +391,9 @@ pub const Request = struct {
             slot.cache.?.len = shared;
             slot.next = null;
         }
-        // room for the context, the drafts and the draw after them
-        if (!try d.room(slot, @max(context.len, slot.seen.items.len) + n + 1)) return r.out.items;
-        const cache = &slot.cache.?;
+        // room for the context, the drafts and the draw after them: the slot grew to its stream's capacity at admission
+        const cache = if (slot.cache) |*c| c else return r.out.items;
+        if (@max(context.len, slot.seen.items.len) + n + 1 > cache.capacity) return r.out.items;
         var flights: [st.window_rows]mtl.CommandBuffer = undefined;
         var draws: [st.window_rows]u64 = undefined; // each pass's drawn slot, in order
         var count: usize = 0;
@@ -416,7 +454,7 @@ pub const Request = struct {
         r.rounds += 1;
         defer r.asked = null;
         if (r.asked == null or rows < 2) return;
-        if (r.returned) |t| r.d.rounds.add(@floatFromInt(rows), now() - t);
+        if (r.returned) |t| if (r.alone) r.d.rounds.add(@floatFromInt(rows), now() - t);
         const offered = rows - 1;
         r.offered += offered;
         r.landed += kept;
@@ -426,27 +464,27 @@ pub const Request = struct {
     }
 };
 
-test "llama drafter: the depth pays for its steps and rows, more at a higher acceptance, none past the ask" {
-    // flat 60 ms rounds and 3 ms steps: at p 0.7 drafting about 5-6 pays best; at 0.95 the window's 15; at 0.1 one
-    var flat: Fit = .{};
-    flat.add(4, 60);
-    try std.testing.expect(depth(0.7, flat, 3, 15) >= 4 and depth(0.7, flat, 3, 15) <= 7);
-    try std.testing.expectEqual(@as(usize, 15), depth(0.95, flat, 3, 15));
-    try std.testing.expectEqual(@as(usize, 1), depth(0.1, flat, 3, 15));
-    try std.testing.expectEqual(@as(usize, 3), depth(0.95, flat, 3, 3));
-    // dear steps pull the depth down
-    try std.testing.expect(depth(0.7, flat, 30, 15) <= 2);
-    // rounds that grow 5 ms a row (as the M5's windows do) pull it down too
-    var sloped: Fit = .{};
-    for (0..40) |i| sloped.add(@floatFromInt(2 + i % 8), 50 + 5 * @as(f64, @floatFromInt(2 + i % 8)));
-    try std.testing.expectApproxEqAbs(@as(f64, 100), sloped.at(10), 3);
-    try std.testing.expect(depth(0.7, sloped, 3, 15) < depth(0.7, flat, 3, 15));
-    try std.testing.expect(depth(0.95, sloped, 3, 15) >= 8);
-    // one row count seen: the mean stands in for the line
-    var one: Fit = .{};
-    one.add(4, 60);
-    one.add(4, 70);
-    try std.testing.expectApproxEqAbs(one.y, one.at(12), 1e-9);
+test "llama drafter: a warm-up that fails frees the drafter it was made for" {
+    const Fake = struct {
+        freed: *bool,
+        fn warm(_: *@This()) !void {
+            return error.WarmUpFailed;
+        }
+        fn deinit(f: *@This()) void {
+            f.freed.* = true;
+        }
+    };
+    var freed = false;
+    var f: Fake = .{ .freed = &freed };
+    try std.testing.expectError(error.WarmUpFailed, started(Fake, &f));
+    try std.testing.expect(freed);
+}
+
+test "llama drafter: a slot's growth counts the new cache and the old state's copy, nothing when it holds enough" {
+    const c = try cfg.parse(std.testing.allocator, @embedFile("fixtures/drafter_config.json"));
+    try std.testing.expectEqual(@as(u64, st.cacheBytes(&c, 9000)), growth(&c, null, 9000));
+    try std.testing.expectEqual(@as(u64, st.cacheBytes(&c, 9000) + snapshot.bytes(&c, 3000)), growth(&c, .{ .capacity = 4096, .len = 3000 }, 9000));
+    try std.testing.expectEqual(@as(u64, 0), growth(&c, .{ .capacity = 9000, .len = 3000 }, 9000));
 }
 
 test "llama drafter: the common prefix and the acceptance history" {

@@ -11,6 +11,7 @@ pub const residency = @import("residency.zig");
 pub const snapshot = @import("snapshot.zig");
 pub const exact = @import("exact.zig");
 pub const drafter = @import("drafter.zig");
+pub const pricing = @import("pricing.zig");
 
 test {
     _ = exact;
@@ -20,4 +21,5 @@ test {
     _ = budget;
     _ = snapshot;
     _ = drafter;
+    _ = pricing;
 }
