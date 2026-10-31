@@ -52,6 +52,27 @@ __device__ __forceinline__ void pairs4(const void* at, Pair out[4]) {
     out[3] = __builtin_bit_cast(Pair, w.w);
 }
 
+// x from lane ^ M of its 16-lane row (M < 16): a DPP row_xmask move, all lanes active.
+template <int M>
+__device__ __forceinline__ float row_xor(float x) {
+    return __builtin_bit_cast(float, __builtin_amdgcn_mov_dpp(__builtin_bit_cast(int, x), 0x160 + M, 0xf, 0xf, false));
+}
+
+// A 16-lane row's max and sum by xor butterflies over lane distances 8, 4, 2, 1, each lane taking own then partner.
+__device__ __forceinline__ float row_max16(float x) {
+    x = fmaxf(x, row_xor<8>(x));
+    x = fmaxf(x, row_xor<4>(x));
+    x = fmaxf(x, row_xor<2>(x));
+    return fmaxf(x, row_xor<1>(x));
+}
+
+__device__ __forceinline__ float row_sum16(float x) {
+    x += row_xor<8>(x);
+    x += row_xor<4>(x);
+    x += row_xor<2>(x);
+    return x + row_xor<1>(x);
+}
+
 // q rounds to the cache type once and stays in LDS; with PAGED, k and v are a layer's pools and a 64-key tile a page.
 template <typename Cache, bool PAGED>
 __device__ void fa_dot2(const float* __restrict__ q, const Cache* __restrict__ k, const Cache* __restrict__ v,
@@ -169,8 +190,7 @@ __device__ void fa_dot2(const float* __restrict__ q, const Cache* __restrict__ k
                 acc[i][j] = (FULL || (row < q_hi && k0 + 4 * sk + j < vis)) ? acc[i][j] * scale : -INFINITY;
                 tile_max = fmaxf(tile_max, acc[i][j]);
             }
-#pragma unroll
-            for (int lane = 8; lane > 0; lane >>= 1) tile_max = fmaxf(tile_max, __shfl_xor(tile_max, lane, 16));
+            tile_max = row_max16(tile_max);
             const float next_m = fmaxf(m_run[i], tile_max);
             const float alpha = next_m == -INFINITY ? 1.f : expf(m_run[i] - next_m);
             float p[4], sum = 0.f;
@@ -179,8 +199,7 @@ __device__ void fa_dot2(const float* __restrict__ q, const Cache* __restrict__ k
                 p[j] = next_m == -INFINITY ? 0.f : expf(acc[i][j] - next_m);
                 sum += p[j];
             }
-#pragma unroll
-            for (int lane = 8; lane > 0; lane >>= 1) sum += __shfl_xor(sum, lane, 16);
+            sum = row_sum16(sum);
             l_run[i] = alpha * l_run[i] + sum;
             m_run[i] = next_m;
             sH[(2 * sk) * kPLd + row] = pair_t{static_cast<elem>(p[0]), static_cast<elem>(p[1])};
