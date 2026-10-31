@@ -134,7 +134,7 @@ pub const Metal = struct {
         return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .first_masked = grammar.firstMasked, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn, .alternatives = alternativesFn, .held = grammar.held, .reports_fill = true } };
     }
 
-    /// The facts the round loop reads at setup (Python's NemotronH attributes), with this engine's own timings.
+    /// The round loop's setup facts, including this engine's measured head-step depth cap.
     pub fn facts(self: *const Metal) lanes.Model {
         const drafting = self.head != null;
         return .{
@@ -142,6 +142,7 @@ pub const Metal = struct {
             .gpu_tokens = true,
             .mtp = drafting,
             .allocate_shared_drafts = drafting,
+            .limit_shared_drafts = drafting,
             .speculate = drafting,
             .speculate_early = false,
             .draft_prior = &nemotron_config.draft_prior,
@@ -156,7 +157,6 @@ pub const Metal = struct {
             .lane_costs = self.costs.window[0..self.costs.windows],
         };
     }
-
     pub fn forward(self: *Metal) fwd.Forward {
         return .{ .c = self.m.config, .k = &self.m.kernels, .w = &self.m.weights, .s = &self.scratch, .pool = &self.pool, .geometry = self.geometry, .members = self.members, .masks = if (self.masks) |*m| m else null };
     }
