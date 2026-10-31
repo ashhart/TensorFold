@@ -62,26 +62,59 @@ greedy chats of 64 tokens (code, prose, Chinese, a document, with and without th
 token; the other three part at a position where the engine's two best logits are the same bf16 value. One-row steps
 and windows of 7 or 16 rows give the same logits bit for bit after prompts of 64 and 1,500 tokens.
 
-The 13 teacher-forced positions of the 1,500 whose top tokens differ (row n predicts token n + 1; a tie goes to the
-lower id on both sides). At each, HF's and the engine's two contenders are within one bf16 step of each other on both
-sides (0.125 below 32, 0.25 from 32 to 64): HF's two tie at 3 of them, the engine's at 8, neither at 22 and 166, and
-at 1370 a third token, `no`, ties at the top on both sides.
+`tools/zig/llama_teacher_judge.py` judges every teacher-forced position by the repository's near-tie rule
+(`qwen27_margins.py`: the same two contenders on both sides, each margin within one bf16 step) and exits 1 on anything
+else. Against HF's bf16 run, 13 of the 1,500 positions differ and two are red: at 425 and 1370 three tokens sit within
+one bf16 step, so the two sides' contenders differ. `tools/zig/llama_f64_reference.py` runs the release in float64
+(its bf16 weights cast up exactly, HF's arithmetic, one rounding at the end) and settles them:
 
-| position | HF's top-1 (a) | engine's top-1 (b) | HF's logits a, b | engine's logits a, b | KL |
-|---:|---|---|---|---|---:|
-| 22 | `en` 271 | `see` 3574 | 20.75, 20.625 | 20.625, 20.75 | 0.0047 |
-| 83 | `the` 269 | `Python` 9120 | 26.25, 26.25 | 26.25, 26.375 | 0.0022 |
-| 85 | `developed` 3260 | `-` 152369 | 35.5, 35.5 | 35.5, 35.75 | 0.0134 |
-| 166 | `";` 2651 | `"))` 9441 | 36.25, 36 | 36.25, 36.5 | 0.0234 |
-| 224 | `(` 152374 | `('` 1091 | 39.75, 39.5 | 39.5, 39.5 | 0.0078 |
-| 401 | `(` 152374 | `({'` 50468 | 39.5, 39.25 | 39.25, 39.25 | 0.0076 |
-| 425 | `{` 152405 | `1` 152367 | 40, 39.75 | 40, 40 | 0.0163 |
-| 586 | `representation` 7443 | `encoding` 13571 | 30, 30 | 29.875, 30 | 0.0027 |
-| 1302 | `If` 3934 | ``` `` ``` 2283 | 32, 31.875 | 32, 32 | 0.0022 |
-| 1304 | `indent` 28799 | `allow` 13471 | 37.25, 37 | 37, 37 | 0.0078 |
-| 1370 | `it` 388 | `the` 269 | 38.25, 38 (`no` 754: 38.25) | 38, 38 (`no` 754: 38) | 0.0076 |
-| 1384 | ``` `` ``` 16411 | `circular` 13380 | 30.875, 30.75 | 30.75, 30.75 | 0.0025 |
-| 1447 | `instead` 62222 | `with` 3629 | 35, 34.75 | 34.5, 34.5 | 0.0129 |
+- Against the float64 pass, the engine passes the rule: 1,483 of 1,500 positions equal, all 17 differences near-ties.
+  HF's bf16 run does not: 1,488 equal, and at 425 it rounds two contenders a step high (red).
+- At 1370 the exact logits are `it` 388 38.1266, `no` 754 38.1037 and `the` 269 38.0106: within 0.116 of each other,
+  under half a bf16 step (0.25 at 32-64). 388 lies 0.0016 above the rounding midpoint 38.125, so rounded once it is
+  38.25 and the others 38.0. HF's bf16 run gives 754 a step too high (38.25); the engine gives 388 a step too low
+  (38.0).
+- Layer by layer at 1370 (the engine's forward stopped after each layer count by a local probe, not in this PR; HF's
+  `output_hidden_states`), the engine's residual and HF's drift from the float64 one alike (0.3% after the first layer,
+  1.8% after the 51st; 0.80% and 0.82% on average over the layers). The engine's largest excess, 1.5-1.7 times HF's at
+  layers 20-22, is channel 4086, a massive activation near 427 where a bf16 step is 2: both hold 430 after layer 19,
+  and at layer 20 HF's add lands on 428 while the engine's stays at 430.
+
+Every position where the engine's top token differs from HF's or from the float64 pass's (row n predicts token
+n + 1; a tie goes to the lower id; logits listed for each side's top-1 tokens in the order of the first three columns):
+
+| position | float64's top-1 | HF's | engine's | float64 (rounded once) | HF | engine | against HF | against float64 |
+|---:|---|---|---|---|---|---|---|---|
+| 22 | `en` 271 | `en` 271 | `see` 3574 | 20.625, 20.625 | 20.75, 20.625 | 20.625, 20.75 | near-tie | near-tie |
+| 64 | `pickle` 82922 | `json` 5174 | `json` 5174 | 31.625, 31.5 | 31.625, 31.625 | 31.75, 31.75 | equal | near-tie |
+| 83 | `the` 269 | `the` 269 | `Python` 9120 | 26.25, 26.25 | 26.25, 26.25 | 26.25, 26.375 | near-tie | near-tie |
+| 85 | `developed` 3260 | `developed` 3260 | `-` 152369 | 35.5, 35.5 | 35.5, 35.5 | 35.5, 35.75 | near-tie | near-tie |
+| 166 | `"))` 9441 | `";` 2651 | `"))` 9441 | 36.5, 36.25 | 36, 36.25 | 36.5, 36.25 | near-tie | equal |
+| 171 | `\"` 12028 | `[\` 11752 | `[\` 11752 | 31.75, 31.625 | 32, 32.25 | 32.25, 32.25 | equal | near-tie |
+| 224 | `('` 1091 | `(` 152374 | `('` 1091 | 39.75, 39.75 | 39.5, 39.75 | 39.5, 39.5 | near-tie | equal |
+| 235 | `.` 152361 | `,` 152363 | `,` 152363 | 45.5, 45.5 | 45.25, 45.5 | 45.25, 45.5 | equal | near-tie |
+| 357 | `separators` 118153 | `indent` 34489 | `indent` 34489 | 37, 36.75 | 36.75, 36.75 | 36.75, 36.75 | equal | near-tie |
+| 401 | `(` 152374 | `(` 152374 | `({'` 50468 | 39.5, 39.25 | 39.5, 39.25 | 39.25, 39.25 | near-tie | near-tie |
+| 425 | `1` 152367 | `{` 152405 | `1` 152367 | 39.75, 39.75 | 39.75, 40 | 40, 40 | bug | equal |
+| 586 | `encoding` 13571 | `representation` 7443 | `encoding` 13571 | 29.75, 29.625 | 30, 30 | 30, 29.875 | near-tie | equal |
+| 1234 | `file` 2408 | `a` 152346 | `a` 152346 | 35, 35 | 35, 35.25 | 35, 35.25 | equal | near-tie |
+| 1295 | `an` 284 | `a` 261 | `a` 261 | 44, 43.75 | 43.75, 43.75 | 43.75, 43.75 | equal | near-tie |
+| 1302 | `If` 3934 | `If` 3934 | `` `` `` 2283 | 32.25, 32 | 32, 31.875 | 32, 32 | near-tie | near-tie |
+| 1304 | `indent` 28799 | `indent` 28799 | `allow` 13471 | 37.25, 37 | 37.25, 37 | 37, 37 | near-tie | near-tie |
+| 1352 | `the` 269 | `\n` 13 | `\n` 13 | 46.25, 46 | 46, 46 | 46, 46 | equal | near-tie |
+| 1370 | `it` 388 | `it` 388 | `the` 269 | 38.25, 38 | 38.25, 38 | 38, 38 | bug | near-tie |
+| 1381 | `skipped` 61065 | `disabled` 18191 | `disabled` 18191 | 41.5, 41.25 | 41.25, 41.25 | 41.25, 41.25 | equal | near-tie |
+| 1384 | `` `` `` 16411 | `` `` `` 16411 | `circular` 13380 | 30.875, 30.75 | 30.875, 30.75 | 30.75, 30.75 | near-tie | near-tie |
+| 1447 | `instead` 62222 | `instead` 62222 | `with` 3629 | 35.5, 35.25 | 35, 34.75 | 34.5, 34.5 | near-tie | near-tie |
+
+A device receipt with no other model server or GPU job on the Mac (28 Oct 2026, this branch's build; a CPU float64
+reference run, one layer's weights at a time, overlapped its first minutes; greedy, 128-token replies,
+`return_token_ids`, `--context 32768 --parallel 2`): the 1,500-position logits are bit-identical to the ones judged
+above, and the six greedy chats to the earlier run; `tf-llama-run ... exact` finds 0 differing rows after the 64- and
+1,500-token prompts at windows of 16 and 7 rows, and reports its planted row each time. Six prompts sent two at a time
+return the same token ids as each one alone. Three chats whose first turn carries an 8,500-token log: the second turn
+resumed from the prompt cache (8,521-8,528 of 8,554-8,568 prompt tokens kept) returns the same ids as on a server
+without the cache. No choice differed, so there are no margins to list.
 
 Served through the recipe harness (an idle 97 GiB server of another model was loaded beside it, so memory readings
 include it), `--context 131072 --parallel 2`, greedy 256-token replies:
