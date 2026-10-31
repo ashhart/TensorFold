@@ -144,6 +144,12 @@ single product bit-equal to float64 on operands with their low 13 mantissa bits 
 toward zero, fp32's exponents and subnormals kept, NaN and the infinities passed. Four controls state the operand as
 fp32 or as rounded to nearest at 10 bits, on each side, and must go red at `shapes`. Before the M5, nax.h's fragments
 keep fp32 operands whole, so the cases run only on the tensor units.
+`core/attention_range.zig` names that cut (`operand_cut`, 2^-10) as a form's `p_cut`: one-sided, since each p only
+shrinks, so it moves an output down by up to 2^-10 of its positive values' share and up by its negative values'. On the
+M5, Nemotron's `tf_attention_nax` and MiniMax-M3.1-Flash's `mm_prompt_attention` state their fp32 P with it, and each
+bf16 output must lie between its range's ends rounded to bf16. Nemotron's adds a case with P spread over about
+[2^-6, 1] and values in [0, 1), where the cut's bias adds up; its control, the same range without the cut, goes red at
+`shapes`. Before the M5, `tf_attention_nax` keeps attention_ref's bound.
 LFM2.5-24B-A2B's shared rounds: the greedy pick (`lfm2_argmax`) and the conv and attention kernels that run every
 stream's rows in one dispatch, each bit-equal to the per-stream kernels it replaces. Four controls edit the source: a tie
 to the highest id, a nonfinite logit not flagged, and every stream reading or writing the first stream's state or cache.
