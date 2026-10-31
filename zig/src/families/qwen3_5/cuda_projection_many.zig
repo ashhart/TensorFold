@@ -19,7 +19,7 @@ pub fn projectMany(e: *Engine, ls: []const Proj, x: u64, xs: u64, outs: []const 
         for (ls, outs, many[0..ls.len]) |l, out, *m| m.* = .{ .q = l.a4, .out = out };
         return e.affine.promptMany(e.stream, x, many[0..ls.len], rows);
     }
-    const segmented = e.affine.split != null and !(prompt and rows > 16) and ls.len <= A.segs_max and for (ls) |l| {
+    const segmented = (e.affine.split != null or e.affine.pdl) and !(prompt and rows > 16) and !(e.affine.pdl and prompt and e.int8.on) and ls.len <= A.segs_max and for (ls) |l| {
         if (l != .a4 or l.inputs() != ls[0].inputs()) break false;
     } else true;
     if (!segmented) {
@@ -30,9 +30,10 @@ pub fn projectMany(e: *Engine, ls: []const Proj, x: u64, xs: u64, outs: []const 
     if (sums) try e.run(e.fns.sums, .{ rows, (k / 64 + 63) / 64, 1 }, .{ 64, 1, 1 }, .{ x, xs, @as(c_int, @intCast(k)), params });
     var many: [A.segs_max]A.Out = undefined;
     var at: usize = 0;
-    while (at < rows) : (at += A.max_rows) {
+    const tile = if (e.affine.pdl) e.affine.verifyRows() else A.max_rows;
+    while (at < rows) : (at += tile) {
         for (ls, outs, many[0..ls.len]) |l, out, *m| m.* = .{ .q = l.a4, .out = out + at * l.outputs() * 2 };
-        try e.affine.decodeMany(e.stream, x + at * k * 2, xs + at * (k / 64) * 4, many[0..ls.len], @min(A.max_rows, rows - at));
+        try e.affine.verifyMany(e.stream, x + at * k * 2, xs + at * (k / 64) * 4, many[0..ls.len], @min(tile, rows - at));
     }
 }
 

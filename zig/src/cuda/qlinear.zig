@@ -253,13 +253,18 @@ pub const PrefillParts = extern struct { p: [4]PrefillPart, count: c_int };
 /// lane_gemv.cu's Part: one projection whose column tiles the CTAs share out.
 pub const GemvPart = extern struct { w: u64, scales: u64, biases: u64, out: u64, n: c_int, npad: c_int, sk: c_int, tiles: c_int };
 
-/// lane_gemv.cu's Seg and Segs: projections of one input, each at its first block, partials and tickets.
+/// GB10 member-local persistent grids; its split stays within the original CTA.
+pub const GemvManyPart = extern struct { p: GemvPart, first: c_int, blocks: c_int };
+pub const GemvManyParts = extern struct { p: [4]GemvManyPart, count: c_int };
+
+/// Split-K descriptors own independent partials and tickets.
 pub const Seg = extern struct { p: GemvPart, first: c_int, work_at: c_int, tick_at: c_int, pad: c_int = 0 };
 pub const Segs = extern struct { s: [4]Seg, count: c_int };
 
 comptime {
     std.debug.assert(@sizeOf(Part) == 56 and @sizeOf(Parts) == 232 and @sizeOf(GemvPart) == 48);
     std.debug.assert(@sizeOf(PrefillPart) == 48 and @sizeOf(PrefillParts) == 200);
+    std.debug.assert(@sizeOf(GemvManyPart) == 56 and @sizeOf(GemvManyParts) == 232);
     std.debug.assert(@sizeOf(Seg) == 64 and @sizeOf(Segs) == 264);
 }
 

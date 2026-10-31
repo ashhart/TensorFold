@@ -150,6 +150,7 @@ fn widths(shape: c.Shape) []const usize {
         12288 => &.{ 12288, 1024, 1024 },
         10240 => &.{ 10240, 6144, 48, 48 },
         17408 => &.{ 17408, 17408 },
+        8192 => &.{ 8192, 4096, 32, 32 },
         else => &.{},
     };
 }
@@ -166,6 +167,7 @@ pub const Product = struct {
     k: usize = 0,
     bytes: usize = 0,
     x: u64 = 0,
+    xs: u64 = 0,
 
     pub fn kernel(self: *Product) g.Kernel {
         return .{ .spec = .{

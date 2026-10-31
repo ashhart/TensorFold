@@ -16,6 +16,7 @@ const weight: cuda.qlinear.Affine4 = .{ .w = 10, .s = 20, .b = 30, .n = n, .k = 
 fn reset() void {
     Trace.count = 0;
     Trace.prompts = 0;
+    Trace.grouped = 0;
 }
 /// Native rows in the fewest verify tiles (decode's bits a row), never the prompt GEMM unless the role is a prompt's.
 fn check(rows: usize, role: P.Role, tile: usize) !void {
@@ -150,10 +151,17 @@ test "Draft precision: the actual grouped MTP QKV keeps live and proposal roles 
                 reset();
                 try d.projQkv(m);
                 const prompt = role == .prompt;
+                try T.expectEqual(@as(usize, @intFromBool(gb10 and !prompt)), Trace.grouped);
                 const per = (m + e.affine.verifyRows() - 1) / e.affine.verifyRows();
                 try T.expectEqual(@as(usize, if (prompt) 3 else 0), Trace.prompts);
                 try T.expectEqual(if (prompt) @as(usize, 0) else 3 * per, Trace.count);
                 for (Trace.calls[0..Trace.count], 0..) |call, i| {
+                    if (gb10) {
+                        try T.expectEqual(@as(usize, if (m <= 32) 5 else if (m <= 64) 6 else 7), call.id);
+                        try T.expectEqual(@as(c_int, 1), call.row_tiles);
+                        try T.expectEqual(@as(u32, if (m <= 32) 32640 else if (m <= 64) 43008 else 57600), call.shared);
+                        try T.expectEqual(@as(c_int, @intCast(cuda.qlinear.splitK(n, k))), call.sk);
+                    }
                     const at = (if (mode == 1) i / 3 else i % per) * e.affine.verifyRows();
                     const projection = if (mode == 1) i % 3 else i / per;
                     try T.expectEqual(@as(u64, x + at * k * 2), call.x);
