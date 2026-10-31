@@ -20,6 +20,9 @@ USAGE = """\
                                            with --fp32-encoder F, F's rows from a float32 encoder too
                                            (CASE_DIR/exact_fp32_encoder.png)
   decode MODEL_DIR LATENTS.f32 PNG         raw float32 latents (rows x columns x 128) from tf-moss-image to a picture
+  vae MODEL_DIR LATENTS.f32 OUT.f64 TORCH.f32  the same decode in float64 on the CPU and in float32 as the
+                                           pipeline runs it, each output before the clamp [height, width, 3] raw,
+                                           for tf-moss-image-decoder
   encode MODEL_DIR OUT_DIR [--prompt-file F]  the prompt encoder alone: token ids, embedding rows, and every layer's
                                            output and the final rows in bf16 and in float32, and
                                            each step alone in bf16 on the float32 run's input
@@ -79,19 +82,24 @@ def rows(x):
     return x[0].float().permute(1, 2, 0).contiguous().cpu()
 
 
-def to_png(pipe, latents, path: str) -> None:
-    """Latents [1, 128, H, W] through the pipeline's own decode path (its batch-norm undo, unpack, VAE) to a PNG."""
+def decoded(vae, latents):
+    """Latents [1, 128, H, W] through the pipeline's own decode path (its batch-norm undo, unpack, VAE), unclamped."""
     import torch
 
     with torch.no_grad():
-        z = latents.to(device=pipe.vae.device, dtype=pipe.vae.dtype)
-        bn = pipe.vae.bn
-        eps = pipe.vae.config.batch_norm_eps
+        z = latents.to(device=vae.device, dtype=vae.dtype)
+        bn = vae.bn
+        eps = vae.config.batch_norm_eps
         z = z * (bn.running_var + eps).sqrt().to(z).view(1, -1, 1, 1) + bn.running_mean.to(z).view(1, -1, 1, 1)
         b, c, h, w = z.shape
         z = z.reshape(b, c // 4, 2, 2, h, w).permute(0, 1, 4, 2, 5, 3).reshape(b, c // 4, 2 * h, 2 * w)
-        image = pipe.vae.decode(z, return_dict=False)[0].clamp(-1, 1)
-        pipe.image_processor.postprocess(image, output_type="pil")[0].save(path)
+        return vae.decode(z, return_dict=False)[0]
+
+
+def to_png(pipe, latents, path: str) -> None:
+    """Latents [1, 128, H, W] decoded as the pipeline does, clamped, to a PNG."""
+    image = decoded(pipe.vae, latents).clamp(-1, 1)
+    pipe.image_processor.postprocess(image, output_type="pil")[0].save(path)
 
 
 def case(args) -> int:
@@ -225,6 +233,28 @@ def decode(args) -> int:
         sys.exit(f"{args.latents} holds {raw.size} values; {args.width}x{args.height} needs {h * w * 128}")
     pipe, _ = pipeline(args.model_dir, args.device, text=False, dit=False)
     to_png(pipe, torch.from_numpy(raw).reshape(1, h, w, 128).permute(0, 3, 1, 2), args.png)
+    return 0
+
+
+def vae(args) -> int:
+    import numpy as np
+    import torch
+    from diffusers import AutoencoderKLFlux2
+
+    raw = np.fromfile(args.latents, dtype=np.float32)
+    h, w = args.height // 16, args.width // 16
+    if raw.size != h * w * 128:
+        sys.exit(f"{args.latents} holds {raw.size} values; {args.width}x{args.height} needs {h * w * 128}")
+    latents = torch.from_numpy(raw).reshape(1, h, w, 128).permute(0, 3, 1, 2)
+    model = AutoencoderKLFlux2.from_pretrained(Path(args.model_dir) / "vae", torch_dtype=torch.float32).eval()
+    torch_rows = decoded(model.to(args.device), latents)[0].permute(1, 2, 0).contiguous().cpu().numpy()
+    torch_rows.astype(np.float32).tofile(args.torch_out)
+    model = model.cpu().double()
+    mark = time.perf_counter()
+    out = decoded(model, latents)[0].permute(1, 2, 0).contiguous().numpy()
+    out.astype(np.float64).tofile(args.out)
+    print(json.dumps({"out": args.out, "torch_out": args.torch_out, "shape": list(out.shape),
+                      "decode_s": round(time.perf_counter() - mark, 1)}))
     return 0
 
 
@@ -399,6 +429,14 @@ def main() -> int:
     n.add_argument("out_dir")
     n.add_argument("--prompt-file", help="the prompt (default: the empty negative prompt)")
     n.add_argument("--device", default="mps")
+    v = sub.add_parser("vae")
+    v.add_argument("model_dir")
+    v.add_argument("latents")
+    v.add_argument("out")
+    v.add_argument("torch_out")
+    v.add_argument("--device", default="mps", help="where the float32 decode runs, as the pipeline would")
+    v.add_argument("--width", type=int, default=1024)
+    v.add_argument("--height", type=int, default=1024)
     p = sub.add_parser("compare")
     p.add_argument("a")
     p.add_argument("b")
@@ -406,7 +444,7 @@ def main() -> int:
     n = sub.add_parser("noise")
     n.add_argument("out")
     args = parser.parse_args()
-    return {"case": case, "start": start, "exact": exact, "decode": decode, "encode": encode, "compare": compare, "noise": noise}[args.mode](args)
+    return {"case": case, "start": start, "exact": exact, "decode": decode, "encode": encode, "vae": vae, "compare": compare, "noise": noise}[args.mode](args)
 
 
 if __name__ == "__main__":

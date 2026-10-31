@@ -1,11 +1,11 @@
-//! A run's rows against float32 ones, gated by the bf16 reference's own distance from them.
+//! A run's rows against exact ones, gated by the reference implementation's own distance from them.
 const std = @import("std");
 const host = @import("host.zig");
 
 pub const Match = struct { max_abs: f64, cosine: f64, worst_row: f64, worst_at: usize };
 
 /// Largest absolute difference, cosine, and the largest relative L2 error of one row of `width` (and its row).
-pub fn match(comptime T: type, ours: []const T, theirs: []const f32, width: usize) Match {
+pub fn match(comptime T: type, ours: []const T, theirs: anytype, width: usize) Match {
     return measure(T, ours, theirs, width, false);
 }
 
@@ -14,7 +14,7 @@ pub fn rounding(theirs: []const f32, width: usize) Match {
     return measure(f32, theirs, theirs, width, true);
 }
 
-fn measure(comptime T: type, ours: []const T, theirs: []const f32, width: usize, comptime rounded: bool) Match {
+fn measure(comptime T: type, ours: []const T, theirs: anytype, width: usize, comptime rounded: bool) Match {
     var dot: f64 = 0;
     var aa: f64 = 0;
     var bb: f64 = 0;
@@ -43,15 +43,20 @@ fn measure(comptime T: type, ours: []const T, theirs: []const f32, width: usize,
     return m;
 }
 
-/// How far a result may be from float32: this many times the bf16 reference's distance, or bf16 rounding's.
+/// How far a result may be from exact: this many times the reference's distance (or bf16 rounding's, for bf16).
 pub const factor = 2.0;
 
 pub const Verdict = struct { pass: bool, cosine_err: f64, cosine_limit: f64, row: f64, row_at: usize, row_limit: f64 };
 
 /// Ours against float32: its cosine error and worst row each within `factor` of the bf16 reference's or rounding's.
 pub fn gate(ours: Match, reference: Match, rounded: Match) Verdict {
-    const cosine_limit = factor * @max(1 - reference.cosine, 1 - rounded.cosine);
-    const row_limit = factor * @max(reference.worst_row, rounded.worst_row);
+    return within(ours, .{ .max_abs = 0, .cosine = @min(reference.cosine, rounded.cosine), .worst_row = @max(reference.worst_row, rounded.worst_row), .worst_at = 0 });
+}
+
+/// Ours against exact rows: its cosine error and worst row each within `factor` of the reference's.
+pub fn within(ours: Match, reference: Match) Verdict {
+    const cosine_limit = factor * (1 - reference.cosine);
+    const row_limit = factor * reference.worst_row;
     const cosine_err = 1 - ours.cosine;
     return .{
         .pass = cosine_err <= cosine_limit and ours.worst_row <= row_limit,
@@ -115,4 +120,23 @@ test "a planted mismatch fails even when its repeat is identical" {
 test "a different repeat fails even when every gate passes" {
     const v: Verdict = .{ .pass = true, .cosine_err = 0, .cosine_limit = 1, .row = 0, .row_at = 0, .row_limit = 1 };
     try std.testing.expect(!accept(&.{ v, v }, false));
+}
+
+test "against float64, a row further off than the reference allows fails" {
+    var exact: [cols * n]f64 = undefined;
+    var f: [cols * n]f32 = undefined;
+    synthetic(&f, 3);
+    for (&exact, f) |*e, x| e.* = x;
+    var theirs: [cols * n]f32 = undefined;
+    var ours: [cols * n]f32 = undefined;
+    for (&theirs, &ours, exact, 0..) |*t, *o, x, i| {
+        const s: f64 = if (i % 2 == 0) 1 else -1;
+        t.* = @floatCast(x * (1 + 1e-5 * s));
+        o.* = @floatCast(x * (1 - 1e-5 * s));
+    }
+    try std.testing.expect(within(match(f32, &ours, &exact, cols), match(f32, &theirs, &exact, cols)).pass);
+    for (ours[3 * cols ..][0..cols], exact[3 * cols ..][0..cols]) |*o, x| o.* = @floatCast(x * (1 + 1e-4));
+    const v = within(match(f32, &ours, &exact, cols), match(f32, &theirs, &exact, cols));
+    try std.testing.expect(!v.pass);
+    try std.testing.expectEqual(@as(usize, 3), v.row_at);
 }

@@ -8,6 +8,7 @@ const Metal = struct {
     pub const mi = tf.moss_image;
     pub const st = tf.safetensors;
     pub const seconds = mtl.clock.seconds;
+    pub const Picture = struct { png: []const u8, load_s: f64, wall: f64, gpu: f64 };
 
     pub const Device = struct {
         pool: mtl.objc.Pool,
@@ -44,6 +45,17 @@ const Metal = struct {
                 try enc.rows(ids, m.*, null);
             }
             return mtl.clock.seconds() - encoding;
+        }
+
+        /// `latents` as a PNG by the checkpoint's vae/ decoder, freed before this returns; its load and decode times.
+        pub fn decode(g: *Device, a: std.mem.Allocator, io: std.Io, checkpoint: []const u8, latents: []const f32, width: usize, height: usize) !Picture {
+            const loading = mtl.clock.seconds();
+            const decoder = try mi.Decoder.load(std.heap.page_allocator, io, g.device, try std.fs.path.join(a, &.{ checkpoint, "vae" }), width, height);
+            defer decoder.deinit();
+            const load_s = mtl.clock.seconds() - loading;
+            const rgb = try a.alloc(u8, width * height * 3);
+            const t = try decoder.decode(latents, rgb);
+            return .{ .png = try mi.png.encode(a, rgb, width, height), .load_s = load_s, .wall = t.wall, .gpu = t.gpu };
         }
     };
 };
