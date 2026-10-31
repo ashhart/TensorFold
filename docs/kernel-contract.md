@@ -207,6 +207,11 @@ CUDA also checks Nemotron's pocket (`nemotron_ops.cu`, the learned neurons the l
 shared expert): relu^2 up into act rows and down added into the shared expert's slot, a block row a row and tiled, the
 down to fp32 and bf16, against float64, the neurons past the count NaN so a read of one shows (two controls: the up's
 relu by `fmaxf`, and the down launched one neuron short).
+CUDA also checks the grouped EXL3 experts (`tf_exl3_grouped_0`, `_1` and `_2`, one a codebook), which on sm_120 and
+sm_121 load a warp's next k tile while the current one decodes: each bit-equal to main's loop (kept in
+`contract_controls.cu`) at one, two and three k tiles a warp and at GLM-5.3-Flash's, MiMo-V2.6-Flash's and the Qwen3.5
+EXL3 pack's widths (two controls: the next load reading tile i + 2, the last tile decoding the words before it).
+Older SMs build main's loop, and their records are main's.
 
 ## CUDA records per nvcc release
 
