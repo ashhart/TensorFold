@@ -4,6 +4,7 @@ const cuda = @import("cuda");
 const core = @import("core");
 const flash = @import("flashnext");
 const rig_ = @import("contract_rig.zig");
+const check_ = @import("check.zig");
 
 const contract = core.contract;
 const c = contract.spec;
@@ -398,6 +399,14 @@ pub const Glue = struct {
         try self.restoreState();
         try self.ours(self.outs[0..self.nout]);
         try self.rig.s.synchronize();
+    }
+
+    /// One launch set's time: the prompt tiles' (`tiles`) or the row kernels', on the prepared inputs.
+    pub fn timed(self: *Glue, tiles: bool, io: std.Io) !i96 {
+        const start = check_.now(io);
+        if (tiles) try self.ours(self.outs[0..self.nout]) else try self.theirs(self.outs[0..self.nout]);
+        try self.rig.s.synchronize();
+        return check_.now(io) - start;
     }
 
     /// The scratch the baseline writes: the outputs' layout back to back, poisoned like them (0xff).
