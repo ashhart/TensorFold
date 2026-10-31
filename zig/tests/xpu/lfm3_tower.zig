@@ -21,16 +21,23 @@ const Dump = struct {
     io: std.Io,
     dir: []const u8,
     prefix: []const u8,
-    fn take(ctx: *anyopaque, stage: i32, rows: []const u16, cols: u32) void {
+    fn take(ctx: *anyopaque, stage: i32, rows: []const f32, cols: u32) void {
         _ = cols;
         const d: *Dump = @ptrCast(@alignCast(ctx));
         var b: [256]u8 = undefined;
         const name = if (stage < 0)
-            std.fmt.bufPrint(&b, "{s}/{s}embedding_norm.bf16", .{ d.dir, d.prefix }) catch return
+            std.fmt.bufPrint(&b, "{s}/{s}embedding_norm.f32", .{ d.dir, d.prefix }) catch return
         else if (stage == lfm3.vision.depth)
-            std.fmt.bufPrint(&b, "{s}/{s}rows.bf16", .{ d.dir, d.prefix }) catch return
+            std.fmt.bufPrint(&b, "{s}/{s}rows.f32", .{ d.dir, d.prefix }) catch return
         else
-            std.fmt.bufPrint(&b, "{s}/{s}layer_{d:0>2}.bf16", .{ d.dir, d.prefix, @as(u32, @intCast(stage)) }) catch return;
+            std.fmt.bufPrint(&b, "{s}/{s}layer_{d:0>2}.f32", .{ d.dir, d.prefix, @as(u32, @intCast(stage)) }) catch return;
+        std.Io.Dir.cwd().writeFile(d.io, .{ .sub_path = name, .data = std.mem.sliceAsBytes(rows) }) catch {};
+    }
+    fn named(ctx: *anyopaque, stage: []const u8, rows: []const f32, cols: u32) void {
+        _ = cols;
+        const d: *Dump = @ptrCast(@alignCast(ctx));
+        var b: [256]u8 = undefined;
+        const name = std.fmt.bufPrint(&b, "{s}/{s}{s}.f32", .{ d.dir, d.prefix, stage }) catch return;
         std.Io.Dir.cwd().writeFile(d.io, .{ .sub_path = name, .data = std.mem.sliceAsBytes(rows) }) catch {};
     }
 };
@@ -68,10 +75,13 @@ pub fn main(init: std.process.Init) !void {
     const t0 = now();
     const t = try Tower.load(gpa, &r, &l, (P + 3) / 4 * 4);
     defer t.deinit();
+    // LFM3_VIT_ROUND: the rounding points (vision.Round bits, e.g. 0x7ff: C11's bf16 tower) for the ablation
+    if (std.c.getenv("LFM3_VIT_ROUND")) |v| t.round = try std.fmt.parseInt(u32, std.mem.span(v), 0);
+    std.debug.print("rounding points 0x{x}\n", .{t.round});
     std.debug.print("tower loaded in {d:.0} ms, {d} MiB on the device with scratch for {d} patches\n", .{ now() - t0, t.bytes >> 20, P });
     const rows = try l.empty(@as(usize, p.tokens) * lfm3.vision.out_width * 2);
     var dump: Dump = .{ .io = io, .dir = out, .prefix = "xpu_" };
-    try t.image(p.pixels, p.gh, p.gw, rows, .{ .ctx = &dump, .f = Dump.take });
+    try t.image(p.pixels, p.gh, p.gw, rows, .{ .ctx = &dump, .f = Dump.take, .named = Dump.named });
     for (0..3) |i| {
         try r.sync();
         const t1 = now();
