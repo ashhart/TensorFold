@@ -76,6 +76,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     if (o.drafts and (o.tp == 1 or o.rank == 0)) {
         own.head = try mtp.Head.init(gpa, io, driver, &own.stream, dir);
         own.depth = @max(1, @min(mtp.max_chain, F.envUsize("TF_FLASHNEXT_DRAFTS", mtp.default_depth)));
+        own.depth_greedy = @max(1, @min(mtp.max_chain, F.envUsize("TF_FLASHNEXT_DRAFTS_GREEDY", mtp.default_depth_greedy)));
         if (std.c.getenv("TF_FLASHNEXT_CONFIDENCE")) |v| own.confidence = std.fmt.parseFloat(f64, std.mem.span(v)) catch mtp.default_confidence;
     }
     errdefer if (own.head) |h| h.deinit();
@@ -100,6 +101,8 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
         const head_bytes = if (own.head) |h| mtp.Draft.bytes(window, h.ids.len, own.engine.chunk) else 0;
         own.kv.layout = @import("cuda_kv_lanes.zig").layout(o.context, page_tokens, own.kv.head, stream_bytes - own_seq_bytes - head_bytes);
     }
+    // the weights are in: the n-gram table into the page cache behind them, so the first prompt finds its rows in RAM
+    own.engine.ngram.warm();
     return .{
         .layout = own.kv.layout,
         .vision = own.vision,

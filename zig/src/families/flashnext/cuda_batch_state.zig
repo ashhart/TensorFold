@@ -144,6 +144,8 @@ pub const Hooks = struct {
     moe_add: ?MoeAdd = null,
     /// The rows are prompt tokens (a fill), not a decode or verify window.
     prompt: bool = false,
+    /// The last row's scores also in seq.logits (a sync, a vocab-row copy); drafted windows' draws read device rows.
+    host_logits: bool = true,
 };
 
 /// Rows a layer's pending-row log holds, and the pending count past which a chain stores its state in place.
@@ -159,6 +161,12 @@ pub const RollJobs = extern struct { j: [roll_jobs_max]RollJob = @splat(.{}), n:
 
 comptime {
     std.debug.assert(@sizeOf(RollJob) == 40 and @sizeOf(RollJobs) == 1608);
+}
+
+/// TF_FLASHNEXT_VERIFY_HOST_LOGITS=1: drafted windows also copy their last row's scores to the host, as before.
+pub fn verifyHostLogits() bool {
+    const v = std.c.getenv("TF_FLASHNEXT_VERIFY_HOST_LOGITS") orelse return false;
+    return std.mem.eql(u8, std.mem.span(v), "1");
 }
 
 /// The kernels the pass launches besides the captured Triton ones, loaded once.
@@ -475,6 +483,8 @@ pub const Scratch = struct {
 
 /// A sequence's state the pass reads and leaves as the row-by-row path would.
 pub const SeqState = struct {
+    /// The sequence's generation (Seq.gen), for graph keys; 0 for the draft head's own views.
+    gen: u64 = 0,
     media: ?@import("cuda_media.zig").View = null,
     conv: []cuda.DeviceBuffer,
     state: []cuda.DeviceBuffer,

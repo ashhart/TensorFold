@@ -31,8 +31,49 @@ pub const Sampling = lanes.sampling.Sampling;
 pub const max_chain: usize = 15;
 /// Preserve the existing recipe unless an explicit depth is selected.
 pub const default_depth: usize = 6;
-/// The live recipe's --mtp-confidence (Python's CONFIDENCE default is 0.7).
-pub const default_confidence: f64 = 0.6;
+/// A greedy stream's chain at most (TF_FLASHNEXT_DRAFTS_GREEDY): greedy drafts land more often, so a deeper chain pays.
+pub const default_depth_greedy: usize = 8;
+
+/// The chain a stream drafts at most: `greedy` for greedy streams (no sampling or temperature 0), else `depth`.
+pub fn depthFor(sm: ?Sampling, depth: usize, greedy: usize) usize {
+    return if (isSampled(sm)) depth else greedy;
+}
+/// The chain's stop rule (Stop): the running product of the drafts' probabilities at 0.4; 0.6 per draft before it.
+pub const default_confidence: f64 = -0.4;
+
+/// TF_FLASHNEXT_CONFIDENCE c > 0: a later draft only at or above c; c < 0: while p1 * ... * pj >= -c; 0: every draft.
+pub const Stop = struct {
+    c: f64,
+    product: f64 = 1.0,
+
+    /// Whether draft j (0-based) with probability `p` is proposed, and whether the chain may go on.
+    pub fn take(s: *Stop, j: usize, p: f64) struct { propose: bool, more: bool } {
+        if (s.c > 0) {
+            const low = p < s.c;
+            if (low and j > 0) return .{ .propose = false, .more = false };
+            return .{ .propose = true, .more = !low };
+        }
+        if (s.c < 0) {
+            s.product *= p;
+            // below the line it ends the chain: no later product can reach it again
+            if (s.product < -s.c) return .{ .propose = j == 0, .more = false };
+        }
+        return .{ .propose = true, .more = true };
+    }
+};
+
+test "the stop rule: per draft above zero, the running product below it, every draft at zero" {
+    var per: Stop = .{ .c = 0.6 };
+    try std.testing.expect(per.take(0, 0.5).propose and !per.take(0, 0.5).more);
+    try std.testing.expect(!per.take(1, 0.5).propose);
+    var prod: Stop = .{ .c = -0.4 };
+    try std.testing.expect(prod.take(0, 0.8).more); // 0.8
+    try std.testing.expect(prod.take(1, 0.6).more); // 0.48
+    const t = prod.take(2, 0.8); // 0.384: below 0.4
+    try std.testing.expect(!t.propose and !t.more);
+    var all: Stop = .{ .c = 0 };
+    try std.testing.expect(all.take(5, 0.01).propose and all.take(6, 0.01).more);
+}
 /// A verify window's rows at most: the pending token and a chain, or a copied continuation.
 pub const max_rows: usize = 32;
 /// A drafting round's rows at most: a shared verify's (TF_FLASHNEXT_WINDOW_ROWS lowers it; 0: each alone).
@@ -165,6 +206,7 @@ pub const Head = struct {
     service: lanes.proposal_head.Service,
     module: cuda.Module,
     best_fn: cuda.Function,
+    topk_fn: cuda.Function, // fn_row_topk: a row's top_k candidates as drawRow ranks them (cuda_mtp_draw.zig)
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, driver: *cuda.Driver, stream: *cuda.Stream, dir: []const u8) !*Head {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
@@ -212,6 +254,7 @@ pub const Head = struct {
         h.module = try cuda.Module.load(driver, cuda.kernels.flashnext_mtp);
         errdefer h.module.unload();
         h.best_fn = try h.module.function("fn_row_best");
+        h.topk_fn = try h.module.function("fn_row_topk");
         return h;
     }
 
@@ -245,6 +288,18 @@ pub const Head = struct {
             return view_.project(.{ .lane = &pass.k.native_lane }, pass.stream, .{ .x = input, .sums = sums, .part = pass.s.native_part }, out, rows);
         }
         _ = try pass.lane(input, sums, h.draft, out, pass.s.dummy, rows, 1);
+    }
+
+    /// Each of `rows` rows' `k` best of its first `v` values (fn_row_topk): bf16 bits to out_v, columns to out_c.
+    pub fn topk(h: *const Head, stream: cuda.Stream, scores: u64, v: usize, ld: usize, rows: usize, k: usize, out_v: u64, out_c: u64) !void {
+        var a: cuda.Args = .{};
+        a.add(scores);
+        a.add(cint(v));
+        a.add(@as(c_longlong, @intCast(ld)));
+        a.add(cint(k));
+        a.add(out_v);
+        a.add(out_c);
+        try cuda.launch.launch(h.topk_fn, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 } }, stream, &a);
     }
 
     /// fn_row_best over `rows` rows of `v` scores `ld` apart: [rows, 4] fp32 at `out` (best, log-sum-exp, id bits).

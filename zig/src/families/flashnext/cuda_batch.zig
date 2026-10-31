@@ -123,6 +123,8 @@ pub fn Pass(comptime Tri: type) type {
         pending_f32: bool = false,
         /// This layer's out projection leaves part's other slices alone; its writeback adds the zero slice once.
         zero_slices: bool = false,
+        /// stageWindow queued the pass's uploads (ids, positions, n-gram rows): it launches kernels alone (graphs).
+        staged: bool = false,
 
         // ---- launches ----------------------------------------------------------------------------------------
 
@@ -188,11 +190,6 @@ pub fn Pass(comptime Tri: type) type {
             try self.tri.hcWriteback(h, h, pss, dummy, "*bf16", inj, y, "*fp32", wts, "*fp32", rs, n, dims, streams, 2, 10, 11, 1);
         }
 
-        /// Prompt rows' read-out on flashnext_hcf.cu's tiles, fn_hc_down's and fn_hc_upmix's bits (K slices folded).
-        fn readoutTiles(self: *Self, hc_w: HcW, r0: usize, n: usize) !void {
-            return tiles.readout(self.tri, self.k, self.stream, self.s, hc_w, r0, n);
-        }
-
         /// A read-out over rows [r0, r0 + n) of the streams: mixed and its group sums, and the inject gates.
         pub fn readout(self: *Self, hc_w: HcW, r0: usize, n: usize) !void {
             return self.readoutKeep(hc_w, r0, n, .{});
@@ -211,7 +208,7 @@ pub fn Pass(comptime Tri: type) type {
                 try self.tri.hcNormalize(h, pss, hc_w.scale.ptr, norm, eps, n, dims, streams);
                 return hc.readoutNative(self, hc_w, r0, n);
             }
-            if (n >= 64 and self.tri.readoutTilesOwned() and std.meta.eql(keep, HcKeep{})) return self.readoutTiles(hc_w, r0, n);
+            if (n >= 64 and self.tri.readoutTilesOwned() and std.meta.eql(keep, HcKeep{})) return tiles.readout(self.tri, self.k, self.stream, self.s, hc_w, r0, n);
             try self.copy(keep.h, h, n * wide * 2);
             if (hc_sk * n * hc_w.n_down * 4 > s.hc_part_bytes) return error.UnexpectedTensor;
             try self.tri.hcDown(h, pss, hc_w.scale.ptr, norm, hc_w.down.w.ptr, hc_w.down.s.ptr, hc_w.down.b.ptr, s.dn, s.hc_part, eps, n, hc_w.n_down, wide, dims, dims / 256, streams, hc_sk);
@@ -513,13 +510,13 @@ pub fn Pass(comptime Tri: type) type {
             self.pending = null;
             self.pending_f32 = false;
             // the gather writes the scratch's pinned rows, so the last pass's uploads must have read them first
-            if (!self.prepared) try s.ready();
+            if (!self.prepared and !self.staged) try s.ready();
             const emb = s.hostEmb(n);
             const xs = s.hostXs(n);
             var gather: Gather = .{ .ngram = self.m.ngram, .history = self.seq.history[0..], .ids = ids, .emb = emb, .xs = xs, .io = self.io, .lanes = self.lanes };
-            var thread: ?std.Thread = if (self.prepared) null else try std.Thread.spawn(.{}, Gather.main, .{&gather});
+            var thread: ?std.Thread = if (self.prepared or self.staged) null else try std.Thread.spawn(.{}, Gather.main, .{&gather});
             defer if (thread) |th| th.join();
-            try self.stage(ids);
+            if (!self.staged) try self.stage(ids);
             if (self.m.table_dense) {
                 try self.tri.embedDense(s.ids, self.m.table_w, s.h, dims, streams, n);
             } else {
@@ -533,9 +530,11 @@ pub fn Pass(comptime Tri: type) type {
                     thread = null;
                     if (gather.failed) |err| return err;
                     if (profile()) std.debug.print("batch: {d} rows' n-gram rows gathered on the host in {d:.1} ms\n", .{ n, @as(f64, @floatFromInt(gather.ns)) / 1e6 });
-                    try self.upload(s.ple_emb, std.mem.sliceAsBytes(emb));
-                    try self.upload(s.ple_xs, std.mem.sliceAsBytes(xs));
-                    if (!self.prepared) try s.uploaded();
+                    if (!self.staged) {
+                        try self.upload(s.ple_emb, std.mem.sliceAsBytes(emb));
+                        try self.upload(s.ple_xs, std.mem.sliceAsBytes(xs));
+                        if (!self.prepared) try s.uploaded();
+                    }
                     if (self.pending != null) try self.writeback(0, n);
                     try self.pleBlock(lw, ids);
                 }
