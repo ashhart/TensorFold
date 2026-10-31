@@ -10,8 +10,8 @@ pub const formats: []const []const u8 = &.{"mlx-q4g64"};
 pub const name = "xpu-lfm3";
 pub const Engine = lfm3.engine.Engine;
 
-/// Rows of one prompt window (pdense above one row; the scratch is sized for it).
-const prompt_rows: u32 = 64;
+/// Rows of one prompt window (pdense above one row; the scratch is sized for it): 128 beat 32 and 64 on Iris Xe.
+const prompt_rows: u32 = 128;
 
 pub fn promptRows(_: *const Engine) u32 {
     return prompt_rows;
