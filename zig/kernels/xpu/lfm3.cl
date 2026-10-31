@@ -90,6 +90,31 @@ __kernel void lfm3_conv_rows(__global const ushort *proj, uint pd, __global cons
     for (uint k = 0; k < 6; k++) sout[k * D + c] = to_bf(h[k]);
 }
 
+// lfm3_conv_rows for a verified window, also ext rows 0..5 = the state before it, 6 + r = row r's B * x (rollback).
+__kernel void lfm3_conv_hist(__global const ushort *proj, uint pd, __global const ushort *sin, __global ushort *sout, __global const ushort *cw,
+                             __global ushort *y, uint n, uint D, __global ushort *ext) {
+    const uint c = get_global_id(0);
+    if (c >= D) return;
+    float h[6], w[7];
+    for (uint k = 0; k < 6; k++) {
+        h[k] = bf(sin[k * D + c]);
+        ext[k * D + c] = to_bf(h[k]);
+    }
+    for (uint k = 0; k < 7; k++) w[k] = bf(cw[c * 7 + k]);
+    for (uint r = 0; r < n; r++) {
+        __global const ushort *p = proj + r * pd;
+        const float bx = bfr(bf(p[c]) * bf(p[2 * D + c]));
+        float acc = 0.0f;
+        for (uint k = 0; k < 6; k++) acc += h[k] * w[k];
+        acc += bx * w[6];
+        y[r * D + c] = to_bf(bf(p[D + c]) * bfr(acc));
+        ext[(6 + r) * D + c] = to_bf(bx);
+        for (uint k = 0; k < 5; k++) h[k] = h[k + 1];
+        h[5] = bx;
+    }
+    for (uint k = 0; k < 6; k++) sout[k * D + c] = to_bf(h[k]);
+}
+
 // One head of row r at position pos: RMSNorm over 128 dims, RoPE on pairs (d, d + 64) with bf16 cos/sin; 64 items.
 inline void norm_rope_head(__global const ushort *s, __global ushort *o, __global const ushort *w, __global const float *inv_freq, uint pos,
                            float eps, __local float *part) {
