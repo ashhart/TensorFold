@@ -172,3 +172,56 @@ test "Draft precision: the actual grouped MTP QKV keeps live and proposal roles 
         }
     }
 }
+
+test "Draft precision: GB10 family grouping DFlash QKV and MLP keep prompt roles and tile every native row" {
+    for ([_]bool{ false, true }) |gb10| {
+        var driver: cuda.Driver = undefined;
+        var e = fixture.engine(&driver, gb10);
+        var d: q.draft.Draft = undefined;
+        d.e = &e;
+        d.xs = xs;
+        for ([_]P.Role{ .prompt, .live, .proposal }) |role| {
+            d.projection_role = role;
+            for ([_]usize{ 1, 4, 16, 17, 32, 33, 64, 65, 128, 129, 256 }) |rows| {
+                reset();
+                try d.projMany(&.{ weight, weight, weight }, x, &.{ out, out + 0x1000000, out + 0x2000000 }, rows);
+                const prompt = role == .prompt and rows > 16;
+                const per = (rows + e.affine.verifyRows() - 1) / e.affine.verifyRows();
+                try T.expectEqual(@as(usize, if (gb10 and !prompt) per else 0), Trace.grouped);
+                try T.expectEqual(@as(usize, if (prompt) 3 else 0), Trace.prompts);
+                try T.expectEqual(@as(usize, if (prompt) 0 else 3 * per), Trace.count);
+                for (Trace.calls[0..Trace.count], 0..) |call, i| {
+                    const at = (if (gb10) i / 3 else i % per) * e.affine.verifyRows();
+                    const part = if (gb10) i % 3 else i / per;
+                    try T.expectEqual(x + at * k * 2, call.x);
+                    try T.expectEqual(xs + at * (k / 64) * 4, call.xs);
+                    try T.expectEqual(out + part * 0x1000000 + at * n * 2, call.out);
+                    try T.expectEqual(@as(c_int, @intCast(@min(e.affine.verifyRows(), rows - at))), call.rows);
+                }
+            }
+        }
+    }
+}
+
+test "Draft precision: GB10 family grouping new pairs preserve the other GPUs' separate dispatches" {
+    for ([_]bool{ false, true }) |gb10| {
+        var driver: cuda.Driver = undefined;
+        var e = fixture.engine(&driver, gb10);
+        var d: q.draft.Draft = undefined;
+        d.e = &e;
+        d.xs = xs;
+        d.projection_role = .proposal;
+        for ([_]usize{ 4, 17, 129 }) |rows| {
+            reset();
+            if (comptime @hasDecl(q.draft.Draft, "projManySums")) {
+                try d.projManySums(&.{ weight, weight }, x, &.{ out, out + 0x1000000 }, rows, false);
+            } else {
+                try d.projAgain(weight, x, out, rows);
+                try d.projAgain(weight, x, out + 0x1000000, rows);
+            }
+            const per = (rows + e.affine.verifyRows() - 1) / e.affine.verifyRows();
+            try T.expectEqual(@as(usize, if (gb10) per else 0), Trace.grouped);
+            try T.expectEqual(2 * per, Trace.count);
+        }
+    }
+}
