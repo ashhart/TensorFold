@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek-V4.1 on CUDA backs up only the ratio-2 recurrent carries before each window, instead of every layer's sliding-window ring (89 device copies, 6.4 MB a window on Flash-1017); rejected rows still roll back exactly.
+
 - DeepSeek-V4.1's DSpark drafting on CUDA no longer drains the whole context before each draft pass's staging upload, so a draft pass stops waiting for every side stream.
 
 - DeepSeek-V4.1 at tensor parallel: every rank's session store now charges disk eviction the same logical size, so the ranks evict the same prefixes and their caps no longer drift apart, and a restore checks the leader's identity before it changes anything. Adapted by @jayleaton from @florianbrede-ayet's downstream fix, with @rootsbymenda's report of the diverging caps.
