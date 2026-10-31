@@ -37,6 +37,8 @@ pub const Model = struct {
         m.config = try cfg.Config.read(gpa, io, dir);
         m.device = try mtl.Device.init();
         errdefer m.device.deinit();
+        // prompt chunks' GEMM and attention run on Metal 4 tensor units: an M5 or later
+        if (!m.device.tensorUnits()) return error.LlamaNeedsTensorUnits;
         m.queue = try m.device.queue();
         errdefer m.queue.deinit();
         m.checkpoint = ck.Checkpoint.init(gpa);

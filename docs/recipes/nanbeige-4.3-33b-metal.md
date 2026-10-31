@@ -3,13 +3,16 @@
 This recipe covers text generation with [`Nanbeige/Nanbeige4.3-33B`](https://huggingface.co/Nanbeige/Nanbeige4.3-33B)
 (model_type `llama`: a dense 33B Llama-architecture model, 512K context, thinking and tool calls in its chat template)
 on the Metal engine, served from the bf16 release as published: no conversion, nothing lost. It was brought up on an
-M5 Ultra (256 GB); other Macs are untested. The family serves any `llama` checkpoint with heads of 128, default RoPE,
-no biases and its own output head, in bf16; it refuses others by name.
+M5 Ultra (256 GB); other Macs are untested. The family admits only the checkpoints checked against Hugging Face, by the
+geometry their configs name (`qualified` in `zig/src/families/llama/config.zig`: Nanbeige4.3-33B); another `llama`
+checkpoint is refused by name until it has been checked the same way. Prompts run on Metal 4 tensor units, so it needs
+an M5 or later: M1 to M4 Macs are refused by name at load.
 
 ## Build and serve
 
 ```sh
-hf download Nanbeige/Nanbeige4.3-33B --local-dir models/nanbeige4.3-33b
+hf download Nanbeige/Nanbeige4.3-33B --revision c1093c501cc6460427c0ac634db7223d0450c0ee \
+  --local-dir models/nanbeige4.3-33b
 zig build native -Doptimize=ReleaseFast -Dcpu=native
 zig build grammar -Dxgrammar=PATH_TO_XGRAMMAR_v0.2.8 -Dcpu=native   # structured output
 LLAMA_LOAD_LIMIT_GB=150 zig-out/native/bin/tensorfold-native serve models/nanbeige4.3-33b --name nanbeige --port 8888 \
@@ -59,6 +62,27 @@ greedy chats of 64 tokens (code, prose, Chinese, a document, with and without th
 token; the other three part at a position where the engine's two best logits are the same bf16 value. One-row steps
 and windows of 7 or 16 rows give the same logits bit for bit after prompts of 64 and 1,500 tokens.
 
+The 13 teacher-forced positions of the 1,500 whose top tokens differ (row n predicts token n + 1; a tie goes to the
+lower id on both sides). At each, HF's and the engine's two contenders are within one bf16 step of each other on both
+sides (0.125 below 32, 0.25 from 32 to 64): HF's two tie at 3 of them, the engine's at 8, neither at 22 and 166, and
+at 1370 a third token, `no`, ties at the top on both sides.
+
+| position | HF's top-1 (a) | engine's top-1 (b) | HF's logits a, b | engine's logits a, b | KL |
+|---:|---|---|---|---|---:|
+| 22 | `en` 271 | `see` 3574 | 20.75, 20.625 | 20.625, 20.75 | 0.0047 |
+| 83 | `the` 269 | `Python` 9120 | 26.25, 26.25 | 26.25, 26.375 | 0.0022 |
+| 85 | `developed` 3260 | `-` 152369 | 35.5, 35.5 | 35.5, 35.75 | 0.0134 |
+| 166 | `";` 2651 | `"))` 9441 | 36.25, 36 | 36.25, 36.5 | 0.0234 |
+| 224 | `(` 152374 | `('` 1091 | 39.75, 39.5 | 39.5, 39.5 | 0.0078 |
+| 401 | `(` 152374 | `({'` 50468 | 39.5, 39.25 | 39.25, 39.25 | 0.0076 |
+| 425 | `{` 152405 | `1` 152367 | 40, 39.75 | 40, 40 | 0.0163 |
+| 586 | `representation` 7443 | `encoding` 13571 | 30, 30 | 29.875, 30 | 0.0027 |
+| 1302 | `If` 3934 | ``` `` ``` 2283 | 32, 31.875 | 32, 32 | 0.0022 |
+| 1304 | `indent` 28799 | `allow` 13471 | 37.25, 37 | 37, 37 | 0.0078 |
+| 1370 | `it` 388 | `the` 269 | 38.25, 38 (`no` 754: 38.25) | 38, 38 (`no` 754: 38) | 0.0076 |
+| 1384 | ``` `` ``` 16411 | `circular` 13380 | 30.875, 30.75 | 30.75, 30.75 | 0.0025 |
+| 1447 | `instead` 62222 | `with` 3629 | 35, 34.75 | 34.5, 34.5 | 0.0129 |
+
 Served through the recipe harness (an idle 97 GiB server of another model was loaded beside it, so memory readings
 include it), `--context 131072 --parallel 2`, greedy 256-token replies:
 
@@ -107,5 +131,11 @@ Each keeps the replies' bits.
 No quality suite was run. No drafter is served (the family has no draft head; copy drafts come from the lane core).
 Logprobs are refused by name: the release's tokenizer decodes through a `Strip` step, which the engine's tokenizer does
 not count as token-local, so the server cannot give a token's bytes on its own.
-Only the M5's tensor units were checked; M1-M4 Macs and smaller RAM are untested. Tied heads, other head sizes,
-Llama 3's scaled RoPE and biased projections are refused at load rather than served untested.
+Only the M5's tensor units were checked; M1-M4 Macs are refused at load, and smaller RAM is untested. Other `llama`
+checkpoints, tied heads, other head sizes, Llama 3's scaled RoPE and biased projections are refused at load rather than
+served untested.
+
+## Licence
+
+Nanbeige4.3-33B is published under Apache-2.0 at the revision measured here
+(`c1093c501cc6460427c0ac634db7223d0450c0ee`, the licence in its model card).
