@@ -1,5 +1,6 @@
 //! Host fixtures for spill concurrency and fault tests; every store has independent filesystem hooks.
 const std = @import("std");
+const waits = @import("rows_test_wait.zig");
 const platform = @import("sys");
 const pc = @import("prompt_cache.zig");
 const rows = @import("rows_store.zig");
@@ -41,7 +42,7 @@ pub const Fixture = struct {
     }
 
     pub fn settle(x: *Fixture) !void {
-        const end = rows.write.nowNs() + 3 * std.time.ns_per_s;
+        const end = waits.deadline();
         while (x.r.worker) |w| {
             rows.write.reap(x.r);
             if (w.pending() == 0) return;
@@ -52,7 +53,7 @@ pub const Fixture = struct {
 
     /// The engine's idle turns until `states` are on disk: a queued save is staged whenever `ready` says so.
     pub fn idle(x: *Fixture, states: usize) !void {
-        const end = rows.write.nowNs() + 3 * std.time.ns_per_s;
+        const end = waits.deadline();
         while (x.r.states.items.len < states) {
             if (rows.write.nowNs() >= end) return error.WriterTimedOut;
             if (rows.write.ready(x.r)) _ = rows.write.step(x.r) else rows.write.io.nap();
@@ -128,7 +129,7 @@ pub const Gate = struct {
     }
 
     pub fn wait(flag: *std.atomic.Value(bool)) !void {
-        const end = rows.write.nowNs() + 3 * std.time.ns_per_s;
+        const end = waits.deadline();
         while (!flag.load(.acquire)) {
             if (rows.write.nowNs() >= end) return error.GateTimedOut;
             rows.write.io.nap();

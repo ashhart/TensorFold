@@ -1,11 +1,12 @@
 //! Close-time spill uses the eviction image, capacity rules and bounded writer with RAM snapshots still alive.
 const std = @import("std");
+const waits = @import("rows_test_wait.zig");
 const rows = @import("rows_store.zig");
 const fx = @import("rows_async_fixture.zig");
 const Fixture = fx.Fixture;
 
 fn drain(x: *Fixture) usize {
-    return rows.write.drain(x.r, rows.write.nowNs() + 3 * std.time.ns_per_s);
+    return rows.write.drain(x.r, waits.deadline());
 }
 
 test "rows close: spill-only flushes more than eight RAM states newest first without ordinary idle writes" {
@@ -99,7 +100,7 @@ test "rows close: finishing an earlier eviction leaves cap space available to th
     try x.keep(&old, 600);
     x.s.remove(0);
     const w = x.r.worker.?;
-    const end = rows.write.nowNs() + 3 * std.time.ns_per_s;
+    const end = waits.deadline();
     while (!w.ready() and rows.write.nowNs() < end) rows.write.io.nap();
     try std.testing.expect(w.ready());
     x.r.cap = w.reserved();

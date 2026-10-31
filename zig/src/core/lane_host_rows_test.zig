@@ -1,5 +1,6 @@
 //! A lane host's kept states on disk: written while idle, finished on a stop, read back by the next host, asked about.
 const std = @import("std");
+const waits = @import("rows_test_wait.zig");
 const platform = @import("sys");
 const lanes = @import("lanes");
 const api = @import("engine_api.zig");
@@ -201,7 +202,7 @@ test "rows I/O: a host serves another turn while its disk writer is blocked" {
             const q = prompt(32);
             const next: api.Request = .{ .prompt = &q, .max_tokens = 6, .history_len = 600 };
             try h.engine().submit(32, &next, .{ .ctx = &second, .event = Box.event });
-            const end = pc.rows.write.nowNs() + 3 * std.time.ns_per_s;
+            const end = waits.deadline();
             var result: ?Reason = null;
             while (pc.rows.write.nowNs() < end) {
                 second.mutex.lockUncancelable(std.testing.io);

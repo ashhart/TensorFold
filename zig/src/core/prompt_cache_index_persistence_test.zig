@@ -6,6 +6,7 @@ const imprint = @import("prompt_imprint.zig");
 const rows = @import("rows_store.zig");
 const Fake = @import("prompt_cache_fake.zig").Fake;
 const RowFake = @import("rows_fake.zig").Fake;
+const waits = @import("rows_test_wait.zig");
 const oracle = @import("prompt_cache_index_oracle.zig");
 const rmTree = @import("prompt_imprint_test.zig").rmTree;
 const a = std.testing.allocator;
@@ -109,15 +110,20 @@ fn rowPrompt(out: []u32) void {
 }
 
 fn seedRows(dir: []const u8, scratch: std.mem.Allocator, prompt: []const u32) !void {
+    try seedRowsWithIo(dir, scratch, prompt, .{});
+}
+
+fn seedRowsWithIo(dir: []const u8, scratch: std.mem.Allocator, prompt: []const u32, io: rows.file.IO) !void {
     var f: RowFake = .{ .gpa = a, .prompt = prompt, .spans = &.{.{ 500, 600 }} };
     const r = try rows.Rows.open(a, f.snapshots(), options(dir));
     defer r.deinit();
+    r.file_io = io;
     var s = pc.Store.init(a, f.snapshots(), rules, 1 << 30);
     defer s.deinit();
     s.disk = r;
     const plan = try s.begin(scratch, prompt, 1400, &.{}, &.{}, null, f.spans);
     try std.testing.expectEqual(@import("rows_fake.zig").fresh(prompt), f.pass(&s, plan));
-    _ = rows.write.drain(r, rows.write.nowNs() + 3 * std.time.ns_per_s); // the write worker publishes the state
+    try waits.published(r);
     try std.testing.expectEqual(@as(usize, 1), r.states.items.len);
     try oracle.check(&s);
 }
@@ -196,4 +202,38 @@ test "snapshot index: row recall unwinds metadata spans and either publication a
     }
     try std.testing.expect(succeeded);
     try std.testing.expectEqual(@as(usize, 6), failures);
+}
+
+test "snapshot index: a slow worker publishes before row-file seed returns" {
+    const Gate = @import("rows_async_fixture.zig").Gate;
+    const Slow = struct {
+        fn release(gate: *Gate) void {
+            Gate.wait(&gate.entered) catch {
+                gate.release.store(true, .release);
+                return;
+            };
+            const end = rows.write.nowNs() + 4 * std.time.ns_per_s;
+            while (rows.write.nowNs() < end) rows.write.io.nap();
+            gate.release.store(true, .release);
+            Gate.wait(&gate.left) catch {};
+        }
+    };
+    var gate: Gate = .{};
+    const worker = try std.Thread.spawn(.{}, Slow.release, .{&gate});
+    defer worker.join();
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    var buf: [128]u8 = undefined;
+    const dir = try root(&buf, "rows-slow");
+    defer rmTree(dir);
+    var prompt: [1500]u32 = undefined;
+    rowPrompt(&prompt);
+    try seedRowsWithIo(dir, arena.allocator(), &prompt, gate.io());
+    try std.testing.expect(gate.entered.load(.acquire));
+    try std.testing.expect(gate.left.load(.acquire));
+    var f: RowFake = .{ .gpa = a, .prompt = &prompt, .spans = &.{.{ 500, 600 }} };
+    const reopened = try rows.Rows.open(a, f.snapshots(), options(dir));
+    defer reopened.deinit();
+    try std.testing.expectEqual(@as(usize, 1), reopened.states.items.len);
+    try std.testing.expectEqualSlices([2]u32, f.spans, reopened.states.items[0].spans);
 }
