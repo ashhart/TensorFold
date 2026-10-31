@@ -219,3 +219,73 @@ def test_the_log_fallback_reads_mains_serving_line():
     assert parse_startup(unlimited) == {"loaded_s": 2.0, "drafts": 0.0}
     none = "serving m at http://127.0.0.1:8080/v1 (sampling: greedy; drafts: none; context: 4096; loaded in 1.5s)"
     assert parse_startup(none)["drafts"] == 0.0
+
+
+# -- teaching is Nemotron-only ---------------------------------------------------------------------------------------
+
+
+def _home_with_copy(tmp_path, monkeypatch, name: str, family: str):
+    import json
+
+    from tensorfold_web import living
+    from tensorfold_web import settings as settings_mod
+
+    monkeypatch.setenv("TENSORFOLD_WEB_LIVING", str(tmp_path / "living"))
+    monkeypatch.setattr(settings_mod, "config_dir", lambda: tmp_path / "conf")
+    monkeypatch.setattr(living, "teachable_here", lambda _b: None)        # the machine could learn
+    (living.root() / name).mkdir(parents=True)
+    (living.root() / name / "config.json").write_text(json.dumps({"model_type": family}))
+
+
+def _app(engine_url="http://127.0.0.1:9"):
+    from fastapi.testclient import TestClient
+
+    from tensorfold_web.catalog import Catalog
+    from tensorfold_web.engine import Engine
+    from tensorfold_web.server import create_app
+    from tensorfold_web.settings import Settings
+
+    s = Settings(engine_url=engine_url, remote=False)
+    eng = Engine(s)
+    cat = Catalog()
+    cat.refresh_sizes_async = lambda: None
+    return s, eng, TestClient(create_app(settings=s, engine=eng, catalog=cat))
+
+
+def test_a_lesson_on_another_family_is_refused_by_name(tmp_path, monkeypatch):
+    from tensorfold_web.engine import Health, _Child
+
+    _home_with_copy(tmp_path, monkeypatch, "qcopy", "qwen3_5")
+    s, eng, c = _app()
+
+    class Running:                                               # an engine process that is alive
+        pid = 1
+
+        def poll(self):
+            return None
+    eng.proc, eng.model = _Child(popen=Running()), "living:qcopy"
+    eng.status = lambda reader="page": Health(ok=True, status="running", model="qcopy")
+    r = c.post("/api/living/teach", json={"facts": [{"fact": "My cat is Pixel.", "question": "What is my cat called?"}]})
+    assert r.status_code == 409
+    assert "Nemotron 3.5 Lightning only" in r.json()["detail"] and "qwen3_5" in r.json()["detail"]
+
+
+def test_another_family_serves_without_learning_and_needs_no_key(tmp_path, monkeypatch):
+    _home_with_copy(tmp_path, monkeypatch, "qcopy", "qwen3_5")
+    s, eng, c = _app()
+    started = []
+    eng.start = lambda model, **kw: started.append(kw) or {}
+    notes = []
+    eng.note = notes.append
+    assert c.post("/api/engine/start", json={"model": "living:qcopy"}).status_code == 200
+    assert started[0]["slide"] is None and s.api_key is None
+    assert any("Nemotron 3.5 Lightning only" in n for n in notes)
+
+
+def test_only_a_nemotron_copy_passes_the_family_check(tmp_path, monkeypatch):
+    from tensorfold_web import living
+
+    _home_with_copy(tmp_path, monkeypatch, "eden", "nemotron_h")
+    (living.root() / "bare").mkdir()                              # no config.json: the family is unknown
+    assert living.family_refusal("eden") is None
+    assert "Nemotron 3.5 Lightning only" in living.family_refusal("bare")

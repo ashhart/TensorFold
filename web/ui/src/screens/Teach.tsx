@@ -164,7 +164,7 @@ export default function Teach({ engine, toast, refreshEngine, stale }: Ctx) {
           </div>
           <div className="actions"><button className="btn primary" aria-busy={is('teach')} disabled={!approved.length || running || !!view?.teachable || any} onClick={teach}>{is('teach') ? 'Starting the lesson…' : `Teach ${approved.length === 1 ? 'this fact' : `these ${approved.length} facts`} (about ${approved.length * 2}–${approved.length * 3} min)`}</button>
             <label className="small muted"><input type="checkbox" checked={checkAround} onChange={(e) => setCheckAround(e.target.checked)} /> ask it the test questions before and after</label></div>
-          <p className="small muted" style={{ marginBottom: 0 }}>A point to go back to is kept first, so any lesson can be undone. Chat goes on while it learns. A fact it cannot answer afterwards is taken out whole.</p>
+          <p className="small muted" style={{ marginBottom: 0 }}>Teaching works on Nemotron 3.5 Lightning only; another model is refused. A point to go back to is kept first, so any lesson can be undone. Chat goes on while it learns. A fact it cannot answer afterwards is taken out whole.</p>
         </>}
         </div>
       </div>}
