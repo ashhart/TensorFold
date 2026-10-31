@@ -1,0 +1,14 @@
+nvcc: NVIDIA (R) Cuda compiler driver
+Copyright (c) 2005-2025 NVIDIA Corporation
+Built on Wed_Aug_20_01:58:59_PM_PDT_2025
+Cuda compilation tools, release 13.0, V13.0.88
+Build cuda_13.0.r13.0/compiler.36424714_0
+nvcc: NVIDIA (R) Cuda compiler driver
+Copyright (c) 2005-2026 NVIDIA Corporation
+Built on Tue_Jun_09_02:43:40_PM_PDT_2026
+Cuda compilation tools, release 13.3, V13.3.73
+Build cuda_13.3.r13.3/compiler.38244171_0
+g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+Copyright (C) 2023 Free Software Foundation, Inc.
+This is free software; see the source for copying conditions.  There is NO
+warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.

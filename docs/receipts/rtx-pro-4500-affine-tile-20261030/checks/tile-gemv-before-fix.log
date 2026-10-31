@@ -1,0 +1,21 @@
+test-qwen35-verify-host
++- run test 7 pass, 1 fail (8 total)
+error: 'qwen35_verify_host.test.MLP128 leaves the lane GEMV column coverage unchanged' failed:
+       expected 272, found 136
+       /opt/zig/lib/std/testing.zig:93:17: 0x12375e8 in expectEqualInner__func_958 (std.zig)
+                       return error.TestExpectedEqual;
+                       ^
+       /opt/zig/lib/std/testing.zig:57:5: 0x12378c4 in expectEqual (qwen35_verify_host.zig)
+           return expectEqualInner(T, expected, actual);
+           ^
+       /submission/publish-tile/zig/qwen35_verify_host.zig:230:9: 0x123791d in test.MLP128 leaves the lane GEMV column coverage unchanged (qwen35_verify_host.zig)
+               try t.expectEqual(@as(c_int, 272), Probe.tiles);
+               ^
+failed command: ./.zig-cache/o/988e2bc6b2b7d0f261d89a1519120850/test --cache-dir=./.zig-cache --seed=0xb342e89b --listen=-
+
+Build Summary: 3/5 steps succeeded (1 failed); 7/8 tests passed (1 failed)
+test-qwen35-verify-host transitive failure
++- run test 7 pass, 1 fail (8 total)
+   +- compile test debug native success 617ms MaxRSS:250M
+      +- options success
+      +- WriteFile draft_ids.txt success

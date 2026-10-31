@@ -1,0 +1,997 @@
+{
+  "complete": false,
+  "exit_code": 1,
+  "summary": [
+    "SUMMARY 465 kernels: 465 pass gates 1-4, 0 fail, 8 known findings; 322 controls: 322 red as planted, 0 missed; 223 limit problems; gates 5132023 ms, limits 1130269 ms"
+  ],
+  "attempt": "1793438223",
+  "elapsed_s": 6263.371963500977,
+  "peak_process_rss_bytes": 17449648128,
+  "scope": "Currentmain94 plus independent MLP and attention patches, common five-file test-only fixture lifetime fix. No context fix or stride trial. One combined full CUDA contract binary; independent served benchmarks remain single-contribution binaries.",
+  "ended_utc": "2026-10-31T11:01:26.569076+00:00",
+  "attempt_finished": true,
+  "all_numerical_cases_passed": true,
+  "full_backend_qualified": false,
+  "limit_diagnosis": {
+    "full_exit_code": 1,
+    "registered_numerical_kernels": 465,
+    "numerical_failures": 0,
+    "known_findings": 8,
+    "controls_caught": 322,
+    "controls_missed": 0,
+    "total_limit_problems": 223,
+    "missing_or_pending_static_records": 168,
+    "static_breakdown_by_sm": {
+      "80": 40,
+      "86": 40,
+      "89": 40,
+      "120": 40,
+      "121": 8
+    },
+    "live_mismatches": 55,
+    "live_missing_zero_records": 46,
+    "live_stale_nonzero_records": 9,
+    "new_launches_all_pass_live_checks": true,
+    "new_launch_pass_lines": [
+      "PASS limits live tf_q35_attn_rows8_mt2: 128 threads launched, the driver allows 128; 249 registers, 36992 + 0 shared bytes (recorded 249, 36992)",
+      "PASS limits live tf_q35_attn_rows8_mt2_whole: 128 threads launched, the driver allows 128; 248 registers, 36992 + 0 shared bytes (recorded 248, 36992)",
+      "PASS limits live qmm_group MLP128: 256 threads launched, the driver allows 256; 54 registers, 0 + 26880 shared bytes (recorded 54, 0)"
+    ],
+    "baseline_pending_files_unchanged": {
+      "zig/src/core/contract/nvfp4_tile_pending.zig": true,
+      "zig/src/core/contract/qwen4_records.zig": true,
+      "zig/src/core/contract/weight_only_records.zig": true,
+      "zig/src/core/contract/hc_activation_records.zig": true,
+      "zig/src/core/contract/paging_pending.zig": true
+    },
+    "static_missing": [
+      {
+        "name": "nvfp4_experts_tile tf_nvfp4_tile_swiglu",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "nvfp4_experts_tile tf_nvfp4_tile_swiglu",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "nvfp4_experts_tile tf_nvfp4_tile_swiglu",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "nvfp4_experts_tile tf_nvfp4_tile_swiglu",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "nvfp4_experts_tile tf_nvfp4_tile_swiglu",
+        "sm": 121,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "nvfp4_experts_tile tf_nvfp4_tile_down_f32",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "nvfp4_experts_tile tf_nvfp4_tile_down_f32",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "nvfp4_experts_tile tf_nvfp4_tile_down_f32",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "nvfp4_experts_tile tf_nvfp4_tile_down_f32",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "nvfp4_experts_tile tf_nvfp4_tile_down_f32",
+        "sm": 121,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen35 tf_q35_attn_partial_legacy",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen35 tf_q35_attn_partial_legacy",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen35 tf_q35_attn_partial_legacy",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen35 tf_q35_attn_partial_legacy",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen35 tf_q35_attn_partial_legacy",
+        "sm": 121,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen35_kv8 tf_q35_attn_partial8_legacy",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen35_kv8 tf_q35_attn_partial8_legacy",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen35_kv8 tf_q35_attn_partial8_legacy",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen35_kv8 tf_q35_attn_partial8_legacy",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen35_kv8 tf_q35_attn_partial8_legacy",
+        "sm": 121,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen35 tf_q35_attn_partial_paged",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen35 tf_q35_attn_partial_paged",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen35 tf_q35_attn_partial_paged",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen35 tf_q35_attn_partial_paged",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen35 tf_q35_attn_partial_paged",
+        "sm": 121,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen35_kv8 tf_q35_attn_partial8_paged",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen35_kv8 tf_q35_attn_partial8_paged",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen35_kv8 tf_q35_attn_partial8_paged",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen35_kv8 tf_q35_attn_partial8_paged",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen35_kv8 tf_q35_attn_partial8_paged",
+        "sm": 121,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen35 tf_q35_attn_partial_contiguous",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen35 tf_q35_attn_partial_contiguous",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen35 tf_q35_attn_partial_contiguous",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen35 tf_q35_attn_partial_contiguous",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen35 tf_q35_attn_partial_contiguous",
+        "sm": 121,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen35_kv8 tf_q35_attn_partial8_contiguous",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen35_kv8 tf_q35_attn_partial8_contiguous",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen35_kv8 tf_q35_attn_partial8_contiguous",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen35_kv8 tf_q35_attn_partial8_contiguous",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen35_kv8 tf_q35_attn_partial8_contiguous",
+        "sm": 121,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_projection tf_qwen4_projection",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_projection tf_qwen4_projection",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_projection tf_qwen4_projection",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_projection tf_qwen4_projection",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_projection tf_qwen4_projection_bad_nan",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_projection tf_qwen4_projection_bad_nan",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_projection tf_qwen4_projection_bad_nan",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_projection tf_qwen4_projection_bad_nan",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_projection tf_qwen4_projection_bad_repeat",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_projection tf_qwen4_projection_bad_repeat",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_projection tf_qwen4_projection_bad_repeat",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_projection tf_qwen4_projection_bad_repeat",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_projection tf_qwen4_projection_bad_tail",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_projection tf_qwen4_projection_bad_tail",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_projection tf_qwen4_projection_bad_tail",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_projection tf_qwen4_projection_bad_tail",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_projection tf_qwen4_projection_bad_sums",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_projection tf_qwen4_projection_bad_sums",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_projection tf_qwen4_projection_bad_sums",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_projection tf_qwen4_projection_bad_sums",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_gdn qwen4_gdn_chain",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_gdn qwen4_gdn_chain",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_gdn qwen4_gdn_chain",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_gdn qwen4_gdn_chain",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_hc_activation",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_hc_activation",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_hc_activation",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_hc_activation",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_hc_activation_bad_nan",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_hc_activation_bad_nan",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_hc_activation_bad_nan",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_hc_activation_bad_nan",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_hc_activation_bad_repeat",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_hc_activation_bad_repeat",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_hc_activation_bad_repeat",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_hc_activation_bad_repeat",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_hc_activation_bad_tail",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_hc_activation_bad_tail",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_hc_activation_bad_tail",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_hc_activation_bad_tail",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_hc_pointwise",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_hc_pointwise",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_hc_pointwise",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_hc_pointwise",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_hc_pointwise_bad_nan",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_hc_pointwise_bad_nan",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_hc_pointwise_bad_nan",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_hc_pointwise_bad_nan",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_hc_pointwise_bad_repeat",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_hc_pointwise_bad_repeat",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_hc_pointwise_bad_repeat",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_hc_pointwise_bad_repeat",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_hc_pointwise_bad_tail",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_hc_pointwise_bad_tail",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_hc_pointwise_bad_tail",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_hc_pointwise_bad_tail",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_dense_act",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_dense_act",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_dense_act",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_dense_act",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_dense_act_bad_nan",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_dense_act_bad_nan",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_dense_act_bad_nan",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_dense_act_bad_nan",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_dense_act_bad_repeat",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_dense_act_bad_repeat",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_dense_act_bad_repeat",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_dense_act_bad_repeat",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_dense_act_bad_tail",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_dense_act_bad_tail",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_dense_act_bad_tail",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_hc qwen4_dense_act_bad_tail",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_gate",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_gate",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_gate",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_gate",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_gate_bad_nan",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_gate_bad_nan",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_gate_bad_nan",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_gate_bad_nan",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_gate_bad_repeat",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_gate_bad_repeat",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_gate_bad_repeat",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_gate_bad_repeat",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_gate_bad_tail",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_gate_bad_tail",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_gate_bad_tail",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_gate_bad_tail",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_gate_bad_sums",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_gate_bad_sums",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_gate_bad_sums",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_gate_bad_sums",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_conv",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_conv",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_conv",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_conv",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_conv_bad_nan",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_conv_bad_nan",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_conv_bad_nan",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_conv_bad_nan",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_conv_bad_repeat",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_conv_bad_repeat",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_conv_bad_repeat",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_conv_bad_repeat",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_conv_bad_tail",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_conv_bad_tail",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_conv_bad_tail",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_conv_bad_tail",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_conv_bad_sums",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_conv_bad_sums",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_conv_bad_sums",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_ple qwen4_ple_conv_bad_sums",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_gdn qwen4_gdn_chain_bad_nan",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_gdn qwen4_gdn_chain_bad_nan",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_gdn qwen4_gdn_chain_bad_nan",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_gdn qwen4_gdn_chain_bad_nan",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_gdn qwen4_gdn_chain_bad_repeat",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_gdn qwen4_gdn_chain_bad_repeat",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_gdn qwen4_gdn_chain_bad_repeat",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_gdn qwen4_gdn_chain_bad_repeat",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_gdn qwen4_gdn_chain_bad_tail",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_gdn qwen4_gdn_chain_bad_tail",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_gdn qwen4_gdn_chain_bad_tail",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_gdn qwen4_gdn_chain_bad_tail",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_gdn qwen4_gdn_chain_bad_sums",
+        "sm": 80,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_gdn qwen4_gdn_chain_bad_sums",
+        "sm": 86,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_gdn qwen4_gdn_chain_bad_sums",
+        "sm": 89,
+        "reason": "no compiled usage recorded"
+      },
+      {
+        "name": "qwen4_gdn qwen4_gdn_chain_bad_sums",
+        "sm": 120,
+        "reason": "no compiled usage recorded"
+      }
+    ],
+    "live_failures": [
+      "FAIL limits live nvfp4_experts_tile tf_nvfp4_tile_swiglu: 128 threads launched, the driver allows 128; 255 registers, 0 + 34816 shared bytes (recorded 0, 0)",
+      "FAIL limits live nvfp4_experts_tile tf_nvfp4_tile_down_f32: 128 threads launched, the driver allows 128; 128 registers, 0 + 19200 shared bytes (recorded 0, 0)",
+      "FAIL limits live tree attention tf_tree_shared_pg: 128 threads launched, the driver allows 128; 210 registers, 0 + 65536 shared bytes (recorded 208, 0)",
+      "FAIL limits live tree attention tf_tree_part_pg: 128 threads launched, the driver allows 128; 208 registers, 0 + 65536 shared bytes (recorded 204, 0)",
+      "FAIL limits live tree attention tf_tree_shared_256_w1_pg: 32 threads launched, the driver allows 32; 247 registers, 0 + 40960 shared bytes (recorded 249, 0)",
+      "FAIL limits live tree attention tf_tree_shared_256_w1s3_pg: 32 threads launched, the driver allows 32; 246 registers, 0 + 57344 shared bytes (recorded 248, 0)",
+      "FAIL limits live norms tf_moe_add_rms_rows_bf16h: 1024 threads launched, the driver allows 1024; 61 registers, 16416 + 0 shared bytes (recorded 60, 16416)",
+      "FAIL limits live moe tf_moe_topk_sigmoid_score_warp: 256 threads launched, the driver allows 256; 219 registers, 0 + 0 shared bytes (recorded 203, 0)",
+      "FAIL limits live window_pages tf_wrows_part_512_pg: 256 threads launched, the driver allows 256; 126 registers, 17536 + 65536 shared bytes (recorded 128, 17536)",
+      "FAIL limits live window_pages tf_wrows_merge_512_pg: 256 threads launched, the driver allows 256; 58 registers, 128 + 0 shared bytes (recorded 60, 128)",
+      "FAIL limits live window_pages tf_wrows_prompt_512_p32_pg: 256 threads launched, the driver allows 256; 253 registers, 144 + 81920 shared bytes (recorded 254, 144)",
+      "FAIL limits live tf_q36m_attn: 32 threads launched, the driver allows 32; 162 registers, 0 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live tf_q36m_attn_rows: 32 threads launched, the driver allows 32; 159 registers, 0 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live tf_q36m_attn_tree: 32 threads launched, the driver allows 32; 162 registers, 0 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live tf_q35_attn_partial_whole: 128 threads launched, the driver allows 128; 168 registers, 11648 + 65536 shared bytes (recorded 0, 0)",
+      "FAIL limits live tf_q35_attn_rows_whole: 256 threads launched, the driver allows 256; 246 registers, 6912 + 65536 shared bytes (recorded 0, 0)",
+      "FAIL limits live tf_q35_attn_partial8_whole: 128 threads launched, the driver allows 128; 197 registers, 44672 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live tf_q35_attn_rows8_whole: 256 threads launched, the driver allows 256; 245 registers, 39936 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live _ZN20tf_prefill_attention19hpattn_whole_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifi: 256 threads launched, the driver allows 256; 255 registers, 0 + 98304 shared bytes (recorded 0, 0)",
+      "FAIL limits live _ZN20tf_prefill_attention20hpattn8_whole_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16PKhS5_PKfS7_PS1_iiiiifi: 256 threads launched, the driver allows 256; 255 registers, 0 + 98304 shared bytes (recorded 0, 0)",
+      "FAIL limits live _ZN20tf_prefill_attention13hpattn_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifiPKixi: 256 threads launched, the driver allows 256; 234 registers, 0 + 98304 shared bytes (recorded 0, 0)",
+      "FAIL limits live _ZN20tf_prefill_attention14hpattn8_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16PKhS5_PKfS7_PS1_iiiiifiPKixi: 256 threads launched, the driver allows 256; 255 registers, 0 + 98304 shared bytes (recorded 0, 0)",
+      "FAIL limits live qwen4_projection tf_qwen4_projection: 128 threads launched, the driver allows 128; 40 registers, 0 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live qwen4_projection tf_qwen4_projection_bad_nan: 128 threads launched, the driver allows 128; 40 registers, 0 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live qwen4_projection tf_qwen4_projection_bad_repeat: 128 threads launched, the driver allows 128; 40 registers, 0 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live qwen4_projection tf_qwen4_projection_bad_tail: 128 threads launched, the driver allows 128; 40 registers, 0 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live qwen4_projection tf_qwen4_projection_bad_sums: 128 threads launched, the driver allows 128; 40 registers, 0 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live qwen4_gdn qwen4_gdn_chain: 1024 threads launched, the driver allows 1024; 64 registers, 2060 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live qwen4_hc qwen4_hc_activation: 256 threads launched, the driver allows 256; 17 registers, 0 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live qwen4_hc qwen4_hc_activation_bad_nan: 256 threads launched, the driver allows 256; 17 registers, 0 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live qwen4_hc qwen4_hc_activation_bad_repeat: 256 threads launched, the driver allows 256; 17 registers, 0 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live qwen4_hc qwen4_hc_activation_bad_tail: 256 threads launched, the driver allows 256; 17 registers, 0 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live qwen4_hc qwen4_hc_pointwise: 256 threads launched, the driver allows 256; 26 registers, 0 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live qwen4_hc qwen4_hc_pointwise_bad_nan: 256 threads launched, the driver allows 256; 26 registers, 0 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live qwen4_hc qwen4_hc_pointwise_bad_repeat: 256 threads launched, the driver allows 256; 26 registers, 0 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live qwen4_hc qwen4_hc_pointwise_bad_tail: 256 threads launched, the driver allows 256; 26 registers, 0 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live qwen4_hc qwen4_dense_act: 256 threads launched, the driver allows 256; 18 registers, 0 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live qwen4_hc qwen4_dense_act_bad_nan: 256 threads launched, the driver allows 256; 18 registers, 0 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live qwen4_hc qwen4_dense_act_bad_repeat: 256 threads launched, the driver allows 256; 18 registers, 0 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live qwen4_hc qwen4_dense_act_bad_tail: 256 threads launched, the driver allows 256; 18 registers, 0 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live qwen4_ple qwen4_ple_gate: 512 threads launched, the driver allows 512; 38 registers, 128 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live qwen4_ple qwen4_ple_gate_bad_nan: 512 threads launched, the driver allows 512; 38 registers, 128 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live qwen4_ple qwen4_ple_gate_bad_repeat: 512 threads launched, the driver allows 512; 35 registers, 128 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live qwen4_ple qwen4_ple_gate_bad_tail: 512 threads launched, the driver allows 512; 37 registers, 128 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live qwen4_ple qwen4_ple_gate_bad_sums: 512 threads launched, the driver allows 512; 38 registers, 128 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live qwen4_ple qwen4_ple_conv: 512 threads launched, the driver allows 512; 36 registers, 0 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live qwen4_ple qwen4_ple_conv_bad_nan: 512 threads launched, the driver allows 512; 36 registers, 0 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live qwen4_ple qwen4_ple_conv_bad_repeat: 512 threads launched, the driver allows 512; 36 registers, 0 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live qwen4_ple qwen4_ple_conv_bad_tail: 512 threads launched, the driver allows 512; 4 registers, 0 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live qwen4_ple qwen4_ple_conv_bad_sums: 512 threads launched, the driver allows 512; 36 registers, 0 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live qwen4_gdn qwen4_gdn_chain_bad_nan: 1024 threads launched, the driver allows 1024; 64 registers, 2060 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live qwen4_gdn qwen4_gdn_chain_bad_repeat: 1024 threads launched, the driver allows 1024; 64 registers, 2060 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live qwen4_gdn qwen4_gdn_chain_bad_tail: 1024 threads launched, the driver allows 1024; 62 registers, 2060 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live qwen4_gdn qwen4_gdn_chain_bad_sums: 1024 threads launched, the driver allows 1024; 64 registers, 2060 + 0 shared bytes (recorded 0, 0)",
+      "FAIL limits live glm_glue tf_glm_top1_sums: 1024 threads launched, the driver allows 1024; 41 registers, 8192 + 0 shared bytes (recorded 0, 0)"
+    ]
+  },
+  "binary_sha256": "5fe741b7d90a9e9bef3ae0c44c4927920151428f6cd966158bcfc44f0b688c93",
+  "base_commit": "94b90c9db65dcb71bbc39715901d6fb1f00407d0",
+  "source_files_sha256": {
+    "zig/build/kernel_contract.zig": "fcc358622116c137bdb3501032348a1280f9537756687b17cac797c5c4a3a1e6",
+    "zig/kernels/cuda/qmm_group.cu": "506e8327ded0306fadbd821ab072a9477de7aa7e42a7c9dee8b729608a6e33bc",
+    "zig/kernels/cuda/qwen35_kv8.cu": "ecefedfabe0066d586b9a2d39788c39c2b3169221cda8d1e01e12075da425f53",
+    "zig/qwen35_draft_frame_host.zig": "8ff3f38990be64d281585aaa87ec4b8730df97928e6e0895c99265fedaaefcc1",
+    "zig/qwen35_formats_host.zig": "2342cab952d1fc7ac1f1d567526034e8d87132c6a8af1feb8236d0bbda9d4bc4",
+    "zig/qwen35_live_host.zig": "ea66ce0d027213cbea8c7e025d6f80656d5bfbe6368c7664210e90532559d396",
+    "zig/qwen35_verify_host.zig": "489dc7fddf1af4f2ce519312f4852d044f515fc4d5848cff1d92952285e1d820",
+    "zig/src/core/contract/cuda_lane_pending.zig": "28675838a713e1f2a4f8246fd00cdab9a74b032a7e11e7ee490deac3dca2a10e",
+    "zig/src/core/contract/fakes.zig": "592be4cb0c5529d41ff46bf6b734005419f0ff633ad61ae1edfec2254266818c",
+    "zig/src/core/contract/gates.zig": "20d25b1f8741588d7e88985958960fce4021b81934b3dd72c79addd6df00d316",
+    "zig/src/core/contract/measurements/pending_133.zig": "c05a0b38323e72273df7b19513d80054f80471f7dca8d78df0bf93e96d945a13",
+    "zig/src/core/contract/measurements/qwen_lanes_133.zig": "9311e7a6fa6fa106b74dbd1f8919c84e07bda614d241e2cb67020b3846ac7d7e",
+    "zig/src/core/contract/mlp128_records.zig": "cc685f1e257a3aeb8091125d8c8ea81083679bc81fab890206fadc17d2df91fc",
+    "zig/src/core/contract/qwen_whole_records.zig": "bac294de01afa237f83a6a3528256ac82dea20dfe1017d0e199a386cf662ea6a",
+    "zig/src/core/contract/registry_pending_test.zig": "d11ad6e4740280f96d8258103e6f61c0e7c25a3679d6fd2ec2e9df9c4a9b58dc",
+    "zig/src/cuda/affine4_kernels.zig": "dff4837b8a0a07a68b3206839cc7f391a10b70f71066d93ac5f7f7993ac89c1c",
+    "zig/src/cuda/root.zig": "33f5e28d63098e628ee9bfac4af3ecc621cc88dbf438e499c2d454291328cc39",
+    "zig/src/cuda/sm120_test_override.zig": "ce097bfbbf8e31af4363a9421da8ac8358ae686e82cd437e2c4faa8f327d0724",
+    "zig/src/families/qwen3_5/cuda_engine.zig": "f50a28a7e93ff5e637329cf82c81238ca46bbbda565d657b9addd6abd52949a6",
+    "zig/src/families/qwen3_5/cuda_forward.zig": "469ffde22dac6e8f7b5849b2bfd92ad38acfdc65b3f1ff4cb1aad8711a928729",
+    "zig/src/families/qwen3_5/cuda_shapes.zig": "76cf23efac8754a40b2f2a01c5a77f06851cfa67fb5633291c246f11a1ab3397",
+    "zig/src/families/qwen3_5/cuda_signatures.zig": "3b0da928bea1f9ee7f630989b2189b64f1fba6b8948bfc29a6c720a097c87a05",
+    "zig/tests/cuda/contract_arch_test.zig": "22d9dc71b82897be40910780726ca8f261535acc868423202c5aaa880486ccfb",
+    "zig/tests/cuda/contract_mm.zig": "79e460212efa415fdbe0f4fc32952e606f44a95d71dc4993ed1e8168a9094d03",
+    "zig/tests/cuda/contract_q35_attn.zig": "c269b0a25cf0f9c8ac6e927b649677f1637b73dfd9274eda9fcf23a8c394a6c1",
+    "zig/tests/cuda/contract_q35_attn_host.zig": "24dcc95e3197fae0472a5fe35837574cc26c8cc593baf66cc095337f44e16754",
+    "zig/tests/cuda/contract_q35_launch_args_host.zig": "114d8adc4ec5b9a70004e6e2959a1f363868a05d928abe2ba132561a4a7dced2",
+    "zig/tests/cuda/contract_rig.zig": "0d97c6e7a9d062da735fb8ffc594d24ab436478dc9fa6b589252d1fcdce0ff7d",
+    "zig/tests/cuda/contract_tests.zig": "cbb40c415b16db51a25a69ced57b0f24253c50e164a84911a079f92c947502da",
+    "zig/tests/cuda/contract_verify_host.zig": "6f15eaf7f1d7f124efefcfcc340b51cf332840117bdc18ad58b102d357d3c026"
+  },
+  "host_build_summary": "171/171 steps;139/139 fresh tests reported; cached steps retained",
+  "lean": "424 inherited,0new",
+  "main_only_limits_control": {
+    "main_base": "94b90c9db65dcb71bbc39715901d6fb1f00407d0",
+    "main_only_exit_code": 1,
+    "main_only_summary": [
+      "LIMITS_SUMMARY main-only: 223 problems"
+    ],
+    "missing_static_record_count": 168,
+    "live_mismatch_count": 55,
+    "candidate_and_main_missing_record_sets_identical": true,
+    "candidate_and_main_live_failure_lines_identical": true,
+    "total_limit_problems_both": 223,
+    "only_baseline_test_change": "Five-line CLI hook calls existing contract_tests.live; all production kernels and registry entries are unmodified.",
+    "unmodified_main_numerical_full_suite_not_rerun": true
+  }
+}

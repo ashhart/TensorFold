@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "fixture_sha256": "9aed9edb7c857de8cd61256c5c23f427aa3e17921666d938df15fa983743c2e3",
+  "requested_reply_tokens": 16,
+  "temperature": 0,
+  "seed": 1234,
+  "rows": [
+    {
+      "phase": "first",
+      "prompt_tokens": null,
+      "cached_tokens": null,
+      "tokens": null,
+      "cache_state": "unverified",
+      "complete": false,
+      "token_sha": null,
+      "token_sha256": null,
+      "output_sha256": null,
+      "ttft_s": null,
+      "decode_tps": null,
+      "error": "RuntimeError"
+    },
+    {
+      "phase": "repeated",
+      "prompt_tokens": null,
+      "cached_tokens": null,
+      "tokens": null,
+      "cache_state": "unverified",
+      "complete": false,
+      "token_sha": null,
+      "token_sha256": null,
+      "output_sha256": null,
+      "ttft_s": null,
+      "decode_tps": null,
+      "error": "RuntimeError",
+      "equal_first_tokens": null,
+      "equal_first_output": null
+    },
+    {
+      "phase": "concurrent",
+      "prompt_tokens": null,
+      "cached_tokens": null,
+      "tokens": null,
+      "cache_state": "unverified",
+      "complete": false,
+      "token_sha": null,
+      "token_sha256": null,
+      "output_sha256": null,
+      "ttft_s": null,
+      "decode_tps": null,
+      "error": "RuntimeError",
+      "equal_first_tokens": null,
+      "equal_first_output": null
+    }
+  ],
+  "concurrent_timing": {
+    "requested_requests": 1,
+    "timed_requests": 0,
+    "makespan_s": null,
+    "end_to_end_tps": null,
+    "timing_valid": false
+  },
+  "qualified": false
+}

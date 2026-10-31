@@ -1,0 +1,89 @@
+{
+  "request": {
+    "model": "qwen-community",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "What color is the square? Answer one word."
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCADgAOADASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD3+iiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiivkyuXE4n2NtL3PcyXJf7T5/f5eW3S973812PrOivkyiub+0f7v4/8A9z/AFM/6f8A/kv/ANsfWdFfJlFH9o/3fx/4Af6mf9P/APyX/wC2PrOivkyij+0f7v4/8AP9TP8Ap/8A+S//AGx9Z0V8mUUf2j/d/H/gB/qZ/wBP/wDyX/7Y+s6K+TKKP7R/u/j/AMAP9TP+n/8A5L/9sfWdFfJlFH9o/wB38f8AgB/qZ/0//wDJf/tj6zor5Moo/tH+7+P/AAA/1M/6f/8Akv8A9sfWdFfJlFH9o/3fx/4Af6mf9P8A/wAl/wDtj6zor5Mr6d8Lf8ihov8A14Qf+i1row+K9s2rWsePnORf2bCM/ac3M7bW/VmtRRRXWfPhRRRQAUUUUAFFFFABXyZX1nXyZXmZj9n5/ofccGf8v/8At3/24KKKK8w+5CiiigAooooAKKKKACiiigAooooAKKKKACiiigAr6d8Lf8ihov8A14Qf+i1r5ir6d8Lf8ihov/XhB/6LWvQy74pHxvGP8Cl6v8jWooor1j4AKKKKACiiigAooooAK+TK+s6+TK8zMfs/P9D7jgz/AJf/APbv/twUUUV5h9yFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABX074W/5FDRf+vCD/wBFrXzFX074W/5FDRf+vCD/ANFrXoZd8Uj43jH+BS9X+RrUUUV6x8AFFFFABRRRQAUUUUAFfJlfWdfJleZmP2fn+h9xwZ/y/wD+3f8A24KKKK8w+5CiiigAooooAKKKKACiiigAooooAKKKKACiiigAr6d8Lf8AIoaL/wBeEH/ota+Yq+nfC3/IoaL/ANeEH/ota9DLvikfG8Y/wKXq/wAjWooor1j4AKKKKACiiigAooooAK+TK+s6+TK8zMfs/P8AQ+44M/5f/wDbv/twUUUV5h9yFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABX074W/5FDRf+vCD/0WtfMVfTvhb/kUNF/68IP/AEWtehl3xSPjeMf4FL1f5GtRRRXrHwAUUUUAFFFFABRRRQAV8mV9Z18mV5mY/Z+f6H3HBn/L/wD7d/8AbgooorzD7kKKKKACiiigAooooAKKKKACiiigAooooAKKKKACvp3wt/yKGi/9eEH/AKLWvmKvp3wt/wAihov/AF4Qf+i1r0Mu+KR8bxj/AAKXq/yNaiiivWPgAooooAKKKKACiiigAr5Mr6zr5MrzMx+z8/0PuODP+X//AG7/AO3BRRRXmH3IUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFfTvhb/AJFDRf8Arwg/9FrXzFX074W/5FDRf+vCD/0Wtehl3xSPjeMf4FL1f5GtRRRXrHwAUUUUAFFFFABRRRQAV8mV9Z18mV5mY/Z+f6H3HBn/AC//AO3f/bgooorzD7kKKKKACiiigAooooAKKKKACiiigAooooAKKKKACvp3wt/yKGi/9eEH/ota+Yq+nfC3/IoaL/14Qf8Aota9DLvikfG8Y/wKXq/yNaiiivWPgAooooAKKKKACiiigAr5Mr6zr5MrzMx+z8/0PuODP+X/AP27/wC3BRRRXmH3IUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFfTvhb/kUNF/68IP8A0WtfMVfTvhb/AJFDRf8Arwg/9FrXoZd8Uj43jH+BS9X+RrUUUV6x8AFFFFABRRRQAUUUUAFfJlfWdZP/AAi3h7/oA6X/AOAcf+FcmKw7rWs7WPoMizmGW+054uXNbbyv/mfMVFfTv/CLeHv+gDpf/gHH/hR/wi3h7/oA6X/4Bx/4Vyf2dL+Y+g/1xof8+n96PmKivp3/AIRbw9/0AdL/APAOP/Cj/hFvD3/QB0v/AMA4/wDCj+zpfzB/rjQ/59P70fMVFfTv/CLeHv8AoA6X/wCAcf8AhR/wi3h7/oA6X/4Bx/4Uf2dL+YP9caH/AD6f3o+YqK+nf+EW8Pf9AHS//AOP/Cj/AIRbw9/0AdL/APAOP/Cj+zpfzB/rjQ/59P70fMVFfTv/AAi3h7/oA6X/AOAcf+FH/CLeHv8AoA6X/wCAcf8AhR/Z0v5g/wBcaH/Pp/ej5ior6d/4Rbw9/wBAHS//AADj/wAKP+EW8Pf9AHS//AOP/Cj+zpfzB/rjQ/59P70fMVFfTv8Awi3h7/oA6X/4Bx/4Uf8ACLeHv+gDpf8A4Bx/4Uf2dL+YP9caH/Pp/ej5ior6d/4Rbw9/0AdL/wDAOP8Awo/4Rbw9/wBAHS//AADj/wAKP7Ol/MH+uND/AJ9P70fMVfTvhb/kUNF/68IP/Ra0f8It4e/6AOl/+Acf+FacUUcEKQwxrHFGoVEQYVQOAAB0FdWGwzotts8PPM8p5lThCEGrO+o+iiiuw+bCiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooA//2Q=="
+            }
+          }
+        ]
+      }
+    ],
+    "temperature": 0,
+    "seed": 42,
+    "max_tokens": 256,
+    "stream": false,
+    "draft": true,
+    "return_token_ids": true,
+    "priority": "background",
+    "reasoning_effort": "none",
+    "chat_template_kwargs": {
+      "enable_thinking": false
+    }
+  },
+  "response": {
+    "id": "chatcmpl-77d0c44783c34387518178d061ad21fe",
+    "object": "chat.completion",
+    "created": 1793402773,
+    "model": "qwen-community",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": " Red"
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 88,
+      "completion_tokens": 2,
+      "total_tokens": 90,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "exact_mode": "exact",
+    "tensorfold": {
+      "enable_thinking": false,
+      "reasoning_effort": "none",
+      "engine": "lanes",
+      "tokens_per_second": 35.47021893815289,
+      "seconds": 0.028192665,
+      "prefill_seconds": 0.082159752,
+      "prefill_widths": [],
+      "prefill_raised": [],
+      "time_to_first_token": 0.232280147,
+      "sampling": "greedy",
+      "drafts": true,
+      "token_sha": "ec7e69366eb3",
+      "token_sha256": "ec7e69366eb30e4dc7a45151dc85401493c4eb025f04b7eb462d8915a8e9d8ff",
+      "token_ids": [
+        3605,
+        248046
+      ],
+      "min_rows": 16
+    },
+    "speculative": {
+      "rounds": 1,
+      "drafted": 15,
+      "accepted": 1,
+      "acceptance_rate": 0.06666666666666667,
+      "tokens_per_round": 2.0
+    }
+  },
+  "elapsed_s": 0.2610958980076248
+}

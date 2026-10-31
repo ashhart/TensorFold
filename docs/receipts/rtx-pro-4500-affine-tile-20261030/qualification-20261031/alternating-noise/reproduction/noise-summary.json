@@ -1,0 +1,207 @@
+{
+  "complete": true,
+  "computed_utc": "2026-10-31T09:02:27.559164+00:00",
+  "primary_unit": "One whole independent ABA triplet, n6; each boot2prompts x7repeats. Requests/tokens are not independent samples.",
+  "geometric_mean_gain_pct": 0.8250226226530613,
+  "log_t_95pct_interval_pct": [
+    0.7543232569980548,
+    0.8957715980929627
+  ],
+  "interval_assumptions": "Student-t interval on6 independent triplet log ratios (df5); approximate normality, no universal hardware/temperature/workload claim. Shared machine/time dependence may limit generalization.",
+  "observed_triplet_range_pct": [
+    0.7070116734254089,
+    0.9001060227621155
+  ],
+  "positive_triplets": 6,
+  "two_sided_exact_sign_test_p": 0.03125,
+  "all_tokens_match": true,
+  "triplets": [
+    {
+      "triplet": 0,
+      "cells": {
+        "fibonacci-raw": {
+          "stock_before": 217.21506237846845,
+          "candidate": 219.64277404398604,
+          "stock_after": 217.27653751011061,
+          "bracket_reference": 217.2457977697988,
+          "log_gain": 0.010973051162303626,
+          "gain_pct": 1.1033475900542213,
+          "baseline_drift_pct": 0.028301504955052792
+        },
+        "gpu-chat-no-think": {
+          "stock_before": 167.00889058707588,
+          "candidate": 167.5297662260031,
+          "stock_after": 165.73298584379106,
+          "bracket_reference": 166.3697150909837,
+          "log_gain": 0.006948533120906042,
+          "gain_pct": 0.697273018941546,
+          "baseline_drift_pct": -0.7639741446097359
+        }
+      },
+      "log_gain": 0.008960792141604834,
+      "greedy_geomean_gain_pct": 0.9001060227621155,
+      "boots": [
+        "00-t0-0",
+        "01-t0-1",
+        "02-t0-0"
+      ]
+    },
+    {
+      "triplet": 1,
+      "cells": {
+        "fibonacci-raw": {
+          "stock_before": 218.55260607286206,
+          "candidate": 219.2783642265015,
+          "stock_after": 216.82440114457992,
+          "bracket_reference": 217.68678859851738,
+          "log_gain": 0.007284712092200607,
+          "gain_pct": 0.7311310154515647,
+          "baseline_drift_pct": -0.7907500895715569
+        },
+        "gpu-chat-no-think": {
+          "stock_before": 166.6395867527287,
+          "candidate": 167.19979578192198,
+          "stock_after": 165.4938614262941,
+          "bracket_reference": 166.06573601496186,
+          "log_gain": 0.006805769190534328,
+          "gain_pct": 0.6828981066015557,
+          "baseline_drift_pct": -0.6875469081273566
+        }
+      },
+      "log_gain": 0.007045240641367467,
+      "greedy_geomean_gain_pct": 0.7070116734254089,
+      "boots": [
+        "03-t1-0",
+        "04-t1-1",
+        "05-t1-0"
+      ]
+    },
+    {
+      "triplet": 2,
+      "cells": {
+        "fibonacci-raw": {
+          "stock_before": 216.6304991432026,
+          "candidate": 218.35411662664248,
+          "stock_after": 216.44761727861228,
+          "bracket_reference": 216.53903890389526,
+          "log_gain": 0.00834728364322146,
+          "gain_pct": 0.8382219353771897,
+          "baseline_drift_pct": -0.08442110659100388
+        },
+        "gpu-chat-no-think": {
+          "stock_before": 165.35299108191074,
+          "candidate": 166.71641397334116,
+          "stock_after": 165.25520553891192,
+          "bracket_reference": 165.30409107978855,
+          "log_gain": 0.008507495111965468,
+          "gain_pct": 0.8543786692314626,
+          "baseline_drift_pct": -0.05913745034729079
+        }
+      },
+      "log_gain": 0.008427389377593464,
+      "greedy_geomean_gain_pct": 0.8462999787425686,
+      "boots": [
+        "06-t2-0",
+        "07-t2-1",
+        "08-t2-0"
+      ]
+    },
+    {
+      "triplet": 3,
+      "cells": {
+        "fibonacci-raw": {
+          "stock_before": 216.38970539605393,
+          "candidate": 218.07867158726978,
+          "stock_after": 216.25800125113523,
+          "bracket_reference": 216.32384330043837,
+          "log_gain": 0.008079317095401883,
+          "gain_pct": 0.8112042852317916,
+          "baseline_drift_pct": -0.06086433024974358
+        },
+        "gpu-chat-no-think": {
+          "stock_before": 165.2130407001889,
+          "candidate": 166.44366957172784,
+          "stock_after": 165.124614301836,
+          "bracket_reference": 165.1688215834097,
+          "log_gain": 0.007688819346965303,
+          "gain_pct": 0.7718454222150707,
+          "baseline_drift_pct": -0.053522650499104873
+        }
+      },
+      "log_gain": 0.007884068221183593,
+      "greedy_geomean_gain_pct": 0.7915229325300137,
+      "boots": [
+        "09-t3-0",
+        "10-t3-1",
+        "11-t3-0"
+      ]
+    },
+    {
+      "triplet": 4,
+      "cells": {
+        "fibonacci-raw": {
+          "stock_before": 216.25644619483765,
+          "candidate": 218.16126482619637,
+          "stock_after": 216.30606216524424,
+          "bracket_reference": 216.28125275727285,
+          "log_gain": 0.008654879429673912,
+          "gain_pct": 0.8692441184596729,
+          "baseline_drift_pct": 0.022943117432849824
+        },
+        "gpu-chat-no-think": {
+          "stock_before": 165.11391982496926,
+          "candidate": 166.52813441431138,
+          "stock_after": 165.15516155481714,
+          "bracket_reference": 165.13453940239734,
+          "log_gain": 0.008403738639030323,
+          "gain_pct": 0.8439149174710527,
+          "baseline_drift_pct": 0.02497774257410601
+        }
+      },
+      "log_gain": 0.008529309034352117,
+      "greedy_geomean_gain_pct": 0.8565787228159186,
+      "boots": [
+        "12-t4-0",
+        "13-t4-1",
+        "14-t4-0"
+      ]
+    },
+    {
+      "triplet": 5,
+      "cells": {
+        "fibonacci-raw": {
+          "stock_before": 216.24565844721639,
+          "candidate": 218.14525750410448,
+          "stock_after": 216.26213099276654,
+          "bracket_reference": 216.2538945631476,
+          "log_gain": 0.008708004533042768,
+          "gain_pct": 0.8746029498231791,
+          "baseline_drift_pct": 0.00761751503750574
+        },
+        "gpu-chat-no-think": {
+          "stock_before": 165.14857305713628,
+          "candidate": 166.53002682039389,
+          "stock_after": 165.19322750961288,
+          "bracket_reference": 165.17089877431627,
+          "log_gain": 0.008194946395737368,
+          "gain_pct": 0.8228616882049569,
+          "baseline_drift_pct": 0.02703895749747165
+        }
+      },
+      "log_gain": 0.008451475464390068,
+      "greedy_geomean_gain_pct": 0.8487290007296727,
+      "boots": [
+        "15-t5-0",
+        "16-t5-1",
+        "17-t5-0"
+      ]
+    }
+  ],
+  "interruptions": [
+    {
+      "reason": "loginctl session vanished between list-sessions and show-session; policy observation failed and owned guard was terminated. No verified profile change or token mismatch. Incomplete triplet1 is excluded and restarted in full; raw archive retained.",
+      "archive": "maintainer-noise-interrupted-1793436474"
+    }
+  ],
+  "separate_protocol": "Classic greedy only. Community/long/feature receipts remain distinct; no pooling with old overnight brackets or reserve0 results."
+}

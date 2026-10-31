@@ -1,0 +1,6 @@
+Build Summary: 5/5 steps succeeded; 8/8 tests passed
+test-qwen35-verify-host success
++- run test 8 pass (8 total) 10ms MaxRSS:6M
+   +- compile test debug native success 677ms MaxRSS:203M
+      +- options cached
+      +- WriteFile draft_ids.txt cached

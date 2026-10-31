@@ -1,0 +1,19 @@
+========= COMPUTE-SANITIZER
+========= Program hit CUDA_ERROR_INVALID_IMAGE (error 200) due to "device kernel image is invalid" on CUDA API call to cuModuleLoad.
+=========     Saved host backtrace up to driver entry point at error
+=========         Host Frame: fn in pr_sanitize_worker.py:41
+=========         Host Frame: <module> in pr_sanitize_worker.py:61
+=========
+Traceback (most recent call last):
+  File "/task/pr_sanitize_worker.py", line 61, in <module>
+    group={64:fn('group.fatbin',sym(64,8),35328),128:fn('group.fatbin',sym(128,4),26880)} if scope!='attention' else {}
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/task/pr_sanitize_worker.py", line 41, in fn
+    m=vp();ok(load(C.byref(m),str(R/'pr-probes'/file).encode()));f=vp();ok(get(C.byref(f),m,name.encode()));modules.append(m)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/task/pr_sanitize_worker.py", line 11, in ok
+    if code:raise RuntimeError('CUDA status '+str(code))
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: CUDA status 200
+========= Target application returned an error
+========= ERROR SUMMARY: 1 error

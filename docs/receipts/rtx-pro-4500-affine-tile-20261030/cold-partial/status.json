@@ -1,0 +1,9 @@
+{
+  "complete": false,
+  "stopped_after_scope_review": true,
+  "completed_boots": [
+    "00-cold-base",
+    "01-cold-tile"
+  ],
+  "reason": "Broader validation stopped after user feedback about elapsed time. No bracketing cold comparison is claimed."
+}

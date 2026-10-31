@@ -1,0 +1,82 @@
+{
+  "qmm_group-13.0": {
+    "_ZN12tf_qmm_group12group_kernelILi64ELi16ELi128ELi1ELi8ELi4ELb0ELb0ELb0ELb0EEEvPK13__nv_bfloat16PKfNS_5PartsEiiiii": {
+      "120": {
+        "regs": 54,
+        "static": 1024,
+        "local": 0
+      },
+      "121": {
+        "regs": 54,
+        "static": 1024,
+        "local": 0
+      }
+    }
+  },
+  "qwen35_kv8-13.0": {
+    "tf_q35_attn_rows8_mt2_whole": {
+      "120": {
+        "regs": 239,
+        "static": 38016,
+        "local": 0
+      },
+      "121": {
+        "regs": 239,
+        "static": 38016,
+        "local": 0
+      }
+    },
+    "tf_q35_attn_rows8_mt2": {
+      "120": {
+        "regs": 242,
+        "static": 38016,
+        "local": 0
+      },
+      "121": {
+        "regs": 242,
+        "static": 38016,
+        "local": 0
+      }
+    }
+  },
+  "qmm_group-13.3": {
+    "_ZN12tf_qmm_group12group_kernelILi64ELi16ELi128ELi1ELi8ELi4ELb0ELb0ELb0ELb0EEEvPK13__nv_bfloat16PKfNS_5PartsEiiiii": {
+      "120": {
+        "regs": 54,
+        "static": 1024,
+        "local": 0
+      },
+      "121": {
+        "regs": 54,
+        "static": 1024,
+        "local": 0
+      }
+    }
+  },
+  "qwen35_kv8-13.3": {
+    "tf_q35_attn_rows8_mt2_whole": {
+      "120": {
+        "regs": 248,
+        "static": 38016,
+        "local": 0
+      },
+      "121": {
+        "regs": 248,
+        "static": 38016,
+        "local": 0
+      }
+    },
+    "tf_q35_attn_rows8_mt2": {
+      "120": {
+        "regs": 249,
+        "static": 38016,
+        "local": 0
+      },
+      "121": {
+        "regs": 249,
+        "static": 38016,
+        "local": 0
+      }
+    }
+  }
+}

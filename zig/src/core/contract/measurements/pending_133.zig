@@ -51,4 +51,5 @@ pub const records = [_]Override{
     .{ .name = "tree_round tf_tree_round_match", .usage = .{ .{ .regs = 25, .static = 0, .bound = 0 }, .{ .regs = 26, .static = 0, .bound = 0 }, .{ .regs = 26, .static = 0, .bound = 0 }, .{ .regs = 34, .static = 0, .bound = 0 }, .{ .regs = 34, .static = 0, .bound = 0 } } },
     .{ .name = "w4a8_prefill tf_w4a8_prefill", .usage = .{ .{ .regs = 216, .static = 0, .bound = 256 }, .{ .regs = 216, .static = 0, .bound = 256 }, .{ .regs = 216, .static = 0, .bound = 256 }, .{ .regs = 136, .static = 0, .bound = 256 }, .{ .regs = 136, .static = 0, .bound = 256 } } },
     .{ .name = "w4a8_prefill tf_w4a8_quantize", .usage = .{ .{ .regs = 27, .static = 0, .bound = 128 }, .{ .regs = 27, .static = 0, .bound = 128 }, .{ .regs = 27, .static = 0, .bound = 128 }, .{ .regs = 27, .static = 0, .bound = 128 }, .{ .regs = 27, .static = 0, .bound = 128 } } },
+    .{ .name = "qmm_group MLP128", .usage = .{ .{ .regs = 0, .static = 0 }, .{ .regs = 0, .static = 0 }, .{ .regs = 0, .static = 0 }, .{ .regs = 54, .static = 0, .bound = 256 }, .{ .regs = 54, .static = 0, .bound = 256 } } },
 };

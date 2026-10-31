@@ -1,0 +1,21 @@
+{
+  "base": "01e25d3aebc0ebb686670c69e37b7c269f261b3d",
+  "code_commit": "aa8ec483b005b94c20dae85a3129a71387ef5f68",
+  "source_files_sha256": {
+    "zig/kernels/cuda/qmm_group.cu": "506e8327ded0306fadbd821ab072a9477de7aa7e42a7c9dee8b729608a6e33bc",
+    "zig/qwen35_draft_frame_host.zig": "8ff3f38990be64d281585aaa87ec4b8730df97928e6e0895c99265fedaaefcc1",
+    "zig/qwen35_formats_host.zig": "2342cab952d1fc7ac1f1d567526034e8d87132c6a8af1feb8236d0bbda9d4bc4",
+    "zig/qwen35_live_host.zig": "ea66ce0d027213cbea8c7e025d6f80656d5bfbe6368c7664210e90532559d396",
+    "zig/qwen35_verify_host.zig": "489dc7fddf1af4f2ce519312f4852d044f515fc4d5848cff1d92952285e1d820",
+    "zig/src/core/contract/cuda_lane_pending.zig": "28675838a713e1f2a4f8246fd00cdab9a74b032a7e11e7ee490deac3dca2a10e",
+    "zig/src/core/contract/measurements/pending_133.zig": "c05a0b38323e72273df7b19513d80054f80471f7dca8d78df0bf93e96d945a13",
+    "zig/src/core/contract/mlp128_records.zig": "cc685f1e257a3aeb8091125d8c8ea81083679bc81fab890206fadc17d2df91fc",
+    "zig/src/core/contract/registry_pending_test.zig": "d11ad6e4740280f96d8258103e6f61c0e7c25a3679d6fd2ec2e9df9c4a9b58dc",
+    "zig/src/cuda/affine4_kernels.zig": "da4784972d82614c2b41c666077951ed0de08c7479e7362470235783c5e4dad1",
+    "zig/tests/cuda/contract_arch_test.zig": "22d9dc71b82897be40910780726ca8f261535acc868423202c5aaa880486ccfb",
+    "zig/tests/cuda/contract_mm.zig": "79e460212efa415fdbe0f4fc32952e606f44a95d71dc4993ed1e8168a9094d03",
+    "zig/tests/cuda/contract_verify_host.zig": "6f15eaf7f1d7f124efefcfcc340b51cf332840117bdc18ad58b102d357d3c026"
+  },
+  "build_version_label": "1.1.6",
+  "build_version_note": "Explicit -Dversion=1.1.6 retained for the existing recipe/client. The source commit and file hashes identify code; this label is not a release provenance claim."
+}

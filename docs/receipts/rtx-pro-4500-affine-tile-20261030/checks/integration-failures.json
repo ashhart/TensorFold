@@ -1,0 +1,24 @@
+{
+  "first_host_attempt": {
+    "failure": "Malformed insertion in a draft-precision host fixture and architecture enumeration expectations not extended for two new SM120-only cases.",
+    "resolution": "Restored the original precision fixture and explicitly tested the additional architecture envelope.",
+    "raw_receipt": "tile-host.log.initial"
+  },
+  "second_host_attempt": {
+    "failure": "registry_pending_test expected3 missing receipts and found0, in both host test entry points.",
+    "summary": "464/469steps,1975/1989tests passed,12skipped,2failed",
+    "cause": "The catalog test counted missing records for older GPUs below the new launch\u2019s minimum SM. checkCuda correctly omits those inapplicable targets.",
+    "resolution": "Honor targetDecision in the catalog test; add an explicit witness that missing SM120/121 records still count2, then1, then0 as valid receipts are supplied."
+  },
+  "expanded_live_host_fixture": {
+    "baseline_exit": 1,
+    "baseline_result": "13pass/1crash",
+    "cause": "Draft.e undefined in existing scratch-memory fixture",
+    "fix": "Initialize a target engine geometry and pointer, test-only."
+  },
+  "sanitizer_fixture_selection": {
+    "failure": "Extractor chose the9-byte host-test placeholder because its bytes also occurred in the binary. CUDA_ERROR_INVALID_IMAGE, before any kernel ran.",
+    "fix": "Extract exact header-sized CUDA fatbinary payloads directly from the native ELF and require one real image containing the kernel symbol.",
+    "note": "nvcc internal symbol names differ between compilations, so a later cached fatbin need not byte-match an earlier native binary."
+  }
+}

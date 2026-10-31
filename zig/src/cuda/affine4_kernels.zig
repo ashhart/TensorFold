@@ -33,6 +33,8 @@ pub const Affine4Kernels = struct {
     pub const Out = struct { q: Affine4, out: u64 };
 
     group_fn: Function,
+    mlp128_fn: Function,
+    mlp128: bool = false,
     gemv_fn: Function,
     verify_fn: Function, // two m16 row tiles share each weight panel on the GB10 verify path
     verify64_fn: Function, // four, for wider shared frames
@@ -54,6 +56,20 @@ pub const Affine4Kernels = struct {
     pub fn resolve(d: *const Driver, group_mod: Module, prefill_mod: Module, gemv_mod: Module, pack_mod: Module, sms: usize, gb10: bool) !Affine4Kernels {
         var a: Affine4Kernels = undefined;
         a.group_fn = try group_mod.function(symbols.group);
+        a.mlp128_fn = try group_mod.function("_ZN12tf_qmm_group12group_kernelILi64ELi16ELi128ELi1ELi8ELi4ELb0ELb0ELb0ELb0EEEvPK13__nv_bfloat16PKfNS_5PartsEiiiii");
+        try a.mlp128_fn.allowDynamicShared(26880);
+        a.mlp128 = false;
+        const test_override = std.c.getenv("TF_CUDA_TEST_MLP128");
+        if (sms == 82 or test_override != null) {
+            var device: @import("abi.zig").Device = 0;
+            try d.check(d.api.cuCtxGetDevice(&device), "cuCtxGetDevice");
+            var major: c_int = 0;
+            var minor: c_int = 0;
+            try d.check(d.api.cuDeviceGetAttribute(&major, .compute_capability_major, device), "cuDeviceGetAttribute");
+            try d.check(d.api.cuDeviceGetAttribute(&minor, .compute_capability_minor, device), "cuDeviceGetAttribute");
+            a.mlp128 = @import("sm120_test_override.zig").enabled(@intCast(10 * major + minor), sms, if (test_override) |v| std.mem.span(v) else null);
+            if (test_override) |v| std.log.info("experimental MLP128 override={s}, enabled={}", .{ std.mem.span(v), a.mlp128 });
+        }
         a.verify_fn = try group_mod.function(symbols.verify32);
         a.verify64_fn = try group_mod.function(symbols.verify64);
         a.verify128_fn = try group_mod.function(symbols.verify128);
@@ -227,7 +243,9 @@ pub const Affine4Kernels = struct {
 
     /// qmm_group's tile 2: a cluster of `sk` CTAs a column tile, its K slices summed over distributed shared memory.
     pub fn cluster(a: *const Affine4Kernels, s: Stream, x: u64, xs: u64, q: Affine4, out: u64, rows: usize, sk: usize) !void {
-        const tiles = (q.n + 63) / 64;
+        const tuned = a.mlp128 and mlp128Shape(rows, q.n, q.k, sk);
+        const width: usize = if (tuned) 128 else 64;
+        const tiles = (q.n + width - 1) / width;
         var parts: Parts = std.mem.zeroes(Parts);
         parts.count = 1;
         parts.p[0] = .{ .w = q.w, .scales = q.s, .biases = q.b, .out = out, .n = int(q.n), .npad = int(q.npad), .sk = int(sk), .tiles = int(tiles), .first = 0 };
@@ -240,12 +258,12 @@ pub const Affine4Kernels = struct {
         for ([_]usize{ rows, q.k, q.k, rows_t, sk }) |v| g.add(int(v));
         const cfg: launch_.Config = .{
             .grid = .{ .x = u(clusters * sk) },
-            .block = .{ .x = 128 },
-            .shared = group_smem,
+            .block = .{ .x = if (tuned) 256 else 128 },
+            .shared = if (tuned) 26880 else group_smem,
             .cluster = if (sk > 1) .{ .x = u(sk) } else null,
-            .pdl = a.pdl,
+            .pdl = a.pdl or tuned,
         };
-        try launch_.launch(a.group_fn, cfg, s, &g);
+        try launch_.launch(if (tuned) a.mlp128_fn else a.group_fn, cfg, s, &g);
     }
 
     /// qmm.prefill_matmul (tile 0): weights rounded once to bf16, one fp32 chain over K; bf16 out.
@@ -303,3 +321,22 @@ pub const Affine4Kernels = struct {
         try launch_.launch(a.prefill_many_fn, .{ .grid = .{ .x = u(blocks) }, .block = .{ .x = 256 }, .shared = prefill_smem }, s, &g);
     }
 };
+
+/// The measured device envelope; other SM120 cards keep the existing tile.
+pub fn mlp128Device(sm: u32, sms: usize) bool {
+    return @import("sm120_test_override.zig").enabled(sm, sms, null);
+}
+
+/// A single K slice and a complete dense 27B MLP output panel.
+pub fn mlp128Shape(rows: usize, n: usize, k: usize, sk: usize) bool {
+    return rows > 0 and rows <= 16 and n == 17408 and k == 5120 and sk == 1;
+}
+
+test "MLP128 keeps unqualified devices and shapes on the existing tile" {
+    try std.testing.expect(mlp128Device(120, 82));
+    for ([_][2]u32{ .{ 121, 82 }, .{ 120, 170 }, .{ 89, 82 } }) |d|
+        try std.testing.expect(!mlp128Device(d[0], d[1]));
+    for ([_]usize{ 1, 8, 16 }) |rows| try std.testing.expect(mlp128Shape(rows, 17408, 5120, 1));
+    for ([_][4]usize{ .{ 0, 17408, 5120, 1 }, .{ 17, 17408, 5120, 1 }, .{ 16, 17408, 5120, 2 }, .{ 16, 5120, 17408, 1 }, .{ 16, 17408, 2048, 1 } }) |s|
+        try std.testing.expect(!mlp128Shape(s[0], s[1], s[2], s[3]));
+}

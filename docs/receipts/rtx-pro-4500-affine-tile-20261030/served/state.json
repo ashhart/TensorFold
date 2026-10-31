@@ -1,0 +1,1236 @@
+{
+  "started_utc": "2026-10-30T23:17:17.795019+00:00",
+  "boots": [
+    {
+      "name": "00-stock-before-tile",
+      "arm": "stock-before-tile",
+      "start_utc": "2026-10-30T23:17:17.887446+00:00",
+      "health": {
+        "status": "ok",
+        "model": "qwen-community",
+        "model_ids": [
+          "qwen-community",
+          "qwen-community-alias"
+        ],
+        "max_batch_size": 1,
+        "warming": false,
+        "memory": {
+          "active": 24406739748,
+          "cache": 0,
+          "peak": 24556349220
+        },
+        "live": {
+          "connections": 0,
+          "waiting": 0,
+          "decode_tokens_per_second": 0.0,
+          "prefill_tokens_per_second": 0.0
+        },
+        "version": "1.1.6",
+        "backend": "cuda",
+        "device": "NVIDIA RTX PRO 4500 Blackwell"
+      },
+      "manifest": {
+        "schema_version": 1,
+        "runtime": {
+          "tensorfold_version": "1.1.6",
+          "backend": "cuda",
+          "python_version": "none",
+          "platform": "linux",
+          "driver": "615.78.08"
+        },
+        "model": {
+          "revision": "22d8d538154e0e5b6f8dcb1fcc74a60a0798104c",
+          "config_sha256": "14b65a0ee06517060a6bbd979bb1a8ff54e7b304b1a1f01d54344b88b8285e85",
+          "tokenizer_sha256": "49d8f5dc9c3e0a89091f4f189ecfd308c8f0250929b815e125d4700bded4df2c"
+        },
+        "hardware": {
+          "cpu_model": "AMD Ryzen 9 5900X 12-Core Processor",
+          "system_memory_bytes": 33539235840,
+          "memory_type": "dedicated",
+          "gpus": [
+            {
+              "name": "NVIDIA RTX PRO 4500 Blackwell",
+              "memory_bytes": 34207694848,
+              "cores": null
+            }
+          ],
+          "gpu_count": 1,
+          "source": "detected"
+        }
+      },
+      "command": [
+        "/task/v1-client",
+        "benchmark",
+        "TensorFold/Qwen3.8-27B-MLX-4bit",
+        "--server",
+        "http://127.0.0.1:18080",
+        "--model-id",
+        "qwen-community",
+        "--backend",
+        "cuda",
+        "--drafter",
+        "z-lab/Qwen3.8-27B-DFlash2",
+        "--context",
+        "131072",
+        "--tokens",
+        "256",
+        "--reps",
+        "5",
+        "--temperatures",
+        "1,0",
+        "--output",
+        "/task/results/00-stock-before-tile.json"
+      ],
+      "exit_code": 0,
+      "token_parity": true,
+      "counts": [
+        {
+          "accepted": 215,
+          "drafted": 652
+        },
+        {
+          "accepted": 218,
+          "drafted": 651
+        },
+        {
+          "accepted": 228,
+          "drafted": 448
+        },
+        {
+          "accepted": 216,
+          "drafted": 615
+        },
+        {
+          "accepted": 211,
+          "drafted": 657
+        },
+        {
+          "accepted": 217,
+          "drafted": 556
+        },
+        {
+          "accepted": 191,
+          "drafted": 904
+        },
+        {
+          "accepted": 193,
+          "drafted": 883
+        },
+        {
+          "accepted": 187,
+          "drafted": 1055
+        },
+        {
+          "accepted": 192,
+          "drafted": 932
+        },
+        {
+          "accepted": 188,
+          "drafted": 1001
+        },
+        {
+          "accepted": 189,
+          "drafted": 980
+        },
+        {
+          "accepted": 213,
+          "drafted": 636
+        },
+        {
+          "accepted": 214,
+          "drafted": 644
+        },
+        {
+          "accepted": 212,
+          "drafted": 674
+        },
+        {
+          "accepted": 213,
+          "drafted": 675
+        },
+        {
+          "accepted": 213,
+          "drafted": 674
+        },
+        {
+          "accepted": 213,
+          "drafted": 660
+        },
+        {
+          "accepted": 198,
+          "drafted": 853
+        },
+        {
+          "accepted": 198,
+          "drafted": 863
+        },
+        {
+          "accepted": 198,
+          "drafted": 865
+        },
+        {
+          "accepted": 198,
+          "drafted": 868
+        },
+        {
+          "accepted": 198,
+          "drafted": 853
+        },
+        {
+          "accepted": 198,
+          "drafted": 864
+        }
+      ],
+      "basic": {
+        "features": {
+          "plain": "f33a30024ddd7a6d9654758cc881ee0a6c455e44700b2d95e02ae7c8d550a7fd",
+          "draft": "f33a30024ddd7a6d9654758cc881ee0a6c455e44700b2d95e02ae7c8d550a7fd",
+          "png": "ec7e69366eb30e4dc7a45151dc85401493c4eb025f04b7eb462d8915a8e9d8ff",
+          "tool": "43eda20e269868f2f46e0f133a8bdfa0dd4aeab9ca55a99b937b95561c20c6cf",
+          "thinking": "7665f35f18106d421ab94bed81d14db46831d7c2da85405f946276e535636eeb"
+        },
+        "fallbacks": {
+          "penalties": "8e0ec9dcfe51089c304f9f14e3eb721f2bd339ee43ea668530769984ccd44b94",
+          "logprobs": {
+            "status": 400,
+            "unchanged_refusal": true
+          },
+          "sample-filters": "292a522b634aa74cd21d4cf3b2e552e5bdf8dbc4776b872b701e66e23bcd90fc"
+        }
+      },
+      "features": {
+        "basic": {
+          "plain": "f33a30024ddd7a6d9654758cc881ee0a6c455e44700b2d95e02ae7c8d550a7fd",
+          "draft": "f33a30024ddd7a6d9654758cc881ee0a6c455e44700b2d95e02ae7c8d550a7fd",
+          "png": "ec7e69366eb30e4dc7a45151dc85401493c4eb025f04b7eb462d8915a8e9d8ff",
+          "tool": "43eda20e269868f2f46e0f133a8bdfa0dd4aeab9ca55a99b937b95561c20c6cf",
+          "thinking": "7665f35f18106d421ab94bed81d14db46831d7c2da85405f946276e535636eeb"
+        },
+        "reasoning_observed": true,
+        "structured": "c2a5a8c69b2c8d38d43d41307c09c6cda1a4f6028f49de34f46856a665880d45",
+        "vision-jpeg": "ec7e69366eb30e4dc7a45151dc85401493c4eb025f04b7eb462d8915a8e9d8ff",
+        "vision-webp": "ec7e69366eb30e4dc7a45151dc85401493c4eb025f04b7eb462d8915a8e9d8ff",
+        "concurrent": [
+          "9d43935e2ce6959b93b45430f77f4a30534d5a11edf29dce2a4f4fef7892bc90",
+          "c9584fa2318cb3af8d916f16b4dc1c1bfe0d74e3ec34a1ecae01ef0d822c6348"
+        ],
+        "cancellation_recovery": true,
+        "contexts": {
+          "8192": {
+            "prompt_tokens": 8192,
+            "cached_tokens": 4096,
+            "hash": "9b5fc15fb6b03639475f3cc6121cd035658f5b1550105f485044277dc5bb95fa"
+          },
+          "32768": {
+            "prompt_tokens": 32767,
+            "cached_tokens": 28672,
+            "hash": "dd5fea2e180d51e87e9b00e3a9275cfed88352320c7893c1b09dc92c790a6367"
+          },
+          "near128k": {
+            "prompt_tokens": 122779,
+            "cached_tokens": 118784,
+            "hash": "ce03a6050a1b62e5006a9b2c71b4cd6e3541f4f6cc0a5dc86e2e32c0470ef37f"
+          }
+        }
+      },
+      "window_costs": [
+        {
+          "file": "00a9422518b624775abf2f4938be5a056a77015a6b5f5489fb6c182aa0e49511.bin",
+          "schema": 1,
+          "rows": 64,
+          "ms": [
+            20.787243,
+            21.912589,
+            22.211372,
+            22.284604,
+            22.368115,
+            22.417356,
+            22.507327,
+            22.570507,
+            22.204192,
+            22.653299,
+            22.77176,
+            22.858961,
+            22.896552,
+            22.967763,
+            23.029095,
+            23.102296,
+            32.532478,
+            32.877002,
+            32.830372,
+            33.008095,
+            33.175557,
+            33.117877,
+            33.074905,
+            33.37655,
+            33.491602,
+            33.499372,
+            33.648534,
+            33.772926,
+            33.808206,
+            33.809786,
+            33.950648,
+            33.865776,
+            47.364497,
+            47.542189,
+            47.740602,
+            47.782933,
+            47.937365,
+            48.069796,
+            48.127698,
+            48.452913,
+            48.552513,
+            48.683065,
+            48.678275,
+            48.765816,
+            48.805047,
+            48.97326,
+            49.142162,
+            49.274734,
+            60.015975,
+            60.254158,
+            60.34264,
+            60.708074,
+            60.744385,
+            60.880156,
+            60.989198,
+            61.196721,
+            61.336183,
+            61.560646,
+            61.670408,
+            61.688978,
+            61.922201,
+            61.83934,
+            62.039383,
+            62.059244
+          ]
+        },
+        {
+          "file": "22ab0d4577403417c26ed8eaddd92d2eecef05cd55a415603963eb679d8f997e.bin",
+          "schema": 1,
+          "rows": 64,
+          "ms": [
+            20.787243,
+            21.912589,
+            22.211372,
+            22.284604,
+            22.368115,
+            22.417356,
+            22.507327,
+            22.570507,
+            22.204192,
+            22.653299,
+            22.77176,
+            22.858961,
+            22.896552,
+            22.967763,
+            23.029095,
+            23.102296,
+            32.532478,
+            32.877002,
+            32.830372,
+            33.008095,
+            33.175557,
+            33.117877,
+            33.074905,
+            33.37655,
+            33.491602,
+            33.499372,
+            33.648534,
+            33.772926,
+            33.808206,
+            33.809786,
+            33.950648,
+            33.865776,
+            47.364497,
+            47.542189,
+            47.740602,
+            47.782933,
+            47.937365,
+            48.069796,
+            48.127698,
+            48.452913,
+            48.552513,
+            48.683065,
+            48.678275,
+            48.765816,
+            48.805047,
+            48.97326,
+            49.142162,
+            49.274734,
+            60.015975,
+            60.254158,
+            60.34264,
+            60.708074,
+            60.744385,
+            60.880156,
+            60.989198,
+            61.196721,
+            61.336183,
+            61.560646,
+            61.670408,
+            61.688978,
+            61.922201,
+            61.83934,
+            62.039383,
+            62.059244
+          ]
+        }
+      ],
+      "final_health": {
+        "status": "ok",
+        "model": "qwen-community",
+        "model_ids": [
+          "qwen-community",
+          "qwen-community-alias"
+        ],
+        "max_batch_size": 1,
+        "warming": false,
+        "memory": {
+          "active": 24129343644,
+          "cache": 0,
+          "peak": 24556349220
+        },
+        "live": {
+          "connections": 0,
+          "waiting": 0,
+          "decode_tokens_per_second": 158.0,
+          "prefill_tokens_per_second": 427.9
+        },
+        "version": "1.1.6",
+        "backend": "cuda",
+        "device": "NVIDIA RTX PRO 4500 Blackwell"
+      },
+      "memory": {
+        "VmLck": 0,
+        "VmPin": 0,
+        "VmHWM": 13314478080,
+        "VmRSS": 6861234176
+      },
+      "complete": true,
+      "end_utc": "2026-10-30T23:21:05.086545+00:00"
+    },
+    {
+      "name": "01-tile",
+      "arm": "tile",
+      "start_utc": "2026-10-30T23:21:08.168322+00:00",
+      "health": {
+        "status": "ok",
+        "model": "qwen-community",
+        "model_ids": [
+          "qwen-community",
+          "qwen-community-alias"
+        ],
+        "max_batch_size": 1,
+        "warming": false,
+        "memory": {
+          "active": 24406739748,
+          "cache": 0,
+          "peak": 24556349220
+        },
+        "live": {
+          "connections": 0,
+          "waiting": 0,
+          "decode_tokens_per_second": 0.0,
+          "prefill_tokens_per_second": 0.0
+        },
+        "version": "1.1.6",
+        "backend": "cuda",
+        "device": "NVIDIA RTX PRO 4500 Blackwell"
+      },
+      "manifest": {
+        "schema_version": 1,
+        "runtime": {
+          "tensorfold_version": "1.1.6",
+          "backend": "cuda",
+          "python_version": "none",
+          "platform": "linux",
+          "driver": "615.78.08"
+        },
+        "model": {
+          "revision": "22d8d538154e0e5b6f8dcb1fcc74a60a0798104c",
+          "config_sha256": "14b65a0ee06517060a6bbd979bb1a8ff54e7b304b1a1f01d54344b88b8285e85",
+          "tokenizer_sha256": "49d8f5dc9c3e0a89091f4f189ecfd308c8f0250929b815e125d4700bded4df2c"
+        },
+        "hardware": {
+          "cpu_model": "AMD Ryzen 9 5900X 12-Core Processor",
+          "system_memory_bytes": 33539235840,
+          "memory_type": "dedicated",
+          "gpus": [
+            {
+              "name": "NVIDIA RTX PRO 4500 Blackwell",
+              "memory_bytes": 34207694848,
+              "cores": null
+            }
+          ],
+          "gpu_count": 1,
+          "source": "detected"
+        }
+      },
+      "command": [
+        "/task/v1-client",
+        "benchmark",
+        "TensorFold/Qwen3.8-27B-MLX-4bit",
+        "--server",
+        "http://127.0.0.1:18080",
+        "--model-id",
+        "qwen-community",
+        "--backend",
+        "cuda",
+        "--drafter",
+        "z-lab/Qwen3.8-27B-DFlash2",
+        "--context",
+        "131072",
+        "--tokens",
+        "256",
+        "--reps",
+        "5",
+        "--temperatures",
+        "1,0",
+        "--output",
+        "/task/results/01-tile.json"
+      ],
+      "exit_code": 0,
+      "matches_original": true,
+      "token_parity": true,
+      "counts": [
+        {
+          "accepted": 217,
+          "drafted": 652
+        },
+        {
+          "accepted": 218,
+          "drafted": 660
+        },
+        {
+          "accepted": 228,
+          "drafted": 450
+        },
+        {
+          "accepted": 216,
+          "drafted": 615
+        },
+        {
+          "accepted": 211,
+          "drafted": 660
+        },
+        {
+          "accepted": 216,
+          "drafted": 585
+        },
+        {
+          "accepted": 191,
+          "drafted": 909
+        },
+        {
+          "accepted": 193,
+          "drafted": 884
+        },
+        {
+          "accepted": 187,
+          "drafted": 1055
+        },
+        {
+          "accepted": 192,
+          "drafted": 936
+        },
+        {
+          "accepted": 188,
+          "drafted": 1001
+        },
+        {
+          "accepted": 189,
+          "drafted": 984
+        },
+        {
+          "accepted": 213,
+          "drafted": 644
+        },
+        {
+          "accepted": 214,
+          "drafted": 645
+        },
+        {
+          "accepted": 212,
+          "drafted": 675
+        },
+        {
+          "accepted": 213,
+          "drafted": 675
+        },
+        {
+          "accepted": 213,
+          "drafted": 675
+        },
+        {
+          "accepted": 213,
+          "drafted": 660
+        },
+        {
+          "accepted": 198,
+          "drafted": 860
+        },
+        {
+          "accepted": 198,
+          "drafted": 868
+        },
+        {
+          "accepted": 198,
+          "drafted": 867
+        },
+        {
+          "accepted": 198,
+          "drafted": 869
+        },
+        {
+          "accepted": 198,
+          "drafted": 854
+        },
+        {
+          "accepted": 198,
+          "drafted": 868
+        }
+      ],
+      "basic": {
+        "features": {
+          "plain": "f33a30024ddd7a6d9654758cc881ee0a6c455e44700b2d95e02ae7c8d550a7fd",
+          "draft": "f33a30024ddd7a6d9654758cc881ee0a6c455e44700b2d95e02ae7c8d550a7fd",
+          "png": "ec7e69366eb30e4dc7a45151dc85401493c4eb025f04b7eb462d8915a8e9d8ff",
+          "tool": "43eda20e269868f2f46e0f133a8bdfa0dd4aeab9ca55a99b937b95561c20c6cf",
+          "thinking": "7665f35f18106d421ab94bed81d14db46831d7c2da85405f946276e535636eeb"
+        },
+        "fallbacks": {
+          "penalties": "8e0ec9dcfe51089c304f9f14e3eb721f2bd339ee43ea668530769984ccd44b94",
+          "logprobs": {
+            "status": 400,
+            "unchanged_refusal": true
+          },
+          "sample-filters": "292a522b634aa74cd21d4cf3b2e552e5bdf8dbc4776b872b701e66e23bcd90fc"
+        }
+      },
+      "features": {
+        "basic": {
+          "plain": "f33a30024ddd7a6d9654758cc881ee0a6c455e44700b2d95e02ae7c8d550a7fd",
+          "draft": "f33a30024ddd7a6d9654758cc881ee0a6c455e44700b2d95e02ae7c8d550a7fd",
+          "png": "ec7e69366eb30e4dc7a45151dc85401493c4eb025f04b7eb462d8915a8e9d8ff",
+          "tool": "43eda20e269868f2f46e0f133a8bdfa0dd4aeab9ca55a99b937b95561c20c6cf",
+          "thinking": "7665f35f18106d421ab94bed81d14db46831d7c2da85405f946276e535636eeb"
+        },
+        "reasoning_observed": true,
+        "structured": "c2a5a8c69b2c8d38d43d41307c09c6cda1a4f6028f49de34f46856a665880d45",
+        "vision-jpeg": "ec7e69366eb30e4dc7a45151dc85401493c4eb025f04b7eb462d8915a8e9d8ff",
+        "vision-webp": "ec7e69366eb30e4dc7a45151dc85401493c4eb025f04b7eb462d8915a8e9d8ff",
+        "concurrent": [
+          "9d43935e2ce6959b93b45430f77f4a30534d5a11edf29dce2a4f4fef7892bc90",
+          "c9584fa2318cb3af8d916f16b4dc1c1bfe0d74e3ec34a1ecae01ef0d822c6348"
+        ],
+        "cancellation_recovery": true,
+        "contexts": {
+          "8192": {
+            "prompt_tokens": 8192,
+            "cached_tokens": 4096,
+            "hash": "9b5fc15fb6b03639475f3cc6121cd035658f5b1550105f485044277dc5bb95fa"
+          },
+          "32768": {
+            "prompt_tokens": 32767,
+            "cached_tokens": 28672,
+            "hash": "dd5fea2e180d51e87e9b00e3a9275cfed88352320c7893c1b09dc92c790a6367"
+          },
+          "near128k": {
+            "prompt_tokens": 122779,
+            "cached_tokens": 118784,
+            "hash": "ce03a6050a1b62e5006a9b2c71b4cd6e3541f4f6cc0a5dc86e2e32c0470ef37f"
+          }
+        }
+      },
+      "window_costs": [
+        {
+          "file": "a9fa7e4e44bd128dd9c5fd526d379f6b78d67a3ff0136650702ae946e01f3aab.bin",
+          "schema": 1,
+          "rows": 64,
+          "ms": [
+            20.75159,
+            21.902016,
+            22.194061,
+            22.308842,
+            22.368263,
+            22.463044,
+            22.522485,
+            22.599906,
+            22.660757,
+            22.746348,
+            22.806159,
+            22.854559,
+            22.90874,
+            23.006991,
+            23.040952,
+            23.094743,
+            32.639336,
+            33.120373,
+            33.137153,
+            33.401787,
+            33.364196,
+            33.545839,
+            33.597529,
+            33.6219,
+            33.746172,
+            33.970115,
+            33.916324,
+            33.965415,
+            33.953584,
+            34.204288,
+            34.324329,
+            34.38294,
+            48.260304,
+            48.443227,
+            48.617749,
+            48.714031,
+            48.935673,
+            49.144227,
+            49.232377,
+            49.42488,
+            49.533052,
+            49.658384,
+            49.746205,
+            49.831677,
+            49.908747,
+            50.031639,
+            50.11272,
+            50.233712,
+            60.84154,
+            61.029283,
+            61.247475,
+            61.431889,
+            61.481179,
+            61.779023,
+            61.884414,
+            62.051237,
+            62.218069,
+            62.229619,
+            62.344201,
+            62.514063,
+            62.640944,
+            62.613944,
+            62.905218,
+            62.831257
+          ]
+        },
+        {
+          "file": "00a9422518b624775abf2f4938be5a056a77015a6b5f5489fb6c182aa0e49511.bin",
+          "schema": 1,
+          "rows": 64,
+          "ms": [
+            20.75159,
+            21.902016,
+            22.194061,
+            22.308842,
+            22.368263,
+            22.463044,
+            22.522485,
+            22.599906,
+            22.660757,
+            22.746348,
+            22.806159,
+            22.854559,
+            22.90874,
+            23.006991,
+            23.040952,
+            23.094743,
+            32.639336,
+            33.120373,
+            33.137153,
+            33.401787,
+            33.364196,
+            33.545839,
+            33.597529,
+            33.6219,
+            33.746172,
+            33.970115,
+            33.916324,
+            33.965415,
+            33.953584,
+            34.204288,
+            34.324329,
+            34.38294,
+            48.260304,
+            48.443227,
+            48.617749,
+            48.714031,
+            48.935673,
+            49.144227,
+            49.232377,
+            49.42488,
+            49.533052,
+            49.658384,
+            49.746205,
+            49.831677,
+            49.908747,
+            50.031639,
+            50.11272,
+            50.233712,
+            60.84154,
+            61.029283,
+            61.247475,
+            61.431889,
+            61.481179,
+            61.779023,
+            61.884414,
+            62.051237,
+            62.218069,
+            62.229619,
+            62.344201,
+            62.514063,
+            62.640944,
+            62.613944,
+            62.905218,
+            62.831257
+          ]
+        }
+      ],
+      "final_health": {
+        "status": "ok",
+        "model": "qwen-community",
+        "model_ids": [
+          "qwen-community",
+          "qwen-community-alias"
+        ],
+        "max_batch_size": 1,
+        "warming": false,
+        "memory": {
+          "active": 24129343644,
+          "cache": 0,
+          "peak": 24556349220
+        },
+        "live": {
+          "connections": 0,
+          "waiting": 0,
+          "decode_tokens_per_second": 158.0,
+          "prefill_tokens_per_second": 426.5
+        },
+        "version": "1.1.6",
+        "backend": "cuda",
+        "device": "NVIDIA RTX PRO 4500 Blackwell"
+      },
+      "memory": {
+        "VmLck": 0,
+        "VmPin": 0,
+        "VmHWM": 15687008256,
+        "VmRSS": 6859141120
+      },
+      "complete": true,
+      "end_utc": "2026-10-30T23:24:49.405460+00:00"
+    },
+    {
+      "name": "02-stock-after-tile",
+      "arm": "stock-after-tile",
+      "start_utc": "2026-10-30T23:24:52.481920+00:00",
+      "health": {
+        "status": "ok",
+        "model": "qwen-community",
+        "model_ids": [
+          "qwen-community",
+          "qwen-community-alias"
+        ],
+        "max_batch_size": 1,
+        "warming": false,
+        "memory": {
+          "active": 24406739748,
+          "cache": 0,
+          "peak": 24556349220
+        },
+        "live": {
+          "connections": 0,
+          "waiting": 0,
+          "decode_tokens_per_second": 0.0,
+          "prefill_tokens_per_second": 0.0
+        },
+        "version": "1.1.6",
+        "backend": "cuda",
+        "device": "NVIDIA RTX PRO 4500 Blackwell"
+      },
+      "manifest": {
+        "schema_version": 1,
+        "runtime": {
+          "tensorfold_version": "1.1.6",
+          "backend": "cuda",
+          "python_version": "none",
+          "platform": "linux",
+          "driver": "615.78.08"
+        },
+        "model": {
+          "revision": "22d8d538154e0e5b6f8dcb1fcc74a60a0798104c",
+          "config_sha256": "14b65a0ee06517060a6bbd979bb1a8ff54e7b304b1a1f01d54344b88b8285e85",
+          "tokenizer_sha256": "49d8f5dc9c3e0a89091f4f189ecfd308c8f0250929b815e125d4700bded4df2c"
+        },
+        "hardware": {
+          "cpu_model": "AMD Ryzen 9 5900X 12-Core Processor",
+          "system_memory_bytes": 33539235840,
+          "memory_type": "dedicated",
+          "gpus": [
+            {
+              "name": "NVIDIA RTX PRO 4500 Blackwell",
+              "memory_bytes": 34207694848,
+              "cores": null
+            }
+          ],
+          "gpu_count": 1,
+          "source": "detected"
+        }
+      },
+      "command": [
+        "/task/v1-client",
+        "benchmark",
+        "TensorFold/Qwen3.8-27B-MLX-4bit",
+        "--server",
+        "http://127.0.0.1:18080",
+        "--model-id",
+        "qwen-community",
+        "--backend",
+        "cuda",
+        "--drafter",
+        "z-lab/Qwen3.8-27B-DFlash2",
+        "--context",
+        "131072",
+        "--tokens",
+        "256",
+        "--reps",
+        "5",
+        "--temperatures",
+        "1,0",
+        "--output",
+        "/task/results/02-stock-after-tile.json"
+      ],
+      "exit_code": 0,
+      "matches_original": true,
+      "token_parity": true,
+      "counts": [
+        {
+          "accepted": 217,
+          "drafted": 653
+        },
+        {
+          "accepted": 218,
+          "drafted": 659
+        },
+        {
+          "accepted": 228,
+          "drafted": 450
+        },
+        {
+          "accepted": 216,
+          "drafted": 615
+        },
+        {
+          "accepted": 211,
+          "drafted": 660
+        },
+        {
+          "accepted": 216,
+          "drafted": 585
+        },
+        {
+          "accepted": 191,
+          "drafted": 911
+        },
+        {
+          "accepted": 193,
+          "drafted": 885
+        },
+        {
+          "accepted": 187,
+          "drafted": 1058
+        },
+        {
+          "accepted": 192,
+          "drafted": 938
+        },
+        {
+          "accepted": 188,
+          "drafted": 1001
+        },
+        {
+          "accepted": 189,
+          "drafted": 982
+        },
+        {
+          "accepted": 213,
+          "drafted": 644
+        },
+        {
+          "accepted": 214,
+          "drafted": 645
+        },
+        {
+          "accepted": 212,
+          "drafted": 675
+        },
+        {
+          "accepted": 213,
+          "drafted": 675
+        },
+        {
+          "accepted": 213,
+          "drafted": 675
+        },
+        {
+          "accepted": 213,
+          "drafted": 660
+        },
+        {
+          "accepted": 198,
+          "drafted": 860
+        },
+        {
+          "accepted": 198,
+          "drafted": 869
+        },
+        {
+          "accepted": 198,
+          "drafted": 869
+        },
+        {
+          "accepted": 198,
+          "drafted": 868
+        },
+        {
+          "accepted": 198,
+          "drafted": 854
+        },
+        {
+          "accepted": 198,
+          "drafted": 869
+        }
+      ],
+      "basic": {
+        "features": {
+          "plain": "f33a30024ddd7a6d9654758cc881ee0a6c455e44700b2d95e02ae7c8d550a7fd",
+          "draft": "f33a30024ddd7a6d9654758cc881ee0a6c455e44700b2d95e02ae7c8d550a7fd",
+          "png": "ec7e69366eb30e4dc7a45151dc85401493c4eb025f04b7eb462d8915a8e9d8ff",
+          "tool": "43eda20e269868f2f46e0f133a8bdfa0dd4aeab9ca55a99b937b95561c20c6cf",
+          "thinking": "7665f35f18106d421ab94bed81d14db46831d7c2da85405f946276e535636eeb"
+        },
+        "fallbacks": {
+          "penalties": "8e0ec9dcfe51089c304f9f14e3eb721f2bd339ee43ea668530769984ccd44b94",
+          "logprobs": {
+            "status": 400,
+            "unchanged_refusal": true
+          },
+          "sample-filters": "292a522b634aa74cd21d4cf3b2e552e5bdf8dbc4776b872b701e66e23bcd90fc"
+        }
+      },
+      "features": {
+        "basic": {
+          "plain": "f33a30024ddd7a6d9654758cc881ee0a6c455e44700b2d95e02ae7c8d550a7fd",
+          "draft": "f33a30024ddd7a6d9654758cc881ee0a6c455e44700b2d95e02ae7c8d550a7fd",
+          "png": "ec7e69366eb30e4dc7a45151dc85401493c4eb025f04b7eb462d8915a8e9d8ff",
+          "tool": "43eda20e269868f2f46e0f133a8bdfa0dd4aeab9ca55a99b937b95561c20c6cf",
+          "thinking": "7665f35f18106d421ab94bed81d14db46831d7c2da85405f946276e535636eeb"
+        },
+        "reasoning_observed": true,
+        "structured": "c2a5a8c69b2c8d38d43d41307c09c6cda1a4f6028f49de34f46856a665880d45",
+        "vision-jpeg": "ec7e69366eb30e4dc7a45151dc85401493c4eb025f04b7eb462d8915a8e9d8ff",
+        "vision-webp": "ec7e69366eb30e4dc7a45151dc85401493c4eb025f04b7eb462d8915a8e9d8ff",
+        "concurrent": [
+          "9d43935e2ce6959b93b45430f77f4a30534d5a11edf29dce2a4f4fef7892bc90",
+          "c9584fa2318cb3af8d916f16b4dc1c1bfe0d74e3ec34a1ecae01ef0d822c6348"
+        ],
+        "cancellation_recovery": true,
+        "contexts": {
+          "8192": {
+            "prompt_tokens": 8192,
+            "cached_tokens": 4096,
+            "hash": "9b5fc15fb6b03639475f3cc6121cd035658f5b1550105f485044277dc5bb95fa"
+          },
+          "32768": {
+            "prompt_tokens": 32767,
+            "cached_tokens": 28672,
+            "hash": "dd5fea2e180d51e87e9b00e3a9275cfed88352320c7893c1b09dc92c790a6367"
+          },
+          "near128k": {
+            "prompt_tokens": 122779,
+            "cached_tokens": 118784,
+            "hash": "ce03a6050a1b62e5006a9b2c71b4cd6e3541f4f6cc0a5dc86e2e32c0470ef37f"
+          }
+        }
+      },
+      "window_costs": [
+        {
+          "file": "00a9422518b624775abf2f4938be5a056a77015a6b5f5489fb6c182aa0e49511.bin",
+          "schema": 1,
+          "rows": 64,
+          "ms": [
+            20.856626,
+            22.084696,
+            22.425189,
+            22.53861,
+            22.602521,
+            22.670551,
+            22.744163,
+            22.818863,
+            22.862034,
+            22.953565,
+            23.022705,
+            23.092695,
+            23.150426,
+            23.213457,
+            23.260537,
+            23.323848,
+            32.766028,
+            33.327452,
+            33.314402,
+            33.435423,
+            33.437173,
+            33.631905,
+            33.805967,
+            33.744296,
+            33.782406,
+            33.893987,
+            34.060069,
+            34.07714,
+            34.236771,
+            34.308922,
+            34.364192,
+            34.472313,
+            48.129339,
+            48.26042,
+            48.346861,
+            48.505563,
+            48.753695,
+            48.861677,
+            48.972057,
+            49.181129,
+            49.2632,
+            49.29163,
+            49.462842,
+            49.601724,
+            49.781325,
+            49.822866,
+            50.002767,
+            50.139208,
+            61.053622,
+            61.298664,
+            61.421026,
+            61.787709,
+            61.692908,
+            61.8477,
+            62.107523,
+            62.241854,
+            62.255944,
+            62.329845,
+            62.563197,
+            62.636748,
+            62.83383,
+            62.905261,
+            63.016802,
+            63.015532
+          ]
+        },
+        {
+          "file": "22ab0d4577403417c26ed8eaddd92d2eecef05cd55a415603963eb679d8f997e.bin",
+          "schema": 1,
+          "rows": 64,
+          "ms": [
+            20.856626,
+            22.084696,
+            22.425189,
+            22.53861,
+            22.602521,
+            22.670551,
+            22.744163,
+            22.818863,
+            22.862034,
+            22.953565,
+            23.022705,
+            23.092695,
+            23.150426,
+            23.213457,
+            23.260537,
+            23.323848,
+            32.766028,
+            33.327452,
+            33.314402,
+            33.435423,
+            33.437173,
+            33.631905,
+            33.805967,
+            33.744296,
+            33.782406,
+            33.893987,
+            34.060069,
+            34.07714,
+            34.236771,
+            34.308922,
+            34.364192,
+            34.472313,
+            48.129339,
+            48.26042,
+            48.346861,
+            48.505563,
+            48.753695,
+            48.861677,
+            48.972057,
+            49.181129,
+            49.2632,
+            49.29163,
+            49.462842,
+            49.601724,
+            49.781325,
+            49.822866,
+            50.002767,
+            50.139208,
+            61.053622,
+            61.298664,
+            61.421026,
+            61.787709,
+            61.692908,
+            61.8477,
+            62.107523,
+            62.241854,
+            62.255944,
+            62.329845,
+            62.563197,
+            62.636748,
+            62.83383,
+            62.905261,
+            63.016802,
+            63.015532
+          ]
+        }
+      ],
+      "final_health": {
+        "status": "ok",
+        "model": "qwen-community",
+        "model_ids": [
+          "qwen-community",
+          "qwen-community-alias"
+        ],
+        "max_batch_size": 1,
+        "warming": false,
+        "memory": {
+          "active": 24129343644,
+          "cache": 0,
+          "peak": 24556349220
+        },
+        "live": {
+          "connections": 0,
+          "waiting": 0,
+          "decode_tokens_per_second": 161.5,
+          "prefill_tokens_per_second": 425.8
+        },
+        "version": "1.1.6",
+        "backend": "cuda",
+        "device": "NVIDIA RTX PRO 4500 Blackwell"
+      },
+      "memory": {
+        "VmLck": 0,
+        "VmPin": 0,
+        "VmHWM": 15681052672,
+        "VmRSS": 6864646144
+      },
+      "complete": true,
+      "end_utc": "2026-10-30T23:28:28.432580+00:00"
+    }
+  ],
+  "complete": true,
+  "ended_utc": "2026-10-30T23:40:57.721993+00:00"
+}

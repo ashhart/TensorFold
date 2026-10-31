@@ -1,0 +1,33 @@
+test-qwen35-live-host
++- run test 13 pass, 1 crash (14 total)
+error: 'qwen35_live_host.test.served scratch: one drafter frame does not allocate 128 streams of logits and attention' terminated with signal ABRT with stderr:
+       General protection exception (no address available)
+       /submission/base/zig/src/families/qwen3_5/cuda_draft.zig:401:349: 0x12ce5ef in factsFn (cuda.zig)
+               return .{ .depth = @intCast(d.c.block - 1), .step_ms = d.step_ms, .prior = &prior, .plain_guard = true, .batched = true, .stream_bytes = d.c.ringBytes() + d.target_taps + d.scratch_one, .trees = platform.c.getenv("TF_NO_TREES") == null, .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs], .copy_match = copyMatch(d.e.g), .tree_nodes = @intCast(if (d.c.block == 16) tree.nodes() else 0) };
+                                                                                                                                                                                                                                                                                                                                                                   ^
+       /submission/base/zig/src/core/lanes/drafter.zig:68:30: 0x1259be0 in facts (lanes.zig)
+               return d.vtable.facts(d.ptr);
+                                    ^
+       /submission/base/zig/qwen35_live_host.zig:228:99: 0x125852b in test.served scratch: one drafter frame does not allocate 128 streams of logits and attention (qwen35_live_host.zig)
+           try std.testing.expectEqual(d.c.ringBytes() + d.target_taps + d.scratch_one, d.drafter().facts().stream_bytes);
+                                                                                                         ^
+       /opt/zig/lib/compiler/test_runner.zig:143:68: 0x11e9d8a in mainServer (test_runner.zig)
+                       const status: TestResults.Status = if (test_fn.func()) |v| s: {
+                                                                          ^
+       /opt/zig/lib/compiler/test_runner.zig:72:26: 0x11eabbd in main (test_runner.zig)
+               return mainServer(init) catch |err| panic("internal test runner failure: {t}", .{err});
+                                ^
+       /opt/zig/lib/std/start.zig:789:88: 0x11e78c8 in callMain (std.zig)
+           if (fn_info.param_types[0].? == std.process.Init.Minimal) return wrapMain(root.main(.{
+                                                                                              ^
+       ???:?:?: 0x7f9dc7ebb1c9 in ??? (/lib/x86_64-linux-gnu/libc.so.6)
+       ???:?:?: 0x7f9dc7ebb28a in ??? (/lib/x86_64-linux-gnu/libc.so.6)
+       ???:?:?: 0x12db574 in _start (???)
+failed command: ./.zig-cache/o/0995a0194c8dcb98c2ea20660a44a02b/test --cache-dir=./.zig-cache --seed=0xf648f5e8 --listen=-
+
+Build Summary: 3/5 steps succeeded (1 failed); 13/14 tests passed (1 crashed)
+test-qwen35-live-host transitive failure
++- run test 13 pass, 1 crash (14 total)
+   +- compile test debug native success 629ms MaxRSS:214M
+      +- options success
+      +- WriteFile draft_ids.txt cached

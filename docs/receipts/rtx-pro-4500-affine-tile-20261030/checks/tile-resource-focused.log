@@ -1,0 +1,31 @@
+Build Summary: 28/28 steps succeeded; 139/139 tests passed
+test-qwen35-launch-args-host success
++- run test 3 pass (3 total) 125ms MaxRSS:14M
+   +- compile test debug native success 1s MaxRSS:203M
+      +- WriteFile draft_ids.txt cached
+      +- options cached
+test-qwen35-attn-contract-host success
++- run test 2 pass (2 total) 15ms MaxRSS:6M
+   +- compile test debug native success 1s MaxRSS:191M
+      +- options (reused)
+test-kernel-contract success
++- run test 90 pass (90 total) 1s MaxRSS:10M
+|  +- compile test debug native success 11s MaxRSS:203M
++- test-gemma4-contract-host success
+|  +- run test 9 pass (9 total) 40s MaxRSS:14M
+|  |  +- compile test debug native success 1s MaxRSS:249M
+|  |     +- WriteFile gemma4-host-empty.metallib cached
+|  +- test-glm-window-contract-host success
+|     +- run test 17 pass (17 total) 46s MaxRSS:8M
+|        +- compile test debug native success 1s MaxRSS:182M
+|           +- WriteFile gemma4-host-empty.metallib (reused)
++- run test cached
+|  +- compile test debug native cached 16ms MaxRSS:41M
++- run test cached
+|  +- compile test debug native cached 18ms MaxRSS:39M
++- run test 7 pass (7 total) 2s MaxRSS:57M
+|  +- compile test debug native success 874ms MaxRSS:176M
++- run test 3 pass (3 total) 25ms MaxRSS:6M
+|  +- compile test debug native success 987ms MaxRSS:172M
++- run test 8 pass (8 total) 1s MaxRSS:8M
+   +- compile test debug native success 1s MaxRSS:175M

@@ -1,0 +1,106 @@
+{
+  "request": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "Return the integer answer 42 in the requested JSON object."
+      }
+    ],
+    "temperature": 0,
+    "seed": 42,
+    "max_tokens": 128,
+    "reasoning_effort": "none",
+    "chat_template_kwargs": {
+      "enable_thinking": false
+    },
+    "response_format": {
+      "type": "json_schema",
+      "json_schema": {
+        "name": "answer",
+        "strict": true,
+        "schema": {
+          "type": "object",
+          "properties": {
+            "answer": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "answer"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "model": "qwen-community",
+    "stream": false,
+    "return_token_ids": true,
+    "priority": "background"
+  },
+  "response": {
+    "id": "chatcmpl-f2242d2ceafd36331bb02dd726e5d1a0",
+    "object": "chat.completion",
+    "created": 1793402330,
+    "model": "qwen-community",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "{\n  \"answer\": 42\n}"
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 25,
+      "completion_tokens": 12,
+      "total_tokens": 37,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "exact_mode": "exact",
+    "tensorfold": {
+      "enable_thinking": false,
+      "reasoning_effort": "none",
+      "engine": "lanes",
+      "tokens_per_second": 207.49723736291836,
+      "seconds": 0.053012754,
+      "prefill_seconds": 0.069276653,
+      "prefill_widths": [],
+      "prefill_raised": [],
+      "time_to_first_token": 0.224120487,
+      "sampling": "greedy",
+      "drafts": true,
+      "token_sha": "c2a5a8c69b2c",
+      "token_sha256": "c2a5a8c69b2c8d38d43d41307c09c6cda1a4f6028f49de34f46856a665880d45",
+      "token_ids": [
+        90,
+        198,
+        220,
+        328,
+        8944,
+        763,
+        220,
+        19,
+        17,
+        198,
+        92,
+        248046
+      ],
+      "min_rows": 1
+    },
+    "speculative": {
+      "rounds": 2,
+      "drafted": 9,
+      "accepted": 9,
+      "acceptance_rate": 1.0,
+      "tokens_per_round": 6.0
+    }
+  },
+  "elapsed_s": 0.277766110986704
+}

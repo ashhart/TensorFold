@@ -1,0 +1,8 @@
+{
+  "Package": "cuda-sanitizer-13-3",
+  "Version": "13.3.75-1",
+  "Filename": "./cuda-sanitizer-13-3_13.3.75-1_amd64.deb",
+  "Size": "11190348",
+  "SHA256": "ab5467d9473adfb528481d1b6166b9bc718ab668563a3466d0f2c5d8dd27aa4f",
+  "url": "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-sanitizer-13-3_13.3.75-1_amd64.deb"
+}

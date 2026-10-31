@@ -1,0 +1,111 @@
+{
+  "request": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "Write a Python function that adds two integers."
+      }
+    ],
+    "temperature": 0,
+    "seed": 42,
+    "max_tokens": 64,
+    "reasoning_effort": "none",
+    "chat_template_kwargs": {
+      "enable_thinking": false
+    },
+    "model": "qwen-community",
+    "stream": false,
+    "return_token_ids": true,
+    "priority": "background"
+  },
+  "response": {
+    "id": "chatcmpl-e02eaf66d58cdda688a1924c6444a34f",
+    "object": "chat.completion",
+    "created": 1793402774,
+    "model": "qwen-community",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "```python\ndef add(a: int, b: int) -> int:\n    \"\"\"Add two integers and return the result.\"\"\"\n    return a + b\n```"
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 21,
+      "completion_tokens": 36,
+      "total_tokens": 57,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "exact_mode": "exact",
+    "tensorfold": {
+      "enable_thinking": false,
+      "reasoning_effort": "none",
+      "engine": "lanes",
+      "tokens_per_second": 336.6239769756894,
+      "seconds": 0.10397358,
+      "prefill_seconds": 0.069287918,
+      "prefill_widths": [],
+      "prefill_raised": [],
+      "time_to_first_token": 0.222163898,
+      "sampling": "greedy",
+      "drafts": true,
+      "token_sha": "c9584fa2318c",
+      "token_sha256": "c9584fa2318cb3af8d916f16b4dc1c1bfe0d74e3ec34a1ecae01ef0d822c6348",
+      "token_ids": [
+        71093,
+        12305,
+        198,
+        727,
+        884,
+        2784,
+        25,
+        514,
+        11,
+        292,
+        25,
+        514,
+        8,
+        1411,
+        514,
+        25,
+        198,
+        262,
+        4071,
+        2143,
+        1330,
+        24959,
+        321,
+        460,
+        279,
+        1067,
+        71483,
+        198,
+        262,
+        460,
+        264,
+        478,
+        292,
+        198,
+        71093,
+        248046
+      ],
+      "min_rows": 16
+    },
+    "speculative": {
+      "rounds": 4,
+      "drafted": 60,
+      "accepted": 32,
+      "acceptance_rate": 0.5333333333333333,
+      "tokens_per_round": 9.0
+    }
+  },
+  "elapsed_s": 0.32683357399946544
+}

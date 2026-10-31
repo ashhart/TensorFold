@@ -1,0 +1,303 @@
+PASS nonfinite cuda vit tf_vit_bias_act none no residual: the stated rule holds: byte-identical to bias then pointwise, including non-finite inputs
+PASS repeat cuda vit tf_vit_bias_act none no residual: five runs byte-identical (163840 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda vit tf_vit_bias_act none no residual: 6 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda vit tf_vit_bias_act none no residual: within its bound at k 1; fp16 sums would miss 0x, bf16 0.0x (pointwise rounding boundaries are checked against the replaced kernels)
+PASS nonfinite cuda vit tf_vit_bias_act gelu_tanh no residual: the stated rule holds: byte-identical to bias then pointwise, including non-finite inputs
+PASS repeat cuda vit tf_vit_bias_act gelu_tanh no residual: five runs byte-identical (163840 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda vit tf_vit_bias_act gelu_tanh no residual: 6 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda vit tf_vit_bias_act gelu_tanh no residual: within its bound at k 1; fp16 sums would miss 0x, bf16 0.0x (pointwise rounding boundaries are checked against the replaced kernels)
+PASS nonfinite cuda vit tf_vit_bias_act gelu no residual: the stated rule holds: byte-identical to bias then pointwise, including non-finite inputs
+PASS repeat cuda vit tf_vit_bias_act gelu no residual: five runs byte-identical (163840 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda vit tf_vit_bias_act gelu no residual: 6 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda vit tf_vit_bias_act gelu no residual: within its bound at k 1; fp16 sums would miss 0x, bf16 0.0x (pointwise rounding boundaries are checked against the replaced kernels)
+PASS nonfinite cuda vit tf_vit_bias_act relu2 no residual: the stated rule holds: byte-identical to bias then pointwise, including non-finite inputs
+PASS repeat cuda vit tf_vit_bias_act relu2 no residual: five runs byte-identical (163840 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda vit tf_vit_bias_act relu2 no residual: 6 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda vit tf_vit_bias_act relu2 no residual: within its bound at k 1; fp16 sums would miss 0x, bf16 0.0x (pointwise rounding boundaries are checked against the replaced kernels)
+PASS nonfinite cuda vit tf_vit_bias_act none residual: the stated rule holds: byte-identical to bias then pointwise, including non-finite inputs
+PASS repeat cuda vit tf_vit_bias_act none residual: five runs byte-identical (163840 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda vit tf_vit_bias_act none residual: 6 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda vit tf_vit_bias_act none residual: within its bound at k 1; fp16 sums would miss 0x, bf16 0.0x (pointwise rounding boundaries are checked against the replaced kernels)
+PASS nonfinite cuda vit tf_vit_bias_act gelu_tanh residual: the stated rule holds: byte-identical to bias then pointwise, including non-finite inputs
+PASS repeat cuda vit tf_vit_bias_act gelu_tanh residual: five runs byte-identical (163840 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda vit tf_vit_bias_act gelu_tanh residual: 6 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda vit tf_vit_bias_act gelu_tanh residual: within its bound at k 1; fp16 sums would miss 0x, bf16 0.0x (pointwise rounding boundaries are checked against the replaced kernels)
+PASS nonfinite cuda vit tf_vit_bias_act gelu residual: the stated rule holds: byte-identical to bias then pointwise, including non-finite inputs
+PASS repeat cuda vit tf_vit_bias_act gelu residual: five runs byte-identical (163840 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda vit tf_vit_bias_act gelu residual: 6 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda vit tf_vit_bias_act gelu residual: within its bound at k 1; fp16 sums would miss 0x, bf16 0.0x (pointwise rounding boundaries are checked against the replaced kernels)
+PASS nonfinite cuda vit tf_vit_bias_act relu2 residual: the stated rule holds: byte-identical to bias then pointwise, including non-finite inputs
+PASS repeat cuda vit tf_vit_bias_act relu2 residual: five runs byte-identical (163840 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda vit tf_vit_bias_act relu2 residual: 6 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda vit tf_vit_bias_act relu2 residual: within its bound at k 1; fp16 sums would miss 0x, bf16 0.0x (pointwise rounding boundaries are checked against the replaced kernels)
+PASS nonfinite cuda vit tf_vit_bias_act none in-place residual: the stated rule holds: byte-identical to bias then pointwise, including non-finite inputs
+PASS repeat cuda vit tf_vit_bias_act none in-place residual: five runs byte-identical (163840 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda vit tf_vit_bias_act none in-place residual: 6 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda vit tf_vit_bias_act none in-place residual: within its bound at k 1; fp16 sums would miss 0x, bf16 0.0x (pointwise rounding boundaries are checked against the replaced kernels)
+PASS nonfinite cuda vit tf_vit_bias_act gelu_tanh in-place residual: the stated rule holds: byte-identical to bias then pointwise, including non-finite inputs
+PASS repeat cuda vit tf_vit_bias_act gelu_tanh in-place residual: five runs byte-identical (163840 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda vit tf_vit_bias_act gelu_tanh in-place residual: 6 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda vit tf_vit_bias_act gelu_tanh in-place residual: within its bound at k 1; fp16 sums would miss 0x, bf16 0.0x (pointwise rounding boundaries are checked against the replaced kernels)
+PASS nonfinite cuda vit tf_vit_bias_act gelu in-place residual: the stated rule holds: byte-identical to bias then pointwise, including non-finite inputs
+PASS repeat cuda vit tf_vit_bias_act gelu in-place residual: five runs byte-identical (163840 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda vit tf_vit_bias_act gelu in-place residual: 6 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda vit tf_vit_bias_act gelu in-place residual: within its bound at k 1; fp16 sums would miss 0x, bf16 0.0x (pointwise rounding boundaries are checked against the replaced kernels)
+PASS nonfinite cuda vit tf_vit_bias_act relu2 in-place residual: the stated rule holds: byte-identical to bias then pointwise, including non-finite inputs
+PASS repeat cuda vit tf_vit_bias_act relu2 in-place residual: five runs byte-identical (163840 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda vit tf_vit_bias_act relu2 in-place residual: 6 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda vit tf_vit_bias_act relu2 in-place residual: within its bound at k 1; fp16 sums would miss 0x, bf16 0.0x (pointwise rounding boundaries are checked against the replaced kernels)
+FAIL shapes control: RADIO omitted bias BF16 round: at 13322x1280x1 its bytes differ from tf_vit_bias then tf_vit_pointwise's from byte 0
+CONTROL control: RADIO omitted bias BF16 round: red at shapes, as planted
+FAIL nonfinite cuda w4a8 CONTROL quantizer missed exceptional flag: exceptional group did not raise the chunk flag
+CONTROL cuda w4a8 CONTROL quantizer missed exceptional flag: red at nonfinite, as planted
+FAIL nonfinite cuda w4a8 CONTROL projection missed exceptional flag: exceptional group did not raise the chunk flag
+CONTROL cuda w4a8 CONTROL projection missed exceptional flag: red at nonfinite, as planted
+PASS nonfinite cuda w4a8 tf_w4a8_quantize: the stated rule holds: any nonfinite activation or nonfinite group scale/sum raises the chunk flag; int8 outputs are discarded and the engine recomputes in bf16
+PASS repeat cuda w4a8 tf_w4a8_quantize: five runs byte-identical (18432 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda w4a8 tf_w4a8_quantize: 22 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda w4a8 tf_w4a8_quantize: exact sums at k 32768, where fp16 sums would miss by infx and bf16 by 256x
+PASS nonfinite cuda w4a8 tf_w4a8_prefill: the stated rule holds: any nonfinite activation or nonfinite group scale/sum raises the chunk flag; int8 outputs are discarded and the engine recomputes in bf16
+PASS repeat cuda w4a8 tf_w4a8_prefill: five runs byte-identical (16512 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda w4a8 tf_w4a8_prefill: 22 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda w4a8 tf_w4a8_prefill: exact sums at k 32768, where fp16 sums would miss by infx and bf16 by 128x
+FAIL repeat cuda w4a8 CONTROL changed guard byte: a run wrote outside its outputs
+CONTROL cuda w4a8 CONTROL changed guard byte: red at repeat, as planted
+FAIL repeat cuda w4a8 CONTROL changed guard byte: a run wrote outside its outputs
+CONTROL cuda w4a8 CONTROL changed guard byte: red at repeat, as planted
+FAIL shapes cuda w4a8 CONTROL changed quantized code: at 129x129x256: quantizer codes differ from independent nearest-even reference
+CONTROL cuda w4a8 CONTROL changed quantized code: red at shapes, as planted
+FAIL shapes cuda w4a8 CONTROL changed group scale: at 129x129x256: quantizer scales leave the independent FP32 division bound
+CONTROL cuda w4a8 CONTROL changed group scale: red at shapes, as planted
+FAIL shapes cuda w4a8 CONTROL changed group sum: at 129x129x256: output leaves independent FP64 bound
+CONTROL cuda w4a8 CONTROL changed group sum: red at shapes, as planted
+FAIL sums cuda w4a8 CONTROL bf16 group sums: 256.0x over its exact-sum bound at k 32768: not fp32 sums (fp16 would miss infx, bf16 256x)
+CONTROL cuda w4a8 CONTROL bf16 group sums: red at sums, as planted
+FAIL shapes cuda w4a8 CONTROL changed weight code: at 127x127x64: output leaves independent FP64 bound
+CONTROL cuda w4a8 CONTROL changed weight code: red at shapes, as planted
+FAIL sums cuda w4a8 CONTROL bf16 epilogue sums: 128.0x over its exact-sum bound at k 32768: not fp32 sums (fp16 would miss infx, bf16 128x)
+CONTROL cuda w4a8 CONTROL bf16 epilogue sums: red at sums, as planted
+PASS nonfinite cuda qwen35_bf16_rows tf_q35_embed_bf16 aligned: the stated rule holds: every live word copied unchanged; device-count padding and prefix left poisoned
+PASS repeat cuda qwen35_bf16_rows tf_q35_embed_bf16 aligned: five runs byte-identical (16384 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda qwen35_bf16_rows tf_q35_embed_bf16 aligned: 13 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums cuda qwen35_bf16_rows tf_q35_embed_bf16 aligned: declares none sums
+PASS nonfinite cuda qwen35_bf16_rows tf_q35_embed_bf16 unaligned: the stated rule holds: every live word copied unchanged; device-count padding and prefix left poisoned
+PASS repeat cuda qwen35_bf16_rows tf_q35_embed_bf16 unaligned: five runs byte-identical (16386 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda qwen35_bf16_rows tf_q35_embed_bf16 unaligned: 13 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums cuda qwen35_bf16_rows tf_q35_embed_bf16 unaligned: declares none sums
+PASS nonfinite cuda qwen35_bf16_rows tf_q35_dense_bf16: 96 non-finite and 64 finite outputs match the float64 classes
+PASS repeat cuda qwen35_bf16_rows tf_q35_dense_bf16: five runs byte-identical (256 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda qwen35_bf16_rows tf_q35_dense_bf16: 15 shapes within the float64 bound (worst 0.977 of the bound), 0 edges refused by the kernel
+PASS sums cuda qwen35_bf16_rows tf_q35_dense_bf16: exact sums at k 8192, where fp16 sums would miss by 128x and bf16 by 256x
+FAIL shapes control: Qwen BF16 copy omits a real row: at 4x2048x1: embedding word, masked row or unaligned prefix differs
+CONTROL control: Qwen BF16 copy omits a real row: red at shapes, as planted
+FAIL sums control: Qwen BF16 dense uses fp16 sums: 256.0x over its exact-sum bound at k 8192: not fp32 sums (fp16 would miss 128x, bf16 256x)
+CONTROL control: Qwen BF16 dense uses fp16 sums: red at sums, as planted
+PASS nonfinite cuda RMS norm tf_rms_rows_bf16 (16-byte form): 2692 non-finite and 18812 finite outputs match the float64 classes
+PASS repeat cuda RMS norm tf_rms_rows_bf16 (16-byte form): five runs byte-identical (91392 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda RMS norm tf_rms_rows_bf16 (16-byte form): 2 shapes within the float64 bound (worst 0.993 of the bound), 5 edges refused by the kernel
+PASS sums cuda RMS norm tf_rms_rows_bf16 (16-byte form): within its bound at k 7168; fp16 sums would miss 256x, bf16 0.4x (a bf16 output follows the sum of squares as ss^-1/2: a bf16 sum's error is a few output ulps (the fp32-out form proves it))
+PASS nonfinite cuda RMS norm tf_rms_rows (f16 in, fp32 out): 2692 non-finite and 18812 finite outputs match the float64 classes
+PASS repeat cuda RMS norm tf_rms_rows (f16 in, fp32 out): five runs byte-identical (182784 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda RMS norm tf_rms_rows (f16 in, fp32 out): 2 shapes within the float64 bound (worst 0.238 of the bound), 5 edges refused by the kernel
+PASS sums cuda RMS norm tf_rms_rows (f16 in, fp32 out): exact sums at k 9216, where fp16 sums would miss by 1864135x and bf16 by 3828x
+FAIL nonfinite control: fmax row max: 1 of 8 outputs differ in class; first at 0: finite where float64 gives nan
+CONTROL control: fmax row max: red at nonfinite, as planted
+FAIL repeat control: atomic-add row sum: 4 of 4 repeats differ from the first run's bytes, first at byte 4
+CONTROL control: atomic-add row sum: red at repeat, as planted
+FAIL repeat control: row sum writing its input: 4 of 4 repeats differ from the first run's bytes, first at byte 0
+CONTROL control: row sum writing its input: red at repeat, as planted
+FAIL shapes control: row sum losing a tail input: at 8x1x1 output 0 is 0.000000e0 where float64 gives -3.203125e-1: 2396744.29 of its bound
+CONTROL control: row sum losing a tail input: red at shapes, as planted
+FAIL sums control: dot summed in half: 29826161.8x over its exact-sum bound at k 4096: not fp32 sums (fp16 would miss 29826162x, bf16 16777216x)
+CONTROL control: dot summed in half: red at sums, as planted
+PASS nonfinite cuda norm tail tf_add_rms_rows_bf16h_tail_round (MLX's rows), output y: the stated rule holds: outputs equal the float64 reference's bytes
+PASS repeat cuda norm tail tf_add_rms_rows_bf16h_tail_round (MLX's rows), output y: five runs byte-identical (265200 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda norm tail tf_add_rms_rows_bf16h_tail_round (MLX's rows), output y: 7 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda norm tail tf_add_rms_rows_bf16h_tail_round (MLX's rows), output y: within its bound at k 5376; fp16 sums would miss 51x, bf16 0.7x (an output follows its sum of squares as ss^-1/2 through bf16 rounding points: a bf16 sum's error is a few output ulps, and an fp16 sum overflows to a zero output, 51x the bound that carries the points)
+PASS nonfinite cuda norm tail tf_add_rms_rows_bf16h_tail_round (MLX's rows), residual h: the stated rule holds: outputs equal the float64 reference's bytes
+PASS repeat cuda norm tail tf_add_rms_rows_bf16h_tail_round (MLX's rows), residual h: five runs byte-identical (265200 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda norm tail tf_add_rms_rows_bf16h_tail_round (MLX's rows), residual h: 7 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda norm tail tf_add_rms_rows_bf16h_tail_round (MLX's rows), residual h: within its bound at k 5376; fp16 sums would miss 51x, bf16 0.7x (an output follows its sum of squares as ss^-1/2 through bf16 rounding points: a bf16 sum's error is a few output ulps, and an fp16 sum overflows to a zero output, 51x the bound that carries the points)
+PASS nonfinite cuda norm tail tf_add_rms_rows_bf16h_tail (rounded once), output y: the stated rule holds: outputs equal the float64 reference's bytes
+PASS repeat cuda norm tail tf_add_rms_rows_bf16h_tail (rounded once), output y: five runs byte-identical (265200 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda norm tail tf_add_rms_rows_bf16h_tail (rounded once), output y: 7 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda norm tail tf_add_rms_rows_bf16h_tail (rounded once), output y: within its bound at k 5376; fp16 sums would miss 51x, bf16 0.4x (an output follows its sum of squares as ss^-1/2 through bf16 rounding points: a bf16 sum's error is a few output ulps, and an fp16 sum overflows to a zero output, 51x the bound that carries the points)
+PASS nonfinite cuda norm tail tf_add_rms_rows_bf16h_tail (rounded once), residual h: the stated rule holds: outputs equal the float64 reference's bytes
+PASS repeat cuda norm tail tf_add_rms_rows_bf16h_tail (rounded once), residual h: five runs byte-identical (265200 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda norm tail tf_add_rms_rows_bf16h_tail (rounded once), residual h: 7 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda norm tail tf_add_rms_rows_bf16h_tail (rounded once), residual h: within its bound at k 5376; fp16 sums would miss 51x, bf16 0.4x (an output follows its sum of squares as ss^-1/2 through bf16 rounding points: a bf16 sum's error is a few output ulps, and an fp16 sum overflows to a zero output, 51x the bound that carries the points)
+PASS nonfinite cuda norm tf_add_rms_rows_bf16h (h = x + r, rounded once), output y: the stated rule holds: outputs equal the float64 reference's bytes
+PASS repeat cuda norm tf_add_rms_rows_bf16h (h = x + r, rounded once), output y: five runs byte-identical (174720 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda norm tf_add_rms_rows_bf16h (h = x + r, rounded once), output y: 6 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda norm tf_add_rms_rows_bf16h (h = x + r, rounded once), output y: within its bound at k 2688; fp16 sums would miss 51x, bf16 0.4x (an output follows its sum of squares as ss^-1/2 through bf16 rounding points: a bf16 sum's error is a few output ulps, and an fp16 sum overflows to a zero output, 51x the bound that carries the points)
+PASS nonfinite cuda norm tf_add_rms_rows_bf16h (h = x + r, rounded once), residual h: the stated rule holds: outputs equal the float64 reference's bytes
+PASS repeat cuda norm tf_add_rms_rows_bf16h (h = x + r, rounded once), residual h: five runs byte-identical (174720 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda norm tf_add_rms_rows_bf16h (h = x + r, rounded once), residual h: 6 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums cuda norm tf_add_rms_rows_bf16h (h = x + r, rounded once), residual h: declares none sums
+PASS nonfinite cuda norm tf_moe_add_rms_rows_bf16h (h = x + bf16 combine of 8 bf16 slots), output y: the stated rule holds: outputs equal the float64 reference's bytes
+PASS repeat cuda norm tf_moe_add_rms_rows_bf16h (h = x + bf16 combine of 8 bf16 slots), output y: five runs byte-identical (174720 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda norm tf_moe_add_rms_rows_bf16h (h = x + bf16 combine of 8 bf16 slots), output y: 6 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda norm tf_moe_add_rms_rows_bf16h (h = x + bf16 combine of 8 bf16 slots), output y: within its bound at k 2688; fp16 sums would miss 51x, bf16 0.4x (an output follows its sum of squares as ss^-1/2 through bf16 rounding points: a bf16 sum's error is a few output ulps, and an fp16 sum overflows to a zero output, 51x the bound that carries the points)
+PASS nonfinite cuda norm tf_moe_add_rms_rows_bf16h (h = x + bf16 combine of 8 bf16 slots), residual h: the stated rule holds: outputs equal the float64 reference's bytes
+PASS repeat cuda norm tf_moe_add_rms_rows_bf16h (h = x + bf16 combine of 8 bf16 slots), residual h: five runs byte-identical (174720 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda norm tf_moe_add_rms_rows_bf16h (h = x + bf16 combine of 8 bf16 slots), residual h: 6 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda norm tf_moe_add_rms_rows_bf16h (h = x + bf16 combine of 8 bf16 slots), residual h: within its bound at k 2688; fp16 sums would miss infx, bf16 0.4x (h is x plus the slots' sum rounded to bf16: a bf16 sum's error is about h's own half ulp, and an fp16 sum overflows on a term past 65,504)
+PASS nonfinite cuda norm tf_moe_add_rms_rows_bf16h (h = x + bf16 combine of 8 fp32 slots), output y: the stated rule holds: outputs equal the float64 reference's bytes
+PASS repeat cuda norm tf_moe_add_rms_rows_bf16h (h = x + bf16 combine of 8 fp32 slots), output y: five runs byte-identical (174720 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda norm tf_moe_add_rms_rows_bf16h (h = x + bf16 combine of 8 fp32 slots), output y: 6 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda norm tf_moe_add_rms_rows_bf16h (h = x + bf16 combine of 8 fp32 slots), output y: within its bound at k 2688; fp16 sums would miss 51x, bf16 0.4x (an output follows its sum of squares as ss^-1/2 through bf16 rounding points: a bf16 sum's error is a few output ulps, and an fp16 sum overflows to a zero output, 51x the bound that carries the points)
+PASS nonfinite cuda norm tf_moe_add_rms_rows_bf16h (h = x + bf16 combine of 8 fp32 slots), residual h: the stated rule holds: outputs equal the float64 reference's bytes
+PASS repeat cuda norm tf_moe_add_rms_rows_bf16h (h = x + bf16 combine of 8 fp32 slots), residual h: five runs byte-identical (174720 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda norm tf_moe_add_rms_rows_bf16h (h = x + bf16 combine of 8 fp32 slots), residual h: 6 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda norm tf_moe_add_rms_rows_bf16h (h = x + bf16 combine of 8 fp32 slots), residual h: within its bound at k 2688; fp16 sums would miss infx, bf16 0.4x (h is x plus the slots' sum rounded to bf16: a bf16 sum's error is about h's own half ulp, and an fp16 sum overflows on a term past 65,504)
+PASS nonfinite cuda norm parts tf_rms_rows_bf16h_parts (strided rows, rounded once, two parts a row), output y: the stated rule holds: outputs equal the float64 reference's bytes
+PASS repeat cuda norm parts tf_rms_rows_bf16h_parts (strided rows, rounded once, two parts a row), output y: five runs byte-identical (349440 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda norm parts tf_rms_rows_bf16h_parts (strided rows, rounded once, two parts a row), output y: 6 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda norm parts tf_rms_rows_bf16h_parts (strided rows, rounded once, two parts a row), output y: within its bound at k 2688; fp16 sums would miss 51x, bf16 0.4x (an output follows its sum of squares as ss^-1/2 through bf16 rounding points: a bf16 sum's error is a few output ulps, and an fp16 sum overflows to a zero output, 51x the bound that carries the points)
+PASS nonfinite cuda norm parts tf_rms_rows_bf16h_parts_round (strided rows, MLX's, two parts a row), output y: the stated rule holds: outputs equal the float64 reference's bytes
+PASS repeat cuda norm parts tf_rms_rows_bf16h_parts_round (strided rows, MLX's, two parts a row), output y: five runs byte-identical (133120 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda norm parts tf_rms_rows_bf16h_parts_round (strided rows, MLX's, two parts a row), output y: 3 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda norm parts tf_rms_rows_bf16h_parts_round (strided rows, MLX's, two parts a row), output y: within its bound at k 512; fp16 sums would miss 51x, bf16 0.6x (an output follows its sum of squares as ss^-1/2 through bf16 rounding points: a bf16 sum's error is a few output ulps, and an fp16 sum overflows to a zero output, 51x the bound that carries the points)
+FAIL shapes control: MLX tail without the branch's normalized-row rounding: at 17x3840x3840: row 0 y[0] = 1.8081665e-3 outside float64's [1.800537109375e-3, 1.800537109375e-3]
+CONTROL control: MLX tail without the branch's normalized-row rounding: red at shapes, as planted
+FAIL shapes control: MLX tail without the branch output's rounding: at 17x3840x3840: row 0 h[4] = 1.2421875e0 outside float64's [1.25e0, 1.25e0]
+CONTROL control: MLX tail without the branch output's rounding: red at shapes, as planted
+FAIL shapes control: MLX tail without the sum's rounding before the scalar: at 17x3840x3840: row 0 h[6] = -3.625e0 outside float64's [-3.609375e0, -3.609375e0]
+CONTROL control: MLX tail without the sum's rounding before the scalar: red at shapes, as planted
+FAIL shapes control: MLX tail without the output's normalized-row rounding: at 17x3840x3840: row 0 y[1] = -2.4609375e-1 outside float64's [-2.470703125e-1, -2.470703125e-1]
+CONTROL control: MLX tail without the output's normalized-row rounding: red at shapes, as planted
+FAIL shapes control: MoE residual with the 8 slots' combine kept in fp32 before the add: at 16x2688x2688: row 0 h[1] = 1.8671875e0 outside float64's [1.875e0, 1.875e0]
+CONTROL control: MoE residual with the 8 slots' combine kept in fp32 before the add: red at shapes, as planted
+PASS nonfinite cuda nGPT rows tf_l2_rows (a loop's exit: bf16(l2(h))): the stated rule holds: outputs equal the float64 reference's bytes
+PASS repeat cuda nGPT rows tf_l2_rows (a loop's exit: bf16(l2(h))): five runs byte-identical (81920 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda nGPT rows tf_l2_rows (a loop's exit: bf16(l2(h))): 6 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda nGPT rows tf_l2_rows (a loop's exit: bf16(l2(h))): within its bound at k 2560; fp16 sums would miss 85x, bf16 0.5x (an output follows its sums of squares as ss^-1/2 through bf16 rounding points, so a bf16 sum's scale error cancels in the row's norm, and an fp16 sum overflows to a zero output)
+PASS nonfinite cuda nGPT rows tf_l2_rows with its add (a loop's entry: bf16(l2(bf16(state + input)))): the stated rule holds: outputs equal the float64 reference's bytes
+PASS repeat cuda nGPT rows tf_l2_rows with its add (a loop's entry: bf16(l2(bf16(state + input)))): five runs byte-identical (81920 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda nGPT rows tf_l2_rows with its add (a loop's entry: bf16(l2(bf16(state + input)))): 6 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda nGPT rows tf_l2_rows with its add (a loop's entry: bf16(l2(bf16(state + input)))): within its bound at k 2560; fp16 sums would miss 85x, bf16 0.6x (an output follows its sums of squares as ss^-1/2 through bf16 rounding points, so a bf16 sum's scale error cancels in the row's norm, and an fp16 sum overflows to a zero output)
+PASS nonfinite cuda nGPT rows tf_slerp_rows (the residual: bf16(l2(a + lr (b - a))), a and b bf16(l2(.))): the stated rule holds: outputs equal the float64 reference's bytes
+PASS repeat cuda nGPT rows tf_slerp_rows (the residual: bf16(l2(a + lr (b - a))), a and b bf16(l2(.))): five runs byte-identical (81920 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda nGPT rows tf_slerp_rows (the residual: bf16(l2(a + lr (b - a))), a and b bf16(l2(.))): 6 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda nGPT rows tf_slerp_rows (the residual: bf16(l2(a + lr (b - a))), a and b bf16(l2(.))): within its bound at k 2560; fp16 sums would miss 51x, bf16 346.5x (an output follows its sums of squares as ss^-1/2 through bf16 rounding points, so a bf16 sum's scale error cancels in the row's norm, and an fp16 sum overflows to a zero output)
+FAIL shapes control: tf_l2_rows without the sum's rounding before the norm: at 16x2560x2560: row 0 out[4] = -4.4555664e-3 outside float64's [-4.425048828125e-3, -4.425048828125e-3]
+CONTROL control: tf_l2_rows without the sum's rounding before the norm: red at shapes, as planted
+FAIL shapes control: tf_slerp_rows without the residual's normalized rounding: at 16x2560x2560: row 0 out[15] = 1.4230609e-6 outside float64's [1.4454126358032227e-6, 1.4454126358032227e-6]
+CONTROL control: tf_slerp_rows without the residual's normalized rounding: red at shapes, as planted
+FAIL shapes control: tf_slerp_rows without the branch's normalized rounding: at 16x2560x2560: row 0 out[3] = -2.0980835e-4 outside float64's [-2.0885467529296875e-4, -2.0885467529296875e-4]
+CONTROL control: tf_slerp_rows without the branch's normalized rounding: red at shapes, as planted
+PASS nonfinite cuda qk_rows tf_qk_rows_l2 (Dory: dim 256, rotation from inv_freq, L2 heads, q by (sqk f)^2, v as is): the stated rule holds: outputs equal the float64 reference's bytes
+PASS repeat cuda qk_rows tf_qk_rows_l2 (Dory: dim 256, rotation from inv_freq, L2 heads, q by (sqk f)^2, v as is): five runs byte-identical (12288 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda qk_rows tf_qk_rows_l2 (Dory: dim 256, rotation from inv_freq, L2 heads, q by (sqk f)^2, v as is): 5 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda qk_rows tf_qk_rows_l2 (Dory: dim 256, rotation from inv_freq, L2 heads, q by (sqk f)^2, v as is): within its bound at k 256; fp16 sums would miss 51x, bf16 0.7x (an output follows its head's sum of squares as ss^-1/2 through bf16 rounding points: a bf16 sum's scale cancels in the norm, and an fp16 sum overflows to a zero output)
+FAIL shapes control: tf_qk_rows_l2 without the rotated head's rounding: at 1x16x256: out[5] = -1.4453125e-1 outside float64's [-1.455078125e-1, -1.455078125e-1]
+CONTROL control: tf_qk_rows_l2 without the rotated head's rounding: red at shapes, as planted
+FAIL shapes control: tf_qk_rows_l2 without q's normalized rounding before its scale: at 1x16x256: out[4] = -8.28125e-1 outside float64's [-8.2421875e-1, -8.2421875e-1]
+CONTROL control: tf_qk_rows_l2 without q's normalized rounding before its scale: red at shapes, as planted
+PASS nonfinite cuda act_rows tf_gate_l2_rows (Dory's output gate: bf16(l2(bf16(o sigmoid(g sg)))) over all heads): the stated rule holds: outputs equal the float64 reference's bytes
+PASS repeat cuda act_rows tf_gate_l2_rows (Dory's output gate: bf16(l2(bf16(o sigmoid(g sg)))) over all heads): five runs byte-identical (131072 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda act_rows tf_gate_l2_rows (Dory's output gate: bf16(l2(bf16(o sigmoid(g sg)))) over all heads): 6 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda act_rows tf_gate_l2_rows (Dory's output gate: bf16(l2(bf16(o sigmoid(g sg)))) over all heads): within its bound at k 4096; fp16 sums would miss 85x, bf16 0.7x (an output follows its row's sum of squares as ss^-1/2 through bf16 rounding points, so a bf16 sum's scale cancels in the norm, and an fp16 sum overflows to a zero output)
+PASS nonfinite cuda act_rows tf_swiglu_l2_rows (Dory's MLP: bf16(l2(bf16(silu(bf16(g sug)) bf16(u suu))))): the stated rule holds: outputs equal the float64 reference's bytes
+PASS repeat cuda act_rows tf_swiglu_l2_rows (Dory's MLP: bf16(l2(bf16(silu(bf16(g sug)) bf16(u suu))))): five runs byte-identical (229376 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda act_rows tf_swiglu_l2_rows (Dory's MLP: bf16(l2(bf16(silu(bf16(g sug)) bf16(u suu))))): 6 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda act_rows tf_swiglu_l2_rows (Dory's MLP: bf16(l2(bf16(silu(bf16(g sug)) bf16(u suu))))): within its bound at k 7168; fp16 sums would miss 51x, bf16 0.4x (an output follows its row's sum of squares as ss^-1/2 through bf16 rounding points, so a bf16 sum's scale cancels in the norm, and an fp16 sum overflows to a zero output)
+FAIL shapes control: tf_gate_l2_rows without the gated row's rounding: at 16x4096x4096: row 0 out[0] = 1.2460077e-10 outside float64's [-2.50244140625e-3, -2.50244140625e-3]
+CONTROL control: tf_gate_l2_rows without the gated row's rounding: red at shapes, as planted
+FAIL shapes control: tf_swiglu_l2_rows without the scaled gate's rounding: at 16x7168x7168: row 0 out[0] = -5.054474e-5 outside float64's [-5.078315734863281e-5, -5.078315734863281e-5]
+CONTROL control: tf_swiglu_l2_rows without the scaled gate's rounding: red at shapes, as planted
+FAIL shapes control: tf_swiglu_l2_rows without the scaled up's rounding: at 16x7168x7168: row 0 out[1] = -1.2111664e-4 outside float64's [-1.201629638671875e-4, -1.201629638671875e-4]
+CONTROL control: tf_swiglu_l2_rows without the scaled up's rounding: red at shapes, as planted
+FAIL shapes control: tf_swiglu_l2_rows without the product's rounding: at 16x7168x7168: row 0 out[0] = 1.0669231e-5 outside float64's [1.0728836059570312e-5, 1.0728836059570312e-5]
+CONTROL control: tf_swiglu_l2_rows without the product's rounding: red at shapes, as planted
+PASS nonfinite cuda dense rows tf_dense_rows_scaled_1 (Dory's logits): 16414 non-finite and 4101 finite outputs match the float64 classes
+PASS repeat cuda dense rows tf_dense_rows_scaled_1 (Dory's logits): five runs byte-identical (16412 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda dense rows tf_dense_rows_scaled_1 (Dory's logits): 10 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda dense rows tf_dense_rows_scaled_1 (Dory's logits): exact sums at k 2560, where fp16 sums would miss by 6462335x and bf16 by 63448377x
+PASS nonfinite cuda dense rows tf_dense_rows_scaled_4: 16414 non-finite and 4101 finite outputs match the float64 classes
+PASS repeat cuda dense rows tf_dense_rows_scaled_4: five runs byte-identical (65648 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda dense rows tf_dense_rows_scaled_4: 12 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda dense rows tf_dense_rows_scaled_4: exact sums at k 2560, where fp16 sums would miss by 7829368x and bf16 by 95630126x
+PASS nonfinite cuda dense rows tf_dense_rows_scaled_16: 16420 non-finite and 16404 finite outputs match the float64 classes
+PASS repeat cuda dense rows tf_dense_rows_scaled_16: five runs byte-identical (262592 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda dense rows tf_dense_rows_scaled_16: 12 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda dense rows tf_dense_rows_scaled_16: exact sums at k 2560, where fp16 sums would miss by 7190235x and bf16 by 72438092x
+PASS nonfinite cuda dense rows tf_dense_rows_scaled_32: 16420 non-finite and 16404 finite outputs match the float64 classes
+PASS repeat cuda dense rows tf_dense_rows_scaled_32: five runs byte-identical (525184 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda dense rows tf_dense_rows_scaled_32: 14 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda dense rows tf_dense_rows_scaled_32: exact sums at k 2560, where fp16 sums would miss by 8388608x and bf16 by 72438094x
+PASS nonfinite cuda nemotron router logits tf_nemo_router: 640 non-finite and 5504 finite outputs match the float64 classes
+PASS repeat cuda nemotron router logits tf_nemo_router: five runs byte-identical (49152 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda nemotron router logits tf_nemo_router: 9 shapes within the float64 bound (worst 0.005 of the bound), 0 edges refused by the kernel
+PASS sums cuda nemotron router logits tf_nemo_router: exact sums at k 2688, where fp16 sums would miss by 13399x and bf16 by 132962x
+PASS nonfinite cuda nemotron router logits tf_nemo_router_tiles: 640 non-finite and 5504 finite outputs match the float64 classes
+PASS repeat cuda nemotron router logits tf_nemo_router_tiles: five runs byte-identical (196608 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda nemotron router logits tf_nemo_router_tiles: 12 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda nemotron router logits tf_nemo_router_tiles: exact sums at k 4096, where fp16 sums would miss by 21566x and bf16 by 171791x
+PASS nonfinite cuda nemotron top-k tf_nemo_topk: the stated rule holds: a NaN logit is never picked ahead of a number; ties go to the lower expert; two shared slots follow the top-k
+PASS repeat cuda nemotron top-k tf_nemo_topk: five runs byte-identical (1024 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda nemotron top-k tf_nemo_topk: 5 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums cuda nemotron top-k tf_nemo_topk: declares none sums
+PASS nonfinite cuda nemotron latent top-k tf_super_topk_few: the stated rule holds: tf_super_topk's bytes, and its host twin's picks: a NaN never ahead of a number, ties to the lower expert, every pick past the numbers expert 0
+PASS repeat cuda nemotron latent top-k tf_super_topk_few: five runs byte-identical (264 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda nemotron latent top-k tf_super_topk_few: 7 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums cuda nemotron latent top-k tf_super_topk_few: declares none sums
+PASS nonfinite cuda nemotron mamba scan tf_nemo_scan: the stated rule holds: glue_ref.scan's bytes (y, the window's dt, the state after the kept rows), NaN wherever it gives NaN
+PASS repeat cuda nemotron mamba scan tf_nemo_scan: five runs byte-identical (4489216 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda nemotron mamba scan tf_nemo_scan: 11 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums cuda nemotron mamba scan tf_nemo_scan: declares none sums
+PASS nonfinite cuda nemotron latent combine tf_super_combine_sums (bf16 share sums): the stated rule holds: as the kernel it replaces gives them from the fp32 shares: NaN and infinite shares and weights
+PASS repeat cuda nemotron latent combine tf_super_combine_sums (bf16 share sums): five runs byte-identical (131072 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda nemotron latent combine tf_super_combine_sums (bf16 share sums): 4 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda nemotron latent combine tf_super_combine_sums (bf16 share sums): exact sums at k 22, where fp16 sums would miss by infx and bf16 by 3840x
+PASS nonfinite cuda nemotron latent shared add tf_super_moe_out_sums (bf16 share sums): the stated rule holds: as the kernel it replaces gives them from the fp32 shares: NaN and infinite shares and weights
+PASS repeat cuda nemotron latent shared add tf_super_moe_out_sums (bf16 share sums): five runs byte-identical (524288 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda nemotron latent shared add tf_super_moe_out_sums (bf16 share sums): 6 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda nemotron latent shared add tf_super_moe_out_sums (bf16 share sums): within its bound at k 1; fp16 sums would miss infx, bf16 1.0x (one fp32 add of two bf16 values a output)
+PASS nonfinite cuda qmm_group (cluster tile): 41216 non-finite and 41216 finite outputs match the float64 classes
+PASS repeat cuda qmm_group (cluster tile): five runs byte-identical (329728 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda qmm_group (cluster tile): 12 shapes within the float64 bound (worst 0.986 of the bound), 0 edges refused by the kernel
+PASS sums cuda qmm_group (cluster tile): exact sums at k 4096, where fp16 sums would miss by 10102x and bf16 by 67394x
+PASS nonfinite cuda lane_gemv: 41216 non-finite and 41216 finite outputs match the float64 classes
+PASS repeat cuda lane_gemv: five runs byte-identical (329728 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda lane_gemv: 12 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda lane_gemv: exact sums at k 4096, where fp16 sums would miss by 9547x and bf16 by 45334x
+PASS nonfinite cuda lane_gemv split-K: 41216 non-finite and 41216 finite outputs match the float64 classes
+PASS repeat cuda lane_gemv split-K: five runs byte-identical (329728 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda lane_gemv split-K: 8 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 4 edges refused by the kernel
+PASS sums cuda lane_gemv split-K: exact sums at k 4096, where fp16 sums would miss by 11557x and bf16 by 74837x
+PASS nonfinite cuda lane_gemv segmented split-K: 40960 non-finite and 40960 finite outputs match the float64 classes
+PASS repeat cuda lane_gemv segmented split-K: five runs byte-identical (327680 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda lane_gemv segmented split-K: 14 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda lane_gemv segmented split-K: exact sums at k 5120, where fp16 sums would miss by 13233x and bf16 by 95069x
+PASS nonfinite cuda prompt16 FP4 tile 4: 2048 non-finite and 2048 finite outputs match the float64 classes
+PASS repeat cuda prompt16 FP4 tile 4: five runs byte-identical (65536 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda prompt16 FP4 tile 4: 13 shapes within the float64 bound (worst 0.994 of the bound), 0 edges refused by the kernel
+PASS sums cuda prompt16 FP4 tile 4: exact sums at k 2560, where fp16 sums would miss by 445x and bf16 by 4631x
+PASS nonfinite cuda prompt16 FP4 tile 4, fp32 out: 2048 non-finite and 2048 finite outputs match the float64 classes
+PASS repeat cuda prompt16 FP4 tile 4, fp32 out: five runs byte-identical (131072 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda prompt16 FP4 tile 4, fp32 out: 15 shapes within the float64 bound (worst 0.087 of the bound), 0 edges refused by the kernel
+PASS sums cuda prompt16 FP4 tile 4, fp32 out: exact sums at k 3072, where fp16 sums would miss by 19922943x and bf16 by 210114649x
+PASS nonfinite cuda prompt16 FP4 lean tile: 2048 non-finite and 2048 finite outputs match the float64 classes
+PASS repeat cuda prompt16 FP4 lean tile: five runs byte-identical (65536 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda prompt16 FP4 lean tile: 17 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda prompt16 FP4 lean tile: exact sums at k 2560, where fp16 sums would miss by 341x and bf16 by 6238x
+PASS nonfinite cuda prompt16 FP4 lean tile, fp32 out: 2048 non-finite and 2048 finite outputs match the float64 classes
+PASS repeat cuda prompt16 FP4 lean tile, fp32 out: five runs byte-identical (131072 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda prompt16 FP4 lean tile, fp32 out: 17 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda prompt16 FP4 lean tile, fp32 out: exact sums at k 2560, where fp16 sums would miss by 8588336x and bf16 by 123762357x
+PASS nonfinite cuda qmmf FP4 fp32 out (slices in a cluster): 2048 non-finite and 2048 finite outputs match the float64 classes
+PASS repeat cuda qmmf FP4 fp32 out (slices in a cluster): five runs byte-identical (32768 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda qmmf FP4 fp32 out (slices in a cluster): 18 shapes within the float64 bound (worst 0.029 of the bound), 0 edges refused by the kernel
+PASS sums cuda qmmf FP4 fp32 out (slices in a cluster): exact sums at k 6144, where fp16 sums would miss by 66709404x and bf16 by 434917044x
+PASS nonfinite cuda qmmf FP4 fp32 out (slices by reduce_kernel<true>): 2048 non-finite and 2048 finite outputs match the float64 classes
+PASS repeat cuda qmmf FP4 fp32 out (slices by reduce_kernel<true>): five runs byte-identical (32768 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda qmmf FP4 fp32 out (slices by reduce_kernel<true>): 18 shapes within the float64 bound (worst 0.029 of the bound), 0 edges refused by the kernel
+PASS sums cuda qmmf FP4 fp32 out (slices by reduce_kernel<true>): exact sums at k 6144, where fp16 sums would miss by 59186287x and bf16 by 507936273x
+PASS nonfinite cuda affine4 verify32 one-row bits: 2048 non-finite and 2048 finite outputs match the float64 classes
+PASS repeat cuda affine4 verify32 one-row bits: five runs byte-identical (16384 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda affine4 verify32 one-row bits: 39 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda affine4 verify32 one-row bits: exact sums at k 25600, where fp16 sums would miss by 11435x and bf16 by 80404x
+PASS nonfinite cuda affine4 verify32 FP64: 2048 non-finite and 2048 finite outputs match the float64 classes
+PASS repeat cuda affine4 verify32 FP64: five runs byte-identical (16384 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda affine4 verify32 FP64: 37 shapes within the float64 bound (worst 0.978 of the bound), 0 edges refused by the kernel

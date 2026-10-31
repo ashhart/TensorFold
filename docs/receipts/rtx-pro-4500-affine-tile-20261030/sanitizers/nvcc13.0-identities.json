@@ -1,0 +1,20 @@
+{
+  "group": {
+    "nvcc": "13.0.88",
+    "targets": [
+      120,
+      121
+    ],
+    "fatbin_sha256": "043fbe51fa0074a843f2a84f8fe2e046d8acba131a9408076463e2f708282ab3",
+    "scope": "Primitive replacement/sanitizer checks; no served-model CUDA13.0 speed qualification."
+  },
+  "attention": {
+    "nvcc": "13.0.88",
+    "targets": [
+      120,
+      121
+    ],
+    "fatbin_sha256": "dccb961469f20647a314c81fac552c0c7aabba53270b8a06cb3cf542bbcbf518",
+    "scope": "Primitive replacement/sanitizer checks; no served-model CUDA13.0 speed qualification."
+  }
+}

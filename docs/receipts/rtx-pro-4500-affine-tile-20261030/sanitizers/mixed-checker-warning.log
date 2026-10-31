@@ -1,0 +1,7 @@
+========= COMPUTE-SANITIZER
+========= CUDA API Warning: Selective device code recompilation in progress.
+=========     Saved host backtrace up to driver entry point at error
+=========         Host Frame: fn in pr_sanitize_worker.py:41
+=========         Host Frame: <module> in pr_sanitize_worker.py:61
+=========
+========= ERROR SUMMARY: 1 error

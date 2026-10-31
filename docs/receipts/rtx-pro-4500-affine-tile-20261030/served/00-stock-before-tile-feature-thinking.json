@@ -1,0 +1,142 @@
+{
+  "request": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "What is 19 times 23?"
+      }
+    ],
+    "temperature": 0,
+    "seed": 42,
+    "max_tokens": 128,
+    "reasoning_effort": "low",
+    "chat_template_kwargs": {
+      "enable_thinking": true
+    },
+    "model": "qwen-community",
+    "return_token_ids": true,
+    "stream": false,
+    "priority": "background"
+  },
+  "response": {
+    "id": "chatcmpl-905860af864f9baf55c72c12ccdc23fd",
+    "object": "chat.completion",
+    "created": 1793402330,
+    "model": "qwen-community",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "19 \u00d7 23 = **437**",
+          "reasoning_content": "The user is asking me to multiply 19 by 23.\n\n19 \u00d7 23 = 19 \u00d7 20 + 19 \u00d7 3 = 380 + 57 = 437"
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 50,
+      "completion_tokens": 67,
+      "total_tokens": 117,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 53
+      }
+    },
+    "exact_mode": "exact",
+    "tensorfold": {
+      "enable_thinking": true,
+      "reasoning_effort": "low",
+      "engine": "lanes",
+      "tokens_per_second": 361.08664034852035,
+      "seconds": 0.182781617,
+      "prefill_seconds": 0.071950591,
+      "prefill_widths": [],
+      "prefill_raised": [],
+      "time_to_first_token": 0.224677545,
+      "sampling": "greedy",
+      "drafts": true,
+      "token_sha": "7665f35f1810",
+      "token_sha256": "7665f35f18106d421ab94bed81d14db46831d7c2da85405f946276e535636eeb",
+      "token_ids": [
+        760,
+        1156,
+        369,
+        9859,
+        728,
+        310,
+        29283,
+        220,
+        16,
+        24,
+        539,
+        220,
+        17,
+        18,
+        13,
+        271,
+        16,
+        24,
+        23985,
+        220,
+        17,
+        18,
+        283,
+        220,
+        16,
+        24,
+        23985,
+        220,
+        17,
+        15,
+        478,
+        220,
+        16,
+        24,
+        23985,
+        220,
+        18,
+        283,
+        220,
+        18,
+        23,
+        15,
+        478,
+        220,
+        20,
+        22,
+        283,
+        220,
+        19,
+        18,
+        22,
+        198,
+        248069,
+        271,
+        16,
+        24,
+        23985,
+        220,
+        17,
+        18,
+        283,
+        2972,
+        19,
+        18,
+        22,
+        332,
+        248046
+      ],
+      "min_rows": 16
+    },
+    "speculative": {
+      "rounds": 7,
+      "drafted": 105,
+      "accepted": 60,
+      "acceptance_rate": 0.5714285714285714,
+      "tokens_per_round": 9.571428571428571
+    }
+  }
+}

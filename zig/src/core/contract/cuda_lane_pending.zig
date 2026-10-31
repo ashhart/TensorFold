@@ -1,7 +1,7 @@
 //! CUDA lane nvcc 13.0 receipts; sm121 refreshed with 13.0.88. Other SMs and later compilers keep their selection.
 const CudaRecord = @import("registry.zig").CudaRecord;
 const none = @import("registry.zig").none;
-pub const records = [_]CudaRecord{
+pub const records = @import("mlp128_records.zig").records ++ [_]CudaRecord{
     .{ .launch = .{ .name = "qwen35 tf_q35_attn_partial_legacy", .symbol = "tf_q35_attn_partial_legacy", .image = "qwen35", .threads = 1024 }, .usage = none },
     .{ .launch = .{ .name = "qwen35_kv8 tf_q35_attn_partial8_legacy", .symbol = "tf_q35_attn_partial8_legacy", .image = "qwen35_kv8", .threads = 1024 }, .usage = none },
     .{ .launch = .{ .name = "qwen35 tf_q35_gdn_slots_1", .symbol = "tf_q35_gdn_slots_1", .image = "qwen35", .threads = 128 }, .usage = .{ .{ .regs = 64, .static = 4096, .bound = 128 }, .{ .regs = 63, .static = 4096, .bound = 128 }, .{ .regs = 63, .static = 4096, .bound = 128 }, .{ .regs = 64, .static = 4096, .bound = 128 }, .{ .regs = 64, .static = 4096, .bound = 128 } }, .later_pending = true },

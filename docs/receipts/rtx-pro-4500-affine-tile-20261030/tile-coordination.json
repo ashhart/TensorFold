@@ -1,0 +1,159 @@
+{
+  "atc": {
+    "complete": false,
+    "limitations": [
+      "pullFilesLimit"
+    ],
+    "changedFiles": 155,
+    "myPullRequests": [],
+    "overlaps": [
+      {
+        "source": "workingTree",
+        "pullRequest": 1476,
+        "sharedFiles": 1,
+        "areas": [],
+        "conflict": "clean",
+        "conflictFiles": 0
+      },
+      {
+        "source": "workingTree",
+        "pullRequest": 1678,
+        "sharedFiles": 1,
+        "areas": [],
+        "conflict": "clean",
+        "conflictFiles": 0
+      },
+      {
+        "source": "workingTree",
+        "pullRequest": 1675,
+        "sharedFiles": 1,
+        "areas": [
+          1
+        ],
+        "conflict": "clean",
+        "conflictFiles": 0
+      },
+      {
+        "source": "workingTree",
+        "pullRequest": 1441,
+        "sharedFiles": 1,
+        "areas": [
+          1
+        ],
+        "conflict": "clean",
+        "conflictFiles": 0
+      },
+      {
+        "source": "workingTree",
+        "pullRequest": 1446,
+        "sharedFiles": 1,
+        "areas": [
+          1
+        ],
+        "conflict": "clean",
+        "conflictFiles": 0
+      },
+      {
+        "source": "workingTree",
+        "pullRequest": 1445,
+        "sharedFiles": 1,
+        "areas": [
+          1
+        ],
+        "conflict": "clean",
+        "conflictFiles": 0
+      },
+      {
+        "source": "workingTree",
+        "pullRequest": 1522,
+        "sharedFiles": 1,
+        "areas": [
+          1
+        ],
+        "conflict": "clean",
+        "conflictFiles": 0
+      },
+      {
+        "source": "workingTree",
+        "pullRequest": 1444,
+        "sharedFiles": 1,
+        "areas": [
+          1
+        ],
+        "conflict": "clean",
+        "conflictFiles": 0
+      },
+      {
+        "source": "workingTree",
+        "pullRequest": 1443,
+        "sharedFiles": 1,
+        "areas": [
+          1
+        ],
+        "conflict": "clean",
+        "conflictFiles": 0
+      },
+      {
+        "source": "workingTree",
+        "pullRequest": 1442,
+        "sharedFiles": 1,
+        "areas": [
+          1
+        ],
+        "conflict": "clean",
+        "conflictFiles": 0
+      },
+      {
+        "source": "workingTree",
+        "pullRequest": 1505,
+        "sharedFiles": 2,
+        "areas": [
+          1,
+          7
+        ],
+        "conflict": "unknown",
+        "conflictFiles": null
+      },
+      {
+        "source": "workingTree",
+        "pullRequest": 1467,
+        "sharedFiles": 2,
+        "areas": [
+          7
+        ],
+        "conflict": "unknown",
+        "conflictFiles": null
+      }
+    ],
+    "worktrees": 0,
+    "worktreeOverlaps": []
+  },
+  "supplemental_merge_checks": [
+    {
+      "pull_request": 1505,
+      "own_conflicts": [],
+      "inherited_conflicts": [],
+      "merge_tree_exit": 0
+    },
+    {
+      "pull_request": 1467,
+      "own_conflicts": [],
+      "inherited_conflicts": [
+        "zig/src/cuda/exl3.zig",
+        "zig/src/families/qwen3_5/cuda_exl3_weights.zig",
+        "zig/src/families/qwen3_5/cuda_projection_many.zig"
+      ],
+      "merge_tree_exit": 1
+    }
+  ],
+  "supplemental_coverage": {
+    "pull_request": 1446,
+    "file_count": 301,
+    "file_list_sha256": "eebfc1b154d0a9c35d181ed72a9d7bf258053434ac6a4c5dc6f4985cde61683e",
+    "overlap_with_changed_files": [
+      "zig/src/core/contract/registry_pending_test.zig"
+    ],
+    "reason": "ATC caps pull file listing at300 and merge checks at10; complete file list and all remaining unknown overlaps checked separately."
+  },
+  "result": "All reported overlaps are clean in this contribution\u2019s changed files; raw CLI coverage limits remain disclosed."
+}

@@ -1,0 +1,9 @@
+{
+  "created_epoch": 1793435976.2862914,
+  "authorization": "User asked to perform maintainer-requested testing and possibly publish the existing PRs; a new bounded background job, not an extension of the expired overnight exclusive window.",
+  "deadline_epoch": 1793438376.2862916,
+  "primary_metric": "Six independent ABA triplet log gains; each boot geometric mean of medians for canonical greedy code/prose. Seven seeded repetitions,256outputtokens.",
+  "decision": "Publish every triplet and both prompts. Report mean log gain with95% Student-t interval(df5), observed range, within-triplet baseline drift and exact sign-test. No pooled request/token pseudo-replicates. A confidence interval crossing zero is inconclusive, not a positive claim.",
+  "features": "131072context, vision/tools/schema/reasoning support, FP8KV,int8prefill,BF16DFlash2,8GiBhostcache,parallel1,0.5GiBupstreamminimum,default200W. No installed source/runtime or profile changes.",
+  "binary_sha256": "68553364dc2a4e50bc609505453486aa6f4d51d4f643864e9dd555bb3855b191"
+}

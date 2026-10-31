@@ -1,0 +1,108 @@
+{
+  "include": false,
+  "reason": "Small plain gain does not offset drafted regressions in two bracketed comparisons.",
+  "result": {
+    "complete": true,
+    "error": null,
+    "runs": [
+      {
+        "name": "00-attention-only-before",
+        "arm": "attention-only-before",
+        "complete": true,
+        "cells": {
+          "8192/draft1/T0": 329.28374223723625,
+          "8192/draft0/T0": 46.134824276784464,
+          "32768/draft1/T0": 275.16727451117606,
+          "32768/draft0/T0": 43.34192598505579
+        }
+      },
+      {
+        "name": "01-attention-gdn",
+        "arm": "attention-gdn",
+        "complete": true,
+        "cells": {
+          "8192/draft1/T0": 328.13459870405904,
+          "8192/draft0/T0": 46.164558747355535,
+          "32768/draft1/T0": 270.37397960673815,
+          "32768/draft0/T0": 43.37972691630519
+        }
+      },
+      {
+        "name": "02-attention-only-after",
+        "arm": "attention-only-after",
+        "complete": true,
+        "cells": {
+          "8192/draft1/T0": 326.36714987070684,
+          "8192/draft0/T0": 45.97452481713085,
+          "32768/draft1/T0": 269.11415209302464,
+          "32768/draft0/T0": 43.224307791631865
+        }
+      },
+      {
+        "name": "03-attention-gdn-repeat",
+        "arm": "attention-gdn-repeat",
+        "complete": true,
+        "cells": {
+          "8192/draft1/T0": 317.718980658742,
+          "8192/draft0/T0": 46.13683292424373,
+          "32768/draft1/T0": 267.3899783141464,
+          "32768/draft0/T0": 43.29554899863064
+        }
+      },
+      {
+        "name": "04-attention-only-final",
+        "arm": "attention-only-final",
+        "complete": true,
+        "cells": {
+          "8192/draft1/T0": 326.61014241814684,
+          "8192/draft0/T0": 45.993084405950064,
+          "32768/draft1/T0": 271.75836040897184,
+          "32768/draft0/T0": 43.20090847850359
+        }
+      }
+    ],
+    "comparisons": [
+      {
+        "candidate": "attention-gdn",
+        "controls": [
+          "00-attention-only-before",
+          "02-attention-only-after"
+        ],
+        "cells_pct": {
+          "8192/draft1/T0": 0.09529440059019567,
+          "8192/draft0/T0": 0.23874690464646964,
+          "32768/draft1/T0": -0.6430539989050188,
+          "32768/draft0/T0": 0.22329738780717534
+        }
+      },
+      {
+        "candidate": "attention-gdn-repeat",
+        "controls": [
+          "02-attention-only-after",
+          "04-attention-only-final"
+        ],
+        "cells_pct": {
+          "8192/draft1/T0": -2.6860485319309957,
+          "8192/draft0/T0": 0.3327894537433096,
+          "32768/draft1/T0": -1.1252494709667382,
+          "32768/draft0/T0": 0.19194039425582954
+        }
+      }
+    ],
+    "paired_geomean_by_cell_pct": {
+      "32768/draft0/T0": 0.2076176645017025,
+      "32768/draft1/T0": -0.8844449685878275,
+      "8192/draft0/T0": 0.28575715569463256,
+      "8192/draft1/T0": -1.3051742922603249
+    },
+    "all_tokens_match": true,
+    "token_hash_counts": {
+      "8192/draft1/T0": 1,
+      "8192/draft0/T0": 1,
+      "32768/draft1/T0": 1,
+      "32768/draft0/T0": 1
+    },
+    "protocol": "Identical binary, fixed calibration, basic and full feature qualification, request sequence, code fixture, three repetitions at each 8K/32K plain/drafted greedy cell. Only GDN_COMMIT differs; original MLP tile and MT2 single/wide attention common."
+  },
+  "measurement_note": "Background CPU compilation was running during this screening ablation; do not treat sub-percent plain differences as CPU-idle qualification. No benefit warranting inclusion was established."
+}

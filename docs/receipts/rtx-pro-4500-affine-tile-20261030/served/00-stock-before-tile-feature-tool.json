@@ -1,0 +1,130 @@
+{
+  "request": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "Get the weather for Berlin."
+      }
+    ],
+    "temperature": 0,
+    "seed": 42,
+    "max_tokens": 128,
+    "reasoning_effort": "none",
+    "chat_template_kwargs": {
+      "enable_thinking": false
+    },
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ]
+          }
+        }
+      }
+    ],
+    "tool_choice": "required",
+    "model": "qwen-community",
+    "return_token_ids": true,
+    "stream": false,
+    "priority": "background"
+  },
+  "response": {
+    "id": "chatcmpl-b7dd65c084ef3af09071c551af91272b",
+    "object": "chat.completion",
+    "created": 1793402329,
+    "model": "qwen-community",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [
+            {
+              "id": "call_eada31dfafccacfdeb9ee919",
+              "type": "function",
+              "function": {
+                "name": "weather",
+                "arguments": "{\"city\":\"Berlin\"}"
+              }
+            }
+          ]
+        },
+        "finish_reason": "tool_calls"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 264,
+      "completion_tokens": 26,
+      "total_tokens": 290,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "exact_mode": "exact",
+    "tensorfold": {
+      "enable_thinking": false,
+      "reasoning_effort": "none",
+      "engine": "lanes",
+      "tokens_per_second": 280.6820857611538,
+      "seconds": 0.089068741,
+      "prefill_seconds": 0.156926373,
+      "prefill_widths": [],
+      "prefill_raised": [],
+      "time_to_first_token": 0.310716273,
+      "sampling": "greedy",
+      "drafts": true,
+      "token_sha": "43eda20e2698",
+      "token_sha256": "43eda20e269868f2f46e0f133a8bdfa0dd4aeab9ca55a99b937b95561c20c6cf",
+      "token_ids": [
+        248058,
+        198,
+        27,
+        1628,
+        28,
+        14764,
+        29,
+        198,
+        27,
+        15704,
+        28,
+        8656,
+        29,
+        198,
+        91149,
+        198,
+        510,
+        15704,
+        29,
+        198,
+        510,
+        1628,
+        29,
+        198,
+        248059,
+        248046
+      ],
+      "min_rows": 5
+    },
+    "speculative": {
+      "rounds": 3,
+      "drafted": 29,
+      "accepted": 22,
+      "acceptance_rate": 0.7586206896551724,
+      "tokens_per_round": 8.666666666666666
+    }
+  }
+}

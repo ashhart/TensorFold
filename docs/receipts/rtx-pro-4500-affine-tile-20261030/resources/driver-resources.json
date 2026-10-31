@@ -1,0 +1,42 @@
+{
+  "13.0/_ZN12tf_qmm_group12group_kernelILi64ELi16ELi128ELi1ELi8ELi4ELb0ELb0ELb0ELb0EEEvPK13__nv_bfloat16PKfNS_5PartsEiiiii": {
+    "max_threads": 256,
+    "static_shared": 0,
+    "registers": 54
+  },
+  "13.0/tf_q35_attn_rows8_mt2": {
+    "max_threads": 128,
+    "static_shared": 36992,
+    "registers": 242
+  },
+  "13.0/tf_q35_attn_rows8_mt2_whole": {
+    "max_threads": 128,
+    "static_shared": 36992,
+    "registers": 239
+  },
+  "13.0/tf_q35_attn_rows8": {
+    "max_threads": 256,
+    "static_shared": 39936,
+    "registers": 247
+  },
+  "13.3/_ZN12tf_qmm_group12group_kernelILi64ELi16ELi128ELi1ELi8ELi4ELb0ELb0ELb0ELb0EEEvPK13__nv_bfloat16PKfNS_5PartsEiiiii": {
+    "max_threads": 256,
+    "static_shared": 0,
+    "registers": 54
+  },
+  "13.3/tf_q35_attn_rows8_mt2": {
+    "max_threads": 128,
+    "static_shared": 36992,
+    "registers": 249
+  },
+  "13.3/tf_q35_attn_rows8_mt2_whole": {
+    "max_threads": 128,
+    "static_shared": 36992,
+    "registers": 248
+  },
+  "13.3/tf_q35_attn_rows8": {
+    "max_threads": 256,
+    "static_shared": 39936,
+    "registers": 255
+  }
+}

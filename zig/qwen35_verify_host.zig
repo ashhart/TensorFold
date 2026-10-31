@@ -66,6 +66,7 @@ fn device(d: *cuda.Driver, gb10: bool, wide: bool) q.engine.Engine {
     e.d = d;
     e.stream = .{ .d = d, .handle = null };
     e.fns.sums = function(d, 1);
+    e.affine.mlp128 = false;
     e.affine.gemv_fn = function(d, 2);
     e.affine.group_fn = function(d, 3);
     e.affine.prefill_fn = function(d, 4);
@@ -202,4 +203,30 @@ test "verify matmuls: real module resolution sets the new function's shared-memo
     try t.expectEqual([3]c_int{ 32640, 43008, 57600 }, Resolve.shared);
     try t.expectEqual(@as(usize, 96), a.gemv_blocks);
     try t.expectEqual(@as(usize, 128), a.verifyRows());
+}
+
+test "MLP128 leaves the lane GEMV column coverage unchanged" {
+    const Probe = struct {
+        var tiles: c_int = 0;
+        var blocks: u32 = 0;
+        fn launch(_: cuda.abi.Function, gx: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, args: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
+            const p = @as(*const cuda.qlinear.GemvPart, @ptrCast(@alignCast(args.?[2].?))).*;
+            tiles = p.tiles;
+            blocks = gx;
+            return 0;
+        }
+    };
+    var d: cuda.Driver = undefined;
+    d.api.cuLaunchKernel = Probe.launch;
+    var a: cuda.qlinear.Affine4Kernels = undefined;
+    a.mlp128 = true;
+    a.gemv_fn = function(&d, 2);
+    a.gemv_blocks = 1000;
+    a.pdl = false;
+    const projection: cuda.qlinear.Affine4 = .{ .w = 10, .s = 20, .b = 30, .n = 17408, .k = 5120, .npad = 17408 };
+    for ([_]usize{ 1, 8, 16 }) |rows| {
+        try a.gemv(.{ .d = &d, .handle = null }, 100, 200, projection, 300, rows, 1);
+        try t.expectEqual(@as(c_int, 272), Probe.tiles);
+        try t.expectEqual(@as(u32, 272), Probe.blocks);
+    }
 }

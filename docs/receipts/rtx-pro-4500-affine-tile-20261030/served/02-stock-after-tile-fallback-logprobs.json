@@ -1,0 +1,29 @@
+{
+  "request": {
+    "model": "qwen-community",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Write a detailed paragraph about hash tables and collision handling."
+      }
+    ],
+    "temperature": 0,
+    "seed": 42,
+    "max_tokens": 96,
+    "reasoning_effort": "none",
+    "chat_template_kwargs": {
+      "enable_thinking": false
+    },
+    "return_token_ids": true,
+    "priority": "background",
+    "logprobs": true,
+    "top_logprobs": 5
+  },
+  "status": 400,
+  "response": {
+    "error": {
+      "message": "logprobs are not supported by this model or backend",
+      "type": "invalid_request_error"
+    }
+  }
+}
