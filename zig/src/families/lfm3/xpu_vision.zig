@@ -72,6 +72,9 @@ pub const Tower = struct {
     max_patches: u32,
     host: []u16,
     bytes: u64 = 0,
+    /// When set (tests): the tower's and the projector's ms of the last picture, a sync after each.
+    split: ?*[2]f64 = null,
+    t0: f64 = 0,
 
     /// The tower's 138 tensors from the checkpoint, and scratch for pictures of up to `max_patches` patches.
     pub fn load(gpa: std.mem.Allocator, r: *rt.Runtime, l: *ld.Loader, max_patches: u32) !*Tower {
@@ -184,6 +187,7 @@ pub const Tower = struct {
         const P = gh * gw;
         if (gh == 0 or gw == 0 or gh % 2 != 0 or gw % 2 != 0 or P > t.max_patches or pixels.len != @as(usize, P) * patch_width) return error.BadLfm3ImageShape;
         const s = &t.s;
+        if (t.split != null) t.t0 = try t.stamp();
         for (t.host[0..pixels.len], pixels) |*o, v| o.* = toBf(v);
         try t.r.upload(s.x0, std.mem.sliceAsBytes(t.host[0..pixels.len]));
         try t.gemm(s.x0, patch_width, t.patchifier, null, s.d, width, P, width, patch_width);
@@ -218,6 +222,7 @@ pub const Tower = struct {
             try run(&t.k.add_rms, .{ P, 1, 1 }, .{ s.h, s.d, next, s.xn, width, eps });
             try t.hook(h, @intCast(i), s.h, P, width);
         }
+        const t_layers = if (t.split != null) try t.stamp() else 0;
         // projector: LayerNorm a patch, the 2 x 2 block's four rows as one 4096-wide row, linear_1, GELU, linear_2
         const R = P / 4;
         try run(&t.k.ln, .{ P, 1, 1 }, .{ s.h, t.pn_w, t.pn_b, s.xn, width, ln_eps });
@@ -225,6 +230,18 @@ pub const Tower = struct {
         try run(&t.k.gelu, .{ (R * proj_hidden + 63) / 64, 1, 1 }, .{ s.p1, s.g, R * proj_hidden });
         try t.gemm(s.g, proj_hidden, t.l2, t.b2, out, out_width, R, out_width, proj_hidden);
         try t.hook(h, depth, out, R, out_width);
+        if (t.split) |sp| {
+            sp[1] = try t.stamp() - t_layers;
+            sp[0] = t_layers - t.t0;
+        }
+    }
+
+    /// ms on the monotonic clock once the queue is drained.
+    fn stamp(t: *Tower) !f64 {
+        try t.r.sync();
+        var ts: std.c.timespec = undefined;
+        _ = std.c.clock_gettime(.MONOTONIC, &ts);
+        return @as(f64, @floatFromInt(ts.sec)) * 1e3 + @as(f64, @floatFromInt(ts.nsec)) / 1e6;
     }
 };
 
