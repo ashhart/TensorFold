@@ -4,6 +4,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on CUDA: `TF_FLASHNEXT_ATTN_LANES=1` (off by default) runs a shared decode round's attention in one launch a kernel, with each row's caches and position in a table uploaded once a round, instead of a launch per stream. Replies are the same tokens; the kernels are bit-equal to the per-stream launches (`tf-cuda-test flashnext-attn-lanes`).
+- Flash Next on CUDA: `TF_FLASHNEXT_GDN_LANES=1` (off by default) runs a shared decode round's DeltaNet in four launches, on the same lane table, instead of four launches a stream. The bytes are the per-stream launches'.
+
 - CUDA EXL3: the dense projections zero their split-K counters only when the buffer grows, on the calls' stream, instead of before every 128-row block of every call; each block's last program already resets its own counter. Replies are token-identical, and on a GB10 with the Qwen3.8-27B 3.50 bpw pack decode is 0.4% to 0.9% faster (#1475). Thanks to @diwakergupta.
 
 - Qwen3.6-35B-A3B on CUDA serves NVIDIA's NVFP4 checkpoint (`nvidia/Qwen3.6-35B-A3B-NVFP4`) as downloaded: W4A16 NVFP4 routed and shared experts, FP8 attention and DeltaNet projections and the NVFP4 head run as stored, and `--drafter` naming the same checkpoint drafts with its bf16 MTP layer, quantized to affine-4 at load. One GB10 decodes 66 tok/s without drafts and 112 to 125 tok/s with them; drafted, concurrent and resumed replies equal their plain runs. The rules come from @gilby's #345.

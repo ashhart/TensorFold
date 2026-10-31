@@ -576,7 +576,7 @@ const learning = @import("registry_learning.zig");
 pub const gradient_pending = learning.gradient_pending;
 pub const qwen_learning_pending = learning.qwen_learning_pending;
 pub const glm_pending = @import("glm_sampling_pending.zig");
-pub const landed_cuda = cuda ++ @import("dory_cuda_records.zig").cuda ++ gradient_pending ++ qwen_learning_pending ++ paging.extra ++ @import("qwen_served_records.zig").records ++ cuda_pending ++ @import("qwen_decode_pending.zig").records ++ glm_pending.sampling ++ @import("glm_kv_pending.zig").records ++ @import("proposal_sampling_records.zig").records ++ @import("flashnext_pages_pending.zig").records ++ @import("glm_f32w_pending.zig").records ++ @import("penalty_sampling_records.zig").records;
+pub const landed_cuda = cuda ++ @import("dory_cuda_records.zig").cuda ++ gradient_pending ++ qwen_learning_pending ++ paging.extra ++ @import("qwen_served_records.zig").records ++ cuda_pending ++ @import("qwen_decode_pending.zig").records ++ glm_pending.sampling ++ @import("glm_kv_pending.zig").records ++ @import("proposal_sampling_records.zig").records ++ @import("flashnext_pages_pending.zig").records ++ @import("flashnext_attn_lanes_pending.zig").records ++ @import("flashnext_gdn_lanes_pending.zig").records ++ @import("glm_f32w_pending.zig").records ++ @import("penalty_sampling_records.zig").records;
 test {
     _ = learning;
 }
@@ -588,6 +588,8 @@ test {
     _ = @import("glm_f32w_pending.zig");
     _ = @import("registry_pending_test.zig");
     _ = @import("flashnext_pages_pending.zig");
+    _ = @import("flashnext_attn_lanes_pending.zig");
+    _ = @import("flashnext_gdn_lanes_pending.zig");
 }
 test "unmeasured CUDA records cannot pass a compiled resource check" {
     for (cuda_pending) |r| {

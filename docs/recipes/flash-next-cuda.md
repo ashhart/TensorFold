@@ -211,6 +211,17 @@ in one start of four on this machine. After the 131,072-token prompt the process
 - One stream at a time (an agent loop, a single user): a larger chunk shortens every prompt longer than the default
   chunk. Several streams that decode while others send long prompts: the default keeps each wait to one short pass.
 
+### One-launch attention
+
+`TF_FLASHNEXT_ATTN_LANES=1` runs a shared decode round's attention in one launch a kernel: each row finds its stream's
+caches and position in a table uploaded once a round, in place of a launch per stream. It applies to two to 32 streams
+of up to 16 rows each, text on contiguous caches, on our own glue; page-table KV, media and captured sets keep the
+per-stream launches. The bytes equal the per-stream launches': `tf-cuda-test flashnext-attn-lanes` compares them.
+
+`TF_FLASHNEXT_GDN_LANES=1` does the same for a shared round's DeltaNet: each stream's rollback copies, the fronts, the
+chains and the conv window moves take a launch each, on the same table and the same conditions.
+`tf-cuda-test flashnext-gdn-lanes` compares its bytes with the per-stream launches'.
+
 ## Not yet
 
 - The dense projections run a copy of the Python engine's group-32 lane matmul (`qmm.cu`); the core's `qmm_group` and

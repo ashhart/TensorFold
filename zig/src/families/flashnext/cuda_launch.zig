@@ -37,6 +37,7 @@ pub const score = @import("cuda_score.zig");
 pub const native = @import("cuda_lanes.zig").Namespace(Tri);
 /// Our own glue kernels, which every launch takes when no captured set is loaded
 pub const Glue = glue_.Glue;
+pub const batch_lanes = @import("cuda_batch_lanes.zig");
 /// A stream's caches through a page table, as the cache launches take them (TF_FLASHNEXT_KV_PAGES)
 pub const Pg = glue_.Pg;
 const glue_ = @import("cuda_glue.zig");
@@ -89,6 +90,12 @@ pub const Tri = struct {
     /// The read-out tiles replace down, reduction and upmix together; mixed operation ownership stays on its route.
     pub fn readoutTilesOwned(t: Tri) bool {
         return t.glue("_qmm_hcdown") != null and t.glue("_hc_reduce_act") != null and t.glue("_qmm_upmix") != null;
+    }
+
+    /// Our glue when it owns every attention launch a shared round's lanes take in one (TF_FLASHNEXT_ATTN_LANES).
+    pub fn lanesGlue(t: Tri) ?*const Glue {
+        inline for (.{ "_attn_prep", "_pool", "_scores", "_chunks", "_merge" }) |name| if (t.glue(name) == null) return null;
+        return t.own;
     }
 
     /// Fusing chunks and merge requires both operations to belong to our glue.

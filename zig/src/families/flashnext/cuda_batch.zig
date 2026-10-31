@@ -118,6 +118,8 @@ pub fn Pass(comptime Tri: type) type {
         pending_f32: bool = false,
         /// This layer's out projection leaves part's other slices alone; its writeback adds the zero slice once.
         zero_slices: bool = false,
+        /// This round staged a lane table for one-launch attention and DeltaNet (batch_lanes).
+        lanes_tab: bool = false,
 
         // ---- launches ----------------------------------------------------------------------------------------
 
@@ -270,6 +272,8 @@ pub fn Pass(comptime Tri: type) type {
             } else if (self.lanes.len == 0) {
                 try self.gdnFront(lw, s.proj, self.seq.conv[li].ptr, n, s.gq, s.gk, s.gv, s.ggb);
                 try self.gdnChain(s.gq, s.gk, s.gv, s.ggb, self.seq.state[li].ptr, keep.state_out, n, s.ys);
+            } else if (self.lanes_tab and batch_lanes.gdnOn()) {
+                try batch_lanes.gdn(self, lw, li);
             } else {
                 // shared rounds: each lane's rows kept, fronted and chained on its own conv window and state
                 var row0: usize = 0;
@@ -344,7 +348,9 @@ pub fn Pass(comptime Tri: type) type {
             try self.copyCols(pa, proj_n, keep.pq, qw2, qw2, n);
             try self.copyCols(pa + qw2 * 2, proj_n, keep.pk, kw, kw, n);
             try self.copyCols(pa + (qw2 + kw) * 2, proj_n, keep.pv, kw, kw, n);
-            if (self.lanes.len > 0) {
+            if (self.lanes_tab and batch_lanes.attnOn()) {
+                try batch_lanes.attn(self, lw, ai, pa);
+            } else if (self.lanes.len > 0) {
                 // shared rounds: each lane's rope, cache writes, selection and attention on its own stream's caches
                 const own_seq = self.seq;
                 const own_pos0 = self.pos0;
@@ -486,6 +492,8 @@ pub fn Pass(comptime Tri: type) type {
             @memset(pos, 0);
             for (0..blocks) |b| pos[4 * b] = @intCast(if (self.lanes.len > 0) self.lanes[b].pos else self.pos0 + b * att_rows);
             try self.upload(s.pos, std.mem.sliceAsBytes(pos));
+            self.lanes_tab = batch_lanes.useTable(self, n);
+            if (self.lanes_tab) try batch_lanes.stage(self);
             if (!self.prepared) try s.uploaded();
         }
 
