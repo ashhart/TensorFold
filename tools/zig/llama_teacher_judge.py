@@ -4,15 +4,18 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 from pathlib import Path
 
 from qwen27_margins import verdict
 
 
 def top2(row) -> dict:
-    """A row's best two ids and scores, ties to the lower id (the engine's argmax and numpy's)."""
+    """A row's best two ids and scores, ties to the lower id (as the engine's argmax); non-finite rows are refused."""
     import numpy as np
 
+    if not np.isfinite(row).all():
+        raise ValueError(f"non-finite logits at id {int(np.flatnonzero(~np.isfinite(row))[0])}")
     first = int(np.argmax(row))
     rest = row.copy()
     rest[first] = -np.inf
@@ -25,6 +28,9 @@ def judge(native: list[dict], reference: list[dict]) -> dict:
         raise ValueError("expected the same positive number of positions on both sides")
     exceptions = []
     for position, (a, b) in enumerate(zip(native, reference)):
+        for side, item in (("native", a), ("reference", b)):
+            if not all(math.isfinite(x) for x in item["logits"]):
+                raise ValueError(f"position {position}: non-finite {side} logits {item['logits']}")
         actual, wanted = a["ids"][0], b["ids"][0]
         if actual != wanted:
             exceptions.append({"position": position, "expected": wanted, "actual": actual, **verdict(a, b, wanted, actual)})
@@ -49,7 +55,20 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     ref, nat = load(args.reference, args.vocab), load(args.native, args.vocab)
-    result = judge([top2(row) for row in nat], [top2(row) for row in ref])
+    try:
+        sides = []
+        for name, rows in (("native", nat), ("reference", ref)):
+            records = []
+            for position, row in enumerate(rows):
+                try:
+                    records.append(top2(row))
+                except ValueError as err:
+                    raise ValueError(f"{name} position {position}: {err}") from None
+            sides.append(records)
+        result = judge(*sides)
+    except ValueError as err:
+        print(f"refused: {err}")
+        raise SystemExit(1)
     result["sha256"] = {key: hashlib.sha256(path.read_bytes()).hexdigest() for key, path in (("reference", args.reference), ("native", args.native))}
     with args.output.open("x") as out:
         out.write(json.dumps(result, indent=2) + "\n")
