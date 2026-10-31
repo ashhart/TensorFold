@@ -10,8 +10,10 @@ const dense_in = contract.dense;
 const family = llama.family;
 const G33 = family.nanbeige43;
 
-/// glue.metal's ll_mv_args, as forward.zig fills it.
+/// glue.metal's ll_mv_args, as forward.zig fills it for the dequant.
 const MArgs = extern struct { rows: u32, n: u32, k: u32, ldy: u32 };
+/// glue.metal's ll_q4_args, as forward.zig fills it.
+const Q4Args = extern struct { rows: u32, n0: u32, n1: u32, n2: u32, k: u32, ldy: u32 };
 
 pub const group = 32;
 
@@ -60,7 +62,7 @@ fn matvecDepth(s: c.Shape) usize {
     return s.k / 1024 + 24;
 }
 
-/// The int4 row projection ll_q4_matvec_ROWS: Y[r, j] = bf16(sum X[r, i] W[j, i]) in fp32 over W as dequantized.
+/// ll_q4_matvec_ROWS: Y[r, j] = bf16(sum X[r, i] W[j, i]) in fp32 over W dequantized, W's rows as three tensors.
 pub const Matvec = struct {
     a: std.mem.Allocator,
     rig: rig_.Rig,
@@ -68,7 +70,7 @@ pub const Matvec = struct {
     pipe: mtl.Pipeline,
     per: u32,
     name: []const u8,
-    served: [2]c.Shape,
+    served: [3]c.Shape,
     shape: c.Shape = .{ .rows = 0, .n = 0, .k = 0 },
     d: ?dense_in.Dense = null,
     m: ?Int4 = null,
@@ -82,7 +84,7 @@ pub const Matvec = struct {
         const name = try std.fmt.allocPrint(a, "llama glue ll_q4_matvec_{d}", .{per});
         errdefer a.free(name);
         const fun = name[std.mem.lastIndexOfScalar(u8, name, ' ').? + 1 ..];
-        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .lib = lib, .pipe = try llama.pipelineOf(lib, device, fun), .per = per, .name = name, .served = .{ .{ .rows = per, .n = 1024, .k = G33.intermediate }, .{ .rows = per, .n = G33.hidden, .k = G33.hidden } } };
+        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .lib = lib, .pipe = try llama.pipelineOf(lib, device, fun), .per = per, .name = name, .served = .{ .{ .rows = per, .n = G33.hidden + 2 * G33.kv_heads * (G33.hidden / G33.heads), .k = G33.hidden }, .{ .rows = per, .n = 2 * G33.intermediate, .k = G33.hidden }, .{ .rows = per, .n = G33.hidden, .k = G33.intermediate } } };
     }
 
     fn drop(p: *Matvec) void {
@@ -131,13 +133,22 @@ pub const Matvec = struct {
         const pass = p.rig.begin();
         const e = pass.e;
         e.setPipeline(p.pipe);
+        const groups = s.k / group;
+        const part = s.n / 24 * 8;
+        const n = [3]usize{ part, part, s.n - 2 * part };
         var at: usize = 0;
         while (at < s.rows) : (at += p.per) {
             const here: u32 = @intCast(@min(p.per, s.rows - at));
             e.setBuffer(p.x.buf, p.x.off + at * s.k * 2, 0);
-            for (p.in, 1..) |r, slot| e.setBuffer(r.buf, r.off, slot);
-            e.setValue(MArgs{ .rows = here, .n = @intCast(s.n), .k = @intCast(s.k), .ldy = @intCast(s.n) }, 4);
-            e.setBuffer(p.y.buf, p.y.off + at * s.n * 2, 5);
+            var first: usize = 0;
+            for (0..3) |i| {
+                e.setBuffer(p.in[0].buf, p.in[0].off + first * s.k / 2, 1 + 3 * i);
+                e.setBuffer(p.in[1].buf, p.in[1].off + first * groups * 2, 2 + 3 * i);
+                e.setBuffer(p.in[2].buf, p.in[2].off + first / 8 * groups * 4, 3 + 3 * i);
+                first += n[i];
+            }
+            e.setValue(Q4Args{ .rows = here, .n0 = @intCast(n[0]), .n1 = @intCast(n[1]), .n2 = @intCast(n[2]), .k = @intCast(s.k), .ldy = @intCast(s.n) }, 10);
+            e.setBuffer(p.y.buf, p.y.off + at * s.n * 2, 11);
             e.dispatchGroups(mtl.Size.of((s.n + 7) / 8, 1, 1), mtl.Size.of(256, 1, 1));
         }
         try p.rig.finish(pass);
