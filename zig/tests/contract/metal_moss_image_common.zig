@@ -64,6 +64,10 @@ pub const Range = struct {
     pub fn recip(a: Range) Range {
         return .{ .lo = 1 / a.hi, .hi = 1 / a.lo };
     }
+    /// Both ranges' span.
+    pub fn join(a: Range, b: Range) Range {
+        return .{ .lo = @min(a.lo, b.lo), .hi = @max(a.hi, b.hi) };
+    }
 };
 
 pub fn tanh(x: f64) f64 {
@@ -75,6 +79,24 @@ pub const div_ulps = 2.5;
 pub const rsqrt_ulps = 2;
 pub const exp_ulps = 4;
 pub const tanh_ulps = 5;
+pub const log_ulps = 4;
+
+/// 1 + exp(-x) at a point x through the kernel's precise exp and add; past fp32's range, exp's fp32 result is +Inf.
+fn denominator(x: f64) Range {
+    var e = Range.of(@exp(-x)).fp32(exp_ulps);
+    if (e.hi > std.math.floatMax(f32)) e.hi = std.math.inf(f64);
+    return e.add(Range.of(1)).fp32(0.5);
+}
+
+/// 1 / (1 + exp(-x)) at a point x through the kernel's precise exp, add and fast division (before any rounding).
+pub fn sigmoid(x: f64) Range {
+    return denominator(x).recip().fp32(div_ulps);
+}
+
+/// x / (1 + exp(-x)) at a point x, as the kernels compute SiLU.
+pub fn silu(x: f64) Range {
+    return Range.of(x).mul(denominator(x).recip()).fp32(div_ulps);
+}
 
 /// Each output's float64 value at the kernel's rounding points, and its range, kept for the bounds and intervals.
 pub const Ends = struct {
