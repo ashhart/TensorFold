@@ -1,4 +1,4 @@
-//! MOSS-Image's launches: its transformer's and prompt encoder's own kernels, and the split-K GEMM it reads sums from.
+//! MOSS-Image's launches: its transformer's, encoder's and decoder's kernels, and the split-K GEMM it reads sums from.
 const std = @import("std");
 const M = @import("limits.zig").MetalLaunch;
 pub const records = [_]M{
@@ -21,6 +21,15 @@ pub const records = [_]M{
     .{ .name = "moss image me_gdn_prep", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "moss image me_gdn", .threads = 128, .tg_memory = 1024, .reserved = 128 },
     .{ .name = "moss image me_gated_norm", .threads = 256, .tg_memory = 0, .reserved = 256 },
+    .{ .name = "moss image decoder md_unpack", .threads = 256, .tg_memory = 0, .reserved = 256 },
+    .{ .name = "moss image decoder md_conv", .threads = 128, .tg_memory = 26624, .reserved = 128 },
+    .{ .name = "moss image decoder md_wino", .threads = 512, .tg_memory = 32768, .reserved = 512 },
+    .{ .name = "moss image decoder md_wino_32", .threads = 512, .tg_memory = 32768, .reserved = 512 },
+    .{ .name = "moss image decoder md_norm", .threads = 256, .tg_memory = 0, .reserved = 256 },
+    .{ .name = "moss image decoder md_group_part", .threads = 384, .tg_memory = 1536, .reserved = 384 },
+    .{ .name = "moss image decoder md_group_finish", .threads = 1024, .tg_memory = 0, .reserved = 1024 },
+    .{ .name = "moss image decoder md_attention", .threads = 128, .tg_memory = 5168, .reserved = 128 },
+    .{ .name = "moss image decoder md_pixels", .threads = 256, .tg_memory = 0, .reserved = 256 },
 };
 
 test "the MOSS-Image launches fit every Apple family" {
