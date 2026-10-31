@@ -20,6 +20,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import __version__
 from . import settings as settings_mod
 
 LABEL = "com.tensorfold.web"
@@ -283,7 +284,8 @@ def main(argv: list[str]) -> int:
         return 0
     if a.action == "install" and temporary_environment():
         print("this tensorfold-web runs from uv's cache (uvx), which `uv cache clean` empties: the service could not "
-              "start again. Install it for good first, then run this again:\n  uv tool install tensorfold-web\n"
+              "start again. Install it for good first, then run this again:\n"
+              f"  uv tool install tensorfold-web=={__version__}\n"
               "  tensorfold-web service install", file=sys.stderr)
         return 2
     try:
