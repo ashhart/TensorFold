@@ -25,6 +25,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - H3 on CUDA finds each tensor by its real header entry, so a look-alike in metadata no longer returns the wrong tensor, spaced JSON headers load, and malformed headers are refused (#1906, part of #1872). Thanks to @jschmied.
 
 - GLM on CUDA refuses a malformed DFlash2 drafter header, or a tensor range past the file, with an error instead of crashing or reading unset memory (#1904, part of #1872). Thanks to @jschmied.
+- Drama speech on CUDA reuses a catalog voice's reference prefill across requests, as Metal does: the backbone and tower state after the reference's whole prompt chunks is kept, and a later request in the same voice restores it and prefills only the rest. The cut is a whole chunk, so a cached request makes the chunk cuts an uncached one makes; host tests check this against a fake lane, and it is not yet measured on a GPU. `TF_DRAMA_REFERENCE_CACHE` sets the voices kept (default 2, 0 off); the default voice is unchanged.
 
 - `pull` fetches an EXL8 width file's header again when its length word or tensor entries are corrupt, instead of crashing or keeping a bad copy (#1907, part of #1872). Thanks to @jschmied.
 

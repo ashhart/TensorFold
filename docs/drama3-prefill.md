@@ -15,6 +15,14 @@ Each prompt starts at offset zero and takes full chunks followed by its remainin
 
 An empty or oversized capacity is refused before any checkpoint or GPU allocation: more than 8192 rows a chunk is `BadPrefillRows`, and an attention query chunk outside 1 through 1024 is `BadAttentionChunk`. The serving host refuses `TF_DRAMA_PREFILL_ROWS` outside 1 through 1024 by name.
 
+## Reference cache
+
+A request in a catalog voice starts with the same reference rows as every other request in that voice. The CUDA host keeps the state after them so a later request prefills only from there, as Metal does. `TF_DRAMA_REFERENCE_CACHE` sets how many voices it keeps, 0 through 16, default 2; 0 turns it off. The least recently used entry is dropped first, and all lanes share the entries.
+
+The saved row is Metal's boundary: the last whole chunk of `TF_DRAMA_PREFILL_ROWS` rows that ends before the last reference row. A request that resumes there therefore makes the same chunk cuts an uncached request makes, and each saved tower row's lookahead label is still a reference row. An entry is keyed by its saved rows and that lookahead row, every token and code compared, and holds both recurrent state blocks and the backbone's attention and tower's K and V rows up to the boundary. Restoring it after the prompt's reset leaves the bytes the skipped chunks would have written, so a cached request's audio should equal an uncached one's; that is checked on host against a fake lane, not yet on a GPU. The default voice, and a reference shorter than one chunk, are not cached.
+
+Each entry is the lane's recurrent state (about 61 MiB) plus 46 KiB a saved row, allocated when the entry is made. A failed allocation or copy keeps no entry and the request continues uncached; a failed restore drops the entry and the request prefills whole.
+
 ## Memory and synchronization
 
 The bounds below are per lane, at context 8192. CUDA's row-dependent buffers in `Engine.allocState` contribute 290832 bytes per row, excluding routing-plan storage. With 128 attention query rows, score storage is 67174400 bytes, and row buffers plus scores total 104400896 bytes per lane. At capacity 1024 the same subtotal is 835207168 bytes. These are allocation formulas, not device measurements; weights, KV, recurrent state, routing plans, codec storage, alignment and library workspaces are additional.
