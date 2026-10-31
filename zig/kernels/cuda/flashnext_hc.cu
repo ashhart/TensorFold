@@ -122,6 +122,84 @@ extern "C" __global__ void __launch_bounds__(256) fn_hc_writeback_slices(const _
     hc_writeback<4>(H, HOUT, PSS, BR, INJ, nullptr, nullptr, RS, D, S, 0, 1, WORLD);
 }
 
+// hc_writeback<MODE> then fn_hc_normalize in one block a row, slices summed and added in their order: the same bits.
+template <int MODE, int NC, int S>
+__device__ __forceinline__ void hc_writeback_norm(const __nv_bfloat16* H, __nv_bfloat16* HOUT, float* __restrict__ PSS,
+                                                  const float* __restrict__ BR, const __nv_bfloat16* __restrict__ INJ,
+                                                  const float* __restrict__ Y, const float* __restrict__ WTS,
+                                                  const float* __restrict__ SCALE, __nv_bfloat16* __restrict__ NORM,
+                                                  long long RS, float eps, int TOPK, int SLOTS, int WORLD) {
+    constexpr int D = NC * 256;
+    __shared__ float red[NC][8][S];
+    __shared__ float rinv[S];
+    const int r = blockIdx.x, warp = threadIdx.x >> 5;
+    float hv[NC][S];
+#pragma unroll
+    for (int c = 0; c < NC; ++c) {
+        const int d = c * 256 + threadIdx.x;
+        float branch = 0.0f;
+        if constexpr (MODE == 4) {
+            float acc = BR[static_cast<long long>(r) * D + d];
+            for (int k = 1; k < WORLD; ++k) acc = __fadd_rn(acc, BR[k * RS + static_cast<long long>(r) * D + d]);
+            branch = rbf(acc);
+        } else if constexpr (MODE == 2) {
+            float acc = 0.0f;
+            for (int k = 0; k <= TOPK; ++k) {
+                const long long at = static_cast<long long>(r) * SLOTS + k;
+                acc = __fmaf_rn(Y[at * D + d], WTS[at], acc);
+            }
+            branch = rbf(acc);
+        }
+#pragma unroll
+        for (int s = 0; s < S; ++s) {
+            const long long at = static_cast<long long>(r) * S * D + static_cast<long long>(s) * D + d;
+            float v = bf(H[at]);
+            if constexpr (MODE != 0) {
+                v = rbf(__fmaf_rn(branch, bf(INJ[r * S + s]), v));
+                HOUT[at] = __float2bfloat16_rn(v);
+            }
+            hv[c][s] = v;
+            const float ss = warp_sum(__fmul_rn(v, v));
+            if ((threadIdx.x & 31) == 0) red[c][warp][s] = ss;
+        }
+    }
+    __syncthreads();
+    if (threadIdx.x < S) {
+        float all = 0.0f;
+        for (int c = 0; c < NC; ++c) {
+            float total = 0.0f;
+            for (int w = 0; w < 8; ++w) total = __fadd_rn(total, red[c][w][threadIdx.x]);
+            PSS[(static_cast<long long>(r) * NC + c) * S + threadIdx.x] = total;
+            all = __fadd_rn(all, total);
+        }
+        rinv[threadIdx.x] = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(all, static_cast<float>(D)), eps)));
+    }
+    __syncthreads();
+#pragma unroll
+    for (int c = 0; c < NC; ++c)
+#pragma unroll
+        for (int s = 0; s < S; ++s) {
+            const int col = s * D + c * 256 + threadIdx.x;
+            NORM[static_cast<long long>(r) * S * D + col] =
+                __float2bfloat16_rn(__fmul_rn(__fmul_rn(hv[c][s], rinv[s]), SCALE[col]));
+        }
+}
+
+// Flash Next's shape: 2560 columns (10 slices), 4 streams.
+extern "C" __global__ void __launch_bounds__(256) fn_hc_writeback_norm0(const __nv_bfloat16* H, float* PSS, const float* SCALE, __nv_bfloat16* NORM, float eps) {
+    hc_writeback_norm<0, 10, 4>(H, nullptr, PSS, nullptr, nullptr, nullptr, nullptr, SCALE, NORM, 0, eps, 0, 1, 1);
+}
+
+extern "C" __global__ void __launch_bounds__(256) fn_hc_writeback_norm_moe(const __nv_bfloat16* H, __nv_bfloat16* HOUT, float* PSS, const __nv_bfloat16* INJ,
+    const float* Y, const float* WTS, const float* SCALE, __nv_bfloat16* NORM, float eps, int TOPK, int SLOTS) {
+    hc_writeback_norm<2, 10, 4>(H, HOUT, PSS, nullptr, INJ, Y, WTS, SCALE, NORM, 0, eps, TOPK, SLOTS, 1);
+}
+
+extern "C" __global__ void __launch_bounds__(256) fn_hc_writeback_norm_slices(const __nv_bfloat16* H, __nv_bfloat16* HOUT, float* PSS, const float* BR,
+    const __nv_bfloat16* INJ, long long RS, const float* SCALE, __nv_bfloat16* NORM, float eps, int WORLD) {
+    hc_writeback_norm<4, 10, 4>(H, HOUT, PSS, BR, INJ, nullptr, nullptr, SCALE, NORM, RS, eps, 0, 1, WORLD);
+}
+
 // qmm._qmm_hcdown, block (16 rows, 64 columns, K slice): the slice's normed rows times the down rows, fp32 to PART.
 extern "C" __global__ void __launch_bounds__(128) fn_hc_down(const __nv_bfloat16* __restrict__ H, const float* __restrict__ PSS,
                                                              const float* __restrict__ SCALE, __nv_bfloat16* __restrict__ NORMED,

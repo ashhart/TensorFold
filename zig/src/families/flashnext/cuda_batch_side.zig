@@ -38,10 +38,10 @@ pub const Side = struct {
 pub fn run(pass: anytype, st: cuda.Stream, native: anytype, n: usize) !void {
     const s = pass.s;
     const glue = pass.tri.own orelse return error.NativeGlueRequired;
-    try pass.k.native_lane.matmul(st, s.mixed, dims, n, native.shared[0].native.?, s.shared_gate, s.native_part);
-    try pass.k.native_lane.matmul(st, s.mixed, dims, n, native.shared[1].native.?, s.shared_up, s.native_part);
+    try pass.k.nativeMatmul(st, s.mixed, dims, n, native.shared[0].native.?, s.shared_gate, s.native_part, .bf16);
+    try pass.k.nativeMatmul(st, s.mixed, dims, n, native.shared[1].native.?, s.shared_up, s.native_part, .bf16);
     try glue.sharedSwiGLU(st, s.shared_gate, s.shared_up, s.shared_act, n, moe_w);
-    try pass.k.native_lane.matmulF32(st, s.shared_act, moe_w, n, native.shared[2].native.?, s.shared_out, s.native_part);
+    try pass.k.nativeMatmul(st, s.shared_act, moe_w, n, native.shared[2].native.?, s.shared_out, s.native_part, .f32);
     try glue.sharedScatter(st, s.shared_out, s.y, n, dims, slots);
 }
 

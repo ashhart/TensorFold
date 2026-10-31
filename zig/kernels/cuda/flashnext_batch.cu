@@ -362,6 +362,45 @@ __device__ __forceinline__ int fn_block_scan(int v, int* warp_sums, int* total) 
     return v;
 }
 
+// A radix pass's cut by one warp (8 bins a lane): the highest bin whose suffix sum reaches need, and how many it gives.
+__device__ __forceinline__ void fn_qsa_bin_cut(const int* hist, int need, uint32_t cut, int shift, uint32_t* cut_s, int* need_s) {
+    const int lane = threadIdx.x & 31;
+    int c[8], local = 0;
+#pragma unroll
+    for (int j = 0; j < 8; ++j) {
+        c[j] = hist[lane * 8 + j];
+        local += c[j];
+    }
+    int above = local;  // the bins of this lane and every lane above it
+#pragma unroll
+    for (int o = 1; o < 32; o <<= 1) {
+        const int v = __shfl_down_sync(0xffffffffu, above, o);
+        if (lane + o < 32) above += v;
+    }
+    above -= local;
+    int best = -1, rest = 0, s = above;  // s = S[d + 1] as d walks down the lane's bins
+#pragma unroll
+    for (int j = 7; j >= 0; --j) {
+        const int d = lane * 8 + j;
+        if (best < 0 && d >= 1 && s + c[j] >= need) {
+            best = d;
+            rest = need - s;
+        }
+        s += c[j];
+    }
+    const int top_d = __reduce_max_sync(0xffffffffu, best);
+    if (top_d < 0) {  // no bin from 1 up reaches it: bin 0, need - S[1]
+        const int s1 = __shfl_sync(0xffffffffu, s - c[0], 0);
+        if (lane == 0) {
+            *need_s = need - s1;
+            *cut_s = cut;
+        }
+    } else if (best == top_d) {
+        *need_s = rest;
+        *cut_s = cut | (static_cast<uint32_t>(top_d) << shift);
+    }
+}
+
 // attention._select and _select_tiles, a row a block: a row past `top` complete blocks lists the best, then its tail.
 extern "C" __global__ void __launch_bounds__(1024) fn_qsa_select(const float* __restrict__ sc,
                                                                  const int* __restrict__ pos0, int* __restrict__ ids,
@@ -385,48 +424,63 @@ extern "C" __global__ void __launch_bounds__(1024) fn_qsa_select(const float* __
     int* out = ids + static_cast<long long>(r) * idw;
     uint32_t cut = 0;
     int need = top;
+    const int lane = threadIdx.x & 31;
     for (int p = 0; p < 4; ++p) {
         const int shift = 24 - 8 * p;
         for (int i = threadIdx.x; i < 256; i += blockDim.x) hist[i] = 0;
         __syncthreads();
-        for (int b = threadIdx.x; b < complete; b += blockDim.x) {
-            const uint32_t k = fn_qsa_key(row[b]);
-            if (p == 0 || (k >> (shift + 8)) == (cut >> (shift + 8))) atomicAdd(&hist[(k >> shift) & 0xFF], 1);
+        constexpr int U = 8;  // a thread's keys in flight before their adds (one L2 wait a key was the pass's time)
+        for (int b0 = 0; b0 < complete; b0 += U * blockDim.x) {
+            float v[U];
+#pragma unroll
+            for (int u = 0; u < U; ++u) {
+                const int b = b0 + u * blockDim.x + threadIdx.x;
+                v[u] = b < complete ? row[b] : 0.0f;
+            }
+#pragma unroll
+            for (int u = 0; u < U; ++u) {
+                const int b = b0 + u * blockDim.x + threadIdx.x;
+                const uint32_t k = fn_qsa_key(v[u]);
+                if (b < complete && (p == 0 || (k >> (shift + 8)) == (cut >> (shift + 8)))) atomicAdd(&hist[(k >> shift) & 0xFF], 1);
+            }
         }
         __syncthreads();
-        if (threadIdx.x == 0) {
-            int above = 0;            // keys under the prefix with a larger byte
-            int d = 255;
-            for (; d > 0; --d) {
-                if (above + hist[d] >= need) break;
-                above += hist[d];
-            }
-            need_s = need - above;
-            cut_s = cut | (static_cast<uint32_t>(d) << shift);
-        }
+        if (threadIdx.x < 32) fn_qsa_bin_cut(hist, need, cut, shift, &cut_s, &need_s);
         __syncthreads();
         cut = cut_s;
         need = need_s;
         __syncthreads();
     }
-    // every key above the cut, then the first `need` keys equal to it, placed in block order
-    int seen = 0;
-    int placed = 0;
-    for (int t0 = 0; t0 < complete && placed < top; t0 += blockDim.x) {
-        const int b = t0 + threadIdx.x;
-        const bool ok = b < complete;
-        const uint32_t k = ok ? fn_qsa_key(row[b]) : 0u;
-        const bool above = ok && k > cut;
-        const bool equal = ok && k == cut;
-        int eq_total = 0;
-        const int rank = seen + fn_block_scan(equal ? 1 : 0, warp_sums, &eq_total);
-        const bool chosen = above || (equal && rank <= need);
-        int ch_total = 0;
-        const int place = placed + fn_block_scan(chosen ? 1 : 0, warp_sums, &ch_total) - 1;
-        if (chosen)
-            for (int j = 0; j < ratio; ++j) out[place * ratio + j] = b * ratio + j;
-        seen += eq_total;
-        placed += ch_total;
+    // keys above the cut, then the first `need` equal ones in block order: a warp a run, ballots and two block scans
+    const int warps = static_cast<int>(blockDim.x) >> 5, warp = threadIdx.x >> 5;
+    const int steps = (complete + 32 * warps - 1) / (32 * warps);
+    const int w0 = warp * steps * 32;
+    const unsigned below = (1u << lane) - 1u;
+    int na = 0, ne = 0;
+    for (int st = 0; st < steps; ++st) {
+        const int b = w0 + st * 32 + lane;
+        const uint32_t k = b < complete ? fn_qsa_key(row[b]) : 0u;
+        na += __popc(__ballot_sync(0xffffffffu, b < complete && k > cut));
+        ne += __popc(__ballot_sync(0xffffffffu, b < complete && k == cut));
+    }
+    int total = 0;
+    const int eq_before = __shfl_sync(0xffffffffu, fn_block_scan(lane == 0 ? ne : 0, warp_sums, &total), 0) - ne;
+    const int take = max(0, min(ne, need - eq_before));
+    const int mine = na + take;
+    int place = __shfl_sync(0xffffffffu, fn_block_scan(lane == 0 ? mine : 0, warp_sums, &total), 0) - mine;
+    int eq_seen = 0;
+    for (int st = 0; st < steps; ++st) {
+        const int b = w0 + st * 32 + lane;
+        const uint32_t k = b < complete ? fn_qsa_key(row[b]) : 0u;
+        const unsigned eq = __ballot_sync(0xffffffffu, b < complete && k == cut);
+        const bool chosen = b < complete && (k > cut || (k == cut && eq_seen + __popc(eq & below) < take));
+        const unsigned ch = __ballot_sync(0xffffffffu, chosen);
+        if (chosen) {
+            const int at = place + __popc(ch & below);
+            for (int j = 0; j < ratio; ++j) out[at * ratio + j] = b * ratio + j;
+        }
+        place += __popc(ch);
+        eq_seen += __popc(eq);
     }
     if (threadIdx.x < ratio) {
         const int tail = ratio * complete + threadIdx.x;
