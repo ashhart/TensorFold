@@ -129,12 +129,69 @@ On the native pre-M5 lane loop, `TF_QWEN27_WINDOW=32` or `64` requests an experi
 those lane switches. Startup logs the effective lone loop and width beside the configured lane window and copies.
 The lane switch accepts only 0 or 1; the copy switch accepts only 0 or 1. Invalid settings name their variable.
 
+### Two Macs over Thunderbolt
+
+Speed-up mode splits one Qwen3.8-27B reply across two Macs over a Thunderbolt 5 cable: both Macs hold the same
+`TensorFold/Qwen3.8-27B-MLX-4bit` checkpoint, each serves it from its own directory with its own settings file, and
+rank 1 starts before rank 0.
+[Speed-up mode](../speed-up-mode.md) builds the server, sets up MCDMA and writes the two settings files; this
+subsection covers what the 27B pair serves and what it leaves out.
+Send requests to rank 0 only; rank 1 holds the other half of the weights and replays rank 0's rounds.
+
+```bash
+# rank 1, on the second Mac: start it first
+zig-out/native/bin/tensorfold-native serve ~/models/qwen3.8-27b \
+  --speed-up rank1.json --port 4101 --parallel 1 --context 32768 --no-update-check
+# rank 0, on the first Mac: start it within five minutes of rank 1
+zig-out/native/bin/tensorfold-native serve ~/models/qwen3.8-27b \
+  --speed-up rank0.json --port 4100 --parallel 1 --context 32768 --no-update-check
+```
+
+`--parallel 1` is required: a pair serves one greedy stream, the default is 8, and any other value stops with
+`--speed-up serves one greedy stream: pass --parallel 1`.
+`--context` defaults to 32768 for this model, and `--no-update-check` is the compatibility switch it is on one Mac,
+so beyond `--parallel` and the settings file each command is what that Mac runs on its own.
+
+Each rank runs every layer and splits the even widths: 12 of the 24 attention heads, 2 of the 4 key/value heads,
+half of the linear attention's heads and value channels, 8,704 of the 17,408-wide MLP, and 124,160 of the untied
+lm_head's 248,320 rows.
+Each projection's output rows are computed on the rank that owns them, with the full-K reduction a single Mac uses, so
+no cross-rank partial sum exists. A seam's `pair_gather` carries the two bf16 halves, input activations and output rows,
+bit-exactly, and the pair needs no tie policy.
+Embeddings and norms stay whole on both Macs, so the 248,320-row table is not split and a token id means the same
+thing on both ranks.
+At each decided token each rank takes the argmax over its own half of the 248,320 logits, and `pair_pick` chooses
+between the two half-vocab winners; the pair never merges the two halves into one 248,320-row argmax.
+A logit that is not finite on either rank is flagged by `pair_argmax` and `pair_pick` answers its sentinel: the request
+fails with `error.NonfiniteLogits`, as on one Mac, and a dropped link fails it with `error.PairFailed` rather than
+letting a half-vocab argmax stand in for the whole vocabulary's.
+
+The pair refuses what needs one Mac's whole state rather than quietly serving without it: `--drafter`, because rank 1
+has no drafter checkpoint, and `--prompt-cache-gib` and `--learn`, because each Mac holds only its own halves of a
+slot's state.
+A pair therefore keeps no prompt cache, learns nothing and drafts nothing.
+A request that samples or carries a grammar is refused too, at the head of prefill with
+`speed-up mode: a pair answers greedy only; send the request with sampling and grammar off`,
+rather than being answered greedily for one token and failing on the next: a pair serves one greedy stream.
+
+A pair's logits are byte-identical to one Mac's on the recorded fixtures, so its reply is a single Mac's token for
+token. The pair-vs-single gate is `tp_check` (`tf-qwen27-tp-check`), which returns
+`error.PairTokensDifferFromSingleMac` on any token difference, with no exemptions.
+
 ## Weights other than 4-bit
 
 The M5 lane kernels accept MLX affine 2-, 3-, 4-, 5-, 6- and 8-bit projections in groups of 64.
 They widen packed values for the tensor operations without changing those values. Mixed-width stacks
 keep separate calls where a fused projection needs one width. Examples include
 `TensorFold/Qwen3.8-27B-oQ2` and `TensorFold/Qwen3.8-27B-oQ4`.
+
+A pair takes the MLX affine checkpoints a single Mac takes on Metal, reading the same checkpoint directory on each Mac.
+The 4-bit `TensorFold/Qwen3.8-27B-MLX-4bit` stack is the one with a pair receipt: the two-Mac acceptance run and
+`tf-qwen27-tp-check` replay one Mac's recorded 4-bit replies against the pair. The 2-, 3-, 5-, 6- and 8-bit affine
+stacks of groups 64 above load through the same readers and split the same way, each rank keeping its row slice of a
+projection while the K split stays the checkpoint matrix's, but no pair run has produced a receipt on them yet: a pair
+serve there is unqualified. Nothing CUDA-only is read (no NVFP4, no EXL3); a tied embedding head is refused at load,
+as it is on one Mac.
 
 The packed row readers on Apple Silicon and the CUDA readers cover MLX affine 2/3/4/5/6/8-bit projections
 with groups of 32/64/128, including mixed layers. CUDA also reads [EXL3 packs](#exl3-checkpoints-experimental).

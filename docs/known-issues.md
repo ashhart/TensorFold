@@ -37,7 +37,12 @@ release fixes it, and the release notes say which one.
   since 1.0.10's faster products. `FZ_M3_LANES=1` keeps the earlier kernels and their tokens.
 - @Bizuayeu's regression run on shipped 1.1.0 loaded the whole GLM-5.3-Flash NVFP4 checkpoint on two GB10s at TP=2 in 302.1 s, kept one token hash per prompt across three runs and found a passphrase in 199,307 tokens; scored prompts and more than two ranks were not covered ([#1040](https://github.com/ashhart/TensorFold/issues/1040)).
 - DeepSeek-V4.1 CUDA pieces land in this release, but no release binary serves DeepSeek checkpoints until its whole-model gate ([#827](https://github.com/ashhart/TensorFold/pull/827)) passes.
-
+- Qwen3.8-27B in speed-up mode, two Macs over Thunderbolt: a pair serves one greedy stream, drafts nothing, keeps no
+  prompt cache and does not learn, because rank 1 has no drafter checkpoint and each Mac holds only its own halves of a
+  slot's state. `--drafter`, `--prompt-cache-gib`, `--learn`, `--vision` and `--parallel` above 1 are refused, and a
+  request that samples or carries a grammar is refused by name at the head of prefill. Each output projection splits by
+  output rows: each rank reads the whole input K and reduces its rows as one Mac does, and a `pair_gather` joins the two
+  bf16 halves with no arithmetic between them: pair logits are byte-identical to one Mac's on the recorded fixtures.
 
 ## HIP builds
 
