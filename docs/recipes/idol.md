@@ -156,9 +156,9 @@ give the same weights. The loader takes either: it rounds an fp32 file to bf16 a
 tensors, `quant_conv` and the two batch-norm statistics, and refuses any other geometry.
 
 The SDK then runs the whole encoder in bf16. This port computes in fp32 on those bf16 weights: 3x3 convolutions by
-Winograd F(2x2, 3x3) with `G g G^T` made in float64 and rounded once, the stride-2 downsamples and 1x1s as implicit GEMMs,
-GroupNorm statistics in two passes (the mean, then the squared deviations), fp32 attention, `precise::exp`. None of it
-uses the tensor units, whose fp32 GEMM is about fp16-accurate (above).
+Winograd F(2x2, 3x3) with `G g G^T` made in float64 and rounded once, the stride-2 downsamples and 1x1s as implicit
+GEMMs, GroupNorm statistics in two passes (the mean, then the squared deviations), fp32 attention, `precise::exp`. None
+of it uses the tensor units, whose fp32 GEMM truncates its inputs to 10 mantissa bits (above).
 
 ### Gates
 
