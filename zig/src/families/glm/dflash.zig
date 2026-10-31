@@ -27,7 +27,7 @@ pub const CH: usize = 16; // key chunks of the chunked attention (df_attn_part)
 pub const CW: usize = 2 * TOPK; // a row's gathered ints: 16 ids, then 16 values' bits
 pub const MAX_S: usize = 16; // streams one block pass drafts for
 pub const MAX_M: usize = MAX_S * BLOCK; // block rows at most
-pub const MAX_CTX: usize = 2048; // context rows one ingest takes (a prompt chunk's)
+pub const MAX_CTX: usize = @import("cuda_state.zig").prefill_rows; // context rows one ingest takes (a prompt chunk's)
 pub const STEP_ROWS: usize = 32; // a verify's tap rows (the shared windows' rows at most)
 pub const TAP_ROW: usize = taps_mod.layers.len * D * 2; // bytes of one row's taps
 
