@@ -582,3 +582,11 @@ test "zero grant: Gemma CUDA assistant and DFlash preserve tokens through a long
     b.m = &m;
     try lanes.shared_draft_check.check(b.facts(), true);
 }
+
+test "shared head costs: Gemma CUDA assistant and DFlash retain costed copy grants" {
+    var m: fwd.Model = undefined;
+    m.slots = 16;
+    var b: Gemma = undefined;
+    b.m = &m;
+    try @import("cuda_head_cost_test.zig").check(b.facts());
+}

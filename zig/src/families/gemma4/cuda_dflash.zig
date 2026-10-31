@@ -271,7 +271,7 @@ pub const Drafter = struct {
     /// Chains of up to 15, no plain guard: a block costs the same at any depth (Metal's facts), the windows timed.
     fn factsFn(ptr: *anyopaque) dr.Facts {
         const x = cast(ptr);
-        return .{ .depth = block_rows - 1, .step_ms = x.step_ms, .prior = &prior, .plain_guard = false, .batched = true, .stream_bytes = x.rowBytes() * x.m.context, .window_costs = &x.costs };
+        return .{ .limit_shared_drafts = true, .depth = block_rows - 1, .step_ms = x.step_ms, .prior = &prior, .plain_guard = false, .batched = true, .stream_bytes = x.rowBytes() * x.m.context, .window_costs = &x.costs };
     }
 
     /// A context position's bytes over every layer's keys and values.

@@ -56,8 +56,14 @@ fn replay(model: lanes.Model, shared: bool, stale: bool) !Result {
     for (streams[0..n], current[0..n], who[0..n], heads[0..n], 0..) |*s, *p, *w, *h, i| {
         s.* = try lanes.Stream.init(a, .{ .id = "code", .prompt = &.{ 1, 2, 3 }, .max_new = 128 });
         made += 1;
-        @memset(try e.rule.rates(win.who(s)), if (i == 0) @as(f64, 0.99) else 0.01);
-        if (stale and i == 0) try s.draft_chances.appendNTimes(a, 0.1, cfg.most_drafts);
+        @memset(try e.rule.rates(win.who(s)), if (i == 0) (if (stale) @as(f64, 0.983) else 0.99) else 0.01);
+        if (stale and i == 0) {
+            var chance: f64 = 1;
+            for (0..cfg.most_drafts) |_| {
+                chance *= 0.98;
+                try s.draft_chances.append(a, chance);
+            }
+        }
         if (i == 1) s.proposer = .{ .ptr = &got.calls, .vtable = &.{ .propose = Copy.propose, .last_match = Copy.match, .priced = true } };
         p.* = .{ .stream = s, .position = 0, .kind = .none };
         w.* = win.who(s);
@@ -84,7 +90,7 @@ pub fn check(model: lanes.Model) !void {
         const next = try replay(m, true, stale);
         try t.expect(old.calls <= 1);
         try t.expectEqual(@as(usize, 1), next.calls);
-        const hot: usize = if (ms == 0) @min(8, m.drafts) else @intFromBool(!m.plain_guard);
+        const hot: usize = if (ms == 0) @min(7, m.drafts) else @intFromBool(!m.plain_guard);
         try t.expectEqual(hot, old.grants[0]);
         try t.expectEqual(8 - hot, old.grants[1]);
         try t.expectEqualSlices(usize, &old.grants, &next.grants);
