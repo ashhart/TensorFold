@@ -2,6 +2,8 @@
 #include <metal_stdlib>
 using namespace metal;
 
+#define TF_UNROLL_4 _Pragma("clang loop unroll(full)")
+
 constant constexpr uint DH = LL_DH; // the head dim (128), defined by the loader
 
 struct ll_args { uint rows, width, heads; float eps; };
@@ -23,6 +25,27 @@ inline void ll_norm_row(const device bfloat* x, const device bfloat* w, constant
   for (uint s = 0; s < n / 32; ++s) total += part[s];
   const float inv = precise::rsqrt(total / float(a.width) + a.eps);
   for (uint i = t; i < a.width; i += n) out[i] = bfloat(float(w[i]) * float(bfloat(float(x[i]) * inv)));
+}
+
+// Up to LL_NP of a thread's row elements (t, t + n, ...) held in registers, so no load waits on a store.
+constant constexpr uint LL_NP = 32;
+
+// ll_norm_row on a row held in v (its fp32 sum of squares in `sum`), the same sums in the same order.
+inline void ll_norm_held(thread const bfloat* v, const device bfloat* w, constant ll_args& a, device bfloat* out,
+    float sum, uint t, uint n, threadgroup float* part) {
+  sum = simd_sum(sum);
+  if (t % 32 == 0) part[t / 32] = sum;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  float total = 0.0f;
+  for (uint s = 0; s < n / 32; ++s) total += part[s];
+  const float inv = precise::rsqrt(total / float(a.width) + a.eps);
+  float wv[LL_NP];
+  TF_UNROLL_4
+  for (uint p = 0; p < LL_NP; ++p) if (t + p * n < a.width) wv[p] = float(w[t + p * n]);
+  TF_UNROLL_4
+  for (uint p = 0; p < LL_NP; ++p) {
+    if (t + p * n < a.width) out[t + p * n] = bfloat(wv[p] * float(bfloat(float(v[p]) * inv)));
+  }
 }
 
 // The residual's rows normed by w into out.
@@ -54,9 +77,27 @@ inline void ll_norm_row(const device bfloat* x, const device bfloat* w, constant
     uint n [[threads_per_threadgroup]]) {
   threadgroup float part[32];
   device bfloat* x = R + (size_t)row * a.width;
+  const device bfloat* y = X + (size_t)row * a.width;
   float sum = 0.0f;
+  if (a.width <= n * LL_NP) {
+    float xv[LL_NP], yv[LL_NP];
+    bfloat v[LL_NP];
+    TF_UNROLL_4
+    for (uint p = 0; p < LL_NP; ++p) {
+      if (t + p * n < a.width) xv[p] = float(x[t + p * n]), yv[p] = float(y[t + p * n]);
+    }
+    TF_UNROLL_4
+    for (uint p = 0; p < LL_NP; ++p) {
+      if (t + p * n < a.width) {
+        v[p] = bfloat(xv[p] + yv[p]);
+        x[t + p * n] = v[p];
+        sum = fma(float(v[p]), float(v[p]), sum);
+      }
+    }
+    return ll_norm_held(v, w, a, out + (size_t)row * a.width, sum, t, n, part);
+  }
   for (uint i = t; i < a.width; i += n) {
-    const bfloat v = bfloat(float(x[i]) + float(X[(size_t)row * a.width + i]));
+    const bfloat v = bfloat(float(x[i]) + float(y[i]));
     x[i] = v;
     const float f = float(v);
     sum = fma(f, f, sum);
@@ -105,8 +146,6 @@ struct ll_prep_args { uint rows, heads, kv_heads, pos, stride; };
   const float silu = float(bfloat(g / (1.0f + precise::exp(-g))));
   A[(size_t)p.y * a.width + p.x] = bfloat(silu * u);
 }
-
-#define TF_UNROLL_4 _Pragma("clang loop unroll(full)")
 
 struct ll_vec_args { uint rows, pos, heads, groups, blocks, chunk, first; float scale; };
 
@@ -280,15 +319,16 @@ inline float ll_q4_zero(const device uint* Z, uint j, uint g, uint groups) {
   return float((Z[(size_t)(j / 8) * groups + g] >> (4 * (j % 8))) & 15u);
 }
 
+// An int4 projection of up to three tensors side by side (q, k, v or gate, up): rows [0, n0), then n1, then n2.
+struct ll_q4_args { uint rows, n0, n1, n2, k, ldy; };
+
 // Y[r, j] = bf16(sum_i X[r, i] * W[j, i]) over the int4 W in fp32: a simdgroup a row j, a lane a group of 32 at a time.
 template <uint ROWS>
 inline void ll_q4_matvec_t(const device bfloat* X, const device uint* Q, const device bfloat* S, const device uint* Z,
-    constant ll_mv_args& a, device bfloat* Y, uint3 tg, uint sg, uint lane) {
-  constexpr uint SG = 8, G = 32;
-  const uint j = tg.x * SG + sg;
-  if (j >= a.n) return;
-  const uint groups = a.k / G;
-  const device packed_uint4* w = (const device packed_uint4*)(Q + (size_t)j * (a.k / 8));
+    uint j, uint jy, uint k, uint rows, uint ldy, device bfloat* Y, uint lane) {
+  constexpr uint G = 32;
+  const uint groups = k / G;
+  const device packed_uint4* w = (const device packed_uint4*)(Q + (size_t)j * (k / 8));
   const device bfloat* s = S + (size_t)j * groups;
   float acc[ROWS];
   TF_UNROLL_4
@@ -304,7 +344,7 @@ inline void ll_q4_matvec_t(const device bfloat* X, const device uint* Q, const d
     }
     TF_UNROLL_4
     for (uint r = 0; r < ROWS; ++r) {
-      const device bfloat4* x = (const device bfloat4*)(X + (size_t)r * a.k + g * G);
+      const device bfloat4* x = (const device bfloat4*)(X + (size_t)r * k + g * G);
       float t = 0.0f;
       TF_UNROLL_4
       for (uint c = 0; c < 8; ++c) t += dot(wv[c], float4(x[c]));
@@ -314,16 +354,21 @@ inline void ll_q4_matvec_t(const device bfloat* X, const device uint* Q, const d
   TF_UNROLL_4
   for (uint r = 0; r < ROWS; ++r) {
     const float sum = simd_sum(acc[r]);
-    if (lane == 0 && r < a.rows) Y[(size_t)r * a.ldy + j] = bfloat(sum);
+    if (lane == 0 && r < rows) Y[(size_t)r * ldy + jy] = bfloat(sum);
   }
 }
 
 #define LL_Q4_MATVEC(ROWS)                                                                                         \
-  [[kernel]] void ll_q4_matvec_##ROWS(const device bfloat* X [[buffer(0)]], const device uint* Q [[buffer(1)]],     \
-      const device bfloat* S [[buffer(2)]], const device uint* Z [[buffer(3)]], constant ll_mv_args& a [[buffer(4)]], \
-      device bfloat* Y [[buffer(5)]], uint3 tg [[threadgroup_position_in_grid]],                                    \
+  [[kernel]] void ll_q4_matvec_##ROWS(const device bfloat* X [[buffer(0)]], const device uint* Q0 [[buffer(1)]],    \
+      const device bfloat* S0 [[buffer(2)]], const device uint* Z0 [[buffer(3)]], const device uint* Q1 [[buffer(4)]], \
+      const device bfloat* S1 [[buffer(5)]], const device uint* Z1 [[buffer(6)]], const device uint* Q2 [[buffer(7)]], \
+      const device bfloat* S2 [[buffer(8)]], const device uint* Z2 [[buffer(9)]], constant ll_q4_args& a [[buffer(10)]], \
+      device bfloat* Y [[buffer(11)]], uint3 tg [[threadgroup_position_in_grid]],                                   \
       uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {                      \
-    ll_q4_matvec_t<ROWS>(X, Q, S, Z, a, Y, tg, sg, lane);                                                          \
+    const uint j = tg.x * 8 + sg;                                                                                   \
+    if (j < a.n0) return ll_q4_matvec_t<ROWS>(X, Q0, S0, Z0, j, j, a.k, a.rows, a.ldy, Y, lane);                    \
+    if (j < a.n0 + a.n1) return ll_q4_matvec_t<ROWS>(X, Q1, S1, Z1, j - a.n0, j, a.k, a.rows, a.ldy, Y, lane);     \
+    if (j < a.n0 + a.n1 + a.n2) ll_q4_matvec_t<ROWS>(X, Q2, S2, Z2, j - a.n0 - a.n1, j, a.k, a.rows, a.ldy, Y, lane); \
   }
 LL_Q4_MATVEC(1)
 LL_Q4_MATVEC(2)
