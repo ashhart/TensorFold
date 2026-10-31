@@ -170,7 +170,8 @@ With the default 0 no cap applies: short prompts run as one burst beside decoder
 For source builds with `zig build native` (including `--prefix` installs): Structured output and required tool calls need the release archive's `lib/` or `zig build grammar -Dxgrammar=DIR`; prepare DIR with `git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar` (use the native build's same `--prefix` for grammar).
 
 Choose `linux-aarch64` for an arm64 host or `linux-x86_64` for an x86_64 host.
-The archives require glibc 2.28 or newer and an NVIDIA driver providing `libcuda.so.1`.
+The archives require glibc 2.28 or newer and NVIDIA driver R580 or newer (CUDA 13.0), providing `libcuda.so.1`.
+Their kernels are built with CUDA 13, so TensorFold refuses an older driver at startup; `nvidia-smi` shows the installed one.
 CUDA serves Nemotron 3.5 Lightning, qualified on GB10 (`linux-aarch64`, greedy and sampled) and on Ampere cards with
 compute capability 8.6 (`linux-x86_64`, greedy: the RTX 30 series, RTX A6000, A10 and A40), and checked on an RTX PRO 6000 Blackwell (compute
 capability 12.0, `linux-x86_64`).

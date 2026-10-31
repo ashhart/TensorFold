@@ -57,7 +57,8 @@ tensorfold serve mlx-community/Qwen3.5-2B-MLX-4bit --name local-model --context 
 ### Linux with an NVIDIA GPU
 
 Use the release archive for your CPU: `linux-aarch64` on a GB10, `linux-x86_64` on an x86_64 host.
-It needs glibc 2.28 or newer and an NVIDIA driver providing `libcuda.so.1`. Keep the archive's directories together.
+It needs glibc 2.28 or newer and NVIDIA driver R580 or newer (CUDA 13.0), providing `libcuda.so.1`. Keep the archive's directories together.
+Its kernels are built with CUDA 13, so TensorFold refuses an older driver at startup; `nvidia-smi` shows the installed one.
 See the [CUDA runbook](RUNBOOK.md#linux-and-cuda) for runtime libraries and supported GPUs.
 
 ```sh
