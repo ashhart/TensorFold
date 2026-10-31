@@ -203,30 +203,47 @@ pub const Metal = struct {
         if (stream.images.len > 0) return error.LlamaHasNoImageTower;
         const capacity = ids.len + stream.max_new + 1;
         const need = st.cacheBytes(&self.model.config, capacity);
-        // the drafter's slot for this stream grows to the same capacity now, in the same ledger: kept slots give way
-        var extra: u64 = if (self.slots) |d| d.growth(d.ctx, stream, capacity) else 0;
-        if (!self.ledger.fits(need + extra)) if (self.slots) |d| {
-            d.shed(d.ctx, need + extra);
-            extra = d.growth(d.ctx, stream, capacity);
+        // the stream's peak (caches, drafter growth) fits before anything is made; kept states trim first
+        const Admit = struct {
+            m: *Metal,
+            stream: *lanes.Stream,
+            capacity: usize,
+            ids: []const u32,
+            pub fn growth(a: *const @This()) u64 {
+                return if (a.m.slots) |d| d.growth(d.ctx, a.stream, a.capacity) else 0;
+            }
+            pub fn shed(a: *const @This(), bytes: u64) void {
+                if (a.m.slots) |d| d.shed(d.ctx, bytes);
+            }
+            pub fn restoreBytes(a: *const @This()) u64 {
+                const saved = a.stream.reuse.saved orelse return 0;
+                const snap: *const snapshot.Snap = @ptrCast(@alignCast(saved));
+                return if (snap.freed) 0 else snap.bytes;
+            }
+            pub fn dropRestore(a: *const @This()) void { // a state the stream cannot hold beside its peak: freed now, no restore
+                const snap: *snapshot.Snap = @ptrCast(@alignCast(a.stream.reuse.saved.?));
+                snap.free();
+            }
+            pub fn trim(a: *const @This(), bytes: u64) void {
+                if (a.m.room) |r| r.fit(r.ctx, bytes, a.stream.reuse.saved, a.ids);
+            }
+            pub fn prepare(a: *const @This()) !void {
+                if (a.m.slots) |d| try d.prepare(d.ctx, a.stream, a.capacity);
+            }
         };
-        if (!self.ledger.fits(need + extra)) {
-            std.log.warn("llama: a {d}-token stream needs {d:.1} GiB of caches; {d:.1} of {d:.1} GiB are held", .{ capacity, gib(need + extra), gib(self.ledger.held), gib(self.ledger.limit) });
-            return error.LaneMemory; // the lane host queues the stream until another finishes, or fails it alone
-        }
-        self.ledger.take(need);
+        const admit: Admit = .{ .m = self, .stream = stream, .capacity = capacity, .ids = ids };
+        budget.admitStream(&self.ledger, need, &admit) catch |err| {
+            if (err == error.LaneMemory) std.log.warn("llama: a {d}-token stream needs {d:.1} GiB of caches; {d:.1} of {d:.1} GiB are held", .{ capacity, gib(need + admit.growth()), gib(self.ledger.held), gib(self.ledger.limit) });
+            return err; // LaneMemory: the lane host queues the stream until another finishes, or fails it alone
+        };
         errdefer self.ledger.give(need);
-        if (self.slots) |d| try d.prepare(d.ctx, stream, capacity);
-        if (stream.reuse.saved) |saved| { // a state the stream cannot hold beside its caches: freed now, no restore
-            const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
-            if (!self.ledger.fits(snap.bytes)) snap.free();
-        }
-        // kept states give way first
-        if (self.room) |r| r.fit(r.ctx, self.ledger.left(), stream.reuse.saved, ids);
         const cache = try self.createCache(capacity);
         errdefer self.gpa.destroy(cache);
         errdefer cache.deinit();
         try self.caches.put(self.gpa, stream, cache); // a mark's save finds it there
         errdefer _ = self.caches.remove(stream);
+        // the kept states may use what the stream's growth copy and the slot's old cache gave back
+        if (self.room) |r| r.fit(r.ctx, self.ledger.left(), stream.reuse.saved, ids);
         stream.cached = 0;
         if (stream.reuse.saved) |saved| { // a kept state of this prompt's prefix: the pass starts there
             const snap: *const snapshot.Snap = @ptrCast(@alignCast(saved));
