@@ -129,6 +129,12 @@ pub const Reclaim = struct {
     call: *const fn (ctx: *anyopaque, want: usize) bool,
 };
 
+/// A tier's notice that a page lost its last holder (its frame, if any, is free again).
+pub const Freed = struct {
+    ctx: *anyopaque,
+    call: *const fn (ctx: *anyopaque, id: u32) void,
+};
+
 /// What an idle pool must show: nothing promised, every page free or the store's alone.
 pub const Census = struct { total: usize, free: usize, promised: usize, kept: usize, leased: usize };
 
@@ -145,6 +151,7 @@ pub const Pool = struct {
     nleased: usize = 0, // pages mapped by at least one lease, counted once
     page_bytes: u64,
     reclaim: ?Reclaim = null,
+    freed: ?Freed = null,
 
     pub fn init(gpa: Allocator, count: usize, page_bytes: u64) !Pool {
         const refs = try gpa.alloc(u32, count);
@@ -205,6 +212,7 @@ pub const Pool = struct {
         if (p.leased[id] == 0 or p.refs[id] < p.leased[id]) std.debug.panic("kv pool: page {d} released with no holder", .{id});
         p.ownership(id, p.refs[id] - 1, p.leased[id] - 1);
         if (p.refs[id] > 0) return;
+        if (p.freed) |f| f.call(f.ctx, id);
         p.free[p.nfree] = id;
         p.nfree += 1;
     }
@@ -235,6 +243,7 @@ pub const Pool = struct {
         if (p.refs[id] <= p.leased[id]) return error.NotHeld; // no holder past the leases' (callers drop theirs first)
         p.ownership(id, p.refs[id] - 1, p.leased[id]);
         if (p.refs[id] > 0) return;
+        if (p.freed) |f| f.call(f.ctx, id);
         p.free[p.nfree] = id;
         p.nfree += 1;
     }
@@ -369,6 +378,7 @@ pub const Pool = struct {
         for (start..start + k) |id| {
             if (p.refs[id] != 1 or p.leased[id] != 1) std.debug.panic("kv pool: run page {d} released while not a run's", .{id});
             p.ownership(id, 0, 0);
+            if (p.freed) |f| f.call(f.ctx, @intCast(id));
             p.free[p.nfree] = @intCast(id);
             p.nfree += 1;
         }
@@ -383,8 +393,13 @@ pub const Pool = struct {
     }
 };
 
+/// The host tier: logical pages in host RAM and device frames that cache them (kv_tier.zig).
+pub const tier = @import("kv_tier.zig");
+pub const Tier = tier.Tier;
+
 test {
     _ = @import("kv_pool_test.zig");
+    _ = @import("kv_tier.zig");
     _ = @import("kv_pool_counts_test.zig");
     _ = @import("kv_pool_walk_test.zig");
 }
