@@ -168,8 +168,6 @@ for a row whose tile or block reads a non-finite value at a key masked for that 
 `gemma_decode_attention` for a decode row whose 32-key step reads one: P = 0 times Inf inside the P x V mma, where
 float64 leaves the masked key out. These were seen on the M5, where their cases run. Each kernel has an entry of its own
 that plants such a value and carries the finding, so its other entries keep a clean gate 1.
-Idol's `id_qk` gives a head holding a NaN +-inf in its other outputs where torch's `F.normalize` gives NaN: its
-norm is `max(precise::sqrt(ss), 1e-12f)`, and Metal's `max` drops the NaN that `clamp_min` keeps.
 
 HIP’s MLX stream tile keeps its finite dot2 sums unchanged. A non-finite result with an actual non-finite
 operand is recomputed by full quantization groups using the factored float64 formula. The plain tile is
