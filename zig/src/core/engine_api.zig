@@ -305,10 +305,12 @@ pub const Open = struct {
     /// --parallel named a number: an engine whose memory fits fewer streams refuses instead of serving fewer.
     lanes_fixed: bool = false,
     drafts: bool = true,
-    /// --drafter: a draft model's directory (Qwen3.8-27B's DFlash2; null: none), and --drafter-bits: 4, or 0 for bf16.
+    /// --drafter: a draft model's directory (null: none); --drafter-bits: 4, 0 for bf16, or 8 (LFM2 only).
     drafter: ?[]const u8 = null,
     drafter_name: ?[]const u8 = null, // the supplied --drafter name, before resolving its directory
     drafter_bits: u8 = 4,
+    /// Whether --drafter-bits was given: LFM2's drafter runs bf16 as released unless it is asked for 8-bit codes.
+    drafter_bits_given: bool = false,
     /// --record: each stream's committed rows and tapped features written under this folder, for drafter training.
     record: ?[]const u8 = null,
     speed_up: ?[]const u8 = null,

@@ -294,6 +294,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .{ .name = "tf-lfm2-forward", .path = "zig/tests/lfm2_forward.zig", .about = "LFM2-MoE native teacher-forced logits" },
         .{ .name = "tf-lfm2-bench", .path = "zig/tests/lfm2_bench.zig", .about = "LFM2-MoE prompt-chunk and one-row decode timing" },
         .{ .name = "tf-lfm2-exact", .path = "zig/tests/lfm2_exact.zig", .about = "LFM2-MoE prompt chunks, windows and committed-state exactness" },
+        .{ .name = "tf-lfm2-dspark", .path = "zig/tests/lfm2_dspark.zig", .about = "LFM2's DSpark drafter on the GPU against an fp32 host reference of the released drafter" },
         .{ .name = "tf-lfm2-fp64", .path = "zig/tests/lfm2_fp64.zig", .about = "LFM2 projection classes and attention on the tensor units, the tiles and the twin, each against float64" },
         .{ .name = "tensorfold", .path = "zig/src/main.zig", .about = "The native engine's command line" },
         .{ .name = "tf-nemotron-fixtures", .path = "zig/tests/nemotron_fixtures.zig", .about = "Nemotron kernels against the Python engine's captured ops" },
@@ -465,7 +466,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     const lfm2_tests = b.addRunArtifact(b.addTest(.{ .root_module = engine, .filters = &.{"lfm2_moe"} }));
     b.step("test-lfm2", "The LFM2-MoE family's tests: config, draws, state and its shared rounds on this Mac's GPU").dependOn(&lfm2_tests.step);
     const lfm2_dspark = b.addRunArtifact(b.addTest(.{ .root_module = engine, .filters = &.{"lfm2 dspark:"} }));
-    b.step("test-lfm2-dspark", "LFM2's taps for a drafter: the tap kernel on this Mac's GPU").dependOn(&lfm2_dspark.step);
+    b.step("test-lfm2-dspark", "LFM2's DSpark drafter and its taps: config, quantizer and kernels on this Mac's GPU").dependOn(&lfm2_dspark.step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = lanes })).step);
     // the fake fabric maps its windows with mmap: the Macs' RDMA, not Windows
     if (target.result.os.tag != .windows) test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = fabric })).step);
