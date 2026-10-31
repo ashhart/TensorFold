@@ -680,7 +680,7 @@ class Bench:
         if mode == "tools":
             tools_exe = tooleval.find()
             if tools_exe is None:
-                raise ValueError("tool-eval-bench is not installed here: uv tool install tool-eval-bench")
+                raise ValueError(f"tool-eval-bench is not installed here: uv tool install tool-eval-bench=={tooleval.VERSION}")
             suites = None
         qdata: dict = {}
         if mode == "quality":

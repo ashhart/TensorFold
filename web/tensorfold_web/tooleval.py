@@ -3,7 +3,7 @@
 It plays scripted conversations with mock tools against an OpenAI-compatible endpoint and scores each scenario as
 pass, partial or fail; it already knows TensorFold. TensorFold Web finds it, runs it on the served engine (or another),
 follows its progress events, and keeps its scenarios as ordinary Bench results: a pass counts as right, so two runs
-compare scenario by scenario with McNemar's test like the quality suite. Install: `uv tool install tool-eval-bench`,
+compare scenario by scenario with McNemar's test like the quality suite. Install: `uv tool install tool-eval-bench==2.8.0`,
 or the Bench's Install button, which runs the same with the version TensorFold Web's reading was checked with.
 """
 
