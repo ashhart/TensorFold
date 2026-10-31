@@ -1,10 +1,12 @@
-//! Flash Next's newer CUDA kernels under the contract, registered as one group: pending rows and their rollback.
+//! Flash Next's newer CUDA kernels under the contract, registered as one group.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
 const tc = @import("check.zig");
 const late_k = @import("contract_flashnext_late.zig");
 const roll_k = @import("contract_flashnext_roll.zig");
+const wbnorm_k = @import("contract_flashnext_wbnorm.zig");
+const flash = @import("flashnext");
 
 const g = core.contract.gates;
 
@@ -16,6 +18,8 @@ pub const Set = struct {
     late: [2]late_k.Late,
     roll_fns: roll_k.Fns,
     roll: roll_k.Roll,
+    glue: flash.Glue,
+    wbnorm: [3]wbnorm_k.WbNorm,
 
     pub fn init(gpu: tc.Gpu, s: cuda.Stream, a: std.mem.Allocator, kernels: *std.ArrayList(g.Kernel)) !*Set {
         const self = try a.create(Set);
@@ -30,12 +34,18 @@ pub const Set = struct {
         self.roll_fns = .{ .shift = try b.function("fn_shift_window"), .roll = try b.function("fn_late_roll") };
         self.roll = .{ .rig = .{ .gpu = gpu, .s = s }, .f = &self.roll_fns };
         try kernels.append(a, self.roll.kernel());
+        self.glue = try flash.Glue.load(gpu.d);
+        errdefer self.glue.deinit();
+        for (std.enums.values(wbnorm_k.Mode), &self.wbnorm) |mode, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .mode = mode, .glue = &self.glue };
+        for (&self.wbnorm) |*x| try kernels.append(a, x.kernel());
         return self;
     }
 
     pub fn deinit(self: *Set) void {
         for (&self.late) |*x| x.deinit();
         self.roll.deinit();
+        for (&self.wbnorm) |*x| x.deinit();
+        self.glue.deinit();
         self.batch.unload();
         self.a.destroy(self);
     }

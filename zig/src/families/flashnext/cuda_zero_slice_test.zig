@@ -91,6 +91,7 @@ const Rig = struct {
         r.k.native_lane.f32_fns = @splat(@splat(f(&r.d, qmmf_id)));
         r.k.native_lane.reduce = @splat(f(&r.d, reduce_id));
         r.k.native_lane.clusters = false;
+        r.k.prompt = null; // no BF16 prompt tile: the lane's handles alone
         r.s = undefined;
         r.s.cap = cap;
         r.s.part = base;

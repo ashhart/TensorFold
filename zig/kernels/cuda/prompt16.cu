@@ -11,7 +11,7 @@ namespace tf_prompt16 {
 
 using namespace qmm_frag;
 
-enum Mode : int { FP4 = 0, FP8 = 1, MXFP8 = 2 };
+enum Mode : int { FP4 = 0, FP8 = 1, MXFP8 = 2, BF16 = 4 };
 
 constexpr int GS = 64;
 
@@ -41,7 +41,7 @@ struct Tile {
     static constexpr int ROW = GS * 2;
     static constexpr int CHUNKS = ROW / 16;
     static constexpr int X = BM * ROW;
-    static constexpr int W = MODE == FP4 ? BN * GS / 2 : BN * GS;
+    static constexpr int W = MODE == FP4 ? BN * GS / 2 : MODE == BF16 ? BN * GS * 2 : BN * GS;
     static constexpr int S = MODE == FP4 ? BN * 4 : MODE == MXFP8 ? BN * 2 : 0;
     static constexpr int STAGE = (X + W + S + 127) / 128 * 128;
     static constexpr int SMEM = STAGES * STAGE;
@@ -422,4 +422,132 @@ template __global__ void prompt_lean<FP4, 128, 256, 1, 8, 3, false>(
 template __global__ void prompt_lean<FP4, 128, 256, 1, 8, 3, true>(
     const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float,
     void* __restrict__, int, int, int, int, int, int);
+
+// BF16 prompt rows on qmmf's BF16 words with qmmf_kernel's sums (K slices from zero, added in order): the lane's bits.
+template <bool F32>
+__device__ __forceinline__ void prompt_bf16(const __nv_bfloat16* __restrict__ x, const unsigned char* __restrict__ w,
+                                            float scale, void* __restrict__ out, int M, int N, int K, int SK, int npad,
+                                            int ldx, int group) {
+    constexpr int BM = 128, BN = 128, WM = 2, WN = 4, STAGES = 3;
+    using T = Tile<BF16, BM, BN, WM, WN, STAGES>;
+    extern __shared__ __align__(128) unsigned char buf[];
+    const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+    const int wm = warp / WN, wn = warp % WN;
+    const int KG = K / GS, slice_groups = KG / SK;
+    const int2 at = tile_of(blockIdx.x, M, N, BM, BN, group);
+    const int m0 = at.x, n0 = at.y;
+
+    auto stage = [&](int s) { return buf + s * T::STAGE; };
+    auto load = [&](int s, int g) {
+        unsigned char* p = stage(s);
+        for (int c = tid; c < BM * T::CHUNKS; c += T::THREADS) {
+            const int r = c / T::CHUNKS, ch = c % T::CHUNKS;
+            cp16z(p + r * T::ROW + swz<T::CHUNKS>(r, ch) * 16,
+                  x + static_cast<size_t>(min(m0 + r, M - 1)) * ldx + g * GS + ch * 8, m0 + r < M);
+        }
+        unsigned char* pw = p + T::X;
+        constexpr int TILE_BYTES = 64 * GS * 2;
+        for (int c = tid; c < T::W / 16; c += T::THREADS) {
+            const int t = c / (TILE_BYTES / 16), off = c % (TILE_BYTES / 16);
+            if (n0 + t * 64 < npad)
+                cp16(pw + c * 16, w + (static_cast<size_t>(n0 / 64 + t) * KG + g) * TILE_BYTES + off * 16);
+        }
+    };
+
+    float acc[T::MT][T::NT][4];
+    float tot[T::MT][T::NT][4];
+#pragma unroll
+    for (int i = 0; i < T::MT; ++i)
+#pragma unroll
+        for (int j = 0; j < T::NT; ++j)
+#pragma unroll
+            for (int e = 0; e < 4; ++e) acc[i][j][e] = tot[i][j][e] = 0.0f;
+#pragma unroll
+    for (int s = 0; s < STAGES - 1; ++s) {
+        if (s < KG) load(s, s);
+        commit();
+    }
+    for (int g = 0; g < KG; ++g) {
+        if (SK > 1 && g > 0 && g % slice_groups == 0) {
+#pragma unroll
+            for (int i = 0; i < T::MT; ++i)
+#pragma unroll
+                for (int j = 0; j < T::NT; ++j)
+#pragma unroll
+                    for (int e = 0; e < 4; ++e) {
+                        tot[i][j][e] = g == slice_groups ? acc[i][j][e] : tot[i][j][e] + acc[i][j][e];
+                        acc[i][j][e] = 0.0f;
+                    }
+        }
+        wait<STAGES - 2>();
+        __syncthreads();
+        if (g + STAGES - 1 < KG) load((g + STAGES - 1) % STAGES, g + STAGES - 1);
+        commit();
+        const unsigned char* p = stage(g % STAGES);
+        const uint2* pw = reinterpret_cast<const uint2*>(p + T::X);
+#pragma unroll
+        for (int kt = 0; kt < GS / 16; ++kt) {
+            uint32_t a[T::MT][4];
+#pragma unroll
+            for (int i = 0; i < T::MT; ++i) {
+                const int r = wm * (BM / WM) + i * 16 + (lane & 7) + ((lane >> 3) & 1) * 8;
+                const int ch = kt * 2 + (lane >> 4);
+                ldmatrix4(a[i], p + r * T::ROW + swz<T::CHUNKS>(r, ch) * 16);
+            }
+#pragma unroll
+            for (int j = 0; j < T::NT; ++j) {
+                // n8 tile jj of the block's two 64-column tiles, laid out back to back: (jj, kt, lane) as qmmf reads
+                const uint2 v = pw[((wn * T::NT + j) * 4 + kt) * 32 + lane];
+#pragma unroll
+                for (int i = 0; i < T::MT; ++i) mma(acc[i][j], a[i], v.x, v.y);
+            }
+        }
+    }
+    wait<0>();
+    if (SK > 1) {
+#pragma unroll
+        for (int i = 0; i < T::MT; ++i)
+#pragma unroll
+            for (int j = 0; j < T::NT; ++j)
+#pragma unroll
+                for (int e = 0; e < 4; ++e) acc[i][j][e] = tot[i][j][e] + acc[i][j][e];
+    }
+#pragma unroll
+    for (int i = 0; i < T::MT; ++i)
+#pragma unroll
+        for (int j = 0; j < T::NT; ++j) {
+            const int col = n0 + wn * (BN / WN) + j * 8 + (lane & 3) * 2;
+#pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                const int row = m0 + wm * (BM / WM) + i * 16 + (lane >> 2) + h * 8;
+                if (row >= M) continue;
+                const float v0 = acc[i][j][2 * h] * scale, v1 = acc[i][j][2 * h + 1] * scale;
+                if (F32) {
+                    float* dst = reinterpret_cast<float*>(out) + static_cast<size_t>(row) * N + col;
+                    if (col < N) dst[0] = v0;
+                    if (col + 1 < N) dst[1] = v1;
+                } else {
+                    __nv_bfloat16* dst = reinterpret_cast<__nv_bfloat16*>(out) + static_cast<size_t>(row) * N + col;
+                    if (col + 1 < N && (N & 1) == 0)
+                        *reinterpret_cast<__nv_bfloat162*>(dst) = __floats2bfloat162_rn(v0, v1);
+                    else {
+                        if (col < N) dst[0] = __float2bfloat16_rn(v0);
+                        if (col + 1 < N) dst[1] = __float2bfloat16_rn(v1);
+                    }
+                }
+            }
+        }
+}
+
+extern "C" __global__ void __launch_bounds__(256) tf_prompt_bf16(const __nv_bfloat16* __restrict__ x, const unsigned char* __restrict__ w,
+                                                                 float scale, void* __restrict__ out, int M, int N, int K, int SK,
+                                                                 int npad, int ldx, int group) {
+    prompt_bf16<false>(x, w, scale, out, M, N, K, SK, npad, ldx, group);
+}
+
+extern "C" __global__ void __launch_bounds__(256) tf_prompt_bf16_f32(const __nv_bfloat16* __restrict__ x, const unsigned char* __restrict__ w,
+                                                                     float scale, void* __restrict__ out, int M, int N, int K, int SK,
+                                                                     int npad, int ldx, int group) {
+    prompt_bf16<true>(x, w, scale, out, M, N, K, SK, npad, ldx, group);
+}
 }
