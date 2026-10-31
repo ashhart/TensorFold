@@ -1,0 +1,80 @@
+{
+ "note": "An example hosts file for settings.py and bundle.sh: one file per host pair, kept outside the TensorFold tree (it names your hosts, their addresses and your paths). Every address here is a documentation address, every MAC a locally administered placeholder (02:...) and every GID the link-local address derived from that MAC: replace them all with the values read on your hosts. \"fields\" explains each field; settings.py ignores it and \"note\".",
+ "fields": {
+  "pair": "the pair's name: settings/<pair>/ in the bundle and the Copy directory's name",
+  "label_prefix": "put before every run's label (\"r-\" keeps a rehearsal's r-G1 .. apart from the gate's G1 ..); default none",
+  "mtu": "the RC path MTU both ends run at: 1024, 2048 or 4096, at most each port's active MTU; default 1024",
+  "kind": "the link kind both ends must report: cx5 (ConnectX, RoCE v2) or tb5 (Thunderbolt); default cx5",
+  "window_mib": "the window in MiB; on a Mac the window plus both ranks' staging fits the kext's 64 regions (at most 63 pieces of 4 MiB)",
+  "rounds": "the suite's rounds for G1 and G2; default 3",
+  "port": "the base UDP port of MCDMA's exchange: each run takes its own, port + 10 per run; default 7610",
+  "name": "the link name both ends give MCDMA; default gate1594",
+  "connect_timeout_s": "how long a run waits for the other end to connect, s; default 120 (G5's runs take 30)",
+  "hosts": "exactly two hosts by name, the Mac first (host a) and the Linux host second (host b)",
+  "os": "macos or linux: which run script and prep lines",
+  "script": "the run script in the bundle; default by os",
+  "library": "libmcdma-fabric on that host: an absolute path, or $BUNDLE/... for the one build_mcdma.sh puts next to the scripts",
+  "gid": "the GID index: 0 on a Mac (the MCDMA kext has only index 0), the RoCE v2 index on Linux (often 1: /sys/class/infiniband/<device>/ports/1/gid_attrs/types/)",
+  "via": "the meeting interface, a slash, then the OTHER host's address on the same layer-2 segment (MCDMA admits only that peer)",
+  "netdev": "the ConnectX port's network interface; on a Mac with \"ports\", it picks the cabled port",
+  "ports": "a Mac with two ConnectX ports: per netdev, its device (rdma_<netdev>), mac and gid_addr",
+  "device": "the RDMA device (ibv_devices on Linux, rdma_mcrdmaN on a Mac)",
+  "mac": "the ConnectX port's MAC, for the other host's static neighbour",
+  "gid_addr": "the address of the port's GID (the IPv6 link-local one), for the other host's static neighbour",
+  "expected_kext_uuid": "a Mac: kextstat's UUID for org.mcdma.cx5.native; the pre-flight WARNs on any other and compare.py fails the gate on that WARN",
+  "restore_rdma": "a Mac, required: MCDMA's tools/restore-rdma.py on that Mac, for the prep line",
+  "native_check": "a Mac, required: MCDMA's cx5-native-check on that Mac, for the prep line's GID check",
+  "ssh": "how host a reaches host b: an alias from ~/.ssh/config (such as \"linux-b\"); default the host's name",
+  "ssh_opts": "extra ssh and scp options; default none (put keys and users in ~/.ssh/config)",
+  "active_mtu": "host b's active MTU as ibv_devinfo reads it: at 4096 PLAN says N/A for G5a",
+  "free": "true only for a box a link drop may take down: only then is G4 planned",
+  "caution": "a line PLAN prints at its top for that host"
+ },
+ "pair": "mac-gb10",
+ "label_prefix": "",
+ "mtu": 1024,
+ "kind": "cx5",
+ "window_mib": 96,
+ "rounds": 3,
+ "port": 7610,
+ "name": "gate1594",
+ "hosts": {
+  "mac": {
+   "os": "macos",
+   "script": "./run_macos.sh",
+   "library": "$BUNDLE/mcdma/build/libmcdma-fabric.dylib",
+   "gid": 0,
+   "via": "en0/192.0.2.20",
+   "netdev": "mcrdma0",
+   "ports": {
+    "mcrdma0": {
+     "device": "rdma_mcrdma0",
+     "mac": "02:00:00:00:0a:01",
+     "gid_addr": "fe80::ff:fe00:a01"
+    },
+    "mcrdma1": {
+     "device": "rdma_mcrdma1",
+     "mac": "02:00:00:00:0a:02",
+     "gid_addr": "fe80::ff:fe00:a02"
+    }
+   },
+   "expected_kext_uuid": "00000000-0000-0000-0000-000000000000",
+   "restore_rdma": "/opt/mcdma/tools/restore-rdma.py",
+   "native_check": "/opt/mcdma/build/cx5-native-check"
+  },
+  "gb10": {
+   "os": "linux",
+   "script": "./run_linux.sh",
+   "library": "$BUNDLE/mcdma/build/libmcdma-fabric.so",
+   "device": "rocep1s0f1",
+   "gid": 1,
+   "via": "eth0/192.0.2.10",
+   "netdev": "enp1s0f1np1",
+   "mac": "02:00:00:00:0b:01",
+   "gid_addr": "fe80::ff:fe00:b01",
+   "ssh": "gb10",
+   "active_mtu": 1024,
+   "caution": "shared with other jobs: no G4 (it is not free), and run G1 and G2 while its ConnectX port is idle (its port also carries 198.51.100.21)"
+  }
+ }
+}
