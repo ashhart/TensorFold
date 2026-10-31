@@ -469,6 +469,7 @@ pub const fn_back = @import("cuda_fn_back.zig");
 pub const gradient_gate = @import("cuda_gradient_gate.zig");
 test {
     _ = gradient_gate;
+    _ = @import("rope_yarn_core_test.zig");
 }
 
 test "prompt tiles retain per-operation ownership" {

@@ -153,6 +153,20 @@ The checkpoint keeps its MTP layer in bf16 in its own shards. Without `mtp-4bit.
 quantizes that layer to MLX affine-4 at load, as Nemotron's ModelOpt drafter does; this changes only which rows a
 round proposes, never a reply, and the startup log says so. With the file present, the file is read instead.
 
+`--drafter` can also name a DFlash2 draft model: a directory whose `config.json` has `dflash_config` drafts with it,
+any other with the target's MTP layer. `incoai/Qwen3.6-35B-A3B-DFlash2` (revision `51ef7b69`, the SGLang DFlash
+recipe's draft) reads eight target layers and is quantized to affine-4 at load:
+
+```bash
+hf download incoai/Qwen3.6-35B-A3B-DFlash2 --revision 51ef7b6923ad6c14cb1bb41c37a9041446496ab6
+tensorfold serve nvidia/Qwen3.6-35B-A3B-NVFP4 --drafter incoai/Qwen3.6-35B-A3B-DFlash2
+```
+
+On the fleet benchmark's 4.2K-token prompt (`bench.py`, 512 tokens), one build with either drafter, it decodes 130.3
+tok/s at one stream against MTP's 98.6, and gives 131.3 / 161.4 / 198.0 tok/s aggregate at 2 / 4 / 8 users against
+124.7 / 170.6 / 208.4: it proposes more rows a round and keeps fewer of them, so it leads at one and two streams and
+MTP leads under load. Every drafted reply equals its `"draft": false` run with either drafter.
+
 The rules come from @gilby's Python port ([#345](https://github.com/ashhart/TensorFold/pull/345)): bf16 activations
 for the W4A16 layers, the shared expert last in the table, and the MTP layer drafting through the target's head.
 
@@ -177,6 +191,29 @@ standard-library source from the checkpoint's own tokenizer, one request each th
 | --- | ---: | ---: | ---: | ---: |
 | Time to first token | 0.38 s | 1.42 s | 6.59 s | 15.91 s |
 | Prompt rate | 5,441 tok/s | 5,757 tok/s | 4,975 tok/s | 4,120 tok/s |
+
+### A 1M-token window (YaRN)
+
+The checkpoint was trained on 262,144 positions. Static YaRN rope with factor 4 serves 1,048,576, as SGLang's Spark
+recipe does: either name the factor on the checkpoint as downloaded, or serve a copy whose `config.json` carries the
+YaRN block (`rope_type: yarn`, `factor: 4.0`, `original_max_position_embeddings: 262144`,
+`max_position_embeddings: 1048576`, the copy SGLang's `extend-qwen3.6-35b-a3b-nvfp4-context-1m` mod stages):
+
+```bash
+tensorfold serve nvidia/Qwen3.6-35B-A3B-NVFP4 --drafter nvidia/Qwen3.6-35B-A3B-NVFP4 --rope-yarn 4 --context 1048576
+```
+
+YaRN turns every position, so replies differ from plain rope at any length; without the flag or the block, every
+byte is as before. Both ways give the same reply bytes. A 1M window takes 22.2 GiB a stream, so a GB10 admits two;
+`--context 0` serves the whole window. The target's and the MTP layer's rope read the YaRN table; the DFlash2 drafter
+keeps its own rope over its 2,048-row window, and a scaled rope in a config TensorFold cannot honor (HIP, Metal, the
+DFlash2 drafters, another scaling type) is refused rather than read as plain rope.
+
+On one GB10 with `--parallel 2`: drafted replies equal their `"draft": false` runs (6 of 6), concurrent ones their
+solo runs, and a resumed second turn its fresh run. A passphrase 5% into a 300,000-token prompt comes back after
+173 s of prefill (1,740 tok/s). A prompt of 1,048,512 tokens with the passphrase prefills in 1,546 s (680 tok/s),
+returns it, and decodes its 64 tokens to the window's last position at 31 tok/s; one token more is refused with the
+server's context-window error. The MTP drafter's cost over a continuation of many thousands of tokens is not measured.
 
 ## Measurements
 

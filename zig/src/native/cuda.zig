@@ -13,6 +13,7 @@ const family_options = @import("cuda_options.zig");
 pub const follow = @import("cuda_follow.zig").follow;
 const lfm2 = @import("lfm2.zig");
 const glm = @import("glm_cuda");
+const minimax = @import("minimax_m3_cuda");
 const qwen35 = @import("qwen35");
 const kolibri1 = @import("kolibri1");
 const gemma4 = @import("gemma4_cuda");
@@ -28,7 +29,7 @@ const vision_offer = @import("cuda_vision_offer.zig");
 const drafted = @import("cuda_drafted.zig");
 const kv_pages = @import("cuda_kv_pool.zig");
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
-const registry = .{ nemotron.native, nemotron.omni, glm.native, qwen35.native, qwen35.native_moe, flashnext.native, kolibri1.native, gemma4.native, gemma4.native31, spark25.native, dory.native };
+const registry = .{ nemotron.native, nemotron.omni, glm.native, minimax.native, qwen35.native, qwen35.native_moe, flashnext.native, kolibri1.native, gemma4.native, gemma4.native31, spark25.native, dory.native };
 /// --record opens here (engines.zig refuses it for a backend without this).
 pub const records = true;
 pub const backends: []const []const u8 = &.{"cuda"};
@@ -75,6 +76,7 @@ pub const Host = struct {
     startup: []u8 = &.{},
     lone: ?LoneRun = null, // the family's driver for a lone drafted stream, called with `family`
     store: ?*api.prompt_cache.Store = null, // kept Nemotron states; null when the budget is 0
+    kv: kv_pages.Watch = .{}, // what the load ledger hears of the KV pool (cuda_kv_pool.zig)
     learn: ?api.Learner = null, // the family's Sliding Weights learner (--slide), called with the context current
     slide: ?*anyopaque = null, // that learner's adapter, freed by slide_free before the family
     slide_free: ?*const fn (Allocator, *anyopaque) void = null,
@@ -133,6 +135,8 @@ pub const Host = struct {
         h.host.warm_quiet = if (info.warm_turns) nemotron.native.warm_quiet else 0;
         if (h.lone != null) h.host.lone = .{ .ctx = h, .run = loneRun, .sampled = true, .logprobs = h.inner.vtable.first_row != null, .structures = h.inner.vtable.first_masked != null, .min_budget = nemotron.native.lone_min_budget, .resumes = true };
         if (h.learn != null) h.host.learner = h.learner();
+        kv_pages.install(&h.kv, &h.host); // the pool's first census, before the engine thread owns the pool
+        errdefer kv_pages.unwatch(&h.kv); // a host that never starts leaves the pool reporting to no one
         try h.host.start();
     }
     /// The family's learner, each call made with the context current on the lane thread.
@@ -209,7 +213,11 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         problem.* = why;
         return null;
     }
-    const native = modelContext(a, io, o.dir);
+    // a family whose rope can stretch (Qwen's YaRN, from its config or --rope-yarn) names its own ceiling
+    const native = if (comptime @hasDecl(F, "contextCeiling")) F.contextCeiling(a, io, o.dir, o.rope_yarn) catch |e| {
+        problem.* = try std.fmt.allocPrint(a, "{s} ({s}): YaRN takes rope_type yarn, factor, original_max_position_embeddings and their product as max_position_embeddings, and --rope-yarn a factor from 1 matching it", .{ if (o.rope_yarn != null) "--rope-yarn" else "the checkpoint's rope scaling", @errorName(e) });
+        return null;
+    } else modelContext(a, io, o.dir);
     const window = contextWindow(o.context, native, F.default_context) catch |e| {
         problem.* = switch (e) {
             error.Negative => try std.fmt.allocPrint(a, "--context {d}: a token count, or 0 for the model's window", .{o.context.?}),
@@ -472,6 +480,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     errdefer if (h.recording) |r| r.free(gpa);
     // the family cuts its own prompt grid from position 0, as `tensorfold run` does: prefill_step 0
     const admit: ?api.Admit = if (comptime !@hasDecl(F, "fits")) null else if (paged != null) .{ .ctx = loaded.ctx, .fits = F.fits } else null;
+    h.kv = kv_pages.watchOf(F, loaded, paged);
     try h.serve(io, served.facts, loaded.rows, .{
         .lanes = streams,
         .draft_sources = .{ .drafter = served.source },

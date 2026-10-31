@@ -330,6 +330,9 @@ template __global__ void tf_prefill_attention::full_kernel<72, 8, 8>(const __nv_
 // Head dim 80, eight warps, two blocks an SM (RADIO's tower, 16 heads of 80): full_kernel<80>'s bits, 1.35x faster.
 template __global__ void tf_prefill_attention::vision_kernel<80, 8>(const __nv_bfloat16* __restrict__, __nv_bfloat16* __restrict__, int, int,
     float);
+// Head dim 128, eight warps (MOSS-Image's denoiser, 24 heads of 128 over its image and prompt rows).
+template __global__ void tf_prefill_attention::vision_kernel<128, 8>(const __nv_bfloat16* __restrict__, __nv_bfloat16* __restrict__, int, int,
+    float);
 // Head dim 256, eight warps, two query heads a block, two staging slots (Qwen3.8-27B's prompt chunks, bf16 and fp8).
 template __global__ void tf_prefill_attention::hpattn_kernel<256, 8, 2, 2>(const __nv_bfloat16* __restrict__,
     const __nv_bfloat16* __restrict__, const __nv_bfloat16* __restrict__, __nv_bfloat16* __restrict__, int, int, int, int,
