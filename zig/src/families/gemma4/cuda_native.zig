@@ -48,7 +48,7 @@ const native = @This();
 
 /// The server's reading of the room left after the weights; null if unreadable.
 pub const Room = struct { ctx: *anyopaque, read: *const fn (*anyopaque) ?u64 };
-/// No `precision` field (refused by name). --vision: the 12B's embedder. kv_pages false, or the env =0: linear caches.
+/// No `precision` field (refused by name). --vision: the 12B's embedder. kv_pages false, a drafter or env =0: linear.
 pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, lanes: u32 = 8, lanes_fixed: bool = false, room: ?Room = null, vision: ?cv.Limits = null, drafter: ?[]const u8 = null, kv_pages: bool = true };
 
 pub const Loaded = struct {
@@ -96,9 +96,9 @@ const Plan = struct {
     }
 };
 
-/// Whether the global layers' caches lease the pool's pages: asked, and not turned off by TENSORFOLD_GEMMA4_KV_PAGES=0.
+/// Global caches in pool pages: asked, no drafter (its paged verify trails main), TENSORFOLD_GEMMA4_KV_PAGES not 0.
 fn pagesOn(o: Options) bool {
-    return o.kv_pages and !envOff("TENSORFOLD_GEMMA4_KV_PAGES");
+    return o.kv_pages and !(o.drafts and o.drafter != null) and !envOff("TENSORFOLD_GEMMA4_KV_PAGES");
 }
 
 /// Paged: the first stream's rings and the scratch must fit; the host plans the pool after.
