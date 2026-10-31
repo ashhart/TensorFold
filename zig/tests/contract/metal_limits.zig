@@ -107,6 +107,9 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
         frags = true;
     } else if (std.mem.startsWith(u8, d.name, "idol vae ")) {
         text = sources.idol_vae;
+    } else if (std.mem.startsWith(u8, d.name, "idol dino ")) {
+        text = sources.idol_dino;
+        frags = true;
     } else if (std.mem.startsWith(u8, d.name, "idol ")) {
         text = sources.idol;
         frags = true;

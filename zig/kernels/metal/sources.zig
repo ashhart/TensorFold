@@ -139,6 +139,8 @@ pub const idol = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("idol.metal"
 pub const idol_decoder = @embedFile("idol_decoder.metal");
 /// Idol's image encoder (FLUX.2's VAE encoder) in fp32.
 pub const idol_vae = @embedFile("idol_vae.metal");
+/// Idol's DINOv3 ViT-H+/16 image encoder: the prefill GEMM template, then its own bf16 steps and attention.
+pub const idol_dino = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("idol_dino.metal");
 /// A prompt chunk's KDA layer in three passes, appended to the generated kda_rows source (its helpers).
 pub const glm_kda_prompt = @embedFile("glm_kda_prompt.metal");
 /// GLM-5.3-Flash speed-up mode's exchange kernels (families/glm/ep.zig).
