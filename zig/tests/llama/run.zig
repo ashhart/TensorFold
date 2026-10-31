@@ -10,7 +10,8 @@ const usage =
     \\tf-llama-run <model> <tokens.json> prompt <out>              the prompt in chunks; the last row's bf16 logits
     \\tf-llama-run <model> <tokens.json> forced <cont.json>,<out>  then cont's tokens a step; bf16 logits before each
     \\tf-llama-run <model> <tokens.json> exact <cont.json>[,<w>]  cont's tokens as one-row steps and as w-row windows
-    \\                                                             (16) after the prompt: every row's logits bit for bit
+    \\                                                             (16) after the prompt: every row's logits bit for bit,
+    \\                                                             failing on any difference or a missed planted row
     \\tf-llama-run <model> <tokens.json> bench <n>                 the prompt, then n one-row steps: wall, encode, GPU ms
     \\
 ;
@@ -90,21 +91,27 @@ pub fn main(init: std.process.Init) !void {
             scache.len += 1;
         }
         if (width == 0 or width > fl.state.window_rows) return error.BadWindow;
-        var differ: usize = 0;
+        const wins = try gpa.alloc(u16, toks.len * vocab);
+        defer gpa.free(wins);
         var at: usize = 0;
         while (at < toks.len) {
             const n = @min(toks.len - at, width);
             try fl.forward.run(m, &small, &wcache, toks[at..][0..n], .{ .all = true });
-            for (0..n) |r| {
-                if (!std.mem.eql(u16, one[(at + r) * vocab ..][0..vocab], small.logits_all.slice(u16, n * vocab)[r * vocab ..][0..vocab])) {
-                    differ += 1;
-                    if (differ <= 4) std.debug.print("row {d} (window row {d}) differs\n", .{ at + r, r });
-                }
-            }
+            @memcpy(wins[at * vocab ..][0 .. n * vocab], small.logits_all.slice(u16, n * vocab));
             wcache.len += n;
             at += n;
         }
+        var first: [4]usize = undefined;
+        const differ = fl.exact.differing(one, wins, vocab, &first);
+        for (first[0..@min(differ, first.len)]) |r| std.debug.print("row {d} (window row {d}) differs\n", .{ r, r % width });
         std.debug.print("llama exact at {d}: {d} of {d} rows' logits differ between one-row steps and windows\n", .{ prompt.len, differ, toks.len });
+        // the control: a row planted in a copy of the steps' logits must be the one difference reported
+        const planted = try gpa.dupe(u16, one);
+        defer gpa.free(planted);
+        fl.exact.plant(planted, vocab, toks.len / 2);
+        if (fl.exact.differing(one, planted, vocab, &first) != 1 or first[0] != toks.len / 2) return error.PlantedRowMissed;
+        std.debug.print("llama exact: the planted row {d} is reported\n", .{toks.len / 2});
+        if (differ > 0) return error.RowsDiffer;
         return;
     }
     try feed(m, &small, &wide, &cache, prompt);
