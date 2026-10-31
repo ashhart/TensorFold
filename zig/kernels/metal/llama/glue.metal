@@ -267,3 +267,80 @@ LL_MATVEC(4)
 LL_MATVEC(8)
 LL_MATVEC(16)
 LL_MATVEC(32)
+
+// Pack-quantized int4 (layout in weights.zig's Int4): nibble e of `word` is bf16((q - z) * s), as its decompressor.
+inline float ll_q4(uint word, uint e, float z, float s) { return float(bfloat((float((word >> (4 * e)) & 15u) - z) * s)); }
+
+inline float4 ll_q4x4(uint word, uint e, float z, float s) {
+  return float4(ll_q4(word, e, z, s), ll_q4(word, e + 1, z, s), ll_q4(word, e + 2, z, s), ll_q4(word, e + 3, z, s));
+}
+
+// Row j's zero point of group g.
+inline float ll_q4_zero(const device uint* Z, uint j, uint g, uint groups) {
+  return float((Z[(size_t)(j / 8) * groups + g] >> (4 * (j % 8))) & 15u);
+}
+
+// Y[r, j] = bf16(sum_i X[r, i] * W[j, i]) over the int4 W in fp32: a simdgroup a row j, a lane a group of 32 at a time.
+template <uint ROWS>
+inline void ll_q4_matvec_t(const device bfloat* X, const device uint* Q, const device bfloat* S, const device uint* Z,
+    constant ll_mv_args& a, device bfloat* Y, uint3 tg, uint sg, uint lane) {
+  constexpr uint SG = 8, G = 32;
+  const uint j = tg.x * SG + sg;
+  if (j >= a.n) return;
+  const uint groups = a.k / G;
+  const device packed_uint4* w = (const device packed_uint4*)(Q + (size_t)j * (a.k / 8));
+  const device bfloat* s = S + (size_t)j * groups;
+  float acc[ROWS];
+  TF_UNROLL_4
+  for (uint r = 0; r < ROWS; ++r) acc[r] = 0.0f;
+  for (uint g = lane; g < groups; g += 32) {
+    const uint4 q = uint4(w[g]);
+    const float sc = float(s[g]), z = ll_q4_zero(Z, j, g, groups);
+    float4 wv[8];
+    TF_UNROLL_4
+    for (uint c = 0; c < 4; ++c) {
+      wv[2 * c] = ll_q4x4(q[c], 0, z, sc);
+      wv[2 * c + 1] = ll_q4x4(q[c], 4, z, sc);
+    }
+    TF_UNROLL_4
+    for (uint r = 0; r < ROWS; ++r) {
+      const device bfloat4* x = (const device bfloat4*)(X + (size_t)r * a.k + g * G);
+      float t = 0.0f;
+      TF_UNROLL_4
+      for (uint c = 0; c < 8; ++c) t += dot(wv[c], float4(x[c]));
+      acc[r] += t;
+    }
+  }
+  TF_UNROLL_4
+  for (uint r = 0; r < ROWS; ++r) {
+    const float sum = simd_sum(acc[r]);
+    if (lane == 0 && r < a.rows) Y[(size_t)r * a.ldy + j] = bfloat(sum);
+  }
+}
+
+#define LL_Q4_MATVEC(ROWS)                                                                                         \
+  [[kernel]] void ll_q4_matvec_##ROWS(const device bfloat* X [[buffer(0)]], const device uint* Q [[buffer(1)]],     \
+      const device bfloat* S [[buffer(2)]], const device uint* Z [[buffer(3)]], constant ll_mv_args& a [[buffer(4)]], \
+      device bfloat* Y [[buffer(5)]], uint3 tg [[threadgroup_position_in_grid]],                                    \
+      uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {                      \
+    ll_q4_matvec_t<ROWS>(X, Q, S, Z, a, Y, tg, sg, lane);                                                          \
+  }
+LL_Q4_MATVEC(1)
+LL_Q4_MATVEC(2)
+LL_Q4_MATVEC(4)
+LL_Q4_MATVEC(8)
+LL_Q4_MATVEC(16)
+LL_Q4_MATVEC(32)
+
+// The int4 W as bf16 [n, k] for a prompt chunk's GEMM: a thread a word, its 8 weights as ll_q4 makes them.
+[[kernel]] void ll_q4_dequant(const device uint* Q [[buffer(0)]], const device bfloat* S [[buffer(1)]],
+    const device uint* Z [[buffer(2)]], constant ll_mv_args& a [[buffer(3)]], device bfloat* W [[buffer(4)]],
+    uint2 p [[thread_position_in_grid]]) {
+  const uint words = a.k / 8, groups = a.k / 32;
+  if (p.x >= words || p.y >= a.n) return;
+  const uint j = p.y, c = p.x;
+  const uint word = Q[(size_t)j * words + c];
+  const float s = float(S[(size_t)j * groups + c / 4]), z = ll_q4_zero(Z, j, c / 4, groups);
+  device bfloat* out = W + (size_t)j * a.k + 8 * c;
+  for (uint e = 0; e < 8; ++e) out[e] = bfloat(ll_q4(word, e, z, s));
+}

@@ -2,11 +2,13 @@
 
 This recipe covers text generation with [`Nanbeige/Nanbeige4.3-33B`](https://huggingface.co/Nanbeige/Nanbeige4.3-33B)
 (model_type `llama`: a dense 33B Llama-architecture model, 512K context, thinking and tool calls in its chat template)
-on the Metal engine, served from the bf16 release as published: no conversion, nothing lost. It was brought up on an
-M5 Ultra (256 GB); other Macs are untested. The family admits only the checkpoints checked against Hugging Face, by the
-geometry their configs name (`qualified` in `zig/src/families/llama/config.zig`: Nanbeige4.3-33B); another `llama`
-checkpoint is refused by name until it has been checked the same way. Prompts run on Metal 4 tensor units, so it needs
-an M5 or later: M1 to M4 Macs are refused by name at load.
+on the Metal engine, served from the bf16 release as published: no conversion, nothing lost. Nanbeige's own INT4
+release, [`Nanbeige/Nanbeige4.3-33B-INT4`](https://huggingface.co/Nanbeige/Nanbeige4.3-33B-INT4), is served as
+published too, read in place ([below](#the-int4-release-nanbeige43-33b-int4)). It was brought up on an M5 Ultra
+(256 GB); other Macs are untested. The family admits only the checkpoints checked against Hugging Face, by the
+geometry and weights their configs name (`qualified` in `zig/src/families/llama/config.zig`: Nanbeige4.3-33B and
+Nanbeige4.3-33B-INT4); another `llama` checkpoint is refused by name until it has been checked the same way. Prompts
+run on Metal 4 tensor units, so it needs an M5 or later: M1 to M4 Macs are refused by name at load.
 
 ## Build and serve
 
@@ -53,12 +55,13 @@ calls take the template's XML form (its `tool_call_format` default), which the s
   drafts verified by the model's windows like any copy, so replies keep the model's bits.
 
 Every kernel is registered with the kernel contract (`zig/tests/contract/metal_llama*.zig`, the roll call in
-`contracts.zig`): the glue, the six row-projection forms, the four GEMM forms and the prompt attention at both served
-geometries. Each kernel group has a planted control (`metal_llama_controls.zig`: one edit of its source, which its
-gate must report). `tf-kernel-contract --only llama` on the M5 Ultra:
+`contracts.zig`): the glue, the six row-projection forms, the four GEMM forms, the prompt attention at both served
+geometries, and the INT4 release's six row-projection forms and its dequantization. Each kernel group has a planted
+control (`metal_llama_controls.zig`: one edit of its source, which its gate must report). `tf-kernel-contract --only
+llama` on the M5 Ultra:
 
 ```
-SUMMARY 21 kernels: 21 pass gates 1-4, 0 fail, 0 known findings; 12 controls: 12 red as planted, 0 missed; 0 limit problems; gates 468447 ms, limits 140 ms
+SUMMARY 28 kernels: 28 pass gates 1-4, 0 fail, 0 known findings; 0 controls: 0 red as planted, 0 missed; 0 limit problems; gates 480758 ms, limits 8694 ms
 ```
 
 ## Measured (M5 Ultra, the bf16 release, 26 Oct 2026)
@@ -164,7 +167,10 @@ Each keeps the replies' bits.
   harness's prompts and gave no measurable decode gain (drafted 16 tokens/s, undrafted 16).
 - **Sampling.** Draws run `tf_sample_full` over the whole 166,912-token vocabulary (the 1,024-candidate kernel is
   compiled for a 131,072-token vocabulary): sampled replies decode at the greedy speed.
-- **Not offered.** No int8 or fp8 cache, no fast-math, no reduced-precision sums, no quantized weights.
+- **Weights.** The bf16 release, or Nanbeige's own INT4 release as published (decode 2.6 times as fast; its
+  quantization's cost is the publisher's, measured [below](#the-int4-release-nanbeige43-33b-int4)). The engine makes
+  no quantized conversion of its own.
+- **Not offered.** No int8 or fp8 cache, no fast-math, no reduced-precision sums.
 
 ## Drafter: Nanbeige4.1-3B
 
@@ -213,17 +219,112 @@ after a cancel is unchanged; in rounds shared from the first token to the last, 
 The drafter's cache is fed the prompt on the first round, after the model's own prompt pass, so the first token keeps
 its time.
 
+## The INT4 release: Nanbeige4.3-33B-INT4
+
+[`Nanbeige/Nanbeige4.3-33B-INT4`](https://huggingface.co/Nanbeige/Nanbeige4.3-33B-INT4) (revision
+`d834b414cf1c47e42640de33c147b7cf8a9321ef`, Apache-2.0) is Nanbeige's own int4 release of the same model, the
+tokenizer files identical to the bf16 release's: a compressed-tensors `pack-quantized` checkpoint, asymmetric int4
+weights in groups of 32 along each row with a bf16 scale and a zero point each (packed as 4-bit codes, `zp_dtype`
+int8), `lm_head` and the embedding left in bf16; 21.0 GiB. The family serves it as published, read in place from the
+mapped shards:
+
+```sh
+hf download Nanbeige/Nanbeige4.3-33B-INT4 --revision d834b414cf1c47e42640de33c147b7cf8a9321ef \
+  --local-dir models/nanbeige4.3-33b-int4
+LLAMA_LOAD_LIMIT_GB=150 zig-out/native/bin/tensorfold-native serve models/nanbeige4.3-33b-int4 --name nanbeige \
+  --port 8888 --context 131072 --parallel 2 --prompt-cache-gib 8 --drafter models/nanbeige4.1-3b
+```
+
+- **Admission.** Exactly that scheme is read (`config.zig`'s `packQuantized`: format, 4 bits, asymmetric, groups of
+  32, int8 zero points, every Linear but the head and embedding, no activation or cache scheme, no activation
+order); any other
+  compressed-tensors or MLX quantization is refused by name. Each projection's `weight_shape` must match the config,
+  and its packed words, scales and zero points their extents.
+- **The weights it means.** compressed-tensors decompresses a weight as `bf16((q - z) * scale)`: the code and zero
+  point are exact small integers and their difference times the bf16 scale is rounded once to bf16
+  (compressed-tensors 0.20.1's `dequantize`). The kernels compute that same bf16 value, so the model the engine runs
+  is the checkpoint's own bf16 model, with the bf16 release's rounding points everywhere else.
+- **Decode windows** (up to 32 rows) run `ll_q4_matvec`: a simdgroup an output row, a lane a group of 32 codes,
+  each weight made as above and multiplied in fp32, the row's sum rounded once as torch's bf16 linear rounds it.
+  One-row steps and 16-row windows give the same logits bit for bit after a 1,500-token prompt (0 of 49 rows differ;
+  the planted row is reported).
+- **Prompt chunks** first make the projection's bf16 weights in a scratch (`ll_q4_dequant`, a thread a packed word),
+  then run the bf16 release's tensor-unit GEMM over them, so a prompt's arithmetic is the bf16 path's on these weights
+  (the scratch holds the widest projection, 301 MiB).
+
+Against `llama_f64_reference.py`, which now reads the same checkpoint (its weights decompressed exactly as above,
+then float64 throughout, rounded once at the end), over 1,500 teacher-forced positions of a chat asking for a summary
+of TensorFold's README (31 Oct 2026, M5 Ultra):
+
+| logits from | mean KL against float64 | top-1 agreement | positions equal | not near-ties by the judge's rule |
+|---|---:|---:|---:|---:|
+| the engine, this checkpoint | 0.0044 | 97.1% | 1,456 | 16 |
+| HF transformers 4.57.1, this checkpoint, bf16 on the CPU | 0.0346 | 96.6% | 1,449 | 22 |
+| the engine, the bf16 release (against its float64 pass) | 0.0110 | 97.1% | 1,457 | 21 |
+| HF transformers, the bf16 release (against its float64 pass) | 0.0234 | 96.5% | 1,447 | 28 |
+
+On this text the judge's strict rule (`llama_teacher_judge.py`: the same two contenders on both sides, each within one
+bf16 step) fails every implementation, Hugging Face's included; the engine is the closest to the float64 pass on
+both checkpoints. Against HF's own run of this checkpoint, the engine's mean KL is 0.0275 (top-1 96.5%).
+
+**What the release's quantization costs** (the publisher's choice, not the engine's): on the same 1,500 positions,
+HF's run of the INT4 release against HF's run of the bf16 release gives mean KL 0.082 and top-1 90.8%, and the
+engine's INT4 against HF's bf16 gives 0.087 and 90.8%. The bf16 release stays the exact choice; the INT4 release is
+the faster one with its own maker's quantization.
+
+Served through the recipe harness (31 Oct 2026, this branch's build, an idle 4 GB server of another model the only
+other one loaded), `--context 131072 --parallel 2 --prompt-cache-gib 8`, greedy 256-token replies:
+
+| | streams | prose | code | structured | list | first token | a round |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| undrafted | 1 | 42.8 | 42.0 | 42.9 | 41.4 | 0.27-0.30 s | 23.8 ms |
+| undrafted | 2 | 74.6 | 53.4 | 66.6 | 74.7 | 0.41-0.45 s | 30.4 ms |
+| `--drafter` | 1 | 79.4 | 79.6 | 81.0 | 80.5 | 0.27-0.31 s | 24.8 ms, 1.98 tokens |
+| `--drafter` | 2 | 74.4 | 74.6 | 73.7 | 74.8 | 0.41-0.46 s | 27.8 ms |
+
+Tokens a second, all streams together: 2.5-2.6 times the bf16 release's one stream undrafted. One stream reads the
+21 GiB of weights each step. The ruler's texts repeat themselves, which the drafter continues (92% of drafts kept); on
+ordinary chats, where the 33B's step is already short beside the drafter's (24 ms against 11), it about breaks even:
+`tf-llama-run ... draft` on the Drafter section's eight chat prompts (128 tokens, thinking on and off) decodes at
+35.6-44.5 tokens/s drafted against 37.9-41.8 plain (40.5 and 40.7 on average), the drafted tokens equal to the plain
+ones on all eight; the suite's drafted check gives 42 against 39. With two streams the shared rounds mostly run
+undrafted, at the plain speed.
+
+| cold prompt | 2,109 | 8,254 | 32,829 | 61,501 tokens |
+|---|---:|---:|---:|---:|
+| tokens a second | 1,185 | 1,257 | 1,041 | 846 |
+| time to first token | 1.78 s | 6.57 s | 31.6 s | 72.7 s |
+
+A fresh server, undrafted, each prompt starting with words no earlier one did; with thinking on within 4%. With the
+drafter loaded the same prompts ran 6-8% slower (thinking on, 4-15%), though the drafter reads the prompt only after
+the model's first token; an earlier run of the same INT4 code on the previous base was within 4% of undrafted. Prompt
+chunks make each projection's bf16 weights before the GEMM: against the bf16 release's prompt numbers above, 4-6%
+slower at 2k-8k tokens and 2-3% at 33k-61k. A multi-turn chat's third turn, resumed from
+5,493 of its 5,649 kept tokens, starts in 0.39 s against 4.6 s cold, with the same reply.
+
+- A passphrase at 10%, 50% and 90% of a 128,579-token prompt comes back exactly (3/3, greedy, thinking off) on the
+  131,072-token server with the drafter; the cold prompt takes 254 s to the first token (506 tokens/s). The drafter
+  reads the prompt only after that first token, so on such a prompt the rest of the reply waits for it: 9-10-token
+  replies took 33-47 s after their first token.
+- Both servers pass the harness's quick plan in full: structured output 18/18 with drafted == plain 12/12, tool calls
+  5/5, seeded sampling 9/9 equal on repeat and undrafted, resumed turns equal to cold ones after a restart, a 60-turn
+  soak and 12 concurrent replies each equal to the request alone, streaming 4/4, multi-turn recall 8/8, stop strings
+  3/3, thinking 10/10, max_tokens 3/3.
+
 ## Not done
 
 No quality suite was run. The family has no draft head of its own: drafts come from `--drafter`'s smaller Llama or
 the lane core's copies. Quantized drafters are refused by name: the drafter is served from its bf16 release.
 Logprobs are refused by name: the release's tokenizer decodes through a `Strip` step, which the engine's tokenizer does
 not count as token-local, so the server cannot give a token's bytes on its own.
-Only the M5's tensor units were checked; M1-M4 Macs are refused at load, and smaller RAM is untested. Other `llama`
-checkpoints, tied heads, other head sizes, Llama 3's scaled RoPE and biased projections are refused at load rather than
-served untested.
+The INT4 release was run to the 131,072-token window, not the full 524,288. After a long prompt the drafter reads
+it before drafting, which holds the reply's second token (30-47 s at 110k-129k tokens with the INT4 release). Only
+the M5's tensor units were checked; M1-M4 Macs are refused at load, and smaller RAM is untested. Other `llama`
+checkpoints, tied heads, other head sizes, Llama 3's scaled RoPE and biased projections are refused at load rather
+than served untested.
 
 ## Licence
 
 Nanbeige4.3-33B is published under Apache-2.0 at the revision measured here
-(`c1093c501cc6460427c0ac634db7223d0450c0ee`, the licence in its model card).
+(`c1093c501cc6460427c0ac634db7223d0450c0ee`, the licence in its model card), and Nanbeige4.3-33B-INT4 likewise
+(`d834b414cf1c47e42640de33c147b7cf8a9321ef`).

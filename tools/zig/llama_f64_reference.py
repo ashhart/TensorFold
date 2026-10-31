@@ -30,12 +30,32 @@ def main(model_dir: str, tokens: str, out: str, points: bool = False) -> None:
     quant = cfg.get("quantization")
     if quant and (quant.get("mode", "affine") != "affine" or quant["bits"] not in (4, 8)):
         raise SystemExit("only MLX affine checkpoints at 4 or 8 bits")
+    packed = cfg.get("quantization_config")
+    if packed:
+        g0 = next(iter(packed["config_groups"].values()))["weights"]
+        scheme = (packed.get("format"), g0["num_bits"], g0["symmetric"], g0["strategy"])
+        if scheme != ("pack-quantized", 4, False, "group"):
+            raise SystemExit("only compressed-tensors' pack-quantized asymmetric int4 in groups")
 
     def tensor(name):
         with safe_open(f"{model_dir}/{index[name]}", framework="pt") as f:
             return f.get_tensor(name)
 
+    def unpack4(words, cols):  # compressed-tensors' 4-bit codes along a row, lowest bits first, stored + 8
+        words = words.to(torch.int64) & 0xFFFFFFFF
+        shifts = torch.arange(0, 32, 4, dtype=torch.int64)
+        return (((words.unsqueeze(-1) >> shifts) & 15).reshape(words.shape[0], -1)[:, :cols] - 8).to(f64)
+
     def w(name, mlx=False):
+        if packed and name.endswith(".weight") and name + "_packed" in index:
+            # the decompressor's weight bf16((q - z) * scale), exact in float64 before that one rounding
+            n, k = tensor(name + "_shape").tolist()
+            q = unpack4(tensor(name + "_packed"), k)
+            scale = tensor(name + "_scale").to(f64)
+            z = unpack4(tensor(name + "_zero_point").T.contiguous(), n).T
+            group = k // scale.shape[1]
+            wide = (q - z.repeat_interleave(group, -1)) * scale.repeat_interleave(group, -1)
+            return wide.to(torch.bfloat16).to(f64)
         if not name.endswith(".weight") or name[: -len("weight")] + "scales" not in index:
             return tensor(name).to(f64)
         # mlx_lm's layout: u32 words of `bits`-bit codes, lowest bits first; a scale and a bias a group of codes
