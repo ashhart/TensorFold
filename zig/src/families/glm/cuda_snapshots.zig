@@ -12,7 +12,7 @@ pub fn prepare(e: anytype, budget: u64) !void {
     const count = std.math.cast(u32, budget / pages.page) orelse return error.SnapshotBudget;
     try e.snaps.ensureTotalCapacity(e.gpa, count);
     try e.dropped.ensureTotalCapacity(e.gpa, @as(usize, count) + 1);
-    e.snap_pages = try pages.Pool.init(e.gpa, e.d, budget);
+    e.snap_pages = try pages.Pool.init(e.gpa, e.d, budget, pages.onHost());
 }
 
 /// A failed allocation still joins the startup agreement, so a peer never waits for a missing participant.
