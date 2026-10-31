@@ -1,0 +1,43 @@
+{
+  "commit": "65051196df3f5d996aae9b4be132240969703dfe",
+  "scope": "Text-only shared-convolution cherry-pick, actual M4 validation only; no M5 claim",
+  "sources": {
+    "zig/kernels/metal/lfm3/ops.metal": "02746819be142ae0788823ffb6963336adc9344fe948d7a9dc94406373e61074",
+    "zig/src/families/lfm3/forward.zig": "082577207be3a85b3e54011eb7dd2d218e96c28a2f66e969431e4bf3a3f7f8e9",
+    "zig/src/families/lfm3/kernels.zig": "ad21db3cb7ba951df07b066f6ec244b61a77edb9c8ba8419cf7c786c75de4071",
+    "zig/src/families/lfm3/state.zig": "13950e1bb0313ae788c43432113d31f27b2b4fa97712d404a3f23ffe2d01ce80",
+    "zig/tests/contract/metal_main.zig": "e38cedc1d7c8fe134cf14bf422920da0f4612981afda177cc85feedfee4ad2c4",
+    "zig/tests/contract/metal_lfm3_conv_segments.zig": "b824c468f403e8384942829ace1b6a7c589a4b091a8f2a8f8af6b81244751857",
+    "zig/tests/contract/metal_limits.zig": "6863bb52b3c48ecd02c0e72a611f9094b94b7e1af9b1642d6c68904ecccb8216",
+    "zig/src/core/contract/lfm3_records.zig": "ce6f0e8cf8ac7d08e27e825ce9e41d0a0c694875811ef11de5f8f876eaba4c0d"
+  },
+  "build_status": "67/67 steps succeeded; 1/1 newly executed host test passed, others cached",
+  "build_command": "zig build native tf-kernel-contract test-lfm3-host -Dcpu=apple_m1 --summary all",
+  "m4_gates": {
+    "passed": 1,
+    "failed": 0,
+    "wrong_state_control_red": 1,
+    "controls_missed": 0
+  },
+  "m4_normal_limits": {
+    "registered_launches": 335,
+    "problems": 0,
+    "new_pipeline_max_threads": 256,
+    "new_pipeline_static_tg_bytes": 0
+  },
+  "m5_executed": false,
+  "tree_clean": true,
+  "binary_sha256": {
+    "zig-out/native/bin/tensorfold-native": "56b9c8a43342f0d93a73ccefe1e0c8813a9bf19bbe2ef9765380e1ee79c0c21e",
+    "zig-out/bin/tf-kernel-contract": "86546abb63ddc5ac0de44192db1dff0fd005d3ac9857929075c3519f10400ee5"
+  },
+  "log_sha256": {
+    "lfm3-shared-conv-text-build.log": "07798b1176d5f6ea8cf3048ef755e55f6b222eb2f33ad42820a0857f5930994f",
+    "lfm3-shared-conv-text-gates-m4.log": "9b6909521ec6b8665f436367424100eb196a715c4fa3cf1f57353c10d60b0c7e",
+    "lfm3-shared-conv-text-limits-m4.log": "a7d20c8682be9b90a31adc564ade14832f146a41d43061873d702acbfb59dd27"
+  },
+  "commands": [
+    "zig-out/bin/tf-kernel-contract --only \"shared conv\" --no-limits",
+    "zig-out/bin/tf-kernel-contract --only \"shared conv\" --no-gates"
+  ]
+}

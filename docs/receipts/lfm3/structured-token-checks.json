@@ -1,0 +1,4480 @@
+{
+  "cells": [
+    {
+      "platform": "M4 Pro, macOS 26.5.1",
+      "checkpoint": "1.7B-4",
+      "native_binary_sha256": "5c8a04d4af599879797f4f5bed8e00ab7d9d70732e698bd2a1ec2a01ec762e09",
+      "original_client_exit": 0,
+      "groups": 32,
+      "passed_full_token_equality": 32,
+      "failed_full_token_equality": 0,
+      "checks": [
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Describe a cat as a JSON object with a few fields.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "response_format": {
+              "type": "json_object"
+            },
+            "temperature": 0
+          },
+          "count": 3,
+          "hashes": [
+            "97fc568e1c13add8c4f1c58c38ab18a87039408de0d789a92614693a8f5c73d0",
+            "97fc568e1c13add8c4f1c58c38ab18a87039408de0d789a92614693a8f5c73d0",
+            "97fc568e1c13add8c4f1c58c38ab18a87039408de0d789a92614693a8f5c73d0"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Describe a cat as a JSON object with a few fields.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "response_format": {
+              "type": "json_object"
+            },
+            "temperature": 0,
+            "thinking_budget": 256
+          },
+          "count": 3,
+          "hashes": [
+            "8f3cef2f2dd40372a9f5a5a45465d005711e83e73de634020964ea1164f102fc",
+            "8f3cef2f2dd40372a9f5a5a45465d005711e83e73de634020964ea1164f102fc",
+            "8f3cef2f2dd40372a9f5a5a45465d005711e83e73de634020964ea1164f102fc"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Describe a cat as a JSON object with a few fields.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "response_format": {
+              "type": "json_object"
+            },
+            "seed": 1234,
+            "temperature": 0.8,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "28e9992d945cd22c289c5a1604e9d84b8fd4d93908d1d3538e441728c2d4b149",
+            "28e9992d945cd22c289c5a1604e9d84b8fd4d93908d1d3538e441728c2d4b149",
+            "28e9992d945cd22c289c5a1604e9d84b8fd4d93908d1d3538e441728c2d4b149"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Describe a cat as a JSON object with a few fields.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "response_format": {
+              "type": "json_object"
+            },
+            "seed": 1234,
+            "temperature": 0.8,
+            "thinking_budget": 256,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "cda680f6cc3d90448f12337ac2cc1b0119f16da48a71ace0e8e1f192c9945a6d",
+            "cda680f6cc3d90448f12337ac2cc1b0119f16da48a71ace0e8e1f192c9945a6d",
+            "cda680f6cc3d90448f12337ac2cc1b0119f16da48a71ace0e8e1f192c9945a6d"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "What is the weather like in Lisbon today? Answer as JSON.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "response_format": {
+              "json_schema": {
+                "name": "weather",
+                "schema": {
+                  "properties": {
+                    "city": {
+                      "type": "string"
+                    },
+                    "conditions": {
+                      "enum": [
+                        "sunny",
+                        "cloudy",
+                        "rain",
+                        "snow"
+                      ]
+                    },
+                    "tags": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "maxItems": 3,
+                      "type": "array"
+                    },
+                    "temperature_c": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "city",
+                    "temperature_c",
+                    "conditions"
+                  ],
+                  "type": "object"
+                }
+              },
+              "type": "json_schema"
+            },
+            "temperature": 0
+          },
+          "count": 3,
+          "hashes": [
+            "d455a572b3e0b29505b67549d22ee6dbdaa3453a3f3d4c4a74d5f9c53c288ac7",
+            "d455a572b3e0b29505b67549d22ee6dbdaa3453a3f3d4c4a74d5f9c53c288ac7",
+            "d455a572b3e0b29505b67549d22ee6dbdaa3453a3f3d4c4a74d5f9c53c288ac7"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "What is the weather like in Lisbon today? Answer as JSON.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "response_format": {
+              "json_schema": {
+                "name": "weather",
+                "schema": {
+                  "properties": {
+                    "city": {
+                      "type": "string"
+                    },
+                    "conditions": {
+                      "enum": [
+                        "sunny",
+                        "cloudy",
+                        "rain",
+                        "snow"
+                      ]
+                    },
+                    "tags": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "maxItems": 3,
+                      "type": "array"
+                    },
+                    "temperature_c": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "city",
+                    "temperature_c",
+                    "conditions"
+                  ],
+                  "type": "object"
+                }
+              },
+              "type": "json_schema"
+            },
+            "temperature": 0,
+            "thinking_budget": 256
+          },
+          "count": 3,
+          "hashes": [
+            "a6703c6b4506a475098af2e37ca37cc66f508ffd46238e5f76546b1ed795021d",
+            "a6703c6b4506a475098af2e37ca37cc66f508ffd46238e5f76546b1ed795021d",
+            "a6703c6b4506a475098af2e37ca37cc66f508ffd46238e5f76546b1ed795021d"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "What is the weather like in Lisbon today? Answer as JSON.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "response_format": {
+              "json_schema": {
+                "name": "weather",
+                "schema": {
+                  "properties": {
+                    "city": {
+                      "type": "string"
+                    },
+                    "conditions": {
+                      "enum": [
+                        "sunny",
+                        "cloudy",
+                        "rain",
+                        "snow"
+                      ]
+                    },
+                    "tags": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "maxItems": 3,
+                      "type": "array"
+                    },
+                    "temperature_c": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "city",
+                    "temperature_c",
+                    "conditions"
+                  ],
+                  "type": "object"
+                }
+              },
+              "type": "json_schema"
+            },
+            "seed": 1234,
+            "temperature": 0.8,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "e2ced68110d55bbdfede82e2431832288dc53c5f2ac44e0f99e4cf28ada34b1c",
+            "e2ced68110d55bbdfede82e2431832288dc53c5f2ac44e0f99e4cf28ada34b1c",
+            "e2ced68110d55bbdfede82e2431832288dc53c5f2ac44e0f99e4cf28ada34b1c"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "What is the weather like in Lisbon today? Answer as JSON.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "response_format": {
+              "json_schema": {
+                "name": "weather",
+                "schema": {
+                  "properties": {
+                    "city": {
+                      "type": "string"
+                    },
+                    "conditions": {
+                      "enum": [
+                        "sunny",
+                        "cloudy",
+                        "rain",
+                        "snow"
+                      ]
+                    },
+                    "tags": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "maxItems": 3,
+                      "type": "array"
+                    },
+                    "temperature_c": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "city",
+                    "temperature_c",
+                    "conditions"
+                  ],
+                  "type": "object"
+                }
+              },
+              "type": "json_schema"
+            },
+            "seed": 1234,
+            "temperature": 0.8,
+            "thinking_budget": 256,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "585b2f3c6566d27343b7af1c4464f280c389a54f26ed878de701db5c0705a147",
+            "585b2f3c6566d27343b7af1c4464f280c389a54f26ed878de701db5c0705a147",
+            "585b2f3c6566d27343b7af1c4464f280c389a54f26ed878de701db5c0705a147"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "guided_json": {
+              "properties": {
+                "city": {
+                  "type": "string"
+                },
+                "conditions": {
+                  "enum": [
+                    "sunny",
+                    "cloudy",
+                    "rain",
+                    "snow"
+                  ]
+                },
+                "tags": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                "temperature_c": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "city",
+                "temperature_c",
+                "conditions"
+              ],
+              "type": "object"
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Make up the weather in Oslo.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0
+          },
+          "count": 3,
+          "hashes": [
+            "d2bf435d203b8e78856bb7eae3e2e7b7c31ae53d883fcf6564fb58f1a938376c",
+            "d2bf435d203b8e78856bb7eae3e2e7b7c31ae53d883fcf6564fb58f1a938376c",
+            "d2bf435d203b8e78856bb7eae3e2e7b7c31ae53d883fcf6564fb58f1a938376c"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "guided_json": {
+              "properties": {
+                "city": {
+                  "type": "string"
+                },
+                "conditions": {
+                  "enum": [
+                    "sunny",
+                    "cloudy",
+                    "rain",
+                    "snow"
+                  ]
+                },
+                "tags": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                "temperature_c": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "city",
+                "temperature_c",
+                "conditions"
+              ],
+              "type": "object"
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Make up the weather in Oslo.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0,
+            "thinking_budget": 256
+          },
+          "count": 3,
+          "hashes": [
+            "2febc228486dea3590e75587cb09af791e2c289b3f1f589ba69b4d81100c390d",
+            "2febc228486dea3590e75587cb09af791e2c289b3f1f589ba69b4d81100c390d",
+            "2febc228486dea3590e75587cb09af791e2c289b3f1f589ba69b4d81100c390d"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "guided_json": {
+              "properties": {
+                "city": {
+                  "type": "string"
+                },
+                "conditions": {
+                  "enum": [
+                    "sunny",
+                    "cloudy",
+                    "rain",
+                    "snow"
+                  ]
+                },
+                "tags": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                "temperature_c": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "city",
+                "temperature_c",
+                "conditions"
+              ],
+              "type": "object"
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Make up the weather in Oslo.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "4faffa1eba4aecc775cd93a9b87f1189e4df90760c98d364a69b9b0b07223162",
+            "4faffa1eba4aecc775cd93a9b87f1189e4df90760c98d364a69b9b0b07223162",
+            "4faffa1eba4aecc775cd93a9b87f1189e4df90760c98d364a69b9b0b07223162"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "guided_json": {
+              "properties": {
+                "city": {
+                  "type": "string"
+                },
+                "conditions": {
+                  "enum": [
+                    "sunny",
+                    "cloudy",
+                    "rain",
+                    "snow"
+                  ]
+                },
+                "tags": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                "temperature_c": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "city",
+                "temperature_c",
+                "conditions"
+              ],
+              "type": "object"
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Make up the weather in Oslo.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "thinking_budget": 256,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "992b757e11570bdf521bccd63218a333ec82a82851e02945b7f63f58dcf07073",
+            "992b757e11570bdf521bccd63218a333ec82a82851e02945b7f63f58dcf07073",
+            "992b757e11570bdf521bccd63218a333ec82a82851e02945b7f63f58dcf07073"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "guided_regex": "\\d{4}-\\d{2}-\\d{2}",
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "When did the first person walk on the moon? Give the date.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0
+          },
+          "count": 3,
+          "hashes": [
+            "613ee0089978b70c8c5f13ea0b1411793e8e2e09a3d03fdc84b0b5bb28aa14e8",
+            "613ee0089978b70c8c5f13ea0b1411793e8e2e09a3d03fdc84b0b5bb28aa14e8",
+            "613ee0089978b70c8c5f13ea0b1411793e8e2e09a3d03fdc84b0b5bb28aa14e8"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "guided_regex": "\\d{4}-\\d{2}-\\d{2}",
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "When did the first person walk on the moon? Give the date.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0,
+            "thinking_budget": 256
+          },
+          "count": 3,
+          "hashes": [
+            "d8c9b5ca8545ff2672e78d1bec92b38bc06719f8171049359250d4358e71e56f",
+            "d8c9b5ca8545ff2672e78d1bec92b38bc06719f8171049359250d4358e71e56f",
+            "d8c9b5ca8545ff2672e78d1bec92b38bc06719f8171049359250d4358e71e56f"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "guided_regex": "\\d{4}-\\d{2}-\\d{2}",
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "When did the first person walk on the moon? Give the date.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "94ace2a871dda93e340c3a2c4501cd061198a7e5ac82b6f32ce15e1a7be2ab7d",
+            "94ace2a871dda93e340c3a2c4501cd061198a7e5ac82b6f32ce15e1a7be2ab7d",
+            "94ace2a871dda93e340c3a2c4501cd061198a7e5ac82b6f32ce15e1a7be2ab7d"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "guided_regex": "\\d{4}-\\d{2}-\\d{2}",
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "When did the first person walk on the moon? Give the date.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "thinking_budget": 256,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "73317173791629306890fe4163ae8ef1b112f66164430be5cf413b20a8d6668d",
+            "73317173791629306890fe4163ae8ef1b112f66164430be5cf413b20a8d6668d",
+            "73317173791629306890fe4163ae8ef1b112f66164430be5cf413b20a8d6668d"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "guided_choice": [
+              "positive",
+              "negative",
+              "neutral"
+            ],
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Classify the sentiment: 'I loved every minute of this film.'",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0
+          },
+          "count": 3,
+          "hashes": [
+            "28abb3eca0a660a77c572da20a61603b9ee466a3809c4bb98fcdf33912b09b3d",
+            "28abb3eca0a660a77c572da20a61603b9ee466a3809c4bb98fcdf33912b09b3d",
+            "28abb3eca0a660a77c572da20a61603b9ee466a3809c4bb98fcdf33912b09b3d"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "guided_choice": [
+              "positive",
+              "negative",
+              "neutral"
+            ],
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Classify the sentiment: 'I loved every minute of this film.'",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0,
+            "thinking_budget": 256
+          },
+          "count": 3,
+          "hashes": [
+            "1e17a6da44a8ae08e848f819966f156cf9556f85540814634c8bdbedc65a30ae",
+            "1e17a6da44a8ae08e848f819966f156cf9556f85540814634c8bdbedc65a30ae",
+            "1e17a6da44a8ae08e848f819966f156cf9556f85540814634c8bdbedc65a30ae"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "guided_choice": [
+              "positive",
+              "negative",
+              "neutral"
+            ],
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Classify the sentiment: 'I loved every minute of this film.'",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "28abb3eca0a660a77c572da20a61603b9ee466a3809c4bb98fcdf33912b09b3d",
+            "28abb3eca0a660a77c572da20a61603b9ee466a3809c4bb98fcdf33912b09b3d",
+            "28abb3eca0a660a77c572da20a61603b9ee466a3809c4bb98fcdf33912b09b3d"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "guided_choice": [
+              "positive",
+              "negative",
+              "neutral"
+            ],
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Classify the sentiment: 'I loved every minute of this film.'",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "thinking_budget": 256,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "7d1aa328f84f06ec6e56421145b066954dcab17d74a2bb222271a610419fbc15",
+            "7d1aa328f84f06ec6e56421145b066954dcab17d74a2bb222271a610419fbc15",
+            "7d1aa328f84f06ec6e56421145b066954dcab17d74a2bb222271a610419fbc15"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "guided_grammar": "root ::= \"Answer: \" (\"yes\" | \"no\") \", because \" [a-z ]{3,40} \".\"",
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Is the sky blue on a clear day?",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0
+          },
+          "count": 3,
+          "hashes": [
+            "321c709fab0bb0a79580785b993f8b74105bdd54fdf9a2e3a6add56d298b4bf5",
+            "321c709fab0bb0a79580785b993f8b74105bdd54fdf9a2e3a6add56d298b4bf5",
+            "321c709fab0bb0a79580785b993f8b74105bdd54fdf9a2e3a6add56d298b4bf5"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "guided_grammar": "root ::= \"Answer: \" (\"yes\" | \"no\") \", because \" [a-z ]{3,40} \".\"",
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Is the sky blue on a clear day?",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0,
+            "thinking_budget": 256
+          },
+          "count": 3,
+          "hashes": [
+            "67d2a38bf0777d6c703cae6bd95ae4fac325304dab7da7c75201db1e235e359e",
+            "67d2a38bf0777d6c703cae6bd95ae4fac325304dab7da7c75201db1e235e359e",
+            "67d2a38bf0777d6c703cae6bd95ae4fac325304dab7da7c75201db1e235e359e"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "guided_grammar": "root ::= \"Answer: \" (\"yes\" | \"no\") \", because \" [a-z ]{3,40} \".\"",
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Is the sky blue on a clear day?",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "b0e4ab03e7c58b4c136ee29584be22fa1d6fe701e5a6da7ed7079264119d1e29",
+            "b0e4ab03e7c58b4c136ee29584be22fa1d6fe701e5a6da7ed7079264119d1e29",
+            "b0e4ab03e7c58b4c136ee29584be22fa1d6fe701e5a6da7ed7079264119d1e29"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "guided_grammar": "root ::= \"Answer: \" (\"yes\" | \"no\") \", because \" [a-z ]{3,40} \".\"",
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Is the sky blue on a clear day?",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "thinking_budget": 256,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "8244dc9f6a9fb711a721dc8fecf31fe515a693e5ff16e5c660f9a44870f874a1",
+            "8244dc9f6a9fb711a721dc8fecf31fe515a693e5ff16e5c660f9a44870f874a1",
+            "8244dc9f6a9fb711a721dc8fecf31fe515a693e5ff16e5c660f9a44870f874a1"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Give today's date in ISO form.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "structured_outputs": {
+              "regex": "\\d{4}-\\d{2}-\\d{2}"
+            },
+            "temperature": 0
+          },
+          "count": 3,
+          "hashes": [
+            "64e4286600a8662814240ae2b715c6adce7a68df0aa3a1c9a7c275ffb55f39cc",
+            "64e4286600a8662814240ae2b715c6adce7a68df0aa3a1c9a7c275ffb55f39cc",
+            "64e4286600a8662814240ae2b715c6adce7a68df0aa3a1c9a7c275ffb55f39cc"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Give today's date in ISO form.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "structured_outputs": {
+              "regex": "\\d{4}-\\d{2}-\\d{2}"
+            },
+            "temperature": 0,
+            "thinking_budget": 256
+          },
+          "count": 3,
+          "hashes": [
+            "400899839ae62d552c2ae9a929b64796294a2ccd36cddad35c9bee8838dc8016",
+            "400899839ae62d552c2ae9a929b64796294a2ccd36cddad35c9bee8838dc8016",
+            "400899839ae62d552c2ae9a929b64796294a2ccd36cddad35c9bee8838dc8016"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Give today's date in ISO form.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "structured_outputs": {
+              "regex": "\\d{4}-\\d{2}-\\d{2}"
+            },
+            "temperature": 0.8,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "64e4286600a8662814240ae2b715c6adce7a68df0aa3a1c9a7c275ffb55f39cc",
+            "64e4286600a8662814240ae2b715c6adce7a68df0aa3a1c9a7c275ffb55f39cc",
+            "64e4286600a8662814240ae2b715c6adce7a68df0aa3a1c9a7c275ffb55f39cc"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Give today's date in ISO form.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "structured_outputs": {
+              "regex": "\\d{4}-\\d{2}-\\d{2}"
+            },
+            "temperature": 0.8,
+            "thinking_budget": 256,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "bc669b4659e66c9409fd9889cfcac61d53e440326d1b81220e9dc68f4780b56e",
+            "bc669b4659e66c9409fd9889cfcac61d53e440326d1b81220e9dc68f4780b56e",
+            "bc669b4659e66c9409fd9889cfcac61d53e440326d1b81220e9dc68f4780b56e"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Write two sentences about the sea.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0
+          },
+          "count": 3,
+          "hashes": [
+            "71bea47b2367b433e957cc461a2a8150a0a7c0e73ae724381a2420078d80011d",
+            "71bea47b2367b433e957cc461a2a8150a0a7c0e73ae724381a2420078d80011d",
+            "71bea47b2367b433e957cc461a2a8150a0a7c0e73ae724381a2420078d80011d"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Write two sentences about the sea.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0,
+            "thinking_budget": 256
+          },
+          "count": 3,
+          "hashes": [
+            "625ea27de49c9d2833132231eff66fb71c9e6062983e6c13eb0c24220cb1afc1",
+            "625ea27de49c9d2833132231eff66fb71c9e6062983e6c13eb0c24220cb1afc1",
+            "625ea27de49c9d2833132231eff66fb71c9e6062983e6c13eb0c24220cb1afc1"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Write two sentences about the sea.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "90528efb4df26e34f648b00717102f32113c2b363224cbac56b8c3b8ff4768ff",
+            "90528efb4df26e34f648b00717102f32113c2b363224cbac56b8c3b8ff4768ff",
+            "90528efb4df26e34f648b00717102f32113c2b363224cbac56b8c3b8ff4768ff"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Write two sentences about the sea.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "thinking_budget": 256,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "5eaa966d72c48c19e4f5f1d99bbf48d937692e3311587041e7f6d8d604e61494",
+            "5eaa966d72c48c19e4f5f1d99bbf48d937692e3311587041e7f6d8d604e61494",
+            "5eaa966d72c48c19e4f5f1d99bbf48d937692e3311587041e7f6d8d604e61494"
+          ],
+          "verified": true
+        }
+      ]
+    },
+    {
+      "platform": "M4 Pro, macOS 26.5.1",
+      "checkpoint": "VL-2B-4",
+      "native_binary_sha256": "5c8a04d4af599879797f4f5bed8e00ab7d9d70732e698bd2a1ec2a01ec762e09",
+      "original_client_exit": 0,
+      "groups": 32,
+      "passed_full_token_equality": 32,
+      "failed_full_token_equality": 0,
+      "checks": [
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Describe a cat as a JSON object with a few fields.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "response_format": {
+              "type": "json_object"
+            },
+            "temperature": 0
+          },
+          "count": 3,
+          "hashes": [
+            "b5c5f176466925a1dc9de8fff4578df4eb4e0efcdac74df82d5df7189f9de5cc",
+            "b5c5f176466925a1dc9de8fff4578df4eb4e0efcdac74df82d5df7189f9de5cc",
+            "b5c5f176466925a1dc9de8fff4578df4eb4e0efcdac74df82d5df7189f9de5cc"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Describe a cat as a JSON object with a few fields.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "response_format": {
+              "type": "json_object"
+            },
+            "temperature": 0,
+            "thinking_budget": 256
+          },
+          "count": 3,
+          "hashes": [
+            "c41981cafaa3da59c92b9e34ce1fd12f59afc0a0fb7229b849c05caf8288a35e",
+            "c41981cafaa3da59c92b9e34ce1fd12f59afc0a0fb7229b849c05caf8288a35e",
+            "c41981cafaa3da59c92b9e34ce1fd12f59afc0a0fb7229b849c05caf8288a35e"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Describe a cat as a JSON object with a few fields.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "response_format": {
+              "type": "json_object"
+            },
+            "seed": 1234,
+            "temperature": 0.8,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "caec2cb7683056a6abc4a97e4f6d632aa9a4efab60bc84a4240224c93168b289",
+            "caec2cb7683056a6abc4a97e4f6d632aa9a4efab60bc84a4240224c93168b289",
+            "caec2cb7683056a6abc4a97e4f6d632aa9a4efab60bc84a4240224c93168b289"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Describe a cat as a JSON object with a few fields.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "response_format": {
+              "type": "json_object"
+            },
+            "seed": 1234,
+            "temperature": 0.8,
+            "thinking_budget": 256,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "5fa4062e683e5f4dbc6acb92975c12d3968d4e6da37be52f0d14e4393f2d277c",
+            "5fa4062e683e5f4dbc6acb92975c12d3968d4e6da37be52f0d14e4393f2d277c",
+            "5fa4062e683e5f4dbc6acb92975c12d3968d4e6da37be52f0d14e4393f2d277c"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "What is the weather like in Lisbon today? Answer as JSON.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "response_format": {
+              "json_schema": {
+                "name": "weather",
+                "schema": {
+                  "properties": {
+                    "city": {
+                      "type": "string"
+                    },
+                    "conditions": {
+                      "enum": [
+                        "sunny",
+                        "cloudy",
+                        "rain",
+                        "snow"
+                      ]
+                    },
+                    "tags": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "maxItems": 3,
+                      "type": "array"
+                    },
+                    "temperature_c": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "city",
+                    "temperature_c",
+                    "conditions"
+                  ],
+                  "type": "object"
+                }
+              },
+              "type": "json_schema"
+            },
+            "temperature": 0
+          },
+          "count": 3,
+          "hashes": [
+            "517656ddfd0a502e0294104fe71d34a05302b61498a49da054a68987fa455812",
+            "517656ddfd0a502e0294104fe71d34a05302b61498a49da054a68987fa455812",
+            "517656ddfd0a502e0294104fe71d34a05302b61498a49da054a68987fa455812"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "What is the weather like in Lisbon today? Answer as JSON.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "response_format": {
+              "json_schema": {
+                "name": "weather",
+                "schema": {
+                  "properties": {
+                    "city": {
+                      "type": "string"
+                    },
+                    "conditions": {
+                      "enum": [
+                        "sunny",
+                        "cloudy",
+                        "rain",
+                        "snow"
+                      ]
+                    },
+                    "tags": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "maxItems": 3,
+                      "type": "array"
+                    },
+                    "temperature_c": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "city",
+                    "temperature_c",
+                    "conditions"
+                  ],
+                  "type": "object"
+                }
+              },
+              "type": "json_schema"
+            },
+            "temperature": 0,
+            "thinking_budget": 256
+          },
+          "count": 3,
+          "hashes": [
+            "361edec20fd0e7e737574dfaeec3d290f52a41f6b390a4a05fd488a0be413bf4",
+            "361edec20fd0e7e737574dfaeec3d290f52a41f6b390a4a05fd488a0be413bf4",
+            "361edec20fd0e7e737574dfaeec3d290f52a41f6b390a4a05fd488a0be413bf4"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "What is the weather like in Lisbon today? Answer as JSON.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "response_format": {
+              "json_schema": {
+                "name": "weather",
+                "schema": {
+                  "properties": {
+                    "city": {
+                      "type": "string"
+                    },
+                    "conditions": {
+                      "enum": [
+                        "sunny",
+                        "cloudy",
+                        "rain",
+                        "snow"
+                      ]
+                    },
+                    "tags": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "maxItems": 3,
+                      "type": "array"
+                    },
+                    "temperature_c": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "city",
+                    "temperature_c",
+                    "conditions"
+                  ],
+                  "type": "object"
+                }
+              },
+              "type": "json_schema"
+            },
+            "seed": 1234,
+            "temperature": 0.8,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "a829538ceb2ceb71462719b460824cfc6abc31b4bbf089ac80266aad3998be70",
+            "a829538ceb2ceb71462719b460824cfc6abc31b4bbf089ac80266aad3998be70",
+            "a829538ceb2ceb71462719b460824cfc6abc31b4bbf089ac80266aad3998be70"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "What is the weather like in Lisbon today? Answer as JSON.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "response_format": {
+              "json_schema": {
+                "name": "weather",
+                "schema": {
+                  "properties": {
+                    "city": {
+                      "type": "string"
+                    },
+                    "conditions": {
+                      "enum": [
+                        "sunny",
+                        "cloudy",
+                        "rain",
+                        "snow"
+                      ]
+                    },
+                    "tags": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "maxItems": 3,
+                      "type": "array"
+                    },
+                    "temperature_c": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "city",
+                    "temperature_c",
+                    "conditions"
+                  ],
+                  "type": "object"
+                }
+              },
+              "type": "json_schema"
+            },
+            "seed": 1234,
+            "temperature": 0.8,
+            "thinking_budget": 256,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "e334d523adbfbe07941af4f2efd60ba0955b74aa7ef7ff0d955dbaef5b2d684f",
+            "e334d523adbfbe07941af4f2efd60ba0955b74aa7ef7ff0d955dbaef5b2d684f",
+            "e334d523adbfbe07941af4f2efd60ba0955b74aa7ef7ff0d955dbaef5b2d684f"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "guided_json": {
+              "properties": {
+                "city": {
+                  "type": "string"
+                },
+                "conditions": {
+                  "enum": [
+                    "sunny",
+                    "cloudy",
+                    "rain",
+                    "snow"
+                  ]
+                },
+                "tags": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                "temperature_c": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "city",
+                "temperature_c",
+                "conditions"
+              ],
+              "type": "object"
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Make up the weather in Oslo.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0
+          },
+          "count": 3,
+          "hashes": [
+            "ec0a75ef9736b0eaa4ddd2bb5ed64eb32080b2ecbcd9dfafa72ad32675eb0784",
+            "ec0a75ef9736b0eaa4ddd2bb5ed64eb32080b2ecbcd9dfafa72ad32675eb0784",
+            "ec0a75ef9736b0eaa4ddd2bb5ed64eb32080b2ecbcd9dfafa72ad32675eb0784"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "guided_json": {
+              "properties": {
+                "city": {
+                  "type": "string"
+                },
+                "conditions": {
+                  "enum": [
+                    "sunny",
+                    "cloudy",
+                    "rain",
+                    "snow"
+                  ]
+                },
+                "tags": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                "temperature_c": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "city",
+                "temperature_c",
+                "conditions"
+              ],
+              "type": "object"
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Make up the weather in Oslo.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0,
+            "thinking_budget": 256
+          },
+          "count": 3,
+          "hashes": [
+            "342863a4b621d4d5c3b51d20415c53867cb35165f8fb08fd5d03e53d5661486f",
+            "342863a4b621d4d5c3b51d20415c53867cb35165f8fb08fd5d03e53d5661486f",
+            "342863a4b621d4d5c3b51d20415c53867cb35165f8fb08fd5d03e53d5661486f"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "guided_json": {
+              "properties": {
+                "city": {
+                  "type": "string"
+                },
+                "conditions": {
+                  "enum": [
+                    "sunny",
+                    "cloudy",
+                    "rain",
+                    "snow"
+                  ]
+                },
+                "tags": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                "temperature_c": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "city",
+                "temperature_c",
+                "conditions"
+              ],
+              "type": "object"
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Make up the weather in Oslo.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "ffd631b0cc4d82afddc08ebb896fb32419da3f546dda4854762093a24b077f37",
+            "ffd631b0cc4d82afddc08ebb896fb32419da3f546dda4854762093a24b077f37",
+            "ffd631b0cc4d82afddc08ebb896fb32419da3f546dda4854762093a24b077f37"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "guided_json": {
+              "properties": {
+                "city": {
+                  "type": "string"
+                },
+                "conditions": {
+                  "enum": [
+                    "sunny",
+                    "cloudy",
+                    "rain",
+                    "snow"
+                  ]
+                },
+                "tags": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                "temperature_c": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "city",
+                "temperature_c",
+                "conditions"
+              ],
+              "type": "object"
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Make up the weather in Oslo.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "thinking_budget": 256,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "858bc1207e3f40bac2597de755d39a6f66f82378691c31a78c565d7c3e30931a",
+            "858bc1207e3f40bac2597de755d39a6f66f82378691c31a78c565d7c3e30931a",
+            "858bc1207e3f40bac2597de755d39a6f66f82378691c31a78c565d7c3e30931a"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "guided_regex": "\\d{4}-\\d{2}-\\d{2}",
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "When did the first person walk on the moon? Give the date.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0
+          },
+          "count": 3,
+          "hashes": [
+            "5ad44b55a70b073ffc05cd0d5da67f2d8d7ec609ce3ed820534ed69697ddbe76",
+            "5ad44b55a70b073ffc05cd0d5da67f2d8d7ec609ce3ed820534ed69697ddbe76",
+            "5ad44b55a70b073ffc05cd0d5da67f2d8d7ec609ce3ed820534ed69697ddbe76"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "guided_regex": "\\d{4}-\\d{2}-\\d{2}",
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "When did the first person walk on the moon? Give the date.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0,
+            "thinking_budget": 256
+          },
+          "count": 3,
+          "hashes": [
+            "508f46ee87de098b28863ee385c865240bfc57c9b1b794fa81390c0958659825",
+            "508f46ee87de098b28863ee385c865240bfc57c9b1b794fa81390c0958659825",
+            "508f46ee87de098b28863ee385c865240bfc57c9b1b794fa81390c0958659825"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "guided_regex": "\\d{4}-\\d{2}-\\d{2}",
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "When did the first person walk on the moon? Give the date.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "466faf974ed2633c54f51bf9055f8c7f39c9e6a3fc9f759be47d5fe6f2521291",
+            "466faf974ed2633c54f51bf9055f8c7f39c9e6a3fc9f759be47d5fe6f2521291",
+            "466faf974ed2633c54f51bf9055f8c7f39c9e6a3fc9f759be47d5fe6f2521291"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "guided_regex": "\\d{4}-\\d{2}-\\d{2}",
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "When did the first person walk on the moon? Give the date.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "thinking_budget": 256,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "028e6b85824bac4cd03f1572b22f667f02bd10ff94be88cbf9b6cfceadcc9892",
+            "028e6b85824bac4cd03f1572b22f667f02bd10ff94be88cbf9b6cfceadcc9892",
+            "028e6b85824bac4cd03f1572b22f667f02bd10ff94be88cbf9b6cfceadcc9892"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "guided_choice": [
+              "positive",
+              "negative",
+              "neutral"
+            ],
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Classify the sentiment: 'I loved every minute of this film.'",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0
+          },
+          "count": 3,
+          "hashes": [
+            "28abb3eca0a660a77c572da20a61603b9ee466a3809c4bb98fcdf33912b09b3d",
+            "28abb3eca0a660a77c572da20a61603b9ee466a3809c4bb98fcdf33912b09b3d",
+            "28abb3eca0a660a77c572da20a61603b9ee466a3809c4bb98fcdf33912b09b3d"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "guided_choice": [
+              "positive",
+              "negative",
+              "neutral"
+            ],
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Classify the sentiment: 'I loved every minute of this film.'",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0,
+            "thinking_budget": 256
+          },
+          "count": 3,
+          "hashes": [
+            "896312515f03752a513f67ba40cb98b81b6212f4141dc783d93fcda3eada7b11",
+            "896312515f03752a513f67ba40cb98b81b6212f4141dc783d93fcda3eada7b11",
+            "896312515f03752a513f67ba40cb98b81b6212f4141dc783d93fcda3eada7b11"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "guided_choice": [
+              "positive",
+              "negative",
+              "neutral"
+            ],
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Classify the sentiment: 'I loved every minute of this film.'",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "28abb3eca0a660a77c572da20a61603b9ee466a3809c4bb98fcdf33912b09b3d",
+            "28abb3eca0a660a77c572da20a61603b9ee466a3809c4bb98fcdf33912b09b3d",
+            "28abb3eca0a660a77c572da20a61603b9ee466a3809c4bb98fcdf33912b09b3d"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "guided_choice": [
+              "positive",
+              "negative",
+              "neutral"
+            ],
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Classify the sentiment: 'I loved every minute of this film.'",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "thinking_budget": 256,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "3e09b96b2542053ab74ead9d3b377a78936bf8f2a4775c5f2a61f31076f6bf04",
+            "3e09b96b2542053ab74ead9d3b377a78936bf8f2a4775c5f2a61f31076f6bf04",
+            "3e09b96b2542053ab74ead9d3b377a78936bf8f2a4775c5f2a61f31076f6bf04"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "guided_grammar": "root ::= \"Answer: \" (\"yes\" | \"no\") \", because \" [a-z ]{3,40} \".\"",
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Is the sky blue on a clear day?",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0
+          },
+          "count": 3,
+          "hashes": [
+            "1c4b25c4b3154630f336ea4e5c3f8029fab55a0a171c7b53a70ddfb5c9f5ab04",
+            "1c4b25c4b3154630f336ea4e5c3f8029fab55a0a171c7b53a70ddfb5c9f5ab04",
+            "1c4b25c4b3154630f336ea4e5c3f8029fab55a0a171c7b53a70ddfb5c9f5ab04"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "guided_grammar": "root ::= \"Answer: \" (\"yes\" | \"no\") \", because \" [a-z ]{3,40} \".\"",
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Is the sky blue on a clear day?",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0,
+            "thinking_budget": 256
+          },
+          "count": 3,
+          "hashes": [
+            "352433279b31016172860966480593c25abd4083021e0ad2b2f4510a69e3f837",
+            "352433279b31016172860966480593c25abd4083021e0ad2b2f4510a69e3f837",
+            "352433279b31016172860966480593c25abd4083021e0ad2b2f4510a69e3f837"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "guided_grammar": "root ::= \"Answer: \" (\"yes\" | \"no\") \", because \" [a-z ]{3,40} \".\"",
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Is the sky blue on a clear day?",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "ba64d4389e5d82b0a3e4119e04d1d99432567b6582c8e23e5db3a64ed5761415",
+            "ba64d4389e5d82b0a3e4119e04d1d99432567b6582c8e23e5db3a64ed5761415",
+            "ba64d4389e5d82b0a3e4119e04d1d99432567b6582c8e23e5db3a64ed5761415"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "guided_grammar": "root ::= \"Answer: \" (\"yes\" | \"no\") \", because \" [a-z ]{3,40} \".\"",
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Is the sky blue on a clear day?",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "thinking_budget": 256,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "fbe0f857a5b704d9b64254e165b8384cbb7a16f2108e4b5e4d9bdfde8ea7ee8d",
+            "fbe0f857a5b704d9b64254e165b8384cbb7a16f2108e4b5e4d9bdfde8ea7ee8d",
+            "fbe0f857a5b704d9b64254e165b8384cbb7a16f2108e4b5e4d9bdfde8ea7ee8d"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Give today's date in ISO form.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "structured_outputs": {
+              "regex": "\\d{4}-\\d{2}-\\d{2}"
+            },
+            "temperature": 0
+          },
+          "count": 3,
+          "hashes": [
+            "a4397e998056b0d725b6151df114c2a4c916e9efce98a20f11ad6666c272bb39",
+            "a4397e998056b0d725b6151df114c2a4c916e9efce98a20f11ad6666c272bb39",
+            "a4397e998056b0d725b6151df114c2a4c916e9efce98a20f11ad6666c272bb39"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Give today's date in ISO form.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "structured_outputs": {
+              "regex": "\\d{4}-\\d{2}-\\d{2}"
+            },
+            "temperature": 0,
+            "thinking_budget": 256
+          },
+          "count": 3,
+          "hashes": [
+            "3daa2e15ab32f03e3ff68a8c4d72b7fdc7662fb4eca448d9960644cac8251c1e",
+            "3daa2e15ab32f03e3ff68a8c4d72b7fdc7662fb4eca448d9960644cac8251c1e",
+            "3daa2e15ab32f03e3ff68a8c4d72b7fdc7662fb4eca448d9960644cac8251c1e"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Give today's date in ISO form.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "structured_outputs": {
+              "regex": "\\d{4}-\\d{2}-\\d{2}"
+            },
+            "temperature": 0.8,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "12c1bc9f4e0160d763f9ecedc28e39f81b66664c598cacdd60d3739678fefe81",
+            "12c1bc9f4e0160d763f9ecedc28e39f81b66664c598cacdd60d3739678fefe81",
+            "12c1bc9f4e0160d763f9ecedc28e39f81b66664c598cacdd60d3739678fefe81"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Give today's date in ISO form.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "structured_outputs": {
+              "regex": "\\d{4}-\\d{2}-\\d{2}"
+            },
+            "temperature": 0.8,
+            "thinking_budget": 256,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "9dd396aa81f2a111491d2ccf92bd6674845adabc14a3e295e4266ec50c63556f",
+            "9dd396aa81f2a111491d2ccf92bd6674845adabc14a3e295e4266ec50c63556f",
+            "9dd396aa81f2a111491d2ccf92bd6674845adabc14a3e295e4266ec50c63556f"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Write two sentences about the sea.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0
+          },
+          "count": 3,
+          "hashes": [
+            "3594736c0c8b914daa5abd7a250ef25e43dd0818d86ab57e51c6acf8360c2144",
+            "3594736c0c8b914daa5abd7a250ef25e43dd0818d86ab57e51c6acf8360c2144",
+            "3594736c0c8b914daa5abd7a250ef25e43dd0818d86ab57e51c6acf8360c2144"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Write two sentences about the sea.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0,
+            "thinking_budget": 256
+          },
+          "count": 3,
+          "hashes": [
+            "d84edd56121bbadfbd11fd5e3a5d6e048aae30d4de5152be87d8608f18011260",
+            "d84edd56121bbadfbd11fd5e3a5d6e048aae30d4de5152be87d8608f18011260",
+            "d84edd56121bbadfbd11fd5e3a5d6e048aae30d4de5152be87d8608f18011260"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Write two sentences about the sea.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "3594736c0c8b914daa5abd7a250ef25e43dd0818d86ab57e51c6acf8360c2144",
+            "3594736c0c8b914daa5abd7a250ef25e43dd0818d86ab57e51c6acf8360c2144",
+            "3594736c0c8b914daa5abd7a250ef25e43dd0818d86ab57e51c6acf8360c2144"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Write two sentences about the sea.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "thinking_budget": 256,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "91a1e14a5b9fc3e27a8b4821548c7203af467f0ca1fdea0b4ba3156a2dd27a49",
+            "91a1e14a5b9fc3e27a8b4821548c7203af467f0ca1fdea0b4ba3156a2dd27a49",
+            "91a1e14a5b9fc3e27a8b4821548c7203af467f0ca1fdea0b4ba3156a2dd27a49"
+          ],
+          "verified": true
+        }
+      ]
+    },
+    {
+      "platform": "M5 Ultra, macOS 27.0",
+      "checkpoint": "1.7B-4",
+      "native_binary_sha256": "251079309919aa9b21ca8cc6a89c58fc3fc9a9baf800fa5ce6a6af313a5b5f65",
+      "original_client_exit": 0,
+      "groups": 32,
+      "passed_full_token_equality": 32,
+      "failed_full_token_equality": 0,
+      "checks": [
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Describe a cat as a JSON object with a few fields.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "response_format": {
+              "type": "json_object"
+            },
+            "temperature": 0
+          },
+          "count": 3,
+          "hashes": [
+            "97fc568e1c13add8c4f1c58c38ab18a87039408de0d789a92614693a8f5c73d0",
+            "97fc568e1c13add8c4f1c58c38ab18a87039408de0d789a92614693a8f5c73d0",
+            "97fc568e1c13add8c4f1c58c38ab18a87039408de0d789a92614693a8f5c73d0"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Describe a cat as a JSON object with a few fields.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "response_format": {
+              "type": "json_object"
+            },
+            "temperature": 0,
+            "thinking_budget": 256
+          },
+          "count": 3,
+          "hashes": [
+            "8f3cef2f2dd40372a9f5a5a45465d005711e83e73de634020964ea1164f102fc",
+            "8f3cef2f2dd40372a9f5a5a45465d005711e83e73de634020964ea1164f102fc",
+            "8f3cef2f2dd40372a9f5a5a45465d005711e83e73de634020964ea1164f102fc"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Describe a cat as a JSON object with a few fields.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "response_format": {
+              "type": "json_object"
+            },
+            "seed": 1234,
+            "temperature": 0.8,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "28e9992d945cd22c289c5a1604e9d84b8fd4d93908d1d3538e441728c2d4b149",
+            "28e9992d945cd22c289c5a1604e9d84b8fd4d93908d1d3538e441728c2d4b149",
+            "28e9992d945cd22c289c5a1604e9d84b8fd4d93908d1d3538e441728c2d4b149"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Describe a cat as a JSON object with a few fields.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "response_format": {
+              "type": "json_object"
+            },
+            "seed": 1234,
+            "temperature": 0.8,
+            "thinking_budget": 256,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "cda680f6cc3d90448f12337ac2cc1b0119f16da48a71ace0e8e1f192c9945a6d",
+            "cda680f6cc3d90448f12337ac2cc1b0119f16da48a71ace0e8e1f192c9945a6d",
+            "cda680f6cc3d90448f12337ac2cc1b0119f16da48a71ace0e8e1f192c9945a6d"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "What is the weather like in Lisbon today? Answer as JSON.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "response_format": {
+              "json_schema": {
+                "name": "weather",
+                "schema": {
+                  "properties": {
+                    "city": {
+                      "type": "string"
+                    },
+                    "conditions": {
+                      "enum": [
+                        "sunny",
+                        "cloudy",
+                        "rain",
+                        "snow"
+                      ]
+                    },
+                    "tags": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "maxItems": 3,
+                      "type": "array"
+                    },
+                    "temperature_c": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "city",
+                    "temperature_c",
+                    "conditions"
+                  ],
+                  "type": "object"
+                }
+              },
+              "type": "json_schema"
+            },
+            "temperature": 0
+          },
+          "count": 3,
+          "hashes": [
+            "d455a572b3e0b29505b67549d22ee6dbdaa3453a3f3d4c4a74d5f9c53c288ac7",
+            "d455a572b3e0b29505b67549d22ee6dbdaa3453a3f3d4c4a74d5f9c53c288ac7",
+            "d455a572b3e0b29505b67549d22ee6dbdaa3453a3f3d4c4a74d5f9c53c288ac7"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "What is the weather like in Lisbon today? Answer as JSON.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "response_format": {
+              "json_schema": {
+                "name": "weather",
+                "schema": {
+                  "properties": {
+                    "city": {
+                      "type": "string"
+                    },
+                    "conditions": {
+                      "enum": [
+                        "sunny",
+                        "cloudy",
+                        "rain",
+                        "snow"
+                      ]
+                    },
+                    "tags": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "maxItems": 3,
+                      "type": "array"
+                    },
+                    "temperature_c": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "city",
+                    "temperature_c",
+                    "conditions"
+                  ],
+                  "type": "object"
+                }
+              },
+              "type": "json_schema"
+            },
+            "temperature": 0,
+            "thinking_budget": 256
+          },
+          "count": 3,
+          "hashes": [
+            "a6703c6b4506a475098af2e37ca37cc66f508ffd46238e5f76546b1ed795021d",
+            "a6703c6b4506a475098af2e37ca37cc66f508ffd46238e5f76546b1ed795021d",
+            "a6703c6b4506a475098af2e37ca37cc66f508ffd46238e5f76546b1ed795021d"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "What is the weather like in Lisbon today? Answer as JSON.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "response_format": {
+              "json_schema": {
+                "name": "weather",
+                "schema": {
+                  "properties": {
+                    "city": {
+                      "type": "string"
+                    },
+                    "conditions": {
+                      "enum": [
+                        "sunny",
+                        "cloudy",
+                        "rain",
+                        "snow"
+                      ]
+                    },
+                    "tags": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "maxItems": 3,
+                      "type": "array"
+                    },
+                    "temperature_c": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "city",
+                    "temperature_c",
+                    "conditions"
+                  ],
+                  "type": "object"
+                }
+              },
+              "type": "json_schema"
+            },
+            "seed": 1234,
+            "temperature": 0.8,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "e2ced68110d55bbdfede82e2431832288dc53c5f2ac44e0f99e4cf28ada34b1c",
+            "e2ced68110d55bbdfede82e2431832288dc53c5f2ac44e0f99e4cf28ada34b1c",
+            "e2ced68110d55bbdfede82e2431832288dc53c5f2ac44e0f99e4cf28ada34b1c"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "What is the weather like in Lisbon today? Answer as JSON.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "response_format": {
+              "json_schema": {
+                "name": "weather",
+                "schema": {
+                  "properties": {
+                    "city": {
+                      "type": "string"
+                    },
+                    "conditions": {
+                      "enum": [
+                        "sunny",
+                        "cloudy",
+                        "rain",
+                        "snow"
+                      ]
+                    },
+                    "tags": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "maxItems": 3,
+                      "type": "array"
+                    },
+                    "temperature_c": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "city",
+                    "temperature_c",
+                    "conditions"
+                  ],
+                  "type": "object"
+                }
+              },
+              "type": "json_schema"
+            },
+            "seed": 1234,
+            "temperature": 0.8,
+            "thinking_budget": 256,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "585b2f3c6566d27343b7af1c4464f280c389a54f26ed878de701db5c0705a147",
+            "585b2f3c6566d27343b7af1c4464f280c389a54f26ed878de701db5c0705a147",
+            "585b2f3c6566d27343b7af1c4464f280c389a54f26ed878de701db5c0705a147"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "guided_json": {
+              "properties": {
+                "city": {
+                  "type": "string"
+                },
+                "conditions": {
+                  "enum": [
+                    "sunny",
+                    "cloudy",
+                    "rain",
+                    "snow"
+                  ]
+                },
+                "tags": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                "temperature_c": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "city",
+                "temperature_c",
+                "conditions"
+              ],
+              "type": "object"
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Make up the weather in Oslo.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0
+          },
+          "count": 3,
+          "hashes": [
+            "d2bf435d203b8e78856bb7eae3e2e7b7c31ae53d883fcf6564fb58f1a938376c",
+            "d2bf435d203b8e78856bb7eae3e2e7b7c31ae53d883fcf6564fb58f1a938376c",
+            "d2bf435d203b8e78856bb7eae3e2e7b7c31ae53d883fcf6564fb58f1a938376c"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "guided_json": {
+              "properties": {
+                "city": {
+                  "type": "string"
+                },
+                "conditions": {
+                  "enum": [
+                    "sunny",
+                    "cloudy",
+                    "rain",
+                    "snow"
+                  ]
+                },
+                "tags": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                "temperature_c": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "city",
+                "temperature_c",
+                "conditions"
+              ],
+              "type": "object"
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Make up the weather in Oslo.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0,
+            "thinking_budget": 256
+          },
+          "count": 3,
+          "hashes": [
+            "2febc228486dea3590e75587cb09af791e2c289b3f1f589ba69b4d81100c390d",
+            "2febc228486dea3590e75587cb09af791e2c289b3f1f589ba69b4d81100c390d",
+            "2febc228486dea3590e75587cb09af791e2c289b3f1f589ba69b4d81100c390d"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "guided_json": {
+              "properties": {
+                "city": {
+                  "type": "string"
+                },
+                "conditions": {
+                  "enum": [
+                    "sunny",
+                    "cloudy",
+                    "rain",
+                    "snow"
+                  ]
+                },
+                "tags": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                "temperature_c": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "city",
+                "temperature_c",
+                "conditions"
+              ],
+              "type": "object"
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Make up the weather in Oslo.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "4faffa1eba4aecc775cd93a9b87f1189e4df90760c98d364a69b9b0b07223162",
+            "4faffa1eba4aecc775cd93a9b87f1189e4df90760c98d364a69b9b0b07223162",
+            "4faffa1eba4aecc775cd93a9b87f1189e4df90760c98d364a69b9b0b07223162"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "guided_json": {
+              "properties": {
+                "city": {
+                  "type": "string"
+                },
+                "conditions": {
+                  "enum": [
+                    "sunny",
+                    "cloudy",
+                    "rain",
+                    "snow"
+                  ]
+                },
+                "tags": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                "temperature_c": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "city",
+                "temperature_c",
+                "conditions"
+              ],
+              "type": "object"
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Make up the weather in Oslo.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "thinking_budget": 256,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "992b757e11570bdf521bccd63218a333ec82a82851e02945b7f63f58dcf07073",
+            "992b757e11570bdf521bccd63218a333ec82a82851e02945b7f63f58dcf07073",
+            "992b757e11570bdf521bccd63218a333ec82a82851e02945b7f63f58dcf07073"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "guided_regex": "\\d{4}-\\d{2}-\\d{2}",
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "When did the first person walk on the moon? Give the date.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0
+          },
+          "count": 3,
+          "hashes": [
+            "613ee0089978b70c8c5f13ea0b1411793e8e2e09a3d03fdc84b0b5bb28aa14e8",
+            "613ee0089978b70c8c5f13ea0b1411793e8e2e09a3d03fdc84b0b5bb28aa14e8",
+            "613ee0089978b70c8c5f13ea0b1411793e8e2e09a3d03fdc84b0b5bb28aa14e8"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "guided_regex": "\\d{4}-\\d{2}-\\d{2}",
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "When did the first person walk on the moon? Give the date.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0,
+            "thinking_budget": 256
+          },
+          "count": 3,
+          "hashes": [
+            "d8c9b5ca8545ff2672e78d1bec92b38bc06719f8171049359250d4358e71e56f",
+            "d8c9b5ca8545ff2672e78d1bec92b38bc06719f8171049359250d4358e71e56f",
+            "d8c9b5ca8545ff2672e78d1bec92b38bc06719f8171049359250d4358e71e56f"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "guided_regex": "\\d{4}-\\d{2}-\\d{2}",
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "When did the first person walk on the moon? Give the date.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "94ace2a871dda93e340c3a2c4501cd061198a7e5ac82b6f32ce15e1a7be2ab7d",
+            "94ace2a871dda93e340c3a2c4501cd061198a7e5ac82b6f32ce15e1a7be2ab7d",
+            "94ace2a871dda93e340c3a2c4501cd061198a7e5ac82b6f32ce15e1a7be2ab7d"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "guided_regex": "\\d{4}-\\d{2}-\\d{2}",
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "When did the first person walk on the moon? Give the date.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "thinking_budget": 256,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "73317173791629306890fe4163ae8ef1b112f66164430be5cf413b20a8d6668d",
+            "73317173791629306890fe4163ae8ef1b112f66164430be5cf413b20a8d6668d",
+            "73317173791629306890fe4163ae8ef1b112f66164430be5cf413b20a8d6668d"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "guided_choice": [
+              "positive",
+              "negative",
+              "neutral"
+            ],
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Classify the sentiment: 'I loved every minute of this film.'",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0
+          },
+          "count": 3,
+          "hashes": [
+            "28abb3eca0a660a77c572da20a61603b9ee466a3809c4bb98fcdf33912b09b3d",
+            "28abb3eca0a660a77c572da20a61603b9ee466a3809c4bb98fcdf33912b09b3d",
+            "28abb3eca0a660a77c572da20a61603b9ee466a3809c4bb98fcdf33912b09b3d"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "guided_choice": [
+              "positive",
+              "negative",
+              "neutral"
+            ],
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Classify the sentiment: 'I loved every minute of this film.'",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0,
+            "thinking_budget": 256
+          },
+          "count": 3,
+          "hashes": [
+            "1e17a6da44a8ae08e848f819966f156cf9556f85540814634c8bdbedc65a30ae",
+            "1e17a6da44a8ae08e848f819966f156cf9556f85540814634c8bdbedc65a30ae",
+            "1e17a6da44a8ae08e848f819966f156cf9556f85540814634c8bdbedc65a30ae"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "guided_choice": [
+              "positive",
+              "negative",
+              "neutral"
+            ],
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Classify the sentiment: 'I loved every minute of this film.'",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "28abb3eca0a660a77c572da20a61603b9ee466a3809c4bb98fcdf33912b09b3d",
+            "28abb3eca0a660a77c572da20a61603b9ee466a3809c4bb98fcdf33912b09b3d",
+            "28abb3eca0a660a77c572da20a61603b9ee466a3809c4bb98fcdf33912b09b3d"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "guided_choice": [
+              "positive",
+              "negative",
+              "neutral"
+            ],
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Classify the sentiment: 'I loved every minute of this film.'",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "thinking_budget": 256,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "7d1aa328f84f06ec6e56421145b066954dcab17d74a2bb222271a610419fbc15",
+            "7d1aa328f84f06ec6e56421145b066954dcab17d74a2bb222271a610419fbc15",
+            "7d1aa328f84f06ec6e56421145b066954dcab17d74a2bb222271a610419fbc15"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "guided_grammar": "root ::= \"Answer: \" (\"yes\" | \"no\") \", because \" [a-z ]{3,40} \".\"",
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Is the sky blue on a clear day?",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0
+          },
+          "count": 3,
+          "hashes": [
+            "321c709fab0bb0a79580785b993f8b74105bdd54fdf9a2e3a6add56d298b4bf5",
+            "321c709fab0bb0a79580785b993f8b74105bdd54fdf9a2e3a6add56d298b4bf5",
+            "321c709fab0bb0a79580785b993f8b74105bdd54fdf9a2e3a6add56d298b4bf5"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "guided_grammar": "root ::= \"Answer: \" (\"yes\" | \"no\") \", because \" [a-z ]{3,40} \".\"",
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Is the sky blue on a clear day?",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0,
+            "thinking_budget": 256
+          },
+          "count": 3,
+          "hashes": [
+            "67d2a38bf0777d6c703cae6bd95ae4fac325304dab7da7c75201db1e235e359e",
+            "67d2a38bf0777d6c703cae6bd95ae4fac325304dab7da7c75201db1e235e359e",
+            "67d2a38bf0777d6c703cae6bd95ae4fac325304dab7da7c75201db1e235e359e"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "guided_grammar": "root ::= \"Answer: \" (\"yes\" | \"no\") \", because \" [a-z ]{3,40} \".\"",
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Is the sky blue on a clear day?",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "b0e4ab03e7c58b4c136ee29584be22fa1d6fe701e5a6da7ed7079264119d1e29",
+            "b0e4ab03e7c58b4c136ee29584be22fa1d6fe701e5a6da7ed7079264119d1e29",
+            "b0e4ab03e7c58b4c136ee29584be22fa1d6fe701e5a6da7ed7079264119d1e29"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "guided_grammar": "root ::= \"Answer: \" (\"yes\" | \"no\") \", because \" [a-z ]{3,40} \".\"",
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Is the sky blue on a clear day?",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "thinking_budget": 256,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "8244dc9f6a9fb711a721dc8fecf31fe515a693e5ff16e5c660f9a44870f874a1",
+            "8244dc9f6a9fb711a721dc8fecf31fe515a693e5ff16e5c660f9a44870f874a1",
+            "8244dc9f6a9fb711a721dc8fecf31fe515a693e5ff16e5c660f9a44870f874a1"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Give today's date in ISO form.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "structured_outputs": {
+              "regex": "\\d{4}-\\d{2}-\\d{2}"
+            },
+            "temperature": 0
+          },
+          "count": 3,
+          "hashes": [
+            "64e4286600a8662814240ae2b715c6adce7a68df0aa3a1c9a7c275ffb55f39cc",
+            "64e4286600a8662814240ae2b715c6adce7a68df0aa3a1c9a7c275ffb55f39cc",
+            "64e4286600a8662814240ae2b715c6adce7a68df0aa3a1c9a7c275ffb55f39cc"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Give today's date in ISO form.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "structured_outputs": {
+              "regex": "\\d{4}-\\d{2}-\\d{2}"
+            },
+            "temperature": 0,
+            "thinking_budget": 256
+          },
+          "count": 3,
+          "hashes": [
+            "400899839ae62d552c2ae9a929b64796294a2ccd36cddad35c9bee8838dc8016",
+            "400899839ae62d552c2ae9a929b64796294a2ccd36cddad35c9bee8838dc8016",
+            "400899839ae62d552c2ae9a929b64796294a2ccd36cddad35c9bee8838dc8016"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Give today's date in ISO form.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "structured_outputs": {
+              "regex": "\\d{4}-\\d{2}-\\d{2}"
+            },
+            "temperature": 0.8,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "64e4286600a8662814240ae2b715c6adce7a68df0aa3a1c9a7c275ffb55f39cc",
+            "64e4286600a8662814240ae2b715c6adce7a68df0aa3a1c9a7c275ffb55f39cc",
+            "64e4286600a8662814240ae2b715c6adce7a68df0aa3a1c9a7c275ffb55f39cc"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Give today's date in ISO form.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "structured_outputs": {
+              "regex": "\\d{4}-\\d{2}-\\d{2}"
+            },
+            "temperature": 0.8,
+            "thinking_budget": 256,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "bc669b4659e66c9409fd9889cfcac61d53e440326d1b81220e9dc68f4780b56e",
+            "bc669b4659e66c9409fd9889cfcac61d53e440326d1b81220e9dc68f4780b56e",
+            "bc669b4659e66c9409fd9889cfcac61d53e440326d1b81220e9dc68f4780b56e"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Write two sentences about the sea.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0
+          },
+          "count": 3,
+          "hashes": [
+            "71bea47b2367b433e957cc461a2a8150a0a7c0e73ae724381a2420078d80011d",
+            "71bea47b2367b433e957cc461a2a8150a0a7c0e73ae724381a2420078d80011d",
+            "71bea47b2367b433e957cc461a2a8150a0a7c0e73ae724381a2420078d80011d"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Write two sentences about the sea.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0,
+            "thinking_budget": 256
+          },
+          "count": 3,
+          "hashes": [
+            "625ea27de49c9d2833132231eff66fb71c9e6062983e6c13eb0c24220cb1afc1",
+            "625ea27de49c9d2833132231eff66fb71c9e6062983e6c13eb0c24220cb1afc1",
+            "625ea27de49c9d2833132231eff66fb71c9e6062983e6c13eb0c24220cb1afc1"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Write two sentences about the sea.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "90528efb4df26e34f648b00717102f32113c2b363224cbac56b8c3b8ff4768ff",
+            "90528efb4df26e34f648b00717102f32113c2b363224cbac56b8c3b8ff4768ff",
+            "90528efb4df26e34f648b00717102f32113c2b363224cbac56b8c3b8ff4768ff"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Write two sentences about the sea.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "thinking_budget": 256,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "5eaa966d72c48c19e4f5f1d99bbf48d937692e3311587041e7f6d8d604e61494",
+            "5eaa966d72c48c19e4f5f1d99bbf48d937692e3311587041e7f6d8d604e61494",
+            "5eaa966d72c48c19e4f5f1d99bbf48d937692e3311587041e7f6d8d604e61494"
+          ],
+          "verified": true
+        }
+      ]
+    },
+    {
+      "platform": "M5 Ultra, macOS 27.0",
+      "checkpoint": "VL-2B-4",
+      "native_binary_sha256": "251079309919aa9b21ca8cc6a89c58fc3fc9a9baf800fa5ce6a6af313a5b5f65",
+      "original_client_exit": 0,
+      "groups": 32,
+      "passed_full_token_equality": 32,
+      "failed_full_token_equality": 0,
+      "checks": [
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Describe a cat as a JSON object with a few fields.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "response_format": {
+              "type": "json_object"
+            },
+            "temperature": 0
+          },
+          "count": 3,
+          "hashes": [
+            "b5c5f176466925a1dc9de8fff4578df4eb4e0efcdac74df82d5df7189f9de5cc",
+            "b5c5f176466925a1dc9de8fff4578df4eb4e0efcdac74df82d5df7189f9de5cc",
+            "b5c5f176466925a1dc9de8fff4578df4eb4e0efcdac74df82d5df7189f9de5cc"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Describe a cat as a JSON object with a few fields.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "response_format": {
+              "type": "json_object"
+            },
+            "temperature": 0,
+            "thinking_budget": 256
+          },
+          "count": 3,
+          "hashes": [
+            "c41981cafaa3da59c92b9e34ce1fd12f59afc0a0fb7229b849c05caf8288a35e",
+            "c41981cafaa3da59c92b9e34ce1fd12f59afc0a0fb7229b849c05caf8288a35e",
+            "c41981cafaa3da59c92b9e34ce1fd12f59afc0a0fb7229b849c05caf8288a35e"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Describe a cat as a JSON object with a few fields.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "response_format": {
+              "type": "json_object"
+            },
+            "seed": 1234,
+            "temperature": 0.8,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "caec2cb7683056a6abc4a97e4f6d632aa9a4efab60bc84a4240224c93168b289",
+            "caec2cb7683056a6abc4a97e4f6d632aa9a4efab60bc84a4240224c93168b289",
+            "caec2cb7683056a6abc4a97e4f6d632aa9a4efab60bc84a4240224c93168b289"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Describe a cat as a JSON object with a few fields.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "response_format": {
+              "type": "json_object"
+            },
+            "seed": 1234,
+            "temperature": 0.8,
+            "thinking_budget": 256,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "5fa4062e683e5f4dbc6acb92975c12d3968d4e6da37be52f0d14e4393f2d277c",
+            "5fa4062e683e5f4dbc6acb92975c12d3968d4e6da37be52f0d14e4393f2d277c",
+            "5fa4062e683e5f4dbc6acb92975c12d3968d4e6da37be52f0d14e4393f2d277c"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "What is the weather like in Lisbon today? Answer as JSON.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "response_format": {
+              "json_schema": {
+                "name": "weather",
+                "schema": {
+                  "properties": {
+                    "city": {
+                      "type": "string"
+                    },
+                    "conditions": {
+                      "enum": [
+                        "sunny",
+                        "cloudy",
+                        "rain",
+                        "snow"
+                      ]
+                    },
+                    "tags": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "maxItems": 3,
+                      "type": "array"
+                    },
+                    "temperature_c": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "city",
+                    "temperature_c",
+                    "conditions"
+                  ],
+                  "type": "object"
+                }
+              },
+              "type": "json_schema"
+            },
+            "temperature": 0
+          },
+          "count": 3,
+          "hashes": [
+            "517656ddfd0a502e0294104fe71d34a05302b61498a49da054a68987fa455812",
+            "517656ddfd0a502e0294104fe71d34a05302b61498a49da054a68987fa455812",
+            "517656ddfd0a502e0294104fe71d34a05302b61498a49da054a68987fa455812"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "What is the weather like in Lisbon today? Answer as JSON.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "response_format": {
+              "json_schema": {
+                "name": "weather",
+                "schema": {
+                  "properties": {
+                    "city": {
+                      "type": "string"
+                    },
+                    "conditions": {
+                      "enum": [
+                        "sunny",
+                        "cloudy",
+                        "rain",
+                        "snow"
+                      ]
+                    },
+                    "tags": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "maxItems": 3,
+                      "type": "array"
+                    },
+                    "temperature_c": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "city",
+                    "temperature_c",
+                    "conditions"
+                  ],
+                  "type": "object"
+                }
+              },
+              "type": "json_schema"
+            },
+            "temperature": 0,
+            "thinking_budget": 256
+          },
+          "count": 3,
+          "hashes": [
+            "361edec20fd0e7e737574dfaeec3d290f52a41f6b390a4a05fd488a0be413bf4",
+            "361edec20fd0e7e737574dfaeec3d290f52a41f6b390a4a05fd488a0be413bf4",
+            "361edec20fd0e7e737574dfaeec3d290f52a41f6b390a4a05fd488a0be413bf4"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "What is the weather like in Lisbon today? Answer as JSON.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "response_format": {
+              "json_schema": {
+                "name": "weather",
+                "schema": {
+                  "properties": {
+                    "city": {
+                      "type": "string"
+                    },
+                    "conditions": {
+                      "enum": [
+                        "sunny",
+                        "cloudy",
+                        "rain",
+                        "snow"
+                      ]
+                    },
+                    "tags": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "maxItems": 3,
+                      "type": "array"
+                    },
+                    "temperature_c": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "city",
+                    "temperature_c",
+                    "conditions"
+                  ],
+                  "type": "object"
+                }
+              },
+              "type": "json_schema"
+            },
+            "seed": 1234,
+            "temperature": 0.8,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "a829538ceb2ceb71462719b460824cfc6abc31b4bbf089ac80266aad3998be70",
+            "a829538ceb2ceb71462719b460824cfc6abc31b4bbf089ac80266aad3998be70",
+            "a829538ceb2ceb71462719b460824cfc6abc31b4bbf089ac80266aad3998be70"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "What is the weather like in Lisbon today? Answer as JSON.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "response_format": {
+              "json_schema": {
+                "name": "weather",
+                "schema": {
+                  "properties": {
+                    "city": {
+                      "type": "string"
+                    },
+                    "conditions": {
+                      "enum": [
+                        "sunny",
+                        "cloudy",
+                        "rain",
+                        "snow"
+                      ]
+                    },
+                    "tags": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "maxItems": 3,
+                      "type": "array"
+                    },
+                    "temperature_c": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "city",
+                    "temperature_c",
+                    "conditions"
+                  ],
+                  "type": "object"
+                }
+              },
+              "type": "json_schema"
+            },
+            "seed": 1234,
+            "temperature": 0.8,
+            "thinking_budget": 256,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "e334d523adbfbe07941af4f2efd60ba0955b74aa7ef7ff0d955dbaef5b2d684f",
+            "e334d523adbfbe07941af4f2efd60ba0955b74aa7ef7ff0d955dbaef5b2d684f",
+            "e334d523adbfbe07941af4f2efd60ba0955b74aa7ef7ff0d955dbaef5b2d684f"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "guided_json": {
+              "properties": {
+                "city": {
+                  "type": "string"
+                },
+                "conditions": {
+                  "enum": [
+                    "sunny",
+                    "cloudy",
+                    "rain",
+                    "snow"
+                  ]
+                },
+                "tags": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                "temperature_c": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "city",
+                "temperature_c",
+                "conditions"
+              ],
+              "type": "object"
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Make up the weather in Oslo.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0
+          },
+          "count": 3,
+          "hashes": [
+            "ec0a75ef9736b0eaa4ddd2bb5ed64eb32080b2ecbcd9dfafa72ad32675eb0784",
+            "ec0a75ef9736b0eaa4ddd2bb5ed64eb32080b2ecbcd9dfafa72ad32675eb0784",
+            "ec0a75ef9736b0eaa4ddd2bb5ed64eb32080b2ecbcd9dfafa72ad32675eb0784"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "guided_json": {
+              "properties": {
+                "city": {
+                  "type": "string"
+                },
+                "conditions": {
+                  "enum": [
+                    "sunny",
+                    "cloudy",
+                    "rain",
+                    "snow"
+                  ]
+                },
+                "tags": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                "temperature_c": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "city",
+                "temperature_c",
+                "conditions"
+              ],
+              "type": "object"
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Make up the weather in Oslo.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0,
+            "thinking_budget": 256
+          },
+          "count": 3,
+          "hashes": [
+            "342863a4b621d4d5c3b51d20415c53867cb35165f8fb08fd5d03e53d5661486f",
+            "342863a4b621d4d5c3b51d20415c53867cb35165f8fb08fd5d03e53d5661486f",
+            "342863a4b621d4d5c3b51d20415c53867cb35165f8fb08fd5d03e53d5661486f"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "guided_json": {
+              "properties": {
+                "city": {
+                  "type": "string"
+                },
+                "conditions": {
+                  "enum": [
+                    "sunny",
+                    "cloudy",
+                    "rain",
+                    "snow"
+                  ]
+                },
+                "tags": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                "temperature_c": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "city",
+                "temperature_c",
+                "conditions"
+              ],
+              "type": "object"
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Make up the weather in Oslo.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "ffd631b0cc4d82afddc08ebb896fb32419da3f546dda4854762093a24b077f37",
+            "ffd631b0cc4d82afddc08ebb896fb32419da3f546dda4854762093a24b077f37",
+            "ffd631b0cc4d82afddc08ebb896fb32419da3f546dda4854762093a24b077f37"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "guided_json": {
+              "properties": {
+                "city": {
+                  "type": "string"
+                },
+                "conditions": {
+                  "enum": [
+                    "sunny",
+                    "cloudy",
+                    "rain",
+                    "snow"
+                  ]
+                },
+                "tags": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                "temperature_c": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "city",
+                "temperature_c",
+                "conditions"
+              ],
+              "type": "object"
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Make up the weather in Oslo.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "thinking_budget": 256,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "858bc1207e3f40bac2597de755d39a6f66f82378691c31a78c565d7c3e30931a",
+            "858bc1207e3f40bac2597de755d39a6f66f82378691c31a78c565d7c3e30931a",
+            "858bc1207e3f40bac2597de755d39a6f66f82378691c31a78c565d7c3e30931a"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "guided_regex": "\\d{4}-\\d{2}-\\d{2}",
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "When did the first person walk on the moon? Give the date.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0
+          },
+          "count": 3,
+          "hashes": [
+            "5ad44b55a70b073ffc05cd0d5da67f2d8d7ec609ce3ed820534ed69697ddbe76",
+            "5ad44b55a70b073ffc05cd0d5da67f2d8d7ec609ce3ed820534ed69697ddbe76",
+            "5ad44b55a70b073ffc05cd0d5da67f2d8d7ec609ce3ed820534ed69697ddbe76"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "guided_regex": "\\d{4}-\\d{2}-\\d{2}",
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "When did the first person walk on the moon? Give the date.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0,
+            "thinking_budget": 256
+          },
+          "count": 3,
+          "hashes": [
+            "508f46ee87de098b28863ee385c865240bfc57c9b1b794fa81390c0958659825",
+            "508f46ee87de098b28863ee385c865240bfc57c9b1b794fa81390c0958659825",
+            "508f46ee87de098b28863ee385c865240bfc57c9b1b794fa81390c0958659825"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "guided_regex": "\\d{4}-\\d{2}-\\d{2}",
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "When did the first person walk on the moon? Give the date.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "466faf974ed2633c54f51bf9055f8c7f39c9e6a3fc9f759be47d5fe6f2521291",
+            "466faf974ed2633c54f51bf9055f8c7f39c9e6a3fc9f759be47d5fe6f2521291",
+            "466faf974ed2633c54f51bf9055f8c7f39c9e6a3fc9f759be47d5fe6f2521291"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "guided_regex": "\\d{4}-\\d{2}-\\d{2}",
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "When did the first person walk on the moon? Give the date.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "thinking_budget": 256,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "028e6b85824bac4cd03f1572b22f667f02bd10ff94be88cbf9b6cfceadcc9892",
+            "028e6b85824bac4cd03f1572b22f667f02bd10ff94be88cbf9b6cfceadcc9892",
+            "028e6b85824bac4cd03f1572b22f667f02bd10ff94be88cbf9b6cfceadcc9892"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "guided_choice": [
+              "positive",
+              "negative",
+              "neutral"
+            ],
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Classify the sentiment: 'I loved every minute of this film.'",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0
+          },
+          "count": 3,
+          "hashes": [
+            "28abb3eca0a660a77c572da20a61603b9ee466a3809c4bb98fcdf33912b09b3d",
+            "28abb3eca0a660a77c572da20a61603b9ee466a3809c4bb98fcdf33912b09b3d",
+            "28abb3eca0a660a77c572da20a61603b9ee466a3809c4bb98fcdf33912b09b3d"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "guided_choice": [
+              "positive",
+              "negative",
+              "neutral"
+            ],
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Classify the sentiment: 'I loved every minute of this film.'",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0,
+            "thinking_budget": 256
+          },
+          "count": 3,
+          "hashes": [
+            "896312515f03752a513f67ba40cb98b81b6212f4141dc783d93fcda3eada7b11",
+            "896312515f03752a513f67ba40cb98b81b6212f4141dc783d93fcda3eada7b11",
+            "896312515f03752a513f67ba40cb98b81b6212f4141dc783d93fcda3eada7b11"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "guided_choice": [
+              "positive",
+              "negative",
+              "neutral"
+            ],
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Classify the sentiment: 'I loved every minute of this film.'",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "28abb3eca0a660a77c572da20a61603b9ee466a3809c4bb98fcdf33912b09b3d",
+            "28abb3eca0a660a77c572da20a61603b9ee466a3809c4bb98fcdf33912b09b3d",
+            "28abb3eca0a660a77c572da20a61603b9ee466a3809c4bb98fcdf33912b09b3d"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "guided_choice": [
+              "positive",
+              "negative",
+              "neutral"
+            ],
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Classify the sentiment: 'I loved every minute of this film.'",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "thinking_budget": 256,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "3e09b96b2542053ab74ead9d3b377a78936bf8f2a4775c5f2a61f31076f6bf04",
+            "3e09b96b2542053ab74ead9d3b377a78936bf8f2a4775c5f2a61f31076f6bf04",
+            "3e09b96b2542053ab74ead9d3b377a78936bf8f2a4775c5f2a61f31076f6bf04"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "guided_grammar": "root ::= \"Answer: \" (\"yes\" | \"no\") \", because \" [a-z ]{3,40} \".\"",
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Is the sky blue on a clear day?",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0
+          },
+          "count": 3,
+          "hashes": [
+            "1c4b25c4b3154630f336ea4e5c3f8029fab55a0a171c7b53a70ddfb5c9f5ab04",
+            "1c4b25c4b3154630f336ea4e5c3f8029fab55a0a171c7b53a70ddfb5c9f5ab04",
+            "1c4b25c4b3154630f336ea4e5c3f8029fab55a0a171c7b53a70ddfb5c9f5ab04"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "guided_grammar": "root ::= \"Answer: \" (\"yes\" | \"no\") \", because \" [a-z ]{3,40} \".\"",
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Is the sky blue on a clear day?",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0,
+            "thinking_budget": 256
+          },
+          "count": 3,
+          "hashes": [
+            "352433279b31016172860966480593c25abd4083021e0ad2b2f4510a69e3f837",
+            "352433279b31016172860966480593c25abd4083021e0ad2b2f4510a69e3f837",
+            "352433279b31016172860966480593c25abd4083021e0ad2b2f4510a69e3f837"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "guided_grammar": "root ::= \"Answer: \" (\"yes\" | \"no\") \", because \" [a-z ]{3,40} \".\"",
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Is the sky blue on a clear day?",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "ba64d4389e5d82b0a3e4119e04d1d99432567b6582c8e23e5db3a64ed5761415",
+            "ba64d4389e5d82b0a3e4119e04d1d99432567b6582c8e23e5db3a64ed5761415",
+            "ba64d4389e5d82b0a3e4119e04d1d99432567b6582c8e23e5db3a64ed5761415"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "guided_grammar": "root ::= \"Answer: \" (\"yes\" | \"no\") \", because \" [a-z ]{3,40} \".\"",
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Is the sky blue on a clear day?",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "thinking_budget": 256,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "fbe0f857a5b704d9b64254e165b8384cbb7a16f2108e4b5e4d9bdfde8ea7ee8d",
+            "fbe0f857a5b704d9b64254e165b8384cbb7a16f2108e4b5e4d9bdfde8ea7ee8d",
+            "fbe0f857a5b704d9b64254e165b8384cbb7a16f2108e4b5e4d9bdfde8ea7ee8d"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Give today's date in ISO form.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "structured_outputs": {
+              "regex": "\\d{4}-\\d{2}-\\d{2}"
+            },
+            "temperature": 0
+          },
+          "count": 3,
+          "hashes": [
+            "a4397e998056b0d725b6151df114c2a4c916e9efce98a20f11ad6666c272bb39",
+            "a4397e998056b0d725b6151df114c2a4c916e9efce98a20f11ad6666c272bb39",
+            "a4397e998056b0d725b6151df114c2a4c916e9efce98a20f11ad6666c272bb39"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Give today's date in ISO form.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "structured_outputs": {
+              "regex": "\\d{4}-\\d{2}-\\d{2}"
+            },
+            "temperature": 0,
+            "thinking_budget": 256
+          },
+          "count": 3,
+          "hashes": [
+            "3daa2e15ab32f03e3ff68a8c4d72b7fdc7662fb4eca448d9960644cac8251c1e",
+            "3daa2e15ab32f03e3ff68a8c4d72b7fdc7662fb4eca448d9960644cac8251c1e",
+            "3daa2e15ab32f03e3ff68a8c4d72b7fdc7662fb4eca448d9960644cac8251c1e"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Give today's date in ISO form.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "structured_outputs": {
+              "regex": "\\d{4}-\\d{2}-\\d{2}"
+            },
+            "temperature": 0.8,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "12c1bc9f4e0160d763f9ecedc28e39f81b66664c598cacdd60d3739678fefe81",
+            "12c1bc9f4e0160d763f9ecedc28e39f81b66664c598cacdd60d3739678fefe81",
+            "12c1bc9f4e0160d763f9ecedc28e39f81b66664c598cacdd60d3739678fefe81"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Give today's date in ISO form.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "structured_outputs": {
+              "regex": "\\d{4}-\\d{2}-\\d{2}"
+            },
+            "temperature": 0.8,
+            "thinking_budget": 256,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "9dd396aa81f2a111491d2ccf92bd6674845adabc14a3e295e4266ec50c63556f",
+            "9dd396aa81f2a111491d2ccf92bd6674845adabc14a3e295e4266ec50c63556f",
+            "9dd396aa81f2a111491d2ccf92bd6674845adabc14a3e295e4266ec50c63556f"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Write two sentences about the sea.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0
+          },
+          "count": 3,
+          "hashes": [
+            "3594736c0c8b914daa5abd7a250ef25e43dd0818d86ab57e51c6acf8360c2144",
+            "3594736c0c8b914daa5abd7a250ef25e43dd0818d86ab57e51c6acf8360c2144",
+            "3594736c0c8b914daa5abd7a250ef25e43dd0818d86ab57e51c6acf8360c2144"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Write two sentences about the sea.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "temperature": 0,
+            "thinking_budget": 256
+          },
+          "count": 3,
+          "hashes": [
+            "d84edd56121bbadfbd11fd5e3a5d6e048aae30d4de5152be87d8608f18011260",
+            "d84edd56121bbadfbd11fd5e3a5d6e048aae30d4de5152be87d8608f18011260",
+            "d84edd56121bbadfbd11fd5e3a5d6e048aae30d4de5152be87d8608f18011260"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            },
+            "max_tokens": 400,
+            "messages": [
+              {
+                "content": "Write two sentences about the sea.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "3594736c0c8b914daa5abd7a250ef25e43dd0818d86ab57e51c6acf8360c2144",
+            "3594736c0c8b914daa5abd7a250ef25e43dd0818d86ab57e51c6acf8360c2144",
+            "3594736c0c8b914daa5abd7a250ef25e43dd0818d86ab57e51c6acf8360c2144"
+          ],
+          "verified": true
+        },
+        {
+          "request": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "content": "Write two sentences about the sea.",
+                "role": "user"
+              }
+            ],
+            "model": "lfm3-check",
+            "seed": 1234,
+            "temperature": 0.8,
+            "thinking_budget": 256,
+            "top_p": 0.95
+          },
+          "count": 3,
+          "hashes": [
+            "91a1e14a5b9fc3e27a8b4821548c7203af467f0ca1fdea0b4ba3156a2dd27a49",
+            "91a1e14a5b9fc3e27a8b4821548c7203af467f0ca1fdea0b4ba3156a2dd27a49",
+            "91a1e14a5b9fc3e27a8b4821548c7203af467f0ca1fdea0b4ba3156a2dd27a49"
+          ],
+          "verified": true
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,406 @@
+{
+  "status": "Default-off development option; numerical gates passed on M4 and small cold-TTFT reductions observed",
+  "date": "2026-10-30",
+  "build_option": "-Dlfm3-defer-prompt-head=true",
+  "default_enabled": false,
+  "release_builds": "Enabled option refused with explicit release version; distribution and host-only engine modules remain disabled",
+  "change": "Skip vocabulary projection and logits copy only on unobserved intermediate prompt chunks; retain transformer work and cache commits. Final heads, marked reuse observers and arbitrary interruption observers retain logits. Recorded/trace forwards reject Head.none.",
+  "model": {
+    "family": "LFM3-VL-2B-MLX-4bit",
+    "weights_sha256": "58268dfdf441ae4020d2a52fc97a814645e8a9624946e2d490403d4dcd71a255",
+    "config_sha256": "0efb7708e0771e3e104ac628954cdc71070dd436e0b7974615bd1b9eb836f9d9"
+  },
+  "device": "Apple M4",
+  "model_qualification": {
+    "prompt_tokens": [
+      2048,
+      8192
+    ],
+    "skipped_intermediate_heads": [
+      14,
+      62
+    ],
+    "chunk_rows": 128,
+    "mark_boundaries": [
+      129,
+      257
+    ],
+    "checks": [
+      "Every chunk active full-addressed KV and convolution state bytes",
+      "Observed and final full-width BF16 logits",
+      "Skipped-head cache logits remain unchanged",
+      "Snapshot bytes at marks",
+      "Saved prefix257 resume state and final logits",
+      "16 greedy output IDs and full logits/state per decode step",
+      "Real backend mark, cancellation, yield, interrupted-cache cleanup, saved-prefix resume and first-token equality"
+    ],
+    "observer_events_per_mode": [
+      2,
+      3,
+      3
+    ],
+    "negative_control": "Deliberately omitting final head rejected with DeferredHeadByteMismatch",
+    "summary_sha256": "793b02d962098d013878d14768ede9f4d764697fa8ad546482f941f5220877cc",
+    "prompt_fixture_sha256": {
+      "vl-2048.npy": "82c7dac5126bf3f7bf789f2a7385214044ad7ace0d151c52935e139ad99bcf2b",
+      "vl-8192.npy": "b371a7a09adfed00451d2aeba2dc64f5851e7ee62136dddcd8f77e1e07673581"
+    },
+    "prompt_sources": [
+      "docs/receipts/lfm3/cold-prompts/vl-2048.ids.json",
+      "docs/receipts/lfm3/cold-prompts/vl-8192.ids.json"
+    ]
+  },
+  "image_qualification": {
+    "scope": "Legacy cat-derived projected rows from earlier preprocessing, not the corrected current processor. Injected70rows into derived512tokens; vision tower not rerun.",
+    "image_start": 4,
+    "image_rows": 70,
+    "prompt_tokens": 512,
+    "skipped_heads": 2,
+    "checks": [
+      "active KV/conv bytes",
+      "final logits",
+      "mark snapshots",
+      "prefix resume",
+      "16 decode IDs and logits"
+    ],
+    "summary_sha256": "f044d2d922184927cf60e416fcccb0535cb44a23a0b53113553aca9fb0509692"
+  },
+  "served_comparison": {
+    "scope": "LOCAL M4 VL4 matched private native false/true deferredhead served cold2k8k, two legs each, not MLX comparison",
+    "order": [
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline"
+    ],
+    "samples_per_route": 2,
+    "prompt_cache": false,
+    "output_tokens": 16,
+    "prompt_ids": "Exact pinned token arrays checked through native tokenize endpoint for both routes",
+    "output_identity": "All response text digests equal. Cold client does not emit token IDs; separate model qualification proves16 IDs/full logits.",
+    "baseline_binary_sha256": "628c8ef425c003cc4ac22036a46612aada21f8d8bf6dbf2ff382d21fb98389bc",
+    "candidate_binary_sha256": "65b13cb701af5d30b7d9411352b63972a5e546e48836854671da7cf5ffa37700",
+    "predeclared_baseline_drift_limit": 0.05,
+    "cases": [
+      {
+        "prompt_tokens": 2048,
+        "baseline_ttft_s": [
+          3.3865730413235724,
+          3.3919462081976235
+        ],
+        "candidate_ttft_s": [
+          3.3729968750849366,
+          3.3754817922599614
+        ],
+        "baseline_median_s": 3.389259624760598,
+        "candidate_median_s": 3.374239333672449,
+        "baseline_over_candidate": 1.0044514599003862,
+        "baseline_first_last_drift": 0.0015866088841098858,
+        "stable_at_5percent": true,
+        "output_text_sha256_equal": true,
+        "output_token_id_equality": "not emitted by cold client; separate model qualification covers16 IDs/logits",
+        "prompt_ids": "both routes /tokenize exact pinned arrays"
+      },
+      {
+        "prompt_tokens": 8192,
+        "baseline_ttft_s": [
+          17.143353125080466,
+          17.1442855829373
+        ],
+        "candidate_ttft_s": [
+          17.07568662473932,
+          17.081687083933502
+        ],
+        "baseline_median_s": 17.143819354008883,
+        "candidate_median_s": 17.07868685433641,
+        "baseline_over_candidate": 1.0038136714038957,
+        "baseline_first_last_drift": 5.4391801302289267e-05,
+        "stable_at_5percent": true,
+        "output_text_sha256_equal": true,
+        "output_token_id_equality": "not emitted by cold client; separate model qualification covers16 IDs/logits",
+        "prompt_ids": "both routes /tokenize exact pinned arrays"
+      }
+    ],
+    "summary_sha256": "ba05fd65735fa1c6c8dbb10405d8f991d0360e8f71507c7befd84a1597553473",
+    "limitations": "Small observed gains from two samples per route; no statistical confidence interval, M5, MLX comparison, fresh vision-tower or broad checkpoint claim. Public build option plumbing uses existing lfm3_options; measured pair used equivalent explicit native backend option."
+  },
+  "reproduce": "Build tf-lfm3-deferred-head; run MODEL TOKENS.npy OUTPUT.json, optionally IMAGE_ROWS.bf16 IMAGE_START. Use --bad-final for planted rejection. Inputs require258..8192 tokens. Compare matched native builds with option false/true using the same cold requests, cache disabled and exclusive device admission.",
+  "public_integration_validation": {
+    "default_build": "native, tf-lfm3-deferred-head, dev-tools, test-lfm3-prefill-host: passed",
+    "enabled_build": "native, tf-lfm3-deferred-head, test-lfm3-prefill-host with optiontrue: passed",
+    "cpu": "apple_m1",
+    "release_enabled_control": "Rejected with Deferred prompt head is a development-only option",
+    "lean": {
+      "baseline": 428,
+      "current": 428,
+      "new": 0
+    },
+    "enabled_native_sha256": "c7229956a5349fa31df3301c4cbe051da2c028c61c761a68a321b885c5b54ef3",
+    "qualifier_sha256": "32dc59e753e11aa8253e79b028d6aac97f6aa900a8262fdc194785a0627a16ca",
+    "public_gpu": {
+      "device": "Apple M4",
+      "compiled_development_default": true,
+      "text_prompt_tokens": 2048,
+      "text_skipped_heads": 14,
+      "injected_image_prompt_tokens": 512,
+      "image_skipped_heads": 2,
+      "full_state_logits_resume_and_16_decode_equal": true,
+      "actual_backend_mark_cancel_yield_pass": true,
+      "bad_final_control": "Rejected with DeferredHeadByteMismatch",
+      "runs_exit_codes": [
+        0,
+        0,
+        1
+      ],
+      "runner_passed": true,
+      "receipt_sha256": "3ac964afb306ff2b9cdc174e12980169de8d3a202b3c232480aaf900c24bf999",
+      "log_sha256": [
+        "d799f4634441be1b978e2ceffd7f4032ff312a1f54dc2c8f62b2f93d23cc186c",
+        "18de5b86c6617d2535e31170c66517cbc26a6a267c020ace5ed891ee1e9bae14",
+        "1172a8168a0b5e984c0bba5040ff453a87df314216f8ced4a425ddcdda3b1c7e"
+      ],
+      "manifest_sha256": "4d299d86188ebf06f6cca420aa0144b722fb58f0bd215bcd7500fba568b19b64"
+    }
+  },
+  "public_m5_qualification": {
+    "scope": "Public compiled optiontrue; text2k/8k, legacyinjectedimage512; no M5 timing claim",
+    "skipped_heads": [
+      14,
+      62,
+      2
+    ],
+    "full_state_logits_resume_16_decode_equal": true,
+    "actual_backend_callbacks_pass": true,
+    "negative_final_control_rejected": true,
+    "summary_sha256": "f667e2c499b34781fb8b24be3cf45a35a23d1efaa8a0c852fc61f73ae291b96a",
+    "stage_receipts": {
+      "smoke": {
+        "exits": [
+          0
+        ],
+        "receipt_sha256": "38dd8dd4d4df72cf2157a3fa21e66abeb6877bbfefe48e9afc2601dabd1e4aca"
+      },
+      "positive": {
+        "exits": [
+          0,
+          0
+        ],
+        "receipt_sha256": "a901095aa17e91746684785a5fb186154734da0e3f5b4b50201540a80f224c46"
+      },
+      "controls": {
+        "exits": [
+          1
+        ],
+        "receipt_sha256": "dca51f989b46fc574eaca1df22d70aa33214683e9e3579584c5ad7ca7f9a72d3"
+      }
+    }
+  },
+  "corrected_image_qualification": {
+    "device": "Apple M4",
+    "scope": "Corrected current-processor cat70projectedrows injected into same512token prompt; tower not rerun in this gate",
+    "projected_rows_sha256": "ffa0401f452f39a07833d6692ac9eff0d5485cc93a14fb3433bdad74c42ab05e",
+    "patches_sha256": "9d39c11551f105b8982e3a9acceffcdf687d360c17a7931b7fff21757a6e5473",
+    "independent_prescribed_native_equal_words": 143360,
+    "legacy_vs_corrected_different_words": 126898,
+    "skipped_heads": 2,
+    "state_logits_snapshots_resume_16_decode_equal": true,
+    "receipt_sha256": "578d28c60b74a562c647de3bbf8fd62efc828bb46be419c316e1d02155d36db0",
+    "log_sha256": "18de5b86c6617d2535e31170c66517cbc26a6a267c020ace5ed891ee1e9bae14",
+    "M5_status": "Passed: same corrected injected rows; full state/logits, two snapshots, resumed prefix257 and16 decode tokens equal; two heads skipped. No fresh tower or timing claim.",
+    "M5_manifest_sha256": "5f22ce436a487a3571d752c3a8faf153fe70676656e628973f1ea84e425f1a38",
+    "M5_receipt_sha256": "03dd2eed55e94ab08b1cc709825ac104321111428b569e834c2a2bd27e15d133",
+    "M5_result_sha256": "bf3ecda81358da9c03799605fffc4fbd2d9fe4140f76737f2b432afad2a65b69",
+    "M5_log_sha256": "18de5b86c6617d2535e31170c66517cbc26a6a267c020ace5ed891ee1e9bae14"
+  },
+  "composed_attention_deferred_m5": {
+    "scope": "Same-source native build options false/false versus true/true; VL4 text2k/8k and corrected injected image512. No fresh tower, wider checkpoint or timing claim.",
+    "manifest_sha256": "aceb3c983a5fbad89672433cbb2c65c6b74682ffe607537af6e0bc30dabd2d5e",
+    "cross_binary_final_active_kv_conv_logits_sha_and_16_tokens_equal": true,
+    "per_binary_all_chunk_state_observed_logits_marks_resume_callbacks_pass": true,
+    "nonvacuous_skipped_heads": [
+      14,
+      62,
+      2
+    ],
+    "negative_controls": [
+      "final head omitted: DeferredHeadByteMismatch",
+      "planted snapshot hash: ComposedStateMismatch"
+    ],
+    "stages": {
+      "smoke": {
+        "receipt_sha256": "76913a198435a0319a1f411dd2848da1236f8bb56523d66ba4d0bf4b6fe5b6e3",
+        "exit_codes": [
+          0,
+          0,
+          0
+        ]
+      },
+      "positive": {
+        "receipt_sha256": "ee303349a99247bd055609fd7b3c23b526743de5b55cac8e1917bb8cd88df520",
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "controls": {
+        "receipt_sha256": "e45833c6999f45aa9c425e474d28778b6e4948f1600b1c9d9bca36d9468e8952",
+        "exit_codes": [
+          1,
+          1
+        ]
+      }
+    }
+  },
+  "composed_m5_serving": {
+    "scope": "M5 VL4 matched composed attention plus deferred-head native falsefalse/truetrue served cold2k8k, two legs each, not MLX comparison",
+    "default_off": true,
+    "protocol": "Fresh native server ABBA, pinned2k then8k IDs, cache0,16 output tokens, no warmup/retry, two legs each.",
+    "summary_sha256": "664facf3d80af22e2c7146f88fc7c4fe17711a4cad059bbadc5a0657e5358975",
+    "raw_files_verified": 63,
+    "cases": [
+      {
+        "prompt_tokens": 2048,
+        "baseline_ttft_s": [
+          0.8617813750170171,
+          0.8616457916796207
+        ],
+        "candidate_ttft_s": [
+          0.8461027080193162,
+          0.8467173343524337
+        ],
+        "baseline_median_s": 0.8617135833483189,
+        "candidate_median_s": 0.8464100211858749,
+        "baseline_over_candidate": 1.0180805540806366,
+        "baseline_first_last_drift": -0.00015732915717014961,
+        "stable_at_5percent": true,
+        "output_text_sha256_equal": true,
+        "output_token_id_equality": "not emitted by cold client; separate model qualification covers16 IDs/logits",
+        "prompt_ids": "both routes /tokenize exact pinned arrays"
+      },
+      {
+        "prompt_tokens": 8192,
+        "baseline_ttft_s": [
+          4.639439832884818,
+          4.660513749811798
+        ],
+        "candidate_ttft_s": [
+          4.434221500065178,
+          4.424068999942392
+        ],
+        "baseline_median_s": 4.649976791348308,
+        "candidate_median_s": 4.429145250003785,
+        "baseline_over_candidate": 1.049858726431321,
+        "baseline_first_last_drift": 0.004542340818304291,
+        "stable_at_5percent": true,
+        "output_text_sha256_equal": true,
+        "output_token_id_equality": "not emitted by cold client; separate model qualification covers16 IDs/logits",
+        "prompt_ids": "both routes /tokenize exact pinned arrays"
+      }
+    ],
+    "server_prefill": {
+      "metric": "tensorfold:request_prefill_seconds_sum",
+      "scope": "Per-leg aggregate of two requests (2k+8k); scrape is before/after both, so individual-length prefill duration cannot be recovered. Separate from client TTFT.",
+      "baseline_sum_s": [
+        5.488429,
+        5.509407
+      ],
+      "candidate_sum_s": [
+        5.267624,
+        5.257553
+      ],
+      "baseline_median_sum_s": 5.498918,
+      "candidate_median_sum_s": 5.2625885
+    },
+    "limitations": "No new ITL/decode benchmark, MLX comparison, fresh vision tower, wider-checkpoint timing or confidence interval. HTTP output text SHA matches; separate numerical gate covers state/logits/token IDs."
+  },
+  "composed_m5_remaining_checkpoints": {
+    "scope": "Text4/6/8 and VL6/8 at2k/8k, plus corrected injected image512 forVL6/8. VL-rendered text token arrays used as valid model inputs, not a text chat-template parity claim. No fresh vision tower or serving timing.",
+    "manifest_sha256": "8077a8ff7ba91b0402b2419d89bda748d74a56882a09f6812247ecdadff686a7",
+    "all_cross_binary_state_logits_16_tokens_equal": true,
+    "all_per_binary_chunk_marks_resume_checks_pass": true,
+    "all_five_bad_final_controls_rejected": true,
+    "cases": [
+      {
+        "case": "LFM3-1.7B-MLX-4bit-vl-2048",
+        "skipped_heads": 14,
+        "result_sha256": "5983f83352bd8e216a40fc3b779d90e8a1a0b5cc0dc72ad6d068c34cf032e85c"
+      },
+      {
+        "case": "LFM3-1.7B-MLX-6bit-vl-2048",
+        "skipped_heads": 14,
+        "result_sha256": "01d1e269ba8a7919f4a97c3a30db4dfb46808b514189b82f5e652ce7956c6771"
+      },
+      {
+        "case": "LFM3-1.7B-MLX-8bit-vl-2048",
+        "skipped_heads": 14,
+        "result_sha256": "27b723cec339e4a1c366dd307dd3915c34f9cac8905b6ffc695bfce05e5a04aa"
+      },
+      {
+        "case": "LFM3-VL-2B-MLX-6bit-vl-2048",
+        "skipped_heads": 14,
+        "result_sha256": "7274b0c09df97cc67de9c4764f14e06dbc772650414c098c1f01b0bc1232cf47"
+      },
+      {
+        "case": "LFM3-VL-2B-MLX-8bit-vl-2048",
+        "skipped_heads": 14,
+        "result_sha256": "8db8e859fda9cb72eb18cd7f181694ec104d3148a2888819b7b8bb06db85cdbd"
+      },
+      {
+        "case": "LFM3-1.7B-MLX-4bit-vl-8192",
+        "skipped_heads": 62,
+        "result_sha256": "0e8cbdec06cf2f443745144e96a9230f1c7e1fefcf0d631e386ed2df1c8ac189"
+      },
+      {
+        "case": "LFM3-1.7B-MLX-6bit-vl-8192",
+        "skipped_heads": 62,
+        "result_sha256": "ddecf8ac439b9acf8d3130076440bb3fbac1bfb16b32b01b542262592bf89e4f"
+      },
+      {
+        "case": "LFM3-1.7B-MLX-8bit-vl-8192",
+        "skipped_heads": 62,
+        "result_sha256": "2fc56c8c2af934bddc753cb5738ebc5af4722e11fa4bdd28e20bf1824b7789d2"
+      },
+      {
+        "case": "LFM3-VL-2B-MLX-6bit-image512",
+        "skipped_heads": 2,
+        "result_sha256": "8cc888761ce47b5249ac9d7debbc640fa5524422d9f0d8d29725d6f2e3805038"
+      },
+      {
+        "case": "LFM3-VL-2B-MLX-6bit-vl-8192",
+        "skipped_heads": 62,
+        "result_sha256": "f38fe52957fa7db8e61e0da0438909bf218a6f2227fd7e89b068fe38e882013f"
+      },
+      {
+        "case": "LFM3-VL-2B-MLX-8bit-image512",
+        "skipped_heads": 2,
+        "result_sha256": "6188832c42c9e689dccf8031481fab0593f960a0010edc1bab45bcec645535bd"
+      },
+      {
+        "case": "LFM3-VL-2B-MLX-8bit-vl-8192",
+        "skipped_heads": 62,
+        "result_sha256": "9c50ac37e1bd76b4032c14fac647b67fa596e82f25405f8e5235f8cd7fb43ca6"
+      }
+    ],
+    "stages": {
+      "smoke": {
+        "receipt_sha256": "0bbf9951981ff74e47260eba9e44dedce623ebc5c04ad4f7bcab35494b9218f7",
+        "commands": 15,
+        "expected_exit": 0
+      },
+      "positive": {
+        "receipt_sha256": "dc665bd413262a61ad17e68998880562d2e1b5ffba23384653412e15440edd0d",
+        "commands": 21,
+        "expected_exit": 0
+      },
+      "controls": {
+        "receipt_sha256": "aa98a8338a64c7bc6bce0fb3e3e131693e4d6baa8e76d7c3f27f82e8796e1bfe",
+        "commands": 5,
+        "expected_exit": 1
+      }
+    }
+  }
+}

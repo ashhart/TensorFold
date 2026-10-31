@@ -31,6 +31,46 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
             return std.mem.indexOf(u8, s, p) != null;
         }
     }.f;
+    if (std.mem.startsWith(u8, d.name, "LFM3 tiled attention ")) {
+        const body = try std.mem.concat(a, u8, &.{ sources.lfm3_attention, "\n", sources.lfm3_attention_tiled });
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
+    if (std.mem.startsWith(u8, d.name, "LFM3 residual FFN ")) {
+        const body = try std.mem.concat(a, u8, &.{ sources.core_row_projection, "\n", sources.nax, "\n", sources.lfm3_residual_ffn });
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
+    if (std.mem.startsWith(u8, d.name, "binned ")) {
+        const prefix = if (has(d.name, " bad-rows ")) "#define TF_BP_BAD_ROWS 1\n" else if (has(d.name, " bad-acc ")) "#define TF_BP_BAD_ACC 1\n" else if (has(d.name, " bad-nonfinite ")) "#define TF_BP_BAD_NONFINITE 1\n" else "";
+        const source = try tf.lfm3.binned_projection.source(device, a);
+        const body = try std.mem.concat(a, u8, &.{ prefix, source });
+        const pre = try preM5(a, prefix, sources.core_binned_projection);
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = pre };
+    }
+    if (std.mem.startsWith(u8, d.name, "lfm3-dual ")) {
+        const source = try tf.lfm3.dual_projection.source(a);
+        const prefix = if (has(d.name, " bad-tail ")) "#define L3_DUAL_BAD_TAIL 1\n" else if (has(d.name, " bad-second ")) "#define L3_DUAL_BAD_SECOND 1\n" else "";
+        const body = try std.mem.concat(a, u8, &.{ prefix, source });
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
+    if (std.mem.startsWith(u8, d.name, "lfm3-projection ")) {
+        const source = try tf.lfm3.row_projection.source(a);
+        const prefix = if (has(d.name, " bad-tail ")) "#define L3_PROJECTION_BAD_TAIL 1\n" else if (has(d.name, " bad-rows ")) "#define L3_PROJECTION_BAD_ROWS 1\n" else "";
+        const body = try std.mem.concat(a, u8, &.{ prefix, source });
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
+    if (std.mem.startsWith(u8, d.name, "lfm3-vision ")) {
+        const lfm3_head = if (has(d.name, " segment-bad ")) "#define L3_SEGMENT_BAD_TAIL 1\n" else if (has(d.name, " square-bad ")) "#define L3_SQUARE_ACC half\n" else if (has(d.name, " attention-bad ")) "#define L3_ATTN_ACC half\n" else "";
+        const body = try std.mem.concat(a, u8, &.{ lfm3_head, sources.lfm3_vision });
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
+    if (std.mem.startsWith(u8, d.name, "lfm3-image ")) {
+        return .{ .decl = d, .function = fun, .here = sources.lfm3_image_rows, .pre_m5 = sources.lfm3_image_rows };
+    }
+    if (std.mem.startsWith(u8, d.name, "lfm3 ")) {
+        const lfm3_head = if (has(d.name, " risk-fast ")) "#define L3_RISK_FAST 1\n" else if (has(d.name, " range-skip ")) "#define L3_RANGE_SKIP_REPAIR 1\n" else if (has(d.name, " range-clear ")) "#define L3_RANGE_CLEAR_RISK 1\n" else if (has(d.name, " postnorm-bad ")) "#define L3_POSTNORM_SKIP_ROUND 1\n" else if (has(d.name, " conv-state-bad ")) "#define L3_CONV_BAD_STATE 1\n" else if (has(d.name, " segment-bad ")) "#define L3_SEGMENT_BAD_TAIL 1\n" else if (has(d.name, " square-bad ")) "#define L3_SQUARE_ACC half\n" else if (has(d.name, " attention-bad ")) "#define L3_ATTN_ACC half\n" else "";
+        const body = try std.mem.concat(a, u8, &.{ lfm3_head, sources.lfm3, "\n", sources.lfm3_attention });
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
     if (std.mem.startsWith(u8, d.name, "qwen4-native ")) {
         const body = try @import("qwen4").family.limits_sources.source(a, d.name);
         return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
@@ -199,7 +239,15 @@ pub fn onThisGpu(a: std.mem.Allocator, device: mtl.Device, l: Launch, control: b
 pub fn gate(a: std.mem.Allocator, io: std.Io, device: mtl.Device, offline: ?[]const u8) !usize {
     var n = try registry.checkMetal(a, &registry.all_metal, false);
     std.debug.print("{s} limits: {d} registered Metal launches against M1-M5, {d} problems\n", .{ if (n == 0) "PASS" else "FAIL", registry.all_metal.len, n });
-    for (registry.all_metal) |d| n += try onThisGpu(a, device, try launchOf(a, device, d), false);
+    for (registry.all_metal) |d| {
+        if (!device.tensorUnits() and (std.mem.startsWith(u8, d.name, "LFM3 residual FFN ") or
+            std.mem.startsWith(u8, d.name, "LFM3 tiled attention ")))
+        {
+            std.debug.print("SKIP limits here {s}: requires tensor units\n", .{d.name});
+            continue;
+        }
+        n += try onThisGpu(a, device, try launchOf(a, device, d), false);
+    }
     for (registry.metal_controls) |d| {
         const red = try registry.checkMetal(a, &.{d}, true) + try onThisGpu(a, device, try launchOf(a, device, d), true);
         if (red == 0) n += 1;

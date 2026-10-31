@@ -1,0 +1,43 @@
+{
+  "shape": [
+    257,
+    6144
+  ],
+  "projection": "language_model.model.layers.0.conv.in_proj",
+  "scope": "Projection rounding replay; not a whole-model fidelity pass",
+  "affine_fusion": "FP64 product-plus-add then FP32 round; checkpoint replay, not arbitrary IEEE fmaf proof",
+  "accepted_threshold": null,
+  "raw_equal": 1579008,
+  "values": 1579008,
+  "bf16_equal": 1579008,
+  "maximum_absolute_error": 0.0,
+  "checkpoint": "LiquidAI/LFM3-VL-2B-MLX-4bit",
+  "fixture": "reasoning-257",
+  "reference_module": "tools/lfm3/row_projection_reference.py",
+  "input_sha256": "c8be512c9fb15ede6f46052c3e6c467a61bfd333d0eb3f70fdb2d597a7a4fa40",
+  "native_raw_sha256": "0480f2bd0ad424db14bd7e197317909019ac0fbc413ff728382900b364febd0a",
+  "rounding_sites": [
+    "Sequential FP32 additions of 16 BF16 inputs per lane",
+    "Four left-associated four-product sums, accumulated in FP32",
+    "Rounded bias-times-input-sum, fused scale-times-dot plus that product",
+    "FP32 accumulation across 512-input lane passes",
+    "FP32 XOR butterfly sum distances 1, 2, 4, 8, 16",
+    "BF16 RNE output storage"
+  ],
+  "explicit_fmaf_accelerator": {
+    "shape": [
+      257,
+      6144
+    ],
+    "projection": "language_model.model.layers.0.conv.in_proj",
+    "scope": "Projection rounding replay; not a whole-model fidelity pass",
+    "affine_fusion": "Explicit CPU fmaf",
+    "accepted_threshold": null,
+    "raw_equal": 1579008,
+    "values": 1579008,
+    "bf16_equal": 1579008,
+    "maximum_absolute_error": 0.0,
+    "source_sha256": "ff336f75fcf0a4f6c0ac92ed627bc1a6abb0b36b8f4cc95d876f2a8bb2f5cc42",
+    "library_sha256": "fd3bdcc07800ca3e4bda472228c5fc86afa1f8eab7c2ba4669b0eae1e07df82b"
+  }
+}

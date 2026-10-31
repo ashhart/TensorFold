@@ -1,0 +1,507 @@
+{
+  "checkpoint": "LiquidAI/LFM3-VL-2B-MLX-8bit",
+  "phase": "prompt",
+  "scope": "Independent CPU FP32 graph diagnostics alongside retained required FP64; no Metal calls in FP32 graph",
+  "image": {
+    "url": "https://placecats.com/300/200",
+    "jpeg_sha256": "d1b324f529a96d8d8a16d973d88e1e974905d9c2c0e3e8b21a50b1c0e3fe2379",
+    "canonical_png_sha256": "005500792ee8ea6f35ac369d900fc788cd77667f145e7100c2cff57fae5355d9",
+    "conversion": "macOS sips JPEG to PNG; canonical PNG is the exact native/reference input"
+  },
+  "grid": [
+    14,
+    20
+  ],
+  "image_start": 4,
+  "image_rows": 70,
+  "suffix_start": 74,
+  "suffix_rows": 16,
+  "all90_scope": "Contains70 image-placeholder rows,4 prefix rows and16 suffix rows; never conflate all90 with suffix16",
+  "modes": {
+    "fp32": "No internal BF16 activation boundaries; changes model arithmetic and is diagnostic only",
+    "fp32-bf16": "FP32 graph with the same explicit BF16 boundary sites as ideal FP64 graph; independent CPU reductions, not native lane replay",
+    "metal_assisted_replay": "Retained separately in real-image-rounding-reproduction.json; explicitly delegates scalar elementary functions to Metal"
+  },
+  "fp32_semantics": {
+    "compute": "NumPy CPU float32 matmul/reductions/elementary functions; no Metal calls",
+    "boundaries": "fp32-bf16",
+    "dequantization": "FP32 q*scale+bias; separate multiply and add, no BF16 dequantized-weight cast",
+    "matmul_order": "NumPy BLAS implementation, not native GPU lane order",
+    "erf": "Binary64 libm erf on FP32 arguments then FP32 RNE",
+    "shape": [
+      90,
+      128000
+    ],
+    "numpy": "2.5.4",
+    "host": "arm64",
+    "blas": {
+      "Compilers": {
+        "c": {
+          "name": "clang",
+          "linker": "ld64",
+          "version": "15.0.0",
+          "commands": "cc"
+        },
+        "cython": {
+          "name": "cython",
+          "linker": "cython",
+          "version": "3.3.0",
+          "commands": "cython"
+        },
+        "c++": {
+          "name": "clang",
+          "linker": "ld64",
+          "version": "15.0.0",
+          "commands": "c++"
+        }
+      },
+      "Machine Information": {
+        "host": {
+          "cpu": "aarch64",
+          "family": "aarch64",
+          "endian": "little",
+          "system": "darwin"
+        },
+        "build": {
+          "cpu": "aarch64",
+          "family": "aarch64",
+          "endian": "little",
+          "system": "darwin"
+        }
+      },
+      "Build Dependencies": {
+        "blas": {
+          "name": "accelerate",
+          "found": true,
+          "version": "unknown",
+          "detection method": "system",
+          "include directory": "unknown",
+          "lib directory": "unknown",
+          "openblas configuration": "unknown",
+          "pc file directory": "unknown"
+        },
+        "lapack": {
+          "name": "accelerate",
+          "found": true,
+          "version": "unknown",
+          "detection method": "system",
+          "include directory": "unknown",
+          "lib directory": "unknown",
+          "openblas configuration": "unknown",
+          "pc file directory": "unknown"
+        }
+      },
+      "Python Information": {
+        "path": "/private/var/folders/s6/5hzmn6lx4dz5nxs7k_0slzph0000gn/T/build-env-q3ulyt3x/bin/python",
+        "version": "3.13"
+      },
+      "SIMD Extensions": {
+        "baseline": [
+          "NEON",
+          "NEON_FP16",
+          "NEON_VFPV4",
+          "ASIMD"
+        ],
+        "found": [
+          "ASIMDHP",
+          "ASIMDDP"
+        ],
+        "not found": [
+          "ASIMDFHM"
+        ]
+      }
+    },
+    "thread_environment": {
+      "OPENBLAS_NUM_THREADS": "2",
+      "VECLIB_MAXIMUM_THREADS": "2",
+      "OMP_NUM_THREADS": null
+    },
+    "source_sha256": "6a8a7dc6434361f22a4da4e24821d14ee45ff2d31d57a9d4cbd5f8d1569f7f4e",
+    "accepted_threshold": null,
+    "fidelity_pass": null
+  },
+  "results": {
+    "ideal_fp64_own_vision": {
+      "logits_sha256": "c34a303517fe4ea85a1886f9bc9928febebd96b677c1c9412462c5967c8fbc42",
+      "all90": {
+        "top1_differences": 7,
+        "disjoint_maximum_sets": 7,
+        "relative_rms": 0.022216577726492024,
+        "maximum_absolute_error": 1.59375
+      },
+      "suffix16": {
+        "top1_differences": 2,
+        "disjoint_maximum_sets": 2,
+        "relative_rms": 0.013412548767931996,
+        "maximum_absolute_error": 0.5
+      },
+      "suffix_differences": [
+        {
+          "row": 81,
+          "native_top": 78,
+          "reference_top": 851,
+          "native_maximum_set": [
+            78
+          ],
+          "reference_maximum_set": [
+            851
+          ],
+          "maximum_sets_overlap": false,
+          "native_margin": 0.125,
+          "reference_margin": 0.40625,
+          "native_reference_contender_gap": 0.125,
+          "reference_native_contender_gap": 0.40625
+        },
+        {
+          "row": 88,
+          "native_top": 309,
+          "reference_top": 22,
+          "native_maximum_set": [
+            309
+          ],
+          "reference_maximum_set": [
+            22
+          ],
+          "maximum_sets_overlap": false,
+          "native_margin": 0.0625,
+          "reference_margin": 0.0625,
+          "native_reference_contender_gap": 0.0625,
+          "reference_native_contender_gap": 0.0625
+        }
+      ],
+      "disputed_rows": [
+        {
+          "row": 81,
+          "contender_ids": [
+            78,
+            851
+          ],
+          "native_values": [
+            7.28125,
+            7.15625
+          ],
+          "reference_values": [
+            7.21875,
+            7.625
+          ],
+          "native_maximum_set": [
+            78
+          ],
+          "reference_maximum_set": [
+            851
+          ],
+          "reference_margin": 0.40625
+        },
+        {
+          "row": 88,
+          "contender_ids": [
+            22,
+            309
+          ],
+          "native_values": [
+            13.4375,
+            13.5
+          ],
+          "reference_values": [
+            13.4375,
+            13.375
+          ],
+          "native_maximum_set": [
+            309
+          ],
+          "reference_maximum_set": [
+            22
+          ],
+          "reference_margin": 0.0625
+        }
+      ]
+    },
+    "independent_fp32_own_vision": {
+      "logits_sha256": "13a0b9aa18f643ebba3b29bc71784fbe2244ca13e47a9632b0ac573df3e8353e",
+      "all90": {
+        "top1_differences": 6,
+        "disjoint_maximum_sets": 5,
+        "relative_rms": 0.029089294594932084,
+        "maximum_absolute_error": 1.75390625
+      },
+      "suffix16": {
+        "top1_differences": 2,
+        "disjoint_maximum_sets": 2,
+        "relative_rms": 0.01862716329656785,
+        "maximum_absolute_error": 0.859375
+      },
+      "suffix_differences": [
+        {
+          "row": 81,
+          "native_top": 78,
+          "reference_top": 851,
+          "native_maximum_set": [
+            78
+          ],
+          "reference_maximum_set": [
+            851
+          ],
+          "maximum_sets_overlap": false,
+          "native_margin": 0.125,
+          "reference_margin": 0.21875,
+          "native_reference_contender_gap": 0.125,
+          "reference_native_contender_gap": 0.21875
+        },
+        {
+          "row": 88,
+          "native_top": 309,
+          "reference_top": 22,
+          "native_maximum_set": [
+            309
+          ],
+          "reference_maximum_set": [
+            22
+          ],
+          "maximum_sets_overlap": false,
+          "native_margin": 0.0625,
+          "reference_margin": 0.125,
+          "native_reference_contender_gap": 0.0625,
+          "reference_native_contender_gap": 0.125
+        }
+      ],
+      "disputed_rows": [
+        {
+          "row": 81,
+          "contender_ids": [
+            78,
+            851
+          ],
+          "native_values": [
+            7.28125,
+            7.15625
+          ],
+          "reference_values": [
+            7.21875,
+            7.4375
+          ],
+          "native_maximum_set": [
+            78
+          ],
+          "reference_maximum_set": [
+            851
+          ],
+          "reference_margin": 0.21875
+        },
+        {
+          "row": 88,
+          "contender_ids": [
+            22,
+            309
+          ],
+          "native_values": [
+            13.4375,
+            13.5
+          ],
+          "reference_values": [
+            13.4375,
+            13.3125
+          ],
+          "native_maximum_set": [
+            309
+          ],
+          "reference_maximum_set": [
+            22
+          ],
+          "reference_margin": 0.125
+        }
+      ]
+    },
+    "independent_fp32_bf16_own_vision": {
+      "logits_sha256": "4e37c32710720c019db62d3d8fe574b202afc50ad6bdf19164c777e0d368e2e7",
+      "all90": {
+        "top1_differences": 5,
+        "disjoint_maximum_sets": 3,
+        "relative_rms": 0.018905629285201224,
+        "maximum_absolute_error": 0.8125
+      },
+      "suffix16": {
+        "top1_differences": 1,
+        "disjoint_maximum_sets": 0,
+        "relative_rms": 0.013024445100711624,
+        "maximum_absolute_error": 0.53125
+      },
+      "suffix_differences": [
+        {
+          "row": 88,
+          "native_top": 309,
+          "reference_top": 22,
+          "native_maximum_set": [
+            309
+          ],
+          "reference_maximum_set": [
+            22,
+            309
+          ],
+          "maximum_sets_overlap": true,
+          "native_margin": 0.0625,
+          "reference_margin": 0.0,
+          "native_reference_contender_gap": 0.0625,
+          "reference_native_contender_gap": 0.0
+        }
+      ],
+      "disputed_rows": [
+        {
+          "row": 81,
+          "contender_ids": [
+            78,
+            851
+          ],
+          "native_values": [
+            7.28125,
+            7.15625
+          ],
+          "reference_values": [
+            7.28125,
+            7.15625
+          ],
+          "native_maximum_set": [
+            78
+          ],
+          "reference_maximum_set": [
+            78
+          ],
+          "reference_margin": 0.125
+        },
+        {
+          "row": 88,
+          "contender_ids": [
+            22,
+            309
+          ],
+          "native_values": [
+            13.4375,
+            13.5
+          ],
+          "reference_values": [
+            13.5,
+            13.5
+          ],
+          "native_maximum_set": [
+            309
+          ],
+          "reference_maximum_set": [
+            22,
+            309
+          ],
+          "reference_margin": 0.0
+        }
+      ]
+    },
+    "independent_fp32_bf16_native_vision": {
+      "logits_sha256": "c604db2c1e236eca9ba6197d5f464625e0c9bcc19a303aae0e12adc605977298",
+      "all90": {
+        "top1_differences": 3,
+        "disjoint_maximum_sets": 1,
+        "relative_rms": 0.015441009381036912,
+        "maximum_absolute_error": 0.8125
+      },
+      "suffix16": {
+        "top1_differences": 1,
+        "disjoint_maximum_sets": 0,
+        "relative_rms": 0.012171142512004731,
+        "maximum_absolute_error": 0.8125
+      },
+      "suffix_differences": [
+        {
+          "row": 88,
+          "native_top": 309,
+          "reference_top": 22,
+          "native_maximum_set": [
+            309
+          ],
+          "reference_maximum_set": [
+            22,
+            309
+          ],
+          "maximum_sets_overlap": true,
+          "native_margin": 0.0625,
+          "reference_margin": 0.0,
+          "native_reference_contender_gap": 0.0625,
+          "reference_native_contender_gap": 0.0
+        }
+      ],
+      "disputed_rows": [
+        {
+          "row": 81,
+          "contender_ids": [
+            78,
+            851
+          ],
+          "native_values": [
+            7.28125,
+            7.15625
+          ],
+          "reference_values": [
+            7.28125,
+            7.25
+          ],
+          "native_maximum_set": [
+            78
+          ],
+          "reference_maximum_set": [
+            78
+          ],
+          "reference_margin": 0.03125
+        },
+        {
+          "row": 88,
+          "contender_ids": [
+            22,
+            309
+          ],
+          "native_values": [
+            13.4375,
+            13.5
+          ],
+          "reference_values": [
+            13.5,
+            13.5
+          ],
+          "native_maximum_set": [
+            309
+          ],
+          "reference_maximum_set": [
+            22,
+            309
+          ],
+          "reference_margin": 0.0
+        }
+      ]
+    }
+  },
+  "conclusion": "Pure FP32 retains both disputed suffix differences. Independent FP32 with model BF16 boundaries removes row81 difference and makes row88 a tied maximum overlapping native309. This demonstrates sensitivity to arithmetic/rounding; it does not establish a new acceptance threshold or attribute every difference to FP64 alone.",
+  "accepted_threshold": null,
+  "fidelity_pass": null,
+  "tests": {
+    "command": "python -m unittest discover -s tools/lfm3 -p test_fp32_graph_reference.py",
+    "passed": 6,
+    "failed": 0
+  },
+  "sources": {
+    "tools/lfm3/fp32_graph_reference.py": "6a8a7dc6434361f22a4da4e24821d14ee45ff2d31d57a9d4cbd5f8d1569f7f4e",
+    "tools/lfm3/test_fp32_graph_reference.py": "dd2c4fc06680dbab904c5d9d54ee0834fd2793f8d32c8c3d5cc9c231aad5468c",
+    "tools/lfm3/fp64_reference.py": "0fb1128ade095db87b6126792ab14930792ab1f7b41b998570356bc586f16b2e",
+    "tools/lfm3/compare_logits.py": "b1bf273c8f3ce89591bccb8f098c82763cddff11373dbe850302450fcee1502c"
+  },
+  "input_sha256": {
+    "lfm3-real-cat-patches.npy": "f1c55a0dd28b91d9929f074995adadea79d7c0862c8cdcd0be6dbfda57383dc1",
+    "lfm3-real-cat-tokens.npy": "54c970db8c6ba82895cb2f18a48d397ea568ae885241129e9c5ee7dbbc91a24d",
+    "lfm3-real-cat-native-8.bf16": "aceb2b880177abfae718bdd660398b3cd7ee990d2dfcdce2a110d08dc4e33135"
+  },
+  "raw_fp32_logits_sha256": {
+    "fp32-ownvision": "28d155c91aa531a7d832429ccbad4a397f0f8cc2a37795dffc3f534e62cc650c",
+    "fp32-bf16-ownvision-final": "3301aa73c1ff171de9b35d1bc5a64ff143d173f3d72edae4a387916b0e0c8d82",
+    "fp32-bf16-nativevision": "e0bcba9ec3e724bbd44e9e5d8b63510fa2d5d0dea0f8b24be8a7cdd3ad38b0d5"
+  },
+  "commands": [
+    "OPENBLAS_NUM_THREADS=2 VECLIB_MAXIMUM_THREADS=2 python tools/lfm3/fp32_graph_reference.py --model-dir MODEL --tokens TOKENS.npy --patches PATCHES.npy --grid-h 14 --grid-w 20 --image-start 4 --boundaries fp32 --output FP32.npy",
+    "Repeat with --boundaries fp32-bf16; fixed-native-image ablation replaces patch/grid arguments with --image-rows NATIVE_ROWS.npy"
+  ],
+  "native_identity_receipt": "real-image-rounding-reproduction.json",
+  "ideal_fp64_receipt": "real-image-fp64.json"
+}

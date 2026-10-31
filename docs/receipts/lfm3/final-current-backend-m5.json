@@ -1,0 +1,110 @@
+{
+  "scope": "Current frozen M5 full synthetic backend run; no checkpoint model execution",
+  "source": {
+    "commit": "20947578c08ead20e8e0a18790b1fd5f5fb3b6e3",
+    "runtime_base": "2e97b1fbbe80f2446e49893fc297da9be914fc71",
+    "archive_sha256": "6001dd8298380ade2764eb75875a7c8a7732f191384b729e711f77e7614d2814",
+    "contract_binary_sha256": "b4a71afee06947144a483508a40f5824f5bfb6a1427c254c93f113caf0b751bb",
+    "source_archive_contains_registration_only_build_change": true
+  },
+  "hardware": {
+    "device": "Apple M5 Ultra",
+    "generation": 17,
+    "os": "27.0.0",
+    "os_build": "26A428",
+    "language": 262145,
+    "math_mode": "safe",
+    "math_functions": "fast",
+    "compiler_service": "382.5.3",
+    "compiler_framework": "382.5.3",
+    "rotary_receipt_sha256": "d6091d16194580bbec30f649c92a5a53d74738a69a3c0fd0523bedcc0f8453a0",
+    "source_oracle_compiler_identity_validated_by_executable": true
+  },
+  "build": {
+    "exit": 0,
+    "steps_succeeded": 46,
+    "targets": [
+      "tf-kernel-contract",
+      "tf-rotary-sweep"
+    ],
+    "log_sha256": "30862efa642641dfe8f62b546977865b00085fca97cc8321a05ed0c19ce33b56"
+  },
+  "result": {
+    "child_exit": 1,
+    "kernels": 316,
+    "gates_1_through_4_passed": 315,
+    "failed": 1,
+    "known_findings": 2,
+    "controls": 321,
+    "controls_red": 321,
+    "controls_missed": 0,
+    "normal_launch_limit_problems": 0,
+    "gates_ms": 1377653,
+    "limits_ms": 3110
+  },
+  "production_failure": {
+    "name": "metal Qwen4 native HC act production",
+    "shape": [
+      128,
+      14336,
+      1
+    ],
+    "output_index": 218116,
+    "native": -0.003997803,
+    "reference_float64": -0.00402832,
+    "bound_ratio": 1.94,
+    "same_literal_case_as_historical_receipt": "full-backend-nf-cancellation.json",
+    "baseline_classification": "Existing historical baseline reproduction retained; no new current baseline rerun"
+  },
+  "known_findings": [
+    {
+      "name": "metal affine_mm q4 g64",
+      "nonfinite_class_mismatches": 1332,
+      "outputs": 16384,
+      "first_index": 2051,
+      "native_class": "nan",
+      "reference_class": "pos_inf"
+    },
+    {
+      "name": "metal affine_mm q4 g64 fp32 out",
+      "nonfinite_class_mismatches": 1296,
+      "outputs": 16384,
+      "first_index": 2059,
+      "native_class": "nan",
+      "reference_class": "pos_inf"
+    }
+  ],
+  "protocol": {
+    "lease_path": "/tmp/tensorfold-model.lock",
+    "inode": 2622134,
+    "device": 16777233,
+    "single_model_admission_guard_sha256": "b37fb2b0aa20bc29e0d7f7bb4930ce267752c26172c9bb368b2ab18a7392954d",
+    "controller_sha256": "b7011ca6b9f245b97146c4ca60a84ceddd973b0c5e6a0ec5ab32ef3eb52a86b1",
+    "memory_admission": {
+      "event": "memory_admission",
+      "time_ns": 1793228925265587000,
+      "synthetic_only_no_checkpoints": true,
+      "conservative_synthetic_reserve_bytes": 8589934592,
+      "working_set": 239143780352,
+      "ceiling": 192414534830,
+      "limits_raised": false
+    },
+    "child_cleanup_exit": 1,
+    "lease_released": true,
+    "no_limits_raised": true,
+    "no_checkpoint_models_loaded": true
+  },
+  "raw_evidence_sha256": {
+    "contract.log": "9d59be137ee47f618d170aef705bb4f26ba032a72a54d48490793b116e1c0fd6",
+    "events.json": "e3c881e73de39597c86fa78493cfd9e3c73b7c4ff4cd03103dbff56f0e5c3ddc",
+    "manifest.json": "858c596a742cee44e4639c563517ce1724ddef221d2ae1de0e9b9524e7c00e7a",
+    "receipt.json": "af15cde2ba51ce576f52f7a2de1cd7e2609b18328159967024c702f763ff4b13"
+  },
+  "performance_pass": false,
+  "global_backend_pass": false,
+  "limitations": [
+    "Synthetic q6/q8 kernels do not substitute for model-width checkpoint qualification.",
+    "This records the current full-backend result; the separate M4 unsupported tensor-unit attempt remains preserved.",
+    "Model and context qualification continues separately."
+  ]
+}

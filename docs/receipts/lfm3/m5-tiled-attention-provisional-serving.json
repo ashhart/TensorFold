@@ -1,0 +1,82 @@
+{
+  "scope": "PROVISIONAL known fidelity-unqualified M5 TEXT4 attention-only prompt tiled SDPA; no production promotion",
+  "cases": [
+    {
+      "prompt_tokens": 2048,
+      "baseline_ttft_s": [
+        0.8462561252526939,
+        0.8461228748783469
+      ],
+      "candidate_ttft_s": [
+        0.7695160410366952,
+        0.7676864583045244
+      ],
+      "baseline_median_s": 0.8461895000655204,
+      "candidate_median_s": 0.7686012496706098,
+      "baseline_over_candidate": 1.1009473383346198,
+      "baseline_first_last_drift": -0.0001574586822721269,
+      "stable_at_5percent": true,
+      "output_text_sha256_equal": true,
+      "output_token_id_equality": "not asserted; same output text digest only",
+      "prompt_ids": "both routes /tokenize exact pinned arrays",
+      "candidate_spread": 0.002383242158799481,
+      "ttft_reduction_fraction": 0.09169134146536084
+    },
+    {
+      "prompt_tokens": 8192,
+      "baseline_ttft_s": [
+        4.401642707642168,
+        4.400061042048037
+      ],
+      "candidate_ttft_s": [
+        3.2477782079949975,
+        3.248213625047356
+      ],
+      "baseline_median_s": 4.400851874845102,
+      "candidate_median_s": 3.2479959165211767,
+      "baseline_over_candidate": 1.3549437831679025,
+      "baseline_first_last_drift": -0.00035933529802056885,
+      "stable_at_5percent": true,
+      "output_text_sha256_equal": true,
+      "output_token_id_equality": "not asserted; same output text digest only",
+      "prompt_ids": "both routes /tokenize exact pinned arrays",
+      "candidate_spread": 0.00013406612904987014,
+      "ttft_reduction_fraction": 0.2619619998831483
+    }
+  ],
+  "predeclared_max_baseline_drift": 0.05,
+  "no_timing_retries": true,
+  "default_off": true,
+  "same_binary_sha256": "b5d10c1a642603ce2c50a90c0054cbfbd9020f785de2a26ec7b7b4e3e06cc4ff",
+  "fidelity": {
+    "basic_finite_logits": true,
+    "prompt128_envelope_pass": true,
+    "continuation_envelope_pass": false,
+    "continuation_native_max_logit_error": 0.2778849602,
+    "continuation_reference_max_logit_error": 0.2564673424,
+    "continuation_native_top20_mean_error": 1.89956e-05,
+    "continuation_reference_top20_mean_error": 1.65508e-05,
+    "continuation_native_top20_max_error": 0.0004400848,
+    "continuation_reference_top20_max_error": 0.0004334887,
+    "all17_top1_match_fp32": true,
+    "top1_match_does_not_waive_error_gate": true
+  },
+  "protocol": {
+    "same_binary_env_order": [
+      0,
+      1,
+      1,
+      0
+    ],
+    "fresh_servers": 4,
+    "cache_tokens": 0,
+    "completion_tokens": 16,
+    "all_server_exit_zero": true,
+    "all_client_exit_zero": true,
+    "candidate_route_hits_verified": true,
+    "same_pinned_token_arrays": true,
+    "no_retries": true
+  },
+  "records_sha256": "45ab9d5d1e8aab6a81140356c7213a4bd0909e73ef2070ac3847c2ac69340d23",
+  "events_sha256": "f6c2388250561d16d1832edf3728969e84dfd9eb0c62bd1eae3b0db6c638381e"
+}
