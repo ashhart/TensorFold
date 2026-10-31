@@ -167,6 +167,20 @@ pub const Affine4Kernels = struct {
         try launch_.launch(f, .{ .grid = .{ .x = u(clusters * width) }, .block = .{ .x = 128 }, .shared = shared, .cluster = if (width > 1) .{ .x = u(width) } else null, .pdl = true }, s, &args);
     }
 
+    /// Native rows in bounded verify tiles, each output retaining its own contiguous row stride.
+    pub fn verifyManyRows(a: *const Affine4Kernels, s: Stream, x: u64, xs: u64, outs: []const Out, rows: usize) !void {
+        if (outs.len < 2 or outs.len > segs_max) return error.TooManyParts;
+        if (rows == 0) return error.WindowTooWide;
+        var many: [segs_max]Out = undefined;
+        const k = outs[0].q.k;
+        const tile = a.verifyRows();
+        var at: usize = 0;
+        while (at < rows) : (at += tile) {
+            for (outs, many[0..outs.len]) |o, *m| m.* = .{ .q = o.q, .out = o.out + at * o.q.n * 2 };
+            try a.verifyMany(s, x + at * k * 2, xs + at * (k / 64) * 4, many[0..outs.len], @min(tile, rows - at));
+        }
+    }
+
     /// One decode-sized PDL grid over independent persistent member grids.
     pub fn gemvMany(a: *const Affine4Kernels, s: Stream, x: u64, xs: u64, outs: []const Out, rows: usize) !void {
         if (!a.pdl or rows == 0 or rows > max_rows) return error.WindowTooWide;
