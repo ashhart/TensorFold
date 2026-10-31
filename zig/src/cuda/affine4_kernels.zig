@@ -39,6 +39,7 @@ pub const Affine4Kernels = struct {
     verify128_fn: Function, // eight
     split_fn: Function,
     seg_fn: Function, // the split form over up to four projections of one input
+    many_fn: Function, // GB10 keeps each member's K slices in its CTA
     prefill_fn: Function,
     prefill22_fn: Function, // the prompt tile on 2x2 warps and two stages (`half_prompt` picks it)
     prefill_many_fn: Function, // GB10: one prompt grid over projections sharing the bf16 input
@@ -63,6 +64,7 @@ pub const Affine4Kernels = struct {
         a.half_prompt = false;
         a.gemv_fn = try gemv_mod.function(symbols.gemv);
         a.split_fn = try gemv_mod.function(symbols.gemv_split);
+        a.many_fn = try gemv_mod.function("tf_lane_gemv_many");
         a.seg_fn = try gemv_mod.function(symbols.gemv_seg);
         a.words_fn = try pack_mod.function(symbols.pack_words);
         a.scales_fn = try pack_mod.function(symbols.pack_scales);
@@ -76,6 +78,7 @@ pub const Affine4Kernels = struct {
         try a.prefill_fn.allowDynamicShared(prefill_smem);
         try a.prefill22_fn.allowDynamicShared(linear.prefill22_smem);
         try a.prefill_many_fn.allowDynamicShared(prefill_smem);
+        try a.many_fn.allowDynamicShared(group_smem);
         a.gemv_blocks = @max(1, try a.gemv_fn.occupancy(128, group_smem)) * sms;
         a.pdl = gb10;
         a.wide_verify = false;
@@ -118,11 +121,74 @@ pub const Affine4Kernels = struct {
     /// decode() of each projection of one input; without GB10 one segmented launch, each keeping its split's bits.
     pub fn decodeMany(a: *const Affine4Kernels, s: Stream, x: u64, xs: u64, outs: []const Out, rows: usize) !void {
         if (rows > max_rows) return error.WindowTooWide;
+        if (a.pdl and outs.len > 1) return a.gemvMany(s, x, xs, outs, rows);
         const sp = a.split orelse {
             for (outs) |o| try a.decode(s, x, xs, o.q, o.out, rows);
             return;
         };
         return a.gemvSeg(s, x, xs, outs, rows, sp);
+    }
+
+    /// Every member's verify() bits, without changing the GB10 split-buffer policy.
+    pub fn verifyMany(a: *const Affine4Kernels, s: Stream, x: u64, xs: u64, outs: []const Out, rows: usize) !void {
+        if (rows == 0 or rows > a.verifyRows()) return error.WindowTooWide;
+        if (rows <= max_rows) return a.decodeMany(s, x, xs, outs, rows);
+        if (a.pdl and outs.len > 1) return a.wideMany(s, x, xs, outs, rows);
+        for (outs) |o| try a.verify(s, x, xs, o.q, o.out, rows);
+    }
+
+    /// The existing wide tile already accepts member-local splits within one common cluster width.
+    pub fn wideMany(a: *const Affine4Kernels, s: Stream, x: u64, xs: u64, outs: []const Out, rows: usize) !void {
+        if (!a.pdl or rows <= max_rows or rows > a.verifyRows()) return error.WindowTooWide;
+        if (outs.len < 2 or outs.len > segs_max) return error.TooManyParts;
+        var width: usize = 1;
+        for (outs, 0..) |o, i| {
+            if (o.q.k == 0 or o.q.k % 64 != 0 or o.q.k != outs[0].q.k or o.q.n == 0 or o.q.npad < o.q.n or o.q.npad % 64 != 0) return error.InputMismatch;
+            for (outs[0..i]) |prev| if (prev.out == o.out) return error.InputMismatch;
+            width = @max(width, splitK(o.q.n, o.q.k));
+        }
+        var parts: Parts = std.mem.zeroes(Parts);
+        var clusters: usize = 0;
+        for (outs, 0..) |o, i| {
+            const sk = splitK(o.q.n, o.q.k);
+            const tiles = (o.q.n + 63) / 64;
+            const per = width / sk;
+            parts.p[i] = .{ .w = o.q.w, .scales = o.q.s, .biases = o.q.b, .out = o.out, .n = int(o.q.n), .npad = int(o.q.npad), .sk = int(sk), .tiles = int(tiles), .first = int(clusters) };
+            clusters += (tiles + per - 1) / per;
+        }
+        parts.count = int(outs.len);
+        var args: launch_.Args = .{};
+        args.add(x);
+        args.add(xs);
+        args.add(parts);
+        for ([_]usize{ rows, outs[0].q.k, outs[0].q.k, 1, width }) |v| args.add(int(v));
+        const f = if (rows <= 32) a.verify_fn else if (rows <= 64) a.verify64_fn else a.verify128_fn;
+        const shared = if (rows <= 32) linear.verify_smem else if (rows <= 64) linear.verify64_smem else linear.verify128_smem;
+        try launch_.launch(f, .{ .grid = .{ .x = u(clusters * width) }, .block = .{ .x = 128 }, .shared = shared, .cluster = if (width > 1) .{ .x = u(width) } else null, .pdl = true }, s, &args);
+    }
+
+    /// One decode-sized PDL grid over independent persistent member grids.
+    pub fn gemvMany(a: *const Affine4Kernels, s: Stream, x: u64, xs: u64, outs: []const Out, rows: usize) !void {
+        if (!a.pdl or rows == 0 or rows > max_rows) return error.WindowTooWide;
+        if (outs.len < 2 or outs.len > segs_max) return error.TooManyParts;
+        var parts: linear.GemvManyParts = std.mem.zeroes(linear.GemvManyParts);
+        var blocks: usize = 0;
+        for (outs, 0..) |o, i| {
+            if (o.q.k == 0 or o.q.k % 64 != 0 or o.q.k != outs[0].q.k or o.q.n == 0 or o.q.npad < o.q.n or o.q.npad % 64 != 0) return error.InputMismatch;
+            for (outs[0..i]) |prev| if (prev.out == o.out) return error.InputMismatch;
+            const tiles = (o.q.n + 63) / 64;
+            const local = @min(tiles, a.gemv_blocks);
+            if (local == 0) return error.InputMismatch;
+            parts.p[i] = .{ .p = .{ .w = o.q.w, .scales = o.q.s, .biases = o.q.b, .out = o.out, .n = int(o.q.n), .npad = int(o.q.npad), .sk = int(splitK(o.q.n, o.q.k)), .tiles = int(tiles) }, .first = int(blocks), .blocks = int(local) };
+            blocks += local;
+        }
+        parts.count = int(outs.len);
+        var args: launch_.Args = .{};
+        args.add(x);
+        args.add(xs);
+        args.add(parts);
+        for ([_]usize{ rows, outs[0].q.k, outs[0].q.k }) |v| args.add(int(v));
+        try launch_.launch(a.many_fn, .{ .grid = .{ .x = u(blocks) }, .block = .{ .x = 128 }, .shared = group_smem, .pdl = true }, s, &args);
     }
 
     /// One CTA a tile's K slice over every projection of `outs`, the split form's partials and tickets in `sp`.
@@ -303,3 +369,7 @@ pub const Affine4Kernels = struct {
         try launch_.launch(a.prefill_many_fn, .{ .grid = .{ .x = u(blocks) }, .block = .{ .x = 256 }, .shared = prefill_smem }, s, &g);
     }
 };
+
+test {
+    _ = @import("gemv_many_host_test.zig");
+}

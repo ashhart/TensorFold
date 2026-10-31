@@ -203,6 +203,9 @@ pub fn run(gpu: check.Gpu) !void {
     }
     defer for (&verify_controls) |*m| m.deinit();
     for (&verify_controls) |*m| if (m.kernel()) |k| try kernels.append(a, k);
+    var gb10_grouped = @import("contract_gb10_many.zig").Registrations.init(gpu, s, &affine4);
+    defer gb10_grouped.deinit();
+    try gb10_grouped.append(cap, a, &kernels);
     var prefill_many = prefill_many_k.Registrations.init(gpu, s, &affine4);
     defer prefill_many.deinit();
     try prefill_many.append(cap, a, &kernels);
