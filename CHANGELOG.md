@@ -4,6 +4,10 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Idol (speridlabs/idol, image to 3D Gaussian splat), first step: its 0.37B denoiser runs natively on M5 Metal from the released checkpoint, the condition refiner once an image and all 50 guided steps on the GPU. On an M5 Ultra a forward takes 0.275 s against the publisher's SDK on torch MPS at 0.939 s, with a 1.84 GB peak footprint. Each step's velocities on the SDK's own input sit as close to an fp32 run as the SDK's own, and each joint block alone passes the same gate; `tf-idol` runs those gates from a case `tools/zig/idol_case.py` records. RePo's fp32 maps run as an fp16 hi/lo split on the tensor units, whose fp32 GEMM truncates its inputs to 10 mantissa bits (#1772). The image encoders and the decoders are not ported yet (#1766, fixes #1757). Thanks to @jayleaton.
+
+- Idol's octree and Gaussian decoders now run natively on M5 Metal, from the denoiser's latent to the 3DGS PLY and camera. On an M5 Ultra, 262,144 Gaussians decode in 0.343 s against the SDK's 0.739 s, and 1,048,576 in 1.963 s against 4.653 s, at a 2.43 GB peak footprint against 5.64 GB. Given the SDK's probabilities and draws, every octree level's counts match, and the PLY's header and rows equal the SDK's. Both decoders sit as close to an fp32 run as the SDK's own; `tf-idol-decode` runs those gates from a `tools/zig/idol_case.py decode` case. The decoders' nine kernels are registered with the kernel contract (#1773, after #1766, for #1757). Thanks to @jayleaton.
+
 - DeepSeek-V4.x: `tool_choice: "required"` and named tool calls are now constrained to the model's own DSML call markup, so those requests are held to a valid call on DeepSeek too.
 
 - Qwen3.6-35B-A3B on CUDA: `--drafter` also takes a DFlash2 draft model, chosen by the `dflash_config` in its `config.json`; the checkpoint's own directory still drafts with its MTP layer. With `incoai/Qwen3.6-35B-A3B-DFlash2` over `nvidia/Qwen3.6-35B-A3B-NVFP4`, one GB10 decodes 130 tok/s at one stream on a 4.2K-token prompt (MTP: 99), and every drafted reply equals its plain run.
