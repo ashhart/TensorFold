@@ -88,6 +88,16 @@ pub fn spec(w: Which, k: Case) c.Spec {
         // sattn: a chunk from the start, one crossing into selected blocks, one deep in the context; attn256 dense
         .served = if (w == .sattn) &sattn_served else &attn_served,
         .sums = .{ .exact = true },
+        .known = if (k == .cut or k == .spread) .{ .gate = .nonfinite, .finding = finding(w) } else null,
+    };
+}
+
+/// Each kernel's gate-1 finding: masked keys score -FLT_MAX, where its running max starts (docs: Known findings).
+fn finding(w: Which) []const u8 {
+    return switch (w) {
+        .sattn => "a non-finite value in key 0's row reaches every row through its padding lanes (key 0 at p = 0: 0 x Inf = NaN), " ++
+            "and a row whose every score is -Inf weighs its padding lanes 1 (its max starts at -FLT_MAX), so it gives key 0's values where float64 gives NaN",
+        .attn256 => "a row whose every score is -Inf weighs its masked keys 1 (its max starts at -FLT_MAX), so it averages them where float64 gives NaN",
     };
 }
 
@@ -267,6 +277,11 @@ pub const Probe = struct {
                     p.q[(r * H + 5 * r) * D + r] = x;
                 };
                 p.k[p.at(1, 2) + 7] = nan16;
+                // row 4's head 0 scores -Inf at every key it sees: q +Inf against keys 0 to 4, each -1 in that dim
+                if (p.rows > 4) {
+                    p.q[(4 * H + 0) * D + 9] = 0x7f80;
+                    for (0..5) |key| p.k[p.at(0, key) + 9] = c.toBf16(-1);
+                }
             },
             .stress => {
                 // keys of 3s or -3s: the first 1,024 score high, the rest probability 0; values cancel but for 8 nudged
