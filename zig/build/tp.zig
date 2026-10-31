@@ -41,6 +41,22 @@ fn kernelModule(b: *std.Build, image: ?std.Build.LazyPath) *std.Build.Module {
     return b.createModule(.{ .root_source_file = wf.add("tp_kernel.zig", "pub const mailbox: []const u8 = \"\";\n") });
 }
 
+var mailbox_image: ?std.Build.LazyPath = null;
+var mailbox_module: ?*std.Build.Module = null;
+
+/// The mailbox fatbin (-Dtp-nvcc / -Dtp-fatbin), built once for every runner that embeds it; null without either.
+fn mailboxImage(b: *std.Build, opts: @import("options.zig").Tp) ?std.Build.LazyPath {
+    if (mailbox_image == null) mailbox_image = if (opts.fatbin) |p| b.graph.cwdRelativePath(p) else if (opts.nvcc) |tool| mailboxFatbin(b, tool) else null;
+    return mailbox_image;
+}
+
+/// `tp_kernel`: the mailbox fatbin's bytes (or empty), one module for every runner on RoCE.
+pub fn mailboxModule(b: *std.Build) *std.Build.Module {
+    if (mailbox_module) |m| return m;
+    mailbox_module = kernelModule(b, mailboxImage(b, @import("options.zig").tp(b)));
+    return mailbox_module.?;
+}
+
 pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, test_step: *std.Build.Step, opts: @import("options.zig").Tp) void {
     const host = b.graph.host;
     if (host.result.os.tag != .windows) {
@@ -79,14 +95,12 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     tests.step.dependOn(&object.step);
     if (host.result.os.tag == .windows) test_step.dependOn(&object.step);
     if (target.result.os.tag != .linux) return;
-    const nvcc = opts.nvcc;
-    const prebuilt = opts.fatbin;
-    const image: ?std.Build.LazyPath = if (prebuilt) |p| b.graph.cwdRelativePath(p) else if (nvcc) |tool| mailboxFatbin(b, tool) else null;
+    const image = mailboxImage(b, opts);
     const cuda = runtime(b, target, optimize);
     const runner = b.createModule(.{ .root_source_file = b.path("zig/src/fabric/tp/gpu_main.zig"), .target = target, .optimize = optimize, .link_libc = true });
     runner.addImport("cuda", cuda);
     runner.addImport("tp", module(b, target, optimize, cuda));
-    runner.addImport("tp_kernel", kernelModule(b, image));
+    runner.addImport("tp_kernel", mailboxModule(b));
     const exe = b.addExecutable(.{ .name = "tf-tp-test", .root_module = runner });
     if (host.result.os.tag == .linux and target.query.isNative()) {
         const cli = @import("../src/fabric/tp/gpu_cli.zig");

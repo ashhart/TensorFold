@@ -114,6 +114,10 @@ pub const kernels = [_]Kernel{
     .{ .name = "torch_indexing", .src = "torch_ops/indexing", .flags = torch_ops },
     .{ .name = "torch_movement", .src = "torch_ops/movement", .flags = torch_ops },
     .{ .name = "torch_nemotron_constants", .src = "torch_ops/nemotron_constants", .flags = torch_ops },
+    .{ .name = "mimo_glue", .src = "mimo_v2/glue", .flags = glue }, // torch's embed / add / rope tables, bit for bit
+    .{ .name = "mimo_ops", .src = "mimo_v2/ops", .flags = glue }, // MiMo-V2: norms, SwiGLU, router, top-k
+    .{ .name = "mimo_attention", .src = "mimo_v2/attention", .flags = glue }, // MiMo-V2: decode and prompt attention
+    .{ .name = "mimo_dflash", .src = "mimo_v2/dflash", .flags = glue }, // the DFlash drafter's torch glue
     .{ .name = "roce_gather", .src = "roce_gather", .flags = &.{"-O3"} }, // b12x's one-shot RoCE all-gather, two ranks
     .{ .name = "drama3_staged_gemv", .flags = glue },
     .{ .name = "drama3", .flags = &.{"-O3"} },

@@ -361,6 +361,8 @@ pub fn run(gpu: check.Gpu) !void {
     defer gemma_ops.deinit();
     try gemma_ops.init(gpu, s, &act_rows, &vit, &round_fns, mods[5]);
     try gemma_ops.append(a, &kernels);
+    const mimo = try @import("contract_mimo.zig").Group.create(a, gpu, s, &kernels);
+    defer mimo.destroy(a);
     var vit_g4 = try vit_g4_group.Group.init(gpu, s, &vit, mods[5]);
     defer vit_g4.deinit();
     try vit_g4.append(a, &kernels);

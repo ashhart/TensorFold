@@ -48,6 +48,14 @@ pub const Model = struct {
     context_copies: bool = false, // a lone head window shares its agreeing copy path and appends the rest
     copy_match: i64 = 8, // matching history tokens a copy needs
     lone_copies: bool = true, // a lone stream proposes copies (false: only streams in shared rounds do)
+    /// A lone stream's depth from its one acceptance rate and a draft pass charged once (a block-drafting head).
+    geometric_depth: bool = false,
+    /// Shared rounds' per-depth costs as the family's table (a forward of r rows against one row); empty: measured.
+    geometric_costs: []const f64 = &.{},
+    geometric_draft_cost: f64 = 0, // the draft pass in geometric_costs' units
+    /// Per 1,000 positions past geometric_ctx_base, a round costs ctx[0] + ctx[1] * drafts more; zero: context-blind.
+    geometric_ctx: [2]f64 = .{ 0, 0 },
+    geometric_ctx_base: f64 = 9000,
 };
 
 pub const Config = struct {
@@ -93,6 +101,11 @@ pub const Config = struct {
     draft_step_ms: f64 = 0, // Model.draft_step_ms
     lone_cost_tile: u32 = 0, // Model.lone_cost_tile
     context_copies: bool = false, // Model.context_copies, within the existing verification width
+    geometric_depth: bool = false,
+    geometric_costs: []const f64 = &.{},
+    geometric_draft_cost: f64 = 0,
+    geometric_ctx: [2]f64 = .{ 0, 0 },
+    geometric_ctx_base: f64 = 9000,
     enter_match: i64 = 8, // matching tokens a copy needs (rejects coincidental indentation)
     copy_rate: f64 = 0.94, // a copied token's chance of landing in allocation
     lone_copies: bool = true, // Model.lone_copies
@@ -165,6 +178,11 @@ pub const Config = struct {
             .mtp_step_ms = m.mtp_step_ms,
             .k = .{ .depth_rate = if (m.depth_rate > 0) m.depth_rate else (Constants{}).depth_rate },
             .draft_step_ms = m.draft_step_ms,
+            .geometric_depth = m.geometric_depth,
+            .geometric_costs = m.geometric_costs,
+            .geometric_draft_cost = m.geometric_draft_cost,
+            .geometric_ctx = m.geometric_ctx,
+            .geometric_ctx_base = m.geometric_ctx_base,
         };
     }
 
