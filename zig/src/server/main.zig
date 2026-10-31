@@ -156,7 +156,7 @@ pub fn main(init: std.process.Init) !u8 {
         .model_dir = dir,
         .model_type = model_type,
         .reopen = .{ .ctx = &closer, .open = Reopen.open, .close_held = Reopen.closeHeld, .halt_held = Closer.halt, .replace = Reopen.replace },
-        .sampling = try sampling(a, io, dir, args),
+        .sampling = try sampling(a, io, dir, args, model_type),
         .environ = init.environ_map,
         .started = started,
         .identity = engines.identity(a, args),
@@ -207,9 +207,10 @@ fn modelType(a: std.mem.Allocator, io: std.Io, dir: []const u8, problem: *[]cons
     return if (t == .string) t.string else "unknown";
 }
 
-/// generation_config.json's sampling (``do_sample`` false is greedy), then the serve flags over it.
-fn sampling(a: std.mem.Allocator, io: std.Io, dir: []const u8, args: cli.Args) !?json.Value {
+/// The family's defaults, generation_config.json's sampling (``do_sample`` false is greedy), then the serve flags.
+fn sampling(a: std.mem.Allocator, io: std.Io, dir: []const u8, args: cli.Args, model_type: []const u8) !?json.Value {
     const out = try json.newObject(a);
+    try @import("family_sampling.zig").put(a, out, model_type);
     const path = try std.fs.path.join(a, &.{ dir, "generation_config.json" });
     if (std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20))) |bytes| {
         if ((try json.parse(a, bytes)) == .ok) {
