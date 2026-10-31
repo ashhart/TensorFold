@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- A tool marked `"strict": true` is now held to its schema under `tool_choice: "auto"` (or none) on every family with a grammar runtime: the server compiles a grammar that triggers at the call markup, so a strict tool's arguments always validate. `TENSORFOLD_TOOL_GRAMMAR=1` holds every auto tools request the same way.
+
 - Qwen3.5 and 3.6 on CUDA serve past their trained 262,144 positions with static YaRN rope: `--rope-yarn 4` on the checkpoint as downloaded, or a config whose rope carries a YaRN block (SGLang's staged 1M copy loads as is), raise the window to 1,048,576. On one GB10, `nvidia/Qwen3.6-35B-A3B-NVFP4` prefills a 1,048,512-token prompt in 26 minutes, finds a passphrase placed 5% in, and decodes to the window's last token; drafted, concurrent and resumed replies equal their plain runs. Without YaRN every reply is byte-identical to before. HIP, Metal, the DFlash2 drafters and every other family refuse a scaled rope by name instead of reading it as plain rope.
 
 - DeepSeek-V4.x requests that omit sampling fields now sample at the release's recommended settings, temperature 1.0 and top_p 1.0 from DeepSeek's model cards, instead of decoding greedily when the checkpoint has no `generation_config.json`. A `generation_config.json`, the serve flags and the request still override them (#1725).
