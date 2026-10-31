@@ -155,6 +155,60 @@ pub fn attend(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, 
     }
 }
 
+/// A prompt MTP chunk's block: every row's caches, then the last row's attention and o_proj partial into `out` row 0.
+pub fn blockLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, x: u64, x_stride: usize, rows: usize, pos: u64, host_pos: usize, nch: usize, out: u64) !void {
+    if (rows == 0) return error.BadWindow;
+    if (c.ps % (l.lw * 2) != 0) return error.LatentShape; // pages whole latent rows apart (the token lists' unit)
+    const t: latent.Table = .{ .pt = c.pt, .ps = c.ps, .page_rows = c.ps / (l.lw * 2) };
+    const ix = l.index;
+    const kw_rows = ix.d + ix.heads;
+    try prepareProfile(k.set, stream, l, s, x, x_stride, rows, sparseRows(l, host_pos, rows), k.prof); // every row keeps its query, its latent, its keys
+    var stamp = prof.span(k.prof, stream, .cache_write);
+    try latent.latentWriteFormat(k.set, stream, s.lat, l.lw, c.lc, c.ls, t, pos, rows, l.lw); // all rows, at pos, before any of them attends
+    stamp.end();
+    stamp = prof.span(k.prof, stream, .index_update);
+    try sparse.indexUpdate(k.set, stream, s.ikr, kw_rows, s.igr, ix.ln_w, ix.ln_b, ix.ape, c.ik, c.ig, c.pk, t, pos, rows);
+    stamp.end();
+    try attendLastRow(k, stream, l, c, s, rows, pos, host_pos, nch, t);
+    const pstamp = prof.span(k.prof, stream, .projections);
+    defer pstamp.end();
+    const off = (rows - 1) * l.heads * l.lw * 2;
+    try latent.expandV(k.set, stream, s.ol + off, l.wv, s.vn, 1, l.heads, l.dv, l.lw); // its o, into vn's row 0
+    try fill(k.set, stream, l, s, 0, 1, out);
+}
+
+/// A chunk's last row attending over caches already written: its own query, causal limit and token list.
+fn attendLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, rows: usize, pos: u64, host_pos: usize, nch: usize, t: latent.Table) !void {
+    const ix = l.index;
+    const r0 = rows - 1;
+    var v = s; // the scratch from the last row (its token lists and partials stay at the front)
+    v.qa += r0 * l.heads * l.lw * 2;
+    v.ol += r0 * l.heads * l.lw * 2;
+    v.qi += r0 * ix.heads * ix.d * 2;
+    var at = pos; // the last row's own position on the device: pos + r0, so its causal limit is unchanged
+    if (r0 > 0) {
+        var a: cuda.Args = .{};
+        a.add(pos);
+        a.add(@as(c_int, @intCast(r0)));
+        a.add(v.at);
+        try cuda.launch.launch(try k.ops.function("tf_glm_add_i32"), .{ .grid = .{ .x = 1 }, .block = .{ .x = 32 } }, stream, &a);
+        at = v.at;
+    }
+    const scale: f32 = @floatCast(std.math.pow(f64, @floatFromInt(l.qk), -0.5));
+    if (host_pos < l.dense_limit) { // the same keys today's whole-chunk call read for this row
+        var stamp = prof.span(k.prof, stream, .mla);
+        try latent.attentionFormat(k.set, stream, v.qa, c.lc, c.ls, .{ .pt = c.pt, .ps = c.ps }, at, v.partials, v.ol, v.dummy, 1, l.heads, l.lw, nch, scale, latent.headBlock(rows));
+        stamp.end();
+    }
+    if (sparseRows(l, host_pos, rows)) {
+        // one row at host_pos + r0: the same pool bucket, score columns and token list its block computed for it
+        try sparse.selectTokensProfile(k.set, k.ops, stream, v.qi, s.ikr + r0 * (ix.d + ix.heads) * 2 + ix.d * 2, ix.d + ix.heads, c.pk, t, at, host_pos + r0, 1, ix.heads, ix.d, c.pk_rows - 2, v.select, v.tokens, v.counts, null, k.prof);
+        var stamp = prof.span(k.prof, stream, .mla);
+        defer stamp.end();
+        try latent.sparseAttentionFormat(k.set, stream, v.qa, c.lc, c.ls, t, v.tokens, v.counts, sparse.width, v.partials, v.ol, 1, l.heads, l.lw, scale);
+    }
+}
+
 /// forward.dense_attention: latent.attention in `part_rows`-row blocks, each at its first row's position.
 fn denseAttention(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, pos: u64, rows: usize, nch: usize, part_rows: usize, scale: f32) !void {
     const hb = latent.headBlock(rows);

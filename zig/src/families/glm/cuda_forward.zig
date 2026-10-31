@@ -481,11 +481,15 @@ pub const Forward = struct {
         }
     }
 
-    /// mtp.mtp_forward: caches from mtp_len, stream in b.mx, a window's draft logits in b.logits (prompt: no head).
+    /// mtp.mtp_forward: caches from mtp_len, drafts in b.logits; a prompt chunk past its caches runs its last row.
     pub fn mtp(f: *const Forward, ids: []const i32, hidden: []const u64) !void {
         const n = ids.len;
         const c = &f.ranks[0].w.config;
         const D: usize = c.hidden;
+        // every rank shares this buffer and this row count, so every rank takes the same path and the gathers match
+        const last_row = f.ranks[0].b.prefill and n > 1;
+        const tail = if (last_row) (n - 1) * D * 2 else 0; // b.mx's last row, or its front
+        const rows: usize = if (last_row) 1 else n; // the pass past the caches works on that row alone
         for (f.ranks, hidden) |r, h| {
             if (r.w.mtp == null) return error.NoMtpHead;
             if (n == 0 or n > r.b.rows) return error.BadWindow;
@@ -503,21 +507,26 @@ pub const Forward = struct {
             try b16.matmul(f.set(), f.stream, b.mcat, 2 * D, m.eh, b.mx, b.kda.mm_part, n, D, 2 * D, false);
             try glue.rmsnormBy(f.set(), f.stream, b.mx, D, m.layer.in_norm, b.normed, D, b.xs, c.eps, n, D);
             const nch = @min(latent.chunksFor(r.st.mtp_len + n), b.nch);
-            try dsa_block.block(.{ .set = f.set(), .ops = f.m.ops() }, f.stream, m.layer.mixer.mla, r.st.mtp_caches, b.dsa, b.normed, D, n, r.st.mtp_pos_dev, r.st.mtp_len, nch, b.part_rows, slot(r, n));
+            const k: dsa_block.Kernels = .{ .set = f.set(), .ops = f.m.ops() };
+            if (last_row) { // all n rows' caches, one row's attention, its partial in the slot's row 0
+                try dsa_block.blockLastRow(k, f.stream, m.layer.mixer.mla, r.st.mtp_caches, b.dsa, b.normed, D, n, r.st.mtp_pos_dev, r.st.mtp_len, nch, slot(r, 1));
+            } else {
+                try dsa_block.block(k, f.stream, m.layer.mixer.mla, r.st.mtp_caches, b.dsa, b.normed, D, n, r.st.mtp_pos_dev, r.st.mtp_len, nch, b.part_rows, slot(r, n));
+            }
         }
-        try f.gather(n);
+        try f.gather(rows);
         for (f.ranks) |r| {
             const m = r.w.mtp.?;
             const b = r.b;
-            try glue.residualAdd(f.set(), f.stream, b.mx, b.mx, b.gathered, n, D, r.w.share.world);
-            try glue.rmsnormBy(f.set(), f.stream, b.mx, D, m.layer.post_norm, b.normed, D, b.xs, c.eps, n, D);
-            try f.ffn(r, m.layer, n, slot(r, n));
+            try glue.residualAdd(f.set(), f.stream, b.mx + tail, b.mx + tail, b.gathered, rows, D, r.w.share.world);
+            try glue.rmsnormBy(f.set(), f.stream, b.mx + tail, D, m.layer.post_norm, b.normed, D, b.xs, c.eps, rows, D);
+            try f.ffn(r, m.layer, rows, slot(r, rows));
         }
-        try f.gather(n);
+        try f.gather(rows);
         for (f.ranks) |r| {
             const m = r.w.mtp.?;
             const b = r.b;
-            try glue.residualAdd(f.set(), f.stream, b.mx, b.mx, b.gathered, n, D, r.w.share.world);
+            try glue.residualAdd(f.set(), f.stream, b.mx + tail, b.mx + tail, b.gathered, rows, D, r.w.share.world);
             try glue.rmsnorm(f.set(), f.stream, b.mx + (n - 1) * D * 2, D, m.norm, b.fnormed, D, b.fxs, c.eps, 1, D);
             if (!b.prefill) try q4.matmul(&f.m.q4, f.stream, b.fnormed, D, b.fxs, m.draft, b.logits, 1);
         }
