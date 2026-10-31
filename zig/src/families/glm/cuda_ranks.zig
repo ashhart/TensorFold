@@ -3,6 +3,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const heat = @import("heat");
+const l2pf = @import("cuda_l2pf.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 /// The forward's knobs a rank reads from its environment (the Python family's names and defaults).
@@ -21,6 +22,7 @@ pub const Settings = struct {
     dense_bits: u8 = 16, // TF_GLM_DENSE_BITS: the dense linears packed at load to 4, 6 or 8 bits (16: bf16)
     head_bits: u8 = 16, // TF_GLM_HEAD_BITS: the head, likewise
     roce_multi: bool = false, // TF_GLM_ROCE_MULTI: 1 (three ranks or more: small all-gathers on fabric/tp's multirank RoCE beside NCCL) or 0
+    l2pf: l2pf.Options = .{}, // TF_GLM_L2PF and its knobs: a decode window's next weights read into L2 beside it
 
     /// The settings `get` (an environment lookup) gives; `problem` names a value that is not one of the choices.
     pub fn read(get: *const fn ([:0]const u8) ?[]const u8, problem: *[]const u8) !Settings {
@@ -58,6 +60,7 @@ pub const Settings = struct {
                 return error.BadSetting;
             }
         }
+        s.l2pf = try l2pf.Options.read(get, problem);
         if (get("TF_GLM_OVERLAP_PIECES")) |v| {
             s.pieces = std.fmt.parseInt(u32, v, 10) catch 0;
             if (s.pieces < 1 or s.pieces > 8) {
@@ -119,7 +122,7 @@ pub fn environment(name: [:0]const u8) ?[]const u8 {
 
 /// What every rank must agree on, as bytes the communicator carries.
 pub const Fingerprint = extern struct {
-    layout: u32 = 13, // this struct's version
+    layout: u32 = 14, // this struct's version
     world: u32,
     rank: u32,
     kv8: u32 = 0,
@@ -137,6 +140,7 @@ pub const Fingerprint = extern struct {
     max_videos: u32 = 0,
     max_frames: u32 = 0,
     roce_multi: u32 = 0, // TF_GLM_ROCE_MULTI: every rank opens the borrowed wire or none does (a lone rank would wait on it)
+    l2pf: [4]u32 = @splat(0), // TF_GLM_L2PF's words: every rank prefetches alike, so none waits on a slower one's windows
     bits: u32 = 16 << 8 | 16, // TF_GLM_DENSE_BITS << 8 | TF_GLM_HEAD_BITS: every rank's matmuls read the same codes
     capacity: u64, // tokens a sequence holds
     heat_high: f64, // the heat bands in degrees (0 and 0: off): every rank must wait alike
@@ -164,6 +168,7 @@ pub const Fingerprint = extern struct {
         max_videos,
         max_frames,
         roce_multi,
+        l2pf,
         bits,
         capacity,
         heat_high,
@@ -196,6 +201,7 @@ pub const Fingerprint = extern struct {
             .layers = s.layers,
             .mtp = @intFromBool(mtp),
             .roce_multi = @intFromBool(s.roce_multi),
+            .l2pf = s.l2pf.words(),
             .bits = @as(u32, s.dense_bits) << 8 | s.head_bits,
             .capacity = capacity,
             .heat_high = if (s.heat) |b| b.high_c else 0,
@@ -232,6 +238,7 @@ pub fn mismatch(all: []const Fingerprint) ?Mismatch {
             "max_videos",
             "max_frames",
             "roce_multi",
+            "l2pf",
             "bits",
             "capacity",
             "heat_high",
@@ -341,6 +348,7 @@ fn explain(f: Fingerprint.Field) []const u8 {
         .max_videos => "the video count limit",
         .max_frames => "the frame limit",
         .roce_multi => "TF_GLM_ROCE_MULTI",
+        .l2pf => "TF_GLM_L2PF, _MB, _CTAS or _PACE_GBPS",
         .bits => "TF_GLM_DENSE_BITS or TF_GLM_HEAD_BITS",
         .capacity => "the sequence capacity (the context)",
         .heat_high => "TF_HEAT_HIGH",
