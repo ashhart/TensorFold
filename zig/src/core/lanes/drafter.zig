@@ -8,6 +8,7 @@ const Allocator = @import("std").mem.Allocator;
 
 /// What the round loop's depth rule needs from the drafter itself (not from the target, whose own head may not exist).
 pub const Facts = struct {
+    limit_shared_drafts: bool = false, // retain the depth rule's head-step price before reserving shared rows
     depth: u32, // drafts a round at most
     step_ms: f64, // one more draft's cost (timed at load); the rule prices a round as forward(rows) + step_ms x drafts
     prior: []const f64 = &.{}, // acceptance by depth until a stream has its own

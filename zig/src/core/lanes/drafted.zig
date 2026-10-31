@@ -112,6 +112,8 @@ pub const Drafted = struct {
             m.draft_probabilities = x.drafter.vtable.chances != null;
             m.head_trees = false;
         }
+        m.limit_shared_drafts = (target.limit_shared_drafts or d.limit_shared_drafts) and
+            !m.draft_probabilities and m.draft_confidence == null;
         if (d.copy_match > 0) m.copy_match = d.copy_match;
         if (d.window_costs.len > 0) m.window_costs = d.window_costs;
         if (d.lane_costs.len > 0) m.lane_costs = d.lane_costs;

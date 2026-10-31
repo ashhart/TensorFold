@@ -602,3 +602,20 @@ test "Qwen stepped prefill: cancel between host iterations retains only the last
 test {
     _ = @import("cuda_mtp_budget.zig");
 }
+
+test "shared head costs: Qwen CUDA MTP retains costed copy grants in chains and trees" {
+    var e: E.Engine = undefined;
+    e.g.kv_heads = 1;
+    e.g.hidden = 16;
+    var head: Mtp = undefined;
+    head.e = &e;
+    head.capacity = 16;
+    head.depth = 3;
+    head.step_ms = 2;
+    head.n_costs = 0;
+    for ([_]bool{ false, true }) |trees| {
+        head.trees = trees;
+        const m = try lanes.shared_head_cost_check.attached(laneFacts(16, 32), head.drafter().facts());
+        try lanes.shared_head_cost_check.check(m);
+    }
+}
