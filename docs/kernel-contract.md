@@ -117,6 +117,10 @@ MLX's formula keeps the infinity, because its codes enter the MMAs as q + 128 an
 `tf_glm_scores` scores a NaN dot as 0 where float64 keeps the NaN: its relu is `fmaxf(x, 0)`, as `tl.maximum` is in the
 Python family's Triton glue it was ported from. Nemotron's Metal `tf_xup_w3` gives 0 for a NaN dot where float64 keeps
 the NaN: its relu2 is `metal::max(bfloat(acc), 0.0f)`; the other up pipelines give its bytes on the same inputs.
+Qwen3.8 Flash Next's `tf_sattn_nax` and `tf_attn256_nax` score masked keys -FLT_MAX, the value each row's running
+max starts from, so a row whose every score is -Inf weighs its masked keys 1 and gives a finite average where float64
+gives NaN. `tf_sattn_nax`'s padding lanes also read key 0 at p = 0, so a non-finite value in key 0's row reaches every
+row (0 x Inf is NaN where float64 gives the infinity).
 
 HIP’s MLX stream tile keeps its finite dot2 sums unchanged. A non-finite result with an actual non-finite
 operand is recomputed by full quantization groups using the factored float64 formula. The plain tile is
@@ -146,6 +150,11 @@ M5, Nemotron's `tf_attention_nax` and MiniMax-M3.1-Flash's `mm_prompt_attention`
 bf16 output must lie between its range's ends rounded to bf16. Nemotron's adds a case with P spread over about
 [2^-6, 1] and values in [0, 1), where the cut's bias adds up; its control, the same range without the cut, goes red at
 `shapes`. Before the M5, `tf_attention_nax` keeps attention_ref's bound.
+Qwen3.8 Flash Next's prompt attention on the M5 does too: `tf_sattn_nax` (the indexer's dense and selected rows) and
+`tf_attn256_nax` (the causal chunk without the indexer), head dim 256, 24 heads over 2. Each bf16 output,
+bf16(bf16(o) * bsig(gate)), must lie between its range's ends rounded to bf16 and through the gate's rounded sigmoid.
+Each adds a P-spread case whose cutless range is a planted control, and a source edit gate 3 must catch: a row's next
+key counted. Before the M5 neither is registered.
 On the M5, Nemotron's SSD steps (`prefill_mixers.zig`'s Mamba mixer) run `gemm_nax`'s five f32 kernels with both
 operands fp32, so each product enters cut, smaller by up to 1 - (1 - 2^-10)^2. Their entries
 (`metal_nemotron_ssd_gemm.zig`, y = sur x dtx and the state dd^T x bh^T a head, at the step's served row counts) state
