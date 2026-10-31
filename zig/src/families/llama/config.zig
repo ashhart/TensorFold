@@ -16,6 +16,11 @@ pub const Error = error{
     UnsupportedLlamaPrecision,
 } || std.json.ParseError(std.json.Scanner);
 
+/// Attention's score scale, 1 / sqrt(head_dim).
+pub fn headScale() f32 {
+    return 1.0 / @sqrt(@as(f32, head_dim));
+}
+
 pub const Config = struct {
     hidden: usize,
     intermediate: usize,
@@ -57,7 +62,7 @@ pub const Config = struct {
 
     /// 1 / sqrt(head_dim), the attention scale.
     pub fn scale(_: Config) f32 {
-        return 1.0 / @sqrt(@as(f32, head_dim));
+        return headScale();
     }
 
     pub fn isEos(c: Config, token: u32) bool {
