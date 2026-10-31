@@ -1,0 +1,10 @@
+{
+  "cuda13.3": {
+    "exit_code": 0,
+    "version": "NVIDIA (R) Compute Sanitizer\nCopyright (c) 2020-2026 NVIDIA Corporation\nVersion 2026.2.1.0 (build 38334959) (public-release)\n"
+  },
+  "cuda13.0": {
+    "exit_code": 0,
+    "version": "NVIDIA (R) Compute Sanitizer\nCopyright (c) 2020-2025 NVIDIA Corporation\nVersion 2025.3.1.0 (build 36400806) (public-release)\n"
+  }
+}

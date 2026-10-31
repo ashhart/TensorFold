@@ -1,0 +1,88 @@
+{
+  "request": {
+    "model": "qwen-community",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "What color is the square? Answer one word."
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAOAAAADgCAIAAACVT/22AAACf0lEQVR4nO3dsQ0DMQwEwddD/bdMd+DACdfATAOnYMFUZ2YeqHq3HwDfCJQ0gZImUNIESppASRMoaQIlTaCkCZQ0gZImUNIESppASRMoaQIlTaCkCZQ0gZImUNIESppASRMoaQIlTaCkCZQ0gZImUNIESppASRMoaQIlTaCkCZQ0gZImUNIESppASRMoaXdt+Zy1aX6z8aWWC0qaQEkTKGkCJU2gpAmUNIGSJlDSBEqaQEkTKGkCJU2gpAmUNIGSJlDSBEqaQEkTKGkCJU2gpAmUNIGSJlDSBEqaQEkTKGkCJU2gpAmUNIGSJlDSBEqaQEkTKGkCJU2gpAmUNIGSJlDSBEqaQEkTKGkCJU2gpAmUNIGSJlDSBEqaQEkTKGkCJU2gpAmUNIGSJlDSBEqaQEkTKGkCJU2gpAmUNIGSJlDSBEqaQEkTKGkCJU2gpAmUNIGSJlDSBEqaQEkTKGkCJU2gpAmUNIGSJlDSBEqaQEkTKGkCJU2gpAmUNIGSJlDSBEqaQEkTKGkCJU2gpAmUNIGSJlDSBEqaQEkTKGkCJU2gpAmUNIGSJlDSBEqaQEkTKGkCJU2gpAmUNIGSJlDSBEqaQEkTKGkCJU2gpAmUNIGSJlDSBEqaQEkTKGkCJU2gpAmUNIGSJlDSBEqaQEkTKGkCJU2gpAmUNIGSJlDSBEqaQEkTKGkCJU2gpAmUNIGSJlDS7tryzNo0/8MFJU2gpAmUNIGSJlDSBEqaQEkTKGkCJU2gpAmUNIGSJlDSBEqaQEkTKGkCJU2gpAmUNIGSJlDSBEqaQEkTKGkCJU2gpAmUNIGSJlDSBEqaQEkTKGkCJU2gpAmUNIGSJlDSBEraBwgoCL9iE05kAAAAAElFTkSuQmCC"
+            }
+          }
+        ]
+      }
+    ],
+    "temperature": 0,
+    "seed": 42,
+    "max_tokens": 256,
+    "stream": false,
+    "draft": true,
+    "return_token_ids": true,
+    "priority": "background",
+    "reasoning_effort": "none",
+    "chat_template_kwargs": {
+      "enable_thinking": false
+    }
+  },
+  "response": {
+    "id": "chatcmpl-7dac9e3c9bcb22446dadd1fb47b59029",
+    "object": "chat.completion",
+    "created": 1793403489,
+    "model": "qwen-community",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": " Red"
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 88,
+      "completion_tokens": 2,
+      "total_tokens": 90,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "exact_mode": "exact",
+    "tensorfold": {
+      "enable_thinking": false,
+      "reasoning_effort": "none",
+      "engine": "lanes",
+      "tokens_per_second": 37.26458286100475,
+      "seconds": 0.026835132,
+      "prefill_seconds": 0.081815934,
+      "prefill_widths": [],
+      "prefill_raised": [],
+      "time_to_first_token": 0.232446074,
+      "sampling": "greedy",
+      "drafts": true,
+      "token_sha": "ec7e69366eb3",
+      "token_sha256": "ec7e69366eb30e4dc7a45151dc85401493c4eb025f04b7eb462d8915a8e9d8ff",
+      "token_ids": [
+        3605,
+        248046
+      ],
+      "min_rows": 16
+    },
+    "speculative": {
+      "rounds": 1,
+      "drafted": 15,
+      "accepted": 1,
+      "acceptance_rate": 0.06666666666666667,
+      "tokens_per_round": 2.0
+    }
+  }
+}

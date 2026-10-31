@@ -1,0 +1,48 @@
+info: CUDA window costs: measured 64 widths
+CUDA family startup phases: load=9.696s reserve=0.010s warmups=0.627s calibration=18.790s
+[tensorfold] open-file limit raised: soft 65536 -> 524288
+[tensorfold] CUDA sm_120 device 0 (NVIDIA RTX PRO 4500 Blackwell): model 18.14 GiB; 1 stream at once, 4.96 GiB each at a 131072-token window (fp8 caches), of 12.5 GiB left after a 0.5 GiB reserve; prompts in passes of up to 4096 rows, no prompt cache; own glue kernels
+[tensorfold] serving qwen-community at http://127.0.0.1:18080/v1 (sampling: temperature 1.0, top_k 20, top_p 0.95; drafts: DFlash2 (/models/Qwen3.8-27B-DFlash2) + copies; context: 131072; loaded in 30.0s)
+[tensorfold] thinking on (the chat template's default): replies reason in reasoning_content before the answer in content, and max_tokens counts both. --no-thinking turns it off; a request can send chat_template_kwargs {"enable_thinking": false}
+[tensorfold] 127.0.0.1 "GET /health HTTP/1.1" 200 -
+[tensorfold] 127.0.0.1 "GET /v1/benchmark/manifest HTTP/1.1" 200 -
+[tensorfold] 127.0.0.1 "POST /v1/tokenize HTTP/1.1" 200 -
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-6ca501df282e9a17e004da8be8ab3af9 prompt=2048 cached=0 thinking=False effort=none tokens=16 sha=c6d677778bf8 finish=length rounds=3 accepted=15/45 ttft=0.821 decode=0.110 elapsed=0.931 queued=0.000 tok/s=135.9
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-9bc616a7a632501f7e7f3c3d68d230c8 prompt=2048 cached=0 thinking=False effort=none tokens=16 sha=c6d677778bf8 finish=length rounds=3 accepted=15/45 ttft=0.831 decode=0.106 elapsed=0.936 queued=0.000 tok/s=142.0
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-5079dac512d265b0a7e91ab3f9f6f20d prompt=2048 cached=0 thinking=False effort=none tokens=16 sha=c6d677778bf8 finish=length rounds=4 accepted=16/45 ttft=0.832 decode=0.136 elapsed=0.967 queued=0.000 tok/s=110.7
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-e17f23a2171d3a9515df84cc217613ba prompt=8192 cached=0 thinking=False effort=none tokens=16 sha=901dbf95ff4d finish=length rounds=6 accepted=13/89 ttft=3.448 decode=0.194 elapsed=3.642 queued=0.000 tok/s=77.4
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-4feed2357c174e17b0630ffa1be89b0c prompt=8192 cached=0 thinking=False effort=none tokens=16 sha=901dbf95ff4d finish=length rounds=7 accepted=12/89 ttft=3.460 decode=0.220 elapsed=3.680 queued=0.000 tok/s=68.2
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-87a95adb9d864b54f72102883094c6d8 prompt=8192 cached=0 thinking=False effort=none tokens=16 sha=901dbf95ff4d finish=length rounds=6 accepted=13/80 ttft=3.463 decode=0.193 elapsed=3.656 queued=0.000 tok/s=77.7
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-75f21fe294766a3674076dbe3007c2c6 prompt=32768 cached=0 thinking=False effort=none tokens=16 sha=e28e8ee97313 finish=length rounds=3 accepted=12/28 ttft=15.676 decode=0.112 elapsed=15.788 queued=0.000 tok/s=134.2
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-133e4c5c0783390c50efd6577be29be7 prompt=32768 cached=0 thinking=False effort=none tokens=16 sha=e28e8ee97313 finish=length rounds=3 accepted=12/28 ttft=15.709 decode=0.112 elapsed=15.821 queued=0.000 tok/s=133.9
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-d2d27e37c018a9906fadf9426acd4006 prompt=32768 cached=0 thinking=False effort=none tokens=16 sha=e28e8ee97313 finish=length rounds=3 accepted=12/28 ttft=15.724 decode=0.112 elapsed=15.836 queued=0.000 tok/s=134.0
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-82d99c76a2f89a4d0a5074323eec8a1e prompt=65536 cached=0 thinking=False effort=none tokens=16 sha=dac966375b69 finish=length rounds=1 accepted=14/14 ttft=36.174 decode=0.056 elapsed=36.230 queued=0.000 tok/s=269.0
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-4681855a322d04cc00336b837d739628 prompt=65536 cached=0 thinking=False effort=none tokens=16 sha=dac966375b69 finish=length rounds=1 accepted=14/14 ttft=36.186 decode=0.056 elapsed=36.242 queued=0.000 tok/s=269.2
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-c971890c70e5bf4df5b349e97e0dde13 prompt=65536 cached=0 thinking=False effort=none tokens=16 sha=dac966375b69 finish=length rounds=1 accepted=14/14 ttft=36.197 decode=0.058 elapsed=36.255 queued=0.000 tok/s=260.3
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+warning: lane host: a round failed (QwenContextFull): every admitted stream fails
+[tensorfold] ended cmpl-0a66c19f22a7b7e247f493c8c97ded69 reason=error (QwenContextFull) prompt=131056 tokens=4 after=91.36s
+[tensorfold] stream error: QwenContextFull
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+warning: lane host: a round failed (QwenContextFull): every admitted stream fails
+[tensorfold] ended cmpl-876d6d12004d3558caefbeb18f5599cd reason=error (QwenContextFull) prompt=131056 tokens=4 after=91.39s
+[tensorfold] stream error: QwenContextFull
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+warning: lane host: a round failed (QwenContextFull): every admitted stream fails
+[tensorfold] ended cmpl-8a1d9e479dd8793e3ec3d5113bffd189 reason=error (QwenContextFull) prompt=131056 tokens=4 after=91.16s
+[tensorfold] stream error: QwenContextFull
+[tensorfold] shutting down (SIGTERM): draining: new requests get 503; 0 request(s) in progress may finish within 20.0 s
+[tensorfold] shutting down: drained
+[tensorfold] shutting down: stopped

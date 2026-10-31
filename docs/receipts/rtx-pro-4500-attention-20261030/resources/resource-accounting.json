@@ -1,0 +1,8 @@
+{
+  "note": "cuobjdump totals exceed cuFuncGetAttribute(SHARED_SIZE_BYTES) by1024bytes for these kernels. Registration uses the measured live-driver attributes; both observations are retained.",
+  "nvcc13.0": "13.0.88",
+  "nvcc13.3": "13.3.73",
+  "driver": "615.78.08",
+  "physical_driver_sample": "SM120 RTX PRO 4500 only",
+  "sm121_scope": "Compiler resource records only, using the matching raw totals/accounting; no physical SM121 device qualification is claimed."
+}

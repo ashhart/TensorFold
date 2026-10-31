@@ -1,0 +1,139 @@
+{
+  "request": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "Explain a binary search tree."
+      }
+    ],
+    "temperature": 0,
+    "seed": 42,
+    "max_tokens": 64,
+    "reasoning_effort": "none",
+    "chat_template_kwargs": {
+      "enable_thinking": false
+    },
+    "model": "qwen-community",
+    "stream": false,
+    "return_token_ids": true,
+    "priority": "background"
+  },
+  "response": {
+    "id": "chatcmpl-04eea1b6add603f3bc3b72f7d0851176",
+    "object": "chat.completion",
+    "created": 1793403492,
+    "model": "qwen-community",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "A **Binary Search Tree (BST)** is a type of binary tree data structure that allows for efficient searching, insertion, and deletion of data. It is widely used in computer science because it provides an average-case time complexity of $O(\\log n)$ for these operations, which is significantly faster than linear search in an"
+        },
+        "finish_reason": "length"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 19,
+      "completion_tokens": 64,
+      "total_tokens": 83,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "exact_mode": "exact",
+    "tensorfold": {
+      "enable_thinking": false,
+      "reasoning_effort": "none",
+      "engine": "lanes",
+      "tokens_per_second": 172.21605664440872,
+      "seconds": 0.365819548,
+      "prefill_seconds": 0.070967994,
+      "prefill_widths": [],
+      "prefill_raised": [],
+      "time_to_first_token": 0.396374976,
+      "sampling": "greedy",
+      "drafts": true,
+      "token_sha": "9d43935e2ce6",
+      "token_sha256": "9d43935e2ce6959b93b45430f77f4a30534d5a11edf29dce2a4f4fef7892bc90",
+      "token_ids": [
+        32,
+        2972,
+        20682,
+        7304,
+        8672,
+        318,
+        58950,
+        31230,
+        369,
+        264,
+        913,
+        314,
+        7620,
+        4757,
+        795,
+        5759,
+        421,
+        5954,
+        364,
+        10727,
+        14603,
+        11,
+        34736,
+        11,
+        321,
+        34872,
+        314,
+        795,
+        13,
+        1049,
+        369,
+        13177,
+        1429,
+        303,
+        6165,
+        7785,
+        1521,
+        424,
+        5529,
+        449,
+        5289,
+        37208,
+        854,
+        22373,
+        314,
+        393,
+        46,
+        11189,
+        813,
+        307,
+        14646,
+        364,
+        1439,
+        7289,
+        11,
+        864,
+        369,
+        11602,
+        10281,
+        1056,
+        13094,
+        2624,
+        303,
+        449
+      ],
+      "min_rows": 15
+    },
+    "speculative": {
+      "rounds": 14,
+      "drafted": 196,
+      "accepted": 49,
+      "acceptance_rate": 0.25,
+      "tokens_per_round": 4.571428571428571
+    }
+  },
+  "elapsed_s": 0.7630350649997126
+}

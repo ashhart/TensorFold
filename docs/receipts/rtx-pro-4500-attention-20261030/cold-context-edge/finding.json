@@ -1,0 +1,12 @@
+{
+  "baseline_source": "01e25d3aebc0ebb686670c69e37b7c269f261b3d",
+  "configured_context": 131072,
+  "attempt_input_tokens": 131056,
+  "output_budget": 16,
+  "observed_error": "QwenContextFull after4emittedtokens",
+  "cause_scope": "Unmodified baseline; target rejects a forward when cache.len+rows exceeds cache.cap. Decode verification windows can reach128rows.",
+  "new_comparison_input_tokens": 130816,
+  "remaining_positions": 256,
+  "policy": "Configured context and all serving features unchanged; all comparison arms use the same explicit input headroom. This does not claim the rejected edge case passes.",
+  "raw_directory": "<WORKSPACE>/work/current/cold-results.context-edge-1793404204"
+}

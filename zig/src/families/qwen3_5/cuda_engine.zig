@@ -137,6 +137,9 @@ pub const Engine = struct {
     pl: u64,
     po: u64,
     logits: u64,
+    mt2_attention: bool = false,
+    mt2_paged: cuda.Function,
+    mt2_whole: cuda.Function,
     routed: routed.Scratch = .{}, // qwen3_5_moe's routed rows
     amax: u64, // the argmax slices' bests: most_verify rows of argmaxSlices(vocab) (f32, i32)
     picks: u64, // drawRows' slice scratch: most_verify rows of cuda.sample.Draws.row_scratch
@@ -218,6 +221,11 @@ pub const Engine = struct {
         const sms: usize = @intCast(try ctx.attribute(.multiprocessor_count));
         const major = try ctx.attribute(.compute_capability_major);
         const minor = try ctx.attribute(.compute_capability_minor);
+        const test_override = std.c.getenv("TF_CUDA_TEST_ATTN_MT2");
+        e.mt2_attention = cuda.sm120_test_override.enabled(@intCast(10 * major + minor), sms, if (test_override) |v| std.mem.span(v) else null) and @import("cuda_geometry.zig").dense27(g);
+        if (test_override) |v| std.log.info("experimental MT2 override={s}, enabled={}", .{ std.mem.span(v), e.mt2_attention });
+        e.mt2_paged = try e.mods[9].function("tf_q35_attn_rows8_mt2");
+        e.mt2_whole = try e.mods[9].function("tf_q35_attn_rows8_mt2_whole");
         const gb10 = major == 12 and minor == 1;
         e.affine = try cuda.qlinear.Affine4Kernels.resolve(d, e.mods[0], e.mods[1], e.mods[2], e.mods[3], sms, gb10);
         e.affine.half_prompt = !gb10; // the 27B's prompt tile (Tile<64, 128, 128, 2, 2, 2>), quicker on an RTX 5090
@@ -487,6 +495,7 @@ pub const Engine = struct {
         };
         shape.hidden = keep == .hidden;
         shape.paged = @import("cuda_attention.zig").hasPages(segs);
+        shape.mt2 = @import("cuda_shapes.zig").useMt2(e.mt2_attention, e.kv8, prompt, total, parts.len, parts[0].cache.len);
         if (e.learning != null or e.pockets.any()) {
             var exact = shape;
             exact.total = @intCast(total);

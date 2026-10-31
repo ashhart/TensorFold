@@ -1,0 +1,19 @@
+{
+  "base": "01e25d3aebc0ebb686670c69e37b7c269f261b3d",
+  "code_commit": "3b1ae41916cf1767f5e425db3df8939df37b456d",
+  "source_files_sha256": {
+    "zig/kernels/cuda/qwen35_kv8.cu": "ecefedfabe0066d586b9a2d39788c39c2b3169221cda8d1e01e12075da425f53",
+    "zig/src/core/contract/measurements/qwen_lanes_133.zig": "9311e7a6fa6fa106b74dbd1f8919c84e07bda614d241e2cb67020b3846ac7d7e",
+    "zig/src/core/contract/qwen_whole_records.zig": "bac294de01afa237f83a6a3528256ac82dea20dfe1017d0e199a386cf662ea6a",
+    "zig/src/core/contract/registry_pending_test.zig": "d11ad6e4740280f96d8258103e6f61c0e7c25a3679d6fd2ec2e9df9c4a9b58dc",
+    "zig/src/families/qwen3_5/cuda_engine.zig": "cc15d27322bbdf2f26119683c93ac1de745ab0c44caad5ac1ae4c82247a9602c",
+    "zig/src/families/qwen3_5/cuda_forward.zig": "469ffde22dac6e8f7b5849b2bfd92ad38acfdc65b3f1ff4cb1aad8711a928729",
+    "zig/src/families/qwen3_5/cuda_shapes.zig": "76cf23efac8754a40b2f2a01c5a77f06851cfa67fb5633291c246f11a1ab3397",
+    "zig/src/families/qwen3_5/cuda_signatures.zig": "3b0da928bea1f9ee7f630989b2189b64f1fba6b8948bfc29a6c720a097c87a05",
+    "zig/tests/cuda/contract_q35_attn.zig": "c269b0a25cf0f9c8ac6e927b649677f1637b73dfd9274eda9fcf23a8c394a6c1",
+    "zig/tests/cuda/contract_q35_attn_host.zig": "24dcc95e3197fae0472a5fe35837574cc26c8cc593baf66cc095337f44e16754",
+    "zig/tests/cuda/contract_q35_launch_args_host.zig": "114d8adc4ec5b9a70004e6e2959a1f363868a05d928abe2ba132561a4a7dced2"
+  },
+  "build_version_label": "1.1.6",
+  "build_version_note": "Explicit -Dversion=1.1.6 retained for the existing recipe/client. The source commit and file hashes identify code; this label is not a release provenance claim."
+}

@@ -1,0 +1,851 @@
+install
++- install tf-qwen35-learn
+   +- compile exe tf-qwen35-learn fast native
+      +- run /usr/local/cuda-13.3/bin/nvcc (glm_mm.fatbin) w
+./zig/kernels/cuda/glm_mm.cu(84): warning #177-D: member "<unnamed>::Tile<BITS, BM, WM, STAGES>::SMEM [with BITS=16, BM=64, WM=2, STAGES=3]" was declared but never referenced
+      static constexpr int SMEM = STAGES * STAGE;
+                           ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+./zig/kernels/cuda/glm_mm.cu(84): warning #177-D: member "<unnamed>::Tile<BITS, BM, WM, STAGES>::SMEM [with BITS=16, BM=32, WM=1, STAGES=3]" was declared but never referenced
+      static constexpr int SMEM = STAGES * STAGE;
+                           ^
+
+./zig/kernels/cuda/glm_mm.cu(84): warning #177-D: member "<unnamed>::Tile<BITS, BM, WM, STAGES>::SMEM [with BITS=16, BM=16, WM=1, STAGES=3]" was declared but never referenced
+      static constexpr int SMEM = STAGES * STAGE;
+                           ^
+
+./zig/kernels/cuda/glm_mm.cu(84): warning #177-D: member "<unnamed>::Tile<BITS, BM, WM, STAGES>::SMEM [with BITS=8, BM=128, WM=2, STAGES=3]" was declared but never referenced
+      static constexpr int SMEM = STAGES * STAGE;
+                           ^
+
+./zig/kernels/cuda/glm_mm.cu(84): warning #177-D: member "<unnamed>::Tile<BITS, BM, WM, STAGES>::SMEM [with BITS=8, BM=64, WM=2, STAGES=3]" was declared but never referenced
+      static constexpr int SMEM = STAGES * STAGE;
+                           ^
+
+./zig/kernels/cuda/glm_mm.cu(84): warning #177-D: member "<unnamed>::Tile<BITS, BM, WM, STAGES>::SMEM [with BITS=8, BM=32, WM=1, STAGES=3]" was declared but never referenced
+      static constexpr int SMEM = STAGES * STAGE;
+                           ^
+
+./zig/kernels/cuda/glm_mm.cu(84): warning #177-D: member "<unnamed>::Tile<BITS, BM, WM, STAGES>::SMEM [with BITS=8, BM=16, WM=1, STAGES=3]" was declared but never referenced
+      static constexpr int SMEM = STAGES * STAGE;
+                           ^
+
+./zig/kernels/cuda/glm_mm.cu(84): warning #177-D: member "<unnamed>::Tile<BITS, BM, WM, STAGES>::SMEM [with BITS=6, BM=128, WM=2, STAGES=3]" was declared but never referenced
+      static constexpr int SMEM = STAGES * STAGE;
+                           ^
+
+./zig/kernels/cuda/glm_mm.cu(84): warning #177-D: member "<unnamed>::Tile<BITS, BM, WM, STAGES>::SMEM [with BITS=6, BM=64, WM=2, STAGES=3]" was declared but never referenced
+      static constexpr int SMEM = STAGES * STAGE;
+                           ^
+
+./zig/kernels/cuda/glm_mm.cu(84): warning #177-D: member "<unnamed>::Tile<BITS, BM, WM, STAGES>::SMEM [with BITS=6, BM=32, WM=1, STAGES=3]" was declared but never referenced
+      static constexpr int SMEM = STAGES * STAGE;
+                           ^
+
+./zig/kernels/cuda/glm_mm.cu(84): warning #177-D: member "<unnamed>::Tile<BITS, BM, WM, STAGES>::SMEM [with BITS=6, BM=16, WM=1, STAGES=3]" was declared but never referenced
+      static constexpr int SMEM = STAGES * STAGE;
+                           ^
+
+./zig/kernels/cuda/glm_mm.cu(84): warning #177-D: member "<unnamed>::Tile<BITS, BM, WM, STAGES>::SMEM [with BITS=4, BM=128, WM=2, STAGES=3]" was declared but never referenced
+      static constexpr int SMEM = STAGES * STAGE;
+                           ^
+
+./zig/kernels/cuda/glm_mm.cu(84): warning #177-D: member "<unnamed>::Tile<BITS, BM, WM, STAGES>::SMEM [with BITS=4, BM=64, WM=2, STAGES=3]" was declared but never referenced
+      static constexpr int SMEM = STAGES * STAGE;
+                           ^
+
+./zig/kernels/cuda/glm_mm.cu(84): warning #177-D: member "<unnamed>::Tile<BITS, BM, WM, STAGES>::SMEM [with BITS=4, BM=32, WM=1, STAGES=3]" was declared but never referenced
+      static constexpr int SMEM = STAGES * STAGE;
+                           ^
+
+./zig/kernels/cuda/glm_mm.cu(84): warning #177-D: member "<unnamed>::Tile<BITS, BM, WM, STAGES>::SMEM [with BITS=4, BM=16, WM=1, STAGES=3]" was declared but never referenced
+      static constexpr int SMEM = STAGES * STAGE;
+                           ^
+
+./zig/kernels/cuda/glm_mm.cu(84): warning #177-D: member "<unnamed>::Tile<BITS, BM, WM, STAGES>::SMEM [with BITS=16, BM=128, WM=2, STAGES=3]" was declared but never referenced
+      static constexpr int SMEM = STAGES * STAGE;
+                           ^
+
+
+install
++- install tf-qwen35-learn
+   +- compile exe tf-qwen35-learn fast native
+      +- run /usr/local/cuda-13.3/bin/nvcc (prefill_attention.fatbin) w
+./zig/kernels/cuda/prefill_attention.cu(21): warning #177-D: variable "tf_prefill_attention::SMEM_MAX" was declared but never referenced
+  constexpr int SMEM_MAX = 96 * 1024;
+                ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+
+install
++- install tf-qwen35-learn
+   +- compile exe tf-qwen35-learn fast native
+      +- run /usr/local/cuda-13.3/bin/nvcc (fp8_experts.fatbin) w
+./zig/kernels/cuda/fp8_experts.cu(149): warning #177-D: variable "RW" was declared but never referenced
+    constexpr int RW = PromptCfg<M, RT, CW>::RW;
+                  ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+
+install
++- install tf-qwen35-learn
+   +- compile exe tf-qwen35-learn fast native
+      +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_fact.fatbin) w
+./zig/kernels/cuda/flashnext_fact.cu(175): warning #128-D: loop is not reachable
+              for (int kt = 0; kt < GS / 16; ++kt) {
+              ^
+          detected during instantiation of "void fact::fact_kernel<BM,BN,WM,WN,STAGES,GPS,DBUF,MINB,FOLD,OUT16,BLOCKED>(const __nv_bfloat16 *, const float *, const uint32_t *, const __nv_bfloat16 *, const __nv_bfloat16 *, void *, float *, int, int, int, int, int, int, int) [with BM=64, BN=128, WM=2, WN=4, STAGES=3, GPS=2, DBUF=false, MINB=2, FOLD=true, OUT16=true, BLOCKED=true]" at line 264
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+
+install
++- install tf-qwen35-learn
+   +- compile exe tf-qwen35-learn fast native
+      +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_attn.fatbin) w
+./zig/kernels/cuda/flashnext_attn.cu(447): warning #128-D: loop is not reachable
+      for (int h = 0; h < 2; ++h) {
+      ^
+          detected during instantiation of "void attn_chunks<NB,ONE,FUSE,PAGED>(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const int *, float *, float *, float *, const int *, const int *, const int *, int, int, int, int, int, float, int, int, fn_attn::Pg) [with NB=1, ONE=true, FUSE=true, PAGED=false]" at line 494
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+./zig/kernels/cuda/flashnext_attn.cu(447): warning #128-D: loop is not reachable
+      for (int h = 0; h < 2; ++h) {
+      ^
+          detected during instantiation of "void attn_chunks<NB,ONE,FUSE,PAGED>(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const int *, float *, float *, float *, const int *, const int *, const int *, int, int, int, int, int, float, int, int, fn_attn::Pg) [with NB=1, ONE=true, FUSE=true, PAGED=true]" at line 523
+
+
+install
++- install tf-qwen35-learn
+   +- compile exe tf-qwen35-learn fast native
+      +- run /usr/local/cuda-13.3/bin/nvcc (drama3_fp8.fatbin) w
+./zig/kernels/cuda/drama3_fp8.cu(179): warning #177-D: variable "RW" was declared but never referenced
+    constexpr int RW = PromptCfg<M, RT, CW>::RW;
+                  ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+
+Build Summary: 162/162 steps succeeded
+install success
++- install tensorfold success
+|  +- compile exe tensorfold fast native success 3m MaxRSS:2G
+|     +- options cached
+|     +- options cached
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen4_projection.fatbin) success 1s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc success 3ms
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen4_gdn.fatbin) success 1s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     |  +- WriteFile qwen4_gdn.cu cached
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen4_hc.fatbin) success 1s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen4_ple.fatbin) success 1s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     |  +- WriteFile qwen4_ple.cu cached
+|     +- run /usr/local/cuda-13.3/bin/nvcc (attn_train.fatbin) success 1s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen27_train.fatbin) success 2s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (gdn_train.fatbin) success 1s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (train_q4.fatbin) success 2s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (train_attn.fatbin) success 1s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_train.fatbin) success 2s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_gdn.fatbin) success 1s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_batch.fatbin) success 4s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_mtp.fatbin) success 949ms
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qmm.fatbin) success 3s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (experts_rows.fatbin) success 1s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (route_rows.fatbin) success 1s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_hc.fatbin) success 3s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_attn.fatbin) success 30s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (experts3.fatbin) success 4s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (experts3_prefill.fatbin) success 3s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (moe.fatbin) success 1s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen36_mtp.fatbin) success 1s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (ggml.fatbin) success 12s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (gdn.fatbin) success 3s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (probe.fatbin) success 495ms
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qmm_group.fatbin) success 5s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qmm_prefill.fatbin) success 2s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_fact.fatbin) success 1s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_hcf.fatbin) success 2s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_fexp.fatbin) success 1s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (w4a8_prefill.fatbin) success 1s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (experts.fatbin) success 2s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (experts_prefill.fatbin) success 2s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (experts_pack.fatbin) success 706ms
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (prefill_attention.fatbin) success 5s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (scan_rows.fatbin) success 1s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nemotron_ops.fatbin) success 2s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (affine4_pack.fatbin) success 572ms
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (affine8.fatbin) success 5s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (affine_prefill.fatbin) success 2s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (fp8_experts.fatbin) success 2s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (exlr8.fatbin) success 4s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (exlr8_dense.fatbin) success 2s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nvfp4_experts_tile.fatbin) success 3s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nvfp4_experts.fatbin) success 18s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (rank_sum.fatbin) success 774ms
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (lane_gemv.fatbin) success 1s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (sample.fatbin) success 14s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (train.fatbin) success 3s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen35.fatbin) success 9s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen35_draft.fatbin) success 2s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen35_keep.fatbin) success 782ms
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen_vision.fatbin) success 1s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (gdn_prefill.fatbin) success 946ms
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen35_kv8.fatbin) success 12s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen35_bf16_rows.fatbin) success 814ms
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nemotron_route.fatbin) success 3s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nemotron_mamba.fatbin) success 1s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nemotron_attention.fatbin) success 2s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nemotron_keyed.fatbin) success 693ms
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nemotron_latent.fatbin) success 4s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (ck_lane.fatbin) success 4s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (ck_experts.fatbin) success 2s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (norms.fatbin) success 5s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (embed_rows.fatbin) success 860ms
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (lfm2.fatbin) success 1s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (vit.fatbin) success 1s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (tree_round.fatbin) success 865ms
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (act_rows.fatbin) success 2s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (gdn_prep.fatbin) success 1s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qk_rows.fatbin) success 2s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qmmf.fatbin) success 12s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (prompt16.fatbin) success 4s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (tree_attention.fatbin) success 36s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (block_attention.fatbin) success 2s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (window_attention.fatbin) success 5s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (window_rows.fatbin) success 8s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (window_pages.fatbin) success 5s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (moe_glue.fatbin) success 1s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dense_rows.fatbin) success 6s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (modelopt_pack.fatbin) success 853ms
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_kda.fatbin) success 1s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_glue.fatbin) success 5s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_ops.fatbin) success 840ms
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_index.fatbin) success 1s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_quant.fatbin) success 1s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (exl3_linear.fatbin) success 26s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (exl3_experts.fatbin) success 10s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (exl3_candidate.fatbin) success 11s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_vision.fatbin) success 1s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_mm.fatbin) success 3s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_dflash.fatbin) success 1s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (torch_argmax.fatbin) success 1s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (torch_topk.fatbin) success 940ms
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (torch_pointwise.fatbin) success 771ms
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (torch_indexing.fatbin) success 543ms
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (torch_movement.fatbin) success 702ms
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (torch_nemotron_constants.fatbin) success 639ms
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (roce_gather.fatbin) success 514ms
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (drama3_staged_gemv.fatbin) success 885ms
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (drama3.fatbin) success 4s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (drama3_fp8.fatbin) success 2s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (drama3_codec.fatbin) success 1s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- WriteFile draft_ids.txt cached
+|     +- WriteFile exlr8_alias.zig cached
++- install tf-cuda-test success
+|  +- compile exe tf-cuda-test fast native success 6m MaxRSS:6G
+|     +- options cached
+|     +- WriteFile exlr8_alias.zig cached
+|     +- options cached
+|     +- run /usr/local/cuda-13.3/bin/nvcc (contract_controls.fatbin) success 8s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (h3.fatbin) success 1s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dsv41_exl3_experts.fatbin) success 13s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dsv41_x3ld.fatbin) success 14s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dsv41_x3pf.fatbin) success 8s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dsv41_x3gm.fatbin) success 2m
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dsv41_linear.fatbin) success 12s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dsv41_x3seg.fatbin) success 8s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dsv41_dense3.fatbin) success 10s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dsv41_attn.fatbin) success 14s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dsv41_topk.fatbin) success 2s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dsv41_mhc.fatbin) success 27s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dsv41_mhc_pf.fatbin) success 3s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dsv41_router_gemv.fatbin) success 52s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dsv41_pfdense_k8.fatbin) success 15s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dsv41_pfdense_k10.fatbin) success 14s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dsv41_pfdense_k12.fatbin) success 14s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dsv41_pfdense_k16.fatbin) success 7s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dsv41_engram_gate.fatbin) success 523ms
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dsv41_l2pace.fatbin) success 529ms
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dsv41_l2pf.fatbin) success 578ms
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dsv41_x3gm_plan.fatbin) success 686ms
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dsv41_topk_keys.fatbin) success 611ms
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dsv41_pointwise.fatbin) success 1s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dsv41_kvsplit.fatbin) success 1s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dsv41_glue.fatbin) success 3s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dsv41_x3gm3.fatbin) success 2m
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dsv41_pfglue.fatbin) success 1s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dsv41_router_glue.fatbin) success 756ms
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dsv41_kv_glue.fatbin) success 1s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dsv41_x3ld_epi.fatbin) success 53s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dsv41_topk_b.fatbin) success 2s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dsv41_sampling.fatbin) success 775ms
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dsv41_lin2.fatbin) success 59s
+|     |  +- run /usr/local/cuda-13.3/bin/nvcc (reused)
+|     +- options (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen4_projection.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen4_gdn.fatbin) (+2 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen4_hc.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen4_ple.fatbin) (+2 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (attn_train.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen27_train.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (gdn_train.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (train_q4.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (train_attn.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_train.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_gdn.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_batch.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_mtp.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qmm.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (experts_rows.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (route_rows.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_hc.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_attn.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (experts3.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (experts3_prefill.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (moe.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen36_mtp.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (ggml.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (gdn.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (probe.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qmm_group.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qmm_prefill.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_fact.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_hcf.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_fexp.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (w4a8_prefill.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (experts.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (experts_prefill.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (experts_pack.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (prefill_attention.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (scan_rows.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nemotron_ops.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (affine4_pack.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (affine8.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (affine_prefill.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (fp8_experts.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (exlr8.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (exlr8_dense.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nvfp4_experts_tile.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nvfp4_experts.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (rank_sum.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (lane_gemv.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (sample.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (train.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen35.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen35_draft.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen35_keep.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen_vision.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (gdn_prefill.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen35_kv8.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen35_bf16_rows.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nemotron_route.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nemotron_mamba.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nemotron_attention.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nemotron_keyed.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nemotron_latent.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (ck_lane.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (ck_experts.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (norms.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (embed_rows.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (lfm2.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (vit.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (tree_round.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (act_rows.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (gdn_prep.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qk_rows.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qmmf.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (prompt16.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (tree_attention.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (block_attention.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (window_attention.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (window_rows.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (window_pages.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (moe_glue.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dense_rows.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (modelopt_pack.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_kda.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_glue.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_ops.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_index.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_quant.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (exl3_linear.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (exl3_experts.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (exl3_candidate.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_vision.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_mm.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_dflash.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (torch_argmax.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (torch_topk.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (torch_pointwise.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (torch_indexing.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (torch_movement.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (torch_nemotron_constants.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (roce_gather.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (drama3_staged_gemv.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (drama3.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (drama3_fp8.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (drama3_codec.fatbin) (+1 more reused dependencies)
+|     +- WriteFile draft_ids.txt (reused)
++- install tf-tp-watch-check cached
+|  +- compile exe tf-tp-watch-check fast native cached 27ms MaxRSS:41M
+|     +- options (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen4_projection.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen4_gdn.fatbin) (+2 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen4_hc.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen4_ple.fatbin) (+2 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (attn_train.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen27_train.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (gdn_train.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (train_q4.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (train_attn.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_train.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_gdn.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_batch.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_mtp.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qmm.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (experts_rows.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (route_rows.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_hc.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_attn.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (experts3.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (experts3_prefill.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (moe.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen36_mtp.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (ggml.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (gdn.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (probe.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qmm_group.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qmm_prefill.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_fact.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_hcf.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_fexp.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (w4a8_prefill.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (experts.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (experts_prefill.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (experts_pack.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (prefill_attention.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (scan_rows.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nemotron_ops.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (affine4_pack.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (affine8.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (affine_prefill.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (fp8_experts.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (exlr8.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (exlr8_dense.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nvfp4_experts_tile.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nvfp4_experts.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (rank_sum.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (lane_gemv.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (sample.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (train.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen35.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen35_draft.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen35_keep.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen_vision.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (gdn_prefill.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen35_kv8.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen35_bf16_rows.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nemotron_route.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nemotron_mamba.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nemotron_attention.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nemotron_keyed.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nemotron_latent.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (ck_lane.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (ck_experts.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (norms.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (embed_rows.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (lfm2.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (vit.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (tree_round.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (act_rows.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (gdn_prep.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qk_rows.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qmmf.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (prompt16.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (tree_attention.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (block_attention.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (window_attention.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (window_rows.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (window_pages.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (moe_glue.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dense_rows.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (modelopt_pack.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_kda.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_glue.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_ops.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_index.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_quant.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (exl3_linear.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (exl3_experts.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (exl3_candidate.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_vision.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_mm.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_dflash.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (torch_argmax.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (torch_topk.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (torch_pointwise.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (torch_indexing.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (torch_movement.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (torch_nemotron_constants.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (roce_gather.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (drama3_staged_gemv.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (drama3.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (drama3_fp8.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (drama3_codec.fatbin) (+1 more reused dependencies)
++- install tf-qwen35-learn success
+|  +- compile exe tf-qwen35-learn fast native success 1m MaxRSS:963M
+|     +- options (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen4_projection.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen4_gdn.fatbin) (+2 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen4_hc.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen4_ple.fatbin) (+2 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (attn_train.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen27_train.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (gdn_train.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (train_q4.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (train_attn.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_train.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_gdn.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_batch.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_mtp.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qmm.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (experts_rows.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (route_rows.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_hc.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_attn.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (experts3.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (experts3_prefill.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (moe.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen36_mtp.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (ggml.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (gdn.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (probe.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qmm_group.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qmm_prefill.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_fact.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_hcf.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_fexp.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (w4a8_prefill.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (experts.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (experts_prefill.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (experts_pack.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (prefill_attention.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (scan_rows.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nemotron_ops.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (affine4_pack.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (affine8.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (affine_prefill.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (fp8_experts.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (exlr8.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (exlr8_dense.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nvfp4_experts_tile.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nvfp4_experts.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (rank_sum.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (lane_gemv.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (sample.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (train.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen35.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen35_draft.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen35_keep.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen_vision.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (gdn_prefill.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen35_kv8.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen35_bf16_rows.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nemotron_route.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nemotron_mamba.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nemotron_attention.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nemotron_keyed.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nemotron_latent.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (ck_lane.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (ck_experts.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (norms.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (embed_rows.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (lfm2.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (vit.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (tree_round.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (act_rows.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (gdn_prep.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qk_rows.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qmmf.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (prompt16.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (tree_attention.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (block_attention.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (window_attention.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (window_rows.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (window_pages.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (moe_glue.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dense_rows.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (modelopt_pack.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_kda.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_glue.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_ops.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_index.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_quant.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (exl3_linear.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (exl3_experts.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (exl3_candidate.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_vision.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_mm.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_dflash.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (torch_argmax.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (torch_topk.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (torch_pointwise.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (torch_indexing.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (torch_movement.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (torch_nemotron_constants.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (roce_gather.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (drama3_staged_gemv.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (drama3.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (drama3_fp8.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (drama3_codec.fatbin) (+1 more reused dependencies)
+|     +- WriteFile draft_ids.txt (reused)
++- install tf-qwen35-cuda success
+|  +- compile exe tf-qwen35-cuda fast native success 1m MaxRSS:1G
+|     +- options (reused)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen4_projection.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen4_gdn.fatbin) (+2 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen4_hc.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen4_ple.fatbin) (+2 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (attn_train.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen27_train.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (gdn_train.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (train_q4.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (train_attn.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_train.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_gdn.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_batch.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_mtp.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qmm.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (experts_rows.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (route_rows.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_hc.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_attn.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (experts3.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (experts3_prefill.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (moe.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen36_mtp.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (ggml.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (gdn.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (probe.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qmm_group.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qmm_prefill.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_fact.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_hcf.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (flashnext_fexp.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (w4a8_prefill.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (experts.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (experts_prefill.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (experts_pack.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (prefill_attention.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (scan_rows.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nemotron_ops.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (affine4_pack.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (affine8.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (affine_prefill.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (fp8_experts.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (exlr8.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (exlr8_dense.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nvfp4_experts_tile.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nvfp4_experts.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (rank_sum.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (lane_gemv.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (sample.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (train.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen35.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen35_draft.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen35_keep.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen_vision.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (gdn_prefill.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen35_kv8.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qwen35_bf16_rows.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nemotron_route.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nemotron_mamba.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nemotron_attention.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nemotron_keyed.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (nemotron_latent.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (ck_lane.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (ck_experts.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (norms.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (embed_rows.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (lfm2.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (vit.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (tree_round.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (act_rows.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (gdn_prep.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qk_rows.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (qmmf.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (prompt16.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (tree_attention.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (block_attention.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (window_attention.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (window_rows.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (window_pages.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (moe_glue.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (dense_rows.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (modelopt_pack.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_kda.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_glue.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_ops.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_index.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_quant.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (exl3_linear.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (exl3_experts.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (exl3_candidate.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_vision.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_mm.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (glm_dflash.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (torch_argmax.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (torch_topk.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (torch_pointwise.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (torch_indexing.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (torch_movement.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (torch_nemotron_constants.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (roce_gather.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (drama3_staged_gemv.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (drama3.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (drama3_fp8.fatbin) (+1 more reused dependencies)
+|     +- run /usr/local/cuda-13.3/bin/nvcc (drama3_codec.fatbin) (+1 more reused dependencies)
+|     +- WriteFile draft_ids.txt (reused)
++- install tf-tp-test cached
+   +- compile exe tf-tp-test fast native cached 20ms MaxRSS:41M
+      +- WriteFile tp_kernel.zig cached
+      +- options cached

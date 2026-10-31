@@ -329,3 +329,21 @@ extern "C" __global__ void __launch_bounds__(256) tf_q35_attn_rows8_whole(Geo ge
     __shared__ float ksc[tf_q35_tc::TK], vsc[tf_q35_tc::TK];
     tf_q35_tc::attn_rows<4, tf_q35_tc::WholeFp8Tiles<256>>({kt, vt, ksc, vsc}, geo, Q, segs, rowseg, rowanc, layer, P, scale, total, PM, PL, PO);
 }
+
+extern "C" __global__ void __launch_bounds__(128) tf_q35_attn_rows8_mt2(Geo geo, const __nv_bfloat16* Q, const Seg* segs,
+    const int* rowseg, const Ancestor* rowanc, int layer, const int* P, float scale, int total,
+    float* PM, float* PL, float* PO) {
+    __shared__ __align__(16) uint4 kt[tf_q35_tc::TK * tf_q35_tc::CH], vt[tf_q35_tc::TK * tf_q35_tc::CH];
+    __shared__ float ksc[tf_q35_tc::TK], vsc[tf_q35_tc::TK];
+    tf_q35_tc::attn_rows<2, tf_q35_tc::Fp8Tiles<128>>({kt, vt, ksc, vsc}, geo, Q, segs, rowseg, rowanc,
+        layer, P, scale, total, PM, PL, PO);
+}
+
+extern "C" __global__ void __launch_bounds__(128) tf_q35_attn_rows8_mt2_whole(Geo geo, const __nv_bfloat16* Q, const Seg* segs,
+    const int* rowseg, const Ancestor* rowanc, int layer, const int* P, float scale, int total,
+    float* PM, float* PL, float* PO) {
+    __shared__ __align__(16) uint4 kt[tf_q35_tc::TK * tf_q35_tc::CH], vt[tf_q35_tc::TK * tf_q35_tc::CH];
+    __shared__ float ksc[tf_q35_tc::TK], vsc[tf_q35_tc::TK];
+    tf_q35_tc::attn_rows<2, tf_q35_tc::WholeFp8Tiles<128>>({kt, vt, ksc, vsc}, geo, Q, segs, rowseg, rowanc,
+        layer, P, scale, total, PM, PL, PO);
+}

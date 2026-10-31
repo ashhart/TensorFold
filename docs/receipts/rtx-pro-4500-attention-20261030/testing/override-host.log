@@ -1,0 +1,10 @@
+Build Summary: 8/8 steps succeeded; 7/7 tests passed
+test-qwen35-launch-args-host success
++- run test 4 pass (4 total) 63ms MaxRSS:15M
+   +- compile test debug native success 656ms MaxRSS:224M
+      +- WriteFile draft_ids.txt success
+      +- options success
+test-qwen35-attn-contract-host success
++- run test 3 pass (3 total) 12ms MaxRSS:6M
+   +- compile test debug native success 685ms MaxRSS:215M
+      +- options (reused)

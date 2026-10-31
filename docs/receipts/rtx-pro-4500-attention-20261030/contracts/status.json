@@ -1,0 +1,8 @@
+{
+  "complete": false,
+  "candidate_full_contract": "NOT RUN",
+  "summary_lines_available": false,
+  "initial_baseline_timeout_s": 1100,
+  "queued_full_runs": "Canceled before start during scope correction",
+  "required_before_ready": "Run the full unmodified backend kernel-contract programs and attach their SUMMARY lines. No compile/sanitizer/served result is substituted for that gate."
+}

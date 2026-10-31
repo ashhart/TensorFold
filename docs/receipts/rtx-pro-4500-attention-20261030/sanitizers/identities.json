@@ -1,0 +1,16 @@
+{
+  "group": {
+    "native_sha256": "a3b58035c8569e0fbf0457430b782a722b08fdbcb0809b0560dddc6c402af2d4",
+    "embedded_fatbin_sha256": "18144a5c1f4ca38a3c2899866b5d76dfee00e56ce05c993757c61057d673b1c5",
+    "binary_offset": 4359184,
+    "image_bytes": 161536,
+    "extraction": "Exact CUDA fatbinary header and payload sliced from native ELF; unique required public kernel symbol. Compiler cache is not the source."
+  },
+  "attention": {
+    "native_sha256": "41ec78b6cc591161e6f10f794dc10fe230f11c26c305060b7152e4b2338b3862",
+    "embedded_fatbin_sha256": "8f794b7c244329060f6cb51117ade02dbd88b83c61d244f52c770b3fcd65df8d",
+    "binary_offset": 18085152,
+    "image_bytes": 724000,
+    "extraction": "Exact CUDA fatbinary header and payload sliced from native ELF; unique required public kernel symbol. Compiler cache is not the source."
+  }
+}

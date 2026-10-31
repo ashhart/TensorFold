@@ -1,0 +1,55 @@
+{
+  "source_commit": "01e25d3aebc0ebb686670c69e37b7c269f261b3d",
+  "gpu": "NVIDIA RTX PRO 4500 Blackwell, 12.0, 615.78.08, 32623 MiB, 200.00 W",
+  "physical_host_ram_gib": 31.24,
+  "os_release": "Omarchy",
+  "kernel": "7.2.8-9-omarchy",
+  "zig": "0.17.0",
+  "cuda_nvcc": [
+    "13.0",
+    "13.3"
+  ],
+  "checkpoint": "TensorFold/Qwen3.8-27B-MLX-4bit",
+  "checkpoint_revision": "22d8d538154e0e5b6f8dcb1fcc74a60a0798104c",
+  "quantization": "affine4/group64",
+  "drafter": "z-lab/Qwen3.8-27B-DFlash2",
+  "drafter_precision": "BF16",
+  "context": 131072,
+  "kv_cache": "fp8",
+  "prompt_precision": "int8",
+  "prompt_cache_gib": 8,
+  "parallel": 1,
+  "rank_count": 1,
+  "thinking_for_speed_tests": false,
+  "runtime": "native Zig/CUDA; no PyTorch in serving path",
+  "historical_private_measurements_reserve_gib": 0,
+  "clean_submission_measurements_reserve_gib": 0.5,
+  "note": "The clean PR sources retain upstream memory policy. Historical private experiments used the same zero-reserve compatibility overlay in both arms.",
+  "drafter_revision": "50307d4c4cde6860d4eee73e2547cd786fe8e8a4",
+  "libraries": {
+    "libturbojpeg": {
+      "version": "3.1.4.1",
+      "sha256": "d8c990c26da46d696ffdde773241a08beaed1f27a022c5bb9a0b9c715724a94e"
+    },
+    "libwebpdecoder": {
+      "version": "1.6.0",
+      "sha256": "da0d37bd04379a98ec872561bfe1726b41cd44a4f1ec6392bb5807d21bf63ca0"
+    },
+    "libtfgrammar": {
+      "sha256": "c2e1034ca8c3c78a3d8bd396ad55da38fc823070161cdf6f7dd8288d424c7c86",
+      "provenance": "The same retained qualified grammar library in every arm."
+    }
+  },
+  "build_version_label": "1.1.6",
+  "build_version_note": "Explicit recipe/client compatibility label; pinned source SHA and per-branch source-identity.json identify tested code, not this label.",
+  "checkpoint_files_sha256": {
+    "config.json": "14b65a0ee06517060a6bbd979bb1a8ff54e7b304b1a1f01d54344b88b8285e85",
+    "tokenizer.json": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523",
+    "tokenizer_config.json": "792fa3f0cb88b111e54ef3134c873531008c4df471d108da17903426e308aa7b"
+  },
+  "drafter_files_sha256": {
+    "config.json": "873e3556509b0da06e29654ba00d4944888d4b5e8a33afde25f7eb27d321e980"
+  },
+  "cpu": "AMD Ryzen 9 5900X 12-Core Processor",
+  "tokenizer_hash_note": "Per-file hashes here are plain SHA256. The native manifest tokenizer_sha256 uses benchmark_model.zig\u2019s framed aggregate of tokenizer assets (filename, NUL, decimal length, NUL, bytes), so it is a different identifier."
+}
