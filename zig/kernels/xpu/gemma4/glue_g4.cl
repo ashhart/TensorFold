@@ -272,6 +272,42 @@ KERNEL(64) void g4_attn_merge(global const float *PM, global const float *PL, gl
   }
 }
 
+// The same fold with a group of 128 columns: fewer, longer groups, better when a row has few tiles.
+KERNEL(128) void g4_attn_merge_w(global const float *PM, global const float *PL, global const float *PO, int p0, int window, int ntl,
+                               global half *H, global half *AHI, global half *ALO) {
+  const int hd = HD;
+  local half hl[HD];
+  const int head = get_group_id(0), t = get_group_id(1), lid = get_local_id(0);
+  const int pos = p0 + t, lo = window ? max(0, pos - window + 1) : 0, nt = pos / KEYS - lo / KEYS + 1;
+  const long b0 = ((long)t * 8 + head) * ntl;
+  float acc[HD / 128], m = PM[b0], l = PL[b0];
+  for (int j = 0; j < hd / KEYS; j++) acc[j] = PO[b0 * hd + lid + j * KEYS];
+  for (int i = 1; i < nt; i++) {
+    const long idx = b0 + i;
+    const float mi = PM[idx], li = PL[idx], mm = fmax(m, mi), a = exp(m - mm), b = exp(mi - mm);
+    l = l * a + li * b;
+    for (int j = 0; j < hd / KEYS; j++) acc[j] = acc[j] * a + PO[idx * hd + lid + j * KEYS] * b;
+    m = mm;
+  }
+  for (int j = 0; j < hd / KEYS; j++) {
+    const half v = convert_half_rte(rbf(acc[j] / l));
+    hl[lid + j * KEYS] = v;
+    H[(long)t * 8 * hd + head * hd + lid + j * KEYS] = v;
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  const int lane = get_sub_group_local_id();
+  for (int g = get_sub_group_id(); g < hd / 64; g += 8) {
+    float s = 0.0f;
+    for (int k = 0; k < 4; k++) s += (float)hl[g * 64 + lane * 4 + k];
+    s = sub_group_reduce_add(s) * (1.0f / 64);
+    if (lane == 0) {
+      const half hi = convert_half_rte(s * ASC);
+      AHI[(long)t * (8 * hd / 64) + head * (hd / 64) + g] = hi;
+      ALO[(long)t * (8 * hd / 64) + head * (hd / 64) + g] = convert_half_rte(s * ASC - (float)hi);
+    }
+  }
+}
+
 // out = a · Wᵀ, K = 256 (per-layer projection), fp32 sums in a fixed order (group-sum pitch too short for 2D blocks).
 kernel void g4_gemv256(global const half *A, global const uint *W, global const half *S, global const half *BG, global half *OUT, int M, int N) {
   const int n = get_global_id(0), m = get_global_id(1);
