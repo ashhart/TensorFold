@@ -14,6 +14,8 @@ const Args = extern struct { rows: u32 = 0, width: u32 = 0, heads: u32 = 0, eps:
 const PArgs = extern struct { rows: u32, heads: u32, kv_heads: u32, pos: u32, stride: u32 };
 /// The bf16 row projection's constants (glue.metal's ll_mv_args).
 const MArgs = extern struct { rows: u32, n: u32, k: u32, ldy: u32 };
+/// The int4 row projection's constants (glue.metal's ll_q4_args).
+const Q4Args = extern struct { rows: u32, n0: u32, n1: u32, n2: u32, k: u32, ldy: u32 };
 /// The decode attention's constants (glue.metal's ll_vec_args).
 const VArgs = extern struct { rows: u32, pos: u32, heads: u32, groups: u32, blocks: u32, chunk: u32, first: u32, scale: f32 };
 
@@ -36,12 +38,8 @@ const Enc = struct {
     fn dense(x: Enc, d: wts.Dense, in: mtl.Buffer, out: mtl.Buffer, out_off: usize, n_rows: usize, ldy: usize) void {
         const e = x.e;
         if (d.int4) |q| {
+            if (n_rows <= st.batch_rows) return x.q4Rows(&.{d}, in, out, out_off, n_rows, ldy);
             const ma = MArgs{ .rows = @intCast(n_rows), .n = @intCast(d.n), .k = @intCast(d.k), .ldy = @intCast(ldy) };
-            if (n_rows <= st.batch_rows) {
-                const variant: Glue = if (n_rows <= 1) .q4_matvec_1 else if (n_rows <= 2) .q4_matvec_2 else if (n_rows <= 4) .q4_matvec_4 else if (n_rows <= 8) .q4_matvec_8 else if (n_rows <= 16) .q4_matvec_16 else .q4_matvec_32;
-                x.glue(variant, ma, &.{ b(in), bo(d.buf, d.off), t(q.scales), t(q.zeros), A, bo(out, out_off) }, .{ (d.n + 7) / 8, 1, 1 }, .{ 256, 1, 1 }, true);
-                return;
-            }
             // a prompt chunk: W as bf16 (as the decompressor makes it) into the scratch, then the bf16 GEMM on it
             x.glue(.q4_dequant, ma, &.{ bo(d.buf, d.off), t(q.scales), t(q.zeros), A, b(x.s.wq) }, .{ d.k / 8, d.n, 1 }, .{ 128, 2, 1 }, false);
             return x.gemmOn(.{ .buf = x.s.wq, .off = 0, .n = d.n, .k = d.k }, in, out, out_off, n_rows, ldy);
@@ -58,6 +56,24 @@ const Enc = struct {
             return;
         }
         x.gemmOn(d, in, out, out_off, n_rows, ldy);
+    }
+
+    /// Up to three int4 tensors on the same input as one dispatch of the row kernel, their columns side by side.
+    fn q4Rows(x: Enc, parts: []const wts.Dense, in: mtl.Buffer, out: mtl.Buffer, out_off: usize, n_rows: usize, ldy: usize) void {
+        var n: [3]u32 = @splat(0);
+        var bufs: [12]B = undefined;
+        bufs[0] = b(in);
+        for (0..3) |i| {
+            const d = parts[@min(i, parts.len - 1)];
+            const q = d.int4.?;
+            if (i < parts.len) n[i] = @intCast(d.n);
+            bufs[1 + 3 * i ..][0..3].* = .{ bo(d.buf, d.off), t(q.scales), t(q.zeros) };
+        }
+        bufs[10] = A;
+        bufs[11] = bo(out, out_off);
+        const qa = Q4Args{ .rows = @intCast(n_rows), .n0 = n[0], .n1 = n[1], .n2 = n[2], .k = @intCast(parts[0].k), .ldy = @intCast(ldy) };
+        const variant: Glue = if (n_rows <= 1) .q4_matvec_1 else if (n_rows <= 2) .q4_matvec_2 else if (n_rows <= 4) .q4_matvec_4 else if (n_rows <= 8) .q4_matvec_8 else if (n_rows <= 16) .q4_matvec_16 else .q4_matvec_32;
+        x.glue(variant, qa, &bufs, .{ (n[0] + n[1] + n[2] + 7) / 8, 1, 1 }, .{ 256, 1, 1 }, true);
     }
 
     /// The tensor-unit GEMM of a prompt chunk on bf16 d.
@@ -212,9 +228,13 @@ fn layer(x: Enc, segments: []const Segment, l: wts.Layer, i: usize, n: usize, ne
     const nr: u32 = @intCast(n);
     const normed = Args{ .rows = nr, .width = @intCast(h), .eps = c.eps };
     const qkvw = c.qkvWidth();
-    x.dense(l.attn.q, s.x, s.q, 0, n, qkvw);
-    x.dense(l.attn.k, s.x, s.q, c.queryWidth() * 2, n, qkvw);
-    x.dense(l.attn.v, s.x, s.q, (c.queryWidth() + c.kvWidth()) * 2, n, qkvw);
+    if (l.attn.q.int4 != null and n <= st.batch_rows) {
+        x.q4Rows(&.{ l.attn.q, l.attn.k, l.attn.v }, s.x, s.q, 0, n, qkvw);
+    } else {
+        x.dense(l.attn.q, s.x, s.q, 0, n, qkvw);
+        x.dense(l.attn.k, s.x, s.q, c.queryWidth() * 2, n, qkvw);
+        x.dense(l.attn.v, s.x, s.q, (c.queryWidth() + c.kvWidth()) * 2, n, qkvw);
+    }
     var base: usize = 0;
     for (segments) |seg| {
         try attention(x, seg.cache, i, base, seg.rows);
@@ -222,8 +242,12 @@ fn layer(x: Enc, segments: []const Segment, l: wts.Layer, i: usize, n: usize, ne
     }
     x.dense(l.attn.o, s.att, s.y, 0, n, h);
     x.glue(.add_norm, normed, &.{ b(s.resid), b(s.y), t(l.post_norm), A, b(s.x) }, .{ n, 1, 1 }, .{ 256, 1, 1 }, true);
-    x.dense(l.mlp.gate, s.x, s.gu, 0, n, 2 * c.intermediate);
-    x.dense(l.mlp.up, s.x, s.gu, c.intermediate * 2, n, 2 * c.intermediate);
+    if (l.mlp.gate.int4 != null and n <= st.batch_rows) {
+        x.q4Rows(&.{ l.mlp.gate, l.mlp.up }, s.x, s.gu, 0, n, 2 * c.intermediate);
+    } else {
+        x.dense(l.mlp.gate, s.x, s.gu, 0, n, 2 * c.intermediate);
+        x.dense(l.mlp.up, s.x, s.gu, c.intermediate * 2, n, 2 * c.intermediate);
+    }
     x.glue(.silu_gu, Args{ .rows = nr, .width = @intCast(c.intermediate) }, &.{ b(s.gu), A, b(s.act) }, .{ c.intermediate, n, 1 }, .{ 256, 1, 1 }, false);
     x.dense(l.mlp.down, s.act, s.y, 0, n, h);
     if (next) |w| {
