@@ -7,6 +7,7 @@ const ple = @import("cuda_ple.zig");
 const wt = @import("cuda_prompt_wt.zig");
 const tk = @import("cuda_tile_kernels.zig");
 const load = @import("cuda_prompt_load.zig");
+const shared = @import("cuda_batch_side.zig");
 const layers_n = wt.layers_n;
 const linear_n = wt.linear_n;
 const dims = wt.dims;
@@ -87,6 +88,9 @@ pub const LayerKeep = struct {
     hist: u64 = 0,
     /// The chain's end state goes here, the sequence's own left as before the chunk; 0: in place.
     state_out: u64 = 0,
+    /// This layer's pending-row log and its control word (fn_late in flashnext_batch.cu); 0: none.
+    log: u64 = 0,
+    log_ctl: u64 = 0,
     attn_hc: HcKeep = .{},
     mlp_hc: HcKeep = .{},
     /// The mixer's and the MoE's branches [rows, dims] bf16 as the write-backs add them (the MoE's with its pocket).
@@ -138,7 +142,24 @@ pub const Hooks = struct {
     streams: u64 = 0,
     /// A training pass's adds to each layer's MoE output, in place of the model's own (Model.pocket).
     moe_add: ?MoeAdd = null,
+    /// The rows are prompt tokens (a fill), not a decode or verify window.
+    prompt: bool = false,
 };
+
+/// Rows a layer's pending-row log holds, and the pending count past which a chain stores its state in place.
+pub const late_rows: usize = 48;
+pub const late_store: usize = 12;
+/// One log row of a layer: k [nk, dk], v [nv, dv], decay and beta [nv, 2], fp32.
+pub const late_row_bytes: usize = (gdn.nk * gdn.dk + gdn.nv * gdn.dv + gdn.nv * 2) * 4;
+
+/// A rolled-back lane's windows for fn_late_roll (fn_roll::Job, by value): its conv windows and the n-gram tail.
+pub const RollJob = extern struct { win: u64 = 0, hist: u64 = 0, rows: u64 = 0, stride: c_longlong = 0, taps: c_int = 0, c: c_int = 0 };
+pub const roll_jobs_max = 40;
+pub const RollJobs = extern struct { j: [roll_jobs_max]RollJob = @splat(.{}), n: c_int = 0 };
+
+comptime {
+    std.debug.assert(@sizeOf(RollJob) == 40 and @sizeOf(RollJobs) == 1608);
+}
 
 /// The kernels the pass launches besides the captured Triton ones, loaded once.
 pub const Kernels = @import("cuda_batch_kernels.zig").Kernels;
@@ -194,6 +215,8 @@ pub fn Staging(comptime Q: type) type {
 /// Device scratch for chunks of up to `cap` rows.
 pub const Scratch = struct {
     cap: usize,
+    /// The shared expert's stream (cuda_batch_side.zig); null: it runs after the routed experts on the pass's stream.
+    side: ?shared.Side = null,
     bufs: std.ArrayList(cuda.DeviceBuffer) = .empty,
     ids: u64 = 0,
     pos: u64 = 0,
@@ -419,6 +442,7 @@ pub const Scratch = struct {
         try stream.synchronize();
         s.host = try cuda.HostBuffer.alloc(d, hostAt(cap)[4]);
         s.staging = .{ .q = .{ .stream = stream, .event = try cuda.Event.init(d, false) } };
+        if (shared.on()) s.side = try shared.Side.init(d); // last: a refused allocation above never makes a stream
         return s;
     }
 
@@ -429,6 +453,7 @@ pub const Scratch = struct {
             g.q.event.deinit();
         }
         if (s.host) |*h| h.free();
+        if (s.side) |*x| x.deinit();
         for (s.bufs.items) |*b| b.free();
         s.bufs.deinit(gpa);
         s.* = undefined;

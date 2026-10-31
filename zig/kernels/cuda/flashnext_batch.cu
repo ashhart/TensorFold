@@ -16,8 +16,8 @@ extern "C" __global__ void fn_sum_slices(const float* __restrict__ part, void* _
 }
 
 // Shifts the last-`taps`-rows window [taps, c] in place past `rows`, n rows `stride` apart (conv history, n-gram tail).
-extern "C" __global__ void fn_shift_window(__nv_bfloat16* __restrict__ win, const __nv_bfloat16* __restrict__ rows,
-                                           long long stride, int n, int taps, int c) {
+static __device__ __forceinline__ void shift_window(__nv_bfloat16* __restrict__ win, const __nv_bfloat16* __restrict__ rows,
+                                                   long long stride, int n, int taps, int c) {
     const int ch = blockIdx.x * blockDim.x + threadIdx.x;
     if (ch >= c) return;
     __nv_bfloat16 next[16];
@@ -27,6 +27,11 @@ extern "C" __global__ void fn_shift_window(__nv_bfloat16* __restrict__ win, cons
                              : rows[static_cast<long long>(src - taps) * stride + ch];
     }
     for (int j = 0; j < taps; ++j) win[static_cast<long long>(j) * c + ch] = next[j];
+}
+
+extern "C" __global__ void fn_shift_window(__nv_bfloat16* __restrict__ win, const __nv_bfloat16* __restrict__ rows,
+                                           long long stride, int n, int taps, int c) {
+    shift_window(win, rows, stride, n, taps, c);
 }
 
 // ---- the DeltaNet chain over a chunk: flashnext_gdn.cu's chain cut into front, rows and norm, with its bits ----
@@ -58,13 +63,22 @@ static __device__ __forceinline__ float conv_act(const __nv_bfloat16* __restrict
 }
 }  // namespace fn_gdn
 
+// A layer's pending-row log: log_rows rows of k [NK, DK], v [NV, DV], decay and beta [NV, 2], fp32; ctl first | n << 16
+namespace fn_late {
+using namespace fn_gdn;
+static __device__ __forceinline__ const float* vs(const float* log, int log_rows) { return log + (size_t)log_rows * NK * DK; }
+static __device__ __forceinline__ const float* gbs(const float* log, int log_rows) { return vs(log, log_rows) + (size_t)log_rows * NV * DV; }
+}  // namespace fn_late
+
 // Program (row, unit), 256 threads: key head u's normed q and k (u < NK), else a value head's v, decay g and beta.
-extern "C" __global__ void __launch_bounds__(256) fn_gdn_front(
+template <bool LOG>  // LOG: k, v and the gates go into the log's row after the pending ones
+static __device__ __forceinline__ void gdn_front(
         const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs, const __nv_bfloat16* __restrict__ cw,
         const float* __restrict__ a_log, const float* __restrict__ dt_bias, float* __restrict__ qn,
-        float* __restrict__ kn, float* __restrict__ v, float* __restrict__ gb) {
+        float* __restrict__ kn, float* __restrict__ v, float* __restrict__ gb, const unsigned* __restrict__ ctl, int log_rows) {
     using namespace fn_gdn;
     const int r = blockIdx.x, u = blockIdx.y, t = threadIdx.x, warp = t >> 5, lane = t & 31;
+    const int kr = LOG ? (int)(((*ctl & 0xffffu) + (*ctl >> 16) + (unsigned)r) % (unsigned)log_rows) : r;
     if (u < NK) {
         __shared__ float x[2][DK];
         const int hk = u;
@@ -80,20 +94,37 @@ extern "C" __global__ void __launch_bounds__(256) fn_gdn_front(
             ss = warp_sum(ss);
             float inv = 1.0f / sqrtf(ss + 1e-6f);
             if (warp == 0) inv = inv * (1.0f / sqrtf((float)DK));
-            float* dst = (warp == 0 ? qn : kn) + ((size_t)r * NK + hk) * DK;
+            float* dst = warp == 0 ? qn + ((size_t)r * NK + hk) * DK : kn + ((size_t)kr * NK + hk) * DK;
 #pragma unroll
             for (int i = 0; i < 4; ++i) dst[lane * 4 + i] = v4[i] * inv;
         }
     } else {
         const int hv = u - NK;
-        if (t < DV) v[(size_t)r * NV * DV + hv * DV + t] = conv_act(P, cs, cw, r, 2 * NK * DK + hv * DV + t);
+        if (t < DV) v[(size_t)kr * NV * DV + hv * DV + t] = conv_act(P, cs, cw, r, 2 * NK * DK + hv * DV + t);
         else if (t == DV) {
             const float b = __bfloat162float(P[(size_t)r * PW + C + NV * DV + hv]);
             const float a = __bfloat162float(P[(size_t)r * PW + C + NV * DV + NV + hv]);
-            gb[((size_t)r * NV + hv) * 2] = expf(-expf(a_log[hv]) * softplusf_(a + dt_bias[hv]));
-            gb[((size_t)r * NV + hv) * 2 + 1] = bf(sigmoidf_(b));
+            gb[((size_t)kr * NV + hv) * 2] = expf(-expf(a_log[hv]) * softplusf_(a + dt_bias[hv]));
+            gb[((size_t)kr * NV + hv) * 2 + 1] = bf(sigmoidf_(b));
         }
     }
+}
+
+extern "C" __global__ void __launch_bounds__(256) fn_gdn_front(
+        const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs, const __nv_bfloat16* __restrict__ cw,
+        const float* __restrict__ a_log, const float* __restrict__ dt_bias, float* __restrict__ qn,
+        float* __restrict__ kn, float* __restrict__ v, float* __restrict__ gb) {
+    gdn_front<false>(P, cs, cw, a_log, dt_bias, qn, kn, v, gb, nullptr, 1);
+}
+
+// fn_gdn_front with the window's k, v and gates into the stream's log after its pending rows (q as fn_gdn_front's).
+extern "C" __global__ void __launch_bounds__(256) fn_gdn_front_log(
+        const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs, const __nv_bfloat16* __restrict__ cw,
+        const float* __restrict__ a_log, const float* __restrict__ dt_bias, float* __restrict__ qn,
+        float* __restrict__ log, const unsigned* __restrict__ ctl, int log_rows) {
+    using namespace fn_gdn;
+    float* vl = log + (size_t)log_rows * NK * DK;
+    gdn_front<true>(P, cs, cw, a_log, dt_bias, qn, log, vl, vl + (size_t)log_rows * NV * DV, ctl, log_rows);
 }
 
 // The chain through the chunk from state_in to state_out (in place, or apart for a rollback): a warp 4 state rows.
@@ -173,6 +204,100 @@ extern "C" __global__ void __launch_bounds__(128) fn_gdn_rows_to(
         const float* __restrict__ qn, const float* __restrict__ kn, const float* __restrict__ v,
         const float* __restrict__ gb, const float* state_in, float* state_out, int rows, float* __restrict__ ys_out) {
     gdn_rows(qn, kn, v, gb, state_in, state_out, rows, ys_out);
+}
+
+// A window's chain after its stream's pending rows: those first (state only), then its rows read out; fn_gdn_rows' sums
+static __device__ __forceinline__ void gdn_rows_late(
+        const float* __restrict__ qn, const float* __restrict__ log, const unsigned* __restrict__ ctl, int log_rows,
+        int store_above, float* state_in, float* state_out, int rows, float* __restrict__ ys_out) {
+    using namespace fn_gdn;
+    const int hv = blockIdx.x, hk = hv / (NV / NK), warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const int row0 = blockIdx.y * 16 + warp * 4;
+    const size_t sbase = (size_t)hv * DV * DK;
+    const float* vl = fn_late::vs(log, log_rows);
+    const float* gl = fn_late::gbs(log, log_rows);
+    const unsigned first = *ctl & 0xffffu, np = *ctl >> 16;
+    float s[4][4];
+#pragma unroll
+    for (int j = 0; j < 4; ++j)
+#pragma unroll
+        for (int i = 0; i < 4; ++i) s[j][i] = state_in[sbase + (size_t)(row0 + j) * DK + lane * 4 + i];
+    const unsigned total = np + (unsigned)rows;
+    for (unsigned p = 0; p < total; ++p) {
+        if (p == np && (int)np > store_above) {
+#pragma unroll
+            for (int j = 0; j < 4; ++j)
+#pragma unroll
+                for (int i = 0; i < 4; ++i) state_in[sbase + (size_t)(row0 + j) * DK + lane * 4 + i] = s[j][i];
+        }
+        const size_t lr = (first + p) % (unsigned)log_rows;
+        const float4 k4 = *reinterpret_cast<const float4*>(log + (lr * NK + hk) * DK + lane * 4);
+        const float4 v4 = *reinterpret_cast<const float4*>(vl + lr * NV * DV + hv * DV + row0);
+        const float kk[4] = {k4.x, k4.y, k4.z, k4.w}, vv[4] = {v4.x, v4.y, v4.z, v4.w};
+        const float g = gl[(lr * NV + hv) * 2], beta = gl[(lr * NV + hv) * 2 + 1];
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            float kv = 0.0f;
+#pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                s[j][i] = s[j][i] * g;
+                kv = kv + s[j][i] * kk[i];
+            }
+            kv = warp_sum(kv);
+            const float delta = (vv[j] - kv) * beta;
+#pragma unroll
+            for (int i = 0; i < 4; ++i) s[j][i] = s[j][i] + kk[i] * delta;
+        }
+        if (p < np) continue;
+        const int r = (int)(p - np);
+        const float4 q4 = *reinterpret_cast<const float4*>(qn + ((size_t)r * NK + hk) * DK + lane * 4);
+        const float qq[4] = {q4.x, q4.y, q4.z, q4.w};
+        float o4[4];
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            float o = 0.0f;
+#pragma unroll
+            for (int i = 0; i < 4; ++i) o = o + s[j][i] * qq[i];
+            o4[j] = bf(warp_sum(o));
+        }
+        if (lane == 0) *reinterpret_cast<float4*>(ys_out + ((size_t)r * NV + hv) * DV + row0) = make_float4(o4[0], o4[1], o4[2], o4[3]);
+    }
+#pragma unroll
+    for (int j = 0; j < 4; ++j)
+#pragma unroll
+        for (int i = 0; i < 4; ++i) state_out[sbase + (size_t)(row0 + j) * DK + lane * 4 + i] = s[j][i];
+}
+
+extern "C" __global__ void __launch_bounds__(128) fn_gdn_rows_late(
+        const float* __restrict__ qn, const float* __restrict__ log, const unsigned* __restrict__ ctl, int log_rows,
+        int store_above, float* state_in, float* state_out, int rows, float* __restrict__ ys_out) {
+    gdn_rows_late(qn, log, ctl, log_rows, store_above, state_in, state_out, rows, ys_out);
+}
+
+// A rolled-back lane's conv windows and n-gram tail in one launch: each window is its copy moved on by `keep` rows.
+namespace fn_roll {
+constexpr int MAXJ = 40;
+struct Job {
+    __nv_bfloat16* win;
+    const __nv_bfloat16* hist;
+    const __nv_bfloat16* rows;
+    long long stride;
+    int taps, c;
+};
+struct Jobs {
+    Job j[MAXJ];
+    int n;
+};
+}  // namespace fn_roll
+
+extern "C" __global__ void fn_late_roll(const fn_roll::Jobs t, int keep) {
+    const fn_roll::Job& j = t.j[blockIdx.y];
+    const int ch = blockIdx.x * blockDim.x + threadIdx.x;
+    if (ch >= j.c) return;
+    for (int r = 0; r < j.taps; ++r) {
+        const int src = r + keep;  // row src of [window (taps rows); the pass's rows]
+        j.win[(long long)r * j.c + ch] = src < j.taps ? j.hist[(long long)src * j.c + ch] : j.rows[(long long)(src - j.taps) * j.stride + ch];
+    }
 }
 
 extern "C" __global__ void __launch_bounds__(128) fn_gdn_norm(
