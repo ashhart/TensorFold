@@ -30,6 +30,8 @@ pub fn opening(b: *Metal, s: *lanes.Stream, slot: u32) !Fill {
     // as does one over the conversation slot 0 holds when the cache cannot keep its end: it would leave nothing there
     if (slot == 0 and s.yield_check != null and s.max_new == 0 and !keepsEnd(s) and resumable(b, s, 0) != .none) return error.Yielded;
     if (b.vision != null and s.images.len > 0 and b.image_fill != null and b.image_fill != s) return error.LaneMemory;
+    // Announced before the first chunk: rank 1 opens where rank 0 does (glm_dsa order).
+    if (b.link) |l| try l.begin(slot);
     try recover(b, s);
     b.runner.rope[slot] = try images.layout(b.vision, s);
     const d = b.drafter(slot);
@@ -124,6 +126,8 @@ pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill, _: u32) !bool {
     const part = ids[at..end];
     const last = end == ids.len;
     const before = b.runner.gpu_seconds;
+    // Rank 0 sends the chunk before running it here (glm_dsa order): the send carries this pass's boundary.
+    if (b.link) |l| try l.chunk(slot, part, last, decoded);
     if (d) |x| {
         if (decoded) try x.decodeChunk(part, last) else try x.promptChunk(part, last);
     } else {
