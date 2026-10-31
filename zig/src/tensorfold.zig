@@ -13,6 +13,7 @@ pub const qwen_vl_tower = @import("core/qwen_vl/metal.zig");
 pub const qwen_image = @import("families/qwen_image/qwen_image.zig");
 /// MOSS-Image's transformer on Metal: a denoiser driven by tf-moss-image, outside the lane engine.
 pub const moss_image = @import("families/moss_image/moss_image.zig");
+pub const idol = @import("families/idol/idol.zig");
 pub const checkpoint = @import("core/checkpoint_metal.zig");
 pub const shard_edit = @import("core/shard_edit.zig");
 pub const lora_merge = @import("core/lora_merge_dir.zig");
