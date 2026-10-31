@@ -195,6 +195,10 @@ sparse). Its prompt indexer (`tf_glm_index_scores`, `tf_glm_index_pools`) is bit
 `tf_glm_select_rows`; both stated rules rank any NaN above +inf, as the GPU's `s + 0` makes every NaN one
 positive NaN.
 
+Ornith-1.5-122B's routed block on Metal registers the experts' decode rows with the shared expert as an extra matrix
+(`q27_rows_extra`, 4 and 8 bits), the router's softmax and top-k with renormalized bf16 weights (`q27_route`: picks
+equal to the host's, each weight within float64's range at its bf16 points), the tensor units' expert sort and gather
+(bit for bit), the experts' SwiGLU, and the weighted combine with the gated shared expert (in place and from its slot).
 GLM's Metal window projections register narrow and wide rows at 2, 3, 4, 5, 6 and 8 bits, plus both gathered paths.
 Independent FP64 linear cases accompany byte replacements against frozen pre-window-optimization kernels.
 The gathered SwiGLU keeps its predecessor's clipped BF16 output and nonfinite rules; gate/up taps qualify its dots separately.
