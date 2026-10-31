@@ -18,6 +18,7 @@ pub const cost_rule = @import("cost_rule.zig");
 pub const gpu_rule = @import("gpu_rule.zig");
 pub const gpu_full = @import("gpu_full.zig");
 pub const depth = @import("depth.zig");
+pub const hold_price = @import("hold_price.zig");
 pub const mtp_policy = @import("mtp_policy.zig");
 pub const trim = @import("trim.zig");
 pub const config = @import("config.zig");
@@ -58,6 +59,8 @@ test {
     _ = @import("recorder_test.zig");
     _ = @import("gpu_full_test.zig");
     _ = @import("drafted_test.zig");
+    _ = @import("drafted_chances_test.zig");
+    _ = @import("drafted_copy_test.zig");
     _ = @import("root_copy_test.zig");
     _ = @import("drafted_grammar_test.zig");
     _ = @import("windows_grammar_test.zig");
