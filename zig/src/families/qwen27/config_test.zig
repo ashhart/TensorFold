@@ -62,6 +62,27 @@ test "rope parameters preserve precision and section metadata" {
     try std.testing.expectEqualSlices(usize, &.{ 2, 1, 1 }, &c.mrope_section);
 }
 
+test "a scaled rope (rope_type or type yarn, a rope_scaling block) is refused; an explicit default is read" {
+    const a = std.testing.allocator;
+    for ([_][]const u8{ "{\"rope_type\":\"yarn\",\"factor\":4.0,\"rope_theta\":10000000}", "{\"type\":\"yarn\",\"rope_theta\":10000000}" }) |text| {
+        const p = try std.json.parseFromSlice(std.json.Value, a, text, .{});
+        defer p.deinit();
+        const json = try edit(a, "rope_parameters", p.value);
+        defer a.free(json);
+        try std.testing.expectError(error.UnsupportedRopeScaling, parse(a, json, null));
+    }
+    const scaling = try std.json.parseFromSlice(std.json.Value, a, "{\"type\":\"yarn\",\"factor\":4.0}", .{});
+    defer scaling.deinit();
+    const scaled = try edit(a, "rope_scaling", scaling.value);
+    defer a.free(scaled);
+    try std.testing.expectError(error.UnsupportedRopeScaling, parse(a, scaled, null));
+    const plain = try std.json.parseFromSlice(std.json.Value, a, "{\"rope_type\":\"default\",\"rope_theta\":10000000}", .{});
+    defer plain.deinit();
+    const json = try edit(a, "rope_parameters", plain.value);
+    defer a.free(json);
+    _ = try parse(a, json, null);
+}
+
 test "dense config refuses MoE and tied embedding heads" {
     const a = std.testing.allocator;
     const moe = try edit(a, "num_experts", .{ .integer = 8 });

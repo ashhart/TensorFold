@@ -34,6 +34,7 @@ pub const norms_ref = @import("norms_ref.zig");
 pub const l2_ref = @import("l2_ref.zig");
 pub const act_ref = @import("act_ref.zig");
 pub const bf16_round = @import("bf16_round.zig");
+pub const rope_yarn = @import("rope_yarn.zig");
 pub const embed_ref = @import("embed_ref.zig");
 /// The kernel contract every GPU kernel's test registers with (zig/tests/contract, tf-cuda-test kernel-contract).
 pub const contract = @import("contract.zig");
@@ -61,6 +62,7 @@ test {
     _ = checkpoint_weights;
     _ = safetensors;
     _ = affine4_host;
+    _ = rope_yarn;
     _ = affine4_fold;
     _ = shard_edit;
     _ = lora_merge;

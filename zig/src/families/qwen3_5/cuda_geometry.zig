@@ -1,6 +1,7 @@
 //! A Qwen3.5 hybrid's widths (2B, 27B) as the CUDA engine reads them from config.json; what qwen35.cu fixes is checked.
 const std = @import("std");
 const core = @import("core");
+const cuda_rope = @import("cuda_rope.zig");
 
 pub const max_layers = 128;
 /// qwen35.cu's fixed widths.
@@ -76,7 +77,8 @@ pub const Geometry = struct {
     kv_heads: usize, // attention key/value heads
     eps: f32,
     tied: bool,
-    context: usize,
+    context: usize, // the window ceiling: max_position_embeddings, or the YaRN window --rope-yarn makes
+    rope: cuda_rope.Rope = .plain,
     linear: [max_layers]bool,
     bits: Widths = .{},
     kinds: Kinds = .{},
@@ -274,8 +276,9 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
     try is(t, "linear_value_head_dim", usize, dk);
     try is(t, "linear_conv_kernel_dim", usize, taps);
     const rope = try object(t.get("rope_parameters") orelse return error.UnsupportedQwenRotary);
-    try is(rope, if (rope.get("rope_type") != null) "rope_type" else "type", []const u8, "default"); // "type": the older key
-    if (try number(rope, "rope_theta") != 10000000 or try number(rope, "partial_rotary_factor") != 0.25) return error.UnsupportedQwenRotary;
+    if (try number(rope, "rope_theta") != cuda_rope.theta or try number(rope, "partial_rotary_factor") != 0.25) return error.UnsupportedQwenRotary;
+    // plain rope, or YaRN from the config (rope_parameters or the older rope_scaling); --rope-yarn applies later
+    const resolved = cuda_rope.resolve(t, null) catch |e| return if (e == error.BadQwenConfig) error.BadQwenConfig else error.UnsupportedQwenRotary;
     // An MLX table keeps precedence; otherwise the format selects its own loader and BF16 embedding owner.
     const qv = root.get("quantization");
     const exl3 = qv == null and isExl3(root);
@@ -296,7 +299,8 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
             if (v != .bool) return error.BadQwenConfig;
             break :blk v.bool;
         },
-        .context = try integer(t, "max_position_embeddings"),
+        .context = resolved.ceiling,
+        .rope = resolved.rope,
         .linear = @splat(false),
         .exl3 = exl3,
     };
@@ -395,6 +399,24 @@ test "the 35B-A3B's routed experts: 256 of width 512, 8 a row, the shared one th
     try std.testing.expectEqual(@as(usize, 9), g.slots());
     try std.testing.expectEqual(@as(usize, 512), g.intermediate);
     try std.testing.expectEqual(@as(usize, 8192), g.convWidth());
+    // a scaled rope, by type or as a rope_scaling block, is refused rather than read as plain rope
+    for ([_][2][]const u8{ .{ "\"rope_type\":\"default\"", "\"rope_type\":\"yarn\"" }, .{ "\"max_position_embeddings\"", "\"rope_scaling\":{\"type\":\"yarn\",\"factor\":4.0},\"max_position_embeddings\"" } }) |r| {
+        const scaled = try std.mem.replaceOwned(u8, std.testing.allocator, text, r[0], r[1]);
+        defer std.testing.allocator.free(scaled);
+        if (parse(std.testing.allocator, scaled)) |_| return error.TestUnexpectedResult else |_| {}
+    }
+    const block = try std.mem.replaceOwned(u8, std.testing.allocator, text, "\"max_position_embeddings\"", "\"rope_scaling\":{\"type\":\"yarn\"},\"max_position_embeddings\"");
+    defer std.testing.allocator.free(block);
+    try std.testing.expectError(error.UnsupportedQwenRotary, parse(std.testing.allocator, block));
+    // SGLang's staged 1M config: YaRN with factor 4 over 262,144, a 1,048,576-token ceiling
+    const one = try std.mem.replaceOwned(u8, std.testing.allocator, text, "\"max_position_embeddings\":262144", "\"max_position_embeddings\":1048576");
+    defer std.testing.allocator.free(one);
+    const staged = try std.mem.replaceOwned(u8, std.testing.allocator, one, "\"rope_type\":\"default\"", "\"rope_type\":\"yarn\",\"factor\":4.0,\"original_max_position_embeddings\":262144");
+    defer std.testing.allocator.free(staged);
+    const y = try parse(std.testing.allocator, staged);
+    try std.testing.expectEqual(@as(usize, 1048576), y.context);
+    try std.testing.expectEqual(@as(usize, 262144), y.rope.yarn.trained);
+    try std.testing.expect(g.rope == .plain and g.context == 262144);
     const odd = try std.mem.replaceOwned(u8, std.testing.allocator, text, "\"shared_expert_intermediate_size\":512", "\"shared_expert_intermediate_size\":1024");
     defer std.testing.allocator.free(odd);
     try std.testing.expectError(error.UnsupportedQwenGeometry, parse(std.testing.allocator, odd));
@@ -490,4 +512,5 @@ test {
     _ = @import("cuda_modelopt_experts.zig");
     _ = @import("cuda_modelopt.zig");
     _ = @import("cuda_exl3_admission_test.zig");
+    _ = @import("cuda_rope.zig");
 }
