@@ -83,6 +83,8 @@ pub const Backend = struct {
         errdefer topk.deinit();
         var head = try @import("runtime_head.zig").Head.init(a, target.device, target.weights.head);
         errdefer head.deinit();
+        // the trimmed head's shape is the drafter's own: compile its pipeline here, not in the first draft round
+        try target.kernels.prepareDecode(head.linear);
         const caches = try newCaches(a, target.device, c, c.layers);
         return .{ .allocator = a, .target = target, .checkpoint = checkpoint, .config = c, .primitives = primitives, .attention = attention, .topk = topk, .head = head, .frame = .{ .allocator = a, .device = target.device, .queue = target.queue }, .caches = caches };
     }
