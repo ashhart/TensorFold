@@ -50,6 +50,16 @@ pub fn dropFailed(h: *LaneHost, job: *Job, err: anyerror) bool {
     return h.drop(job, h.words(err));
 }
 
+/// Sends replies and finishes jobs only after the core has reaped terminal streams.
+pub fn deliverPending(h: *LaneHost) void {
+    var i: usize = 0;
+    while (i < h.admitted.items.len) {
+        const job = h.admitted.items[i];
+        if (h.deliver(job)) continue;
+        i += 1;
+    }
+}
+
 /// A round the backend failed: the failure hook hears the error and every admitted stream gets its name.
 pub fn failRound(h: *LaneHost, err: anyerror) void {
     failed(h, err);
