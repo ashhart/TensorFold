@@ -4,6 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- The server reads a request's top-level `thinking` switch (`{"type": "disabled"}` or `"enabled"`), as DeepSeek's own API and Hermes Agent's DeepSeek profile send it. Before, it was ignored and the prompt still opened a think block. `chat_template_kwargs` still wins when both are set.
 - Flash Next on CUDA: `TF_FLASHNEXT_CHUNK_SOLO` (opt-in, up to 16,384 rows) lets a prompt pass take a larger chunk when no other stream is decoding, and `TF_FLASHNEXT_CHUNK`'s rows otherwise. On a GB10 at 4,096 rows, a lone prompt's first token comes 5-8% sooner, for 2.25 GiB more scratch and up to about 2 s of wait for a request that arrives during a large pass. Unset, nothing changes (#1733, option C of #1554). Thanks to @jschmied.
 
 - Qwen3.8-27B on Metal: the DFlash2 drafter reads its sliding-window keys and values in place in its cache while the context has not wrapped, instead of copying them to scratch for every draft layer each round. Drafts are bit-identical. Thanks to @kieranscotney.
