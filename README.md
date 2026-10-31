@@ -542,6 +542,7 @@ Thank you to everyone who has sent TensorFold a pull request, a measurement or a
 [@spenchey](https://github.com/spenchey),
 [@squarrier](https://github.com/squarrier),
 [@ss-cong](https://github.com/ss-cong),
+[@Stephane-Eden](https://github.com/Stephane-Eden),
 [@styles01](https://github.com/styles01),
 [@SvangenStudios](https://github.com/SvangenStudios),
 [@swbiggart](https://github.com/swbiggart),

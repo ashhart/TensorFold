@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- TensorFold Web, a small local web app for picking a model that fits, running it, watching it, chatting and connecting your tools, ships in `web/` and is one command away: `tensorfold web` opens it, and on first use offers to install it with uv, pinned to the same release. Adopted, with fixes for current TensorFold, from @Stephane-Eden's project: thank you, Stephane.
+
 - DeepSeek-V4.x requests that omit sampling fields now sample at the release's recommended settings, temperature 1.0 and top_p 1.0 from DeepSeek's model cards, instead of decoding greedily when the checkpoint has no `generation_config.json`. A `generation_config.json`, the serve flags and the request still override them (#1725).
 
 - DeepSeek-V4.x: `tool_choice: "required"` and named tool calls are now constrained to the model's own DSML call markup, so those requests are held to a valid call on DeepSeek too.
