@@ -203,9 +203,6 @@ pub fn run(gpu: check.Gpu) !void {
     }
     defer for (&verify_controls) |*m| m.deinit();
     for (&verify_controls) |*m| if (m.kernel()) |k| try kernels.append(a, k);
-    var gb10_grouped = @import("contract_gb10_many.zig").Registrations.init(gpu, s, &affine4);
-    defer gb10_grouped.deinit();
-    try gb10_grouped.append(cap, a, &kernels);
     var prefill_many = prefill_many_k.Registrations.init(gpu, s, &affine4);
     defer prefill_many.deinit();
     try prefill_many.append(cap, a, &kernels);
@@ -578,7 +575,7 @@ pub fn run(gpu: check.Gpu) !void {
     defer mtp_rows.destroy();
     const weight_only = try @import("contract_weight_only_suite.zig").Suite.create(a, gpu, s, &kernels);
     defer weight_only.destroy(a);
-    const families = try @import("contract_family_sets.zig").Sets.init(gpu, s, a, &kernels);
+    const families = try @import("contract_family_sets.zig").Sets.init(gpu, s, a, &kernels, &affine4, cap);
     defer families.deinit();
     var t: g.Tally = .{};
     try @import("contract_dump.zig").run(a, kernels.items);
