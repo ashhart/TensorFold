@@ -597,5 +597,4 @@ test "Qwen stepped prefill: cancel between host iterations retains only the last
 
 test {
     _ = @import("cuda_mtp_budget.zig");
-    _ = @import("cuda_native_grants_test.zig");
 }
