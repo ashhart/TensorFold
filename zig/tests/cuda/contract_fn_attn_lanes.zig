@@ -34,6 +34,8 @@ const cases = [_][]const Lane{
     &.{ .{ .len = 0, .rows = 1 }, .{ .len = 3, .rows = 1 } }, // first keys
     &.{ .{ .len = 127, .rows = 16 }, .{ .len = 128, .rows = 16 }, .{ .len = 2040, .rows = 7 } }, // pooled blocks at edges
     &.{ .{ .len = 2040, .rows = 16 }, .{ .len = 2100, .rows = 1 }, .{ .len = 9000, .rows = 4 }, .{ .len = 300, .rows = 16 } }, // dense beside sparse
+    &.{.{ .len = 2040, .rows = 5 }}, // one stream
+    &.{ .{ .len = 100, .rows = 4 }, .{ .len = 2040, .rows = 0 }, .{ .len = 9000, .rows = 3 } }, // a stream with no rows this round
     &sixteen, // sixteen streams, all sparse
     &widest, // the table's lanes
 };
@@ -151,6 +153,7 @@ fn launch(gpu: check.Gpu, s: cuda.Stream, k: Fns, f: Fixture, way: Way, a: std.m
     if (way == .lanes) {
         var row0: usize = 0;
         for (f.lanes, kv) |l, cs| {
+            if (l.rows == 0) continue; // nothing of a lane without rows is launched
             const pos_host: [4]i32 = .{ @intCast(l.len), 0, 0, 0 };
             const pos = try rig.input(std.mem.sliceAsBytes(&pos_host));
             const at = row0 * proj_n * 2;
@@ -181,6 +184,7 @@ fn launch(gpu: check.Gpu, s: cuda.Stream, k: Fns, f: Fixture, way: Way, a: std.m
             table.putCaches(tab, 0, i, cs[0], cs[1], cs[2], cs[3]);
             table.putLane(tab, i, row0, l.len, l.rows);
             row0 += l.rows;
+            if (l.rows == 0) continue;
             const ends = l.len + l.rows;
             max_rows = @max(max_rows, l.rows);
             if (ends / ratio > top) max_blocks = @max(max_blocks, @min(nb, cdiv(ends, ratio)));
