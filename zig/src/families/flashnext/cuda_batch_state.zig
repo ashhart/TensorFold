@@ -47,10 +47,13 @@ pub const att_rows: usize = 256;
 pub const pocket_stride: usize = 128;
 /// Prompt rows one fused attention launch takes (their selections staged att_rows at a time).
 pub const fused_rows: usize = 1024;
-/// A shared round's lanes the attention launches take at once (flashnext_attn.cu's fn_lanes MAX) and their table:
-/// each attention layer's [lane][4] cache addresses, then the lanes' ints and each of up to att_rows rows' lane.
+/// A shared round's lanes the attention and DeltaNet launches take at once (the kernels' fn_lanes MAX) and their table:
+/// each attention layer's [lane][4] cache addresses, each DeltaNet layer's [lane][5] conv window, state, state out,
+/// kept projection and kept window, then the lanes' ints and each of up to att_rows rows' lane.
 pub const attn_lanes: usize = 32;
-pub const lanes_ptrs: usize = (wt.layers_n / 4) * attn_lanes * 4 * 8;
+pub const lanes_attn_ptrs: usize = wt.attn_n * attn_lanes * 4 * 8;
+pub const lanes_gdn_ptrs: usize = wt.linear_n * attn_lanes * 5 * 8;
+pub const lanes_ptrs: usize = lanes_attn_ptrs + lanes_gdn_ptrs;
 pub const lanes_bytes: usize = lanes_ptrs + (4 * attn_lanes + att_rows) * 4;
 /// Rows a pass holds at most unless asked for more.
 pub const default_chunk: usize = 1536;

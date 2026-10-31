@@ -35,6 +35,11 @@ pub const Kernels = struct {
     /// Each sparse row's top blocks (attention._select / _select_tiles), native.
     select: cuda.Function,
     select_lanes: cuda.Function,
+    /// A shared round's DeltaNet launches for every lane at once (TF_FLASHNEXT_GDN_LANES=1).
+    front_lanes: cuda.Function,
+    chain_lanes: cuda.Function,
+    shift_lanes: cuda.Function,
+    keep_lanes: cuda.Function,
 
     pub fn load(d: *const cuda.Driver) !Kernels {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
@@ -71,6 +76,10 @@ pub const Kernels = struct {
         k.shift = try k.batch.function("fn_shift_window");
         k.select = try k.batch.function("fn_qsa_select");
         k.select_lanes = try k.batch.function("fn_qsa_select_lanes");
+        k.front_lanes = try k.batch.function("fn_gdn_front_lanes");
+        k.chain_lanes = try k.batch.function("fn_gdn_rows_lanes");
+        k.shift_lanes = try k.batch.function("fn_shift_window_lanes");
+        k.keep_lanes = try k.batch.function("fn_gdn_keep_lanes");
         k.front = try k.batch.function("fn_gdn_front");
         k.chain = try k.batch.function("fn_gdn_rows");
         k.chain_to = try k.batch.function("fn_gdn_rows_to");

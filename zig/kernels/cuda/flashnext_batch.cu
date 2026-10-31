@@ -16,8 +16,8 @@ extern "C" __global__ void fn_sum_slices(const float* __restrict__ part, void* _
 }
 
 // Shifts the last-`taps`-rows window [taps, c] in place past `rows`, n rows `stride` apart (conv history, n-gram tail).
-extern "C" __global__ void fn_shift_window(__nv_bfloat16* __restrict__ win, const __nv_bfloat16* __restrict__ rows,
-                                           long long stride, int n, int taps, int c) {
+static __device__ __forceinline__ void shift_window(__nv_bfloat16* __restrict__ win, const __nv_bfloat16* __restrict__ rows,
+                                                    long long stride, int n, int taps, int c) {
     const int ch = blockIdx.x * blockDim.x + threadIdx.x;
     if (ch >= c) return;
     __nv_bfloat16 next[16];
@@ -27,6 +27,45 @@ extern "C" __global__ void fn_shift_window(__nv_bfloat16* __restrict__ win, cons
                              : rows[static_cast<long long>(src - taps) * stride + ch];
     }
     for (int j = 0; j < taps; ++j) win[static_cast<long long>(j) * c + ch] = next[j];
+}
+
+extern "C" __global__ void fn_shift_window(__nv_bfloat16* __restrict__ win, const __nv_bfloat16* __restrict__ rows,
+                                           long long stride, int n, int taps, int c) {
+    shift_window(win, rows, stride, n, taps, c);
+}
+
+// A shared round's lanes in one launch (flashnext_attn.cu's lane table: LI the lanes' ints, each row's lane at 4 * MAX;
+// LP this DeltaNet layer's [lane][5] addresses: conv window, state, state out, kept projection, kept window).
+namespace fn_lanes {
+constexpr int MAX = 32, PTRS = 5;
+__device__ __forceinline__ int rows(const int* LI, int l) { return LI[2 * MAX + l]; }
+__device__ __forceinline__ int row0(const int* LI, int l) { return LI[3 * MAX + l]; }
+__device__ __forceinline__ int lane(const int* LI, int r) { return LI[4 * MAX + r]; }
+template <typename T> __device__ __forceinline__ T* at(const unsigned long long* LP, int l, int k) {
+    return reinterpret_cast<T*>(LP[PTRS * l + k]);
+}
+}  // namespace fn_lanes
+
+// fn_shift_window for every lane, lane blockIdx.y: its conv window past its rows of `rows`.
+extern "C" __global__ void fn_shift_window_lanes(const unsigned long long* __restrict__ LP, const int* __restrict__ LI,
+                                                 const __nv_bfloat16* __restrict__ rows, long long stride, int taps, int c) {
+    const int l = blockIdx.y;
+    shift_window(fn_lanes::at<__nv_bfloat16>(LP, l, 0), rows + fn_lanes::row0(LI, l) * stride, stride,
+                 fn_lanes::rows(LI, l), taps, c);
+}
+
+// Each lane's kept projection rows and conv window (a rollback's), lane blockIdx.y, part blockIdx.z (0 the rows, 1 the
+// window), 16 bytes a thread; a lane that keeps nothing has no address.
+extern "C" __global__ void fn_gdn_keep_lanes(const unsigned long long* __restrict__ LP, const int* __restrict__ LI,
+                                             const uint4* __restrict__ proj, long long row_units, long long hist_units) {
+    const int l = blockIdx.y;
+    const bool hist = blockIdx.z == 1;
+    uint4* dst = fn_lanes::at<uint4>(LP, l, hist ? 4 : 3);
+    if (!dst) return;
+    const uint4* src = hist ? fn_lanes::at<const uint4>(LP, l, 0) : proj + fn_lanes::row0(LI, l) * row_units;
+    const long long n = hist ? hist_units : fn_lanes::rows(LI, l) * row_units;
+    for (long long i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += static_cast<long long>(gridDim.x) * blockDim.x)
+        dst[i] = src[i];
 }
 
 // ---- the DeltaNet chain over a chunk: flashnext_gdn.cu's chain cut into front, rows and norm, with its bits ----
@@ -59,12 +98,12 @@ static __device__ __forceinline__ float conv_act(const __nv_bfloat16* __restrict
 }  // namespace fn_gdn
 
 // Program (row, unit), 256 threads: key head u's normed q and k (u < NK), else a value head's v, decay g and beta.
-extern "C" __global__ void __launch_bounds__(256) fn_gdn_front(
+static __device__ __forceinline__ void gdn_front(
         const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs, const __nv_bfloat16* __restrict__ cw,
         const float* __restrict__ a_log, const float* __restrict__ dt_bias, float* __restrict__ qn,
-        float* __restrict__ kn, float* __restrict__ v, float* __restrict__ gb) {
+        float* __restrict__ kn, float* __restrict__ v, float* __restrict__ gb, int r) {
     using namespace fn_gdn;
-    const int r = blockIdx.x, u = blockIdx.y, t = threadIdx.x, warp = t >> 5, lane = t & 31;
+    const int u = blockIdx.y, t = threadIdx.x, warp = t >> 5, lane = t & 31;
     if (u < NK) {
         __shared__ float x[2][DK];
         const int hk = u;
@@ -94,6 +133,24 @@ extern "C" __global__ void __launch_bounds__(256) fn_gdn_front(
             gb[((size_t)r * NV + hv) * 2 + 1] = bf(sigmoidf_(b));
         }
     }
+}
+
+extern "C" __global__ void __launch_bounds__(256) fn_gdn_front(
+        const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs, const __nv_bfloat16* __restrict__ cw,
+        const float* __restrict__ a_log, const float* __restrict__ dt_bias, float* __restrict__ qn,
+        float* __restrict__ kn, float* __restrict__ v, float* __restrict__ gb) {
+    gdn_front(P, cs, cw, a_log, dt_bias, qn, kn, v, gb, blockIdx.x);
+}
+
+// fn_gdn_front over a shared round's rows: row blockIdx.x is its lane's row r, after the lane's own conv window.
+extern "C" __global__ void __launch_bounds__(256) fn_gdn_front_lanes(
+        const __nv_bfloat16* __restrict__ P, const unsigned long long* __restrict__ LP, const int* __restrict__ LI,
+        const __nv_bfloat16* __restrict__ cw, const float* __restrict__ a_log, const float* __restrict__ dt_bias,
+        float* __restrict__ qn, float* __restrict__ kn, float* __restrict__ v, float* __restrict__ gb) {
+    using namespace fn_gdn;
+    const int l = fn_lanes::lane(LI, blockIdx.x), r0 = fn_lanes::row0(LI, l);
+    gdn_front(P + (size_t)r0 * PW, fn_lanes::at<const __nv_bfloat16>(LP, l, 0), cw, a_log, dt_bias, qn + (size_t)r0 * NK * DK,
+              kn + (size_t)r0 * NK * DK, v + (size_t)r0 * NV * DV, gb + (size_t)r0 * NV * 2, blockIdx.x - r0);
 }
 
 // The chain through the chunk from state_in to state_out (in place, or apart for a rollback): a warp 4 state rows.
@@ -173,6 +230,18 @@ extern "C" __global__ void __launch_bounds__(128) fn_gdn_rows_to(
         const float* __restrict__ qn, const float* __restrict__ kn, const float* __restrict__ v,
         const float* __restrict__ gb, const float* state_in, float* state_out, int rows, float* __restrict__ ys_out) {
     gdn_rows(qn, kn, v, gb, state_in, state_out, rows, ys_out);
+}
+
+// fn_gdn_rows(_to) for every lane, lane blockIdx.z: its rows from its state into its state out (in place or apart).
+extern "C" __global__ void __launch_bounds__(128) fn_gdn_rows_lanes(
+        const float* __restrict__ qn, const float* __restrict__ kn, const float* __restrict__ v,
+        const float* __restrict__ gb, const unsigned long long* __restrict__ LP, const int* __restrict__ LI,
+        float* __restrict__ ys_out) {
+    using namespace fn_gdn;
+    const int l = blockIdx.z, r0 = fn_lanes::row0(LI, l);
+    gdn_rows(qn + (size_t)r0 * NK * DK, kn + (size_t)r0 * NK * DK, v + (size_t)r0 * NV * DV, gb + (size_t)r0 * NV * 2,
+             fn_lanes::at<const float>(LP, l, 1), fn_lanes::at<float>(LP, l, 2), fn_lanes::rows(LI, l),
+             ys_out + (size_t)r0 * NV * DV);
 }
 
 extern "C" __global__ void __launch_bounds__(128) fn_gdn_norm(
