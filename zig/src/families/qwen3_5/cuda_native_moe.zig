@@ -7,7 +7,7 @@ pub const formats: []const []const u8 = &.{ "mlx-q4g64", "modelopt-mixed", "mode
 pub const default_context = native.default_context;
 pub const max_segments = native.max_segments;
 pub const prompt_rows = native.prompt_rows;
-/// --drafter names the checkpoint's own directory: its MTP layer (mtp-4bit.safetensors) drafts chains.
+/// --drafter names the checkpoint's own directory (its MTP layer drafts chains) or a DFlash2 draft model's.
 pub const takes_drafter = true;
 pub const Options = native.Options;
 pub const open = native.open;
@@ -15,7 +15,7 @@ pub const attach = native.attach;
 pub const pagedLayout = native.pagedLayout; // TF_QWEN_KV_PAGES: the same pool as the dense models'
 pub const fits = native.fits;
 pub const window_rows = native.window_rows;
-pub const openDrafter = native.openMtp;
+pub const openDrafter = native.openDrafter;
 pub const explain = native.explain;
 /// The dense family's kept prompt states, its open refusals' words and its image tower: the MLP is the only change.
 pub const snap_bytes = native.snap_bytes;

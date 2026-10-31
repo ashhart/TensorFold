@@ -153,6 +153,20 @@ The checkpoint keeps its MTP layer in bf16 in its own shards. Without `mtp-4bit.
 quantizes that layer to MLX affine-4 at load, as Nemotron's ModelOpt drafter does; this changes only which rows a
 round proposes, never a reply, and the startup log says so. With the file present, the file is read instead.
 
+`--drafter` can also name a DFlash2 draft model: a directory whose `config.json` has `dflash_config` drafts with it,
+any other with the target's MTP layer. `incoai/Qwen3.6-35B-A3B-DFlash2` (revision `51ef7b69`, the SGLang DFlash
+recipe's draft) reads eight target layers and is quantized to affine-4 at load:
+
+```bash
+hf download incoai/Qwen3.6-35B-A3B-DFlash2 --revision 51ef7b6923ad6c14cb1bb41c37a9041446496ab6
+tensorfold serve nvidia/Qwen3.6-35B-A3B-NVFP4 --drafter incoai/Qwen3.6-35B-A3B-DFlash2
+```
+
+On the fleet benchmark's 4.2K-token prompt (`bench.py`, 512 tokens), one build with either drafter, it decodes 130.3
+tok/s at one stream against MTP's 98.6, and gives 131.3 / 161.4 / 198.0 tok/s aggregate at 2 / 4 / 8 users against
+124.7 / 170.6 / 208.4: it proposes more rows a round and keeps fewer of them, so it leads at one and two streams and
+MTP leads under load. Every drafted reply equals its `"draft": false` run with either drafter.
+
 The rules come from @gilby's Python port ([#345](https://github.com/ashhart/TensorFold/pull/345)): bf16 activations
 for the W4A16 layers, the shared expert last in the table, and the MTP layer drafting through the target's head.
 
