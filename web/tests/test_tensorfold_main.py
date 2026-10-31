@@ -289,3 +289,30 @@ def test_only_a_nemotron_copy_passes_the_family_check(tmp_path, monkeypatch):
     (living.root() / "bare").mkdir()                              # no config.json: the family is unknown
     assert living.family_refusal("eden") is None
     assert "Nemotron 3.5 Lightning only" in living.family_refusal("bare")
+
+
+# -- framing ---------------------------------------------------------------------------------------------------------
+
+
+def _framing_ok(r) -> bool:
+    return r.headers.get("x-frame-options") == "DENY" and \
+        "frame-ancestors 'none'" in r.headers.get("content-security-policy", "")
+
+
+def test_every_page_refuses_framing(tmp_path, monkeypatch):
+    from tensorfold_web import settings as settings_mod
+
+    monkeypatch.setattr(settings_mod, "config_dir", lambda: tmp_path / "conf")
+    _s, _eng, c = _app()
+    for path in ("/", "/index.html", "/api/settings", "/manifest.webmanifest", "/no-such-page"):
+        assert _framing_ok(c.get(path)), path
+    refused = c.get("/api/settings", headers={"host": "rebind.example"})    # the gate's own refusal
+    assert refused.status_code == 421 and _framing_ok(refused)
+
+
+def test_an_engine_page_keeps_its_policy_but_not_its_frame_ancestors():
+    from tensorfold_web.server import frame_policy
+
+    assert frame_policy(None) == "frame-ancestors 'none'"
+    assert frame_policy("default-src 'self'; frame-ancestors *; img-src data:") == \
+        "default-src 'self'; img-src data:; frame-ancestors 'none'"

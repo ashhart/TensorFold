@@ -119,6 +119,13 @@ def same_secret(given: str, known: str) -> bool:
     return given.isascii() and known.isascii() and hmac.compare_digest(given, known)
 
 
+def frame_policy(csp: str | None) -> str:
+    """``csp`` with ``frame-ancestors 'none'``: an engine page's own policy is kept, its frame-ancestors replaced."""
+
+    kept = [d.strip() for d in (csp or "").split(";") if d.strip() and not d.strip().lower().startswith("frame-ancestors")]
+    return "; ".join([*kept, "frame-ancestors 'none'"])
+
+
 def _host_of(value: str) -> str:
     """`host` from `host:port`, `[v6]:port` or a URL's netloc, lower-cased."""
 
@@ -260,6 +267,16 @@ def create_app(*, settings: settings_mod.Settings | None = None, engine: Engine 
                           "a TensorFold Web token or the engine's API key is required")
                 return JSONResponse({"detail": detail}, status_code=401)
         return await call_next(request)
+
+    @app.middleware("http")
+    async def _no_framing(request: Request, call_next):
+        """No page of another site may frame these pages: every response, the gate's refusals and the relay's
+        included. Registered after the gate, so it wraps it."""
+
+        response = await call_next(request)
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Content-Security-Policy"] = frame_policy(response.headers.get("content-security-policy"))
+        return response
 
     # figures kept by the server, so Monitor's charts draw as soon as a page opens
     used = usage.Usage(settings_mod.config_dir() / "usage.sqlite")
