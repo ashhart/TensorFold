@@ -65,6 +65,7 @@ pub const Loaded = struct {
     vision: ?*images_mod.Images = null, // rank 0's tower for the server's image offer
     layout: ?kv.Layout = null, // every stream's memory as one pool of KV pages (null: a window each, by TF_KV_PAGES)
     engine_paged: bool = false, // with a layout, the engine's own sequence takes pages too: the plan sets a window aside
+    host_snaps: bool = false, // TF_GLM_HOST_CACHE: kept states in pinned host memory, --prompt-cache-gib of it
 };
 
 /// The pool behind every stream: the engine's own sequence and `streams` more on `pages` KV pages, on every rank.
@@ -322,6 +323,7 @@ fn finishRank(a: OpenArgs) !Loaded {
         .vision = own.e.images,
         .layout = own.layout,
         .engine_paged = set.pages,
+        .host_snaps = snapshots.pages.onHost(),
     };
 }
 
