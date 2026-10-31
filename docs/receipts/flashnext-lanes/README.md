@@ -62,10 +62,12 @@ noise. The first prompt was already cached in cycle 2, so the one-stream cells a
 | 1 | 16 | 7.27 / 7.39 | 7.28 / 7.26 | 7.44 / 7.42 | 7.47 / 5.40 |
 
 These cells are mostly prompt fill: a 16-stream cell waits about 270 s for its first token and decodes for about 10 s.
-The prompt cache held three states here and evicted during the runs, so the fill varies with what it kept. Attention stays
-inside main and read-out's range in every cell but one, 7.46 at temp 0, 4 streams, below their 7.66. Attention + DeltaNet
-also falls outside it at 7.05 and in its cycle 2 at 16 streams, 5.23 and 5.40, with a slower first token (365 to 377 s against
-265 to 290 s) and slower decode. Cycle 1 of the same build shows neither, and the cause is not established.
+The prompt cache held three states here and evicted during the runs, so the fill varies with what it kept.
+
+Against main and read-out's range, attention falls outside in two cells: 7.46 below 7.66, and 6.76 below 6.79.
+Attention + DeltaNet falls outside at 7.05 at temp 0, 4 streams, and in all of its cycle 2 sampled cells from 4 streams up and
+at temp 0, 16 streams: 8.20, 6.76, 5.40 and 5.23. Those 16-stream cells have a slower first token (365 to 377 s against 265
+to 290 s) and slower decode. Cycle 1 of the same build shows neither, and the cause is not established.
 
 ## Not established
 
