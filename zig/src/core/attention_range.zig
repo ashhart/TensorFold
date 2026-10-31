@@ -137,6 +137,20 @@ pub fn ends(point: f64, half: f64, down: f64, up: f64) [2]f64 {
     return .{ bfr.bf16(point - half - down), bfr.bf16(point + half + up) };
 }
 
+/// A bf16 output's allowance: the range's half width and the cut's wider side, plus the output's rounding.
+pub fn allowBf16(point: f64, half: f64, down: f64, up: f64) f64 {
+    if (!std.math.isFinite(point)) return 0;
+    if (!std.math.isFinite(half)) return std.math.floatMax(f64); // scores too far apart for the first order: any value
+    const h = half + @max(down, up);
+    return h + 0x1p-8 * (@abs(point) + h) + 0x1p-133;
+}
+
+/// A bf16 output's signed interval: its range's rounded ends, open where float64 or the range is not finite.
+pub fn intervalBf16(point: f64, half: f64, down: f64, up: f64) [2]f64 {
+    if (!std.math.isFinite(point) or !std.math.isFinite(half)) return .{ -std.math.floatMax(f64), std.math.floatMax(f64) };
+    return ends(point, half, down, up);
+}
+
 /// What a check saw: outputs whose range holds one bf16 value, several, and outputs non-finite in float64.
 pub const Stats = struct { decided: usize = 0, ranged: usize = 0, nonfinite: usize = 0 };
 
