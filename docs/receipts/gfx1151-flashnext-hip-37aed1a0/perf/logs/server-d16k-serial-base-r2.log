@@ -1,0 +1,26 @@
+[tensorfold] HIP rank 0 of 1: policy matrix=auto,attention=auto,kernels=auto,graphs=auto,prefill_step=1024,fill_rows=512; mtp drafts 3 under 0.3, 8 snapshots 
+[tensorfold] open-file limit raised: soft 1024 -> 524288
+warning: libtfgrammar.so is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
+[tensorfold] HIP gfx1151 device 0, rank 0 of 1: Flash Next, 76.58 GiB on the device, 1 stream of 19520 positions, 1.11 GiB each; prompts in 1024-row chunks
+[tensorfold] serving flashnext at http://127.0.0.1:30461/v1 (sampling: temperature 1.0, top_k 20, top_p 0.95; drafts: off; context: 19456; loaded in 12.3s)
+[tensorfold] 127.0.0.1 "GET /health HTTP/1.1" 200 -
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-b945fd387ddabea65dcfff7e4c66d634 prompt=16384 cached=0 thinking=False effort=none tokens=16 sha=a955cb2f9f8d finish=length rounds=15 accepted=0/0 ttft=64.569 decode=0.759 elapsed=65.328 queued=0.000 tok/s=19.8
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-49fb59d008778ad8928a02b8225c2289 prompt=16384 cached=0 thinking=False effort=none tokens=256 sha=09172b34c45a finish=length rounds=255 accepted=0/0 ttft=46.472 decode=9.649 elapsed=56.121 queued=0.000 tok/s=26.4
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-ffff277af6df49a9d05a430a7cce9eed prompt=16384 cached=0 thinking=False effort=none tokens=256 sha=09172b34c45a finish=length rounds=255 accepted=0/0 ttft=46.367 decode=8.670 elapsed=55.037 queued=0.000 tok/s=29.4
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-22fca07234b1eabf1e7875a5695cb91f prompt=16384 cached=0 thinking=False effort=none tokens=256 sha=09172b34c45a finish=length rounds=255 accepted=0/0 ttft=46.689 decode=8.650 elapsed=55.339 queued=0.000 tok/s=29.5
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-039cbde124279ab61062edac1092cec7 prompt=16384 cached=0 thinking=False effort=none tokens=1024 sha=35725e749acd finish=length rounds=1023 accepted=0/0 ttft=46.684 decode=37.975 elapsed=84.659 queued=0.000 tok/s=26.9
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-a034d4fe13dd0eee2bef448a81d70f35 prompt=16384 cached=0 thinking=False effort=none tokens=1024 sha=35725e749acd finish=length rounds=1023 accepted=0/0 ttft=46.601 decode=34.112 elapsed=80.713 queued=0.000 tok/s=30.0
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-82d2dac2567135b02d7b58231a3f46d0 prompt=16384 cached=0 thinking=False effort=none tokens=1024 sha=35725e749acd finish=length rounds=1023 accepted=0/0 ttft=46.564 decode=34.111 elapsed=80.675 queued=0.000 tok/s=30.0
+[tensorfold] 127.0.0.1 "GET /memory HTTP/1.1" 200 -
+[tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+[tensorfold] shutting down (SIGTERM): draining: new requests get 503; 0 request(s) in progress may finish within 20.0 s
+[tensorfold] shutting down: drained
+info: graphs: 1 captured (2 ms each), 3847 of 3849 rounds replayed
+[tensorfold] shutting down: stopped

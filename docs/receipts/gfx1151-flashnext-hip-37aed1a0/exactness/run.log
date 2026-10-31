@@ -1,0 +1,43 @@
+pgrep: pattern that searches for process name longer than 15 characters will result in zero matches
+Try `pgrep -f' option to match against the complete command line.
+pgrep: pattern that searches for process name longer than 15 characters will result in zero matches
+Try `pgrep -f' option to match against the complete command line.
+pgrep: pattern that searches for process name longer than 15 characters will result in zero matches
+Try `pgrep -f' option to match against the complete command line.
+pgrep: pattern that searches for process name longer than 15 characters will result in zero matches
+Try `pgrep -f' option to match against the complete command line.
+pgrep: pattern that searches for process name longer than 15 characters will result in zero matches
+Try `pgrep -f' option to match against the complete command line.
+== 2026-10-31T19:13:41Z server ex-exact-nocache: context 32768, parallel 4, prompt cache 0 GiB 
+== 2026-10-31T19:14:19Z step rewind-exact-nocache
+== 2026-10-31T19:19:28Z step rewind-exact-nocache rc=0
+== 2026-10-31T19:19:30Z server ex-exact: context 32768, parallel 4, prompt cache 1 GiB 
+== 2026-10-31T19:20:00Z step serve-check-exact
+== 2026-10-31T19:21:10Z step serve-check-exact rc=0
+== 2026-10-31T19:21:10Z step serve-cancel-exact
+== 2026-10-31T19:21:15Z step serve-cancel-exact rc=0
+== 2026-10-31T19:21:15Z step rewind-exact
+== 2026-10-31T19:21:48Z step rewind-exact rc=0
+== 2026-10-31T19:21:49Z step generate-exact-chunk512
+== 2026-10-31T19:22:36Z step generate-exact-chunk512 rc=0
+== 2026-10-31T19:22:36Z step generate-exact-chunk2048
+== 2026-10-31T19:23:19Z step generate-exact-chunk2048 rc=0
+== 2026-10-31T19:23:19Z step generate-exact-chunk8192
+== 2026-10-31T19:24:00Z step generate-exact-chunk8192 rc=0
+== 2026-10-31T19:24:00Z step generate-exact-chunk20480
+== 2026-10-31T19:24:45Z step generate-exact-chunk20480 rc=0
+## Exactness
+| numerics | serve_check | accepted/drafted (served) | token-hash audit | serve_cancel | rewind (cache on vs off) | one chunk hash |
+|---|---|---|---|---|---|---|
+| exact | 15 ok, 0 fail | 1285/1688 | 11 groups, 0 differ | 3 ok, 0 fail | 0 differ (rc 0), up to 10240 cached tokens | yes |
+
+## Prompt-chunk seams (`generate --chat --max 64 --hash`)
+| numerics | --chunk | prompt tokens | logits hash | rc |
+|---|---|---|---|---|
+| exact | 512 | 10368 | c8f6888043c972e0 | 0 |
+| exact | 2048 | 10368 | c8f6888043c972e0 | 0 |
+| exact | 8192 | 10368 | c8f6888043c972e0 | 0 |
+| exact | 20480 | 10368 | c8f6888043c972e0 | 0 |
+
+Seams exercised (prompt longer than 8,192 and shorter than the largest chunk): exact True.
+== 2026-10-31T19:24:45Z exactness done; next: finalize.sh

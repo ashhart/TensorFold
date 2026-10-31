@@ -1,0 +1,554 @@
+PASS nonfinite hip RMS norm tf_rms_rows (fp32): 260 non-finite and 1788 finite outputs match the float64 classes
+PASS repeat hip RMS norm tf_rms_rows (fp32): five runs byte-identical (32768 bytes), inputs and guards untouched, no overlap
+PASS shapes hip RMS norm tf_rms_rows (fp32): 12 shapes within the float64 bound (worst 0.245 of the bound), 0 edges refused by the kernel
+PASS sums hip RMS norm tf_rms_rows (fp32): exact sums at k 1024, where fp16 sums would miss by 1864135x and bf16 by 2922x
+PASS nonfinite hip RMS norm tf_rms_rows (fp16): 260 non-finite and 1788 finite outputs match the float64 classes
+PASS repeat hip RMS norm tf_rms_rows (fp16): five runs byte-identical (16384 bytes), inputs and guards untouched, no overlap
+PASS shapes hip RMS norm tf_rms_rows (fp16): 12 shapes within the float64 bound (worst 0.993 of the bound), 0 edges refused by the kernel
+PASS sums hip RMS norm tf_rms_rows (fp16): within its bound at k 1024; fp16 sums would miss 2046x, bf16 0.2x (a 16-bit output follows the sum of squares as ss^-1/2: a bf16 sum's error is a few output ulps (the fp32-out form proves fp32 sums))
+PASS nonfinite hip RMS norm tf_rms_rows (bf16): 260 non-finite and 1788 finite outputs match the float64 classes
+PASS repeat hip RMS norm tf_rms_rows (bf16): five runs byte-identical (16384 bytes), inputs and guards untouched, no overlap
+PASS shapes hip RMS norm tf_rms_rows (bf16): 12 shapes within the float64 bound (worst 0.996 of the bound), 0 edges refused by the kernel
+PASS sums hip RMS norm tf_rms_rows (bf16): within its bound at k 1024; fp16 sums would miss 256x, bf16 0.1x (a 16-bit output follows the sum of squares as ss^-1/2: a bf16 sum's error is a few output ulps (the fp32-out form proves fp32 sums))
+PASS nonfinite hip RMS norm rms_kernel<__half>: 2052 non-finite and 14332 finite outputs match the float64 classes
+PASS repeat hip RMS norm rms_kernel<__half>: five runs byte-identical (69632 bytes), inputs and guards untouched, no overlap
+PASS shapes hip RMS norm rms_kernel<__half>: 9 shapes within the float64 bound (worst 0.987 of the bound), 0 edges refused by the kernel
+PASS sums hip RMS norm rms_kernel<__half>: within its bound at k 8192; fp16 sums would miss 2046x, bf16 3.1x (a 16-bit output follows the sum of squares as ss^-1/2: a bf16 sum's error is a few output ulps (the fp32-out form proves fp32 sums))
+PASS nonfinite hip RMS norm rms_kernel<hip_bfloat16>: 2052 non-finite and 14332 finite outputs match the float64 classes
+PASS repeat hip RMS norm rms_kernel<hip_bfloat16>: five runs byte-identical (69632 bytes), inputs and guards untouched, no overlap
+PASS shapes hip RMS norm rms_kernel<hip_bfloat16>: 9 shapes within the float64 bound (worst 0.993 of the bound), 0 edges refused by the kernel
+PASS sums hip RMS norm rms_kernel<hip_bfloat16>: within its bound at k 8192; fp16 sums would miss 256x, bf16 0.2x (a 16-bit output follows the sum of squares as ss^-1/2: a bf16 sum's error is a few output ulps (the fp32-out form proves fp32 sums))
+FAIL nonfinite control: fmax row max: 1 of 8 outputs differ in class; first at 0: finite where float64 gives nan
+CONTROL control: fmax row max: red at nonfinite, as planted
+FAIL repeat control: atomic-add row sum: 4 of 4 repeats differ from the first run's bytes, first at byte 0
+CONTROL control: atomic-add row sum: red at repeat, as planted
+FAIL repeat control: row sum writing its input: 4 of 4 repeats differ from the first run's bytes, first at byte 0
+CONTROL control: row sum writing its input: red at repeat, as planted
+FAIL shapes control: row sum losing a tail input: at 8x1x1 output 0 is 0.000000e0 where float64 gives -3.203125e-1: 2396744.29 of its bound
+CONTROL control: row sum losing a tail input: red at shapes, as planted
+FAIL sums control: dot summed in half: 29826161.8x over its exact-sum bound at k 4096: not fp32 sums (fp16 would miss 29826162x, bf16 16777216x)
+CONTROL control: dot summed in half: red at sums, as planted
+PASS nonfinite hip mamba tf_mamba_conv (bf16): 11 non-finite and 49141 finite outputs match the float64 classes
+PASS repeat hip mamba tf_mamba_conv (bf16): five runs byte-identical (49152 bytes), inputs and guards untouched, no overlap
+PASS shapes hip mamba tf_mamba_conv (bf16): 7 shapes within the float64 bound (worst 0.536 of the bound), 0 edges refused by the kernel
+PASS sums hip mamba tf_mamba_conv (bf16): within its bound at k 5; fp16 sums would miss infx, bf16 63.8x (five terms through silu, which squashes a sum's error below zero: the fp16 margin proves fp32 sums)
+PASS nonfinite hip mamba tf_mamba_dt (bf16 in): 2 non-finite and 318 finite outputs match the float64 classes
+PASS repeat hip mamba tf_mamba_dt (bf16 in): five runs byte-identical (256 bytes), inputs and guards untouched, no overlap
+PASS shapes hip mamba tf_mamba_dt (bf16 in): 7 shapes within the float64 bound (worst 0.323 of the bound), 0 edges refused by the kernel
+N/A  sums hip mamba tf_mamba_dt (bf16 in): declares none sums
+PASS nonfinite hip mamba tf_mamba_gnorm (bf16): 516 non-finite and 19964 finite outputs match the float64 classes
+PASS repeat hip mamba tf_mamba_gnorm (bf16): five runs byte-identical (8192 bytes), inputs and guards untouched, no overlap
+PASS shapes hip mamba tf_mamba_gnorm (bf16): 8 shapes within the float64 bound (worst 0.938 of the bound), 0 edges refused by the kernel
+PASS sums hip mamba tf_mamba_gnorm (bf16): within its bound at k 1024; fp16 sums would miss 128x, bf16 0.2x (a 16-bit output follows the sum of squares as ss^-1/2: a bf16 sum's error is a few output ulps)
+PASS nonfinite hip mamba tf_mamba_scan (y, bf16): 203 non-finite and 10037 finite outputs match the float64 classes
+PASS repeat hip mamba tf_mamba_scan (y, bf16): five runs byte-identical (16384 bytes), inputs and guards untouched, no overlap
+PASS shapes hip mamba tf_mamba_scan (y, bf16): 8 shapes within the float64 bound (worst 0.869 of the bound), 0 edges refused by the kernel
+PASS sums hip mamba tf_mamba_scan (y, bf16): exact sums at k 128, where fp16 sums would miss by infx and bf16 by 2066x
+PASS nonfinite hip mamba tf_mamba_scan (the state): 8321 non-finite and 253823 finite outputs match the float64 classes
+PASS repeat hip mamba tf_mamba_scan (the state): five runs byte-identical (1048576 bytes), inputs and guards untouched, no overlap
+PASS shapes hip mamba tf_mamba_scan (the state): 8 shapes within the float64 bound (worst 0.071 of the bound), 0 edges refused by the kernel
+PASS sums hip mamba tf_mamba_scan (the state): exact sums at k 128, where fp16 sums would miss by 1438047x and bf16 by 13901122x
+PASS nonfinite hip nemotron tf_nemo_select (a pick at a time): the stated rule holds: the top-k of sigmoid(logit) + bias, a NaN never ahead of a number, ties to the lower expert; weights within (k + 8) fp32 ulps of float64
+PASS repeat hip nemotron tf_nemo_select (a pick at a time): five runs byte-identical (560 bytes), inputs and guards untouched, no overlap
+PASS shapes hip nemotron tf_nemo_select (a pick at a time): 7 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums hip nemotron tf_nemo_select (a pick at a time): declares none sums
+PASS nonfinite hip nemotron tf_nemo_select_rank: the stated rule holds: the top-k of sigmoid(logit) + bias, a NaN never ahead of a number, ties to the lower expert; weights within (k + 8) fp32 ulps of float64
+PASS repeat hip nemotron tf_nemo_select_rank: five runs byte-identical (560 bytes), inputs and guards untouched, no overlap
+PASS shapes hip nemotron tf_nemo_select_rank: 7 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums hip nemotron tf_nemo_select_rank: declares none sums
+PASS nonfinite hip nemotron tf_nemo_localize: the stated rule holds: pick - first for the rank's own experts, else own
+PASS repeat hip nemotron tf_nemo_localize: five runs byte-identical (24 bytes), inputs and guards untouched, no overlap
+PASS shapes hip nemotron tf_nemo_localize: 7 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums hip nemotron tf_nemo_localize: declares none sums
+PASS nonfinite hip nemotron tf_nemo_relu2 (bf16): 2 non-finite and 11134 finite outputs match the float64 classes
+PASS repeat hip nemotron tf_nemo_relu2 (bf16): five runs byte-identical (22272 bytes), inputs and guards untouched, no overlap
+PASS shapes hip nemotron tf_nemo_relu2 (bf16): 8 shapes within the float64 bound (worst 0.913 of the bound), 0 edges refused by the kernel
+N/A  sums hip nemotron tf_nemo_relu2 (bf16): declares none sums
+PASS nonfinite hip nemotron tf_nemo_combine (bf16): 4 non-finite and 13436 finite outputs match the float64 classes
+PASS repeat hip nemotron tf_nemo_combine (bf16): five runs byte-identical (5376 bytes), inputs and guards untouched, no overlap
+PASS shapes hip nemotron tf_nemo_combine (bf16): 7 shapes within the float64 bound (worst 0.996 of the bound), 0 edges refused by the kernel
+PASS sums hip nemotron tf_nemo_combine (bf16): exact sums at k 6, where fp16 sums would miss by infx and bf16 by 4987x
+PASS nonfinite hip nemotron tf_nemo_combine (fp32): 4 non-finite and 13436 finite outputs match the float64 classes
+PASS repeat hip nemotron tf_nemo_combine (fp32): five runs byte-identical (10752 bytes), inputs and guards untouched, no overlap
+PASS shapes hip nemotron tf_nemo_combine (fp32): 7 shapes within the float64 bound (worst 0.253 of the bound), 0 edges refused by the kernel
+PASS sums hip nemotron tf_nemo_combine (fp32): exact sums at k 6, where fp16 sums would miss by infx and bf16 by 326820168x
+PASS nonfinite hip planned decode walk planCausal (bf16 cache): 5541 non-finite and 14939 finite outputs match the float64 classes
+PASS repeat hip planned decode walk planCausal (bf16 cache): five runs byte-identical (16384 bytes), inputs and guards untouched, no overlap
+PASS shapes hip planned decode walk planCausal (bf16 cache): 8 shapes within the float64 bound (worst 0.002 of the bound), 0 edges refused by the kernel
+PASS sums hip planned decode walk planCausal (bf16 cache): exact sums at k 65536, where fp16 sums would miss by 2130706432x and bf16 by 16777216x
+PASS nonfinite hip planned decode walk planCausalAs (q and rows bf16): 4525 non-finite and 15955 finite outputs match the float64 classes
+PASS repeat hip planned decode walk planCausalAs (q and rows bf16): five runs byte-identical (8192 bytes), inputs and guards untouched, no overlap
+PASS shapes hip planned decode walk planCausalAs (q and rows bf16): 8 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip planned decode walk planCausalAs (q and rows bf16): exact sums at k 65536, where fp16 sums would miss by 256x and bf16 by 256x
+PASS nonfinite hip tf_plan_attend_bf16 (q and rows fp32): 4652 non-finite and 15828 finite outputs match the float64 classes
+PASS repeat hip tf_plan_attend_bf16 (q and rows fp32): five runs byte-identical (16384 bytes), inputs and guards untouched, no overlap
+PASS shapes hip tf_plan_attend_bf16 (q and rows fp32): 7 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip tf_plan_attend_bf16 (q and rows fp32): exact sums at k 4096, where fp16 sums would miss by 65011712x and bf16 by 780140544x
+PASS nonfinite hip tf_plan_attend_bf16 (q and rows bf16): 5668 non-finite and 14812 finite outputs match the float64 classes
+PASS repeat hip tf_plan_attend_bf16 (q and rows bf16): five runs byte-identical (8192 bytes), inputs and guards untouched, no overlap
+PASS shapes hip tf_plan_attend_bf16 (q and rows bf16): 7 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip tf_plan_attend_bf16 (q and rows bf16): exact sums at k 4096, where fp16 sums would miss by 768x and bf16 by 9472x
+PASS nonfinite hip tf_add_rms_bf16 (y bf16): 2695 non-finite and 24185 finite outputs match the float64 classes
+PASS repeat hip tf_add_rms_bf16 (y bf16): five runs byte-identical (10752 bytes), inputs and guards untouched, no overlap
+PASS shapes hip tf_add_rms_bf16 (y bf16): 8 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip tf_add_rms_bf16 (y bf16): within its bound at k 8192; fp16 sums would miss 85x, bf16 0.1x (a 16-bit output follows the sum of squares as ss^-1/2: a bf16 sum's error is a few output ulps; fp16's overflowing sums give 0, which the bound's residual roundings put at 51x)
+PASS nonfinite hip tf_add_rms_bf16 (y fp32): 2695 non-finite and 24185 finite outputs match the float64 classes
+PASS repeat hip tf_add_rms_bf16 (y fp32): five runs byte-identical (10752 bytes), inputs and guards untouched, no overlap
+PASS shapes hip tf_add_rms_bf16 (y fp32): 8 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip tf_add_rms_bf16 (y fp32): within its bound at k 8192; fp16 sums would miss 85x, bf16 0.2x (a 16-bit output follows the sum of squares as ss^-1/2: a bf16 sum's error is a few output ulps; fp16's overflowing sums give 0, which the bound's residual roundings put at 51x)
+PASS nonfinite hip tf_add_rms_bf16 (the MoE rows): 2693 non-finite and 24187 finite outputs match the float64 classes
+PASS repeat hip tf_add_rms_bf16 (the MoE rows): five runs byte-identical (10752 bytes), inputs and guards untouched, no overlap
+PASS shapes hip tf_add_rms_bf16 (the MoE rows): 8 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip tf_add_rms_bf16 (the MoE rows): within its bound at k 8192; fp16 sums would miss 51x, bf16 0.1x (a 16-bit output follows the sum of squares as ss^-1/2: a bf16 sum's error is a few output ulps; fp16's overflowing sums give 0, which the bound's residual roundings put at 51x)
+PASS nonfinite hip mamba tf_mamba_conv_window (xc and tails, bf16): 17 non-finite and 122863 finite outputs match the float64 classes
+PASS repeat hip mamba tf_mamba_conv_window (xc and tails, bf16): five runs byte-identical (98304 bytes), inputs and guards untouched, no overlap
+PASS shapes hip mamba tf_mamba_conv_window (xc and tails, bf16): 7 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip mamba tf_mamba_conv_window (xc and tails, bf16): within its bound at k 5; fp16 sums would miss infx, bf16 63.8x (five terms through silu, which squashes a sum's error below zero: the fp16 margin proves fp32 sums)
+PASS nonfinite hip mamba tf_mamba_conv_window (dt, bf16 in): 2 non-finite and 318 finite outputs match the float64 classes
+PASS repeat hip mamba tf_mamba_conv_window (dt, bf16 in): five runs byte-identical (512 bytes), inputs and guards untouched, no overlap
+PASS shapes hip mamba tf_mamba_conv_window (dt, bf16 in): 8 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums hip mamba tf_mamba_conv_window (dt, bf16 in): declares none sums
+PASS nonfinite hip mamba tf_mamba_scan_snap (y, bf16): 203 non-finite and 20277 finite outputs match the float64 classes
+PASS repeat hip mamba tf_mamba_scan_snap (y, bf16): five runs byte-identical (16384 bytes), inputs and guards untouched, no overlap
+PASS shapes hip mamba tf_mamba_scan_snap (y, bf16): 7 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip mamba tf_mamba_scan_snap (y, bf16): exact sums at k 128, where fp16 sums would miss by infx and bf16 by 1931x
+PASS nonfinite hip mamba tf_mamba_scan_snap (the state and its slots): 25221 non-finite and 2596219 finite outputs match the float64 classes
+PASS repeat hip mamba tf_mamba_scan_snap (the state and its slots): five runs byte-identical (4194304 bytes), inputs and guards untouched, no overlap
+PASS shapes hip mamba tf_mamba_scan_snap (the state and its slots): 7 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip mamba tf_mamba_scan_snap (the state and its slots): exact sums at k 128, where fp16 sums would miss by 15933x and bf16 by 126144x
+PASS nonfinite hip affine_dot2_stream (2-bit, group 32, fp32 out): 131 non-finite and 29 finite outputs match the float64 classes
+PASS repeat hip affine_dot2_stream (2-bit, group 32, fp32 out): five runs byte-identical (128 bytes), inputs and guards untouched, no overlap
+PASS shapes hip affine_dot2_stream (2-bit, group 32, fp32 out): 13 shapes within the float64 bound (worst 0.032 of the bound), 0 edges refused by the kernel
+PASS sums hip affine_dot2_stream (2-bit, group 32, fp32 out): exact sums at k 2048, where fp16 sums would miss by 83886080x and bf16 by 1996488704x
+PASS nonfinite hip affine_dot2_stream (2-bit, group 64, fp32 out): 131 non-finite and 29 finite outputs match the float64 classes
+PASS repeat hip affine_dot2_stream (2-bit, group 64, fp32 out): five runs byte-identical (128 bytes), inputs and guards untouched, no overlap
+PASS shapes hip affine_dot2_stream (2-bit, group 64, fp32 out): 13 shapes within the float64 bound (worst 0.003 of the bound), 0 edges refused by the kernel
+PASS sums hip affine_dot2_stream (2-bit, group 64, fp32 out): exact sums at k 2048, where fp16 sums would miss by 83886080x and bf16 by 1862270976x
+PASS nonfinite hip affine_dot2_stream (2-bit, group 128, fp32 out): 131 non-finite and 29 finite outputs match the float64 classes
+PASS repeat hip affine_dot2_stream (2-bit, group 128, fp32 out): five runs byte-identical (128 bytes), inputs and guards untouched, no overlap
+PASS shapes hip affine_dot2_stream (2-bit, group 128, fp32 out): 13 shapes within the float64 bound (worst 0.002 of the bound), 0 edges refused by the kernel
+PASS sums hip affine_dot2_stream (2-bit, group 128, fp32 out): exact sums at k 2048, where fp16 sums would miss by 83886080x and bf16 by 1996488704x
+PASS nonfinite hip affine_dot2_stream (3-bit, group 32, fp32 out): 131 non-finite and 29 finite outputs match the float64 classes
+PASS repeat hip affine_dot2_stream (3-bit, group 32, fp32 out): five runs byte-identical (128 bytes), inputs and guards untouched, no overlap
+PASS shapes hip affine_dot2_stream (3-bit, group 32, fp32 out): 9 shapes within the float64 bound (worst 0.004 of the bound), 0 edges refused by the kernel
+PASS sums hip affine_dot2_stream (3-bit, group 32, fp32 out): exact sums at k 512, where fp16 sums would miss by 13048946x and bf16 by 134217728x
+PASS nonfinite hip affine_dot2_stream (3-bit, group 64, fp32 out): 131 non-finite and 29 finite outputs match the float64 classes
+PASS repeat hip affine_dot2_stream (3-bit, group 64, fp32 out): five runs byte-identical (128 bytes), inputs and guards untouched, no overlap
+PASS shapes hip affine_dot2_stream (3-bit, group 64, fp32 out): 9 shapes within the float64 bound (worst 0.008 of the bound), 0 edges refused by the kernel
+PASS sums hip affine_dot2_stream (3-bit, group 64, fp32 out): exact sums at k 512, where fp16 sums would miss by 24403223x and bf16 by 123893287x
+PASS nonfinite hip affine_dot2_stream (3-bit, group 128, fp32 out): 131 non-finite and 29 finite outputs match the float64 classes
+PASS repeat hip affine_dot2_stream (3-bit, group 128, fp32 out): five runs byte-identical (128 bytes), inputs and guards untouched, no overlap
+PASS shapes hip affine_dot2_stream (3-bit, group 128, fp32 out): 9 shapes within the float64 bound (worst 0.002 of the bound), 0 edges refused by the kernel
+PASS sums hip affine_dot2_stream (3-bit, group 128, fp32 out): exact sums at k 512, where fp16 sums would miss by 13421773x and bf16 by 148757982x
+PASS nonfinite hip affine_dot2_stream (4-bit, group 32, fp32 out): 131 non-finite and 29 finite outputs match the float64 classes
+PASS repeat hip affine_dot2_stream (4-bit, group 32, fp32 out): five runs byte-identical (128 bytes), inputs and guards untouched, no overlap
+PASS shapes hip affine_dot2_stream (4-bit, group 32, fp32 out): 9 shapes within the float64 bound (worst 0.007 of the bound), 0 edges refused by the kernel
+PASS sums hip affine_dot2_stream (4-bit, group 32, fp32 out): exact sums at k 512, where fp16 sums would miss by 19173961x and bf16 by 128432481x
+PASS nonfinite hip affine_dot2_stream (4-bit, group 64, fp32 out): 7427 non-finite and 1853 finite outputs match the float64 classes
+PASS repeat hip affine_dot2_stream (4-bit, group 64, fp32 out): five runs byte-identical (7424 bytes), inputs and guards untouched, no overlap
+PASS shapes hip affine_dot2_stream (4-bit, group 64, fp32 out): 12 shapes within the float64 bound (worst 0.012 of the bound), 0 edges refused by the kernel
+PASS sums hip affine_dot2_stream (4-bit, group 64, fp32 out): exact sums at k 2688, where fp16 sums would miss by 344374434x and bf16 by 1892097138x
+PASS nonfinite hip affine_dot2_stream (4-bit, group 128, fp32 out): 131 non-finite and 29 finite outputs match the float64 classes
+PASS repeat hip affine_dot2_stream (4-bit, group 128, fp32 out): five runs byte-identical (128 bytes), inputs and guards untouched, no overlap
+PASS shapes hip affine_dot2_stream (4-bit, group 128, fp32 out): 9 shapes within the float64 bound (worst 0.004 of the bound), 0 edges refused by the kernel
+PASS sums hip affine_dot2_stream (4-bit, group 128, fp32 out): exact sums at k 512, where fp16 sums would miss by 22730422x and bf16 by 150265500x
+PASS nonfinite hip affine_dot2_stream (5-bit, group 32, fp32 out): 131 non-finite and 29 finite outputs match the float64 classes
+PASS repeat hip affine_dot2_stream (5-bit, group 32, fp32 out): five runs byte-identical (128 bytes), inputs and guards untouched, no overlap
+PASS shapes hip affine_dot2_stream (5-bit, group 32, fp32 out): 9 shapes within the float64 bound (worst 0.007 of the bound), 0 edges refused by the kernel
+PASS sums hip affine_dot2_stream (5-bit, group 32, fp32 out): exact sums at k 512, where fp16 sums would miss by 20771791x and bf16 by 16777216x
+PASS nonfinite hip affine_dot2_stream (5-bit, group 64, fp32 out): 131 non-finite and 29 finite outputs match the float64 classes
+PASS repeat hip affine_dot2_stream (5-bit, group 64, fp32 out): five runs byte-identical (128 bytes), inputs and guards untouched, no overlap
+PASS shapes hip affine_dot2_stream (5-bit, group 64, fp32 out): 9 shapes within the float64 bound (worst 0.006 of the bound), 0 edges refused by the kernel
+PASS sums hip affine_dot2_stream (5-bit, group 64, fp32 out): exact sums at k 512, where fp16 sums would miss by 18454938x and bf16 by 98104060x
+PASS nonfinite hip affine_dot2_stream (5-bit, group 128, fp32 out): 131 non-finite and 29 finite outputs match the float64 classes
+PASS repeat hip affine_dot2_stream (5-bit, group 128, fp32 out): five runs byte-identical (128 bytes), inputs and guards untouched, no overlap
+PASS shapes hip affine_dot2_stream (5-bit, group 128, fp32 out): 9 shapes within the float64 bound (worst 0.002 of the bound), 0 edges refused by the kernel
+PASS sums hip affine_dot2_stream (5-bit, group 128, fp32 out): exact sums at k 512, where fp16 sums would miss by 21996794x and bf16 by 181753173x
+PASS nonfinite hip affine_dot2_stream (6-bit, group 32, fp32 out): 131 non-finite and 29 finite outputs match the float64 classes
+PASS repeat hip affine_dot2_stream (6-bit, group 32, fp32 out): five runs byte-identical (128 bytes), inputs and guards untouched, no overlap
+PASS shapes hip affine_dot2_stream (6-bit, group 32, fp32 out): 9 shapes within the float64 bound (worst 0.020 of the bound), 0 edges refused by the kernel
+PASS sums hip affine_dot2_stream (6-bit, group 32, fp32 out): exact sums at k 512, where fp16 sums would miss by 23216955x and bf16 by 152422792x
+PASS nonfinite hip affine_dot2_stream (6-bit, group 64, fp32 out): 131 non-finite and 29 finite outputs match the float64 classes
+PASS repeat hip affine_dot2_stream (6-bit, group 64, fp32 out): five runs byte-identical (128 bytes), inputs and guards untouched, no overlap
+PASS shapes hip affine_dot2_stream (6-bit, group 64, fp32 out): 9 shapes within the float64 bound (worst 0.006 of the bound), 0 edges refused by the kernel
+PASS sums hip affine_dot2_stream (6-bit, group 64, fp32 out): exact sums at k 512, where fp16 sums would miss by 24254019x and bf16 by 168799336x
+PASS nonfinite hip affine_dot2_stream (6-bit, group 128, fp32 out): 131 non-finite and 29 finite outputs match the float64 classes
+PASS repeat hip affine_dot2_stream (6-bit, group 128, fp32 out): five runs byte-identical (128 bytes), inputs and guards untouched, no overlap
+PASS shapes hip affine_dot2_stream (6-bit, group 128, fp32 out): 9 shapes within the float64 bound (worst 0.002 of the bound), 0 edges refused by the kernel
+PASS sums hip affine_dot2_stream (6-bit, group 128, fp32 out): exact sums at k 512, where fp16 sums would miss by 30482547x and bf16 by 16777216x
+PASS nonfinite hip affine_dot2_stream (8-bit, group 32, fp32 out): 131 non-finite and 29 finite outputs match the float64 classes
+PASS repeat hip affine_dot2_stream (8-bit, group 32, fp32 out): five runs byte-identical (128 bytes), inputs and guards untouched, no overlap
+PASS shapes hip affine_dot2_stream (8-bit, group 32, fp32 out): 9 shapes within the float64 bound (worst 0.026 of the bound), 0 edges refused by the kernel
+PASS sums hip affine_dot2_stream (8-bit, group 32, fp32 out): exact sums at k 512, where fp16 sums would miss by infx and bf16 by 16777216x
+PASS nonfinite hip affine_dot2_stream (8-bit, group 64, fp32 out): 131 non-finite and 29 finite outputs match the float64 classes
+PASS repeat hip affine_dot2_stream (8-bit, group 64, fp32 out): five runs byte-identical (128 bytes), inputs and guards untouched, no overlap
+PASS shapes hip affine_dot2_stream (8-bit, group 64, fp32 out): 9 shapes within the float64 bound (worst 0.007 of the bound), 0 edges refused by the kernel
+PASS sums hip affine_dot2_stream (8-bit, group 64, fp32 out): exact sums at k 512, where fp16 sums would miss by infx and bf16 by 77266498x
+PASS nonfinite hip affine_dot2_stream (8-bit, group 128, fp32 out): 131 non-finite and 29 finite outputs match the float64 classes
+PASS repeat hip affine_dot2_stream (8-bit, group 128, fp32 out): five runs byte-identical (128 bytes), inputs and guards untouched, no overlap
+PASS shapes hip affine_dot2_stream (8-bit, group 128, fp32 out): 9 shapes within the float64 bound (worst 0.003 of the bound), 0 edges refused by the kernel
+PASS sums hip affine_dot2_stream (8-bit, group 128, fp32 out): exact sums at k 512, where fp16 sums would miss by infx and bf16 by 59170376x
+PASS nonfinite hip affine_dot2_stream_relu2 (4-bit, bf16): the stated rule holds: the unfused bytes and every float64 output class
+PASS repeat hip affine_dot2_stream_relu2 (4-bit, bf16): five runs byte-identical (3712 bytes), inputs and guards untouched, no overlap
+PASS shapes hip affine_dot2_stream_relu2 (4-bit, bf16): 3 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip affine_dot2_stream_relu2 (4-bit, bf16): exact sums at k 2688, where fp16 sums would miss by 85x and bf16 by 1235148x
+PASS nonfinite hip tf_plan_kv_write_act (bf16): 128518 non-finite and 2554 finite outputs match the float64 classes
+PASS repeat hip tf_plan_kv_write_act (bf16): five runs byte-identical (262144 bytes), inputs and guards untouched, no overlap
+PASS shapes hip tf_plan_kv_write_act (bf16): 6 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums hip tf_plan_kv_write_act (bf16): declares none sums
+PASS nonfinite hip tf_argmax_part and tf_argmax_join (bf16): the stated rule holds: torch's argmax order: a NaN ahead of every value, then the larger value, then the lower index
+PASS repeat hip tf_argmax_part and tf_argmax_join (bf16): five runs byte-identical (4 bytes), inputs and guards untouched, no overlap
+PASS shapes hip tf_argmax_part and tf_argmax_join (bf16): 7 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums hip tf_argmax_part and tf_argmax_join (bf16): declares none sums
+PASS nonfinite hip affine_dot2_stream_relu2_pair (4-bit, bf16): the stated rule holds: the separate launches' bytes and every float64 output class
+PASS repeat hip affine_dot2_stream_relu2_pair (4-bit, bf16): five runs byte-identical (29696 bytes), inputs and guards untouched, no overlap
+PASS shapes hip affine_dot2_stream_relu2_pair (4-bit, bf16): 2 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip affine_dot2_stream_relu2_pair (4-bit, bf16): exact sums at k 2688, where fp16 sums would miss by 85x and bf16 by 1586504x
+PASS nonfinite hip affine_wmma_dense<320> (4-bit, group 32, fp32 out): 40972 non-finite and 40948 finite outputs match the float64 classes
+PASS repeat hip affine_wmma_dense<320> (4-bit, group 32, fp32 out): five runs byte-identical (2621440 bytes), inputs and guards untouched, no overlap
+PASS shapes hip affine_wmma_dense<320> (4-bit, group 32, fp32 out): 7 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip affine_wmma_dense<320> (4-bit, group 32, fp32 out): exact sums at k 320, where fp16 sums would miss by 17576131x and bf16 by 125829120x
+PASS nonfinite hip affine_wmma_dense<320> (4-bit, group 32, bf16 out): 40972 non-finite and 40948 finite outputs match the float64 classes
+PASS repeat hip affine_wmma_dense<320> (4-bit, group 32, bf16 out): five runs byte-identical (1310720 bytes), inputs and guards untouched, no overlap
+PASS shapes hip affine_wmma_dense<320> (4-bit, group 32, bf16 out): 7 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip affine_wmma_dense<320> (4-bit, group 32, bf16 out): exact sums at k 320, where fp16 sums would miss by 256x and bf16 by 1772x
+PASS nonfinite hip affine_wmma_dense<2560> (4-bit, group 32, fp32 out): 2572 non-finite and 2548 finite outputs match the float64 classes
+PASS repeat hip affine_wmma_dense<2560> (4-bit, group 32, fp32 out): five runs byte-identical (163840 bytes), inputs and guards untouched, no overlap
+PASS shapes hip affine_wmma_dense<2560> (4-bit, group 32, fp32 out): 7 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip affine_wmma_dense<2560> (4-bit, group 32, fp32 out): exact sums at k 2560, where fp16 sums would miss by 418311919x and bf16 by 2065631170x
+PASS nonfinite hip affine_wmma_dense<2560> (4-bit, group 32, bf16 out): 2572 non-finite and 2548 finite outputs match the float64 classes
+PASS repeat hip affine_wmma_dense<2560> (4-bit, group 32, bf16 out): five runs byte-identical (81920 bytes), inputs and guards untouched, no overlap
+PASS shapes hip affine_wmma_dense<2560> (4-bit, group 32, bf16 out): 7 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip affine_wmma_dense<2560> (4-bit, group 32, bf16 out): exact sums at k 2560, where fp16 sums would miss by 3950x and bf16 by 28416x
+PASS nonfinite hip affine_wmma_dense<6144> (4-bit, group 32, fp32 out): 10252 non-finite and 10228 finite outputs match the float64 classes
+PASS repeat hip affine_wmma_dense<6144> (4-bit, group 32, fp32 out): five runs byte-identical (655360 bytes), inputs and guards untouched, no overlap
+PASS shapes hip affine_wmma_dense<6144> (4-bit, group 32, fp32 out): 7 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip affine_wmma_dense<6144> (4-bit, group 32, fp32 out): exact sums at k 6144, where fp16 sums would miss by 696899742x and bf16 by 4783480350x
+PASS nonfinite hip affine_wmma_dense<6144> (4-bit, group 32, bf16 out): 10252 non-finite and 10228 finite outputs match the float64 classes
+PASS repeat hip affine_wmma_dense<6144> (4-bit, group 32, bf16 out): five runs byte-identical (327680 bytes), inputs and guards untouched, no overlap
+PASS shapes hip affine_wmma_dense<6144> (4-bit, group 32, bf16 out): 7 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip affine_wmma_dense<6144> (4-bit, group 32, bf16 out): exact sums at k 6144, where fp16 sums would miss by 10320x and bf16 by 77416x
+PASS nonfinite hip affine_wmma_dense<10240> (4-bit, group 32, fp32 out): 1308 non-finite and 1284 finite outputs match the float64 classes
+PASS repeat hip affine_wmma_dense<10240> (4-bit, group 32, fp32 out): five runs byte-identical (82944 bytes), inputs and guards untouched, no overlap
+PASS shapes hip affine_wmma_dense<10240> (4-bit, group 32, fp32 out): 8 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip affine_wmma_dense<10240> (4-bit, group 32, fp32 out): exact sums at k 10240, where fp16 sums would miss by 429496730x and bf16 by 16777216x
+PASS nonfinite hip affine_wmma_dense<10240> (4-bit, group 32, bf16 out): 1308 non-finite and 1284 finite outputs match the float64 classes
+PASS repeat hip affine_wmma_dense<10240> (4-bit, group 32, bf16 out): five runs byte-identical (41472 bytes), inputs and guards untouched, no overlap
+PASS shapes hip affine_wmma_dense<10240> (4-bit, group 32, bf16 out): 8 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip affine_wmma_dense<10240> (4-bit, group 32, bf16 out): exact sums at k 10240, where fp16 sums would miss by 6434x and bf16 by 47034x
+PASS nonfinite hip affine_wmma_moe_gu<4> (Flash Next's expert gate and up, silu(g) u, bf16 out): 5120 non-finite and 5120 finite outputs match the float64 classes
+PASS repeat hip affine_wmma_moe_gu<4> (Flash Next's expert gate and up, silu(g) u, bf16 out): five runs byte-identical (163840 bytes), inputs and guards untouched, no overlap
+PASS shapes hip affine_wmma_moe_gu<4> (Flash Next's expert gate and up, silu(g) u, bf16 out): 5 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip affine_wmma_moe_gu<4> (Flash Next's expert gate and up, silu(g) u, bf16 out): exact sums at k 2560, where fp16 sums would miss by 152142465291167150000000000x and bf16 by 256x
+PASS nonfinite hip affine_wmma_moe_down<4> (Flash Next's expert down, fp32 out): 10240 non-finite and 30720 finite outputs match the float64 classes
+PASS repeat hip affine_wmma_moe_down<4> (Flash Next's expert down, fp32 out): five runs byte-identical (1310720 bytes), inputs and guards untouched, no overlap
+PASS shapes hip affine_wmma_moe_down<4> (Flash Next's expert down, fp32 out): 5 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip affine_wmma_moe_down<4> (Flash Next's expert down, fp32 out): exact sums at k 640, where fp16 sums would miss by 49344753x and bf16 by 359032422x
+PASS nonfinite hip tf_route_count, tf_route_scan and tf_route_scatter: the stated rule holds: members: the pairs stably sorted by expert; items: each expert's pairs in tiles, experts in order, then dead items, as tf_moe_route cuts them
+PASS repeat hip tf_route_count, tf_route_scan and tf_route_scatter: five runs byte-identical (10028 bytes), inputs and guards untouched, no overlap
+PASS shapes hip tf_route_count, tf_route_scan and tf_route_scatter: 7 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums hip tf_route_count, tf_route_scan and tf_route_scatter: declares none sums
+FAIL nonfinite hip tf_select_rows: row 0 slot 0 holds expert 7, the rule gives 114
+KNOWN nonfinite hip tf_select_rows: select_body (upstream): a NaN shares rank 0 with the top number (slot 0 races) and a row with fewer than k numbers leaves slots unwritten; bytes kept equal to upstream's
+PASS repeat hip tf_select_rows: five runs byte-identical (88 bytes), inputs and guards untouched, no overlap
+PASS shapes hip tf_select_rows: 7 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums hip tf_select_rows: declares none sums
+FAIL nonfinite hip tf_router_select_bf16: row 0 slot 0 holds expert 3, the rule gives 1
+KNOWN nonfinite hip tf_router_select_bf16: select_body (upstream): a NaN shares rank 0 with the top number (slot 0 races) and a row with fewer than k numbers leaves slots unwritten; bytes kept equal to upstream's
+PASS repeat hip tf_router_select_bf16: five runs byte-identical (4560 bytes), inputs and guards untouched, no overlap
+PASS shapes hip tf_router_select_bf16: 6 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip tf_router_select_bf16: exact sums at k 2560, where fp16 sums would miss by 317206433x and bf16 by 1581350150x
+PASS nonfinite hip tf_topk_part and tf_topk_join (bf16): the stated rule holds: each row's ks[r] largest by a 16-bit key of the value's bits (-0 equal to +0, a positive NaN above +Inf, a negative NaN below -Inf), ties to the lower id, as ids and the values' bits; no slot past ks[r] written
+PASS repeat hip tf_topk_part and tf_topk_join (bf16): five runs byte-identical (384 bytes), inputs and guards untouched, no overlap
+PASS shapes hip tf_topk_part and tf_topk_join (bf16): 5 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums hip tf_topk_part and tf_topk_join (bf16): declares none sums
+PASS nonfinite hip tf_moe_prefetch: the stated rule holds: no output: every buffer as prepared and every guard intact after each run; with no output it has no float class or bound, so gates 1 and 3 check this, and no sums, so gate 4 has none
+PASS repeat hip tf_moe_prefetch: five runs byte-identical (0 bytes), inputs and guards untouched, no overlap
+PASS shapes hip tf_moe_prefetch: 1 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums hip tf_moe_prefetch: declares none sums
+FAIL nonfinite hip flashnext tf_fn_idx_scores_quad (bf16 keys): 1658 of 8800 outputs differ in class; first at 0: finite where float64 gives nan
+KNOWN nonfinite hip flashnext tf_fn_idx_scores_quad (bf16 keys): relu is fmaxf(x, 0): a NaN head dot scores 0 where float64 keeps the NaN
+PASS repeat hip flashnext tf_fn_idx_scores_quad (bf16 keys): five runs byte-identical (140800 bytes), inputs and guards untouched, no overlap
+PASS shapes hip flashnext tf_fn_idx_scores_quad (bf16 keys): 12 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip flashnext tf_fn_idx_scores_quad (bf16 keys): exact sums at k 128, where fp16 sums would miss by 269573x and bf16 by 2219692x
+FAIL nonfinite hip flashnext tf_fn_idx_scores8 (bf16 keys): 1655 of 5500 outputs differ in class; first at 0: finite where float64 gives nan
+KNOWN nonfinite hip flashnext tf_fn_idx_scores8 (bf16 keys): relu is fmaxf(x, 0): a NaN head dot scores 0 where float64 keeps the NaN
+PASS repeat hip flashnext tf_fn_idx_scores8 (bf16 keys): five runs byte-identical (22000 bytes), inputs and guards untouched, no overlap
+PASS shapes hip flashnext tf_fn_idx_scores8 (bf16 keys): 13 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip flashnext tf_fn_idx_scores8 (bf16 keys): exact sums at k 128, where fp16 sums would miss by 281431x and bf16 by 2223085x
+PASS nonfinite hip flashnext tf_fn_qsa_prep (q and index q rows, bf16): 256 non-finite and 33024 finite outputs match the float64 classes
+PASS repeat hip flashnext tf_fn_qsa_prep (q and index q rows, bf16): five runs byte-identical (26624 bytes), inputs and guards untouched, no overlap
+PASS shapes hip flashnext tf_fn_qsa_prep (q and index q rows, bf16): 5 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip flashnext tf_fn_qsa_prep (q and index q rows, bf16): within its bound at k 256; fp16 sums would miss 126x, bf16 0.3x (the outputs pass two roundings to the activation kind: a bf16 sum of squares misses by a few of their ulps (fp16's overflows))
+PASS nonfinite hip flashnext tf_fn_qsa_prep (caches and pools, bf16): 9 non-finite and 1288183 finite outputs match the float64 classes
+PASS repeat hip flashnext tf_fn_qsa_prep (caches and pools, bf16): five runs byte-identical (2576384 bytes), inputs and guards untouched, no overlap
+PASS shapes hip flashnext tf_fn_qsa_prep (caches and pools, bf16): 5 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip flashnext tf_fn_qsa_prep (caches and pools, bf16): within its bound at k 256; fp16 sums would miss 126x, bf16 0.1x (the outputs pass two roundings to the activation kind: a bf16 sum of squares misses by a few of their ulps (fp16's overflows))
+PASS nonfinite hip tf_affine_dense_hcmix (hc up, 4-bit, K 320, the HC mix as its epilogue): the stated rule holds: the separate launches' bytes and every float64 output class
+PASS repeat hip tf_affine_dense_hcmix (hc up, 4-bit, K 320, the HC mix as its epilogue): five runs byte-identical (327680 bytes), inputs and guards untouched, no overlap
+PASS shapes hip tf_affine_dense_hcmix (hc up, 4-bit, K 320, the HC mix as its epilogue): 8 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip tf_affine_dense_hcmix (hc up, 4-bit, K 320, the HC mix as its epilogue): exact sums at k 320, where fp16 sums would miss by 195767622x and bf16 by 4114763975231118x
+PASS nonfinite hip tf_hc_gate_fill (tf_affine_dense_hcmix's 65,536 gates): the stated rule holds: every bf16 g: NaN for NaN, else float64's 1 / (1 + e^-g) rounded to bf16 within expf's 2^-20 (2^-126 below fp32's normals); and tf_fn_hc_mix's gate of g, bit for bit
+PASS repeat hip tf_hc_gate_fill (tf_affine_dense_hcmix's 65,536 gates): five runs byte-identical (131072 bytes), inputs and guards untouched, no overlap
+PASS shapes hip tf_hc_gate_fill (tf_affine_dense_hcmix's 65,536 gates): 1 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums hip tf_hc_gate_fill (tf_affine_dense_hcmix's 65,536 gates): declares none sums
+PASS nonfinite hip tf_fn_hc_mix8 (g fp32, bf16 x): the stated rule holds: the per-element kernel's bytes and every float64 output class
+PASS repeat hip tf_fn_hc_mix8 (g fp32, bf16 x): five runs byte-identical (5120 bytes), inputs and guards untouched, no overlap
+PASS shapes hip tf_fn_hc_mix8 (g fp32, bf16 x): 7 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip tf_fn_hc_mix8 (g fp32, bf16 x): exact sums at k 4, where fp16 sums would miss by infx and bf16 by 174224571863520500000000000000000000000000x
+PASS nonfinite hip tf_fn_hc_mix8 (g bf16, bf16 x): the stated rule holds: the per-element kernel's bytes and every float64 output class
+PASS repeat hip tf_fn_hc_mix8 (g bf16, bf16 x): five runs byte-identical (5120 bytes), inputs and guards untouched, no overlap
+PASS shapes hip tf_fn_hc_mix8 (g bf16, bf16 x): 7 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip tf_fn_hc_mix8 (g bf16, bf16 x): exact sums at k 4, where fp16 sums would miss by infx and bf16 by 174224571863520500000000000000000000000000x
+PASS nonfinite hip tf_fn_hc_norm_v (bf16, a branch added in place): the stated rule holds: the chain's bytes and every float64 output class
+PASS repeat hip tf_fn_hc_norm_v (bf16, a branch added in place): five runs byte-identical (40960 bytes), inputs and guards untouched, no overlap
+PASS shapes hip tf_fn_hc_norm_v (bf16, a branch added in place): 5 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip tf_fn_hc_norm_v (bf16, a branch added in place): within its bound at k 2560; fp16 sums would miss 256x, bf16 0.3x (a 16-bit output follows the sum of squares as ss^-1/2: a bf16 sum's error is a few output ulps)
+PASS nonfinite hip tf_fn_hc_norm_v (bf16, no branch): the stated rule holds: the chain's bytes and every float64 output class
+PASS repeat hip tf_fn_hc_norm_v (bf16, no branch): five runs byte-identical (20480 bytes), inputs and guards untouched, no overlap
+PASS shapes hip tf_fn_hc_norm_v (bf16, no branch): 5 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip tf_fn_hc_norm_v (bf16, no branch): within its bound at k 2560; fp16 sums would miss 256x, bf16 0.4x (a 16-bit output follows the sum of squares as ss^-1/2: a bf16 sum's error is a few output ulps)
+PASS nonfinite hip tf_fn_hc_norm_moe (bf16): the stated rule holds: the chain's bytes and every float64 output class
+PASS repeat hip tf_fn_hc_norm_moe (bf16): five runs byte-identical (40960 bytes), inputs and guards untouched, no overlap
+PASS shapes hip tf_fn_hc_norm_moe (bf16): 9 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip tf_fn_hc_norm_moe (bf16): within its bound at k 2560; fp16 sums would miss 256x, bf16 0.2x (a 16-bit output follows the sum of squares as ss^-1/2: a bf16 sum's error is a few output ulps)
+PASS nonfinite hip tf_fn_hc_norm_moe_v (bf16, a prompt's rows): the stated rule holds: the chain's bytes and every float64 output class
+PASS repeat hip tf_fn_hc_norm_moe_v (bf16, a prompt's rows): five runs byte-identical (40960 bytes), inputs and guards untouched, no overlap
+PASS shapes hip tf_fn_hc_norm_moe_v (bf16, a prompt's rows): 5 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip tf_fn_hc_norm_moe_v (bf16, a prompt's rows): within its bound at k 2560; fp16 sums would miss 256x, bf16 0.6x (a 16-bit output follows the sum of squares as ss^-1/2: a bf16 sum's error is a few output ulps)
+PASS nonfinite hip DeltaNet tf_gdn_prompt_128 (y): 1166 non-finite and 47986 finite outputs match the float64 classes
+PASS repeat hip DeltaNet tf_gdn_prompt_128 (y): five runs byte-identical (1572864 bytes), inputs and guards untouched, no overlap
+PASS shapes hip DeltaNet tf_gdn_prompt_128 (y): 7 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip DeltaNet tf_gdn_prompt_128 (y): exact sums at k 128, where fp16 sums would miss by infx and bf16 by 90637017916318400000000000000000x
+PASS nonfinite hip DeltaNet tf_gdn_prompt_128 (the state): 16640 non-finite and 769792 finite outputs match the float64 classes
+PASS repeat hip DeltaNet tf_gdn_prompt_128 (the state): five runs byte-identical (3145728 bytes), inputs and guards untouched, no overlap
+PASS shapes hip DeltaNet tf_gdn_prompt_128 (the state): 7 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip DeltaNet tf_gdn_prompt_128 (the state): exact sums at k 128, where fp16 sums would miss by infx and bf16 by 1708648260329309700000000000000000000000000000000000000000000000000x
+PASS nonfinite hip DeltaNet tf_gdn_prompt_prep (bf16 in): 777 non-finite and 112631 finite outputs match the float64 classes
+PASS repeat hip DeltaNet tf_gdn_prompt_prep (bf16 in): five runs byte-identical (1776640 bytes), inputs and guards untouched, no overlap
+PASS shapes hip DeltaNet tf_gdn_prompt_prep (bf16 in): 6 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip DeltaNet tf_gdn_prompt_prep (bf16 in): exact sums at k 128, where fp16 sums would miss by infx and bf16 by 24277617x
+PASS nonfinite hip DeltaNet tf_gdn_hold_128 (y): 776 non-finite and 29944 finite outputs match the float64 classes
+PASS repeat hip DeltaNet tf_gdn_hold_128 (y): five runs byte-identical (49152 bytes), inputs and guards untouched, no overlap
+PASS shapes hip DeltaNet tf_gdn_hold_128 (y): 4 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip DeltaNet tf_gdn_hold_128 (y): exact sums at k 128, where fp16 sums would miss by infx and bf16 by 249031044995062170000x
+PASS nonfinite hip DeltaNet tf_gdn_hold_16 (y): 104 non-finite and 3736 finite outputs match the float64 classes
+PASS repeat hip DeltaNet tf_gdn_hold_16 (y): five runs byte-identical (6144 bytes), inputs and guards untouched, no overlap
+PASS shapes hip DeltaNet tf_gdn_hold_16 (y): 4 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip DeltaNet tf_gdn_hold_16 (y): exact sums at k 16, where fp16 sums would miss by infx and bf16 by 3170534137652052000x
+PASS nonfinite hip DeltaNet tf_gdn_keep_128 (the states): 33280 non-finite and 1539584 finite outputs match the float64 classes
+PASS repeat hip DeltaNet tf_gdn_keep_128 (the states): five runs byte-identical (6291456 bytes), inputs and guards untouched, no overlap
+PASS shapes hip DeltaNet tf_gdn_keep_128 (the states): 3 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip DeltaNet tf_gdn_keep_128 (the states): exact sums at k 128, where fp16 sums would miss by infx and bf16 by 3346951400137926300000000000000000000000000000000000000000000000000x
+PASS nonfinite hip DeltaNet tf_gdn_keep_16 (the states): 576 non-finite and 24000 finite outputs match the float64 classes
+PASS repeat hip DeltaNet tf_gdn_keep_16 (the states): five runs byte-identical (98304 bytes), inputs and guards untouched, no overlap
+PASS shapes hip DeltaNet tf_gdn_keep_16 (the states): 3 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums hip DeltaNet tf_gdn_keep_16 (the states): exact sums at k 16, where fp16 sums would miss by infx and bf16 by 4616726528052754000000000000000000000000000000000000000000000000x
+PASS limits: 199 registered HIP launches against gfx1030/1100/1151/1201, 0 problems
+RED  limits control: past its bounds: red on every chip
+RED  limits control: 72 KiB of LDS: red on every chip
+PASS limits live gfx1151 threads a workgroup: the device says 1024, the table 1024
+PASS limits live gfx1151 LDS bytes a workgroup: the device says 65536, the table 65536
+PASS limits live gfx1151 wave size: the device says 32, the table 32
+PASS limits live swiglu stream work list 4-bit 4x2: 128 threads launched, the runtime allows 128; 163 VGPRs, 0 + 0 LDS bytes (recorded 163, 0)
+PASS limits live plain stream work list 4-bit 4x4: 128 threads launched, the runtime allows 128; 220 VGPRs, 0 + 0 LDS bytes (recorded 220, 0)
+PASS limits live RMS norm tf_rms_rows: 256 threads launched, the runtime allows 256; 42 VGPRs, 0 + 0 LDS bytes (recorded 42, 0)
+PASS limits live RMS norm rms_kernel<__half>: 256 threads launched, the runtime allows 256; 10 VGPRs, 32772 + 0 LDS bytes (recorded 10, 32772)
+PASS limits live RMS norm rms_kernel<hip_bfloat16>: 256 threads launched, the runtime allows 256; 10 VGPRs, 32772 + 0 LDS bytes (recorded 10, 32772)
+PASS limits live mamba tf_mamba_conv: 256 threads launched, the runtime allows 256; 26 VGPRs, 0 + 0 LDS bytes (recorded 26, 0)
+PASS limits live mamba tf_mamba_dt: 256 threads launched, the runtime allows 1024; 16 VGPRs, 0 + 0 LDS bytes (recorded 16, 0)
+PASS limits live mamba tf_mamba_scan: 128 threads launched, the runtime allows 128; 125 VGPRs, 20544 + 0 LDS bytes (recorded 125, 20544)
+PASS limits live mamba tf_mamba_gnorm: 128 threads launched, the runtime allows 128; 23 VGPRs, 16 + 0 LDS bytes (recorded 23, 16)
+PASS limits live nemotron tf_nemo_select: 32 threads launched, the runtime allows 32; 27 VGPRs, 8320 + 0 LDS bytes (recorded 27, 8320)
+PASS limits live nemotron tf_nemo_select_rank: 512 threads launched, the runtime allows 512; 27 VGPRs, 8320 + 0 LDS bytes (recorded 27, 8320)
+PASS limits live nemotron tf_nemo_relu2: 256 threads launched, the runtime allows 1024; 8 VGPRs, 0 + 0 LDS bytes (recorded 8, 0)
+PASS limits live nemotron tf_nemo_localize: 256 threads launched, the runtime allows 1024; 4 VGPRs, 0 + 0 LDS bytes (recorded 4, 0)
+PASS limits live nemotron tf_nemo_combine: 256 threads launched, the runtime allows 1024; 9 VGPRs, 0 + 0 LDS bytes (recorded 9, 0)
+PASS limits live planned walk tf_plan_score_f16: 128 threads launched, the runtime allows 128; 17 VGPRs, 0 + 8192 LDS bytes (recorded 17, 0)
+PASS limits live planned walk tf_plan_score_bf16: 128 threads launched, the runtime allows 128; 17 VGPRs, 0 + 8192 LDS bytes (recorded 17, 0)
+PASS limits live planned walk tf_softmax_stats: 256 threads launched, the runtime allows 1024; 9 VGPRs, 1024 + 0 LDS bytes (recorded 9, 1024)
+PASS limits live planned walk tf_plan_apply_f16: 256 threads launched, the runtime allows 256; 57 VGPRs, 8192 + 0 LDS bytes (recorded 57, 8192)
+PASS limits live planned walk tf_plan_apply_bf16: 256 threads launched, the runtime allows 256; 57 VGPRs, 8192 + 0 LDS bytes (recorded 57, 8192)
+PASS limits live planned walk tf_sum_partials: 256 threads launched, the runtime allows 1024; 5 VGPRs, 0 + 0 LDS bytes (recorded 5, 0)
+PASS limits live add rms tf_add_rms_f16: 1024 threads launched, the runtime allows 1024; 45 VGPRs, 32772 + 0 LDS bytes (recorded 45, 32772)
+PASS limits live add rms tf_add_rms_bf16: 1024 threads launched, the runtime allows 1024; 45 VGPRs, 32772 + 0 LDS bytes (recorded 45, 32772)
+PASS limits live mamba tf_mamba_conv_window: 256 threads launched, the runtime allows 256; 37 VGPRs, 0 + 0 LDS bytes (recorded 37, 0)
+PASS limits live mamba tf_mamba_scan_snap: 128 threads launched, the runtime allows 128; 135 VGPRs, 20544 + 0 LDS bytes (recorded 135, 20544)
+PASS limits live relu2 stream tile 4-bit 1x2: 128 threads launched, the runtime allows 128; 83 VGPRs, 0 + 0 LDS bytes (recorded 83, 0)
+PASS limits live relu2 stream tile 4-bit 1x4: 128 threads launched, the runtime allows 128; 121 VGPRs, 0 + 0 LDS bytes (recorded 121, 0)
+PASS limits live relu2 stream tile 4-bit 1x8: 128 threads launched, the runtime allows 128; 186 VGPRs, 0 + 0 LDS bytes (recorded 186, 0)
+PASS limits live relu2 stream tile 4-bit 2x2: 128 threads launched, the runtime allows 128; 110 VGPRs, 0 + 0 LDS bytes (recorded 110, 0)
+PASS limits live relu2 stream tile 4-bit 2x4: 128 threads launched, the runtime allows 128; 135 VGPRs, 0 + 0 LDS bytes (recorded 135, 0)
+PASS limits live relu2 stream tile 4-bit 2x8: 128 threads launched, the runtime allows 128; 248 VGPRs, 0 + 0 LDS bytes (recorded 248, 0)
+PASS limits live relu2 stream tile 4-bit 4x2: 128 threads launched, the runtime allows 128; 148 VGPRs, 0 + 0 LDS bytes (recorded 148, 0)
+PASS limits live relu2 stream tile 4-bit 4x4: 128 threads launched, the runtime allows 128; 181 VGPRs, 0 + 0 LDS bytes (recorded 181, 0)
+PASS limits live planned walk tf_plan_kv_write_act: 256 threads launched, the runtime allows 256; 20 VGPRs, 0 + 0 LDS bytes (recorded 20, 0)
+PASS limits live planned walk tf_plan_score_act_f16: 128 threads launched, the runtime allows 128; 17 VGPRs, 0 + 8192 LDS bytes (recorded 17, 0)
+PASS limits live planned walk tf_plan_score_act_bf16: 128 threads launched, the runtime allows 128; 17 VGPRs, 0 + 8192 LDS bytes (recorded 17, 0)
+PASS limits live planned walk tf_sum_partials_act: 256 threads launched, the runtime allows 1024; 6 VGPRs, 0 + 0 LDS bytes (recorded 6, 0)
+PASS limits live argmax tf_argmax_part: 256 threads launched, the runtime allows 256; 8 VGPRs, 2048 + 0 LDS bytes (recorded 8, 2048)
+PASS limits live top-k tf_topk_part: 1024 threads launched, the runtime allows 1024; 78 VGPRs, 1296 + 0 LDS bytes (recorded 78, 1296)
+PASS limits live top-k tf_topk_join: 1024 threads launched, the runtime allows 1024; 16 VGPRs, 33808 + 0 LDS bytes (recorded 16, 33808)
+PASS limits live argmax tf_argmax_join: 256 threads launched, the runtime allows 256; 10 VGPRs, 2048 + 0 LDS bytes (recorded 10, 2048)
+PASS limits live planned walk tf_plan_attend_f16: 1024 threads launched, the runtime allows 1024; 38 VGPRs, 50688 + 0 LDS bytes (recorded 38, 50688)
+PASS limits live planned walk tf_plan_attend_bf16: 1024 threads launched, the runtime allows 1024; 36 VGPRs, 50688 + 0 LDS bytes (recorded 36, 50688)
+PASS limits live MoE router (decode, fp32 rows) tf_router_decode_f16: 128 threads launched, the runtime allows 128; 90 VGPRs, 0 + 0 LDS bytes (recorded 90, 0)
+PASS limits live MoE router (decode, fp32 rows) tf_router_decode_bf16: 128 threads launched, the runtime allows 128; 91 VGPRs, 0 + 0 LDS bytes (recorded 91, 0)
+PASS limits live MoE router and pick in one launch (decode, bf16 rows) tf_router_select_f16: 128 threads launched, the runtime allows 128; 135 VGPRs, 5456 + 10240 LDS bytes (recorded 135, 5456)
+PASS limits live MoE router and pick in one launch (decode, bf16 rows) tf_router_select_bf16: 128 threads launched, the runtime allows 128; 135 VGPRs, 5456 + 10240 LDS bytes (recorded 135, 5456)
+PASS limits live MoE down codes read beside the gate and up (side stream) tf_moe_prefetch: 256 threads launched, the runtime allows 256; 11 VGPRs, 260 + 0 LDS bytes (recorded 11, 260)
+PASS limits live prompt expert gate+up tile 4-bit: 256 threads launched, the runtime allows 256; 225 VGPRs, 36352 + 0 LDS bytes (recorded 225, 36352)
+PASS limits live prompt expert down tile 4-bit: 256 threads launched, the runtime allows 256; 189 VGPRs, 32256 + 0 LDS bytes (recorded 189, 32256)
+PASS limits live prompt dense tile 4-bit K 320: 256 threads launched, the runtime allows 256; 208 VGPRs, 39936 + 0 LDS bytes (recorded 208, 39936)
+PASS limits live prompt dense tile 4-bit K 320 with the HC mix: 256 threads launched, the runtime allows 256; 215 VGPRs, 39936 + 0 LDS bytes (recorded 215, 39936)
+PASS limits live prompt dense tile 4-bit K 2560: 256 threads launched, the runtime allows 256; 208 VGPRs, 39936 + 0 LDS bytes (recorded 208, 39936)
+PASS limits live prompt dense tile 4-bit K 6144: 256 threads launched, the runtime allows 256; 208 VGPRs, 39936 + 0 LDS bytes (recorded 208, 39936)
+PASS limits live prompt dense tile 4-bit K 10240: 256 threads launched, the runtime allows 256; 246 VGPRs, 39936 + 0 LDS bytes (recorded 246, 39936)
+PASS limits live Flash Next QSA decode prep: 256 threads launched, the runtime allows 256; 34 VGPRs, 17440 + 0 LDS bytes (recorded 34, 17440)
+PASS limits live relu2 pair tile 4-bit 1x2: 128 threads launched, the runtime allows 128; 83 VGPRs, 0 + 0 LDS bytes (recorded 83, 0)
+PASS limits live relu2 pair tile 4-bit 1x4: 128 threads launched, the runtime allows 128; 121 VGPRs, 0 + 0 LDS bytes (recorded 121, 0)
+PASS limits live relu2 pair tile 4-bit 1x8: 128 threads launched, the runtime allows 128; 186 VGPRs, 0 + 0 LDS bytes (recorded 186, 0)
+PASS limits live relu2 pair tile 4-bit 2x2: 128 threads launched, the runtime allows 128; 109 VGPRs, 0 + 0 LDS bytes (recorded 109, 0)
+PASS limits live relu2 pair tile 4-bit 2x4: 128 threads launched, the runtime allows 128; 135 VGPRs, 0 + 0 LDS bytes (recorded 135, 0)
+PASS limits live relu2 pair tile 4-bit 2x8: 128 threads launched, the runtime allows 128; 248 VGPRs, 0 + 0 LDS bytes (recorded 248, 0)
+PASS limits live relu2 pair tile 4-bit 4x2: 128 threads launched, the runtime allows 128; 148 VGPRs, 0 + 0 LDS bytes (recorded 148, 0)
+PASS limits live relu2 pair tile 4-bit 4x4: 128 threads launched, the runtime allows 128; 181 VGPRs, 0 + 0 LDS bytes (recorded 181, 0)
+PASS limits live plain stream tile 2-bit 1x1: 128 threads launched, the runtime allows 128; 56 VGPRs, 0 + 0 LDS bytes (recorded 56, 0)
+PASS limits live plain stream tile 2-bit 1x2: 128 threads launched, the runtime allows 128; 73 VGPRs, 0 + 0 LDS bytes (recorded 73, 0)
+PASS limits live plain stream tile 2-bit 1x4: 128 threads launched, the runtime allows 128; 94 VGPRs, 0 + 0 LDS bytes (recorded 94, 0)
+PASS limits live plain stream tile 2-bit 1x8: 128 threads launched, the runtime allows 128; 154 VGPRs, 0 + 0 LDS bytes (recorded 154, 0)
+PASS limits live plain stream tile 2-bit 2x1: 128 threads launched, the runtime allows 128; 69 VGPRs, 0 + 0 LDS bytes (recorded 69, 0)
+PASS limits live plain stream tile 2-bit 2x2: 128 threads launched, the runtime allows 128; 108 VGPRs, 0 + 0 LDS bytes (recorded 108, 0)
+PASS limits live plain stream tile 2-bit 2x4: 128 threads launched, the runtime allows 128; 130 VGPRs, 0 + 0 LDS bytes (recorded 130, 0)
+PASS limits live plain stream tile 2-bit 2x8: 128 threads launched, the runtime allows 128; 175 VGPRs, 0 + 0 LDS bytes (recorded 175, 0)
+PASS limits live plain stream tile 2-bit 4x1: 128 threads launched, the runtime allows 128; 119 VGPRs, 0 + 0 LDS bytes (recorded 119, 0)
+PASS limits live plain stream tile 2-bit 4x2: 128 threads launched, the runtime allows 128; 147 VGPRs, 0 + 0 LDS bytes (recorded 147, 0)
+PASS limits live plain stream tile 2-bit 4x4: 128 threads launched, the runtime allows 128; 173 VGPRs, 0 + 0 LDS bytes (recorded 173, 0)
+PASS limits live plain stream tile 3-bit 1x1: 128 threads launched, the runtime allows 128; 58 VGPRs, 0 + 0 LDS bytes (recorded 58, 0)
+PASS limits live plain stream tile 3-bit 1x2: 128 threads launched, the runtime allows 128; 77 VGPRs, 0 + 0 LDS bytes (recorded 77, 0)
+PASS limits live plain stream tile 3-bit 1x4: 128 threads launched, the runtime allows 128; 97 VGPRs, 0 + 0 LDS bytes (recorded 97, 0)
+PASS limits live plain stream tile 3-bit 1x8: 128 threads launched, the runtime allows 128; 165 VGPRs, 0 + 0 LDS bytes (recorded 165, 0)
+PASS limits live plain stream tile 3-bit 2x1: 128 threads launched, the runtime allows 128; 96 VGPRs, 0 + 0 LDS bytes (recorded 96, 0)
+PASS limits live plain stream tile 3-bit 2x2: 128 threads launched, the runtime allows 128; 109 VGPRs, 0 + 0 LDS bytes (recorded 109, 0)
+PASS limits live plain stream tile 3-bit 2x4: 128 threads launched, the runtime allows 128; 133 VGPRs, 0 + 0 LDS bytes (recorded 133, 0)
+PASS limits live plain stream tile 3-bit 2x8: 128 threads launched, the runtime allows 128; 180 VGPRs, 0 + 0 LDS bytes (recorded 180, 0)
+PASS limits live plain stream tile 3-bit 4x1: 128 threads launched, the runtime allows 128; 132 VGPRs, 0 + 0 LDS bytes (recorded 132, 0)
+PASS limits live plain stream tile 3-bit 4x2: 128 threads launched, the runtime allows 128; 146 VGPRs, 0 + 0 LDS bytes (recorded 146, 0)
+PASS limits live plain stream tile 3-bit 4x4: 128 threads launched, the runtime allows 128; 174 VGPRs, 0 + 0 LDS bytes (recorded 174, 0)
+PASS limits live plain stream tile 4-bit 1x1: 128 threads launched, the runtime allows 128; 60 VGPRs, 0 + 0 LDS bytes (recorded 60, 0)
+PASS limits live plain stream tile 4-bit 1x2: 128 threads launched, the runtime allows 128; 83 VGPRs, 0 + 0 LDS bytes (recorded 83, 0)
+PASS limits live plain stream tile 4-bit 1x4: 128 threads launched, the runtime allows 128; 121 VGPRs, 0 + 0 LDS bytes (recorded 121, 0)
+PASS limits live plain stream tile 4-bit 1x8: 128 threads launched, the runtime allows 128; 186 VGPRs, 0 + 0 LDS bytes (recorded 186, 0)
+PASS limits live plain stream tile 4-bit 2x1: 128 threads launched, the runtime allows 128; 98 VGPRs, 0 + 0 LDS bytes (recorded 98, 0)
+PASS limits live plain stream tile 4-bit 2x2: 128 threads launched, the runtime allows 128; 110 VGPRs, 0 + 0 LDS bytes (recorded 110, 0)
+PASS limits live plain stream tile 4-bit 2x4: 128 threads launched, the runtime allows 128; 135 VGPRs, 0 + 0 LDS bytes (recorded 135, 0)
+PASS limits live plain stream tile 4-bit 2x8: 128 threads launched, the runtime allows 128; 188 VGPRs, 0 + 0 LDS bytes (recorded 188, 0)
+PASS limits live plain stream tile 4-bit 4x1: 128 threads launched, the runtime allows 128; 134 VGPRs, 0 + 0 LDS bytes (recorded 134, 0)
+PASS limits live plain stream tile 4-bit 4x2: 128 threads launched, the runtime allows 128; 148 VGPRs, 0 + 0 LDS bytes (recorded 148, 0)
+PASS limits live plain stream tile 4-bit 4x4: 128 threads launched, the runtime allows 128; 181 VGPRs, 0 + 0 LDS bytes (recorded 181, 0)
+PASS limits live plain stream tile 5-bit 1x1: 128 threads launched, the runtime allows 128; 62 VGPRs, 0 + 0 LDS bytes (recorded 62, 0)
+PASS limits live plain stream tile 5-bit 1x2: 128 threads launched, the runtime allows 128; 80 VGPRs, 0 + 0 LDS bytes (recorded 80, 0)
+PASS limits live plain stream tile 5-bit 1x4: 128 threads launched, the runtime allows 128; 113 VGPRs, 0 + 0 LDS bytes (recorded 113, 0)
+PASS limits live plain stream tile 5-bit 1x8: 128 threads launched, the runtime allows 128; 197 VGPRs, 0 + 0 LDS bytes (recorded 197, 0)
+PASS limits live plain stream tile 5-bit 2x1: 128 threads launched, the runtime allows 128; 96 VGPRs, 0 + 0 LDS bytes (recorded 96, 0)
+PASS limits live plain stream tile 5-bit 2x2: 128 threads launched, the runtime allows 128; 113 VGPRs, 0 + 0 LDS bytes (recorded 113, 0)
+PASS limits live plain stream tile 5-bit 2x4: 128 threads launched, the runtime allows 128; 141 VGPRs, 0 + 0 LDS bytes (recorded 141, 0)
+PASS limits live plain stream tile 5-bit 2x8: 128 threads launched, the runtime allows 128; 194 VGPRs, 0 + 0 LDS bytes (recorded 194, 0)
+PASS limits live plain stream tile 5-bit 4x1: 128 threads launched, the runtime allows 128; 132 VGPRs, 0 + 0 LDS bytes (recorded 132, 0)
+PASS limits live plain stream tile 5-bit 4x2: 128 threads launched, the runtime allows 128; 149 VGPRs, 0 + 0 LDS bytes (recorded 149, 0)
+PASS limits live plain stream tile 5-bit 4x4: 128 threads launched, the runtime allows 128; 180 VGPRs, 0 + 0 LDS bytes (recorded 180, 0)
+PASS limits live plain stream tile 6-bit 1x1: 128 threads launched, the runtime allows 128; 64 VGPRs, 0 + 0 LDS bytes (recorded 64, 0)
+PASS limits live plain stream tile 6-bit 1x2: 128 threads launched, the runtime allows 128; 85 VGPRs, 0 + 0 LDS bytes (recorded 85, 0)
+PASS limits live plain stream tile 6-bit 1x4: 128 threads launched, the runtime allows 128; 121 VGPRs, 0 + 0 LDS bytes (recorded 121, 0)
+PASS limits live plain stream tile 6-bit 1x8: 128 threads launched, the runtime allows 128; 213 VGPRs, 0 + 0 LDS bytes (recorded 213, 0)
+PASS limits live plain stream tile 6-bit 2x1: 128 threads launched, the runtime allows 128; 98 VGPRs, 0 + 0 LDS bytes (recorded 98, 0)
+PASS limits live plain stream tile 6-bit 2x2: 128 threads launched, the runtime allows 128; 113 VGPRs, 0 + 0 LDS bytes (recorded 113, 0)
+PASS limits live plain stream tile 6-bit 2x4: 128 threads launched, the runtime allows 128; 143 VGPRs, 0 + 0 LDS bytes (recorded 143, 0)
+PASS limits live plain stream tile 6-bit 2x8: 128 threads launched, the runtime allows 128; 200 VGPRs, 0 + 0 LDS bytes (recorded 200, 0)
+PASS limits live plain stream tile 6-bit 4x1: 128 threads launched, the runtime allows 128; 134 VGPRs, 0 + 0 LDS bytes (recorded 134, 0)
+PASS limits live plain stream tile 6-bit 4x2: 128 threads launched, the runtime allows 128; 148 VGPRs, 0 + 0 LDS bytes (recorded 148, 0)
+PASS limits live plain stream tile 6-bit 4x4: 128 threads launched, the runtime allows 128; 182 VGPRs, 0 + 0 LDS bytes (recorded 182, 0)
+PASS limits live plain stream tile 8-bit 1x1: 128 threads launched, the runtime allows 128; 68 VGPRs, 0 + 0 LDS bytes (recorded 68, 0)
+PASS limits live plain stream tile 8-bit 1x2: 128 threads launched, the runtime allows 128; 95 VGPRs, 0 + 0 LDS bytes (recorded 95, 0)
+PASS limits live plain stream tile 8-bit 1x4: 128 threads launched, the runtime allows 128; 137 VGPRs, 0 + 0 LDS bytes (recorded 137, 0)
+PASS limits live plain stream tile 8-bit 1x8: 128 threads launched, the runtime allows 128; 256 VGPRs, 0 + 0 LDS bytes (recorded 256, 0)
+PASS limits live plain stream tile 8-bit 2x1: 128 threads launched, the runtime allows 128; 96 VGPRs, 0 + 0 LDS bytes (recorded 96, 0)
+PASS limits live plain stream tile 8-bit 2x2: 128 threads launched, the runtime allows 128; 105 VGPRs, 0 + 0 LDS bytes (recorded 105, 0)
+PASS limits live plain stream tile 8-bit 2x4: 128 threads launched, the runtime allows 128; 141 VGPRs, 0 + 0 LDS bytes (recorded 141, 0)
+PASS limits live plain stream tile 8-bit 2x8: 128 threads launched, the runtime allows 128; 205 VGPRs, 0 + 0 LDS bytes (recorded 205, 0)
+PASS limits live plain stream tile 8-bit 4x1: 128 threads launched, the runtime allows 128; 132 VGPRs, 0 + 0 LDS bytes (recorded 132, 0)
+PASS limits live plain stream tile 8-bit 4x2: 128 threads launched, the runtime allows 128; 155 VGPRs, 0 + 0 LDS bytes (recorded 155, 0)
+PASS limits live plain stream tile 8-bit 4x4: 128 threads launched, the runtime allows 128; 195 VGPRs, 0 + 0 LDS bytes (recorded 195, 0)
+PASS limits live swiglu stream tile 2-bit 1x2: 128 threads launched, the runtime allows 128; 72 VGPRs, 0 + 0 LDS bytes (recorded 72, 0)
+PASS limits live swiglu stream tile 2-bit 1x4: 128 threads launched, the runtime allows 128; 91 VGPRs, 0 + 0 LDS bytes (recorded 91, 0)
+PASS limits live swiglu stream tile 2-bit 1x8: 128 threads launched, the runtime allows 128; 158 VGPRs, 0 + 0 LDS bytes (recorded 158, 0)
+PASS limits live swiglu stream tile 2-bit 2x2: 128 threads launched, the runtime allows 128; 105 VGPRs, 0 + 0 LDS bytes (recorded 105, 0)
+PASS limits live swiglu stream tile 2-bit 2x4: 128 threads launched, the runtime allows 128; 128 VGPRs, 0 + 0 LDS bytes (recorded 128, 0)
+PASS limits live swiglu stream tile 2-bit 2x8: 128 threads launched, the runtime allows 128; 171 VGPRs, 0 + 0 LDS bytes (recorded 171, 0)
+PASS limits live swiglu stream tile 2-bit 4x2: 128 threads launched, the runtime allows 128; 144 VGPRs, 0 + 0 LDS bytes (recorded 144, 0)
+PASS limits live swiglu stream tile 2-bit 4x4: 128 threads launched, the runtime allows 128; 171 VGPRs, 0 + 0 LDS bytes (recorded 171, 0)
+PASS limits live swiglu stream tile 3-bit 1x2: 128 threads launched, the runtime allows 128; 74 VGPRs, 0 + 0 LDS bytes (recorded 74, 0)
+PASS limits live swiglu stream tile 3-bit 1x4: 128 threads launched, the runtime allows 128; 96 VGPRs, 0 + 0 LDS bytes (recorded 96, 0)
+PASS limits live swiglu stream tile 3-bit 1x8: 128 threads launched, the runtime allows 128; 169 VGPRs, 0 + 0 LDS bytes (recorded 169, 0)
+PASS limits live swiglu stream tile 3-bit 2x2: 128 threads launched, the runtime allows 128; 109 VGPRs, 0 + 0 LDS bytes (recorded 109, 0)
+PASS limits live swiglu stream tile 3-bit 2x4: 128 threads launched, the runtime allows 128; 94 VGPRs, 0 + 0 LDS bytes (recorded 94, 0)
+PASS limits live swiglu stream tile 3-bit 2x8: 128 threads launched, the runtime allows 128; 176 VGPRs, 0 + 0 LDS bytes (recorded 176, 0)
+PASS limits live swiglu stream tile 3-bit 4x2: 128 threads launched, the runtime allows 128; 144 VGPRs, 0 + 0 LDS bytes (recorded 144, 0)
+PASS limits live swiglu stream tile 3-bit 4x4: 128 threads launched, the runtime allows 128; 138 VGPRs, 0 + 0 LDS bytes (recorded 138, 0)
+PASS limits live swiglu stream tile 4-bit 1x2: 128 threads launched, the runtime allows 128; 75 VGPRs, 0 + 0 LDS bytes (recorded 75, 0)
+PASS limits live swiglu stream tile 4-bit 1x4: 128 threads launched, the runtime allows 128; 119 VGPRs, 0 + 0 LDS bytes (recorded 119, 0)
+PASS limits live swiglu stream tile 4-bit 1x8: 128 threads launched, the runtime allows 128; 190 VGPRs, 0 + 0 LDS bytes (recorded 190, 0)
+PASS limits live swiglu stream tile 4-bit 2x2: 128 threads launched, the runtime allows 128; 106 VGPRs, 0 + 0 LDS bytes (recorded 106, 0)
+PASS limits live swiglu stream tile 4-bit 2x4: 128 threads launched, the runtime allows 128; 134 VGPRs, 0 + 0 LDS bytes (recorded 134, 0)
+PASS limits live swiglu stream tile 4-bit 2x8: 128 threads launched, the runtime allows 128; 184 VGPRs, 0 + 0 LDS bytes (recorded 184, 0)
+PASS limits live swiglu stream tile 4-bit 4x2: 128 threads launched, the runtime allows 128; 145 VGPRs, 0 + 0 LDS bytes (recorded 145, 0)
+PASS limits live swiglu stream tile 4-bit 4x4: 128 threads launched, the runtime allows 128; 179 VGPRs, 0 + 0 LDS bytes (recorded 179, 0)
+PASS limits live swiglu stream tile 5-bit 1x2: 128 threads launched, the runtime allows 128; 76 VGPRs, 0 + 0 LDS bytes (recorded 76, 0)
+PASS limits live swiglu stream tile 5-bit 1x4: 128 threads launched, the runtime allows 128; 112 VGPRs, 0 + 0 LDS bytes (recorded 112, 0)
+PASS limits live swiglu stream tile 5-bit 1x8: 128 threads launched, the runtime allows 128; 201 VGPRs, 0 + 0 LDS bytes (recorded 201, 0)
+PASS limits live swiglu stream tile 5-bit 2x2: 128 threads launched, the runtime allows 128; 75 VGPRs, 0 + 0 LDS bytes (recorded 75, 0)
+PASS limits live swiglu stream tile 5-bit 2x4: 128 threads launched, the runtime allows 128; 104 VGPRs, 0 + 0 LDS bytes (recorded 104, 0)
+PASS limits live swiglu stream tile 5-bit 2x8: 128 threads launched, the runtime allows 128; 190 VGPRs, 0 + 0 LDS bytes (recorded 190, 0)
+PASS limits live swiglu stream tile 5-bit 4x2: 128 threads launched, the runtime allows 128; 113 VGPRs, 0 + 0 LDS bytes (recorded 113, 0)
+PASS limits live swiglu stream tile 5-bit 4x4: 128 threads launched, the runtime allows 128; 143 VGPRs, 0 + 0 LDS bytes (recorded 143, 0)
+PASS limits live swiglu stream tile 6-bit 1x2: 128 threads launched, the runtime allows 128; 82 VGPRs, 0 + 0 LDS bytes (recorded 82, 0)
+PASS limits live swiglu stream tile 6-bit 1x4: 128 threads launched, the runtime allows 128; 121 VGPRs, 0 + 0 LDS bytes (recorded 121, 0)
+PASS limits live swiglu stream tile 6-bit 1x8: 128 threads launched, the runtime allows 128; 217 VGPRs, 0 + 0 LDS bytes (recorded 217, 0)
+PASS limits live swiglu stream tile 6-bit 2x2: 128 threads launched, the runtime allows 128; 108 VGPRs, 0 + 0 LDS bytes (recorded 108, 0)
+PASS limits live swiglu stream tile 6-bit 2x4: 128 threads launched, the runtime allows 128; 141 VGPRs, 0 + 0 LDS bytes (recorded 141, 0)
+PASS limits live swiglu stream tile 6-bit 2x8: 128 threads launched, the runtime allows 128; 196 VGPRs, 0 + 0 LDS bytes (recorded 196, 0)
+PASS limits live swiglu stream tile 6-bit 4x2: 128 threads launched, the runtime allows 128; 145 VGPRs, 0 + 0 LDS bytes (recorded 145, 0)
+PASS limits live swiglu stream tile 6-bit 4x4: 128 threads launched, the runtime allows 128; 180 VGPRs, 0 + 0 LDS bytes (recorded 180, 0)
+PASS limits live swiglu stream tile 8-bit 1x2: 128 threads launched, the runtime allows 128; 94 VGPRs, 0 + 0 LDS bytes (recorded 94, 0)
+PASS limits live swiglu stream tile 8-bit 1x4: 128 threads launched, the runtime allows 128; 137 VGPRs, 0 + 0 LDS bytes (recorded 137, 0)
+PASS limits live swiglu stream tile 8-bit 1x8: 128 threads launched, the runtime allows 128; 235 VGPRs, 0 + 0 LDS bytes (recorded 235, 0)
+PASS limits live swiglu stream tile 8-bit 2x2: 128 threads launched, the runtime allows 128; 102 VGPRs, 0 + 0 LDS bytes (recorded 102, 0)
+PASS limits live swiglu stream tile 8-bit 2x4: 128 threads launched, the runtime allows 128; 139 VGPRs, 0 + 0 LDS bytes (recorded 139, 0)
+PASS limits live swiglu stream tile 8-bit 2x8: 128 threads launched, the runtime allows 128; 201 VGPRs, 0 + 0 LDS bytes (recorded 201, 0)
+PASS limits live swiglu stream tile 8-bit 4x2: 128 threads launched, the runtime allows 128; 152 VGPRs, 0 + 0 LDS bytes (recorded 152, 0)
+PASS limits live swiglu stream tile 8-bit 4x4: 128 threads launched, the runtime allows 128; 193 VGPRs, 0 + 0 LDS bytes (recorded 193, 0)
+PASS limits live held stream tile 4-bit 4x1: 128 threads launched, the runtime allows 128; 99 VGPRs, 0 + 0 LDS bytes (recorded 99, 0)
+PASS limits live held stream tile 4-bit 4x2: 128 threads launched, the runtime allows 128; 128 VGPRs, 0 + 0 LDS bytes (recorded 128, 0)
+PASS limits live held stream tile 4-bit 4x4: 128 threads launched, the runtime allows 128; 180 VGPRs, 0 + 0 LDS bytes (recorded 180, 0)
+PASS limits live held stream tile 4-bit 8x2: 128 threads launched, the runtime allows 128; 200 VGPRs, 0 + 0 LDS bytes (recorded 200, 0)
+PASS limits live held stream tile 4-bit 8x4: 128 threads launched, the runtime allows 128; 256 VGPRs, 0 + 0 LDS bytes (recorded 256, 0)
+PASS limits live MoE plan count tf_route_count: 256 threads launched, the runtime allows 256; 7 VGPRs, 4096 + 0 LDS bytes (recorded 7, 4096)
+PASS limits live MoE plan scan tf_route_scan: 1024 threads launched, the runtime allows 1024; 10 VGPRs, 20480 + 0 LDS bytes (recorded 10, 20480)
+PASS limits live MoE plan scatter tf_route_scatter: 512 threads launched, the runtime allows 512; 14 VGPRs, 2048 + 0 LDS bytes (recorded 14, 2048)
+PASS limits live MoE prompt picks a wave a row tf_select_rows: 128 threads launched, the runtime allows 128; 135 VGPRs, 5428 + 0 LDS bytes (recorded 135, 5428)
+PASS limits live Flash Next index scores, 4 lanes a score: 128 threads launched, the runtime allows 128; 184 VGPRs, 32772 + 0 LDS bytes (recorded 184, 32772)
+PASS limits live Flash Next index scores, 8 rows a wave: 256 threads launched, the runtime allows 256; 93 VGPRs, 0 + 0 LDS bytes (recorded 93, 0)
+PASS limits live Flash Next HC gate table tf_hc_gate_fill: 256 threads launched, the runtime allows 256; 7 VGPRs, 0 + 0 LDS bytes (recorded 7, 0)
+PASS limits live Flash Next HC mix tf_fn_hc_mix8: 256 threads launched, the runtime allows 1024; 68 VGPRs, 0 + 0 LDS bytes (recorded 68, 0)
+PASS limits live Flash Next HC norm tf_fn_hc_norm_v: 128 threads launched, the runtime allows 128; 77 VGPRs, 128 + 0 LDS bytes (recorded 77, 128)
+PASS limits live Flash Next HC norm with the MoE combine tf_fn_hc_norm_moe: 1024 threads launched, the runtime allows 1024; 19 VGPRs, 128 + 0 LDS bytes (recorded 19, 128)
+PASS limits live Flash Next HC norm with the MoE combine, a block a row tf_fn_hc_norm_moe_v: 512 threads launched, the runtime allows 512; 59 VGPRs, 10752 + 0 LDS bytes (recorded 59, 10752)
+PASS limits live DeltaNet tf_gdn_prompt_128: 128 threads launched, the runtime allows 128; 185 VGPRs, 20608 + 0 LDS bytes (recorded 185, 20608)
+PASS limits live DeltaNet tf_gdn_prompt_prep: 256 threads launched, the runtime allows 256; 93 VGPRs, 0 + 0 LDS bytes (recorded 93, 0)
+PASS limits live DeltaNet tf_gdn_hold_128: 256 threads launched, the runtime allows 256; 38 VGPRs, 17024 + 0 LDS bytes (recorded 38, 17024)
+PASS limits live DeltaNet tf_gdn_hold_16: 256 threads launched, the runtime allows 256; 31 VGPRs, 2688 + 0 LDS bytes (recorded 31, 2688)
+PASS limits live DeltaNet tf_gdn_keep_128: 256 threads launched, the runtime allows 256; 39 VGPRs, 8832 + 0 LDS bytes (recorded 39, 8832)
+PASS limits live DeltaNet tf_gdn_keep_16: 256 threads launched, the runtime allows 256; 35 VGPRs, 1664 + 0 LDS bytes (recorded 35, 1664)
+RED  limits live control: past its bounds: 512 threads launched, the runtime allows 256; 4 VGPRs, 0 + 0 LDS bytes (recorded 4, 0)
+RED  limits live control: 72 KiB of LDS: 256 threads launched, the runtime allows 1024; 6 VGPRs, 40960 + 32768 LDS bytes (recorded 6, 40960)
+SUMMARY gfx1151 83 kernels: 83 pass gates 1-4, 0 fail, 4 known findings; 5 controls: 5 red as planted, 0 missed; 0 limit problems; gates 134267 ms, limits 2432 ms

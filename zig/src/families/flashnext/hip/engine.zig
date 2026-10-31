@@ -52,6 +52,9 @@ pub const Engine = struct {
     ctx: hip.Context,
     lib: hip.Launcher,
     stream: hip.Stream,
+    /// A stream beside `stream` and the events its forks and joins take.
+    side: hip.Stream,
+    ring: hip.side.Ring,
     o: Options,
     cfg: config.Config,
     ck: core.checkpoint.Checkpoint,
@@ -108,6 +111,10 @@ pub const Engine = struct {
         e.act = if (caps.act == .f16) .f16 else .bf16;
         e.stream = try hip.Stream.init(&e.driver);
         errdefer e.stream.deinit();
+        e.side = try hip.Stream.init(&e.driver);
+        errdefer e.side.deinit();
+        e.ring = try hip.side.Ring.init(&e.driver);
+        errdefer e.ring.deinit();
         e.comm = null;
         // RCCL's init waits for every rank: none enters it unless every rank got this far
         _ = try steps.done(.{ 0, 0 }, .first);
@@ -126,6 +133,8 @@ pub const Engine = struct {
         e.weights.model.tp = e.comm;
         const spelling = try spellingOf(e.keep.allocator(), io, dir);
         e.tables = try tables.Tables.init(e.keep.allocator(), &e.ck, &e.cfg, e.weights.model.ple.layer, spelling);
+        // one rank: the n-gram rows in anonymous memory (ranks of a group share the mapping's page cache instead)
+        if (o.world == 1 and o.policy.rows == .resident) try e.tables.keepResident(e.keep.allocator(), &e.ck);
         const c = mixers.qkConstants(e.cfg.key_dim);
         var w: [2]hip.DeviceBuffer = undefined;
         for (&w, [_]f32{ c.q, c.k }) |*b, v| {
@@ -188,6 +197,9 @@ pub const Engine = struct {
         e.ck.close();
         e.cfg.deinit();
         if (e.comm) |c| c.close();
+        e.side.synchronize() catch {};
+        e.ring.deinit();
+        e.side.deinit();
         e.stream.deinit();
         e.lib.unload();
         e.ctx.deinit();
@@ -200,7 +212,7 @@ pub const Engine = struct {
     }
 
     pub fn ops(e: *Engine, arena: *hip.Arena) hip.ops.Ops {
-        return .{ .l = &e.lib, .bf16 = e.act == .bf16, .stream = e.stream.handle, .arena = arena };
+        return .{ .l = &e.lib, .bf16 = e.act == .bf16, .stream = e.stream.handle, .arena = arena, .side = .{ .stream = e.side.handle, .ring = &e.ring } };
     }
 
     /// The layer kinds as the caches lay them out: true for a DeltaNet layer.
@@ -259,28 +271,14 @@ pub const Engine = struct {
         return .{ .ptr = out, .kind = y.kind };
     }
 
-    /// The first `kept` rows of a window from `c.len` become the stream's: DeltaNet states, n-gram tail and history.
+    /// A window's first `kept` rows become the stream's: states run through them, a dropped row's conv tail named.
     pub fn keepWindow(e: *Engine, c: *cache.Caches, tokens: []const u32, kept: usize) !void {
         if (kept == 0 or kept > tokens.len) return error.BadKeep;
         const l = c.layout;
         const s = e.stream.handle;
-        if (kept < tokens.len) for (c.linear, 0..) |linear, i| {
-            if (!linear) continue;
-            const from = c.snapshot(i, kept - 1);
-            const to = c.linearAt(i);
-            try hip.runtime.check(e.driver.api.hipMemcpyDtoDAsync(
-                @ptrFromInt(to.conv),
-                @ptrFromInt(from.conv),
-                l.conv_bytes,
-                s,
-            ));
-            try hip.runtime.check(e.driver.api.hipMemcpyDtoDAsync(
-                @ptrFromInt(to.state),
-                @ptrFromInt(from.state),
-                l.state_bytes,
-                s,
-            ));
-        };
+        // a window of one row stored its states (mixers.recur): nothing to run
+        if (tokens.len > 1) try c.keepStates(&e.lib, kept, e.stream);
+        try c.startAt(if (kept < tokens.len) kept - 1 else null, e.stream);
         const row = l.tail_bytes / l.tail_rows;
         try hip.runtime.check(e.driver.api.hipMemcpyDtoDAsync(
             @ptrFromInt(c.tail()),
@@ -300,6 +298,7 @@ pub const Engine = struct {
         try e.stream.synchronize();
         e.host.used = 0;
         e.arena.reset();
+        try c.settle(e.stream);
         const segs = [_]forward.Seg{.{ .c = c, .tokens = tokens, .pos = c.len }};
         const staged = try forward.stage(&e.weights.model, &e.host, &segs, false);
         const out = try forward.run(e.ops(&e.arena), &e.weights.model, &e.host, &segs, false, staged);

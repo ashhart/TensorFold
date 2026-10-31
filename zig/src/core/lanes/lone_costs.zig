@@ -14,7 +14,7 @@ fn observed(s: anytype) Table {
 
 pub fn enabled(e: anytype, p: anytype) bool {
     return e.alone and e.cfg.lone_cost_tile > 0 and e.cfg.timed and e.cfg.plain_guard and
-        e.cfg.draft_confidence == null and p.kind == .head and p.lanes == null;
+        e.cfg.draft_confidence == null and !e.cfg.pinned_depth and p.kind == .head and p.lanes == null;
 }
 
 /// Measured full-round time at this width; otherwise the nearest sample plus the startup forward-time difference.

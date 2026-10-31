@@ -1,0 +1,6 @@
+{"mode": "serial", "output_tokens": 256, "rep": 1, "prompt_tokens": 16384, "cached_tokens": 0, "tokens": 256, "ttft_s": 30.755413222010247, "decode_tps": 35.71700023630829, "prefill_tps": 532.7192283755342}
+{"mode": "serial", "output_tokens": 256, "rep": 2, "prompt_tokens": 16384, "cached_tokens": 0, "tokens": 256, "ttft_s": 30.559503414988285, "decode_tps": 35.57959941469009, "prefill_tps": 536.1343663707659}
+{"mode": "serial", "output_tokens": 256, "rep": 3, "prompt_tokens": 16384, "cached_tokens": 0, "tokens": 256, "ttft_s": 30.591321493004216, "decode_tps": 35.530218936841834, "prefill_tps": 535.5767322358656}
+{"mode": "serial", "output_tokens": 1024, "rep": 1, "prompt_tokens": 16384, "cached_tokens": 0, "tokens": 1024, "ttft_s": 30.602394760004245, "decode_tps": 35.75389834873005, "prefill_tps": 535.3829374625624}
+{"mode": "serial", "output_tokens": 1024, "rep": 2, "prompt_tokens": 16384, "cached_tokens": 0, "tokens": 1024, "ttft_s": 30.716184312972473, "decode_tps": 35.947091337468855, "prefill_tps": 533.3995861289479}
+{"mode": "serial", "output_tokens": 1024, "rep": 3, "prompt_tokens": 16384, "cached_tokens": 0, "tokens": 1024, "ttft_s": 30.6996438470087, "decode_tps": 35.662802161502036, "prefill_tps": 533.6869731013644}

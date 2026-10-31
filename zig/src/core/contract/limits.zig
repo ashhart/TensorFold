@@ -181,6 +181,13 @@ pub const rdna = [_]Rdna{
     .{ .name = "gfx1201", .vgprs_simd = 1536, .granule = 24 },
 };
 
+/// `HipLaunch.served` of a tile only the gfx11 matrix cores run (RDNA3 and RDNA3.5, not RDNA2 or RDNA4).
+pub const gfx11_only: [rdna.len]bool = blk: {
+    var on: [rdna.len]bool = undefined;
+    for (rdna, &on) |t, *o| o.* = std.mem.startsWith(u8, t.name, "gfx11");
+    break :blk on;
+};
+
 /// A HIP kernel as launched: its symbol, its code object, most threads a workgroup and dynamic LDS bytes.
 pub const HipLaunch = struct {
     name: []const u8,
@@ -190,6 +197,8 @@ pub const HipLaunch = struct {
     dynamic: u32 = 0,
     /// The symbol on each chip (rdna's order) where it differs, as a stream tile's dot2 type does.
     symbols: ?[rdna.len][]const u8 = null,
+    /// The chips (rdna's order) that launch it: a gfx11 matrix-core tile records no usage elsewhere (`gfx11_only`).
+    served: [rdna.len]bool = @splat(true),
 
     /// The symbol the launch resolves on chip `i` of `rdna`.
     pub fn symbolOn(l: HipLaunch, i: usize) []const u8 {

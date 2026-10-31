@@ -184,6 +184,36 @@ each row then L2-normed, against float64's ranges at their bf16 points and expf'
 CUDA also checks `dense_rows`' scaled epilogue (Dory's logits, fp32(bf16(x . w)) times a per-column scale), bit-equal to its
 unscaled tile's outputs rounded and scaled on the host.
 HIP: the RMS norm rows, a wave a row (fp32, fp16 and bf16 out) and a block a row (fp16 and bf16 out).
+HIP also checks Qwen3.8-Flash-Next's gfx11 matrix-core prompt tiles: the dense tile (`affine_wmma_dense`) at K 320,
+2560, 6144 and 10240, fp32 out and bf16 out, bit-equal to the matrix tile `affine_wmma_gemm` (then `tf_cast`).
+Its routed expert tiles take a prompt's plan: gate and up with silu(g) u in bf16 (`affine_wmma_moe_gu`) and down in fp32
+(`affine_wmma_moe_down`), bit-equal to `affine_wmma_gemm` over the same plan (then `tf_moe_act`).
+HIP also checks a prompt's MoE plan in three launches (`tf_route_count`, `tf_route_scan`, `tf_route_scatter`),
+bit-equal to `tf_moe_route`, and its stated plan: the pairs stably sorted by expert, each expert's pairs cut into tiles.
+HIP's MoE picks: `tf_select_rows`, bit-equal to `select_body`, and `tf_router_select_*` (router logits, picks and plan in
+one launch), bit-equal to `tf_router_decode`, the pick and `tf_moe_route`, its logits' sums proven fp32. Both check the
+pick's stated rule (a NaN below every number, ties to the lower id, every slot written) and carry a known finding at
+gate 1: upstream's `select_body` ranks a NaN level with the top number, so slot 0 races, and a row of fewer than k
+numbers leaves slots unwritten. Their bytes stay equal to upstream's.
+HIP's top-k in parts (`tf_topk_part`, `tf_topk_join`) is bit-equal to `tf_topk` and checked against its key order: a
+positive NaN above +Inf, a negative NaN below -Inf, -0 equal to +0, ties to the lower id.
+`tf_moe_prefetch` writes nothing: gates 1 to 3 check that every buffer and guard stays as prepared, and gate 5 holds
+its launch. It has no float output for gates 1 and 3 to class or bound, and no sums for gate 4.
+HIP also checks Flash Next's hyper-connection kernels. On gfx11, `tf_affine_dense_hcmix` (hc up's dense K 320 tile
+with the HC mix as its epilogue) is bit-equal to the tile's bf16 product then `tf_fn_hc_mix`, and its gate table
+`tf_hc_gate_fill` holds, for all 65,536 bf16 g, float64's sigmoid rounded to bf16 within expf's 2^-20 and
+`tf_fn_hc_mix`'s gate bit for bit.
+`tf_fn_hc_mix8`, the bf16 mix at 8 outputs a thread, is bit-equal to `tf_fn_hc_mix` over fp32 and bf16 g.
+`tf_fn_hc_norm_v` (bf16 streams of 2,560 in 16-byte accesses, with and without a branch) is bit-equal to
+`tf_fn_hc_norm`, and the MoE combine inside the norm (`tf_fn_hc_norm_moe`, and `tf_fn_hc_norm_moe_v` a block a row)
+to `tf_moe_combine` then `tf_fn_hc_norm`.
+HIP also checks the DeltaNet prompt recurrence at half a value head a block (`tf_gdn_prompt_128`, its y and state),
+bit-equal to the plain window scan `gated_delta_tile` on the same tokens.
+Its prompt prework in one launch (`tf_gdn_prompt_prep`: conv, q and k head norms, v, gate, beta and the new conv state)
+is bit-equal to the chain it replaces (`tf_conv_prefill`, `tf_copy_cols`, `tf_rms`, `tf_gdn_gate_prefill`).
+A verify window that holds its state (`tf_gdn_hold_128` and `_16`: y only, the state an input left unchanged) and the
+keep that replays it (`tf_gdn_keep_128` and `_16`: two layers' states after their kept rows) are each bit-equal to
+`gated_delta_tile` over the same rows.
 
 RADIO's fused bias, activation and residual (`tf_vit_bias_act`) replaces `tf_vit_bias` then
 `tf_vit_pointwise`, byte for byte.
@@ -207,6 +237,12 @@ CUDA also checks Nemotron's pocket (`nemotron_ops.cu`, the learned neurons the l
 shared expert): relu^2 up into act rows and down added into the shared expert's slot, a block row a row and tiled, the
 down to fp32 and bf16, against float64, the neurons past the count NaN so a read of one shows (two controls: the up's
 relu by `fmaxf`, and the down launched one neuron short).
+HIP also checks Flash Next's index block scores over 4 heads of 128: `tf_fn_idx_scores_quad` (4 lanes a score) and
+`tf_fn_idx_scores8` (8 rows a wave), each bit-equal to `tf_fn_idx_scores`. Their relu is `fmaxf(x, 0)`: a NaN head
+dot scores 0 where float64 keeps the NaN, a known finding as `tf_glm_scores`'s is.
+HIP also checks Flash Next's QSA decode prep, `tf_fn_qsa_prep`, bit-equal to the seven launches it replaces (`tf_qk_rope`
+for q, the index q and k, `tf_kv_write_at` for v and the raw index key, `tf_copy_cols` and `tf_fn_idx_pool_at`) on 1 to
+15 rows, its fp32 rows and its caches and pools each registered, the caches' earlier contents prepared.
 
 CUDA also checks the grouped EXL3 experts' `tf_exl3_plan_finish`: its bf16 and fp32 SwiGLU and its fp32 and bf16 down
 epilogues bit-equal to main's kernel (kept in `contract_controls.cu`), and its SwiGLU-OAI (`act_mode` 2,

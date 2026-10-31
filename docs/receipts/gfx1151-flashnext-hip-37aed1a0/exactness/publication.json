@@ -1,0 +1,104 @@
+{
+ "replacements_per_file": {
+  "run.log": {
+   "replacements": 0
+  },
+  "environment.json": {
+   "replacements": 0
+  },
+  "provenance.json": {
+   "replacements": 0
+  },
+  "checkpoint.json": {
+   "replacements": 0
+  },
+  "steps.tsv": {
+   "replacements": 0
+  },
+  "summary.json": {
+   "replacements": 0
+  },
+  "summary.md": {
+   "replacements": 0
+  },
+  "runs/ex-exact-nocache.json": {
+   "replacements": 0
+  },
+  "runs/ex-exact.json": {
+   "replacements": 0
+  },
+  "exactness/exact-rewind-nocache.jsonl": {
+   "replacements": 0
+  },
+  "exactness/exact-rewind-nocache.json": {
+   "replacements": 0
+  },
+  "exactness/exact-serve-check.jsonl": {
+   "replacements": 0
+  },
+  "exactness/exact-serve-cancel.jsonl": {
+   "replacements": 0
+  },
+  "exactness/exact-rewind.jsonl": {
+   "replacements": 0
+  },
+  "exactness/exact-rewind.json": {
+   "replacements": 0
+  },
+  "exactness/seam-corpus.json": {
+   "replacements": 0
+  },
+  "record_http.py": {
+   "replacements": 0
+  },
+  "logs/generate-exact-chunk2048.log": {
+   "replacements": 0
+  },
+  "logs/generate-exact-chunk20480.log": {
+   "replacements": 0
+  },
+  "logs/generate-exact-chunk512.log": {
+   "replacements": 0
+  },
+  "logs/generate-exact-chunk8192.log": {
+   "replacements": 0
+  },
+  "logs/rewind-exact-nocache.log": {
+   "replacements": 0
+  },
+  "logs/rewind-exact.log": {
+   "replacements": 0
+  },
+  "logs/serve-cancel-exact.log": {
+   "replacements": 0
+  },
+  "logs/serve-check-exact.log": {
+   "replacements": 0
+  },
+  "logs/server-ex-exact-nocache.log": {
+   "replacements": 0
+  },
+  "memory/ex-exact-nocache-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/ex-exact-nocache-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/ex-exact-nocache-metrics.txt": {
+   "replacements": 0
+  },
+  "logs/server-ex-exact.log": {
+   "replacements": 0
+  },
+  "memory/ex-exact-samples.jsonl": {
+   "replacements": 0
+  },
+  "memory/ex-exact-memory-endpoint.json": {
+   "replacements": 0
+  },
+  "memory/ex-exact-metrics.txt": {
+   "replacements": 0
+  }
+ },
+ "rule": "machine-local paths, host and user names replaced by placeholders; request and reply values, token ids and hashes unchanged"
+}

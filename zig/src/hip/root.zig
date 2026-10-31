@@ -11,6 +11,8 @@ pub const HostBuffer = memory.HostBuffer;
 pub const usage = memory.usage;
 pub const Usage = memory.Usage;
 pub const Stream = @import("stream.zig").Stream;
+/// A second stream beside a step's own, with the events its forks and joins take.
+pub const side = @import("side.zig");
 pub const Module = @import("module.zig").Module;
 pub const Function = @import("module.zig").Function;
 pub const launch = @import("launch.zig");
@@ -53,6 +55,7 @@ pub const loopback = @import("comm/loopback.zig");
 
 test {
     _ = policy;
+    _ = side;
     _ = admission;
     _ = Device;
     _ = collective;

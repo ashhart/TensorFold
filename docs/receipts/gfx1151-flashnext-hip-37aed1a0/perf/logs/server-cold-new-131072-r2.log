@@ -1,0 +1,17 @@
+[tensorfold] HIP rank 0 of 1: policy matrix=auto,attention=auto,kernels=auto,graphs=auto,prefill_step=4096,fill_rows=512,mtp_depth=gated; mtp drafts 7 under 0.9, 8 snapshots 
+info: lane costs ms by window rows 1:25.34 2:29.76 3:35.03 4:39.05 5:43.45 6:46.91 7:50.02 8:53.80; head step 1.325
+[tensorfold] open-file limit raised: soft 1024 -> 524288
+warning: libtfgrammar.so is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
+[tensorfold] HIP gfx1151 device 0, rank 0 of 1: Flash Next, 84.97 GiB on the device, 1 stream of 139328 positions, 4.15 GiB each; prompts in 4096-row chunks
+[tensorfold] serving flashnext at http://127.0.0.1:30461/v1 (sampling: temperature 1.0, top_k 20, top_p 0.95; drafts: MTP + copies; context: 139264; loaded in 28.8s)
+[tensorfold] 127.0.0.1 "GET /health HTTP/1.1" 200 -
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-b6f10f7812bd6d67db9326aad4d13d79 prompt=256 cached=0 thinking=False effort=none tokens=1 sha=3635a91e3da8 finish=length rounds=0 accepted=0/0 ttft=0.453 decode=0.000 elapsed=0.453 queued=0.000 tok/s=0.0
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-55b5eeeaadd691cdd85ad85ecd8b66b8 prompt=131072 cached=0 thinking=False effort=none tokens=1 sha=397ed1e27591 finish=length rounds=0 accepted=0/0 ttft=277.984 decode=0.000 elapsed=277.985 queued=0.000 tok/s=0.0
+[tensorfold] 127.0.0.1 "GET /memory HTTP/1.1" 200 -
+[tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+[tensorfold] shutting down (SIGTERM): draining: new requests get 503; 0 request(s) in progress may finish within 20.0 s
+[tensorfold] shutting down: drained
+info: graphs: 8 captured (29 ms each), 64 of 80 rounds replayed
+[tensorfold] shutting down: stopped

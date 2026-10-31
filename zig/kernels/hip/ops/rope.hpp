@@ -1,6 +1,7 @@
 #pragma once
 
 #include "common.hpp"
+#include "qk_rope_wave.hpp"
 
 // RoPE for a prefill and the window's fused q / k norm and rotation.
 
@@ -36,51 +37,17 @@ extern "C" __global__ void __launch_bounds__(256) tf_qk_rope(const void* src, in
                                                       const float* weight, float eps, int rows, int heads, int width,
                                                       int rotary, float theta, const int* pos, float* wide,
                                                       void* cache, int total) {
-    constexpr int kMost = 512 / 32;
     __shared__ float row_v[8][512];
-    const int lane = threadIdx.x & 31, wave = threadIdx.x >> 5;
+    const int wave = threadIdx.x >> 5;
     const int g = blockIdx.x * 8 + wave;
     const bool live = g < rows * heads;
     const int r = live ? g / heads : 0, h = live ? g % heads : 0;
-    const long long at = r * s_row + static_cast<long long>(h) * s_head;
-    float v[kMost];
-    float sum = 0.f;
-#pragma unroll
-    for (int j = 0; j < kMost; ++j) {
-        const int i = lane + 32 * j;
-        v[j] = live && i < width ? load(src, kind, at + i) : 0.f;
-        if (i < width) sum += v[j] * v[j];
-    }
-#pragma unroll
-    for (int mask = 16; mask > 0; mask >>= 1) sum += __shfl_xor(sum, mask, 32);
-    const float inv = rsqrtf(__shfl(sum, 0, 32) / static_cast<float>(width) + eps);
-#pragma unroll
-    for (int j = 0; j < kMost; ++j) {
-        const int i = lane + 32 * j;
-        if (i < width) row_v[wave][i] = rounded(v[j] * inv * weight[i], kind);
-    }
+    qk_rope_norm(src, kind, r * s_row + static_cast<long long>(h) * s_head, weight, eps, width, live, row_v[wave]);
     __syncthreads();
     if (!live) return;
     const int p = pos[r];
-    const int half = rotary >> 1;
-    float* out = wide ? wide + static_cast<long long>(g) * width : nullptr;
-    const long long slot = (static_cast<long long>(h) * total + p) * width;
-    auto put = [&](int i, float value) {
-        value = rounded(value, kind);
-        if (out) out[i] = value;
-        if (cache) store(cache, kind, slot + i, value);
-    };
-    for (int i = lane; i < half; i += 32) {
-        float freq = 1.f / powf(theta, static_cast<float>(i) / static_cast<float>(half));
-        float ang = static_cast<float>(p) * freq;
-        float c = cosf(ang);
-        float sn = sinf(ang);
-        float x1 = row_v[wave][i];
-        float x2 = row_v[wave][half + i];
-        put(i, x1 * c - x2 * sn);
-        put(half + i, x1 * sn + x2 * c);
-    }
-    for (int i = rotary + lane; i < width; i += 32) put(i, row_v[wave][i]);
+    qk_rope_put(kind, width, rotary, theta, p, row_v[wave], wide ? wide + static_cast<long long>(g) * width : nullptr,
+                cache, (static_cast<long long>(h) * total + p) * width);
 }
 
 }  // namespace

@@ -72,10 +72,14 @@ pub fn hcPre(o: Ops, m: *const model.Model, hc: model.Hc, x: Tensor, rows: usize
         @intCast(d.streams),
         o.stream,
     );
-    const g = try o.project(act, hc.up, rows, true);
+    // a prompt's up product with the mix in the dense tile's epilogue (no g in memory): the same bytes
+    if (try o.hcUpMix(act, hc.up, x, rows)) |mixed| return mixed;
+    // g in the activation kind: the mix rounds it there first (the dense prompt tile writes it so, without a cast)
+    const g = try o.project(act, hc.up, rows, false);
     const mixed = try take(o, m.act, rows * d.hidden);
     try o.l.fn_hc_mix(
         @ptrFromInt(g.ptr),
+        @intCast(@backingInt(g.kind)),
         @ptrFromInt(x.ptr),
         @ptrFromInt(mixed.ptr),
         kind,
@@ -382,15 +386,28 @@ pub fn run(ops: Ops, m: *const model.Model, host: *Host, segs: []const Seg, wind
         };
         try hcBranch(o, m, h, branch, inject, x, layer.mhc.scale, rows);
         const mixed2 = try hcPre(o, m, layer.mhc, x, rows, inject);
-        const y = try hip.moe.run(o, m.act, layer.moe, mixed2, rows, !window);
         const next = if (i + 1 < m.layers.len) m.layers[i + 1].ahc.scale else m.mix.scale;
-        try hcBranch(o, m, h, y, inject, x, next, rows);
+        if (window and m.tp == null) {
+            // a window's MoE combine inside the next HC norm: the experts' rows and weights, one launch for both
+            const p = try hip.moe.parts(o, m.act, layer.moe, mixed2, rows);
+            try o.l.fn_hc_norm_moe(@ptrFromInt(h.ptr), @ptrFromInt(p.y), @ptrFromInt(p.wts), @ptrFromInt(inject.ptr), @ptrFromInt(h.ptr), @ptrFromInt(x.ptr), @ptrFromInt(next), @backingInt(m.act), @intCast(rows), @intCast(d.streams), @intCast(d.hidden), d.eps, @intCast(p.slots), o.stream);
+        } else if (m.tp == null and m.act == .bf16 and d.hidden == 2560 and d.streams <= 4) {
+            // a prompt's MoE combine inside the next HC norm, a block a row: the combined rows never written
+            const p = try hip.moe.parts(o, m.act, layer.moe, mixed2, rows);
+            try o.l.fn_hc_norm_moe_v(@ptrFromInt(h.ptr), @ptrFromInt(p.y), @ptrFromInt(p.wts), @ptrFromInt(inject.ptr), @ptrFromInt(h.ptr), @ptrFromInt(x.ptr), @ptrFromInt(next), @intCast(rows), @intCast(d.streams), d.eps, @intCast(p.slots), o.stream);
+        } else {
+            const y = try hip.moe.run(o, m.act, layer.moe, mixed2, rows, !window);
+            try hcBranch(o, m, h, y, inject, x, next, rows);
+        }
     }
     // a window's count moves in `Engine.round`, which a replay runs too: the launches change nothing on the host
     if (!window) for (segs) |g| {
         g.c.pooled = (g.pos + g.tokens.len) / d.index_ratio;
     };
-    return .{ .mixed = try hcPre(o, m, m.mix, x, rows, null), .streams = h };
+    const out: Out = .{ .mixed = try hcPre(o, m, m.mix, x, rows, null), .streams = h };
+    // hip.moe.parts' side-stream prefetches (windows of <= prefetch_rows rows) rejoin the stream after the last layer
+    if (window and m.tp == null and rows <= hip.moe.prefetch_rows) try o.join();
+    return out;
 }
 
 /// Streams a forward takes at once at most.

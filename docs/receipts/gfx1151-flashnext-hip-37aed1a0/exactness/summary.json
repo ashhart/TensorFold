@@ -1,0 +1,51 @@
+{
+ "exact": {
+  "serve_check": {
+   "ok": 15,
+   "fail": 0,
+   "rc": 0,
+   "groups": 11,
+   "groups_with_different_hashes": 0,
+   "drafted": 1688,
+   "accepted": 1285
+  },
+  "serve_cancel": {
+   "ok": 3,
+   "fail": 0,
+   "rc": 0
+  },
+  "rewind": {
+   "differing": 0,
+   "rc": 0,
+   "max_cached_tokens": 10240
+  },
+  "chunks": {
+   "2048": {
+    "rc": 0,
+    "prompt_tokens": "10368",
+    "hash": "c8f6888043c972e0",
+    "ids": null
+   },
+   "20480": {
+    "rc": 0,
+    "prompt_tokens": "10368",
+    "hash": "c8f6888043c972e0",
+    "ids": null
+   },
+   "512": {
+    "rc": 0,
+    "prompt_tokens": "10368",
+    "hash": "c8f6888043c972e0",
+    "ids": null
+   },
+   "8192": {
+    "rc": 0,
+    "prompt_tokens": "10368",
+    "hash": "c8f6888043c972e0",
+    "ids": null
+   }
+  },
+  "one_hash": true,
+  "seams_exercised": true
+ }
+}

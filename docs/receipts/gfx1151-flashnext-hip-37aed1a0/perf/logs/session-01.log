@@ -1,0 +1,80 @@
+pgrep: pattern that searches for process name longer than 15 characters will result in zero matches
+Try `pgrep -f' option to match against the complete command line.
+pgrep: pattern that searches for process name longer than 15 characters will result in zero matches
+Try `pgrep -f' option to match against the complete command line.
+pgrep: pattern that searches for process name longer than 15 characters will result in zero matches
+Try `pgrep -f' option to match against the complete command line.
+pgrep: pattern that searches for process name longer than 15 characters will result in zero matches
+Try `pgrep -f' option to match against the complete command line.
+pgrep: pattern that searches for process name longer than 15 characters will result in zero matches
+Try `pgrep -f' option to match against the complete command line.
+== 2026-10-31T09:34:07Z server cold-new-2048-r1: context 10240, parallel 1, prompt cache 0 GiB 
+== 2026-10-31T09:34:33Z step cold-new-2048-r1
+== 2026-10-31T09:34:37Z step cold-new-2048-r1 rc=0
+== 2026-10-31T09:34:39Z server cold-base-2048-r1: context 10240, parallel 1, prompt cache 0 GiB 
+== 2026-10-31T09:34:51Z step cold-base-2048-r1
+== 2026-10-31T09:35:00Z step cold-base-2048-r1 rc=0
+== 2026-10-31T09:35:02Z server cold-new-2048-r2: context 10240, parallel 1, prompt cache 0 GiB 
+== 2026-10-31T09:35:28Z step cold-new-2048-r2
+== 2026-10-31T09:35:32Z step cold-new-2048-r2 rc=0
+== 2026-10-31T09:35:34Z server cold-base-2048-r2: context 10240, parallel 1, prompt cache 0 GiB 
+== 2026-10-31T09:35:46Z step cold-base-2048-r2
+== 2026-10-31T09:35:55Z step cold-base-2048-r2 rc=0
+== 2026-10-31T09:35:56Z server cold-new-8192-r1: context 16384, parallel 1, prompt cache 0 GiB 
+== 2026-10-31T09:36:21Z step cold-new-8192-r1
+== 2026-10-31T09:36:37Z step cold-new-8192-r1 rc=0
+== 2026-10-31T09:36:38Z server cold-base-8192-r1: context 16384, parallel 1, prompt cache 0 GiB 
+== 2026-10-31T09:36:51Z step cold-base-8192-r1
+== 2026-10-31T09:37:25Z step cold-base-8192-r1 rc=0
+== 2026-10-31T09:37:26Z server cold-new-8192-r2: context 16384, parallel 1, prompt cache 0 GiB 
+== 2026-10-31T09:37:53Z step cold-new-8192-r2
+== 2026-10-31T09:38:09Z step cold-new-8192-r2 rc=0
+== 2026-10-31T09:38:11Z server cold-base-8192-r2: context 16384, parallel 1, prompt cache 0 GiB 
+== 2026-10-31T09:38:24Z step cold-base-8192-r2
+== 2026-10-31T09:38:58Z step cold-base-8192-r2 rc=0
+== 2026-10-31T09:39:00Z server cold-new-32768-r1: context 40960, parallel 1, prompt cache 0 GiB 
+== 2026-10-31T09:39:27Z step cold-new-32768-r1
+== 2026-10-31T09:40:32Z step cold-new-32768-r1 rc=0
+== 2026-10-31T09:40:34Z server cold-base-32768-r1: context 40960, parallel 1, prompt cache 0 GiB 
+== 2026-10-31T09:40:47Z step cold-base-32768-r1
+== 2026-10-31T09:42:56Z step cold-base-32768-r1 rc=0
+== 2026-10-31T09:42:58Z server cold-new-32768-r2: context 40960, parallel 1, prompt cache 0 GiB 
+== 2026-10-31T09:43:28Z step cold-new-32768-r2
+== 2026-10-31T09:44:32Z step cold-new-32768-r2 rc=0
+== 2026-10-31T09:44:34Z server cold-base-32768-r2: context 40960, parallel 1, prompt cache 0 GiB 
+== 2026-10-31T09:44:47Z step cold-base-32768-r2
+== 2026-10-31T09:46:55Z step cold-base-32768-r2 rc=0
+## Cold prefill (max_tokens 1, prompt cache off, fresh server per run)
+| arm | prompt tokens | context | prefill tok/s (median) | per round | TTFT (s) | wall (s) | cached tokens | GTT+VRAM peak over idle (GiB) | RSS peak (GiB) | server |
+|---|---|---|---|---|---|---|---|---|---|---|
+| new | 2,048 | 10240 | 673.7 | 681.4, 666.0 | 3.040 | 3.041 | 0 | 82.45 | 102.9 | ready |
+| base | 2,048 | 10240 | 293.2 | 290.0, 296.4 | 6.986 | 6.996 | 0 | 78.21 | 76.81 | ready |
+| new | 8,192 | 16384 | 558.2 | 559.2, 557.2 | 14.68 | 14.68 | 0 | 82.62 | 105.0 | ready |
+| base | 8,192 | 16384 | 261.3 | 261.3, 261.3 | 31.35 | 31.35 | 0 | 78.39 | 77.56 | ready |
+| new | 32,768 | 40960 | 513.5 | 512.6, 514.5 | 63.81 | 63.81 | 0 | 83.33 | 105.0 | ready |
+| base | 32,768 | 40960 | 260.4 | 260.1, 260.6 | 125.9 | 125.9 | 0 | 79.09 | 79.81 | ready |
+
+new / base, prefill tok/s
+| prompt tokens | new | base | ratio |
+|---|---|---|---|
+| 2,048 | 673.7 | 293.2 | 2.298 |
+| 8,192 | 558.2 | 261.3 | 2.136 |
+| 32,768 | 513.5 | 260.4 | 1.972 |
+
+## Decode, one stream (bench_openai.py, 256 tokens, greedy, drafts on)
+| arm | prompt | decode tok/s (median) | per round | TTFT (s) | wall (s, derived) | spec-decode hit rate | GTT+VRAM peak (GiB) | RSS peak (GiB) |
+|---|---|---|---|---|---|---|---|---|
+
+## Prefill, serial decode and Default MTP decode (one public-code prompt, greedy, cache off, drafts as stated)
+| arm | decode | output tokens | decode tok/s (median) | every rep | TTFT (s) | wall (s) | spec-decode hit rate | GTT+VRAM peak over idle (GiB) | RSS peak (GiB) | cached tokens |
+|---|---|---|---|---|---|---|---|---|---|---|
+
+| arm | prefill tok/s (cold, 16K) | MTP token hash == serial's |
+|---|---|---|
+| new | - |  |
+| base | - |  |
+
+## Concurrent (bench_concurrent.py --levels 1,4 --alone --serial)
+| arm | prompt | streams | aggregate tok/s | per-stream tok/s | concurrent==alone (eq/ne/failed) | alone==draft:false (eq/ne/failed) | failed requests |
+|---|---|---|---|---|---|---|---|
+== 2026-10-31T09:46:58Z perf done; next: finalize.sh

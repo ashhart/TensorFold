@@ -14,6 +14,9 @@ const registry = @import("core").registry;
 const quant = @import("core").quant;
 const tuning = @import("../tuning/tuning.zig");
 const mlx_entries = @import("mlx_entries.zig");
+const affine_stream = @import("affine_stream.zig");
+const affine_load = @import("affine_load.zig");
+const affine_matrix = @import("affine_matrix.zig");
 
 const Error = runtime.Error;
 
@@ -54,6 +57,8 @@ pub const StreamSides = extern struct {
     out_half: c_int = 0,
     pair_cols: c_int = 0,
     limit: f32 = 0,
+    /// > 1: the launch's row blocks are the grid's x and its column blocks its y (stream.hpp stream_tile)
+    row_blocks: c_int = 0,
 };
 
 /// One side of a group: its matrix and where its (rows, n) output goes.
@@ -82,17 +87,26 @@ pub const Registry = registry.Registry(Launch);
 pub const Entry = Registry.E;
 
 pub const bit_widths = [_]c_int{ 2, 3, 4, 5, 6, 8 };
-const row_counts = [_]u8{ 1, 2, 4, 8 };
-const piece_counts = [_]u8{ 1, 2, 4 };
+pub const row_counts = [_]u8{ 1, 2, 4, 8 };
+pub const piece_counts = [_]u8{ 1, 2, 4 };
 
 pub const lane_rows = 8; // kLaneRows
 pub const lane_group_max = 128;
 const fast_n = 256;
-pub const stream_cbs = [_]c_int{ 2, 4, 8 }; // columns a lane carries in the stream tile
+pub const stream_cbs = [_]c_int{ 1, 2, 4, 8 }; // columns a lane carries in the stream tile (1: plain products only)
 pub const stream_rows = [_]u8{ 1, 2, 4 }; // its row counts: columns * rows <= 16
 pub const stream_waves = 4; // kStreamWaves
 pub const streams_wanted = 3000; // kStreamWavesWanted
 pub const stream_code_words = 32; // kStreamCodeWords
+pub const stream_pair_code_words = affine_stream.stream_pair_code_words;
+pub const stream_routed_cb_top = affine_stream.stream_routed_cb_top;
+pub const stream_list_blocks = affine_stream.stream_list_blocks;
+pub const stream_one_col_n = affine_stream.stream_one_col_n;
+pub const HeldPick = affine_stream.HeldPick;
+pub const held_wide_n = affine_stream.held_wide_n;
+pub const held_narrow_lo = affine_stream.held_narrow_lo;
+pub const held_narrow_hi = affine_stream.held_narrow_hi;
+pub const heldPick = affine_stream.heldPick;
 
 /// The K-parallel tiles of a short prompt: cb columns a lane set, r rows a pass over up to rb row blocks.
 pub const KpTile = struct { cb: c_int, r: c_int, waves: c_int, rb: c_int, loop: bool = true };
@@ -132,11 +146,27 @@ pub const Kernels = struct {
     /// The same tile with Nemotron's relu^2 as its epilogue, and with two such products in one launch.
     relu2: [bit_widths.len][stream_rows.len][stream_cbs.len]?Function,
     relu2_pair: [bit_widths.len][stream_rows.len][stream_cbs.len]?Function,
+    /// The 5- to 8-row routed 4-bit work lists (stream.hpp stream_list), 4-row tile: [0] pair CB 2, [1] plain CB 4.
+    stream_list: [2]Function,
     /// Off keeps the decode tiles before the stream tile (the policy's reference switch).
     stream_on: bool,
+    /// A test's forced columns a lane (a stream_cbs value; 0: the rule), where the shape takes it.
+    stream_cb_force: c_int,
+    /// The held-codes 4-bit plain tile (stream.hpp HELD) by rows (4, 8) and columns a lane; `heldPick` picks it.
+    held: [2][stream_cbs.len]?Function,
     block: [bit_widths.len]Function,
     gemm: [bit_widths.len]Function,
     wmma_gemm: [bit_widths.len]Function,
+    /// Qwen3.8-Flash-Next's routed gate and up of a prompt with the activation as epilogue (tiles/moe_gemm.hpp); gfx11.
+    moe_gu: ?Function,
+    /// The same tile's routed down of a prompt, fp32 out.
+    moe_down: ?Function,
+    /// A prompt's plain 4-bit group-32 products at each of dense_ks (tiles/dense_gemm.hpp); gfx11.
+    dense: [dense_ks.len]?Function,
+    /// hc up (K 320) on the dense tile with tf_fn_hc_mix in its epilogue (tf_affine_dense_hcmix); gfx11.
+    dense_hcmix: ?Function,
+    /// Fills the tile's gate table (rnd(sigmoid(g)) for every bf16 g) once a device; gfx11.
+    hc_gate_fill: ?Function,
     kp: [bit_widths.len][kp_tiles.len]Function,
     span: [2]Function,
     fold: Function,
@@ -146,96 +176,22 @@ pub const Kernels = struct {
     fill: Function,
     reg: Registry,
 
-    /// `tiles` holds dot2_tiles.hip's kernels, `dot2` dot2.hip's; bf16 on the WMMA build, fp16 on RDNA2.
-    pub fn load(tiles_obj: Module, dot2_obj: Module, caps: Caps, choices: Choices) Error!Kernels {
-        var k: Kernels = undefined;
-        const wmma = caps.act == .bf16;
-        k.caps = caps;
-        k.wmma = wmma;
-        k.matrix = wmma and caps.matrix == .wmma11;
-        k.mode = choices.matrix;
-        k.tile = if (choices.gemm) .gemm else .block;
-        k.stream_on = choices.stream;
-        k.reg = Registry.init(tableFor(caps), &mlx_entries.all);
-        k.reg.verify(k.env(), .mlx) catch return error.Invalid;
-        // the GEMM tile's rows of x a lane keeps (tiles/gemm.hpp GemmShape): 8 for BF16, 16 for FP16
-        if (wmma) try k.resolve("7DotBF16", "Li8E", tiles_obj) else try k.resolve("6DotF16", "Li16E", tiles_obj);
-        const r = "_ZN2tf4rocm";
-        k.span = .{ try dot2_obj.function(r ++ "16affine_dot2_spanILi1EEEvNS0_6AffineEPfi"), try dot2_obj.function(r ++ "16affine_dot2_spanILi8EEEvNS0_6AffineEPfi") };
-        k.fold = try dot2_obj.function(r ++ "16affine_dot2_foldEPKfNS0_10GroupTableES3_Pfiii");
-        k.wide = try dot2_obj.function(r ++ "16affine_dot2_wideENS0_6AffineE");
-        k.tiled = try dot2_obj.function(r ++ "17affine_dot2_tiledENS0_6AffineE");
-        k.reference = try dot2_obj.function(r ++ "18affine_dot2_kernelENS0_6AffineE");
-        k.fill = try dot2_obj.function(r ++ "13fill_byte_lutEP6__half");
-        return k;
-    }
-
-    fn resolve(k: *Kernels, comptime dot: []const u8, comptime shape: []const u8, m: Module) Error!void {
-        @setEvalBranchQuota(300_000);
-        inline for (bit_widths, 0..) |bits, b| {
-            k.block[b] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm17affine_dot2_blockINS0_{s}ELi{d}EEEvNS0_6AffineE", .{ dot, bits }));
-            if (k.matrix) k.wmma_gemm[b] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm16affine_wmma_gemmILi{d}EEEvNS0_6AffineE", .{bits}));
-            k.gemm[b] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm17affine_gemm_blockINS0_{s}ELi{d}E{s}EEvNS0_6AffineE", .{ dot, bits, shape }));
-            inline for (kp_tiles, 0..) |t, i| {
-                k.kp[b][i] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm14affine_gemm_kpINS0_{s}ELi{d}ELi{d}ELi{d}ELi{d}ELi{d}ELb{d}EEEvNS0_6AffineE", .{ dot, bits, t.cb, t.r, t.waves, t.rb, @intFromBool(t.loop) }));
-            }
-            inline for (piece_counts, 0..) |pieces, p| {
-                k.row[b][p] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm15affine_dot2_rowINS0_{s}ELi{d}ELi{d}EEEvNS0_6AffineEi", .{ dot, bits, pieces }));
-                inline for (row_counts, 0..) |rows, r| {
-                    k.lanes[b][r][p] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm17affine_dot2_lanesINS0_{s}ELi{d}ELi{d}ELi{d}EEEvNS0_6AffineE", .{ dot, bits, rows, pieces }));
-                }
-            }
-            inline for (stream_rows, 0..) |rows, r| {
-                inline for (stream_cbs, 0..) |cb, c| {
-                    k.stream[b][r][c] = if (cb * rows <= 16)
-                        try m.function(std.fmt.comptimePrint("_ZN2tf4rocm18affine_dot2_streamINS0_{s}ELi{d}ELi{d}ELi{d}ELb0EEEvNS0_6AffineENS0_11StreamSidesEii", .{ dot, bits, rows, cb }))
-                    else
-                        null;
-                    k.pairs[b][r][c] = if (cb * rows <= 16)
-                        try m.function(std.fmt.comptimePrint("_ZN2tf4rocm18affine_dot2_streamINS0_{s}ELi{d}ELi{d}ELi{d}ELb1EEEvNS0_6AffineENS0_11StreamSidesEii", .{ dot, bits, rows, cb }))
-                    else
-                        null;
-                    k.relu2[b][r][c] = if (cb * rows <= 16)
-                        try m.function(
-                            std.fmt.comptimePrint("_ZN2tf4rocm24affine_dot2_stream_relu2INS0_{s}" ++
-                                "ELi{d}ELi{d}ELi{d}EEEvNS0_6AffineENS0_11StreamSidesEii", .{ dot, bits, rows, cb }),
-                        )
-                    else
-                        null;
-                    k.relu2_pair[b][r][c] = if (cb * rows <= 16)
-                        try m.function(
-                            std.fmt.comptimePrint("_ZN2tf4rocm29affine_dot2_stream_relu2_pairINS0_{s}" ++
-                                "ELi{d}ELi{d}ELi{d}EEEvNS0_6AffineES3_iii", .{ dot, bits, rows, cb }),
-                        )
-                    else
-                        null;
-                }
-            }
-        }
-    }
-
-    /// fp16(bf16(code)) for every byte into the module's constant table: the RDNA2 fp16 tiles read it. Once a device.
-    pub fn fillByteLut(k: *const Kernels, r: *const runtime.Runtime, dot2_obj: Module) Error!void {
-        if (k.wmma) return;
-        const lut = try dot2_obj.global("_ZN2tf4rocm8kByteF16E");
-        var args: hl.Args = .{};
-        try args.add(lut.address);
-        try hl.launch(k.fill, .{ .grid = .{ .x = 1 }, .block = .{ .x = 256 } }, .{ .r = r, .handle = null }, &args);
-        try runtime.check(r.api.hipStreamSynchronize(null));
-    }
+    pub const load = affine_load.load;
+    pub const fillByteLut = affine_load.fillByteLut;
+    pub const fillHcGate = affine_load.fillHcGate;
 
     /// Launches on `s`; the counting stream runs nothing.
-    fn go(r: *const runtime.Runtime, f: Function, grid: hl.Dim3, block: hl.Dim3, s: abi.Stream, args: *hl.Args) Error!void {
+    pub fn go(r: *const runtime.Runtime, f: Function, grid: hl.Dim3, block: hl.Dim3, s: abi.Stream, args: *hl.Args) Error!void {
         if (s == util.counting) return;
         try hl.launch(f, .{ .grid = grid, .block = block }, .{ .r = r, .handle = s }, args);
     }
 
-    fn refuse(what: []const u8) Error {
+    pub fn refuse(what: []const u8) Error {
         std.log.err("affine: {s}", .{what});
         return error.Invalid;
     }
 
-    fn bitIndex(bits: c_int) ?usize {
+    pub fn bitIndex(bits: c_int) ?usize {
         return std.mem.indexOfScalar(c_int, &bit_widths, bits);
     }
 
@@ -247,7 +203,7 @@ pub const Kernels = struct {
         };
     }
 
-    fn cdiv(n: c_int, by: c_int) c_uint {
+    pub fn cdiv(n: c_int, by: c_int) c_uint {
         return @intCast(@divTrunc(n + by - 1, by));
     }
 
@@ -320,64 +276,13 @@ pub const Kernels = struct {
 
     /// The stream tile on `total_n` columns (a group's sum); `sides` counts them off block by block when it has any.
     pub fn streamGo(k: *const Kernels, r: *const runtime.Runtime, a: Arg, sides_in: StreamSides, total_n: c_int, items: c_int, s: abi.Stream) Error!void {
-        return k.streamWith(r, a, sides_in, total_n, items, s, false);
+        return affine_stream.streamWith(k, r, a, sides_in, total_n, items, s, false);
     }
 
     /// `streamGo` with Nemotron's relu^2 as the epilogue: `a.out16` takes relu(round(sum))^2 in the activation type.
     pub fn relu2Go(k: *const Kernels, r: *const runtime.Runtime, a: Arg, items: c_int, s: abi.Stream) Error!void {
         if (a.out16 == 0 or a.out != 0) return refuse("relu2 output");
-        return k.streamWith(r, a, .{}, a.n, items, s, true);
-    }
-
-    fn streamWith(
-        k: *const Kernels,
-        r: *const runtime.Runtime,
-        a: Arg,
-        sides_in: StreamSides,
-        total_n: c_int,
-        items: c_int,
-        s: abi.Stream,
-        relu2: bool,
-    ) Error!void {
-        const b = bitIndex(a.bits).?;
-        var sides = sides_in;
-        // a pair's lane carries half as many output columns: a gate column and its up column make one
-        const pair_div: c_int = if (sides.pair_cols > 0) 2 else 1;
-        var lpc_log2: u5 = 0;
-        while ((@as(c_int, 1) << lpc_log2) < (a.k >> 5) and lpc_log2 < 5) lpc_log2 += 1;
-        const ri: usize = if (a.m == 1) 0 else if (a.m == 2) 1 else 2;
-        // the widest column count that still fills the card with waves, within the registers the lane's code words take
-        var pick: usize = 0;
-        var c: usize = stream_cbs.len;
-        while (c > 0) {
-            c -= 1;
-            if (stream_cbs[c] * stream_rows[ri] > 16 or stream_cbs[c] * a.bits > stream_code_words) continue;
-            pick = c;
-            const per_block: c_int = stream_waves * (@as(c_int, 32) >> lpc_log2) * @divExact(stream_cbs[c], pair_div);
-            if (@as(u64, cdiv(total_n, per_block)) * stream_waves * @as(u64, @intCast(items)) * cdiv(a.m, stream_rows[ri]) >= streams_wanted) break;
-        }
-        const per_block: c_int = stream_waves * (@as(c_int, 32) >> lpc_log2) * @divExact(stream_cbs[pick], pair_div);
-        var blocks: c_uint = cdiv(total_n, per_block);
-        if (sides.count > 0) {
-            blocks = 0;
-            for (0..@intCast(sides.count)) |i| {
-                sides.first[i] = @intCast(blocks);
-                blocks += cdiv(sides.n[i], per_block);
-            }
-            sides.first[@intCast(sides.count)] = @intCast(blocks);
-        }
-        var args: hl.Args = .{};
-        try args.add(a);
-        try args.add(sides);
-        try args.add(@as(c_int, lpc_log2));
-        try args.add(@as(c_int, switch (a.group) {
-            32 => 0,
-            64 => 1,
-            else => 2,
-        }));
-        const table = if (sides.pair_cols > 0) &k.pairs else if (relu2) &k.relu2 else &k.stream;
-        const f = table[b][ri][pick].?;
-        try go(r, f, .{ .x = blocks, .y = cdiv(a.m, stream_rows[ri]), .z = @intCast(items) }, .{ .x = 32 * stream_waves }, s, &args);
+        return affine_stream.streamWith(k, r, a, .{}, a.n, items, s, true);
     }
 
     /// One row on the row tile: a lane owns a group, a wave reads a column's row in one run.
@@ -450,6 +355,18 @@ pub const Kernels = struct {
         };
         try go(r, f, .{ .x = cdiv(a.n, 128), .y = cdiv(a.m, 128), .z = @intCast(items) }, .{ .x = 256 }, s, &args);
     }
+
+    pub const MoeShape = affine_matrix.MoeShape;
+    pub const moe_gu_shape = affine_matrix.moe_gu_shape;
+    pub const moe_down_shape = affine_matrix.moe_down_shape;
+    pub const moeGateUpTakes = affine_matrix.moeGateUpTakes;
+    pub const moeDownTakes = affine_matrix.moeDownTakes;
+    pub const moeGateUp = affine_matrix.moeGateUp;
+    pub const moeDown = affine_matrix.moeDown;
+    pub const dense_ks = affine_matrix.dense_ks;
+    pub const denseIndex = affine_matrix.denseIndex;
+    pub const denseGo = affine_matrix.denseGo;
+    pub const denseHcMixGo = affine_matrix.denseHcMixGo;
 
     /// K-parallel tile `tier` (an index of kp_tiles) of a short prompt.
     pub fn kpGo(k: *const Kernels, r: *const runtime.Runtime, a: Arg, s: abi.Stream, items: c_int, tier: usize) Error!void {
@@ -596,4 +513,7 @@ test "the lane groups of a row tile" {
 
 test {
     _ = mlx_entries;
+    _ = affine_stream;
+    _ = affine_load;
+    _ = affine_matrix;
 }

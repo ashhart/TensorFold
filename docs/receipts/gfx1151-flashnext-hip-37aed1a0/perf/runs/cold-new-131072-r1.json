@@ -1,0 +1,48 @@
+{
+ "tag": "cold-new-131072-r1",
+ "context": 139264,
+ "parallel": 1,
+ "prompt_cache_gib": 0,
+ "flags": "",
+ "ready_s": 29,
+ "status": "ready",
+ "server_exit": 0,
+ "ram_class_gib": 192,
+ "mem_total_gib": 184.58,
+ "load": {
+  "serving_line": "[tensorfold] serving flashnext at http://127.0.0.1:30461/v1 (sampling: temperature 1.0, top_k 20, top_p 0.95; drafts: MTP + copies; context: 139264; loaded in 27.6s)",
+  "loaded_s": 27.6,
+  "startup_lines": [
+   "[tensorfold] HIP gfx1151 device 0, rank 0 of 1: Flash Next, 84.97 GiB on the device, 1 stream of 139328 positions, 4.15 GiB each; prompts in 4096-row chunks"
+  ],
+  "tail": []
+ },
+ "sample_interval_s": 1.0,
+ "samples": 241,
+ "process": {
+  "rss_peak_sampled_bytes": 111058145280,
+  "rss_lifetime_peak_bytes": 111924826112,
+  "scope": "VmRSS/VmHWM of the one server process; device memory is not in it"
+ },
+ "device": {
+  "scope": "amdgpu sysfs, whole card; baseline taken idle before the server started",
+  "gtt_baseline_bytes": 31657984,
+  "gtt_peak_bytes": 92513394688,
+  "gtt_peak_over_baseline_bytes": 92481736704,
+  "gtt_total_bytes": 193273528320,
+  "vram_baseline_bytes": 187670528,
+  "vram_peak_bytes": 203411456,
+  "vram_peak_over_baseline_bytes": 15740928,
+  "vram_total_bytes": 4294967296
+ },
+ "server_memory_endpoint": {
+  "active_bytes": 91232258708,
+  "cache_bytes": 0,
+  "peak_bytes": 91543357348,
+  "peak_scope": "since_start_or_health_reset"
+ },
+ "server_resident_peak_bytes": 111924826112.0,
+ "drafted_total": 0.0,
+ "accepted_total": 0.0,
+ "spec_hit_rate": null
+}

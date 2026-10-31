@@ -36,7 +36,7 @@ pub fn routerWith(l: *const Launcher, x: C, kind: c_int, rows: CF, logits: F, r:
     try a.add(e);
     const k: usize = if (kind == 1) 0 else 1;
     if (small) return l.go(l.op.router_small[k], dim(cdiv(e, 8), cdiv(r, 32), 1), dim(256, 1, 1), 0, s, &a);
-    try l.go(l.op.router_tile[k], dim(cdiv(e, 64), cdiv(r, 64), 1), dim(256, 1, 1), 0, s, &a);
+    try l.go(l.op.router_tile[k], dim(cdiv(e, 64), cdiv(r, 128), 1), dim(256, 1, 1), 0, s, &a);
 }
 
 /// A lane round's router at any row count; false (nothing launched) where the shape keeps the other kernels.
@@ -53,6 +53,49 @@ pub fn routerWindow(l: *const Launcher, x: C, kind: c_int, rows: CF, logits: F, 
     return true;
 }
 
+/// Decode router logits, row picks and (with `items`) plan in one launch; false where the shape keeps them apart.
+pub fn routerSelect(l: *const Launcher, x: C, kind: c_int, rows16: C, logits: F, pick: I, wts: F, items: I, members: I, capacity: c_int, r: c_int, d: c_int, e: c_int, top_k: c_int, tile: c_int, done: u64, s: S) Error!bool {
+    if (!l.fuse or done == 0 or r < 1 or r > 16 or @rem(d, 4) != 0 or ad(rows16) % 8 != 0 or ad(x) % 8 != 0) return false;
+    if (e - 1 > 1024 or top_k < 1 or top_k > 31) return false;
+    // the plan in the launch: one row, or 2 to 8 rows of at most plan_pairs pairs (route_plan's pair a thread)
+    if (items != null and r != 1 and (r > 8 or r * (top_k + 1) > plan_pairs or tile < 1)) return false;
+    var a: Args = .{};
+    try a.add(ad(x));
+    try a.add(ad(rows16));
+    try a.add(ad(logits));
+    try a.add(r);
+    try a.add(d);
+    try a.add(e);
+    try a.add(ad(pick));
+    try a.add(ad(wts));
+    try a.add(ad(items));
+    try a.add(ad(members));
+    try a.add(capacity);
+    try a.add(top_k);
+    try a.add(tile);
+    const sh = routerShared(ad(x), r, d, e, items != null);
+    try a.add(@as(c_int, @intFromBool(sh.staged)));
+    try a.add(done);
+    try l.go(l.dec.router_select[if (kind == 1) 0 else 1], dim(cdiv(e, 4), 1, 1), dim(128, 1, 1), sh.bytes, s, &a);
+    return true;
+}
+
+/// The most bytes of x tf_router_select stages: 2 rows of 2560 bf16; more rows cost blocks a WGP than they save in L2.
+const STAGED = 2 * 2560 * 2;
+
+/// decode/select.hpp's kPlanPairs: the pairs route_plan takes in the router launch, a thread each (32 * kRouterWaves).
+const plan_pairs = 128;
+
+/// tf_router_select's dynamic shared memory: max of staged rows and (2 to 8 rows) top lists plus plan pool; 1 row: 0.
+fn routerShared(x: usize, r: c_int, d: c_int, e: c_int, plan: bool) struct { bytes: u32, staged: bool } {
+    if (r < 2 or r > 8) return .{ .bytes = 0, .staged = false };
+    const staged = @rem(d, 8) == 0 and x % 16 == 0 and r * d * 2 <= STAGED;
+    const rows: c_int = if (staged) r * d * 2 else 0;
+    // the waves' top values and indices (32 each a wave), then route_plan's counts, starts and ends, scans and pairs
+    const ints: c_int = if (e - 1 <= 1024) 2 * 32 * 4 + (if (plan) 3 * e + 2 * 128 + plan_pairs else 0) else 0;
+    return .{ .bytes = @intCast(@max(rows, ints * 4)), .staged = staged };
+}
+
 pub fn tf_moe_router(l: *const Launcher, x: C, kind: c_int, rows: CF, logits: F, r: c_int, d: c_int, e: c_int, s: S) Error!void {
     // a prompt's rows take the 64 x 64 tiles, a round's few rows a wave an expert; each logit's sum is the same
     var a: Args = .{};
@@ -66,7 +109,7 @@ pub fn tf_moe_router(l: *const Launcher, x: C, kind: c_int, rows: CF, logits: F,
     if (l.fuse and r <= 16 and @rem(d, 4) == 0 and ad(rows) % 16 == 0 and ad(x) % 8 == 0) {
         return l.go(l.dec.router[k], dim(cdiv(e, 4), 1, 1), dim(128, 1, 1), 0, s, &a);
     }
-    if (r >= 64 and @rem(d, 32) == 0) return l.go(l.op.router_tile[k], dim(cdiv(e, 64), cdiv(r, 64), 1), dim(256, 1, 1), 0, s, &a);
+    if (r >= 64 and @rem(d, 32) == 0) return l.go(l.op.router_tile[k], dim(cdiv(e, 64), cdiv(r, 128), 1), dim(256, 1, 1), 0, s, &a);
     try l.go(l.op.router_rows[k], dim(cdiv(e, 8), cdiv(r, 8), 1), dim(256, 1, 1), 0, s, &a);
 }
 
@@ -81,6 +124,17 @@ pub fn tf_moe_select(l: *const Launcher, logits: CF, pick: I, wts: F, items: I, 
     try a.add(capacity);
     try a.add(experts);
     try a.add(top_k);
+    // a prompt's rows (no plan): a wave a row, 4 rows a block, select_body's bytes (tf_select_rows)
+    if (l.fuse and items == null) {
+        var b: Args = .{};
+        try b.add(ad(logits));
+        try b.add(ad(pick));
+        try b.add(ad(wts));
+        try b.add(r);
+        try b.add(experts);
+        try b.add(top_k);
+        return l.go(l.dec.select_rows, dim(cdiv(r, 4), 1, 1), dim(128, 1, 1), 0, s, &b);
+    }
     if (l.fuse) return l.go(l.dec.select, dim(r, 1, 1), dim(512, 1, 1), 0, s, &a);
     try l.go(l.moe_select, dim(r, 1, 1), dim(32, 1, 1), 0, s, &a);
 }
@@ -96,6 +150,22 @@ pub fn tf_moe_act(l: *const Launcher, both: CF, out: P, kind: c_int, pairs: c_in
     try l.go(l.moe_act[if (kind == 1) 0 else 1], dim(cdiv(total, 256), 1, 1), dim(256, 1, 1), 0, s, &a);
 }
 
+/// The prefetch's blocks: 16 of 256 threads finish a one-row call's down codes about when its down starts.
+pub const prefetch_blocks = 16;
+
+/// tf_moe_prefetch on side stream `s`: reads the live items' experts' down codes, at most `cap_bytes`; writes nothing.
+pub fn tf_moe_prefetch(l: *const Launcher, items: CI, count: c_int, words: u64, expert_bytes: i64, experts: c_int, cap_bytes: i64, s: S) Error!void {
+    if (count <= 0 or expert_bytes <= 0 or @rem(expert_bytes, 16) != 0) return invalid("moe prefetch");
+    var a: Args = .{};
+    try a.add(ad(items));
+    try a.add(count);
+    try a.add(words);
+    try a.add(expert_bytes);
+    try a.add(experts);
+    try a.add(cap_bytes);
+    try l.go(l.dec.prefetch, dim(prefetch_blocks, 1, 1), dim(256, 1, 1), 0, s, &a);
+}
+
 pub fn tf_moe_combine(l: *const Launcher, y: CF, wts: CF, out: P, kind: c_int, r: c_int, slots: c_int, d: c_int, s: S) Error!void {
     var a: Args = .{};
     try a.add(ad(y));
@@ -104,6 +174,42 @@ pub fn tf_moe_combine(l: *const Launcher, y: CF, wts: CF, out: P, kind: c_int, r
     try a.add(slots);
     try a.add(d);
     try l.go(l.moe_combine[tri(kind)], dim(cdiv(d, 256), r, 1), dim(256, 1, 1), 0, s, &a);
+}
+
+/// decode.hip / moe.hpp kRouteSeg: the pairs a block of tf_route_count and tf_route_scatter takes.
+pub const route_seg = 512;
+
+/// The bytes of tf_moe_route_wide's scratch for `pairs` pairs over `experts` experts.
+pub fn routeScratch(pairs: usize, experts: usize) usize {
+    return (std.math.divCeil(usize, pairs, route_seg) catch unreachable) * experts * 4 + experts * 4;
+}
+
+/// tf_moe_route's members and items in three launches over 512-pair segments; a few pairs keep tf_moe_route.
+pub fn tf_moe_route_wide(l: *const Launcher, picks: CI, pairs: c_int, experts: c_int, tile: c_int, members: I, items: I, capacity: c_int, scratch: u64, s: S) Error!void {
+    if (pairs < 4 * route_seg or experts > 1024 or scratch == 0) return tf_moe_route(l, picks, pairs, experts, tile, members, items, capacity, s);
+    const segs: c_int = @intCast(cdiv(pairs, route_seg));
+    var a: Args = .{};
+    try a.add(ad(picks));
+    try a.add(pairs);
+    try a.add(experts);
+    try a.add(scratch);
+    try l.go(l.op.route_count, dim(segs, 1, 1), dim(256, 1, 1), 0, s, &a);
+    var b: Args = .{};
+    try b.add(scratch);
+    try b.add(segs);
+    try b.add(experts);
+    try b.add(tile);
+    try b.add(ad(items));
+    try b.add(capacity);
+    try l.go(l.op.route_scan, dim(1, 1, 1), dim(1024, 1, 1), 0, s, &b);
+    var c: Args = .{};
+    try c.add(ad(picks));
+    try c.add(pairs);
+    try c.add(segs);
+    try c.add(experts);
+    try c.add(scratch);
+    try c.add(ad(members));
+    try l.go(l.op.route_scatter, dim(segs, 1, 1), dim(route_seg, 1, 1), 0, s, &c);
 }
 
 pub fn tf_moe_route(l: *const Launcher, picks: CI, pairs: c_int, experts: c_int, tile: c_int, members: I, items: I, capacity: c_int, s: S) Error!void {

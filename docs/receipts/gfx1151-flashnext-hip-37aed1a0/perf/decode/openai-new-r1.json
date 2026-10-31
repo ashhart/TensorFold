@@ -1,0 +1,102 @@
+[
+ {
+  "label": "new-r1",
+  "prompt": "fibonacci-raw",
+  "temperature": 0.0,
+  "tokens": 256,
+  "decode_tps_median": 69.15345703661757,
+  "decode_tps_all": [
+   69.77,
+   68.12,
+   69.15
+  ],
+  "ttft_s_median": 0.09834573298576288,
+  "prefill_tps_median": 142.355,
+  "itl_mean_ms_median": 14.461,
+  "itl_p50_ms_median": 0.0,
+  "itl_p95_ms_median": 70.896,
+  "round_gap_p50_ms_median": 45.971,
+  "round_gap_p95_ms_median": 112.928,
+  "tokens_per_chunk_median": 3.71,
+  "evidence": [
+   {
+    "prompt_tokens": 14,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "beb57dfacf5e",
+    "output_sha256": "e471828008cbc1b08ec3bb9c14c972a0219b1f7b7825587ed9933b24a92c8bcc"
+   },
+   {
+    "prompt_tokens": 14,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "beb57dfacf5e",
+    "output_sha256": "e471828008cbc1b08ec3bb9c14c972a0219b1f7b7825587ed9933b24a92c8bcc"
+   },
+   {
+    "prompt_tokens": 14,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "beb57dfacf5e",
+    "output_sha256": "e471828008cbc1b08ec3bb9c14c972a0219b1f7b7825587ed9933b24a92c8bcc"
+   }
+  ],
+  "sample": "\n\n<think>\n\n</think>\n\nHere is a concise and efficient Python function to compute the Fibonacci sequence, followed by a detailed explanation.\n\n### Python Function"
+ },
+ {
+  "label": "new-r1",
+  "prompt": "gpu-chat-no-think",
+  "temperature": 0.0,
+  "tokens": 256,
+  "decode_tps_median": 55.4400335994644,
+  "decode_tps_all": [
+   56.07,
+   55.44,
+   55.2
+  ],
+  "ttft_s_median": 0.1711614170053508,
+  "prefill_tps_median": 181.116,
+  "itl_mean_ms_median": 18.038,
+  "itl_p50_ms_median": 0.0,
+  "itl_p95_ms_median": 58.012,
+  "round_gap_p50_ms_median": 38.606,
+  "round_gap_p95_ms_median": 118.704,
+  "tokens_per_chunk_median": 2.462,
+  "evidence": [
+   {
+    "prompt_tokens": 31,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "e5fa3204ab36",
+    "output_sha256": "8d495fb2636b022a072838c3847aba890d4c29b9be924278ec62bc572d8c83a1"
+   },
+   {
+    "prompt_tokens": 31,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "e5fa3204ab36",
+    "output_sha256": "8d495fb2636b022a072838c3847aba890d4c29b9be924278ec62bc572d8c83a1"
+   },
+   {
+    "prompt_tokens": 31,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "e5fa3204ab36",
+    "output_sha256": "8d495fb2636b022a072838c3847aba890d4c29b9be924278ec62bc572d8c83a1"
+   }
+  ],
+  "sample": "### How Matrix Multiplication Uses a GPU (In Plain English)\n\nTo understand how a GPU (Graphics Processing Unit) handles matrix multiplication, it helps to first"
+ }
+]

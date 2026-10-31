@@ -134,7 +134,7 @@ fn linear(o: Ops, m: *const view.Model, l: view.Linear, caches: *state.Caches, i
     const beta = try o.arena.of(f32, rows * s.value_heads);
     try o.gdnGatePrefill(a, b, l.a_log, l.dt_bias, gate, beta, rows, s.value_heads);
     const y = try o.arena.of(f32, rows * s.valueWidth());
-    try o.gatedDelta(q, k, v, gate, beta, cache.state.base(), y, rows, s.key_heads, s.value_heads, s.key_dim, s.value_dim, null);
+    try o.gatedDelta(q, k, v, gate, beta, cache.state.base(), y, rows, s.key_heads, s.value_heads, s.key_dim, s.value_dim, null, 0);
     return gatedOut(o, m, l, y, z, rows);
 }
 

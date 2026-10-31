@@ -127,7 +127,8 @@ test "hyper-connection norm, gates and mix: the reference's roundings, each row 
     defer mixed.free();
     try t.on.fn_hc_gates(ptr(?[*]const f32, z), ptr(?*anyopaque, act), ptr(?*anyopaque, inj), k, rows, low, s, st);
     try t.on.fn_hc_mix(
-        ptr(?[*]const f32, g),
+        ptr(?*const anyopaque, g),
+        0,
         ptr(?*const anyopaque, x_out),
         ptr(?*anyopaque, mixed),
         k,
@@ -556,4 +557,8 @@ test "n-gram rows: every head's hash of the window, segments cut at eos, exact" 
             );
         };
     }
+}
+
+test {
+    _ = @import("flashnext_hc.zig");
 }

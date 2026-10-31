@@ -94,6 +94,8 @@ pub fn save(
 ) !*Saved {
     try s.synchronize();
     if (c.len != at) return error.SnapshotNotAtMark;
+    // a keep that named a snapshot row left the conv tails out of their places: the caller settles first
+    if (c.pending != null) return error.SnapshotUnsettled;
     const out = try gpa.create(Saved);
     errdefer gpa.destroy(out);
     const main = try copyOut(d, c, at, ratio, gpa);
@@ -115,6 +117,8 @@ fn restore(
 ) !void {
     try s.synchronize();
     if (saved.at + 1 > c.layout.cap) return error.SnapshotTooLong;
+    // the copy fills the places: a window after it starts from them, not from a snapshot row an earlier keep named
+    try c.startAt(null, s);
     try copyIn(d, c, saved.at, ratio, saved.main, gpa);
     if (head) |h| try copyIn(d, h, saved.at, ratio, saved.head, gpa);
     c.len = saved.at;

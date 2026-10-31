@@ -1,0 +1,66 @@
+pgrep: pattern that searches for process name longer than 15 characters will result in zero matches
+Try `pgrep -f' option to match against the complete command line.
+pgrep: pattern that searches for process name longer than 15 characters will result in zero matches
+Try `pgrep -f' option to match against the complete command line.
+pgrep: pattern that searches for process name longer than 15 characters will result in zero matches
+Try `pgrep -f' option to match against the complete command line.
+pgrep: pattern that searches for process name longer than 15 characters will result in zero matches
+Try `pgrep -f' option to match against the complete command line.
+pgrep: pattern that searches for process name longer than 15 characters will result in zero matches
+Try `pgrep -f' option to match against the complete command line.
+== 2026-10-31T17:40:29Z server mem-new-default-r1: context 20480, parallel 1, prompt cache 0 GiB 
+== 2026-10-31T17:41:07Z step mem-new-default-r1
+== 2026-10-31T17:41:38Z step mem-new-default-r1 rc=0
+== 2026-10-31T17:41:40Z server mem-new-step1024-r1: context 20480, parallel 1, prompt cache 0 GiB --policy prefill_step=1024
+== 2026-10-31T17:42:10Z step mem-new-step1024-r1
+== 2026-10-31T17:42:45Z step mem-new-step1024-r1 rc=0
+== 2026-10-31T17:42:47Z server mem-new-step20480-r1: context 20480, parallel 1, prompt cache 0 GiB --policy prefill_step=20480
+== 2026-10-31T17:43:19Z step mem-new-step20480-r1
+== 2026-10-31T17:43:49Z step mem-new-step20480-r1 rc=0
+== 2026-10-31T17:43:51Z server mem-new-mapped-cold-r1: context 20480, parallel 1, prompt cache 0 GiB --policy rows=mapped
+== 2026-10-31T17:44:10Z step mem-new-mapped-cold-r1
+== 2026-10-31T17:44:58Z step mem-new-mapped-cold-r1 rc=0
+== 2026-10-31T17:45:01Z server mem-new-mapped-warm-r1: context 20480, parallel 1, prompt cache 0 GiB --policy rows=mapped
+== 2026-10-31T17:45:15Z step mem-new-mapped-warm-r1
+== 2026-10-31T17:45:46Z step mem-new-mapped-warm-r1 rc=0
+== 2026-10-31T17:45:48Z server mem-new-step1024-mapped-r1: context 20480, parallel 1, prompt cache 0 GiB --policy prefill_step=1024,rows=mapped
+== 2026-10-31T17:46:02Z step mem-new-step1024-mapped-r1
+== 2026-10-31T17:46:37Z step mem-new-step1024-mapped-r1 rc=0
+== 2026-10-31T17:46:38Z server mem-base-r1: context 20480, parallel 1, prompt cache 0 GiB 
+== 2026-10-31T17:46:49Z step mem-base-r1
+== 2026-10-31T17:47:36Z step mem-base-r1 rc=0
+== 2026-10-31T17:47:39Z server mem-new-default-r2: context 20480, parallel 1, prompt cache 0 GiB 
+== 2026-10-31T17:48:08Z step mem-new-default-r2
+== 2026-10-31T17:48:39Z step mem-new-default-r2 rc=0
+== 2026-10-31T17:48:42Z server mem-new-step1024-r2: context 20480, parallel 1, prompt cache 0 GiB --policy prefill_step=1024
+== 2026-10-31T17:49:14Z step mem-new-step1024-r2
+== 2026-10-31T17:49:48Z step mem-new-step1024-r2 rc=0
+== 2026-10-31T17:49:51Z server mem-new-step20480-r2: context 20480, parallel 1, prompt cache 0 GiB --policy prefill_step=20480
+== 2026-10-31T17:50:25Z step mem-new-step20480-r2
+== 2026-10-31T17:50:55Z step mem-new-step20480-r2 rc=0
+== 2026-10-31T17:50:57Z server mem-new-mapped-cold-r2: context 20480, parallel 1, prompt cache 0 GiB --policy rows=mapped
+== 2026-10-31T17:51:17Z step mem-new-mapped-cold-r2
+== 2026-10-31T17:52:04Z step mem-new-mapped-cold-r2 rc=0
+== 2026-10-31T17:52:07Z server mem-new-mapped-warm-r2: context 20480, parallel 1, prompt cache 0 GiB --policy rows=mapped
+== 2026-10-31T17:52:22Z step mem-new-mapped-warm-r2
+== 2026-10-31T17:52:54Z step mem-new-mapped-warm-r2 rc=0
+== 2026-10-31T17:52:55Z server mem-new-step1024-mapped-r2: context 20480, parallel 1, prompt cache 0 GiB --policy prefill_step=1024,rows=mapped
+== 2026-10-31T17:53:09Z step mem-new-step1024-mapped-r2
+== 2026-10-31T17:53:44Z step mem-new-step1024-mapped-r2 rc=0
+== 2026-10-31T17:53:45Z server mem-base-r2: context 20480, parallel 1, prompt cache 0 GiB 
+== 2026-10-31T17:53:56Z step mem-base-r2
+== 2026-10-31T17:54:43Z step mem-base-r2 rc=0
+mem-base-r1 | 76.58 GiB on the device, 1 stream of 20544 positions, 1.14 GiB each; prompts in 1024-row chunks | 84292440064 84332322816 | ttft 46.471027742984006
+mem-base-r2 | 76.58 GiB on the device, 1 stream of 20544 positions, 1.14 GiB each; prompts in 1024-row chunks | 84292440064 84356018176 | ttft 46.46257960499497
+mem-new-default-r1 | 81.82 GiB on the device, 1 stream of 20544 positions, 0.74 GiB each; prompts in 4096-row chunks | 88832692224 112119701504 | ttft 30.735502470983192
+mem-new-default-r2 | 81.82 GiB on the device, 1 stream of 20544 positions, 0.74 GiB each; prompts in 4096-row chunks | 88832692224 112311951360 | ttft 30.823120265005855
+mem-new-mapped-cold-r1 | 81.82 GiB on the device, 1 stream of 20544 positions, 0.74 GiB each; prompts in 4096-row chunks | 88832692224 84365791232 | ttft 46.297117879992584
+mem-new-mapped-cold-r2 | 81.82 GiB on the device, 1 stream of 20544 positions, 0.74 GiB each; prompts in 4096-row chunks | 88832692224 84386779136 | ttft 46.203377994999755
+mem-new-mapped-warm-r1 | 81.82 GiB on the device, 1 stream of 20544 positions, 0.74 GiB each; prompts in 4096-row chunks | 88832692224 84412772352 | ttft 30.92277264900622
+mem-new-mapped-warm-r2 | 81.82 GiB on the device, 1 stream of 20544 positions, 0.74 GiB each; prompts in 4096-row chunks | 88832692224 84432424960 | ttft 30.93969676399138
+mem-new-step1024-mapped-r1 | 77.36 GiB on the device, 1 stream of 20544 positions, 0.74 GiB each; prompts in 1024-row chunks | 84038602752 84413345792 | ttft 34.125737205991754
+mem-new-step1024-mapped-r2 | 77.36 GiB on the device, 1 stream of 20544 positions, 0.74 GiB each; prompts in 1024-row chunks | 84038602752 84431228928 | ttft 34.12385592798819
+mem-new-step1024-r1 | 77.36 GiB on the device, 1 stream of 20544 positions, 0.74 GiB each; prompts in 1024-row chunks | 84038602752 110197727232 | ttft 33.89995566298603
+mem-new-step1024-r2 | 77.36 GiB on the device, 1 stream of 20544 positions, 0.74 GiB each; prompts in 1024-row chunks | 84038602752 111990099968 | ttft 33.83586324600037
+mem-new-step20480-r1 | 105.63 GiB on the device, 1 stream of 20544 positions, 0.74 GiB each; prompts in 20480-row chunks | 114392780800 112203182080 | ttft 29.693808502983302
+mem-new-step20480-r2 | 105.63 GiB on the device, 1 stream of 20544 positions, 0.74 GiB each; prompts in 20480-row chunks | 114392780800 112598904832 | ttft 29.839465764991473

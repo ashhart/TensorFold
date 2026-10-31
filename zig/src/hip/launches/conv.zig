@@ -45,6 +45,8 @@ pub const ConvArgs = extern struct {
     plan: PlanArgs = .{},
     layer: c_int = 0,
     slots: c_int = 1,
+    /// A device i32: with row f >= 0, a window's start is the last window's snapshot after row f (states must be set).
+    from: u64 = 0,
 };
 
 pub fn tf_conv_decode(l: *const Launcher, x: CF, weight: CF, state: F, y: F, batch: c_int, channels: c_int, kernel: c_int, s: S) Error!void {
@@ -94,4 +96,21 @@ pub fn tf_conv_prefill(l: *const Launcher, x: C, kind: c_int, weight: CF, state:
     // a thread a channel over 16 rows (conv_prefill_kernel's kConvRows), at most 8 taps
     if (kernel > 8) return invalid("conv_prefill");
     try l.go(l.op.conv_prefill, dim(cdiv(channels, 256), @max(1, cdiv(len, 16)), 1), dim(256, 1, 1), 0, s, &a);
+}
+
+/// A DeltaNet layer's prompt prework in one launch: conv, q/k RMS norm, v, new conv state, gate and beta (linear.hpp).
+pub fn tf_gdn_prompt_prep(l: *const Launcher, x: C, kind: c_int, weight: CF, state: CF, new_state: F, q: F, k: F, v: F, qw: CF, kw_w: CF, eps: f32, len: c_int, kwidth: c_int, vwidth: c_int, kernel: c_int, a: C, b: C, a_log: CF, dt_bias: CF, gate: F, beta: F, heads: c_int, s: S) Error!void {
+    if (kernel < 1 or kernel > 8 or @rem(kwidth, 128) != 0 or len < 1) return invalid("gdn prompt prep");
+    var args: Args = .{};
+    inline for (.{ ad(x), kind, ad(weight), ad(state), ad(new_state), ad(q), ad(k), ad(v), ad(qw), ad(kw_w), eps, len, kwidth, vwidth, kernel, ad(a), ad(b), ad(a_log), ad(dt_bias), ad(gate), ad(beta), heads }) |val| try args.add(val);
+    const n: usize = @intCast(len);
+    const kwu: usize = @intCast(kwidth);
+    const vwu: usize = @intCast(vwidth);
+    const segs = (n + 15) / 16;
+    const qk_heads = 2 * kwu / 128;
+    const per_v = (vwu + 255) / 256;
+    const states = @as(usize, @intCast(kernel - 1)) * (2 * kwu + vwu);
+    const total = (qk_heads * segs + 7) / 8 + per_v * segs + (n * @as(usize, @intCast(heads)) + 255) / 256 + (states + 255) / 256;
+    const blocks: c_int = @intCast(total);
+    try l.go(l.op.gdn_prompt_prep, dim(blocks, 1, 1), dim(256, 1, 1), 0, s, &args);
 }

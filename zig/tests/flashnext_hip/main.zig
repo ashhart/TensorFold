@@ -7,7 +7,7 @@ const tokenizer = @import("tokenizer");
 /// No per-thread alternate signal stack: its thread-local leaves RCCL's and HIP's threads too little stack to start.
 pub const std_options: std.Options = .{ .signal_stack_size = null };
 
-const usage = "usage: tf-flashnext-hip-test generate <model dir> [--tp N --rank R --master H --port P --policy P] [--text T] [--chat] [--max N] [--capacity N] [--repeat N] [--chunk N] [--hash]\n";
+const usage = "usage: tf-flashnext-hip-test generate <model dir> [--tp N --rank R --master H --port P --policy P] [--text T] [--chat] [--max N] [--capacity N] [--repeat N] [--chunk N] [--hash] [--margins N]\n";
 
 const Args = struct {
     dir: []const u8 = "",
@@ -24,6 +24,8 @@ const Args = struct {
     chunk: usize = 512,
     /// Print a hash of every step's whole logits row, to compare builds and policies bit for bit.
     hash: bool = false,
+    /// Print the first N steps' two best tokens and their logits (a near-tie shows as a small gap).
+    margins: usize = 0,
 };
 
 fn parse(args: []const [:0]const u8) !Args {
@@ -58,6 +60,8 @@ fn parse(args: []const [:0]const u8) !Args {
             a.repeat = try std.fmt.parseInt(usize, v, 10)
         else if (std.mem.eql(u8, name, "--chunk"))
             a.chunk = try std.fmt.parseInt(usize, v, 10)
+        else if (std.mem.eql(u8, name, "--margins"))
+            a.margins = try std.fmt.parseInt(usize, v, 10)
         else
             return error.UnknownOption;
     }
@@ -124,16 +128,18 @@ fn generate(gpa: std.mem.Allocator, io: std.Io, a: Args) !void {
         var digest = std.hash.Fnv1a_64.init();
         const first = try e.logits(o, last, 1);
         if (a.hash) try mix(e, &digest, first);
+        if (a.margins > 0 and loud) try margin(e, first, 0);
         try e.drawer.draw(o, e.stream, first, &.{.{ .sampling = null, .position = prompt.len }}, &next, false);
         const p1 = nowNs(io);
         var reply: std.ArrayList(u32) = .empty;
         try reply.append(arena.allocator(), next[0]);
-        for (1..a.max) |_| {
+        for (1..a.max) |n_step| {
             const step = [1]u32{next[0]};
             const seg = [_]fx.forward.Seg{.{ .c = &c, .tokens = &step, .pos = c.len }};
             const y = (try e.round(&seg, try e.choose(&seg))).logits;
             o = e.ops(&e.arena);
             if (a.hash) try mix(e, &digest, y);
+            if (n_step < a.margins and loud) try margin(e, y, n_step);
             try e.drawer.draw(o, e.stream, y, &.{.{ .sampling = null, .position = c.len + 1 }}, &next, false);
             try e.keepWindow(&c, &step, 1);
             try reply.append(arena.allocator(), next[0]);
@@ -158,6 +164,23 @@ fn generate(gpa: std.mem.Allocator, io: std.Io, a: Args) !void {
         if (a.hash) std.debug.print("logits hash {x:0>16}\n", .{digest.final()});
         std.debug.print("ids {any}\n---\n{s}{s}\n---\n", .{ reply.items, text, words });
     }
+}
+
+/// Step `n`'s two best tokens and their logits (bf16 or fp16 rows), read back after the stream's work.
+fn margin(e: *fx.engine.Engine, y: hip.ops.Tensor, n: usize) !void {
+    const row = try e.gpa.alloc(u16, e.cfg.vocab);
+    defer e.gpa.free(row);
+    try e.stream.synchronize();
+    try hip.runtime.check(e.driver.api.hipMemcpyDtoH(@ptrCast(row.ptr), @ptrFromInt(y.ptr), row.len * 2));
+    var best: [2]struct { id: usize, v: f32 } = .{ .{ .id = 0, .v = -std.math.inf(f32) }, .{ .id = 0, .v = -std.math.inf(f32) } };
+    for (row, 0..) |b, i| {
+        const v: f32 = if (y.kind == .f16) @floatCast(@as(f16, @bitCast(b))) else @bitCast(@as(u32, b) << 16);
+        if (v > best[0].v) {
+            best[1] = best[0];
+            best[0] = .{ .id = i, .v = v };
+        } else if (v > best[1].v) best[1] = .{ .id = i, .v = v };
+    }
+    std.debug.print("margin step {d}: {d} {d:.4}, {d} {d:.4}, gap {d:.4}\n", .{ n, best[0].id, best[0].v, best[1].id, best[1].v, best[0].v - best[1].v });
 }
 
 /// One logits row folded into `digest`, read back after the stream's work.

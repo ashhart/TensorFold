@@ -1,0 +1,6 @@
+{"mode": "drafts", "output_tokens": 256, "rep": 1, "prompt_tokens": 16384, "cached_tokens": 0, "tokens": 256, "ttft_s": 46.42886849399656, "decode_tps": 34.90616944594986, "prefill_tps": 352.8838959777475}
+{"mode": "drafts", "output_tokens": 256, "rep": 2, "prompt_tokens": 16384, "cached_tokens": 0, "tokens": 256, "ttft_s": 46.460142659023404, "decode_tps": 40.63882954261092, "prefill_tps": 352.6463558289985}
+{"mode": "drafts", "output_tokens": 256, "rep": 3, "prompt_tokens": 16384, "cached_tokens": 0, "tokens": 256, "ttft_s": 46.54141795900068, "decode_tps": 41.065374588925394, "prefill_tps": 352.03052933266906}
+{"mode": "drafts", "output_tokens": 1024, "rep": 1, "prompt_tokens": 16384, "cached_tokens": 0, "tokens": 1024, "ttft_s": 46.42469694299507, "decode_tps": 35.44115830408456, "prefill_tps": 352.9156048152114}
+{"mode": "drafts", "output_tokens": 1024, "rep": 2, "prompt_tokens": 16384, "cached_tokens": 0, "tokens": 1024, "ttft_s": 46.50661671999842, "decode_tps": 38.423109525995486, "prefill_tps": 352.2939563340603}
+{"mode": "drafts", "output_tokens": 1024, "rep": 3, "prompt_tokens": 16384, "cached_tokens": 0, "tokens": 1024, "ttft_s": 46.53043384497869, "decode_tps": 38.329530889919425, "prefill_tps": 352.1136307171585}

@@ -185,6 +185,12 @@ fn fitsPrefillMatrix(s: Shape) bool {
     return prefillOk(s) and !s.fp16 and gemmFits(s);
 }
 
+/// The dense tile: plain 4-bit group-32 products, bf16 x and tables, a K it compiles, at least one full column tile.
+fn fitsPrefillDense(s: Shape) bool {
+    return fitsPrefillMatrix(s) and s.items == 0 and s.bits == 4 and s.group == 32 and s.tables == .bf16 and s.x_aligned and
+        s.n >= 128 and Kernels.denseIndex(@intCast(s.k)) != null;
+}
+
 fn fitsPrefillGemm(s: Shape) bool {
     return prefillOk(s) and gemmFits(s);
 }
@@ -237,6 +243,10 @@ fn launchBlock(comptime kind: affine.BlockKind) Launch {
             try k.blockGo(c.r, c.arg, c.s, c.items, kind);
         }
     }.f;
+}
+
+fn launchDense(k: *const Kernels, c: Call) Error!void {
+    try k.denseGo(c.r, c.arg, c.s);
 }
 
 fn launchKp(comptime tier: usize) Launch {
@@ -315,7 +325,11 @@ fn prefill(comptime op: Op) [7]Entry {
     };
 }
 
-pub const all = project_decode ++ routed_decode ++ other_decode ++ prefill(.project) ++ prefill(.routed);
+const project_prefill = [_]Entry{
+    entry(.project, .prefill, "dense", .{ .family = .gemm, .fits = &fitsPrefillDense, .launch = &launchDense, .caps = &matrixCores, .policy = &matrixOn, .rounds = .always }),
+};
+
+pub const all = project_decode ++ routed_decode ++ other_decode ++ project_prefill ++ prefill(.project) ++ prefill(.routed);
 
 // ---- the choices on the GPUs' tables
 
@@ -455,4 +469,34 @@ test "gfx1201 takes the K-parallel tile for short routed prompts, up to its item
         const shape: Shape = .{ .m = 128, .n = w[0], .k = w[1], .bits = 4, .group = w[2], .fp16 = false, .items = w[3], .plan_pairs = w[4] };
         try std.testing.expect(std.mem.endsWith(u8, r.select(env, .mlx, .routed, .prefill, shape).?.id, w[5]));
     }
+}
+
+test "a prompt's plain 4-bit group-32 products at Flash Next's K take the dense tile past the K-parallel tiles" {
+    const r = kernelsOn("gfx1151");
+    const env = envOn("gfx1151", true, true, true);
+    var shape: Shape = .{ .m = 8192, .n = 10240, .k = 2560, .bits = 4, .group = 32, .fp16 = false };
+    for ([_]u32{ 320, 2560, 6144, 10240 }) |k| {
+        shape.k = k;
+        try std.testing.expect(std.mem.endsWith(u8, r.select(env, .mlx, .project, .prefill, shape).?.id, "dense"));
+    }
+    shape.m = 32;
+    try std.testing.expect(std.mem.endsWith(u8, r.select(env, .mlx, .project, .prefill, shape).?.id, "kp2"));
+    shape.m = 33;
+    try std.testing.expect(std.mem.endsWith(u8, r.select(env, .mlx, .project, .prefill, shape).?.id, "dense"));
+    // the matrix tile keeps every other product: another K, width, group or table kind, a narrow one, a plan
+    const others = [_]Shape{
+        .{ .m = 8192, .n = 10240, .k = 4096, .bits = 4, .group = 32, .fp16 = false },
+        .{ .m = 8192, .n = 10240, .k = 2560, .bits = 8, .group = 32, .fp16 = false },
+        .{ .m = 8192, .n = 10240, .k = 2560, .bits = 4, .group = 64, .fp16 = false },
+        .{ .m = 8192, .n = 10240, .k = 2560, .bits = 4, .group = 32, .fp16 = false, .tables = .f32 },
+        .{ .m = 8192, .n = 48, .k = 2560, .bits = 4, .group = 32, .fp16 = false },
+    };
+    for (others) |s| try std.testing.expect(std.mem.endsWith(u8, r.select(env, .mlx, .project, .prefill, s).?.id, "matrix"));
+    shape.m = 8192;
+    shape.items = 301;
+    try std.testing.expect(std.mem.endsWith(u8, r.select(env, .mlx, .routed, .prefill, shape).?.id, "matrix"));
+    // with the matrix cores off, and on gfx1201, the dot2 GEMM tile
+    shape.items = 0;
+    try std.testing.expect(std.mem.endsWith(u8, r.select(envOn("gfx1151", true, true, false), .mlx, .project, .prefill, shape).?.id, "gemm"));
+    try std.testing.expect(std.mem.endsWith(u8, r.select(envOn("gfx1201", true, true, true), .mlx, .project, .prefill, shape).?.id, "gemm"));
 }

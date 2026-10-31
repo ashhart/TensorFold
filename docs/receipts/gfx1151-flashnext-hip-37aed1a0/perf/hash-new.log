@@ -1,0 +1,23 @@
+loaded in 28.7 s, 75.92 GiB on the device
+prompt 24 tokens in 0.144 s (166.4 tok/s); 63 tokens in 1.634 s (38.55 tok/s)
+logits hash 243ecea88fe50d9f
+ids { 71093, 12305, 198, 727, 73111, 1393, 25, 514, 8, 1411, 514, 25, 198, 262, 4071, 198, 262, 3301, 279, 307, 7324, 76938, 1324, 13, 198, 1031, 262, 561, 76938, 8240, 8211, 440, 426, 7, 15, 8, 283, 220, 15, 11, 426, 7, 16, 8, 283, 220, 16, 11, 321, 1754, 16905, 198, 262, 1324, 369, 279, 2542, 314, 279, 1330, 36497, 5981, 13, 198 }
+---
+<|im_start|>user
+Write a Python function that returns the n-th Fibonacci number.<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+
+```python
+def fibonacci(n: int) -> int:
+    """
+    Return the n-th Fibonacci number.
+    
+    The Fibonacci sequence starts with F(0) = 0, F(1) = 1, and each subsequent
+    number is the sum of the two preceding ones.
+
+---
+info: graphs: 1 captured (8 ms each), 61 of 63 rounds replayed
+rc=0

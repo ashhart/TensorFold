@@ -475,6 +475,13 @@ families refuse `--kv-dtype` before any download.
 `--mtp-confidence P`, from 0 to 1, sets the probability under which a chain stops before a later draft; the CUDA
 default is 0.70, for one stream and for concurrent rounds. Only Flash Next's CUDA engine has this rule, so the MLX path and the other families refuse it.
 
+## HIP prompt chunk
+
+On HIP, Flash Next cuts prompts at 4,096 rows unless `--policy` or `TF_POLICY` names `prefill_step`.
+`--policy prefill_step=20480` runs a 20K prompt in one pass. On a gfx1151 machine with 192 GiB of unified memory it
+prefilled a 16K prompt about 3 % faster and held about 24 GiB more GPU memory than the default. Use it only where that
+memory is free. A measurement on a larger machine is not a budget for a smaller one.
+
 ## Draft vocabulary provenance
 
 The Flash Next dump tool accepts `--draft-vocab default` for the shipped list,

@@ -29,12 +29,19 @@ pub const Routed = struct {
     remap: u64 = 0,
     /// Plan the rows' own pairs, not a power-of-two bucket's (no graph replays the launches at other row counts).
     exact: bool = false,
+    /// The router's rows in bf16 (E + 1, D), as `rows32`: one router-and-pick launch reads them (0: two over `rows32`).
+    rows16: u64 = 0,
+    /// A u32, zero between launches, that the one-launch router and pick counts its finished blocks in.
+    done: u64 = 0,
 
     /// Routed experts, the shared one not counted.
     pub fn count(r: Routed) usize {
         return r.rows - 1;
     }
 };
+
+/// Most rows a call has to read its live experts' down codes on the side stream beside its gate and up (more: no gain).
+pub const prefetch_rows = 1;
 
 /// experts.py: the decode tile's most rows, the GEMM tile's rows and where it starts, items' pair cap.
 const LANE_ROWS = 8;
@@ -51,6 +58,12 @@ pub fn bucket(rows: usize) usize {
 /// max_items(pairs, experts, min(TILE, LANE_ROWS)): an item a used expert plus one a tile of pairs past its first.
 pub fn capacity(pairs: usize, experts: usize) usize {
     return @min(pairs, experts) + pairs / @min(TILE, LANE_ROWS);
+}
+
+/// The most live items a prompt plan has at `tile` pairs an item (tf_moe_route puts them first): its launches' z.
+pub fn planItems(pairs: usize, experts: usize, tile: usize) usize {
+    const a = @min(pairs, experts);
+    return a + (pairs - a) / tile;
 }
 
 /// tile_for: the decode tile below BLOCK_FROM rows, the GEMM tile from there; a lane round's rows keep the decode tile.
@@ -76,10 +89,10 @@ pub fn run(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, prefill: bool)
     const wts = try o.arena.of(f32, size * slots);
     const items = try o.arena.of(i32, cap * 3);
     const members = try o.arena.of(i32, size * slots);
-    try o.moeRouter(x, r.rows32, logits, rows, ex.dims, r.rows);
     const count: usize = cap;
     var tile: usize = undefined;
     if (r.remap != 0) {
+        try o.moeRouter(x, r.rows32, logits, rows, ex.dims, r.rows);
         // every rank picks the same pairs, runs the ones it holds (the others group under an id past its experts)
         try o.moeSelect(logits, pick, wts, null, 0, rows, r.count(), r.top_k);
         const local = try o.arena.of(i32, size * slots);
@@ -97,13 +110,13 @@ pub fn run(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, prefill: bool)
         try o.moeCombine(y, wts, .{ .ptr = share, .kind = .f32 }, rows, slots, ex.dims);
         return .{ .ptr = share, .kind = .f32 };
     }
-    const p = try expertParts(o, kind, r, x, rows, logits, pick, wts, items, members, cap);
+    const p = try expertParts(o, kind, r, x, rows, logits, pick, wts, items, members, cap, false);
     const out = try o.arena.take(rows * ex.dims * kind.size());
     try o.moeCombine(p.y, wts, .{ .ptr = out, .kind = kind }, rows, slots, ex.dims);
     return .{ .ptr = out, .kind = kind };
 }
 
-/// The routed slots a row (fp32) and their weights before the sum: a single rank only.
+/// The routed slots a row (fp32) and their weights before the sum, single rank: join the side stream before reading y.
 pub const Parts = struct { y: u64, wts: u64, slots: usize };
 
 pub fn parts(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize) ops.Error!Parts {
@@ -115,27 +128,47 @@ pub fn parts(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize) ops.Error!Pa
     const wts = try o.arena.of(f32, size * slots);
     const items = try o.arena.of(i32, cap * 3);
     const members = try o.arena.of(i32, size * slots);
-    try o.moeRouter(x, r.rows32, logits, rows, r.experts.dims, r.rows);
-    const p = try expertParts(o, kind, r, x, rows, logits, pick, wts, items, members, cap);
+    const p = try expertParts(o, kind, r, x, rows, logits, pick, wts, items, members, cap, true);
     return .{ .y = p.y, .wts = wts, .slots = slots };
 }
 
 /// Select, plan, gate and up, the activation and down: the rows' slots before the combine.
-fn expertParts(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, logits: u64, pick: u64, wts: u64, items: u64, members: u64, cap: usize) ops.Error!struct { y: u64 } {
+fn expertParts(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, logits: u64, pick: u64, wts: u64, items: u64, members: u64, cap: usize, prefetch: bool) ops.Error!struct { y: u64 } {
     const ex = r.experts;
     const slots = r.top_k + 1;
     const pairs = rows * slots;
     var count: usize = cap;
     var tile: usize = undefined;
     if (rows == 1) {
-        try o.moeSelect(logits, pick, wts, .{ .items = items, .members = members }, cap, 1, r.count(), r.top_k);
+        // the router and the pick (and the plan) in one launch where the decode kernels take it
+        if (!try o.moeRouterSelect(x, r.rows16, r.done, logits, pick, wts, .{ .items = items, .members = members }, cap, 1, ex.dims, r.rows, r.top_k, 0)) {
+            try o.moeRouter(x, r.rows32, logits, rows, ex.dims, r.rows);
+            try o.moeSelect(logits, pick, wts, .{ .items = items, .members = members }, cap, 1, r.count(), r.top_k);
+        }
         tile = 1;
         count = slots;
     } else {
-        try o.moeSelect(logits, pick, wts, null, 0, rows, r.count(), r.top_k);
         tile = tileFor(o, rows);
-        try o.moeRoute(pick, pairs, r.rows, tile, members, items, cap);
+        // a verify window's 2 to 8 rows: the router, the pick and tf_moe_route's plan in one launch
+        const planned = rows <= 8 and try o.moeRouterSelect(x, r.rows16, r.done, logits, pick, wts, .{ .items = items, .members = members }, cap, rows, ex.dims, r.rows, r.top_k, tile);
+        if (!planned) {
+            if (!try o.moeRouterSelect(x, r.rows16, r.done, logits, pick, wts, null, 0, rows, ex.dims, r.rows, r.top_k, 0)) {
+                try o.moeRouter(x, r.rows32, logits, rows, ex.dims, r.rows);
+                try o.moeSelect(logits, pick, wts, null, 0, rows, r.count(), r.top_k);
+            }
+            try o.moeRoute(pick, pairs, r.rows, tile, members, items, cap);
+            // a prompt plan's launches cover its live items only (the slots past them are dead)
+            if (tile == BLOCK_ROWS) count = @min(cap, planItems(pairs, r.rows, tile));
+        }
     }
+    // the live experts' down codes into the caches on the side stream while the gate and up run
+    if (prefetch and rows <= prefetch_rows and !o.prefill) switch (ex.down.handle) {
+        .mlx => |h| {
+            const expert_bytes = @as(usize, ex.down.n) * @as(usize, ex.down.k) * @as(usize, h.bits) / 8;
+            try o.moePrefetch(items, count, h.words, expert_bytes, r.rows, count * expert_bytes);
+        },
+        .dense => {},
+    };
     // the gate and up's activation is the launch's epilogue when the tile takes the shape
     const act_t: Tensor = if (try o.projectRoutedAct(x, ex.fused, items, count, members, pairs, slots, @min(tile, rows), ex.limit)) |t| t else blk: {
         const both = try o.projectRouted(x, ex.fused, items, count, members, pairs, slots, @min(tile, rows));
@@ -154,6 +187,44 @@ test "buffer sizes follow moe.run and max_items" {
     try std.testing.expectEqual(@as(usize, 32), bucket(17));
     try std.testing.expectEqual(@as(usize, 2048), bucket(2048));
     try std.testing.expectEqual(@as(usize, 129 + 16 * 9 / 8), capacity(16 * 9, 129));
+}
+
+test "a prompt plan's live items are at most planItems, equal with every expert at 128 k + 1 pairs" {
+    const items = struct {
+        fn of(counts: []const usize, tile: usize) usize {
+            var n: usize = 0;
+            for (counts) |c| n += (c + tile - 1) / tile;
+            return n;
+        }
+    };
+    var prng = std.Random.DefaultPrng.init(0x5851F42D4C957F2D);
+    const rnd = prng.random();
+    var counts: [513]usize = undefined;
+    // the coding prompt in 8,192-row chunks and in one chunk, 11 slots a row
+    for ([_]usize{ 8192 * 11, 17715 * 11, 20480 * 11 }) |pairs| {
+        // the bound's case: 128 k + 1 pairs an expert, the pairs past them on one expert (fewer than a tile)
+        const per = (pairs - counts.len) / counts.len / BLOCK_ROWS;
+        var used: usize = 0;
+        for (&counts) |*c| {
+            c.* = BLOCK_ROWS * per + 1;
+            used += c.*;
+        }
+        var spare = pairs - used;
+        var e: usize = 0;
+        while (spare >= BLOCK_ROWS) : (e += 1) {
+            counts[e] += BLOCK_ROWS;
+            spare -= BLOCK_ROWS;
+        }
+        counts[counts.len - 1] += spare;
+        try std.testing.expectEqual(planItems(pairs, counts.len, BLOCK_ROWS), items.of(&counts, BLOCK_ROWS));
+        // skewed and sparse routings stay under it
+        for (0..20) |_| {
+            @memset(&counts, 0);
+            for (0..pairs) |_| counts[if (rnd.boolean()) rnd.uintLessThan(usize, 8) else rnd.uintLessThan(usize, counts.len)] += 1;
+            try std.testing.expect(items.of(&counts, BLOCK_ROWS) <= planItems(pairs, counts.len, BLOCK_ROWS));
+        }
+        try std.testing.expect(planItems(pairs, counts.len, BLOCK_ROWS) <= capacity(pairs, counts.len));
+    }
 }
 
 test "the routed products take the decode tile below 64 rows and in a lane round, the GEMM tile from 64 rows" {
