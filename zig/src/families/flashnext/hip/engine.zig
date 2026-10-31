@@ -116,6 +116,10 @@ pub const Engine = struct {
         _ = try steps.done(.{ 0, 0 }, .first);
         e.cfg = try config.Config.read(gpa, io, dir);
         errdefer e.cfg.deinit();
+        model.checkSparseRatio(o.policy.sparse == .wmma, e.cfg.index_ratio) catch |err| {
+            std.log.err("sparse=wmma needs indexer_compress_ratio {d}; this model has {d}", .{ model.sparse_wmma_ratio, e.cfg.index_ratio });
+            return err;
+        };
         e.ck = try core.checkpoint.Checkpoint.openModel(gpa, io, dir);
         errdefer e.ck.close();
         e.keep = .init(gpa);

@@ -23,6 +23,21 @@ fn relu2Tile(comptime rows: u32, comptime cb: u32) limits.HipLaunch {
     };
 }
 
+/// Flash Next's WMMA sparse prefill attention for one cache kind; gfx1030 and gfx1201 compile it to a stub.
+fn sparsePrefill(comptime kind: []const u8) Record {
+    const symbol = "tf_fn_sparse_prefill_wmma_" ++ kind;
+    const stub: U = .{ .vgprs = 80, .sgprs = 58, .lds = 20736, .private = 0, .bound = 512, .wave = 32 };
+    return .{
+        .launch = .{ .name = "flashnext " ++ symbol, .symbol = symbol, .image = "flashnext", .threads = 512 },
+        .usage = .{
+            stub,
+            .{ .vgprs = 190, .sgprs = 70, .lds = 39936, .private = 0, .bound = 512, .wave = 32 },
+            .{ .vgprs = 189, .sgprs = 71, .lds = 39936, .private = 0, .bound = 512, .wave = 32 },
+            .{ .vgprs = 90, .sgprs = 59, .lds = 20736, .private = 0, .bound = 512, .wave = 32 },
+        },
+    };
+}
+
 /// HIP kernels as launched; tf-hip-kernel-contract limits DIR re-derives the usage records from the code objects.
 const own_records = [_]Record{
     .{
@@ -479,6 +494,8 @@ const own_records = [_]Record{
             .{ .vgprs = 36, .sgprs = 32, .lds = 50688, .private = 0, .bound = 1024, .wave = 32 },
         },
     },
+    sparsePrefill("f16"),
+    sparsePrefill("bf16"),
 } ++ @import("hip_records_pair.zig").records;
 
 pub const records = own_records ++ @import("hip_records_stream.zig").records;
