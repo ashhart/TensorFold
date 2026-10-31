@@ -22,8 +22,11 @@ TIMEOUT = 15.0
 CANDIDATES = ("~/.tensorfold/bin/tensorfold", "/opt/homebrew/bin/tensorfold", "/usr/local/bin/tensorfold", "~/.local/bin/tensorfold-native",
               "/opt/tensorfold/bin/tensorfold-native")
 # `serving NAME at URL (sampling: …; drafts: on; context: 262144; loaded in 13.9s)`
-_SERVING = re.compile(r"serving (?P<name>\S+) at (?P<url>\S+) \(.*?drafts: (?P<drafts>\w+); "
-                      r"context: (?P<context>\d+); loaded in (?P<loaded>[\d.]+)s\)")
+# the engine's `serving …` line, the log fallback for what no endpoint gives (the context and the load time). Main
+# (zig/src/server/serve.zig) writes the drafts as a phrase ("MTP + copies", "DFlash2 (repo) + copies", "none", "off")
+# and the context as a number or "unlimited"; 1.0.x wrote "on" or "off" and always a number.
+_SERVING = re.compile(r"serving (?P<name>\S+) at (?P<url>\S+) \(.*?drafts: (?P<drafts>[^;]*); "
+                      r"context: (?P<context>\d+|unlimited); loaded in (?P<loaded>[\d.]+)s\)")
 # the CUDA engine's sizing line: `model 17.99 GiB; 8 streams at once, 0.18 GiB each at a 16384-token window, of
 # 83.8 GiB left after a 12.2 GiB reserve`
 _CUDA_SIZING = re.compile(r"model (?P<model>[\d.]+) GiB; (?P<streams>\d+) streams at once, (?P<each>[\d.]+) GiB each at a "
@@ -274,8 +277,10 @@ def parse_startup(line: str) -> dict[str, float]:
     m = _SERVING.search(line)
     if not m:
         return {}
-    return {"context_tokens": float(m.group("context")), "loaded_s": float(m.group("loaded")),
-            "drafts": 1.0 if m.group("drafts") == "on" else 0.0}
+    out = {"loaded_s": float(m.group("loaded")), "drafts": 0.0 if m.group("drafts").strip() in ("off", "none") else 1.0}
+    if m.group("context") != "unlimited":
+        out["context_tokens"] = float(m.group("context"))
+    return out
 
 
 # a model the binary lists by family but will not load on this chip, such as the 27B on an M6 under 1.0.6:

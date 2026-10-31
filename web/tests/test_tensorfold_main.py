@@ -134,3 +134,88 @@ def test_a_key_already_set_is_kept_for_learning(monkeypatch):
     cmd, env, _ = native.build_command("tensorfold-native", "/x/eden", Settings(api_key="tf-mine"),
                                        slide="/x/eden.facts.json")
     assert env["TENSORFOLD_API_KEY"] == "tf-mine" and not _slide_keyless(cmd, env)
+
+
+# -- server ready and load: GET /health and GET /v1/load, as main answers them behind a key -------------------------
+
+
+def keyed_main(asked: list, *, parked: bool = False, key: str = "tf-k"):
+    """docs/api.md: with keys, /health is only {"status": "ok"}; /v1/load needs the key and returns the ledger."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        asked.append(request.url.path)
+        ok = request.headers.get("authorization") == f"Bearer {key}"
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
+        if request.url.path == "/v1/load":
+            if not ok:
+                return httpx.Response(401, json={"error": {"message": "missing or invalid API key"}})
+            return httpx.Response(200, json={
+                "instance": "0f3c", "timestamp": 1761940800.5, "model": "nemotron-3.5-lightning", "parked": parked,
+                "lanes": 4, "http_active": {"chat_completions": 1, "completions": 0, "responses": 0, "messages": 0,
+                                            "embeddings": 0, "speech": 0, "other": 0},
+                "running": 1, "waiting": 2, "requests_started": 9, "requests_requeued": 0, "background_yields": 0,
+                "waiting_prompt_tokens": 300, "fill_unknown": False})
+        if request.url.path == "/metrics":
+            return httpx.Response(200 if ok else 401, text="tensorfold:num_requests_running 0\n")
+        return httpx.Response(404, json={"error": {"message": "not found"}})
+    return httpx.MockTransport(handler)
+
+
+def _engine(transport, key="tf-k"):
+    from tensorfold_web.engine import Engine
+    from tensorfold_web.settings import Settings
+
+    eng = Engine(Settings(engine_url="http://127.0.0.1:8080", api_key=key, remote=True))
+    eng._client = httpx.Client(transport=transport)
+    return eng
+
+
+def test_model_and_load_come_from_v1_load_behind_a_key():
+    asked: list[str] = []
+    h = _engine(keyed_main(asked)).health()
+    assert h.ok and h.status == "running"
+    assert h.model == "nemotron-3.5-lightning" and h.model_ids == ["nemotron-3.5-lightning"]
+    assert "/v1/models" not in asked                       # the server's own ledger named it
+    assert h.load["lanes"] == 4 and not h.parked
+    assert (h.connections, h.waiting) == (3, 2)            # running and waiting, as /health's live block counts them
+
+
+def test_a_parked_engine_is_reported_parked():
+    h = _engine(keyed_main([], parked=True)).health()
+    assert h.ok and h.parked and h.load["parked"] is True
+
+
+def test_a_wrong_key_reads_as_unauthorized_not_as_running_without_a_model():
+    h = _engine(keyed_main([]), key="tf-wrong").health()
+    assert h.status == "unauthorized" and "refuses the API key" in (h.error or "")
+
+
+def test_lanes_from_v1_load_reach_the_page_startup_figures():
+    from tensorfold_web.engine import Engine
+    from tensorfold_web.settings import Settings
+
+    eng = Engine(Settings(engine_url="http://127.0.0.1:8080", api_key="tf-k", remote=False))
+    eng._client = httpx.Client(transport=keyed_main([]))
+    assert eng.info()["startup"]["streams"] == 4.0
+
+
+def test_parse_load_refuses_what_is_not_the_ledger():
+    from tensorfold_web.engine import parse_load
+
+    assert parse_load({"status": "ok"}) is None and parse_load([]) is None
+    assert parse_load({"model": "m", "parked": 0}) is None               # a bool, as main writes it
+    assert parse_load({"model": "m", "parked": False, "lanes": True, "running": -1}) == {"model": "m", "parked": False}
+
+
+def test_the_log_fallback_reads_mains_serving_line():
+    from tensorfold_web.native import parse_startup
+
+    # zig/src/server/serve.zig:247, with draft_line.zig's phrases
+    line = ("[tensorfold] serving nemotron at http://127.0.0.1:8080/v1 (sampling: temperature 1.0, top_p 0.95; "
+            "drafts: DFlash2 (z-lab/Qwen3.8-27B-DFlash2) + copies; context: 262144; loaded in 41.3s)")
+    assert parse_startup(line) == {"loaded_s": 41.3, "drafts": 1.0, "context_tokens": 262144.0}
+    unlimited = "serving m at http://127.0.0.1:8080/v1 (sampling: greedy; drafts: off; context: unlimited; loaded in 2.0s)"
+    assert parse_startup(unlimited) == {"loaded_s": 2.0, "drafts": 0.0}
+    none = "serving m at http://127.0.0.1:8080/v1 (sampling: greedy; drafts: none; context: 4096; loaded in 1.5s)"
+    assert parse_startup(none)["drafts"] == 0.0

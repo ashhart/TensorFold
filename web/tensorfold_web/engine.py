@@ -76,6 +76,8 @@ class Health:
     prompt_cache: dict | None = None           # prompt tokens restored from kept states, of all prompt tokens (1.0.5)
     totals: dict | None = None                 # tokens and requests since the engine started, for the usage history
     source: str = "health"                     # "health", or "metrics" when /health is bare behind an API key
+    load: dict | None = None                   # TensorFold's GET /v1/load: model, parked, lanes and the queue
+    parked: bool = False                       # the idle unload has closed the engine; the next request reloads it
     raw: dict | None = None
     error: str | None = None
     generation: int | None = None              # the engine target it was read under (Engine.target)
@@ -117,6 +119,21 @@ def parse_health(body: dict) -> Health:
                   counters=counters, kv_fill=kv_fill(body), streams=streams_of(body),
                   kept_prompts=int(body["kept_prompts"]) if isinstance(body.get("kept_prompts"), int) else None,
                   raw=body)
+
+
+def parse_load(body: object) -> dict | None:
+    """TensorFold's `GET /v1/load` (zig/src/server/load_metrics.zig): the served model, whether the idle unload has
+    parked the engine, its lanes and, when the engine reports them, its running and waiting requests. None when the
+    body is not that object."""
+
+    if not isinstance(body, dict) or not isinstance(body.get("model"), str) or not isinstance(body.get("parked"), bool):
+        return None
+    out: dict = {"model": body["model"], "parked": body["parked"]}
+    for k in ("lanes", "running", "waiting"):
+        v = body.get(k)
+        if isinstance(v, int) and not isinstance(v, bool) and v >= 0:
+            out[k] = v
+    return out
 
 
 def parse_metrics(text: str) -> dict[str, float]:
@@ -623,8 +640,21 @@ class Engine:
         except Exception as exc:  # noqa: BLE001
             h = Health(ok=False, status="unreachable", error=str(exc)[:200])
         bare = h.ok and not h.model and h.raw is not None and "live" not in h.raw and h.counters is None
-        if h.ok and not h.model:
-            with contextlib.suppress(Exception):      # /v1/models needs the key when one is set; a miss keeps None
+        if h.ok:
+            # the served model and its load from the server itself: /health is bare behind a key, /v1/load is not
+            with contextlib.suppress(Exception):
+                r = self._client.get(base + "/v1/load", headers=hdrs)
+                if r.status_code == 200 and (ld := parse_load(r.json())) is not None:
+                    h.load, h.parked = ld, ld["parked"]
+                    if not h.model and ld["model"]:
+                        h.model = ld["model"]
+                        h.model_ids = h.model_ids or [ld["model"]]
+                elif r.status_code == 401:
+                    h.status = "unauthorized"           # the server answers; TensorFold Web's key does not open it
+                    h.error = "the engine refuses the API key TensorFold Web holds" if key else \
+                        "the engine requires an API key TensorFold Web does not have"
+        if h.ok and not h.model and h.status != "unauthorized":
+            with contextlib.suppress(Exception):      # an engine without /v1/load: /v1/models, a miss keeps None
                 r = self._client.get(base + "/v1/models", headers=hdrs)
                 if r.status_code == 200:
                     ids = [m.get("id") for m in r.json().get("data", []) if m.get("id")]
@@ -639,6 +669,9 @@ class Engine:
                 r = self._client.get(base + "/metrics", headers=hdrs)
                 if r.status_code == 200:
                     self._read_metrics(h, parse_metrics(r.text))
+        if bare and h.load and "running" in h.load:   # the ledger's queue, when it gives one, over the scrape's
+            h.connections = h.load["running"] + h.load.get("waiting", 0)
+            h.waiting = h.load.get("waiting", 0)
         if h.ok and not bare and h.status != "unauthorized" and h.source != "metrics":
             # what /health leaves out: the Mac's memory and drafts, and on both engines the prompt cache (1.0.5)
             with contextlib.suppress(Exception):
@@ -720,6 +753,8 @@ class Engine:
             if not stale:
                 if st.context_length:                 # the CUDA server says it on every poll; keep the latest
                     self.startup["context_tokens"] = float(st.context_length)
+                if st.load and "lanes" in st.load:    # the server's own count, over any log line's
+                    self.startup["streams"] = float(st.load["lanes"])
                 h = st.to_dict()
                 h.update({
                     "managed": not self.settings.remote, "owned": self.owned, "engine_url": self.settings.engine_url,
