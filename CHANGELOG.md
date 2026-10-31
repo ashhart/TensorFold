@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- EXL3 mixture-of-experts models on CUDA (GLM-5.3-Flash and the Qwen3.5-MoE EXL3 packs): on sm_120 and sm_121 (RTX PRO and RTX 50 Blackwell, GB10), the grouped experts kernel reads a warp's next tile of weights while it decodes the current one (#1505). The decode and the sums are unchanged, so outputs are the same bits; the kernel contract checks them against the previous loop at one to three tiles a warp and at the served models' widths, with two planted load faults that must fail. On a GB10 the kernel ran 11% faster at MiMo-V2.6-Flash's expert shapes (109 to 97 µs a launch), and GLM-5.3-Flash at two GB10s decoded the same tokens, within 1% of its previous speed. Ampere and Ada GPUs build the same code as before. Thanks to @ajensenwaud.
+
 - CUDA graphs: a capture whose end fails because it was invalidated (`CUDA_ERROR_STREAM_CAPTURE_INVALIDATED`) no longer leaves its stream marked as capturing, which had refused every later capture on that stream and every temporary host upload in the process with `UnownedCaptureSource`. A failed end that leaves the stream capturing, such as one from the wrong thread, still keeps the guard. Thanks to @jayleaton.
 
 - A streamed reply's `reasoning_content` now equals the whole reply's: leading whitespace is never sent and trailing whitespace is held until more reasoning follows, so the stream no longer keeps the newline before the close tag (#1743). Thanks to @jayleaton.
