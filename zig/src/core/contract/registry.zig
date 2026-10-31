@@ -218,6 +218,7 @@ pub const CudaSet = struct { release: limits.Nvcc, usage: []const Override };
 /// The later releases' sets, rising by release; a tree's images are checked against the newest at or below their own.
 pub const cuda_sets = [_]CudaSet{
     .{ .release = .{ .major = 13, .minor = 2 }, .usage = &([_]Override{
+        .{ .name = "window_pages tf_wrows_merge_512_pg", .usage = .{ .{ .regs = 56, .static = 128, .bound = 256 }, .{ .regs = 56, .static = 128, .bound = 256 }, .{ .regs = 56, .static = 128, .bound = 256 }, .{ .regs = 60, .static = 128, .bound = 256 }, .{ .regs = 60, .static = 128, .bound = 256 } } },
         .{ .name = "norms tf_rms_rows", .usage = .{ .{ .regs = 32, .static = 132, .bound = 1024 }, .{ .regs = 46, .static = 132, .bound = 1024 }, .{ .regs = 46, .static = 132, .bound = 1024 }, .{ .regs = 43, .static = 132, .bound = 1024 }, .{ .regs = 43, .static = 132, .bound = 1024 } } },
         .{ .name = "lane_gemv", .usage = .{ .{ .regs = 64, .static = 0, .bound = 128 }, .{ .regs = 58, .static = 0, .bound = 128 }, .{ .regs = 58, .static = 0, .bound = 128 }, .{ .regs = 66, .static = 0, .bound = 128 }, .{ .regs = 66, .static = 0, .bound = 128 } } },
         .{ .name = "lane_gemv split-K", .usage = .{ .{ .regs = 62, .static = 128, .bound = 128 }, .{ .regs = 56, .static = 128, .bound = 128 }, .{ .regs = 56, .static = 128, .bound = 128 }, .{ .regs = 72, .static = 128, .bound = 128 }, .{ .regs = 72, .static = 128, .bound = 128 } } },

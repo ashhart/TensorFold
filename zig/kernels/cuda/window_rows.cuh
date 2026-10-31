@@ -251,6 +251,8 @@ __device__ __forceinline__ void part(const __nv_bfloat16* __restrict__ q, const 
     if (threadIdx.x < G) pm[part * G + threadIdx.x] = mx[threadIdx.x], pl[part * G + threadIdx.x] = ls[threadIdx.x];
 }
 
+// merge's float64 replay of a head over pages (window_pages.cu), off the fast path: its frame and divisions with it.
+template <int D> __device__ __noinline__ void merge_pg_odd(const __nv_bfloat16*, const __nv_bfloat16*, const __nv_bfloat16*, const int*, const int*, int, int, int, float, Pg, __nv_bfloat16*, int64_t, int, int);
 // out = sum_c a_c o_c / sum_c a_c l_c, a_c = expf(m_c - M), chunks in order; NaN or inf: the head again in float64.
 template <int D, int FAULT, bool PG = false>
 __device__ __forceinline__ void merge(const float* __restrict__ po, const float* __restrict__ pm,
@@ -277,15 +279,13 @@ __device__ __forceinline__ void merge(const float* __restrict__ po, const float*
     const float x = __fdiv_rn(acc, l);
     __nv_bfloat16* oh = out + (r * h + kh * G + hd) * D;
     oh[e] = FAULT == TRUNC ? __float2bfloat16_rz(x) : __float2bfloat16_rn(x);
-    if (__syncthreads_or(!isfinite(x))) {
+    if constexpr (PG) {
+        if (__syncthreads_or(!isfinite(x))) merge_pg_odd<D>(q, kc, vc, pos, slot, h, hk, win, scale, pg, oh, r, kh, hd);
+    } else if (__syncthreads_or(!isfinite(x))) {
         const int p = pos[r];
         const int64_t base = (slot != nullptr ? static_cast<int64_t>(slot[r]) : 0) * ring;
         const auto kv = [&](int key, int which) {
             const __nv_bfloat16* c = which == 0 ? kc : vc;
-            if constexpr (PG) {
-                const int64_t pid = pg.tab[(slot != nullptr ? slot[r] : 0) * pg.stride + key / pg.tok];
-                return c + pid * pg.page + (static_cast<int64_t>(key % pg.tok) * hk + kh) * D;
-            }
             return c + ((base + key % ring) * hk + kh) * D;
         };
         const int c0 = blockIdx.z * NT % D;
