@@ -263,6 +263,11 @@ fn hasDpas(device: []const u8) bool {
     return true;
 }
 
+/// #1502's LFM3-VL image steps over core/picture (zig/src/lfm3_image.zig; `sys` comes from build/sys.zig's pass).
+fn lfm3Image(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("zig/src/lfm3_image.zig"), .target = target, .optimize = optimize, .link_libc = true });
+}
+
 /// LFM3's forward and engine on the runtime module `xpu`.
 fn lfm3Module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, xpu: *std.Build.Module) *std.Build.Module {
     const m = b.createModule(.{ .root_source_file = b.path("zig/src/families/lfm3/xpu.zig"), .target = target, .optimize = optimize, .link_libc = true });
@@ -272,7 +277,7 @@ fn lfm3Module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
 
 /// The standalone op and model tests, each its own program `tf-xpu-<name>-test` (step `xpu-tests`).
 const test_programs = [_][]const u8{
-    "panic", "nem_rows", "nem_prefill", "nem_gen", "nem_mtp", "nem_kl", "nem_norm_bench", "nem_mv_bench", "nem_slot", "nem_format", "nem_seam", "nem_attn_dec", "nem_fp64", "memory", "lfm3_conv", "lfm3_rope", "lfm3_attn", "lfm3_norm", "lfm3_fwd", "lfm3_bench", "lfm3_rows", "lfm3_streams", "lfm3_chunks", "lfm3_pgemm", "lfm3_q32", "lfm3_vit",
+    "panic", "nem_rows", "nem_prefill", "nem_gen", "nem_mtp", "nem_kl", "nem_norm_bench", "nem_mv_bench", "nem_slot", "nem_format", "nem_seam", "nem_attn_dec", "nem_fp64", "memory", "lfm3_conv", "lfm3_rope", "lfm3_attn", "lfm3_norm", "lfm3_fwd", "lfm3_bench", "lfm3_rows", "lfm3_streams", "lfm3_chunks", "lfm3_pgemm", "lfm3_q32", "lfm3_vit", "lfm3_tower",
 };
 
 /// `-Dxpu` (Linux): Nemotron's SPIR-V images, `tensorfold-xpu` and `tf-xpu-test`; needs ocloc, not nvcc or CUDA.
@@ -290,12 +295,14 @@ fn nemotronSteps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
     b.installArtifact(b.addExecutable(.{ .name = "tf-xpu-test", .root_module = runner }));
     const tests_step = b.step("xpu-tests", "Build the standalone Intel GPU op and model tests (tf-xpu-<name>-test)");
     const lfm3 = lfm3Module(b, target, optimize, xpu);
+    const image = lfm3Image(b, target, optimize);
     for (test_programs) |name| {
         const mod = b.createModule(.{ .root_source_file = b.path(b.fmt("zig/tests/xpu/{s}.zig", .{name})), .target = target, .optimize = optimize, .link_libc = true });
         mod.addImport("xpu", xpu);
         mod.addImport("core", mods.core);
         mod.addImport("nemotron_xpu", mods.nemotron);
         mod.addImport("lfm3_xpu", lfm3);
+        mod.addImport("lfm3_image", image);
         tests_step.dependOn(&b.addInstallArtifact(b.addExecutable(.{ .name = b.fmt("tf-xpu-{s}-test", .{name}), .root_module = mod }), .{}).step);
     }
 }
