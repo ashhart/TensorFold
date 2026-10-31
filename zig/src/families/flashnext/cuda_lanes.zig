@@ -8,6 +8,7 @@ const mtp = @import("cuda_mtp.zig");
 const mtp_ops = @import("cuda_mtp_ops.zig");
 const lanes_draft = @import("cuda_lanes_draft.zig");
 const snap = @import("cuda_snap.zig");
+const batch = @import("cuda_batch_state.zig");
 const ranks = @import("cuda_rank_engine.zig");
 const Glue = @import("cuda_glue.zig").Glue;
 const living = @import("living");
@@ -134,6 +135,8 @@ pub fn Namespace(comptime Tri: type) type {
             /// Its sequence's and draft's fixed-size buffers' blocks (Parts), given back when it drops.
             part_seq: ?cuda.DeviceBuffer = null,
             part_draft: ?cuda.DeviceBuffer = null,
+            /// Kept states its current prompt chunk fills on the way, until the cache takes them
+            prepared: [batch.max_marks]?*snap.Snap = .{ null, null },
         };
 
         const Parts = @import("cuda_lane_parts.zig").Parts;
@@ -327,7 +330,7 @@ pub fn Namespace(comptime Tri: type) type {
                 }
                 return l;
             }
-            /// One prompt chunk, its rows picked as it starts, cut at the next cache mark; true once it was the last.
+            /// One prompt chunk, rows picked as it starts, cut at a mark it cannot keep on the way; true once the last.
             fn step(self: *Cuda, s: *lanes.Stream, l: *Lane, _: u32) !bool {
                 const ids = s.prompt();
                 const at = l.filled orelse return true;
@@ -336,21 +339,20 @@ pub fn Namespace(comptime Tri: type) type {
                     return error.Cancelled;
                 }
                 const rows = @import("cuda_chunk.zig").passRows(&self.lanes, l, self.engine.chunk, self.engine.busy_chunk);
-                var stop = @min(ids.len, at + rows);
-                for (s.reuse.marks) |m| if (m > at and m < stop) {
-                    stop = m;
-                    break;
-                };
-                const last = stop == ids.len;
-                self.engine.ngram.warmAhead(ids, stop, @min(ids.len, stop + rows));
+                var marks: [batch.max_marks]batch.Mark = .{ .{}, .{} };
+                defer snaps.dropPrepared(self, l);
+                const cut = snaps.cut(self, s, l, ids, at, @min(ids.len, at + rows), &marks);
+                const last = cut.stop == ids.len;
+                self.engine.ngram.warmAhead(ids, cut.stop, @min(ids.len, cut.stop + rows));
                 if (l.draft) |*d| {
-                    try self.ops().prefillChunk(&l.seq, d, ids, at, stop);
+                    try self.ops().prefillChunk(&l.seq, d, ids, at, cut.stop, marks);
                 } else if (self.ranks) |r| {
-                    try r.forward(Tri, self.tri(), &l.seq, ids[at..stop], .{ .logits = if (last) .last else .none, .prompt = true });
-                } else try self.engine.forward(Tri, self.tri(), &l.seq, ids[at..stop], .{ .logits = if (last) .last else .none, .prompt = true });
-                l.filled = if (last) null else stop;
-                if (!last and std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(stop)) != null) {
-                    if (s.reuse.hook) |k| k.at(k.ptr, s, @intCast(stop));
+                    try r.forward(Tri, self.tri(), &l.seq, ids[at..cut.stop], .{ .logits = if (last) .last else .none, .prompt = true });
+                } else try self.engine.forward(Tri, self.tri(), &l.seq, ids[at..cut.stop], .{ .logits = if (last) .last else .none, .prompt = true, .marks = marks });
+                l.filled = if (last) null else cut.stop;
+                if (cut.kept > 0) try snaps.handOver(self, s, l, marks[0..cut.kept]);
+                if (!last and std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(cut.stop)) != null) {
+                    if (s.reuse.hook) |k| k.at(k.ptr, s, @intCast(cut.stop));
                 }
                 return last;
             }
@@ -395,6 +397,7 @@ pub fn Namespace(comptime Tri: type) type {
 
         fn dropLane(self: *Cuda, l: *Lane) void {
             cuda.completion.drain(self.engine.driver, self.stream, "flashnext: a failed or closed lane did not drain");
+            snaps.dropPrepared(self, l);
             if (l.draft) |*d| d.deinit();
             if (self.ranks) |r| r.drop(&l.seq) else if (!self.kv.close(l.from, &l.seq)) l.seq.deinit(self.gpa);
             // the blocks after both: a state / spare swap may have left views of each in the other

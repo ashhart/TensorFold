@@ -4,6 +4,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const wt = @import("cuda_prompt_wt.zig");
 const batch = @import("cuda_batch.zig");
+const parts = @import("cuda_batch_state.zig");
 const prompt = @import("cuda_prompt.zig");
 const gdn = @import("cuda_gdn.zig");
 const mtp = @import("cuda_mtp.zig");
@@ -94,13 +95,13 @@ pub fn Ops(comptime Tri: type) type {
             return o.e.stream.*;
         }
 
-        /// Prompt rows [at, stop): the pass with its streams kept, then the head over each row with a known next token.
-        pub fn prefillChunk(o: Self, seq: *prompt.Seq, d: *Draft, ids: []const u32, at: usize, stop: usize) !void {
+        /// Prompt rows [at, stop): the pass (keeping `marks` on its way) and its streams, then the head over the rows.
+        pub fn prefillChunk(o: Self, seq: *prompt.Seq, d: *Draft, ids: []const u32, at: usize, stop: usize, marks: [parts.max_marks]parts.Mark) !void {
             if (stop > d.cap or stop <= at or stop - at > d.rows_cap) return error.PromptTooLong;
             if (seq.fed != at or d.len != at or d.drafted != 0 or d.pending != 0) return error.PositionMismatch;
             d.media = if (seq.media) |*m| m.view() else null;
             const last = stop == ids.len;
-            try o.forwardMain(seq, ids[at..stop], .{ .logits = if (last) .last else .none, .streams = d.streams.ptr, .prompt = true });
+            try o.forwardMain(seq, ids[at..stop], .{ .logits = if (last) .last else .none, .streams = d.streams.ptr, .prompt = true, .marks = marks });
             const head_to = @min(stop, ids.len - 1);
             if (head_to > at) try o.forwardHead(d, ids[at + 1 .. head_to + 1], d.streams.ptr, false);
             if (last) d.prompt_last = d.streams.ptr + (stop - 1 - at) * wide * 2;
@@ -112,7 +113,7 @@ pub fn Ops(comptime Tri: type) type {
             var at: usize = 0;
             while (at < ids.len) {
                 const stop = @min(ids.len, at + @min(o.e.chunk, d.rows_cap));
-                try o.prefillChunk(seq, d, ids, at, stop);
+                try o.prefillChunk(seq, d, ids, at, stop, .{ .{}, .{} });
                 at = stop;
             }
         }

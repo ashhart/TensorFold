@@ -4,6 +4,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const gdn = @import("cuda_gdn.zig");
 const gdn_fused = @import("cuda_gdn_fused.zig");
+const marks = @import("cuda_batch_marks.zig");
 const ple = @import("cuda_ple.zig");
 const wt = @import("cuda_prompt_wt.zig");
 const load = @import("cuda_prompt_load.zig");
@@ -90,12 +91,6 @@ pub const scoreBytes = parts.scoreBytes;
 pub const Lane = parts.Lane;
 pub const Model = parts.Model;
 const Gather = parts.Gather;
-
-/// TF_FLASHNEXT_PROFILE=1: each chunk's wall time (synchronized) and its host n-gram gather on stderr.
-fn profile() bool {
-    const v = std.c.getenv("TF_FLASHNEXT_PROFILE") orelse return false;
-    return std.mem.eql(u8, std.mem.span(v), "1");
-}
 
 pub fn Pass(comptime Tri: type) type {
     return struct {
@@ -235,6 +230,7 @@ pub fn Pass(comptime Tri: type) type {
             try self.tri.pleGate(s.ple_keys, s.ple_vals, s.h, lw.nk.ptr, lw.nq.ptr, s.ple_gated, s.ple_pss, eps, n, dims, streams);
             if (self.lanes.len == 0) {
                 try self.tri.pleConv(s.ple_gated, s.ple_pss, lw.nc.ptr, self.seq.tail.ptr, lw.ple_cw.ptr, s.h, s.h, s.ple_nrow, eps, n, dims, streams, 4, 3);
+                try marks.tails(self);
                 try self.shiftWindow(self.seq.tail.ptr, s.ple_nrow, wide, n, ple_tail_n, wide);
                 return;
             }
@@ -258,12 +254,13 @@ pub fn Pass(comptime Tri: type) type {
                 try self.copy(keep.hist, self.seq.conv[li].ptr, (gdn.taps - 1) * gdn.conv_dim * 2);
             }
             // every row's conv, norms and gates, the recurrence, then the gated norm: the one-block chain's bits
-            const fused = self.lanes.len == 0 and n >= 64 and gdn_fused.on();
+            const fused = self.lanes.len == 0 and (n >= 64 or marks.inPass(self)) and gdn_fused.on();
+            const cuts = try marks.cuts(self, li, fused);
             if (fused and keep.log != 0) return error.UnexpectedTensor;
             if (fused) {
                 // the three in one kernel a value head: the same per-row op sequences, no fp32 rows through memory
                 const st = self.seq.state[li].ptr;
-                const in: gdn_fused.In = .{ .proj = s.proj, .conv = self.seq.conv[li].ptr, .cw = lw.cw.ptr, .a_log = lw.a_log.ptr, .dt = lw.dt.ptr, .state = st, .state_out = if (keep.state_out != 0) keep.state_out else st, .norm = lw.norm.ptr };
+                const in: gdn_fused.In = .{ .proj = s.proj, .conv = self.seq.conv[li].ptr, .cw = lw.cw.ptr, .a_log = lw.a_log.ptr, .dt = lw.dt.ptr, .state = st, .state_out = if (keep.state_out != 0) keep.state_out else st, .norm = lw.norm.ptr, .cuts = cuts };
                 try gdn_fused.launch(self.k.gdn_fused, self.stream, in, n, s.gout, s.gxs);
             } else if (self.lanes.len == 0 and keep.log != 0) {
                 // pending rows: the window goes into the log after them, the chain runs from before them
@@ -495,7 +492,7 @@ pub fn Pass(comptime Tri: type) type {
             const s = self.s;
             const n = ids.len;
             const t0 = std.Io.Clock.awake.now(self.io).toNanoseconds();
-            defer if (profile()) {
+            defer if (Kernels.profile()) {
                 self.complete() catch {};
                 std.debug.print("batch: {d} rows at {d} in {d:.1} ms\n", .{ n, pos0, @as(f64, @floatFromInt(std.Io.Clock.awake.now(self.io).toNanoseconds() - t0)) / 1e6 });
             };
@@ -529,7 +526,7 @@ pub fn Pass(comptime Tri: type) type {
                     if (thread) |th| th.join();
                     thread = null;
                     if (gather.failed) |err| return err;
-                    if (profile()) std.debug.print("batch: {d} rows' n-gram rows gathered on the host in {d:.1} ms\n", .{ n, @as(f64, @floatFromInt(gather.ns)) / 1e6 });
+                    if (Kernels.profile()) std.debug.print("batch: {d} rows' n-gram rows gathered on the host in {d:.1} ms\n", .{ n, @as(f64, @floatFromInt(gather.ns)) / 1e6 });
                     if (!self.staged) {
                         try self.upload(s.ple_emb, std.mem.sliceAsBytes(emb));
                         try self.upload(s.ple_xs, std.mem.sliceAsBytes(xs));

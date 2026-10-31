@@ -118,7 +118,8 @@ __device__ __forceinline__ void run(const __nv_bfloat16* __restrict__ P, const _
                                     const __nv_bfloat16* __restrict__ cw, const float* __restrict__ a_log,
                                     const float* __restrict__ dt_bias, const float* state_in, float* state_out, int rows,
                                     const __nv_bfloat16* __restrict__ norm_w, float eps, __nv_bfloat16* __restrict__ out,
-                                    float* __restrict__ xs, float* __restrict__ ys_out) {
+                                    float* __restrict__ xs, float* __restrict__ ys_out, int cut0, float* cut0_state,
+                                    int cut1, float* cut1_state) {
     extern __shared__ __align__(16) unsigned char smem[];
     unsigned char* stage = smem;                                                 // [2][STEPS] rows
     float (*ysb)[STEPS][DV] = reinterpret_cast<float (*)[STEPS][DV]>(smem + 2 * STAGE);
@@ -198,6 +199,15 @@ __device__ __forceinline__ void run(const __nv_bfloat16* __restrict__ P, const _
                     x[l] = o;
                 }
                 const float o = bf(gdn_tpr::tree<TPR>(x));
+                // a prompt cache mark inside the pass: the state after row cut - 1, as the final store below writes it
+                const int done = r0 + rr + 1;
+                if (done == cut0 || done == cut1) {
+                    float* cs_out = done == cut0 ? cut0_state : cut1_state;
+#pragma unroll
+                    for (int l = 0; l < L; ++l)
+#pragma unroll
+                        for (int i = 0; i < 4; ++i) cs_out[sbase + (l * TPR + t) * 4 + i] = s[l][i];
+                }
                 if (t == 0) {
                     ysb[bi & 1][rr][row] = o;
                     if (ys_out) ys_out[((size_t)(r0 + rr) * NV + hv) * DV + row] = o;
@@ -220,6 +230,6 @@ extern "C" __global__ void __launch_bounds__(gdn_fused::THREADS) fn_gdn_fused(
         const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs, const __nv_bfloat16* __restrict__ cw,
         const float* __restrict__ a_log, const float* __restrict__ dt_bias, const float* state_in, float* state_out, int rows,
         const __nv_bfloat16* __restrict__ norm_w, float eps, __nv_bfloat16* __restrict__ out, float* __restrict__ xs,
-        float* __restrict__ ys_out) {
-    gdn_fused::run(P, cs, cw, a_log, dt_bias, state_in, state_out, rows, norm_w, eps, out, xs, ys_out);
+        float* __restrict__ ys_out, int cut0, float* cut0_state, int cut1, float* cut1_state) {
+    gdn_fused::run(P, cs, cw, a_log, dt_bias, state_in, state_out, rows, norm_w, eps, out, xs, ys_out, cut0, cut0_state, cut1, cut1_state);
 }

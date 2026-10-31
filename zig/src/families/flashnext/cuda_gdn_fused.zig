@@ -12,7 +12,10 @@ pub fn on() bool {
 }
 
 /// fn_gdn_fused's inputs: projection rows, conv window and taps, gate parameters, the state and where it goes.
-pub const In = struct { proj: u64, conv: u64, cw: u64, a_log: u64, dt: u64, state: u64, state_out: u64, norm: u64 };
+pub const In = struct { proj: u64, conv: u64, cw: u64, a_log: u64, dt: u64, state: u64, state_out: u64, norm: u64, cuts: [2]Cut = .{ .{}, .{} } };
+
+/// A prompt cache mark inside the pass: the state after `row` rows (1 .. rows) also into `state`; row 0: none.
+pub const Cut = struct { row: u32 = 0, state: u64 = 0 };
 
 /// fn_gdn_front, fn_gdn_chain_tpr and fn_gdn_norm over `rows` rows in one launch (their bits): out and xs.
 pub fn launch(f: cuda.Function, stream: cuda.Stream, in: In, rows: usize, out: u64, xs: u64) !void {
@@ -22,6 +25,10 @@ pub fn launch(f: cuda.Function, stream: cuda.Stream, in: In, rows: usize, out: u
     a.add(in.norm);
     a.add(eps);
     for ([_]u64{ out, xs, 0 }) |v| a.add(v); // no fp32 readouts kept
+    for (in.cuts) |c| {
+        a.add(@as(c_int, @intCast(c.row)));
+        a.add(c.state);
+    }
     try cuda.launch.launch(f, .{ .grid = .{ .x = gdn.nv }, .block = .{ .x = parts.gdn_fused_threads }, .shared = parts.gdn_fused_smem }, stream, &a);
 }
 

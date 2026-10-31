@@ -100,6 +100,12 @@ pub const Kernels = struct {
         return k.native_lane.matmulOut(s, x, ldx, m, w, y, out, part);
     }
 
+    /// TF_FLASHNEXT_PROFILE=1: each chunk's wall time (synchronized) and its host n-gram gather on stderr.
+    pub fn profile() bool {
+        const v = std.c.getenv("TF_FLASHNEXT_PROFILE") orelse return false;
+        return std.mem.eql(u8, std.mem.span(v), "1");
+    }
+
     pub fn deinit(k: *Kernels) void {
         if (k.expert_tile) |*tile| tile.unload();
         k.nvfp4.unload();

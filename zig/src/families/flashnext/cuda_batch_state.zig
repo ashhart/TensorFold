@@ -146,6 +146,8 @@ pub const Hooks = struct {
     prompt: bool = false,
     /// The last row's scores also in seq.logits (a sync, a vocab-row copy); drafted windows' draws read device rows.
     host_logits: bool = true,
+    /// Prompt cache marks inside this pass (TF_FLASHNEXT_KEEP_INPASS): each one's states go to its kept state's buffer.
+    marks: [max_marks]Mark = .{ .{}, .{} },
 };
 
 /// Rows a layer's pending-row log holds, and the pending count past which a chain stores its state in place.
@@ -162,6 +164,10 @@ pub const RollJobs = extern struct { j: [roll_jobs_max]RollJob = @splat(.{}), n:
 comptime {
     std.debug.assert(@sizeOf(RollJob) == 40 and @sizeOf(RollJobs) == 1608);
 }
+
+/// A prompt cache mark inside a pass: the stream's position `at` and the kept state's device buffer (base 0: none).
+pub const Mark = struct { at: usize = 0, base: u64 = 0 };
+pub const max_marks = 2;
 
 /// TF_FLASHNEXT_VERIFY_HOST_LOGITS=1: drafted windows also copy their last row's scores to the host, as before.
 pub fn verifyHostLogits() bool {
@@ -503,15 +509,8 @@ pub const SeqState = struct {
     pg: @import("cuda_glue.zig").Pg = .{},
 };
 
-/// The block scores' row stride for a cache of `cap` tokens: its blocks rounded up to 16 (the captured _scores').
-pub fn scoreStride(cap: usize) usize {
-    return (cdiv(cap, ratio) + 15) / 16 * 16;
-}
-
-/// Bytes of block scores a pass over a cache of `cap` tokens needs for chunks of up to `rows` rows.
-pub fn scoreBytes(cap: usize, rows: usize) usize {
-    return @min(rows, att_rows) * scoreStride(cap) * 4;
-}
+pub const scoreStride = sizes.scoreStride;
+pub const scoreBytes = sizes.scoreBytes;
 
 /// One stream's rows in a shared pass from `pos` on its own caches, and its window's rollback, hidden rows and scores.
 pub const Lane = struct { seq: SeqState, pos: usize, rows: usize = 1, keep: ?*const Keep = null, streams: u64 = 0, logits: u64 = 0 };
