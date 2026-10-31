@@ -28,3 +28,4 @@ pub const nem_prow: []const u8 = if (available) &Blob("spv_nem_prow").bytes else
 pub const nem_prow_gen12: []const u8 = if (available) &Blob("spv_nem_prow_gen12").bytes else &.{};
 pub const nem_attn_dec: []const u8 = if (available) &Blob("spv_nem_attn_dec").bytes else &.{};
 pub const lfm3: []const u8 = if (available) &Blob("spv_lfm3").bytes else &.{};
+pub const lfm3_mv: []const u8 = if (available) &Blob("spv_lfm3_mv").bytes else &.{};

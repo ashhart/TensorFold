@@ -43,6 +43,9 @@ const Kernels = struct {
     part: rt.Kernel,
     merge: rt.Kernel,
     swiglu: rt.Kernel,
+    qkvg: rt.Kernel,
+    w13: rt.Kernel,
+    rope_store: rt.Kernel,
 };
 
 /// One stream's state: each conv layer's last six B*x rows, each attention layer's KV slots, and its position.
@@ -102,6 +105,8 @@ pub const Model = struct {
     /// The bound stream's state (`own` until another is bound); `pos` is the bound stream's position.
     seq: *Seq = undefined,
     own: *Seq = undefined,
+    /// Fused launches by bit (1 w1+w3+SwiGLU, 2 q/k/v/gate, 4 rope and KV store); LFM3_FUSE sets them for A/B.
+    fuse: u32 = 7,
 
     /// The affine tensors of module `m` (in layer `layer`, or a model tensor) by names.zig in namespace `ns`.
     fn table(l: *ld.Loader, ns: names.Namespace, layer: ?usize, m: names.Module) !Table {
@@ -134,6 +139,7 @@ pub const Model = struct {
         var am = try r.module(xpu.kernels.attn);
         var pm = try r.module(if (gen12) xpu.kernels.nem_prow_gen12 else xpu.kernels.nem_prow);
         var fm = try r.module(xpu.kernels.lfm3);
+        var vm = try r.module(xpu.kernels.lfm3_mv);
         const k: Kernels = .{
             .embed = try bm.kernel("embed4", .{ 64, 1, 1 }),
             .qmv = try am.kernel("qmv4_bf", .{ 64, 1, 1 }),
@@ -149,6 +155,9 @@ pub const Model = struct {
             .part = try fm.kernel("lfm3_attn_partial", .{ 64, 1, 1 }),
             .merge = try fm.kernel("lfm3_attn_merge_gate", .{ 16, 1, 1 }),
             .swiglu = try fm.kernel("lfm3_swiglu", .{ 64, 1, 1 }),
+            .qkvg = try vm.kernel("qmv4_bf_x4", .{ 64, 1, 1 }),
+            .w13 = try vm.kernel("qmv4_swiglu", .{ 64, 1, 1 }),
+            .rope_store = try fm.kernel("lfm3_rope_store", .{ 64, 1, 1 }),
         };
         const maxc = (cap + chunk - 1) / chunk;
         const w: usize = max_rows;
@@ -228,6 +237,7 @@ pub const Model = struct {
             .maxc = maxc,
             .device_bytes = l.total,
         };
+        if (std.c.getenv("LFM3_FUSE")) |v| m.fuse = std.fmt.parseInt(u32, std.mem.span(v), 10) catch 7;
         m.own = try m.newSeq();
         m.seq = m.own;
         return m;
@@ -353,14 +363,22 @@ pub const Model = struct {
                 try m.proj(c.out, s.att, s.d, H, H, n, H, 0);
             },
             .attn => |a| {
-                try m.proj(a.q, s.xn, s.qkv, H, NQ * HD, n, QKV, 0);
-                try m.proj(a.k, s.xn, s.qkv, H, NKV * HD, n, QKV, NQ * HD);
-                try m.proj(a.v, s.xn, s.qkv, H, NKV * HD, n, QKV, (NQ + NKV) * HD);
-                try m.proj(a.g, s.xn, s.g, H, NQ, n, NQ, 0);
+                if (n == 1 and m.fuse & 2 != 0) { // the four decode matvecs in one launch, each row as qmv4_bf sums it
+                    try run(&m.k.qkvg, .{ (QKV + NQ + 3) / 4, 1, 1 }, .{ a.q.w, a.q.s, a.q.b, s.qkv, NQ * HD, @as(u32, 0), a.k.w, a.k.s, a.k.b, s.qkv, NKV * HD, NQ * HD, a.v.w, a.v.s, a.v.b, s.qkv, NKV * HD, (NQ + NKV) * HD, a.g.w, a.g.s, a.g.b, s.g, NQ, @as(u32, 0), s.xn, H });
+                } else {
+                    try m.proj(a.q, s.xn, s.qkv, H, NQ * HD, n, QKV, 0);
+                    try m.proj(a.k, s.xn, s.qkv, H, NKV * HD, n, QKV, NQ * HD);
+                    try m.proj(a.v, s.xn, s.qkv, H, NKV * HD, n, QKV, (NQ + NKV) * HD);
+                    try m.proj(a.g, s.xn, s.g, H, NQ, n, NQ, 0);
+                }
                 const inv = if (a.window == 0) m.inv_full else m.inv_slide;
-                try run(&m.k.rope, .{ NQ, n, 1 }, .{ s.qkv, QKV, @as(u32, 0), s.q, NQ * HD, a.qn, inv, m.pos, @as(u32, 0), cfg.eps });
-                try run(&m.k.rope, .{ NKV, n, 1 }, .{ s.qkv, QKV, NQ * HD, m.seq.kc[li], NKV * HD, a.kn, inv, m.pos, a.ring, cfg.eps });
-                try run(&m.k.vst, .{ NKV * HD / 64, n, 1 }, .{ s.qkv, QKV, (NQ + NKV) * HD, m.seq.vc[li], NKV * HD, m.pos, a.ring });
+                if (m.fuse & 4 != 0) { // q, k and v of every row in one launch
+                    try run(&m.k.rope_store, .{ NQ + NKV + NKV * HD / 64, n, 1 }, .{ s.qkv, QKV, s.q, m.seq.kc[li], m.seq.vc[li], a.qn, a.kn, inv, NQ, NKV, m.pos, a.ring, cfg.eps });
+                } else {
+                    try run(&m.k.rope, .{ NQ, n, 1 }, .{ s.qkv, QKV, @as(u32, 0), s.q, NQ * HD, a.qn, inv, m.pos, @as(u32, 0), cfg.eps });
+                    try run(&m.k.rope, .{ NKV, n, 1 }, .{ s.qkv, QKV, NQ * HD, m.seq.kc[li], NKV * HD, a.kn, inv, m.pos, a.ring, cfg.eps });
+                    try run(&m.k.vst, .{ NKV * HD / 64, n, 1 }, .{ s.qkv, QKV, (NQ + NKV) * HD, m.seq.vc[li], NKV * HD, m.pos, a.ring });
+                }
                 const span = if (a.window == 0) m.pos + n else @min(m.pos + n, a.window);
                 const scale: f32 = 1.0 / @sqrt(@as(f32, HD));
                 try run(&m.k.part, .{ NKV, (span + chunk - 1) / chunk, n }, .{ s.q, m.seq.kc[li], m.seq.vc[li], s.po, s.pm, s.pl, m.pos, chunk, a.ring, a.window, NKV, m.maxc, scale });
@@ -391,9 +409,13 @@ pub const Model = struct {
         for (m.layers, 0..) |*ly, i| {
             try m.mixer(ly, i, n);
             try run(&m.k.pan, .{ n, 1, 1 }, .{ s.d, s.x, ly.post_op, ly.ffn_norm, s.xn, H, cfg.eps });
-            try m.proj(ly.w1, s.xn, s.a, H, FF, n, FF, 0);
-            try m.proj(ly.w3, s.xn, s.b, H, FF, n, FF, 0);
-            try run(&m.k.swiglu, .{ (n * FF + 63) / 64, 1, 1 }, .{ s.a, s.b, s.act, n * FF });
+            if (n == 1 and m.fuse & 1 != 0) { // w1, w3 and their SwiGLU in one launch, each value as the three launches round it
+                try run(&m.k.w13, .{ FF / 4, 1, 1 }, .{ ly.w1.w, ly.w1.s, ly.w1.b, ly.w3.w, ly.w3.s, ly.w3.b, s.xn, s.act, H, FF });
+            } else {
+                try m.proj(ly.w1, s.xn, s.a, H, FF, n, FF, 0);
+                try m.proj(ly.w3, s.xn, s.b, H, FF, n, FF, 0);
+                try run(&m.k.swiglu, .{ (n * FF + 63) / 64, 1, 1 }, .{ s.a, s.b, s.act, n * FF });
+            }
             try m.proj(ly.w2, s.act, s.d, FF, H, n, H, 0);
             const next = if (i + 1 < m.layers.len) m.layers[i + 1].op_norm else m.norm_f;
             try run(&m.k.pan, .{ n, 1, 1 }, .{ s.d, s.x, ly.post_ffn, next, s.xn, H, cfg.eps });
