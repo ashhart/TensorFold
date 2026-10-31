@@ -27,6 +27,8 @@ const cases = [_][]const Lane{
     &.{ .{ .rows = 1 }, .{ .rows = 1 } },
     &.{ .{ .rows = 16, .keep = true, .apart = true }, .{ .rows = 1 }, .{ .rows = 7, .keep = true } },
     &.{ .{ .rows = 3, .apart = true }, .{ .rows = 16 }, .{ .rows = 5, .keep = true, .apart = true }, .{ .rows = 2 } },
+    &.{.{ .rows = 5, .keep = true, .apart = true }}, // one stream
+    &.{ .{ .rows = 4, .keep = true }, .{ .rows = 0 }, .{ .rows = 3, .apart = true } }, // a stream with no rows this round
     &sixteen, // sixteen streams
     &widest, // the table's lanes
 };
@@ -124,6 +126,7 @@ fn launch(gpu: check.Gpu, s: cuda.Stream, k: Fns, f: Fixture, way: Way, a: std.m
         const d = gpu.d;
         var row0: usize = 0;
         for (f.lanes, 0..) |l, i| {
+            if (l.rows == 0) continue; // nothing of a lane without rows is launched
             const pr = proj + row0 * pw * 2;
             const q = gq + row0 * qk_n * 4;
             const ky = gk + row0 * qk_n * 4;
