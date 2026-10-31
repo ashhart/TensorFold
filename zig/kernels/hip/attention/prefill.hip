@@ -12,6 +12,7 @@ constexpr int kRows = 64;     // query rows a block
 constexpr int kKeys = 64;     // keys a tile
 constexpr int kChunk = 64;    // head dimensions a staged key or value chunk
 constexpr int kThreads = 256;
+using word4 = unsigned __attribute__((ext_vector_type(4)));   // a 16-byte load held as one value
 static_assert(kKeys == kPageTokens, "a key tile is one page");
 
 // A cache element type's pair for dot2, the rounding into it and the product.
@@ -107,7 +108,10 @@ __device__ void fa_dot2(const float* __restrict__ q, const Cache* __restrict__ k
 #pragma unroll
         for (int m = 0; m < 16; ++m) o[i][m] = 0.f;
 
-    for (int k0 = 0; k0 < max_vis; k0 += kKeys) {
+    // a tile ending by full_end is in range and visible to every stored row, so FULL drops its guards and masks
+    int full_end = q_pos0 + q0 + 1;
+    if (full_end > span) full_end = span;
+    const auto tile = [&]<bool FULL>(int k0) __attribute__((always_inline)) {
         // the tile's first key row in the keys' and the values' storage
         const Cache* ktile = PAGED ? kbase + page_row(table[k0 / kPageTokens], count, kv, 0, d) : kbase + static_cast<long long>(k0) * k_ss;
         const Cache* vtile = PAGED ? vbase + page_row(table[k0 / kPageTokens], count, kv, 0, d) : vbase + static_cast<long long>(k0) * v_ss;
@@ -117,19 +121,19 @@ __device__ void fa_dot2(const float* __restrict__ q, const Cache* __restrict__ k
 #pragma unroll
             for (int j = 0; j < 4; ++j) acc[i][j] = 0.f;
         for (int c0 = 0; c0 < chunks; c0 += kKChunks) {
-            uint4 staged[2];
+            word4 staged[2];
 #pragma unroll
             for (int t = 0; t < 2; ++t) {
                 const int e = tid + t * kThreads, key = e / kKChunks, c = e % kKChunks;
-                staged[t] = k0 + key < span
-                                ? *reinterpret_cast<const uint4*>(ktile + static_cast<long long>(key) * kstride + 8 * (c0 + c))
-                                : uint4{0, 0, 0, 0};
+                staged[t] = (FULL || k0 + key < span)
+                                ? *reinterpret_cast<const word4*>(ktile + static_cast<long long>(key) * kstride + 8 * (c0 + c))
+                                : word4{0, 0, 0, 0};
             }
             __syncthreads();
 #pragma unroll
             for (int t = 0; t < 2; ++t) {
                 const int e = tid + t * kThreads, key = e / kKChunks, c = e % kKChunks;
-                sKV[key * kKChunks + (c ^ ((key >> 2) & 7))] = staged[t];
+                sKV[key * kKChunks + (c ^ ((key >> 2) & 7))] = __builtin_bit_cast(uint4, staged[t]);
             }
             __syncthreads();
 #pragma unroll 2
@@ -162,7 +166,7 @@ __device__ void fa_dot2(const float* __restrict__ q, const Cache* __restrict__ k
             float tile_max = -INFINITY;
 #pragma unroll
             for (int j = 0; j < 4; ++j) {
-                acc[i][j] = (row < q_hi && k0 + 4 * sk + j < vis) ? acc[i][j] * scale : -INFINITY;
+                acc[i][j] = (FULL || (row < q_hi && k0 + 4 * sk + j < vis)) ? acc[i][j] * scale : -INFINITY;
                 tile_max = fmaxf(tile_max, acc[i][j]);
             }
 #pragma unroll
@@ -190,9 +194,9 @@ __device__ void fa_dot2(const float* __restrict__ q, const Cache* __restrict__ k
             // a value chunk: key pair `pair`, dims 8g .. 8g + 7 interleaved as (key, key + 1) fp16 pairs
             const int pair = tid / kKChunks, g = tid % kKChunks;
             const int key = k0 + 2 * pair;
-            const uint4 a = key < span ? *reinterpret_cast<const uint4*>(vtile + static_cast<long long>(2 * pair) * vstride + 8 * (c0 + g))
+            const uint4 a = (FULL || key < span) ? *reinterpret_cast<const uint4*>(vtile + static_cast<long long>(2 * pair) * vstride + 8 * (c0 + g))
                                        : uint4{0, 0, 0, 0};
-            const uint4 b = key + 1 < span
+            const uint4 b = (FULL || key + 1 < span)
                                 ? *reinterpret_cast<const uint4*>(vtile + static_cast<long long>(2 * pair + 1) * vstride + 8 * (c0 + g))
                                 : uint4{0, 0, 0, 0};
             __syncthreads();
@@ -227,7 +231,10 @@ __device__ void fa_dot2(const float* __restrict__ q, const Cache* __restrict__ k
                     acc_o = fmaf(sA[pr + i], acc_o, pv[i][m]);
                 }
         }
-    }
+    };
+    int k0 = 0;
+    for (; k0 + kKeys <= full_end; k0 += kKeys) tile.template operator()<true>(k0);
+    for (; k0 < max_vis; k0 += kKeys) tile.template operator()<false>(k0);
     if (sk == 0)
 #pragma unroll
         for (int i = 0; i < 4; ++i) sL[sr + 16 * i] = l_run[i];
