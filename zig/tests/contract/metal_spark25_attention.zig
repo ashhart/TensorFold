@@ -116,8 +116,12 @@ fn spec(l: Layer, case: Case) c.Spec {
         .tiles = if (spread) .{ .{}, .{}, .{} } else .{ .{ .size = rt, .min = st.window_rows + 1 }, .{}, .{ .size = bkt, .min = 0 } },
         .served = if (spread) spread_shapes else plain_shapes,
         .sums = .{ .exact = true },
+        .known = if (case == .plain or case == .spread) masked_key else null,
     };
 }
+
+/// Gate 1's plant at key p0 + 5, which rows 0 to 4 do not see but their tile reads, makes their outputs NaN.
+const masked_key: c.Known = .{ .gate = .nonfinite, .finding = "a non-finite value at a key masked for a row of its tile reaches that row as NaN (P = 0 times Inf inside the P x V mma)" };
 
 /// sp_prompt_attention over n keys, its counts from the source; `cut` the fp32 P's operand cut into P x V.
 fn form(n: usize, cut: f64) ar.Form {
@@ -169,8 +173,7 @@ const Probe = struct {
     fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, l: Layer, case: Case) !Probe {
         const src = try built(a, device, l, case);
         defer a.free(src);
-        // before the M5, nax.h's fragments keep P whole; the cutless control states it whole on the M5
-        const cut: f64 = if (device.tensorUnits() and case != .cutless) ar.operand_cut else 0;
+        const cut: f64 = if (case == .cutless) 0 else ar.operand_cut; // the cutless control states P whole
         return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .pipe = try rig_.pipeline(device, src, "sp_prompt_attention"), .layer = l, .case = case, .cut = cut };
     }
 
@@ -232,12 +235,13 @@ const Probe = struct {
         switch (fill) {
             .random => if (p.case == .spread or p.case == .cutless) p.spread(rng),
             .nonfinite => {
-                // every row sees key p0, rows 2 on see key p0 + 2
+                // every row sees key p0, rows 2 on key p0 + 2; rows 0 to 4 not key p0 + 5, which their tile reads
                 for ([_]usize{ 3, 1 * dh, 2 * dh + 5 }, [_]f32{ std.math.nan(f32), std.math.inf(f32), -std.math.inf(f32) }, 0..) |at, x, r| if (r < p.rows) {
                     p.q[(r * nq + r * grp + 1) * dh + at % dh] = c.toBf16(x);
                 };
                 p.v[p.slot(p.p0) * kw + 0 * dh + 5] = c.toBf16(std.math.inf(f32));
                 p.v[p.slot(p.p0) * kw + 1 * dh + 6] = c.toBf16(std.math.nan(f32));
+                if (p.rows > 5) p.v[p.slot(p.p0 + 5) * kw + 3 * dh + 7] = c.toBf16(std.math.inf(f32));
                 p.k[p.slot(p.p0 + 2) * kw + 2 * dh] = c.toBf16(std.math.nan(f32));
             },
             .stress => try p.stress(rng),
@@ -379,7 +383,7 @@ fn fillRandom(rng: std.Random, out: []u16, r: f32) void {
     for (out) |*x| x.* = c.toBf16((rng.float(f32) * 2 - 1) * r);
 }
 
-/// Both layers' pipelines with their controls; the spread cases and their cutless controls on the tensor units only.
+/// Both layers' pipelines with their controls, on the tensor units only: before the M5 the path is not qualified.
 pub const Suite = struct {
     a: std.mem.Allocator,
     device: mtl.Device,
@@ -388,9 +392,9 @@ pub const Suite = struct {
     probes: std.ArrayList(*Probe) = .empty,
 
     pub fn collect(s: *Suite, only: ?[]const u8) !void {
+        if (!s.device.tensorUnits()) return;
         for (std.enums.values(Layer)) |l| for (std.enums.values(Case)) |k| {
             if (only) |o| if (std.mem.indexOf(u8, name(l, k), o) == null) continue;
-            if ((k == .spread or k == .cutless) and !s.device.tensorUnits()) continue;
             const p = try s.a.create(Probe);
             errdefer s.a.destroy(p);
             p.* = try Probe.init(s.a, s.device, s.queue, l, k);
