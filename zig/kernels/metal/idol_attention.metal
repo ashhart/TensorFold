@@ -79,7 +79,8 @@ inline void id_attention(const device T* Q, const device T* K, const device T* V
     TF_UNROLL
     for (short f = 0; f < 2; f++) {
       TF_UNROLL
-      for (short e = 0; e < 8; e++) s[f][e] = fast::exp2(s[f][e] - top_new[e >> 2]);
+      // the units take an fp32 P short: round it to fp16 here, so the denominator sums the values P V multiplies
+      for (short e = 0; e < 8; e++) s[f][e] = float(half(fast::exp2(s[f][e] - top_new[e >> 2])));
     }
     float scale_old[2];
     TF_UNROLL
