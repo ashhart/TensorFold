@@ -19,6 +19,10 @@ from starlette.background import BackgroundTask
 HOP = {"host", "content-length", "connection", "keep-alive", "transfer-encoding", "te", "trailer", "upgrade",
        "proxy-authorization", "proxy-authenticate"}
 STUDIO_HEADERS = {"x-studio-token"}
+# The browser's Origin names TensorFold Web's page, not the engine. TensorFold's server refuses a request whose Origin
+# differs from its own address (zig/src/server/request_guard.zig), so the relay drops it. TensorFold Web's own gate has
+# already refused cross-site changes before a request reaches the relay.
+BROWSER_ONLY = {"origin"}
 STUDIO_PARAMS = {"token"}
 ENGINE_AUTH = {"authorization", "x-api-key"}
 
@@ -38,10 +42,11 @@ class Proxy:
 
     def upstream_headers(self, incoming: list[tuple[str, str]], key: str | None = None, *,
                          snapshot: bool = False) -> dict[str, str]:
-        """The headers the engine gets: hop-by-hop and TensorFold Web credentials dropped, the engine's key enforced
+        """The headers the engine gets: hop-by-hop, TensorFold Web credentials and Origin dropped, the engine's key enforced
         (``key`` from the request's own snapshot of the target, when ``snapshot``)."""
 
-        headers = {k: v for k, v in incoming if k.lower() not in HOP and k.lower() not in STUDIO_HEADERS}
+        headers = {k: v for k, v in incoming
+                   if k.lower() not in HOP and k.lower() not in STUDIO_HEADERS and k.lower() not in BROWSER_ONLY}
         key = key if snapshot else self._key()
         headers[RELAYED] = "1"                        # a request that comes back to a relay is refused there (a loop)
         if key:
