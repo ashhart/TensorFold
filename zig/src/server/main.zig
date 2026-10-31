@@ -207,25 +207,11 @@ fn modelType(a: std.mem.Allocator, io: std.Io, dir: []const u8, problem: *[]cons
     return if (t == .string) t.string else "unknown";
 }
 
-/// The family's defaults, generation_config.json's sampling (``do_sample`` false is greedy), then the serve flags.
+/// The family's defaults, generation_config.json's sampling, then the serve flags (family_sampling.resolve).
 fn sampling(a: std.mem.Allocator, io: std.Io, dir: []const u8, args: cli.Args, model_type: []const u8) !?json.Value {
-    const out = try json.newObject(a);
-    try @import("family_sampling.zig").put(a, out, model_type);
     const path = try std.fs.path.join(a, &.{ dir, "generation_config.json" });
-    if (std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20))) |bytes| {
-        if ((try json.parse(a, bytes)) == .ok) {
-            const cfg = (try json.parse(a, bytes)).ok;
-            for ([_][]const u8{ "temperature", "top_k", "top_p", "min_p" }) |k| if (cfg.field(k)) |v| try out.put(a, k, v);
-            if (cfg.get("do_sample")) |d| if (d == .bool) {
-                if (!d.bool) try out.put(a, "temperature", .{ .float = 0 }) else if (out.get("temperature") == null) try out.put(a, "temperature", .{ .float = 1 });
-            };
-        }
-    } else |_| {}
-    if (args.temperature) |t| try out.put(a, "temperature", .{ .float = t });
-    if (args.top_p) |t| try out.put(a, "top_p", .{ .float = t });
-    if (args.top_k) |t| try out.put(a, "top_k", try json.intValue(a, t));
-    if (args.min_p) |t| try out.put(a, "min_p", .{ .float = t });
-    return if (out.count() > 0) json.Value{ .object = out } else null;
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20)) catch null;
+    return @import("family_sampling.zig").resolve(a, model_type, bytes, .{ .temperature = args.temperature, .top_p = args.top_p, .top_k = args.top_k, .min_p = args.min_p });
 }
 
 const Closer = @import("idle_unload_closer.zig").Closer;
