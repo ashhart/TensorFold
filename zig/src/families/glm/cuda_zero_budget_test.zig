@@ -50,3 +50,41 @@ test "zero grant: GLM DFlash2 skips the actual block pass and transmits a stable
         try std.testing.expectEqual(useful.pos, q.pos);
     }
 }
+
+test "shared head costs: GLM CUDA MTP is unpriced and DFlash2 already uses node budgets" {
+    var e: engine.Engine = undefined;
+    e.mtp = true;
+    var b: @import("cuda_lanes.zig").Lanes = undefined;
+    b.x.e = &e;
+    b.alone = false;
+    b.mtp_confidence = null;
+    for ([_]bool{ false, true }) |block| {
+        e.drafter = if (block) @ptrFromInt(16) else null;
+        const m = b.facts();
+        try std.testing.expect(!m.limit_shared_drafts);
+        if (!block) {
+            try std.testing.expectEqual(@as(f64, 0), m.mtp_step_ms);
+            try std.testing.expect(!m.draft_probabilities);
+            continue;
+        }
+        try std.testing.expect(m.mtp_step_ms > 0 and m.draft_probabilities);
+        var cfg = try lanes.Config.init(std.testing.allocator, m, m.exact_width, m.drafts);
+        defer cfg.deinit(std.testing.allocator);
+        var fake: lanes.fake.Fake = .{ .gpa = std.testing.allocator };
+        defer fake.deinit();
+        var clock: lanes.fake.FixedClock = .{};
+        var core = lanes.Engine.init(std.testing.allocator, &cfg, fake.backend(), clock.clock());
+        defer core.deinit();
+        var stream = try lanes.Stream.init(std.testing.allocator, .{ .id = "node", .prompt = &.{1}, .max_new = 64 });
+        defer stream.deinit(std.testing.allocator);
+        stream.granted = 1;
+        var who = [_]lanes.depth.Who{lanes.windows.who(&stream)};
+        var old: [1]i64 = undefined;
+        var expensive: [1]i64 = undefined;
+        try core.rule.budgets(&who, lanes.windows.probe(&core), false, &old);
+        core.rule.mtp_step_ms = 1000;
+        try core.rule.budgets(&who, lanes.windows.probe(&core), false, &expensive);
+        try std.testing.expectEqual(@as(i64, 3), old[0]);
+        try std.testing.expectEqualSlices(i64, &old, &expensive);
+    }
+}
