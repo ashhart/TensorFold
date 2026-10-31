@@ -1,0 +1,87 @@
+{
+  "hardware": {
+    "gpu": "Apple M4 Pro",
+    "ram_bytes": 51539607552
+  },
+  "settings": {
+    "context": 4096,
+    "parallel": 1,
+    "prompt_cache_gib": 0,
+    "drafter_bits": 0,
+    "before_any_request": true,
+    "repetitions": 1
+  },
+  "target_revision": "667408d494bde191c2cb9dd4f4549827816b9275",
+  "checkpoints_as_in": "historical-equality-and-load.json",
+  "before_source": "51cbe02b15aa9319e2f3a3403ea76030fac60a0b",
+  "after_source": "c1b9d325af6714a39922216d15369541b6bd084c",
+  "compiler": "Zig 0.17.0",
+  "flags": [
+    "-Dcpu=apple_m1",
+    "-Dversion=1.1.8"
+  ],
+  "memory": {
+    "1392": {
+      "schema_version": 1,
+      "context_window": 4096,
+      "context_fitted": false,
+      "process": {
+        "source": "darwin_rusage_info_v4",
+        "physical_footprint_bytes": 15484546088,
+        "lifetime_peak_physical_footprint_bytes": 16037424528
+      },
+      "prompt_cache_plan": {
+        "source": "physical_footprint",
+        "budget_bytes": 0,
+        "explicit_budget": true,
+        "over_cap": false,
+        "ram_bytes": 51539607552,
+        "ready_footprint_bytes": 15426464712,
+        "cap_bytes": 36077725250,
+        "room_bytes": 18503776890,
+        "margin_bytes": 2147483648
+      }
+    },
+    "1393": {
+      "schema_version": 1,
+      "context_window": 4096,
+      "context_fitted": false,
+      "process": {
+        "source": "darwin_rusage_info_v4",
+        "physical_footprint_bytes": 15475911696,
+        "lifetime_peak_physical_footprint_bytes": 15511169992
+      },
+      "prompt_cache_plan": {
+        "source": "physical_footprint",
+        "budget_bytes": 0,
+        "explicit_budget": true,
+        "over_cap": false,
+        "ram_bytes": 51539607552,
+        "ready_footprint_bytes": 15469210568,
+        "cap_bytes": 36077725250,
+        "room_bytes": 18461031034,
+        "margin_bytes": 2147483648
+      }
+    }
+  },
+  "shutdowns": {
+    "1392": {
+      "forced_kill": false,
+      "seconds": 0.4373434172011912,
+      "returncode": 0
+    },
+    "1393": {
+      "forced_kill": false,
+      "seconds": 0.5479795830324292,
+      "returncode": 0
+    }
+  },
+  "no_m5_access": true,
+  "binary_sha256": {
+    "1392": "3a82d6f793b92c4c7a749e226b8f02bc5441979c927138947d3f786384bec51f",
+    "1393": "29f1a35ab1fbccbbd0fcbd20e4c4ac73782a43e7760d9adcdaddbbaa6b8d62b8",
+    "1394": "135dadf0b40f59b2e06d09ee2c2a63d6d866c859c8904de1d26f897384433c76"
+  },
+  "peak_reduction_bytes": 526254536,
+  "peak_reduction_mib": 501.8754348754883
+}
