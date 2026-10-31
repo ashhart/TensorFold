@@ -42,7 +42,16 @@ const Probe = struct {
     pub fn prepare(p: *Probe, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         if (!try p.inner.prepare(shape, fill, seed)) return false;
         if (p.case != .cut and fill == .random) p.spread(seed);
+        if (fill == .nonfinite) p.maskedInf();
         return true;
+    }
+
+    /// +Inf in V at key len + 5 (head 0, column 7): rows 0 to 4 have it masked, yet their tile reads it.
+    fn maskedInf(p: *Probe) void {
+        const in = &p.inner;
+        in.host[in.at(true, 0, in.len + 5) + 7] = 0x7f80;
+        const cache = old.kvh * in.cap * D;
+        @memcpy(p.rig.bytes(in.kv[1], cache * 2), std.mem.sliceAsBytes(in.host[cache..][0..cache]));
     }
 
     /// Scores q . k = q0 k0 alone, so P = 2^(s - max) spreads over about [2^-6, 1]; values in [0, 1) add the bias up.
@@ -157,6 +166,7 @@ pub const Suite = struct {
             try s.probes.append(s.a, p);
             var spec = old.spec(.prompt, 1, false);
             spec.name = name(k);
+            if (k != .cutless) spec.known = .{ .gate = .nonfinite, .finding = "a non-finite value at a key masked for a row of its tile reaches that row as NaN (P = 0 times Inf inside the P x V mma)" };
             try s.kernels.append(s.a, .{ .spec = spec, .ctx = p, .vt = &vt, .control = if (k == .cutless) .shapes else null });
         }
     }
