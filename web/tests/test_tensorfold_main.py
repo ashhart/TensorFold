@@ -316,3 +316,30 @@ def test_an_engine_page_keeps_its_policy_but_not_its_frame_ancestors():
     assert frame_policy(None) == "frame-ancestors 'none'"
     assert frame_policy("default-src 'self'; frame-ancestors *; img-src data:") == \
         "default-src 'self'; img-src data:; frame-ancestors 'none'"
+
+
+# -- pinned installs -------------------------------------------------------------------------------------------------
+
+
+def test_every_install_command_names_an_exact_version():
+    import pathlib
+    import re
+
+    from tensorfold_web import tooleval
+
+    assert re.fullmatch(r"\d+\.\d+\.\d+", tooleval.VERSION)
+    root = pathlib.Path(__file__).resolve().parents[1]
+    sources = [*root.glob("tensorfold_web/*.py"), *root.glob("ui/src/**/*.tsx"), *root.glob("ui/src/**/*.ts"),
+               *root.glob("tensorfold_web/ui_dist/assets/*.js")]
+    # a package after `uv tool install`, `pip install` or `pipx install`; a bare mention (`uv tool install` puts…) is
+    # no command
+    command = re.compile(r"(?:uv tool install|pip3? install|pipx install)\s+(?!-)([A-Za-z][\w.-]*)(\S*)")
+    seen = 0
+    for path in sources:
+        for m in command.finditer(path.read_text(encoding="utf-8", errors="replace")):
+            name, rest = m.group(1), m.group(2)
+            if name in ("puts", "for", "and", "the", "first", "it"):
+                continue
+            seen += 1
+            assert rest.startswith("==") or "{" in rest, f"{path.name}: {m.group(0)!r} is not pinned"
+    assert seen >= 3
