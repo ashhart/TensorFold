@@ -149,7 +149,6 @@ pub const Cuda = struct {
     fn probabilitiesFn(ptr: *anyopaque, s: *lanes.Stream, out: []f64) anyerror!bool {
         return @import("cuda_mtp_policy.zig").probabilities(of(ptr), s, out);
     }
-
     /// The checkpoint's verify width, shared target forwards and this GPU's measured costs.
     pub fn facts(self: *const Cuda) lanes.Model {
         const drafting = self.head != null;
@@ -160,6 +159,7 @@ pub const Cuda = struct {
             .gpu_tokens = false,
             .mtp = drafting,
             .allocate_shared_drafts = drafting,
+            .limit_shared_drafts = drafting and self.mtp_confidence == null,
             .speculate = drafting,
             .speculate_early = false,
             .draft_prior = &config.draft_prior,
