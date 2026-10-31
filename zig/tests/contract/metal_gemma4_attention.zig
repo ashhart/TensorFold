@@ -148,6 +148,10 @@ const prompt_sliding = [_]c.Shape{ .{ .rows = 77, .n = cfg.sliding_dim, .k = 0 }
 const prompt_global = [_]c.Shape{ .{ .rows = 77, .n = cfg.global_dim, .k = 0 }, .{ .rows = 64, .n = cfg.global_dim, .k = 700 }, .{ .rows = 33, .n = cfg.global_dim, .k = 1500 }, .{ .rows = prompt_rows, .n = cfg.global_dim, .k = 0 } };
 const decode_global = [_]c.Shape{ .{ .rows = decode_rows, .n = cfg.global_dim, .k = 700 }, .{ .rows = 1, .n = cfg.global_dim, .k = 0 }, .{ .rows = 5, .n = cfg.global_dim, .k = 255 }, .{ .rows = 9, .n = cfg.global_dim, .k = 1100 }, .{ .rows = 1, .n = cfg.global_dim, .k = 3000 } };
 
+/// Gate 1's known findings: a masked key's value still enters P x V, where P = 0 times Inf is NaN.
+const prompt_finding = "a non-finite value at a key masked for a row of its tile reaches that row as NaN (P = 0 times Inf inside the P x V mma)";
+const decode_finding = "a non-finite value at a key masked for a decode row but in its 32-key step reaches that row as NaN (P = 0 times Inf inside the P x V mma)";
+
 fn keysDepth(s: c.Shape) usize {
     return s.n + s.k + s.rows;
 }
@@ -237,7 +241,8 @@ const Probe = struct {
         const rows: c.Tile = if (p.v.kind == .decode) .{ .size = 16 / (p.nq() / p.nk()) } else .{ .size = rt };
         const keys: c.Tile = .{ .size = if (p.v.kind == .decode) cd else p.dh() / 2, .min = 0 };
         // ops: gate 4's exact sums meet only the final division's roundings
-        return .{ .name = p.name, .accum = .f32, .depth = keysDepth, .ops = 4, .out = .bf16, .tiles = .{ rows, .{}, keys }, .served = served };
+        const known: ?c.Known = if (p.v.case == .plain or p.v.case == .spread) .{ .gate = .nonfinite, .finding = if (p.v.kind == .prompt) prompt_finding else decode_finding } else null;
+        return .{ .name = p.name, .accum = .f32, .depth = keysDepth, .ops = 4, .out = .bf16, .tiles = .{ rows, .{}, keys }, .served = served, .known = known };
     }
 
     /// The keys row `r` attends: a sliding row's window up to its last key, else every key up to its own.
@@ -291,6 +296,8 @@ const Probe = struct {
                 p.vp[p.p0 * dh_ + 5] = c.toBf16(std.math.inf(f32));
                 p.vp[p.p0 * dh_ + 6] = c.toBf16(-std.math.inf(f32));
                 if (p.p0 + 2 < n) p.kp[(p.p0 + 2) * dh_] = c.toBf16(std.math.nan(f32));
+                // +Inf at p0 + 1: masked for row 0, yet read in row 0's tile (prompt) or 32-key step (decode)
+                p.vp[(p.p0 + 1) * dh_ + 7] = c.toBf16(std.math.inf(f32));
             },
             .stress => {
                 // every score 0, so every weight 1; the values every row sees cancel but for four ones
