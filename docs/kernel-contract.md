@@ -125,6 +125,9 @@ Qwen3.8 Flash Next's `tf_sattn_nax` and `tf_attn256_nax` score masked keys -FLT_
 max starts from, so a row whose every score is -Inf weighs its masked keys 1 and gives a finite average where float64
 gives NaN. `tf_sattn_nax`'s padding lanes also read key 0 at p = 0, so a non-finite value in key 0's row reaches every
 row (0 x Inf is NaN where float64 gives the infinity).
+MiniMax-M3.1-Flash's `mm_prompt_attention`, Spark-X2.6-4B's `sp_prompt_attention` and, on the M5, Nemotron's
+`tf_attention_nax` give NaN for a row whose tile reads a non-finite value at a key masked for that row (a later key of the tile, P = 0 times Inf inside the P x V mma),
+where float64 keeps the row finite; gate 1 plants one such value.
 
 HIP’s MLX stream tile keeps its finite dot2 sums unchanged. A non-finite result with an actual non-finite
 operand is recomputed by full quantization groups using the factored float64 formula. The plain tile is
@@ -168,8 +171,9 @@ keeps. Two cases take operands in (0, 1], where the bias adds up; their controls
 at `shapes`, as does a source edit dropping the ragged K tail's last column. Before the M5 they keep fp32 whole and are
 not registered; their launches are in `nemotron_ssd_records.zig`.
 Spark-X2.6-4B's `sp_prompt_attention` registers both pipelines the engine builds (sliding layers over a 512-key window
-in a 2,560-slot ring, and full layers), its fp32 P stated with the cut on the M5 and whole before it, each with a P
-spread case and its cutless control (M5 only), and one source edit each (a key past the window, a key past the row).
+in a 2,560-slot ring, and full layers), its fp32 P stated with the cut, each with a P spread case
+and its cutless control, and one source edit each (a key past the window, a key past the row); before the M5 they are
+not registered.
 LFM2.5-24B-A2B's shared rounds: the greedy pick (`lfm2_argmax`) and the conv and attention kernels that run every
 stream's rows in one dispatch, each bit-equal to the per-stream kernels it replaces. Four controls edit the source: a tie
 to the highest id, a nonfinite logit not flagged, and every stream reading or writing the first stream's state or cache.
