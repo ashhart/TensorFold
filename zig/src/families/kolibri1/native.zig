@@ -155,9 +155,22 @@ fn kolibri(ptr: *anyopaque) *be.Kolibri {
     return @ptrCast(@alignCast(ptr));
 }
 
-/// Bytes a state at `at` prompt tokens takes.
+/// Bytes a state at `at` prompt tokens takes (TF_KV_SHARE: the pool pages its rings take, past the store's pages).
 pub fn snap_bytes(ptr: *anyopaque, at: u32) u64 {
-    return snap.bytes(kolibri(ptr).m, at);
+    const x = kolibri(ptr);
+    if (x.prompts == null) return snap.bytes(x.m, at, 0);
+    return snap.blobPages(x.m, at, at) * x.m.pageBytes();
+}
+
+/// TF_KV_SHARE: the pool the store keeps prompts in (null: linear caches, no pool).
+pub fn share_pool(ptr: *anyopaque) ?*kv.Pool {
+    const x = kolibri(ptr);
+    return if (x.pool) |*p| p else null;
+}
+
+/// TF_KV_SHARE: the store the prompt passes keep and resume through (null: none, as before).
+pub fn share_attach(ptr: *anyopaque, prompts: ?@import("core").kv_prompts.Prompts) void {
+    kolibri(ptr).prompts = prompts;
 }
 
 /// The prompt pass stands at `at` (a chunk start): copy the stream's caches there.
