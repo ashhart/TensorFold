@@ -43,8 +43,9 @@ This family keeps that split:
 ### The tensor units' fp32 matmul is not fp32
 
 On the M5, a GEMM whose inputs are fp32 on the tensor units (`tfp::gemm_nax<float>`, the Qwen-VL tower's
-`qwv_gemm_f32`, MLX's fp32 matmul) rounds its inputs to about fp16: its error against float64 is about 7.5e-4 of the
-result, against about 1e-7 for an fp32 FMA. RePo's maps at that precision move block 8's attention out of its gate.
+`qwv_gemm_f32`, MLX's fp32 matmul) truncates each input to 10 mantissa bits, toward zero (#1772): its error against
+float64 is about 7.5e-4 of the result, against about 1e-7 for an fp32 FMA. RePo's maps at that precision move
+block 8's attention out of its gate.
 
 `id_norm_split` therefore writes each RePo input row as fp16 `[hi | hi | lo]` (`lo = x - hi`), and the map's weights are
 stored `[hi | lo | hi]`, scaled by a power of two so `lo` stays normal. One fp16 split-K GEMM with K = 3,072 then sums
