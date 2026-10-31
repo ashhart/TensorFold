@@ -4,8 +4,8 @@
   vision_check.py REF_TOOLS MODEL_DIR DUMP_DIR
 
 REF_TOOLS holds #1502's tools/lfm3/vision_fp64_reference.py and fp64_reference.py, unchanged. DUMP_DIR is
-tf-xpu-lfm3_tower-test's output: pixels.f32, grid.json, xpu_embedding_norm.bf16, xpu_layer_NN.bf16, xpu_rows.bf16
-and the control's transposed_rows.bf16 (the grid passed as gw x gh). The reference runs twice: with its bf16
+tf-xpu-lfm3_tower-test's output: pixels.f32, grid.json, xpu_embedding_norm.f32, xpu_layer_NN.f32, xpu_rows.f32
+(the image rows as bf16 values), the first layers' stages, and the control's transposed_rows.f32 (the grid passed as gw x gh). The reference runs twice: with its bf16
 activation points (transformers' bf16 tower), and in plain float64 (its bf16 rounding replaced by the identity).
 Each stage prints rel (|got - ref| / |ref|, Frobenius) and cos; the image rows must reach cos >= 0.999 against
 plain float64, and the transposed control must not.
@@ -16,9 +16,15 @@ from pathlib import Path
 import numpy as np
 
 
-def load_bf16(path, cols):
-    raw = np.fromfile(path, dtype="<u2").astype(np.uint32) << 16
-    return raw.view(np.float32).astype(np.float64).reshape(-1, cols)
+# the first conv layer's and the first attention layer's stages, and the projector's, as the reference names them
+STAGES = ["patchifier", "first_operator_norm", "first_conv_in", "first_conv_gated", "first_operator", "first_residual",
+          "first_ffn_norm", "first_ffn_gate", "first_ffn_up", "first_ffn_act", "first_ffn_down", "first_attention_norm",
+          "first_attention_q", "first_attention_k", "first_attention_v", "first_attention_context", "first_attention_operator",
+          "projector_norm", "projector_gelu"]
+
+
+def load_f32(path, cols):
+    return np.fromfile(path, dtype="<f4").astype(np.float64).reshape(-1, cols)
 
 
 def compare(got, ref):
@@ -43,17 +49,25 @@ def main(tools, model_dir, dump):
     grid = json.loads((dump / "grid.json").read_text())
     gh, gw = grid["gh"], grid["gw"]
     patches = np.fromfile(dump / "pixels.f32", dtype="<f4").astype(np.float64).reshape(gh * gw, 1536)
-    xpu = {"embedding_norm": load_bf16(dump / "xpu_embedding_norm.bf16", 1024)}
+    xpu = {"embedding_norm": load_f32(dump / "xpu_embedding_norm.f32", 1024)}
     for i in range(14):
-        xpu[f"layer_{i:02d}"] = load_bf16(dump / f"xpu_layer_{i:02d}.bf16", 1024)
-    rows = load_bf16(dump / "xpu_rows.bf16", 2048)
-    transposed = load_bf16(dump / "transposed_rows.bf16", 2048)
+        xpu[f"layer_{i:02d}"] = load_f32(dump / f"xpu_layer_{i:02d}.f32", 1024)
+    rows = load_f32(dump / "xpu_rows.f32", 2048)
+    transposed = load_f32(dump / "transposed_rows.f32", 2048)
     result = {"grid": [gh, gw], "stages": {}}
     refs = {}
     for mode, plain in (("bf16 points", False), ("float64", True)):
         trace, ref = reference(tools, model_dir, patches, gh, gw, plain)
         refs[mode] = ref
         print(f"against #1502's reference, {mode} ({gh} x {gw} patches):")
+        for name in STAGES:
+            path = dump / f"xpu_{name}.f32"
+            if name not in trace or not path.exists():
+                continue
+            want = trace[name].reshape(trace[name].shape[0], -1) if trace[name].ndim > 1 else trace[name]
+            d, c = compare(load_f32(path, want.shape[-1]), want)
+            result["stages"].setdefault(name, {})[mode] = {"rel": d, "cos": c}
+            print(f"  {name:24s} rel {d:.3e}  cos {c:.6f}")
         for name in xpu:
             d, c = compare(xpu[name], trace[name])
             result["stages"].setdefault(name, {})[mode] = {"rel": d, "cos": c}
