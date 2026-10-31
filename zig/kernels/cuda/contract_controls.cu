@@ -364,6 +364,8 @@ extern "C" __global__ void __launch_bounds__(128) tf_ctl_pocket_in_fmax(const __
         const float z = fmaxf(s, 0.0f);
         act[static_cast<int64_t>(r) * 64 + j] = z * z;
     }
+}
+
 // Gate 3: moss_image.cu's steps, each with one of the publisher's bf16 points dropped; their range checks must go red.
 namespace tf_ctl_moss {
 typedef __nv_bfloat16 bf16;
