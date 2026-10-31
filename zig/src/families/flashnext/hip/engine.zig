@@ -145,6 +145,9 @@ pub const Engine = struct {
         };
         errdefer e.host.staging.free();
         e.eos = e.tables.hasher.ref.eos;
+        // every weight is on the device now: only the n-gram rows a gather reads stay resident
+        const live = try e.tables.spans(e.keep.allocator());
+        e.ck.releaseExcept(live);
         e.arena = try hip.Arena.init(&e.driver, try e.scratchBytes());
         errdefer e.arena.deinit();
         e.drawer = try serve.draw.Drawer.init(
