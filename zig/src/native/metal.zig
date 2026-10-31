@@ -52,6 +52,7 @@ pub const families: []const api.Family = &.{
     .{ .model_type = "step5_vl", .formats = &.{"mlx-q2g128"} },
     .{ .model_type = "spark2_5", .formats = &.{ "bf16", "mlx-q2g64", "mlx-q3g64", "mlx-q4g64", "mlx-q5g64", "mlx-q6g64", "mlx-q8g64" } },
     .{ .model_type = "minimax_m3_vl", .formats = &.{ "mlx-q3g64", "mlx-q8g64" } },
+    .{ .model_type = "llama", .formats = &.{"bf16"} },
 };
 
 /// Gemma 4 31B (gemma4) and 12B (gemma4_unified, its text model): one native family, gemma4.zig's host.
@@ -174,10 +175,6 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = why;
         return null;
     }
-    if (o.drafter != null and !dense and !isGemma4(o.model_type)) {
-        problem.* = "--drafter is supported for Qwen3.8-27B-class checkpoints (qwen3_5 with its own output head) and Gemma 4 dense";
-        return null;
-    }
     if (dense) return openQwen27(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "qwen4_exp")) return openFlashNext(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "glm5_next")) return openGlm(a, gpa, io, o, problem);
@@ -191,6 +188,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     if (std.mem.eql(u8, o.model_type, "step5_vl")) return @import("step5.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "spark2_5")) return @import("spark25.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "minimax_m3_vl")) return @import("minimax_m3.zig").open(a, gpa, io, o, problem);
+    if (std.mem.eql(u8, o.model_type, "llama")) return @import("llama.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "lfm2_moe")) return @import("lfm2_moe.zig").open(a, gpa, io, o, problem);
     if (!std.mem.eql(u8, o.model_type, "nemotron_h")) {
         problem.* = try std.fmt.allocPrint(a, "the native engine has no backend for {s} checkpoints yet; the Python engine 0.6.6 may serve them: python -m pip install git+https://github.com/ashhart/TensorFold.git@v0.6.6", .{o.model_type});
@@ -319,14 +317,15 @@ fn refusal(a: Allocator, o: api.Open, dense: bool) !?[]const u8 {
     if (o.kv8) return "--kv-cache fp8 keeps fp8 caches on CUDA; the Metal engines keep bf16: serve without it";
     if (o.prompt_int8) return prompt_int8_refusal;
     if (!learners.supports(t)) if (try o.slideRefusal(a, "Macs")) |why| return why;
-    const one_mac: ?[]const u8 = if (std.mem.eql(u8, t, "nemotron_h")) "Nemotron" else if (std.mem.eql(u8, t, "lfm2_moe")) "LFM2.5-24B-A2B" else if (isGemma4(t)) "Gemma 4" else if (std.mem.eql(u8, t, "step5_vl")) "Step-5" else if (std.mem.eql(u8, t, "spark2_5")) "Spark-X2.6" else if (std.mem.eql(u8, t, "minimax_m3_vl")) "MiniMax-M3.1-Flash" else if (!std.mem.eql(u8, t, "qwen3_5")) null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
+    if (o.drafter != null and !dense and !isGemma4(t)) return "--drafter is supported for Qwen3.8-27B-class checkpoints (qwen3_5 with its own output head) and Gemma 4 dense";
+    const one_mac: ?[]const u8 = if (std.mem.eql(u8, t, "nemotron_h")) "Nemotron" else if (std.mem.eql(u8, t, "lfm2_moe")) "LFM2.5-24B-A2B" else if (isGemma4(t)) "Gemma 4" else if (std.mem.eql(u8, t, "step5_vl")) "Step-5" else if (std.mem.eql(u8, t, "spark2_5")) "Spark-X2.6" else if (std.mem.eql(u8, t, "minimax_m3_vl")) "MiniMax-M3.1-Flash" else if (std.mem.eql(u8, t, "llama")) "Llama" else if (!std.mem.eql(u8, t, "qwen3_5")) null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
     if (o.speed_up != null) if (one_mac) |name| return try std.fmt.allocPrint(a, "--speed-up joins two Macs for Flash Next, GLM-5.3-Flash and GLM-5.3 only: serve {s} without it", .{name});
     if (o.recall and std.mem.eql(u8, t, "qwen4_exp")) return recall_refusal;
     if (spill.refusal(o)) |why| return why;
     if (o.learn == null) return null;
     // the 27B writes conversation states
     if (o.learn_conversations and std.mem.eql(u8, t, "qwen3_5") and dense) return null;
-    const name: []const u8 = if (std.mem.eql(u8, t, "glm_moe_dsa")) "GLM-5.3 (EXLR8)" else if (std.mem.eql(u8, t, "lfm2_moe")) "LFM2.5-24B-A2B" else if (isGemma4(t)) "Gemma 4" else if (std.mem.eql(u8, t, "step5_vl")) "Step-5" else if (std.mem.eql(u8, t, "spark2_5")) "Spark-X2.6" else if (std.mem.eql(u8, t, "minimax_m3_vl")) "MiniMax-M3.1-Flash" else if (!std.mem.eql(u8, t, "qwen3_5")) return null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
+    const name: []const u8 = if (std.mem.eql(u8, t, "glm_moe_dsa")) "GLM-5.3 (EXLR8)" else if (std.mem.eql(u8, t, "lfm2_moe")) "LFM2.5-24B-A2B" else if (isGemma4(t)) "Gemma 4" else if (std.mem.eql(u8, t, "step5_vl")) "Step-5" else if (std.mem.eql(u8, t, "spark2_5")) "Spark-X2.6" else if (std.mem.eql(u8, t, "minimax_m3_vl")) "MiniMax-M3.1-Flash" else if (std.mem.eql(u8, t, "llama")) "Llama" else if (!std.mem.eql(u8, t, "qwen3_5")) return null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
     if (o.learn_conversations) return try std.fmt.allocPrint(a, "{s} keeps conversation states on disk for Qwen3.8-27B, Nemotron, Flash Next and GLM-5.3-Flash: serve {s} without it", .{ spill.flag(o), name });
     const or_talks: []const u8 = if (dense) " (Qwen3.8-27B keeps conversation states on disk with --learn-conversations)" else "";
     return try std.fmt.allocPrint(a, "--learn learns prompt prefixes for Nemotron, Flash Next and GLM-5.3-Flash only{s}: serve {s} without --learn, --learn-dir or --learn-gib", .{ or_talks, name });
