@@ -1,6 +1,15 @@
 //! Host regressions use no shaders, model or GPU execution.
 const std = @import("std");
-pub fn tests(b: *std.Build) void {
+pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
+    const real_metal = b.createModule(.{ .root_source_file = b.path("zig/src/metal/metal.zig"), .target = b.graph.host });
+    const recording = b.createModule(.{ .root_source_file = b.path("zig/qwen27_quant_metal.zig"), .target = b.graph.host, .imports = &.{.{ .name = "real_metal", .module = real_metal }} });
+    const quant_sources = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig") });
+    const quant = b.createModule(.{ .root_source_file = b.path("zig/qwen27_quant_test.zig"), .target = b.graph.host, .imports = &.{ .{ .name = "metal", .module = recording }, .{ .name = "kernel_sources", .module = quant_sources } } });
+    _ = @import("qwen27.zig").engineModules(b, b.graph.host, recording, quant_sources, quant);
+    const quant_test = b.addTest(.{ .root_module = quant, .filters = &.{"qwen27 quant:"} });
+    const quant_run = b.addRunArtifact(quant_test);
+    test_step.dependOn(&quant_run.step);
+    b.step("test-qwen27-quant-host", "Prepared head cache identity and prompt row capacity without a GPU").dependOn(&quant_run.step);
     const metrics = b.createModule(.{ .root_source_file = b.path("zig/src/metal/pass_metrics.zig"), .target = b.graph.host });
     b.step("test-qwen27-pass-metrics-host", "Pass timing and forwarding allocator without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = metrics })).step);
     const window = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_window.zig"), .target = b.graph.host });
