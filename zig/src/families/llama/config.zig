@@ -1,4 +1,4 @@
-//! Llama-architecture (model_type llama) admission: a dense bf16 GQA stack, heads of 128, default RoPE, its own head.
+//! Llama (model_type llama) admission: dense bf16 GQA, 128-wide heads, default RoPE; `qualified` checkpoints only.
 const std = @import("std");
 
 pub const head_dim = 128;
@@ -14,7 +14,26 @@ pub const Error = error{
     UnsupportedLlamaGeometry,
     UnsupportedLlamaRotary,
     UnsupportedLlamaPrecision,
+    UnqualifiedLlamaCheckpoint,
 } || std.json.ParseError(std.json.Scanner);
+
+/// A checkpoint checked against HF on the device, by the geometry its config names.
+pub const Qualified = struct {
+    name: []const u8,
+    hidden: usize,
+    intermediate: usize,
+    layers: usize,
+    heads: usize,
+    kv_heads: usize,
+    vocab: usize,
+    theta: f64,
+    context: usize,
+};
+
+/// The checkpoints the family serves; another `llama` checkpoint is refused until it has been checked the same way.
+pub const qualified = [_]Qualified{
+    .{ .name = "Nanbeige4.3-33B", .hidden = 7168, .intermediate = 22016, .layers = 52, .heads = 56, .kv_heads = 8, .vocab = 166912, .theta = 120000000, .context = 524288 },
+};
 
 /// Attention's score scale, 1 / sqrt(head_dim).
 pub fn headScale() f32 {
@@ -39,7 +58,18 @@ pub const Config = struct {
         defer gpa.free(path);
         const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 22));
         defer gpa.free(bytes);
-        return parse(gpa, bytes);
+        const c = try parse(gpa, bytes);
+        _ = try c.qualification();
+        return c;
+    }
+
+    /// The qualified checkpoint this config names.
+    pub fn qualification(c: Config) Error!*const Qualified {
+        for (&qualified) |*q| {
+            if (c.hidden == q.hidden and c.intermediate == q.intermediate and c.layers == q.layers and c.heads == q.heads and
+                c.kv_heads == q.kv_heads and c.vocab == q.vocab and c.theta == q.theta and c.context == q.context) return q;
+        }
+        return error.UnqualifiedLlamaCheckpoint;
     }
 
     pub fn queryWidth(c: Config) usize {
@@ -194,6 +224,26 @@ test "Nanbeige4.3-33B's config is admitted with its geometry, context and end to
     try std.testing.expectEqual(@as(usize, 524288), c.context);
     try std.testing.expectEqualSlices(u32, &.{166101}, c.eos[0..c.eos_count]);
     try std.testing.expect(c.isEos(166101) and !c.isEos(166100));
+}
+
+test "only the qualified checkpoint is admitted: a llama of another geometry parses but is refused" {
+    const gpa = std.testing.allocator;
+    const c = try parse(gpa, fixture);
+    try std.testing.expectEqualStrings("Nanbeige4.3-33B", (try c.qualification()).name);
+    const cases = .{
+        .{ "\"hidden_size\": 7168", "\"hidden_size\": 4096" },
+        .{ "\"num_hidden_layers\": 52", "\"num_hidden_layers\": 32" },
+        .{ "\"num_key_value_heads\": 8", "\"num_key_value_heads\": 7" },
+        .{ "\"rope_theta\": 120000000", "\"rope_theta\": 500000" },
+        .{ "\"max_position_embeddings\": 524288", "\"max_position_embeddings\": 131072" },
+    };
+    inline for (cases) |k| {
+        const bytes = try std.mem.replaceOwned(u8, gpa, fixture, k[0], k[1]);
+        defer gpa.free(bytes);
+        try std.testing.expect(!std.mem.eql(u8, bytes, fixture));
+        const d = try parse(gpa, bytes);
+        try std.testing.expectError(error.UnqualifiedLlamaCheckpoint, d.qualification());
+    }
 }
 
 test "other layouts are refused by name" {

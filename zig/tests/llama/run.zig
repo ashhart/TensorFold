@@ -9,10 +9,9 @@ const usage =
     \\tf-llama-run <model> <tokens.json> logits <out>              16-row windows from 0; bf16 logits [tokens, vocab]
     \\tf-llama-run <model> <tokens.json> prompt <out>              the prompt in chunks; the last row's bf16 logits
     \\tf-llama-run <model> <tokens.json> forced <cont.json>,<out>  then cont's tokens a step; bf16 logits before each
-    \\tf-llama-run <model> <tokens.json> exact <cont.json>        cont's tokens as one-row steps and as 16-row windows
-    \\                                                             after the prompt: every row's logits bit for bit
+    \\tf-llama-run <model> <tokens.json> exact <cont.json>[,<w>]  cont's tokens as one-row steps and as w-row windows
+    \\                                                             (16) after the prompt: every row's logits bit for bit
     \\tf-llama-run <model> <tokens.json> bench <n>                 the prompt, then n one-row steps: wall, encode, GPU ms
-    \\LLAMA_LAYERS=N runs the first N layers only (a truncated reference's check)
     \\
 ;
 
@@ -33,8 +32,6 @@ pub fn main(init: std.process.Init) !void {
     if (prompt.len == 0) return error.EmptyPrompt;
     const m = try fl.Model.load(gpa, init.io, args[1]);
     defer m.deinit();
-    // LLAMA_LAYERS=N: the first N layers only, for a layer-by-layer check against a truncated reference
-    if (std.c.getenv("LLAMA_LAYERS")) |v| m.weights.layers = m.weights.layers[0..@min(m.weights.layers.len, try std.fmt.parseInt(usize, std.mem.span(v), 10))];
     const mode = args[3];
     var forced: ?std.json.Parsed([]u32) = null;
     defer if (forced) |f| f.deinit();
@@ -71,11 +68,13 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     if (std.mem.eql(u8, mode, "exact")) {
-        const text = try std.Io.Dir.cwd().readFileAlloc(init.io, args[4], gpa, .limited(1 << 20));
+        var parts = std.mem.splitScalar(u8, args[4], ',');
+        const text = try std.Io.Dir.cwd().readFileAlloc(init.io, parts.first(), gpa, .limited(1 << 20));
         defer gpa.free(text);
         const cont = try std.json.parseFromSlice([]u32, gpa, text, .{});
         defer cont.deinit();
         const toks = cont.value;
+        const width: usize = if (parts.next()) |w| try std.fmt.parseInt(usize, w, 10) else fl.state.window_rows;
         // both caches at one capacity: the decode blocks follow it
         var scache = try fl.state.Cache.init(m.device, &m.config, prompt.len + toks.len + 1);
         defer scache.deinit();
@@ -90,8 +89,6 @@ pub fn main(init: std.process.Init) !void {
             @memcpy(one[i * vocab ..][0..vocab], small.logits_all.slice(u16, vocab));
             scache.len += 1;
         }
-        // LLAMA_WINDOW=W: windows of W rows (16 by default)
-        const width: usize = if (std.c.getenv("LLAMA_WINDOW")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else fl.state.window_rows;
         if (width == 0 or width > fl.state.window_rows) return error.BadWindow;
         var differ: usize = 0;
         var at: usize = 0;
