@@ -38,7 +38,11 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const model = fl.Model.load(gpa, io, o.dir) catch |err| {
-        problem.* = try std.fmt.allocPrint(a, "the native Llama engine cannot load this checkpoint ({s})", .{@errorName(err)});
+        problem.* = switch (err) {
+            error.LlamaNeedsTensorUnits => "the native Llama engine needs Metal 4 tensor units (an M5 or later) for its prompt GEMM and attention: this Mac's GPU (M1 to M4) has none",
+            error.UnqualifiedLlamaCheckpoint => try std.fmt.allocPrint(a, "the native Llama engine serves only the checkpoints checked against Hugging Face ({s}): this llama checkpoint's geometry is not one of them", .{qualifiedNames()}),
+            else => try std.fmt.allocPrint(a, "the native Llama engine cannot load this checkpoint ({s})", .{@errorName(err)}),
+        };
         return null;
     };
     errdefer model.deinit();
@@ -94,6 +98,13 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     try h.host.start();
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
+}
+
+/// The qualified checkpoints' names, comma-separated.
+fn qualifiedNames() []const u8 {
+    comptime var names: []const u8 = "";
+    inline for (fl.config.qualified, 0..) |q, i| names = names ++ (if (i == 0) "" else ", ") ++ q.name;
+    return names;
 }
 
 /// Metal.room's fit: the kept states' budget is what the streams leave, at most the cap; the least valuable go first.
