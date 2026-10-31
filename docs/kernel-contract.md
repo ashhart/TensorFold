@@ -117,8 +117,6 @@ MLX's formula keeps the infinity, because its codes enter the MMAs as q + 128 an
 `tf_glm_scores` scores a NaN dot as 0 where float64 keeps the NaN: its relu is `fmaxf(x, 0)`, as `tl.maximum` is in the
 Python family's Triton glue it was ported from. Nemotron's Metal `tf_xup_w3` gives 0 for a NaN dot where float64 keeps
 the NaN: its relu2 is `metal::max(bfloat(acc), 0.0f)`; the other up pipelines give its bytes on the same inputs.
-Idol's `id_qk` gives a head holding a NaN +-inf in its other outputs where torch's `F.normalize` gives NaN: its
-norm is `max(precise::sqrt(ss), 1e-12f)`, and Metal's `max` drops the NaN that `clamp_min` keeps.
 
 HIP’s MLX stream tile keeps its finite dot2 sums unchanged. A non-finite result with an actual non-finite
 operand is recomputed by full quantization groups using the factored float64 formula. The plain tile is

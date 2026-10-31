@@ -220,8 +220,6 @@ pub const Repo = struct {
 
 const qk_why = "an fp16 output follows the head's sum of squares as its square root: a bf16 sum is off a few ulps";
 
-const qk_known = "a NaN in a head gives its other outputs +-inf where F.normalize gives NaN: max(sqrt(ss), 1e-12f) drops it";
-
 /// A lane's two squares, then the simdgroup tree.
 fn qkDepth(_: c.Shape) usize {
     return 1 + 5;
@@ -253,7 +251,6 @@ pub const Qk = struct {
             .out = .f16,
             .served = &.{ .{ .rows = 12294, .n = 16, .k = D }, .{ .rows = 8192, .n = 16, .k = D }, .{ .rows = 4101, .n = 16, .k = D } },
             .sums = .{ .bf16 = 0, .why = qk_why },
-            .known = .{ .gate = .nonfinite, .finding = qk_known },
         };
     }
 
