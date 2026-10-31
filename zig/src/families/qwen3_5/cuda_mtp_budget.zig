@@ -35,3 +35,7 @@ test "zero grant: Qwen CUDA MTP absorbs committed rows without scoring them" {
     try std.testing.expectEqual(@as(usize, 2), (try active(&f, &.{ useful, it, useful }, &out)).len);
     for (out[0..2]) |q| try std.testing.expect(q.propose);
 }
+
+test {
+    _ = @import("cuda_native_grants_test.zig");
+}
