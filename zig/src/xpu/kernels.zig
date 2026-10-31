@@ -35,3 +35,5 @@ pub const nem_prow_g32: []const u8 = if (available) &Blob("spv_nem_prow_g32").by
 pub const nem_prow_gen12_g32: []const u8 = if (available) &Blob("spv_nem_prow_gen12_g32").bytes else &.{};
 pub const lfm3_mv_g32: []const u8 = if (available) &Blob("spv_lfm3_mv_g32").bytes else &.{};
 pub const lfm3_q8: []const u8 = if (available) &Blob("spv_lfm3_q8").bytes else &.{};
+/// LFM3-VL's vision tower and projector (bf16, no DPAS).
+pub const lfm3_vit: []const u8 = if (available) &Blob("spv_lfm3_vit").bytes else &.{};
