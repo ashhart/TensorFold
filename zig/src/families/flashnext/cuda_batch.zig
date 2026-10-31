@@ -8,6 +8,8 @@ const ple = @import("cuda_ple.zig");
 const wt = @import("cuda_prompt_wt.zig");
 const load = @import("cuda_prompt_load.zig");
 const parts = @import("cuda_batch_state.zig");
+const late = @import("cuda_batch_late.zig");
+const shared = @import("cuda_batch_side.zig");
 const batch_lanes = @import("cuda_batch_lanes.zig");
 const tiles = @import("cuda_tiles.zig");
 const tk = @import("cuda_tile_kernels.zig");
@@ -77,6 +79,9 @@ pub const Span = parts.Span;
 pub const MoeAdd = parts.MoeAdd;
 pub const pocket_stride = parts.pocket_stride;
 pub const Hooks = parts.Hooks;
+pub const late_rows = parts.late_rows;
+pub const late_store = parts.late_store;
+pub const late_row_bytes = parts.late_row_bytes;
 pub const Kernels = parts.Kernels;
 pub const Scratch = parts.Scratch;
 pub const SeqState = parts.SeqState;
@@ -262,11 +267,16 @@ pub fn Pass(comptime Tri: type) type {
             }
             // every row's conv, norms and gates, the recurrence, then the gated norm: the one-block chain's bits
             const fused = self.lanes.len == 0 and n >= 64 and gdn_fused.on();
+            if (fused and keep.log != 0) return error.UnexpectedTensor;
             if (fused) {
                 // the three in one kernel a value head: the same per-row op sequences, no fp32 rows through memory
                 const st = self.seq.state[li].ptr;
                 const in: gdn_fused.In = .{ .proj = s.proj, .conv = self.seq.conv[li].ptr, .cw = lw.cw.ptr, .a_log = lw.a_log.ptr, .dt = lw.dt.ptr, .state = st, .state_out = if (keep.state_out != 0) keep.state_out else st, .norm = lw.norm.ptr };
                 try gdn_fused.launch(self.k.gdn_fused, self.stream, in, n, s.gout, s.gxs);
+            } else if (self.lanes.len == 0 and keep.log != 0) {
+                // pending rows: the window goes into the log after them, the chain runs from before them
+                try late.front(self.k, self.stream, lw, s.proj, self.seq.conv[li].ptr, n, s.gq, keep);
+                try late.chain(self.k, self.stream, s.gq, keep, self.seq.state[li].ptr, n, s.ys);
             } else if (self.lanes.len == 0) {
                 try self.gdnFront(lw, s.proj, self.seq.conv[li].ptr, n, s.gq, s.gk, s.gv, s.ggb);
                 try self.gdnChain(s.gq, s.gk, s.gv, s.ggb, self.seq.state[li].ptr, keep.state_out, n, s.ys);
@@ -281,8 +291,13 @@ pub fn Pass(comptime Tri: type) type {
                     const gb = row0 * gdn.nv * 2 * 4;
                     try self.copy(lk.proj, proj, l.rows * gdn.proj_width * 2);
                     try self.copy(lk.hist, l.seq.conv[li].ptr, (gdn.taps - 1) * gdn.conv_dim * 2);
-                    try self.gdnFront(lw, proj, l.seq.conv[li].ptr, l.rows, s.gq + qk, s.gk + qk, s.gv + v, s.ggb + gb);
-                    try self.gdnChain(s.gq + qk, s.gk + qk, s.gv + v, s.ggb + gb, l.seq.state[li].ptr, lk.state_out, l.rows, s.ys + v);
+                    if (lk.log != 0) {
+                        try late.front(self.k, self.stream, lw, proj, l.seq.conv[li].ptr, l.rows, s.gq + qk, lk);
+                        try late.chain(self.k, self.stream, s.gq + qk, lk, l.seq.state[li].ptr, l.rows, s.ys + v);
+                    } else {
+                        try self.gdnFront(lw, proj, l.seq.conv[li].ptr, l.rows, s.gq + qk, s.gk + qk, s.gv + v, s.ggb + gb);
+                        try self.gdnChain(s.gq + qk, s.gk + qk, s.gv + v, s.ggb + gb, l.seq.state[li].ptr, lk.state_out, l.rows, s.ys + v);
+                    }
                     // the lane's conv window moves on now: the gated norm below reads none of it
                     try self.shiftWindow(l.seq.conv[li].ptr, proj, gdn.proj_width, l.rows, gdn.taps - 1, gdn.conv_dim);
                     row0 += l.rows;
@@ -440,16 +455,10 @@ pub fn Pass(comptime Tri: type) type {
                 const pt = nvfp4_tile.size(n);
                 try self.k.router.route(self.stream, s.picks, pairs, e, pt, plan);
                 const items = cuda.grouped.maxItems(pairs, e, pt);
+                const side = try shared.fork(self, native, n);
                 try nvfp4_tile.run(self.k, pt, self.stream, .up, .{ .x = s.mixed, .stride = dims, .slots = slots }, owned.view(), plan, s.moe_act, items, experts_n);
                 try nvfp4_tile.run(self.k, pt, self.stream, .down_f32, .{ .x = s.moe_act, .stride = owned.width }, owned.view(), plan, s.y, items, experts_n);
-                if (native.rank == 0) {
-                    const glue = self.tri.own orelse return error.NativeGlueRequired;
-                    try self.k.native_lane.matmul(self.stream, s.mixed, dims, n, native.shared[0].native.?, s.shared_gate, s.native_part);
-                    try self.k.native_lane.matmul(self.stream, s.mixed, dims, n, native.shared[1].native.?, s.shared_up, s.native_part);
-                    try glue.sharedSwiGLU(self.stream, s.shared_gate, s.shared_up, s.shared_act, n, moe_w);
-                    try self.k.native_lane.matmulF32(self.stream, s.shared_act, moe_w, n, native.shared[2].native.?, s.shared_out, s.native_part);
-                    try glue.sharedScatter(self.stream, s.shared_out, s.y, n, dims, slots);
-                }
+                try shared.join(self, side, native, n);
                 if (native.world != 1) {
                     const collective = self.m.collective orelse return error.TensorParallelUnavailable;
                     try collective.sum(self.stream, s.y, pairs * dims);
