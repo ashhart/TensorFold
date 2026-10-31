@@ -107,6 +107,8 @@ pub const Launcher = struct {
 
     const Decode = struct {
         router: [2]Function, // fp16, bf16
+        /// The router over the stored bf16 rows: the same logits' bits from half the bytes.
+        router_bf16: [2]Function, // fp16, bf16
         tail: Function,
         conv_split: Function,
         rms2: Function,
@@ -168,7 +170,7 @@ pub const Launcher = struct {
         const pl = l.mods[@backingInt(kernels.Group.plan)];
         l.fuse = choices.fuse;
         l.wide = choices.wide;
-        l.dec = .{ .router = .{ try dec.function("tf_router_decode_f16"), try dec.function("tf_router_decode_bf16") }, .tail = try dec.function("tf_tail"), .conv_split = try dec.function("tf_conv_split"), .rms2 = try dec.function("tf_rms2"), .gnorm_out = try dec.function("tf_gnorm_out"), .select = try dec.function("tf_select_decode") };
+        l.dec = .{ .router = .{ try dec.function("tf_router_decode_f16"), try dec.function("tf_router_decode_bf16") }, .router_bf16 = .{ try dec.function("tf_router_bf16_f16"), try dec.function("tf_router_bf16") }, .tail = try dec.function("tf_tail"), .conv_split = try dec.function("tf_conv_split"), .rms2 = try dec.function("tf_rms2"), .gnorm_out = try dec.function("tf_gnorm_out"), .select = try dec.function("tf_select_decode") };
         l.plan = .{
             .kv_write = try pl.function("tf_plan_kv_write"),
             .kv_write_act = try pl.function("tf_plan_kv_write_act"),
@@ -303,6 +305,7 @@ pub const Launcher = struct {
     pub const tf_rope_decode = rope.tf_rope_decode;
     pub const tf_rope_prefill = rope.tf_rope_prefill;
     pub const routerTile = moe.routerTile;
+    pub const routerBf16 = moe.routerBf16;
     pub const routerWith = moe.routerWith;
     pub const routerWindow = moe.routerWindow;
     pub const tf_moe_router = moe.tf_moe_router;
