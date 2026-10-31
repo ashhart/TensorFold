@@ -26,6 +26,7 @@ pub const backend = @import("backend.zig");
 pub const embedding = @import("embedding.zig");
 pub const events = @import("events.zig");
 pub const windows = @import("windows.zig");
+pub const shared_drafts = @import("shared_drafts.zig");
 pub const trail = @import("trail.zig");
 pub const engine = @import("engine.zig");
 pub const fake = @import("fake.zig");
