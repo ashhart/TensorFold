@@ -11,7 +11,7 @@ const parts = @import("cuda_batch_state.zig");
 const batch_lanes = @import("cuda_batch_lanes.zig");
 const tiles = @import("cuda_tiles.zig");
 const tk = @import("cuda_tile_kernels.zig");
-const nvfp4_tile = @import("cuda_nvfp4_tile.zig");
+const moe_native = @import("cuda_moe_native.zig");
 const zs = @import("cuda_zero_slice.zig");
 const ops = @import("cuda_batch_ops.zig");
 
@@ -434,28 +434,7 @@ pub fn Pass(comptime Tri: type) type {
             try self.copy(keep.moe_wts, s.wts, pairs * 4);
             const e = experts_n + 1;
             const plan: cuda.grouped.Plan = .{ .members = s.members, .items = s.items, .counts = s.counts, .rank = s.rank, .hist = s.hist };
-            if (lw.native_experts) |*native| {
-                const owned = &native.experts;
-                if (zs.clearsY(native.world, native.rank)) try self.stream.d.check(self.stream.d.api.cuMemsetD8Async(s.y, 0, pairs * dims * 4, self.stream.handle), "cuMemsetD8Async");
-                const pt = nvfp4_tile.size(n);
-                try self.k.router.route(self.stream, s.picks, pairs, e, pt, plan);
-                const items = cuda.grouped.maxItems(pairs, e, pt);
-                try nvfp4_tile.run(self.k, pt, self.stream, .up, .{ .x = s.mixed, .stride = dims, .slots = slots }, owned.view(), plan, s.moe_act, items, experts_n);
-                try nvfp4_tile.run(self.k, pt, self.stream, .down_f32, .{ .x = s.moe_act, .stride = owned.width }, owned.view(), plan, s.y, items, experts_n);
-                if (native.rank == 0) {
-                    const glue = self.tri.own orelse return error.NativeGlueRequired;
-                    try self.k.native_lane.matmul(self.stream, s.mixed, dims, n, native.shared[0].native.?, s.shared_gate, s.native_part);
-                    try self.k.native_lane.matmul(self.stream, s.mixed, dims, n, native.shared[1].native.?, s.shared_up, s.native_part);
-                    try glue.sharedSwiGLU(self.stream, s.shared_gate, s.shared_up, s.shared_act, n, moe_w);
-                    try self.k.native_lane.matmulF32(self.stream, s.shared_act, moe_w, n, native.shared[2].native.?, s.shared_out, s.native_part);
-                    try glue.sharedScatter(self.stream, s.shared_out, s.y, n, dims, slots);
-                }
-                if (native.world != 1) {
-                    const collective = self.m.collective orelse return error.TensorParallelUnavailable;
-                    try collective.sum(self.stream, s.y, pairs * dims);
-                }
-                return;
-            }
+            if (lw.native_experts) |*native| return moe_native.run(self, native, n, pairs, plan);
             if (n >= 64) {
                 // prompt rows on 64-pair factored tiles, expert_rows' bits
                 try self.k.router.route(self.stream, s.picks, pairs, e, tk.fexp_tile, plan);
