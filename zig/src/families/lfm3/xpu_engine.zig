@@ -26,6 +26,14 @@ pub const Engine = struct {
     /// Each slot's sequence (0 is `own`); verifyMulti names streams by slot.
     slots: [model.max_streams]?*Sequence,
 
+    /// LFM3-1.7B's MLX 4-bit in groups of 64, or LFM3-VL-2B's: 4-bit in groups of 32 with the embedding in 8 bits.
+    pub fn readable(c: *const cfg.Config) bool {
+        const q = c.quant.global;
+        const emb = c.quant.width("embed_tokens");
+        if (c.kind == .text) return q.bits == 4 and q.group == 64 and c.quant.modules.count() == 0;
+        return q.bits == 4 and q.group == 32 and emb.bits == 8 and emb.group == 32 and c.quant.modules.count() == 1;
+    }
+
     pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const xpu.Context, dir: []const u8, o: Options) !*Engine {
         const t0 = std.Io.Clock.awake.now(io);
         const e = try gpa.create(Engine);
@@ -33,9 +41,7 @@ pub const Engine = struct {
         e.gpa = gpa;
         e.c = try cfg.Config.read(gpa, io, dir);
         errdefer e.c.deinit();
-        if (e.c.kind != .text) return error.UnsupportedFormat;
-        const q = e.c.quant.global;
-        if (q.bits != 4 or q.group != 64 or e.c.quant.modules.count() != 0) return error.UnsupportedFormat;
+        if (!readable(&e.c)) return error.UnsupportedFormat;
         e.stream = try xpu.Stream.init(ctx);
         errdefer e.stream.deinit();
         e.r = try xpu.rt.Runtime.init(ctx, e.stream);
