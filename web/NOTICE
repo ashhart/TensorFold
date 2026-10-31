@@ -1,0 +1,21 @@
+TensorFold Web
+
+This software was adopted from TensorFold Studio by Stephane Rogeau (@Stephane-Eden), at commit
+b51b209cf2e338aa7c6e618e127e4cf1cee4b021 of its repository, under the Apache License, Version 2.0 (see LICENSE).
+It was renamed TensorFold Web and moved into TensorFold's repository as web/.
+
+Changes made in adopting it:
+
+- Renamed TensorFold Studio to TensorFold Web: the folder (web/), the pip package and command (tensorfold-web), the
+  Python package (tensorfold_web), the page, messages and docs, the config folder and its files, the service labels
+  and the TENSORFOLD_WEB_LIVING variable. Stored data and wire names between instances keep their earlier names.
+- Chat: the relay drops the browser's Origin header before it reaches the TensorFold server, which refuses foreign
+  origins.
+- Teaching: a copy that learns starts with an API key, which the server's --slide requires.
+- Server state: the served model and its load are read from the server's GET /health and GET /v1/load; the serving
+  log line is read only for what no endpoint gives.
+- Teaching is offered for Nemotron 3.5 Lightning only, and other models are refused by name.
+- Every response refuses framing (X-Frame-Options: DENY, Content-Security-Policy frame-ancestors 'none').
+- Every tool install it runs or prints names an exact version.
+
+The data files under tensorfold_web/data/licenses/ keep their own licenses.
