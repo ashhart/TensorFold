@@ -66,6 +66,8 @@ pub const Prompt = struct {
     fp4: Function,
     fp8: Function,
     fp4_f32: Function, // FP4 writing the fp32 sums unrounded
+    bf16: Function, // BF16 on 2 x 4 warps, 3 stages, the lane's K slices (bf16Shared): the lane's bits
+    bf16_f32: Function,
     lean: Function, // prompt_lean FP4, bf16 out
     lean_f32: Function, // and fp32 out
     sms: usize, // the current device's multiprocessors: prompt_lean's blocks (one a multiprocessor, tiles in turn)
@@ -82,6 +84,13 @@ pub const Prompt = struct {
         std.fmt.comptimePrint(name, .{ 1, 0 }),
         std.fmt.comptimePrint(name, .{ 0, 1 }),
     };
+    const bf16_threads = 256;
+
+    /// prompt16.cu Tile<BF16, 128, 128, 2, 4, 3>::SMEM: x and the bf16 words of 64 inputs, three stages.
+    pub fn bf16Shared() u32 {
+        return 3 * ((bm * group * 2 + bn * group * 2 + 127) / 128 * 128);
+    }
+
     const lean_bm = 128;
     const lean_bn = 256;
     const lean_threads = 256;
@@ -113,6 +122,10 @@ pub const Prompt = struct {
         try fp8.allowDynamicShared(sharedBytes(.fp8));
         const fp4_f32 = try mod.function(symbols[2]);
         try fp4_f32.allowDynamicShared(sharedBytes(.fp4));
+        const bf16 = try mod.function("tf_prompt_bf16");
+        try bf16.allowDynamicShared(bf16Shared());
+        const bf16_f32 = try mod.function("tf_prompt_bf16_f32");
+        try bf16_f32.allowDynamicShared(bf16Shared());
         const lean = try mod.function(lean_symbols[0]);
         try lean.allowDynamicShared(leanSharedBytes());
         const lean_f32 = try mod.function(lean_symbols[1]);
@@ -121,7 +134,7 @@ pub const Prompt = struct {
         try d.check(d.api.cuCtxGetDevice(&dev), "cuCtxGetDevice");
         var sms: c_int = 0;
         try d.check(d.api.cuDeviceGetAttribute(&sms, .multiprocessor_count, dev), "cuDeviceGetAttribute");
-        return .{ .mod = mod, .fp4 = fp4, .fp8 = fp8, .fp4_f32 = fp4_f32, .lean = lean, .lean_f32 = lean_f32, .sms = @intCast(@max(sms, 1)) };
+        return .{ .mod = mod, .fp4 = fp4, .fp8 = fp8, .fp4_f32 = fp4_f32, .bf16 = bf16, .bf16_f32 = bf16_f32, .lean = lean, .lean_f32 = lean_f32, .sms = @intCast(@max(sms, 1)) };
     }
 
     pub fn unload(p: *Prompt) void {
@@ -133,8 +146,9 @@ pub const Prompt = struct {
         return p.matmulOut(s, x, ldx, m, w, y, .bf16);
     }
 
-    /// matmul() writing y as `out` says: bf16, or fp32 (FP4 only).
+    /// matmul() writing y as `out` says: bf16, or fp32 (FP4 and BF16 only).
     pub fn matmulOut(p: Prompt, s: Stream, x: u64, ldx: usize, m: usize, w: qmmf.Weight, y: u64, out: qmmf.Out) !void {
+        if (w.mode == .bf16) return p.matmulBf16(s, x, ldx, m, w, y, out);
         return p.matmulTile(s, x, ldx, m, w, y, out, .lean);
     }
 
@@ -176,6 +190,29 @@ pub const Prompt = struct {
             .grid = .{ .x = @intCast(@min(t.blocks, rows_t * ((w.n + t.bn - 1) / t.bn))), .y = 1, .z = 1 },
             .block = .{ .x = t.threads, .y = 1, .z = 1 },
             .shared = t.shared,
+        }, s, &args);
+    }
+
+    /// A BF16 weight in the lane's word order: the K slices the lane would take (qmmf.splitK), folded in order.
+    fn matmulBf16(p: Prompt, s: Stream, x: u64, ldx: usize, m: usize, w: qmmf.Weight, y: u64, out: qmmf.Out) !void {
+        const rows_t = (m + bm - 1) / bm;
+        const band = @max(1, @min(rows_t, (12 << 20) / (@as(usize, bm) * w.k * 2)));
+        var args: launch_.Args = .{};
+        args.add(x);
+        args.add(w.codes);
+        args.add(w.scale);
+        args.add(y);
+        args.add(@as(i32, @intCast(m)));
+        args.add(@as(i32, @intCast(w.n)));
+        args.add(@as(i32, @intCast(w.k)));
+        args.add(@as(i32, @intCast(qmmf.splitK(w.n, w.k))));
+        args.add(@as(i32, @intCast(w.npad)));
+        args.add(@as(i32, @intCast(if (m == 1) w.k else ldx)));
+        args.add(@as(i32, @intCast(band)));
+        try launch_.launch(if (out == .f32) p.bf16_f32 else p.bf16, .{
+            .grid = .{ .x = @intCast(rows_t * ((w.n + bn - 1) / bn)), .y = 1, .z = 1 },
+            .block = .{ .x = bf16_threads, .y = 1, .z = 1 },
+            .shared = bf16Shared(),
         }, s, &args);
     }
 };

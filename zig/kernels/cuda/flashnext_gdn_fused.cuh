@@ -1,4 +1,4 @@
-// Flash Next prompt GDN in one kernel a value head: front, chain and gated norm, rows kept in shared memory.
+// Flash Next prompt GDN, one kernel a value head: 4 producer warps front the next batch, 8 chain warps step and norm.
 namespace gdn_fused {
 using namespace fn_gdn;
 constexpr int STEPS = 16, TPR = 2, CH = 256, PR = 128, THREADS = CH + PR;
@@ -8,49 +8,52 @@ constexpr int SMEM = 2 * STAGE + 2 * STEPS * DV * 4 + STEPS * 2 * DK * 4 + STEPS
 
 __device__ __forceinline__ void pbar() { asm volatile("bar.sync 1, 128;\n" ::: "memory"); }
 
-// conv_act for rows r0 .. r0 + n - 1 of channel c, each P / cs row loaded once (conv_act's taps, order and rounding)
-__device__ __forceinline__ void conv_rows(const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs,
-                                          const __nv_bfloat16* __restrict__ cw, int r0, int n, int c, float (&out)[STEPS]) {
-    float w[TAPS];
+__device__ __forceinline__ void cbar() { asm volatile("bar.sync 2, 256;\n" ::: "memory"); }
+
+constexpr int XW = STEPS + TAPS - 1;  // a batch's conv window rows
+
+// a batch's loads, issued together: rows r0 .. r0 + n - 1's q, k and v conv windows and row r0 + p's b and a
+struct Rows {
+    float xw[3][XW];
+    float b, a;
+};
+
+__device__ __forceinline__ void load_rows(const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs, int r0,
+                                          int n, const int (&ch)[3], int hv, int p, Rows& in) {
 #pragma unroll
-    for (int tap = 0; tap < TAPS; ++tap) w[tap] = __bfloat162float(cw[c * TAPS + tap]);
-    float xw[STEPS + TAPS - 1];
+    for (int c3 = 0; c3 < 3; ++c3)
 #pragma unroll
-    for (int k = 0; k < STEPS + TAPS - 1; ++k) {
-        const int at = r0 + k;  // conv_act's `at` for row r0 + j, tap k - j
-        xw[k] = k < n + TAPS - 1 ? (at < TAPS - 1 ? __bfloat162float(cs[at * C + c]) : __bfloat162float(P[(size_t)(at - (TAPS - 1)) * PW + c])) : 0.0f;
-    }
-#pragma unroll
-    for (int j = 0; j < STEPS; ++j) {
-        float acc = 0.0f;
-#pragma unroll
-        for (int tap = 0; tap < TAPS; ++tap) acc = acc + w[tap] * xw[j + tap];
-        out[j] = bf(acc / (1.0f + expf(-acc)));
+        for (int k = 0; k < XW; ++k) {
+            const int at = r0 + k, c = ch[c3];  // conv_act's `at` for row r0 + j, tap k - j
+            in.xw[c3][k] = k < n + TAPS - 1 ? (at < TAPS - 1 ? __bfloat162float(cs[at * C + c]) : __bfloat162float(P[(size_t)(at - (TAPS - 1)) * PW + c])) : 0.0f;
+        }
+    if (p < n) {
+        const int r = r0 + p;
+        in.b = __bfloat162float(P[(size_t)r * PW + C + NV * DV + hv]);
+        in.a = __bfloat162float(P[(size_t)r * PW + C + NV * DV + NV + hv]);
     }
 }
 
-// producers: rows r0 .. r0 + n - 1's q, k (normed as fn_gdn_front), v, g, beta into the stage
-__device__ __forceinline__ void front_batch(const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs,
-                                            const __nv_bfloat16* __restrict__ cw, const float* __restrict__ a_log,
-                                            const float* __restrict__ dt_bias, int r0, int n, int hk, int hv, int p,
-                                            unsigned char* base, float (*x)[2][DK]) {
-    float o[STEPS];
-    conv_rows(P, cs, cw, r0, n, hk * DK + p, o);                       // fn_gdn_front unit hk, t = p: q's channel
+// producers: the batch's q, k, v, g, beta into the stage as fn_gdn_front makes them (nea = -exp(a_log), dtb dt bias)
+__device__ __forceinline__ void front_rows(const Rows& in, const float (&w)[3][TAPS], float nea, float dtb, int n, int p,
+                                           unsigned char* base, float (*x)[2][DK]) {
 #pragma unroll
-    for (int j = 0; j < STEPS; ++j) if (j < n) x[j][0][p] = o[j];
-    conv_rows(P, cs, cw, r0, n, NK * DK + hk * DK + p, o);             // t = p + DK: k's channel
+    for (int c3 = 0; c3 < 3; ++c3)
 #pragma unroll
-    for (int j = 0; j < STEPS; ++j) if (j < n) x[j][1][p] = o[j];
-    conv_rows(P, cs, cw, r0, n, 2 * NK * DK + hv * DV + p, o);         // unit NK + hv, t = p: v
+        for (int j = 0; j < STEPS; ++j) {
+            float acc = 0.0f;
 #pragma unroll
-    for (int j = 0; j < STEPS; ++j) if (j < n) reinterpret_cast<float*>(base + j * ROW + 2 * DK * 4)[p] = o[j];
-    if (p < n) {                                                         // unit NK + hv, t == DV: row r0 + p's g and beta
-        const int r = r0 + p;
-        const float b = __bfloat162float(P[(size_t)r * PW + C + NV * DV + hv]);
-        const float a = __bfloat162float(P[(size_t)r * PW + C + NV * DV + NV + hv]);
+            for (int tap = 0; tap < TAPS; ++tap) acc = acc + w[c3][tap] * in.xw[c3][j + tap];
+            const float o = bf(acc / (1.0f + expf(-acc)));
+            if (j < n) {
+                if (c3 < 2) x[j][c3][p] = o;                                              // q, k: normed below
+                else reinterpret_cast<float*>(base + j * ROW + 2 * DK * 4)[p] = o;       // v
+            }
+        }
+    if (p < n) {                                                                          // row p's g and beta
         float* gbp = reinterpret_cast<float*>(base + p * ROW + (2 * DK + DV) * 4);
-        gbp[0] = expf(-expf(a_log[hv]) * softplusf_(a + dt_bias[hv]));
-        gbp[1] = bf(sigmoidf_(b));
+        gbp[0] = expf(nea * softplusf_(in.a + dtb));
+        gbp[1] = bf(sigmoidf_(in.b));
     }
     pbar();
     const int warp = p >> 5, lane = p & 31;
@@ -71,12 +74,13 @@ __device__ __forceinline__ void front_batch(const __nv_bfloat16* __restrict__ P,
     }
 }
 
-// producers: fn_gdn_norm for n rows from row r0 (readouts ys[j][dv])
+// the chain's 256 threads after a batch's steps: fn_gdn_norm's arithmetic for its n rows from row r0 (ys[j][dv])
 __device__ __forceinline__ void norm_rows(const float (*ys)[DV], const __nv_bfloat16* __restrict__ P,
                                           const __nv_bfloat16* __restrict__ norm_w, float eps, __nv_bfloat16* __restrict__ out,
-                                          float* __restrict__ xs, int r0, int n, int hv, int p, float* rinv) {
-    const int warp = p >> 5, lane = p & 31;
-    for (int j = warp; j < n; j += PR / 32) {
+                                          float* __restrict__ xs, int r0, int n, int hv, float* rinv) {
+    const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+    cbar();  // every readout of the batch is in ys
+    for (int j = warp; j < n; j += CH / 32) {
         float ss = 0.0f;
 #pragma unroll
         for (int i = 0; i < 4; ++i) {
@@ -86,23 +90,28 @@ __device__ __forceinline__ void norm_rows(const float (*ys)[DV], const __nv_bflo
         ss = warp_sum(ss);
         if (lane == 0) rinv[j] = 1.0f / sqrtf(ss / (float)DV + eps);
     }
-    pbar();
-    float zs[STEPS];
+    cbar();
+    constexpr int HALF = STEPS / 2;
+    const int h = tid >> 7, p = tid & 127;
+    float zs[HALF];
 #pragma unroll
-    for (int j = 0; j < STEPS; ++j) zs[j] = j < n ? __bfloat162float(P[(size_t)(r0 + j) * PW + C + hv * DV + p]) : 0.0f;
+    for (int k = 0; k < HALF; ++k) {
+        const int j = h * HALF + k;
+        zs[k] = j < n ? __bfloat162float(P[(size_t)(r0 + j) * PW + C + hv * DV + p]) : 0.0f;
+    }
     const float nw = __bfloat162float(norm_w[p]);
 #pragma unroll
-    for (int j = 0; j < STEPS; ++j) {
+    for (int k = 0; k < HALF; ++k) {
+        const int j = h * HALF + k;
         if (j >= n) break;
         const int r = r0 + j;
         const float yn = bf(bf(ys[j][p] * rinv[j]) * nw);
-        const float z = zs[j];
+        const float z = zs[k];
         const float o = bf(yn * sigmoidf_(z));
         out[(size_t)r * NV * DV + hv * DV + p] = __float2bfloat16_rn(o);
         const float gs = warp_sum(o);
-        if (lane == 0) xs[(size_t)r * (NV * DV / 32) + hv * (DV / 32) + warp] = gs;
+        if (lane == 0) xs[(size_t)r * (NV * DV / 32) + hv * (DV / 32) + (p >> 5)] = gs;
     }
-    pbar();
 }
 
 __device__ __forceinline__ void run(const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs,
@@ -119,9 +128,15 @@ __device__ __forceinline__ void run(const __nv_bfloat16* __restrict__ P, const _
     const bool producer = threadIdx.x >= CH;
     const int p = threadIdx.x - CH;
     const int batches = (rows + STEPS - 1) / STEPS;
+    // producers: the three channels' taps and the gate constants once, then a batch's loads together, then its front
+    const int ch[3] = {hk * DK + p, NK * DK + hk * DK + p, 2 * NK * DK + hv * DV + p};
+    float w[3][TAPS];
+    float nea = 0.0f, dtb = 0.0f;
     auto fill = [&](int bi) {
         const int r0 = bi * STEPS, n = min(STEPS, rows - r0);
-        front_batch(P, cs, cw, a_log, dt_bias, r0, n, hk, hv, p, stage + (bi & 1) * STAGE, xb);
+        Rows in;
+        load_rows(P, cs, r0, n, ch, hv, p, in);
+        front_rows(in, w, nea, dtb, n, p, stage + (bi & 1) * STAGE, xb);
     };
     // the chain's registers (gdn_tpr::chain<2, 16>'s)
     constexpr int L = 32 / TPR;
@@ -133,13 +148,20 @@ __device__ __forceinline__ void run(const __nv_bfloat16* __restrict__ P, const _
         for (int l = 0; l < L; ++l)
 #pragma unroll
             for (int i = 0; i < 4; ++i) s[l][i] = state_in[sbase + (l * TPR + t) * 4 + i];
-    } else if (batches > 0) fill(0);
+    } else {
+#pragma unroll
+        for (int c3 = 0; c3 < 3; ++c3)
+#pragma unroll
+            for (int tap = 0; tap < TAPS; ++tap) w[c3][tap] = __bfloat162float(cw[ch[c3] * TAPS + tap]);
+        nea = -expf(a_log[hv]);
+        dtb = dt_bias[hv];
+        if (batches > 0) fill(0);
+    }
     __syncthreads();
     for (int bi = 0; bi < batches; ++bi) {
         const int r0 = bi * STEPS, n = min(STEPS, rows - r0);
         if (producer) {
             if (bi + 1 < batches) fill(bi + 1);
-            if (bi >= 1) norm_rows(ysb[(bi - 1) & 1], P, norm_w, eps, out, xs, (bi - 1) * STEPS, STEPS, hv, p, rinv);
         } else {
             const unsigned char* base = stage + (bi & 1) * STAGE;
             for (int rr = 0; rr < n; ++rr) {
@@ -181,12 +203,11 @@ __device__ __forceinline__ void run(const __nv_bfloat16* __restrict__ P, const _
                     if (ys_out) ys_out[((size_t)(r0 + rr) * NV + hv) * DV + row] = o;
                 }
             }
+            norm_rows(ysb[bi & 1], P, norm_w, eps, out, xs, r0, n, hv, rinv);  // on the chain: it would wait at the barrier
         }
         __syncthreads();
     }
-    if (producer) {
-        if (batches > 0) norm_rows(ysb[(batches - 1) & 1], P, norm_w, eps, out, xs, (batches - 1) * STEPS, rows - (batches - 1) * STEPS, hv, p, rinv);
-    } else {
+    if (!producer) {
 #pragma unroll
         for (int l = 0; l < L; ++l)
 #pragma unroll
