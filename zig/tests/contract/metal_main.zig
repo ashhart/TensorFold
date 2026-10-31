@@ -545,6 +545,8 @@ pub fn main(init: std.process.Init) !u8 {
     defer dsv41_suites.destroy();
     const idol = try @import("metal_idol.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer idol.destroy();
+    const idol_decoder = try @import("metal_idol_decoder.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer idol_decoder.destroy();
     var t: g.Tally = .{};
     const t0 = std.Io.Clock.awake.now(init.io);
     if (o.gates) {
