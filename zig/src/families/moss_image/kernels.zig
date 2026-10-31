@@ -21,6 +21,15 @@ pub const names = [_][]const u8{
     "mi_attention_00",
     "mi_attention_01",
     "mi_attention_11",
+    "me_norm",
+    "me_head",
+    "me_attention",
+    "me_gate",
+    "me_silu_mul",
+    "me_conv",
+    "me_gdn_prep",
+    "me_gdn",
+    "me_gated_norm",
 };
 const tower_count = 6;
 const sums = 4;
@@ -161,6 +170,55 @@ pub fn gateAdd(e: mtl.ComputeEncoder, p: mtl.Pipeline, x: Ref, y: Ref, g: Ref, r
 pub fn bias(e: mtl.ComputeEncoder, p: mtl.Pipeline, c: Ref, b: Ref, y: Ref, rows: usize, width: usize) void {
     Kernels.bind(e, p, &.{ c, b, y }, @as(u32, @intCast(width)));
     e.dispatchThreads(mtl.Size.of(width, rows, 1), mtl.Size.of(256, 1, 1));
+}
+
+/// y = Qwen3.5's zero-centered RMSNorm of `rows` rows of `width` (rows `in_stride` and `out_stride` apart).
+pub fn encoderNorm(e: mtl.ComputeEncoder, p: mtl.Pipeline, x: Ref, w: Ref, y: Ref, rows: usize, width: usize, in_stride: usize, out_stride: usize, eps: f32) void {
+    const params = extern struct { width: u32, in_stride: u32, out_stride: u32, eps: f32 }{ .width = @intCast(width), .in_stride = @intCast(in_stride), .out_stride = @intCast(out_stride), .eps = eps };
+    Kernels.bind(e, p, &.{ x, w, y }, params);
+    e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
+}
+
+/// 256-wide heads to [count, rows, 256]: normed and turned by cs, sn [rows, 32] when `normed`, else copied.
+pub fn encoderHeads(e: mtl.ComputeEncoder, p: mtl.Pipeline, x: Ref, w: Ref, cs: Ref, sn: Ref, y: Ref, rows: usize, count: usize, in_stride: usize, head_stride: usize, eps: f32, normed: bool) void {
+    const params = extern struct { rows: u32, heads: u32, in_stride: u32, head_stride: u32, eps: f32, normed: u32 }{ .rows = @intCast(rows), .heads = @intCast(count), .in_stride = @intCast(in_stride), .head_stride = @intCast(head_stride), .eps = eps, .normed = @intFromBool(normed) };
+    Kernels.bind(e, p, &.{ x, w, cs, sn, y }, params);
+    e.dispatchGroups(mtl.Size.of(rows, (count + 7) / 8, 1), mtl.Size.of(256, 1, 1));
+}
+
+/// o [rows, count * 256] = causal attention of q [count, rows, 256] over k, v [kv_count, rows, 256].
+pub fn encoderAttention(e: mtl.ComputeEncoder, p: mtl.Pipeline, q: Ref, k: Ref, v: Ref, o: Ref, rows: usize, count: usize, kv_count: usize, scale: f32) void {
+    const params = extern struct { rows: u32, heads: u32, kv_heads: u32, scale: f32 }{ .rows = @intCast(rows), .heads = @intCast(count), .kv_heads = @intCast(kv_count), .scale = scale };
+    Kernels.bind(e, p, &.{ q, k, v, o }, params);
+    e.dispatchGroups(mtl.Size.of(rows, count, 1), mtl.Size.of(256, 1, 1));
+}
+
+/// One of the elementwise steps (me_gate, me_silu_mul, me_conv) over `rows` rows of `width`.
+pub fn encoderRows(e: mtl.ComputeEncoder, p: mtl.Pipeline, a: Ref, b: Ref, y: Ref, rows: usize, width: usize) void {
+    Kernels.bind(e, p, &.{ a, b, y }, @as(u32, @intCast(width)));
+    e.dispatchThreads(mtl.Size.of(width, rows, 1), mtl.Size.of(256, 1, 1));
+}
+
+/// The DeltaNet's geometry for me_gdn_prep and me_gdn.
+pub const Gdn = extern struct { rows: u32, kheads: u32, vheads: u32, mix_stride: u32, scale: f32 };
+
+/// qn, kn [rows, kheads, 128] and g, beta [rows, vheads] in fp32 from the conv's rows and the a, b projections.
+pub fn encoderGdnPrep(e: mtl.ComputeEncoder, p: mtl.Pipeline, mix: Ref, a: Ref, b: Ref, a_log: Ref, dt_bias: Ref, qn: Ref, kn: Ref, g: Ref, beta: Ref, params: Gdn) void {
+    Kernels.bind(e, p, &.{ mix, a, b, a_log, dt_bias, qn, kn, g, beta }, params);
+    e.dispatchGroups(mtl.Size.of(params.rows, (params.kheads + 7) / 8, 1), mtl.Size.of(256, 1, 1));
+}
+
+/// The gated delta rule's out [rows, vheads, 128] bf16: a threadgroup a value head.
+pub fn encoderGdn(e: mtl.ComputeEncoder, p: mtl.Pipeline, qn: Ref, kn: Ref, mix: Ref, g: Ref, beta: Ref, out: Ref, params: Gdn) void {
+    Kernels.bind(e, p, &.{ qn, kn, mix, g, beta, out }, params);
+    e.dispatchGroups(mtl.Size.of(params.vheads, 1, 1), mtl.Size.of(128, 1, 1));
+}
+
+/// y [rows, width] = the gated norm of x by its 128-wide heads with gate z and weight w.
+pub fn encoderGatedNorm(e: mtl.ComputeEncoder, p: mtl.Pipeline, x: Ref, z: Ref, w: Ref, y: Ref, rows: usize, width: usize, eps: f32) void {
+    const params = extern struct { width: u32, in_stride: u32, out_stride: u32, eps: f32 }{ .width = @intCast(width), .in_stride = @intCast(width), .out_stride = @intCast(width), .eps = eps };
+    Kernels.bind(e, p, &.{ x, z, w, y }, params);
+    e.dispatchGroups(mtl.Size.of(rows, (width / 128 + 7) / 8, 1), mtl.Size.of(256, 1, 1));
 }
 
 test "every MOSS-Image pipeline compiles and loads on this GPU" {

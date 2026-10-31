@@ -6,6 +6,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Flash Next on CUDA: `TF_FLASHNEXT_ATTN_LANES=1` (off by default) runs a shared decode round's attention in one launch a kernel, with each row's caches and position in a table uploaded once a round, instead of a launch per stream. Replies are the same tokens; the kernels are bit-equal to the per-stream launches (`tf-cuda-test flashnext-attn-lanes`).
 
+- MOSS-Image's prompt encoder runs on Metal inside the `moss_image` family, in bf16 as published with fp32 sums where the reference sums, under the Metal kernel contract (`tf-kernel-contract --only "moss image"`).
+
 - GLM-5.3-Flash on CUDA with `--vision`: `TF_GLM_VISION_HOST=1` keeps the vision tower's bf16 weights in pinned host memory mapped into the device and copies each unit into one device slot just before it runs, so rank 0 keeps 240 MiB for the tower instead of 1.05 GiB and every rank gets that room back for KV pages and the prompt cache. Unset, nothing changes.
 
 - A tool marked `"strict": true` is now held to its schema under `tool_choice: "auto"` (or none) on every family with a grammar runtime: the server compiles a grammar that triggers at the call markup, so a strict tool's arguments always validate. `TENSORFOLD_TOOL_GRAMMAR=1` holds every auto tools request the same way.
