@@ -168,6 +168,8 @@ for a row whose tile or block reads a non-finite value at a key masked for that 
 `gemma_decode_attention` for a decode row whose 32-key step reads one: P = 0 times Inf inside the P x V mma, where
 float64 leaves the masked key out. These were seen on the M5, where their cases run. Each kernel has an entry of its own
 that plants such a value and carries the finding, so its other entries keep a clean gate 1.
+Idol's `id_qk` gives a head holding a NaN +-inf in its other outputs where torch's `F.normalize` gives NaN: its
+norm is `max(precise::sqrt(ss), 1e-12f)`, and Metal's `max` drops the NaN that `clamp_min` keeps.
 
 HIP’s MLX stream tile keeps its finite dot2 sums unchanged. A non-finite result with an actual non-finite
 operand is recomputed by full quantization groups using the factored float64 formula. The plain tile is
@@ -342,6 +344,10 @@ Every kernel has a planted control (`contract_js_controls.cuh`), each naming the
 HIP also checks the router over the rows a checkpoint already holds in bf16 (`tf_router_bf16`, and its fp16-activation
 form), bit-equal to the fp32-rows router it replaces at 1 to 16 rows, with both kinds' non-finite plants through gate 1
 and the exact sums of gate 4.
+
+Metal also checks Idol's denoiser (`metal_idol*.zig`): its fp16 projections and GELU form, the split-K fp32 rows,
+`id_gemm32` (true fp32 sums: the NAX fp32 path in its place is a control gate 4 must catch), the LayerNorms, RePo's
+angles, the heads, the elementwise steps and the attention's four forms, each at idol-sdk's fp16 points (19 controls).
 
 HIP also checks the DeltaNet prompt recurrence at half a value head a block (`tf_gdn_prompt_128`, its y and state),
 bit-equal to the plain window scan `gated_delta_tile` on the same tokens.
