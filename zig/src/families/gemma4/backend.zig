@@ -417,3 +417,11 @@ test "zero grant: Gemma Metal assistant and DFlash retain tapped context through
     b.shared_timed = 0;
     try lanes.shared_draft_check.check(b.facts(), true);
 }
+
+test "shared head costs: Gemma Metal assistant and DFlash retain costed copy grants" {
+    var b: Metal = undefined;
+    b.options = .{ .capacity = 512, .streams = 16 };
+    b.timed = 0;
+    b.shared_timed = 0;
+    try @import("metal_head_cost_test.zig").check(b.facts());
+}
