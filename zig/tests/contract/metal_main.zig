@@ -385,6 +385,9 @@ pub fn main(init: std.process.Init) !u8 {
     var nemotron_prompt: @import("metal_nemotron_prompt_range.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer nemotron_prompt.deinit();
     try nemotron_prompt.collect(o.only);
+    var flashnext_attn: @import("metal_flashnext_attn.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer flashnext_attn.deinit();
+    try flashnext_attn.collect(o.only);
     var nemotron_unroll: @import("metal_nemotron_unroll.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer nemotron_unroll.deinit();
     try nemotron_unroll.collect(o.only);
