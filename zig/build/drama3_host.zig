@@ -26,7 +26,7 @@ pub fn native(b: *std.Build, step: *std.Build.Step, family: *std.Build.Module, c
     if (family.import_table.get("metal")) |runtime| mod.addImport("metal", runtime);
     if (cuda) |c| mod.addImport("cuda", c);
     step.dependOn(&b.addObject(.{ .name = name, .root_module = mod }).step);
-    const tests = b.addTest(.{ .root_module = mod, .filters = &.{"native silence guard:"} });
+    const tests = b.addTest(.{ .root_module = mod, .filters = &.{ "native silence guard:", "drama reference cache:" } });
     step.dependOn(&b.addRunArtifact(tests).step);
 }
 
