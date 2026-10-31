@@ -58,13 +58,21 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     var drafter_model: ?*fl.Model = null;
     errdefer if (drafter_model) |dm| dm.deinit();
     if (o.drafts) if (o.drafter) |dir| {
+        if (o.drafter_bits != 0) {
+            problem.* = try std.fmt.allocPrint(a, "--drafter-bits {d}: a Llama drafter is served from its bf16 release as published, with no copies prepared at load: pass --drafter-bits 0", .{o.drafter_bits});
+            model.deinit();
+            return null;
+        }
         // a smaller Llama on the model's tokens, its commands on the model's queue (one residency set for both)
         const dm = fl.Model.loadOn(gpa, io, dir, model.queue) catch |err| {
-            problem.* = try std.fmt.allocPrint(a, "--drafter: the native Llama engine cannot load {s} ({s}); it takes a smaller Llama checkpoint on the served model's tokenizer", .{ dir, @errorName(err) });
+            problem.* = if (err == error.UnsupportedLlamaPrecision)
+                try std.fmt.allocPrint(a, "--drafter: {s} is a quantized checkpoint; a Llama drafter is served from its bf16 release as published", .{dir})
+            else
+                try std.fmt.allocPrint(a, "--drafter: the native Llama engine cannot load {s} ({s}); it takes a smaller Llama checkpoint on the served model's tokenizer", .{ dir, @errorName(err) });
             model.deinit();
             return null;
         };
-        if (try drafterRefusal(a, dir, &model.config, &dm.config, o.drafter_bits)) |why| {
+        if (try drafterRefusal(a, dir, &model.config, &dm.config)) |why| {
             problem.* = why;
             dm.deinit();
             model.deinit();
@@ -116,7 +124,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         h.drafter = try fl.drafter.Drafter.start(gpa, dm, .{ .capacity = capacity, .streams = streams, .ledger = &h.metal.ledger });
         h.metal.slots = h.drafter.?.slotsHook(); // its slots grow with their streams' admission, in the same budget
         const dc = &dm.config;
-        std.log.info("llama drafter: {s}: {d} layers, {s}, {d:.2} GiB of weights, {d} caches of up to {d} tokens ({d:.2} GiB each), each grown with its stream in the same budget", .{ o.drafter.?, dc.layers, if (dc.bits == fl.config.bf16) "bf16" else if (dc.bits == 8) "8-bit" else "4-bit", @as(f64, @floatFromInt(dm.checkpoint.residentBytes())) / (1 << 30), streams, capacity, @as(f64, @floatFromInt(fl.state.cacheBytes(dc, capacity))) / (1 << 30) });
+        std.log.info("llama drafter: {s}: {d} layers, bf16, {d:.2} GiB of weights, {d} caches of up to {d} tokens ({d:.2} GiB each), each grown with its stream in the same budget", .{ o.drafter.?, dc.layers, @as(f64, @floatFromInt(dm.checkpoint.residentBytes())) / (1 << 30), streams, capacity, @as(f64, @floatFromInt(fl.state.cacheBytes(dc, capacity))) / (1 << 30) });
     }
     errdefer if (h.drafter) |d| d.deinit();
     h.config = try lanes.Config.init(gpa, h.metal.facts(), fl.state.window_rows, fl.state.window_rows - 1);
@@ -154,14 +162,8 @@ fn qualifiedNames(comptime role: fl.config.Role) []const u8 {
     return names;
 }
 
-/// Why a drafter cannot serve: not the width --drafter-bits names, or tokens that are not the model's.
-fn drafterRefusal(a: std.mem.Allocator, dir: []const u8, target: *const fl.config.Config, drafter: *const fl.config.Config, bits: u8) !?[]const u8 {
-    const width: []const u8 = if (drafter.bits == fl.config.bf16) "bf16" else if (drafter.bits == 8) "MLX 8-bit" else "MLX 4-bit";
-    switch (bits) {
-        0 => if (drafter.bits != fl.config.bf16) return try std.fmt.allocPrint(a, "--drafter-bits 0 serves the drafter's bf16 release; {s} is {s}", .{ dir, width }),
-        4 => if (drafter.bits != 4) return try std.fmt.allocPrint(a, "--drafter-bits 4 (the default) serves an MLX 4-bit drafter as published (mlx_lm's layout, groups of 64); {s} is {s}: pass --drafter-bits 0 for a bf16 release", .{ dir, width }),
-        else => return try std.fmt.allocPrint(a, "--drafter-bits {d}: a Llama drafter is served at 4 (an MLX 4-bit checkpoint) or 0 (bf16)", .{bits}),
-    }
+/// Why a drafter cannot serve: tokens that are not the model's.
+fn drafterRefusal(a: std.mem.Allocator, dir: []const u8, target: *const fl.config.Config, drafter: *const fl.config.Config) !?[]const u8 {
     var same = drafter.vocab <= target.vocab and drafter.eos_count == target.eos_count;
     if (same) for (drafter.eos[0..drafter.eos_count]) |e| {
         if (!target.isEos(e)) same = false;

@@ -17,6 +17,10 @@ zig build native -Doptimize=ReleaseFast -Dcpu=native
 zig build grammar -Dxgrammar=PATH_TO_XGRAMMAR_v0.2.8 -Dcpu=native   # structured output
 LLAMA_LOAD_LIMIT_GB=150 zig-out/native/bin/tensorfold-native serve models/nanbeige4.3-33b --name nanbeige --port 8888 \
   --context 131072 --parallel 2 --prompt-cache-gib 8
+# with Nanbeige4.1-3B drafting from its bf16 release (the same replies, faster: see Drafter below)
+hf download Nanbeige/Nanbeige4.1-3B --revision 9c4555c37921c0982af8fffeee1e0a6e6b953c4f --local-dir models/nanbeige4.1-3b
+LLAMA_LOAD_LIMIT_GB=150 zig-out/native/bin/tensorfold-native serve models/nanbeige4.3-33b --name nanbeige --port 8888 \
+  --context 131072 --parallel 2 --prompt-cache-gib 8 --drafter models/nanbeige4.1-3b --drafter-bits 0
 ```
 
 `LLAMA_LOAD_LIMIT_GB` caps weights, scratch and caches together (75% of RAM when unset). The weights take 61.7 GiB; a
@@ -45,6 +49,8 @@ calls take the template's XML form (its `tool_call_format` default), which the s
   never depend on the rows beside it.
 - The lane host's shared rounds, a lone stream's steps drawn on the GPU a step ahead (argmax, or `tf_sample_full`),
   copy drafts and the prompt cache.
+- `--drafter`: a smaller Llama on the same tokenizer (`drafter.zig`) as the lane core's priced copy proposer, its
+  drafts verified by the model's windows like any copy, so replies keep the model's bits.
 
 Every kernel is registered with the kernel contract (`zig/tests/contract/metal_llama*.zig`, the roll call in
 `contracts.zig`): the glue, the six row-projection forms, the four GEMM forms and the prompt attention at both served
@@ -160,9 +166,56 @@ Each keeps the replies' bits.
   compiled for a 131,072-token vocabulary): sampled replies decode at the greedy speed.
 - **Not offered.** No int8 or fp8 cache, no fast-math, no reduced-precision sums, no quantized weights.
 
+## Drafter: Nanbeige4.1-3B
+
+[`Nanbeige/Nanbeige4.1-3B`](https://huggingface.co/Nanbeige/Nanbeige4.1-3B) (revision
+`9c4555c37921c0982af8fffeee1e0a6e6b953c4f`, Apache-2.0; model_type `llama`, 32 layers, hidden 2,560, 20 query and 4 key
+heads of 128) shares the 33B's tokenizer: the same 166,100 ids, merges and added tokens, the same bos and eos (its
+`vocab_size` pads to 166,144, the 33B's to 166,912). The family admits it as a drafter only, served from its bf16
+release as published (7.33 GiB); `--drafter-bits 4` and quantized drafter checkpoints are refused by name.
+
+- **The proposer.** `--drafter` loads the smaller Llama on the served model's queue and registers it as the lane
+  host's copy proposer (`LaneHost.proposers`), priced, so a round takes its drafts as given. The model's window
+  verifies them row by row and keeps the prefix its own draws agree with, as it keeps any copy draft: replies are the
+  model's whatever the drafter says.
+- **One budget.** The streams' caches and the drafter's (64 KiB a token) share one ledger (`budget.Ledger`). A
+  stream's admission (`budget.admitStream`) checks its peak first (its caches and its drafter cache's growth, the old
+  state's copy included), trims the kept prompt states to what that peak leaves, and only then allocates; a freed
+  drafter cache keeps its tokens for the next request sharing its prefix, counted, and gives way first.
+- **Drafting.** Before each round the drafter's cache is synced to the stream's context by their longest common
+  prefix, the new tokens are fed, and the drafts are greedy steps chained on the GPU. The depth comes from measured
+  rates: the stream's decayed acceptance, a chained step's time (8.5-8.9 ms) and a line fitted to the round's time by
+  its window's rows. With several streams in a round, each stream drafts the depth with the most tokens a millisecond
+  for the whole round (`pricing.depthShared`), nothing only when drafting costs the round more than it lands.
+
+Checked with `tf-llama-run <33B> <tokens> draft <drafter>,<n>`, which decodes greedily through the drafter's windows:
+on eight chat prompts (128 tokens, thinking on and off) and after a 1,500-token prompt (256 tokens), the drafted
+tokens equal the plain greedy tokens exactly (28 Oct 2026, one model process on the Mac):
+
+| prompt | plain | drafted | tokens a round | drafts kept |
+|---|---:|---:|---:|---:|
+| Fibonacci function, thinking off | 15.8 tok/s | 40.7 | 4.54 | 99 of 127 |
+| Fibonacci function, thinking on | 15.8 | 22.0 | 1.81 | 57 of 142 |
+| why the sky is blue, thinking off | 15.8 | 26.8 | 2.44 | 75 of 151 |
+| why the sky is blue, thinking on | 15.9 | 22.8 | 1.88 | 60 of 125 |
+| Hangzhou in two sentences (Chinese), thinking off | 15.9 | 21.1 | 1.73 | 54 of 137 |
+| Hangzhou in two sentences (Chinese), thinking on | 15.9 | 24.1 | 2.02 | 64 of 130 |
+| 9.11 or 9.8, thinking off | 15.8 | 31.1 | 3.31 | 90 of 167 |
+| 9.11 or 9.8, thinking on | 15.8 | 25.9 | 2.42 | 75 of 158 |
+| 1,500 tokens of Python's json docs, 256 tokens | 16.1 | 27.8 | 2.68 | 160 of 332 |
+
+Served (`--context 32768 --parallel 2 --prompt-cache-gib 8 --drafter ... --drafter-bits 0`, fresh servers): eight new
+prompts sent two at a time (greedy, 256 tokens, thinking off) decode together at 30.1-40.9 tokens/s (36.1 on average)
+against 26.6-30.1 (29.0) without `--drafter`, every reply's token ids equal to the undrafted one. Streams joining,
+leaving, queued, refused (HTTP 400) and cancelled each return the token ids of their plain solo run, and a reply alone
+after a cancel is unchanged; in rounds shared from the first token to the last, 199 drafts were offered and 125 kept.
+The drafter's cache is fed the prompt on the first round, after the model's own prompt pass, so the first token keeps
+its time.
+
 ## Not done
 
-No quality suite was run. No drafter is served (the family has no draft head; copy drafts come from the lane core).
+No quality suite was run. The family has no draft head of its own: drafts come from `--drafter`'s smaller Llama or
+the lane core's copies. Quantized drafters are refused by name: the drafter is served from its bf16 release.
 Logprobs are refused by name: the release's tokenizer decodes through a `Strip` step, which the engine's tokenizer does
 not count as token-local, so the server cannot give a token's bytes on its own.
 Only the M5's tensor units were checked; M1-M4 Macs are refused at load, and smaller RAM is untested. Other `llama`
