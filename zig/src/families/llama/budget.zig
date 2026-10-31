@@ -20,6 +20,29 @@ pub fn caches(ram: u64, working_set: u64, text: ?[]const u8, resident: u64) erro
     return if (limit > resident + margin) limit - resident - margin else 0;
 }
 
+/// One budget for every cache a load holds: each stream's, the drafter's slots (taken or kept) and their growth copies.
+pub const Ledger = struct {
+    limit: u64,
+    held: u64 = 0,
+
+    pub fn fits(l: *const Ledger, bytes: u64) bool {
+        return l.held + bytes <= l.limit;
+    }
+
+    pub fn take(l: *Ledger, bytes: u64) void {
+        std.debug.assert(l.fits(bytes));
+        l.held += bytes;
+    }
+
+    pub fn give(l: *Ledger, bytes: u64) void {
+        l.held -= bytes;
+    }
+
+    pub fn left(l: *const Ledger) u64 {
+        return l.limit - l.held;
+    }
+};
+
 /// A drafter's caches beside a stream's: `streams` of them, each the window and a decode window of rows more.
 pub const Drafted = struct { c: *const cfg.Config, streams: u32 };
 
@@ -45,6 +68,27 @@ pub fn needed(c: *const cfg.Config, drafted: ?Drafted, n: usize) u64 {
     var total: u64 = st.cacheBytes(c, n + 1);
     if (drafted) |d| total += @as(u64, @max(d.streams, 1)) * st.cacheBytes(d.c, n + st.window_rows);
     return total;
+}
+
+test "llama budget: two drafted requests that each fit alone are refused together, and pass in turn" {
+    const gpa = std.testing.allocator;
+    const gib: u64 = 1 << 30;
+    const c = try cfg.parse(gpa, @embedFile("fixtures/config.json"));
+    const dc = try cfg.parse(gpa, @embedFile("fixtures/drafter_config.json"));
+    // a 100 GiB budget, a 262,144-token context and two streams: startup admits the window
+    const drafted: Drafted = .{ .c = &dc, .streams = 2 };
+    try std.testing.expect(longestWith(&c, drafted, 100 * gib, 262144) == 262144);
+    // a 240,000-token request: its caches and its drafter slot's at the same capacity (backend.prefillFn's need)
+    const capacity = 240_000 + 1;
+    const one = st.cacheBytes(&c, capacity) + st.cacheBytes(&dc, capacity + st.window_rows);
+    var l: Ledger = .{ .limit = 100 * gib };
+    try std.testing.expect(l.fits(one));
+    l.take(one);
+    try std.testing.expect(!l.fits(one)); // the second waits: together they would pass the budget by 24.5 GiB
+    try std.testing.expect(2 * one - l.limit > 24 * gib);
+    // the first ends: its stream's caches are given back, its drafter slot kept (and still counted)
+    l.give(st.cacheBytes(&c, capacity));
+    try std.testing.expect(l.fits(one));
 }
 
 test "llama budget: a share of RAM less the weights, a set limit capped at the working set, bad text refused" {
