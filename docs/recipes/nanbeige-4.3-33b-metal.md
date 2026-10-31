@@ -20,7 +20,7 @@ LLAMA_LOAD_LIMIT_GB=150 zig-out/native/bin/tensorfold-native serve models/nanbei
 # with Nanbeige4.1-3B drafting from its bf16 release (the same replies, faster: see Drafter below)
 hf download Nanbeige/Nanbeige4.1-3B --revision 9c4555c37921c0982af8fffeee1e0a6e6b953c4f --local-dir models/nanbeige4.1-3b
 LLAMA_LOAD_LIMIT_GB=150 zig-out/native/bin/tensorfold-native serve models/nanbeige4.3-33b --name nanbeige --port 8888 \
-  --context 131072 --parallel 2 --prompt-cache-gib 8 --drafter models/nanbeige4.1-3b --drafter-bits 0
+  --context 131072 --parallel 2 --prompt-cache-gib 8 --drafter models/nanbeige4.1-3b
 ```
 
 `LLAMA_LOAD_LIMIT_GB` caps weights, scratch and caches together (75% of RAM when unset). The weights take 61.7 GiB; a
@@ -172,7 +172,8 @@ Each keeps the replies' bits.
 `9c4555c37921c0982af8fffeee1e0a6e6b953c4f`, Apache-2.0; model_type `llama`, 32 layers, hidden 2,560, 20 query and 4 key
 heads of 128) shares the 33B's tokenizer: the same 166,100 ids, merges and added tokens, the same bos and eos (its
 `vocab_size` pads to 166,144, the 33B's to 166,912). The family admits it as a drafter only, served from its bf16
-release as published (7.33 GiB); `--drafter-bits 4` and quantized drafter checkpoints are refused by name.
+release as published (7.33 GiB), so the plain `--drafter <dir>` serves it: `--drafter-bits` (which picks Qwen's
+DFlash width) is not read for Llama, as for Gemma 4, and quantized drafter checkpoints are refused by name.
 
 - **The proposer.** `--drafter` loads the smaller Llama on the served model's queue and registers it as the lane
   host's copy proposer (`LaneHost.proposers`), priced, so a round takes its drafts as given. The model's window
