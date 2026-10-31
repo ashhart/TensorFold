@@ -1,4 +1,4 @@
-//! LFM3-VL's vision kernels (lfm3_vit.cl) against FP64 on random data, each with a planted control that must fail.
+//! LFM3-VL's vision kernels (lfm3_vit.cl), fp32 activations, against FP64 on random data, each with a planted control.
 
 const std = @import("std");
 const o = @import("lfm3_ops.zig");
@@ -10,6 +10,58 @@ const NP: u32 = GH * GW;
 const D: u32 = 1024;
 const HD: u32 = 64;
 const eps: f64 = 1e-5;
+/// fp32 activations and sums: an output within 1e-5 of FP64 (relative to its largest value); a control outside.
+const tol: f64 = 1e-5;
+
+const Tally = struct {
+    bad: bool = false,
+    fn check(t: *Tally, what: []const u8, err: f64) void {
+        const ok = err <= tol;
+        if (!ok) t.bad = true;
+        std.debug.print("  {s}: rel err {e:.2} (tol {e:.0}) {s}\n", .{ what, err, tol, if (ok) "pass" else "FAIL" });
+    }
+    fn control(t: *Tally, what: []const u8, err: f64) void {
+        const fails = err > tol;
+        if (!fails) t.bad = true;
+        std.debug.print("  control {s}: rel err {e:.2} {s}\n", .{ what, err, if (fails) "fails as planted" else "PASSES (control broken)" });
+    }
+};
+
+/// Random fp32 values (mean, sd) and their exact FP64 widening.
+fn randF(n: usize, rnd: std.Random, mean: f64, sd: f64) !struct { h: []f32, f: []f64 } {
+    const h = try o.gpa.alloc(f32, n);
+    const f = try o.gpa.alloc(f64, n);
+    for (h, f) |*a, *b| {
+        a.* = @floatCast(mean + sd * rnd.floatNorm(f64));
+        b.* = a.*;
+    }
+    return .{ .h = h, .f = f };
+}
+
+fn up(r: *o.rt.Runtime, h: []const f32) !o.Buf {
+    const b = try r.alloc(h.len * 4);
+    try r.upload(b, std.mem.sliceAsBytes(h));
+    return b;
+}
+
+fn get(r: *o.rt.Runtime, b: o.Buf, n: usize) ![]f32 {
+    const h = try o.gpa.alloc(f32, n);
+    try r.sync();
+    try r.download(std.mem.sliceAsBytes(h), b);
+    try r.sync();
+    return h;
+}
+
+/// max|got - want| / max|want|.
+fn relErr(got: []const f32, want: []const f64) f64 {
+    var e: f64 = 0;
+    var m: f64 = 0;
+    for (got, want) |g, w| {
+        e = @max(e, @abs(@as(f64, g) - w));
+        m = @max(m, @abs(w));
+    }
+    return if (m == 0) e else e / m;
+}
 
 /// Grid row and column of patch p in merge order (2 x 2 blocks).
 fn hw(p: usize, gw: usize) [2]usize {
@@ -34,8 +86,11 @@ fn rmsRow(x: []const f64, w: []const f64, centered: bool, out: []f64) void {
     for (x, w, out) |v, wv, *y| y.* = (v - mean) * inv * wv;
 }
 
-fn randMean(buf: []u16, rnd: std.Random, mean: f64, sd: f64) void {
-    for (buf) |*v| v.* = o.toBf(mean + sd * rnd.floatNorm(f64));
+/// bf16 weights (as stored) and their exact FP64 widening.
+fn weights(n: usize, rnd: std.Random, mean: f64, sd: f64) !struct { h: []u16, f: []f64 } {
+    const h = try o.gpa.alloc(u16, n);
+    for (h) |*v| v.* = o.toBf(mean + sd * rnd.floatNorm(f64));
+    return .{ .h = h, .f = try o.widen(o.gpa, h) };
 }
 
 pub const panic = std.debug.FullPanic(@import("rig.zig").panicDrain);
@@ -53,138 +108,123 @@ pub fn main() !void {
     var k_rope = try m.kernel("vit_qk_norm_rope", .{ 64, 1, 1 });
     var k_attn = try m.kernel("vit_attn", .{ 64, 1, 1 });
     var k_swi = try m.kernel("vit_swiglu", .{ 64, 1, 1 });
-    var t: o.Tally = .{ .name = "lfm3_vit" };
+    var t: Tally = .{};
     var prng = std.Random.DefaultPrng.init(1024);
     const rnd = prng.random();
     const gpa = o.gpa;
-    std.debug.print("vision kernels on a {d} x {d} patch grid ({d} patches), against FP64\n", .{ GH, GW, NP });
+    const no: u32 = 0;
+    std.debug.print("vision kernels, fp32 activations, on a {d} x {d} patch grid ({d} patches), against FP64\n", .{ GH, GW, NP });
 
-    // GEMM: y = x . w^T + bias for 100 rows (a partial tile), the patchifier's k = 1536 and a square table
+    // GEMM: y = x . w^T + bias, 100 rows (a partial tile), the patchifier's k = 1536 and a square table; bf16 rows out
     for ([_][2]u32{ .{ 1536, 1024 }, .{ 1024, 1024 } }) |kn| {
         const K = kn[0];
         const N = kn[1];
         const M: u32 = 100;
-        const xh = try gpa.alloc(u16, M * K);
-        const wh = try gpa.alloc(u16, N * K);
-        const bh = try gpa.alloc(u16, N);
-        o.randBf(xh, rnd, 1.0);
-        o.randBf(wh, rnd, 0.03);
-        o.randBf(bh, rnd, 0.5);
-        const xf = try o.widen(gpa, xh);
-        const wf = try o.widen(gpa, wh);
-        const bfv = try o.widen(gpa, bh);
-        const y = try r.alloc(M * N * 2);
-        try o.run(&k_gemm, .{ N / 64, (M + 63) / 64, 1 }, .{ try o.upload(&r, xh), K, try o.upload(&r, wh), try o.upload(&r, bh), @as(u32, 1), y, N, M, K });
-        const got = try o.fetch(&r, y, M * N);
+        const x = try randF(M * K, rnd, 0, 1.0);
+        const w = try weights(N * K, rnd, 0, 0.03);
+        const b = try weights(N, rnd, 0, 0.5);
+        const y = try r.alloc(M * N * 4);
+        try o.run(&k_gemm, .{ N / 64, (M + 63) / 64, 1 }, .{ try up(&r, x.h), K, try o.upload(&r, w.h), try o.upload(&r, b.h), @as(u32, 1), y, N, M, K, no, no });
+        const got = try get(&r, y, M * N);
         const want = try gpa.alloc(f64, M * N);
         const ctl = try gpa.alloc(f64, M * N);
         for (0..M) |i| for (0..N) |j| {
-            var a: f64 = bfv[j];
-            var c: f64 = bfv[j];
+            var a: f64 = b.f[j];
+            var c: f64 = b.f[j];
             for (0..K) |q| {
-                a += xf[i * K + q] * wf[j * K + q];
-                if (K == N) c += xf[i * K + q] * wf[q * K + j];
+                a += x.f[i * K + q] * w.f[j * K + q];
+                if (K == N) c += x.f[i * K + q] * w.f[q * K + j];
             }
             want[i * N + j] = a;
             ctl[i * N + j] = c;
         };
         var buf: [64]u8 = undefined;
-        t.check(try std.fmt.bufPrint(&buf, "vit_gemm k {d} n {d}, 100 rows, bias", .{ K, N }), o.relErr(got, want));
-        if (K == N) t.control("vit_gemm against the table transposed", o.relErr(got, ctl));
+        t.check(try std.fmt.bufPrint(&buf, "vit_gemm k {d} n {d}, 100 rows, bias", .{ K, N }), relErr(got, want));
+        if (K == N) t.control("vit_gemm against the table transposed", relErr(got, ctl));
+        if (K != N) continue;
+        // the image rows' form: bf16 out, as the decoder reads them (bf16 tolerance)
+        const yb = try r.alloc(M * N * 2);
+        try o.run(&k_gemm, .{ N / 64, (M + 63) / 64, 1 }, .{ try up(&r, x.h), K, try o.upload(&r, w.h), try o.upload(&r, b.h), @as(u32, 1), yb, N, M, K, no, @as(u32, 1) });
+        const gb = try o.fetch(&r, yb, M * N);
+        const e = o.relErr(gb, want);
+        const ok = e <= 4e-3;
+        if (!ok) t.bad = true;
+        std.debug.print("  vit_gemm bf16 rows out: rel err {e:.2} (tol 4e-3, one bf16 rounding) {s}\n", .{ e, if (ok) "pass" else "FAIL" });
     }
 
-    // RMSNorm rows of 1024 (inputs off zero so a LayerNorm's centring shows), and the residual step
+    // RMSNorm rows of 1024 (inputs off zero so a LayerNorm's centring shows), LayerNorm with bias, the residual step
     {
         const R: u32 = 7;
-        const xh = try gpa.alloc(u16, R * D);
-        const dh = try gpa.alloc(u16, R * D);
-        const wh = try gpa.alloc(u16, D);
-        const bh = try gpa.alloc(u16, D);
-        randMean(xh, rnd, 0.7, 1.0);
-        randMean(dh, rnd, 0.0, 0.5);
-        randMean(wh, rnd, 1.0, 0.3);
-        randMean(bh, rnd, 0.0, 0.2);
-        const xf = try o.widen(gpa, xh);
-        const df = try o.widen(gpa, dh);
-        const wf = try o.widen(gpa, wh);
-        const bfv = try o.widen(gpa, bh);
-        const y = try r.alloc(R * D * 2);
+        const x = try randF(R * D, rnd, 0.7, 1.0);
+        const dd = try randF(R * D, rnd, 0, 0.5);
+        const w = try weights(D, rnd, 1.0, 0.3);
+        const b = try weights(D, rnd, 0, 0.2);
+        const y = try r.alloc(R * D * 4);
         const want = try gpa.alloc(f64, R * D);
         const ctl = try gpa.alloc(f64, R * D);
-        try o.run(&k_rms, .{ R, 1, 1 }, .{ try o.upload(&r, xh), try o.upload(&r, wh), y, D, @as(f32, 1e-5) });
+        try o.run(&k_rms, .{ R, 1, 1 }, .{ try up(&r, x.h), try o.upload(&r, w.h), y, D, @as(f32, 1e-5), no });
         for (0..R) |i| {
-            rmsRow(xf[i * D ..][0..D], wf, false, want[i * D ..][0..D]);
-            rmsRow(xf[i * D ..][0..D], wf, true, ctl[i * D ..][0..D]);
+            rmsRow(x.f[i * D ..][0..D], w.f, false, want[i * D ..][0..D]);
+            rmsRow(x.f[i * D ..][0..D], w.f, true, ctl[i * D ..][0..D]);
         }
-        const got = try o.fetch(&r, y, R * D);
-        t.check("vit_rms", o.relErr(got, want));
-        t.control("vit_rms against a centred norm", o.relErr(got, ctl));
-        // LayerNorm with bias: the centred norm plus b; control: the uncentred one
-        try o.run(&k_ln, .{ R, 1, 1 }, .{ try o.upload(&r, xh), try o.upload(&r, wh), try o.upload(&r, bh), y, D, @as(f32, 1e-6) });
+        const got = try get(&r, y, R * D);
+        t.check("vit_rms", relErr(got, want));
+        t.control("vit_rms against a centred norm", relErr(got, ctl));
+        try o.run(&k_ln, .{ R, 1, 1 }, .{ try up(&r, x.h), try o.upload(&r, w.h), try o.upload(&r, b.h), y, D, @as(f32, 1e-5), no });
         for (0..R) |i| for (0..D) |j| {
-            want[i * D + j] = ctl[i * D + j] + bfv[j];
-            ctl[i * D + j] = 0;
+            want[i * D + j] = ctl[i * D + j] + b.f[j];
         };
         for (0..R) |i| {
-            rmsRow(xf[i * D ..][0..D], wf, false, ctl[i * D ..][0..D]);
-            for (0..D) |j| ctl[i * D + j] += bfv[j];
+            rmsRow(x.f[i * D ..][0..D], w.f, false, ctl[i * D ..][0..D]);
+            for (0..D) |j| ctl[i * D + j] += b.f[j];
         }
-        const ln = try o.fetch(&r, y, R * D);
-        t.check("vit_layernorm with bias", o.relErr(ln, want));
-        t.control("vit_layernorm against the uncentred norm", o.relErr(ln, ctl));
-        // residual step: h = x + d, y = rms(h); control: the norm of x before the add
-        const h = try o.upload(&r, xh);
-        try o.run(&k_arms, .{ R, 1, 1 }, .{ h, try o.upload(&r, dh), try o.upload(&r, wh), y, D, @as(f32, 1e-5) });
+        const ln = try get(&r, y, R * D);
+        t.check("vit_layernorm with bias", relErr(ln, want));
+        t.control("vit_layernorm against the uncentred norm", relErr(ln, ctl));
+        const h = try up(&r, x.h);
+        try o.run(&k_arms, .{ R, 1, 1 }, .{ h, try up(&r, dd.h), try o.upload(&r, w.h), y, D, @as(f32, 1e-5), no, no });
         const hs = try gpa.alloc(f64, R * D);
-        for (hs, xf, df) |*v, a, b| v.* = a + b;
+        for (hs, x.f, dd.f) |*v, a, c| v.* = a + c;
         for (0..R) |i| {
-            rmsRow(hs[i * D ..][0..D], wf, false, want[i * D ..][0..D]);
-            rmsRow(xf[i * D ..][0..D], wf, false, ctl[i * D ..][0..D]);
+            rmsRow(hs[i * D ..][0..D], w.f, false, want[i * D ..][0..D]);
+            rmsRow(x.f[i * D ..][0..D], w.f, false, ctl[i * D ..][0..D]);
         }
-        t.check("vit_add_rms residual", o.relErr(try o.fetch(&r, h, R * D), hs));
-        const ys = try o.fetch(&r, y, R * D);
-        t.check("vit_add_rms norm", o.relErr(ys, want));
-        t.control("vit_add_rms against the norm before the add", o.relErr(ys, ctl));
+        t.check("vit_add_rms residual", relErr(try get(&r, h, R * D), hs));
+        const ys = try get(&r, y, R * D);
+        t.check("vit_add_rms norm", relErr(ys, want));
+        t.control("vit_add_rms against the norm before the add", relErr(ys, ctl));
     }
 
     // GELU (erf) and SwiGLU, elementwise
     {
         const n: u32 = 4096;
-        const ah = try gpa.alloc(u16, n);
-        const bh = try gpa.alloc(u16, n);
-        o.randBf(ah, rnd, 2.0);
-        o.randBf(bh, rnd, 1.0);
-        const af = try o.widen(gpa, ah);
-        const bfv = try o.widen(gpa, bh);
-        const y = try r.alloc(n * 2);
+        const a = try randF(n, rnd, 0, 2.0);
+        const b = try randF(n, rnd, 0, 1.0);
+        const y = try r.alloc(n * 4);
         const want = try gpa.alloc(f64, n);
         const ctl = try gpa.alloc(f64, n);
-        try o.run(&k_gelu, .{ n / 64, 1, 1 }, .{ try o.upload(&r, ah), y, n });
-        for (af, want, ctl) |x, *w, *c| {
+        try o.run(&k_gelu, .{ n / 64, 1, 1 }, .{ try up(&r, a.h), y, n, no });
+        for (a.f, want, ctl) |x, *w, *c| {
             w.* = 0.5 * x * (1.0 + erf(x / std.math.sqrt2));
-            c.* = x / (1.0 + @exp(-x));
+            c.* = 0.5 * x * (1.0 + std.math.tanh(0.7978845608028654 * (x + 0.044715 * x * x * x))); // GELU's tanh form
         }
-        const g = try o.fetch(&r, y, n);
-        t.check("vit_gelu (erf)", o.relErr(g, want));
-        t.control("vit_gelu against silu", o.relErr(g, ctl));
-        try o.run(&k_swi, .{ n / 64, 1, 1 }, .{ try o.upload(&r, ah), try o.upload(&r, bh), y, n });
-        for (af, bfv, want, ctl) |x, u, *w, *c| {
+        const g = try get(&r, y, n);
+        t.check("vit_gelu (erf)", relErr(g, want));
+        t.control("vit_gelu against GELU's tanh form", relErr(g, ctl));
+        try o.run(&k_swi, .{ n / 64, 1, 1 }, .{ try up(&r, a.h), try up(&r, b.h), y, n, no });
+        for (a.f, b.f, want, ctl) |x, u, *w, *c| {
             w.* = x / (1.0 + @exp(-x)) * u;
             c.* = u / (1.0 + @exp(-u)) * x;
         }
-        const s = try o.fetch(&r, y, n);
-        t.check("vit_swiglu", o.relErr(s, want));
-        t.control("vit_swiglu with gate and up swapped", o.relErr(s, ctl));
+        const s = try get(&r, y, n);
+        t.check("vit_swiglu", relErr(s, want));
+        t.control("vit_swiglu with gate and up swapped", relErr(s, ctl));
     }
 
     // gated depthwise 3 x 3 conv over merge-order rows; control: the same rows fed in raster order
     {
-        const ph = try gpa.alloc(u16, NP * 3 * D);
-        const ch = try gpa.alloc(u16, D * 9);
-        o.randBf(ph, rnd, 1.0);
-        o.randBf(ch, rnd, 0.3);
-        const pf = try o.widen(gpa, ph);
-        const cf = try o.widen(gpa, ch);
+        const pr = try randF(NP * 3 * D, rnd, 0, 1.0);
+        const cw = try weights(D * 9, rnd, 0, 0.3);
         const want = try gpa.alloc(f64, NP * D);
         for (0..NP) |p| {
             const c0 = hw(p, GW);
@@ -195,28 +235,27 @@ pub fn main() !void {
                     const xx = @as(isize, @intCast(c0[1])) + @as(isize, @intCast(dx)) - 1;
                     if (yy < 0 or xx < 0 or yy >= GH or xx >= GW) continue;
                     const q = mergeIndex(@intCast(yy), @intCast(xx), GW);
-                    acc += pf[q * 3 * D + c] * pf[q * 3 * D + 2 * D + c] * cf[c * 9 + dy * 3 + dx];
+                    acc += pr.f[q * 3 * D + c] * pr.f[q * 3 * D + 2 * D + c] * cw.f[c * 9 + dy * 3 + dx];
                 };
-                want[p * D + c] = acc * pf[p * 3 * D + D + c];
+                want[p * D + c] = acc * pr.f[p * 3 * D + D + c];
             }
         }
-        const y = try r.alloc(NP * D * 2);
-        try o.run(&k_conv, .{ D / 64, NP, 1 }, .{ try o.upload(&r, ph), try o.upload(&r, ch), y, GH, GW });
-        t.check("vit_dwconv (merge order)", o.relErr(try o.fetch(&r, y, NP * D), want));
-        // raster control: row p of the input holds grid cell (p / GW, p % GW); the output read back in merge order
-        const rh = try gpa.alloc(u16, NP * 3 * D);
+        const y = try r.alloc(NP * D * 4);
+        try o.run(&k_conv, .{ D / 64, NP, 1 }, .{ try up(&r, pr.h), try o.upload(&r, cw.h), y, GH, GW, no });
+        t.check("vit_dwconv (merge order)", relErr(try get(&r, y, NP * D), want));
+        const rh = try gpa.alloc(f32, NP * 3 * D);
         for (0..NP) |p| {
             const q = mergeIndex(p / GW, p % GW, GW);
-            @memcpy(rh[p * 3 * D ..][0 .. 3 * D], ph[q * 3 * D ..][0 .. 3 * D]);
+            @memcpy(rh[p * 3 * D ..][0 .. 3 * D], pr.h[q * 3 * D ..][0 .. 3 * D]);
         }
-        try o.run(&k_conv, .{ D / 64, NP, 1 }, .{ try o.upload(&r, rh), try o.upload(&r, ch), y, GH, GW });
-        const raster = try o.fetch(&r, y, NP * D);
-        const back = try gpa.alloc(u16, NP * D);
+        try o.run(&k_conv, .{ D / 64, NP, 1 }, .{ try up(&r, rh), try o.upload(&r, cw.h), y, GH, GW, no });
+        const raster = try get(&r, y, NP * D);
+        const back = try gpa.alloc(f32, NP * D);
         for (0..NP) |p| {
             const q = mergeIndex(p / GW, p % GW, GW);
             @memcpy(back[q * D ..][0..D], raster[p * D ..][0..D]);
         }
-        t.control("vit_dwconv with the grid in raster order", o.relErr(back, want));
+        t.control("vit_dwconv with the grid in raster order", relErr(back, want));
     }
 
     // q heads: RMSNorm over 64, then axial RoPE by (row, column); control: rows and columns swapped
@@ -226,21 +265,17 @@ pub fn main() !void {
     try r.upload(invb, std.mem.sliceAsBytes(&inv));
     {
         const H: u32 = 16;
-        const qh = try gpa.alloc(u16, NP * H * HD);
-        const wh = try gpa.alloc(u16, HD);
-        randMean(qh, rnd, 0.3, 1.0);
-        randMean(wh, rnd, 1.0, 0.3);
-        const qf = try o.widen(gpa, qh);
-        const wf = try o.widen(gpa, wh);
-        const y = try r.alloc(NP * H * HD * 2);
-        try o.run(&k_rope, .{ NP * H / 4, 1, 1 }, .{ try o.upload(&r, qh), H * HD, y, try o.upload(&r, wh), invb, H, GW, @as(f32, 1e-5) });
-        const got = try o.fetch(&r, y, NP * H * HD);
+        const q = try randF(NP * H * HD, rnd, 0.3, 1.0);
+        const w = try weights(HD, rnd, 1.0, 0.3);
+        const y = try r.alloc(NP * H * HD * 4);
+        try o.run(&k_rope, .{ NP * H / 4, 1, 1 }, .{ try up(&r, q.h), H * HD, y, try o.upload(&r, w.h), invb, H, GW, @as(f32, 1e-5), no });
+        const got = try get(&r, y, NP * H * HD);
         const want = try gpa.alloc(f64, NP * H * HD);
         const ctl = try gpa.alloc(f64, NP * H * HD);
         var nrm: [HD]f64 = undefined;
         for (0..NP) |p| for (0..H) |h| {
             const base = (p * H + h) * HD;
-            rmsRow(qf[base..][0..HD], wf, false, &nrm);
+            rmsRow(q.f[base..][0..HD], w.f, false, &nrm);
             const c = hw(p, GW);
             for (0..2) |swap| for (0..HD) |j| {
                 const axis = (j / 16) % 2;
@@ -250,26 +285,20 @@ pub fn main() !void {
                 (if (swap == 0) want else ctl)[base + j] = nrm[j] * @cos(ang) + rot * @sin(ang);
             };
         };
-        t.check("vit_qk_norm_rope", o.relErr(got, want));
-        t.control("vit_qk_norm_rope with rows and columns swapped", o.relErr(got, ctl));
+        t.check("vit_qk_norm_rope", relErr(got, want));
+        t.control("vit_qk_norm_rope with rows and columns swapped", relErr(got, ctl));
     }
 
     // attention, 16 query heads over 8 KV heads, no mask; controls: a causal mask, and query head h on KV head h % 8
     for ([_]u32{ NP, 1156 }) |n| {
         const HQ: u32 = 16;
         const HK: u32 = 8;
-        const qh = try gpa.alloc(u16, n * HQ * HD);
-        const kh = try gpa.alloc(u16, n * HK * HD);
-        const vh = try gpa.alloc(u16, n * HK * HD);
-        o.randBf(qh, rnd, 1.0);
-        o.randBf(kh, rnd, 1.0);
-        o.randBf(vh, rnd, 1.0);
-        const qf = try o.widen(gpa, qh);
-        const kf = try o.widen(gpa, kh);
-        const vf = try o.widen(gpa, vh);
-        const y = try r.alloc(n * HQ * HD * 2);
-        try o.run(&k_attn, .{ (n + 31) / 32, HQ, 1 }, .{ try o.upload(&r, qh), try o.upload(&r, kh), try o.upload(&r, vh), y, n, HQ, HK, @as(f32, 0.125) });
-        const got = try o.fetch(&r, y, n * HQ * HD);
+        const q = try randF(n * HQ * HD, rnd, 0, 1.0);
+        const k = try randF(n * HK * HD, rnd, 0, 1.0);
+        const v = try randF(n * HK * HD, rnd, 0, 1.0);
+        const y = try r.alloc(n * HQ * HD * 4);
+        try o.run(&k_attn, .{ (n + 31) / 32, HQ, 1 }, .{ try up(&r, q.h), try up(&r, k.h), try up(&r, v.h), y, n, HQ, HK, @as(f32, 0.125), no });
+        const got = try get(&r, y, n * HQ * HD);
         const sc = try gpa.alloc(f64, n);
         var outs: [3][]f64 = undefined;
         for (&outs) |*a| a.* = try gpa.alloc(f64, n * HQ * HD);
@@ -279,7 +308,7 @@ pub fn main() !void {
             var mx: f64 = -std.math.inf(f64);
             for (0..last) |j| {
                 var s: f64 = 0;
-                for (0..HD) |d| s += qf[(i * HQ + h) * HD + d] * kf[(j * HK + kv) * HD + d];
+                for (0..HD) |d| s += q.f[(i * HQ + h) * HD + d] * k.f[(j * HK + kv) * HD + d];
                 sc[j] = s * 0.125;
                 mx = @max(mx, sc[j]);
             }
@@ -290,16 +319,17 @@ pub fn main() !void {
             }
             for (0..HD) |d| {
                 var a: f64 = 0;
-                for (0..last) |j| a += sc[j] * vf[(j * HK + kv) * HD + d];
+                for (0..last) |j| a += sc[j] * v.f[(j * HK + kv) * HD + d];
                 outs[mode][(i * HQ + h) * HD + d] = a / l;
             }
         };
         var buf: [64]u8 = undefined;
-        t.check(try std.fmt.bufPrint(&buf, "vit_attn over {d} patches", .{n}), o.relErr(got, outs[0]));
-        t.control(try std.fmt.bufPrint(&buf, "vit_attn against a causal mask, {d}", .{n}), o.relErr(got, outs[1]));
-        t.control(try std.fmt.bufPrint(&buf, "vit_attn with KV head h % 8, {d}", .{n}), o.relErr(got, outs[2]));
+        t.check(try std.fmt.bufPrint(&buf, "vit_attn over {d} patches", .{n}), relErr(got, outs[0]));
+        t.control(try std.fmt.bufPrint(&buf, "vit_attn against a causal mask, {d}", .{n}), relErr(got, outs[1]));
+        t.control(try std.fmt.bufPrint(&buf, "vit_attn with KV head h % 8, {d}", .{n}), relErr(got, outs[2]));
     }
-    try t.finish();
+    std.debug.print("lfm3_vit: {s}\n", .{if (t.bad) "FAILED" else "ok"});
+    if (t.bad) return error.TestFailed;
 }
 
 /// erf by its series and continued fraction to double precision (std.math has none in this Zig).
