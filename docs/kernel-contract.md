@@ -134,6 +134,12 @@ bits) and simd_qmm_bits (3, 6 and 8 bits), and the lane projection (6-bit groups
 formats on the M5's tensor units, where its reg kernel must equal the cooperative one bit for bit), and tile_qmm's
 prompt tiles and their decode twin (4, 6 and 8 bits; the twin bit-equal to the tiles). Gate 5 also holds the rest of
 tile_qmm's pipelines and GLM-5.3-Flash's hc_expand_10.
+On the M5's tensor units, Metal also checks what nax.h's `mma_16x32` keeps of an fp32 operand
+(`metal_mma_operand.zig`): the left, the right and both (attention's fp32 P, `gemm_nax`'s f32 kernels), each output a
+single product bit-equal to float64 on operands with their low 13 mantissa bits cleared. That is 10 bits kept, rounded
+toward zero, fp32's exponents and subnormals kept, NaN and the infinities passed. Four controls state the operand as
+fp32 or as rounded to nearest at 10 bits, on each side, and must go red at `shapes`. Before the M5, nax.h's fragments
+keep fp32 operands whole, so the cases run only on the tensor units.
 LFM2.5-24B-A2B's shared rounds: the greedy pick (`lfm2_argmax`) and the conv and attention kernels that run every
 stream's rows in one dispatch, each bit-equal to the per-stream kernels it replaces. Four controls edit the source: a tie
 to the highest id, a nonfinite logit not flagged, and every stream reading or writing the first stream's state or cache.
