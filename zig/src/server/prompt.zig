@@ -36,7 +36,7 @@ pub fn renderIds(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, t
         .tools = if (tools.len > 0) Value{ .array = @constCast(tools) } else null,
         .add_generation_prompt = generation,
         .enable_thinking = thinking,
-        .reasoning_effort = if (thinking) effort else null,
+        .reasoning_effort = if (thinking) effort else srv.off_effort,
         .clear_thinking = cx.clear_thinking,
     };
     var ids = render(srv, cx.a, normalized, options, &problem) catch |e| switch (e) {

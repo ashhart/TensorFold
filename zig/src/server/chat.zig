@@ -5,6 +5,7 @@ const json = @import("json");
 const errors = @import("errors.zig");
 const fields_mod = @import("fields.zig");
 const reply_text = @import("reply_text.zig");
+const recipient_reply = @import("recipient_reply.zig");
 const tool_stream = @import("tool_stream.zig");
 const tool_parse = @import("tool_parse.zig");
 const tool_lfm2 = @import("tool_lfm2.zig");
@@ -98,13 +99,6 @@ test "Server recovery: token staging allocation failure ends the loop without co
     }
 }
 
-/// Python's ``bool(fields.get(key))`` on the sampling fields.
-fn flag(f: Value, key: []const u8) ?bool {
-    const v = f.get(key) orelse return null;
-    if (v == .null) return null;
-    return v.truthy();
-}
-
 /// A request rendered and checked but not submitted; it holds the preparing count until generate or release.
 pub const Prepared = struct {
     input: Input,
@@ -136,10 +130,10 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     if (preparing) _ = srv.preparing.fetchAdd(1, .acq_rel);
     errdefer srv.release(preparing, null);
     if (gone.check()) return error.Cancelled;
-    var thinking = flag(f, "enable_thinking") orelse srv.config.enable_thinking;
+    var thinking = fields_mod.flag(f, "enable_thinking") orelse srv.config.enable_thinking;
     if (input.prompt != null) thinking = false;
     const effort = srv.effortFor(if (f.get("reasoning_effort")) |e| (if (e == .string) e.string else null) else null);
-    cx.clear_thinking = flag(f, "clear_thinking");
+    cx.clear_thinking = fields_mod.flag(f, "clear_thinking");
     const rendered = try prompt_mod.prepare(srv, cx, input, thinking, effort);
     if (gone.check()) return error.Cancelled;
     if (rendered.ids.len == 0) return cx.refuse("rendered prompt is empty");
@@ -199,7 +193,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     }
     if (input.logprobs) |count| request.logprobs = try @import("logprobs.zig").admit(srv, cx, thinking, request.think_budget, count);
     request.prompt_logprobs = input.prompt_logprobs;
-    return .{ .input = input, .request = request, .prompt_len = rendered.ids.len, .received = received, .thinking = thinking, .effort = effort, .sampled = sampling != null, .drafts = drafts, .token_ids = flag(f, "return_token_ids") orelse false, .stops = stops_opt, .preparing = preparing };
+    return .{ .input = input, .request = request, .prompt_len = rendered.ids.len, .received = received, .thinking = thinking, .effort = effort, .sampled = sampling != null, .drafts = drafts, .token_ids = fields_mod.flag(f, "return_token_ids") orelse false, .stops = stops_opt, .preparing = preparing };
 }
 
 /// Submit a prepared request and collect its reply; ``sink`` hears the stream (null: not streamed).
@@ -246,6 +240,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .reply_id = input.id, .seed = if (request.sampling) |v| v.seed else null, .sink = sink, .thinking = thinking or reply_text.isChannel(srv.markers), .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools, .token_ids = prepared.token_ids, .lp = if (request.logprobs != null) .{} else null, .loop_stop = request.loop_stop };
     defer srv.noteRequest(prepared.prompt_len, box.cached orelse 0, gen.collected.items.len, box.stats.drafted, box.stats.accepted, box.stats.rounds, received, gen.first_ns, gen.last_ns, box.stats.prefill_seconds);
     errdefer if (!gen.engine_done) gen.cancel(); // the engine writes to the mailbox until it says finished
+    if (srv.recipients and input.prompt == null) gen.recipient = try recipient_reply.Reading.of(a, srv.text, request.prompt, input.tools, thinking);
     const result: Failure!Reply = blk: {
         if (sink) |s| if (s.begin) |begin| begin(s.ctx, prepared.prompt_len) catch break :blk error.Cancelled;
         if (sink != null and input.tools.len > 0) gen.calls = tool_stream.Streamer.init(a, input.tools) catch |e| break :blk e;
@@ -289,6 +284,7 @@ const Generation = struct {
     token_ids: bool, // "return_token_ids": the response's tensorfold block carries the reply's token ids
     tools: []const Value,
     calls: ?tool_stream.Streamer = null,
+    recipient: ?recipient_reply.Reading = null, // a chat whose reply is messages to recipients (Muse Spark's)
     collected: std.ArrayList(u32) = .empty,
     visible: reply_text.Incremental = .{},
     hidden: std.ArrayList(u8) = .empty, // reused for the answer without its call blocks
@@ -358,9 +354,8 @@ const Generation = struct {
         const text = g.stops.visible(all, true);
         if (g.visible.pending()) return; // a character still split across tokens
         var answer = text;
-        if (g.thinking) {
-            const close = try g.visible.closeOf(g.a, reply_text.decodeText, g.srv.text, g.srv.close_id);
-            const split = try reply_text.splitThinkingAt(g.a, text, false, g.srv.markers, close);
+        if (g.thinking or g.recipient != null) {
+            const split = if (g.recipient) |*r| try r.split(g.a, text, .streaming) else try reply_text.splitThinkingAt(g.a, text, false, g.srv.markers, try g.visible.closeOf(g.a, reply_text.decodeText, g.srv.text, g.srv.close_id));
             const piece = g.streamed_reasoning.after(split.reasoning, true);
             if (piece.len > 0) {
                 try g.streamed_reasoning.set(g.a, split.reasoning, piece);
@@ -483,8 +478,9 @@ const Generation = struct {
         const text = if (close.len > 0) try std.mem.concat(a, u8, &.{ visible, close }) else visible;
         var content: []const u8 = text;
         var reasoning: ?[]const u8 = null;
-        if (g.thinking) {
-            const split = try reply_text.splitThinkingTokens(a, reply_text.decodeText, g.srv.text, text, true, g.srv.markers, content_tokens, g.srv.close_id);
+        const read = g.thinking or g.recipient != null; // the reply's split text is its content
+        if (read) {
+            const split = if (g.recipient) |*r| try r.split(a, text, if (std.mem.eql(u8, reason, "length")) .cut else if (g.stops.matched(raw) != null) .stopped else .ended) else try reply_text.splitThinkingTokens(a, reply_text.decodeText, g.srv.text, text, true, g.srv.markers, content_tokens, g.srv.close_id);
             const r = reply_text.pyStrip(split.reasoning);
             reasoning = if (r.len > 0) r else null;
             content = split.answer;
@@ -498,14 +494,14 @@ const Generation = struct {
             const thought = g.streamed_reasoning.text.items;
             if (reasoning) |r| if (std.mem.startsWith(u8, r, thought) and r.len > thought.len)
                 try g.emit(sink, try deltaOf(a, "reasoning_content", r[thought.len..]));
-            const shown = if (g.calls != null) try tool_stream.endProse(a, content, if (g.thinking) content else text, g.tools, reason) else content;
+            const shown = if (g.calls != null) try tool_stream.endProse(a, content, if (read) content else text, g.tools, reason) else content;
             const sent = g.streamed.text.items;
             const rest = if (std.mem.startsWith(u8, shown, sent) and shown.len > sent.len) shown[sent.len..] else "";
             if (g.lp) |*l| (if (try l.delta(g.srv, a, g.thinking, g.ignore_eos, g.collected.items, rest, shown.len, true)) |d| try g.emit(sink, d)) else if (rest.len > 0) try g.emit(sink, .{ .string = rest });
-            if (g.calls) |*c| if (close.len > 0 or std.mem.eql(u8, reason, "length")) {
+            if (g.calls) |*c| if (close.len > 0 or std.mem.eql(u8, reason, "length") or g.recipient != null) {
                 // the streamer reads the closers as markup the model wrote, so the call ends with the same deltas
                 var out: std.ArrayList(Value) = .empty;
-                try c.finishCut(if (g.thinking) content else text, &out); // a cut value sends its held bytes
+                try c.finishCut(if (read) content else text, &out); // a cut value sends its held bytes
                 for (out.items) |d| try g.emit(sink, d);
             };
         }

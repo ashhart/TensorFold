@@ -11,6 +11,7 @@ const request_guard = @import("request_guard.zig");
 const metrics = @import("metrics.zig");
 const model_text = @import("model_text.zig");
 const reply_text = @import("reply_text.zig");
+const recipient_reply = @import("recipient_reply.zig");
 const http_conn = @import("http_conn.zig");
 const listener_mod = @import("listener.zig");
 const routes = @import("routes.zig");
@@ -125,9 +126,13 @@ pub const Server = struct {
     late_system: []const u8 = "system",
     needs_user_after_tool: bool = false,
     markers: reply_text.Markers = reply_text.think_markers,
+    /// Replies are messages to recipients (`to=self` reasoning, `to=user` answer, a tool's name a call).
+    recipients: bool = false,
     close_id: ?u32 = null, // the close marker's own token, when the marker is one token
     chunks: chunk_plan.Plan = .{},
     effort_levels: []const []const u8 = &.{},
+    /// The effort a recipient template hears with thinking off: it has no switch, so its lowest level, not its default.
+    off_effort: ?[]const u8 = null,
     thinking_switch: bool = false,
     eos: []const u32 = &.{},
     think_close: []const u32 = &.{},
@@ -193,8 +198,10 @@ pub const Server = struct {
         srv.eos = try a.dupe(u32, text.eosIds());
         if (text.tokenId(reply_text.channel_markers.close) != null) srv.markers = reply_text.channel_markers;
         srv.close_id = text.tokenId(srv.markers.close);
+        srv.recipients = recipient_reply.detect(text);
         const source = text.templateSource();
         srv.effort_levels = try fields.effortLevels(a, source);
+        if (srv.recipients and srv.effort_levels.len > 0) srv.off_effort = fields.coerceEffort("minimal", srv.effort_levels);
         srv.thinking_switch = std.mem.indexOf(u8, source, "enable_thinking") != null or
             std.mem.indexOf(u8, source, "thinking_mode") != null;
         srv.late_system = try lateSystem(a, text);
