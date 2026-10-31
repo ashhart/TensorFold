@@ -1,4 +1,4 @@
-//! A shared pass's lanes: what a lane may hold, what its rollback may keep, attention and DeltaNet in one launch a kernel.
+//! A shared pass's lanes: what a lane may hold, what its rollback may keep, one-launch attention and DeltaNet.
 const std = @import("std");
 const cuda = @import("cuda");
 const state = @import("cuda_batch_state.zig");
@@ -78,8 +78,7 @@ pub fn putLane(tab: []u8, i: usize, row0: usize, pos: usize, rows: usize) void {
     for (0..rows) |r| ints[4 * lanes_n + row0 + r] = @intCast(i);
 }
 
-/// Whether a round's `n` rows stage a lane table: two or more lanes of decode rows (the per-lane path's next-tile-ahead
-/// chunks and small-row chain), text on contiguous caches, one block-score buffer, our glue owning every launch.
+/// Whether a round's `n` rows stage a lane table: two to 32 lanes of decode rows, text on contiguous caches, our glue.
 pub fn useTable(pass: anytype, n: usize) bool {
     if (comptime !@hasDecl(@TypeOf(pass.tri), "lanesGlue")) return false;
     if (!(attnOn() or gdnOn()) or pass.lanes.len < 2 or pass.lanes.len > lanes_n or n > att_rows) return false;
@@ -92,8 +91,7 @@ pub fn useTable(pass: anytype, n: usize) bool {
     return true;
 }
 
-/// Uploads the lane table: each attention layer's caches a lane, each DeltaNet layer's window, state and keeps, the
-/// lanes' positions and rows.
+/// Uploads the lane table: each layer's addresses a lane, then the lanes' positions and rows.
 pub fn stage(pass: anytype) !void {
     const tab = pass.s.hostLanes();
     @memset(tab, 0);
@@ -148,8 +146,7 @@ pub fn attn(pass: anytype, lw: anytype, ai: usize, pa: u64) !void {
 /// What gdnRound launches on: a DeltaNet layer's table and weights, the round's projection rows and scratch.
 pub const Gdn = struct { lp: u64, li: u64, proj: u64, cw: u64, a_log: u64, dt: u64, gq: u64, gk: u64, gv: u64, ggb: u64, ys: u64, rows: usize, lanes: usize };
 
-/// The round's DeltaNet in four launches: each lane's kept rows and window, every row's front, every lane's chain on
-/// its own state, then every lane's conv window past its rows (the per-lane loop's order).
+/// The round's DeltaNet in four launches, the per-lane loop's order: keeps, fronts, chains, then the conv windows.
 pub fn gdnRound(k: anytype, stream: cuda.Stream, g: Gdn) !void {
     const lanes: u32 = @intCast(g.lanes);
     var a: cuda.Args = .{};

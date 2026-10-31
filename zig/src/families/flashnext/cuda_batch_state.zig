@@ -47,9 +47,7 @@ pub const att_rows: usize = 256;
 pub const pocket_stride: usize = 128;
 /// Prompt rows one fused attention launch takes (their selections staged att_rows at a time).
 pub const fused_rows: usize = 1024;
-/// A shared round's lanes the attention and DeltaNet launches take at once (the kernels' fn_lanes MAX) and their table:
-/// each attention layer's [lane][4] cache addresses, each DeltaNet layer's [lane][5] conv window, state, state out,
-/// kept projection and kept window, then the lanes' ints and each of up to att_rows rows' lane.
+/// Lanes one launch takes at once (fn_lanes MAX); the table: attention [lane][4], DeltaNet [lane][5], ints, row lanes.
 pub const attn_lanes: usize = 32;
 pub const lanes_attn_ptrs: usize = wt.attn_n * attn_lanes * 4 * 8;
 pub const lanes_gdn_ptrs: usize = wt.linear_n * attn_lanes * 5 * 8;

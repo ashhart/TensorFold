@@ -34,8 +34,7 @@ extern "C" __global__ void fn_shift_window(__nv_bfloat16* __restrict__ win, cons
     shift_window(win, rows, stride, n, taps, c);
 }
 
-// A shared round's lanes in one launch (flashnext_attn.cu's lane table: LI the lanes' ints, each row's lane at 4 * MAX;
-// LP this DeltaNet layer's [lane][5] addresses: conv window, state, state out, kept projection, kept window).
+// One-launch lanes: LI as in flashnext_attn_lanes.cuh; LP [lane][5] window, state, state out, kept rows, kept window.
 namespace fn_lanes {
 constexpr int MAX = 32, PTRS = 5;
 __device__ __forceinline__ int rows(const int* LI, int l) { return LI[2 * MAX + l]; }
@@ -54,8 +53,7 @@ extern "C" __global__ void fn_shift_window_lanes(const unsigned long long* __res
                  fn_lanes::rows(LI, l), taps, c);
 }
 
-// Each lane's kept projection rows and conv window (a rollback's), lane blockIdx.y, part blockIdx.z (0 the rows, 1 the
-// window), 16 bytes a thread; a lane that keeps nothing has no address.
+// Each lane's kept rows (blockIdx.z 0) and conv window (1), lane blockIdx.y; a lane that keeps nothing has no address.
 extern "C" __global__ void fn_gdn_keep_lanes(const unsigned long long* __restrict__ LP, const int* __restrict__ LI,
                                              const uint4* __restrict__ proj, long long row_units, long long hist_units) {
     const int l = blockIdx.y;

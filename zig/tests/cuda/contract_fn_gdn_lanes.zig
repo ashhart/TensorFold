@@ -1,4 +1,4 @@
-//! flashnext_batch.cu's lane kernels: a shared round's DeltaNet in one launch a kernel, bit for bit the per-lane launches.
+//! flashnext_batch.cu's lane kernels: a shared round's DeltaNet in one launch a kernel, the per-lane launches' bits.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
