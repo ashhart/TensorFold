@@ -281,8 +281,10 @@ struct IdHeads {
   const float k0 = float(qkv[from + 1024]), k1 = float(qkv[from + 1025]);
   const float rq0 = id_h(q0 * c - q1 * s), rq1 = id_h(q0 * s + q1 * c);
   const float rk0 = id_h(k0 * c - k1 * s), rk1 = id_h(k0 * s + k1 * c);
-  const float qn = max(metal::precise::sqrt(simd_sum(rq0 * rq0 + rq1 * rq1)), 1e-12f);
-  const float kn = max(metal::precise::sqrt(simd_sum(rk0 * rk0 + rk1 * rk1)), 1e-12f);
+  // F.normalize's clamp_min keeps a NaN norm, where Metal's max would drop it
+  const float sq = metal::precise::sqrt(simd_sum(rq0 * rq0 + rq1 * rq1));
+  const float sk = metal::precise::sqrt(simd_sum(rk0 * rk0 + rk1 * rk1));
+  const float qn = isnan(sq) ? sq : max(sq, 1e-12f), kn = isnan(sk) ? sk : max(sk, 1e-12f);
   const uint g = h * 64 + lane * 2;
   const ulong to = (ulong(h) * p.rows + r) * 64 + lane * 2;
   Q[to] = half(rq0 / qn * gq[g] * p.scale);
