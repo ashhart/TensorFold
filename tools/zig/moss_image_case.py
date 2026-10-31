@@ -20,8 +20,9 @@ USAGE = """\
                                            with --fp32-encoder F, F's rows from a float32 encoder too
                                            (CASE_DIR/exact_fp32_encoder.png)
   decode MODEL_DIR LATENTS.f32 PNG         raw float32 latents (rows x columns x 128) from tf-moss-image to a picture
-  encode MODEL_DIR OUT_DIR [--prompt-file F]  the prompt encoder alone: token ids, embedding rows, every layer's
-                                           output and the final rows in bf16, and the final rows in float32
+  encode MODEL_DIR OUT_DIR [--prompt-file F]  the prompt encoder alone: token ids, embedding rows, and every layer's
+                                           output and the final rows in bf16 and in float32, and
+                                           each step alone in bf16 on the float32 run's input
   compare A.png B.png [SIDE.png]           PSNR and mean absolute difference of two pictures, optionally side by side
   noise OUT.json                           torch.randn's starting latents for many seeds and sizes, as sha256s (x86)
 MODEL_DIR is the OpenMOSS-Team/MOSS-Image-Base folder. The case runs the card's defaults: 50 Euler steps, CFG 3, an
@@ -286,8 +287,19 @@ def encoder_rows(model_dir: str, prompt: str, dtype, device: str):
     return rows
 
 
+def given(rows, device: str):
+    """A forward pre-hook that hands a layer `rows` in place of its input."""
+    def hook(module, args, kwargs):
+        x = rows.to(device).unsqueeze(0)
+        if "hidden_states" in kwargs:
+            kwargs["hidden_states"] = x
+            return args, kwargs
+        return (x,) + tuple(args[1:]), kwargs
+    return hook
+
+
 def encode(args) -> int:
-    """The prompt encoder as the pipeline runs it, every layer's rows kept; then the same prompt in float32."""
+    """The prompt encoder as the pipeline runs it, in float32 and bf16, every layer's rows kept; each step alone too."""
     import torch
     from safetensors.torch import save_file
     from transformers import AutoModel, AutoTokenizer
@@ -302,7 +314,7 @@ def encode(args) -> int:
                                               add_generation_prompt=True, enable_thinking=True)
     inputs = tokenizer(formatted, return_tensors="pt", truncation=True, max_length=4096)
     tensors = {"ids": inputs["input_ids"][0].to(torch.int32).contiguous()}
-    for dtype in (torch.bfloat16, torch.float32):
+    for dtype in (torch.float32, torch.bfloat16):
         encoder = AutoModel.from_pretrained(root / "text_encoder", dtype=dtype).eval().to(args.device)
         text = encoder.language_model
         kept = []
@@ -313,13 +325,30 @@ def encode(args) -> int:
             final = encoder(**inputs.to(args.device), use_cache=False, return_dict=True).last_hidden_state[0]
         for h in hooks:
             h.remove()
-        if dtype is torch.bfloat16:
+        if dtype is torch.float32:
+            for i, rows in enumerate(kept[1:]):
+                tensors[f"layer_fp32.{i}"] = rows[0].cpu().contiguous()
+            tensors["final_fp32"] = final.cpu().contiguous()
+        else:
             tensors["embed"] = kept[0][0].cpu().contiguous()
             for i, rows in enumerate(kept[1:]):
                 tensors[f"layer.{i}"] = rows[0].cpu().contiguous()
             tensors["final"] = final.cpu().contiguous()
-        else:
-            tensors["final_fp32"] = final.cpu().contiguous()
+            # each step alone on the float32 run's input in bf16: torch bf16's own error at that step
+            steps = [tensors["embed"]] + [tensors[f"layer_fp32.{i}"].to(dtype) for i in range(len(text.layers))]
+            alone = []
+            hooks = [layer.register_forward_pre_hook(given(steps[i], args.device), with_kwargs=True)
+                     for i, layer in enumerate(text.layers)]
+            hooks += [layer.register_forward_hook(lambda mod, a, o: alone.append(o[0] if isinstance(o, tuple) else o))
+                      for layer in text.layers]
+            with torch.no_grad():
+                encoder(**inputs.to(args.device), use_cache=False, return_dict=True)
+                alone.append(text.norm(steps[-1].to(args.device).unsqueeze(0)))
+            for h in hooks:
+                h.remove()
+            for i, rows in enumerate(alone[:-1]):
+                tensors[f"alone.{i}"] = rows[0].cpu().contiguous()
+            tensors["alone.final"] = alone[-1][0].cpu().contiguous()
         del encoder, text, kept
         if args.device == "mps":
             torch.mps.empty_cache()
