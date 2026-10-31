@@ -59,7 +59,7 @@ pub fn argmax(raw: []const u8) u32 {
     return @intCast(at);
 }
 /// `n` zeroed buffers, the fill on the compute stream: a legacy-stream memset returns before it lands.
-fn zeros(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: cuda.Stream, n: usize, len: usize) ![]cuda.DeviceBuffer {
+pub fn zeros(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: cuda.Stream, n: usize, len: usize) ![]cuda.DeviceBuffer {
     const Zeroed = struct {
         driver: *cuda.Driver,
         stream: cuda.Stream,
