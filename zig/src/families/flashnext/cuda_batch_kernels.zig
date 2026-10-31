@@ -23,6 +23,8 @@ pub const Kernels = struct {
     prompt: ?cuda.nvfp4.Prompt,
     prompt_rows: usize,
     nvfp4: cuda.experts.Nvfp4Experts,
+    /// Block-FP8 routed experts (the MTP head of NVIDIA's NVFP4 checkpoint; cuda_moe_native.zig).
+    fp8: cuda.experts.Fp8Experts,
     expert_tile: ?cuda.experts_tile.Tile = null,
     front: cuda.Function,
     chain: cuda.Function,
@@ -74,6 +76,8 @@ pub const Kernels = struct {
         try d.check(d.api.cuDeviceGetAttribute(&sms, .multiprocessor_count, device), "cuDeviceGetAttribute");
         k.nvfp4 = try cuda.experts.Nvfp4Experts.load(d, @intCast(sms));
         errdefer k.nvfp4.unload();
+        k.fp8 = try cuda.experts.Fp8Experts.load(d, @intCast(sms));
+        errdefer k.fp8.unload();
         if (tile_mode != .off) k.expert_tile = try cuda.experts_tile.Tile.load(d, @intCast(sms), tile_mode);
         errdefer if (k.expert_tile) |*tile| tile.unload();
         k.sum = try k.batch.function("fn_sum_slices");
@@ -104,6 +108,7 @@ pub const Kernels = struct {
 
     pub fn deinit(k: *Kernels) void {
         if (k.expert_tile) |*tile| tile.unload();
+        k.fp8.unload();
         k.nvfp4.unload();
         if (k.prompt) |*p| p.unload();
         k.native_lane.unload();

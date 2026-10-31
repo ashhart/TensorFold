@@ -1,4 +1,4 @@
-//! Rank-local intermediate-channel TP for NVFP4 routed experts; the shared expert retains its own projection format.
+//! Routed experts: NVFP4 with intermediate-channel TP, or block FP8 at world 1; the shared expert keeps its format.
 const std = @import("std");
 const core = @import("core");
 const cuda = @import("cuda");
@@ -6,6 +6,7 @@ const wt = @import("cuda_prompt_wt.zig");
 const ex = cuda.experts.Nvfp4Experts;
 const slice = core.nvfp4_slice;
 const threads = @import("cuda_modelopt_threads.zig");
+const fp8 = @import("cuda_fp8_experts_load.zig");
 
 pub const Cut = struct {
     from: usize,
@@ -31,6 +32,8 @@ pub const Owned = struct {
     width: usize,
     dims: usize,
     count: usize,
+    /// .nvfp4 (global scales a projection) or .fp8g (f32 128x128 block scales, cuda_fp8_experts_load.zig).
+    format: cuda.experts.Format = .nvfp4,
 
     pub fn free(self: *Owned) void {
         self.up.free();
@@ -41,7 +44,7 @@ pub const Owned = struct {
     }
 
     pub fn view(self: *const Owned) cuda.experts.Layer {
-        return .{ .format = .nvfp4, .up = self.up.ptr, .down = self.down.ptr, .up_scale = self.up_scale.ptr, .down_scale = self.down_scale.ptr, .width = self.width, .dims = self.dims, .experts = self.count };
+        return .{ .format = self.format, .up = self.up.ptr, .down = self.down.ptr, .up_scale = self.up_scale.ptr, .down_scale = self.down_scale.ptr, .width = self.width, .dims = self.dims, .experts = self.count };
     }
 };
 
@@ -67,6 +70,8 @@ pub fn load(a: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, prefix: []c
 pub fn loadShape(a: std.mem.Allocator, d: *const cuda.Driver, store: anytype, prefix: []const u8, world: usize, rank: usize, dims: usize, full_width: usize, count: usize) !Owned {
     const cut = try Cut.init(full_width, world, rank);
     if (dims == 0 or dims % 32 != 0 or count == 0) return error.UnexpectedTensor;
+    // F8_E4M3 weights load in their own loop; U8 (NVFP4) goes on to the threaded or one-expert paths below
+    if (try formatOf(store, prefix) == .fp8g) return fp8.load(a, d, store, prefix, world, dims, full_width, count);
     // one GPU and the weight store: packed on threads (cuda_modelopt_threads.zig); other readers or 1 thread: this loop
     if (comptime @typeInfo(@TypeOf(store)).pointer.child == wt.Store) {
         const n = try threads.configured();
@@ -110,6 +115,18 @@ pub fn loadShape(a: std.mem.Allocator, d: *const cuda.Driver, store: anytype, pr
     errdefer us.free();
     const ds = try cuda.DeviceBuffer.fromHost(d, std.mem.sliceAsBytes(down_globals));
     return .{ .up = up, .down = down, .up_scale = us, .down_scale = ds, .width = width, .dims = dims, .count = count };
+}
+
+/// The layer's format from its first expert's gate weight dtype; the loader's next release returns the borrow.
+fn formatOf(store: anytype, prefix: []const u8) !cuda.experts.Format {
+    var buf: [512]u8 = undefined;
+    const w = try store.get(try std.fmt.bufPrint(&buf, "{s}.experts.0.gate_proj.weight", .{prefix}));
+    errdefer store.release(); // a refused dtype returns the borrow here; the loaders return it otherwise
+    return switch (w.dtype) {
+        .u8 => .nvfp4,
+        .f8_e4m3 => .fp8g,
+        else => error.UnsupportedQuantization,
+    };
 }
 
 test "intermediate-channel cuts cover the source once and preserve 32-input kernel groups" {
