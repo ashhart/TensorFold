@@ -61,11 +61,12 @@ pub const Pipelines = struct {
 pub const Call = struct { pipeline: mtl.Pipeline, args: Args, groups: mtl.Size, threads: usize };
 
 /// y[m * ld + j] = x W^T, g64 codes of `bits`: the twin at 1-2 rows when `scalar` (checked equal), else tiles.
-pub fn call(p: *Pipelines, bits: u8, n: usize, k: usize, rows: usize, ld: usize, scalar: bool) !Call {
+pub fn call(p: *Pipelines, bits: u8, n: usize, k: usize, rows: usize, ld: usize, scalar: bool, whole: usize) !Call {
+    // `whole` is the split rank's full width, whose own tree its K chunks keep (0: `n`).
     if (n == 0 or n % 8 != 0 or n > std.math.maxInt(i32) or k == 0 or k % 64 != 0 or k > std.math.maxInt(i32)) return error.UnsupportedSimdShape;
     if (ld < n or ld > std.math.maxInt(i32)) return error.UnsupportedSimdStride;
     if (rows == 0 or rows > std.math.maxInt(i32)) return error.NoRows;
-    const s = simd.splits(n);
+    const s = simd.chunks(n, whole);
     const args = Args{ .k = @intCast(k), .n = @intCast(n), .r = @intCast(rows), .ld = @intCast(ld) };
     if (scalar and simd.scalarBlock(rows, s) != 0) {
         const nr: usize = if (n > 2048) 2 else 1;
@@ -99,8 +100,8 @@ pub fn encode(e: mtl.ComputeEncoder, c: Call, m: Matrix, x: mtl.Buffer, x_off: u
     e.dispatchGroups(c.groups, .{ .width = c.threads });
 }
 
-/// Whether the scalar twin's 1-2 row results equal the tiles' for an [n, k] matrix of `bits` codes.
-pub fn twinExact(p: *Pipelines, device: mtl.Device, bits: u8, m: Matrix, n: usize, k: usize) !bool {
+/// Whether the scalar twin's 1-2 row results equal the tiles' for an [n, k] `bits` matrix, chunked as `call` takes it.
+pub fn twinExact(p: *Pipelines, device: mtl.Device, bits: u8, m: Matrix, n: usize, k: usize, whole: usize) !bool {
     const rows = 8;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
@@ -118,9 +119,9 @@ pub fn twinExact(p: *Pipelines, device: mtl.Device, bits: u8, m: Matrix, n: usiz
     defer queue.deinit();
     const cb = queue.commandBuffer();
     const e = cb.compute(.serial);
-    encode(e, try call(p, bits, n, k, rows, n, false), m, x, 0, tiled, 0);
-    for (0..rows) |r| encode(e, try call(p, bits, n, k, 1, n, true), m, x, r * k * 2, twin, r * n * 2);
-    for ([_]usize{ 0, rows - 2 }, 0..) |r, i| encode(e, try call(p, bits, n, k, 2, n, true), m, x, r * k * 2, pairs, i * 2 * n * 2);
+    encode(e, try call(p, bits, n, k, rows, n, false, whole), m, x, 0, tiled, 0);
+    for (0..rows) |r| encode(e, try call(p, bits, n, k, 1, n, true, whole), m, x, r * k * 2, twin, r * n * 2);
+    for ([_]usize{ 0, rows - 2 }, 0..) |r, i| encode(e, try call(p, bits, n, k, 2, n, true, whole), m, x, r * k * 2, pairs, i * 2 * n * 2);
     e.end();
     cb.commit();
     cb.wait();
