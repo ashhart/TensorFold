@@ -11,21 +11,23 @@ transformer on the Metal runtime from the released bf16 diffusers checkpoint:
 
 The card's guidance runs two passes a step: the prompt, and the empty negative prompt with block 22 skipped.
 
-The prompt encoder, the checkpoint's Qwen3.5 text model, runs on Metal too (below): `tf-moss-image --prompt` makes both
-prompts' rows itself. The image decoder (FLUX.2's small decoder) is not ported. `tools/zig/moss_image_case.py` runs it,
-and the reference pipeline, through the publisher's own `pipeline_moss_image.py` in torch.
+The prompt encoder, the checkpoint's Qwen3.5 text model, and the image decoder, FLUX.2's small VAE decoder, run on
+Metal too (below): `tf-moss-image --prompt` makes both prompts' rows itself, and `tf-moss-image` turns the final latents
+into the picture. `tools/zig/moss_image_case.py` runs the reference pipeline through the publisher's own
+`pipeline_moss_image.py` in torch, a development reference.
 
 It is a denoiser, not a token family. It does not register with the lane engine, the server or `families.detect`.
 
-It runs on the M5's tensor units alone, the only chip it was checked on: `Model.load` refuses a GPU without them.
+It runs on the M5 alone, the only chip it was checked on: `Model.load` and `Decoder.load` refuse a GPU without tensor
+units.
 
 The same transformer runs on CUDA too: [moss-image-cuda.md](moss-image-cuda.md).
 
 ## Checkpoint
 
 `OpenMOSS-Team/MOSS-Image-Base` at `85975793d8b3d432f1b6e27f352abaa4c2a4c0d3`, Apache 2.0. `transformer/config.json`
-must be `MOSSImageTransformer` at the released geometry; any other config is refused, and so is a checkpoint with
-tensors this family does not read.
+must be `MOSSImageTransformer` at the released geometry, and `vae/config.json` `AutoencoderKLFlux2` at its released
+decoder geometry. Any other config is refused, and so is a checkpoint with tensors this family does not read.
 
 ## Precision
 
@@ -36,6 +38,14 @@ tensors this family does not read.
 - fp32 for norms, softmax and the time sinusoid's input (the sinusoid itself in float64, as the publisher computes it).
 - The rotary tables in bf16, as the pipeline casts them; its frequencies are the checkpoint's `rope.bands`.
 - No int8.
+
+The decoder is float32 throughout, as the pipeline decodes: its weights as published (float32), fp32 sums in every
+convolution and in its attention, GroupNorm's mean and variance in two fp32 passes, then the pipeline's own 8-bit
+conversion (clamp, `* 0.5 + 0.5`, `* 255`, round to even). Its 3x3 convolutions run as Winograd F(2x2, 3x3)
+(`md_wino`): the weights' transform G g G^T is computed in float64 at load and rounded once, the input's and the
+output's transforms in fp32 in the kernel, 2.25x fewer products than a direct convolution. Its error stays the size
+of a direct convolution's (see Measured). Like any Winograd convolution, an infinite input can come out NaN where a
+direct one gives an infinity; the contract checks the classes against the Winograd formula's.
 
 The bf16 projections are the Qwen-VL tower's `tfp::gemm_nax`. Attention is the prefill `tfp::attention_nax` template's
 full (non-causal) form. The time MLP and both modulation projections run on the host, once a timestep.
@@ -118,10 +128,28 @@ Gate 4:
 
 Gate 5 holds the 17 launches of the family's source and the two split-K projections.
 
+`zig/tests/contract/metal_moss_image_decoder*.zig` registers every kernel of `moss_image_decoder.metal`:
+
+- `md_unpack` (the latents' batch norm undone, the patches unpacked);
+- `md_wino` (64 output channels a threadgroup) and `md_wino_32` (32, for 96 and 3 channels) in the forms the decoder
+  launches: 3x3, 3x3 read nearest from half size, and 3x3 with a residual, against the float64 convolution through the
+  exact transform, within a bound on the transformed terms' magnitude;
+- `md_conv`, the 1x1 convolutions, with and without a residual;
+- `md_norm`, with and without SiLU, and GroupNorm's statistics: `md_group_part` (plain and centered) and
+  `md_group_finish`;
+- `md_attention` and `md_pixels`.
+
+Each fp32 step's output must lie in the range float32 allows about float64. Gate 4 uses integer channels, pixels or
+values whose sums pass fp16's range and cancel. `md_pixels` is checked byte for byte against the same fp32 steps, with
+every tie between two bytes among its inputs. Nine controls each break one kernel: a swapped patch axis, a 1x1's
+inputs staged in half, a Winograd patch staged in half, a term dropped from its output transform, a SiLU in half,
+both statistics kernels summing in half, the attention's rescale dropped, and the pixels' halves rounded up. Each is
+caught at the gate it names. Gate 5 holds its nine launches.
+
 `tf-kernel-contract --only "moss image"` on the M5 Ultra:
 
 ```
-SUMMARY 22 kernels: 22 pass gates 1-4, 0 fail, 0 known findings; 16 controls: 16 red as planted, 0 missed; 0 limit problems
+SUMMARY 37 kernels: 37 pass gates 1-4, 0 fail, 0 known findings; 25 controls: 25 red as planted, 0 missed; 0 limit problems
 ```
 
 ## Run a case
@@ -133,9 +161,8 @@ only when the file's sha256 is the pinned revision's (`1dac1aca…8b31`) and ref
 hf download OpenMOSS-Team/MOSS-Image-Base --revision 85975793d8b3d432f1b6e27f352abaa4c2a4c0d3 --local-dir MODEL_DIR
 python3 tools/zig/moss_image_case.py case MODEL_DIR case/ --prompt-file prompt.txt   # needs torch, diffusers, transformers
 zig build tf-moss-image -Dcpu=apple_m1
-zig-out/bin/tf-moss-image MODEL_DIR/transformer case/case.safetensors case/
-python3 tools/zig/moss_image_case.py decode MODEL_DIR case/latents.f32 case/zig.png
-python3 tools/zig/moss_image_case.py compare case/reference.png case/zig.png case/side.png
+zig-out/bin/tf-moss-image MODEL_DIR/transformer case/case.safetensors case/      # case/picture.png
+python3 tools/zig/moss_image_case.py compare case/reference.png case/picture.png case/side.png
 python3 tools/zig/moss_image_case.py exact MODEL_DIR case/      # the same schedule with a float32 transformer
 python3 tools/zig/moss_image_case.py exact MODEL_DIR case/ --fp32-encoder prompt.txt   # and a float32 encoder
 
@@ -155,10 +182,23 @@ The case holds:
 - with `--fp32-steps N`, a float32 run of the same transformer for the first N steps.
 
 `tf-moss-image` first runs both branches of each step on the pipeline's own input and compares the velocities. It then
-runs the whole guided schedule from the starting latents, times it, and writes the final latents. A case made by
-`start` holds only the prompts, the schedule and the noise; `tf-moss-image` then just makes the picture. With
-`--prompt` (and `--negative`, else the empty negative prompt), it encodes both prompts natively in place of the case's
-rows; `start --no-encoder` leaves them out of the case, and torch never loads the encoder.
+runs the whole guided schedule from the starting latents, times it, frees the transformer, and decodes the final
+latents with the checkpoint's `vae/` decoder into `picture.png`. A case made by `start` holds only the prompts, the
+schedule and the noise; `tf-moss-image` then just makes the picture. With `--prompt` (and `--negative`, else the empty
+negative prompt), it encodes both prompts natively in place of the case's rows; `start --no-encoder` leaves them out of
+the case, and torch never loads the encoder.
+
+To check the decoder alone against a float64 decode of the same latents:
+
+```sh
+# float64 on the CPU, and float32 on MPS as the pipeline decodes
+python3 tools/zig/moss_image_case.py vae MODEL_DIR case/latents.f32 case/decode.f64 case/torch.f32
+zig build tf-moss-image-decoder -Dcpu=apple_m1
+zig-out/bin/tf-moss-image-decoder MODEL_DIR case/latents.f32 1024 1024 case/decode.f64 case/torch.f32 case/decoded.png
+```
+
+Ours must be within twice torch float32's distance from float64, in cosine error and in its worst row of pixels, and a
+second decode must repeat the first byte for byte; it fails otherwise.
 
 On MPS, which has no float64, the case tool computes the time sinusoid on the host in float64 and moves its float32
 result to the GPU; every other step of the publisher's code runs unchanged.
@@ -226,3 +266,12 @@ Results:
     pipeline's own picture: 47.07 dB.
   - Speed, one session with no other GPU work: 0.054 to 0.067 s a prompt against torch MPS's 0.158 to 0.165 s
     (warm). Loading takes 0.6 s against 2.60 s.
+- **Decoder**, on the transformer's final latents of both cases, against the publisher's decoder in float64 on the CPU:
+  - Ours: max |diff| 8.9e-6 (fox) and 5.2e-6 (sticky note) before the clamp; 162 of 3,145,728 and 45 of 3,168,000
+    8-bit values differ from float64's, each by 1.
+  - torch's own float32 decode on MPS, in the same session: 155 and 34 values differ from float64's, each by 1 (the
+    count moves between torch runs). Ours and torch's pictures differ by at most 1 (95.4 and 97.7 dB PSNR).
+  - Speed, back to back in one session with no other GPU work, the median of three: ours 0.181 s and 0.188 s on the
+    GPU; torch's warm float32 decode on MPS 0.186 s and 0.191 s. Ours loads in 0.3 to 0.4 s. Its scratch is five
+    float32 picture tensors at the widest stage: 4.7 GB at peak at 1024x1024, after the transformer is freed, so
+    `tf-moss-image` peaks at the transformer's 11.3 GB.
