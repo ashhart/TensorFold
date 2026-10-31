@@ -28,13 +28,13 @@ pub const max_segs = Round.max_segs;
 /// Rows of a verify forward at most: each row's logits are kept and drawn.
 pub const most_verify = Round.most_verify;
 /// tf_q35_argmax_slices' blocks a row (ARGMAX_SLICE entries each).
-fn argmaxSlices(vocab: usize) usize {
+pub fn argmaxSlices(vocab: usize) usize {
     return (vocab + 4095) / 4096;
 }
 /// A window's rows at most (exact: one-row steps' bits; qwen35.cuh's MAXW, the rows a stream's log holds).
 pub const most_window = Round.most_window;
 /// Partial attention chunks a row at most (qwen35.cuh's MAXCH): each row's chunk width grows with its own keys.
-const max_chunks = 64;
+pub const max_chunks = 64;
 
 /// Device allocations are 256-byte aligned, as the driver's are.
 pub fn aligned(n: usize) usize {
@@ -329,43 +329,8 @@ pub const Engine = struct {
         return e.arena.ptr + at;
     }
 
-    /// The scratch rows' bytes (`measure`: summed, nothing taken), or the rows themselves from the arena.
-    pub fn scratch(e: *Engine, mode: enum { measure, allocate }) !usize {
-        var total: usize = 0;
-        const Take = struct {
-            e: *Engine,
-            mode: @TypeOf(mode),
-            total: *usize,
-            pub fn alloc(t: @This(), bytes: usize) !u64 {
-                t.total.* += aligned(bytes);
-                return if (t.mode == .measure) 0 else try t.e.alloc(bytes);
-            }
-        };
-        const t = Take{ .e = e, .mode = mode, .total = &total };
-        const g = e.g;
-        const R = max_rows;
-        const wide = @max(g.valueWidth(), g.attnWidth(), g.hidden); // y and mix: either mixer's rows
-        inline for (.{ "h", "x", "r" }) |name| @field(e, name) = try t.alloc(R * g.hidden * 2);
-        inline for (.{ "y", "mix", "z", "v" }) |name| @field(e, name) = try t.alloc(R * wide * 2);
-        inline for (.{ "q", "k" }) |name| @field(e, name) = try t.alloc(R * g.k_heads * geometry.dk * 2);
-        e.qkv = try t.alloc(R * g.convWidth() * 2);
-        inline for (.{ "gate", "up", "act" }) |name| @field(e, name) = try t.alloc(R * g.intermediate * 2);
-        e.xs = try t.alloc(R * (@max(g.intermediate, wide) / 64) * 4);
-        inline for (.{ "a", "b", "beta" }) |name| @field(e, name) = try t.alloc(R * g.v_heads * 2);
-        e.g_ = try t.alloc(R * g.v_heads * 4);
-        e.qraw = try t.alloc(R * 2 * g.attnWidth() * 2);
-        e.qn = try t.alloc(R * g.attnWidth() * 2);
-        inline for (.{ "kraw", "vraw", "kn" }) |name| @field(e, name) = try t.alloc(R * g.kv_heads * head_dim * 2);
-        // the decode partials: verify rows only (a prompt chunk's attention runs cuda_prompt_attention's tiles)
-        e.pm = try t.alloc(most_verify * g.q_heads * max_chunks * 4);
-        e.pl = try t.alloc(most_verify * g.q_heads * max_chunks * 4);
-        e.po = try t.alloc(most_verify * g.q_heads * max_chunks * head_dim * 4);
-        e.logits = try t.alloc(most_verify * g.vocab * 2);
-        if (g.moe()) e.routed = try routed.Scratch.carve(t, g, R);
-        e.amax = try t.alloc(most_verify * argmaxSlices(g.vocab) * 8);
-        e.picks = try t.alloc(most_verify * cuda.sample.Draws.row_scratch);
-        return total;
-    }
+    /// The scratch rows' bytes, or the rows themselves from the arena (cuda_scratch.zig).
+    pub const scratch = @import("cuda_scratch.zig").scratch;
 
     pub fn run(e: *Engine, f: cuda.Function, grid: [3]usize, block: [3]usize, args: anytype) !void {
         var a: cuda.Args = .{};
