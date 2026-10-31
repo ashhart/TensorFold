@@ -146,6 +146,7 @@ fn openFamily(comptime S: type, a: Allocator, gpa: Allocator, io: std.Io, o: api
     h.backend.started = chainStopHandlers;
     try h.backend.measure();
     if (@hasDecl(S.Engine, "copy_only")) {
+        if (@hasDecl(S, "copy_match")) h.backend.copy_match = S.copy_match;
         if (getenv("XPU_COPY_MATCH")) |v| h.backend.copy_match = std.fmt.parseInt(i64, v, 10) catch 4;
         h.backend.streams = @min(@max(1, o.lanes), 8); // one sequence each (the engine holds up to 8)
     } else if (h.backend.facts().exact_width > 1) h.backend.streams = @max(1, o.lanes); // drafted windows: up to --parallel streams a round
