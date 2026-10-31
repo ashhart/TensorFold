@@ -19,7 +19,7 @@ pub const prompt_rows = fwd.prompt_rows;
 pub const round_rows = fwd.round_rows;
 /// The widest window a stream verifies: one-row steps and every wider window give a row the same bits.
 pub const max_window = 16;
-/// Pages a request holds at most: its prompt, its reply and one last verify window (cuda_shared.zig).
+/// Pages a request holds at most (cuda_shared.zig).
 pub const pagesFor = shared.pagesFor;
 /// Drawn tokens a handle names (a ring; read before the round loop could wrap it).
 const ring = 1024;
@@ -100,12 +100,6 @@ pub const Gemma = struct {
             made += 1;
         }
         return .{ .gpa = gpa, .d = d, .m = m, .k = k, .s = s, .free = free, .tok = tok, .picks = picks, .greedy = greedy, .meta = meta, .slot_bufs = bufs };
-    }
-
-    /// The pool's free pages in a seeded random order, leased in that order (a check's hook).
-    pub fn shufflePages(x: *Gemma, seed: u64) void {
-        var prng = std.Random.DefaultPrng.init(seed);
-        if (x.pool) |*p| prng.random().shuffle(u32, p.free[0..p.nfree]);
     }
 
     pub fn deinit(x: *Gemma) void {
@@ -541,17 +535,8 @@ pub const Gemma = struct {
                 x.s.synchronize() catch {};
                 b.free();
             }
-            if (x.lanes.count() == 0) x.report();
+            if (x.lanes.count() == 0) shared.report(x);
         }
-    }
-
-    /// The idle server's line: nothing promised, every page free (kept states are copies, not pages).
-    fn report(x: *const Gemma) void {
-        if (@import("builtin").is_test) return;
-        const p = x.pool orelse return;
-        const c = p.census();
-        const ok = p.idle() and c.free == c.total;
-        std.log.info("kv pool idle{s}: promised {d}, free {d} + store {d} == total {d}", .{ if (ok) "" else " (UNEVEN)", c.promised, c.free, c.kept, c.total });
     }
 
     fn release(ptr: *anyopaque, s: *Stream) void {
@@ -608,11 +593,4 @@ test "shared head costs: Gemma CUDA assistant and DFlash retain costed copy gran
     var b: Gemma = undefined;
     b.m = &m;
     try @import("cuda_head_cost_test.zig").check(b.facts());
-}
-
-test "a request holds its prompt, its reply and one verify window in whole pages of 256 positions" {
-    try std.testing.expectEqual(@as(usize, 1), pagesFor(1, 1));
-    try std.testing.expectEqual(@as(usize, 1), pagesFor(200, 40));
-    try std.testing.expectEqual(@as(usize, 2), pagesFor(200, 41));
-    try std.testing.expectEqual(@as(usize, 129), pagesFor(32768, 0));
 }

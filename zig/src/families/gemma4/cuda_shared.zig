@@ -29,6 +29,21 @@ pub fn admits(x: anytype, prompt: usize, max_new: usize) bool {
     return if (x.pool) |*p| p.fits(pagesFor(prompt, max_new)) else true;
 }
 
+/// The pool's free pages in a seeded random order, leased in that order (a check's hook).
+pub fn shufflePages(x: anytype, seed: u64) void {
+    var prng = std.Random.DefaultPrng.init(seed);
+    if (x.pool) |*p| prng.random().shuffle(u32, p.free[0..p.nfree]);
+}
+
+/// The idle server's line: nothing promised, every page free (kept states are copies, not pages).
+pub fn report(x: anytype) void {
+    if (@import("builtin").is_test) return;
+    const p = x.pool orelse return;
+    const c = p.census();
+    const ok = p.idle() and (x.prompts != null or c.free == c.total); // TF_KV_SHARE: the store holds pages
+    std.log.info("kv pool idle{s}: promised {d}, free {d} + store {d} == total {d}", .{ if (ok) "" else " (UNEVEN)", c.promised, c.free, c.kept, c.total });
+}
+
 pub fn reach(x: anytype, l: anytype, end: usize) !void {
     const p = if (x.pool) |*p| p else return;
     const n = pagesOf(end);
@@ -173,4 +188,11 @@ pub fn legacyOpening(comptime Lane: type, x: anytype, s: *Stream) !*Lane {
     l.fill = x.resumeAt(s, l, p.len);
     s.fill_at.store(@intCast(l.fill.?), .monotonic);
     return l;
+}
+
+test "a request holds its prompt, its reply and one verify window in whole pages of 256 positions" {
+    try std.testing.expectEqual(@as(usize, 1), pagesFor(1, 1));
+    try std.testing.expectEqual(@as(usize, 1), pagesFor(200, 40));
+    try std.testing.expectEqual(@as(usize, 2), pagesFor(200, 41));
+    try std.testing.expectEqual(@as(usize, 129), pagesFor(32768, 0));
 }
