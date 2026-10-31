@@ -305,7 +305,7 @@ pub const Glue = struct {
         try go(g.f.scores, s, .{ rows, cdiv(blocks, 64), 1 }, 256, 0, &a);
     }
 
-    // ---- a shared round's lanes in one launch a kernel (flashnext_attn_lanes.cuh): lp [lane][4] addresses, li the ints
+    // ---- a shared round's lanes in one launch (flashnext_attn_lanes.cuh): lp [lane][4] addresses, li the ints
 
     /// attnPrep over the round's `rows` rows, each into its lane's caches at its lane's positions.
     pub fn attnPrepLanes(g: *const Glue, s: cuda.Stream, proj: u64, lp: u64, li: u64, q_scale: u64, k_scale: u64, i_scale: u64, inv: u64, q: u64, iq: u64, eps: f32, rows: usize) !void {
