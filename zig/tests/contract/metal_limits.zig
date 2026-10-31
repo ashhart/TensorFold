@@ -331,6 +331,9 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     } else if (std.mem.startsWith(u8, d.name, "idol vae ")) {
         if (!assemble) return undefined;
         text = sources.idol_vae;
+    } else if (std.mem.startsWith(u8, d.name, "idol dino ")) {
+        text = sources.idol_dino;
+        frags = true;
     } else if (std.mem.startsWith(u8, d.name, "idol ")) {
         if (!assemble) return undefined;
         text = sources.idol;
