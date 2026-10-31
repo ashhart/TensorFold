@@ -19,6 +19,11 @@ pub const Facts = struct {
     lane_costs: []const Cost = &.{}, // the same for the lane planner (Model.lane_costs)
     copy_match: i64 = 0, // matching tokens a copy needs beside this drafter's proposals (0: the target's copy_match)
     tree_nodes: u32 = 0, // hold() without lanes grows its own tree of up to `depth` nodes, at most this many (tree, chances)
+    chances: bool = false, // chances() gives each held chain draft's chance: verify rows go by them (Model.granted_depth)
+    confidence_floor: ?f64 = null, // with chances: every round drafts the deepest chain and verifies drafts this likely
+    slack: u32 = 0, // with chances: drafts a hold offers past the stream's last grant (0: the depth rule's own)
+    copy_first: bool = false, // a hold costs a pass of its own: none is asked for a stream with a copy ahead
+    hold_costs: []const @import("hold_price.zig").HoldCost = &.{}, // that pass's ms by blocks and depth (timed at load)
 };
 
 /// Target rows [start, start + features.rows) and the token after each; `rows`, when given, picks which to absorb.
