@@ -11,11 +11,16 @@ const gs = id.gaussian;
 
 const usage =
     \\tf-idol-generate SNAPSHOT_DIR VAE_DIR DINO_DIR PICTURE OUT_DIR [--seed N] [--steps N] [--cfg X] [--gaussians N]
-    \\                 [--noise FILE] [--features FILE]...
+    \\                 [--noise FILE] [--features FILE]... [--mode synthetic|real] [--crop-margin X]
     \\SNAPSHOT_DIR is a speridlabs/idol snapshot, VAE_DIR FLUX.2-klein-4B's vae/ folder, DINO_DIR
     \\timm/vit_huge_plus_patch16_dinov3.lvd1689m. PICTURE is a safetensors file holding the 1,024 x 1,024 picture
     \\IdolPipeline.preprocess returns, in [0, 1]: `image` [1024, 1024, 3] (idol_case.py vae) or `pixels` [3, 1024, 1024]
     \\(idol_case.py dino). Defaults: seed 42, 50 steps, guidance 3, 262,144 Gaussians, as IdolPipeline's.
+    \\PICTURE may instead be a raw photo (.png, .jpg, .jpeg or .webp), preprocessed natively as IdolPipeline.preprocess
+    \\does it: the short side resized to 1,024, the background removed by BiRefNet (SNAPSHOT_DIR/birefnet.safetensors)
+    \\unless the photo has real alpha, the alpha eroded, a square crop of the object, resized to 1,024, pasted on black.
+    \\--mode synthetic (default; crop 1.2 x the object's box) or real (1.7) as the SDK's mode; --crop-margin X overrides
+    \\it. A photo also writes OUT_DIR/preprocessed.png, the 1,024 x 1,024 RGB the encoders saw.
     \\The denoiser starts from torch.Generator("cpu").manual_seed(seed)'s randn [8192, 16] then [5], as idol_case.py
     \\case draws it (the SDK draws on its device's generator). The VAE posterior's noise and the octree's draws come from
     \\native seeded generators. --noise FILE gives the posterior's noise instead (`noise` [128, 128, 32], as idol_case.py
@@ -23,6 +28,8 @@ const usage =
     \\(once or twice) gives feature1 [1, 4101, 1280] and feature2 [1, 4101, 128] and skips both encoders (PICTURE: -).
     \\Writes OUT_DIR/generate.ply, camera.json, start.f32 (the starting latent and camera), sample.f32 and
     \\tf-idol-generate.json (each stage's seconds). Each model is freed once its stage is done.
+    \\A photo's tf-idol-generate.json adds preprocess_s (all of preprocessing but BiRefNet's load, which load_s counts)
+    \\and birefnet_s (BiRefNet's forward and alpha).
 ;
 
 const N = cfg.latent_rows * cfg.latent_channels;
@@ -122,6 +129,8 @@ const Options = struct {
     gaussians: usize = 262144,
     noise: ?[]const u8 = null,
     features: [2]?[]const u8 = .{ null, null },
+    mode: id.preprocess.Mode = .synthetic,
+    crop_margin: ?f64 = null,
 };
 
 fn parse(args: []const [:0]const u8) !Options {
@@ -143,6 +152,11 @@ fn parse(args: []const [:0]const u8) !Options {
             o.noise = v;
         } else if (std.mem.eql(u8, k, "--features")) {
             if (o.features[0] == null) o.features[0] = v else if (o.features[1] == null) o.features[1] = v else return error.Usage;
+        } else if (std.mem.eql(u8, k, "--mode")) {
+            o.mode = std.meta.stringToEnum(id.preprocess.Mode, v) orelse return error.Usage;
+        } else if (std.mem.eql(u8, k, "--crop-margin")) {
+            o.crop_margin = try std.fmt.parseFloat(f64, v);
+            if (!(o.crop_margin.? > 0)) return error.Usage;
         } else return error.Usage;
     }
     if (o.steps == 0) return error.Usage;
@@ -161,8 +175,28 @@ fn maybe(a: std.mem.Allocator, f: *const tf.safetensors.File, name: []const u8, 
     return out;
 }
 
-/// The picture as [3, 1024, 1024] (DINOv3's input) and [1024, 1024, 3] (the VAE's).
-fn picture(a: std.mem.Allocator, io: std.Io, path: []const u8) ![2][]f32 {
+/// The picture as [3, 1024, 1024] (DINOv3's) and [1024, 1024, 3] (the VAE's), from a photo or a safetensors file.
+fn picture(a: std.mem.Allocator, io: std.Io, device: mtl.Device, args: []const [:0]const u8, o: Options, pt: *id.photo.Timing) ![2][]f32 {
+    const path = args[4];
+    if (id.photo.isPhoto(path)) {
+        const started = mtl.clock.seconds();
+        const rgb = try a.alloc(u8, side * side * 3);
+        const margin = o.crop_margin orelse id.preprocess.margin(o.mode);
+        const weights = try std.fmt.allocPrintSentinel(a, "{s}/birefnet.safetensors", .{args[1]}, 0);
+        try id.photo.preprocess(a, io, device, weights, path, margin, rgb, pt);
+        pt.preprocess = mtl.clock.seconds() - started - pt.load;
+        const png = try id.photo.png(a, rgb, side, side);
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "{s}/preprocessed.png", .{args[5]}), .data = png });
+        const chw = try a.alloc(f32, 3 * side * side);
+        const hwc = try a.alloc(f32, 3 * side * side);
+        for (0..side * side) |i| for (0..3) |c| {
+            const v = @as(f32, @floatFromInt(rgb[i * 3 + c])) / 255.0;
+            hwc[i * 3 + c] = v;
+            chw[c * side * side + i] = v;
+        };
+        std.debug.print("preprocess: {s} in {d:.3} s ({s}; BiRefNet loaded in {d:.2} s, {d:.3} s, {d:.3} s on the GPU), crop margin {d}\n", .{ path, pt.preprocess, if (pt.real_alpha) "real alpha, no BiRefNet" else "background removed", pt.load, pt.birefnet, pt.birefnet_gpu, margin });
+        return .{ chw, hwc };
+    }
     var f = try tf.safetensors.File.open(a, io, path);
     defer f.close(io);
     const n = 3 * side * side;
@@ -211,7 +245,7 @@ const Times = struct {
 };
 
 /// feature1 and feature2 from the encoders, or from --features files.
-fn encode(a: std.mem.Allocator, io: std.Io, device: mtl.Device, args: []const [:0]const u8, o: Options, t: *Times, metal_peak: *u64) ![2][]f32 {
+fn encode(a: std.mem.Allocator, io: std.Io, device: mtl.Device, args: []const [:0]const u8, o: Options, t: *Times, pt: *id.photo.Timing, metal_peak: *u64) ![2][]f32 {
     if (o.features[0]) |first| {
         var f1: ?[]f32 = null;
         var f2: ?[]f32 = null;
@@ -228,7 +262,8 @@ fn encode(a: std.mem.Allocator, io: std.Io, device: mtl.Device, args: []const [:
         std.debug.print("features: given, both encoders skipped\n", .{});
         return .{ f1.?, f2.? };
     }
-    const pics = try picture(a, io, args[4]);
+    const pics = try picture(a, io, device, args, o, pt);
+    metal_peak.* = @max(metal_peak.*, pt.metal_peak);
     const f1 = try a.alloc(f32, f1_n);
     const f2 = try a.alloc(f32, f2_n);
     {
@@ -346,7 +381,8 @@ pub fn main(init: std.process.Init) !u8 {
     defer pool.pop();
     const device = try mtl.Device.init();
     std.debug.print("{s}: seed {d}, {d} steps, guidance {d}, {d} Gaussians; starting noise {s}\n", .{ device.name(), o.seed, o.steps, o.guidance, o.gaussians, if (start_given) "given" else "torch CPU-seeded" });
-    const features = try encode(a, io, device, args, o, &t, &metal_peak);
+    var pt: id.photo.Timing = .{};
+    const features = try encode(a, io, device, args, o, &t, &pt, &metal_peak);
     try denoise(a, io, device, args[1], features, x, o, &t, &metal_peak);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "{s}/sample.f32", .{out_dir}), .data = std.mem.sliceAsBytes(x) });
 
@@ -372,13 +408,14 @@ pub fn main(init: std.process.Init) !u8 {
     t.ply = mtl.clock.seconds() - started;
     t.total = mtl.clock.seconds() - begun;
 
-    const load = t.load_dino + t.load_vae + t.load_denoiser + t.load_decoders;
+    const load = pt.load + t.load_dino + t.load_vae + t.load_denoiser + t.load_decoders;
     std.debug.print("PLY: {d} Gaussians, {d} bytes in {d:.3} s; camera {s}", .{ r.gaussians.count(), bytes.len, t.ply, cam_json });
     std.debug.print("total {d:.2} s: load {d:.2}, dino {d:.3}, vae {d:.3}, condition {d:.3}, denoise {d:.2}, octree {d:.3}, Gaussian decoder {d:.3} (+ activation {d:.3}), PLY {d:.3}; Metal peak {d:.2} GB\n", .{ t.total, load, t.dino, t.vae, t.condition, t.denoise, t.octree, t.gaussian_decoder, t.activation, t.ply, gb(metal_peak) });
     var out: std.ArrayList(u8) = .empty;
     try print(&out, a, "{{\"device\": \"{s}\", \"seed\": {d}, \"steps\": {d}, \"cfg\": {d}, \"gaussians\": {d}, \"start_noise\": \"{s}\", \"vae_noise\": \"{s}\", \"features_given\": {}", .{ device.name(), o.seed, o.steps, o.guidance, r.gaussians.count(), if (start_given) "given" else "torch_cpu", if (o.features[0] != null) "unused" else if (o.noise != null) "given" else "native", o.features[0] != null });
     try print(&out, a, ", \"load_s\": {d:.4}", .{load});
     inline for (@typeInfo(Times).@"struct".field_names) |name| try print(&out, a, ", \"{s}_s\": {d:.4}", .{ name, @field(t, name) });
+    if (id.photo.isPhoto(args[4]) and o.features[0] == null) try print(&out, a, ", \"preprocess_s\": {d:.4}, \"birefnet_s\": {d:.4}", .{ pt.preprocess, pt.birefnet });
     try print(&out, a, ", \"metal_peak_allocated_gb\": {d:.3}, \"camera\": {s}}}\n", .{ gb(metal_peak), std.mem.trimEnd(u8, cam_json, "\n") });
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "{s}/tf-idol-generate.json", .{out_dir}), .data = out.items });
     return 0;
