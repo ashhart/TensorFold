@@ -187,10 +187,6 @@ pub fn laneFacts(window: u32, verify: u32) lanes.Model {
     return .{ .exact_width = window, .hidden_rows = true, .batch_rows = verify, .max_streams = E.max_segs, .streams_exact = true, .copy_match = 5, .context_copies = true, .lone_cost_tile = 16 };
 }
 
-test "zero grant: Qwen MTP and DFlash wrappers keep their absorbed history through a long skip" {
-    try lanes.shared_draft_check.check(laneFacts(16, 32), true);
-}
-
 fn reserve(p: *anyopaque, streams: u32) anyerror!void {
     const l: *Lanes = @ptrCast(@alignCast(p));
     try reservation.target(E.Cache, E.Part, l, streams); // with a pool: the first window, the shapes on its lanes
@@ -601,21 +597,5 @@ test "Qwen stepped prefill: cancel between host iterations retains only the last
 
 test {
     _ = @import("cuda_mtp_budget.zig");
-}
-
-test "shared head costs: Qwen CUDA MTP retains costed copy grants in chains and trees" {
-    var e: E.Engine = undefined;
-    e.g.kv_heads = 1;
-    e.g.hidden = 16;
-    var head: Mtp = undefined;
-    head.e = &e;
-    head.capacity = 16;
-    head.depth = 3;
-    head.step_ms = 2;
-    head.n_costs = 0;
-    for ([_]bool{ false, true }) |trees| {
-        head.trees = trees;
-        const m = try lanes.shared_head_cost_check.attached(laneFacts(16, 32), head.drafter().facts());
-        try lanes.shared_head_cost_check.check(m);
-    }
+    _ = @import("cuda_native_grants_test.zig");
 }
