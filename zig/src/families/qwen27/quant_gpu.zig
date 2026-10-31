@@ -148,6 +148,56 @@ pub const Kernels = struct {
         return k.quantOne(input_encoder, p, x, xs, dims, y, rows, skip, cut);
     }
 
+    /// The lane projection a launch of `p` takes, compiled from source and cached the first time its key is seen.
+    fn laneEntry(
+        k: *Kernels,
+        p: projection.Linear,
+        sk: u32,
+        skip: u32,
+        cut: [2]u32,
+        long: bool,
+    ) !std.AutoHashMapUnmanaged(Key, lane.Projection).GetOrPutResult {
+        const reg = p.bits == 4 and p.group == 64;
+        const key = Key{
+            .kind = .projection,
+            .n = p.n,
+            .k = p.k,
+            .slices = if (reg) sk else p.slices,
+            .skip = skip,
+            .cut = cut,
+            .bits = p.bits,
+            .group = p.group,
+            .long = long,
+        };
+        const half = p.n / 64;
+        const ranges = [_][2]usize{ .{ skip, half - skip }, .{ half + skip, half - skip } };
+        const entry = try k.lanes.getOrPut(k.allocator, key);
+        if (!entry.found_existing) {
+            errdefer _ = k.lanes.remove(key);
+            entry.value_ptr.* = try lane.Projection.init(k.allocator, k.device, .{
+                .n = p.n,
+                .k = p.k,
+                .format = .{ .bits = p.bits, .group = p.group },
+                .sk = key.slices,
+                .ranges = if (skip > 0) &ranges else &.{},
+                .groups = if (cut[1] > 0) .{ cut[0], cut[1] } else null,
+                .output = if (cut[1] > 0) .f32 else .bf16,
+                .precompute_sums = reg,
+                .reg = reg,
+                .rows = if (long) lane.max_reg_rows else lane.reg_rows,
+            });
+            k.joined(entry.value_ptr);
+        }
+        return entry;
+    }
+
+    /// Compiles at load the decode-row pipeline a later `quant` of `p` takes (for shapes no target layer uses).
+    pub fn prepareDecode(k: *Kernels, p: projection.Linear) !void {
+        if (p.runs.len > 0 or p.raw != null or p.tile != 32 or k.prompt) return;
+        // decoded rows never take the long key (longKey needs prompt rows)
+        _ = try k.laneEntry(p, p.slices, 0, .{ 0, 0 }, false);
+    }
+
     fn quantOne(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: ?Sums, dims: Ref, y: Ref, rows: u32, skip: u32, cut: [2]u32) !void {
         if ((skip > 0 or cut[1] > 0) and p.raw != null) return error.BadCoreProjectionRows;
         if (skip > 0 and (p.raw != null or skip >= p.n / 64)) return error.BadCoreProjectionRows;
@@ -193,16 +243,8 @@ pub const Kernels = struct {
         const reg = p.bits == 4 and p.group == 64;
         if (!reg and (skip > 0 or cut[1] > 0)) return error.BadCoreProjectionRows;
         const long = reg and longKey(k.long_prompt, k.prompt, rows);
-        const key = Key{ .kind = .projection, .n = p.n, .k = p.k, .slices = if (reg) sk else p.slices, .skip = skip, .cut = cut, .bits = p.bits, .group = p.group, .long = long };
         const sums: ?Sums = if (reg) xs else null; // the non-reg kernel sums its own groups
-        const half = p.n / 64;
-        const ranges = [_][2]usize{ .{ skip, half - skip }, .{ half + skip, half - skip } };
-        const entry = try k.lanes.getOrPut(k.allocator, key);
-        if (!entry.found_existing) {
-            errdefer _ = k.lanes.remove(key);
-            entry.value_ptr.* = try lane.Projection.init(k.allocator, k.device, .{ .n = p.n, .k = p.k, .format = .{ .bits = p.bits, .group = p.group }, .sk = key.slices, .ranges = if (skip > 0) &ranges else &.{}, .groups = if (cut[1] > 0) .{ cut[0], cut[1] } else null, .output = if (cut[1] > 0) .f32 else .bf16, .precompute_sums = reg, .reg = reg, .rows = if (long) lane.max_reg_rows else lane.reg_rows });
-            k.joined(entry.value_ptr);
-        }
+        const entry = try k.laneEntry(p, sk, skip, cut, long);
         const step = entry.value_ptr.max_rows;
         var first: u32 = 0;
         while (first < rows) : (first += step) {
