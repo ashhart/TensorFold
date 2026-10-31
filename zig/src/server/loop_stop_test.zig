@@ -225,7 +225,7 @@ test "loop stop: off, the guarded reply closes and answers as before, with no er
         const v = try chat(a, &e, config(true, false), stream, tools);
         try t.expect(e.guard and !e.stop and e.closes);
         try t.expectEqualStrings(if (tools) "tool_calls" else "stop", v.finish);
-        try t.expectEqualStrings(reasoning, std.mem.trimEnd(u8, v.reasoning, "\n")); // a stream sends the close's lead
+        try t.expectEqualStrings(reasoning, v.reasoning); // the close's lead is whitespace the reply strips
         try t.expectEqualStrings(if (tools) "" else "done", v.content);
         try t.expectEqual(@as(usize, @intFromBool(tools)), v.calls);
         try t.expect(v.err == null);
