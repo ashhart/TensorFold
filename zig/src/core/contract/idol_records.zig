@@ -1,5 +1,4 @@
-//! Idol's launches, each source-reserved: the denoiser's (idol.metal, idol_attention.metal), then idol_decoder.metal's,
-//! then the image encoder's (idol_vae.metal).
+//! Idol's launches, each source-reserved: the denoiser's (idol.metal, idol_attention.metal), the decoders', the VAE's.
 const std = @import("std");
 const M = @import("limits.zig").MetalLaunch;
 pub const records = denoiser ++ decoder ++ vae;
