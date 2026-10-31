@@ -89,6 +89,21 @@ test "capture start rollback and failed end preserve the temporary-source guard"
     g.deinit();
     try source.synchronousCopy(&d, 256, &.{3}, t.allocator);
 }
+test "an invalidated end that stops the capture releases the temporary-source guard and the stream" {
+    var d = Fake.init();
+    source.setCurrent(@ptrFromInt(56));
+    const s: Stream = .{ .d = &d, .handle = @ptrFromInt(6) };
+    try graph.beginCapture(s, .thread_local);
+    Fake.invalidate_end = true;
+    try t.expectError(error.NotReady, graph.endCapture(s));
+    try t.expectEqual(@import("abi.zig").CaptureStatus.none, try graph.captureStatus(s));
+    Fake.fail = false;
+    try source.synchronousCopy(&d, 256, &.{4}, t.allocator);
+    Fake.invalidate_end = false;
+    try graph.beginCapture(s, .thread_local);
+    var g = try graph.endCapture(s);
+    g.deinit();
+}
 const OtherThread = struct {
     const Driver = @import("driver.zig").Driver;
     var result: ?anyerror = null;

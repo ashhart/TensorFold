@@ -9,6 +9,7 @@ pub const Fake = struct {
     pub var replays: usize = 0;
     pub var fail_begin = false;
     pub var fail_end = false;
+    pub var invalidate_end = false;
     var in_capture = false;
     var captured: ?[]const u8 = null;
     var copies: usize = 0;
@@ -98,9 +99,17 @@ pub const Fake = struct {
     }
     fn end(_: abi.Stream, out: *abi.Graph) callconv(.c) abi.Result {
         if (fail_end) return abi.error_not_ready;
+        if (invalidate_end) {
+            in_capture = false;
+            return abi.error_not_ready;
+        }
         in_capture = false;
         graph_count += 1;
         out.* = @ptrFromInt(graph_count);
+        return 0;
+    }
+    fn capturing(_: abi.Stream, out: *abi.CaptureStatus) callconv(.c) abi.Result {
+        out.* = if (in_capture) .active else .none;
         return 0;
     }
     fn instantiate(out: *abi.GraphExec, _: abi.Graph, _: u64) callconv(.c) abi.Result {
@@ -124,6 +133,7 @@ pub const Fake = struct {
     pub fn init() @import("driver.zig").Driver {
         fail_begin = false;
         fail_end = false;
+        invalidate_end = false;
         graph_count = 0;
         exec_count = 0;
         replays = 0;
@@ -144,6 +154,7 @@ pub const Fake = struct {
         d.api.cuStreamDestroy_v2 = streamDestroy;
         d.api.cuStreamBeginCapture_v2 = begin;
         d.api.cuStreamEndCapture = end;
+        d.api.cuStreamIsCapturing = capturing;
         d.api.cuGraphInstantiateWithFlags = instantiate;
         d.api.cuGraphDestroy = graphDestroy;
         d.api.cuGraphExecDestroy = execDestroy;
