@@ -240,10 +240,10 @@ pub const Index = struct {
 
 // --- mm_prompt_attention: softmax over the kept blocks' keys up to each row, bf16 out ----------------------------
 
-/// The range's fp32 arithmetic: mma scores, fp32 SCALE * log2e, fast exp2, 64-key blocks; P multiplies V as bf16.
+/// The range's fp32 arithmetic: mma scores, fp32 SCALE * log2e, fast exp2, 64-key blocks; fp32 P cut as it meets V.
 fn form(n: usize) ar.Form {
     const blocks: f64 = @floatFromInt(n / 64 + 2);
-    return .{ .score = @as(f64, @floatFromInt(dh / 16)) * mma_step + 2, .fast_exp = true, .chunk_exp = false, .p_rel = 0x1p-8, .num = mma_step * 4 + blocks + 2, .den = blocks + 6, .score_round = 4, .nan_max = true };
+    return .{ .score = @as(f64, @floatFromInt(dh / 16)) * mma_step + 2, .fast_exp = true, .chunk_exp = false, .p_rel = 0, .p_cut = ar.operand_cut, .num = mma_step * 4 + blocks + 2, .den = blocks + 6, .score_round = 4, .nan_max = true };
 }
 
 /// Gate 4's keys: the first 1,024 score high (their probabilities exactly 1), every other key scores far below.
@@ -264,7 +264,10 @@ pub const Prompt = struct {
     k: []u16 = &.{},
     v: []u16 = &.{},
     sel: []u32 = &.{},
+    point: []f64 = &.{},
     half: []f64 = &.{},
+    down: []f64 = &.{},
+    up: []f64 = &.{},
     refs: [5]rig_.Ref = undefined,
     out: rig_.Ref = undefined,
 
@@ -290,12 +293,15 @@ pub const Prompt = struct {
     fn free(t: *Prompt) void {
         for ([_][]u16{ t.q, t.k, t.v }) |x| t.a.free(x);
         t.a.free(t.sel);
-        t.a.free(t.half);
+        for ([_][]f64{ t.point, t.half, t.down, t.up }) |x| t.a.free(x);
         t.q = &.{};
         t.k = &.{};
         t.v = &.{};
         t.sel = &.{};
+        t.point = &.{};
         t.half = &.{};
+        t.down = &.{};
+        t.up = &.{};
     }
     pub fn deinit(t: *Prompt) void {
         t.free();
@@ -356,7 +362,7 @@ pub const Prompt = struct {
         t.k = try t.a.alloc(u16, slots * kw);
         t.v = try t.a.alloc(u16, slots * kw);
         t.sel = try t.a.alloc(u32, pad * kvh * words);
-        t.half = try t.a.alloc(f64, t.count());
+        for ([_]*[]f64{ &t.point, &t.half, &t.down, &t.up }) |x| x.* = try t.a.alloc(f64, t.count());
         var prng = std.Random.DefaultPrng.init(seed);
         const rng = prng.random();
         fillRandom(rng, t.q, 3);
@@ -439,22 +445,35 @@ pub const Prompt = struct {
                 const hq = kv * grp + gh;
                 for (qv, 0..) |*x, e| x.* = c.fromBf16(t.q[(r * nq + hq) * dh + e]);
                 const at = (r * nq + hq) * dh;
-                ar.head(qv, ks, vs, n, dh, scale, form(n), w, tau, want[at..][0..dh], hf);
+                const f = form(n);
+                ar.head(qv, ks, vs, n, dh, scale, f, w, tau, want[at..][0..dh], hf);
                 @memcpy(t.half[at..][0..dh], hf);
+                ar.cutSides(f, w, tau, vs, n, dh, t.down[at..][0..dh], t.up[at..][0..dh]);
             }
         };
+        @memcpy(t.point, want);
     }
 
-    /// The range's half width plus the output's bf16 rounding; gate 4's exact sums allow the rounding alone.
+    /// The range's half width and the cut's wider side plus bf16's rounding; gate 4 allows the rounding alone.
     pub fn bounds(t: *Prompt, want: []const f64, _: []const f64, allow: []f64) !void {
-        for (allow, want, t.half) |*l, w, h| {
+        for (allow, want, t.half, t.down, t.up) |*l, w, h, d, u| {
             if (t.fill == .stress) {
                 l.* = c.boundExact(spec(), w);
             } else if (!std.math.isFinite(w)) {
                 l.* = 0;
             } else if (!std.math.isFinite(h)) {
                 l.* = std.math.floatMax(f64); // scores too far apart for the range's first order: any finite value
-            } else l.* = h + 0x1p-8 * (@abs(w) + h) + 0x1p-133;
+            } else l.* = h + @max(d, u) + 0x1p-8 * (@abs(w) + h + @max(d, u)) + 0x1p-133;
+        }
+    }
+
+    /// Each bf16 output within its range's ends as rounded, the cut on its own side; gate 4 and wide ranges are open.
+    pub fn intervals(t: *Prompt, low: []f64, high: []f64) !void {
+        for (low, high, t.point, t.half, t.down, t.up) |*l, *hi, p, h, d, u| {
+            const open = t.fill == .stress or !std.math.isFinite(p) or !std.math.isFinite(h);
+            const e = if (open) [2]f64{ -std.math.floatMax(f64), std.math.floatMax(f64) } else ar.ends(p, h, d, u);
+            l.* = e[0];
+            hi.* = e[1];
         }
     }
 
