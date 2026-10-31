@@ -85,7 +85,7 @@ pub const Hip = struct {
 
     /// Time the forwards and the head on scratch caches, for the depth rule; before `facts`, on a lone rank.
     pub fn measure(h: *Hip) void {
-        costs.measure(h.gpa, h.e, h.head, &h.costs) catch |err| {
+        costs.measure(h.gpa, h.e, h.head, max_window, &h.costs) catch |err| {
             std.log.warn("lane costs not timed: {s}", .{@errorName(err)});
             h.costs = .{};
         };
