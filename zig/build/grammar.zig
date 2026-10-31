@@ -91,7 +91,11 @@ pub fn library(b: *std.Build, target: std.Build.ResolvedTarget, dir: []const u8)
 pub fn overlay(b: *std.Build, target: std.Build.ResolvedTarget, dir: []const u8) ?std.Build.LazyPath {
     const lib = library(b, target, dir) orelse return null;
     const files = b.addWriteFiles();
-    const name = if (target.result.os.tag == .macos) "libtfgrammar.dylib" else "libtfgrammar.so";
+    const name = switch (target.result.os.tag) {
+        .macos => "libtfgrammar.dylib",
+        .windows => "tfgrammar.dll",
+        else => "libtfgrammar.so",
+    };
     _ = files.addCopyFile(lib.getEmittedBin(), b.fmt("lib/{s}", .{name}));
     const root: std.Build.LazyPath = .{ .cwd_relative = dir };
     _ = files.addCopyFile(root.path(b, "LICENSE"), "LICENSES/xgrammar-Apache-2.0.txt");
