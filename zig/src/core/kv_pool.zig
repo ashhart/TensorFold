@@ -56,10 +56,12 @@ pub const Budget = struct {
     window: u64 = 0,
     /// The engine's own rows are pages too: a window of them first, then the cache after the windows the room holds.
     engine_paged: bool = false,
+    /// Parts per million of the cache that kept states hold as pool pages (TF_KV_SHARE): made pages past the windows.
+    kept_ppm: u32 = 0,
 };
 
 /// The streams served, the cache's slots and copied-KV bytes, and the pages left for the streams.
-pub const Plan = struct { lanes: u32, snaps: usize, copied: u64, pages: usize };
+pub const Plan = struct { lanes: u32, snaps: usize, copied: u64, pages: usize, kept: u64 = 0 }; // kept: the cache bytes made pages
 
 /// The prompt cache's split: slots for its snapshots, the rest for their copied KV rows (no slot: no cache).
 pub fn split(cache: u64, snap_bytes: u64, named: ?usize) struct { snaps: usize, copied: u64 } {
@@ -78,10 +80,12 @@ pub fn plan(l: Layout, b: Budget) error{ NoStream, TooMany }!Plan {
     const fit = @min(extra, left / each);
     if (fit < extra and b.fixed) return error.TooMany;
     left -= fit * l.fixed_bytes;
-    const c = split(@min(b.cache, left -| held(l, b, fit)), l.snap_bytes, b.snaps);
+    const cache = @min(b.cache, left -| held(l, b, fit));
+    const kept = cache / 1_000_000 * b.kept_ppm + cache % 1_000_000 * b.kept_ppm / 1_000_000; // the cache's share as pages
+    const c = split(cache - kept, l.snap_bytes, b.snaps);
     left -= c.snaps * l.snap_bytes + c.copied;
-    const most: u64 = if (b.window > 0) (fit + @intFromBool(b.engine_paged)) * l.pages(b.window) + fit * l.runPages() else std.math.maxInt(u64);
-    return .{ .lanes = @intCast(1 + fit), .snaps = c.snaps, .copied = c.copied, .pages = @intCast(@min((left + own) / l.pageBytes(), most)) };
+    const most: u64 = if (b.window > 0) (fit + @intFromBool(b.engine_paged)) * l.pages(b.window) + fit * l.runPages() + kept / l.pageBytes() else std.math.maxInt(u64);
+    return .{ .lanes = @intCast(1 + fit), .snaps = c.snaps, .copied = c.copied, .pages = @intCast(@min((left + own) / l.pageBytes(), most)), .kept = kept };
 }
 
 /// Whether `b.cache` fits whole in what `plan` leaves it: the room past the engine and a fixed part and page a stream.
@@ -266,6 +270,22 @@ pub const Pool = struct {
         if (p.available() < n) return error.LaneMemory;
         p.promised += n;
         l.promised += n;
+    }
+
+    /// `out.len` free pages the store holds itself (a kept state's copied rows), the store reclaiming first if it must.
+    pub fn hold(p: *Pool, out: []u32) bool {
+        p.enter();
+        defer p.leave();
+        if (p.available() < out.len) if (p.reclaim) |r| {
+            _ = r.call(r.ctx, out.len);
+        };
+        if (p.available() < out.len) return false;
+        for (out) |*id| {
+            p.nfree -= 1;
+            id.* = p.free[p.nfree];
+            p.ownership(id.*, 1, 0);
+        }
+        return true;
     }
 
     /// The part of `l`'s promise it has not taken goes back.
