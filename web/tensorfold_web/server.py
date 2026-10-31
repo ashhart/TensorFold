@@ -419,7 +419,7 @@ def create_app(*, settings: settings_mod.Settings | None = None, engine: Engine 
             path = living.folder(copy)
             if not path.is_dir() or living.is_unfinished(copy):
                 raise RuntimeError(f"there is no living copy named {copy} on this machine")
-            why = living.teachable_here(native.find_binary())
+            why = living.family_refusal(copy) or living.teachable_here(native.find_binary())
             if not why:
                 key_for_learning()
             result = eng.start(model, native_model=True, serve=str(path),
@@ -2076,7 +2076,7 @@ def create_app(*, settings: settings_mod.Settings | None = None, engine: Engine 
             raise HTTPException(409, f"the facts were previewed on {body['copy']}, and {copy} is served now; preview again")
         from . import native
 
-        why = living.teachable_here(native.find_binary())
+        why = living.family_refusal(copy) or living.teachable_here(native.find_binary())
         if why:
             raise HTTPException(409, why)
         try:

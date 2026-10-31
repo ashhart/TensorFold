@@ -34,7 +34,8 @@ from . import httpread
 PREFIX = "living:"                 # a model id naming a copy, as TensorFold Web's settings keep it
 NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")     # no dot: nothing a copy is named can look like another's files
 KEPT = ("kept", "partly kept")                       # outcomes that left something in the weights
-LEARNABLE = {"nemotron_h"}         # the families TensorFold 1.0.7 learns into
+LEARNABLE = {"nemotron_h"}         # TensorFold Web teaches Nemotron 3.5 Lightning only
+ONLY = "teaching works on Nemotron 3.5 Lightning only"
 
 
 def root() -> Path:
@@ -109,6 +110,15 @@ def _write(p: Path, value) -> None:
     from .settings import write_private
 
     write_private(p, json.dumps(value, indent=1, ensure_ascii=False))
+
+
+def family_refusal(copy: str) -> str | None:
+    """Why TensorFold Web will not teach ``copy``, or None: teaching is Nemotron-only, whatever the engine offers."""
+
+    family = family_of(folder(copy))
+    if family in LEARNABLE:
+        return None
+    return f"{ONLY}; {copy} is a copy of {family or 'a model whose family its config does not name'}"
 
 
 def family_of(path: Path) -> str | None:
