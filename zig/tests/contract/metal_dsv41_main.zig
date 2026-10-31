@@ -6,21 +6,26 @@ const g = contract.gates;
 
 const dsv41_fp8_rows = @import("metal_dsv41_fp8_rows.zig");
 const dsv41_fp8_mma = @import("metal_dsv41_fp8_mma.zig");
+const dsv41_experts = @import("metal_dsv41_experts.zig");
 
 /// Every dsv41 suite, created and destroyed in the order main held them.
 pub const Suites = struct {
     fp8: *dsv41_fp8_rows.Suite,
     fp8_mma: *dsv41_fp8_mma.Suite,
+    experts: *dsv41_experts.Suite,
 
     pub fn create(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !Suites {
         const fp8 = try dsv41_fp8_rows.Suite.create(a, device, queue, kernels, only);
         errdefer fp8.destroy();
         const fp8_mma = try dsv41_fp8_mma.Suite.create(a, device, queue, kernels, only);
         errdefer fp8_mma.destroy();
-        return .{ .fp8 = fp8, .fp8_mma = fp8_mma };
+        const experts = try dsv41_experts.Suite.create(a, device, queue, kernels, only);
+        errdefer experts.destroy();
+        return .{ .fp8 = fp8, .fp8_mma = fp8_mma, .experts = experts };
     }
 
     pub fn destroy(s: *Suites) void {
+        s.experts.destroy();
         s.fp8_mma.destroy();
         s.fp8.destroy();
     }
@@ -32,5 +37,7 @@ pub const Suites = struct {
         t.failed += try s.fp8_mma.invariance(seed);
         t.failed += try s.fp8_mma.accuracy(seed);
         if (std.c.getenv("TF_DSV41_TIME") != null) try s.fp8_mma.timing(io);
+        if (s.experts.probes.items.len > 0) t.failed += try s.experts.pipeline(seed);
+        if (std.c.getenv("TF_DSV41_EXPERTS_TIME") != null) try s.experts.timing(io);
     }
 };
