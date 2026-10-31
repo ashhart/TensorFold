@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8-27B on M5 Ultra: a prompt chunk of more than 128 rows runs each 4-bit projection in one dispatch instead of 128-row pieces, so each weight matrix is read once per chunk. Replies are token-identical; decode, verify rows and other chips are unchanged (#1738). Thanks to @Nipale-ai.
+
 - The server reads a request's top-level `thinking` switch (`{"type": "disabled"}` or `"enabled"`), as DeepSeek's own API and Hermes Agent's DeepSeek profile send it. Before, it was ignored and the prompt still opened a think block. `chat_template_kwargs` still wins when both are set.
 
 - MiniMax-M3.1-Flash on CUDA, at tensor parallel over two GB10s (sm_121 and two ranks only; anything else is refused), from Mia-AiLab's published EXL3 pack read as stored: a lossy third-party quantization whose logits against the release, teacher-forced over 2,406 tokens, give a mean KL of 0.0788 and 89.9% top-1 agreement (#1388, after #1235). It serves the release's DSpark drafts, kept prompt states, tools, structured output and images; one stream with drafts ran 24 to 39 tokens a second. The shared EXL3 grouped experts gain a SwiGLU-OAI epilogue (`act_mode` 2); modes 0 and 1 are bit-equal to before in the kernel contract. Thanks to @BobClawblaw.
