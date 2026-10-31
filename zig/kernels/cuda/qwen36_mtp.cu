@@ -74,10 +74,11 @@ __device__ __forceinline__ void fold_ring(const __nv_bfloat16* rk, const __nv_bf
 
 using namespace tf_q36m;
 
-// A warp a (row, head): RMS norm, rope on [0, ROT) as pairs (i, i + 32) at pos0 + row * step; OUT (rows, heads, HD)
-extern "C" __global__ void __launch_bounds__(32) tf_q36m_norm_rope(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ W,
-                                                                     __nv_bfloat16* __restrict__ OUT, int heads, int stride, int in_head,
-                                                                     long long pos0, int step, float eps, float theta) {
+// tf_q36m_norm_rope's body; the plain instantiation is its own code, so its products contract as before YaRN.
+template <bool YARN>
+__device__ __forceinline__ void norm_rope(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ W, __nv_bfloat16* __restrict__ OUT,
+                                          int heads, int stride, int in_head, long long pos0, int step, float eps, float theta,
+                                          const float* __restrict__ Y) {
     const int head = blockIdx.x % heads;
     const size_t m = blockIdx.x / heads;
     const int t = threadIdx.x;
@@ -103,13 +104,31 @@ extern "C" __global__ void __launch_bounds__(32) tf_q36m_norm_rope(const __nv_bf
         float r = n[i];
         if (d < ROT) {
             const int j = d < ROT / 2 ? d : d - ROT / 2;
-            const float angle = pos * powf(theta, -(float)j / (float)(ROT / 2));
-            float sn, cs;
-            sincosf(angle, &sn, &cs);
-            r = d < ROT / 2 ? n[i] * cs - partner * sn : n[i] * cs + partner * sn;
+            if constexpr (!YARN) {
+                const float angle = pos * powf(theta, -(float)j / (float)(ROT / 2));
+                float sn, cs;
+                sincosf(angle, &sn, &cs);
+                r = d < ROT / 2 ? n[i] * cs - partner * sn : n[i] * cs + partner * sn;
+            } else {
+                const float angle = pos * Y[1 + j];
+                float sn, cs;
+                sincosf(angle, &sn, &cs);
+                cs *= Y[0];
+                sn *= Y[0];
+                r = d < ROT / 2 ? n[i] * cs - partner * sn : n[i] * cs + partner * sn;
+            }
         }
         out[d] = __float2bfloat16_rn(r);
     }
+}
+
+// A warp a (row, head): RMS norm, rope on [0, ROT) as pairs (i, i + 32) at pos0 + row * step; OUT (rows, heads, HD)
+extern "C" __global__ void __launch_bounds__(32) tf_q36m_norm_rope(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ W,
+                                                                     __nv_bfloat16* __restrict__ OUT, int heads, int stride, int in_head,
+                                                                     long long pos0, int step, float eps, float theta, const float* __restrict__ Y) {
+    // Y null: theta's plain rope; else YaRN's attention factor, then its 32 frequencies, as the target's rope
+    if (Y == nullptr) norm_rope<false>(X, W, OUT, heads, stride, in_head, pos0, step, eps, theta, Y);
+    else norm_rope<true>(X, W, OUT, heads, stride, in_head, pos0, step, eps, theta, Y);
 }
 
 // A warp a (row, head): ring slots [begin, pos0), then block rows 0..m; OUT = softmax-weighted values x sigmoid(gate).

@@ -159,6 +159,10 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         std.debug.print("tensorfold: TF_SSE_KEEPALIVE_S: seconds, a number >= 0\n", .{});
         return 1;
     };
+    const spark_stats = @import("spark_wire.zig").enabled(s.model_type, env(s, "TENSORFOLD_WIRE")) orelse {
+        std.debug.print("tensorfold: TENSORFOLD_WIRE: expected spark or native\n", .{});
+        return 1;
+    };
     const config: server_mod.Config = .{
         .browser = .{ .allowed_hosts = args.allowed_host, .allowed_origins = args.allowed_origin },
         .allowed_controls = args.allowed_controls,
@@ -189,6 +193,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .prompt_seed = args.prompt_seed,
         .sse_keepalive_s = keepalive_s,
         .request_log = env(s, "TENSORFOLD_REQUEST_LOG"),
+        .spark_stats = spark_stats,
         .dashboard = args.dashboard,
         .compact_at = if (args.compact_auto) .{ .auto = {} } else if (args.compact_fraction) |f| .{ .fraction = f } else null,
         .compact_keep = args.compact_keep,
@@ -209,6 +214,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         return 1;
     };
     defer srv.deinit();
+    srv.load.attach(srv.engine);
     srv.recall = s.recall;
     switch (idle_unload.startServer(srv, args, s.reopen, s.model_dir, s.model_type)) {
         .disabled, .enabled => {},
@@ -372,6 +378,7 @@ test "Failure boundaries: drain and SSE duration settings refuse non-finite or u
 fn closeIdle(srv: *server_mod.Server, stop: ?EngineStop) bool {
     if (srv.open_connections.load(.acquire) != 0 or srv.generating.load(.seq_cst) != 0) return false;
     srv.stopKeepalive();
+    srv.load.detach(false); // the engine stops writing to the ledger before it closes
     if (stop) |st| st.close(st.ctx);
     return true;
 }
@@ -388,6 +395,7 @@ test "Failure boundaries: engine close waits for handlers and connections to lea
     server.open_connections = .init(1);
     server.generating = .init(0);
     server.keepalive = null;
+    server.load = .init(std.testing.io);
     const stop: EngineStop = .{ .ctx = &count, .close = Count.close };
     try std.testing.expect(!closeIdle(&server, stop));
     server.open_connections.store(0, .seq_cst);

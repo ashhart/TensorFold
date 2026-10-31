@@ -28,6 +28,18 @@ fn each(m: *const fwd.Model, slot: usize, at: usize, ctx: anytype, comptime f: f
     var off: usize = 0;
     const rb = rowBytes(m);
     for (0..m.layers) |i| for ([_][]u64{ m.kc, m.vc }) |cache| {
+        if (cfg.full(i) and m.paged) { // pages: p in page p / page_tokens of the slot's row, a copy a run within one
+            var p: usize = 0;
+            while (p < at) {
+                const into = p % fwd.page_tokens;
+                const run = @min(at - p, fwd.page_tokens - into);
+                const row = @as(usize, m.ids[slot * m.perSlot() + p / fwd.page_tokens]) * fwd.page_tokens + into;
+                try f(ctx, cache[i] + row * rb, off, run * rb);
+                off += run * rb;
+                p += run;
+            }
+            continue;
+        }
         const len = m.cacheLen(i);
         const base = cache[i] + slot * len * rb;
         var p = if (cfg.full(i)) 0 else at - tail(at);
@@ -89,6 +101,7 @@ test "a state holds full layers' positions and each sliding ring's last window -
     m.geo = cfg.spark4b;
     m.layers = 4; // layer 3 is full
     m.context = 4096;
+    m.paged = false;
     m.kc = &k;
     m.vc = &v;
     const at = 1500; // sliding: positions 989..1499, ring rows 989..1023 then 0..475
@@ -102,4 +115,30 @@ test "a state holds full layers' positions and each sliding ring's last window -
     try testing.expectEqual([3]usize{ (1 << 30) + fwd.ring * rb, (fwd.ring - 989) * rb, 476 * rb }, runs.items[1]);
     const last = runs.items[runs.items.len - 1];
     try testing.expectEqual([3]usize{ (10 << 30) + 4096 * rb, 2 * 3 * 511 * rb + at * rb, at * rb }, last);
+}
+
+test "a paged state takes a full layer's positions through the slot's pages, a run a page, in position order" {
+    var k = [_]u64{ 1 << 30, 2 << 30, 3 << 30, 4 << 30 };
+    var v = [_]u64{ 7 << 30, 8 << 30, 9 << 30, 10 << 30 };
+    var ids = [_]u32{ 0, 0, 0, 0, 7, 2, 9, 0 }; // slot 1's row: pages 7, 2, 9, then unmapped
+    var m: fwd.Model = undefined;
+    m.geo = cfg.spark4b;
+    m.layers = 4; // layer 3 is full
+    m.context = 4 * fwd.page_tokens;
+    m.paged = true;
+    m.ids = &ids;
+    m.kc = &k;
+    m.vc = &v;
+    const at = 2 * fwd.page_tokens + 10; // pages 7 and 2 whole, then 10 rows of page 9
+    const rb = 4 * 256 * 2;
+    var runs: std.ArrayList([3]usize) = .empty;
+    defer runs.deinit(testing.allocator);
+    try each(&m, 1, at, Count{ .runs = &runs }, Count.add);
+    try testing.expectEqual(@as(usize, 3 * 2 + 2 * 3), runs.items.len); // a sliding cache's 511 rows: one run each
+    const pt = fwd.page_tokens;
+    const kr = runs.items[runs.items.len - 6 ..][0..3];
+    try testing.expectEqual([3]usize{ (4 << 30) + 7 * pt * rb, kr[0][1], pt * rb }, kr[0]);
+    try testing.expectEqual([3]usize{ (4 << 30) + 2 * pt * rb, kr[0][1] + pt * rb, pt * rb }, kr[1]);
+    try testing.expectEqual([3]usize{ (4 << 30) + 9 * pt * rb, kr[0][1] + 2 * pt * rb, 10 * rb }, kr[2]);
+    try testing.expectEqual(bytes(&m, at), runs.items[runs.items.len - 1][1] + runs.items[runs.items.len - 1][2]);
 }

@@ -115,6 +115,17 @@ pub const Driver = struct {
         return @intCast(10 * major + minor);
     }
 
+    /// The current context's device's compute capability as 10 * major + minor.
+    pub fn currentCapability(self: *const Driver) Error!u32 {
+        var dev: abi.Device = 0;
+        try self.check(self.api.cuCtxGetDevice(&dev), "cuCtxGetDevice");
+        var major: c_int = 0;
+        var minor: c_int = 0;
+        try self.check(self.api.cuDeviceGetAttribute(&major, .compute_capability_major, dev), "cuDeviceGetAttribute");
+        try self.check(self.api.cuDeviceGetAttribute(&minor, .compute_capability_minor, dev), "cuDeviceGetAttribute");
+        return @intCast(10 * major + minor);
+    }
+
     /// Device `ordinal`'s name ("NVIDIA GB10"), read without making a context.
     pub fn deviceName(self: *const Driver, ordinal: c_int, buf: []u8) Error![]const u8 {
         if (buf.len < 2) return error.Invalid;

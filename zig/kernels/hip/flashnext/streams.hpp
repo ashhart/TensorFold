@@ -97,6 +97,37 @@ tf_fn_rms_wide(const void* x, const float* scale, void* y, int kind, int width, 
     }
 }
 
+// tf_fn_rms_wide at Flash Next's bf16 MTP width in two launches with its bits: each wave's sum, then y over groups.
+constexpr int kWideWidth = 10240;
+constexpr int kWidePer = kWideWidth / kFnThreads;
+constexpr int kWideApply = 64;
+
+// Group (w, r): wave w of tf_fn_rms_wide's block on row r, its threads' strided squares and xor tree as it forms them.
+extern "C" __global__ void __launch_bounds__(32) tf_fn_rms_wide_waves(const uint16_t* x, float* waves) {
+    const long long base = static_cast<long long>(blockIdx.y) * kWideWidth + blockIdx.x * 32 + threadIdx.x;
+    float v[kWidePer];
+#pragma unroll
+    for (int j = 0; j < kWidePer; ++j) v[j] = bf16_to_float(x[base + j * kFnThreads]);
+    float sum = 0.f;
+#pragma unroll
+    for (int j = 0; j < kWidePer; ++j) sum += v[j] * v[j];
+#pragma unroll
+    for (int mask = 16; mask > 0; mask >>= 1) sum += __shfl_xor(sum, mask, 32);
+    if (threadIdx.x == 0) waves[blockIdx.y * kFnWaves + blockIdx.x] = sum;
+}
+
+// y = (x rinv) scale as tf_fn_rms_wide stores it (rinv from the row's waves in order, `width` is kWideWidth), a value a
+// thread over rows * kWideWidth / kWideApply groups.
+extern "C" __global__ void __launch_bounds__(kWideApply)
+tf_fn_rms_wide_apply(const uint16_t* x, const float* waves, const float* scale, uint16_t* y, int width, float eps) {
+    const long long i = static_cast<long long>(blockIdx.x) * kWideApply + threadIdx.x;
+    const long long r = i / kWideWidth;
+    float total = 0.f;
+    for (int w = 0; w < kFnWaves; ++w) total += waves[r * kFnWaves + w];
+    const float rinv = rsqrtf(total / static_cast<float>(width) + eps);
+    y[i] = float_to_bf16((bf16_to_float(x[i]) * rinv) * scale[i % kWideWidth]);
+}
+
 // mixed[r, d] = mean over the streams (in order) of round(sigmoid(round(g)) * x): g the up projection's fp32 sums.
 extern "C" __global__ void tf_fn_hc_mix(const float* g, const void* x, void* mixed, int kind, int rows, int streams,
                                         int dims) {

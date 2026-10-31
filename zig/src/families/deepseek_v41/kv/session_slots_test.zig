@@ -79,7 +79,7 @@ const HostBounded = struct {
         const h = try gpa.create(HostBounded);
         h.* = b;
         h.gpa = gpa;
-        return .{ .ptr = h, .vtable = &vt };
+        return .{ .ptr = h, .vtable = &vt, .logical_bytes = h.measure };
     }
     fn nbytes(p: *anyopaque) u64 {
         const h: *HostBounded = @ptrCast(@alignCast(p));
@@ -277,7 +277,10 @@ const World = struct {
             try testing.expectEqual(want.ds_rows, ds);
             try testing.expectEqual(want.nbytes, m);
             const b = try HostBounded.make(w.gpa, .{ .gpa = w.gpa, .pos = save_at, .ds_rows = ds, .stash_from = save_at - stash, .measure = m });
-            const id = try w.store.save(s, b, ids[0..@intCast(save_at)], w.g.tag, 1);
+            const id = w.store.save(s, b, ids[0..@intCast(save_at)], w.g.tag, 1) catch |err| {
+                b.vtable.release(b.ptr);
+                return err;
+            };
             try testing.expectEqual(want.dup, id == null);
             if (id) |x| try w.names.put(w.gpa, x, try std.fmt.allocPrint(a, "c{d}b{d}@{d}", .{ st.chat, st.branch, save_at }));
             try w.store.settleAll();

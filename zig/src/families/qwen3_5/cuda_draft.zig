@@ -524,6 +524,15 @@ test "a drafter config with a zero divisor is refused, and any admitted rank's s
         defer gpa.free(bad);
         try std.testing.expectError(error.BadDraftConfig, Config.parse(gpa, bad, target));
     }
+    // the kernels rope with theta alone: a scaled rope is refused, an explicit default one is read
+    for ([_][2][]const u8{ .{ "{\"rope_theta\"", "{\"rope_type\":\"yarn\",\"factor\":4.0,\"rope_theta\"" }, .{ "{\"rope_theta\"", "{\"type\":\"yarn\",\"rope_theta\"" }, .{ "\"sliding_window\"", "\"rope_scaling\":{\"type\":\"yarn\"},\"sliding_window\"" } }) |r| {
+        const scaled = try std.mem.replaceOwned(u8, gpa, text, r[0], r[1]);
+        defer gpa.free(scaled);
+        try std.testing.expectError(error.UnsupportedDraftConfig, Config.parse(gpa, scaled, target));
+    }
+    const plain = try std.mem.replaceOwned(u8, gpa, text, "{\"rope_theta\"", "{\"rope_type\":\"default\",\"rope_theta\"");
+    defer gpa.free(plain);
+    try std.testing.expectEqual(@as(usize, 256), (try Config.parse(gpa, plain, target)).rank);
     const wide = try std.mem.replaceOwned(u8, gpa, text, "\"selector_rank\":256", "\"selector_rank\":1024");
     defer gpa.free(wide);
     const c = try Config.parse(gpa, wide, target);

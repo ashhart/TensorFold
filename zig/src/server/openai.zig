@@ -323,6 +323,7 @@ const Run = struct {
     fn extras(r: *Run, o: *json.Object, reply: *const chat.Reply) Allocator.Error!void {
         try o.put(r.a, "exact_mode", .{ .string = "exact" });
         if (reply.stop_sequence) |s| try o.put(r.a, "stop_sequence", .{ .string = s });
+        if (r.srv.config.spark_stats) try @import("spark_wire.zig").add(r.a, reply);
         try o.put(r.a, "tensorfold", reply.runtime);
         try o.put(r.a, "speculative", reply.speculative);
         if (r.turn) |t| try o.put(r.a, "cortheon", try t.summary(r.a));

@@ -45,6 +45,12 @@ pub fn mrope(rope: std.json.ObjectMap, rotary: usize) Error!Mrope {
     return m;
 }
 
+/// Unscaled rope only: a tower's `rope_scaling`, or a `rope_type`/`type` not default, would be read as plain rope.
+pub fn defaultRope(tower: std.json.ObjectMap, rope: std.json.ObjectMap) Error!void {
+    if (tower.get("rope_scaling")) |v| if (v != .null) return error.InvalidRotary;
+    for ([_][]const u8{ "rope_type", "type" }) |key| if (rope.get(key)) |v| if (!isString(v, "default")) return error.InvalidRotary;
+}
+
 /// `max_position_embeddings`: a positive token count, else the family's 262,144.
 pub fn maxPosition(tower: std.json.ObjectMap) Error!usize {
     const v = tower.get("max_position_embeddings") orelse return 262144;
@@ -218,4 +224,22 @@ test "mrope: three sections filling half the rotary width, interleaved; max_posi
     try std.testing.expectEqual(@as(usize, 262144), try maxPosition(try parsed(a, "{}")));
     try std.testing.expectEqual(@as(usize, 32768), try maxPosition(try parsed(a, "{\"max_position_embeddings\":32768}")));
     try std.testing.expectError(error.InvalidConfig, maxPosition(try parsed(a, "{\"max_position_embeddings\":0}")));
+}
+
+test "rope: a scaled rope (rope_type or type yarn, a rope_scaling block) is refused; default and absent pass" {
+    const a = std.testing.allocator;
+    const cases = .{
+        .{ "{\"rope_parameters\":{\"rope_type\":\"yarn\",\"factor\":4.0}}", true },
+        .{ "{\"rope_parameters\":{\"type\":\"yarn\"}}", true },
+        .{ "{\"rope_parameters\":{\"rope_type\":\"default\"},\"rope_scaling\":{\"type\":\"yarn\"}}", true },
+        .{ "{\"rope_parameters\":{\"rope_type\":\"default\"},\"rope_scaling\":null}", false },
+        .{ "{\"rope_parameters\":{\"rope_theta\":10000000}}", false },
+    };
+    inline for (cases) |c| {
+        const doc = try std.json.parseFromSlice(std.json.Value, a, c[0], .{});
+        defer doc.deinit();
+        const t = doc.value.object;
+        const got = defaultRope(t, t.get("rope_parameters").?.object);
+        if (c[1]) try std.testing.expectError(error.InvalidRotary, got) else try got;
+    }
 }

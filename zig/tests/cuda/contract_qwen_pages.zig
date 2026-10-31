@@ -232,7 +232,7 @@ fn launch(gpu: check.Gpu, s: cuda.Stream, fns: Fns, f: Fixture, tables: ?[2][]co
     const layer: c_int = 1;
     const none: u64 = 0;
     var args: cuda.Args = .{};
-    inline for (.{ geo, qn, kn, vr, segs_d, rowseg_d, rowanc_d, layer, none, none }) |x| args.add(x);
+    inline for (.{ geo, qn, kn, vr, segs_d, rowseg_d, rowanc_d, layer, none, none, none }) |x| args.add(x);
     try cuda.launch.launch(fns.rope, .{ .grid = .{ .x = @intCast(m), .y = q_heads + kv_heads }, .block = .{ .x = hd } }, s, &args);
     args = .{};
     inline for (.{ geo, qn, segs_d, rowseg_d, rowanc_d, layer, none, @as(f32, 1.0 / 16.0), pm, pl, po }) |x| args.add(x);
