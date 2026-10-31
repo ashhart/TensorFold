@@ -5,6 +5,7 @@ const cuda = @import("cuda");
 const fwd = @import("forward.zig");
 const iface = @import("draft/iface.zig");
 const partition = @import("partition.zig");
+const ph = @import("phases.zig");
 const Allocator = std.mem.Allocator;
 
 /// One "w.logits" row's allowed tokens for the next picks: token t is bit t % 32 of word t / 32 (lanes/grammar.zig).
@@ -211,6 +212,8 @@ pub const Masks = struct {
         var buf: [max_rows]Run = undefined;
         const rs = runs(st, row0, n, &buf);
         if (rs.len == 0) return;
+        const tg = ph.start(x.f.phases, .grammar);
+        defer tg.stop();
         const r = x.f.runner;
         const row_bytes = 4 * @as(usize, x.width);
         const host = x.host.bytes;
