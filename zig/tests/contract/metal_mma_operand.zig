@@ -226,7 +226,7 @@ pub const Suite = struct {
     kernels: *std.ArrayList(g.Kernel),
     probes: std.ArrayList(*Probe) = .empty,
 
-    /// Only where the tensor units are: before the M5, nax.h's fragments keep fp32 operands whole.
+    /// Only on the tensor units, where the cut was measured; before the M5 the operands' precision is unmeasured.
     pub fn collect(s: *Suite, only: ?[]const u8) !void {
         if (!s.device.tensorUnits()) return;
         for (cases) |v| {
