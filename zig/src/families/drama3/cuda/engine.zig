@@ -440,6 +440,54 @@ pub const Engine = struct {
         try b.copyFrom(0, src, bytes, e.stream.handle);
     }
 
+    /// A reference cache entry's device copy of the state after its prompt rows.
+    pub const Saved = Buf;
+    const kv_row = cfg.kv_heads * cfg.head_dim * 2;
+
+    /// Device bytes of the state after `rows` prompt rows: both recurrent blocks, then each K and V cache's rows.
+    pub fn referenceBytes(e: *const Engine, rows: usize) usize {
+        var caches: usize = 2 * cfg.tower_layers;
+        for (e.c.full_attention) |full| caches += 2 * @as(usize, @intFromBool(full));
+        return e.state_bytes[0] + e.state_bytes[1] + caches * rows * kv_row;
+    }
+
+    pub fn allocReference(e: *Engine, bytes: usize) !Saved {
+        return Buf.alloc(&e.driver, bytes);
+    }
+
+    pub fn freeReference(saved: *Saved) void {
+        saved.free();
+    }
+
+    /// The state the prompt's first `rows` rows left (no later row run yet) into `saved`, finished on return.
+    pub fn saveReference(e: *Engine, saved: Saved, rows: usize) !void {
+        try e.moveReference(saved, rows, false);
+    }
+
+    /// After startPrompt: the state saveReference copied, so the next chunk starts at `rows`; later rows are rewritten.
+    pub fn loadReference(e: *Engine, saved: Saved, rows: usize) !void {
+        try e.moveReference(saved, rows, true);
+    }
+
+    fn moveReference(e: *Engine, saved: Saved, rows: usize, load: bool) !void {
+        if (rows == 0 or rows > e.o.max_ctx or saved.len < e.referenceBytes(rows)) return error.BadReferenceRows;
+        errdefer e.stream.synchronize() catch {};
+        var at = saved.ptr;
+        for (e.state_bufs, e.state_bytes) |live, bytes| at = try e.moveRows(live, at, bytes, load);
+        for (0..cfg.layers) |li| if (e.c.full_attention[li]) {
+            for (e.kv_bb[li]) |live| at = try e.moveRows(live, at, rows * kv_row, load);
+        };
+        for (e.kv_tw) |pair| for (pair) |live| {
+            at = try e.moveRows(live, at, rows * kv_row, load);
+        };
+        try e.stream.synchronize();
+    }
+
+    fn moveRows(e: *Engine, live: u64, saved: u64, bytes: usize, load: bool) !u64 {
+        if (load) try e.copyRow(saved, live, bytes) else try e.copyRow(live, saved, bytes);
+        return saved + bytes;
+    }
+
     /// Teacher forcing for parity: each pick goes to `picks`, then `frame`'s value (device int32 [11]) replaces it.
     pub const Force = struct { frame: u64, picks: u64 };
 
