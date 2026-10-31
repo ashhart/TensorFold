@@ -6,11 +6,18 @@ pub const Scale = struct { format: enum { f16, packed_signs }, input: pk.Info, o
 pub const Projection = union(enum) {
     dense: struct { weight: pk.Info, scales: Scale, k: usize, n: usize },
     exl3: struct { trellis: pk.Info, scales: Scale, geometry: exl3.Group, marker: ?pk.Info },
+    /// The release's dense FP8: E4M3 [N,K] with one E8M0 scale per 32x32 block.
+    fp8_block: struct { weight: pk.Info, scale: pk.Info, k: usize, n: usize },
+    /// The release's routed experts: I8 [N,K/2] holding two E2M1 codes a byte, one E8M0 scale per 32 of K.
+    mxfp4: struct { weight: pk.Info, scale: pk.Info, k: usize, n: usize },
+    /// The release's Engram table: E4M3 [rows,256] with one E8M0 scale per row and 32 columns.
+    fp8_rows: struct { weight: pk.Info, scale: pk.Info, k: usize, n: usize },
     /// CUDA's current rank image executes only trellises with F16 scales. Refuse after shared admission.
     pub fn cudaGroup(p: Projection) !exl3.Group {
         return switch (p) {
             .dense => error.UnsupportedDenseProjection,
             .exl3 => |g| if (g.scales.format == .f16) g.geometry else error.UnsupportedPackedScales,
+            .fp8_block, .mxfp4, .fp8_rows => error.UnsupportedProjection,
         };
     }
 };
@@ -31,10 +38,40 @@ fn scales(p: *const pk.Pack, prefix: []const u8, k: usize, n: usize, allow_signs
     }
     return error.MissingTensor;
 }
+/// The release's E8M0 scales of `{prefix}` when they have exactly the wanted shape; null when they do not.
+fn releaseScale(p: *const pk.Pack, prefix: []const u8, want: []const usize) !?pk.Info {
+    var buf: [256]u8 = undefined;
+    const s = (try p.scale(prefix, &buf)) orelse return error.MissingTensor;
+    if (!s.is(.f8_e8m0, want)) return null;
+    return s;
+}
+/// The release's stored weights: E4M3 with a 32x32 block scale, or I8 holding two E2M1 codes a byte.
+fn release(p: *const pk.Pack, prefix: []const u8, w: pk.Info) !Projection {
+    if (w.rank != 2 or w.shape[0] == 0 or w.shape[1] == 0) return error.UnsupportedProjection;
+    const n = w.shape[0];
+    const k = w.shape[1];
+    switch (w.dtype) {
+        .f8_e4m3 => {
+            const blocked = &.{ (n + 31) / 32, (k + 31) / 32 };
+            const rows = &.{ n, (k + 31) / 32 };
+            if (try releaseScale(p, prefix, blocked)) |s| return .{ .fp8_block = .{ .weight = w, .scale = s, .k = k, .n = n } };
+            if (try releaseScale(p, prefix, rows)) |s| return .{ .fp8_rows = .{ .weight = w, .scale = s, .k = k, .n = n } };
+            return error.BadScales;
+        },
+        .i8 => {
+            // two E2M1 codes a byte: the stored width is half the logical K and the scales run one per 32 of it
+            if (k % 2 != 0) return error.BadScales;
+            const s = (try releaseScale(p, prefix, &.{ n, k / 16 })) orelse return error.BadScales;
+            return .{ .mxfp4 = .{ .weight = w, .scale = s, .k = k * 2, .n = n } };
+        },
+        else => return error.UnsupportedProjection,
+    }
+}
 /// Kept dense weights take precedence, matching the Metal matrixAny contract. They still require rotation scales.
 pub fn read(p: *const pk.Pack, prefix: []const u8) !Projection {
     var buf: [256]u8 = undefined;
     if (p.get(try std.fmt.bufPrint(&buf, "{s}.weight", .{prefix}))) |w| {
+        if (w.dtype == .f8_e4m3 or w.dtype == .i8) return release(p, prefix, w);
         if (w.dtype != .bf16 or w.rank != 2 or w.shape[0] == 0 or w.shape[1] == 0) return error.UnsupportedProjection;
         return .{ .dense = .{ .weight = w, .k = w.shape[1], .n = w.shape[0], .scales = try scales(p, prefix, w.shape[1], w.shape[0], false) } };
     }
