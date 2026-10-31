@@ -53,6 +53,7 @@ fn server(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Step.Compi
 pub fn serverOn(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, engine: *std.Build.Module) *std.Build.Step.Compile {
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "version", @import("../../build.zig.zon").version);
+    build_options.addOption(bool, "is_release", false);
     build_options.addOption(bool, "slide_test_hooks", false);
     const name = "tensorfold-dsv41";
     const api = engine.import_table.get("engine_api").?;
