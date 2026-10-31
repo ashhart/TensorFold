@@ -16,7 +16,7 @@ const log = std.log.scoped(.mcdma);
 /// MCDMA_FABRIC_ROCE (mcdma_fabric.h): a ConnectX link; abi.thunderbolt is the other kind MCDMA reports.
 pub const roce: c_int = 1;
 /// The path MTUs MCDMA's queue pairs take; it would quietly run any other value at 1024.
-const path_mtus = [_]c_int{ 1024, 2048, 4096 };
+pub const path_mtus = [_]c_int{ 1024, 2048, 4096 };
 /// Additive ABI 1 (mcdma_fabric.h): MCDMA_FABRIC_PEER and the first reason once the peer is down for good.
 const PeerStatus = *const fn (*const abi.Peer, ?[*]u8, usize) callconv(.c) c_int;
 
