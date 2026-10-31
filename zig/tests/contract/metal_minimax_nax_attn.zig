@@ -458,24 +458,15 @@ pub const Prompt = struct {
         @memcpy(t.point, want);
     }
 
-    /// The range's half width and the cut's wider side plus bf16's rounding; gate 4 allows the rounding alone.
+    /// The range's allowance (attention_range.allowBf16); gate 4's exact sums allow the rounding alone.
     pub fn bounds(t: *Prompt, want: []const f64, _: []const f64, allow: []f64) !void {
-        for (allow, want, t.half, t.down, t.up) |*l, w, h, d, u| {
-            if (t.fill == .stress) {
-                l.* = c.boundExact(spec(), w);
-            } else if (!std.math.isFinite(w)) {
-                l.* = 0;
-            } else if (!std.math.isFinite(h)) {
-                l.* = std.math.floatMax(f64); // scores too far apart for the range's first order: any finite value
-            } else l.* = h + @max(d, u) + 0x1p-8 * (@abs(w) + h + @max(d, u)) + 0x1p-133;
-        }
+        for (allow, want, t.half, t.down, t.up) |*l, w, h, d, u| l.* = if (t.fill == .stress) c.boundExact(spec(), w) else ar.allowBf16(w, h, d, u);
     }
 
-    /// Each bf16 output within its range's ends as rounded, the cut on its own side; gate 4 and wide ranges are open.
+    /// Each bf16 output within its range's rounded ends, the cut on its own side; gate 4's stress fill is open.
     pub fn intervals(t: *Prompt, low: []f64, high: []f64) !void {
         for (low, high, t.point, t.half, t.down, t.up) |*l, *hi, p, h, d, u| {
-            const open = t.fill == .stress or !std.math.isFinite(p) or !std.math.isFinite(h);
-            const e = if (open) [2]f64{ -std.math.floatMax(f64), std.math.floatMax(f64) } else ar.ends(p, h, d, u);
+            const e = if (t.fill == .stress) [2]f64{ -std.math.floatMax(f64), std.math.floatMax(f64) } else ar.intervalBf16(p, h, d, u);
             l.* = e[0];
             hi.* = e[1];
         }

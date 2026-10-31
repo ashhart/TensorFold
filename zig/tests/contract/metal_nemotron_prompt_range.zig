@@ -8,14 +8,15 @@ const g = contract.gates;
 const ar = contract.attention_range;
 const D = old.D;
 
-/// P with the tensor units' cut; P spread over [0, 1] with values in [0, 1); that case's range without the cut.
-const Case = enum { cut, spread, cutless };
+/// P with the tensor units' cut; P spread over [0, 1]; that case without the cut; a non-finite value at a masked key.
+const Case = enum { cut, spread, cutless, masked };
 
 fn name(k: Case) []const u8 {
     return switch (k) {
         .cut => "metal nemotron attention prompt nax",
         .spread => "metal nemotron attention prompt nax, P spread over [0, 1]",
         .cutless => "control: metal nemotron attention prompt nax, P spread, its range without the operand cut",
+        .masked => "metal nemotron attention prompt nax, a non-finite value at a key masked in its tile",
     };
 }
 
@@ -41,8 +42,8 @@ const Probe = struct {
 
     pub fn prepare(p: *Probe, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         if (!try p.inner.prepare(shape, fill, seed)) return false;
-        if (p.case != .cut and fill == .random) p.spread(seed);
-        if (fill == .nonfinite) p.maskedInf();
+        if ((p.case == .spread or p.case == .cutless) and fill == .random) p.spread(seed);
+        if (p.case == .masked and fill == .nonfinite) p.maskedInf();
         return true;
     }
 
@@ -120,25 +121,16 @@ const Probe = struct {
         @memcpy(p.point, want);
     }
 
-    /// The range's half width and the cut's wider side plus bf16's rounding; gate 4's exact sums keep the exact bound.
+    /// The range's allowance (attention_range.allowBf16); gate 4's exact sums keep the exact bound.
     pub fn bounds(p: *Probe, want: []const f64, _: []const f64, allow: []f64) !void {
         const s = old.spec(.prompt, 1, false);
-        for (want, allow, p.half, p.down, p.up) |w, *l, h, d, u| {
-            if (p.inner.stress) {
-                l.* = c.boundExact(s, w);
-            } else if (!std.math.isFinite(w)) {
-                l.* = 0;
-            } else if (!std.math.isFinite(h)) {
-                l.* = std.math.floatMax(f64); // scores too far apart for the range's first order: any finite value
-            } else l.* = h + @max(d, u) + 0x1p-8 * (@abs(w) + h + @max(d, u)) + 0x1p-133;
-        }
+        for (want, allow, p.half, p.down, p.up) |w, *l, h, d, u| l.* = if (p.inner.stress) c.boundExact(s, w) else ar.allowBf16(w, h, d, u);
     }
 
-    /// Each bf16 output within its range's ends as rounded, the cut on its own side; gate 4 and wide ranges are open.
+    /// Each bf16 output within its range's rounded ends, the cut on its own side; gate 4's stress fill is open.
     pub fn intervals(p: *Probe, low: []f64, high: []f64) !void {
         for (low, high, p.point, p.half, p.down, p.up) |*l, *hi, pt, h, d, u| {
-            const open = p.inner.stress or !std.math.isFinite(pt) or !std.math.isFinite(h);
-            const e = if (open) [2]f64{ -std.math.floatMax(f64), std.math.floatMax(f64) } else ar.ends(pt, h, d, u);
+            const e = if (p.inner.stress) [2]f64{ -std.math.floatMax(f64), std.math.floatMax(f64) } else ar.intervalBf16(pt, h, d, u);
             l.* = e[0];
             hi.* = e[1];
         }
@@ -154,7 +146,7 @@ pub const Suite = struct {
     kernels: *std.ArrayList(g.Kernel),
     probes: std.ArrayList(*Probe) = .empty,
 
-    /// Only on the tensor units: before the M5, nax.h's fragments keep P whole and attention_ref's bound stays.
+    /// Only on the tensor units, where the cut was measured; before the M5, attention_ref's bound stays.
     pub fn collect(s: *Suite, only: ?[]const u8) !void {
         if (!s.device.tensorUnits()) return;
         for (std.enums.values(Case)) |k| {
@@ -166,7 +158,10 @@ pub const Suite = struct {
             try s.probes.append(s.a, p);
             var spec = old.spec(.prompt, 1, false);
             spec.name = name(k);
-            if (k != .cutless) spec.known = .{ .gate = .nonfinite, .finding = "a non-finite value at a key masked for a row of its tile reaches that row as NaN (P = 0 times Inf inside the P x V mma)" };
+            if (k == .masked) {
+                spec.served = spec.served[0..1];
+                spec.known = .{ .gate = .nonfinite, .finding = "a non-finite value at a key masked for a row of its tile reaches that row as NaN (P = 0 times Inf inside the P x V mma)" };
+            }
             try s.kernels.append(s.a, .{ .spec = spec, .ctx = p, .vt = &vt, .control = if (k == .cutless) .shapes else null });
         }
     }
