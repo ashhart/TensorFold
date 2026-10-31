@@ -17,9 +17,13 @@ pub const Error = error{
     UnqualifiedLlamaCheckpoint,
 } || std.json.ParseError(std.json.Scanner);
 
-/// A checkpoint checked against HF on the device, by the geometry its config names.
+/// What a qualified checkpoint was checked for: served on its own, or drafting for a served one.
+pub const Role = enum { served, drafter };
+
+/// A checkpoint checked on the device, by the geometry its config names.
 pub const Qualified = struct {
     name: []const u8,
+    role: Role,
     hidden: usize,
     intermediate: usize,
     layers: usize,
@@ -32,7 +36,9 @@ pub const Qualified = struct {
 
 /// The checkpoints the family serves; another `llama` checkpoint is refused until it has been checked the same way.
 pub const qualified = [_]Qualified{
-    .{ .name = "Nanbeige4.3-33B", .hidden = 7168, .intermediate = 22016, .layers = 52, .heads = 56, .kv_heads = 8, .vocab = 166912, .theta = 120000000, .context = 524288 },
+    .{ .name = "Nanbeige4.3-33B", .role = .served, .hidden = 7168, .intermediate = 22016, .layers = 52, .heads = 56, .kv_heads = 8, .vocab = 166912, .theta = 120000000, .context = 524288 },
+    // its drafts are checked by the served model's windows, its own logits not against HF
+    .{ .name = "Nanbeige4.1-3B", .role = .drafter, .hidden = 2560, .intermediate = 10496, .layers = 32, .heads = 20, .kv_heads = 4, .vocab = 166144, .theta = 70000000, .context = 262144 },
 };
 
 /// Attention's score scale, 1 / sqrt(head_dim).
@@ -244,6 +250,31 @@ test "only the qualified checkpoint is admitted: a llama of another geometry par
         const d = try parse(gpa, bytes);
         try std.testing.expectError(error.UnqualifiedLlamaCheckpoint, d.qualification());
     }
+}
+
+test "Nanbeige4.1-3B's geometry is admitted as a drafter, not as a served model" {
+    const gpa = std.testing.allocator;
+    var bytes = try gpa.dupe(u8, fixture);
+    defer gpa.free(bytes);
+    const geometry = .{
+        .{ "\"hidden_size\": 7168", "\"hidden_size\": 2560" },
+        .{ "\"intermediate_size\": 22016", "\"intermediate_size\": 10496" },
+        .{ "\"num_hidden_layers\": 52", "\"num_hidden_layers\": 32" },
+        .{ "\"num_attention_heads\": 56", "\"num_attention_heads\": 20" },
+        .{ "\"num_key_value_heads\": 8", "\"num_key_value_heads\": 4" },
+        .{ "\"vocab_size\": 166912", "\"vocab_size\": 166144" },
+        .{ "\"rope_theta\": 120000000", "\"rope_theta\": 70000000" },
+        .{ "\"max_position_embeddings\": 524288", "\"max_position_embeddings\": 262144" },
+    };
+    inline for (geometry) |k| {
+        const next = try std.mem.replaceOwned(u8, gpa, bytes, k[0], k[1]);
+        try std.testing.expect(!std.mem.eql(u8, next, bytes));
+        gpa.free(bytes);
+        bytes = next;
+    }
+    const q = try (try parse(gpa, bytes)).qualification();
+    try std.testing.expectEqualStrings("Nanbeige4.1-3B", q.name);
+    try std.testing.expectEqual(Role.drafter, q.role);
 }
 
 test "other layouts are refused by name" {
