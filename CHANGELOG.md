@@ -143,6 +143,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Flash Next's MTP head norms its 10,240-value rows with tiled launches on CUDA sm_120 and sm_121 and split wave launches on HIP gfx1201, storing the same bytes as before: the norm kernel runs 1.4x to 2.5x faster on a GB10 and 4x to 5x on a Radeon AI PRO R9700 at 1 to 16 rows (#1702, fixes #1689). Thanks to @laudney.
 
 ## 1.2.0
+- Flash Next on CUDA: the hyper-connection read-out takes the prompt tiles from 128 rows instead of 64, so a large shared decode round keeps the row kernels, the same bits for less time.
 
 - CUDA EXL3: the dense projections zero their split-K counters only when the buffer grows, on the calls' stream, instead of before every 128-row block of every call; each block's last program already resets its own counter. Replies are token-identical, and on a GB10 with the Qwen3.8-27B 3.50 bpw pack decode is 0.4% to 0.9% faster (#1475). Thanks to @diwakergupta.
 
