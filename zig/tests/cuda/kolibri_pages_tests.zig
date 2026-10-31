@@ -3,6 +3,7 @@ const std = @import("std");
 const core = @import("core");
 const lanes = @import("lanes");
 const kolibri1 = @import("kolibri1");
+const prompt_pages = @import("prompt_pages");
 const check = @import("check.zig");
 const Gpu = check.Gpu;
 
@@ -17,7 +18,9 @@ const mark: u32 = 1000;
 
 const Out = struct { ids: []u32, logits: []u8, cached: u64 };
 /// Each case plain, then drafted (copies from the prompt's text, verified as chain windows by tree attention).
-const Result = struct { solo: [2][lens.len]Out, sampled: Out, pair: [2][2][]u32, resumed: [2]Out };
+const Result = struct { solo: [2][lens.len]Out, sampled: Out, pair: [2][2][]u32, resumed: [2]Out, stored: ?[2]Out = null };
+/// TF_KV_SHARE: where the store keeps the second prompt, its last whole page short of the end.
+const page_mark: u32 = 1024;
 
 const Keep = struct {
     kb: *be.Kolibri,
@@ -83,11 +86,11 @@ fn pair(gpu: Gpu, engine: *lanes.Engine, kb: *be.Kolibri, a: []const u32, b: []c
     return .{ ra, try gpa.dupe(u32, sb.emitted()) };
 }
 
-/// Paged: every stream ended, so nothing is promised and every page is free again.
+/// Paged: every stream ended, so nothing is promised and every page is free again (or, TF_KV_SHARE, the store's).
 fn idle(kb: *const be.Kolibri) !void {
     const p = kb.pool orelse return;
     const c = p.census();
-    try check.expect(p.idle() and c.free == c.total, "kolibri pages: the idle pool holds promised {d}, free {d} of {d}", .{ c.promised, c.free, c.total });
+    try check.expect(p.idle() and (c.free == c.total or kb.prompts != null), "kolibri pages: the idle pool holds promised {d}, free {d} of {d}", .{ c.promised, c.free, c.total });
 }
 
 fn free(gpa: std.mem.Allocator, o: Out) void {
@@ -100,6 +103,7 @@ fn freeResult(gpa: std.mem.Allocator, r: Result) void {
     free(gpa, r.sampled);
     for (r.pair) |p| for (p) |x| gpa.free(x);
     for (r.resumed) |o| free(gpa, o);
+    if (r.stored) |st| for (st) |o| free(gpa, o);
 }
 
 /// One model with linear or paged full layers through every case, plain and drafted.
@@ -114,7 +118,9 @@ fn pass(gpu: Gpu, model: []const u8, paged: bool, prompts: [lens.len][]const u32
         var sequential: usize = 0;
         for (lens) |n| sequential += be.pagesFor(n, count);
         try check.expect(sequential > pool, "kolibri pages: the solo runs take more pages than the pool holds", .{});
-        try native.attach(loaded.ctx, 1, pool);
+        const kept = if (try core.kv_prompts.sharing() > 0) page_mark / kolibri1.forward.page_tokens + snap.blobPages(kb.m, page_mark, page_mark) else 0;
+        try native.attach(loaded.ctx, 1, pool + 2 * kept); // TF_KV_SHARE: room for the store's pages and rings, the scrub's too
+
         kb.shufflePages(0x6e4);
     }
     var cfg = try lanes.Config.init(gpa, loaded.facts, loaded.rows, loaded.rows - 1);
@@ -124,6 +130,7 @@ fn pass(gpu: Gpu, model: []const u8, paged: bool, prompts: [lens.len][]const u32
     defer engine.deinit();
 
     var r: Result = undefined;
+    r.stored = null;
     var made: usize = 0;
     errdefer for (0..made) |i| free(gpa, r.solo[i / lens.len][i % lens.len]);
     for (0..2) |d| for (prompts, &r.solo[d]) |p, *o| {
@@ -145,7 +152,27 @@ fn pass(gpu: Gpu, model: []const u8, paged: bool, prompts: [lens.len][]const u32
         free(gpa, try run(gpu, &engine, kb, .{ .prompt = scrub, .drafts = false }, 2)); // two: a reply of one ends at its first token
         r.resumed[d] = try run(gpu, &engine, kb, .{ .prompt = prompts[1], .drafts = d == 1, .reuse = .{ .saved = v, .at = mark } }, count);
     }
+    if (paged and try core.kv_prompts.sharing() > 0) r.stored = try stored(gpu, &engine, kb, prompts[1], scrub, count);
     return r;
+}
+
+/// TF_KV_SHARE: the store keeps the prompt at its page mark, then each resume adopts its pages (plain, drafted).
+fn stored(gpu: Gpu, engine: *lanes.Engine, kb: *be.Kolibri, prompt: []const u32, scrub: []const u32, count: u32) ![2]Out {
+    const gpa = gpu.gpa;
+    const x = (try prompt_pages.Adapter.open(native, gpa, kb, kolibri1.forward.page_tokens, 4)) orelse return error.NoPool;
+    var closed = false;
+    defer if (!closed) x.close();
+    free(gpa, try run(gpu, engine, kb, .{ .prompt = prompt, .drafts = false }, 2));
+    var out: [2]Out = undefined;
+    for (0..2) |d| {
+        free(gpa, try run(gpu, engine, kb, .{ .prompt = scrub, .drafts = false }, 2));
+        out[d] = try run(gpu, engine, kb, .{ .prompt = prompt, .drafts = d == 1 }, count);
+    }
+    x.close();
+    closed = true;
+    const p = kb.pool.?;
+    try check.expect(p.idle() and p.census().free == p.census().total, "kolibri pages: the store gave every page back when it closed", .{});
+    return out;
 }
 
 fn same(bad: *usize, what: []const u8, a: []const u8, b: []const u8) void {
@@ -197,7 +224,13 @@ pub fn pages(gpu: Gpu, rest: []const []const u8) !void {
         same(&bad, try std.fmt.bufPrint(&what, "paged resumed == paged fresh, {s}", .{how[d]}), std.mem.sliceAsBytes(paged.resumed[d].ids), std.mem.sliceAsBytes(paged.solo[d][1].ids));
         if (paged.resumed[d].cached != mark or linear.resumed[d].cached != mark) bad += 1;
     }
+    if (paged.stored) |st| for (0..2) |d| {
+        same(&bad, try std.fmt.bufPrint(&what, "TF_KV_SHARE resumed at page {d}, {s}: reply", .{ page_mark, how[d] }), std.mem.sliceAsBytes(linear.solo[d][1].ids), std.mem.sliceAsBytes(st[d].ids));
+        same(&bad, try std.fmt.bufPrint(&what, "TF_KV_SHARE resumed at page {d}, {s}: last-row logits", .{ page_mark, how[d] }), linear.solo[d][1].logits, st[d].logits);
+        if (st[d].cached != page_mark) bad += 1;
+        std.debug.print("RESULT kolibri pages TF_KV_SHARE resume {s}: {d} rows from the store's pages (want {d})\n", .{ how[d], st[d].cached, page_mark });
+    };
     same(&bad, "drafted == plain (greedy, paged)", std.mem.sliceAsBytes(paged.solo[1][1].ids), std.mem.sliceAsBytes(paged.solo[0][1].ids));
     try check.expect(bad == 0, "kolibri pages: {d} checks failed", .{bad});
-    check.pass("kolibri pages: full layers in shuffled pool pages give the linear caches' replies and logits ({d} tokens), plain and drafted, shared rounds and a kept state's resume included, ended streams' pages reused", .{count});
+    check.pass("kolibri pages: full layers in shuffled pool pages give the linear caches' replies and logits ({d} tokens), plain and drafted, shared rounds and a kept state's resume included{s}, ended streams' pages reused", .{ count, if (paged.stored != null) " (and the TF_KV_SHARE store's)" else "" });
 }
