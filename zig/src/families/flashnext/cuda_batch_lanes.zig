@@ -62,8 +62,7 @@ pub fn putLane(tab: []u8, i: usize, row0: usize, pos: usize, rows: usize) void {
     for (0..rows) |r| ints[4 * lanes_n + row0 + r] = @intCast(i);
 }
 
-/// Whether a round's `n` rows take attn: two or more lanes of decode rows (the per-lane path's next-tile-ahead chunks),
-/// text on contiguous caches, one block-score buffer, our glue owning every launch.
+/// Whether a round's `n` rows take attn: two to 32 lanes of decode rows, text on contiguous caches, our glue.
 pub fn useAttn(pass: anytype, n: usize) bool {
     if (comptime !@hasDecl(@TypeOf(pass.tri), "lanesGlue")) return false;
     if (!attnLanesOn() or pass.lanes.len < 2 or pass.lanes.len > lanes_n or n > att_rows) return false;
@@ -88,8 +87,7 @@ pub fn stageAttn(pass: anytype) !void {
     try pass.upload(pass.s.lanes_tab, tab);
 }
 
-/// The round's rows in one launch a kernel: each row's rope and cache writes, its lane's pooling and scores, then every
-/// row's selection, attention and merge, the per-lane passes' programs over the round's rows.
+/// The round's attention in one launch a kernel, the per-lane passes' programs over the round's rows.
 pub fn attn(pass: anytype, lw: anytype, ai: usize, pa: u64) !void {
     if (comptime !@hasDecl(@TypeOf(pass.tri), "lanesGlue")) return error.NativeGlueRequired;
     const s = pass.s;

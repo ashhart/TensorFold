@@ -1,7 +1,4 @@
-// A shared round's lanes in one launch a kernel (TF_FLASHNEXT_ATTN_LANES=1): each row finds its stream by table and
-// runs the one-stream program. LP: this layer's [lane][4] cache addresses (keys, values, indexer keys, pooled keys);
-// LI: MAX ints each of the lanes' positions less their first row, positions, rows and first rows, then each row's lane.
-// Rows index the round's buffers as the round's rows, so the queries, lists and partials are the per-lane passes'.
+// One-launch lanes: LP [lane][4] cache addresses; LI positions less first rows, positions, rows, first rows, row lanes.
 #pragma once
 
 namespace fn_lanes {
@@ -55,8 +52,7 @@ extern "C" __global__ void __launch_bounds__(256)
     fn_attn_merge_body(PO, PM, PL, fn_lanes::shift(LI, fn_lanes::lane(LI, blockIdx.x)), OUT, NKR, SPR, H, HK, G, CH, NCH, QSA);
 }
 
-// qsa_tile::scores<8, 4> over a shared round's lanes, lane blockIdx.z: its rows' queries and scores at its first row
-// (rows NB apart in the round's block scores), its own pooled keys and position.
+// qsa_tile::scores<8, 4> over a shared round's lanes, lane blockIdx.z, on that lane's rows and pooled keys.
 extern "C" __global__ void __launch_bounds__(256)
     fn_qsa_scores_lanes(const __nv_bfloat16* __restrict__ IQ, const unsigned long long* __restrict__ LP,
                         const int* __restrict__ LI, float* __restrict__ SC, int NB, int RATIO, int TOP) {

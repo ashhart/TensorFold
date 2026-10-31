@@ -47,8 +47,7 @@ pub const att_rows: usize = 256;
 pub const pocket_stride: usize = 128;
 /// Prompt rows one fused attention launch takes (their selections staged att_rows at a time).
 pub const fused_rows: usize = 1024;
-/// A shared round's lanes the attention launches take at once (flashnext_attn.cu's fn_lanes MAX) and their table:
-/// each attention layer's [lane][4] cache addresses, then the lanes' ints and each of up to att_rows rows' lane.
+/// Lanes one attention launch takes at once (fn_lanes MAX); the table: [lane][4] cache addresses, ints, row lanes.
 pub const attn_lanes: usize = 32;
 pub const lanes_ptrs: usize = (wt.layers_n / 4) * attn_lanes * 4 * 8;
 pub const lanes_bytes: usize = lanes_ptrs + (4 * attn_lanes + att_rows) * 4;
