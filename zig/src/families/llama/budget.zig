@@ -43,6 +43,22 @@ pub const Ledger = struct {
     }
 };
 
+/// A stream's admission inside the limit: peak checked, kept states (and an unfitting restore) trimmed, then made.
+pub fn admitStream(l: *Ledger, need: u64, h: anytype) !void {
+    var peak = h.growth();
+    if (!l.fits(need + peak)) {
+        h.shed(need + peak);
+        peak = h.growth();
+    }
+    if (!l.fits(need + peak)) return error.LaneMemory;
+    const room = l.left() - need - peak;
+    if (h.restoreBytes() > room) h.dropRestore();
+    h.trim(room);
+    l.take(need);
+    errdefer l.give(need);
+    try h.prepare();
+}
+
 /// A drafter's caches beside a stream's: `streams` of them, each the window and a decode window of rows more.
 pub const Drafted = struct { c: *const cfg.Config, streams: u32 };
 
@@ -89,6 +105,83 @@ test "llama budget: two drafted requests that each fit alone are refused togethe
     // the first ends: its stream's caches are given back, its drafter slot kept (and still counted)
     l.give(st.cacheBytes(&c, capacity));
     try std.testing.expect(l.fits(one));
+}
+
+/// A fake prompt store, drafter slot and allocation recorder: the most the ledger and the kept states held at once.
+const Fake = struct {
+    const gib: u64 = 1 << 30;
+    l: *Ledger,
+    kept: u64, // kept prompt states but the restore entry
+    restore: u64, // the entry this stream resumes from (0: none)
+    old: u64, // the drafter slot's cache before it grows
+    grown: u64, // its cache after
+    copy: u64, // the old state's copy while it moves
+    fail: bool = false,
+    peak: u64 = 0,
+
+    fn note(f: *Fake) void {
+        f.peak = @max(f.peak, f.l.held + f.kept + f.restore);
+    }
+    fn growth(f: *Fake) u64 {
+        return f.grown + f.copy;
+    }
+    fn shed(_: *Fake, _: u64) void {}
+    fn restoreBytes(f: *Fake) u64 {
+        return f.restore;
+    }
+    fn dropRestore(f: *Fake) void {
+        f.restore = 0;
+    }
+    fn trim(f: *Fake, bytes: u64) void {
+        f.kept = @min(f.kept, bytes -| f.restore);
+        f.note();
+    }
+    fn prepare(f: *Fake) !void {
+        f.l.take(f.grown);
+        f.note();
+        if (f.fail) {
+            f.l.give(f.grown);
+            return error.OutOfMemory;
+        }
+        f.l.take(f.copy);
+        f.note();
+        f.l.give(f.copy);
+        f.l.give(f.old);
+    }
+};
+
+test "llama budget: admission trims kept prompt states before it allocates, so its peak stays inside the budget" {
+    const g = Fake.gib;
+    // 8 GiB, slot 1 and kept states 3 held; allocating the stream's 3 + 2.5 before the trim would reach 9.5 GiB
+    var l: Ledger = .{ .limit = 8 * g };
+    l.take(g);
+    var f: Fake = .{ .l = &l, .kept = 2 * g, .restore = g, .old = g, .grown = 2 * g, .copy = g / 2 };
+    try admitStream(&l, 3 * g, &f);
+    try std.testing.expect(f.peak <= l.limit);
+    try std.testing.expectEqual(g, f.restore); // the protected entry stayed
+    try std.testing.expectEqual(5 * g, l.held); // the stream's 3 and the grown slot's 2
+    // a restore entry that cannot stay beside the stream's peak is dropped, not kept past the budget
+    var l2: Ledger = .{ .limit = 8 * g };
+    l2.take(g);
+    var f2: Fake = .{ .l = &l2, .kept = g, .restore = 2 * g, .old = g, .grown = 2 * g, .copy = g / 2 };
+    try admitStream(&l2, 3 * g, &f2);
+    try std.testing.expect(f2.peak <= l2.limit);
+    try std.testing.expectEqual(@as(u64, 0), f2.restore);
+}
+
+test "llama budget: a failed drafter growth gives every byte back, and its peak stays inside the budget" {
+    const g = Fake.gib;
+    var l: Ledger = .{ .limit = 8 * g };
+    l.take(g);
+    var f: Fake = .{ .l = &l, .kept = 2 * g, .restore = g, .old = g, .grown = 2 * g, .copy = g / 2, .fail = true };
+    try std.testing.expectError(error.OutOfMemory, admitStream(&l, 3 * g, &f));
+    try std.testing.expect(f.peak <= l.limit);
+    try std.testing.expectEqual(g, l.held); // the stream's caches and the growth given back; the old slot still held
+    // a peak that cannot fit at all waits before anything is trimmed or made
+    var f2: Fake = .{ .l = &l, .kept = 2 * g, .restore = g, .old = g, .grown = 6 * g, .copy = g };
+    try std.testing.expectError(error.LaneMemory, admitStream(&l, 3 * g, &f2));
+    try std.testing.expectEqual(@as(u64, 2 * g), f2.kept);
+    try std.testing.expectEqual(@as(u64, 0), f2.peak);
 }
 
 test "llama budget: a share of RAM less the weights, a set limit capped at the working set, bad text refused" {
