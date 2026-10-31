@@ -6,6 +6,7 @@ const st = @import("state.zig");
 const fwd = @import("forward.zig");
 const Model = @import("model.zig").Model;
 const snapshot = @import("snapshot.zig");
+const budget = @import("budget.zig");
 const row = @import("../step5/backend.zig").row;
 const gpu_full = lanes.gpu_full;
 const be = lanes.backend;
@@ -22,6 +23,14 @@ const Flight = struct { end: u64, cb: mtl.CommandBuffer };
 /// The prompt cache's room beside the streams: its kept states fit in `bytes`, never evicting `restoring`.
 pub const Room = struct { ctx: *anyopaque, fit: *const fn (ctx: *anyopaque, bytes: u64, restoring: ?*anyopaque, prompt: []const u32) void };
 
+/// The drafter's slots in the same ledger: a stream's slot growth (with its copy), made, and kept slots shed to fit.
+pub const Slots = struct {
+    ctx: *anyopaque,
+    growth: *const fn (ctx: *anyopaque, stream: *lanes.Stream, capacity: usize) u64,
+    prepare: *const fn (ctx: *anyopaque, stream: *lanes.Stream, capacity: usize) anyerror!void,
+    shed: *const fn (ctx: *anyopaque, bytes: u64) void,
+};
+
 pub const Metal = struct {
     gpa: std.mem.Allocator,
     model: *Model,
@@ -30,8 +39,9 @@ pub const Metal = struct {
     prompt: st.Scratch, // prompt chunks
     caches: std.AutoHashMapUnmanaged(*lanes.Stream, *st.Cache) = .empty,
     follow: ?mtl.ResidencySet.Follow = null,
-    held: u64 = 0, // bytes the streams' caches hold
-    room: ?Room = null, // the prompt cache, which takes what the streams leave of the budget
+    ledger: budget.Ledger, // every cache's bytes against the one budget: the streams' and the drafter's slots
+    room: ?Room = null, // the prompt cache, which takes what the ledger leaves
+    slots: ?Slots = null, // --drafter's slots, admitted with their streams
     tokens: mtl.Buffer, // u32 [ring]
     next: u64 = 0, // the next free token slot
     landed: u64 = 0, // slots below it are written
@@ -47,7 +57,7 @@ pub const Metal = struct {
         errdefer prompt.deinit();
         const tokens = try model.device.buffer(ring * 4, mtl.ResourceOptions.shared);
         errdefer tokens.deinit();
-        out.* = .{ .gpa = gpa, .model = model, .options = options, .scratch = scratch, .prompt = prompt, .tokens = tokens, .values = try gpa.alloc(f32, model.config.vocab) };
+        out.* = .{ .gpa = gpa, .model = model, .options = options, .scratch = scratch, .prompt = prompt, .tokens = tokens, .values = try gpa.alloc(f32, model.config.vocab), .ledger = .{ .limit = options.budget } };
         return out;
     }
 
@@ -193,18 +203,25 @@ pub const Metal = struct {
         if (stream.images.len > 0) return error.LlamaHasNoImageTower;
         const capacity = ids.len + stream.max_new + 1;
         const need = st.cacheBytes(&self.model.config, capacity);
-        if (self.held + need > self.options.budget) {
-            std.log.warn("llama: a {d}-token stream needs {d:.1} GiB of caches; {d:.1} of {d:.1} GiB are held", .{ capacity, gib(need), gib(self.held), gib(self.options.budget) });
+        // the drafter's slot for this stream grows to the same capacity now, in the same ledger: kept slots give way
+        var extra: u64 = if (self.slots) |d| d.growth(d.ctx, stream, capacity) else 0;
+        if (!self.ledger.fits(need + extra)) if (self.slots) |d| {
+            d.shed(d.ctx, need + extra);
+            extra = d.growth(d.ctx, stream, capacity);
+        };
+        if (!self.ledger.fits(need + extra)) {
+            std.log.warn("llama: a {d}-token stream needs {d:.1} GiB of caches; {d:.1} of {d:.1} GiB are held", .{ capacity, gib(need + extra), gib(self.ledger.held), gib(self.ledger.limit) });
             return error.LaneMemory; // the lane host queues the stream until another finishes, or fails it alone
         }
-        self.held += need;
-        errdefer self.held -= need;
+        self.ledger.take(need);
+        errdefer self.ledger.give(need);
+        if (self.slots) |d| try d.prepare(d.ctx, stream, capacity);
         if (stream.reuse.saved) |saved| { // a state the stream cannot hold beside its caches: freed now, no restore
             const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
-            if (self.held + snap.bytes > self.options.budget) snap.free();
+            if (!self.ledger.fits(snap.bytes)) snap.free();
         }
         // kept states give way first
-        if (self.room) |r| r.fit(r.ctx, self.options.budget - self.held, stream.reuse.saved, ids);
+        if (self.room) |r| r.fit(r.ctx, self.ledger.left(), stream.reuse.saved, ids);
         const cache = try self.createCache(capacity);
         errdefer self.gpa.destroy(cache);
         errdefer cache.deinit();
@@ -355,10 +372,10 @@ pub const Metal = struct {
         const self = cast(ptr);
         self.drain() catch |err| std.log.err("llama: a step in flight failed at release: {s}", .{@errorName(err)});
         if (self.caches.fetchRemove(stream)) |entry| {
-            self.held -= st.cacheBytes(&self.model.config, entry.value.capacity);
+            self.ledger.give(st.cacheBytes(&self.model.config, entry.value.capacity));
             entry.value.deinit();
             self.gpa.destroy(entry.value);
-            if (self.room) |r| r.fit(r.ctx, self.options.budget - self.held, null, &.{});
+            if (self.room) |r| r.fit(r.ctx, self.ledger.left(), null, &.{});
         }
     }
 
