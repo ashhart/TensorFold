@@ -13,6 +13,8 @@ const usage =
     \\                                                             (16) after the prompt: every row's logits bit for bit,
     \\                                                             failing on any difference or a missed planted row
     \\tf-llama-run <model> <tokens.json> bench <n>                 the prompt, then n one-row steps: wall, encode, GPU ms
+    \\tf-llama-run <model> <tokens.json> draft <drafter>,<n>       greedy's n tokens through the drafter's windows: the same
+    \\                                                             tokens, with the rounds, drafts kept and tok/s
     \\
 ;
 
@@ -44,8 +46,13 @@ pub fn main(init: std.process.Init) !void {
         forced = try std.json.parseFromSlice([]u32, gpa, text, .{});
         forced_out = args[4][comma + 1 ..];
     }
-    const steps: usize = if (std.mem.eql(u8, mode, "greedy") or std.mem.eql(u8, mode, "bench")) try std.fmt.parseInt(usize, args[4], 10) else if (forced) |f| f.value.len else 0;
-    var cache = try fl.state.Cache.init(m.device, &m.config, prompt.len + steps + 1);
+    var drafter_dir: []const u8 = "";
+    if (std.mem.eql(u8, mode, "draft")) {
+        const comma = std.mem.indexOfScalar(u8, args[4], ',') orelse return error.ExpectedDrafterCommaSteps;
+        drafter_dir = args[4][0..comma];
+    }
+    const steps: usize = if (std.mem.eql(u8, mode, "greedy") or std.mem.eql(u8, mode, "bench")) try std.fmt.parseInt(usize, args[4], 10) else if (drafter_dir.len > 0) try std.fmt.parseInt(usize, args[4][drafter_dir.len + 1 ..], 10) else if (forced) |f| f.value.len else 0;
+    var cache = try fl.state.Cache.init(m.device, &m.config, prompt.len + steps + fl.state.window_rows + 1);
     defer cache.deinit();
     var small = try fl.state.Scratch.init(m.device, &m.config, fl.state.batch_rows);
     defer small.deinit();
@@ -146,6 +153,7 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("llama bench at {d}: {d:.3} ms a step wall, {d:.3} encode, {d:.3} GPU\n", .{ prompt.len, wall, tm.encode * per, tm.gpu * per });
         return;
     }
+    if (drafter_dir.len > 0) return draft(gpa, init.io, m, &small, &cache, drafter_dir, prompt, steps);
     if (!std.mem.eql(u8, mode, "greedy")) {
         std.debug.print("{s}", .{usage});
         return error.UnknownMode;
@@ -165,6 +173,58 @@ pub fn main(init: std.process.Init) !void {
     try std.json.Stringify.value(picks, .{}, &w.writer);
     std.debug.print("{s}\n", .{w.written()});
     std.debug.print("llama greedy: prompt {d} tokens {d} ms, {d} steps {d:.1} tok/s\n", .{ prompt.len, ttft / std.time.ns_per_ms, steps, @as(f64, @floatFromInt(steps - 1)) * 1e9 / @as(f64, @floatFromInt(decode)) });
+}
+
+/// Greedy decoding through the drafter's windows after the prompt: drafts kept while the target's rows agree.
+fn draft(gpa: std.mem.Allocator, io: std.Io, m: *fl.Model, small: *fl.state.Scratch, cache: *fl.state.Cache, dir: []const u8, prompt: []const u32, steps: usize) !void {
+    const vocab = m.config.vocab;
+    const dm = try fl.Model.loadOn(gpa, io, dir, m.queue);
+    const d = try fl.drafter.Drafter.init(gpa, dm, .{ .capacity = prompt.len + steps + 2 * fl.state.window_rows, .streams = 1 });
+    defer d.deinit();
+    try d.warm();
+    const p = try fl.drafter.Drafter.make(d, gpa, prompt, m.config.eos[0..m.config.eos_count]);
+    defer fl.drafter.Drafter.free(d, p);
+    var context: std.ArrayList(u32) = .empty;
+    defer context.deinit(gpa);
+    try context.appendSlice(gpa, prompt);
+    var picks: std.ArrayList(u32) = .empty;
+    defer picks.deinit(gpa);
+    var pending = argmax(cache.logits.slice(u16, vocab));
+    try picks.append(gpa, pending);
+    try context.append(gpa, pending);
+    var rounds: usize = 0;
+    var offered: usize = 0;
+    var landed: usize = 0;
+    var ids: [fl.state.window_rows]u32 = undefined;
+    const t0 = now();
+    while (picks.items.len < steps) {
+        const drafts = try p.propose(context.items, fl.state.window_rows - 1);
+        ids[0] = pending;
+        @memcpy(ids[1..][0..drafts.len], drafts);
+        const rows = 1 + drafts.len;
+        try fl.forward.run(m, small, cache, ids[0..rows], .{ .all = true });
+        const all = small.logits_all.slice(u16, rows * vocab);
+        var keep: usize = 0;
+        while (keep < drafts.len and argmax(all[keep * vocab ..][0..vocab]) == drafts[keep]) keep += 1;
+        pending = argmax(all[keep * vocab ..][0..vocab]);
+        cache.len += keep + 1;
+        try picks.appendSlice(gpa, drafts[0..keep]);
+        try picks.append(gpa, pending);
+        try context.appendSlice(gpa, drafts[0..keep]);
+        try context.append(gpa, pending);
+        p.round(@intCast(rows), @intCast(keep));
+        rounds += 1;
+        offered += drafts.len;
+        landed += keep;
+    }
+    const decode = now() - t0;
+    picks.shrinkRetainingCapacity(steps);
+    var w: std.Io.Writer.Allocating = .init(gpa);
+    defer w.deinit();
+    try std.json.Stringify.value(picks.items, .{}, &w.writer);
+    std.debug.print("{s}\n", .{w.written()});
+    const per_round = @as(f64, @floatFromInt(rounds + landed)) / @as(f64, @floatFromInt(@max(rounds, 1)));
+    std.debug.print("llama draft: prompt {d} tokens, {d} tokens in {d} rounds ({d:.2} a round), {d} of {d} drafts kept, {d:.1} tok/s; step {d:.2} ms, rounds {d:.1} ms at 4 rows, {d:.1} at 8\n", .{ prompt.len, steps, rounds, per_round, landed, offered, @as(f64, @floatFromInt(steps - 1)) * 1e9 / @as(f64, @floatFromInt(decode)), d.step_ms orelse 0, d.rounds.at(4), d.rounds.at(8) });
 }
 
 /// The prompt in prompt_rows chunks (the tensor-unit path past 16 rows), as the backend feeds it.

@@ -1,4 +1,4 @@
-//! Llama on Metal served by the lane host: one-row rounds and copy-drafted windows, contexts within the budget.
+//! Llama on Metal served by the lane host: one-row rounds, windows of --drafter's or copied drafts, contexts budgeted.
 const std = @import("std");
 const mtl = @import("metal");
 const api = @import("engine_api");
@@ -12,6 +12,7 @@ const Host = struct {
     io: std.Io,
     model: *fl.Model,
     metal: *fl.backend.Metal,
+    drafter: ?*fl.drafter.Drafter = null, // --drafter: a smaller Llama proposing each stream's next tokens
     warm: mtl.keepalive.Target = undefined, // the residency set's, or the bare queue's, for the lane host's idle ticker
     resident: ?Resident = null, // weights and scratch kept wired between requests, when they fit the 70% limit
     config: lanes.Config,
@@ -29,6 +30,7 @@ const Host = struct {
         h.config.deinit(h.gpa);
         fl.residency.drop(h);
         h.metal.deinit();
+        if (h.drafter) |d| d.deinit();
         h.model.deinit();
         h.gpa.destroy(h);
     }
@@ -40,28 +42,60 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     const model = fl.Model.load(gpa, io, o.dir) catch |err| {
         problem.* = switch (err) {
             error.LlamaNeedsTensorUnits => "the native Llama engine needs Metal 4 tensor units (an M5 or later) for its prompt GEMM and attention: this Mac's GPU (M1 to M4) has none",
-            error.UnqualifiedLlamaCheckpoint => try std.fmt.allocPrint(a, "the native Llama engine serves only the checkpoints checked against Hugging Face ({s}): this llama checkpoint's geometry is not one of them", .{qualifiedNames()}),
+            error.UnqualifiedLlamaCheckpoint => try std.fmt.allocPrint(a, "the native Llama engine serves only the checkpoints checked against Hugging Face ({s}): this llama checkpoint's geometry is not one of them", .{qualifiedNames(.served)}),
             else => try std.fmt.allocPrint(a, "the native Llama engine cannot load this checkpoint ({s})", .{@errorName(err)}),
         };
         return null;
     };
     errdefer model.deinit();
+    const q = try model.config.qualification();
+    if (q.role != .served) {
+        problem.* = try std.fmt.allocPrint(a, "{s} is checked only as a drafter (--drafter): the native Llama engine serves {s}", .{ q.name, qualifiedNames(.served) });
+        model.deinit();
+        return null;
+    }
     // refusals that return null free what they hold themselves: errdefer runs only for errors
+    var drafter_model: ?*fl.Model = null;
+    errdefer if (drafter_model) |dm| dm.deinit();
+    if (o.drafts) if (o.drafter) |dir| {
+        // a smaller Llama on the model's tokens, its commands on the model's queue (one residency set for both)
+        const dm = fl.Model.loadOn(gpa, io, dir, model.queue) catch |err| {
+            problem.* = try std.fmt.allocPrint(a, "--drafter: the native Llama engine cannot load {s} ({s}); it takes a smaller Llama checkpoint on the served model's tokenizer", .{ dir, @errorName(err) });
+            model.deinit();
+            return null;
+        };
+        if (try drafterRefusal(a, dir, &model.config, &dm.config, o.drafter_bits)) |why| {
+            problem.* = why;
+            dm.deinit();
+            model.deinit();
+            return null;
+        }
+        drafter_model = dm;
+    };
     var ram: u64 = 0;
     var len: usize = @sizeOf(u64);
     if (std.c.sysctlbyname("hw.memsize", &ram, &len, null, 0) != 0) ram = 0;
     const text: ?[]const u8 = if (std.c.getenv("LLAMA_LOAD_LIMIT_GB")) |v| std.mem.span(v) else null;
     // the decode window's and the prompt chunk's buffers
-    const scratch: u64 = fl.state.scratchBytes(&model.config, fl.state.batch_rows) + fl.state.scratchBytes(&model.config, fl.state.prompt_rows);
+    var scratch: u64 = fl.state.scratchBytes(&model.config, fl.state.batch_rows) + fl.state.scratchBytes(&model.config, fl.state.prompt_rows);
+    var most: usize = @min(model.config.context, fl.state.max_capacity);
+    if (drafter_model) |dm| {
+        scratch += dm.checkpoint.residentBytes() + fl.drafter.Drafter.fixedBytes(&dm.config);
+        most = @min(most, dm.config.context); // the drafter drafts within its own trained window
+    }
     const budget = fl.budget.caches(ram, model.device.maxWorkingSet(), text, model.checkpoint.residentBytes() + scratch) catch {
+        if (drafter_model) |dm| dm.deinit();
         model.deinit();
         problem.* = "LLAMA_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 75% of RAM";
         return null;
     };
-    const fits = fl.budget.longest(&model.config, budget, @min(model.config.context, fl.state.max_capacity));
+    const streams: u32 = @max(o.lanes, 1);
+    const drafted: ?fl.budget.Drafted = if (drafter_model) |dm| .{ .c = &dm.config, .streams = streams } else null;
+    const fits = fl.budget.longestWith(&model.config, drafted, budget, most);
     const window: i64 = o.context orelse @intCast(fits);
     if (window < 1 or window > fits) {
-        problem.* = try std.fmt.allocPrint(a, "--context {d}: this Mac's Llama caches fit {d} tokens under its load limit (75% of RAM, or LLAMA_LOAD_LIMIT_GB)", .{ window, fits });
+        problem.* = try std.fmt.allocPrint(a, "--context {d}: this Mac's Llama caches fit {d} tokens under its load limit (75% of RAM, or LLAMA_LOAD_LIMIT_GB){s}", .{ window, fits, if (drafter_model != null) ", the drafter's caches and trained window counted" else "" });
+        if (drafter_model) |dm| dm.deinit();
         model.deinit(); // after the message, so a failed allocation leaves the model to the errdefer
         return null;
     }
@@ -72,9 +106,19 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.io = io;
     h.model = model;
     h.resident = null;
-    h.metal = try fl.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = @max(o.lanes, 1), .budget = budget });
+    h.drafter = null;
+    h.metal = try fl.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = streams, .budget = budget });
     errdefer h.metal.deinit();
     try h.metal.warm();
+    if (drafter_model) |dm| {
+        const capacity: usize = @as(usize, @intCast(window)) + fl.state.window_rows;
+        h.drafter = try fl.drafter.Drafter.init(gpa, dm, .{ .capacity = capacity, .streams = streams });
+        drafter_model = null; // the drafter's now
+        try h.drafter.?.warm();
+        const dc = &dm.config;
+        std.log.info("llama drafter: {s}: {d} layers, {s}, {d:.2} GiB of weights, {d} caches of {d} tokens ({d:.2} GiB each) as requests take them", .{ o.drafter.?, dc.layers, if (dc.bits == fl.config.bf16) "bf16" else if (dc.bits == 8) "8-bit" else "4-bit", @as(f64, @floatFromInt(dm.checkpoint.residentBytes())) / (1 << 30), streams, capacity, @as(f64, @floatFromInt(fl.state.cacheBytes(dc, capacity))) / (1 << 30) });
+    }
+    errdefer if (h.drafter) |d| d.deinit();
     h.config = try lanes.Config.init(gpa, h.metal.facts(), fl.state.window_rows, fl.state.window_rows - 1);
     errdefer h.config.deinit(gpa);
     h.clock = .{ .io = io };
@@ -95,16 +139,35 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     errdefer if (h.cache) |*store| store.deinit();
     try fl.residency.hold(h);
     errdefer fl.residency.drop(h);
+    if (h.drafter) |d| h.host.proposers = .{ .ctx = d, .make = fl.drafter.Drafter.make, .free = fl.drafter.Drafter.free };
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     try h.host.start();
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
 }
 
-/// The qualified checkpoints' names, comma-separated.
-fn qualifiedNames() []const u8 {
+/// The names of the checkpoints qualified for `role`, comma-separated.
+fn qualifiedNames(comptime role: fl.config.Role) []const u8 {
     comptime var names: []const u8 = "";
-    inline for (fl.config.qualified, 0..) |q, i| names = names ++ (if (i == 0) "" else ", ") ++ q.name;
+    inline for (fl.config.qualified) |q| if (q.role == role) {
+        names = names ++ (if (names.len == 0) "" else ", ") ++ q.name;
+    };
     return names;
+}
+
+/// Why a drafter cannot serve: not the width --drafter-bits names, or tokens that are not the model's.
+fn drafterRefusal(a: std.mem.Allocator, dir: []const u8, target: *const fl.config.Config, drafter: *const fl.config.Config, bits: u8) !?[]const u8 {
+    const width: []const u8 = if (drafter.bits == fl.config.bf16) "bf16" else if (drafter.bits == 8) "MLX 8-bit" else "MLX 4-bit";
+    switch (bits) {
+        0 => if (drafter.bits != fl.config.bf16) return try std.fmt.allocPrint(a, "--drafter-bits 0 serves the drafter's bf16 release; {s} is {s}", .{ dir, width }),
+        4 => if (drafter.bits != 4) return try std.fmt.allocPrint(a, "--drafter-bits 4 (the default) serves an MLX 4-bit drafter as published (mlx_lm's layout, groups of 64); {s} is {s}: pass --drafter-bits 0 for a bf16 release", .{ dir, width }),
+        else => return try std.fmt.allocPrint(a, "--drafter-bits {d}: a Llama drafter is served at 4 (an MLX 4-bit checkpoint) or 0 (bf16)", .{bits}),
+    }
+    var same = drafter.vocab <= target.vocab and drafter.eos_count == target.eos_count;
+    if (same) for (drafter.eos[0..drafter.eos_count]) |e| {
+        if (!target.isEos(e)) same = false;
+    };
+    if (!same) return try std.fmt.allocPrint(a, "--drafter: {s} does not share the model's tokens (vocabulary {d} against {d}, or other end tokens); a drafter is a smaller Llama on the served model's tokenizer", .{ dir, drafter.vocab, target.vocab });
+    return null;
 }
 
 /// Metal.room's fit: the kept states' budget is what the streams leave, at most the cap; the least valuable go first.

@@ -27,8 +27,15 @@ pub const Model = struct {
     gemm: [2][2]mtl.Pipeline,
     /// RoPE's inverse frequencies: fp32 [head_dim / 2].
     inv: mtl.Buffer,
+    /// The queue is another model's (a drafter's commands behind the served model's, in its residency set).
+    shared_queue: bool,
 
     pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !*Model {
+        return loadOn(gpa, io, dir, null);
+    }
+
+    /// As `load`, on `queue` when given (the model then never releases it).
+    pub fn loadOn(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, queue: ?mtl.Queue) !*Model {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const m = try gpa.create(Model);
@@ -39,8 +46,9 @@ pub const Model = struct {
         errdefer m.device.deinit();
         // prompt chunks' GEMM and attention run on Metal 4 tensor units: an M5 or later
         if (!m.device.tensorUnits()) return error.LlamaNeedsTensorUnits;
-        m.queue = try m.device.queue();
-        errdefer m.queue.deinit();
+        m.shared_queue = queue != null;
+        m.queue = queue orelse try m.device.queue();
+        errdefer if (!m.shared_queue) m.queue.deinit();
         m.checkpoint = ck.Checkpoint.init(gpa);
         errdefer m.checkpoint.deinit();
         const files = try shards.shardFiles(gpa, io, dir);
@@ -110,7 +118,7 @@ pub const Model = struct {
         for (m.glue) |p| p.deinit();
         m.weights.deinit(m.gpa);
         m.checkpoint.deinit();
-        m.queue.deinit();
+        if (!m.shared_queue) m.queue.deinit();
         m.device.deinit();
         m.gpa.destroy(m);
     }
