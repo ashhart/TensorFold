@@ -388,8 +388,7 @@ extern "C" __global__ void __launch_bounds__(1024) fn_qsa_select(const float* __
     fn_qsa_select_body(sc, pos0, ids, nkr, spr, nb, idw, top, ratio);
 }
 
-// fn_qsa_select over a shared round's rows in one launch (flashnext_attn.cu's lane table LI): row r of every lane's
-// rows reads its lane's position less its first row, so the rows, scores and lists stay the round's own.
+// fn_qsa_select over a shared round's rows in one launch: each row reads its lane's position from LI.
 extern "C" __global__ void __launch_bounds__(1024) fn_qsa_select_lanes(const float* __restrict__ sc,
                                                                        const int* __restrict__ LI, int* __restrict__ ids,
                                                                        int* __restrict__ nkr, int* __restrict__ spr, int nb,

@@ -118,7 +118,7 @@ fn cint(v: usize) c_int {
 const Fns = struct { g: *const flash.Glue, select: cuda.Function, select_lanes: cuda.Function };
 const Way = enum { lanes, one_launch, swapped_table };
 
-/// The round through `way`, its outputs and every cache: `.swapped_table` is the one-launch path with two lanes' caches crossed.
+/// The round through `way`, its outputs and every cache: `.swapped_table` crosses two lanes' caches.
 fn launch(gpu: check.Gpu, s: cuda.Stream, k: Fns, f: Fixture, way: Way, a: std.mem.Allocator) ![]const u8 {
     var rig = rig_.Rig{ .gpu = gpu, .s = s };
     defer {

@@ -1,4 +1,4 @@
-//! A shared round's attention in one launch a kernel (flashnext_attn_lanes.cuh): measured resources for all five SM targets.
+//! A shared round's attention in one launch a kernel: measured resources for all five SM targets.
 const registry = @import("registry.zig");
 pub const records = [_]registry.CudaRecord{
     .{ .launch = .{ .name = "flashnext_attn fn_attn_prep_lanes", .symbol = "fn_attn_prep_lanes", .image = "flashnext_attn", .threads = 256 }, .usage = .{ .{ .regs = 32, .static = 128, .bound = 256 }, .{ .regs = 38, .static = 128, .bound = 256 }, .{ .regs = 38, .static = 128, .bound = 256 }, .{ .regs = 36, .static = 128, .bound = 256 }, .{ .regs = 36, .static = 128, .bound = 256 }, } },

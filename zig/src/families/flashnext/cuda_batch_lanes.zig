@@ -113,8 +113,7 @@ pub fn stage(pass: anytype) !void {
     try pass.upload(pass.s.lanes_tab, tab);
 }
 
-/// The round's rows in one launch a kernel: each row's rope and cache writes, its lane's pooling and scores, then every
-/// row's selection, attention and merge, the per-lane passes' programs over the round's rows.
+/// The round's attention in one launch a kernel, the per-lane passes' programs over the round's rows.
 pub fn attn(pass: anytype, lw: anytype, ai: usize, pa: u64) !void {
     if (comptime !@hasDecl(@TypeOf(pass.tri), "lanesGlue")) return error.NativeGlueRequired;
     const s = pass.s;
