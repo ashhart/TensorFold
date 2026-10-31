@@ -110,8 +110,7 @@ pub fn attention(ptr: *anyopaque, epoch: u64, p: op.Attention) !op.View {
 fn attendRows(b: *Backend, e: @import("metal").ComputeEncoder, p: op.Attention, context: op.Context, caches: []const @import("runtime_backend.zig").Cache, first: u32, rows: u32, result: op.View) !void {
     const context_rows: u32 = @intCast(context.end - context.begin);
     const keys = context_rows + rows;
-    // The context is contiguous in the ring when it does not wrap, and the cache holds 16 rows past the window: the
-    // query rows' own keys and values then go in the free slots after it and attention reads the cache in place.
+    // An unwrapped context is contiguous in the cache: the query rows go behind it and attention reads in place.
     const at: u32 = @intCast(context.begin % b.config.window);
     const in_place = at + context_rows <= b.config.window and at + keys <= b.config.window + 16;
     var k: Ref = undefined;
