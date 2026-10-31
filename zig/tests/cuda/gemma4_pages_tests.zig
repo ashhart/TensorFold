@@ -95,12 +95,12 @@ fn pass(gpu: Gpu, model: []const u8, drafter: ?[]const u8, paged: bool, prompts:
     if (drafter) |dir| opened = try native.openDrafter(gpa, gpu.io, loaded.ctx, dir, 4);
     const gb = loaded.target;
     if (paged) { // the two widest requests at once; the rest lease pages the ended ones gave back, in a shuffled order
-        const pool = be.pagesFor(lens[0], count) + be.pagesFor(lens[1], count);
+        const pool = g4.pages.pagesFor(lens[0], count) + g4.pages.pagesFor(lens[1], count);
         var sequential: usize = 0;
-        for (lens) |n| sequential += be.pagesFor(n, count);
+        for (lens) |n| sequential += g4.pages.pagesFor(n, count);
         try check.expect(sequential > pool, "gemma4 pages: the solo runs take more pages than the pool holds", .{});
         try native.attach(loaded.ctx, 1, pool);
-        gb.shufflePages(0x6e4);
+        g4.pages.shufflePages(gb, 0x6e4);
     }
     var drafted: ?lanes.drafted.Drafted = if (opened) |o| try lanes.drafted.Drafted.init(gpa, loaded.backend, o.drafter) else null;
     defer if (drafted) |*d| d.deinit();
