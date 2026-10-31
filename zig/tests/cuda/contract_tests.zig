@@ -9,6 +9,7 @@ const rows_k = @import("contract_rows.zig");
 const tail_k = @import("contract_norms_tail.zig");
 const tiles_k = @import("contract_rms_tiles.zig");
 const dory_k = @import("contract_dory.zig");
+const exl3_k = @import("contract_exl3.zig");
 const router_k = @import("contract_router.zig");
 const mm_k = @import("contract_mm.zig");
 const prefill_many_k = @import("contract_qmm_prefill_many.zig");
@@ -162,6 +163,9 @@ pub fn run(gpu: check.Gpu) !void {
     var dory: dory_k.Dory = .{};
     defer dory.deinit();
     try dory.add(gpu, s, &norms, mods[5], &kernels);
+    var exl3_set: exl3_k.Set = .{};
+    defer exl3_set.deinit();
+    try exl3_set.add(gpu, s, &kernels);
     var logits = router_k.Logits{ .rig = .{ .gpu = gpu, .s = s }, .f = try mods[0].function("tf_nemo_router") };
     defer logits.deinit();
     var logits_tiles = router_k.Logits{ .rig = .{ .gpu = gpu, .s = s }, .f = logits.f, .tiles = try mods[0].function("tf_nemo_router_tiles") };

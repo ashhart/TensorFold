@@ -142,6 +142,7 @@ fn dense(s: *Sink, kit: ?*Kit, ck: *core.Checkpoint, prefix: []const u8, mod: []
         .stride_k = st.k,
         .stride_nb = st.nb,
     };
+    if (cuda.exl3.variantIndex(w.halves, w.codebook, cuda.exl3.planOf(w).wk) == null) return error.UnsupportedQwenQuantization;
     if (kit) |x| try x.dense.reserve(s.e.stream, w);
     return .{ .x3 = w };
 }
@@ -282,6 +283,19 @@ fn all(s: *Sink, ck: *core.Checkpoint) !void {
             .up = try dense(s, kit, ck, p, "mlp.up_proj", g.intermediate, g.hidden),
             .down = try dense(s, kit, ck, p, "mlp.down_proj", g.hidden, g.intermediate),
         } };
+        if (kit) |k| try reserveGroups(k, s.e.stream, l.*);
+    }
+}
+
+/// Grouped decode launches (q/k/v, qkv/z, gate/up) need their members' scratch together before any graph capture.
+pub fn reserveGroups(k: *Kit, st: cuda.Stream, l: engine.Layer) !void {
+    switch (l.mixer) {
+        .delta => |m| try k.dense.reserveGroup(st, &.{ m.qkv.x3, m.z.x3 }),
+        .attention => |m| try k.dense.reserveGroup(st, &.{ m.q.x3, m.k.x3, m.v.x3 }),
+    }
+    switch (l.mlp) {
+        .dense => |m| try k.dense.reserveGroup(st, &.{ m.gate.x3, m.up.x3 }),
+        .moe => {},
     }
 }
 

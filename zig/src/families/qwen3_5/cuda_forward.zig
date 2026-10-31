@@ -97,8 +97,12 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
         if (e.learning) |k| try k.post(i, e.h, e.x, total);
         switch (l.mlp) {
             .dense => |m| {
-                try e.projAgain(m.gate, e.x, e.gate, total, prompt);
-                try e.projAgain(m.up, e.x, e.up, total, prompt);
+                if (m.gate == .x3) {
+                    try e.projMany(&.{ m.gate, m.up }, e.x, &.{ e.gate, e.up }, total, prompt); // one EXL3 group launch
+                } else {
+                    try e.projAgain(m.gate, e.x, e.gate, total, prompt);
+                    try e.projAgain(m.up, e.x, e.up, total, prompt);
+                }
                 if (e.learning) |k| try k.mlp(i, e.gate, e.up, total);
                 const n: c_longlong = @intCast(total * g.intermediate);
                 try e.run(e.fns.mlp_act, .{ (total * g.intermediate + 1023) / 1024, 1, 1 }, .{ 256, 1, 1 }, .{ e.gate, e.up, e.act, n, t_params, @as(c_int, @intCast(g.intermediate)), sums });

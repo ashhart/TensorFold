@@ -100,26 +100,57 @@ __device__ __forceinline__ void step_lane_words(const uint32_t (&raw)[8 * lane_w
     for (int q = 0; q < lane_words<K2>(); ++q) w[q] = raw[j * lane_words<K2>() + q];
 }
 
+// Programmatic dependent launch: wait for the previous kernel's writes here (a no-op without it); trigger the next.
+__device__ __forceinline__ void pdl_wait() {
+#if __CUDA_ARCH__ >= 900
+    asm volatile("griddepcontrol.wait;\n" ::: "memory");
+#endif
+}
+__device__ __forceinline__ void pdl_trigger() {
+#if __CUDA_ARCH__ >= 900
+    asm volatile("griddepcontrol.launch_dependents;\n" ::: "memory");
+#endif
+}
+
 // xh = fp16(((x * suh) @ H) / sqrt(128)): one warp per 128 columns, one block of 4 warps per 512.
-extern "C" __global__ void __launch_bounds__(128) tf_exl3_rot_in(RotInArgs a) {
+__device__ __forceinline__ void rot_in_body(const void* x, int x_dtype, const half* suh, half* xh, int kdim) {
+    pdl_trigger();
+    pdl_wait();
     const int blk = blockIdx.x * 4 + (threadIdx.x >> 5), row = blockIdx.y, lane = threadIdx.x & 31;
-    if (blk * 128 >= a.k) return;
+    if (blk * 128 >= kdim) return;
     const int k = blk * 128 + 4 * lane;
     float v[4], s[4];
-    load4(a.x, a.x_dtype, (size_t)row * a.k + k, v);
-    load4(a.suh, F16, k, s);
+    load4(x, x_dtype, (size_t)row * kdim + k, v);
+    load4(suh, F16, k, s);
 #pragma unroll
     for (int j = 0; j < 4; ++j) v[j] *= s[j];
     fwht128(v, lane);
 #pragma unroll
     for (int j = 0; j < 4; ++j) v[j] *= HAD_SCALE;
-    store4(a.xh, F16, (size_t)row * a.k + k, v);
+    store4(xh, F16, (size_t)row * kdim + k, v);
+}
+
+extern "C" __global__ void __launch_bounds__(128) tf_exl3_rot_in(RotInArgs a) {
+    rot_in_body(a.x, a.x_dtype, a.suh, a.xh, a.k);
+}
+
+// Up to three layers that read the same rows (a projection group): member blockIdx.z's rotation, one launch.
+struct RotGroupArgs {
+    const void* x;
+    const half* suh[3];
+    half* xh[3];
+    int x_dtype;
+    int m, k;
+};
+
+extern "C" __global__ void __launch_bounds__(128) tf_exl3_rot_group(RotGroupArgs a) {
+    rot_in_body(a.x, a.x_dtype, a.suh[blockIdx.z], a.xh[blockIdx.z], a.k);
 }
 
 
 // One program: (N / 128) * SK blocks, split-major like a (N / 128, SK) grid, WK warps each.
 template <int K2, int CB, int WK>
-__device__ __forceinline__ void linear_body(LinearArgs a) {
+__device__ __forceinline__ void linear_body(const LinearArgs& a, int bid) {
     constexpr int TW = tile_words<K2>(), LW = lane_words<K2>();
     constexpr bool PF = K2 <= 12;                             // the next k step's words load while this one decodes
     constexpr int SR = 8 * LW;
@@ -127,13 +158,16 @@ __device__ __forceinline__ void linear_body(LinearArgs a) {
     __shared__ int last;
     const int M = a.m, K = a.k, N = a.n, SK = a.sk, NB = N >> 7;
     const int RH = imin(M, 8);                                // rows of red a warp
-    const int nb = (int)blockIdx.x % NB, split = (int)blockIdx.x / NB;
+    const int nb = bid % NB, split = bid / NB;
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const int g = lane >> 2, t = lane & 3;
     const int per_warp = (K >> 4) / SK / WK;
     const int kt0 = split * (per_warp * WK) + warp * per_warp;
     const uint32_t* tiles = a.t + nb * a.stride_nb;
     const int col0 = nb * 128;
+
+    // (prefetching the first k steps to L2 before the wait measured a millisecond slower a token on GB10)
+    pdl_wait();
 
     for (int m0 = 0, pass = 0; m0 < M; m0 += 16, ++pass) {
         const int R = imin(16, M - m0);
@@ -184,6 +218,7 @@ __device__ __forceinline__ void linear_body(LinearArgs a) {
             }
         }
 
+        if (m0 == 0) pdl_trigger();                  // the next kernel may launch: only the reduction is left
         // the warps' sums, added in warp order, rows 0-7 of the pass and then rows 8-15
         for (int rlo = 0; rlo < R; rlo += 8) {
             const int rn = imin(R - rlo, 8);
@@ -252,15 +287,163 @@ __device__ __forceinline__ void linear_body(LinearArgs a) {
     }
 }
 
+// 17-128 rows (mid-M): a program decodes each k step's tiles once for P 16-row passes, in linear_body's order and bits.
+template <int K2, int CB, int WK, int P>
+__device__ __forceinline__ void linear_mpg_body(LinearArgs a) {
+    constexpr int TW = tile_words<K2>(), LW = lane_words<K2>();
+    constexpr bool PF = K2 <= 12;
+    constexpr int SR = 8 * LW;
+    extern __shared__ __align__(16) float red[];              // WK * RH * 128 floats
+    __shared__ int last;
+    const int M = a.m, K = a.k, N = a.n, SK = a.sk, NB = N >> 7;
+    const int RH = imin(M, 8);
+    const int G = (M + 16 * P - 1) / (16 * P), grp = (int)blockIdx.x % G, nb = (int)blockIdx.x / G, split = blockIdx.y;
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const int g = lane >> 2, t = lane & 3;
+    const int per_warp = (K >> 4) / SK / WK;
+    const int kt0 = split * (per_warp * WK) + warp * per_warp;
+    const uint32_t* tiles = a.t + nb * a.stride_nb;
+    const int col0 = nb * 128;
+    const int mg = grp * 16 * P, pg = grp * P;
+
+    float acc[P][8][2][4];
+#pragma unroll
+    for (int q = 0; q < P; ++q)
+#pragma unroll
+        for (int i = 0; i < 8; ++i)
+#pragma unroll
+            for (int h = 0; h < 2; ++h)
+#pragma unroll
+                for (int c = 0; c < 4; ++c) acc[q][i][h][c] = 0.f;
+
+    // each pass's rows for the mma, clamped inside the buffer (rows past M are computed and dropped)
+    const half* x0[P];
+    const half* x1[P];
+#pragma unroll
+    for (int q = 0; q < P; ++q) {
+        const int mq = imin(mg + 16 * q, M - 1), Rq = imin(16, M - mq) < 1 ? 1 : imin(16, M - mq);
+        const int r0 = mq + (g < Rq ? g : Rq - 1), r1 = mq + (g + 8 < Rq ? g + 8 : Rq - 1);
+        x0[q] = static_cast<const half*>(a.xh) + (size_t)r0 * K;
+        x1[q] = static_cast<const half*>(a.xh) + (size_t)r1 * K;
+    }
+    const uint32_t* tile = tiles + (size_t)kt0 * a.stride_k;
+    uint32_t cur[PF ? SR : 1], nxt[PF ? SR : 1];
+    if constexpr (PF) load_step<K2>(tile, lane, cur);
+#pragma unroll 1
+    for (int i = 0; i < per_warp; ++i) {
+        const int kt = kt0 + i;
+        uint32_t u[P][4];
+#pragma unroll
+        for (int q = 0; q < P; ++q) {
+            u[q][0] = __ldg(reinterpret_cast<const uint32_t*>(x0[q] + kt * 16 + 2 * t));
+            u[q][2] = __ldg(reinterpret_cast<const uint32_t*>(x0[q] + kt * 16 + 2 * t + 8));
+            u[q][1] = __ldg(reinterpret_cast<const uint32_t*>(x1[q] + kt * 16 + 2 * t));
+            u[q][3] = __ldg(reinterpret_cast<const uint32_t*>(x1[q] + kt * 16 + 2 * t + 8));
+        }
+        if constexpr (PF) {
+            if (i + 1 < per_warp) load_step<K2>(tile + (size_t)(i + 1) * a.stride_k, lane, nxt);
+        }
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            uint32_t w[LW];
+            if constexpr (PF) step_lane_words<K2>(cur, j, w);
+            else ldg_lane_words<K2>(tile + (size_t)i * a.stride_k + j * TW, lane, w);
+            uint32_t b0[2], b1[2];
+            decode_lane<K2, CB>(w, lane, b0, b1);
+#pragma unroll
+            for (int q = 0; q < P; ++q) {
+                mma16816(acc[q][j][0], u[q], b0);
+                mma16816(acc[q][j][1], u[q], b1);
+            }
+        }
+        if constexpr (PF) {
+#pragma unroll
+            for (int q = 0; q < SR; ++q) cur[q] = nxt[q];
+        }
+    }
+
+#pragma unroll
+    for (int q = 0; q < P; ++q) {
+        const int m0 = mg + 16 * q, pass = pg + q;
+        if (m0 >= M) break;
+        const int R = imin(16, M - m0);
+        // the warps' sums, added in warp order, rows 0-7 of the pass and then rows 8-15
+        for (int rlo = 0; rlo < R; rlo += 8) {
+            const int rn = imin(R - rlo, 8);
+            __syncthreads();
+            if (g < RH) {
+#pragma unroll
+                for (int i = 0; i < 8; ++i)
+#pragma unroll
+                    for (int h = 0; h < 2; ++h) {
+                        const int col = i * 16 + h * 8 + 2 * t;
+                        *reinterpret_cast<float2*>(red + (warp * RH + g) * 128 + col) =
+                            rlo ? make_float2(acc[q][i][h][2], acc[q][i][h][3])
+                                : make_float2(acc[q][i][h][0], acc[q][i][h][1]);
+                    }
+            }
+            __syncthreads();
+            if (SK == 1) {
+                for (int r = warp; r < rn; r += WK) {
+                    float v[4];
+                    const float4 s4 = *reinterpret_cast<const float4*>(red + r * 128 + 4 * lane);
+                    v[0] = s4.x; v[1] = s4.y; v[2] = s4.z; v[3] = s4.w;
+#pragma unroll
+                    for (int w = 1; w < WK; ++w) {
+                        const float4 o = *reinterpret_cast<const float4*>(red + (w * RH + r) * 128 + 4 * lane);
+                        v[0] += o.x; v[1] += o.y; v[2] += o.z; v[3] += o.w;
+                    }
+                    finish(v, lane, a.svh, a.bias, col0 + 4 * lane);
+                    store4(a.y, a.y_dtype, (size_t)(m0 + rlo + r) * N + col0 + 4 * lane, v);
+                }
+            } else {
+                for (int idx = threadIdx.x; idx < rn * 32; idx += WK * 32) {
+                    const int r = idx >> 5, c = 4 * (idx & 31);
+                    float4 s4 = *reinterpret_cast<const float4*>(red + r * 128 + c);
+#pragma unroll
+                    for (int w = 1; w < WK; ++w) {
+                        const float4 o = *reinterpret_cast<const float4*>(red + (w * RH + r) * 128 + c);
+                        s4.x += o.x; s4.y += o.y; s4.z += o.z; s4.w += o.w;
+                    }
+                    *reinterpret_cast<float4*>(a.z + ((size_t)split * M + m0 + rlo + r) * N + col0 + c) = s4;
+                }
+            }
+        }
+        if (SK > 1) {
+            __threadfence();
+            __syncthreads();
+            if (threadIdx.x == 0) last = atomicAdd(a.counters + pass * NB + nb, 1) == SK - 1;
+            __syncthreads();
+            if (last) {
+                __threadfence();
+                for (int r = warp; r < R; r += WK) {
+                    const size_t at = ((size_t)m0 + r) * N + col0 + 4 * lane;
+                    float4 s4 = __ldcg(reinterpret_cast<const float4*>(a.z + at));
+                    for (int o = 1; o < SK; ++o) {
+                        const float4 v4 = __ldcg(reinterpret_cast<const float4*>(a.z + (size_t)o * M * N + at));
+                        s4.x += v4.x; s4.y += v4.y; s4.z += v4.z; s4.w += v4.w;
+                    }
+                    float v[4] = {s4.x, s4.y, s4.z, s4.w};
+                    finish(v, lane, a.svh, a.bias, col0 + 4 * lane);
+                    store4(a.y, a.y_dtype, (size_t)(m0 + r) * N + col0 + 4 * lane, v);
+                }
+                if (threadIdx.x == 0) a.counters[pass * NB + nb] = 0;
+            }
+        }
+    }
+}
+
+#include "exl3_linear_wc.cuh"
+
 // One extern "C" kernel per instantiation: the fatbin carries __global__ functions, the host resolves them by name.
 #define TF_EXL3_LINEAR(K2, CB, WK)                                                       \
     extern "C" __global__ void __launch_bounds__((WK) * 32)                              \
         tf_exl3_linear_##K2##_##CB##_##WK(tf_exl3::LinearArgs a) {                       \
-        tf_exl3::linear_body<K2, CB, WK>(a);                                             \
+        tf_exl3::linear_body<K2, CB, WK>(a, blockIdx.x);                                 \
     }
 
 // Every width the format serves (linear.cu TF_EXL3_ALL plus 4.5-6.5): whole bits, all codebooks; 7.5 is not a width.
-#define TF_EXL3_WIDTHS(K2, CB) TF_EXL3_LINEAR(K2, CB, 4) TF_EXL3_LINEAR(K2, CB, 8)
+#define TF_EXL3_WIDTHS(K2, CB) TF_EXL3_LINEAR(K2, CB, 2) TF_EXL3_LINEAR(K2, CB, 4) TF_EXL3_LINEAR(K2, CB, 8)
 #define TF_EXL3_CODEBOOK(CB)                                                                                \
     TF_EXL3_WIDTHS(2, CB) TF_EXL3_WIDTHS(4, CB) TF_EXL3_WIDTHS(6, CB) TF_EXL3_WIDTHS(8, CB)                 \
     TF_EXL3_WIDTHS(10, CB) TF_EXL3_WIDTHS(12, CB) TF_EXL3_WIDTHS(14, CB) TF_EXL3_WIDTHS(16, CB)
@@ -269,6 +452,34 @@ TF_EXL3_WIDTHS(3, 2) TF_EXL3_WIDTHS(5, 2) TF_EXL3_WIDTHS(7, 2) TF_EXL3_WIDTHS(9,
 TF_EXL3_WIDTHS(11, 2) TF_EXL3_WIDTHS(13, 2)
 TF_EXL3_CODEBOOK(1) // mcg
 TF_EXL3_CODEBOOK(0) // inst3
+// The mid-M kernels for the mul1 widths a dense family serves (3 to 6 bits), P = 1 (17-48 rows) and 2 (49-128).
+#define TF_EXL3_MPG(K2, WK, P)                                                           \
+    extern "C" __global__ void __launch_bounds__((WK) * 32)                              \
+        tf_exl3_mpg_##K2##_##WK##_##P(tf_exl3::LinearArgs a) {                           \
+        tf_exl3::linear_mpg_body<K2, 2, WK, P>(a);                                       \
+    }
+#define TF_EXL3_MPG_W(K2) TF_EXL3_MPG(K2, 2, 1) TF_EXL3_MPG(K2, 4, 1) TF_EXL3_MPG(K2, 8, 1) \
+    TF_EXL3_MPG(K2, 2, 2) TF_EXL3_MPG(K2, 4, 2) TF_EXL3_MPG(K2, 8, 2)
+TF_EXL3_MPG_W(6) TF_EXL3_MPG_W(8) TF_EXL3_MPG_W(10) TF_EXL3_MPG_W(12)
+#undef TF_EXL3_MPG_W
+#undef TF_EXL3_MPG
+// A projection group: up to three layers of one K and warps, one launch; member i takes blocks ends[i - 1]..ends[i].
+struct GroupArgs {
+    LinearArgs l[3];
+    int ends[3];
+};
+// Member i of a group runs linear_body on its own blocks, exactly as its own launch would.
+__device__ __forceinline__ int group_member(const tf_exl3::GroupArgs& g, int b) {
+    return b < g.ends[0] ? 0 : b < g.ends[1] ? 1 : 2;
+}
+extern "C" __global__ void __launch_bounds__(128) tf_exl3_group_8_2_4(tf_exl3::GroupArgs g) {
+    const int b = blockIdx.x, i = group_member(g, b);
+    tf_exl3::linear_body<8, 2, 4>(g.l[i], b - (i ? g.ends[i - 1] : 0));
+}
+extern "C" __global__ void __launch_bounds__(256) tf_exl3_group_8_2_8(tf_exl3::GroupArgs g) {
+    const int b = blockIdx.x, i = group_member(g, b);
+    tf_exl3::linear_body<8, 2, 8>(g.l[i], b - (i ? g.ends[i - 1] : 0));
+}
 #undef TF_EXL3_CODEBOOK
 #undef TF_EXL3_WIDTHS
 }  // namespace tf_exl3

@@ -1,7 +1,9 @@
 //! The EXL3 decode-row linear (exl3/linear.cu's device code): the plan, a layer's tensors, and the two kernels.
 const std = @import("std");
 const candidate = @import("exl3_candidate.zig");
+const platform = @import("sys");
 const driver = @import("driver.zig");
+const abi = @import("abi.zig");
 const module = @import("module.zig");
 const launch_ = @import("launch.zig");
 const stream_ = @import("stream.zig");
@@ -21,12 +23,12 @@ pub const Codebook = enum(u3) { inst3 = 0, mcg = 1, mul1 = 2 };
 /// One compiled kernel: 2 * bits halves, a codebook, and the warps one block runs.
 pub const Variant = struct { halves: u32, codebook: Codebook, warps: u32 };
 
-/// Every instantiation of exl3_linear.cu: every width (whole bits all codebooks, the mul1 half steps), 4 and 8 warps.
+/// Every instantiation of exl3_linear.cu: every width (whole bits, the mul1 half steps), 2, 4 and 8 warps.
 pub const variants = blk: {
-    var vs: [60]Variant = undefined;
+    var vs: [90]Variant = undefined;
     var i: usize = 0;
-    for (0..2) |w| {
-        const warps: u32 = if (w == 0) 4 else 8;
+    const counts = [_]u32{ 4, 8, 2 }; // 2 last: the 4- and 8-warp indices stay as they were
+    for (counts) |warps| {
         for ([_]u32{ 2, 1, 0 }) |cbi| {
             const cb: Codebook = @fromBackingInt(@intCast(cbi));
             var halves: u32 = 2;
@@ -52,6 +54,15 @@ pub fn symbol(comptime halves: u32, comptime codebook: Codebook, comptime warps:
 
 pub const rot_in_symbol = "tf_exl3_rot_in";
 
+const midm_tables = @import("exl3_midm.zig");
+pub const Mpg = midm_tables.Mpg;
+pub const mpg_variants = midm_tables.mpg_variants;
+pub const Wc = midm_tables.Wc;
+pub const wc_variants = midm_tables.wc_variants;
+pub const wcPick = midm_tables.wcPick;
+const wcShared = midm_tables.wcShared;
+const mpgIndex = midm_tables.mpgIndex;
+
 pub fn variantIndex(halves: u32, codebook: Codebook, warps: u32) ?usize {
     for (variants, 0..) |v, i| {
         if (v.halves == halves and v.codebook == codebook and v.warps == warps) return i;
@@ -61,6 +72,20 @@ pub fn variantIndex(halves: u32, codebook: Codebook, warps: u32) ?usize {
 
 /// From this many 128-column blocks a shape plans one K split, so a view that wide keeps the whole matrix's bits.
 pub const wide_blocks = 64;
+
+/// The kernel matmul launches after the rotation: a linear_wc, a mid-M kernel or the linear, by index.
+pub const Pick = union(enum) { wc: usize, mpg: usize, linear: usize };
+
+/// matmul's choice for m rows of `w` (null: no kernel for its width); a family's fixed plan keeps the linear.
+pub fn pick(w: Weight, m: usize, midm: bool, use_wc: bool, min_rows: usize) ?Pick {
+    const p = planOf(w);
+    const idx = variantIndex(w.halves, w.codebook, p.wk) orelse return null;
+    if (!midm or w.sk != 0) return .{ .linear = idx };
+    if (use_wc) if (wcPick(w, m, p.sk, p.wk, min_rows)) |wi| return .{ .wc = wi };
+    // 17-48 rows: 16-row groups; 49-128: 32-row groups, each group's tiles decoded once (linear.cu's dispatch)
+    if (m >= min_rows) if (mpgIndex(w.halves, w.codebook, p.wk, if (m > 48) 2 else 1)) |mi| return .{ .mpg = mi };
+    return .{ .linear = idx };
+}
 
 /// What one shape launches, from the shape alone so a row's bits never depend on the row count (linear.py plan).
 pub fn plan(k: usize, n: usize, blocks: usize, min_tiles: usize) struct { sk: u32, wk: u32 } {
@@ -98,12 +123,16 @@ pub const Weight = struct {
     codebook: Codebook,
     stride_k: u64,
     stride_nb: u64,
+    sk: u32 = 0, // the K splits and warps a program the family fixed for this shape; 0: plan()'s
+    wk: u32 = 0,
 
     /// Columns [from, from + n) as a view of the stored matrix: whole 128-column blocks, the parent's strides.
     pub fn columns(w: Weight, from: u32, n: u32) !Weight {
         if (from % 128 != 0 or n % 128 != 0 or n == 0 or @as(u64, from) + n > w.n) return error.Exl3Shape;
         var v = w;
         v.n = n;
+        v.sk = 0; // a narrower view plans as its own shape
+        v.wk = 0;
         v.trellis = w.trellis + @as(u64, from / 128) * w.stride_nb * 4;
         v.svh = w.svh + @as(u64, from) * 2;
         if (w.bias != 0) v.bias = w.bias + @as(u64, from) * 2;
@@ -111,11 +140,38 @@ pub const Weight = struct {
     }
 };
 
+/// A weight's launch: the family's fixed (sk, wk) when given, else plan()'s; either is the shape's alone.
+pub fn planOf(w: Weight) struct { sk: u32, wk: u32 } {
+    if (w.sk != 0) return .{ .sk = w.sk, .wk = w.wk };
+    const p = plan(w.k, w.n, 192, 8);
+    return .{ .sk = p.sk, .wk = p.wk };
+}
+
+/// Whether the current context's device takes programmatic dependent launches (compute capability 9.0 or newer).
+fn dependentLaunches(d: *const Driver) bool {
+    var dev: abi.Device = 0;
+    var major: c_int = 0;
+    if (d.api.cuCtxGetDevice(&dev) != abi.success) return false;
+    return d.api.cuDeviceGetAttribute(&major, .compute_capability_major, dev) == abi.success and major >= 9;
+}
+
 /// The module and its kernels.
 pub const Linear = struct {
     mod: Module,
     fns: [variants.len]Function,
     rot_in: Function,
+    mpg: [mpg_variants.len]Function = undefined,
+    group: [2]Function = undefined, // tf_exl3_group_8_2_{4,8}: projection groups of 4-bit mul1 layers
+    rot_group: Function = undefined,
+    wc: [wc_variants.len]Function = undefined,
+    /// 17-128 rows of 4- and 6-bit mul1 layers on linear_wc (false: the mid-M kernels; the same bits either way).
+    use_wc: bool = true,
+    /// Programmatic dependent launch for the rotations and the decode-row linears (TF_EXL3_PDL=0: plain launches).
+    pdl: bool = true,
+    /// 17-128 rows on the mid-M kernels where a width has them (false: the linear at every row count, same bits).
+    midm: bool = true,
+    /// The least rows the mid-M kernels and linear_wc take (the kernel contract: 1, proving their bits at every count).
+    min_rows: usize = 17,
 
     pub fn load(d: *const Driver) !Linear {
         if (!kernels.available) return error.BuiltWithoutKernels;
@@ -125,6 +181,17 @@ pub const Linear = struct {
         inline for (0..variants.len) |i| {
             l.fns[i] = try l.mod.function(symbol(variants[i].halves, variants[i].codebook, variants[i].warps));
         }
+        inline for (mpg_variants, 0..) |v, i| {
+            l.mpg[i] = try l.mod.function(std.fmt.comptimePrint("tf_exl3_mpg_{d}_{d}_{d}", .{ v.halves, v.warps, v.p }));
+        }
+        inline for (wc_variants, 0..) |v, i| {
+            l.wc[i] = try l.mod.function(std.fmt.comptimePrint("tf_exl3_wc_{d}_{d}_{d}_{d}", .{ v.halves, v.mt, v.ks, @intFromBool(v.fold) }));
+            try l.wc[i].allowDynamicShared(wcShared(v));
+        }
+        l.group = .{ try l.mod.function("tf_exl3_group_8_2_4"), try l.mod.function("tf_exl3_group_8_2_8") };
+        l.rot_group = try l.mod.function("tf_exl3_rot_group");
+        l.pdl = dependentLaunches(d); // sm_90 and newer; the kernels' waits compile to nothing below
+        if (platform.c.getenv("TF_EXL3_PDL")) |v| l.pdl = !std.mem.eql(u8, std.mem.span(v), "0");
         return l;
     }
 
@@ -134,13 +201,13 @@ pub const Linear = struct {
 
     /// Shared bytes one call needs: WK * min(m, 8) * 128 floats of warp sums, at most 32 KB.
     pub fn sharedBytes(w: Weight, m: usize) u32 {
-        const p = plan(w.k, w.n, 192, 8);
+        const p = planOf(w);
         return @intCast(p.wk * @min(m, 8) * 128 * 4);
     }
 
     /// Split partials one call needs (fp32 [sk, m, n]) when the plan splits K, else 0.
     pub fn zBytes(w: Weight, m: usize) usize {
-        const p = plan(w.k, w.n, 192, 8);
+        const p = planOf(w);
         return if (p.sk > 1) @as(usize, p.sk) * m * w.n * 4 else 0;
     }
 
@@ -154,9 +221,9 @@ pub const Linear = struct {
         // Shapes the loader admits (linear.py's k % 128 and n % 128, 1..128 rows) are returned errors here too.
         if (m < 1 or m > 128) return error.Exl3Shape;
         if (w.k % 128 != 0 or w.n % 128 != 0) return error.Exl3Shape;
-        const p = plan(w.k, w.n, 192, 8);
+        const p = planOf(w);
         if ((w.k / 16) % (p.sk * p.wk) != 0) return error.Exl3Shape;
-        const idx = variantIndex(w.halves, w.codebook, p.wk) orelse return error.UnsupportedExl3Width;
+        const how = pick(w, m, l.midm, l.use_wc, l.min_rows) orelse return error.UnsupportedExl3Width;
         if (p.sk > 1 and z == 0) return error.Exl3Scratch;
 
         var r: launch_.Args = .{};
@@ -170,6 +237,7 @@ pub const Linear = struct {
             .grid = .{ .x = @intCast((w.k / 128 + 3) / 4), .y = @intCast(m), .z = 1 },
             .block = .{ .x = 128, .y = 1, .z = 1 },
             .shared = 0,
+            .pdl = l.pdl, // tf_exl3_rot_in waits for the previous kernel's rows itself
         }, s, &r);
 
         var args: launch_.Args = .{};
@@ -187,13 +255,81 @@ pub const Linear = struct {
         args.add(@as(i32, @intCast(p.sk)));
         args.add(@as(i32, @intCast(m)));
         args.add(@as(i32, @intCast(w.k)));
-        try launch_.launch(l.fns[idx], .{
-            .grid = .{ .x = @intCast(w.n / 128 * p.sk), .y = 1, .z = 1 },
-            .block = .{ .x = @intCast(p.wk * 32), .y = 1, .z = 1 },
-            .shared = sharedBytes(w, m),
-        }, s, &args);
+        switch (how) {
+            .wc => |wi| {
+                const v = wc_variants[wi];
+                args.add(@as(i32, @intCast(p.wk))); // WcArgs: LinearArgs, then the plan's warps
+                const rg = 16 * v.mt;
+                try launch_.launch(l.wc[wi], .{
+                    .grid = .{ .x = @intCast(w.n / 128 * ((m + rg - 1) / rg)), .y = if (v.fold) 1 else p.sk, .z = 1 },
+                    .block = .{ .x = 256, .y = 1, .z = 1 },
+                    .shared = wcShared(v),
+                }, s, &args);
+            },
+            .mpg => |mi| {
+                const rg = 16 * mpg_variants[mi].p;
+                try launch_.launch(l.mpg[mi], .{
+                    .grid = .{ .x = @intCast(w.n / 128 * ((m + rg - 1) / rg)), .y = p.sk, .z = 1 },
+                    .block = .{ .x = @intCast(p.wk * 32), .y = 1, .z = 1 },
+                    .shared = sharedBytes(w, m),
+                }, s, &args);
+            },
+            .linear => |idx| try launch_.launch(l.fns[idx], .{
+                .grid = .{ .x = @intCast(w.n / 128 * p.sk), .y = 1, .z = 1 },
+                .block = .{ .x = @intCast(p.wk * 32), .y = 1, .z = 1 },
+                .shared = sharedBytes(w, m),
+                .pdl = l.pdl, // prefetches its weights, then waits for the rotation
+            }, s, &args),
+        }
+    }
+
+    /// y_i = x through each of `ws` in one rotation and one launch (a member's own bits); scratch back to back, zeroed.
+    pub fn matmulGroup(l: *const Linear, s: Stream, ws: []const Weight, x: u64, x_dtype: DType, m: usize, ys: []const u64, y_dtype: DType, xh: u64, z: u64, counters: u64) !void {
+        if (!groupable(ws, m) or ys.len != ws.len) return error.Exl3Group;
+        const k = ws[0].k;
+        var rot: RotGroupC = .{ .x = x, .suh = @splat(0), .xh = @splat(0), .x_dtype = @backingInt(x_dtype), .m = @intCast(m), .k = @intCast(k) };
+        var g: GroupArgsC = .{ .l = undefined, .ends = @splat(0) };
+        var zat = z;
+        var cat = counters;
+        var end: i32 = 0;
+        for (ws, ys, 0..) |w, y, i| {
+            const p = planOf(w);
+            if (p.sk > 1 and z == 0) return error.Exl3Scratch;
+            rot.suh[i] = w.suh;
+            rot.xh[i] = xh + i * m * k * 2;
+            g.l[i] = .{ .xh = rot.xh[i], .t = w.trellis, .stride_k = @intCast(w.stride_k), .stride_nb = @intCast(w.stride_nb), .svh = w.svh, .bias = w.bias, .y = y, .z = if (p.sk > 1) zat else 0, .counters = cat, .y_dtype = @backingInt(y_dtype), .n = @intCast(w.n), .sk = @intCast(p.sk), .m = @intCast(m), .k = @intCast(k) };
+            zat += zBytes(w, m);
+            cat += counterBytes(w);
+            end += @intCast(w.n / 128 * p.sk);
+            g.ends[i] = end;
+        }
+        for (ws.len..3) |i| g.ends[i] = end;
+        var ra: launch_.Args = .{};
+        ra.add(rot);
+        try launch_.launch(l.rot_group, .{ .grid = .{ .x = @intCast((k / 128 + 3) / 4), .y = @intCast(m), .z = @intCast(ws.len) }, .block = .{ .x = 128, .y = 1, .z = 1 }, .pdl = l.pdl }, s, &ra);
+        var ga: launch_.Args = .{};
+        ga.add(g);
+        const wk = planOf(ws[0]).wk;
+        try launch_.launch(l.group[if (wk == 4) 0 else 1], .{ .grid = .{ .x = @intCast(end), .y = 1, .z = 1 }, .block = .{ .x = wk * 32, .y = 1, .z = 1 }, .shared = sharedBytes(ws[0], m), .pdl = l.pdl }, s, &ga);
     }
 };
+
+/// Members one group launch takes: 2 or 3 4-bit mul1 layers of one K and one warp count, at 1 to 16 rows.
+pub fn groupable(ws: []const Weight, m: usize) bool {
+    if (ws.len < 2 or ws.len > 3 or m < 1 or m > 16) return false;
+    const wk = planOf(ws[0]).wk;
+    if (wk != 4 and wk != 8) return false;
+    for (ws) |w| {
+        if (w.halves != 8 or w.codebook != .mul1 or w.k != ws[0].k or planOf(w).wk != wk) return false;
+        if (w.k % 128 != 0 or w.n % 128 != 0 or (w.k / 16) % (planOf(w).sk * wk) != 0) return false;
+    }
+    return true;
+}
+
+/// linear.cu's LinearArgs, GroupArgs and RotGroupArgs as the kernels read them.
+const LinearArgsC = extern struct { xh: u64, t: u64, stride_k: i64, stride_nb: i64, svh: u64, bias: u64, y: u64, z: u64, counters: u64, y_dtype: i32, n: i32, sk: i32, m: i32, k: i32 };
+const GroupArgsC = extern struct { l: [3]LinearArgsC, ends: [3]i32 };
+const RotGroupC = extern struct { x: u64, suh: [3]u64, xh: [3]u64, x_dtype: i32, m: i32, k: i32 };
 
 /// The loaded kernels plus the scratch one stream's dense calls share; prompt rows run in 128-row blocks (forward.py).
 pub const Dense = struct {
@@ -232,7 +368,7 @@ pub const Dense = struct {
 
     /// Grow every scratch buffer to what 128 rows of `w` need on `s`, so a call in a graph capture allocates nothing.
     pub fn reserve(de: *Dense, s: Stream, w: Weight) !void {
-        if (plan(w.k, w.n, 192, 8).sk > 1) _ = try de.scratch(&de.z, Linear.zBytes(w, 128));
+        if (planOf(w).sk > 1) _ = try de.scratch(&de.z, Linear.zBytes(w, 128));
         _ = try de.grownCounters(s, Linear.counterBytes(w));
         _ = try de.scratch(&de.xh, 128 * w.k * 2);
     }
@@ -243,6 +379,26 @@ pub const Dense = struct {
         const ptr = try de.scratch(&de.counters, bytes);
         try de.counters.?.fill8(0, s.handle);
         return ptr;
+    }
+
+    /// `reserve` for a group `decodeGroup` launches at once: its members' scratch side by side, at 16 rows.
+    pub fn reserveGroup(de: *Dense, s: Stream, ws: []const Weight) !void {
+        if (groupable(ws, 16)) _ = try de.groupScratch(s, ws, 16);
+    }
+
+    /// A group's scratch at `rows`: its members' split partials, counters and rotated inputs side by side.
+    pub fn groupScratch(de: *Dense, s: Stream, ws: []const Weight, rows: usize) !struct { z: u64, counters: u64, xh: u64 } {
+        var zb: usize = 0;
+        var cb: usize = 0;
+        for (ws) |w| {
+            zb += Linear.zBytes(w, 128);
+            cb += Linear.counterBytes(w);
+        }
+        return .{
+            .z = if (zb > 0) try de.scratch(&de.z, zb) else 0,
+            .counters = try de.grownCounters(s, cb),
+            .xh = try de.scratch(&de.xh, ws.len * rows * ws[0].k * 2),
+        };
     }
 
     /// Decode rows: one call (the kernel takes 1..128), any count above in 128-row blocks.
@@ -283,8 +439,18 @@ pub const Dense = struct {
         return k.rows(s, x, w.k, m, y, rows, yd == .f32);
     }
 
+    /// Decode rows of a projection group in one launch where `groupable`, else member by member (the same bits).
+    pub fn decodeGroup(de: *Dense, s: Stream, ws: []const Weight, x: u64, x_dtype: DType, rows: usize, ys: []const u64, y_dtype: DType) !void {
+        if (!groupable(ws, rows)) {
+            for (ws, ys) |w, y| try de.decode(s, w, x, x_dtype, rows, y, y_dtype);
+            return;
+        }
+        const sc = try de.groupScratch(s, ws, rows);
+        try de.lin.matmulGroup(s, ws, x, x_dtype, rows, ys, y_dtype, sc.xh, sc.z, sc.counters);
+    }
+
     fn blocks(de: *Dense, s: Stream, w: Weight, x: u64, x_dtype: DType, rows: usize, y: u64, y_dtype: DType) !void {
-        const p = plan(w.k, w.n, 192, 8);
+        const p = planOf(w);
         const z: u64 = if (p.sk > 1) try de.scratch(&de.z, Linear.zBytes(w, 128)) else 0;
         const counters = try de.grownCounters(s, Linear.counterBytes(w));
         const xe: u64 = if (x_dtype == .f32) 4 else 2;
@@ -403,3 +569,7 @@ test "candidate selection refuses layouts it cannot represent" {
 }
 
 pub const block = @import("exl3_block.zig");
+
+test {
+    _ = @import("exl3_dense_test.zig");
+}
