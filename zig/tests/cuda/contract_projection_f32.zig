@@ -52,7 +52,7 @@ pub const Product = struct {
     mode: cuda.qmmf.Mode,
     clusters: bool,
     out_kind: cuda.qmmf.Out = .f32,
-    prompt: ?*const cuda.nvfp4.Prompt = null, // set: prompt16's FP8 tile instead of the lane
+    prompt: ?*const cuda.nvfp4.Prompt = null, // set: prompt16's FP8 or BF16 tile instead of the lane
     d: ?Dense = null,
     weight: cuda.qmmf.Weight = undefined,
     x: u64 = 0,
@@ -65,15 +65,19 @@ pub const Product = struct {
     }
 
     pub fn kernel(self: *Product) g.Kernel {
-        if (self.prompt != null) return .{ .spec = .{
-            .name = "cuda prompt16 FP8 tile 4",
-            .accum = .f32,
-            .depth = promptDepth,
-            .ops = 1,
-            .out = .bf16,
-            .tiles = .{ .{ .size = 128 }, .{ .size = 128, .step = 64, .min = 64 }, .{ .size = 128, .step = 64, .min = 64 } },
-            .served = &served_prompt,
-        }, .ctx = self, .vt = &vt };
+        if (self.prompt != null) return .{
+            .spec = .{
+                .name = if (self.mode != .bf16) "cuda prompt16 FP8 tile 4" else if (self.out_kind == .f32) "cuda prompt16 BF16 tile, fp32 out" else "cuda prompt16 BF16 tile",
+                .accum = .f32,
+                .depth = if (self.mode == .bf16) depth else promptDepth, // BF16: the lane's K slices, folded in order
+                .ops = if (self.mode == .bf16) 0 else 1,
+                .out = if (self.out_kind == .f32) .f32 else .bf16,
+                .tiles = .{ .{ .size = 128 }, .{ .size = 128, .step = 64, .min = 64 }, .{ .size = 128, .step = 64, .min = 64 } },
+                .served = &served_prompt,
+            },
+            .ctx = self,
+            .vt = &vt,
+        };
         const wide = self.out_kind == .f32;
         const name = switch (self.mode) {
             .bf16 => if (!wide) (if (self.clusters) "cuda BF16 bf16 clustered" else "cuda BF16 bf16 reduce") else if (self.clusters) "cuda BF16 fp32 clustered" else "cuda BF16 fp32 reduce",
@@ -112,7 +116,7 @@ pub const Product = struct {
         self.x = try self.rig.input(std.mem.sliceAsBytes(d.x));
         const bytes = if (self.prompt != null) 0 else self.lane.partBytes(shape.rows, self.weight);
         if (bytes > 0) self.part = try self.rig.scratch(bytes);
-        self.out = try self.rig.output(shape.rows * shape.n * @as(usize, if (self.out_kind == .f32 and self.prompt == null) 4 else 2));
+        self.out = try self.rig.output(shape.rows * shape.n * @as(usize, if (self.out_kind == .f32) 4 else 2));
         return true;
     }
 
@@ -209,7 +213,7 @@ pub const Product = struct {
     pub fn run(self: *Product) !void {
         const shape = self.d.?.shape;
         if (self.prompt) |p| {
-            try p.matmul(self.rig.s, self.x, shape.k, shape.rows, self.weight, self.out);
+            if (self.mode == .bf16) try p.matmulOut(self.rig.s, self.x, shape.k, shape.rows, self.weight, self.out, self.out_kind) else try p.matmul(self.rig.s, self.x, shape.k, shape.rows, self.weight, self.out);
         } else try self.lane.matmulOut(self.rig.s, self.x, shape.k, shape.rows, self.weight, self.out, self.out_kind, self.part);
         try self.rig.s.synchronize();
     }

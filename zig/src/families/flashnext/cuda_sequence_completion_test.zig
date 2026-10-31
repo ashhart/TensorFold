@@ -171,7 +171,7 @@ test "Flash Next completion: scratch growth refusal after queued inverse-frequen
     d.api.cuEventDestroy_v2 = Fake.destroy;
     d.api.cuMemcpyHtoDAsync_v2 = Fake.copyAndRefuseNext;
     const stream: cuda.Stream = .{ .d = &d, .handle = @ptrFromInt(330) };
-    try t.expectError(error.OutOfDeviceMemory, prompt.batch.Scratch.alloc(t.allocator, &d, stream, 1));
+    try t.expectError(error.OutOfDeviceMemory, prompt.batch.Scratch.alloc(t.allocator, &d, stream, 1, .{}));
     const cleanup_syncs = Fake.syncs;
     _ = try cuda.memory.setAllocationLimit(null);
     try stream.synchronize(); // also clean the old-main control's deliberately unfinished copy source

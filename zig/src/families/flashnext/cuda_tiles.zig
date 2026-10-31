@@ -35,14 +35,14 @@ fn sweepOf(m: usize, bm: usize, k: usize) usize {
 pub fn matmul(k: *const Kernels, stream: cuda.Stream, x: u64, xs: u64, w: Q4, out: u64, part: u64, native_part: u64, m: usize, sk: usize) !usize {
     if (w.native) |native| {
         if (sk == 1) {
-            try k.native_lane.matmul(stream, x, w.k, m, native, out, native_part);
+            try k.nativeMatmul(stream, x, w.k, m, native, out, native_part, .bf16);
             return 1;
         }
-        // Legacy callers consume SK slices; the native lane has already reduced its own shape-driven slices.
-        try k.native_lane.matmulF32(stream, x, w.k, m, native, part, native_part);
+        // the native lane has reduced its own slices: that slice and one zero slice give the old sums' bits (-0 to +0)
+        try k.nativeMatmul(stream, x, w.k, m, native, part, native_part, .f32);
         const bytes = m * w.n * 4;
-        if (sk > 1) try stream.d.check(stream.d.api.cuMemsetD8Async(part + bytes, 0, bytes * (sk - 1), stream.handle), "cuMemsetD8Async");
-        return sk;
+        try stream.d.check(stream.d.api.cuMemsetD8Async(part + bytes, 0, bytes, stream.handle), "cuMemsetD8Async");
+        return 2;
     }
     // from 64 rows the prompt tile (flashnext_fact.cu), bit for bit the 16-row lane tile
     const big = m >= 64;

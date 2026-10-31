@@ -46,13 +46,13 @@ __device__ __forceinline__ void block_best(float& v, int& i, float (*sv)[NT / 32
 using namespace tf_route;
 
 // OUT[m, e] = x[m] . w[e], 8 experts a warp, RT tiles of 16 rows, one mma chain over K, STAGES of KC (row sums fixed).
-template <int WARPS, int STAGES, int KC, int RT = 1>
+template <int WARPS, int STAGES, int KC, int RT = 1, bool EFAST = false>  // EFAST: x walks the expert blocks, rows read once
 __device__ __forceinline__ void route_logits(const __nv_bfloat16* __restrict__ X, int x_ld, const __nv_bfloat16* __restrict__ W,
                                              float* __restrict__ OUT, int M, int D, int E) {
     constexpr int LD = KC + 8, EB = 8 * WARPS, XR = 16 * RT, ROWS = XR + EB;
     extern __shared__ __align__(16) unsigned char smem_raw[];
     auto tile = reinterpret_cast<__nv_bfloat16 (*)[ROWS][LD]>(smem_raw);  // [STAGES] XR input rows, then EB expert rows
-    const int m0 = blockIdx.x * XR, e0 = blockIdx.y * EB;
+    const int m0 = (EFAST ? blockIdx.y : blockIdx.x) * XR, e0 = (EFAST ? blockIdx.x : blockIdx.y) * EB;
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, g = lane >> 2, t = lane & 3;
     const int stages = (D + KC - 1) / KC;
     const int xr = min(XR, M - m0);  // input rows past M stay zero: written once, never staged
@@ -116,11 +116,11 @@ extern "C" __global__ void __launch_bounds__(128) tf_route_logits(const __nv_bfl
     route_logits<4, 2, 128>(X, x_ld, W, OUT, M, D, E);
 }
 
-// route_logits over 128 rows and 64 experts a block, eight warps (from 64 rows), the same sums.
+// route_logits over 128 rows and 64 experts a block, eight warps (from 64 rows), the same sums; EFAST block order.
 extern "C" __global__ void __launch_bounds__(256) tf_route_logits_wide(const __nv_bfloat16* __restrict__ X, int x_ld,
                                                                        const __nv_bfloat16* __restrict__ W, float* __restrict__ OUT,
                                                                        int M, int D, int E) {
-    route_logits<8, 2, 64, 8>(X, x_ld, W, OUT, M, D, E);
+    route_logits<8, 2, 64, 8, true>(X, x_ld, W, OUT, M, D, E);
 }
 
 // route_logits with three stages of 256 in flight (up to 16 rows, where the router rows' reads set its time).
