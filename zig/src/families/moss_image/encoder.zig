@@ -84,15 +84,13 @@ pub const Encoder = struct {
         if (T == 0 or T > cfg.max_rows) return error.PromptRows;
         if (out.len != T * H) return error.PromptRows;
         if (kept) |k| if (k.len != cfg.layers * T * H) return error.PromptRows;
-        const s = try Scratch.make(t.device, T);
+        const s = try scratch(t.device, T);
         defer s.buf.deinit();
         const x = s.at(.x);
         for (tokens, 0..) |id, r| {
             if (id >= cfg.vocab) return error.TokenOutOfRange;
             @memcpy(halves(x.at(r * H * 2), H), t.w.embed[id * H ..][0..H]);
         }
-        rotary(floats(s.at(.cos), T * 32), floats(s.at(.sin), T * 32), T);
-        @memset(halves(s.at(.ones), H), 0x3f80);
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         var cb = t.queue.commandBuffer();
@@ -109,6 +107,27 @@ pub const Encoder = struct {
         ks.encoderNorm(e, t.k.get("me_norm"), x, t.w.norm, s.at(.out), T, H, H, H, cfg.eps);
         try finish(cb, e);
         @memcpy(out, halves(s.at(.out), T * H));
+    }
+
+    /// For checks, layer i on block i of `inputs` [layers + 1, rows, 4096], the final norm on the last.
+    pub fn steps(t: *Encoder, T: usize, inputs: []const u16, out: []u16) !void {
+        const n = (cfg.layers + 1) * T * H;
+        if (T == 0 or T > cfg.max_rows) return error.PromptRows;
+        if (inputs.len != n or out.len != n) return error.PromptRows;
+        const s = try scratch(t.device, T);
+        defer s.buf.deinit();
+        const x = s.at(.x);
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
+        for (0..cfg.layers + 1) |i| {
+            @memcpy(halves(x, T * H), inputs[i * T * H ..][0 .. T * H]);
+            const cb = t.queue.commandBuffer();
+            const e = cb.compute(.serial);
+            const last = i == cfg.layers;
+            if (last) ks.encoderNorm(e, t.k.get("me_norm"), x, t.w.norm, s.at(.out), T, H, H, H, cfg.eps) else t.layer(e, s, t.w.layers[i], T);
+            try finish(cb, e);
+            @memcpy(out[i * T * H ..][0 .. T * H], halves(if (last) s.at(.out) else x, T * H));
+        }
     }
 
     fn layer(t: *const Encoder, e: mtl.ComputeEncoder, s: Scratch, l: wts.Layer, T: usize) void {
@@ -167,6 +186,14 @@ fn finish(cb: mtl.CommandBuffer, e: mtl.ComputeEncoder) !void {
         std.log.err("moss image encoder: a pass failed on the GPU: {s}", .{msg});
         return error.GpuFailure;
     }
+}
+
+/// A prompt of `T` rows' scratch with its rotary tables and unit gate filled.
+fn scratch(device: mtl.Device, T: usize) !Scratch {
+    const s = try Scratch.make(device, T);
+    rotary(floats(s.at(.cos), T * 32), floats(s.at(.sin), T * 32), T);
+    @memset(halves(s.at(.ones), H), 0x3f80);
+    return s;
 }
 
 fn floats(r: Ref, n: usize) []f32 {

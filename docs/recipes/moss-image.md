@@ -78,8 +78,15 @@ The residual adds reuse `mi_gate_add`.
 `tf-moss-image-encoder` checks a case from `moss_image_case.py encode`:
 
 - the token ids;
-- every layer's rows against the publisher's torch path in bf16;
-- the final rows against bf16 and float32.
+- each step alone, every layer and the final norm, on the float32 run's input for that step rounded to bf16: its rows
+  against float32 must be within twice torch bf16's distance on the same input (or plain bf16 rounding's, when
+  larger) in cosine error and in its worst row;
+- the whole prompt, every layer's rows against torch bf16's and the final rows against float32, reported but not
+  gated: in bf16 the 32 layers magnify each implementation's rounding differently, so two correct runs part by more
+  than any one step's error;
+- a second encoding must repeat the first byte for byte.
+
+It fails otherwise, and `reference.zig`'s tests check that a planted mismatch fails even when its repeat is identical.
 
 ## Kernel contract
 
@@ -206,6 +213,14 @@ Results:
     - 0.999931 and 0.0261 against 0.999934 and 0.0259 (fox);
     - 0.999926 and 0.0454 against 0.999938 and 0.0318 (sticky note).
   - Repeat: identical bytes.
+  - `tf-moss-image-encoder`'s gates, all 33 steps on these three prompts and six more (31 to 75 tokens): each step's
+    distance from float32 is a mean of 0.50 of its limit, torch bf16's own, and at most 0.65 (the fox's layer 13,
+    worst row). A row planted 5% off at layer 20, in the float32 rows and torch's, fails there and at layer 21, its
+    repeat identical.
+  - The whole prompt in bf16 spreads by more than any step: on the 75-token prompt, torch's own runs (MPS or CPU,
+    chunks of 8 to 64, or the recurrent form) end 0.86 to 4.97 times its default's cosine error from float32, and
+    ours 1.82 times. Against float64, which float32 matches to four places, the sticky note's row 58 is 0.0153 to
+    0.0320 across eight of those runs, and 0.0454 in ours.
   - Pictures with our encoder, against the all-float32 ruler over the same 8 cases: a mean of 31.13 dB. Our
     transformer on torch's encoder rows gives 31.20 dB, and each is the closer in 4 of 8. The fox, against the
     pipeline's own picture: 47.07 dB.

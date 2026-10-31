@@ -8,37 +8,28 @@ const tokenizer = @import("tokenizer");
 const usage =
     \\tf-moss-image-encoder MODEL_DIR CASE [PROMPT_FILE]
     \\MODEL_DIR is the OpenMOSS-Team/MOSS-Image-Base folder. CASE (moss_image_case.py encode) holds the prompt's token
-    \\ids, every layer's rows and the final rows from the publisher's torch path in bf16, and the final rows in float32.
-    \\The prompt (PROMPT_FILE, else the empty negative prompt) is tokenized and checked against the ids, then encoded:
-    \\each layer's rows and the final ones are compared (max |diff|, cosine, worst row) and the encoding is timed.
+    \\ids, every layer's rows and the final rows from the publisher's torch path in bf16 and in float32, and torch
+    \\bf16's rows for each step alone on the float32 run's input. The prompt (PROMPT_FILE, else the empty negative
+    \\prompt) is tokenized and checked against the ids. Each layer and the final norm, run alone on the same input, must
+    \\be as close to float32 as twice torch bf16's (or bf16 rounding's) cosine error and worst row there. The whole
+    \\prompt is then encoded twice, compared with both torch runs, and must repeat byte for byte; else it fails.
 ;
 
-const Match = struct { max_abs: f64, cosine: f64, worst_row: f64 };
+const ref = mi.reference;
+const H = mi.encoder_config.hidden;
+const L = mi.encoder_config.layers;
 
-/// Largest absolute difference, cosine, and the largest relative L2 error of one row of `width`.
-fn match(ours: []const u16, theirs: []const f32, width: usize) Match {
-    var dot: f64 = 0;
-    var aa: f64 = 0;
-    var bb: f64 = 0;
-    var most: f64 = 0;
-    var worst: f64 = 0;
-    var row: usize = 0;
-    while (row < ours.len) : (row += width) {
-        var rd: f64 = 0;
-        var rb: f64 = 0;
-        for (ours[row..][0..width], theirs[row..][0..width]) |h, b| {
-            const a: f64 = @as(f32, @bitCast(@as(u32, h) << 16));
-            const d = a - b;
-            dot += a * b;
-            aa += a * a;
-            bb += @as(f64, b) * b;
-            rd += d * d;
-            rb += @as(f64, b) * b;
-            most = @max(most, @abs(d));
-        }
-        worst = @max(worst, @sqrt(rd / @max(rb, 1e-30)));
-    }
-    return .{ .max_abs = most, .cosine = dot / @sqrt(aa * bb), .worst_row = worst };
+/// One comparison's line: against float32 within its gate, beside torch bf16's own distance.
+fn report(label: []const u8, bf: ref.Match, v: ref.Verdict) void {
+    std.debug.print("{s}: float32 1-cosine {e:.2} of {e:.2}, worst row {d:.5} (row {d}) of {d:.5}, torch bf16 {d:.5} (row {d}): {s}\n", .{ label, v.cosine_err, v.cosine_limit, v.row, v.row_at, v.row_limit, bf.worst_row, bf.worst_at, if (v.pass) "pass" else "FAIL" });
+}
+
+/// Ours against float32 rows `fp32_name`, gated by torch bf16's rows `name` on the same input.
+fn check(a: std.mem.Allocator, case: *const tf.safetensors.File, ours: []const u16, name: []const u8, fp32_name: []const u8) !struct { ref.Match, ref.Verdict } {
+    const bf16 = try floats(a, case, name);
+    const exact = try floats(a, case, fp32_name);
+    const theirs = ref.match(f32, bf16, exact, H);
+    return .{ theirs, ref.gate(ref.match(u16, ours, exact, H), theirs, ref.rounding(exact, H)) };
 }
 
 /// The case tensor `name` as f32 (from bf16 or f32).
@@ -86,24 +77,36 @@ pub fn main(init: std.process.Init) !u8 {
     std.debug.print("{s}: {d} tokens, the same ids as the tokenizer's: {}; loaded in {d:.1} s\n", .{ device.name(), ids.len, same_ids, load_s });
     if (!same_ids) return 1;
 
-    const H = mi.encoder_config.hidden;
-    const L = mi.encoder_config.layers;
     const T = ids.len;
+    const inputs = try a.alloc(u16, (L + 1) * T * H);
+    for (0..L + 1) |i| {
+        var name: [32]u8 = undefined;
+        const rows = try floats(a, &case, if (i == 0) "embed" else try std.fmt.bufPrint(&name, "layer_fp32.{d}", .{i - 1}));
+        for (inputs[i * T * H ..][0 .. T * H], rows) |*o, x| o.* = mi.host.bf16(x);
+    }
+    const alone = try a.alloc(u16, (L + 1) * T * H);
+    try enc.steps(T, inputs, alone);
+    var verdicts: [L + 1]ref.Verdict = undefined;
+    for (0..L + 1) |i| {
+        var name: [32]u8 = undefined;
+        var fp32_name: [32]u8 = undefined;
+        var label: [32]u8 = undefined;
+        const last = i == L;
+        const bf, const v = try check(a, &case, alone[i * T * H ..][0 .. T * H], if (last) "alone.final" else try std.fmt.bufPrint(&name, "alone.{d}", .{i}), if (last) "final_fp32" else try std.fmt.bufPrint(&fp32_name, "layer_fp32.{d}", .{i}));
+        report(if (last) "final norm alone" else try std.fmt.bufPrint(&label, "layer {d:>2} alone ({s})", .{ i, if (mi.encoder_config.isFull(i)) "attention" else "delta    " }), bf, v);
+        verdicts[i] = v;
+    }
+
     const out = try a.alloc(u16, T * H);
     const kept = try a.alloc(u16, L * T * H);
     try enc.rows(ids, out, kept);
-    var worst: f64 = 1;
+    var lowest: f64 = 1;
     for (0..L) |i| {
         var name: [32]u8 = undefined;
-        const ref = try floats(a, &case, try std.fmt.bufPrint(&name, "layer.{d}", .{i}));
-        const m = match(kept[i * T * H ..][0 .. T * H], ref, H);
-        worst = @min(worst, m.cosine);
-        std.debug.print("layer {d:>2} ({s}): max |diff| {d:.4}, cosine {d:.6}, worst row {d:.5}\n", .{ i, if (mi.encoder_config.isFull(i)) "attention" else "delta    ", m.max_abs, m.cosine, m.worst_row });
+        lowest = @min(lowest, ref.match(u16, kept[i * T * H ..][0 .. T * H], try floats(a, &case, try std.fmt.bufPrint(&name, "layer.{d}", .{i})), H).cosine);
     }
-    const bf = match(out, try floats(a, &case, "final"), H);
-    const fp = match(out, try floats(a, &case, "final_fp32"), H);
-    std.debug.print("final rows against torch bf16: max |diff| {d:.4}, cosine {d:.6}, worst row {d:.5}\n", .{ bf.max_abs, bf.cosine, bf.worst_row });
-    std.debug.print("final rows against float32:    max |diff| {d:.4}, cosine {d:.6}, worst row {d:.5}\n", .{ fp.max_abs, fp.cosine, fp.worst_row });
+    const bf, const v = try check(a, &case, out, "final", "final_fp32");
+    std.debug.print("whole prompt, not gated: each layer against torch bf16's, cosine {d:.6} or more; the final rows against float32, 1-cosine {e:.2}, worst row {d:.5} (row {d}), torch bf16's {e:.2}, {d:.5} (row {d})\n", .{ lowest, v.cosine_err, v.row, v.row_at, 1 - bf.cosine, bf.worst_row, bf.worst_at });
 
     const again = try a.alloc(u16, T * H);
     const timing = mtl.clock.seconds();
@@ -111,5 +114,7 @@ pub fn main(init: std.process.Init) !u8 {
     const encode_s = mtl.clock.seconds() - timing;
     const repeat = std.mem.eql(u16, out, again);
     std.debug.print("encoded again in {d:.3} s, the same bytes: {}\n", .{ encode_s, repeat });
-    return if (repeat) 0 else 1;
+    const pass = ref.accept(&verdicts, repeat);
+    std.debug.print("{s}\n", .{if (pass) "PASS every step within its gate, repeated byte for byte" else "FAIL"});
+    return if (pass) 0 else 1;
 }
