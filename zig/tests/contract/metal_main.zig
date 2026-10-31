@@ -388,6 +388,9 @@ pub fn main(init: std.process.Init) !u8 {
     var minimax: minimax_k.Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer minimax.deinit();
     try minimax.collect(o.only);
+    var mma_operand: @import("metal_mma_operand.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer mma_operand.deinit();
+    try mma_operand.collect(o.only);
     const weight_only = @import("metal_weight_only.zig");
     const weight_source = try weight_only.text(a);
     defer a.free(weight_source);
