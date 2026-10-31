@@ -147,8 +147,22 @@ fn spark(ptr: *anyopaque) *be.Spark {
     return @ptrCast(@alignCast(ptr));
 }
 
+/// Bytes a state at `at` takes (TF_KV_SHARE: the pool pages its rings take, past the store's pages).
 pub fn snap_bytes(ptr: *anyopaque, at: u32) u64 {
-    return snap.bytes(spark(ptr).m, at);
+    const x = spark(ptr);
+    if (x.prompts == null) return snap.bytes(x.m, at, 0);
+    return snap.blobPages(x.m, at, at) * x.m.pageBytes();
+}
+
+/// TF_KV_SHARE: the pool the store keeps prompts in (null: linear caches, no pool).
+pub fn share_pool(ptr: *anyopaque) ?*kv.Pool {
+    const x = spark(ptr);
+    return if (x.pool) |*p| p else null;
+}
+
+/// TF_KV_SHARE: the store the prompt passes keep and resume through (null: none, as before).
+pub fn share_attach(ptr: *anyopaque, prompts: ?@import("core").kv_prompts.Prompts) void {
+    spark(ptr).prompts = prompts;
 }
 
 pub fn snap_save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {

@@ -3,6 +3,7 @@ const std = @import("std");
 const core = @import("core");
 const lanes = @import("lanes");
 const spark = @import("spark25");
+const prompt_pages = @import("prompt_pages");
 const check = @import("check.zig");
 const Gpu = check.Gpu;
 
@@ -16,7 +17,9 @@ const lens = [_]usize{ 200, 1300, 700 };
 const mark: u32 = 1000;
 
 const Out = struct { ids: []u32, logits: []u8, cached: u64 };
-const Result = struct { solo: [lens.len]Out, sampled: Out, pair: [2][]u32, resumed: Out };
+const Result = struct { solo: [lens.len]Out, sampled: Out, pair: [2][]u32, resumed: Out, stored: ?Out = null };
+/// TF_KV_SHARE: where the store keeps the second prompt, its last whole page short of the end.
+const page_mark: u32 = 1280;
 
 const Keep = struct {
     gb: *be.Spark,
@@ -68,7 +71,7 @@ fn pair(gpu: Gpu, engine: *lanes.Engine, gb: *be.Spark, a: []const u32, b: []con
 fn idle(gb: *const be.Spark) !void {
     const p = gb.pool orelse return;
     const c = p.census();
-    try check.expect(p.idle() and c.free == c.total, "spark25 pages: the idle pool holds promised {d}, free {d} of {d}", .{ c.promised, c.free, c.total });
+    try check.expect(p.idle() and (c.free == c.total or gb.prompts != null), "spark25 pages: the idle pool holds promised {d}, free {d} of {d}", .{ c.promised, c.free, c.total });
 }
 
 fn free(gpa: std.mem.Allocator, o: Out) void {
@@ -81,6 +84,7 @@ fn freeResult(gpa: std.mem.Allocator, r: Result) void {
     free(gpa, r.sampled);
     for (r.pair) |p| gpa.free(p);
     free(gpa, r.resumed);
+    if (r.stored) |o| free(gpa, o);
 }
 
 /// One model with linear or paged full-layer caches through every case (copy drafts from the prompt's text).
@@ -95,7 +99,8 @@ fn pass(gpu: Gpu, model: []const u8, paged: bool, prompts: [lens.len][]const u32
         var sequential: usize = 0;
         for (lens) |n| sequential += be.pagesFor(n, count);
         try check.expect(sequential > pool, "spark25 pages: the solo runs take more pages than the pool holds", .{});
-        try native.attach(loaded.ctx, 1, pool);
+        const kept = if (try core.kv_prompts.sharing() > 0) page_mark / spark.forward.page_tokens + snap.blobPages(gb.m, page_mark, page_mark) else 0;
+        try native.attach(loaded.ctx, 1, pool + 2 * kept); // TF_KV_SHARE: room for the store's pages and rings, the scrub's too
         gb.shufflePages(0x6e4);
     }
     var cfg = try lanes.Config.init(gpa, loaded.facts, loaded.rows, loaded.rows - 1);
@@ -106,6 +111,7 @@ fn pass(gpu: Gpu, model: []const u8, paged: bool, prompts: [lens.len][]const u32
     const drafts = true;
 
     var r: Result = undefined;
+    r.stored = null;
     var made: usize = 0;
     errdefer for (r.solo[0..made]) |o| free(gpa, o);
     for (prompts, &r.solo) |p, *o| {
@@ -126,7 +132,24 @@ fn pass(gpu: Gpu, model: []const u8, paged: bool, prompts: [lens.len][]const u32
     const v = keep.saved orelse return error.NothingKept;
     free(gpa, try run(gpu, &engine, gb, .{ .prompt = scrub, .drafts = drafts }, 2));
     r.resumed = try run(gpu, &engine, gb, .{ .prompt = prompts[1], .drafts = drafts, .reuse = .{ .saved = v, .at = mark } }, count);
+    if (paged and try core.kv_prompts.sharing() > 0) r.stored = try stored(gpu, &engine, gb, prompts[1], scrub, count);
     return r;
+}
+
+/// TF_KV_SHARE: the store keeps the prompt at its page mark, then a resume adopts its pages; closing frees them.
+fn stored(gpu: Gpu, engine: *lanes.Engine, gb: *be.Spark, prompt: []const u32, scrub: []const u32, count: u32) !Out {
+    const gpa = gpu.gpa;
+    const x = (try prompt_pages.Adapter.open(native, gpa, gb, spark.forward.page_tokens, 4)) orelse return error.NoPool;
+    var closed = false;
+    defer if (!closed) x.close();
+    free(gpa, try run(gpu, engine, gb, .{ .prompt = prompt, .drafts = true }, 2));
+    free(gpa, try run(gpu, engine, gb, .{ .prompt = scrub, .drafts = true }, 2));
+    const out = try run(gpu, engine, gb, .{ .prompt = prompt, .drafts = true }, count);
+    x.close();
+    closed = true;
+    const p = gb.pool.?;
+    try check.expect(p.idle() and p.census().free == p.census().total, "spark25 pages: the store gave every page back when it closed", .{});
+    return out;
 }
 
 fn same(bad: *usize, what: []const u8, a: []const u8, b: []const u8) void {
@@ -175,7 +198,13 @@ pub fn pages(gpu: Gpu, rest: []const []const u8) !void {
     same(&bad, "resumed at the mark: last-row logits", linear.resumed.logits, paged.resumed.logits);
     same(&bad, "paged resumed == paged fresh", std.mem.sliceAsBytes(paged.resumed.ids), std.mem.sliceAsBytes(paged.solo[1].ids));
     if (paged.resumed.cached != mark or linear.resumed.cached != mark) bad += 1;
+    if (paged.stored) |st| {
+        same(&bad, "TF_KV_SHARE resumed at its page mark: reply", std.mem.sliceAsBytes(linear.solo[1].ids), std.mem.sliceAsBytes(st.ids));
+        same(&bad, "TF_KV_SHARE resumed at its page mark: last-row logits", linear.solo[1].logits, st.logits);
+        if (st.cached != page_mark) bad += 1;
+        std.debug.print("RESULT spark25 pages TF_KV_SHARE resume: {d} rows from the store's pages (want {d})\n", .{ st.cached, page_mark });
+    }
     std.debug.print("RESULT spark25 pages resumed rows: linear {d}, paged {d} (want {d})\n", .{ linear.resumed.cached, paged.resumed.cached, mark });
     try check.expect(bad == 0, "spark25 pages: {d} checks failed", .{bad});
-    check.pass("spark25 pages: full-layer caches in shuffled pool pages give the linear caches' replies and logits ({d} tokens, copy drafts), shared rounds and a kept state's resume included, ended streams' pages reused", .{count});
+    check.pass("spark25 pages: full-layer caches in shuffled pool pages give the linear caches' replies and logits ({d} tokens, copy drafts), shared rounds and a kept state's resume included{s}, ended streams' pages reused", .{ count, if (paged.stored != null) " (and the TF_KV_SHARE store's)" else "" });
 }
