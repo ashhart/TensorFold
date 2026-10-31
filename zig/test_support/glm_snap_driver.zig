@@ -11,6 +11,7 @@ pub const Driver = struct {
 
     pub fn init() cuda.Driver {
         allocs = 0;
+        host_allocs = 0;
         copies = 0;
         syncs = 0;
         fail_copy = null;
@@ -20,6 +21,9 @@ pub const Driver = struct {
         d.api.cuMemFree_v2 = free;
         d.api.cuMemsetD8_v2 = zero;
         d.api.cuMemcpyDtoDAsync_v2 = copy;
+        d.api.cuMemHostAlloc = hostAlloc;
+        d.api.cuMemHostGetDevicePointer_v2 = hostDevice;
+        d.api.cuMemFreeHost = hostFree;
         d.api.cuMemsetD32Async = set;
         d.api.cuStreamSynchronize = sync;
         d.api.cuCtxSynchronize = contextSync;
@@ -50,6 +54,24 @@ pub const Driver = struct {
             }
         };
         return 1;
+    }
+    pub var host_allocs: usize = 0;
+    // pinned host memory: the same recorded blocks, its device address the host address (as under UVA)
+    fn hostAlloc(out: *?*anyopaque, n: usize, _: c_uint) callconv(.c) cuda.abi.Result {
+        var p: u64 = 0;
+        const r = alloc(&p, n);
+        if (r != 0) return r;
+        allocs -= 1;
+        host_allocs += 1;
+        out.* = @ptrFromInt(p);
+        return 0;
+    }
+    fn hostDevice(out: *u64, p: ?*anyopaque, _: c_uint) callconv(.c) cuda.abi.Result {
+        out.* = @intFromPtr(p);
+        return 0;
+    }
+    fn hostFree(p: ?*anyopaque) callconv(.c) cuda.abi.Result {
+        return free(@intFromPtr(p));
     }
     fn zero(ptr: u64, v: u8, n: usize) callconv(.c) cuda.abi.Result {
         @memset(bytes(ptr, n), v);

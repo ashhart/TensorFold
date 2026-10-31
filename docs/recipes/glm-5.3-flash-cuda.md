@@ -43,6 +43,10 @@ left after a 12.2 GiB reserve` and a 5.8 GiB prompt cache
   on, and required and named tool calls use the model's tool markup ([1.1.1](../../CHANGELOG.md#111): #1016 to #1018).
 - `--kv-cache fp8` is an opt-in FP8 latent cache. BF16 remains the default, and its native quality and device
   qualification are pending ([1.1.2](../../CHANGELOG.md#112)).
+- `TF_GLM_HOST_CACHE=1` on every rank keeps kept prompt states in pinned host memory instead of on the card, so a
+  long conversation's next turn resumes when the card has no room left for its state (#1510). `--prompt-cache-gib`
+  sizes the host cache on each rank (8 GiB unasked, at most half of the available memory), and the KV pool sets no
+  device cache aside. Checked on two RTX PRO 6000 Blackwell cards at TP=2 with the EXL3 4bpw checkpoint.
 
 ## More ranks
 

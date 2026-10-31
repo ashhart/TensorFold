@@ -58,6 +58,10 @@ test "GLM snapshots: a short prefix fits 4 GiB even with a 524288-token configur
 
 const rec = @import("test_support/glm_snap_driver.zig").Driver;
 const Fixture = @import("test_support/glm_snap_fixture.zig").Fixture;
+
+test {
+    _ = @import("glm_snapshot_host_ram.zig");
+}
 const pc = @import("engine_api").prompt_cache;
 const adapter = @import("copies");
 
@@ -91,7 +95,7 @@ test "GLM snapshots: grid and committed off-grid read sets survive copies on bot
             try t.expectEqual(@as(u8, 0xE9), rec.bytes(tail, 1)[0]);
             const charge = f.e.snaps.get(id).?.lease.ids.items.len * glm.snapshots.pages.page;
             try t.expect(charge <= f.e.stateBytes(at));
-            try t.expectEqual(f.e.snap_pages.?.arena.?.len, charge + f.e.snap_pages.?.spare());
+            try t.expectEqual(f.e.snap_pages.?.arena.?.len(), charge + f.e.snap_pages.?.spare());
             f.e.dropState(id);
             // In production the following gate or the next Leader step drains these notes.
             f.e.dropped.clearRetainingCapacity();
@@ -169,7 +173,7 @@ test "GLM snapshots: copy faults drain before pages return and a restore can ret
 test "GLM snapshots: fragmented pages join a larger state and cannot exceed the admitted budget" {
     var d = rec.init();
     const p = glm.snapshots.pages;
-    var pool = try p.Pool.init(t.allocator, &d, 5 * p.page + p.page - 1);
+    var pool = try p.Pool.init(t.allocator, &d, 5 * p.page + p.page - 1, false);
     defer pool.deinit();
     var a = try pool.take(1);
     var b = try pool.take(2 * p.page);
@@ -363,13 +367,13 @@ test "GLM snapshots: pool construction failures refund device accounting and fre
     const before = cuda.usage(false).device;
     for (0..3) |index| {
         var failing = t.FailingAllocator.init(t.allocator, .{ .fail_index = index });
-        try t.expectError(error.OutOfMemory, glm.snapshots.pages.Pool.init(failing.allocator(), &d, 2 << 20));
+        try t.expectError(error.OutOfMemory, glm.snapshots.pages.Pool.init(failing.allocator(), &d, 2 << 20, false));
     }
     rec.fail_alloc = true;
-    try t.expectError(error.NotReady, glm.snapshots.pages.Pool.init(t.allocator, &d, 2 << 20));
+    try t.expectError(error.NotReady, glm.snapshots.pages.Pool.init(t.allocator, &d, 2 << 20, false));
     rec.fail_alloc = false;
     try t.expectEqual(before, cuda.usage(false).device);
-    var empty = try glm.snapshots.pages.Pool.init(t.allocator, &d, (2 << 20) - 1);
+    var empty = try glm.snapshots.pages.Pool.init(t.allocator, &d, (2 << 20) - 1, false);
     defer empty.deinit();
     try t.expectEqual(@as(u64, 0), empty.spare());
     try t.expectError(error.NoSnapshotRoom, empty.take(1));
