@@ -46,6 +46,8 @@ pub const proj_row = @max(gdn.proj_width, proj_n);
 pub const att_rows: usize = 256;
 /// Neurons a pocket's activations take a row (fn_back's max_pocket).
 pub const pocket_stride: usize = 128;
+/// Rows from which a read-out takes the prompt tiles: the row kernels, the same bits, are quicker below that.
+pub const readout_tile_rows: usize = 128;
 /// Prompt rows one fused attention launch takes (their selections staged att_rows at a time).
 pub const fused_rows: usize = 1024;
 /// Rows a pass holds at most unless asked for more.
