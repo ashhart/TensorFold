@@ -84,7 +84,14 @@ __device__ __forceinline__ float row_sum16(float x) {
     return x + row_xor<1>(x);
 }
 
-// q rounds to the cache type once and stays in LDS; with PAGED, k and v are a layer's pools and a 64-key tile a page.
+// One lane's x on every lane of its 16-lane row, `sel` naming that lane in each nibble: v_permlane16.
+template <typename P>
+__device__ __forceinline__ P row_lane(P x, unsigned sel) {
+    const int w = __builtin_bit_cast(int, x);
+    return __builtin_bit_cast(P, __builtin_amdgcn_permlane16(w, w, sel, sel, false, false));
+}
+
+// q rounds to the cache type once into LDS, p stays in registers; with PAGED, k and v are pools and a key tile a page.
 template <typename Cache, bool PAGED>
 __device__ void fa_dot2(const float* __restrict__ q, const Cache* __restrict__ k, const Cache* __restrict__ v,
                         float* __restrict__ out, int qlen, int span, int heads, int kv_heads, int d, float scale,
@@ -92,14 +99,11 @@ __device__ void fa_dot2(const float* __restrict__ q, const Cache* __restrict__ k
                         long long v_ss, const unsigned* table, int count) {
     constexpr int kQChunks = 256 / 8;      // 16-byte chunks a q row
     constexpr int kKChunks = kChunk / 8;   // a staged key row's
-    constexpr int kPLd = kRows + 4;        // a key pair's probabilities, row-indexed
     __shared__ uint4 sQ[kRows * kQChunks];
     __shared__ uint4 sKV[kKeys * kKChunks];   // a key chunk (key, 8 dims) or a value chunk (key pair, 4 dims)
     using T = Dot<Cache>;
     using elem = typename T::elem;
     using pair_t = typename T::pair;
-    __shared__ alignas(16) pair_t sH[kKeys / 2 * kPLd];
-    __shared__ float sA[kRows], sL[kRows];
 
     const int q0 = blockIdx.x * kRows;
     const int head = blockIdx.y;
@@ -128,9 +132,8 @@ __device__ void fa_dot2(const float* __restrict__ q, const Cache* __restrict__ k
         sQ[row * kQChunks + (c ^ (row & 7))] = __builtin_bit_cast(uint4, h);
     }
 
-    // scores: rows sr + 16i against keys 4sk .. 4sk + 3; PV: rows pr .. pr + 3 at dims 4pc .. 4pc + 3 of each chunk
+    // rows sr + 16i: scores against keys 4sk .. 4sk + 3, PV at dims 4sk .. 4sk + 3 of each chunk
     const int sr = tid / 16, sk = tid % 16;
-    const int pr = (tid / 16) * 4, pc = tid % 16;
     float m_run[4], l_run[4];
 #pragma unroll
     for (int i = 0; i < 4; ++i) m_run[i] = -INFINITY, l_run[i] = 0.f;
@@ -215,7 +218,9 @@ __device__ void fa_dot2(const float* __restrict__ q, const Cache* __restrict__ k
                         for (int m = 0; m < 4; ++m) acc[i][j] = T::dot(qv[i][m], kf[j][m], acc[i][j]);
             }
         }
-        // the online softmax in registers: a row's 64 keys sit on its 16 lanes
+        // the online softmax in registers: a row's 64 keys sit on its 16 lanes, key pair pp's p on lane pp / 2
+        pair_t ph[4][2];
+        float alpha_r[4];
 #pragma unroll
         for (int i = 0; i < 4; ++i) {
             const int row = sr + 16 * i;
@@ -239,9 +244,9 @@ __device__ void fa_dot2(const float* __restrict__ q, const Cache* __restrict__ k
             sum = row_sum16(sum);
             l_run[i] = alpha * l_run[i] + sum;
             m_run[i] = next_m;
-            sH[(2 * sk) * kPLd + row] = pair_t{static_cast<elem>(p[0]), static_cast<elem>(p[1])};
-            sH[(2 * sk + 1) * kPLd + row] = pair_t{static_cast<elem>(p[2]), static_cast<elem>(p[3])};
-            if (sk == 0) sA[row] = alpha;
+            ph[i][0] = pair_t{static_cast<elem>(p[0]), static_cast<elem>(p[1])};
+            ph[i][1] = pair_t{static_cast<elem>(p[2]), static_cast<elem>(p[3])};
+            alpha_r[i] = alpha;
         }
 #pragma unroll
         for (int at = 0; at < 256 / kChunk; ++at) {
@@ -267,20 +272,22 @@ __device__ void fa_dot2(const float* __restrict__ q, const Cache* __restrict__ k
                 for (int m = 0; m < 4; ++m) pv[i][m] = 0.f;
 #pragma unroll 4
             for (int pp = 0; pp < kKeys / 2; ++pp) {
-                pair_t pr4[4], vv[4];
-                pairs4(sH + pp * kPLd + pr, pr4);
-                pairs4(&sKV[pp * 16 + pc], vv);
+                pair_t vv[4];
+                pairs4(&sKV[pp * 16 + sk], vv);
+                const unsigned lane = (pp / 2) * 0x11111111u;
 #pragma unroll
-                for (int i = 0; i < 4; ++i)
+                for (int i = 0; i < 4; ++i) {
+                    const pair_t pp4 = row_lane(ph[i][pp % 2], lane);
 #pragma unroll
-                    for (int m = 0; m < 4; ++m) pv[i][m] = T::dot(pr4[i], vv[m], pv[i][m]);
+                    for (int m = 0; m < 4; ++m) pv[i][m] = T::dot(pp4, vv[m], pv[i][m]);
+                }
             }
 #pragma unroll
             for (int i = 0; i < 4; ++i)
 #pragma unroll
                 for (int m = 0; m < 4; ++m) {
                     float& acc_o = o[i][4 * at + m];
-                    acc_o = fmaf(sA[pr + i], acc_o, pv[i][m]);
+                    acc_o = fmaf(alpha_r[i], acc_o, pv[i][m]);
                 }
         }
         page = next;
@@ -288,21 +295,17 @@ __device__ void fa_dot2(const float* __restrict__ q, const Cache* __restrict__ k
     int k0 = 0;
     for (; k0 + kKeys <= full_end; k0 += kKeys) tile.template operator()<true>(k0);
     for (; k0 < max_vis; k0 += kKeys) tile.template operator()<false>(k0);
-    if (sk == 0)
-#pragma unroll
-        for (int i = 0; i < 4; ++i) sL[sr + 16 * i] = l_run[i];
-    __syncthreads();
 #pragma unroll
     for (int i = 0; i < 4; ++i) {
-        const int row = pr + i;
+        const int row = sr + 16 * i;
         if (row >= q_hi) continue;
-        const float inv = sL[row] == 0.f ? 0.f : 1.f / sL[row];
+        const float inv = l_run[i] == 0.f ? 0.f : 1.f / l_run[i];
 #pragma unroll
         for (int at = 0; at < 256 / kChunk; ++at) {
             if (at * kKChunks >= chunks) break;
 #pragma unroll
             for (int m = 0; m < 4; ++m)
-                orows[static_cast<long long>(row) * d + 64 * at + 4 * pc + m] = o[i][4 * at + m] * inv;
+                orows[static_cast<long long>(row) * d + 64 * at + 4 * sk + m] = o[i][4 * at + m] * inv;
         }
     }
 }
