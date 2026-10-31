@@ -321,6 +321,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .{ .name = "tf-idol-decode", .path = "zig/tests/idol_decode.zig", .about = "Idol's octree and Gaussian decoders on a reference case: each level, the rows and the PLY gated, then timed" },
         .{ .name = "tf-idol-vae", .path = "zig/tests/idol_vae.zig", .about = "Idol's image encoder on a reference case: its condition rows gated against float64 beside the SDK's, then timed" },
         .{ .name = "tf-idol-dino", .path = "zig/tests/idol_dino.zig", .about = "Idol's DINOv3 image encoder on a reference case: feature1 and each block gated against torch's, then timed" },
+        .{ .name = "tf-idol-birefnet", .path = "zig/tests/idol_birefnet.zig", .about = "Idol's background removal and preprocessing on a reference case: BiRefNet's logits, each stage, the alpha and the picture gated, then timed" },
         .{ .name = "tf-idol-generate", .path = "zig/tests/idol_generate.zig", .about = "Idol end to end: one preprocessed picture to a 3DGS PLY and camera through both encoders, the denoiser and the decoders, timed by stage" },
         .{ .name = "tf-glm-attn-probe", .path = "zig/tests/glm_attn_probe.zig", .about = "GLM-5.3-Flash's dense latent attention kernels on given inputs (scores, probabilities, outputs)" },
         .{ .name = "tf-moe-bench", .path = "zig/tests/moe_bench.zig", .about = "Routed-expert prompt kernels from .metal files on a skewed routing: chained speed, bits against the first" },

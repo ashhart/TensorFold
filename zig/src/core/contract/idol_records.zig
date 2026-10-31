@@ -1,7 +1,7 @@
-//! Idol's launches, each source-reserved: the denoiser's (idol.metal, idol_attention.metal), the decoders', the VAE's.
+//! Idol's launches, each source-reserved: the denoiser's, the decoders', the VAE's and BiRefNet's.
 const std = @import("std");
 const M = @import("limits.zig").MetalLaunch;
-pub const records = denoiser ++ decoder ++ vae;
+pub const records = denoiser ++ decoder ++ vae ++ birefnet;
 
 const denoiser = [_]M{
     .{ .name = "idol id_linear_00", .threads = 256, .tg_memory = 0, .reserved = 256 },
@@ -53,7 +53,20 @@ const vae = [_]M{
     .{ .name = "idol vae iv_tokens", .threads = 256, .tg_memory = 0, .reserved = 256 },
 };
 
+const birefnet = [_]M{
+    .{ .name = "idol birefnet br_conv", .threads = 128, .tg_memory = 26624, .reserved = 128 },
+    .{ .name = "idol birefnet br_norm", .threads = 256, .tg_memory = 32, .reserved = 256 },
+    .{ .name = "idol birefnet br_window", .threads = 192, .tg_memory = 28416, .reserved = 192 },
+    .{ .name = "idol birefnet br_resize", .threads = 256, .tg_memory = 0, .reserved = 256 },
+    .{ .name = "idol birefnet br_tiles", .threads = 256, .tg_memory = 0, .reserved = 256 },
+    .{ .name = "idol birefnet br_conv3", .threads = 256, .tg_memory = 0, .reserved = 256 },
+    .{ .name = "idol birefnet br_deform", .threads = 256, .tg_memory = 0, .reserved = 256 },
+    .{ .name = "idol birefnet br_pool", .threads = 256, .tg_memory = 32, .reserved = 256 },
+    .{ .name = "idol birefnet br_gate", .threads = 256, .tg_memory = 0, .reserved = 256 },
+    .{ .name = "idol birefnet br_head", .threads = 256, .tg_memory = 0, .reserved = 256 },
+};
+
 test "the Idol launches fit every Apple family, one record a pipeline" {
     try std.testing.expectEqual(@as(usize, 0), try @import("registry.zig").checkMetal(std.testing.allocator, &records, true));
-    try std.testing.expectEqual(@as(usize, 24 + 9 + 8), records.len);
+    try std.testing.expectEqual(@as(usize, 24 + 9 + 8 + 10), records.len);
 }

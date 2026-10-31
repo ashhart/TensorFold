@@ -196,6 +196,10 @@ Its image encoder (`metal_idol_vae*.zig`, FLUX.2's VAE encoder in fp32) register
 GEMM and Winograd), GroupNorm's passes, the 512-wide attention and the condition rows against float64 (12 controls).
 Metal also checks Idol's DINOv3 encoder (`metal_idol_dino*.zig`): its bf16 projections, LayerNorm and final F.layer_norm,
 the RoPE heads, LayerScale with the residual, SwiGLU and the attention, each at transformers' bf16 points (11 controls).
+Its background remover (`metal_idol_birefnet*.zig`, BiRefNet in fp32) registers the implicit GEMM convolution's nine
+served forms (1x1, 3x3, 7x7; batch norm, ReLU, exact GELU, residual by a window map), the picture's 3x3, LayerNorm by
+rows, by window map and as PatchMerging's gather, the shifted windows' attention, the align_corners resize, the patch
+and tile copies, the modulated deformable columns, the pool, the gate and the head against float64 (21 controls).
 
 RADIO's fused bias, activation and residual (`tf_vit_bias_act`) replaces `tf_vit_bias` then
 `tf_vit_pointwise`, byte for byte.
