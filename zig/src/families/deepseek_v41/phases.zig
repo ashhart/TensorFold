@@ -25,6 +25,8 @@ pub const Name = enum {
     @"draft.chain",
     /// inside `draft.pass`, the host step (DRAFT_GRAPHS off): the logits' download, the host candidates, their gather
     @"draft.host",
+    /// structured output (grammar_gpu.zig): a pick's masked rows copied out, masked on the host and copied back
+    grammar,
 };
 
 /// A gap between top-level phases this long or longer is idle (no live stream), not a round's host time.
