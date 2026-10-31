@@ -84,17 +84,18 @@ fn freeResult(gpa: std.mem.Allocator, r: Result) void {
     free(gpa, r.resumed);
 }
 
-/// One model with linear or paged global caches through every case.
+/// One model with linear or paged global caches through every case (a drafter keeps them linear: open's rule).
 fn pass(gpu: Gpu, model: []const u8, drafter: ?[]const u8, paged: bool, prompts: [lens.len][]const u32, scrub: []const u32, count: u32) !Result {
     const gpa = gpu.gpa;
     var loaded = try native.open(gpa, gpu.io, gpu.ctx, model, null, .{ .context = 8192, .drafts = drafter != null, .lanes = 2, .drafter = drafter, .kv_pages = paged });
     defer loaded.deinit(loaded.ctx);
-    try check.expect((loaded.layout != null) == paged, "gemma4 pages: open made the caches asked for", .{});
+    const pages_on = paged and drafter == null;
+    try check.expect((loaded.layout != null) == pages_on, "gemma4 pages: open made the caches asked for (a drafter: linear)", .{});
     var opened: ?Opened = null;
     defer if (opened) |o| o.close(o.ctx);
     if (drafter) |dir| opened = try native.openDrafter(gpa, gpu.io, loaded.ctx, dir, 4);
     const gb = loaded.target;
-    if (paged) { // the two widest requests at once; the rest lease pages the ended ones gave back, in a shuffled order
+    if (pages_on) { // the two widest requests at once; the rest lease pages the ended ones gave back, in a shuffled order
         const pool = be.pagesFor(lens[0], count) + be.pagesFor(lens[1], count);
         var sequential: usize = 0;
         for (lens) |n| sequential += be.pagesFor(n, count);
@@ -186,5 +187,9 @@ pub fn pages(gpu: Gpu, rest: []const []const u8) !void {
     if (paged.resumed.cached != mark or linear.resumed.cached != mark) bad += 1;
     std.debug.print("RESULT gemma4 pages resumed rows: linear {d}, paged {d} (want {d})\n", .{ linear.resumed.cached, paged.resumed.cached, mark });
     try check.expect(bad == 0, "gemma4 pages: {d} checks failed", .{bad});
-    check.pass("gemma4 pages: global caches in shuffled pool pages give the linear caches' replies and logits ({d} tokens{s}), shared rounds and a kept state's resume included, ended streams' pages reused", .{ count, if (drafter != null) ", drafted" else "" });
+    if (drafter != null) {
+        check.pass("gemma4 pages: with a drafter the default keeps linear global caches, and its replies and logits are the linear caches' ({d} tokens, drafted)", .{count});
+        return;
+    }
+    check.pass("gemma4 pages: global caches in shuffled pool pages give the linear caches' replies and logits ({d} tokens), shared rounds and a kept state's resume included, ended streams' pages reused", .{count});
 }
