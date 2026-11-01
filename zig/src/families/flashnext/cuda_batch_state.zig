@@ -192,8 +192,13 @@ pub fn Staging(comptime Q: type) type {
 }
 
 /// Device scratch for chunks of up to `cap` rows.
+pub const ScratchFormat = enum { classic, exl3 };
+
 pub const Scratch = struct {
     cap: usize,
+    format: ScratchFormat = .classic,
+    /// The allocation's own head bound; another engine cannot change its launch admission.
+    head_local_rows: usize = std.math.maxInt(usize),
     bufs: std.ArrayList(cuda.DeviceBuffer) = .empty,
     ids: u64 = 0,
     pos: u64 = 0,
@@ -312,110 +317,143 @@ pub const Scratch = struct {
         return @alignCast(std.mem.bytesAsSlice(f32, s.host.?.bytes[hostAt(s.cap)[3]..][0 .. n * (dims / 32) * 4]));
     }
 
-    /// Bytes `alloc(cap)` takes on the device.
-    pub fn bytes(cap: usize) usize {
+    /// The buffers in the order `allocationSizes` lists their sizes.
+    const order = [_][]const u8{
+        "ids",       "pos",        "h",          "pss",     "norm",     "rinv",    "dn",         "hc_part",    "hc_up",   "native_part", "act",
+        "xs_act",    "inj",        "mixed",      "xsm",     "proj",     "part",    "gout",       "gxs",        "ys",      "gq",          "gk",
+        "gv",        "ggb",        "q",          "iq",      "po",       "pm",      "pl",         "qids",       "qnk",     "qspr",        "ao",
+        "gated",     "gxs_attn",   "router_l",   "picks",   "wts",      "members", "items",      "counts",     "rank",    "hist",        "shared_gate",
+        "shared_up", "shared_act", "shared_out", "moe_act", "y",        "branch",  "moe_f32",    "pocket_act", "ple_emb", "ple_xs",      "ple_keys",
+        "ple_vals",  "ple_part",   "ple_gated",  "ple_pss", "ple_nrow", "logits",  "head_local", "inv",        "dummy",
+    };
+
+    pub fn headRows(s: *const Scratch) usize {
+        return @min(s.cap, s.head_local_rows);
+    }
+
+    pub fn allocationSizes(cap: usize, format: ScratchFormat) [64]?usize {
+        return allocationSizesForHead(cap, format, cap);
+    }
+
+    pub fn allocationSizesForHead(cap: usize, format: ScratchFormat, head_rows: usize) [64]?usize {
         const pairs = cap * slots;
         const nblk = cdiv(pairs, plan_small);
         const items = cdiv(pairs, tile) + experts_n + 1;
-        var n: usize = 0;
-        n += cap * 4 + (cap + 1) * 16;
-        n += cap * streams * 4 + cap * wide * 2 * 2 + cap * pss_n * 4 + cap * (low + 4) * 2 + hc_sk * cap * (low + 4) * 4;
-        n += cap * wide * 2 + 8 * cap * dims * 4;
-        n += cap * low * 2 + cap * (low / 32) * 4 + cap * streams * 2 + cap * dims * 2 + cap * (dims / 32) * 4;
-        n += cap * proj_row * 2 + out_sk * cap * dims * 4 + cap * gdn.value_dim * (2 + 4 + 4) + cap * (gdn.value_dim / 32) * 4;
-        n += cap * (2 * gdn.nk * gdn.dk + 2 * gdn.nv) * 4;
-        n += cap * q_heads * head_dim * 2 + cap * index_heads * index_dim * 2;
-        n += att_rows * nch * q_heads * (head_dim + 2) * 4 + cap * out_k * 2 * 2 + cap * (out_k / 32) * 4;
-        n += fused_rows * (idw + 2) * 4;
-        n += cap * (experts_n + 1) * 4 + pairs * 4 * 2 + pairs * 4 + items * 3 * 4 + 8 + pairs * 4 + nblk * (experts_n + 1) * 4;
-        n += cap * moe_w * 6 + cap * dims * 4;
-        n += pairs * moe_w * 2 + pairs * dims * 4 + cap * dims * 2;
-        n += cap * dims * 2 + cap * (dims / 32) * 4 + cap * wide * 2 + cap * dims * 2 + 4 * cap * dims * 4;
-        n += cap * wide * 2 * 2 + cap * streams * 4 + vocab * 2 + cap * vocab + half * 4 + 4096;
-        n += cap * dims * 4 + cap * pocket_stride * 4;
-        return n;
+        return .{
+            cap * 4,
+            (cap + 1) * 16,
+            cap * wide * 2,
+            cap * pss_n * 4,
+            cap * wide * 2,
+            cap * streams * 4,
+            cap * (low + 4) * 2,
+            hc_sk * cap * (low + 4) * 4,
+            cap * wide * 2,
+            8 * cap * dims * 4,
+            cap * low * 2,
+            cap * (low / 32) * 4,
+            cap * streams * 2,
+            cap * dims * 2,
+            cap * (dims / 32) * 4,
+            cap * proj_row * 2,
+            out_sk * cap * dims * 4,
+            cap * gdn.value_dim * 2,
+            cap * (gdn.value_dim / 32) * 4,
+            cap * gdn.value_dim * 4,
+            cap * gdn.nk * gdn.dk * 4,
+            cap * gdn.nk * gdn.dk * 4,
+            cap * gdn.value_dim * 4,
+            cap * gdn.nv * 2 * 4,
+            cap * q_heads * head_dim * 2,
+            cap * index_heads * index_dim * 2,
+            att_rows * nch * q_heads * head_dim * 4,
+            att_rows * nch * q_heads * 4,
+            att_rows * nch * q_heads * 4,
+            fused_rows * idw * 4,
+            fused_rows * 4,
+            fused_rows * 4,
+            cap * out_k * 2,
+            cap * out_k * 2,
+            cap * (out_k / 32) * 4,
+            cap * (experts_n + 1) * 4,
+            pairs * 4,
+            pairs * 4,
+            if (format == .classic) pairs * 4 else null,
+            if (format == .classic) items * 3 * 4 else null,
+            if (format == .classic) 8 else null,
+            if (format == .classic) pairs * 4 else null,
+            if (format == .classic) nblk * (experts_n + 1) * 4 else null,
+            if (format == .classic) cap * moe_w * 2 else null,
+            if (format == .classic) cap * moe_w * 2 else null,
+            if (format == .classic) cap * moe_w * 2 else null,
+            if (format == .classic) cap * dims * 4 else null,
+            if (format == .classic) pairs * moe_w * 2 else null,
+            pairs * dims * 4,
+            cap * dims * 2,
+            cap * dims * 4,
+            cap * pocket_stride * 4,
+            cap * dims * 2,
+            cap * (dims / 32) * 4,
+            cap * wide * 2,
+            cap * dims * 2,
+            4 * cap * dims * 4,
+            cap * wide * 2,
+            cap * streams * 4,
+            cap * wide * 2,
+            vocab * 2,
+            @min(cap, head_rows) * vocab,
+            half * 4,
+            4096,
+        };
+    }
+
+    pub fn bytes(cap: usize) usize {
+        return bytesForFormat(cap, .classic);
+    }
+
+    pub fn bytesForFormat(cap: usize, format: ScratchFormat) usize {
+        return bytesForHead(cap, format, cap);
+    }
+
+    pub fn bytesForHead(cap: usize, format: ScratchFormat, head_rows: usize) usize {
+        var total: usize = 0;
+        for (allocationSizesForHead(cap, format, head_rows)) |optional| if (optional) |len| {
+            total += @max(len, 256);
+        };
+        return total;
     }
 
     pub fn alloc(gpa: std.mem.Allocator, d: *const cuda.Driver, stream: cuda.Stream, cap: usize) !Scratch {
-        var s: Scratch = .{ .cap = cap };
+        return allocForFormat(gpa, d, stream, cap, .classic);
+    }
+
+    pub fn allocForFormat(gpa: std.mem.Allocator, d: *const cuda.Driver, stream: cuda.Stream, cap: usize, format: ScratchFormat) !Scratch {
+        return allocForHead(gpa, d, stream, cap, format, cap);
+    }
+
+    pub fn allocForHead(gpa: std.mem.Allocator, d: *const cuda.Driver, stream: cuda.Stream, cap: usize, format: ScratchFormat, head_rows: usize) !Scratch {
+        var s: Scratch = .{ .cap = cap, .format = format, .head_local_rows = head_rows };
         errdefer {
             cuda.completion.drain(d, stream, "Flash Next scratch work did not drain before rollback");
             s.free(gpa);
         }
-        const pairs = cap * slots;
-        const nblk = cdiv(pairs, plan_small);
-        const items = cdiv(pairs, tile) + experts_n + 1;
-        s.ids = try s.add(gpa, d, cap * 4);
-        // a position every 16 bytes: one a block of att_rows rows, or one a row of a decode round
-        s.pos = try s.add(gpa, d, (cap + 1) * 16);
-        s.h = try s.add(gpa, d, cap * wide * 2);
-        s.pss = try s.add(gpa, d, cap * pss_n * 4);
-        s.norm = try s.add(gpa, d, cap * wide * 2);
-        s.rinv = try s.add(gpa, d, cap * streams * 4);
-        s.dn = try s.add(gpa, d, cap * (low + 4) * 2);
-        s.hc_part = try s.add(gpa, d, hc_sk * cap * (low + 4) * 4);
-        s.hc_up = try s.add(gpa, d, cap * wide * 2);
-        s.native_part = try s.add(gpa, d, 8 * cap * dims * 4);
-        s.act = try s.add(gpa, d, cap * low * 2);
-        s.xs_act = try s.add(gpa, d, cap * (low / 32) * 4);
-        s.inj = try s.add(gpa, d, cap * streams * 2);
-        s.mixed = try s.add(gpa, d, cap * dims * 2);
-        s.xsm = try s.add(gpa, d, cap * (dims / 32) * 4);
-        s.proj = try s.add(gpa, d, cap * proj_row * 2);
-        s.part = try s.add(gpa, d, out_sk * cap * dims * 4);
-        try s.bufs.items[s.bufs.items.len - 1].fill8(0, stream.handle);
-        s.part_zero = true;
-        s.gout = try s.add(gpa, d, cap * gdn.value_dim * 2);
-        s.gxs = try s.add(gpa, d, cap * (gdn.value_dim / 32) * 4);
-        s.ys = try s.add(gpa, d, cap * gdn.value_dim * 4);
-        s.gq = try s.add(gpa, d, cap * gdn.nk * gdn.dk * 4);
-        s.gk = try s.add(gpa, d, cap * gdn.nk * gdn.dk * 4);
-        s.gv = try s.add(gpa, d, cap * gdn.value_dim * 4);
-        s.ggb = try s.add(gpa, d, cap * gdn.nv * 2 * 4);
-        s.q = try s.add(gpa, d, cap * q_heads * head_dim * 2);
-        s.iq = try s.add(gpa, d, cap * index_heads * index_dim * 2);
-        s.po = try s.add(gpa, d, att_rows * nch * q_heads * head_dim * 4);
-        s.pm = try s.add(gpa, d, att_rows * nch * q_heads * 4);
-        s.pl = try s.add(gpa, d, att_rows * nch * q_heads * 4);
-        s.qids = try s.add(gpa, d, fused_rows * idw * 4);
-        s.qnk = try s.add(gpa, d, fused_rows * 4);
-        s.qspr = try s.add(gpa, d, fused_rows * 4);
-        s.ao = try s.add(gpa, d, cap * out_k * 2);
-        s.gated = try s.add(gpa, d, cap * out_k * 2);
-        s.gxs_attn = try s.add(gpa, d, cap * (out_k / 32) * 4);
-        s.router_l = try s.add(gpa, d, cap * (experts_n + 1) * 4);
-        s.picks = try s.add(gpa, d, pairs * 4);
-        s.wts = try s.add(gpa, d, pairs * 4);
-        s.members = try s.add(gpa, d, pairs * 4);
-        s.items = try s.add(gpa, d, items * 3 * 4);
-        s.counts = try s.add(gpa, d, 8);
-        s.rank = try s.add(gpa, d, pairs * 4);
-        s.hist = try s.add(gpa, d, nblk * (experts_n + 1) * 4);
-        s.shared_gate = try s.add(gpa, d, cap * moe_w * 2);
-        s.shared_up = try s.add(gpa, d, cap * moe_w * 2);
-        s.shared_act = try s.add(gpa, d, cap * moe_w * 2);
-        s.shared_out = try s.add(gpa, d, cap * dims * 4);
-        s.moe_act = try s.add(gpa, d, pairs * moe_w * 2);
-        s.y = try s.add(gpa, d, pairs * dims * 4);
-        s.branch = try s.add(gpa, d, cap * dims * 2);
-        s.moe_f32 = try s.add(gpa, d, cap * dims * 4);
-        s.pocket_act = try s.add(gpa, d, cap * pocket_stride * 4);
-        s.ple_emb = try s.add(gpa, d, cap * dims * 2);
-        s.ple_xs = try s.add(gpa, d, cap * (dims / 32) * 4);
-        s.ple_keys = try s.add(gpa, d, cap * wide * 2);
-        s.ple_vals = try s.add(gpa, d, cap * dims * 2);
-        s.ple_part = try s.add(gpa, d, 4 * cap * dims * 4);
-        s.ple_gated = try s.add(gpa, d, cap * wide * 2);
-        s.ple_pss = try s.add(gpa, d, cap * streams * 4);
-        s.ple_nrow = try s.add(gpa, d, cap * wide * 2);
-        s.logits = try s.add(gpa, d, vocab * 2);
-        s.head_local = try s.add(gpa, d, cap * vocab);
+        const sizes = allocationSizesForHead(cap, format, head_rows);
+        // a row of a decode round or a block of att_rows rows takes `pos`'s 16 bytes
         var inv: [half]f32 = undefined;
         for (&inv, 0..) |*o, i| o.* = @floatCast(std.math.pow(f64, 10_000_000.0, -@as(f64, @floatFromInt(i)) / @as(f64, half)));
-        s.inv = try s.add(gpa, d, half * 4);
-        try s.bufs.items[s.bufs.items.len - 1].uploadAsync(0, std.mem.sliceAsBytes(&inv), stream.handle);
-        s.dummy = try s.add(gpa, d, 4096);
-        try s.bufs.items[s.bufs.items.len - 1].fill8(0, stream.handle);
+        inline for (order, 0..) |name, i| {
+            @field(s, name) = if (sizes[i]) |len| try s.add(gpa, d, len) else 0;
+            if (sizes[i] != null) {
+                const last = &s.bufs.items[s.bufs.items.len - 1];
+                // part's second cap-stride slice stays zeros (native lanes write only the first); dummy is all zeros
+                if (comptime std.mem.eql(u8, name, "part")) {
+                    try last.fill8(0, stream.handle);
+                    s.part_zero = true;
+                }
+                if (comptime std.mem.eql(u8, name, "inv")) try last.uploadAsync(0, std.mem.sliceAsBytes(&inv), stream.handle);
+                if (comptime std.mem.eql(u8, name, "dummy")) try last.fill8(0, stream.handle);
+            }
+        }
         try stream.synchronize();
         s.host = try cuda.HostBuffer.alloc(d, hostAt(cap)[4]);
         s.staging = .{ .q = .{ .stream = stream, .event = try cuda.Event.init(d, false) } };
@@ -483,42 +521,12 @@ pub const Model = struct {
     pocket: ?MoeAdd = null,
 };
 
-/// The rows' n-gram embeddings, gathered on a host thread while the GPU embeds and runs layer 0.
-pub const Gather = struct {
-    ngram: *const ple.Ngram,
-    history: []i64,
-    ids: []const u32,
-    emb: []u16,
-    xs: []f32,
-    failed: ?anyerror = null,
-    ns: i96 = 0,
-    io: std.Io,
-    /// A round's rows, each gathered after its own stream's history (empty: every row after `history`).
-    lanes: []const Lane = &.{},
-
-    pub fn main(g: *Gather) void {
-        const t0 = std.Io.Clock.awake.now(g.io).toNanoseconds();
-        defer g.ns = std.Io.Clock.awake.now(g.io).toNanoseconds() - t0;
-        if (g.lanes.len == 0) {
-            g.ngram.rows(g.history, g.ids, g.emb, g.xs) catch |err| {
-                g.failed = err;
-            };
-            return;
-        }
-        var row0: usize = 0;
-        for (g.lanes) |l| {
-            g.ngram.rows(l.seq.history[0..], g.ids[row0..][0..l.rows], g.emb[row0 * dims ..][0 .. l.rows * dims], g.xs[row0 * (dims / 32) ..][0 .. l.rows * (dims / 32)]) catch |err| {
-                g.failed = err;
-                return;
-            };
-            row0 += l.rows;
-        }
-    }
-};
+pub const Gather = @import("cuda_batch_gather.zig").Gather;
 
 test {
     _ = @import("cuda_batch_state_test.zig");
     _ = @import("cuda_nvfp4_tile.zig");
+    _ = @import("cuda_scratch_layout_test.zig");
 }
 
 pub const Pg = @import("cuda_glue.zig").Pg;

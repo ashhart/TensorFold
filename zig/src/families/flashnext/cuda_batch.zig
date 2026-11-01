@@ -8,6 +8,7 @@ const ple = @import("cuda_ple.zig");
 const wt = @import("cuda_prompt_wt.zig");
 const load = @import("cuda_prompt_load.zig");
 const parts = @import("cuda_batch_state.zig");
+const exl3_pass = @import("exl3/model/cuda_exl3_pass.zig");
 const batch_lanes = @import("cuda_batch_lanes.zig");
 const tiles = @import("cuda_tiles.zig");
 const tk = @import("cuda_tile_kernels.zig");
@@ -116,6 +117,9 @@ pub fn Pass(comptime Tri: type) type {
         prepared: bool = false,
         /// The pending write-back's branch sits in fp32 in moe_f32 (something added to it, or it is kept).
         pending_f32: bool = false,
+        pending_f32_weights: ?u64 = null,
+        /// moe_f32 holds the EXL3 canonical grouped branch (moeAdds keeps it instead of re-summing the slots).
+        canon_f32: bool = false,
         /// This layer's out projection leaves part's other slices alone; its writeback adds the zero slice once.
         zero_slices: bool = false,
 
@@ -123,6 +127,10 @@ pub fn Pass(comptime Tri: type) type {
 
         /// qmm.cu's arithmetic over m rows into out (bf16) or part (fp32 K slices); returns the slices (1 when folded).
         pub fn lane(self: *Self, x: u64, xs: u64, w: Q4, out: u64, part: u64, m: usize, sk: usize) !usize {
+            if (w.exl3) |e| {
+                try exl3_pass.lane(self, x, e, out, part, m, sk);
+                return sk; // the first slice written, the other sk - 1 zero-filled (cuda_exl3_pass.lane)
+            }
             if (try zs.lane(self.k, self.stream, self.s, self.zero_slices, x, w, part, m, sk)) |one| return one;
             return tiles.matmul(self.k, self.stream, x, xs, w, out, part, self.s.native_part, m, sk);
         }
@@ -175,6 +183,11 @@ pub fn Pass(comptime Tri: type) type {
             if (self.pending_f32) {
                 // the fp32 branch rounded once, as MODE 2 rounds its sum (a slice of one)
                 self.pending_f32 = false;
+                if (self.pending_f32_weights) |weights| {
+                    self.pending_f32_weights = null;
+                    try self.tri.hcWriteback(h, h, pss, dummy, "*bf16", inj, s.moe_f32 + r0 * dims * 4, "*fp32", weights + r0 * 4, "*fp32", rs, n, dims, streams, 2, 0, 1, 1);
+                    return;
+                }
                 try self.tri.hcWriteback(h, h, pss, s.moe_f32 + r0 * dims * 4, "*fp32", inj, dummy, "*bf16", dummy, "*bf16", rs, n, dims, streams, 4, 1, 1, 1);
                 return;
             }
@@ -228,27 +241,7 @@ pub fn Pass(comptime Tri: type) type {
         }
 
         pub fn pleBlock(self: *Self, lw: *const Layer, ids: []const u32) !void {
-            const s = self.s;
-            const n = self.rows;
-            // the rows' n-gram embeddings (host gathers from the mapped table) are already uploaded by `stage`
-            _ = ids;
-            _ = try self.lane(s.ple_emb, s.ple_xs, lw.key, s.ple_keys, s.dummy, n, 1);
-            const vsk = try self.lane(s.ple_emb, s.ple_xs, lw.val, s.dummy, s.ple_part, n, 4);
-            try self.sumSlices(s.ple_part, s.ple_vals, true, n * dims, vsk);
-            try self.tri.pleGate(s.ple_keys, s.ple_vals, s.h, lw.nk.ptr, lw.nq.ptr, s.ple_gated, s.ple_pss, eps, n, dims, streams);
-            if (self.lanes.len == 0) {
-                try self.tri.pleConv(s.ple_gated, s.ple_pss, lw.nc.ptr, self.seq.tail.ptr, lw.ple_cw.ptr, s.h, s.h, s.ple_nrow, eps, n, dims, streams, 4, 3);
-                try self.shiftWindow(self.seq.tail.ptr, s.ple_nrow, wide, n, ple_tail_n, wide);
-                return;
-            }
-            // shared rounds: each lane's rows convolved over its own stream's tail, the launch its lone pass makes
-            var row0: usize = 0;
-            for (self.lanes) |l| {
-                const g = row0 * wide * 2;
-                try self.tri.pleConv(s.ple_gated + g, s.ple_pss + row0 * streams * 4, lw.nc.ptr, l.seq.tail.ptr, lw.ple_cw.ptr, s.h + g, s.h + g, s.ple_nrow + g, eps, l.rows, dims, streams, 4, 3);
-                try self.shiftWindow(l.seq.tail.ptr, s.ple_nrow + g, wide, l.rows, ple_tail_n, wide);
-                row0 += l.rows;
-            }
+            return @import("cuda_batch_ple.zig").pleBlock(self, lw, ids);
         }
 
         pub fn gdnBlock(self: *Self, lw: *const Layer, layer: usize, li: usize, keep: LayerKeep) !void {
@@ -427,6 +420,14 @@ pub fn Pass(comptime Tri: type) type {
             const s = self.s;
             const n = self.rows;
             const pairs = n * slots;
+            if (lw.exl3) |x| {
+                if (x.needsPool()) return error.Exl3PoolNotAttached;
+                if (keep.moe_x != 0) try self.copy(keep.moe_x, s.mixed, n * dims * 2);
+                try exl3_pass.moe(self, lw, x);
+                if (keep.moe_ids != 0) try self.copy(keep.moe_ids, s.picks, pairs * 4);
+                if (keep.moe_wts != 0) try self.copy(keep.moe_wts, s.wts, pairs * 4);
+                return;
+            }
             try self.copy(keep.moe_x, s.mixed, n * dims * 2);
             try self.tri.routerMany(s.mixed, lw.router.ptr, s.router_l, dims, n);
             try self.tri.topkMany(s.router_l, s.picks, s.wts, n);
@@ -508,6 +509,8 @@ pub fn Pass(comptime Tri: type) type {
             self.pos0 = pos0;
             self.pending = null;
             self.pending_f32 = false;
+            self.pending_f32_weights = null;
+            self.canon_f32 = false;
             // the gather writes the scratch's pinned rows, so the last pass's uploads must have read them first
             if (!self.prepared) try s.ready();
             const emb = s.hostEmb(n);

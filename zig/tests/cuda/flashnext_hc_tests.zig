@@ -369,6 +369,51 @@ fn writebackRounding(r: *Rig, g: *const flash.Glue) !void {
     }
 }
 
+fn reducedWriteback(r: *Rig, g: *const flash.Glue) !void {
+    const rows: usize = 17;
+    const count = rows * dims;
+    const hidden = r.bfs(rows * wide, 1);
+    const inject = r.bfs(rows * streams, 1);
+    const branch = r.f32s(count, -2, 2);
+    const edges = [_]f32{ 0.0, -0.0, 0x1.01p0, -0x1.01p0, 0x1.03p0, -0x1.03p0, 0x1p-126, -0x1p-126 };
+    for (branch, 0..) |*value, index| if (index % 7 == 0) {
+        value.* = edges[index % edges.len];
+    };
+    hidden[1] = 0x8000;
+    inject[0] = 0x3f80;
+    branch[1] = -0.0;
+    const y = r.f32s(count * 11, -13, 13);
+    const weights = try r.a.alloc(f32, rows * 11);
+    @memset(weights, 0);
+    const ones = try r.a.alloc(f32, rows);
+    @memset(ones, 1);
+    for (0..rows) |row| {
+        @memcpy(y[row * 11 * dims ..][0..dims], branch[row * dims ..][0..dims]);
+        weights[row * 11] = 1;
+    }
+    const dh = try r.dev(std.mem.sliceAsBytes(hidden));
+    const di = try r.dev(std.mem.sliceAsBytes(inject));
+    const dy = try r.dev(std.mem.sliceAsBytes(y));
+    const dw = try r.dev(std.mem.sliceAsBytes(weights));
+    const db = try r.dev(std.mem.sliceAsBytes(branch));
+    const du = try r.dev(std.mem.sliceAsBytes(ones));
+    const reference = try r.out(hidden.len * 2);
+    const result = try r.out(hidden.len * 2);
+    const reference_sums = try r.out(rows * (dims / 256) * streams * 4);
+    const result_sums = try r.out(rows * (dims / 256) * streams * 4);
+    try g.hcWriteback(r.s, dh, reference, reference_sums, 0, di, dy, dw, count, rows, dims, streams, 2, 10, 11, 1);
+    for ([_]usize{ 0, 3, 16 }, [_]usize{ 3, 13, 1 }) |at, nrows| {
+        try g.hcWriteback(r.s, dh + at * wide * 2, result + at * wide * 2, result_sums + at * (dims / 256) * streams * 4, 0, di + at * streams * 2, db + at * dims * 4, du + at * 4, nrows * dims, nrows, dims, streams, 2, 0, 1, 1);
+    }
+    const want = try r.back(u16, reference, hidden.len);
+    const got = try r.back(u16, result, hidden.len);
+    try check.expect(std.mem.eql(u16, want, got), "reduced writeback: hidden BF16 bits equal the placed 11-slot path", .{});
+    const want_sums = try r.back(u32, reference_sums, rows * (dims / 256) * streams);
+    const got_sums = try r.back(u32, result_sums, want_sums.len);
+    try check.expect(std.mem.eql(u32, want_sums, got_sums), "reduced writeback: FP32 square-sum bits equal the placed 11-slot path", .{});
+    check.pass("reduced writeback: exact hidden BF16 and FP32 square sums, finite stale slots, signed zero, BF16 ties and short tail", .{});
+}
+
 pub fn run(gpu: check.Gpu) !void {
     var arena: std.heap.ArenaAllocator = .init(gpu.gpa);
     defer arena.deinit();
@@ -377,6 +422,7 @@ pub fn run(gpu: check.Gpu) !void {
     defer r.deinit();
     var g = try flash.Glue.load(gpu.d);
     defer g.deinit();
+    try reducedWriteback(&r, &g);
     try writebackRounding(&r, &g);
     for ([_]usize{ 0, 2, 4 }) |mode| try writeback(&r, &g, mode);
     try readout(&r, &g);

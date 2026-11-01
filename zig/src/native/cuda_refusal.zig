@@ -9,6 +9,7 @@ const glm_model_type = "glm5_next"; // GLM-5.3-Flash's (glm.cuda_native.model_ty
 pub fn backend(o: api.Open) ?[]const u8 {
     if (std.mem.eql(u8, o.model_type, "deepseek_v4") or std.mem.eql(u8, o.model_type, "deepseek_v41"))
         return deepseek_release_message;
+    if (o.tp != 1 and o.tp != 2) return "--tp: the CUDA engine runs one or two ranks (one process a GPU): serve --tp 1 or --tp 2";
     if (o.mtp_drafts) |n| if (n > nemotron.native.max_drafts) return std.fmt.comptimePrint("--mtp-drafts: the CUDA engine drafts at most {d}", .{nemotron.native.max_drafts});
     if (o.mtp_confidence) |c| if (!(c >= 0 and c <= 1)) return "--mtp-confidence must be from 0 to 1";
     if (std.mem.eql(u8, o.model_type, glm_model_type)) {
@@ -39,12 +40,23 @@ const lfm2_vision = "--vision: LFM2 reads the checkpoint's images through its ow
 
 /// A family takes --drafter only if it says so, and --learn-conversations only as Nemotron; null: `o` may open `F`.
 pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
+    return admitted(F, o, false);
+}
+
+/// Apply family and rank refusals after identifying a multi-rank EXL3 checkpoint.
+pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, o: api.Open) ?[]const u8 {
+    const exl3_pack = if (comptime @hasDecl(F, "exl3_pack")) o.tp > 1 and F.exl3_pack(gpa, io, o.dir) else false;
+    return admitted(F, o, exl3_pack) orelse packRanks(F, o, exl3_pack);
+}
+
+/// `family` for a checkpoint that is or is not an EXL3 pack: its ranks keep drafting states, so --tp with drafts opens.
+pub fn admitted(comptime F: type, o: api.Open, exl3_pack: bool) ?[]const u8 {
     if (o.vision != null and !(@hasDecl(F, "Options") and @hasField(F.Options, "vision")))
         return "--vision: this CUDA family reads no images; serve it without --vision";
     const ranked = @hasDecl(F, "Options") and @hasField(F.Options, "rank");
     if (o.tp != 1 and !ranked) return "this CUDA family has no tensor-parallel ranks: serve without --tp";
     if (@hasDecl(F, "tp_draft_snapshots")) {
-        if (!F.tp_draft_snapshots and o.tp > 1 and o.drafts and (o.prompt_cache_gib orelse 1) > 0)
+        if (!F.tp_draft_snapshots and !exl3_pack and o.tp > 1 and o.drafts and (o.prompt_cache_gib orelse 1) > 0)
             return "Flash Next tensor-rank MTP snapshots are unavailable: use --prompt-cache-gib 0 with --tp and drafting";
     }
     // ahead of the drafter's and --learn-conversations' refusals (--spill-gib sets that flag), on a line of its own
@@ -61,6 +73,12 @@ pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
     return null;
 }
 
+/// --tp is served on CUDA for a family's EXL3 packs (`F.exl3_pack`); any other pack keeps the flag refused.
+pub fn packRanks(comptime F: type, o: api.Open, exl3_pack: bool) ?[]const u8 {
+    if (o.tp == 1 or !@hasDecl(F, "exl3_pack") or exl3_pack) return null;
+    return "--tp: on CUDA only an EXL3 pack is placed across ranks by --tp --rank; this checkpoint is not one: serve without --tp";
+}
+
 test "a family must consume rank options before tensor parallelism is admitted" {
     const Single = struct {
         pub const Options = struct { context: usize };
@@ -70,6 +88,15 @@ test "a family must consume rank options before tensor parallelism is admitted" 
     };
     try std.testing.expectStringStartsWith(family(Single, .{ .dir = "d", .model_type = "m", .tp = 2 }) orelse "", "this CUDA family has no tensor-parallel ranks");
     try std.testing.expect(family(Ranked, .{ .dir = "d", .model_type = "m", .tp = 2 }) == null);
+}
+
+test "--tp is served on CUDA for two ranks of a ranked family (Flash Next) only; 4 and 8 stay refused" {
+    const flashnext = @import("flashnext").native;
+    for ([_]u32{ 4, 8 }) |tp| try std.testing.expectStringStartsWith(backend(.{ .dir = "d", .model_type = flashnext.model_type, .tp = tp }) orelse "", "--tp: the CUDA engine runs one or two ranks");
+    for ([_]u32{ 1, 2 }) |tp| try std.testing.expect(backend(.{ .dir = "d", .model_type = flashnext.model_type, .tp = tp }) == null);
+    try std.testing.expect(family(flashnext, .{ .dir = "d", .model_type = flashnext.model_type, .tp = 2, .rank = 1, .drafts = false }) == null);
+    // a family without rank options (Nemotron) still refuses --tp 2 at its admission
+    try std.testing.expectStringStartsWith(family(nemotron.native, .{ .dir = "d", .model_type = nemotron.native.model_type, .tp = 2 }) orelse "", "this CUDA family has no tensor-parallel ranks");
 }
 
 test "--learn is refused whatever the family, and --slide or a learned-disk size alone is not" {
@@ -231,4 +258,8 @@ test "--spill-gib and --checkpoint-slots open the families with a disk image; th
     try std.testing.expectStringStartsWith(family(Other, spilled) orelse "", "--spill-gib keeps evicted states");
     try std.testing.expectStringStartsWith(backend(.{ .dir = "d", .model_type = "m", .keep = 2 }) orelse "", "--checkpoint-slots sets how many");
     try std.testing.expect(backend(.{ .dir = "d", .model_type = "m" }) == null);
+}
+
+test {
+    _ = @import("cuda_flashnext_exl3_refusal_test.zig");
 }
