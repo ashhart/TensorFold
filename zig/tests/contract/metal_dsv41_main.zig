@@ -13,7 +13,9 @@ const dsv41_attn = @import("metal_dsv41_attn.zig");
 const dsv41_experts = @import("metal_dsv41_experts.zig");
 const dsv41_xmma = @import("metal_dsv41_xmma.zig");
 const dsv41_index = @import("metal_dsv41_index.zig");
+const dsv41_engram = @import("metal_dsv41_engram.zig");
 const dsv41_glue = @import("metal_dsv41_glue.zig");
+const dsv41_compress = @import("metal_dsv41_compress.zig");
 const dsv41_mv = @import("metal_dsv41_mv.zig");
 const dsv41_glue_tmp = @import("metal_dsv41_glue_tmp.zig");
 const dsv41_glue_tmp2 = @import("metal_dsv41_glue_tmp2.zig");
@@ -58,7 +60,9 @@ pub const Suites = struct {
     experts: *dsv41_experts.Suite,
     xmma: *dsv41_xmma.Suite,
     ix: *dsv41_index.Suite,
+    engram: *dsv41_engram.Suite,
     glue: *dsv41_glue.Suite,
+    compress: *dsv41_compress.Suite,
     mv: *dsv41_mv.Suite,
     glue_tmp: *dsv41_glue_tmp.Suite,
     glue_tmp2: *dsv41_glue_tmp2.Suite,
@@ -80,22 +84,28 @@ pub const Suites = struct {
         errdefer xmma.destroy();
         const ix = try dsv41_index.Suite.create(a, device, queue, kernels, only);
         errdefer ix.destroy();
+        const engram = try dsv41_engram.Suite.create(a, device, queue, kernels, only);
+        errdefer engram.destroy();
         const glue = try dsv41_glue.Suite.create(a, device, queue, kernels, only);
         errdefer glue.destroy();
+        const compress = try dsv41_compress.Suite.create(a, device, queue, kernels, only);
+        errdefer compress.destroy();
         const mv = try dsv41_mv.Suite.create(a, device, queue, kernels, only);
         errdefer mv.destroy();
         const glue_tmp = try dsv41_glue_tmp.Suite.create(a, device, queue, kernels, only);
         errdefer glue_tmp.destroy();
         const glue_tmp2 = try dsv41_glue_tmp2.Suite.create(a, device, queue, kernels, only);
         errdefer glue_tmp2.destroy();
-        return .{ .fp8 = fp8, .fp8_mma = fp8_mma, .topk = topk, .cand = cand, .attn = attn, .experts = experts, .xmma = xmma, .ix = ix, .glue = glue, .mv = mv, .glue_tmp = glue_tmp, .glue_tmp2 = glue_tmp2 };
+        return .{ .fp8 = fp8, .fp8_mma = fp8_mma, .topk = topk, .cand = cand, .attn = attn, .experts = experts, .xmma = xmma, .ix = ix, .engram = engram, .glue = glue, .compress = compress, .mv = mv, .glue_tmp = glue_tmp, .glue_tmp2 = glue_tmp2 };
     }
 
     pub fn destroy(s: *Suites) void {
         s.glue_tmp2.destroy();
         s.glue_tmp.destroy();
         s.mv.destroy();
+        s.compress.destroy();
         s.glue.destroy();
+        s.engram.destroy();
         s.ix.destroy();
         s.xmma.destroy();
         s.experts.destroy();
@@ -125,6 +135,7 @@ pub const Suites = struct {
         try s.attn.invariance(io, seed, t);
         if (std.c.getenv("TF_DSV41_TIME") != null) try s.attn.timing(io);
         t.failed += try s.ix.invariance(seed);
+        t.failed += try s.engram.invariance(seed);
         t.failed += try s.glue.invariance(seed);
         if (s.mv.probes.items.len > 0) {
             t.failed += try s.mv.invariance(seed);
@@ -132,6 +143,8 @@ pub const Suites = struct {
             t.failed += try s.mv.head(io, seed, std.c.getenv("TF_DSV41_TIME") != null);
         }
         t.failed += try s.glue.tables();
+        t.failed += try s.compress.invariance(seed);
+        t.failed += try s.compress.equality(seed);
         t.failed += try s.glue_tmp.invariance(seed);
         t.failed += try s.glue_tmp2.invariance(seed);
         if (std.c.getenv("TF_DSV41_TIME") != null) try s.ix.timing(io);

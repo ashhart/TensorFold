@@ -14,12 +14,15 @@ pub const xmma = @embedFile("experts_mma.metal");
 /// DeepSeek-V4.1 sparse-attention indexer top-512 over fp32 score rows.
 pub const topk512 = @embedFile("topk512.metal");
 pub const glue = @embedFile("glue.metal");
+pub const compress = @embedFile("compress.metal");
 /// DeepSeek-V4.1 router, indexer, compressor and head matvecs: lane chains over K, one butterfly, any row count.
 pub const mv = @embedFile("mv.metal");
 /// DeepSeek-V4.1 candidate blocks: block maxima, the newest block pinned, an exact top-2048 as a byte mask.
 pub const cand = @embedFile("cand.metal");
 /// DeepSeek V4.1's indexer scores: FP4 query and key dots in one stated order, causal and block masks.
 pub const index = @embedFile("index.metal");
+/// DeepSeek V4.1 Engram: FP8 row dequantisation, F16 wkv, the gate and the residual add.
+pub const engram = @embedFile("engram.metal");
 /// DeepSeek-V4.1's MoE route: the top-k of sqrt(softplus(logit)) + bias, per row (deepseek_v41/route.metal).
 pub const route = @embedFile("route.metal");
 /// DeepSeek-V4.1's phase-1 glue (deepseek_v41/glue_tmp.metal): the reference bits of the registered glue kernels.
