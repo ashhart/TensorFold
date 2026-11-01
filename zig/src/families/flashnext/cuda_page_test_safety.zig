@@ -128,8 +128,8 @@ test "diagnostic pages: admission includes full final pages and the device table
     try std.testing.expectEqual(@as(usize, 2), l.pages);
     try std.testing.expectEqual(2 * pages.pageBytes(48), l.arena);
     try std.testing.expectEqual(@as(usize, 8), l.table);
-    const contiguous = wt.attn_n * (cap * (2 * prompt.kv_row_bytes + wt.index_dim * 2) + prompt.pooledBytes(cap));
-    try std.testing.expectEqual(prompt.seqBytes(cap) - contiguous + l.total, try prompt.seqBytesPaged(cap, 48));
-    try std.testing.expect(try prompt.seqBytesPaged(cap, 48) > prompt.seqBytes(cap));
-    try std.testing.expectEqual(prompt.seqBytes(cap), try prompt.seqBytesPaged(cap, 0));
+    const contiguous = wt.attn_n * (cap * (2 * wt.kv_heads * wt.head_dim * 2 + wt.index_dim * 2) + prompt.pooledBytes(cap));
+    try std.testing.expectEqual(prompt.seqBytes(cap, .full) - contiguous + l.total, try prompt.seqBytesPaged(cap, 48, .full));
+    try std.testing.expect(try prompt.seqBytesPaged(cap, 48, .full) > prompt.seqBytes(cap, .full));
+    try std.testing.expectEqual(prompt.seqBytes(cap, .full), try prompt.seqBytesPaged(cap, 0, .full));
 }

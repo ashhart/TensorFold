@@ -161,15 +161,15 @@ fn launch(gpu: check.Gpu, s: cuda.Stream, k: Fns, f: Fixture, way: Way, a: std.m
             const iqr = iq + row0 * index_heads * index_dim * 2;
             const scr = sc + row0 * nb * 4;
             const ends = l.len + l.rows;
-            try k.g.attnPrep(s, proj + at, pos, qw, kw, iw, inv, qr, cs[0], cs[1], iqr, cs[2], eps, l.rows, .{});
+            try k.g.attnPrep(s, proj + at, pos, qw, kw, iw, inv, qr, cs[0], cs[1], iqr, cs[2], eps, l.rows, .full, .{});
             try k.g.qsaPool(s, cs[2], cs[3], pos, ikw, inv, eps, l.rows, .{});
             if (ends / ratio > top) try k.g.qsaScores(s, iqr, cs[3], pos, scr, nb, l.rows, @min(nb, cdiv(ends, ratio)), .{});
             var args: cuda.Args = .{};
             inline for (.{ scr, pos, ids + row0 * idw * 4, nk + row0 * 4, spr + row0 * 4, cint(nb), cint(idw), cint(top), cint(ratio) }) |x| args.add(x);
             try cuda.launch.launch(k.select, .{ .grid = .{ .x = @intCast(l.rows) }, .block = .{ .x = 1024 } }, s, &args);
             const chunks = cdiv(@min(ends, dense_keys), 512);
-            try k.g.attnChunks(s, qr, cs[0], cs[1], pos, po, pm, pl, ids + row0 * idw * 4, nk + row0 * 4, spr + row0 * 4, l.rows, kv_heads, chunks, true, .{});
-            try k.g.attnMerge(s, po, pm, pl, pos, ao + row0 * out_k * 2, nk + row0 * 4, spr + row0 * 4, l.rows, kv_heads, true);
+            try k.g.attnChunks(s, qr, cs[0], cs[1], pos, po, pm, pl, ids + row0 * idw * 4, nk + row0 * 4, spr + row0 * 4, l.rows, .full, chunks, true, .{});
+            try k.g.attnMerge(s, po, pm, pl, pos, ao + row0 * out_k * 2, nk + row0 * 4, spr + row0 * 4, l.rows, .full, true);
             row0 += l.rows;
         }
     } else {

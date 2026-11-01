@@ -72,3 +72,7 @@ test "targeted CUDA launches still refuse every missing applicable receipt" {
     record.usage[4] = record.usage[3];
     try std.testing.expectEqual(@as(usize, 0), try checkCuda(std.testing.allocator, &.{record}, true));
 }
+
+test {
+    _ = @import("flashnext_heads_records.zig"); // its own test: the TP=2 DeltaNet twins' records
+}
