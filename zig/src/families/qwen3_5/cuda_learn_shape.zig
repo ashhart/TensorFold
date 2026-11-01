@@ -61,12 +61,22 @@ pub const the_27b: Geometry = .{ .hidden = 5120, .intermediate = 17408, .layers 
 
 /// This backward is qualified for the dense 27B geometry alone; serving keeps its wider registry.
 pub fn from(g: owned.Geometry) !Geometry {
-    const out: Geometry = .{ .hidden = g.hidden, .intermediate = g.intermediate, .layers = g.layers, .linear_k_heads = g.k_heads, .linear_v_heads = g.v_heads, .query_heads = g.q_heads, .kv_heads = g.kv_heads };
-    if (!std.meta.eql(out, the_27b) or g.vocab != vocab or g.eps != eps) return error.UnsupportedLearningGeometry;
+    const out: Geometry = .{ .experts = g.experts, .top_k = g.top_k, .hidden = g.hidden, .intermediate = g.intermediate, .layers = g.layers, .linear_k_heads = g.k_heads, .linear_v_heads = g.v_heads, .query_heads = g.q_heads, .kv_heads = g.kv_heads };
+    if (g.moe()) {
+        if (g.kinds.modelopt or g.exl3 or g.expert_bits != 4 or g.hidden != 2048) return error.UnsupportedLearningFormat;
+        if (g.layers < 4 or g.layers > 64 or g.layers % 4 != 0 or g.intermediate != 512 or
+            g.k_heads != 16 or g.v_heads != 32 or g.q_heads != 16 or g.kv_heads != 2 or
+            g.experts == 0 or g.experts >= 1024 or g.top_k == 0 or g.top_k > @min(16, g.experts))
+            return error.UnsupportedLearningGeometry;
+    } else if (!std.meta.eql(out, the_27b)) return error.UnsupportedLearningGeometry;
+    if (g.vocab != vocab or g.eps != eps) return error.UnsupportedLearningGeometry;
     for (g.linear[0..g.layers], 0..) |v, i| if (v != linear(i)) return error.UnsupportedLearningGeometry;
-    if (g.moe() or g.bits.embed != 4 or g.bits.head != 4) return error.UnsupportedLearningFormat;
+    if (g.bits.embed != 4 or g.bits.head != 4) return error.UnsupportedLearningFormat;
     if (g.rope != .plain) return error.QwenYarnNoLearner; // the backward attention ropes with theta's frequencies alone
-    for (g.bits.proj[0..g.layers]) |widths| for (widths) |bits| if (bits != 4) return error.UnsupportedLearningFormat;
+    for (g.bits.proj[0..g.layers]) |widths| for (widths, 0..) |bits, slot| {
+        if (g.moe() and slot <= @backingInt(owned.Slot.down)) continue;
+        if (bits != 4) return error.UnsupportedLearningFormat;
+    };
     return out;
 }
 
@@ -87,4 +97,32 @@ test "Dense learning: learning admits the dense affine4 layout and refuses mixed
     g.rope = .plain;
     g.experts = 256;
     try std.testing.expectError(error.UnsupportedLearningFormat, from(g));
+}
+
+test "MoE learning: 35B geometry and named refusals leave dense admission unchanged" {
+    var g: owned.Geometry = .{ .hidden = 2048, .intermediate = 512, .layers = 40, .vocab = vocab, .k_heads = 16, .v_heads = 32, .q_heads = 16, .kv_heads = 2, .eps = eps, .tied = false, .context = 4096, .linear = @splat(false), .experts = 256, .top_k = 8 };
+    for (0..g.layers) |i| g.linear[i] = linear(i);
+    const got = try from(g);
+    try std.testing.expectEqual(@as(usize, 256), got.experts);
+    try std.testing.expectEqual(@as(usize, 8), got.top_k);
+    g.expert_bits = 3;
+    try std.testing.expectError(error.UnsupportedLearningFormat, from(g));
+    g.expert_bits = 4;
+    g.kinds.modelopt = true;
+    try std.testing.expectError(error.UnsupportedLearningFormat, from(g));
+    g.kinds.modelopt = false;
+    g.exl3 = true;
+    try std.testing.expectError(error.UnsupportedLearningFormat, from(g));
+    g.exl3 = false;
+    g.top_k = 17;
+    try std.testing.expectError(error.UnsupportedLearningGeometry, from(g));
+    g.top_k = 8;
+    g.rope = .{ .yarn = .{ .factor = 4, .trained = 262144, .table = @splat(0) } };
+    try std.testing.expectError(error.QwenYarnNoLearner, from(g));
+    g.rope = .plain;
+    g.bits.proj[0][@backingInt(owned.Slot.qkv)] = 8;
+    try std.testing.expectError(error.UnsupportedLearningFormat, from(g));
+    g.bits.proj[0][@backingInt(owned.Slot.qkv)] = 4;
+    g.bits.proj[0][@backingInt(owned.Slot.gate)] = 8;
+    _ = try from(g); // unused dense MLP slots are not the routed expert format
 }
