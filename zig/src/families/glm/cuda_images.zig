@@ -150,6 +150,11 @@ pub const Images = struct {
 
     /// Rank 0: a prompt pass on `slot` from row `from`: the images whose rows end past it, through the tower.
     pub fn begin(v: *Images, slot: u32, images: []const lanes.stream.Image, from: usize) !void {
+        return v.beginUsing(slot, images, from, vision.Tower.encode);
+    }
+
+    /// The production admission and suffix selection, with the encoder fixed at compile time.
+    pub fn beginUsing(v: *Images, slot: u32, images: []const lanes.stream.Image, from: usize, comptime encode: anytype) !void {
         try v.activate(slot);
         v.clear();
         errdefer v.clear();
@@ -159,7 +164,7 @@ pub const Images = struct {
             if (img.gh * img.gw != img.tokens * vcfg.patches_per_token) return error.ImageOutOfStep;
             if (img.at + img.tokens <= from) continue; // in the kept state already
             if (img.tokens > (try v.rowLimit()) -| row) return error.ImageRows; // the server holds a request to its limits
-            try t.encode(&v.run, img.pixels, .{ 1, img.gh, img.gw }, v.rows.ptr + @as(u64, row) * vcfg.out_hidden * 2);
+            try encode(t, &v.run, img.pixels, .{ 1, img.gh, img.gw }, v.rows.ptr + @as(u64, row) * vcfg.out_hidden * 2);
             try v.spans.append(v.gpa, .{ .at = img.at, .n = img.tokens, .row = row });
             row += img.tokens;
         }

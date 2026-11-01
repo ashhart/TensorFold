@@ -287,7 +287,7 @@ pub const Lanes = struct {
         var adopt: std.ArrayList(u32) = .empty;
         defer adopt.deinit(gpa);
         // TF_GLM_KV_SHARE: the deepest kept state's pages, held for this call until the seat takes them
-        const marks: []const u32 = if (share) (try self.prefix.?.begin(ids, s.history_len, s.shared_prefixes, &owner, &adopt)).marks else &.{};
+        const marks: []const u32 = if (share) (try self.prefix.?.beginStream(s, &owner, &adopt)).marks else &.{};
         var held = true;
         errdefer if (held) gpa.free(marks);
         const pages = try self.seat(s, ids.len, s.max_new, adopt.items);
@@ -311,9 +311,9 @@ pub const Lanes = struct {
         return if (s.prompt_logprobs != null) null else self.resumeFrom(s, ids.len); // prompt rows need every row
     }
 
-    /// Whether the prompt cache over the pool's pages keeps and resumes this pass: text alone, no prompt rows asked.
+    /// Whether the pool's prompt cache keeps this content-keyed pass, with no prompt logprob rows asked.
     fn cached(self: *const Lanes, s: *const lanes.Stream) bool {
-        return self.prefix != null and s.images.len == 0 and s.prompt_logprobs == null;
+        return self.prefix != null and prefix_mod.cacheable(s);
     }
 
     /// The stream's slot, its pages (the cache's `adopted` first, given back on a refusal), then its sequence.
@@ -364,8 +364,7 @@ pub const Lanes = struct {
     fn marksOf(self: *Lanes, s: *lanes.Stream, keeps: *prefix_mod.Keeps) ?engine.Marks {
         if (self.cached(s)) {
             const l = self.lanes.getPtr(s) orelse return null;
-            keeps.* = .{ .x = self.prefix.?, .slot = l.slot, .prompt = s.prompt() };
-            return if (l.marks.len == 0) null else .{ .at = l.marks, .ctx = keeps, .call = prefix_mod.Keeps.at, .interrupted = prefix_mod.Keeps.at };
+            return self.prefix.?.marks(l.slot, s, l.marks, keeps);
         }
         return if (s.reuse.hook == null) null else .{
             .at = s.reuse.marks,
