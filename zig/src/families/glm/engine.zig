@@ -178,6 +178,7 @@ pub const Engine = struct {
             e.k.deinit();
             gpa.destroy(e.k);
         }
+        @import("../../core/route_tap_metal.zig").attach(e.device);
         try frags.check(e.device, e.queue, gpa); // the fragment layout nax.h gives GLM's prompt and attention kernels
         const chunked = if (platform.c.getenv("GLM_PROMPT")) |v| v[0] != '0' else true;
         e.limit = try load_plan.loadLimit(e.device);
@@ -274,6 +275,7 @@ pub const Engine = struct {
 
     pub fn deinit(e: *Engine) void {
         const gpa = e.gpa;
+        @import("../../core/route_tap_metal.zig").detach();
         residency.drop(e);
         if (e.dflash) |d| d.deinit(); // before the device, kernels and weights it borrows
         if (e.ep) |ep| ep.deinit(gpa);
@@ -338,6 +340,7 @@ pub const Engine = struct {
         if (spin) {
             while (@backingInt(cb.status()) < @backingInt(mtl.types.CommandBufferStatus.completed)) std.atomic.spinLoopHint();
         } else cb.wait();
+        @import("../../core/route_tap_metal.zig").afterWait();
         e.gpu = .{ cb.gpuStart(), cb.gpuEnd() };
         if (cb.failure()) |msg| {
             e.event.set(e.ev); // a failed buffer may never signal: the next one must not wait on it

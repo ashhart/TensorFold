@@ -48,6 +48,7 @@ pub const Model = struct {
         m.device = try mtl.Device.init();
         errdefer m.device.deinit();
         m.queue = try m.device.queue();
+        @import("../../core/route_tap_metal.zig").attach(m.device);
         errdefer m.queue.deinit();
         m.checkpoint = ck.Checkpoint.init(gpa);
         errdefer m.checkpoint.deinit();
@@ -140,6 +141,7 @@ pub const Model = struct {
         for (m.route) |p| p.deinit();
         m.rows.deinit();
         for (m.glue) |p| p.deinit();
+        @import("../../core/route_tap_metal.zig").detach();
         m.weights.deinit(m.gpa);
         m.checkpoint.deinit();
         m.queue.deinit();
