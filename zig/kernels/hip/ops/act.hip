@@ -338,6 +338,24 @@ __global__ void moe_combine_kernel(const float* __restrict__ y, const float* __r
     narrow(acc, out + static_cast<long long>(row) * d + c);
 }
 
+// A shared expert beside the routed stack: its row is not in y, so wts' last slot (tf_moe_select's sigmoid) weights it.
+extern "C" __global__ void tf_moe_combine_gate(const float* __restrict__ y, const float* __restrict__ wts,
+                                                const float* __restrict__ shared, void* __restrict__ out, int kind,
+                                                int slots, int d) {
+    const int row = blockIdx.y;
+    const int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= d) return;
+    float acc = 0.f;
+    for (int s = 0; s < slots - 1; ++s) {
+        acc += y[(static_cast<long long>(row) * slots + s) * d + c] * wts[row * slots + s];
+    }
+    if (shared != nullptr) acc += shared[static_cast<long long>(row) * d + c] * wts[row * slots + slots - 1];
+    const long long at = static_cast<long long>(row) * d + c;
+    if (kind == 0) narrow(acc, static_cast<float*>(out) + at);
+    else if (kind == 1) narrow(acc, static_cast<__half*>(out) + at);
+    else narrow(acc, reinterpret_cast<hip_bfloat16*>(out) + at);
+}
+
 template <typename T>
 __global__ void gdn_gate_kernel(const T* __restrict__ a, const T* __restrict__ b, const float* __restrict__ a_log,
                                 const float* __restrict__ dt_bias, float* __restrict__ gate, float* __restrict__ beta,

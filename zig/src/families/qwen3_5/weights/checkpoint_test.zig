@@ -314,3 +314,61 @@ test "an MTP head shipped zero-centered gets back the 1 the trunk has baked in; 
             try std.testing.expectEqual(@as(f64, 1.25), convert.load(.f32, t.bytes, 3));
     }
 }
+
+/// The same MoE layer with the shared expert at 8-bit and its own width: its projections cannot stack into the stack.
+const mixed_config =
+    \\{"model_type": "qwen3_5_moe", "tie_word_embeddings": true,
+    \\ "quantization": {"group_size": 32, "bits": 4, "mode": "affine",
+    \\   "language_model.model.layers.0.mlp.gate": {"group_size": 32, "bits": 8},
+    \\   "language_model.model.layers.0.mlp.shared_expert_gate": {"group_size": 32, "bits": 8},
+    \\   "language_model.model.layers.0.mlp.shared_expert.gate_proj": {"group_size": 32, "bits": 8},
+    \\   "language_model.model.layers.0.mlp.shared_expert.up_proj": {"group_size": 32, "bits": 8},
+    \\   "language_model.model.layers.0.mlp.shared_expert.down_proj": {"group_size": 32, "bits": 8}},
+    \\ "text_config": {"hidden_size": 64, "num_hidden_layers": 1, "num_attention_heads": 2,
+    \\  "num_key_value_heads": 1, "head_dim": 32, "linear_num_key_heads": 1, "linear_num_value_heads": 2,
+    \\  "linear_key_head_dim": 32, "linear_value_head_dim": 16, "linear_conv_kernel_dim": 4, "vocab_size": 16,
+    \\  "full_attention_interval": 1, "num_experts": 2, "num_experts_per_tok": 1, "moe_intermediate_size": 32,
+    \\  "shared_expert_intermediate_size": 32, "eos_token_id": 1}}
+;
+
+test "a mixed-width MoE checkpoint: this bridge stacks the shared expert, so it refuses one beside the stack" {
+    var img = Image.init();
+    defer img.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = L ++ "layers.0.";
+    const mlp = base ++ "mlp.";
+    try trunk(&img);
+    try norms(&img, base);
+    try attention(&img, base);
+    try img.affine(mlp ++ "gate", 2, 64, 8, 32);
+    try img.affine(mlp ++ "shared_expert_gate", 1, 64, 8, 32);
+    // the routed stack at 4-bit (rank 3, experts first); the shared expert at 8-bit, its own rank-2 projections
+    const stack = [_]struct { suffix: []const u8, words: [3]usize, table: [3]usize }{
+        .{ .suffix = "gate_proj", .words = .{ 2, 32, 8 }, .table = .{ 2, 32, 2 } },
+        .{ .suffix = "up_proj", .words = .{ 2, 32, 8 }, .table = .{ 2, 32, 2 } },
+        .{ .suffix = "down_proj", .words = .{ 2, 64, 4 }, .table = .{ 2, 64, 1 } },
+    };
+    for (stack) |p| for ([_][]const u8{ "weight", "scales", "biases" }) |part| {
+        var buf: [160]u8 = undefined;
+        const w = std.mem.eql(u8, part, "weight");
+        try img.put(
+            try std.fmt.bufPrint(&buf, "{s}switch_mlp.{s}.{s}", .{ mlp, p.suffix, part }),
+            if (w) "U32" else "BF16",
+            if (w) &p.words else &p.table,
+        );
+    };
+    try img.affine(mlp ++ "shared_expert.gate_proj", 32, 64, 8, 32);
+    try img.affine(mlp ++ "shared_expert.up_proj", 32, 64, 8, 32);
+    try img.affine(mlp ++ "shared_expert.down_proj", 64, 32, 8, 32);
+    try img.write(tmp.dir, "model.safetensors");
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = mixed_config });
+    const root = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer gpa.free(root);
+
+    var ck = try checkpoint.Checkpoint.open(gpa, io, root);
+    defer ck.close();
+    std.testing.log_level = .err; // the refusal is logged as a warning, as it is meant to be
+    defer std.testing.log_level = .warn;
+    try std.testing.expectError(error.UnexpectedTensor, ck.layer(0));
+}
