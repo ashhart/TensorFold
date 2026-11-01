@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- With `TF_DSV41_PF_4K=1`, `aot-needs` also lists the 2,048-row prefill variants the forward still runs, so a pack built with it no longer fails its first operation with `MissingTritonVariant _kv_store … RING 4096` (#1683). Thanks to @jayleaton.
+
 - DeepSeek-V4.1's prefill planner sizes the indexer's scratch before it shares and prices the workspace, so ragged prompts and the two-batch-overlap branch can no longer plan less than they use. This takes about 128 MiB more per rank on the Flash-1017 pack, and tokens are unchanged (#1681). Thanks to @jayleaton.
 
 - On Intel GPUs, the engine asks Level Zero how many drivers and devices there are before listing them and skips empty entries, so `tensorfold-xpu devices` and the device tests no longer crash on WSL2 with an Iris Xe (#1672). Thanks to @jschmied.
