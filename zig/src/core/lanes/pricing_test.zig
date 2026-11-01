@@ -9,7 +9,6 @@ const be = @import("backend.zig");
 const depth = @import("depth.zig");
 const Table = @import("table.zig").Table;
 
-
 const gpa = std.testing.allocator;
 
 /// A round's ms: the model's window cost for its rows, plus 3 ms a row of host draws when a stream in it samples.
