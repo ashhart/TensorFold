@@ -73,6 +73,7 @@ pub const glm_index: []const u8 = if (available) &Blob("fatbin_glm_index").bytes
 pub const minimax_m3: []const u8 = if (available) &Blob("fatbin_minimax_m3").bytes else &.{};
 pub const minimax_m3_attn: []const u8 = if (available) &Blob("fatbin_minimax_m3_attn").bytes else &.{};
 pub const idol: []const u8 = if (available) &Blob("fatbin_idol").bytes else &.{};
+pub const idol_dino: []const u8 = if (available) &Blob("fatbin_idol_dino").bytes else &.{};
 pub const glm_quant: []const u8 = if (available) &Blob("fatbin_glm_quant").bytes else &.{};
 pub const glm_vision: []const u8 = if (available) &Blob("fatbin_glm_vision").bytes else &.{};
 pub const glm_mm: []const u8 = if (available) &Blob("fatbin_glm_mm").bytes else &.{};

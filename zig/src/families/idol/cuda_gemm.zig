@@ -1,12 +1,12 @@
-//! Idol's products on cuBLASLt: fp16 block linears into fp32 sums, and true fp32 products (no TF32), a plan a shape.
+//! Idol's products on cuBLASLt: fp16 or bf16 linears into fp32 sums, true fp32 products (no TF32), a plan a shape.
 const std = @import("std");
 const cuda = @import("cuda");
 const lt_ = cuda.cublaslt;
 
 pub const workspace_bytes = 32 << 20;
 
-/// The operands' type: fp16 for the blocks' linears, fp32 for RePo's maps and the condition and output projections.
-pub const In = enum { f16, f32 };
+/// The operands' type: fp16 block linears, fp32 RePo maps and condition/output projections, bf16 DINOv3 linears.
+pub const In = enum { f16, f32, bf16 };
 
 pub const Gemms = struct {
     gpa: std.mem.Allocator,
@@ -41,6 +41,7 @@ pub const Gemms = struct {
         const t: lt_.DataType = switch (in) {
             .f16 => .f16,
             .f32 => .f32,
+            .bf16 => .bf16,
         };
         got.value_ptr.* = lt_.Linear.initTyped(&g.lt, rows, n, k, t, .f32, workspace_bytes, .none) catch |e| {
             g.plans.removeByPtr(got.key_ptr);
@@ -55,4 +56,5 @@ test "cuBLASLt's fp32 compute type is CUBLAS_COMPUTE_32F, not a TF32 or fast mod
     try std.testing.expectEqual(@as(c_int, 68), lt_.compute_32f);
     try std.testing.expectEqual(@as(c_int, 2), @backingInt(lt_.DataType.f16));
     try std.testing.expectEqual(@as(c_int, 0), @backingInt(lt_.DataType.f32));
+    try std.testing.expectEqual(@as(c_int, 14), @backingInt(lt_.DataType.bf16));
 }

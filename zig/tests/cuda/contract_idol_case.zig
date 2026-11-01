@@ -7,14 +7,20 @@ const r = @import("contract_idol_ref.zig");
 
 const c = r.c;
 const g = r.g;
+const bf16 = @import("core").contract.bf16_round;
 
-/// The gates' hooks over an Op: its kinds, out, in_place (input the output starts as), spec, sizes, fill, launch, ref.
+/// The kernels an Op launches: its own `Kernels` (DINOv3's), else the denoiser's.
+pub fn KernelsOf(comptime Op: type) type {
+    return if (@hasDecl(Op, "Kernels")) Op.Kernels else idol.Kernels;
+}
+
+/// The gates' hooks over an Op (kinds, out, in_place, spec, sizes, fill, launch, ref; Kernels, scratch, launchWith).
 pub fn Case(comptime Op: type) type {
     const n = Op.kinds.len;
     return struct {
         const Self = @This();
         rig: rig_.Rig,
-        k: idol.Kernels,
+        k: KernelsOf(Op),
         name: []const u8,
         /// The Op's own form (a norm's mode, the bias's GELU), passed to each of its functions.
         variant: u32 = 0,
@@ -24,6 +30,8 @@ pub fn Case(comptime Op: type) type {
         vals: [n][]f64 = @splat(&.{}),
         dev: [n]u64 = @splat(0),
         out: u64 = 0,
+        /// An Op's second output, unchecked (`Op.scratch` bytes), when it declares one.
+        extra: u64 = 0,
         ends: r.Ends,
 
         pub fn deinit(t: *Self) void {
@@ -62,14 +70,14 @@ pub fn Case(comptime Op: type) type {
                 defer a.free(bytes);
                 d.* = try t.rig.input(bytes);
             }
-            t.out = try t.rig.output(Op.count(shape) * @as(usize, if (Op.out == .f16) 2 else 4));
+            t.out = try t.rig.output(Op.count(shape) * Op.out.size());
+            if (@hasDecl(Op, "scratch")) t.extra = try t.rig.scratch(Op.scratch(shape));
             return true;
         }
 
         /// The values as the device holds them (each rounded to its type), and their bytes.
         fn encode(a: std.mem.Allocator, kind: r.Kind, v: []f64) ![]u8 {
-            const size: usize = if (kind == .f16) 2 else 4;
-            const out = try a.alloc(u8, v.len * size);
+            const out = try a.alloc(u8, v.len * kind.size());
             for (v, 0..) |*x, i| switch (kind) {
                 .f16 => {
                     const hv: f16 = @floatCast(@as(f32, @floatCast(x.*)));
@@ -81,16 +89,23 @@ pub fn Case(comptime Op: type) type {
                     std.mem.writeInt(u32, out[4 * i ..][0..4], @bitCast(fv), .little);
                     x.* = fv;
                 },
+                .bf16 => {
+                    const bv = bf16.bits(@floatCast(x.*));
+                    std.mem.writeInt(u16, out[2 * i ..][0..2], bv, .little);
+                    x.* = bf16.value(bv);
+                },
             };
             return out;
         }
 
         pub fn run(t: *Self) !void {
             if (Op.in_place) |i| {
-                const bytes = t.count() * @as(usize, if (Op.out == .f16) 2 else 4);
+                const bytes = t.count() * Op.out.size();
                 try (cuda.DeviceBuffer{ .d = t.rig.gpu.d, .ptr = t.out, .len = bytes }).copyFrom(0, t.dev[i], bytes, t.rig.s.handle);
             }
-            try Op.launch(&t.k, t.rig.s, t.dev, t.out, t.shape, t.variant);
+            if (@hasDecl(Op, "scratch")) {
+                try Op.launchWith(&t.k, t.rig.s, t.dev, t.out, t.extra, t.shape, t.variant);
+            } else try Op.launch(&t.k, t.rig.s, t.dev, t.out, t.shape, t.variant);
             try t.rig.s.synchronize();
         }
 
@@ -130,6 +145,6 @@ pub fn Case(comptime Op: type) type {
 }
 
 /// The usual registration of a test: its rig on the stream, the kernels (or a control's copy), name and form.
-pub fn make(comptime Op: type, rig: rig_.Rig, k: idol.Kernels, name: []const u8, variant: u32, control: ?g.Gate) Case(Op) {
+pub fn make(comptime Op: type, rig: rig_.Rig, k: KernelsOf(Op), name: []const u8, variant: u32, control: ?g.Gate) Case(Op) {
     return .{ .rig = rig, .k = k, .name = name, .variant = variant, .control = control, .ends = .{ .a = rig.gpu.gpa } };
 }
