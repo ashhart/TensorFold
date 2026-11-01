@@ -84,6 +84,8 @@ pub const Decider = struct {
     bidirectional: bool,
     /// A decision's questions in one several-slot pass (TF_DECIDE_BATCH=0: one pass each, as before).
     batch: bool = true,
+    /// TF_DECIDE_CHECK: each answer is checked against a fresh slot's trunk-then-question pass (verify).
+    fresh_check: bool = false,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, runner: *Runner, chunk: u32, bidirectional: bool) !Decider {
         var head = try Head.open(gpa, io, dir, runner.model.config.hidden);
@@ -91,7 +93,8 @@ pub const Decider = struct {
         const rewind = try runner.model.device.buffer(q.snapshot.rewindBytes(runner, null), mtl.ResourceOptions.private | mtl.ResourceOptions.untracked);
         errdefer rewind.deinit();
         const off = if (std.c.getenv("TF_DECIDE_BATCH")) |v| std.mem.eql(u8, std.mem.span(v), "0") else false;
-        return .{ .gpa = gpa, .runner = runner, .head = head, .rewind = rewind, .chunk = blockRows(runner.promptRows(chunk)), .hidden = try gpa.alloc(f32, runner.model.config.hidden), .bidirectional = bidirectional, .batch = bidirectional and !off };
+        const fresh = std.c.getenv("TF_DECIDE_CHECK") != null;
+        return .{ .fresh_check = fresh, .gpa = gpa, .runner = runner, .head = head, .rewind = rewind, .chunk = blockRows(runner.promptRows(chunk)), .hidden = try gpa.alloc(f32, runner.model.config.hidden), .bidirectional = bidirectional, .batch = bidirectional and !off };
     }
 
     pub fn deinit(d: *Decider) void {
@@ -217,6 +220,7 @@ pub const Decider = struct {
             xs[j].read = read;
         }
         for (0..used) |s| try r.reset(@intCast(s));
+        if (d.fresh_check) for (group) |j| try d.verify(xs[j]);
     }
 
     /// `pieces` in passes of at most `chunk` rows (one block alone: the one-slot pass); questions read their labels.
@@ -317,9 +321,32 @@ pub const Decider = struct {
             read += b.len;
         }
         try r.reset(d.slot);
+        if (d.fresh_check) try d.verify(x);
         x.read = read;
     }
 
+    /// Each question again from an empty slot (its trunk, then it alone): logits must match bit for bit.
+    fn verify(d: *Decider, x: *const api.Decision) !void {
+        const r = d.runner;
+        var at: usize = 0;
+        var equal: usize = 0;
+        for (x.branches, x.counts) |b, n| {
+            try r.reset(d.slot);
+            if (x.trunk.len > 0) _ = try q.block_forward.run(r, &d.store, d.slot, x.trunk, d.chunk, d.bidirectional);
+            const rows = try q.block_forward.run(r, &d.store, d.slot, b, d.chunk, d.bidirectional);
+            try q.block_forward.lastHidden(r, rows, d.hidden);
+            for (x.labels[at..][0..n], x.logits[at..][0..n]) |id, got| {
+                const w = try d.head.row(id);
+                var acc: f64 = 0;
+                for (w, d.hidden) |a, h| acc += @as(f64, a) * h;
+                if (@as(u64, @bitCast(acc)) == @as(u64, @bitCast(got))) equal += 1 else std.log.warn("decide check: label {d} gave {e} fresh, {e} answered", .{ id, acc, got });
+            }
+            at += n;
+        }
+        try r.reset(d.slot);
+        std.log.info("decide check: {d}/{d} label logits of {d} questions equal a fresh pass bit for bit", .{ equal, x.labels.len, x.branches.len });
+        if (equal != x.labels.len) return error.CheckFailed;
+    }
 };
 
 /// TF_QWEN27_BLOCK_ROWS (16 to `most`, a multiple of 16) runs longer blocks layer-major at that width; a check's knob.
