@@ -10,6 +10,14 @@ const snapshot = @import("snapshot.zig");
 const Model = @import("model.zig").Model;
 const be = lanes.backend;
 
+/// Where a drafter holds a stream's drafts on the device, for verify windows that take them there (Window.held).
+pub const HeldSource = struct {
+    ptr: *anyopaque,
+    get: *const fn (ptr: *anyopaque, s: *lanes.Stream) ?Device,
+    host: *const fn (ptr: *anyopaque, s: *lanes.Stream, out: []u32) anyerror!void, // where `get` gives none
+};
+pub const Device = struct { src: mtl.Buffer, off: usize, stride: u32, wait: fwd.Wait };
+
 pub const Options = struct { capacity: usize, chunk: usize = 128, streams: u32 = 8 };
 
 pub const Metal = struct {
@@ -25,6 +33,8 @@ pub const Metal = struct {
     timed: usize = 0,
     /// Forwards run so far: a stream's tapped rows in the scratch are current while their gen matches.
     gen: u64 = 0,
+    /// A drafter whose drafts verify windows read on the device (null: windows carry host tokens only).
+    held_source: ?HeldSource = null,
 
     pub fn init(gpa: std.mem.Allocator, model: *Model, options: Options) !*Metal {
         const out = try gpa.create(Metal);
@@ -246,20 +256,34 @@ pub const Metal = struct {
         const self = cast(ptr);
         var segments: [st.batch_rows]fwd.Segment = undefined;
         var ids: [st.batch_rows]u32 = undefined;
+        var held: [st.batch_rows]fwd.Held = undefined;
+        var count: usize = 0;
+        var wait: ?fwd.Wait = null;
         var total: usize = 0;
         if (windows.len > segments.len or windows.len != out.len) return error.InvalidLfmWindows;
         for (windows, 0..) |w, i| {
             const rows = w.rows();
-            if (w.parents != null or w.held != 0 or rows > st.window_rows or total + rows > st.batch_rows or w.positions.len != rows) return error.UnsupportedLfmWindow;
+            if (w.held != 0) { // the drafter's picks, copied into the window's rows on the GPU
+                const source = self.held_source orelse return error.UnsupportedLfmWindow;
+                if (total + rows > st.batch_rows) return error.UnsupportedLfmWindow;
+                if (source.get(source.ptr, w.stream)) |dev| {
+                    held[count] = .{ .row = total + 1, .src = dev.src, .off = dev.off, .stride = dev.stride, .count = w.held };
+                    count += 1;
+                    wait = if (wait) |x| (if (x.value >= dev.wait.value) x else dev.wait) else dev.wait;
+                    @memset(ids[total + 1 ..][0..w.held], 0);
+                } else try source.host(source.ptr, w.stream, ids[total + 1 ..][0..w.held]);
+            }
+            if (w.parents != null or rows > st.window_rows or total + rows > st.batch_rows or w.positions.len != rows) return error.UnsupportedLfmWindow;
             if (w.masks.len != 0 and w.masks.len != rows * mask_words) return error.InvalidLfmMasks;
             const cache = try self.cacheOf(w.stream);
             for (w.positions, 0..) |p, r| if (p != cache.len + r + 1) return error.InvalidLfmPosition;
             segments[i] = .{ .cache = cache, .rows = rows };
             ids[total] = w.pending;
-            @memcpy(ids[total + 1 ..][0..w.tokens.len], w.tokens);
+            @memcpy(ids[total + 1 + w.held ..][0..w.tokens.len], w.tokens);
             total += rows;
         }
-        try self.run(segments[0..windows.len], ids[0..total], true, .all);
+        self.gen += 1;
+        try fwd.runHeld(self.model, &self.scratch, segments[0..windows.len], ids[0..total], true, .all, held[0..count], wait);
         if (self.scratch.taps != null) for (segments[0..windows.len]) |seg| {
             const last = seg.cache.last.?;
             seg.cache.tap = .{ .start = last.start, .row = last.base, .rows = last.rows, .gen = self.gen };
@@ -268,7 +292,7 @@ pub const Metal = struct {
         const best = self.scratch.best.slice(u32, 2 * total);
         var base: usize = 0;
         for (windows, out) |w, o| {
-            if (o.sampled.len != w.rows() or o.drafts.len != w.tokens.len) return error.InvalidLfmOutputs;
+            if (o.sampled.len != w.rows() or o.drafts.len != w.rows() - 1) return error.InvalidLfmOutputs;
             for (o.sampled, w.positions, 0..) |*t, p, r| {
                 const mask = if (w.masks.len > 0) w.masks[r * mask_words ..][0..mask_words] else &.{};
                 // A greedy row takes the GPU's pick, the host's draw on the same logits; a nonfinite row errors there.
@@ -279,7 +303,7 @@ pub const Metal = struct {
                 }
                 t.* = try draw(self.gpa, logits[(base + r) * c.vocab ..][0..c.vocab], w.stream.sampling, p, mask);
             }
-            @memcpy(o.drafts, w.tokens);
+            @memcpy(o.drafts, self.scratch.ids.slice(u32, base + w.rows())[base + 1 ..][0 .. w.rows() - 1]);
             base += w.rows();
         }
     }

@@ -188,8 +188,10 @@ each, red at `shapes`, and a score edit (2 log2e) in each kernel is a control. T
 LFM2.5-24B-A2B's shared rounds: the greedy pick (`lfm2_argmax`) and the conv and attention kernels that run every
 stream's rows in one dispatch, each bit-equal to the per-stream kernels it replaces. Four controls edit the source: a tie
 to the highest id, a nonfinite logit not flagged, and every stream reading or writing the first stream's state or cache.
-Their launches are in `lfm2_records.zig` with the M1 and M2 limits from `--offline`; `lfm2_attn_segs` reserves its 128
-threads in its source, as Metal cannot build it for M1 or M2 at another count.
+The DSpark drafter's tap copy, Markov scan and pick, draft ids, block attention and confidence logit are there too, with seven more controls.
+Its bf16 linears (few rows, 64x64 tiles) and the Markov scan over a bf16 W2 have four and two more.
+Their launches are in `lfm2_records.zig` with the M1 and M2 limits from `--offline`; `lfm2_attn_segs` and
+`lfm2_attn_block` reserve their 128 threads in their source, as Metal cannot build them for M1 or M2 at another count.
 Metal also checks Nemotron's routed experts on the engine's route tables, one row to 128: `tf_xup_w3` and `tf_xdown_w3`
 against float64 at tf_load16's bf16 x sums (up's relu2 as an interval over its two bf16 roundings), and the rows2, rows4
 and six geometry pipelines of each projection bit-equal to them (two controls: member rows read from one row, and

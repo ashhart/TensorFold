@@ -124,8 +124,9 @@ pub const Engine = struct {
         for (e.live.items) |s| {
             if (!s.finished and !s.paused) try live.append(a, s);
         }
-        if (live.items.len > 1 and e.cfg.family_streams) {
-            // a shared round is synchronous: a stream that ran a step ahead lands its queued token first
+        const priced = @import("hold_price.zig").priced(e);
+        if (e.cfg.family_streams and (live.items.len > 1 or (live.items.len == 1 and priced and live.items[0].drafts))) {
+            // Row-allocated rounds land queued tokens before constructing their windows.
             for (live.items) |s| {
                 if (s.inflight != null) try e.landInflight(s);
             }
@@ -141,7 +142,7 @@ pub const Engine = struct {
         if (!e.alone) for (live.items) |s| {
             s.shared_round = true;
         };
-        if (live.items.len > 1 and e.cfg.family_streams) {
+        if (e.cfg.family_streams and (live.items.len > 1 or (live.items.len == 1 and priced and live.items[0].drafts))) {
             const chosen = try e.takeTurns(live.items);
             e.shared_rounds += 1;
             for (chosen) |s| s.served = e.shared_rounds;
@@ -199,7 +200,7 @@ pub const Engine = struct {
 
     /// One stream's round: verify pending and drafted tokens together, keep drafts to the first mismatch.
     fn familyRound(e: *Engine, s: *Stream, copied: ?win.Copy) !Result {
-        e.clock.start();
+        @import("hold_price.zig").startRound(e);
         try e.late.flush(e, Engine.askDrafts);
         const priced = s.priced;
         s.priced = null;
@@ -248,7 +249,7 @@ pub const Engine = struct {
         if (e.cfg.timed and plan.kind == .head) {
             const ms = e.clock.elapsedMs(.overhead);
             try trail.event(e, &.{ f("ev", str("overhead")), f("streams", int(1)), f("rows", int(rows)), f("ms", ev.bits(ms)) });
-            try e.rule.observeOverhead(1, rows, ms, s.sampling != null, 0.0);
+            try e.rule.observeOverhead(1, rows, ms, s.sampling != null, @import("hold_price.zig").observedHeadMs(e.backend, &e.rule, &.{}));
         }
         if (e.backend.round_observer != null) e.backend.observed(&.{o.path});
         return .{ .rows = @intCast(rows), .keep = @intCast(o.path.len), .got = o.got };
@@ -256,7 +257,7 @@ pub const Engine = struct {
 
     /// The stream windows of a shared round in one forward, then each verified, committed and drafted on its own.
     fn roundStreams(e: *Engine, entries: []*Stream) !void {
-        e.clock.start();
+        @import("hold_price.zig").startRound(e);
         try e.late.flush(e, Engine.askDrafts);
         const a = e.arena.allocator();
         const plans = try a.alloc(Plan, entries.len);
@@ -315,11 +316,10 @@ pub const Engine = struct {
         try e.backend.keep(windows, paths);
         if (e.cfg.timed) {
             // the drafts budgets priced past each stream's first are no part of the round's overhead
-            var steps: i64 = 0;
-            for (budgets) |d| steps = if (e.cfg.draft_streams and depth.pricedBatched()) @max(steps, d - 1) else steps + @max(0, d - 1);
-            const ms = e.clock.elapsedMs(.overhead) - e.cfg.draft_step_ms * @as(f64, @floatFromInt(steps));
+            const extra = @import("hold_price.zig").extraStepMs(budgets, e.cfg.draft_step_ms, e.cfg.draft_step_ms != 0 and e.cfg.draft_streams and depth.pricedBatched());
+            const ms = e.clock.elapsedMs(.overhead) - extra;
             try trail.event(e, &.{ f("ev", str("overhead")), f("streams", int(plans.len)), f("rows", int(total)), f("ms", ev.bits(ms)) });
-            try e.rule.observeOverhead(@intCast(plans.len), total, ms, sampled, e.rule.headMs(budgets));
+            try e.rule.observeOverhead(@intCast(plans.len), total, ms, sampled, @import("hold_price.zig").observedHeadMs(e.backend, &e.rule, budgets));
         }
         if (e.backend.round_observer != null) e.backend.observed(paths);
     }

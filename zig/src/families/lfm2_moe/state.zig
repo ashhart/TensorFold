@@ -119,6 +119,7 @@ pub const Scratch = struct {
     memory: Storage,
     rows: usize,
     ids: mtl.Buffer,
+    bad: mtl.Buffer, // set by lfm2_draft_ids when a held pick is flagged nonfinite or past the vocabulary
     h: mtl.Buffer,
     x: mtl.Buffer,
     r: mtl.Buffer,
@@ -170,6 +171,7 @@ pub const Scratch = struct {
         const mem = &out.memory;
         const slots = rows * c.topk;
         out.ids = try mem.alloc(rows * 4);
+        out.bad = try mem.alloc(4);
         inline for (.{ "h", "x", "r", "y", "q" }) |name| @field(out, name) = try mem.alloc(rows * c.hidden * 2);
         out.queries = try mem.alloc((rows + attn_rows) * c.hidden * 2); // a prompt attention tile reads attn_rows from its first
         out.bcx = try mem.alloc(rows * 3 * c.hidden * 2);

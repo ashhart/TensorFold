@@ -7,3 +7,7 @@ pub const state = @import("state.zig");
 pub const forward = @import("forward.zig");
 pub const backend = @import("backend.zig");
 pub const snapshot = @import("snapshot.zig");
+pub const dspark = @import("dspark.zig");
+pub const dspark_config = @import("dspark_config.zig");
+pub const dspark_block = @import("dspark_block.zig");
+pub const dspark_quant = @import("dspark_quant.zig");
