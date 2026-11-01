@@ -92,6 +92,9 @@ pub fn expertRows(o: Ops, l: Layer, x: Tensor, rows: usize) ops.Error!Ops.MoeRow
     } else {
         try select(o, l, logits, pick, wts, null, 0, rows);
         tile = moe.tileFor(o, rows);
+    }
+    @import("route_tap_copy.zig").afterSelect(o.l.r, o.stream, pick, wts, rows, slots);
+    if (rows != 1 or !l.whole()) {
         if (!l.whole()) {
             // every rank picks the same pairs and runs its own; the others group under an expert past its own
             local = try o.arena.of(i32, size * slots);
