@@ -188,9 +188,21 @@ pub fn promptRows(generation: u32) u32 {
     return @import("prompt_rows.zig").requested(generation, value);
 }
 
-/// The qualified shape and layer schedule; per-module widths are admitted by widths.admit once the chip is known.
+/// The qualified sizes: the 27B's, and the 9B's (half the depth, narrower layers, the same heads of 256 and 128).
+const Size = struct { hidden: usize, intermediate: usize, layers: usize, heads: usize, v_heads: usize };
+const sizes = [_]Size{
+    .{ .hidden = 5120, .intermediate = 17408, .layers = 64, .heads = 24, .v_heads = 48 },
+    .{ .hidden = 4096, .intermediate = 12288, .layers = 32, .heads = 16, .v_heads = 32 },
+};
+
+fn qualifiedSize(c: cfg.Config) bool {
+    for (sizes) |z| if (c.hidden == z.hidden and c.intermediate == z.intermediate and c.layers == z.layers and c.heads == z.heads and c.v_heads == z.v_heads) return true;
+    return false;
+}
+
+/// A qualified shape and layer schedule; per-module widths are admitted by widths.admit once the chip is known.
 pub fn supported(c: cfg.Config) !void {
-    if (c.hidden != 5120 or c.intermediate != 17408 or c.layers != 64 or c.vocab != 248320 or c.heads != 24 or c.kv_heads != 4 or c.head_dim != 256 or c.k_heads != 16 or c.v_heads != 48 or c.dk != 128 or c.dv != 128 or c.conv_kernel != 4 or c.rope_dims != 64) return error.UnqualifiedQwenShape;
+    if (!qualifiedSize(c) or c.vocab != 248320 or c.kv_heads != 4 or c.head_dim != 256 or c.k_heads != 16 or c.dk != 128 or c.dv != 128 or c.conv_kernel != 4 or c.rope_dims != 64) return error.UnqualifiedQwenShape;
     for (c.kinds[0..c.layers], 0..) |kind, i| if (kind != (if ((i + 1) % 4 == 0) cfg.Kind.attention else cfg.Kind.linear)) return error.UnqualifiedLayerSchedule;
 }
 
@@ -213,4 +225,24 @@ test "the 27B's Neural Engine share of 3,072 columns holds 5,760 MiB of fp16 wei
     c.hidden = 5120;
     c.layers = 64;
     try std.testing.expectEqual(@as(u64, 5760 << 20), ane_mlp.Share.bytes(c, 3072));
+}
+
+fn testShape(hidden: u32, intermediate: u32, layers: u32, heads: u32, v_heads: u32) !void {
+    const a = std.testing.allocator;
+    const text = try std.fmt.allocPrint(a,
+        \\{{"model_type":"qwen3_5","text_config":{{"model_type":"qwen3_5_text","hidden_size":{d},"intermediate_size":{d},
+        \\"num_hidden_layers":{d},"num_attention_heads":{d},"num_key_value_heads":4,"head_dim":256,"vocab_size":248320,
+        \\"linear_num_key_heads":16,"linear_num_value_heads":{d},"linear_key_head_dim":128,"linear_value_head_dim":128,
+        \\"linear_conv_kernel_dim":4,"partial_rotary_factor":0.25,"eos_token_id":248044}}}}
+    , .{ hidden, intermediate, layers, heads, v_heads });
+    defer a.free(text);
+    return supported(try cfg.parse(a, text, null));
+}
+
+test "a qwen3_5 dense checkpoint opens at the 27B and 9B shapes and refuses its neighbours" {
+    try testShape(5120, 17408, 64, 24, 48);
+    try testShape(4096, 12288, 32, 16, 32);
+    try std.testing.expectError(error.UnqualifiedQwenShape, testShape(2560, 9216, 32, 16, 32)); // the 4B
+    try std.testing.expectError(error.UnqualifiedQwenShape, testShape(4096, 12288, 64, 16, 32)); // 9B widths, 27B depth
+    try std.testing.expectError(error.UnqualifiedQwenShape, testShape(5120, 17408, 64, 24, 32)); // 27B, 9B GDN heads
 }
