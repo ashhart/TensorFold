@@ -4,6 +4,7 @@ const std = @import("std");
 const xpu = @import("xpu");
 const cfg = @import("config.zig");
 const names = @import("names.zig");
+const spec = @import("vision_spec.zig");
 const rt = xpu.rt;
 const ld = xpu.loader;
 
@@ -496,11 +497,9 @@ pub const Model = struct {
             try m.r.upload(s.ids, std.mem.sliceAsBytes(segs[0].ids));
             try run(&m.k.embed, .{ n, 1, 1 }, .{ m.emb.w, m.emb.s, m.emb.b, s.ids, s.x, H });
         }
-        if (segs.len == 1) for (m.images) |im| { // image rows over the embeddings of their positions
-            const p0 = segs[0].q.pos;
-            const lo = @max(p0, im.at);
-            const hi = @min(p0 + n, im.at + im.n);
-            if (lo < hi) try m.r.copy(from(s.x, (lo - p0) * H * 2), from(im.rows, (lo - im.at) * H * 2), (hi - lo) * H * 2);
+        if (segs.len == 1) for (m.images) |im| { // image rows over the embeddings of their positions (vision_spec's overlap)
+            if (spec.overlap(.{ .at = im.at, .rows = im.n, .source = 0 }, segs[0].q.pos, n)) |c|
+                try m.r.copy(from(s.x, c.row * H * 2), from(im.rows, c.source * H * 2), c.rows * H * 2);
         };
         try run(&m.k.rms, .{ n, 1, 1 }, .{ s.x, m.layers[0].op_norm, s.xn, H, cfg.eps });
         for (m.layers, 0..) |*ly, i| {
