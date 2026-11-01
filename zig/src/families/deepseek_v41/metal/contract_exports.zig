@@ -1,5 +1,15 @@
 //! DeepSeek-V4.1's Metal family behind one export: tf.dsv41_metal.NAME (families/deepseek_v41/metal).
 pub const fp8_mma = @import("fp8_mma.zig");
+pub const index = @import("index.zig");
+pub const engram = @import("engram.zig");
 pub const fp8_rows = @import("fp8_rows.zig");
+pub const attn = @import("csa2_attn.zig");
 pub const experts = @import("experts.zig");
+pub const mv = @import("mv.zig");
+pub const glue = @import("glue_k.zig");
+pub const compress = @import("compress.zig");
 pub const xmma = @import("experts_mma.zig");
+pub const hc = @import("hc.zig");
+pub const fused = @import("fused.zig");
+pub const fold = @import("fold.zig");
+pub const glue_tmp = @import("glue.zig");
