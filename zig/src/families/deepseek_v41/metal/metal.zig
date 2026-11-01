@@ -29,6 +29,12 @@ pub const snapshots = @import("snapshots.zig");
 pub const target = @import("target.zig");
 pub const pass = @import("pass.zig");
 pub const serve = @import("serve.zig");
+pub const vision = @import("vision.zig");
+pub const vision_weights = @import("vision_weights.zig");
+pub const vision_tower = @import("vision_tower.zig");
+pub const vision_prep = @import("vision_prep.zig");
+pub const vision_rows = @import("vision_rows.zig");
+pub const vision_prepare = @import("vision_prepare.zig");
 pub const boot = @import("boot.zig");
 
 test {
@@ -40,4 +46,8 @@ test {
     _ = dspark;
     _ = dspark_plan;
     _ = pass;
+    _ = vision;
+    _ = vision_prep;
+    _ = vision_rows;
+    _ = vision_prepare;
 }

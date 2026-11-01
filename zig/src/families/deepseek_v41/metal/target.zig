@@ -10,6 +10,11 @@ const forward = @import("forward.zig");
 const prompt = @import("prompt.zig");
 const pipelines = @import("pipelines.zig");
 const snapshots = @import("snapshots.zig");
+const vision = @import("vision.zig");
+const vw = @import("vision_weights.zig");
+const vt = @import("vision_tower.zig");
+const vrows = @import("vision_rows.zig");
+const prep = @import("vision_prep.zig");
 
 const iface = host.iface;
 const lanes = host.lanes;
@@ -27,7 +32,11 @@ pub const Env = struct {
     s: *const scratch.Scratch,
     model: forward.Model,
     lookup: ?forward.Lookup,
+    /// the vision tower's kernels and weights (null: text only; a prompt with images is refused)
+    vision: ?VisionRefs = null,
 };
+
+pub const VisionRefs = struct { kit: *const vision.Kit, w: *const vw.Weights };
 
 pub const Options = struct {
     slots: u32,
@@ -61,6 +70,8 @@ const Slot = struct {
     live: bool = false,
     /// every launch since the request began completed (a release keeps only a whole state)
     whole: bool = false,
+    /// the images `setImages` named for the next prompt (their pixels borrowed until it is prefilled)
+    images: []vrows.Image = &.{},
     /// the rows the last prompt took from kept state
     resumed: u32 = 0,
 };
@@ -76,6 +87,8 @@ pub const Target = struct {
     stats: Stats = .{},
     /// a command buffer failed: the device state is no longer trusted (the health hook)
     failed: bool = false,
+    /// the ViT and aligner, when the environment has a tower
+    tower: ?vt.Tower = null,
 
     pub fn init(a: Allocator, env: Env, opt: Options) !*Target {
         const c = env.c;
@@ -107,6 +120,7 @@ pub const Target = struct {
             made += 1;
         }
         t.slots = slots;
+        if (env.vision) |v| t.tower = vt.Tower.init(a, env.device, env.queue, v.kit, v.w);
         return t;
     }
 
@@ -116,9 +130,11 @@ pub const Target = struct {
         s.ptaps.deinit();
         a.free(s.ring);
         s.hist.deinit(a);
+        a.free(s.images);
     }
 
     pub fn deinit(t: *Target) void {
+        if (t.tower) |*w| w.deinit();
         for (t.slots) |*s| freeSlot(t.a, s);
         t.a.free(t.slots);
         t.cache.deinit();
@@ -138,7 +154,7 @@ pub const Target = struct {
     }
 
     pub fn target(t: *Target) iface.Target {
-        return .{ .ptr = t, .vtable = &.{ .prefill = prefill, .window = window, .keep = keep, .taps = taps, .release = release, .resumed = resumedFn } };
+        return .{ .ptr = t, .vtable = &.{ .prefill = prefill, .window = window, .keep = keep, .taps = taps, .release = release, .images = imagesFn, .resumed = resumedFn } };
     }
 
     fn self(ptr: *anyopaque) *Target {
@@ -159,26 +175,64 @@ pub const Target = struct {
 
     // prompts ------------------------------------------------------------------------------------------------------
 
+    /// The images of the slot's next prompt, their pixels borrowed until `prefill` returns.
+    pub fn setImages(t: *Target, slot: u32, images: []const vrows.Image) !void {
+        if (slot >= t.slots.len) return error.NoSlot;
+        const s = &t.slots[slot];
+        if (images.len > 0 and t.tower == null) return error.NoVision;
+        const copy = try t.a.dupe(vrows.Image, images);
+        t.a.free(s.images);
+        s.images = copy;
+    }
+
+    fn imagesFn(ptr: *anyopaque, slot: u32, images: []const vrows.Image) anyerror!void {
+        return self(ptr).setImages(slot, images);
+    }
+
     fn resumedFn(ptr: *anyopaque, slot: u32) u64 {
         const t = self(ptr);
         return if (slot < t.slots.len) t.slots[slot].resumed else 0;
     }
 
-    fn prefill(ptr: *anyopaque, slot: u32, ids: []const u32, smp: ?lanes.Sampling, draw: u64) anyerror!u32 {
+    /// `ids` with each image position replaced by its virtual id (the prompt cache's and the Engram hash's view of it).
+    fn withVids(t: *Target, ids: []const u32, images: []const vrows.Image) ![]u32 {
+        const out = try t.a.dupe(u32, ids);
+        errdefer t.a.free(out);
+        for (images) |im| {
+            if (@as(u64, im.at) + im.tokens > ids.len) return error.BadImageSpan;
+            for (0..im.tokens) |p| out[im.at + p] = prep.vid(im.hash, @intCast(p));
+        }
+        return out;
+    }
+
+    fn prefill(ptr: *anyopaque, slot: u32, ids_in: []const u32, smp: ?lanes.Sampling, draw: u64) anyerror!u32 {
         const t = self(ptr);
         if (slot >= t.slots.len) return error.NoSlot;
         const s = &t.slots[slot];
         const c = t.env.c;
         if (s.live) return error.SlotLive;
-        if (ids.len == 0) return error.EmptyPrompt;
-        if (ids.len >= t.opt.limit) return error.PastLimit;
-        for (ids) |id| if (id >= c.vocab) return error.BadToken;
+        if (ids_in.len == 0) return error.EmptyPrompt;
+        if (ids_in.len >= t.opt.limit) return error.PastLimit;
+        const images = s.images;
+        s.images = &.{};
+        defer t.a.free(images);
+        var vids: ?[]u32 = null;
+        defer if (vids) |v| t.a.free(v);
+        if (images.len > 0) {
+            if (t.tower == null) return error.NoVision;
+            vids = try t.withVids(ids_in, images);
+        }
+        const ids: []const u32 = vids orelse ids_in;
+        for (ids) |id| if (id >= c.vocab and !prep.isVid(id)) return error.BadToken;
         s.whole = false;
         s.open = false;
         s.rows = 0;
         t.stats.prompts += 1;
-        // a kept state that starts this prompt, else a cleared slot
-        const hit = if (t.cache.on()) t.cache.best(ids) else null;
+        // a kept state that starts this prompt (not one that ends inside an image's span), else a cleared slot
+        var hit = if (t.cache.on()) t.cache.best(ids) else null;
+        if (hit) |e| for (images) |im| if (e.ids.len > im.at and e.ids.len < im.at + im.tokens) {
+            hit = null;
+        };
         const at: u32 = if (hit) |e| @intCast(e.ids.len) else 0;
         if (hit) |e| {
             t.cache.restore(c, e, &s.kv, s.high, s.ring);
@@ -195,6 +249,11 @@ pub const Target = struct {
         const V: usize = c.vocab;
         var logits: []const f32 = undefined;
         if (at == n) logits = hit.?.logits.? else {
+            var rows: ?vrows.Rows = null;
+            if (images.len > 0) rows = vrows.Rows.build(t.a, t.env.device, &t.tower.?, images, n, t.opt.prompt.chunk, at) catch |e| return t.fail(e);
+            defer if (rows) |*r| r.deinit();
+            t.pr.images = if (rows) |*r| r else null;
+            defer t.pr.images = null;
             t.pr.run(t.promptEnv(), &s.kv, &s.tail, ids) catch |e| return t.fail(e);
             const all = t.pr.logits(c);
             logits = all[(t.pr.head - 1) * V ..][0..V];

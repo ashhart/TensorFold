@@ -188,6 +188,7 @@ pub const Lanes = struct {
         x.policy.depth.reset(slot);
         const ids = s.prompt();
         x.target.admit(slot, s.max_new);
+        if (s.images.len > 0) try x.target.setImages(slot, s.images);
         st.first = try x.target.prefill(slot, ids, s.sampling, ids.len);
         s.cached = @intCast(x.target.resumedRows(slot));
         st.len = ids.len;

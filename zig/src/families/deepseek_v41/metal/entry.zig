@@ -29,6 +29,9 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         .context = if (o.context) |c| @intCast(@max(c, 1)) else null,
         .drafts = o.drafts,
         .cache_bytes = if (o.prompt_cache_gib) |g| @intFromFloat(@max(g, 0) * (1 << 30)) else 4 << 30,
+        .vision = o.vision != null,
+        .image_tokens = if (o.vision) |v| v.image_tokens else 4096,
+        .max_images = if (o.vision) |v| v.max_images else 4,
         .small = if (std.c.getenv("TF_DSV41_SMALL")) |v| std.mem.eql(u8, std.mem.span(v), "1") else false,
     };
     const m = pkg.boot.Boot.open(gpa, io, o.dir, opts) catch |e| {
