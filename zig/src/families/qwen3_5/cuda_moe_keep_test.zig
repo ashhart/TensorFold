@@ -45,3 +45,8 @@ test "MoE learning: memory replaces dense MLP copies with bounded pair scratch" 
     const larger = @import("cuda_train.zig").memory(g);
     try std.testing.expect(larger - moe < 2 << 20);
 }
+
+test {
+    _ = @import("cuda_learn_routes.zig");
+    _ = @import("cuda_moe_adjoint_test.zig");
+}

@@ -31,5 +31,12 @@ fn runImpl(gpu: check.Gpu, comptime omit_shared: bool) !void {
     defer k.core.deinit();
     k.pocket = try to.Kernels.load(gpu.d);
     defer k.pocket.deinit();
+    try @import("moe_round_points.zig").run(gpu, &k.core, true);
     try @import("moe_back_tests.zig").runQwen(gpu, For(omit_shared), &k);
+}
+
+pub fn roundingControl(gpu: check.Gpu) !void {
+    var k = try q4.Kernels.load(gpu.d);
+    defer k.deinit();
+    try @import("moe_round_points.zig").run(gpu, &k, false);
 }

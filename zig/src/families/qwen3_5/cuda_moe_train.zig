@@ -46,7 +46,7 @@ pub fn backward(t: anytype, layer: usize, kp: hooks.LayerKeep, pocket: ?to.Pocke
     const m = e.layers[layer].mlp.moe;
     if (m.experts.format != .affine4) return error.UnsupportedLearningFormat;
     const ops: q4.Ops = .{ .k = &t.mk.?, .s = e.stream };
-    const kept: q4.MoeKept = .{ .x = kp.y, .ids = kp.ids, .wts = kp.wts };
+    const kept: q4.MoeKept = .{ .x = kp.y, .ids = kp.ids, .wts = kp.wts, .served_rounding = true };
     const tables: q4.PackedExperts = .{ .up = m.experts.up, .down = m.experts.down, .routed = g.experts, .width = g.intermediate, .dim = g.hidden, .group = 64 };
     try ops.zero(t.dy, rows * g.hidden);
     try ops.expertsBackPacked(tables, m.router, kept, t.grad, t.dy, t.moe_scratch, rows, g.top_k);

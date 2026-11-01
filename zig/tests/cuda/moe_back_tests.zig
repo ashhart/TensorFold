@@ -92,7 +92,7 @@ fn Case(comptime shape: Shape) type {
         }
 
         /// The reference on one row from g = dL/d the MoE output: dx, each slot's a = dL/dw, dlog, the pocket's output.
-        fn moeBack(m: *const Moe, x: []const f64, g: []const f64, ids: []const i32, wts: []const f64, dx: []f64, a: []f64, dlog: []f64, pout: []f64) void {
+        fn moeBack(m: *const Moe, x: []const f64, g: []const f64, ids: []const i32, wts: []const f64, dx: []f64, a: []f64, dlog: []f64, pout: []f64, rounded: bool) void {
             @memset(dx, 0);
             var gv: [W]f64 = undefined;
             var uv: [W]f64 = undefined;
@@ -100,16 +100,19 @@ fn Case(comptime shape: Shape) type {
             for (0..SLOTS) |k| {
                 const mt = m.expert(@intCast(ids[k]));
                 for (0..W) |i| {
-                    gv[i] = mt.g.rowDot(mt.go + i, x);
-                    uv[i] = mt.u.rowDot(mt.go + i, x);
+                    const vg = mt.g.rowDot(mt.go + i, x);
+                    const vu = mt.u.rowDot(mt.go + i, x);
+                    gv[i] = if (rounded) rb(vg) else vg;
+                    uv[i] = if (rounded) rb(vu) else vu;
                 }
                 @memset(&dact, 0);
                 for (0..D) |d| mt.d.rowAxpy(mt.do + d, g[d], &dact);
                 var s: f64 = 0;
                 for (0..W) |i| {
-                    s += dact[i] * silu(gv[i]) * uv[i];
+                    const si = if (rounded) rb(silu(gv[i])) else silu(gv[i]);
+                    s += dact[i] * if (rounded) rb(si * uv[i]) else si * uv[i];
                     mt.g.rowAxpy(mt.go + i, wts[k] * dact[i] * uv[i] * siluGrad(gv[i]), dx);
-                    mt.u.rowAxpy(mt.go + i, wts[k] * dact[i] * silu(gv[i]), dx);
+                    mt.u.rowAxpy(mt.go + i, wts[k] * dact[i] * si, dx);
                 }
                 a[k] = s;
             }
@@ -136,7 +139,7 @@ fn Case(comptime shape: Shape) type {
             var mix: f64 = 0;
             for (0..TOPK) |k| mix += @exp(l[k] - top) / total * a[k];
             for (0..TOPK) |k| dlog[k] = @exp(l[k] - top) / total * (a[k] - mix);
-            const ss = sig(l[TOPK]);
+            const ss = sig(if (rounded) rb(l[TOPK]) else l[TOPK]);
             dlog[TOPK] = a[TOPK] * ss * (1 - ss);
             for (0..SLOTS) |k| {
                 const e: usize = @intCast(ids[k]);
@@ -144,26 +147,114 @@ fn Case(comptime shape: Shape) type {
             }
         }
 
-        /// L = g . the MoE output on one row (its experts fixed by ids), a float64 forward without rounding.
+        /// The serving quantizers' residuals at one point, held constant only for local STE differentiation.
+        const Edges = struct {
+            gate: [SLOTS][W]f64,
+            up: [SLOTS][W]f64,
+            silu: [SLOTS][W]f64,
+            act: [SLOTS][W]f64,
+            wts: [SLOTS]f64,
+            shared: f64,
+        };
+
         fn moeLoss(m: *const Moe, x: []const f64, g: []const f64, ids: []const i32) f64 {
+            return localLoss(m, x, g, ids, null);
+        }
+
+        fn localLoss(m: *const Moe, x: []const f64, g: []const f64, ids: []const i32, edges: ?*const Edges) f64 {
             var l: [SLOTS]f64 = undefined;
             for (0..SLOTS) |k| l[k] = m.logit(@intCast(ids[k]), x);
             var top: f64 = -std.math.inf(f64);
             for (0..TOPK) |k| top = @max(top, l[k]);
             var total: f64 = 0;
             for (0..TOPK) |k| total += @exp(l[k] - top);
-            const sg = sig(l[TOPK]);
+            const sg = sig(l[TOPK] + if (edges) |ed| ed.shared else 0) + if (edges) |ed| ed.wts[TOPK] else 0;
             var loss: f64 = 0;
             var act: [W]f64 = undefined;
             for (0..SLOTS) |k| {
                 const mt = m.expert(@intCast(ids[k]));
-                for (0..W) |i| act[i] = silu(mt.g.rowDot(mt.go + i, x)) * mt.u.rowDot(mt.go + i, x);
+                for (0..W) |i| {
+                    const gv = mt.g.rowDot(mt.go + i, x) + if (edges) |ed| ed.gate[k][i] else 0;
+                    const uv = mt.u.rowDot(mt.go + i, x) + if (edges) |ed| ed.up[k][i] else 0;
+                    const si = silu(gv) + if (edges) |ed| ed.silu[k][i] else 0;
+                    act[i] = si * uv + if (edges) |ed| ed.act[k][i] else 0;
+                }
                 var y: f64 = 0;
                 for (0..D) |d| y += g[d] * mt.d.rowDot(mt.do + d, &act);
-                loss += y * if (k < TOPK) @exp(l[k] - top) / total else sg;
+                loss += y * if (k < TOPK) @exp(l[k] - top) / total + if (edges) |ed| ed.wts[k] else 0 else sg;
             }
             for (0..m.p) |j| loss += sg * silu(dotF(m.pg[j * D ..][0..D], x)) * dotF(m.pu[j * D ..][0..D], x) * dotF(m.pd[j * D ..][0..D], g);
             return loss;
+        }
+
+        /// Quantization residuals stay constant only for this independent local straight-through reference.
+        fn edgesAt(m: *const Moe, x: []const f64, ids: []const i32, wts: []const f64) Edges {
+            var ed: Edges = undefined;
+            var smooth_ids: [SLOTS]i32 = undefined;
+            var smooth: [SLOTS]f64 = undefined;
+            route(m, x, false, &smooth_ids, &smooth);
+            ed.shared = rb(m.logit(E, x)) - m.logit(E, x);
+            for (0..SLOTS) |k| {
+                const mt = m.expert(@intCast(ids[k]));
+                ed.wts[k] = wts[k] - if (k < TOPK) smooth[k] else sig(rb(m.logit(E, x)));
+                for (0..W) |i| {
+                    const gv = mt.g.rowDot(mt.go + i, x);
+                    const uv = mt.u.rowDot(mt.go + i, x);
+                    const si = silu(rb(gv));
+                    ed.gate[k][i] = rb(gv) - gv;
+                    ed.up[k][i] = rb(uv) - uv;
+                    ed.silu[k][i] = rb(si) - si;
+                    ed.act[k][i] = rb(rb(si) * rb(uv)) - rb(si) * rb(uv);
+                }
+            }
+            return ed;
+        }
+
+        pub fn host() !void {
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            var prng = std.Random.DefaultPrng.init(0x35b64);
+            var r: Rig = .{ .a = arena.allocator(), .rng = prng.random(), .gpu = undefined, .s = undefined };
+            const m = try fixture(&r, 2);
+            const x = try r.f64s(D, -1, 1, .bf);
+            const g = try r.f64s(D, -1, 1, .f);
+            const dx = try r.a.alloc(f64, D);
+            const old = try r.a.alloc(f64, D);
+            const dir = try r.a.alloc(f64, D);
+            var a: [SLOTS]f64 = undefined;
+            var dl: [SLOTS]f64 = undefined;
+            var pout: [D]f64 = undefined;
+            var worst: f64 = 0;
+            var old_gap: f64 = 0;
+            for (0..3) |row| {
+                for (x) |*v| v.* = rb(r.uni(-1, 1));
+                var ids: [SLOTS]i32 = undefined;
+                var wts: [SLOTS]f64 = undefined;
+                route(&m, x, true, &ids, &wts);
+                const ed = edgesAt(&m, x, &ids, &wts);
+                moeBack(&m, x, g, &ids, &wts, old, &a, &dl, &pout, false);
+                moeBack(&m, x, g, &ids, &wts, dx, &a, &dl, &pout, true);
+                for (old, dx) |o, d| old_gap = @max(old_gap, @abs(o - d));
+                for (0..2) |direction| {
+                    for (dir, dx) |*v, d| v.* = if (direction == 0) d else r.uni(-1, 1);
+                    const length = @sqrt(dot(dir, dir));
+                    for (dir) |*v| v.* /= length;
+                    const want = dot(dir, dx);
+                    const h = 1e-4;
+                    for (x, dir) |*v, d| v.* += h * d;
+                    const hi = localLoss(&m, x, g, &ids, &ed);
+                    for (x, dir) |*v, d| v.* -= 2 * h * d;
+                    const lo = localLoss(&m, x, g, &ids, &ed);
+                    for (x, dir) |*v, d| v.* += h * d;
+                    const fd = (hi - lo) / (2 * h);
+                    const relative = @abs(fd - want) / @max(@abs(want), 1e-12);
+                    worst = @max(worst, relative);
+                    try std.testing.expect(relative < 1e-5);
+                }
+                std.debug.print("REFERENCE MoE group64 fixture {d}: top {d} of {d}, shared {d}, width {d}, dim {d}\n", .{ row, TOPK, E, ids[TOPK], W, D });
+            }
+            try std.testing.expect(old_gap > 1e-5);
+            std.debug.print("REFERENCE MoE local STE: worst FD relative {e}, omitted-rounding max dx gap {e}\n", .{ worst, old_gap });
         }
 
         const MoeCase = struct {
@@ -176,15 +267,16 @@ fn Case(comptime shape: Shape) type {
             a: []f64,
             dlog: []f64,
             pout: []f64,
+            rounded: bool,
 
-            fn init(al: std.mem.Allocator, m: *const Moe, rows: usize, x: []const f64, g: []const f64, ids: []const i32, wts: []const f64) !MoeCase {
-                var c: MoeCase = .{ .m = m, .x = x, .g = g, .ids = ids, .wts = wts, .dx = try al.alloc(f64, rows * D), .a = try al.alloc(f64, rows * SLOTS), .dlog = try al.alloc(f64, rows * SLOTS), .pout = try al.alloc(f64, rows * D) };
+            fn init(al: std.mem.Allocator, m: *const Moe, rows: usize, x: []const f64, g: []const f64, ids: []const i32, wts: []const f64, rounded: bool) !MoeCase {
+                var c: MoeCase = .{ .rounded = rounded, .m = m, .x = x, .g = g, .ids = ids, .wts = wts, .dx = try al.alloc(f64, rows * D), .a = try al.alloc(f64, rows * SLOTS), .dlog = try al.alloc(f64, rows * SLOTS), .pout = try al.alloc(f64, rows * D) };
                 parallel(rows, @as(*const MoeCase, &c), row);
                 return c;
             }
 
             fn row(c: *const MoeCase, r: usize, _: usize) void {
-                moeBack(c.m, c.x[r * D ..][0..D], c.g[r * D ..][0..D], c.ids[r * SLOTS ..][0..SLOTS], c.wts[r * SLOTS ..][0..SLOTS], c.dx[r * D ..][0..D], c.a[r * SLOTS ..][0..SLOTS], c.dlog[r * SLOTS ..][0..SLOTS], c.pout[r * D ..][0..D]);
+                moeBack(c.m, c.x[r * D ..][0..D], c.g[r * D ..][0..D], c.ids[r * SLOTS ..][0..SLOTS], c.wts[r * SLOTS ..][0..SLOTS], c.dx[r * D ..][0..D], c.a[r * SLOTS ..][0..SLOTS], c.dlog[r * SLOTS ..][0..SLOTS], c.pout[r * D ..][0..D], c.rounded);
             }
         };
 
@@ -193,14 +285,9 @@ fn Case(comptime shape: Shape) type {
             route(c.m, c.x[r * D ..][0..D], c.round, c.ids[r * SLOTS ..][0..SLOTS], c.wts[r * SLOTS ..][0..SLOTS]);
         }
 
-        /// The core's layer, or a family's layer with its pocket beside the experts.
-        fn moeTest(r: *Rig, core: q4.Ops, family: anytype) !void {
-            const F = @TypeOf(family);
-            const with_pocket = comptime F != void;
-            const P: usize = if (with_pocket) pocket_n else 0;
-            const R = row_counts[row_counts.len - 1];
+        fn fixture(r: *Rig, comptime P: usize) !Moe {
             const amp_in = @sqrt(3.0 / @as(f64, D));
-            var m: Moe = .{
+            const m: Moe = .{
                 .router = try r.a.alloc(u16, (E + 1) * D),
                 .gate = try r.q4Group(shape.group, E * W, D, 2 * amp_in),
                 .up = try r.q4Group(shape.group, E * W, D, 2 * amp_in),
@@ -214,6 +301,16 @@ fn Case(comptime shape: Shape) type {
                 .p = P,
             };
             for (m.router) |*v| v.* = bf16(r.uni(-6, 6) / @sqrt(@as(f64, D)));
+            return m;
+        }
+
+        /// The core's layer, or a family's layer with its pocket beside the experts.
+        fn moeTest(r: *Rig, core: q4.Ops, family: anytype) !void {
+            const F = @TypeOf(family);
+            const with_pocket = comptime F != void;
+            const P: usize = if (with_pocket) pocket_n else 0;
+            const R = row_counts[row_counts.len - 1];
+            var m = try fixture(r, P);
             const x = try r.f64s(R * D, -1, 1, .bf);
             const g = try r.f64s(R * D, -1, 1, .f);
             const ids = try r.a.alloc(i32, R * SLOTS);
@@ -223,7 +320,7 @@ fn Case(comptime shape: Shape) type {
             {
                 const sw = try r.a.alloc(f64, R * SLOTS);
                 parallel(64, &RouteCtx{ .m = &m, .x = x, .round = false, .ids = try r.a.alloc(i32, R * SLOTS), .wts = sw }, routeRow);
-                const c = try MoeCase.init(r.a, &m, 64, x, g, ids, sw);
+                const c = try MoeCase.init(r.a, &m, 64, x, g, ids, sw, false);
                 var num: std.ArrayList(f64) = .empty;
                 var ref: std.ArrayList(f64) = .empty;
                 var nump: std.ArrayList(f64) = .empty;
@@ -261,7 +358,7 @@ fn Case(comptime shape: Shape) type {
                 r.fd("moe dx", num.items, ref.items, rms(c.dx));
                 if (P > 0) r.fd("moe pocket output vectors", nump.items, refp.items, 0);
             }
-            const c = try MoeCase.init(r.a, &m, R, x, g, ids, wts);
+            const c = try MoeCase.init(r.a, &m, R, x, g, ids, wts, shape.group == 64);
             // the device side
             const e: q4.Experts = blk: {
                 const gq = try m.gate.dev(r);
@@ -280,7 +377,7 @@ fn Case(comptime shape: Shape) type {
             for (row_counts) |rows| {
                 const pairs = rows * SLOTS;
                 const wts32 = try toF32(r.a, wts[0 .. rows * SLOTS]);
-                const kept: q4.MoeKept = .{ .x = try r.dev(u16, try toBf16(r.a, x[0 .. rows * D])), .ids = try r.dev(i32, ids[0 .. rows * SLOTS]), .wts = try r.dev(f32, wts32) };
+                const kept: q4.MoeKept = .{ .served_rounding = shape.group == 64, .x = try r.dev(u16, try toBf16(r.a, x[0 .. rows * D])), .ids = try r.dev(i32, ids[0 .. rows * SLOTS]), .wts = try r.dev(f32, wts32) };
                 const gd = try r.dev(f32, try toF32(r.a, g[0 .. rows * D]));
                 const before = r.bytes;
                 const dx = try r.zeros(rows * D * 4);
@@ -429,4 +526,8 @@ pub fn runCase(gpu: Gpu, name: []const u8, comptime Ops: type, kernels: anytype)
 }
 pub fn runQwen(gpu: Gpu, comptime Ops: type, kernels: anytype) !void {
     return Case(.{ .group = 64, .dims = 2048, .width = 512, .experts = 256, .picks = 8 }).runCase(gpu, "qwen-moe-back", Ops, kernels);
+}
+
+test "MoE packed reference: the 35B routed geometry retains serving BF16 edges and shared pocket gate" {
+    try Case(.{ .group = 64, .dims = 2048, .experts = 256, .width = 512, .picks = 8 }).host();
 }

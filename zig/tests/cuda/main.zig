@@ -502,6 +502,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
         const mib = if (rest.len > 0) try std.fmt.parseInt(usize, rest[0], 10) else cuda.carveout.default_bytes >> 20;
         return carveout_tests.run(gpu, if (rest.len > 1) rest[1] else cuda.carveout.default_card, mib);
     }
+    if (std.mem.eql(u8, cmd, "qwen-moe-back-rounding-control")) return @import("qwen_moe_back_tests.zig").roundingControl(gpu);
     if (std.mem.eql(u8, cmd, "qwen-moe-back")) return @import("qwen_moe_back_tests.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "q27-back")) return q27_back_tests.run(gpu, .all);
     if (std.mem.eql(u8, cmd, "q27-gemm")) return q27_gemm_tests.run(gpu);

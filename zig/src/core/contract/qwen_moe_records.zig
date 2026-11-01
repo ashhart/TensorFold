@@ -2,7 +2,7 @@
 const std = @import("std");
 const r = @import("registry.zig");
 pub fn changed(symbol: []const u8) bool {
-    return std.mem.eql(u8, symbol, "tf_q27_pocket_rows") or std.mem.eql(u8, symbol, "tf_q27_pocket_back") or std.mem.startsWith(u8, symbol, "tf_q4_experts_nt_packed") or std.mem.startsWith(u8, symbol, "tf_q4_experts_mm_packed");
+    return std.mem.eql(u8, symbol, "tf_q27_pocket_rows") or std.mem.eql(u8, symbol, "tf_q27_pocket_back") or std.mem.eql(u8, symbol, "tf_q4_swiglu_back") or std.mem.eql(u8, symbol, "tf_q4_route_back") or std.mem.startsWith(u8, symbol, "tf_q4_experts_nt_packed") or std.mem.startsWith(u8, symbol, "tf_q4_experts_mm_packed");
 }
 pub const extra = [_]r.CudaRecord{
     .{ .launch = .{ .name = "train_q4 tf_q4_experts_nt_packed64 threads 64", .image = "train_q4", .symbol = "tf_q4_experts_nt_packed64", .threads = 64 }, .usage = r.none },
@@ -23,5 +23,5 @@ test "MoE learning: changed pocket ABIs never reuse historical resource receipts
         try std.testing.expectEqual(r.none, record.usage);
         try std.testing.expectEqual(r.none, r.usageFor(record, .{ .major = 13, .minor = 3 }));
     };
-    try std.testing.expectEqual(@as(usize, 6), found);
+    try std.testing.expectEqual(@as(usize, 8), found);
 }

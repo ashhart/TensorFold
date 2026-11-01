@@ -2,6 +2,7 @@
 const std = @import("std");
 const qwen = @import("cuda.zig");
 const train = qwen.train;
+const routes = @import("cuda_learn_routes.zig");
 const gradient = @import("core").directional;
 const turn: train.Turn = .{ .decide = 0, .bits = .empty, .whole = true };
 fn bf(v: u16) f64 {
@@ -18,6 +19,8 @@ pub const Case = struct {
     push: []f32,
     dir: []f32,
     label: []const u8,
+    route_base: []i32 = &.{},
+    route_now: []i32 = &.{},
 
     fn sample(v: *Case, layer: usize, step: f64) !f64 {
         var losses: [2]f64 = undefined;
@@ -27,6 +30,11 @@ pub const Case = struct {
             var result: [1]train.Result = undefined;
             try v.t.pass(&.{v.sq}, .loss, turn, &result);
             loss.* = result[0].loss;
+            if (v.route_base.len != 0) {
+                try routes.read(v.t, v.route_now);
+                const changed = routes.changes(v.route_base, v.route_now, v.t.g.top_k);
+                std.debug.print("ROUTING {s} layer {d} row {d}: step {e:.16}, sign {d:.0}, changed rows {d}, replaced slots {d}\n", .{ v.label, layer, v.sq.nudge.rows[0], step, sign, changed.rows, changed.slots });
+            }
             std.debug.print("SAMPLE {s} layer {d} row {d}: step {e:.16}, sign {d:.0}, loss {e:.16}\n", .{ v.label, layer, v.sq.nudge.rows[0], step, sign, loss.* });
         }
         return gradient.central(losses, step);
@@ -46,6 +54,18 @@ pub const Case = struct {
         v.sq.nudge = .{ .layers = .{ @as(u64, 1) << @intCast(layer), 0, 0 }, .rows = .{ row, 0, 0 } };
         var result: [1]train.Result = undefined;
         try v.t.pass(&.{v.sq}, .target, turn, &result);
+        const count = if (v.t.g.experts > 0) v.t.g.layers * v.t.rows * (v.t.g.top_k + 1) else 0;
+        v.route_base = try v.t.gpa.alloc(i32, count);
+        defer {
+            v.t.gpa.free(v.route_base);
+            v.route_base = &.{};
+        }
+        v.route_now = try v.t.gpa.alloc(i32, count);
+        defer {
+            v.t.gpa.free(v.route_now);
+            v.route_now = &.{};
+        }
+        if (count > 0) try routes.read(v.t, v.route_base);
         @memcpy(v.push, v.t.pushAt(0, 0, layer));
         const length = @sqrt(dot(v.push, v.push));
         if (!std.math.isFinite(length) or length <= 0) {

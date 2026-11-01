@@ -6,9 +6,12 @@ const Driver = @import("driver.zig").Driver;
 const Module = @import("module.zig");
 const t = std.testing;
 var launches: usize = 0;
+var rounding: [2]c_int = @splat(-1);
 var symbols: [32]usize = @splat(0);
-fn launch(f: abi.Function, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: abi.Stream, _: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) abi.Result {
+fn launch(f: abi.Function, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: abi.Stream, args: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) abi.Result {
     symbols[launches] = @intFromPtr(f.?);
+    if (@intFromPtr(f.?) == 105) rounding[0] = @as(*const c_int, @ptrCast(@alignCast(args.?[7].?))).*;
+    if (@intFromPtr(f.?) == 108) rounding[1] = @as(*const c_int, @ptrCast(@alignCast(args.?[11].?))).*;
     launches += 1;
     return 0;
 }
@@ -96,4 +99,19 @@ test "MoE packed: group 64 selects its two adjoints; group 32 keeps its original
         try t.expectEqual(mm, symbols[7]);
         try t.expectEqual(mm, symbols[8]);
     }
+}
+
+test "MoE packed: serving rounding reaches both adjoints and the legacy default stays off" {
+    for ([_]bool{ false, true }) |served| {
+        var x: Rig = .{};
+        x.init();
+        for (&x.k.fq, 0..) |*f, i| f.handle = @ptrFromInt(100 + i);
+        var inputs = kept;
+        inputs.served_rounding = served;
+        rounding = @splat(-1);
+        try x.ops().moeBackPacked(.{ .up = 1, .down = 2, .routed = 256, .width = 512, .dim = 2048, .group = 64 }, 5, inputs, 6, 7, scratch, 3, 8);
+        const want: c_int = @intFromBool(served);
+        try t.expectEqual([2]c_int{ want, want }, rounding);
+    }
+    try t.expect(!kept.served_rounding);
 }

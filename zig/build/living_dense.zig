@@ -38,7 +38,8 @@ pub fn host(b: *std.Build, cuda: *std.Build.Module, qwen: *std.Build.Module, dra
     b.step("compile-qwen-moe-contract-host", "Compile group-64 CUDA component bodies with inert images, no execution").dependOn(&component.step);
     const constructors = b.addRunArtifact(b.addTest(.{ .root_module = fake.qwen35, .filters = &.{"dense constructor:"} }));
     b.step("test-dense-constructors-host", "Actual dense constructor ownership and completion failures").dependOn(&constructors.step);
-    const reference = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/train_back_rig.zig"), .target = t, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "cuda", .module = cuda }} }), .filters = &.{"MoE packed reference:"} }));
+    const reference = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/moe_back_tests.zig"), .target = t, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "cuda", .module = cuda }} }), .filters = &.{"MoE packed reference:"} }));
+    all.dependOn(&reference.step);
     b.step("test-qwen-moe-reference-host", "Packed reference adjoints against finite differences without devices").dependOn(&reference.step);
     b.step("test-packed-experts-host", "Packed adjoints layout and launch bounds without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda, .filters = &.{ "MoE packed:", "Quantized adjoints:" } })).step);
 }

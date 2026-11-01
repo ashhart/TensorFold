@@ -405,7 +405,7 @@ extern "C" __global__ void __launch_bounds__(64) tf_q4_experts_mm_packed64(const
 
 // Pair s's SwiGLU undone from dact: a[p] = dact . act (dL/d its weight), dgu = wt[p] (dact u silu'(g), dact silu(g)).
 extern "C" __global__ void __launch_bounds__(128) tf_q4_swiglu_back(const float* gu, const float* dact, const int* order,
-                                                                   const float* wts, float* a, float* dgu, int width) {
+                                                                   const float* wts, float* a, float* dgu, int width, int served_rounding) {
     __shared__ float scratch[32];
     const int s = blockIdx.x, t = threadIdx.x, p = order[s];
     const float wt = wts[p];
@@ -414,8 +414,10 @@ extern "C" __global__ void __launch_bounds__(128) tf_q4_swiglu_back(const float*
     float* out = dgu + (size_t)s * 2 * width;
     float dot = 0;
     for (int i = t; i < width; i += 128) {
-        const float gv = g[i], uv = g[width + i], d = da[i], sg = silu(gv);
-        dot += d * sg * uv;
+        const float gv = served_rounding ? f32(b16(g[i])) : g[i];
+        const float uv = served_rounding ? f32(b16(g[width + i])) : g[width + i], d = da[i];
+        const float sg = served_rounding ? f32(b16(silu(gv))) : silu(gv);
+        dot += served_rounding ? d * f32(b16(sg * uv)) : d * sg * uv;
         out[i] = wt * d * uv * silu_grad(gv);
         out[width + i] = wt * d * sg;
     }
@@ -428,7 +430,7 @@ extern "C" __global__ void __launch_bounds__(128) tf_q4_swiglu_back(const float*
 // dx[r] += the top_k softmax weights' and the shared gate's (sigmoid of logit `shared`) gradients through the router.
 extern "C" __global__ void __launch_bounds__(256) tf_q4_route_back(const float* logits, int nl, const int* ids, int slots,
                                                                   const float* a, const bf16* router, float* dx, int top_k,
-                                                                  int shared, int dim, float* dlog) {
+                                                                  int shared, int dim, float* dlog, int served_rounding) {
     __shared__ float dl[17];
     __shared__ int at[17];
     const int r = blockIdx.x, t = threadIdx.x;
@@ -447,7 +449,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_q4_route_back(const float* 
             dl[k] = e[k] / total * (a[r * slots + k] - mix);
             at[k] = ids[r * slots + k];
         }
-        const float sg = sigmoidf_(l[shared]);
+        const float sg = sigmoidf_(served_rounding ? f32(b16(l[shared])) : l[shared]);
         dl[top_k] = a[r * slots + top_k] * sg * (1.0f - sg);
         at[top_k] = shared;
         if (dlog)

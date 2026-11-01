@@ -37,8 +37,8 @@ pub const Experts = struct {
 /// Packed experts: gate and up interleaved by block, down alone; shared expert at index routed.
 pub const PackedExperts = struct { up: u64, down: u64, routed: usize, width: usize, dim: usize, group: usize = 32 };
 
-/// What the MoE layer kept: x [rows, d] bf16, ids [rows, slots] (top_k, then the shared one), wts [rows, slots] fp32.
-pub const MoeKept = struct { x: u64, ids: u64, wts: u64 };
+/// Kept x [rows,d] BF16, ids/wts [rows,top_k+1]; served_rounding retains serving's BF16 boundaries.
+pub const MoeKept = struct { x: u64, ids: u64, wts: u64, served_rounding: bool = false };
 
 /// Scratch for the MoE backward of `rows` rows (pairs = rows slots).
 pub const MoeScratch = struct {
@@ -245,6 +245,7 @@ pub const Ops = struct {
         var s: Args = .{};
         for ([_]u64{ t.gu, t.dact, t.order, kept.wts, t.a, t.dgu }) |v| s.add(v);
         s.add(int(width));
+        s.add(@as(c_int, @intFromBool(kept.served_rounding)));
         try o.go("tf_q4_swiglu_back", .{ u(pairs), 1, 1 }, 128, &s);
     }
 
@@ -316,6 +317,7 @@ pub const Ops = struct {
         for ([_]u64{ t.a, router, dx }) |v| r.add(v);
         for ([_]usize{ top_k, routed, dim }) |v| r.add(int(v));
         r.add(t.dlog);
+        r.add(@as(c_int, @intFromBool(kept.served_rounding)));
         try o.go("tf_q4_route_back", .{ u(rows), 1, 1 }, 256, &r);
     }
 
