@@ -3,7 +3,7 @@
 #define KREG 0
 #endif
 namespace gdn_tpr {
-constexpr int NK = 16, NV = 48, DK = 128, DV = 128;
+constexpr int DK = 128, DV = 128;
 __device__ __forceinline__ float bf(float x) { return __bfloat162float(__float2bfloat16_rn(x)); }
 __device__ __forceinline__ void cp16(void* dst, const void* src) {
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"(static_cast<uint32_t>(__cvta_generic_to_shared(dst))), "l"(src));
@@ -27,7 +27,8 @@ __device__ __forceinline__ float tree(float (&x)[32 / TPR]) {
     for (int m = TPR / 2; m >= 1; m >>= 1) r = r + __shfl_xor_sync(0xffffffffu, r, m);
     return r;
 }
-template <int TPR, int STEPS>
+// NK key and NV value heads (a layer's 16 and 48, or one rank's 8 and 24), TPR threads a state row, STEPS rows a stage
+template <int NK, int NV, int TPR, int STEPS>
 __device__ __forceinline__ void chain(const float* __restrict__ qn, const float* __restrict__ kn, const float* __restrict__ v,
                                       const float* __restrict__ gb, const float* state_in, float* state_out, int rows,
                                       float* __restrict__ ys_out) {

@@ -7,6 +7,7 @@ const wire = @import("cuda_rank_wire.zig");
 const Collective = @import("cuda_collective.zig").Collective;
 const wt = @import("cuda_prompt_wt.zig");
 const mtp = @import("cuda_mtp.zig");
+const verify_rows = @import("cuda_rank_verify.zig");
 
 pub const Identity = extern struct {
     config: [32]u8,
@@ -20,6 +21,7 @@ pub const Identity = extern struct {
     head_sharded: u64 = 0,
     image_tokens: u64 = 0,
     max_images: u64 = 0,
+    dense_split: u64 = 0,
 };
 
 fn fileHash(a: std.mem.Allocator, io: std.Io, path: []const u8) ![32]u8 {
@@ -30,18 +32,26 @@ fn fileHash(a: std.mem.Allocator, io: std.Io, path: []const u8) ![32]u8 {
     return out;
 }
 
+/// The checkpoint's bytes as both ranks see them: TENSORFOLD_CHECKPOINT_SHA256 when set, else the cached full digest.
 pub fn identity(a: std.mem.Allocator, io: std.Io, dir: []const u8, context: usize, chunk: usize) !Identity {
-    const digest = std.mem.span(std.c.getenv("TENSORFOLD_CHECKPOINT_SHA256") orelse return error.NoCheckpointIdentity);
-    if (digest.len != 64) return error.NoCheckpointIdentity;
     var checkpoint: [32]u8 = undefined;
-    _ = std.fmt.hexToBytes(&checkpoint, digest) catch return error.NoCheckpointIdentity;
+    if (std.c.getenv("TENSORFOLD_CHECKPOINT_SHA256")) |given| {
+        const digest = std.mem.span(given);
+        if (digest.len != 64) return error.NoCheckpointIdentity;
+        _ = std.fmt.hexToBytes(&checkpoint, digest) catch return error.NoCheckpointIdentity;
+    } else checkpoint = try @import("core").checkpoint_identity.fullIdentity(a, io, dir);
     const config = try std.fs.path.join(a, &.{ dir, "config.json" });
     defer a.free(config);
     const index = try std.fs.path.join(a, &.{ dir, "model.safetensors.index.json" });
     defer a.free(index);
     const program = try std.process.executablePathAlloc(io, a);
     defer a.free(program);
-    return .{ .config = try fileHash(a, io, config), .index = try fileHash(a, io, index), .program = try fileHash(a, io, program), .checkpoint = checkpoint, .context = context, .chunk = chunk, .decode_graph = @intFromBool(@import("cuda_round_graph.zig").enabled()), .head_sharded = @intFromBool(try @import("cuda_head.zig").enabled()) };
+    return .{ .config = try fileHash(a, io, config), .index = try fileHash(a, io, index), .program = try fileHash(a, io, program), .checkpoint = checkpoint, .context = context, .chunk = chunk, .decode_graph = @intFromBool(@import("cuda_round_graph.zig").enabled()), .head_sharded = @intFromBool(try @import("cuda_head.zig").enabled()), .dense_split = @intFromBool(try @import("cuda_dense_split.zig").appliesDir(a, io, dir, 2)) };
+}
+
+/// How long a rank waits for its peer: a minute with a given digest, 30 when the peer may be hashing every byte.
+pub fn linkWait() u64 {
+    return if (std.c.getenv("TENSORFOLD_CHECKPOINT_SHA256") != null) 60_000 else 30 * 60_000;
 }
 
 pub const Session = struct {
@@ -59,12 +69,15 @@ pub const Session = struct {
     stopped: bool = false,
     available: std.atomic.Value(bool) = .init(true),
 
-    pub fn init(a: std.mem.Allocator, io: std.Io, host: []const u8, port: u16, rank: usize, mine: Identity) !*Session {
+    /// `wait_ms` bounds the link and the hello: the peer may still be reading every byte for its digest (`linkWait`).
+    pub fn init(a: std.mem.Allocator, io: std.Io, host: []const u8, port: u16, rank: usize, mine: Identity, wait_ms: u64) !*Session {
+        if (rank > 1) return error.BadRank;
         const s = try a.create(Session);
         errdefer a.destroy(s);
-        const link = try wire.Link.open(io, host, port, rank, 60_000);
+        if (wait_ms > 60_000) std.log.info("flashnext: rank {d} waits up to {d} min for rank {d} and its checkpoint digest", .{ rank, wait_ms / 60_000, 1 - rank });
+        const link = try wire.Link.open(io, host, port, rank, wait_ms);
         errdefer link.close();
-        const until = wire.deadline(60_000);
+        const until = wire.deadline(wait_ms);
         var peer: Identity = undefined;
         const hello: wire.Header = .{ .kind = .hello, .arg = rank, .bytes = @sizeOf(Identity) };
         if (rank == 0) {
@@ -221,6 +234,8 @@ pub const Session = struct {
         try s.ack(h);
     }
 
+    pub const verifyMany = verify_rows.send;
+
     pub fn keep(s: *Session, comptime Tri: type, tri: Tri, q: *prompt.Seq, d: *mtp.Draft, count: usize) !void {
         if (!s.drafting or count == 0 or count > d.rows) return error.CannotRewind;
         const h = try s.command(.{ .kind = .keep, .object = q.rank_id, .arg = count }, &.{});
@@ -235,7 +250,7 @@ pub const Session = struct {
         const item = try s.windows.getOrPut(s.gpa, q.rank_id);
         if (!item.found_existing) {
             errdefer _ = s.windows.remove(q.rank_id);
-            item.value_ptr.* = try mtp.Draft.init(s.gpa, s.engine.driver, s.engine.stream.*, q.cap, 1, s.engine.chunk);
+            item.value_ptr.* = try verify_rows.makeWindow(s, q);
         }
         return item.value_ptr;
     }
@@ -339,6 +354,7 @@ pub const Session = struct {
                 const ops: mtp.Ops(Tri) = .{ .e = s.engine, .tri = tri, .h = undefined };
                 try ops.verify(q, try s.window(q), ids[0..n]);
             },
+            .verify_many => try verify_rows.receive(s, Tri, tri, h, payload, logits),
             .keep => {
                 if (!s.drafting) return error.UnsupportedRankOperation;
                 const q = s.seqs.get(h.object) orelse return error.UnknownRankSequence;
@@ -409,6 +425,7 @@ pub fn shape(h: wire.Header) !void {
         .forward => if (h.object == 0 or h.arg != 0 or h.bytes == 0 or h.bytes % 4 != 0 or (h.flags != @backingInt(prompt.batch.Logits.last) and h.flags != @backingInt(prompt.batch.Logits.none))) return error.BadRankFrame,
         .verify => if (h.object == 0 or h.arg != 0 or h.flags != 0 or h.bytes == 0 or h.bytes % 4 != 0 or h.bytes / 4 > mtp.max_rows) return error.BadRankFrame,
         .keep => if (h.object == 0 or h.arg == 0 or h.arg > mtp.max_rows or h.bytes != 0 or h.flags != 0) return error.BadRankFrame,
+        .verify_many => if (h.object != 0 or h.flags != 0 or h.arg == 0 or h.arg > verify_rows.max_windows or h.bytes < 16 * h.arg or h.bytes > verify_rows.max_bytes) return error.BadRankFrame,
         .round => if (h.object != 0 or h.arg != 0 or h.flags != 0 or h.bytes == 0 or h.bytes % 12 != 0 or h.bytes / 12 > 32) return error.BadRankFrame,
         .save, .restore => if (h.object == 0 or h.arg == 0 or h.bytes != 0 or h.flags != 0) return error.BadRankFrame,
         .drop_seq, .drop_snap => if (h.object == 0 or h.arg != 0 or h.bytes != 0 or h.flags != 0) return error.BadRankFrame,
@@ -448,7 +465,15 @@ test "rank operations refuse invalid geometry and unsupported hooks before execu
     try shape(.{ .kind = .round, .bytes = 24 });
     try shape(.{ .kind = .verify, .object = 1, .bytes = mtp.max_rows * 4 });
     try shape(.{ .kind = .keep, .object = 1, .arg = mtp.max_rows });
+    try shape(.{ .kind = .verify_many, .arg = 2, .bytes = 32 });
+    try shape(.{ .kind = .verify_many, .arg = verify_rows.max_windows, .bytes = verify_rows.max_bytes });
     for ([_]wire.Header{
+        .{ .kind = .verify_many, .bytes = 16 },
+        .{ .kind = .verify_many, .arg = verify_rows.max_windows + 1, .bytes = verify_rows.max_bytes },
+        .{ .kind = .verify_many, .arg = 2, .bytes = 31 },
+        .{ .kind = .verify_many, .arg = 1, .bytes = verify_rows.max_bytes + 4 },
+        .{ .kind = .verify_many, .object = 1, .arg = 1, .bytes = 16 },
+        .{ .kind = .verify_many, .arg = 1, .bytes = 16, .flags = 1 },
         .{ .kind = .verify, .object = 1, .bytes = (mtp.max_rows + 1) * 4 },
         .{ .kind = .verify, .object = 1, .bytes = 3 },
         .{ .kind = .verify, .bytes = 4 },
@@ -489,4 +514,31 @@ test "tensor ranks agree on image admission limits" {
     try shape(.{ .kind = .media, .object = 1, .arg = 4096, .bytes = 12 });
     try std.testing.expectError(error.BadRankFrame, shape(.{ .kind = .media, .object = 1, .arg = 4096, .bytes = 65 * 12 }));
     _ = @import("cuda_rank_media.zig");
+}
+
+test "rank identity: the cached full digest by default, a given digest when set, and the wait each allows" {
+    const t = std.testing;
+    const env = @import("sys").env;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const header = "{\"w\":{\"dtype\":\"U8\",\"shape\":[4],\"data_offsets\":[0,4]}}";
+    var shard: [8 + header.len + 4]u8 = undefined;
+    std.mem.writeInt(u64, shard[0..8], header.len, .little);
+    @memcpy(shard[8..][0..header.len], header);
+    @memcpy(shard[8 + header.len ..], "abcd");
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "model.safetensors", .data = &shard });
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "config.json", .data = "{\"hidden_size\":8}" });
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "model.safetensors.index.json", .data = "{\"weight_map\":{\"w\":\"model.safetensors\"}}" });
+    const dir = try tmp.dir.realPathFileAlloc(t.io, ".", t.allocator);
+    defer t.allocator.free(dir);
+    _ = env.unsetenv("TENSORFOLD_CHECKPOINT_SHA256");
+    try t.expectEqual(@as(u64, 30 * 60_000), linkWait());
+    const computed = try identity(t.allocator, t.io, dir, 4096, 64);
+    try t.expectEqual(try @import("core").checkpoint_identity.fullIdentity(t.allocator, t.io, dir), computed.checkpoint);
+    _ = env.setenv("TENSORFOLD_CHECKPOINT_SHA256", "abababababababababababababababababababababababababababababababab", 1);
+    defer _ = env.unsetenv("TENSORFOLD_CHECKPOINT_SHA256");
+    try t.expectEqual(@as(u64, 60_000), linkWait());
+    try t.expectEqual(@as([32]u8, @splat(0xab)), (try identity(t.allocator, t.io, dir, 4096, 64)).checkpoint);
+    _ = env.setenv("TENSORFOLD_CHECKPOINT_SHA256", "ab", 1);
+    try t.expectError(error.NoCheckpointIdentity, identity(t.allocator, t.io, dir, 4096, 64));
 }

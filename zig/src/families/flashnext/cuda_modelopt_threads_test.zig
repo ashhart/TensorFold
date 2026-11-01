@@ -68,15 +68,15 @@ const ta = std.testing.allocator;
 const env = @import("sys").env;
 
 /// A driver whose device memory is host memory, counting calls and live allocations; cuda.memory's limit refuses.
-const Fake = struct {
-    const Kind = enum { pinned, device, copy };
-    var calls: [3]usize = @splat(0);
-    var live_pinned: usize = 0;
-    var live_device: usize = 0;
+pub const Fake = struct {
+    pub const Kind = enum { pinned, device, copy };
+    pub var calls: [3]usize = @splat(0);
+    pub var live_pinned: usize = 0;
+    pub var live_device: usize = 0;
     var spans: [256][]u8 = undefined;
     var nspans: usize = 0;
 
-    fn reset() void {
+    pub fn reset() void {
         calls = @splat(0);
     }
     fn tally(k: Kind) void {
@@ -117,7 +117,7 @@ const Fake = struct {
         live_device += 1;
         return abi.success;
     }
-    fn devFree(p: abi.DevicePtr) callconv(.c) abi.Result {
+    pub fn devFree(p: abi.DevicePtr) callconv(.c) abi.Result {
         give(p);
         live_device -= 1;
         return abi.success;
@@ -137,7 +137,7 @@ const Fake = struct {
         s.* = null;
         return 1;
     }
-    fn driver() cuda.Driver {
+    pub fn driver() cuda.Driver {
         var d: cuda.Driver = undefined;
         d.func_name = null;
         d.api.cuMemHostAlloc = hostAlloc;

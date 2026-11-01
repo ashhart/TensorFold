@@ -33,7 +33,7 @@ pub fn identity(a: Allocator, args: cli.Args) build_identity.Identity {
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, dir: []const u8, model_type: []const u8, args: cli.Args, problem: *[]const u8) !?Opened {
     if (args.idle_unload > 0) {
         const world = if (std.c.getenv("TF_GLM_WORLD")) |value| std.mem.span(value) else null;
-        if (@import("idle_unload_policy.zig").refusal(native.backends, model_type, args.idle_unload, world)) |why| {
+        if (@import("idle_unload_policy.zig").refusal(native.backends, model_type, args.idle_unload, world, args.tp)) |why| {
             problem.* = why;
             return null;
         }
