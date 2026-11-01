@@ -579,7 +579,7 @@ pub const landed_cuda = cuda ++ @import("dory_cuda_records.zig").cuda ++ gradien
 test {
     _ = learning;
 }
-pub const all_cuda = @import("gb10_many_records.zig").records ++ @import("nvfp4_tile_pending.zig").records ++ landed_cuda ++ dsv41_pending ++ @import("inc4_pending.zig").trees ++ @import("inc4_pending.zig").rows ++ @import("affine_verify_records.zig").records;
+pub const all_cuda = @import("gb10_many_records.zig").records ++ @import("nvfp4_tile_pending.zig").records ++ landed_cuda ++ dsv41_pending ++ @import("inc4_pending.zig").trees ++ @import("inc4_pending.zig").rows ++ @import("affine_verify_records.zig").records ++ @import("flashnext_hc_fused_records.zig").records;
 pub const dsv41_pending = @import("registry_union.zig").extra(landed_cuda, @import("dsv41_pending_1.zig").records ++ @import("dsv41_pending_2.zig").records);
 test {
     _ = @import("qwen4_cuda_receipts_test.zig");
@@ -590,6 +590,7 @@ test {
     _ = @import("registry_pending_test.zig");
     _ = @import("flashnext_pages_pending.zig");
     _ = @import("flashnext_heads_records.zig");
+    _ = @import("flashnext_hc_fused_records.zig");
 }
 test "unmeasured CUDA records cannot pass a compiled resource check" {
     for (cuda_pending) |r| {

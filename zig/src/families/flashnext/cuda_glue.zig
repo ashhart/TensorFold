@@ -103,6 +103,7 @@ pub const Glue = struct {
     norms: cuda.norms.Norms,
     route: cuda.route_rows.RouteRows,
     f: Fns,
+    hc_fused: @import("cuda_hc_fused_kernels.zig").Kernels,
 
     pub fn load(d: *const cuda.Driver) !Glue {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
@@ -110,6 +111,7 @@ pub const Glue = struct {
         g.mixed = mixedFromEnv();
         g.hc = try cuda.Module.load(d, cuda.kernels.flashnext_hc);
         errdefer g.hc.unload();
+        g.hc_fused = try @import("cuda_hc_fused_kernels.zig").Kernels.resolve(g.hc);
         g.attn = try cuda.Module.load(d, cuda.kernels.flashnext_attn);
         errdefer g.attn.unload();
         g.emb = try cuda.embed_rows.EmbedRows.load(d);

@@ -18,8 +18,8 @@ const half_k = @import("contract_lane_half.zig");
 const wide_k = @import("contract_projection_f32.zig");
 const rank_k = @import("contract_rank.zig");
 const writeback_k = @import("contract_flashnext_writeback.zig");
-const hcnorm_k = @import("contract_hc_normalize.zig");
 const hcmix_k = @import("contract_hc_mix.zig");
+const hcfused_k = @import("contract_hc_fused.zig");
 const utility_k = @import("contract_utility.zig");
 const best_k = @import("contract_row_best.zig");
 const qsa_k = @import("contract_qsa_select.zig");
@@ -253,10 +253,9 @@ pub fn run(gpu: check.Gpu) !void {
     }
     defer for (&writebacks) |*w| w.deinit();
     for (&writebacks) |*w| try kernels.append(a, w.kernel());
-    var hcnorms: [2]hcnorm_k.Normalize = undefined;
-    for (std.enums.values(hcnorm_k.Kind), &hcnorms) |kind, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .cols_fn = try hc.function("fn_hc_normalize_cols"), .old_fn = try hc.function("fn_hc_normalize") };
-    defer for (&hcnorms) |*x| x.deinit();
-    for (&hcnorms) |*x| try kernels.append(a, x.kernel());
+    var hc_fusions = try hcfused_k.Registrations.init(gpu, s, hc);
+    defer hc_fusions.deinit();
+    try hc_fusions.append(a, &kernels);
     var hcmixes: [4]hcmix_k.Mix = undefined;
     for (std.enums.values(hcmix_k.Kind), &hcmixes) |kind, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .new_fn = try hc.function("fn_hc_dense_mix8"), .old_fn = try hc.function("fn_hc_dense_mix"), .ctl_fn = if (kind == .sums_control) try mods[5].function("tf_ctl_hc_mix8_bf16") else null };
     defer for (&hcmixes) |*x| x.deinit();

@@ -14,6 +14,7 @@ pub const modelopt_experts = @import("cuda_modelopt_experts.zig");
 /// The MoE pass's native routed experts (NVFP4, block FP8), whose FP8 call a device test takes.
 pub const moe_native = @import("cuda_moe_native.zig");
 pub const hc = @import("cuda_hc.zig");
+pub const hc_fused = @import("cuda_hc_fused.zig");
 pub const draft_affine = @import("cuda_draft_affine.zig");
 pub const qmm = @import("cuda_qmm.zig");
 /// The batched pass's and its prompt tiles' symbols and launch sizes, which the contract's tests launch.
@@ -425,6 +426,7 @@ pub const Tri = struct {
 test {
     _ = embed;
     _ = hc;
+    _ = hc_fused;
     _ = qmm;
     _ = gdn;
     _ = mlp;

@@ -433,6 +433,7 @@ extern "C" __global__ void fn_add_streams(const __nv_bfloat16* __restrict__ E, c
 }
 
 #include "flashnext_hc_dense.cuh"
+#include "flashnext_hc_fused.cuh"
 
 // Shared expert uses its own BF16 projection outputs and rounding boundaries.
 extern "C" __global__ void fn_shared_swiglu(const __nv_bfloat16* GATE, const __nv_bfloat16* UP,
