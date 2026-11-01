@@ -21,5 +21,6 @@ test {
     _ = budget;
     _ = snapshot;
     _ = drafter;
+    _ = @import("drafter_test.zig");
     _ = pricing;
 }

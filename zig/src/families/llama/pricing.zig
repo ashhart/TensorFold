@@ -37,8 +37,8 @@ pub const Fit = struct {
     }
 };
 
-/// The depth with the most tokens a millisecond: a round lands 1 + p + ... + p^k tokens for k + 1 rows and k steps.
-pub fn depth(p: f64, rounds: Fit, step_ms: f64, most: usize) usize {
+/// The drafting depth with the most tokens a millisecond: 1 + p + ... + p^k tokens for k + 1 rows and k steps.
+pub fn depthDrafting(p: f64, rounds: Fit, step_ms: f64, most: usize) usize {
     var best: usize = 1;
     var best_rate: f64 = 0;
     var expect: f64 = 1;
@@ -54,6 +54,20 @@ pub fn depth(p: f64, rounds: Fit, step_ms: f64, most: usize) usize {
         }
     }
     return best;
+}
+
+/// The depth with the most tokens a millisecond, 0 when a plain round (one row, no drafts) lands more.
+pub fn depth(p: f64, rounds: Fit, step_ms: f64, most: usize) usize {
+    if (most == 0) return 0;
+    const k = depthDrafting(p, rounds, step_ms, most);
+    var expect: f64 = 1;
+    var pk: f64 = 1;
+    for (0..k) |_| {
+        pk *= p;
+        expect += pk;
+    }
+    const kf: f64 = @floatFromInt(k);
+    return if (expect / (rounds.at(kf + 1) + kf * step_ms) > 1 / rounds.at(1)) k else 0;
 }
 
 /// A shared round's depth for each of `streams` streams: most tokens a millisecond for the round, 0 if drafting costs.
@@ -76,13 +90,16 @@ pub fn depthShared(p: f64, rounds: Fit, step_ms: f64, most: usize, streams: usiz
     return best;
 }
 
-test "llama pricing: the depth pays for its steps and rows, more at a higher acceptance, none past the ask" {
+test "llama pricing: the depth pays for its steps and rows, more at a higher acceptance, none past the ask or where a plain step lands more" {
     // flat 60 ms rounds and 3 ms steps: at p 0.7 drafting about 5-6 pays best; at 0.95 the window's 15; at 0.1 one
     var flat: Fit = .{};
     flat.add(4, 60);
     try std.testing.expect(depth(0.7, flat, 3, 15) >= 4 and depth(0.7, flat, 3, 15) <= 7);
     try std.testing.expectEqual(@as(usize, 15), depth(0.95, flat, 3, 15));
     try std.testing.expectEqual(@as(usize, 1), depth(0.1, flat, 3, 15));
+    // a drafter that lands little and steps dearly stands aside: a plain step lands more a millisecond
+    try std.testing.expectEqual(@as(usize, 0), depth(0.1, flat, 30, 15));
+    try std.testing.expectEqual(@as(usize, 1), depthDrafting(0.1, flat, 30, 15));
     try std.testing.expectEqual(@as(usize, 3), depth(0.95, flat, 3, 3));
     // dear steps pull the depth down
     try std.testing.expect(depth(0.7, flat, 30, 15) <= 2);
@@ -92,6 +109,9 @@ test "llama pricing: the depth pays for its steps and rows, more at a higher acc
     try std.testing.expectApproxEqAbs(@as(f64, 100), sloped.at(10), 3);
     try std.testing.expect(depth(0.7, sloped, 3, 15) < depth(0.7, flat, 3, 15));
     try std.testing.expect(depth(0.95, sloped, 3, 15) >= 8);
+    // rounds that grow with their rows: at a low acceptance the window's extra rows cost more than they land
+    try std.testing.expectEqual(@as(usize, 0), depth(0.2, sloped, 8, 15));
+    try std.testing.expect(depth(0.9, sloped, 3, 15) >= 4);
     // one row count seen: the mean stands in for the line
     var one: Fit = .{};
     one.add(4, 60);
