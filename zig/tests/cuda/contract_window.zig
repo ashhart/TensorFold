@@ -45,7 +45,7 @@ pub fn spec(f: Cfg) c.Spec {
 pub fn load(d: *const cuda.Driver) !wa.WindowAttention {
     var w = try wa.WindowAttention.load(d);
     errdefer w.unload();
-    try w.loadPages(d);
+    try w.loadPromptPages128(d);
     return w;
 }
 

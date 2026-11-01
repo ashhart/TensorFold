@@ -93,7 +93,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer own.w.deinit();
     own.k = try kern.Kernels.load(ctx);
     errdefer own.k.deinit();
-    if (paged) try own.k.win.loadPages(ctx.d);
+    if (paged) try own.k.win.loadPromptPages128(ctx.d);
     own.s = try cuda.Stream.init(ctx.d, false);
     errdefer own.s.deinit();
     // Price the original caches, or the first paged slot and metadata, inside the room the weights leave.

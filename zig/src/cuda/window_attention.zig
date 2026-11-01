@@ -104,7 +104,7 @@ pub const WindowAttention = struct {
         }, .prompt_fns = p, .rows = rows, .wide_fns = wf };
     }
 
-    /// Page functions: 128-dimensional prompt rows, wide decode/prompt rows, and the shared cache writer.
+    /// Wide page functions and the shared cache writer; 128-dimensional prompt pages are an explicit opt-in.
     pub fn loadPages(g: *WindowAttention, d: *const Driver) !void {
         if (g.pages != null) return;
         var pages = try Module.load(d, kernels.window_pages);
@@ -114,12 +114,19 @@ pub const WindowAttention = struct {
         const p512: Paged = .{ .part = try pages.function("tf_wrows_part_512_pg"), .merge = try pages.function("tf_wrows_merge_512_pg"), .prompt = .{ try pages.function("tf_wrows_prompt_512_pg"), try pages.function("tf_wrows_prompt_512_p32_pg") } };
         try p512.part.allowDynamicShared(staged_smem);
         for (p512.prompt) |pf| try pf.?.allowDynamicShared(rows_smem[1]);
-        g.prompt_pages128 = .{ try g.mod.function("tf_window_prompt_128_h4_pg"), try g.mod.function("tf_window_prompt_128_h8_pg") };
-        for (g.prompt_pages128) |pf| try pf.?.allowDynamicShared(prompt_smem);
         g.put_fn = try pages.function("tf_wrows_put");
         g.wide_fns[0].paged = p;
         g.wide_fns[1].paged = p512;
         g.pages = pages;
+    }
+
+    /// Kolibri's shared prompts opt in separately, leaving Spark's existing wide-page load unchanged.
+    pub fn loadPromptPages128(g: *WindowAttention, d: *const Driver) !void {
+        if (g.prompt_pages128[0] != null and g.prompt_pages128[1] != null) return;
+        try g.loadPages(d);
+        const narrow_functions = [_]?Function{ try g.mod.function("tf_window_prompt_128_h4_pg"), try g.mod.function("tf_window_prompt_128_h8_pg") };
+        for (narrow_functions) |pf| try pf.?.allowDynamicShared(prompt_smem);
+        g.prompt_pages128 = narrow_functions;
     }
 
     pub fn unload(g: *WindowAttention) void {
