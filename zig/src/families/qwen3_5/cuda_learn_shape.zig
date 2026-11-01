@@ -17,6 +17,8 @@ pub fn linear(index: usize) bool {
 
 /// The widths a forward sizes its buffers by.
 pub const Geometry = struct {
+    experts: usize = 0,
+    top_k: usize = 0,
     hidden: usize,
     intermediate: usize,
     layers: usize,

@@ -80,3 +80,7 @@ test {
 test {
     _ = @import("cuda_moe_pocket_test.zig");
 }
+
+test {
+    _ = @import("cuda_moe_keep_test.zig");
+}

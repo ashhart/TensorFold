@@ -42,6 +42,7 @@ const prefix = "language_model.";
 
 /// Device bytes the trainer takes at most beside the engine (its MLX copies, keeps, logits and scratch).
 pub fn memory(g: c.Geometry) usize {
+    if (g.experts > 0) return @import("cuda_moe_train.zig").memory(g);
     const R = pack_rows;
     const kept = g.layers - keepLow(g.layers);
     const proj = g.convDim() + g.vInner() + 2 * g.linear_v_heads;
@@ -93,6 +94,9 @@ pub const Trainer = struct {
     g: c.Geometry,
     k: to.Kernels,
     gk: gt.Kernels,
+    mk: ?cuda.train_q4.Kernels = null,
+    gates: ?Mapped = null,
+    moe_scratch: cuda.train_q4.MoeScratch = undefined,
     states: [max_seqs]engine.Cache = undefined,
     owned: std.ArrayList(cuda.DeviceBuffer) = .empty,
     w: []LayerW = &.{},
@@ -152,6 +156,7 @@ pub const Trainer = struct {
         partial.k = true;
         t.gk = try gt.Kernels.load(d);
         partial.gk = true;
+        if (e.g.moe()) t.mk = try cuda.train_q4.Kernels.load(d);
         while (partial.states < max_seqs) : (partial.states += 1)
             t.states[partial.states] = try engine.Cache.init(gpa, e, max_rows + 1);
         t.w = try gpa.alloc(LayerW, t.g.layers);
@@ -168,6 +173,7 @@ pub const Trainer = struct {
             @field(t, field) = try Mapped.init(d, bytes);
             partial.mapped += 1;
         }
+        if (e.g.moe()) t.gates = try Mapped.init(d, t.g.layers * pack_rows * e.g.slots() * 4);
         try t.carve();
         try e.stream.synchronize();
         var bytes: usize = 0;
@@ -193,6 +199,8 @@ pub const Trainer = struct {
         gpa.free(t.light);
         gpa.free(t.w);
         gpa.free(t.resid);
+        if (t.gates) |*m| m.deinit();
+        if (t.mk) |*k| k.deinit();
         t.gk.deinit();
         t.k.deinit();
         gpa.destroy(t);
@@ -309,6 +317,12 @@ pub const Trainer = struct {
     pub fn normed(t: *const Trainer, l: usize, row: usize) []const u16 {
         const D = t.g.hidden;
         return t.ys.slice(u16, t.g.layers * pack_rows * D)[(l * pack_rows + row) * D ..][0..D];
+    }
+
+    /// The shared expert's stored gate, at routing slot top_k for this layer and packed row.
+    pub fn gateAt(t: *const Trainer, l: usize, row: usize) f32 {
+        const slots = t.e.g.slots();
+        return t.gates.?.slice(f32, t.g.layers * pack_rows * slots)[(l * pack_rows + row) * slots + slots - 1];
     }
 
     /// What layer l's pocket reads is its post norm's output, its weight times the residual over its RMS.
@@ -472,6 +486,10 @@ pub const Trainer = struct {
             var pk = pk0;
             pk.scale = t.host.dev + 4 * pack_rows * 4 + t.hook_at * 4;
             pk.from = t.from[layer];
+            if (t.e.g.moe()) {
+                pk.row_gate = t.keep.layers[layer].wts + (t.hook_at * t.e.g.slots() + t.e.g.top_k) * 4;
+                pk.gate_stride = t.e.g.slots();
+            }
             try o.pocketRows(pk, y, out, rows, D);
         }
         for (t.seqs[0..t.nseq], t.spans[0..t.nseq], 0..) |sq, sp, si| for (sq.nudge.layers, sq.nudge.rows, 0..) |mask, row, i| {
@@ -516,7 +534,9 @@ pub const Trainer = struct {
                 x.scale = t.host.dev + 4 * pack_rows * 4;
                 x.from = t.from[l];
             }
-            try o.mlpBackTail(lw.mlp, .{ .y = kp.y, .gate = kp.gate, .up = kp.up }, pk, t.grad, t.dy, t.ms, rows, t.parts, tail);
+            if (e.g.moe()) {
+                try @import("cuda_moe_train.zig").backward(t, l, kp, pk, rows);
+            } else try o.mlpBackTail(lw.mlp, .{ .y = kp.y, .gate = kp.gate, .up = kp.up }, pk, t.grad, t.dy, t.ms, rows, t.parts, tail);
             try o.rmsBack(kp.h_mid, layer.post_norm, t.dy, t.grad, rows, D, c.eps);
             if (tail) |tl| try o.zeroRows(t.grad, D, rows, tl); // the mixers read every row: the rest as zeros
             // the mixer (a DeltaNet's projections once for every sequence.

@@ -134,6 +134,7 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
             },
             .moe => |m| {
                 try e.routedRows(m.router, m.experts, x0, r0, rows, promptMoe(prompt, rows), rp);
+                if (e.learning) |k| try k.moe(i, e.routed.picks, e.routed.wts, total);
                 const gate = e.routed.wts + g.top_k * 4;
                 if (e.mlp) |k| try k.f(k.ctx, i, e.x, e.r, total, e.taught) else try e.pockets.addGated(e.stream, i, e.x, e.r, total, e.taught, gate, g.slots());
             },

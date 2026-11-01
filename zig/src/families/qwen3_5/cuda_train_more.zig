@@ -141,13 +141,17 @@ pub fn carve(t: anytype) !void {
     const proj = g.convDim() + g.vInner() + 2 * g.linear_v_heads;
     for (0..g.layers) |l| {
         const y = t.ys.dev + l * R * g.hidden * 2;
-        t.light[l] = .{ .y = y };
-        var k: hooks.LayerKeep = .{ .y = y };
+        const wts = if (t.gates) |gates| gates.dev + l * R * t.e.g.slots() * 4 else 0;
+        const ids = if (t.e.g.moe()) try t.device(R * t.e.g.slots() * 4) else 0;
+        t.light[l] = .{ .y = y, .wts = wts, .ids = ids };
+        var k: hooks.LayerKeep = t.light[l];
         if (l >= low) {
             k.h_in = try t.device(R * g.hidden * 2);
             k.h_mid = try t.device(R * g.hidden * 2);
-            k.gate = try t.device(R * g.intermediate * 2);
-            k.up = try t.device(R * g.intermediate * 2);
+            if (!t.e.g.moe()) {
+                k.gate = try t.device(R * g.intermediate * 2);
+                k.up = try t.device(R * g.intermediate * 2);
+            }
             if (c.linear(l)) {
                 k.proj = try t.device(R * proj * 2);
             } else {
@@ -167,7 +171,7 @@ pub fn carve(t: anytype) !void {
     t.dy = try t.device(R * g.hidden * 4);
     t.dlast = try t.device(R * g.hidden * 4);
     t.parts = try t.device((R + 512) * g.hidden * 4);
-    t.ms = .{ .dact = try t.device(R * g.intermediate * 4), .dgate = try t.device(R * g.intermediate * 4), .dup = try t.device(R * g.intermediate * 4) };
+    if (t.e.g.moe()) try @import("cuda_moe_train.zig").carve(t) else t.ms = .{ .dact = try t.device(R * g.intermediate * 4), .dgate = try t.device(R * g.intermediate * 4), .dup = try t.device(R * g.intermediate * 4) };
     const M = max_rows;
     const qw = g.qInner();
     const kw = g.kvInner();

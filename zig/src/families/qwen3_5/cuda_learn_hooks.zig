@@ -11,7 +11,7 @@ pub const MlpAdd = struct {
 };
 
 /// One layer's kept bf16 rows (0: not kept), named as the backward reads them (train.zig).
-pub const LayerKeep = struct { h_in: u64 = 0, proj: u64 = 0, pq: u64 = 0, pk: u64 = 0, pv: u64 = 0, gated: u64 = 0, h_mid: u64 = 0, y: u64 = 0, gate: u64 = 0, up: u64 = 0 };
+pub const LayerKeep = struct { ids: u64 = 0, wts: u64 = 0, h_in: u64 = 0, proj: u64 = 0, pq: u64 = 0, pk: u64 = 0, pv: u64 = 0, gated: u64 = 0, h_mid: u64 = 0, y: u64 = 0, gate: u64 = 0, up: u64 = 0 };
 
 pub const Keep = struct {
     t: to.Ops, // the trainer's kernels (column copies)
@@ -66,6 +66,14 @@ pub const Keep = struct {
     pub fn mlp(k: *const Keep, i: usize, gate: u64, up: u64, rows: usize) !void {
         try k.copy(k.layers[i].gate, gate, rows * k.g.intermediate * 2);
         try k.copy(k.layers[i].up, up, rows * k.g.intermediate * 2);
+    }
+
+    /// Routing scratch is reused by the next layer; keep each layer's own picks and weights now.
+    pub fn moe(k: *const Keep, i: usize, ids: u64, wts: u64, rows: usize) !void {
+        const stride = (k.g.top_k + 1) * 4;
+        const l = k.layers[i];
+        if (l.ids != 0) try k.d.check(k.d.api.cuMemcpyDtoDAsync_v2(l.ids + k.at * stride, ids, rows * stride, k.t.s.handle), "keep picks");
+        if (l.wts != 0) try k.d.check(k.d.api.cuMemcpyDtoDAsync_v2(l.wts + k.at * stride, wts, rows * stride, k.t.s.handle), "keep weights");
     }
 
     pub fn final(k: *const Keep, h: u64, rows: usize) !void {

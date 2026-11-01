@@ -10,7 +10,7 @@ pub fn target(b: *std.Build, t: std.Build.ResolvedTarget, o: std.builtin.Optimiz
 
 pub fn host(b: *std.Build, cuda: *std.Build.Module, qwen: *std.Build.Module, draft_ids: *std.Build.Module, comptime runtime: anytype, comptime family: anytype, comptime n: usize) void {
     const t = b.graph.host;
-    b.step("test-qwen-moe-learning-host", "MoE descriptor, widened loading and backward host regressions").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = qwen, .filters = &.{ "MoE learning:", "the 35B-A3B's routed experts" } })).step);
+    b.step("test-qwen-moe-learning-host", "MoE descriptor, widened loading and backward host regressions").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = qwen, .filters = &.{ "MoE learning:", "the 35B-A3B's routed experts", "Dense learning:", "Trainer admission:", "Save recovery: dense" } })).step);
     const pin = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/dense_serving_test.zig"), .target = t, .optimize = .debug }) }));
     b.step("test-qwen-serving-host", "Landed CUDA kernels and dense serving launch pins").dependOn(&pin.step);
     b.step("test-qwen-pocket-host", "Dense device publication and checked reads under CUDA failures").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = qwen, .filters = &.{ "dense pocket:", "dense media:", "dense save:", "dense read cost:" } })).step);

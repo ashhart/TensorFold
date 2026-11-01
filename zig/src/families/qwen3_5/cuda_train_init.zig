@@ -19,6 +19,8 @@ pub fn Partial(comptime T: type) type {
             gpa.free(t.light);
             gpa.free(t.w);
             gpa.free(t.resid);
+            if (t.gates) |*m| m.deinit();
+            if (t.mk) |*k| k.deinit();
             if (p.gk) t.gk.deinit();
             if (p.k) t.k.deinit();
             gpa.destroy(t);

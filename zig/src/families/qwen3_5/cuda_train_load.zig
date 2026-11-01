@@ -91,7 +91,7 @@ pub fn weights(t: *Trainer, io: std.Io) !void {
     for (keepLow(g.layers)..g.layers) |l| {
         const lw = &t.w[l];
         const I = g.intermediate;
-        lw.mlp = .{
+        if (!e.g.moe()) lw.mlp = .{
             .gate = try r.q4(try std.fmt.bufPrint(&nb, "model.layers.{d}.mlp.gate_proj", .{l}), I, g.hidden),
             .up = try r.q4(try std.fmt.bufPrint(&nb, "model.layers.{d}.mlp.up_proj", .{l}), I, g.hidden),
             .down = try r.q4(try std.fmt.bufPrint(&nb, "model.layers.{d}.mlp.down_proj", .{l}), g.hidden, I),
