@@ -48,7 +48,7 @@ pub fn targets(b: *std.Build, cuda: *std.Build.Module, all: *std.Build.Step) voi
 }
 
 fn module(b: *std.Build, target: std.Build.ResolvedTarget, cuda: *std.Build.Module) *std.Build.Module {
-    const m = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/cuda_lib.zig"), .target = target, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "cuda", .module = cuda }} });
+    const m = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/cuda_lib.zig"), .target = target, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "safetensors", .module = safetensors(b, target) } } });
     m.addAnonymousImport("fatbin_h3", .{ .root_source_file = b.addWriteFiles().add("h3-compile-only.fatbin", "") });
     m.addCSourceFile(.{ .file = b.path("zig/tests/cuda/h3_abi_test.c"), .flags = &.{"-std=c11"} });
     return m;
@@ -67,8 +67,13 @@ pub fn library(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{.{ .name = "cuda", .module = cuda }},
+        .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "safetensors", .module = safetensors(b, target) } },
     }) });
     lib.root_module.addAnonymousImport("fatbin_h3", .{ .root_source_file = image });
     step.dependOn(&b.addInstallArtifact(lib, .{}).step);
+}
+
+/// core's safetensors reader alone, for the CUDA side's checkpoint (h3/checkpoint.zig).
+pub fn safetensors(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("zig/src/core/safetensors.zig"), .target = target });
 }
