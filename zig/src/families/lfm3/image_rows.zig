@@ -7,7 +7,8 @@ const lanes = @import("lanes");
 
 pub const Provider = struct {
     ctx: *anyopaque,
-    prepare: *const fn (*anyopaque, *const lanes.Stream, usize) anyerror!?Images,
+    /// The image rows a prompt chunk [from, to) reads, null when none overlap it.
+    prepare: *const fn (*anyopaque, *const lanes.Stream, usize, usize) anyerror!?Images,
 };
 
 pub const Span = struct { at: u32, rows: u32, source: u32 };

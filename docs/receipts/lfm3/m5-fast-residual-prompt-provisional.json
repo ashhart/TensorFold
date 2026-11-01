@@ -1,0 +1,239 @@
+{
+  "schema": 1,
+  "status": "PROVISIONAL-serving-gain-numerical-rejected",
+  "scope": "M5 TEXT4 Q4/GS64 residual-weight tiled prompt projections, 128-row chunks; public decode projections; private developer option only. No production promotion.",
+  "authorization": "User requested provisional end-to-end timing after finite-output and nonvacuous route checks, before broader fidelity acceptance.",
+  "implementation": "BF16 high and residual affine weight components, separate strict matrix accumulations, FP32 sum then BF16; nonfinite tiles use public row-pair fallback.",
+  "held_input_operator": {
+    "gate": {
+      "native": {
+        "mean_absolute_error": 0.0004282208804823995,
+        "rms_error": 0.0006554408840321345,
+        "relative_rms": 0.0016702313459241976,
+        "maximum_absolute_error": 0.007761955261230469,
+        "maximum_coordinate": [
+          19,
+          6325
+        ]
+      },
+      "reference_bf16": {
+        "mean_absolute_error": 0.0005146326388109894,
+        "rms_error": 0.0007270719176299991,
+        "relative_rms": 0.0018527655768072338,
+        "maximum_absolute_error": 0.008344173431396484,
+        "maximum_coordinate": [
+          4,
+          445
+        ]
+      },
+      "passed": true
+    },
+    "up": {
+      "native": {
+        "mean_absolute_error": 0.00023988126580718472,
+        "rms_error": 0.00036742669405024123,
+        "relative_rms": 0.0016653896392712529,
+        "maximum_absolute_error": 0.0049169063568115234,
+        "maximum_coordinate": [
+          12,
+          2119
+        ]
+      },
+      "reference_bf16": {
+        "mean_absolute_error": 0.00033850177936471936,
+        "rms_error": 0.0004556513123757718,
+        "relative_rms": 0.0020652744807028024,
+        "maximum_absolute_error": 0.0049169063568115234,
+        "maximum_coordinate": [
+          12,
+          2119
+        ]
+      },
+      "passed": true
+    },
+    "down": {
+      "native": {
+        "mean_absolute_error": 8.849430627116961e-05,
+        "rms_error": 0.00019918425001084545,
+        "relative_rms": 0.0017976343353374538,
+        "maximum_absolute_error": 0.015062332153320312,
+        "maximum_coordinate": [
+          0,
+          1688
+        ]
+      },
+      "reference_bf16": {
+        "mean_absolute_error": 0.00011842676151635478,
+        "rms_error": 0.0002245361179170129,
+        "relative_rms": 0.0020264344950417707,
+        "maximum_absolute_error": 0.015062332153320312,
+        "maximum_coordinate": [
+          0,
+          1688
+        ]
+      },
+      "passed": true
+    }
+  },
+  "full_model": {
+    "passed": false,
+    "fixed_prompt_tokens": 128,
+    "teacher_forced_continuations": 16,
+    "selected_full_vocabulary_rows": 17,
+    "top1_matches_fp32_all_rows": true,
+    "failures": {
+      "prompt_boundary": {
+        "native": {
+          "mean_absolute_error": 0.05981908342488724,
+          "rms_error": 0.06732795929188548,
+          "relative_rms": 0.019365780399993968,
+          "maximum_absolute_error": 0.2148294448852539,
+          "maximum_coordinate": [
+            0,
+            30059
+          ]
+        },
+        "reference_bf16": {
+          "mean_absolute_error": 0.03884851189472984,
+          "rms_error": 0.04764064939088356,
+          "relative_rms": 0.01370304943028551,
+          "maximum_absolute_error": 0.20851778984069824,
+          "maximum_coordinate": [
+            0,
+            91107
+          ]
+        },
+        "metric_results": {
+          "rms_error": false,
+          "maximum_absolute_error": false,
+          "top20_probability_mean": true,
+          "top20_probability_max": true
+        }
+      },
+      "teacher_forced_continuation": {
+        "native": {
+          "mean_absolute_error": 0.03918649825569497,
+          "rms_error": 0.04971042433487815,
+          "relative_rms": 0.014194850043484667,
+          "maximum_absolute_error": 0.28858280181884766,
+          "maximum_coordinate": [
+            14,
+            1399
+          ]
+        },
+        "reference_bf16": {
+          "mean_absolute_error": 0.032687712900759155,
+          "rms_error": 0.0425864734405558,
+          "relative_rms": 0.01216060036617698,
+          "maximum_absolute_error": 0.256467342376709,
+          "maximum_coordinate": [
+            14,
+            4438
+          ]
+        },
+        "metric_results": {
+          "rms_error": false,
+          "maximum_absolute_error": false,
+          "top20_probability_mean": true,
+          "top20_probability_max": true
+        }
+      }
+    }
+  },
+  "basic": {
+    "scope": "PROVISIONAL basic sanity only, not FP32 fidelity",
+    "encoded_calls": 142,
+    "fallback_calls": 2476,
+    "finite_words": 2176000,
+    "different_baseline_words": 1924929,
+    "logits_sha256": "a8dfee0f08dbe93d1ccf7b7cc128d7018294baf0b11e0e68fc339466890b2aeb"
+  },
+  "gate_complete_cost": {
+    "scope": "GenuineR128fullgate complete2pass fastBF16dequantNAX vspublic; fivebalancedround operator only, nofullforwardqualification",
+    "public_seconds": 0.00047865055421425495,
+    "candidate_seconds": 0.0002224270829174202,
+    "throughput_ratio": 2.1519436749164313,
+    "drift": {
+      "0": 6.121026473859814e-05,
+      "1": 0.040339739716438894
+    },
+    "max_within_round_spread": 0.03977839188106569,
+    "stable_at_5percent": true,
+    "all_outputs_match_FP32_envelope_screen": true,
+    "repeats": 128,
+    "raw_sha256": "5d184ab92ecf1cb71355f63be9d955b39ca78c666e9e54614adaf075758c2125"
+  },
+  "served_cases": [
+    {
+      "prompt_tokens": 2048,
+      "baseline_ttft_s": [
+        0.8585991663858294,
+        0.8589464169926941
+      ],
+      "candidate_ttft_s": [
+        0.617787292227149,
+        0.6173734590411186
+      ],
+      "baseline_median_s": 0.8587727916892618,
+      "candidate_median_s": 0.6175803756341338,
+      "baseline_over_candidate": 1.3905441713679303,
+      "baseline_first_last_drift": 0.0004044385558006347,
+      "stable_at_5percent": true,
+      "output_text_sha256_equal": true,
+      "output_token_id_equality": "not emitted by cold client; candidate basic finite/hits pass; full-model FP32 RMS/max gates FAIL",
+      "prompt_ids": "both routes /tokenize exact pinned arrays"
+    },
+    {
+      "prompt_tokens": 8192,
+      "baseline_ttft_s": [
+        4.614732750225812,
+        4.618652666918933
+      ],
+      "candidate_ttft_s": [
+        3.6667009578086436,
+        3.6655994160100818
+      ],
+      "baseline_median_s": 4.616692708572373,
+      "candidate_median_s": 3.6661501869093627,
+      "baseline_over_candidate": 1.2592753905874043,
+      "baseline_first_last_drift": 0.0008494352555799001,
+      "stable_at_5percent": true,
+      "output_text_sha256_equal": true,
+      "output_token_id_equality": "not emitted by cold client; candidate basic finite/hits pass; full-model FP32 RMS/max gates FAIL",
+      "prompt_ids": "both routes /tokenize exact pinned arrays"
+    }
+  ],
+  "serving_protocol": "Same-source build option off/on; ABBA fresh servers; exact pinned 2048/8192 prompt IDs; prompt cache disabled and cached0; temperature0/no-thinking;16 outputs; no hidden retry; predeclared5% baseline drift.",
+  "route_counts": {
+    "baseline": [
+      0,
+      0
+    ],
+    "candidate_per_leg": [
+      2272,
+      9088
+    ]
+  },
+  "cleanup": {
+    "server_exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "lock_released": true,
+    "all_served_raw_hashes_verified": true
+  },
+  "provenance": {
+    "source_base": "7d8b6141a",
+    "served_pins_sha256": "dc42e943b526ab2a2a24bdb63567739b1463d13bd7825fd83f2f8bb2033d4bb0",
+    "served_summary_sha256": "d7b79a1395ea0b134010b8827d323db00d5d49a1460e8b8b4b66ef2bcf07634c",
+    "full_model_phases_sha256": "1a53f8865714abd877e619e628803eae70af9b606e6007415bc6260e5585075e",
+    "native_basic_manifest_sha256": "134727a06ae3f8af5f2d002d01ec6615e33041527ea03418b796aac2f4d1f8a6"
+  },
+  "remaining": [
+    "Full-model prompt and continuation RMS/max gates fail; equal top1 and output text do not waive failure.",
+    "No qualified prefill improvement, decode/ITL gain, or10x claim.",
+    "Measured route changes other prompt projections as well as FFN; next attribution is an explicit FFN-only route."
+  ]
+}
