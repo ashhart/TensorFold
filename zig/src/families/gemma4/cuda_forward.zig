@@ -226,6 +226,21 @@ pub const Model = struct {
         }
     }
 
+    /// Same-input affine-4 native projections share the GB10 grid; prompt and mixed widths keep their launches.
+    pub fn projectMany(m: *const Model, k: *const kern.Kernels, s: cuda.Stream, ls: []const wts.Proj, x: u64, xs: u64, outs: []const u64, rows: usize, prompt: bool) !void {
+        if (ls.len == 0 or ls.len != outs.len) return error.ShapeMismatch;
+        const A = cuda.qlinear.Affine4Kernels;
+        if (k.affine.pdl and !prompt and ls.len >= 2 and ls.len <= A.segs_max) grouped: {
+            var many: [A.segs_max]A.Out = undefined;
+            for (ls, outs, many[0..ls.len]) |l, out, *v| {
+                if (l != .a4 or l.k() != ls[0].k()) break :grouped;
+                v.* = .{ .q = l.a4, .out = out };
+            }
+            return k.affine.verifyManyRows(s, x, xs, many[0..ls.len], rows);
+        }
+        for (ls, outs) |l, out| try m.project(k, s, l, x, xs, out, rows, prompt);
+    }
+
     /// Every chain's rows (a prompt chunk, or decode windows); rows [head0, head0 + heads)'s capped logits at s.logits.
     pub fn forward(m: *Model, k: *const kern.Kernels, s: cuda.Stream, chains: []const Chain, prompt: bool, head0: usize, heads: usize) !void {
         var rows: usize = 0;
@@ -307,9 +322,9 @@ pub const Model = struct {
         const kvh = geo.kvHeads(i);
         const qw = geo.query_heads * dh;
         const kw = kvh * dh;
-        try m.project(k, s, l.q, x.n, x.xs, x.q, rows, prompt);
-        try m.project(k, s, l.k, x.n, x.xs, x.k, rows, prompt);
-        if (l.v) |v| try m.project(k, s, v, x.n, x.xs, x.v, rows, prompt);
+        if (l.v) |v| {
+            try m.projectMany(k, s, &.{ l.q, l.k, v }, x.n, x.xs, &.{ x.q, x.k, x.v }, rows, prompt);
+        } else try m.projectMany(k, s, &.{ l.q, l.k }, x.n, x.xs, &.{ x.q, x.k }, rows, prompt);
         const vsrc = if (global) x.k else x.v; // global layers: v is k_proj's output, unit-normed and not rotated
         const src: cuda.qk_rows.Src = .{ .q = x.q, .q_ld = @intCast(qw), .q_hs = @intCast(dh), .k = x.k, .k_ld = @intCast(kw), .k_hs = @intCast(dh), .v = vsrc, .v_ld = @intCast(kw), .v_hs = @intCast(dh) };
         const shape: cuda.qk_rows.Shape = .{ .norms = l.q_norm, .norm_k = l.k_norm, .norms_bf16 = true, .inv = if (global) m.inv_global else m.inv_sliding, .rot = dh, .eps = cfg.eps, .round = true, .v_norm = true };
@@ -331,8 +346,7 @@ pub const Model = struct {
         try k.act.groupSums(s, x.att, qw, x.xs, rows, qw);
         try m.project(k, s, l.o, x.att, x.xs, x.o, rows, prompt);
         try k.norms.addRmsTail(s, x.o, x.h[0], l.pre_feedforward, x.h[1], x.n, x.xs, rows, h, cfg.eps, .{ .round = true, .branch = l.post_attention });
-        try m.project(k, s, l.gate, x.n, x.xs, x.gate, rows, prompt);
-        try m.project(k, s, l.up, x.n, x.xs, x.up, rows, prompt);
+        try m.projectMany(k, s, &.{ l.gate, l.up }, x.n, x.xs, &.{ x.gate, x.up }, rows, prompt);
         try k.act.geglu(s, x.gate, geo.intermediate, x.up, geo.intermediate, x.act, x.xs, rows, geo.intermediate);
         try m.project(k, s, l.down, x.act, x.xs, x.y, rows, prompt);
         const next = if (i + 1 < m.layers) m.w.layers[i + 1].input_norm else m.w.final_norm;

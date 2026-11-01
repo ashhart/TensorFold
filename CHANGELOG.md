@@ -4,6 +4,20 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- With `TF_DSV41_PF_4K=1`, `aot-needs` also lists the 2,048-row prefill variants the forward still runs, so a pack built with it no longer fails its first operation with `MissingTritonVariant _kv_store … RING 4096` (#1683). Thanks to @jayleaton.
+
+- DeepSeek-V4.1's prefill planner sizes the indexer's scratch before it shares and prices the workspace, so ragged prompts and the two-batch-overlap branch can no longer plan less than they use. This takes about 128 MiB more per rank on the Flash-1017 pack, and tokens are unchanged (#1681). Thanks to @jayleaton.
+
+- On Intel GPUs, the engine asks Level Zero how many drivers and devices there are before listing them and skips empty entries, so `tensorfold-xpu devices` and the device tests no longer crash on WSL2 with an Iris Xe (#1672). Thanks to @jschmied.
+
+- With `--cortheon`, text beside an image now counts toward the room left for a fetched page, so a long vision turn no longer gets a full page. Progress lines and the check for a utility request no longer cut a character in half, and a fallback search whose first word doesn't fit is skipped instead of sent empty (#1677). Thanks to @ppardus.
+
+- The CUDA drafter cost-identity host test sets the rewritten file's time itself, so it passes on filesystems with a coarse clock, such as ramfs and NTFS (#1770, fixes #1697). Thanks to @wesley4546.
+
+- `TENSORFOLD_LOG_TIME=1` (or `on`) starts each server log line, the `[tensorfold]` lines and every engine's warnings, with its UTC time to the millisecond, to match the log against other records. It's off by default, and the log is unchanged without it (#1690, fixes #1626). Thanks to @atakann.
+
+- On GB10s, affine-4 (MLX 4-bit) decode and verify projections that read the same input run as one grouped launch, each output byte-equal to its separate launch under the kernel contract, for the dense targets, Nemotron, the DFlash2 drafter, Gemma 4 and Spark. Replies are unchanged. Nemotron 3.5 Lightning: 8 streams +13.3%, 2 streams +5.9%; Qwen3.8-27B with DFlash2: decode after a prompt +3.7% to +5.0%, 1 stream +4.5%, 4 streams +3.5%.
+
 - LFM2 DSpark holds gather adjacent small context pieces in preallocated scratch. Target normalization carries raw BF16 residuals in captured tap columns instead of storing them twice. Bounded, admission-priced lane storage retains verified taps until a hold, snapshot or overflow needs their projections, preserving context across zero-grant rounds and target-tap overwrites.
 
 - `tools/bench_lfm2_dspark.py` records the complete same-head no-drafter/BF16/8-bit qualification matrix, checks token equality across solo, draft-disabled and concurrent runs, and fails every cell below its plain baseline. Reduced runs are explicitly smoke evidence, not qualification.
