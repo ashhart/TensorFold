@@ -530,4 +530,5 @@ test {
     _ = @import("hf_eos_test.zig");
     _ = @import("dory_chat_test.zig");
     _ = @import("deepseek_chat_test.zig");
+    _ = @import("deepseek_admission_test.zig");
 }
