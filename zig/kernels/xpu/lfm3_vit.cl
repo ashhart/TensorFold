@@ -271,6 +271,152 @@ __kernel void vit_attn(__global const float *q, __global const float *k, __globa
     }
 }
 
+// vit_attn at 4 query rows a sub-group, 8 sub-groups (32 rows a work-group, as vit_attn's): each row's ops unchanged.
+#define QR4 4
+__attribute__((intel_reqd_sub_group_size(16)))
+__attribute__((reqd_work_group_size(128, 1, 1)))
+__kernel void vit_attn_q4(__global const float *q, __global const float *k, __global const float *v, __global float *out,
+                          uint n, uint hq, uint hkv, float scale, uint rnd) {
+    __local float qs[8][QR4][VHD];
+    const uint lane = get_sub_group_local_id(), sg = get_sub_group_id();
+    const uint head = get_group_id(1), kvh = head / (hq / hkv);
+    const ulong r0 = ((ulong)get_group_id(0) * 8 + sg) * QR4;
+    for (uint i = lane; i < QR4 * VHD; i += 16) {
+        const ulong r = r0 + i / VHD;
+        qs[sg][i / VHD][i % VHD] = r < n ? q[(r * hq + head) * VHD + i % VHD] : 0.0f;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    float m[QR4], l[QR4], o[QR4][4];
+    for (uint r = 0; r < QR4; r++) {
+        m[r] = -INFINITY;
+        l[r] = 0.0f;
+        o[r][0] = o[r][1] = o[r][2] = o[r][3] = 0.0f;
+    }
+    for (uint k0 = 0; k0 < n; k0 += 16) {
+        const uint key = k0 + lane;
+        float s[QR4];
+        for (uint r = 0; r < QR4; r++) s[r] = 0.0f;
+        if (key < n) {
+            __global const float *kr = k + ((ulong)key * hkv + kvh) * VHD;
+            for (uint d = 0; d < VHD; d += 8) {
+                const float8 kv = vload8(0, kr + d);
+                for (uint r = 0; r < QR4; r++) {
+                    const float8 qv = vload8(0, &qs[sg][r][d]);
+                    s[r] += dot(qv.lo, kv.lo) + dot(qv.hi, kv.hi);
+                }
+            }
+        }
+        for (uint r = 0; r < QR4; r++) {
+            const float sc = key < n ? s[r] * scale : -INFINITY;
+            const float mn = fmax(m[r], sub_group_reduce_max(sc));
+            const float pr = key < n ? exp(sc - mn) : 0.0f;
+            const float a = exp(m[r] - mn);
+            l[r] = l[r] * a + sub_group_reduce_add(pr);
+            m[r] = mn;
+            o[r][0] *= a;
+            o[r][1] *= a;
+            o[r][2] *= a;
+            o[r][3] *= a;
+            s[r] = pr;
+        }
+        const uint kn = min(16u, n - k0);
+        for (uint j = 0; j < kn; j++) {
+            const float4 vv = vload4(0, v + ((ulong)(k0 + j) * hkv + kvh) * VHD + lane * 4);
+            for (uint r = 0; r < QR4; r++) {
+                const float pj = sub_group_shuffle(s[r], j);
+                o[r][0] = fma(pj, vv.s0, o[r][0]);
+                o[r][1] = fma(pj, vv.s1, o[r][1]);
+                o[r][2] = fma(pj, vv.s2, o[r][2]);
+                o[r][3] = fma(pj, vv.s3, o[r][3]);
+            }
+        }
+    }
+    for (uint r = 0; r < QR4; r++) {
+        const ulong row = r0 + r;
+        if (row >= n) continue;
+        const float il = 1.0f / l[r];
+        vstore4((float4)(rd(o[r][0] * il, rnd), rd(o[r][1] * il, rnd), rd(o[r][2] * il, rnd), rd(o[r][3] * il, rnd)), 0,
+                out + (row * hq + head) * VHD + lane * 4);
+    }
+}
+
+// vit_attn_q4 with q in registers (lane l holds dims 4l to 4l + 3, shuffled to every lane), 32-bit offsets: no SLM.
+__attribute__((intel_reqd_sub_group_size(16)))
+__attribute__((reqd_work_group_size(128, 1, 1)))
+__kernel void vit_attn_qr(__global const float *q, __global const float *k, __global const float *v, __global float *out,
+                          uint n, uint hq, uint hkv, float scale, uint rnd) {
+    const uint lane = get_sub_group_local_id(), sg = get_sub_group_id();
+    const uint head = get_group_id(1), kvh = head / (hq / hkv);
+    const uint r0 = (get_group_id(0) * 8 + sg) * QR4;
+    const uint ks = hkv * VHD; // floats from one key's row to the next
+    float4 qd[QR4];
+    float m[QR4], l[QR4], o[QR4][4];
+    for (uint r = 0; r < QR4; r++) {
+        const float4 qa = vload4(0, q + (min(r0 + r, n - 1) * hq + head) * VHD + lane * 4); // past n: a real row, never stored
+        qd[r] = r0 + r < n ? qa : (float4)(0.0f);
+        m[r] = -INFINITY;
+        l[r] = 0.0f;
+        o[r][0] = o[r][1] = o[r][2] = o[r][3] = 0.0f;
+    }
+    for (uint k0 = 0; k0 < n; k0 += 16) {
+        const uint key = k0 + lane, kr = min(key, n - 1) * ks + kvh * VHD; // past n: a real row, s is never read
+        float s[QR4];
+        for (uint r = 0; r < QR4; r++) s[r] = 0.0f;
+        for (uint d = 0; d < VHD; d += 8) {
+            const float8 kv = vload8(0, k + kr + d);
+            for (uint r = 0; r < QR4; r++) {
+                const float4 qa = qd[r];
+                const float8 qv = (float8)(sub_group_shuffle(qa.s0, d / 4), sub_group_shuffle(qa.s1, d / 4), sub_group_shuffle(qa.s2, d / 4),
+                                           sub_group_shuffle(qa.s3, d / 4), sub_group_shuffle(qa.s0, d / 4 + 1), sub_group_shuffle(qa.s1, d / 4 + 1),
+                                           sub_group_shuffle(qa.s2, d / 4 + 1), sub_group_shuffle(qa.s3, d / 4 + 1));
+                s[r] += dot(qv.lo, kv.lo) + dot(qv.hi, kv.hi);
+            }
+        }
+        for (uint r = 0; r < QR4; r++) {
+            const float sc = key < n ? s[r] * scale : -INFINITY;
+            const float mn = fmax(m[r], sub_group_reduce_max(sc));
+            const float pr = key < n ? exp(sc - mn) : 0.0f;
+            const float a = exp(m[r] - mn);
+            l[r] = l[r] * a + sub_group_reduce_add(pr);
+            m[r] = mn;
+            o[r][0] *= a;
+            o[r][1] *= a;
+            o[r][2] *= a;
+            o[r][3] *= a;
+            s[r] = pr;
+        }
+        if (k0 + 16 <= n) { // a full tile: j constant once unrolled, so each shuffle is a register region
+            __attribute__((opencl_unroll_hint(16))) for (uint j = 0; j < 16; j++) {
+                const float4 vv = vload4(0, v + (k0 + j) * ks + kvh * VHD + lane * 4);
+                for (uint r = 0; r < QR4; r++) {
+                    const float pj = sub_group_shuffle(s[r], j);
+                    o[r][0] = fma(pj, vv.s0, o[r][0]);
+                    o[r][1] = fma(pj, vv.s1, o[r][1]);
+                    o[r][2] = fma(pj, vv.s2, o[r][2]);
+                    o[r][3] = fma(pj, vv.s3, o[r][3]);
+                }
+            }
+        } else
+            for (uint j = 0; j < n - k0; j++) {
+                const float4 vv = vload4(0, v + (k0 + j) * ks + kvh * VHD + lane * 4);
+                for (uint r = 0; r < QR4; r++) {
+                    const float pj = sub_group_shuffle(s[r], j);
+                    o[r][0] = fma(pj, vv.s0, o[r][0]);
+                    o[r][1] = fma(pj, vv.s1, o[r][1]);
+                    o[r][2] = fma(pj, vv.s2, o[r][2]);
+                    o[r][3] = fma(pj, vv.s3, o[r][3]);
+                }
+            }
+    }
+    for (uint r = 0; r < QR4; r++) {
+        const ulong row = r0 + r;
+        if (row >= n) continue;
+        const float il = 1.0f / l[r];
+        vstore4((float4)(rd(o[r][0] * il, rnd), rd(o[r][1] * il, rnd), rd(o[r][2] * il, rnd), rd(o[r][3] * il, rnd)), 0,
+                out + (row * hq + head) * VHD + lane * 4);
+    }
+}
+
 // SwiGLU: silu(a) * b (rnd: transformers' bf16(bf16(silu(a)) * b)).
 __kernel void vit_swiglu(__global const float *a, __global const float *b, __global float *out, uint n, uint rnd) {
     const uint i = get_global_id(0);
