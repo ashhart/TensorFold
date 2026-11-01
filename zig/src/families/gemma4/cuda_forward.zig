@@ -1,6 +1,7 @@
 //! Gemma 4 on CUDA: prompt chunks and decode windows through the shared operators in the Metal family's steps.
 const std = @import("std");
 const cuda = @import("cuda");
+const rope_freq = @import("core").rope_freq;
 const cfg = @import("cuda_config.zig");
 const wts = @import("cuda_weights.zig");
 const kern = @import("cuda_kernels.zig");
@@ -30,17 +31,10 @@ pub fn embedScale(hidden: usize) f32 {
     return @bitCast((b + 0x7FFF + ((b >> 16) & 1)) & 0xFFFF0000);
 }
 
-/// fp32 inverse RoPE frequencies [dim / 2]: sliding as Metal's host table; global 1 / f32(1e6^(2i/512)), 0 past 64.
+/// fp32 inverse RoPE frequencies [dim / 2]: sliding as Metal's host table; global core's proportional, 0 past 64.
 pub fn inverseFrequencies(is_global: bool, out: []f32) void {
     if (!is_global) return cfg.inverseFrequencies(false, out);
-    for (out, 0..) |*f, i| {
-        if (i >= cfg.global_rotated) {
-            f.* = 0;
-            continue;
-        }
-        const p: f32 = @floatCast(std.math.pow(f64, cfg.global_theta, @as(f64, @as(f32, @floatFromInt(2 * i)) / 512.0)));
-        f.* = @floatCast(1.0 / @as(f64, p));
-    }
+    rope_freq.proportional(cfg.global_theta, cfg.global_dim, cfg.global_rotated, out);
 }
 
 pub const Model = struct {
@@ -374,4 +368,17 @@ test "RoPE tables: sliding as Metal's host table, global zero past 64 pairs and 
     try std.testing.expectEqual(@as(f32, 1), gl[0]);
     for (1..64) |i| try std.testing.expect(gl[i] < gl[i - 1] and gl[i] > 0);
     for (gl[64..]) |v| try std.testing.expectEqual(@as(f32, 0), v);
+}
+
+test "the global table is core's proportional one, word for word the expression it replaced" {
+    var gl: [256]f32 = undefined;
+    inverseFrequencies(true, &gl);
+    for (gl, 0..) |v, i| {
+        var old: f32 = 0; // the replaced form: 1 / f32(1e6^f32(2i / 512)), the reciprocal in f64
+        if (i < cfg.global_rotated) {
+            const p: f32 = @floatCast(std.math.pow(f64, cfg.global_theta, @as(f64, @as(f32, @floatFromInt(2 * i)) / 512.0)));
+            old = @floatCast(1.0 / @as(f64, p));
+        }
+        try std.testing.expectEqual(@as(u32, @bitCast(old)), @as(u32, @bitCast(v)));
+    }
 }
