@@ -10,6 +10,7 @@ const st = @import("state.zig");
 const snapshot = @import("snapshot.zig");
 const Model = @import("model.zig").Model;
 const backend = @import("backend.zig");
+const stage = @import("dspark_stage.zig");
 
 const dr = lanes.drafter;
 const Stream = lanes.Stream;
@@ -184,7 +185,7 @@ pub const Drafter = struct {
     }
 
     pub fn drafter(d: *Drafter) dr.Drafter {
-        return .{ .ptr = d, .hold_timing = .{ .ptr = d, .take = block.takeHoldMs }, .vtable = &.{ .taps = tapsFn, .facts = factsFn, .open = openFn, .absorb = absorbFn, .hold = holdFn, .held = heldFn, .release = releaseFn, .chances = chancesFn } };
+        return .{ .ptr = d, .hold_timing = .{ .ptr = d, .take = block.takeHoldMs }, .vtable = &.{ .taps = tapsFn, .facts = factsFn, .open = openFn, .absorb = stage.absorb, .hold = holdFn, .held = heldFn, .release = releaseFn, .chances = chancesFn } };
     }
 
     /// Whether holds compute the confidence head: the verify rows follow its chances, else the core's depth rule.
@@ -261,7 +262,7 @@ pub const Drafter = struct {
     }
 
     /// The lane's staged rows absorbed now, in a command buffer of their own.
-    fn flush(d: *Drafter, l: *Lane) !void {
+    pub fn flush(d: *Drafter, l: *Lane) !void {
         const pc = stagedPiece(l) orelse return;
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
@@ -326,7 +327,7 @@ pub const Drafter = struct {
     }
 
     /// The lane takes the context kept with the state its stream's prompt pass resumed at `start`.
-    fn resumeLane(d: *Drafter, s: *Stream, l: *Lane, start: u64) !void {
+    pub fn resumeLane(d: *Drafter, s: *Stream, l: *Lane, start: u64) !void {
         const saved = s.reuse.saved orelse return error.DraftContextGap;
         const snap: *const snapshot.Snap = @ptrCast(@alignCast(saved));
         const bytes = snap.draft orelse return error.DraftContextGap;
@@ -344,75 +345,6 @@ pub const Drafter = struct {
             if (out) @memcpy(bytes[off..][0..n], live) else @memcpy(live, bytes[off..][0..n]);
             off += n;
         };
-    }
-
-    /// Owns taps before the target overwrites them; materializes context on hold, snapshot or overflow.
-    fn absorbFn(ptr: *anyopaque, items: []const dr.Absorb) anyerror!void {
-        const d = cast(ptr);
-        try d.settle();
-        const width = d.tapBytes();
-        // every item is accepted before any row is staged or encoded: a refused call leaves no command buffer open
-        for (items) |it| {
-            const l = d.lanes.get(it.stream) orelse return error.DraftStreamUnknown;
-            const f = it.features;
-            if (f.space != .device or f.dtype != .bf16 or f.row_bytes != width or it.rows != null) return error.DraftFeaturesUnsupported;
-            if (it.start > l.end + l.staged) try d.resumeLane(it.stream, l, it.start); // a prompt pass that resumed
-            if (it.start + f.rows + d.config.block > l.cap) return error.DraftContextGap;
-        }
-        const pool = mtl.objc.Pool.push();
-        defer pool.pop();
-        var run: ?@TypeOf(block.begin(d)) = null;
-        errdefer if (run) |r| r.e.end(); // an encoding error closes the open encoder
-        var pieces: [32]block.Piece = undefined;
-        var count: usize = 0;
-        var rows: usize = 0;
-        for (items) |it| {
-            const l = d.lanes.get(it.stream).?;
-            const f = it.features;
-            l.held_len = 0;
-            l.slot = null;
-            const src = mtl.Buffer{ .id = @ptrFromInt(f.buffer) };
-            // rows from `start` replace what was staged past it; rows before the absorbed end go to the GPU now
-            const keep: u32 = if (it.start >= l.end) @intCast(it.start - l.end) else 0;
-            l.staged = @min(l.staged, keep);
-            if (it.start >= l.end and l.staged + f.rows <= @min(stage_rows, l.cap)) {
-                const from = (src.contents() + f.offset)[0 .. f.rows * width];
-                @memcpy((l.mem.contents() + l.stage_at + l.staged * width)[0 .. f.rows * width], from);
-                l.staged += f.rows;
-                continue;
-            }
-            if (run == null) run = block.begin(d);
-            const e = run.?.e;
-            if (stagedPiece(l)) |pc| {
-                if (count == pieces.len or rows + pc.rows > absorb_rows) {
-                    try block.absorbPass(d, e, pieces[0..count]);
-                    count = 0;
-                    rows = 0;
-                }
-                pieces[count] = pc;
-                count += 1;
-                rows += pc.rows;
-            }
-            var at: usize = 0;
-            while (at < f.rows) {
-                if (rows == absorb_rows or count == pieces.len) { // the pass is full: encode it
-                    try block.absorbPass(d, e, pieces[0..count]);
-                    count = 0;
-                    rows = 0;
-                }
-                const n = @min(absorb_rows - rows, f.rows - at);
-                pieces[count] = .{ .lane = l, .src = .{ .buf = src, .off = f.offset + at * width }, .rows = n, .p0 = it.start + at };
-                count += 1;
-                rows += n;
-                at += n;
-            }
-            l.end = it.start + f.rows;
-            l.staged = 0;
-        }
-        const r = run orelse return;
-        if (count > 0) try block.absorbPass(d, r.e, pieces[0..count]);
-        run = null; // `end` closes the encoder, even when the buffer fails
-        try block.end(d, r.cb, r.e);
     }
 
     /// Each stream's chain of `depth` drafts after `pending` at `position`, its block's rows in a pass of pass_rows.
@@ -457,7 +389,7 @@ pub const Drafter = struct {
     }
 
     /// The signalled hold waited on, its picks read into its lanes' held chains (nothing pending: nothing done).
-    fn settle(d: *Drafter) !void {
+    pub fn settle(d: *Drafter) !void {
         const cb = d.pending orelse return;
         d.pending = null;
         defer cb.release();
@@ -510,6 +442,11 @@ pub const Drafter = struct {
     /// The target's verify reading the held drafts on the device, or as host tokens where it cannot.
     pub fn heldSource(d: *Drafter) backend.HeldSource {
         return .{ .ptr = d, .get = device, .host = hostHeld };
+    }
+
+    /// The target's forwards capturing taps straight into the lanes' staged rows.
+    pub fn stageSource(d: *Drafter) backend.StageSource {
+        return stage.source(d);
     }
 
     fn hostHeld(ptr: *anyopaque, s: *Stream, out: []u32) anyerror!void {

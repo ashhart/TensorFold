@@ -10,7 +10,10 @@ const tile = @import("../../core/tile_qmm.zig");
 const am = @import("../../core/affine_mm.zig");
 const segs = @import("segments.zig");
 const Buffer = mtl.Buffer;
-pub const Segment = struct { cache: *st.Cache, rows: usize };
+/// Where a segment's tapped rows go: the scratch's taps, nowhere, or a stage.
+pub const Tap = union(enum) { scratch, none, stage: Place };
+pub const Place = struct { buf: Buffer, off: usize };
+pub const Segment = struct { cache: *st.Cache, rows: usize, tap: Tap = .scratch };
 /// GPU seconds of every call so far (the bench reports a chunk's GPU time beside its wall time).
 pub var gpu_seconds: f64 = 0;
 /// `all`: every row's logits and greedy pick (Scratch.best); `last`: the last row's logits alone.
@@ -20,19 +23,23 @@ const tile_rows = 33;
 /// A buffer and byte offset as core/affine_mm binds them.
 const Ref = struct { buf: Buffer, off: usize = 0 };
 
-/// Per-forward residual location: canonical h or a captured, immutable tap column.
-const Residual = struct {
-    buf: Buffer,
-    off: usize, // bytes
-    stride: u32, // bf16 words per row
-
-    fn canonical(s: *const st.Scratch) Residual {
-        return .{ .buf = s.h, .off = 0, .stride = c.hidden };
+/// Each row's tap destination into the scratch's table, every buffer it names declared on `e`.
+fn tapTable(e: mtl.ComputeEncoder, s: *st.Scratch, segments: []const Segment) void {
+    const taps = s.taps orelse return;
+    const width = taps.count * c.hidden * 2;
+    const table = @as([*]u64, @ptrCast(@alignCast(taps.buf.contents() + taps.table_at)))[0..s.rows];
+    var base: usize = 0;
+    for (segments) |seg| {
+        const place: ?Place = switch (seg.tap) {
+            .scratch => .{ .buf = taps.buf, .off = base * width },
+            .none => null,
+            .stage => |p| p,
+        };
+        if (place) |p| e.useResource(p.buf, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
+        for (table[base..][0..seg.rows], 0..) |*dst, i| dst.* = if (place) |p| p.buf.gpuAddress() + p.off + i * width else 0;
+        base += seg.rows;
     }
-    fn isCanonical(self: Residual, s: *const st.Scratch) bool {
-        return self.buf.id == s.h.id;
-    }
-};
+}
 
 const QkArgs = extern struct { len: u32, cap: u32, eps: f32, log2_theta: f32 };
 const AttnArgs = extern struct { len: u32, cap: u32, scale: f32, subs: u32 };
@@ -47,8 +54,6 @@ const Encoder = struct {
     record: bool,
     /// A recorded window of several streams: their conv and attention kernels run once a layer over every row.
     plan: ?segs.Plan = null,
-    /// The forward's residual stream (see Residual): the norms read it and move it.
-    residual: *Residual,
 
     fn pipe(self: Encoder, comptime key: []const u8) void {
         self.e.setPipeline(self.m.kernels.get(key));
@@ -87,43 +92,35 @@ const Encoder = struct {
             tile.encode(self.e, t, matrix(w), x, x_off, self.s.sums, 0, y, y_off, rows) catch unreachable;
         } else tile.encodeTwin(self.e, t, matrix(w), x, x_off, y, y_off, rows) catch unreachable;
     }
-    /// Capture raw residuals in taps; the next untapped norm restores canonical h.
+    /// h += r unless first, then x = norm(h); `combine`: r is the decode experts' combine, taken here instead.
     fn norm(self: Encoder, s: *st.Scratch, weight: wts.Tensor, first: bool, rows: usize, combine: bool, tap_layer: ?usize) void {
-        const res = self.residual.*;
         var mask: u32 = 0; // the tap columns of this layer, bit i: column i
-        var carry: usize = 0; // the first of them
         if (s.taps) |taps| if (tap_layer) |layer| for (taps.layers[0..taps.count], 0..) |l, i| if (l == layer) {
-            if (mask == 0) carry = i;
             mask |= @as(u32, 1) << @intCast(i);
         };
-        const direct = mask == 0 and res.isCanonical(s);
-        const into: Residual = if (mask != 0)
-            .{ .buf = s.taps.?.buf, .off = carry * c.hidden * 2, .stride = s.taps.?.count * c.hidden }
-        else
-            Residual.canonical(s);
         if (combine) {
-            if (direct) self.pipe("lfm2_combine_norm") else self.pipe("lfm2_combine_norm_tap");
+            if (mask == 0) self.pipe("lfm2_combine_norm") else self.pipe("lfm2_combine_norm_tap");
             self.e.setBuffer(s.experts, 0, 0);
             self.e.setBuffer(s.weights, 0, 1);
-            self.e.setBuffer(res.buf, res.off, 2);
+            self.e.setBuffer(s.h, 0, 2);
             self.tensor(weight, 3);
             self.e.setValue(c.eps, 4);
             self.e.setBuffer(s.x, 0, 5);
         } else {
-            if (direct) self.pipe("lfm2_norm") else self.pipe("lfm2_norm_tap");
-            self.e.setBuffer(res.buf, res.off, 0);
+            if (mask == 0) self.pipe("lfm2_norm") else self.pipe("lfm2_norm_tap");
+            self.e.setBuffer(s.h, 0, 0);
             self.e.setBuffer(s.r, 0, 1);
             self.tensor(weight, 2);
             self.e.setValue(c.eps, 3);
             self.e.setValue(@as(u32, @intFromBool(!first)), 4);
             self.e.setBuffer(s.x, 0, 5);
         }
-        if (!direct) {
-            self.e.setBuffer(into.buf, 0, 6);
-            self.e.setValue([4]u32{ res.stride, into.stride, if (mask != 0) mask else 1, 0 }, 7);
+        if (mask != 0) {
+            const taps = s.taps.?;
+            self.e.setBuffer(taps.buf, taps.table_at, 6);
+            self.e.setValue(mask, 7);
         }
         self.groups(.{ rows, 1, 1 }, .{ c.hidden / 4, 1, 1 });
-        self.residual.* = into;
     }
     fn swiglu(self: Encoder, s: *st.Scratch, count: usize) void {
         self.pipe("lfm2_swiglu");
@@ -177,8 +174,8 @@ pub fn runHeld(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []c
     const prompt = (!record and head == .last) or total >= tile_rows;
     const e = cb.compute(.serial);
     const plan = if (segs.batched(record, segments.len)) segs.prepare(e, s, segments) else null;
-    var residual = Residual.canonical(s); // the embedding below writes it; the norms then carry it through the taps
-    const enc = Encoder{ .e = e, .m = m, .s = s, .prompt = prompt, .record = record, .plan = plan, .residual = &residual };
+    tapTable(e, s, segments);
+    const enc = Encoder{ .e = e, .m = m, .s = s, .prompt = prompt, .record = record, .plan = plan };
     if (held.len > 0) @memset(s.bad.contents()[0..4], 0);
     for (held) |h| {
         enc.pipe("lfm2_draft_ids");
@@ -214,7 +211,6 @@ pub fn runHeld(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []c
             .moe => |x| combine = moe(enc, s, x, m.config.scale, total),
         }
     }
-    // A final tap leaves h stale; consumers read x/logits and the next forward re-embeds.
     enc.norm(s, m.weights.norm, false, total, combine, c.layers - 1);
     if (head == .all) {
         enc.projection(embedding, s.x, 0, s.logits, 0, total);

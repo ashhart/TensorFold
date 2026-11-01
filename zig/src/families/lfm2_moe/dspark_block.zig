@@ -174,6 +174,15 @@ const Enc = struct {
         x.e.dispatchGroups(mtl.Size.of(c.query_heads, rows, 1), mtl.Size.of(32, 1, 1));
     }
 
+    /// `rows` hidden-wide bf16 rows copied between buffers on the GPU.
+    fn copyRows(x: Enc, from: Ref, to: Ref, rows: usize) void {
+        x.pipe("lfm2_tap");
+        x.e.setBuffer(from.buf, from.off, 0);
+        x.e.setBuffer(to.buf, to.off, 1);
+        x.e.setValue([2]u32{ c.hidden, 0 }, 2);
+        x.e.dispatchThreads(mtl.Size.of(c.hidden / 8, rows, 1), mtl.Size.of(256, 1, 1));
+    }
+
     /// Project pieces into fcx, grouping adjacent small pieces in stable scratch without changing a row's sum.
     fn fc(x: Enc, pieces: []const Piece, gather: ?*usize) !usize {
         const d = x.d;
@@ -199,12 +208,12 @@ const Enc = struct {
             const out = Ref{ .buf = s.fcx, .off = rows * c.hidden * 2 };
             if (together) {
                 const used = gather.?;
-                const into = s.gather.contents() + used.* * width;
-                var off: usize = 0;
+                var off = used.* * width;
                 for (pieces[at..until]) |pc| {
-                    @memcpy((into + off)[0 .. pc.rows * width], (pc.src.buf.contents() + pc.src.off)[0 .. pc.rows * width]);
+                    x.copyRows(pc.src, .{ .buf = s.gather, .off = off }, pc.rows * d.config.tap_count);
                     off += pc.rows * width;
                 }
+                x.sync();
                 try x.project(d.w.fc, .{ .buf = s.gather, .off = used.* * width }, out, run);
                 used.* += run;
             } else try x.project(d.w.fc, pieces[at].src, out, run);

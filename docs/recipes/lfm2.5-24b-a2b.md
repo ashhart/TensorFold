@@ -87,6 +87,8 @@ cohort into several passes, priced in execution order rather than as one impossi
 A new stream waits for its first funded hold while retaining its prompt context. Each lane owns incoming prompt
 and verified taps before the target overwrites them, projecting them only for a hold, snapshot or stage overflow.
 Zero-grant rounds therefore retain contiguous context for later drafts; they do not disable drafting by stream count.
+Decode and verify norms write taps directly into the lane's stage, without a per-round host copy. A forward
+waits on a pending hold before replacing rows that hold still reads; only accepted rows become staged context.
 
 `tf-kernel-contract --only lfm2` checks these kernels. `tf-lfm2-dspark MODEL DRAFTER TOKENS [ROWS]` runs the drafter
 against an fp32 host reference of the released checkpoint (the same taps and the target's embedding and head),
@@ -150,8 +152,10 @@ the target overwrites its taps. At most 2048 rows, clipped to the lane's capacit
 hold, snapshot or overflow; an unrelated lane's absorb no longer flushes them. A later hold projects the
 entire retained prefix first, including rows from zero-grant rounds. The released five-tap checkpoint uses
 at most 40 MiB of raw staging per lane; this larger bounded storage is included in memory admission.
-Captured target residuals are carried in the tap columns themselves and restored by the next norm, rather
-than stored both in the canonical residual and the taps. Duplicate columns are captured in the same dispatch.
+Captured target residuals use the same canonical bf16 arithmetic as plain forwarding; capture adds a masked
+store of those bits, including duplicate columns in the same dispatch. Small staged gathers copy on the GPU
+before projection. Stage overflow projects only the retained prefix before the next capture's anchor, so a
+reused anchor can replace its old row without losing contiguous context.
 
 Shared verification past the 16-row qualified window uses measured increments
 from the shared forward path through 32 rows, anchored at the 16-row window

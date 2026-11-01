@@ -257,39 +257,44 @@ constant constexpr uint BF16_ROWS = 16;
   lfm2_attn_rows<1, true>(queries, keys, values, p, pm, pl, po, rows, tg, tid, sg, lane, ks, vs);
 }
 
-// Tap ABI: {input row stride, output row stride, destination column mask, 0}; h is readonly.
-inline void lfm2_store_columns(device bfloat* dst, uint row, constant uint4& at, uint t, bfloat4 saved) {
-  device bfloat* out = dst + size_t(row) * at.y + 4 * t;
-  for (uint m = at.z; m != 0; m &= m - 1) *(device bfloat4*)(out + size_t(ctz(m)) * D) = saved;
+// A tapped norm's raw state also goes to each row's destination (null: none), column i of `mask` at i * D values.
+struct lfm2_tap_dst { device bfloat* row; };
+inline void lfm2_store_columns(const device lfm2_tap_dst* dst, uint row, uint mask, uint t, bfloat4 saved) {
+  device bfloat* out = dst[row].row;
+  if (out == nullptr) return;
+  for (uint m = mask; m != 0; m &= m - 1) *(device bfloat4*)(out + size_t(ctz(m)) * D + 4 * t) = saved;
 }
 
-// lfm2_norm with a readonly, strided h and the raw state stored to the masked destination columns instead of back to h.
-[[kernel]] void lfm2_norm_tap(const device bfloat* h [[buffer(0)]], const device bfloat* r [[buffer(1)]], const device bfloat* w [[buffer(2)]],
-                          constant float& eps [[buffer(3)]], constant uint& add [[buffer(4)]], device bfloat* x [[buffer(5)]], device bfloat* dst [[buffer(6)]], constant uint4& at [[buffer(7)]],
+// lfm2_norm that also stores the new state to the destination columns.
+[[kernel]] void lfm2_norm_tap(device bfloat* h [[buffer(0)]], const device bfloat* r [[buffer(1)]], const device bfloat* w [[buffer(2)]],
+                          constant float& eps [[buffer(3)]], constant uint& add [[buffer(4)]], device bfloat* x [[buffer(5)]],
+                          const device lfm2_tap_dst* dst [[buffer(6)]], constant uint& mask [[buffer(7)]],
                           uint row [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]],
                           uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
   const size_t base = size_t(row) * D + 4 * t;
-  const size_t from = size_t(row) * at.x + 4 * t;
   float v[4];
   bfloat4 saved;
   for (int j = 0; j < 4; ++j) {
-    bfloat hv = h[from + j];
-    if (add != 0) hv = hv + r[base + j];
+    bfloat hv = h[base + j];
+    if (add != 0) {
+      hv = hv + r[base + j];
+      h[base + j] = hv;
+    }
     v[j] = hv;
     saved[j] = hv;
   }
-  lfm2_store_columns(dst, row, at, t, saved);
+  lfm2_store_columns(dst, row, mask, t, saved);
   threadgroup float sums[32], inv[1];
   lfm2_rms(v, w, eps, x, base, t, sg, lane, sums, inv);
 }
 
-// Combine norm with readonly strided h and masked raw-state output.
-[[kernel]] void lfm2_combine_norm_tap(const device bfloat* y [[buffer(0)]], const device bfloat* wts [[buffer(1)]], const device bfloat* h [[buffer(2)]],
-                                  const device bfloat* w [[buffer(3)]], constant float& eps [[buffer(4)]], device bfloat* x [[buffer(5)]], device bfloat* dst [[buffer(6)]], constant uint4& at [[buffer(7)]],
+// lfm2_combine_norm that also stores the new state to the destination columns.
+[[kernel]] void lfm2_combine_norm_tap(const device bfloat* y [[buffer(0)]], const device bfloat* wts [[buffer(1)]], device bfloat* h [[buffer(2)]],
+                                  const device bfloat* w [[buffer(3)]], constant float& eps [[buffer(4)]], device bfloat* x [[buffer(5)]],
+                                  const device lfm2_tap_dst* dst [[buffer(6)]], constant uint& mask [[buffer(7)]],
                                   uint row [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]],
                                   uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
   const size_t base = size_t(row) * D + 4 * t;
-  const size_t from = size_t(row) * at.x + 4 * t;
   float v[4];
   bfloat4 saved;
   for (int j = 0; j < 4; ++j) {
@@ -298,11 +303,12 @@ inline void lfm2_store_columns(device bfloat* dst, uint row, constant uint4& at,
       const size_t slot = size_t(row) * TOPK + k;
       acc += float(static_cast<bfloat>(float(y[slot * D + 4 * t + j]) * float(wts[slot])));
     }
-    const bfloat hv = h[from + j] + static_cast<bfloat>(acc);
+    const bfloat hv = h[base + j] + static_cast<bfloat>(acc);
+    h[base + j] = hv;
     v[j] = hv;
     saved[j] = hv;
   }
-  lfm2_store_columns(dst, row, at, t, saved);
+  lfm2_store_columns(dst, row, mask, t, saved);
   threadgroup float sums[32], inv[1];
   lfm2_rms(v, w, eps, x, base, t, sg, lane, sums, inv);
 }

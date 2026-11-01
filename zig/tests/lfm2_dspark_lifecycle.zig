@@ -38,6 +38,57 @@ fn equalContext(a: *const q.dspark.Lane, b: *const q.dspark.Lane, layers: usize,
     return true;
 }
 
+/// Binds a stream's stage, writes rows there as a forward's kernels do, and absorbs them in place.
+fn capture(d: *q.dspark.Drafter, s: *tf.lanes.Stream, history: mtl.Buffer, width: usize, start: usize, rows: usize) !q.backend.Stage {
+    const src = d.stageSource();
+    const stage = (try src.bind(src.ptr, s, start, rows)) orelse return error.StageRefused;
+    @memcpy((stage.place.buf.contents() + stage.place.off)[0 .. rows * width], (history.contents() + start * width)[0 .. rows * width]);
+    const f: tf.lanes.backend.Features = .{ .buffer = @intFromPtr(stage.place.buf.id), .offset = stage.place.off, .rows = @intCast(rows), .row_bytes = @intCast(width), .space = .device, .dtype = .bf16 };
+    try d.drafter().absorb(&.{.{ .stream = s, .features = f, .start = start, .follow = &.{}, .prompt = false }});
+    return stage;
+}
+
+/// Captured rows stay in the stage without GPU work; a full stage flushes only the rows before a reused anchor.
+fn stagedCapture(gpa: std.mem.Allocator, d: *q.dspark.Drafter, taps: mtl.Buffer, ids: []const u32, ctx: usize) !void {
+    const rows = q.dspark.stage_rows;
+    if (d.options.capacity < rows + 256) return;
+    const width = d.tapBytes();
+    const history = try d.target.device.buffer((rows + 8) * width, mtl.ResourceOptions.shared);
+    defer history.deinit();
+    for (0..rows + 8) |row| @memcpy((history.contents() + row * width)[0..width], (taps.contents() + (row % ctx) * width)[0..width]);
+    var s = try tf.lanes.Stream.init(gpa, .{ .id = "stage-capture", .prompt = &.{1}, .max_new = rows + 64 });
+    defer s.deinit(gpa);
+    const dr = d.drafter();
+    try dr.open(&s);
+    var open = true;
+    defer if (open) dr.release(&s);
+    const l = d.lanes.get(&s) orelse return error.LaneNotOpened;
+    const spent = d.hold_spent_ms;
+    var at: usize = 0;
+    while (at < rows - 2) : (at += 16) _ = try capture(d, &s, history, width, at, @min(16, rows - 2 - at));
+    if (l.end != 0 or l.staged != rows - 2 or d.hold_spent_ms != spent) return error.CaptureNotOwnedInPlace;
+    // the next forward starts at the last kept row: only the rows before it are absorbed, the stage then starts over
+    const anchor = rows - 3;
+    const stage = try capture(d, &s, history, width, anchor, 6);
+    if (l.end != anchor or l.staged != 6 or stage.place.off != l.stage_at) return error.OverflowFlushedPastTheAnchor;
+    if (!std.mem.eql(u8, (l.mem.contents() + l.stage_at)[0 .. 6 * width], (history.contents() + anchor * width)[0 .. 6 * width])) return error.OverflowLostCapturedRows;
+    const reference = try d.newLane(rows + 16);
+    defer d.dropLane(reference);
+    try direct(d, reference, history, width, 0, anchor);
+    if (!equalContext(reference, l, d.config.layers, anchor)) return error.OverflowContextDiffers;
+    // a capture after a signalled hold follows it
+    try dr.hold(&.{.{ .stream = &s, .pending = ids[0], .position = anchor + 7, .depth = d.config.block }});
+    if (d.pending == null) return error.StageHoldNotPending;
+    const next = (try d.stageSource().bind(d.stageSource().ptr, &s, anchor + 6, 2)) orelse return error.StageRefused;
+    const wait = next.wait orelse return error.CaptureNotAfterPendingHold;
+    if (wait.value != d.signalled or l.end != anchor + 6 or l.staged != 0) return error.CaptureWaitsWrongHold;
+    // release leaves no destination to the target
+    dr.release(&s);
+    open = false;
+    const src = d.stageSource();
+    if (src.buffer(src.ptr, &s) != null or (try src.bind(src.ptr, &s, 0, 1)) != null) return error.StageOutlivesLane;
+}
+
 pub fn run(gpa: std.mem.Allocator, d: *q.dspark.Drafter, taps: mtl.Buffer, ids: []const u32, ctx: usize) !void {
     if (ctx < 2) return;
     const grid = d.holds;
@@ -125,4 +176,5 @@ pub fn run(gpa: std.mem.Allocator, d: *q.dspark.Drafter, taps: mtl.Buffer, ids: 
     try dr.held(&.{&resumed}, &.{got[0..depth]});
     if (!std.mem.eql(u32, expected[0..depth], got[0..depth])) return error.SnapshotResumePicksDiffer;
     if (!equalContext(reference, restored, d.config.layers, ctx)) return error.SnapshotResumeContextDiffers;
+    try stagedCapture(gpa, d, taps, ids, ctx);
 }

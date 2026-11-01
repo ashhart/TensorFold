@@ -53,17 +53,17 @@ fn offerFor(rule: anytype, who: anytype, index: usize, wanted: i64, base: price.
         price.prefix(rule.shared_costs, rule.k.hold_costs, base, fixed, who.prices, observed, tried, wanted)
     else
         null;
-    var offer: Offer = if (prefix) |p| .{
+    const offer: Offer = if (prefix) |p| .{
         .index = index,
         .gain = p.gain,
         .rows = p.rows,
         .depth = p.depth,
         .lowered = p.lowered,
         .shortened = p.shortened,
-        .pays = false,
+        .pays = p.pays,
     } else legacy: {
         const gain = try gainOf(rule, who);
-        break :legacy .{
+        var held: Offer = .{
             .index = index,
             .gain = gain,
             .rows = @floatFromInt(@max(1, who.granted orelse 1)),
@@ -72,10 +72,11 @@ fn offerFor(rule: anytype, who: anytype, index: usize, wanted: i64, base: price.
             .shortened = false,
             .pays = false,
         };
+        if (rule.shared_costs.get(@as(i64, base.rows) + @as(i64, @intFromFloat(held.rows)))) |verify| {
+            held.pays = (base.tokens + held.gain) / (verify + fixed + price.holdMs(rule.k.hold_costs, 1, held.depth)) > plain;
+        }
+        break :legacy held;
     };
-    if (rule.shared_costs.get(@as(i64, base.rows) + @as(i64, @intFromFloat(offer.rows)))) |verify| {
-        offer.pays = (base.tokens + offer.gain) / (verify + fixed + price.holdMs(rule.k.hold_costs, 1, offer.depth)) > plain;
-    }
     return offer;
 }
 

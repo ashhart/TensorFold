@@ -10,6 +10,8 @@ pub fn holdMs(costs: []const HoldCost, streams: usize, depth: i64) f64 {
     var below: ?u32 = null;
     var above: ?u32 = null;
     for (costs) |c| {
+        // An exact point retains the first duplicate, as atDepth does.
+        if (c.streams == streams and c.depth == depth) return c.ms;
         if (c.streams <= streams and (below == null or c.streams > below.?)) below = c.streams;
         if (c.streams >= streams and (above == null or c.streams < above.?)) above = c.streams;
     }
@@ -120,6 +122,7 @@ pub const Prefix = struct {
     rows: f64,
     lowered: bool, // full observed gain was below full raw confidence gain
     shortened: bool,
+    pays: bool, // its price score strictly beats the round's plain score
 };
 
 /// The cheapest per-extra-row price at which a perfect-acceptance pass could exist, for one cost shape.
@@ -158,12 +161,12 @@ pub fn prefix(costs: *const Table, holds: []const HoldCost, base: Base, fixed: f
         const verify = costs.get(@as(i64, base.rows) + @as(i64, @intCast(n))) orelse continue;
         const score = (base.tokens + gain) / (verify + fixed + holdMs(holds, 1, depth));
         if (last and score > plain_score) {
-            best = .{ .depth = depth, .gain = gain, .rows = @floatFromInt(n), .lowered = false, .shortened = false };
+            best = .{ .depth = depth, .gain = gain, .rows = @floatFromInt(n), .lowered = false, .shortened = false, .pays = true };
             break;
         }
         if (best == null or score >= best_score) {
             best_score = score;
-            best = .{ .depth = depth, .gain = gain, .rows = @floatFromInt(n), .lowered = false, .shortened = !last };
+            best = .{ .depth = depth, .gain = gain, .rows = @floatFromInt(n), .lowered = false, .shortened = !last, .pays = score > plain_score };
         }
     }
     var chosen = best orelse return null;
@@ -299,6 +302,48 @@ test "hold prices retain measured kernel transitions and use the adjacent depth 
     try std.testing.expectEqual(@as(f64, 17.5), holdMs(&t, 8, 3));
     try std.testing.expectEqual(@as(f64, 18.5), holdMs(&t, 8, 5));
     try std.testing.expectEqual(@as(f64, 3), holdMs(&t, 8, 0));
+}
+
+test "an exact timed point is the first duplicate; other points interpolate unsorted grids as before" {
+    const t = [_]HoldCost{
+        .{ .streams = 8, .depth = 4, .ms = 18 },
+        .{ .streams = 4, .depth = 2, .ms = 5 },
+        .{ .streams = 8, .depth = 2, .ms = 17 },
+        .{ .streams = 8, .depth = 2, .ms = 99 },
+        .{ .streams = 8, .depth = 1, .ms = 10 },
+        .{ .streams = 4, .depth = 3, .ms = 7 },
+    };
+    try std.testing.expectEqual(@as(f64, 17), holdMs(&t, 8, 2)); // not the later duplicate
+    try std.testing.expectEqual(@as(f64, 17.5), holdMs(&t, 8, 3)); // the first duplicate bounds the segment
+    try std.testing.expectEqual(@as(f64, 5), holdMs(&t, 4, 2)); // another count's depth-2 point is its own
+    try std.testing.expectEqual(@as(f64, 11), holdMs(&t, 6, 2)); // halfway between the counts' exact points
+    try std.testing.expectEqual(@as(f64, 1), holdMs(&t, 4, 0)); // the adjacent segment, extended past the shallowest
+}
+
+test "a prefix carries whether its score strictly beats the plain round" {
+    var slots = [_]?f64{ null, 10, 10, 20 };
+    const costs: Table = .{ .slots = &slots };
+    const base = Base.pending(1); // plain: 1 token in 10 ms
+    const even = [_]HoldCost{.{ .streams = 1, .depth = 1, .ms = 5 }};
+    const tie = prefix(&costs, &even, base, 0, &.{0.5}, &.{}, 0, 1).?; // 1.5 tokens in 15 ms
+    try std.testing.expectEqual(@as(f64, 0.5), tie.gain);
+    try std.testing.expect(!tie.pays and !tie.shortened);
+    const cheaper = [_]HoldCost{.{ .streams = 1, .depth = 1, .ms = 4 }};
+    try std.testing.expect(prefix(&costs, &cheaper, base, 0, &.{0.5}, &.{}, 0, 1).?.pays);
+    // a second draft that costs a whole extra pass leaves the paying first one
+    const chain = [_]HoldCost{ .{ .streams = 1, .depth = 1, .ms = 2 }, .{ .streams = 1, .depth = 2, .ms = 2 } };
+    const first = prefix(&costs, &chain, base, 0, &.{ 0.9, 0 }, &.{}, 0, 2).?;
+    try std.testing.expect(first.pays and first.shortened);
+    try std.testing.expectEqual(@as(i64, 1), first.depth);
+    // none pays: the best prefix is still offered, as not paying
+    const dear = [_]HoldCost{ .{ .streams = 1, .depth = 1, .ms = 50 }, .{ .streams = 1, .depth = 2, .ms = 50 } };
+    const none = prefix(&costs, &dear, base, 0, &.{ 0.9, 0 }, &.{}, 0, 2).?;
+    try std.testing.expect(!none.pays);
+    try std.testing.expectEqual(@as(i64, 1), none.depth);
+    // a paying full hold ends the search
+    const full = prefix(&costs, &chain, base, 0, &.{ 0.9, 0.9 }, &.{}, 0, 2).?;
+    try std.testing.expect(full.pays and !full.shortened);
+    try std.testing.expectEqual(@as(i64, 2), full.depth);
 }
 
 test "a hold's ms between and past the timed passes" {
