@@ -32,9 +32,13 @@ extern "C" __global__ void fn_shift_window(__nv_bfloat16* __restrict__ win, cons
 // ---- the DeltaNet chain over a chunk: flashnext_gdn.cu's chain cut into front, rows and norm, with its bits ----
 
 namespace fn_gdn {
-constexpr int NK = 16, NV = 48, DK = 128, DV = 128, TAPS = 4;
-constexpr int C = 2 * NK * DK + NV * DV;
-constexpr int PW = C + NV * DV + 2 * NV;
+constexpr int DK = 128, DV = 128, TAPS = 4;
+
+// A layer's key and value heads (all 16 and 48, or one rank's 8 and 24): its conv channels and projection row width.
+template <int NK, int NV> struct G {
+    static constexpr int C = 2 * NK * DK + NV * DV;
+    static constexpr int PW = C + NV * DV + 2 * NV;
+};
 
 static __device__ __forceinline__ float bf(float x) { return __bfloat162float(__float2bfloat16_rn(x)); }
 
@@ -44,8 +48,10 @@ static __device__ __forceinline__ float sigmoidf_(float x) { return 1.0f / (1.0f
 
 static __device__ __forceinline__ float softplusf_(float x) { return x > 20.0f ? x : log1pf(expf(x)); }
 
+template <int NK, int NV>
 static __device__ __forceinline__ float conv_act(const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs,
                                                  const __nv_bfloat16* __restrict__ cw, int r, int c) {
+    constexpr int C = G<NK, NV>::C, PW = G<NK, NV>::PW;
     float acc = 0.0f;
 #pragma unroll
     for (int tap = 0; tap < TAPS; ++tap) {
@@ -59,16 +65,18 @@ static __device__ __forceinline__ float conv_act(const __nv_bfloat16* __restrict
 }  // namespace fn_gdn
 
 // Program (row, unit), 256 threads: key head u's normed q and k (u < NK), else a value head's v, decay g and beta.
-extern "C" __global__ void __launch_bounds__(256) fn_gdn_front(
+template <int NK, int NV>
+static __device__ __forceinline__ void gdn_front(
         const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs, const __nv_bfloat16* __restrict__ cw,
         const float* __restrict__ a_log, const float* __restrict__ dt_bias, float* __restrict__ qn,
         float* __restrict__ kn, float* __restrict__ v, float* __restrict__ gb) {
     using namespace fn_gdn;
+    constexpr int C = G<NK, NV>::C, PW = G<NK, NV>::PW;
     const int r = blockIdx.x, u = blockIdx.y, t = threadIdx.x, warp = t >> 5, lane = t & 31;
     if (u < NK) {
         __shared__ float x[2][DK];
         const int hk = u;
-        x[t / DK][t % DK] = conv_act(P, cs, cw, r, t < DK ? hk * DK + t : NK * DK + hk * DK + (t - DK));
+        x[t / DK][t % DK] = conv_act<NK, NV>(P, cs, cw, r, t < DK ? hk * DK + t : NK * DK + hk * DK + (t - DK));
         __syncthreads();
         if (warp < 2) {
             float v4[4], ss = 0.0f;
@@ -86,7 +94,7 @@ extern "C" __global__ void __launch_bounds__(256) fn_gdn_front(
         }
     } else {
         const int hv = u - NK;
-        if (t < DV) v[(size_t)r * NV * DV + hv * DV + t] = conv_act(P, cs, cw, r, 2 * NK * DK + hv * DV + t);
+        if (t < DV) v[(size_t)r * NV * DV + hv * DV + t] = conv_act<NK, NV>(P, cs, cw, r, 2 * NK * DK + hv * DV + t);
         else if (t == DV) {
             const float b = __bfloat162float(P[(size_t)r * PW + C + NV * DV + hv]);
             const float a = __bfloat162float(P[(size_t)r * PW + C + NV * DV + NV + hv]);
@@ -96,7 +104,23 @@ extern "C" __global__ void __launch_bounds__(256) fn_gdn_front(
     }
 }
 
+extern "C" __global__ void __launch_bounds__(256) fn_gdn_front(
+        const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs, const __nv_bfloat16* __restrict__ cw,
+        const float* __restrict__ a_log, const float* __restrict__ dt_bias, float* __restrict__ qn,
+        float* __restrict__ kn, float* __restrict__ v, float* __restrict__ gb) {
+    gdn_front<16, 48>(P, cs, cw, a_log, dt_bias, qn, kn, v, gb);
+}
+
+// fn_gdn_front on one rank's 8 key and 24 value heads (a projection row 8,240 wide, 5,120 conv channels).
+extern "C" __global__ void __launch_bounds__(256) fn_gdn_front_h8(
+        const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs, const __nv_bfloat16* __restrict__ cw,
+        const float* __restrict__ a_log, const float* __restrict__ dt_bias, float* __restrict__ qn,
+        float* __restrict__ kn, float* __restrict__ v, float* __restrict__ gb) {
+    gdn_front<8, 24>(P, cs, cw, a_log, dt_bias, qn, kn, v, gb);
+}
+
 // The chain through the chunk from state_in to state_out (in place, or apart for a rollback): a warp 4 state rows.
+template <int NK, int NV>
 static __device__ __forceinline__ void gdn_rows(
         const float* __restrict__ qn, const float* __restrict__ kn, const float* __restrict__ v,
         const float* __restrict__ gb, const float* state_in, float* state_out, int rows, float* __restrict__ ys_out) {
@@ -166,19 +190,34 @@ static __device__ __forceinline__ void gdn_rows(
 extern "C" __global__ void __launch_bounds__(128) fn_gdn_rows(
         const float* __restrict__ qn, const float* __restrict__ kn, const float* __restrict__ v,
         const float* __restrict__ gb, float* state, int rows, float* __restrict__ ys_out) {
-    gdn_rows(qn, kn, v, gb, state, state, rows, ys_out);
+    gdn_rows<16, 48>(qn, kn, v, gb, state, state, rows, ys_out);
 }
 
 extern "C" __global__ void __launch_bounds__(128) fn_gdn_rows_to(
         const float* __restrict__ qn, const float* __restrict__ kn, const float* __restrict__ v,
         const float* __restrict__ gb, const float* state_in, float* state_out, int rows, float* __restrict__ ys_out) {
-    gdn_rows(qn, kn, v, gb, state_in, state_out, rows, ys_out);
+    gdn_rows<16, 48>(qn, kn, v, gb, state_in, state_out, rows, ys_out);
 }
 
-extern "C" __global__ void __launch_bounds__(128) fn_gdn_norm(
+// fn_gdn_rows and fn_gdn_rows_to on one rank's 8 key and 24 value heads.
+extern "C" __global__ void __launch_bounds__(128) fn_gdn_rows_h8(
+        const float* __restrict__ qn, const float* __restrict__ kn, const float* __restrict__ v,
+        const float* __restrict__ gb, float* state, int rows, float* __restrict__ ys_out) {
+    gdn_rows<8, 24>(qn, kn, v, gb, state, state, rows, ys_out);
+}
+
+extern "C" __global__ void __launch_bounds__(128) fn_gdn_rows_to_h8(
+        const float* __restrict__ qn, const float* __restrict__ kn, const float* __restrict__ v,
+        const float* __restrict__ gb, const float* state_in, float* state_out, int rows, float* __restrict__ ys_out) {
+    gdn_rows<8, 24>(qn, kn, v, gb, state_in, state_out, rows, ys_out);
+}
+
+template <int NK, int NV>
+static __device__ __forceinline__ void gdn_norm(
         const float* __restrict__ ys_in, const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ norm_w,
         float eps, __nv_bfloat16* __restrict__ out, float* __restrict__ xs) {
     using namespace fn_gdn;
+    constexpr int C = G<NK, NV>::C, PW = G<NK, NV>::PW;
     const int r = blockIdx.x, hv = blockIdx.y, t = threadIdx.x, warp = t >> 5, lane = t & 31;
     __shared__ float ys[DV];
     __shared__ float rinv;
@@ -201,6 +240,19 @@ extern "C" __global__ void __launch_bounds__(128) fn_gdn_norm(
     out[(size_t)r * NV * DV + hv * DV + t] = __float2bfloat16_rn(o);
     const float gs = warp_sum(o);
     if (lane == 0) xs[(size_t)r * (NV * DV / 32) + hv * (DV / 32) + warp] = gs;
+}
+
+extern "C" __global__ void __launch_bounds__(128) fn_gdn_norm(
+        const float* __restrict__ ys_in, const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ norm_w,
+        float eps, __nv_bfloat16* __restrict__ out, float* __restrict__ xs) {
+    gdn_norm<16, 48>(ys_in, P, norm_w, eps, out, xs);
+}
+
+// fn_gdn_norm on one rank's 24 value heads (z read from its 8,240-wide projection rows).
+extern "C" __global__ void __launch_bounds__(128) fn_gdn_norm_h8(
+        const float* __restrict__ ys_in, const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ norm_w,
+        float eps, __nv_bfloat16* __restrict__ out, float* __restrict__ xs) {
+    gdn_norm<8, 24>(ys_in, P, norm_w, eps, out, xs);
 }
 
 // ---- sparse attention (QSA): each row's blocks ----------------------------------------------------------------------
@@ -331,13 +383,28 @@ extern "C" __global__ void fn_copy_cols(const uint16_t* __restrict__ src, long l
     if (col < width) dst[r * dst_pitch + col] = src[r * src_pitch + col];
 }
 
+// A rank's picks as its experts' ids: first..first+local-1 become 0..local-1, any other id (the shared slot too) local.
+extern "C" __global__ void fn_ep_picks(const int* __restrict__ picks, int* __restrict__ out, int n, int first, int local) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const int p = picks[i];
+    out[i] = p >= first && p < first + local ? p - first : local;
+}
+
 #include "flashnext_gdn_tpr.cuh"
 
 // The prompt chain on two threads a state row (gdn_tpr): fn_gdn_rows_to's bits, state_in == state_out in place.
 extern "C" __global__ void __launch_bounds__(256) fn_gdn_chain_tpr(const float* qn, const float* kn, const float* v,
                                                                  const float* gb, const float* state_in, float* state_out,
                                                                  int rows, float* ys_out) {
-    gdn_tpr::chain<2, 16>(qn, kn, v, gb, state_in, state_out, rows, ys_out);
+    gdn_tpr::chain<16, 48, 2, 16>(qn, kn, v, gb, state_in, state_out, rows, ys_out);
+}
+
+// fn_gdn_chain_tpr on one rank's 8 key and 24 value heads.
+extern "C" __global__ void __launch_bounds__(256) fn_gdn_chain_tpr_h8(const float* qn, const float* kn, const float* v,
+                                                                    const float* gb, const float* state_in,
+                                                                    float* state_out, int rows, float* ys_out) {
+    gdn_tpr::chain<8, 24, 2, 16>(qn, kn, v, gb, state_in, state_out, rows, ys_out);
 }
 
 // The prompt GDN block in one kernel a value head (front, chain, gated norm; their bits), no fp32 rows through memory.

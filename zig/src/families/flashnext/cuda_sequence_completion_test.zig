@@ -98,6 +98,7 @@ test "Flash Next completion: allocation refusals drain fills before every constr
         e.stream = &stream;
         e.eos = 1;
         e.round_graph = .{};
+        e.heads = .full;
         try t.expectError(error.OutOfDeviceMemory, e.newSeq(4));
         _ = try cuda.memory.setAllocationLimit(null);
         try t.expectEqual(deny, Fake.allocations);
@@ -119,6 +120,7 @@ test "Flash Next completion: failed asynchronous fill and an interrupted prefill
         e.stream = &stream;
         e.eos = 1;
         e.round_graph = .{};
+        e.heads = .full;
         try t.expectError(error.NotReady, e.newSeq(4));
         try t.expectEqual(Fake.allocations, Fake.frees);
         if (Fake.early != 0) std.log.warn("completion control: allocs={d}, fills={d}, frees={d}, syncs={d}", .{ Fake.allocations, Fake.fills, Fake.frees, Fake.syncs });
@@ -132,6 +134,7 @@ test "Flash Next completion: failed asynchronous fill and an interrupted prefill
     e.stream = &stream;
     e.eos = 1;
     e.round_graph = .{};
+    e.heads = .full;
     var seq = try e.newSeq(4);
     // Model a queued prefill kernel writing every owned sequence buffer before request refusal.
     for (Fake.pending[1 .. Fake.allocations + 1]) |*pending| pending.* = true;
@@ -145,13 +148,13 @@ test "Flash Next completion: draft constructor fill failures and queued window w
     for ([_]usize{ 1, 2, 3, 4 }) |fail_fill| {
         var d = Fake.init(0, fail_fill);
         const stream: cuda.Stream = .{ .d = &d, .handle = @ptrFromInt(328) };
-        try t.expectError(error.NotReady, Draft.init(t.allocator, &d, stream, 4, 8, 1));
+        try t.expectError(error.NotReady, Draft.init(t.allocator, &d, stream, 4, 8, 1, .full));
         try t.expectEqual(Fake.allocations, Fake.frees);
         try t.expectEqual(@as(usize, 0), Fake.early);
     }
     var d = Fake.init(0, 0);
     const stream: cuda.Stream = .{ .d = &d, .handle = @ptrFromInt(329) };
-    var draft = try Draft.init(t.allocator, &d, stream, 4, 8, 1);
+    var draft = try Draft.init(t.allocator, &d, stream, 4, 8, 1, .full);
     @memset(Fake.pending[1 .. Fake.allocations + 1], true);
     draft.deinit();
     try t.expectEqual(Fake.allocations, Fake.frees);

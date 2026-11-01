@@ -3,6 +3,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const wt = @import("cuda_prompt_wt.zig");
+const Heads = @import("cuda_heads.zig").Heads;
 
 /// The attention tiles' head width and query heads a KV head (flashnext_attn.cu's HD and QR).
 const tile_head_dim = 256;
@@ -219,25 +220,26 @@ pub const Glue = struct {
         try go(g.f.gate, s, .{ rows, q_heads, 1 }, tile_head_dim, 0, &a);
     }
 
-    /// Text positions, a bf16 cache: the model's heads (cuda_prompt_wt.zig) normed, roped and stored.
-    pub fn attnPrep(g: *const Glue, s: cuda.Stream, proj: u64, pos: u64, q_scale: u64, k_scale: u64, i_scale: u64, inv: u64, q: u64, kc: u64, vc: u64, iq: u64, ikc: u64, eps: f32, rows: usize, pg: Pg) !void {
+    /// Text positions, a bf16 cache: the layer's heads `h` and the whole indexer normed, roped and stored.
+    pub fn attnPrep(g: *const Glue, s: cuda.Stream, proj: u64, pos: u64, q_scale: u64, k_scale: u64, i_scale: u64, inv: u64, q: u64, kc: u64, vc: u64, iq: u64, ikc: u64, eps: f32, rows: usize, h: Heads, pg: Pg) !void {
         if (wt.head_dim != tile_head_dim) return error.RowShape;
         var a: cuda.Args = .{};
         ptrs(&a, &.{ proj, pos, q_scale, k_scale, i_scale, inv, q, kc, vc, iq, ikc });
         a.add(eps);
-        ints(&a, &.{ wt.proj_n, wt.q_heads, wt.kv_heads, wt.index_heads, wt.index_dim, wt.half });
+        ints(&a, &.{ h.projN(), h.q, h.kv, wt.index_heads, wt.index_dim, wt.half });
         if (pg.pt != 0) a.add(pg);
         const f = if (pg.pt != 0) g.f.prep_paged else g.f.prep;
-        try go(f, s, .{ rows, wt.q_heads + wt.kv_heads + wt.index_heads + 1, 1 }, tile_head_dim, 0, &a);
+        try go(f, s, .{ rows, h.q + h.kv + wt.index_heads + 1, 1 }, tile_head_dim, 0, &a);
     }
 
     /// Attention over 512-key chunks; `qsa` the sparse form (NCH 5, rows' key lists), else dense (NCH 3).
-    pub fn attnChunks(g: *const Glue, s: cuda.Stream, q: u64, kc: u64, vc: u64, pos: u64, po: u64, pm: u64, pl: u64, ids: u64, nk: u64, sparse: u64, rows: usize, kv: usize, chunks: usize, qsa: bool, pg: Pg) !void {
-        const group = wt.q_heads / kv;
+    pub fn attnChunks(g: *const Glue, s: cuda.Stream, q: u64, kc: u64, vc: u64, pos: u64, po: u64, pm: u64, pl: u64, ids: u64, nk: u64, sparse: u64, rows: usize, h: Heads, chunks: usize, qsa: bool, pg: Pg) !void {
+        const kv: usize = h.kv;
+        const group = h.q / kv;
         if (group > tile_heads) return error.RowShape;
         var a: cuda.Args = .{};
         ptrs(&a, &.{ q, kc, vc, pos, po, pm, pl, ids, nk, sparse });
-        ints(&a, &.{ wt.q_heads, kv, group, 512, if (qsa) wt.nch else wt.dense_nch });
+        ints(&a, &.{ h.q, kv, group, 512, if (qsa) wt.nch else wt.dense_nch });
         a.add(@as(f32, 0.0625));
         ints(&a, &.{ wt.index_idw, @intFromBool(qsa) });
         if (pg.pt != 0) a.add(pg);
@@ -248,23 +250,24 @@ pub const Glue = struct {
     }
 
     /// Prompt rows' attention with every chunk merged in the program (fn_attn_fused): out bf16, attnChunks then
-    pub fn attnFused(g: *const Glue, s: cuda.Stream, q: u64, kc: u64, vc: u64, pos: u64, out: u64, ids: u64, nk: u64, sparse: u64, rows: usize, kv: usize, pg: Pg) !void {
-        const group = wt.q_heads / kv;
+    pub fn attnFused(g: *const Glue, s: cuda.Stream, q: u64, kc: u64, vc: u64, pos: u64, out: u64, ids: u64, nk: u64, sparse: u64, rows: usize, h: Heads, pg: Pg) !void {
+        const kv: usize = h.kv;
+        const group = h.q / kv;
         if (group > tile_heads) return error.RowShape;
         var a: cuda.Args = .{};
         ptrs(&a, &.{ q, kc, vc, pos, out, ids, nk, sparse });
-        ints(&a, &.{ wt.q_heads, kv, group, 512 });
+        ints(&a, &.{ h.q, kv, group, 512 });
         a.add(@as(f32, 0.0625));
         ints(&a, &.{ wt.index_idw, 1 });
         if (pg.pt != 0) a.add(pg);
         try go(if (pg.pt != 0) g.f.fused_paged else g.f.fused, s, .{ rows, kv, 1 }, 128, oneSmem(), &a);
     }
 
-    pub fn attnMerge(g: *const Glue, s: cuda.Stream, po: u64, pm: u64, pl: u64, pos: u64, out: u64, nk: u64, sparse: u64, rows: usize, kv: usize, qsa: bool) !void {
+    pub fn attnMerge(g: *const Glue, s: cuda.Stream, po: u64, pm: u64, pl: u64, pos: u64, out: u64, nk: u64, sparse: u64, rows: usize, h: Heads, qsa: bool) !void {
         var a: cuda.Args = .{};
         ptrs(&a, &.{ po, pm, pl, pos, out, nk, sparse });
-        ints(&a, &.{ wt.q_heads, kv, wt.q_heads / kv, 512, if (qsa) wt.nch else wt.dense_nch, @intFromBool(qsa) });
-        try go(g.f.merge, s, .{ rows, wt.q_heads, 1 }, tile_head_dim, 0, &a);
+        ints(&a, &.{ h.q, h.kv, h.q / h.kv, 512, if (qsa) wt.nch else wt.dense_nch, @intFromBool(qsa) });
+        try go(g.f.merge, s, .{ rows, h.q, 1 }, tile_head_dim, 0, &a);
     }
 
     pub fn qsaPool(g: *const Glue, s: cuda.Stream, ikc: u64, pooled: u64, pos: u64, k_scale: u64, inv: u64, eps: f32, rows: usize, pg: Pg) !void {

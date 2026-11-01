@@ -32,3 +32,18 @@ test "Flash Next head plan: one lane's rows never exceed the piece" {
     try std.testing.expectEqual(@as(usize, 1), plan.groups(&rows, p.piece, groups[0..]));
     try std.testing.expectEqual(@as(usize, 1), groups[0]);
 }
+
+test "Flash Next head scratch: reserve two rows per token through the 256-token boundary" {
+    try std.testing.expectEqual(@as(usize, 512), plan.reserveRows(256));
+    try std.testing.expectEqual(@as(usize, 512), plan.reserveRows(16384));
+    for ([_]usize{ 32, 64, 512, 1536, 16384 }) |admitted| {
+        for (1..16385) |total| {
+            const p = plan.plan(admitted, total);
+            const used: usize = @min(total, p.piece);
+            try std.testing.expect(p.pass_rows <= admitted);
+            try std.testing.expect(2 * used <= p.pass_rows);
+            const bounded: usize = if (total < 256) total else 256;
+            try std.testing.expectEqual(@max(@as(usize, 32), 2 * bounded), plan.reserveRows(total));
+        }
+    }
+}
