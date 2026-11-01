@@ -147,7 +147,7 @@ pub fn encodeWholeAs(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref,
     if (b.n == 0 or (kind == .a) != (c.split == 1) or c.n % kind.columns() != 0) return error.BadFp8Shape;
     const tiles = tilesOf(c.k, c.split);
     const args = WholeArgs{ .K = c.k, .N = c.n, .R = c.rows, .groups = c.k / 32, .tiles = tiles, .blocks = c.n / kind.columns(), .xs = b.xs, .ws = b.ws, .ss = b.ss, .ys = b.ys };
-    e.setPipeline(p.whole[@intFromEnum(kind)][wholeTier(c.rows)][@intFromEnum(c.out)]);
+    e.setPipeline(p.whole[@backingInt(kind)][wholeTier(c.rows)][@backingInt(c.out)]);
     e.setBuffer(x.buf, x.off, 0);
     e.setBuffer(w.buf, w.off, 1);
     e.setBuffer(s.buf, s.off, 2);
