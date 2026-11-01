@@ -90,6 +90,8 @@ See [the chat command](docs/chat.md) for its flags and the serve flags it passes
 - [Changes](CHANGELOG.md), [1.0.0 release notes](docs/release-notes-1.0.0.md) and [the Zig engine preview](docs/zig-preview.md).
 - TensorFold is Apache-2.0: [LICENSE](LICENSE), [NOTICE](NOTICE), [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and [SECURITY.md](SECURITY.md).
 
+`TF_ROUTE_TAP=/path` writes a versioned trace of each MoE layer's global top-k on rank 0 of a tapped family, for inspecting or monitoring routing; unset, nothing changes. Other families, including DeepSeek V4.1, refuse the switch by name. See [MoE route tap](docs/route-tap.md).
+
 ## Contributors
 
 Thank you to everyone who has sent TensorFold a pull request, a measurement or a bug report:
