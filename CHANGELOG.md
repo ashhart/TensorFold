@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- The CUDA drafter cost-identity host test sets the rewritten file's time itself, so it passes on filesystems with a coarse clock, such as ramfs and NTFS (#1770, fixes #1697). Thanks to @wesley4546.
+
 - `TENSORFOLD_LOG_TIME=1` (or `on`) starts each server log line, the `[tensorfold]` lines and every engine's warnings, with its UTC time to the millisecond, to match the log against other records. It's off by default, and the log is unchanged without it (#1690, fixes #1626). Thanks to @atakann.
 
 - On GB10s, affine-4 (MLX 4-bit) decode and verify projections that read the same input run as one grouped launch, each output byte-equal to its separate launch under the kernel contract, for the dense targets, Nemotron, the DFlash2 drafter, Gemma 4 and Spark. Replies are unchanged. Nemotron 3.5 Lightning: 8 streams +13.3%, 2 streams +5.9%; Qwen3.8-27B with DFlash2: decode after a prompt +3.7% to +5.0%, 1 stream +4.5%, 4 streams +3.5%.
