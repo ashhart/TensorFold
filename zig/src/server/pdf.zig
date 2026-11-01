@@ -1,10 +1,10 @@
-//! PDF document input (--vision): renders PDF pages via libpdfium (or extracts embedded images) into image_url parts.
+//! PDF document input (--vision): renders PDF pages via PDFium and libjpeg-turbo into image_url parts.
 const std = @import("std");
-const builtin = @import("builtin");
 const sys = @import("sys");
 const json = @import("json");
 const errors = @import("errors.zig");
 const images = @import("images.zig");
+const log = @import("log.zig");
 const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
@@ -12,9 +12,6 @@ const Allocator = std.mem.Allocator;
 pub const env = "TENSORFOLD_LIBPDFIUM";
 pub const max_pdf_bytes: usize = 32 << 20;
 pub const default_max_pages: u32 = 16;
-
-const pdfium_lib = if (builtin.os.tag == .macos) "libpdfium.dylib" else if (builtin.os.tag == .windows) "pdfium.dll" else "libpdfium.so";
-const jpeg_lib = if (builtin.os.tag == .macos) "libturbojpeg.0.dylib" else if (builtin.os.tag == .windows) "turbojpeg.dll" else "libturbojpeg.so.0";
 
 const PdfiumFns = struct {
     FPDF_InitLibrary: *const fn () callconv(.c) void,
@@ -45,101 +42,44 @@ const JpegLoaded = union(enum) { unknown, missing, ready: JpegFns };
 
 var pdfium_state: PdfiumLoaded = .unknown;
 var jpeg_state: JpegLoaded = .unknown;
-var pdfium_mutex: std.atomic.Mutex = .unlocked;
-var jpeg_mutex: std.atomic.Mutex = .unlocked;
+var pdfium_mutex: std.Io.Mutex = .init;
+var jpeg_mutex: std.Io.Mutex = .init;
 
-fn lock(m: *std.atomic.Mutex) void {
-    while (!m.tryLock()) std.atomic.spinLoopHint();
-}
-
-fn openPdfium(path: []const u8) ?PdfiumFns {
-    var dl = sys.DynLib.open(path) catch return null;
+fn findPdfium(a: Allocator) PdfiumLoaded {
+    const exe = std.process.executableDirPathAlloc(log.io(), a) catch null;
+    defer if (exe) |p| a.free(p);
+    var dl = sys.optional_libraries.open(sys.optional_libraries.spec(.pdfium), a, sys, exe) orelse return .missing;
     var f: PdfiumFns = undefined;
     const info = @typeInfo(PdfiumFns).@"struct";
     inline for (info.field_names, info.field_types) |name, T| {
         @field(f, name) = dl.lookup(T, name) orelse {
             dl.close();
-            return null;
+            return .missing;
         };
     }
     f.FPDF_InitLibrary();
-    return f;
+    return .{ .ready = f };
 }
 
-fn findPdfium(a: Allocator) PdfiumLoaded {
-    if (sys.getenv(env)) |named| {
-        if (named.len == 0) return .missing;
-        if (openPdfium(named)) |f| return .{ .ready = f };
-        return .missing;
-    }
-    if (comptime builtin.os.tag == .linux) {
-        var exe_buf: [1024]u8 = undefined;
-        if (sys.optional_libraries.video_library.executableDir(&exe_buf)) |dir| {
-            for ([_][]const []const u8{ &.{ dir, "..", "lib", pdfium_lib }, &.{ dir, pdfium_lib } }) |parts| {
-                const p = std.fs.path.join(a, parts) catch continue;
-                defer a.free(p);
-                if (openPdfium(p)) |f| return .{ .ready = f };
-            }
-        }
-    }
-    const candidates = [_][]const u8{
-        "/opt/tensorfold/lib/" ++ pdfium_lib,
-        "/opt/tensorfold/native/lib/" ++ pdfium_lib,
-        "/opt/codecs/pdfium/lib/" ++ pdfium_lib,
-        "/usr/local/lib/" ++ pdfium_lib,
-        pdfium_lib,
-    };
-    for (candidates) |p| {
-        if (openPdfium(p)) |f| return .{ .ready = f };
-    }
-    return .missing;
-}
-
-fn openJpeg(path: []const u8) ?JpegFns {
-    var dl = sys.DynLib.open(path) catch return null;
+fn findJpeg(a: Allocator) JpegLoaded {
+    const exe = std.process.executableDirPathAlloc(log.io(), a) catch null;
+    defer if (exe) |p| a.free(p);
+    var dl = sys.optional_libraries.open(sys.optional_libraries.spec(.jpeg), a, sys, exe) orelse return .missing;
     var f: JpegFns = undefined;
     const info = @typeInfo(JpegFns).@"struct";
     inline for (info.field_names, info.field_types) |name, T| {
         @field(f, name) = dl.lookup(T, name) orelse {
             dl.close();
-            return null;
+            return .missing;
         };
     }
-    return f;
-}
-
-fn findJpeg(a: Allocator) JpegLoaded {
-    if (sys.getenv("TENSORFOLD_LIBTURBOJPEG")) |named| {
-        if (named.len > 0) if (openJpeg(named)) |f| return .{ .ready = f };
-    }
-    if (comptime builtin.os.tag == .linux) {
-        var exe_buf: [1024]u8 = undefined;
-        if (sys.optional_libraries.video_library.executableDir(&exe_buf)) |dir| {
-            for ([_][]const []const u8{ &.{ dir, "..", "lib", jpeg_lib }, &.{ dir, jpeg_lib } }) |parts| {
-                const p = std.fs.path.join(a, parts) catch continue;
-                defer a.free(p);
-                if (openJpeg(p)) |f| return .{ .ready = f };
-            }
-        }
-    }
-    const candidates = if (builtin.os.tag == .macos) [_][]const u8{
-        "/opt/homebrew/opt/jpeg-turbo/lib/" ++ jpeg_lib,
-        "/usr/local/opt/jpeg-turbo/lib/" ++ jpeg_lib,
-        jpeg_lib,
-    } else [_][]const u8{
-        "/opt/tensorfold/lib/" ++ jpeg_lib,
-        "/opt/codecs/jpeg/lib/" ++ jpeg_lib,
-        jpeg_lib,
-    };
-    for (candidates) |p| {
-        if (openJpeg(p)) |f| return .{ .ready = f };
-    }
-    return .missing;
+    return .{ .ready = f };
 }
 
 fn getJpeg(a: Allocator) ?JpegFns {
-    lock(&jpeg_mutex);
-    defer jpeg_mutex.unlock();
+    const io = log.io();
+    jpeg_mutex.lockUncancelable(io);
+    defer jpeg_mutex.unlock(io);
     if (jpeg_state == .unknown) jpeg_state = findJpeg(a);
     return switch (jpeg_state) {
         .ready => |f| f,
@@ -168,7 +108,8 @@ pub fn isPdfImagePart(part: Value) bool {
 /// Expands a `file`, `input_file` or PDF `image_url` content part into one or more `image_url` parts.
 pub fn expandPart(cx: *Cx, part: Value, image_type: []const u8, max_images: u32, parts: *std.ArrayList(Value)) errors.Refused!void {
     const pdf_bytes = try extractPartBytes(cx, part);
-    try expandBytes(cx, pdf_bytes, image_type, maxPagesLimit(max_images), parts);
+    var encoded_bytes: usize = 0;
+    try expandBytes(cx, pdf_bytes, image_type, maxPagesLimit(max_images), &encoded_bytes, parts);
 }
 
 fn extractPartBytes(cx: *Cx, part: Value) errors.Refused![]const u8 {
@@ -179,6 +120,11 @@ fn extractPartBytes(cx: *Cx, part: Value) errors.Refused![]const u8 {
     const container: Value = if (part.get("file")) |f| (if (f == .object) f else return cx.refuse("file content part must contain a file object")) else part;
     if (container.get("file_id") != null and container.get("file_data") == null and container.get("data") == null and container.get("url") == null and container.get("file_url") == null)
         return cx.refuse("file parts require inline file_data (base64 or data:application/pdf;base64,...); file_id is not supported");
+    if (container.strField("file_url") orelse container.strField("url")) |u| {
+        const trimmed = std.mem.trim(u8, u, " \t\r\n");
+        if (trimmed.len > 0 and !std.ascii.startsWithIgnoreCase(trimmed, "data:"))
+            return cx.refuse("URLs are not accepted for PDF inputs; send inline base64 or a data:application/pdf;base64,... URL");
+    }
     const raw = container.strField("file_data") orelse container.strField("data") orelse container.strField("url") orelse container.strField("file_url") orelse
         return cx.refuse("file content part must contain file_data");
     if (raw.len == 0) return cx.refuse("file_data must be a non-empty base64 string or data URL");
@@ -187,6 +133,8 @@ fn extractPartBytes(cx: *Cx, part: Value) errors.Refused![]const u8 {
 
 pub fn decodeFileData(cx: *Cx, raw: []const u8) errors.Refused![]const u8 {
     const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    if (!std.ascii.startsWithIgnoreCase(trimmed, "data:") and (std.ascii.startsWithIgnoreCase(trimmed, "http://") or std.ascii.startsWithIgnoreCase(trimmed, "https://") or std.mem.indexOf(u8, trimmed, "://") != null))
+        return cx.refuse("URLs are not accepted for PDF inputs; send inline base64 or a data:application/pdf;base64,... URL");
     const bytes = if (std.ascii.startsWithIgnoreCase(trimmed, "data:")) blk: {
         const comma = std.mem.indexOfScalar(u8, trimmed, ',') orelse return cx.refuse("invalid PDF data URL");
         const header = trimmed[5..comma];
@@ -214,35 +162,37 @@ pub fn decodeFileData(cx: *Cx, raw: []const u8) errors.Refused![]const u8 {
     return bytes;
 }
 
-/// Renders up to `max_pages` pages of `pdf_bytes` into `image_url` content parts appended to `parts`.
-pub fn expandBytes(cx: *Cx, pdf_bytes: []const u8, image_type: []const u8, max_pages: u32, parts: *std.ArrayList(Value)) errors.Refused!void {
-    lock(&pdfium_mutex);
-    defer pdfium_mutex.unlock();
+/// Renders all pages of `pdf_bytes` (up to `max_pages`, refusing if more) into `image_url` parts appended to `parts`.
+pub fn expandBytes(cx: *Cx, pdf_bytes: []const u8, image_type: []const u8, max_pages: u32, encoded_bytes: *usize, parts: *std.ArrayList(Value)) errors.Refused!void {
+    const jf = getJpeg(cx.a) orelse return cx.refuse(sys.optional_libraries.spec(.jpeg).message);
+    const io = log.io();
+    pdfium_mutex.lockUncancelable(io);
+    defer pdfium_mutex.unlock(io);
     if (pdfium_state == .unknown) pdfium_state = findPdfium(cx.a);
-    switch (pdfium_state) {
-        .ready => |f| return renderWithPdfium(cx, f, pdf_bytes, image_type, max_pages, parts),
-        .missing, .unknown => {
-            if (try extractEmbeddedImages(cx, pdf_bytes, image_type, max_pages, parts)) return;
-            return cx.refuse("PDF input requires libpdfium; install pypdfium2 and set TENSORFOLD_LIBPDFIUM to libpdfium.so");
-        },
-    }
+    return switch (pdfium_state) {
+        .ready => |f| renderWithPdfium(cx, f, jf, pdf_bytes, image_type, max_pages, encoded_bytes, parts),
+        .missing, .unknown => cx.refuse(sys.optional_libraries.spec(.pdfium).message),
+    };
 }
 
-fn renderWithPdfium(cx: *Cx, f: PdfiumFns, pdf_bytes: []const u8, image_type: []const u8, max_pages: u32, parts: *std.ArrayList(Value)) errors.Refused!void {
+fn renderWithPdfium(cx: *Cx, f: PdfiumFns, jf: JpegFns, pdf_bytes: []const u8, image_type: []const u8, max_pages: u32, encoded_bytes: *usize, parts: *std.ArrayList(Value)) errors.Refused!void {
     if (pdf_bytes.len > std.math.maxInt(c_int)) return cx.refuse("PDF exceeds the encoded byte limit");
-    const doc = f.FPDF_LoadMemDocument(pdf_bytes.ptr, @intCast(pdf_bytes.len), null) orelse {
-        if (try extractEmbeddedImages(cx, pdf_bytes, image_type, max_pages, parts)) return;
+    const doc = f.FPDF_LoadMemDocument(pdf_bytes.ptr, @intCast(pdf_bytes.len), null) orelse
         return cx.refuse("PDF document could not be opened (corrupt or password-protected)");
-    };
     defer f.FPDF_CloseDocument(doc);
     const total_pages = f.FPDF_GetPageCount(doc);
-    if (total_pages <= 0) {
-        if (try extractEmbeddedImages(cx, pdf_bytes, image_type, max_pages, parts)) return;
-        return cx.refuse("PDF document contains no pages");
+    if (total_pages <= 0) return cx.refuse("PDF document contains no pages");
+    const pages: u32 = @intCast(total_pages);
+    const limit: u32 = @max(@as(u32, 1), max_pages);
+    if (pages > limit) {
+        return cx.refuse(try std.fmt.allocPrint(
+            cx.a,
+            "a PDF may have at most {d} pages (--vision-max-images, TENSORFOLD_MAX_PDF_PAGES); this one has {d}",
+            .{ limit, pages },
+        ));
     }
-    const pages_to_render: u32 = @min(@as(u32, @intCast(total_pages)), @max(@as(u32, 1), max_pages));
     var rendered_any = false;
-    for (0..pages_to_render) |idx| {
+    for (0..pages) |idx| {
         const page = f.FPDF_LoadPage(doc, @intCast(idx)) orelse continue;
         defer f.FPDF_ClosePage(page);
         const pw_raw = f.FPDF_GetPageWidthF(page);
@@ -254,9 +204,7 @@ fn renderWithPdfium(cx: *Cx, f: PdfiumFns, pdf_bytes: []const u8, image_type: []
         const max_area: f32 = 3_600_000.0;
         if (pw * scale > max_side) scale = max_side / pw;
         if (ph * scale > max_side) scale = max_side / ph;
-        if ((pw * scale) * (ph * scale) > max_area) {
-            scale = @sqrt(max_area / (pw * ph));
-        }
+        if ((pw * scale) * (ph * scale) > max_area) scale = @sqrt(max_area / (pw * ph));
         const w: c_int = @max(28, @min(4096, @as(c_int, @intFromFloat(@round(pw * scale)))));
         const h: c_int = @max(28, @min(4096, @as(c_int, @intFromFloat(@round(ph * scale)))));
         const bmp = f.FPDFBitmap_Create(w, h, 0) orelse return error.OutOfMemory;
@@ -269,21 +217,18 @@ fn renderWithPdfium(cx: *Cx, f: PdfiumFns, pdf_bytes: []const u8, image_type: []
         @memset(bgra[0..total_bytes], 0xFF); // white background
         // 0x01 = FPDF_ANNOT, 0x10 = FPDF_PRINTING
         f.FPDF_RenderPageBitmap(bmp, page, 0, 0, w, h, 0, 0x01 | 0x10);
-        const data_url = try encodeBgraDataUrl(cx.a, bgra[0..total_bytes], @intCast(w), @intCast(h), @intCast(stride));
+        const jpeg_bytes = encodeJpegBgra(cx.a, jf, bgra[0..total_bytes], @intCast(w), @intCast(h), @intCast(stride)) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.EncodeFailed => return cx.refuse("rendered PDF page could not be encoded as JPEG"),
+        };
+        if (jpeg_bytes.len > images.max_image_bytes) return cx.refuse("rendered PDF page exceeds the 10 MB image byte limit");
+        if (encoded_bytes.* + jpeg_bytes.len > images.max_request_bytes) return cx.refuse("the request's images exceed 20 MB encoded");
+        encoded_bytes.* += jpeg_bytes.len;
+        const data_url = try makeDataUrl(cx.a, "image/jpeg", jpeg_bytes);
         try appendImageUrlPart(cx.a, parts, image_type, data_url);
         rendered_any = true;
     }
     if (!rendered_any) return cx.refuse("PDF document pages could not be rendered");
-}
-
-fn encodeBgraDataUrl(a: Allocator, bgra: []const u8, width: usize, height: usize, stride: usize) Allocator.Error![]const u8 {
-    if (getJpeg(a)) |jf| {
-        if (encodeJpegBgra(a, jf, bgra, width, height, stride)) |jpeg_bytes| {
-            return makeDataUrl(a, "image/jpeg", jpeg_bytes);
-        } else |_| {}
-    }
-    const png_bytes = try encodePngBgra(a, bgra, width, height, stride);
-    return makeDataUrl(a, "image/png", png_bytes);
 }
 
 fn encodeJpegBgra(a: Allocator, jf: JpegFns, bgra: []const u8, width: usize, height: usize, stride: usize) error{ OutOfMemory, EncodeFailed }![]const u8 {
@@ -300,88 +245,7 @@ fn encodeJpegBgra(a: Allocator, jf: JpegFns, bgra: []const u8, width: usize, hei
     return a.dupe(u8, out_buf.?[0..out_size]);
 }
 
-/// Pure-Zig uncompressed RGB PNG encoder (fallback when libturbojpeg is not loaded).
-pub fn encodePngBgra(a: Allocator, bgra: []const u8, width: usize, height: usize, stride: usize) Allocator.Error![]const u8 {
-    const row_raw = 1 + width * 3;
-    const raw_len = height * row_raw;
-    const num_blocks = if (raw_len == 0) 1 else (raw_len + 65534) / 65535;
-    const zlib_len = 2 + num_blocks * 5 + raw_len + 4;
-    var out: std.ArrayList(u8) = .empty;
-    try out.ensureTotalCapacity(a, 8 + 25 + 12 + zlib_len + 12);
-    try out.appendSlice(a, "\x89PNG\r\n\x1a\n");
-
-    // IHDR
-    var ihdr: [13]u8 = undefined;
-    std.mem.writeInt(u32, ihdr[0..4], @intCast(width), .big);
-    std.mem.writeInt(u32, ihdr[4..8], @intCast(height), .big);
-    ihdr[8] = 8; // bit depth
-    ihdr[9] = 2; // color type: RGB
-    ihdr[10] = 0; // compression
-    ihdr[11] = 0; // filter
-    ihdr[12] = 0; // interlace
-    try appendPngChunk(a, &out, "IHDR", &ihdr);
-
-    // Build raw scanlines (filter 0 + RGB)
-    const raw = try a.alloc(u8, raw_len);
-    defer a.free(raw);
-    var s1: u32 = 1;
-    var s2: u32 = 0;
-    for (0..height) |y| {
-        const src_row = bgra[y * stride ..];
-        const dst_row = raw[y * row_raw ..][0..row_raw];
-        dst_row[0] = 0;
-        for (0..width) |x| {
-            dst_row[1 + x * 3 + 0] = src_row[x * 4 + 2]; // R
-            dst_row[1 + x * 3 + 1] = src_row[x * 4 + 1]; // G
-            dst_row[1 + x * 3 + 2] = src_row[x * 4 + 0]; // B
-        }
-        for (dst_row) |b| {
-            s1 = (s1 + b) % 65521;
-            s2 = (s2 + s1) % 65521;
-        }
-    }
-
-    // Wrap raw scanlines in an uncompressed zlib stream
-    var zbuf: std.ArrayList(u8) = .empty;
-    defer zbuf.deinit(a);
-    try zbuf.ensureTotalCapacity(a, zlib_len);
-    try zbuf.appendSlice(a, &.{ 0x78, 0x01 });
-    var offset: usize = 0;
-    while (true) {
-        const rem = raw.len - offset;
-        const chunk_len: u16 = @intCast(@min(rem, 65535));
-        const final_block: u8 = if (offset + chunk_len >= raw.len) 1 else 0;
-        try zbuf.append(a, final_block);
-        var len_bytes: [4]u8 = undefined;
-        std.mem.writeInt(u16, len_bytes[0..2], chunk_len, .little);
-        std.mem.writeInt(u16, len_bytes[2..4], ~chunk_len, .little);
-        try zbuf.appendSlice(a, &len_bytes);
-        try zbuf.appendSlice(a, raw[offset .. offset + chunk_len]);
-        offset += chunk_len;
-        if (final_block == 1) break;
-    }
-    var adler_bytes: [4]u8 = undefined;
-    std.mem.writeInt(u32, &adler_bytes, (s2 << 16) | s1, .big);
-    try zbuf.appendSlice(a, &adler_bytes);
-    try appendPngChunk(a, &out, "IDAT", zbuf.items);
-    try appendPngChunk(a, &out, "IEND", &.{});
-    return out.items;
-}
-
-fn appendPngChunk(a: Allocator, out: *std.ArrayList(u8), kind: *const [4]u8, body: []const u8) Allocator.Error!void {
-    var len_bytes: [4]u8 = undefined;
-    std.mem.writeInt(u32, &len_bytes, @intCast(body.len), .big);
-    try out.appendSlice(a, &len_bytes);
-    const start = out.items.len;
-    try out.appendSlice(a, kind);
-    try out.appendSlice(a, body);
-    const crc = std.hash.Crc32.hash(out.items[start..]);
-    var crc_bytes: [4]u8 = undefined;
-    std.mem.writeInt(u32, &crc_bytes, crc, .big);
-    try out.appendSlice(a, &crc_bytes);
-}
-
-fn makeDataUrl(a: Allocator, mime: []const u8, bytes: []const u8) Allocator.Error![]const u8 {
+pub fn makeDataUrl(a: Allocator, mime: []const u8, bytes: []const u8) Allocator.Error![]const u8 {
     const prefix = try std.fmt.allocPrint(a, "data:{s};base64,", .{mime});
     const enc = std.base64.standard.Encoder;
     const b64_len = enc.calcSize(bytes.len);
@@ -400,107 +264,65 @@ fn appendImageUrlPart(a: Allocator, parts: *std.ArrayList(Value), image_type: []
     try parts.append(a, .{ .object = p });
 }
 
-/// Fallback when libpdfium is unavailable: extracts raw JPEG or PNG streams embedded in the PDF.
-fn extractEmbeddedImages(cx: *Cx, pdf_bytes: []const u8, image_type: []const u8, max_pages: u32, parts: *std.ArrayList(Value)) errors.Refused!bool {
-    var count: u32 = 0;
-    const limit = @max(@as(u32, 1), max_pages);
-    var pos: usize = 0;
-    while (pos < pdf_bytes.len and count < limit) {
-        if (std.mem.indexOfPos(u8, pdf_bytes, pos, "stream")) |s_pos| {
-            var data_start = s_pos + 6;
-            if (data_start < pdf_bytes.len and pdf_bytes[data_start] == '\r') data_start += 1;
-            if (data_start < pdf_bytes.len and pdf_bytes[data_start] == '\n') {
-                data_start += 1;
-                if (std.mem.indexOfPos(u8, pdf_bytes, data_start, "endstream")) |e_pos| {
-                    var data_end = e_pos;
-                    while (data_end > data_start and (pdf_bytes[data_end - 1] == '\n' or pdf_bytes[data_end - 1] == '\r' or pdf_bytes[data_end - 1] == ' ')) {
-                        data_end -= 1;
-                    }
-                    const stream = pdf_bytes[data_start..data_end];
-                    if (stream.len > 4 and images.sniff(stream) == .jpeg and stream[stream.len - 2] == 0xFF and stream[stream.len - 1] == 0xD9) {
-                        const url = try makeDataUrl(cx.a, "image/jpeg", stream);
-                        try appendImageUrlPart(cx.a, parts, image_type, url);
-                        count += 1;
-                    } else if (stream.len > 16 and images.sniff(stream) == .png) {
-                        const url = try makeDataUrl(cx.a, "image/png", stream);
-                        try appendImageUrlPart(cx.a, parts, image_type, url);
-                        count += 1;
-                    }
-                    pos = e_pos + 9;
-                    continue;
-                }
-            }
-            pos = s_pos + 6;
-        } else break;
-    }
-    return count > 0;
-}
+pub const minimal_two_page_pdf =
+    "%PDF-1.4\n" ++
+    "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n" ++
+    "2 0 obj << /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >> endobj\n" ++
+    "3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >> endobj\n" ++
+    "4 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >> endobj\n" ++
+    "xref\n0 5\n" ++
+    "0000000000 65535 f \n" ++
+    "0000000009 00000 n \n" ++
+    "0000000058 00000 n \n" ++
+    "0000000121 00000 n \n" ++
+    "0000000190 00000 n \n" ++
+    "trailer << /Size 5 /Root 1 0 R >>\n" ++
+    "startxref\n259\n%%EOF\n";
 
-test "pure-Zig PNG encoder produces valid PNG bytes and embedded-image PDF fallback expands to image_url parts" {
+test "decodeFileData validates PDF headers and refuses remote URLs" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var cx: Cx = .{ .a = a };
 
-    // 2x2 BGRA image -> PNG
-    const bgra = [_]u8{
-        255, 0,   0,   255, 0,   255, 0,   255,
-        0,   0,   255, 255, 255, 255, 255, 255,
-    };
-    const png = try encodePngBgra(a, &bgra, 2, 2, 8);
-    try std.testing.expectEqual(images.Format.png, images.sniff(png));
-
-    // Build a synthetic PDF wrapping that PNG stream
-    var pdf_doc: std.ArrayList(u8) = .empty;
-    try pdf_doc.appendSlice(a, "%PDF-1.4\n1 0 obj\n<< /Length ");
-    try pdf_doc.appendSlice(a, try std.fmt.allocPrint(a, "{d}", .{png.len}));
-    try pdf_doc.appendSlice(a, " >>\nstream\n");
-    try pdf_doc.appendSlice(a, png);
-    try pdf_doc.appendSlice(a, "\nendstream\nendobj\n%%EOF\n");
-
-    const data_url = try makeDataUrl(a, "application/pdf", pdf_doc.items);
+    const data_url = try makeDataUrl(a, "application/pdf", minimal_two_page_pdf);
     const decoded = try decodeFileData(&cx, data_url);
-    try std.testing.expectEqualSlices(u8, pdf_doc.items, decoded);
+    try std.testing.expectEqualSlices(u8, minimal_two_page_pdf, decoded);
 
-    var parts: std.ArrayList(Value) = .empty;
-    try std.testing.expect(try extractEmbeddedImages(&cx, decoded, "image_url", 4, &parts));
-    try std.testing.expectEqual(@as(usize, 1), parts.items.len);
-    const url = parts.items[0].get("image_url").?.get("url").?.string;
-    const img_bytes = try images.dataBytes(&cx, url);
-    try std.testing.expectEqual(images.Format.png, images.sniff(img_bytes));
+    var url_cx: Cx = .{ .a = a };
+    try std.testing.expectError(error.Refused, decodeFileData(&url_cx, "https://example.com/doc.pdf"));
+    try std.testing.expect(std.mem.indexOf(u8, url_cx.message, "URLs are not accepted") != null);
 }
 
-test "libpdfium renders a multi-page PDF document when available" {
+test "libpdfium renders a multi-page PDF document and refuses when page count exceeds limit" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var cx: Cx = .{ .a = a };
 
-    const minimal_two_page_pdf =
-        "%PDF-1.4\n" ++
-        "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n" ++
-        "2 0 obj << /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >> endobj\n" ++
-        "3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >> endobj\n" ++
-        "4 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >> endobj\n" ++
-        "xref\n0 5\n" ++
-        "0000000000 65535 f \n" ++
-        "0000000009 00000 n \n" ++
-        "0000000058 00000 n \n" ++
-        "0000000121 00000 n \n" ++
-        "0000000190 00000 n \n" ++
-        "trailer << /Size 5 /Root 1 0 R >>\n" ++
-        "startxref\n259\n%%EOF\n";
-
     var parts: std.ArrayList(Value) = .empty;
-    expandBytes(&cx, minimal_two_page_pdf, "image_url", 4, &parts) catch |err| {
-        if (err == error.Refused and pdfium_state == .missing) return;
+    var used: usize = 0;
+    expandBytes(&cx, minimal_two_page_pdf, "image_url", 4, &used, &parts) catch |err| {
+        if (err == error.Refused and (pdfium_state == .missing or jpeg_state == .missing)) {
+            const want = if (jpeg_state == .missing) sys.optional_libraries.spec(.jpeg).names[0] else sys.optional_libraries.spec(.pdfium).names[0];
+            try std.testing.expect(std.mem.indexOf(u8, cx.message, want) != null);
+            return;
+        }
         return err;
     };
     try std.testing.expectEqual(@as(usize, 2), parts.items.len);
+    try std.testing.expect(used > 0 and used <= images.max_request_bytes);
     for (parts.items) |p| {
         const url = p.get("image_url").?.get("url").?.string;
         const img_bytes = try images.dataBytes(&cx, url);
-        const fmt = images.sniff(img_bytes);
-        try std.testing.expect(fmt == .jpeg or fmt == .png);
+        try std.testing.expectEqual(images.Format.jpeg, images.sniff(img_bytes));
     }
+
+    // Refuse when total_pages (2) > max_pages (1), naming both numbers in the refusal
+    var cap_cx: Cx = .{ .a = a };
+    var cap_parts: std.ArrayList(Value) = .empty;
+    var cap_used: usize = 0;
+    try std.testing.expectError(error.Refused, expandBytes(&cap_cx, minimal_two_page_pdf, "image_url", 1, &cap_used, &cap_parts));
+    try std.testing.expect(std.mem.indexOf(u8, cap_cx.message, "at most 1 pages") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cap_cx.message, "has 2") != null);
 }
