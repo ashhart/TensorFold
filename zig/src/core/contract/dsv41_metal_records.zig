@@ -2,5 +2,8 @@
 const M = @import("limits.zig").MetalLaunch;
 
 const head = @import("dsv41_fp8_records.zig").records ++ @import("dsv41_fp8_mma_records.zig").records ++
-    @import("dsv41_experts_records.zig").records ++ @import("dsv41_xmma_records.zig").records;
-pub const records = head;
+    @import("dsv41_attn_records.zig").records ++ @import("dsv41_experts_records.zig").records ++
+    @import("dsv41_glue_records.zig").records ++ @import("dsv41_xmma_records.zig").records ++
+    @import("dsv41_mv_records.zig").records;
+
+pub const records = head ++ @import("dsv41_glue_tmp_records.zig").records;
