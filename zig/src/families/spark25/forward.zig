@@ -321,6 +321,21 @@ pub const Model = struct {
         }
     }
 
+    /// Same-input affine-4 native projections share the GB10 grid; prompt and mixed widths keep their launches.
+    pub fn projectMany(m: *const Model, k: *const kern.Kernels, s: cuda.Stream, ls: []const wts.Proj, x: u64, xs: u64, outs: []const u64, rows: usize, prompt: bool) !void {
+        if (ls.len == 0 or ls.len != outs.len) return error.ShapeMismatch;
+        const A = cuda.qlinear.Affine4Kernels;
+        if (k.affine.pdl and !prompt and ls.len >= 2 and ls.len <= A.segs_max) grouped: {
+            var many: [A.segs_max]A.Out = undefined;
+            for (ls, outs, many[0..ls.len]) |l, out, *v| {
+                if (l != .a4 or l.k() != ls[0].k()) break :grouped;
+                v.* = .{ .q = l.a4, .out = out };
+            }
+            return k.affine.verifyManyRows(s, x, xs, many[0..ls.len], rows);
+        }
+        for (ls, outs) |l, out| try m.project(k, s, l, x, xs, out, rows, prompt);
+    }
+
     /// Every chain's rows (a prompt chunk, or decode windows); rows [head0, head0 + heads)'s logits at s.logits.
     pub fn forward(m: *Model, k: *const kern.Kernels, s: cuda.Stream, chains: []const Chain, prompt: bool, head0: usize, heads: usize) !void {
         var rows: usize = 0;
@@ -421,8 +436,7 @@ pub const Model = struct {
         try k.act.headGate(s, x.att, x.qkvg + (qw + 2 * kw) * 2, @intCast(ld), x.ag, x.xs, rows, geo.query_heads, dh);
         try m.project(k, s, l.out, x.ag, x.xs, x.o, rows, prompt);
         try m.residual(k, s, x.o, l.post_attention, rows);
-        try m.project(k, s, l.gate, x.n, x.xs, x.gate, rows, prompt);
-        try m.project(k, s, l.up, x.n, x.xs, x.up, rows, prompt);
+        try m.projectMany(k, s, &.{ l.gate, l.up }, x.n, x.xs, &.{ x.gate, x.up }, rows, prompt);
         try k.act.gegluErf(s, x.gate, geo.intermediate, x.up, geo.intermediate, x.act, x.xs, rows, geo.intermediate);
         try m.project(k, s, l.down, x.act, x.xs, x.y, rows, prompt);
         const next = if (i + 1 < m.layers) m.w.layers[i + 1].input_norm else m.w.final_norm;

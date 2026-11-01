@@ -4,7 +4,12 @@ const std = @import("std");
 const platform = @import("sys");
 const abi = @import("abi.zig");
 
-pub const Error = error{ CopySourceLimit, StageBusy, StageUnprepared, UnownedCaptureSource, OutOfMemory, DriverUnavailable, MissingSymbol, CudaFailed, CudaContextLost, GraphNotPermitted, OutOfDeviceMemory, NotReady, NotFound, Invalid };
+pub const Error = error{ CopySourceLimit, StageBusy, StageUnprepared, UnownedCaptureSource, OutOfMemory, DriverUnavailable, DriverTooOld, MissingSymbol, CudaFailed, CudaContextLost, GraphNotPermitted, OutOfDeviceMemory, NotReady, NotFound, Invalid };
+
+/// The oldest CUDA version (cuDriverGetVersion) the kernels load on: nvcc 13 builds them, which needs a 13.x driver.
+pub const min_version: c_int = 13000;
+/// The NVIDIA driver branch that first runs CUDA 13.0.
+pub const min_branch = "R580";
 
 pub const Driver = struct {
     lib: platform.DynLib,
@@ -32,7 +37,19 @@ pub const Driver = struct {
         }
         const d: Driver = .{ .lib = lib, .api = api, .func_name = lib.lookup(FuncGetName, "cuFuncGetName") };
         try d.check(api.cuInit(0), "cuInit");
+        var buf: [256]u8 = undefined;
+        if (d.tooOld(&buf)) |why| {
+            std.log.err("{s}", .{why});
+            return error.DriverTooOld;
+        }
         return d;
+    }
+
+    /// Why this driver cannot load the kernels, read before any image: an older one crashes inside cuModuleLoadData.
+    pub fn tooOld(self: *const Driver, buf: []u8) ?[]const u8 {
+        var v: c_int = 0;
+        if (self.api.cuDriverGetVersion(&v) != abi.success) v = 0;
+        return refusal(v, buf);
     }
 
     pub fn close(self: *Driver) void {
@@ -170,9 +187,44 @@ pub fn shutdownNote(res: abi.Result) []const u8 {
     return if (res == 4) " (the CUDA driver is shutting down: the process is exiting)" else "";
 }
 
+/// The refusal for a driver running CUDA `v` (0 when it reports none), naming the driver needed; null when it suffices.
+pub fn refusal(v: c_int, buf: []u8) ?[]const u8 {
+    if (v >= min_version) return null;
+    const need = std.fmt.comptimePrint("TensorFold's GPU kernels need CUDA {d}.{d}: install NVIDIA driver {s} or newer", .{ min_version / 1000, min_version % 1000 / 10, min_branch });
+    if (v <= 0) return "this NVIDIA driver reports no CUDA version, and " ++ need;
+    return std.fmt.bufPrint(buf, "this NVIDIA driver runs CUDA {d}.{d}, and " ++ need, .{ @divTrunc(v, 1000), @divTrunc(@mod(v, 1000), 10) }) catch need;
+}
+
 test "CUresult names without the driver: DEINITIALIZED is 4, unknown codes stay unknown" {
     try std.testing.expectEqualStrings("CUDA_ERROR_DEINITIALIZED", knownName(4).?);
     try std.testing.expectEqualStrings("CUDA_ERROR_ILLEGAL_ADDRESS", knownName(700).?);
     try std.testing.expect(knownName(12345) == null);
     try std.testing.expect(shutdownNote(4).len > 0 and shutdownNote(1).len == 0);
+}
+
+test "the driver floor: an older driver, or one reporting no version, is refused with the driver needed" {
+    const Fake = struct {
+        var cuda: c_int = 0;
+        var reply: abi.Result = abi.success;
+        fn version(v: *c_int) callconv(.c) abi.Result {
+            v.* = cuda;
+            return reply;
+        }
+    };
+    var d: Driver = undefined;
+    d.api.cuDriverGetVersion = Fake.version;
+    var buf: [256]u8 = undefined;
+    const need = ", and TensorFold's GPU kernels need CUDA 13.0: install NVIDIA driver R580 or newer";
+    for ([_]struct { c_int, abi.Result, ?[]const u8 }{
+        .{ 12040, abi.success, "this NVIDIA driver runs CUDA 12.4" ++ need },
+        .{ 12090, abi.success, "this NVIDIA driver runs CUDA 12.9" ++ need },
+        .{ 13000, abi.success, null },
+        .{ 13020, abi.success, null },
+        .{ 0, abi.success, "this NVIDIA driver reports no CUDA version" ++ need },
+        .{ 13000, 3, "this NVIDIA driver reports no CUDA version" ++ need },
+    }) |case| {
+        Fake.cuda = case[0];
+        Fake.reply = case[1];
+        if (case[2]) |want| try std.testing.expectEqualStrings(want, d.tooOld(&buf) orelse "admitted") else try std.testing.expect(d.tooOld(&buf) == null);
+    }
 }

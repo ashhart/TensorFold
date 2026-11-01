@@ -77,6 +77,7 @@ test {
     _ = engine;
     _ = follow;
     _ = lanes;
+    _ = @import("cuda_zero_budget_test.zig");
     _ = native;
     _ = @import("cuda_qpack.zig");
     _ = @import("cuda_prefix.zig");

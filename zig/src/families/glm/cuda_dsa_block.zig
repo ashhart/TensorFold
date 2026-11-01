@@ -135,18 +135,12 @@ pub fn attend(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, 
     v.qa += r0 * l.heads * l.lw * 2;
     v.ol += r0 * l.heads * l.lw * 2;
     v.qi += r0 * ix.heads * ix.d * 2;
-    if (c.ps % (l.lw * 2) != 0) return error.LatentShape; // pages whole latent rows apart (the token lists' unit)
+    try writeKeys(k, stream, l, c, v, rows, pos);
     const t: latent.Table = .{ .pt = c.pt, .ps = c.ps, .page_rows = c.ps / (l.lw * 2) };
     const tk: latent.Table = .{ .pt = c.pt, .ps = if (c.pks != 0) c.pks else c.ps, .page_rows = t.page_rows };
-    var stamp = prof.span(k.prof, stream, .cache_write);
-    try latent.latentWriteFormat(set, stream, v.lat, l.lw, c.lc, c.ls, t, pos, rows, l.lw);
-    stamp.end();
-    stamp = prof.span(k.prof, stream, .index_update);
-    try sparse.indexUpdate(set, stream, v.ikr, kw_rows, v.igr, ix.ln_w, ix.ln_b, ix.ape, c.ik, c.ig, c.pk, tk, pos, rows);
-    stamp.end();
     const scale: f32 = @floatCast(std.math.pow(f64, @floatFromInt(l.qk), -0.5));
     if (host_pos < l.dense_limit) {
-        stamp = prof.span(k.prof, stream, .mla);
+        const stamp = prof.span(k.prof, stream, .mla);
         var dc = c;
         if (c.pks != 0) if (kv_host.active) |*g| { // host rows: the visible ones, in order, into the slots
             dc = .{ .lc = try g.visible(k.ops, stream, c.lc, c.pt, t.page_rows, pos, rows, l.dense_limit + rows), .ik = c.ik, .ig = c.ig, .pk = c.pk, .pk_rows = c.pk_rows };
@@ -156,7 +150,7 @@ pub fn attend(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, 
     }
     if (sparseRows(l, host_pos, rows)) {
         try sparse.selectTokensProfile(set, k.ops, stream, v.qi, v.ikr + ix.d * 2, kw_rows, c.pk, tk, pos, host_pos, rows, ix.heads, ix.d, c.pk_rows - 2, v.select, v.tokens, v.counts, k.split, k.prof);
-        stamp = prof.span(k.prof, stream, .mla);
+        const stamp = prof.span(k.prof, stream, .mla);
         defer stamp.end();
         if (c.pks != 0) if (kv_host.active) |*g| { // host rows: gather the picks into device slots, attend there
             const slots = try g.gather(k.ops, stream, ix.gate, c.lc, c.pt, t.page_rows, pos, v.tokens, v.counts, rows, sparse.width);
@@ -184,4 +178,25 @@ fn denseAttention(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scrat
         const off = r0 * l.heads * l.lw * 2;
         try latent.attentionFormat(k.set, stream, s.qa + off, c.lc, c.ls, .{ .pt = c.pt, .ps = c.ps }, at, s.partials, s.ol + off, s.dummy, n, l.heads, l.lw, nch, scale, hb);
     }
+}
+
+fn writeKeys(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, rows: usize, pos: u64) !void {
+    const set = k.set;
+    const ix = l.index;
+    const kw_rows = ix.d + ix.heads;
+    if (c.ps % (l.lw * 2) != 0) return error.LatentShape; // pages whole latent rows apart (the token lists' unit)
+    const t: latent.Table = .{ .pt = c.pt, .ps = c.ps, .page_rows = c.ps / (l.lw * 2) };
+    const tk: latent.Table = .{ .pt = c.pt, .ps = if (c.pks != 0) c.pks else c.ps, .page_rows = t.page_rows };
+    var stamp = prof.span(k.prof, stream, .cache_write);
+    try latent.latentWriteFormat(set, stream, s.lat, l.lw, c.lc, c.ls, t, pos, rows, l.lw);
+    stamp.end();
+    stamp = prof.span(k.prof, stream, .index_update);
+    try sparse.indexUpdate(set, stream, s.ikr, kw_rows, s.igr, ix.ln_w, ix.ln_b, ix.ape, c.ik, c.ig, c.pk, tk, pos, rows);
+    stamp.end();
+}
+
+/// The existing row projections and cache writes, without attention or output projections.
+pub fn commit(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, x: u64, stride: usize, rows: usize, pos: u64, host_pos: usize) !void {
+    try prepareProfile(k.set, stream, l, s, x, stride, rows, sparseRows(l, host_pos, rows), k.prof);
+    try writeKeys(k, stream, l, c, s, rows, pos);
 }
