@@ -26,6 +26,9 @@ pub fn backend(o: api.Open) ?[]const u8 {
     if (o.learn != null and !o.learn_conversations) return "--learn learns shared prompt prefixes on Macs only; CUDA keeps conversation states on disk with --learn-conversations: serve with it, or without --learn, --learn-dir or --learn-gib";
     if (o.speed_up != null) return "--speed-up links two Macs: serve without --speed-up on CUDA";
     if (o.prompt_cache_over_cap) return "--prompt-cache-over-cap lifts a Mac's 70% cap: on CUDA the prompt cache takes at most the memory the weights and streams leave, so serve without it";
+    // Fish and Qwen4 open outside family(), so their --tp is refused here
+    if (std.mem.eql(u8, o.model_type, "fish_omni") or std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text"))
+        if (unranked(o)) |why| return why;
     return null;
 }
 
@@ -82,6 +85,18 @@ test "a family must consume rank options before tensor parallelism is admitted" 
     try std.testing.expect(unranked(.{ .dir = "d", .model_type = "qwen4", .tp = 1 }) == null);
     try std.testing.expectEqualStrings(no_ranks, unranked(.{ .dir = "d", .model_type = "qwen4", .tp = 2 }).?);
     try std.testing.expectEqualStrings(no_ranks, lfm2(.{ .dir = "d", .model_type = "lfm2", .tp = 2 }).?);
+    for ([_][]const u8{ "fish_omni", "qwen4", "qwen4_text" }) |m| {
+        try std.testing.expect(backend(.{ .dir = "d", .model_type = m, .tp = 1 }) == null);
+        try std.testing.expectEqualStrings(no_ranks, backend(.{ .dir = "d", .model_type = m, .tp = 2 }).?);
+    }
+}
+
+test "the CUDA server serves --tp, and Flash Next's two ranks pass family admission" {
+    try std.testing.expect(for (@import("cuda.zig").serves) |x| {
+        if (std.mem.eql(u8, x, "--tp")) break true;
+    } else false);
+    const flashnext = @import("flashnext").native;
+    try std.testing.expect(family(flashnext, .{ .dir = "d", .model_type = flashnext.model_type, .tp = 2, .prompt_cache_gib = 0 }) == null);
 }
 
 test "--learn is refused whatever the family, and --slide or a learned-disk size alone is not" {
