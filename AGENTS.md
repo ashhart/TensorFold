@@ -13,3 +13,4 @@ Show a GitHub name with `--github-name` only when the human opts in.
 
 Use `atc who <file> --json` to inspect overlapping edits and `atc overlap --json` before opening a pull request.
 Resolve reported conflicts and link the issue in the pull request description so other contributors can see the work in progress.
+Before opening or updating a pull request, run the [pull request skill](docs/pr/SKILL.md) pre-flight.
