@@ -362,10 +362,10 @@ test "cortheon fuzz: every reader takes linear time on long inputs" {
         const pages = [2][]u8{ try longPage(shape[0], shape[1], small), try longPage(shape[0], shape[1], 8 * small) };
         defer for (pages) |p| std.testing.allocator.free(p);
         for (readers) |r| {
-            const ns = try linear_time.fastest(3, &Timed{ .r = r, .pages = .{ pages[0], pages[1] } }, Timed.run);
-            if (ns[1] <= 20 * ms or ns[1] <= 24 * ns[0]) continue; // 8x the bytes: near 8x the time, not 64x
+            const f = try linear_time.fastest(3, &Timed{ .r = r, .pages = .{ pages[0], pages[1] } }, Timed.run);
+            if (f.ns[1] <= 20 * ms or f.work[1] <= 24 * f.work[0]) continue; // 8x the bytes: near 8x the time, not 64x
             const what = "\nfuzz: {s} took {d} ms on {d} KiB and {d} ms on {d} KiB of \"";
-            std.debug.print(what, .{ r.name, ns[0] / ms, small >> 10, ns[1] / ms, (8 * small) >> 10 });
+            std.debug.print(what, .{ r.name, f.ns[0] / ms, small >> 10, f.ns[1] / ms, (8 * small) >> 10 });
             show(shape[0]);
             show(shape[1][0..@min(shape[1].len, 120)]);
             std.debug.print("\" repeated\n", .{});

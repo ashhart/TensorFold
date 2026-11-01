@@ -229,8 +229,8 @@ const Timed = struct {
     }
     /// Within 24x (or 20 ms) for the bigger reply; each size keeps its fastest of five.
     fn linear(t: *const Timed) !void {
-        const ns = try @import("linear_time.zig").fastest(5, t, run);
-        try std.testing.expect(ns[1] <= 20 * std.time.ns_per_ms or ns[1] <= 24 * ns[0]);
+        const f = try @import("linear_time.zig").fastest(5, t, run);
+        try std.testing.expect(f.ns[1] <= 20 * std.time.ns_per_ms or f.work[1] <= 24 * f.work[0]);
     }
 };
 
