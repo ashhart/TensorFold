@@ -4,6 +4,7 @@ const mtl = @import("metal");
 const tf = @import("tensorfold");
 const contract = @import("contract");
 const rig_ = @import("rig.zig");
+const controls = @import("metal_llama_controls.zig");
 const c = contract.spec;
 const g = contract.gates;
 const rows_in = contract.rows;
@@ -74,6 +75,7 @@ pub const Glue = struct {
     a: std.mem.Allocator,
     rig: rig_.Rig,
     which: Which,
+    mutation: controls.Mutation,
     lib: mtl.Library,
     pipe: mtl.Pipeline,
     shape: c.Shape = .{ .rows = 0, .n = 0, .k = 0 },
@@ -88,10 +90,10 @@ pub const Glue = struct {
     in: [3]rig_.Ref = undefined,
     out: [3]rig_.Ref = undefined,
 
-    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, which: Which) !Glue {
-        const lib = try family.glueLibrary(device, a);
+    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, which: Which, mutation: controls.Mutation) !Glue {
+        const lib = try controls.glueLibrary(device, a, mutation);
         errdefer lib.deinit();
-        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .which = which, .lib = lib, .pipe = try pipelineOf(lib, device, function(which)) };
+        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .which = which, .mutation = mutation, .lib = lib, .pipe = try pipelineOf(lib, device, function(which)) };
     }
 
     fn drop(p: *Glue) void {
@@ -118,7 +120,7 @@ pub const Glue = struct {
     const vt = g.hooks(Glue);
 
     pub fn kernel(p: *Glue) g.Kernel {
-        return .{ .spec = spec(p.which), .ctx = p, .vt = &vt };
+        return controls.mark(.{ .spec = spec(p.which), .ctx = p, .vt = &vt }, p.mutation);
     }
 
     fn width(p: *const Glue) usize {
@@ -415,6 +417,7 @@ pub const Glue = struct {
 pub const Argmax = struct {
     a: std.mem.Allocator,
     rig: rig_.Rig,
+    mutation: controls.Mutation,
     lib: mtl.Library,
     pipe: mtl.Pipeline,
     shape: c.Shape = .{ .rows = 0, .n = 0, .k = 0 },
@@ -423,10 +426,10 @@ pub const Argmax = struct {
     out: rig_.Ref = undefined,
     msg: [160]u8 = undefined,
 
-    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue) !Argmax {
-        const lib = try family.glueLibrary(device, a);
+    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, mutation: controls.Mutation) !Argmax {
+        const lib = try controls.glueLibrary(device, a, mutation);
         errdefer lib.deinit();
-        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .lib = lib, .pipe = try pipelineOf(lib, device, "ll_argmax") };
+        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .mutation = mutation, .lib = lib, .pipe = try pipelineOf(lib, device, "ll_argmax") };
     }
 
     pub fn deinit(p: *Argmax) void {
@@ -439,7 +442,7 @@ pub const Argmax = struct {
     const vt = g.hooks(Argmax);
 
     pub fn kernel(p: *Argmax) g.Kernel {
-        return .{ .spec = .{ .name = "llama glue ll_argmax", .accum = .none, .depth = none, .out = .raw, .nan = .{ .stated = argmax_rule }, .tiles = .{ .{}, .{}, .{ .size = 1024, .step = 1, .min = 1 } }, .served = &.{ .{ .rows = 1, .n = 1, .k = G33.vocab }, .{ .rows = 1, .n = 1, .k = G3.vocab } }, .sums = no_sums }, .ctx = p, .vt = &vt };
+        return controls.mark(.{ .spec = .{ .name = "llama glue ll_argmax", .accum = .none, .depth = none, .out = .raw, .nan = .{ .stated = argmax_rule }, .tiles = .{ .{}, .{}, .{ .size = 1024, .step = 1, .min = 1 } }, .served = &.{ .{ .rows = 1, .n = 1, .k = G33.vocab }, .{ .rows = 1, .n = 1, .k = G3.vocab } }, .sums = no_sums }, .ctx = p, .vt = &vt }, p.mutation);
     }
 
     /// rows logits rows of k: NaNs and infinities as planted, two NaNs in row 3 and a tie in row 4.
