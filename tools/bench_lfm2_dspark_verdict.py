@@ -6,6 +6,9 @@ from bench_evidence import count, token_equal
 
 SCHEMA = "bench_lfm2_dspark/1"
 ARMS = ("plain", "bf16", "bits8")
+DEFAULT_WIDTHS = (1, 4, 8, 16)
+DEFAULT_TEMPERATURES = (0.0, 1.0)
+DEFAULT_TOKENS = 512
 EXIT_PASS, EXIT_FAIL, EXIT_USAGE, EXIT_PERF = 0, 1, 2, 3
 
 
@@ -140,11 +143,28 @@ def summarize(meta: dict, records: list[dict], events: list[dict]) -> dict:
     failures += cross_arm(s, cells, oracle)
     if not meta["smoke"] and (reps < len(ARMS) or reps % len(ARMS) or not s["rotation_balanced"]):
         failures.append({"class": "scenario", "what": "unbalanced_rotation"})
+    if not meta["smoke"]:
+        if (s["tokens"] != DEFAULT_TOKENS or tuple(widths) != DEFAULT_WIDTHS
+                or tuple(temps) != DEFAULT_TEMPERATURES or prompts != ["code", "chat"]):
+            failures.append({"class": "scenario", "what": "incomplete_qualification_matrix"})
+        for name, revision in (("source", meta.get("source_revision")),
+                               ("target", meta.get("target", {}).get("revision")),
+                               ("drafter", meta.get("drafter", {}).get("revision"))):
+            if not revision or revision == "unknown":
+                failures.append({"class": "scenario", "what": "missing_revision", "model": name})
+    expected_labels = {f"r{rep}-{arm}" for rep in range(reps) for arm in ARMS}
+    for event in ("ready", "shutdown"):
+        labels = [e.get("label") for e in events if e["event"] == event]
+        if len(labels) != len(expected_labels) or set(labels) != expected_labels:
+            failures.append({"class": "scenario", "what": f"missing_or_duplicate_{event}"})
     for e in events:
         if e["event"] == "abort":
             failures.append({"class": "scenario", "what": "abort", "detail": e.get("detail")})
         if e["event"] == "shutdown" and e.get("forced_kill"):
             failures.append({"class": "scenario", "what": "forced_shutdown", "label": e.get("label")})
+        if e["event"] == "shutdown" and e.get("returncode") != 0:
+            failures.append({"class": "scenario", "what": "unclean_shutdown", "label": e.get("label"),
+                             "returncode": e.get("returncode")})
         if e["event"] == "ready" and e.get("binary_sha256") != meta["binary"]["sha256"]:
             failures.append({"class": "scenario", "what": "binary_changed", "label": e.get("label")})
     activity_totals = {arm: {k: sum(x.get("activity", {}).get(k, 0) for x in cells + oracle if x["arm"] == arm)

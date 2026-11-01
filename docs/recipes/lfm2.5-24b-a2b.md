@@ -128,11 +128,12 @@ four-stream tradeoff does not establish the current no-slowdown gate.
 
 ### Requalifying the drafter
 
-Run the complete matrix from one native binary, with pinned target and drafter revisions:
+Run the complete matrix from one frozen native binary, with its source commit and pinned model revisions:
 
 ```sh
 python3 tools/bench_lfm2_dspark.py run \
   --binary zig-out/native/bin/tensorfold-native \
+  --source-revision "$SOURCE_REVISION" \
   --target "$TARGET" --drafter "$DRAFTER" \
   --target-revision "$TARGET_REVISION" --drafter-revision "$DRAFTER_REVISION" \
   --output-dir dspark-qualification
@@ -145,6 +146,7 @@ hash must match across arms; each cell's median aggregate decode throughput must
 Negative cells fail individually, without a tolerance or pooled average. Reduced runs require `--smoke` and
 never establish qualification.
 
-Keep the source commit/patch with the recorded binary hash. Publish the metadata, raw request and cell records,
+The driver requires and records those revisions for qualification. Keep the source commit/patch with the binary hash.
+Publish the metadata, raw request and cell records,
 events and summary, not `private-logs/`. Device receipts remain device-specific; a new short smoke cannot
 replace historical long-context, cancellation, load-memory or other-device evidence.

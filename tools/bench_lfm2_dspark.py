@@ -18,15 +18,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import bench_concurrent as bc  # noqa: E402
-from bench_lfm2_dspark_verdict import (ARMS, EXIT_USAGE, SCHEMA, activity, compare, problems, render,  # noqa: E402
-                                       seeds_for, startup_modes, summarize, total_activity)
+from bench_lfm2_dspark_verdict import (ARMS, DEFAULT_WIDTHS, DEFAULT_TEMPERATURES, DEFAULT_TOKENS, EXIT_USAGE, SCHEMA,  # noqa: E402
+                                       activity, compare, problems, render, seeds_for, startup_modes, summarize, total_activity)
 
 LOCK = "/tmp/tensorfold-model.lock"
 ARM_FLAGS = {"plain": [], "bf16": ["--drafter", "{drafter}"], "bits8": ["--drafter", "{drafter}", "--drafter-bits", "8"]}
 PARALLEL = 16
-DEFAULT_WIDTHS = (1, 4, 8, 16)
-DEFAULT_TEMPERATURES = (0.0, 1.0)
-DEFAULT_TOKENS = 512
 SERVED_NAME = "dspark-qual"
 SCRUBBED_PREFIXES = ("TF_", "TENSORFOLD_", "MTL_", "METAL_")
 SCRUBBED_NAMES = ("GEMMA_DRAFT_TRACE", "FZ_PRICE_BATCHED")
@@ -220,7 +217,7 @@ class Server:
             nonlocal interrupted
             interrupted = True
 
-        handlers = {s: signal.signal(s, defer_interrupt) for s in (signal.SIGINT, signal.SIGTERM)}
+        handlers = {s: signal.signal(s, defer_interrupt) for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
         try:
             if self.proc.poll() is None:
                 self.proc.send_signal(signal.SIGTERM)
@@ -340,6 +337,7 @@ def metadata(ctx: Context) -> dict:
         "schema": SCHEMA, "label": "SMOKE" if smoke else "QUALIFICATION", "smoke": smoke, "started_at": now_utc(),
         "same_head": f"every arm runs this one binary ({ctx.binary.name}); arms differ only in the drafter flags",
         "binary": {"name": ctx.binary.name, "sha256": ctx.binary_sha256},
+        "source_revision": a.source_revision or "unknown",
         "target": model(ctx.target, a.target_revision), "drafter": model(ctx.drafter, a.drafter_revision),
         "settings": {
             "context": a.context, "parallel": PARALLEL, "prompt_cache_gib": 0, "tokens": ctx.tokens, "reps": ctx.reps,
@@ -378,6 +376,10 @@ def validate(p: argparse.ArgumentParser, a: argparse.Namespace) -> None:
     if not full and not a.smoke:
         p.error(f"anything short of the full matrix (--tokens {DEFAULT_TOKENS}, --reps a positive multiple of 3, "
                 f"--widths {','.join(map(str, DEFAULT_WIDTHS))}, --temperatures 0,1) needs --smoke")
+    if not a.smoke:
+        for name in ("source_revision", "target_revision", "drafter_revision"):
+            if not getattr(a, name) or getattr(a, name) == "unknown":
+                p.error(f"--{name.replace('_', '-')}: required for full qualification")
     if not Path(a.binary).is_file() or not os.access(a.binary, os.X_OK):
         p.error("--binary: not an executable file")
     for name, path in (("--target", a.target), ("--drafter", a.drafter)):
@@ -389,7 +391,7 @@ def validate(p: argparse.ArgumentParser, a: argparse.Namespace) -> None:
 
 
 def interrupt(signum, frame):
-    """SIGTERM unwinds like Ctrl-C, so every server is stopped and the summary still written."""
+    """SIGTERM/SIGHUP unwind like Ctrl-C, so every server is stopped and the summary still written."""
     raise KeyboardInterrupt
 
 
@@ -421,7 +423,8 @@ def run(p: argparse.ArgumentParser, a: argparse.Namespace) -> int:
         ctx.logs.mkdir()
         meta = metadata(ctx)
         (out / "metadata.json").write_text(json.dumps(meta, indent=1) + "\n", encoding="utf-8")
-        signal.signal(signal.SIGTERM, interrupt)
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            signal.signal(sig, interrupt)
         try:
             for rep in range(ctx.reps):
                 for arm in order(rep):
@@ -448,9 +451,10 @@ as released" / "8-bit codes quantized at load (--drafter-bits 8)"), and plain no
 Holds /tmp/tensorfold-model.lock, refuses competing model processes, aborts on
 memory pressure, strips TF_/TENSORFOLD_/MTL_/METAL_ variables. --smoke (any reduced matrix) labels all output SMOKE.
 Output: metadata.json, requests.jsonl (raw), cells.jsonl, events.jsonl, summary.json, private-logs/ (local paths).
-Model revisions are only as supplied (else "unknown") plus config.json sha256; no local names are recorded.
+Full qualification requires source, target and drafter revision IDs; smoke may record unknown revisions.
 Exit: 0 pass; 1 exactness/scenario failure or interruption; 2 unusable arguments/environment; 3 a cell below plain.
-  tools/bench_lfm2_dspark.py run --binary BIN --target DIR --drafter DIR --output-dir OUT; ... summarize OUT"""
+  tools/bench_lfm2_dspark.py run --binary BIN --target DIR --drafter DIR --source-revision COMMIT
+    --target-revision TARGET_COMMIT --drafter-revision DRAFTER_COMMIT --output-dir OUT; ... summarize OUT"""
 
 
 def main() -> int:
@@ -465,13 +469,14 @@ def main() -> int:
     r.add_argument("--output-dir", required=True)
     r.add_argument("--context", type=int, default=4096)
     r.add_argument("--port", type=int, default=18194)
-    r.add_argument("--reps", type=int, default=3, help="launches per arm; arm order rotates (default 3; >= 2)")
+    r.add_argument("--reps", type=int, default=3, help="launches per arm; full qualification needs a positive multiple of 3")
     r.add_argument("--tokens", type=int, default=DEFAULT_TOKENS, help="tokens per reply (default 512; others need --smoke)")
     r.add_argument("--seed", type=int, default=1234)
     r.add_argument("--widths", default=",".join(map(str, DEFAULT_WIDTHS)))
     r.add_argument("--temperatures", default="0,1")
-    r.add_argument("--target-revision", help="public revision id of the target (default: unknown)")
-    r.add_argument("--drafter-revision", help="public revision id of the drafter (default: unknown)")
+    r.add_argument("--source-revision", help="source commit of the frozen native binary; required unless --smoke")
+    r.add_argument("--target-revision", help="public revision id of the target; required unless --smoke")
+    r.add_argument("--drafter-revision", help="public revision id of the drafter; required unless --smoke")
     r.add_argument("--startup-timeout", type=float, default=900)
     r.add_argument("--smoke", action="store_true", help="allow a reduced matrix; everything is labelled SMOKE")
     s = sub.add_parser("summarize", help="rebuild summary.json from an output directory and print it")
