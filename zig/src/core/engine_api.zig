@@ -4,6 +4,7 @@ const lanes = @import("lanes");
 const Allocator = std.mem.Allocator;
 pub const tfvideo = @import("tfvideo.zig");
 pub const DraftSources = @import("draft_sources.zig").Sources;
+pub const glp = @import("glp.zig");
 /// The server's name for one request, unique while the process lives.
 pub const Id = u64;
 /// One request's sampling (Python's exact_sampling.Sampling); a request without one decodes greedily.
@@ -24,44 +25,12 @@ pub const seedFor = lanes.sampling.seedFor;
 /// A committed token's log probability under the target's raw distribution, with the best tokens at its position.
 pub const LogprobRow = lanes.LogprobRow;
 
-/// The request's stop strings, checked on the engine's thread after each committed token (the server decodes the tail).
-pub const Stop = struct {
-    ctx: *anyopaque,
-    check: *const fn (ctx: *anyopaque, emitted: []const u32) bool,
-};
-
-/// tool_choice "required" or a named function: outside a think block the answer opens a call to an offered tool.
-pub const CallGate = struct {
-    /// The token that opens a call, the template text before the name, and the mark that ends the name.
-    opener: u32,
-    lead: []const u8 = "",
-    tail: []const u8 = "",
-    /// Offered names (empty: any); the gate completes a name its prefix starts.
-    names: []const []const u8 = &.{},
-    think_open: ?u32 = null,
-    think_end: ?u32 = null,
-};
-
-/// response_format and the guided_* fields: every token keeps the reply inside this grammar.
-pub const Structure = struct {
-    kind: enum { json, json_schema, regex, choice, grammar, structural_tag },
-    /// The schema (JSON text), regex, choices (a JSON array), EBNF or structural tag; empty for any JSON object.
-    text: []const u8 = "",
-    /// With thinking on, the grammar starts after this token.
-    after: ?u32 = null,
-    /// The server's compiler, which has compiled `text` once already (the engine's compile is then a cache hit).
-    compiler: ?*grammar.Compiler = null,
-    /// That compile, which the engine reads instead of compiling again; the server frees it after `finished`.
-    compiled: ?grammar.Compiled = null,
-    /// grammar_budget: mask tokens after which the reply could no longer complete within its token limits.
-    budget: bool = false,
-
-    pub fn free(st: Structure) void {
-        if (st.compiled) |g| g.free();
-    }
-};
-
-pub const grammar = lanes.grammar;
+/// The shapes a request carries, in the module that owns them.
+const request_types = @import("engine_request.zig");
+pub const Stop = request_types.Stop;
+pub const CallGate = request_types.CallGate;
+pub const Structure = request_types.Structure;
+pub const grammar = request_types.grammar;
 
 /// A reply to decode. The request and every slice in it stay valid until its ``finished`` event.
 pub const Request = struct {
@@ -262,6 +231,9 @@ pub const Family = struct { model_type: []const u8, formats: []const []const u8,
 /// The math an NVFP4 checkpoint runs: its own (FP4 rows into NVFP4 layers, FP8 into FP8 ones), or bf16 rows throughout.
 pub const Precision = enum { checkpoint, full };
 
+/// The control vector a serve applies to the residual stream (--glp).
+pub const Glp = glp.Glp;
+
 /// What a server asks of the engine it opens: the checkpoint, and the serve flags an engine reads.
 pub const Open = struct {
     pub const slideRefusal = @import("engine_slide.zig").refusal;
@@ -294,6 +266,8 @@ pub const Open = struct {
     rope_yarn: ?f64 = null, // --rope-yarn: YaRN over the checkpoint's trained window; families without it refuse
     /// --record: each stream's committed rows and tapped features written under this folder, for drafter training.
     record: ?[]const u8 = null,
+    /// --glp: the control vector the engine applies to the residual stream (null: none).
+    glp: ?Glp = null,
     speed_up: ?[]const u8 = null,
     prompt_cache_gib: ?f64 = null,
     prompt_cache_over_cap: bool = false,

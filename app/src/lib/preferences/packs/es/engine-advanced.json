@@ -18,5 +18,16 @@
  "Where Hugging Face caches downloads. TensorFold keeps its own model folders in Settings → Model folders.": "Dónde guarda Hugging Face las descargas. TensorFold mantiene sus propias carpetas de modelos en Ajustes → Carpetas de modelos.",
  "Engine knob: append per-request records to a file for diagnostics.": "Parámetro del motor: añade registros por solicitud a un archivo para diagnóstico.",
  "Set 1 to hide the engine live text display in its terminal; the served model is unchanged.": "Pon 1 para ocultar la muestra de texto en vivo del motor en su terminal; el modelo servido no cambia.",
- "Engine knob: mix a salt into request seeds.": "Parámetro del motor: mezcla una sal en las semillas de las solicitudes."
+ "Engine knob: mix a salt into request seeds.": "Parámetro del motor: mezcla una sal en las semillas de las solicitudes.",
+ "Control vector": "Vector de control",
+ "A control vector steers the local model: it changes what the model says. It is off until you turn it on, and the engine names what is in force when it starts.": "Un vector de control guía el modelo local: cambia lo que el modelo responde. Está apagado hasta que lo actives, y el motor indica al arrancar qué está en vigor.",
+ "Apply a control vector": "Aplicar un vector de control",
+ "Choose…": "Elegir…",
+ "Strength": "Intensidad",
+ "File: {value0}": "Archivo: {value0}",
+ "In force in the loaded model.": "En vigor en el modelo cargado.",
+ "One is the strength the file was derived at. A strength past a few can leave the model without an answer.": "Uno es la intensidad con la que se obtuvo el archivo. Una intensidad varias veces mayor puede dejar al modelo sin respuesta.",
+ "The strength must be above 0 and at most {value0}.": "La intensidad debe ser mayor que 0 y como máximo {value0}.",
+ "This build's TensorFold engine does not offer control vectors yet, so the engine in use cannot take one.": "El motor de TensorFold de esta versión todavía no ofrece vectores de control, así que el motor en uso no puede aceptar uno.",
+ "With a control vector in force the model replies differently. It is a steering direction, not a safety setting: it changes what the model is willing to say.": "Con un vector de control en vigor el modelo responde de otra manera. Es una dirección de guía, no un ajuste de seguridad: cambia lo que el modelo está dispuesto a decir."
 }

@@ -506,6 +506,15 @@ test "a request that does not fit a shared cache pool waits, in order, until a s
             p.asked.store(prompt + max_tokens, .monotonic);
             return p.room.load(.monotonic);
         }
+        /// What the host asked about, once it has asked: a loaded machine asks late, so wait for the question.
+        fn waitAsked(p: *@This(), ms: i64) u32 {
+            const until = std.Io.Clock.awake.now(std.testing.io).toNanoseconds() + @as(i64, ms) * std.time.ns_per_ms;
+            while (p.asked.load(.monotonic) == 0) {
+                if (std.Io.Clock.awake.now(std.testing.io).toNanoseconds() >= until) break;
+                std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+            }
+            return p.asked.load(.monotonic);
+        }
     };
     var pool: Pool = .{};
     const admit: api.Admit = .{ .ctx = &pool, .fits = Pool.fits };
@@ -550,7 +559,7 @@ test "a request that does not fit a shared cache pool waits, in order, until a s
     std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake) catch {};
     try std.testing.expectEqual(@as(usize, 0), b.state()[0]); // a lane is free, the pool is not: it waits
     try std.testing.expectEqual(@as(?Reason, null), b.state()[1]);
-    try std.testing.expectEqual(@as(u32, prompt.len + 4), pool.asked.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, prompt.len + 4), pool.waitAsked(5000));
     e.cancel(1);
     try std.testing.expectEqual(Reason.cancelled, a.wait());
     try std.testing.expectEqual(Reason.length, b.wait()); // alone again: admitted

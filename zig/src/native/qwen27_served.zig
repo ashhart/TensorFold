@@ -31,6 +31,7 @@ pub const Options = struct {
     learn: ?disk.Learn = null, // --learn-conversations: kept states written behind to disk and read back
     vision: ?api.VisionOpen = null, // --vision: open loads the image tower, and requests may hold images
     images: ?*images.Vision = null, // the loaded tower attach serves (and the host then owns)
+    glp: ?api.Glp = null, // the control vector the model steers with (null: none)
 };
 
 pub const Host = struct {
@@ -286,6 +287,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     defer pool.pop();
     const model = try q.model.Model.loadDeferred(gpa, io, dir, 128);
     errdefer model.deinit();
+    if (o.glp) |g| try steerModel(gpa, model, dir, g, a, why);
     var with = o;
     // the tower before the slots: their room and the cache's budget count it as taken
     if (o.vision) |v| with.images = try images.open(gpa, io, model, dir, v, a, why);
@@ -293,6 +295,54 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     const h = try attach(gpa, io, model, null, with, a, why);
     h.owns_model = true;
     return h;
+}
+
+/// The control vector the model takes: checked against the model that loaded, then its directions on the device.
+fn steerModel(gpa: Allocator, model: *q.model.Model, dir: []const u8, g: api.Glp, a: Allocator, why: *[]const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    var reason: api.glp.Why = .{};
+    api.glp.checkModel(g.vector, model.config.hidden, repoId(arena.allocator(), dir), &reason) catch |err| {
+        why.* = try std.fmt.allocPrint(a, "the control vector does not fit {s}: {s}", .{ dir, reason.text() });
+        return err;
+    };
+    const layers = try gpa.alloc(q.steer.Layer, g.vector.layers.len);
+    defer gpa.free(layers);
+    for (g.vector.layers, 0..) |l, i| layers[i] = .{ .id = l.id, .dir = l.dir };
+    const plan = q.steer.init(gpa, model.device, .{
+        .mode = switch (g.vector.mode) {
+            .project => .project,
+            .add => .add,
+        },
+        .alpha = g.alpha,
+        .hidden = @intCast(model.config.hidden),
+        .layers_total = @intCast(model.config.layers),
+        .layers = layers,
+    }) catch |err| {
+        why.* = try std.fmt.allocPrint(a, "the control vector does not fit {s}: {s}", .{ dir, steerProblem(err) });
+        return err;
+    };
+    model.steer = plan;
+}
+
+/// The repo id a cached checkpoint came from ("Org/Name"); empty when the folder is not a cache snapshot.
+fn repoId(a: Allocator, dir: []const u8) []const u8 {
+    const at = std.mem.lastIndexOf(u8, dir, "models--") orelse return "";
+    const rest = dir[at + "models--".len ..];
+    const sep = std.mem.indexOf(u8, rest, "/snapshots/") orelse return "";
+    const owner = rest[0..sep];
+    const dash = std.mem.indexOf(u8, owner, "--") orelse return "";
+    return std.fmt.allocPrint(a, "{s}/{s}", .{ owner[0..dash], owner[dash + 2 ..] }) catch "";
+}
+
+/// Why a vector's directions cannot be prepared, as the operator reads it.
+fn steerProblem(err: anyerror) []const u8 {
+    return switch (err) {
+        error.BadSteerLayer => "it names a layer this model does not have",
+        error.BadSteerWidth => "its directions are not as wide as this model",
+        error.BadSteerShape => "it holds no direction",
+        else => "its directions cannot be prepared",
+    };
 }
 
 /// A loaded model served as `open` serves one, `drafter` bound in place of `o.drafter`; both stay the caller's.
@@ -405,6 +455,9 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     if (h.trace) |*t| t.enabled = true; // serving rounds count from here: measure() timed whole, unsplit buffers
     try h.host.start();
     std.log.info("Qwen3.8-27B: {d} streams of {d} tokens{s}{s}", .{ slots, capacity, if (h.draft != null) ", DFlash2 drafts for one of them" else "", if (o.images != null) ", images read" else "" });
+    if (o.glp) |g| {
+        if (model.steer != null) reportSteer(g);
+    }
     return h;
 }
 
@@ -426,6 +479,44 @@ fn laterRoom(h: *const Host) u64 {
 /// --prompt-cache-gib's bytes (0 or less: none).
 fn gibBytes(gib: f64) u64 {
     return if (gib > 0) std.math.lossyCast(u64, gib * cache_fit.GiB) else 0;
+}
+
+/// The line that reports the control vector this model steers with.
+fn reportSteer(g: api.Glp) void {
+    const v = g.vector;
+    const sha = std.fmt.bytesToHex(v.sha256, .lower);
+    var first: u32 = 0;
+    var last: u32 = 0;
+    for (v.layers, 0..) |l, i| {
+        if (i == 0) first = l.id;
+        last = l.id;
+    }
+    var base: [192]u8 = undefined;
+    std.log.info("Qwen3.8-27B: control vector in force: {s} mode, alpha {d:.3}, {d} layers ({d}-{d}), base {s}, digest {s}", .{
+        @tagName(v.mode),
+        g.alpha,
+        v.layers.len,
+        first,
+        last,
+        baseOf(v, base[0..]),
+        sha[0..12],
+    });
+    if (v.transferred) std.log.warn("Qwen3.8-27B: the control vector was derived at {s}, not at {s}: it is applied at the residual stream", .{ v.derived_at, v.hook_point });
+}
+
+/// The checkpoint the vector came from, with its revision when it names one.
+fn baseOf(v: api.glp.Vector, buf: []u8) []const u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    if (v.base_model.len == 0) {
+        w.writeAll("an unnamed checkpoint") catch {};
+    } else {
+        w.writeAll(v.base_model) catch {};
+        if (v.base_revision.len > 0) {
+            w.writeAll(" @ ") catch {};
+            w.writeAll(v.base_revision) catch {};
+        }
+    }
+    return buf[0..w.end];
 }
 
 /// Reserve later buffers and the loaded share's priced bytes that its construction left outside the footprint.
