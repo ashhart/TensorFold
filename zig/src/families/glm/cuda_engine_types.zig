@@ -3,6 +3,9 @@ const cuda = @import("cuda");
 const fw = @import("cuda_forward.zig");
 const sampler = @import("cuda_sampler.zig");
 
+/// Rank 0's own word on its request (cancelled or not); the other ranks have none and hear rank 0's.
+pub const Cancel = struct { ptr: ?*anyopaque, check: *const fn (?*anyopaque) bool };
+
 /// One stream's window of a shared verify: its slot, its ids, and its drawn tokens.
 pub const Part = struct { slot: u32, ids: []const u32, out: []u32, bits: u64 = 0 };
 
