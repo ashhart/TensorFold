@@ -104,12 +104,6 @@ fn run(k: *rt.Kernel, groups: [3]u32, a: anytype) !void {
     try k.launch(groups);
 }
 
-/// Inverse RoPE frequencies as upstream builds them (fp32): theta^(-2i/128) for i < angles, then zeros (zero-tail).
-pub fn invFreq(theta: f32, partial: f32, out: *[HD / 2]f32) void {
-    const angles: usize = @intFromFloat(partial * @as(f32, HD) / 2);
-    for (out, 0..) |*f, i| f.* = if (i < angles) 1.0 / std.math.pow(f32, theta, @as(f32, @floatFromInt(2 * i)) / @as(f32, HD)) else 0;
-}
-
 pub const Model = struct {
     gpa: std.mem.Allocator,
     r: *rt.Runtime,
@@ -224,7 +218,7 @@ pub const Model = struct {
                     .out = try table(l, ns, i, .conv_out),
                     .cw = try vec(l, ns, i, .conv),
                 } } else blk: {
-                    const ring: u32 = if (kind == .sliding_attention) cfg.sliding_window + max_rows else cap;
+                    const ring: u32 = if (kind == .sliding_attention) @intCast(cfg.ring(max_rows)) else cap;
                     break :blk .{ .attn = .{
                         .q = try table(l, ns, i, .q_proj),
                         .k = try table(l, ns, i, .k_proj),
@@ -234,18 +228,16 @@ pub const Model = struct {
                         .qn = try vec(l, ns, i, .q_norm),
                         .kn = try vec(l, ns, i, .k_norm),
                         .ring = ring,
-                        .window = if (kind == .sliding_attention) cfg.sliding_window else 0,
+                        .window = @intCast(kind.window()),
                     } };
                 },
             };
         }
-        var inv: [HD / 2]f32 = undefined;
+        // the family's RoPE frequencies (torch's float32 values), as every backend's
         const inv_full = try l.empty(HD / 2 * 4);
-        invFreq(c.full_rotary.theta, c.full_rotary.partial, &inv);
-        try r.upload(inv_full, std.mem.sliceAsBytes(&inv));
+        try r.upload(inv_full, std.mem.sliceAsBytes(&c.full_rotary.inverseFrequencies()));
         const inv_slide = try l.empty(HD / 2 * 4);
-        invFreq(c.sliding_rotary.theta, c.sliding_rotary.partial, &inv);
-        try r.upload(inv_slide, std.mem.sliceAsBytes(&inv));
+        try r.upload(inv_slide, std.mem.sliceAsBytes(&c.sliding_rotary.inverseFrequencies()));
         try r.sync();
         var m: Model = .{
             .gpa = gpa,
