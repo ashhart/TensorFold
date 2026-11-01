@@ -22,6 +22,7 @@ test {
     _ = @import("contract/delta_slots_records.zig");
     _ = @import("contract/vit_records.zig");
     _ = @import("contract/simd_pairs_records.zig");
+    _ = @import("contract/simd32_records.zig");
     _ = @import("contract/glm_rows_records.zig");
     _ = @import("contract/nemotron_experts_records.zig");
     _ = @import("contract/moss_image_records.zig");

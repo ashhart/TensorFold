@@ -14,6 +14,13 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
     run.has_side_effects = true;
     b.step("test-kernel-seed-host", "Named contract fixtures keep their seed when entries are inserted").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module(b, b.graph.host, .debug), .filters = &.{"contract seed:"} })).step);
     const step = b.step("test-kernel-contract", "The kernel contract's host tests: gate logic, controls, every launch against every chip");
+    const simd_metal = b.createModule(.{ .root_source_file = b.path("zig/simd_qmm32_host_metal.zig"), .target = b.graph.host });
+    const simd_sources = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig"), .target = b.graph.host });
+    const simd_projection = b.createModule(.{ .root_source_file = b.path("zig/src/core/row_projection.zig"), .target = b.graph.host, .imports = &.{ .{ .name = "metal", .module = simd_metal }, .{ .name = "kernel_sources", .module = simd_sources } } });
+    const simd_test = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/simd_qmm32_host.zig"), .target = b.graph.host, .imports = &.{ .{ .name = "projection", .module = simd_projection }, .{ .name = "metal", .module = simd_metal }, .{ .name = "kernel_sources", .module = simd_sources } } }) });
+    const simd_run = b.addRunArtifact(simd_test);
+    b.step("test-simd32-host", "Actual 32-row projection launchers and strided mixed members without shaders").dependOn(&simd_run.step);
+    step.dependOn(&simd_run.step);
     step.dependOn(&run.step);
     step.dependOn(family);
     const rotary = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
