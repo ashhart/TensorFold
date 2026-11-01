@@ -128,7 +128,7 @@ pub const Tower = struct {
                 .gelu = try m.kernel("vit_gelu", .{ 64, 1, 1 }),
                 .conv = try m.kernel("vit_dwconv", .{ 64, 1, 1 }),
                 .rope = try m.kernel("vit_qk_norm_rope", .{ 64, 1, 1 }),
-                .attn = try m.kernel("vit_attn", .{ 64, 1, 1 }),
+                .attn = try m.kernel("vit_attn_qr", .{ 128, 1, 1 }), // vit_attn's bytes, q in registers: 1.7x
                 .swiglu = try m.kernel("vit_swiglu", .{ 64, 1, 1 }),
             },
             .s = undefined,
