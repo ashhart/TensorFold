@@ -103,6 +103,7 @@ pub fn run(gpu: Gpu, dir: []const u8) !void {
     };
     try @import("exl3_dense_tests.zig").run(&r, &state, dir);
     try @import("exl3_experts_tests.zig").run(&r, &state, dir);
+    try @import("exl3_grouped_oai_tests.zig").run(&r, &state);
     try @import("exl3_layer_tests.zig").run(&r, &state, dir);
     if (state.failed) return error.TestFailed;
     try bench(&r, &lin);

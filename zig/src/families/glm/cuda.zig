@@ -48,6 +48,7 @@ test {
     _ = @import("cuda_pages_test.zig");
     _ = @import("cuda_ranks_test.zig");
     _ = @import("cuda_roce_multi.zig");
+    _ = @import("cuda_lanes_test.zig");
     _ = experts;
     _ = exl3;
     _ = vision;
@@ -78,6 +79,7 @@ test {
     _ = lanes;
     _ = native;
     _ = @import("cuda_qpack.zig");
+    _ = @import("cuda_prefix.zig");
     _ = @import("cuda_mtp_chance.zig");
     _ = @import("cuda_tile.zig");
     _ = @import("heat"); // upstream's heat bands, run where the GLM ranks use them

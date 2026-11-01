@@ -9,6 +9,7 @@ const load = @import("cuda_prompt_load.zig");
 pub const batch = @import("cuda_batch.zig");
 const fb = @import("cuda_fn_back.zig");
 const pocket = @import("cuda_pocket.zig");
+const chunks = @import("cuda_chunk.zig");
 const layers_n = weights.layers_n;
 const linear_n = weights.linear_n;
 const attn_n = weights.attn_n;
@@ -137,8 +138,10 @@ pub const Engine = struct {
     batch_s: ?batch.Scratch = null,
     /// Block scores for the sparse rows of an attention block, grown to the longest sequence's need.
     scores: ?cuda.DeviceBuffer = null,
-    /// Rows a batched chunk takes at most (chunkRows).
+    /// Rows a batched chunk takes at most: TF_FLASHNEXT_CHUNK_SOLO if set, else TF_FLASHNEXT_CHUNK (cuda_chunk.zig).
     chunk: usize,
+    /// Rows a lane's prompt pass takes while another stream decodes: TF_FLASHNEXT_CHUNK.
+    busy_chunk: usize = batch.default_chunk,
     round_graph: round_graph.Cache = .{},
     image_factory: ?*@import("cuda_images.zig").Vision = null,
     collective: ?*@import("cuda_collective.zig").Collective = null,
@@ -153,7 +156,8 @@ pub const Engine = struct {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
         if ((world != 1 and world != 2) or rank >= world) return error.BadRank;
         // refused before anything loads: a bad TF_FLASHNEXT_CHUNK leaves no module or buffer behind
-        const chunk = try chunkRows();
+        const busy = try chunkRows();
+        const chunk = try chunks.soloRows(busy);
         const e = try gpa.create(Engine);
         errdefer gpa.destroy(e);
         e.gpa = gpa;
@@ -224,6 +228,7 @@ pub const Engine = struct {
         e.batch_s = null;
         e.scores = null;
         e.chunk = chunk;
+        e.busy_chunk = busy;
         return e;
     }
 
@@ -575,25 +580,10 @@ test "a failed fill frees the buffer it was filling and every one before it" {
     try std.testing.expectEqual(@as(usize, 3), live);
 }
 
-/// TF_FLASHNEXT_CHUNK's rows a pass: unset, the default; otherwise 1 to batch.max_chunk, anything else refused.
-pub fn parseChunk(v: ?[]const u8) !usize {
-    const s = v orelse return batch.default_chunk;
-    const n = std.fmt.parseInt(usize, s, 10) catch return error.BadChunk;
-    if (n == 0 or n > batch.max_chunk) return error.BadChunk;
-    return n;
-}
-
-pub fn chunkRows() !usize {
-    return parseChunk(if (std.c.getenv("TF_FLASHNEXT_CHUNK")) |v| std.mem.span(v) else null);
-}
-
-test "TF_FLASHNEXT_CHUNK takes 1 to the largest measured pass and refuses the rest" {
-    try std.testing.expectEqual(batch.default_chunk, try parseChunk(null));
-    try std.testing.expectEqual(@as(usize, 4096), try parseChunk("4096"));
-    try std.testing.expectEqual(batch.max_chunk, try parseChunk("16384"));
-    for ([_][]const u8{ "0", "16385", "-1", "4k", "" }) |bad| try std.testing.expectError(error.BadChunk, parseChunk(bad));
-}
+pub const parseChunk = chunks.parseChunk;
+pub const chunkRows = chunks.chunkRows;
 
 test {
     _ = @import("cuda_sequence_completion_test.zig");
+    _ = chunks;
 }
