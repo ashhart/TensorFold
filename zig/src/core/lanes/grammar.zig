@@ -153,7 +153,7 @@ pub const Matcher = struct {
     }
 
     pub fn rules(m: Matcher) Rules {
-        return .{ .ptr = m.h, .vtable = &.{ .accept = acceptFn, .rollback = rollbackFn, .terminated = terminatedFn, .fill = fillFn, .drafts = draftsFn, .free = freeFn, .budget = budgetFn } };
+        return .{ .ptr = m.h, .parallel_walk = true, .vtable = &.{ .accept = acceptFn, .rollback = rollbackFn, .terminated = terminatedFn, .fill = fillFn, .drafts = draftsFn, .free = freeFn, .budget = budgetFn } };
     }
 
     fn budgetFn(h: *anyopaque, words: []u32, left: u32) anyerror!bool {
@@ -198,6 +198,8 @@ pub const Matcher = struct {
 /// A grammar matcher as the round loop drives it: xgrammar's, or a test's.
 pub const Rules = struct {
     ptr: *anyopaque,
+    /// Distinct matcher pointers can be walked concurrently, including accept, rollback, drafts and budget.
+    parallel_walk: bool = false,
     vtable: *const VTable,
 
     pub const VTable = struct {
