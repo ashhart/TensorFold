@@ -64,6 +64,7 @@ pub const host_test = @import("host_test.zig");
 pub const pocket_round = @import("pocket_round.zig");
 test {
     _ = @import("commit_test.zig");
+    _ = @import("pocket_round_test.zig");
 }
 
 test {
