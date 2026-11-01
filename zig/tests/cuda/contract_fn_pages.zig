@@ -228,10 +228,10 @@ const Bufs = struct { proj: u64, pos: u64, qw: u64, kw: u64, iw: u64, ikw: u64, 
 /// cuda_batch.zig's attnRows over `n` rows from `pos0`: prep, pooling, each block's scores and selection, attention.
 fn pass(g: *const flash.Glue, s: cuda.Stream, select: cuda.Function, pos0: usize, n: usize, nb: usize, b: Bufs, pg: flash.Pg, image: ?media.View) !void {
     if (image) |im| {
-        try im.attn(s, b.proj, b.pos, b.qw, b.kw, b.iw, b.inv, b.q, b.kc, b.vc, b.iq, b.ikc, eps, n, pg);
+        try im.attn(s, b.proj, b.pos, b.qw, b.kw, b.iw, b.inv, b.q, b.kc, b.vc, b.iq, b.ikc, eps, n, .full, pg);
         try im.pooled(s, b.ikc, b.pooled, b.pos, b.ikw, b.inv, eps, n, pg);
     } else {
-        try g.attnPrep(s, b.proj, b.pos, b.qw, b.kw, b.iw, b.inv, b.q, b.kc, b.vc, b.iq, b.ikc, eps, n, pg);
+        try g.attnPrep(s, b.proj, b.pos, b.qw, b.kw, b.iw, b.inv, b.q, b.kc, b.vc, b.iq, b.ikc, eps, n, .full, pg);
         try g.qsaPool(s, b.ikc, b.pooled, b.pos, b.ikw, b.inv, eps, n, pg);
     }
     const fused = n > att_rows;
@@ -251,11 +251,11 @@ fn pass(g: *const flash.Glue, s: cuda.Stream, select: cuda.Function, pos0: usize
             try cuda.launch.launch(select, .{ .grid = .{ .x = @intCast(m) }, .block = .{ .x = 1024 } }, s, &a);
             if (!fused) {
                 const chunks = cdiv(@min(ends, dense_keys), 512);
-                try g.attnChunks(s, b.q + r0 * q_heads * head_dim * 2, b.kc, b.vc, pos, b.po, b.pm, b.pl, b.ids, b.nk, b.spr, m, kv_heads, chunks, true, pg);
-                try g.attnMerge(s, b.po, b.pm, b.pl, pos, b.ao + r0 * out_k * 2, b.nk, b.spr, m, kv_heads, true);
+                try g.attnChunks(s, b.q + r0 * q_heads * head_dim * 2, b.kc, b.vc, pos, b.po, b.pm, b.pl, b.ids, b.nk, b.spr, m, .full, chunks, true, pg);
+                try g.attnMerge(s, b.po, b.pm, b.pl, pos, b.ao + r0 * out_k * 2, b.nk, b.spr, m, .full, true);
             }
         }
-        if (fused) try g.attnFused(s, b.q + g0 * q_heads * head_dim * 2, b.kc, b.vc, b.pos + (g0 / att_rows) * 16, b.ao + g0 * out_k * 2, b.ids, b.nk, b.spr, gm, kv_heads, pg);
+        if (fused) try g.attnFused(s, b.q + g0 * q_heads * head_dim * 2, b.kc, b.vc, b.pos + (g0 / att_rows) * 16, b.ao + g0 * out_k * 2, b.ids, b.nk, b.spr, gm, .full, pg);
     }
 }
 

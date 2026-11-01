@@ -6,11 +6,15 @@ const aot = cuda.aot;
 
 pub const embed = @import("cuda_embed.zig");
 pub const projection = @import("cuda_projection.zig");
+pub const projection_load = @import("cuda_projection_load.zig");
 pub const rank_engine = @import("cuda_rank_engine.zig");
 pub const collective = @import("cuda_collective.zig");
 pub const rank_wire = @import("cuda_rank_wire.zig");
 pub const modelopt_experts = @import("cuda_modelopt_experts.zig");
+/// The MoE pass's native routed experts (NVFP4, block FP8), whose FP8 call a device test takes.
+pub const moe_native = @import("cuda_moe_native.zig");
 pub const hc = @import("cuda_hc.zig");
+pub const hc_fused = @import("cuda_hc_fused.zig");
 pub const draft_affine = @import("cuda_draft_affine.zig");
 pub const qmm = @import("cuda_qmm.zig");
 /// The batched pass's and its prompt tiles' symbols and launch sizes, which the contract's tests launch.
@@ -39,6 +43,10 @@ pub const native = @import("cuda_lanes.zig").Namespace(Tri);
 pub const Glue = glue_.Glue;
 /// A stream's caches through a page table, as the cache launches take them (TF_FLASHNEXT_KV_PAGES)
 pub const Pg = glue_.Pg;
+/// A layer's head geometry, which the attention launches take (the whole layer: Heads.full)
+pub const Heads = @import("cuda_heads.zig").Heads;
+/// What one rank keeps of a layer under the head split, which the head split's device test cuts by
+pub const heads_cut = @import("heads_cut.zig");
 const glue_ = @import("cuda_glue.zig");
 
 const p = aot.ptr;
@@ -148,9 +156,10 @@ pub const Tri = struct {
     }
 
     /// glue.attn_prep for text positions, bf16 KV (BITS 0, the scale pointers unread); `length` unused at MODE 0.
-    pub fn attnPrep(t: Tri, proj: u64, pos: u64, q_scale: u64, k_scale: u64, i_scale: u64, inv: u64, q: u64, kc: u64, vc: u64, iq: u64, ikc: u64, rope: u64, delta: u64, eps: f32, rows: usize, length: usize, pg: Pg) !void {
-        if (t.glue("_attn_prep")) |g| return g.attnPrep(t.s, proj, pos, q_scale, k_scale, i_scale, inv, q, kc, vc, iq, ikc, eps, rows, pg);
+    pub fn attnPrep(t: Tri, proj: u64, pos: u64, q_scale: u64, k_scale: u64, i_scale: u64, inv: u64, q: u64, kc: u64, vc: u64, iq: u64, ikc: u64, rope: u64, delta: u64, eps: f32, rows: usize, length: usize, h: Heads, pg: Pg) !void {
+        if (t.glue("_attn_prep")) |g| return g.attnPrep(t.s, proj, pos, q_scale, k_scale, i_scale, inv, q, kc, vc, iq, ikc, eps, rows, h, pg);
         if (pg.pt != 0) return error.PagedCapturedGlue; // a captured entry reads whole windows
+        if (!h.eql(.full)) return error.RowShape; // and bakes in the whole layer's heads
         try t.run("_attn_prep", .{ u(rows), u(24 + 2 + 4 + 1), 1 }, &.{
             p("P", "*bf16", proj),
             p("POS0", "*i32", pos),
@@ -173,10 +182,11 @@ pub const Tri = struct {
     }
 
     /// attention._chunks over 512-key chunks, bf16 KV; `qsa` the sparse form (NCH 5, QSA 1), else dense (NCH 3, QSA 0).
-    pub fn attnChunks(t: Tri, q: u64, kc: u64, vc: u64, pos: u64, po: u64, pm: u64, pl: u64, ids: u64, nk: u64, sparse: u64, rows: usize, kv: usize, chunks: usize, qsa: bool, pg: Pg) !void {
-        if (t.glue("_chunks")) |g| return g.attnChunks(t.s, q, kc, vc, pos, po, pm, pl, ids, nk, sparse, rows, kv, chunks, qsa, pg);
+    pub fn attnChunks(t: Tri, q: u64, kc: u64, vc: u64, pos: u64, po: u64, pm: u64, pl: u64, ids: u64, nk: u64, sparse: u64, rows: usize, h: Heads, chunks: usize, qsa: bool, pg: Pg) !void {
+        if (t.glue("_chunks")) |g| return g.attnChunks(t.s, q, kc, vc, pos, po, pm, pl, ids, nk, sparse, rows, h, chunks, qsa, pg);
         if (pg.pt != 0) return error.PagedCapturedGlue;
-        try t.run("_chunks", .{ u(rows), u(kv), u(chunks) }, &.{
+        if (!h.eql(.full)) return error.RowShape;
+        try t.run("_chunks", .{ u(rows), h.kv, u(chunks) }, &.{
             p("Q", "*bf16", q),
             p("KC", "*bf16", kc),
             p("VC", "*bf16", vc),
@@ -193,9 +203,10 @@ pub const Tri = struct {
     }
 
     /// attention._merge: one program per row and per KV head, in attnChunks' form.
-    pub fn attnMerge(t: Tri, po: u64, pm: u64, pl: u64, pos: u64, out: u64, nk: u64, sparse: u64, rows: usize, kv: usize, qsa: bool) !void {
-        if (t.glue("_merge")) |g| return g.attnMerge(t.s, po, pm, pl, pos, out, nk, sparse, rows, kv, qsa);
-        try t.run("_merge", .{ u(rows), u(kv), 1 }, &.{
+    pub fn attnMerge(t: Tri, po: u64, pm: u64, pl: u64, pos: u64, out: u64, nk: u64, sparse: u64, rows: usize, h: Heads, qsa: bool) !void {
+        if (t.glue("_merge")) |g| return g.attnMerge(t.s, po, pm, pl, pos, out, nk, sparse, rows, h, qsa);
+        if (!h.eql(.full)) return error.RowShape;
+        try t.run("_merge", .{ u(rows), h.kv, 1 }, &.{
             p("PO", "*fp32", po),
             p("PM", "*fp32", pm),
             p("PL", "*fp32", pl),
@@ -292,9 +303,9 @@ pub const Tri = struct {
     }
 
     /// Prompt rows' attention, chunks merged in the program, ours only.
-    pub fn attnFused(t: Tri, q: u64, kc: u64, vc: u64, pos: u64, out: u64, ids: u64, nk: u64, sparse: u64, rows: usize, kv: usize, pg: Pg) !void {
+    pub fn attnFused(t: Tri, q: u64, kc: u64, vc: u64, pos: u64, out: u64, ids: u64, nk: u64, sparse: u64, rows: usize, h: Heads, pg: Pg) !void {
         const g = t.glue("_chunks") orelse return error.NoGlue;
-        return g.attnFused(t.s, q, kc, vc, pos, out, ids, nk, sparse, rows, kv, pg);
+        return g.attnFused(t.s, q, kc, vc, pos, out, ids, nk, sparse, rows, h, pg);
     }
 
     /// Whether every launch that reads or writes the caches is ours, so a stream's caches may be paged.
@@ -415,6 +426,7 @@ pub const Tri = struct {
 test {
     _ = embed;
     _ = hc;
+    _ = hc_fused;
     _ = qmm;
     _ = gdn;
     _ = mlp;
@@ -433,6 +445,7 @@ test {
     _ = @import("cuda_config.zig");
     _ = @import("cuda_projection_load.zig");
     _ = @import("cuda_rank_engine.zig");
+    _ = @import("cuda_rank_verify.zig");
     _ = @import("cuda_round_graph.zig");
     _ = @import("cuda_rank_memory.zig");
     _ = @import("cuda_rank_wire.zig");
@@ -442,6 +455,9 @@ test {
     _ = @import("cuda_mtp_check.zig");
     _ = @import("cuda_draft_affine.zig");
     _ = @import("cuda_head.zig");
+    _ = @import("cuda_heads.zig");
+    _ = @import("cuda_batch_kernels.zig");
+    _ = @import("cuda_mtp_draft.zig");
     _ = fn_back;
     _ = pocket;
     _ = train;
@@ -502,11 +518,19 @@ test "a paged launch never reaches a captured entry" {
     var set: aot.Set = undefined;
     const t: Tri = .{ .set = &set, .s = undefined };
     const pg: Pg = .{ .pt = 64, .ps = 1, .ptok = 32 };
-    try std.testing.expectError(error.PagedCapturedGlue, t.attnPrep(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1e-6, 1, 0, pg));
+    try std.testing.expectError(error.PagedCapturedGlue, t.attnPrep(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1e-6, 1, 0, .full, pg));
     try std.testing.expectError(error.PagedCapturedGlue, t.qsaPool(0, 0, 0, 0, 0, 1e-6, 1, pg));
     try std.testing.expectError(error.PagedCapturedGlue, t.qsaScores(0, 0, 0, 0, 16, 1, 1, pg));
-    try std.testing.expectError(error.PagedCapturedGlue, t.attnChunks(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 1, true, pg));
-    try std.testing.expectError(error.NoGlue, t.attnFused(0, 0, 0, 0, 0, 0, 0, 0, 1, 2, pg));
+    try std.testing.expectError(error.PagedCapturedGlue, t.attnChunks(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .full, 1, true, pg));
+    try std.testing.expectError(error.NoGlue, t.attnFused(0, 0, 0, 0, 0, 0, 0, 0, 1, .full, pg));
+}
+
+test "a captured entry takes the whole layer's heads only" {
+    var set: aot.Set = undefined;
+    const t: Tri = .{ .set = &set, .s = undefined };
+    try std.testing.expectError(error.RowShape, t.attnPrep(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1e-6, 1, 0, .half, .{}));
+    try std.testing.expectError(error.RowShape, t.attnChunks(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .half, 1, true, .{}));
+    try std.testing.expectError(error.RowShape, t.attnMerge(0, 0, 0, 0, 0, 0, 0, 1, .half, true));
 }
 
 test {

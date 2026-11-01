@@ -18,8 +18,8 @@ const half_k = @import("contract_lane_half.zig");
 const wide_k = @import("contract_projection_f32.zig");
 const rank_k = @import("contract_rank.zig");
 const writeback_k = @import("contract_flashnext_writeback.zig");
-const hcnorm_k = @import("contract_hc_normalize.zig");
 const hcmix_k = @import("contract_hc_mix.zig");
+const hcfused_k = @import("contract_hc_fused.zig");
 const utility_k = @import("contract_utility.zig");
 const best_k = @import("contract_row_best.zig");
 const qsa_k = @import("contract_qsa_select.zig");
@@ -57,7 +57,7 @@ const qkr_k = @import("contract_qk_round.zig");
 const fact_k = @import("contract_flashnext_fact.zig");
 const route_k = @import("contract_route_rows.zig");
 const fexp_k = @import("contract_flashnext_fexp.zig");
-const glue_k = @import("contract_flashnext_glue.zig");
+const fn_groups_k = @import("contract_flashnext_groups.zig");
 const q35_contiguous = @import("contract_q35_contiguous.zig");
 const contract = core.contract;
 const g = contract.gates;
@@ -253,14 +253,12 @@ pub fn run(gpu: check.Gpu) !void {
     }
     defer for (&writebacks) |*w| w.deinit();
     for (&writebacks) |*w| try kernels.append(a, w.kernel());
-    var hcnorms: [2]hcnorm_k.Normalize = undefined;
-    for (std.enums.values(hcnorm_k.Kind), &hcnorms) |kind, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .cols_fn = try hc.function("fn_hc_normalize_cols"), .old_fn = try hc.function("fn_hc_normalize") };
-    defer for (&hcnorms) |*x| x.deinit();
-    for (&hcnorms) |*x| try kernels.append(a, x.kernel());
-    var hcmixes: [4]hcmix_k.Mix = undefined;
-    for (std.enums.values(hcmix_k.Kind), &hcmixes) |kind, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .new_fn = try hc.function("fn_hc_dense_mix8"), .old_fn = try hc.function("fn_hc_dense_mix"), .ctl_fn = if (kind == .sums_control) try mods[5].function("tf_ctl_hc_mix8_bf16") else null };
-    defer for (&hcmixes) |*x| x.deinit();
-    for (&hcmixes) |*x| try kernels.append(a, x.kernel());
+    var hc_fusions = try hcfused_k.Registrations.init(gpu, s, hc);
+    defer hc_fusions.deinit();
+    try hc_fusions.append(a, &kernels);
+    var hc_mixes = try hcmix_k.Registrations.init(gpu, s, hc, try mods[5].function("tf_ctl_hc_mix8_bf16"));
+    defer hc_mixes.deinit();
+    try hc_mixes.append(a, &kernels);
     var batch = try cuda.Module.load(gpu.d, kk.flashnext_batch);
     defer batch.unload();
     var sums: [2]utility_k.Sum = undefined;
@@ -484,27 +482,9 @@ pub fn run(gpu: check.Gpu) !void {
     defer attn.unload();
     var hcf_mod = try cuda.Module.load(gpu.d, kk.flashnext_hcf);
     defer hcf_mod.unload();
-    var fglue = try @import("flashnext").Glue.load(gpu.d);
-    defer fglue.deinit();
-    const glue_fns: glue_k.Fns = .{
-        .tpr = try batch.function("fn_gdn_chain_tpr"),
-        .rows_to = try batch.function("fn_gdn_rows_to"),
-        .tile = try attn.function("_ZN8qsa_tile6scoresILi8ELi4EEEvPK13__nv_bfloat16S3_PKiPfiiii"),
-        .scores = try attn.function("fn_qsa_scores"),
-        .hcf_down = try hcf_mod.function(ftk.cubin_hcf_down),
-        .hcf_up = try hcf_mod.function(ftk.cubin_hcf_up),
-        .front = try batch.function("fn_gdn_front"),
-        .norm = try batch.function("fn_gdn_norm"),
-        .fused = try batch.function("fn_gdn_fused"),
-    };
-    try glue_fns.fused.allowDynamicShared(fparts.gdn_fused_smem);
-    try glue_fns.tpr.allowDynamicShared(fparts.chain_tpr_smem);
-    try glue_fns.hcf_down.allowDynamicShared(ftk.hcf_down_smem);
-    try glue_fns.hcf_up.allowDynamicShared(ftk.hcf_up_smem);
-    var glues: [4]glue_k.Glue = undefined;
-    for (std.enums.values(glue_k.Kind), &glues) |kind, *m| m.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .f = &glue_fns, .glue = &fglue };
-    defer for (&glues) |*m| m.deinit();
-    for (&glues) |*m| try kernels.append(a, m.kernel());
+    var fn_groups: fn_groups_k.Set = .{};
+    defer fn_groups.deinit();
+    try fn_groups.add(gpu, s, batch, attn, hcf_mod, &kernels);
     var wrows: [wrows_k.cfgs.len]wrows_k.Rows = undefined;
     for (&wrows, wrows_k.cfgs) |*x, f| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = f, .g = &window_fns, .ctl = mods[5], .arena = .init(a) };
     defer for (&wrows) |*x| x.deinit();

@@ -64,6 +64,8 @@ __device__ __forceinline__ float block_sum(float v, float* scratch) {
 
 using namespace fn_hc;
 
+#include "flashnext_hc_mix_vec.cuh"
+
 // glue._hc_writeback, program (row, 256 columns): MODE 0 sums only, 2 MoE slots (fp32 y and weights), 4 K slices.
 template <int MODE>
 __device__ __forceinline__ void hc_writeback(const __nv_bfloat16* H, __nv_bfloat16* HOUT, float* __restrict__ PSS,
@@ -433,6 +435,7 @@ extern "C" __global__ void fn_add_streams(const __nv_bfloat16* __restrict__ E, c
 }
 
 #include "flashnext_hc_dense.cuh"
+#include "flashnext_hc_fused.cuh"
 
 // Shared expert uses its own BF16 projection outputs and rounding boundaries.
 extern "C" __global__ void fn_shared_swiglu(const __nv_bfloat16* GATE, const __nv_bfloat16* UP,
