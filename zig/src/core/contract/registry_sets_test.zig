@@ -30,16 +30,16 @@ test "each later nvcc's set rises by release and names registered launches that 
 }
 
 test "a compiler's records: its own set, else the newest below it, else 13.0's" {
-    const topk = named("router tf_nemo_topk").?;
+    const topk = named("flashnext_attn fn_attn_fused").?;
     const rms = named("norms tf_rms_rows").?;
     const cases = [_]struct { ?limits.Nvcc, limits.Nvcc, u32, u32 }{
-        .{ null, .{ .major = 13, .minor = 0 }, 91, 45 },
-        .{ .{ .major = 12, .minor = 8 }, .{ .major = 13, .minor = 0 }, 91, 45 },
-        .{ .{ .major = 13, .minor = 0 }, .{ .major = 13, .minor = 0 }, 91, 45 },
-        .{ .{ .major = 13, .minor = 1 }, .{ .major = 13, .minor = 0 }, 91, 45 },
-        .{ .{ .major = 13, .minor = 2 }, .{ .major = 13, .minor = 2 }, 91, 43 },
-        .{ .{ .major = 13, .minor = 3 }, .{ .major = 13, .minor = 3 }, 96, 43 },
-        .{ .{ .major = 14, .minor = 0 }, .{ .major = 13, .minor = 3 }, 96, 43 },
+        .{ null, .{ .major = 13, .minor = 0 }, 121, 45 },
+        .{ .{ .major = 12, .minor = 8 }, .{ .major = 13, .minor = 0 }, 121, 45 },
+        .{ .{ .major = 13, .minor = 0 }, .{ .major = 13, .minor = 0 }, 121, 45 },
+        .{ .{ .major = 13, .minor = 1 }, .{ .major = 13, .minor = 0 }, 121, 45 },
+        .{ .{ .major = 13, .minor = 2 }, .{ .major = 13, .minor = 2 }, 121, 43 },
+        .{ .{ .major = 13, .minor = 3 }, .{ .major = 13, .minor = 3 }, 122, 43 },
+        .{ .{ .major = 14, .minor = 0 }, .{ .major = 13, .minor = 3 }, 122, 43 },
     };
     for (cases) |c| {
         try std.testing.expectEqual(c[1], setFor(c[0]));
@@ -51,5 +51,7 @@ test "a compiler's records: its own set, else the newest below it, else 13.0's" 
 
 test {
     _ = @import("pending_132_test.zig");
+    _ = @import("exl3_grouped_records.zig");
     _ = @import("proposal_sampling_records.zig");
+    _ = @import("pocket_records.zig");
 }

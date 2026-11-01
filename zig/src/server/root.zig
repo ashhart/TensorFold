@@ -18,6 +18,7 @@ pub const Config = server.Config;
 
 test {
     _ = @import("auth_scope_test.zig");
+    _ = @import("family_sampling.zig");
     _ = @import("auth_scope_http_test.zig");
     _ = @import("admission_cli.zig");
     _ = @import("request_admission_test.zig");
@@ -40,6 +41,7 @@ test {
     _ = @import("tool_parse.zig");
     _ = @import("tool_lfm2.zig");
     _ = @import("tool_lfm2_stream_test.zig");
+    _ = @import("tool_minimax.zig");
     _ = @import("tool_stream.zig");
     _ = @import("tool_params.zig");
     _ = @import("tool_grammar.zig");
@@ -49,6 +51,7 @@ test {
     _ = @import("grammar.zig");
     _ = @import("pyrepr.zig");
     _ = @import("metrics.zig");
+    _ = @import("load_metrics.zig");
     _ = @import("http_conn.zig");
     _ = @import("auth.zig");
     _ = @import("cli.zig");
@@ -89,6 +92,7 @@ test {
     _ = @import("tool_cut_test.zig");
     _ = @import("logprobs_test.zig");
     _ = @import("think_split_test.zig");
+    _ = @import("deepseek_reply_test.zig");
     _ = @import("thinking_reserve_test.zig");
     _ = @import("loop_stop_test.zig");
     _ = @import("late_system_test.zig");
@@ -98,6 +102,8 @@ test {
     _ = @import("completion_prompt_test.zig");
     _ = @import("hf_eos_http_test.zig");
     _ = @import("reply_gpu_seconds_test.zig");
+    _ = @import("spark_wire.zig");
+    _ = @import("spark_wire_test.zig");
     _ = @import("server_init_test.zig");
     _ = @import("connection_arena_test.zig");
     _ = @import("decisions.zig");
@@ -128,6 +134,7 @@ test {
     _ = @import("slide_recheck.zig");
     _ = @import("slide_forget.zig");
     _ = @import("slide_forget_test.zig");
+    _ = @import("slide_forget_many_test.zig");
     _ = @import("slide_supplied.zig");
     _ = @import("slide_questions_test.zig");
     _ = @import("slide_teacher_test.zig");
@@ -146,6 +153,8 @@ test {
     _ = @import("responses_include_test.zig");
     _ = @import("cortheon/cortheon.zig");
     _ = @import("cortheon/cortheon_test.zig");
+    _ = @import("cortheon/research.zig");
+    _ = @import("cortheon/program.zig");
     _ = @import("recall_routes.zig");
     // the benchmark command's serve child runs under POSIX signals and waits; Windows refuses the command
     if (comptime @import("builtin").os.tag != .windows) {

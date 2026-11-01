@@ -195,6 +195,7 @@ row's bits match it:
   for 1 to 128 rows, every codebook and width (the `mul1` half steps included), with the K split planned from the
   layer's shape alone. `exl3.Dense` runs prompt rows in 128-row blocks of the same kernel, so a prompt row's bits
   equal its decode-row bits wherever its chunk starts; `qlinear.Weight` has an `.exl3` arm for both.
+  The split counters are zeroed on the calls' stream when they grow, and each block's last program resets its own.
 - `zig/kernels/cuda/exl3_experts.cu`, `zig/src/cuda/exl3_experts.zig`: grouped routed experts (member lists,
   each expert's rotation, gate and up, GLM's SwiGLU roundings, down and the weighted combine), widths mixed within
   a layer; an expert's member count never changes a row's bits.
@@ -209,5 +210,7 @@ under real routing) included. The program that records them runs the Python engi
 NCCL (output-column cuts, input-row cuts with fp32 partials summed rank 0 first, and the experts' intermediate cut)
 and checks every rank's bytes and the sums the same way.
 
-No family serves EXL3 natively yet: the Metal projection (#681) and these CUDA pieces are what a family's engine
-takes, through `qlinear` and `exl3_experts`.
+The Metal projection (#681) and these CUDA pieces are what a family's engine takes, through `qlinear` and
+`exl3_experts`. On CUDA, `qwen3_5` serves EXL3 packs of the Qwen3.5 MoE models and of the dense
+[Qwen3.8-27B](qwen3.8-27b.md#cuda), whose DFlash2 drafter reads the head through column views
+(`exl3.Weight.columns`: whole 128-column blocks with the parent's strides).

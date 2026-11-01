@@ -109,10 +109,10 @@ const Watch = struct {
     }
 };
 
-fn staleProgress(ptr: *anyopaque, stream: *lanes.Stream) !bool {
+fn staleProgress(ptr: *anyopaque, stream: *lanes.Stream, max_rows: u32) !bool {
     const target: *lanes.fake.Fake = @ptrCast(@alignCast(ptr));
     const before = stream.fill_at.load(.monotonic);
-    const done = try target.stepped().vtable.prefill_step.?(ptr, stream);
+    const done = try target.stepped().vtable.prefill_step.?(ptr, stream, max_rows);
     stream.fill_at.store(before, .monotonic);
     return done;
 }

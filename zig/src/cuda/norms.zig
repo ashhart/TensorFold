@@ -17,6 +17,28 @@ const threads = 1024;
 /// norms.cu's 16-byte forms: VNT threads, VEC_MOST loads of 8 a thread.
 const vec_threads = 256;
 const vec_most = 4;
+/// norms_strided.cuh's rows: the MoE form's widest row and slots, and the parts' widest by form.
+const strided_most = 4096;
+const strided_slots = 8;
+/// rms_tiles.cuh's shape: Flash Next's MTP row of four 2,560-value streams, sums of 32, 256 threads a tile.
+pub const tiles_width = 10240;
+const tiles_group = 32;
+const tiles_threads = 256;
+
+/// rms_tiles.cuh's tiles a row on an SM at a row count (measured at rows 1, 4, 16); null keeps tf_rms_rows_sums.
+pub fn sumsTiles(sm: u32, rows: usize) ?u32 {
+    if (rows == 0 or rows > 16) return null;
+    return switch (sm) {
+        120 => if (rows == 1) 40 else 10,
+        121 => if (rows <= 4) 10 else 1,
+        else => null,
+    };
+}
+
+/// The parts' widest row: 128 threads of 8 (MLX's steps), 256 of 16 (rounded once); the threads are part of the order.
+pub fn partsMost(round: bool) usize {
+    return if (round) 128 * 8 else 256 * 16;
+}
 
 /// The 16-byte forms take a bf16 row by its width alone: a multiple of 8 within VEC_MOST * 8 * VNT.
 fn vectorWidth(width: usize) bool {
@@ -51,11 +73,16 @@ pub const Norms = struct {
     add_rms_bf16_fn: Function,
     add_rms_h_fn: Function,
     add_rms_h_f32w_fn: Function,
+    moe_add_rms_h_fn: Function, // the expert slots' sum added to the residual, then the strided norm
     gated_fns: [3]Function, // head dim 64, 128, 256
     rms_sums_fn: Function,
+    rms_sums_tiles_fn: Function,
+    /// The current context's device's compute capability (10 * major + minor): it picks sumsTiles' row.
+    sm: u32,
     tail_fns: [2]Function, // each norm rounded once, MLX's bf16 steps
     l2_fn: Function,
     slerp_fn: Function,
+    parts_fns: [2]Function, // the strided norm on parts of rows: rounded once, MLX's bf16 steps
 
     pub fn load(d: *const Driver) !Norms {
         if (!kernels.available) return error.BuiltWithoutKernels;
@@ -69,11 +96,15 @@ pub const Norms = struct {
             .add_rms_bf16_fn = try mod.function("tf_add_rms_rows_bf16"),
             .add_rms_h_fn = try mod.function("tf_add_rms_rows_bf16h"),
             .add_rms_h_f32w_fn = try mod.function("tf_add_rms_rows_bf16h_f32w"),
+            .moe_add_rms_h_fn = try mod.function("tf_moe_add_rms_rows_bf16h"),
             .gated_fns = .{ try mod.function("tf_gated_rms_rows_64"), try mod.function("tf_gated_rms_rows_128"), try mod.function("tf_gated_rms_rows_256") },
             .rms_sums_fn = try mod.function("tf_rms_rows_sums"),
+            .rms_sums_tiles_fn = try mod.function("tf_rms_rows_sums_tiles"),
+            .sm = try d.currentCapability(),
             .tail_fns = .{ try mod.function("tf_add_rms_rows_bf16h_tail"), try mod.function("tf_add_rms_rows_bf16h_tail_round") },
             .l2_fn = try mod.function("tf_l2_rows"),
             .slerp_fn = try mod.function("tf_slerp_rows"),
+            .parts_fns = .{ try mod.function("tf_rms_rows_bf16h_parts"), try mod.function("tf_rms_rows_bf16h_parts_round") },
         };
     }
 
@@ -109,6 +140,9 @@ pub const Norms = struct {
     pub fn rmsSums(n: *const Norms, s: Stream, x: u64, x_ld: usize, w: u64, y: u64, xs: u64, rows: usize, width: usize, group: usize, eps: f32) !void {
         if (group == 0 or width % group != 0 or x_ld < width) return error.RowShape;
         if (rows == 0) return;
+        if (width == tiles_width and group == tiles_group) {
+            if (sumsTiles(n.sm, rows)) |t| return n.rmsSumsTiles(s, x, x_ld, w, y, xs, rows, t, eps);
+        }
         var a: launch_.Args = .{};
         a.add(x);
         a.add(@as(i64, @intCast(x_ld)));
@@ -117,6 +151,19 @@ pub const Norms = struct {
         a.add(@as(i32, @intCast(group)));
         a.add(eps);
         try launch_.launch(n.rms_sums_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = threads } }, s, &a);
+    }
+
+    /// rmsSums at rms_tiles.cuh's shape over `tiles` blocks a row (1, 10 or 40): tf_rms_rows_sums' bytes.
+    pub fn rmsSumsTiles(n: *const Norms, s: Stream, x: u64, x_ld: usize, w: u64, y: u64, xs: u64, rows: usize, tiles: u32, eps: f32) !void {
+        if ((tiles != 1 and tiles != 10 and tiles != 40) or x_ld < tiles_width) return error.RowShape;
+        if (rows == 0) return;
+        var a: launch_.Args = .{};
+        a.add(x);
+        a.add(@as(i64, @intCast(x_ld)));
+        for ([_]u64{ w, y, xs }) |v| a.add(v);
+        a.add(@as(i32, @intCast(tiles)));
+        a.add(eps);
+        try launch_.launch(n.rms_sums_tiles_fn, .{ .grid = .{ .x = tiles, .y = @intCast(rows), .z = 1 }, .block = .{ .x = tiles_threads } }, s, &a);
     }
 
     /// The residual step: res (fp32, in place) += rms(x) * w1 (w1 null: res += x), then y = rms(res) * w2.
@@ -159,6 +206,21 @@ pub const Norms = struct {
         try launch_.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = vec_threads } }, s, &a);
     }
 
+    /// h = bf16(x + bf16(the `routed` slots' fma chain by wt + the rest's sum)), y = rms(h) w, xs: moe_row's order.
+    pub fn moeAddRmsH(n: *const Norms, s: Stream, x: u64, ys: u64, ys_kind: Kind, wt: u64, routed: usize, slots: usize, w: u64, h: u64, y: u64, xs: u64, rows: usize, width: usize, eps: f32) !void {
+        if (width % 64 != 0 or width > strided_most or ys_kind == .f16) return error.RowShape;
+        if (slots > strided_slots or routed > slots) return error.TooManySlots;
+        if (rows == 0) return;
+        var a: launch_.Args = .{};
+        a.add(x);
+        a.add(ys);
+        a.add(@as(i32, @intFromBool(ys_kind == .f32)));
+        for ([_]u64{ wt, w, h, y, xs }) |v| a.add(v);
+        a.add(eps);
+        for ([_]usize{ width, routed, slots }) |v| a.add(@as(i32, @intCast(v)));
+        try launch_.launch(n.moe_add_rms_h_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = threads } }, s, &a);
+    }
+
     /// addRmsH with bf16 weights and a tail's options; with none set it is addRmsH itself, the same kernel and bits.
     pub fn addRmsTail(n: *const Norms, s: Stream, x: u64, r: ?u64, w: u64, h: u64, y: u64, xs: ?u64, rows: usize, width: usize, eps: f32, t: Tail) !void {
         if (!t.round and t.branch == null and t.scalar == null) return n.addRmsH(s, x, r, w, .bf16, h, y, xs, rows, width, eps);
@@ -170,6 +232,25 @@ pub const Norms = struct {
         a.add(eps);
         const f = n.tail_fns[@intFromBool(t.round)];
         try launch_.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = vec_threads } }, s, &a);
+    }
+
+    /// The strided norm of part p of row i at x + i x_ld + p x_part (signed parts; MLX's bf16 steps with `round`).
+    pub fn rmsParts(n: *const Norms, s: Stream, x: u64, x_ld: usize, x_part: isize, w: u64, w_part: isize, y: u64, y_ld: usize, y_part: usize, xs: ?u64, rows: usize, parts: usize, width: usize, eps: f32, round: bool) !void {
+        if (width % 64 != 0 or width > partsMost(round) or (xs != null and (y_ld | y_part) % 64 != 0)) return error.RowShape;
+        if (rows == 0 or parts == 0) return;
+        var a: launch_.Args = .{};
+        a.add(x);
+        a.add(@as(i64, @intCast(x_ld)));
+        a.add(@as(i64, x_part));
+        a.add(w);
+        a.add(@as(i64, w_part));
+        a.add(y);
+        for ([_]usize{ y_ld, y_part }) |v| a.add(@as(i64, @intCast(v)));
+        a.add(xs orelse 0);
+        a.add(@as(i32, @intCast(width)));
+        a.add(eps);
+        const block: u32 = if (round) 128 else 256;
+        try launch_.launch(n.parts_fns[@intFromBool(round)], .{ .grid = .{ .x = @intCast(rows), .y = @intCast(parts), .z = 1 }, .block = .{ .x = block } }, s, &a);
     }
 
     /// nGPT rows: y = bf16(s / sqrt(sum(s^2) + eps)), s = x, or bf16(x + r) with r; width % 64, at most 8,192.

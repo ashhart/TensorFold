@@ -188,6 +188,7 @@ fn join(
 
 /// The family's refusal of --slide or --mtp-confidence, when it names one.
 fn flagRefused(comptime F: type, o: api.Open) ?[]const u8 {
+    if (o.rope_yarn != null) return "--rope-yarn: the native HIP engine has no YaRN rope; serve without --rope-yarn, or on CUDA";
     if (o.slide and @hasDecl(F, "slide_refusal")) return F.slide_refusal;
     if (o.mtp_confidence != null and @hasDecl(F, "confidence_refusal")) return F.confidence_refusal;
     return null;
@@ -227,6 +228,10 @@ fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const report = @import("sys").optional_libraries.atBoundary();
     defer report.deinit();
+    if (try o.slideRefusal(a, "HIP")) |why| {
+        problem.* = why;
+        return null;
+    }
     if (o.fsrRefusal("hip")) |why| {
         problem.* = why;
         return null;
@@ -266,7 +271,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     h.clock = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.cfg, loaded.backend, h.clock.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = @intCast(loaded.streams), .context_window = @intCast(r.options.window), .prefill_step = F.prefill_step, .policy = h.policy_line, .startup = loaded.startup, .structures = true });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = @intCast(loaded.streams), .context_window = @intCast(r.options.window), .prefill_step = F.prefill_step, .decode_share = o.decode_share, .policy = h.policy_line, .startup = loaded.startup, .structures = true });
     h.host.memory = .{ .read = readMemory };
     try h.host.start();
     served = true;
@@ -277,6 +282,10 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
 pub fn follow(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !bool {
     const report = @import("sys").optional_libraries.atBoundary();
     defer report.deinit();
+    if (try o.slideRefusal(a, "HIP")) |why| {
+        problem.* = why;
+        return false;
+    }
     inline for (registry) |F| {
         if (std.mem.eql(u8, o.model_type, F.model_type)) {
             if (flagRefused(F, o)) |why| {
@@ -397,4 +406,19 @@ test "matrix=on runs only where the matrix-core tiles exist; auto runs everywher
 
 test {
     _ = @import("draft_sources_hip_test.zig");
+}
+
+test "slide admission: hip refuses before checkpoint or device access" {
+    try @import("slide_open_test.zig").check(open, "HIP", &.{ "qwen3_5", "qwen3_5_moe", "qwen4_exp", "nemotron_h" });
+}
+
+test "slide admission: HIP followers refuse before joining ranks" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (families) |f| {
+        var why: []const u8 = "";
+        try std.testing.expect(!try follow(a, std.testing.allocator, std.testing.io, .{ .dir = "missing-slide-checkpoint", .model_type = f.model_type, .slide = true, .tp = 2, .rank = 1 }, &why));
+        try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "--slide: {s} checkpoints do not learn on HIP yet", .{f.model_type}), why);
+    }
 }

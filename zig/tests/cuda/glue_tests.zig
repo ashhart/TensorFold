@@ -109,6 +109,30 @@ fn route(r: *Rig) !void {
     try routeShape(r, D, E, top_k, NS);
     try routeShape(r, 4096, 496, 9, 9);
     for ([_]usize{ 32, 33, 300, 4100 }) |rows| try superLogits(r, rows); // 32 rows keep tf_nemo_router
+    try routeUnderflow(r);
+}
+
+/// Every sigmoid underflows in fp32 (two slices of -50): the sum's + 1e-20 keeps the weights 0, not 0 / 0 = NaN.
+fn routeUnderflow(r: *Rig) !void {
+    const rows = 3;
+    const part = try r.a.alloc(f32, 2 * rows * E);
+    @memset(part, -50);
+    const bias = try r.f32s(E, -0.05, 0.05);
+    const idx = try r.a.alloc(i32, rows * NS);
+    const wt = try r.a.alloc(f32, rows * NS);
+    ref.topk(part, bias, idx, wt, rows, 2.5, E, 2, top_k, NS, true);
+    const idxd = try r.zeros(i32, rows * NS);
+    const wtd = try r.zeros(f32, rows * NS);
+    const route_: cuda.moe_glue.Route = .{ .experts = E, .topk = top_k, .shared = true, .shared_slots = NS - top_k, .normalize = true, .scale = 2.5, .score = true, .slices = 2 };
+    try r.moe.topk(r.s, try r.dev(f32, part), try r.dev(f32, bias), route_, idxd, wtd, rows);
+    try r.same("underflowed top-k ids", i32, idxd, idx);
+    try r.same("underflowed top-k weights", f32, wtd, wt);
+    r.cases += 1;
+    for (try r.get(f32, wtd, rows * NS), 0..) |w, i| if (w != @as(f32, if (i % NS < top_k) 0 else 1)) {
+        r.bad += 1;
+        std.debug.print("DIFFER underflowed top-k weights: element {d} is {d}, want {d}\n", .{ i, w, @as(f32, if (i % NS < top_k) 0 else 1) });
+        break;
+    };
 }
 
 fn routeShape(r: *Rig, d: usize, e: usize, k: usize, ns: usize) !void {
@@ -505,10 +529,10 @@ pub fn run(gpu: Gpu) !void {
     var arena: std.heap.ArenaAllocator = .init(gpu.gpa);
     defer arena.deinit();
     const kk = cuda.kernels;
-    var mods: [5]cuda.Module = undefined;
+    var mods: [4]cuda.Module = undefined;
     var loaded: usize = 0;
     defer for (mods[0..loaded]) |*m| m.unload();
-    for ([_][]const u8{ kk.nemotron_norms, kk.nemotron_route, kk.nemotron_mamba, kk.nemotron_attention, kk.nemotron_keyed }, 0..) |img, i| {
+    for ([_][]const u8{ kk.nemotron_route, kk.nemotron_mamba, kk.nemotron_attention, kk.nemotron_keyed }, 0..) |img, i| {
         mods[i] = try cuda.Module.load(gpu.d, img);
         loaded += 1;
     }
@@ -522,11 +546,13 @@ pub fn run(gpu: Gpu) !void {
         .f = try glue.Fns.resolve(&mods),
         .emb = try cuda.embed_rows.EmbedRows.load(gpu.d),
         .norms = try cuda.norms.Norms.load(gpu.d),
+        .moe = try cuda.moe_glue.MoeGlue.load(gpu.d),
         .rng = prng.random(),
     };
     defer {
         r.emb.unload();
         r.norms.unload();
+        r.moe.unload();
         r.s.deinit();
         for (r.bufs.items) |*b| b.free();
         r.bufs.deinit(gpu.gpa);

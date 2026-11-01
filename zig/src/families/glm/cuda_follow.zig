@@ -19,8 +19,8 @@ pub const Header = extern struct {
     kind: u32,
     n: u32 = 0, // ids that follow
     depth: u32 = 0, // draft: drafts to chain; chunk: where it starts; shared: its parts
-    flags: u32 = 0, // begin: sampled; draft: from the prompt; prefill, chunk: prompt_logprobs (1); chunk: indexer rows split (2); verify, shared: whole rows
-    a: u64 = 0, // keep: rows; prefill, chunk: the kept state it resumes (0: none); redraw: the prompt's length
+    flags: u32 = 0, // begin: sampled; draft: from the prompt (1), chances (2); prefill, chunk: prompt_logprobs (1); chunk: indexer rows split (2); verify, shared: whole rows; snapshots: pages shared
+    a: u64 = 0, // begin: the prompt cache's pages first in its table; keep: rows; prefill, chunk: the kept state it resumes (0: none); redraw: the prompt's length
     seed: u64 = 0, // begin: the sampling seed; prefill, chunk: the kept state's position
     temperature: f64 = 0,
     top_p: f64 = 0,
@@ -172,14 +172,14 @@ pub const Leader = struct {
     }
 
     pub fn begin(x: Leader, s: ?sampler.Sampling) !void {
-        return x.beginOn(s, &.{});
+        return x.beginOn(s, &.{}, 0);
     }
 
-    /// `begin` on a paged sequence: the page ids it maps (rank 0's lease) go with the step, to every rank's table.
-    pub fn beginOn(x: Leader, s: ?sampler.Sampling, pages: []const u32) !void {
+    /// `begin` on a paged sequence: its page ids (rank 0's lease, the cache's `kept` first) go to every rank's table.
+    pub fn beginOn(x: Leader, s: ?sampler.Sampling, pages: []const u32, kept: usize) !void {
         try x.flush();
         const c = sampler.check(s);
-        var h: Header = .{ .kind = @backingInt(Kind.begin) };
+        var h: Header = .{ .kind = @backingInt(Kind.begin), .a = kept };
         if (c) |v| {
             h.flags = 1;
             h.seed = v.seed;
@@ -192,9 +192,9 @@ pub const Leader = struct {
         try x.e.begin(c);
     }
 
-    /// Every rank's prompt cache at rank 0's budget (snapshots.agree): the others make theirs on this step.
+    /// Every rank's prompt cache at rank 0's budget (snapshots.agree), its states past the pool's pages as rank 0's.
     pub fn snapshots(x: Leader, budget: u64) !void {
-        try x.send(.{ .kind = @backingInt(Kind.snapshots), .a = budget }, &.{});
+        try x.send(.{ .kind = @backingInt(Kind.snapshots), .a = budget, .flags = @intFromBool(x.e.share_pages) }, &.{});
         try @import("cuda_snapshots.zig").agree(x.e, budget);
     }
 
@@ -275,10 +275,11 @@ pub const Leader = struct {
         return x.e.redrawFirst(len, bits);
     }
 
-    pub fn draft(x: Leader, from_prompt: bool, follow_ids: []const u32, depth: usize, out: []u32) !void {
+    /// With `chances` every rank picks with its softmax sum, so rank 0 reads each draft's chance (--mtp-confidence).
+    pub fn draft(x: Leader, from_prompt: bool, follow_ids: []const u32, depth: usize, out: []u32, chances: ?[]f64) !void {
         try x.flush();
-        try x.send(.{ .kind = @backingInt(Kind.draft), .depth = @intCast(depth), .flags = @intFromBool(from_prompt) }, follow_ids);
-        try x.e.draft(from_prompt, follow_ids, depth, out);
+        try x.send(.{ .kind = @backingInt(Kind.draft), .depth = @intCast(depth), .flags = @intFromBool(from_prompt) | @as(u32, @intFromBool(chances != null)) << 1 }, follow_ids);
+        try x.e.draft(from_prompt, follow_ids, depth, out, chances);
     }
 
     /// DFlash2's round on every rank (Engine.draftBlock): each stream's slot, kept rows and anchor.
@@ -287,7 +288,7 @@ pub const Leader = struct {
         try x.flush();
         var buf: [3 * dflash.MAX_S]u32 = undefined;
         for (reqs, 0..) |q, i| buf[3 * i ..][0..3].* = .{ q.slot, @intCast(q.n), q.anchor };
-        try x.send(.{ .kind = @backingInt(Kind.block), .depth = @intCast(reqs.len) }, buf[0 .. 3 * reqs.len]);
+        try x.send(.{ .kind = @backingInt(Kind.block), .depth = @intCast(reqs.len), .flags = @import("dflash_proposals.zig").mask(reqs) }, buf[0 .. 3 * reqs.len]);
         try x.e.draftBlock(reqs);
     }
 
@@ -318,6 +319,7 @@ fn structuredStep(h: Header) bool {
 /// A rank other than 0 runs rank 0's steps until it ends; a cancelled prefill is error.Cancelled and the loop goes on.
 pub fn follow(e: *Engine, link: *Link) !void {
     var drafts: [engine.max_drafts]u32 = undefined;
+    var chances: [engine.max_drafts]f64 = undefined;
     var sampled: [16]u32 = undefined;
     cuda.tp_watch.sleep(e.io); // rank 0 starts with no stream: its first step wakes this rank
     while (true) {
@@ -329,7 +331,7 @@ pub fn follow(e: *Engine, link: *Link) !void {
         e.structured = structuredStep(h); // rank 0 alone masks them
         switch (kind) {
             .begin => {
-                if (step.ids.len > 0) try (e.pages orelse return error.BadStep).map(h.slot, step.ids);
+                if (step.ids.len > 0) try (e.pages orelse return error.BadStep).map(h.slot, step.ids, std.math.cast(usize, h.a) orelse return error.BadStep);
                 try e.beginFollowing(if (h.flags & 1 != 0) .{ .seed = h.seed, .temperature = h.temperature, .top_p = h.top_p, .min_p = h.min_p, .top_k = h.top_k } else null);
             },
             .pool => {
@@ -383,13 +385,13 @@ pub fn follow(e: *Engine, link: *Link) !void {
             .draft => {
                 const ids = try e.gpa.dupe(u32, step.ids);
                 defer e.gpa.free(ids);
-                try e.draft(h.flags & 1 != 0, ids, h.depth, &drafts);
+                try e.draft(h.flags & 1 != 0, ids, h.depth, &drafts, if (h.flags & 2 != 0) &chances else null);
             },
             .block => {
                 const k = h.depth;
                 if (k == 0 or k > dflash.MAX_S or step.ids.len != 3 * k) return error.BadStep;
                 var reqs: [dflash.MAX_S]dflash.Req = undefined;
-                for (reqs[0..k], 0..) |*q, i| q.* = .{ .slot = step.ids[3 * i], .pos = 0, .n = step.ids[3 * i + 1], .anchor = step.ids[3 * i + 2] };
+                for (reqs[0..k], 0..) |*q, i| q.* = .{ .slot = step.ids[3 * i], .pos = 0, .n = step.ids[3 * i + 1], .anchor = step.ids[3 * i + 2], .propose = @import("dflash_proposals.zig").enabled(h.flags, i) };
                 try e.draftBlock(reqs[0..k]);
             },
             .image => {
@@ -397,7 +399,10 @@ pub fn follow(e: *Engine, link: *Link) !void {
                 try v.take(h.slot, step.ids);
                 try link.rows(v.rows.ptr, v.rowCount() * vcfg.out_hidden * 2);
             },
-            .snapshots => try @import("cuda_snapshots.zig").agree(e, h.a),
+            .snapshots => {
+                e.share_pages = h.flags & 1 != 0; // TF_GLM_KV_SHARE on rank 0: a kept state leaves the prompt cache's pages out
+                try @import("cuda_snapshots.zig").agree(e, h.a);
+            },
             .drop => for (step.ids) |id| e.dropState(id),
             .release => e.release(h.slot),
             .idle => cuda.tp_watch.sleep(e.io),

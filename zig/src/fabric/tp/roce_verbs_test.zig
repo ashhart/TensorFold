@@ -1,6 +1,7 @@
 //! The RoCE verbs wire's pairing of HCAs across ranks, on records alone.
 const std = @import("std");
 const rv = @import("roce_multi_verbs.zig");
+const pair = @import("roce_multi_pairs.zig");
 const Record = rv.Record;
 const VerbsWire = rv.VerbsWire;
 const max_peers = rv.max_peers;
@@ -25,33 +26,35 @@ test "four ranks: HCA h of every rank pairs by subnet, whatever order each node 
     for (0..4) |i| for (0..4) |p| {
         if (i == p) continue;
         const pairs = try VerbsWire.pairBoth(recs[i], recs[p]);
+        try std.testing.expectEqual(@as(u32, 2), pairs.n);
         for (0..2) |h| {
-            const j = pairs[h];
+            const j = pairs.theirs[h];
             // the same subnet at both ends, and the queue pair at the far end is rank p's HCA j's towards rank i
             try std.testing.expectEqualSlices(u8, recs[i].gid[h][12..15], recs[p].gid[j][12..15]);
             try std.testing.expectEqual(@as(u32, @intCast(1000 * (p + 1) + 10 * j + i)), recs[p].qpn[j][i]);
         }
         // the far end pairs back the same way (both ends compute it alone)
         const back = try VerbsWire.pairBoth(recs[p], recs[i]);
-        for (0..2) |h| try std.testing.expectEqual(@as(u32, @intCast(h)), back[pairs[h]]);
+        for (0..2) |h| try std.testing.expectEqual(@as(u32, @intCast(h)), back.theirs[pairs.theirs[h]]);
     };
     // the records all-gather through the bootstrap: sixteen of them fit one blob table
     try std.testing.expect(@sizeOf(Record) * max_peers <= 64 * 1024);
 }
 
-test "a pairing that is not one-to-one is refused at both ends (the stripes would cross)" {
+test "a pairing that is not one-to-one leaves an HCA idle at each end, and each end refuses it" {
     var a: Record = .{ .n_hca = 2, .slot_bytes = 1 << 16, .region_len = 1 << 20 };
     var b: Record = .{ .n_hca = 2, .slot_bytes = 1 << 16, .region_len = 1 << 20 };
-    // a's two functions on one subnet, b's on two: both of a's would write b's HCA on that subnet
+    // a's two functions on one subnet, b's on two: one link between them, a's second and b's first reach nobody
     a.gid = .{ testGid(0, 10), testGid(0, 20) };
     b.gid = .{ testGid(1, 11), testGid(0, 11) };
-    try std.testing.expectError(error.BadRecord, VerbsWire.pairBoth(a, b));
-    try std.testing.expectError(error.BadRecord, VerbsWire.pairBoth(b, a));
+    const ab = try VerbsWire.pairBoth(a, b);
+    try std.testing.expectEqual(pair.Pairs{ .n = 1, .mine = .{ 0, 0 }, .theirs = .{ 1, 0 } }, ab);
+    try std.testing.expectError(error.BadRecord, pair.plan(&.{ .{}, ab }, 0, 2));
+    try std.testing.expectError(error.BadRecord, pair.plan(&.{ try VerbsWire.pairBoth(b, a), .{} }, 1, 2));
     // one subnet for every function on both: the listed order, as before
     b.gid = .{ testGid(0, 11), testGid(0, 21) };
     const p = try VerbsWire.pairBoth(a, b);
-    try std.testing.expectEqual(@as(u32, 0), p[0]);
-    try std.testing.expectEqual(@as(u32, 1), p[1]);
+    try std.testing.expectEqual([2]u32{ 0, 1 }, p.theirs);
     // a record of another build
     b.magic +%= 1;
     try std.testing.expectError(error.BadRecord, VerbsWire.pairBoth(a, b));

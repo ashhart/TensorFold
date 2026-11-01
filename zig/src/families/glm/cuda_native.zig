@@ -14,6 +14,7 @@ const shard = @import("cuda_shard.zig");
 const dflash = @import("dflash.zig");
 const dflash_load = @import("dflash_load.zig");
 const pages_mod = @import("cuda_pages.zig");
+const prefix_mod = @import("cuda_prefix.zig");
 const kv = @import("core").kv_pool;
 
 pub const model_type = "glm5_next";
@@ -40,6 +41,7 @@ pub const Options = struct {
     vision: ?images_mod.Limits = null, // --vision: rank 0's tower, every rank's image rows
     drafter: ?[]const u8 = null, // --drafter: DFlash2's folder (the same on every rank; needs drafts on)
     drafter_bits: u8 = 4, // --drafter-bits: 4 (default) or 0 (bf16)
+    mtp_confidence: ?f64 = null, // --mtp-confidence: rank 0's lanes stop an MTP chain where its chance falls under it
 };
 /// --drafter: DFlash2 (incoai/GLM-5.3-Flash-DFlash2, non-commercial weights) drafts instead of the MTP head.
 pub const takes_drafter = true;
@@ -64,6 +66,8 @@ pub const Loaded = struct {
     vision: ?*images_mod.Images = null, // rank 0's tower for the server's image offer
     layout: ?kv.Layout = null, // every stream's memory as one pool of KV pages (null: a window each, by TF_KV_PAGES)
     engine_paged: bool = false, // with a layout, the engine's own sequence takes pages too: the plan sets a window aside
+    host_snaps: bool = false, // TF_GLM_HOST_CACHE: kept states in pinned host memory, --prompt-cache-gib of it
+    own_prompt_cache: bool = false, // TF_GLM_KV_SHARE: the family keeps prompts over the pool's pages, no host store
 };
 
 /// The pool behind every stream: the engine's own sequence and `streams` more on `pages` KV pages, on every rank.
@@ -72,12 +76,34 @@ pub fn attach(p: *anyopaque, streams: u32, pages: usize) !void {
     const l = own.layout orelse return error.NoPages;
     try own.lanes.x.pool(streams + 1, pages, l.pageBytes());
     own.e.pages = try pages_mod.Pages.init(own.gpa, own.e, l, streams + 1, pages, true);
+    if (own.share > 0) try share(own, streams + 1);
+}
+
+/// TF_GLM_KV_SHARE: the pool's prompt cache, its `own.share` snapshots sized at the window's last mark (rings whole).
+fn share(own: *Owned, parallel: u32) !void {
+    const e = own.e;
+    e.share_pages = true;
+    // cc-defer: the snapshots take the room set aside for --prompt-cache-gib; from the plan once it plans them
+    try readySnapshots(own, own.share * e.stateBytes(e.capacity - e.capacity % snap_grid));
+    own.lanes.prefix = try prefix_mod.Prefix.init(e.gpa, e, e.pages.?, snap_grid, own.share);
+    if (prefix_mod.fewStates(own.share, parallel)) std.log.warn(
+        "TF_GLM_KV_SHARE={d} keeps under 4 states a stream at --parallel {d}: live streams evict each other's before a resume; set it to {d} or more",
+        .{ own.share, parallel, 4 * parallel },
+    );
 }
 
 /// Whether a request's caches fit now (the lane host's admission, on its engine thread).
 pub fn fits(p: *anyopaque, prompt: u32, max_tokens: u32) bool {
     const own: *Owned = @ptrCast(@alignCast(p));
     return own.lanes.fits(prompt, max_tokens);
+}
+
+/// The page pool the load ledger watches: rank 0's, the one that takes and gives pages for every rank.
+pub fn kvPool(p: *anyopaque) ?kv.Source {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    const pages = own.e.pages orelse return null; // a window a stream
+    if (!pages.leader) return null;
+    return .{ .pool = &pages.pool, .page_tokens = @import("cuda_state.zig").page_rows };
 }
 
 /// This rank's place: TF_GLM_RANK of TF_GLM_WORLD (both, or neither for a refusal that names them).
@@ -124,6 +150,7 @@ const Owned = struct {
     link: follow.Link,
     lanes: glm_lanes.Lanes,
     layout: ?kv.Layout,
+    share: usize, // TF_GLM_KV_SHARE: states the prompt cache over the pool's pages keeps (0: the host store)
 };
 
 const env = @import("sys").env;
@@ -170,7 +197,8 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         return err;
     };
     set.kv8 = o.kv8;
-    return startup.open(io, p, if (std.c.getenv("TF_KV_PAGES")) |v| std.mem.span(v) else null, set, cuda.tp_watch, StartArgs{ .gpa = gpa, .io = io, .ctx = ctx, .dir = dir, .o = o, .p = p, .roce_bytes = roce_bytes }, openRank);
+    const share_snaps = try prefix_mod.sharing();
+    return startup.open(io, p, if (std.c.getenv("TF_KV_PAGES")) |v| std.mem.span(v) else null, set, cuda.tp_watch, StartArgs{ .gpa = gpa, .io = io, .ctx = ctx, .dir = dir, .o = o, .p = p, .roce_bytes = roce_bytes, .share = share_snaps }, openRank);
 }
 
 const StartArgs = struct {
@@ -181,6 +209,7 @@ const StartArgs = struct {
     o: Options,
     p: Place,
     roce_bytes: usize,
+    share: usize,
 };
 
 /// After liveness and page settings: NCCL, the engine and the link, then a follower's loop or rank zero's lanes.
@@ -192,10 +221,13 @@ fn openRank(a: StartArgs, set: ranks.Settings) !Loaded {
     const o = a.o;
     const p = a.p;
     const roce_bytes = a.roce_bytes;
+    // TF_GLM_KV_SHARE keeps prompts as the pool's pages: refused before the weights load, every rank told (startup)
+    if (a.share > 0 and !set.pages) return error.GlmShareNeedsPages;
     cuda.memory_receipt.emit(@intCast(p.rank), .load_begin, true); // the four phases tools/memory_receipts.py reads
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
     own.gpa = gpa;
+    own.share = a.share;
     // every connection registered at init, while memory is free (lazily, a full GB10's ibv_reg_mr can refuse it)
     if (std.c.getenv("NCCL_RUNTIME_CONNECT") == null) _ = env.setenv("NCCL_RUNTIME_CONNECT", "0", 0);
     // NCCL's cuMem host buffers wore out GB10's driver pool under load (NV_ERR_NO_MEMORY; next ranks failed to start)
@@ -266,6 +298,8 @@ fn finishRank(a: OpenArgs) !Loaded {
     }
     try own.group.openRoce(gpa, io, ctx.d, own.e.stream, roce_bytes); // both ranks bring it up or neither does
     errdefer if (own.group.fast) |f| f.deinit();
+    try @import("cuda_roce_multi.zig").open(gpa, io, ctx.d, &own.group, set.roce_multi); // three ranks or more, likewise
+    errdefer if (own.group.multi) |m| m.deinit(m.ctx);
     own.e.group = &own.group;
     own.link = try follow.Link.init(gpa, ctx.d, &own.group.lib, own.group.comm, own.e.stream, try linkCapacity(cap, o.vision));
     errdefer own.link.deinit();
@@ -302,7 +336,7 @@ fn finishRank(a: OpenArgs) !Loaded {
         }
     }.get;
     own.link.asleep = cuda.tp_watch.open(); // the other ranks begin asleep (follow): the first step wakes them
-    own.lanes = .{ .x = .{ .e = own.e, .link = &own.link }, .whole = off("TF_GLM_PROMPT_STEPS"), .alone = off("TF_GLM_SHARED") };
+    own.lanes = .{ .x = .{ .e = own.e, .link = &own.link }, .whole = off("TF_GLM_PROMPT_STEPS"), .alone = off("TF_GLM_SHARED"), .mtp_confidence = o.mtp_confidence };
     const extra: u64 = (if (o.drafter != null) dflash.ring_bytes else 0) + if (own.e.images) |v| v.streamBytes() else @as(usize, 0);
     own.layout = if (set.pages) try pages_mod.layout(gpa, own.e, extra) else null;
     return .{
@@ -319,6 +353,8 @@ fn finishRank(a: OpenArgs) !Loaded {
         .vision = own.e.images,
         .layout = own.layout,
         .engine_paged = set.pages,
+        .host_snaps = snapshots.pages.onHost(),
+        .own_prompt_cache = own.share > 0,
     };
 }
 
@@ -417,6 +453,8 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.NoCommId => "GLM-5.3-Flash's ranks meet over NCCL: with TF_GLM_WORLD 2 or more, set NCCL_COMM_ID to rank 0's address:port on every host",
         error.RankMismatch => "the ranks' settings differ (each rank's log names the one): start them alike",
         error.Fp8OnPages => "--kv-cache fp8 keeps a window per stream: unset TF_KV_PAGES, or set it to auto or off",
+        error.BadGlmKvShare => "TF_GLM_KV_SHARE: give how many states the prompt cache over the KV pages keeps, or 0 or unset for off",
+        error.GlmShareNeedsPages => "TF_GLM_KV_SHARE keeps prompts as KV pool pages: set TF_KV_PAGES=on as well",
         error.TooManyRanks => std.fmt.comptimePrint(
             "GLM-5.3-Flash on CUDA runs on at most {d} ranks: set TF_GLM_WORLD to {d} or fewer",
             .{ ranks.max_world, ranks.max_world },

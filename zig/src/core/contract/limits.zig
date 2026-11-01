@@ -26,6 +26,8 @@ pub const MetalLaunch = struct {
     adapts: bool = false,
     /// False for Metal 4 tensor-op kernels: Xcode's translator cannot build them for M1/M2 ahead of time.
     offline: bool = true,
+    /// air-tt refuses this pipeline for M1/M2 (Nemotron's attention partials): unmeasured there, not shown to fit.
+    unbuildable: bool = false,
 };
 
 /// An NVIDIA target we build for: its per-block and per-SM limits (CUDA's compute capability tables).
@@ -73,7 +75,7 @@ pub fn metal(l: MetalLaunch, f: Apple, out: *std.ArrayList(u8), a: std.mem.Alloc
     if (l.threads > f.threads) n += try note(out, a, "{s} on {s}: {d} threads a group, the family's most is {d}", .{ l.name, f.name, l.threads, f.threads });
     const tg = l.tg_memory + l.dynamic;
     if (tg > f.tg_memory) n += try note(out, a, "{s} on {s}: {d} threadgroup bytes, the family's most is {d}", .{ l.name, f.name, tg, f.tg_memory });
-    if (f.by_registers and l.reserved < l.threads and !l.adapts) {
+    if (f.by_registers and l.reserved < l.threads and !l.adapts and !l.unbuildable) {
         const lim = if (f.gen == 13) l.m1 else l.m2;
         if (!l.offline and l.threads > 256) n += try note(out, a, "{s} on {s}: {d} threads past 256 and no M1/M2 compile to show they fit (reserve them)", .{ l.name, f.name, l.threads });
         if (l.offline and lim == 0) n += try note(out, a, "{s} on {s}: no compiled thread limit recorded", .{ l.name, f.name });
@@ -260,6 +262,11 @@ test "a launch inside every family passes; each planted excess is named" {
     var wide_op = tensor_op;
     wide_op.threads = 512;
     try std.testing.expectEqual(@as(usize, 1), try metal(wide_op, apple[0], &out, a));
+    var wide_unmeasured = wide_op;
+    wide_unmeasured.unbuildable = true; // air-tt refuses it: unmeasured on M1/M2, not shown to fit
+    for (apple[0..2]) |f| try std.testing.expectEqual(@as(usize, 0), try metal(wide_unmeasured, f, &out, a));
+    wide_unmeasured.threads = 2048; // still held to the family's absolute limit
+    try std.testing.expectEqual(@as(usize, 1), try metal(wide_unmeasured, apple[0], &out, a));
 }
 
 /// The table's row for `sm` (a target the records cover).
@@ -314,4 +321,37 @@ test "HIP: bounds, wave size, VGPRs a SIMD and LDS per chip" {
     big.dynamic = 32 * 1024;
     try std.testing.expectEqual(@as(usize, 1), try hip(big, .{ .vgprs = 32, .lds = 40 * 1024 }, rdna[0], &out, a));
     try std.testing.expectEqual(@as(usize, 0), try hip(big, .{ .vgprs = 32, .lds = 32 * 1024 }, rdna[0], &out, a));
+}
+/// A Vulkan entry point as dispatched, with its workgroup geometry and shared-memory use.
+pub const VulkanLaunch = struct {
+    name: []const u8,
+    local_size: [3]u32,
+    shared_bytes: u32 = 0,
+};
+
+/// Measured per-chip physical-device limits. Null means the fleet has not measured this value.
+pub const VulkanDeviceLimits = struct {
+    chip: []const u8,
+    max_compute_work_group_invocations: ?u32 = null,
+    max_compute_work_group_size: ?[3]u32 = null,
+    max_compute_shared_memory_size: ?u32 = null,
+    max_storage_buffer_range: ?u32 = null,
+    min_storage_buffer_offset_alignment: ?u32 = null,
+    subgroup_size: ?u32 = null,
+};
+
+/// Refuses incomplete measurements instead of treating missing values as permissive defaults.
+pub fn vulkanFits(launch: VulkanLaunch, device: VulkanDeviceLimits) error{Unmeasured}!bool {
+    const invocations = device.max_compute_work_group_invocations orelse return error.Unmeasured;
+    const sizes = device.max_compute_work_group_size orelse return error.Unmeasured;
+    const shared = device.max_compute_shared_memory_size orelse return error.Unmeasured;
+    _ = device.max_storage_buffer_range orelse return error.Unmeasured;
+    _ = device.min_storage_buffer_offset_alignment orelse return error.Unmeasured;
+    _ = device.subgroup_size orelse return error.Unmeasured;
+    var total: u64 = 1;
+    for (launch.local_size, sizes) |asked, most| {
+        if (asked == 0 or asked > most) return false;
+        total *= asked;
+    }
+    return total <= invocations and launch.shared_bytes <= shared;
 }

@@ -3,7 +3,7 @@ const std = @import("std");
 const auth = @import("auth.zig");
 fn open(raw: []const u8, metrics: bool) bool {
     const path = auth.routePath(raw);
-    return path.len == 0 or std.mem.eql(u8, path, "/health") or std.mem.eql(u8, path, "/slide") or staticAsset(path) or (metrics and (std.mem.eql(u8, path, "/metrics") or std.mem.eql(u8, path, "/v1/metrics")));
+    return path.len == 0 or std.mem.eql(u8, path, "/health") or std.mem.eql(u8, path, "/slide") or staticAsset(path) or (metrics and (std.mem.eql(u8, path, "/metrics") or std.mem.eql(u8, path, "/v1/metrics") or std.mem.eql(u8, path, "/v1/load")));
 }
 test "auth route policy covers every dispatcher path and future private routes" {
     var walked: usize = 0;
@@ -29,6 +29,8 @@ test "auth route policy covers every dispatcher path and future private routes" 
     for ([_][]const u8{ "", "/", "/health/", "/slide", "/slide/data.js" }) |path| try std.testing.expect(!auth.gated(path, false));
     try std.testing.expect(auth.gated("/metrics", false));
     try std.testing.expect(!auth.gated("/v1/metrics/?x=1", true));
+    try std.testing.expect(auth.gated("/v1/load", false)); // the load snapshot follows the metrics rule
+    try std.testing.expect(!auth.gated("/v1/load/", true));
 }
 
 test "only fixed static GET assets and GET health or opened metrics are public" {

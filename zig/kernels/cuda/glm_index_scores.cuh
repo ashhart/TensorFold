@@ -4,6 +4,7 @@
 #include <cuda_bf16.h>
 #include <math.h>
 #include <stdint.h>
+#include "common/cp_async.cuh"
 
 namespace glm_index {
 
@@ -14,8 +15,8 @@ __device__ __forceinline__ void cp16(void* dst, const void* src, bool ok) {
   const unsigned d = static_cast<unsigned>(__cvta_generic_to_shared(dst));
   asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(d), "l"(src), "r"(ok ? 16 : 0));
 }
-__device__ __forceinline__ void cp_commit() { asm volatile("cp.async.commit_group;\n" ::); }
-__device__ __forceinline__ void cp_wait() { asm volatile("cp.async.wait_group 0;\n" ::); }
+using tf_common::cp_commit;
+using tf_common::cp_wait;
 
 __device__ __forceinline__ void ldm4(uint32_t* r, const void* p) {
   const unsigned a = static_cast<unsigned>(__cvta_generic_to_shared(p));
@@ -91,7 +92,7 @@ extern "C" __global__ void __launch_bounds__(glm_index::RB * 32)
   for (int j = 0; j < loop; ++j) {
     const int64_t pb = first + j, p0 = pb * BP;
     if (pb >= nb) break;
-    cp_wait();
+    cp_wait<0>();
     __syncthreads();  // tile j is in, and every warp is done with tile j - 1
     if (any(j + 1)) stage((j + 1) & 1, pb + 1);
     cp_commit();

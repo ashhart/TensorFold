@@ -3,6 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const st = @import("state.zig");
 const fwd = @import("forward.zig");
+const kvp = @import("kv_pages.zig");
 
 const Buffer = mtl.Buffer;
 const Enc = fwd.Enc;
@@ -45,26 +46,26 @@ pub fn attention(f: Forward, e: *Enc, kv: st.Kv, len: usize, rows: usize, deepes
         const tiles: usize = @min(rows, 16);
         e.pipe(partial);
         e.buf(s.qp, 0, 0);
-        e.buf(kv.k, 0, 1);
+        kvp.bindKv(e, kv, 1, 3);
         e.bytes(strides, 2);
-        e.buf(kv.v, 0, 3);
         e.bytes(strides, 4);
         e.bytes(scale, 5);
         e.bytes([5]i32{ @intCast(pt), @intCast(nca), @intCast(rows), 0, @intCast(g * rows / 16) }, 6);
         e.buf(s.po, 0, 7);
         e.buf(s.pm, 0, 8);
         e.buf(s.pl, 0, 9);
+        if (kv.paged) |pg| kvp.bindTable(e, pg, 10);
         e.run(.{ c.kv_heads * 32 * tiles, nca, (rows + tiles - 1) / tiles }, .{ 32 * tiles, 1, 1 });
     }
     const dims = [5]i32{ @intCast(len), @intCast(pt), @intCast(nca), @intCast(ncb), @intCast(rows) };
-    e.pipe(f.k.get("tf_tree_tail"));
+    e.pipe(if (kv.paged != null) f.k.paged.?.tail else f.k.get("tf_tree_tail"));
     e.buf(s.qp, 0, 0);
-    e.buf(kv.k, 0, 1);
+    kvp.bindKv(e, kv, 1, 3);
     e.bytes(strides, 2);
-    e.buf(kv.v, 0, 3);
     e.bytes(strides, 4);
     e.bytes(scale, 5);
     e.bytes(dims, 6);
+    if (kv.paged) |pg| kvp.bindTable(e, pg, 15);
     e.buf(s.tpaths, first * max_depth * 4, 7);
     e.buf(s.tdepths, first * 4, 8);
     e.buf(s.po, 0, 9);
@@ -112,24 +113,24 @@ pub fn attentionGpu(f: Forward, e: *Enc, kv: st.Kv, rows: usize, partial: mtl.Pi
     const tiles: usize = @min(rows, 16);
     e.pipe(partial);
     e.buf(s.qp, 0, 0);
-    e.buf(kv.k, 0, 1);
+    kvp.bindKv(e, kv, 1, 3);
     e.bytes(strides, 2);
-    e.buf(kv.v, 0, 3);
     e.bytes(strides, 4);
     e.bytes(scale, 5);
     e.buf(gt.args, gt.tp, 6);
+    if (kv.paged) |pg| kvp.bindTable(e, pg, 10);
     e.buf(s.po, 0, 7);
     e.buf(s.pm, 0, 8);
     e.buf(s.pl, 0, 9);
     e.run(.{ c.kv_heads * 32 * tiles, gt.nca, (rows + tiles - 1) / tiles }, .{ 32 * tiles, 1, 1 });
-    e.pipe(f.k.get("tf_tree_tail"));
+    e.pipe(if (kv.paged != null) f.k.paged.?.tail else f.k.get("tf_tree_tail"));
     e.buf(s.qp, 0, 0);
-    e.buf(kv.k, 0, 1);
+    kvp.bindKv(e, kv, 1, 3);
     e.bytes(strides, 2);
-    e.buf(kv.v, 0, 3);
     e.bytes(strides, 4);
     e.bytes(scale, 5);
     e.buf(gt.args, gt.tt, 6);
+    if (kv.paged) |pg| kvp.bindTable(e, pg, 15);
     e.buf(s.tpaths, 0, 7);
     e.buf(s.tdepths, 0, 8);
     e.buf(s.po, 0, 9);
@@ -155,11 +156,11 @@ pub fn attentionGpu(f: Forward, e: *Enc, kv: st.Kv, rows: usize, partial: mtl.Pi
 pub fn compact(f: Forward, e: *Enc, kv: st.Kv, len: usize, path: []const u32) void {
     var rows: [st.max_rows]i32 = @splat(0);
     for (path, 0..) |r, j| rows[j] = @intCast(r);
-    e.pipe(f.k.get("tf_kv_compact"));
-    e.buf(kv.k, 0, 0);
-    e.buf(kv.v, 0, 1);
+    e.pipe(if (kv.paged != null) f.k.paged.?.glue[1] else f.k.get("tf_kv_compact"));
+    kvp.bindKv(e, kv, 0, 1);
     e.e.setBytes(std.mem.sliceAsBytes(rows[0..@max(path.len, 8)]), 2);
     e.bytes([4]u32{ @intCast(len), @intCast(path.len), @intCast(kv.capacity), @intCast(f.c.head_dim) }, 3);
+    if (kv.paged) |pg| kvp.bindTable(e, pg, 4);
     e.run(.{ f.c.head_dim, f.c.kv_heads, 1 }, .{ f.c.head_dim, 1, 1 });
 }
 

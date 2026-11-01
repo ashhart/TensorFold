@@ -10,6 +10,7 @@ const glm_checks = @import("zig/build/glm_checks.zig");
 const merge_build = @import("zig/build/merge.zig");
 const flashnext_checks = @import("zig/build/flashnext_checks.zig");
 const hip_build = @import("zig/build/hip.zig");
+const vulkan_build = @import("zig/build/vulkan.zig");
 const xpu_build = @import("zig/build/xpu.zig");
 const grammar_build = @import("zig/build/grammar.zig");
 const counters_build = @import("zig/build/metal_counters.zig");
@@ -66,6 +67,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/dsv41_cuda.zig").steps(b);
     @import("zig/build/dsv41_state.zig").steps(b);
     @import("zig/build/dsv41_draft.zig").steps(b);
+    @import("zig/build/dsv41_assets.zig").steps(b);
     const target = b.standardTargetOptions(.{});
     @import("zig/build/copy_source.zig").steps(b);
     @import("zig/build/checkpoint_io_host.zig").steps(b, target);
@@ -101,13 +103,16 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/digest.zig").steps(b, test_step, draft_ids, build_options);
     @import("zig/build/flashnext_budget.zig").steps(b, test_step);
     @import("zig/build/flashnext_batch_host.zig").tests(b, test_step);
+    @import("zig/build/lfm3_host.zig").steps(b, test_step);
     if (b.graph.host.result.os.tag == .macos) {
         const budget_mods = metalEngineModules(b, b.graph.host, .Debug, draft_ids);
         const budget_empty = b.addWriteFiles().add("budget-compile-only.metallib", "");
         budget_mods.sources.addImport("nemotron_packed_metallib", embedded(b, budget_empty, "nemotron_packed.metallib"));
         @import("zig/build/fsr.zig").deviceSteps(b, budget_mods.metal, budget_mods.engine, budget_mods.sources);
+        b.step("test-shared-head-cost-metal-host", "Metal family head-cost grants without device execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = budget_mods.engine, .filters = &.{"shared head costs:"} })).step);
         @import("zig/build/flashnext_budget.zig").compileHost(b, budget_mods.metal, budget_mods.engine, budget_mods.lanes);
         @import("zig/build/residency_host.zig").compileHost(b, budget_mods.metal, budget_mods.engine, budget_mods.lanes);
+        @import("zig/build/slide_host.zig").metal(b, budget_mods);
     }
     // every tracked path checks out on Windows too
     const names_run = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/portable_names.zig"), .target = target }) }));
@@ -117,6 +122,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/native/xpu_admit.zig"), .target = target }) })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/safetensors.zig"), .target = target }) })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/limits.zig"), .target = target }) })).step);
+    // MOSS-Image's seeded starting latents against x86 torch's, a host computation on every platform
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/moss_image/noise.zig"), .target = target }) })).step);
     const cost_cases = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/cost_rule_cases.zig"),
         .target = target,
@@ -179,6 +186,9 @@ pub fn build(b: *std.Build) void {
     const hip_options = hip_build.options(b); // declared on every target (#1165), used only with -Dhip=true
     hip_build.loaderTests(b, test_step);
     if (with_hip) hip_build.steps(b, target, optimize, build_options, test_step, hip_options);
+    const with_vulkan = b.option(bool, "vulkan", "Enable the opt-in Vulkan backend and its host/device targets") orelse false;
+    const vulkan_options = vulkan_build.options(b); // declared on every target, used only with -Dvulkan=true
+    if (with_vulkan) vulkan_build.steps(b, target, optimize, test_step, vulkan_options);
     exlr8_build.hostTests(b, target, test_step);
     xpu_build.steps(b, target, optimize, build_options);
     video_build.steps(b, target, test_step);

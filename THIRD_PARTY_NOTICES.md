@@ -16,6 +16,14 @@ The native engine carries that adaptation. `zig/kernels/metal/qwen3_5/gdn_pre.me
 `zig/kernels/metal/core/deltanet.metal` and Flash Next's `zig/kernels/metal/flashnext/q4_gdn_*.metal` run the same
 model math.
 
+## Vulkan affine projections
+
+`zig/kernels/vulkan/qmm.comp` adapts the GLSL shader from
+[mlx-omarchy](https://github.com/joshuaswarren/omarchy-mlx), MIT License,
+Copyright © 2026 Joshua Warren and mlx-omarchy contributors.
+Its arithmetic is unchanged; the native Vulkan path does not link MLX.
+See [the license text](LICENSES/mlx-omarchy-MIT.txt).
+
 ## Qwen Flash Next
 
 The n-gram ID helpers translate Hugging Face transformers' `models/qwen4_exp/modeling_qwen4_exp.py` with renamed
@@ -363,3 +371,14 @@ The complete original MIT notices and permission text are retained in [Mia-Flash
 
 Ling-3.0-tiny and Ling-3.1-flash are MIT licensed by inclusionAI. The host family package
 (`zig/src/families/ling/`) is a port of @jschmied's ling-tiny branch (98026d35). TensorFold ships no Ling weights.
+
+## MOSS-Image seeded noise
+
+`zig/src/families/moss_image/noise.zig` is an altered port, to Zig, of the code x86 PyTorch runs for `torch.randn` on a
+seeded CPU generator, so that it makes the same latents bit for bit:
+
+- PyTorch's mt19937 engine and `normal_fill` (BSD-3-Clause, Copyright (c) 2016- Facebook, Inc. and the other holders
+  listed in `LICENSES/PyTorch-BSD-3.txt`).
+- `log256_ps` and `sincos256_ps` from `avx_mathfun.h`, which PyTorch includes (zlib license, Copyright (C) 2012 Giovanni
+  Garberoglio, based on Julien Pommier's `sse_mathfun.h`, Copyright (C) 2007; the license is in
+  `LICENSES/avx_mathfun-zlib.txt`).

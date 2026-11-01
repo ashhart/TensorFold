@@ -20,7 +20,6 @@ const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
 pub const Prompt = union(enum) { text: []const u8, ids: []const u32 };
-
 /// What a route hands the reply: Python's chat() arguments.
 pub const Input = struct {
     messages: Value = .{ .array = &.{} },
@@ -355,21 +354,21 @@ const Generation = struct {
             try fresh.append(g.a, t);
         }
         const all = try g.visible.extend(g.a, g.srv.text, reply_text.decodeText, fresh.items);
-        const text = g.stops.visible(all, true);
+        const text = try @import("tool_minimax.zig").dsml(g.a, g.stops.visible(all, true), g.tools); // MiniMax-M3's calls as DSML
         if (g.visible.pending()) return; // a character still split across tokens
         var answer = text;
         if (g.thinking) {
             const close = try g.visible.closeOf(g.a, reply_text.decodeText, g.srv.text, g.srv.close_id);
             const split = try reply_text.splitThinkingAt(g.a, text, false, g.srv.markers, close);
-            const piece = g.streamed_reasoning.after(split.reasoning, true);
+            const piece = g.streamed_reasoning.after(reply_text.pyStrip(split.reasoning), true); // the whole reply strips it
             if (piece.len > 0) {
-                try g.streamed_reasoning.set(g.a, split.reasoning, piece);
+                try g.streamed_reasoning.set(g.a, reply_text.pyStrip(split.reasoning), piece);
                 try g.emit(sink, try deltaOf(g.a, "reasoning_content", piece));
             }
             answer = split.answer;
         }
         answer = try tool_lfm2.dsml(g.a, answer, g.tools, false); // the answer only, so a call the reasoning mentions is not made
-        const shown = if (g.calls != null) try reply_text.hideInto(g.a, &g.hidden, answer, false, true) else answer;
+        const shown = if (g.calls != null) try reply_text.hideInto(g.a, &g.hidden, answer, false, true, reply_text.openersOf(g.srv.markers)) else answer;
         const vis = reply_text.heldBack(reply_text.streamingVisible(shown), g.calls != null);
         const copied = @intFromPtr(vis.ptr) >= @intFromPtr(g.hidden.items.ptr) and @intFromPtr(vis.ptr) <= @intFromPtr(g.hidden.items.ptr) + g.hidden.items.len;
         const delta = g.streamed.after(vis, !copied);
@@ -477,7 +476,7 @@ const Generation = struct {
         const finished_ns = nowNs(g.srv.io);
         const content_tokens = if (g.ignore_eos) g.collected.items else reply_text.stripTrailing(g.collected.items, g.srv.eos);
         const raw = try g.srv.text.decode(a, content_tokens);
-        const visible = g.stops.visible(raw, false);
+        const visible = try @import("tool_minimax.zig").dsml(a, g.stops.visible(raw, false), g.tools);
         // closed before the think split, so a call ending an unclosed think block is the answer
         const close = try g.closeCall(visible);
         const text = if (close.len > 0) try std.mem.concat(a, u8, &.{ visible, close }) else visible;
@@ -518,6 +517,7 @@ const Generation = struct {
         try runtime.put(a, "engine", .{ .string = g.srv.info.name });
         try runtime.put(a, "tokens_per_second", .{ .float = if (decode_s > 0) @as(f64, @floatFromInt(decode_tokens)) / decode_s else 0 });
         try runtime.put(a, "seconds", .{ .float = @max(0, decode_s) }); // the reply's decode seconds, as tokens_per_second divides them
+        try @import("grammar_metrics.zig").put(a, runtime, m.stats.grammar);
         if (m.stats.gpu_seconds) |gpu| try runtime.put(a, "gpu_seconds", .{ .float = gpu }); // TF_Q27_PROFILE only
         try runtime.put(a, "prefill_seconds", if (m.stats.prefill_seconds) |p| .{ .float = p } else .null);
         const widths = try a.alloc(Value, m.widths.len);

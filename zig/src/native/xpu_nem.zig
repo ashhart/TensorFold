@@ -9,6 +9,7 @@ const Allocator = std.mem.Allocator;
 /// The families this host serves, each a file with its table row, loader and prompt window.
 const specs = .{
     @import("xpu_nemotron.zig"),
+    @import("xpu_gemma4.zig"),
 };
 
 /// Prompt plus reply tokens when --context names none (and the model's window is larger).
@@ -105,6 +106,10 @@ pub fn serves(model_type: []const u8) bool {
 }
 
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (try o.slideRefusal(a, "XPU")) |why| {
+        problem.* = why;
+        return null;
+    }
     inline for (specs) |S| if (std.mem.eql(u8, o.model_type, S.model_type)) return openFamily(S, a, gpa, io, o, problem);
     problem.* = try std.fmt.allocPrint(a, "the native Intel GPU engine has no backend for {s} checkpoints yet (it reads {s})", .{ o.model_type, served });
     return null;
@@ -140,7 +145,10 @@ fn openFamily(comptime S: type, a: Allocator, gpa: Allocator, io: std.Io, o: api
     h.backend.halt = &stopping;
     h.backend.started = chainStopHandlers;
     try h.backend.measure();
-    if (h.backend.facts().exact_width > 1) h.backend.streams = @max(1, o.lanes); // drafted windows: up to --parallel streams a round
+    if (@hasDecl(S.Engine, "copy_only")) {
+        if (getenv("XPU_COPY_MATCH")) |v| h.backend.copy_match = std.fmt.parseInt(i64, v, 10) catch 4;
+        h.backend.streams = @min(@max(1, o.lanes), 8); // one sequence each (the engine holds up to 8)
+    } else if (h.backend.facts().exact_width > 1) h.backend.streams = @max(1, o.lanes); // drafted windows: up to --parallel streams a round
     const facts = h.backend.facts();
     h.cfg = try lanes.Config.init(gpa, facts, facts.exact_width, facts.exact_width - 1);
     h.clock = .{ .io = io };
@@ -148,15 +156,19 @@ fn openFamily(comptime S: type, a: Allocator, gpa: Allocator, io: std.Io, o: api
     const note = try S.note(a, h.engine);
     h.startup = try std.fmt.allocPrint(gpa, "Intel GPU engine: {s}, {d:.2} GB on the device, context {d}{s}; {d} stream(s) a round on the lane core, sampling on the host", .{ h.ctx.name(), @as(f64, @floatFromInt(xpu.rt.alloc_now)) / 1e9, window, note, h.backend.streams });
     const drafted = facts.exact_width > 1;
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = S.name, .lanes = h.backend.streams, .context_window = @intCast(window), .context_fitted = true, .startup = h.startup, .prefill_step = if (drafted) S.promptRows(h.engine) else 0 });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = S.name, .lanes = h.backend.streams, .context_window = @intCast(window), .context_fitted = true, .startup = h.startup, .prefill_step = if (drafted and !@hasDecl(S.Engine, "copy_only")) S.promptRows(h.engine) else 0 });
     // kept prompt states (with sequences): --prompt-cache-gib, else 4 GiB, inside the device memory left past 2 GiB
     const want: u64 = @intFromFloat((o.prompt_cache_gib orelse 4) * (1 << 30));
-    const free = freeMemory(&h.ctx);
+    // Sysman only when a cache can use it: zesInit faults inside the driver under WSL2 (Iris Xe, NEO 23.43)
+    const free = if (drafted) freeMemory(&h.ctx) else 0;
     const budget: u64 = if (free > 2 << 30) @min(want, free - (2 << 30)) else 0;
     h.cache = null;
+    std.log.info("xpu: prompt cache budget {d} MiB (free {d} MiB, asked {d} MiB)", .{ budget >> 20, free >> 20, want >> 20 });
     if (drafted and budget > 0) {
-        h.cache = api.prompt_cache.Store.init(gpa, h.backend.snapshots(), .{ .lookahead = 1, .planned = true }, budget);
+        const rules: api.prompt_cache.Rules = if (@hasDecl(S, "cache_rules")) S.cache_rules else .{ .lookahead = 1, .planned = true };
+        h.cache = api.prompt_cache.Store.init(gpa, h.backend.snapshots(), rules, budget);
         h.host.cache = &h.cache.?;
+        h.host.info_.prompt_cache = true;
     }
     h.host.memory = .{ .read = readMemory };
     h.host.explain = .{ .text = lane.explain };

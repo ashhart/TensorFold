@@ -66,17 +66,59 @@ pub fn kinds(gpa: std.mem.Allocator, config: []const u8, g: Geometry) !Kinds {
     if (g.tied) return error.UnsupportedQwenQuantization;
     if (r.modules.count() == 0) return single(gpa, config, g);
     if (r.of(prefix ++ "embed_tokens") != null) return error.UnsupportedQwenQuantization; // the rows stay bf16
-    var out: Kinds = .{ .modelopt = true, .head = try kindOf(r.of("lm_head")) };
+    var out: Kinds = .{ .modelopt = true, .head = try kindOf(r.of("lm_head")), .experts = if (g.moe()) try moeKinds(&r, g) else .affine };
     var buf: [128]u8 = undefined;
     for (0..g.layers) |i| for (std.enums.values(Slot)) |slot| {
         const used = switch (slot) {
-            .gate, .up, .down => true,
+            .gate, .up, .down => !g.moe(),
             .qkv, .z, .a, .b, .out => g.linear[i],
             .q, .k, .v, .o => !g.linear[i],
         };
         if (used) out.proj[i][@backingInt(slot)] = try kindOf(r.of(try std.fmt.bufPrint(&buf, prefix ++ "layers.{d}.{s}", .{ i, geometry.slot_modules.get(slot) })));
     };
     return out;
+}
+
+/// A MoE layer's module names under `prefix`: experts 0..experts-1 then the shared one, each projection; the router's.
+const Names = struct {
+    buf: [160]u8 = undefined,
+
+    fn expert(n: *Names, layer: usize, x: usize, g: Geometry, proj: []const u8) ![]const u8 {
+        if (x < g.experts) return std.fmt.bufPrint(&n.buf, prefix ++ "layers.{d}.mlp.experts.{d}.{s}", .{ layer, x, proj });
+        return std.fmt.bufPrint(&n.buf, prefix ++ "layers.{d}.mlp.shared_expert.{s}", .{ layer, proj });
+    }
+
+    fn router(n: *Names, layer: usize, which: []const u8) ![]const u8 {
+        return std.fmt.bufPrint(&n.buf, prefix ++ "layers.{d}.mlp.{s}", .{ layer, which });
+    }
+};
+
+const expert_projs = [_][]const u8{ "gate_proj", "up_proj", "down_proj" };
+const router_rows = [_][]const u8{ "gate", "shared_expert_gate" };
+
+/// The routed and shared experts' one NVFP4 recipe, read for every projection (a child entry overrides its parent).
+fn moeKinds(r: *const core.modelopt.Recipes, g: Geometry) !Kind {
+    var first: ?core.modelopt.Recipe = null;
+    var n: Names = .{};
+    for (0..g.layers) |i| {
+        for (0..g.experts + 1) |x| for (expert_projs) |proj| {
+            const got = r.of(try n.expert(i, x, g, proj)) orelse return error.UnsupportedQwenQuantization;
+            if (got != .nvfp4 and got != .w4a16_nvfp4) return error.UnsupportedQwenQuantization;
+            if (first != null and first.? != got) return error.UnsupportedQwenQuantization;
+            first = got;
+        };
+        for (router_rows) |w| if (r.of(try n.router(i, w)) != null) return error.UnsupportedQwenQuantization; // bf16 rows
+    }
+    return kindOf(first orelse return error.UnsupportedQwenQuantization);
+}
+
+/// A single-format NVFP4 MoE: no expert projection ignored (they are one table), the router's rows ignored (bf16).
+fn moeIgnored(ig: Ignored, g: Geometry) !void {
+    var n: Names = .{};
+    for (0..g.layers) |i| {
+        for (0..g.experts + 1) |x| for (expert_projs) |proj| if (ig.has(try n.expert(i, x, g, proj))) return error.UnsupportedQwenQuantization;
+        for (router_rows) |w| if (!ig.has(try n.router(i, w))) return error.UnsupportedQwenQuantization;
+    }
 }
 
 /// Whether quantization_config is compressed-tensors' (unsloth's export): its kinds are read from the tensors.
@@ -133,7 +175,8 @@ fn single(gpa: std.mem.Allocator, config: []const u8, g: Geometry) !Kinds {
     const ig = try Ignored.read(gpa, config);
     defer ig.doc.deinit();
     if (!ig.has(prefix ++ "embed_tokens")) return error.UnsupportedQwenQuantization;
-    var out: Kinds = .{ .modelopt = true, .head = if (ig.has("lm_head")) .bf16 else .nvfp4 };
+    if (g.moe()) try moeIgnored(ig, g);
+    var out: Kinds = .{ .modelopt = true, .head = if (ig.has("lm_head")) .bf16 else .nvfp4, .experts = if (g.moe()) .nvfp4 else .affine };
     var buf: [128]u8 = undefined;
     for (0..g.layers) |i| for (std.enums.values(Slot)) |slot| {
         const used = switch (slot) {
@@ -169,27 +212,42 @@ pub fn rawBytes(n: usize, k: usize, kind: Kind) usize {
     };
 }
 
+/// FP8 and NVFP4 weights decode to bf16 for mma.sync (sm_80 up), as the Nemotron lane does.
+pub const modelopt_min: u32 = 80;
+
+/// Why a ModelOpt checkpoint cannot load at `capability` (10 * major + minor), or null when it may.
+pub fn modeloptRefusal(capability: u32) ?[]const u8 {
+    if (capability >= modelopt_min) return null;
+    return "FP8 and NVFP4 weights decode to bf16 for mma.sync: " ++
+        "a ModelOpt checkpoint needs compute capability 8.0 or newer";
+}
+
 /// The kernels a ModelOpt checkpoint adds: the lane matmul, the prompt GEMM, the packers and the bf16 token rows.
 pub const Kernels = struct {
     lane: cuda.qmmf.Lane,
     prompt: cuda.nvfp4.Prompt,
     pack: cuda.modelopt.Packer,
     embed: cuda.embed_rows.EmbedRows,
-    /// Slice partials where no cluster meets them (before sm_90): the most any projection takes at max_rows.
+    /// Slice partials where no cluster meets them (before sm_90): the most any projection takes below fused_rows.
     part: ?DeviceBuffer = null,
+    experts: ?cuda.experts.Nvfp4Experts = null, // a MoE's routed experts (cuda_modelopt_experts.zig)
 
-    pub fn load(d: *const cuda.Driver, major: u32) !Kernels {
-        var lane = try cuda.qmmf.Lane.load(d, major);
+    pub fn load(d: *const cuda.Driver, capability: u32, sms: usize, moe: bool) !Kernels {
+        if (modeloptRefusal(capability) != null) return error.ModeloptNeedsSm80;
+        var lane = try cuda.qmmf.Lane.load(d, capability / 10);
         errdefer lane.unload();
         var prompt = try cuda.nvfp4.Prompt.load(d);
         errdefer prompt.unload();
         var pack = try cuda.modelopt.Packer.load(d);
         errdefer pack.unload();
-        return .{ .lane = lane, .prompt = prompt, .pack = pack, .embed = try cuda.embed_rows.EmbedRows.load(d) };
+        var experts: ?cuda.experts.Nvfp4Experts = if (moe) try cuda.experts.Nvfp4Experts.load(d, sms) else null;
+        errdefer if (experts) |*x| x.unload();
+        return .{ .lane = lane, .prompt = prompt, .pack = pack, .embed = try cuda.embed_rows.EmbedRows.load(d), .experts = experts };
     }
 
     pub fn unload(k: *Kernels) void {
         if (k.part) |*p| p.free();
+        if (k.experts) |*x| x.unload();
         k.embed.unload();
         k.pack.unload();
         k.prompt.unload();
@@ -200,14 +258,14 @@ pub const Kernels = struct {
         return .{ .lane = &k.lane, .nvfp4_prompt = &k.prompt };
     }
 
-    /// The slice partials every projection of `e` takes at up to max_rows rows (none with clusters).
+    /// The slice partials every projection of `e` takes below fused_rows (none with clusters).
     pub fn reserveParts(k: *Kernels, e: *const Engine) !void {
         var most: usize = 0;
         const Each = struct {
             fn bytes(lane: cuda.qmmf.Lane, p: Proj) usize {
                 return switch (p) {
                     .ql => |w| switch (w) {
-                        .nvfp4, .fp8, .bf16, .fp8g => |q| lane.partBytes(engine.max_rows, q),
+                        .nvfp4, .fp8, .bf16, .fp8g => |q| lane.partBytes(@min(engine.max_rows, cuda.qmmf.fused_rows - 1), q),
                         else => 0,
                     },
                     else => 0,
@@ -246,7 +304,7 @@ pub fn project(e: *Engine, w: Weight, x: u64, out: u64, rows: usize, prompt: boo
 }
 
 /// An fp32 tensor of one element.
-fn scalar(ck: *core.Checkpoint, name: []const u8) !f32 {
+pub fn scalar(ck: *core.Checkpoint, name: []const u8) !f32 {
     const t = try ck.get(name);
     if (t.dtype != .f32 or t.bytes.len != 4) return error.UnexpectedTensor;
     return @bitCast(std.mem.readInt(u32, t.bytes[0..4], .little));
@@ -423,4 +481,10 @@ test "a row's FP8 scale fills its column of every 64-input tile, padding rows on
     try std.testing.expectEqual(bf(rows[5]), out[(0 * 2 + 1) * 64 + 5]); // tile 0, group 1, row 5
     try std.testing.expectEqual(bf(rows[129]), out[(2 * 2 + 0) * 64 + 1]); // tile 2: rows 128..
     try std.testing.expectEqual(@as(f32, 1.0), out[(2 * 2 + 1) * 64 + 2]); // row 130: padding
+}
+
+test "ModelOpt's floor refuses pre-Ampere cards and admits non-cluster reductions" {
+    for ([_]u32{ 70, 75 }) |c| try std.testing.expect(modeloptRefusal(c) != null);
+    for ([_]u32{ 80, 86, 87, 89, 90, 100, 120, 121 }) |c| try std.testing.expect(modeloptRefusal(c) == null);
+    try std.testing.expectEqualStrings("FP8 and NVFP4 weights decode to bf16 for mma.sync: a ModelOpt checkpoint needs compute capability 8.0 or newer", modeloptRefusal(75).?);
 }

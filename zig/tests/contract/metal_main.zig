@@ -13,10 +13,14 @@ const h3_topk = @import("metal_h3_topk.zig");
 const drama3_k = @import("metal_drama3.zig");
 const drama_nvfp4 = @import("metal_drama3_nvfp4.zig");
 const drama_router = @import("metal_drama_router.zig");
+const dsv41 = @import("metal_dsv41_main.zig");
 const drama_combine = @import("metal_drama_combine.zig");
 const drama_cfg = @import("metal_drama_cfg.zig");
 const glm_eh_k = @import("metal_glm_eh.zig");
 const glm_rows_k = @import("metal_glm_rows.zig");
+const pair_k = @import("metal_pair.zig");
+const pair_controls = @import("metal_pair_controls.zig");
+const minimax_k = @import("metal_minimax.zig");
 
 const flash_pool = @import("metal_flashnext_pool.zig");
 const flash = @import("metal_flashnext.zig");
@@ -26,6 +30,7 @@ const gemma_embed = @import("metal_gemma4_embed.zig");
 const gemma_mixed = @import("metal_gemma4_mixed.zig");
 const lfm2_argmax = @import("metal_lfm2_argmax.zig");
 const lfm2_streams = @import("metal_lfm2_streams.zig");
+const lfm2_tap = @import("metal_lfm2_tap.zig");
 const lfm2_controls = @import("metal_lfm2_controls.zig");
 const g = contract.gates;
 const usage = "usage: tf-kernel-contract [--only TEXT] [--no-gates] [--no-limits] [--offline DIR] [--seed N] [--repro] [--rotary-long] [--rotary-accuracy FILE]";
@@ -191,6 +196,22 @@ pub fn main(init: std.process.Init) !u8 {
             try kernels.append(a, p.kernel());
         }
     }
+    var tap_list: std.ArrayList(*lfm2_tap.Probe) = .empty;
+    defer {
+        for (tap_list.items) |p| {
+            p.deinit();
+            a.destroy(p);
+        }
+        tap_list.deinit(a);
+    }
+    for ([_]lfm2_controls.Mutation{ .none, .tap_packed_rows, .tap_clobbers_column }) |m| {
+        if (!wanted(o, if (m == .none) lfm2_tap.name else m.name())) continue;
+        const p = try a.create(lfm2_tap.Probe);
+        errdefer a.destroy(p);
+        p.* = try lfm2_tap.Probe.init(a, device, queue, m);
+        try tap_list.append(a, p);
+        try kernels.append(a, p.kernel());
+    }
     var rows_list: std.ArrayList(*rows_k.Row) = .empty;
     var proj_list: std.ArrayList(*affine_k.Proj) = .empty;
     defer for (rows_list.items) |r| r.deinit();
@@ -201,6 +222,32 @@ pub fn main(init: std.process.Init) !u8 {
         r.* = try rows_k.Row.init(a, device, queue, w);
         try rows_list.append(a, r);
         try kernels.append(a, r.kernel());
+    }
+    var pair_list: std.ArrayList(*pair_k.Pair) = .empty;
+    defer {
+        for (pair_list.items) |p| {
+            p.deinit();
+            a.destroy(p);
+        }
+        pair_list.deinit(a);
+    }
+    for (std.enums.values(pair_controls.Mutation)) |m| {
+        for (pair_k.all) |w| {
+            const control_for = switch (m) {
+                .none => true,
+                .stage_peer_half => w == .stage,
+                .gather_own_halves => w == .gather,
+                .argmax_high_tie, .argmax_no_flag => w == .argmax,
+                .pick_no_flag, .pick_high_tie => w == .pick,
+            };
+            if (!control_for) continue;
+            if (!wanted(o, if (m == .none) pair_k.spec(w).name else m.name())) continue;
+            const p = try a.create(pair_k.Pair);
+            errdefer a.destroy(p);
+            p.* = try pair_k.Pair.init(a, device, queue, w, m);
+            try pair_list.append(a, p);
+            try kernels.append(a, p.kernel());
+        }
     }
     var flash_list: [8]flash.Probe = undefined;
     var flash_made: usize = 0;
@@ -329,6 +376,18 @@ pub fn main(init: std.process.Init) !u8 {
     var nemotron_experts: @import("metal_nemotron_experts.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer nemotron_experts.deinit();
     try nemotron_experts.collect(o.only);
+    var nemotron_pages: @import("metal_nemotron_pages.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer nemotron_pages.deinit();
+    try nemotron_pages.collect(o.only);
+    var nemotron_attention: @import("metal_nemotron_attention.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer nemotron_attention.deinit();
+    try nemotron_attention.collect(o.only);
+    var nemotron_unroll: @import("metal_nemotron_unroll.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer nemotron_unroll.deinit();
+    try nemotron_unroll.collect(o.only);
+    var minimax: minimax_k.Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer minimax.deinit();
+    try minimax.collect(o.only);
     const weight_only = @import("metal_weight_only.zig");
     const weight_source = try weight_only.text(a);
     defer a.free(weight_source);
@@ -369,11 +428,16 @@ pub fn main(init: std.process.Init) !u8 {
     defer native_gdn.destroy();
     const moss_image = try @import("metal_moss_image.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer moss_image.destroy();
+    const moss_image_decoder = try @import("metal_moss_image_decoder.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer moss_image_decoder.destroy();
+    var dsv41_suites = try dsv41.Suites.create(a, device, queue, &kernels, o.only);
+    defer dsv41_suites.destroy();
     var t: g.Tally = .{};
     const t0 = std.Io.Clock.awake.now(init.io);
     if (o.gates) {
         try g.runAll(a, kernels.items, o.seed, &t);
         for (flash_list[0..flash_made]) |*probe| try probe.rowCountInvariant();
+        try dsv41_suites.gates(init.io, o.seed, &t);
     }
     const t1 = std.Io.Clock.awake.now(init.io);
     var lim: usize = 0;

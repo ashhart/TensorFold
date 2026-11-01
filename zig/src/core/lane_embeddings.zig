@@ -24,7 +24,7 @@ pub fn complete(h: *LaneHost, job: *LaneHost.Job) bool {
     job.stream.finished = true;
     job.stream.reason = if (failure == null) .length else if (failure.? == error.Cancelled) .cancelled else .@"error";
     backend.release(&job.stream);
-    if (failure) |err| return if (err == error.Cancelled) h.cancel(job) else h.drop(job, h.words(err));
+    if (failure) |err| return if (err == error.Cancelled) h.cancel(job) else @import("lane_host_end.zig").dropFailed(h, job, err);
     h.remove(job);
     h.finish(job, .length, "");
     return true;

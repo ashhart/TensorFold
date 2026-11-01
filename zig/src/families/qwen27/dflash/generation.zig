@@ -110,7 +110,9 @@ pub const Generation = struct {
         return g.finishKeep();
     }
     /// A round's keep runs behind the drafter; it ends before the next verify and before a run returns.
-    fn finishKeep(g: *Generation) !void {
+    pub fn finishKeep(g: *Generation) !void {
+        const metric = mtl.pass_metrics.phase(.keep);
+        defer metric.end();
         const cb = g.keep orelse return;
         g.keep = null;
         defer cb.release();
@@ -121,6 +123,8 @@ pub const Generation = struct {
         }
     }
     fn accept(g: *Generation, round: *const Round, ids: []const u32, parents: []const i32, budget: u32, eos: []const u32) !@import("core").tree_round.Decoded {
+        const metric = mtl.pass_metrics.phase(.sampling);
+        defer metric.end();
         // the picks rewrite the matcher's result, which a pending keep still reads
         std.debug.assert(g.keep == null);
         errdefer g.runner.failed = true;

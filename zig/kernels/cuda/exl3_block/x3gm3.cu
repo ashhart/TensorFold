@@ -84,7 +84,7 @@ __device__ __forceinline__ void kloop3(float (&acc)[MTL][NG][4], const unsigned 
 #pragma unroll
             for (int np = 0; np < PAIRS; ++np) {
                 uint32_t b[4];
-                ldsm4(b, A + (16 * np + lr) * LDA + chunk * 8);
+                ldmatrix4(b, A + (16 * np + lr) * LDA + chunk * 8);
                 const uint32_t b01[2] = {b[0], b[1]}, b23[2] = {b[2], b[3]};
 #pragma unroll
                 for (int l = 0; l < MTL; ++l) {
@@ -94,7 +94,7 @@ __device__ __forceinline__ void kloop3(float (&acc)[MTL][NG][4], const unsigned 
             }
             if constexpr ((N8 & 1) != 0) {
                 uint32_t b[2];
-                ldsm2(b, A + (16 * PAIRS + lr) * LDA + chunk * 8);
+                ldmatrix2(b, A + (16 * PAIRS + lr) * LDA + chunk * 8);
 #pragma unroll
                 for (int l = 0; l < MTL; ++l) mma16816(acc[l][2 * PAIRS], af[l], b);
             }

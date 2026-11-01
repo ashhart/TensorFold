@@ -14,6 +14,7 @@ const selector = @import("selector.zig");
 const backend_mod = @import("runtime_backend.zig");
 const Cache = backend_mod.Cache;
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
+pub const max_nodes = 63; // selected tree nodes, independent of the unchanged 16-row drafter block
 pub const Model = struct {
     allocator: std.mem.Allocator,
     checkpoint: core.checkpoint_metal.Checkpoint,
@@ -124,7 +125,18 @@ pub const Model = struct {
         std.mem.swap(op.Context, &m.backend.context, &x.context);
     }
     /// One stream of a batch: its parked context (null: the model's own), pending token and node budget.
-    pub const Proposal = struct { context: ?*Context, pending: u32, nodes: u32 };
+    pub const Proposal = struct {
+        context: ?*Context,
+        pending: u32,
+        nodes: u32,
+        costs: []const f64 = &.{},
+        overhead_ms: f64 = 0,
+        defer_price: bool = true,
+    };
+    /// The lane core prices complete candidate prefixes with its calibrated landing rates.
+    pub fn selection(p: Proposal) selector.Options {
+        return .{ .nodes = p.nodes, .children = if (p.costs.len > 0) 16 else 4, .costs = if (p.defer_price) &.{} else p.costs, .overhead_ms = if (p.defer_price) 0 else p.overhead_ms };
+    }
     /// Trees for 2 to 8 streams from one frame: each stream's new taps into its own caches, then one block pass.
     pub fn proposeBatch(m: *Model, entries: []const Proposal, out: []selector.Tree) !void {
         const n = entries.len;
@@ -134,7 +146,7 @@ pub const Model = struct {
         var caches: [8][]Cache = undefined;
         var news: [8]?Fresh = @splat(null);
         for (entries, 0..) |en, k| {
-            if (en.pending >= c.vocab or en.nodes == 0 or en.nodes > 15) return error.BadDraftOptions;
+            if (en.pending >= c.vocab or en.nodes == 0 or en.nodes > max_nodes) return error.BadDraftOptions;
             if (en.context) |x| try m.swap(x);
             news[k] = m.fresh();
             const flushed: anyerror!void = if (news[k] == null) m.flush() else {};
@@ -181,7 +193,7 @@ pub const Model = struct {
         var made: usize = 0;
         errdefer for (out[0..made]) |*t| t.deinit();
         for (entries, streams[0..n], lattices[0..n], out) |en, s2, l, *t| {
-            t.* = try selector.propose(m.allocator, &m.graph, l, en.pending, s2.context.end + 1, .{ .nodes = en.nodes });
+            t.* = try selector.propose(m.allocator, &m.graph, l, en.pending, s2.context.end + 1, selection(en));
             made += 1;
         }
     }
@@ -189,32 +201,34 @@ pub const Model = struct {
     const Fresh = struct { ring: mtl.Buffer, slot: u32, rows: u32, first: u64, next: op.Context };
     fn fresh(m: *const Model) ?Fresh {
         const window = m.graph.config.window;
-        if (!m.session.ready or m.committed_end <= m.session.context.end) return null;
-        const behind = m.committed_end - m.session.context.end;
-        const slot: u32 = @intCast(m.session.context.end % window);
-        if (behind > 128 or slot + behind > window or m.session.context.end < m.committed_end -| (@as(u64, window) - 1)) return null;
-        const begin = @max(m.session.context.begin, m.committed_end -| (@as(u64, window) - 1));
-        return .{ .ring = m.pending, .slot = slot, .rows = @intCast(behind), .first = m.session.context.end, .next = .{ .cache = m.session.context.cache, .begin = begin, .end = m.committed_end } };
+        const span = @import("catchup.zig").fresh(m.session.ready, m.session.context.begin, m.session.context.end, m.committed_end, window) orelse return null;
+        return .{ .ring = m.pending, .slot = span.slot, .rows = span.rows, .first = span.first, .next = .{ .cache = m.session.context.cache, .begin = span.begin, .end = m.committed_end } };
     }
-    pub fn propose(m: *Model, pending: u32, nodes: u32) !@import("selector.zig").Tree {
-        if (m.backend.failed or m.backend.frame.active or m.backend.transaction != null or pending >= m.graph.config.vocab or nodes > 15 or m.tree_block == 0 or m.tree_block > 16) return error.BadDraftOptions;
+    pub fn propose(m: *Model, pending: u32, nodes: u32) !selector.Tree {
+        return m.proposeOptions(pending, .{ .nodes = nodes });
+    }
+    /// A costed tree grows siblings from the same masked block, then keeps the most useful prefix.
+    pub fn proposeOptions(m: *Model, pending: u32, options: selector.Options) !selector.Tree {
+        const metric = mtl.pass_metrics.phase(.drafter);
+        defer metric.end();
+        const nodes = options.nodes;
+        if (m.backend.failed or m.backend.frame.active or m.backend.transaction != null or pending >= m.graph.config.vocab or nodes > max_nodes or m.tree_block == 0 or m.tree_block > 16) return error.BadDraftOptions;
         if (m.committed_end == 0) return error.DraftContextNotReady;
         const block = @min(m.tree_block, nodes + 1);
         if (block < 2) return .{ .gpa = m.allocator, .tokens = &.{}, .parents = &.{}, .scores = &.{} };
         const window = m.graph.config.window;
-        const behind = m.committed_end - m.session.context.end;
-        const slot: u32 = @intCast(m.session.context.end % window);
-        if (m.session.ready and behind > 0 and behind <= 128 and slot + behind <= window and m.session.context.end >= m.committed_end -| (@as(u64, window) - 1)) {
-            const rows: u32 = @intCast(behind);
+        if (@import("catchup.zig").fresh(m.session.ready, m.session.context.begin, m.session.context.end, m.committed_end, window)) |span| {
+            const rows = span.rows;
+            const slot = span.slot;
             var positions: [128]u64 = undefined;
             for (positions[0..rows], 0..) |*position, i| position.* = m.session.context.end + i;
             const stride = @as(usize, m.graph.config.tapWidth()) * 2;
             const view = try m.backend.frame.borrow(.{ .buf = m.pending, .off = @as(usize, slot) * stride }, rows, m.graph.config.tapWidth());
-            return m.session.absorbTreeBlock(m.allocator, m.backend.ops(), &m.graph, m.preparation, .{ .values = view, .positions = positions[0..rows], .layers = m.graph.config.taps, .target_end = m.session.context.end + rows }, pending, block, .{ .nodes = nodes });
+            return m.session.absorbTreeBlock(m.allocator, m.backend.ops(), &m.graph, m.preparation, .{ .values = view, .positions = positions[0..rows], .layers = m.graph.config.taps, .target_end = m.session.context.end + rows }, pending, block, options);
         }
         try m.flush();
         const first = try m.session.firstDraw();
-        return m.session.treeBlock(m.allocator, m.backend.ops(), &m.graph, m.preparation, pending, first, block, .{ .nodes = nodes });
+        return m.session.treeBlock(m.allocator, m.backend.ops(), &m.graph, m.preparation, pending, first, block, options);
     }
 };
 /// A stream's own drafter state, parked while another stream drafts: its taps ring, rolling K/V and session.

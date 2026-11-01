@@ -271,15 +271,25 @@ pub const Draft = struct {
 
     /// proj of each of `ls` into `outs` over one x, its group sums taken once; decode() keeps each one's bits.
     pub fn projMany(d: *Draft, ls: []const cuda.qlinear.Affine4, x: u64, outs: []const u64, rows: usize) !void {
+        return d.projManyInner(ls, x, outs, rows, true, true);
+    }
+
+    pub fn projManySums(d: *Draft, ls: []const cuda.qlinear.Affine4, x: u64, outs: []const u64, rows: usize, sums: bool) !void {
+        return d.projManyInner(ls, x, outs, rows, sums, false);
+    }
+
+    fn projManyInner(d: *Draft, ls: []const cuda.qlinear.Affine4, x: u64, outs: []const u64, rows: usize, sums: bool, segmented: bool) !void {
         const e = d.e;
-        if (rows > 16 or ls.len > cuda.qlinear.Affine4Kernels.segs_max) {
-            for (ls, outs, 0..) |l, out, i| try d.projSums(l, x, out, rows, i == 0);
+        if (ls.len == 0 or ls.len != outs.len) return error.UnexpectedTensor;
+        const prompt = precision.prompt(d.projection_role, rows, precision.dflash_projection_prompt_cutoff);
+        if ((!e.affine.pdl and !segmented) or (rows > 16 and (!e.affine.pdl or prompt)) or ls.len > cuda.qlinear.Affine4Kernels.segs_max or ls.len == 1) {
+            for (ls, outs, 0..) |l, out, i| try d.projSums(l, x, out, rows, sums and i == 0);
             return;
         }
-        try e.run(e.fns.sums, .{ rows, (ls[0].k / 64 + 63) / 64, 1 }, .{ 64, 1, 1 }, .{ x, d.xs, @as(c_int, @intCast(ls[0].k)), @as(u64, 0) });
+        if (sums) try e.run(e.fns.sums, .{ rows, (ls[0].k / 64 + 63) / 64, 1 }, .{ 64, 1, 1 }, .{ x, d.xs, @as(c_int, @intCast(ls[0].k)), @as(u64, 0) });
         var many: [cuda.qlinear.Affine4Kernels.segs_max]cuda.qlinear.Affine4Kernels.Out = undefined;
         for (ls, outs, many[0..ls.len]) |l, out, *m| m.* = .{ .q = l, .out = out };
-        try e.affine.decodeMany(e.stream, x, d.xs, many[0..ls.len], rows);
+        try e.affine.verifyManyRows(e.stream, x, d.xs, many[0..ls.len], rows);
     }
 
     pub fn projSums(d: *Draft, l: cuda.qlinear.Affine4, x: u64, out: u64, rows: usize, sums: bool) !void {
@@ -328,9 +338,14 @@ pub const Draft = struct {
             try d.proj(d.w.fc, d.taps_in, d.th, rows);
             try d.norm(d.th, d.w.hidden_norm, d.thn, rows);
             for (d.w.layers, 0..) |l, i| {
-                try d.projAgain(l.k, d.thn, d.kabs, rows);
-                try d.normRope(d.kabs, l.k_norm, d.kn, rows, c.kv_heads, start);
-                try d.projAgain(l.v, d.thn, d.vabs, rows);
+                if (e.affine.pdl) {
+                    try d.projManySums(&.{ l.k, l.v }, d.thn, &.{ d.kabs, d.vabs }, rows, false);
+                    try d.normRope(d.kabs, l.k_norm, d.kn, rows, c.kv_heads, start);
+                } else {
+                    try d.projAgain(l.k, d.thn, d.kabs, rows);
+                    try d.normRope(d.kabs, l.k_norm, d.kn, rows, c.kv_heads, start);
+                    try d.projAgain(l.v, d.thn, d.vabs, rows);
+                }
                 try e.run(d.fns.ring_put, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ d.kn, d.vabs, d.ringK(ctx, i), d.ringV(ctx, i), @as(c_int, @intCast(c.kvWidth())), @as(c_longlong, @intCast(start)), @as(c_int, @intCast(c.ringRows())) });
             }
             start += rows;
@@ -398,7 +413,7 @@ pub const Draft = struct {
     fn factsFn(p: *anyopaque) dr.Facts {
         const d = cast(p);
         // TF_NO_TREES=1: chains only (for comparing)
-        return .{ .depth = @intCast(d.c.block - 1), .step_ms = d.step_ms, .prior = &prior, .plain_guard = true, .batched = true, .stream_bytes = d.c.ringBytes() + d.target_taps + d.scratch_one, .trees = platform.c.getenv("TF_NO_TREES") == null, .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs], .tree_nodes = @intCast(if (d.c.block == 16) tree.nodes() else 0) };
+        return .{ .depth = @intCast(d.c.block - 1), .step_ms = d.step_ms, .prior = &prior, .plain_guard = true, .batched = true, .stream_bytes = d.c.ringBytes() + d.target_taps + d.scratch_one, .trees = platform.c.getenv("TF_NO_TREES") == null, .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs], .copy_match = copyMatch(d.e.g), .tree_nodes = @intCast(if (d.c.block == 16) tree.nodes() else 0) };
     }
 
     fn openFn(p: *anyopaque, s: *Stream) anyerror!void {
@@ -488,6 +503,11 @@ pub const Draft = struct {
     }
 };
 
+/// The copy match beside DFlash2: the dense 27B leaves short copies to its drafts and copies after long_match (20).
+pub fn copyMatch(g: anytype) i64 {
+    return if (@import("cuda_geometry.zig").dense27(g)) lanes.windows.long_match else 0;
+}
+
 /// Acceptance by depth until a stream has its own (the reference's chat text: measured, see the commit).
 const prior = [_]f64{ 0.75, 0.65, 0.58, 0.52, 0.47, 0.43, 0.4, 0.37, 0.35, 0.33, 0.31, 0.29, 0.28, 0.27, 0.26 };
 
@@ -519,6 +539,15 @@ test "a drafter config with a zero divisor is refused, and any admitted rank's s
         defer gpa.free(bad);
         try std.testing.expectError(error.BadDraftConfig, Config.parse(gpa, bad, target));
     }
+    // the kernels rope with theta alone: a scaled rope is refused, an explicit default one is read
+    for ([_][2][]const u8{ .{ "{\"rope_theta\"", "{\"rope_type\":\"yarn\",\"factor\":4.0,\"rope_theta\"" }, .{ "{\"rope_theta\"", "{\"type\":\"yarn\",\"rope_theta\"" }, .{ "\"sliding_window\"", "\"rope_scaling\":{\"type\":\"yarn\"},\"sliding_window\"" } }) |r| {
+        const scaled = try std.mem.replaceOwned(u8, gpa, text, r[0], r[1]);
+        defer gpa.free(scaled);
+        try std.testing.expectError(error.UnsupportedDraftConfig, Config.parse(gpa, scaled, target));
+    }
+    const plain = try std.mem.replaceOwned(u8, gpa, text, "{\"rope_theta\"", "{\"rope_type\":\"default\",\"rope_theta\"");
+    defer gpa.free(plain);
+    try std.testing.expectEqual(@as(usize, 256), (try Config.parse(gpa, plain, target)).rank);
     const wide = try std.mem.replaceOwned(u8, gpa, text, "\"selector_rank\":256", "\"selector_rank\":1024");
     defer gpa.free(wide);
     const c = try Config.parse(gpa, wide, target);

@@ -1,4 +1,4 @@
-//! Gemma 4 on CUDA (#1048 step 8); the cuda_ config, widths, plan and layer_input copy their twins (one per file).
+//! Gemma 4 on CUDA (#1048 step 8); cuda_ config, widths, plan and layer_input copy their twins, image.zig is shared.
 
 const std = @import("std");
 
@@ -15,14 +15,14 @@ pub const assistant = @import("cuda_assistant.zig");
 pub const vision = @import("cuda_vision.zig");
 pub const dflash = @import("cuda_dflash.zig");
 pub const tower = @import("cuda_tower.zig");
-pub const image = @import("cuda_image.zig");
+pub const image = @import("image.zig");
 pub const native = @import("cuda_native.zig").Family("gemma4_unified");
 pub const native31 = @import("cuda_native.zig").Family("gemma4");
 
 test "each cuda_ twin is its file but for its first lines (doc, imports)" {
     // the copies' width tests log the refusals they plant, as Metal's do: warnings, meant
     std.testing.log_level = .err;
-    const pairs = [_][2][]const u8{ .{ @embedFile("config.zig"), @embedFile("cuda_config.zig") }, .{ @embedFile("widths.zig"), @embedFile("cuda_widths.zig") }, .{ @embedFile("plan.zig"), @embedFile("cuda_plan.zig") }, .{ @embedFile("layer_input.zig"), @embedFile("cuda_layer_input.zig") }, .{ @embedFile("image.zig"), @embedFile("cuda_image.zig") } };
+    const pairs = [_][2][]const u8{ .{ @embedFile("config.zig"), @embedFile("cuda_config.zig") }, .{ @embedFile("widths.zig"), @embedFile("cuda_widths.zig") }, .{ @embedFile("plan.zig"), @embedFile("cuda_plan.zig") }, .{ @embedFile("layer_input.zig"), @embedFile("cuda_layer_input.zig") } };
     for (pairs) |p| {
         var a = std.mem.splitScalar(u8, p[0], '\n');
         var b = std.mem.splitScalar(u8, p[1], '\n');
@@ -51,6 +51,6 @@ test {
     _ = @import("cuda_dflash.zig");
     _ = @import("cuda_dflash_test.zig");
     _ = @import("cuda_tower.zig");
-    _ = @import("cuda_image.zig");
+    _ = @import("image.zig");
     _ = @import("cuda_native.zig");
 }

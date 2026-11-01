@@ -222,7 +222,7 @@ pub fn Namespace(comptime Tri: type) type {
                     .hidden_rows = true,
                     .batch_rows = if (drafting) mtp.round_rows else round_streams,
                     .max_streams = round_streams,
-                    // a shared round's greedy streams draft in one head pass a step (lanes_draft.batched)
+                    // a shared round's streams draft in one head pass a step (lanes_draft.batched)
                     .draft_streams = drafting and lanes_draft.batchHeads(),
                 };
             }
@@ -305,21 +305,22 @@ pub fn Namespace(comptime Tri: type) type {
                 }
                 return l;
             }
-            /// One prompt chunk, cut at the next cache mark; true once the last row's scores are in seq.logits.
-            fn step(self: *Cuda, s: *lanes.Stream, l: *Lane) !bool {
+            /// One prompt chunk, its rows picked as it starts, cut at the next cache mark; true once it was the last.
+            fn step(self: *Cuda, s: *lanes.Stream, l: *Lane, _: u32) !bool {
                 const ids = s.prompt();
                 const at = l.filled orelse return true;
                 if (s.isCancelled()) {
                     s.keepInterruptedPrefill(@intCast(at));
                     return error.Cancelled;
                 }
-                var stop = @min(ids.len, at + self.engine.chunk);
+                const rows = @import("cuda_chunk.zig").passRows(&self.lanes, l, self.engine.chunk, self.engine.busy_chunk);
+                var stop = @min(ids.len, at + rows);
                 for (s.reuse.marks) |m| if (m > at and m < stop) {
                     stop = m;
                     break;
                 };
                 const last = stop == ids.len;
-                self.engine.ngram.warmAhead(ids, stop, @min(ids.len, stop + self.engine.chunk));
+                self.engine.ngram.warmAhead(ids, stop, @min(ids.len, stop + rows));
                 if (l.draft) |*d| {
                     try self.ops().prefillChunk(&l.seq, d, ids, at, stop);
                 } else if (self.ranks) |r| {
@@ -333,8 +334,7 @@ pub fn Namespace(comptime Tri: type) type {
             }
         };
         pub fn envUsize(name: [:0]const u8, default: usize) usize {
-            const v = std.c.getenv(name) orelse return default;
-            return std.fmt.parseInt(usize, std.mem.span(v), 10) catch default;
+            return std.fmt.parseInt(usize, std.mem.span(std.c.getenv(name) orelse return default), 10) catch default;
         }
 
         pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, captured: ?[]const u8, o: Options) !Loaded {
@@ -383,14 +383,14 @@ pub fn Namespace(comptime Tri: type) type {
         fn prefillFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!void {
             const self = of(ptr);
             const l = try self.open(s);
-            while (!try self.step(s, l)) {}
+            while (!try self.step(s, l, 0)) {}
         }
 
         /// One chunk of the stream's prompt between the other streams' rounds; the first call opens its caches.
-        fn prefillStepFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!bool {
+        fn prefillStepFn(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
             const self = of(ptr);
             const l = if (self.lanes.getPtr(s)) |x| (if (x.filled != null) x else try self.open(s)) else try self.open(s);
-            return self.step(s, l);
+            return self.step(s, l, 0);
         }
 
         fn cancelPrefillFn(ptr: *anyopaque, s: *lanes.Stream) !void {
@@ -488,7 +488,7 @@ pub fn Namespace(comptime Tri: type) type {
             const self = of(ptr);
             if (self.head == null) return error.NoDraftHead;
             defer lanes_draft.depthLog(self, requests);
-            // greedy chains of a shared round: their heads in one pass a step (the drafts each would get alone)
+            // a shared round's chains: their heads in one pass a step (the drafts each would get alone)
             var batched: [mtp_ops.max_lanes]bool = @splat(false);
             if (lanes_draft.batchHeads() and requests.len > 1 and requests.len <= mtp_ops.max_lanes) try lanes_draft.batched(self, requests, &batched);
             for (requests, 0..) |r, ri| {
@@ -549,12 +549,12 @@ pub fn Namespace(comptime Tri: type) type {
             _ = @import("cuda_score.zig").CapabilityCases(Cuda);
         }
 
-        test "a bad TF_FLASHNEXT_CHUNK or TF_FLASHNEXT_LOAD_THREADS is refused at load before the loader takes a stream, a module or a buffer" {
+        test "a bad TF_FLASHNEXT_CHUNK, _CHUNK_SOLO or TF_FLASHNEXT_LOAD_THREADS is refused at load before the loader takes a stream, a module or a buffer" {
             const env = @import("sys").env;
             // every driver entry point undefined: the refusal must come before the first call
             var driver: cuda.Driver = undefined;
             const ctx: cuda.Context = .{ .d = &driver, .device = 0, .handle = null };
-            for ([_]struct { [*:0]const u8, [*:0]const u8, anyerror }{ .{ "TF_FLASHNEXT_CHUNK", "0", error.BadChunk }, .{ "TF_FLASHNEXT_CHUNK", "16385", error.BadChunk }, .{ "TF_FLASHNEXT_CHUNK", "4k", error.BadChunk }, .{ "TF_FLASHNEXT_LOAD_THREADS", "0", error.BadLoadThreads }, .{ "TF_FLASHNEXT_LOAD_THREADS", "33", error.BadLoadThreads }, .{ "TF_FLASHNEXT_LOAD_THREADS", "8x", error.BadLoadThreads } }) |bad| {
+            for ([_]struct { [*:0]const u8, [*:0]const u8, anyerror }{ .{ "TF_FLASHNEXT_CHUNK", "0", error.BadChunk }, .{ "TF_FLASHNEXT_CHUNK", "16385", error.BadChunk }, .{ "TF_FLASHNEXT_CHUNK", "4k", error.BadChunk }, .{ "TF_FLASHNEXT_CHUNK_SOLO", "1024", error.BadChunk }, .{ "TF_FLASHNEXT_LOAD_THREADS", "0", error.BadLoadThreads }, .{ "TF_FLASHNEXT_LOAD_THREADS", "33", error.BadLoadThreads }, .{ "TF_FLASHNEXT_LOAD_THREADS", "8x", error.BadLoadThreads } }) |bad| {
                 _ = env.setenv(bad[0], bad[1], 1);
                 defer _ = env.unsetenv(bad[0]);
                 try std.testing.expectError(bad[2], open(std.testing.allocator, std.testing.io, &ctx, "no-such-checkpoint", null, .{ .context = 4096, .drafts = true }));

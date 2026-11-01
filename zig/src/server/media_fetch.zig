@@ -276,9 +276,7 @@ fn connectPosix(addr: net.IpAddress, ms: i64, f: *Failure) Error!net.Stream {
     return .{ .socket = .{ .handle = fd, .address = addr } };
 }
 
-var bundle_lock: Io.RwLock = .init;
-var bundle: std.crypto.Certificate.Bundle = .empty;
-var bundle_loaded = false;
+var trust: @import("media_fetch_tls.zig").Trust = .{};
 
 /// The network: every address the host resolves to checked public, then TLS verified for the host on the first.
 const Network = struct {
@@ -302,35 +300,10 @@ const Network = struct {
             } else |_| {}
         }
         const addr = first orelse return fail(f, unresolved);
-        {
-            bundle_lock.lockUncancelable(io);
-            defer bundle_lock.unlock(io);
-            if (!bundle_loaded) {
-                bundle.rescan(std.heap.page_allocator, io, Io.Clock.real.now(io)) catch return fail(f, "image download failed: no CA certificates on the server");
-                bundle_loaded = true;
-            }
-        }
+        try trust.ensure(io, f);
         const stream = try connect(addr, try remaining(io, deadline, f), f);
         defer stream.close(io);
-        const tls_len = std.crypto.tls.Client.min_buffer_len;
-        const bufs = try a.alloc(u8, 4 * tls_len);
-        var sr = stream.reader(io, bufs[0..tls_len]);
-        var sw = stream.writer(io, bufs[tls_len .. 2 * tls_len]);
-        var entropy: [std.crypto.tls.Client.Options.entropy_len]u8 = undefined;
-        io.random(&entropy);
-        var tls = std.crypto.tls.Client.init(&sr.interface, &sw.interface, .{
-            .host = .{ .explicit = std.mem.trimEnd(u8, u.host, ".") },
-            .ca = .{ .bundle = .{ .gpa = std.heap.page_allocator, .io = io, .lock = &bundle_lock, .bundle = &bundle } },
-            .read_buffer = bufs[2 * tls_len .. 3 * tls_len],
-            .write_buffer = bufs[3 * tls_len ..],
-            .entropy = &entropy,
-            .realtime_now = Io.Clock.real.now(io),
-            .allow_truncation_attacks = true, // HTTP's own length and chunk framing end the body
-        }) catch return fail(f, "image download failed or timed out"); // images_http.py: an ssl.SSLError is an OSError
-        const accept = try std.mem.join(a, ", ", media_types);
-        ask(&tls.writer, u, accept) catch return fail(f, "image download failed or timed out");
-        sw.interface.flush() catch return fail(f, "image download failed or timed out");
-        return answer(a, io, &tls.reader, max_bytes, deadline, media_types, f);
+        return @import("media_fetch_tls.zig").request(&trust, a, io, stream, u, max_bytes, deadline, media_types, f);
     }
 };
 
@@ -490,4 +463,8 @@ test "responses as images_http._request reads them: redirects, types, lengths, e
     // a deadline already passed refuses before the body
     try std.testing.expectError(error.Media, fetchVia(a, io, "https://e.com/a.png", 10, Io.Clock.awake.now(io), &image_media, &f, fx));
     try std.testing.expectEqualStrings("image download timed out", f.text);
+}
+
+test {
+    _ = @import("media_fetch_tls.zig");
 }

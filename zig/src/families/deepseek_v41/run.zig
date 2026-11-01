@@ -76,6 +76,7 @@ pub const Runner = struct {
     verified: std.AutoHashMapUnmanaged(u64, void) = .empty,
     /// Runner.guard: each Triton function's runtime parameters (built at the first window)
     params: ?Params = null,
+    progress: ?*@import("round_progress.zig").Progress = null,
 
     pub const TapsMark = struct { ev: cuda.Event, armed: bool = false, recorded: u64 = 0 };
 
@@ -231,6 +232,7 @@ pub const Runner = struct {
 
     /// Issues one call on the runner's stream; L2 prefetchers go to the side stream (skipped without TF_DSV41_L2PF).
     pub fn issue(r: *Runner, c: *const calls.Call) !void {
+        defer if (r.progress) |progress| progress.touch();
         if (r.br) |b| {
             if (c.join) try r.joinBranch();
             if (c.wait > 0) {

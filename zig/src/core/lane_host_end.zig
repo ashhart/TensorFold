@@ -2,6 +2,8 @@
 const std = @import("std");
 const fill = @import("lane_host_fill.zig");
 const lane_halt = @import("lane_halt.zig");
+const lane_stream = @import("lane_stream.zig");
+const recalls = @import("lane_host_recall.zig");
 const LaneHost = @import("lane_host.zig").LaneHost;
 const Job = LaneHost.Job;
 
@@ -29,7 +31,7 @@ pub fn takeCancels(h: *LaneHost) void {
         if (found) |job| {
             if (job.fill_began and job.prefilled == null and !job.stream.finished) if (h.core.backend.vtable.cancel_prefill) |keep_prefix| {
                 keep_prefix(h.core.backend.ptr, &job.stream) catch |err| {
-                    _ = h.drop(job, h.words(err));
+                    _ = dropFailed(h, job, err);
                     continue;
                 };
             };
@@ -37,6 +39,33 @@ pub fn takeCancels(h: *LaneHost) void {
             h.finish(job, .cancelled, "");
         }
     }
+}
+
+/// The backend's failure hook hears a round's or request's error; the caller chooses the message.
+pub fn failed(h: *const LaneHost, err: anyerror) void {
+    if (h.failure) |f| f.call(f.ctx, err);
+}
+
+/// A request the backend failed: the failure hook hears the error and the request ends with the backend's words.
+pub fn dropFailed(h: *LaneHost, job: *Job, err: anyerror) bool {
+    failed(h, err);
+    return h.drop(job, h.words(err));
+}
+
+/// Sends replies and finishes jobs only after the core has reaped terminal streams.
+pub fn deliverPending(h: *LaneHost) void {
+    var i: usize = 0;
+    while (i < h.admitted.items.len) {
+        const job = h.admitted.items[i];
+        if (h.deliver(job)) continue;
+        i += 1;
+    }
+}
+
+/// A round the backend failed: the failure hook hears the error and every admitted stream gets its name.
+pub fn failRound(h: *LaneHost, err: anyerror) void {
+    failed(h, err);
+    failAll(h, @errorName(err));
 }
 
 /// A failed round ends every job it admitted, with the backend's error; the list is taken whole, not copied.
@@ -75,6 +104,48 @@ pub fn closeAll(h: *LaneHost) void {
     }
     for (queued.items) |job| h.finish(job, .cancelled, "");
 }
+
+/// No memory for another lane yet: the job waits at the queue's head, and admission holds until a job ends.
+pub fn requeue(h: *LaneHost, job: *Job) bool {
+    if (job.stream.pending != null or job.delivered != 0) return h.drop(job, "memory failure after first-token commit");
+    h.lock();
+    for (h.admitted.items, 0..) |j, i| if (j == job) {
+        _ = h.admitted.orderedRemove(i);
+        break;
+    };
+    const others = h.admitted.items.len;
+    const waits = others > 0 and blk: { // with nothing else running no memory comes back: it would wait forever
+        h.queued.insert(h.gpa, 0, job) catch break :blk false;
+        break :blk true;
+    };
+    @import("lane_host_load.zig").ended(job); // before the teardown: this attempt's time leaves with it
+    if (waits) {
+        h.load.requeued += 1;
+        h.memory_lanes = others; // under the lock: a publish reads it
+    }
+    h.unlock();
+    if (!waits) {
+        h.finish(job, .failed, if (others > 0) "out of memory" else alone_words);
+        return true;
+    }
+    job.fill_on.store(false, .release); // off the lists before the teardown a status reader could have walked into
+    job.reported();
+    if (job.stream.grammar) |g| g.deinit(h.gpa); // the next admission compiles its own
+    job.stream.deinit(h.gpa);
+    lane_stream.freeProposer(h, job);
+    recalls.release(job);
+    job.started = false;
+    job.fill_began = false;
+    job.reached = 0;
+    job.entry = null; // looked up again at its next admission
+    h.gpa.free(job.marks);
+    job.marks = &.{};
+    h.gpa.free(job.key);
+    job.key = &.{};
+    return false;
+}
+
+const alone_words = "the engine has no memory for this request's caches with nothing else running: lower --context or --parallel";
 
 test {
     _ = @import("lane_host_interrupted_test.zig");

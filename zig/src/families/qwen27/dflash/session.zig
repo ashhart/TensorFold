@@ -38,6 +38,8 @@ pub const Session = struct {
         var lattice = try execution.appendBlock(ops, graph, preparation, s.context, batch.values, batch.positions, next, pending, block);
         defer lattice.deinit();
         s.context = next;
+        const metric = @import("metal").pass_metrics.phase(.selector);
+        defer metric.end();
         return selector.propose(gpa, graph, lattice, pending, try std.math.add(u64, next.end, 1), options);
     }
     pub fn firstDraw(s: Session) !u64 {
@@ -52,11 +54,15 @@ pub const Session = struct {
         if (!std.meta.eql(s.config, graph.config) or first_draw != try s.firstDraw()) return error.BadDraftPosition;
         var lattice = try execution.forwardBlock(ops, graph, preparation, s.context, pending, block);
         defer lattice.deinit();
+        const metric = @import("metal").pass_metrics.phase(.selector);
+        defer metric.end();
         return selector.propose(gpa, graph, lattice, pending, first_draw, options);
     }
     pub fn tree(s: Session, gpa: std.mem.Allocator, ops: op.Ops, graph: *const weights.Graph, preparation: op.Preparation, pending: u32, first_draw: u64, options: selector.Options) !selector.Tree {
         var lattice = try s.propose(ops, graph, preparation, pending, first_draw);
         defer lattice.deinit();
+        const metric = @import("metal").pass_metrics.phase(.selector);
+        defer metric.end();
         return selector.propose(gpa, graph, lattice, pending, first_draw, options);
     }
 };

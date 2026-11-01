@@ -150,25 +150,25 @@ pub fn release(f: *Forward) !void {
     f.slot = .{};
 }
 
-/// Rank 0: a restore to the followers, with the entry's ids when it is not in RAM ([op, id, ids...]).
-pub fn sendRestore(f: *Forward, id: u32, ids: ?[]const u32) !void {
+/// Rank 0: [op, id, position, key words, ids...]; RAM restores omit the ids.
+pub fn sendRestore(f: *Forward, id: u32, want: Forward.Want, ids: ?[]const u32) !void {
     if (!f.leads()) return;
     const extra = if (ids) |x| x.len else 0;
-    const msg = try f.gpa.alloc(i64, 2 + extra);
+    const msg = try f.gpa.alloc(i64, 5 + extra);
     defer f.gpa.free(msg);
     msg[0] = op_sess_restore;
     msg[1] = id;
-    if (ids) |x| for (x, msg[2..]) |t, *y| {
+    want.encode(msg[2..5]);
+    if (ids) |x| for (x, msg[5..]) |t, *y| {
         y.* = t;
     };
     try f.link.?.send(msg);
 }
 
 /// Rank 0: a session operation to the followers (before running it).
-pub fn sendSess(f: *Forward, op: enum { save, restore, prompt }, id: u32) !void {
+pub fn sendSess(f: *Forward, op: enum { save, prompt }, id: u32) !void {
     if (f.leads()) try f.link.?.send(&.{ switch (op) {
         .save => op_sess_save,
-        .restore => op_sess_restore,
         .prompt => op_sess_prompt,
     }, id });
 }
@@ -223,6 +223,8 @@ pub fn follow(f: *Forward) !void {
     while (true) {
         const msg = try f.link.?.recvGrow(f.gpa, &buf);
         if (msg.len == 0) return error.BadPlan;
+        var activity: @import("round_progress.zig").Progress.Scope = if (f.progress) |progress| progress.begin(.follower) else .{ .owner = null };
+        defer activity.end();
         const ended = followOp(f, msg, &ids, &prompt, &picks) catch |e| {
             // Runner.guard failed the leader's same window before any launch: only its request fails
             if (e != error.MissingTritonVariant) return e;
@@ -280,8 +282,10 @@ fn followOp(f: *Forward, msg: []const i64, ids: *std.ArrayList(u32), prompt: *st
         },
         op_sess_restore => {
             const x = f.sess orelse return error.BadPlan;
-            if (msg.len < 2) return error.BadPlan;
-            try x.restore(x.ptr, @intCast(msg[1]), msg[2..]);
+            if (msg.len < 5 or msg[1] < 0 or msg[1] > std.math.maxInt(u32)) return error.BadPlan;
+            const want = try Forward.Want.decode(msg[2..5]);
+            for (msg[5..]) |id| if (id < 0 or id > std.math.maxInt(u32)) return error.BadPlan;
+            try x.restore(x.ptr, @intCast(msg[1]), want, msg[5..]);
         },
         op_sess_prompt => {
             const x = f.sess orelse return error.BadPlan;

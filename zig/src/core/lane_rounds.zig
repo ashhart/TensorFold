@@ -95,6 +95,7 @@ fn round(h: *LaneHost, rd: Rounds) bool {
     h.unlock();
     for (refused.items) |x| h.finish(x.job, .failed, x.why);
     rd.vtable.admitted(rd.ctx) catch |e| {
+        ends.failed(h, e);
         ends.failAll(h, h.words(e));
         return true;
     };
@@ -103,13 +104,14 @@ fn round(h: *LaneHost, rd: Rounds) bool {
         if (!lane_stream.open(h, job)) continue;
         rd.vtable.arm(rd.ctx, @intFromPtr(job));
         const b = h.core.beginStream(&job.stream) catch |e| {
-            _ = h.drop(job, h.words(e));
+            _ = ends.dropFailed(h, job, e);
             continue;
         };
         rd.vtable.began(rd.ctx, @intFromPtr(job), b.damaged);
     }
     // this round's pieces, a decode round of the streams decoding, then the prompts whose rows are in
     rd.vtable.plan(rd.ctx, &h.pieces, &h.finals) catch |e| {
+        ends.failed(h, e);
         ends.failAll(h, h.words(e));
         return true;
     };
@@ -132,6 +134,7 @@ fn round(h: *LaneHost, rd: Rounds) bool {
                 n += 1;
             }
             if (n > 0) h.core.pieces(list[0..n]) catch |e| {
+                ends.failed(h, e);
                 for (jobs[0..n], 0..) |job, i| {
                     const seen = for (jobs[0..i]) |previous| {
                         if (previous == job) break true;
@@ -146,6 +149,7 @@ fn round(h: *LaneHost, rd: Rounds) bool {
         const job: *Job = @ptrFromInt(piece.key);
         if (job.stream.finished) continue;
         h.core.piece(&job.stream, piece.start, piece.end, piece.save) catch |e| {
+            ends.failed(h, e);
             dropPiece(h, job, h.words(e));
         };
     }
@@ -159,7 +163,7 @@ fn round(h: *LaneHost, rd: Rounds) bool {
     if (h.core.activeCount() > 0) {
         did = true;
         h.core.step() catch |e| {
-            ends.failAll(h, @errorName(e));
+            ends.failRound(h, e);
             return true;
         };
     }
@@ -212,6 +216,7 @@ fn runFinals(h: *LaneHost) void {
                 n += 1;
             }
             h.core.prepareFinals(ss[0..n]) catch |e| {
+                ends.failed(h, e);
                 ends.failAll(h, h.words(e));
                 return;
             };
@@ -241,7 +246,7 @@ fn runFinals(h: *LaneHost) void {
             if (joined > 0) std.log.info("join drafts: {d} of {d} finished prompts drafted in one pass", .{ joined, n });
             for (jobs[0..n], errs[0..n]) |job, x| {
                 if (x) |e| {
-                    _ = if (e == error.Cancelled) h.cancel(job) else h.drop(job, h.words(e));
+                    _ = if (e == error.Cancelled) h.cancel(job) else ends.dropFailed(h, job, e);
                     continue;
                 }
                 h.prefilled(job, job.began);
@@ -253,7 +258,7 @@ fn runFinals(h: *LaneHost) void {
         const job: *Job = @ptrFromInt(key);
         if (job.stream.finished) continue;
         h.core.finishStream(&job.stream) catch |e| {
-            _ = if (e == error.Cancelled) h.cancel(job) else h.drop(job, h.words(e));
+            _ = if (e == error.Cancelled) h.cancel(job) else ends.dropFailed(h, job, e);
             continue;
         };
         h.prefilled(job, job.began);
@@ -263,6 +268,8 @@ fn runFinals(h: *LaneHost) void {
 /// The engine thread under a round planner; an idle round waits for an arrival, a cancel or a short timeout.
 pub fn run(h: *LaneHost, rd: Rounds) void {
     while (true) {
+        var activity = @import("lane_activity.zig").Activity.enter(h.activity);
+        defer activity.end();
         ends.takeCancels(h);
         pressure.step(h);
         rows_host.answer(h);
@@ -287,6 +294,7 @@ pub fn run(h: *LaneHost, rd: Rounds) void {
             continue;
         }
         if (!work) {
+            activity.end();
             if (rows_host.idle(h)) continue;
             if (h.cancels.items.len == 0) h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } }) catch {};
             h.unlock();

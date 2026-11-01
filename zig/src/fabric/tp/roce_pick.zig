@@ -71,6 +71,34 @@ pub fn choose(ports: []const rv.Port, peer: []const [4]u8, out: *[rv.max_hcas]rv
     return .{ .n = n, .shared = true };
 }
 
+fn includes(specs: []const rv.HcaSpec, s: rv.HcaSpec) bool {
+    for (specs) |x| if (std.mem.eql(u8, x.name[0..x.name_len], s.name[0..s.name_len])) return true;
+    return false;
+}
+
+/// Three ranks or more: `choose` toward each peer alone, the most ports a peer (`limit` down) whose union fits.
+pub fn choosePeers(ports: []const rv.Port, peers: []const []const [4]u8, out: *[rv.max_hcas]rv.HcaSpec, limit: usize) Pick {
+    const cap = @min(limit, rv.max_hcas);
+    var k = cap;
+    // a switch: every peer's choice is the same ports; a switchless ring: each neighbour its own
+    next: while (k > 0) : (k -= 1) {
+        var n: usize = 0;
+        for (peers) |peer| {
+            var one: [rv.max_hcas]rv.HcaSpec = undefined;
+            const p = choose(ports, peer, &one, k);
+            // a peer on no /24 of ours: the first usable ports, as `choose` (the wire refuses them)
+            if (!p.shared) return choose(ports, &.{}, out, cap);
+            for (one[0..p.n]) |s| if (!includes(out[0..n], s)) {
+                if (n == cap) continue :next;
+                out[n] = s;
+                n += 1;
+            };
+        }
+        return .{ .n = n, .shared = true };
+    }
+    return .{ .n = 0, .shared = false };
+}
+
 /// `[count][count x IPv4]` of the usable ports, the blob each rank sends.
 fn encode(ports: []const rv.Port, out: *[blob_bytes]u8) []const u8 {
     var n: u8 = 0;
@@ -123,11 +151,16 @@ pub fn selectFrom(cfg: Config, b: *bootstrap.Bootstrap, ports: []const rv.Port, 
     const all = try b.allGather(encode(ports, &mine), &buf, &blobs);
     if (cfg.roce_hca) |text| return .{ .n = try rv.parseSpecs(text, out), .shared = false, .explicit = true };
     var peer: [bootstrap.max_ranks * max_ports][4]u8 = undefined;
+    var lists: [bootstrap.max_ranks][]const [4]u8 = undefined;
     var n_peer: usize = 0;
+    var n_list: usize = 0;
     for (all, 0..) |blob, r| if (r != b.rank) {
-        n_peer += decode(blob, peer[n_peer..]);
+        const k = decode(blob, peer[n_peer..]);
+        lists[n_list] = peer[n_peer..][0..k];
+        n_list += 1;
+        n_peer += k;
     };
-    const pick = choose(ports, peer[0..n_peer], out, cfg.roce_hcas);
+    const pick = if (b.world >= 3) choosePeers(ports, lists[0..n_list], out, cfg.roce_hcas) else choose(ports, peer[0..n_peer], out, cfg.roce_hcas);
     if (!pick.shared and pick.n > 0) log.warn("tp roce: no RoCE port shares an IPv4 /24 with the peer's; using the first {d} active (set TF_TP_ROCE_HCA)", .{pick.n});
     return pick;
 }
@@ -242,6 +275,40 @@ test "two rails on one /24 count once per peer port; no shared /24 keeps the lis
     var out: [max_ports][4]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 0), decode(&.{ 2, 1, 2, 3, 4 }, &out));
     try std.testing.expectEqual(@as(?u8, 3), specs[0].gid);
+}
+
+test "three ranks: one port toward each neighbour of a switchless ring, the same two ports to every peer of a switch" {
+    var specs: [rv.max_hcas]rv.HcaSpec = undefined;
+    var buf: [128]u8 = undefined;
+    // each port's two functions on two /24s numbered by the neighbour, so the lowest /24s all lead to rank 1
+    const ports = [_]rv.Port{
+        port("rocep1s0f0", true, .{ 10, 1, 0, 1 }),
+        port("rocep1s0f1", true, .{ 10, 2, 0, 1 }),
+        port("roceP2p1s0f0", true, .{ 10, 1, 1, 1 }),
+        port("roceP2p1s0f1", true, .{ 10, 2, 1, 1 }),
+    };
+    const to1 = [_][4]u8{ .{ 10, 1, 0, 2 }, .{ 10, 1, 1, 2 }, .{ 10, 3, 0, 1 }, .{ 10, 3, 1, 1 } };
+    const to2 = [_][4]u8{ .{ 10, 2, 0, 2 }, .{ 10, 2, 1, 2 }, .{ 10, 3, 0, 2 }, .{ 10, 3, 1, 2 } };
+    // every peer's addresses at once (the two-rank rule): both functions toward rank 1, none toward rank 2
+    const both = to1 ++ to2;
+    try std.testing.expectEqualStrings("rocep1s0f0,roceP2p1s0f0", names(specs[0..choose(&ports, &both, &specs, 2).n], &buf));
+    const ring = choosePeers(&ports, &.{ &to1, &to2 }, &specs, 2);
+    try std.testing.expect(ring.shared);
+    try std.testing.expectEqualStrings("rocep1s0f0,rocep1s0f1", names(specs[0..ring.n], &buf));
+    // one port cannot reach two neighbours: nothing picked, and the ranks take NCCL
+    try std.testing.expectEqual(@as(usize, 0), choosePeers(&ports, &.{ &to1, &to2 }, &specs, 1).n);
+    // a switch: both peers list the same two /24s of ours, so the two-rank rule's two ports
+    const s1 = [_][4]u8{ .{ 10, 1, 0, 3 }, .{ 10, 2, 0, 3 } };
+    const s2 = [_][4]u8{ .{ 10, 1, 0, 4 }, .{ 10, 2, 0, 4 } };
+    const sw = choosePeers(&ports, &.{ &s1, &s2 }, &specs, 2);
+    try std.testing.expectEqualStrings("rocep1s0f0,rocep1s0f1", names(specs[0..sw.n], &buf));
+    const all = s1 ++ s2;
+    try std.testing.expectEqualStrings("rocep1s0f0,rocep1s0f1", names(specs[0..choose(&ports, &all, &specs, 2).n], &buf));
+    // a peer on no /24 of ours: the first usable ports, not shared, as `choose` without a peer
+    const elsewhere = [_][4]u8{.{ 10, 9, 9, 9 }};
+    const far = choosePeers(&ports, &.{ &to1, &elsewhere }, &specs, 2);
+    try std.testing.expect(!far.shared);
+    try std.testing.expectEqualStrings("rocep1s0f0,rocep1s0f1", names(specs[0..far.n], &buf));
 }
 
 test "hca's line: the picked names for NCCL; no device or no shared /24 is refused, an explicit list is taken" {
@@ -463,4 +530,57 @@ test "hca over a real bootstrap: both ranks print their peer-linked ports; an ex
     try hcaPair(auto, .{ &.{}, ports[1] }, &lines, &bufs);
     try std.testing.expectError(error.NoRoceDevice, lines[0]);
     try std.testing.expectError(error.NoSharedSubnet, lines[1]);
+}
+
+/// Three Sparks cabled in a triangle, no switch: each port's two functions on the link's two /24s (10.41.ab, 10.42.ab).
+const triangle = [3][4]rv.Port{ .{
+    port("rocep1s0f0", true, .{ 10, 41, 13, 1 }),
+    port("rocep1s0f1", true, .{ 10, 41, 12, 1 }),
+    port("roceP2p1s0f0", true, .{ 10, 42, 13, 1 }),
+    port("roceP2p1s0f1", true, .{ 10, 42, 12, 1 }),
+}, .{
+    port("rocep1s0f0", true, .{ 10, 41, 12, 2 }),
+    port("rocep1s0f1", true, .{ 10, 41, 23, 1 }),
+    port("roceP2p1s0f0", true, .{ 10, 42, 12, 2 }),
+    port("roceP2p1s0f1", true, .{ 10, 42, 23, 1 }),
+}, .{
+    port("rocep1s0f0", true, .{ 10, 41, 13, 2 }),
+    port("rocep1s0f1", true, .{ 10, 41, 23, 2 }),
+    port("roceP2p1s0f0", true, .{ 10, 42, 13, 2 }),
+    port("roceP2p1s0f1", true, .{ 10, 42, 23, 2 }),
+} };
+
+/// One rank's `selectFrom` over a real bootstrap of `cfg.world` ranks (rank 0 accepts on `l`): its pick's names.
+fn pickRank(cfg: Config, l: ?sock.Fd, ports: []const rv.Port, buf: *[list_bytes]u8, got: *[]const u8, err: *?anyerror) void {
+    var b = (if (l) |fd| bootstrap.Bootstrap.acceptOn(fd, cfg.world, 5 * std.time.ns_per_s) else bootstrap.Bootstrap.open(cfg)) catch |e| {
+        err.* = e;
+        return;
+    };
+    defer b.close();
+    var specs: [rv.max_hcas]rv.HcaSpec = undefined;
+    const pick = selectFrom(cfg, &b, ports, &specs) catch |e| {
+        err.* = e;
+        return;
+    };
+    got.* = names(specs[0..pick.n], buf);
+}
+
+test "three ranks over a real bootstrap: each picks one port toward each neighbour of a switchless triangle" {
+    const l = try bootstrap.testListener();
+    defer sock.close(l.fd);
+    var bufs: [3][list_bytes]u8 = undefined;
+    var got: [3][]const u8 = @splat("");
+    var errs: [3]?anyerror = @splat(null);
+    var threads: [2]std.Thread = undefined;
+    for (&threads, 1..) |*t, r| {
+        const cfg: Config = .{ .world = 3, .rank = @intCast(r), .link_port = l.port, .connect_timeout_ns = 5 * std.time.ns_per_s };
+        t.* = try std.Thread.spawn(.{}, pickRank, .{ cfg, null, &triangle[r], &bufs[r], &got[r], &errs[r] });
+    }
+    pickRank(.{ .world = 3 }, l.fd, &triangle[0], &bufs[0], &got[0], &errs[0]);
+    for (threads) |t| t.join();
+    for (errs) |e| if (e) |x| return x;
+    // rank 0 lists rank 1's link first (10.41.12), then rank 2's (10.41.13); the wire pairs each with its neighbour's
+    try std.testing.expectEqualStrings("rocep1s0f1,rocep1s0f0", got[0]);
+    try std.testing.expectEqualStrings("rocep1s0f0,rocep1s0f1", got[1]);
+    try std.testing.expectEqualStrings("rocep1s0f0,rocep1s0f1", got[2]);
 }

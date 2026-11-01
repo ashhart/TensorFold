@@ -303,3 +303,157 @@ test "tiny conditional score differences collapse before sibling selection" {
     try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2, 3 }, tree.tokens);
     try std.testing.expectEqualSlices(i32, &.{ -1, -1, -1, -1 }, tree.parents);
 }
+
+test "qwen27 window: 31 selected nodes fit a 32-row verify from the existing drafter lattice" {
+    const a = std.testing.allocator;
+    var store = try fixtures.Store.init(a);
+    defer store.deinit();
+    var graph = try store.graph(a);
+    defer graph.deinit();
+    var fake: Fake = .{};
+    var lattice = try execution.forward(fake.ops(), &graph, .{ .mode = .bf16_reference }, .{ .cache = 1, .begin = 0, .end = 1 }, 3);
+    defer lattice.deinit();
+    var tree = try selector.propose(a, &graph, lattice, 3, 2, .{ .nodes = 31, .children = 2 });
+    defer tree.deinit();
+    try std.testing.expectEqual(@as(usize, 31), tree.tokens.len);
+    const parents = try tree.verifyParents(a);
+    defer a.free(parents);
+    try std.testing.expectEqual(@as(usize, 32), parents.len);
+    for (parents[1..], 1..) |parent, i| try std.testing.expect(parent >= 0 and parent < i);
+}
+
+test "qwen27 window: 63-node tree includes all sixteen likely siblings from the same masked block" {
+    const a = std.testing.allocator;
+    var store = try fixtures.Store.init(a);
+    defer store.deinit();
+    var graph = try store.graph(a);
+    defer graph.deinit();
+    graph.config.topk = 16;
+    var fake: Fake = .{};
+    var lattice = try execution.forward(fake.ops(), &graph, .{ .mode = .bf16_reference }, .{ .cache = 1, .begin = 0, .end = 1 }, 3);
+    defer lattice.deinit();
+    var tree = try selector.propose(a, &graph, lattice, 3, 2, .{ .nodes = 63, .children = 16 });
+    defer tree.deinit();
+    try std.testing.expectEqual(@as(usize, 63), tree.tokens.len);
+    var roots: usize = 0;
+    for (tree.parents) |parent| roots += @intFromBool(parent == -1);
+    try std.testing.expectEqual(@as(usize, 16), roots);
+    const parents = try tree.verifyParents(a);
+    defer a.free(parents);
+    try std.testing.expectEqual(@as(usize, 64), parents.len);
+    for (parents[1..], 1..) |parent, i| try std.testing.expect(parent >= 0 and parent < i);
+    try std.testing.expectEqual(@as(u32, 7), lattice.depth);
+}
+
+test "qwen27 window: priced siblings match exhaustive expected accepted tokens per measured ms" {
+    const a = std.testing.allocator;
+    var store = try fixtures.Store.init(a);
+    defer store.deinit();
+    var graph = try store.graph(a);
+    defer graph.deinit();
+    var fake: Fake = .{};
+    var lattice = try Fake.lattice(&fake, 1, undefined, .{ .handle = 1, .rows = 2, .width = graph.config.rank, .stride = graph.config.rank, .dtype = .bf16 }, graph.config);
+    defer lattice.deinit();
+    for (0..2) |row| {
+        lattice.unary[row * 2] = @floatCast(@log(@as(f64, 0.6)));
+        lattice.unary[row * 2 + 1] = @floatCast(@log(@as(f64, 0.4)));
+    }
+    const costs = [_]f64{ 1, 1.01, 1.02, 1.1, 2.5, 4, 5 };
+    var tree = try selector.propose(a, &graph, lattice, 3, 2, .{ .nodes = 6, .children = 2, .edge = 0, .tau = 1, .costs = &costs });
+    defer tree.deinit();
+    const x = @exp(@as(f64, lattice.unary[0]));
+    const y = @exp(@as(f64, lattice.unary[1]));
+    const p0 = x / (x + y);
+    const p1 = y / (x + y);
+    const mass = [_]f64{ p0, p1, p0 * p0, p0 * p1, p1 * p0, p1 * p1 };
+    const parents = [_]i32{ -1, -1, 0, 0, 1, 1 };
+    var best: f64 = 0;
+    var best_count: usize = 0;
+    for (0..64) |subset| {
+        var expected: f64 = 1;
+        var count: usize = 0;
+        var closed = true;
+        for (parents, mass, 0..) |parent, probability, i| {
+            if (subset & (@as(usize, 1) << @intCast(i)) == 0) continue;
+            if (parent >= 0 and subset & (@as(usize, 1) << @intCast(parent)) == 0) closed = false;
+            expected += probability;
+            count += 1;
+        }
+        if (closed and expected / costs[count] > best) {
+            best = expected / costs[count];
+            best_count = count;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 3), best_count);
+    try std.testing.expectEqual(best_count, tree.tokens.len);
+    var expected: f64 = 1;
+    for (tree.scores) |score| expected += @exp(score);
+    try std.testing.expectApproxEqAbs(best, expected / costs[tree.tokens.len], 1e-12);
+    try std.testing.expectError(error.BadDraftCosts, selector.propose(a, &graph, lattice, 3, 2, .{ .nodes = 6, .costs = costs[0..6] }));
+    var invalid = costs;
+    invalid[2] = std.math.nan(f64);
+    try std.testing.expectError(error.BadDraftCosts, selector.propose(a, &graph, lattice, 3, 2, .{ .nodes = 6, .costs = &invalid }));
+    invalid[2] = 0;
+    try std.testing.expectError(error.BadDraftCosts, selector.propose(a, &graph, lattice, 3, 2, .{ .nodes = 6, .costs = &invalid }));
+}
+
+test "qwen27 window: common-core proposals retain candidates for calibrated window pricing" {
+    const a = std.testing.allocator;
+    var store = try fixtures.Store.init(a);
+    defer store.deinit();
+    var graph = try store.graph(a);
+    defer graph.deinit();
+    var fake: Fake = .{};
+    var lattice = try Fake.lattice(&fake, 1, undefined, .{ .handle = 1, .rows = 2, .width = graph.config.rank, .stride = graph.config.rank, .dtype = .bf16 }, graph.config);
+    defer lattice.deinit();
+    const prices = [_]f64{ 1, 1.7, 3, 4, 4, 4, 4 };
+    const options = @import("runtime_model.zig").Model.selection(.{ .context = null, .pending = 3, .nodes = 6, .costs = &prices });
+    var tree = try selector.propose(a, &graph, lattice, 3, 2, options);
+    defer tree.deinit();
+    const calibrated = [_]f64{ 0.99, 0.01, 0.495, 0.495, 0.005, 0.005 };
+    var expected: f64 = 1;
+    var rate: f64 = 1;
+    var best: usize = 0;
+    for (calibrated[0..tree.tokens.len], 0..) |chance, i| {
+        expected += chance;
+        if (expected / prices[i + 1] > rate) {
+            rate = expected / prices[i + 1];
+            best = i + 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), best);
+    try std.testing.expectEqual(@as(usize, 6), tree.tokens.len);
+    const parents = try tree.verifyParents(a);
+    defer a.free(parents);
+    try std.testing.expectEqual(@as(usize, 7), parents.len);
+    const standalone = @import("runtime_model.zig").Model.selection(.{ .context = null, .pending = 3, .nodes = 6, .costs = &prices, .defer_price = false });
+    var local = try selector.propose(a, &graph, lattice, 3, 2, standalone);
+    defer local.deinit();
+    try std.testing.expectEqual(@as(usize, 0), local.tokens.len);
+}
+
+test "qwen27 window: tree search allocates only its three owned result arrays" {
+    const a = std.testing.allocator;
+    var store = try fixtures.Store.init(a);
+    defer store.deinit();
+    var graph = try store.graph(a);
+    defer graph.deinit();
+    var fake: Fake = .{};
+    var lattice = try Fake.lattice(&fake, 1, undefined, .{ .handle = 1, .rows = 2, .width = graph.config.rank, .stride = graph.config.rank, .dtype = .bf16 }, graph.config);
+    defer lattice.deinit();
+    var counter = std.testing.FailingAllocator.init(a, .{});
+    var counted = lattice;
+    counted.gpa = counter.allocator();
+    var tree = try selector.propose(counter.allocator(), &graph, counted, 3, 2, .{ .nodes = 63, .children = 16 });
+    defer tree.deinit();
+    try std.testing.expectEqual(@as(usize, 3), counter.alloc_index);
+    for (0..3) |fail| {
+        var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = fail });
+        counted.gpa = failing.allocator();
+        if (selector.propose(failing.allocator(), &graph, counted, 3, 2, .{ .nodes = 63, .children = 16 })) |t| {
+            var unexpected = t;
+            unexpected.deinit();
+            return error.TestUnexpectedResult;
+        } else |err| try std.testing.expectEqual(error.OutOfMemory, err);
+    }
+}

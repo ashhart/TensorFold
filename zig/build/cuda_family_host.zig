@@ -3,6 +3,8 @@ const std = @import("std");
 
 pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.Build.Step) void {
     const host = b.graph.host;
+    @import("minimax_cuda.zig").hostTests(b, host, cuda, mods.core, mods.lanes, step);
+    @import("cuda_groups_host.zig").host(b, cuda, mods, step);
     const prefill = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen stepped prefill:"} }));
     b.step("test-qwen35-prefill-host", "Interrupted stepped prompt lifecycle without devices").dependOn(&prefill.step);
     step.dependOn(&prefill.step);
@@ -10,6 +12,8 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const ct_run = b.addRunArtifact(b.addTest(.{ .root_module = ct_admit }));
     b.step("test-qwen35-modelopt-admission-host", "Synthetic stored-format admission and full-precision loading without devices").dependOn(&ct_run.step);
     step.dependOn(&ct_run.step);
+    const share_faults = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen share faults:"} }));
+    b.step("test-qwen35-share-faults-host", "TF_QWEN_KV_SHARE's pages through failed allocations, lanes, promises, uploads and copies without devices").dependOn(&share_faults.step);
     const admission = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/cuda_exl3_loader_test.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } } });
     const admission_run = b.addRunArtifact(b.addTest(.{ .root_module = admission, .filters = &.{"EXL3 admission:"} }));
     b.step("test-qwen35-exl3-admission-host", "Synthetic EXL3 tensors and dry-run refusals before upload").dependOn(&admission_run.step);

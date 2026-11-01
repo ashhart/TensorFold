@@ -29,6 +29,27 @@ pub fn streams(a: std.mem.Allocator, family: []const u8, stream_bytes: u64, left
     return p.lanes;
 }
 
+/// A paged family's plan: its layout, the streams and the pages of one arena buffer.
+pub const Pages = struct { layout: kv_pool.Layout, lanes: u32, pages: usize };
+
+/// kv_pool's plan of streams and pages in `left`, a `window` a stream at most, one buffer's pages; null: `problem`.
+pub fn pages(a: std.mem.Allocator, flag: []const u8, l: kv_pool.Layout, device: mtl.Device, o: api.Open, window: u64, left: u64, problem: *[]const u8) !?Pages {
+    const lanes_n: u32 = @max(o.lanes, 2);
+    const p = kv_pool.plan(l, .{ .room = left, .engine = l.fixed_bytes, .lanes = lanes_n, .fixed = o.lanes_fixed, .window = window, .engine_paged = true }) catch |e| {
+        problem.* = switch (e) {
+            error.NoStream => try std.fmt.allocPrint(a, "{s}: one stream's {d}-token window of KV pages ({d:.2} GiB) does not fit the {d:.2} GiB left under the load limit; lower --context", .{ flag, window, gib(l.pages(window) * l.pageBytes()), gib(left) }),
+            error.TooMany => try std.fmt.allocPrint(a, "{s}: --parallel {d} needs a fixed part and a page for each stream beside the first, more than the {d:.2} GiB left under the load limit", .{ flag, lanes_n, gib(left) }),
+        };
+        return null;
+    };
+    const most = @min(p.pages, device.maxBufferLength() / l.pageBytes());
+    if (most < l.pages(window)) {
+        problem.* = try std.fmt.allocPrint(a, "{s}: one {d}-token window needs {d} pages, one buffer holds {d}; lower --context", .{ flag, window, l.pages(window), most });
+        return null;
+    }
+    return .{ .layout = l, .lanes = p.lanes, .pages = most };
+}
+
 /// Streams the plan would serve from `left`, for the refusal's count.
 fn fit(stream_bytes: u64, left: u64) u32 {
     const p = kv_pool.plan(layout(stream_bytes), .{ .room = left, .engine = stream_bytes, .lanes = std.math.maxInt(u16) }) catch return 0;

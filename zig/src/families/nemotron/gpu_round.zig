@@ -6,6 +6,7 @@ const lanes = @import("lanes");
 const st = @import("state.zig");
 const fwd = @import("forward.zig");
 const layers = @import("layers.zig");
+const kvp = @import("kv_pages.zig");
 const backend = @import("backend.zig");
 const copy_lanes = @import("copy_lanes.zig");
 const Depth = @import("round_depth.zig").Depth;
@@ -231,11 +232,12 @@ const Round = struct {
         _ = win;
         // the kept path's keys and values into place, its hidden rows gathered, absorbed with the tokens after them
         for (0..r.c.attentions) |a| {
-            e.pipe(b.m.kernels.get("tf_kv_compact"));
-            e.buf(r.c.kv[a].k, 0, 0);
-            e.buf(r.c.kv[a].v, 0, 1);
+            const kv = r.c.kv[a];
+            e.pipe(if (kv.paged != null) b.m.kernels.paged.?.glue[1] else b.m.kernels.get("tf_kv_compact"));
+            kvp.bindKv(e, kv, 0, 1);
             e.buf(r.args, a_path * 4, 2);
             e.buf(r.args, a_cmp * 4, 3);
+            if (kv.paged) |pg| kvp.bindTable(e, pg, 4);
             if (a > 0) e.alongside();
             e.run(.{ cfg.head_dim, cfg.kv_heads, 1 }, .{ cfg.head_dim, 1, 1 });
         }

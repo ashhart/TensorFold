@@ -78,7 +78,7 @@ pub fn For(comptime picture: type) type {
             const gh = g.target_h / P;
             const gw = g.target_w / P;
             const out = try gpa.alloc(f32, @as(usize, gh) * gw * vision.patch_width);
-            const rescale: f32 = @floatCast(@as(f64, 1.0) / 255.0);
+            const lut = picture.normalize.table(.rescale_f32, 1.0 / 255.0, mean, sd);
             var row: usize = 0;
             for (0..gh / M) |wy| for (0..gw / M) |wx| for (0..M) |my| for (0..M) |mx| {
                 const py0 = (wy * M + my) * P;
@@ -88,8 +88,7 @@ pub fn For(comptime picture: type) type {
                     const y = py0 + dy;
                     const x = px0 + dx;
                     const v: u8 = if (y < content.height and x < content.width) content.pixels[(y * content.width + x) * 3 + ch] else 0;
-                    const f = @as(f32, @floatFromInt(v)) * rescale;
-                    dst[((ch * vision.temporal + t) * P + dy) * P + dx] = (f - mean[ch]) / sd[ch];
+                    dst[((ch * vision.temporal + t) * P + dy) * P + dx] = lut[ch][v];
                 };
                 row += 1;
             };

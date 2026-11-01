@@ -56,6 +56,7 @@ const embed_tests = @import("embed_tests.zig");
 const pocket_tests = @import("pocket_tests.zig");
 const recapture_tests = @import("recapture_tests.zig");
 const contract_tests = @import("contract_tests.zig");
+const gb10_many_contract = @import("contract_gb10_many.zig");
 const qmm_prefill_many_contract = @import("contract_qmm_prefill_many.zig");
 const qmm_prefill_tile22_contract = @import("contract_qmm_prefill_tile22.zig");
 const glue_contract = @import("contract_flashnext_glue.zig");
@@ -75,6 +76,7 @@ const gdn_prep_tests = @import("gdn_prep_tests.zig");
 const qk_rows_tests = @import("qk_rows_tests.zig");
 const window_tests = @import("window_tests.zig");
 const window_rows_tests = @import("window_rows_tests.zig");
+const window_pages512_tests = @import("window_pages512_tests.zig");
 const window_bench = @import("window_bench.zig");
 const moe_glue_tests = @import("moe_glue_tests.zig");
 const dense_rows_tests = @import("dense_rows_tests.zig");
@@ -219,6 +221,7 @@ const usage =
     \\  block                     DFlash block attention over windowed contexts against float64 (synthetic)
     \\  window                    sliding-window attention against float64 references (synthetic)
     \\  window-rows               window attention at head dims 256 and 512 against float64 ranges (synthetic)
+    \\  window-pages-512          head dim 512 decode and prompt rows over shuffled pages: the contiguous bits (synthetic)
     \\  window-bench WHICH        window attention's GPU time: callers (Kolibri-1's shapes) or gemma (head dims 256, 512)
     \\  moe-glue                  sigmoid top-k routing and the weighted combine against float64 references (synthetic)
     \\  dense-rows                bf16 rows times weight rows (routers, heads) against float64 references (synthetic)
@@ -230,8 +233,13 @@ const usage =
     \\  qmm-prefill-many-contract the GB10 bit-exact multi-projection prompt launch against separate launches
     \\  qmm-prefill-tile22-contract the GB10 large-prompt 2x2 tile against the default tile
     \\  qmm-prefill-many-bench    same-process A-B-A screening for the GB10 launch fusion
+    \\  mtp-rows                  tf_q36m_attn_rows: gates 1-4 (byte-equal to tf_q36m_attn a segment) and float64 alone
     \\  qwen-pages                qwen35.cu's attention cache through a page table: paged == contiguous, float64, red controls
+    \\  rope-yarn                 YaRN rope in tf_q35_rope, tf_q35_rope8 and tf_q36m_norm_rope against float64, to 1M
     \\  kernel-contract-limits DIR   each registered launch against sm_80/86/89/120/121 from the fatbins in DIR
+    \\  pocket-contract           Nemotron's pocket kernels (learned neurons) through gates 1-4, controls red
+    \\  minimax-contract          MiniMax-M3.1-Flash's indexer and block-sparse attention through gates 1-4, controls red
+    \\  moss-contract             MOSS-Image's own kernels and its full attention through gates 1-4, controls red
     \\  glm-exl3                  GLM's EXL3 routed experts, decode and prompt, against float64 (synthetic)
     \\  glm-kda-pad-split         TF_GLM_KDA_PAD's padding of the bf16 and split KDA stacks at TP=3 (synthetic)
     \\  glm-vision MODEL F32 BF16 IMG  GLM's image tower and preparation against vision_ref.py's torch runs
@@ -251,6 +259,7 @@ const usage =
     \\  dory-pages MODEL LOOPS TEXT N   Dory with its full caches in pages == contiguous: fp32 logits bytes, then replies
     \\  dory-prefill MODEL LOOPS TEXT N  Dory prompt time alone at 512, 2k, 8k and 16k rows (DORY_PAGED=1: on pages)
     \\  gemma4-states MODEL DRAFTER TEXT N   Gemma 4 + DFlash: stepped passes keep the drafter's context, resumed == fresh
+    \\  spark25-pages MODEL TEXT N   Spark2.5: full-layer caches in pool pages == linear ones, replies and logits
     \\  kolibri-reference MODEL IDS  Kolibri-1's layer 0 and head against float64 from the checkpoint (prompt and decode rows)
     \\  kolibri-layers MODEL IDS    Kolibri-1's window edge (513 keys) and its fifth layer's full reach, on the checkpoint
     \\  kolibri-full MODEL IDS N    Kolibri-1: eager rows, steps, drafted, sampled, shared rounds, cuts and kept states alike
@@ -448,15 +457,22 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "q27-gemm")) return q27_gemm_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "gdn-back-27b")) return gdn_back_tests.runShape(gpu, 5120, 64);
     if (std.mem.eql(u8, cmd, "kernel-contract")) return contract_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "gb10-grouped-contract")) return gb10_many_contract.runAll(gpu);
     if (std.mem.eql(u8, cmd, "qmm-prefill-many-contract")) return qmm_prefill_many_contract.run(gpu);
     if (std.mem.eql(u8, cmd, "qmm-prefill-tile22-contract")) return qmm_prefill_tile22_contract.run(gpu);
     if (std.mem.eql(u8, cmd, "qmm-prefill-many-bench")) return qmm_prefill_many_contract.bench(gpu);
+    if (std.mem.eql(u8, cmd, "mtp-rows")) return @import("contract_qwen_mtp_rows.zig").alone(gpu);
     if (std.mem.eql(u8, cmd, "qwen-pages")) return @import("contract_qwen_pages.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "minimax-contract")) return @import("contract_minimax.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "rope-yarn")) return @import("contract_qwen_rope_yarn.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "kernel-contract-limits")) return contract_tests.fatbins(gpu, try arg(rest, 0));
+    if (std.mem.eql(u8, cmd, "pocket-contract")) return @import("contract_pocket.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "moss-contract")) return @import("contract_moss_image.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "tree")) return tree_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "block")) return block_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "window")) return window_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "window-rows")) return window_rows_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "window-pages-512")) return window_pages512_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "window-bench")) return window_bench.run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "moe-glue")) return moe_glue_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "dense-rows")) return dense_rows_tests.run(gpu);
@@ -473,6 +489,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "glm-fp8g-shares")) return glm_fp8g_shares.run(gpu);
     if (std.mem.startsWith(u8, cmd, "dory-")) return dory_serve.run(gpu, cmd, rest);
     if (std.mem.eql(u8, cmd, "gemma4-states")) return @import("gemma4_states_tests.zig").states(gpu, rest);
+    if (std.mem.eql(u8, cmd, "spark25-pages")) return @import("spark25_pages_tests.zig").pages(gpu, rest);
     if (std.mem.eql(u8, cmd, "dory")) return dory_tests.greedy(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
     if (std.mem.eql(u8, cmd, "kolibri-reference")) return kolibri_layer_tests.reference(gpu, try arg(rest, 0), try arg(rest, 1));
     if (std.mem.eql(u8, cmd, "kolibri-layers")) return kolibri_layer_tests.layers(gpu, try arg(rest, 0), try arg(rest, 1));

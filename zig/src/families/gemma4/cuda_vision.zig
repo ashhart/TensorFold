@@ -3,7 +3,8 @@ const std = @import("std");
 const cuda = @import("cuda");
 const wts = @import("cuda_weights.zig");
 const kern = @import("cuda_kernels.zig");
-const image = @import("cuda_image.zig");
+const image = @import("image.zig");
+const steps = image.For(@import("core").picture);
 const tw = @import("cuda_tower.zig");
 
 const vit = cuda.vit;
@@ -26,7 +27,7 @@ pub const Vision = struct {
     e: union(enum) { embedder: Embedder, tower: tw.Tower },
 
     pub fn prepare(v: *const Vision, a: std.mem.Allocator, bytes: []const u8, max_tokens: u32) !image.Prepared {
-        return image.prepare(v.io, a, bytes, @min(max_tokens, v.limits.image_tokens), if (v.e == .tower) .patches else .merged);
+        return steps.prepare(v.io, a, bytes, @min(max_tokens, v.limits.image_tokens), if (v.e == .tower) .patches else .merged);
     }
 
     /// An image's prepared rows to `out` [tokens, hidden] bf16, queued on `s`.
@@ -42,7 +43,7 @@ pub const Vision = struct {
         }
     }
 
-    pub const explain = image.decoderProblem;
+    pub const explain = steps.decoderProblem;
     /// Gemma 4's templates write an image for parts of type "image" (as the Metal family offers them).
     pub const part_type = "image";
 };

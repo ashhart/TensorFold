@@ -109,6 +109,7 @@ pub const Model = struct {
 
     /// A model whose full caches are pages: one slot's rings now; `attach` makes the arena, the other slots' rings.
     pub fn initPaged(gpa: std.mem.Allocator, d: *const cuda.Driver, s: cuda.Stream, w: *const wts.Weights, k: *const Kernels, context: usize) !Model {
+        if (k.win.pages == null) return error.PagesNotLoaded;
         var m = blank(gpa, d, w, context, 1);
         m.paged = true;
         errdefer m.deinit();
@@ -118,6 +119,7 @@ pub const Model = struct {
 
     /// The device bytes `initPaged` allocates.
     pub fn openBytesPaged(gpa: std.mem.Allocator, d: *const cuda.Driver, s: cuda.Stream, w: *const wts.Weights, k: *const Kernels, context: usize) !usize {
+        if (k.win.pages == null) return error.PagesNotLoaded;
         var m = blank(gpa, d, w, context, 1);
         defer m.deinit();
         m.paged = true;
@@ -140,7 +142,7 @@ pub const Model = struct {
     pub fn attach(m: *Model, s: cuda.Stream, extra: usize, pool: usize) !void {
         if (!m.paged or m.paging != null or extra >= pages.max_slots) return error.BadAttach;
         const c = m.c;
-        const per_slot = pages.pagesOf(m.context);
+        const per_slot = try pages.perSlot(m.context);
         const elems = pages.pageElems(c, m.sched.cacheCount(.full));
         const ids = try m.gpa.alloc(u32, pages.max_slots * per_slot);
         errdefer m.gpa.free(ids);

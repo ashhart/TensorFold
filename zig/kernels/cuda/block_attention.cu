@@ -9,6 +9,7 @@
 
 #include "attn_odd.cuh"
 #include "common/qmm_frag.cuh"
+#include "common/cp_async.cuh"
 
 namespace tf_block {
 
@@ -22,7 +23,7 @@ using qmm_frag::mma0;
 constexpr int D = 128, C = D / 8, K16 = D / 16, NB = D / 8, KT = 32;
 constexpr float LOG2E = 1.4426950408889634f;
 
-__device__ __forceinline__ void wait_all() { asm volatile("cp.async.wait_group 0;\n" ::); }
+using tf_common::cp_wait;
 
 __device__ __forceinline__ float texp(float x) {
     float y;
@@ -174,7 +175,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_block_attention(
                 cp16z(vs + sw(i / C, i % C), vc + (int64_t)(in ? key : 0) * D + (i % C) * 8, in);
             }
             commit();
-            wait_all();
+            cp_wait<0>();
             if (odd) attn_odd::clean<D>(vs, blockDim.x);
             __syncthreads();
             f.tile(qa, ks, vs, scale, lane, k0, vis);
@@ -190,7 +191,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_block_attention(
             cp16z(vs + sw(c, i % C), vb + at, in);
         }
         commit();
-        wait_all();
+        cp_wait<0>();
     };
     const auto own = [&](int r, int c) { return r < L && c < L && (!causal || c <= r); };
     context(false);

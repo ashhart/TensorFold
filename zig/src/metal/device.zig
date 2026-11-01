@@ -93,6 +93,7 @@ pub const Device = struct {
 
     /// A new buffer of `len` bytes; `options` from types.ResourceOptions (shared storage by default).
     pub fn buffer(self: Device, len: usize, options: usize) Error!Buffer {
+        @import("pass_metrics.zig").buffer();
         const id = objc.msg(?Id, self.id, "newBufferWithLength:options:", .{ len, options });
         return .{ .id = id orelse return error.NoBuffer };
     }

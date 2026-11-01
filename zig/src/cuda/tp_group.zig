@@ -6,8 +6,19 @@ const stream_ = @import("stream.zig");
 const memory = @import("memory.zig");
 const roce = @import("roce.zig");
 const p2p_report = @import("p2p_report.zig");
+const abi = @import("abi.zig");
 
 const Stream = stream_.Stream;
+
+/// Three ranks or more: a wire a family borrows for small all-gathers (fabric/tp's multirank RoCE), every rank or none.
+pub const Multi = struct {
+    ctx: *anyopaque,
+    fits: *const fn (ctx: *anyopaque, bytes: usize) bool,
+    gather: *const fn (ctx: *anyopaque, s: abi.Stream, mine: abi.DevicePtr, all: abi.DevicePtr, bytes: usize) anyerror!void,
+    check: *const fn (ctx: *anyopaque) anyerror!void, // a failed gather's error, as Group.check reports it
+    abort: *const fn (ctx: *anyopaque) void, // its device waits give up, as NCCL's do on Group.abort
+    deinit: *const fn (ctx: *anyopaque) void,
+};
 
 pub const Group = struct {
     lib: nccl.Library,
@@ -16,6 +27,7 @@ pub const Group = struct {
     world: usize,
     aborted: std.atomic.Value(bool) = .init(false),
     fast: ?*roce.Gather = null, // two ranks' small all-gathers by RoCE writes (openRoce), when both ranks brought it up
+    multi: ?Multi = null, // three ranks or more: small all-gathers on a borrowed wire, set once every rank's probe agreed
 
     /// Rank `rank` of `world` (NCCL opened at run time; NCCL_COMM_ID names rank 0's address, every rank the same).
     pub fn open(d: *const driver.Driver, rank: usize, world: usize) !Group {
@@ -35,10 +47,18 @@ pub const Group = struct {
 
     pub fn close(g: *Group) void {
         p2p_report.ready(); // a transport line still owed is reported before the communicator goes
-        if (g.fast) |f| f.deinit();
+        g.closeWires();
         g.destroyComm();
         g.lib.close();
         g.* = undefined;
+    }
+
+    /// The RoCE wires beside NCCL: two ranks' gathers, or a borrowed one.
+    fn closeWires(g: *Group) void {
+        if (g.fast) |f| f.deinit();
+        g.fast = null;
+        if (g.multi) |m| m.deinit(m.ctx);
+        g.multi = null;
     }
 
     fn destroyComm(g: *Group) void {
@@ -46,6 +66,7 @@ pub const Group = struct {
     }
 
     pub fn abort(g: *Group) void {
+        if (g.multi) |m| m.abort(m.ctx);
         if (!g.aborted.swap(true, .acq_rel)) _ = g.lib.api.ncclCommAbort(g.comm);
     }
 
@@ -58,11 +79,13 @@ pub const Group = struct {
     /// A failed RoCE gather's error (its rows hold nothing valid): call it after a synchronize that reads a gather.
     pub fn check(g: *const Group) !void {
         if (g.fast) |f| try f.check();
+        if (g.multi) |m| try m.check(m.ctx);
     }
 
     /// `bytes` at `mine` from every rank into `all` in rank order (world * bytes there), on `s`.
     pub fn allGather(g: *const Group, s: Stream, mine: u64, all: u64, bytes: usize) !void {
         if (g.fast) |f| if (f.fits(bytes)) return f.gather(s.handle, mine, all, bytes);
+        if (g.multi) |m| if (m.fits(m.ctx, bytes)) return m.gather(m.ctx, s.handle, mine, all, bytes);
         try g.lib.check(g.lib.api.ncclAllGather(mine, all, bytes, .u8, g.comm, s.handle), "ncclAllGather");
     }
 
@@ -102,6 +125,57 @@ pub const Group = struct {
         try dev.download(0, std.mem.sliceAsBytes(out));
     }
 };
+
+test "three ranks send a gather the borrowed wire fits down it and the rest to NCCL; its check, abort and close follow" {
+    const Fake = struct {
+        var gathers: usize = 0;
+        var nccl_gathers: usize = 0;
+        var checks: usize = 0;
+        var aborts: usize = 0;
+        var deinits: usize = 0;
+        var failing = false;
+        fn fits(_: *anyopaque, bytes: usize) bool {
+            return bytes <= 8192;
+        }
+        fn gather(_: *anyopaque, _: abi.Stream, _: abi.DevicePtr, _: abi.DevicePtr, _: usize) anyerror!void {
+            gathers += 1;
+        }
+        fn check(_: *anyopaque) anyerror!void {
+            checks += 1;
+            if (failing) return error.PeerFailed;
+        }
+        fn abort(_: *anyopaque) void {
+            aborts += 1;
+        }
+        fn deinit(_: *anyopaque) void {
+            deinits += 1;
+        }
+        fn allGather(_: abi.DevicePtr, _: abi.DevicePtr, _: usize, _: nccl.DataType, _: nccl.Comm, _: abi.Stream) callconv(.c) nccl.Result {
+            nccl_gathers += 1;
+            return 0;
+        }
+        fn commAbort(_: nccl.Comm) callconv(.c) nccl.Result {
+            return 0;
+        }
+    };
+    var ctx: u8 = 0;
+    var group: Group = .{ .lib = undefined, .comm = null, .rank = 0, .world = 3, .multi = .{ .ctx = &ctx, .fits = Fake.fits, .gather = Fake.gather, .check = Fake.check, .abort = Fake.abort, .deinit = Fake.deinit } };
+    group.lib.api.ncclAllGather = Fake.allGather;
+    group.lib.api.ncclCommAbort = Fake.commAbort;
+    const s: Stream = .{ .d = undefined, .handle = null };
+    try group.allGather(s, 0, 0, 8192);
+    try group.allGather(s, 0, 0, 8193);
+    try std.testing.expectEqual(@as(usize, 1), Fake.gathers);
+    try std.testing.expectEqual(@as(usize, 1), Fake.nccl_gathers);
+    try group.check();
+    Fake.failing = true;
+    try std.testing.expectError(error.PeerFailed, group.check());
+    group.abort();
+    try std.testing.expectEqual(@as(usize, 1), Fake.aborts);
+    group.closeWires();
+    try std.testing.expectEqual(@as(usize, 1), Fake.deinits);
+    try std.testing.expect(group.multi == null);
+}
 
 test "an aborted two-rank communicator is not destroyed a second time" {
     const Fake = struct {

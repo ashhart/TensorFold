@@ -11,7 +11,6 @@ const resume_rules = @import("qwen27_resume.zig");
 const Metal = lb.Metal;
 const Ring = q.tap_ring.Ring;
 const Context = q.dflash.runtime_model.Context;
-const max_rows = lb.max_rows;
 
 /// A prompt pass under way in `slot`: where its next chunk starts, where its restore ended, and its encoded images.
 pub const Fill = struct { slot: u32, at: usize, from: usize, images: ?q.image_rows.Images, checkpoint: u32 = 0, rewind: u32 = 0 }; // rewind: slot 0's point
@@ -20,13 +19,13 @@ pub const Fill = struct { slot: u32, at: usize, from: usize, images: ?q.image_ro
 pub fn prefill(b: *Metal, s: *lanes.Stream, slot: u32) !void {
     var f = try opening(b, s, slot);
     defer closing(b, s);
-    while (!try chunk(b, s, &f)) {}
+    while (!try chunk(b, s, &f, 0)) {}
 }
 
 /// A prompt pass begins in `slot`: its kept state restored and its images encoded (one image prompt fills at a time).
 pub fn opening(b: *Metal, s: *lanes.Stream, slot: u32) !Fill {
     const ids = s.prompt();
-    if (ids.len == 0 or ids.len + s.max_new + max_rows > b.runner.capacity) return error.PromptTooLong;
+    if (ids.len == 0 or ids.len + s.max_new + b.window > b.runner.capacity) return error.PromptTooLong;
     if (s.yields()) return error.Yielded; // a background pass steps aside before it touches the slot
     // as does one over the conversation slot 0 holds when the cache cannot keep its end: it would leave nothing there
     if (slot == 0 and s.yield_check != null and s.max_new == 0 and !keepsEnd(s) and resumable(b, s, 0) != .none) return error.Yielded;
@@ -71,8 +70,8 @@ pub fn charge(b: *const Metal, s: *lanes.Stream, before: f64) void {
     if (b.runner.trace != null) s.chargeGpu(b.runner.gpu_seconds - before);
 }
 
-/// The pass's next chunk, its drafter's absorb before its marks; true once the prompt is in.
-pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill) !bool {
+/// The pass's next chunk, its drafter's absorb before its marks; true once the prompt is in. `_: u32` keeps its grid.
+pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill, _: u32) !bool {
     const paused = tf.gpu_profile.pause(b.runner.trace); // prompt passes run unprofiled: TF_Q27_PROFILE's rounds decode
     defer paused.end();
     const ids = s.prompt();
@@ -163,7 +162,7 @@ pub fn bind(b: *Metal, s: *lanes.Stream) !u32 {
 }
 
 /// One chunk of `s`'s prompt pass a call (the lane host's prefill_step), the others' rounds kept first.
-pub fn prefillStep(ptr: *anyopaque, s: *lanes.Stream) anyerror!bool {
+pub fn prefillStep(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
     const b: *Metal = @ptrCast(@alignCast(ptr));
     b.settle() catch {};
     b.dropRound();
@@ -179,7 +178,7 @@ pub fn prefillStep(ptr: *anyopaque, s: *lanes.Stream) anyerror!bool {
     }
     const f = b.fills.getPtr(s).?;
     const slot = f.slot;
-    const done = chunk(b, s, f) catch |err| {
+    const done = chunk(b, s, f, 0) catch |err| {
         endFill(b, s);
         b.owners[slot] = null;
         return err;
@@ -338,7 +337,10 @@ const TapGather = struct {
 
 /// `slot` becomes a kept state: the drafter (slot 0) rebuilds its context from the restored taps.
 pub fn restore(b: *Metal, slot: u32, st: *q.snapshot.State) !void {
-    if (b.drafter(slot)) |d| try d.model.reset();
+    if (b.drafter(slot)) |d| {
+        try d.generation.settle();
+        try d.model.reset();
+    }
     try clearContext(b, slot);
     try q.snapshot.restoreSlot(b.gpa, b.runner, slot, b.ringOf(slot), st);
 }
@@ -377,11 +379,12 @@ pub fn free(b: *const Metal) ?u32 {
 
 /// The drafter absorbs nothing more for a stream that is gone; its slot is free once its state is kept.
 pub fn unbind(b: *Metal, s: *lanes.Stream) void {
+    defer mtl.pass_metrics.end();
     const slot = b.slotOf(s) orelse return;
     b.settle() catch {};
     b.dropRound();
     b.dropTreeOf(slot);
-    if (b.release_hook) |hook| if (s.finished and s.reason != .cancelled and s.reason != .@"error") hook.kept(hook.ctx, s, slot);
+    if (b.release_hook) |hook| if (!b.runner.failed and s.finished and s.reason != .cancelled and s.reason != .@"error") hook.kept(hook.ctx, s, slot);
     if (slot == 0) leave(b, s);
     b.owners[slot] = null;
     b.runner.rope[slot] = .{};
@@ -402,6 +405,7 @@ pub fn promoteDue(b: *Metal) void {
 pub fn promote(b: *Metal) void {
     const d = b.draft orelse return;
     if (b.owners[0] != null or b.round != null) return;
+    d.generation.settle() catch return;
     for (1..b.runner.slots) |k| {
         const s = b.owners[k] orelse continue;
         if (s.finished or b.fills.contains(s)) continue; // a prompt pass under way stays in its slot until it is in
@@ -478,7 +482,9 @@ pub fn lone(b: *Metal, s: *lanes.Stream, hooks: api.LoneHooks) !bool {
         const room: u32 = @intCast(s.max_new - s.emitted().len);
         copies.history = s.context.items;
         const before = b.runner.gpu_seconds;
-        const result = try g.runRound(room, b.nodes, s.eos, true, if (extra > 0) .{ .ptr = &copies, .call = Copies.call } else null, extra);
+        mtl.pass_metrics.begin(b.pass_profile, "serial", b.window, mtl.clock.seconds);
+        defer mtl.pass_metrics.end();
+        const result = try g.runRound(room, @min(b.nodes, 15), s.eos, true, if (extra > 0) .{ .ptr = &copies, .call = Copies.call } else null, extra);
         defer b.gpa.free(result.tokens);
         charge(b, s, before);
         if (result.extended > 0) {

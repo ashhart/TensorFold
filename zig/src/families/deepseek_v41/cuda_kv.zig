@@ -308,6 +308,8 @@ pub const Kv = struct {
 
     /// A prefill segment's union: sorted unique selected rows, padded per owner (one host sync), token owner x M + i.
     fn unionOf(k: *Kv, r: *run.Runner, c: *const calls.Call) !void {
+        var activity: @import("round_progress.zig").Progress.Scope = if (r.progress) |progress| progress.begin(.kv_union) else .{ .owner = null };
+        defer activity.end();
         const a = try args(r, c);
         const n: usize = @intCast(a.sel.shape[0]);
         const kk: u32 = @intCast(a.sel.shape[1]);

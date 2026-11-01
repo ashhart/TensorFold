@@ -3,7 +3,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const wts = @import("cuda_weights.zig");
 const kern = @import("cuda_kernels.zig");
-const image = @import("cuda_image.zig");
+const image = @import("image.zig");
 
 const vit = cuda.vit;
 const W = wts.tower_width;

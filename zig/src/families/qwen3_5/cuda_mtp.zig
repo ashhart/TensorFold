@@ -8,6 +8,7 @@ const geometry = @import("cuda_geometry.zig");
 const weights = @import("cuda_mtp_weights.zig");
 const timing = @import("cuda_draft.zig").timing;
 const precision = @import("cuda_draft_precision.zig");
+const batched = @import("cuda_mtp_batch.zig");
 
 const E = engine.Engine;
 const DeviceBuffer = cuda.DeviceBuffer;
@@ -25,15 +26,16 @@ const ranks = lanes.shape.ranks;
 /// The logprob row's words (sample.cu's LP_WORDS): the ids of a row's best tokens sit at words 2 onward.
 const lp_words = 3 + 2 * 20;
 
-const Fns = struct { norm_rope: cuda.Function, attn: cuda.Function, attn_tree: cuda.Function };
+const Fns = struct { norm_rope: cuda.Function, attn: cuda.Function, attn_tree: cuda.Function, attn_rows: cuda.Function };
 /// qwen35_draft.cu's ring kernels, shared with the DFlash2 drafter.
 const Ring = struct { gather_taps: cuda.Function, gather_rows: cuda.Function, ring_put: cuda.Function };
-const TapRows = extern struct { n: c_int, rows: [most_window]c_int };
+pub const TapRows = extern struct { n: c_int, rows: [most_window]c_int };
 
 /// A stream's context: its ring of keys and values over [begin, end), the newest row's state, and its held drafts.
 pub const Ctx = struct {
     ring: DeviceBuffer,
     last: DeviceBuffer, // the newest absorbed row's normed output (bf16 hidden): the first draft row's state
+    step: DeviceBuffer, // a batched chain's previous draft level's normed output (cuda_mtp_batch.zig)
     begin: u64 = 0,
     end: u64 = 0,
     cands: [ranks]u32 = @splat(0), // the newest absorbed row's best tokens by rank (rank 0: its chain draft)
@@ -89,6 +91,9 @@ pub const Mtp = struct {
     ids: u64, // u32 the rows' tokens
     tok: u64, // u32 the drawn token
     staged: cuda.HostBuffer, // pinned: the ids and ancestors up, the token and words down
+    tab: u64, // a batched pass's RingRow table (cuda_mtp_batch.zig)
+    batch: bool = true, // shared rounds draft every stream in one pass a level; TF_MTP_BATCH=0 keeps one at a time
+    batch_passes: u64 = 0, // batched passes run, for the GPU check
     streams: std.AutoHashMapUnmanaged(*Stream, *Ctx) = .empty,
     /// Contexts between streams, allocated and run once (`reserve`), as the driver stalls a buffer's first kernel.
     pool: std.ArrayList(*Ctx) = .empty,
@@ -102,18 +107,21 @@ pub const Mtp = struct {
 
     const anc_stride = 1 + max_lanes;
     const ids_at = 0;
-    const tok_at = max_rows * 4;
+    pub const tok_at = max_rows * 4;
     const words_at = tok_at + 64;
     const anc_at = words_at + max_lanes * lp_words * 4;
-    const staged_len = anc_at + max_lanes * anc_stride * 4;
+    pub const bids_at = anc_at + max_lanes * anc_stride * 4; // a batched pass's ids, then its ring table
+    pub const btab_at = bids_at + batched.most * 4;
+    const staged_len = btab_at + batched.most * @sizeOf(batched.RingRow);
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, e: *E, dir: []const u8, capacity: usize) !*Mtp {
         if (!e.g.moe()) return error.NotRouted;
         const d = try gpa.create(Mtp);
         errdefer gpa.destroy(d);
-        d.* = .{ .gpa = gpa, .io = io, .e = e, .w = undefined, .mod = undefined, .dmod = undefined, .fns = undefined, .ring_fns = undefined, .scratch = undefined, .capacity = capacity, .depth = default_depth, .trees = platform.c.getenv("TF_MTP_TREES") != null, .tap = .{@intCast(e.g.layers - 1)}, .taps_in = 0, .hin = 0, .hn = 0, .emb = 0, .en = 0, .h = 0, .r = 0, .x = 0, .qraw = 0, .q = 0, .kraw = 0, .kb = 0, .vb = 0, .att = 0, .xs = 0, .logits = 0, .words = 0, .picks = 0, .lane_state = 0, .lane_k = 0, .lane_v = 0, .anc = 0, .ids = 0, .tok = 0, .staged = undefined };
+        d.* = .{ .gpa = gpa, .io = io, .e = e, .w = undefined, .mod = undefined, .dmod = undefined, .fns = undefined, .ring_fns = undefined, .scratch = undefined, .capacity = capacity, .depth = default_depth, .trees = platform.c.getenv("TF_MTP_TREES") != null, .tap = .{@intCast(e.g.layers - 1)}, .taps_in = 0, .hin = 0, .hn = 0, .emb = 0, .en = 0, .h = 0, .r = 0, .x = 0, .qraw = 0, .q = 0, .kraw = 0, .kb = 0, .vb = 0, .att = 0, .xs = 0, .logits = 0, .words = 0, .picks = 0, .lane_state = 0, .lane_k = 0, .lane_v = 0, .anc = 0, .ids = 0, .tok = 0, .staged = undefined, .tab = 0 };
         if (platform.c.getenv("TF_MTP_DRAFTS")) |v| d.depth = std.fmt.parseInt(u32, std.mem.span(v), 10) catch default_depth;
         d.depth = @min(@max(d.depth, 1), most_window - 1);
+        if (platform.c.getenv("TF_MTP_BATCH")) |v| d.batch = !std.mem.eql(u8, std.mem.span(v), "0");
         d.mod = try cuda.Module.load(e.d, cuda.kernels.qwen36_mtp);
         errdefer d.mod.unload();
         d.dmod = try cuda.Module.load(e.d, cuda.kernels.qwen35_draft);
@@ -177,13 +185,17 @@ pub const Mtp = struct {
         return d.e.g.kv_heads * head_dim;
     }
 
-    fn ringBytes(d: *const Mtp) usize {
+    pub fn ringBytes(d: *const Mtp) usize {
         return 2 * d.capacity * d.kvWidth() * 2;
     }
 
-    /// A stream's buffers in a pool lane's run: its ring, then (256-aligned) its newest row's state.
+    /// A stream's buffers in a pool lane's run: ring, newest row's state, then chain step state, each 256-aligned.
     pub fn areaBytes(d: *const Mtp) usize {
-        return std.mem.alignForward(usize, d.ringBytes(), 256) + d.e.g.hidden * 2;
+        return d.stepOffset() + d.e.g.hidden * 2;
+    }
+
+    fn stepOffset(d: *const Mtp) usize {
+        return std.mem.alignForward(usize, std.mem.alignForward(usize, d.ringBytes(), 256) + d.e.g.hidden * 2, 256);
     }
 
     fn scratchBytes(d: *Mtp) usize {
@@ -199,12 +211,13 @@ pub const Mtp = struct {
         const aw = g.attnWidth();
         const kw = d.kvWidth();
         const sizes = .{
-            .{ "taps_in", R * g.hidden * 2 }, .{ "hin", R * g.hidden * 2 },   .{ "hn", R * g.hidden * 2 },                  .{ "emb", R * g.hidden * 2 },
-            .{ "en", R * g.hidden * 2 },      .{ "h", R * g.hidden * 2 },     .{ "r", R * g.hidden * 2 },                   .{ "x", R * g.hidden * 2 },
-            .{ "qraw", R * 2 * aw * 2 },      .{ "q", R * aw * 2 },           .{ "kraw", R * kw * 2 },                      .{ "kb", R * kw * 2 },
-            .{ "vb", R * kw * 2 },            .{ "att", R * aw * 2 },         .{ "xs", R * (@max(g.hidden, aw) / 64) * 4 }, .{ "logits", L * g.vocab * 2 },
-            .{ "words", L * lp_words * 4 },   .{ "picks", L * 4 },            .{ "lane_state", L * g.hidden * 2 },          .{ "lane_k", L * kw * 2 },
-            .{ "lane_v", L * kw * 2 },        .{ "anc", L * anc_stride * 4 }, .{ "ids", R * 4 },                            .{ "tok", 64 },
+            .{ "taps_in", R * g.hidden * 2 },                    .{ "hin", R * g.hidden * 2 },   .{ "hn", R * g.hidden * 2 },                  .{ "emb", R * g.hidden * 2 },
+            .{ "en", R * g.hidden * 2 },                         .{ "h", R * g.hidden * 2 },     .{ "r", R * g.hidden * 2 },                   .{ "x", R * g.hidden * 2 },
+            .{ "qraw", R * 2 * aw * 2 },                         .{ "q", R * aw * 2 },           .{ "kraw", R * kw * 2 },                      .{ "kb", R * kw * 2 },
+            .{ "vb", R * kw * 2 },                               .{ "att", R * aw * 2 },         .{ "xs", R * (@max(g.hidden, aw) / 64) * 4 }, .{ "logits", L * g.vocab * 2 },
+            .{ "words", L * lp_words * 4 },                      .{ "picks", L * 4 },            .{ "lane_state", L * g.hidden * 2 },          .{ "lane_k", L * kw * 2 },
+            .{ "lane_v", L * kw * 2 },                           .{ "anc", L * anc_stride * 4 }, .{ "ids", R * 4 },                            .{ "tok", 64 },
+            .{ "tab", batched.most * @sizeOf(batched.RingRow) },
         };
         var total: usize = 0;
         inline for (sizes) |s| {
@@ -216,6 +229,7 @@ pub const Mtp = struct {
     }
 
     pub fn drop(d: *Mtp, ctx: *Ctx) void {
+        ctx.step.free();
         ctx.last.free();
         ctx.ring.free();
         d.gpa.destroy(ctx);
@@ -223,17 +237,20 @@ pub const Mtp = struct {
 
     fn resetCtx(d: *Mtp, ctx: *Ctx) void {
         _ = d;
-        ctx.* = .{ .ring = ctx.ring, .last = ctx.last };
+        ctx.* = .{ .ring = ctx.ring, .last = ctx.last, .step = ctx.step };
     }
 
     /// A new context, touched once (an absorb, then a chain), so no request pays the driver's stall.
     pub fn create(d: *Mtp) !*Ctx {
         const ctx = try d.gpa.create(Ctx);
         errdefer d.gpa.destroy(ctx);
-        ctx.* = .{ .ring = try DeviceBuffer.alloc(d.e.d, d.ringBytes()), .last = undefined };
+        ctx.* = .{ .ring = try DeviceBuffer.alloc(d.e.d, d.ringBytes()), .last = undefined, .step = undefined };
         errdefer ctx.ring.free();
         ctx.last = try DeviceBuffer.alloc(d.e.d, d.e.g.hidden * 2);
         errdefer ctx.last.free();
+        ctx.step = try DeviceBuffer.alloc(d.e.d, d.e.g.hidden * 2);
+        errdefer ctx.step.free();
+        try ctx.step.fill8(0, null);
         try ctx.ring.fill8(0, null);
         try ctx.last.fill8(0, null);
         try d.absorb(ctx, d.taps_in, 0, 1, null, &.{0}); // any tap rows do: the drafter's own zeroed staging
@@ -273,13 +290,23 @@ pub const Mtp = struct {
     }
 
     /// out = norm(h + r) with w; h takes the sum (r 0: no residual).
-    fn norm(d: *Mtp, h: u64, r: u64, w: u64, out: u64, rows: usize) !void {
+    pub fn norm(d: *Mtp, h: u64, r: u64, w: u64, out: u64, rows: usize) !void {
         const e = d.e;
         try e.run(e.fns.norm, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ h, r, w, out, e.g.eps, @as(c_int, @intCast(e.g.hidden)), @as(u64, 0), @as(u64, 0) });
     }
 
+    /// q or k heads normed and roped from `src` into `out`, with the target's rope (its YaRN table when it has one).
+    pub fn normRope(d: *Mtp, src: u64, w: u64, out: u64, heads: usize, stride: usize, in_head: usize, p0: c_longlong, step: c_int, rows: usize) !void {
+        const e = d.e;
+        try e.run(d.fns.norm_rope, .{ rows * heads, 1, 1 }, .{ 32, 1, 1 }, .{ src, w, out, @as(c_int, @intCast(heads)), @as(c_int, @intCast(stride)), @as(c_int, @intCast(in_head)), p0, step, e.g.eps, geometry.theta, e.rope_table });
+    }
+
     /// The layer over `rows` rows at slots pos0..: d.ids their tokens, d.hin their states; x gets their normed outputs.
     pub fn layer(d: *Mtp, ctx: *Ctx, rows: usize, pos0: u64, pass: Pass) !void {
+        return d.layerMode(ctx, rows, pos0, pass, true);
+    }
+
+    pub fn layerMode(d: *Mtp, ctx: *Ctx, rows: usize, pos0: u64, pass: Pass, propose: bool) !void {
         const e = d.e;
         const g = e.g;
         const w = &d.w;
@@ -295,8 +322,12 @@ pub const Mtp = struct {
         try d.proj(.{ .a4 = w.fc_h }, d.hn, d.r, rows);
         try d.norm(d.h, d.r, w.input_norm, d.x, rows);
         try d.projQkv(rows);
-        try e.run(d.fns.norm_rope, .{ rows * g.q_heads, 1, 1 }, .{ 32, 1, 1 }, .{ d.qraw, w.q_norm, d.q, @as(c_int, @intCast(g.q_heads)), @as(c_int, @intCast(2 * aw)), @as(c_int, 2 * head_dim), p0, step, g.eps, geometry.theta });
-        try e.run(d.fns.norm_rope, .{ rows * g.kv_heads, 1, 1 }, .{ 32, 1, 1 }, .{ d.kraw, w.k_norm, d.kb, @as(c_int, @intCast(g.kv_heads)), @as(c_int, @intCast(kw)), @as(c_int, head_dim), p0, step, g.eps, geometry.theta });
+        try d.normRope(d.qraw, w.q_norm, d.q, g.q_heads, 2 * aw, 2 * head_dim, p0, step, rows);
+        try d.normRope(d.kraw, w.k_norm, d.kb, g.kv_heads, kw, head_dim, p0, step, rows);
+        if (!propose) {
+            try d.putRing(ctx, rows, p0);
+            return;
+        }
         const heads: c_int = @intCast(g.q_heads);
         const kvh: c_int = @intCast(g.kv_heads);
         const cap: c_int = @intCast(d.capacity);
@@ -309,11 +340,15 @@ pub const Mtp = struct {
         try d.norm(d.h, d.r, w.post_norm, d.x, rows);
         try d.routed(w.mlp.moe.router, w.mlp.moe.experts, d.x, d.r, rows);
         try d.norm(d.h, d.r, w.norm, d.x, rows);
-        if (pass == .ring) try e.run(d.ring_fns.ring_put, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ d.kb, d.vb, d.ringK(ctx), d.ringV(ctx), @as(c_int, @intCast(kw)), p0, cap });
+        if (pass == .ring) try d.putRing(ctx, rows, p0);
+    }
+
+    fn putRing(d: *Mtp, ctx: *Ctx, rows: usize, p0: c_longlong) !void {
+        try d.e.run(d.ring_fns.ring_put, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ d.kb, d.vb, d.ringK(ctx), d.ringV(ctx), @as(c_int, @intCast(d.kvWidth())), p0, @as(c_int, @intCast(d.capacity)) });
     }
 
     /// Rows [first, first + n) of x through the target's head: their logits and best tokens' words, row 0's pick.
-    fn draw(d: *Mtp, first: usize, n: usize, cands: bool) !void {
+    pub fn draw(d: *Mtp, first: usize, n: usize, cands: bool) !void {
         const e = d.e;
         try d.proj(e.head, d.x + first * e.g.hidden * 2, d.logits, n);
         try e.run(e.fns.argmax, .{ 1, 1, 1 }, .{ 1024, 1, 1 }, .{ d.logits, @as(c_int, @intCast(e.g.vocab)), d.tok });
@@ -321,7 +356,7 @@ pub const Mtp = struct {
     }
 
     /// The drawn token, and the first `n` rows' candidates by rank, after a draw.
-    fn fetch(d: *Mtp, n: usize, cands: [][ranks]u32) !u32 {
+    pub fn fetch(d: *Mtp, n: usize, cands: [][ranks]u32) !u32 {
         const e = d.e;
         const st = d.staged.bytes;
         try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(st.ptr + tok_at, d.tok, 4, e.stream.handle), "cuMemcpyDtoHAsync");
@@ -343,55 +378,13 @@ pub const Mtp = struct {
 
     /// Target rows [start, start + n) from the tap ring with the token after each; `rows`, when given, picks them.
     pub fn absorb(d: *Mtp, ctx: *Ctx, tap_ring: u64, start_: u64, n_: usize, rows_: ?[]const u32, follow: []const u32) !void {
-        return d.absorbRole(ctx, tap_ring, start_, n_, rows_, follow, true);
+        return d.absorbRole(ctx, tap_ring, start_, n_, rows_, follow, true, true);
     }
 
-    fn absorbRole(d: *Mtp, ctx: *Ctx, tap_ring: u64, start_: u64, n_: usize, rows_: ?[]const u32, follow: []const u32, prompt: bool) !void {
-        const previous = d.projection_role;
-        defer d.projection_role = previous;
-        d.projection_role = if (prompt) .prompt else .live;
-        const e = d.e;
-        const g = e.g;
-        var start = start_;
-        var n = n_;
-        var fi: usize = 0;
-        if (follow.len < n) return error.BadDraftRows;
-        if (rows_) |rs| if (rs.len != n or n > most_window) return error.BadDraftRows;
-        if (start < ctx.end) ctx.end = start;
-        if (start > ctx.end) ctx.begin = start; // a gap (a prompt restored from a cache): the context starts here
-        const held = engine.tap_rows - engine.max_rows; // the target's ring holds this many rows behind its newest chunk
-        if (n > held) {
-            fi = n - held;
-            start += n - held;
-            n = held;
-            ctx.begin = start;
-        }
-        ctx.end = start;
-        while (n > 0) {
-            const rows = @min(n, max_rows);
-            if (rows_) |rs| {
-                var tr: TapRows = .{ .n = @intCast(rows), .rows = @splat(0) };
-                for (rs, 0..) |r, i| tr.rows[i] = @intCast(r);
-                try e.run(d.ring_fns.gather_rows, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ tap_ring, @as(c_int, engine.tap_rows), @as(c_longlong, @intCast(start)), tr, @as(c_int, @intCast(g.hidden)), d.taps_in });
-            } else try e.run(d.ring_fns.gather_taps, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ tap_ring, @as(c_int, engine.tap_rows), @as(c_longlong, @intCast(start)), @as(c_int, @intCast(g.hidden)), d.taps_in });
-            try d.norm(d.taps_in, 0, e.final_norm, d.hin, rows); // the target's final norm: the rows the head read
-            try d.putIds(follow[fi..][0..rows]);
-            try d.layer(ctx, rows, start, .ring);
-            start += rows;
-            n -= rows;
-            fi += rows;
-            ctx.end = start;
-            // the newest row: its state kept for the drafts, its best tokens drawn
-            try ctx.last.copyFrom(0, d.x + (rows - 1) * g.hidden * 2, g.hidden * 2, e.stream.handle);
-            try d.draw(rows - 1, 1, true);
-        }
-        var cands: [1][ranks]u32 = undefined;
-        ctx.cands[0] = try d.fetch(1, &cands);
-        if (d.trees) ctx.cands = cands[0];
-    }
+    pub const absorbRole = @import("cuda_mtp_absorb.zig").absorbRole;
 
     /// `depth` drafts after `pending` at pos0 (the pending token's slot): a chain, or the planner's tree of lanes.
-    fn hold(d: *Mtp, ctx: *Ctx, pending: u32, pos0: u64, depth: usize, lanes_: ?*const lanes.shape.Shape) !void {
+    pub fn hold(d: *Mtp, ctx: *Ctx, pending: u32, pos0: u64, depth: usize, lanes_: ?*const lanes.shape.Shape) !void {
         _ = pending; // the newest absorbed row's follow token, whose candidates ctx.cands are
         if (ctx.end != pos0) return error.DraftContextBehind;
         if (lanes_) |l| return d.holdTree(ctx, pos0, l);
@@ -499,7 +492,7 @@ pub const Mtp = struct {
 
     fn factsFn(p: *anyopaque) dr.Facts {
         const d = cast(p);
-        return .{ .depth = d.depth, .step_ms = d.step_ms, .prior = &prior, .plain_guard = true, .batched = false, .stream_bytes = d.ringBytes() + d.e.g.hidden * 2, .trees = d.trees, .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs] };
+        return .{ .limit_shared_drafts = true, .depth = d.depth, .step_ms = d.step_ms, .prior = &prior, .plain_guard = true, .batched = !d.trees, .stream_bytes = d.ringBytes() + 2 * d.e.g.hidden * 2, .trees = d.trees, .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs] };
     }
 
     fn openFn(p: *anyopaque, s: *Stream) anyerror!void {
@@ -509,7 +502,7 @@ pub const Mtp = struct {
             const ctx = try d.gpa.create(Ctx);
             errdefer d.gpa.destroy(ctx);
             const last = base + std.mem.alignForward(usize, d.ringBytes(), 256);
-            ctx.* = .{ .ring = .{ .d = d.e.d, .ptr = base, .len = d.ringBytes(), .borrowed = true }, .last = .{ .d = d.e.d, .ptr = last, .len = d.e.g.hidden * 2, .borrowed = true } };
+            ctx.* = .{ .ring = .{ .d = d.e.d, .ptr = base, .len = d.ringBytes(), .borrowed = true }, .last = .{ .d = d.e.d, .ptr = last, .len = d.e.g.hidden * 2, .borrowed = true }, .step = .{ .d = d.e.d, .ptr = base + d.stepOffset(), .len = d.e.g.hidden * 2, .borrowed = true } };
             return d.streams.put(d.gpa, s, ctx);
         };
         const ctx = d.pool.pop() orelse try d.create();
@@ -522,20 +515,26 @@ pub const Mtp = struct {
         const d = cast(p);
         const t0 = std.Io.Clock.awake.now(d.io);
         defer timing("mtp absorb", d.io, t0);
-        for (items) |it| {
-            const ctx = d.streams.get(it.stream) orelse return error.UnknownStream;
-            if (it.features.space != .device or it.features.dtype != .bf16) return error.UnsupportedFeatures;
-            // the target's features: its ring, `offset` the first row's position (cuda_native.zig's featuresFn)
-            if (it.rows) |rs| {
-                try d.absorbRole(ctx, it.features.buffer, it.features.offset, rs.len, rs, it.follow, it.prompt);
-            } else try d.absorbRole(ctx, it.features.buffer, it.features.offset, it.features.rows, null, it.follow, it.prompt);
-        }
+        // a shared round's streams in passes; one stream alone runs the same bits without the batch's copies
+        if (d.batch and !d.trees and items.len > 1) return batched.absorb(d, items);
+        for (items) |it| try d.absorbOne(it);
+    }
+
+    /// One stream's absorb, as the serial path runs it.
+    pub fn absorbOne(d: *Mtp, it: dr.Absorb) !void {
+        const ctx = d.streams.get(it.stream) orelse return error.UnknownStream;
+        if (it.features.space != .device or it.features.dtype != .bf16) return error.UnsupportedFeatures;
+        // the target's features: its ring, `offset` the first row's position (cuda_native.zig's featuresFn)
+        if (it.rows) |rs| {
+            try d.absorbRole(ctx, it.features.buffer, it.features.offset, rs.len, rs, it.follow, it.prompt, it.propose);
+        } else try d.absorbRole(ctx, it.features.buffer, it.features.offset, it.features.rows, null, it.follow, it.prompt, it.propose);
     }
 
     fn holdFn(p: *anyopaque, items: []const dr.Hold) anyerror!void {
         const d = cast(p);
         const t0 = std.Io.Clock.awake.now(d.io);
         defer timing("mtp hold", d.io, t0);
+        if (d.batch and !d.trees and items.len > 1) return batched.hold(d, items);
         for (items) |it| {
             const ctx = d.streams.get(it.stream) orelse return error.UnknownStream;
             try d.hold(ctx, it.pending, it.position - 1, it.depth, it.lanes);

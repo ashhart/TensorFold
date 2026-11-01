@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "common/qmm_frag.cuh"
+#include "common/cp_async.cuh"
 
 namespace tf_prefill_attention {
 
@@ -19,13 +20,9 @@ constexpr int BN = 64, HALF = 32;             // keys a tile (the fold's unit), 
 constexpr float LOG2E = 1.4426950408889634f;
 constexpr int SMEM_MAX = 96 * 1024;
 
-template <int N>
-__device__ __forceinline__ void wait_group() { asm volatile("cp.async.wait_group %0;\n" ::"n"(N)); }
+using tf_common::cp_wait;
 
-__device__ __forceinline__ void ldmatrix4t(uint32_t (&r)[4], const void* p) {
-    asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0, %1, %2, %3}, [%4];\n"
-                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(qmm_frag::smem(p)));
-}
+using qmm_frag::ldmatrix4t;
 
 __device__ __forceinline__ float texp(float x) {
     float y;
@@ -230,7 +227,7 @@ vision_kernel(const __nv_bfloat16* __restrict__ qkv, __nv_bfloat16* __restrict__
     float m0 = -INFINITY, m1 = -INFINITY, l0 = 0.0f, l1 = 0.0f;
     stage(0);
     for (int t = 0; t < tiles; ++t) {
-        wait_group<0>();
+        cp_wait<0>();
         __syncthreads();                                 // tile t landed, and every warp is done with tile t - 1
         if (t + 1 < tiles) stage(t + 1);
         const uint4* ks = smem + (t & 1) * 2 * BN * RS;
@@ -332,6 +329,9 @@ template __global__ void tf_prefill_attention::full_kernel<72, 8, 8>(const __nv_
     float);
 // Head dim 80, eight warps, two blocks an SM (RADIO's tower, 16 heads of 80): full_kernel<80>'s bits, 1.35x faster.
 template __global__ void tf_prefill_attention::vision_kernel<80, 8>(const __nv_bfloat16* __restrict__, __nv_bfloat16* __restrict__, int, int,
+    float);
+// Head dim 128, eight warps (MOSS-Image's denoiser, 24 heads of 128 over its image and prompt rows).
+template __global__ void tf_prefill_attention::vision_kernel<128, 8>(const __nv_bfloat16* __restrict__, __nv_bfloat16* __restrict__, int, int,
     float);
 // Head dim 256, eight warps, two query heads a block, two staging slots (Qwen3.8-27B's prompt chunks, bf16 and fp8).
 template __global__ void tf_prefill_attention::hpattn_kernel<256, 8, 2, 2>(const __nv_bfloat16* __restrict__,

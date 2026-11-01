@@ -66,6 +66,13 @@ pub fn main(init: std.process.Init) !void {
         cb.commit();
         cb.wait();
         if (cb.failure() != null) return error.GpuFailure;
+        const bytes = rows * 5 * target.config.hidden * 2;
+        const host_taps = try a.alloc(u8, bytes);
+        for (0..5) |_| {
+            @memset(host_taps, 0xab);
+            try q.tap_gather.gather(runner.taps.buffer.contents()[0..runner.taps.buffer.length()], runner.taps.capacity, runner.taps.rows, runner.taps.width, path[0..rows], host_taps);
+            if (!std.mem.eql(u8, host_taps, accepted.contents()[0..bytes])) return error.HostTapGatherDiffers;
+        }
         try draft.absorb(.{ .buf = accepted }, @intCast(rows));
         if (draft.session.ready or draft.session.context.end != 0) return error.ContextWasNotDeferred;
         var sub: usize = 0;
@@ -91,6 +98,7 @@ pub fn main(init: std.process.Init) !void {
             if (!std.mem.eql(u8, lazy_buffer.contents()[slot * stride ..][0..stride], eager_buffer.contents()[slot * stride ..][0..stride])) return error.DeferredContextDiffers;
         }
     };
+    std.debug.print("host/native GPU tap gather byte equality: five repeats on each prompt chunk\n", .{});
     std.debug.print("deferred accepted context: wrapped/cropped130-row suffix, all visible per-layer KV and proposal token/parent/score bytes equal eager17-row flushes\n", .{});
     try draft.absorb(.{ .buf = accepted }, 128);
     var replay: usize = 0;

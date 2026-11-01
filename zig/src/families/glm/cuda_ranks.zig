@@ -21,6 +21,7 @@ pub const Settings = struct {
     layers: u32 = 0, // TF_GLM_LAYERS: the first this many layers only, a thin model for one-GPU checks (0: all)
     dense_bits: u8 = 16, // TF_GLM_DENSE_BITS: the dense linears packed at load to 4, 6 or 8 bits (16: bf16)
     head_bits: u8 = 16, // TF_GLM_HEAD_BITS: the head, likewise
+    roce_multi: bool = false, // TF_GLM_ROCE_MULTI: 1 (three ranks or more: small all-gathers on fabric/tp's multirank RoCE beside NCCL) or 0
 
     /// The settings `get` (an environment lookup) gives; `problem` names a value that is not one of the choices.
     pub fn read(get: *const fn ([:0]const u8) ?[]const u8, problem: *[]const u8) !Settings {
@@ -55,6 +56,12 @@ pub const Settings = struct {
         if (get("TF_GLM_KDA_DECODE_WIDE")) |v| {
             if (std.mem.eql(u8, v, "1")) s.kda_wide = true else if (std.mem.eql(u8, v, "0")) s.kda_wide = false else {
                 problem.* = "TF_GLM_KDA_DECODE_WIDE: 0 or 1";
+                return error.BadSetting;
+            }
+        }
+        if (get("TF_GLM_ROCE_MULTI")) |v| {
+            if (std.mem.eql(u8, v, "1")) s.roce_multi = true else if (std.mem.eql(u8, v, "0")) s.roce_multi = false else {
+                problem.* = "TF_GLM_ROCE_MULTI: 0 or 1";
                 return error.BadSetting;
             }
         }
@@ -104,6 +111,11 @@ pub const Settings = struct {
             problem.* = "TF_GLM_KDA_PAD=1 requires TF_GLM_MM=1 (glm_mm is what reads the padded rows)";
             return error.BadSetting;
         }
+        // refused here, before the weights load: the wire's bootstrap meets at rank 0, its kernel comes from the image
+        if (s.roce_multi and (get("TF_TP_MASTER") == null or get("TF_TP_KERNEL_IMAGE") == null)) {
+            problem.* = "TF_GLM_ROCE_MULTI=1 requires TF_TP_MASTER and TF_TP_KERNEL_IMAGE";
+            return error.BadSetting;
+        }
         return s;
     }
 };
@@ -118,7 +130,7 @@ pub fn environment(name: [:0]const u8) ?[]const u8 {
 
 /// What every rank must agree on, as bytes the communicator carries.
 pub const Fingerprint = extern struct {
-    layout: u32 = 13, // this struct's version
+    layout: u32 = 14, // this struct's version
     world: u32,
     rank: u32,
     kv8: u32 = 0,
@@ -136,6 +148,7 @@ pub const Fingerprint = extern struct {
     max_images: u32 = 0,
     max_videos: u32 = 0,
     max_frames: u32 = 0,
+    roce_multi: u32 = 0, // TF_GLM_ROCE_MULTI: every rank opens the borrowed wire or none does (a lone rank would wait on it)
     bits: u32 = 16 << 8 | 16, // TF_GLM_DENSE_BITS << 8 | TF_GLM_HEAD_BITS: every rank's matmuls read the same codes
     capacity: u64, // tokens a sequence holds
     heat_high: f64, // the heat bands in degrees (0 and 0: off): every rank must wait alike
@@ -163,6 +176,7 @@ pub const Fingerprint = extern struct {
         max_images,
         max_videos,
         max_frames,
+        roce_multi,
         bits,
         capacity,
         heat_high,
@@ -195,6 +209,7 @@ pub const Fingerprint = extern struct {
             .pieces = s.pieces,
             .layers = s.layers,
             .mtp = @intFromBool(mtp),
+            .roce_multi = @intFromBool(s.roce_multi),
             .bits = @as(u32, s.dense_bits) << 8 | s.head_bits,
             .capacity = capacity,
             .heat_high = if (s.heat) |b| b.high_c else 0,
@@ -231,6 +246,7 @@ pub fn mismatch(all: []const Fingerprint) ?Mismatch {
             "max_images",
             "max_videos",
             "max_frames",
+            "roce_multi",
             "bits",
             "capacity",
             "heat_high",
@@ -340,6 +356,7 @@ fn explain(f: Fingerprint.Field) []const u8 {
         .max_images => "the image count limit",
         .max_videos => "the video count limit",
         .max_frames => "the frame limit",
+        .roce_multi => "TF_GLM_ROCE_MULTI",
         .bits => "TF_GLM_DENSE_BITS or TF_GLM_HEAD_BITS",
         .capacity => "the sequence capacity (the context)",
         .heat_high => "TF_HEAT_HIGH",

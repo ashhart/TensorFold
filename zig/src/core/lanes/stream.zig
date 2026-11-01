@@ -225,6 +225,8 @@ pub const Stream = struct {
     measured: [plan_lanes.sizes.len + 1]plan_lanes.Measured = @splat(.{}), // each pick's round times past its table price
     priced: ?struct { choice: usize, ms: f64 } = null, // the pick that shaped the held window, at its table price
     min_rows: u32 = 0,
+    grammar_time: @import("grammar_time.zig").Sum = .{},
+    grammar_round: @import("grammar_time.zig").Round = .{},
     gpu_seconds: ?f64 = null, // a timed backend's passes this stream ran in (TF_Q27_PROFILE); null: untimed
     paused: bool = false,
     depth: ?State = null,
@@ -234,6 +236,7 @@ pub const Stream = struct {
     served: ?u64 = null,
     proposal_depth: ?u32 = null, // null: legacy; otherwise the last routed request, zero until it succeeds
     granted: ?u32 = null,
+    draft_chances: std.ArrayList(f64) = .empty, // last full head prices, retained through zero-row rounds
     copy_width: ?u32 = null,
 
     pub fn init(gpa: Allocator, spec: Spec) !Stream {
@@ -302,6 +305,8 @@ pub const Stream = struct {
         s.inflight = null;
         s.served = null;
         s.granted = null;
+        s.draft_chances.deinit(gpa);
+        s.draft_chances = .empty;
         s.copy_width = null;
         s.proposal_depth = null;
     }

@@ -402,6 +402,24 @@ const own_records = [_]Record{
         },
     },
     .{
+        .launch = .{ .name = "Flash Next wide norm tf_fn_rms_wide_waves", .symbol = "tf_fn_rms_wide_waves", .image = "flashnext", .threads = 32 },
+        .usage = .{
+            .{ .vgprs = 42, .sgprs = 12, .lds = 0, .private = 0, .bound = 32, .wave = 32 },
+            .{ .vgprs = 42, .sgprs = 18, .lds = 0, .private = 0, .bound = 32, .wave = 32 },
+            .{ .vgprs = 42, .sgprs = 12, .lds = 0, .private = 0, .bound = 32, .wave = 32 },
+            .{ .vgprs = 41, .sgprs = 12, .lds = 0, .private = 0, .bound = 32, .wave = 32 },
+        },
+    },
+    .{
+        .launch = .{ .name = "Flash Next wide norm tf_fn_rms_wide_apply", .symbol = "tf_fn_rms_wide_apply", .image = "flashnext", .threads = 64 },
+        .usage = .{
+            .{ .vgprs = 15, .sgprs = 18, .lds = 0, .private = 0, .bound = 64, .wave = 32 },
+            .{ .vgprs = 16, .sgprs = 18, .lds = 0, .private = 0, .bound = 64, .wave = 32 },
+            .{ .vgprs = 15, .sgprs = 16, .lds = 0, .private = 0, .bound = 64, .wave = 32 },
+            .{ .vgprs = 15, .sgprs = 15, .lds = 0, .private = 0, .bound = 64, .wave = 32 },
+        },
+    },
+    .{
         .launch = .{
             .name = "planned walk tf_sum_partials_act",
             .symbol = "tf_sum_partials_act",
@@ -461,7 +479,7 @@ const own_records = [_]Record{
             .{ .vgprs = 36, .sgprs = 32, .lds = 50688, .private = 0, .bound = 1024, .wave = 32 },
         },
     },
-} ++ @import("hip_records_pair.zig").records;
+} ++ @import("hip_records_pair.zig").records ++ @import("hip_records_prompt.zig").records;
 
 pub const records = own_records ++ @import("hip_records_stream.zig").records;
 

@@ -218,11 +218,11 @@ pub fn Backend(comptime F: type) type {
 
         /// The whole prompt pass, chunk by chunk (a driver of its own, with no rounds between).
         fn prefillFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!void {
-            while (!try prefillStepFn(ptr, s)) {}
+            while (!try prefillStepFn(ptr, s, 0)) {} // whole prompts: the 512-row cap would cut where this driver never does
         }
 
         /// One chunk of the prompt pass, ending on the next cut or the prompt's end; the last draws the first token.
-        fn prefillStepFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!bool {
+        fn prefillStepFn(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
             const h = of(ptr);
             if (s.isCancelled()) return error.Cancelled;
             const lane = if (h.streams.map.get(s)) |l| (if (l.fill != null) l else try h.begin(s)) else try h.begin(s);

@@ -28,7 +28,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []
     if (o.tokens.len == 0) return error.EmptyPrompt;
     var w = try wts.load(gpa, io, ctx.d, dir, o.loops);
     defer w.deinit();
-    var k = try fwd.Kernels.load(ctx);
+    var k = try fwd.Kernels.load(ctx, false);
     defer k.deinit();
     if (!k.served) return error.BuiltWithoutKernels;
     var s = try cuda.Stream.init(ctx.d, false);

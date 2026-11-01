@@ -152,12 +152,7 @@ pub fn patchify(a: std.mem.Allocator, p: Plan, frames: []const u8, c: Config) Er
     const gh = p.h / P;
     const gw = p.w / P;
     const width = c.patchWidth();
-    var m: [3]f32 = undefined;
-    var sd: [3]f32 = undefined;
-    for (0..3) |ch| { // the fast processors' fused rescale and normalize: mean and std over the rescale
-        m[ch] = @floatCast(@as(f64, c.mean[ch]) / c.rescale);
-        sd[ch] = @floatCast(@as(f64, c.std[ch]) / c.rescale);
-    }
+    const lut = picture.normalize.table(.fused, c.rescale, c.mean, c.std); // the fast processors' fused rescale
     const out = try a.alloc(Pair, p.pairs());
     for (out, 0..) |*pair, g| {
         var slot: [2]usize = undefined; // each of the pair's frames' place among the decoded ones
@@ -171,7 +166,7 @@ pub fn patchify(a: std.mem.Allocator, p: Plan, frames: []const u8, c: Config) Er
                 for (0..P) |dy| for (0..P) |dx| {
                     const y = (wy * M + my) * P + dy;
                     const x = (wx * M + mx) * P + dx;
-                    dst[((ch * c.temporal + t) * P + dy) * P + dx] = (@as(f32, @floatFromInt(frame[(y * p.w + x) * 3 + ch])) - m[ch]) / sd[ch];
+                    dst[((ch * c.temporal + t) * P + dy) * P + dx] = lut[ch][frame[(y * p.w + x) * 3 + ch]];
                 };
             };
             row += 1;

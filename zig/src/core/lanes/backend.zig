@@ -76,8 +76,12 @@ pub const Backend = struct {
     proposal_head: ?*const @import("proposal_head.zig").Service = null,
     round_observer: ?RoundObserver = null,
     first_before_draft: bool = false,
+    /// A single-slot target lets its asynchronous keep progress between host steps before drafting again.
+    defer_lone_draft: bool = false,
     /// Every draw (first, queue and verify rows) takes `Stream.penalties` from the reply's tokens; wrappers copy it.
     penalties: bool = false,
+    /// Prompt fill gives the same tokens at any chunk cut, so --decode-share may cap its chunk rows; wrappers copy it.
+    chunk_invariant: bool = false,
     ptr: *anyopaque,
     vtable: *const VTable,
 
@@ -86,8 +90,8 @@ pub const Backend = struct {
         embedding: ?*const fn (*anyopaque, *Stream, []f32) anyerror!void = null,
         /// Prefill the stream's prompt into its caches (and its draft head's).
         prefill: *const fn (ptr: *anyopaque, s: *Stream) anyerror!void,
-        /// One chunk of the prompt pass, false while chunks remain; null: the pass runs whole.
-        prefill_step: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!bool = null,
+        /// One prompt-pass chunk of at most `max_rows` rows when capped (0: uncapped); null: the pass runs whole.
+        prefill_step: ?*const fn (ptr: *anyopaque, s: *Stream, max_rows: u32) anyerror!bool = null,
         /// Keep a cancelled partial prompt before release, between prefill_step calls; no prompt work may run.
         cancel_prefill: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!void = null,
         /// Several prompts in one pass, each as after `prefill`; false or an error leaves none prefilled.
@@ -106,6 +110,7 @@ pub const Backend = struct {
         keep: *const fn (ptr: *anyopaque, windows: []const Window, paths: []const []const u32) anyerror!void,
         /// Absorb kept rows and hold drafts for the next round (one batch for a shared round).
         draft: *const fn (ptr: *anyopaque, requests: []const DraftRequest) anyerror!void,
+        draft_capacity: ?*const fn (*anyopaque, *Stream) u32 = null, // current per-stream proposal capacity
         proposal_draft: ?*const fn (*anyopaque, []const DraftRequest) anyerror!void = null,
         clear_proposals: ?*const fn (*anyopaque, *Stream) void = null,
         /// Undo an early speculation whose round was cut (the drafts come from a late request instead).
@@ -223,6 +228,7 @@ pub const Clock = struct {
     pub const VTable = struct {
         start: *const fn (ptr: *anyopaque) void,
         elapsed_ms: *const fn (ptr: *anyopaque, mark: Mark) f64,
+        host_ns: ?*const fn (ptr: *anyopaque) i128 = null,
     };
 
     pub fn start(c: Clock) void {
@@ -239,7 +245,12 @@ pub const WallClock = struct {
     started: std.Io.Timestamp = .zero,
 
     pub fn clock(w: *WallClock) Clock {
-        return .{ .ptr = w, .vtable = &.{ .start = startFn, .elapsed_ms = elapsedFn } };
+        return .{ .ptr = w, .vtable = &.{ .start = startFn, .elapsed_ms = elapsedFn, .host_ns = hostNs } };
+    }
+
+    pub fn hostNs(ptr: *anyopaque) i128 {
+        const w: *WallClock = @ptrCast(@alignCast(ptr));
+        return std.Io.Clock.awake.now(w.io).toNanoseconds();
     }
 
     fn startFn(ptr: *anyopaque) void {

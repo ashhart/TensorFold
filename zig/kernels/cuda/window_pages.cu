@@ -1,8 +1,25 @@
-// window_rows.cuh over paged caches (Dory's full-attention layers, head dim 256): the kernels, and the rows' writer.
+// window_rows.cuh over paged caches (Dory's and Spark2.5's full attention at 256, Gemma 4's global at 512), the writer.
 
 #include "window_rows.cuh"
+#include "window_rows512.cuh"
 
 using namespace tf_wrows;
+
+// merge's replay of head hd of row r, key head kh over the row's pages in float64 (a block; every thread calls it).
+template <int D>
+__device__ __noinline__ void tf_wrows::merge_pg_odd(const __nv_bfloat16* q, const __nv_bfloat16* kc,
+                                                    const __nv_bfloat16* vc, const int* pos, const int* slot, int h,
+                                                    int hk, int win, float scale, Pg pg, __nv_bfloat16* oh, int64_t r,
+                                                    int kh, int hd) {
+    const int p = pos[r], G = h / hk, ts = (slot != nullptr ? slot[r] : 0) * pg.stride;
+    const auto kv = [&](int key, int which) {
+        const int64_t pid = pg.tab[ts + key / pg.tok];
+        return (which == 0 ? kc : vc) + pid * pg.page + (static_cast<int64_t>(key % pg.tok) * hk + kh) * D;
+    };
+    const int c0 = blockIdx.z * NT % D;
+    slow_head<D>(q + (r * h + kh * G + hd) * D, kv, win > 0 ? max(p - win + 1, 0) : 0, p, (double)scale, oh, c0,
+                 c0 + NT);
+}
 
 // Dory's full-attention caches in pages (head dim 256, no window): kc/vc a layer's part of page 0, tab a row of ids.
 extern "C" __global__ void __launch_bounds__(NT) tf_wrows_part_256_pg(
@@ -26,6 +43,45 @@ extern "C" __global__ void __launch_bounds__(NT, 1) tf_wrows_prompt_256_pg(
     int p0, int W, int H, int HK, int G, float scale, int win, int ring, const int* tab, long long page, int tok) {
     prompt::kernel<256, false, NONE, true>(q, kc, vc, out, hi, p0, W, H, HK, G, scale, win, ring,
                                            Pg{tab, page, tok, 0});
+}
+
+// Spark2.5's full-attention prompt rows over pages (head dim 256, P32): tab the stream's row, tok % 32 == 0.
+extern "C" __global__ void __launch_bounds__(NT, 1) tf_wrows_prompt_256_p32_pg(
+    const __nv_bfloat16* q, const __nv_bfloat16* kc, const __nv_bfloat16* vc, __nv_bfloat16* out, const int* hi,
+    int p0, int W, int H, int HK, int G, float scale, int win, int ring, const int* tab, long long page, int tok) {
+    prompt::kernel<256, true, NONE, true>(q, kc, vc, out, hi, p0, W, H, HK, G, scale, win, ring,
+                                          Pg{tab, page, tok, 0});
+}
+
+// Gemma 4's global decode over pages (head dim 512, no window): each key's page from tab, any tok; merge's replay too.
+extern "C" __global__ void __launch_bounds__(NT) tf_wrows_part_512_pg(
+    const __nv_bfloat16* q, const __nv_bfloat16* kc, const __nv_bfloat16* vc, const int* pos, const int* slot,
+    float* po, float* pm, float* pl, int h, int hk, int win, long long ring, float scale, const int* tab,
+    long long page, int tok, int stride) {
+    part_staged<512, NONE>(q, kc, vc, pos, slot, po, pm, pl, h, hk, win, ring, scale, Pg{tab, page, tok, stride});
+}
+
+extern "C" __global__ void __launch_bounds__(NT) tf_wrows_merge_512_pg(
+    const float* po, const float* pm, const float* pl, __nv_bfloat16* out, int h, int hk, int chunks,
+    const __nv_bfloat16* q, const __nv_bfloat16* kc, const __nv_bfloat16* vc, const int* pos, const int* slot, int win,
+    long long ring, float scale, const int* tab, long long page, int tok, int stride) {
+    merge<512, NONE, true>(po, pm, pl, out, h, hk, chunks, q, kc, vc, pos, slot, win, ring, scale,
+                           Pg{tab, page, tok, stride});
+}
+
+// Gemma 4's global prompt rows over pages: tab the stream's row; a 32-key tile takes one page base, so tok % 32 == 0.
+extern "C" __global__ void __launch_bounds__(NT, 1) tf_wrows_prompt_512_pg(
+    const __nv_bfloat16* q, const __nv_bfloat16* kc, const __nv_bfloat16* vc, __nv_bfloat16* out, const int* hi,
+    int p0, int W, int H, int HK, int G, float scale, int win, int ring, const int* tab, long long page, int tok) {
+    prompt::kernel<512, false, NONE, true>(q, kc, vc, out, hi, p0, W, H, HK, G, scale, win, ring,
+                                           Pg{tab, page, tok, 0});
+}
+
+extern "C" __global__ void __launch_bounds__(NT, 1) tf_wrows_prompt_512_p32_pg(
+    const __nv_bfloat16* q, const __nv_bfloat16* kc, const __nv_bfloat16* vc, __nv_bfloat16* out, const int* hi,
+    int p0, int W, int H, int HK, int G, float scale, int win, int ring, const int* tab, long long page, int tok) {
+    prompt::kernel<512, true, NONE, true>(q, kc, vc, out, hi, p0, W, H, HK, G, scale, win, ring,
+                                          Pg{tab, page, tok, 0});
 }
 
 // Rows k, v [n, row] (row = hk * D elements) into the pages at their positions: a block a row, 16 bytes a thread.

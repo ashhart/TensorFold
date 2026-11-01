@@ -1,0 +1,598 @@
+//! Gemma 4 E4B forward on Intel Xe2 over Level Zero: windows of up to 16 rows (decode, verification, prompt).
+const std = @import("std");
+const ze = @import("ze");
+const kb = @import("xpu_gemma4_kernels");
+const dev = @import("xpu_dev.zig");
+const cfg = @import("xpu_config.zig");
+const load_mod = @import("xpu_load.zig");
+const ple_check = @import("xpu_ple_check.zig");
+const Dev = dev.Dev;
+const Proj = load_mod.Proj;
+const alloc = dev.alloc;
+const off = dev.off;
+
+pub const ROWS = 16; // rows of a decode or verification window
+pub const MAXT = 1024; // rows of a prompt forward at most
+pub const KEYS = 128;
+const MERGE_TILES = 16; // tiles from which a window's merge splits a row over 64-column groups
+pub const MAXK = 64; // candidates the device keeps of a row of logits (top_k above it: the host draws from all)
+const EPS: f32 = cfg.eps;
+const nul: ?*anyopaque = null;
+
+pub const Kernels = struct {
+    repack: ze.H,
+    embed: ze.H,
+    x2h: ze.H,
+    ple_tok: ze.H,
+    ple_combine: ze.H,
+    resid: ze.H,
+    geglu: ze.H,
+    geglu_sums: ze.H,
+    geglu_tab: ze.H,
+    ple_mid: ze.H,
+    attn_prep: [2]ze.H, // [sliding, global]
+    attn_merge: [2]ze.H,
+    attn_merge_w: [2]ze.H, // the 128-column fold, for windows over few tiles
+    argmax_part: ze.H,
+    argmax: ze.H,
+    dec_wide: ze.H,
+    dec_wide64: ze.H,
+    dec_narrow: ze.H,
+    gemv256: ze.H,
+    dense: ze.H,
+    dense_b: ze.H, // the same with the sum rounded to bf16: the per-layer input path
+    w8: ze.H,
+    dec_narrow16: ze.H,
+    dec_wide16: ze.H,
+    dec_narrow16s: ze.H, // the same two with the scales loaded ahead (same bits)
+    dec_wide16s: ze.H,
+    dp_part: [2]ze.H,
+    dp_rows: [2]ze.H,
+    dp_sums: [2]ze.H,
+    ngen_wide: ze.H,
+    ngen_narrow: ze.H,
+    ngen_geglu: ze.H, // gate_up with the GeGLU epilogue
+    topk_part: ze.H,
+    topk_merge: ze.H,
+};
+
+pub const Acts = struct {
+    ids: *anyopaque,
+    x: *anyopaque, // fp32 [ROWS, 2560], bf16 values
+    h: *anyopaque, // fp16 GEMM input [ROWS, K <= 10240]
+    ahi: *anyopaque, // fp16 group sums [ROWS, K / 64]
+    alo: *anyopaque,
+    p: *anyopaque, // fp16 GEMM output [ROWS, N <= 20480]
+    r: *anyopaque, // fp16 [ROWS, 2560]
+    q: *anyopaque, // bf16 [ROWS, 8, hd]
+    pm: *anyopaque, // attention tile partials: m, l [ROWS, 8, ntl], o [ROWS, 8, ntl, hd]
+    pl: *anyopaque,
+    po: *anyopaque,
+    tok: *anyopaque, // bf16 [ROWS, 10752]: the per-layer table's rows
+    pli: *anyopaque, // bf16 [ROWS, 42, 256]
+    logits: *anyopaque, // fp16 [ROWS, 262144]
+    pv: *anyopaque,
+    pi: *anyopaque,
+    out: *anyopaque, // i32 [ROWS]
+    pscr: *anyopaque, // fp32 [MAXT, 6144]: slice totals of the narrow prompt GEMM
+    tkv: *anyopaque, // top-k stage 1: f32 [ROWS, 256, 64], i32
+    tki: *anyopaque,
+    tov: *anyopaque, // top-k result: f32 [ROWS, 64], i32
+    toi: *anyopaque,
+};
+
+pub const MAXS = 8; // sequences (streams) the runner holds at most
+
+const SeqSt = struct { kc: [24]*anyopaque, vc: [24]*anyopaque, pos: u32, last: u32 };
+
+/// A window of the rows `ro` .. `ro + t` of a shared forward: sequence `slot`, positions p0 ..
+const Part = struct { slot: u32, ro: u32, t: u32, p0: u32 };
+pub const MultiWindow = struct { slot: u32, ids: []const u32 };
+
+pub const Want = enum { none, last, rows };
+
+pub const Runner = struct {
+    d: *Dev,
+    k: Kernels,
+    kp: Kernels, // prompt rows (more than ROWS): the glue kernels that gain from 128 registers a thread
+    tab: *anyopaque, // bf16 [65536]: bf16(gelu_tanh(x)) of every bf16 x, for the GEMM's GeGLU epilogue
+    m: load_mod.Model,
+    a: Acts,
+    kc: [24]*anyopaque,
+    vc: [24]*anyopaque,
+    ckpt: dev.Checkpoint,
+    context: u32,
+    ntl_max: u32,
+    pos: u32 = 0,
+    last: u32 = 0,
+    host_logits: []f32,
+    dump_dir: ?[]const u8 = null,
+    cap: ?*ple_check.Capture = null, // set by `xpu-gemma4 --ple-check`: the per-layer input path is read back as it runs
+    slot: u32 = 0, // the sequence the fields below stand for (kc, vc, pos, last)
+    nslots: u32 = 1,
+    seqs: [MAXS]SeqSt = undefined, // the other sequences' fields, parked
+    tag: []const u8 = "",
+    t_enqueue: f64 = 0, // seconds the host spent queueing forwards, XPU_TIMING
+    t_forward: f64 = 0,
+    rows_last: u32 = 0,
+    window: u32 = MAXT, // rows per forward of `feed` (tests cut a prompt differently)
+
+    pub fn init(dir: []const u8, context: u32) !*Runner {
+        const cfg_path = try std.fmt.allocPrint(alloc, "{s}/config.json", .{dir});
+        defer alloc.free(cfg_path);
+        try cfg.admit(alloc, try dev.mapFile(cfg_path));
+        const r = try alloc.create(Runner);
+        errdefer alloc.destroy(r);
+        r.* = undefined;
+        r.ckpt = .{};
+        errdefer r.ckpt.deinit();
+        try r.ckpt.open(dir);
+        r.d = try Dev.open(0xe223);
+        errdefer r.d.deinit();
+        const d = r.d;
+        r.context = context;
+        r.pos = 0;
+        r.last = 0;
+        r.window = MAXT;
+        r.cap = null;
+        r.slot = 0;
+        r.nslots = 1;
+        r.rows_last = 0;
+        r.tag = "";
+        r.t_enqueue = 0;
+        r.t_forward = 0;
+        r.dump_dir = if (std.c.getenv("XPU_DUMP")) |v| std.mem.span(v) else null;
+        const mg = try d.g.module(&kb.glue);
+        const mgg = try d.g.module(&kb.glue_g);
+        const mr = try d.g.module(&kb.rows);
+        const mrg = try d.g.module(&kb.rows_g);
+        const mw = try d.g.module(&kb.ngen_wide);
+        const mn = try d.g.module(&kb.ngen_narrow);
+        const mgl = try d.g.module(&kb.ngen_geglu);
+        const mm = try d.g.module(&kb.gemm);
+        r.k = .{
+            .repack = try d.kernel(mg, "repack", 16),
+            .embed = try d.kernel(mg, "g4_embed", 256),
+            .x2h = try d.kernel(mg, "g4_x2h", 256),
+            .ple_tok = try d.kernel(mg, "g4_ple_tok", 256),
+            .ple_combine = try d.kernel(mg, "g4_ple_combine", 16),
+            .resid = try d.kernel(mg, "g4_resid", 512),
+            .geglu = try d.kernel(mg, "g4_geglu", 256),
+            .geglu_sums = try d.kernel(mg, "g4_geglu_sums", 256),
+            .geglu_tab = try d.kernel(mg, "g4_geglu_tab", 256),
+            .ple_mid = try d.kernel(mg, "g4_ple_mid", 64),
+            .attn_prep = .{ try d.kernel(mg, "g4_attn_prep", 256), try d.kernel(mgg, "g4_attn_prep", 256) },
+            .attn_merge = .{ try d.kernel(mg, "g4_attn_merge", 64), try d.kernel(mgg, "g4_attn_merge", 64) },
+            .attn_merge_w = .{ try d.kernel(mg, "g4_attn_merge_w", 128), try d.kernel(mgg, "g4_attn_merge_w", 128) },
+            .argmax_part = try d.kernel(mg, "argmax_part", 256),
+            .argmax = try d.kernel(mg, "argmax", 256),
+            .dec_wide = try d.kernel(mm, "w4k1_decode", 64),
+            .dec_wide64 = try d.kernel(mm, "w4k1_d64", 64),
+            .dec_narrow = try d.kernel(mm, "w4k_dsplit", 64),
+            .gemv256 = try d.kernel(mg, "g4_gemv256", 64),
+            .dense = try d.kernel(mg, "g4_dense", 256),
+            .dense_b = try d.kernel(mg, "g4_dense_b", 256),
+            .w8 = try d.kernel(mg, "g4_w8", 256),
+            .dec_narrow16 = try d.kernel(mm, "w4k_s16x16", 64),
+            .dec_wide16 = try d.kernel(mm, "w4k1_d16", 64),
+            .dec_narrow16s = try d.kernel(mm, "w4k_s16x16s", 64),
+            .dec_wide16s = try d.kernel(mm, "w4k1_d16s", 64),
+            .dp_part = .{ try d.kernel(mg, "g4_attn_dp_part", 256), try d.kernel(mgg, "g4_attn_dp_part", 256) },
+            .dp_rows = .{ try d.kernel(mr, "g4_attn_dp_rows", 256), try d.kernel(mrg, "g4_attn_dp_rows", 256) },
+            .dp_sums = .{ try d.kernel(mg, "g4_attn_sums", 128), try d.kernel(mgg, "g4_attn_sums", 128) },
+            .ngen_wide = try d.kernel(mw, "w4g_dpb", 256),
+            .ngen_narrow = try d.kernel(mn, "w4g_s4dpb", 256),
+            .ngen_geglu = try d.kernel(mgl, "w4g_dpb_geglu", 256),
+            .topk_part = try d.kernel(mg, "g4_topk_part", 256),
+            .topk_merge = try d.kernel(mg, "g4_topk_merge", 256),
+        };
+        // the same source at 128 registers a thread: twice the resident threads for the memory-bound glue of prompts
+        r.kp = r.k;
+        r.kp.embed = try d.kernel(mr, "g4_embed", 256);
+        r.kp.x2h = try d.kernel(mr, "g4_x2h", 256);
+        r.kp.ple_tok = try d.kernel(mr, "g4_ple_tok", 256);
+        r.kp.resid = try d.kernel(mr, "g4_resid", 512);
+        r.kp.geglu = try d.kernel(mr, "g4_geglu", 256);
+        r.kp.geglu_sums = try d.kernel(mr, "g4_geglu_sums", 256);
+        r.kp.ple_mid = try d.kernel(mr, "g4_ple_mid", 64);
+        r.kp.attn_prep = .{ try d.kernel(mr, "g4_attn_prep", 256), try d.kernel(mrg, "g4_attn_prep", 256) };
+        r.kp.dp_sums = .{ try d.kernel(mr, "g4_attn_sums", 128), try d.kernel(mrg, "g4_attn_sums", 128) };
+        r.kp.dense_b = try d.kernel(mr, "g4_dense_b", 256);
+        if (std.c.getenv("XPU_PROFILE") != null) try d.profOn();
+        const prof = d.prof_on;
+        d.prof_on = false;
+        r.m = try load_mod.load(d, r.k.repack, &r.ckpt);
+        d.prof_on = prof;
+        r.tab = try d.alloc_(65536 * 2);
+        try d.launch(r.k.geglu_tab, .{ .x = 256 }, .{r.tab});
+        try r.buffers();
+        return r;
+    }
+
+    /// The activations, K/V caches and host logits of one sequence (a fork has its own; the weights are shared).
+    fn buffers(r: *Runner) !void {
+        const d = r.d;
+        r.ntl_max = (r.context + KEYS - 1) / KEYS + 1;
+        const nt: usize = r.ntl_max;
+        r.a = .{
+            .ids = try d.alloc_(MAXT * 4),
+            .x = try d.alloc_(MAXT * cfg.hidden * 4),
+            .h = try d.alloc_(MAXT * cfg.ff * 2),
+            .ahi = try d.alloc_(MAXT * (cfg.ff / 64) * 2),
+            .alo = try d.alloc_(MAXT * (cfg.ff / 64) * 2),
+            .p = try d.alloc_(MAXT * 2 * cfg.ff * 2),
+            .r = try d.alloc_(MAXT * cfg.hidden * 2),
+            .q = try d.alloc_(MAXT * cfg.heads * cfg.dim_g * 2),
+            .pm = try d.alloc_(ROWS * cfg.heads * nt * 4),
+            .pl = try d.alloc_(ROWS * cfg.heads * nt * 4),
+            .po = try d.alloc_(ROWS * cfg.heads * nt * cfg.dim_g * 4),
+            .tok = try d.alloc_(MAXT * cfg.ple_all * 2),
+            .pli = try d.alloc_(MAXT * cfg.ple_all * 2),
+            .pscr = try d.alloc_(MAXT * 6144 * 4),
+            .logits = try d.alloc_(ROWS * cfg.vocab * 2),
+            .pv = try d.alloc_(ROWS * 256 * 4),
+            .pi = try d.alloc_(ROWS * 256 * 4),
+            .out = try d.alloc_(ROWS * 4),
+            .tkv = try d.alloc_(ROWS * 256 * MAXK * 4),
+            .tki = try d.alloc_(ROWS * 256 * MAXK * 4),
+            .tov = try d.alloc_(ROWS * MAXK * 4),
+            .toi = try d.alloc_(ROWS * MAXK * 4),
+        };
+        for (0..24) |i| {
+            const bytes: usize = if (cfg.isGlobal(i)) @as(usize, r.context) * cfg.kv_heads * cfg.dim_g * 2 else cfg.ring * cfg.kv_heads * cfg.dim_s * 2;
+            r.kc[i] = try d.alloc_(bytes);
+            r.vc[i] = try d.alloc_(bytes);
+        }
+        r.host_logits = try alloc.alloc(f32, cfg.vocab);
+    }
+
+    /// Makes `n` sequences (streams) of the runner: each has its own K/V caches and position; `select` switches.
+    pub fn addSlots(r: *Runner, n: u32) !void {
+        if (n > MAXS or r.nslots != 1 or r.slot != 0) return error.TooManySlots;
+        for (1..n) |s| {
+            for (0..24) |i| {
+                const bytes: usize = if (cfg.isGlobal(i)) @as(usize, r.context) * cfg.kv_heads * cfg.dim_g * 2 else cfg.ring * cfg.kv_heads * cfg.dim_s * 2;
+                r.seqs[s].kc[i] = try r.d.alloc_(bytes);
+                r.seqs[s].vc[i] = try r.d.alloc_(bytes);
+            }
+            r.seqs[s].pos = 0;
+            r.seqs[s].last = 0;
+        }
+        r.nslots = n;
+    }
+
+    /// The sequence `s` becomes the current one (its caches, position and next greedy token).
+    pub fn select(r: *Runner, s: u32) void {
+        if (s == r.slot) return;
+        r.seqs[r.slot] = .{ .kc = r.kc, .vc = r.vc, .pos = r.pos, .last = r.last };
+        const t = r.seqs[s];
+        r.kc = t.kc;
+        r.vc = t.vc;
+        r.pos = t.pos;
+        r.last = t.last;
+        r.slot = s;
+    }
+
+    /// A second sequence on the same weights, kernels and device (decisions score on it while streams run).
+    pub fn fork(r: *Runner) !*Runner {
+        const f = try alloc.create(Runner);
+        errdefer alloc.destroy(f);
+        f.* = r.*;
+        f.pos = 0;
+        f.last = 0;
+        f.slot = 0;
+        f.nslots = 1;
+        try f.buffers();
+        return f;
+    }
+
+    /// A fork's host memory back (its device buffers go with the device).
+    pub fn deinitFork(f: *Runner) void {
+        alloc.free(f.host_logits);
+        alloc.destroy(f);
+    }
+
+    pub fn deinit(r: *Runner) void {
+        r.d.deinit();
+        r.ckpt.deinit();
+        alloc.free(r.host_logits);
+        alloc.destroy(r);
+    }
+
+    pub fn reset(r: *Runner) void {
+        r.pos = 0;
+    }
+
+    /// Feeds tokens in windows of 16 rows; `want`: the last row's logits and greedy token are kept.
+    pub fn feed(r: *Runner, ids: []const u32, want: bool) !void {
+        var at: usize = 0;
+        while (at < ids.len) {
+            const end = @min(ids.len, at + r.window);
+            if (r.pos + (end - at) > r.context) return error.ContextFull;
+            var win: [MAXT]i32 = undefined;
+            for (ids[at..end], 0..) |t, j| win[j] = @intCast(t);
+            // the prompt's last row runs alone: the rows before it only fill the cache (16 rows or fewer stay whole)
+            const split = want and end == ids.len and end - at > ROWS;
+            const body = end - at - @intFromBool(split);
+            const w: Want = if (want and end == ids.len and !split) .last else .none;
+            if (try r.forward(win[0..body], r.pos, w)) |t| r.last = @intCast(t);
+            r.pos += @intCast(body);
+            if (split) {
+                if (try r.forward(win[body .. body + 1], r.pos, .last)) |t| r.last = @intCast(t);
+                r.pos += 1;
+            }
+            at = end;
+        }
+    }
+
+    /// The `k` (<= 64) largest logits of the last forward's row `row`, softcapped, descending (ties: lower id).
+    pub fn topK(r: *Runner, row: u32, k: u32, vals: []f32, ids: []u32) !void {
+        if (k == 0 or k > MAXK) return error.BadTopK;
+        const d = r.d;
+        const a = &r.a;
+        const Kk: i32 = @intCast(k);
+        // the row's logits start at row * vocab
+        try d.launch(r.k.topk_part, .{ .x = 256, .y = 1 }, .{ off(a.logits, @as(usize, row) * cfg.vocab * 2), @as(i32, cfg.vocab), Kk, a.tkv, a.tki });
+        try d.launch(r.k.topk_merge, .{ .x = 1 }, .{ a.tkv, a.tki, Kk, a.tov, a.toi });
+        var hv: [MAXK]f32 = undefined;
+        var hi: [MAXK]i32 = undefined;
+        try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, &hv, a.tov, k * 4, null, 0, null));
+        try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, &hi, a.toi, k * 4, null, 0, null));
+        try d.sync();
+        for (0..k) |i| {
+            vals[i] = cfg.softcap * std.math.tanh(hv[i] / cfg.softcap);
+            ids[i] = @intCast(hi[i]);
+        }
+    }
+
+    /// A window of up to 16 rows at the position, not committed: every row's greedy token (`rowTokens`) and logits.
+    pub fn verify(r: *Runner, ids: []const u32) !void {
+        if (ids.len == 0 or ids.len > ROWS) return error.BadWindow;
+        if (r.pos + ids.len > r.context) return error.ContextFull;
+        var win: [ROWS]i32 = undefined;
+        for (ids, 0..) |t, j| win[j] = @intCast(t);
+        _ = try r.forward(win[0..ids.len], r.pos, .rows);
+        r.rows_last = @intCast(ids.len);
+    }
+
+    /// The greedy tokens of the last window's rows.
+    pub fn rowTokens(r: *Runner, out: []i32) !void {
+        try r.d.read(std.mem.sliceAsBytes(out), r.a.out);
+    }
+
+    /// The last window's logits after the softcap, fp32 [rows, vocab] on the host.
+    pub fn rowLogits(r: *Runner, out: []f32) !void {
+        const rows = out.len / cfg.vocab;
+        const raw = try alloc.alloc(f16, rows * cfg.vocab);
+        defer alloc.free(raw);
+        try r.d.read(std.mem.sliceAsBytes(raw), r.a.logits);
+        for (out, raw) |*o, v| o.* = cfg.softcap * std.math.tanh(@as(f32, v) / cfg.softcap);
+    }
+
+    /// The last forward's row `row` of logits after the softcap, fp32 on the host.
+    pub fn logits(r: *Runner, row: u32) ![]const f32 {
+        const raw = try alloc.alloc(f16, cfg.vocab);
+        defer alloc.free(raw);
+        try r.d.read(std.mem.sliceAsBytes(raw), off(r.a.logits, @as(usize, row) * cfg.vocab * 2));
+        for (r.host_logits, raw) |*o, v| o.* = cfg.softcap * std.math.tanh(@as(f32, v) / cfg.softcap);
+        return r.host_logits;
+    }
+
+    /// gate | up of prompt rows with the GeGLU in the GEMM epilogue: activation in `a.p` [m, ff], its sums in ahi, alo.
+    pub fn gateUp(r: *Runner, w: Proj, m: u32) !bool {
+        if (m <= ROWS or w.bits8 or w.dense or !w.wide or w.n != 2 * cfg.ff) return false;
+        const a = &r.a;
+        if (r.d.prof_on) r.d.tag = r.tag;
+        defer r.d.tag = "";
+        const mp: i32 = @intCast((m + 7) / 8 * 8);
+        const groups: ze.GroupCount = .{ .x = 8, .y = w.n / 256, .z = ((m + 63) / 64 + 7) / 8 };
+        try r.d.launch(r.kp.ngen_geglu, groups, .{ a.h, w.w, w.s, w.bg, a.p, @as(i32, @intCast(m)), @as(i32, @intCast(w.n)), @as(i32, @intCast(w.k)), a.ahi, a.alo, mp, @as(i32, @intCast(w.k / 64)), r.tab });
+        r.d.tag = "";
+        try r.d.launch(r.kp.geglu_sums, .{ .x = m, .y = cfg.ff / 1024 }, .{ a.p, a.ahi, a.alo });
+        return true;
+    }
+
+    pub fn gemm(r: *Runner, h: *anyopaque, ahi: *anyopaque, alo: *anyopaque, w: Proj, out: *anyopaque, m: u32) !void {
+        if (r.d.prof_on) r.d.tag = r.tag;
+        defer r.d.tag = "";
+        const M: i32 = @intCast(m);
+        const N: i32 = @intCast(w.n);
+        const K: i32 = @intCast(w.k);
+        const G: i32 = @intCast(w.k / 64);
+        const mp: i32 = @intCast((m + 7) / 8 * 8);
+        const k = if (m > ROWS) r.kp else r.k;
+        if (w.dense) { // a bf16 weight (the per-layer linears)
+            try r.d.launch(k.dense_b, .{ .x = (m + 15) / 16, .y = w.n / 16 }, .{ h, w.w, out, M, N, K });
+            return;
+        }
+        if (w.bits8) { // 8-bit attention: one kernel for every row count
+            try r.d.launch(k.w8, .{ .x = (m + 15) / 16, .y = w.n / 16 }, .{ h, w.w, w.s, w.bg, out, ahi, alo, M, N, K });
+            return;
+        }
+        if (m > ROWS and w.k != 256) { // prompt rows: the nGEN GEMMs, the decode kernels' arithmetic
+            const tiles = (m + 63) / 64;
+            const groups: ze.GroupCount = .{ .x = 8, .y = w.n / 256, .z = (tiles + 7) / 8 };
+            if (w.wide)
+                try r.d.launch(k.ngen_wide, groups, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G })
+            else
+                try r.d.launch(k.ngen_narrow, groups, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G, r.a.pscr });
+            return;
+        }
+        if (w.k == 256) { // K = 256: the GEMM families' group-sum planes are too narrow for a 2D block (per-layer projection)
+            try r.d.launch(k.gemv256, .{ .x = w.n / 64, .y = m }, .{ h, w.w, w.s, w.bg, out, M, N });
+            return;
+        }
+        if (w.wide) {
+            if (w.n <= 6144) // 64 columns a group: twice the groups of the 128-column kernel on these narrow-N shapes
+                try r.d.launch(if (@rem(G, 8) == 0) k.dec_wide16s else k.dec_wide16, .{ .x = 1, .y = w.n / 64 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G })
+            else if (w.n >= 30000)
+                try r.d.launch(k.dec_wide64, .{ .x = 1, .y = w.n / 256 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G })
+            else
+                try r.d.launch(k.dec_wide, .{ .x = 1, .y = w.n / 128 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G });
+        } else try r.d.launch(if (@rem(G, 32) == 0) k.dec_narrow16s else k.dec_narrow16, .{ .x = 1, .y = w.n / 16 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G }); // K in 4 slices, 16 columns a group
+    }
+
+    fn dump(r: *Runner, name: []const u8, p0: u32, rows: u32) !void {
+        const dir = r.dump_dir orelse return;
+        if (p0 != 0) return;
+        const buf = try alloc.alloc(u8, rows * cfg.hidden * 4);
+        defer alloc.free(buf);
+        try r.d.read(buf, r.a.x);
+        const path = try std.fmt.allocPrint(alloc, "{s}/xpu_x_{s}.f32", .{ dir, name });
+        defer alloc.free(path);
+        try dev.writeFile(path, &.{buf});
+    }
+
+    fn dumpBuf(r: *Runner, name: []const u8, p: *anyopaque, bytes: usize) !void {
+        const dir = r.dump_dir orelse return;
+        const buf = try alloc.alloc(u8, bytes);
+        defer alloc.free(buf);
+        try r.d.read(buf, p);
+        const path = try std.fmt.allocPrint(alloc, "{s}/xpu_{s}.bin", .{ dir, name });
+        defer alloc.free(path);
+        try dev.writeFile(path, &.{buf});
+    }
+
+    /// One forward over `ids` (at most 16 rows) at positions p0 ..; with `want`, the last row's greedy token.
+    pub fn forward(r: *Runner, ids: []const i32, p0: u32, want: Want) !?i32 {
+        const one = [1]Part{.{ .slot = r.slot, .ro = 0, .t = @intCast(ids.len), .p0 = p0 }};
+        return r.forwardParts(ids, &one, want);
+    }
+
+    /// The caches of sequence `slot`.
+    fn cachesOf(r: *Runner, slot: u32) struct { kc: *const [24]*anyopaque, vc: *const [24]*anyopaque } {
+        return if (slot == r.slot) .{ .kc = &r.kc, .vc = &r.vc } else .{ .kc = &r.seqs[slot].kc, .vc = &r.seqs[slot].vc };
+    }
+
+    /// The position the next row of sequence `slot` lands at.
+    pub fn posOf(r: *const Runner, slot: u32) u32 {
+        return if (slot == r.slot) r.pos else r.seqs[slot].pos;
+    }
+
+    /// A shared window: rows of several sequences (at most 16) in one forward, each on its caches; a sequence once.
+    pub fn verifyMulti(r: *Runner, windows: []const MultiWindow) !void {
+        var ids: [ROWS]i32 = undefined;
+        var parts: [ROWS]Part = undefined;
+        var n: u32 = 0;
+        for (windows, 0..) |w, i| {
+            if (w.ids.len == 0 or n + w.ids.len > ROWS) return error.BadWindow;
+            for (windows[0..i]) |o| if (o.slot == w.slot) return error.BadWindow;
+            const p0 = r.posOf(w.slot);
+            if (p0 + w.ids.len > r.context) return error.ContextFull;
+            for (w.ids, 0..) |t, j| ids[n + j] = @intCast(t);
+            parts[i] = .{ .slot = w.slot, .ro = n, .t = @intCast(w.ids.len), .p0 = p0 };
+            n += @intCast(w.ids.len);
+        }
+        _ = try r.forwardParts(ids[0..n], parts[0..windows.len], .rows);
+        r.rows_last = n;
+    }
+
+    fn forwardParts(r: *Runner, ids: []const i32, parts: []const Part, want: Want) !?i32 {
+        const p0 = parts[0].p0;
+        const d = r.d;
+        const a = &r.a;
+        const m = &r.m;
+        const T: u32 = @intCast(ids.len);
+        const k = if (T > ROWS) r.kp else r.k;
+        if (T == 0 or T > MAXT or (T > ROWS and want == .rows)) return error.BadWindow;
+        try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, a.ids, ids.ptr, ids.len * 4, null, 0, null));
+        errdefer d.settle(); // the queued copy reads the caller's ids
+        const t_start = dev.now();
+        defer r.t_forward += dev.now() - t_start;
+        // the embeddings, and the per-layer inputs they give
+        try d.launch(k.embed, .{ .x = T }, .{ a.ids, m.embed_w, m.embed_s, m.embed_b, a.x });
+        try r.dump("embed", p0, T);
+        if (r.cap) |c| try c.grab(r, .embeddings, 0);
+        try d.launch(k.x2h, .{ .x = T }, .{ a.x, a.h, a.ahi, a.alo });
+        r.tag = "ple_model_proj";
+        try r.gemm(a.h, a.ahi, a.alo, m.ple_proj, a.p, T);
+        try d.launch(k.ple_tok, .{ .x = T }, .{ a.ids, m.ple_w, m.ple_s, m.ple_b, a.tok });
+        try d.launch(k.ple_combine, .{ .x = T, .y = cfg.layers }, .{ a.p, a.tok, m.ple_norm, a.pli, EPS });
+        if (r.cap) |c| try c.grab(r, .inputs, 0);
+        try d.launch(k.resid, .{ .x = T }, .{ a.x, nul, nul, nul, m.layers[0].in_norm, a.h, a.ahi, a.alo, EPS, @as(i32, 0) });
+        if (r.dump_dir != null and p0 == 0) try r.dumpBuf("pli", a.pli, T * cfg.ple_all * 2);
+        // a forward nothing reads stops after the layers that own a K/V cache: the deeper ones write none
+        const depth: usize = if (want == .none and r.cap == null) cfg.shared_from else cfg.layers;
+        for (m.layers[0..depth], 0..) |*l, i| {
+            const glob = cfg.isGlobal(i);
+            const hd: u32 = if (glob) cfg.dim_g else cfg.dim_s;
+            const src = cfg.kvSource(i);
+            const own = i < cfg.shared_from;
+            r.tag = "qkv";
+            try r.gemm(a.h, a.ahi, a.alo, l.qkv, a.p, T);
+            const window: i32 = if (glob) 0 else cfg.window;
+            const ring: i32 = if (glob) 0 else cfg.ring;
+            const g = @intFromBool(glob);
+            for (parts) |pt| {
+                const ca = r.cachesOf(pt.slot);
+                const krows: i32 = if (glob) @intCast(r.context) else cfg.ring;
+                const qn_off = @as(usize, pt.ro) * l.qkv.n * 2;
+                const q_off = @as(usize, pt.ro) * 8 * hd * 2;
+                const h_off = @as(usize, pt.ro) * 8 * hd * 2;
+                const ps_off = @as(usize, pt.ro) * ((8 * hd) / 64) * 2;
+                try d.launch(k.attn_prep[g], .{ .x = pt.t }, .{ off(a.p, qn_off), @as(i32, @intCast(l.qkv.n)), l.qn, l.kn orelse l.qn, if (glob) m.invf_g else m.invf_s, off(a.q, q_off), ca.kc[src], ca.vc[src], @as(i32, @intCast(pt.p0)), EPS, ring, @as(i32, @intFromBool(own)) });
+                const blocks: u32 = (pt.t + 3) / 4;
+                if (pt.t > ROWS) { // prompt rows: every tile of a block's rows in one group, folded in order
+                    try d.launch(k.dp_rows[g], .{ .x = 2, .y = blocks }, .{ off(a.q, q_off), ca.kc[src], ca.vc[src], @as(i32, @intCast(pt.p0)), @as(i32, @intCast(pt.t)), window, ring, krows, off(a.h, h_off) });
+                    try d.launch(k.dp_sums[g], .{ .x = 8, .y = pt.t }, .{ off(a.h, h_off), off(a.ahi, ps_off), off(a.alo, ps_off) });
+                } else { // a window: the tiles in parallel, then the ordered fold
+                    const nt: u32 = if (glob) (pt.p0 + pt.t - 1) / KEYS + 1 else 6; // a block's rows may span one tile more than a row's window
+                    try d.launch(k.dp_part[g], .{ .x = nt, .y = 2, .z = blocks }, .{ off(a.q, q_off), ca.kc[src], ca.vc[src], a.pm, a.pl, a.po, @as(i32, @intCast(pt.p0)), @as(i32, @intCast(pt.t)), window, ring, krows, @as(i32, @intCast(nt)) });
+                    const margs = .{ a.pm, a.pl, a.po, @as(i32, @intCast(pt.p0)), window, @as(i32, @intCast(nt)), off(a.h, h_off), off(a.ahi, ps_off), off(a.alo, ps_off) };
+                    const few = nt < MERGE_TILES;
+                    try d.launch(if (few) k.attn_merge_w[g] else k.attn_merge[g], .{ .x = 8, .y = pt.t, .z = if (few) 1 else @as(u32, @intCast(hd / 64)) }, margs);
+                }
+            }
+            if (r.dump_dir != null and p0 == 0 and i == 0) {
+                try r.dumpBuf("q0", a.q, T * 8 * hd * 2);
+                try r.dumpBuf("k0", r.kc[0], T * 2 * hd * 2);
+                try r.dumpBuf("v0", r.vc[0], T * 2 * hd * 2);
+                try r.dumpBuf("attn0", a.h, T * 8 * hd * 2);
+            }
+            r.tag = "o";
+            try r.gemm(a.h, a.ahi, a.alo, l.o, a.r, T);
+            try d.launch(k.resid, .{ .x = T }, .{ a.x, a.r, l.post_attn_norm, nul, l.pre_ffn_norm, a.h, a.ahi, a.alo, EPS, @as(i32, 0) });
+            if (r.dump_dir != null and p0 == 0 and i == 0) try r.dump("0_attn", p0, T);
+            r.tag = "gate_up";
+            const fused = try r.gateUp(l.gu, T);
+            if (!fused) {
+                try r.gemm(a.h, a.ahi, a.alo, l.gu, a.p, T);
+                try d.launch(k.geglu, .{ .x = T, .y = cfg.ff / 1024 }, .{ a.p, a.h, a.ahi, a.alo });
+            }
+            r.tag = "down";
+            try r.gemm(if (fused) a.p else a.h, a.ahi, a.alo, l.down, a.r, T);
+            try d.launch(k.resid, .{ .x = T }, .{ a.x, a.r, l.post_ffn_norm, nul, nul, a.h, a.ahi, a.alo, EPS, @as(i32, 1) });
+            if (r.dump_dir != null and p0 == 0 and i == 0) try r.dump("0_ffn", p0, T);
+            if (r.cap) |c| try c.grab(r, .before, i);
+            r.tag = "ple_gate";
+            try r.gemm(a.h, a.ahi, a.alo, l.ple_gate, a.p, T);
+            try d.launch(k.ple_mid, .{ .x = T }, .{ a.p, a.pli, @as(i32, @intCast(i)), a.h, a.ahi, a.alo });
+            r.tag = "ple_proj";
+            try r.gemm(a.h, a.ahi, a.alo, l.ple_proj, a.r, T);
+            const next = if (i + 1 < cfg.layers) m.layers[i + 1].in_norm else m.norm;
+            try d.launch(k.resid, .{ .x = T }, .{ a.x, a.r, l.post_ple_norm, l.scalar, next, a.h, a.ahi, a.alo, EPS, @as(i32, 0) });
+            if (r.cap) |c| try c.grab(r, .after, i);
+            if (r.dump_dir != null and i < 4) {
+                const name = try std.fmt.allocPrint(alloc, "{d}", .{i});
+                defer alloc.free(name);
+                try r.dump(name, p0, T);
+            }
+        }
+        if (want == .none) {
+            try d.sync();
+            return null;
+        }
+        const first: u32 = if (want == .rows) 0 else T - 1;
+        const rows = T - first;
+        const G = cfg.hidden / 64;
+        r.tag = "head";
+        try r.gemm(off(a.h, first * cfg.hidden * 2), off(a.ahi, first * G * 2), off(a.alo, first * G * 2), m.head, a.logits, rows);
+        try d.launch(k.argmax_part, .{ .x = 256, .y = rows }, .{ a.logits, @as(i32, cfg.vocab), a.pv, a.pi });
+        try d.launch(k.argmax, .{ .x = rows }, .{ a.pv, a.pi, a.out });
+        var toks: [ROWS]i32 = undefined;
+        try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, &toks, a.out, rows * 4, null, 0, null));
+        r.t_enqueue += dev.now() - t_start;
+        try d.sync();
+        return toks[rows - 1];
+    }
+};

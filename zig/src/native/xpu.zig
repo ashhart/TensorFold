@@ -11,7 +11,7 @@ const admit = @import("xpu_admit.zig");
 const Allocator = std.mem.Allocator;
 
 pub const backends: []const []const u8 = &.{"xpu"};
-pub const families: []const api.Family = &.{ .{ .model_type = "qwen3_5", .formats = &.{ "mlx-q4g64", "gptq-int4-g128" } }, .{ .model_type = "nemotron_h", .formats = &.{"mlx-q4g64"} } };
+pub const families: []const api.Family = &.{ .{ .model_type = "qwen3_5", .formats = &.{ "mlx-q4g64", "gptq-int4-g128" } }, .{ .model_type = "nemotron_h", .formats = &.{"mlx-q4g64"} }, .{ .model_type = "gemma4", .formats = &.{"mlx-q4g64"} } };
 
 pub fn chip(_: Allocator) ?[]const u8 {
     return "Intel Xe2 (Level Zero)";
@@ -162,8 +162,16 @@ fn openLanes(gpa: Allocator, io: std.Io, runner: *xq.Runner, drafter: ?*Drafter,
 }
 
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (try o.slideRefusal(a, "XPU")) |why| {
+        problem.* = why;
+        return null;
+    }
     if (o.fsrRefusal("xpu")) |why| {
         problem.* = why;
+        return null;
+    }
+    if (o.rope_yarn != null) { // every XPU family, Nemotron's included: none ropes with YaRN
+        problem.* = "--rope-yarn: the native Intel GPU engine has no YaRN rope; serve without --rope-yarn, or on CUDA";
         return null;
     }
     if (nem.serves(o.model_type)) return nem.open(a, gpa, io, o, problem);
@@ -201,4 +209,8 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
             try std.fmt.allocPrint(a, "the XPU engine could not serve {s}: {s}", .{ o.dir, @errorName(err) });
         return null;
     };
+}
+
+test "slide admission: xpu refuses before checkpoint or device access" {
+    try @import("slide_open_test.zig").check(open, "XPU", &.{ "qwen3_5", "nemotron_h", "gemma4" });
 }

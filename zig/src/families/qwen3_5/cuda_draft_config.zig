@@ -69,7 +69,7 @@ pub const Config = struct {
             .rank = try int(d.object, "selector_rank"),
             .topk = try int(d.object, "selector_top_k"),
             .eps = @floatCast(try num(o, "rms_norm_eps")),
-            .theta = @floatCast(try num((o.get("rope_parameters") orelse return error.BadDraftConfig).object, "rope_theta")),
+            .theta = @floatCast(try num(try plainRope(o), "rope_theta")),
             .taps = @splat(0),
             .n_taps = 0,
         };
@@ -91,6 +91,28 @@ pub const Config = struct {
     }
 };
 
+/// The draft's rope_parameters, refused unless unscaled: its kernels rope with theta alone.
+fn plainRope(o: std.json.ObjectMap) !std.json.ObjectMap {
+    const rope = o.get("rope_parameters") orelse return error.BadDraftConfig;
+    if (rope != .object) return error.BadDraftConfig;
+    for ([_][]const u8{ "rope_type", "type" }) |key| if (rope.object.get(key)) |v| {
+        if (v != .string or !std.mem.eql(u8, v.string, "default")) return error.UnsupportedDraftConfig;
+    };
+    if (o.get("rope_scaling")) |v| if (v != .null) return error.UnsupportedDraftConfig;
+    return rope.object;
+}
+
+/// Whether `dir`'s config.json declares a DFlash2 draft (a top-level dflash_config); no readable object: not one.
+pub fn declared(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) bool {
+    const path = std.fs.path.join(gpa, &.{ dir, "config.json" }) catch return false;
+    defer gpa.free(path);
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 20)) catch return false;
+    defer gpa.free(bytes);
+    const doc = std.json.parseFromSlice(std.json.Value, gpa, bytes, .{}) catch return false;
+    defer doc.deinit();
+    return doc.value == .object and doc.value.object.get("dflash_config") != null;
+}
+
 /// A size, count or divisor: positive, so a zero can't reach a remainder or an empty allocation.
 fn int(o: std.json.ObjectMap, key: []const u8) !usize {
     const v = try whole(o, key);
@@ -111,4 +133,20 @@ fn num(o: std.json.ObjectMap, key: []const u8) !f64 {
         .float => |f| f,
         else => error.BadDraftConfig,
     };
+}
+
+test "a drafter directory is DFlash2's by its config's dflash_config; a checkpoint's own config or none is not" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(root);
+    try std.testing.expect(!declared(a, io, root));
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = "{\"model_type\":\"qwen3_5_moe\",\"text_config\":{}}" });
+    try std.testing.expect(!declared(a, io, root));
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = "{\"model_type\":\"qwen3\",\"dflash_config\":{\"block_size\":8}}" });
+    try std.testing.expect(declared(a, io, root));
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = "[1]" });
+    try std.testing.expect(!declared(a, io, root));
 }

@@ -136,3 +136,7 @@ test "contract architecture: modern gate 3 retains bit equality and rejects a pl
         try std.testing.expectEqual(@as(usize, 0), cpu.references);
     }
 }
+
+test {
+    _ = @import("contract_exl3_grouped_ref.zig");
+}

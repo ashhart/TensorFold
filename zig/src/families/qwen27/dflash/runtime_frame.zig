@@ -117,15 +117,17 @@ pub const Frame = struct {
     pub fn alloc(f: *Frame, rows: u32, width: u32, dtype: @import("../checkpoint.zig").DType) !op.View {
         if (!f.active or f.completed or rows == 0 or width == 0) return error.DraftFrameNotActive;
         const bytes = try std.math.mul(usize, try std.math.mul(usize, rows, width), dtype.size());
+        // Each slot keeps less than 64 KiB of spare scratch as context scores grow across rounds.
+        const reserved = (try std.math.add(usize, bytes, 65535)) & ~@as(usize, 65535);
         if (f.cursor == f.pool.items.len) {
-            const buffer = try f.device.buffer(bytes, options);
+            const buffer = try f.device.buffer(reserved, options);
             f.pool.append(f.allocator, buffer) catch |err| {
                 buffer.deinit();
                 return err;
             };
             if (f.residency) |h| h.join(h.ctx, buffer);
         } else if (f.pool.items[f.cursor].length() < bytes) {
-            const buffer = try f.device.buffer(bytes, options);
+            const buffer = try f.device.buffer(reserved, options);
             if (f.residency) |h| h.leave(h.ctx, f.pool.items[f.cursor]);
             f.pool.items[f.cursor].deinit();
             f.pool.items[f.cursor] = buffer;

@@ -23,7 +23,8 @@ pub fn start(b: anytype, s: *Stream, slot: ?usize) !void {
     b.filling.putAssumeCapacity(s, begun);
 }
 
-pub fn step(b: anytype, s: *Stream) !bool {
+/// A family the cap cannot stand in for consumes the hint as `_: u32`: GLM CUDA's chunks fix `at + prompt_rows`.
+pub fn step(b: anytype, s: *Stream, _: u32) !bool {
     errdefer b.abortPrompt(s);
     if (s.isCancelled()) return error.Cancelled;
     if (!b.filling.contains(s)) try start(b, s, null);
@@ -58,7 +59,7 @@ pub fn step(b: anytype, s: *Stream) !bool {
 // True means the prompt completed; false hands its unfinished cursor to the shared host after a completed call.
 pub fn lone(b: anytype, s: *Stream, hooks: anytype) !bool {
     try start(b, s, 0);
-    while (!try step(b, s)) {
+    while (!try step(b, s, 0)) {
         if (hooks.prefill_yield) |yield_| if (yield_(hooks.ctx)) return false;
     }
     return true;
@@ -71,13 +72,13 @@ pub fn Callbacks(comptime B: type) type {
             const b = B.self(ptr);
             const pool = b.promptPool();
             defer pool.pop();
-            while (!try step(b, s)) {}
+            while (!try step(b, s, 0)) {}
         }
-        pub fn one(ptr: *anyopaque, s: *Stream) anyerror!bool {
+        pub fn one(ptr: *anyopaque, s: *Stream, _: u32) anyerror!bool {
             const b = B.self(ptr);
             const pool = b.promptPool();
             defer pool.pop();
-            return step(b, s);
+            return step(b, s, 0);
         }
     };
 }

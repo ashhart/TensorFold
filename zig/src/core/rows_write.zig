@@ -31,8 +31,16 @@ pub fn queued(r: *Rows, e: *pc.Entry, starts: []const u32) void {
     sync.queued(r, e, starts);
 }
 
-/// Staged work owns no entry pointer; eviction only removes an entry still waiting to be staged.
+/// Eviction removes only a save still queued (staged work owns no entry); one that waited for room counts as skipped.
 pub fn dropped(r: *Rows, e: *pc.Entry) void {
+    if (r.waiting == e) r.waiting = null;
+    for (r.queue.items) |q| if (q.entry == e) {
+        if (q.waited and !r.stopped) {
+            r.next_job +%= 1; // the id a save staged now would take, so no job in flight shares it
+            skip(r, chain.state(r.keying, e.tokens, e.decode_spans, q.starts, e.at), e.at, error.StagingFull);
+        }
+        break;
+    };
     sync.dropped(r, e);
 }
 
@@ -43,7 +51,13 @@ pub fn pending(r: *const Rows) bool {
 
 pub fn ready(r: *const Rows) bool {
     if (r.sync_writes) return sync.pending(r);
-    return (if (r.worker) |w| w.ready() else false) or (!r.stopped and r.spill != .evicted and r.queue.items.len > 0);
+    return (if (r.worker) |w| w.ready() else false) or (!r.stopped and r.spill != .evicted and r.queue.items.len > 0 and !blocked(r));
+}
+
+/// Whether the newest queued save was refused room by the jobs in flight and none has been taken since.
+fn blocked(r: *const Rows) bool {
+    const e = r.waiting orelse return false;
+    return r.queue.items.len > 0 and r.queue.items[r.queue.items.len - 1].entry == e;
 }
 
 /// A spill copies the entry before RAM releases it, without waiting for filesystem work or a byte permit.
@@ -52,7 +66,8 @@ pub fn evicted(r: *Rows, e: *pc.Entry) void {
     if (r.spill == .off or r.stopped) return;
     reap(r);
     for (r.queue.items, 0..) |q, i| if (q.entry == e) {
-        _ = stage(r, r.queue.orderedRemove(i));
+        // The entry leaves RAM now, so a full permit skips it rather than hold it.
+        _ = stage(r, r.queue.orderedRemove(i), false);
         return;
     };
 }
@@ -62,14 +77,13 @@ pub fn wanted(r: *const Rows, n: chain.Stem) bool {
     return if (r.worker) |w| w.wanted(n) else false;
 }
 
-/// Reconcile finished jobs and stage at most one queued entry; an outstanding write alone does not spin the engine.
+/// Reconcile finished jobs and stage at most one queued entry; a save waiting for room is work only a reap can free.
 pub fn step(r: *Rows) bool {
     if (r.sync_writes) return sync.step(r);
     reap(r);
-    if (r.stopped or (r.spill == .evicted and r.flush_clock == null)) return false;
+    if (r.stopped or blocked(r) or (r.spill == .evicted and r.flush_clock == null)) return false;
     const q = r.queue.pop() orelse return false;
-    _ = stage(r, q);
-    return true;
+    return stage(r, q, true);
 }
 
 pub fn abort(r: *Rows, j: *Job) void {
@@ -145,6 +159,7 @@ pub fn reap(r: *Rows) void {
     const w = r.worker orelse return;
     while (w.take()) |j| {
         defer j.destroy();
+        r.waiting = null;
         const err: ?anyerror = j.failure orelse if (j.generation != w.generation.load(.acquire)) error.Cancelled else null;
         if (err) |e| {
             failed(r, j, e);
@@ -154,7 +169,8 @@ pub fn reap(r: *Rows) void {
         }
         publish(r, j) catch |e| {
             failed(r, j, e);
-            r.admission.finish(r.dir, j.bytes, false);
+            // The job that owed the block already backed admission off.
+            r.admission.finish(r.dir, j.bytes, e == error.MissingBlock);
             r.collect();
             continue;
         };
@@ -164,6 +180,7 @@ pub fn reap(r: *Rows) void {
 
 fn publish(r: *Rows, j: *io.Job) !void {
     if (r.find(j.name)) |_| return;
+    if (!complete(r, j)) return error.MissingBlock;
     var s: store.State = .{ .name = j.name, .at = j.at, .tokens = &.{}, .spans = &.{}, .starts = &.{}, .own = j.files[j.files.len - 1].bytes, .rows = 0, .used = 0, .shared = j.shared };
     s.tokens = try r.gpa.dupe(u32, j.tokens);
     errdefer r.gpa.free(s.tokens);
@@ -190,51 +207,79 @@ fn publish(r: *Rows, j: *io.Job) !void {
     if (!@import("builtin").is_test) std.log.info("imprint: {d} tokens on disk: {d} new blocks and its own {d} MiB ({d} MiB this state, {d} MiB of rows it shares) in {d:.0} ms", .{ j.at, j.files.len - 1, s.own >> 20, j.bytes >> 20, s.rows >> 20, @as(f64, @floatFromInt(nowNs() - j.began)) / 1e6 });
 }
 
-fn stage(r: *Rows, q: Queued) bool {
+/// Whether every block the job's state names is on disk or among the files it publishes now.
+fn complete(r: *const Rows, j: *const io.Job) bool {
+    blocks: for (j.wants) |want| {
+        const n = chain.stem(want.name);
+        if (r.blocks.contains(n)) continue;
+        for (j.blocks()) |f| if (std.mem.eql(u8, &chain.stem(f.trailer.name), &n)) continue :blocks;
+        return false;
+    }
+    return true;
+}
+
+/// Whether `q` left the queue, staged or skipped; false when it waits for room and is queued again (`may_wait`).
+fn stage(r: *Rows, q: Queued, may_wait: bool) bool {
     const at = q.entry.at;
     r.next_job +%= 1;
     const name = chain.state(r.keying, q.entry.tokens, q.entry.decode_spans, q.starts, at);
     const j = sync.prepare(r, q) catch |err| {
-        r.counts.skipped += 1;
-        r.failures.add(.{ .id = r.next_job, .generation = if (r.worker) |w| w.generation.load(.acquire) else 0, .name = name, .at = at, .err = err });
-        pc.note("imprint: saving {d} tokens skipped ({s})", .{ at, @errorName(err) });
-        return false;
-    } orelse return false;
+        skip(r, name, at, err);
+        return true;
+    } orelse return true;
+    var queued_again = false;
     defer {
-        r.gpa.free(j.starts);
+        if (!queued_again) r.gpa.free(j.starts);
         r.gpa.free(j.parts);
         r.gpa.free(j.wants);
         r.gpa.free(j.own);
         r.gpa.destroy(j);
     }
-    stageJob(r, j) catch |err| {
-        r.counts.skipped += 1;
-        r.failures.add(.{ .id = r.next_job, .generation = if (r.worker) |w| w.generation.load(.acquire) else 0, .name = j.name, .at = at, .err = err });
+    stageJob(r, j, may_wait) catch |err| {
+        if (err == error.StagingBusy) {
+            queued_again = true;
+            r.waiting = q.entry;
+            r.queue.appendAssumeCapacity(.{ .entry = q.entry, .starts = q.starts, .waited = true });
+            return false;
+        }
+        skip(r, j.name, at, err);
         if (err == error.GatherFailed or err == error.SnapshotGpuFailure) r.counts.failed += 1;
-        pc.note("imprint: saving {d} tokens skipped ({s})", .{ at, @errorName(err) });
-        return false;
+        return true;
     };
     return true;
 }
 
-fn stageJob(r: *Rows, prepared: *const Job) !void {
+/// A save given up: counted, recorded under the job id it would have had, and noted.
+fn skip(r: *Rows, name: chain.Name, at: u32, err: anyerror) void {
+    r.counts.skipped += 1;
+    r.failures.add(.{ .id = r.next_job, .generation = if (r.worker) |w| w.generation.load(.acquire) else 0, .name = name, .at = at, .err = err });
+    pc.note("imprint: saving {d} tokens skipped ({s})", .{ at, @errorName(err) });
+}
+
+fn stageJob(r: *Rows, prepared: *const Job, may_wait: bool) !void {
     if (r.worker == null) r.worker = try io.Worker.open(r.dir, r.staging_bytes, r.file_io);
     const w = r.worker.?;
     if (w.names(prepared.name)) return;
     const e = prepared.entry;
     const metadata = 4 * (3 + e.tokens.len + 2 * e.decode_spans.len + prepared.starts.len);
-    var bytes: u64 = 0;
+    var promised: io.Promised = .empty;
+    defer promised.deinit(r.gpa);
     var count: usize = 0;
+    try w.promised(r.gpa, &promised);
+    var bytes = newBytes(r, &promised, prepared, metadata, &count);
     var charge: u64 = 0;
     while (true) {
-        bytes = newBytes(r, prepared, metadata, &count);
         charge = bytes + @sizeOf(io.Job) + count * @sizeOf(io.File) + prepared.wants.len * @sizeOf(Want) + 4 * @sizeOf([]const u8);
-        if (!w.fits(charge)) return error.StagingFull;
+        if (!w.fits(charge)) return if (may_wait and w.busy(charge)) error.StagingBusy else error.StagingFull;
         const reserved = w.reserved();
         if (!r.budget(bytes + reserved)) return error.DailyBudgetSpent;
         if (!r.room(bytes + reserved)) return error.OverCap;
-        var after_count: usize = 0;
-        if (newBytes(r, prepared, metadata, &after_count) == bytes) break;
+        try w.promised(r.gpa, &promised); // a fence inside room frees the blocks cancelled jobs promised
+        var again_count: usize = 0;
+        const again = newBytes(r, &promised, prepared, metadata, &again_count);
+        if (again == bytes) break;
+        bytes = again;
+        count = again_count;
     }
     if (r.admission.reserve(r.dir, bytes) != .ready) return error.UnderFreeDiskFloor;
     errdefer r.admission.finish(r.dir, bytes, true);
@@ -245,7 +290,7 @@ fn stageJob(r: *Rows, prepared: *const Job) !void {
     const a = arena.allocator();
     const files = try a.alloc(io.File, count);
     var built: usize = 0;
-    for (prepared.wants) |want| if (!r.blocks.contains(chain.stem(want.name))) {
+    for (prepared.wants) |want| if (lacks(r, &promised, want)) {
         var ranges: std.ArrayList(image.Range) = .empty;
         defer ranges.deinit(r.gpa);
         try image.blockRanges(prepared.parts, r.keying.block, want.window, want.k, &ranges, r.gpa);
@@ -267,10 +312,16 @@ fn stageJob(r: *Rows, prepared: *const Job) !void {
     w.submit(j);
 }
 
-fn newBytes(r: *const Rows, j: *const Job, metadata: usize, count: *usize) u64 {
+/// Whether the state's block is for this job to write: the disk lacks it and no job in flight is writing it.
+fn lacks(r: *const Rows, promised: *const io.Promised, want: Want) bool {
+    const n = chain.stem(want.name);
+    return !r.blocks.contains(n) and !promised.contains(n);
+}
+
+fn newBytes(r: *const Rows, promised: *const io.Promised, j: *const Job, metadata: usize, count: *usize) u64 {
     var bytes = image.total(j.own) + metadata + @sizeOf(file.Trailer);
     count.* = 1;
-    for (j.wants) |want| if (!r.blocks.contains(chain.stem(want.name))) {
+    for (j.wants) |want| if (lacks(r, promised, want)) {
         bytes += want.bytes;
         count.* += 1;
     };

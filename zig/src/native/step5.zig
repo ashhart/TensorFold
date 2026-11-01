@@ -36,6 +36,10 @@ const Host = struct {
 };
 
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (try o.slideRefusal(a, "Macs")) |why| {
+        problem.* = why;
+        return null;
+    }
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const model = s5.Model.load(gpa, io, o.dir) catch |err| {
@@ -87,7 +91,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         h.markers = .{ 128000, 128001, 128002, 128003, 128004, 128005 };
         vis = .{ .ctx = h, .prepare = prepareImage, .image_token = h.markers[1], .markers = &h.markers, .part_type = "image", .image_tokens = v.image_tokens, .max_images = v.max_images, .explain = s5.image.decoderProblem };
     }
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(window), .prefill_step = s5.state.prompt_rows, .structures = true, .logprobs = true, .vision = vis });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(window), .prefill_step = s5.state.prompt_rows, .decode_share = o.decode_share, .structures = true, .logprobs = true, .vision = vis });
     h.cache = null;
     h.cache_cap = if (o.prompt_cache_gib) |g| @intFromFloat(g * (1 << 30)) else budget;
     if (h.cache_cap > 0) {

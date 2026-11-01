@@ -12,6 +12,7 @@ const g = contract.gates;
 const engine = tf.nemotron.kernels;
 
 comptime {
+    @setEvalBranchQuota(4000);
     std.debug.assert(engine.geometries.len == cases.geometries.len);
     for (engine.geometries, cases.geometries) |e, x| std.debug.assert(e[0] == x[0] and e[1] == x[1]);
     for (cases.entries) |v| {

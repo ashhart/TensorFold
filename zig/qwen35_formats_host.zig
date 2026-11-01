@@ -43,19 +43,23 @@ fn config(quant: []const u8, moe: bool, pocket: bool) ![]u8 {
 const exl3 = "\"quantization_config\":{\"quant_method\":\"exl3\"}";
 const ct = "\"quantization_config\":{\"quant_method\":\"compressed-tensors\"}";
 
-test "format coexistence: EXL3 stays MoE only and ModelOpt keeps its admission and refusals" {
+test "format coexistence: EXL3 admits MoE and dense and ModelOpt keeps its admission and refusals" {
     const x = try config(exl3, true, false);
     defer t.allocator.free(x);
     const gx = try geo.parse(t.allocator, x);
     try t.expect(gx.exl3);
     try t.expect(!gx.kinds.modelopt);
+    const xd = try config(exl3, false, false);
+    defer t.allocator.free(xd);
+    const gd = try geo.parse(t.allocator, xd);
+    try t.expect(gd.exl3 and !gd.moe() and !gd.kinds.modelopt);
     const m = try config(ct, false, false);
     defer t.allocator.free(m);
     const gm = try geo.parse(t.allocator, m);
     try t.expect(gm.kinds.modelopt and gm.kinds.ct and !gm.exl3);
     try t.expectEqual(@as(u8, 16), gm.bits.embed);
     for ([_]struct { q: []const u8, moe: bool, pocket: bool, err: anyerror }{
-        .{ .q = exl3, .moe = false, .pocket = false, .err = error.UnsupportedQwenQuantization },
+        .{ .q = exl3, .moe = false, .pocket = true, .err = error.UnsupportedQwenQuantization },
         .{ .q = exl3, .moe = true, .pocket = true, .err = error.UnsupportedQwenQuantization },
         .{ .q = ct, .moe = true, .pocket = false, .err = error.UnsupportedQwenQuantization },
         .{ .q = ct, .moe = false, .pocket = true, .err = error.UnsupportedLearningFormat },
