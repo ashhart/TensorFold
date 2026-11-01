@@ -56,6 +56,7 @@ pub fn states(gpu: Gpu, rest: []const []const u8) !void {
     defer loaded.deinit(loaded.ctx);
     const opened = try native.openDrafter(gpa, gpu.io, loaded.ctx, rest[1], 4);
     defer opened.close(opened.ctx);
+    if (loaded.layout != null) try native.attach(loaded.ctx, 1, 2 * g4.pages.pagesFor(8192, 0)); // paged: both lanes' widest
     var drafted = try lanes.drafted.Drafted.init(gpa, loaded.backend, opened.drafter);
     defer drafted.deinit();
     const facts = drafted.facts(loaded.facts);

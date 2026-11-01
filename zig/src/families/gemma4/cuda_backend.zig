@@ -7,6 +7,8 @@ const fwd = @import("cuda_forward.zig");
 const kern = @import("cuda_kernels.zig");
 const snap = @import("cuda_snap.zig");
 const cv = @import("cuda_vision.zig");
+const kv = @import("core").kv_pool;
+const pg = @import("cuda_pages.zig");
 
 const be = lanes.backend;
 const Stream = lanes.Stream;
@@ -33,6 +35,7 @@ const Lane = struct {
     mark: ?usize = null, // a stepped pass's mark kept at its next step, after the drafter absorbed the chunk
     tap: Tap = .{},
     images: ?cuda.DeviceBuffer = null, // the prompt's images through the embedder, while its pass runs
+    lease: kv.Lease = .{}, // paged: the global layers' pages it holds and is promised
 };
 
 /// A drafter's context beside a kept state: its bytes at a position, and its copy into the state.
@@ -60,6 +63,7 @@ pub const Gemma = struct {
     vision: ?*cv.Vision = null, // --vision: the embedder a prompt's images go through
     keeper: ?Keeper = null, // a drafter whose context a kept prompt state carries (DFlash's)
     bits: ?cuda.DeviceBuffer = null, // structured output's allowed-token words, a round's rows, at first use
+    pool: ?kv.Pool = null, // paged: the pages every slot leases (attach)
 
     /// The device bytes `init` allocates: the token and pick rings, metas, each slot's last row and rule.
     pub fn openBytes(slots: usize) usize {
@@ -67,7 +71,7 @@ pub const Gemma = struct {
     }
 
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, m: *fwd.Model, k: *const kern.Kernels, s: cuda.Stream) !Gemma {
-        const free = try gpa.alloc(bool, m.slots);
+        const free = try gpa.alloc(bool, m.slotCap());
         errdefer gpa.free(free);
         @memset(free, true);
         const greedy = try gpa.alloc(bool, ring + round_rows);
@@ -79,7 +83,7 @@ pub const Gemma = struct {
         errdefer picks.free();
         var meta = try cuda.DeviceBuffer.alloc(d, round_rows * 16);
         errdefer meta.free();
-        const bufs = try gpa.alloc(cuda.DeviceBuffer, 2 * m.slots);
+        const bufs = try gpa.alloc(cuda.DeviceBuffer, 2 * m.slotCap());
         errdefer gpa.free(bufs);
         var made: usize = 0;
         errdefer for (bufs[0..made]) |*b| b.free();
@@ -92,6 +96,7 @@ pub const Gemma = struct {
 
     pub fn deinit(x: *Gemma) void {
         var it = x.lanes.valueIterator();
+        pg.close(x);
         while (it.next()) |l| l.rows.deinit(x.gpa);
         x.lanes.deinit(x.gpa);
         for (x.slot_bufs) |*b| b.free();
@@ -165,7 +170,7 @@ pub const Gemma = struct {
 
     /// The round loop's facts: no draft head; host copies verified in windows up to 16 rows, streams sharing a forward.
     pub fn facts(x: *const Gemma) lanes.Model {
-        return .{ .exact_width = max_window, .gpu_tokens = false, .mtp = false, .speculate = false, .hidden_rows = true, .batch_rows = round_rows, .max_streams = @intCast(@min(x.m.slots, round_rows)) };
+        return .{ .exact_width = max_window, .gpu_tokens = false, .mtp = false, .speculate = false, .hidden_rows = true, .batch_rows = round_rows, .max_streams = @intCast(@min(x.m.slotCap(), round_rows)) };
     }
 
     fn self(ptr: *anyopaque) *Gemma {
@@ -260,25 +265,23 @@ pub const Gemma = struct {
         snap.drop(x.gpa, x.s, k);
     }
 
-    fn freeSlot(x: *const Gemma) ?usize {
-        return std.mem.indexOfScalar(bool, x.free, true);
-    }
-
     /// A prompt pass begins: a slot, the stream's rule, a kept state restored; where its first chunk starts.
     fn opening(x: *Gemma, s: *Stream) !*Lane {
         const p = s.prompt();
         if (p.len == 0) return error.EmptyPrompt;
-        if (p.len + @as(usize, s.max_new) + max_window > x.m.context) return error.PastContext;
+        if (!pg.fitsContext(x, p.len, s.max_new)) return error.PastContext;
         const got = try x.lanes.getOrPut(x.gpa, s);
         if (!got.found_existing) {
-            const slot = x.freeSlot() orelse {
+            var lease: kv.Lease = .{};
+            const slot = pg.takeSlot(x, &lease, p.len, s.max_new) catch |e| {
                 x.lanes.removeByPtr(got.key_ptr);
-                return error.NoFreeSlot;
+                return e;
             };
             x.free[slot] = false;
-            got.value_ptr.* = .{ .slot = slot, .last = x.slot_bufs[2 * slot].ptr, .rule = x.slot_bufs[2 * slot + 1].ptr };
+            got.value_ptr.* = .{ .slot = slot, .last = x.slot_bufs[2 * slot].ptr, .rule = x.slot_bufs[2 * slot + 1].ptr, .lease = lease };
         }
         const l = got.value_ptr;
+        try pg.reach(x, l, p.len); // the prompt's pages (a kept state's restore writes into them too)
         l.sampled = false;
         l.mark = null;
         if (s.sampling) |sp| if (sp.temperature > 0) {
@@ -450,6 +453,7 @@ pub const Gemma = struct {
         const l = x.lanes.getPtr(s) orelse return error.UnknownStream;
         const t = try x.value(feed);
         if (position != l.len + 1) return error.PositionMismatch;
+        try pg.reach(x, l, l.len + 1);
         try x.run(&.{.{ .slot = l.slot, .p0 = l.len, .tokens = &.{t} }}, false, 0, 1);
         l.tap = .{ .row = 0, .start = l.len, .rows = 1, .gen = x.gen };
         l.len += 1;
@@ -481,6 +485,7 @@ pub const Gemma = struct {
             try l.rows.append(x.gpa, w.pending);
             try l.rows.appendSlice(x.gpa, w.tokens);
             for (w.positions, 0..) |pos, r| if (pos != l.base + r + 1) return error.PositionMismatch;
+            try pg.reach(x, l, l.base + l.rows.items.len);
             c.* = .{ .slot = l.slot, .p0 = l.base, .tokens = l.rows.items };
             total += l.rows.items.len;
         }
@@ -524,14 +529,16 @@ pub const Gemma = struct {
     }
 
     fn dropLane(x: *Gemma, s: *const Stream) void {
-        if (x.lanes.fetchRemove(s)) |kv| {
-            var l = kv.value;
+        if (x.lanes.fetchRemove(s)) |entry| {
+            var l = entry.value;
+            pg.release(x, &l);
             x.free[l.slot] = true;
             l.rows.deinit(x.gpa);
             if (l.images) |*b| {
                 x.s.synchronize() catch {};
                 b.free();
             }
+            if (x.lanes.count() == 0) pg.report(x);
         }
     }
 
