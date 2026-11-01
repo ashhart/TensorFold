@@ -111,7 +111,7 @@ const Fake = struct {
     }
 };
 fn taps() session.Batch {
-    return .{ .values = .{ .handle = 99, .rows = 2, .width = toy.tapWidth(), .stride = toy.tapWidth(), .dtype = .bf16 }, .positions = &.{ 0, 1 }, .layers = toy.taps, .target_end = 2 };
+    return .{ .values = .{ .handle = 99, .rows = 2, .width = toy.ringWidth(), .stride = toy.ringWidth(), .dtype = .bf16 }, .positions = &.{ 0, 1 }, .layers = toy.taps, .target_end = 2 };
 }
 
 test "a v1 block runs attention and an MLP a layer, two residual adds each, and heads its fifteen mask rows" {
@@ -125,8 +125,8 @@ test "a v1 block runs attention and an MLP a layer, two residual adds each, and 
     const p = op.Preparation{ .mode = .bf16_reference };
     try state.absorb(fake.ops(), &g, p, taps());
     try std.testing.expectEqual(@as(u32, 3), fake.appends);
-    // the context append: fc, then k and v a layer
-    try std.testing.expectEqual(@as(u32, 1 + 2 * 3), fake.projects);
+    // the context append from fused ring rows: k and v a layer, no fc (the target's taps pass ran it)
+    try std.testing.expectEqual(@as(u32, 2 * 3), fake.projects);
     fake.projects = 0;
     var tree = try state.treeBlock(a, fake.ops(), &g, p, 5, try state.firstDraw(), 16, .{ .nodes = 15 });
     defer tree.deinit();
@@ -167,4 +167,17 @@ test "a v1 block without an add operator is refused, not run without its residua
     vtable.add = null;
     const ops = op.Ops{ .ptr = &fake, .vtable = &vtable };
     try std.testing.expectError(error.DraftOperatorShape, execution.forwardBlock(ops, &g, .{ .mode = .bf16_reference }, .{ .cache = 1, .begin = 0, .end = 2 }, 5, 16));
+}
+
+test "a v1 drafter's context keeps its whole span, not just the sliding window" {
+    var c = toy;
+    c.history = 64;
+    const s = try session.Session.init(c, 1, 0);
+    var positions: [40]u64 = undefined;
+    for (&positions, 0..) |*p, i| p.* = i;
+    const next = try s.admit(.{ .values = .{ .handle = 2, .rows = 40, .width = c.ringWidth(), .stride = c.ringWidth(), .dtype = .bf16 }, .positions = &positions, .layers = c.taps, .target_end = 40 });
+    try std.testing.expectEqual(@as(u64, 0), next.begin);
+    const windowed = try session.Session.init(toy, 1, 0);
+    const cropped = try windowed.admit(.{ .values = .{ .handle = 2, .rows = 40, .width = toy.ringWidth(), .stride = toy.ringWidth(), .dtype = .bf16 }, .positions = &positions, .layers = toy.taps, .target_end = 40 });
+    try std.testing.expectEqual(@as(u64, 40 - 31), cropped.begin);
 }
