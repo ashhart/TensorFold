@@ -23,6 +23,20 @@ fn relu2Tile(comptime rows: u32, comptime cb: u32) limits.HipLaunch {
     };
 }
 
+/// Flash Next's lanes sparse attention for 12 query heads a kv head over a cache of one kind (`late`: gfx1151/gfx1201).
+fn sparseLanes(comptime kind: []const u8, comptime late: u32) Record {
+    const symbol = "tf_fn_sparse_lanes12_" ++ kind;
+    return .{
+        .launch = .{ .name = "flashnext " ++ symbol, .symbol = symbol, .image = "flashnext", .threads = 256 },
+        .usage = .{
+            .{ .vgprs = 93, .sgprs = 55, .lds = 31264, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 93, .sgprs = 55, .lds = 31264, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = late, .sgprs = 57, .lds = 31264, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = late, .sgprs = 60, .lds = 31264, .private = 0, .bound = 256, .wave = 32 },
+        },
+    };
+}
+
 /// HIP kernels as launched; tf-hip-kernel-contract limits DIR re-derives the usage records from the code objects.
 const own_records = [_]Record{
     .{
@@ -479,6 +493,8 @@ const own_records = [_]Record{
             .{ .vgprs = 36, .sgprs = 32, .lds = 50688, .private = 0, .bound = 1024, .wave = 32 },
         },
     },
+    sparseLanes("f16", 95),
+    sparseLanes("bf16", 91),
 } ++ @import("hip_records_pair.zig").records ++ @import("hip_records_prompt.zig").records;
 
 pub const records = own_records ++ @import("hip_records_stream.zig").records;
