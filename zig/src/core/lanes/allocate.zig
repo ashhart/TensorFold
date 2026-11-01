@@ -331,7 +331,7 @@ test "a hold past the pass's rows is priced as the passes it takes: an asymmetri
     defer flat.deinit(gpa);
     // every pass costs 10 ms whatever its shape, so the price is the number of passes
     const grid = [_]hold_price.HoldCost{ .{ .streams = 1, .depth = 1, .ms = 10 }, .{ .streams = 1, .depth = 9, .ms = 10 }, .{ .streams = 32, .depth = 1, .ms = 10 }, .{ .streams = 32, .depth = 9, .ms = 10 } };
-    const deep = [_]f64{0.99} ** 9;
+    const deep: [9]f64 = @splat(0.99);
     const one = [_]f64{0.9};
     const Case = struct { deep_at: usize, rows: u32, want: [8]u32 };
     const cases = [_]Case{
