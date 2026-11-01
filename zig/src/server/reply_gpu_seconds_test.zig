@@ -61,7 +61,11 @@ fn steady(a: Allocator, value: json.Value, drop: ?[]const u8) ![]u8 {
         for ([_][]const u8{ "tokens_per_second", "seconds", "time_to_first_token" }) |k| {
             if (runtime.object.getPtr(k)) |p| p.* = .null;
         }
-        if (drop) |k| _ = runtime.object.orderedRemove(k);
+        if (drop) |k| {
+            if (std.mem.eql(u8, k, "grammar")) {
+                for ([_][]const u8{ "grammar_windows", "grammar_fills", "grammar_window_seconds", "grammar_fill_seconds" }) |key| _ = runtime.object.orderedRemove(key);
+            } else _ = runtime.object.orderedRemove(k);
+        }
     }
     return json.stringify(a, v, .{});
 }
@@ -103,5 +107,30 @@ test "gpu_seconds: a reply whose engine did not time it is byte-identical, whole
             if (std.mem.indexOf(u8, z, "\"gpu_seconds\": 0.25") != null) timed += 1;
         }
         try std.testing.expectEqual(@as(usize, 1), timed); // the finish carries it, once
+    }
+}
+
+test "grammar timing: measured totals reach whole and streamed replies and unconstrained bytes stay unchanged" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]bool{ false, true }) |streaming| {
+        const off = try served(a, .{ .rounds = 2 }, streaming, null);
+        const stats: api.Stats = .{ .rounds = 2, .grammar = .{ .windows = 2, .fills = 5, .window_ns = 250000000, .fill_ns = 200000000 } };
+        const less = try served(a, stats, streaming, "grammar");
+        const on = try served(a, stats, streaming, null);
+        try std.testing.expectEqual(off.len, on.len);
+        var measured: usize = 0;
+        for (off, less, on) |x, y, z| {
+            try std.testing.expectEqualStrings(x, y);
+            try std.testing.expect(std.mem.indexOf(u8, x, "grammar_") == null);
+            if (std.mem.indexOf(u8, z, "\"grammar_windows\": 2") != null) {
+                measured += 1;
+                try std.testing.expect(std.mem.indexOf(u8, z, "\"grammar_fills\": 5") != null);
+                try std.testing.expect(std.mem.indexOf(u8, z, "\"grammar_window_seconds\": 0.25") != null);
+                try std.testing.expect(std.mem.indexOf(u8, z, "\"grammar_fill_seconds\": 0.2") != null);
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 1), measured);
     }
 }

@@ -56,6 +56,7 @@ pub fn table(a: Allocator, t: Table) !Value {
 /// The loop's state after a step: the recorder's `state` event, field for field.
 pub fn state(e: *Engine) !void {
     if (e.log == null) return;
+    @import("grammar_time.zig").report(e);
     const a = e.arena.allocator();
     const overhead = try a.alloc(Value, e.rule.overhead.items.len);
     for (overhead, e.rule.overhead.items) |*o, x| {
