@@ -50,6 +50,7 @@ pub const Engine = struct {
     alone: bool = true, // this step has one live stream: its copies may take their ramp
     lone_kept: [2][lone_costs.bands]?lone_costs.Kept = @splat(@splat(null)), // the newest lone calibrations, greedy then sampled, a band each
     steps: u64 = 0,
+    grammar_round: @import("grammar_time.zig").Round = .{},
     arena: std.heap.ArenaAllocator, // a round's temporaries
     unread: std.ArrayList(Unread) = .empty, // queued draws the log reads at the step's end
 
@@ -315,9 +316,7 @@ pub const Engine = struct {
         try e.backend.keep(windows, paths);
         if (e.cfg.timed) {
             // the drafts budgets priced past each stream's first are no part of the round's overhead
-            var steps: i64 = 0;
-            for (budgets) |d| steps = if (e.cfg.draft_streams and depth.pricedBatched()) @max(steps, d - 1) else steps + @max(0, d - 1);
-            const ms = e.clock.elapsedMs(.overhead) - e.cfg.draft_step_ms * @as(f64, @floatFromInt(steps));
+            const ms = e.clock.elapsedMs(.overhead) - @import("hold_price.zig").extraStepMs(budgets, e.cfg.draft_step_ms, e.cfg.draft_streams and depth.pricedBatched());
             try trail.event(e, &.{ f("ev", str("overhead")), f("streams", int(plans.len)), f("rows", int(total)), f("ms", ev.bits(ms)) });
             try e.rule.observeOverhead(@intCast(plans.len), total, ms, sampled, @import("hold_price.zig").observedHeadMs(e.backend, &e.rule, budgets));
         }

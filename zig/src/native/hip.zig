@@ -228,6 +228,10 @@ fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const report = @import("sys").optional_libraries.atBoundary();
     defer report.deinit();
+    if (try o.slideRefusal(a, "HIP")) |why| {
+        problem.* = why;
+        return null;
+    }
     if (o.fsrRefusal("hip")) |why| {
         problem.* = why;
         return null;
@@ -278,6 +282,10 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
 pub fn follow(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !bool {
     const report = @import("sys").optional_libraries.atBoundary();
     defer report.deinit();
+    if (try o.slideRefusal(a, "HIP")) |why| {
+        problem.* = why;
+        return false;
+    }
     inline for (registry) |F| {
         if (std.mem.eql(u8, o.model_type, F.model_type)) {
             if (flagRefused(F, o)) |why| {
@@ -398,4 +406,19 @@ test "matrix=on runs only where the matrix-core tiles exist; auto runs everywher
 
 test {
     _ = @import("draft_sources_hip_test.zig");
+}
+
+test "slide admission: hip refuses before checkpoint or device access" {
+    try @import("slide_open_test.zig").check(open, "HIP", &.{ "qwen3_5", "qwen3_5_moe", "qwen4_exp", "nemotron_h" });
+}
+
+test "slide admission: HIP followers refuse before joining ranks" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (families) |f| {
+        var why: []const u8 = "";
+        try std.testing.expect(!try follow(a, std.testing.allocator, std.testing.io, .{ .dir = "missing-slide-checkpoint", .model_type = f.model_type, .slide = true, .tp = 2, .rank = 1 }, &why));
+        try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "--slide: {s} checkpoints do not learn on HIP yet", .{f.model_type}), why);
+    }
 }

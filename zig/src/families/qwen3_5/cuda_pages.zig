@@ -23,7 +23,7 @@ pub fn parsePaging(v: []const u8) !usize {
     return n;
 }
 
-/// TF_QWEN_KV_PAGES_ALL=1: every stream on pages, the first stream's reserved window left idle (checks).
+/// TF_QWEN_KV_PAGES_ALL=1: every stream on pages, the engine's own too: no window is reserved for it.
 pub fn pagedOnly() bool {
     const v = std.c.getenv("TF_QWEN_KV_PAGES_ALL") orelse return false;
     return std.mem.eql(u8, std.mem.span(v), "1");

@@ -11,8 +11,8 @@ const qwen27 = @import("qwen27_served.zig");
 const flashnext = @import("flashnext_host.zig");
 const glm = @import("glm_host.zig");
 const glm_dsa = @import("glm_dsa_host.zig");
-const slide_adapter = @import("slide_adapter.zig");
-const Slide = slide_adapter.Adapter(nemotron.slide);
+const metal_slide = @import("metal_slide.zig");
+const learners = metal_slide.Registry(.{nemotron});
 const cache_fit = @import("cache_fit.zig");
 const metal_admit = @import("metal_admit.zig");
 const Resident = @import("resident.zig").Resident;
@@ -120,7 +120,7 @@ const Host = struct {
     cache: ?api.prompt_cache.Store = null, // kept prompt states (engine thread only); null: a zero budget
     learned: ?api.prompt_imprint.Imprint = null, // --learn: shared states on disk, read back by later servers
     round: nemotron.gpu_round.Options = .{ .depth = 8 }, // a lone greedy stream's GPU-side rounds, as the CLI runs them
-    slide: ?*Slide = null, // Sliding Weights' learner, with --slide
+    slide: ?metal_slide.Registration = null, // Sliding Weights' learner, with --slide
 
     /// A lone greedy stream's rounds on the GPU until it finishes, or a hand-over to the lane core (true).
     fn lone(ctx: *anyopaque, s: *lanes.Stream, hooks: api.LoneHooks) anyerror!bool {
@@ -139,10 +139,7 @@ const Host = struct {
     fn close(ctx: *anyopaque) void {
         const h: *Host = @ptrCast(@alignCast(ctx));
         h.host.stop();
-        if (h.slide) |s| {
-            s.deinit();
-            h.gpa.destroy(s);
-        }
+        if (h.slide) |s| s.deinit(h.gpa);
         const rows = if (h.cache) |*store| store.disk else null;
         if (h.cache) |*store| store.deinit();
         if (rows) |r| r.deinit(); // after the store: its entries leave the write queue as they go
@@ -199,14 +196,10 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = try std.fmt.allocPrint(a, "the native engine has no backend for {s} checkpoints yet; the Python engine 0.6.6 may serve them: python -m pip install git+https://github.com/ashhart/TensorFold.git@v0.6.6", .{o.model_type});
         return null;
     }
-    if (o.slide) if (try slide_adapter.refusal(tf.shard_edit, a, io, o.dir, "`cp -cRL` (an APFS clone that follows links)")) |why| {
+    if (try metal_slide.refusal(nemotron, a, io, o)) |why| {
         problem.* = why;
         return null;
-    };
-    if (o.slide) if (try slideWidths(a, io, o.dir)) |why| {
-        problem.* = why;
-        return null;
-    };
+    }
     const native = modelContext(a, io, o.dir);
     const window: i64 = o.context orelse native;
     if (window < 0 or (native > 0 and window > native)) {
@@ -303,42 +296,29 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     h.slide = null;
     if (o.slide) {
-        const s = try gpa.create(Slide);
-        errdefer gpa.destroy(s);
-        s.* = Slide.init(gpa, io, h.metal);
+        const s = try metal_slide.init(nemotron, gpa, io, h.metal, o.dir);
         h.slide = s;
-        h.host.learner = s.hook();
-        h.host.info_.slide_conversations = s.learner.readsConversations();
+        h.host.learner = s.hook;
+        h.host.info_.slide_conversations = s.conversations;
     }
-    errdefer if (h.slide) |s| {
-        s.deinit();
-        gpa.destroy(s);
-    };
+    errdefer if (h.slide) |s| s.deinit(gpa);
     try h.host.start();
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h, .halt = Host.halt };
 }
 
 const prompt_int8_refusal = "--prompt-precision int8 is the CUDA Qwen3.5 engine's; the Metal engines prompt in bf16: serve without it";
 
-/// --slide writes 4-bit codes into the shards: a checkpoint with any other width is refused by its first such matrix.
-fn slideWidths(a: Allocator, io: std.Io, dir: []const u8) !?[]const u8 {
-    const c = nemotron.config.Config.read(a, io, dir) catch return null; // the load names a config.json it cannot read
-    var buf: [96]u8 = undefined;
-    const m = c.other(&buf) orelse return null;
-    return try std.fmt.allocPrint(a, "--slide learns into checkpoints at 4-bit in groups of 64, and {s} in {s} is {d}-bit in groups of {d}: serve it without --slide", .{ m.name, dir, m.width.bits, m.width.group });
-}
-
 /// Flash Next's replay engine copies on the GPU from its own history: it reads no Recall record yet.
 const recall_refusal = "--recall drafts from a record in the lane engine's rounds; " ++
     "Flash Next's replay engine copies from its own history on the GPU and reads no record yet: " ++
     "serve it without --recall, --recall-dir, --recall-gib or --recall-read-only";
 
-/// Refused before any weights load: --slide but on Nemotron, as CUDA does, and --learn where nothing is kept on disk.
+/// Refused before any weights load: absent family learners and unsupported disk-state options.
 fn refusal(a: Allocator, o: api.Open, dense: bool) !?[]const u8 {
     const t = o.model_type;
     if (o.kv8) return "--kv-cache fp8 keeps fp8 caches on CUDA; the Metal engines keep bf16: serve without it";
     if (o.prompt_int8) return prompt_int8_refusal;
-    if (o.slide and !std.mem.eql(u8, t, "nemotron_h")) return try std.fmt.allocPrint(a, "--slide: {s} checkpoints do not learn on Macs yet", .{t});
+    if (!learners.supports(t)) if (try o.slideRefusal(a, "Macs")) |why| return why;
     const one_mac: ?[]const u8 = if (std.mem.eql(u8, t, "nemotron_h")) "Nemotron" else if (std.mem.eql(u8, t, "lfm2_moe")) "LFM2.5-24B-A2B" else if (isGemma4(t)) "Gemma 4" else if (std.mem.eql(u8, t, "step5_vl")) "Step-5" else if (std.mem.eql(u8, t, "spark2_5")) "Spark-X2.6" else if (std.mem.eql(u8, t, "minimax_m3_vl")) "MiniMax-M3.1-Flash" else if (!std.mem.eql(u8, t, "qwen3_5")) null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
     if (o.speed_up != null) if (one_mac) |name| return try std.fmt.allocPrint(a, "--speed-up joins two Macs for Flash Next, GLM-5.3-Flash and GLM-5.3 only: serve {s} without it", .{name});
     if (o.recall and std.mem.eql(u8, t, "qwen4_exp")) return recall_refusal;
@@ -380,6 +360,10 @@ fn gibBytes(g: f64) u64 {
 
 /// Flash Next uses the dump named by TF_FLASHNEXT_DUMP, or the checked-in kernels when that variable is unset.
 pub fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (try o.slideRefusal(a, "Macs")) |why| {
+        problem.* = why;
+        return null;
+    }
     if (fsr_options.refuse(o, problem)) return null;
     const dump: ?[]const u8 = if (platform.c.getenv("TF_FLASHNEXT_DUMP")) |d| std.mem.span(d) else null;
     const native = modelContext(a, io, o.dir);
@@ -426,6 +410,8 @@ pub fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, prob
 }
 
 test {
+    _ = metal_slide;
+    _ = @import("metal_slide_test.zig");
     _ = @import("draft_sources_metal_test.zig");
     _ = flashnext;
     _ = glm;
@@ -563,4 +549,16 @@ test "prompt precision: Metal refuses int8 before any model or family-specific l
         try std.testing.expect(opened == null);
         try std.testing.expectEqualStrings(prompt_int8_refusal, why);
     }
+}
+
+test "slide admission: Metal entry points refuse before checkpoint or device access" {
+    const check = @import("slide_open_test.zig").check;
+    for (families) |f| if (!std.mem.eql(u8, f.model_type, "nemotron_h")) try check(open, "Macs", &.{f.model_type});
+    try check(@import("qwen35.zig").open, "Macs", &.{"qwen3_5"});
+    try check(@import("gemma4.zig").open, "Macs", &.{"gemma4"});
+    try check(@import("lfm2_moe.zig").open, "Macs", &.{"lfm2_moe"});
+    try check(@import("step5.zig").open, "Macs", &.{"step5_vl"});
+    try check(@import("spark25.zig").open, "Macs", &.{"spark2_5"});
+    try check(@import("minimax_m3.zig").open, "Macs", &.{"minimax_m3_vl"});
+    try check(openFlashNext, "Macs", &.{"qwen4_exp"});
 }

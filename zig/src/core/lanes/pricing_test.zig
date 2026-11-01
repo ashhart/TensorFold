@@ -9,6 +9,7 @@ const be = @import("backend.zig");
 const depth = @import("depth.zig");
 const Table = @import("table.zig").Table;
 
+
 const gpa = std.testing.allocator;
 
 /// A round's ms: the model's window cost for its rows, plus 3 ms a row of host draws when a stream in it samples.
@@ -283,7 +284,7 @@ const Sampling = @import("sampling.zig").Sampling;
 const dt = @import("drafted_test.zig");
 const price = @import("hold_price.zig");
 
-// SYNTHETIC, not device/performance data: forward 10 ms, holds 7/9 ms; two .8-chance blocks pay above 1.25 fixed ms.
+// SYNTHETIC, not performance data: forward 10 ms, modeled holds 7/9 ms; two .8-chance blocks pay above 1.25 ms.
 const deferred_holds = [_]depth.HoldCost{ .{ .streams = 1, .depth = 1, .ms = 7 }, .{ .streams = 2, .depth = 1, .ms = 9 } };
 // SYNTHETIC TIMING: every target forward width costs 10 ms.
 var deferred_costs: [8]Cost = undefined;
@@ -364,7 +365,7 @@ const Deferred = struct {
         var deepest: i64 = 0;
         for (items) |it| deepest = @max(deepest, @as(i64, it.depth));
         x.blocks += @intCast(items.len);
-        x.pending += price.holdMs(&deferred_holds, items.len, deepest); // launched now, waited for by the next verify
+        x.pending += price.holdMs(&deferred_holds, items.len, deepest) + 4; // settled time differs from the model
     }
 
     fn chances(ptr: *anyopaque, s: *sm.Stream, out: []f64) anyerror!bool {
@@ -430,7 +431,6 @@ fn deferredRun(host_ms: f64, seed: ?u64) !void {
         p.* = try deferredPlain(prompt, n, seed);
         planned += 1;
     }
-
     var target: fake.Fake = .{ .gpa = gpa };
     defer target.deinit();
     var strict: dt.Strict = .{ .inner = target.backend() };
@@ -476,4 +476,3 @@ fn deferredRun(host_ms: f64, seed: ?u64) !void {
 test "a hold settled by a later verify is charged to that round: unpaid holds stop, paid ones stay, tokens are unchanged" {
     for ([_]f64{ 0, 2.5 }) |host_ms| for ([_]?u64{ null, 1234 }) |seed| try deferredRun(host_ms, seed);
 }
-

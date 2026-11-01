@@ -154,7 +154,8 @@ pub fn pay(rule: anytype, whos: anytype, sampled: bool, out: []i64, base: price.
     const order = rule.hold_order[0..normal];
     std.mem.sort(Offer, order, {}, Offer.less);
     const starting_forward = rule.shared_costs.get(@intFromFloat(@ceil(rows))) orelse return;
-    const probe_ms = if (probes > 0) price.holdMs(rule.k.hold_costs, probes, deepest) else 0;
+    for (order) |item| out[item.index] = 0;
+    const probe_ms = passCost(rule, out, probes, deepest);
     var best = tokens / (starting_forward + fixed + probe_ms);
     var keep: usize = 0;
     for (order, 1..) |item, count| {
@@ -162,7 +163,8 @@ pub fn pay(rule: anytype, whos: anytype, sampled: bool, out: []i64, base: price.
         tokens += item.gain;
         deepest = @max(deepest, item.depth);
         const verify = rule.shared_costs.get(@intFromFloat(@ceil(rows))) orelse break;
-        const now = tokens / (verify + fixed + price.holdMs(rule.k.hold_costs, count + probes, deepest));
+        out[item.index] = item.depth;
+        const now = tokens / (verify + fixed + passCost(rule, out, count + probes, deepest));
         if (now > best) {
             best = now;
             keep = count;
@@ -173,6 +175,15 @@ pub fn pay(rule: anytype, whos: anytype, sampled: bool, out: []i64, base: price.
             state.hold_capped = item.lowered and (index >= keep or item.shortened);
         if (index >= keep) out[item.index] = 0;
     }
+}
+
+/// The common single-pass shape stays O(1); physical splitting preserves the backend's original head order.
+fn passCost(rule: anytype, depths: []const i64, blocks: usize, deepest: i64) f64 {
+    if (blocks == 0) return 0;
+    const rows = rule.k.hold_rows;
+    if (rows == 0 or @as(u64, @intCast(blocks)) * @as(u64, @intCast(deepest)) <= rows)
+        return price.holdMs(rule.k.hold_costs, blocks, deepest);
+    return price.passMs(rule.k.hold_costs, rows, depths);
 }
 
 fn observedOf(who: anytype) []const f64 {

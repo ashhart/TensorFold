@@ -56,7 +56,12 @@ pub fn budgets(e: *Engine, plans: []const win.Plan, heads: []const usize, out: [
         @memset(out, 0);
         return;
     }
-    const counts = try alloc.allocate(a, fixed, probs, &e.cfg.shared_costs, e.rule.overheadMs(@intCast(live), sampled), @max(live, e.cfg.batch_rows));
+    // A rich hold grid prices the cohort's actual pass: the head streams' blocks, while copy and forced rows add
+    // forward rows but no hold. Granted depths price their holds in payReserved; other heads keep the old overhead.
+    const rich = e.cfg.k.hold_costs.len > 0 and !e.cfg.granted_depth;
+    const head: alloc.HeadCost = if (rich) .{ .hold_costs = e.cfg.k.hold_costs, .hold_rows = e.cfg.k.hold_rows, .batched = e.cfg.draft_streams and depth.pricedBatched(), .charged = neural } else .{};
+    const overhead = if (rich) e.rule.fixedMs(@intCast(live), sampled) else e.rule.overheadMs(@intCast(live), sampled);
+    const counts = try alloc.allocateDrafts(a, fixed, probs, &e.cfg.shared_costs, overhead, @max(live, e.cfg.batch_rows), head);
     for (heads, out) |i, *budget| {
         budget.* = if (neural[i]) counts[i] else 0;
     }

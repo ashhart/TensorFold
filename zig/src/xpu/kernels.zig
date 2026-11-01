@@ -10,6 +10,8 @@ fn Blob(comptime import_name: []const u8) type {
 
 /// False in host-only builds (no -Dxpu); every image is then empty.
 pub const available = options.with_kernels;
+/// The device has DPAS (-Dxpu-dpas); without it DPAS kernels build from fallbacks and models route around them.
+pub const dpas = options.dpas;
 
 pub const basic: []const u8 = if (available) &Blob("spv_basic").bytes else &.{};
 pub const qmv4: []const u8 = if (available) &Blob("spv_qmv4").bytes else &.{};

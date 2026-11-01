@@ -23,12 +23,14 @@ test {
     _ = @import("kernel_tests/decode.zig");
     _ = @import("kernel_tests/chain.zig");
     _ = @import("kernel_tests/attention.zig");
+    _ = @import("kernel_tests/attention_pin.zig");
     _ = @import("kernel_tests/ops.zig");
     _ = @import("kernel_tests/argmax.zig");
     _ = @import("kernel_tests/tp.zig");
     _ = @import("kernel_tests/affine/affine.zig");
     _ = @import("kernel_tests/affine/rows.zig");
     _ = @import("kernel_tests/affine/order.zig");
+    _ = @import("kernel_tests/affine/round.zig");
     _ = @import("kernel_tests/graph_split.zig");
     _ = @import("kernel_tests/flashnext.zig");
     _ = @import("kernel_tests/flashnext_attn.zig");

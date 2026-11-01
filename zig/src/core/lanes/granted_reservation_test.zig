@@ -211,6 +211,23 @@ test "a stateful copy proposer is asked once a round, and its copy takes the rou
     }
 }
 
+test "the final shared reservation charges a hold to the head stream alone, over the fixed overhead without the head's own" {
+    // Costly versus free holds: the same cohort and copy offers, only the hold price differs.
+    for ([_]f64{ 1000, 0 }) |hold_ms| {
+        var s: Setup = .{};
+        try s.init(.{ .legacy = true, .hold_ms = hold_ms }, 2);
+        defer s.deinit();
+        s.cfg.limit_shared_drafts = false; // no preliminary cap: the final global allocation alone prices the holds
+        // Past head work must not inflate the next cohort's fixed cost; the seeded fixed work stays 8 ms.
+        try s.e.rule.observeOverhead(2, 2, s.e.rule.shared_costs.get(2).? + 8 + 10000, false, 10000);
+        var ask: Ask = .{};
+        s.streams[0].proposer = .{ .ptr = &ask, .vtable = &.{ .propose = propose, .last_match = match, .priced = true } };
+        try s.chain(1, &.{}, 0.9);
+        // stream 0 offers four copied tokens, which take rows but no hold; stream 1 is the head
+        const keep: i64 = if (hold_ms > 0) 0 else 7; // a dear hold does not pay at 8 ms of overhead; a free one keeps the chain
+        try t.expectEqualSlices(i64, &.{ 0, keep }, try s.budgets());
+    }
+}
 /// The drafter of drafted_test, pricing every held chain by 0.9 a draft and holding each hold to the grant's bound.
 const Scripted = struct {
     head: dt.FakeDrafter,

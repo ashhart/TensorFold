@@ -1,5 +1,8 @@
 //! Metal kernel sources the engine compiles at run time, embedded in the executable.
 
+/// DeepSeek-V4.1's sources live beside their kernels: users say sources.dsv41.NAME.
+pub const dsv41 = @import("deepseek_v41/sources.zig");
+
 /// Nemotron's generated kernels (tools/zig/gen_nemotron_kernels.py).
 pub const nemotron = @import("nemotron/kernels.zig");
 /// Nemotron's KV in pages of the core pool: twins of its seven K/V kernels, each library beside its original.

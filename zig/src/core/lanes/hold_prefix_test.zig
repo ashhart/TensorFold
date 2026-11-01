@@ -1,6 +1,5 @@
-//! Reserved head holds are priced against the round they join: a profitable shorter prefix survives an unaffordable
-//! full hold, a futile exploration never fires while a real recovery stays available, and companion rows count in the base.
-//! Every timing below is SYNTHETIC, chosen to make one consumer decision (shared_drafts.budgets) unambiguous; none is device data.
+//! Reserved head holds price shorter prefixes, recovery trials, and companion rows against the whole round.
+//! Every timing is SYNTHETIC and makes a shared_drafts.budgets decision unambiguous; none is device data.
 const std = @import("std");
 const Config = @import("config.zig").Config;
 const Cost = @import("config.zig").Cost;
@@ -279,5 +278,49 @@ test "a due exploration is feasible when a deeper padded hold is cheaper than a 
                 if (offered > 0) try f.engine.rule.observeDepth(win.who(s), offered, 0);
             }
         }
+    }
+}
+
+test "a confidence hold pays for every physical pass, not one impossible padded cohort" {
+    for ([_]bool{ false, true }) |sampled| {
+        var f: Fixture = .{};
+        try f.init(.{
+            .drafts = 3,
+            .forward = [_]f64{10} ** 8,
+            .holds = &.{
+                .{ .streams = 1, .depth = 3, .ms = 20 },
+                .{ .streams = 2, .depth = 3, .ms = 20 },
+            },
+            .prior = &.{ 0.9, 0.9, 0.9 },
+        });
+        defer f.deinit();
+        f.engine.rule.k.hold_rows = 4;
+        try f.engine.rule.observeOverhead(2, 2, 10, sampled, 0);
+        var streams: [2]sm.Stream = undefined;
+        var made: usize = 0;
+        defer for (streams[0..made]) |*s| s.deinit(gpa);
+        for (&streams, 0..) |*s, i| {
+            s.* = try sm.Stream.init(gpa, .{
+                .id = "physical-hold",
+                .prompt = &.{ 2, 7, 13 },
+                .max_new = 64,
+                .sampling = sampling(sampled, 70 + i),
+            });
+            made += 1;
+            s.granted = 3;
+            try s.draft_chances.appendSlice(gpa, &.{ 0.99, 0.98, 0.97 });
+        }
+        const plans = [_]win.Plan{
+            .{ .stream = &streams[0], .position = 0, .kind = .none },
+            .{ .stream = &streams[1], .position = 0, .kind = .none },
+        };
+        var out: [2]i64 = undefined;
+        // Two three-deep blocks split at four physical rows: 7.88 / (10 + 20 + 20) loses to 2 / 10.
+        try f.budgetsFor(&plans, &.{ 0, 1 }, &out);
+        try std.testing.expectEqualSlices(i64, &.{ 0, 0 }, &out);
+        // An actually unbounded provider needs only one pass: 7.88 / (10 + 20) genuinely wins.
+        f.engine.rule.k.hold_rows = 0;
+        try f.budgetsFor(&plans, &.{ 0, 1 }, &out);
+        try std.testing.expectEqualSlices(i64, &.{ 3, 3 }, &out);
     }
 }
