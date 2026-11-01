@@ -353,7 +353,8 @@ pub const Metal = struct {
         std.debug.assert(r.active == null);
         if (r.active != null) return error.RoundNotReady;
         try r.taps.complete();
-        try q.tap_gather.gather(r.taps.buffer.contents()[0..r.taps.buffer.length()], r.taps.capacity, r.taps.rows, r.taps.width, r.taps.count, rows[0..n], out.contents()[0..out.length()]);
+        const src = r.taps.source();
+        try q.tap_gather.gather(src.buffer.contents()[0..src.buffer.length()], r.taps.capacity, r.taps.rows, src.width, src.planes, rows[0..n], out.contents()[0..out.length()]);
         var at: usize = 0;
         for (paths, b.windows[0..b.count]) |path, slot| {
             const g = b.ringOf(slot).?;
