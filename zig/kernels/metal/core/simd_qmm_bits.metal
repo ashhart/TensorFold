@@ -280,6 +280,8 @@ template <int BITS, int S, int NR, int XB, int RS>
   TF_SQW(B, 16, 1, 1) TF_SQW(B, 16, 2, 1) TF_SQW(B, 16, 4, 1) TF_SQW(B, 16, 1, 2) TF_SQW(B, 16, 2, 2) \
   TF_SQW(B, 32, 1, 1) TF_SQW(B, 32, 2, 1) TF_SQW(B, 32, 1, 2)
 TF_SQW_BITS(2) TF_SQW_BITS(3) TF_SQW_BITS(4) TF_SQW_BITS(5) TF_SQW_BITS(6) TF_SQW_BITS(8)
+TF_SQW(4, 8, 1, 4) TF_SQW(4, 8, 2, 4) TF_SQW(4, 8, 4, 4)
+TF_SQW(4, 16, 1, 4) TF_SQW(4, 16, 2, 4) TF_SQW(4, 32, 1, 4)
 #define TF_SQWS(B, S, NR, XB, RS) template [[host_name("tf_sqw_scalar_q" #B "_" #S "_" #NR "_" #RS)]] [[kernel]] decltype(tf_sqw_scalar<B, S, NR, XB, RS>) tf_sqw_scalar<B, S, NR, XB, RS>;
 #define TF_SQWS_BITS(B) \
   TF_SQWS(B, 8, 1, 32, 1) TF_SQWS(B, 8, 2, 32, 1) TF_SQWS(B, 8, 1, 16, 2) TF_SQWS(B, 8, 2, 16, 2) \

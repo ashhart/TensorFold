@@ -71,6 +71,8 @@ fn parse(args: []const [:0]const u8) !Opts {
 
 const Reg = struct { v: affine_k.Variant, name: []const u8 };
 
+const simd32 = @import("metal_simd32_controls.zig").entries(Reg);
+
 const common = [_]Reg{
     .{ .v = .{ .kind = .row, .bits = 4, .group = 64 }, .name = "metal row projection q4 g64" },
     .{ .v = .{ .kind = .row, .bits = 6, .group = 32 }, .name = "metal row projection q6 g32" },
@@ -410,7 +412,7 @@ pub fn main(init: std.process.Init) !u8 {
         ling = try ling_route.Route.init(a, device, queue);
         try kernels.append(a, ling.?.kernel());
     }
-    for ([_][]const Reg{ &common, if (tensor) &m5_only else &.{} }) |list| for (list) |v| {
+    for ([_][]const Reg{ &simd32, &common, if (tensor) &m5_only else &.{} }) |list| for (list) |v| {
         if (!wanted(o, v.name)) continue;
         const p = try a.create(affine_k.Proj);
         p.* = try affine_k.Proj.init(a, device, queue, v.v, v.name);

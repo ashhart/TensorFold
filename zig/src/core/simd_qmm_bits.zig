@@ -15,16 +15,20 @@ pub const Args = extern struct { k: i32, n: i32, r: i32, ld: i32, one: f32 = 1.0
 pub const Pipelines = struct {
     device: mtl.Device,
     lib: mtl.Library,
-    built: [bit_widths.len][s_values.len][nt_values.len][2]?mtl.Pipeline = @splat(@splat(@splat(@splat(null)))),
+    built: [bit_widths.len][s_values.len][nt_values.len][3]?mtl.Pipeline = @splat(@splat(@splat(@splat(null)))),
     /// Simdgroups a 16-row tile of a grid of at least 512 groups takes at most: 4 on the M1, else 16.
     wide: usize = 16,
     scalar: [bit_widths.len][s_values.len][2][simd.max_scalar_rows]?mtl.Pipeline = @splat(@splat(@splat(@splat(null)))),
 
     pub fn load(device: mtl.Device) !Pipelines {
+        return loadSource(device, sources.core_simd_qmm_bits);
+    }
+
+    pub fn loadSource(device: mtl.Device, text: []const u8) !Pipelines {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const wide: usize = if (device.generation() == 13) 4 else 16;
-        return .{ .device = device, .lib = try mtl.Library.fromSource(device, sources.core_simd_qmm_bits, mtl.CompileOptions.mlx()), .wide = wide };
+        return .{ .device = device, .lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx()), .wide = wide };
     }
 
     pub fn deinit(p: *Pipelines) void {
@@ -37,7 +41,7 @@ pub const Pipelines = struct {
         const bi = std.mem.indexOfScalar(u8, &bit_widths, bits) orelse return error.UnsupportedSimdBits;
         const si = std.mem.indexOfScalar(u32, &s_values, s).?;
         const ti = std.mem.indexOfScalar(u32, &nt_values, nt).?;
-        const slot = &p.built[bi][si][ti][rt - 1];
+        const slot = &p.built[bi][si][ti][if (rt == 4) 2 else rt - 1];
         if (slot.*) |x| return x;
         var name: [48]u8 = undefined;
         const z = try std.fmt.bufPrint(&name, "tf_sqw_mma_q{d}_{d}_{d}_{d}\x00", .{ bits, s, nt, rt });
@@ -76,7 +80,7 @@ pub fn call(p: *Pipelines, bits: u8, n: usize, k: usize, rows: usize, ld: usize,
         if (pipeline.maxThreads() < sgs * 32) return error.SimdThreads;
         return .{ .pipeline = pipeline, .args = args, .groups = .{ .width = (n + per - 1) / per }, .threads = sgs * 32 };
     }
-    const rt: u32 = @min(2, @as(u32, @intCast((rows + 7) / 8)));
+    const rt: u32 = if (bits == 4) simd.rowTiles(rows) else @min(2, @as(u32, @intCast((rows + 7) / 8)));
     const nt = simd.tiles(n, rt, s);
     const pipeline = try p.get(bits, s, nt, rt);
     const groups = mtl.Size{ .width = (n + 8 * nt - 1) / (8 * nt), .height = (rows + 8 * rt - 1) / (8 * rt) };

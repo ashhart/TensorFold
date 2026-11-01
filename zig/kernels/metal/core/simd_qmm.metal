@@ -381,6 +381,8 @@ template <int S, int NR, int XB, int RS>
 TF_SQ_MMA(8, 1, 1) TF_SQ_MMA(8, 2, 1) TF_SQ_MMA(8, 4, 1) TF_SQ_MMA(8, 1, 2) TF_SQ_MMA(8, 2, 2) TF_SQ_MMA(8, 4, 2)
 TF_SQ_MMA(16, 1, 1) TF_SQ_MMA(16, 2, 1) TF_SQ_MMA(16, 4, 1) TF_SQ_MMA(16, 1, 2) TF_SQ_MMA(16, 2, 2)
 TF_SQ_MMA(32, 1, 1) TF_SQ_MMA(32, 2, 1) TF_SQ_MMA(32, 1, 2)
+TF_SQ_MMA(8, 1, 4) TF_SQ_MMA(8, 2, 4) TF_SQ_MMA(8, 4, 4)
+TF_SQ_MMA(16, 1, 4) TF_SQ_MMA(16, 2, 4) TF_SQ_MMA(32, 1, 4)
 #define TF_SQ_MMP(S, NT, RT, P) template [[host_name("tf_sq_mmp_" #S "_" #NT "_" #RT "_" #P)]] [[kernel]] decltype(tf_sq_mmp<S, NT, RT, P>) tf_sq_mmp<S, NT, RT, P>;
 TF_SQ_MMP(16, 4, 2, 2)
 #define TF_SQ_SCALAR(S, NR, XB, RS) template [[host_name("tf_sq_scalar_" #S "_" #NR "_" #RS)]] [[kernel]] decltype(tf_sq_scalar<S, NR, XB, RS>) tf_sq_scalar<S, NR, XB, RS>;
