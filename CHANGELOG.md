@@ -4,6 +4,10 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- The benchmark clients refuse a nonpositive `--tokens`, `--reps` or `--levels` entry, or a malformed `--levels` list, with a clear error and exit status 2 before any request, instead of failing mid-run or writing zero-stream cells (#1869, fixes #1867). Thanks to @garvrao80.
+
+- Qwen3.8-Flash-Next on Macs, opt-in: `TENSORFOLD_PREFILL_POLICY=fcfs` serves long prompts that arrive together oldest first, in chunks of `TENSORFOLD_PREFILL_TOKENS` rows (default 2,048) between decode rounds, with the same tokens. With eight 14K-token prompts at once on an M3 Ultra, the last user's first token comes after 93.6 s instead of 326.9 s; unset, nothing changes (#1843). Thanks to @ivanfioravanti.
+
 - On CUDA, every family's loader drops its checkpoint from the page cache once the weights are on the GPU, as Flash Next does since 1.2.1, so a GB10's shared memory doesn't hold them twice: a served Qwen3.8-27B frees about 15 GiB. Files read at runtime (PLE rows, DeepSeek's Engram tables) are kept (part of #1868).
 
 - Lanes: grammar masks for constrained streams are filled in parallel across streams, with the same masks and tokens; one stream is unchanged. On an M5 Ultra, Qwen3.5-2B serves 0.7% to 1.3% faster at 4 to 32 constrained streams (fixes #1455).
