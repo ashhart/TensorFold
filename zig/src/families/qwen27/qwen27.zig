@@ -57,6 +57,7 @@ test {
     _ = state;
     _ = projection;
     _ = model;
+    _ = quant_gpu;
     _ = round_plan;
     _ = attention;
     _ = prompt_glue;

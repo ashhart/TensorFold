@@ -33,12 +33,11 @@ pub const Hook = struct {
     }
 };
 
-/// z, b and a read in place from the fused zba rows.
+/// z, b and a read in place from fused rows: a rank's b starts rank*24 after z, a 48 later (zbaDim = width + 96).
 fn refs(weight: Weights.Gdn, frame: *Frame) !pool_gpu.Refs {
-    const width = frame.config.gdnValueDim();
-    const heads = frame.config.v_heads;
+    const c = frame.config;
     const mixed = frame.get(.mixed);
-    return .{ .z = mixed, .b = .{ .buffer = mixed.buffer, .offset = mixed.offset + width * 2 }, .a = .{ .buffer = mixed.buffer, .offset = mixed.offset + (width + heads) * 2 }, .output = frame.get(.mixer_out), .scalars = try pool_gpu.Scalars.from(weight), .zba_stride = @intCast(width + 2 * heads) };
+    return .{ .z = mixed, .b = .{ .buffer = mixed.buffer, .offset = mixed.offset + c.zbaB() * 2 }, .a = .{ .buffer = mixed.buffer, .offset = mixed.offset + c.zbaA() * 2 }, .output = frame.get(.mixer_out), .scalars = try pool_gpu.Scalars.from(weight), .zba_stride = @intCast(c.zbaDim()) };
 }
 
 fn devicePlan(plan: Plan, frame: *Frame) pool_gpu.DevicePlan {

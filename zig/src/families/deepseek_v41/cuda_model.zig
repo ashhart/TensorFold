@@ -215,6 +215,7 @@ pub const Model = struct {
         tr.step("start", cuda.usage(false));
         const comm = m.session.comm();
         const world: u32 = @intCast(comm.world());
+        try @import("session_protocol.zig").preflight(&m.session.plan);
         m.cfg = try Config.read(gpa, io, pack_dir);
         if (o.own_prefill) try @import("block_admission.zig").nativePrefill(&m.cfg, world);
         m.pack = try Pack.open(gpa, io, pack_dir);

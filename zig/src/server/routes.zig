@@ -84,6 +84,7 @@ fn get(srv: *Server, conn: *Conn, a: Allocator) void {
         return memory.get(srv, conn, a) catch {};
     if (responses.route(route)) |rid| if (rid.len > 0) return responses.get(srv, conn, a, rid);
     if (std.mem.eql(u8, route, "/metrics") or std.mem.eql(u8, route, "/v1/metrics")) return status.metrics(srv, conn, a);
+    if (std.mem.eql(u8, route, "/v1/load")) return @import("load_metrics.zig").get(srv, conn, a);
     if (std.mem.eql(u8, route, "/dashboard")) return status.dashboard(srv, conn, a);
     if (std.mem.eql(u8, route, "/stats")) return status.stats(srv, conn, a);
     if (std.mem.eql(u8, route, "/slide")) return slide.view(srv, conn, a);
@@ -120,6 +121,9 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     // counted before the drain flag is read: a stop that sees no request in progress sees every later one refused
     _ = srv.generating.fetchAdd(1, .seq_cst);
     defer _ = srv.generating.fetchSub(1, .seq_cst);
+    const group: api.load_ledger.RouteGroup = if (is_chat) .chat_completions else if (is_responses) .responses else if (is_anthropic) .messages else if (is_embedding) .embeddings else if (is_speech) .speech else if (std.mem.endsWith(u8, route, "/completions")) .completions else .other;
+    srv.load.enter(group);
+    defer srv.load.leave(group);
     if (srv.idle_manager) |m| m.begin(); // engine work starts: the idle window restarts at this route's end
     defer if (srv.idle_manager) |m| m.end();
     if (@import("builtin").is_test) if (counted_hook) |h| h();
