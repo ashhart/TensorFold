@@ -101,7 +101,8 @@ fn run(cases: []const Case, mode: Mode, record: bool) ![][]u32 {
         const ss = try a.alloc(*sm.Stream, streams.len);
         for (streams, ss) |*s, *p| p.* = s;
         const errs = try a.alloc(?anyerror, streams.len);
-        engine.addStreams(ss, errs);
+        const done = try a.alloc(bool, streams.len);
+        engine.addStreams(ss, errs, done);
         for (errs) |err| if (err) |e| return e;
         try std.testing.expectEqual(@as(usize, if (mode.memory_lanes == null) 1 else 0), target.many_passes);
     } else for (streams) |*s| if (mode.chunks > 0) {

@@ -224,7 +224,7 @@ test "auth scopes HTTP: inference and read are separate grants and full keys kee
     const a = arena.allocator();
     for ([_][]const u8{ "/models", "/v1/models", "/v1/models/?x=1" }) |path| for ([_][]const u8{ "read-secret", "infer-secret" }) |key|
         try expectStatus(try h.ask(a, "GET", path, key, ""), 200);
-    for ([_][]const u8{ "/metrics", "/v1/metrics", "/memory", "/v1/memory", "/stats", "/dashboard" }) |path| {
+    for ([_][]const u8{ "/metrics", "/v1/metrics", "/v1/load", "/memory", "/v1/memory", "/stats", "/dashboard" }) |path| {
         try expectStatus(try h.ask(a, "GET", path, "read-secret", ""), 200);
         try expectStatus(try h.ask(a, "GET", path, "infer-secret", ""), 403);
     }

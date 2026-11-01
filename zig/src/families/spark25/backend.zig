@@ -6,6 +6,8 @@ const cfg = @import("config.zig");
 const fwd = @import("forward.zig");
 const kern = @import("kernels.zig");
 const snap = @import("snap.zig");
+const kv = @import("core").kv_pool;
+const kp = @import("core").kv_prompts;
 
 const be = lanes.backend;
 const Stream = lanes.Stream;
@@ -29,7 +31,21 @@ const Lane = struct {
     rule: u64, // sample.cu's Rule, when the stream samples
     sampled: bool = false,
     fill: ?usize = null, // a prompt pass going a chunk at a time: where its next chunk starts
+    lease: kv.Lease = .{}, // paged: the full layers' pages it holds and is promised
+    marks: []const u32 = &.{}, // TF_KV_SHARE: where its pass keeps states, the store's plan (owned)
+    from: u32 = 0, // TF_KV_SHARE: the position its adopted pages and restored rings resume at
+    kept: u32 = 0, // TF_KV_SHARE: states its pass kept
 };
+
+/// Pages a request holds at most: its prompt, its reply and one last verify window.
+pub fn pagesFor(prompt: usize, max_new: usize) usize {
+    return pagesOf(prompt + max_new + max_window);
+}
+
+/// Pages that hold positions [0, positions).
+fn pagesOf(positions: usize) usize {
+    return (positions + fwd.page_tokens - 1) / fwd.page_tokens;
+}
 
 pub const Spark = struct {
     gpa: std.mem.Allocator,
@@ -45,6 +61,9 @@ pub const Spark = struct {
     meta: cuda.DeviceBuffer, // a draw's first position minus one, a window each
     slot_bufs: []cuda.DeviceBuffer, // a slot's last-row logits, then its rule: two a slot
     next: u64 = 0,
+    pool: ?kv.Pool = null, // paged: the pages every slot leases (attach)
+    prompts: ?kp.Prompts = null, // TF_KV_SHARE: the store keeping prompts as the pool's pages (cuda_prompt_pages.zig)
+    pending: ?*const snap.Saved = null, // TF_KV_SHARE: a resumed state's rings, put in once its lane opens
 
     /// The device bytes `init` allocates: the token and pick rings, metas, each slot's last row and rule.
     pub fn openBytes(slots: usize) usize {
@@ -52,7 +71,7 @@ pub const Spark = struct {
     }
 
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, m: *fwd.Model, k: *const kern.Kernels, s: cuda.Stream) !Spark {
-        const free = try gpa.alloc(bool, m.slots);
+        const free = try gpa.alloc(bool, m.slotCap());
         errdefer gpa.free(free);
         @memset(free, true);
         const greedy = try gpa.alloc(bool, ring + round_rows);
@@ -64,7 +83,7 @@ pub const Spark = struct {
         errdefer picks.free();
         var meta = try cuda.DeviceBuffer.alloc(d, round_rows * 16);
         errdefer meta.free();
-        const bufs = try gpa.alloc(cuda.DeviceBuffer, 2 * m.slots);
+        const bufs = try gpa.alloc(cuda.DeviceBuffer, 2 * m.slotCap());
         errdefer gpa.free(bufs);
         var made: usize = 0;
         errdefer for (bufs[0..made]) |*b| b.free();
@@ -75,9 +94,26 @@ pub const Spark = struct {
         return .{ .gpa = gpa, .d = d, .m = m, .k = k, .s = s, .free = free, .tok = tok, .picks = picks, .greedy = greedy, .meta = meta, .slot_bufs = bufs };
     }
 
+    /// Makes a paged model's arena of `pages` pages for `extra + 1` slots, and the pool that leases them.
+    pub fn attach(x: *Spark, extra: usize, pages: usize) !void {
+        try x.m.attach(x.s, extra, pages);
+        x.pool = try kv.Pool.init(x.gpa, pages, x.m.pageBytes());
+    }
+
+    /// The pool's free pages in a seeded random order, leased in that order (a check's hook).
+    pub fn shufflePages(x: *Spark, seed: u64) void {
+        var prng = std.Random.DefaultPrng.init(seed);
+        if (x.pool) |*p| prng.random().shuffle(u32, p.free[0..p.nfree]);
+    }
+
     pub fn deinit(x: *Spark) void {
         var it = x.lanes.valueIterator();
-        while (it.next()) |l| l.rows.deinit(x.gpa);
+        while (it.next()) |l| {
+            if (x.pool) |*p| p.finish(&l.lease);
+            l.rows.deinit(x.gpa);
+            x.gpa.free(l.marks);
+        }
+        if (x.pool) |*p| p.deinit();
         x.lanes.deinit(x.gpa);
         for (x.slot_bufs) |*b| b.free();
         x.gpa.free(x.slot_bufs);
@@ -96,7 +132,7 @@ pub const Spark = struct {
 
     /// The round loop's facts: no draft head; host copies verified in windows up to 16 rows, streams sharing a forward.
     pub fn facts(x: *const Spark) lanes.Model {
-        return .{ .exact_width = max_window, .gpu_tokens = false, .mtp = false, .speculate = false, .hidden_rows = true, .batch_rows = round_rows, .max_streams = @intCast(@min(x.m.slots, round_rows)) };
+        return .{ .exact_width = max_window, .gpu_tokens = false, .mtp = false, .speculate = false, .hidden_rows = true, .batch_rows = round_rows, .max_streams = @intCast(@min(x.m.slotCap(), round_rows)) };
     }
 
     fn self(ptr: *anyopaque) *Spark {
@@ -135,22 +171,107 @@ pub const Spark = struct {
         const s: *const Stream = @ptrCast(@alignCast(owner orelse return error.NoOwner));
         const l = x.lanes.getPtr(s) orelse return error.UnknownStream;
         if ((l.fill orelse l.len) != at) return error.NotAtMark; // a state is copied only where the pass stands
-        return snap.save(x.gpa, x.m, x.s, l.slot, at);
+        if (x.prompts == null) return snap.save(x.gpa, x.m, x.s, l.slot, at, 0, &.{});
+        // TF_KV_SHARE: the store holds [0, at) as pages, and the sliding rings in pages it holds too
+        const blob = try x.holdBlob(snap.blobPages(x.m, at, at));
+        return snap.save(x.gpa, x.m, x.s, l.slot, at, at, blob) catch |e| {
+            for (blob) |id| x.pool.?.release(id);
+            x.gpa.free(blob);
+            return e;
+        };
     }
 
+    /// `n` free pool pages the store holds for a state's rings; NoCachePages: the pool has none, even reclaiming.
+    fn holdBlob(x: *Spark, n: usize) ![]u32 {
+        if (n == 0) return &.{};
+        const ids = try x.gpa.alloc(u32, n);
+        if (!x.pool.?.hold(ids)) {
+            x.gpa.free(ids);
+            return error.NoCachePages;
+        }
+        return ids;
+    }
+
+    /// The stream's slot made to hold `k`'s state; TF_KV_SHARE: before its lane opens, put in by opening.
     pub fn restoreState(x: *Spark, owner: ?*anyopaque, k: *const snap.Saved) !void {
+        if (x.prompts != null) {
+            x.pending = k;
+            return;
+        }
         const s: *const Stream = @ptrCast(@alignCast(owner orelse return error.NoOwner));
         const l = x.lanes.getPtr(s) orelse return error.UnknownStream;
+        try x.reach(l, k.at); // the state's pages (a restore writes into them)
         try snap.restore(x.m, x.s, l.slot, k);
         l.len = k.at;
     }
 
     pub fn dropState(x: *Spark, k: *snap.Saved) void {
+        if (k.blob.len > 0) {
+            x.s.synchronize() catch {}; // a restore's queued copies out of them are done
+            for (k.blob) |id| x.pool.?.release(id);
+            x.gpa.free(k.blob);
+            k.blob = &.{};
+        }
         snap.drop(x.gpa, x.s, k);
     }
 
     fn freeSlot(x: *const Spark) ?usize {
-        return std.mem.indexOfScalar(bool, x.free, true);
+        return std.mem.indexOfScalar(bool, x.free[0..x.m.slots], true);
+    }
+
+    fn fitsContext(x: *const Spark, prompt: usize, max_new: usize) bool {
+        return prompt + max_new + max_window <= x.m.context;
+    }
+
+    /// Whether a request could start now: a free slot and (paged) its pages; one that never fits passes.
+    pub fn admits(x: *const Spark, prompt: usize, max_new: usize) bool {
+        if (!x.fitsContext(prompt, max_new)) return true; // its prompt pass refuses it by name
+        const p = x.pool orelse return x.freeSlot() != null;
+        return x.freeSlot() != null and p.fits(pagesFor(prompt, max_new));
+    }
+
+    const Map = struct {
+        x: *Spark,
+        slot: usize,
+        fn write(ctx: *anyopaque, ids: []const u32, from: usize) anyerror!void {
+            const m: *const Map = @ptrCast(@alignCast(ctx));
+            try m.x.m.mapPages(m.x.s, m.slot, ids[from..], from);
+        }
+    };
+
+    /// The lane's pages cover positions [0, end): pages taken from its promise as its context grows.
+    fn reach(x: *Spark, l: *Lane, end: usize) !void {
+        const p = if (x.pool) |*p| p else return;
+        const n = pagesOf(end);
+        if (n <= l.lease.ids.items.len) return;
+        var map: Map = .{ .x = x, .slot = l.slot };
+        try p.cover(&l.lease, n, .{ .ctx = &map, .write = Map.write });
+    }
+
+    /// A free slot for the request, its pages promised now (taken as its rows need them); LaneMemory: not yet.
+    fn takeSlot(x: *Spark, lease: *kv.Lease, prompt: usize, max_new: usize, held: usize) !usize {
+        const slot = x.freeSlot() orelse return error.NoFreeSlot;
+        if (x.pool) |*p| try p.promise(lease, pagesFor(prompt, max_new) - held);
+        return slot;
+    }
+
+    /// TF_KV_SHARE: the store's plan for this prompt, its pages in `adopt` and its rings pending; none without a store.
+    fn plan(x: *Spark, s: *Stream, adopt: *std.ArrayList(u32)) !kp.Plan {
+        const pr = x.prompts orelse return .{};
+        x.pending = null;
+        const got = try pr.begin(s.prompt(), s.history_len, s.shared_prefixes, @ptrCast(s), adopt);
+        defer pr.free(got.marks);
+        const marks = x.gpa.dupe(u32, got.marks) catch |e| {
+            for (adopt.items) |id| x.pool.?.release(id);
+            return e;
+        };
+        return .{ .from = got.from, .marks = marks };
+    }
+
+    /// A new lane's table starts with the kept pages, held once more by its lease (rows below `from`, never written).
+    fn adoptHeld(x: *Spark, l: *Lane, ids: []const u32) !void {
+        try x.pool.?.adopt(&l.lease, ids); // releases them again if it fails
+        try x.m.mapPages(x.s, l.slot, ids, 0);
     }
 
     /// A prompt pass begins: a slot, the stream's rule, a kept state restored; where its first chunk starts.
@@ -158,17 +279,31 @@ pub const Spark = struct {
         const p = s.prompt();
         if (p.len == 0) return error.EmptyPrompt;
         if (s.images.len > 0) return error.SparkTextOnly;
-        if (p.len + @as(usize, s.max_new) + max_window > x.m.context) return error.PastContext;
+        if (!x.fitsContext(p.len, s.max_new)) return error.PastContext;
         const got = try x.lanes.getOrPut(x.gpa, s);
         if (!got.found_existing) {
-            const slot = x.freeSlot() orelse {
+            var lease: kv.Lease = .{};
+            var adopt: std.ArrayList(u32) = .empty;
+            defer adopt.deinit(x.gpa);
+            const kept = x.plan(s, &adopt) catch |e| {
                 x.lanes.removeByPtr(got.key_ptr);
-                return error.NoFreeSlot;
+                return e;
+            };
+            const slot = x.takeSlot(&lease, p.len, s.max_new, adopt.items.len) catch |e| {
+                for (adopt.items) |id| x.pool.?.release(id);
+                x.gpa.free(kept.marks);
+                x.lanes.removeByPtr(got.key_ptr);
+                return e;
             };
             x.free[slot] = false;
-            got.value_ptr.* = .{ .slot = slot, .last = x.slot_bufs[2 * slot].ptr, .rule = x.slot_bufs[2 * slot + 1].ptr };
+            got.value_ptr.* = .{ .slot = slot, .last = x.slot_bufs[2 * slot].ptr, .rule = x.slot_bufs[2 * slot + 1].ptr, .lease = lease, .marks = kept.marks, .from = kept.from };
+            if (adopt.items.len > 0) x.adoptHeld(got.value_ptr, adopt.items) catch |e| {
+                x.dropLane(s);
+                return e;
+            };
         }
         const l = got.value_ptr;
+        try x.reach(l, p.len); // the prompt's pages (a kept state's restore writes into them too)
         l.sampled = false;
         if (s.sampling) |sp| if (sp.temperature > 0) {
             const r = cuda.sample.Rule.from(lanes.gpu_rule.rule(sp));
@@ -176,7 +311,7 @@ pub const Spark = struct {
             l.sampled = true;
         };
         s.cached = 0;
-        l.fill = x.resumeAt(s, l, p.len);
+        l.fill = if (x.prompts != null) try x.resumeShared(s, l) else x.resumeAt(s, l, p.len);
         s.fill_at.store(@intCast(l.fill.?), .monotonic);
         return l;
     }
@@ -197,13 +332,38 @@ pub const Spark = struct {
         return k.at;
     }
 
+    /// TF_KV_SHARE: where the adopted pages end, the pending rings put in (a failure fails the pass: pages are shared).
+    fn resumeShared(x: *Spark, s: *Stream, l: *Lane) !usize {
+        const k = x.pending orelse return if (l.from == 0) 0 else error.KeptStateMismatch;
+        x.pending = null;
+        if (k.at != l.from) return error.KeptStateMismatch;
+        try snap.restore(x.m, x.s, l.slot, k);
+        s.cached = l.from;
+        return l.from;
+    }
+
+    /// TF_KV_SHARE: at mark `at` the store takes the lane's pages and rings; pages it held already replace the lane's.
+    fn keepPages(x: *Spark, pr: kp.Prompts, s: *Stream, l: *Lane, at: usize) !void {
+        const n = at / fwd.page_tokens;
+        const path = try x.gpa.alloc(u32, n);
+        defer x.gpa.free(path);
+        const mine = try x.gpa.dupe(u32, l.lease.ids.items[0..n]);
+        defer x.gpa.free(mine);
+        const shared = pr.keep(s.prompt(), @intCast(at), @ptrCast(s), mine, path);
+        if (shared == n) l.kept += 1;
+        if (std.mem.eql(u32, mine[0..shared], path[0..shared])) return;
+        try x.m.mapPages(x.s, l.slot, path[0..shared], 0); // the same tokens' rows: a resume from any row is exact
+        for (path[0..shared], 0..) |id, i| x.pool.?.share(&l.lease, i, id);
+    }
+
     /// One chunk from `l.fill` to the next grid line or mark. `_: u32` keeps its grid.
     fn chunk(x: *Spark, s: *Stream, l: *Lane, _: u32) !bool {
         const p = s.prompt();
         const at = l.fill.?;
         if (s.isCancelled()) return error.Cancelled;
         var end = @min(p.len, (at / prompt_rows + 1) * prompt_rows);
-        for (s.reuse.marks) |mk| if (mk > at and mk < end) {
+        const marks = if (x.prompts != null) l.marks else s.reuse.marks;
+        for (marks) |mk| if (mk > at and mk < end) {
             end = mk;
         };
         const done = end == p.len;
@@ -212,6 +372,13 @@ pub const Spark = struct {
         s.fill_at.store(@intCast(end), .monotonic);
         l.fill = if (done) null else end;
         if (done) l.len = p.len;
+        if (x.prompts) |pr| {
+            if (!done and std.mem.indexOfScalar(u32, l.marks, @intCast(end)) != null) x.keepPages(pr, s, l, end) catch |e| {
+                std.log.warn("spark25: prompt pages not kept: {s}", .{@errorName(e)});
+            };
+            if (done) pr.report(p.len, s.cached, l.kept);
+            return done;
+        }
         if (s.reuse.hook) |hk| if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(end)) != null) hk.at(hk.ptr, s, @intCast(end));
         return done;
     }
@@ -258,6 +425,7 @@ pub const Spark = struct {
         const l = x.lanes.getPtr(s) orelse return error.UnknownStream;
         const t = try x.value(feed);
         if (position != l.len + 1) return error.PositionMismatch;
+        try x.reach(l, l.len + 1);
         try x.m.forward(x.k, x.s, &.{.{ .slot = l.slot, .p0 = l.len, .tokens = &.{t} }}, false, 0, 1);
         l.len += 1;
         const h = x.next;
@@ -289,6 +457,7 @@ pub const Spark = struct {
             try l.rows.append(x.gpa, w.pending);
             try l.rows.appendSlice(x.gpa, w.tokens);
             for (w.positions, 0..) |pos, r| if (pos != l.base + r + 1) return error.PositionMismatch;
+            try x.reach(l, l.base + l.rows.items.len);
             c.* = .{ .slot = l.slot, .p0 = l.base, .tokens = l.rows.items };
             total += l.rows.items.len;
         }
@@ -329,14 +498,36 @@ pub const Spark = struct {
     }
 
     fn dropLane(x: *Spark, s: *const Stream) void {
-        if (x.lanes.fetchRemove(s)) |kv| {
-            var l = kv.value;
+        if (x.lanes.fetchRemove(s)) |entry| {
+            var l = entry.value;
+            if (x.pool) |*p| { // one CUDA stream: a later lease's writes queue behind this stream's last reads
+                p.finish(&l.lease);
+                x.m.unmapPages(l.slot);
+            }
             x.free[l.slot] = true;
             l.rows.deinit(x.gpa);
+            x.gpa.free(l.marks);
+            if (x.lanes.count() == 0) x.report();
         }
+    }
+
+    /// The idle server's line: nothing promised, every page free (kept states are copies, not pages).
+    fn report(x: *const Spark) void {
+        if (@import("builtin").is_test) return;
+        const p = x.pool orelse return;
+        const c = p.census();
+        const ok = p.idle() and (x.prompts != null or c.free == c.total); // TF_KV_SHARE: the store holds pages
+        std.log.info("kv pool idle{s}: promised {d}, free {d} + store {d} == total {d}", .{ if (ok) "" else " (UNEVEN)", c.promised, c.free, c.kept, c.total });
     }
 
     fn release(ptr: *anyopaque, s: *Stream) void {
         self(ptr).dropLane(s);
     }
 };
+
+test "a request holds its prompt, its reply and one verify window in whole pages of 256 positions" {
+    try std.testing.expectEqual(@as(usize, 1), pagesFor(1, 1));
+    try std.testing.expectEqual(@as(usize, 1), pagesFor(200, 40));
+    try std.testing.expectEqual(@as(usize, 2), pagesFor(200, 41));
+    try std.testing.expectEqual(@as(usize, 129), pagesFor(32768, 0));
+}

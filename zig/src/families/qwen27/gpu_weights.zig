@@ -1,8 +1,8 @@
-//! The Metal graph borrows native scalar tensors and owns only byte-preserving affine layouts.
+//! Borrows native scalar tensors and owns only byte-preserving affine layouts; rows and columns follow config.Shard.
 const std = @import("std");
 const mtl = @import("metal");
 const cp = @import("core").checkpoint_metal;
-const Config = @import("config.zig").Config;
+const cfg = @import("config.zig");
 const projection = @import("projection.zig");
 const lane = @import("core").lane_projection;
 const widths = @import("widths.zig");
@@ -89,29 +89,89 @@ const Builder = struct {
         return .{ .weight = tensors[0], .scales = tensors[1], .biases = tensors[2], .bits = w.bits, .group = w.group };
     }
 
-    /// `parts` (stacked in order, `n` rows of `k` each, at their widths) staged from the files and repacked.
+    /// One part's staged tensors, shape-checked and viewed at the rank's rows; the stage must outlive these views.
+    fn viewed(p: Part, k: usize, tensors: [3]Tensor) !projection.Triple {
+        const weight = try checked(tensors[0], .u32, &.{ p.n, k * p.w.bits / 32 });
+        const scales = try checked(tensors[1], .bf16, &.{ p.n, k / p.w.group });
+        const biases = try checked(tensors[2], .bf16, &.{ p.n, k / p.w.group });
+        return .{ .weight = try rowView(weight, p.span), .scales = try rowView(scales, p.span), .biases = try rowView(biases, p.span), .bits = p.w.bits, .group = p.w.group, .gn = p.n };
+    }
+
+    /// Parts at their widths and K windows, all staged before any is viewed: the stage is one reused buffer.
     fn linear(b: Builder, parts: []const Part, k: usize) !Linear {
         var arena = std.heap.ArenaAllocator.init(b.allocator);
         defer arena.deinit();
-        const names = try arena.allocator().alloc([]const u8, parts.len * 3);
+        if (parts.len > 3) return error.BadProjectionShape;
+        for (parts) |p| if (k * p.w.bits % 32 != 0 or k % p.w.group != 0) return error.BadNativeTensor;
+        const a = arena.allocator();
+        const names = try a.alloc([]const u8, parts.len * 3);
         for (parts, 0..) |p, i| for ([_][]const u8{ ".weight", ".scales", ".biases" }, 0..) |suffix, j| {
-            names[i * 3 + j] = try std.mem.concat(arena.allocator(), u8, &.{ b.prefix, p.module, suffix });
+            names[i * 3 + j] = try std.mem.concat(a, u8, &.{ b.prefix, p.module, suffix });
         };
         try b.stage.reserve(b.checkpoint, names);
         defer b.stage.reset();
         var triples: [3]projection.Triple = undefined;
-        if (parts.len > triples.len) return error.BadProjectionShape;
         for (parts, triples[0..parts.len], 0..) |p, *t, i| {
-            if (k * p.w.bits % 32 != 0 or k % p.w.group != 0) return error.BadNativeTensor;
-            t.* = .{
-                .weight = try checked(try b.stage.read(b.checkpoint, names[i * 3]), .u32, &.{ p.n, k * p.w.bits / 32 }),
-                .scales = try checked(try b.stage.read(b.checkpoint, names[i * 3 + 1]), .bf16, &.{ p.n, k / p.w.group }),
-                .biases = try checked(try b.stage.read(b.checkpoint, names[i * 3 + 2]), .bf16, &.{ p.n, k / p.w.group }),
-                .bits = p.w.bits,
-                .group = p.w.group,
-            };
+            t.* = try viewed(p, k, .{
+                try b.stage.read(b.checkpoint, names[i * 3]),
+                try b.stage.read(b.checkpoint, names[i * 3 + 1]),
+                try b.stage.read(b.checkpoint, names[i * 3 + 2]),
+            });
         }
         return b.stack(triples[0..parts.len]);
+    }
+
+    /// One tensor a rank takes in blocks (GDN q | k | v); `n` is the split's key, `rows` each block's checkpoint rows.
+    fn blocks(b: Builder, module: []const u8, n: usize, k: usize, w: Width, spans: []const cfg.Span, rows: []const usize) !Linear {
+        var arena = std.heap.ArenaAllocator.init(b.allocator);
+        defer arena.deinit();
+        if (k * w.bits % 32 != 0 or k % w.group != 0) return error.BadNativeTensor;
+        const suffixes = [_][]const u8{ ".weight", ".scales", ".biases" };
+        const names = try arena.allocator().alloc([]const u8, suffixes.len);
+        for (suffixes, 0..) |suffix, j| names[j] = try std.mem.concat(arena.allocator(), u8, &.{ b.prefix, module, suffix });
+        try b.stage.reserve(b.checkpoint, names);
+        defer b.stage.reset();
+        const weight = try checked(try b.stage.read(b.checkpoint, names[0]), .u32, &.{ n, k * w.bits / 32 });
+        const scales = try checked(try b.stage.read(b.checkpoint, names[1]), .bf16, &.{ n, k / w.group });
+        const biases = try checked(try b.stage.read(b.checkpoint, names[2]), .bf16, &.{ n, k / w.group });
+        var triples: [3]projection.Triple = undefined;
+        if (spans.len > triples.len or rows.len != spans.len) return error.BadProjectionShape;
+        for (spans, rows, triples[0..spans.len]) |span, gn, *t| {
+            t.* = .{ .weight = try rowView(weight, span), .scales = try rowView(scales, span), .biases = try rowView(biases, span), .bits = w.bits, .group = w.group, .gn = gn, .whole = n };
+        }
+        return b.stack(triples[0..spans.len]);
+    }
+
+    /// `conv1d.weight`'s row blocks fused in the same q | k | v order, as one bf16 copy (the file's is not repacked).
+    fn conv(b: Builder, module: []const u8, kernel: usize, n: usize, spans: []const cfg.Span) !Tensor {
+        const t = try b.tensor(module, .bf16, &.{ n, kernel, 1 });
+        var at: usize = 0;
+        for (spans) |span| {
+            if (span.len == 0 or span.from != at) break;
+            at = span.end();
+        }
+        if (at == n) return t; // the blocks are the whole tensor in order: no copy
+        var rows: usize = 0;
+        for (spans) |span| rows += span.len;
+        const out = try b.device.buffer(rows * kernel * @sizeOf(u16), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+        b.owned.append(b.allocator, out) catch |err| {
+            out.deinit();
+            return err;
+        };
+        const from = t.host(u16);
+        const to = out.slice(u16, rows * kernel);
+        var base: usize = 0;
+        for (spans) |span| {
+            if (span.end() > n) return error.BadNativeTensor;
+            @memcpy(to[base * kernel ..][0 .. span.len * kernel], from[span.from * kernel ..][0 .. span.len * kernel]);
+            base += span.len;
+        }
+        var view = t;
+        view.buffer = out;
+        view.offset = 0;
+        view.bytes = rows * kernel * @sizeOf(u16);
+        view.shape[0] = rows;
+        return view;
     }
 
     /// Fused members of one width take one matrix as before; a mixed stack becomes one matrix a member.
@@ -133,12 +193,14 @@ const Builder = struct {
         }
         var fused = runs[0].linear;
         fused.n = first;
+        fused.gn = 0;
+        for (runs) |run| fused.gn += run.linear.gn;
         fused.raw = null;
         fused.runs = runs;
         return fused;
     }
 
-    fn layer(b: Builder, c: Config, i: usize) !Layer {
+    fn layer(b: Builder, s: *const cfg.Shard, i: usize) !Layer {
         var arena = std.heap.ArenaAllocator.init(b.allocator);
         defer arena.deinit();
         const a = arena.allocator();
@@ -148,41 +210,83 @@ const Builder = struct {
                 return std.mem.concat(allocator, u8, &.{ p, leaf });
             }
         };
+        const c = s.local;
+        const g = s.global;
         const w = b.widths.layers[i];
         const M = widths.Member;
+        const qkv = s.qkvSpans();
+        const qkvRows = [3]usize{ g.k_heads * g.dk, g.k_heads * g.dk, g.gdnValueDim() };
+        const convRows = s.convSpans();
         const mixer: @FieldType(Layer, "mixer") = switch (c.kind(i)) {
             .linear => .{ .linear = .{
-                .qkv = try b.linear(&.{.{ .module = try Name.full(a, prefix, "linear_attn.in_proj_qkv"), .n = c.gdnQkvDim(), .w = w[@backingInt(M.qkv)] }}, c.hidden),
-                .zba = try b.linear(&.{ .{ .module = try Name.full(a, prefix, "linear_attn.in_proj_z"), .n = c.gdnValueDim(), .w = w[@backingInt(M.z)] }, .{ .module = try Name.full(a, prefix, "linear_attn.in_proj_b"), .n = c.v_heads, .w = w[@backingInt(M.b)] }, .{ .module = try Name.full(a, prefix, "linear_attn.in_proj_a"), .n = c.v_heads, .w = w[@backingInt(M.a)] } }, c.hidden),
-                .out = try b.linear(&.{.{ .module = try Name.full(a, prefix, "linear_attn.out_proj"), .n = c.hidden, .w = w[@backingInt(M.out)] }}, c.gdnValueDim()),
-                .conv = try b.tensor(try Name.full(a, prefix, "linear_attn.conv1d.weight"), .bf16, &.{ c.gdnQkvDim(), c.conv_kernel, 1 }),
-                .a_log = try b.tensor(try Name.full(a, prefix, "linear_attn.A_log"), .bf16, &.{c.v_heads}),
-                .dt = try b.tensor(try Name.full(a, prefix, "linear_attn.dt_bias"), .bf16, &.{c.v_heads}),
+                .qkv = try b.blocks(try Name.full(a, prefix, "linear_attn.in_proj_qkv"), g.gdnQkvDim(), g.hidden, w[@backingInt(M.qkv)], &qkv, &qkvRows),
+                .zba = try b.linear(&.{
+                    .{ .module = try Name.full(a, prefix, "linear_attn.in_proj_z"), .n = g.gdnValueDim(), .w = w[@backingInt(M.z)], .span = s.zRows() },
+                    .{ .module = try Name.full(a, prefix, "linear_attn.in_proj_b"), .n = g.v_heads, .w = w[@backingInt(M.b)], .span = s.abRows() },
+                    .{ .module = try Name.full(a, prefix, "linear_attn.in_proj_a"), .n = g.v_heads, .w = w[@backingInt(M.a)], .span = s.abRows() },
+                }, g.hidden),
+                .out = try b.linear(&.{.{ .module = try Name.full(a, prefix, "linear_attn.out_proj"), .n = g.hidden, .w = w[@backingInt(M.out)], .span = s.outputRows() }}, g.gdnValueDim()),
+                .conv = try b.conv(try Name.full(a, prefix, "linear_attn.conv1d.weight"), g.conv_kernel, g.gdnQkvDim(), &convRows),
+                .a_log = try rowView(try b.tensor(try Name.full(a, prefix, "linear_attn.A_log"), .bf16, &.{g.v_heads}), s.valueRows()),
+                .dt = try rowView(try b.tensor(try Name.full(a, prefix, "linear_attn.dt_bias"), .bf16, &.{g.v_heads}), s.valueRows()),
                 .norm = try b.tensor(try Name.full(a, prefix, "linear_attn.norm.weight"), .bf16, &.{c.dv}),
             } },
             .attention => .{ .attention = .{
-                .q = try b.linear(&.{.{ .module = try Name.full(a, prefix, "self_attn.q_proj"), .n = c.qDim(), .w = w[@backingInt(M.q)] }}, c.hidden),
-                .kv = try b.linear(&.{ .{ .module = try Name.full(a, prefix, "self_attn.k_proj"), .n = c.kvDim(), .w = w[@backingInt(M.k)] }, .{ .module = try Name.full(a, prefix, "self_attn.v_proj"), .n = c.kvDim(), .w = w[@backingInt(M.v)] } }, c.hidden),
-                .out = try b.linear(&.{.{ .module = try Name.full(a, prefix, "self_attn.o_proj"), .n = c.hidden, .w = w[@backingInt(M.o)] }}, c.heads * c.head_dim),
+                .q = try b.linear(&.{.{ .module = try Name.full(a, prefix, "self_attn.q_proj"), .n = g.qDim(), .w = w[@backingInt(M.q)], .span = s.qRows() }}, g.hidden),
+                .kv = try b.linear(&.{
+                    .{ .module = try Name.full(a, prefix, "self_attn.k_proj"), .n = g.kvDim(), .w = w[@backingInt(M.k)], .span = s.kvRows() },
+                    .{ .module = try Name.full(a, prefix, "self_attn.v_proj"), .n = g.kvDim(), .w = w[@backingInt(M.v)], .span = s.kvRows() },
+                }, g.hidden),
+                .out = try b.linear(&.{.{ .module = try Name.full(a, prefix, "self_attn.o_proj"), .n = g.hidden, .w = w[@backingInt(M.o)], .span = s.outputRows() }}, g.heads * g.head_dim),
                 .q_norm = try b.tensor(try Name.full(a, prefix, "self_attn.q_norm.weight"), .bf16, &.{c.head_dim}),
                 .k_norm = try b.tensor(try Name.full(a, prefix, "self_attn.k_norm.weight"), .bf16, &.{c.head_dim}),
             } },
         };
-        const gu = try b.linear(&.{ .{ .module = try Name.full(a, prefix, "mlp.gate_proj"), .n = c.intermediate, .w = w[@backingInt(M.gate)] }, .{ .module = try Name.full(a, prefix, "mlp.up_proj"), .n = c.intermediate, .w = w[@backingInt(M.up)] } }, c.hidden);
-        const down = try b.linear(&.{.{ .module = try Name.full(a, prefix, "mlp.down_proj"), .n = c.hidden, .w = w[@backingInt(M.down)] }}, c.intermediate);
+        const gu = try b.linear(&.{
+            .{ .module = try Name.full(a, prefix, "mlp.gate_proj"), .n = g.intermediate, .w = w[@backingInt(M.gate)], .span = s.intermediateRows() },
+            .{ .module = try Name.full(a, prefix, "mlp.up_proj"), .n = g.intermediate, .w = w[@backingInt(M.up)], .span = s.intermediateRows() },
+        }, g.hidden);
+        const down = try b.linear(&.{.{ .module = try Name.full(a, prefix, "mlp.down_proj"), .n = g.hidden, .w = w[@backingInt(M.down)], .span = s.outputRows() }}, g.intermediate);
         return .{ .norm = try b.tensor(try Name.full(a, prefix, "input_layernorm.weight"), .bf16, &.{c.hidden}), .post_norm = try b.tensor(try Name.full(a, prefix, "post_attention_layernorm.weight"), .bf16, &.{c.hidden}), .gu = gu, .down = down, .mixer = mixer };
     }
 };
 
-const Part = struct { module: []const u8, n: usize, w: Width };
+const Part = struct {
+    /// The module's checkpoint name, without the shard's namespace prefix.
+    module: []const u8,
+    /// The rows the checkpoint's tensor has, before this rank takes its span.
+    n: usize,
+    w: Width,
+    /// The rows this rank takes: the whole tensor unless the rank splits this matrix.
+    span: cfg.Span = .{},
+};
+
+/// Rows `[span.from, end)` of `t`: rows are contiguous, so the same buffer at a later offset and a shorter shape.
+fn rowView(t: Tensor, span: cfg.Span) !Tensor {
+    if (span.len == 0) return t;
+    if (span.from == 0 and span.len == t.shape[0]) return t;
+    if (span.end() > t.shape[0]) return error.BadNativeTensor;
+    var row: usize = 1;
+    for (t.shape[1..t.rank]) |d| row *= d;
+    const elem = t.dtype.size();
+    const at = span.from * row * elem;
+    if (at % elem != 0) return error.BadNativeTensor;
+    var view = t;
+    view.offset = t.offset + at;
+    view.bytes = row * span.len * elem;
+    view.shape[0] = span.len;
+    return view;
+}
 
 fn checked(t: Tensor, dtype: cp.DType, shape: []const usize) !Tensor {
     if (t.dtype != dtype or t.rank != shape.len or !std.mem.eql(usize, t.shape[0..t.rank], shape)) return error.BadNativeTensor;
     return t;
 }
 
-/// The graph from `checkpoint`, whose `repacked` tensors stay in their files: each Linear is staged, repacked, dropped.
-pub fn load(allocator: std.mem.Allocator, device: mtl.Device, checkpoint: *const cp.Checkpoint, c: Config, ws: *const widths.Widths) !Weights {
+/// Graph from `checkpoint`; each Linear is staged, repacked, dropped. `s` is the rank's share, `local` from `global`.
+pub fn load(allocator: std.mem.Allocator, device: mtl.Device, checkpoint: *const cp.Checkpoint, s: *const cfg.Shard, ws: *const widths.Widths) !Weights {
+    const c = s.local;
+    const g = s.global;
     const prefix: []const u8 = if (checkpoint.has("language_model.model.embed_tokens.weight")) "language_model." else if (checkpoint.has("model.embed_tokens.weight")) "" else return error.MissingTextNamespace;
     if (checkpoint.has("language_model.model.embed_tokens.weight") and checkpoint.has("model.embed_tokens.weight")) return error.AmbiguousTextNamespace;
     var owned: std.ArrayList(mtl.Buffer) = .empty;
@@ -200,10 +304,10 @@ pub fn load(allocator: std.mem.Allocator, device: mtl.Device, checkpoint: *const
     var stage = cp.Stage{ .device = device };
     defer stage.deinit();
     const b = Builder{ .allocator = allocator, .device = device, .checkpoint = checkpoint, .prefix = prefix, .owned = &owned, .stage = &stage, .runs = &runs, .widths = ws };
-    for (layers, 0..) |*l, i| l.* = try b.layer(c, i);
-    const embed = try b.quant("model.embed_tokens", c.vocab, c.hidden, ws.embed);
+    for (layers, 0..) |*l, i| l.* = try b.layer(s, i);
+    const embed = try b.quant("model.embed_tokens", g.vocab, g.hidden, ws.embed);
     const norm = try b.tensor("model.norm.weight", .bf16, &.{c.hidden});
-    const head = try b.linear(&.{.{ .module = "lm_head", .n = c.vocab, .w = ws.head }}, c.hidden);
+    const head = try b.linear(&.{.{ .module = "lm_head", .n = g.vocab, .w = ws.head, .span = s.vocabRows() }}, g.hidden);
     if (device.tensorUnits()) try laneOrder(allocator, device, layers, head);
     return .{ .allocator = allocator, .layers = layers, .embed = embed, .norm = norm, .head = head, .owned = owned, .runs = runs };
 }

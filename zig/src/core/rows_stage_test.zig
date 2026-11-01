@@ -1,5 +1,6 @@
 //! Staging: a block still being written is charged and gathered once, and a save that fits the permit waits for it.
 const std = @import("std");
+const waits = @import("rows_test_wait.zig");
 const rows = @import("rows_store.zig");
 const fixture = @import("rows_async_fixture.zig");
 const Fixture = fixture.Fixture;
@@ -208,7 +209,7 @@ test "rows stage: a close writes the saves that waited for room" {
         try x.keep(&second, 600);
         try t.expectEqual(@as(usize, 1), x.r.queue.items.len);
         hold.release.store(true, .release);
-        try t.expectEqual(@as(usize, 0), rows.write.drain(x.r, rows.write.nowNs() + 3 * std.time.ns_per_s));
+        try t.expectEqual(@as(usize, 0), rows.write.drain(x.r, waits.deadline()));
         try t.expectEqual(@as(usize, 2), x.r.states.items.len);
         try t.expectEqual(@as(u64, 0), x.r.counts.skipped);
     }

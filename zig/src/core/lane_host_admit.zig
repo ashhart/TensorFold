@@ -92,7 +92,11 @@ pub fn many(h: *LaneHost) bool {
     var streams: [lanes.Engine.max_together]*lanes.Stream = undefined;
     for (jobs[0..n], 0..) |job, i| streams[i] = &job.stream;
     var errs: [lanes.Engine.max_together]?anyerror = undefined;
-    h.core.addStreams(streams[0..n], errs[0..n]);
+    var done: [lanes.Engine.max_together]bool = undefined;
+    const load = @import("lane_host_load.zig");
+    const t0 = load.clock(h);
+    h.core.addStreams(streams[0..n], errs[0..n], done[0..n]);
+    load.creditBatch(h, jobs[0..n], done[0..n], t0); // one return, one credit: before any job reports alone
     for (jobs[0..n], began[0..n], errs[0..n]) |job, at, err| {
         if (err) |e| {
             _ = h.failedPass(job, e);

@@ -16,7 +16,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     if (o.segments != 1) return error.UnsupportedOption;
     if ((o.tp != 1 and o.tp != 2) or o.rank >= o.tp) return error.BadRank;
     // refused before the stream, the glue or a captured set loads
-    const chunk = try prompt.chunkRows();
+    const chunk = try @import("cuda_chunk.zig").soloRows(try prompt.chunkRows()); // the largest pass, solo or not
     _ = try @import("cuda_modelopt_threads.zig").configured(); // TF_FLASHNEXT_LOAD_THREADS, refused before any load
     const mode = try config.mode(gpa, io, dir);
     if (o.tp != 1 and (mode != .modelopt or captured != null)) return error.UnsupportedQuantization;
@@ -55,6 +55,8 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
         own.engine.collective = &r.collective;
     }
     errdefer own.engine.deinit();
+    const e = own.engine;
+    if (e.chunk != e.busy_chunk) std.log.info("flashnext: prompt passes of {d} rows, {d} while another stream decodes", .{ e.chunk, e.busy_chunk });
     if (o.vision) |limits| {
         if (own.set != null) return error.VisionCapturedSetUnsupported;
         own.vision = try images.Vision.load(gpa, io, driver, own.stream, dir, limits, o.rank, own.glue.f.prep_media, own.glue.f.pool_media, own.glue.f.prep_media_paged, own.glue.f.pool_media_paged);

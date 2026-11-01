@@ -184,6 +184,12 @@ test "chunks follow output width only and tiles fit the reduction buffer" {
     try std.testing.expectEqual(@as(u32, 8), splits(34816));
     try std.testing.expectEqual(splits(6240), chunks(3168, 6240));
     try std.testing.expectEqual(splits(6240), chunks(6240, 0));
+    // a pair's q and q | k | v key their checkpoint width: 12,288 and 10,240 over 6,144 and 5,120 a rank's.
+    try std.testing.expectEqual(@as(u32, 8), chunks(6144, 12288));
+    try std.testing.expectEqual(@as(u32, 8), chunks(5120, 10240));
+    // the rank's window alone would take 16 chunks, the split this key keeps a pair from forking.
+    try std.testing.expectEqual(@as(u32, 16), chunks(6144, 0));
+    try std.testing.expectEqual(@as(u32, 16), chunks(5120, 0));
     for (s_values) |s| for ([_]u32{ 1, 2 }) |rt| {
         const nt = tiles(34816, rt, s);
         try std.testing.expect(s * rt * nt * 64 * 4 <= 16384);

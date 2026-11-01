@@ -100,6 +100,7 @@ pub fn parse(gpa: std.mem.Allocator, raw: []const u8) !Config {
     if (sliding != .bool or !sliding.bool or try number(o, "attention_dropout") != 0) return error.BadDraftConfig;
     const rope = try object(o.get("rope_parameters") orelse return error.BadDraftConfig);
     try text(rope, "rope_type", "default");
+    if (o.get("rope_scaling")) |v| if (v != .null) return error.BadDraftConfig; // a scaled rope read as plain rope
     var c = Config{ .hidden = try integer(o, "hidden_size"), .intermediate = try integer(o, "intermediate_size"), .layers = try integer(o, "num_hidden_layers"), .vocab = try integer(o, "vocab_size"), .heads = try integer(o, "num_attention_heads"), .kv_heads = try integer(o, "num_key_value_heads"), .head_dim = try integer(o, "head_dim"), .target_layers = try integer(o, "num_target_layers"), .block = try integer(d, "block_size"), .mask = try integer(d, "mask_token_id"), .window = try integer(o, "sliding_window"), .group = try integer(d, "conv_group_size"), .conv = try integer(d, "conv_kernel_size"), .rank = try integer(d, "selector_rank"), .topk = try integer(d, "selector_top_k"), .eps = @floatCast(try number(o, "rms_norm_eps")), .theta = try number(rope, "rope_theta") };
     const taps = d.get("target_layer_ids") orelse return error.BadDraftConfig;
     if (taps != .array or taps.array.items.len != 5) return error.BadDraftConfig;
@@ -161,4 +162,10 @@ test "a causal reading or changed native storage cannot silently become the defa
     const text_json = try std.json.Stringify.valueAlloc(a, p.value, .{});
     defer a.free(text_json);
     try std.testing.expectError(error.BadDraftConfig, parse(a, text_json));
+}
+test "a draft whose rope is scaled by a rope_scaling block is refused, not read as plain rope" {
+    const a = std.testing.allocator;
+    const scaled = try std.mem.replaceOwned(u8, a, fixture, "\"layer_types\"", "\"rope_scaling\":{\"type\":\"yarn\",\"factor\":4.0},\"layer_types\"");
+    defer a.free(scaled);
+    try std.testing.expectError(error.BadDraftConfig, parse(a, scaled));
 }

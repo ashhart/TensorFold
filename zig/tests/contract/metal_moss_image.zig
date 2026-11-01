@@ -8,6 +8,8 @@ const rig_ = @import("rig.zig");
 const mi = @import("metal_moss_image_common.zig");
 const norms = @import("metal_moss_image_norms.zig");
 const steps = @import("metal_moss_image_steps.zig");
+const enc = @import("metal_moss_image_encoder.zig");
+const enc_state = @import("metal_moss_image_encoder_state.zig");
 
 const c = mi.c;
 const g = mi.g;
@@ -244,6 +246,14 @@ const controls = [_]?Control{
     .{ .kernel = "mi_situ", .what = "drops bf16(tanh(h / 25))", .from = "mi_bf(25.0f * mi_bf(metal::precise::tanh(", .to = "mi_bf(25.0f * (metal::precise::tanh(" },
     .{ .kernel = "mi_gate_add", .what = "drops bf16(g y)", .from = "x[i] = bfloat(float(x[i]) + mi_bf(float(g[at.x]) * float(y[i])));", .to = "x[i] = bfloat(float(x[i]) + (float(g[at.x]) * float(y[i])));" },
     .{ .kernel = "mi_bias", .what = "adds bf16(c) before the bias", .from = "y[i] = bfloat(c[i] + float(b[at.x]));", .to = "y[i] = bfloat(mi_bf(c[i]) + float(b[at.x]));" },
+    .{ .kernel = "me_norm", .what = "adds bf16(x inv)", .from = "yr[i] = bfloat(float(xr[i]) * inv * (1.0f + float(w[i])));", .to = "yr[i] = bfloat(mi_bf(float(xr[i]) * inv) * (1.0f + float(w[i])));" },
+    .{ .kernel = "me_head q", .what = "drops bf16(q cos)", .from = "o = mi_bf(v[i] * cs[ulong(r) * 32 + j]) + mi_bf(pv * sn[ulong(r) * 32 + j]);", .to = "o = (v[i] * cs[ulong(r) * 32 + j]) + mi_bf(pv * sn[ulong(r) * 32 + j]);" },
+    .{ .kernel = "me_gated_norm", .what = "drops bf16(x inv)", .from = "mi_bf(float(w[lane * 4 + i]) * mi_bf(v[i] * inv))", .to = "mi_bf(float(w[lane * 4 + i]) * (v[i] * inv))" },
+    .{ .kernel = "me_gate", .what = "drops bf16(sigmoid(g))", .from = "o[i] = bfloat(float(a[i]) * mi_bf(1.0f / (1.0f + metal::precise::exp(-g))));", .to = "o[i] = bfloat(float(a[i]) * (1.0f / (1.0f + metal::precise::exp(-g))));" },
+    .{ .kernel = "me_silu_mul", .what = "drops bf16(silu(g))", .from = "o[i] = bfloat(mi_bf(gv / (1.0f + metal::precise::exp(-gv))) * float(u[i]));", .to = "o[i] = bfloat((gv / (1.0f + metal::precise::exp(-gv))) * float(u[i]));" },
+    .{ .kernel = "me_conv", .what = "drops bf16(the taps' sum)", .from = "const float c = mi_bf(s);", .to = "const float c = s;" },
+    .{ .kernel = "me_gdn_prep", .what = "drops bf16(beta)", .from = "beta[at] = mi_bf(1.0f / (1.0f + metal::precise::exp(-float(b[at]))));", .to = "beta[at] = (1.0f / (1.0f + metal::precise::exp(-float(b[at]))));" },
+    .{ .kernel = "me_gdn", .what = "adds bf16(the state)", .from = "s[i] += kq[i] * delta;", .to = "s[i] = mi_bf(s[i] + kq[i] * delta);" },
 };
 
 /// The family's source as the engine compiles it, with `ctl`'s change made where it occurs, exactly once.
@@ -284,6 +294,12 @@ pub const Suite = struct {
     adds: std.ArrayList(*GateAdd) = .empty,
     biases: std.ArrayList(*Bias) = .empty,
     attns: std.ArrayList(*Attention) = .empty,
+    heads: std.ArrayList(*enc.Head) = .empty,
+    gated: std.ArrayList(*enc.GatedNorm) = .empty,
+    rows: std.ArrayList(*enc.Step) = .empty,
+    preps: std.ArrayList(*enc_state.Prep) = .empty,
+    gdns: std.ArrayList(*enc_state.Gdn) = .empty,
+    encoder_attns: std.ArrayList(*enc_state.Attention) = .empty,
 
     fn pipeline(s: *Suite, device: mtl.Device, lib: *Lazy, name: []const u8) !mtl.Pipeline {
         const p = try mtl.Pipeline.init(device, try lib.get(), name, false);
@@ -321,11 +337,15 @@ pub const Suite = struct {
                 return if (o) |needle| std.mem.indexOf(u8, name, needle) != null else true;
             }
         };
-        for ([_]bool{ false, true }) |modulated| {
-            const kind = if (modulated) "mi_norm modulated" else "mi_norm";
+        for (std.enums.values(norms.NormKind)) |nk| {
+            const kind = switch (nk) {
+                .plain => "mi_norm",
+                .modulated => "mi_norm modulated",
+                .zero_centered => "me_norm",
+            };
             const name = try s.label("metal moss image {s}{s}", .{ kind, suffix });
             if (!want.is(ctl, kind) or !want.keep(only, name)) continue;
-            const t = try s.make(Norm, &s.norms, .{ .a = s.a, .rig = rig, .pipe = try s.pipeline(device, lib, "mi_norm"), .modulated = modulated, .name = name, .ends = ends });
+            const t = try s.make(Norm, &s.norms, .{ .a = s.a, .rig = rig, .pipe = try s.pipeline(device, lib, if (nk == .zero_centered) "me_norm" else "mi_norm"), .kind = nk, .name = name, .ends = ends });
             try out.append(s.a, t.kernel(gate));
         }
         for ([_]bool{ false, true }) |packed_rows| {
@@ -354,7 +374,49 @@ pub const Suite = struct {
                 try out.append(s.a, t.kernel(gate));
             }
         }
+        for (std.enums.values(enc.HeadForm)) |form| {
+            const kind = try s.label("me_head {t}", .{form});
+            const name = try s.label("metal moss image {s}{s}", .{ kind, suffix });
+            if (!want.is(ctl, kind) or !want.keep(only, name)) continue;
+            const t = try s.make(enc.Head, &s.heads, .{ .a = s.a, .rig = rig, .pipe = try s.pipeline(device, lib, "me_head"), .form = form, .name = name, .ends = ends });
+            try out.append(s.a, t.kernel(gate));
+        }
+        {
+            const name = try s.label("metal moss image me_gated_norm{s}", .{suffix});
+            if (want.is(ctl, "me_gated_norm") and want.keep(only, name)) {
+                const t = try s.make(enc.GatedNorm, &s.gated, .{ .a = s.a, .rig = rig, .pipe = try s.pipeline(device, lib, "me_gated_norm"), .name = name, .ends = ends });
+                try out.append(s.a, t.kernel(gate));
+            }
+        }
+        for (std.enums.values(enc.StepKind)) |kind| {
+            const fn_name = try s.label("me_{t}", .{kind});
+            const name = try s.label("metal moss image {s}{s}", .{ fn_name, suffix });
+            if (!want.is(ctl, fn_name) or !want.keep(only, name)) continue;
+            const t = try s.make(enc.Step, &s.rows, .{ .a = s.a, .rig = rig, .pipe = try s.pipeline(device, lib, fn_name), .kind = kind, .name = name, .ends = ends });
+            try out.append(s.a, t.kernel(gate));
+        }
+        {
+            const name = try s.label("metal moss image me_gdn_prep{s}", .{suffix});
+            if (want.is(ctl, "me_gdn_prep") and want.keep(only, name)) {
+                const t = try s.make(enc_state.Prep, &s.preps, .{ .a = s.a, .rig = rig, .pipe = try s.pipeline(device, lib, "me_gdn_prep"), .name = name, .ends = ends });
+                try out.append(s.a, t.kernel(gate));
+            }
+        }
+        {
+            const name = try s.label("metal moss image me_gdn{s}", .{suffix});
+            if (want.is(ctl, "me_gdn") and want.keep(only, name)) {
+                const t = try s.make(enc_state.Gdn, &s.gdns, .{ .a = s.a, .rig = rig, .pipe = try s.pipeline(device, lib, "me_gdn"), .name = name });
+                try out.append(s.a, t.kernel(gate));
+            }
+        }
         if (ctl != null) return;
+        {
+            const name = try s.label("metal moss image me_attention", .{});
+            if (want.keep(only, name)) {
+                const t = try s.make(enc_state.Attention, &s.encoder_attns, .{ .a = s.a, .rig = rig, .pipe = try s.pipeline(device, lib, "me_attention"), .name = name });
+                try out.append(s.a, t.kernel(null));
+            }
+        }
         for (forms, 0..) |f, form| {
             const name = try s.label("metal moss image {s}", .{f.name});
             if (!want.keep(only, name)) continue;
@@ -381,7 +443,7 @@ pub const Suite = struct {
 
     pub fn destroy(s: *Suite) void {
         const a = s.a;
-        inline for (.{ &s.norms, &s.qks, &s.situs, &s.adds, &s.biases, &s.attns }) |list| {
+        inline for (.{ &s.norms, &s.qks, &s.situs, &s.adds, &s.biases, &s.attns, &s.heads, &s.gated, &s.rows, &s.preps, &s.gdns, &s.encoder_attns }) |list| {
             for (list.items) |t| {
                 t.deinit();
                 a.destroy(t);

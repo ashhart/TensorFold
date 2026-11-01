@@ -34,6 +34,8 @@ pub const Layout = struct {
     cooperative: bool = false,
     /// 4-bit g64 codes in reg_layout, unpacked into tensor-op registers; every word equals the cooperative kernel's.
     reg: bool = false,
+    /// Rows one reg encode may take, `reg_rows` to `max_reg_rows`: it sizes the sums scratch, never the kernel source.
+    rows: usize = reg_rows,
     /// Elements between output rows (default N): a member of a fused stack writes its columns of the fused rows.
     y_stride: ?usize = null,
 
@@ -46,6 +48,7 @@ pub const Layout = struct {
         if (l.n == 0 or l.n % 16 != 0 or l.k == 0 or l.k % l.format.group != 0 or
             l.n > std.math.maxInt(i32) / 16 or l.k > std.math.maxInt(i32) / 16) return error.InvalidShape;
         if (l.sk == 0 or l.sk > 32 or (l.pf != 1 and l.pf != 2)) return error.InvalidSchedule;
+        if (l.rows != reg_rows and (!l.reg or l.rows < reg_rows or l.rows % 16 != 0 or l.rows > max_reg_rows)) return error.InvalidSchedule;
         const g = l.groupCut();
         if (g[1] == 0 or g[0] >= l.k / l.format.group or g[1] > l.k / l.format.group - g[0]) return error.InvalidGroupCut;
         if (l.groups != null and l.output != .f32) return error.PartialOutputNeedsFloat;
@@ -232,6 +235,8 @@ pub const Projection = struct {
     sums_buffer: ?mtl.Buffer = null,
     threads_per_slice: usize = 32,
     reg: bool = false,
+    /// Rows one encode takes at most: the layout's rows for reg, 16 otherwise.
+    max_rows: u32 = reg_rows,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, l: Layout) !Projection {
         try l.validate();
@@ -250,9 +255,9 @@ pub const Projection = struct {
         if (l.precompute_sums) {
             sums_pipe = try mtl.Pipeline.init(device, lib, "tf_lane_sums", false);
             errdefer sums_pipe.?.deinit();
-            sums_buffer = try device.buffer(@as(usize, if (l.reg) reg_rows else 16) * (l.k / l.format.group) * 4, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+            sums_buffer = try device.buffer(@as(usize, if (l.reg) l.rows else 16) * (l.k / l.format.group) * 4, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         }
-        return .{ .pipe = p, .n = l.n, .k = l.k, .group_count = l.k / l.format.group, .weight_bytes = l.weightWords() * 4, .metadata_bytes = l.metadataElements() * 2, .output_bytes = if (l.output == .f32) 4 else 2, .y_stride = l.y_stride orelse l.n, .tile_count = l.tiles(), .sk = l.sk, .sums_pipe = sums_pipe, .sums_buffer = sums_buffer, .threads_per_slice = if (l.cooperative) 64 else 32, .reg = l.reg };
+        return .{ .pipe = p, .n = l.n, .k = l.k, .group_count = l.k / l.format.group, .weight_bytes = l.weightWords() * 4, .metadata_bytes = l.metadataElements() * 2, .output_bytes = if (l.output == .f32) 4 else 2, .y_stride = l.y_stride orelse l.n, .tile_count = l.tiles(), .sk = l.sk, .sums_pipe = sums_pipe, .sums_buffer = sums_buffer, .threads_per_slice = if (l.cooperative) 64 else 32, .reg = l.reg, .max_rows = @intCast(if (l.reg) l.rows else 16) };
     }
 
     pub fn deinit(p: Projection) void {
@@ -269,13 +274,13 @@ pub const Projection = struct {
     /// The reg kernel on group sums its input's producer wrote (tf_lane_sums' order): no sums dispatch, no barrier.
     pub fn encodeSums(p: Projection, e: mtl.ComputeEncoder, x: Ref, w: Ref, sb: Ref, sums: Sums, y: Ref, rows: u32) !void {
         if (!p.reg) return error.SumsNeedReg;
-        if (rows == 0 or rows > reg_rows or sums.stride < rows) return error.InvalidRows;
+        if (rows == 0 or rows > p.max_rows or sums.stride < rows) return error.InvalidRows;
         try checkRef(sums.ref, ((p.group_count - 1) * @as(usize, sums.stride) + rows) * 4, 4);
         return p.encodeImpl(e, x, w, sb, sums, y, rows);
     }
 
     fn encodeImpl(p: Projection, e: mtl.ComputeEncoder, x: Ref, w: Ref, sb: Ref, given: ?Sums, y: Ref, rows: u32) !void {
-        if (rows == 0 or rows > @as(u32, if (p.reg) reg_rows else 16)) return error.InvalidRows;
+        if (rows == 0 or rows > p.max_rows) return error.InvalidRows;
         const blocks = (rows + 15) / 16;
         const stride: u32 = if (given) |g| g.stride else 16 * blocks;
         try checkRef(x, rows * p.k * 2, 2);
@@ -305,6 +310,8 @@ pub const Projection = struct {
 
 /// Rows one reg encode takes, as 16-row blocks on the grid's y (a prompt chunk's rows in one weight read).
 pub const reg_rows = 128;
+/// Rows one reg encode may take when its layout says so (`Layout.rows`): a whole prompt chunk in one dispatch.
+pub const max_reg_rows = 2048;
 
 /// Group sums of a projection's input: XS[group * stride + row], fp32, each group's values added in order from zero.
 pub const Sums = struct { ref: Ref, stride: u32 };
@@ -313,6 +320,26 @@ fn checkRef(r: Ref, need: usize, alignment: usize) !void {
     if (r.off % alignment != 0) return error.MisalignedBuffer;
     const len = r.buf.length();
     if (r.off > len or need > len - r.off) return error.BufferTooSmall;
+}
+
+test "a reg layout's rows size its sums scratch, never its kernel source" {
+    const base = Layout{ .n = 34816, .k = 5120, .format = .{ .bits = 4, .group = 64 }, .precompute_sums = true, .reg = true };
+    var long = base;
+    long.rows = max_reg_rows;
+    try long.validate();
+    const short_text = try source(std.testing.allocator, base);
+    defer std.testing.allocator.free(short_text);
+    const long_text = try source(std.testing.allocator, long);
+    defer std.testing.allocator.free(long_text);
+    try std.testing.expectEqualStrings(short_text, long_text);
+    for ([_]usize{ 0, 64, 1000, max_reg_rows + 16 }) |rows| {
+        long.rows = rows;
+        try std.testing.expectError(error.InvalidSchedule, long.validate());
+    }
+    var plain = base;
+    plain.reg = false;
+    plain.rows = 256;
+    try std.testing.expectError(error.InvalidSchedule, plain.validate());
 }
 
 test "layouts reject unsupported formats, schedules, cuts and overlapping tile reads" {

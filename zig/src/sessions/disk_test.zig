@@ -123,3 +123,127 @@ test "split ranks write and restore their own pages (rank 0 and 1 of 2)" {
     try roundTrip(2, 0);
     try roundTrip(2, 1);
 }
+
+test "split reconcile refuses before deleting temporary files or indexing physical bytes" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const d = try disk.Disk.open(gpa, io, .{ .root = root, .compat = @splat(9), .world = 2 });
+    defer d.close();
+    const f = try d.dir.createFile(io, "unreconciled.tmp", .{});
+    f.close(io);
+    var found: std.ArrayList(disk.Disk.Found) = .empty;
+    defer found.deinit(gpa);
+    try testing.expectError(error.SplitReconcileUnsupported, d.scan(&found));
+    try testing.expectEqual(@as(usize, 0), d.recs.items.len);
+    try testing.expectEqual(@as(u64, 0), d.used);
+    const kept = try d.dir.openFile(io, "unreconciled.tmp", .{});
+    kept.close(io);
+}
+
+test "logical charge counts delta pages and bounded measure independently of blob and padded file bytes" {
+    const charge = @import("disk_charge.zig").charge;
+    var src: disk.WriteSrc = undefined;
+    src.page = 64;
+    src.npages = 7;
+    src.first_page = 4;
+    src.ids = &.{ 1, 2, 3 };
+    src.measure = 3000;
+    src.families = &fams;
+    var expected: u64 = 3012;
+    for (fams) |f| expected += 3 * f.pageBytes(64) / (if (f.split) @as(u64, 2) else 1);
+    try testing.expectEqual(expected, charge(&src, 2, 999999));
+    try testing.expectEqual(expected, charge(&src, 2, 4096));
+    try testing.expectEqual(@as(u64, 4096), charge(&src, 1, 4096));
+}
+
+test "fresh serving starts do not accumulate files from previous processes" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const opts: disk.Options = .{ .root = root, .compat = @splat(5), .rank = 0, .world = 2, .fresh_start = true };
+    {
+        const d = try disk.Disk.open(gpa, io, opts);
+        defer d.close();
+        // Exercise cleanup with hundreds of stale files.
+        for (0..300) |i| {
+            var name_buf: [32]u8 = undefined;
+            const name = try std.fmt.bufPrint(&name_buf, "stale-{d}.tfs", .{i});
+            const f = try d.dir.createFile(io, name, .{});
+            f.close(io);
+        }
+        // These are disposable, unindexed files left by a previous serving process.
+        for ([_][]const u8{ "old.tfs", "interrupted.tmp", "keep.txt" }) |name| {
+            const f = try d.dir.createFile(io, name, .{});
+            f.close(io);
+        }
+    }
+    const other = try disk.Disk.open(gpa, io, .{ .root = root, .compat = @splat(5), .rank = 1, .world = 2 });
+    defer other.close();
+    const peer = try other.dir.createFile(io, "peer.tfs", .{});
+    peer.close(io);
+    const foreign = try disk.Disk.open(gpa, io, .{ .root = root, .compat = @splat(6) });
+    defer foreign.close();
+    const unrelated = try foreign.dir.createFile(io, "foreign.tfs", .{});
+    unrelated.close(io);
+
+    const reopened = try disk.Disk.open(gpa, io, opts);
+    defer reopened.close();
+    try testing.expectError(error.FileNotFound, reopened.dir.openFile(io, "old.tfs", .{}));
+    try testing.expectError(error.FileNotFound, reopened.dir.openFile(io, "interrupted.tmp", .{}));
+    var it = reopened.dir.iterate();
+    while (try it.next(io)) |ent| {
+        try testing.expect(!std.mem.endsWith(u8, ent.name, ".tfs"));
+        try testing.expect(!std.mem.endsWith(u8, ent.name, ".tmp"));
+    }
+    const marker = try reopened.dir.openFile(io, "keep.txt", .{});
+    marker.close(io);
+    const peer_after = try other.dir.openFile(io, "peer.tfs", .{});
+    peer_after.close(io);
+    const foreign_after = try foreign.dir.openFile(io, "foreign.tfs", .{});
+    foreign_after.close(io);
+}
+
+test "fresh namespace has one owner and an active owner prevents cleanup" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const opts: disk.Options = .{ .root = root, .compat = @splat(3), .fresh_start = true };
+    const owner = try disk.Disk.open(gpa, io, opts);
+    defer owner.close();
+    const file = try owner.dir.createFile(io, "active.tfs", .{});
+    file.close(io);
+    try testing.expectError(error.SessionNamespaceBusy, disk.Disk.open(gpa, io, opts));
+    const kept = try owner.dir.openFile(io, "active.tfs", .{});
+    kept.close(io);
+}
+
+test "unknown dtype uses nonfollowing stat and cleanup errors surface" {
+    const ns = @import("disk_namespace.zig");
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "old.tfs", .{});
+    file.close(io);
+    try ns.discard(tmp.dir, io, .{ .name = "old.tfs", .kind = .unknown, .inode = 0 });
+    try testing.expectError(error.FileNotFound, tmp.dir.openFile(io, "old.tfs", .{}));
+    try tmp.dir.createDirPath(io, "keep.tmp");
+    try ns.discard(tmp.dir, io, .{ .name = "keep.tmp", .kind = .unknown, .inode = 0 });
+    try testing.expectEqual(std.Io.File.Kind.directory, (try tmp.dir.statFile(io, "keep.tmp", .{})).kind);
+    try tmp.dir.symLink(io, "elsewhere", "link.tfs", .{});
+    try ns.discard(tmp.dir, io, .{ .name = "link.tfs", .kind = .unknown, .inode = 0 });
+    try testing.expectEqual(std.Io.File.Kind.sym_link, (try tmp.dir.statFile(io, "link.tfs", .{ .follow_symlinks = false })).kind);
+    try testing.expectError(error.FileNotFound, ns.discard(tmp.dir, io, .{ .name = "missing.tmp", .kind = .unknown, .inode = 0 }));
+    if (ns.discard(tmp.dir, io, .{ .name = "keep.tmp", .kind = .file, .inode = 0 })) |_| {
+        return error.TestUnexpectedResult;
+    } else |_| {}
+}

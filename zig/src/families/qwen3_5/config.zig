@@ -121,6 +121,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Config {
     }
     const rope = try object(try field(text, "rope_parameters"));
     try string(rope, "rope_type", "default");
+    checks.defaultRope(text, rope) catch return error.UnsupportedQwenRotary;
     try boolean(rope, "mrope_interleaved", true);
     if (try number(try field(rope, "rope_theta")) != theta or
         try number(try field(rope, "partial_rotary_factor")) != 0.25) return error.UnsupportedQwenRotary;
@@ -237,6 +238,7 @@ test "admit the affine 2B geometry and text rotary layout" {
         .{ "\"rope_theta\":10000000", "\"rope_theta\":100000", error.UnsupportedQwenRotary },
         .{ "\"mrope_section\":[11,11,10]", "\"mrope_section\":[16,8,8]", error.UnsupportedQwenRotary },
         .{ "\"max_position_embeddings\":262144", "\"max_position_embeddings\":524288", error.UnsupportedQwenConfig },
+        .{ "\"rope_type\":\"default\"", "\"rope_type\":\"yarn\",\"factor\":4.0,\"original_max_position_embeddings\":262144", error.UnsupportedQwenConfig },
     };
     inline for (changes) |change| {
         try std.testing.expect(std.mem.indexOf(u8, compact, change[0]) != null);
@@ -389,7 +391,9 @@ pub fn geometry(tower: std.json.ObjectMap, bits: u8, group_size: u16) Error!Spec
     try checks.products(.{ .hidden = spec.hidden, .intermediate = spec.intermediate, .vocab = spec.vocab, .heads = spec.heads, .kv_heads = spec.kv_heads, .head_dim = spec.head_dim, .key_heads = spec.key_heads, .value_heads = spec.value_heads, .key_dim = spec.key_dim, .value_dim = spec.value_dim, .conv = spec.conv, .experts = spec.experts, .moe_width = spec.moe_width, .shared_width = spec.shared_width });
     try checks.layers(&spec.full_layers, tower, spec.n_layers, spec.full_every);
     spec.mrope = try checks.mrope(rope, rotary);
+    try checks.defaultRope(tower, rope);
     spec.max_position = try checks.maxPosition(tower);
+    if (spec.max_position > 262144) return error.InvalidConfig; // past the trained window only with scaled rope
     return spec;
 }
 
@@ -515,6 +519,11 @@ test "the geometry refuses what the kernels do not compute and sizes past 32 bit
         .{ "\"rms_norm_eps\"", "\"output_gate_type\": \"sigmoid\", \"rms_norm_eps\"", error.UnsupportedAttentionGate },
         .{ "\"rms_norm_eps\"", "\"mamba_ssm_dtype\": \"bfloat16\", \"rms_norm_eps\"", error.UnsupportedStateType },
         .{ "\"vocab_size\": 248320", "\"vocab_size\": 1048576", error.InvalidConfig },
+        // a scaled rope, which HIP and loader.zig would otherwise read as plain rope, and a window past the trained one
+        .{ "\"rope_theta\": 10000000,", "\"rope_type\": \"yarn\", \"factor\": 4.0, \"rope_theta\": 10000000,", error.InvalidRotary },
+        .{ "\"rope_theta\": 10000000,", "\"type\": \"yarn\", \"rope_theta\": 10000000,", error.InvalidRotary },
+        .{ "\"rms_norm_eps\"", "\"rope_scaling\": {\"type\": \"yarn\", \"factor\": 4.0}, \"rms_norm_eps\"", error.InvalidRotary },
+        .{ "\"rms_norm_eps\"", "\"max_position_embeddings\": 1048576, \"rms_norm_eps\"", error.InvalidConfig },
     };
     for (cases) |c| {
         const text = try std.mem.replaceOwned(u8, a, sample_text, c[0], c[1]);
