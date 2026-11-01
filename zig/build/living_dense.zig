@@ -2,6 +2,13 @@
 const std = @import("std");
 
 pub fn target(b: *std.Build, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode, cuda: *std.Build.Module, qwen: *std.Build.Module) void {
+    const moe = b.addExecutable(.{ .name = "tf-qwen-moe-learn", .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/cli/qwen_moe_learn.zig"), .target = t, .optimize = o, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "qwen35", .module = qwen } } }) });
+    b.step("compile-qwen-moe-learn", "Compile MoE learner qualification without running a device").dependOn(&moe.step);
+    const run = b.addRunArtifact(moe);
+    const model = b.option([]const u8, "qwen35-learn-model", "MoE checkpoint for learner qualification");
+    const ids = b.option([]const u8, "qwen35-learn-ids", "Rendered token IDs as a JSON array");
+    if (model != null and ids != null) run.addArgs(&.{ model.?, ids.? });
+    b.step("qwen35-learn", "Qualify the Qwen MoE learner on a CUDA checkpoint").dependOn(&run.step);
     const m = b.createModule(.{ .root_source_file = b.path("zig/src/cli/qwen35_learn.zig"), .target = t, .optimize = o, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "qwen35", .module = qwen } } });
     const exe = b.addExecutable(.{ .name = "tf-qwen35-learn", .root_module = m });
     b.installArtifact(exe);
@@ -18,7 +25,11 @@ pub fn host(b: *std.Build, cuda: *std.Build.Module, qwen: *std.Build.Module, dra
     const images: [n]?std.Build.LazyPath = @splat(placeholder);
     const fake_cuda = runtime(b, t, .debug, &images);
     const fake = family(b, t, .debug, fake_cuda, draft_ids);
+    const component = b.addObject(.{ .name = "qwen_moe_contract_compile", .root_module = b.createModule(.{ .root_source_file = b.path("zig/qwen_moe_contract_compile.zig"), .target = t, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = fake_cuda }, .{ .name = "qwen35", .module = fake.qwen35 } } }) });
+    b.step("compile-qwen-moe-contract-host", "Compile group-64 CUDA component bodies with inert images, no execution").dependOn(&component.step);
     const constructors = b.addRunArtifact(b.addTest(.{ .root_module = fake.qwen35, .filters = &.{"dense constructor:"} }));
     b.step("test-dense-constructors-host", "Actual dense constructor ownership and completion failures").dependOn(&constructors.step);
+    const reference = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/train_back_rig.zig"), .target = t, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "cuda", .module = cuda }} }), .filters = &.{"MoE packed reference:"} }));
+    b.step("test-qwen-moe-reference-host", "Packed reference adjoints against finite differences without devices").dependOn(&reference.step);
     b.step("test-packed-experts-host", "Packed adjoints layout and launch bounds without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda, .filters = &.{ "MoE packed:", "Quantized adjoints:" } })).step);
 }

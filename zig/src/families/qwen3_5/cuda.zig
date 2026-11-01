@@ -84,3 +84,5 @@ test {
 test {
     _ = @import("cuda_moe_keep_test.zig");
 }
+
+pub const learn_main = @import("cuda_learn_main.zig");

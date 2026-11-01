@@ -1,4 +1,4 @@
-//! The shapes the CUDA engine is built for: the family's parsed config (config.zig), held to the 27B's.
+//! Geometry admitted by the dense and shared-expert CUDA learners.
 const std = @import("std");
 const owned = @import("cuda_geometry.zig");
 
@@ -59,7 +59,7 @@ pub const Geometry = struct {
 /// Qwen3.8-27B, the one checkpoint shape the CUDA engine serves.
 pub const the_27b: Geometry = .{ .hidden = 5120, .intermediate = 17408, .layers = 64, .linear_k_heads = 16, .linear_v_heads = 48, .query_heads = 24, .kv_heads = 4 };
 
-/// This backward is qualified for the dense 27B geometry alone; serving keeps its wider registry.
+/// Dense 27B and group-64 MoE geometries; device qualification is recorded separately.
 pub fn from(g: owned.Geometry) !Geometry {
     const out: Geometry = .{ .experts = g.experts, .top_k = g.top_k, .hidden = g.hidden, .intermediate = g.intermediate, .layers = g.layers, .linear_k_heads = g.k_heads, .linear_v_heads = g.v_heads, .query_heads = g.q_heads, .kv_heads = g.kv_heads };
     if (g.moe()) {

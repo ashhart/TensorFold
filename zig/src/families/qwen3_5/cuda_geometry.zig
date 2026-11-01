@@ -347,7 +347,9 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
     g.bits = try widths(gpa, root, try object(qv.?), g);
     if (g.pocket > 0) {
         if (g.moe() and g.expert_bits != 4) return error.UnsupportedLearningFormat;
-        for (0..g.layers) |i| for ([_]Slot{ .gate, .up, .down }) |slot| {
+        for (0..g.layers) |i| for (std.enums.values(Slot)) |slot| {
+            const mlp = slot == .gate or slot == .up or slot == .down;
+            if (mlp == g.moe()) continue;
             if (g.bits.of(i, slot) != 4) return error.UnsupportedLearningFormat;
         };
     }

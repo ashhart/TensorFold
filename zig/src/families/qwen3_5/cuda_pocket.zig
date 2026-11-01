@@ -1,4 +1,4 @@
-//! Living Weights' pocket beside each dense MLP: fp32 SwiGLU neurons a layer, added to the MLP's output in every pass.
+//! Living Weights' fp32 SwiGLU pocket beside each dense MLP or gated shared expert.
 const std = @import("std");
 const cuda = @import("cuda");
 const to = @import("cuda_train_ops.zig");

@@ -1,4 +1,4 @@
-//! train_q4.cu's input gradients for MLX affine 4-bit (group 32) models, with train.cu's loss, sort and pair kernels.
+//! Affine-4 input gradients; packed expert readers support groups of 32 or 64.
 const std = @import("std");
 const driver = @import("driver.zig");
 const module = @import("module.zig");
@@ -34,7 +34,7 @@ pub const Experts = struct {
     dim: usize,
 };
 
-/// Experts as experts_pack.cu packs them (group 32): `up` gate | up block by block, `down` alone; `routed` the shared.
+/// Packed experts: gate and up interleaved by block, down alone; shared expert at index routed.
 pub const PackedExperts = struct { up: u64, down: u64, routed: usize, width: usize, dim: usize, group: usize = 32 };
 
 /// What the MoE layer kept: x [rows, d] bf16, ids [rows, slots] (top_k, then the shared one), wts [rows, slots] fp32.

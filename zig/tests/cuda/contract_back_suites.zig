@@ -5,6 +5,13 @@ const std = @import("std");
 pub fn run(gpu: check.Gpu) !void {
     try @import("gdn_back_tests.zig").run(gpu);
     try @import("q4_back_tests.zig").run(gpu);
+    try @import("qwen_moe_back_tests.zig").run(gpu);
+    if (@import("cuda").kernels.available) {
+        if (@import("qwen_moe_back_tests.zig").control(gpu)) |_| return error.ControlStayedGreen else |err| {
+            if (err != error.TestFailed) return err;
+            std.debug.print("PASS control red: the gated pocket omitted its shared slot gradient\n", .{});
+        }
+    }
     try @import("moe_back_tests.zig").run(gpu);
     try @import("attn_back_tests.zig").run(gpu);
     try @import("fn_hc_back_tests.zig").run(gpu);

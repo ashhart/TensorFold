@@ -74,6 +74,7 @@ pub fn dotF(a: []const f32, b: []const f64) f64 {
 
 /// A 4-bit [n, k] matrix in MLX's layout on the host: 8 codes a word, a bf16 scale and bias every 32 of a row.
 pub const HQ4 = struct {
+    group: usize = 32,
     n: usize,
     k: usize,
     words: []u32,
@@ -82,15 +83,15 @@ pub const HQ4 = struct {
 
     /// Row i . x.
     pub fn rowDot(m: *const HQ4, i: usize, x: []const f64) f64 {
-        const g = m.k / 32;
+        const g = m.k / m.group;
         const words = m.words[i * (m.k / 8) ..][0 .. m.k / 8];
         var total: f64 = 0;
         for (0..g) |gi| {
             var sq: f64 = 0;
             var sx: f64 = 0;
-            for (0..4) |wi| {
-                const w = words[gi * 4 + wi];
-                const xs = x[gi * 32 + wi * 8 ..][0..8];
+            for (0..m.group / 8) |wi| {
+                const w = words[gi * (m.group / 8) + wi];
+                const xs = x[gi * m.group + wi * 8 ..][0..8];
                 inline for (0..8) |j| {
                     const q: f64 = @floatFromInt((w >> (4 * j)) & 0xf);
                     sq += q * xs[j];
@@ -104,14 +105,14 @@ pub const HQ4 = struct {
 
     /// y += c row i.
     pub fn rowAxpy(m: *const HQ4, i: usize, c: f64, y: []f64) void {
-        const g = m.k / 32;
+        const g = m.k / m.group;
         const words = m.words[i * (m.k / 8) ..][0 .. m.k / 8];
         for (0..g) |gi| {
             const cs = c * bf(m.sc[i * g + gi]);
             const cb = c * bf(m.bi[i * g + gi]);
-            for (0..4) |wi| {
-                const w = words[gi * 4 + wi];
-                const ys = y[gi * 32 + wi * 8 ..][0..8];
+            for (0..m.group / 8) |wi| {
+                const w = words[gi * (m.group / 8) + wi];
+                const ys = y[gi * m.group + wi * 8 ..][0..8];
                 inline for (0..8) |j| ys[j] += cs * @as(f64, @floatFromInt((w >> (4 * j)) & 0xf)) + cb;
             }
         }
@@ -176,7 +177,10 @@ pub const Rig = struct {
 
     /// A random 4-bit matrix with values in about [-amp, amp]: codes uniform, each group's scale and bias jittered.
     pub fn q4(r: *Rig, n: usize, k: usize, amp: f64) !HQ4 {
-        const m: HQ4 = .{ .n = n, .k = k, .words = try r.a.alloc(u32, n * k / 8), .sc = try r.a.alloc(u16, n * k / 32), .bi = try r.a.alloc(u16, n * k / 32) };
+        return r.q4Group(32, n, k, amp);
+    }
+    pub fn q4Group(r: *Rig, group: usize, n: usize, k: usize, amp: f64) !HQ4 {
+        const m: HQ4 = .{ .group = group, .n = n, .k = k, .words = try r.a.alloc(u32, n * k / 8), .sc = try r.a.alloc(u16, n * k / group), .bi = try r.a.alloc(u16, n * k / group) };
         r.rng.bytes(std.mem.sliceAsBytes(m.words));
         for (m.sc, m.bi) |*s, *b| {
             const sv = 2 * amp / 15 * r.uni(0.6, 1.4);
@@ -306,4 +310,26 @@ pub const Timer = struct {
 
 pub fn mib(b: usize) f64 {
     return @as(f64, @floatFromInt(b)) / (1 << 20);
+}
+
+test "MoE packed reference: group 64 uses both half groups in dot and transpose finite differences" {
+    const words: [16]u32 = @splat(0x76543210);
+    const sc = [2]u16{ bf16(0.125), bf16(0.25) };
+    const bi = [2]u16{ bf16(-0.5), bf16(0.125) };
+    var m: HQ4 = .{ .group = 64, .n = 1, .k = 128, .words = @constCast(&words), .sc = @constCast(&sc), .bi = @constCast(&bi) };
+    var x: [128]f64 = @splat(0.2);
+    var dx: [128]f64 = @splat(0);
+    m.rowAxpy(0, 1, &dx);
+    for (0..128) |i| {
+        const v = x[i];
+        x[i] = v + 1e-4;
+        const hi = m.rowDot(0, &x);
+        x[i] = v - 1e-4;
+        const lo = m.rowDot(0, &x);
+        x[i] = v;
+        const group = i / 64;
+        const want = bf(sc[group]) * @as(f64, @floatFromInt(i % 8)) + bf(bi[group]);
+        try std.testing.expectApproxEqAbs(want, dx[i], 1e-12);
+        try std.testing.expectApproxEqAbs(dx[i], (hi - lo) / 2e-4, 1e-9);
+    }
 }

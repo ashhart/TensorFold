@@ -140,4 +140,5 @@ fn Cases(comptime family: @import("family.zig").Family) type {
 test {
     _ = Cases(@import("families.zig").qwen4_exp);
     _ = Cases(@import("families.zig").qwen3_5);
+    _ = Cases(@import("families.zig").qwen3_5_moe);
 }

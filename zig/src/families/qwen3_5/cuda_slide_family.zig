@@ -1,4 +1,4 @@
-//! The 27B's Living Weights learner on CUDA (--slide): the family-neutral learner over train.zig and the shard writer.
+//! Shared Qwen learner over the family-neutral learner, CUDA trainer and shard writer.
 const std = @import("std");
 const living = @import("living");
 const core = @import("core");
@@ -12,7 +12,7 @@ pub fn For(comptime desc: living.Family) type {
         const fam = family;
         const Shards = living.shards.Io(core);
 
-        /// Every layer's MLP carries the pocket and all but the last learn; `width` still holds a pocket written earlier.
+        /// Every shared expert widens; all but the last learn. Width includes any previously written pocket.
         pub fn layout(hidden: usize, layers: usize, width: usize, pocket: usize) !living.Layout {
             if (layers > living.family.max_layers or pocket >= width) return error.BadConfig;
             var every: living.Layers = .empty;
@@ -35,7 +35,7 @@ pub fn For(comptime desc: living.Family) type {
             return layout(int(text, k.hidden) orelse return error.BadConfig, int(text, k.layers) orelse return error.BadConfig, int(text, k.width) orelse return error.BadConfig, int(text, k.pocket) orelse 0);
         }
 
-        /// The first file a lesson rewrites (config, index, shards with an MLP) that shares its data through a link, or null.
+        /// The first linked config, index or shared-expert shard a lesson rewrites, or null.
         pub fn linked(arena: std.mem.Allocator, io: std.Io, dir: []const u8) !?[]const u8 {
             var d = try std.Io.Dir.cwd().openDir(io, dir, .{});
             defer d.close(io);

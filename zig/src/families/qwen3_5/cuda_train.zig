@@ -1,4 +1,4 @@
-//! The 27B's Living Weights trainer: packed passes through Forward.chunks and the loss back to the lowest nudged layer.
+//! Qwen hybrid trainer: serving passes and the loss back to the lowest nudged layer.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -139,6 +139,7 @@ pub const Trainer = struct {
     from: [living.family.max_layers]u32 = @splat(std.math.maxInt(u32)),
     keys_top: ?usize = null, // a keys pass's highest layer whose MLP inputs are read (null: every layer)
     pocket_back: bool = true, // the backward runs through the pocket's inputs (false: its activations held as they are)
+    raw_scores: bool = false,
     hook_at: usize = 0, // this owned forward's row in the packed pass
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, e: *engine.Engine) !*Trainer {
@@ -385,6 +386,14 @@ pub const Trainer = struct {
         return out[0];
     }
 
+    /// A qualification pass's logits before softmax overwrites them with its gradient.
+    pub fn scores(t: *Trainer, sq: Seq) !void {
+        t.raw_scores = true;
+        defer t.raw_scores = false;
+        var out: [1]Result = undefined;
+        try t.pass(&.{sq}, .loss, .{ .decide = 0, .bits = .empty, .whole = true }, &out);
+    }
+
     // ---- the pass ---------------------------------------------------------------------------------------------------
 
     /// `seqs` side by side in one pass: keys (MLP inputs), loss (each answer's loss, recall) or target (and push).
@@ -461,6 +470,10 @@ pub const Trainer = struct {
         if (mode == .keys) {
             try e.stream.synchronize();
             for (out[0..seqs.len]) |*r| r.* = .{ .loss = 0, .recalled = false };
+            return;
+        }
+        if (t.raw_scores) {
+            try e.stream.synchronize();
             return;
         }
         const o = t.ops();

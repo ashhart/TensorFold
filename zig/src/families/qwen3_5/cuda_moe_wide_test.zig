@@ -35,7 +35,8 @@ test "MoE learning: shared shards reopen exact base bytes and zero or judged poc
         }
     }
     const sentinel: [8]u8 = @splat(13);
-    try ts.append(scratch, .{ .name = "language_model.mtp.shared", .dtype = .bf16, .shape = &.{4}, .bytes = &sentinel });
+    const untouched = [_][]const u8{ "language_model.mtp.shared", "language_model.model.layers.0.mlp.switch_mlp.gate_proj.weight", "language_model.model.layers.0.mlp.shared_expert_gate.weight" };
+    for (untouched) |name| try ts.append(scratch, .{ .name = name, .dtype = .bf16, .shape = &.{4}, .bytes = &sentinel });
     try core.shard_edit.create(a, try std.fs.path.join(scratch, &.{ dir, "model.safetensors" }), &.{}, ts.items);
     var index: std.ArrayList(u8) = .empty;
     try index.appendSlice(scratch, "{\"weight_map\":{");
@@ -76,6 +77,6 @@ test "MoE learning: shared shards reopen exact base bytes and zero or judged poc
             try wide.read(&ck, stem, name, if (pi < 2) width else d, if (pi < 2) d else width, restored);
             try std.testing.expectEqualSlices(f32, ([_][]f32{ gate, up, down })[pi], restored);
         }
-        try std.testing.expectEqualSlices(u8, &sentinel, (try ck.get("language_model.mtp.shared")).bytes);
+        for (untouched) |name| try std.testing.expectEqualSlices(u8, &sentinel, (try ck.get(name)).bytes);
     }
 }

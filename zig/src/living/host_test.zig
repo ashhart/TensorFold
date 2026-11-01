@@ -325,3 +325,7 @@ test "Save recovery: partial throwing save preserves the accepted lesson and ret
 test "Trainer admission: an ungated dense SwiGLU lesson uses the identical judged save gate" {
     try run(@import("families.zig").qwen3_5);
 }
+
+test "MoE learning: shared group-64 lesson fits, rolls back and survives another lesson" {
+    try run(families.qwen3_5_moe);
+}
