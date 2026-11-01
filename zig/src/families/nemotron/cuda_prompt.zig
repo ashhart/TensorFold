@@ -39,7 +39,7 @@ pub fn prefillFrom(e: *Engine, prompt: []const u32, from: usize, dump: ?*Dump, h
         if (head) |h| try h.reset();
     } else if (e.pos != from) return error.BadReuse;
     const waited = e.heat_gate.waited_s;
-    if (from == 0 and keep == null and e.vision == null and e.segments > 1 and dump == null and e.prompt_rows == null and e.taps == null and prompt.len > state.prefill_rows and e.decide == lesson_route.none and !Cancel.background(cancel)) {
+    if (from == 0 and keep == null and e.vision == null and e.audio == null and e.segments > 1 and dump == null and e.prompt_rows == null and e.taps == null and prompt.len > state.prefill_rows and e.decide == lesson_route.none and !Cancel.background(cancel)) {
         try segs.prefill(e, try e.segmentSet(), prompt, head, e.segments, cancel);
     } else try e.serialChunks(prompt, from, dump, head, cancel, keep);
     if (e.heat_gate.waited_s > waited) heat.note(e.heat_gate.waited_s - waited);
@@ -96,6 +96,10 @@ pub fn serialChunks(e: *Engine, prompt: []const u32, from: usize, dump: ?*Dump, 
         try e.copied.synchronize();
         const host = e.promptHost(chunk.len);
         @memcpy(host, chunk);
+        // a speech prompt's <|audio|> placeholders lie past the token table: their rows are the clip's (cuda_audio.zig)
+        if (e.audio != null) for (host) |*t| if (t.* >= e.c.vocab) {
+            t.* = 0;
+        };
         try e.ops().upload(e.b.p_ids, std.mem.sliceAsBytes(host));
         try e.copied.record(e.stream);
         try f.chunk(@intCast(chunk.len), e.pos);
@@ -103,7 +107,7 @@ pub fn serialChunks(e: *Engine, prompt: []const u32, from: usize, dump: ?*Dump, 
         e.pos += @intCast(chunk.len);
         const known = @min(chunk.len, prompt.len - 1 - s);
         if (e.prompt_rows) |p| try prompt_rows.run(e, p, prompt[s + 1 ..][0..known]);
-        if (head) |h| if (known > 0) try h.absorb(e.b.p_hidden, prompt[s + 1 ..][0..known]);
+        if (head) |h| if (known > 0) try h.absorb(e.b.p_hidden, prompt[s + 1 ..][0..known], s + 1);
         if (e.taps) |t| try t.call(t.ctx, e.b.p_hidden, s, chunk.len);
         try reuse.finish(.{ .e = e, .head = head });
         s = end;
