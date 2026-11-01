@@ -120,6 +120,11 @@ test "shard bytes: a flipped byte fails the hash, a short or missing file fails 
     p.deinit();
 }
 
+test "a shard's header length is read as core reads it: one byte past the file or the u64 maximum is refused" {
+    try expectRefused(.header_past_file, error.BadShard, .{});
+    try expectRefused(.header_max, error.BadShard, .{ .hash_shards = false });
+}
+
 test "the shard headers must hold exactly the manifest's tensors" {
     try expectRefused(.tensor_extra, error.TensorExtra, .{});
     try expectRefused(.tensor_missing, error.TensorMissing, .{});
