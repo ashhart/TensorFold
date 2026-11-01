@@ -19,6 +19,8 @@ pub const Mutation = enum {
     matvec_drops_tail,
     gemm_untransposed,
     prompt_sees_next_key,
+    q4_matvec_first_zero,
+    q4_dequant_reversed_nibbles,
 
     pub fn name(m: Mutation) []const u8 {
         return switch (m) {
@@ -35,6 +37,8 @@ pub const Mutation = enum {
             .matvec_drops_tail => "control: metal llama matvec, the columns past the last whole 256 are dropped",
             .gemm_untransposed => "control: metal llama gemm_00, the weights are read untransposed, as [k, n]",
             .prompt_sees_next_key => "control: metal llama prompt attention, each row also sees the next key",
+            .q4_matvec_first_zero => "control: metal llama q4 matvec, every group takes its row's first zero point",
+            .q4_dequant_reversed_nibbles => "control: metal llama q4 dequant, a word's eight nibbles are read in reverse",
         };
     }
 
@@ -53,9 +57,9 @@ pub const Mutation = enum {
         return switch (m) {
             .none => unreachable,
             .embed_own_row => .{ .from = "E[(size_t)ids[p.y] * a.width + p.x]", .to = "E[(size_t)p.y * a.width + p.x]" },
-            .norm_mean_over_threads => .{ .from = "total / float(a.width)", .to = "total / float(n)" },
+            .norm_mean_over_threads => .{ .from = "total / float(a.width) + a.eps);\n  for (uint i = t;", .to = "total / float(n) + a.eps);\n  for (uint i = t;" },
             .add_wrong_sign => .{ .from = "R[i] = bfloat(float(R[i]) + float(X[i]));", .to = "R[i] = bfloat(float(R[i]) - float(X[i]));" },
-            .add_norm_no_residual => .{ .from = "    x[i] = v;\n", .to = "" },
+            .add_norm_no_residual => .{ .from = "        x[t + p * n] = v[p];\n", .to = "" },
             .silu_swapped => .{ .from = "const float g = float(GU[at]), u = float(GU[at + a.width]);", .to = "const float u = float(GU[at]), g = float(GU[at + a.width]);" },
             .prep_first_position => .{ .from = "const float angle = position * inv[i];", .to = "const float angle = float(a.pos) * inv[i];" },
             .argmax_nan_loses => .{ .from = "if (isnan(a)) return !isnan(b) || ia < ib;", .to = "if (isnan(a)) return false;" },
@@ -64,6 +68,8 @@ pub const Mutation = enum {
             .matvec_drops_tail => .{ .from = "for (uint i = 8 * lane; i < a.k; i += 256) {", .to = "for (uint i = 8 * lane; i + 256 - 8 * lane <= a.k; i += 256) {" },
             .gemm_untransposed => .{ .from = "gemm_nax<bfloat16_t, false, true, AM, AN", .to = "gemm_nax<bfloat16_t, false, false, AM, AN" },
             .prompt_sees_next_key => .{ .from = "col > row ? kMasked", .to = "col > row + 1 ? kMasked" },
+            .q4_matvec_first_zero => .{ .from = "z = ll_q4_zero(Z, j, g, groups);", .to = "z = ll_q4_zero(Z, j, 0, groups);" },
+            .q4_dequant_reversed_nibbles => .{ .from = "out[e] = bfloat(ll_q4(word, e, z, s));", .to = "out[e] = bfloat(ll_q4(word, 7 - e, z, s));" },
         };
     }
 };
