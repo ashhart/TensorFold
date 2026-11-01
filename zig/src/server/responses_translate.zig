@@ -59,6 +59,19 @@ fn content(cx: *Cx, c: ?Value) errors.Refused!Value {
             try p.put(a, "type", .{ .string = "image_url" });
             try p.put(a, "image_url", .{ .object = url });
             try parts.append(a, .{ .object = p });
+        } else if (kind != null and kind.? == .string and (std.mem.eql(u8, k, "input_file") or std.mem.eql(u8, k, "file"))) {
+            const inner = if (part.get("file")) |f| (if (f == .object) f.object else return cx.refuse("file must be an object")) else blk: {
+                const f = try json.newObject(a);
+                if (part.get("filename")) |v| try f.put(a, "filename", v);
+                if (part.get("file_data")) |v| try f.put(a, "file_data", v);
+                if (part.get("file_url")) |v| try f.put(a, "url", v);
+                if (part.get("file_id")) |v| try f.put(a, "file_id", v);
+                break :blk f;
+            };
+            const p = try json.newObject(a);
+            try p.put(a, "type", .{ .string = "file" });
+            try p.put(a, "file", .{ .object = inner });
+            try parts.append(a, .{ .object = p });
         } else return cx.fail(.request, "content parts of type {s} are not supported: send input_text or input_image", .{try pyrepr.repr(a, kind)});
     }
     return .{ .array = parts.items };
@@ -77,7 +90,7 @@ fn output(cx: *Cx, o: ?Value) errors.Refused!Value {
             const k = kindOf(p);
             const name = if (k != null and k.? == .string) k.?.string else "";
             if (!std.mem.eql(u8, name, "input_text")) texts_only = false;
-            if (!std.mem.eql(u8, name, "input_text") and !std.mem.eql(u8, name, "input_image")) parts_only = false;
+            if (!std.mem.eql(u8, name, "input_text") and !std.mem.eql(u8, name, "input_image") and !std.mem.eql(u8, name, "input_file")) parts_only = false;
         }
         if (texts_only) {
             var joined: std.ArrayList(u8) = .empty;

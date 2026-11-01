@@ -51,6 +51,26 @@ fn image(cx: *Cx, block: Value) errors.Refused!Value {
     return .{ .object = o };
 }
 
+fn document(cx: *Cx, block: Value) errors.Refused!Value {
+    const a = cx.a;
+    const source = block.get("source") orelse Value.null;
+    if (source != .object) return cx.refuse("document.source must be an object");
+    var file_data: []const u8 = undefined;
+    if (source.typeIs("base64")) {
+        const media = try string(cx, source.get("media_type"), "document.source.media_type", false);
+        if (!std.mem.eql(u8, media, "application/pdf")) return cx.refuse("unsupported document media_type; only application/pdf is supported");
+        file_data = try std.fmt.allocPrint(a, "data:{s};base64,{s}", .{ media, try string(cx, source.get("data"), "document.source.data", false) });
+    } else if (source.typeIs("url")) {
+        file_data = try string(cx, source.get("url"), "document.source.url", false);
+    } else return cx.refuse("document.source.type must be base64 or url; file IDs are unsupported");
+    const inner = try json.newObject(a);
+    try inner.put(a, "file_data", .{ .string = file_data });
+    const o = try json.newObject(a);
+    try o.put(a, "type", .{ .string = "file" });
+    try o.put(a, "file", .{ .object = inner });
+    return .{ .object = o };
+}
+
 fn roleIs(v: Value, names: []const []const u8) bool {
     const r = v.get("role") orelse return false;
     if (r != .string) return false;
@@ -106,6 +126,8 @@ fn messages(cx: *Cx, value: ?Value, system: ?Value) errors.Refused!Value {
                 try content.append(a, try textPart(a, try string(cx, block.get("text"), "text", true)));
             } else if (std.mem.eql(u8, k, "image") and user) {
                 try content.append(a, try image(cx, block));
+            } else if (std.mem.eql(u8, k, "document") and user) {
+                try content.append(a, try document(cx, block));
             } else if (std.mem.eql(u8, k, "thinking") and assistant) {
                 try thoughts.appendSlice(a, try string(cx, block.get("thinking"), "thinking", true));
                 any_thought = true;
@@ -135,6 +157,9 @@ fn messages(cx: *Cx, value: ?Value, system: ?Value) errors.Refused!Value {
                         try result_parts.append(a, try textPart(a, t));
                     } else if (part.typeIs("image")) {
                         try result_parts.append(a, try image(cx, part));
+                        has_image = true;
+                    } else if (part.typeIs("document")) {
+                        try result_parts.append(a, try document(cx, part));
                         has_image = true;
                     } else return cx.fail(.request, "unsupported tool_result content type {s}", .{try pyrepr.repr(a, part.get("type"))});
                 }
