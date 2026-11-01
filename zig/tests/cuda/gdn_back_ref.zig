@@ -43,6 +43,8 @@ pub const Inputs = struct {
     init: ?[]const f64,
     eps: f64,
     qwen27: bool = false,
+    /// Already checked rounded Q/K, for derivatives at the device's actual forward point.
+    prepared: ?struct { q: []const f64, k: []const f64 } = null,
 };
 
 pub const Fwd = struct {
@@ -223,7 +225,10 @@ pub fn forwardFrom(a: std.mem.Allocator, d: Dims, in: Inputs, act: []f64, betas:
         .y = try a.alloc(f64, d.rows * d.nv * d.dv),
         .out = try a.alloc(f64, d.rows * d.nv * d.dv),
     };
-    qk(d, f.act, f.q, f.k, in.qwen27, round);
+    if (in.prepared) |point| {
+        @memcpy(f.q, point.q);
+        @memcpy(f.k, point.k);
+    } else qk(d, f.act, f.q, f.k, in.qwen27, round);
     for (0..d.rows) |r| for (0..d.nv) |h| {
         f.g[r * d.nv + h] = gate(d, in, r, h, round);
     };
@@ -287,7 +292,10 @@ pub fn backward(a: std.mem.Allocator, d: Dims, in: Inputs, act: []const f64, bet
     defer a.free(q);
     const k = try a.alloc(f64, d.rows * d.nk * dkn);
     defer a.free(k);
-    qk(d, act, q, k, in.qwen27, round);
+    if (in.prepared) |point| {
+        @memcpy(q, point.q);
+        @memcpy(k, point.k);
+    } else qk(d, act, q, k, in.qwen27, round);
     // the gated RMS norm
     for (0..d.rows) |r| for (0..d.nv) |h| {
         const yr = y[(r * d.nv + h) * d.dv ..][0..d.dv];

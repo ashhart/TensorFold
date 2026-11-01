@@ -3,6 +3,7 @@ const std = @import("std");
 const steps = @import("src/cli/qwen35_gradient.zig");
 test {
     _ = @import("tests/cuda/q27_boundary_ref.zig");
+    _ = @import("tests/cuda/gdn_back_point.zig");
 }
 fn cubicSlope(step: f64) f64 {
     var num: f64 = 0;

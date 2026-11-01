@@ -28,20 +28,20 @@ const Rig = struct {
     bufs: std.ArrayList(cuda.DeviceBuffer) = .empty,
     bad: usize = 0,
 
-    fn dev(r: *Rig, bytes: []const u8) !u64 {
+    pub fn dev(r: *Rig, bytes: []const u8) !u64 {
         const b = try cuda.DeviceBuffer.fromHost(r.gpu.d, bytes);
         try r.bufs.append(r.gpu.gpa, b);
         return b.ptr;
     }
 
-    fn alloc(r: *Rig, bytes: usize) !u64 {
+    pub fn alloc(r: *Rig, bytes: usize) !u64 {
         const b = try cuda.DeviceBuffer.alloc(r.gpu.d, @max(bytes, 16));
         try r.bufs.append(r.gpu.gpa, b);
         try b.fill8(0xff, r.s.handle); // NaN everywhere: an element no kernel writes cannot pass
         return b.ptr;
     }
 
-    fn back(r: *Rig, comptime T: type, ptr: u64, n: usize) ![]T {
+    pub fn back(r: *Rig, comptime T: type, ptr: u64, n: usize) ![]T {
         const out = try r.a.alloc(T, n);
         try r.s.synchronize();
         const b: cuda.DeviceBuffer = .{ .d = r.gpu.d, .ptr = ptr, .len = n * @sizeOf(T) };
@@ -336,7 +336,7 @@ fn runCase(r: *Rig, case: Case, kern: *const gt.Kernels) !void {
     const g_dx = try r.back(f32, dx_d, rows * HIDDEN);
 
     // the reference
-    const in: ref.Inputs = .{
+    var in: ref.Inputs = .{
         .p = try widen(r.a, u16, p16),
         .hist = if (hist16) |h| try widen(r.a, u16, h) else null,
         .conv_w = try widen(r.a, u16, cw16),
@@ -357,10 +357,29 @@ fn runCase(r: *Rig, case: Case, kern: *const gt.Kernels) !void {
     // the rest of the forward from the GPU's conv outputs and betas
     const act64 = try widen(r.a, u16, g_act);
     const beta64 = try widen(r.a, f32, g_beta);
+    if (MODE == .qwen27) {
+        try @import("gdn_back_serving.zig").compare(r, s, p16, hist16, layer.conv_w, layer.a_log, dt_bias, g_q, g_k);
+        var outside: usize = 0;
+        for (0..rows) |row| for (0..NK) |hk| for (0..2) |which| {
+            var bounds: [DK]@import("core").l2_ref.Iv = undefined;
+            const xs = act64[row * C + (which * NK + hk) * DK ..][0..DK];
+            @import("gdn_back_point.zig").ranges(xs, which == 0, &bounds);
+            const got = (if (which == 0) g_q else g_k)[(row * NK + hk) * DK ..][0..DK];
+            for (got, bounds) |v, b| if (!@import("gdn_back_point.zig").contains(v, b)) {
+                outside += 1;
+            };
+        };
+        if (outside != 0) r.bad += 1;
+        std.debug.print("RESULT gdn-back served Q/K: {d} outside FP64 rounding ranges\n", .{outside});
+        // The derivative is evaluated at the independently checked GPU point, including either BF16 midpoint choice.
+        in.prepared = .{ .q = try widen(r.a, f32, g_q), .k = try widen(r.a, f32, g_k) };
+    }
     const fg = try ref.forwardFrom(r.a, d, in, act64, beta64, true);
     ulps("y", g_y, fg.y);
-    r.compare("forward q", rows, NK * DK, view(f32, g_q, NK * DK, 0), view(f64, fg.q, NK * DK, 0), tol_f32);
-    r.compare("forward k", rows, NK * DK, view(f32, g_k, NK * DK, 0), view(f64, fg.k, NK * DK, 0), tol_f32);
+    if (MODE != .qwen27) {
+        r.compare("forward q", rows, NK * DK, view(f32, g_q, NK * DK, 0), view(f64, fg.q, NK * DK, 0), tol_f32);
+        r.compare("forward k", rows, NK * DK, view(f32, g_k, NK * DK, 0), view(f64, fg.k, NK * DK, 0), tol_f32);
+    }
     r.compare("forward g", rows, NV, view(f32, g_g, NV, 0), view(f64, fg.g, NV, 0), tol_f32);
     r.compare("forward y", rows, NV * DV, view(u16, g_y, NV * DV, 0), view(f64, fg.y, NV * DV, 0), 2e-2);
 
