@@ -16,6 +16,8 @@ const Matcher = struct {
     fail: bool = false,
     fills: usize = 0,
     budgets: usize = 0,
+    fault_owner: ?std.Thread.Id = null,
+    worker_faults: usize = 0,
     busy: std.atomic.Value(bool) = .init(false),
     fn cast(p: *anyopaque) *Matcher {
         return @ptrCast(@alignCast(p));
@@ -47,6 +49,10 @@ const Matcher = struct {
         @memset(words, 0);
         const next = m.token(m.at);
         words[next / 32] |= @as(u32, 1) << @intCast(next % 32);
+        if (m.fault_owner) |owner| if (std.Thread.getCurrentId() != owner) {
+            words[0] ^= 1;
+            m.worker_faults += 1;
+        };
     }
     fn drafts(p: *anyopaque, out: []u32) anyerror!usize {
         const m = cast(p);
@@ -67,11 +73,11 @@ const Fixture = struct {
     target: fake.Fake = .{ .gpa = t.allocator },
     clock: @import("backend.zig").WallClock = .{ .io = t.io },
     engine: Engine = undefined,
-    streams: [16]sm.Stream = undefined,
-    matchers: [16]Matcher = undefined,
-    constraints: [16]grammar.Constraint = undefined,
-    plans: [16]win.Plan = undefined,
-    tokens: [16][4]u32 = undefined,
+    streams: [32]sm.Stream = undefined,
+    matchers: [32]Matcher = undefined,
+    constraints: [32]grammar.Constraint = undefined,
+    plans: [32]win.Plan = undefined,
+    tokens: [32][4]u32 = undefined,
     n: usize = 0,
 
     fn init(f: *Fixture, n: usize, mode: Mode) !void {
@@ -125,8 +131,8 @@ fn compare(a: *const Fixture, b: *const Fixture) !void {
     }
 }
 
-test "grammar parallel: 1/4/8/16 streams keep every serial mask byte and pruned plan" {
-    for ([_]usize{ 1, 4, 8, 16 }) |n| for (std.meta.tags(Mode)) |mode| {
+test "grammar parallel: 1/4/8/16/32 streams keep every serial mask byte and pruned plan" {
+    for ([_]usize{ 1, 4, 8, 16, 32 }) |n| for (std.meta.tags(Mode)) |mode| {
         var serial: Fixture = .{};
         try serial.init(n, mode);
         defer serial.deinit();
@@ -275,4 +281,118 @@ test "grammar parallel: held device drafts are read on the owner before any matc
     try compare(&serial, &threaded);
     try t.expectEqual(@as(usize, 8), serial_probe.calls);
     try t.expectEqual(@as(usize, 8), threaded_probe.calls);
+}
+
+test "grammar parallel: byte oracle catches a fault produced inside worker fill callbacks" {
+    if ((std.Thread.getCpuCount() catch 1) < 2) return error.SkipZigTest;
+    var serial: Fixture = .{};
+    try serial.init(32, .plain);
+    defer serial.deinit();
+    var faulty: Fixture = .{};
+    try faulty.init(32, .plain);
+    defer faulty.deinit();
+    for ([_]*Fixture{ &serial, &faulty }) |f| for (f.matchers[0..f.n]) |*m| {
+        m.fault_owner = std.Thread.getCurrentId();
+    };
+    try serial.run(false);
+    try faulty.run(true);
+    var planted: usize = 0;
+    for (faulty.matchers[0..faulty.n]) |m| planted += m.worker_faults;
+    try t.expect(planted > 0);
+    try t.expect(!masksEqual(&serial, &faulty));
+    for (serial.matchers[0..serial.n]) |m| try t.expectEqual(@as(usize, 0), m.worker_faults);
+    var clean: Fixture = .{};
+    try clean.init(32, .plain);
+    defer clean.deinit();
+    try clean.run(true);
+    try compare(&serial, &clean);
+}
+
+const Mixed = struct {
+    cfg: @import("config.zig").Config = undefined,
+    target: fake.Fake = .{ .gpa = t.allocator },
+    clock: @import("backend.zig").WallClock = .{ .io = t.io },
+    vtable: @import("backend.zig").Clock.VTable = undefined,
+    backend_vtable: @import("backend.zig").Backend.VTable = undefined,
+    engine: Engine = undefined,
+    streams: [8]sm.Stream = undefined,
+    classes: [8]et.Classes = undefined,
+    constraints: [8]grammar.Constraint = undefined,
+    masks: [8][4]u32 = undefined,
+    mask_lengths: [8]usize = @splat(0),
+    n: usize = 0,
+
+    fn init(f: *Mixed, threaded: bool) !void {
+        f.cfg = try et.model();
+        f.vtable = f.clock.clock().vtable.*;
+        f.vtable.parallel_host_ns = threaded;
+        var clock = f.clock.clock();
+        clock.vtable = &f.vtable;
+        var backend = f.target.backend();
+        f.backend_vtable = backend.vtable.*;
+        f.backend_vtable.verify = verify;
+        backend.vtable = &f.backend_vtable;
+        f.engine = Engine.init(t.allocator, &f.cfg, backend, clock);
+        for (0..8) |i| {
+            f.classes[i] = .{ .length = if (i == 0) 2 else 7, .spell = true };
+            var rules = f.classes[i].rules();
+            rules.parallel_walk = true;
+            f.constraints[i] = .init(rules, (fake.vocab + 31) / 32, null);
+            f.streams[i] = try sm.Stream.init(t.allocator, .{ .id = "mixed", .prompt = &et.p1, .max_new = 12, .eos = &.{96}, .drafts = false, .grammar = if (i < 6) &f.constraints[i] else null });
+            f.n += 1;
+            try f.engine.addStream(&f.streams[i]);
+        }
+    }
+    fn deinit(f: *Mixed) void {
+        f.engine.deinit();
+        for (f.streams[0..f.n]) |*s| s.deinit(t.allocator);
+        f.target.deinit();
+        f.cfg.deinit(t.allocator);
+    }
+    fn verify(ptr: *anyopaque, windows: []const @import("backend.zig").Window, out: []@import("backend.zig").Verified) anyerror!void {
+        const target: *fake.Fake = @ptrCast(@alignCast(ptr));
+        const f: *Mixed = @alignCast(@fieldParentPtr("target", target));
+        for (windows) |w| for (&f.streams, 0..) |*s, i| {
+            if (w.stream != s) continue;
+            if (w.masks.len > f.masks[i].len) return error.UnexpectedMixedMaskRows;
+            @memcpy(f.masks[i][0..w.masks.len], w.masks);
+            f.mask_lengths[i] = w.masks.len;
+        };
+        try target.backend().verify(windows, out);
+    }
+};
+
+test "grammar parallel: mixed constrained and free streams keep serial bytes when one finishes mid-batch" {
+    var serial: Mixed = .{};
+    try serial.init(false);
+    defer serial.deinit();
+    var threaded: Mixed = .{};
+    try threaded.init(true);
+    defer threaded.deinit();
+    var continued = false;
+    var steps: usize = 0;
+    while (serial.engine.activeCount() > 0) : (steps += 1) {
+        try t.expect(steps < 20);
+        serial.mask_lengths = @splat(0);
+        threaded.mask_lengths = @splat(0);
+        try serial.engine.step();
+        try threaded.engine.step();
+        for (&serial.streams, &threaded.streams, 0..) |*a, *b, i| {
+            try t.expectEqualSlices(u32, a.emitted(), b.emitted());
+            try t.expectEqual(a.finished, b.finished);
+            try t.expectEqual(a.reason, b.reason);
+            try t.expectEqual(serial.mask_lengths[i], threaded.mask_lengths[i]);
+            try t.expectEqualSlices(u32, serial.masks[i][0..serial.mask_lengths[i]], threaded.masks[i][0..threaded.mask_lengths[i]]);
+            if (i >= 6) try t.expectEqual(@as(usize, 0), threaded.mask_lengths[i]);
+        }
+        if (serial.streams[0].finished and !serial.streams[1].finished) {
+            continued = true;
+            try t.expect(threaded.mask_lengths[1] > 0);
+        }
+    }
+    try t.expect(continued);
+    try t.expect(threaded.engine.grammar_workers.pool != null);
+    try t.expect(serial.engine.grammar_workers.pool == null);
+    try t.expectEqual(@as(usize, 0), threaded.engine.activeCount());
+    for (0..6) |i| try t.expectEqual(serial.classes[i].at, threaded.classes[i].at);
 }
