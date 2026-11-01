@@ -33,7 +33,7 @@ const bf16_served = [_]c.Shape{
     .{ .rows = 1, .n = 2560, .k = 640 },   .{ .rows = 64, .n = 2560, .k = 640 },
 };
 
-/// The qmmf lane's BF16-weight product (16-, 32- and 64-row tiles, K slices as the lane plans them) as Flash Next calls it.
+/// Flash Next's qmmf BF16-weight product: 16-, 32- and 64-row tiles, with the lane's K-slice plan.
 pub const Bf16 = struct {
     rig: Rig,
     lane: *const q.Lane,
@@ -128,7 +128,7 @@ const target = 2;
 const decode_served = [_]c.Shape{ .{ .rows = 10, .n = 2560, .k = 640 }, .{ .rows = 40, .n = 2560, .k = 640 }, .{ .rows = 160, .n = 2560, .k = 640 } };
 const prompt_served = [_]c.Shape{ .{ .rows = 160, .n = 2560, .k = 640 }, .{ .rows = 1280, .n = 2560, .k = 640 } };
 
-/// fp8_experts.cu's down_f32 (decode or prompt kernel) on a grouped plan of one expert's pairs, as the MTP head calls it.
+/// The MTP head's fp8_experts down_f32: decode or prompt over one expert's grouped pairs.
 pub const Fp8Down = struct {
     rig: Rig,
     set: *const Set,
