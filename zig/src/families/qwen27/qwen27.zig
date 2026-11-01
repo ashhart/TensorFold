@@ -10,6 +10,7 @@ pub const attention_plan = @import("attention_plan.zig");
 /// The tail attention's rewrite and check before M5, as the runner builds it (tf-qwen27-attention-precision reads it).
 pub const simd_attention = @import("simd_attention.zig");
 pub const decode_round = @import("decode_round.zig");
+pub const block_forward = @import("block_forward.zig");
 pub const forward = @import("forward.zig");
 pub const gdn = @import("gdn.zig");
 pub const gdn_contract = @import("gdn_contract.zig");
@@ -27,6 +28,7 @@ pub const model = @import("model.zig");
 pub const projection = @import("projection.zig");
 pub const prompt_memory = @import("prompt_memory.zig");
 pub const prompt_rows = @import("prompt_rows.zig");
+pub const readout = @import("readout.zig");
 pub const prompt_glue = @import("prompt_glue.zig");
 pub const prompt_gpu = @import("prompt_gpu.zig");
 pub const prompt_state = @import("prompt_state.zig");
@@ -64,6 +66,8 @@ test {
     _ = prompt_glue;
     _ = prompt_state;
     _ = prompt_marks;
+    _ = readout;
+    _ = block_forward;
     _ = config;
     _ = affine;
     _ = widths;

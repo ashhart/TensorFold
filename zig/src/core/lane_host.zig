@@ -74,6 +74,7 @@ pub const LaneHost = struct {
     warm_quiet: u64 = 0, // ns a warm pass waits for other work before its first chunk (0: none), set by its family
     disk: rows_host.Disk = .{}, // the Mac app's questions about kept states, and the disk writer's quiet
     scores: scoring.Queue = .{}, // decisions' label scores waiting for the engine thread (lane_host_score.zig)
+    decider: ?scoring.Decider = null, // opt-in: a family's whole decisions (Engine.decide), set before start
     /// Runs first on the engine thread: a backend whose API state is per thread (a CUDA context) binds it there.
     on_thread: ?ThreadInit = null,
     /// opt-in: a family round planner (prompt pieces, decode rows in one pass); null: whole or `prefill_step` prompts
@@ -131,6 +132,7 @@ pub const LaneHost = struct {
 
     pub fn engine(h: *LaneHost) Engine {
         // decisions' label scores only when the backend gives them, so the route refuses as before otherwise
+        if (h.decider != null) return .{ .ctx = h, .vtable = &decided_vtable };
         return .{ .ctx = h, .vtable = if (h.core.backend.vtable.score != null) &scored_vtable else &plain_vtable };
     }
 
@@ -151,6 +153,12 @@ pub const LaneHost = struct {
     const scored_vtable: Engine.VTable = blk: {
         var v = plain_vtable;
         v.score = scoring.score;
+        break :blk v;
+    };
+
+    const decided_vtable: Engine.VTable = blk: {
+        var v = plain_vtable;
+        v.decide = scoring.decide;
         break :blk v;
     };
 

@@ -59,6 +59,7 @@ pub const Backend = struct {
     config: cfg.Config,
     primitives: core.draft_ops.Ops,
     attention: core.shared_attention.Attention,
+    attention_full: ?core.shared_attention.Attention = null, // a v1 full layer's, over the whole span
     topk: core.bf16_topk_gpu.Ops,
     head: @import("runtime_head.zig").Head,
     frame: Frame,
@@ -79,12 +80,14 @@ pub const Backend = struct {
         errdefer primitives.deinit();
         const attention = try core.shared_attention.Attention.init(a, target.device, .{ .query_heads = c.heads, .kv_heads = c.kv_heads, .head_dim = c.head_dim, .rotary_dim = c.head_dim, .capacity = c.window + 16, .output = .bf16 });
         errdefer attention.deinit();
+        const attention_full: ?core.shared_attention.Attention = if (c.span() > c.window) try core.shared_attention.Attention.init(a, target.device, .{ .query_heads = c.heads, .kv_heads = c.kv_heads, .head_dim = c.head_dim, .rotary_dim = c.head_dim, .capacity = c.span() + 16, .output = .bf16 }) else null;
+        errdefer if (attention_full) |x| x.deinit();
         const topk = try core.bf16_topk_gpu.Ops.init(target.device);
         errdefer topk.deinit();
         var head = try @import("runtime_head.zig").Head.init(a, target.device, target.weights.head);
         errdefer head.deinit();
         const caches = try newCaches(a, target.device, c, c.layers);
-        return .{ .allocator = a, .target = target, .checkpoint = checkpoint, .config = c, .primitives = primitives, .attention = attention, .topk = topk, .head = head, .frame = .{ .allocator = a, .device = target.device, .queue = target.queue }, .caches = caches };
+        return .{ .allocator = a, .target = target, .checkpoint = checkpoint, .config = c, .primitives = primitives, .attention = attention, .attention_full = attention_full, .topk = topk, .head = head, .frame = .{ .allocator = a, .device = target.device, .queue = target.queue }, .caches = caches };
     }
     pub fn setResident(b: *Backend, hook: ?mtl.ResidencySet.Follow) void {
         @import("../residency.zig").setDraft(b, hook);
@@ -103,6 +106,7 @@ pub const Backend = struct {
         freeCaches(b.allocator, b.caches);
         b.head.deinit();
         b.topk.deinit();
+        if (b.attention_full) |x| x.deinit();
         b.attention.deinit();
         b.primitives.deinit();
     }
@@ -144,6 +148,26 @@ pub const Backend = struct {
     /// The draft's linears: its rank-2 weights, which q4 drafts read only through their prepared copies.
     pub fn linear(name: []const u8, rank: usize) bool {
         return rank == 2 and std.mem.endsWith(u8, name, ".weight");
+    }
+    /// `rows` rows of x (contiguous, `w`'s width) through linear `w` into y, outside any drafter frame.
+    pub fn encodeLinear(b: *Backend, e: mtl.ComputeEncoder, w: ck.Tensor, mode: op.Mode, x: Ref, y: Ref, rows: u32) !void {
+        const n: u32 = @intCast(w.shape[0]);
+        const k: u32 = @intCast(w.shape[1]);
+        if (mode == .bf16_reference) {
+            try b.primitives.linear(e, x, try b.weight(w), y, .{ .rows = rows, .n = n, .k = k, .x_stride = k, .w_stride = k, .y_stride = n });
+        } else if (b.tiled.get(@intFromPtr(w.bytes.ptr))) |t| {
+            simd.encode(e, try simd.call(&b.simd.?, t.n, t.k, rows, false, false, 0), t.matrix(), x.buf, x.off, y.buf, y.off);
+        } else {
+            const adapter = b.prepared.get(@intFromPtr(w.bytes.ptr)) orelse return error.DraftPreparationUnqualified;
+            var first: u32 = 0;
+            while (first < rows) : (first += 16) {
+                try adapter.encode(e, .{ .buf = x.buf, .off = x.off + @as(usize, first) * k * 2 }, .{ .buf = y.buf, .off = y.off + @as(usize, first) * n * 2 }, @min(rows - first, 16));
+            }
+        }
+    }
+    /// The attention whose capacity is layer `layer`'s window.
+    pub fn attentionFor(b: *const Backend, layer: u32) *const core.shared_attention.Attention {
+        return if (b.config.layerWindow(layer) > b.config.window) &b.attention_full.? else &b.attention;
     }
     pub fn ops(b: *Backend) op.Ops {
         return .{ .ptr = b, .vtable = &callbacks.vtable };

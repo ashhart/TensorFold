@@ -65,6 +65,10 @@ pub const Runner = struct {
     reduce: ?forward.Reduce = null,
     /// The pair's head-seam picks (one u32 a row), required with `reduce`: unexchanged halves make the ranks diverge.
     picks: ?Ref = null,
+    /// Above 0: full-attention rows read every key before it (a block-bidirectional block, block_forward.zig).
+    block_end: u32 = 0,
+    /// block_forward.runMany's streams' ends, in round order; empty: `block_end`.
+    block_ends: []const u32 = &.{},
 
     pub fn init(a: std.mem.Allocator, m: *Model, slots: u32, capacity: u32) !Runner {
         return initReady(a, m, slots, capacity, slots);
@@ -96,13 +100,14 @@ pub const Runner = struct {
         const units = m.device.tensorUnits();
         // before M5 the tail attention reads its tensor-op results in the simdgroup-matrix layout (simd_attention.zig)
         if (!units) try @import("simd_attention.zig").check(m.device, m.queue);
-        const text = try @import("simd_attention.zig").library(a, units, true);
+        // both builds take the kernels' KV group as the defines attention_mpp.metal reads
+        const text = try @import("simd_attention.zig").grouped(a, units, true, geometry.group(), geometry.kv_heads);
         defer a.free(text);
         // before M5 the prompt kernels are optional: a chip that cannot build them keeps the decode path for prompts
         const library = mtl.Library.fromSource(m.device, text, mtl.CompileOptions.mlx()) catch |err| blk: {
             if (units) return err;
             std.log.info("qwen27: the prompt attention kernels do not build here ({t}); prompt rows take the decode path", .{err});
-            const base = try @import("simd_attention.zig").library(a, units, false);
+            const base = try @import("simd_attention.zig").grouped(a, units, false, geometry.group(), geometry.kv_heads);
             defer a.free(base);
             break :blk try mtl.Library.fromSource(m.device, base, mtl.CompileOptions.mlx());
         };
@@ -425,7 +430,7 @@ pub const Runner = struct {
         r.offsets[slot] = 0;
     }
 
-    fn params(r: *Runner, rows: usize) !abi.Params {
+    pub fn params(r: *Runner, rows: usize) !abi.Params {
         return r.gdn.budget.shape.params(rows, r.slots, .{ .conv = .bf16, .a_log = .bf16, .dt = .bf16, .norm = .bf16 });
     }
 
@@ -438,7 +443,7 @@ pub const Runner = struct {
         return r.geometry.promptRows(@min(requested, r.model.frame.capacity));
     }
 
-    fn attentionPlan(r: *Runner, round: *const Round) !attn.Plan {
+    pub fn attentionPlan(r: *Runner, round: *const Round) !attn.Plan {
         var windows: [attn.planning.max_streams]attn.planning.Window = undefined;
         if (round.windows.len > windows.len) return error.AttentionStreams;
         for (round.windows, 0..) |window, i| windows[i] = .{ .parents = window.parents, .start = window.start, .capacity = r.capacity };
@@ -450,13 +455,13 @@ pub const Runner = struct {
         return views[0..round.slots.len];
     }
 
-    fn gdnForward(ptr: *anyopaque, e: mtl.ComputeEncoder, block: usize, weights: wts.Gdn, frame: *Frame, rows: u32) !void {
+    pub fn gdnForward(ptr: *anyopaque, e: mtl.ComputeEncoder, block: usize, weights: wts.Gdn, frame: *Frame, rows: u32) !void {
         const r: *Runner = @ptrCast(@alignCast(ptr));
         var hook = GdnHook{ .pool = &r.gdn, .quant = &r.model.kernels, .glue = r.model.glue, .plan = r.current_gdn orelse return error.RoundNotReady, .linear_index = r.linear_index, .accepted_chain = r.accepted_chain };
         try GdnHook.forward(&hook, e, block, weights, frame, rows);
     }
 
-    fn attentionForward(ptr: *anyopaque, e: mtl.ComputeEncoder, block: usize, weights: wts.Attention, f: *Frame, rows: u32) !void {
+    pub fn attentionForward(ptr: *anyopaque, e: mtl.ComputeEncoder, block: usize, weights: wts.Attention, f: *Frame, rows: u32) !void {
         const r: *Runner = @ptrCast(@alignCast(ptr));
         const plan = (r.current_attention orelse return error.RoundNotReady).*;
         const layer = r.attention_index[block];
@@ -471,7 +476,8 @@ pub const Runner = struct {
         try r.model.glue.unstack(e, f.get(.mixed), f.get(.value), .{ .rows = rows, .width = kv, .stride = 2 * kv, .offset = kv });
         e.barrier();
         try r.attention.preprocess(e, .{ .qg = f.get(.q_gate), .key = f.get(.key), .q_gain = wts.ref(weights.q_norm), .k_gain = wts.ref(weights.k_norm), .norm_q = f.get(.norm_query), .norm_k = f.get(.norm_key), .query = f.get(.query), .rotated_key = f.get(.rotated_key), .positions = f.get(.positions), .rows = rows, .eps = r.model.config.eps, .theta = r.model.config.rope_theta, .h_end = r.current_placed.h_end, .w_end = r.current_placed.w_end, .plane = f.capacity, .geometry = r.geometry });
-        try r.attention.encode(e, &r.scratch, &r.bindings[layer], plan, f.get(.query), f.get(.rotated_key), f.get(.value), f.get(.mixer_out), caches, f.get(.q_gate), r.model.kernels.prompt, r.reduce != null);
+        if (r.block_ends.len > 1) return r.attention.encodeBlocks(e, &r.scratch, &r.bindings[layer], plan, f.get(.query), f.get(.rotated_key), f.get(.value), f.get(.mixer_out), caches, f.get(.q_gate), r.reduce != null, r.block_ends);
+        try r.attention.encodeTo(e, &r.scratch, &r.bindings[layer], plan, f.get(.query), f.get(.rotated_key), f.get(.value), f.get(.mixer_out), caches, f.get(.q_gate), r.model.kernels.prompt, r.reduce != null, r.block_end);
     }
 
     fn tap(ptr: *anyopaque, e: mtl.ComputeEncoder, layer: usize, hidden: @import("projection.zig").Ref, rows: u32) !void {
