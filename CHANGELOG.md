@@ -6,18 +6,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Shared draft rounds price each stream's drafts before drafting, and a stream whose drafts would get no verify rows skips the drafter's proposal work, for Nemotron, Qwen's MTP, GLM, Gemma 4 (assistant and DFlash) and attached LFM2 drafters, on CUDA and Metal; each family keeps its head step's cost in the price. Replies are unchanged. Nemotron 3.5 Lightning with its MTP head: on an M5 Ultra, 16-stream chat +9.0% greedy and +4.7% sampled; on a GB10, 16 streams +2.1% and 8 streams +1.1%.
 
-- GLM shared MTP and DFlash2 rounds preserve committed context while skipping proposals with no verify rows.
-
-- Gemma 4 assistant and DFlash attachments price shared proposals before running them; assistants skip unused row norms.
-
-- Attached LFM2 drafters use the shared zero-row budget while retaining context needed by later proposals.
-
-- Qwen3.6 MTP and external draft adapters reserve shared verify rows before proposing. A zero-row budget keeps committed context current without running the proposal pass (#1621).
-
-- Nemotron on Metal and CUDA reserves shared verify rows before proposing MTP drafts, skipping unused proposals while still absorbing committed rows into the head cache (#1621).
-
-- Nemotron on CUDA, with default MTP sizing, keeps the measured head-step cost and current acceptance rates in shared draft reservations, so skipping unused proposals does not let deeper neural drafts displace the code-copy rows selected by the earlier cost rule. The change is covered by host grant and token tests; device performance qualification remains pending (#1621).
-
 - MOSS-Image's image decoder (the checkpoint's FLUX.2 small VAE, in float32 as the pipeline runs it) runs on Metal inside the `moss_image` family, and `tf-moss-image` writes `picture.png` itself, so torch no longer decodes (#1687, #1504). Thanks to @BobClawblaw.
 
 - On CUDA, a driver older than CUDA 13.0 is refused at startup with a plain message naming the driver to install (R580 or newer), before any kernel loads; an R550 driver had ended the process with SIGILL inside libcuda on the first module load (#1791, #1724). Thanks to @rootsbymenda.
@@ -37,8 +25,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - DeepSeek-V4.x: `tool_choice: "required"` and named tool calls are now constrained to the model's own DSML call markup, so those requests are held to a valid call on DeepSeek too (#1684).
 
 - Qwen3.6-35B-A3B on CUDA: `--drafter` also takes a DFlash2 draft model, chosen by the `dflash_config` in its `config.json`; the checkpoint's own directory still drafts with its MTP layer. With `incoai/Qwen3.6-35B-A3B-DFlash2` over `nvidia/Qwen3.6-35B-A3B-NVFP4`, one GB10 decodes 130 tok/s at one stream on a 4.2K-token prompt (MTP: 99), and every drafted reply equals its plain run (#1674).
-
-
 
 - A fresh-start session disk now clears the `.tfs` and `.tmp` files earlier serving processes left behind, under an exclusive lock on its directory, so restarts no longer fill the disk (#1680). Ported by @jayleaton from @mikolaj92's downstream fix, corroborated by @Jenpo.
 
@@ -81,6 +67,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Qwen3.8-27B on Metal: the DFlash2 drafter reads its sliding-window keys and values in place in its cache while the context has not wrapped, instead of copying them to scratch for every draft layer each round. Drafts are bit-identical (#1727). Thanks to @kieranscotney.
 
 - Flash Next's MTP head norms its 10,240-value rows with tiled launches on CUDA sm_120 and sm_121 and split wave launches on HIP gfx1201, storing the same bytes as before: the norm kernel runs 1.4x to 2.5x faster on a GB10 and 4x to 5x on a Radeon AI PRO R9700 at 1 to 16 rows (#1702, fixes #1689). Thanks to @laudney.
+
 
 ## 1.2.0
 
