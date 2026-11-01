@@ -396,7 +396,7 @@ test "flashnext prefill: a nonzero host hint caps the chunk beside a decoder, 0 
     try std.testing.expect(f.decoding());
     var s = try lanes.Stream.init(a, .{ .id = "long", .prompt = tokens, .max_new = 4 });
     defer s.deinit(a);
-    // hint, then the rows the call must take: 0 is the default decode cut; Fake.promptRows' step (1024) bounds a big hint
+    // hint, then the rows taken: 0 is the default decode cut; Fake.promptRows' step (1024) bounds a big hint
     const Case = struct { hint: u32, rows: u32 };
     const cases = [_]Case{ .{ .hint = 0, .rows = fill.decode_rows }, .{ .hint = 700, .rows = 700 }, .{ .hint = 0, .rows = fill.decode_rows }, .{ .hint = 8192, .rows = 1024 }, .{ .hint = 16, .rows = 16 } };
     const ends = f.ends; // the decoder's own prompt

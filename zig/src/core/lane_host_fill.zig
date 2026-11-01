@@ -168,9 +168,7 @@ pub fn run(h: *LaneHost) void {
     _ = longStep(h, at);
 }
 
-/// TENSORFOLD_PREFILL_POLICY=fcfs: short prompts as the default path runs them (no row budget), then the oldest
-/// admitted long prompt's one chunk of `tokens` rows while a stream decodes (else the engine's cut).
-/// The decoders' round follows the visit as always, so it interleaves between prompt chunks.
+/// TENSORFOLD_PREFILL_POLICY=fcfs: short prompts as by default (no budget), then one chunk of the oldest long prompt.
 fn policyRun(h: *LaneHost) void {
     var burst: usize = 0;
     while (pick(h, .short)) |at| {
@@ -183,7 +181,7 @@ fn policyRun(h: *LaneHost) void {
     }
     if (!due(h)) return; // TENSORFOLD_PREFILL_SHARE's debt, per visit
     const at = oldestLong(h) orelse return;
-    // alone and nothing decoding: the engine's own cut (a solo prompt as without the policy); else the cap stands in for its decode cut
+    // `tokens` rows while a stream decodes; alone, the engine's own cut, as without the policy
     h.share.call_rows = if (runnable(h) > 0) h.share.tokens else 0;
     defer h.share.call_rows = 0;
     _ = longStep(h, at);
