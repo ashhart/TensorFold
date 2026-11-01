@@ -15,6 +15,13 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
     b.step("test-kernel-seed-host", "Named contract fixtures keep their seed when entries are inserted").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module(b, b.graph.host, .debug), .filters = &.{"contract seed:"} })).step);
     const step = b.step("test-kernel-contract", "The kernel contract's host tests: gate logic, controls, every launch against every chip");
     step.dependOn(&run.step);
+    const precision = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/core/attention_precision.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+    }) }));
+    b.step("test-attention-precision-host", "Shared attention precision mode, source and kept-state identity").dependOn(&precision.step);
+    step.dependOn(&precision.step);
     step.dependOn(family);
     const rotary = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/contract/rotary_cache_positions.zig"),

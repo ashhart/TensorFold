@@ -31,6 +31,19 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
             return std.mem.indexOf(u8, s, p) != null;
         }
     }.f;
+    if (std.mem.startsWith(u8, d.name, "attention pv ")) {
+        const full = std.mem.indexOf(u8, d.name, " fp32 ") != null;
+        const probe = @import("metal_attention_pv.zig");
+        if (std.mem.eql(u8, fun, probe.function)) {
+            const body = try probe.text(a, device, full);
+            return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+        }
+        const raw = for (sources.prefill) |f| {
+            if (std.mem.eql(u8, f.name, "attention_nax")) break f.text;
+        } else return error.UnknownLaunch;
+        const body = try tf.frags.sourceMode(device, a, raw, full);
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = try preM5(a, "", raw) };
+    }
     if (std.mem.startsWith(u8, d.name, "qwen4-native ")) {
         const body = try @import("qwen4").family.limits_sources.source(a, d.name);
         return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
