@@ -33,9 +33,9 @@ pub const Pair = struct {
     }
 };
 
-/// Whether an engine makes the pair's twin: TF_GLM_PROMPT_PAIR on, and other ranks whose exchanges a pair hides.
-pub fn wanted(on: bool, world: usize) bool {
-    return on and world > 1;
+/// Whether an engine makes the pair's twin: TF_GLM_PROMPT_PAIR on, no solo passes, and ranks to hide exchanges from.
+pub fn wanted(on: bool, solo: bool, world: usize) bool {
+    return on and !solo and world > 1;
 }
 
 /// Whether a step at `start` of a `len`-id prompt takes the next chunk too: min_rows or more there, and no mark at it.
@@ -148,7 +148,12 @@ test "a pair rebases the index rings where a chunk at a time would, so a ring ba
 }
 
 test "only ranks that exchange make the twin: TP=1 has no exchanges to hide" {
-    try std.testing.expect(!wanted(true, 1));
-    try std.testing.expect(wanted(true, 2));
-    try std.testing.expect(!wanted(false, 3));
+    try std.testing.expect(!wanted(true, false, 1));
+    try std.testing.expect(wanted(true, false, 2));
+    try std.testing.expect(!wanted(false, false, 3));
+}
+
+test "a server with solo passes holds no twin: they take the pair's steps" {
+    try std.testing.expect(!wanted(true, true, 2));
+    try std.testing.expect(!wanted(true, true, 3));
 }

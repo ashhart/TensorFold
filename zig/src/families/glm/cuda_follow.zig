@@ -224,7 +224,7 @@ pub const Leader = struct {
         return x.e.prefill(ids, from, cancel, marks);
     }
 
-    /// One prompt step on every rank (Engine.prefillChunk): a chunk, or two if `alone` and prompt_solo.at or the pair's rule allow.
+    /// One prompt step on every rank (Engine.prefillChunk): a chunk, or two if `alone` and solo or pair rules allow.
     pub fn chunk(x: Leader, ids: []const u32, start: usize, alone: bool, from: ?engine.Resume, cancel: ?engine.Cancel, marks: ?engine.Marks) !Chunk {
         if (start >= ids.len) return error.BadChunk;
         try x.flush();
