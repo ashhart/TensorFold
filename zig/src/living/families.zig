@@ -62,7 +62,17 @@ pub const qwen3_5: Family = .{
     .experts = .every,
 };
 
-pub const all = [_]Family{ nemotron_h, nemotron_h_omni, qwen4_exp, qwen3_5 };
+/// Qwen3.6-35B-A3B: a gated shared SwiGLU expert in affine 4-bit groups of 64.
+pub const qwen3_5_moe: Family = .{
+    .model_type = "qwen3_5_moe",
+    .names = .{ .layers = "language_model.model.layers.", .expert = "mlp.shared_expert.", .inputs = &.{ "gate_proj", "up_proj" } },
+    .neuron = .{ .act = .swiglu, .gated = true, .margin = 0.5, .sharp = 16 },
+    .quant = .{ .bits = 4, .group = 64 },
+    .keys = .{ .scope = "text_config", .width = "shared_expert_intermediate_size" },
+    .experts = .every,
+};
+
+pub const all = [_]Family{ nemotron_h, nemotron_h_omni, qwen4_exp, qwen3_5, qwen3_5_moe };
 
 /// The family of a checkpoint's top-level model_type, or null.
 pub fn byModelType(model_type: []const u8) ?Family {
@@ -119,4 +129,20 @@ test "each family's model type finds it; a pattern family's letters come from it
     try std.testing.expectEqualStrings("ME*", try kinds(a, nemotron_h, n.object));
     const q = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"text_config\": {\"num_hidden_layers\": 3}}", .{});
     try std.testing.expectEqualStrings("EEE", try kinds(a, qwen4_exp, scoped(qwen4_exp, q.object).?));
+}
+
+test "MoE learning: only the shared expert widens, with a gate and whole affine groups" {
+    const f = byModelType("qwen3_5_moe").?;
+    try f.check();
+    try std.testing.expect(f.neuron.gated);
+    try std.testing.expectEqual(@as(usize, 64), f.quant.group);
+    try std.testing.expectEqualStrings("shared_expert_intermediate_size", f.keys.width);
+    try std.testing.expect(f.names.mtp == null);
+    try std.testing.expectEqual(@as(?usize, 3), f.expertLayer("language_model.model.layers.3.mlp.shared_expert.gate_proj.weight"));
+    try std.testing.expect(f.expertLayer("language_model.model.layers.3.mlp.shared_expert_gate.weight") == null);
+    try std.testing.expect(f.expertLayer("language_model.model.layers.3.mlp.switch_mlp.gate_proj.weight") == null);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const obj = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), "{\"num_hidden_layers\":4}", .{});
+    try std.testing.expectEqualStrings("EEEE", try kinds(arena.allocator(), f, obj.object));
 }
