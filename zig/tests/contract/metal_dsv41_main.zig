@@ -7,12 +7,14 @@ const g = contract.gates;
 const dsv41_fp8_rows = @import("metal_dsv41_fp8_rows.zig");
 const dsv41_fp8_mma = @import("metal_dsv41_fp8_mma.zig");
 const dsv41_experts = @import("metal_dsv41_experts.zig");
+const dsv41_xmma = @import("metal_dsv41_xmma.zig");
 
 /// Every dsv41 suite, created and destroyed in the order main held them.
 pub const Suites = struct {
     fp8: *dsv41_fp8_rows.Suite,
     fp8_mma: *dsv41_fp8_mma.Suite,
     experts: *dsv41_experts.Suite,
+    xmma: *dsv41_xmma.Suite,
 
     pub fn create(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !Suites {
         const fp8 = try dsv41_fp8_rows.Suite.create(a, device, queue, kernels, only);
@@ -21,23 +23,28 @@ pub const Suites = struct {
         errdefer fp8_mma.destroy();
         const experts = try dsv41_experts.Suite.create(a, device, queue, kernels, only);
         errdefer experts.destroy();
-        return .{ .fp8 = fp8, .fp8_mma = fp8_mma, .experts = experts };
+        const xmma = try dsv41_xmma.Suite.create(a, device, queue, kernels, only);
+        errdefer xmma.destroy();
+        return .{ .fp8 = fp8, .fp8_mma = fp8_mma, .experts = experts, .xmma = xmma };
     }
 
     pub fn destroy(s: *Suites) void {
+        s.xmma.destroy();
         s.experts.destroy();
         s.fp8_mma.destroy();
         s.fp8.destroy();
     }
 
-    /// The dsv41 gates after runAll: invariance and accuracy probes, and timings when asked for.
+    /// The dsv41 gates after runAll: equality, invariance and accuracy probes, and timings when asked for.
     pub fn gates(s: *Suites, io: std.Io, seed: u64, t: *g.Tally) !void {
+        if (s.experts.probes.items.len > 0) t.failed += try s.experts.pipeline(seed);
+        if (std.c.getenv("TF_DSV41_EXPERTS_TIME") != null) try s.experts.timing(io);
+        if (s.xmma.probes.items.len > 0) t.failed += try s.xmma.equality(seed);
+        if (std.c.getenv("TF_DSV41_XMMA_TIME") != null) try s.xmma.timing(io);
         t.failed += try s.fp8.invariance(seed);
         if (std.c.getenv("TF_DSV41_TIME") != null) try s.fp8.timing(io);
         t.failed += try s.fp8_mma.invariance(seed);
         t.failed += try s.fp8_mma.accuracy(seed);
         if (std.c.getenv("TF_DSV41_TIME") != null) try s.fp8_mma.timing(io);
-        if (s.experts.probes.items.len > 0) t.failed += try s.experts.pipeline(seed);
-        if (std.c.getenv("TF_DSV41_EXPERTS_TIME") != null) try s.experts.timing(io);
     }
 };

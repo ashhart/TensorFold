@@ -8,3 +8,4 @@ pub const fp8_rows = @embedFile("fp8_rows.metal");
 pub const experts_kimi = @embedFile("experts_kimi.metal");
 /// DeepSeek V4.1's routed-expert gate/up (clamped SwiGLU, the reference's activation rounding) over the copy.
 pub const experts = @embedFile("experts.metal");
+pub const xmma = @embedFile("experts_mma.metal");
