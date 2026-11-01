@@ -1,0 +1,421 @@
+// Preserve the omitted contract, precision, and host-interface facts from the original comment.
+#version 460
+
+#extension GL_GOOGLE_include_directive : require
+#include "omarchy_trig.h"
+
+#ifdef USE_FP16
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#define STORAGE_TYPE float16_t
+layout(set = 0, binding = 0, std430) readonly buffer Input {
+  STORAGE_TYPE values[];
+} input_data;
+layout(set = 0, binding = 1, std430) writeonly buffer Output {
+  STORAGE_TYPE values[];
+} output_data;
+float rope_load(uint abs_index) {
+  return float(input_data.values[abs_index]);
+}
+void rope_store(uint abs_index, float value) {
+  output_data.values[abs_index] = float16_t(value);
+}
+float rope_round(float value) {
+  // Match eager storage rounding after each operation; preserve float16 output bits.
+  return float(float16_t(value));
+}
+#elif defined(USE_BF16)
+#extension GL_EXT_shader_16bit_storage : require
+// Preserve the omitted contract, precision, and host-interface facts from the original comment.
+layout(set = 0, binding = 0, std430) readonly buffer Input {
+  uint values[];
+} input_data;
+layout(set = 0, binding = 1, std430) buffer Output {
+  uint values[];
+} output_data;
+float rope_load(uint abs_index) {
+  uint word = input_data.values[abs_index >> 1u];
+  uint bits = ((abs_index & 1u) == 0u) ? (word & 0xFFFFu) : (word >> 16u);
+  return uintBitsToFloat(bits << 16u);
+}
+uint bf16_bits(float value) {
+  uint bits = floatBitsToUint(value);
+  return isnan(value)
+      ? ((bits >> 16u) | 0x40u)
+      : ((bits + 0x7fffu + ((bits >> 16u) & 1u)) >> 16u);
+}
+// ASH_QWEN35 matches Metal's float32 angle/products and performs one final bfloat16 RNE store.
+float rope_round(float value) {
+#ifdef ASH_QWEN35
+  return value;
+#else
+  uint bits = floatBitsToUint(value);
+  uint rounded = isnan(value)
+      ? ((bits >> 16u) | 0x40u)
+      : ((bits + 0x7fffu + ((bits >> 16u) & 1u)) >> 16u);
+  return uintBitsToFloat(rounded << 16u);
+#endif
+}
+#else
+#define STORAGE_TYPE float
+layout(set = 0, binding = 0, std430) readonly buffer Input {
+  STORAGE_TYPE values[];
+} input_data;
+layout(set = 0, binding = 1, std430) writeonly buffer Output {
+  STORAGE_TYPE values[];
+} output_data;
+float rope_load(uint abs_index) {
+  return input_data.values[abs_index];
+}
+void rope_store(uint abs_index, float value) {
+  output_data.values[abs_index] = value;
+}
+float rope_round(float value) {
+  return value;
+}
+#endif
+
+layout(set = 0, binding = 2, std430) readonly buffer Offsets {
+  int values[];
+} offset_data;
+#ifdef USE_FREQS
+layout(set = 0, binding = 3, std430) readonly buffer Freqs {
+  float values[];
+} freqs_data;
+#endif
+
+// ASH_QWEN35 uses Metal's pow(10000000.0f, -i/32) expression with i < 32.
+float rope_inv_freq(uint i) {
+#if defined(ASH_QWEN35)
+  return pow(1.0e7f, -float(i) / 32.0f);
+#elif defined(USE_FREQS)
+  return 1.0f / freqs_data.values[params.aux_offset + i];
+#else
+  return exp(-float(i) * params.beta);
+#endif
+}
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Params {
+  uint count;
+  uint operation;
+  uint lhs_size;
+  uint rhs_size;
+  uint reduce_size;
+  uint output_size;
+  uint lhs_offset;
+  uint rhs_offset;
+  uint output_offset;
+  uint aux_size;
+  uint aux_offset;
+  uint matrix_m;
+  uint matrix_n;
+  uint matrix_k;
+  uint flags;
+  float alpha;
+  float beta;
+  uint dims;
+  uint shape[4];
+  uint in_strides[4];
+  uint out_strides[4];
+} params;
+
+void main() {
+#ifdef USE_BF16
+  // Preserve the omitted contract, precision, and host-interface facts from the original comment.
+  uint index = gl_GlobalInvocationID.x;
+  uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  uint half_dims = params.dims;
+  uint time = params.shape[1];
+  uint heads = params.shape[0];
+  bool forward = (params.flags & 1u) != 0u;
+  bool traditional = (params.flags & 2u) != 0u;
+  bool head_seq_transpose = (params.flags & 4u) != 0u;
+  bool passthrough = (params.flags & 8u) != 0u;
+  while (index < params.count) {
+    uint k;
+    uint t;
+    uint mat;
+    // Half-split rotation assigns D/2 words to each row.
+    if (!passthrough && !traditional) {
+      {
+        uint row_words = half_dims;
+        k = index % row_words;
+        t = (index / row_words) % time;
+        mat = index / (row_words * time);
+        uint b = mat / heads;
+        uint head = mat - b * heads;
+        float offset = float(
+            offset_data.values[params.rhs_offset + b * params.matrix_m]);
+        float position = params.alpha * (float(t) + offset);
+        // Each k maps two adjacent r1 elements or the mirrored r2 pair.
+        bool r1_side = k < (half_dims >> 1u);
+        // On r2, theta and operands use the mirrored i = element - half_dims.
+        uint j0 = r1_side ? (2u * k)
+                          : (half_dims + 2u * (k - (half_dims >> 1u)));
+        uint j1 = j0 + 1u;
+        uint i0 = r1_side ? j0 : (j0 - half_dims);
+        uint i1 = i0 + 1u;
+#ifdef USE_FREQS
+        float inv0 = 1.0f / freqs_data.values[params.aux_offset + i0];
+        float inv1 = 1.0f / freqs_data.values[params.aux_offset + i1];
+#else
+        float inv0 = exp(-float(i0) * params.beta);
+        float inv1 = exp(-float(i1) * params.beta);
+#endif
+        float cos0 = rope_round(omarchy_trig_cos(position * inv0));
+        float sin0 = rope_round(omarchy_trig_sin(position * inv0));
+        float cos1 = rope_round(omarchy_trig_cos(position * inv1));
+        float sin1 = rope_round(omarchy_trig_sin(position * inv1));
+        uint in_base;
+        if (head_seq_transpose) {
+          in_base = b * (time * params.in_strides[1]) +
+              t * params.in_strides[1] + head * params.in_strides[0];
+        } else {
+          in_base = t * params.in_strides[1] + mat * params.in_strides[0];
+        }
+        uint out_row =
+            t * params.out_strides[1] + mat * params.out_strides[0];
+        uint x1a = in_base + i0 * params.in_strides[2];
+        uint x2a = x1a + half_dims * params.in_strides[2];
+        uint x1b = in_base + i1 * params.in_strides[2];
+        uint x2b = x1b + half_dims * params.in_strides[2];
+        float xa = rope_load(params.lhs_offset + x1a);
+        float xb = rope_load(params.lhs_offset + x2a);
+        float xc = rope_load(params.lhs_offset + x1b);
+        float xd = rope_load(params.lhs_offset + x2b);
+        float v0;
+        float v1;
+        if (r1_side) {
+          v0 = forward ? (rope_round(xa * cos0) - rope_round(xb * sin0))
+                       : (rope_round(xb * sin0) + rope_round(xa * cos0));
+          v1 = forward ? (rope_round(xc * cos1) - rope_round(xd * sin1))
+                       : (rope_round(xd * sin1) + rope_round(xc * cos1));
+        } else {
+          v0 = forward ? (rope_round(xa * sin0) + rope_round(xb * cos0))
+                       : (rope_round(xb * cos0) - rope_round(xa * sin0));
+          v1 = forward ? (rope_round(xc * sin1) + rope_round(xd * cos1))
+                       : (rope_round(xd * cos1) - rope_round(xc * sin1));
+        }
+        uint word_base = (params.output_offset + out_row) >> 1u;
+        output_data.values[word_base + k] =
+            bf16_bits(v0) | (bf16_bits(v1) << 16u);
+      }
+    } else {
+      // Traditional and passthrough pairs each occupy one output word.
+      uint row_words = passthrough ? (params.shape[2] >> 1u) : half_dims;
+      uint k = index % row_words;
+      t = (index / row_words) % time;
+      mat = index / (row_words * time);
+      uint b = mat / heads;
+      uint head = mat - b * heads;
+      float offset = float(
+          offset_data.values[params.rhs_offset + b * params.matrix_m]);
+      float position = params.alpha * (float(t) + offset);
+      uint in_base;
+      if (head_seq_transpose) {
+        in_base = b * (time * params.in_strides[1]) +
+            t * params.in_strides[1] + head * params.in_strides[0];
+      } else {
+        in_base = t * params.in_strides[1] + mat * params.in_strides[0];
+      }
+      uint out_row = t * params.out_strides[1] + mat * params.out_strides[0];
+      uint word_base = (params.output_offset + out_row) >> 1u;
+      if (!passthrough) {
+        // Traditional: element 2i = r1, element 2i+1 = r2, one theta.
+        uint i = k;
+#ifdef USE_FREQS
+        float inv_freq = 1.0f / freqs_data.values[params.aux_offset + i];
+#else
+        float inv_freq = exp(-float(i) * params.beta);
+#endif
+        float theta = position * inv_freq;
+        float cos_t = rope_round(omarchy_trig_cos(theta));
+        float sin_t = rope_round(omarchy_trig_sin(theta));
+        uint in_row = in_base;
+        float x1 = rope_load(
+            params.lhs_offset + in_row + (2u * i) * params.in_strides[2]);
+        float x2 = rope_load(
+            params.lhs_offset + in_row + (2u * i + 1u) * params.in_strides[2]);
+        float xa = rope_round(x1 * cos_t);
+        float xb = rope_round(x2 * sin_t);
+        float xc = rope_round(x1 * sin_t);
+        float xd = rope_round(x2 * cos_t);
+        float r1 = forward ? (xa - xb) : (xb + xa);
+        float r2 = forward ? (xc + xd) : (xd - xa);
+        output_data.values[word_base + k] =
+            bf16_bits(r1) | (bf16_bits(r2) << 16u);
+      } else {
+        // Passthrough pair: two adjacent d, both rotated (d < dims) or both tail.
+        uint d0 = 2u * k;
+        uint d1 = d0 + 1u;
+        float v0;
+        float v1;
+        if (d0 >= 2u * half_dims) {
+          v0 = rope_load(
+              params.lhs_offset + in_base + d0 * params.in_strides[2]);
+          v1 = rope_load(
+              params.lhs_offset + in_base + d1 * params.in_strides[2]);
+        } else {
+          float vals[2];
+          for (uint side = 0u; side < 2u; ++side) {
+            uint d = d0 + side;
+            uint i = d % half_dims;
+#ifdef USE_FREQS
+            float inv_freq = 1.0f / freqs_data.values[params.aux_offset + i];
+#else
+            float inv_freq = exp(-float(i) * params.beta);
+#endif
+            float theta = position * inv_freq;
+            float cos_t = rope_round(omarchy_trig_cos(theta));
+            float sin_t = rope_round(omarchy_trig_sin(theta));
+            uint x1_index = in_base + i * params.in_strides[2];
+            uint x2_index = x1_index + half_dims * params.in_strides[2];
+            float x1 = rope_load(params.lhs_offset + x1_index);
+            float x2 = rope_load(params.lhs_offset + x2_index);
+            float xa = rope_round(x1 * cos_t);
+            float xb = rope_round(x2 * sin_t);
+            float xc = rope_round(x1 * sin_t);
+            float xd = rope_round(x2 * cos_t);
+            vals[side] = (d < half_dims) ? (forward ? (xa - xb) : (xb + xa))
+                                         : (forward ? (xc + xd) : (xd - xa));
+          }
+          v0 = vals[0];
+          v1 = vals[1];
+        }
+        output_data.values[word_base + k] =
+            bf16_bits(v0) | (bf16_bits(v1) << 16u);
+      }
+    }
+    if (params.count - index <= stride) {
+      break;
+    }
+    index += stride;
+  }
+  return;
+#else
+  uint index = gl_GlobalInvocationID.x;
+  uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  uint half_dims = params.dims;
+  uint time = params.shape[1];
+  uint heads = params.shape[0];
+  bool forward = (params.flags & 1u) != 0u;
+  bool traditional = (params.flags & 2u) != 0u;
+  bool head_seq_transpose = (params.flags & 4u) != 0u;
+  bool passthrough = (params.flags & 8u) != 0u;
+  while (index < params.count) {
+    uint i;
+    uint t;
+    uint mat;
+    if (passthrough) {
+      uint d = index % params.shape[2];
+      t = (index / params.shape[2]) % time;
+      mat = index / (params.shape[2] * time);
+      uint b = mat / heads;
+      uint head = mat - b * heads;
+      i = traditional ? (d >> 1u) : (d - (d / half_dims) * half_dims);
+      float offset =
+          float(offset_data.values[params.rhs_offset + b * params.matrix_m]);
+      float position = params.alpha * (float(t) + offset);
+#ifdef USE_FREQS
+      float inv_freq = 1.0f / freqs_data.values[params.aux_offset + i];
+#else
+      float inv_freq = exp(-float(i) * params.beta);
+#endif
+      float theta = position * inv_freq;
+      float cos_t = rope_round(omarchy_trig_cos(theta));
+      float sin_t = rope_round(omarchy_trig_sin(theta));
+      uint in_base;
+      if (head_seq_transpose) {
+        in_base = b * (time * params.in_strides[1]) +
+            t * params.in_strides[1] + head * params.in_strides[0];
+      } else {
+        in_base = t * params.in_strides[1] + mat * params.in_strides[0];
+      }
+      uint out_base =
+          t * params.out_strides[1] + mat * params.out_strides[0];
+      uint x1_index = in_base +
+          (traditional ? (d & ~1u) : i) * params.in_strides[2];
+      uint x2_index = traditional
+          ? (x1_index + params.in_strides[2])
+          : (x1_index + half_dims * params.in_strides[2]);
+      uint out_index = out_base + d * params.out_strides[2];
+      if (d >= 2u * half_dims) {
+        // Passthrough tail: the rotated range ends at dims; the rest of the axis carries the input through untouched.
+        rope_store(
+            params.output_offset + out_index,
+            rope_load(params.lhs_offset + in_base + d * params.in_strides[2]));
+      } else {
+        float x1 = rope_load(params.lhs_offset + x1_index);
+        float x2 = rope_load(params.lhs_offset + x2_index);
+        float xa = rope_round(x1 * cos_t);
+        float xb = rope_round(x2 * sin_t);
+        float xc = rope_round(x1 * sin_t);
+        float xd = rope_round(x2 * cos_t);
+        bool first = traditional ? ((d & 1u) == 0u) : (d < half_dims);
+        float r1 = forward ? (xa - xb) : (xb + xa);
+        float r2 = forward ? (xc + xd) : (xd - xa);
+        rope_store(params.output_offset + out_index, first ? r1 : r2);
+      }
+    } else {
+      i = index % half_dims;
+      t = (index / half_dims) % time;
+      mat = index / (half_dims * time);
+      uint b = mat / heads;
+      uint head = mat - b * heads;
+      float offset =
+          float(offset_data.values[params.rhs_offset + b * params.matrix_m]);
+      float position = params.alpha * (float(t) + offset);
+#ifdef USE_FREQS
+      float inv_freq = 1.0f / freqs_data.values[params.aux_offset + i];
+#else
+      float inv_freq = exp(-float(i) * params.beta);
+#endif
+      float theta = position * inv_freq;
+      float cos_t = rope_round(omarchy_trig_cos(theta));
+      float sin_t = rope_round(omarchy_trig_sin(theta));
+      uint in_base;
+      if (head_seq_transpose) {
+        in_base = b * (time * params.in_strides[1]) +
+            t * params.in_strides[1] + head * params.in_strides[0];
+      } else {
+        in_base = t * params.in_strides[1] + mat * params.in_strides[0];
+      }
+      uint out_base =
+          t * params.out_strides[1] + mat * params.out_strides[0];
+      uint in_index_1;
+      uint in_index_2;
+      uint out_index_1;
+      // Match eager intermediate rounding; float32 storage is transparent.
+      uint out_index_2;
+      if (traditional) {
+        in_index_1 = in_base + (2u * i) * params.in_strides[2];
+        in_index_2 = in_index_1 + params.in_strides[2];
+        out_index_1 = out_base + (2u * i) * params.out_strides[2];
+        out_index_2 = out_index_1 + params.out_strides[2];
+      } else {
+        in_index_1 = in_base + i * params.in_strides[2];
+        in_index_2 = in_index_1 + half_dims * params.in_strides[2];
+        out_index_1 = out_base + i * params.out_strides[2];
+        out_index_2 = out_index_1 + half_dims * params.out_strides[2];
+      }
+      float x1 = rope_load(params.lhs_offset + in_index_1);
+      float x2 = rope_load(params.lhs_offset + in_index_2);
+      // Match eager storage-precision rounding after each operation; f32 storage is transparent.
+      float xa = rope_round(x1 * cos_t);
+      float xb = rope_round(x2 * sin_t);
+      float xc = rope_round(x1 * sin_t);
+      float xd = rope_round(x2 * cos_t);
+      float r1 = forward ? (xa - xb) : (xb + xa);
+      float r2 = forward ? (xc + xd) : (xd - xa);
+      rope_store(params.output_offset + out_index_1, r1);
+      rope_store(params.output_offset + out_index_2, r2);
+    }
+    if (params.count - index <= stride) {
+      break;
+    }
+    index += stride;
+  }
+#endif
+}

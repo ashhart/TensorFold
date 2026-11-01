@@ -1,0 +1,148 @@
+#version 460
+
+// From omarchy-mlx overlay/mlx/backend/omarchy/shaders/cast.comp at fde15c1ece69:
+
+// code unchanged, comments condensed.
+
+// Copyright © 2026 Joshua Warren and mlx-omarchy contributors; MIT License, full text in LICENSES/mlx-omarchy-MIT.txt.
+
+// Element cast across SOURCE_*/DEST_* macros; complex64 real-part load drops imag.
+
+// Real->complex64 is vec2(x, 0); BF16 uint16 RNE store with NaN quiet bit.
+
+// SOURCE_BOOL: one word load per stride iter outside lane loop (Honeykrisp bool load quirk).
+
+#if defined(SOURCE_FP16) || defined(DEST_FP16)
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#endif
+#if defined(SOURCE_BF16) || defined(DEST_BF16)
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#endif
+
+#ifdef SOURCE_FP16
+#define SOURCE_TYPE float16_t
+#elif defined(SOURCE_BF16)
+#define SOURCE_TYPE uint16_t
+#elif defined(SOURCE_C64)
+#define SOURCE_TYPE vec2
+#elif defined(SOURCE_I32)
+#define SOURCE_TYPE int
+#elif defined(SOURCE_U32)
+#define SOURCE_TYPE uint
+#elif defined(SOURCE_BOOL)
+#define SOURCE_TYPE uint
+#else
+#define SOURCE_TYPE float
+#endif
+
+#ifndef SOURCE_BOOL
+#ifdef SOURCE_C64
+// Real-part projection: complex64->real load drops imag (upstream operator float).
+#define SOURCE_LOAD(i) input_data.values[(i)].x
+#else
+#define SOURCE_LOAD(i) input_data.values[(i)]
+#endif
+#endif
+
+#ifdef DEST_FP16
+#define DEST_TYPE float16_t
+#elif defined(DEST_BF16)
+#define DEST_TYPE uint16_t
+#elif defined(DEST_C64)
+#define DEST_TYPE vec2
+#elif defined(DEST_I32)
+#define DEST_TYPE int
+#else
+#define DEST_TYPE float
+#endif
+
+#if defined(SOURCE_BF16) || defined(DEST_BF16)
+float bf16_load(uint16_t bits) {
+  return uintBitsToFloat(uint(bits) << 16u);
+}
+uint16_t bf16_store(float value) {
+  uint bits = floatBitsToUint(value);
+  if (isnan(value)) {
+    return uint16_t((bits >> 16) | 0x40u);
+  }
+  return uint16_t((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16);
+}
+#endif
+
+#if defined(DEST_C64)
+// Real->complex64 imag=0; BF16 widens via bf16_load; CONVERT arg appears once.
+#if defined(SOURCE_BF16)
+#define CONVERT(x) vec2(bf16_load(x), 0.0)
+#else
+#define CONVERT(x) vec2(float(x), 0.0)
+#endif
+#elif defined(SOURCE_BF16) && defined(DEST_BF16)
+#define CONVERT(x) (x)
+#elif defined(SOURCE_BF16)
+#define CONVERT(x) DEST_TYPE(bf16_load(x))
+#elif defined(DEST_BF16)
+#define CONVERT(x) bf16_store(float(x))
+#else
+#define CONVERT(x) DEST_TYPE(x)
+#endif
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Input {
+  SOURCE_TYPE values[];
+} input_data;
+layout(set = 0, binding = 2, std430) writeonly buffer Output {
+  DEST_TYPE values[];
+} output_data;
+
+layout(push_constant) uniform Params {
+  uint count;
+  uint operation;
+  uint lhs_size;
+  uint rhs_size;
+  uint reduce_size;
+  uint output_size;
+  uint lhs_offset;
+  uint rhs_offset;
+  uint output_offset;
+} params;
+
+void main() {
+#ifdef SOURCE_BOOL
+// SOURCE_BOOL: one word load per stride iter outside lane loop (Honeykrisp bool load quirk).
+
+// mis/word_count cover unaligned start; grid-stride for counts above 65535*256*4.
+  uint mis = params.lhs_offset & 3u;
+  uint word_count = (params.count + mis + 3u) >> 2u;
+  uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  for (uint word_index = gl_GlobalInvocationID.x; word_index < word_count;
+       word_index += stride) {
+    uint word = input_data.values[(params.lhs_offset >> 2u) + word_index];
+    uint first = 4u * word_index - mis;
+    for (uint lane = 0u; lane < 4u; ++lane) {
+      if (word_index == 0u && lane < mis) {
+        continue;
+      }
+      uint index = first + lane;
+      if (index >= params.count) {
+        break;
+      }
+      output_data.values[params.output_offset + index] =
+          CONVERT((word >> (lane * 8u)) & 0xFFu);
+    }
+  }
+#else
+  uint index = gl_GlobalInvocationID.x;
+  uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  while (index < params.count) {
+    output_data.values[params.output_offset + index] =
+        CONVERT(SOURCE_LOAD(params.lhs_offset + index));
+    if (params.count - index <= stride) {
+      break;
+    }
+    index += stride;
+  }
+#endif
+}

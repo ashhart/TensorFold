@@ -1,0 +1,255 @@
+// Preserve the omitted contract, precision, and host-interface facts from the original comment.
+#version 460
+
+#extension GL_EXT_shader_16bit_storage : require
+// int16 is required: raw-gates slots read uint16_t A_log words in every build.
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer QBuf  { uint16_t v[]; } q_buf;
+layout(set = 0, binding = 1, std430) readonly buffer KBuf  { uint16_t v[]; } k_buf;
+layout(set = 0, binding = 2, std430) readonly buffer VBuf  { uint16_t v[]; } v_buf;
+layout(set = 0, binding = 3, std430) readonly buffer GBuf  { uint16_t v[]; } g_buf;
+layout(set = 0, binding = 4, std430) readonly buffer BBuf  { uint16_t v[]; } b_buf;
+layout(set = 0, binding = 5, std430) readonly buffer SIn   { float    v[]; } s_in;
+layout(set = 0, binding = 6, std430) writeonly buffer YBuf { uint16_t v[]; } y_buf;
+layout(set = 0, binding = 7, std430) buffer         SOut  { float    v[]; } s_out;
+// Flag 3 raw-gates mode uses slots 3/4 for a/b and slots 8/9 for A_log/dt_bias (bf16).
+layout(set = 0, binding = 8, std430) readonly buffer ALogBuf { uint16_t v[]; } alog_buf;
+layout(set = 0, binding = 9, std430) readonly buffer DtBuf   { uint16_t v[]; } dt_buf;
+
+layout(push_constant) uniform Params {
+  uint count;
+  uint operation;
+  uint lhs_size;
+  uint rhs_size;
+  uint reduce_size;
+  uint output_size;
+  uint lhs_offset;
+  uint rhs_offset;
+  uint output_offset;
+  uint aux_size;
+  uint aux_offset;
+  uint matrix_m;   // Dk
+  uint matrix_n;   // Dv
+  uint matrix_k;   // Hv
+  uint flags;
+  float alpha;
+  float beta_f;
+  uint dims;
+  uint shape[4];
+  uint in_strides[4];
+  uint out_strides[4];
+} params;
+
+float bf16_load(uint16_t bits) {
+  return uintBitsToFloat(uint(bits) << 16u);
+}
+
+uint16_t bf16_store(float value) {
+  uint bits = floatBitsToUint(value);
+  if (isnan(value)) {
+    return uint16_t((bits >> 16) | 0x40u);
+  }
+  return uint16_t((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16);
+}
+
+// Preserve the omitted contract, precision, and host-interface facts from the original comment.
+const uint ROWS = 32u;
+const uint TILE_STRIDE = 129u;  // padded: row r, column i -> bank (r + i) % 32
+
+shared float sk[128];
+shared float sq[128];
+shared float skg[128];
+shared float tile[ROWS * TILE_STRIDE];
+
+// Preserve the omitted contract, precision, and host-interface facts from the original comment.
+float gdn_kv_walk(uint trow, uint dk, float g, bool mlx_order) {
+  float kv_acc = 0.0f;
+  for (uint i = 0u; i < dk; ++i) {
+    if (mlx_order) {
+      precise float s_g = tile[trow + i] * g;
+      precise float term = s_g * sk[i];
+      kv_acc += term;
+    } else {
+      kv_acc += tile[trow + i] * skg[i];
+    }
+  }
+  return kv_acc;
+}
+
+// ns = s * g + dk_term, contracted (dk_term arrives rounded).
+float gdn_decay_add(float s, float g, float dk_term) {
+  return s * g + dk_term;
+}
+
+#ifdef GDN_COMPOSED_ORDER
+// Match elementwise.comp LogAddExp(0,x) without `precise`, preserving compiler choices.
+float gdn_log1p_ew(float v) {
+  float u = 1.0f + v;
+  if (u == 1.0f) {
+    return v;
+  }
+  return log(u) * (v / (u - 1.0f));
+}
+
+float gdn_softplus_ew(float x) {
+  float value = max(0.0f, x);
+  if (!isnan(value) && !isinf(value)) {
+    value += gdn_log1p_ew(exp(-abs(0.0f - x)));
+  }
+  return value;
+}
+
+// Preserve the omitted contract, precision, and host-interface facts from the original comment.
+float gdn_g_composed(float x, float a_log) {
+  float sp = gdn_softplus_ew(x);
+  precise float e = exp(a_log);
+  precise float p = e * sp;
+  precise float n = -p;
+  precise float g = exp(n);
+  return g;
+}
+
+
+#endif /* GDN_COMPOSED_ORDER */
+// Gate prologue (g, beta) for one head.
+vec2 gdn_gates(uint head) {
+  float g;
+  float beta;
+    // g stays f32; eager-chain bf16 roundings apply to x, softplus, and beta.
+  if ((params.flags & 8u) != 0u) {
+    // Raw gates: beta=sigmoid(b) f32->bf16; g=exp(-exp(A_log_f32)*softplus(a+dt_bias)) f32->bf16.
+    float b_in = bf16_load(b_buf.v[params.aux_offset + head]);
+    float beta_f = 1.0f / (1.0f + exp(-b_in));
+    beta = bf16_load(bf16_store(beta_f));
+    float a_in = bf16_load(g_buf.v[params.shape[0] + head]);
+    // Preserve the omitted contract, precision, and host-interface facts from the original comment.
+    uint ph = head % params.in_strides[2];
+    float a_log;
+    if ((params.flags & 512u) != 0u) {
+      uint base = params.in_strides[0] + 2u * ph;
+      a_log = uintBitsToFloat(uint(alog_buf.v[base]) |
+                              (uint(alog_buf.v[base + 1u]) << 16u));
+    } else {
+      a_log = bf16_load(alog_buf.v[params.in_strides[0] + ph]);
+    }
+    // dt_bias rides bf16 in the Qwen3.8 checkpoint; widening is exact.
+    float dt = bf16_load(dt_buf.v[params.in_strides[1] + ph]);
+    // The eager chain rounds x = a + dt_bias to bf16 (bf16 + bf16 stays
+#ifndef GDN_COMPOSED_ORDER
+    // bf16) and softplus(x) to bf16; replicate those roundings exactly.
+#else /* GDN_COMPOSED_ORDER */
+    // bf16); the widen is exact.
+#endif /* GDN_COMPOSED_ORDER */
+    float x = bf16_load(bf16_store(a_in + dt));
+#ifdef ASH_QWEN35
+    // Preserve the omitted contract, precision, and host-interface facts from the original comment.
+    float sp = bf16_load(bf16_store(max(x, 0.0f) + log(1.0f + exp(-abs(x)))));
+    g = exp(-(exp(a_log) * sp));
+#else /* ASH_QWEN35 */
+#ifndef GDN_COMPOSED_ORDER
+    // Compute elementwise LogAddExp softplus with corrected log1p ratio, then round to bf16.
+    float u = 1.0f + exp(-abs(x));
+    float l1p = (u == 1.0f) ? exp(-abs(x)) : log(u) * (exp(-abs(x)) / (u - 1.0f));
+    // C++ fallback keeps softplus f32; flag 9 selects it. Other models round softplus to bf16.
+    float sp_raw = max(x, 0.0f) + l1p;
+    float sp = ((params.flags & 512u) != 0u) ? sp_raw
+                                             : bf16_load(bf16_store(sp_raw));
+    // g stays f32; eager-chain bf16 roundings apply to x, softplus, and beta.
+    g = exp(-(exp(a_log) * sp));
+#else /* GDN_COMPOSED_ORDER */
+    if ((params.flags & 512u) != 0u) {
+      // Flag 9 (f32 A_log) selects the C++ raw fallback; softplus output stays f32.
+      g = gdn_g_composed(x, a_log);
+    } else {
+      // softplus=logaddexp(0,x)=max(a,b)+log1p(exp(-|a-b|)); corrected log1p=log(u)*x/(u-1), then bf16.
+      float u = 1.0f + exp(-abs(x));
+      float l1p = (u == 1.0f) ? exp(-abs(x)) : log(u) * (exp(-abs(x)) / (u - 1.0f));
+      float sp = bf16_load(bf16_store(max(x, 0.0f) + l1p));
+      g = exp(-(exp(a_log) * sp));
+    }
+#endif /* GDN_COMPOSED_ORDER */
+#endif /* ASH_QWEN35 */
+  } else {
+    g = bf16_load(g_buf.v[params.shape[0] + head]);
+    beta = bf16_load(b_buf.v[params.aux_offset + head]);
+  }
+  return vec2(g, beta);
+}
+
+void main() {
+  uint dk = params.matrix_m;
+  uint dv = params.matrix_n;
+  uint hv = params.matrix_k;
+  uint head = gl_WorkGroupID.x;
+  uint row0 = gl_WorkGroupID.y * ROWS;
+  uint lane = gl_LocalInvocationID.x;
+
+  if (head >= hv) {
+    return;
+  }
+  vec2 gates = gdn_gates(head);
+  float g = gates.x;
+  float beta = gates.y;
+#ifdef GDN_COMPOSED_ORDER
+  // Preserve the omitted contract, precision, and host-interface facts from the original comment.
+  uint khead = head;
+  if (params.in_strides[3] != 0u) {
+    uint hv_b = params.in_strides[2];
+    uint hk_b = params.in_strides[3];
+    khead = (head / hv_b) * hk_b + (head % hv_b) / (hv_b / hk_b);
+  }
+#elif defined(GDN_NATIVE_GQA_INDEX)
+  // Default order uses native GQA key index; BF16 A_log models select MLX_OMARCHY_GDN_GQA_BF16A.
+  uint khead = head;
+  if (params.in_strides[3] != 0u) {
+    uint hv_b = params.in_strides[2];
+    uint hk_b = params.in_strides[3];
+    khead = (head / hv_b) * hk_b + (head % hv_b) / (hv_b / hk_b);
+  }
+#else /* GDN_COMPOSED_ORDER */
+  uint khead = head;
+#endif /* GDN_COMPOSED_ORDER */
+  sk[lane] = bf16_load(k_buf.v[params.rhs_offset + khead * dk + lane]);
+  sq[lane] = bf16_load(q_buf.v[params.lhs_offset + khead * dk + lane]);
+  skg[lane] = sk[lane] * g;
+  uint head_base = head * dv * dk;
+  uint tile_base = params.shape[1] + head_base + row0 * dk;
+  for (uint r = 0u; r < ROWS; ++r) {
+    tile[r * TILE_STRIDE + lane] = s_in.v[tile_base + r * dk + lane];
+  }
+  barrier();
+
+  if (lane < ROWS) {
+    uint row = row0 + lane;
+    uint trow = lane * TILE_STRIDE;
+    bool mlx_order = (params.flags & 512u) != 0u;
+    float kv_acc = gdn_kv_walk(trow, dk, g, mlx_order);
+    precise float delta =
+        (bf16_load(v_buf.v[params.aux_size + head * dv + row]) - kv_acc) * beta;
+
+    float o_acc = 0.0f;
+    for (uint i = 0u; i < dk; ++i) {
+      precise float dk_term = delta * sk[i];
+      precise float ns;
+      if (mlx_order) {
+        // Composed chain rounds state*g and delta*k separately, then adds; no FMA contraction.
+        precise float s_g = tile[trow + i] * g;
+        ns = s_g + dk_term;
+      } else {
+        ns = gdn_decay_add(tile[trow + i], g, dk_term);
+      }
+      tile[trow + i] = ns;
+      precise float o_term = ns * sq[i];
+      o_acc += o_term;
+    }
+    y_buf.v[params.output_offset + head * dv + row] = bf16_store(o_acc);
+  }
+  barrier();
+  uint out_base = params.shape[2] + head_base + row0 * dk;
+  for (uint r = 0u; r < ROWS; ++r) {
+    s_out.v[out_base + r * dk + lane] = tile[r * TILE_STRIDE + lane];
+  }
+}
