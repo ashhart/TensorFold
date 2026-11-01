@@ -100,6 +100,11 @@ pub const Pockets = struct {
 
     /// out [rows, hidden] bf16 += layer `layer`'s pocket on y [rows, hidden] bf16 (nothing without one).
     pub fn add(p: *const Pockets, s: cuda.Stream, layer: usize, y: u64, out: u64, rows: usize, taught: u64) !void {
+        return p.addGated(s, layer, y, out, rows, taught, 0, 0);
+    }
+
+    /// The shared expert's gate at each row, with the routing table's stride (0: dense).
+    pub fn addGated(p: *const Pockets, s: cuda.Stream, layer: usize, y: u64, out: u64, rows: usize, taught: u64, gate: u64, stride: usize) !void {
         const pk = p.of(layer) orelse return;
         var a: cuda.Args = .{};
         a.add(y);
@@ -109,6 +114,8 @@ pub const Pockets = struct {
         a.add(out);
         a.add(taught);
         a.add(@as(c_int, 0));
+        a.add(gate);
+        a.add(@as(c_int, @intCast(stride)));
         try cuda.launch.launch(p.k.?.rows, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 256 } }, s, &a);
     }
 

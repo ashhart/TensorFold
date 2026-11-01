@@ -76,3 +76,7 @@ test {
 test {
     _ = @import("cuda_moe_wide_test.zig");
 }
+
+test {
+    _ = @import("cuda_moe_pocket_test.zig");
+}

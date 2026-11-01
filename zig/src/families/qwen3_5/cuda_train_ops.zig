@@ -94,7 +94,7 @@ pub fn splitsFor(m: usize, n: usize, k: usize) usize {
 pub const Tail = struct { list: u64, mask: u64, n: usize };
 
 /// The pocket: SwiGLU neurons fp32 [n, d]; `scale` (f32 a row, 0: none) scales neurons from `from` on per row.
-pub const Pocket = struct { gate: u64, up: u64, down: u64, n: usize, scale: u64 = 0, from: usize = 0 };
+pub const Pocket = struct { gate: u64, up: u64, down: u64, n: usize, scale: u64 = 0, from: usize = 0, row_gate: u64 = 0, gate_stride: usize = 0, a_shared: u64 = 0 };
 
 /// A layer's MLP as the backward reads it (MLX copies): gate and up [inter, d], down [d, inter].
 pub const Mlp = struct { gate: Q4, up: Q4, down: Q4 };
@@ -301,6 +301,8 @@ pub const Ops = struct {
         a.add(out);
         a.add(pk.scale);
         a.add(int(@min(pk.from, pk.n)));
+        a.add(pk.row_gate);
+        a.add(int(pk.gate_stride));
         try o.go("tf_q27_pocket_rows", .{ u(rows), 1, 1 }, 256, &a);
     }
 
@@ -314,6 +316,9 @@ pub const Ops = struct {
         a.add(int(pk.n));
         for ([_]u64{ g, dx, pk.scale }) |v| a.add(v);
         a.add(int(@min(pk.from, pk.n)));
+        a.add(pk.row_gate);
+        a.add(int(pk.gate_stride));
+        a.add(pk.a_shared);
         try o.go("tf_q27_pocket_back", .{ u(rows), 1, 1 }, 256, &a);
     }
 

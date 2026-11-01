@@ -303,14 +303,18 @@ __device__ __forceinline__ float pocket_scale(const float* rs, int from, int j, 
 
 // out[r] = bf16(out[r] + sum_j f_j silu(gate_j . y_r) (up_j . y_r) down_j); grid rows, block 256.
 extern "C" __global__ void __launch_bounds__(256) tf_q27_pocket_rows(const bf16* y, int d, const float* gate, const float* up,
-                                                                    const float* down, int n, bf16* out, const float* rs, int from) {
+                                                                    const float* down, int n, bf16* out, const float* rs, int from,
+                                                                    const float* row_gate, int gate_stride) {
     __shared__ float act[POCKET_MAX];
     const int r = blockIdx.x, lane = threadIdx.x & 31, w = threadIdx.x >> 5;
     const bf16* yr = y + (size_t)r * d;
     for (int j = w; j < n; j += 8) {
         float zg, zu, e;
         pocket_dots(yr, nullptr, d, gate, up, down, j, zg, zu, e);
-        if (lane == 0) act[j] = pocket_scale(rs, from, j, r) * silu(zg) * zu;
+        if (lane == 0) {
+            act[j] = pocket_scale(rs, from, j, r) * silu(zg) * zu;
+            if (row_gate) act[j] *= row_gate[(size_t)r * gate_stride];
+        }
     }
     __syncthreads();
     for (int k = threadIdx.x; k < d; k += 256) {
@@ -324,8 +328,9 @@ extern "C" __global__ void __launch_bounds__(256) tf_q27_pocket_rows(const bf16*
 // The pocket undone on row r: dx[r] += sum_j f_j (down_j . g) (silu'(zg) zu gate_j + silu(zg) up_j).
 extern "C" __global__ void __launch_bounds__(256) tf_q27_pocket_back(const bf16* y, int d, const float* gate, const float* up,
                                                                     const float* down, int n, const float* g, float* dx,
-                                                                    const float* rs, int from) {
-    __shared__ float cg[POCKET_MAX], cu[POCKET_MAX];
+                                                                    const float* rs, int from, const float* row_gate,
+                                                                    int gate_stride, float* a_shared) {
+    __shared__ float cg[POCKET_MAX], cu[POCKET_MAX], ca[POCKET_MAX];
     const int r = blockIdx.x, lane = threadIdx.x & 31, w = threadIdx.x >> 5;
     const bf16* yr = y + (size_t)r * d;
     const float* gr = g + (size_t)r * d;
@@ -336,9 +341,20 @@ extern "C" __global__ void __launch_bounds__(256) tf_q27_pocket_back(const bf16*
             const float f = pocket_scale(rs, from, j, r);
             cg[j] = f * e * silu_grad(zg) * zu;
             cu[j] = f * e * silu(zg);
+            if (row_gate) {
+                ca[j] = f * e * silu(zg) * zu;
+                const float sg = row_gate[(size_t)r * gate_stride];
+                cg[j] *= sg;
+                cu[j] *= sg;
+            }
         }
     }
     __syncthreads();
+    if (threadIdx.x == 0 && a_shared) {
+        float a = 0;
+        for (int j = 0; j < n; j++) a += ca[j];
+        a_shared[(size_t)r * gate_stride] += a;
+    }
     for (int k = threadIdx.x; k < d; k += 256) {
         float v = 0;
         for (int j = 0; j < n; j++) v += cg[j] * gate[(size_t)j * d + k] + cu[j] * up[(size_t)j * d + k];

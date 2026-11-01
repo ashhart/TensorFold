@@ -336,6 +336,7 @@ pub fn setFor(release: ?limits.Nvcc) limits.Nvcc {
 }
 /// A record's usage on every SM for images built by `release` (null: an image that names no compiler, cuda's).
 pub fn usageFor(r: CudaRecord, release: ?limits.Nvcc) [limits.sms.len]U {
+    if (@import("qwen_moe_records.zig").changed(r.launch.symbol)) return none;
     var u = r.usage;
     const rel = release orelse return u;
     if (r.later_pending and !newer(.{ .major = 13, .minor = 2 }, rel)) u = none;
@@ -578,7 +579,8 @@ pub const landed_cuda = cuda ++ @import("dory_cuda_records.zig").cuda ++ gradien
 test {
     _ = learning;
 }
-pub const all_cuda = @import("moetile_records.zig").records ++ @import("gb10_many_records.zig").records ++ @import("nvfp4_tile_pending.zig").records ++ landed_cuda ++ dsv41_pending ++ @import("inc4_pending.zig").trees ++ @import("inc4_pending.zig").rows ++ @import("affine_verify_records.zig").records;
+const before_qwen_moe = @import("moetile_records.zig").records ++ @import("gb10_many_records.zig").records ++ @import("nvfp4_tile_pending.zig").records ++ landed_cuda ++ dsv41_pending ++ @import("inc4_pending.zig").trees ++ @import("inc4_pending.zig").rows ++ @import("affine_verify_records.zig").records;
+pub const all_cuda = @import("qwen_moe_records.zig").pending(before_qwen_moe);
 pub const dsv41_pending = @import("registry_union.zig").extra(landed_cuda, @import("dsv41_pending_1.zig").records ++ @import("dsv41_pending_2.zig").records);
 test {
     _ = @import("qwen4_cuda_receipts_test.zig");
