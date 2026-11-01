@@ -295,6 +295,12 @@ pub const Mtp = struct {
         try e.run(e.fns.norm, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ h, r, w, out, e.g.eps, @as(c_int, @intCast(e.g.hidden)), @as(u64, 0), @as(u64, 0) });
     }
 
+    /// q or k heads normed and roped from `src` into `out`, with the target's rope (its YaRN table when it has one).
+    pub fn normRope(d: *Mtp, src: u64, w: u64, out: u64, heads: usize, stride: usize, in_head: usize, p0: c_longlong, step: c_int, rows: usize) !void {
+        const e = d.e;
+        try e.run(d.fns.norm_rope, .{ rows * heads, 1, 1 }, .{ 32, 1, 1 }, .{ src, w, out, @as(c_int, @intCast(heads)), @as(c_int, @intCast(stride)), @as(c_int, @intCast(in_head)), p0, step, e.g.eps, geometry.theta, e.rope_table });
+    }
+
     /// The layer over `rows` rows at slots pos0..: d.ids their tokens, d.hin their states; x gets their normed outputs.
     pub fn layer(d: *Mtp, ctx: *Ctx, rows: usize, pos0: u64, pass: Pass) !void {
         const e = d.e;
@@ -312,8 +318,8 @@ pub const Mtp = struct {
         try d.proj(.{ .a4 = w.fc_h }, d.hn, d.r, rows);
         try d.norm(d.h, d.r, w.input_norm, d.x, rows);
         try d.projQkv(rows);
-        try e.run(d.fns.norm_rope, .{ rows * g.q_heads, 1, 1 }, .{ 32, 1, 1 }, .{ d.qraw, w.q_norm, d.q, @as(c_int, @intCast(g.q_heads)), @as(c_int, @intCast(2 * aw)), @as(c_int, 2 * head_dim), p0, step, g.eps, geometry.theta });
-        try e.run(d.fns.norm_rope, .{ rows * g.kv_heads, 1, 1 }, .{ 32, 1, 1 }, .{ d.kraw, w.k_norm, d.kb, @as(c_int, @intCast(g.kv_heads)), @as(c_int, @intCast(kw)), @as(c_int, head_dim), p0, step, g.eps, geometry.theta });
+        try d.normRope(d.qraw, w.q_norm, d.q, g.q_heads, 2 * aw, 2 * head_dim, p0, step, rows);
+        try d.normRope(d.kraw, w.k_norm, d.kb, g.kv_heads, kw, head_dim, p0, step, rows);
         const heads: c_int = @intCast(g.q_heads);
         const kvh: c_int = @intCast(g.kv_heads);
         const cap: c_int = @intCast(d.capacity);

@@ -51,6 +51,7 @@ test "a compiler's records: its own set, else the newest below it, else 13.0's" 
 
 test {
     _ = @import("pending_132_test.zig");
+    _ = @import("exl3_grouped_records.zig");
     _ = @import("proposal_sampling_records.zig");
     _ = @import("pocket_records.zig");
 }

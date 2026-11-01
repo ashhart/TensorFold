@@ -560,3 +560,5 @@ extern "C" __global__ void __launch_bounds__(tf_rms_strided::LT) tf_moe_add_rms_
     __nv_bfloat16* y, float* xs, float eps, int width, int routed, int slots) {
     tf_rms_strided::moe_row<false>(x, ys, y_f32, wt, w, h, y, xs, eps, width, routed, slots);
 }
+
+#include "rms_tiles.cuh"

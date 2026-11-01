@@ -252,6 +252,8 @@ __device__ __forceinline__ void part(const __nv_bfloat16* __restrict__ q, const 
     if (threadIdx.x < G) pm[part * G + threadIdx.x] = mx[threadIdx.x], pl[part * G + threadIdx.x] = ls[threadIdx.x];
 }
 
+// merge's float64 replay of a head over pages (window_pages.cu), off the fast path: its frame and divisions with it.
+template <int D> __device__ __noinline__ void merge_pg_odd(const __nv_bfloat16*, const __nv_bfloat16*, const __nv_bfloat16*, const int*, const int*, int, int, int, float, Pg, __nv_bfloat16*, int64_t, int, int);
 // out = sum_c a_c o_c / sum_c a_c l_c, a_c = expf(m_c - M), chunks in order; NaN or inf: the head again in float64.
 template <int D, int FAULT, bool PG = false>
 __device__ __forceinline__ void merge(const float* __restrict__ po, const float* __restrict__ pm,
@@ -278,15 +280,13 @@ __device__ __forceinline__ void merge(const float* __restrict__ po, const float*
     const float x = __fdiv_rn(acc, l);
     __nv_bfloat16* oh = out + (r * h + kh * G + hd) * D;
     oh[e] = FAULT == TRUNC ? __float2bfloat16_rz(x) : __float2bfloat16_rn(x);
-    if (__syncthreads_or(!isfinite(x))) {
+    if constexpr (PG) {
+        if (__syncthreads_or(!isfinite(x))) merge_pg_odd<D>(q, kc, vc, pos, slot, h, hk, win, scale, pg, oh, r, kh, hd);
+    } else if (__syncthreads_or(!isfinite(x))) {
         const int p = pos[r];
         const int64_t base = (slot != nullptr ? static_cast<int64_t>(slot[r]) : 0) * ring;
         const auto kv = [&](int key, int which) {
             const __nv_bfloat16* c = which == 0 ? kc : vc;
-            if constexpr (PG) {
-                const int64_t pid = pg.tab[(slot != nullptr ? slot[r] : 0) * pg.stride + key / pg.tok];
-                return c + pid * pg.page + (static_cast<int64_t>(key % pg.tok) * hk + kh) * D;
-            }
             return c + ((base + key % ring) * hk + kh) * D;
         };
         const int c0 = blockIdx.z * NT % D;
@@ -352,17 +352,33 @@ __device__ __forceinline__ bool rows(const __nv_bfloat16* __restrict__ q, const 
     __syncthreads();
     const int kfirst = first(p0 + row0), klast = kmax, limit = p0 + W;
     const int t0 = kfirst / BN, tiles = klast / BN + 1 - t0, items = 2 * tiles;
-    auto stage = [&](int item) { // item 2t: tile t's keys, 2t + 1: its values
+    int pk = 0, nxt = 0; // PG: the staged tile's first key's row in its page, the next page's id (a page early)
+    int64_t pb = 0;      // PG: the staged tile's base, stepped a tile at a time (pages hold whole tiles)
+    const int* tp = pg.tab + (PG ? t0 * BN / pg.tok : 0);
+    if constexpr (PG) {
+        pk = t0 * BN % pg.tok;
+        pb = static_cast<int64_t>(*tp) * pg.page + static_cast<int64_t>(pk) * HK * D;
+        if (t0 * BN - pk + pg.tok <= klast) nxt = tp[1];
+    }
+    auto stage = [&](int item) { // item 2t: tile t's keys, 2t + 1: its values (items staged in order)
         const __nv_bfloat16* src = item % 2 == 0 ? kc : vc;
         const int key0 = (t0 + item / 2) * BN;
         uint4* dst = slots + (item % NS) * K::SLOT;
-        int64_t pb = 0; // a paged tile lies in one page (pages hold whole tiles)
-        if constexpr (PG) pb = static_cast<int64_t>(pg.tab[key0 / pg.tok]) * pg.page + static_cast<int64_t>(key0 % pg.tok) * HK * D;
+        if (PG && item % 2 == 0 && item > 0) { // the next tile: a tile on, or at a page end the id loaded a page ago
+            pb += BN * HK * D;
+            if ((pk += BN) == pg.tok) {
+                pk = 0;
+                pb = static_cast<int64_t>(nxt) * pg.page;
+                ++tp;
+                if (key0 + pg.tok <= klast) nxt = tp[1];
+            }
+        }
         for (int i = threadIdx.x; i < BN * C; i += NT) {
             const int key = key0 + i / C;
             const bool in = key >= kfirst && key <= klast && key < limit; // outside every row's keys: zeros
-            if constexpr (PG) {
-                cp16z(dst + sw<D>(i / C, i % C), in ? src + pb + ((int64_t)(i / C) * HK + hk) * D + (i % C) * 8 : src, in);
+            if constexpr (PG) { // the linear form below with the tile's row at pb
+                const int row = in ? i / C : 0;
+                cp16z(dst + sw<D>(i / C, i % C), src + (pb + ((int64_t)row * HK + hk) * D + (i % C) * 8), in);
             } else {
                 const int row = in ? (ring > 0 ? key % ring : key) : 0;
                 cp16z(dst + sw<D>(i / C, i % C), src + ((int64_t)row * HK + hk) * D + (i % C) * 8, in);
