@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.5-family models on CUDA apply a verified window's kept DeltaNet rows inside the next round's slot scan, instead of a separate pass over every layer's state, with the same bits. On a GB10, Qwen3.8-27B MLX 4-bit decodes 0.7% to 10.4% faster, most at 16 streams, with none slower, for about 66 MiB more a stream. It's on by default; `TF_QWEN_KEEP_LATE=0` keeps the separate pass (#1824). Thanks to @jrb-ai, with code from @fkiene's cuda.fast submission.
+
 ## 1.2.1
 
 - Qwen3.8-Flash-Next on CUDA: a loaded server drops its checkpoint from the page cache. On a GB10, whose GPU memory is the system's, about 36 GiB of cached shards had left under 1 GiB free, and long prompts slowed to about 0.73x from some point in a server's life until a restart; they now hold their speed, with the same tokens (fixes #1868).
