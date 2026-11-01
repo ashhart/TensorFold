@@ -6,7 +6,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Shared draft rounds price each stream's drafts before drafting, and a stream whose drafts would get no verify rows skips the drafter's proposal work, for Nemotron, Qwen's MTP, GLM, Gemma 4 (assistant and DFlash) and attached LFM2 drafters, on CUDA and Metal; each family keeps its head step's cost in the price. Replies are unchanged. Nemotron 3.5 Lightning with its MTP head: on an M5 Ultra, 16-stream chat +9.0% greedy and +4.7% sampled; on a GB10, 16 streams +2.1% and 8 streams +1.1%.
 
-- Opt-in external-drafter chain pricing composes with shared-row reservations: the last verified grant bounds the next hold, the drafter's own chances price its rows, and only positively reserved holds that pay for their pass survive. A zero reservation skips the hold while retaining the context needed for a later one.
+- Opt-in external-drafter chain pricing composes with shared-row reservations: the last verified grant bounds the next hold, and the drafter's own chances price its rows. Measured hold costs filter positive reservations while preserving periodic probes; a zero reservation skips the hold and retains context for a later one.
 
 - MOSS-Image's image decoder (the checkpoint's FLUX.2 small VAE, in float32 as the pipeline runs it) runs on Metal inside the `moss_image` family, and `tf-moss-image` writes `picture.png` itself, so torch no longer decodes (#1687, #1504). Thanks to @BobClawblaw.
 
