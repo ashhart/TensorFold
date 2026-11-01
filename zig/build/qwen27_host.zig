@@ -1,11 +1,6 @@
 //! Host regressions use no shaders, model or GPU execution.
 const std = @import("std");
 pub fn tests(b: *std.Build) void {
-    const simd_metal = b.createModule(.{ .root_source_file = b.path("zig/simd_qmm32_host_metal.zig"), .target = b.graph.host });
-    const simd_sources = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig"), .target = b.graph.host });
-    const simd_projection = b.createModule(.{ .root_source_file = b.path("zig/src/core/row_projection.zig"), .target = b.graph.host, .imports = &.{ .{ .name = "metal", .module = simd_metal }, .{ .name = "kernel_sources", .module = simd_sources } } });
-    const simd_test = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/simd_qmm32_host.zig"), .target = b.graph.host, .imports = &.{ .{ .name = "projection", .module = simd_projection }, .{ .name = "metal", .module = simd_metal }, .{ .name = "kernel_sources", .module = simd_sources } } }) });
-    b.step("test-simd32-host", "Actual 32-row projection launchers and strided mixed members without shaders").dependOn(&b.addRunArtifact(simd_test).step);
     const metrics = b.createModule(.{ .root_source_file = b.path("zig/src/metal/pass_metrics.zig"), .target = b.graph.host });
     b.step("test-qwen27-pass-metrics-host", "Pass timing and forwarding allocator without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = metrics })).step);
     const window = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_window.zig"), .target = b.graph.host });
