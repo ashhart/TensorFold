@@ -83,6 +83,7 @@ pub const all_metal = @import("penalties_records.zig").records ++
     @import("lane_q8_records.zig").records ++
     @import("attention_pv_records.zig").records ++
     registry.metal ++
+    @import("qwen27_records.zig").metal ++
     @import("delta_slots_records.zig").records ++
     @import("flashnext_pending.zig").records ++
     @import("simd_pairs_records.zig").records ++
