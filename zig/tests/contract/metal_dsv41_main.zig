@@ -9,6 +9,9 @@ const dsv41_fp8_rows = @import("metal_dsv41_fp8_rows.zig");
 const dsv41_fp8_mma = @import("metal_dsv41_fp8_mma.zig");
 const dsv41_experts = @import("metal_dsv41_experts.zig");
 const dsv41_xmma = @import("metal_dsv41_xmma.zig");
+const dsv41_mv = @import("metal_dsv41_mv.zig");
+const dsv41_glue_tmp = @import("metal_dsv41_glue_tmp.zig");
+const dsv41_glue_tmp2 = @import("metal_dsv41_glue_tmp2.zig");
 
 /// Every dsv41 suite, created and destroyed in the order main held them.
 pub const Suites = struct {
@@ -17,6 +20,9 @@ pub const Suites = struct {
     attn: *dsv41_attn.Suite,
     experts: *dsv41_experts.Suite,
     xmma: *dsv41_xmma.Suite,
+    mv: *dsv41_mv.Suite,
+    glue_tmp: *dsv41_glue_tmp.Suite,
+    glue_tmp2: *dsv41_glue_tmp2.Suite,
 
     pub fn create(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !Suites {
         const fp8 = try dsv41_fp8_rows.Suite.create(a, device, queue, kernels, only);
@@ -29,10 +35,19 @@ pub const Suites = struct {
         errdefer experts.destroy();
         const xmma = try dsv41_xmma.Suite.create(a, device, queue, kernels, only);
         errdefer xmma.destroy();
-        return .{ .fp8 = fp8, .fp8_mma = fp8_mma, .attn = attn, .experts = experts, .xmma = xmma };
+        const mv = try dsv41_mv.Suite.create(a, device, queue, kernels, only);
+        errdefer mv.destroy();
+        const glue_tmp = try dsv41_glue_tmp.Suite.create(a, device, queue, kernels, only);
+        errdefer glue_tmp.destroy();
+        const glue_tmp2 = try dsv41_glue_tmp2.Suite.create(a, device, queue, kernels, only);
+        errdefer glue_tmp2.destroy();
+        return .{ .fp8 = fp8, .fp8_mma = fp8_mma, .attn = attn, .experts = experts, .xmma = xmma, .mv = mv, .glue_tmp = glue_tmp, .glue_tmp2 = glue_tmp2 };
     }
 
     pub fn destroy(s: *Suites) void {
+        s.glue_tmp2.destroy();
+        s.glue_tmp.destroy();
+        s.mv.destroy();
         s.xmma.destroy();
         s.experts.destroy();
         s.attn.destroy();
@@ -53,5 +68,12 @@ pub const Suites = struct {
         if (std.c.getenv("TF_DSV41_TIME") != null) try s.fp8_mma.timing(io);
         try s.attn.invariance(io, seed, t);
         if (std.c.getenv("TF_DSV41_TIME") != null) try s.attn.timing(io);
+        if (s.mv.probes.items.len > 0) {
+            t.failed += try s.mv.invariance(seed);
+            t.failed += try s.mv.equality(seed);
+            t.failed += try s.mv.head(io, seed, std.c.getenv("TF_DSV41_TIME") != null);
+        }
+        t.failed += try s.glue_tmp.invariance(seed);
+        t.failed += try s.glue_tmp2.invariance(seed);
     }
 };
