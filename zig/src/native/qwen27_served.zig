@@ -31,7 +31,11 @@ pub const Options = struct {
     learn: ?disk.Learn = null, // --learn-conversations: kept states written behind to disk and read back
     vision: ?api.VisionOpen = null, // --vision: open loads the image tower, and requests may hold images
     images: ?*images.Vision = null, // the loaded tower attach serves (and the host then owns)
+    decision: ?Decision = null, // a slot_lm checkpoint: decisions only (Engine.decide), chat refused
 };
+
+/// The checkpoint folder whose LM head gives the answer slots, and how its full-attention layers read a block.
+pub const Decision = struct { dir: []const u8, readout: q.readout.Readout };
 
 pub const Host = struct {
     gpa: Allocator,
@@ -52,6 +56,7 @@ pub const Host = struct {
     disk_stage: ?mtl.Buffer = null, // copies out of private kept states for the disk (qwen27_disk.zig)
     vision: ?*images.Vision = null, // --vision's tower and image rows
     spares: q.snapshot.Spares = .{}, // dropped kept states' buffers, for the next saves
+    decider: ?*@import("qwen27_decide.zig").Decider = null, // a decision checkpoint's (Options.decision)
 
     pub fn engine(h: *Host) api.Engine {
         return h.host.engine();
@@ -91,6 +96,13 @@ pub const Host = struct {
         if (@import("qwen27_resume.zig").checkpointFits(store, key, at, s.reuse.marks, s.decode_spans)) {
             if (s.reuse.hook) |k| k.at(k.ptr, s, at);
         }
+    }
+
+    /// Engine.decide's runner, on the engine thread between rounds: slot 0 holds no stream (chat is refused).
+    fn decide(ptr: *anyopaque, d: *api.Decision) anyerror!void {
+        const h = of(ptr);
+        if (h.back.owners[0] != null) return error.DecisionSlotBusy;
+        return h.decider.?.decide(d);
     }
 
     /// Info.vision's prepare, on the HTTP thread.
@@ -288,9 +300,19 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
         why.* = try drafterRefusal(a, dir, d, err);
         return err;
     };
+    var problem: []const u8 = "";
+    const readout = q.readout.read(a, io, dir, &problem) catch |err| {
+        if (err == error.Refused) why.* = try std.fmt.allocPrint(a, "{s}: {s}", .{ dir, problem });
+        return err;
+    };
     const model = try q.model.Model.loadDeferred(gpa, io, dir, 128);
     errdefer model.deinit();
     var with = o;
+    if (readout) |r| {
+        with.decision = .{ .dir = dir, .readout = r };
+        with.streams = 1; // decisions take turns on slot 0; chat is refused, so no other slot is used
+        with.streams_fixed = false;
+    }
     // the tower before the slots: their room and the cache's budget count it as taken
     if (o.vision) |v| with.images = try images.open(gpa, io, model, dir, v, a, why);
     errdefer if (with.images) |v| v.deinit();
@@ -362,6 +384,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.disk_stage = null;
     h.vision = o.images; // closed with the host; a failed attach leaves it to the caller
     h.trace = null;
+    h.decider = null;
     h.runner = try q.decode_round.Runner.initReady(gpa, model, slots, capacity + window, 1);
     errdefer h.runner.deinit();
     if (profileEvery()) |every| {
@@ -411,6 +434,8 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     errdefer if (h.cache) |*store| store.deinit();
     if (o.learn) |l| try disk.attach(h, io, a, l);
     errdefer if (h.cache) |*store| if (store.disk) |r| r.deinit();
+    if (o.decision) |dec| try attachDecider(h, io, dec);
+    errdefer if (h.decider) |d| closeDecider(h.gpa, d);
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     if (h.trace) |*t| t.enabled = true; // serving rounds count from here: measure() timed whole, unsplit buffers
     try h.host.start();
@@ -418,6 +443,22 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     const drafts = if (h.draft) |d| std.fmt.bufPrint(&drafts_buf, ", {s} drafts for one of them", .{d.model.graph.config.kind()}) catch "" else "";
     std.log.info("Qwen3.8-27B: {d} streams of {d} tokens{s}{s}", .{ slots, capacity, drafts, if (o.images != null) ", images read" else "" });
     return h;
+}
+
+/// A slot_lm checkpoint's decider beside the runner: Info.decides, so the server refuses text requests.
+fn attachDecider(h: *Host, io: std.Io, dec: Decision) !void {
+    const d = try h.gpa.create(@import("qwen27_decide.zig").Decider);
+    errdefer h.gpa.destroy(d);
+    d.* = try .init(h.gpa, io, dec.dir, &h.runner, @intCast(h.back.chunk), dec.readout.attention == .block_bidirectional);
+    h.decider = d;
+    h.host.decider = .{ .ctx = h, .run = Host.decide };
+    h.host.info_.decides = true;
+    std.log.info("qwen27: decisions only (slot_lm readout, {t} full attention, {d}-row passes)", .{ dec.readout.attention, d.chunk });
+}
+
+fn closeDecider(gpa: Allocator, d: *@import("qwen27_decide.zig").Decider) void {
+    d.deinit();
+    gpa.destroy(d);
 }
 
 /// TF_Q27_PROFILE's rounds between log reports, or null (off); a value it cannot read leaves profiling off.
@@ -484,6 +525,7 @@ pub fn close(ptr: *anyopaque) void {
     h.back.deinit();
     if (h.draft) |d| d.deinit();
     if (h.trace) |*t| t.reportRest();
+    if (h.decider) |d| closeDecider(h.gpa, d);
     h.runner.deinit();
     if (h.vision) |v| v.deinit();
     if (h.owns_model) h.model.deinit();
@@ -492,6 +534,7 @@ pub fn close(ptr: *anyopaque) void {
 
 test {
     _ = @import("qwen27_share_fit.zig");
+    _ = @import("qwen27_decide.zig");
 }
 
 test "Qwen27 interior state uses a guaranteed cold request cut" {
