@@ -25,7 +25,6 @@ const Priced = struct {
     inner_hold: *const fn (*anyopaque, []const dr.Hold) anyerror!void = undefined,
     at: std.AutoHashMapUnmanaged(*sm.Stream, u64) = .empty, // each stream's last hold's position
     asked: u32 = 0,
-    held: u64 = 0, // drafts its holds asked for
 
     fn of(ptr: *anyopaque) *Priced {
         return @fieldParentPtr("head", @as(*dt.FakeDrafter, @ptrCast(@alignCast(ptr))));
@@ -35,7 +34,6 @@ const Priced = struct {
         const p = of(ptr);
         for (items) |it| {
             try p.at.put(gpa, it.stream, it.position);
-            p.held += it.depth;
         }
         return p.inner_hold(ptr, items);
     }
@@ -96,9 +94,9 @@ fn base() Model {
     return .{ .exact_width = 16, .gpu_tokens = true, .window_costs = &costs, .hidden_rows = true, .batch_rows = 32, .max_streams = most_streams };
 }
 
-const Run = struct { tokens: [most_streams][64]u32 = undefined, lens: [most_streams]usize = @splat(0), drafted: u64 = 0, holds: u32 = 0, asked: u32 = 0, ragged: u32 = 0, rows: u64 = 0, held: u64 = 0 };
+const Run = struct { tokens: [most_streams][64]u32 = undefined, lens: [most_streams]usize = @splat(0), drafted: u64 = 0, holds: u32 = 0, asked: u32 = 0, ragged: u32 = 0, rows: u64 = 0 };
 
-/// The drafter's Facts.slack for the next runs (0: the depth rule's own; 9: every hold the whole block).
+/// The drafter's Facts.slack for following runs; fresh reservations still cap each hold.
 var slack: u32 = 0;
 
 /// The drafter's chances: equal everywhere, or knowing its wrong guesses (a confidence head that ranks well).
@@ -136,7 +134,7 @@ fn run(prompts: []const []const u32, drafts: bool, floor: ?f64, head: Head) !Run
     defer for (streams[0..n]) |*s| s.deinit(gpa);
     for (streams[0..n]) |*s| try engine.addStream(s);
     while (engine.activeCount() > 0) try engine.step();
-    var out: Run = .{ .holds = p.head.holds, .asked = p.asked, .ragged = Seen.ragged, .rows = Seen.rows, .held = p.held };
+    var out: Run = .{ .holds = p.head.holds, .asked = p.asked, .ragged = Seen.ragged, .rows = Seen.rows };
     for (streams[0..n], 0..) |*s, i| {
         out.lens[i] = s.emitted().len;
         @memcpy(out.tokens[i][0..out.lens[i]], s.emitted());
@@ -243,7 +241,7 @@ test "a granted depth: the deepest chain first, then the grant plus its slack, a
     try std.testing.expectEqual(@as(usize, 1), drafted); // one probe of draft_slack drafts in the first eight rounds
 }
 
-test "holds as wide as the grants: replies equal one-token decode at 1, 4 and 8 streams, fewer drafts than whole blocks" {
+test "chance-priced holds preserve one-token replies across stream counts and slack choices" {
     var buf: [most_streams][]const u32 = undefined;
     defer slack = 0;
     for ([_]usize{ 1, 4, 8 }) |n| {
@@ -260,7 +258,6 @@ test "holds as wide as the grants: replies equal one-token decode at 1, 4 and 8 
             try expectSame(plain, two, n);
             try expectSame(plain, whole, n);
             try std.testing.expect(narrow.drafted > 0);
-            try std.testing.expect(narrow.held < two.held and two.held < whole.held);
         }
     }
 }

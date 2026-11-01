@@ -153,7 +153,7 @@ pub const Drafter = struct {
     /// Chains of up to 6, one assistant forward a draft: the rule prices each draft and may choose none.
     fn factsFn(ptr: *anyopaque) dr.Facts {
         const x = cast(ptr);
-        return .{ .depth = depth, .step_ms = x.step_ms, .batched = true, .stream_bytes = x.m.geo.hidden * 2, .window_costs = &x.costs };
+        return .{ .limit_shared_drafts = true, .depth = depth, .step_ms = x.step_ms, .batched = true, .stream_bytes = x.m.geo.hidden * 2, .window_costs = &x.costs };
     }
 
     fn newLane(x: *Drafter) !*Lane {
@@ -196,8 +196,10 @@ pub const Drafter = struct {
     /// Each stream's last absorbed row through the target's final norm into its lane, queued on the target's stream.
     fn absorbFn(ptr: *anyopaque, items: []const dr.Absorb) anyerror!void {
         const x = cast(ptr);
+        if (!try @import("assistant_budget.zig").useful(x, items)) return;
         const width = x.m.geo.hidden * 2;
         for (items) |it| {
+            if (!it.propose) continue;
             const l = x.lanes.get(it.stream) orelse return error.DraftStreamUnknown;
             const f = it.features;
             if (f.space != .device or f.dtype != .bf16 or f.row_bytes != width or f.rows == 0 or it.follow.len < f.rows) return error.DraftFeaturesUnsupported;
@@ -378,3 +380,7 @@ pub const Drafter = struct {
         }
     }
 };
+
+test {
+    _ = @import("assistant_budget.zig").Cases(Drafter, Lane);
+}

@@ -594,3 +594,7 @@ test "Qwen share faults: --parallel N admits N streams at once with every stream
 test "Qwen stepped prefill: cancel between host iterations retains only the last completed cut" {
     try @import("cuda_prefill_test.zig").cancelled(Lanes, Lanes.backend);
 }
+
+test {
+    _ = @import("cuda_mtp_budget.zig");
+}

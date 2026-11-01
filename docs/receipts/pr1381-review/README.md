@@ -1,5 +1,52 @@
 # PR 1381 standalone review fixes
 
+## Composition with requested main `cb036e00f`
+
+The shared-reservation stack is integrated without restoring the rejected shared-round guard.
+Historical grants and new reservations remain distinct:
+
+1. `granted_depth` reads the last **verified** grant, its short-grant flag and configured slack. Its periodic
+   zero-grant probe is evaluated once. This bounds what the next reservation may request.
+2. The shared allocator reserves rows using the drafter's cached chain chances, even when that historical
+   depth bound exists. The reservation decision queries a stateful copy proposer once.
+3. The actual reservation is capped to the hold pass's padded capacity, then `payHolds` prices only its
+   positive holds. Expected gain is recomputed from the usable chance prefix. These steps only reduce depths.
+4. A fresh zero reservation therefore never offers a hold. A historical zero grant may still probe, but only
+   if the new reservation supplies positive rows. Context absorption continues before the depth-zero skip,
+   so later holds retain continuous history.
+
+`limit_shared_drafts` keeps upstream's legacy head-step-cost meaning. LFM2's target facts set it, but upstream's
+attached-drafter classification excludes its legacy cap for node prices and confidence floors. The opt-in
+`granted_depth` path composes its own bound with reservations independently; it neither reinterprets
+`Stream.granted` nor replaces the drafter's chain chances with generic rates. Confidence and other-family
+legacy caps retain their existing paths.
+
+The focused regressions cover bounds, zero-to-positive transitions, chance pricing, padded-pass capacity,
+reserved gain, probe cadence and copy lookup. The mechanical merge without the composition fails seven of
+the nine new regressions. An independently compiled host API smoke also reproduces an unpaid hold pass
+before the fix: four positive holds survive a 1000 ms hold price. With the composition they are all rejected;
+profitable holds remain and zero reservations stay zero, without mutating historical grant fields.
+
+Current-main scoped checks use Zig 0.17.0 and `-Dcpu=apple_m1 -Dversion=1.2.0`:
+
+```sh
+zig build native test-native test-shared-lane-regressions-host \
+  test-shared-head-cost-metal-host test-draft-metal-host test-contract-images-host \
+  -Dcpu=apple_m1 -Dversion=1.2.0 -j2
+```
+
+The lane suite passes 299/299, including the complete absorbed-history comparison before every later hold;
+the Metal family head-cost checks pass 48/48, draft-host checks 11/11, and native checks 93 with three skips.
+The pinned main checker (`985356b424269b8d11e8a486223cf3c9aa1e726bb4761ad4a414482352024367`)
+reports 424 inherited findings on both trees, zero new. Only obsolete comparisons against deliberately wasted
+holds/full-block counts were removed: reservations now optimize both sides of those comparisons. Token
+equality, copy-skip, bound, price and zero-row gates remain.
+
+The historical results below retain their original source and device scope. They do not qualify the new
+DSpark chain's complete no-slowdown matrix.
+
+## Historical device receipt
+
 The lane changes are rebased onto main `d33dcfc767ee093393c6bfa00b3949bd7b4d8e88`, without the rejected guard ancestry. Source `745fe1088ab7293b5bc4f28c6cdedb989e83ec4f` retains the opt-in chance/grant/hold features, reuses the hold-order buffer, interpolates adjacent measured depths and queries a stateful copy proposer only once per granted-depth budget decision.
 
 Host checks: `zig build test-shared-lane-regressions-host test-draft-metal-host -Dcpu=apple_m1 -Dversion=1.1.8 --summary all` passes 57/57 steps, 290/290 tests. Plain `zig build -Dcpu=apple_m1 -Dversion=1.1.8 --summary all` passes 236/236 steps. Zig is 0.17.0. Formatting and whitespace pass. The same lean checker reports 425 findings on current main and this branch, zero new.

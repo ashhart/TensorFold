@@ -39,6 +39,7 @@ pub const identity = @import("core").checkpoint_identity;
 test {
     _ = @import("cuda_bolt_lanes_test.zig");
     _ = @import("cuda_lanes.zig");
+    _ = @import("cuda_shared_grants_test.zig");
     _ = vision;
     _ = @import("cuda_sm89_test.zig");
     _ = @import("config.zig");

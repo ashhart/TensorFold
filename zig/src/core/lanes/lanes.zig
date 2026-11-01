@@ -27,9 +27,12 @@ pub const backend = @import("backend.zig");
 pub const embedding = @import("embedding.zig");
 pub const events = @import("events.zig");
 pub const windows = @import("windows.zig");
+pub const shared_drafts = @import("shared_drafts.zig");
 pub const trail = @import("trail.zig");
 pub const engine = @import("engine.zig");
 pub const fake = @import("fake.zig");
+pub const shared_head_cost_check = @import("shared_head_cost_check.zig");
+pub const shared_draft_check = @import("shared_draft_check.zig");
 pub const drafter = @import("drafter.zig");
 pub const drafted = @import("drafted.zig");
 pub const recorder = @import("recorder.zig");
@@ -73,6 +76,7 @@ test {
     _ = @import("fill_trim_test.zig");
     _ = @import("fair_turns_test.zig");
     _ = @import("copied_rate_test.zig");
+    _ = @import("granted_reservation_test.zig");
 }
 
 pub const learned_disk = @import("learned_disk.zig");
