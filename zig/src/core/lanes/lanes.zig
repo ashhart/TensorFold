@@ -63,6 +63,7 @@ test {
     _ = @import("gpu_full_test.zig");
     _ = @import("drafted_test.zig");
     _ = @import("drafted_chances_test.zig");
+    _ = @import("hold_recovery_test.zig");
     _ = @import("drafted_copy_test.zig");
     _ = @import("root_copy_test.zig");
     _ = @import("drafted_grammar_test.zig");

@@ -26,6 +26,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Opt-in external-drafter chain pricing composes with shared-row reservations: the last verified grant bounds the next hold, and the drafter's own chances price its rows. Measured hold costs filter positive reservations while preserving periodic probes; a zero reservation skips the hold and retains context for a later one. Observed rounds subtract that priced padded pass, not a linear head-step estimate, from fixed overhead.
 
+- Confidence-priced external-drafter holds use observed head acceptance to stand aside when their pass does not pay. Separate hold-value estimates start from actual trials, while reservation fallback retains its original prior. Suppressed holds can recover through the existing periodic probe backoff. One-stream and shared rounds use the same fresh-reservation and padded-pass pricing; verify confidence, context retention and absent-head fallback remain unchanged. Deferred hold GPU cost is attributed where it settles, without extra waits. Full no-slowdown qualification remains separate.
+
 - LFM2 DSpark's allocation-failure regression now derives the warm-up failure point from scratch preparation and disables in-place allocator growth, so scratch and warm-up cleanup are tested without reaching uninitialized model state. Serving behavior is unchanged.
 
 - MOSS-Image's image decoder (the checkpoint's FLUX.2 small VAE, in float32 as the pipeline runs it) runs on Metal inside the `moss_image` family, and `tf-moss-image` writes `picture.png` itself, so torch no longer decodes (#1687, #1504). Thanks to @BobClawblaw.

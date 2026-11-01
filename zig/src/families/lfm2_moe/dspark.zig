@@ -91,6 +91,7 @@ pub const Drafter = struct {
     step_ms: f64 = 0,
     holds: [2 * pass_rows]lanes.hold_price.HoldCost = undefined, // the power-of-two block counts sum to fewer than 2 * pass_rows depths
     holds_len: usize = 0,
+    hold_spent_ms: f64 = 0, // completed hold GPU time; drained at round boundaries, never waits to read it
     event: mtl.Event = undefined,
     signalled: u64 = 0,
     pending: ?mtl.CommandBuffer = null,
@@ -183,7 +184,7 @@ pub const Drafter = struct {
     }
 
     pub fn drafter(d: *Drafter) dr.Drafter {
-        return .{ .ptr = d, .vtable = &.{ .taps = tapsFn, .facts = factsFn, .open = openFn, .absorb = absorbFn, .hold = holdFn, .held = heldFn, .release = releaseFn, .chances = chancesFn } };
+        return .{ .ptr = d, .hold_timing = .{ .ptr = d, .take = block.takeHoldMs }, .vtable = &.{ .taps = tapsFn, .facts = factsFn, .open = openFn, .absorb = absorbFn, .hold = holdFn, .held = heldFn, .release = releaseFn, .chances = chancesFn } };
     }
 
     /// Whether holds compute the confidence head: the verify rows follow its chances, else the core's depth rule.
@@ -454,7 +455,9 @@ pub const Drafter = struct {
             std.log.err("lfm2 dspark: a hold failed on the GPU: {s}", .{msg});
             return error.DraftGpuFailed;
         }
-        d.priceHold((cb.gpuEnd() - cb.gpuStart()) * 1000);
+        const ms = (cb.gpuEnd() - cb.gpuStart()) * 1000;
+        d.hold_spent_ms += ms;
+        d.priceHold(ms);
         try block.readPicks(d, d.pass[0..d.pass_len], d.depths[0..d.pass_len]);
     }
 
