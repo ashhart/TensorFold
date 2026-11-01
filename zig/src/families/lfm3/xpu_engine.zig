@@ -121,7 +121,7 @@ pub const Engine = struct {
         var t = from;
         while (t < to) {
             const n = @min(w, to - t);
-            try e.m.forward(ids[t .. t + n], t + n == ids.len, null);
+            try e.m.forwardPrompt(ids[t .. t + n], t + n == ids.len, null);
             t += n;
         }
     }
@@ -226,7 +226,7 @@ pub const Engine = struct {
         const w = @min(rows, e.window_rows);
         while (t < head.len) {
             const n = @min(w, head.len - t);
-            try e.m.forward(head[t .. t + n], false, null);
+            try e.m.forwardPrompt(head[t .. t + n], false, null);
             t += n;
         }
         try e.r.sync();

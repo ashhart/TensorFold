@@ -102,7 +102,7 @@ pub fn main(init: std.process.Init) !void {
         while (i < T) {
             const n = @min(T - i, rows);
             keep.row0 = i;
-            try m.forward(ids[i .. i + n], i + n == T, hk);
+            try m.forwardPrompt(ids[i .. i + n], i + n == T, hk);
             i += n;
         }
         const next = try m.argmax();
