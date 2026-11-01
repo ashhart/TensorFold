@@ -252,16 +252,19 @@ extern "C" __global__ void __launch_bounds__(64) tf_q4_experts_nt(const bf16* x,
 }
 
 // The packed table's block of expert e (experts_pack.cu, group 32: 128 code words, then 32 of scales and biases).
+template <int H>
 __device__ __forceinline__ const unsigned* packed_block(const unsigned* w, int stack, int half, size_t e, int R, int K, int r,
                                                         int k) {
-    const size_t b = (e * (size_t)(R / 32) + (size_t)(r / 32)) * (size_t)(K / 32) + (size_t)(k / 32);
-    return w + (b * stack + half) * 160;
+    const size_t b = (e * (size_t)(R / 32) + (size_t)(r / 32)) * (size_t)(K / (32 * H)) + (size_t)(k / (32 * H));
+    return w + (b * stack + half) * (128 * H + 32);
 }
 
 // Row rr's word kk (codes 8 kk .. 8 kk + 7 of the block's 32 inputs) in MLX's order: code j at bits 4 j.
+template <int H>
 __device__ __forceinline__ unsigned packed_word(const unsigned* blk, int rr, int kk) {
-    const int i = rr * 4 + kk;
-    const unsigned p = blk[(i % 32) * 4 + i / 32];
+    const int t = rr / 8, r = rr % 8, q = kk / H, j = kk % H;
+    const int f = ((t * H + j) * 8 + r) * 4 + q;
+    const unsigned p = blk[(f / 128) * 128 + (f % 32) * 4 + (f / 32) % 4];
     unsigned out = 0;
 #pragma unroll
     for (int j = 0; j < 4; j++) out |= (((p >> (4 * j)) & 0xfu) << (8 * j)) | (((p >> (16 + 4 * j)) & 0xfu) << (8 * j + 4));
@@ -269,15 +272,17 @@ __device__ __forceinline__ unsigned packed_word(const unsigned* blk, int rr, int
 }
 
 // Row rr's scale and bias in its block.
+template <int H>
 __device__ __forceinline__ void packed_sb(const unsigned* blk, int rr, float& s, float& b) {
     const int t = rr / 8, p = (rr % 8) / 2, hi = rr % 2;
-    const unsigned ws = blk[128 + p * 8 + t], wb = blk[128 + p * 8 + 4 + t];
+    const unsigned ws = blk[128 * H + p * 8 + t], wb = blk[128 * H + p * 8 + 4 + t];
     s = __uint_as_float((hi ? ws >> 16 : ws & 0xffffu) << 16);
     b = __uint_as_float((hi ? wb >> 16 : wb & 0xffffu) << 16);
 }
 
 // tf_q4_experts_nt over the packed table w [E, n_out, k_in] (`stack` tables side by side, `half` picks one).
-extern "C" __global__ void __launch_bounds__(64) tf_q4_experts_nt_packed(const bf16* x, int ldx, const int* order, int slots,
+template <int H>
+__device__ __forceinline__ void packed_nt(const bf16* x, int ldx, const int* order, int slots,
                                                                         const unsigned* w, int stack, int half,
                                                                         const unsigned* tiles, const int* offsets, float* y, int ldy,
                                                                         int col0, int pairs, int k_in, int n_out, int routed) {
@@ -297,10 +302,10 @@ extern "C" __global__ void __launch_bounds__(64) tf_q4_experts_nt_packed(const b
         }
         for (int i = t; i < 64 * 4; i += 64) {
             const int nn = i / 4, c = i % 4, n = n0 + nn;
-            const unsigned* blk = packed_block(w, stack, half, e, n_out, k_in, n, k0);
-            const unsigned q = packed_word(blk, n % 32, c);
+            const unsigned* blk = packed_block<H>(w, stack, half, e, n_out, k_in, n, k0);
+            const unsigned q = packed_word<H>(blk, n % 32, (k0 % (32 * H)) / 8 + c);
             float sc, bi;
-            packed_sb(blk, n % 32, sc, bi);
+            packed_sb<H>(blk, n % 32, sc, bi);
             for (int j = 0; j < 8; j++) ws[c * 8 + j][nn] = fmaf(sc, (float)((q >> (4 * j)) & 0xfu), bi);
         }
         __syncthreads();
@@ -323,7 +328,8 @@ extern "C" __global__ void __launch_bounds__(64) tf_q4_experts_nt_packed(const b
 }
 
 // tf_q4_experts_mm over the packed table w [E, n_in, k_out].
-extern "C" __global__ void __launch_bounds__(64) tf_q4_experts_mm_packed(const float* x, int ldx, const int* order, int slots,
+template <int H>
+__device__ __forceinline__ void packed_mm(const float* x, int ldx, const int* order, int slots,
                                                                         const unsigned* w, int stack, int half,
                                                                         const unsigned* tiles, const int* offsets, float* y, int pairs,
                                                                         int n_in, int k_out, int routed, int accumulate) {
@@ -343,10 +349,10 @@ extern "C" __global__ void __launch_bounds__(64) tf_q4_experts_mm_packed(const f
         }
         for (int i = t; i < 32 * 8; i += 64) {
             const int n = n0 + i / 8, kw = i % 8, k = k0 + kw * 8;
-            const unsigned* blk = packed_block(w, stack, half, e, n_in, k_out, n, k);
-            const unsigned q = packed_word(blk, n % 32, (k % 32) / 8);
+            const unsigned* blk = packed_block<H>(w, stack, half, e, n_in, k_out, n, k);
+            const unsigned q = packed_word<H>(blk, n % 32, (k % (32 * H)) / 8);
             float sc, bi;
-            packed_sb(blk, n % 32, sc, bi);
+            packed_sb<H>(blk, n % 32, sc, bi);
             for (int j = 0; j < 8; j++) ws[i / 8][kw * 8 + j] = fmaf(sc, (float)((q >> (4 * j)) & 0xfu), bi);
         }
         __syncthreads();
@@ -373,6 +379,28 @@ extern "C" __global__ void __launch_bounds__(64) tf_q4_experts_mm_packed(const f
         }
         *out = v;
     }
+}
+
+extern "C" __global__ void __launch_bounds__(64) tf_q4_experts_nt_packed(const bf16* x, int ldx, const int* order, int slots,
+    const unsigned* w, int stack, int half, const unsigned* tiles, const int* offsets, float* y, int ldy,
+    int col0, int pairs, int k_in, int n_out, int routed) {
+    packed_nt<1>(x, ldx, order, slots, w, stack, half, tiles, offsets, y, ldy, col0, pairs, k_in, n_out, routed);
+}
+extern "C" __global__ void __launch_bounds__(64) tf_q4_experts_mm_packed(const float* x, int ldx, const int* order, int slots,
+    const unsigned* w, int stack, int half, const unsigned* tiles, const int* offsets, float* y, int pairs,
+    int n_in, int k_out, int routed, int accumulate) {
+    packed_mm<1>(x, ldx, order, slots, w, stack, half, tiles, offsets, y, pairs, n_in, k_out, routed, accumulate);
+}
+
+extern "C" __global__ void __launch_bounds__(64) tf_q4_experts_nt_packed64(const bf16* x, int ldx, const int* order, int slots,
+    const unsigned* w, int stack, int half, const unsigned* tiles, const int* offsets, float* y, int ldy,
+    int col0, int pairs, int k_in, int n_out, int routed) {
+    packed_nt<2>(x, ldx, order, slots, w, stack, half, tiles, offsets, y, ldy, col0, pairs, k_in, n_out, routed);
+}
+extern "C" __global__ void __launch_bounds__(64) tf_q4_experts_mm_packed64(const float* x, int ldx, const int* order, int slots,
+    const unsigned* w, int stack, int half, const unsigned* tiles, const int* offsets, float* y, int pairs,
+    int n_in, int k_out, int routed, int accumulate) {
+    packed_mm<2>(x, ldx, order, slots, w, stack, half, tiles, offsets, y, pairs, n_in, k_out, routed, accumulate);
 }
 
 // Pair s's SwiGLU undone from dact: a[p] = dact . act (dL/d its weight), dgu = wt[p] (dact u silu'(g), dact silu(g)).

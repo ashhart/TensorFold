@@ -20,5 +20,5 @@ pub fn host(b: *std.Build, cuda: *std.Build.Module, qwen: *std.Build.Module, dra
     const fake = family(b, t, .debug, fake_cuda, draft_ids);
     const constructors = b.addRunArtifact(b.addTest(.{ .root_module = fake.qwen35, .filters = &.{"dense constructor:"} }));
     b.step("test-dense-constructors-host", "Actual dense constructor ownership and completion failures").dependOn(&constructors.step);
-    _ = cuda;
+    b.step("test-packed-experts-host", "Packed adjoints layout and launch bounds without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda, .filters = &.{ "MoE packed:", "Quantized adjoints:" } })).step);
 }

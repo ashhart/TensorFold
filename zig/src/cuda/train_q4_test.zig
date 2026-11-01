@@ -6,7 +6,9 @@ const Driver = @import("driver.zig").Driver;
 const Module = @import("module.zig");
 const t = std.testing;
 var launches: usize = 0;
-fn launch(_: abi.Function, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: abi.Stream, _: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) abi.Result {
+var symbols: [32]usize = @splat(0);
+fn launch(f: abi.Function, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: abi.Stream, _: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) abi.Result {
+    symbols[launches] = @intFromPtr(f.?);
     launches += 1;
     return 0;
 }
@@ -77,4 +79,21 @@ test "Quantized adjoints: supported expert boundary still launches all forward-a
     launches = 0;
     try o.moeBackPacked(.{ .up = 1, .down = 2, .routed = 512, .width = 640, .dim = 2560 }, 5, kept, 6, 7, scratch, 17, 10);
     try t.expectEqual(@as(usize, 11), launches);
+}
+
+test "MoE packed: group 64 selects its two adjoints; group 32 keeps its original symbols" {
+    for ([_]usize{ 32, 64 }) |group| {
+        var x: Rig = .{};
+        x.init();
+        for (&x.k.fq, 0..) |*f, i| f.handle = @ptrFromInt(100 + i);
+        try x.ops().moeBackPacked(.{ .up = 1, .down = 2, .routed = 256, .width = 512, .dim = 2048, .group = group }, 5, kept, 6, 7, scratch, 3, 8);
+        try t.expectEqual(@as(usize, 11), launches);
+        const nt: usize = if (group == 64) 110 else 106;
+        const mm: usize = if (group == 64) 111 else 107;
+        try t.expectEqual(nt, symbols[3]);
+        try t.expectEqual(nt, symbols[4]);
+        try t.expectEqual(mm, symbols[5]);
+        try t.expectEqual(mm, symbols[7]);
+        try t.expectEqual(mm, symbols[8]);
+    }
 }

@@ -35,7 +35,7 @@ pub const Experts = struct {
 };
 
 /// Experts as experts_pack.cu packs them (group 32): `up` gate | up block by block, `down` alone; `routed` the shared.
-pub const PackedExperts = struct { up: u64, down: u64, routed: usize, width: usize, dim: usize };
+pub const PackedExperts = struct { up: u64, down: u64, routed: usize, width: usize, dim: usize, group: usize = 32 };
 
 /// What the MoE layer kept: x [rows, d] bf16, ids [rows, slots] (top_k, then the shared one), wts [rows, slots] fp32.
 pub const MoeKept = struct { x: u64, ids: u64, wts: u64 };
@@ -56,8 +56,9 @@ pub const MoeScratch = struct {
 };
 
 const q4_names = [_][:0]const u8{
-    "tf_q4_back",        "tf_q4_back_bf",           "tf_q4_sum_parts",         "tf_q4_experts_mm", "tf_q4_experts_nt",
-    "tf_q4_swiglu_back", "tf_q4_experts_nt_packed", "tf_q4_experts_mm_packed", "tf_q4_route_back", "tf_q4_axpy",
+    "tf_q4_back",                "tf_q4_back_bf",             "tf_q4_sum_parts",         "tf_q4_experts_mm", "tf_q4_experts_nt",
+    "tf_q4_swiglu_back",         "tf_q4_experts_nt_packed",   "tf_q4_experts_mm_packed", "tf_q4_route_back", "tf_q4_axpy",
+    "tf_q4_experts_nt_packed64", "tf_q4_experts_mm_packed64",
 };
 
 const train_names = [_][:0]const u8{ "tf_train_softmax", "tf_train_logits", "tf_train_sort_pairs", "tf_train_experts_tiles", "tf_train_pairs_out", "tf_train_zero" };
@@ -279,19 +280,28 @@ pub const Ops = struct {
     pub fn expertsBackPacked(o: Ops, e: PackedExperts, router: u64, kept: MoeKept, g: u64, dx: u64, t: MoeScratch, rows: usize, top_k: usize) !void {
         try routeShape(top_k, e.routed);
         try expertShape(e.width, e.dim);
+        const W = e.width;
+        const D = e.dim;
+        if (W % 64 != 0 or D % 64 != 0 or (e.group != 32 and e.group != 64)) return error.UnsupportedShape;
+        if (e.group == 64) return o.expertsBackGroup(64, e, router, kept, g, dx, t, rows, top_k);
+        return o.expertsBackGroup(32, e, router, kept, g, dx, t, rows, top_k);
+    }
+
+    fn expertsBackGroup(o: Ops, comptime group: usize, e: PackedExperts, router: u64, kept: MoeKept, g: u64, dx: u64, t: MoeScratch, rows: usize, top_k: usize) !void {
         const slots = top_k + 1;
         const pairs = rows * slots;
         const total = e.routed + 1;
         const W = e.width;
         const D = e.dim;
-        if (W % 64 != 0 or D % 64 != 0) return error.UnsupportedShape;
+        const nt = if (group == 64) "tf_q4_experts_nt_packed64" else "tf_q4_experts_nt_packed";
+        const mm = if (group == 64) "tf_q4_experts_mm_packed64" else "tf_q4_experts_mm_packed";
         try o.sortPairs(router, kept, t, rows, top_k, e.routed, D);
         inline for (.{ .{ 0, 0 }, .{ 1, W } }) |m|
-            try o.packed_("tf_q4_experts_nt_packed", kept.x, D, t.order, slots, e.up, 2, m[0], t, t.gu, .{ int(2 * W), int(m[1]), int(pairs), int(D), int(W), int(e.routed) }, pairs, W / 64, total);
-        try o.packed_("tf_q4_experts_mm_packed", g, D, t.order, slots, e.down, 1, 0, t, t.dact, .{ int(pairs), int(D), int(W), int(e.routed), @as(c_int, 0) }, pairs, W / 64, total);
+            try o.packed_(nt, kept.x, D, t.order, slots, e.up, 2, m[0], t, t.gu, .{ int(2 * W), int(m[1]), int(pairs), int(D), int(W), int(e.routed) }, pairs, W / 64, total);
+        try o.packed_(mm, g, D, t.order, slots, e.down, 1, 0, t, t.dact, .{ int(pairs), int(D), int(W), int(e.routed), @as(c_int, 0) }, pairs, W / 64, total);
         try o.swigluPairs(kept, t, pairs, W);
-        try o.packed_("tf_q4_experts_mm_packed", t.dgu, 2 * W, 0, slots, e.up, 2, 0, t, t.dxp, .{ int(pairs), int(W), int(D), int(e.routed), @as(c_int, 0) }, pairs, D / 64, total);
-        try o.packed_("tf_q4_experts_mm_packed", t.dgu + W * 4, 2 * W, 0, slots, e.up, 2, 1, t, t.dxp, .{ int(pairs), int(W), int(D), int(e.routed), @as(c_int, 1) }, pairs, D / 64, total);
+        try o.packed_(mm, t.dgu, 2 * W, 0, slots, e.up, 2, 0, t, t.dxp, .{ int(pairs), int(W), int(D), int(e.routed), @as(c_int, 0) }, pairs, D / 64, total);
+        try o.packed_(mm, t.dgu + W * 4, 2 * W, 0, slots, e.up, 2, 1, t, t.dxp, .{ int(pairs), int(W), int(D), int(e.routed), @as(c_int, 1) }, pairs, D / 64, total);
         try o.pairsOut(dx, t, rows, D, slots);
     }
 
@@ -330,4 +340,8 @@ test "a product splits only past 1024 inputs a split, and tiles cover every pair
 
 test {
     _ = @import("train_q4_test.zig");
+}
+
+test {
+    _ = @import("train_packed_layout_test.zig");
 }
