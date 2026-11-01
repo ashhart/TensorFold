@@ -9,7 +9,8 @@ pub const Plan = planning.Plan;
 pub const Cache = struct { keys: Ref, values: Ref, capacity: u32, key_stride: u32 = 0, value_stride: u32 = 0 };
 const CachePtrs = extern struct { keys: u64, values: u64 };
 const PackArgs = extern struct { rows: u32, packed_rows: u32, heads: u32 = 24, kv_heads: u32 = 4, dim: u32 = 256, group: u32 = 6 };
-const PromptArgs = extern struct { start: i32, rows: i32, chunks: i32, rp: i32, key_stride: i32, value_stride: i32, scale2: f32, kv_heads: i32 };
+/// `end` above 0: every row reads keys [0, end), a block-bidirectional block; 0: each row its own causal count.
+const PromptArgs = extern struct { start: i32, rows: i32, chunks: i32, rp: i32, key_stride: i32, value_stride: i32, scale2: f32, kv_heads: i32, end: i32 = 0 };
 pub const Limits = struct {
     rows: u32 = 128,
     streams: u32 = 8,
@@ -197,7 +198,7 @@ pub const Attention = struct {
     profiler: ?*profile.Trace = null,
     prefix: [16]mtl.Pipeline,
     io: [11]mtl.Pipeline,
-    prompt: ?[3]mtl.Pipeline, // a prompt chunk's kernel and merge: tensor ops on the M5, simdgroup matrices before it
+    prompt: ?[4]mtl.Pipeline, // prompt kernel, merges, block kernel: tensor ops on the M5, simdgroup matrices before
     units: bool,
     pub fn init(device: mtl.Device, library: mtl.Library) !Attention {
         var p: [16]mtl.Pipeline = undefined;
@@ -222,8 +223,8 @@ pub const Attention = struct {
         for (a.prefix ++ a.io) |pipe| pipe.deinit();
         if (a.prompt) |pipes| for (pipes) |pipe| pipe.deinit();
     }
-    /// The prompt kernel plus pair and single-Mac merges; before M5 null unless a group holds `prompt_threads`.
-    pub fn promptPipelines(device: mtl.Device, library: mtl.Library, units: bool) !?[3]mtl.Pipeline {
+    /// Prompt kernel, pair and single-Mac merges, block kernel; before M5 null unless a group holds `prompt_threads`.
+    pub fn promptPipelines(device: mtl.Device, library: mtl.Library, units: bool) !?[4]mtl.Pipeline {
         const chunks = try mtl.Pipeline.init(device, library, if (units) "q27_attn_prompt_8" else "q27_attn_prompt_sg_8", false);
         if (!units and chunks.maxThreads() < prompt_threads) {
             std.log.info("qwen27: the prompt attention kernel runs {d} threads a group here, not {d}; prompt rows take the decode path", .{ chunks.maxThreads(), prompt_threads });
@@ -233,7 +234,10 @@ pub const Attention = struct {
         errdefer chunks.deinit();
         const merge = try mtl.Pipeline.init(device, library, "q27_attn_prompt_merge", false);
         errdefer merge.deinit();
-        return .{ chunks, merge, try mtl.Pipeline.init(device, library, "q27_attn_prompt_merge_single", false) };
+        const single = try mtl.Pipeline.init(device, library, "q27_attn_prompt_merge_single", false);
+        errdefer single.deinit();
+        const block = if (units) "q27_attn_prompt_block_8" else "q27_attn_prompt_sg_block_8";
+        return .{ chunks, merge, single, try mtl.Pipeline.init(device, library, block, false) };
     }
     pub fn preprocess(a: *const Attention, input_encoder: mtl.ComputeEncoder, p: Preprocess) !void {
         try p.geometry.check();
@@ -286,6 +290,10 @@ pub const Attention = struct {
     }
     /// `prompt` picks the prompt kernel; `split` reads the head count, constant when one Mac runs it.
     pub fn encode(a: *const Attention, input_encoder: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, q: Ref, k: Ref, v: Ref, out: Ref, caches: []const Cache, raw_gate: ?Ref, prompt: bool, split: bool) !void {
+        return a.encodeTo(input_encoder, scratch, binding, plan, q, k, v, out, caches, raw_gate, prompt, split, 0);
+    }
+    /// `encode` whose rows read every key before `end` (the prompt kernel only; 0: causal, as `encode`).
+    pub fn encodeTo(a: *const Attention, input_encoder: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, q: Ref, k: Ref, v: Ref, out: Ref, caches: []const Cache, raw_gate: ?Ref, prompt: bool, split: bool, end: u32) !void {
         try plan.geometry.check();
         const g = plan.geometry;
         const q_bytes = @as(usize, plan.rows) * g.heads * g.dim * 2;
@@ -324,9 +332,11 @@ pub const Attention = struct {
         bind(e, .{ q, scratch.get(.q_rows), scratch.get(.qa) });
         e.setValue(args, 3);
         e.dispatchThreads(mtl.Size.of(g.dim, args.packed_rows, g.kv_heads), mtl.Size.of(32, 4, 1));
-        if (prompt and a.prompt != null and (plan.geometry.shared_prefix or !a.units) and plan.streams == 1) {
+        const prompt_kernel = prompt and a.prompt != null and (plan.geometry.shared_prefix or !a.units) and plan.streams == 1;
+        if (end != 0 and !prompt_kernel) return error.BidirectionalNeedsPromptKernel;
+        if (prompt_kernel) {
             e.barrier();
-            try a.promptRows(e, scratch, binding, plan, out, split);
+            try a.promptRows(e, scratch, binding, plan, out, split, end);
             if (raw_gate) |gate| {
                 e.setPipeline(a.io[9]);
                 bind(e, .{ out, gate });
@@ -339,18 +349,21 @@ pub const Attention = struct {
         try timing.end();
     }
     /// A prompt chunk's rows over absolute 512-key chunks (attention_prompt.metal), merged in key order.
-    fn promptRows(a: *const Attention, e: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, out: Ref, split: bool) !void {
+    fn promptRows(a: *const Attention, e: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, out: Ref, split: bool, end: u32) !void {
         const g = plan.geometry;
         const start: i32 = plan.meta[planning.global_words + 4];
         for (plan.positions, 0..) |position, i| if (position != start + @as(i32, @intCast(i))) return error.PromptRowsNotChain; // the kernel places row i at start + i
-        const chunks: u32 = @intCast(@divFloor(start + @as(i32, @intCast(plan.rows)) + planning.chunk - 1, planning.chunk));
+        const own_end = start + @as(i32, @intCast(plan.rows));
+        if (end != 0 and (end < own_end or end > binding.limits.keys)) return error.BidirectionalBlockEnd;
+        const keys_end: i32 = if (end != 0) @intCast(end) else own_end;
+        const chunks: u32 = @intCast(@divFloor(keys_end + planning.chunk - 1, planning.chunk));
         if (chunks > scratch.chunks or plan.tiles > scratch.tiles) return error.AttentionLimits;
         // before M5 (no shared prefix) the partials take the tail's buffers, which hold every chunk's packed rows
         const parts = if (g.shared_prefix) [3]Field{ .poa, .pma, .pla } else [3]Field{ .pob, .pmb, .plb };
         if (!g.shared_prefix and @as(usize, chunks) * plan.tiles * 16 > @as(usize, scratch.tail_chunks) * scratch.limits.rows * 16) return error.AttentionLimits;
-        const args = PromptArgs{ .start = start, .rows = @intCast(plan.rows), .chunks = @intCast(chunks), .rp = @intCast(plan.tiles * 16), .key_stride = @intCast(binding.strides[0][0]), .value_stride = @intCast(binding.strides[0][1]), .scale2 = 0.0625 * std.math.log2e, .kv_heads = @intCast(g.kv_heads) };
+        const args = PromptArgs{ .start = start, .rows = @intCast(plan.rows), .chunks = @intCast(chunks), .rp = @intCast(plan.tiles * 16), .key_stride = @intCast(binding.strides[0][0]), .value_stride = @intCast(binding.strides[0][1]), .scale2 = 0.0625 * std.math.log2e, .kv_heads = @intCast(g.kv_heads), .end = @intCast(end) };
         const pairs = prompt_threads / 64; // simdgroup pairs, each halving the head dim of one 16-row tile
-        e.setPipeline(a.prompt.?[0]);
+        e.setPipeline(a.prompt.?[if (end != 0) 3 else 0]); // the causal kernel is the one main compiles
         bind(e, .{ scratch.get(.qa), binding.get(.caches) });
         e.setValue(args, 2);
         e.setBuffer(scratch.get(parts[0]).buffer, 0, 3);
