@@ -1,4 +1,5 @@
 //! A GLP control vector: the GGUF container's GLP subset read whole, written whole, and the rules that accept it.
+//! The format, its reference implementation and its validator are Matt Suiche's (the weightless plugin, MIT).
 
 const std = @import("std");
 const gguf = @import("gguf.zig");
