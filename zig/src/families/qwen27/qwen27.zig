@@ -27,6 +27,7 @@ pub const model = @import("model.zig");
 pub const projection = @import("projection.zig");
 pub const prompt_memory = @import("prompt_memory.zig");
 pub const prompt_rows = @import("prompt_rows.zig");
+pub const readout = @import("readout.zig");
 pub const prompt_glue = @import("prompt_glue.zig");
 pub const prompt_gpu = @import("prompt_gpu.zig");
 pub const prompt_state = @import("prompt_state.zig");
@@ -64,6 +65,7 @@ test {
     _ = prompt_glue;
     _ = prompt_state;
     _ = prompt_marks;
+    _ = readout;
     _ = config;
     _ = affine;
     _ = widths;
