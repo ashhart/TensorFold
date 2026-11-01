@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- On GB10s, affine-4 (MLX 4-bit) decode and verify projections that read the same input run as one grouped launch, each output byte-equal to its separate launch under the kernel contract, for the dense targets, Nemotron, the DFlash2 drafter, Gemma 4 and Spark. Replies are unchanged. Nemotron 3.5 Lightning: 8 streams +13.3%, 2 streams +5.9%; Qwen3.8-27B with DFlash2: decode after a prompt +3.7% to +5.0%, 1 stream +4.5%, 4 streams +3.5%.
+
 - Shared draft rounds price each stream's drafts before drafting, and a stream whose drafts would get no verify rows skips the drafter's proposal work, for Nemotron, Qwen's MTP, GLM, Gemma 4 (assistant and DFlash) and attached LFM2 drafters, on CUDA and Metal; each family keeps its head step's cost in the price. Replies are unchanged. Nemotron 3.5 Lightning with its MTP head: on an M5 Ultra, 16-stream chat +9.0% greedy and +4.7% sampled; on a GB10, 16 streams +2.1% and 8 streams +1.1%.
 
 - MOSS-Image's image decoder (the checkpoint's FLUX.2 small VAE, in float32 as the pipeline runs it) runs on Metal inside the `moss_image` family, and `tf-moss-image` writes `picture.png` itself, so torch no longer decodes (#1687, #1504). Thanks to @BobClawblaw.
