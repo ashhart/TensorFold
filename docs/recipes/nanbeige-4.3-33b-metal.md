@@ -48,10 +48,11 @@ calls take the template's XML form (its `tool_call_format` default), which the s
 
 Every kernel is registered with the kernel contract (`zig/tests/contract/metal_llama*.zig`, the roll call in
 `contracts.zig`): the glue, the six row-projection forms, the four GEMM forms and the prompt attention at both served
-geometries. `tf-kernel-contract --only llama` on the M5 Ultra:
+geometries. Each kernel group has a planted control (`metal_llama_controls.zig`: one edit of its source, which its
+gate must report). `tf-kernel-contract --only llama` on the M5 Ultra:
 
 ```
-SUMMARY 21 kernels: 21 pass gates 1-4, 0 fail, 0 known findings; 0 controls: 0 red as planted, 0 missed; 0 limit problems; gates 432063 ms, limits 105 ms
+SUMMARY 21 kernels: 21 pass gates 1-4, 0 fail, 0 known findings; 12 controls: 12 red as planted, 0 missed; 0 limit problems; gates 468447 ms, limits 140 ms
 ```
 
 ## Measured (M5 Ultra, the bf16 release, 26 Oct 2026)

@@ -5,6 +5,7 @@ const tf = @import("tensorfold");
 const contract = @import("contract");
 const rig_ = @import("rig.zig");
 const llama = @import("metal_llama.zig");
+const controls = @import("metal_llama_controls.zig");
 const c = contract.spec;
 const g = contract.gates;
 const rows_in = contract.rows;
@@ -39,6 +40,7 @@ fn decodeDepth(s: c.Shape) usize {
 pub const DecodeVec = struct {
     a: std.mem.Allocator,
     rig: rig_.Rig,
+    mutation: controls.Mutation,
     lib: mtl.Library,
     pipe: mtl.Pipeline,
     shape: c.Shape = .{ .rows = 0, .n = 0, .k = 0 },
@@ -51,10 +53,10 @@ pub const DecodeVec = struct {
     in: [3]rig_.Ref = undefined,
     out: [3]rig_.Ref = undefined,
 
-    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue) !DecodeVec {
-        const lib = try family.glueLibrary(device, a);
+    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, mutation: controls.Mutation) !DecodeVec {
+        const lib = try controls.glueLibrary(device, a, mutation);
         errdefer lib.deinit();
-        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .lib = lib, .pipe = try llama.pipelineOf(lib, device, "ll_decode_vec") };
+        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .mutation = mutation, .lib = lib, .pipe = try llama.pipelineOf(lib, device, "ll_decode_vec") };
     }
 
     fn drop(p: *DecodeVec) void {
@@ -75,7 +77,7 @@ pub const DecodeVec = struct {
     const vt = g.hooks(DecodeVec);
 
     pub fn kernel(p: *DecodeVec) g.Kernel {
-        return .{ .spec = .{ .name = "llama glue ll_decode_vec", .accum = .f32, .depth = decodeDepth, .ops = 24, .out = .f32, .tiles = .{ .{ .size = 16, .step = 1, .min = 1 }, .{}, .{ .size = 32, .step = 1, .min = 1 } }, .served = &.{ .{ .rows = 16, .n = family.nanbeige43.heads, .k = 4096 }, .{ .rows = 4, .n = family.nanbeige41.heads, .k = 1024 } }, .sums = softmax_sums }, .ctx = p, .vt = &vt };
+        return controls.mark(.{ .spec = .{ .name = "llama glue ll_decode_vec", .accum = .f32, .depth = decodeDepth, .ops = 24, .out = .f32, .tiles = .{ .{ .size = 16, .step = 1, .min = 1 }, .{}, .{ .size = 32, .step = 1, .min = 1 } }, .served = &.{ .{ .rows = 16, .n = family.nanbeige43.heads, .k = 4096 }, .{ .rows = 4, .n = family.nanbeige41.heads, .k = 1024 } }, .sums = softmax_sums }, .ctx = p, .vt = &vt }, p.mutation);
     }
 
     /// rows query rows at the end of k positions, n query heads; the blocks as the served cache of k would hold.
@@ -231,6 +233,7 @@ fn mergeDepth(s: c.Shape) usize {
 pub const MergeVec = struct {
     a: std.mem.Allocator,
     rig: rig_.Rig,
+    mutation: controls.Mutation,
     lib: mtl.Library,
     pipe: mtl.Pipeline,
     shape: c.Shape = .{ .rows = 0, .n = 0, .k = 0 },
@@ -240,10 +243,10 @@ pub const MergeVec = struct {
     in: [3]rig_.Ref = undefined,
     out: rig_.Ref = undefined,
 
-    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue) !MergeVec {
-        const lib = try family.glueLibrary(device, a);
+    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, mutation: controls.Mutation) !MergeVec {
+        const lib = try controls.glueLibrary(device, a, mutation);
         errdefer lib.deinit();
-        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .lib = lib, .pipe = try llama.pipelineOf(lib, device, "ll_merge_vec") };
+        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .mutation = mutation, .lib = lib, .pipe = try llama.pipelineOf(lib, device, "ll_merge_vec") };
     }
 
     fn drop(p: *MergeVec) void {
@@ -264,7 +267,7 @@ pub const MergeVec = struct {
     const vt = g.hooks(MergeVec);
 
     pub fn kernel(p: *MergeVec) g.Kernel {
-        return .{ .spec = .{ .name = "llama glue ll_merge_vec", .accum = .f32, .depth = mergeDepth, .ops = 6, .out = .bf16, .tiles = .{ .{ .size = 16, .step = 1, .min = 1 }, .{}, .{ .size = 32, .step = 1, .min = 1 } }, .served = &.{ .{ .rows = 16, .n = family.nanbeige43.heads, .k = 128 }, .{ .rows = 4, .n = family.nanbeige41.heads, .k = 64 } }, .sums = softmax_sums }, .ctx = p, .vt = &vt };
+        return controls.mark(.{ .spec = .{ .name = "llama glue ll_merge_vec", .accum = .f32, .depth = mergeDepth, .ops = 6, .out = .bf16, .tiles = .{ .{ .size = 16, .step = 1, .min = 1 }, .{}, .{ .size = 32, .step = 1, .min = 1 } }, .served = &.{ .{ .rows = 16, .n = family.nanbeige43.heads, .k = 128 }, .{ .rows = 4, .n = family.nanbeige41.heads, .k = 64 } }, .sums = softmax_sums }, .ctx = p, .vt = &vt }, p.mutation);
     }
 
     /// rows rows of n heads over k blocks of partials, as decode leaves them: every fourth block past the first empty.
@@ -367,6 +370,7 @@ pub const Prompt = struct {
     rig: rig_.Rig,
     pipe: mtl.Pipeline,
     geo: family.Geometry,
+    mutation: controls.Mutation,
     name: []const u8,
     served: [2]c.Shape,
     shape: c.Shape = .{ .rows = 0, .n = 0, .k = 0 },
@@ -376,13 +380,15 @@ pub const Prompt = struct {
     in: [3]rig_.Ref = undefined,
     out: rig_.Ref = undefined,
 
-    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, geo: family.Geometry) !Prompt {
-        const src = try family.attentionSource(device, a, geo);
+    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, geo: family.Geometry, mutation: controls.Mutation) !Prompt {
+        const plain = try family.attentionSource(device, a, geo);
+        defer a.free(plain);
+        const src = try controls.apply(a, plain, mutation);
         defer a.free(src);
         const name = try std.fmt.allocPrint(a, "llama {s} attention ll_prompt_attention", .{geo.name});
         errdefer a.free(name);
         const big = geo.heads == family.nanbeige43.heads;
-        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .pipe = try rig_.pipeline(device, src, family.attention_name), .geo = geo, .name = name, .served = .{ .{ .rows = if (big) 256 else 64, .n = geo.heads, .k = if (big) 1280 else 64 }, .{ .rows = 33, .n = geo.heads, .k = 33 } } };
+        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .pipe = try rig_.pipeline(device, src, family.attention_name), .geo = geo, .mutation = mutation, .name = name, .served = .{ .{ .rows = if (big) 256 else 64, .n = geo.heads, .k = if (big) 1280 else 64 }, .{ .rows = 33, .n = geo.heads, .k = 33 } } };
     }
 
     fn drop(p: *Prompt) void {
@@ -403,7 +409,7 @@ pub const Prompt = struct {
     const vt = g.hooks(Prompt);
 
     pub fn kernel(p: *Prompt) g.Kernel {
-        return .{ .spec = .{ .name = p.name, .accum = .f32, .depth = promptDepth, .ops = 8, .out = .bf16, .tiles = .{ .{ .size = 32, .step = 1, .min = 1 }, .{}, .{ .size = 64, .step = 1, .min = 1 } }, .served = &p.served, .sums = softmax_sums }, .ctx = p, .vt = &vt };
+        return controls.mark(.{ .spec = .{ .name = p.name, .accum = .f32, .depth = promptDepth, .ops = 8, .out = .bf16, .tiles = .{ .{ .size = 32, .step = 1, .min = 1 }, .{}, .{ .size = 64, .step = 1, .min = 1 } }, .served = &p.served, .sums = softmax_sums }, .ctx = p, .vt = &vt }, p.mutation);
     }
 
     /// Q padded to whole 32-row tiles and the cache to whole 64-key blocks, as the served buffers hold them.
