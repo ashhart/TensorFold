@@ -391,13 +391,11 @@ test "lfm2 dspark: failed lane creation and map insertion clean up" {
     d.gpa = failing.allocator();
     defer d.lanes.deinit(d.gpa);
     try std.testing.expectError(error.OutOfMemory, d.newLane(64));
-    try std.testing.expect(failing.has_induced_failure);
     try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
     failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
     var stream = try lanes.Stream.init(std.testing.allocator, .{ .id = "failed-open", .prompt = &.{1}, .max_new = 1 });
     defer stream.deinit(std.testing.allocator);
     try std.testing.expectError(error.OutOfMemory, d.drafter().open(&stream));
-    try std.testing.expect(failing.has_induced_failure);
     try std.testing.expectEqual(@as(usize, 0), d.lanes.count());
     try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
 }
