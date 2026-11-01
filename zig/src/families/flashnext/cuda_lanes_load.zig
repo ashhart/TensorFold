@@ -20,6 +20,8 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     _ = try @import("cuda_modelopt_threads.zig").configured(); // TF_FLASHNEXT_LOAD_THREADS, refused before any load
     const mode = try config.mode(gpa, io, dir);
     if (o.tp != 1 and (mode != .modelopt or captured != null)) return error.UnsupportedQuantization;
+    // the decode graph captures each layer's collectives; the dense split adds its own until a later stage qualifies it
+    if (@import("cuda_round_graph.zig").enabled() and try @import("cuda_dense_split.zig").appliesDir(gpa, io, dir, o.tp)) return error.DecodeGraphWithDenseSplit;
     if (o.slide and (mode != .affine or o.tp != 1)) return error.UnsupportedLearningFormat;
     if (o.slide and captured != null) return error.TrainingOnCapturedGlue;
     const page_tokens = try @import("cuda_kv_lanes.zig").paging();
@@ -43,7 +45,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
             id.image_tokens = v.image_tokens;
             id.max_images = v.max_images;
         }
-        own.ranks = try ranks.Session.init(gpa, io, o.master orelse "127.0.0.1", o.master_port, o.rank, id);
+        own.ranks = try ranks.Session.init(gpa, io, o.master orelse "127.0.0.1", o.master_port, o.rank, id, ranks.linkWait());
     }
     errdefer if (own.ranks) |r| {
         r.poison();
@@ -81,16 +83,16 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     own.lanes = .empty;
     own.next = 0;
     if (o.slide) own.lay = try @import("cuda_slide.zig").layoutOf(gpa, io, dir);
-    const own_seq_bytes = try prompt.seqBytesPaged(window, try @import("cuda_pages.zig").pageTest());
+    const own_seq_bytes = try prompt.seqBytesPaged(window, try @import("cuda_pages.zig").pageTest(), own.engine.heads);
     var stream_bytes = own_seq_bytes;
     if (own.head) |h| {
-        stream_bytes += mtp.Draft.bytes(window, h.ids.len, own.engine.chunk);
-    } else if (o.drafts and o.tp == 2) stream_bytes += mtp.Draft.bytes(window, 1, own.engine.chunk);
+        stream_bytes += mtp.Draft.bytes(window, h.ids.len, own.engine.chunk, own.engine.heads);
+    } else if (o.drafts and o.tp == 2) stream_bytes += mtp.Draft.bytes(window, 1, own.engine.chunk, own.engine.heads);
     if (o.vision) |v| stream_bytes += @as(usize, v.image_tokens) * @import("cuda_prompt_wt.zig").dims * 2 + 16 * o.context;
     if (page_tokens > 0) {
         // the lane's head runs at the engine's chunk: its cache on the stream's pages, its buffers in the run
         own.kv.head = if (own.head) |h| .{ .draft_n = h.ids.len, .rows = own.engine.chunk } else null;
-        const head_bytes = if (own.head) |h| mtp.Draft.bytes(window, h.ids.len, own.engine.chunk) else 0;
+        const head_bytes = if (own.head) |h| mtp.Draft.bytes(window, h.ids.len, own.engine.chunk, own.engine.heads) else 0;
         own.kv.layout = @import("cuda_kv_lanes.zig").layout(o.context, page_tokens, own.kv.head, stream_bytes - own_seq_bytes - head_bytes);
     }
     return .{

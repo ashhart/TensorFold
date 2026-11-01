@@ -16,12 +16,13 @@ pub const Collective = struct {
     comm: nccl.Comm = null,
     link: wire.Link,
     timeout_ms: u64,
+    rank: usize = 0,
     failed: bool = false,
 
     /// `link` has completed the source/settings handshake; it stays owned by the caller.
     pub fn init(link: wire.Link, rank: usize, timeout_ms: u64) !Collective {
         if (rank > 1 or timeout_ms == 0) return error.BadRank;
-        var c: Collective = .{ .lib = try nccl.Library.open(), .api = undefined, .link = link, .timeout_ms = timeout_ms };
+        var c: Collective = .{ .lib = try nccl.Library.open(), .api = undefined, .link = link, .timeout_ms = timeout_ms, .rank = rank };
         errdefer c.lib.close();
         try c.lib.requireSupportedVersion();
         const info = @typeInfo(Advanced).@"struct";
@@ -84,13 +85,22 @@ pub const Collective = struct {
         try c.wait(stream, wire.deadline(c.timeout_ms));
     }
 
-    /// Disjoint BF16 vocabulary columns are concatenated without an arithmetic reduction.
+    /// BF16 rank blocks are concatenated without an arithmetic reduction.
     pub fn gather(c: *Collective, stream: cuda.Stream, local: u64, out: u64, count: usize) !void {
+        return c.gatherType(stream, local, out, count, .bf16);
+    }
+
+    /// FP32 rank blocks are concatenated without rounding or reduction.
+    pub fn gatherF32(c: *Collective, stream: cuda.Stream, local: u64, out: u64, count: usize) !void {
+        return c.gatherType(stream, local, out, count, .f32);
+    }
+
+    fn gatherType(c: *Collective, stream: cuda.Stream, local: u64, out: u64, count: usize, dtype: nccl.DataType) !void {
         if (c.failed or c.comm == null) return error.RankDisconnected;
         if (count == 0) return;
         errdefer c.abort();
         try c.link.checkPeer();
-        try c.submitted(c.lib.api.ncclAllGather(local, out, count, .bf16, c.comm, stream.handle));
+        try c.submitted(c.lib.api.ncclAllGather(local, out, count, dtype, c.comm, stream.handle));
         try c.wait(null, wire.deadline(c.timeout_ms));
     }
 
