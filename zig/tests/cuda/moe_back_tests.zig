@@ -276,7 +276,7 @@ fn Case(comptime shape: Shape) type {
             // the forward's activation rows for the most rows a case runs
             const pocket = if (with_pocket) F.Pocket{ .gate = try r.dev(f32, m.pg), .up = try r.dev(f32, m.pu), .down = try r.dev(f32, m.pd), .n = P, .act = try r.zeros(row_counts[row_counts.len - 1] * pocket_stride * 4) } else {};
             const pk = try packExperts(r, &m);
-            std.debug.print("RESULT moe weights: {d:.1} MiB (512 routed experts as MLX stacks and packed, the shared expert, the router, a pocket of {d})\n", .{ mib(r.bytes), P });
+            std.debug.print("RESULT moe weights: {d:.1} MiB ({d} routed experts as MLX stacks and packed, the shared expert, the router, a pocket of {d})\n", .{ mib(r.bytes), E, P });
             for (row_counts) |rows| {
                 const pairs = rows * SLOTS;
                 const wts32 = try toF32(r.a, wts[0 .. rows * SLOTS]);
@@ -353,10 +353,10 @@ fn Case(comptime shape: Shape) type {
             };
         }
 
-        /// experts_pack.cu's kernel at group 32, as Flash Next's engine packs its experts.
+        /// The engine's packer at this case's affine group size.
         const pack_symbol: [:0]const u8 = if (shape.group == 64) "_ZN15tf_experts_pack11pack_kernelILi2EEEvPKjPKtS4_Pjiiiiii" else "_ZN15tf_experts_pack11pack_kernelILi1EEEvPKjPKtS4_Pjiiiiii";
 
-        /// Bytes of one expert's packed [n, k] blocks (experts_pack.cu at group 32: 160 words a 32 x 32 block).
+        /// Bytes of one expert's blocks at this case's affine group size.
         fn packedBytes(n: usize, k: usize) usize {
             return (n / 32) * (k / shape.group) * (4 * shape.group + 32) * 4;
         }
