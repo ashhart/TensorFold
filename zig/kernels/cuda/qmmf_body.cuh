@@ -1,5 +1,10 @@
 // Strided stores are instantiated only by the shared-slot entries.
+#ifdef TF_QMMF_K32
+    using T = PromptK32Tile;
+    static_assert(BK == 32 && MODE == BF16 && !CLUSTER && !FUSE && BN == 128, "unsplit BF16 K32");
+#else
     using T = Tile<MODE, BM, BN, WM, WN, STAGES>;
+#endif
 #ifdef TF_QMMF_STRIDED
     static_assert(BN == 64 || BN == 32, "a block reads one 64-column tile of words and scales, or its half");
 #else
@@ -8,7 +13,11 @@
     extern __shared__ __align__(128) unsigned char buf[];
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
     const int wm = warp / WN, wn = warp % WN;
+#ifdef TF_QMMF_K32
+    const int KG = K / GS, steps = K / BK, slice_groups = steps / SK, per = FUSE ? steps : slice_groups;
+#else
     const int KG = K / GS, slice_groups = KG / SK, per = FUSE ? KG : slice_groups;
+#endif
     const int2 at = tile_of(blockIdx.x, M, N, BM, BN, group);
     const int m0 = at.x, n0 = at.y, slice = FUSE ? 0 : blockIdx.z, g0 = slice * per;
 
@@ -32,8 +41,13 @@
         for (int c = tid; c < BM * T::CHUNKS; c += T::THREADS) {
             const int r = c / T::CHUNKS, ch = c % T::CHUNKS;
             const int row = min(m0 + r, M - 1);
+#ifdef TF_QMMF_K32
+            cp16z(p + r * T::ROW + swz<T::CHUNKS>(r, ch) * 16, x + static_cast<size_t>(row) * ldx + g * BK + ch * 8,
+                  m0 + r < M);
+#else
             cp16z(p + r * T::ROW + swz<T::CHUNKS>(r, ch) * 16, x + static_cast<size_t>(row) * ldx + g * GS + ch * 8,
                   m0 + r < M);
+#endif
         }
         unsigned char* pw = p + T::X;
         constexpr int TILE_BYTES = MODE == FP4 ? 64 * GS / 2 : MODE == BF16 ? 64 * GS * 2 : 64 * GS;
@@ -49,6 +63,18 @@
                     asm volatile("cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];"
                                  :: "r"(smem(pw + t * TILE_BYTES)), "l"(src), "r"(TILE_BYTES), "r"(bar) : "memory");
                 }
+            }
+        } else
+#endif
+#ifdef TF_QMMF_K32
+        if constexpr (BK == 32) {
+            // Gather each n8 tile's two K16 fragments from the unchanged K64 pack.
+            constexpr int FRAG_BYTES = 32 * 8, HALF_BYTES = 2 * FRAG_BYTES;
+            for (int c = tid; c < T::W / 16; c += T::THREADS) {
+                const int t = c / (8 * HALF_BYTES / 16), off = c % (8 * HALF_BYTES / 16);
+                const int jj = off / (HALF_BYTES / 16), pair = off % (HALF_BYTES / 16);
+                const size_t src = (static_cast<size_t>(n0 / 64 + t) * KG + g / 2) * TILE_BYTES;
+                cp16(pw + c * 16, w + src + jj * 2 * HALF_BYTES + (g & 1) * HALF_BYTES + pair * 16);
             }
         } else
 #endif
@@ -141,7 +167,11 @@
             }
         }
 #pragma unroll
+#ifdef TF_QMMF_K32
+        for (int kt = 0; kt < BK / 16; ++kt) {
+#else
         for (int kt = 0; kt < GS / 16; ++kt) {
+#endif
             uint32_t a[T::MT][4];
 #pragma unroll
             for (int i = 0; i < T::MT; ++i) {
@@ -157,7 +187,11 @@
                     b0 = fp4pair(word, (kt & 1) * 8);
                     b1 = fp4pair(word, (kt & 1) * 8 + 4);
                 } else if constexpr (MODE == BF16) {
+#ifdef TF_QMMF_K32
+                    const uint2 v = reinterpret_cast<const uint2*>(pw)[((wn * T::NT + j) * (BK / 16) + kt) * 32 + lane];
+#else
                     const uint2 v = reinterpret_cast<const uint2*>(pw)[((wn * T::NT + j) * 4 + kt) * 32 + lane];
+#endif
                     b0 = v.x;
                     b1 = v.y;
                 } else {

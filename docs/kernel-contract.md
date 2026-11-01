@@ -322,3 +322,12 @@ Later compiler receipts remain pending. Check each build with `tf-cuda-test kern
 `moetile-bench` alternates baseline and direct-slot GPU event timings at 4218 rows; no current timing is claimed.
 Automatic shared-down dispatch yields to an eligible 128-row prompt projection from 512 rows.
 The direct entry remains available for forced byte fixtures; automatic selection and direct support are checked separately.
+
+BF16 prompt K32 staging registers two unfused 128x128 entries, one for BF16 output and one for FP32 output.
+They read the parent's K64 weight packs in two K32 halves and keep the K16 MMA order and output rounding.
+Only unsplit prompt calls select K32; fused slices retain the parent K64 tile.
+`qmmf-prompt` compares each new output directly with the parent's 128x128 K64 output, including forced small rows.
+`qmmf-prompt-contract` keeps the four parent entries and adds both K32 replacements and their scaled controls.
+Each new control launches K32 for its output type at small and production row counts.
+`qmmf-prompt-bench` alternates parent K64 and candidate timings over the six current served projection shapes.
+Measured nvcc 13.0 resources cover both K32 entries on sm_120 and sm_121; later compiler receipts remain pending.

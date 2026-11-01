@@ -151,6 +151,11 @@ fn loadTiles(mod: Module, comptime mode: Mode, comptime wide: bool) ![7]Function
 /// BF16 prompt tile: 128x128, eight warps, three 32 KiB stages and one barrier per stage.
 pub const prompt_shared: u32 = 3 * (128 + 128) * group * 2 + 128;
 pub const prompt_rows: usize = 512;
+pub const prompt_k32_shared: u32 = 3 * (128 + 128) * 32 * 2;
+
+pub fn promptK32Symbol(comptime out: Out) [:0]const u8 {
+    return std.fmt.comptimePrint("_ZN7tf_qmmf22qmmf_prompt_k32_kernelILb{d}EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii", .{@intFromBool(out == .f32)});
+}
 
 pub fn promptSymbol(comptime out: Out, comptime fused: bool) [:0]const u8 {
     return std.fmt.comptimePrint("_ZN7tf_qmmf11qmmf_kernelILi4ELi128ELi128ELi2ELi4ELi3ELb{d}ELb0ELb{d}EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii", .{ @intFromBool(out == .f32), @intFromBool(fused) });
@@ -171,6 +176,7 @@ pub const Lane = struct {
     half_below: usize = half_below_default,
     shared_down: [4]Function = undefined,
     prompt: ?[2][2]Function = null, // Out, then plain / fused; loaded only on sm_12x
+    prompt_k32: ?[2]Function = null, // Out; unsplit BF16 prompt calls on sm_12x
     clusters: bool, // sm_90 on: slices meet in a cluster's shared memory
 
     pub fn load(d: *const Driver, capability_major: u32) !Lane {
@@ -207,6 +213,13 @@ pub const Lane = struct {
                 prompt[oi][fi] = f;
             };
             l.prompt = prompt;
+            var k32: [2]Function = undefined;
+            inline for (.{ Out.bf16, Out.f32 }, 0..) |out, oi| {
+                const f = try mod.function(promptK32Symbol(out));
+                try f.allowDynamicShared(prompt_k32_shared);
+                k32[oi] = f;
+            }
+            l.prompt_k32 = k32;
         }
         l.half_below = halfBelow();
         return l;
@@ -247,11 +260,12 @@ pub const Lane = struct {
         const set = (if (out == .f32) l.f32_fns else l.fns)[modeIndex(w.mode)];
         const ti: usize = if (p.bm == 16) 0 else if (p.bm == 32) 1 else 2;
         const prompt = l.usesPrompt(m, w);
+        const k32 = prompt and p.sk == 1 and l.prompt_k32 != null;
         const bm: usize = if (prompt) 128 else p.bm;
         const rows_t = (m + bm - 1) / bm;
         const hm = halfModeIndex(w.mode);
         const half = hm != null and p.bm == 16 and !p.fused and rows_t * ((w.n + bn - 1) / bn) * p.sk < l.half_below;
-        const f = if (prompt) l.prompt.?[@backingInt(out)][@intFromBool(p.fused)] else if (half) l.half[hm.?][@backingInt(out)][@intFromBool(p.cluster)] else if (p.fused) set[6] else set[ti * 2 + @intFromBool(p.cluster)];
+        const f = if (k32) l.prompt_k32.?[@backingInt(out)] else if (prompt) l.prompt.?[@backingInt(out)][@intFromBool(p.fused)] else if (half) l.half[hm.?][@backingInt(out)][@intFromBool(p.cluster)] else if (p.fused) set[6] else set[ti * 2 + @intFromBool(p.cluster)];
         const cols: usize = if (prompt) 128 else if (half) 32 else bn;
         const band = @max(1, @min(rows_t, (12 << 20) / (bm * w.k * 2)));
         var args: launch_.Args = .{};
@@ -271,7 +285,7 @@ pub const Lane = struct {
         try launch_.launch(f, .{
             .grid = .{ .x = @intCast(rows_t * ((w.n + cols - 1) / cols)), .y = 1, .z = if (p.fused) 1 else p.sk },
             .block = .{ .x = if (prompt) 256 else threads, .y = 1, .z = 1 },
-            .shared = if (prompt) prompt_shared else if (half) halfShared(w.mode) else sharedBytes(w.mode, p.bm),
+            .shared = if (k32) prompt_k32_shared else if (prompt) prompt_shared else if (half) halfShared(w.mode) else sharedBytes(w.mode, p.bm),
             .cluster = if (p.cluster) .{ .x = 1, .y = 1, .z = p.sk } else null,
         }, s, &args);
         if (p.reduce) {
@@ -407,6 +421,8 @@ test "prompt dispatch changes CTA geometry and output instance without changing 
     const fast: Function = .{ .d = &d, .handle = @ptrFromInt(20) };
     const fused: Function = .{ .d = &d, .handle = @ptrFromInt(21) };
     const wide: Function = .{ .d = &d, .handle = @ptrFromInt(23) };
+    const k32: Function = .{ .d = &d, .handle = @ptrFromInt(30) };
+    const k32_wide: Function = .{ .d = &d, .handle = @ptrFromInt(31) };
     var lane: Lane = .{
         .mod = undefined,
         .fns = @splat(@splat(base)),
@@ -415,6 +431,7 @@ test "prompt dispatch changes CTA geometry and output instance without changing 
         .half = @splat(@splat(@splat(base))),
         .half_below = 0,
         .prompt = .{ .{ fast, fused }, .{ fast, wide } },
+        .prompt_k32 = .{ k32, k32_wide },
         .clusters = false,
     };
     const s: Stream = .{ .d = &d, .handle = null };
@@ -426,9 +443,9 @@ test "prompt dispatch changes CTA geometry and output instance without changing 
         const bm: usize = if (fast_path) 128 else bucket(m);
         const cols: usize = if (fast_path) 128 else 64;
         try std.testing.expectEqual(@as(usize, 1), Trace.calls);
-        try std.testing.expectEqual(@as(usize, if (fast_path) 20 else 10), Trace.id);
+        try std.testing.expectEqual(@as(usize, if (fast_path) 30 else 10), Trace.id);
         try std.testing.expectEqual(@as(u32, if (fast_path) 256 else 128), Trace.block);
-        try std.testing.expectEqual(if (fast_path) prompt_shared else sharedBytes(.bf16, @intCast(bm)), Trace.shared);
+        try std.testing.expectEqual(if (fast_path) prompt_k32_shared else sharedBytes(.bf16, @intCast(bm)), Trace.shared);
         try std.testing.expectEqual((m + bm - 1) / bm * ((w.n + cols - 1) / cols), Trace.grid);
         try std.testing.expectEqual(@as(i32, 1), Trace.slices);
     }
@@ -436,6 +453,29 @@ test "prompt dispatch changes CTA geometry and output instance without changing 
     try lane.matmulF32(s, 0, w.k, 4218, w, 0, 0);
     try std.testing.expectEqual(@as(usize, 23), Trace.id);
     try std.testing.expectEqual(@as(i32, 4), Trace.slices);
+    try std.testing.expectEqual(prompt_shared, Trace.shared);
+    for ([_]u32{ 2, 4, 8 }) |sk| {
+        w = try pinned(Weight{ .mode = .bf16, .codes = 0, .scales = 0, .n = 2560, .k = 6144, .npad = 2560 }, sk);
+        for ([_]bool{ false, true }) |clusters| for ([_]Out{ .bf16, .f32 }) |out| for ([_]usize{ 512, 1536, 4218 }) |m| {
+            lane.clusters = clusters;
+            Trace.calls = 0;
+            try lane.matmulOut(s, 0, w.k, m, w, 0, out, 0);
+            try std.testing.expectEqual(@as(usize, 1), Trace.calls);
+            try std.testing.expectEqual(@as(usize, if (out == .f32) 23 else 21), Trace.id);
+            try std.testing.expectEqual(prompt_shared, Trace.shared);
+            try std.testing.expectEqual((m + 127) / 128 * 20, Trace.grid);
+            try std.testing.expectEqual(@as(i32, @intCast(sk)), Trace.slices);
+        };
+    }
+    w = try pinned(w, 1);
+    try lane.matmulF32(s, 0, w.k, 4218, w, 0, 0);
+    try std.testing.expectEqual(@as(usize, 31), Trace.id);
+    try std.testing.expectEqual(prompt_k32_shared, Trace.shared);
+    lane.prompt_k32 = null;
+    try lane.matmulF32(s, 0, w.k, 4218, w, 0, 0);
+    try std.testing.expectEqual(@as(usize, 20), Trace.id);
+    try std.testing.expectEqual(prompt_shared, Trace.shared);
+    w = try pinned(w, 4);
     lane.prompt = null;
     try lane.matmulF32(s, 0, w.k, 4218, w, 0, 0);
     try std.testing.expectEqual(@as(usize, 10), Trace.id);

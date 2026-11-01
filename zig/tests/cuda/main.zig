@@ -239,8 +239,8 @@ const usage =
     \\  kernel-contract           the registered kernels through the contract's gates, each planted control red (needs -Dnvcc)
     \\  qmm-prefill-many-contract the GB10 bit-exact multi-projection prompt launch against separate launches
     \\  qmm-prefill-tile22-contract the GB10 large-prompt 2x2 tile against the default tile
-    \\  qmmf-prompt              BF16 128x128 prompt tiles: byte equality at Flash Next TP=2 shapes
-    \\  qmmf-prompt-contract     gates 1-4 for all four BF16 prompt instances and a scaled control
+    \\  qmmf-prompt              BF16 K32 prompt staging: parent K64 bytes at current Flash Next shapes
+    \\  qmmf-prompt-contract     K64 and K32 replacement gates with both new output controls
     \\  qmmf-prompt-repro        isolate M=65 N=8240 K=2560 SK=4 BF16 without clusters
     \\  qmmf-prompt-bench        rank0 normal-main weighted A-B-A timings, plus separate MTP hidden timings
     \\  qmm-prefill-many-bench    same-process A-B-A screening for the GB10 launch fusion
