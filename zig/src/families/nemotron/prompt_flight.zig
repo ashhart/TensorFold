@@ -3,12 +3,15 @@ const lanes = @import("lanes");
 
 pub const Prompt = struct { stream: *lanes.Stream, rows: usize };
 
-/// The original prompt cuts: requested boundaries, the decision row, and the configured row cap.
-pub inline fn rows(s: *const lanes.Stream, at: usize, cap: usize, decision: ?usize, next: *usize) usize {
+/// The prompt cuts: requested boundaries, the decision row, TF_KV_SHARE's store marks, and the configured row cap.
+pub inline fn rows(s: *const lanes.Stream, at: usize, cap: usize, decision: ?usize, marks: []const u32, next: *usize) usize {
     while (next.* < s.chunks.len and s.chunks[next.*] <= at) next.* += 1;
     var end = if (next.* < s.chunks.len) @min(s.chunks[next.*], s.prompt_len) else s.prompt_len;
     if (decision) |d| if (d >= at and d + 1 < end) {
         end = d + 1;
+    };
+    for (marks) |m| if (m > at) {
+        end = @min(end, m); // the store keeps a state only where a chunk ends
     };
     return @min(cap, end - at);
 }
