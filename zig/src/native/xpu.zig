@@ -162,6 +162,10 @@ fn openLanes(gpa: Allocator, io: std.Io, runner: *xq.Runner, drafter: ?*Drafter,
 }
 
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (try o.slideRefusal(a, "XPU")) |why| {
+        problem.* = why;
+        return null;
+    }
     if (o.fsrRefusal("xpu")) |why| {
         problem.* = why;
         return null;
@@ -205,4 +209,8 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
             try std.fmt.allocPrint(a, "the XPU engine could not serve {s}: {s}", .{ o.dir, @errorName(err) });
         return null;
     };
+}
+
+test "slide admission: xpu refuses before checkpoint or device access" {
+    try @import("slide_open_test.zig").check(open, "XPU", &.{ "qwen3_5", "nemotron_h", "gemma4" });
 }

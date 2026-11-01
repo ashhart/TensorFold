@@ -26,3 +26,9 @@ test "draft sources: XPU Nemotron follows the checkpoint head, with no copy wind
     e.head = present(@TypeOf(e.head.?));
     try check(b.facts(), null, true, true);
 }
+
+test "slide admission: XPU refuses every family before device access" {
+    const native = @import("xpu.zig");
+    for (native.families) |f| try @import("slide_open_test.zig").check(native.open, "XPU", &.{f.model_type});
+    try @import("slide_open_test.zig").check(@import("xpu_nem.zig").open, "XPU", &.{ "nemotron_h", "gemma4" });
+}

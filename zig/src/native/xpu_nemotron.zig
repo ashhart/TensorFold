@@ -32,6 +32,10 @@ fn wantsHead(a: Allocator, dir: []const u8, drafts: bool) bool {
 
 /// The engine for `o.dir`, or null with `problem` set (the caller releases the device).
 pub fn init(a: Allocator, io: std.Io, ctx: *const xpu.Context, o: api.Open, window: usize, problem: *[]const u8) !?*Engine {
+    if (try o.slideRefusal(a, "XPU")) |why| {
+        problem.* = why;
+        return null;
+    }
     return nemotron.Engine.init(std.heap.page_allocator, io, ctx, o.dir, .{ .context = window, .window_rows = prompt_rows, .mtp = wantsHead(a, o.dir, o.drafts) }) catch |e| {
         problem.* = if (e == error.UnsupportedFormat)
             try std.fmt.allocPrint(a, "{s}: NVFP4 checkpoints are not supported on the XPU backend yet; use the MLX 4-bit checkpoint", .{o.dir})

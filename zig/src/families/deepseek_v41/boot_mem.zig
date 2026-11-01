@@ -147,6 +147,7 @@ pub const Trace = struct {
 
     /// glibc's free heap returned to the system, logged as RssAnon before and after (a no-op without glibc).
     pub fn trim(t: *const Trace) void {
+        if (@import("builtin").os.tag != .linux) return;
         if (!t.on) return;
         const f = malloc_trim orelse return log.info("boot trace: malloc_trim: not in this libc", .{});
         const before = procField("/proc/self/status", "RssAnon:");

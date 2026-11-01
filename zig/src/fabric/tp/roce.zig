@@ -519,6 +519,7 @@ pub const Roce = struct {
 };
 
 fn pin(cpu: u32) void {
+    if (@import("builtin").os.tag != .linux) return;
     var set: std.os.linux.cpu_set_t = @splat(0);
     set[cpu / @bitSizeOf(usize)] |= @as(usize, 1) << @intCast(cpu % @bitSizeOf(usize));
     std.os.linux.sched_setaffinity(0, &set) catch log.warn("tp roce: could not pin the proxy to CPU {d}", .{cpu});

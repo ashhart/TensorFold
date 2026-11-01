@@ -6,6 +6,10 @@ const setting = @import("cuda_device.zig").setting;
 const getenv = @import("cuda_device.zig").getenv;
 
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (try o.slideRefusal(a, "CUDA")) |why| {
+        problem.* = why;
+        return null;
+    }
     if (o.cfg_enabled or o.cfg_batched) {
         problem.* = "this engine revision implements Drama CFG on Metal only; use the pinned CUDA quant engine on Linux";
         return null;
@@ -60,6 +64,10 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
 }
 
 pub fn openMetal(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (try o.slideRefusal(a, "Macs")) |why| {
+        problem.* = why;
+        return null;
+    }
     const window = o.context orelse 8192;
     if (window < 1025 or window > 8192 or o.tp != 1 or o.rank != 0 or
         (o.lanes_fixed and (o.lanes == 0 or o.lanes > 8)) or

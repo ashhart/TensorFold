@@ -592,3 +592,7 @@ test "Save recovery: real native close drains the accepted trainer before any ch
 test "Save recovery: real native close drains the dense trainer before any child or parent is released" {
     try @import("dense_trainer_close_test.zig").run(Host, Host.serve, Host.close);
 }
+
+test "slide admission: cuda refuses before checkpoint or device access" {
+    try @import("slide_open_test.zig").check(open, "CUDA", &.{ "qwen4", "qwen4_text", "lfm2_vl", "glm5_next", "gemma4", "fish_omni" });
+}

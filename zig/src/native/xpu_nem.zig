@@ -106,6 +106,10 @@ pub fn serves(model_type: []const u8) bool {
 }
 
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (try o.slideRefusal(a, "XPU")) |why| {
+        problem.* = why;
+        return null;
+    }
     inline for (specs) |S| if (std.mem.eql(u8, o.model_type, S.model_type)) return openFamily(S, a, gpa, io, o, problem);
     problem.* = try std.fmt.allocPrint(a, "the native Intel GPU engine has no backend for {s} checkpoints yet (it reads {s})", .{ o.model_type, served });
     return null;
