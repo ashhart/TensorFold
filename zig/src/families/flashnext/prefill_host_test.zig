@@ -376,3 +376,36 @@ test "flashnext prefill: an active flag share leaves a gated family's chunks exa
     core.backend.chunk_invariant = true; // the knob is live: a qualified family's cap arrives
     try std.testing.expectEqual(hostfill.decode_cap_rows, hostfill.capRows(&host));
 }
+
+// The host's nonzero hint caps a call beside decoders in place of decode_rows; 0 keeps them.
+test "flashnext prefill: a nonzero host hint caps the chunk beside a decoder, 0 keeps decode_rows, promptRows bounds it" {
+    const tokens = try a.alloc(u32, 5000);
+    defer a.free(tokens);
+    for (tokens, 0..) |*t, i| t.* = @intCast((i * 5 + 1) % 97);
+    var f: Fake = .{}; // decode_shrink: the Metal shape, 32 rows a call while a stream decodes
+    defer f.deinit();
+    var cfg = try config();
+    defer cfg.deinit(a);
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(a, &cfg, f.backend(), clock.clock());
+    defer core.deinit();
+    var dec = try lanes.Stream.init(a, .{ .id = "dec", .prompt = &.{ 3, 1, 4 }, .max_new = 8 });
+    defer dec.deinit(a);
+    try core.addStream(&dec);
+    defer core.backend.release(&dec);
+    try std.testing.expect(f.decoding());
+    var s = try lanes.Stream.init(a, .{ .id = "long", .prompt = tokens, .max_new = 4 });
+    defer s.deinit(a);
+    // hint, then the rows the call must take: 0 is the default decode cut; Fake.promptRows' step (1024) bounds a big hint
+    const Case = struct { hint: u32, rows: u32 };
+    const cases = [_]Case{ .{ .hint = 0, .rows = fill.decode_rows }, .{ .hint = 700, .rows = 700 }, .{ .hint = 0, .rows = fill.decode_rows }, .{ .hint = 8192, .rows = 1024 }, .{ .hint = 16, .rows = 16 } };
+    const ends = f.ends; // the decoder's own prompt
+    var at: u32 = 0;
+    for (cases) |c| {
+        try std.testing.expect(!try fill.step(&f, &s, c.hint));
+        at += c.rows;
+        try std.testing.expectEqual(@as(u64, at), s.fill_at.load(.monotonic));
+    }
+    while (!try fill.step(&f, &s, 4096)) {} // to the end under a hint: the prompt's state still checks out
+    try std.testing.expectEqual(ends + 1, f.ends);
+}
