@@ -10,6 +10,7 @@ const cv = @import("cuda_vision.zig");
 
 const be = lanes.backend;
 const Stream = lanes.Stream;
+pub const shared = @import("cuda_shared.zig");
 const Pick = cuda.tree_round.Pick;
 
 /// Prompt rows a step takes: the forward's chunk grid, from position 0.
@@ -23,6 +24,10 @@ const ring = 1024;
 
 const Lane = struct {
     slot: usize,
+    lease: @import("core").kv_pool.Lease = .{},
+    marks: []const u32 = &.{},
+    shared: bool = false,
+    kept: u32 = 0,
     len: u64 = 0, // the cache length: positions [0, len) hold this stream's keys
     base: u64 = 0, // the cache length the last verify started from
     rows: std.ArrayList(u32) = .empty, // the last verify's row tokens
@@ -55,6 +60,11 @@ pub const Gemma = struct {
     meta: cuda.DeviceBuffer, // a draw's first position minus one, a window each
     slot_bufs: []cuda.DeviceBuffer, // a slot's last-row logits, then its rule: two a slot
     next: u64 = 0,
+    pool: ?@import("core").kv_pool.Pool = null,
+    prompts: ?@import("core").kv_prompts.Prompts = null,
+    restore_slot: ?usize = null,
+    restored_at: u32 = 0,
+    relocated: ?struct { ctx: *anyopaque, call: *const fn (*anyopaque) void } = null,
     gen: u64 = 1, // forwards run: a tap is current while its gen is this
     tapped: bool = false, // a drafter reads the last layer's rows (prepare_features)
     vision: ?*cv.Vision = null, // --vision: the embedder a prompt's images go through
@@ -67,7 +77,7 @@ pub const Gemma = struct {
     }
 
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, m: *fwd.Model, k: *const kern.Kernels, s: cuda.Stream) !Gemma {
-        const free = try gpa.alloc(bool, m.slots);
+        const free = try gpa.alloc(bool, if (m.paged) round_rows else m.slots);
         errdefer gpa.free(free);
         @memset(free, true);
         const greedy = try gpa.alloc(bool, ring + round_rows);
@@ -79,7 +89,7 @@ pub const Gemma = struct {
         errdefer picks.free();
         var meta = try cuda.DeviceBuffer.alloc(d, round_rows * 16);
         errdefer meta.free();
-        const bufs = try gpa.alloc(cuda.DeviceBuffer, 2 * m.slots);
+        const bufs = try gpa.alloc(cuda.DeviceBuffer, 2 * (if (m.paged) round_rows else m.slots));
         errdefer gpa.free(bufs);
         var made: usize = 0;
         errdefer for (bufs[0..made]) |*b| b.free();
@@ -92,7 +102,12 @@ pub const Gemma = struct {
 
     pub fn deinit(x: *Gemma) void {
         var it = x.lanes.valueIterator();
-        while (it.next()) |l| l.rows.deinit(x.gpa);
+        while (it.next()) |l| {
+            if (x.pool) |*p| p.finish(&l.lease);
+            x.gpa.free(l.marks);
+            l.rows.deinit(x.gpa);
+        }
+        if (x.pool) |*p| p.deinit();
         x.lanes.deinit(x.gpa);
         for (x.slot_bufs) |*b| b.free();
         x.gpa.free(x.slot_bufs);
@@ -165,14 +180,14 @@ pub const Gemma = struct {
 
     /// The round loop's facts: no draft head; host copies verified in windows up to 16 rows, streams sharing a forward.
     pub fn facts(x: *const Gemma) lanes.Model {
-        return .{ .exact_width = max_window, .gpu_tokens = false, .mtp = false, .speculate = false, .hidden_rows = true, .batch_rows = round_rows, .max_streams = @intCast(@min(x.m.slots, round_rows)) };
+        return .{ .exact_width = max_window, .gpu_tokens = false, .mtp = false, .speculate = false, .hidden_rows = true, .batch_rows = round_rows, .max_streams = @intCast(@min(if (x.m.paged) round_rows else x.m.slots, round_rows)) };
     }
 
     fn self(ptr: *anyopaque) *Gemma {
         return @ptrCast(@alignCast(ptr));
     }
 
-    fn upload(x: *Gemma, dst: u64, bytes: []const u8) !void {
+    pub fn upload(x: *Gemma, dst: u64, bytes: []const u8) !void {
         try x.d.check(x.d.api.cuMemcpyHtoDAsync_v2(dst, bytes.ptr, bytes.len, x.s.handle), "cuMemcpyHtoDAsync");
     }
 
@@ -243,6 +258,7 @@ pub const Gemma = struct {
         const s: *const Stream = @ptrCast(@alignCast(owner orelse return error.NoOwner));
         const l = x.lanes.getPtr(s) orelse return error.UnknownStream;
         if ((l.fill orelse l.len) != at) return error.NotAtMark; // a state is copied only where the pass stands
+        if (x.prompts != null) return shared.save(x, l.slot, at);
         const k = try snap.save(x.gpa, x.m, x.s, l.slot, at);
         errdefer snap.drop(x.gpa, x.s, k);
         if (x.keeper) |kp| try kp.keep(kp.ctx, s, k);
@@ -250,6 +266,7 @@ pub const Gemma = struct {
     }
 
     pub fn restoreState(x: *Gemma, owner: ?*anyopaque, k: *const snap.Saved) !void {
+        if (x.prompts != null) return shared.restore(x, k);
         const s: *const Stream = @ptrCast(@alignCast(owner orelse return error.NoOwner));
         const l = x.lanes.getPtr(s) orelse return error.UnknownStream;
         try snap.restore(x.m, x.s, l.slot, k);
@@ -257,7 +274,7 @@ pub const Gemma = struct {
     }
 
     pub fn dropState(x: *Gemma, k: *snap.Saved) void {
-        snap.drop(x.gpa, x.s, k);
+        shared.drop(x, k);
     }
 
     fn freeSlot(x: *const Gemma) ?usize {
@@ -265,36 +282,12 @@ pub const Gemma = struct {
     }
 
     /// A prompt pass begins: a slot, the stream's rule, a kept state restored; where its first chunk starts.
-    fn opening(x: *Gemma, s: *Stream) !*Lane {
-        const p = s.prompt();
-        if (p.len == 0) return error.EmptyPrompt;
-        if (p.len + @as(usize, s.max_new) + max_window > x.m.context) return error.PastContext;
-        const got = try x.lanes.getOrPut(x.gpa, s);
-        if (!got.found_existing) {
-            const slot = x.freeSlot() orelse {
-                x.lanes.removeByPtr(got.key_ptr);
-                return error.NoFreeSlot;
-            };
-            x.free[slot] = false;
-            got.value_ptr.* = .{ .slot = slot, .last = x.slot_bufs[2 * slot].ptr, .rule = x.slot_bufs[2 * slot + 1].ptr };
-        }
-        const l = got.value_ptr;
-        l.sampled = false;
-        l.mark = null;
-        if (s.sampling) |sp| if (sp.temperature > 0) {
-            const r = cuda.sample.Rule.from(lanes.gpu_rule.rule(sp));
-            try x.upload(l.rule, std.mem.asBytes(&r));
-            l.sampled = true;
-        };
-        s.cached = 0;
-        if (s.images.len > 0) try x.encodeImages(s, l);
-        l.fill = x.resumeAt(s, l, p.len);
-        s.fill_at.store(@intCast(l.fill.?), .monotonic);
-        return l;
+    pub fn opening(x: *Gemma, s: *Stream) !*Lane {
+        return if (x.pool != null) shared.opening(Lane, x, s) else shared.legacyOpening(Lane, x, s);
     }
 
     /// Every image of the prompt through the embedder into the lane's buffer, in prompt order.
-    fn encodeImages(x: *Gemma, s: *Stream, l: *Lane) !void {
+    pub fn encodeImages(x: *Gemma, s: *Stream, l: *Lane) !void {
         const v = x.vision orelse return error.GemmaServedWithoutVision;
         const p = s.prompt();
         var rows: usize = 0;
@@ -326,7 +319,7 @@ pub const Gemma = struct {
     }
 
     /// The kept state's position, restored into the slot (0: none, or not this prompt's).
-    fn resumeAt(x: *Gemma, s: *Stream, l: *const Lane, len: usize) usize {
+    pub fn resumeAt(x: *Gemma, s: *Stream, l: *const Lane, len: usize) usize {
         const saved = s.reuse.saved orelse return 0;
         const k: *const snap.Saved = @ptrCast(@alignCast(saved));
         // a drafter that keeps context resumes only a state that carries it
@@ -348,7 +341,7 @@ pub const Gemma = struct {
         const at = l.fill.?;
         if (s.isCancelled()) return error.Cancelled;
         var end = @min(p.len, (at / prompt_rows + 1) * prompt_rows);
-        for (s.reuse.marks) |mk| if (mk > at and mk < end and !insideImage(s, mk)) {
+        for (if (l.shared) l.marks else s.reuse.marks) |mk| if (mk > at and mk < end and !insideImage(s, mk)) {
             end = mk;
         };
         // never through an image: its rows see each other, so a chunk holds all of them (one is at most 280)
@@ -385,8 +378,11 @@ pub const Gemma = struct {
     }
 
     /// The prompt cache's mark at `end`: the state there is copied (with a drafter's context, once it holds it).
-    fn marked(x: *Gemma, s: *Stream, end: usize) void {
-        _ = x;
+    pub fn marked(x: *Gemma, s: *Stream, end: usize) void {
+        if (x.lanes.getPtr(s)) |l| if (l.shared) {
+            shared.marked(x, s, l, end) catch |err| std.log.warn("gemma4: prompt pages not kept: {s}", .{@errorName(err)});
+            return;
+        };
         if (s.reuse.hook) |hk| if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(end)) != null) hk.at(hk.ptr, s, @intCast(end));
     }
 
@@ -450,6 +446,7 @@ pub const Gemma = struct {
         const l = x.lanes.getPtr(s) orelse return error.UnknownStream;
         const t = try x.value(feed);
         if (position != l.len + 1) return error.PositionMismatch;
+        try shared.reach(x, l, l.len + 1);
         try x.run(&.{.{ .slot = l.slot, .p0 = l.len, .tokens = &.{t} }}, false, 0, 1);
         l.tap = .{ .row = 0, .start = l.len, .rows = 1, .gen = x.gen };
         l.len += 1;
@@ -481,6 +478,7 @@ pub const Gemma = struct {
             try l.rows.append(x.gpa, w.pending);
             try l.rows.appendSlice(x.gpa, w.tokens);
             for (w.positions, 0..) |pos, r| if (pos != l.base + r + 1) return error.PositionMismatch;
+            try shared.reach(x, l, l.base + l.rows.items.len);
             c.* = .{ .slot = l.slot, .p0 = l.base, .tokens = l.rows.items };
             total += l.rows.items.len;
         }
@@ -527,6 +525,9 @@ pub const Gemma = struct {
         if (x.lanes.fetchRemove(s)) |kv| {
             var l = kv.value;
             x.free[l.slot] = true;
+            if (x.pool) |*p| p.finish(&l.lease);
+            if (x.m.paged) x.m.caps[l.slot] = 0;
+            x.gpa.free(l.marks);
             l.rows.deinit(x.gpa);
             if (l.images) |*b| {
                 x.s.synchronize() catch {};
