@@ -188,11 +188,8 @@ pub fn promptRows(generation: u32) u32 {
     return @import("prompt_rows.zig").requested(generation, value);
 }
 
-/// The qualified shape and layer schedule; per-module widths are admitted by widths.admit once the chip is known.
-pub fn supported(c: cfg.Config) !void {
-    if (c.hidden != 5120 or c.intermediate != 17408 or c.layers != 64 or c.vocab != 248320 or c.heads != 24 or c.kv_heads != 4 or c.head_dim != 256 or c.k_heads != 16 or c.v_heads != 48 or c.dk != 128 or c.dv != 128 or c.conv_kernel != 4 or c.rope_dims != 64) return error.UnqualifiedQwenShape;
-    for (c.kinds[0..c.layers], 0..) |kind, i| if (kind != (if ((i + 1) % 4 == 0) cfg.Kind.attention else cfg.Kind.linear)) return error.UnqualifiedLayerSchedule;
-}
+/// Kernel-compatible geometry from config; checkpoint qualification is a separate device gate.
+pub const supported = @import("geometry.zig").supported;
 
 fn qualifiedGeneration(generation: u32) bool {
     return generation >= 13 and generation <= 18;
