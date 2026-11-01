@@ -170,11 +170,60 @@ pub const Fns = struct {
         return f;
     }
 
+    /// Replace only the full-head oracle; candidate half handles stay initialized and owned by their original module.
+    pub fn withFull(f: Fns, batch: cuda.Module) !Fns {
+        var out = f;
+        for (std.enums.values(Kind)) |k| {
+            const i = @backingInt(k);
+            out.full[i] = try batch.function(symbol(k, false));
+            const smem: u32 = switch (k) {
+                .tpr => parts.chain_tpr_smem,
+                .fused => parts.gdn_fused_smem,
+                else => continue,
+            };
+            try out.full[i].allowDynamicShared(smem);
+        }
+        return out;
+    }
+
     /// The kernel of `kind` built for heads h.
     pub fn of(f: *const Fns, kind: Kind, h: Heads) cuda.Function {
         return if (h.eql(.full)) f.full[@backingInt(kind)] else f.half[@backingInt(kind)];
     }
 };
+
+test "a frozen full-head oracle replaces no candidate half handle" {
+    const Fake = struct {
+        var shared: usize = 0;
+        fn get(out: *cuda.abi.Function, _: cuda.abi.Module, name: [*:0]const u8) callconv(.c) c_int {
+            for (std.enums.values(Kind)) |k| if (std.mem.eql(u8, std.mem.span(name), symbol(k, false))) {
+                out.* = @ptrFromInt(0x300 + @as(usize, @backingInt(k)));
+                return 0;
+            };
+            return 1;
+        }
+        fn attribute(_: cuda.abi.Function, _: cuda.abi.FunctionAttribute, _: c_int) callconv(.c) c_int {
+            shared += 1;
+            return 0;
+        }
+    };
+    var driver: cuda.Driver = undefined;
+    driver.api.cuModuleGetFunction = Fake.get;
+    driver.api.cuFuncSetAttribute = Fake.attribute;
+    var candidate: Fns = undefined;
+    for (&candidate.full, &candidate.half, 0..) |*f, *h, i| {
+        f.* = .{ .d = &driver, .handle = @ptrFromInt(0x100 + i) };
+        h.* = .{ .d = &driver, .handle = @ptrFromInt(0x200 + i) };
+    }
+    Fake.shared = 0;
+    const oracle = try candidate.withFull(.{ .d = &driver, .handle = @ptrFromInt(0x10) });
+    for (candidate.full, candidate.half, oracle.full, oracle.half, 0..) |f, h, of, oh, i| {
+        try std.testing.expectEqual(@as(usize, 0x100 + i), @intFromPtr(f.handle));
+        try std.testing.expectEqual(@as(usize, 0x300 + i), @intFromPtr(of.handle));
+        try std.testing.expectEqual(h.handle, oh.handle);
+    }
+    try std.testing.expectEqual(@as(usize, 2), Fake.shared);
+}
 
 fn cint(n: usize) c_int {
     return @intCast(n);
