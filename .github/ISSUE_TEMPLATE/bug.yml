@@ -48,7 +48,7 @@ body:
     attributes:
       label: TensorFold version or commit
       description: The `--version` output or the commit SHA. Say whether it is a release archive, a source build or a fork with changes.
-      placeholder: 1.1.9 release archive
+      placeholder: "the `--version` output"
     validations:
       required: true
   - type: input

@@ -39,7 +39,7 @@ body:
     attributes:
       label: Baseline and candidate versions or commits
       description: The faster or smaller one and the slower or larger one. Say whether either is a fork with changes.
-      placeholder: 1.1.8 release archive and 1.1.9 release archive
+      placeholder: "the `--version` output for both"
     validations:
       required: true
   - type: dropdown

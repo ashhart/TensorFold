@@ -61,7 +61,7 @@ body:
     id: arithmetic
     attributes:
       label: Chips, precision and stored arithmetic
-      description: The chips, the precision and format, and whether stored weights or caches would be converted. Opt-in does not waive exactness or precision.
+      description: The chips, the precision and format, and whether stored weights or caches would be converted. A change to output tokens on a default path needs proof and an opt-in, and an opt-in that changes tokens stays off by default with its own agreed gate.
     validations:
       required: true
   - type: textarea
