@@ -112,6 +112,7 @@ pub fn build(b: *std.Build) void {
         b.step("test-shared-head-cost-metal-host", "Metal family head-cost grants without device execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = budget_mods.engine, .filters = &.{"shared head costs:"} })).step);
         @import("zig/build/flashnext_budget.zig").compileHost(b, budget_mods.metal, budget_mods.engine, budget_mods.lanes);
         @import("zig/build/residency_host.zig").compileHost(b, budget_mods.metal, budget_mods.engine, budget_mods.lanes);
+        @import("zig/build/dsv41_metal.zig").steps(b, budget_mods.metal, budget_mods.sources, test_step);
         @import("zig/build/slide_host.zig").metal(b, budget_mods);
     }
     // every tracked path checks out on Windows too
