@@ -1,4 +1,4 @@
-// Causal prefill attention on the M5 tensor unit, bit-identical to MLX 0.32.3's steel_attention (NAX, bq64 bk32 d128).
+// Causal prefill attention: MLX NAX arithmetic by default; TF_ATTN_PV_FP32 opts into full-float P x V on M5.
 #include <metal_stdlib>
 using namespace metal;
 typedef bfloat bfloat16_t;
@@ -24,6 +24,29 @@ inline void row_fold(thread const frag<float>& f, thread float (&r)[2]) {
     t = MAX ? max(t, w) : t + w;
     r[h] = MAX ? max(r[h], t) : r[h] + t;
   }
+}
+
+// The P x V product: the default tensor op cuts P to ten fraction bits; the opt-in uses float FMAs.
+template <typename T>
+inline void attention_pv(thread frag<float>& lo, thread frag<float>& hi, thread const frag<float>& p,
+                         thread const frag<T>& v0, thread const frag<T>& v1, ushort lane) {
+#if defined(TF_ATTN_PV_FP32) && !defined(TF_SIMD_FRAGS)
+  TF_UNROLL
+  for (ushort k = 0; k < 16; k++) {
+    const ushort pl = (lane & 22) | ((k >> 2) & 1) | ((k >> 3) << 3);
+    const ushort vl = ((k & 3) << 1) | ((k & 4) << 2) | (lane & 9);
+    const float p0 = simd_shuffle(p[k & 3], pl), p1 = simd_shuffle(p[4 + (k & 3)], pl);
+    TF_UNROLL
+    for (ushort c = 0; c < 4; c++) {
+      const float a = simd_shuffle(float(v0[4 * (k >> 3) + c]), vl);
+      const float b = simd_shuffle(float(v1[4 * (k >> 3) + c]), vl);
+      lo[c] = fma(p0, a, lo[c]); hi[c] = fma(p0, b, hi[c]);
+      lo[4 + c] = fma(p1, a, lo[4 + c]); hi[4 + c] = fma(p1, b, hi[4 + c]);
+    }
+  }
+#else
+  mma_16x32<false, false>(lo, hi, p, v0, v1);
+#endif
 }
 
 // One 64-query block of one head, online softmax over 32-key blocks; P holds the ATTN_PARAMS fields, F[0] the scale.
@@ -147,7 +170,7 @@ inline void attention_nax(const device T* Q, const device T* K, const device T* 
           frag_get(v0, V, vs, 16 * k, 16 * d, home);
           frag_get(v1, V, vs, 16 * k, 16 * d + 16, home);
         }
-        mma_16x32<false, false>(acc[d], acc[d + 1], s[k], v0, v1);
+        attention_pv(acc[d], acc[d + 1], s[k], v0, v1, ushort(lane));
       }
     }
     K += BK * ks;
