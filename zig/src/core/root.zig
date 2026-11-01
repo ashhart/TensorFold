@@ -35,6 +35,8 @@ pub const l2_ref = @import("l2_ref.zig");
 pub const act_ref = @import("act_ref.zig");
 pub const bf16_round = @import("bf16_round.zig");
 pub const rope_yarn = @import("rope_yarn.zig");
+/// transformers' default and proportional RoPE inverse frequencies in fp32, word for word.
+pub const rope_freq = @import("rope_freq.zig");
 pub const embed_ref = @import("embed_ref.zig");
 /// The kernel contract every GPU kernel's test registers with (zig/tests/contract, tf-cuda-test kernel-contract).
 pub const contract = @import("contract.zig");
@@ -64,6 +66,7 @@ test {
     _ = safetensors;
     _ = affine4_host;
     _ = rope_yarn;
+    _ = rope_freq;
     _ = affine4_fold;
     _ = shard_edit;
     _ = lora_merge;
