@@ -53,6 +53,7 @@ pub const attention_range = @import("attention_range.zig");
 pub const gdn_prep_ref = @import("gdn_prep_ref.zig");
 pub const qk_ref = @import("qk_ref.zig");
 pub const moe_ref = @import("moe_ref.zig");
+pub const route_tap = @import("route_tap.zig");
 pub const dense_ref = @import("dense_ref.zig");
 
 pub const checkpoint_weights = @import("checkpoint_weights.zig");
@@ -86,6 +87,7 @@ test {
     _ = gdn_prep_ref;
     _ = qk_ref;
     _ = moe_ref;
+    _ = route_tap;
     _ = dense_ref;
     _ = exl3_format;
     _ = exlr8;

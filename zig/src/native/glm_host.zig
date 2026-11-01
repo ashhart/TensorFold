@@ -226,6 +226,7 @@ pub const Learn = struct { root: []const u8, cap: u64, floor: u64, daily: u64, c
 pub fn close(ctx: *anyopaque) void {
     const h: *Host = @ptrCast(@alignCast(ctx));
     h.host.stop();
+    tf.route_tap.stop();
     const rows = if (h.cache) |*store| store.disk else null;
     if (h.cache) |*store| store.deinit();
     if (rows) |r| r.deinit(); // after the store: its entries leave the write queue as they go

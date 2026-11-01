@@ -3,6 +3,7 @@ const failed_load = @import("cuda_load_gpu.zig");
 const kv_pages = @import("cuda_kv_pool.zig");
 pub fn close(h: anytype) void {
     h.host.stop();
+    @import("core").route_tap.stop();
     kv_pages.unwatch(&h.kv); // the engine thread is joined: the pool's teardown below reports to no one
     h.core.deinit();
     h.cfg.deinit(h.gpa);

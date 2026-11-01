@@ -14,10 +14,8 @@ const glmCuda = engines_build.glmCuda;
 const lfm2Module = engines_build.lfm2Module;
 
 fn family(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, draft_ids: *std.Build.Module) struct { core: *std.Build.Module, lanes: *std.Build.Module, nemotron: *std.Build.Module, qwen35: *std.Build.Module, qwen_vision: *std.Build.Module, tokenizer: *std.Build.Module, heat: *std.Build.Module, radio: *std.Build.Module, living: *std.Build.Module, api: *std.Build.Module } {
-    const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = optimize, .link_libc = true });
-    const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
-    core.addImport("gpu_memory", @import("gpu_memory.zig").module(b, target));
-    core.addImport("tokenizer", tokenizer);
+    const core = cuda.import_table.get("core").?;
+    const tokenizer = core.import_table.get("tokenizer").?;
     const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const heat = b.createModule(.{ .root_source_file = b.path("zig/src/core/heat.zig"), .target = target, .optimize = optimize, .link_libc = true });
     // Living Weights' family-neutral learner: a family's lessons, and the server's view of them, import it

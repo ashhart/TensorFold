@@ -71,6 +71,7 @@ const LaneServed = struct {
     fn close(ptr: *anyopaque) void {
         const h: *LaneServed = @ptrCast(@alignCast(ptr));
         h.host.stop();
+        @import("core").route_tap.stop();
         if (h.cache) |*store| store.deinit();
         h.core.deinit();
         h.cfg.deinit(h.gpa);
@@ -162,6 +163,7 @@ fn openLanes(gpa: Allocator, io: std.Io, runner: *xq.Runner, drafter: ?*Drafter,
 }
 
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (!@import("core").route_tap.admit(a, gpa, o.model_type, o.rank, problem)) return null;
     if (try o.slideRefusal(a, "XPU")) |why| {
         problem.* = why;
         return null;

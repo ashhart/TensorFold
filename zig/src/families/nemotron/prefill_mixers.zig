@@ -170,6 +170,12 @@ pub fn moe(x: Chunk, m: pre.Moe, w: wts.Moe) void {
     e.buf(s.ids, 0, 4);
     e.buf(s.wt, 0, 5);
     e.run(.{ 128, L, 1 }, .{ 128, 1, 1 });
+    // glue set: tf_copy_u32 is not in the prefill pipeline map
+    const tap_m = @import("../../core/route_tap_metal.zig");
+    if (tap_m.live()) {
+        if (e.concurrent and e.dispatches > 0) e.e.barrier();
+        tap_m.blit(e.e, x.f.k.get("tf_copy_u32"), s.ids, 0, s.wt, 0, @intCast(n));
+    }
     const blocks = (n + 255) / 256;
     l.glue("sort_count_uint32_t_int32_t_int32_t", &.{At.of(s.ids)}, &.{ n, E }, &.{At.of(s.counts)}, .{ blocks * 256, 1, 1 }, .{ 256, 1, 1 });
     l.glue("sort_starts_int32_t_int32_t_int32_t_int32_t", &.{At.of(s.counts)}, &.{ n, E }, &.{ At.of(s.starts), At.of(s.offsets) }, .{ E, 1, 1 }, .{ E, 1, 1 });

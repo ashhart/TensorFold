@@ -164,6 +164,7 @@ fn finish(cb: mtl.CommandBuffer, x: Enc) !void {
     x.e.end();
     cb.commit();
     cb.wait();
+    @import("../../core/route_tap_metal.zig").afterWait();
     if (cb.failure()) |msg| {
         std.log.err("step5 forward: {s}", .{msg});
         return error.GpuFailed;
@@ -212,6 +213,7 @@ fn layer(x: Enc, cache: *st.Cache, l: wts.Layer, i: usize, start: usize, n: usiz
                     .counts = b(s.route[5]),
                     .word = b(s.route[6]),
                 });
+                @import("../../core/route_tap_metal.zig").blitPicks(x.e, s.pick, at, s.wts, at, blk * c.topk);
             }
             const slots = n * c.topk;
             if (n > st.window_rows) {

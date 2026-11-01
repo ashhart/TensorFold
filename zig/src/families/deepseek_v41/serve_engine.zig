@@ -28,6 +28,7 @@ pub fn chip(_: Allocator) ?[]const u8 {
 
 /// The engine for `o.dir`, or null with `problem` set (the native_engines contract).
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (!@import("core").route_tap.admit(a, gpa, o.model_type, o.rank, problem)) return null;
     if (try o.slideRefusal(a, "CUDA")) |why| {
         problem.* = why;
         return null;

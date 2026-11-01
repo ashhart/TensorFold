@@ -33,6 +33,7 @@ pub const Model = struct {
         m.device = try mtl.Device.init();
         errdefer m.device.deinit();
         m.queue = try m.device.queue();
+        @import("../../core/route_tap_metal.zig").attach(m.device);
         errdefer m.queue.deinit();
         m.checkpoint = ckpt.Checkpoint.init(gpa);
         errdefer m.checkpoint.deinit();
@@ -93,6 +94,7 @@ pub const Model = struct {
 
     pub fn deinit(m: *Model) void {
         m.dropResident();
+        @import("../../core/route_tap_metal.zig").detach();
         m.kernels.deinit();
         m.checkpoint.deinit();
         m.queue.deinit();

@@ -237,6 +237,7 @@ pub const Forward = struct {
         const pairs = R * topk;
         try kern.router(&f.m.k, f.stream, b.x, m.router, b.logits32, R, h, co.experts);
         try kern.route(&f.m.k, f.stream, b.logits32, m.bias, b.pick, b.wts, R, co.experts, topk);
+        cuda.route_tap_copy.afterPick(f.stream, b.pick, b.wts, R, topk);
         const tile: usize = if (b.prefill) 64 else 16;
         try f.m.router.route(f.stream, b.pick, pairs, co.experts, tile, b.plan());
         const g = f.m.grouped();

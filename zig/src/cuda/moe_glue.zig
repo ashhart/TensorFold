@@ -64,8 +64,13 @@ pub const MoeGlue = struct {
         a.add(@as(i32, @intFromBool(r.normalize)));
         a.add(r.scale);
         if (r.score) a.add(@as(i32, @intCast(r.slices)));
-        if (warp) return launch_.launch(if (!r.score) g.topk_warp_fn else if (r.experts <= 128) g.topk_score128_fn else g.topk_score_fn, .{ .grid = .{ .x = @intCast((rows + 7) / 8), .y = 1, .z = 1 }, .block = .{ .x = 256 } }, s, &a);
-        try launch_.launch(g.topk_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = threads } }, s, &a);
+        if (warp) {
+            try launch_.launch(if (!r.score) g.topk_warp_fn else if (r.experts <= 128) g.topk_score128_fn else g.topk_score_fn, .{ .grid = .{ .x = @intCast((rows + 7) / 8), .y = 1, .z = 1 }, .block = .{ .x = 256 } }, s, &a);
+        } else {
+            try launch_.launch(g.topk_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = threads } }, s, &a);
+        }
+        const slots = r.topk + (if (r.shared) r.shared_slots else 0);
+        @import("route_tap_copy.zig").afterPick(s, pick, wts, rows, slots);
     }
 
     /// out [rows, dims] = the sum, in slot order, of w [rows, slots] (fp32) times y [rows, slots, dims].

@@ -74,6 +74,7 @@ pub const RouteRows = struct {
         a.add(@as(i32, @intCast(slots)));
         a.add(@as(i32, @intFromBool(shared)));
         try launch_.launch(g.topk_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = 128 } }, s, &a);
+        @import("route_tap_copy.zig").afterPick(s, picks, wts, rows, slots);
     }
 };
 

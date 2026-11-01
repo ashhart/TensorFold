@@ -95,6 +95,7 @@ pub fn route(K: *const ly.Kernels, L: *const L_, s: *const gpu.Scratch, q: *cons
         kn.route_select(e, K.k.select, at(q.logits, k, c.experts), L.k.at(m.bias), c.routed_scale, @min(R, rows - k), .{ 0, c.experts }, kn.RouteOutputs(Ref){ .pick = at(q.pick, k, c.topk), .wts = at(q.wts8, k, c.topk), .ids = ref(r[2]), .members = ref(r[3]), .count = ref(r[4]), .mine = ref(r[5]), .theirs = ref(r[6]), .counts = ref(r[7]), .word = ref(r[8]) });
         e.barrier();
     }
+    @import("../../core/route_tap_metal.zig").blitPicks(e, q.pick, 0, q.wts8, 0, rows * c.topk);
 }
 
 /// The window's experts of normed rows `x` into `out` from q's picks: tiles decoded once for 32 rows (bf16 rows).

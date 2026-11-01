@@ -89,10 +89,16 @@ fn route(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, row
     if (x.fused_route) {
         if (on(x, "r_router")) moe_route.logits(e, k.route_logits, route_shape, x_in, w.router, sc.logits_r, rows);
         if (!on(x, "r_topk")) return;
-        if (x.ep) |ep| if (!c.byRows()) return moe_route.select(e, k.route_select, sc.logits_r, w.bias, c.routed_scale, rows, c.own, ep.outputs(sc.pick, sc.wts));
+        if (x.ep) |ep| if (!c.byRows()) {
+            moe_route.select(e, k.route_select, sc.logits_r, w.bias, c.routed_scale, rows, c.own, ep.outputs(sc.pick, sc.wts));
+            tapRoute(x, e, rows);
+            return;
+        };
         const rl = sc.rl;
         const T: usize = c.topk * st.max_rows * 4;
-        return moe_route.select(e, k.route_select, sc.logits_r, w.bias, c.routed_scale, rows, .{ 0, c.experts }, .{ .pick = sc.pick, .wts = sc.wts, .ids = sc.uids, .members = sc.umem, .count = sc.ucount, .mine = rl, .theirs = rl.at(T), .counts = rl.at(2 * T), .word = rl.at(2 * T + 64) });
+        moe_route.select(e, k.route_select, sc.logits_r, w.bias, c.routed_scale, rows, .{ 0, c.experts }, .{ .pick = sc.pick, .wts = sc.wts, .ids = sc.uids, .members = sc.umem, .count = sc.ucount, .mine = rl, .theirs = rl.at(T), .counts = rl.at(2 * T), .word = rl.at(2 * T + 64) });
+        tapRoute(x, e, rows);
+        return;
     }
     if (on(x, "r_cast")) {
         e.setPipeline(k.cast_f32);
@@ -113,6 +119,12 @@ fn route(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, row
     e.setValue(c.routed_scale, 3);
     bind(e, 4, .{ sc.pick, sc.wts, sc.uids, sc.umem, sc.ucount });
     e.dispatchThreads(size(512, 1, 1), size(512, 1, 1));
+    tapRoute(x, e, rows);
+}
+
+fn tapRoute(x: *const Ctx, e: mtl.ComputeEncoder, rows: u32) void {
+    const tap_m = @import("../../core/route_tap_metal.zig");
+    if (tap_m.live()) tap_m.blit(e, x.k.copy_u32, x.sc.pick.buf, x.sc.pick.off, x.sc.wts.buf, x.sc.wts.off, rows * x.c.topk);
 }
 
 /// Whether the shared expert, the routed ones or both take the generated 4/64 kernels.

@@ -57,6 +57,7 @@ pub fn body(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_str
     var stamp = prof_mod.span(k.prof, stream, .router);
     try glue.router(k.set, stream, x, x_stride, l.router, s.mlog, s.router_part, rows, d, l.count);
     try glue.select(k.set, stream, s.mlog, l.bias, s.pick, s.wts, rows, l.top_k, l.count, l.scale, l.norm);
+    cuda.route_tap_copy.afterPick(stream, s.pick, s.wts, rows, l.top_k + 1);
     stamp.end();
     stamp = prof_mod.span(k.prof, stream, .experts);
     defer stamp.end();

@@ -19,7 +19,7 @@ const max_window = 8;
 const ring = 4096;
 
 /// A committed step: the token slots below `end` are written when `cb` completes.
-const Flight = struct { end: u64, cb: mtl.CommandBuffer };
+const Flight = struct { end: u64, cb: mtl.CommandBuffer, tap_at: u32 = 0 };
 
 /// The prompt cache's room beside the streams: its kept states fit in `bytes`, never evicting `restoring`.
 pub const Room = struct { ctx: *anyopaque, fit: *const fn (ctx: *anyopaque, bytes: u64, restoring: ?*anyopaque, prompt: []const u32) void };
@@ -218,6 +218,7 @@ pub const Metal = struct {
         const f = self.flights.orderedRemove(0);
         defer f.cb.release();
         f.cb.wait();
+        @import("../../core/route_tap_metal.zig").afterLand(f.tap_at);
         if (f.cb.failure()) |msg| {
             std.log.err("minimax_m3 step: {s}", .{msg});
             return error.GpuFailed;
@@ -381,7 +382,7 @@ pub const Metal = struct {
         const how: @FieldType(fwd.Draw, "how") = if (sampled(stream.sampling)) |t| .{ .sampled = .{ .sampling = t, .position = position } } else .greedy;
         var cb: mtl.CommandBuffer = undefined;
         try fwd.run(self.model, &self.scratch, cache, &.{0}, .{ .ids = self.slotOf(in), .draw = .{ .how = how, .out = self.slotOf(out) }, .flight = &cb });
-        self.flights.append(self.gpa, .{ .end = out + 1, .cb = cb }) catch |err| {
+        self.flights.append(self.gpa, .{ .end = out + 1, .cb = cb, .tap_at = @import("../../core/route_tap.zig").reservedCount() }) catch |err| {
             cb.wait();
             cb.release();
             return err;
