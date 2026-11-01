@@ -43,3 +43,19 @@ test "widened down projection keeps every base group byte for byte across row st
     defer std.testing.allocator.free(out);
     try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4, 5, 6, 7, 8 }, out);
 }
+
+test "MoE learning: shared width 576 keeps the 512 base neurons byte for byte" {
+    const a = std.testing.allocator;
+    for ([_][4]usize{ .{ 512, 2048, 576, 2048 }, .{ 2048, 512, 2048, 576 } }) |dims| {
+        for ([_][2]usize{ .{ 8, 4 }, .{ 64, 2 }, .{ 64, 2 } }) |part| {
+            const stride = dims[3] / part[0] * part[1];
+            const kept = dims[1] / part[0] * part[1];
+            const bytes = try a.alloc(u8, dims[2] * stride);
+            defer a.free(bytes);
+            for (bytes, 0..) |*b, i| b.* = @truncate(i *% 37 +% i / stride);
+            const cut = try base(a, bytes, dims[0], stride, kept);
+            defer a.free(cut);
+            for (0..dims[0]) |r| try std.testing.expectEqualSlices(u8, bytes[r * stride ..][0..kept], cut[r * kept ..][0..kept]);
+        }
+    }
+}

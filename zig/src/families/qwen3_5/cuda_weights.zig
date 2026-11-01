@@ -270,7 +270,21 @@ fn expertTable(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer, prefix: [
     var buf: [160]u8 = undefined;
     var parts: [3][]const u8 = undefined;
     const specs = [_]struct { []const u8, core.checkpoint.DType, usize }{ .{ "weight", .u32, k * bits / 32 }, .{ "scales", .bf16, k / 64 }, .{ "biases", .bf16, k / 64 } };
-    for (specs, &parts) |p, *part| {
+    var owned: [3]?[]u8 = @splat(null);
+    defer for (owned) |cut| if (cut) |bytes| e.gpa.free(bytes);
+    const wide = count == 0 and e.g.pocket > 0;
+    const columns = std.mem.endsWith(u8, name, "down_proj");
+    for (specs, &parts, &owned) |p, *part, *cut| {
+        if (wide) {
+            const na = n + if (columns) @as(usize, 0) else e.g.pocket;
+            const ka = k + if (columns) e.g.pocket else 0;
+            const unit: usize = if (p[1] == .u32) 4 else 2;
+            const stride = if (p[1] == .u32) ka / 8 else ka / 64;
+            const t = try ck.expect(try std.fmt.bufPrint(&buf, "{s}{s}.{s}", .{ prefix, name, p[0] }), p[1], &.{ na, stride });
+            cut.* = try @import("cuda_wide.zig").base(e.gpa, t.bytes, n, stride * unit, p[2] * unit);
+            part.* = cut.*.?;
+            continue;
+        }
         const stacked: []const usize = &.{ count, n, p[2] };
         const one: []const usize = &.{ n, p[2] };
         part.* = (try ck.expect(try std.fmt.bufPrint(&buf, "{s}{s}.{s}", .{ prefix, name, p[0] }), p[1], if (count == 0) one else stacked)).bytes;
@@ -480,9 +494,10 @@ fn loadPocket(e: *Engine, ck: *core.Checkpoint, prefix: []const u8, layer: usize
     const host = try e.gpa.alloc(f32, 3 * n);
     defer e.gpa.free(host);
     const wide = @import("cuda_wide.zig");
-    try wide.read(ck, prefix, "mlp.gate_proj", e.g.intermediate, e.g.hidden, host[0..n]);
-    try wide.read(ck, prefix, "mlp.up_proj", e.g.intermediate, e.g.hidden, host[n..][0..n]);
-    try wide.read(ck, prefix, "mlp.down_proj", e.g.hidden, e.g.intermediate, host[2 * n ..][0..n]);
+    const names = if (e.g.moe()) [3][]const u8{ "mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj", "mlp.shared_expert.down_proj" } else .{ "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj" };
+    try wide.read(ck, prefix, names[0], e.g.intermediate, e.g.hidden, host[0..n]);
+    try wide.read(ck, prefix, names[1], e.g.intermediate, e.g.hidden, host[n..][0..n]);
+    try wide.read(ck, prefix, names[2], e.g.hidden, e.g.intermediate, host[2 * n ..][0..n]);
     var used: usize = 0;
     for (0..e.g.pocket) |j| if (std.mem.indexOfNone(f32, host[n + j * e.g.hidden ..][0..e.g.hidden], &.{0}) != null) {
         used = j + 1;

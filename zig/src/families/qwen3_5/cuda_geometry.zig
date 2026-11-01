@@ -309,8 +309,11 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
         if (pocket != .integer or pocket.integer < 0 or pocket.integer > 128 or @mod(pocket.integer, 64) != 0)
             return error.UnsupportedQwenGeometry;
         g.pocket = @intCast(pocket.integer);
-        if (g.pocket >= g.intermediate) return error.UnsupportedQwenGeometry;
-        g.intermediate -= g.pocket;
+        if (g.pocket > 0 and modelopt) return error.UnsupportedLearningFormat;
+        if (g.pocket > 0 and exl3) return error.UnsupportedQwenQuantization;
+        const shared = if (moe) try integer(t, "shared_expert_intermediate_size") else g.intermediate;
+        if (g.pocket >= shared) return error.UnsupportedQwenGeometry;
+        if (!moe) g.intermediate -= g.pocket;
     }
     if (g.layers > max_layers or g.hidden % 256 != 0 or g.hidden > 8192 or g.intermediate % 64 != 0) return error.UnsupportedQwenGeometry;
     if (moe) {
@@ -318,7 +321,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
         g.experts = try integer(t, "num_experts");
         g.top_k = try integer(t, "num_experts_per_tok");
         // the shared expert runs in the routed experts' table, so it needs their width
-        if (try integer(t, "shared_expert_intermediate_size") != g.intermediate) return error.UnsupportedQwenGeometry;
+        if (try integer(t, "shared_expert_intermediate_size") != g.intermediate + g.pocket) return error.UnsupportedQwenGeometry;
         if (g.experts > 256 or g.top_k > 31 or g.top_k >= g.experts) return error.UnsupportedQwenGeometry;
         if (!exl3 and !modelopt) { // an MLX table's widths; ModelOpt's experts come from their recipes
             const w = try expertBits(try object(qv.?), g.layers);
@@ -343,7 +346,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
     }
     g.bits = try widths(gpa, root, try object(qv.?), g);
     if (g.pocket > 0) {
-        if (g.moe()) return error.UnsupportedLearningFormat;
+        if (g.moe() and g.expert_bits != 4) return error.UnsupportedLearningFormat;
         for (0..g.layers) |i| for ([_]Slot{ .gate, .up, .down }) |slot| {
             if (g.bits.of(i, slot) != 4) return error.UnsupportedLearningFormat;
         };
@@ -397,6 +400,14 @@ test "the 35B-A3B's routed experts: 256 of width 512, 8 a row, the shared one th
     try std.testing.expectEqual(@as(usize, 9), g.slots());
     try std.testing.expectEqual(@as(usize, 512), g.intermediate);
     try std.testing.expectEqual(@as(usize, 8192), g.convWidth());
+    const saved = try std.mem.replaceOwned(u8, std.testing.allocator, text, "\"shared_expert_intermediate_size\":512", "\"shared_expert_intermediate_size\":576,\"tensorfold_learned_neurons\":64");
+    defer std.testing.allocator.free(saved);
+    const widened = try parse(std.testing.allocator, saved);
+    try std.testing.expectEqual(@as(usize, 512), widened.intermediate);
+    try std.testing.expectEqual(@as(usize, 64), widened.pocket);
+    const wrong = try std.mem.replaceOwned(u8, std.testing.allocator, saved, "\"tensorfold_learned_neurons\":64", "\"tensorfold_learned_neurons\":128");
+    defer std.testing.allocator.free(wrong);
+    try std.testing.expectError(error.UnsupportedQwenGeometry, parse(std.testing.allocator, wrong));
     // a scaled rope, by type or as a rope_scaling block, is refused rather than read as plain rope
     for ([_][2][]const u8{ .{ "\"rope_type\":\"default\"", "\"rope_type\":\"yarn\"" }, .{ "\"max_position_embeddings\"", "\"rope_scaling\":{\"type\":\"yarn\",\"factor\":4.0},\"max_position_embeddings\"" } }) |r| {
         const scaled = try std.mem.replaceOwned(u8, std.testing.allocator, text, r[0], r[1]);
