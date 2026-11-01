@@ -13,11 +13,17 @@ pub const Plan = struct {
     piece: usize,
 };
 
+/// Two scratch rows per token, with the bounded count widened before multiplication.
+pub fn reserveRows(total: usize) usize {
+    const rows: usize = @min(total, piece_rows);
+    return @max(@as(usize, 32), 2 * rows);
+}
+
 /// The head's plan from the admitted capacity and the rows to draft.
 pub fn plan(admitted: usize, total: usize) Plan {
     // the pass's rows as they stand: the head asks for at least 32, as the single-stream head does
     const cap = @max(admitted, 32);
-    const want = @max(@as(usize, 32), 2 * @min(total, piece_rows));
+    const want = reserveRows(total);
     return .{
         .pass_rows = @min(want, cap),
         .score_rows = @max(@as(usize, 1), @min(piece_rows, cap / 2)),
