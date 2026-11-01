@@ -128,6 +128,8 @@ fn engineOf(
         .policy = dev.policy,
         .capacity = capacity(o.window),
         .chunk = @max(dev.policy.prefill_step, dev.policy.fill_rows),
+        .fallback = if (dev.fallback_step) |s| @max(s, dev.policy.fill_rows) else null,
+        .want = @max(o.streams, 1),
     });
 }
 
@@ -171,7 +173,7 @@ fn prepare(
         .{@errorName(err)},
     );
     const room = pool.room(hip.usage(false).device);
-    const per = streamBytes(e, capacity(mine.window));
+    const per = e.streamBytes(capacity(mine.window));
     // the least over the ranks: a follower takes a stream's caches when rank 0 begins it
     const fit: usize = @intCast((try steps.together(a, .{ room / per, 0 }, .least, problem))[0]);
     // every rank holds the same least, so every rank refuses here alike
@@ -214,10 +216,15 @@ fn lanesOf(gpa: std.mem.Allocator, dev: hip.Device, o: anytype, p: Prepared, str
     errdefer fx.deinit();
     // kept prompt states live in host memory: --prompt-cache-gib, else 16 GiB
     fx.keepPrompts(@intFromFloat((o.cache_gib orelse 16.0) * (1 << 30)));
+    var why: [96]u8 = undefined;
+    const narrowed = if (p.e.narrowed) |n|
+        std.fmt.bufPrint(&why, " ({d}-row chunks would admit fewer of the streams asked for)", .{n}) catch ""
+    else
+        "";
     const startup = try std.fmt.allocPrint(
         gpa,
         "HIP {s} device {d}, rank {d} of {d}: Flash Next, {d:.2} GiB on the device, " ++
-            "{d} stream{s} of {d} positions, {d:.2} GiB each; prompts in {d}-row chunks",
+            "{d} stream{s} of {d} positions, {d:.2} GiB each; prompts in {d}-row chunks{s}",
         .{
             hip.kernels.arch,
             dev.index,
@@ -229,6 +236,7 @@ fn lanesOf(gpa: std.mem.Allocator, dev: hip.Device, o: anytype, p: Prepared, str
             capacity(p.window),
             gibs(p.per),
             p.e.o.chunk,
+            narrowed,
         },
     );
     own.* = .{ .gpa = gpa, .e = p.e, .fx = fx, .startup = startup };
@@ -275,20 +283,6 @@ pub fn open(
         .streams = streams,
         .startup = own.startup,
     };
-}
-
-/// Device bytes a stream takes at `cap` positions: its caches, window snapshots, the head's caches and its rows.
-fn streamBytes(e: *const Engine, cap: usize) usize {
-    var buf: [config.max_layers]bool = undefined;
-    const kinds = e.kinds(&buf) catch return std.math.maxInt(usize);
-    const l = cache.Layout.of(e.weights.model.dims, kinds, cap, e.act);
-    var head: usize = 0;
-    if (e.weights.model.mtp) |h| {
-        const hl = cache.Layout.of(h.dims, &.{false}, cap, e.act);
-        head = hl.bytes() + hl.cinBytes() + 4;
-    }
-    return l.bytes() + l.windowBytes() + l.cinBytes() + head +
-        cache.max_window * e.weights.model.dims.wide() * e.act.size();
 }
 
 /// A rank above 0: holds its share of the model and runs rank 0's steps until rank 0 stops.

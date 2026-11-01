@@ -102,7 +102,16 @@ fn ready(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open
     const index: c_int = if (o.device) |d| @intCast(d) else hip.Device.ordinal(o.rank);
     const caps = hip.Device.capsOf(index) orelse return refuse(a, problem, "HIP device {d} is not a GPU this engine supports", .{index});
     var notes: hip.Policy.Notes = .{};
-    var policy = hip.Policy.resolve(o.policy, .current, &notes) catch |err| return refuse(a, problem, "the policy \"{s}\" is refused ({s})", .{ o.policy, @errorName(err) });
+    var policy = hip.Policy.resolveFrom(hip.Policy.forCaps(caps), o.policy, .current, &notes) catch |err| return refuse(a, problem, "the policy \"{s}\" is refused ({s})", .{ o.policy, @errorName(err) });
+    // the step came from the GPU's defaults when the plain defaults under the same flags differ: one rank may fall back
+    var plain_notes: hip.Policy.Notes = .{};
+    const plain = hip.Policy.resolve(o.policy, .current, &plain_notes) catch policy;
+    const own_default = o.tp == 1 and plain.prefill_step != policy.prefill_step;
+    const fallback_step: ?u32 = if (own_default) plain.prefill_step else null;
+    if (fallback_step) |s| notes.add("prefill_step {d} is this GPU's default, {d} when it admits fewer streams; ", .{
+        policy.prefill_step,
+        s,
+    });
     if (o.mtp_drafts) |n| policy.mtp.drafts = @intCast(n);
     if (o.mtp_confidence) |c| policy.mtp.confidence = c;
     if (o.keep) |n| policy.slots = @intCast(@min(n, 1 << 16));
@@ -112,7 +121,7 @@ fn ready(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open
     const policy_line = try std.fmt.allocPrint(gpa, "{f}", .{policy});
     std.debug.print("[tensorfold] HIP rank {d} of {d}: policy {s}{s} {s}\n", .{ o.rank, o.tp, policy_line, if (o.rank > 0) " (rank 0's)" else "", notes.text() });
     return .{
-        .dev = .{ .index = index, .caps = caps, .policy = policy, .group = group },
+        .dev = .{ .index = index, .caps = caps, .policy = policy, .group = group, .fallback_step = fallback_step },
         .options = .{
             .window = @intCast(window),
             .streams = @max(o.lanes, 1),

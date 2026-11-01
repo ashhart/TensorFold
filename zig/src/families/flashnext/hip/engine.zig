@@ -24,7 +24,16 @@ pub const Options = struct {
     capacity: usize = 4096,
     /// Prompt rows a forward takes at most: a multiple of 64, so a prompt's bits do not depend on where it is cut.
     chunk: usize = 512,
+    /// A smaller chunk to take when `chunk`'s scratch would admit fewer of the `want` streams (null: keep `chunk`).
+    fallback: ?usize = null,
+    /// The streams the server asks for.
+    want: usize = 1,
 };
+
+/// Whether the smaller chunk's scratch admits more of `want` streams of `per` bytes in `room` than the larger's.
+pub fn narrows(room: u64, larger: u64, smaller: u64, per: u64, want: u64) bool {
+    return @min(want, (room -| smaller) / per) > @min(want, (room -| larger) / per);
+}
 
 /// Bytes of the pinned staging a forward's uploads and n-gram rows go through.
 const staging_bytes = 64 << 20;
@@ -76,6 +85,8 @@ pub const Engine = struct {
     votes: ?hip.Votes,
     /// A rank could not take a round: every rank stops before another collective.
     stopped: bool,
+    /// The chunk the options asked for when the engine took their fallback (null: it took what they asked).
+    narrowed: ?usize = null,
 
     /// `load`, this rank's failure heard by the other ranks at the step they wait at.
     pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !*Engine {
@@ -145,7 +156,8 @@ pub const Engine = struct {
         };
         errdefer e.host.staging.free();
         e.eos = e.tables.hasher.ref.eos;
-        e.arena = try hip.Arena.init(&e.driver, try e.scratchBytes());
+        e.narrowed = null;
+        e.arena = try hip.Arena.init(&e.driver, try e.fittedScratch());
         errdefer e.arena.deinit();
         e.drawer = try serve.draw.Drawer.init(
             gpa,
@@ -213,6 +225,38 @@ pub const Engine = struct {
     pub fn caches(e: *Engine, cap: usize) !cache.Caches {
         var buf: [config.max_layers]bool = undefined;
         return cache.Caches.init(e.gpa, &e.driver, e.weights.model.dims, try e.kinds(&buf), cap, e.act, e.eos);
+    }
+
+    /// Device bytes a stream takes at `cap` positions: its caches, window snapshots, the head's caches and its rows.
+    pub fn streamBytes(e: *const Engine, cap: usize) usize {
+        var buf: [config.max_layers]bool = undefined;
+        const ks = e.kinds(&buf) catch return std.math.maxInt(usize);
+        const l = cache.Layout.of(e.weights.model.dims, ks, cap, e.act);
+        var head: usize = 0;
+        if (e.weights.model.mtp) |h| {
+            const hl = cache.Layout.of(h.dims, &.{false}, cap, e.act);
+            head = hl.bytes() + hl.cinBytes() + 4;
+        }
+        return l.bytes() + l.windowBytes() + l.cinBytes() + head +
+            cache.max_window * e.weights.model.dims.wide() * e.act.size();
+    }
+
+    /// The scratch for `o.chunk` rows, or the fallback's when the larger chunk admits fewer of the streams asked for.
+    fn fittedScratch(e: *Engine) !usize {
+        const larger = try e.scratchBytes();
+        const small = e.o.fallback orelse return larger;
+        if (small >= e.o.chunk) return larger;
+        const pool = try hip.admission.budget(e.gpa, e.io, e.ctx);
+        const room = pool.room(hip.usage(false).device);
+        const asked = e.o.chunk;
+        e.o.chunk = small;
+        const smaller = try e.scratchBytes();
+        if (!narrows(room, larger, smaller, e.streamBytes(e.o.capacity), e.o.want)) {
+            e.o.chunk = asked;
+            return larger;
+        }
+        e.narrowed = asked;
+        return smaller;
     }
 
     /// The scratch the largest forward takes: a prompt chunk at the capacity's end, counted on a dry run.
@@ -417,4 +461,18 @@ fn spellingOf(a: std.mem.Allocator, io: std.Io, dir: []const u8) ![]const u8 {
     const doc = try std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{});
     const map = try core.safetensors.index.weightMap(doc);
     return index.ngramSpelling(map);
+}
+
+test "a chunk narrows only when its scratch costs a stream the server asked for" {
+    const gib: u64 = 1 << 30;
+    // one stream asked, room for many either way: the larger chunk stays
+    try std.testing.expect(!narrows(40 * gib, 7 * gib, 2 * gib, 3 * gib, 1));
+    // one stream fits only beside the smaller chunk's scratch
+    try std.testing.expect(narrows(9 * gib, 7 * gib, 2 * gib, 4 * gib, 1));
+    // four asked: the larger chunk leaves three, the smaller four
+    try std.testing.expect(narrows(20 * gib, 7 * gib, 2 * gib, 4 * gib, 4));
+    // four asked and four fit beside either
+    try std.testing.expect(!narrows(30 * gib, 7 * gib, 2 * gib, 4 * gib, 4));
+    // neither fits one: nothing to gain
+    try std.testing.expect(!narrows(3 * gib, 7 * gib, 2 * gib, 4 * gib, 1));
 }
