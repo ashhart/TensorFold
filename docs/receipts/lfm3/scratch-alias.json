@@ -1,0 +1,406 @@
+{
+  "date": "2026-10-30",
+  "status": "Scratch allocation reuse; exact native baseline equivalence on the recorded fixtures",
+  "base_commit": "e9aeab27ce21b66fc9652fe8ce1163dc0f9d48cd",
+  "change": "Reuse attention partial-output storage for vocabulary logits after all attention layers complete. Allocate max(partial_bytes, logits_bytes) once.",
+  "scope": "Allocation and lifetime change only; no shader, arithmetic, dispatch, or performance change claimed.",
+  "checkpoint": {
+    "repository": "LiquidAI/LFM3-VL-2B-MLX-4bit",
+    "revision": "c823fade98e35a3d6942ad4d38b1ea15f675cd12"
+  },
+  "ownership": {
+    "storage_owner": "One entry in Scratch.memory.buffers owns the shared allocation; po and logits are borrowed handles.",
+    "lifetime": "Attention partials expire before the final head. Command completion precedes cache-logit copy. Cache.logits remains separate.",
+    "checked_scratch_rows": [
+      1,
+      32,
+      64,
+      65,
+      128
+    ],
+    "checks": [
+      "Shared handle identity and required buffer lengths",
+      "One fewer owned allocation and no duplicate owner IDs",
+      "Sum of actual allocated buffer lengths decreases by min(partial_bytes, logits_bytes)",
+      "Two 16-row streams match solo state and every logit row; partial keep lengths 3 and 1",
+      "Text callback cancellation, yield, reuse and unchanged deferred cache logits"
+    ]
+  },
+  "allocation": {
+    "normal_partial_bytes": 33554432,
+    "normal_logits_bytes": 8192000,
+    "normal_saved_bytes": 8192000,
+    "single_row_saved_bytes": 256000,
+    "process_footprint_or_speed_measured": false
+  },
+  "build": {
+    "compiler": "Zig 0.17.0",
+    "cpu_target": "apple_m1",
+    "options": [
+      "-Dversion=1.1.6",
+      "-Dlfm3-risk-fast=true",
+      "-Dlfm3-defer-prompt-head=false"
+    ],
+    "native_dev_tools_exit": 0,
+    "qualifier_build_exit": 0,
+    "private_differential_probe_sha256": "798da300ec67bba39a6852774b808058988fe4f5f0781569123793391c43cdd8",
+    "public_state_sha256": "617208965442fa41fc341c470bf022ae1ac8b17a682a0384cd429273a846219d",
+    "public_qualifier_sha256": "52373585f3ab4b9627156decc2aa543b4c81ee1c0777403d9e8f6a49a802da49"
+  },
+  "fixtures_sha256": {
+    "vl-2048.npy": "82c7dac5126bf3f7bf789f2a7385214044ad7ace0d151c52935e139ad99bcf2b",
+    "vl-8192.npy": "b371a7a09adfed00451d2aeba2dc64f5851e7ee62136dddcd8f77e1e07673581",
+    "image512.npy": "57111edcf1dd6adb846c9dedc3f398be5c8e19223cc4e75846d28296dc55e40f",
+    "image-vl4.bf16": "ffa0401f452f39a07833d6692ac9eff0d5485cc93a14fb3433bdad74c42ab05e"
+  },
+  "devices": [
+    {
+      "device": "Apple M5 Ultra",
+      "physical_memory_bytes": 274877906944,
+      "os": "macOS27.0 build26A428",
+      "manifest_sha256": "febe8bc72090b84fe74c03b1d1cf63c572bfd8a4e626988ec5bbbad7e94a02c1",
+      "stages": [
+        {
+          "stage": "smoke",
+          "receipt_sha256": "8b14e0b21263f7b4596c950cf225684936cde99ea383b16e3d2fbf72f125cd67",
+          "events_sha256": "6c6ded5e7b43e457efe914fe64bb851a202b972955cca8a8e557d5d39ae459b6",
+          "runs": [
+            {
+              "index": 0,
+              "exit": 0,
+              "log_sha256": "455aee97ad2530dab52975947dd8606a0f6c539f3704e7075cf8ebf69bcfb249"
+            }
+          ],
+          "results": [
+            {
+              "case": "ordinary2k",
+              "result_sha256": "ca3115ee28cf383fae20c74a7360f6a7d9e34beccc7765d95f60e8460ce63423",
+              "scratch_alias_bytes_saved": 8192000,
+              "scratch_alias_owners_valid": true,
+              "scratch_alias_partial_keep_qualified": true,
+              "final_state_sha256": "8b3760aa217e7ee625b1af7f6e884ae32f8d86ff853bd55befa3619c7d4a2f10",
+              "final_logits_sha256": "8e67a0869f49e095ea7d6a6c134c0ee4e2722da949a96431e20b20c2df804a76",
+              "prompt_tokens": 2048,
+              "skipped_heads": 0,
+              "mark_snapshots_equal": 2,
+              "resumed_prefix": 257,
+              "resume_state_logits_equal": true,
+              "full_active_kv_conv_equal": true,
+              "full_logits_equal": true,
+              "decode_tokens": [
+                597,
+                8055,
+                509,
+                5901,
+                4116,
+                355,
+                267,
+                1286,
+                4160,
+                302,
+                278,
+                7126,
+                496,
+                73,
+                10,
+                10601
+              ],
+              "vision_rows": false,
+              "scope": "real checkpoint differential correctness; backend callbacks exercised separately for text fixtures; not served timing"
+            }
+          ]
+        },
+        {
+          "stage": "positive",
+          "receipt_sha256": "5027e799cb4c0bf492cb338fd9c2475129c34f91835218b8eb125d47b4086c3c",
+          "events_sha256": "0ee12d9b3ac2ccc95655ab57ec9a5aa8b6018b5aaa574fe366b168fd48e43bc9",
+          "runs": [
+            {
+              "index": 0,
+              "exit": 0,
+              "log_sha256": "9b6aac2ec7c4deb563780bede833b6705d5e95aa08929bae7347a459d5a34a08"
+            },
+            {
+              "index": 1,
+              "exit": 0,
+              "log_sha256": "7753ff8f0e14ba14005ab5bc0de8a9d606495dc3e926cfbb1e39a055fc167ea8"
+            }
+          ],
+          "results": [
+            {
+              "case": "deferred8k",
+              "result_sha256": "22beb4f4e6d594a338a239e31d88034e22b055330a048f7d2a4ead393296017f",
+              "scratch_alias_bytes_saved": 8192000,
+              "scratch_alias_owners_valid": true,
+              "scratch_alias_partial_keep_qualified": true,
+              "final_state_sha256": "8b9175c2c0062d43e54db026e161988e1e156bbf6a140a89ae29d671bf0d4a49",
+              "final_logits_sha256": "f7ed4ed4d826a6bebf5d95b79278c3f2f9079dca80ba11918ac0a2aae77504fa",
+              "prompt_tokens": 8192,
+              "skipped_heads": 62,
+              "mark_snapshots_equal": 2,
+              "resumed_prefix": 257,
+              "resume_state_logits_equal": true,
+              "full_active_kv_conv_equal": true,
+              "full_logits_equal": true,
+              "decode_tokens": [
+                597,
+                4695,
+                677,
+                4116,
+                267,
+                1442,
+                1286,
+                4160,
+                302,
+                496,
+                3862,
+                10,
+                8426,
+                20,
+                643,
+                7204
+              ],
+              "vision_rows": false,
+              "scope": "real checkpoint differential correctness; backend callbacks exercised separately for text fixtures; not served timing"
+            },
+            {
+              "case": "image512",
+              "result_sha256": "ed043108162aac16e9cd2faf459f8f384e0c1d8a858cfdddba799e7b2830fd51",
+              "scratch_alias_bytes_saved": 8192000,
+              "scratch_alias_owners_valid": true,
+              "scratch_alias_partial_keep_qualified": true,
+              "final_state_sha256": "610ac8da7d7b099a0ed329257aaa6c67c8985cfb863595ae271fb321ec3463a9",
+              "final_logits_sha256": "9ab8840f27a8c003547a7b204f6d9fd489323cabe16098a419c2c44e47a5bef3",
+              "prompt_tokens": 512,
+              "skipped_heads": 0,
+              "mark_snapshots_equal": 2,
+              "resumed_prefix": 257,
+              "resume_state_logits_equal": true,
+              "full_active_kv_conv_equal": true,
+              "full_logits_equal": true,
+              "decode_tokens": [
+                23018,
+                23018,
+                23018,
+                23018,
+                23018,
+                23018,
+                23018,
+                23018,
+                23018,
+                23018,
+                23018,
+                23018,
+                23018,
+                23018,
+                23018,
+                23018
+              ],
+              "vision_rows": true,
+              "scope": "real checkpoint differential correctness; backend callbacks exercised separately for text fixtures; not served timing"
+            }
+          ]
+        },
+        {
+          "stage": "controls",
+          "receipt_sha256": "b57fb072fbdee02defe0681a76bcae328e5b04b59972296b7d0815039fd569d5",
+          "events_sha256": "3c4d77bd6725fbd456739e2f1438d746a66ab255e42bdcd013a83d5a18130388",
+          "runs": [
+            {
+              "index": 0,
+              "exit": 1,
+              "log_sha256": "fd4515cea36bf1663d137ad5f5733db628535a9f909791bd8a9b1a306a2ad820"
+            }
+          ],
+          "results": [],
+          "intended_failure": "Actual final-head suppression causes DeferredHeadByteMismatch"
+        }
+      ]
+    },
+    {
+      "device": "Apple M4 Pro",
+      "physical_memory_bytes": 51539607552,
+      "os": "macOS26.5.1 build25F80",
+      "manifest_sha256": "9d1decfd297fbfd22ffae19039e67e100374da350085f09e0399048ac25ae7df",
+      "stages": [
+        {
+          "stage": "smoke",
+          "receipt_sha256": "647efc0d9e83a436bf7cb4e729cf4fefc0f58987107c89abad5646e7a520fb7c",
+          "events_sha256": "3820aea44e97e595fdabf1d1576dbeee62cebb8e627ad318ed466282853ff8db",
+          "runs": [
+            {
+              "index": 0,
+              "exit": 0,
+              "log_sha256": "455aee97ad2530dab52975947dd8606a0f6c539f3704e7075cf8ebf69bcfb249"
+            }
+          ],
+          "results": [
+            {
+              "case": "ordinary2k",
+              "result_sha256": "ca3115ee28cf383fae20c74a7360f6a7d9e34beccc7765d95f60e8460ce63423",
+              "scratch_alias_bytes_saved": 8192000,
+              "scratch_alias_owners_valid": true,
+              "scratch_alias_partial_keep_qualified": true,
+              "final_state_sha256": "8b3760aa217e7ee625b1af7f6e884ae32f8d86ff853bd55befa3619c7d4a2f10",
+              "final_logits_sha256": "8e67a0869f49e095ea7d6a6c134c0ee4e2722da949a96431e20b20c2df804a76",
+              "prompt_tokens": 2048,
+              "skipped_heads": 0,
+              "mark_snapshots_equal": 2,
+              "resumed_prefix": 257,
+              "resume_state_logits_equal": true,
+              "full_active_kv_conv_equal": true,
+              "full_logits_equal": true,
+              "decode_tokens": [
+                597,
+                8055,
+                509,
+                5901,
+                4116,
+                355,
+                267,
+                1286,
+                4160,
+                302,
+                278,
+                7126,
+                496,
+                73,
+                10,
+                10601
+              ],
+              "vision_rows": false,
+              "scope": "real checkpoint differential correctness; backend callbacks exercised separately for text fixtures; not served timing"
+            }
+          ]
+        },
+        {
+          "stage": "positive",
+          "receipt_sha256": "0cceb7dd25376e3576f8c055f83d8dc9ac51df84900cf60fed5b066144aeb0de",
+          "events_sha256": "63d0f91da4fc96aaf4238c6ef47d63815e6822d68ffef4ac24d34bd996487489",
+          "runs": [
+            {
+              "index": 0,
+              "exit": 0,
+              "log_sha256": "7753ff8f0e14ba14005ab5bc0de8a9d606495dc3e926cfbb1e39a055fc167ea8"
+            },
+            {
+              "index": 1,
+              "exit": 0,
+              "log_sha256": "7fcfc39468e24fc314e1f918c1adadc3d1954c75093859b7c0aea636bf29742a"
+            }
+          ],
+          "results": [
+            {
+              "case": "image512",
+              "result_sha256": "ed043108162aac16e9cd2faf459f8f384e0c1d8a858cfdddba799e7b2830fd51",
+              "scratch_alias_bytes_saved": 8192000,
+              "scratch_alias_owners_valid": true,
+              "scratch_alias_partial_keep_qualified": true,
+              "final_state_sha256": "610ac8da7d7b099a0ed329257aaa6c67c8985cfb863595ae271fb321ec3463a9",
+              "final_logits_sha256": "9ab8840f27a8c003547a7b204f6d9fd489323cabe16098a419c2c44e47a5bef3",
+              "prompt_tokens": 512,
+              "skipped_heads": 0,
+              "mark_snapshots_equal": 2,
+              "resumed_prefix": 257,
+              "resume_state_logits_equal": true,
+              "full_active_kv_conv_equal": true,
+              "full_logits_equal": true,
+              "decode_tokens": [
+                23018,
+                23018,
+                23018,
+                23018,
+                23018,
+                23018,
+                23018,
+                23018,
+                23018,
+                23018,
+                23018,
+                23018,
+                23018,
+                23018,
+                23018,
+                23018
+              ],
+              "vision_rows": true,
+              "scope": "real checkpoint differential correctness; backend callbacks exercised separately for text fixtures; not served timing"
+            },
+            {
+              "case": "public2k",
+              "result_sha256": "73ffbc25c72ca4b7c6f39620cbf098744a8f993b80f4fdf12b71752c9ed1b0bb",
+              "final_state_sha256": "8b3760aa217e7ee625b1af7f6e884ae32f8d86ff853bd55befa3619c7d4a2f10",
+              "final_logits_sha256": "8e67a0869f49e095ea7d6a6c134c0ee4e2722da949a96431e20b20c2df804a76",
+              "prompt_tokens": 2048,
+              "skipped_heads": 14,
+              "mark_snapshots_equal": 2,
+              "resumed_prefix": 257,
+              "resume_state_logits_equal": true,
+              "full_active_kv_conv_equal": true,
+              "full_logits_equal": true,
+              "decode_tokens": [
+                597,
+                8055,
+                509,
+                5901,
+                4116,
+                355,
+                267,
+                1286,
+                4160,
+                302,
+                278,
+                7126,
+                496,
+                73,
+                10,
+                10601
+              ],
+              "vision_rows": false,
+              "scope": "real checkpoint differential correctness; backend callbacks exercised separately for text fixtures; not served timing"
+            }
+          ]
+        },
+        {
+          "stage": "controls",
+          "receipt_sha256": "739b41fd43b2906558b136bbce165687f3537df82cac4bbf4ac6bade2e5bd192",
+          "events_sha256": "13c1ee8a65409eec7df0dfee4ef94717985ad6a7a53cca05b0ce0ffee9df3c6a",
+          "runs": [
+            {
+              "index": 0,
+              "exit": 1,
+              "log_sha256": "fd4515cea36bf1663d137ad5f5733db628535a9f909791bd8a9b1a306a2ad820"
+            }
+          ],
+          "results": [],
+          "intended_failure": "Actual final-head suppression causes DeferredHeadByteMismatch"
+        }
+      ]
+    }
+  ],
+  "limitations": [
+    "Only the pinned VL4 checkpoint was exercised for this allocation change; no new text-family or 6/8-bit qualification.",
+    "M4 did not run the 8k alias fixture.",
+    "Image case injects corrected native projected image rows; it does not rerun the vision tower.",
+    "Baseline byte equivalence is not independent FP64 model-fidelity qualification.",
+    "No new served timing, decode-rate, peak process footprint, or all-platform claim."
+  ],
+  "integrated_public_check": "M4 public qualifier final state/logit SHA and all 16 decode tokens equal the private original-layout 2k baseline; both public qualifier branches use the integrated alias.",
+  "host_checks": {
+    "command": "zig build test test-kernel-contract test-golden fuzz-cortheon -Dcpu=apple_m1",
+    "exit": 0,
+    "golden_equal": 322,
+    "golden_total": 335,
+    "golden_known_differences": 13,
+    "golden_unexpected_differences": 0,
+    "log_sha256": "aaf56811f1742f67753fded085a230b0bffd6944a5f5a8731015a064f52ca984",
+    "plain_build_command": "zig build -Dcpu=apple_m1 -Dversion=1.1.6",
+    "plain_build_exit": 0,
+    "plain_build_log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "lean_merge_base": "b30d5b9d36786ff778b4bb7a7e1c4b5d26de126e",
+    "lean_inherited_problems": 428,
+    "lean_new_problems": 0,
+    "git_diff_check_exit": 0,
+    "changed_zig_fmt_check_exit": 0
+  }
+}

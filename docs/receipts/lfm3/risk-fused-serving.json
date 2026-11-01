@@ -1,0 +1,206 @@
+{
+  "date": "2026-10-30",
+  "status": "Measured isolated native served TTFT improvement; candidate remains default-off",
+  "device": "Apple M5 Ultra",
+  "physical_memory_bytes": 274877906944,
+  "os": "macOS27.0 build26A428",
+  "source_commit": "de7cf96ed",
+  "checkpoint": {
+    "repository": "LiquidAI/LFM3-VL-2B-MLX-4bit",
+    "revision": "c823fade98e35a3d6942ad4d38b1ea15f675cd12"
+  },
+  "scope": "VL4 text prompts, cold prefix2k/8k,16 generated tokens; native baseline versus fused attention only",
+  "build": {
+    "version_string": "tensorfold-native1.1.6",
+    "compiler": "Zig0.17.0",
+    "cpu_target": "apple_m1",
+    "baseline_option": "-Dlfm3-risk-fast=false",
+    "candidate_option": "-Dlfm3-risk-fast=true",
+    "original_prompt_head_behavior_both": true,
+    "projection_candidate_both": false,
+    "baseline_sha256": "c01f10e0872f80b67ae2125a852d8179c058e9c95f6fbda8ad36e38f594484d8",
+    "candidate_sha256": "165c31f5ae6d085f8c6ec57fa6c0b2ad2d9737cf8256fb41148e58a203d7e351"
+  },
+  "protocol": {
+    "order": [
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline"
+    ],
+    "measurements_per_variant_and_prompt": 2,
+    "request_order_each_leg": [
+      2048,
+      8192
+    ],
+    "fresh_server_per_leg": true,
+    "fresh_KV_per_request": true,
+    "cached_tokens_every_request": 0,
+    "prompt_cache_gib": 0,
+    "context": 70000,
+    "configured_parallel": 4,
+    "active_measured_requests": 1,
+    "temperature": 0,
+    "thinking": false,
+    "output_tokens_every_request": 16,
+    "prompt_ids_exactly_verified_by_tokenize": true,
+    "output_text_digests_equal": true,
+    "output_token_ids": "Not emitted by this cold client; same exact histories separately passed state/logit/16-token qualification",
+    "predeclared_baseline_drift_limit": 0.05,
+    "hidden_warmups": 0,
+    "timing_retries": 0,
+    "client_python": "Python 3.9.6",
+    "client_sha256": "7b8ea55aa88834814f95a6f679654e16074b7a8364e34b39a276f009fe0231f2",
+    "all_owned_servers_exit": 0
+  },
+  "cases": [
+    {
+      "prompt_tokens": 2048,
+      "baseline_ttft_s": [
+        0.859373208,
+        0.858855417
+      ],
+      "candidate_ttft_s": [
+        0.8477165,
+        0.8471230000000001
+      ],
+      "baseline_median_s": 0.8591143125,
+      "candidate_median_s": 0.84741975,
+      "baseline_over_candidate": 1.0138002005499636,
+      "baseline_first_last_drift": -0.0006025216927638688,
+      "stable_at_5percent": true,
+      "output_text_sha256_equal": true,
+      "output_token_id_equality": "not emitted by cold client; separate model qualification covers16 IDs/logits",
+      "prompt_ids": "both routes /tokenize exact pinned arrays",
+      "ttft_saved_ms": 11.694562500000005,
+      "ttft_fraction_lower": 0.01361234742553541
+    },
+    {
+      "prompt_tokens": 8192,
+      "baseline_ttft_s": [
+        4.64294925,
+        4.651438291
+      ],
+      "candidate_ttft_s": [
+        4.429717459,
+        4.4373175
+      ],
+      "baseline_median_s": 4.6471937704999995,
+      "candidate_median_s": 4.4335174795,
+      "baseline_over_candidate": 1.0481956577340703,
+      "baseline_first_last_drift": 0.0018283725586705213,
+      "stable_at_5percent": true,
+      "output_text_sha256_equal": true,
+      "output_token_id_equality": "not emitted by cold client; separate model qualification covers16 IDs/logits",
+      "prompt_ids": "both routes /tokenize exact pinned arrays",
+      "ttft_saved_ms": 213.67629099999962,
+      "ttft_fraction_lower": 0.04597963879974165
+    }
+  ],
+  "memory_legs": [
+    {
+      "leg": 0,
+      "variant": "baseline",
+      "max_rss_bytes": 1835204608,
+      "peak_physical_footprint_bytes": 2290419872
+    },
+    {
+      "leg": 1,
+      "variant": "candidate",
+      "max_rss_bytes": 1834844160,
+      "peak_physical_footprint_bytes": 2290010200
+    },
+    {
+      "leg": 2,
+      "variant": "candidate",
+      "max_rss_bytes": 1834172416,
+      "peak_physical_footprint_bytes": 2289272992
+    },
+    {
+      "leg": 3,
+      "variant": "baseline",
+      "max_rss_bytes": 1834188800,
+      "peak_physical_footprint_bytes": 2289240224
+    }
+  ],
+  "evidence": {
+    "raw_records_sha256": "e53f81fe6f66a553aee90c4ae5665e296fc7cbcca7ff2f85c0a961cfd7432bdf",
+    "run_manifest_sha256": "a1b8d919deb72f85fdaad1999b9cd2827710ede921d97252e371506f68fd2e9d",
+    "events_sha256": "4084128466f1c6bb6acbda2bff84305e6df75e426143c8c1446afda8992c3d61",
+    "config_sha256": "80080d9e087f91cacc1399406e5de168eed094dd8d7e94946bb5308438469bb1",
+    "pins_sha256": "0962da3cfceef95cdce20f624dbdc9c5e10b37a80b32f21d75741a1ea2e955f8",
+    "raw_files_sha256": {
+      "vl-4-2-candidate.after.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+      "vl-4-0-public.cold-8192.tokenize.request.json": "c196be253a6a7f7928e3f427e0faad10300dc3216279a3ae8a80a9cd46f77dab",
+      "vl-4-0-public.cold-8192.tokenize.response.json": "1e924ba32cf41b050291eaf02707b996b9f656171f816c15c24c7045a92600ee",
+      "vl-4-2-candidate.cold-2048.json": "720954418d49adfbb9acf1a776cbc6baa885924063931dcf344f739da7000e5e",
+      "vl-4-1-candidate.after.metrics": "f01a6bda582a1604bc512e27e0f6a380838c96f0077b93ed6bdda44655f202cd",
+      "vl-4-1-candidate.before.health": "e41f1fa5fa63b41398632c5ab9622e881079971c2bec31b6d54da709ab256599",
+      "vl-4-3-public.cold-8192.tokenize.request.json": "c196be253a6a7f7928e3f427e0faad10300dc3216279a3ae8a80a9cd46f77dab",
+      "vl-4-2-candidate.cold-8192.tokenize.response.json": "1e924ba32cf41b050291eaf02707b996b9f656171f816c15c24c7045a92600ee",
+      "vl-4-0-public.before.metrics": "ac28361cba697650f05014545c8a633e520dc3f6a2eb17d737268d1f7b11b30f",
+      "vl-4-2-candidate.cold-8192.json": "4cbf61f0e861a7e1d85287d94da5b58809497a672e73b9872bef21b738f7e406",
+      "vl-4-1-candidate.after.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+      "vl-4-1-candidate.server.log": "7d411bbb95a004f4866ede7041abdf7e632390fb418a9e18c1fe861d076f3202",
+      "vl-4-2-candidate.cold-8192.tokenize.request.json": "c196be253a6a7f7928e3f427e0faad10300dc3216279a3ae8a80a9cd46f77dab",
+      "vl-4-2-candidate.cold-2048.client.log": "129bd17ec574c422bfe55dc47701277bd7aa01cc89716940bdfa4e1e2ed2b610",
+      "vl-4-3-public.cold-8192.tokenize.response.json": "1e924ba32cf41b050291eaf02707b996b9f656171f816c15c24c7045a92600ee",
+      "events.json": "4084128466f1c6bb6acbda2bff84305e6df75e426143c8c1446afda8992c3d61",
+      "vl-4-2-candidate.before.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+      "vl-4-0-public.cold-2048.client.log": "a2d4b52e0e549c65ee98f42d01179ab0c38253177230045611f660dac84707c9",
+      "vl-4-0-public.after.health": "65fb8a4a434e9aa79532c77b77fda785189afb47bb0294b9e032b47a7122a348",
+      "vl-4-3-public.after.metrics": "d484760218ed144c17b316b2b768ce118b3032ab965ea900c8f2a8993b0c6c03",
+      "vl-4-3-public.cold-2048.tokenize.request.json": "f69a5dcb97950c19f12fd93b89b288ec0dd214a89ed83fbe5fb1e60270f6dabd",
+      "vl-4-0-public.after.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+      "vl-4-3-public.before.health": "e41f1fa5fa63b41398632c5ab9622e881079971c2bec31b6d54da709ab256599",
+      "vl-4-0-public.cold-8192.json": "fd70fa19f5868d0cbc632c1a7ff0df66bbce88a3e7a776fa7207fab02b0fafb5",
+      "vl-4-0-public.cold-2048.tokenize.request.json": "f69a5dcb97950c19f12fd93b89b288ec0dd214a89ed83fbe5fb1e60270f6dabd",
+      "vl-4-1-candidate.before.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+      "vl-4-3-public.after.health": "15f6c2e761e03054eaacf6f3f96dd6dcf92dc017bf69c64992ecc799654fde96",
+      "vl-4-1-candidate.cold-8192.client.log": "ce37e19db16c13943f051a1feabf38beaf1397ae0d6f2b8d25ec3ec9d24702cf",
+      "vl-4-2-candidate.before.health": "e41f1fa5fa63b41398632c5ab9622e881079971c2bec31b6d54da709ab256599",
+      "vl-4-2-candidate.after.metrics": "e3d44b7caee031537101aa4d4cdfe711ffa265a0f089fe613b5ba16e3a768cb0",
+      "vl-4-1-candidate.cold-8192.tokenize.response.json": "1e924ba32cf41b050291eaf02707b996b9f656171f816c15c24c7045a92600ee",
+      "vl-4-3-public.cold-8192.client.log": "695745c9e4fe677ca5f73d38188eda01133742ceee03feccc8ad84bdd4a1f5c0",
+      "vl-4-2-candidate.before.metrics": "270dace984bc1c0d9c5cb22be0035387cfef71838f417ccde6498c44e0346a60",
+      "vl-4-2-candidate.cold-2048.tokenize.request.json": "f69a5dcb97950c19f12fd93b89b288ec0dd214a89ed83fbe5fb1e60270f6dabd",
+      "vl-4-0-public.cold-2048.json": "04b347278fad621cda9c7c2ea76ef551f02eda82b9d57d0ddbd6fdcc570ea82e",
+      "vl-4-1-candidate.cold-2048.tokenize.response.json": "7f59448440e4d3f003e40ef5773b12b7ef17c6808bc21ea16cb1bf3807ad06f6",
+      "vl-4-3-public.after.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+      "vl-4-2-candidate.cold-8192.client.log": "e64806903d1ae7e913b4180d34c2eb90c8fedac3e900a9caaddae6a887e9b992",
+      "vl-4-1-candidate.after.health": "a56f21d7db6293b2888cdab808f66d2374eafb371cf7c0dbf03360893cfe908d",
+      "vl-4-1-candidate.cold-8192.json": "c379378a462eaaf065b5dfbe04fa412d42a92943d1c7145bf87491750d2ea16b",
+      "vl-4-3-public.before.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+      "vl-4-0-public.before.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+      "vl-4-0-public.cold-8192.client.log": "73d45f64359fbb729d8ca48cdf1f6394e90c03e486d47f95b38bc601491bfe57",
+      "vl-4-1-candidate.cold-2048.json": "2c78c0119ed630475040fc3b5be66307b6d12d4d7d1de10a596782267cb43ab7",
+      "vl-4-3-public.before.metrics": "2eadf0d05e2cd61b6145e306310ae428db02a8a1c5f00da6695850c6d445d5d9",
+      "vl-4-0-public.server.log": "adc4bf07279c1be7de25b69e5a9375dc054fb2249e52d1f52740b0d354771c78",
+      "vl-4-0-public.after.metrics": "7c31794b9d0d5727d94266546d9813517c800685e0b889e1c3b1ed7ded6b27fe",
+      "manifest.json": "a1b8d919deb72f85fdaad1999b9cd2827710ede921d97252e371506f68fd2e9d",
+      "vl-4-0-public.before.health": "e41f1fa5fa63b41398632c5ab9622e881079971c2bec31b6d54da709ab256599",
+      "vl-4-1-candidate.cold-8192.tokenize.request.json": "c196be253a6a7f7928e3f427e0faad10300dc3216279a3ae8a80a9cd46f77dab",
+      "vl-4-2-candidate.after.health": "a2bd00c0acf0aa418f4a4946e811171ea36f6e1509d17b84c4eab4ac2da82b22",
+      "records.json": "e53f81fe6f66a553aee90c4ae5665e296fc7cbcca7ff2f85c0a961cfd7432bdf",
+      "vl-4-3-public.cold-2048.json": "b2431f60e1d4d57259f5fd34ac430eff16a8d01a2d65d8b94528881a6b0a65ea",
+      "vl-4-1-candidate.before.metrics": "48cb06efdf74ae5b84f3f2b7cf9dfbb03e6b4230c9aec27d0dcdf59fec53943b",
+      "vl-4-3-public.cold-2048.client.log": "8bff0ba7f5b944a87935f5a31c731e2851fcb2fbcd8528655400b655dedb205e",
+      "vl-4-3-public.cold-2048.tokenize.response.json": "7f59448440e4d3f003e40ef5773b12b7ef17c6808bc21ea16cb1bf3807ad06f6",
+      "vl-4-3-public.server.log": "af7ee13b3228606211afe2b200b1bb68b1a10a1430bc5a37f573242bb2c286ef",
+      "vl-4-2-candidate.server.log": "ae044ccce5c82ea2a5c4bf751394f4a561d99680f587222d513d62757764f3cf",
+      "vl-4-1-candidate.cold-2048.tokenize.request.json": "f69a5dcb97950c19f12fd93b89b288ec0dd214a89ed83fbe5fb1e60270f6dabd",
+      "vl-4-2-candidate.cold-2048.tokenize.response.json": "7f59448440e4d3f003e40ef5773b12b7ef17c6808bc21ea16cb1bf3807ad06f6",
+      "vl-4-0-public.cold-2048.tokenize.response.json": "7f59448440e4d3f003e40ef5773b12b7ef17c6808bc21ea16cb1bf3807ad06f6",
+      "vl-4-1-candidate.cold-2048.client.log": "5ffa60f6b57d3ea1aec484258d48af8ca0ac86b486de9fd06fafd794f5c29d22",
+      "vl-4-3-public.cold-8192.json": "b0be53215dbfb55676555774c88fbff1bd74ecada8ed9168e3fdae1a0ceec7b4"
+    }
+  },
+  "limitations": [
+    "One M5 Ultra and VL4 checkpoint; two ABBA legs per variant and prompt",
+    "No new decode-rate or ITL measurement",
+    "No MLX performance comparison in this experiment",
+    "No image-request serving timing or6/8-bit serving timing",
+    "No full-suite or all-platform qualification claim"
+  ],
+  "m4_receipt": "risk-fused-m4.json"
+}

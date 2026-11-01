@@ -1,0 +1,294 @@
+{
+  "date": "2026-10-30",
+  "status": "Measured isolated M4 served TTFT improvement and full-model baseline equivalence; candidate remains default-off",
+  "device": "Apple M4 Pro",
+  "physical_memory_bytes": 51539607552,
+  "os": "macOS26.5.1 build25F80",
+  "source_commit": "de7cf96ed",
+  "checkpoint": {
+    "repository": "LiquidAI/LFM3-VL-2B-MLX-4bit",
+    "revision": "c823fade98e35a3d6942ad4d38b1ea15f675cd12"
+  },
+  "scope": "VL4 text prompts, cold prefix2k/8k,16 generated tokens; native baseline versus fused attention only; M4 non-NAX path",
+  "build": {
+    "version_string": "tensorfold-native1.1.6",
+    "compiler": "Zig0.17.0",
+    "cpu_target": "apple_m1",
+    "baseline_option": "-Dlfm3-risk-fast=false",
+    "candidate_option": "-Dlfm3-risk-fast=true",
+    "original_prompt_head_behavior_both": true,
+    "projection_candidate_both": false,
+    "baseline_sha256": "c01f10e0872f80b67ae2125a852d8179c058e9c95f6fbda8ad36e38f594484d8",
+    "candidate_sha256": "165c31f5ae6d085f8c6ec57fa6c0b2ad2d9737cf8256fb41148e58a203d7e351"
+  },
+  "protocol": {
+    "order": [
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline"
+    ],
+    "measurements_per_variant_and_prompt": 2,
+    "request_order_each_leg": [
+      2048,
+      8192
+    ],
+    "fresh_server_per_leg": true,
+    "fresh_KV_per_request": true,
+    "cached_tokens_every_request": 0,
+    "prompt_cache_gib": 0,
+    "context": 70000,
+    "configured_parallel": 4,
+    "active_measured_requests": 1,
+    "temperature": 0,
+    "thinking": false,
+    "output_tokens_every_request": 16,
+    "prompt_ids_exactly_verified_by_tokenize": true,
+    "output_text_digests_equal": true,
+    "output_token_ids": "Not emitted by this cold client; same exact histories separately passed state/logit/16-token qualification",
+    "predeclared_baseline_drift_limit": 0.05,
+    "hidden_warmups": 0,
+    "timing_retries": 0,
+    "client_python": "Python 3.9.6",
+    "client_sha256": "7b8ea55aa88834814f95a6f679654e16074b7a8364e34b39a276f009fe0231f2",
+    "all_owned_servers_exit": 0
+  },
+  "cases": [
+    {
+      "prompt_tokens": 2048,
+      "baseline_ttft_s": [
+        3.385673459,
+        3.384928958
+      ],
+      "candidate_ttft_s": [
+        3.3500699579999997,
+        3.347492209
+      ],
+      "baseline_median_s": 3.3853012085,
+      "candidate_median_s": 3.3487810834999996,
+      "baseline_over_candidate": 1.0109054978780014,
+      "baseline_first_last_drift": -0.00021989746176520608,
+      "stable_at_5percent": true,
+      "output_text_sha256_equal": true,
+      "output_token_id_equality": "not emitted by cold client; separate model qualification covers16 IDs/logits",
+      "prompt_ids": "both routes /tokenize exact pinned arrays",
+      "ttft_saved_ms": 36.52012500000046,
+      "ttft_fraction_lower": 0.010787850991901049
+    },
+    {
+      "prompt_tokens": 8192,
+      "baseline_ttft_s": [
+        17.139636916,
+        17.139102082999997
+      ],
+      "candidate_ttft_s": [
+        16.666613792,
+        16.663699875
+      ],
+      "baseline_median_s": 17.1393694995,
+      "candidate_median_s": 16.6651568335,
+      "baseline_over_candidate": 1.0284553377287602,
+      "baseline_first_last_drift": -3.12044533162803e-05,
+      "stable_at_5percent": true,
+      "output_text_sha256_equal": true,
+      "output_token_id_equality": "not emitted by cold client; separate model qualification covers16 IDs/logits",
+      "prompt_ids": "both routes /tokenize exact pinned arrays",
+      "ttft_saved_ms": 474.2126659999997,
+      "ttft_fraction_lower": 0.02766803446380184
+    }
+  ],
+  "memory_legs": [
+    {
+      "leg": 0,
+      "variant": "baseline",
+      "max_rss_bytes": 1836318720,
+      "peak_physical_footprint_bytes": 2172422208
+    },
+    {
+      "leg": 1,
+      "variant": "candidate",
+      "max_rss_bytes": 1836302336,
+      "peak_physical_footprint_bytes": 2172831880
+    },
+    {
+      "leg": 2,
+      "variant": "candidate",
+      "max_rss_bytes": 1836138496,
+      "peak_physical_footprint_bytes": 2172569760
+    },
+    {
+      "leg": 3,
+      "variant": "baseline",
+      "max_rss_bytes": 1836236800,
+      "peak_physical_footprint_bytes": 2172405896
+    }
+  ],
+  "evidence": {
+    "raw_records_sha256": "c6dbbd8c16bb0d7387ec13f8ad2683827830fa56e3e16645defc88289be909c5",
+    "run_manifest_sha256": "6cd8366d1c1b4f17dd9a0d19e4dd8abe83c3476673b6c5aa6a9563c5a5380795",
+    "events_sha256": "2950cde41d0e51a7ce9b0b41d1bb1e203d2eafc2b9094ed8b24fcedc365362d4",
+    "config_sha256": "75c52200e57ab68b97912dd9b2150f76e8acd95d2511a48611c4d0c8d6af7b70",
+    "pins_sha256": "263f956db60d9443f5e528e5e4fcbf51b63997bf98ad37b99156fe694568e6c3",
+    "raw_files_sha256": {
+      "vl-4-2-candidate.after.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+      "vl-4-0-public.cold-8192.tokenize.request.json": "c196be253a6a7f7928e3f427e0faad10300dc3216279a3ae8a80a9cd46f77dab",
+      "vl-4-0-public.cold-8192.tokenize.response.json": "1e924ba32cf41b050291eaf02707b996b9f656171f816c15c24c7045a92600ee",
+      "vl-4-2-candidate.cold-2048.json": "79c2e59e901f9c797dd0bdf69e951e3fa71f18071402447dfe4a82305f26f3ea",
+      "vl-4-1-candidate.after.metrics": "819edaa78fdc2c58b2afcb52c1dc2129eba9585834dc90f63e481ea32695380d",
+      "vl-4-1-candidate.before.health": "3ecca835aef6168623e5fd09af1a553676471c6c3d76176c12322725ac4e2881",
+      "vl-4-3-public.cold-8192.tokenize.request.json": "c196be253a6a7f7928e3f427e0faad10300dc3216279a3ae8a80a9cd46f77dab",
+      "vl-4-2-candidate.cold-8192.tokenize.response.json": "1e924ba32cf41b050291eaf02707b996b9f656171f816c15c24c7045a92600ee",
+      "vl-4-0-public.before.metrics": "cef6cd5d59d65c9b027f88fac90fd28584ba69f3301b20fd7566298c1ca9d9c8",
+      "vl-4-2-candidate.cold-8192.json": "21b474da076f3f27d60fdf3ae93753593c21dec44a4be7e802396fcd2a7ed40d",
+      "vl-4-1-candidate.after.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+      "vl-4-1-candidate.server.log": "fd566f89a1f93b5531686b6bd3aabeb5f66cd9574aec91346f0230edb058658d",
+      "vl-4-2-candidate.cold-8192.tokenize.request.json": "c196be253a6a7f7928e3f427e0faad10300dc3216279a3ae8a80a9cd46f77dab",
+      "vl-4-2-candidate.cold-2048.client.log": "e8784c8a5e3c7cb5a1d858e655a4e3a1f761ada16f0ae941eaae63374c5289b2",
+      "vl-4-3-public.cold-8192.tokenize.response.json": "1e924ba32cf41b050291eaf02707b996b9f656171f816c15c24c7045a92600ee",
+      "events.json": "2950cde41d0e51a7ce9b0b41d1bb1e203d2eafc2b9094ed8b24fcedc365362d4",
+      "vl-4-2-candidate.before.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+      "vl-4-0-public.cold-2048.client.log": "98a281a571b665381c1538d0d6d03c373c36099f8eab13849bec22d4c8b7ed01",
+      "vl-4-0-public.after.health": "3c5e807cf2e0ae94385da5880ca71a15ef41499b1926bb71f08ee83760dca585",
+      "vl-4-3-public.after.metrics": "64f4e6cc771c66ccc9d5523093b5f83dbb265aec42227c037bbdc70415b05f90",
+      "vl-4-3-public.cold-2048.tokenize.request.json": "f69a5dcb97950c19f12fd93b89b288ec0dd214a89ed83fbe5fb1e60270f6dabd",
+      "vl-4-0-public.after.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+      "vl-4-3-public.before.health": "3ecca835aef6168623e5fd09af1a553676471c6c3d76176c12322725ac4e2881",
+      "vl-4-0-public.cold-8192.json": "562f972349f9e880b6c229991f9c2f1d1e58468e08b5870da06bf5c390d51fcb",
+      "vl-4-0-public.cold-2048.tokenize.request.json": "f69a5dcb97950c19f12fd93b89b288ec0dd214a89ed83fbe5fb1e60270f6dabd",
+      "vl-4-1-candidate.before.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+      "vl-4-3-public.after.health": "3c5e807cf2e0ae94385da5880ca71a15ef41499b1926bb71f08ee83760dca585",
+      "vl-4-1-candidate.cold-8192.client.log": "8f3cca94a803a16f684517edd7bf049d8155cabaa464a6660edb1754d0753d23",
+      "vl-4-2-candidate.before.health": "3ecca835aef6168623e5fd09af1a553676471c6c3d76176c12322725ac4e2881",
+      "vl-4-2-candidate.after.metrics": "22372c28c4f9842e588b386ad79e6bf8e1bc38bc806dc01875d9770d4c3d5384",
+      "vl-4-1-candidate.cold-8192.tokenize.response.json": "1e924ba32cf41b050291eaf02707b996b9f656171f816c15c24c7045a92600ee",
+      "vl-4-3-public.cold-8192.client.log": "431757bbd4a301146bd98beb2a649d808c0839b38599a8ef4da7f78b8126fc0f",
+      "vl-4-2-candidate.before.metrics": "97957533feedf4919e21f881260237524d38a3e0e480c89661b0179180a4c8c8",
+      "vl-4-2-candidate.cold-2048.tokenize.request.json": "f69a5dcb97950c19f12fd93b89b288ec0dd214a89ed83fbe5fb1e60270f6dabd",
+      "vl-4-0-public.cold-2048.json": "47bac048e687b828425db97350b5d810f1b667a5b0d3789cc3f378aa96ea175a",
+      "vl-4-1-candidate.cold-2048.tokenize.response.json": "7f59448440e4d3f003e40ef5773b12b7ef17c6808bc21ea16cb1bf3807ad06f6",
+      "vl-4-3-public.after.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+      "vl-4-2-candidate.cold-8192.client.log": "525046f838962b9902da5e1b7ec5256bdf92547c550c864c125ff147efc44ef8",
+      "vl-4-1-candidate.after.health": "c2470ce8a87fa19e5fd7e74fd83156d15382abeb1fb85542e8e8545109266730",
+      "vl-4-1-candidate.cold-8192.json": "c637028f47f1f58282e569048719d18b7b5204649ce59041f70040f6eccc4f1a",
+      "vl-4-3-public.before.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+      "vl-4-0-public.before.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+      "vl-4-0-public.cold-8192.client.log": "860f41a6242ad40867e114261f93f074061f3d6d847cbd9bcefa0ec0e4c1f970",
+      "vl-4-1-candidate.cold-2048.json": "c1d992dc58448bf305f9068d4461ff27f4507283631ccb9050bbb0ba6b31e3ad",
+      "vl-4-3-public.before.metrics": "74ac71d53e103ec893ab9237dfea2b25668cfadc1796c6dfef9c38bd13af2a13",
+      "vl-4-0-public.server.log": "0a18ba222629efa9d9800e4a53919bf2a246b33cbcb6dce30e519405269522b7",
+      "vl-4-0-public.after.metrics": "1ff28b9f2f859901bceb3b132114c00f5a321c466ea2c91dccf844b8138e9911",
+      "manifest.json": "6cd8366d1c1b4f17dd9a0d19e4dd8abe83c3476673b6c5aa6a9563c5a5380795",
+      "vl-4-0-public.before.health": "3ecca835aef6168623e5fd09af1a553676471c6c3d76176c12322725ac4e2881",
+      "vl-4-1-candidate.cold-8192.tokenize.request.json": "c196be253a6a7f7928e3f427e0faad10300dc3216279a3ae8a80a9cd46f77dab",
+      "vl-4-2-candidate.after.health": "c2470ce8a87fa19e5fd7e74fd83156d15382abeb1fb85542e8e8545109266730",
+      "records.json": "c6dbbd8c16bb0d7387ec13f8ad2683827830fa56e3e16645defc88289be909c5",
+      "vl-4-3-public.cold-2048.json": "5873b501f0ae665272e0ac2a5ea21a8200b9d6bfce7749ab1e422b2debe75bfe",
+      "vl-4-1-candidate.before.metrics": "754ccde7360a9bc95b10d1e48e6f5ce72a87e79ca38c6eeac352dd784b6c840d",
+      "vl-4-3-public.cold-2048.client.log": "2110be127144ab06abb48d97a46a80964fa04c28a309190131a58453f6b6eaff",
+      "vl-4-3-public.cold-2048.tokenize.response.json": "7f59448440e4d3f003e40ef5773b12b7ef17c6808bc21ea16cb1bf3807ad06f6",
+      "vl-4-3-public.server.log": "c18d98af8362d0f53e496f721a83cc38da911682d5e9e5ed70af503473a7b33f",
+      "vl-4-2-candidate.server.log": "6f1ad71c23929d68d6acdd62e8534511b3b7b3bea9c51ffb7a3e2ea4a4848f53",
+      "vl-4-1-candidate.cold-2048.tokenize.request.json": "f69a5dcb97950c19f12fd93b89b288ec0dd214a89ed83fbe5fb1e60270f6dabd",
+      "vl-4-2-candidate.cold-2048.tokenize.response.json": "7f59448440e4d3f003e40ef5773b12b7ef17c6808bc21ea16cb1bf3807ad06f6",
+      "vl-4-0-public.cold-2048.tokenize.response.json": "7f59448440e4d3f003e40ef5773b12b7ef17c6808bc21ea16cb1bf3807ad06f6",
+      "vl-4-1-candidate.cold-2048.client.log": "c817f59c86cc3301269b237c09136de3c3b657532cf00e8ff8578a91ddff067c",
+      "vl-4-3-public.cold-8192.json": "b0a8730631e347cc085279f6c6373ea2415f61a0a37e72ee62ed5f753c561a8d"
+    }
+  },
+  "limitations": [
+    "One M4 Pro with48GiB RAM and VL4 checkpoint; two ABBA legs per variant and prompt",
+    "No new decode-rate or ITL measurement",
+    "No MLX performance comparison in this experiment",
+    "No M4 image-request or6/8-bit qualification in this experiment",
+    "No full-suite or all-platform qualification claim"
+  ],
+  "numerical_qualification": {
+    "comparison": "One loaded model with only four attention pipelines changed between baseline macro0 and candidate macro1; all other model operations and weights identical",
+    "checks": [
+      "Full active KV bytes per head and convolution state after every prompt chunk",
+      "Complete last-row logits after every prompt chunk",
+      "Snapshot bytes at129 and257 tokens",
+      "Restore257-token snapshot and finish prompt with full state/logit comparison",
+      "16greedy decode tokens with full state/logit comparison after each token"
+    ],
+    "cases": [
+      {
+        "prompt_tokens": 2048,
+        "compared_prompt_chunks": 17,
+        "mark_snapshots_equal": 2,
+        "resumed_prefix": 257,
+        "resume_state_logits_equal": true,
+        "full_active_kv_conv_equal": true,
+        "full_logits_equal": true,
+        "decode_tokens": [
+          597,
+          8055,
+          509,
+          5901,
+          4116,
+          355,
+          267,
+          1286,
+          4160,
+          302,
+          278,
+          7126,
+          496,
+          73,
+          10,
+          10601
+        ],
+        "vision_rows": false,
+        "scope": "real checkpoint differential correctness, not served timing or cancellation callback execution",
+        "result_sha256": "c478ff8b01fc09bd8ff940e838a3e60cab72fcaae008a21f2fd1527d655b4e9a",
+        "log_sha256": "52fc171b440729618ce26a4f89e0c0c9366f3bb6ae3b1f9e408e46f73e6b120a",
+        "receipt_sha256": "867f4c062f0721c20a02180850ba0bc2058ad25a67d758af962fe75a2eac83f0"
+      },
+      {
+        "prompt_tokens": 8192,
+        "compared_prompt_chunks": 65,
+        "mark_snapshots_equal": 2,
+        "resumed_prefix": 257,
+        "resume_state_logits_equal": true,
+        "full_active_kv_conv_equal": true,
+        "full_logits_equal": true,
+        "decode_tokens": [
+          597,
+          4695,
+          677,
+          4116,
+          267,
+          1442,
+          1286,
+          4160,
+          302,
+          496,
+          3862,
+          10,
+          8426,
+          20,
+          643,
+          7204
+        ],
+        "vision_rows": false,
+        "scope": "real checkpoint differential correctness, not served timing or cancellation callback execution",
+        "result_sha256": "fdb1dec6589d628cb277e464776fa417d9cf1b4987389a82cbf0b19c9e1b7813",
+        "log_sha256": "fbfbc76691049c0e915ffffb39d1217062b355959ac07a0e72b6cc1d707e36f5",
+        "receipt_sha256": "afc4af4472f35ead2884b768395a67e33891b2d21ba8a313a451145a01730a6e"
+      }
+    ],
+    "negative_control": {
+      "mutation": "Actual candidate Metal final attention stores write zero",
+      "exit_code": 1,
+      "required_error": "AttentionFusedByteMismatch",
+      "log_sha256": "ad9d7a7a025bfccf06104d2e48d5323f7d0ba2aa86039cc47cb71925b2311dd5",
+      "receipt_sha256": "4c722fa32661cf6be986d54055c83b5f9c3c19e71ab8c080aa55ff331e5c9700"
+    },
+    "manifest_sha256": "d610bf79f0c02428a12ba8fd2ea3110610a2d7738e5ca0d8381c0d487263bbf0",
+    "probe_sha256": "1e4053893a30190b24e27c9dffba24f32ab98179c56059b27ee263a914e803ae",
+    "probe_source_sha256": "7d571c502e44eb75915b66b32018d7aac7ab0a231bad546dd0ac0b3888677cc2",
+    "baseline_shader_sha256": "760ea921822580f7973070fa915808570cbb27214017e5ebe14a5e844faedbfe",
+    "candidate_shader_sha256": "193a16770a6da1085fbde3247d26da7fa22a3ac4f0f937d9233ea0ffedfb11b3",
+    "scope": "Exact baseline equivalence on this checkpoint; no new independent FP64 fidelity qualification"
+  }
+}

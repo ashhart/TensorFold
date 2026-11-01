@@ -1,0 +1,324 @@
+{
+  "date": "2026-10-30",
+  "status": "Seven VL baseline-equivalence cases passed; three actual-kernel faults rejected",
+  "device": "Apple M5 Ultra",
+  "os": "macOS27.0 build26A428",
+  "source_commit": "de7cf96ed",
+  "scope": "VL6/8 text histories at2k/8k and VL4/6/8 decoder inputs containing70 corrected real-image projected rows in512-token prompts",
+  "comparison": "Fused attention versus original attention within each checkpoint; original prompt-head/projection behavior retained",
+  "fidelity_scope": "Baseline equivalence only. This does not add an independent FP64 decoder-fidelity result or change the existing FP64 difference ledger. Saved image-row provenance qualifies the inputs, not a new vision-tower execution.",
+  "checkpoints": {
+    "LFM3-VL-2B-MLX-4bit": {
+      "repository": "LiquidAI/LFM3-VL-2B-MLX-4bit",
+      "revision": "c823fade98e35a3d6942ad4d38b1ea15f675cd12",
+      "files": {
+        "model.safetensors": "58268dfdf441ae4020d2a52fc97a814645e8a9624946e2d490403d4dcd71a255",
+        "config.json": "0efb7708e0771e3e104ac628954cdc71070dd436e0b7974615bd1b9eb836f9d9",
+        "tokenizer.json": "a39eed58008cbcbc09e5b629b81338a654269c64cd13348aaa6090f4db75c7e7"
+      }
+    },
+    "LFM3-VL-2B-MLX-6bit": {
+      "repository": "LiquidAI/LFM3-VL-2B-MLX-6bit",
+      "revision": "6d71bfae121abedc75f6d531fc7f6ceb4f5e3501",
+      "files": {
+        "model.safetensors": "838c39147541b12e86a4f1b43d6a7814d7fb4efe9d5ff8a151c85ac06f321eef",
+        "config.json": "4c03aa298372cbcb478eb08be0a4a59be917b4949756066ce4eac06033d200bc",
+        "tokenizer.json": "a39eed58008cbcbc09e5b629b81338a654269c64cd13348aaa6090f4db75c7e7"
+      }
+    },
+    "LFM3-VL-2B-MLX-8bit": {
+      "repository": "LiquidAI/LFM3-VL-2B-MLX-8bit",
+      "revision": "83336d5be3874a2bdd3297bde77b2114dbd3a816",
+      "files": {
+        "model.safetensors": "50c9476a7f00f5349e81b42ab88b47635b9eba3c7ab5851c598d270cda4c6857",
+        "config.json": "9f7dc06d04d0610c7e27fb6a110c42a3a09b686a6ec53b0eb383f30a8be5a457",
+        "tokenizer.json": "a39eed58008cbcbc09e5b629b81338a654269c64cd13348aaa6090f4db75c7e7"
+      }
+    }
+  },
+  "image_inputs": {
+    "input_png_sha256": "005500792ee8ea6f35ac369d900fc788cd77667f145e7100c2cff57fae5355d9",
+    "corrected_CPU_patches_sha256": "9d39c11551f105b8982e3a9acceffcdf687d360c17a7931b7fff21757a6e5473",
+    "prompt_tokens": 512,
+    "image_rows": 70,
+    "image_width": 2048,
+    "image_start": 4,
+    "prompt_sha256": "57111edcf1dd6adb846c9dedc3f398be5c8e19223cc4e75846d28296dc55e40f",
+    "projected_rows_sha256": {
+      "4": "ffa0401f452f39a07833d6692ac9eff0d5485cc93a14fb3433bdad74c42ab05e",
+      "6": "0bfbdb4d6e8f3485609f0b6e8cf4b84bd8daba4c2ae62f56a4861aad3688b4df",
+      "8": "0bfbdb4d6e8f3485609f0b6e8cf4b84bd8daba4c2ae62f56a4861aad3688b4df"
+    },
+    "derivation": "Original90-token real cat prompt plus first422 publicVL2k text IDs;70 placeholders at4..73;512total tokens",
+    "provenance_sha256": {
+      "independent-vision6.json": "cd65b824e33a1e20bd635c4f7500819b36e4c6702135d3a75e409943cdb3fc13",
+      "vision68-identity.json": "6e28b34d17c1b5ff57811e1375bf8292fdbe18b2ddeeebe78d12191c64ebab98",
+      "corrected-capture.json": "967400283a8ceeadd4d45f91c5dc7f85a18ec58af79020b7391621d069d7c6e0",
+      "independent-vision4.json": "98556f6663ca894b3f185e7873f145fb199f76d32a24bf62b6a5db6023b35bd3"
+    }
+  },
+  "checks": [
+    "Active KV per head and every convolution state after each prompt chunk",
+    "Full last-row logits after each prompt chunk",
+    "Snapshot bytes at129 and257 tokens",
+    "Restore257-token snapshot and compare final state/logits",
+    "16greedy decode tokens and full state/logits after each token"
+  ],
+  "cases": [
+    {
+      "prompt_tokens": 512,
+      "compared_prompt_chunks": 5,
+      "mark_snapshots_equal": 2,
+      "resumed_prefix": 257,
+      "resume_state_logits_equal": true,
+      "full_active_kv_conv_equal": true,
+      "full_logits_equal": true,
+      "decode_tokens": [
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018
+      ],
+      "vision_rows": true,
+      "case": "vl4-image512",
+      "result_sha256": "7614841c497e11aadd1832316fbc086eff5c182501884a5245ce4761d52cf852"
+    },
+    {
+      "prompt_tokens": 512,
+      "compared_prompt_chunks": 5,
+      "mark_snapshots_equal": 2,
+      "resumed_prefix": 257,
+      "resume_state_logits_equal": true,
+      "full_active_kv_conv_equal": true,
+      "full_logits_equal": true,
+      "decode_tokens": [
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018
+      ],
+      "vision_rows": true,
+      "case": "vl6-image512",
+      "result_sha256": "7614841c497e11aadd1832316fbc086eff5c182501884a5245ce4761d52cf852"
+    },
+    {
+      "prompt_tokens": 2048,
+      "compared_prompt_chunks": 17,
+      "mark_snapshots_equal": 2,
+      "resumed_prefix": 257,
+      "resume_state_logits_equal": true,
+      "full_active_kv_conv_equal": true,
+      "full_logits_equal": true,
+      "decode_tokens": [
+        597,
+        8055,
+        509,
+        5901,
+        4116,
+        355,
+        267,
+        1286,
+        4160,
+        302,
+        278,
+        7126,
+        496,
+        73,
+        10,
+        10601
+      ],
+      "vision_rows": false,
+      "case": "vl6-text2048",
+      "result_sha256": "c478ff8b01fc09bd8ff940e838a3e60cab72fcaae008a21f2fd1527d655b4e9a"
+    },
+    {
+      "prompt_tokens": 8192,
+      "compared_prompt_chunks": 65,
+      "mark_snapshots_equal": 2,
+      "resumed_prefix": 257,
+      "resume_state_logits_equal": true,
+      "full_active_kv_conv_equal": true,
+      "full_logits_equal": true,
+      "decode_tokens": [
+        597,
+        4695,
+        677,
+        4116,
+        267,
+        1442,
+        1286,
+        4160,
+        302,
+        496,
+        3862,
+        10,
+        8426,
+        20,
+        643,
+        7204
+      ],
+      "vision_rows": false,
+      "case": "vl6-text8192",
+      "result_sha256": "fdb1dec6589d628cb277e464776fa417d9cf1b4987389a82cbf0b19c9e1b7813"
+    },
+    {
+      "prompt_tokens": 512,
+      "compared_prompt_chunks": 5,
+      "mark_snapshots_equal": 2,
+      "resumed_prefix": 257,
+      "resume_state_logits_equal": true,
+      "full_active_kv_conv_equal": true,
+      "full_logits_equal": true,
+      "decode_tokens": [
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018
+      ],
+      "vision_rows": true,
+      "case": "vl8-image512",
+      "result_sha256": "7614841c497e11aadd1832316fbc086eff5c182501884a5245ce4761d52cf852"
+    },
+    {
+      "prompt_tokens": 2048,
+      "compared_prompt_chunks": 17,
+      "mark_snapshots_equal": 2,
+      "resumed_prefix": 257,
+      "resume_state_logits_equal": true,
+      "full_active_kv_conv_equal": true,
+      "full_logits_equal": true,
+      "decode_tokens": [
+        597,
+        8055,
+        509,
+        5901,
+        4116,
+        355,
+        267,
+        1286,
+        4160,
+        302,
+        278,
+        7126,
+        496,
+        73,
+        10,
+        10601
+      ],
+      "vision_rows": false,
+      "case": "vl8-text2048",
+      "result_sha256": "c478ff8b01fc09bd8ff940e838a3e60cab72fcaae008a21f2fd1527d655b4e9a"
+    },
+    {
+      "prompt_tokens": 8192,
+      "compared_prompt_chunks": 65,
+      "mark_snapshots_equal": 2,
+      "resumed_prefix": 257,
+      "resume_state_logits_equal": true,
+      "full_active_kv_conv_equal": true,
+      "full_logits_equal": true,
+      "decode_tokens": [
+        597,
+        4695,
+        677,
+        4116,
+        267,
+        1442,
+        1286,
+        4160,
+        302,
+        496,
+        3862,
+        10,
+        8426,
+        20,
+        643,
+        355
+      ],
+      "vision_rows": false,
+      "case": "vl8-text8192",
+      "result_sha256": "b091c42d1fec9422d3aade3c2951678002585775e326ad843618fdcdb9cc0b6b"
+    }
+  ],
+  "controls": [
+    {
+      "checkpoint_bits": 4,
+      "prompt": "image512",
+      "mutation": "Candidate final attention stores write zero",
+      "exit_code": 1,
+      "required_error": "AttentionFusedByteMismatch",
+      "log_sha256": "ad9d7a7a025bfccf06104d2e48d5323f7d0ba2aa86039cc47cb71925b2311dd5"
+    },
+    {
+      "checkpoint_bits": 6,
+      "prompt": "image512",
+      "mutation": "Candidate final attention stores write zero",
+      "exit_code": 1,
+      "required_error": "AttentionFusedByteMismatch",
+      "log_sha256": "ad9d7a7a025bfccf06104d2e48d5323f7d0ba2aa86039cc47cb71925b2311dd5"
+    },
+    {
+      "checkpoint_bits": 8,
+      "prompt": "image512",
+      "mutation": "Candidate final attention stores write zero",
+      "exit_code": 1,
+      "required_error": "AttentionFusedByteMismatch",
+      "log_sha256": "ad9d7a7a025bfccf06104d2e48d5323f7d0ba2aa86039cc47cb71925b2311dd5"
+    }
+  ],
+  "evidence": {
+    "remote_manifest_sha256": "8a1657e6f700c97b347e92409b70a63c289ea057d20cc2bdf5a8bd324b83e54d",
+    "probe_sha256": "1e4053893a30190b24e27c9dffba24f32ab98179c56059b27ee263a914e803ae",
+    "probe_source_sha256": "7d571c502e44eb75915b66b32018d7aac7ab0a231bad546dd0ac0b3888677cc2",
+    "baseline_shader_sha256": "760ea921822580f7973070fa915808570cbb27214017e5ebe14a5e844faedbfe",
+    "candidate_shader_sha256": "193a16770a6da1085fbde3247d26da7fa22a3ac4f0f937d9233ea0ffedfb11b3",
+    "fault_shader_sha256": "c37fac732d17c22408f627d1b8b66f55415751275a15c28079414e0a726ec593",
+    "stage_receipts_sha256": {
+      "smoke": "2177e51514cdb786b6831f8d99c64f10f6722d21d82354c394535cdc830edef6",
+      "positive": "87da1f092392477e224640ba4f37567b9b89cffa96b8031cdc4fe48645486a57",
+      "controls": "ff1299861e602c5f464447ef409729e92444f409b45ce29d02f894e0711909c5"
+    }
+  },
+  "remaining": [
+    "Fresh image-to-decoder and HTTP image-request checks",
+    "Full test suites, other GPUs and longer contexts",
+    "Existing independent FP64 fidelity ledger remains unchanged"
+  ],
+  "text_widths_receipt": "risk-fused-text-widths.json"
+}

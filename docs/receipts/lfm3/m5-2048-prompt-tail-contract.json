@@ -1,0 +1,52 @@
+{
+  "scope": "M5 targeted mechanical contract for 2048-mode prompt-tail kernels. Not independent propagated model fidelity or full backend qualification.",
+  "source_base": "d9c1ea531",
+  "sources_sha256": {
+    "zig/tests/contract/metal_lfm3_tiled.zig": "b3885ded26ed103e757691374584db4eb32e245b8ebc6f449c582a34fb90ce51",
+    "zig/tests/contract/metal_lfm3_residual.zig": "bcb83756775468e2762f7e9a694f16ed5e6322c450e28a262367680f712e98c5",
+    "zig/kernels/metal/lfm3/attention_tiled.metal": "6b134e9062fd55dc2b04bf5124c54c540e9a74d669cdb88336460093abb24c81",
+    "zig/kernels/metal/lfm3/residual_ffn.metal": "add7140a9ec0589fe674c2066317b9e511430596892cbeb1b831feadd465c86b"
+  },
+  "binary_sha256": "ca7fd00d0e2d6c6c7ec62e5aa749e4352ad71c2fa6137caad5da791e654195b8",
+  "commands": [
+    "tf-kernel-contract --only LFM3 tiled structural --no-limits",
+    "tf-kernel-contract --only LFM3 residual FFN --no-limits"
+  ],
+  "actual_tail_rows": [
+    1,
+    5,
+    8
+  ],
+  "nonfinite_fixture_rows": 5,
+  "results": {
+    "attention": {
+      "exit": 0,
+      "elapsed_seconds": 6.321991208940744,
+      "summary": "SUMMARY 2 kernels: 2 pass gates 1-4, 0 fail, 0 known findings; 2 controls: 2 red as planted, 0 missed; 0 limit problems; gates 4951 ms, limits 0 ms",
+      "log_sha256": "f8d9df17c65f6971d48803cdc3cd49eaf6408f3d858ba2fa85b0f51c655795cd",
+      "nonfinite": "PASS nonfinite metal LFM3 tiled structural full: the stated rule holds: visible-query/key/value nonfinite classes; masked future values must not contaminate",
+      "shapes": [
+        "PASS shapes metal LFM3 tiled structural full: 16 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel",
+        "PASS shapes metal LFM3 tiled structural sliding: 16 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel"
+      ],
+      "controls_red": 2
+    },
+    "residual": {
+      "exit": 0,
+      "elapsed_seconds": 13.454363541211933,
+      "summary": "SUMMARY 1 kernels: 1 pass gates 1-4, 0 fail, 0 known findings; 2 controls: 2 red as planted, 0 missed; 0 limit problems; gates 12434 ms, limits 0 ms",
+      "log_sha256": "75e7038a7c5b4da1942008d68d96962879491691c1aae64a38951046b3a4fd05",
+      "nonfinite": "PASS nonfinite metal LFM3 residual FFN: 30720 non-finite and 30720 finite outputs match the float64 classes",
+      "shapes": [
+        "PASS shapes metal LFM3 residual FFN: 15 shapes within the float64 bound (worst 0.992 of the bound), 0 edges refused by the kernel"
+      ],
+      "controls_red": 2
+    }
+  },
+  "limitations": [
+    "Targeted --no-limits: zero limit problems in summary is not a launch-limit pass.",
+    "Attention uses a uniform-score structural fixture; it is not a reduced-accumulation witness or official MLX comparison.",
+    "Five-row nonfinite fixtures do not establish arbitrary tails or full-model FP32/BF16 acceptance.",
+    "Residual 15-shape synthetic FP64-bound contract is mechanical evidence, separate from agreed model-fidelity gate."
+  ]
+}

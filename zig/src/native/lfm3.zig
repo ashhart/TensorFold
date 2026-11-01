@@ -7,6 +7,7 @@ const q = tf.lfm3;
 const lanes = tf.lanes;
 const cache_fit = @import("cache_fit.zig");
 const metal_admit = @import("metal_admit.zig");
+const images = @import("lfm3_images.zig");
 
 const Host = struct {
     resident: ?mtl.resident.Resident = null,
@@ -19,6 +20,7 @@ const Host = struct {
     core: lanes.Engine,
     host: api.LaneHost,
     cache: ?api.prompt_cache.Store = null, // kept prompt states (engine thread only); null: a zero budget
+    vision: ?*images.Vision = null,
 
     fn close(ctx: *anyopaque) void {
         const h: *Host = @ptrCast(@alignCast(ctx));
@@ -28,6 +30,7 @@ const Host = struct {
         mtl.resident.streams.drop(h);
         h.config.deinit(h.gpa);
         h.metal.deinit();
+        if (h.vision) |v| v.deinit();
         h.model.deinit();
         h.gpa.destroy(h);
     }
@@ -48,10 +51,6 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         return null;
     };
     defer config.deinit();
-    if (config.kind != .text) {
-        problem.* = "LFM3-VL inference requires the stacked vision contribution";
-        return null;
-    }
     if (o.vision != null and config.kind == .text) {
         problem.* = "LFM3-1.7B is text-only; --vision requires an LFM3-VL checkpoint";
         return null;
@@ -76,12 +75,19 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.gpa = gpa;
     h.model = model;
     h.resident = null;
-    const chunk = prompt_chunk;
+    h.vision = null;
+    const chunk: u32 = if (model.device.tensorUnits()) q.backend.prompt_rows else 128;
     h.metal = try q.backend.Metal.init(gpa, model, .{ .capacity = window, .chunk = chunk, .streams = @max(o.lanes, 2) });
     errdefer h.metal.deinit();
+    if (model.config.kind == .vision_language) {
+        h.vision = try images.open(gpa, io, model, o.dir, o.vision orelse .{});
+        h.metal.images = .{ .ctx = h.vision.?, .prepare = images.Vision.encode };
+    }
+    errdefer if (h.vision) |v| v.deinit();
     const per_stream = q.state.cacheBytes(&model.config.layer_types, window);
     const served = try metal_admit.streams(a, "lfm3", per_stream, metal_admit.room(model.device), o, window, problem) orelse {
         h.metal.deinit();
+        if (h.vision) |v| v.deinit();
         model.deinit();
         gpa.destroy(h);
         return null;
@@ -92,7 +98,17 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.clock = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.config, h.metal.backend(), h.clock.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "lfm3", .lanes = served, .context_window = @intCast(window), .prefill_step = chunk, .structures = true, .vision = null });
+    const offer: ?api.Vision = if (h.vision) |v| .{
+        .ctx = h,
+        .prepare = prepareImage,
+        .image_token = 125030,
+        .markers = &.{ 125009, 125030, 125010 },
+        .image_tokens = v.capacity,
+        .max_images = v.max_images,
+        .part_type = "image",
+        .explain = q.image.explain,
+    } else null;
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "lfm3", .lanes = served, .context_window = @intCast(window), .prefill_step = chunk, .decode_share = o.decode_share, .structures = true, .vision = offer });
     h.cache = null;
     var why: []const u8 = "";
     const dev = model.device;
@@ -120,9 +136,25 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     errdefer if (h.cache) |*store| store.deinit();
     try mtl.resident.streams.hold(h, io, "lfm3");
     errdefer mtl.resident.streams.drop(h);
+    if (h.vision) |v| if (h.resident) |*resident| {
+        var buffers: std.ArrayList(mtl.Buffer) = .empty;
+        defer buffers.deinit(gpa);
+        try buffers.appendSlice(gpa, v.tower.buffers());
+        try buffers.append(gpa, v.rows);
+        if (!resident.tryAddNow(buffers.items)) {
+            problem.* = "LFM3 vision scratch and projected image rows exceed the model's residency budget";
+            return error.Lfm3VisionResidencyBudget;
+        }
+    };
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     try h.host.start();
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
+}
+
+fn prepareImage(ctx: *anyopaque, a: std.mem.Allocator, bytes: []const u8, max_tokens: u32) anyerror!api.PreparedImage {
+    const h: *Host = @ptrCast(@alignCast(ctx));
+    const prepared = try q.image.prepare(h.clock.io, a, bytes, max_tokens);
+    return .{ .pixels = prepared.pixels, .gh = prepared.gh, .gw = prepared.gw, .tokens = prepared.tokens, .hash = prepared.hash };
 }
 
 test "LFM3 repeats keep a resumable raw prefix without caching an unrelated prompt" {

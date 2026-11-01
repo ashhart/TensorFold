@@ -1,0 +1,119 @@
+{
+  "scope": "Final frozen current artifact local M4 four-bit qualification; no global readiness or performance acceptance",
+  "source": {
+    "head": "1dcada935e83b0064a1af16b7fdd32c8f5a5a1d2",
+    "runtime_base": "2e97b1fbbe80f2446e49893fc297da9be914fc71",
+    "working_tree_change": "Only move existing lfm3_host build registration immediately after flashnext_batch_host; runtime sources unchanged",
+    "sha256": {
+      "build.zig": "13a86ee3a72ccd3613e264690e5a5e46858ef68b8ff9fe73c36fa9010c2da850",
+      "zig-out/native/bin/tensorfold-native": "d264f089879e343344dd4ccc1bfd7fef94d5b81baeb089eee51b12fd847cce3f",
+      "zig-out/bin/tf-kernel-contract": "75197e5bf308f967fd9881654a33b11459bfe6b536546c89a997e36fb4c05b92",
+      "tools/lfm3/serve_check.py": "87327328ef1a1fcc35536efa0c18829779ee278a4d325f2af69356bc68a71f5c",
+      "zig/src/families/lfm3/state.zig": "8a7083b1c43c75803596d441f20c5cfefb00820738adbcc65ffc6b043e647e10",
+      "zig/src/families/lfm3/backend.zig": "4ed5d33b869dc4be0d82d406cff4abc0f65a63687c45d8b3aaa61e26361db233",
+      "zig/src/families/lfm3/forward.zig": "618e9ecf0e96f4709c0ad543585ec58d06f14501cabdc2b9caeba9ab1d73e7b6",
+      "zig/kernels/metal/lfm3/attention.metal": "6dc51acbb45e2e65028e72fed72d318629eb7b382e773c5837db9baa8de5d3b9"
+    }
+  },
+  "host": {
+    "build_exit": 0,
+    "build_steps_succeeded": 72,
+    "fmt_exit": 0,
+    "lean_exit": 1,
+    "lean_inherited": 428,
+    "lean_new": 0,
+    "lean_log_byteidentical_prior_public_alias": true,
+    "test_exit": 0,
+    "test_steps_succeeded": 548,
+    "tests_passed": 7232,
+    "tests_total": 7277,
+    "tests_skipped": 45,
+    "warnings": "Retained expected negative-fixture/dependency warnings. All45skips remain unqualified; per-test details are retained in the full host log. Codec warning strings can be deliberate negative fixtures and are not alone evidence of an unavailable dependency."
+  },
+  "affected_contract": {
+    "command": "tf-kernel-contract --only \"metal LFM3\"",
+    "device": "Apple M4 Pro",
+    "exit": 0,
+    "kernels": 70,
+    "gates_1_through_4_passed": 70,
+    "failed": 0,
+    "known_findings": 0,
+    "controls_red": 2,
+    "controls_missed": 0,
+    "normal_launch_limit_problems": 0,
+    "gates_ms": 70170,
+    "limits_ms": 147,
+    "synthetic_width_scope": "q6/q8 synthetic kernel contracts included; no paused 6/8 checkpoint/model runs"
+  },
+  "served": {
+    "text4": {
+      "counts": {
+        "passed": 40,
+        "failed": 0,
+        "skipped": 0
+      },
+      "cancellation_checks": 6,
+      "binary_sha256": "d264f089879e343344dd4ccc1bfd7fef94d5b81baeb089eee51b12fd847cce3f",
+      "sampled": true,
+      "images": false,
+      "speed_qualified": false
+    },
+    "vl4": {
+      "counts": {
+        "passed": 61,
+        "failed": 0,
+        "skipped": 0
+      },
+      "cancellation_checks": 9,
+      "binary_sha256": "d264f089879e343344dd4ccc1bfd7fef94d5b81baeb089eee51b12fd847cce3f",
+      "sampled": true,
+      "images": true,
+      "speed_qualified": false
+    }
+  },
+  "global_backend": {
+    "passed": false,
+    "initial_refusal": "UnrecordedRotaryCompiler; no arithmetic executed",
+    "rotary_receipt_sha256": "c559829bac73c0b1da2350c599aa06bd00a6aaf0b8e304c41c6cab3132a51394",
+    "rotary_identity": "Independent current source/oracle/OS/compiler/options match; accepted by executable",
+    "actual_attempt_exit": 1,
+    "hardware_limitation": "UNSUPPORTED gemma4 31B rounded dense: tensor units required; M4 reports tensor units false. Stopped before complete global contract run.",
+    "prior_qwen_failure": "Historical baseline-reproduced Qwen4 HC act failure remains documented in full-backend-nf-cancellation.json; no current M4 result on that case."
+  },
+  "lease": {
+    "path": "/tmp/tensorfold-model.lock",
+    "alias_inode": 46835039,
+    "device": 16777231,
+    "controller_children_exit_and_cleanup_recorded": true,
+    "all_three_leases_released": true,
+    "single_model_exact_alias_admission": true,
+    "memory_policy": "Unchanged native admission and conservative model bytes plus4GiB below min(70percent physicalRAM,recommendedworkingSetSize); no limits raised",
+    "timing_qualification": false
+  },
+  "raw_evidence_sha256": {
+    "frozen_manifest": "21b3011e4eadcaea3599ebf6df37ead0198c45a2496931c6bba2f27d556e753a",
+    "controller_events": "92a17cf032a8bb94abe80cce90b795801e3d20c8e62e7f62b1cfd5c9df1d0cb1",
+    "host_log": "f72a1c72e48d78a83904c967ea19acfaf0711e5106f5fb6b4f8c284d9c1b1681",
+    "initial_contract_refusal": "e49b7f79dbb1824dd0fd06281705514d2d9c952f40903a5a8490268d2816297f",
+    "host_serving_receipt": "7f5bfe120e0de8d55e167a66abc390ffe7a4201a5cb8205d609685069924005e",
+    "text4_serving": "bec36be5b1c8576d48fdae51aef7d24dca4e0ae93e456ac532a847e693817881",
+    "vl4_serving": "db6cd05e99d18d9a64f8729e35859dc91bef037905d31dec1bfd9e8e2af47d8b",
+    "full_backend_hardware_refusal": "783afe28842782e928cabf8f9bc097d635fc6bad664a888f1ec89d63a6f7cfc4",
+    "full_backend_events": "84034759e3ab4a2b0970932526cd0feb6f5d70bf48a58fe0a79993ace20aec3e",
+    "affected_contract": "e0796932b501b9805a6873a82bc99cdff05608416e71f76e21f16e61c7a8b44a",
+    "affected_events": "8f663da1cf44f14b18bc72690c87a244652801cc4464b5c9b3b73fe3302201d8",
+    "affected_manifest": "1717423fadb8864cb0b0fd4190ea71c32d65a6d1f2034afb36e822b908bfe0b0",
+    "build_log": "dde4eabdc6c95876bc58aa14a5206cd147a872e14e9cbfc2732beeb6ca9bd317",
+    "fmt_log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "lean_log": "2aceae81fc338ffce3e33e5ec0a51b733e33eee717e102384f750bf41e808a01"
+  },
+  "limits": [
+    "No standard performance pass; existing same-machine standard comparisons remain failures.",
+    "No6/8 checkpoint/model qualification resumed.",
+    "No universal FP64 identity claim; original four-bit disjoint contexts have separate prescribed-rounding explanation receipts.",
+    "Full backend unsupported on M4; M5 completion remains pending availability.",
+    "Private Qgate scheduling candidate retired OFF after exact correctness but no stable speed gain."
+  ],
+  "performance_pass": false,
+  "ready_for_full_maintainer_acceptance": false
+}

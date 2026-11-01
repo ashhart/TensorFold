@@ -1,0 +1,447 @@
+{
+ "prompt_tokens": 32768,
+ "continuation_rows": 16,
+ "device": "Apple M5 Ultra",
+ "text": "real prose, one fixed token sequence for all widths",
+ "reference": "independent FP32 decoder and official MLX BF16, both fed the same tokens",
+ "routes": {
+  "nax_tiled_prompt": {
+   "rows": 102,
+   "pooled_rms_native": 0.032296981555119966,
+   "pooled_rms_official_bf16": 0.03373134369347903,
+   "pooled_ratio": 0.9574768751759998,
+   "rows_above_1p5x_official": 6,
+   "per_model": {
+    "LFM3-1.7B-MLX-4bit": {
+     "prompt_boundary": {
+      "rows": 1,
+      "native_rms": 0.024311248185334228,
+      "official_bf16_rms": 0.026831738891510262,
+      "native_max": 0.14638233184814453,
+      "official_bf16_max": 0.15340590476989746,
+      "native_top1_misses": 0,
+      "official_bf16_top1_misses": 0,
+      "proposed_metrics_not_met": [
+       "top20_probability_mean",
+       "top20_probability_max"
+      ],
+      "top1_differences": []
+     },
+     "teacher_forced_continuation": {
+      "rows": 16,
+      "native_rms": 0.03531880628829018,
+      "official_bf16_rms": 0.03997996631472334,
+      "native_max": 0.28801822662353516,
+      "official_bf16_max": 0.3483619689941406,
+      "native_top1_misses": 0,
+      "official_bf16_top1_misses": 0,
+      "proposed_metrics_not_met": [],
+      "top1_differences": []
+     }
+    },
+    "LFM3-1.7B-MLX-6bit": {
+     "prompt_boundary": {
+      "rows": 1,
+      "native_rms": 0.019839066560119717,
+      "official_bf16_rms": 0.024457985529238054,
+      "native_max": 0.14065933227539062,
+      "official_bf16_max": 0.19359827041625977,
+      "native_top1_misses": 0,
+      "official_bf16_top1_misses": 0,
+      "proposed_metrics_not_met": [],
+      "top1_differences": []
+     },
+     "teacher_forced_continuation": {
+      "rows": 16,
+      "native_rms": 0.029129037699508874,
+      "official_bf16_rms": 0.03326967166162887,
+      "native_max": 0.24056923389434814,
+      "official_bf16_max": 0.2304544448852539,
+      "native_top1_misses": 0,
+      "official_bf16_top1_misses": 0,
+      "proposed_metrics_not_met": [
+       "maximum_absolute_error",
+       "top20_probability_mean",
+       "top20_probability_max"
+      ],
+      "top1_differences": []
+     }
+    },
+    "LFM3-1.7B-MLX-8bit": {
+     "prompt_boundary": {
+      "rows": 1,
+      "native_rms": 0.021103950548045463,
+      "official_bf16_rms": 0.019152764769749354,
+      "native_max": 0.13100147247314453,
+      "official_bf16_max": 0.11677169799804688,
+      "native_top1_misses": 0,
+      "official_bf16_top1_misses": 0,
+      "proposed_metrics_not_met": [
+       "rms_error",
+       "maximum_absolute_error",
+       "top20_probability_mean",
+       "top20_probability_max"
+      ],
+      "top1_differences": []
+     },
+     "teacher_forced_continuation": {
+      "rows": 16,
+      "native_rms": 0.031197310500633017,
+      "official_bf16_rms": 0.03113037185178176,
+      "native_max": 0.2583197355270386,
+      "official_bf16_max": 0.23815441131591797,
+      "native_top1_misses": 0,
+      "official_bf16_top1_misses": 0,
+      "proposed_metrics_not_met": [
+       "rms_error",
+       "maximum_absolute_error",
+       "top20_probability_mean",
+       "top20_probability_max"
+      ],
+      "top1_differences": []
+     }
+    },
+    "LFM3-VL-2B-MLX-4bit": {
+     "prompt_boundary": {
+      "rows": 1,
+      "native_rms": 0.03887785904676225,
+      "official_bf16_rms": 0.025605707372078373,
+      "native_max": 0.13653945922851562,
+      "official_bf16_max": 0.13260555267333984,
+      "native_top1_misses": 1,
+      "official_bf16_top1_misses": 1,
+      "proposed_metrics_not_met": [
+       "rms_error",
+       "maximum_absolute_error"
+      ],
+      "top1_differences": [
+       {
+        "row": 0,
+        "native_top": 654,
+        "reference_bf16_top": 654,
+        "fp32_top": 1131,
+        "native_maximum_set": [
+         654,
+         1131
+        ],
+        "reference_maximum_set": [
+         654,
+         1131
+        ],
+        "fp32_maximum_set": [
+         1131
+        ],
+        "native_margin": 0.0,
+        "reference_bf16_margin": 0.0,
+        "fp32_margin": 0.08532047271728516,
+        "fp32_native_contender_gap": 0.08532047271728516,
+        "fp32_reference_contender_gap": 0.08532047271728516,
+        "native_only_miss": false
+       }
+      ]
+     },
+     "teacher_forced_continuation": {
+      "rows": 16,
+      "native_rms": 0.03666612632209707,
+      "official_bf16_rms": 0.0348104796607303,
+      "native_max": 0.19969844818115234,
+      "official_bf16_max": 0.19331121444702148,
+      "native_top1_misses": 0,
+      "official_bf16_top1_misses": 0,
+      "proposed_metrics_not_met": [
+       "rms_error",
+       "maximum_absolute_error",
+       "top20_probability_max"
+      ],
+      "top1_differences": []
+     }
+    },
+    "LFM3-VL-2B-MLX-6bit": {
+     "prompt_boundary": {
+      "rows": 1,
+      "native_rms": 0.023632405489822744,
+      "official_bf16_rms": 0.03372439317436025,
+      "native_max": 0.10165882110595703,
+      "official_bf16_max": 0.14469528198242188,
+      "native_top1_misses": 0,
+      "official_bf16_top1_misses": 0,
+      "proposed_metrics_not_met": [],
+      "top1_differences": []
+     },
+     "teacher_forced_continuation": {
+      "rows": 16,
+      "native_rms": 0.03433726153643044,
+      "official_bf16_rms": 0.030513009797015433,
+      "native_max": 0.22870779037475586,
+      "official_bf16_max": 0.2049427032470703,
+      "native_top1_misses": 1,
+      "official_bf16_top1_misses": 0,
+      "proposed_metrics_not_met": [
+       "rms_error",
+       "maximum_absolute_error",
+       "top20_probability_mean",
+       "top20_probability_max"
+      ],
+      "top1_differences": [
+       {
+        "row": 0,
+        "native_top": 589,
+        "reference_bf16_top": 58884,
+        "fp32_top": 58884,
+        "native_maximum_set": [
+         589,
+         58884
+        ],
+        "reference_maximum_set": [
+         58884
+        ],
+        "fp32_maximum_set": [
+         58884
+        ],
+        "native_margin": 0.0,
+        "reference_bf16_margin": 0.125,
+        "fp32_margin": 0.13377094268798828,
+        "fp32_native_contender_gap": 0.13377094268798828,
+        "fp32_reference_contender_gap": 0.0,
+        "native_only_miss": true
+       }
+      ]
+     }
+    },
+    "LFM3-VL-2B-MLX-8bit": {
+     "prompt_boundary": {
+      "rows": 1,
+      "native_rms": 0.026211339611638483,
+      "official_bf16_rms": 0.03482085233001276,
+      "native_max": 0.10755634307861328,
+      "official_bf16_max": 0.1343708038330078,
+      "native_top1_misses": 0,
+      "official_bf16_top1_misses": 0,
+      "proposed_metrics_not_met": [],
+      "top1_differences": []
+     },
+     "teacher_forced_continuation": {
+      "rows": 16,
+      "native_rms": 0.02820281649131737,
+      "official_bf16_rms": 0.03381069201792409,
+      "native_max": 0.1860060691833496,
+      "official_bf16_max": 0.2198195457458496,
+      "native_top1_misses": 0,
+      "official_bf16_top1_misses": 0,
+      "proposed_metrics_not_met": [
+       "top20_probability_mean",
+       "top20_probability_max"
+      ],
+      "top1_differences": []
+     }
+    }
+   }
+  },
+  "baseline_prompt": {
+   "rows": 102,
+   "pooled_rms_native": 0.03167307407601195,
+   "pooled_rms_official_bf16": 0.03373134369347903,
+   "pooled_ratio": 0.9389805032325176,
+   "rows_above_1p5x_official": 9,
+   "per_model": {
+    "LFM3-1.7B-MLX-4bit": {
+     "prompt_boundary": {
+      "rows": 1,
+      "native_rms": 0.028130729673664197,
+      "official_bf16_rms": 0.026831738891510262,
+      "native_max": 0.13915395736694336,
+      "official_bf16_max": 0.15340590476989746,
+      "native_top1_misses": 0,
+      "official_bf16_top1_misses": 0,
+      "proposed_metrics_not_met": [
+       "rms_error",
+       "top20_probability_mean",
+       "top20_probability_max"
+      ],
+      "top1_differences": []
+     },
+     "teacher_forced_continuation": {
+      "rows": 16,
+      "native_rms": 0.031360554044810064,
+      "official_bf16_rms": 0.03997996631472334,
+      "native_max": 0.22579622268676758,
+      "official_bf16_max": 0.3483619689941406,
+      "native_top1_misses": 0,
+      "official_bf16_top1_misses": 0,
+      "proposed_metrics_not_met": [],
+      "top1_differences": []
+     }
+    },
+    "LFM3-1.7B-MLX-6bit": {
+     "prompt_boundary": {
+      "rows": 1,
+      "native_rms": 0.02278565423070546,
+      "official_bf16_rms": 0.024457985529238054,
+      "native_max": 0.15340805053710938,
+      "official_bf16_max": 0.19359827041625977,
+      "native_top1_misses": 0,
+      "official_bf16_top1_misses": 0,
+      "proposed_metrics_not_met": [],
+      "top1_differences": []
+     },
+     "teacher_forced_continuation": {
+      "rows": 16,
+      "native_rms": 0.03099310502574918,
+      "official_bf16_rms": 0.03326967166162887,
+      "native_max": 0.24349021911621094,
+      "official_bf16_max": 0.2304544448852539,
+      "native_top1_misses": 0,
+      "official_bf16_top1_misses": 0,
+      "proposed_metrics_not_met": [
+       "maximum_absolute_error",
+       "top20_probability_mean",
+       "top20_probability_max"
+      ],
+      "top1_differences": []
+     }
+    },
+    "LFM3-1.7B-MLX-8bit": {
+     "prompt_boundary": {
+      "rows": 1,
+      "native_rms": 0.019917083098697524,
+      "official_bf16_rms": 0.019152764769749354,
+      "native_max": 0.14476776123046875,
+      "official_bf16_max": 0.11677169799804688,
+      "native_top1_misses": 0,
+      "official_bf16_top1_misses": 0,
+      "proposed_metrics_not_met": [
+       "rms_error",
+       "maximum_absolute_error",
+       "top20_probability_mean",
+       "top20_probability_max"
+      ],
+      "top1_differences": []
+     },
+     "teacher_forced_continuation": {
+      "rows": 16,
+      "native_rms": 0.03594687433707124,
+      "official_bf16_rms": 0.03113037185178176,
+      "native_max": 0.2350451946258545,
+      "official_bf16_max": 0.23815441131591797,
+      "native_top1_misses": 0,
+      "official_bf16_top1_misses": 0,
+      "proposed_metrics_not_met": [
+       "rms_error",
+       "top20_probability_mean",
+       "top20_probability_max"
+      ],
+      "top1_differences": []
+     }
+    },
+    "LFM3-VL-2B-MLX-4bit": {
+     "prompt_boundary": {
+      "rows": 1,
+      "native_rms": 0.040038664624215764,
+      "official_bf16_rms": 0.025605707372078373,
+      "native_max": 0.13653945922851562,
+      "official_bf16_max": 0.13260555267333984,
+      "native_top1_misses": 0,
+      "official_bf16_top1_misses": 1,
+      "proposed_metrics_not_met": [
+       "rms_error",
+       "maximum_absolute_error"
+      ],
+      "top1_differences": [
+       {
+        "row": 0,
+        "native_top": 1131,
+        "reference_bf16_top": 654,
+        "fp32_top": 1131,
+        "native_maximum_set": [
+         1131
+        ],
+        "reference_maximum_set": [
+         654,
+         1131
+        ],
+        "fp32_maximum_set": [
+         1131
+        ],
+        "native_margin": 0.0625,
+        "reference_bf16_margin": 0.0,
+        "fp32_margin": 0.08532047271728516,
+        "fp32_native_contender_gap": 0.0,
+        "fp32_reference_contender_gap": 0.08532047271728516,
+        "native_only_miss": false
+       }
+      ]
+     },
+     "teacher_forced_continuation": {
+      "rows": 16,
+      "native_rms": 0.030018120393483384,
+      "official_bf16_rms": 0.0348104796607303,
+      "native_max": 0.18657350540161133,
+      "official_bf16_max": 0.19331121444702148,
+      "native_top1_misses": 0,
+      "official_bf16_top1_misses": 0,
+      "proposed_metrics_not_met": [
+       "top20_probability_max"
+      ],
+      "top1_differences": []
+     }
+    },
+    "LFM3-VL-2B-MLX-6bit": {
+     "prompt_boundary": {
+      "rows": 1,
+      "native_rms": 0.042030211884171775,
+      "official_bf16_rms": 0.03372439317436025,
+      "native_max": 0.14401626586914062,
+      "official_bf16_max": 0.14469528198242188,
+      "native_top1_misses": 0,
+      "official_bf16_top1_misses": 0,
+      "proposed_metrics_not_met": [
+       "rms_error"
+      ],
+      "top1_differences": []
+     },
+     "teacher_forced_continuation": {
+      "rows": 16,
+      "native_rms": 0.026109912298379927,
+      "official_bf16_rms": 0.030513009797015433,
+      "native_max": 0.21293854713439941,
+      "official_bf16_max": 0.2049427032470703,
+      "native_top1_misses": 0,
+      "official_bf16_top1_misses": 0,
+      "proposed_metrics_not_met": [
+       "maximum_absolute_error",
+       "top20_probability_mean"
+      ],
+      "top1_differences": []
+     }
+    },
+    "LFM3-VL-2B-MLX-8bit": {
+     "prompt_boundary": {
+      "rows": 1,
+      "native_rms": 0.06112402311211287,
+      "official_bf16_rms": 0.03482085233001276,
+      "native_max": 0.15047073364257812,
+      "official_bf16_max": 0.1343708038330078,
+      "native_top1_misses": 0,
+      "official_bf16_top1_misses": 0,
+      "proposed_metrics_not_met": [
+       "rms_error",
+       "maximum_absolute_error"
+      ],
+      "top1_differences": []
+     },
+     "teacher_forced_continuation": {
+      "rows": 16,
+      "native_rms": 0.03202239404238794,
+      "official_bf16_rms": 0.03381069201792409,
+      "native_max": 0.2106175422668457,
+      "official_bf16_max": 0.2198195457458496,
+      "native_top1_misses": 0,
+      "official_bf16_top1_misses": 0,
+      "proposed_metrics_not_met": [],
+      "top1_differences": []
+     }
+    }
+   }
+  }
+ }
+}

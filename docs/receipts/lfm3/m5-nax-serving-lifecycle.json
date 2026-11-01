@@ -1,0 +1,318 @@
+{
+ "tool": "tools/lfm3/serve_check.py --cancel --sampled",
+ "server": "--context 2048 --parallel 4 --prompt-cache-gib 0",
+ "device": "Apple M5 Ultra",
+ "scheduling": "prompts fill one 2048-row chunk at a time; the engine runs the shortest remaining prompt first and decodes between chunks",
+ "widths": {
+  "LFM3-1.7B-MLX-4bit": {
+   "counts": {
+    "passed": 40,
+    "failed": 0,
+    "skipped": 0
+   },
+   "binary_sha256": "88c59bd6d40bad63c23505338603821760404ac7982c1d33ea774d917215ccc3",
+   "checks": {
+    "fresh_plain": 6,
+    "length_over_256": 1,
+    "plain_equals_fresh": 6,
+    "drafted_equals_fresh": 6,
+    "warm_reuses_and_matches_fresh": 1,
+    "no_stale_prefix_reuse": 1,
+    "matches_cache_off": 1,
+    "concurrent_1_equals_solo": 4,
+    "concurrent_2_equals_solo": 4,
+    "concurrent_4_equals_solo": 4,
+    "cancel_server_confirmed": 2,
+    "cancel_next_plain_equals_fresh": 2,
+    "cancel_next_drafted_equals_fresh": 2
+   },
+   "long_context": {
+    "server_context": 40000,
+    "prompt_tokens": 31178,
+    "cold_prefill_s": 1.566,
+    "idle_small_request_s": 0.033,
+    "cancel_mid_prefill": [
+     {
+      "cancel_after_s": 0.3,
+      "next_request_s": 0.042,
+      "next_output_equals_fresh": true
+     },
+     {
+      "cancel_after_s": 1.0,
+      "next_request_s": 0.042,
+      "next_output_equals_fresh": true
+     },
+     {
+      "cancel_after_s": 2.0,
+      "next_request_s": 0.042,
+      "next_output_equals_fresh": true
+     }
+    ],
+    "small_request_during_three_30k_prefills_s": 0.68,
+    "that_output_equals_fresh": true,
+    "three_30k_prefills_wall_s": 4.65,
+    "server_exit_clean": true
+   }
+  },
+  "LFM3-1.7B-MLX-6bit": {
+   "counts": {
+    "passed": 40,
+    "failed": 0,
+    "skipped": 0
+   },
+   "binary_sha256": "88c59bd6d40bad63c23505338603821760404ac7982c1d33ea774d917215ccc3",
+   "checks": {
+    "fresh_plain": 6,
+    "length_over_256": 1,
+    "plain_equals_fresh": 6,
+    "drafted_equals_fresh": 6,
+    "warm_reuses_and_matches_fresh": 1,
+    "no_stale_prefix_reuse": 1,
+    "matches_cache_off": 1,
+    "concurrent_1_equals_solo": 4,
+    "concurrent_2_equals_solo": 4,
+    "concurrent_4_equals_solo": 4,
+    "cancel_server_confirmed": 2,
+    "cancel_next_plain_equals_fresh": 2,
+    "cancel_next_drafted_equals_fresh": 2
+   },
+   "long_context": {
+    "server_context": 40000,
+    "prompt_tokens": 31178,
+    "cold_prefill_s": 1.594,
+    "idle_small_request_s": 0.036,
+    "cancel_mid_prefill": [
+     {
+      "cancel_after_s": 0.3,
+      "next_request_s": 0.047,
+      "next_output_equals_fresh": true
+     },
+     {
+      "cancel_after_s": 1.0,
+      "next_request_s": 0.046,
+      "next_output_equals_fresh": true
+     },
+     {
+      "cancel_after_s": 2.0,
+      "next_request_s": 0.047,
+      "next_output_equals_fresh": true
+     }
+    ],
+    "small_request_during_three_30k_prefills_s": 0.68,
+    "that_output_equals_fresh": true,
+    "three_30k_prefills_wall_s": 4.81,
+    "server_exit_clean": true
+   }
+  },
+  "LFM3-1.7B-MLX-8bit": {
+   "counts": {
+    "passed": 40,
+    "failed": 0,
+    "skipped": 0
+   },
+   "binary_sha256": "88c59bd6d40bad63c23505338603821760404ac7982c1d33ea774d917215ccc3",
+   "checks": {
+    "fresh_plain": 6,
+    "length_over_256": 1,
+    "plain_equals_fresh": 6,
+    "drafted_equals_fresh": 6,
+    "warm_reuses_and_matches_fresh": 1,
+    "no_stale_prefix_reuse": 1,
+    "matches_cache_off": 1,
+    "concurrent_1_equals_solo": 4,
+    "concurrent_2_equals_solo": 4,
+    "concurrent_4_equals_solo": 4,
+    "cancel_server_confirmed": 2,
+    "cancel_next_plain_equals_fresh": 2,
+    "cancel_next_drafted_equals_fresh": 2
+   },
+   "long_context": {
+    "server_context": 40000,
+    "prompt_tokens": 31178,
+    "cold_prefill_s": 1.633,
+    "idle_small_request_s": 0.039,
+    "cancel_mid_prefill": [
+     {
+      "cancel_after_s": 0.3,
+      "next_request_s": 0.048,
+      "next_output_equals_fresh": true
+     },
+     {
+      "cancel_after_s": 1.0,
+      "next_request_s": 0.054,
+      "next_output_equals_fresh": true
+     },
+     {
+      "cancel_after_s": 2.0,
+      "next_request_s": 0.048,
+      "next_output_equals_fresh": true
+     }
+    ],
+    "small_request_during_three_30k_prefills_s": 0.7,
+    "that_output_equals_fresh": true,
+    "three_30k_prefills_wall_s": 4.85,
+    "server_exit_clean": true
+   }
+  },
+  "LFM3-VL-2B-MLX-4bit": {
+   "counts": {
+    "passed": 61,
+    "failed": 0,
+    "skipped": 0
+   },
+   "binary_sha256": "88c59bd6d40bad63c23505338603821760404ac7982c1d33ea774d917215ccc3",
+   "checks": {
+    "fresh_plain": 10,
+    "length_over_256": 1,
+    "plain_equals_fresh": 10,
+    "drafted_equals_fresh": 10,
+    "warm_reuses_and_matches_fresh": 1,
+    "no_stale_prefix_reuse": 1,
+    "matches_cache_off": 1,
+    "concurrent_1_equals_solo": 4,
+    "concurrent_2_equals_solo": 4,
+    "concurrent_4_equals_solo": 4,
+    "color_semantics": 4,
+    "concurrent_equals_solos": 1,
+    "corrupt_png_rejected": 1,
+    "cancel_server_confirmed": 3,
+    "cancel_next_plain_equals_fresh": 3,
+    "cancel_next_drafted_equals_fresh": 3
+   },
+   "long_context": {
+    "server_context": 40000,
+    "prompt_tokens": 31178,
+    "cold_prefill_s": 1.603,
+    "idle_small_request_s": 0.034,
+    "cancel_mid_prefill": [
+     {
+      "cancel_after_s": 0.3,
+      "next_request_s": 0.043,
+      "next_output_equals_fresh": true
+     },
+     {
+      "cancel_after_s": 1.0,
+      "next_request_s": 0.043,
+      "next_output_equals_fresh": true
+     },
+     {
+      "cancel_after_s": 2.0,
+      "next_request_s": 0.043,
+      "next_output_equals_fresh": true
+     }
+    ],
+    "small_request_during_three_30k_prefills_s": 0.74,
+    "that_output_equals_fresh": true,
+    "three_30k_prefills_wall_s": 4.75,
+    "server_exit_clean": true
+   }
+  },
+  "LFM3-VL-2B-MLX-6bit": {
+   "counts": {
+    "passed": 61,
+    "failed": 0,
+    "skipped": 0
+   },
+   "binary_sha256": "88c59bd6d40bad63c23505338603821760404ac7982c1d33ea774d917215ccc3",
+   "checks": {
+    "fresh_plain": 10,
+    "length_over_256": 1,
+    "plain_equals_fresh": 10,
+    "drafted_equals_fresh": 10,
+    "warm_reuses_and_matches_fresh": 1,
+    "no_stale_prefix_reuse": 1,
+    "matches_cache_off": 1,
+    "concurrent_1_equals_solo": 4,
+    "concurrent_2_equals_solo": 4,
+    "concurrent_4_equals_solo": 4,
+    "color_semantics": 4,
+    "concurrent_equals_solos": 1,
+    "corrupt_png_rejected": 1,
+    "cancel_server_confirmed": 3,
+    "cancel_next_plain_equals_fresh": 3,
+    "cancel_next_drafted_equals_fresh": 3
+   },
+   "long_context": {
+    "server_context": 40000,
+    "prompt_tokens": 31178,
+    "cold_prefill_s": 1.616,
+    "idle_small_request_s": 0.037,
+    "cancel_mid_prefill": [
+     {
+      "cancel_after_s": 0.3,
+      "next_request_s": 0.047,
+      "next_output_equals_fresh": true
+     },
+     {
+      "cancel_after_s": 1.0,
+      "next_request_s": 0.046,
+      "next_output_equals_fresh": true
+     },
+     {
+      "cancel_after_s": 2.0,
+      "next_request_s": 0.046,
+      "next_output_equals_fresh": true
+     }
+    ],
+    "small_request_during_three_30k_prefills_s": 0.67,
+    "that_output_equals_fresh": true,
+    "three_30k_prefills_wall_s": 4.81,
+    "server_exit_clean": true
+   }
+  },
+  "LFM3-VL-2B-MLX-8bit": {
+   "counts": {
+    "passed": 61,
+    "failed": 0,
+    "skipped": 0
+   },
+   "binary_sha256": "88c59bd6d40bad63c23505338603821760404ac7982c1d33ea774d917215ccc3",
+   "checks": {
+    "fresh_plain": 10,
+    "length_over_256": 1,
+    "plain_equals_fresh": 10,
+    "drafted_equals_fresh": 10,
+    "warm_reuses_and_matches_fresh": 1,
+    "no_stale_prefix_reuse": 1,
+    "matches_cache_off": 1,
+    "concurrent_1_equals_solo": 4,
+    "concurrent_2_equals_solo": 4,
+    "concurrent_4_equals_solo": 4,
+    "color_semantics": 4,
+    "concurrent_equals_solos": 1,
+    "corrupt_png_rejected": 1,
+    "cancel_server_confirmed": 3,
+    "cancel_next_plain_equals_fresh": 3,
+    "cancel_next_drafted_equals_fresh": 3
+   },
+   "long_context": {
+    "server_context": 40000,
+    "prompt_tokens": 31178,
+    "cold_prefill_s": 1.626,
+    "idle_small_request_s": 0.038,
+    "cancel_mid_prefill": [
+     {
+      "cancel_after_s": 0.3,
+      "next_request_s": 0.048,
+      "next_output_equals_fresh": true
+     },
+     {
+      "cancel_after_s": 1.0,
+      "next_request_s": 0.048,
+      "next_output_equals_fresh": true
+     },
+     {
+      "cancel_after_s": 2.0,
+      "next_request_s": 0.048,
+      "next_output_equals_fresh": true
+     }
+    ],
+    "small_request_during_three_30k_prefills_s": 0.69,
+    "that_output_equals_fresh": true,
+    "three_30k_prefills_wall_s": 4.85,
+    "server_exit_clean": true
+   }
+  }
+ },
+ "build": "native built with -Dlfm3-nax-prompt=true -Dlfm3-tiled-attention=true (both are off by default); the 2048-row chunk follows from both"
+}
