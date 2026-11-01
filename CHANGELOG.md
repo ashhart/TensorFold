@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- On Macs, Flash Next with `--ple-on-ssd` reads its per-layer embedding rows from disk in batches instead of one at a time: decode is 36% to 39% faster on an M5 Max (75.8 to 105.1 tok/s on code) and cold prompts take a third of the time at 2K tokens, with the same replies (#1462, fixes #1461). Thanks to @paragontasx.
+
 - Qwen3.5-family models on CUDA apply a verified window's kept DeltaNet rows inside the next round's slot scan, instead of a separate pass over every layer's state, with the same bits. On a GB10, Qwen3.8-27B MLX 4-bit decodes 0.7% to 10.4% faster, most at 16 streams, with none slower, for about 66 MiB more a stream. It's on by default; `TF_QWEN_KEEP_LATE=0` keeps the separate pass (#1824). Thanks to @jrb-ai, with code from @fkiene's cuda.fast submission.
 
 ## 1.2.1
