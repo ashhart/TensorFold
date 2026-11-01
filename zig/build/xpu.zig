@@ -266,7 +266,7 @@ fn lfm3Module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
 
 /// The standalone op and model tests, each its own program `tf-xpu-<name>-test` (step `xpu-tests`).
 const test_programs = [_][]const u8{
-    "panic", "nem_rows", "nem_prefill", "nem_gen", "nem_mtp", "nem_kl", "nem_norm_bench", "nem_mv_bench", "nem_slot", "nem_format", "nem_seam", "nem_attn_dec", "nem_fp64", "memory", "lfm3_conv", "lfm3_rope", "lfm3_attn", "lfm3_norm", "lfm3_fwd", "lfm3_bench", "lfm3_rows", "lfm3_streams",
+    "panic", "nem_rows", "nem_prefill", "nem_gen", "nem_mtp", "nem_kl", "nem_norm_bench", "nem_mv_bench", "nem_slot", "nem_format", "nem_seam", "nem_attn_dec", "nem_fp64", "memory", "lfm3_conv", "lfm3_rope", "lfm3_attn", "lfm3_norm", "lfm3_fwd", "lfm3_bench", "lfm3_rows", "lfm3_streams", "lfm3_chunks", "lfm3_pgemm",
 };
 
 /// `-Dxpu` (Linux): Nemotron's SPIR-V images, `tensorfold-xpu` and `tf-xpu-test`; needs ocloc, not nvcc or CUDA.
