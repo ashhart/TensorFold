@@ -137,6 +137,7 @@ pub fn main(init: std.process.Init) !u8 {
         return e;
     } orelse return fail(problem);
     defer up.text.deinit();
+    log.line("chat template: {s}", .{up.text.renderer()});
     var record: ?*@import("engine_api").recall_store.Store = null;
     defer if (record) |r| r.close(); // after the engine below has stopped reading it
     var closer: Closer = .{ .opened = up.engine };

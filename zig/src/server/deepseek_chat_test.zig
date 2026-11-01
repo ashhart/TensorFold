@@ -109,6 +109,7 @@ test "DeepSeek chat: an explicit override wins, a checkpoint Jinja does not, and
     const override = try HfText.load(a, t.io, tmp.path, path, a, &problem);
     defer override.deinit();
     try t.expectEqualStrings("overrideH", (try override.text().render(a, messages, .{}, &problem)).text);
+    try t.expectEqualStrings("the --chat-template file", override.renderer());
     // DeepSeek-V4.x releases ship encoding.py, not Jinja: a checkpoint's own file (a stale copy) is not read
     try tmp.tmp.dir.writeFile(t.io, .{ .sub_path = "chat_template.jinja", .data = "jinja{{ messages[0].content }}" });
     const packed_jinja = try HfText.load(a, t.io, tmp.path, null, a, &problem);
@@ -116,10 +117,12 @@ test "DeepSeek chat: an explicit override wins, a checkpoint Jinja does not, and
     const native_text = (try packed_jinja.text().render(a, messages, .{}, &problem)).text;
     try t.expect(std.mem.startsWith(u8, native_text, "<｜begin▁of▁sentence｜>"));
     try t.expect(std.mem.indexOf(u8, native_text, "jinja") == null);
+    try t.expect(std.mem.indexOf(u8, packed_jinja.renderer(), "own chat template is not used") != null);
     var other = try fixture(a, "deepseek_v41");
     defer other.deinit();
     const native = try HfText.load(a, t.io, other.path, null, a, &problem);
     defer native.deinit();
+    try t.expectEqualStrings("the DeepSeek-V4.x encoder (encoding.py)", native.renderer());
     const images = (try json.parseText(a, "[{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"local\"}}]}]")).ok;
     try t.expectError(error.Template, native.text().render(a, images, .{}, &problem));
     try t.expect(std.mem.indexOf(u8, problem, "images are not served") != null);
@@ -261,6 +264,7 @@ test "DeepSeek chat: tool-only Jinja metadata does not replace the native encode
     const hf = try HfText.load(a, t.io, tmp.path, null, a, &problem);
     defer hf.deinit();
     try t.expect(std.mem.indexOf(u8, hf.text().templateSource(), "No user query found") == null);
+    try t.expect(std.mem.indexOf(u8, hf.renderer(), "own chat template is not used") != null);
     try t.expect(std.mem.indexOf(u8, hf.text().templateSource(), "thinking_mode") != null);
     const messages = try tf.messages(a, "H");
     try t.expect(std.mem.startsWith(u8, (try hf.text().render(a, messages, .{ .tools = .{ .array = &.{} } }, &problem)).text, "<｜begin▁of▁sentence｜>"));
