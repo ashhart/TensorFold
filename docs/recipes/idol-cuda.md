@@ -48,8 +48,8 @@ Idol's octree and Gaussian decoders (`idol.md`, [Decoders](idol.md#decoders)) on
 compaction, jitter, the activation, PLY and camera). `tf-idol-decode` on Metal and on CUDA is one driver
 (`zig/tests/idol_decode_run.zig`), so a CUDA build reads the same case and runs the same gates.
 
-**Not run on a GPU yet.** The decoders' host tests pass; their nvcc build for sm_120 and sm_121 and its gate-5 records
-are pending, and none of their kernels has run on a device. `Decoder.load` admits sm_121 and sm_120 alone and refuses any other GPU by name.
+**Not run on a GPU yet.** The decoders compile for sm_120 and sm_121 and their host tests pass; none of their kernels
+has run on a device. `Decoder.load` admits sm_121 and sm_120 alone and refuses any other GPU by name.
 
 ### Precision
 
@@ -101,7 +101,7 @@ Attention's references hold the kernel's own P: fp16 in the tiled form, fp32 in 
 each score's 64-deep fp32 sum, exp's approximation and the key sums' depth, P's fp16 rounding where an fp32 P could
 fall on either side of a midpoint, and O's own rounding. Half the heads are built so O is P's fp16 remainder alone:
 the tiled form must give 0 there, and the short form with P rounded to fp16 goes red. Gate-5 records
-(nvcc 13.0, sm_80, 86, 89, 120 and 121) are pending the first nvcc build. No SUMMARY line yet: it needs a GPU.
+(`idol_decoder_cuda_records.zig`) are nvcc 13.0's for sm_80, 86, 89, 120 and 121. No SUMMARY line yet: it needs a GPU.
 
 ### Run a case
 
