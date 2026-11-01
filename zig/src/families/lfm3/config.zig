@@ -12,14 +12,56 @@ pub const head_dim = 128;
 pub const sliding_window = 256;
 pub const eps: f32 = 1e-5;
 pub const Kind = enum { text, vision_language };
-pub const LayerType = enum { conv, full_attention, sliding_attention };
-pub const Rotary = struct { theta: f32, partial: f32 };
+pub const LayerType = enum {
+    conv,
+    full_attention,
+    sliding_attention,
+
+    /// Keys before a row its attention reads: the sliding window, or 0 for every one (a conv layer reads none).
+    pub fn window(t: LayerType) usize {
+        return if (t == .sliding_attention) sliding_window else 0;
+    }
+};
+
+pub const Rotary = struct {
+    theta: f32,
+    partial: f32,
+
+    /// RoPE's inverse frequencies as torch's float32 rows: 1 / theta^(2i / 128) rotated, zero past them (cos 1, sin 0).
+    pub fn inverseFrequencies(rot: Rotary) [head_dim / 2]f32 {
+        var out: [head_dim / 2]f32 = undefined;
+        const angles: usize = @intFromFloat(rot.partial * @as(f32, head_dim) / 2);
+        for (&out, 0..) |*v, i| {
+            if (i >= angles) {
+                v.* = 0;
+                continue;
+            }
+            const e: f32 = @as(f32, @floatFromInt(2 * i)) / @as(f32, head_dim);
+            const pw: f32 = @floatCast(std.math.pow(f64, rot.theta, e));
+            v.* = 1.0 / pw;
+        }
+        return out;
+    }
+};
+
 pub const schedule: [layers]LayerType = .{
     .conv,              .conv, .full_attention,    .conv, .sliding_attention, .conv,
     .full_attention,    .conv, .sliding_attention, .conv, .full_attention,    .conv,
     .sliding_attention, .conv, .full_attention,    .conv, .sliding_attention, .conv,
     .full_attention,    .conv, .sliding_attention, .conv, .full_attention,    .conv,
 };
+
+/// Layers of `kind` in the admitted schedule.
+pub fn count(kind: LayerType) usize {
+    var n: usize = 0;
+    for (schedule) |t| n += @intFromBool(t == kind);
+    return n;
+}
+
+/// Keys a sliding layer's ring holds when `rows` rows are written before the first of them reads its window back.
+pub fn ring(rows: usize) usize {
+    return sliding_window + rows;
+}
 
 pub const Width = struct { bits: u8, group: u16 };
 pub const Quant = struct {
