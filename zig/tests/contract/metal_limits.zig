@@ -26,7 +26,7 @@ fn specialize(a: std.mem.Allocator, template: []const u8, definitions: []const u
     return std.mem.concat(a, u8, &.{ template[0..mark], definitions, template[mark + "Q27_SPECIALIZE".len ..] });
 }
 
-/// The 27B's own source for a launch, by what its label says: the copy, the steering kernel at the 27B's width, or the glue.
+/// The 27B's source for a launch, by its label: the copy, the steering kernel, or the glue.
 fn qwen27Source(a: std.mem.Allocator, name: []const u8) ![]const u8 {
     if (std.mem.indexOf(u8, name, " copy ") != null) return tf.qwen27.runtime_sources.copy;
     if (std.mem.indexOf(u8, name, " norm steer ") != null) {
