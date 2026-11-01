@@ -6,6 +6,7 @@ const Glue = @import("glue_gpu.zig").Kernels;
 
 /// The 27B drafter's tap layers, the default before a drafter sets its own.
 pub const layers = [_]usize{ 5, 19, 33, 47, 61 };
+/// The most tap planes a drafter may name (a DFlash v1 draft names up to eight).
 pub const max_planes = 8;
 
 pub const Taps = struct {

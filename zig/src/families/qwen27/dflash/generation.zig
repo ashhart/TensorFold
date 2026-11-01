@@ -33,6 +33,7 @@ pub const Generation = struct {
         const matcher = try @import("round_gpu.zig").Matcher.init(runner.model.device);
         errdefer matcher.deinit();
         const commit = try @import("core").tree_commit_gpu.Ops.init(runner.model.device);
+        errdefer commit.deinit();
         return .{ .allocator = a, .runner = runner, .draft = draft, .kept = kept, .taps = taps, .matcher = matcher, .commit = commit };
     }
     pub fn deinit(g: Generation) void {

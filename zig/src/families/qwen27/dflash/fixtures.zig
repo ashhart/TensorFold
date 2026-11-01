@@ -4,56 +4,64 @@ const ck = @import("../checkpoint.zig");
 const Config = @import("config.zig").Config;
 const weights = @import("weights.zig");
 pub const toy = Config{ .hidden = 64, .intermediate = 128, .vocab = 64, .heads = 8, .kv_heads = 4, .head_dim = 8, .mask = 63, .window = 16, .rank = 16, .topk = 2 };
+/// A tiny DFlash v1 draft: three taps of an eight-layer target, a sixteen-row block, its last layer full.
+pub const toy_v1 = Config{ .variant = .v1, .hidden = 64, .intermediate = 128, .layers = 3, .vocab = 64, .heads = 8, .kv_heads = 4, .head_dim = 8, .target_layers = 8, .block = 16, .mask = 62, .window = 32, .group = 0, .conv = 0, .rank = 0, .topk = 2, .taps = .{ 1, 3, 5, 0, 0, 0, 0, 0 }, .tap_count = 3, .full = .{ false, false, true, false, false, false, false, false } };
 const Dimensions = struct { values: @FieldType(ck.Tensor, "shape"), rank: usize };
 
 pub const Store = struct {
     arena: std.heap.ArenaAllocator,
+    config: Config = toy,
     keys: [][]const u8 = undefined,
     tensors: []ck.Tensor = undefined,
     embed: ck.Tensor = undefined,
     pub fn init(gpa: std.mem.Allocator) !Store {
-        var s = Store{ .arena = std.heap.ArenaAllocator.init(gpa) };
+        return initConfig(gpa, toy);
+    }
+    /// Zeroed tensors for every name the draft of config `c` reads.
+    pub fn initConfig(gpa: std.mem.Allocator, c: Config) !Store {
+        var s = Store{ .arena = std.heap.ArenaAllocator.init(gpa), .config = c };
         errdefer s.deinit();
         const a = s.arena.allocator();
-        s.keys = try weights.names(a, toy);
+        s.keys = try weights.names(a, c);
         s.tensors = try a.alloc(ck.Tensor, s.keys.len);
         for (s.keys, s.tensors) |name, *t| {
-            const shape = dims(name);
+            const shape = dims(c, name);
             var count: usize = 2;
             for (shape.values[0..shape.rank]) |n| count = try std.math.mul(usize, count, n);
             const data = try a.alloc(u8, count);
             @memset(data, 0);
             t.* = .{ .dtype = .bf16, .rank = @intCast(shape.rank), .shape = shape.values, .bytes = data };
         }
-        const data = try a.alloc(u8, toy.vocab * toy.hidden * 2);
+        const data = try a.alloc(u8, c.vocab * c.hidden * 2);
         @memset(data, 0);
-        s.embed = .{ .dtype = .bf16, .rank = 2, .shape = .{ toy.vocab, toy.hidden, 1, 1, 1 }, .bytes = data };
+        s.embed = .{ .dtype = .bf16, .rank = 2, .shape = .{ c.vocab, c.hidden, 1, 1, 1 }, .bytes = data };
         return s;
     }
     pub fn deinit(s: *Store) void {
         s.arena.deinit();
     }
     pub fn graph(s: *Store, gpa: std.mem.Allocator) !weights.Graph {
-        return weights.load(gpa, .{ .source = .{ .ptr = s, .getFn = get }, .names = s.keys }, toy, .{ .dense = s.embed });
+        return weights.load(gpa, .{ .source = .{ .ptr = s, .getFn = get }, .names = s.keys }, s.config, .{ .dense = s.embed });
     }
     fn get(ptr: *anyopaque, name: []const u8) !ck.Tensor {
         const s: *Store = @ptrCast(@alignCast(ptr));
         for (s.keys, s.tensors) |key, t| if (std.mem.eql(u8, key, name)) return t;
         return error.MissingTensor;
     }
-    fn dims(name: []const u8) Dimensions {
-        if (std.mem.eql(u8, name, "fc.weight")) return .{ .values = .{ toy.hidden, toy.tapWidth(), 1, 1, 1 }, .rank = 2 };
-        if (std.mem.eql(u8, name, "candidate_selector.hidden_projection.weight")) return .{ .values = .{ toy.rank, toy.hidden, 1, 1, 1 }, .rank = 2 };
-        if (std.mem.startsWith(u8, name, "candidate_selector.")) return .{ .values = .{ toy.vocab, toy.rank, 1, 1, 1 }, .rank = 2 };
-        if (std.mem.endsWith(u8, name, "base_kernel")) return .{ .values = .{ 2, 2, toy.hidden, 1, 1 }, .rank = 3 };
-        if (std.mem.endsWith(u8, name, "kernel_projection.weight")) return .{ .values = .{ toy.dynamicWidth(), toy.hidden, 1, 1, 1 }, .rank = 2 };
-        if (std.mem.endsWith(u8, name, "q_proj.weight")) return .{ .values = .{ toy.qWidth(), toy.hidden, 1, 1, 1 }, .rank = 2 };
-        if (std.mem.endsWith(u8, name, "k_proj.weight") or std.mem.endsWith(u8, name, "v_proj.weight")) return .{ .values = .{ toy.kvWidth(), toy.hidden, 1, 1, 1 }, .rank = 2 };
-        if (std.mem.endsWith(u8, name, "o_proj.weight")) return .{ .values = .{ toy.hidden, toy.qWidth(), 1, 1, 1 }, .rank = 2 };
-        if (std.mem.endsWith(u8, name, "gate_proj.weight") or std.mem.endsWith(u8, name, "up_proj.weight")) return .{ .values = .{ toy.intermediate, toy.hidden, 1, 1, 1 }, .rank = 2 };
-        if (std.mem.endsWith(u8, name, "down_proj.weight")) return .{ .values = .{ toy.hidden, toy.intermediate, 1, 1, 1 }, .rank = 2 };
-        if (std.mem.endsWith(u8, name, "q_norm.weight") or std.mem.endsWith(u8, name, "k_norm.weight")) return .{ .values = .{ toy.head_dim, 1, 1, 1, 1 }, .rank = 1 };
-        return .{ .values = .{ toy.hidden, 1, 1, 1, 1 }, .rank = 1 };
+    fn dims(toy_config: Config, name: []const u8) Dimensions {
+        const t = toy_config;
+        if (std.mem.eql(u8, name, "fc.weight")) return .{ .values = .{ t.hidden, t.tapWidth(), 1, 1, 1 }, .rank = 2 };
+        if (std.mem.eql(u8, name, "candidate_selector.hidden_projection.weight")) return .{ .values = .{ t.rank, t.hidden, 1, 1, 1 }, .rank = 2 };
+        if (std.mem.startsWith(u8, name, "candidate_selector.")) return .{ .values = .{ t.vocab, t.rank, 1, 1, 1 }, .rank = 2 };
+        if (std.mem.endsWith(u8, name, "base_kernel")) return .{ .values = .{ 2, 2, t.hidden, 1, 1 }, .rank = 3 };
+        if (std.mem.endsWith(u8, name, "kernel_projection.weight")) return .{ .values = .{ t.dynamicWidth(), t.hidden, 1, 1, 1 }, .rank = 2 };
+        if (std.mem.endsWith(u8, name, "q_proj.weight")) return .{ .values = .{ t.qWidth(), t.hidden, 1, 1, 1 }, .rank = 2 };
+        if (std.mem.endsWith(u8, name, "k_proj.weight") or std.mem.endsWith(u8, name, "v_proj.weight")) return .{ .values = .{ t.kvWidth(), t.hidden, 1, 1, 1 }, .rank = 2 };
+        if (std.mem.endsWith(u8, name, "o_proj.weight")) return .{ .values = .{ t.hidden, t.qWidth(), 1, 1, 1 }, .rank = 2 };
+        if (std.mem.endsWith(u8, name, "gate_proj.weight") or std.mem.endsWith(u8, name, "up_proj.weight")) return .{ .values = .{ t.intermediate, t.hidden, 1, 1, 1 }, .rank = 2 };
+        if (std.mem.endsWith(u8, name, "down_proj.weight")) return .{ .values = .{ t.hidden, t.intermediate, 1, 1, 1 }, .rank = 2 };
+        if (std.mem.endsWith(u8, name, "q_norm.weight") or std.mem.endsWith(u8, name, "k_norm.weight")) return .{ .values = .{ t.head_dim, 1, 1, 1, 1 }, .rank = 1 };
+        return .{ .values = .{ t.hidden, 1, 1, 1, 1 }, .rank = 1 };
     }
 };
 
