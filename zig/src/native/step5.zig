@@ -36,6 +36,10 @@ const Host = struct {
 };
 
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (try o.slideRefusal(a, "Macs")) |why| {
+        problem.* = why;
+        return null;
+    }
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const model = s5.Model.load(gpa, io, o.dir) catch |err| {

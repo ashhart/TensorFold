@@ -226,6 +226,10 @@ fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
 
 /// The engine for `o.dir`, or null with `problem` when no HIP family reads it; under tensor parallelism, rank 0.
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (try o.slideRefusal(a, "HIP")) |why| {
+        problem.* = why;
+        return null;
+    }
     const report = @import("sys").optional_libraries.atBoundary();
     defer report.deinit();
     if (o.fsrRefusal("hip")) |why| {
@@ -276,6 +280,10 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
 
 /// A rank above 0: holds its share and runs rank 0's steps until rank 0 stops; false with `problem` if it cannot start.
 pub fn follow(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !bool {
+    if (try o.slideRefusal(a, "HIP")) |why| {
+        problem.* = why;
+        return false;
+    }
     const report = @import("sys").optional_libraries.atBoundary();
     defer report.deinit();
     inline for (registry) |F| {
@@ -398,4 +406,19 @@ test "matrix=on runs only where the matrix-core tiles exist; auto runs everywher
 
 test {
     _ = @import("draft_sources_hip_test.zig");
+}
+
+test "slide admission: hip refuses before checkpoint or device access" {
+    try @import("slide_open_test.zig").check(open, "HIP", &.{ "qwen3_5", "qwen3_5_moe", "qwen4_exp", "nemotron_h" });
+}
+
+test "slide admission: HIP followers refuse before joining ranks" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (families) |f| {
+        var why: []const u8 = "";
+        try std.testing.expect(!try follow(a, std.testing.allocator, std.testing.io, .{ .dir = "missing-slide-checkpoint", .model_type = f.model_type, .slide = true, .tp = 2, .rank = 1 }, &why));
+        try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "--slide: {s} checkpoints do not learn on HIP yet", .{f.model_type}), why);
+    }
 }

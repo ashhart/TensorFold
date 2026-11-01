@@ -380,6 +380,10 @@ fn gibBytes(g: f64) u64 {
 
 /// Flash Next uses the dump named by TF_FLASHNEXT_DUMP, or the checked-in kernels when that variable is unset.
 pub fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (try o.slideRefusal(a, "Macs")) |why| {
+        problem.* = why;
+        return null;
+    }
     if (fsr_options.refuse(o, problem)) return null;
     const dump: ?[]const u8 = if (platform.c.getenv("TF_FLASHNEXT_DUMP")) |d| std.mem.span(d) else null;
     const native = modelContext(a, io, o.dir);
@@ -563,4 +567,16 @@ test "prompt precision: Metal refuses int8 before any model or family-specific l
         try std.testing.expect(opened == null);
         try std.testing.expectEqualStrings(prompt_int8_refusal, why);
     }
+}
+
+test "slide admission: Metal entry points refuse before checkpoint or device access" {
+    const check = @import("slide_open_test.zig").check;
+    for (families) |f| if (!std.mem.eql(u8, f.model_type, "nemotron_h")) try check(open, "Macs", &.{f.model_type});
+    try check(@import("qwen35.zig").open, "Macs", &.{"qwen3_5"});
+    try check(@import("gemma4.zig").open, "Macs", &.{"gemma4"});
+    try check(@import("lfm2_moe.zig").open, "Macs", &.{"lfm2_moe"});
+    try check(@import("step5.zig").open, "Macs", &.{"step5_vl"});
+    try check(@import("spark25.zig").open, "Macs", &.{"spark2_5"});
+    try check(@import("minimax_m3.zig").open, "Macs", &.{"minimax_m3_vl"});
+    try check(openFlashNext, "Macs", &.{"qwen4_exp"});
 }
