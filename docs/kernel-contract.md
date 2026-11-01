@@ -240,6 +240,14 @@ CUDA also checks Dory's activation rows (`act_l2.cuh`): the scaled sigmoid outpu
 each row then L2-normed, against float64's ranges at their bf16 points and expf's ulps (four controls, one point each).
 CUDA also checks `dense_rows`' scaled epilogue (Dory's logits, fp32(bf16(x . w)) times a per-column scale), bit-equal to its
 unscaled tile's outputs rounded and scaled on the host.
+CUDA also checks EXL3's replacements of `linear_body` (`exl3_linear.cu`), each byte-equal to it at every row count it
+takes: the mid-M kernels (3, 4, 5 and 6 bits) and `linear_wc` (4 and 6 bits) at 1-128 rows (`Linear.min_rows` 1 runs
+them below 17 rows), the projection groups against each member's own launch, and `tf_exl3_rot_group` against
+`tf_exl3_rot_in` (1-16 rows). Their served shapes reach every form `plan()` gives them (row passes, warps, split or
+unsplit K, `linear_wc`'s tiles); a host test sweeps K and N to 16384 through `exl3.pick` and `groupable` and fails on a
+form no registration runs. A fixed plan keeps the linear. Gate 4 proves an fp16 sum would overflow on a constant-weight
+stress input (all-ones states: one weight at every width). Six controls: another K split (3, 4 and 5 bits; `linear_wc`),
+swapped scales, a swapped suh.
 HIP: the RMS norm rows, a wave a row (fp32, fp16 and bf16 out) and a block a row (fp16 and bf16 out).
 HIP also checks the 64-row prompt attention tile (`prefill.hip`): `tf_fa_paged_bf16` and `tf_fa_paged_f16` over a
 permuted page table at the 27B's, the 35B-A3B's and Nemotron's head counts, each output within attention_ref's float64
