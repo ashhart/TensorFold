@@ -12,6 +12,8 @@ test {
     _ = @import("engram_boundary_test.zig");
     _ = @import("engram_start_test.zig");
     _ = @import("engram_recovery_test.zig");
+    _ = @import("ced.zig");
+    _ = @import("suffix_test.zig");
     _ = @import("format_test.zig");
     inline for (.{ @import("config.zig"), @import("pack.zig"), @import("plan.zig"), @import("stage.zig"), @import("named.zig"), @import("prepare.zig"), @import("prepared.zig"), @import("load.zig"), @import("model.zig"), @import("host_test.zig"), @import("boundary_test.zig") }) |m| std.testing.refAllDecls(m);
     _ = @import("core").exl3_layout;
