@@ -53,7 +53,7 @@ const Hooks = struct {
         try r.model.glue.unstack(e, f.get(.mixed), f.get(.value), .{ .rows = rows, .width = kv, .stride = 2 * kv, .offset = kv });
         e.barrier();
         try r.attention.preprocess(e, .{ .qg = f.get(.q_gate), .key = f.get(.key), .q_gain = q.gpu_weights.ref(weights.q_norm), .k_gain = q.gpu_weights.ref(weights.k_norm), .norm_q = f.get(.norm_query), .norm_k = f.get(.norm_key), .query = f.get(.query), .rotated_key = f.get(.rotated_key), .positions = f.get(.positions), .rows = rows, .eps = r.model.config.eps, .theta = r.model.config.rope_theta, .h_end = r.current_placed.h_end, .w_end = r.current_placed.w_end, .plane = f.capacity, .geometry = r.geometry });
-        try r.attention.encode(e, &r.scratch, &r.bindings[layer], plan, f.get(.query), f.get(.rotated_key), f.get(.value), f.get(.mixer_out), &.{cache}, f.get(.q_gate), r.model.kernels.prompt);
+        try r.attention.encode(e, &r.scratch, &r.bindings[layer], plan, f.get(.query), f.get(.rotated_key), f.get(.value), f.get(.mixer_out), &.{cache}, f.get(.q_gate), r.model.kernels.prompt, r.reduce != null);
     }
 
     /// The capture hook, in the tap's slot: the post-block residual, exactly where a projection would act.
