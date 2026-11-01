@@ -18,6 +18,7 @@ const Taps = @import("taps.zig").Taps;
 const image_rows = @import("image_rows.zig");
 const mrope = @import("core").qwen_vl.rope;
 const kv_grow = @import("kv_grow.zig");
+const kv_slots = @import("kv_slots.zig");
 
 /// The host's hook for buffers a slot's K/V growth made.
 pub const Grown = struct { ctx: *anyopaque, added: *const fn (ctx: *anyopaque, buffers: []const mtl.Buffer) void };
@@ -183,58 +184,29 @@ pub const Runner = struct {
         return rows;
     }
 
-    /// Slot `slot` holds `need` K/V rows: layer by layer, a wider pair takes every old byte at its place (waited blit).
+    /// Slot `slot` holds `need` K/V rows, grown layer by layer (kv_slots.zig).
     pub fn reserve(r: *Runner, slot: u32, need: u32) !void {
-        const s = r.kv_step orelse return;
-        if (slot >= r.ready) return error.SlotNotReady;
-        const held = r.heldRows(slot);
-        if (need <= held) return;
-        if (need > r.capacity) return error.AttentionCapacity;
+        return kv_slots.reserve(r, slot, need);
+    }
+
+    /// Slot `slot` back to its first rows once it is free and unread (kv_slots.zig).
+    pub fn release(r: *Runner, slot: u32) !void {
+        return kv_slots.release(r, slot);
+    }
+
+    /// Whether a blit still reads slot `slot` (without waiting for it).
+    pub fn busy(r: *const Runner, slot: u32) bool {
+        const cb = r.reading[slot] orelse return false;
+        return switch (cb.status()) {
+            .completed, .@"error" => false,
+            else => true,
+        };
+    }
+
+    /// settleSlot for a hook that holds the runner as an opaque pointer (a drafter context's ring).
+    pub fn settleOpaque(ctx: *anyopaque, slot: u32) void {
+        const r: *Runner = @ptrCast(@alignCast(ctx));
         r.settleSlot(slot);
-        if (r.failed or r.active != null) return error.RoundNotReady;
-        const rows = kv_grow.rows(held, need, s, r.capacity);
-        const layers = r.caches.len / r.slots;
-        const bytes = @as(usize, rows) * r.model.config.kvDim() * 2;
-        // one layer at a time, so growth holds at most one layer's old pair beside the new rows
-        for (0..layers) |layer| {
-            const at = layer * r.slots + slot;
-            const c = r.caches[at];
-            if (c.capacity >= rows) continue; // grown before an earlier failure
-            if (c.keys.offset != 0 or c.values.offset != 0 or c.key_stride != 0 or c.value_stride != 0) return error.KvGrowLayout;
-            var fresh: [2]mtl.Buffer = undefined;
-            fresh[0] = try r.model.device.buffer(bytes, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
-            errdefer fresh[0].deinit();
-            fresh[1] = try r.model.device.buffer(bytes, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
-            errdefer fresh[1].deinit();
-            const old = [2]mtl.Buffer{ c.keys.buffer, c.values.buffer };
-            {
-                const pool = mtl.objc.Pool.push();
-                defer pool.pop();
-                const cb = r.model.queue.commandBuffer();
-                const e = cb.blit();
-                var moves: [attn.planning.max_streams]kv_grow.Move = undefined;
-                for (old, fresh) |from, to| {
-                    for (kv_grow.moves(&moves, r.model.config.kv_heads, r.model.config.head_dim, c.capacity, rows)) |mv| e.copy(from, mv.from, to, mv.to, mv.len);
-                }
-                e.end();
-                cb.commit();
-                cb.wait();
-                if (gpuFailed(cb, "a slot's K/V growth")) return error.RoundGpuFailure;
-            }
-            for (old, fresh) |from, to| {
-                for (r.owned.items) |*b| if (b.id == from.id) {
-                    b.* = to;
-                };
-                if (r.residency) |f| {
-                    f.leave(f.ctx, from);
-                    f.join(f.ctx, to);
-                }
-                from.deinit();
-            }
-            r.caches[at] = .{ .keys = .{ .buffer = fresh[0] }, .values = .{ .buffer = fresh[1] }, .capacity = rows };
-            if (r.grown) |g| g.added(g.ctx, &fresh);
-        }
-        std.log.info("qwen27: slot {d} K/V grew from {d} to {d} rows ({d} of {d} MiB held)", .{ slot, held, rows, kv_grow.slotBytes(layers, r.model.config.kvDim(), rows) >> 20, r.slotBytes() >> 20 });
     }
 
     /// The K/V buffers of the ready slots (for a residency set).

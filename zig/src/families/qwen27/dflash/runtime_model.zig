@@ -9,6 +9,8 @@ const Backend = @import("runtime_backend.zig").Backend;
 const Target = @import("../model.zig").Model;
 const Session = @import("session.zig").Session;
 const op = @import("operators.zig");
+const tap_ring = @import("../tap_ring.zig");
+const kv_grow = @import("../kv_grow.zig");
 const execution = @import("execution.zig");
 const selector = @import("selector.zig");
 const backend_mod = @import("runtime_backend.zig");
@@ -268,20 +270,64 @@ pub const Context = struct {
     caches: []Cache,
     session: Session,
     context: op.Context = .{ .cache = 1, .begin = 0, .end = 0 },
+    device: mtl.Device,
+    span: u32, // the ring's window
+    stride: usize, // a ring row's bytes
+    held: u32, // the ring's rows: the span unless it grows as used
+    step: ?u32 = null, // a ring that grows as used (TF_Q27_KV_GROW): its first rows and step
+    settle: ?Settle = null, // the slot's pending reads land before its ring's buffer changes
 
-    /// `drafting`: the stream drafts its own trees, so it gets K/V caches; else only its ring.
-    pub fn init(a: std.mem.Allocator, m: *const Model, drafting: bool) !*Context {
+    /// The runner's wait for a blit still reading the slot (Runner.settleSlot).
+    pub const Settle = struct { ctx: *anyopaque, slot: u32, run: *const fn (ctx: *anyopaque, slot: u32) void };
+
+    /// `drafting`: the stream drafts its own trees, so it gets K/V caches; its ring grows by `step` (null: the span).
+    pub fn init(a: std.mem.Allocator, m: *const Model, drafting: bool, step: ?u32) !*Context {
         const c = m.graph.config;
         const device = m.backend.target.device;
         const x = try a.create(Context);
         errdefer a.destroy(x);
-        const pending = try device.buffer(@as(usize, c.span()) * c.ringWidth() * 2, opts);
+        const grows = step; // drafter frames wait for their ring reads before closing: a ring grows between them
+        const held = if (grows) |s| kv_grow.first(s, c.span()) else c.span();
+        const pending = try device.buffer(@as(usize, held) * c.ringWidth() * 2, opts);
         errdefer pending.deinit();
         const caches = try backend_mod.newCaches(a, device, c, if (drafting) c.layers else 0);
         errdefer backend_mod.freeCaches(a, caches);
-        x.* = .{ .pending = pending, .caches = caches, .session = try Session.init(c, 1, 0) };
+        x.* = .{ .pending = pending, .caches = caches, .session = try Session.init(c, 1, 0), .device = device, .span = c.span(), .stride = @as(usize, c.ringWidth()) * 2, .held = held, .step = grows };
         x.setResident(m.backend.residency);
         return x;
+    }
+    /// The ring's buffer holding `rows` (Ring.Grow): a wider one takes every held row at its place.
+    fn growRing(ctx: *anyopaque, rows: u32) anyerror!mtl.Buffer {
+        const x: *Context = @ptrCast(@alignCast(ctx));
+        if (rows <= x.held) return x.pending;
+        const stride = x.stride;
+        const next = tap_ring.grownRows(x.held, rows, x.step.?, x.span);
+        const fresh = try x.device.buffer(@as(usize, next) * stride, opts);
+        if (x.settle) |s| s.run(s.ctx, s.slot);
+        tap_ring.carry(x.pending, fresh, x.held, stride);
+        std.log.info("qwen27: slot {d} taps ring grew from {d} to {d} rows", .{ if (x.settle) |h| h.slot else 0, x.held, next });
+        x.swapRing(fresh, next);
+        return fresh;
+    }
+    /// The ring back to its first rows once its stream left; nothing reads the old rows once `settle` returns.
+    fn shrinkRing(x: *Context) !void {
+        const s = x.step orelse return;
+        const first = kv_grow.first(s, x.span);
+        if (x.held <= first) return;
+        const stride = x.stride;
+        const fresh = try x.device.buffer(@as(usize, first) * stride, opts);
+        if (x.settle) |h| h.run(h.ctx, h.slot);
+        std.log.info("qwen27: slot {d} taps ring gave back {d} to {d} rows", .{ if (x.settle) |h| h.slot else 0, x.held, first });
+        x.swapRing(fresh, first);
+    }
+    fn swapRing(x: *Context, fresh: mtl.Buffer, rows: u32) void {
+        if (x.residency) |f| {
+            f.leave(f.ctx, x.pending);
+            f.join(f.ctx, fresh);
+        }
+        x.pending.deinit();
+        x.pending = fresh;
+        x.held = rows;
     }
     pub fn setResident(x: *Context, hook: ?mtl.ResidencySet.Follow) void {
         if (x.residency) |f| x.apply(f, false);
@@ -300,13 +346,14 @@ pub const Context = struct {
     }
     /// Empty, as Model.reset leaves the model's own.
     pub fn reset(x: *Context, c: cfg.Config) !void {
+        try x.shrinkRing();
         x.committed_end = 0;
         x.session = try Session.init(c, 1, 0);
         x.context = .{ .cache = 1, .begin = 0, .end = 0 };
     }
     /// Its taps ring, where the lane backend absorbs the stream's kept rows while it is parked.
     pub fn ring(x: *Context, c: cfg.Config) @import("../tap_ring.zig").Ring {
-        return .{ .buf = x.pending, .end = &x.committed_end, .window = c.span(), .stride = @as(usize, c.ringWidth()) * 2 };
+        return .{ .buf = x.pending, .end = &x.committed_end, .window = c.span(), .stride = @as(usize, c.ringWidth()) * 2, .grow = if (x.step != null) .{ .ctx = x, .run = growRing } else null };
     }
     /// Its buffers, for a residency set.
     pub fn buffers(x: *const Context, list: *std.ArrayList(mtl.Buffer), a: std.mem.Allocator) !void {

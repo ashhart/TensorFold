@@ -243,8 +243,10 @@ pub fn restoreSlot(a: std.mem.Allocator, r: *Runner, slot: u32, ring: ?Ring, st:
     if (st.bytes != slotBytes(r, ring, st.at) or st.at > r.capacity) return error.SnapshotLayout;
     try st.landed();
     try r.reset(slot);
-    try r.reserve(slot, st.at); // a slot whose K/V grows as used holds the state's rows first
-    try copy(a, r, slot, ring, st, false);
+    try r.reserve(slot, st.at); // a slot whose K/V and ring grow as used holds the state's rows first
+    var held = ring;
+    if (held) |*g| try g.hold(st.at);
+    try copy(a, r, slot, held, st, false);
     r.offsets[slot] = st.at;
     if (ring) |g| g.end.* = st.draft_end;
 }
@@ -257,12 +259,14 @@ pub fn moveSlot(a: std.mem.Allocator, r: *Runner, from: u32, from_ring: ?Ring, t
     if (from_ring) |g| if (g.end.* != at) return error.NotAtMark;
     try r.reset(to);
     try r.reserve(to, at);
+    var to_held = to_ring;
+    if (to_held) |*g| try g.hold(at);
     var src: std.ArrayList(Part) = .empty;
     defer src.deinit(a);
     var dst: std.ArrayList(Part) = .empty;
     defer dst.deinit(a);
     try parts(r, from, from_ring, at, &src, a, false);
-    try parts(r, to, to_ring, at, &dst, a, false);
+    try parts(r, to, to_held, at, &dst, a, false);
     if (src.items.len != dst.items.len) return error.SnapshotLayout;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();

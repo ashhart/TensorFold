@@ -125,3 +125,72 @@ test "qwen27 memory: growing moves every K/V head to its place in the wider buff
     // a slot's bytes at a row count, for the residency set and the memory receipts
     try std.testing.expectEqual(@as(usize, 8 * 2 * 4096 * 1024 * 2), kv_grow.slotBytes(8, 1024, 4096));
 }
+
+const tap_ring = @import("families/qwen27/tap_ring.zig");
+const Ring = tap_ring.Ring;
+const mtl_fake = @import("metal");
+
+/// A ring that starts at `held` rows and grows by tap_ring.grow, as a parked slot's ring does.
+const Growing = struct {
+    buf: mtl_fake.Buffer,
+    held: u32,
+    window: u32,
+    stride: usize,
+    asks: u32 = 0,
+    fn make(n: u32, stride: usize) !mtl_fake.Buffer {
+        const data = try std.testing.allocator.alignedAlloc(u8, .@"16", n * stride);
+        @memset(data, 0);
+        return .{ .id = n, .data = data };
+    }
+    fn free(b: mtl_fake.Buffer) void {
+        std.testing.allocator.free(b.data);
+    }
+    fn run(ctx: *anyopaque, want: u32) anyerror!mtl_fake.Buffer {
+        const g: *Growing = @ptrCast(@alignCast(ctx));
+        g.asks += 1;
+        if (want <= g.held) return g.buf;
+        const next = tap_ring.grownRows(g.held, want, 16, g.window);
+        const fresh = try make(next, g.stride);
+        tap_ring.carry(g.buf, fresh, g.held, g.stride);
+        free(g.buf);
+        g.buf = fresh;
+        g.held = next;
+        return fresh;
+    }
+};
+
+test "qwen27 memory: a growing taps ring holds the same rows at the same places as a whole-window ring" {
+    const window: u32 = 64;
+    const stride: usize = 4;
+    var whole_end: u64 = 0;
+    var grow_end: u64 = 0;
+    const whole_buf = try Growing.make(window, stride);
+    defer Growing.free(whole_buf);
+    var g = Growing{ .buf = try Growing.make(16, stride), .held = 16, .window = window, .stride = stride };
+    defer Growing.free(g.buf);
+    const whole = Ring{ .buf = whole_buf, .end = &whole_end, .window = window, .stride = stride };
+    var growing = Ring{ .buf = g.buf, .end = &grow_end, .window = window, .stride = stride, .grow = .{ .ctx = &g, .run = Growing.run } };
+    const src = try Growing.make(128, stride);
+    defer Growing.free(src);
+    var next: u32 = 1;
+    for ([_]u32{ 5, 11, 1, 20, 30, 40 }) |n| { // past 16, 32 and the 64-row window: grows, then wraps
+        for (0..n) |i| std.mem.writeInt(u32, src.contents()[i * stride ..][0..4], next + @as(u32, @intCast(i)), .little);
+        next += n;
+        try whole.absorb(src, 0, n);
+        try growing.absorb(src, 0, n);
+        try std.testing.expectEqual(whole_end, grow_end);
+        const first = whole_end -| window;
+        for (first..whole_end) |pos| {
+            const at = (pos % window) * stride;
+            try std.testing.expectEqualSlices(u8, whole_buf.contents()[at..][0..stride], g.buf.contents()[at..][0..stride]);
+        }
+    }
+    try std.testing.expectEqual(window, g.held); // a wrapped ring holds the whole window
+    // a restore into the ring asks for its rows first; a held ring is not asked to grow
+    var restored = Ring{ .buf = g.buf, .end = &grow_end, .window = window, .stride = stride, .grow = .{ .ctx = &g, .run = Growing.run } };
+    try restored.hold(200);
+    try std.testing.expectEqual(window, g.held);
+    try std.testing.expectEqual(@as(u32, 16), tap_ring.grownRows(16, 3, 16, 64));
+    try std.testing.expectEqual(@as(u32, 48), tap_ring.grownRows(16, 33, 16, 64));
+    try std.testing.expectEqual(@as(u32, 64), tap_ring.grownRows(48, 49, 16, 64));
+}
