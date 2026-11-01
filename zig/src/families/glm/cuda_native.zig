@@ -74,8 +74,9 @@ pub const Loaded = struct {
 pub fn attach(p: *anyopaque, streams: u32, pages: usize) !void {
     const own: *Owned = @ptrCast(@alignCast(p));
     const l = own.layout orelse return error.NoPages;
-    try own.lanes.x.pool(streams + 1, pages, l.pageBytes());
-    own.e.pages = try pages_mod.Pages.init(own.gpa, own.e, l, streams + 1, pages, true);
+    const kept = @import("cuda_kv_host.zig").pagesFor(@import("cuda_state.zig").pageBytes(&own.e.w), own.e.capacity, pages);
+    try own.lanes.x.pool(streams + 1, kept, l.pageBytes());
+    own.e.pages = try pages_mod.Pages.init(own.gpa, own.e, l, streams + 1, kept, true);
     if (own.share > 0) try share(own, streams + 1);
 }
 
@@ -223,6 +224,7 @@ fn openRank(a: StartArgs, set: ranks.Settings) !Loaded {
     const roce_bytes = a.roce_bytes;
     // TF_GLM_KV_SHARE keeps prompts as the pool's pages: refused before the weights load, every rank told (startup)
     if (a.share > 0 and !set.pages) return error.GlmShareNeedsPages;
+    if (@import("cuda_kv_host.zig").onHost() and !set.pages) return error.GlmKvHostNeedsPages;
     cuda.memory_receipt.emit(@intCast(p.rank), .load_begin, true); // the four phases tools/memory_receipts.py reads
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
@@ -304,6 +306,7 @@ fn finishRank(a: OpenArgs) !Loaded {
     own.link = try follow.Link.init(gpa, ctx.d, &own.group.lib, own.group.comm, own.e.stream, try linkCapacity(cap, o.vision));
     errdefer own.link.deinit();
     own.e.snap_setup = .{ .ptr = own, .run = readySnapshots };
+    try @import("cuda_kv_host.zig").prepare(ctx.d, @import("cuda_state.zig").pageBytes(&own.e.w), own.e.capacity, own.e.w.config.kv_lora * 2);
     // Rank 0 admits by the smallest room of the ranks; its sizes are the largest (the first ranks take the remainder).
     const rooms = try gpa.alloc(u64, p.world);
     defer gpa.free(rooms);
@@ -455,6 +458,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.Fp8OnPages => "--kv-cache fp8 keeps a window per stream: unset TF_KV_PAGES, or set it to auto or off",
         error.BadGlmKvShare => "TF_GLM_KV_SHARE: give how many states the prompt cache over the KV pages keeps, or 0 or unset for off",
         error.GlmShareNeedsPages => "TF_GLM_KV_SHARE keeps prompts as KV pool pages: set TF_KV_PAGES=on as well",
+        error.GlmKvHostNeedsPages => "TF_GLM_KV_HOST keeps the KV pool's pages in host memory: set TF_KV_PAGES=on (and --kv-cache bf16) as well",
         error.TooManyRanks => std.fmt.comptimePrint(
             "GLM-5.3-Flash on CUDA runs on at most {d} ranks: set TF_GLM_WORLD to {d} or fewer",
             .{ ranks.max_world, ranks.max_world },
@@ -501,6 +505,7 @@ test "TF_KV_PAGES with --kv-cache fp8: auto and off keep windows at every rank c
         for ([_][]const u8{ "on", "1", "all" }) |v| try std.testing.expectError(error.Fp8OnPages, paging(v, w, true));
     }
     try std.testing.expect(explain(null, error.Fp8OnPages) != null);
+    try std.testing.expect(explain(null, error.GlmKvHostNeedsPages) != null);
 }
 
 test "capacity keeps a verify window past the context and a multiple of 64" {

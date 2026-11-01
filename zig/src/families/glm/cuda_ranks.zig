@@ -22,6 +22,8 @@ pub const Settings = struct {
     dense_bits: u8 = 16, // TF_GLM_DENSE_BITS: the dense linears packed at load to 4, 6 or 8 bits (16: bf16)
     head_bits: u8 = 16, // TF_GLM_HEAD_BITS: the head, likewise
     roce_multi: bool = false, // TF_GLM_ROCE_MULTI: 1 (three ranks or more: small all-gathers on fabric/tp's multirank RoCE beside NCCL) or 0
+    kv_host: u8 = 0, // TF_GLM_KV_HOST=1: KV pages in host memory (1); with TF_GLM_KV_HOST_SHARED=1, one copy a host (2)
+    kv_host_gib: f64 = 0, // TF_GLM_KV_HOST_GIB: the host pages' GiB (0: one full window)
 
     /// The settings `get` (an environment lookup) gives; `problem` names a value that is not one of the choices.
     pub fn read(get: *const fn ([:0]const u8) ?[]const u8, problem: *[]const u8) !Settings {
@@ -107,6 +109,25 @@ pub const Settings = struct {
             problem.* = "TF_GLM_PROMPT_K=shape requires TF_GLM_MM=1";
             return error.BadSetting;
         }
+        if (get("TF_GLM_KV_HOST")) |v| {
+            if (std.mem.eql(u8, v, "1")) s.kv_host = 1 else if (!std.mem.eql(u8, v, "0")) {
+                problem.* = "TF_GLM_KV_HOST: 0 or 1";
+                return error.BadSetting;
+            }
+        }
+        if (get("TF_GLM_KV_HOST_SHARED")) |v| {
+            if (std.mem.eql(u8, v, "1") and s.kv_host == 1) s.kv_host = 2 else if (!std.mem.eql(u8, v, "0")) {
+                problem.* = if (std.mem.eql(u8, v, "1")) "TF_GLM_KV_HOST_SHARED=1 requires TF_GLM_KV_HOST=1" else "TF_GLM_KV_HOST_SHARED: 0 or 1";
+                return error.BadSetting;
+            }
+        }
+        if (get("TF_GLM_KV_HOST_GIB")) |v| {
+            s.kv_host_gib = std.fmt.parseFloat(f64, v) catch 0;
+            if (!(s.kv_host_gib > 0) or s.kv_host == 0) {
+                problem.* = "TF_GLM_KV_HOST_GIB: the host pages' GiB, more than 0, with TF_GLM_KV_HOST=1";
+                return error.BadSetting;
+            }
+        }
         // refused here, before the weights load: the wire's bootstrap meets at rank 0, its kernel comes from the image
         if (s.roce_multi and (get("TF_TP_MASTER") == null or get("TF_TP_KERNEL_IMAGE") == null)) {
             problem.* = "TF_GLM_ROCE_MULTI=1 requires TF_TP_MASTER and TF_TP_KERNEL_IMAGE";
@@ -126,7 +147,7 @@ pub fn environment(name: [:0]const u8) ?[]const u8 {
 
 /// What every rank must agree on, as bytes the communicator carries.
 pub const Fingerprint = extern struct {
-    layout: u32 = 14, // this struct's version
+    layout: u32 = 15, // this struct's version
     world: u32,
     rank: u32,
     kv8: u32 = 0,
@@ -144,11 +165,13 @@ pub const Fingerprint = extern struct {
     max_videos: u32 = 0,
     max_frames: u32 = 0,
     roce_multi: u32 = 0, // TF_GLM_ROCE_MULTI: every rank opens the borrowed wire or none does (a lone rank would wait on it)
+    kv_host: u32 = 0, // TF_GLM_KV_HOST(_SHARED): every rank sizes the pool alike and maps the shared file, or none does
     solo: u32 = 0, // TF_GLM_CHUNK_SOLO: rank 0's solo passes need the wider prompt buffers on every rank
     bits: u32 = 16 << 8 | 16, // TF_GLM_DENSE_BITS << 8 | TF_GLM_HEAD_BITS: every rank's matmuls read the same codes
     capacity: u64, // tokens a sequence holds
     heat_high: f64, // the heat bands in degrees (0 and 0: off): every rank must wait alike
     heat_low: f64,
+    kv_host_gib: f64 = 0, // TF_GLM_KV_HOST_GIB: each rank's row marks span the host pages rank 0 counts
     config: [32]u8, // sha256 of config.json
     program: [32]u8, // sha256 of this executable
     checkpoint: [64]u8, // hex digest of the checkpoint's metadata and every shard byte, through the digest cache
@@ -172,11 +195,13 @@ pub const Fingerprint = extern struct {
         max_videos,
         max_frames,
         roce_multi,
+        kv_host,
         solo,
         bits,
         capacity,
         heat_high,
         heat_low,
+        kv_host_gib,
         config,
         program,
         checkpoint,
@@ -205,6 +230,8 @@ pub const Fingerprint = extern struct {
             .layers = s.layers,
             .mtp = @intFromBool(mtp),
             .roce_multi = @intFromBool(s.roce_multi),
+            .kv_host = s.kv_host,
+            .kv_host_gib = s.kv_host_gib,
             .solo = @intFromBool(s.solo),
             .bits = @as(u32, s.dense_bits) << 8 | s.head_bits,
             .capacity = capacity,
@@ -242,11 +269,13 @@ pub fn mismatch(all: []const Fingerprint) ?Mismatch {
             "max_videos",
             "max_frames",
             "roce_multi",
+            "kv_host",
             "solo",
             "bits",
             "capacity",
             "heat_high",
             "heat_low",
+            "kv_host_gib",
             "config",
             "program",
             "checkpoint",
@@ -352,6 +381,8 @@ fn explain(f: Fingerprint.Field) []const u8 {
         .max_videos => "the video count limit",
         .max_frames => "the frame limit",
         .roce_multi => "TF_GLM_ROCE_MULTI",
+        .kv_host => "TF_GLM_KV_HOST or TF_GLM_KV_HOST_SHARED",
+        .kv_host_gib => "TF_GLM_KV_HOST_GIB",
         .solo => "TF_GLM_CHUNK_SOLO",
         .bits => "TF_GLM_DENSE_BITS or TF_GLM_HEAD_BITS",
         .capacity => "the sequence capacity (the context)",
