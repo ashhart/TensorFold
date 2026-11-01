@@ -79,6 +79,7 @@ const Shard = struct {
     }
 
     fn close(self: *Shard) void {
+        self.f.release(); // its pages leave the page cache with the mapping (dropPageCache)
         self.f.close(self.io);
     }
 
@@ -86,6 +87,21 @@ const Shard = struct {
         return self.f.get(name);
     }
 };
+
+/// After load, every shard leaves the page cache: on unified memory a resident copy crowds the device's own pages.
+pub fn dropPageCache(io: std.Io, dir: []const u8) void {
+    if (@import("builtin").os.tag != .linux) return;
+    var d = std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true }) catch return;
+    defer d.close(io);
+    var it = d.iterate();
+    while (it.next(io) catch null) |e| {
+        if (e.kind != .file and e.kind != .sym_link) continue;
+        if (!std.mem.endsWith(u8, e.name, ".safetensors")) continue;
+        const f = d.openFile(io, e.name, .{}) catch continue;
+        defer f.close(io);
+        _ = std.os.linux.fadvise(f.handle, 0, 0, std.os.linux.POSIX_FADV.DONTNEED);
+    }
+}
 
 pub const Store = struct {
     gpa: std.mem.Allocator,
