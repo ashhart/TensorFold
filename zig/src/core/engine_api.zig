@@ -306,12 +306,10 @@ pub const Open = struct {
     /// --parallel named a number: an engine whose memory fits fewer streams refuses instead of serving fewer.
     lanes_fixed: bool = false,
     drafts: bool = true,
-    /// --drafter: a draft model's directory (null: none); --drafter-bits: 4, 0 for bf16, or 8 (LFM2 only).
-    drafter: ?[]const u8 = null,
+    drafter: ?[]const u8 = null, // --drafter checkpoint directory (null: none)
     drafter_name: ?[]const u8 = null, // the supplied --drafter name, before resolving its directory
-    drafter_bits: u8 = 4,
-    /// Whether --drafter-bits was given: LFM2's drafter runs bf16 as released unless it is asked for 8-bit codes.
-    drafter_bits_given: bool = false,
+    drafter_bits: u8 = 4, // --drafter-bits: 4, 0 (bf16), or 8 (LFM2 only)
+    drafter_bits_given: bool = false, // false: LFM2 defaults to the released bf16 matrices
     rope_yarn: ?f64 = null, // --rope-yarn: YaRN over the checkpoint's trained window; families without it refuse
     /// --record: each stream's committed rows and tapped features written under this folder, for drafter training.
     record: ?[]const u8 = null,

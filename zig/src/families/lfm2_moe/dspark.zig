@@ -545,17 +545,30 @@ test "lfm2 dspark: scratch and warm allocation failures release buffers before t
     defer device.deinit();
     var target: Model = undefined;
     target.device = device;
-    for ([_]usize{ 1, 3 }) |fail_index| {
-        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
-        var d: Drafter = .{
-            .gpa = failing.allocator(),
-            .io = undefined,
-            .target = &target,
-            .config = try dc.Config.parse(std.testing.allocator, dc.stock),
-            .w = undefined,
-            .options = .{ .capacity = 64 },
-            .s = undefined,
-        };
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
+    var d: Drafter = .{
+        .gpa = failing.allocator(),
+        .io = undefined,
+        .target = &target,
+        .config = try dc.Config.parse(std.testing.allocator, dc.stock),
+        .w = undefined,
+        .options = .{ .capacity = 64 },
+        .s = undefined,
+    };
+    const warm_fail_index = blk: {
+        defer {
+            for (d.owned.items) |b| b.deinit();
+            d.owned.deinit(d.gpa);
+        }
+        try d.scratch();
+        break :blk failing.alloc_index;
+    };
+    for ([_]usize{ 1, warm_fail_index }) |fail_index| {
+        failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
+            .fail_index = fail_index,
+            .resize_fail_index = 0,
+        });
+        d.owned = .empty;
         try std.testing.expectError(error.OutOfMemory, d.prepare());
         try std.testing.expect(failing.has_induced_failure);
         try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
