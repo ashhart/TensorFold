@@ -56,7 +56,7 @@ fn run(queue: mtl.Queue, op: *const attn.Attention, scratch: *attn.Scratch, bind
     try binding.upload(plan, caches);
     const cb = queue.commandBuffer();
     const e = cb.compute(.concurrent);
-    try op.encode(e, scratch, binding, plan, query, key, value, out, caches, gate, false);
+    try op.encode(e, scratch, binding, plan, query, key, value, out, caches, gate, false, false);
     e.end();
     cb.commit();
     cb.wait();
@@ -98,7 +98,7 @@ fn bench(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, op: *const 
     for (&times) |*t| {
         const cb = queue.commandBuffer();
         const e = cb.compute(.concurrent);
-        for (0..layers) |i| try op.encode(e, &scratch, &bindings[i], plan, .{ .buffer = query }, .{ .buffer = key }, .{ .buffer = value }, .{ .buffer = out }, caches[i .. i + 1], .{ .buffer = raw_gate }, false);
+        for (0..layers) |i| try op.encode(e, &scratch, &bindings[i], plan, .{ .buffer = query }, .{ .buffer = key }, .{ .buffer = value }, .{ .buffer = out }, caches[i .. i + 1], .{ .buffer = raw_gate }, false, false);
         e.end();
         cb.commit();
         cb.wait();

@@ -67,8 +67,8 @@ fn layerRows(d: *Mtp, segs: []const Seg, rows: usize) !void {
     try d.projQkv(rows);
     for (segs) |s| { // rope positions run from each segment's first slot
         const p0: c_longlong = @intCast(s.p0);
-        try e.run(d.fns.norm_rope, .{ s.rows * g.q_heads, 1, 1 }, .{ 32, 1, 1 }, .{ d.qraw + s.first * 2 * aw * 2, w.q_norm, d.q + s.first * aw * 2, @as(c_int, @intCast(g.q_heads)), @as(c_int, @intCast(2 * aw)), @as(c_int, 2 * head_dim), p0, @as(c_int, 1), g.eps, geometry.theta });
-        try e.run(d.fns.norm_rope, .{ s.rows * g.kv_heads, 1, 1 }, .{ 32, 1, 1 }, .{ d.kraw + s.first * kw * 2, w.k_norm, d.kb + s.first * kw * 2, @as(c_int, @intCast(g.kv_heads)), @as(c_int, @intCast(kw)), @as(c_int, head_dim), p0, @as(c_int, 1), g.eps, geometry.theta });
+        try d.normRope(d.qraw + s.first * 2 * aw * 2, w.q_norm, d.q + s.first * aw * 2, g.q_heads, 2 * aw, 2 * head_dim, p0, 1, s.rows);
+        try d.normRope(d.kraw + s.first * kw * 2, w.k_norm, d.kb + s.first * kw * 2, g.kv_heads, kw, head_dim, p0, 1, s.rows);
     }
     try e.run(d.fns.attn_rows, .{ rows, g.q_heads, 1 }, .{ 32, 1, 1 }, .{ d.q, d.qraw, @as(c_int, @intCast(2 * aw)), d.kb, d.vb, d.tab, @as(c_int, @intCast(g.q_heads)), @as(c_int, @intCast(g.kv_heads)), d.att });
     try d.proj(w.o, d.att, d.r, rows);

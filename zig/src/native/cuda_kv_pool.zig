@@ -17,6 +17,67 @@ pub fn enginePaged(loaded: anytype) bool {
     return if (comptime @hasField(@TypeOf(loaded), "engine_paged")) loaded.engine_paged else false;
 }
 
+/// What the load ledger hears of an engine's KV: its mode and, when paged, the pool it watches.
+pub const Watch = struct {
+    mode: ?api.load_ledger.Mode = null, // null: the capacity group stays absent
+    src: ?kv_pool.Source = null,
+    host: ?*api.LaneHost = null,
+};
+
+/// A window a stream without a page plan; a paged family's pool when it names one (`kvPool`); otherwise none.
+pub fn watchOf(comptime F: type, loaded: anytype, paged: ?Plan) Watch {
+    if (paged == null) return .{ .mode = .window };
+    if (comptime !@hasDecl(F, "kvPool")) return .{};
+    const src = F.kvPool(loaded.ctx) orelse return .{};
+    return .{ .mode = .paged, .src = src };
+}
+
+/// The lane host's capacity source and the pool's first census, before the engine thread owns the pool.
+pub fn install(w: *Watch, lane: *api.LaneHost) void {
+    const mode = w.mode orelse return;
+    lane.capacity = .{ .mode = mode };
+    const src = w.src orelse return;
+    w.host = lane;
+    src.pool.notify = .{ .ctx = w, .call = changed };
+    api.LaneHost.Load.poolChanged(lane, census(src));
+}
+
+/// The pool stops reporting before its owner closes.
+pub fn unwatch(w: *Watch) void {
+    if (w.src) |src| src.pool.notify = null;
+}
+
+fn changed(ctx: *anyopaque, _: *const kv_pool.Pool) void {
+    const w: *Watch = @ptrCast(@alignCast(ctx));
+    api.LaneHost.Load.poolChanged(w.host.?, census(w.src.?));
+}
+
+/// The pool's counts in tokens at page granularity; `run` only where the family needs a contiguous run.
+pub fn census(src: kv_pool.Source) api.load_ledger.Pool {
+    const p = src.pool;
+    const t: u64 = src.page_tokens;
+    return .{
+        .capacity = p.total() * t,
+        .available = p.available() * t,
+        .reclaimable = p.reclaimable() * t,
+        .promised = p.promised * t,
+        .run = if (src.run_pages > 0) p.findRun(src.run_pages) != null else null,
+    };
+}
+
+test "a pool's census is in tokens, and a run shows only where the family needs one" {
+    var p = try kv_pool.Pool.init(std.testing.allocator, 8, 64);
+    defer p.deinit();
+    var l: kv_pool.Lease = .{};
+    defer p.finish(&l);
+    try p.promise(&l, 3);
+    _ = try p.take(&l);
+    const plain = census(.{ .pool = &p, .page_tokens = 64 });
+    try std.testing.expectEqual(api.load_ledger.Pool{ .capacity = 512, .available = 320, .reclaimable = 0, .promised = 128 }, plain);
+    try std.testing.expectEqual(@as(?bool, true), census(.{ .pool = &p, .page_tokens = 64, .run_pages = 4 }).run);
+    try std.testing.expectEqual(@as(?bool, false), census(.{ .pool = &p, .page_tokens = 64, .run_pages = 8 }).run);
+}
+
 /// The plan's view of a wrapped family: drafter buffers join the fixed part; no free stream pays its window first.
 pub fn served(l: ?kv_pool.Layout, free_streams: u32, family_bytes: u64, stream_bytes: u64, room: u64) struct { layout: ?kv_pool.Layout, room: u64 } {
     var out = l orelse return .{ .layout = null, .room = room };
@@ -84,10 +145,10 @@ fn fits(comptime F: type, loaded: anytype, o: api.Open, room: u64, window: u64, 
 }
 
 /// The pool beside the engine's own sequence (in `model`: a window, or on pages its fixed part); null: see `problem`.
-pub fn plan(comptime F: type, a: Allocator, l: kv_pool.Layout, room: u64, o: api.Open, window: u64, problem: *[]const u8, host_mode: bool, engine_paged: bool) !?Plan {
+pub fn plan(comptime F: type, a: Allocator, l: kv_pool.Layout, room: u64, o: api.Open, window: u64, problem: *[]const u8, host_mode: bool, engine_paged: bool, kept_ppm: u32) !?Plan {
     const rows: u64 = if (comptime @hasDecl(F, "window_rows")) F.window_rows else 0;
     const want = if (host_mode) 0 else budget.cacheBytes(o.prompt_cache_gib, std.math.maxInt(u64), 0);
-    return kv_pool.plan(l, .{ .room = room, .engine = 0, .lanes = o.lanes, .fixed = o.lanes_fixed, .cache = want, .snaps = named(o), .window = window + rows, .engine_paged = engine_paged }) catch |e| {
+    return kv_pool.plan(l, .{ .room = room, .engine = 0, .lanes = o.lanes, .fixed = o.lanes_fixed, .cache = want, .snaps = named(o), .window = window + rows, .engine_paged = engine_paged, .kept_ppm = if (host_mode) 0 else kept_ppm }) catch |e| {
         problem.* = switch (e) {
             error.NoStream => if (engine_paged) try std.fmt.allocPrint(a, "the CUDA memory budget fits no stream beside the model: one at a {d}-token window takes {d:.2} GiB of KV pages, and the budget leaves {d:.2} GiB", .{ window, toGib(l.pages(window + rows) * l.pageBytes()), toGib(room) }) else "the CUDA memory budget fits no stream beside the model",
             error.TooMany => try std.fmt.allocPrint(a, "--parallel {d} needs {d:.2} GiB for its other streams' fixed parts, state runs and a page each, and the CUDA memory budget leaves {d:.2} GiB: serve fewer, or free device memory", .{ o.lanes, toGib((o.lanes - 1) * (l.fixed_bytes + (1 + l.runPages()) * l.pageBytes())), toGib(room) }),
@@ -113,7 +174,7 @@ pub const Kept = struct { snaps: usize, copied: u64, snap_bytes: u64, host: bool
 pub fn kept(comptime F: type, loaded: anytype, paged: ?Plan, o: api.Open, room: u64, held: u64, host_budget: u64, host_mode: bool) Kept {
     if (host_mode) return .{ .snaps = 0, .copied = hostBudget(o, host_budget), .snap_bytes = stagingBytes(F, loaded, hostBudget(o, host_budget)), .host = true, .most = named(o) orelse std.math.maxInt(usize) };
     // on pages the plan set the cache aside already; `held` counts every stream at a whole window
-    if (comptime !@hasDecl(F, "snap_slots")) return .{ .snaps = 0, .copied = if (!@hasDecl(F, "snap_save")) 0 else if (paged) |p| p.copied else budget.cacheBytes(o.prompt_cache_gib, room, held), .snap_bytes = 0 };
+    if (comptime !@hasDecl(F, "snap_slots")) return .{ .snaps = 0, .copied = if (!@hasDecl(F, "snap_save")) 0 else if (paged) |p| p.copied + p.kept else budget.cacheBytes(o.prompt_cache_gib, room, held), .snap_bytes = 0 }; // kept: the store's budget, held as pool pages
     const b: u64 = loaded.snap_bytes;
     const s = if (paged) |p| kv_pool.split(p.snaps * b + p.copied, b, p.snaps) else kv_pool.split(budget.cacheBytes(o.prompt_cache_gib, room, held), b, named(o));
     return .{ .snaps = s.snaps, .copied = s.copied, .snap_bytes = b };
@@ -218,11 +279,11 @@ test "kv pages: an engine whose own rows are pages plans a window of them first,
     const l: kv_pool.Layout = .{ .fixed_bytes = 180 << 20, .token_bytes = 13_056, .page_tokens = 512, .snap_bytes = 0 };
     const o: api.Open = .{ .dir = "", .model_type = "g", .lanes = 4, .prompt_cache_gib = 4 };
     try std.testing.expect(enginePaged(.{ .layout = @as(?kv_pool.Layout, l), .engine_paged = true }) and !enginePaged(.{ .layout = @as(?kv_pool.Layout, l) }));
-    const p = (try plan(Owned, a, l, 40 << 30, o, 8192, &problem, false, true)).?;
+    const p = (try plan(Owned, a, l, 40 << 30, o, 8192, &problem, false, true, 0)).?;
     try std.testing.expectEqual(@as(u32, 4), p.lanes);
     try std.testing.expectEqual(@as(usize, 4 * 17), p.pages); // every stream at most 8,192 rows and a verify window: 17 pages
     const floor = 17 * l.pageBytes();
-    try std.testing.expectEqual(@as(?Plan, null), try plan(Owned, a, l, floor - 1, o, 8192, &problem, false, true));
+    try std.testing.expectEqual(@as(?Plan, null), try plan(Owned, a, l, floor - 1, o, 8192, &problem, false, true, 0));
     try std.testing.expect(std.mem.indexOf(u8, problem, "8192-token window") != null);
     const shown = (try text(Owned, a, 180 << 20, l, p, true, false, 8192, .{ .snaps = 0, .copied = 4 << 30, .snap_bytes = 0 }, false))[0];
     try std.testing.expectEqualStrings("the engine's own and 3 more taking 68 pages of 512 rows (0.42 GiB) as they need them (enough for one at a 8192-token window), 180 MiB fixed each", shown);
@@ -286,7 +347,7 @@ test "KV admission: a refusal prices the running states beside the fixed part an
     var problem: []const u8 = "";
     const l: kv_pool.Layout = .{ .fixed_bytes = 1 << 30, .token_bytes = 1 << 28, .page_tokens = 4, .snap_bytes = 1, .run_bytes = 1 << 30 };
     const o: api.Open = .{ .dir = "", .model_type = "n", .lanes = 2, .lanes_fixed = true, .prompt_cache_gib = 0 };
-    try std.testing.expectEqual(@as(?Plan, null), try plan(struct {}, arena.allocator(), l, 2 << 30, o, 8, &problem, false, false));
+    try std.testing.expectEqual(@as(?Plan, null), try plan(struct {}, arena.allocator(), l, 2 << 30, o, 8, &problem, false, false, 0));
     try std.testing.expect(std.mem.indexOf(u8, problem, "needs 3.00 GiB") != null);
     try std.testing.expect(std.mem.indexOf(u8, problem, "state runs") != null);
 }

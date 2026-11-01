@@ -46,9 +46,9 @@ struct StoreFp8 {
 extern "C" __global__ void __launch_bounds__(256) tf_q35_rope8(Geo geo, __nv_bfloat16* __restrict__ Qn, const __nv_bfloat16* __restrict__ Kn,
                                                                  const __nv_bfloat16* __restrict__ Vr, const Seg* __restrict__ segs,
                                                                  const int* __restrict__ rowseg, const Ancestor* __restrict__ rowanc, int layer,
-                                                                 const int* __restrict__ P, const int* __restrict__ M) {
+                                                                 const int* __restrict__ P, const int* __restrict__ M, const float* __restrict__ Y) {
     __shared__ float red[HD / 32];
-    rope_rows(geo, Qn, Kn, Vr, segs, rowseg, rowanc, P, M, StoreFp8{layer, geo.kvh, red});
+    rope_rows(geo, Qn, Kn, Vr, segs, rowseg, rowanc, P, M, Y, StoreFp8{layer, geo.kvh, red});
 }
 
 

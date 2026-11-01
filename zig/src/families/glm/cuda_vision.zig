@@ -21,8 +21,9 @@ const ROWS: i64 = 4096; // rows a linear's fp32 product covers (the scratch's bo
 const EPS: f32 = 1e-5;
 const LIMIT: f32 = 10.0;
 
-/// A projection's weight: the checkpoint's bf16 for cuBLASLt, or MXFP8 or NVFP4 as stored for qlinear's prompt rows.
-const Lin = union(enum) { bf16: u64, q: cuda.qlinear.Weight };
+const weights = @import("cuda_vision_weights.zig");
+const Lin = weights.Lin;
+const staging = @import("cuda_vision_stage.zig");
 
 const Block = struct { n1: u64, n2: u64, qkv_w: Lin, qkv_b: u64, qn: u64, kn: u64, proj_w: Lin, proj_b: u64, g_w: Lin, g_b: u64, u_w: Lin, u_b: u64, d_w: Lin, d_b: u64 };
 
@@ -126,7 +127,7 @@ pub const Tower = struct {
     gpa: std.mem.Allocator,
     d: *const cuda.Driver,
     lt: cuda.cublaslt.Library,
-    mem: cuda.DeviceBuffer,
+    mem: weights.Weights,
     blocks: [DEPTH]Block = undefined,
     patch_w: u64 = 0,
     patch_b: u64 = 0,
@@ -145,6 +146,7 @@ pub const Tower = struct {
     ws: cuda.DeviceBuffer,
     ws_len: usize = 64 << 20,
     bytes: u64 = 0,
+    staged: ?staging.Stage = null, // TF_GLM_VISION_HOST: the units' copies from host memory into one device slot
     stages: ?[]f32 = null, // checks: the fp32 stream after the patch embedding and after every block, read back
 
     /// The tower's tensors (either prefix) in one allocation: bf16 as stored, MXFP8 and NVFP4 packed for ``ql``.
@@ -168,12 +170,15 @@ pub const Tower = struct {
                 total += std.mem.alignForward(u64, p.codes, 256) + std.mem.alignForward(u64, p.scales, 256);
             } else total += std.mem.alignForward(u64, (try ck.get(name)).bytes.len, 256);
         };
-        var t: Tower = .{ .gpa = gpa, .d = d, .lt = try cuda.cublaslt.Library.open(), .mem = try cuda.DeviceBuffer.alloc(d, total), .ql = ql, .inv_freq = try cuda.DeviceBuffer.alloc(d, 16 * 4), .linears = .init(gpa), .ws = undefined, .bytes = total };
+        var t: Tower = .{ .gpa = gpa, .d = d, .lt = try cuda.cublaslt.Library.open(), .mem = try weights.Weights.alloc(d, total, weights.onHost()), .ql = ql, .inv_freq = try cuda.DeviceBuffer.alloc(d, 16 * 4), .linears = .init(gpa), .ws = undefined };
         errdefer t.deinit();
+        t.bytes = t.mem.deviceBytes();
         t.ws = try cuda.DeviceBuffer.alloc(d, t.ws_len);
         var at: u64 = 0;
         var names = std.StringHashMap(u64).init(gpa);
         defer names.deinit();
+        var entries: std.ArrayList(staging.Entry) = .empty; // the host-resident tensors a pass stages
+        defer entries.deinit(gpa);
         var quant = std.StringHashMap(cuda.qlinear.Weight).init(gpa);
         defer quant.deinit();
         for (plans.items) |p| try quant.put(p.module[pre.len..], try t.pack(&ck, p, &at));
@@ -189,34 +194,19 @@ pub const Tower = struct {
                 tower_names.transposeRows(perm, src, ab[0], ab[1]);
                 bytes = std.mem.sliceAsBytes(perm);
             }
-            const ptr = t.mem.ptr + at;
+            const ptr = t.mem.ptr() + at;
             try cuda.copy_source.synchronousCopy(d, ptr, bytes, std.heap.page_allocator);
             try names.put(name[pre.len..], ptr); // by the name after the prefix
+            if (t.mem == .host) try entries.append(gpa, .{ .name = name[pre.len..], .at = ptr, .len = bytes.len });
             at += std.mem.alignForward(u64, bytes.len, 256);
         };
-        const get = struct {
-            fn f(m: *const std.StringHashMap(u64), comptime fmt: []const u8, args: anytype) !u64 {
-                var nb: [128]u8 = undefined;
-                const name = try std.fmt.bufPrint(&nb, fmt, args);
-                return m.get(name) orelse {
-                    std.log.err("glm vision: no tensor {s}", .{name});
-                    return error.MissingVisionTensor;
-                };
-            }
-        }.f;
-        const lin = struct {
-            fn f(m: *const std.StringHashMap(u64), qm: *const std.StringHashMap(cuda.qlinear.Weight), comptime fmt: []const u8, args: anytype) !Lin {
-                var nb: [128]u8 = undefined;
-                const module = try std.fmt.bufPrint(&nb, fmt, args);
-                if (qm.get(module)) |q| return .{ .q = q };
-                var wb: [136]u8 = undefined;
-                const name = try std.fmt.bufPrint(&wb, "{s}.weight", .{module});
-                return .{ .bf16 = m.get(name) orelse {
-                    std.log.err("glm vision: no tensor {s}", .{name});
-                    return error.MissingVisionTensor;
-                } };
-            }
-        }.f;
+        if (t.mem == .host) { // a pass reads them from the slot the stage copies each unit into
+            if (plans.items.len > 0) return error.VisionHostNeedsBf16;
+            t.staged = try staging.Stage.init(gpa, d, entries.items, &names, DEPTH);
+            t.bytes = t.staged.?.slot.len;
+        }
+        const get = weights.tensor;
+        const lin = weights.linear;
         t.patch_w = try get(&names, "patch_embed.proj.weight", .{});
         t.patch_b = try get(&names, "patch_embed.proj.bias", .{});
         t.post = try get(&names, "post_layernorm.weight", .{});
@@ -257,10 +247,16 @@ pub const Tower = struct {
         var it = t.linears.valueIterator();
         while (it.next()) |l| l.deinit();
         t.linears.deinit();
+        if (t.staged) |*s| s.deinit();
         t.mem.free();
         t.inv_freq.free();
         t.ws.free();
         t.lt.close();
+    }
+
+    /// TF_GLM_VISION_HOST: copy unit `u` of the pass into the slot before the work that reads it (on the device: none).
+    fn bring(t: *const Tower, ru: *const Run, u: usize) !void {
+        if (t.staged) |*s| try s.bring(ru.stream, u);
     }
 
     /// Stage `i`'s fp32 stream (N rows) into `dst` (checks only: it waits for the GPU).
@@ -327,7 +323,7 @@ pub const Tower = struct {
 
     /// `bytes` copied into ``t.mem`` at ``at``, which moves past them to the next 256-byte boundary.
     fn put(t: *Tower, bytes: []const u8, at: *u64) !u64 {
-        const ptr = t.mem.ptr + at.*;
+        const ptr = t.mem.ptr() + at.*;
         try cuda.copy_source.synchronousCopy(t.d, ptr, bytes, std.heap.page_allocator);
         at.* += std.mem.alignForward(u64, bytes.len, 256);
         return ptr;
@@ -444,6 +440,7 @@ pub const Tower = struct {
         const dpos = take(&at, N * 8);
         try cuda.copy_source.enqueue(d, dpos, std.mem.sliceAsBytes(pos), ru.stream);
         try cuda.copy_source.enqueue(d, p32, std.mem.sliceAsBytes(patches), ru.stream);
+        try t.bring(ru, 0);
         { // the patch embedding: the patches as bf16, then the conv as a linear (with its bias) into the fp32 stream
             var a: cuda.Args = .{};
             a.add(p32);
@@ -467,6 +464,7 @@ pub const Tower = struct {
         if (t.stages) |dst| try t.stage(ru, dst, 0, x32, N);
         for (t.blocks, 1..) |bl, bi| {
             defer if (t.stages) |dst| t.stage(ru, dst, bi, x32, N) catch {};
+            try t.bring(ru, bi);
             try rmsnorm(ru, x32, bl.n1, xn, N, H);
             try t.dense(ru, xn, bl.qkv_w, bl.qkv_b, big, 0, acc, N, 3 * H, H);
             {
@@ -520,10 +518,12 @@ pub const Tower = struct {
             try t.dense(ru, big, bl.d_w, bl.d_b, 0, x32, acc, N, H, MLP);
         }
         // the post-norm, then each merge block's four patches (adjacent rows) through the 2 x 2 conv as one linear
+        try t.bring(ru, DEPTH + 1);
         try rmsnorm(ru, x32, t.post, xn, N, H);
         const M = @divExact(N, MERGE * MERGE);
         try t.dense(ru, xn, .{ .bf16 = t.down_w }, t.down_b, att, 0, acc, M, OUT, 4 * H);
         // the merger: projection, LayerNorm + GELU, the limited SwiGLU to 10240 and back
+        try t.bring(ru, DEPTH + 2);
         var r: i64 = 0;
         while (r < M) : (r += ROWS) {
             const rows = @min(ROWS, M - r);
@@ -538,6 +538,7 @@ pub const Tower = struct {
             try launch(ru, ru.f.ln_gelu, .{ .x = @intCast(rows) }, 256, &a);
         }
         r = 0;
+        try t.bring(ru, DEPTH + 3);
         const step = @divFloor(ROWS * MLP, PROJ);
         while (r < M) : (r += step) {
             const rows = @min(step, M - r);

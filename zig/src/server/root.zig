@@ -18,6 +18,7 @@ pub const Config = server.Config;
 
 test {
     _ = @import("auth_scope_test.zig");
+    _ = @import("family_sampling.zig");
     _ = @import("auth_scope_http_test.zig");
     _ = @import("admission_cli.zig");
     _ = @import("request_admission_test.zig");
@@ -50,6 +51,7 @@ test {
     _ = @import("grammar.zig");
     _ = @import("pyrepr.zig");
     _ = @import("metrics.zig");
+    _ = @import("load_metrics.zig");
     _ = @import("http_conn.zig");
     _ = @import("auth.zig");
     _ = @import("cli.zig");
@@ -90,6 +92,7 @@ test {
     _ = @import("tool_cut_test.zig");
     _ = @import("logprobs_test.zig");
     _ = @import("think_split_test.zig");
+    _ = @import("deepseek_reply_test.zig");
     _ = @import("thinking_reserve_test.zig");
     _ = @import("loop_stop_test.zig");
     _ = @import("late_system_test.zig");
@@ -99,6 +102,8 @@ test {
     _ = @import("completion_prompt_test.zig");
     _ = @import("hf_eos_http_test.zig");
     _ = @import("reply_gpu_seconds_test.zig");
+    _ = @import("spark_wire.zig");
+    _ = @import("spark_wire_test.zig");
     _ = @import("server_init_test.zig");
     _ = @import("connection_arena_test.zig");
     _ = @import("decisions.zig");

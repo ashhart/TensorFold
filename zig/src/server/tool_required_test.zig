@@ -414,3 +414,37 @@ test "grammar_budget: a boolean that marks a covered grammar, refused when malfo
     }
     try std.testing.expectEqual(fake.compiles, fake.frees); // refused requests free what they compiled
 }
+
+test "auto tools: a strict tool gets the optional-call grammar, other auto requests none, LFM2 stays free" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const g = arena.allocator();
+    var stub: Stub = .{};
+    var compile: Compile = .{};
+    var compiler = compile.compiler();
+    const strict = "[{\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"strict\":true,\"parameters\":{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"}},\"required\":[\"q\"]}}},{\"type\":\"function\",\"function\":{\"name\":\"now\"}}]";
+    for ([_]@FieldType(Text, "form"){ .xml, .json, .gemma, .lfm2, .unknown }) |form| for ([_][]const u8{ specs, strict }) |offered| {
+        var text: Text = .{ .form = form };
+        const srv = try Server.init(a, std.testing.io, stub.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"} }, null);
+        defer srv.deinit();
+        srv.info.structures = true;
+        srv.grammars = &compiler;
+        var cx: errors.Cx = .{ .a = g };
+        var request: api.Request = .{ .prompt = &.{1}, .max_tokens = 200 };
+        try srv.checkFeatures(&cx, try value(g, "{}"), true, false, &.{1}, (try value(g, offered)).array, &request);
+        if (std.mem.eql(u8, offered, specs) or form == .lfm2) {
+            try std.testing.expect(request.structure == null);
+            continue;
+        }
+        const format = (try value(g, request.structure.?.text)).get("format").?;
+        try std.testing.expectEqualStrings("triggered_tags", format.strField("type").?);
+        try std.testing.expect(!format.get("stop_after_first").?.bool);
+        try std.testing.expect(std.mem.indexOf(u8, request.structure.?.text, "\"required\":[\"q\"]") != null);
+        var single: api.Request = .{ .prompt = &.{1}, .max_tokens = 200 };
+        try srv.checkFeatures(&cx, try value(g, "{\"tool_call_single\":true}"), true, false, &.{1}, (try value(g, offered)).array, &single);
+        try std.testing.expect((try value(g, single.structure.?.text)).get("format").?.get("stop_after_first").?.bool);
+        var required: api.Request = .{ .prompt = &.{1}, .max_tokens = 200 };
+        try srv.checkFeatures(&cx, try value(g, "{\"tool_call_required\":true}"), true, false, &.{1}, (try value(g, offered)).array, &required);
+        try std.testing.expectEqualStrings("sequence", (try value(g, required.structure.?.text)).get("format").?.strField("type").?);
+    };
+}

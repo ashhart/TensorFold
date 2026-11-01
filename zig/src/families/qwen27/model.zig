@@ -18,6 +18,9 @@ pub const Model = struct {
     allocator: std.mem.Allocator,
     device: mtl.Device,
     queue: mtl.Queue,
+    /// This rank's share of the family's weights; `local` shapes are what this graph builds, `global` the file's.
+    shard: cfg.Shard,
+    /// The local config, so downstream shapes are the rank's own.
     config: cfg.Config,
     checkpoint: core.checkpoint_metal.Checkpoint,
     weights: wts.Weights,
@@ -41,6 +44,16 @@ pub const Model = struct {
         return loadWith(a, io, dir, rows, null, true);
     }
 
+    /// One rank of a `ranks`-way tensor-parallel run: the same checkpoint, sliced in the engine.
+    pub fn loadShard(a: std.mem.Allocator, io: std.Io, dir: []const u8, rows: u32, rank: u32, ranks: u32, mode: cfg.Mode, share_fits: ?*const fn (u64) bool) !*Model {
+        return loadShared(a, io, dir, rows, rank, ranks, mode, share_fits, false);
+    }
+
+    /// One rank of a pair, its share decided after everything else is accounted for (the serving order).
+    pub fn loadShardDeferred(a: std.mem.Allocator, io: std.Io, dir: []const u8, rows: u32, rank: u32, ranks: u32, mode: cfg.Mode) !*Model {
+        return loadShared(a, io, dir, rows, rank, ranks, mode, null, true);
+    }
+
     fn loadWith(
         a: std.mem.Allocator,
         io: std.Io,
@@ -49,26 +62,43 @@ pub const Model = struct {
         share_fits: ?*const fn (u64) bool,
         later: bool,
     ) !*Model {
+        return loadShared(a, io, dir, rows, 0, 1, .full, share_fits, later);
+    }
+
+    fn loadShared(
+        a: std.mem.Allocator,
+        io: std.Io,
+        dir: []const u8,
+        rows: u32,
+        rank: u32,
+        ranks: u32,
+        mode: cfg.Mode,
+        share_fits: ?*const fn (u64) bool,
+        later: bool,
+    ) !*Model {
         const path = try std.fs.path.join(a, &.{ dir, "config.json" });
         defer a.free(path);
         const text = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 20));
         defer a.free(text);
         const c = try cfg.parse(a, text, null);
-        try supported(c);
+        var local = c;
+        const shard = if (ranks == 1) cfg.Shard{ .rank = 0, .ranks = 1, .global = c, .local = local } else try cfg.split(&local, rank, ranks, mode);
+        try supported(shard.global);
         var formats = try affine.Formats.init(a, text);
         defer formats.deinit();
-        var ws = try widths.Widths.resolve(a, &formats, c);
+        var ws = try widths.Widths.resolve(a, &formats, shard.local);
         defer ws.deinit();
         const m = try a.create(Model);
         errdefer a.destroy(m);
         m.allocator = a;
-        m.config = c;
+        m.shard = shard;
+        m.config = shard.local;
         m.widths_tag = ws.tag();
         m.device = try mtl.Device.init();
         errdefer m.device.deinit();
         if (!qualifiedGeneration(m.device.generation())) return error.QwenMetalQualificationRequired;
         var why: widths.Why = .{};
-        widths.admit(&ws, c, .{ .tensor_units = m.device.tensorUnits() }, &why) catch |err| {
+        widths.admit(&ws, shard.local, .{ .tensor_units = m.device.tensorUnits() }, &why) catch |err| {
             std.log.err("qwen27: {s} (layer {?d}) is {d}-bit group {d}; this chip's projection kernels do not run it ({s})", .{ why.module, why.layer, why.width.bits, why.width.group, @errorName(why.reason) });
             return err;
         };
@@ -80,14 +110,14 @@ pub const Model = struct {
         defer core.checkpoint_host.freeShardFiles(a, files);
         // projections stay in the files until load repacks them: the weights live once, in their lane layouts
         for (files) |file| try m.checkpoint.addFileSplit(m.device, file, "", "language_model.", wts.repacked);
-        m.weights = try wts.load(a, m.device, &m.checkpoint, c, &ws);
+        m.weights = try wts.load(a, m.device, &m.checkpoint, &m.shard, &ws);
         errdefer m.weights.deinit();
-        m.kernels = .{ .allocator = a, .device = m.device, .raw_tiles = !m.device.tensorUnits() };
+        m.kernels = .{ .allocator = a, .device = m.device, .raw_tiles = !m.device.tensorUnits(), .long_prompt = quant.longPrompt(std.mem.span(m.device.name()), m.device.tensorUnits()) };
         errdefer m.kernels.deinit();
         m.glue = try glue.Kernels.init(m.device);
         errdefer m.glue.deinit();
         // Serving defers automatic widening until its context and streams are known; explicit widths stay exact.
-        m.frame = try Frame.init(m.device, c, @max(rows, promptRows(if (later) 0 else m.device.generation())));
+        m.frame = try Frame.init(m.device, shard.local, @max(rows, promptRows(if (later) 0 else m.device.generation())));
         errdefer m.frame.deinit();
         m.ane = null;
         m.share_pending = true;
@@ -106,7 +136,9 @@ pub const Model = struct {
         defer m.checkpoint.closeFiles();
         const c = m.config;
         const columns = try ane_policy.columns(if (platform.c.getenv("TF_ANE_COLUMNS")) |v| std.mem.span(v) else null);
-        const share = ane_policy.requestedOnChip(columns, m.device.tensorUnits()) and mtl.ane.available() and m.weights.uniformMlp();
+        // The share is a whole MLP's columns: a rank holds half of them, so tensor parallel keeps prompts on the GPU.
+        const share = m.shard.ranks == 1 and ane_policy.requestedOnChip(columns, m.device.tensorUnits()) and mtl.ane.available() and m.weights.uniformMlp();
+        if (m.shard.ranks != 1) std.log.info("qwen27: tensor parallel rank {d}/{d} runs prompts on the GPU alone", .{ m.shard.rank, m.shard.ranks });
         const bytes = ane_mlp.Share.bytes(c, columns);
         const slices = (m.frame.capacity + ane_mlp.width - 1) / ane_mlp.width;
         const required: ?u64 = if (share) ane_mlp.Share.totalBytes(c, columns, slices, ane_policy.build_runtime_overhead) catch |err| switch (err) {

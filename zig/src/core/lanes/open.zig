@@ -19,12 +19,18 @@ pub fn add(e: *Engine, s: *Stream) !void {
 }
 
 pub fn addCommitted(e: *Engine, s: *Stream, hook: ?be.Committed) !void {
+    return addNoted(e, s, hook, null);
+}
+
+/// `addCommitted`, with `done` set once the prompt pass completes, before the first token can fail.
+fn addNoted(e: *Engine, s: *Stream, hook: ?be.Committed, done: ?*bool) !void {
     _ = e.arena.reset(.retain_capacity);
     try trail.event(e, &.{ f("ev", str("add")), f("stream", str(s.id)) });
     e.backend.prefill(s) catch |err| {
         if (err == error.Cancelled) e.backend.release(s); // the host finishes a cancelled stream without the core
         return err;
     };
+    if (done) |d| d.* = true;
     try openedCommitted(e, s, .rule, hook);
 }
 
@@ -34,18 +40,20 @@ pub const Reach = enum { rule, head };
 /// Streams a backend prefills in one pass at most.
 pub const max_together = 16;
 
-/// `add` for several streams, prompts in one pass when the backend takes them; `errs[i]`: stream i's error, or null.
-pub fn addStreams(e: *Engine, ss: []const *Stream, errs: []?anyerror) void {
+/// `add` for several streams, in one pass when the backend takes them; `errs[i]`: its error; `done[i]`: its prompt ran.
+pub fn addStreams(e: *Engine, ss: []const *Stream, errs: []?anyerror, done: []bool) void {
     for (errs) |*x| x.* = null;
-    const many = e.backend.vtable.prefill_many orelse return addEach(e, ss, errs);
-    if (ss.len < 2 or ss.len > max_together) return addEach(e, ss, errs);
+    for (done) |*d| d.* = false;
+    const many = e.backend.vtable.prefill_many orelse return addEach(e, ss, errs, done);
+    if (ss.len < 2 or ss.len > max_together) return addEach(e, ss, errs, done);
     _ = e.arena.reset(.retain_capacity);
     for (ss) |s| trail.event(e, &.{ f("ev", str("add")), f("stream", str(s.id)) }) catch {};
     const together = many(e.backend.ptr, ss) catch |err| blk: { // one stream's refusal is its own: each goes alone
         std.log.warn("{d} prompts together: {s}; each goes alone", .{ ss.len, @errorName(err) });
         break :blk false;
     };
-    if (!together) return addEach(e, ss, errs);
+    if (!together) return addEach(e, ss, errs, done);
+    for (done) |*d| d.* = true;
     for (ss, errs) |s, *x| opened(e, s) catch |err| { // a stream cancelled in the pass gets no first token
         x.* = err;
     };
@@ -57,8 +65,8 @@ pub fn batchable(e: *const Engine, s: *const Stream) bool {
     return n > 0 and s.prompt_len <= n and s.images.len == 0 and s.reuse.saved == null;
 }
 
-fn addEach(e: *Engine, ss: []const *Stream, errs: []?anyerror) void {
-    for (ss, errs) |s, *x| add(e, s) catch |err| {
+fn addEach(e: *Engine, ss: []const *Stream, errs: []?anyerror, done: []bool) void {
+    for (ss, errs, done) |s, *x, *d| addNoted(e, s, null, d) catch |err| {
         x.* = err;
     };
 }
