@@ -166,7 +166,7 @@ pub fn run(k: *const Kernels, ek: *const experts.Kernels, stream: cuda.Stream, w
         try copyRows(stream, sc.picks, top_k * 4, picks + at * slots * 4, slots * 4, top_k * 4, n, "EXL3 compact route rows");
         const output = if (fused) blk: {
             const scratch = try common.prompt.scratch(arena, l, cap, top_k);
-            try k.prompt.run(k, ek.router, stream, l, x + at * x_stride * 2, x_stride, sc.picks, n, scratch, plan_buf);
+            try k.prompt.run(k, ek.router, stream, l, x + at * x_stride * 2, .bf16, x_stride, sc.picks, n, scratch, plan_buf);
             break :blk scratch.y;
         } else blk: {
             const scratch = try common.scratch(arena, l, cap, top_k);
