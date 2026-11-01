@@ -288,7 +288,7 @@ pub const Leader = struct {
         try x.flush();
         var buf: [3 * dflash.MAX_S]u32 = undefined;
         for (reqs, 0..) |q, i| buf[3 * i ..][0..3].* = .{ q.slot, @intCast(q.n), q.anchor };
-        try x.send(.{ .kind = @backingInt(Kind.block), .depth = @intCast(reqs.len) }, buf[0 .. 3 * reqs.len]);
+        try x.send(.{ .kind = @backingInt(Kind.block), .depth = @intCast(reqs.len), .flags = @import("dflash_proposals.zig").mask(reqs) }, buf[0 .. 3 * reqs.len]);
         try x.e.draftBlock(reqs);
     }
 
@@ -391,7 +391,7 @@ pub fn follow(e: *Engine, link: *Link) !void {
                 const k = h.depth;
                 if (k == 0 or k > dflash.MAX_S or step.ids.len != 3 * k) return error.BadStep;
                 var reqs: [dflash.MAX_S]dflash.Req = undefined;
-                for (reqs[0..k], 0..) |*q, i| q.* = .{ .slot = step.ids[3 * i], .pos = 0, .n = step.ids[3 * i + 1], .anchor = step.ids[3 * i + 2] };
+                for (reqs[0..k], 0..) |*q, i| q.* = .{ .slot = step.ids[3 * i], .pos = 0, .n = step.ids[3 * i + 1], .anchor = step.ids[3 * i + 2], .propose = @import("dflash_proposals.zig").enabled(h.flags, i) };
                 try e.draftBlock(reqs[0..k]);
             },
             .image => {

@@ -116,6 +116,7 @@ pub fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     golden_build.step(b, target, server_tests, api, tokenizer, template, engines);
     engines.addImport("lanes", api.import_table.get("lanes").?);
     b.step("test-draft-metal-host", "Metal draft source metadata without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engines, .filters = &.{"draft sources:"} })).step);
+    b.step("test-drafter-skip-metal-host", "Counted shared draft skips without device execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engine, .filters = &.{"zero grant:"} })).step);
     b.step("test-native", "The Metal engines module's host-side tests").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engines })).step);
     const reuse = b.addExecutable(.{ .name = "tf-flashnext-reuse", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/flashnext_reuse.zig"),
