@@ -33,12 +33,12 @@ pub fn relu2PairGo(k: *const Kernels, r: *const runtime.Runtime, a: Arg, b: Arg,
     const bi = std.mem.indexOfScalar(c_int, &affine.bit_widths, a.bits) orelse return false;
     var lpc_log2: u5 = 0;
     while ((@as(c_int, 1) << lpc_log2) < (a.k >> 5) and lpc_log2 < 5) lpc_log2 += 1;
-    const ri: usize = if (a.m == 1) 0 else if (a.m == 2) 1 else 2;
+    const ri = stream_pick.rowTile(a.m);
     // the routed product's own column count a lane, as its launch alone takes it (the bits do not depend on it)
-    const pick = stream_pick.pick(k.caps.generation, a.m, lpc_log2, a.bits, a.n, items, 1);
-    const per: c_int = affine.stream_waves * (@as(c_int, 32) >> lpc_log2) * affine.stream_cbs[pick];
+    const tile = stream_pick.pick(k.caps.generation, a.m, lpc_log2, a.bits, a.n, items, false);
+    const per = tile.per_block;
     const split = cdiv(a.n, per);
-    const f = k.relu2_pair[bi][ri][pick] orelse return false;
+    const f = k.relu2_pair[bi][ri][tile.at] orelse return false;
     var args: hl.Args = .{};
     try args.add(a);
     try args.add(b);
