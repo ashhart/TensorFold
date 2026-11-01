@@ -22,15 +22,13 @@ pub fn openCache(b: anytype, stream: *@import("lanes").Stream, capacity: usize) 
     return cache;
 }
 
-/// TF_NEMOTRON_METAL_KV_PAGES: a free lane promised and holding the pages of `capacity` rows; LaneMemory: none now.
+/// TF_NEMOTRON_METAL_KV_PAGES: a free lane promised the pages of `capacity` rows; LaneMemory: none now.
 fn leasePages(b: anytype, capacity: usize) !?@import("state.zig").Lease {
     const pages = b.kv_pages orelse return null;
     const lane = for (pages.leases, 0..) |l, i| {
         if (l.promised == 0 and l.ids.items.len == 0) break i;
     } else return error.LaneMemory;
-    try pages.admit(lane, pages.layout.pages(capacity));
-    errdefer pages.finish(lane);
-    try pages.cover(lane, capacity); // every row's page now: a GPU round writes rows the host does not see first
+    try pages.admit(lane, pages.layout.pages(capacity)); // its pages are taken as its rows grow (kv_pages.grow)
     return .{ .pages = pages, .lane = lane };
 }
 
