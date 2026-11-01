@@ -32,6 +32,7 @@ test "HIP record counts stay pinned in their owning files" {
         @import("hip_records_qwen_vision.zig").records.len,
         @import("hip_records_router.zig").records.len,
         @import("hip_records_score.zig").records.len,
+        @import("hip_records_sparse.zig").records.len,
         @import("hip_records_stream_plain.zig").records.len,
         @import("hip_records_stream_swiglu.zig").records.len,
         @import("hip_records_tail.zig").records.len,
