@@ -107,9 +107,10 @@ Inputs use varied BF16 exponents and signs to expose a changed sum order.
 A separate N=129 tail fixture plants NaNs, infinities, signed zeros and
 subnormals in the inputs, and checks that inputs and weights stay unchanged.
 
-The benchmark checks equality first, then times four ways: the 64-row
-lane, prompt16, the forced tile and the lane's own gated choice. Each
-row count runs four rounds that rotate the ways' order, with CUDA timing
+The benchmark checks equality first, then times five ways: the 64-row
+lane, prompt16, the forced K64 tile, the forced K32 tile (unsplit
+calls) and the lane's own gated choice. Each row count runs five rounds
+that rotate the ways' order, with CUDA timing
 events, three warmups and twenty calls per sample. It prints each way's
 median for the nine Flash Next shapes and a total weighted by calls.
 Run on an idle GB10. These warm microbenchmarks do not prove the full

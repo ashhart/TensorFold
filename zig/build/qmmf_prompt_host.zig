@@ -22,6 +22,6 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, core: *std.Build.Module, st
         .link_libc = true,
         .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core } },
     }), .filters = &.{"qmmf prompt contract"} }));
-    b.step("test-qmmf-prompt-contract-host", "Four BF16 prompt instances and their contract/limit coverage without a GPU").dependOn(&qmmf_prompt_contract.step);
+    b.step("test-qmmf-prompt-contract-host", "BF16 K64 and K32 prompt instances, controls and limits without a GPU").dependOn(&qmmf_prompt_contract.step);
     step.dependOn(&qmmf_prompt_contract.step);
 }

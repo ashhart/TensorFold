@@ -1,4 +1,4 @@
-//! BF16 prompt tiles against the unchanged lane kernels, including forced small tiles and GPU event timing.
+//! BF16 K32 prompt staging against the parent 128x128 K64 tile, including forced tails and GPU event timing.
 const std = @import("std");
 const cuda = @import("cuda");
 const check = @import("check.zig");
@@ -92,20 +92,15 @@ const Fixture = struct {
         try f.product(m, out, false, f.old.ptr + guard);
     }
 
-    // Force the new tile even at one row, independently of the production threshold and slice meeting choice.
     fn candidate(f: *Fixture, m: usize, out: q.Out) !void {
         try f.product(m, out, true, f.new.ptr + guard);
     }
 
+    // Force the parent's K64 or new unsplit K32 tile even below the production threshold.
     fn product(f: *Fixture, m: usize, out: q.Out, candidate_: bool, dest: u64) !void {
-        if (!candidate_) {
-            var old = f.lane.*;
-            old.prompt = null;
-            return old.matmulOut(f.s, f.x.ptr, f.ldx, m, f.w, dest, out, f.part.ptr);
-        }
         const sk = f.w.sk;
-        const fused = sk > 1;
-        const fun = f.lane.prompt.?[@backingInt(out)][@intFromBool(fused)];
+        const k32 = candidate_ and sk == 1;
+        const fun = if (k32) f.lane.prompt_k32.?[@backingInt(out)] else f.lane.prompt.?[@backingInt(out)][@intFromBool(sk > 1)];
         const band = @max(1, @min((m + 127) / 128, (12 << 20) / (128 * f.w.k * 2)));
         var args: cuda.Args = .{};
         args.add(f.x.ptr);
@@ -124,7 +119,7 @@ const Fixture = struct {
         try cuda.launch.launch(fun, .{
             .grid = .{ .x = @intCast(((m + 127) / 128) * ((f.w.n + 127) / 128)), .y = 1, .z = 1 },
             .block = .{ .x = 256, .y = 1, .z = 1 },
-            .shared = q.prompt_shared,
+            .shared = if (k32) q.prompt_k32_shared else q.prompt_shared,
         }, f.s, &args);
     }
 
@@ -149,7 +144,7 @@ const Fixture = struct {
             try f.candidate(m, out);
             try f.s.synchronize();
             try f.new.download(guard, got);
-            try check.sameBytes("forced BF16 prompt tile", got, want);
+            try check.sameBytes("K32 versus parent K64 prompt tile", got, want);
             try f.guards(bytes);
         }
         try f.new.fill8(0x5a, f.s.handle);
@@ -157,7 +152,7 @@ const Fixture = struct {
         try f.lane.matmulOut(f.s, f.x.ptr, f.ldx, m, f.w, f.new.ptr + guard, out, f.part.ptr);
         try f.s.synchronize();
         try f.new.download(guard, got);
-        try check.sameBytes("production BF16 prompt dispatch", got, want);
+        try check.sameBytes("production prompt versus parent K64 tile", got, want);
         try f.guards(bytes);
     }
 
@@ -220,7 +215,7 @@ pub fn run(gpu: check.Gpu) !void {
                 lane.clusters = clusters;
                 for ([_]q.Out{ .bf16, .f32 }) |out| for (rows) |m| {
                     try f.compare(m, out, if (m == 4218) 5 else 1);
-                    check.pass("qmmf-prompt M={d} N={d} K={d} SK={d} out={t} clusters={}", .{ m, f.w.n, f.w.k, sk, out, clusters });
+                    check.pass("qmmf-prompt K32/K64 M={d} N={d} K={d} SK={d} out={t} clusters={}", .{ m, f.w.n, f.w.k, sk, out, clusters });
                 };
             }
         }
@@ -281,13 +276,19 @@ fn special(gpu: check.Gpu, s: cuda.Stream, lane: *q.Lane) !void {
     check.pass("qmmf-prompt N=129: nonfinite, subnormal and signed-zero input bytes, immutable inputs", .{});
 }
 
-/// The 64-row lane, #1764's prompt16 tile (cuda.nvfp4.Prompt), this tile, and the lane's own choice, one product each.
-const Way = enum { lane, prompt16, tile, gated };
+/// The 64-row lane, #1764's prompt16, the parent K64 tile, K32 (unfused) and the lane's own choice, one product each.
+const Way = enum { lane, prompt16, k64, k32, gated };
 
 fn product3(f: *Fixture, p16: *const cuda.nvfp4.Prompt, m: usize, out: q.Out, way: Way, dest: u64) !void {
     switch (way) {
-        .lane => try f.product(m, out, false, dest),
-        .tile => try f.product(m, out, true, dest),
+        .lane => {
+            var lane = f.lane.*;
+            lane.prompt = null;
+            lane.prompt_k32 = null;
+            try lane.matmulOut(f.s, f.x.ptr, f.ldx, m, f.w, dest, out, f.part.ptr);
+        },
+        .k64 => try f.product(m, out, false, dest),
+        .k32 => try f.product(m, out, true, dest),
         .prompt16 => try p16.matmulOut(f.s, f.x.ptr, f.ldx, m, f.w, dest, out),
         .gated => try f.lane.matmulOut(f.s, f.x.ptr, f.ldx, m, f.w, dest, out, f.part.ptr),
     }
@@ -336,7 +337,7 @@ pub fn bench(gpu: check.Gpu) !void {
     var p16 = try cuda.nvfp4.Prompt.load(gpu.d);
     defer p16.unload();
     // weighted by each projection's calls in one normal main-model pass, per row count and way
-    var totals: [bench_rows.len][4]f64 = @splat(@splat(0));
+    var totals: [bench_rows.len][5]f64 = @splat(@splat(0));
     for (normal) |shape| {
         var f = try Fixture.init(gpu, s, &lane, shape.n, shape.k, bench_rows[bench_rows.len - 1]);
         defer f.deinit();
@@ -346,20 +347,20 @@ pub fn bench(gpu: check.Gpu) !void {
         for (bench_rows, 0..) |m, mi| {
             try f.compare(m, out, 1);
             try samePrompt16(&f, &p16, m, out);
-            // four rounds, each way's turn rotating within a round; the median of each way
-            var t: [4][4]f64 = undefined;
-            for (0..4) |round| for (0..4) |j| {
-                const i = (round + j) % 4;
+            // five rounds, each way's turn rotating within a round; the median of each way
+            var t: [5][5]f64 = undefined;
+            for (0..5) |round| for (0..5) |j| {
+                const i = (round + j) % 5;
                 t[i][round] = try time3(&f, &p16, m, out, @fromBackingInt(@intCast(i)));
             };
-            var med: [4]f64 = undefined;
+            var med: [5]f64 = undefined;
             for (&med, &t) |*x, *row| x.* = check.median(row);
             const calls: f64 = @floatFromInt(shape.calls);
             for (&totals[mi], med) |*x, v| x.* += v * calls;
-            std.debug.print("BENCH qmmf-prompt {s} M={d} N={d} K={d} SK={d} out={t} lane={d:.4} prompt16={d:.4} tile={d:.4} gated={d:.4}{s} ms\n", .{ shape.name, m, f.w.n, f.w.k, f.w.sk, out, med[0], med[1], med[2], med[3], if (lane.usesPrompt(m, f.w)) "(tile)" else "(lane)" });
+            std.debug.print("BENCH qmmf-prompt {s} M={d} N={d} K={d} SK={d} out={t} lane={d:.4} prompt16={d:.4} k64={d:.4} k32={d:.4} gated={d:.4}{s} ms\n", .{ shape.name, m, f.w.n, f.w.k, f.w.sk, out, med[0], med[1], med[2], med[3], med[4], if (lane.usesPrompt(m, f.w)) "(tile)" else "(lane)" });
         }
     }
-    for (bench_rows, totals) |m, x| std.debug.print("BENCH qmmf-prompt weighted 36/12/48/96/48/96/96/1/1 M={d}: lane={d:.3} prompt16={d:.3} tile={d:.3} gated={d:.3} ms\n", .{ m, x[0], x[1], x[2], x[3] });
+    for (bench_rows, totals) |m, x| std.debug.print("BENCH qmmf-prompt weighted 36/12/48/96/48/96/96/1/1 M={d}: lane={d:.3} prompt16={d:.3} k64={d:.3} k32={d:.3} gated={d:.3} ms\n", .{ m, x[0], x[1], x[2], x[3], x[4] });
 }
 
 test "qmmf prompt scratch fixture uses usize before multiplication and covers every split row count" {
@@ -402,7 +403,7 @@ test "qmmf prompt scratch keeps the current normal weights and bounds all-logit 
     try std.testing.expect(q.promptEligible(4 * 256, hidden));
 }
 
-test "qmmf prompt scratch timed launches share one output while byte comparisons keep separate outputs" {
+test "qmmf prompt scratch timed fused control shares one kernel, arguments and output" {
     const Trace = struct {
         var calls: usize = 0;
         var ids: [2]usize = undefined;
@@ -454,7 +455,9 @@ test "qmmf prompt scratch timed launches share one output while byte comparisons
         try f.timed(m, false, out);
         try f.timed(m, true, out);
         try std.testing.expectEqual(@as(usize, 2), Trace.calls);
-        try std.testing.expectEqualSlices(usize, &.{ 10, 20 }, &Trace.ids);
+        try std.testing.expectEqualSlices(usize, &.{ 20, 20 }, &Trace.ids);
+        try std.testing.expectEqualDeep(Trace.args[0], Trace.args[1]);
+        try std.testing.expectEqualDeep(Trace.geometry[0], Trace.geometry[1]);
         for (Trace.args) |a| try std.testing.expectEqual(f.new.ptr + guard, a[4]);
         Trace.calls = 0;
         try f.baseline(m, out);
