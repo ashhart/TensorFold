@@ -167,19 +167,22 @@ pub fn Ops(comptime Tri: type) type {
                 try p.readout(h.layer.attn_hc, 0, m);
                 try p.attnBlock(&h.layer, 0);
                 try tri.hcWriteback(s.h, s.h, s.pss, s.part, "*fp32", s.inj, s.dummy, "*bf16", s.dummy, "*bf16", m * dims, m, dims, streams, 4, 1, 1, p.out_slices);
-                try p.readout(h.layer.mlp_hc, 0, m);
-                try p.moeBlock(&h.layer);
-                p.pending = 0;
-                try p.writeback(0, m);
-                try p.copy(d.out.ptr, s.h + (m - 1) * wide * 2, wide * 2);
                 d.len += m;
                 at += m;
-                if (at == next.len and scores) {
-                    // the last row's streams and sums at row 0, where the captured kernels' pointers stay aligned
-                    if (m > 1) {
-                        try p.copy(s.h, s.h + (m - 1) * wide * 2, wide * 2);
-                        try p.copy(s.pss, s.pss + (m - 1) * pss_n * 4, pss_n * 4);
-                    }
+                // the cache is written; only the call's last row reaches d.out, so the experts run on it alone
+                if (at < next.len) continue;
+                if (m > 1) {
+                    try p.copy(s.h, s.h + (m - 1) * wide * 2, wide * 2);
+                    try p.copy(s.pss, s.pss + (m - 1) * pss_n * 4, pss_n * 4);
+                    p.rows = 1;
+                }
+                try p.readout(h.layer.mlp_hc, 0, 1);
+                try p.moeBlock(&h.layer);
+                p.pending = 0;
+                try p.writeback(0, 1);
+                try p.copy(d.out.ptr, s.h, wide * 2);
+                if (scores) {
+                    // the last row's streams and sums are at row 0, where the captured kernels' pointers stay aligned
                     try p.readout(h.mixer, 0, 1);
                     try h.project(&p, s.mixed, s.xsm, d.dlogits.ptr, 1);
                 }
