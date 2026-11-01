@@ -458,7 +458,7 @@ test "descriptor identity includes numeric geometry and limits still refuse new 
     var plan = try Plan.init(std.testing.allocator, &.{.{ .parents = &.{-1}, .start = 0, .capacity = 8 }}, .{});
     defer plan.deinit();
     const before = fingerprint(plan);
-    plan.geometry.heads = 16;
+    plan.geometry.heads = 20; // GQA 5: no shader build takes it
     try std.testing.expect(!std.mem.eql(u8, &before, &fingerprint(plan)));
     try std.testing.expectError(error.TargetAttentionShape, validLimits(.{ .geometry = plan.geometry }));
 }
