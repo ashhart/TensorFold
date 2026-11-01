@@ -115,7 +115,7 @@ fn absorb(d: *q.dspark.Drafter, piece: q.dspark_block.Piece) !void {
     try q.dspark_block.absorbNow(d, &.{piece});
 }
 
-/// An absorb of `rows` tapped rows from row `row` of `buf` (the target's rows, as the drafter takes them), `row` the context's start.
+/// An owned tapped-row span; `row` is both the source row and context start.
 fn ownAbsorb(key: *tf.lanes.Stream, buf: mtl.Buffer, row_bytes: usize, row: usize, rows: u32, prompt: bool) tf.lanes.drafter.Absorb {
     return .{
         .stream = key,
@@ -126,14 +126,7 @@ fn ownAbsorb(key: *tf.lanes.Stream, buf: mtl.Buffer, row_bytes: usize, row: usiz
     };
 }
 
-/// The public hold path on eight real lanes of capacity 64 (empty contexts, anchor 0) at depths [9, 1 x 7], stock block 9.
-/// holdFn's greedy partition gives a pass of 3 blocks of 9 rows (27 <= 32; a 4th would make 36) then one of 5 blocks of 1
-/// row: both synchronous, so nothing stays pending. The grid is a SYNTHETIC control (10000 ms scale, real GPU times are a
-/// thousandth of it), so each completed group's tenth-of-the-way step lands just under x0.9 and the shapes that
-/// participated are visible: 3 blocks move the timed 2- and 4-block passes, 5 blocks the 4- and 8-block ones (so the
-/// 4-block ones move twice); the 1- and 16-block passes are untouched controls. A single combined pass of 8 blocks would
-/// move only the 8-block passes. Each group's own GPU ms is not separately observable without production telemetry, so
-/// the bounds below are on the grid's steps, and the taken time is only bounded by the call's wall time.
+/// Real-lane 3x9 + 5x1 split: same-kernel reference picks and synthetic grid controls, not a speed measurement.
 fn splitHold(gpa: std.mem.Allocator, io: std.Io, d: *q.dspark.Drafter, ids: []const u32) !void {
     const depths = [8]u32{ 9, 1, 1, 1, 1, 1, 1, 1 };
     const groups = [2][2]usize{ .{ 0, 3 }, .{ 3, 8 } }; // the lanes each physical pass holds
@@ -245,11 +238,7 @@ pub fn main(init: std.process.Init) !void {
     var held: [16]u32 = undefined;
     @memcpy(held[0..block], lane.held[0..block]);
     const gpu = held[0..block];
-    // the owned stage: the context taken in uneven absorbs (the prompt's rows first, the last rows taken again) waits on the
-    // host and one hold absorbs it as ONE piece of ctx rows from position 0 (the staged rows are bytes of the same taps).
-    // The direct absorbs above are also one piece of ctx rows while ctx <= absorb_rows, so fc, k, v and qk see the same row
-    // count in both lanes and run the same kernels (bf16: rows <= 32 the 16-row kernel, above it the 64x64 tiles; 8-bit: the
-    // twin to 32 rows, above it the tensor or tile kernels): exact equality of keys, values and picks, no tolerance.
+    // Compare identical taps through staged and direct paths in the same numerical regime.
     if (ctx > 3 and ctx <= @min(q.dspark.absorb_rows, @min(q.dspark.stage_rows, lane.cap))) {
         const key: *tf.lanes.Stream = @ptrFromInt(0x1000);
         const own = try d.newLane(length + 32);
@@ -280,8 +269,7 @@ pub fn main(init: std.process.Init) !void {
         };
         std.debug.print("the owned stage: {d} rows staged in uneven absorbs, absorbed as one {d}-row piece like the direct absorbs' ({s} regime): keys, values and picks equal\n", .{ ctx, ctx, if (ctx <= 32) "<= 32-row" else "> 32-row" });
     }
-    // settled GPU time is taken once: a standalone absorb adds its time and leaves the grid as it was; a synchronous
-    // one-block hold adds its own and reprices exactly the passes at one block (other block counts stay as timed)
+    // Absorb time is consumed once without repricing; a hold reprices only participating shapes.
     {
         const grid = d.holds;
         const grid_len = d.holds_len;

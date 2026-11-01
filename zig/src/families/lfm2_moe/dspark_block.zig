@@ -127,8 +127,7 @@ fn failed(msg: [*:0]const u8) anyerror {
     return error.GpuFailed;
 }
 
-/// The encoder ended, the buffer committed and waited on; its GPU ms join the settled time and are returned, both before
-/// the caller releases the buffer. A failed buffer returns its error with no time taken.
+/// Commits and waits, recording GPU time only for successful command buffers before release.
 fn finish(d: *Drafter, cb: mtl.CommandBuffer, e: mtl.ComputeEncoder) !f64 {
     e.end();
     cb.commit();
@@ -188,8 +187,7 @@ pub fn absorbNow(d: *Drafter, pieces: []const Piece) !void {
     return end(d, run.cb, run.e);
 }
 
-/// The drafter's GPU ms since the last take: signalled holds once settled, and every command buffer it waited on.
-/// Reads what completed; never submits, waits or allocates.
+/// Drains already-settled GPU time once, without submitting, waiting or allocating.
 pub fn takeHoldMs(ptr: *anyopaque) f64 {
     const d: *Drafter = @ptrCast(@alignCast(ptr));
     const ms = d.hold_spent_ms;

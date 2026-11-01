@@ -30,9 +30,7 @@ pub fn holdMs(costs: []const HoldCost, streams: usize, depth: i64) f64 {
     return at_lo + t * (atDepth(costs, hi, depth) - at_lo);
 }
 
-/// A hold of `view.len()` streams' blocks in order, priced as the drafter runs it: `rows` (0: unbounded) bounds a pass's
-/// rows, each block as long as the pass's deepest. A pass takes streams in order while its blocks still fit, the next
-/// then starts fresh; each pass costs its own `holdMs`. `view.at(i)` is stream i's depth (zero or less: no block).
+/// Greedy stream-order passes pad blocks to the deepest; `rows == 0` means no physical row limit.
 pub fn rowsMs(costs: []const HoldCost, rows: u32, view: anytype) f64 {
     const n = view.len();
     var ms: f64 = 0;
@@ -68,8 +66,7 @@ pub fn passMs(costs: []const HoldCost, rows: u32, depths: []const i64) f64 {
     return rowsMs(costs, rows, View{ .d = depths });
 }
 
-/// The same for allocated node `counts`: a charged stream's block is its count past `free` nodes (an empty `charged`
-/// charges every stream; the others, and counts within `free`, take no block).
+/// Only charged counts above free-first nodes form hold blocks; an empty charged mask includes all streams.
 pub fn countsMs(costs: []const HoldCost, rows: u32, counts: []const u32, charged: []const bool, free: u32) f64 {
     const View = struct {
         counts: []const u32,
@@ -156,7 +153,7 @@ test "a hold's ms between and past the timed passes" {
     try std.testing.expectApproxEqAbs(@as(f64, 5.0), holdMs(&t, 12, 1), 1e-12); // past the widest: the slope below it
 }
 
-// SYNTHETIC grids: `flat` costs 10 ms whatever the pass, `product` a block-row (blocks x depth) ms, each up to 32 blocks.
+// Synthetic flat and block-row grids, not device or performance evidence.
 const flat = [_]HoldCost{ .{ .streams = 1, .depth = 1, .ms = 10 }, .{ .streams = 1, .depth = 9, .ms = 10 }, .{ .streams = 32, .depth = 1, .ms = 10 }, .{ .streams = 32, .depth = 9, .ms = 10 } };
 const product = [_]HoldCost{ .{ .streams = 1, .depth = 1, .ms = 1 }, .{ .streams = 1, .depth = 9, .ms = 9 }, .{ .streams = 32, .depth = 1, .ms = 32 }, .{ .streams = 32, .depth = 9, .ms = 288 } };
 
