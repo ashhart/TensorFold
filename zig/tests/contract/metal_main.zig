@@ -306,6 +306,8 @@ pub fn main(init: std.process.Init) !u8 {
         d3router_count += 1;
         try kernels.append(a, d3routers[d3router_count - 1].kernel());
     }
+    var dsv41_routes = try dsv41.Routes.create(a, device, queue, &kernels, o.only);
+    defer dsv41_routes.destroy();
     var d3combines: [std.enums.values(drama_combine.Variant).len]drama_combine.Combine = undefined;
     var d3combine_count: usize = 0;
     defer for (d3combines[0..d3combine_count]) |*p| p.deinit();
