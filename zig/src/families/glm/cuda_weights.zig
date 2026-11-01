@@ -536,9 +536,9 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, stream: c
     var w: Weights = .{ .gpa = gpa, .config = c, .share = share };
     errdefer w.deinit();
     var ck = try core.Checkpoint.openModelPrefix(gpa, io, dir, prefix);
-    defer ck.close();
+    defer core.checkpoint.cache.close(&ck);
     var head_ck = try core.Checkpoint.openModelPrefix(gpa, io, dir, "lm_head.");
-    defer head_ck.close();
+    defer core.checkpoint.cache.close(&head_ck);
     var L: Loader = .{ .gpa = gpa, .d = d, .stream = stream, .pack_dense = tools.pack_dense, .tools = tools, .w = &w, .ck = &ck };
     defer L.host.deinit(gpa);
     defer L.staging.deinit();

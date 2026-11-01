@@ -97,7 +97,7 @@ pub const Tower = struct {
         t.* = .{ .gpa = gpa, .d = d, .k = try vit.Kernels.load(d), .att = try vit.Attention.load(d), .g = try vit.Gemms.init(gpa, d) };
         errdefer t.deinit();
         var ck = try core.Checkpoint.openModel(gpa, io, dir);
-        defer ck.close();
+        defer core.checkpoint.cache.close(&ck);
         const pre = "vision_tower.vision_model.";
         {
             const w = try ck.expect(pre ++ "embeddings.patch_embedding.weight", .f32, &.{ width, 3, 2, 14, 14 });
@@ -163,7 +163,7 @@ pub const Tower = struct {
     /// The device bytes load takes for the checkpoint at `dir`: its tower tensors as stored, and the scratch.
     pub fn bytesFor(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !u64 {
         var ck = try core.Checkpoint.openModelPrefixes(gpa, io, dir, &prefixes);
-        defer ck.close();
+        defer core.checkpoint.cache.close(&ck);
         var total: u64 = scratch_bytes;
         for (ck.files.items) |*f| for (f.names.keys()) |name| {
             total += f.get(name).?.bytes.len;

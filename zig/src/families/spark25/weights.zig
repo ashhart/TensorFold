@@ -152,7 +152,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.S
     var w: Weights = .{ .gpa = gpa, .config = c };
     errdefer w.deinit();
     var ck = try core.checkpoint.Checkpoint.openModel(gpa, io, dir);
-    defer ck.close();
+    defer core.checkpoint.cache.close(&ck);
     const h = geo.hidden;
     // the largest projection as stored: the tied head's table
     var stage = try DeviceBuffer.alloc(d, cfg.vocab * h * c.bits / 8 + 2 * cfg.vocab * (h / 64) * 2);

@@ -213,7 +213,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, tools: Tools, dir: []const u8, c
     var w: Weights = .{ .gpa = gpa, .config = c, .share = share };
     errdefer w.deinit();
     var ck = try core.Checkpoint.openModel(gpa, io, dir);
-    defer ck.close();
+    defer core.checkpoint.cache.close(&ck);
     var L: Loader = .{ .gpa = gpa, .t = tools, .w = &w, .ck = &ck };
     w.layers = try gpa.alloc(Layer, layers.len);
     for (layers, w.layers) |i, *l| {

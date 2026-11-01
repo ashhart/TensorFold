@@ -74,7 +74,7 @@ fn fill(p: *Pending, io: std.Io, dir: []const u8, c: Config, with_mtp: bool) !vo
     const L = &p.loader.?;
     if (c.latent > 0 and !c.bolt) try latent.checkHeld(c);
     var ck = try core.Checkpoint.openModel(gpa, io, dir);
-    defer ck.close();
+    defer core.checkpoint.cache.close(&ck);
     try src.add(&ck);
     const pre = c.prefix();
     w.blocks = try gpa.alloc(Block, c.layers);

@@ -89,7 +89,10 @@ pub const Weights = struct {
         const path = try std.fs.path.join(gpa, &.{ dir, "model.safetensors" });
         defer gpa.free(path);
         var file = try core.safetensors.File.open(gpa, io, path);
-        defer file.close(io);
+        defer {
+            file.release();
+            file.close(io);
+        }
         var problem: []const u8 = "";
         var p = try plan(gpa, cfg, &file.names, &problem) orelse {
             defer gpa.free(problem);

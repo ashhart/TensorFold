@@ -207,7 +207,7 @@ pub const Engine = struct {
         e.stream = try cuda.Stream.init(d, true);
         errdefer e.stream.deinit();
         var ck = try core.Checkpoint.openModel(gpa, io, dir);
-        defer ck.close();
+        defer core.checkpoint.cache.close(&ck);
         // an EXL3 checkpoint's weights are sized by a dry run of its loader (trellis widths come from the tensors)
         const wbytes = if (g.exl3) try x3w.measure(e, &ck) else weights.total(g);
         e.arena = try DeviceBuffer.alloc(d, wbytes + try e.scratch(.measure));

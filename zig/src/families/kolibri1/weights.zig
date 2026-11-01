@@ -60,7 +60,7 @@ pub const Weights = struct {
 pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []const u8, layers: ?usize) !Weights {
     const c = try Config.read(gpa, io, dir);
     var ck = try core.checkpoint.Checkpoint.openModel(gpa, io, dir);
-    defer ck.close();
+    defer core.checkpoint.cache.close(&ck);
     var m = try names.map(gpa, &ck, c);
     defer m.deinit();
     var w: Weights = .{ .gpa = gpa, .config = c };
