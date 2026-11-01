@@ -182,15 +182,17 @@ const Fixture = struct {
         try self.ctx.glue.hcReduceAct(self.ctx.s, chain.proj.ptr, chain.act.ptr, chain.xs.ptr, chain.inj.ptr, 1, self.rows, streams, low, ndn, 1);
     }
 
-    fn mix(self: *Fixture, chain: Chain) !void {
+    fn mix(self: *Fixture, chain: Chain, new: bool) !void {
         try self.ctx.lane.matmul(self.ctx.s, chain.act.ptr, low, self.rows, self.up.native.?, chain.up.ptr, self.part);
-        try self.ctx.glue.hcDenseMix(self.ctx.s, chain.up.ptr, chain.norm.ptr, chain.mixed.ptr, chain.xsm.ptr, self.rows, d, streams);
+        if (new and self.rows >= 512) {
+            try self.ctx.kernels.mix(self.ctx.s, chain.up.ptr, chain.norm.ptr, chain.mixed.ptr, chain.xsm.ptr, self.rows);
+        } else try self.ctx.glue.hcDenseMix(self.ctx.s, chain.up.ptr, chain.norm.ptr, chain.mixed.ptr, chain.xsm.ptr, self.rows, d, streams);
     }
 
     fn runChain(self: *Fixture, out: Chain, new: bool) !void {
         try self.write(out, new);
         try self.front(out);
-        try self.mix(out);
+        try self.mix(out, new);
     }
 
     fn capturedStreams(self: *Fixture) !void {

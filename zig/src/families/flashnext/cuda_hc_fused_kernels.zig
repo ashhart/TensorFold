@@ -18,9 +18,17 @@ pub const Writeback = struct {
 
 pub const Kernels = struct {
     norm: cuda.Function,
+    mix_vec: cuda.Function,
 
     pub fn resolve(m: cuda.Module) !Kernels {
-        return .{ .norm = try m.function("fn_hc_writeback_norm") };
+        return .{ .norm = try m.function("fn_hc_writeback_norm"), .mix_vec = try m.function("fn_hc_dense_mix_vec") };
+    }
+
+    pub fn mix(k: Kernels, s: cuda.Stream, up: u64, norm: u64, mixed: u64, xsm: u64, rows: usize) !void {
+        if (rows == 0) return error.RowShape;
+        var a: cuda.Args = .{};
+        for ([_]u64{ up, norm, mixed, xsm }) |p| a.add(p);
+        try cuda.launch.launch(k.mix_vec, .{ .grid = .{ .x = @intCast(rows), .y = 5 }, .block = .{ .x = 256 } }, s, &a);
     }
 
     pub fn writeback(k: Kernels, s: cuda.Stream, in: Writeback, norm: u64, gamma: u64, rows: usize) !void {

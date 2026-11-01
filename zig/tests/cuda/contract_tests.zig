@@ -256,10 +256,9 @@ pub fn run(gpu: check.Gpu) !void {
     var hc_fusions = try hcfused_k.Registrations.init(gpu, s, hc);
     defer hc_fusions.deinit();
     try hc_fusions.append(a, &kernels);
-    var hcmixes: [4]hcmix_k.Mix = undefined;
-    for (std.enums.values(hcmix_k.Kind), &hcmixes) |kind, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .new_fn = try hc.function("fn_hc_dense_mix8"), .old_fn = try hc.function("fn_hc_dense_mix"), .ctl_fn = if (kind == .sums_control) try mods[5].function("tf_ctl_hc_mix8_bf16") else null };
-    defer for (&hcmixes) |*x| x.deinit();
-    for (&hcmixes) |*x| try kernels.append(a, x.kernel());
+    var hc_mixes = try hcmix_k.Registrations.init(gpu, s, hc, try mods[5].function("tf_ctl_hc_mix8_bf16"));
+    defer hc_mixes.deinit();
+    try hc_mixes.append(a, &kernels);
     var batch = try cuda.Module.load(gpu.d, kk.flashnext_batch);
     defer batch.unload();
     var sums: [2]utility_k.Sum = undefined;

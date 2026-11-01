@@ -32,7 +32,9 @@ fn normalized(self: anytype, w: wt.HcW) !void {
     try self.k.native_lane.matmulF32(self.stream, s.norm, wt.wide, n, w.down.native.?, s.hc_part, s.native_part);
     try self.tri.hcReduceAct(s.hc_part, s.act, s.xs_act, s.inj, 1, n, wt.streams, wt.low, w.n_down, w.has_inj);
     try self.k.native_lane.matmul(self.stream, s.act, wt.low, n, w.up.native.?, s.hc_up, s.native_part);
-    try self.tri.hcDenseMix(s.hc_up, s.norm, s.mixed, s.xsm, n, wt.dims, wt.streams);
+    if (n >= 512) {
+        try self.tri.own.?.hc_fused.mix(self.stream, s.hc_up, s.norm, s.mixed, s.xsm, n);
+    } else try self.tri.hcDenseMix(s.hc_up, s.norm, s.mixed, s.xsm, n, wt.dims, wt.streams);
 }
 
 /// Layer entry: pending MoE writeback and this layer's normalization, without deferring work across PLE.
