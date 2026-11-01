@@ -91,7 +91,7 @@ test "paged snapshots: save and restore keep contiguous order across partial shu
         try std.testing.expectEqual(kept.buf.ptr + off, copy[0]);
         off += copy[2];
     }
-    try std.testing.expectEqual(@as(u64, snap.bytes(150, false)), off);
+    try std.testing.expectEqual(@as(u64, snap.bytes(150, false, .full)), off);
     const p = f.paged(&d);
     var i: usize = 2 * wt.linear_n;
     for (std.enums.values(pages.Part)) |part| for (0..wt.attn_n) |layer| {
@@ -187,7 +187,7 @@ test "paged snapshots: the pooled MTP head occupies the thirteenth layer with th
         try std.testing.expectEqual(kept.buf.ptr + off, copy[0]);
         off += copy[2];
     }
-    try std.testing.expectEqual(@as(u64, snap.bytes(150, true)), off);
+    try std.testing.expectEqual(@as(u64, snap.bytes(150, true, .full)), off);
     Fake.n = 0;
     seq.fed = 0;
     try snap.restore(stream, &seq, &head, kept);

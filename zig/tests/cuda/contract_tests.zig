@@ -57,7 +57,7 @@ const qkr_k = @import("contract_qk_round.zig");
 const fact_k = @import("contract_flashnext_fact.zig");
 const route_k = @import("contract_route_rows.zig");
 const fexp_k = @import("contract_flashnext_fexp.zig");
-const glue_k = @import("contract_flashnext_glue.zig");
+const fn_groups_k = @import("contract_flashnext_groups.zig");
 const q35_contiguous = @import("contract_q35_contiguous.zig");
 const contract = core.contract;
 const g = contract.gates;
@@ -484,27 +484,9 @@ pub fn run(gpu: check.Gpu) !void {
     defer attn.unload();
     var hcf_mod = try cuda.Module.load(gpu.d, kk.flashnext_hcf);
     defer hcf_mod.unload();
-    var fglue = try @import("flashnext").Glue.load(gpu.d);
-    defer fglue.deinit();
-    const glue_fns: glue_k.Fns = .{
-        .tpr = try batch.function("fn_gdn_chain_tpr"),
-        .rows_to = try batch.function("fn_gdn_rows_to"),
-        .tile = try attn.function("_ZN8qsa_tile6scoresILi8ELi4EEEvPK13__nv_bfloat16S3_PKiPfiiii"),
-        .scores = try attn.function("fn_qsa_scores"),
-        .hcf_down = try hcf_mod.function(ftk.cubin_hcf_down),
-        .hcf_up = try hcf_mod.function(ftk.cubin_hcf_up),
-        .front = try batch.function("fn_gdn_front"),
-        .norm = try batch.function("fn_gdn_norm"),
-        .fused = try batch.function("fn_gdn_fused"),
-    };
-    try glue_fns.fused.allowDynamicShared(fparts.gdn_fused_smem);
-    try glue_fns.tpr.allowDynamicShared(fparts.chain_tpr_smem);
-    try glue_fns.hcf_down.allowDynamicShared(ftk.hcf_down_smem);
-    try glue_fns.hcf_up.allowDynamicShared(ftk.hcf_up_smem);
-    var glues: [4]glue_k.Glue = undefined;
-    for (std.enums.values(glue_k.Kind), &glues) |kind, *m| m.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .f = &glue_fns, .glue = &fglue };
-    defer for (&glues) |*m| m.deinit();
-    for (&glues) |*m| try kernels.append(a, m.kernel());
+    var fn_groups: fn_groups_k.Set = .{};
+    defer fn_groups.deinit();
+    try fn_groups.add(gpu, s, batch, attn, hcf_mod, &kernels);
     var wrows: [wrows_k.cfgs.len]wrows_k.Rows = undefined;
     for (&wrows, wrows_k.cfgs) |*x, f| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = f, .g = &window_fns, .ctl = mods[5], .arena = .init(a) };
     defer for (&wrows) |*x| x.deinit();

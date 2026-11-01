@@ -26,6 +26,9 @@ fn stress(rng: std.Random, n: usize, k: usize, out: []f32) void {
 
 // The dense and shared layers at decode rows: DeltaNet qkvz+ab, attention qkv+indexer, both outs, shared gate+up, down.
 const bf16_served = [_]c.Shape{
+    .{ .rows = 1, .n = 8240, .k = 2560 },  .{ .rows = 64, .n = 7296, .k = 2560 },
+    .{ .rows = 1, .n = 1280, .k = 6144 },  .{ .rows = 64, .n = 1280, .k = 6144 },
+    .{ .rows = 1, .n = 320, .k = 2560 },   .{ .rows = 64, .n = 1280, .k = 640 },
     .{ .rows = 1, .n = 16480, .k = 2560 }, .{ .rows = 16, .n = 16480, .k = 2560 },
     .{ .rows = 1, .n = 13952, .k = 2560 }, .{ .rows = 64, .n = 13952, .k = 2560 },
     .{ .rows = 1, .n = 2560, .k = 6144 },  .{ .rows = 16, .n = 2560, .k = 6144 },
