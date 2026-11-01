@@ -7,12 +7,18 @@
 namespace tf_idol_dec {
 
 using tf_idol_attn::BN;
-using tf_idol_attn::mma;
-using tf_idol_attn::mma0;
-using tf_idol_attn::pack;
 using tf_idol_attn::rowsum;
 using tf_idol_attn::tdiv;
 using tf_idol_attn::texp;
+
+// The shared helpers at the decoders' element type, fp16.
+__device__ __forceinline__ void mma(float (&d)[4], const uint32_t (&a)[4], uint32_t b0, uint32_t b1) {
+  tf_idol_attn::mma<__half>(d, a, b0, b1);
+}
+__device__ __forceinline__ void mma0(float (&d)[4], const uint32_t (&a)[4], uint32_t b0, uint32_t b1) {
+  tf_idol_attn::mma0<__half>(d, a, b0, b1);
+}
+__device__ __forceinline__ uint32_t pack(float lo, float hi) { return tf_idol_attn::pack<__half>(lo, hi); }
 
 // o [LQ, HO D] = softmax(q k^T scale) v, v at column (HO + h) D of k's rows. BREAK 1: keys past LK kept; 2: fp16 P V.
 template <int D, int WARPS, int BREAK>
