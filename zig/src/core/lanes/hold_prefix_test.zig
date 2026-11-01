@@ -231,7 +231,7 @@ test "a due exploration is feasible when a deeper padded hold is cheaper than a 
         var f: Fixture = .{};
         try f.init(.{
             .drafts = 3,
-            .forward = [_]f64{10} ** 8,
+            .forward = @as([8]f64, @splat(10)),
             .holds = &.{
                 .{ .streams = 1, .depth = 1, .ms = 11 },
                 .{ .streams = 2, .depth = 1, .ms = 12 },
@@ -287,7 +287,7 @@ test "a confidence hold pays for every physical pass, not one impossible padded 
         var f: Fixture = .{};
         try f.init(.{
             .drafts = 3,
-            .forward = [_]f64{10} ** 8,
+            .forward = @as([8]f64, @splat(10)),
             .holds = &.{
                 .{ .streams = 1, .depth = 3, .ms = 20 },
                 .{ .streams = 2, .depth = 3, .ms = 20 },
