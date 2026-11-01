@@ -53,7 +53,7 @@ A worked example is [`route-tap-sample.tfr1`](route-tap-sample.tfr1).
 ## When copies happen
 
 - CUDA: async device-to-host of the pick and weight buffers after the global top-k, before localisation.
-- HIP: the same, before `tf_moe_localize`.
+- HIP: the same, before `tf_moe_localize` or `tf_nemo_localize`.
 - Metal: a blit of each layer's picks into a shared-storage ring in the same command buffer; the host reads only that buffer's slots at its existing wait. Pipelined later buffers stay unpublished until they land. A slot that is still all-zero after the wait is dropped, not written. No extra wait is added.
 
 ## Checks

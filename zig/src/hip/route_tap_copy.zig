@@ -1,4 +1,4 @@
-//! Async device-to-host copy of the global top-k before `tf_moe_localize` rewrites local ids.
+//! Async device-to-host copy of the global top-k before localisation rewrites local ids.
 const tap = @import("core").route_tap;
 const runtime = @import("runtime.zig");
 const abi = @import("abi.zig");
