@@ -46,6 +46,8 @@ pub const ConvArgs = conv.ConvArgs;
 pub const PlanArgs = plan.PlanArgs;
 pub const PlanRef = plan.PlanRef;
 pub const PlanKeep = plan.Keep;
+/// The stream tile's columns a lane, for launches that copy its geometry.
+pub const stream_pick = @import("launches/stream_pick.zig");
 
 pub const Launcher = struct {
     r: *const runtime.Runtime,

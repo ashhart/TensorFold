@@ -6,6 +6,7 @@ const hl = @import("../launch.zig");
 const runtime = @import("../runtime.zig");
 const abi = @import("../abi.zig");
 const util = @import("util.zig");
+const stream_pick = @import("stream_pick.zig");
 
 const Kernels = affine.Kernels;
 const Arg = affine.Arg;
@@ -32,22 +33,12 @@ pub fn relu2PairGo(k: *const Kernels, r: *const runtime.Runtime, a: Arg, b: Arg,
     const bi = std.mem.indexOfScalar(c_int, &affine.bit_widths, a.bits) orelse return false;
     var lpc_log2: u5 = 0;
     while ((@as(c_int, 1) << lpc_log2) < (a.k >> 5) and lpc_log2 < 5) lpc_log2 += 1;
-    const ri: usize = if (a.m == 1) 0 else if (a.m == 2) 1 else 2;
+    const ri = stream_pick.rowTile(a.m);
     // the routed product's own column count a lane, as its launch alone takes it (the bits do not depend on it)
-    var pick: usize = 0;
-    var c: usize = affine.stream_cbs.len;
-    while (c > 0) {
-        c -= 1;
-        const cb = affine.stream_cbs[c];
-        if (cb * affine.stream_rows[ri] > 16 or cb * a.bits > affine.stream_code_words) continue;
-        pick = c;
-        const per: c_int = affine.stream_waves * (@as(c_int, 32) >> lpc_log2) * cb;
-        const waves = @as(u64, cdiv(a.n, per)) * affine.stream_waves * @as(u64, @intCast(items));
-        if (waves * cdiv(a.m, affine.stream_rows[ri]) >= affine.streams_wanted) break;
-    }
-    const per: c_int = affine.stream_waves * (@as(c_int, 32) >> lpc_log2) * affine.stream_cbs[pick];
+    const tile = stream_pick.pick(k.caps.generation, a.m, lpc_log2, a.bits, a.n, items, false);
+    const per = tile.per_block;
     const split = cdiv(a.n, per);
-    const f = k.relu2_pair[bi][ri][pick] orelse return false;
+    const f = k.relu2_pair[bi][ri][tile.at] orelse return false;
     var args: hl.Args = .{};
     try args.add(a);
     try args.add(b);
