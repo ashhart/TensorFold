@@ -49,6 +49,7 @@ pub const Model = struct {
             break :units m.device.tensorUnits();
         };
         errdefer m.queue.deinit();
+        @import("../../core/route_tap_metal.zig").attach(m.device);
 
         m.config = try cfg.Config.read(allocator, io, dir);
         try cfg.checkShapes(m.config);
@@ -166,6 +167,7 @@ pub const Model = struct {
         self.checkpoint.deinit();
         self.allocator.free(self.draft_ids);
         self.allocator.free(self.dir);
+        @import("../../core/route_tap_metal.zig").detach();
         self.queue.deinit();
         self.device.deinit();
         self.allocator.destroy(self);

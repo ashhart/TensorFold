@@ -196,6 +196,7 @@ pub fn runShared(m: *const Model, s: *st.Scratch, segments: []const Segment, ids
         return;
     }
     cb.wait();
+    @import("../../core/route_tap_metal.zig").afterWait();
     if (cb.failure()) |msg| {
         std.log.err("minimax_m3 forward: {s}", .{msg});
         return error.GpuFailed;
@@ -285,6 +286,7 @@ fn layer(x: Enc, segments: []const Segment, l: wts.Layer, i: usize, n: usize, ne
             if (n > st.batch_rows) {
                 x.glue(.route_pick, Args{ .rows = nr, .width = c.experts, .heads = c.topk }, &.{ b(s.logits32), t(e.bias), A, b(s.pick), b(s.wts) }, .{ n, 1, 1 }, .{ 32, 1, 1 }, true);
             } else x.glue(.route_groups, Args{ .rows = nr, .width = c.experts, .heads = c.topk }, &.{ b(s.logits32), t(e.bias), A, b(s.pick), b(s.wts), b(s.groups), b(s.members) }, .{ 1, 1, 1 }, .{ 32 * n, 1, 1 }, true);
+            @import("../../core/route_tap_metal.zig").blitPicks(x.e, s.pick, 0, s.wts, 0, @intCast(n * c.topk));
             const slots = n * c.topk;
             const inter: u32 = c.moe_intermediate;
             const act = Args{ .rows = @intCast(slots), .width = inter, .stride = 2 * inter, .alpha = c.swiglu_alpha, .limit = c.swiglu_limit };
