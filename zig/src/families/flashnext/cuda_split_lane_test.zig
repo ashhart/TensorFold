@@ -1,5 +1,6 @@
 //! Exact rank gathers over recorded launches, with the unsplit lane as the control.
 const std = @import("std");
+const builtin = @import("builtin");
 const cuda = @import("cuda");
 const wt = @import("cuda_prompt_wt.zig");
 const parts = @import("cuda_batch_state.zig");
@@ -16,6 +17,7 @@ const qmmf_id = 0x100;
 const reduce_id = 0x200;
 const legacy_id = 0x300;
 const copy_id = 0x400;
+const strided_id = 0x500;
 const x_at: u64 = 0x10_0000;
 const part_at: u64 = 0x2000_0000;
 const native_part_at: u64 = 0x4000_0000;
@@ -45,6 +47,7 @@ const Rec = struct {
             .a = switch (id) {
                 // x, y, part, m, n and k as n * 10^6 + k, and the row stride a qmmf tile reads
                 qmmf_id => .{ arg(u64, args, 0), arg(u64, args, 4), arg(u64, args, 5), arg(i32, args, 6), arg(i32, args, 7) * 1_000_000 + arg(i32, args, 8), arg(i32, args, 11) },
+                strided_id => .{ arg(u64, args, 0), arg(u64, args, 3), arg(i32, args, 4), arg(i32, args, 5) * 1_000_000 + arg(i32, args, 6), arg(i32, args, 10), arg(i32, args, 8) },
                 copy_id => .{ arg(u64, args, 0), arg(i64, args, 1), arg(u64, args, 2), arg(i64, args, 3), arg(i32, args, 4), 0 },
                 reduce_id => .{ arg(u64, args, 0), arg(u64, args, 1), arg(i64, args, 2), arg(i32, args, 3), 0, 0 },
                 else => .{ arg(u64, args, 0), arg(u64, args, 6), arg(c_int, args, 7), arg(c_int, args, 8), arg(c_int, args, 9), arg(c_int, args, 10) },
@@ -161,6 +164,7 @@ fn recorded() []const Call {
 }
 
 test "split out lane gathers full BF16 inputs and disjoint FP32 outputs without a reduction" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     var r: Rig = undefined;
     try r.init();
     defer r.deinit();
@@ -196,6 +200,7 @@ test "split out lane gathers full BF16 inputs and disjoint FP32 outputs without 
 }
 
 test "split out lane: an unsplit layer launches exactly what Pass.lane launches, with or without a collective" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     var r: Rig = undefined;
     try r.init();
     defer r.deinit();
@@ -221,6 +226,7 @@ test "split out lane: an unsplit layer launches exactly what Pass.lane launches,
 }
 
 test "split out lane: a split layer refuses a missing collective or a non-native weight" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     var r: Rig = undefined;
     try r.init();
     defer r.deinit();
@@ -232,4 +238,80 @@ test "split out lane: a split layer refuses a missing collective or a non-native
     var q = r.pass(4, true);
     try std.testing.expectError(error.UnexpectedTensor, split_lane.out(&q, x_at, 0x20, &legacy));
     try std.testing.expectEqual(@as(usize, 0), Rec.n);
+}
+
+const SharedGlue = struct {
+    pub fn sharedSwiGLU(_: *SharedGlue, _: cuda.Stream, _: u64, _: u64, _: u64, _: usize, _: usize) !void {}
+    pub fn sharedScatter(_: *SharedGlue, _: cuda.Stream, input: u64, output: u64, rows: usize, width: usize, slots: usize) !void {
+        Rec.push(.{ .kind = .launch, .f = 0x600, .a = .{ @intCast(input), @intCast(output), @intCast(rows), @intCast(width), @intCast(slots), 0 } });
+    }
+};
+
+test "shared expert composition keeps whole direct slots and split full-K output copies" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var r: Rig = undefined;
+    try r.init();
+    defer r.deinit();
+    var glue: SharedGlue = .{};
+    r.s.mixed = x_at;
+    r.s.shared_gate = 0x9000_0000;
+    r.s.shared_up = 0x9100_0000;
+    r.s.shared_act = 0x9200_0000;
+    r.s.shared_out = 0x9300_0000;
+    r.s.y = 0x9400_0000;
+    for (&r.k.native_lane.shared_down) |*f| f.* = .{ .d = &r.d, .handle = @ptrFromInt(strided_id) };
+    const Self = struct {
+        k: *parts.Kernels,
+        s: *parts.Scratch,
+        m: parts.Model,
+        stream: cuda.Stream,
+        tri: struct { own: ?*SharedGlue },
+    };
+    for ([_]bool{ false, true }) |split| for ([_]usize{ 64, 512 }) |n| for (0..2) |rank| {
+        r.c.rank = rank;
+        var native: @import("cuda_mixed_experts.zig").Owned = undefined;
+        native.rank = rank;
+        native.split_shared = split;
+        const width: usize = if (split) wt.moe_w / 2 else wt.moe_w;
+        const columns: usize = if (split) dims / 2 else dims;
+        for (0..3) |i| native.shared[i].native = cuda.modelopt.bf16Weight(0x2000, if (i == 2) columns else width, if (i == 2) wt.moe_w else dims);
+        var self: Self = .{ .k = &r.k, .s = &r.s, .m = r.pass(n, true).m, .stream = .{ .d = &r.d, .handle = null }, .tri = .{ .own = &glue } };
+        Rec.n = 0;
+        try @import("cuda_shared_split.zig").run(&self, &native, n);
+        if (!split and rank != 0) {
+            try std.testing.expectEqual(@as(usize, 0), Rec.n);
+            continue;
+        }
+        const direct = !split;
+        const last = recorded()[Rec.n - 1];
+        if (direct) {
+            try std.testing.expectEqual(strided_id, last.f);
+            try std.testing.expectEqualSlices(i64, &.{ @intCast(r.s.shared_act), @intCast(r.s.y + (wt.slots - 1) * dims * 4), @intCast(n), dims * 1_000_000 + wt.moe_w, wt.slots * dims, wt.moe_w }, &last.a);
+        } else {
+            const down = recorded()[Rec.n - 2];
+            try std.testing.expectEqual(qmmf_id, down.f);
+            try std.testing.expectEqual(@as(i64, @intCast(columns * 1_000_000 + wt.moe_w)), down.a[4]);
+            try std.testing.expectEqual(@as(i64, wt.moe_w), down.a[5]);
+            if (split) {
+                try std.testing.expectEqual(copy_id, last.f);
+                try std.testing.expectEqualSlices(i64, &.{ @intCast(r.s.shared_out), dims, @intCast(r.s.y + (wt.slots - 1) * dims * 4 + rank * dims * 2), wt.slots * dims * 2, dims, 0 }, &last.a);
+                var gather_at: ?usize = null;
+                for (recorded(), 0..) |call, i| if (call.kind == .gather) {
+                    try std.testing.expect(gather_at == null);
+                    gather_at = i;
+                };
+                const at = gather_at orelse return error.TestExpectedGather;
+                try std.testing.expectEqual(at + 5, Rec.n);
+                try std.testing.expectEqual(Call{ .kind = .gather, .a = .{ @intCast(r.s.shared_act), @intCast(r.s.rank_gather), @intCast(n * width), @backingInt(nccl.DataType.bf16), 0, 0 } }, recorded()[at]);
+                for (0..2) |peer| {
+                    const copy = recorded()[at + 1 + peer];
+                    try std.testing.expectEqual(copy_id, copy.f);
+                    try std.testing.expectEqualSlices(i64, &.{ @intCast(r.s.rank_gather + peer * n * width * 2), @intCast(width), @intCast(r.s.rank_input + peer * width * 2), wt.moe_w, @intCast(width), 0 }, &copy.a);
+                }
+                try std.testing.expectEqual(@as(i64, @intCast(r.s.rank_input)), down.a[0]);
+                try std.testing.expectEqual(@as(i64, @intCast(r.s.shared_out)), down.a[1]);
+                for (recorded()) |c| try std.testing.expect(c.f != strided_id and c.kind != .sum);
+            } else try std.testing.expectEqual(@as(usize, 0x600), last.f);
+        }
+    };
 }

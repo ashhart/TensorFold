@@ -9,7 +9,6 @@ const Kernels = @import("cuda_batch_kernels.zig").Kernels;
 const dims = wt.dims;
 const experts_n = wt.experts_n;
 const slots = wt.slots;
-const moe_w = wt.moe_w;
 
 /// moeBlockKeep's native layer: each routed pair's fp32 row into y [pairs, dims], the shared slot's on rank 0.
 pub fn run(self: anytype, native: *const mixed.Owned, n: usize, pairs: usize, plan: cuda.grouped.Plan) !void {

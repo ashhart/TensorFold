@@ -4,6 +4,7 @@ const cuda = @import("cuda");
 const check = @import("check.zig");
 const g = @import("core").contract.gates;
 
+const SharedDown = @import("contract_qmmf_shared.zig").Registrations;
 const Grouped = @import("contract_gb10_many.zig").Registrations;
 
 pub const Sets = struct {
@@ -13,6 +14,7 @@ pub const Sets = struct {
     moss: *@import("contract_moss_image.zig").Set,
     modelopt: *@import("contract_flashnext_modelopt.zig").Set,
     grouped: *Grouped,
+    shared_down: *SharedDown,
 
     /// Each set's kernels appended to `list`, in this order.
     pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel), affine4: *cuda.qlinear.Affine4Kernels, cap: u32) !Sets {
@@ -29,10 +31,12 @@ pub const Sets = struct {
         grouped.* = Grouped.init(gpu, s, affine4);
         errdefer grouped.deinit();
         try grouped.append(cap, a, list);
-        return .{ .gpa = gpu.gpa, .pocket = pocket, .minimax = minimax, .moss = moss, .modelopt = modelopt, .grouped = grouped };
+        const shared_down = try SharedDown.create(gpu, s, &modelopt.lane, a, list);
+        return .{ .shared_down = shared_down, .gpa = gpu.gpa, .pocket = pocket, .minimax = minimax, .moss = moss, .modelopt = modelopt, .grouped = grouped };
     }
 
     pub fn deinit(sets: Sets) void {
+        sets.shared_down.deinit();
         sets.grouped.deinit();
         sets.gpa.destroy(sets.grouped);
         sets.modelopt.deinit();

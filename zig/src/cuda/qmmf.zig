@@ -155,6 +155,7 @@ pub const Lane = struct {
     reduce: [2]Function, // by Out
     half: [2][2][2]Function, // by halfModeIndex, Out, then plain / cluster
     half_below: usize = half_below_default,
+    shared_down: [4]Function = undefined,
     clusters: bool, // sm_90 on: slices meet in a cluster's shared memory
 
     pub fn load(d: *const Driver, capability_major: u32) !Lane {
@@ -179,6 +180,10 @@ pub const Lane = struct {
             try f.allowDynamicShared(halfShared(mode));
             l.half[mi][oi][ci] = f;
         };
+        for (@import("qmmf_shared.zig").symbols, &l.shared_down) |name, *f| {
+            f.* = try mod.function(name);
+            try f.allowDynamicShared(sharedBytes(.bf16, 64));
+        }
         l.half_below = halfBelow();
         return l;
     }
@@ -202,6 +207,8 @@ pub const Lane = struct {
     pub fn matmulF32(l: Lane, s: Stream, x: u64, ldx: usize, m: usize, w: Weight, y: u64, part: u64) !void {
         return l.matmulOut(s, x, ldx, m, w, y, .f32, part);
     }
+
+    pub const matmulF32Strided = @import("qmmf_shared.zig").matmulF32Strided;
 
     /// matmul() writing y as `out` says: bf16, or fp32.
     pub fn matmulOut(l: Lane, s: Stream, x: u64, ldx: usize, m: usize, w: Weight, y: u64, out: Out, part: u64) !void {

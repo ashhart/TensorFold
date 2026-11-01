@@ -310,3 +310,13 @@ The sum fixtures use integers with exact FP32 partials below 2^24, including poo
 FP16 and BF16 simulations must fail in each of the three accumulator orders. Pooling declares its nine-term
 reduction separately from the physical grid width, so the small stress grid remains a valid launch.
 NaN and both infinity signs have explicit class controls. These registrations still require the device gates.
+
+Flash Next's BF16 shared-down entries `tf_qmmf_shared16_half`, `tf_qmmf_shared16`, `tf_qmmf_shared32` and
+`tf_qmmf_shared64` preserve the contiguous projection's FP32 result and store it directly in expert slot 10.
+The baseline shared expert has all 640 intermediate channels and runs only on rank 0 at two ranks.
+The contract checks all four geometries, nonfinite inputs, output bytes and untouched routed slots.
+`moetile_records.zig` holds launch geometry and measured nvcc 13.0 resources on all five served SMs.
+Later compiler receipts remain pending. Check each build with `tf-cuda-test kernel-contract-limits zig-out/fatbin`.
+`tf-cuda-test moetile` compares the direct slot with the contiguous product and scatter at 1, 16, 17, 32, 64, 65,
+1536 and 4218 rows, five repeats with guards. `moetile-contract` runs the replacement gates and planted control.
+`moetile-bench` alternates baseline and direct-slot GPU event timings at 4218 rows; no current timing is claimed.
