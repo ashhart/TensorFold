@@ -7,9 +7,11 @@ const usage =
     \\and noise levels and the starting latents. A `case` also holds a reference run (each step's input and both
     \\branches' velocities): each step then runs both branches on the reference's input and compares them (max |diff|,
     \\cosine, worst row). Then the whole schedule runs from the starting latents with the card's guidance (scale 3, the
-    \\negative branch skipping block 22), timed, and OUT_DIR gets latents.f32 (rows x columns x 128) and run.json.
-    \\With --prompt, the encoder in TRANSFORMER_DIR's checkpoint folder makes both prompts' rows (the negative from
-    \\--negative's file, else empty) in place of the case's; only the Metal build has the encoder.
+    \\negative branch skipping block 22), timed, and OUT_DIR gets latents.f32 (rows x columns x 128) and run.json. On
+    \\Metal the transformer is then freed and the checkpoint's image decoder (the vae/ folder beside TRANSFORMER_DIR)
+    \\turns the latents into OUT_DIR's picture.png. With --prompt, the encoder in TRANSFORMER_DIR's checkpoint folder
+    \\makes both prompts' rows (the negative from --negative's file, else empty) in place of the case's; only the Metal
+    \\build has the encoder.
 ;
 
 /// The card's sampling defaults: the guidance scale, and the block the negative branch skips.
@@ -166,42 +168,55 @@ pub fn run(comptime B: type, init: std.process.Init) !u8 {
     const negative = both[1];
     const text = prompt.len / mi.config.context;
     const negative_rows = negative.len / mi.config.context;
-    const loading = B.seconds();
-    const model = try gpu.load(std.heap.page_allocator, io, args[1], @max(text, negative_rows), grid[1] * 16, grid[0] * 16);
-    defer model.deinit();
-    const load_s = B.seconds() - loading;
-    std.debug.print("{s}: {d} image rows, prompts of {d} and {d} rows, {d} steps; loaded in {d:.1} s\n", .{ device, rows, text, negative_rows, steps, load_s });
-
     var out: std.ArrayList(u8) = .empty;
-    const refining = B.seconds();
-    var branches: [2]mi.Prompt = undefined;
-    branches[0] = try model.prompt(prompt);
-    defer branches[0].deinit();
-    branches[1] = try model.prompt(negative);
-    defer branches[1].deinit();
-    const refine_s = B.seconds() - refining;
-    std.debug.print("both prompts refined: {d:.3} s\n", .{refine_s});
-    try print(&out, a, "{{\"device\": \"{s}\", \"image_rows\": {d}, \"prompt_rows\": {d}, \"negative_rows\": {d}, \"load_s\": {d:.2}, \"refine_s\": {d:.4}", .{ device, rows, text, negative_rows, load_s, refine_s });
-    if (encode_s) |s| try print(&out, a, ", \"native_encoder\": true, \"encode_s\": {d:.4}", .{s});
-    const repeat = if (case.get("inputs") == null) true else try teacher(B, a, &case, model, &branches, timesteps, count, &out);
-    try print(&out, a, ", \"run\": [", .{});
+    // The transformer is freed when its run ends, before the decoder loads.
+    const x, const repeat = denoise: {
+        const loading = B.seconds();
+        const model = try gpu.load(std.heap.page_allocator, io, args[1], @max(text, negative_rows), grid[1] * 16, grid[0] * 16);
+        defer model.deinit();
+        const load_s = B.seconds() - loading;
+        std.debug.print("{s}: {d} image rows, prompts of {d} and {d} rows, {d} steps; loaded in {d:.1} s\n", .{ device, rows, text, negative_rows, steps, load_s });
 
-    const x = try a.dupe(f32, start);
-    const cond = try a.alloc(f32, count);
-    const uncond = try a.alloc(f32, count);
-    var total: f64 = 0;
-    for (0..steps) |s| {
-        const c = try model.forward(&branches[0], x, timesteps[s], null, cond);
-        const u = try model.forward(&branches[1], x, timesteps[s], negative_skip, uncond);
-        const by = sigmas[s + 1] - sigmas[s];
-        for (x, cond, uncond) |*o, pc, pu| o.* += (pu + guidance * (pc - pu)) * by;
-        const wall = c.wall + u.wall;
-        total += wall;
-        std.debug.print("step {d}/{d}: {d:.3} s ({d:.3} s on the GPU, {d:.3} s modulation on the host)\n", .{ s + 1, steps, wall, c.gpu + u.gpu, c.host + u.host });
-        try print(&out, a, "{s}{{\"wall_s\": {d:.4}, \"gpu_s\": {d:.4}, \"host_s\": {d:.4}}}", .{ if (s == 0) "" else ", ", wall, c.gpu + u.gpu, c.host + u.host });
+        const refining = B.seconds();
+        var branches: [2]mi.Prompt = undefined;
+        branches[0] = try model.prompt(prompt);
+        defer branches[0].deinit();
+        branches[1] = try model.prompt(negative);
+        defer branches[1].deinit();
+        const refine_s = B.seconds() - refining;
+        std.debug.print("both prompts refined: {d:.3} s\n", .{refine_s});
+        try print(&out, a, "{{\"device\": \"{s}\", \"image_rows\": {d}, \"prompt_rows\": {d}, \"negative_rows\": {d}, \"load_s\": {d:.2}, \"refine_s\": {d:.4}", .{ device, rows, text, negative_rows, load_s, refine_s });
+        if (encode_s) |s| try print(&out, a, ", \"native_encoder\": true, \"encode_s\": {d:.4}", .{s});
+        const repeat = if (case.get("inputs") == null) true else try teacher(B, a, &case, model, &branches, timesteps, count, &out);
+        try print(&out, a, ", \"run\": [", .{});
+
+        const x = try a.dupe(f32, start);
+        const cond = try a.alloc(f32, count);
+        const uncond = try a.alloc(f32, count);
+        var total: f64 = 0;
+        for (0..steps) |s| {
+            const c = try model.forward(&branches[0], x, timesteps[s], null, cond);
+            const u = try model.forward(&branches[1], x, timesteps[s], negative_skip, uncond);
+            const by = sigmas[s + 1] - sigmas[s];
+            for (x, cond, uncond) |*o, pc, pu| o.* += (pu + guidance * (pc - pu)) * by;
+            const wall = c.wall + u.wall;
+            total += wall;
+            std.debug.print("step {d}/{d}: {d:.3} s ({d:.3} s on the GPU, {d:.3} s modulation on the host)\n", .{ s + 1, steps, wall, c.gpu + u.gpu, c.host + u.host });
+            try print(&out, a, "{s}{{\"wall_s\": {d:.4}, \"gpu_s\": {d:.4}, \"host_s\": {d:.4}}}", .{ if (s == 0) "" else ", ", wall, c.gpu + u.gpu, c.host + u.host });
+        }
+        try print(&out, a, "], \"denoise_s\": {d:.3}", .{total});
+        std.debug.print("denoise: {d:.2} s for {d} steps ({d} forwards)\n", .{ total, steps, 2 * steps });
+        break :denoise .{ x, repeat };
+    };
+    if (comptime @hasDecl(B.Device, "decode")) {
+        const width = grid[1] * 16;
+        const height = grid[0] * 16;
+        const picture = try gpu.decode(a, io, std.fs.path.dirname(args[1]) orelse ".", x, width, height);
+        std.debug.print("decoded {d}x{d}: {d:.3} s ({d:.3} s on the GPU), the decoder loaded in {d:.2} s\n", .{ width, height, picture.wall, picture.gpu, picture.load_s });
+        try print(&out, a, ", \"decoder_load_s\": {d:.3}, \"decode_s\": {d:.4}", .{ picture.load_s, picture.wall });
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "{s}/picture.png", .{args[3]}), .data = picture.png });
     }
-    try print(&out, a, "], \"denoise_s\": {d:.3}}}\n", .{total});
-    std.debug.print("denoise: {d:.2} s for {d} steps ({d} forwards)\n", .{ total, steps, 2 * steps });
+    try print(&out, a, "}}\n", .{});
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "{s}/latents.f32", .{args[3]}), .data = std.mem.sliceAsBytes(x) });
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "{s}/run.json", .{args[3]}), .data = out.items });
     return if (repeat) 0 else 1;

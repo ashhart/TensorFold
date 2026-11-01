@@ -217,6 +217,11 @@ pub const Model = struct {
         const world: u32 = @intCast(comm.world());
         try @import("session_protocol.zig").preflight(&m.session.plan);
         m.cfg = try Config.read(gpa, io, pack_dir);
+        // the release's FP8 blocks parse (Metal runs them); refused here, before any pack or launch on CUDA
+        if (@import("cuda_format.zig").problem(&m.cfg)) |text| {
+            if (!quiet) std.log.err("{s}", .{text});
+            return error.UnsupportedCheckpoint;
+        }
         if (o.own_prefill) try @import("block_admission.zig").nativePrefill(&m.cfg, world);
         m.pack = try Pack.open(gpa, io, pack_dir);
         const backbone = if (o.layers) |ls| try a.dupe(u32, ls) else blk: {

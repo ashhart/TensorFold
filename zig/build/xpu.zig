@@ -229,7 +229,7 @@ fn spirv(b: *std.Build, ocloc: []const u8, device: []const u8, k: Kernel) std.Bu
 
 /// The standalone op and model tests, each its own program `tf-xpu-<name>-test` (step `xpu-tests`).
 const test_programs = [_][]const u8{
-    "panic", "nem_rows", "nem_prefill", "nem_gen", "nem_mtp", "nem_kl", "nem_norm_bench", "nem_mv_bench", "nem_slot", "nem_format", "nem_seam", "nem_attn_dec", "nem_fp64",
+    "panic", "nem_rows", "nem_prefill", "nem_gen", "nem_mtp", "nem_kl", "nem_norm_bench", "nem_mv_bench", "nem_slot", "nem_format", "nem_seam", "nem_attn_dec", "nem_fp64", "memory",
 };
 
 /// `-Dxpu` (Linux): Nemotron's SPIR-V images, `tensorfold-xpu` and `tf-xpu-test`; needs ocloc, not nvcc or CUDA.
@@ -262,11 +262,17 @@ pub fn hostTests(b: *std.Build, step: *std.Build.Step) void {
     const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = host, .optimize = .debug, .link_libc = true });
     const mods = family(b, host, .debug, xpu, lanes);
     const ze = xpu.import_table.get("ze").?;
-    const empty = b.createModule(.{ .root_source_file = b.addWriteFiles().add("draft_xpu_images.zig", "") });
+    const empty = b.createModule(.{ .root_source_file = b.addWriteFiles().add("draft_xpu_images.zig", "pub const drafter = [_]u8{};\npub const glue_g = [_]u8{};\npub const glue = [_]u8{};\npub const decode = [_]u8{};\npub const gemm = [_]u8{};\npub const gdn = [_]u8{};\npub const ngen_wide = [_]u8{};\npub const ngen_narrow = [_]u8{};\npub const gemm128 = [_]u8{};\npub const ngen_wide128 = [_]u8{};\npub const ngen_narrow128 = [_]u8{};\npub const ngen_swiglu = [_]u8{};\npub const ngen_swiglu128 = [_]u8{};\npub const ngen_a8 = [_]u8{};\npub const ngen_a8_swiglu = [_]u8{};\npub const ngen_a4 = [_]u8{};\n") });
     const qwen = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/qwen27.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "ze", .module = ze }, .{ .name = "xpu_qwen27_kernels", .module = empty } } });
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const sources = b.createModule(.{ .root_source_file = b.path("zig/src/native/draft_sources_xpu_test.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "lanes", .module = lanes }, .{ .name = "engine_api", .module = api }, .{ .name = "xpu", .module = xpu }, .{ .name = "xpu_qwen27", .module = qwen }, .{ .name = "nemotron_xpu", .module = mods.nemotron } } });
+    const gemma_native = b.createModule(.{ .root_source_file = b.path("zig/src/families/gemma4/xpu_engine.zig"), .target = host, .link_libc = true });
+    gemma_native.addImport("core", mods.core);
+    gemma_native.addImport("ze", ze);
+    gemma_native.addImport("xpu_gemma4_kernels", empty);
+    sources.addImport("gemma4_xpu", gemma_native);
     const source_tests = b.addRunArtifact(b.addTest(.{ .root_module = sources, .filters = &.{"draft sources:"} }));
+    b.step("test-slide-xpu-host", "Unsupported XPU learning refuses before device or checkpoint access").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = sources, .filters = &.{"slide admission:"} })).step);
     b.step("test-draft-xpu-host", "XPU draft source metadata without devices or kernel compilation").dependOn(&source_tests.step);
     step.dependOn(&source_tests.step);
     for ([_]*std.Build.Module{ xpu, mods.nemotron, cliModule(b, host, .debug, xpu, mods), zeModule(b, host, .debug) }) |m| step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);

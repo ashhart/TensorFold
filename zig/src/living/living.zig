@@ -1,6 +1,7 @@
 //! Living Weights, family-neutral: the learner, its pocket of new neurons, their fits and the shard writer.
 pub const family = @import("family.zig");
 pub const families = @import("families.zig");
+pub const widths = @import("widths.zig");
 pub const Family = family.Family;
 pub const Layout = family.Layout;
 pub const Layers = family.Layers;
@@ -36,6 +37,7 @@ pub const pocket_values = @import("pocket_values.zig");
 test {
     _ = family;
     _ = families;
+    _ = widths;
     _ = neuron;
     _ = affine;
     _ = shards;

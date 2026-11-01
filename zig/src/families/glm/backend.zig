@@ -53,6 +53,8 @@ pub const Backend = struct {
     /// Windows of up to 16 rows (drafted == plain at every width), the MTP head's chains, every stream in one forward.
     pub fn facts(b: *const Backend) lanes.Model {
         return .{
+            .allocate_shared_drafts = b.sl.e.hasMtp(),
+            .limit_shared_drafts = b.sl.e.hasMtp(),
             .exact_width = st.max_rows,
             .first_copy_rows = 4,
             .mtp = b.sl.e.hasMtp(),
@@ -421,3 +423,35 @@ pub const Backend = struct {
         b.sl.release(kv.value);
     }
 };
+
+test "zero grant: GLM Metal MTP resumes after a long priced skip" {
+    var w: @import("weights.zig").Weights = undefined;
+    w.mtp = @as(@import("weights.zig").Mtp, undefined);
+    var e: Engine = undefined;
+    e.w = &w;
+    e.ep = null;
+    var slots: [16]slots_mod.Slot = undefined;
+    var sl: slots_mod.Slots = undefined;
+    sl.e = &e;
+    sl.slots = &slots;
+    var b: Backend = undefined;
+    b.sl = &sl;
+    b.costs = null;
+    try lanes.shared_draft_check.check(b.facts(), false);
+}
+
+test "shared head costs: GLM Metal MTP retains costed copy grants" {
+    var w: @import("weights.zig").Weights = undefined;
+    w.mtp = @as(@import("weights.zig").Mtp, undefined);
+    var e: Engine = undefined;
+    e.w = &w;
+    e.ep = null;
+    var slots: [16]slots_mod.Slot = undefined;
+    var sl: slots_mod.Slots = undefined;
+    sl.e = &e;
+    sl.slots = &slots;
+    var b: Backend = undefined;
+    b.sl = &sl;
+    b.costs = null;
+    try lanes.shared_head_cost_check.check(b.facts());
+}
