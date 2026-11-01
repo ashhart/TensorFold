@@ -56,4 +56,14 @@ pub fn steps(b: *std.Build, metal: *std.Build.Module, sources: *std.Build.Module
     const timing_run = b.addRunArtifact(b.addTest(.{ .root_module = timing }));
     timing_run.has_side_effects = true;
     b.step("time-dsv41-metal-real", "DeepSeek-V4.1 Metal: one release layer's decode timed at 1 and 4 rows").dependOn(&timing_run.step);
+    const ptime = b.createModule(.{
+        .root_source_file = b.path("zig/tests/dsv41_metal/prompt_time.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "dsv41_metal", .module = fast.pkg }, .{ .name = "metal", .module = metal }, .{ .name = "dsv41", .module = fast.host } },
+    });
+    const ptime_run = b.addRunArtifact(b.addTest(.{ .root_module = ptime }));
+    ptime_run.has_side_effects = true;
+    b.step("test-dsv41-metal-prompt-time", "DeepSeek-V4.1 Metal: ms a stage of one release layer's prompt chunks (TF_DSV41_REAL)").dependOn(&ptime_run.step);
 }

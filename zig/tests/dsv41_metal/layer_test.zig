@@ -15,6 +15,7 @@ test {
     _ = @import("ref.zig");
     _ = @import("forward_test.zig");
     _ = @import("zerocopy_test.zig");
+    _ = @import("prompt_test.zig");
 }
 
 test "dsv41 metal: every stage of every layer kind within its float64 bound" {
