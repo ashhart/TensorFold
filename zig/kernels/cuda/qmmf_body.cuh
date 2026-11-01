@@ -1,5 +1,10 @@
+// Strided stores are instantiated only by the shared-slot entries.
     using T = Tile<MODE, BM, BN, WM, WN, STAGES>;
+#ifdef TF_QMMF_STRIDED
     static_assert(BN == 64 || BN == 32, "a block reads one 64-column tile of words and scales, or its half");
+#else
+    static_assert(BN == 64 || BN == 32 || (MODE == BF16 && BN == 128), "packed column tiles");
+#endif
     extern __shared__ __align__(128) unsigned char buf[];
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
     const int wm = warp / WN, wn = warp % WN;
@@ -7,6 +12,20 @@
     const int2 at = tile_of(blockIdx.x, M, N, BM, BN, group);
     const int m0 = at.x, n0 = at.y, slice = FUSE ? 0 : blockIdx.z, g0 = slice * per;
 
+#ifndef TF_QMMF_STRIDED
+    uint64_t* ready = reinterpret_cast<uint64_t*>(buf + STAGES * T::STAGE);
+#if __CUDA_ARCH__ >= 1200
+    if constexpr (T::BARRIERS > 0) {
+        if (tid == 0) {
+#pragma unroll
+            for (int s = 0; s < STAGES; ++s)
+                asm volatile("mbarrier.init.shared::cta.b64 [%0], 1;" :: "r"(smem(ready + s)) : "memory");
+            asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+        }
+        __syncthreads();
+    }
+#endif
+#endif
     auto stage = [&](int s) { return buf + s * T::STAGE; };
     auto load = [&](int s, int g) {
         unsigned char* p = stage(s);
@@ -18,6 +37,21 @@
         }
         unsigned char* pw = p + T::X;
         constexpr int TILE_BYTES = MODE == FP4 ? 64 * GS / 2 : MODE == BF16 ? 64 * GS * 2 : 64 * GS;
+#if __CUDA_ARCH__ >= 1200 && !defined(TF_QMMF_STRIDED)
+        if constexpr (T::BARRIERS > 0) {
+            if (tid == 0) {
+                const uint32_t bar = smem(ready + s);
+                asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;"
+                             :: "r"(bar), "r"(T::W) : "memory");
+#pragma unroll
+                for (int t = 0; t < BN / 64; ++t) {
+                    const void* src = w + (static_cast<size_t>(n0 / 64 + t) * KG + g) * TILE_BYTES;
+                    asm volatile("cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];"
+                                 :: "r"(smem(pw + t * TILE_BYTES)), "l"(src), "r"(TILE_BYTES), "r"(bar) : "memory");
+                }
+            }
+        } else
+#endif
         if constexpr (BN == 32) {
             // half a packed 64-column tile: its n8 tiles 0-3 or 4-7, contiguous in every format's word order
             const int half = (n0 % 64) / 32;
@@ -69,6 +103,13 @@
             }
         }
         wait<STAGES - 2>();
+#if __CUDA_ARCH__ >= 1200 && !defined(TF_QMMF_STRIDED)
+        if constexpr (T::BARRIERS > 0) {
+            const uint32_t bar = smem(ready + it % STAGES), phase = (it / STAGES) & 1;
+            asm volatile("{ .reg .pred done; WAIT: mbarrier.try_wait.parity.shared::cta.b64 done, [%0], %1;"
+                         " @!done bra WAIT; }" :: "r"(bar), "r"(phase) : "memory");
+        }
+#endif
         __syncthreads();
         const int next = it + STAGES - 1;
         if (next < per) load(next % STAGES, g0 + next);
@@ -217,11 +258,19 @@
                 }
                 const float v0 = acc[i][j][2 * h] * scale, v1 = acc[i][j][2 * h + 1] * scale;
                 if (F32) {
+#ifdef TF_QMMF_STRIDED
                     float* dst = reinterpret_cast<float*>(out) + static_cast<size_t>(row) * ldy + col;
+#else
+                    float* dst = reinterpret_cast<float*>(out) + static_cast<size_t>(row) * N + col;
+#endif
                     if (col < N) dst[0] = v0;
                     if (col + 1 < N) dst[1] = v1;
                 } else {
+#ifdef TF_QMMF_STRIDED
                     __nv_bfloat16* dst = reinterpret_cast<__nv_bfloat16*>(out) + static_cast<size_t>(row) * ldy + col;
+#else
+                    __nv_bfloat16* dst = reinterpret_cast<__nv_bfloat16*>(out) + static_cast<size_t>(row) * N + col;
+#endif
                     if (col + 1 < N && (N & 1) == 0)
                         *reinterpret_cast<__nv_bfloat162*>(dst) = __floats2bfloat162_rn(v0, v1);
                     else {
