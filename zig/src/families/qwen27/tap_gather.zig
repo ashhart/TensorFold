@@ -1,15 +1,20 @@
 //! Completed shared-memory tap planes gathered on the host without an extra GPU submission.
 const std = @import("std");
 pub fn gather(planes: []const u8, capacity: usize, written: usize, width: usize, rows: []const u32, out: []u8) !void {
+    return gatherPlanes(5, planes, capacity, written, width, rows, out);
+}
+/// `count` planes of `capacity` rows each, row `rows[i]` of every plane side by side in out's row i.
+pub fn gatherPlanes(count: usize, planes: []const u8, capacity: usize, written: usize, width: usize, rows: []const u32, out: []u8) !void {
+    if (count == 0 or count > 8) return error.BadTapGather;
     const bytes = try std.math.mul(usize, width, 2);
-    const stride = try std.math.mul(usize, bytes, 5);
+    const stride = try std.math.mul(usize, bytes, count);
     const source_size = try std.math.mul(usize, capacity, stride);
     const output_size = try std.math.mul(usize, rows.len, stride);
     if (planes.len < source_size or out.len < output_size) return error.ShortTapGather;
     if (written > capacity or rows.len > written) return error.BadTapGather;
     for (rows) |row| if (row >= written) return error.BadTapGather;
     for (rows, 0..) |row, i| {
-        for (0..5) |plane| {
+        for (0..count) |plane| {
             const src = (plane * capacity + row) * bytes;
             @memcpy(out[i * stride + plane * bytes ..][0..bytes], planes[src..][0..bytes]);
         }
