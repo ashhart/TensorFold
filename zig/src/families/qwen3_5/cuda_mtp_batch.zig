@@ -101,7 +101,11 @@ fn fetchRows(d: *Mtp, rows: usize) ![]align(1) const u32 {
 }
 
 /// The round's absorbs: up to `most` rows a pass, each stream's rows one segment; larger or empty ones as before.
-pub fn absorb(d: *Mtp, items: []const dr.Absorb) !void {
+pub fn absorb(d: *Mtp, incoming: []const dr.Absorb) !void {
+    const useful = try d.gpa.alloc(dr.Absorb, incoming.len);
+    defer d.gpa.free(useful);
+    const items = try @import("cuda_mtp_budget.zig").active(d, incoming, useful);
+    if (items.len == 0) return;
     const sizes = try d.gpa.alloc(usize, items.len);
     defer d.gpa.free(sizes);
     for (items, sizes) |it, *s| {

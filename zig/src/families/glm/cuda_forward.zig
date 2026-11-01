@@ -483,6 +483,10 @@ pub const Forward = struct {
 
     /// mtp.mtp_forward: caches from mtp_len, stream in b.mx, a window's draft logits in b.logits (prompt: no head).
     pub fn mtp(f: *const Forward, ids: []const i32, hidden: []const u64) !void {
+        return f.mtpMode(ids, hidden, true);
+    }
+
+    pub fn mtpMode(f: *const Forward, ids: []const i32, hidden: []const u64, propose: bool) !void {
         const n = ids.len;
         const c = &f.ranks[0].w.config;
         const D: usize = c.hidden;
@@ -503,8 +507,11 @@ pub const Forward = struct {
             try b16.matmul(f.set(), f.stream, b.mcat, 2 * D, m.eh, b.mx, b.kda.mm_part, n, D, 2 * D, false);
             try glue.rmsnormBy(f.set(), f.stream, b.mx, D, m.layer.in_norm, b.normed, D, b.xs, c.eps, n, D);
             const nch = @min(latent.chunksFor(r.st.mtp_len + n), b.nch);
-            try dsa_block.block(.{ .set = f.set(), .ops = f.m.ops() }, f.stream, m.layer.mixer.mla, r.st.mtp_caches, b.dsa, b.normed, D, n, r.st.mtp_pos_dev, r.st.mtp_len, nch, b.part_rows, slot(r, n));
+            if (propose) {
+                try dsa_block.block(.{ .set = f.set(), .ops = f.m.ops() }, f.stream, m.layer.mixer.mla, r.st.mtp_caches, b.dsa, b.normed, D, n, r.st.mtp_pos_dev, r.st.mtp_len, nch, b.part_rows, slot(r, n));
+            } else try dsa_block.commit(.{ .set = f.set(), .ops = f.m.ops() }, f.stream, m.layer.mixer.mla, r.st.mtp_caches, b.dsa, b.normed, D, n, r.st.mtp_pos_dev, r.st.mtp_len);
         }
+        if (!propose) return;
         try f.gather(n);
         for (f.ranks) |r| {
             const m = r.w.mtp.?;

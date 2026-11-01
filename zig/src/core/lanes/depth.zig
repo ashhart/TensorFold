@@ -236,7 +236,7 @@ pub const Rule = struct {
     }
 
     /// A shared hold pads every block to its deepest: depths cut so the drafting streams' blocks fit `rows` (one pass).
-    fn capPass(out: []i64, rows: u32) void {
+    pub fn capPass(out: []i64, rows: u32) void {
         var n: i64 = 0;
         for (out) |d| n += @intFromBool(d > 0);
         if (n == 0) return;
@@ -245,7 +245,7 @@ pub const Rule = struct {
     }
 
     /// Granted holds kept, most expected drafts a row first, while they raise the next round's expected tokens a ms.
-    fn payHolds(r: *Rule, whos: []const Who, sampled: bool, out: []i64) !void {
+    pub fn payHolds(r: *Rule, whos: []const Who, sampled: bool, out: []i64) !void {
         if (whos.len > r.batch_rows) return error.BadHoldStreamCount;
         if (r.hold_order.len == 0) r.hold_order = try r.gpa.alloc(usize, r.batch_rows);
         const order = r.hold_order[0..whos.len];

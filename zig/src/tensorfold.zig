@@ -68,6 +68,7 @@ test {
     _ = @import("families/nemotron/prefill_kernels.zig"); // Compile the prompt-chunk sources in tests.
     _ = @import("families/nemotron/simd_attention.zig"); // The pre-M5 attention rewrite finds its lines.
     _ = @import("families/nemotron/weights.zig");
+    _ = @import("families/nemotron/zero_budget_test.zig");
     _ = @import("families/nemotron/kernels.zig");
     _ = @import("families/nemotron/living_test.zig"); // saved lessons and their routers, beside the shards
     _ = @import("families/nemotron/pocket_shards_test.zig"); // learned neurons in the shards themselves
