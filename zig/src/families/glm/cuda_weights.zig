@@ -63,11 +63,7 @@ pub const Weights = struct {
     }
 };
 /// Host bf16 from fp32: round to nearest even (torch's float -> bfloat16), NaN kept quiet.
-fn toBf16(v: f32) u16 {
-    const b: u32 = @bitCast(v);
-    if (std.math.isNan(v)) return @intCast((b >> 16) | 0x40);
-    return @intCast((b + 0x7fff + ((b >> 16) & 1)) >> 16);
-}
+const toBf16 = core.bf16_round.bits;
 
 /// A float32 narrowed to bf16 by the loader, or null when bf16 does not hold it exactly (NaN stays NaN).
 fn narrow(v: f32) ?u16 {

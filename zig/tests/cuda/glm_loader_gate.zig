@@ -428,11 +428,7 @@ fn put(out: *std.ArrayList(u8), gpa: std.mem.Allocator, t: Tensor, lo: usize, hi
 }
 
 /// fp32 to bf16 to nearest even (torch's), NaN kept quiet.
-fn bf16(v: f32) u16 {
-    const b: u32 = @bitCast(v);
-    if (std.math.isNan(v)) return @intCast((b >> 16) | 0x40);
-    return @intCast((b + 0x7fff + ((b >> 16) & 1)) >> 16);
-}
+const bf16 = core.bf16_round.bits;
 
 /// What a run changes on purpose: one bit of upload `name`'s downloaded bytes; the copies changed and those caught.
 const Tamper = struct { name: ?[]const u8, done: usize = 0, caught: usize = 0 };
