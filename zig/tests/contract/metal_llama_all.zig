@@ -25,7 +25,7 @@ pub const Set = struct {
     glue: std.ArrayList(*llama.Glue) = .empty,
     matvec: std.ArrayList(*dense.Matvec) = .empty,
     q4: std.ArrayList(*int4.Matvec) = .empty,
-    dequant: ?*int4.Dequant = null,
+    dequant: std.ArrayList(*int4.Dequant) = .empty,
     gemm: std.ArrayList(*dense.Gemm) = .empty,
     argmax: std.ArrayList(*llama.Argmax) = .empty,
     decode: std.ArrayList(*attention.DecodeVec) = .empty,
@@ -49,10 +49,11 @@ pub const Set = struct {
             p.deinit();
             a.destroy(p);
         }
-        if (s.dequant) |p| {
+        for (s.dequant.items) |p| {
             p.deinit();
             a.destroy(p);
         }
+        s.dequant.deinit(a);
         for (s.prompt.items) |p| {
             p.deinit();
             a.destroy(p);
@@ -138,7 +139,7 @@ pub const Set = struct {
             if (!wanted(only, try std.fmt.bufPrint(&name_buf, "llama glue {s}", .{fun}))) continue;
             const p = try a.create(int4.Matvec);
             errdefer a.destroy(p);
-            p.* = try int4.Matvec.init(a, device, queue, rows);
+            p.* = try int4.Matvec.init(a, device, queue, rows, .none);
             try s.q4.append(a, p);
             try kernels.append(a, p.kernel());
         }
@@ -147,8 +148,8 @@ pub const Set = struct {
         if (wanted(only, "llama glue ll_q4_dequant")) {
             const p = try a.create(int4.Dequant);
             errdefer a.destroy(p);
-            p.* = try int4.Dequant.init(a, device, queue);
-            s.dequant = p;
+            p.* = try int4.Dequant.init(a, device, queue, .none);
+            try s.dequant.append(a, p);
             try kernels.append(a, p.kernel());
         }
         for ([_][2]bool{ .{ false, false }, .{ false, true }, .{ true, false }, .{ true, true } }) |form| {
@@ -240,6 +241,20 @@ pub const Set = struct {
                     errdefer a.destroy(p);
                     p.* = try attention.Prompt.init(a, device, queue, family.nanbeige41, m);
                     try s.prompt.append(a, p);
+                    try kernels.append(a, p.kernel());
+                },
+                .q4_matvec_first_zero => {
+                    const p = try a.create(int4.Matvec);
+                    errdefer a.destroy(p);
+                    p.* = try int4.Matvec.init(a, device, queue, 4, m);
+                    try s.q4.append(a, p);
+                    try kernels.append(a, p.kernel());
+                },
+                .q4_dequant_reversed_nibbles => {
+                    const p = try a.create(int4.Dequant);
+                    errdefer a.destroy(p);
+                    p.* = try int4.Dequant.init(a, device, queue, m);
+                    try s.dequant.append(a, p);
                     try kernels.append(a, p.kernel());
                 },
                 else => unreachable,
