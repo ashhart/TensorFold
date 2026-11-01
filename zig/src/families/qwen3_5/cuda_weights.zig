@@ -489,7 +489,7 @@ fn loadPocket(e: *Engine, ck: *core.Checkpoint, prefix: []const u8, layer: usize
     const host = try e.gpa.alloc(f32, 3 * n);
     defer e.gpa.free(host);
     const wide = @import("cuda_wide.zig");
-    const names = if (e.g.moe()) [3][]const u8{ "mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj", "mlp.shared_expert.down_proj" } else .{ "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj" };
+    const names = if (e.g.moe()) [3][]const u8{ "mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj", "mlp.shared_expert.down_proj" } else [3][]const u8{ "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj" };
     try wide.read(ck, prefix, names[0], e.g.intermediate, e.g.hidden, host[0..n]);
     try wide.read(ck, prefix, names[1], e.g.intermediate, e.g.hidden, host[n..][0..n]);
     try wide.read(ck, prefix, names[2], e.g.hidden, e.g.intermediate, host[2 * n ..][0..n]);
