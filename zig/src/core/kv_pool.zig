@@ -142,6 +142,12 @@ pub const Notify = struct {
 /// A family's pool as the load ledger reads it: tokens a page, and the contiguous run it needs (0: none).
 pub const Source = struct { pool: *Pool, page_tokens: u32, run_pages: u32 = 0 };
 
+/// A tier's notice that a page lost its last holder (its frame, if any, is free again).
+pub const Freed = struct {
+    ctx: *anyopaque,
+    call: *const fn (ctx: *anyopaque, id: u32) void,
+};
+
 /// What an idle pool must show: nothing promised, every page free or the store's alone.
 pub const Census = struct { total: usize, free: usize, promised: usize, kept: usize, leased: usize };
 
@@ -160,6 +166,7 @@ pub const Pool = struct {
     reclaim: ?Reclaim = null,
     notify: ?Notify = null,
     depth: u8 = 0, // public changes in progress: the outermost one notifies, after nested calls and rollbacks
+    freed: ?Freed = null,
 
     pub fn init(gpa: Allocator, count: usize, page_bytes: u64) !Pool {
         const refs = try gpa.alloc(u32, count);
@@ -220,6 +227,7 @@ pub const Pool = struct {
         if (p.leased[id] == 0 or p.refs[id] < p.leased[id]) std.debug.panic("kv pool: page {d} released with no holder", .{id});
         p.ownership(id, p.refs[id] - 1, p.leased[id] - 1);
         if (p.refs[id] > 0) return;
+        if (p.freed) |f| f.call(f.ctx, id);
         p.free[p.nfree] = id;
         p.nfree += 1;
     }
@@ -256,6 +264,7 @@ pub const Pool = struct {
         if (p.refs[id] <= p.leased[id]) return error.NotHeld; // no holder past the leases' (callers drop theirs first)
         p.ownership(id, p.refs[id] - 1, p.leased[id]);
         if (p.refs[id] > 0) return;
+        if (p.freed) |f| f.call(f.ctx, id);
         p.free[p.nfree] = id;
         p.nfree += 1;
     }
@@ -424,6 +433,7 @@ pub const Pool = struct {
         for (start..start + k) |id| {
             if (p.refs[id] != 1 or p.leased[id] != 1) std.debug.panic("kv pool: run page {d} released while not a run's", .{id});
             p.ownership(id, 0, 0);
+            if (p.freed) |f| f.call(f.ctx, @intCast(id));
             p.free[p.nfree] = @intCast(id);
             p.nfree += 1;
         }
@@ -449,8 +459,13 @@ pub const Pool = struct {
     }
 };
 
+/// The host tier: logical pages in host RAM and device frames that cache them (kv_tier.zig).
+pub const tier = @import("kv_tier.zig");
+pub const Tier = tier.Tier;
+
 test {
     _ = @import("kv_pool_test.zig");
+    _ = @import("kv_tier.zig");
     _ = @import("kv_pool_counts_test.zig");
     _ = @import("kv_pool_walk_test.zig");
     _ = @import("kv_pool_notify_test.zig");

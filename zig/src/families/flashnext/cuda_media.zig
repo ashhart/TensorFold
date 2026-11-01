@@ -3,6 +3,9 @@ const cuda = @import("cuda");
 const shared = @import("qwen_vision");
 const wt = @import("cuda_prompt_wt.zig");
 const Pg = @import("cuda_glue.zig").Pg;
+/// prep and pool through a host tier's planes (the indexer keys by logical page).
+pub const Planes = struct { prep: cuda.Function, pool: cuda.Function };
+
 pub const State = struct {
     image: shared.media.Media,
     prep: cuda.Function,
@@ -10,8 +13,9 @@ pub const State = struct {
     /// prep and pool through a stream's page table (TF_FLASHNEXT_KV_PAGES).
     prep_paged: cuda.Function,
     pool_paged: cuda.Function,
+    planes: ?Planes = null,
     pub fn view(s: *const State) View {
-        return .{ .image = s.image.view(), .prep = s.prep, .pool = s.pool, .prep_paged = s.prep_paged, .pool_paged = s.pool_paged };
+        return .{ .image = s.image.view(), .prep = s.prep, .pool = s.pool, .prep_paged = s.prep_paged, .pool_paged = s.pool_paged, .planes = s.planes };
     }
     pub fn deinit(s: *State) void {
         s.image.deinit();
@@ -23,6 +27,7 @@ pub const View = struct {
     pool: cuda.Function,
     prep_paged: cuda.Function,
     pool_paged: cuda.Function,
+    planes: ?Planes = null,
     pub fn attn(v: View, stream: cuda.Stream, proj: u64, pos: u64, qw: u64, kw: u64, iw: u64, inv: u64, q: u64, kc: u64, vc: u64, iq: u64, ikc: u64, eps: f32, rows: usize, pg: Pg) !void {
         var a: cuda.Args = .{};
         for ([_]u64{ proj, pos, qw, kw, iw, inv, q, kc, vc, iq, ikc }) |x| a.add(x);
@@ -31,8 +36,8 @@ pub const View = struct {
         a.add(v.image.rope);
         a.add(@as(i32, @intCast(v.image.n)));
         a.add(v.image.delta);
-        if (pg.pt != 0) a.add(pg);
-        const f = if (pg.pt != 0) v.prep_paged else v.prep;
+        if (pg.pt != 0) if (pg.planes()) a.add(pg) else a.add(pg.main());
+        const f = if (pg.pt != 0) (if (pg.planes()) (v.planes orelse return error.NoPlanesKernel).prep else v.prep_paged) else v.prep;
         try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = wt.q_heads + wt.kv_heads + wt.index_heads + 1, .z = 1 }, .block = .{ .x = 256, .y = 1, .z = 1 } }, stream, &a);
     }
     pub fn pooled(v: View, stream: cuda.Stream, ikc: u64, out: u64, pos: u64, w: u64, inv: u64, eps: f32, rows: usize, pg: Pg) !void {
@@ -43,8 +48,8 @@ pub const View = struct {
         a.add(v.image.rope);
         a.add(@as(i32, @intCast(v.image.n)));
         a.add(v.image.delta);
-        if (pg.pt != 0) a.add(pg);
-        const f = if (pg.pt != 0) v.pool_paged else v.pool;
+        if (pg.pt != 0) if (pg.planes()) a.add(pg) else a.add(pg.main());
+        const f = if (pg.pt != 0) (if (pg.planes()) (v.planes orelse return error.NoPlanesKernel).pool else v.pool_paged) else v.pool;
         try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows / wt.index_ratio + 2), .y = 1, .z = 1 }, .block = .{ .x = wt.index_dim, .y = 1, .z = 1 } }, stream, &a);
     }
 };

@@ -45,6 +45,7 @@ pub const Chain = struct {
 
 /// A sequence's head cache and the buffers a window needs: its rows' scores and streams, and what it rolls back to.
 pub const Draft = struct {
+    sel: ?*@import("exl3/kv/cuda_exl3_kvtier.zig").LaneSel = null, // a host tier's selection of the stream's blocks
     stream: ?cuda.Stream = null,
     media: ?@import("cuda_media.zig").View = null,
     gpa: std.mem.Allocator,
@@ -177,6 +178,11 @@ pub const Draft = struct {
         d.host = try gpa.alloc(u16, @max(max_rows * vocab, draft_n));
         d.point();
         return d;
+    }
+
+    /// The head's one layer as a pass reads its cache: contiguous, or the lane's pages (`pg`) after the model's.
+    pub fn headSeq(d: *Draft, media: ?@import("cuda_media.zig").View, scores: u64) batch.SeqState {
+        return .{ .media = media, .conv = &.{}, .state = &.{}, .kc = (&d.kc)[0..1], .vc = (&d.vc)[0..1], .ikc = (&d.ikc)[0..1], .pooled = (&d.pooled)[0..1], .pg = d.pg, .tail = d.kc, .history = &d.unused_history, .cap = d.cap, .scores = scores, .sel = d.sel, .sel_layer = wt.attn_n };
     }
 
     /// Each DeltaNet layer's window end state into its spare buffer.
