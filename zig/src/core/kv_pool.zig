@@ -357,6 +357,13 @@ pub const Pool = struct {
         if (table) |t| try t.write(t.ctx, l.ids.items, 0);
     }
 
+    /// `l`'s table back to `n` pages, the rest to its promise (rows a rolled-back window held; no reader in flight).
+    pub fn trim(p: *Pool, l: *Lease, n: usize) void {
+        p.enter();
+        defer p.leave();
+        p.shrink(l, n);
+    }
+
     /// Pages past `n` in `l`'s table go back to its promise, as they were before it took them.
     fn shrink(p: *Pool, l: *Lease, n: usize) void {
         while (l.ids.items.len > n) {
