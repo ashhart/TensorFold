@@ -399,7 +399,7 @@ pub fn writing(s: *pc.Store, prompt: []const u32, starts: []const u32, spans: []
     w.cancellations(&jobs);
     for (jobs) |job| if (job) |j| {
         if (j.generation != w.generation.load(.acquire) or j.at <= at) continue;
-        if (s.most == 0 or s.family.vtable.bytes(s.family.ptr, j.at) > s.budget) continue;
+        if (s.most == 0 or r.blankBytes(j.at) > s.budget) continue;
         const state: rows_store.State = .{ .name = j.name, .at = j.at, .tokens = j.tokens, .spans = j.spans, .starts = j.starts, .own = 0, .rows = 0, .used = 0, .shared = j.shared };
         if (!r.matches(&state, prompt, starts, spans)) continue;
         name = j.name;
@@ -412,7 +412,7 @@ pub fn writing(s: *pc.Store, prompt: []const u32, starts: []const u32, spans: []
 pub fn choose(s: *pc.Store, prompt: []const u32, starts: []const u32, spans: []const modes.Span) ?usize {
     const r = s.disk orelse return null;
     const i = select.choose(s, prompt, starts, spans, s.find(prompt, starts, spans)).restore orelse return null;
-    if (s.family.vtable.bytes(s.family.ptr, r.states.items[i].at) > s.budget or s.most == 0) return null;
+    if (r.blankBytes(r.states.items[i].at) > s.budget or s.most == 0) return null;
     return i;
 }
 

@@ -26,6 +26,8 @@ pub const Image = struct {
     gather: *const fn (ptr: *anyopaque, saved: pc.Saved, ranges: []const image.Range, out: []u8) anyerror!void,
     /// A new kept state of `at` tokens, its image filled by `scatter` and then restored as any other.
     blank: *const fn (ptr: *anyopaque, at: u32) anyerror!pc.Saved,
+    /// New storage `blank` takes at `at` (null: the family's ordinary save estimate).
+    blank_bytes: ?*const fn (ptr: *anyopaque, at: u32) u64 = null,
     /// Copy `in`, back to back, into `ranges` of `saved`'s image.
     scatter: *const fn (ptr: *anyopaque, saved: pc.Saved, ranges: []const image.Range, in: []const u8) anyerror!void,
     /// Whether `saved`'s image can still be read whole (null: always).
@@ -165,6 +167,11 @@ pub const Rows = struct {
         gpa.free(s.tokens);
         gpa.free(s.spans);
         gpa.free(s.starts);
+    }
+
+    /// A disk restore can need more storage than saving a resident state whose rows stay in the live pool.
+    pub fn blankBytes(r: *const Rows, at: u32) u64 {
+        return if (r.img.blank_bytes) |f| f(r.family.ptr, at) else r.family.vtable.bytes(r.family.ptr, at);
     }
 
     /// A staging buffer of at least `bytes` (kept between steps).
@@ -581,19 +588,5 @@ fn makePath(gpa: Allocator, dir: [:0]const u8) !void {
 }
 
 test {
-    _ = image;
-    _ = chain;
-    _ = file;
-    _ = write.io;
-    _ = @import("rows_test.zig");
-    _ = @import("rows_spill_test.zig");
-    _ = @import("rows_async_test.zig");
-    _ = @import("rows_close_test.zig");
-    _ = @import("rows_stage_test.zig");
-    _ = @import("rows_select_test.zig");
-    _ = @import("rows_recall_select_test.zig");
-    _ = @import("rows_pool_select_test.zig");
-    _ = @import("rows_prefetch.zig");
-    _ = @import("rows_prefetch_stack_test.zig");
-    _ = @import("rows_refusal_test.zig");
+    _ = @import("rows_all_test.zig");
 }
