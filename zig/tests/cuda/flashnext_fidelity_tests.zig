@@ -31,7 +31,7 @@ pub fn run(gpu: check.Gpu, model: []const u8, rank: usize, port: u16, fixture: [
     defer glue.deinit();
     const tri: flash.Tri = .{ .s = stream, .own = &glue };
     const identity = try flash.rank_engine.identity(gpu.gpa, gpu.io, model, context, chunk);
-    const session = try flash.rank_engine.Session.init(gpu.gpa, gpu.io, "127.0.0.1", port, rank, identity);
+    const session = try flash.rank_engine.Session.init(gpu.gpa, gpu.io, "127.0.0.1", port, rank, identity, flash.rank_engine.linkWait());
     const e = flash.prompt.Engine.initRank(gpu.gpa, gpu.io, @constCast(gpu.d), &stream, model, 2, rank) catch |err| {
         session.poison();
         session.deinit();

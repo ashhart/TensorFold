@@ -9,8 +9,10 @@ constexpr int SMEM = 2 * STAGE + 2 * STEPS * DV * 4 + STEPS * 2 * DK * 4 + STEPS
 __device__ __forceinline__ void pbar() { asm volatile("bar.sync 1, 128;\n" ::: "memory"); }
 
 // conv_act for rows r0 .. r0 + n - 1 of channel c, each P / cs row loaded once (conv_act's taps, order and rounding)
+template <int NK, int NV>
 __device__ __forceinline__ void conv_rows(const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs,
                                           const __nv_bfloat16* __restrict__ cw, int r0, int n, int c, float (&out)[STEPS]) {
+    constexpr int C = G<NK, NV>::C, PW = G<NK, NV>::PW;
     float w[TAPS];
 #pragma unroll
     for (int tap = 0; tap < TAPS; ++tap) w[tap] = __bfloat162float(cw[c * TAPS + tap]);
@@ -30,18 +32,20 @@ __device__ __forceinline__ void conv_rows(const __nv_bfloat16* __restrict__ P, c
 }
 
 // producers: rows r0 .. r0 + n - 1's q, k (normed as fn_gdn_front), v, g, beta into the stage
+template <int NK, int NV>
 __device__ __forceinline__ void front_batch(const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs,
                                             const __nv_bfloat16* __restrict__ cw, const float* __restrict__ a_log,
                                             const float* __restrict__ dt_bias, int r0, int n, int hk, int hv, int p,
                                             unsigned char* base, float (*x)[2][DK]) {
+    constexpr int C = G<NK, NV>::C, PW = G<NK, NV>::PW;
     float o[STEPS];
-    conv_rows(P, cs, cw, r0, n, hk * DK + p, o);                       // fn_gdn_front unit hk, t = p: q's channel
+    conv_rows<NK, NV>(P, cs, cw, r0, n, hk * DK + p, o);               // fn_gdn_front unit hk, t = p: q's channel
 #pragma unroll
     for (int j = 0; j < STEPS; ++j) if (j < n) x[j][0][p] = o[j];
-    conv_rows(P, cs, cw, r0, n, NK * DK + hk * DK + p, o);             // t = p + DK: k's channel
+    conv_rows<NK, NV>(P, cs, cw, r0, n, NK * DK + hk * DK + p, o);     // t = p + DK: k's channel
 #pragma unroll
     for (int j = 0; j < STEPS; ++j) if (j < n) x[j][1][p] = o[j];
-    conv_rows(P, cs, cw, r0, n, 2 * NK * DK + hv * DV + p, o);         // unit NK + hv, t = p: v
+    conv_rows<NK, NV>(P, cs, cw, r0, n, 2 * NK * DK + hv * DV + p, o); // unit NK + hv, t = p: v
 #pragma unroll
     for (int j = 0; j < STEPS; ++j) if (j < n) reinterpret_cast<float*>(base + j * ROW + 2 * DK * 4)[p] = o[j];
     if (p < n) {                                                         // unit NK + hv, t == DV: row r0 + p's g and beta
@@ -72,9 +76,11 @@ __device__ __forceinline__ void front_batch(const __nv_bfloat16* __restrict__ P,
 }
 
 // producers: fn_gdn_norm for n rows from row r0 (readouts ys[j][dv])
+template <int NK, int NV>
 __device__ __forceinline__ void norm_rows(const float (*ys)[DV], const __nv_bfloat16* __restrict__ P,
                                           const __nv_bfloat16* __restrict__ norm_w, float eps, __nv_bfloat16* __restrict__ out,
                                           float* __restrict__ xs, int r0, int n, int hv, int p, float* rinv) {
+    constexpr int C = G<NK, NV>::C, PW = G<NK, NV>::PW;
     const int warp = p >> 5, lane = p & 31;
     for (int j = warp; j < n; j += PR / 32) {
         float ss = 0.0f;
@@ -105,6 +111,7 @@ __device__ __forceinline__ void norm_rows(const float (*ys)[DV], const __nv_bflo
     pbar();
 }
 
+template <int NK, int NV>
 __device__ __forceinline__ void run(const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs,
                                     const __nv_bfloat16* __restrict__ cw, const float* __restrict__ a_log,
                                     const float* __restrict__ dt_bias, const float* state_in, float* state_out, int rows,
@@ -121,9 +128,9 @@ __device__ __forceinline__ void run(const __nv_bfloat16* __restrict__ P, const _
     const int batches = (rows + STEPS - 1) / STEPS;
     auto fill = [&](int bi) {
         const int r0 = bi * STEPS, n = min(STEPS, rows - r0);
-        front_batch(P, cs, cw, a_log, dt_bias, r0, n, hk, hv, p, stage + (bi & 1) * STAGE, xb);
+        front_batch<NK, NV>(P, cs, cw, a_log, dt_bias, r0, n, hk, hv, p, stage + (bi & 1) * STAGE, xb);
     };
-    // the chain's registers (gdn_tpr::chain<2, 16>'s)
+    // the chain's registers (gdn_tpr::chain<NK, NV, 2, 16>'s)
     constexpr int L = 32 / TPR;
     const int row = threadIdx.x / TPR, t = threadIdx.x % TPR;
     const size_t sbase = (size_t)hv * DV * DK + (size_t)row * DK;
@@ -139,7 +146,7 @@ __device__ __forceinline__ void run(const __nv_bfloat16* __restrict__ P, const _
         const int r0 = bi * STEPS, n = min(STEPS, rows - r0);
         if (producer) {
             if (bi + 1 < batches) fill(bi + 1);
-            if (bi >= 1) norm_rows(ysb[(bi - 1) & 1], P, norm_w, eps, out, xs, (bi - 1) * STEPS, STEPS, hv, p, rinv);
+            if (bi >= 1) norm_rows<NK, NV>(ysb[(bi - 1) & 1], P, norm_w, eps, out, xs, (bi - 1) * STEPS, STEPS, hv, p, rinv);
         } else {
             const unsigned char* base = stage + (bi & 1) * STAGE;
             for (int rr = 0; rr < n; ++rr) {
@@ -185,7 +192,7 @@ __device__ __forceinline__ void run(const __nv_bfloat16* __restrict__ P, const _
         __syncthreads();
     }
     if (producer) {
-        if (batches > 0) norm_rows(ysb[(batches - 1) & 1], P, norm_w, eps, out, xs, (batches - 1) * STEPS, rows - (batches - 1) * STEPS, hv, p, rinv);
+        if (batches > 0) norm_rows<NK, NV>(ysb[(batches - 1) & 1], P, norm_w, eps, out, xs, (batches - 1) * STEPS, rows - (batches - 1) * STEPS, hv, p, rinv);
     } else {
 #pragma unroll
         for (int l = 0; l < L; ++l)
@@ -200,5 +207,14 @@ extern "C" __global__ void __launch_bounds__(gdn_fused::THREADS) fn_gdn_fused(
         const float* __restrict__ a_log, const float* __restrict__ dt_bias, const float* state_in, float* state_out, int rows,
         const __nv_bfloat16* __restrict__ norm_w, float eps, __nv_bfloat16* __restrict__ out, float* __restrict__ xs,
         float* __restrict__ ys_out) {
-    gdn_fused::run(P, cs, cw, a_log, dt_bias, state_in, state_out, rows, norm_w, eps, out, xs, ys_out);
+    gdn_fused::run<16, 48>(P, cs, cw, a_log, dt_bias, state_in, state_out, rows, norm_w, eps, out, xs, ys_out);
+}
+
+// fn_gdn_fused on one rank's 8 key and 24 value heads (8,240-wide projection rows, a 5,120-channel conv window).
+extern "C" __global__ void __launch_bounds__(gdn_fused::THREADS) fn_gdn_fused_h8(
+        const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs, const __nv_bfloat16* __restrict__ cw,
+        const float* __restrict__ a_log, const float* __restrict__ dt_bias, const float* state_in, float* state_out, int rows,
+        const __nv_bfloat16* __restrict__ norm_w, float eps, __nv_bfloat16* __restrict__ out, float* __restrict__ xs,
+        float* __restrict__ ys_out) {
+    gdn_fused::run<8, 24>(P, cs, cw, a_log, dt_bias, state_in, state_out, rows, norm_w, eps, out, xs, ys_out);
 }

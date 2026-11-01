@@ -99,7 +99,7 @@ test "paged media contract: production wrappers select both media symbols with f
     for (plans) |p| {
         Capture.calls = 0;
         const v = at(&d, f, 0x8000, p);
-        try v.attn(s, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 1e-6, 16, pg);
+        try v.attn(s, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 1e-6, 16, .full, pg);
         try v.pooled(s, 1, 2, 3, 4, 5, 1e-6, 16, pg);
         try std.testing.expectEqualSlices(usize, &.{ 3, 4 }, &Capture.symbols);
         for (0..2) |i| {
