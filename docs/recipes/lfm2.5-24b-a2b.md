@@ -62,7 +62,7 @@ off; the lane core verifies every draft, so a drafted reply equals its `"draft":
 
 The drafter has no embedding and no head of its own:
 
-- Context: the target's rows after layers 2, 10, 18, 26 and 34 (the backend's taps, `lfm2_tap`), through `fc` and
+- Context: the target's captured rows after layers 2, 10, 18, 26 and 34, through `fc` and
   `hidden_norm`, give each of its five layers' context keys and values (k_norm, then RoPE at the row's position).
 - Block: the pending token and mask tokens run five Qwen3 layers with non-causal attention over the context and the
   block, then the target's head. A block is as long as the deepest chain its pass holds, at most the nine rows the
@@ -110,15 +110,41 @@ allocations over twenty served drafter rounds, which must be none.
 
 A hold runs on one concurrent encoder with a barrier only where a step reads an earlier step's writes: q, k and v,
 and gate and up, share one sums pass, and the blocks of a shared hold attend side by side. An 8-bit projection takes
-the scalar twin up to 8 rows, the window kernel past them where the GPU has no tensor units, and the tensor units
-from 9 rows (the head from 5) where it has them. Held blocks use one bf16 16-row group, then the existing
-64x64 tiles past 16 rows, avoiding a second weight pass for shared holds of 17 to 32 rows. Context ingestion
-keeps the original row kernel through 32 rows, preserving the persistent context projections.
+the scalar twin up to 8 rows and the window kernel past them where the GPU has no tensor units. With tensor units,
+wide projections use them from 9 rows, the head from 5, and projections no wider than the hidden state from 33.
+Held blocks use one bf16 16-row group, then 64x64 tiles past 16 rows. Context ingestion
+keeps the original row kernel through 32 rows, preserving the persistent context projections. A hold gathers
+adjacent small staged pieces into preallocated scratch: at most 128 rows per hold and 32 per call, or 8 per call
+on the coded scalar twin without tensor units. This preserves each piece's projection regime; lone, larger or
+out-of-room pieces use their original calls. Every context row is still projected.
 When one lane's stage of 128 verified rows fills, its absorb pass takes
 every lane's staged rows, so the lanes' stages fill together.
 
 Shared verification past the 16-row qualified window uses measured increments
 from the shared forward path through 32 rows, anchored at the 16-row window
 price. This calibrates the batch cost without widening a stream's qualified
-window. The wide-batch receipt records the throughput gains, the accepted
-four-stream tradeoff, startup/footprint cost and hardware coverage limits.
+window. Older wide-batch receipts retain their recorded source, device and measurement provenance; their
+four-stream tradeoff does not establish the current no-slowdown gate.
+
+### Requalifying the drafter
+
+Run the complete matrix from one native binary, with pinned target and drafter revisions:
+
+```sh
+python3 tools/bench_lfm2_dspark.py run \
+  --binary zig-out/native/bin/tensorfold-native \
+  --target "$TARGET" --drafter "$DRAFTER" \
+  --target-revision "$TARGET_REVISION" --drafter-revision "$DRAFTER_REVISION" \
+  --output-dir dspark-qualification
+```
+
+Defaults: 512-token replies, code completion and chat, greedy and sampled, 1/4/8/16 streams, three balanced
+rotations of no external drafter, released BF16 and 8-bit. The plain arm retains normal core proposals such as
+copies. Each launch verifies the binary hash and drafter mode. Every solo, `draft:false` and concurrent token
+hash must match across arms; each cell's median aggregate decode throughput must be at least its plain cell's.
+Negative cells fail individually, without a tolerance or pooled average. Reduced runs require `--smoke` and
+never establish qualification.
+
+Keep the source commit/patch with the recorded binary hash. Publish the metadata, raw request and cell records,
+events and summary, not `private-logs/`. Device receipts remain device-specific; a new short smoke cannot
+replace historical long-context, cancellation, load-memory or other-device evidence.

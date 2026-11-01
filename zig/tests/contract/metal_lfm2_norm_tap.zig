@@ -16,7 +16,7 @@ const shapes = [_]c.Shape{
     .{ .rows = 32, .n = hidden, .k = hidden },
     .{ .rows = 2048, .n = hidden, .k = hidden },
 };
-pub const Which = enum { norm, combine };
+pub const Which = enum { norm, norm_first, combine };
 fn depth(_: c.Shape) usize {
     return 14;
 }
@@ -24,6 +24,7 @@ pub fn spec(w: Which) c.Spec {
     return .{
         .name = switch (w) {
             .norm => "metal lfm2 norm tap lfm2_norm_tap",
+            .norm_first => "metal lfm2 norm tap first lfm2_norm_tap",
             .combine => "metal lfm2 combine norm tap lfm2_combine_norm_tap",
         },
         .accum = .f32,
@@ -40,6 +41,7 @@ pub fn spec(w: Which) c.Spec {
 pub fn controlName(w: Which) []const u8 {
     return switch (w) {
         .norm => "control: metal lfm2 norm tap wrong column",
+        .norm_first => "control: metal lfm2 norm tap first wrong column",
         .combine => "control: metal lfm2 combine norm tap wrong column",
     };
 }
@@ -71,9 +73,9 @@ pub const Probe = struct {
         const src = if (control) try std.mem.replaceOwned(u8, a, sources.lfm2, from, to) else sources.lfm2;
         defer if (control) a.free(src);
         if (control and std.mem.indexOf(u8, sources.lfm2, from) == null) return error.ControlEditMissing;
-        const fused = try rig_.pipeline(device, src, if (w == .norm) "lfm2_norm_tap" else "lfm2_combine_norm_tap");
+        const fused = try rig_.pipeline(device, src, if (w == .combine) "lfm2_combine_norm_tap" else "lfm2_norm_tap");
         errdefer fused.deinit();
-        const old = try rig_.pipeline(device, sources.lfm2, if (w == .norm) "lfm2_norm" else "lfm2_combine_norm");
+        const old = try rig_.pipeline(device, sources.lfm2, if (w == .combine) "lfm2_combine_norm" else "lfm2_norm");
         errdefer old.deinit();
         return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .which = w, .control = control, .fused = fused, .old = old, .tap = try rig_.pipeline(device, sources.lfm2, "lfm2_tap") };
     }
@@ -110,7 +112,7 @@ pub const Probe = struct {
         const n = r.outputs();
         p.prior = try p.a.alloc(u16, n * taps);
         @memset(p.prior, 0x3f80);
-        const res = try p.a.alloc(u16, n * if (p.which == .norm) @as(usize, 1) else topk);
+        const res = try p.a.alloc(u16, n * if (p.which == .combine) @as(usize, topk) else 1);
         defer p.a.free(res);
         @memset(res, 0);
         const rw = try p.a.alloc(u16, shape.rows * topk);
@@ -121,12 +123,12 @@ pub const Probe = struct {
             const expert = [_]f32{ 0.125, -0.0625, 0.03125, 0.015625 };
             const combined: f32 = 0.046875;
             for (0..n) |i| {
-                if (p.which == .norm) {
+                if (p.which != .combine) {
                     res[i] = c.toBf16(0.125);
                 } else for (expert, 0..) |v, k| {
                     res[(i / hidden * topk + k) * hidden + i % hidden] = c.toBf16(v);
                 }
-                r.x[i] = c.toBf16(@as(f32, @floatCast(c.fromBf16(p.initial[i]))) + if (p.which == .norm) @as(f32, 0.125) else combined);
+                r.x[i] = if (p.which == .norm_first) p.initial[i] else c.toBf16(@as(f32, @floatCast(c.fromBf16(p.initial[i]))) + if (p.which == .norm) @as(f32, 0.125) else combined);
             }
             for (0..shape.rows) |row| for (0..topk) |k| {
                 rw[row * topk + k] = c.toBf16(if (k == 0) 0.5 else 1);
@@ -136,7 +138,7 @@ pub const Probe = struct {
             // Exercise non-finites in the other operands, not only the hidden row.
             r.w[1] = 0x7fc0;
             if (shape.rows > 4) {
-                res[4 * hidden * if (p.which == .norm) @as(usize, 1) else topk] = 0x7f80;
+                res[4 * hidden * if (p.which == .combine) @as(usize, topk) else 1] = 0x7f80;
                 if (p.which == .combine) rw[4 * topk + 1] = 0xff80;
             }
         }
@@ -165,12 +167,12 @@ pub const Probe = struct {
         const pass = p.rig.begin();
         const e = pass.e;
         e.setPipeline(if (fused) p.fused else p.old);
-        if (p.which == .norm) {
+        if (p.which != .combine) {
             e.setBuffer(h.buf, h.off, 0);
             e.setBuffer(p.residual.buf, p.residual.off, 1);
             e.setBuffer(p.weights.buf, p.weights.off, 2);
             e.setValue(p.r.?.eps, 3);
-            e.setValue(@as(u32, 1), 4);
+            e.setValue(@as(u32, @intFromBool(p.which != .norm_first)), 4);
         } else {
             e.setBuffer(p.residual.buf, p.residual.off, 0);
             e.setBuffer(p.router.buf, p.router.off, 1);

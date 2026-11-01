@@ -8,6 +8,8 @@ const block = @import("dspark_block.zig");
 const Pick = @import("tree_round_gpu").contract.Pick;
 const ds = @import("dspark.zig");
 const lanes = @import("lanes");
+const dc = @import("dspark_config.zig");
+const Model = @import("model.zig").Model;
 
 const shared = mtl.ResourceOptions.shared;
 
@@ -354,4 +356,114 @@ test "lfm2 dspark: fused normalization taps match the separate copy bit for bit"
             for (out[(3 * row + 2) * c.hidden ..][0..c.hidden]) |v| try std.testing.expectEqual(@as(u16, 0x7fc0), v);
         }
     };
+}
+
+/// Project pieces separated by NaN sentinels; a stray gather copy must change the output.
+fn fcOnce(rig: *Rig, d: *ds.Drafter, src: mtl.Buffer, sizes: []const usize, gather: ?*usize, out: []u16) !void {
+    var pieces: [40]block.Piece = undefined;
+    var row: usize = 0;
+    for (sizes, pieces[0..sizes.len]) |n, *pc| {
+        pc.* = .{ .lane = undefined, .src = .{ .buf = src, .off = row * d.tapBytes() }, .rows = n, .p0 = 0 };
+        row += n + 1;
+    }
+    @memset(d.s.fcx.slice(u16, out.len), 0x5a5a);
+    const cb = rig.queue.commandBuffer();
+    const e = cb.compute(if (gather == null) .serial else .concurrent);
+    const rows = try block.fcRows(d, e, gather != null, pieces[0..sizes.len], gather);
+    e.end();
+    cb.commit();
+    cb.wait();
+    if (cb.failure()) |_| return error.GpuFailed;
+    try std.testing.expectEqual(out.len / c.hidden, rows);
+    @memcpy(out, d.s.fcx.slice(u16, out.len));
+}
+
+test "lfm2 dspark: small staged pieces sharing one fc call give the bytes each gives alone, at the boundaries of a call's rows" {
+    var rig = try Rig.init();
+    defer rig.deinit();
+    var target: Model = undefined;
+    target.device = rig.device;
+    target.kernels = rig.k;
+    var d: ds.Drafter = undefined;
+    d.target = &target;
+    d.config = try dc.Config.parse(std.testing.allocator, dc.stock);
+    const k = d.config.tap_count * c.hidden;
+    const most = 200; // source rows: 40 pieces of four rows, each followed by a NaN row
+    d.s.sums = try rig.buffer(f32, most * (k / 64));
+    defer d.s.sums.deinit();
+    d.s.fcx = try rig.buffer(u16, most * c.hidden);
+    defer d.s.fcx.deinit();
+    d.s.gather = try rig.buffer(u16, ds.gather_rows * k);
+    defer d.s.gather.deinit();
+    const src = try rig.buffer(u16, most * k);
+    defer src.deinit();
+    const w16 = try rig.buffer(u16, c.hidden * k);
+    defer w16.deinit();
+    noise(41, w16.slice(u16, c.hidden * k), 0.5);
+    const wq = try rig.buffer(u8, c.hidden * k);
+    defer wq.deinit();
+    var prng = std.Random.DefaultPrng.init(42);
+    prng.random().bytes(wq.slice(u8, c.hidden * k));
+    const scales = try rig.buffer(u16, c.hidden * (k / 64));
+    defer scales.deinit();
+    noise(43, scales.slice(u16, c.hidden * (k / 64)), 0.02);
+    const biases = try rig.buffer(u16, c.hidden * (k / 64));
+    defer biases.deinit();
+    noise(44, biases.slice(u16, c.hidden * (k / 64)), 0.1);
+    // the pieces' rows, and the rows of `gather` the pieces that share a call take (a call takes 32 rows, gather 128)
+    const cases = [_]struct { sizes: []const usize, used: usize, scalar_used: usize }{
+        .{ .sizes = &.{ 1, 1, 1, 1, 1, 1, 1, 1 }, .used = 8, .scalar_used = 8 },
+        .{ .sizes = &.{ 1, 2, 8, 9, 16, 32 }, .used = 20, .scalar_used = 3 },
+        .{ .sizes = &.{ 16, 16, 1 }, .used = 32, .scalar_used = 0 },
+        .{ .sizes = &.{ 33, 1, 1, 40 }, .used = 2, .scalar_used = 2 },
+        .{ .sizes = &.{ 32, 1 }, .used = 0, .scalar_used = 0 },
+        .{ .sizes = &.{ 31, 1, 1 }, .used = 32, .scalar_used = 2 },
+        .{ .sizes = &.{ 5, 5, 5, 5, 5, 5, 5, 5 }, .used = 40, .scalar_used = 0 },
+        .{ .sizes = &@as([24]usize, @splat(6)), .used = 120, .scalar_used = 0 },
+        .{ .sizes = &@as([40]usize, @splat(4)), .used = 128, .scalar_used = 128 },
+    };
+    for ([_]u8{ 0, 1, 2 }) |mode| { // bf16; 8-bit with the tiles; 8-bit with the twin
+        target.kernels.twin = mode == 2;
+        const scalar = mode == 2 and target.kernels.naxPipes(8) == null;
+        d.w.fc = if (mode == 0)
+            .{ .bf16 = .{ .w = w16, .n = c.hidden, .k = k } }
+        else
+            .{ .codes = .{ .w = wq, .scales = scales, .biases = biases, .n = c.hidden, .k = k, .bits = 8 } };
+        for (cases) |cs| for ([_]bool{ false, true }) |bad| {
+            const all = src.slice(u16, most * k);
+            noise(45, all, 2);
+            var first: [40]usize = undefined;
+            var row: usize = 0;
+            var total: usize = 0;
+            for (cs.sizes, first[0..cs.sizes.len]) |n, *f| {
+                f.* = row;
+                @memset(all[(row + n) * k ..][0..k], 0x7fc0); // the NaN row after the piece
+                row += n + 1;
+                total += n;
+            }
+            const last = cs.sizes.len - 1;
+            if (bad) { // a NaN, a -inf and a +inf among the rows
+                all[first[0] * k + 3] = 0x7fc0;
+                all[first[cs.sizes.len / 2] * k + 17] = 0xff80;
+                all[(first[last] + cs.sizes[last] - 1) * k + k - 1] = 0x7f80;
+            }
+            const want = try std.testing.allocator.alloc(u16, total * c.hidden);
+            defer std.testing.allocator.free(want);
+            const got = try std.testing.allocator.alloc(u16, total * c.hidden);
+            defer std.testing.allocator.free(got);
+            try fcOnce(&rig, &d, src, cs.sizes, null, want);
+            var used: usize = 0;
+            try fcOnce(&rig, &d, src, cs.sizes, &used, got);
+            try std.testing.expectEqual(if (scalar) cs.scalar_used else cs.used, used);
+            try std.testing.expectEqualSlices(u16, want, got);
+            var nonfinite = false;
+            var nonzero = false;
+            for (want) |v| {
+                nonfinite = nonfinite or !std.math.isFinite(quant.toF32(v));
+                nonzero = nonzero or v != 0;
+            }
+            try std.testing.expect(nonzero);
+            try std.testing.expectEqual(bad, nonfinite);
+        };
+    }
 }

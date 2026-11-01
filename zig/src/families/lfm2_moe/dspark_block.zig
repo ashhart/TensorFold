@@ -173,27 +173,74 @@ const Enc = struct {
         x.e.setBuffer(s.y, row * c.hidden * 2, 4);
         x.e.dispatchGroups(mtl.Size.of(c.query_heads, rows, 1), mtl.Size.of(32, 1, 1));
     }
+
+    /// Project pieces into fcx, grouping adjacent small pieces in stable scratch without changing a row's sum.
+    fn fc(x: Enc, pieces: []const Piece, gather: ?*usize) !usize {
+        const d = x.d;
+        const s = &d.s;
+        const width = d.tapBytes();
+        // A scalar context piece must not become an MMA window just because another lane joins it.
+        const scalar = d.w.fc == .codes and d.target.kernels.twin and d.target.kernels.naxPipes(d.w.fc.codes.bits) == null;
+        const cap = if (scalar) scalar_rows else @min(x.bf16_rows_max, tile.twin_rows);
+        const is_bf16 = d.w.fc == .bf16;
+        var rows: usize = 0;
+        var at: usize = 0;
+        while (at < pieces.len) {
+            var until = at + 1;
+            var run = pieces[at].rows;
+            if (gather != null) while (until < pieces.len and run + pieces[until].rows <= cap) : (until += 1) {
+                run += pieces[until].rows;
+            };
+            const together = until - at > 1 and gather.?.* + run <= ds.gather_rows;
+            if (!together) {
+                until = at + 1;
+                run = pieces[at].rows;
+            }
+            const out = Ref{ .buf = s.fcx, .off = rows * c.hidden * 2 };
+            if (together) {
+                const used = gather.?;
+                const into = s.gather.contents() + used.* * width;
+                var off: usize = 0;
+                for (pieces[at..until]) |pc| {
+                    @memcpy((into + off)[0 .. pc.rows * width], (pc.src.buf.contents() + pc.src.off)[0 .. pc.rows * width]);
+                    off += pc.rows * width;
+                }
+                try x.project(d.w.fc, .{ .buf = s.gather, .off = used.* * width }, out, run);
+                used.* += run;
+            } else try x.project(d.w.fc, pieces[at].src, out, run);
+            if (!is_bf16) x.sync(); // the codes' projections share the sums scratch
+            rows += run;
+            at = until;
+        }
+        if (is_bf16) x.sync(); // the calls write their own rows of fcx
+        return rows;
+    }
 };
+
+/// Rows a bf16 call takes on the few-rows kernel in an absorb pass.
+const absorb_bf16_rows = 32;
 
 /// One stream's tapped rows in an absorb pass: `rows` rows at `src`, the context from position `p0`.
 pub const Piece = struct { lane: *Lane, src: Ref, rows: usize, p0: u64 };
 
 /// Each piece's rows into its lane's keys and values (fc, hidden_norm, k, v, k_norm, RoPE) in passes on `e`.
 pub fn absorbPass(d: *Drafter, e: mtl.ComputeEncoder, pieces: []const Piece) !void {
-    return absorbOn(.{ .d = d, .e = e }, pieces);
+    return absorbOn(.{ .d = d, .e = e }, pieces, null);
 }
 
-fn absorbOn(encoder: Enc, pieces: []const Piece) !void {
+/// Project an absorb pass's fc rows; a hold's monotone gather cursor permits batching its small pieces.
+pub fn fcRows(d: *Drafter, e: mtl.ComputeEncoder, conc: bool, pieces: []const Piece, gather: ?*usize) !usize {
+    var x = Enc{ .d = d, .e = e, .conc = conc };
+    x.bf16_rows_max = absorb_bf16_rows;
+    return x.fc(pieces, gather);
+}
+
+fn absorbOn(encoder: Enc, pieces: []const Piece, gather: ?*usize) !void {
     var x = encoder;
-    x.bf16_rows_max = 32; // preserve the context cache's original projection arithmetic
+    x.bf16_rows_max = absorb_bf16_rows; // preserve the context cache's original projection arithmetic
     const d = x.d;
     const s = &d.s;
-    var rows: usize = 0;
-    for (pieces) |pc| {
-        try x.project(d.w.fc, pc.src, .{ .buf = s.fcx, .off = rows * c.hidden * 2 }, pc.rows);
-        x.sync(); // the pieces' projections share the sums scratch
-        rows += pc.rows;
-    }
+    const rows = try x.fc(pieces, gather);
     if (rows == 0 or rows > ds.absorb_rows) return error.DraftContextGap;
     x.norm(s.fcx, s.fcx, d.w.hidden_norm, false, s.fcx, rows); // in place: a thread reads its values first
     x.sync();
@@ -280,9 +327,10 @@ pub fn hold(d: *Drafter, blocks: []const Block, signal: ?Signal) !?mtl.CommandBu
     var staged: [ds.pass_rows]Piece = undefined;
     var count: usize = 0;
     var held: usize = 0;
+    var gathered: usize = 0; // rows of `gather` this hold's absorb calls took
     for (blocks) |b| if (ds.Drafter.stagedPiece(b.lane)) |pc| {
         if (held + pc.rows > ds.absorb_rows) {
-            try absorbOn(x, staged[0..count]);
+            try absorbOn(x, staged[0..count], &gathered);
             count = 0;
             held = 0;
         }
@@ -290,7 +338,7 @@ pub fn hold(d: *Drafter, blocks: []const Block, signal: ?Signal) !?mtl.CommandBu
         count += 1;
         held += pc.rows;
     };
-    if (count > 0) try absorbOn(x, staged[0..count]);
+    if (count > 0) try absorbOn(x, staged[0..count], &gathered);
     for (blocks) |b| {
         b.lane.end += b.lane.staged;
         b.lane.staged = 0;

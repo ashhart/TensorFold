@@ -263,6 +263,7 @@ constant constexpr uint BF16_ROWS = 16;
                           uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
   const size_t base = size_t(row) * D + 4 * t;
   float v[4];
+  bfloat4 saved;
   for (int j = 0; j < 4; ++j) {
     bfloat hv = h[base + j];
     if (add != 0) {
@@ -270,10 +271,11 @@ constant constexpr uint BF16_ROWS = 16;
       h[base + j] = hv;
     }
     v[j] = hv;
+    saved[j] = hv;
   }
+  *(device bfloat4*)(taps + size_t(row) * tap_at.x + tap_at.y + 4 * t) = saved;
   threadgroup float sums[32], inv[1];
   lfm2_rms(v, w, eps, x, base, t, sg, lane, sums, inv);
-  *(device bfloat4*)(taps + size_t(row) * tap_at.x + tap_at.y + 4 * t) = *(device bfloat4*)(h + base);
 }
 
 [[kernel]] void lfm2_combine_norm_tap(const device bfloat* y [[buffer(0)]], const device bfloat* wts [[buffer(1)]], device bfloat* h [[buffer(2)]],
@@ -282,6 +284,7 @@ constant constexpr uint BF16_ROWS = 16;
                                   uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
   const size_t base = size_t(row) * D + 4 * t;
   float v[4];
+  bfloat4 saved;
   for (int j = 0; j < 4; ++j) {
     float acc = 0.0f;
     for (uint k = 0; k < TOPK; ++k) {
@@ -291,8 +294,9 @@ constant constexpr uint BF16_ROWS = 16;
     const bfloat hv = h[base + j] + static_cast<bfloat>(acc);
     h[base + j] = hv;
     v[j] = hv;
+    saved[j] = hv;
   }
+  *(device bfloat4*)(taps + size_t(row) * tap_at.x + tap_at.y + 4 * t) = saved;
   threadgroup float sums[32], inv[1];
   lfm2_rms(v, w, eps, x, base, t, sg, lane, sums, inv);
-  *(device bfloat4*)(taps + size_t(row) * tap_at.x + tap_at.y + 4 * t) = *(device bfloat4*)(h + base);
 }

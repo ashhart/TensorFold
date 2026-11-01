@@ -20,6 +20,8 @@ pub const pass_rows = 32;
 pub const absorb_rows = 2048;
 /// Verified rows a lane keeps on the host until its next hold absorbs them (a round's rows for no GPU work).
 pub const stage_rows = 128;
+/// Staged rows a hold can gather to share fc reads, in calls of at most 32 rows.
+pub const gather_rows = 128;
 /// The block counts timed at load, at every depth that fits one pass and the checkpoint's block.
 const hold_grid = [_]u32{ 1, 2, 4, 8, 16 };
 const kw = c.kv_heads * c.head_dim;
@@ -71,6 +73,7 @@ pub const Scratch = struct {
     at: mtl.Buffer,
     picks: mtl.Buffer,
     conf: mtl.Buffer, // the confidence logits, step by step, a pass's blocks each
+    gather: mtl.Buffer, // a hold's small staged pieces, side by side, for one fc call
 };
 
 pub const Drafter = struct {
@@ -165,6 +168,7 @@ pub const Drafter = struct {
             .at = try d.buffer(r * block.scan_groups * 4),
             .picks = try d.buffer(d.config.block * r * 8),
             .conf = try d.buffer(d.config.block * r * 4),
+            .gather = try d.buffer(gather_rows * d.tapBytes()),
         };
     }
 
