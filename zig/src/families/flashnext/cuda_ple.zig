@@ -151,11 +151,7 @@ pub fn lastIds(h: Hash, history: []const i64, token: i64, out: []i64) !void {
     }
 }
 
-pub fn toBf16(v: f32) u16 {
-    const bits: u32 = @bitCast(v);
-    if (std.math.isNan(v)) return @intCast((bits >> 16) | 0x40);
-    return @intCast((bits + 0x7FFF + ((bits >> 16) & 1)) >> 16);
-}
+pub const toBf16 = core.bf16_round.bits;
 
 pub fn sumGroups(row: []const u16, out: []f32) void {
     const groups = row.len / 32;
