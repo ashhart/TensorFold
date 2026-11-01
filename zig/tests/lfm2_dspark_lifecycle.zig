@@ -118,7 +118,7 @@ pub fn run(gpa: std.mem.Allocator, d: *q.dspark.Drafter, taps: mtl.Buffer, ids: 
         .{ .stream = &resumed, .pending = ids[ctx], .position = ctx + 1, .depth = depth },
     });
     if (d.pending == null) return error.LifecycleHoldNotPending;
-    dr.release(&first); // settles the shared hold before freeing the packed allocation
+    dr.release(&first); // settles the shared hold before releasing lane storage
     first_open = false;
     if (d.pending != null or d.pass_len != 0 or d.lanes.contains(&first)) return error.CancelledLaneStillHeld;
     var got: [16]u32 = undefined;
