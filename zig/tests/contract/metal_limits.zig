@@ -26,6 +26,15 @@ fn specialize(a: std.mem.Allocator, template: []const u8, definitions: []const u
     return std.mem.concat(a, u8, &.{ template[0..mark], definitions, template[mark + "Q27_SPECIALIZE".len ..] });
 }
 
+/// The 27B's own source for a launch, by what its label says: the copy, the steering kernel at the 27B's width, or the glue.
+fn qwen27Source(a: std.mem.Allocator, name: []const u8) ![]const u8 {
+    if (std.mem.indexOf(u8, name, " copy ") != null) return tf.qwen27.runtime_sources.copy;
+    if (std.mem.indexOf(u8, name, " norm steer ") != null) {
+        return specialize(a, tf.qwen27.runtime_sources.norm_steer, "constexpr int K=5120;");
+    }
+    return tf.qwen27.runtime_sources.glue;
+}
+
 /// Each registration's function is its label's last word; the label's words say which source it compiles.
 fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !Launch {
     const fun = d.name[std.mem.lastIndexOfScalar(u8, d.name, ' ').? + 1 ..];
@@ -125,10 +134,9 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
     } else if (std.mem.startsWith(u8, d.name, "core deltanet ")) {
         text = sources.core_deltanet;
     } else if (std.mem.startsWith(u8, d.name, "qwen27 ")) {
-        text = if (has(d.name, " copy ")) tf.qwen27.runtime_sources.copy else tf.qwen27.runtime_sources.glue;
+        text = try qwen27Source(a, d.name);
     } else if (std.mem.startsWith(u8, d.name, "metal pair ")) {
         text = sources.core_pair_rows;
-        text = if (has(d.name, " copy ")) tf.qwen27.runtime_sources.copy else if (has(d.name, " norm steer ")) try specialize(a, tf.qwen27.runtime_sources.norm_steer, "constexpr int K=5120;") else tf.qwen27.runtime_sources.glue;
     } else if (has(d.name, "tile_qmm")) text = sources.core_tile_qmm else if (has(d.name, "softmax")) text = sources.ops_softmax else if (has(d.name, "rms")) text = sources.ops_embed_norm else if (has(d.name, "top-k")) text = topk_text else if (has(d.name, "row projection")) text = sources.core_row_projection else if (has(d.name, "simd_qmm_bits")) text = sources.core_simd_qmm_bits else if (has(d.name, "simd_qmm")) text = sources.core_simd_qmm else if (has(d.name, "affine_mm")) {
         const bits: u8 = if (has(d.name, "q8")) 8 else 4;
         const group: u16 = if (has(d.name, "g32")) 32 else 64;
