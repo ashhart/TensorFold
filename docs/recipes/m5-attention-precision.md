@@ -28,6 +28,9 @@ zig build test-kernel-contract tf-kernel-contract -Dcpu=apple_m1
 
 The contract registers cut operands against a cut-operand binary64 formula and full operands against full binary64.
 Both require FP32 sums, guarded buffers, repeats, exceptional classes and matrix tile edges.
+The served Nemotron prompt range keeps the measured one-sided operand-cut terms when unset.
+Full mode removes that operand cut and counts 32 FMA steps per key tile; its control still compiles the cut product.
+The masked-key nonfinite finding remains a separate case in both modes.
 Its planted control runs the actual cut helper against the full-operand bound and must fail the shapes gate.
 The bound is the FP32 chain length and term magnitude, not a percentage fitted to the observed result.
 Separate launch records name both probes and all four production full-mode alignments.
