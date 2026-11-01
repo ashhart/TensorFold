@@ -43,7 +43,7 @@ pub fn mixer(f: *const fw.Forward, r: fw.Rank, l: weights.Layer, li: usize, di: 
     switch (l.mixer) {
         .kda => |k| {
             const n = k.heads * kda.dk;
-            const w = k.width();
+            const w = k.matWidth(); // TF_GLM_KDA_PAD: the projection rows carry the padded width
             var s = b.kda;
             s.p = b.kproj;
             try kda_block.project(f.set(), f.stream, k, s, b.normed, c.hidden, rows);

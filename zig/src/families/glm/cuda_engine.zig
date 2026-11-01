@@ -134,6 +134,8 @@ pub const Engine = struct {
         try ranks.agree(d, lib, comm, stream, fp, try a.alloc(ranks.Fingerprint, world));
         try ranks.probeStart(d, lib, comm, stream, o.settings, rank, world);
         const share = try shard.Share.of(&c, rank, world);
+        const kb = @import("cuda_kda_block.zig");
+        kb.pad_to = if (o.settings.kda_pad) kb.padWidth(c.kda_heads, world) else 0; // read once: rowWidth reads only this
         const spans = try gpa.alloc(shard.Span, world);
         errdefer gpa.free(spans);
         for (spans, 0..) |*sp, q| sp.* = (try shard.Share.of(&c, q, world)).vocab;
