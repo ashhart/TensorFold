@@ -36,11 +36,7 @@ pub fn read(e: Elem, bytes: []const u8, i: usize) f64 {
 }
 
 /// fp32 to bf16, round to nearest even (NaN stays NaN).
-pub fn toBf16(v: f32) u16 {
-    const u: u32 = @bitCast(v);
-    if (std.math.isNan(v)) return @truncate((u >> 16) | 0x40);
-    return @truncate((u +% 0x7fff +% ((u >> 16) & 1)) >> 16);
-}
+pub const toBf16 = @import("../bf16_round.zig").bits;
 
 pub fn fromBf16(h: u16) f32 {
     return @bitCast(@as(u32, h) << 16);
