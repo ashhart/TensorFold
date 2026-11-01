@@ -20,6 +20,7 @@ pub const vae_weights = @import("vae_weights.zig");
 /// Its DINOv3 ViT-H+/16 image encoder: an image to feature1.
 pub const dino = @import("dino.zig");
 /// Its background remover (BiRefNet) and the SDK's preprocess: a raw photo to the 1024 x 1024 picture.
+pub const birefnet_config = @import("birefnet_config.zig");
 pub const birefnet = @import("birefnet.zig");
 pub const birefnet_kernels = @import("birefnet_kernels.zig");
 pub const birefnet_weights = @import("birefnet_weights.zig");
@@ -50,6 +51,7 @@ test {
     _ = vae_kernels;
     _ = vae_weights;
     _ = dino;
+    _ = birefnet_config;
     _ = birefnet;
     _ = birefnet_kernels;
     _ = birefnet_weights;

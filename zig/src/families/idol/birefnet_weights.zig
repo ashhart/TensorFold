@@ -4,22 +4,21 @@ const mtl = @import("metal");
 const ck = @import("../../core/checkpoint_metal.zig");
 pub const Ref = @import("../../core/qwen_vl/weights.zig").Ref;
 
-/// The released geometry: Swin-L (embed 192, depths 2 2 18 2, heads 6 12 24 48, windows of 12), decoder widths.
-pub const embed = 192;
-pub const depths = [4]usize{ 2, 2, 18, 2 };
-pub const heads = [4]usize{ 6, 12, 24, 48 };
-pub const window = 12;
-pub const widths = [4]usize{ 192, 384, 768, 1536 };
-/// The decoder's channels after the backbone's two passes are concatenated (mul_scl_ipt='cat').
-pub const channels = [4]usize{ 3072, 1536, 768, 384 };
-pub const inter = 64;
-/// The squeeze's input: the four concatenated features, the three finer ones resized to the coarsest grid.
-pub const squeeze_in = channels[0] + channels[1] + channels[2] + channels[3];
-pub const aspp_planes = 256;
-/// The tensors the file holds: 742, ZhengPeng7/BiRefNet's less its 12 training-only ones.
-pub const tensor_count = 742;
-pub const ln_eps: f32 = 1e-5;
-pub const bn_eps: f64 = 1e-5;
+const cfg = @import("birefnet_config.zig");
+
+/// The released geometry (birefnet_config.zig): Swin-L, the decoder's widths, the checkpoint's tensors.
+pub const embed = cfg.embed;
+pub const depths = cfg.depths;
+pub const heads = cfg.heads;
+pub const window = cfg.window;
+pub const widths = cfg.widths;
+pub const channels = cfg.channels;
+pub const inter = cfg.inter;
+pub const squeeze_in = cfg.squeeze_in;
+pub const aspp_planes = cfg.aspp_planes;
+pub const tensor_count = cfg.tensor_count;
+pub const ln_eps = cfg.ln_eps;
+pub const bn_eps = cfg.bn_eps;
 
 /// A conv or linear as a GEMM: w [k * k * cin, ldw] by tap, bias [ldw], post [mean | scale | shift] after a BN.
 pub const Conv = struct { w: Ref, b: Ref, post: ?Ref = null, cin: usize, cout: usize, ldw: usize, k: usize };
@@ -33,8 +32,7 @@ pub const DecBlock = struct { conv_in: Conv, aspp: Aspp, conv_out: Conv };
 pub const Simple = struct { conv1: Conv, conv_out: Conv };
 pub const Dot = struct { w: Ref, b: Ref };
 
-/// The deformable branches' kernel sides: aspp1, then aspp_deforms 0, 1, 2.
-pub const branch_k = [4]usize{ 1, 1, 3, 7 };
+pub const branch_k = cfg.branch_k;
 
 pub const Weights = struct {
     buf: mtl.Buffer,
@@ -307,8 +305,3 @@ const Packer = struct {
         return d;
     }
 };
-
-test "the decoder's widths follow the backbone's: 5,760 channels into the squeeze, 240 into the head" {
-    try std.testing.expectEqual(@as(usize, 5760), squeeze_in);
-    try std.testing.expectEqual(@as(usize, 240), channels[3] / 2 + channels[3] / 8);
-}

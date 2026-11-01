@@ -6,14 +6,14 @@ const wts = @import("birefnet_weights.zig");
 const bn = @import("birefnet.zig");
 const Ref = ks.Ref;
 const Net = bn.Net;
-const C = wts.channels;
 
-/// Each level's input channels (the previous level's output plus its image patches' convolution) and grid side.
-pub const level_in = [4]usize{ C[0] + C[0] / 8, C[1] + C[0] / 8, C[2] + C[1] / 8, C[3] + C[2] / 8 };
-pub const level_side = [4]usize{ 32, 64, 128, 256 };
-/// Each level's output channels (decoder_block4 .. 1), and the image patches' tile side at each level.
-pub const level_out = [4]usize{ C[1], C[2], C[3], C[3] / 2 };
-const ipt_tile = [4]usize{ 32, 16, 8, 4 };
+const cfg = @import("birefnet_config.zig");
+
+/// Each level's input channels and side, its output channels and image patches' tile (birefnet_config.zig).
+pub const level_in = cfg.level_in;
+pub const level_side = cfg.level_side;
+pub const level_out = cfg.level_out;
+const ipt_tile = cfg.ipt_tile;
 
 /// squeeze_module: the encoder's [32^2, 5,760] to the first level's input [32^2, 3,456], its first 3,072 channels.
 pub fn squeeze(n: *Net, e: mtl.ComputeEncoder) void {
@@ -94,9 +94,4 @@ pub fn head(n: *Net, e: mtl.ComputeEncoder) void {
     n.conv(e, s.conv_out, n.cat, n.q48, .{ .rows = bn.size, .cols = bn.size, .ldy = s.conv_out.cout, .ldx = wts.inter });
     const side = level_side[3];
     ks.head(e, n.k.get("br_head"), n.out[3], n.q48, n.w.head.w, n.w.head.b, n.logits, .{ .h = side, .w = side }, full, level_out[3], s.conv_out.cout);
-}
-
-test "the levels' widths are the decoder blocks' inputs" {
-    try std.testing.expectEqual([4]usize{ 3456, 1920, 960, 480 }, level_in);
-    try std.testing.expectEqual(@as(usize, 240), level_out[3] + C[3] / 8);
 }

@@ -1,4 +1,4 @@
-//! The family sets in the full kernel contract: Nemotron's pocket, MiniMax-M3's, MOSS-Image's, Idol's.
+//! The family sets in the full kernel contract: Nemotron's pocket, MiniMax-M3's, MOSS-Image's, Idol's two.
 const std = @import("std");
 const cuda = @import("cuda");
 const check = @import("check.zig");
@@ -9,6 +9,7 @@ pub const Sets = struct {
     minimax: *@import("contract_minimax.zig").Set,
     moss: *@import("contract_moss_image.zig").Set,
     idol: *@import("contract_idol.zig").Set,
+    birefnet: *@import("contract_birefnet.zig").Set,
 
     /// Each set's kernels appended to `list`, in this order.
     pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel)) !Sets {
@@ -19,10 +20,13 @@ pub const Sets = struct {
         const moss = try @import("contract_moss_image.zig").Set.init(gpu, s, a, list);
         errdefer moss.deinit();
         const idol = try @import("contract_idol.zig").Set.init(gpu, s, a, list);
-        return .{ .pocket = pocket, .minimax = minimax, .moss = moss, .idol = idol };
+        errdefer idol.deinit();
+        const birefnet = try @import("contract_birefnet.zig").Set.init(gpu, s, a, list);
+        return .{ .pocket = pocket, .minimax = minimax, .moss = moss, .idol = idol, .birefnet = birefnet };
     }
 
     pub fn deinit(sets: Sets) void {
+        sets.birefnet.deinit();
         sets.idol.deinit();
         sets.moss.deinit();
         sets.minimax.deinit();

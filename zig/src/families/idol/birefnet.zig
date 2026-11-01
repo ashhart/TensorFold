@@ -7,18 +7,16 @@ const dec = @import("birefnet_decoder.zig");
 const pre = @import("preprocess.zig");
 const Ref = ks.Ref;
 
-/// The network's input side, and its two passes' patch grids (the full picture's, then the half picture's).
-pub const size = 1024;
-pub const grids = [2]usize{ size / 4, size / 8 };
-/// Pixels a deformable branch builds columns for at once.
-pub const chunk = 8192;
+const cfg = @import("birefnet_config.zig");
+
+/// The network's input side, its two passes' patch grids, a deformable branch's pixels at once (birefnet_config.zig).
+pub const size = cfg.size;
+pub const grids = cfg.grids;
+pub const chunk = cfg.chunk;
 
 pub const Timing = struct { wall: f64, gpu: f64 };
 
-/// The padded side of a grid of `n` (a whole number of windows).
-pub fn padded(n: usize) usize {
-    return (n + wts.window - 1) / wts.window * wts.window;
-}
+pub const padded = cfg.padded;
 
 /// Each scratch tensor's floats: the picture and encoder outputs persist; encoder and decoder temporaries share one.
 const P = struct {
@@ -277,39 +275,4 @@ pub const Net = struct {
     }
 };
 
-/// Grid h's window map shifted by `shift`: each slot (144 a window) to the token torch.roll puts there, -1 padding.
-pub fn fillMap(out: []i32, h: usize, shift: usize) void {
-    const hp = padded(h);
-    const per = hp / wts.window;
-    for (out, 0..) |*m, slot| {
-        const win = slot / 144;
-        const t = slot % 144;
-        const sy = (win / per) * wts.window + t / wts.window;
-        const sx = (win % per) * wts.window + t % wts.window;
-        const oy = (sy + shift) % hp;
-        const ox = (sx + shift) % hp;
-        m.* = if (oy < h and ox < h) @intCast(oy * h + ox) else -1;
-    }
-}
-
-test "a window map sends every token to one slot, the padding nowhere" {
-    const a = std.testing.allocator;
-    for ([_]usize{ 0, 6 }) |shift| {
-        const h = 16;
-        const hp = padded(h);
-        const m = try a.alloc(i32, hp * hp);
-        defer a.free(m);
-        fillMap(m, h, shift);
-        var seen: [h * h]u8 = @splat(0);
-        var pad: usize = 0;
-        for (m) |v| {
-            if (v < 0) pad += 1 else seen[@intCast(v)] += 1;
-        }
-        try std.testing.expectEqual(hp * hp - h * h, pad);
-        for (seen) |s| try std.testing.expectEqual(@as(u8, 1), s);
-    }
-    var m: [24 * 24]i32 = undefined;
-    fillMap(&m, 16, 6);
-    // the first window's first slot holds token (6, 6) once rolled by -6
-    try std.testing.expectEqual(@as(i32, 6 * 16 + 6), m[0]);
-}
+pub const fillMap = cfg.fillMap;

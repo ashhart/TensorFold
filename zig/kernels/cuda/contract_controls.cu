@@ -594,3 +594,6 @@ extern "C" __global__ void __launch_bounds__(256) tf_ctl_idol_bias_late(const fl
     if (act) v = 0.5f * v * (1.0f + tanhf(0.7978845608028654f * (v + 0.044715f * v * v * v)));
     Y[i] = __float2half_rn(act ? v : h(v));
 }
+
+// Idol's background remover's controls (fp16 rounding points or sums, a dropped NaN); none ship.
+#include "idol_birefnet_controls.cuh"
