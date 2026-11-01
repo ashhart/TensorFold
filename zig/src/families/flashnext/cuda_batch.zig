@@ -217,7 +217,7 @@ pub fn Pass(comptime Tri: type) type {
                 try self.tri.hcDenseMix(s.hc_up, norm, s.mixed + r0 * dims * 2, s.xsm + r0 * (dims / 32) * 4, n, dims, streams);
                 return;
             }
-            if (n >= parts.readout_tile_rows and self.tri.readoutTilesOwned() and std.meta.eql(keep, HcKeep{})) return self.readoutTiles(hc_w, r0, n);
+            if (n >= parts.readoutTileRows() and self.tri.readoutTilesOwned() and std.meta.eql(keep, HcKeep{})) return self.readoutTiles(hc_w, r0, n);
             try self.copy(keep.h, h, n * wide * 2);
             try self.tri.hcDown(h, pss, hc_w.scale.ptr, norm, hc_w.down.w.ptr, hc_w.down.s.ptr, hc_w.down.b.ptr, s.dn, s.hc_part, eps, n, hc_w.n_down, wide, dims, dims / 256, streams, hc_sk);
             if (keep.v != 0) try self.sumSlices(s.hc_part, keep.v, false, n * hc_w.n_down, hc_sk);

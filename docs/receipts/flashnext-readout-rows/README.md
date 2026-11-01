@@ -1,7 +1,9 @@
 # Flash Next read-out cut-over at 128 rows
 
-Moving the HC read-out's switch to the prompt tiles from 64 to 128 rows adds up to 7% throughput at 16 streams on a GB10,
-with no cell slower. Any cut from 96 to 160 serves the same, so 128 is a value inside a flat range and not a sharp optimum.
+`TF_FLASHNEXT_READOUT_ROWS=128`, off by default, moves the HC read-out's switch to the prompt tiles from 64 to 128 rows. That adds
+up to 7% throughput at 16 streams on a GB10. Any cut from 96 to 160 serves the same, so 128 is a value inside a flat range and
+not a sharp optimum. These runs set the value at build time. On the same build with the switch unset and at 128, 16 streams,
+`--reps 3`, a check gave +7.1%, +3.7%, +2.1% and 0.0%, the same order as below, and replies at 1, 4 and 16 streams were equal.
 
 ## Source and environment
 
@@ -15,7 +17,7 @@ streams, four builds differing only in `readout_tile_rows`.
 
 ## The cut-over, served at 16 streams
 
-End-to-end tok/s, mean of two cycles. 64 is main; 96 and 160 are the cells either side of this change.
+End-to-end tok/s, mean of two cycles. 64 is main; 96 and 160 are the cuts either side of this change.
 
 | Prompt | Temp | 64 | 96 | 128 | 160 |
 |---|---|---|---|---|---|
@@ -25,6 +27,10 @@ End-to-end tok/s, mean of two cycles. 64 is main; 96 and 160 are the cells eithe
 | chat | 1 | 187.3 | 187.0 | 187.8 | 187.6 |
 
 Cycles differ by at most 1.2 tok/s, except 64 at code, temp 1, by 3.2.
+
+This compares cuts, not cells on either side of 128 rows. The tie from 96 to 160 suggests these 16-stream rounds stay below 96
+rows, so those three columns take one path and the 64 column takes the other, on the same rounds. No served round at or above
+128 rows was measured here, and Flash Next stops at 16 lanes. That side is unchanged: it takes the tiles under either value.
 
 ## Main against this branch
 
