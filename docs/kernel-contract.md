@@ -194,6 +194,11 @@ sparse). Its prompt indexer (`tf_glm_index_scores`, `tf_glm_index_pools`) is bit
 `tf_glm_select_rows`, and its decode select at a 1,024-thread block a row (`tf_glm_select_rows_wide`) to
 `tf_glm_select_rows`; both stated rules rank any NaN above +inf, as the GPU's `s + 0` makes every NaN one
 positive NaN.
+CUDA also checks `TF_GLM_KV_HOST`'s gather (`tf_glm_kvh_*` in `glm_ops.cu`, launched by `cuda_kv_host.zig`): the
+marks (a slot for each distinct pick; past its slots, the call flagged and no row left marked), the picked rows into
+their slots from host pages or the layer's row cache, the token lists' slots, the marks cleared, the dense rows through
+pages out of order, and the layer's cache kept, each exact against the host's replay (nine controls, one a kernel: a
+stale mark, a dropped row or swapped slots).
 
 GLM's Metal window projections register narrow and wide rows at 2, 3, 4, 5, 6 and 8 bits, plus both gathered paths.
 Independent FP64 linear cases accompany byte replacements against frozen pre-window-optimization kernels.
