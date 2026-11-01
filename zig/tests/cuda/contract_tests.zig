@@ -554,7 +554,7 @@ pub fn run(gpu: check.Gpu) !void {
         x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = if (hb == 16) glm_fns.chunks_16 else glm_fns.chunks_32, .merge = glm_fns.merge, .form = .{ .hb = hb, .sparse = sparse } };
     defer for (&glm_chunks) |*x| x.deinit();
     for (&glm_chunks) |*x| try kernels.append(a, x.kernel());
-    var glm_controls = @import("contract_glm_controls.zig").Controls.init(gpu, s, glm_fns, glm_tokens.f);
+    var glm_controls = @import("contract_glm_controls.zig").Controls.init(gpu, s, glm_fns, glm_tokens.f, glm_ops);
     defer glm_controls.deinit();
     try glm_controls.append(a, &kernels);
     var q35_flat_mod = try cuda.Module.load(gpu.d, kk.qwen35);

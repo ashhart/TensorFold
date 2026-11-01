@@ -56,7 +56,8 @@ extern "C" __global__ void tf_glm_copy_rows(const unsigned char* __restrict__ sr
 
 // TF_GLM_KV_HOST mark: each picked row (first counts[r] of tokens [rows][width]) gets a slot; slot_of -1 if unseen.
 extern "C" __global__ void tf_glm_kvh_mark(const int* __restrict__ tokens, const int* __restrict__ counts, int width,
-                                           long long total, int* slot_of, int* list, int* n, int cap) {
+                                           long long total, int* slot_of, int* list, int* n, int cap,
+                                           volatile int* over) {
     const long long i = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= total) return;
     if (static_cast<int>(i % width) >= counts[i / width]) return;
@@ -66,6 +67,9 @@ extern "C" __global__ void tf_glm_kvh_mark(const int* __restrict__ tokens, const
     if (s < cap) {
         list[s] = t;
         slot_of[t] = s;
+    } else {
+        slot_of[t] = -1;  // past the slots: left unseen, and the call flagged in host memory (Gather.check reads it)
+        *over = 1;
     }
 }
 
