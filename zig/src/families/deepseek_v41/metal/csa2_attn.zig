@@ -81,7 +81,7 @@ pub fn encodeDecode(p: *const Pipelines, e: mtl.ComputeEncoder, b: Bind, c: Call
 /// `encodeDecode` with the key prefetch chosen by the caller.
 pub fn encodeDecodeAs(p: *const Pipelines, e: mtl.ComputeEncoder, b: Bind, c: Call, prefetch: bool) !void {
     try check(c);
-    e.setPipeline((if (prefetch) p.pf else p.dec)[@intFromEnum(c.out)]);
+    e.setPipeline((if (prefetch) p.pf else p.dec)[@backingInt(c.out)]);
     bind(e, b, c);
     e.dispatchGroups(mtl.Size.of(c.rows, c.heads / heads_per_sg, 1), mtl.Size.of(32 * chunks, 1, 1));
 }
@@ -89,7 +89,7 @@ pub fn encodeDecodeAs(p: *const Pipelines, e: mtl.ComputeEncoder, b: Bind, c: Ca
 /// Prompt rows: consecutive positions of one stream over a linear window buffer (`wbase` >= 0); bits equal decode's.
 pub fn encodePrompt(p: *const Pipelines, e: mtl.ComputeEncoder, b: Bind, c: Call) !void {
     try check(c);
-    e.setPipeline(p.pre[@intFromEnum(c.out)]);
+    e.setPipeline(p.pre[@backingInt(c.out)]);
     bind(e, b, c);
     const per = heads_per_sg * prompt_head_groups;
     e.dispatchGroups(mtl.Size.of((c.rows + prompt_rows - 1) / prompt_rows, (c.heads + per - 1) / per, 1), mtl.Size.of(32 * prompt_rows * prompt_head_groups, 1, 1));
