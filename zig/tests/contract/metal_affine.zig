@@ -13,11 +13,13 @@ const sq = row.simd;
 const sqb = row.simd_bits;
 const mm = tf.affine_mm;
 const lane = tf.lane_projection;
+const wide = @import("metal_simd32_controls.zig");
+const sources = @import("kernel_sources");
 
 pub const Kind = enum { row, affine_mm, simd, simd_bits, lane, lane_reg };
 
 /// One registered variant: the kernel, its code width and group, its output, and the lane kernel's K slices.
-pub const Variant = struct { kind: Kind, bits: u8 = 4, group: usize = 64, f32_out: bool = false, sk: usize = 1, coop: bool = false };
+pub const Variant = struct { kind: Kind, bits: u8 = 4, group: usize = 64, f32_out: bool = false, sk: usize = 1, coop: bool = false, rows32: bool = false, coupled: bool = false };
 
 /// Each 16-input piece's products, two roundings a piece, a lane's pieces in turn, then a simd_sum tree.
 fn rowDepth(s: c.Shape) usize {
@@ -43,6 +45,19 @@ fn laneDepth(s: c.Shape) usize {
 const offset_inf = c.Known{ .gate = .nonfinite, .finding = "an infinite input gives NaN where MLX's s*sum(q x) + b*sum(x) keeps the infinity (the +128 code offset moves the bias to b - 128 s)" };
 
 pub fn spec(v: Variant, name: []const u8) c.Spec {
+    if (v.rows32) return .{
+        .name = name,
+        .accum = .f32,
+        .depth = simdDepth,
+        .out = .bf16,
+        .replaces = "frozen main's 16-row simd_qmm passes",
+        .tiles = .{ .{ .size = 32 }, .{ .size = 32, .step = 8, .min = 8 }, .{ .size = 512, .step = 64, .min = 64 } },
+        .served = &.{
+            .{ .rows = 17, .n = 48, .k = 256 },   .{ .rows = 31, .n = 264, .k = 320 },
+            .{ .rows = 32, .n = 272, .k = 512 },  .{ .rows = 33, .n = 6408, .k = 192 },
+            .{ .rows = 32, .n = 6416, .k = 256 }, .{ .rows = 64, .n = 6432, .k = 512 },
+        },
+    };
     const out: c.Elem = if (v.f32_out) .f32 else .bf16;
     const step: usize = @max(16, v.group);
     return switch (v.kind) {
@@ -58,6 +73,8 @@ pub const Proj = struct {
     rig: rig_.Rig,
     v: Variant,
     name: []const u8,
+    frozen: ?mtl.Library = null,
+    compact: std.ArrayList(u8) = .empty,
     row_p: ?row.Pipelines = null,
     sq_p: ?sq.Pipelines = null,
     sqb_p: ?sqb.Pipelines = null,
@@ -77,10 +94,15 @@ pub const Proj = struct {
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, v: Variant, name: []const u8) !Proj {
         var p = Proj{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .v = v, .name = name };
+        errdefer p.deinit();
+        const text = if (v.kind == .simd_bits) sources.core_simd_qmm_bits else sources.core_simd_qmm;
+        const bad = if (v.coupled) try wide.source(a, text) else null;
+        defer if (bad) |owned| a.free(owned);
+        if (v.rows32) p.frozen = try mtl.Library.fromSource(device, if (v.kind == .simd_bits) wide.frozen_strided else wide.frozen, mtl.CompileOptions.mlx());
         switch (v.kind) {
             .row => p.row_p = try row.Pipelines.load(device),
-            .simd => p.sq_p = try sq.Pipelines.load(device),
-            .simd_bits => p.sqb_p = try sqb.Pipelines.load(device),
+            .simd => p.sq_p = try sq.Pipelines.loadSource(device, bad orelse text),
+            .simd_bits => p.sqb_p = try sqb.Pipelines.loadSource(device, bad orelse text),
             .affine_mm => {
                 const src = try mm.source(device, a, .{ .bits = v.bits, .group = @intCast(v.group), .out_f32 = v.f32_out });
                 defer a.free(src);
@@ -103,6 +125,8 @@ pub const Proj = struct {
         if (p.sqb_p) |*x| x.deinit();
         if (p.mm_p) |pipes| for (pipes) |x| x.deinit();
         if (p.order) |o| o.deinit();
+        if (p.frozen) |lib| lib.deinit();
+        p.compact.deinit(p.a);
         p.rig.deinit();
     }
 
@@ -117,10 +141,36 @@ pub const Proj = struct {
     }
 
     pub fn kernel(p: *Proj) g.Kernel {
-        return .{ .spec = spec(p.v, p.name), .ctx = p, .vt = &vt };
+        return .{ .spec = spec(p.v, p.name), .ctx = p, .vt = &vt, .control = if (p.v.coupled) .shapes else null };
     }
 
-    const vt = g.hooks(Proj);
+    const vt: g.VTable = block: {
+        var hooks = g.hooks(Proj);
+        hooks.output = output;
+        hooks.intact = intact;
+        break :block hooks;
+    };
+
+    fn stride(p: *const Proj) usize {
+        return p.f.?.shape.n + @as(usize, if (p.v.rows32 and p.v.kind == .simd_bits) 8 else 0);
+    }
+
+    fn output(ctx: *anyopaque) ![]const u8 {
+        const p: *Proj = @ptrCast(@alignCast(ctx));
+        if (!p.v.rows32 or p.v.kind != .simd_bits) return p.rig.outputBytes();
+        const shape = p.f.?.shape;
+        try p.compact.resize(p.a, shape.rows * shape.n * 2);
+        wide.packRows(p.compact.items, p.rig.bytes(p.out, shape.rows * p.stride() * 2), shape.rows, shape.n, p.stride());
+        return p.compact.items;
+    }
+
+    fn intact(ctx: *anyopaque) !bool {
+        const p: *Proj = @ptrCast(@alignCast(ctx));
+        if (!try p.rig.intact()) return false;
+        if (!p.v.rows32 or p.v.kind != .simd_bits) return true;
+        const shape = p.f.?.shape;
+        return wide.paddingIntact(p.rig.bytes(p.out, shape.rows * p.stride() * 2), shape.rows, shape.n, p.stride());
+    }
 
     fn layout(p: *const Proj, shape: c.Shape, coop: bool) lane.Layout {
         const reg = p.v.kind == .lane_reg and !coop;
@@ -149,7 +199,7 @@ pub const Proj = struct {
         defer p.a.free(words);
         f.words(words);
         p.x = try p.rig.input(std.mem.sliceAsBytes(f.x));
-        const out_bytes = f.outputs() * c.size(spec(p.v, p.name).out);
+        const out_bytes = shape.rows * p.stride() * c.size(spec(p.v, p.name).out);
         switch (p.v.kind) {
             .row, .simd, .simd_bits, .affine_mm => {
                 p.w = try p.rig.input(std.mem.sliceAsBytes(words));
@@ -175,6 +225,7 @@ pub const Proj = struct {
                 }
             },
         }
+        if (p.v.rows32) p.base = try p.rig.scratch(out_bytes);
         p.out = try p.rig.output(out_bytes);
         return true;
     }
@@ -202,7 +253,7 @@ pub const Proj = struct {
                 sq.encode(e, cl, .{ .w = p.w.buf, .w_off = p.w.off, .scales = p.s.buf, .s_off = p.s.off, .biases = p.b.buf, .b_off = p.b.off, .n = shape.n, .k = shape.k }, p.x.buf, p.x.off, p.out.buf, p.out.off);
             },
             .simd_bits => {
-                const cl = try sqb.call(&p.sqb_p.?, p.v.bits, shape.n, shape.k, shape.rows, shape.n, false, 0);
+                const cl = try sqb.call(&p.sqb_p.?, p.v.bits, shape.n, shape.k, shape.rows, p.stride(), false, 0);
                 sqb.encode(e, cl, .{ .w = p.w.buf, .w_off = p.w.off, .scales = p.s.buf, .s_off = p.s.off, .biases = p.b.buf, .b_off = p.b.off }, p.x.buf, p.x.off, p.out.buf, p.out.off);
             },
             .affine_mm => {
@@ -217,8 +268,9 @@ pub const Proj = struct {
         try p.rig.finish(pass);
     }
 
-    /// The cooperative kernel's bytes on the same inputs, from the weights before the reg order.
+    /// The replaced kernel's bytes on the same inputs, with frozen narrow passes for the wide projection.
     pub fn replaced(p: *Proj) ![]const u8 {
+        if (p.v.rows32) return p.frozenRows();
         if (p.v.kind != .lane_reg) return error.NotAReplacement;
         const f = p.f.?;
         const len = f.outputs() * c.size(spec(p.v, p.name).out);
@@ -226,6 +278,38 @@ pub const Proj = struct {
         const pass = p.rig.begin();
         try p.coop_p.?.encode(pass.e, ref(p.x), ref(p.tiled), ref(p.s), ref(p.base), @intCast(f.shape.rows));
         try p.rig.finish(pass);
+        return p.rig.bytes(p.base, len);
+    }
+
+    fn frozenRows(p: *Proj) ![]const u8 {
+        const shape = p.f.?.shape;
+        const len = shape.rows * shape.n * 2;
+        @memset(p.rig.bytes(p.base, len), 0xff);
+        const s = sq.splits(shape.n);
+        var first: usize = 0;
+        while (first < shape.rows) : (first += 16) {
+            const rows = @min(16, shape.rows - first);
+            const rt: u32 = @intCast(@min(2, (rows + 7) / 8));
+            const nt = sq.tiles(shape.n, rt, s);
+            var name: [48]u8 = undefined;
+            const symbol = if (p.v.kind == .simd_bits)
+                try std.fmt.bufPrintSentinel(&name, "tf_sqw_mma_q4_{d}_{d}_{d}", .{ s, nt, rt }, 0)
+            else
+                try std.fmt.bufPrintSentinel(&name, "tf_sq_mma_{d}_{d}_{d}", .{ s, nt, rt }, 0);
+            const pipe = try mtl.Pipeline.init(p.rig.device, p.frozen.?, symbol, false);
+            defer pipe.deinit();
+            const sgs: usize = @min(s, 16, pipe.maxThreads() / 32);
+            const threads = sgs * 32;
+            if (threads == 0) return error.SimdThreads;
+            const pass = p.rig.begin();
+            const groups = mtl.Size{ .width = (shape.n + 8 * nt - 1) / (8 * nt), .height = (rows + 8 * rt - 1) / (8 * rt) };
+            if (p.v.kind == .simd_bits) {
+                sqb.encode(pass.e, .{ .pipeline = pipe, .args = .{ .k = @intCast(shape.k), .n = @intCast(shape.n), .r = @intCast(rows), .ld = @intCast(shape.n) }, .groups = groups, .threads = threads }, .{ .w = p.w.buf, .w_off = p.w.off, .scales = p.s.buf, .s_off = p.s.off, .biases = p.b.buf, .b_off = p.b.off }, p.x.buf, p.x.off + first * shape.k * 2, p.base.buf, p.base.off + first * shape.n * 2);
+            } else {
+                sq.encode(pass.e, .{ .pipeline = pipe, .args = .{ .k = @intCast(shape.k), .n = @intCast(shape.n), .r = @intCast(rows) }, .groups = groups, .threads = threads }, .{ .w = p.w.buf, .w_off = p.w.off, .scales = p.s.buf, .s_off = p.s.off, .biases = p.b.buf, .b_off = p.b.off, .n = shape.n, .k = shape.k }, p.x.buf, p.x.off + first * shape.k * 2, p.base.buf, p.base.off + first * shape.n * 2);
+            }
+            try p.rig.finish(pass);
+        }
         return p.rig.bytes(p.base, len);
     }
 
