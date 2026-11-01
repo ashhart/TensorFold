@@ -6,8 +6,8 @@ const win = builtin.os.tag == .windows;
 pub const video_library = @import("video_library.zig");
 const grammar_library = @import("grammar_library.zig");
 
-pub const Id = enum { cublaslt, cublas, nccl, verbs, video, jpeg, webp, grammar, rccl, mcdma_rpc, mcdma_fabric };
-pub const Failure = error{ CublasLtUnavailable, CublasUnavailable, NcclUnavailable, VerbsUnavailable, VideoLibraryUnavailable, JpegLibraryUnavailable, WebpLibraryUnavailable, GrammarLibraryUnavailable, RcclUnavailable, McdmaRpcUnavailable, McdmaFabricUnavailable };
+pub const Id = enum { cublaslt, cublas, nccl, verbs, video, jpeg, webp, pdfium, grammar, rccl, mcdma_rpc, mcdma_fabric };
+pub const Failure = error{ CublasLtUnavailable, CublasUnavailable, NcclUnavailable, VerbsUnavailable, VideoLibraryUnavailable, JpegLibraryUnavailable, WebpLibraryUnavailable, PdfiumLibraryUnavailable, GrammarLibraryUnavailable, RcclUnavailable, McdmaRpcUnavailable, McdmaFabricUnavailable };
 pub const Spec = struct {
     id: Id,
     name: []const u8,
@@ -34,6 +34,7 @@ pub const all = [_]Spec{
     item(.video, "TensorFold video", if (mac) &.{"libtfvideo.dylib"} else if (win) &.{"tfvideo.dll"} else &.{video_library.soname}, "video inputs (--vision)", "build the optional zig build video -Dffmpeg=PREFIX runtime against FFmpeg 9.0.2 and place it in lib beside the server; see packaging/RUNTIME.md", error.VideoLibraryUnavailable, null, true),
     item(.jpeg, "libjpeg-turbo", if (mac) &.{"libturbojpeg.0.dylib"} else if (win) &.{"turbojpeg.dll"} else &.{"libturbojpeg.so.0"}, "JPEG inputs (--vision)", "install libjpeg-turbo 3.1.4.1 and set TENSORFOLD_LIBTURBOJPEG to its file, or put it on the documented loader path", error.JpegLibraryUnavailable, "TENSORFOLD_LIBTURBOJPEG", true),
     item(.webp, "libwebp", if (mac) &.{"libwebpdecoder.3.dylib"} else &.{"libwebpdecoder.so.3"}, "WebP inputs (--vision)", "install libwebp 1.6.0 and set TENSORFOLD_LIBWEBP to its decoder file, or put it on the documented loader path", error.WebpLibraryUnavailable, "TENSORFOLD_LIBWEBP", true),
+    item(.pdfium, "PDFium", if (mac) &.{"libpdfium.dylib"} else if (win) &.{"pdfium.dll"} else &.{"libpdfium.so"}, "PDF inputs (--vision)", "install PDFium (chromium/7725) and set TENSORFOLD_LIBPDFIUM to its file, or put it on the documented loader path", error.PdfiumLibraryUnavailable, "TENSORFOLD_LIBPDFIUM", true),
     item(.grammar, "TensorFold grammar", if (mac) &.{"libtfgrammar.dylib"} else if (win) &.{"tfgrammar.dll"} else &.{"libtfgrammar.so"}, "structured output and required tool calls (HTTP 400 when missing)", "restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with " ++ grammar_library.clone, error.GrammarLibraryUnavailable, null, true),
     item(.rccl, "RCCL", &.{ "librccl.so.1", "librccl.so", "/opt/rocm/lib/librccl.so.1" }, "HIP tensor-parallel ranks", "install the RCCL runtime matching the ROCm installation; " ++ loader_path ++ "", error.RcclUnavailable, null, false),
     item(.mcdma_rpc, "MCDMA RPC", if (mac) &.{"libmcdma-rpc.dylib"} else &.{"libmcdma-rpc.so"}, "MCDMA mailbox and Metal speed-up communication", "build and install MCDMA's RPC helper and set MCDMA_RPC_LIBRARY to its file", error.McdmaRpcUnavailable, "MCDMA_RPC_LIBRARY", false),
@@ -108,17 +109,17 @@ pub fn probe(a: std.mem.Allocator, io: std.Io, comptime Sys: type) ![]Status {
     return out;
 }
 
-pub fn found(s: Spec, a: std.mem.Allocator, comptime Sys: type, exe: ?[]const u8) bool {
-    if (builtin.os.tag == .linux and s.id == .video) return video_library.open(a, Sys, exe) != null;
+pub fn open(s: Spec, a: std.mem.Allocator, comptime Sys: type, exe: ?[]const u8) ?@typeInfo(@typeInfo(@TypeOf(Sys.DynLib.open)).@"fn".return_type.?).error_union.payload {
+    if (builtin.os.tag == .linux and s.id == .video) return video_library.open(a, Sys, exe);
     if (s.env) |name| if (Sys.getenv(name)) |value| {
-        if (value.len == 0 and s.id != .mcdma_rpc) return false;
-        if (value.len > 0) return loads(Sys, value);
+        if (value.len == 0 and s.id != .mcdma_rpc) return null;
+        if (value.len > 0) return Sys.DynLib.open(value) catch null;
     };
     if (s.local) if (exe) |dir| for (s.names) |name| {
         for ([_][]const []const u8{ &.{ dir, "..", "lib", name }, &.{ dir, name } }) |parts| {
             const path = std.fs.path.join(a, parts) catch continue;
             defer a.free(path);
-            if (loads(Sys, path)) return true;
+            if (Sys.DynLib.open(path)) |dl| return dl else |_| {}
         }
     };
     if (mac and (s.id == .jpeg or s.id == .webp)) {
@@ -126,19 +127,18 @@ pub fn found(s: Spec, a: std.mem.Allocator, comptime Sys: type, exe: ?[]const u8
         for ([_][]const u8{ "/opt/homebrew/opt", "/usr/local/opt" }) |root| {
             const path = std.fs.path.join(a, &.{ root, package, "lib", s.names[0] }) catch continue;
             defer a.free(path);
-            if (loads(Sys, path)) return true;
+            if (Sys.DynLib.open(path)) |dl| return dl else |_| {}
         }
     }
     if (s.id == .mcdma_rpc) {
-        for (rpcPaths(builtin.os.tag)) |path| if (loads(Sys, path)) return true;
-        return false;
+        for (rpcPaths(builtin.os.tag)) |path| if (Sys.DynLib.open(path)) |dl| return dl else |_| {};
+        return null;
     }
-    for (s.names) |name| if (loads(Sys, name)) return true;
-    return false;
+    for (s.names) |name| if (Sys.DynLib.open(name)) |dl| return dl else |_| {};
+    return null;
 }
 
-fn loads(comptime Sys: type, path: []const u8) bool {
+pub fn found(s: Spec, a: std.mem.Allocator, comptime Sys: type, exe: ?[]const u8) bool {
     // Constructors may register process or thread exit handlers: keep every found loader reference until exit.
-    _ = Sys.DynLib.open(path) catch return false;
-    return true;
+    return open(s, a, Sys, exe) != null;
 }

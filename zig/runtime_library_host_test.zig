@@ -16,8 +16,10 @@ test "runtime library: missing CUDA rank dependency retains its identity" {
 test "runtime library: missing media refusals name the actual loader soname" {
     const mac = @import("builtin").os.tag == .macos;
     const windows = @import("builtin").os.tag == .windows;
+    const libs = @import("sys").optional_libraries;
     try std.testing.expect(std.mem.containsAtLeast(u8, jpeg.missing, 1, if (mac) "libturbojpeg.0.dylib" else if (windows) "turbojpeg.dll" else "libturbojpeg.so.0"));
     try std.testing.expect(std.mem.containsAtLeast(u8, webp.missing, 1, if (mac) "libwebpdecoder.3.dylib" else "libwebpdecoder.so.3"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, libs.spec(.pdfium).message, 1, if (mac) "libpdfium.dylib" else if (windows) "pdfium.dll" else "libpdfium.so"));
 }
 
 test "runtime library: missing RoCE dependency retains its identity" {

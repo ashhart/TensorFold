@@ -42,6 +42,7 @@ supply cuBLASLt or NCCL. A GLM CUDA pair needs NCCL on both ranks; adding `--vis
 | Video inputs | TensorFold video | `libtfvideo.so`; `libtfvideo.dylib` | Optional `zig build video -Dffmpeg=PREFIX` runtime built against FFmpeg 9.0.2, installed in the server's `lib` directory |
 | JPEG inputs | libjpeg-turbo 3.1.4.1 | `libturbojpeg.so.0`; `libturbojpeg.0.dylib` | Separately installed pinned decoder; `TENSORFOLD_LIBTURBOJPEG` can name its file |
 | WebP inputs | libwebp 1.6.0 | `libwebpdecoder.so.3`; `libwebpdecoder.3.dylib` | Separately installed pinned decoder; `TENSORFOLD_LIBWEBP` can name its file |
+| PDF inputs | PDFium (`chromium/7725`) | `libpdfium.so`; `libpdfium.dylib` (`pdfium.dll` on Windows) | Separately installed PDF renderer; `TENSORFOLD_LIBPDFIUM` can name its file |
 | Structured output and required tool calls | TensorFold grammar | `libtfgrammar.so`; `libtfgrammar.dylib` (`tfgrammar.dll` on Windows) | The matching release archive's `lib` directory, or `zig build grammar` |
 | HIP tensor-parallel ranks | RCCL | `librccl.so.1` | ROCm's matching RCCL runtime |
 | MCDMA mailbox/Metal speed-up communication | MCDMA RPC | `libmcdma-rpc.so`; `libmcdma-rpc.dylib` | Separately built MCDMA RPC helper; `MCDMA_RPC_LIBRARY` can name its file |
