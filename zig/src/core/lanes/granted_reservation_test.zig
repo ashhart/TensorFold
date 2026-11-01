@@ -45,6 +45,7 @@ const Setup = struct {
         s.target = .{ .gpa = a };
         s.e = lanes.Engine.init(a, &s.cfg, s.target.backend(), s.clock.clock());
         s.e.alone = false;
+        try s.e.rule.observeOverhead(@intCast(n), @intCast(n), s.costs[n - 1].ms + 8, false, 0);
         for (0..n) |i| {
             s.streams[i] = try lanes.Stream.init(a, .{ .id = "reserve", .prompt = &.{ 1, 2, 3 }, .max_new = 128 });
             s.n += 1;
@@ -136,21 +137,23 @@ test "a hold is priced at the rows and drafts reserved now, not at its last gran
     }
 }
 
-test "a probe after a grant of none keeps its hold only while its reservation is positive" {
+test "a historical-zero trial needs a viable pass and a positive fresh reservation" {
     for ([_]f64{ 0.9, 0.01 }) |chance| {
         var s: Setup = .{};
-        try s.init(.{ .hold_ms = 1000 }, 1); // far too dear for any granted hold to pay
+        try s.init(.{ .hold_ms = 1000 }, 1);
         defer s.deinit();
         s.history(0, 0, false, null);
         try s.chain(0, &.{}, chance);
-        const probe: i64 = if (chance > 0.5) 2 else 0; // two drafts, the depth rule's slack past a grant of none
+        try t.expectEqualSlices(i64, &.{0}, try s.budgets()); // even perfect acceptance cannot pay
+        s.holds[0].ms = 1; // a changed live cost must release the saved trial immediately
+        const probe: i64 = if (chance > 0.5) 2 else 0;
         try t.expectEqualSlices(i64, &.{probe}, try s.budgets());
     }
 }
 
 test "a historical zero grant consumes one probe tick per round at the configured interval" {
     var s: Setup = .{};
-    try s.init(.{ .plain_guard = true, .hold_ms = 1000 }, 1);
+    try s.init(.{ .plain_guard = true, .hold_ms = 1 }, 1);
     defer s.deinit();
     s.e.rule.k.depth_probe_every = 5;
     s.history(0, 0, false, null);
@@ -208,6 +211,23 @@ test "a stateful copy proposer is asked once a round, and its copy takes the rou
     }
 }
 
+test "the final shared reservation charges a hold to the head stream alone, over the fixed overhead without the head's own" {
+    // Costly versus free holds: the same cohort and copy offers, only the hold price differs.
+    for ([_]f64{ 1000, 0 }) |hold_ms| {
+        var s: Setup = .{};
+        try s.init(.{ .legacy = true, .hold_ms = hold_ms }, 2);
+        defer s.deinit();
+        s.cfg.limit_shared_drafts = false; // no preliminary cap: the final global allocation alone prices the holds
+        // Past head work must not inflate the next cohort's fixed cost; the seeded fixed work stays 8 ms.
+        try s.e.rule.observeOverhead(2, 2, s.e.rule.shared_costs.get(2).? + 8 + 10000, false, 10000);
+        var ask: Ask = .{};
+        s.streams[0].proposer = .{ .ptr = &ask, .vtable = &.{ .propose = propose, .last_match = match, .priced = true } };
+        try s.chain(1, &.{}, 0.9);
+        // stream 0 offers four copied tokens, which take rows but no hold; stream 1 is the head
+        const keep: i64 = if (hold_ms > 0) 0 else 7; // a dear hold does not pay at 8 ms of overhead; a free one keeps the chain
+        try t.expectEqualSlices(i64, &.{ 0, keep }, try s.budgets());
+    }
+}
 /// The drafter of drafted_test, pricing every held chain by 0.9 a draft and holding each hold to the grant's bound.
 const Scripted = struct {
     head: dt.FakeDrafter,

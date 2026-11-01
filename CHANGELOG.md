@@ -64,6 +64,12 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Shared draft rounds price each stream's drafts before drafting, and a stream whose drafts would get no verify rows skips the drafter's proposal work, for Nemotron, Qwen's MTP, GLM, Gemma 4 (assistant and DFlash) and attached LFM2 drafters, on CUDA and Metal; each family keeps its head step's cost in the price. Replies are unchanged. Nemotron 3.5 Lightning with its MTP head: on an M5 Ultra, 16-stream chat +9.0% greedy and +4.7% sampled; on a GB10, 16 streams +2.1% and 8 streams +1.1%.
 
+- LFM2 DSpark prices physical drafter passes from its measured stream-count/depth grid, including split passes in execution order; copy and forced rows still count toward verification. A new stream waits for its first priced grant, while owned prompt and verified taps preserve contiguous context through zero-grant rounds, snapshots and stage overflow. Settled GPU work is charged at its existing wait, without an extra synchronization.
+
+- DSpark confidence scheduling keeps a useful observed prefix when its full hold cannot pay. Recovery trials require a fresh positive reservation and funding in the full round's verify and physical hold costs, including companion rows; an impossible trial does not spend its probe cadence. Verify allocation keeps the checkpoint confidences, and the absent-head fallback keeps its original prior. No stream-count cutoff is added; full no-slowdown qualification remains separate.
+
+- LFM2 DSpark's allocation-failure regression now derives the warm-up failure point from scratch preparation and disables in-place allocator growth, so scratch and warm-up cleanup are tested without reaching uninitialized model state. Serving behavior is unchanged.
+
 - MOSS-Image's image decoder (the checkpoint's FLUX.2 small VAE, in float32 as the pipeline runs it) runs on Metal inside the `moss_image` family, and `tf-moss-image` writes `picture.png` itself, so torch no longer decodes (#1687, #1504). Thanks to @BobClawblaw.
 
 - On CUDA, a driver older than CUDA 13.0 is refused at startup with a plain message naming the driver to install (R580 or newer), before any kernel loads; an R550 driver had ended the process with SIGILL inside libcuda on the first module load (#1791, #1724). Thanks to @rootsbymenda.

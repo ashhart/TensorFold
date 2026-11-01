@@ -131,3 +131,28 @@ test "shared depth probe: every eighth grant adds at most one row and rotates st
     }
     for (seen) |s| try t.expect(s);
 }
+
+test "a depth's acceptance estimate moves by the configured weight of the newest round" {
+    const empty: @import("table.zig").Table = .{};
+    var rule: depth.Rule = .{ .gpa = gpa, .k = .{ .depth_rate = 0.08 }, .prior = &.{ 0.5, 0.5 }, .most_drafts = 2, .family_costs = &empty, .shared_costs = &empty, .mtp_step_ms = 0.5, .plain_guard = true, .node_probabilities = false, .batch_rows = 8 };
+    defer rule.deinit();
+    var st: ?depth.State = null;
+    defer if (st) |*s| s.deinit(gpa);
+    const who: depth.Who = .{ .state = &st, .draft_room = 100, .finished = false, .forced = false };
+    try rule.observeDepth(who, 2, 1); // the first draft landed, the second did not
+    try t.expectApproxEqAbs(@as(f64, 0.54), st.?.p[0], 1e-12);
+    try t.expectApproxEqAbs(@as(f64, 0.46), st.?.p[1], 1e-12);
+}
+
+test "depth picks the most tokens a ms and probes deeper" {
+    var fc: @import("table.zig").Table = .{};
+    defer fc.deinit(gpa);
+    for (1..5) |w| try fc.put(gpa, @intCast(w), 5.0 + @as(f64, @floatFromInt(w)));
+    const shared: @import("table.zig").Table = .{};
+    var rule: depth.Rule = .{ .gpa = gpa, .prior = &.{ 0.9, 0.9, 0.9 }, .most_drafts = 3, .family_costs = &fc, .shared_costs = &shared, .mtp_step_ms = 0.5, .plain_guard = false, .node_probabilities = false, .batch_rows = 8 };
+    defer rule.deinit();
+    var st: ?depth.State = null;
+    defer if (st) |*s| s.deinit(gpa);
+    const who: depth.Who = .{ .state = &st, .draft_room = 100, .finished = false, .forced = false };
+    try t.expectEqual(@as(i64, 3), try rule.depth(who));
+}

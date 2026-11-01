@@ -25,6 +25,7 @@ pub const Facts = struct {
     slack: u32 = 0, // with chances: drafts a hold offers past the stream's last grant (0: the depth rule's own)
     copy_first: bool = false, // a hold costs a pass of its own: none is asked for a stream with a copy ahead
     hold_costs: []const @import("hold_price.zig").HoldCost = &.{}, // that pass's ms by blocks and depth (timed at load)
+    hold_rows: u32 = 0, // rows one hold pass holds at most, a block as long as its pass's deepest: more run as passes in order (0: no bound)
 };
 
 /// Target rows [start, start + features.rows) and the token after each; `rows`, when given, picks which to absorb.
@@ -45,6 +46,7 @@ pub const Hold = struct { stream: *Stream, pending: u32, position: u64, depth: u
 pub const Drafter = struct {
     kind: []const u8 = "draft model", // descriptive only; the loader identifies the implementation it attached
     proposal_head: ?*const @import("proposal_head.zig").Service = null,
+    hold_timing: ?@import("backend.zig").DraftTiming = null, // its settled GPU ms since the last take, never a wait (null: the rule models it)
     ptr: *anyopaque,
     vtable: *const VTable,
 
