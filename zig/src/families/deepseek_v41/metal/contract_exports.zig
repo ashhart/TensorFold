@@ -4,5 +4,6 @@ pub const fp8_rows = @import("fp8_rows.zig");
 pub const attn = @import("csa2_attn.zig");
 pub const experts = @import("experts.zig");
 pub const mv = @import("mv.zig");
+pub const glue = @import("glue_k.zig");
 pub const xmma = @import("experts_mma.zig");
 pub const glue_tmp = @import("glue.zig");
