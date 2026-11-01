@@ -38,3 +38,21 @@ test "the MoE family's capabilities name the ModelOpt formats it reads beside ML
         try std.testing.expect(found);
     }
 }
+
+pub const slide = @import("cuda_slide.zig").For(@import("living").families.qwen3_5_moe);
+pub const linked = slide.linked;
+pub fn learnModel(p: *anyopaque, dir: []const u8) slide.Model {
+    const m = native.learnModel(p, dir);
+    return .{ .e = m.e, .dir = m.dir, .lay = m.lay };
+}
+
+test "MoE learning: CUDA registration binds the gated group-64 descriptor and routed-width layout" {
+    const std = @import("std");
+    try std.testing.expect(slide.family.neuron.gated);
+    try std.testing.expectEqualStrings(model_type, slide.family.model_type);
+    const lay = try slide.layout(2048, 40, 576, 64);
+    try std.testing.expectEqual(@as(usize, 512), lay.width);
+    try std.testing.expect(lay.widen.isSet(39) and !lay.learn.isSet(39));
+    _ = &learnModel;
+    _ = &linked;
+}
