@@ -159,6 +159,27 @@ KERNEL(256) void g4_geglu(global const half *GU, global half *H, global half *AH
   }
 }
 
+// bf16(gelu_tanh(x)) for every bf16 x, from the code g4_geglu runs: the table the GEMM's GeGLU epilogue reads.
+KERNEL(256) void g4_geglu_tab(global ushort *T) {
+  const int i = get_global_id(0);
+  T[i] = f2bf(gelu_tanh(bf2f((ushort)i)));
+}
+
+// The group sums of the GEMM-fused GeGLU's activation H [T, 10240], summed as g4_geglu does; (T, 10).
+KERNEL(256) void g4_geglu_sums(global const half *H, global half *AHI, global half *ALO) {
+  const int t = get_group_id(0), blk = get_group_id(1), lid = get_local_id(0);
+  const half4 hv = vload4(0, H + (long)t * FF4 + blk * 1024 + lid * 4);
+  float s = 0.0f;
+  for (int k = 0; k < 4; k++) s += (float)hv[k];
+  s = sub_group_reduce_add(s) * (1.0f / 64);
+  if (get_sub_group_local_id() == 0) {
+    const int g = get_sub_group_id();
+    const half hi = convert_half_rte(s * ASC);
+    AHI[(long)t * (FF4 / 64) + blk * 16 + g] = hi;
+    ALO[(long)t * (FF4 / 64) + blk * 16 + g] = convert_half_rte(s * ASC - (float)hi);
+  }
+}
+
 // Per-layer gate: h = fp16(bf16(gelu_bf(gate) · pli_l)) [T, 256] and its sums; GO bf16 in fp16, PLI bf16 [T,42,256].
 KERNEL(64) void g4_ple_mid(global const half *GO, global const ushort *PLI, int layer, global half *H, global half *AHI, global half *ALO) {
   local half hl[PLE];
@@ -204,30 +225,69 @@ KERNEL(256) void g4_attn_prep(global const half *P, int ldp, global const ushort
 }
 
 
-// Folds a row's tile partials (from g4_attn_dp_part) in order (m, l, o); writes fp16(bf16(o / l)) [T, 8 hd] and sums.
-KERNEL(128) void g4_attn_merge(global const float *PM, global const float *PL, global const float *PO, int p0, int window, int ntl,
+// Folds a row's tile partials (g4_attn_dp_part) in order, 64 columns of o a group; writes fp16(bf16(o / l)) and sums.
+KERNEL(64) void g4_attn_merge(global const float *PM, global const float *PL, global const float *PO, int p0, int window, int ntl,
+                              global half *H, global half *AHI, global half *ALO) {
+  const int hd = HD;
+  local half hl[64];
+  const int head = get_group_id(0), t = get_group_id(1), z = get_group_id(2), lid = get_local_id(0);
+  const int col = z * 64 + lid;
+  const int pos = p0 + t, lo = window ? max(0, pos - window + 1) : 0;
+  const int nt = pos / KEYS - lo / KEYS + 1;
+  const long base = ((long)t * 8 + head) * ntl;
+  float m = PM[base], l = PL[base], acc = PO[base * hd + col];
+  for (int i0 = 1; i0 < nt; i0 += 8) {
+    const int n = min(8, nt - i0);
+    float mi[8], li[8], oi[8];
+#pragma unroll
+    for (int u = 0; u < 8; u++)
+      if (u < n) {
+        mi[u] = PM[base + i0 + u];
+        li[u] = PL[base + i0 + u];
+        oi[u] = PO[(base + i0 + u) * hd + col];
+      }
+#pragma unroll
+    for (int u = 0; u < 8; u++)
+      if (u < n) {
+        const float mm = fmax(m, mi[u]), a = exp(m - mm), b = exp(mi[u] - mm);
+        l = l * a + li[u] * b;
+        acc = acc * a + oi[u] * b;
+        m = mm;
+      }
+  }
+  const half v = convert_half_rte(rbf(acc / l));
+  hl[lid] = v;
+  H[(long)t * 8 * hd + head * hd + col] = v;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  if (get_sub_group_id() == 0) {
+    const int lane = get_sub_group_local_id();
+    float s = 0.0f;
+    for (int k = 0; k < 4; k++) s += (float)hl[lane * 4 + k];
+    s = sub_group_reduce_add(s) * (1.0f / 64);
+    if (lane == 0) {
+      const half hi = convert_half_rte(s * ASC);
+      AHI[(long)t * (8 * hd / 64) + head * (hd / 64) + z] = hi;
+      ALO[(long)t * (8 * hd / 64) + head * (hd / 64) + z] = convert_half_rte(s * ASC - (float)hi);
+    }
+  }
+}
+
+// The same fold with a group of 128 columns: fewer, longer groups, better when a row has few tiles.
+KERNEL(128) void g4_attn_merge_w(global const float *PM, global const float *PL, global const float *PO, int p0, int window, int ntl,
                                global half *H, global half *AHI, global half *ALO) {
   const int hd = HD;
   local half hl[HD];
   const int head = get_group_id(0), t = get_group_id(1), lid = get_local_id(0);
-  const int pos = p0 + t, lo = window ? max(0, pos - window + 1) : 0;
-  const int nt = pos / KEYS - lo / KEYS + 1;
-  float acc[HD / 128];
-  for (int j = 0; j < HD / 128; j++) acc[j] = 0.0f;
-  float m = 0.0f, l = 0.0f;
-  for (int i = 0; i < nt; i++) {
-    const long idx = ((long)t * 8 + head) * ntl + i;
-    const float mi = PM[idx], li = PL[idx];
-    if (i == 0) {
-      m = mi;
-      l = li;
-      for (int j = 0; j < hd / KEYS; j++) acc[j] = PO[idx * hd + lid + j * KEYS];
-    } else {
-      const float mm = fmax(m, mi), a = exp(m - mm), b = exp(mi - mm);
-      l = l * a + li * b;
-      for (int j = 0; j < hd / KEYS; j++) acc[j] = acc[j] * a + PO[idx * hd + lid + j * KEYS] * b;
-      m = mm;
-    }
+  const int pos = p0 + t, lo = window ? max(0, pos - window + 1) : 0, nt = pos / KEYS - lo / KEYS + 1;
+  const long b0 = ((long)t * 8 + head) * ntl;
+  float acc[HD / 128], m = PM[b0], l = PL[b0];
+  for (int j = 0; j < hd / KEYS; j++) acc[j] = PO[b0 * hd + lid + j * KEYS];
+  for (int i = 1; i < nt; i++) {
+    const long idx = b0 + i;
+    const float mi = PM[idx], li = PL[idx], mm = fmax(m, mi), a = exp(m - mm), b = exp(mi - mm);
+    l = l * a + li * b;
+    for (int j = 0; j < hd / KEYS; j++) acc[j] = acc[j] * a + PO[idx * hd + lid + j * KEYS] * b;
+    m = mm;
   }
   for (int j = 0; j < hd / KEYS; j++) {
     const half v = convert_half_rte(rbf(acc[j] / l));
@@ -522,65 +582,7 @@ KERNEL(256) void g4_attn_dp_part(global const ushort *Q, global const ushort *KC
     }
 }
 
-// Prompt rows: the tile function over every tile of the block's rows in order, folded into (m, l, o) as g4_attn_merge.
-KERNEL(256) void g4_attn_dp_rows(global const ushort *Q, global const ushort *KC, global const ushort *VC, int p0, int T, int window, int ring, int krows,
-                                 global half *H) {
-  local ushort Pl[16 * KEYS];
-  local float MX[NSG * 16], SM[NSG * 16], OM[16], OL[16], FA[16], FB[16], LF[16];
-  local int FS[16];
-  const int kvh = get_group_id(0), t0 = get_group_id(1) * 4, lane = get_sub_group_local_id(), sg = get_sub_group_id();
-  const int min_first = first_tile(p0 + t0, window), max_last = (p0 + min(t0 + 3, T - 1)) / KEYS;
-  const int token = t0 + lane / 4, qpos = p0 + token;
-  const bool qok = token < T;
-  const int first_l = first_tile(qpos, window), last_l = qpos / KEYS;
-  float mrun = -INFINITY, lrun = 0.0f;
-  float8 orun[2][DTS];
-  for (int h = 0; h < 2; h++)
-    for (int j = 0; j < DTS; j++) orun[h][j] = 0.0f;
-  for (int tile = min_first; tile <= max_last; tile++) {
-    float8 ot[2][DTS];
-    dp_tile(Q, KC, VC, t0, T, p0, kvh, ring, krows, window, tile, Pl, MX, SM, OM, OL, ot);
-    const float m = OM[lane], l = OL[lane];
-    int st = 0;
-    float a = 1.0f, b = 0.0f;
-    if (qok && tile >= first_l && tile <= last_l) {
-      if (tile == first_l) {
-        st = 1;
-        mrun = m;
-        lrun = l;
-      } else {
-        st = 2;
-        const float mm = fmax(mrun, m);
-        a = exp(mrun - mm);
-        b = exp(m - mm);
-        lrun = lrun * a + l * b;
-        mrun = mm;
-      }
-    }
-    if (sg == 0) {
-      FA[lane] = a;
-      FB[lane] = b;
-      FS[lane] = st;
-    }
-    barrier(CLK_LOCAL_MEM_FENCE);
-    for (int h = 0; h < 2; h++)
-      for (int j = 0; j < DTS; j++)
-        for (int i = 0; i < 8; i++) {
-          const int s = FS[8 * h + i];
-          if (s == 1) orun[h][j][i] = ot[h][j][i];
-          else if (s == 2) orun[h][j][i] = orun[h][j][i] * FA[8 * h + i] + ot[h][j][i] * FB[8 * h + i];
-        }
-    barrier(CLK_LOCAL_MEM_FENCE);
-  }
-  if (sg == 0) LF[lane] = lrun;
-  barrier(CLK_LOCAL_MEM_FENCE);
-  for (int h = 0; h < 2; h++)
-    for (int i = 0; i < 8; i++) {
-      const int slot = 8 * h + i, tok = t0 + slot / 4, head = kvh * 4 + slot % 4;
-      if (tok >= T) continue;
-      for (int j = 0; j < DTS; j++) H[(long)tok * 8 * HD + head * HD + (sg * DTS + j) * 16 + lane] = convert_half_rte(rbf(orun[h][j][i] / LF[slot]));
-    }
-}
+#include "attn_rows_g4.cl"
 
 // The group sums of an attention output H [T, 8 HD] (g4_attn_merge's, from memory): grid (8 heads, T).
 KERNEL(128) void g4_attn_sums(global const half *H, global half *AHI, global half *ALO) {
