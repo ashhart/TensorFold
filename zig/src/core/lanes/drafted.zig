@@ -106,6 +106,15 @@ pub const Drafted = struct {
         m.draft_streams = d.batched;
         m.draft_probabilities = false;
         m.head_trees = d.trees;
+        m.copy_first = d.copy_first;
+        m.hold_costs = d.hold_costs;
+        if (d.chances and x.drafter.vtable.chances != null) {
+            // a chain's drafts priced by the drafter's own chances; the next hold as deep as the grant and its slack
+            m.draft_probabilities = d.confidence_floor == null;
+            m.draft_confidence = d.confidence_floor;
+            m.granted_depth = d.confidence_floor == null;
+            m.draft_slack = d.slack;
+        }
         if (d.tree_nodes > 0) {
             // the drafter grows its own trees, best first, and prices their nodes
             m.drafts = @min(d.tree_nodes, if (target.exact_width > 1) target.exact_width - 1 else 0);

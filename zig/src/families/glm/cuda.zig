@@ -28,6 +28,7 @@ pub const q4 = @import("cuda_q4.zig");
 pub const ranks = @import("cuda_ranks.zig");
 pub const sampler = @import("cuda_sampler.zig");
 pub const prompt_sink = @import("cuda_prompt_sink.zig");
+pub const prompt_solo = @import("cuda_prompt_solo.zig");
 pub const prompt_logprobs = @import("cuda_prompt_logprobs.zig");
 pub const engine = @import("cuda_engine.zig");
 pub const pages = @import("cuda_pages.zig");
@@ -50,6 +51,7 @@ test {
     _ = @import("cuda_taps_tp_test.zig");
     _ = @import("cuda_roce_multi.zig");
     _ = @import("cuda_lanes_test.zig");
+    _ = prompt_solo;
     _ = experts;
     _ = exl3;
     _ = vision;

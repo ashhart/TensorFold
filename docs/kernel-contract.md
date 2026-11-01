@@ -121,6 +121,16 @@ HIP's prompt attention tile (`tf_fa_paged_*`, `tf_fa_wide_*`) writes 0 for a row
 float64 gives NaN, as its running max is `fmaxf` and a row at max -inf takes p = 0; and an infinite value at a key
 whose fp32 weight is 0 (past the row's causal edge in its 64-key tile, or under fp32's least) gives NaN where float64
 gives inf or a finite value, as its P x V takes every key of the tile.
+Qwen3.8 Flash Next's `tf_sattn_nax` and `tf_attn256_nax` score masked keys -FLT_MAX, the value each row's running
+max starts from, so a row whose every score is -Inf weighs its masked keys 1 and gives a finite average where float64
+gives NaN. `tf_sattn_nax`'s padding lanes also read key 0 at p = 0, so a non-finite value in key 0's row reaches every
+row whose key count is not a multiple of 32 (0 x Inf is NaN where float64 gives the infinity).
+MiniMax-M3.1-Flash's `mm_prompt_attention`, Spark-X2.6-4B's `sp_prompt_attention`, Gemma 4's `gemma_prompt_attention`
+(31B and 12B, sliding and global), Nemotron's `tf_attention_nax` and Qwen3.8 Flash Next's `tf_attn256_nax` give NaN
+for a row whose tile or block reads a non-finite value at a key masked for that row, and Gemma 4's
+`gemma_decode_attention` for a decode row whose 32-key step reads one: P = 0 times Inf inside the P x V mma, where
+float64 leaves the masked key out. These were seen on the M5, where their cases run. Each kernel has an entry of its own
+that plants such a value and carries the finding, so its other entries keep a clean gate 1.
 
 HIP’s MLX stream tile keeps its finite dot2 sums unchanged. A non-finite result with an actual non-finite
 operand is recomputed by full quantization groups using the factored float64 formula. The plain tile is
@@ -138,6 +148,43 @@ bits) and simd_qmm_bits (3, 6 and 8 bits), and the lane projection (6-bit groups
 formats on the M5's tensor units, where its reg kernel must equal the cooperative one bit for bit), and tile_qmm's
 prompt tiles and their decode twin (4, 6 and 8 bits; the twin bit-equal to the tiles). Gate 5 also holds the rest of
 tile_qmm's pipelines and GLM-5.3-Flash's hc_expand_10.
+On the M5's tensor units, Metal also checks what nax.h's `mma_16x32` keeps of an fp32 operand
+(`metal_mma_operand.zig`): the left, the right and both (attention's fp32 P, `gemm_nax`'s f32 kernels), each output a
+single product bit-equal to float64 on operands with their low 13 mantissa bits cleared. That is 10 bits kept, rounded
+toward zero, fp32's exponents and subnormals kept, NaN and the infinities passed. Four controls state the operand as
+fp32 or as rounded to nearest at 10 bits, on each side, and must go red at `shapes`. The cut was measured on the tensor
+units only, so the cases run only there; what M1-M4 keep of an fp32 operand is not measured.
+`core/attention_range.zig` names that cut (`operand_cut`, 2^-10) as a form's `p_cut`: one-sided, since each p only
+shrinks, so it moves an output down by up to 2^-10 of its positive values' share and up by its negative values'. On the
+M5, Nemotron's `tf_attention_nax` states its fp32 P with it, and MiniMax-M3.1-Flash's `mm_prompt_attention` does on
+every chip (before the M5 that only widens its range); each bf16 output must lie between its range's ends rounded to
+bf16. Nemotron's adds a case with P spread over about
+[2^-6, 1] and values in [0, 1), where the cut's bias adds up; its control, the same range without the cut, goes red at
+`shapes`. Before the M5, `tf_attention_nax` keeps attention_ref's bound.
+Qwen3.8 Flash Next's prompt attention on the M5 does too: `tf_sattn_nax` (the indexer's dense and selected rows) and
+`tf_attn256_nax` (the causal chunk without the indexer), head dim 256, 24 heads over 2. Each bf16 output,
+bf16(bf16(o) * bsig(gate)), must lie between its range's ends rounded to bf16 and through the gate's rounded sigmoid.
+Each adds a P-spread case whose cutless range is a planted control, and a source edit gate 3 must catch: `tf_sattn_nax`
+counting its padding lane (key 0 again), `tf_attn256_nax` seeing one key past the row. Before the M5 neither is
+registered.
+On the M5, Nemotron's SSD steps (`prefill_mixers.zig`'s Mamba mixer) run `gemm_nax`'s five f32 kernels with both
+operands fp32, so each product enters cut, smaller by up to 1 - (1 - 2^-10)^2. Their entries
+(`metal_nemotron_ssd_gemm.zig`, y = sur x dtx and the state dd^T x bh^T a head, at the step's served row counts) state
+it as a one-sided range: float64's value less that share of the positive terms and plus that of the negative, beside
+the fp32 sums' `mma_step` roundings for every k16 step. Gate 4 runs 11-bit integers times 5-bit ones, which the cut
+keeps. Two cases take operands in (0, 1], where the bias adds up; their controls state the operands as fp32 and go red
+at `shapes`, as does a source edit dropping the ragged K tail's last column. Before the M5 they are not registered;
+their launches are in `nemotron_ssd_records.zig`.
+Spark-X2.6-4B's `sp_prompt_attention` registers both pipelines the engine builds (sliding layers over a 512-key window
+in a 2,560-slot ring, and full layers), its fp32 P stated with the cut, each with a P spread case
+and its cutless control, and one source edit each (a key past the window, a key past the row); before the M5 they are
+not registered.
+On the M5, Gemma 4's `gemma_prompt_attention` (the 31B's and 12B's sliding and global layers) and
+`gemma_decode_attention` with `gemma_attention_merge` (their global layers; the 12B's assistant launches the 12B's)
+state their fp32 P with the cut too, each form's counts taken from the kernel's own steps, at the sliding ring, image
+rows and decode chunks the engine serves. A P-spread case on the 31B's global prompt and decode has a cutless control
+each, red at `shapes`, and a score edit (2 log2e) in each kernel is a control. Their launches are in
+`gemma_attention_records.zig`.
 LFM2.5-24B-A2B's shared rounds: the greedy pick (`lfm2_argmax`) and the conv and attention kernels that run every
 stream's rows in one dispatch, each bit-equal to the per-stream kernels it replaces. Four controls edit the source: a tie
 to the highest id, a nonfinite logit not flagged, and every stream reading or writing the first stream's state or cache.

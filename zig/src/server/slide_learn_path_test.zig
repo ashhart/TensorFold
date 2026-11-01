@@ -98,7 +98,7 @@ const Model = struct {
     trained: std.ArrayList([]const u8) = .empty, // per kept lesson: the personal prompts it trained to keep, joined
     pending: std.ArrayList(u8) = .empty, // the open lesson's personal keep prompts
     lessons: usize = 0,
-    mode: enum { none, construction, empty, training, save } = .none,
+    mode: enum { none, construction, empty, training, rounding, save } = .none,
     fault_now: bool = false,
     failures: usize = 0,
     saves: usize = 0,
@@ -224,9 +224,9 @@ const Model = struct {
             for (ex.ids[0..n], buf[0..n]) |x, *b| b.* = @intCast(x);
             m.open = topicOf(buf[0..n]);
             m.draft_index = null;
-            if (m.mode == .training and m.open == 1) {
+            if ((m.mode == .training or m.mode == .rounding) and m.open == 1) {
                 m.failures += 1;
-                return sink.event(sink.ctx, &.{ .done = .{ .message = "injected training failure" } });
+                return sink.event(sink.ctx, &.{ .done = .{ .message = if (m.mode == .rounding) "LayerRoundsAgain" else "injected training failure" } });
             }
             m.pending.clearRetainingCapacity();
             for (request.keep) |k| {
@@ -257,7 +257,7 @@ const drain_slice_ms = 50;
 const drain_idle_ms = 10_000;
 
 /// One POST /v1/slide/learn through the router, its whole event stream read.
-fn learnOne(srv: *Server, text: []const u8) !void {
+fn learnOne(srv: *Server, text: []const u8, failure: ?[]const u8) !void {
     var pair: [2]platform.posix.socket_t = undefined;
     if (platform.windows) {
         try platform.posix.socketpair(&pair);
@@ -327,6 +327,12 @@ fn learnOne(srv: *Server, text: []const u8) !void {
     try testing.expect(!drained.bad);
     try testing.expect(std.mem.indexOf(u8, drained.wire[0..drained.used], "200 OK") != null);
     try testing.expect(std.mem.indexOf(u8, drained.wire[0..drained.used], "data: [DONE]") != null);
+    if (failure) |words| {
+        const wire = drained.wire[0..drained.used];
+        try testing.expect(std.mem.indexOf(u8, wire, words) != null);
+        try testing.expect(std.mem.indexOf(u8, wire, "LayerRoundsAgain") == null);
+        try testing.expect(std.mem.indexOf(u8, wire, "the delete") == null);
+    }
 }
 
 /// The personal prompts each kept lesson trained to keep, after teaching `facts` in turn (one gives up when told).
@@ -342,7 +348,7 @@ fn teachModel(model: Model, facts: []const []const u8) !Model {
     defer srv.deinit();
     for (facts) |f| {
         m.fault_now = has(f, "I like apples.");
-        try learnOne(srv, f);
+        try learnOne(srv, f, if (m.mode == .rounding and m.fault_now) round_words else null);
     }
     m.lessons = srv.teacher.lessons;
     return m;
@@ -426,7 +432,7 @@ test "lesson accounting: concurrent learn routes serialize the same accepted che
         fact: []const u8,
         failure: ?anyerror = null,
         fn run(j: *@This()) void {
-            learnOne(j.srv, j.fact) catch |err| {
+            learnOne(j.srv, j.fact, null) catch |err| {
                 j.failure = err;
             };
         }
@@ -434,7 +440,7 @@ test "lesson accounting: concurrent learn routes serialize the same accepted che
     var job: Job = .{ .srv = srv, .fact = "I like blue." };
     const thread = try std.Thread.spawn(.{}, Job.run, .{&job});
     var failure: ?anyerror = null;
-    learnOne(srv, "I like tea.") catch |err| {
+    learnOne(srv, "I like tea.", null) catch |err| {
         failure = err;
     };
     thread.join();
@@ -481,4 +487,16 @@ fn renderedFixture(a: Allocator) !void {
 
 test "lesson fixture: rendered byte tokens preserve request provenance and allocation ownership" {
     try testing.checkAllAllocationFailures(testing.allocator, renderedFixture, .{});
+}
+
+const round_words = "a fitted layer would change its 4-bit values when saved, so this lesson could not be accepted";
+
+test "lesson stream: rounding failure says why the lesson stopped and leaves the next lesson's checks intact" {
+    var failed = try teachModel(.{ .mode = .rounding }, &.{ "I like blue.", "I like apples.", "I like tea." });
+    defer failed.deinit();
+    var alone = try teach("", &.{ "I like blue.", "I like tea." });
+    defer alone.deinit();
+    try sameAccepted(&failed, &alone);
+    try testing.expectEqual(@as(usize, 1), failed.failures);
+    try testing.expect(failed.drops > 0 and !failed.live[1]);
 }
