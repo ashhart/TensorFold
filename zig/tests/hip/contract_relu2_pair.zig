@@ -15,8 +15,7 @@ const bits = 4;
 const group = 64;
 const experts = 8; // the experts the plan's items pick from (a layer has 128; the kernel reads the picked ones)
 const top_k = 6;
-/// launches/affine.zig's stream tile constants: columns a lane and waves a block.
-const stream_cbs = [_]c_int{ 2, 4, 8 };
+/// launches/affine.zig's stream tile waves a block.
 const stream_waves = 4;
 const bit_index = 2; // 4 in launches/affine.zig's bit_widths
 
@@ -151,11 +150,11 @@ pub const Pair = struct {
         const b = self.arg[1];
         var lpc_log2: u5 = 0;
         while ((@as(c_int, 1) << lpc_log2) < (a.k >> 5) and lpc_log2 < 5) lpc_log2 += 1;
-        const ri: usize = 0; // one row
-        const pick = hip.launches.stream_pick.pick(self.l.affine.caps.generation, a.m, lpc_log2, a.bits, a.n, top_k, 1);
-        const per: c_int = stream_waves * (@as(c_int, 32) >> lpc_log2) * stream_cbs[pick];
+        const ri = hip.launches.stream_pick.rowTile(a.m);
+        const tile = hip.launches.stream_pick.pick(self.l.affine.caps.generation, a.m, lpc_log2, a.bits, a.n, top_k, false);
+        const per = tile.per_block;
         const split = cdiv(a.n, per);
-        const f = self.l.affine.relu2_pair[bit_index][ri][pick].?;
+        const f = self.l.affine.relu2_pair[bit_index][ri][tile.at].?;
         var args: hip.launch.Args = .{};
         try args.add(a);
         try args.add(b);
