@@ -494,7 +494,7 @@ const own_records = [_]Record{
         },
     },
 } ++ @import("hip_records_pair.zig").records ++ @import("hip_records_prompt.zig").records ++
-    @import("hip_records_score.zig").records ++ @import("hip_records_embed.zig").records ++ @import("hip_records_tail.zig").records;
+    @import("hip_records_score.zig").records ++ @import("hip_records_embed.zig").records ++ @import("hip_records_tail.zig").records ++ @import("hip_records_sparse.zig").records;
 
 pub const records = own_records ++ @import("hip_records_stream.zig").records ++ @import("hip_records_router.zig").records ++
     @import("hip_records_item.zig").records ++ @import("hip_records_qwen3.zig").records ++ @import("hip_records_columns.zig").records ++

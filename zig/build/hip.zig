@@ -417,15 +417,15 @@ const groups = [_]Source{
 
 /// What the group sources include, so an edit to one rebuilds them.
 const headers = [_][]const u8{
-    "attention/attention_fa.hip", "attention/prefill.hpp", "decode/pages.hpp",     "decode/plan.hpp",      "ops/attention.hpp",
-    "ops/common.hpp",             "ops/draw.hpp",          "ops/tp.hpp",           "ops/elementwise.hpp",  "ops/linear.hpp",
-    "ops/moe.hpp",                "ops/norms.hpp",         "ops/rope.hpp",         "common/arch.hpp",      "common/dot2.hpp",
-    "common/vec.hpp",             "common/wmma.hpp",       "quant/act.hpp",        "quant/mlx.hpp",        "quant/mlx_decoder.hpp",
-    "quant/mlx_pieces.hpp",       "quant/mlx_tiles.hpp",   "tiles/dot2.hpp",       "tiles/epilogue.hpp",   "tiles/gemm.hpp",
-    "tiles/gemm_kp.hpp",          "tiles/matrix_gemm.hpp", "tiles/plan.hpp",       "tiles/stream.hpp",     "flashnext/streams.hpp",
-    "flashnext/ngram.hpp",        "flashnext/indexer.hpp", "flashnext/sparse.hpp", "ops/nemotron_moe.hpp", "quant/bf16_decoder.hpp",
-    "quant/dense_tiles.hpp",      "tiles/wmma12_gemm.hpp", "ops/columns.hpp",      "columns_controls.hpp", "ops/vision.hpp",
-    "ops/dense_text.hpp",
+    "attention/attention_fa.hip", "attention/prefill.hpp",      "decode/pages.hpp",     "decode/plan.hpp",      "ops/attention.hpp",
+    "ops/common.hpp",             "ops/draw.hpp",               "ops/tp.hpp",           "ops/elementwise.hpp",  "ops/linear.hpp",
+    "ops/moe.hpp",                "ops/norms.hpp",              "ops/rope.hpp",         "common/arch.hpp",      "common/dot2.hpp",
+    "common/vec.hpp",             "common/wmma.hpp",            "quant/act.hpp",        "quant/mlx.hpp",        "quant/mlx_decoder.hpp",
+    "quant/mlx_pieces.hpp",       "quant/mlx_tiles.hpp",        "tiles/dot2.hpp",       "tiles/epilogue.hpp",   "tiles/gemm.hpp",
+    "tiles/gemm_kp.hpp",          "tiles/matrix_gemm.hpp",      "tiles/plan.hpp",       "tiles/stream.hpp",     "flashnext/streams.hpp",
+    "flashnext/ngram.hpp",        "flashnext/indexer.hpp",      "flashnext/sparse.hpp", "ops/nemotron_moe.hpp", "quant/bf16_decoder.hpp",
+    "quant/dense_tiles.hpp",      "tiles/wmma12_gemm.hpp",      "ops/columns.hpp",      "columns_controls.hpp", "ops/vision.hpp",
+    "ops/dense_text.hpp",         "flashnext/sparse_lanes.hpp",
 };
 
 /// The flags of the kernels' first build: no contraction, wave32 on RDNA, C++20.
