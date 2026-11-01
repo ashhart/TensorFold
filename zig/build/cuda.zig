@@ -212,7 +212,11 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     runtime_host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda })).step);
     const mods = family(b, host, .debug, cuda, draft_ids);
     const omni_slide = b.addRunArtifact(b.addTest(.{ .root_module = mods.nemotron, .filters = &.{"Omni learner:"} }));
-    b.step("test-omni-slide-host", "Omni learner registration, widths and scoped tensors without devices").dependOn(&omni_slide.step);
+    const omni_slide_step = b.step("test-omni-slide-host", "Omni learner registration, widths and scoped tensors without devices");
+    omni_slide_step.dependOn(&omni_slide.step);
+    const slide_adapter = b.createModule(.{ .root_source_file = b.path("zig/src/native/slide_adapter.zig"), .target = host, .link_libc = true, .imports = &.{.{ .name = "engine_api", .module = mods.api }} });
+    const omni_untaught = b.createModule(.{ .root_source_file = b.path("zig/omni_slide_host.zig"), .target = host, .link_libc = true, .imports = &.{ .{ .name = "nemotron", .module = mods.nemotron }, .{ .name = "slide_adapter", .module = slide_adapter } } });
+    omni_slide_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = omni_untaught, .filters = &.{"Omni learner:"} })).step);
     step.dependOn(&omni_slide.step);
     const skip_drafts = b.step("test-drafter-skip-cuda-host", "Counted shared draft skips without devices");
     for ([_]*std.Build.Module{ mods.nemotron, mods.qwen35, flashnextModule(b, host, .debug, cuda, mods.core, mods.lanes, mods.qwen_vision, mods.api) }) |m| skip_drafts.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"zero grant:"} })).step);

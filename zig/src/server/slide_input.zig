@@ -7,7 +7,7 @@ pub const Refused = error{ ImagesNotSupported, TextRequired };
 pub fn message(e: Refused) []const u8 {
     return switch (e) {
         error.ImagesNotSupported => "Living Weights lessons take text only: images and message parts cannot be learned",
-        error.TextRequired => "text is required as a string",
+        error.TextRequired => "text is required",
     };
 }
 
