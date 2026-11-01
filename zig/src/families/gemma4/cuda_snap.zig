@@ -29,6 +29,18 @@ fn each(m: *const fwd.Model, slot: usize, at: usize, ctx: anytype, comptime f: f
     for (0..m.layers) |i| for ([_][]u64{ m.kc, m.vc }) |cache| {
         const rb = rowBytes(m, i);
         const global = cfg.global(i);
+        if (global and m.paged) { // pages: p in page p / page_tokens of the slot's row, a copy a run within one
+            var p: usize = 0;
+            while (p < at) {
+                const into = p % fwd.page_tokens;
+                const run = @min(at - p, fwd.page_tokens - into);
+                const row = @as(usize, m.ids[slot * m.perSlot() + p / fwd.page_tokens]) * fwd.page_tokens + into;
+                try f(ctx, cache[i] + row * rb, off, run * rb);
+                off += run * rb;
+                p += run;
+            }
+            continue;
+        }
         const len = m.cacheLen(i);
         const base = cache[i] + slot * len * rb;
         var p = if (global) 0 else at - tail(at);
@@ -91,6 +103,7 @@ test "a state holds global layers' positions and each sliding ring's last window
     m.geo = cfg.unified12b;
     m.layers = 6; // layer 5 is global
     m.context = 4096;
+    m.paged = false;
     m.kc = &k;
     m.vc = &v;
     const at = 2000; // sliding: positions 977..1999, ring rows 977..1535 then 0..463
@@ -106,4 +119,30 @@ test "a state holds global layers' positions and each sliding ring's last window
     try testing.expectEqual([3]usize{ (1 << 30) + fwd.ring * sb, (fwd.ring - 977) * sb, 464 * sb }, runs.items[1]);
     const last = runs.items[runs.items.len - 1];
     try testing.expectEqual([3]usize{ (12 << 30) + 4096 * gb, 2 * 5 * 1023 * sb + at * gb, at * gb }, last);
+}
+
+test "a paged state takes a global layer's positions through the slot's pages, a run a page, in position order" {
+    var k = [_]u64{ 1 << 30, 2 << 30, 3 << 30, 4 << 30, 5 << 30, 6 << 30 };
+    var v = [_]u64{ 7 << 30, 8 << 30, 9 << 30, 10 << 30, 11 << 30, 12 << 30 };
+    var ids = [_]u32{ 0, 0, 0, 0, 7, 2, 9, 0 }; // slot 1's row: pages 7, 2, 9, then unmapped
+    var m: fwd.Model = undefined;
+    m.geo = cfg.unified12b;
+    m.layers = 6; // layer 5 is global
+    m.context = 4 * fwd.page_tokens;
+    m.paged = true;
+    m.ids = &ids;
+    m.kc = &k;
+    m.vc = &v;
+    const at = 2 * fwd.page_tokens + 10; // pages 7 and 2 whole, then 10 rows of page 9
+    const gb = 1 * 512 * 2;
+    var runs: std.ArrayList([3]usize) = .empty;
+    defer runs.deinit(testing.allocator);
+    try each(&m, 1, at, Count{ .runs = &runs }, Count.add);
+    try testing.expectEqual(@as(usize, 5 * 2 + 2 * 3), runs.items.len); // a sliding cache's 522 rows: one run each
+    const pt = fwd.page_tokens;
+    const kr = runs.items[runs.items.len - 6 ..][0..3];
+    try testing.expectEqual([3]usize{ (6 << 30) + 7 * pt * gb, kr[0][1], pt * gb }, kr[0]);
+    try testing.expectEqual([3]usize{ (6 << 30) + 2 * pt * gb, kr[0][1] + pt * gb, pt * gb }, kr[1]);
+    try testing.expectEqual([3]usize{ (6 << 30) + 9 * pt * gb, kr[0][1] + 2 * pt * gb, 10 * gb }, kr[2]);
+    try testing.expectEqual(bytes(&m, at), runs.items[runs.items.len - 1][1] + runs.items[runs.items.len - 1][2]);
 }

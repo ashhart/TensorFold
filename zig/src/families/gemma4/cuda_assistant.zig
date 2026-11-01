@@ -53,6 +53,8 @@ pub const Drafter = struct {
     step_ms: f64 = 0,
     /// A hold's steps as CUDA graphs, by rows and steps ([rows - 1][steps - 1]; null: not yet, or graphs off).
     graphs: [max_items][depth]?cuda.graph.Exec = @splat(@splat(null)),
+    /// The target's graph_gen the graphs were captured at (attach moves the caches they read).
+    gen: u32 = 0,
     /// The target's forward ms by window width (1 to 16), timed at load: the depth rule prices drafts by them.
     costs: [be.max_window]lanes.config.Cost = undefined,
     buffers: std.ArrayList(cuda.DeviceBuffer) = .empty,
@@ -254,7 +256,7 @@ pub const Drafter = struct {
         try x.k.qk.rowsFrom(x.s, src, .{ .h = c.heads, .hk = 1, .dim = dh }, shape, s.pos, null, .{ .q = s.q, .k = s.kj, .v = 0 }, rows);
         const t = x.sources[@intFromBool(global)];
         const len = x.m.cacheLen(t);
-        const w: Window = .{ .h = c.heads, .hk = geo.kvHeads(t), .d = dh, .win = if (global) 0 else cfg.window, .ring = len, .scale = 1 };
+        const w: Window = .{ .h = c.heads, .hk = geo.kvHeads(t), .d = dh, .win = if (global) 0 else cfg.window, .ring = len, .scale = 1, .pg = if (global) x.m.pagesFor(null) else null };
         var r: usize = 0;
         while (r < rows) : (r += 16) {
             const n = @min(16, rows - r);
@@ -286,6 +288,13 @@ pub const Drafter = struct {
         for (items, 0..) |it, r| try x.d.check(x.d.api.cuMemcpyDtoDAsync_v2(s.hin + r * hid * 2, it.lane.h.ptr, hid * 2, x.s.handle), "cuMemcpyDtoDAsync");
         if (!x.m.graphed) return x.run(rows, steps);
         // the steps read only the staged rows and fixed scratch: one graph a (rows, steps), captured at its first use
+        if (x.gen != x.m.graph_gen) { // the target dropped its graphs (attach): ours read the old caches too
+            for (&x.graphs) |*row| for (row) |*e| if (e.*) |*old| {
+                old.deinit();
+                e.* = null;
+            };
+            x.gen = x.m.graph_gen;
+        }
         const g = &x.graphs[rows - 1][steps - 1];
         if (g.* == null) g.* = try x.capture(rows, steps);
         try g.*.?.launchOn(x.s);
