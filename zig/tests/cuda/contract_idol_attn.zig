@@ -43,6 +43,8 @@ pub fn Attention(comptime E: type) type {
         rig: rig_.Rig,
         k: *const E.Kernels,
         name: []const u8,
+        /// The calls it is registered at: E's (the denoiser's), or the Gaussian decoder's self attention over anchors.
+        served: []const c.Shape = &E.served,
         ref: ?attn.Ref = null,
         heads: usize = 0,
         tokens: usize = 0,
@@ -54,8 +56,8 @@ pub fn Attention(comptime E: type) type {
 
         const Self = @This();
 
-        pub fn spec(name: []const u8) c.Spec {
-            return .{ .name = name, .accum = .f32, .depth = keyChain, .ops = 6, .out = E.elem, .tiles = .{ .{}, .{ .size = 16 * E.warps }, .{} }, .served = &E.served, .sums = .{ .why = E.why } };
+        pub fn spec(name: []const u8, at: []const c.Shape) c.Spec {
+            return .{ .name = name, .accum = .f32, .depth = keyChain, .ops = 6, .out = E.elem, .tiles = .{ .{}, .{ .size = 16 * E.warps }, .{} }, .served = at, .sums = .{ .why = E.why } };
         }
 
         pub fn deinit(t: *Self) void {
@@ -65,7 +67,7 @@ pub fn Attention(comptime E: type) type {
         }
 
         pub fn kernel(t: *Self) g.Kernel {
-            return .{ .spec = spec(t.name), .ctx = t, .vt = &vt };
+            return .{ .spec = spec(t.name, t.served), .ctx = t, .vt = &vt };
         }
         const vt = g.hooks(Self);
 

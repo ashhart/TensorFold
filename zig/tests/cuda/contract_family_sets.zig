@@ -11,6 +11,7 @@ pub const Sets = struct {
     idol: *@import("contract_idol.zig").Set,
     idol_dino: *@import("contract_idol_dino.zig").Set,
     idol_vae: *@import("contract_idol_vae.zig").Set,
+    idol_decoder: *@import("contract_idol_decoder.zig").Set,
     birefnet: *@import("contract_birefnet.zig").Set,
 
     /// Each set's kernels appended to `list`, in this order.
@@ -27,6 +28,8 @@ pub const Sets = struct {
         errdefer idol_dino.deinit();
         const idol_vae = try @import("contract_idol_vae.zig").Set.init(gpu, s, a, list);
         errdefer idol_vae.deinit();
+        const idol_decoder = try @import("contract_idol_decoder.zig").Set.init(gpu, s, a, list);
+        errdefer idol_decoder.deinit();
         const birefnet = try @import("contract_birefnet.zig").Set.init(gpu, s, a, list);
         return .{
             .pocket = pocket,
@@ -35,12 +38,14 @@ pub const Sets = struct {
             .idol = idol,
             .idol_dino = idol_dino,
             .idol_vae = idol_vae,
+            .idol_decoder = idol_decoder,
             .birefnet = birefnet,
         };
     }
 
     pub fn deinit(sets: Sets) void {
         sets.birefnet.deinit();
+        sets.idol_decoder.deinit();
         sets.idol_vae.deinit();
         sets.idol_dino.deinit();
         sets.idol.deinit();

@@ -16,11 +16,16 @@ pub fn KernelsOf(comptime Op: type) type {
 
 /// The gates' hooks over an Op (kinds, out, in_place, spec, sizes, fill, launch, ref; Kernels, scratch, launchWith).
 pub fn Case(comptime Op: type) type {
+    return CaseOf(KernelsOf(Op), Op);
+}
+
+/// Case over an image's kernels `K` given by the caller (the decoders'), which Op.launch takes.
+pub fn CaseOf(comptime K: type, comptime Op: type) type {
     const n = Op.kinds.len;
     return struct {
         const Self = @This();
         rig: rig_.Rig,
-        k: KernelsOf(Op),
+        k: K,
         name: []const u8,
         /// The Op's own form (a norm's mode, the bias's GELU), passed to each of its functions.
         variant: u32 = 0,
@@ -146,5 +151,9 @@ pub fn Case(comptime Op: type) type {
 
 /// The usual registration of a test: its rig on the stream, the kernels (or a control's copy), name and form.
 pub fn make(comptime Op: type, rig: rig_.Rig, k: KernelsOf(Op), name: []const u8, variant: u32, control: ?g.Gate) Case(Op) {
+    return makeOf(KernelsOf(Op), Op, rig, k, name, variant, control);
+}
+
+pub fn makeOf(comptime K: type, comptime Op: type, rig: rig_.Rig, k: K, name: []const u8, variant: u32, control: ?g.Gate) CaseOf(K, Op) {
     return .{ .rig = rig, .k = k, .name = name, .variant = variant, .control = control, .ends = .{ .a = rig.gpu.gpa } };
 }

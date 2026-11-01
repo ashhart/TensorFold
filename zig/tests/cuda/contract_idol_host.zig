@@ -10,4 +10,6 @@ test {
     _ = @import("contract_idol_dino_emulate.zig");
     _ = @import("contract_idol_vae_convs.zig");
     _ = @import("contract_idol_vae_rows.zig");
+    _ = @import("contract_idol_dec_steps.zig");
+    _ = @import("contract_idol_dec_attn.zig");
 }

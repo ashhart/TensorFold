@@ -11,6 +11,7 @@ const launcher_files = [_]struct { []const u8, []const u8 }{
     .{ "idol_cuda", "cuda_kernels.zig" }, // idol.cu: the denoiser
     .{ "idol_dino_cuda", "dino_cuda_kernels.zig" }, // idol_dino.cu: the DINOv3 encoder
     .{ "idol_vae_cuda", "cuda_vae_kernels.zig" }, // idol_vae.cu: the VAE image encoder
+    .{ "idol_decoder_cuda", "cuda_decoder_kernels.zig" }, // idol_decoder.cu: the octree and Gaussian decoders
 };
 
 fn launchersOf(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, file: []const u8) *std.Build.Module {
@@ -29,6 +30,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         .{ "tf-idol", "zig/tests/idol_cuda.zig", "idol-cuda", "Build tf-idol: Idol's denoiser on a reference case on CUDA" },
         .{ "tf-idol-dino", "zig/tests/idol_dino_cuda.zig", "idol-dino-cuda", "Build tf-idol-dino: Idol's DINOv3 encoder on a reference case on CUDA" },
         .{ "tf-idol-vae", "zig/tests/idol_vae_cuda.zig", "idol-vae-cuda", "Build tf-idol-vae: Idol's image encoder on a reference case on CUDA" },
+        .{ "tf-idol-decode", "zig/tests/idol_decode_cuda.zig", "idol-decode-cuda", "Build tf-idol-decode: Idol's decoders on a reference case on CUDA" },
     };
     for (tools) |t| {
         const tool = b.createModule(.{ .root_source_file = b.path(t[1]), .target = target, .optimize = optimize, .link_libc = true, .strip = strip, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core }, .{ .name = "idol", .module = family } } });

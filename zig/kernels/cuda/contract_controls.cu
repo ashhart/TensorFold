@@ -599,5 +599,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_ctl_idol_bias_late(const fl
 #include "idol_dino_controls.cuh"
 // Idol's image encoder (idol_vae.cu), each control one planted flaw of idol_vae.cuh's bodies.
 #include "idol_vae_controls.cuh"
+// Idol decoders: their templates at the BREAK values that drop or add one rounding point, sum or rule.
+#include "contract_controls_idol_decoder.cuh"
 // Idol's background remover's controls (fp16 rounding points or sums, a dropped NaN); none ship.
 #include "idol_birefnet_controls.cuh"
