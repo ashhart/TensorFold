@@ -197,6 +197,16 @@ pub const Backend = struct {
         return snapshot.bytes(&b.sl.e.c, at, b.sl.resident());
     }
 
+    /// A disk read allocates a whole image, even when ordinary saves share the live MLA pool.
+    pub fn snapReadBytes(ptr: *anyopaque, at: u32) u64 {
+        return snapshot.bytes(&self(ptr).sl.e.c, at, false);
+    }
+
+    pub fn snapCharged(_: *anyopaque, saved: *anyopaque) u64 {
+        const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
+        return snap.bytes;
+    }
+
     pub fn snapSave(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
         const b = self(ptr);
         const i = try b.slotOf(@ptrCast(@alignCast(owner orelse return error.NoStream)));
@@ -454,4 +464,23 @@ test "shared head costs: GLM Metal MTP retains costed copy grants" {
     b.sl = &sl;
     b.costs = null;
     try lanes.shared_head_cost_check.check(b.facts());
+}
+
+test "GLM disk charge: a whole read is larger than a resident save and charged at its actual size" {
+    var e: Engine = undefined;
+    e.c = .{};
+    var sl: slots_mod.Slots = undefined;
+    sl.e = &e;
+    sl.learned = null;
+    var b: Backend = undefined;
+    b.sl = &sl;
+    const resident = Backend.snapBytes(&b, 130000);
+    const whole = Backend.snapReadBytes(&b, 130000);
+    try std.testing.expectEqual(@as(u64, snapshot.bytes(&e.c, 130000, false)), whole);
+    try std.testing.expect(whole > resident + (2 << 30));
+    var snap: snapshot.Snap = .{ .id = 1, .at = 130000, .buf = undefined, .bytes = whole };
+    try std.testing.expectEqual(whole, Backend.snapCharged(&b, &snap));
+    snap.bytes = @intCast(resident);
+    try std.testing.expectEqual(resident, Backend.snapCharged(&b, &snap));
+    std.debug.print("GLM_DISK_CHARGE at=130000 resident={d} whole={d} missing={d}\n", .{ resident, whole, whole - resident });
 }

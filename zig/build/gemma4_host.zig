@@ -42,6 +42,7 @@ pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.M
     const contract_object = b.addObject(.{ .name = "gemma4-contract-compile", .root_module = contract_root });
     _ = contract_object.getEmittedBin();
     b.step("compile-gemma4-contract-host", "Compile normal contract runner, family hooks and reflection without a metallib").dependOn(&contract_object.step);
+    b.step("test-glm-disk-charge-host", "Actual GLM snapshot save/read byte accounting without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engine, .filters = &.{"GLM disk charge:"} })).step);
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/gemma4.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api } } });
     const root = b.createModule(.{ .root_source_file = b.path("zig/gemma4_host_compile.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "host", .module = host }, .{ .name = "tensorfold", .module = engine } } });

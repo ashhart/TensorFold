@@ -9,7 +9,7 @@ const Backend = glm.backend.Backend;
 const Allocator = std.mem.Allocator;
 
 /// The store's view of a kept state: its KDA states, then each MLA layer's rows as a whole state lays them out.
-pub const image: rows.Image = .{ .parts = parts, .gather = gather, .blank = blank, .scatter = scatter, .whole = whole };
+pub const image: rows.Image = .{ .parts = parts, .gather = gather, .blank = blank, .blank_bytes = Backend.snapReadBytes, .scatter = scatter, .whole = whole };
 
 fn back(ptr: *anyopaque) *Backend {
     return @ptrCast(@alignCast(ptr));
