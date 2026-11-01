@@ -1,0 +1,559 @@
+{
+  "scope": "M5 text4 exactHTTPcold2k8k diagnostic; existing profiler labels only, no kernel/arithmetic variant. Stage instrumentation may perturb schedules; plain wall clocks retained. No performance acceptance.",
+  "hardware": "M5; exclusive existing model lease; no all-width or serving performance acceptance",
+  "native_cache_capacity": 70000,
+  "native_prefill_chunk": 128,
+  "token_verification": [
+    {
+      "tokens": 2048,
+      "actual_current_native_tokenize_matches_pinned_http_fixture": true,
+      "body_sha256": "e6932e72d2a5ea89eec6f20a0aeb42b8e632262ecfb0482a6ac2017f17352896",
+      "npy_sha256": "cc3c5a72ddfc5cd60f83fa046250606cc452a0ac483e49184626dc78e5a45d12"
+    },
+    {
+      "tokens": 8192,
+      "actual_current_native_tokenize_matches_pinned_http_fixture": true,
+      "body_sha256": "655407f5dc3614476ec857a0309ed5437000c2be91d3859659b256d83e1bb407",
+      "npy_sha256": "92bcc953dc435011aec99e723b25210e105f8b9cc4d370d938722ce3861d690a"
+    }
+  ],
+  "source_sha256": {
+    "zig/tests/lfm3_profile.zig": "f5620a0ca8565abb3d923c2da6793c1b51eb030fa87214d8a7f933195e17bb32",
+    "zig/src/core/gpu_profile.zig": "80eb55884ef6d7c9b894f06e3ebfa06a4a485bd3f48895d634ed89d6a638261b",
+    "zig/src/families/lfm3/forward.zig": "894c9541112518287bc9985db51f7e023b870b234da54acc626e9f2f57533bc9",
+    "zig/kernels/metal/lfm3/attention.metal": "6dc51acbb45e2e65028e72fed72d318629eb7b382e773c5837db9baa8de5d3b9",
+    "zig/kernels/metal/lfm3/tile_pair.metal": "e21ba279d7518093dd7a8e74bfb848da7f41d97136a2c2ad9d2a1c1d226be50f",
+    "zig/src/families/lfm3/prompt_projection.zig": "634d4f1ec738dad4a067410875760a66b790cc318e63b54ecf880f18bf67c235",
+    "zig/src/families/lfm3/tile_pair.zig": "d98e6de843242f0620b79f65568a0a0a859e00138ad807464f8e1d49f6fbed9e"
+  },
+  "diagnostic_binary_sha256": "f664911c1ad88511208596165604bd142e8d689a6afb8889e1e44f88d04e4fb1",
+  "same_variant_profiled_and_plain_endpoint_identity": true,
+  "cross_variant_bit_identity_claimed": false,
+  "runs": [
+    {
+      "tokens": 2048,
+      "variant": "current",
+      "cache_capacity": 70000,
+      "chunk": 128,
+      "counter_mode": [
+        "stage",
+        "stage"
+      ],
+      "plain_wall_seconds_median": 0.883111,
+      "plain_gpu_seconds_median": 0.846759352600202,
+      "profiled_stage_seconds_sum": 0.851895154,
+      "stages": {
+        "conv_in": {
+          "gpu_seconds_median": 0.08091941450000001,
+          "calls_each": [
+            208,
+            208
+          ]
+        },
+        "conv_out": {
+          "gpu_seconds_median": 0.028126116000000003,
+          "calls_each": [
+            208,
+            208
+          ]
+        },
+        "attn_q": {
+          "gpu_seconds_median": 0.0237688785,
+          "calls_each": [
+            176,
+            176
+          ]
+        },
+        "attn_kv": {
+          "gpu_seconds_median": 0.012734998,
+          "calls_each": [
+            176,
+            176
+          ]
+        },
+        "attn_gate": {
+          "gpu_seconds_median": 0.001957206,
+          "calls_each": [
+            176,
+            176
+          ]
+        },
+        "attn_out": {
+          "gpu_seconds_median": 0.0237685195,
+          "calls_each": [
+            176,
+            176
+          ]
+        },
+        "ffn_gate_up": {
+          "gpu_seconds_median": 0.36674050300000005,
+          "calls_each": [
+            384,
+            384
+          ]
+        },
+        "ffn_down": {
+          "gpu_seconds_median": 0.179886763,
+          "calls_each": [
+            384,
+            384
+          ]
+        },
+        "vocabulary_head": {
+          "gpu_seconds_median": 0.0023307285000000004,
+          "calls_each": [
+            16,
+            16
+          ]
+        },
+        "norm": {
+          "gpu_seconds_median": 0.0042161035,
+          "calls_each": [
+            784,
+            784
+          ]
+        },
+        "embedding": {
+          "gpu_seconds_median": 0.00010474999999999998,
+          "calls_each": [
+            16,
+            16
+          ]
+        },
+        "activation": {
+          "gpu_seconds_median": 0.005800944500000001,
+          "calls_each": [
+            768,
+            768
+          ]
+        },
+        "attention_prepare": {
+          "gpu_seconds_median": 0.0012115645,
+          "calls_each": [
+            176,
+            176
+          ]
+        },
+        "attention": {
+          "gpu_seconds_median": 0.12032866449999999,
+          "calls_each": [
+            704,
+            704
+          ]
+        }
+      },
+      "all_profiled_endpoints_equal_plain": true,
+      "repeat_final_logit_sha256": "8700e9a12456dce4f744caa329ad2013f44df7f2704e58e245e52aa0e9e9ddc5",
+      "attention_fraction_of_profiled_stage_time": 0.1412482086968181,
+      "plain_wall_seconds_each": [
+        0.882642,
+        0.88358
+      ]
+    },
+    {
+      "tokens": 2048,
+      "variant": "paired_tiles",
+      "cache_capacity": 70000,
+      "chunk": 128,
+      "counter_mode": [
+        "stage",
+        "stage"
+      ],
+      "plain_wall_seconds_median": 0.46441299999999996,
+      "plain_gpu_seconds_median": 0.42822166811674833,
+      "profiled_stage_seconds_sum": 0.438255828,
+      "stages": {
+        "conv_in": {
+          "gpu_seconds_median": 0.0322938525,
+          "calls_each": [
+            208,
+            208
+          ]
+        },
+        "conv_out": {
+          "gpu_seconds_median": 0.013225664500000001,
+          "calls_each": [
+            208,
+            208
+          ]
+        },
+        "attn_q": {
+          "gpu_seconds_median": 0.011144940500000002,
+          "calls_each": [
+            176,
+            176
+          ]
+        },
+        "attn_kv": {
+          "gpu_seconds_median": 0.007488039,
+          "calls_each": [
+            176,
+            176
+          ]
+        },
+        "attn_gate": {
+          "gpu_seconds_median": 0.0020158750000000003,
+          "calls_each": [
+            176,
+            176
+          ]
+        },
+        "attn_out": {
+          "gpu_seconds_median": 0.011178397000000003,
+          "calls_each": [
+            176,
+            176
+          ]
+        },
+        "ffn_gate_up": {
+          "gpu_seconds_median": 0.1439456705,
+          "calls_each": [
+            384,
+            384
+          ]
+        },
+        "ffn_down": {
+          "gpu_seconds_median": 0.08293642150000001,
+          "calls_each": [
+            384,
+            384
+          ]
+        },
+        "vocabulary_head": {
+          "gpu_seconds_median": 0.0023206685000000003,
+          "calls_each": [
+            16,
+            16
+          ]
+        },
+        "norm": {
+          "gpu_seconds_median": 0.004304714,
+          "calls_each": [
+            784,
+            784
+          ]
+        },
+        "embedding": {
+          "gpu_seconds_median": 0.000251833,
+          "calls_each": [
+            16,
+            16
+          ]
+        },
+        "activation": {
+          "gpu_seconds_median": 0.005752878499999999,
+          "calls_each": [
+            768,
+            768
+          ]
+        },
+        "attention_prepare": {
+          "gpu_seconds_median": 0.0012094789999999998,
+          "calls_each": [
+            176,
+            176
+          ]
+        },
+        "attention": {
+          "gpu_seconds_median": 0.12018739449999999,
+          "calls_each": [
+            704,
+            704
+          ]
+        }
+      },
+      "all_profiled_endpoints_equal_plain": true,
+      "repeat_final_logit_sha256": "7ad8423d5e79a75bc4b72f9a0b32b4f2023272d3a1ec04b597fb37cd5438e964",
+      "attention_fraction_of_profiled_stage_time": 0.2742402652087492,
+      "plain_wall_seconds_each": [
+        0.4644,
+        0.464426
+      ]
+    },
+    {
+      "tokens": 8192,
+      "variant": "current",
+      "cache_capacity": 70000,
+      "chunk": 128,
+      "counter_mode": [
+        "stage",
+        "stage"
+      ],
+      "plain_wall_seconds_median": 4.638943,
+      "plain_gpu_seconds_median": 4.5858032503165305,
+      "profiled_stage_seconds_sum": 4.605206704,
+      "stages": {
+        "conv_in": {
+          "gpu_seconds_median": 0.32363039149999995,
+          "calls_each": [
+            832,
+            832
+          ]
+        },
+        "conv_out": {
+          "gpu_seconds_median": 0.11234039850000002,
+          "calls_each": [
+            832,
+            832
+          ]
+        },
+        "attn_q": {
+          "gpu_seconds_median": 0.09514477200000002,
+          "calls_each": [
+            704,
+            704
+          ]
+        },
+        "attn_kv": {
+          "gpu_seconds_median": 0.05088421800000002,
+          "calls_each": [
+            704,
+            704
+          ]
+        },
+        "attn_gate": {
+          "gpu_seconds_median": 0.0079379555,
+          "calls_each": [
+            704,
+            704
+          ]
+        },
+        "attn_out": {
+          "gpu_seconds_median": 0.09525006349999998,
+          "calls_each": [
+            704,
+            704
+          ]
+        },
+        "ffn_gate_up": {
+          "gpu_seconds_median": 1.4671723220000001,
+          "calls_each": [
+            1536,
+            1536
+          ]
+        },
+        "ffn_down": {
+          "gpu_seconds_median": 0.719726452,
+          "calls_each": [
+            1536,
+            1536
+          ]
+        },
+        "vocabulary_head": {
+          "gpu_seconds_median": 0.009268914500000003,
+          "calls_each": [
+            64,
+            64
+          ]
+        },
+        "norm": {
+          "gpu_seconds_median": 0.0169286425,
+          "calls_each": [
+            3136,
+            3136
+          ]
+        },
+        "embedding": {
+          "gpu_seconds_median": 0.00036797999999999996,
+          "calls_each": [
+            64,
+            64
+          ]
+        },
+        "activation": {
+          "gpu_seconds_median": 0.023302213,
+          "calls_each": [
+            3072,
+            3072
+          ]
+        },
+        "attention_prepare": {
+          "gpu_seconds_median": 0.0048518125,
+          "calls_each": [
+            704,
+            704
+          ]
+        },
+        "attention": {
+          "gpu_seconds_median": 1.6784005685000003,
+          "calls_each": [
+            2816,
+            2816
+          ]
+        }
+      },
+      "all_profiled_endpoints_equal_plain": true,
+      "repeat_final_logit_sha256": "19a2f9b7b0794ef2f2be0edb7d16564e24d33f02e0d01972780ae28d09010bf5",
+      "attention_fraction_of_profiled_stage_time": 0.36445716259428085,
+      "plain_wall_seconds_each": [
+        4.63588,
+        4.642006
+      ]
+    },
+    {
+      "tokens": 8192,
+      "variant": "paired_tiles",
+      "cache_capacity": 70000,
+      "chunk": 128,
+      "counter_mode": [
+        "stage",
+        "stage"
+      ],
+      "plain_wall_seconds_median": 3.107767,
+      "plain_gpu_seconds_median": 3.053785268450156,
+      "profiled_stage_seconds_sum": 3.064434951,
+      "stages": {
+        "conv_in": {
+          "gpu_seconds_median": 0.1291200075,
+          "calls_each": [
+            832,
+            832
+          ]
+        },
+        "conv_out": {
+          "gpu_seconds_median": 0.05291137350000001,
+          "calls_each": [
+            832,
+            832
+          ]
+        },
+        "attn_q": {
+          "gpu_seconds_median": 0.04456602450000001,
+          "calls_each": [
+            704,
+            704
+          ]
+        },
+        "attn_kv": {
+          "gpu_seconds_median": 0.029950899500000003,
+          "calls_each": [
+            704,
+            704
+          ]
+        },
+        "attn_gate": {
+          "gpu_seconds_median": 0.0081318085,
+          "calls_each": [
+            704,
+            704
+          ]
+        },
+        "attn_out": {
+          "gpu_seconds_median": 0.04479231750000002,
+          "calls_each": [
+            704,
+            704
+          ]
+        },
+        "ffn_gate_up": {
+          "gpu_seconds_median": 0.5757702760000001,
+          "calls_each": [
+            1536,
+            1536
+          ]
+        },
+        "ffn_down": {
+          "gpu_seconds_median": 0.331787373,
+          "calls_each": [
+            1536,
+            1536
+          ]
+        },
+        "vocabulary_head": {
+          "gpu_seconds_median": 0.009284855000000002,
+          "calls_each": [
+            64,
+            64
+          ]
+        },
+        "norm": {
+          "gpu_seconds_median": 0.017096581500000003,
+          "calls_each": [
+            3136,
+            3136
+          ]
+        },
+        "embedding": {
+          "gpu_seconds_median": 0.0008800625000000004,
+          "calls_each": [
+            64,
+            64
+          ]
+        },
+        "activation": {
+          "gpu_seconds_median": 0.0231809975,
+          "calls_each": [
+            3072,
+            3072
+          ]
+        },
+        "attention_prepare": {
+          "gpu_seconds_median": 0.004806967500000002,
+          "calls_each": [
+            704,
+            704
+          ]
+        },
+        "attention": {
+          "gpu_seconds_median": 1.7921554069999999,
+          "calls_each": [
+            2816,
+            2816
+          ]
+        }
+      },
+      "all_profiled_endpoints_equal_plain": true,
+      "repeat_final_logit_sha256": "305e345e11883986154d8b8dde198985589ac1d064517c14bdd46224c46dd074",
+      "attention_fraction_of_profiled_stage_time": 0.5848240982942633,
+      "plain_wall_seconds_each": [
+        3.114677,
+        3.100857
+      ]
+    }
+  ],
+  "raw_logical_limits": [
+    "These are prefill-only direct native passes, not16-output HTTP elapsed time.",
+    "Paired FFN gate/up and K/V remain grouped because each is a single existing dispatch.",
+    "Stage counter instrumentation can perturb scheduling; matched unprofiled wall clocks retained.",
+    "Projection class labels are host metadata; all kernels/arithmetic/dispatches unchanged."
+  ],
+  "performance_accepted": false,
+  "dominant_eight_k": {
+    "paired_tiles_attention_seconds": 1.792155407,
+    "paired_tiles_attention_fraction": 0.5848240982942633,
+    "paired_tiles_ffn_gate_up_plus_down_seconds": 0.9075576489999999,
+    "interpretation": "Shared tiles reduce dense time; scalar attention is the largest remaining8k stage and FFN remains substantial. No unmeasured standard stage breakdown inferred."
+  },
+  "counter_clock_scope": {
+    "counter_mode": "stage; calibrated GPU counter samples for all8runs",
+    "profiled_command_buffer_gpu_timestamps": "All8invalid/unavailable clocks discarded (null inraw), never used forstage totals.",
+    "plain_clocks": "Uninstrumented wall and valid plaincommandGPUtimes retained separately; profiledstage sum is diagnostic, notHTTPelapsedtime."
+  },
+  "raw_evidence_sha256": {
+    "cold-stage-profile/0-current-2048.json": "d57819311ac26762671e0741fb2652cf606000b0c7036cddc42b6b304504bb8e",
+    "cold-stage-profile/0-current-2048.log": "3abf7120a89d3ff17e97e5d25061c4199236419aba394e4cada6f084877cc954",
+    "cold-stage-profile/1-paired-2048.json": "2f17f9e7044183412c7a52d3067c1c761398c9df5bf2499c0aae9622b5b64142",
+    "cold-stage-profile/1-paired-2048.log": "3abf7120a89d3ff17e97e5d25061c4199236419aba394e4cada6f084877cc954",
+    "cold-stage-profile/2-paired-8192.json": "6f126f49b939dcbf7207afa1f9bc03696f2661a3a4ce39072923bdbb20c5589b",
+    "cold-stage-profile/2-paired-8192.log": "5cf360bde5c1a9e0ff68b1cbc385982da901a621793fe54b8ef9fac5763c83ef",
+    "cold-stage-profile/3-current-8192.json": "98492b420fe61647cef131e6b661e663c51bcfcd3ba8b904ac45c3b913c7fa02",
+    "cold-stage-profile/3-current-8192.log": "5cf360bde5c1a9e0ff68b1cbc385982da901a621793fe54b8ef9fac5763c83ef",
+    "cold-stage-profile/4-current-8192.json": "280bac4b3abd0f17d2a233fd7946292e500f970af72fc6b76b09650454b59d13",
+    "cold-stage-profile/4-current-8192.log": "5cf360bde5c1a9e0ff68b1cbc385982da901a621793fe54b8ef9fac5763c83ef",
+    "cold-stage-profile/5-paired-8192.json": "a6d2afadee39dd978e5a4b61d3dbceeda905bf09f4bc809c84a4ea9cc378c00b",
+    "cold-stage-profile/5-paired-8192.log": "5cf360bde5c1a9e0ff68b1cbc385982da901a621793fe54b8ef9fac5763c83ef",
+    "cold-stage-profile/6-paired-2048.json": "df474ed6d68b6065d36ac6486c5237abb93d86dfdbe0ad356f47c09ab0c126fb",
+    "cold-stage-profile/6-paired-2048.log": "3abf7120a89d3ff17e97e5d25061c4199236419aba394e4cada6f084877cc954",
+    "cold-stage-profile/7-current-2048.json": "8028346486e0fd8ef4c736f9d688573edac1b9c2c6166e1a4ab241570b6794aa",
+    "cold-stage-profile/7-current-2048.log": "3abf7120a89d3ff17e97e5d25061c4199236419aba394e4cada6f084877cc954",
+    "cold-stage-profile/admission.json": "be0c3a3290919ede0ec7782068bd9eb8582d6d3bc309bac481f40f0814eec171",
+    "cold-stage-profile/events.json": "5d28399bcaf6fecc70c6559fcae7f4d475f33f0fdecb45503d3dfc1c825b3d76",
+    "cold-stage-profile/records.json": "59fe919a83146c0ac1d9564f4cbf5805666b08719d9994de1bfe3f23c49f1f17",
+    "cold-stage-profile/summary.json": "8e939eda43fc2fe0624cfdbf002811e394706d954f6d4fbd3aa35f6e1487bdf7",
+    "cold-token-capture/events.json": "e40beeedfd304799b8e4ee137d00903873008b03befa7a729f0e39c3f9a68dd9",
+    "cold-token-capture/receipt.json": "f9c67f355260b8a706147ce1d27d4765c3e18f265d12343d4b877b8ee10cfc53",
+    "cold-token-capture/text-2048.npy": "cc3c5a72ddfc5cd60f83fa046250606cc452a0ac483e49184626dc78e5a45d12",
+    "cold-token-capture/text-8192.npy": "92bcc953dc435011aec99e723b25210e105f8b9cc4d370d938722ce3861d690a",
+    "cold-token-capture/text-capture.server.log": "3792e9007dc40ec42809781d62f6a3f7d8a1c15f96f79129e995a56a83403872"
+  }
+}

@@ -1,6 +1,9 @@
 //! Check saved header metadata from tools/lfm3/inspect_checkpoint.py without loading model data or running a GPU.
 const std = @import("std");
-const lfm3 = @import("lfm3");
+const lfm3 = struct {
+    const config = @import("src/families/lfm3/config.zig");
+    const weights = @import("src/families/lfm3/weights.zig");
+};
 const st = @import("safetensors");
 
 pub fn main(init: std.process.Init) !void {
