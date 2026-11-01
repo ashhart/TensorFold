@@ -4,6 +4,7 @@ const mtl = @import("metal");
 const contract = @import("contract");
 const rig_ = @import("rig.zig");
 const llama = @import("metal_llama.zig");
+const controls = @import("metal_llama_controls.zig");
 const c = contract.spec;
 const g = contract.gates;
 const dense_in = contract.dense;
@@ -69,6 +70,7 @@ pub const Matvec = struct {
     lib: mtl.Library,
     pipe: mtl.Pipeline,
     per: u32,
+    mutation: controls.Mutation,
     name: []const u8,
     served: [3]c.Shape,
     shape: c.Shape = .{ .rows = 0, .n = 0, .k = 0 },
@@ -78,13 +80,13 @@ pub const Matvec = struct {
     in: [3]rig_.Ref = undefined,
     y: rig_.Ref = undefined,
 
-    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, per: u32) !Matvec {
-        const lib = try family.glueLibrary(device, a);
+    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, per: u32, mutation: controls.Mutation) !Matvec {
+        const lib = try controls.glueLibrary(device, a, mutation);
         errdefer lib.deinit();
         const name = try std.fmt.allocPrint(a, "llama glue ll_q4_matvec_{d}", .{per});
         errdefer a.free(name);
         const fun = name[std.mem.lastIndexOfScalar(u8, name, ' ').? + 1 ..];
-        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .lib = lib, .pipe = try llama.pipelineOf(lib, device, fun), .per = per, .name = name, .served = .{ .{ .rows = per, .n = G33.hidden + 2 * G33.kv_heads * (G33.hidden / G33.heads), .k = G33.hidden }, .{ .rows = per, .n = 2 * G33.intermediate, .k = G33.hidden }, .{ .rows = per, .n = G33.hidden, .k = G33.intermediate } } };
+        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .lib = lib, .pipe = try llama.pipelineOf(lib, device, fun), .per = per, .mutation = mutation, .name = name, .served = .{ .{ .rows = per, .n = G33.hidden + 2 * G33.kv_heads * (G33.hidden / G33.heads), .k = G33.hidden }, .{ .rows = per, .n = 2 * G33.intermediate, .k = G33.hidden }, .{ .rows = per, .n = G33.hidden, .k = G33.intermediate } } };
     }
 
     fn drop(p: *Matvec) void {
@@ -106,7 +108,7 @@ pub const Matvec = struct {
     const vt = g.hooks(Matvec);
 
     pub fn kernel(p: *Matvec) g.Kernel {
-        return .{ .spec = .{ .name = p.name, .accum = .f32, .depth = matvecDepth, .out = .bf16, .tiles = .{ .{ .size = p.per, .step = 1, .min = 1 }, .{ .size = 8, .step = 1, .min = 1 }, .{ .size = 1024, .step = group, .min = group } }, .served = &p.served }, .ctx = p, .vt = &vt };
+        return controls.mark(.{ .spec = .{ .name = p.name, .accum = .f32, .depth = matvecDepth, .out = .bf16, .tiles = .{ .{ .size = p.per, .step = 1, .min = 1 }, .{ .size = 8, .step = 1, .min = 1 }, .{ .size = 1024, .step = group, .min = group } }, .served = &p.served }, .ctx = p, .vt = &vt }, p.mutation);
     }
 
     pub fn prepare(p: *Matvec, s: c.Shape, fill: g.Fill, seed: u64) !bool {
@@ -171,6 +173,7 @@ fn none(_: c.Shape) usize {
 pub const Dequant = struct {
     a: std.mem.Allocator,
     rig: rig_.Rig,
+    mutation: controls.Mutation,
     lib: mtl.Library,
     pipe: mtl.Pipeline,
     shape: c.Shape = .{ .rows = 0, .n = 0, .k = 0 },
@@ -182,10 +185,10 @@ pub const Dequant = struct {
     // a slice of the gate and down projections' rows: every row is the same work
     const served = [_]c.Shape{ .{ .rows = 512, .n = G33.hidden, .k = G33.hidden }, .{ .rows = 512, .n = G33.intermediate, .k = G33.intermediate } };
 
-    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue) !Dequant {
-        const lib = try family.glueLibrary(device, a);
+    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, mutation: controls.Mutation) !Dequant {
+        const lib = try controls.glueLibrary(device, a, mutation);
         errdefer lib.deinit();
-        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .lib = lib, .pipe = try llama.pipelineOf(lib, device, "ll_q4_dequant") };
+        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .mutation = mutation, .lib = lib, .pipe = try llama.pipelineOf(lib, device, "ll_q4_dequant") };
     }
 
     fn drop(p: *Dequant) void {
@@ -207,7 +210,7 @@ pub const Dequant = struct {
 
     pub fn kernel(p: *Dequant) g.Kernel {
         const no_sums: c.Sums = .{ .f16 = 0, .bf16 = 0, .why = "no sums: one product of exact factors, rounded once" };
-        return .{ .spec = .{ .name = "llama glue ll_q4_dequant", .accum = .none, .depth = none, .out = .bf16, .tiles = .{ .{ .size = 8, .step = 1, .min = 1 }, .{}, .{ .size = 256, .step = group, .min = group } }, .served = &served, .sums = no_sums }, .ctx = p, .vt = &vt };
+        return controls.mark(.{ .spec = .{ .name = "llama glue ll_q4_dequant", .accum = .none, .depth = none, .out = .bf16, .tiles = .{ .{ .size = 8, .step = 1, .min = 1 }, .{}, .{ .size = 256, .step = group, .min = group } }, .served = &served, .sums = no_sums }, .ctx = p, .vt = &vt }, p.mutation);
     }
 
     pub fn prepare(p: *Dequant, s: c.Shape, fill: g.Fill, seed: u64) !bool {

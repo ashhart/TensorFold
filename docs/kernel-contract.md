@@ -215,7 +215,8 @@ source, one a kernel group: an embedding reading its own row, a norm's mean over
 add-norm dropping its residual, a SiLU with gate and up swapped, a rope at the window's first position, a decode that
 never rescales, a merge dropping each block's scale, a row projection dropping its tail, a GEMM reading its weights
 untransposed and a prompt attention seeing the next key go red at `shapes`, and an argmax never picking a NaN at
-`nonfinite`.
+`nonfinite`. The INT4 release's row projections and dequantization have two more: every group taking its row's first
+zero point, and a word's nibbles read in reverse, both red at `shapes`.
 CUDA: the RMS norm rows (16-byte form and the fp32-out tree), the bf16 residual's norm tails (MLX's rounded rows and
 the once-rounded ones, each checked on its residual and its output, with four controls each dropping a rounding point), Nemotron's router logits (and their 128-row tiles,
 bit-equal to them) and top-k, the latent top-k's decode form (bit-equal to `tf_super_topk`), the latent combine and
