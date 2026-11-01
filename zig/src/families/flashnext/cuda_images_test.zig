@@ -42,6 +42,7 @@ fn run(comptime Cuda: type, comptime open: anytype, comptime drop: anytype, draf
     engine.chunk = 16;
     engine.eos = 7;
     engine.round_graph = .{};
+    engine.heads = .full;
     var ids = [_]u32{1};
     var head: mtp.Head = undefined;
     head.ids = &ids;
@@ -140,6 +141,7 @@ fn release(comptime Cuda: type, comptime open: anytype) !void {
     engine.chunk = 16;
     engine.eos = 7;
     engine.round_graph = .{};
+    engine.heads = .full;
     var self: Cuda = undefined;
     self.gpa = a;
     self.context = 64;

@@ -93,6 +93,7 @@ const flashnext_rank_tests = @import("flashnext_rank_tests.zig");
 const flashnext_draft_affine_tests = @import("flashnext_draft_affine_tests.zig");
 const flashnext_shared_tests = @import("flashnext_shared_tests.zig");
 const flashnext_nvfp4_tp_tests = @import("flashnext_nvfp4_tp_tests.zig");
+const flashnext_fp8_experts_tests = @import("flashnext_fp8_experts_tests.zig");
 const nvfp4_fact_tests = @import("nvfp4_fact_tests.zig");
 const lane_half_tests = @import("lane_half_tests.zig");
 const flashnext_dense_hc_tests = @import("flashnext_dense_hc_tests.zig");
@@ -134,11 +135,14 @@ const usage =
     \\  flashnext-draft-affine    proposal-head affine projection against FP64 and row-count invariance
     \\  flashnext-shared          separate MXFP8 shared expert and reserved-slot scatter against FP64
     \\  flashnext-nvfp4-tp        rank-local expert cuts and FP32 partials against FP64 (one GPU)
+    \\  flashnext-fp8-experts     the MTP head's block-FP8 experts (512 x 640 x 2560) through moe_native.fp8 against FP64
     \\  nvfp4-fact                NVFP4 experts' prompt tiles with the decode form's sums: its bytes at every row, FP64
     \\  lane-half                 lane half tiles (MXFP8, BF16): bytes equal to the 64-column tile, FP64, cold-weight time
     \\  flashnext-dense-hc        dense connection weights and FP32 normalization against FP64
     \\  flashnext-hc              Flash Next's own hyper-connection and n-gram glue against float64 (synthetic rows)
     \\  flashnext-attn            Flash Next's own attention glue, pooling and block scores against float64 (synthetic)
+    \\  flashnext-gdn-heads [BASELINE]  DeltaNet full/half bytes, optionally against a frozen flashnext_batch.fatbin
+    \\  flashnext-tp-heads MODEL  each rank's cut in-projections and attention heads equal the whole layer's bytes
     \\  flashnext-pages           the attention glue's caches through a page table: paged == contiguous, float64, controls
     \\  info                      driver, device and library versions
     \\  smoke                     copies, fills, launches, argument packing, module globals
@@ -238,6 +242,7 @@ const usage =
     \\  rope-yarn                 YaRN rope in tf_q35_rope, tf_q35_rope8 and tf_q36m_norm_rope against float64, to 1M
     \\  kernel-contract-limits DIR   each registered launch against sm_80/86/89/120/121 from the fatbins in DIR
     \\  pocket-contract           Nemotron's pocket kernels (learned neurons) through gates 1-4, controls red
+    \\  flashnext-modelopt-contract  Flash Next NVFP4's BF16 dense and FP8 MTP-expert downs through gates 1-4
     \\  minimax-contract          MiniMax-M3.1-Flash's indexer and block-sparse attention through gates 1-4, controls red
     \\  moss-contract             MOSS-Image's own kernels and its full attention through gates 1-4, controls red
     \\  glm-exl3                  GLM's EXL3 routed experts, decode and prompt, against float64 (synthetic)
@@ -339,11 +344,18 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "flashnext-draft-affine")) return flashnext_draft_affine_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "flashnext-shared")) return flashnext_shared_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "flashnext-nvfp4-tp")) return flashnext_nvfp4_tp_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "flashnext-fp8-experts")) return flashnext_fp8_experts_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "nvfp4-fact")) return nvfp4_fact_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "lane-half")) return lane_half_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "flashnext-dense-hc")) return flashnext_dense_hc_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "flashnext-hc")) return flashnext_hc_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "flashnext-attn")) return flashnext_attn_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "flashnext-gdn-heads")) {
+        if (rest.len > 1) return error.GdnHeadsArguments;
+        const heads = @import("flashnext_gdn_heads_tests.zig");
+        return if (rest.len == 1) heads.runBaseline(gpu, rest[0]) else heads.run(gpu);
+    }
+    if (std.mem.eql(u8, cmd, "flashnext-tp-heads")) return @import("flashnext_tp_heads_tests.zig").run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "flashnext-pages")) return @import("contract_fn_pages.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "info")) return info(gpu);
     if (std.mem.eql(u8, cmd, "smoke")) return runtime_tests.smoke(gpu);
@@ -466,6 +478,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "rope-yarn")) return @import("contract_qwen_rope_yarn.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "kernel-contract-limits")) return contract_tests.fatbins(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "pocket-contract")) return @import("contract_pocket.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "flashnext-modelopt-contract")) return @import("contract_flashnext_modelopt.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "moss-contract")) return @import("contract_moss_image.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "tree")) return tree_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "block")) return block_tests.run(gpu);

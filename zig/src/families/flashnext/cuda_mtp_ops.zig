@@ -34,7 +34,6 @@ const Q4 = wt.Q4;
 const HcW = wt.HcW;
 const max_chain = mtp.max_chain;
 const max_rows = mtp.max_rows;
-const conv_bytes = mtp.conv_bytes;
 const proj_bytes = mtp.proj_bytes;
 const fc_sk = mtp.fc_sk;
 const piece_rows = mtp.piece_rows;
@@ -417,15 +416,16 @@ pub fn Ops(comptime Tri: type) type {
             const n = ids.len;
             if (n == 0 or n > max_rows) return error.WindowTooWide;
             if (seq.fed + n > seq.cap) return error.PromptTooLong;
+            if (!d.layout.heads.eql(seq.heads)) return error.DraftHeads; // its spares swap with the sequence's states
             d.settle(seq);
             d.fed0 = seq.fed;
             d.rows = n;
             d.history = seq.history;
             @memcpy(d.ids[0..n], ids);
             const keeps = n > 1;
-            if (keeps) try copyAsync(o.stream(), d.saved.ptr + Draft.tail_at, seq.tail.ptr, ple_tail_n * wide * 2);
+            if (keeps) try copyAsync(o.stream(), d.saved.ptr + d.layout.tail_at, seq.tail.ptr, ple_tail_n * wide * 2);
             try o.e.forward(Tri, o.tri, seq, ids, .{ .logits = .all, .logits_out = d.logits.ptr, .keep = if (keeps) &d.keep else null, .streams = d.streams.ptr });
-            if (keeps) try copyAsync(o.stream(), d.saved.ptr + Draft.nrow_at, o.e.batch_s.?.ple_nrow, n * wide * 2);
+            if (keeps) try copyAsync(o.stream(), d.saved.ptr + d.layout.nrow_at, o.e.batch_s.?.ple_nrow, n * wide * 2);
             d.open = keeps;
         }
 
@@ -433,9 +433,10 @@ pub fn Ops(comptime Tri: type) type {
         pub fn verifyMany(o: Self, seqs: []const *prompt.Seq, ds: []const *Draft, idss: []const []const u32, out: u64) !void {
             if (o.main != null) return error.UnsupportedRankOperation;
             // every window refused before any stream's state moves
-            for (seqs, idss) |seq, ids| {
+            for (seqs, idss, ds) |seq, ids, d| {
                 if (ids.len == 0 or ids.len > max_rows) return error.WindowTooWide;
                 if (seq.fed + ids.len > seq.cap) return error.PromptTooLong;
+                if (!d.layout.heads.eql(seq.heads)) return error.DraftHeads;
             }
             o.e.round_graph.clear();
             const wins = try o.e.gpa.alloc(prompt.Engine.Window, seqs.len);
@@ -448,14 +449,14 @@ pub fn Ops(comptime Tri: type) type {
                 d.history = seq.history;
                 @memcpy(d.ids[0..n], ids);
                 const keeps = n > 1;
-                if (keeps) try copyAsync(o.stream(), d.saved.ptr + Draft.tail_at, seq.tail.ptr, ple_tail_n * wide * 2);
+                if (keeps) try copyAsync(o.stream(), d.saved.ptr + d.layout.tail_at, seq.tail.ptr, ple_tail_n * wide * 2);
                 w.* = .{ .seq = seq, .ids = ids, .keep = if (keeps) &d.keep else null, .streams = d.streams.ptr, .logits = d.logits.ptr };
             }
             try o.e.windows(Tri, o.tri, wins, out);
             var row0: usize = 0;
             for (ds, idss) |d, ids| {
                 const keeps = ids.len > 1;
-                if (keeps) try copyAsync(o.stream(), d.saved.ptr + Draft.nrow_at, o.e.batch_s.?.ple_nrow + row0 * wide * 2, ids.len * wide * 2);
+                if (keeps) try copyAsync(o.stream(), d.saved.ptr + d.layout.nrow_at, o.e.batch_s.?.ple_nrow + row0 * wide * 2, ids.len * wide * 2);
                 d.open = keeps;
                 row0 += ids.len;
             }
@@ -492,19 +493,27 @@ pub fn Ops(comptime Tri: type) type {
             const st = o.stream();
             const s = if (e.batch_s) |*bs| bs else return error.CannotRewind;
             const k = &e.batch_k;
+            // refused before any change: kernels for every layer's heads, saved rows at the sequence's
+            if (!d.layout.heads.eql(seq.heads)) return error.DraftHeads;
+            for (e.layers[0..e.n_layers]) |*lw| if (lw.linear) {
+                _ = try k.gdnSet(lw.heads);
+                if (!lw.heads.eql(seq.heads)) return error.DraftHeads;
+            };
             seq.fed = d.fed0 + keep;
             var hist = d.history;
             for (d.ids[0..keep]) |t| hist = .{ hist[1], t };
             seq.history = hist;
-            try copyAsync(st, seq.tail.ptr, d.saved.ptr + Draft.tail_at, ple_tail_n * wide * 2);
-            try shift(k, st, seq.tail.ptr, d.saved.ptr + Draft.nrow_at, wide, keep, ple_tail_n, wide);
+            try copyAsync(st, seq.tail.ptr, d.saved.ptr + d.layout.tail_at, ple_tail_n * wide * 2);
+            try shift(k, st, seq.tail.ptr, d.saved.ptr + d.layout.nrow_at, wide, keep, ple_tail_n, wide);
             var li: usize = 0;
             for (e.layers[0..e.n_layers], 0..) |*lw, layer| {
                 if (!lw.linear) continue;
                 defer li += 1;
                 // the sequence's state is still the window's start (the pass wrote its end state to the spare)
                 const lk = d.keep.layers[layer];
-                try copyAsync(st, seq.conv[li].ptr, lk.hist, conv_bytes);
+                const h = lw.heads;
+                const g = try k.gdnSet(h);
+                try copyAsync(st, seq.conv[li].ptr, lk.hist, (gdn.taps - 1) * h.convDim() * 2);
                 var f: cuda.Args = .{};
                 f.add(lk.proj);
                 f.add(seq.conv[li].ptr);
@@ -515,7 +524,7 @@ pub fn Ops(comptime Tri: type) type {
                 f.add(s.gk);
                 f.add(s.gv);
                 f.add(s.ggb);
-                try cuda.launch.launch(k.front, .{ .grid = .{ .x = @intCast(keep), .y = gdn.nk + gdn.nv }, .block = .{ .x = 256 } }, st, &f);
+                try cuda.launch.launch(g.front, .{ .grid = .{ .x = @intCast(keep), .y = h.nk + h.nv }, .block = .{ .x = 256 } }, st, &f);
                 var a: cuda.Args = .{};
                 a.add(s.gq);
                 a.add(s.gk);
@@ -524,8 +533,8 @@ pub fn Ops(comptime Tri: type) type {
                 a.add(seq.state[li].ptr);
                 a.add(cint(keep));
                 a.add(s.ys);
-                try cuda.launch.launch(k.chain, .{ .grid = .{ .x = gdn.nv, .y = gdn.dv / 16 }, .block = .{ .x = 128 } }, st, &a);
-                try shift(k, st, seq.conv[li].ptr, lk.proj, gdn.proj_width, keep, gdn.taps - 1, gdn.conv_dim);
+                try cuda.launch.launch(g.chain, .{ .grid = .{ .x = h.nv, .y = gdn.dv / 16 }, .block = .{ .x = 128 } }, st, &a);
+                try shift(k, st, seq.conv[li].ptr, lk.proj, h.projWidth(), keep, gdn.taps - 1, h.convDim());
             }
             d.rows = keep;
             d.open = false;

@@ -13,8 +13,8 @@ const tk = flash.tile_kernels;
 
 pub const Kind = enum { chain, scores, readout, fused };
 
-const nk = 16;
-const nv = 48;
+const nk = flash.Heads.full.nk;
+const nv = flash.Heads.full.nv;
 const dk = 128;
 const dv = 128;
 const di = 128;
