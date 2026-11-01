@@ -90,10 +90,9 @@ pub const Pack = struct {
             defer file.close(io);
             var head: [8]u8 = undefined;
             if (try file.readPositionalAll(io, &head, 0) != 8) return error.BadSafetensors;
-            const n = std.mem.readInt(u64, &head, .little);
             const len = try file.length(io);
-            if (n > len - 8 or n > 1 << 30) return error.BadSafetensors;
-            const json = try a.alloc(u8, @intCast(n));
+            const n = try st.headerSize(std.mem.readInt(u64, &head, .little), len);
+            const json = try a.alloc(u8, n);
             if (try file.readPositionalAll(io, json, 8) != json.len) return error.BadSafetensors;
             try p.addHeader(name, json, len - 8 - n);
         }
@@ -363,4 +362,32 @@ test "a folder by its headers: index order, groups checked, strided reads, codeb
     try testing.expectEqual(exl3.Codebook.inst3, try p.codebook(io, "y"));
     try testing.expectError(error.MissingTensor, p.group("y", &buf));
     try testing.expectError(error.BadSpan, p.read(io, p.get("y.weight").?, .{ .offset = 8, .len = 8 }, out[0..8]));
+}
+
+test "a shard's header length is read as core reads it: past the file, past 100 MB or the u64 maximum is refused" {
+    const io = testing.io;
+    const a = testing.allocator;
+    const good = try image(a, &.{.{ .name = "y.weight", .dtype = "BF16", .shape = &.{ 3, 2 }, .fill = 7 }});
+    defer a.free(good);
+    const lengths = [_]?u64{ null, good.len - 7, st.max_header_bytes + 1, std.math.maxInt(u64), std.math.maxInt(u64) - 7 };
+    for (lengths) |length| {
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const bytes = try a.dupe(u8, good);
+        defer a.free(bytes);
+        if (length) |n| std.mem.writeInt(u64, bytes[0..8], n, .little);
+        try tmp.dir.writeFile(io, .{ .sub_path = "a.safetensors", .data = bytes });
+        if (length == st.max_header_bytes + 1) { // a sparse file long enough to hold that header
+            const f = try tmp.dir.openFile(io, "a.safetensors", .{ .mode = .read_write });
+            defer f.close(io);
+            try f.setLength(io, st.max_header_bytes + 16);
+        }
+        const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+        defer a.free(dir);
+        if (length == null) {
+            var p = try Pack.open(a, io, dir);
+            defer p.deinit();
+            try testing.expectEqual(@as(u64, 12), p.get("y.weight").?.nbytes);
+        } else try testing.expectError(error.BadSafetensors, Pack.open(a, io, dir));
+    }
 }
