@@ -1,0 +1,747 @@
+{
+ "scope": "TEXT6 (LFM3-1.7B-MLX-6bit) prompt128+16 teacher-forced: route isolation and 25-row prompt-boundary sweep. Bounded diagnostic; no width, image, long-context or release qualification.",
+ "source_commit": "583a8f390 plus an uncommitted-at-run forward-tool flag change (--tiled-attention, --residual-ffn) committed with this receipt",
+ "host": "M5 Ultra, one guarded model job at a time under the shared lock",
+ "route_isolation": {
+  "same_bytes": {
+   "baseline_equals_residual_ffn_only": true,
+   "tiled_attention_only_equals_tiled_prompt": true
+  },
+  "output_sha256": {
+   "baseline": "8e2fce1b1c1a1d6abcb2f80640472d9d8cab571d4492ce63918b442c2ee5662c",
+   "residual_ffn_only": "8e2fce1b1c1a1d6abcb2f80640472d9d8cab571d4492ce63918b442c2ee5662c",
+   "tiled_attention_only": "998933420ad173aa3e4809ab4491d6c568b7a4289a8edced245ebed62b36d7ff",
+   "tiled_prompt": "998933420ad173aa3e4809ab4491d6c568b7a4289a8edced245ebed62b36d7ff"
+  },
+  "finding": "The 6-bit checkpoint does not use the 4-bit residual FFN path; only tiled attention changes its output.",
+  "phase_scores_prompt128_row_and_16_continuation": {
+   "baseline": {
+    "prompt_boundary": {
+     "native_rms": 0.04901861875813257,
+     "native_max": 0.2050304412841797,
+     "bf16_rms": 0.031214103195262688,
+     "bf16_max": 0.19215011596679688,
+     "proposed_metric_results": {
+      "rms_error": false,
+      "maximum_absolute_error": false,
+      "top20_probability_mean": false,
+      "top20_probability_max": false
+     },
+     "top20_probability": {
+      "native_mean": 1.2156167466048575e-05,
+      "reference_mean": 5.438477557612127e-06,
+      "native_max": 0.00014394107004278567,
+      "reference_max": 3.2107429089545114e-05
+     },
+     "native_fp32_top1_misses": 0,
+     "bf16_fp32_top1_misses": 0
+    },
+    "teacher_forced_continuation": {
+     "native_rms": 0.04184006094548536,
+     "native_max": 0.28766918182373047,
+     "bf16_rms": 0.05064403338575528,
+     "bf16_max": 0.3306717872619629,
+     "proposed_metric_results": {
+      "rms_error": true,
+      "maximum_absolute_error": true,
+      "top20_probability_mean": false,
+      "top20_probability_max": false
+     },
+     "top20_probability": {
+      "native_mean": 1.3799773429444968e-05,
+      "reference_mean": 1.3041501782842574e-05,
+      "native_max": 0.0003969739185127885,
+      "reference_max": 0.0002879273057369014
+     },
+     "native_fp32_top1_misses": 0,
+     "bf16_fp32_top1_misses": 0
+    }
+   },
+   "attn": {
+    "prompt_boundary": {
+     "native_rms": 0.05813316250926237,
+     "native_max": 0.22626113891601562,
+     "bf16_rms": 0.031214103195262688,
+     "bf16_max": 0.19215011596679688,
+     "proposed_metric_results": {
+      "rms_error": false,
+      "maximum_absolute_error": false,
+      "top20_probability_mean": false,
+      "top20_probability_max": false
+     },
+     "top20_probability": {
+      "native_mean": 2.4365584210391822e-05,
+      "reference_mean": 5.438477557612127e-06,
+      "native_max": 0.00028596345265041734,
+      "reference_max": 3.2107429089545114e-05
+     },
+     "native_fp32_top1_misses": 0,
+     "bf16_fp32_top1_misses": 0
+    },
+    "teacher_forced_continuation": {
+     "native_rms": 0.04758823452986163,
+     "native_max": 0.24394440650939941,
+     "bf16_rms": 0.05064403338575528,
+     "bf16_max": 0.3306717872619629,
+     "proposed_metric_results": {
+      "rms_error": true,
+      "maximum_absolute_error": true,
+      "top20_probability_mean": false,
+      "top20_probability_max": false
+     },
+     "top20_probability": {
+      "native_mean": 1.3406862109416334e-05,
+      "reference_mean": 1.3041501782842574e-05,
+      "native_max": 0.00033607338410834853,
+      "reference_max": 0.0002879273057369014
+     },
+     "native_fp32_top1_misses": 0,
+     "bf16_fp32_top1_misses": 0
+    }
+   }
+  },
+  "finding_phases": "The proposed prompt-phase logit RMS/max and probability diagnostics fail for BOTH baseline and tiled attention on the single prompt-boundary row at N=128; tiled attention is further from FP32 there (RMS 0.0581 vs 0.0490). The proposed continuation probability diagnostics also fail on both routes. Continuation logit RMS/max pass on both. All 17 top picks match FP32 on both routes."
+ },
+ "prompt_boundary_row_sweep": {
+  "scope": "Per-row boundary error versus independent FP32; descriptive statistics, no pass/fail rule",
+  "rows": 25,
+  "summary": {
+   "official_bf16": {
+    "rms": 0.04018031004122828,
+    "max": 0.19565048962831497,
+    "top20_probability_max": 0.0004705272920054893,
+    "top1_misses": 0
+   },
+   "baseline": {
+    "rms": 0.03904510857050718,
+    "max": 0.1850430727005005,
+    "top20_probability_max": 0.00039090498853548635,
+    "top1_misses": 0
+   },
+   "tiled_attention": {
+    "rms": 0.03889914475997641,
+    "max": 0.18597806632518768,
+    "top20_probability_max": 0.0004109389619873649,
+    "top1_misses": 0
+   },
+   "rows_where_route_rms_exceeds_official_bf16": {
+    "baseline": 9,
+    "tiled_attention": 11
+   }
+  },
+  "per_row": [
+   {
+    "prompt_length": 32,
+    "fp32_top1": 23018,
+    "official_bf16": {
+     "rms": 0.03976233231910736,
+     "max": 0.2087164893746376,
+     "top20_probability_max": 0.0032537480217538217,
+     "top1_matches_fp32": true
+    },
+    "baseline": {
+     "rms": 0.026819654572983853,
+     "max": 0.13836026191711426,
+     "top20_probability_max": 0.0018293817622364802,
+     "top1_matches_fp32": true
+    },
+    "tiled_attention": {
+     "rms": 0.04227642995861886,
+     "max": 0.16788291931152344,
+     "top20_probability_max": 0.0018636441745943089,
+     "top1_matches_fp32": true
+    }
+   },
+   {
+    "prompt_length": 36,
+    "fp32_top1": 23018,
+    "official_bf16": {
+     "rms": 0.03080779656339401,
+     "max": 0.1591489315032959,
+     "top20_probability_max": 0.0011985592435845849,
+     "top1_matches_fp32": true
+    },
+    "baseline": {
+     "rms": 0.02926782126783764,
+     "max": 0.14392757415771484,
+     "top20_probability_max": 0.0011574321735139392,
+     "top1_matches_fp32": true
+    },
+    "tiled_attention": {
+     "rms": 0.03593410608231325,
+     "max": 0.19315195083618164,
+     "top20_probability_max": 0.0011514354515780312,
+     "top1_matches_fp32": true
+    }
+   },
+   {
+    "prompt_length": 40,
+    "fp32_top1": 23018,
+    "official_bf16": {
+     "rms": 0.03309655847734577,
+     "max": 0.16278481483459473,
+     "top20_probability_max": 0.0010421974222822872,
+     "top1_matches_fp32": true
+    },
+    "baseline": {
+     "rms": 0.027848813484300648,
+     "max": 0.1446385383605957,
+     "top20_probability_max": 0.001052807914827092,
+     "top1_matches_fp32": true
+    },
+    "tiled_attention": {
+     "rms": 0.031185467182035905,
+     "max": 0.14122691750526428,
+     "top20_probability_max": 0.0012826159437662188,
+     "top1_matches_fp32": true
+    }
+   },
+   {
+    "prompt_length": 44,
+    "fp32_top1": 23018,
+    "official_bf16": {
+     "rms": 0.03316512204588175,
+     "max": 0.19300466775894165,
+     "top20_probability_max": 0.001227914588654122,
+     "top1_matches_fp32": true
+    },
+    "baseline": {
+     "rms": 0.036614246311039565,
+     "max": 0.17698287963867188,
+     "top20_probability_max": 0.0005085567628388965,
+     "top1_matches_fp32": true
+    },
+    "tiled_attention": {
+     "rms": 0.03190379590225403,
+     "max": 0.17340421676635742,
+     "top20_probability_max": 0.0005185608345426029,
+     "top1_matches_fp32": true
+    }
+   },
+   {
+    "prompt_length": 48,
+    "fp32_top1": 23018,
+    "official_bf16": {
+     "rms": 0.030279244688240923,
+     "max": 0.18629074096679688,
+     "top20_probability_max": 0.000327467382107368,
+     "top1_matches_fp32": true
+    },
+    "baseline": {
+     "rms": 0.02965907601820752,
+     "max": 0.15568938851356506,
+     "top20_probability_max": 0.0009484653666017584,
+     "top1_matches_fp32": true
+    },
+    "tiled_attention": {
+     "rms": 0.0300995724854818,
+     "max": 0.13663412630558014,
+     "top20_probability_max": 0.00035088584982545523,
+     "top1_matches_fp32": true
+    }
+   },
+   {
+    "prompt_length": 52,
+    "fp32_top1": 23018,
+    "official_bf16": {
+     "rms": 0.034784372629980236,
+     "max": 0.17693257331848145,
+     "top20_probability_max": 0.0004477491159463609,
+     "top1_matches_fp32": true
+    },
+    "baseline": {
+     "rms": 0.033041077012022954,
+     "max": 0.2043132781982422,
+     "top20_probability_max": 0.0005399274803227216,
+     "top1_matches_fp32": true
+    },
+    "tiled_attention": {
+     "rms": 0.03011213990267148,
+     "max": 0.15331554412841797,
+     "top20_probability_max": 0.0008724697088714484,
+     "top1_matches_fp32": true
+    }
+   },
+   {
+    "prompt_length": 56,
+    "fp32_top1": 23018,
+    "official_bf16": {
+     "rms": 0.030770128922654735,
+     "max": 0.15156316757202148,
+     "top20_probability_max": 0.00011187145229134797,
+     "top1_matches_fp32": true
+    },
+    "baseline": {
+     "rms": 0.045287599634868836,
+     "max": 0.17670154571533203,
+     "top20_probability_max": 0.0001921535216700132,
+     "top1_matches_fp32": true
+    },
+    "tiled_attention": {
+     "rms": 0.03500732000641,
+     "max": 0.19055402278900146,
+     "top20_probability_max": 7.536459951716363e-05,
+     "top1_matches_fp32": true
+    }
+   },
+   {
+    "prompt_length": 60,
+    "fp32_top1": 23018,
+    "official_bf16": {
+     "rms": 0.03269374260168729,
+     "max": 0.18070220947265625,
+     "top20_probability_max": 0.0003918909117336389,
+     "top1_matches_fp32": true
+    },
+    "baseline": {
+     "rms": 0.04380859175551235,
+     "max": 0.17037725448608398,
+     "top20_probability_max": 0.00010506906210931092,
+     "top1_matches_fp32": true
+    },
+    "tiled_attention": {
+     "rms": 0.042795764416603606,
+     "max": 0.19571471214294434,
+     "top20_probability_max": 0.00010526871194356958,
+     "top1_matches_fp32": true
+    }
+   },
+   {
+    "prompt_length": 64,
+    "fp32_top1": 23018,
+    "official_bf16": {
+     "rms": 0.043858222394534636,
+     "max": 0.17912554740905762,
+     "top20_probability_max": 0.0007770456931190939,
+     "top1_matches_fp32": true
+    },
+    "baseline": {
+     "rms": 0.033912832150465644,
+     "max": 0.17676019668579102,
+     "top20_probability_max": 6.177931271444947e-05,
+     "top1_matches_fp32": true
+    },
+    "tiled_attention": {
+     "rms": 0.034923334681959635,
+     "max": 0.19501233100891113,
+     "top20_probability_max": 0.0005733931118793167,
+     "top1_matches_fp32": true
+    }
+   },
+   {
+    "prompt_length": 68,
+    "fp32_top1": 23018,
+    "official_bf16": {
+     "rms": 0.03327854633896781,
+     "max": 0.19359242916107178,
+     "top20_probability_max": 0.00017002240258989776,
+     "top1_matches_fp32": true
+    },
+    "baseline": {
+     "rms": 0.052187463677182445,
+     "max": 0.22980403900146484,
+     "top20_probability_max": 0.00020824351949377817,
+     "top1_matches_fp32": true
+    },
+    "tiled_attention": {
+     "rms": 0.04204762855160615,
+     "max": 0.2206680178642273,
+     "top20_probability_max": 0.0002991654694334267,
+     "top1_matches_fp32": true
+    }
+   },
+   {
+    "prompt_length": 72,
+    "fp32_top1": 23018,
+    "official_bf16": {
+     "rms": 0.05194892418742913,
+     "max": 0.25265586376190186,
+     "top20_probability_max": 0.00010786254491271566,
+     "top1_matches_fp32": true
+    },
+    "baseline": {
+     "rms": 0.036663238489017376,
+     "max": 0.23136691749095917,
+     "top20_probability_max": 0.00014089190166344245,
+     "top1_matches_fp32": true
+    },
+    "tiled_attention": {
+     "rms": 0.036142674450218217,
+     "max": 0.17760801315307617,
+     "top20_probability_max": 0.00033487588220881825,
+     "top1_matches_fp32": true
+    }
+   },
+   {
+    "prompt_length": 76,
+    "fp32_top1": 23018,
+    "official_bf16": {
+     "rms": 0.04155062043098694,
+     "max": 0.2230692207813263,
+     "top20_probability_max": 0.00013393631954561336,
+     "top1_matches_fp32": true
+    },
+    "baseline": {
+     "rms": 0.03189733378649612,
+     "max": 0.17526674270629883,
+     "top20_probability_max": 0.0001938512462887898,
+     "top1_matches_fp32": true
+    },
+    "tiled_attention": {
+     "rms": 0.035089205533822866,
+     "max": 0.18467950820922852,
+     "top20_probability_max": 0.00019827994413113004,
+     "top1_matches_fp32": true
+    }
+   },
+   {
+    "prompt_length": 80,
+    "fp32_top1": 23018,
+    "official_bf16": {
+     "rms": 0.041043408311579196,
+     "max": 0.19153368473052979,
+     "top20_probability_max": 0.00016857156344007862,
+     "top1_matches_fp32": true
+    },
+    "baseline": {
+     "rms": 0.033329789719621236,
+     "max": 0.1611614227294922,
+     "top20_probability_max": 0.00015246758939657656,
+     "top1_matches_fp32": true
+    },
+    "tiled_attention": {
+     "rms": 0.04777225846599014,
+     "max": 0.19099998474121094,
+     "top20_probability_max": 0.00019945526915421397,
+     "top1_matches_fp32": true
+    }
+   },
+   {
+    "prompt_length": 84,
+    "fp32_top1": 23018,
+    "official_bf16": {
+     "rms": 0.03665466164203777,
+     "max": 0.21520519256591797,
+     "top20_probability_max": 0.0002861158266269648,
+     "top1_matches_fp32": true
+    },
+    "baseline": {
+     "rms": 0.036601492706390355,
+     "max": 0.19108664989471436,
+     "top20_probability_max": 0.00026785863334843896,
+     "top1_matches_fp32": true
+    },
+    "tiled_attention": {
+     "rms": 0.03322934691436011,
+     "max": 0.1823410987854004,
+     "top20_probability_max": 0.000115461321217869,
+     "top1_matches_fp32": true
+    }
+   },
+   {
+    "prompt_length": 88,
+    "fp32_top1": 23018,
+    "official_bf16": {
+     "rms": 0.039216420446088966,
+     "max": 0.22095680236816406,
+     "top20_probability_max": 5.7472444053074945e-05,
+     "top1_matches_fp32": true
+    },
+    "baseline": {
+     "rms": 0.044303234489248014,
+     "max": 0.24634921550750732,
+     "top20_probability_max": 0.0004073445375285534,
+     "top1_matches_fp32": true
+    },
+    "tiled_attention": {
+     "rms": 0.03784907138207381,
+     "max": 0.1904163360595703,
+     "top20_probability_max": 0.00015790628452738709,
+     "top1_matches_fp32": true
+    }
+   },
+   {
+    "prompt_length": 92,
+    "fp32_top1": 23018,
+    "official_bf16": {
+     "rms": 0.02957815231971923,
+     "max": 0.1651597023010254,
+     "top20_probability_max": 0.00025952225668135487,
+     "top1_matches_fp32": true
+    },
+    "baseline": {
+     "rms": 0.056984911259793394,
+     "max": 0.21957707405090332,
+     "top20_probability_max": 2.1944074520694606e-05,
+     "top1_matches_fp32": true
+    },
+    "tiled_attention": {
+     "rms": 0.04507530186526227,
+     "max": 0.2137523889541626,
+     "top20_probability_max": 2.2105992155794878e-05,
+     "top1_matches_fp32": true
+    }
+   },
+   {
+    "prompt_length": 96,
+    "fp32_top1": 23018,
+    "official_bf16": {
+     "rms": 0.04215044747420486,
+     "max": 0.2117934226989746,
+     "top20_probability_max": 4.5188616786033206e-05,
+     "top1_matches_fp32": true
+    },
+    "baseline": {
+     "rms": 0.040645146474558816,
+     "max": 0.18277287483215332,
+     "top20_probability_max": 0.00042819003566152425,
+     "top1_matches_fp32": true
+    },
+    "tiled_attention": {
+     "rms": 0.04367835243002802,
+     "max": 0.18214869499206543,
+     "top20_probability_max": 0.0006100215474373893,
+     "top1_matches_fp32": true
+    }
+   },
+   {
+    "prompt_length": 100,
+    "fp32_top1": 23018,
+    "official_bf16": {
+     "rms": 0.050008337081004724,
+     "max": 0.18951702117919922,
+     "top20_probability_max": 0.00019690380337478164,
+     "top1_matches_fp32": true
+    },
+    "baseline": {
+     "rms": 0.029700930143676234,
+     "max": 0.15193645656108856,
+     "top20_probability_max": 0.0001592931691535293,
+     "top1_matches_fp32": true
+    },
+    "tiled_attention": {
+     "rms": 0.04021727253017334,
+     "max": 0.2136911153793335,
+     "top20_probability_max": 6.258407985093584e-05,
+     "top1_matches_fp32": true
+    }
+   },
+   {
+    "prompt_length": 104,
+    "fp32_top1": 23018,
+    "official_bf16": {
+     "rms": 0.07571420260578858,
+     "max": 0.27094125747680664,
+     "top20_probability_max": 0.00044130888416471503,
+     "top1_matches_fp32": true
+    },
+    "baseline": {
+     "rms": 0.04236098431320027,
+     "max": 0.1941680908203125,
+     "top20_probability_max": 0.00019166469287901222,
+     "top1_matches_fp32": true
+    },
+    "tiled_attention": {
+     "rms": 0.031211861609196014,
+     "max": 0.16148138046264648,
+     "top20_probability_max": 7.588719296025559e-05,
+     "top1_matches_fp32": true
+    }
+   },
+   {
+    "prompt_length": 108,
+    "fp32_top1": 23018,
+    "official_bf16": {
+     "rms": 0.043819194999991935,
+     "max": 0.18938517570495605,
+     "top20_probability_max": 0.0002837446010606204,
+     "top1_matches_fp32": true
+    },
+    "baseline": {
+     "rms": 0.03155986560035978,
+     "max": 0.16353273391723633,
+     "top20_probability_max": 0.00018781796542688411,
+     "top1_matches_fp32": true
+    },
+    "tiled_attention": {
+     "rms": 0.040019718693838136,
+     "max": 0.18419241905212402,
+     "top20_probability_max": 0.00013844999007317504,
+     "top1_matches_fp32": true
+    }
+   },
+   {
+    "prompt_length": 112,
+    "fp32_top1": 23018,
+    "official_bf16": {
+     "rms": 0.03428625608019581,
+     "max": 0.17277026176452637,
+     "top20_probability_max": 0.0001444165063861913,
+     "top1_matches_fp32": true
+    },
+    "baseline": {
+     "rms": 0.06374090815621541,
+     "max": 0.2557234764099121,
+     "top20_probability_max": 0.0002899818195412074,
+     "top1_matches_fp32": true
+    },
+    "tiled_attention": {
+     "rms": 0.04678385551085235,
+     "max": 0.21122074127197266,
+     "top20_probability_max": 0.00024220497742977187,
+     "top1_matches_fp32": true
+    }
+   },
+   {
+    "prompt_length": 116,
+    "fp32_top1": 23018,
+    "official_bf16": {
+     "rms": 0.060949252483137054,
+     "max": 0.20413434505462646,
+     "top20_probability_max": 0.00042304447876484463,
+     "top1_matches_fp32": true
+    },
+    "baseline": {
+     "rms": 0.03002384240889594,
+     "max": 0.16187453269958496,
+     "top20_probability_max": 2.5467639321756605e-05,
+     "top1_matches_fp32": true
+    },
+    "tiled_attention": {
+     "rms": 0.043439848129088805,
+     "max": 0.1672534942626953,
+     "top20_probability_max": 0.0003947588513765199,
+     "top1_matches_fp32": true
+    }
+   },
+   {
+    "prompt_length": 120,
+    "fp32_top1": 23018,
+    "official_bf16": {
+     "rms": 0.039883908485483885,
+     "max": 0.18085312843322754,
+     "top20_probability_max": 0.00019398905356160512,
+     "top1_matches_fp32": true
+    },
+    "baseline": {
+     "rms": 0.026609757772176185,
+     "max": 0.1322917938232422,
+     "top20_probability_max": 0.00013383672083633336,
+     "top1_matches_fp32": true
+    },
+    "tiled_attention": {
+     "rms": 0.04213891972157278,
+     "max": 0.20961952209472656,
+     "top20_probability_max": 0.00027606862799056664,
+     "top1_matches_fp32": true
+    }
+   },
+   {
+    "prompt_length": 124,
+    "fp32_top1": 23018,
+    "official_bf16": {
+     "rms": 0.04399379430600178,
+     "max": 0.21927547454833984,
+     "top20_probability_max": 4.0531737626569046e-05,
+     "top1_matches_fp32": true
+    },
+    "baseline": {
+     "rms": 0.06424048430047624,
+     "max": 0.23638343811035156,
+     "top20_probability_max": 0.00042425674144919157,
+     "top1_matches_fp32": true
+    },
+    "tiled_attention": {
+     "rms": 0.03541221008371638,
+     "max": 0.18622106313705444,
+     "top20_probability_max": 6.664678056833573e-05,
+     "top1_matches_fp32": true
+    }
+   },
+   {
+    "prompt_length": 128,
+    "fp32_top1": 23018,
+    "official_bf16": {
+     "rms": 0.031214103195262688,
+     "max": 0.19215011596679688,
+     "top20_probability_max": 3.2107429089545114e-05,
+     "top1_matches_fp32": true
+    },
+    "baseline": {
+     "rms": 0.04901861875813257,
+     "max": 0.2050304412841797,
+     "top20_probability_max": 0.00014394107004278567,
+     "top1_matches_fp32": true
+    },
+    "tiled_attention": {
+     "rms": 0.05813316250926237,
+     "max": 0.22626113891601562,
+     "top20_probability_max": 0.00028596345265041734,
+     "top1_matches_fp32": true
+    }
+   }
+  ],
+  "files_sha256": {
+   "fp32-rows.npy": "76811be2332d5f2f59a8e180884f7234f942443d9a2002d722e87e7b4123db41",
+   "mlx-rows.npy": "a69dff01c633ba000c01605f231f00ccd5fea0456a797ed7433d72bfb6fdb4c2",
+   "baseline_32.bf16": "3aada3fc898b2f6f14164596b7facc30233b5af48e450f9e2f183ec71b03eceb",
+   "attn_32.bf16": "53ba286650d5700eaf0667e24077211369c63d6460f2e09fa805e891a8e30196",
+   "baseline_36.bf16": "d8e3e5521de14146abcd84327c805826960912292a18db1ab6fae3a3ba0c5465",
+   "attn_36.bf16": "6a13deb966f666c8b00c7335d48a93197d6e9f7e4878df7dbe33815dc33ddd28",
+   "baseline_40.bf16": "ed174bb245177f60da5196fb39f287a242bd3f9e4212dc553dc6136b5cb74126",
+   "attn_40.bf16": "597b7282f6ee1b024810f9d8c0d055fa04e5ecb7099a2a57943b9f65b68a555a",
+   "baseline_44.bf16": "8fe8ad0ffdd33e21bcbe769af750d1b85c848be70fa4359e4507585c1f3d2478",
+   "attn_44.bf16": "c6333314b89b6c2179468a618c9c4d41fce516f6c3f95dc8789528926e701e2f",
+   "baseline_48.bf16": "143888684fe5b8d9fe57489baa69b0be5344892fbcfa7587d2dc6163359088e2",
+   "attn_48.bf16": "b99d9ada3000a5cec7591e7b877558e0ec5e4f0d02fe5628b9f4d7cbc56d22d8",
+   "baseline_52.bf16": "4e040bd16748202082515c4ca8db11f71c7606e4df13106408ba8f9e50905a34",
+   "attn_52.bf16": "458ef524b890591efc2f3be20cd898ca009f99a920ec205017e834a663bb042f",
+   "baseline_56.bf16": "eeaf9173e8e05dca1baa2998532e9ee40d3623e53483695794e5b54e7a833681",
+   "attn_56.bf16": "41c525e26265bea13e1ccbe00bd02987e23af4ce0a499d02bfd20d22f3ff63b6",
+   "baseline_60.bf16": "71c001320cfe02472a3916736a543591bbe3c6340fb13275ffe8b813643c091f",
+   "attn_60.bf16": "a92bfb8944b39a74b9d5c3671e3bd0a14115deb7b56745178b0131d9930f9ad7",
+   "baseline_64.bf16": "7cd41af4f49f0f56bb72d533163c3a028464ee74d5cbfeca99a9881700c4fcf0",
+   "attn_64.bf16": "9844fbb8298d44821bb18884a763a0313dae821bed684b72ba36ac04af2eced0",
+   "baseline_68.bf16": "4f2dc6f0727357b965f4f84d3755359a92463464f85aaa4c3fd1f026597b5c58",
+   "attn_68.bf16": "5f1ced4ce5256d13b2c65e10552b134ced164ab5abbe7970657049c28740be31",
+   "baseline_72.bf16": "e293b3b2b2538985950d79b8c5991b98301ed798aa902635e8c6dc6f1b89a449",
+   "attn_72.bf16": "7eff39ddb176236ab6b50e0f9ff6570ddbe7ce9fd781b579f9b3e66fef9014c5",
+   "baseline_76.bf16": "0af4f6961dc48ff59fa654cb001d2ce4e3b44dd8f28db90c8db77005ef22c9a8",
+   "attn_76.bf16": "21b13555ed6c0add739091d5c2fa11932a9fc0a9dcb0b898e4d68cac3579309c",
+   "baseline_80.bf16": "20729353bd61699f9969261de63052825a6393917f09fdaf334fabcb45f8deb4",
+   "attn_80.bf16": "3e784cb15dafe93e21c31038dcc6d9bc83a5fa8571de14562e3a919dca677ac6",
+   "baseline_84.bf16": "7d554732e26ecb639f186b2d91345d88c175b529b8118693174d21074d9d079c",
+   "attn_84.bf16": "66d314fb0f086acfe7d9c19c8417e61c8fd580d8c12fc19e7df70dd21a3c2eb0",
+   "baseline_88.bf16": "c33ab1061be13855b7c3eac60a2f0adc22a28d90be13f71863ea0953510f0cc6",
+   "attn_88.bf16": "aa349a706d298d2385078a040c7dc021b404c639a09c2b7b45631d585ce81749",
+   "baseline_92.bf16": "f30362bf695b83dad547abd05f0ddd9143536db1214d6a4146298f6c63874dc0",
+   "attn_92.bf16": "c2e72d19ea9aab958bce87c6ef425f14901b8160a8f0239cde5bbe2667d42e1c",
+   "baseline_96.bf16": "3ef5647b2ce8c2e9f7fd251dadf02ee2398671e670ca4cfa31ed623dbabc62fe",
+   "attn_96.bf16": "0d7d17055ed1a5c13cf86984764396880feff133959b917a8312a0086b4c583f",
+   "baseline_100.bf16": "2db15cf79128cdb3856c8ffed0900af13cf32952539a8aabf3ec049d61909af8",
+   "attn_100.bf16": "8584a9a0f596b56a35d31fe03000580b9a5dcefe38c136cde4f10411dbc67284",
+   "baseline_104.bf16": "c79f124fb79b10e169e89b0325890db78356f3ebf8d644dca0010e98ded910a8",
+   "attn_104.bf16": "3429d47e11a088ce8c840925a96046b2710ce2276065144fc384011084a1e7cd",
+   "baseline_108.bf16": "763f8f210019dd525f8a2375f84125a6e5b73e27cb4e2c8957e642d3f855857d",
+   "attn_108.bf16": "dc268e17c694af27ee58c182026674116b988425f20a120e91eb7ce66cdeb9df",
+   "baseline_112.bf16": "9e0b5d3c484124e3a02eaf00444b739f1453175eb4c8ff3e1fc0cda5a97b9259",
+   "attn_112.bf16": "c2094783bf8b600db7dffded18b5f7b35b59e7e3cee51424ac37db50ac82280b",
+   "baseline_116.bf16": "20de4919ac46688c97d89950722867e1b16d8dbaab30efcb99eeb4a6dc6f2f65",
+   "attn_116.bf16": "d21d393e07c0b068d612791cc2cd28e25148e7964bba7725838413bdd29ba9e4",
+   "baseline_120.bf16": "1c26e7ca166c69529d1aea3b0699a91a2245a4363a6e491660841985d8397da8",
+   "attn_120.bf16": "66528d4375f33df8f2437097132b15503f475d1f1ea43e6272508b2ec76a5c7f",
+   "baseline_124.bf16": "d530bc7c6f2b063bf0e22e2b9e850f28a8d4f1bb3e917e674cc80dab3c2f4e97",
+   "attn_124.bf16": "586c8a86def2ab90fcebdfac3a102f6224507bee2d4e4953e14047a6c5b5e93f",
+   "baseline_128.bf16": "f0067bcabfa213f6f46e87d0e5855ddc22a9560126d72bfd6d451025157d3390",
+   "attn_128.bf16": "3dd80ef6916a8140bf85e18194fef5a4717e9b4d9f9a36d55afde288e796c8ab"
+  },
+  "method": "FP32 and official MLX BF16 (0.32.4) rows were produced once for the 144-token sequence with --rows 31..127; native used tokens[:N] with prompt:N for N in 32..128 step 4 (25 prompt lengths) for baseline and --tiled-attention. tools/lfm3/prompt_row_sweep.py.",
+  "finding": "Across 25 boundary rows baseline, tiled attention and official BF16 have indistinguishable mean distance to FP32 (mean RMS 0.0390 / 0.0389 / 0.0402; mean max 0.185 / 0.186 / 0.196; mean top-20 probability max 3.9e-4 / 4.1e-4 / 4.7e-4). Tiled attention RMS exceeded official BF16 in 11/25 rows; baseline in 9/25. No top-1 miss in any route. The N=128 single-row failure is within the per-row spread (official BF16 per-row RMS ranges 0.0296-0.0757). Rows come from one sequence and are correlated, so this is not independent-prompt evidence."
+ },
+ "not_established": [
+  "arbitrary-prompt fidelity",
+  "TEXT8/VL/image-row fidelity",
+  "a metric that is statistically meaningful on one boundary row",
+  "that the single-row N=128 diagnostic failure is acceptable under the maintainer criterion"
+ ]
+}

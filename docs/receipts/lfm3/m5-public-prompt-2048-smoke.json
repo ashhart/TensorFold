@@ -1,0 +1,60 @@
+{
+  "scope": "M5 public developer2048 prompttail cold2k8k basic smoke, not paired timing or broad qualification",
+  "binary_sha256": "46a9b73c763b4c94957332f4d8099098d4883b9a00486b5b4f1fd9121a6faec6",
+  "build_options": {
+    "cpu": "apple_m1",
+    "lfm3-residual-ffn": true,
+    "lfm3-tiled-attention": true,
+    "lfm3-prompt-rows": 2048
+  },
+  "source_pins_sha256": "3178db24cfda2bb950df4f8c25cfdd2efbd219c31573e4b0bcc860ee6785e95c",
+  "packet_pins_sha256": "e2b77edcda4b017b75146ed70ee8dd480264d1059d1f1adf00cae74be54a7b8a",
+  "cases": [
+    {
+      "prompt_tokens": 2048,
+      "completion_tokens": 16,
+      "cached_tokens": 0,
+      "ttft_s": 0.47450420912355185,
+      "output_sha256": "a9f963e9ea3381adb9633cbe50e9c3e84ba88e0f646c6280583320a8097c1da9",
+      "request_body_sha256": "bb5a87e435a323373c42953ab2e62d1b483f9f30c502cf8102ead10409525b27"
+    },
+    {
+      "prompt_tokens": 8192,
+      "completion_tokens": 16,
+      "cached_tokens": 0,
+      "ttft_s": 2.0480394582264125,
+      "output_sha256": "e2476773ac8616580547ee0cb0ea44121f776b7988e7eba184743b0d51441349",
+      "request_body_sha256": "1df0a7343db5cb48b65f713a1410e84f5b48748d7e09bf32686bacc3e4bbb5e0"
+    }
+  ],
+  "exact_private_candidate_text_digest_match": true,
+  "exact_tokenize_prompt_arrays": true,
+  "clients_exit_zero": 2,
+  "servers_exit_zero": 1,
+  "lock_released": true,
+  "limitations": [
+    "Single public observation each; paired private timing is a separate receipt.",
+    "Served text hashes, not emitted token arrays. Actual route counters belong to the separate instrumented private test.",
+    "Broad small-row nonfinite/guards/FP32-envelope checks, image/otherwidth/backend and warm/concurrent behavior remain unqualified."
+  ],
+  "raw_sha256": {
+    "text-4-0-candidate.cold-8192.json": "2fdb0281e43bc4eafc1ead58e1d52ac3770ed4d918e7532658fd09f925704d2a",
+    "text-4-0-candidate.cold-2048.json": "32fc44aae208b7c78005db6f088caeefc8194cbc9121af905d5e7c8688957aa5",
+    "text-4-0-candidate.cold-8192.tokenize.request.json": "c196be253a6a7f7928e3f427e0faad10300dc3216279a3ae8a80a9cd46f77dab",
+    "events.json": "d085a99fae0ca7540aaad6ae5d99da0abc079f08db2589cd5fc8dd5adbded39b",
+    "text-4-0-candidate.before.metrics": "06316272b58bbb868efb7e9a96a582ede9a79af90cb1dd23749ed0606a1388cd",
+    "text-4-0-candidate.cold-8192.client.log": "935621011f68b40d88aa6b1fb5a4b951ca6396733192e6cfa7f2f2d3254997fe",
+    "text-4-0-candidate.cold-2048.tokenize.response.json": "7f59448440e4d3f003e40ef5773b12b7ef17c6808bc21ea16cb1bf3807ad06f6",
+    "text-4-0-candidate.cold-2048.tokenize.request.json": "f69a5dcb97950c19f12fd93b89b288ec0dd214a89ed83fbe5fb1e60270f6dabd",
+    "text-4-0-candidate.cold-8192.tokenize.response.json": "1e924ba32cf41b050291eaf02707b996b9f656171f816c15c24c7045a92600ee",
+    "text-4-0-candidate.after.metrics": "22f1e5284665e6aa70705a5c4f38c35801674bc241e9b150d03b32b38ecabdbf",
+    "text-4-0-candidate.before.health": "e41f1fa5fa63b41398632c5ab9622e881079971c2bec31b6d54da709ab256599",
+    "manifest.json": "6ff7c6e74b3c4b4e91c80074cd7b63eb3b9ceedcc751b2170a75b23a81165801",
+    "text-4-0-candidate.before.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+    "records.json": "fa3f3757c105d561d373a1ec756476c211d19f88d5d96102de5bb4030c3e16da",
+    "text-4-0-candidate.server.log": "07240fa074f9a9440a0081d636e55919f3327bb3cebfbebab122995bed312b78",
+    "text-4-0-candidate.cold-2048.client.log": "9528d3490ed52cf7ef53829c1e908a54c713b310c11f94982083f74fde1f9f43",
+    "text-4-0-candidate.after.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+    "text-4-0-candidate.after.health": "e5ed9dc37687f2fa719289587b3f79491c67bd34a80fb5e19bdd5e3bb8a10b06"
+  }
+}

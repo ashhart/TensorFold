@@ -1,0 +1,122 @@
+{
+  "scope": "Source-free ledger of rejected standalone public-arithmetic FFN weight-reuse experiments. No production default change.",
+  "fixture": {
+    "checkpoint": "LiquidAI/LFM3-1.7B-MLX-4bit",
+    "operation": "FFN gate",
+    "rows": 64,
+    "k": 2048,
+    "tested_columns": 2048,
+    "full_columns": 7680,
+    "column_start": 0
+  },
+  "variants": {
+    "cached4": "Four rows, decode fourcolumns into64floatlane cache before originalpairouterloop; preserves oneactivationloadperpair.",
+    "cached8": "Same decodedlane cache across eightrows.",
+    "triples": "Existing public three-row BF16-storage helper with original two/one-rowtails.",
+    "shared-pairs-float-LDS": "Four SIMDgroups each retain2rows/4cols; share decodedFP32codes and duplicatedcoefficients via9216byteLDS, two barriers/K512.",
+    "compact-transposed-LDS": "Same2rows/SG,128threads4SG, ushortcodes[col][element][lane] and pergroupBF16coefficients;4352byteLDSvs9216; same2barriers/K512. No measured hardwarebankstall attribution."
+  },
+  "gates": "Cached4/8 and triples:25case byteidentity screens including GS32/64 bits4/6/8 tails/NF, actualslice everycolumnFP64no-worse and plantednegativecontrols. Shared-pairs: bounded actualslice canonical/FP64gate. These are not full66 or full-model qualifications. CompactLDS:14case screen actual64+derived65tail and6format9rowfinite/NF, everyactualcolumnFP64no-worse, two plantedcontrols.",
+  "cost_protocol": {
+    "balanced_rounds": 5,
+    "legs": 20,
+    "min_calibration_seconds": 0.025,
+    "min_sample_seconds": 0.02,
+    "max_sample_seconds": 1,
+    "baseline_drift_and_spread_limit": 0.05,
+    "same_output_and_guards_every_leg": true,
+    "no_hidden_retries": true
+  },
+  "results": [
+    {
+      "device": "Apple M4",
+      "variant": "cached4",
+      "baseline_seconds_per_op": 0.0002635113924043253,
+      "candidate_seconds_per_op": 0.00033853125205496326,
+      "median_candidate_over_public_throughput": 0.7777216816172479,
+      "stable": true,
+      "baseline_first_last_drift": 0.00020938915523638357,
+      "analysis_sha256": "fac52715a1f5af9211fde42ac13e0e1dac02875ed5f8883f8da56e35257dfd31",
+      "full_output_matches_frozen_canonical": true
+    },
+    {
+      "device": "Apple M4",
+      "variant": "cached8",
+      "baseline_seconds_per_op": 0.00026354947658546735,
+      "candidate_seconds_per_op": 0.00031502587989962194,
+      "median_candidate_over_public_throughput": 0.8364290055429738,
+      "stable": true,
+      "baseline_first_last_drift": 0.00010066294419197597,
+      "analysis_sha256": "68f6d3a3b76010080590266b369c26bd879e5c6cf4ce7b0cda4468b464a6b5e3",
+      "full_output_matches_frozen_canonical": true
+    },
+    {
+      "device": "Apple M5",
+      "variant": "cached4",
+      "baseline_seconds_per_op": 6.72171222504403e-05,
+      "candidate_seconds_per_op": 0.00010990905730068334,
+      "median_candidate_over_public_throughput": 0.6113964318541105,
+      "stable": true,
+      "baseline_first_last_drift": -0.00010351041271328132,
+      "analysis_sha256": "e04c8bdbffaff2bdf3d162a9b5a9f49e7001c7c1802e5a903b60c9e50c6eef34",
+      "full_output_matches_frozen_canonical": true
+    },
+    {
+      "device": "Apple M5",
+      "variant": "cached8",
+      "baseline_seconds_per_op": 6.725671346430317e-05,
+      "candidate_seconds_per_op": 0.00011073811811002088,
+      "median_candidate_over_public_throughput": 0.6071178337837835,
+      "stable": true,
+      "baseline_first_last_drift": -4.234749437015406e-05,
+      "analysis_sha256": "08030cd6a0072859a4f2b2bb0038f79ed20d6077ed5f9fb331f2c1e050293bca",
+      "full_output_matches_frozen_canonical": true
+    },
+    {
+      "device": "Apple M4",
+      "variant": "triples",
+      "baseline_seconds_per_op": 0.0002635327164171031,
+      "candidate_seconds_per_op": 0.0002824956045515137,
+      "median_candidate_over_public_throughput": 0.9311926863223228,
+      "stable": true,
+      "baseline_first_last_drift": -0.0018862538425180597,
+      "analysis_sha256": "b684e7ab47319340e32193823afe501917af46b75e9de422859c0bcff1fcf2c1",
+      "full_output_matches_frozen_canonical": true
+    },
+    {
+      "device": "Apple M5",
+      "variant": "shared-pairs-float-LDS",
+      "baseline_seconds_per_op": 6.718225085933227e-05,
+      "candidate_seconds_per_op": 8.050610358623089e-05,
+      "median_candidate_over_public_throughput": 0.8345021465595635,
+      "stable": true,
+      "baseline_first_last_drift": 0.0001514320707756145,
+      "analysis_sha256": "eea69bcd98dc39c4d917eb955437027e252bf6408a48c042cfbf744c258937fd",
+      "full_output_matches_frozen_canonical": true
+    },
+    {
+      "device": "Apple M4",
+      "variant": "compact-transposed-LDS",
+      "baseline_seconds_per_op": 0.00026341683042119257,
+      "candidate_seconds_per_op": 0.00034259798121638596,
+      "median_candidate_over_public_throughput": 0.7688219515629374,
+      "stable": true,
+      "baseline_first_last_drift": -0.00029217137416359673,
+      "analysis_sha256": "16b418f778bd3b66dae4219f5b2b860e1cc018d13d84452177b8f1826b6d5ad1",
+      "full_output_matches_frozen_canonical": true
+    },
+    {
+      "device": "Apple M5",
+      "variant": "compact-transposed-LDS",
+      "baseline_seconds_per_op": 6.723702017552569e-05,
+      "candidate_seconds_per_op": 9.397123221788206e-05,
+      "median_candidate_over_public_throughput": 0.7155009673949159,
+      "stable": true,
+      "baseline_first_last_drift": -0.00010045612681630622,
+      "analysis_sha256": "b12ecc11ddfec20e7b88cff6a3133639c7bdde6c9680a7080fb95214859be5ab",
+      "full_output_matches_frozen_canonical": true
+    }
+  ],
+  "conclusion": "All listed variants are slower than their matched public row-pair baseline. Do not promote or extrapolate a gain from source-level weight reuse. No measured register-spill, cache-miss or LDS-bank-stall attribution is established.",
+  "pending": "M5 three-row timing not included. Stop nearby reuse tuning until new profiling evidence."
+}

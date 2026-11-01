@@ -1,0 +1,136 @@
+{
+  "date": "2026-10-30",
+  "status": "2k/8k checkpoint equivalence and isolated served TTFT improvement passed; remains default-off pending broader qualification",
+  "device": "Apple M5 Ultra",
+  "os": "macOS27.0 build26A428",
+  "backend": "Metal",
+  "source_commit": "de7cf96ed",
+  "checkpoint": {
+    "repository": "LiquidAI/LFM3-VL-2B-MLX-4bit",
+    "revision": "c823fade98e35a3d6942ad4d38b1ea15f675cd12",
+    "files_sha256": {
+      "model.safetensors": "58268dfdf441ae4020d2a52fc97a814645e8a9624946e2d490403d4dcd71a255",
+      "config.json": "0efb7708e0771e3e104ac628954cdc71070dd436e0b7974615bd1b9eb836f9d9",
+      "tokenizer.json": "a39eed58008cbcbc09e5b629b81338a654269c64cd13348aaa6090f4db75c7e7"
+    }
+  },
+  "scope": "Isolated fused attention with original prompt-head and projection behavior; text prompts through the VL4 checkpoint; no image or served timing claim",
+  "comparison": "One loaded model with only four attention pipelines changed between baseline macro0 and candidate macro1; all other model operations and weights identical",
+  "checks": [
+    "Full active KV bytes per head and convolution state after every prompt chunk",
+    "Complete last-row logits after every prompt chunk",
+    "Snapshot bytes at129 and257 tokens",
+    "Restore257-token snapshot and finish prompt with full state/logit comparison",
+    "16greedy decode tokens with full state/logit comparison after each token"
+  ],
+  "cases": [
+    {
+      "prompt_tokens": 2048,
+      "compared_prompt_chunks": 17,
+      "mark_snapshots_equal": 2,
+      "resumed_prefix": 257,
+      "resume_state_logits_equal": true,
+      "full_active_kv_conv_equal": true,
+      "full_logits_equal": true,
+      "decode_tokens": [
+        597,
+        8055,
+        509,
+        5901,
+        4116,
+        355,
+        267,
+        1286,
+        4160,
+        302,
+        278,
+        7126,
+        496,
+        73,
+        10,
+        10601
+      ],
+      "vision_rows": false,
+      "prompt_u32_npy_sha256": "82c7dac5126bf3f7bf789f2a7385214044ad7ace0d151c52935e139ad99bcf2b",
+      "result_sha256": "c478ff8b01fc09bd8ff940e838a3e60cab72fcaae008a21f2fd1527d655b4e9a",
+      "log_sha256": "52fc171b440729618ce26a4f89e0c0c9366f3bb6ae3b1f9e408e46f73e6b120a"
+    },
+    {
+      "prompt_tokens": 8192,
+      "compared_prompt_chunks": 65,
+      "mark_snapshots_equal": 2,
+      "resumed_prefix": 257,
+      "resume_state_logits_equal": true,
+      "full_active_kv_conv_equal": true,
+      "full_logits_equal": true,
+      "decode_tokens": [
+        597,
+        4695,
+        677,
+        4116,
+        267,
+        1442,
+        1286,
+        4160,
+        302,
+        496,
+        3862,
+        10,
+        8426,
+        20,
+        643,
+        7204
+      ],
+      "vision_rows": false,
+      "prompt_u32_npy_sha256": "b371a7a09adfed00451d2aeba2dc64f5851e7ee62136dddcd8f77e1e07673581",
+      "result_sha256": "fdb1dec6589d628cb277e464776fa417d9cf1b4987389a82cbf0b19c9e1b7813",
+      "log_sha256": "fbfbc76691049c0e915ffffb39d1217062b355959ac07a0e72b6cc1d707e36f5"
+    }
+  ],
+  "negative_control": {
+    "mutation": "Actual candidate Metal final attention stores write zero",
+    "exit_code": 1,
+    "required_error": "AttentionFusedByteMismatch",
+    "log_sha256": "ad9d7a7a025bfccf06104d2e48d5323f7d0ba2aa86039cc47cb71925b2311dd5"
+  },
+  "evidence": {
+    "manifest_sha256": "f23d7b9803b722f2456aff2c30ebc2840eb6c32b58e83652ada2cf0f55e0d4e2",
+    "probe_sha256": "1e4053893a30190b24e27c9dffba24f32ab98179c56059b27ee263a914e803ae",
+    "probe_source_sha256": "7d571c502e44eb75915b66b32018d7aac7ab0a231bad546dd0ac0b3888677cc2",
+    "baseline_shader_sha256": "760ea921822580f7973070fa915808570cbb27214017e5ebe14a5e844faedbfe",
+    "candidate_shader_sha256": "193a16770a6da1085fbde3247d26da7fa22a3ac4f0f937d9233ea0ffedfb11b3",
+    "stage_receipts_sha256": {
+      "smoke": "9e65e09d37c2e194afd7d03a56fa5a231ff65534b3a75a3916a461926a5049a5",
+      "positive": "145a3b965a80c578b73993fcce15758161bf301b7a85b5f991794abaa08dca82",
+      "controls": "6fa09e258a9436276ef7c764f56703deda9fd901445ccad9a74f4da8f77a1e0e"
+    }
+  },
+  "host_subset": {
+    "command": "zig build test-kernel-contract test-golden fuzz-cortheon -Dcpu=apple_m1 -Dlfm3-risk-fast=true",
+    "source_snapshot": "de7cf96ed plus a private qualifier target registration",
+    "exit_code": 0,
+    "golden": {
+      "equal": 322,
+      "total": 335,
+      "known_differences": 13,
+      "unexpected_differences": 0
+    },
+    "security_golden": {
+      "equal": 26,
+      "total": 26,
+      "unexpected_differences": 0
+    },
+    "log_sha256": "3e154251cc4ab661aa9cc158f2e87a5cccd389d469d68d3529741150febe5f07",
+    "scope": "Host contract, golden and Cortheon fuzz targets; not the full zig build test suite"
+  },
+  "remaining": [
+    "Fresh image-to-decoder inputs",
+    "Live cancellation and concurrent-stream baseline/candidate comparisons",
+    "Full host and device test suites",
+    "Other GPU generations and backends"
+  ],
+  "serving_receipt": "risk-fused-serving.json",
+  "width_image_receipt": "risk-fused-width-image.json",
+  "text_widths_receipt": "risk-fused-text-widths.json",
+  "m4_receipt": "risk-fused-m4.json"
+}

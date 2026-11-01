@@ -41,6 +41,17 @@ test "LFM3 prefill cancellation takes priority and no empty prefix is kept" {
     try std.testing.expectEqual(@as(usize, 0), p.yield_checks);
     try std.testing.expectEqual(@as(usize, 0), p.marked);
 }
+test "LFM3 stepped prefill checks cancellation without asking to yield" {
+    var p: Probe = .{ .yield_at = 0 };
+    var s = try make(&p, &.{ 1, 2, 3 });
+    defer s.deinit(std.testing.allocator);
+    p.stream = &s;
+    try control.cancelled(&s, 0);
+    try std.testing.expectEqual(@as(usize, 0), p.yield_checks);
+    p.cancel_at = 0;
+    try std.testing.expectError(error.Cancelled, control.cancelled(&s, 0));
+    try std.testing.expectEqual(@as(usize, 0), p.yield_checks);
+}
 test "LFM3 prefill background yield remains distinct from cancellation" {
     var p: Probe = .{ .yield_at = 0 };
     var s = try make(&p, &.{ 1, 2, 3 });
