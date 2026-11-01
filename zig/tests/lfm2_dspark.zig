@@ -143,6 +143,7 @@ fn steady(gpa: std.mem.Allocator, d: *q.dspark.Drafter, taps: mtl.Buffer, ids: [
     };
     try dr.absorb(&.{.{ .stream = &s, .features = feats.at(taps, 0, ctx, width), .start = 0, .follow = &.{} }});
     var counted = std.testing.FailingAllocator.init(gpa, .{});
+    defer d.gpa = gpa;
     var anchor: u64 = ctx;
     const rounds = 24;
     const warm = 4;
@@ -162,10 +163,119 @@ fn steady(gpa: std.mem.Allocator, d: *q.dspark.Drafter, taps: mtl.Buffer, ids: [
         try dr.absorb(&.{.{ .stream = &s, .features = feats.at(taps, at, rows, width), .start = anchor, .follow = &.{}, .prompt = false }});
         anchor += rows;
     }
-    d.gpa = gpa;
     const n = rounds - warm;
     std.debug.print("steady rounds: {d} rounds of hold, chances, held and a verified absorb: {d} host allocations, {d} resizes, {d} unwaited holds\n", .{ n, counted.allocations, counted.resize_index, d.signalled - holds });
     if (counted.allocations != 0 or counted.resize_index != 0 or d.signalled - holds != n) return error.SteadyRoundsAllocate;
+}
+
+/// Replay owned context after long zero-grant stretches, tap overwrites and a rewind inside the pending tail.
+fn deferred(gpa: std.mem.Allocator, d: *q.dspark.Drafter, taps: mtl.Buffer, ids: []const u32, ctx: usize) !void {
+    const skip = q.dspark.stage_rows + 33;
+    const anchor = ctx + skip;
+    const width = d.tapBytes();
+    const shared = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
+    const history = try d.target.device.buffer(anchor * width, shared);
+    defer history.deinit();
+    @memcpy(history.contents()[0 .. ctx * width], taps.contents()[0 .. ctx * width]);
+    const source = try d.target.device.buffer(width, shared);
+    defer source.deinit();
+    const reference = try d.newLane(anchor + 64);
+    defer d.dropLane(reference);
+    var s = try tf.lanes.Stream.init(gpa, .{ .id = "deferred", .prompt = ids[0 .. ctx + 1], .max_new = skip + 64 });
+    defer s.deinit(gpa);
+    const dr = d.drafter();
+    try dr.open(&s);
+    defer dr.release(&s);
+    const live = d.lanes.get(&s).?;
+    try dr.absorb(&.{.{ .stream = &s, .features = .{ .buffer = @intFromPtr(taps.id), .rows = @intCast(ctx), .row_bytes = @intCast(width), .space = .device, .dtype = .bf16 }, .start = 0, .follow = &.{}, .propose = false }});
+    var at: usize = 0;
+    while (at < live.end) {
+        const n = @min(q.dspark.absorb_rows, live.end - at);
+        try absorb(d, .{ .lane = reference, .src = .{ .buf = history, .off = at * width }, .rows = n, .p0 = at });
+        at += n;
+    }
+    var rewound: usize = 0;
+    for (0..2) |phase| {
+        const count: usize = if (phase == 0) skip else @min(29, @as(usize, live.staged));
+        const first = if (phase == 0) ctx else anchor - count;
+        if (phase == 1) rewound = count;
+        for (0..count) |i| {
+            const pos = first + i;
+            const row = ((phase * skip + i) * 71 + 17) % ctx;
+            @memcpy(source.contents()[0..width], (taps.contents() + row * width)[0..width]);
+            @memcpy((history.contents() + pos * width)[0..width], source.contents()[0..width]);
+            const before = live.end;
+            const staged = live.staged;
+            try dr.absorb(&.{.{ .stream = &s, .features = .{ .buffer = @intFromPtr(source.id), .rows = 1, .row_bytes = @intCast(width), .space = .device, .dtype = .bf16 }, .start = pos, .follow = &.{}, .prompt = false, .propose = false }});
+            @memset(source.slice(u16, width / 2), 0x7fc0); // the target's next forward overwrites borrowed taps
+            if (live.end != before) {
+                // Match projection batches, not source storage: the oracle reads the immutable complete history.
+                if (staged > 0) try absorb(d, .{ .lane = reference, .src = .{ .buf = history, .off = before * width }, .rows = staged, .p0 = before });
+                try absorb(d, .{ .lane = reference, .src = .{ .buf = history, .off = pos * width }, .rows = 1, .p0 = pos });
+            }
+        }
+    }
+    if (live.staged > 0) try absorb(d, .{ .lane = reference, .src = .{ .buf = history, .off = live.end * width }, .rows = live.staged, .p0 = live.end });
+    reference.end = anchor;
+    _ = try q.dspark_block.hold(d, &.{.{ .lane = reference, .pending = ids[ctx], .anchor = anchor, .depth = 3 }}, null);
+    const want = reference.held[0..3].*;
+    try dr.hold(&.{.{ .stream = &s, .pending = ids[ctx], .position = anchor + 1, .depth = 3 }});
+    var got: [3]u32 = undefined;
+    try dr.held(&.{&s}, &.{&got});
+    if (!std.mem.eql(u32, &want, &got)) return error.DeferredDraftMismatch;
+    const bytes = anchor * c.head_dim * 2;
+    for (0..d.config.layers) |layer| for ([_]bool{ false, true }) |values| for (0..c.kv_heads) |head| {
+        const actual = live.kv(layer, values);
+        const expected = reference.kv(layer, values);
+        const a = (live.mem.contents() + actual.off + head * live.cap * c.head_dim * 2)[0..bytes];
+        const b = (reference.mem.contents() + expected.off + head * reference.cap * c.head_dim * 2)[0..bytes];
+        if (!std.mem.eql(u8, a, b)) return error.DeferredContextMismatch;
+    };
+    std.debug.print("deferred context: {d} zero-grant rows, {d} overwritten pending rows, {d} complete context rows and 3 later drafts match the independent replay\n", .{ skip, rewound, anchor });
+}
+
+/// Untapped target outputs versus capture/restore, including duplicate final taps and every admitted column.
+fn targetTaps(gpa: std.mem.Allocator, m: *q.Model, scratch: *st.Scratch, ids: []const u32) !void {
+    const original = scratch.taps.?;
+    defer scratch.taps = original;
+    for ([_]usize{ 1, 4, 16, ids.len }, 0..) |n, shape| {
+        if (n > ids.len or (shape == 3 and (n == 1 or n == 4 or n == 16))) continue;
+        scratch.taps = null;
+        var plain = try st.Cache.init(gpa, m.device, &m.config.attention, n + 16);
+        defer plain.deinit();
+        const record = n <= st.batch_rows;
+        try q.forward.run(m, scratch, &.{.{ .cache = &plain, .rows = n }}, ids[0..n], record, .last);
+        const x = try gpa.dupe(u8, scratch.x.contents()[0 .. n * c.hidden * 2]);
+        defer gpa.free(x);
+        const logits = try gpa.dupe(u8, scratch.logits.contents()[0 .. c.vocab * 2]);
+        defer gpa.free(logits);
+        for (0..3) |layout| {
+            var taps = original;
+            if (layout == 1) {
+                taps.count = 3;
+                taps.layers[0..3].* = .{ 0, c.layers - 1, c.layers - 1 };
+            } else if (layout == 2) {
+                taps.count = st.max_taps;
+                for (0..st.max_taps) |i| taps.layers[i] = @intCast(if (i >= st.max_taps - 2) c.layers - 1 else i);
+            }
+            taps.buf = try m.device.buffer(n * taps.count * c.hidden * 2, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+            defer {
+                scratch.taps = null;
+                taps.buf.deinit();
+            }
+            scratch.taps = taps;
+            var captured = try st.Cache.init(gpa, m.device, &m.config.attention, n + 16);
+            defer captured.deinit();
+            try q.forward.run(m, scratch, &.{.{ .cache = &captured, .rows = n }}, ids[0..n], record, .last);
+            if (!std.mem.eql(u8, x, scratch.x.contents()[0..x.len]) or !std.mem.eql(u8, logits, scratch.logits.contents()[0..logits.len])) return error.TargetTapOutputMismatch;
+            const data = taps.buf.slice(u16, n * taps.count * c.hidden);
+            for (taps.layers[0..taps.count], 0..) |layer, i| for (taps.layers[0..i], 0..) |other, j| {
+                if (layer != other) continue;
+                for (0..n) |row| if (!std.mem.eql(u16, data[(row * taps.count + i) * c.hidden ..][0..c.hidden], data[(row * taps.count + j) * c.hidden ..][0..c.hidden])) return error.RepeatedTapMismatch;
+            };
+        }
+        std.debug.print("target taps: {d} rows, released/duplicate/max-column layouts preserve all normalized and logit bytes\n", .{n});
+    }
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -178,7 +288,7 @@ pub fn main(init: std.process.Init) !void {
     defer pool.pop();
     const m = try q.Model.load(gpa, init.io, args[1]);
     defer m.deinit();
-    const d = try q.dspark.Drafter.init(gpa, init.io, m, args[2], .{ .capacity = length + 64, .bits = bits });
+    const d = try q.dspark.Drafter.init(gpa, init.io, m, args[2], .{ .capacity = length + q.dspark.stage_rows + 512, .bits = bits });
     defer d.deinit();
     const cfg = d.config;
     // the compared block's rows (a hold of depth d runs a d-row block)
@@ -195,6 +305,7 @@ pub fn main(init: std.process.Init) !void {
     const ids = try gpa.alloc(u32, length);
     defer gpa.free(ids);
     for (ids, 0..) |*id, i| id.* = @intCast((i * 7919 + 13) % 120000);
+    try targetTaps(gpa, m, &scratch, ids);
     try q.forward.run(m, &scratch, &.{.{ .cache = &cache, .rows = length }}, ids, false, .last);
     // Repeated target layers are legal: every requested column must receive the same hidden row.
     const tapped = taps.buf.slice(u16, length * width);
@@ -273,6 +384,7 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("hold of {d} streams at depth {d}: {d:.2} ms, GPU {d:.2} ms (best of 5)\n", .{ streams, depth, best, gpu_best });
     };
     try steady(gpa, d, taps.buf, ids, ctx);
+    try deferred(gpa, d, taps.buf, ids, ctx);
     _ = try q.dspark_block.hold(d, &.{.{ .lane = lane, .pending = ids[ctx], .anchor = ctx, .depth = block }}, null);
     // the host reference, fp32 throughout
     var r: Ref = .{ .gpa = gpa, .check = ck.Checkpoint.init(gpa), .cfg = cfg };

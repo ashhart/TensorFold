@@ -18,8 +18,8 @@ const shared = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 /// Block rows one hold pass takes (the decode twin's rows), and context rows one absorb pass takes.
 pub const pass_rows = 32;
 pub const absorb_rows = 2048;
-/// Verified rows a lane keeps on the host until its next hold absorbs them (a round's rows for no GPU work).
-pub const stage_rows = 128;
+/// At most one absorb pass of owned raw taps per lane; only holds, snapshots or overflow project them.
+pub const stage_rows = absorb_rows;
 /// Staged rows a hold can gather to share fc reads, in calls of at most 32 rows.
 pub const gather_rows = 128;
 /// The block counts timed at load, at every depth that fits one pass and the checkpoint's block.
@@ -238,7 +238,8 @@ pub const Drafter = struct {
 
     /// A stream's lane at `capacity` positions: its context keys and values a layer, and its staged rows.
     pub fn laneBytes(d: *const Drafter, capacity: usize) usize {
-        return @intCast(d.keptBytes(capacity + d.config.block) + stage_rows * d.tapBytes());
+        const cap = capacity + d.config.block;
+        return @intCast(d.keptBytes(cap) + @min(stage_rows, cap) * d.tapBytes());
     }
 
     /// A tapped row's bytes: every tap's hidden row, bf16.
@@ -363,7 +364,7 @@ pub const Drafter = struct {
             // rows from `start` replace what was staged past it; rows before the absorbed end go to the GPU now
             const keep: u32 = if (it.start >= l.end) @intCast(it.start - l.end) else 0;
             l.staged = @min(l.staged, keep);
-            if (it.start >= l.end and l.staged + f.rows <= stage_rows) {
+            if (it.start >= l.end and l.staged + f.rows <= @min(stage_rows, l.cap)) {
                 const from = (src.contents() + f.offset)[0 .. f.rows * width];
                 @memcpy((l.mem.contents() + l.stage_at + l.staged * width)[0 .. f.rows * width], from);
                 l.staged += f.rows;
@@ -398,21 +399,6 @@ pub const Drafter = struct {
             l.staged = 0;
         }
         const r = run orelse return;
-        // the other lanes' staged rows join the pass: one waited pass a stage's worth of rounds, not one a stream
-        var others = d.lanes.valueIterator();
-        while (others.next()) |lp| {
-            const pc = stagedPiece(lp.*) orelse continue;
-            if (count == pieces.len or rows + pc.rows > absorb_rows) {
-                try block.absorbPass(d, r.e, pieces[0..count]);
-                count = 0;
-                rows = 0;
-            }
-            pieces[count] = pc;
-            count += 1;
-            rows += pc.rows;
-            lp.*.end += lp.*.staged;
-            lp.*.staged = 0;
-        }
         if (count > 0) try block.absorbPass(d, r.e, pieces[0..count]);
         try block.end(r.cb, r.e);
     }
@@ -540,7 +526,7 @@ pub const Drafter = struct {
         d.hold_ms = best[1];
         d.step_ms = best[1] / @as(f64, @floatFromInt(d.config.block));
         std.log.info("lfm2 dspark: a 1-draft hold takes {d:.2} ms, a {d}-draft hold {d:.2} ms", .{ best[0], d.config.block, best[1] });
-        std.log.info("lfm2 dspark: weights {d:.1} MiB, scratch {d:.1} MiB, a stream {d} KiB a position and {d} KiB staged", .{ mibOf(d.w.buffers()), mibOf(d.owned.items), d.keptBytes(1) / 1024, stage_rows * d.tapBytes() / 1024 });
+        std.log.info("lfm2 dspark: weights {d:.1} MiB, scratch {d:.1} MiB, a stream {d} KiB a position and at most {d} KiB staged", .{ mibOf(d.w.buffers()), mibOf(d.owned.items), d.keptBytes(1) / 1024, @min(stage_rows, d.options.capacity + d.config.block) * d.tapBytes() / 1024 });
         var blocks: [hold_grid[hold_grid.len - 1]]block.Block = undefined;
         for (made, &blocks) |lane, *b| b.* = .{ .lane = lane, .pending = 1, .anchor = 0, .depth = 1 };
         d.holds_len = 0;

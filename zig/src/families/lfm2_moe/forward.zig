@@ -20,6 +20,23 @@ const tile_rows = 33;
 /// A buffer and byte offset as core/affine_mm binds them.
 const Ref = struct { buf: Buffer, off: usize = 0 };
 
+/// Where the residual stream's rows are right now, `stride` bf16 words apart: the canonical `Scratch.h`, or the first column a tapped norm
+/// captured them in. A tapped norm writes its raw state to the requested tap columns alone, so the next norm reads that column in place
+/// (it is never written again until the next forward) and restores the canonical `h`. One lives on the stack of each forward: the final norm
+/// may leave `h` stale, since only `x`, the logits and the taps are read after it, and the next forward embeds into `h` again.
+const Residual = struct {
+    buf: Buffer,
+    off: usize,
+    stride: u32,
+
+    fn canonical(s: *const st.Scratch) Residual {
+        return .{ .buf = s.h, .off = 0, .stride = c.hidden };
+    }
+    fn isCanonical(self: Residual, s: *const st.Scratch) bool {
+        return self.buf.id == s.h.id;
+    }
+};
+
 const QkArgs = extern struct { len: u32, cap: u32, eps: f32, log2_theta: f32 };
 const AttnArgs = extern struct { len: u32, cap: u32, scale: f32, subs: u32 };
 
@@ -33,6 +50,8 @@ const Encoder = struct {
     record: bool,
     /// A recorded window of several streams: their conv and attention kernels run once a layer over every row.
     plan: ?segs.Plan = null,
+    /// The forward's residual stream (see Residual): the norms read it and move it.
+    residual: *Residual,
 
     fn pipe(self: Encoder, comptime key: []const u8) void {
         self.e.setPipeline(self.m.kernels.get(key));
@@ -71,57 +90,46 @@ const Encoder = struct {
             tile.encode(self.e, t, matrix(w), x, x_off, self.s.sums, 0, y, y_off, rows) catch unreachable;
         } else tile.encodeTwin(self.e, t, matrix(w), x, x_off, y, y_off, rows) catch unreachable;
     }
-    /// h += r unless first, then x = norm(h); `combine`: r is the decode experts' combine, taken here instead.
+    /// h += r unless first, then x = norm(h); `combine`: r is the decode experts' combine, taken here instead. The rows' h is the current
+    /// residual: a norm that taps `tap_layer` writes the raw sum only to every tap column of that layer (and carries the first), the one that
+    /// follows reads the carried column and writes the canonical h; the others work in place on the canonical h as before.
     fn norm(self: Encoder, s: *st.Scratch, weight: wts.Tensor, first: bool, rows: usize, combine: bool, tap_layer: ?usize) void {
-        const tap_index: ?usize = if (tap_layer) |layer| blk: {
-            const taps = s.taps orelse break :blk null;
-            for (taps.layers[0..taps.count], 0..) |l, i| if (l == layer) break :blk i;
-            break :blk null;
-        } else null;
+        const res = self.residual.*;
+        var mask: u32 = 0; // the tap columns of this layer, bit i: column i
+        var carry: usize = 0; // the first of them
+        if (s.taps) |taps| if (tap_layer) |layer| for (taps.layers[0..taps.count], 0..) |l, i| if (l == layer) {
+            if (mask == 0) carry = i;
+            mask |= @as(u32, 1) << @intCast(i);
+        };
+        // The raw sum goes to the tap columns, or to the canonical h when a carried column held the residual; else the norm is in place.
+        const direct = mask == 0 and res.isCanonical(s);
+        const into: Residual = if (mask != 0)
+            .{ .buf = s.taps.?.buf, .off = carry * c.hidden * 2, .stride = s.taps.?.count * c.hidden }
+        else
+            Residual.canonical(s);
         if (combine) {
-            if (tap_index != null) self.pipe("lfm2_combine_norm_tap") else self.pipe("lfm2_combine_norm");
+            if (direct) self.pipe("lfm2_combine_norm") else self.pipe("lfm2_combine_norm_tap");
             self.e.setBuffer(s.experts, 0, 0);
             self.e.setBuffer(s.weights, 0, 1);
-            self.e.setBuffer(s.h, 0, 2);
+            self.e.setBuffer(res.buf, res.off, 2);
             self.tensor(weight, 3);
             self.e.setValue(c.eps, 4);
             self.e.setBuffer(s.x, 0, 5);
-            if (tap_index) |i| {
-                const taps = s.taps.?;
-                self.e.setBuffer(taps.buf, 0, 6);
-                self.e.setValue([2]u32{ taps.count * c.hidden, @intCast(i * c.hidden) }, 7);
-            }
-            self.groups(.{ rows, 1, 1 }, .{ c.hidden / 4, 1, 1 });
-            self.copyRepeatedTaps(s, tap_layer, tap_index, rows);
-            return;
+        } else {
+            if (direct) self.pipe("lfm2_norm") else self.pipe("lfm2_norm_tap");
+            self.e.setBuffer(res.buf, res.off, 0);
+            self.e.setBuffer(s.r, 0, 1);
+            self.tensor(weight, 2);
+            self.e.setValue(c.eps, 3);
+            self.e.setValue(@as(u32, @intFromBool(!first)), 4);
+            self.e.setBuffer(s.x, 0, 5);
         }
-        if (tap_index != null) self.pipe("lfm2_norm_tap") else self.pipe("lfm2_norm");
-        self.e.setBuffer(s.h, 0, 0);
-        self.e.setBuffer(s.r, 0, 1);
-        self.tensor(weight, 2);
-        self.e.setValue(c.eps, 3);
-        self.e.setValue(@as(u32, @intFromBool(!first)), 4);
-        self.e.setBuffer(s.x, 0, 5);
-        if (tap_index) |i| {
-            const taps = s.taps.?;
-            self.e.setBuffer(taps.buf, 0, 6);
-            self.e.setValue([2]u32{ taps.count * c.hidden, @intCast(i * c.hidden) }, 7);
+        if (!direct) {
+            self.e.setBuffer(into.buf, 0, 6);
+            self.e.setValue([4]u32{ res.stride, into.stride, if (mask != 0) mask else 1, 0 }, 7);
         }
         self.groups(.{ rows, 1, 1 }, .{ c.hidden / 4, 1, 1 });
-        self.copyRepeatedTaps(s, tap_layer, tap_index, rows);
-    }
-    /// A drafter may request the same target layer more than once.
-    fn copyRepeatedTaps(self: Encoder, s: *st.Scratch, layer: ?usize, first: ?usize, rows: usize) void {
-        const target = layer orelse return;
-        const start = first orelse return;
-        const taps = s.taps.?;
-        for (taps.layers[start + 1 .. taps.count], start + 1..) |l, i| if (l == target) {
-            self.pipe("lfm2_tap");
-            self.e.setBuffer(s.h, 0, 0);
-            self.e.setBuffer(taps.buf, 0, 1);
-            self.e.setValue([2]u32{ taps.count * c.hidden, @intCast(i * c.hidden) }, 2);
-            self.threads(.{ c.hidden / 8, rows, 1 }, .{ 256, 1, 1 });
-        };
+        self.residual.* = into;
     }
     fn swiglu(self: Encoder, s: *st.Scratch, count: usize) void {
         self.pipe("lfm2_swiglu");
@@ -175,7 +183,8 @@ pub fn runHeld(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []c
     const prompt = (!record and head == .last) or total >= tile_rows;
     const e = cb.compute(.serial);
     const plan = if (segs.batched(record, segments.len)) segs.prepare(e, s, segments) else null;
-    const enc = Encoder{ .e = e, .m = m, .s = s, .prompt = prompt, .record = record, .plan = plan };
+    var residual = Residual.canonical(s); // the embedding below writes it; the norms then carry it through the taps
+    const enc = Encoder{ .e = e, .m = m, .s = s, .prompt = prompt, .record = record, .plan = plan, .residual = &residual };
     if (held.len > 0) @memset(s.bad.contents()[0..4], 0);
     for (held) |h| {
         enc.pipe("lfm2_draft_ids");

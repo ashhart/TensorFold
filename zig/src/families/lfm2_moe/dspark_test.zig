@@ -273,7 +273,7 @@ test "lfm2 dspark: a settled hold refuses a NaN, infinity or invalid pick as the
     try block.copyPicks(&picks, &chains, &.{ 2, 2 });
 }
 
-test "lfm2 dspark: fused normalization taps match the separate copy bit for bit" {
+test "lfm2 dspark: fused normalization taps match the separate copy bit for bit and leave the state input untouched" {
     var rig = try Rig.init();
     defer rig.deinit();
     for ([_]usize{ 1, 16, 32, 2048 }) |rows| for ([_]bool{ false, true }) |combine| for ([_]bool{ false, true }) |nonfinite| {
@@ -304,6 +304,8 @@ test "lfm2 dspark: fused normalization taps match the separate copy bit for bit"
             initial[2] = 0xff80;
         }
         @memcpy(h1.slice(u16, count), initial);
+        const input = try std.testing.allocator.dupe(u16, initial);
+        defer std.testing.allocator.free(input);
         noise(31, residual.slice(u16, if (combine) count * c.topk else count), 0.2);
         noise(32, router.slice(u16, rows * c.topk), 0.2);
         noise(33, weight.slice(u16, c.hidden), 1);
@@ -330,7 +332,7 @@ test "lfm2 dspark: fused normalization taps match the separate copy bit for bit"
             e.setBuffer(if (fused) x1 else x0, 0, 5);
             if (fused) {
                 e.setBuffer(taps, 0, 6);
-                e.setValue([2]u32{ 3 * c.hidden, c.hidden }, 7);
+                e.setValue([4]u32{ c.hidden, 3 * c.hidden, 0b010, 0 }, 7);
             }
             e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(c.hidden / 4, 1, 1));
             if (!fused) {
@@ -346,7 +348,7 @@ test "lfm2 dspark: fused normalization taps match the separate copy bit for bit"
             defer cb.release();
             if (cb.failure()) |_| return error.GpuFailed;
         }
-        try std.testing.expectEqualSlices(u16, h0.slice(u16, count), h1.slice(u16, count));
+        try std.testing.expectEqualSlices(u16, input, h1.slice(u16, count));
         try std.testing.expectEqualSlices(u16, x0.slice(u16, count), x1.slice(u16, count));
         const out = taps.slice(u16, count * 3);
         try std.testing.expectEqualSlices(u16, reference_taps.slice(u16, count * 3), out);

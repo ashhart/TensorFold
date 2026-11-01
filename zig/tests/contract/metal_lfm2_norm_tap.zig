@@ -1,4 +1,4 @@
-//! Fused LFM2 norm and tap: identical to norm followed by a tap on the same rows.
+//! Fused LFM2 norm and tap: identical to norm followed by a tap on the same rows, with the state read strided and the raw state written to any columns.
 const std = @import("std");
 const mtl = @import("metal");
 const contract = @import("contract");
@@ -9,7 +9,15 @@ const g = contract.gates;
 const rows = contract.rows;
 const hidden = 2048;
 const topk = 4;
-const taps = 3;
+const max_cols = 4;
+/// A launch's state input and raw-state destination. `mask` names the destination columns written, duplicates included.
+const Layout = struct { src_cols: usize, src_col: usize, dst_cols: usize, mask: u32 };
+const layouts = [_]Layout{
+    .{ .src_cols = 1, .src_col = 0, .dst_cols = 1, .mask = 0b1 }, // canonical in and out: the restore of the state
+    .{ .src_cols = 4, .src_col = 2, .dst_cols = 4, .mask = 0b1001 }, // strided in, first and last column of a strided out
+    .{ .src_cols = 1, .src_col = 0, .dst_cols = 4, .mask = 0b0110 }, // canonical in, one layer captured twice, guard columns either side
+    .{ .src_cols = 4, .src_col = 1, .dst_cols = 1, .mask = 0b1 }, // restore from a captured column
+};
 const shapes = [_]c.Shape{
     .{ .rows = 1, .n = hidden, .k = hidden },
     .{ .rows = 10, .n = hidden, .k = hidden },
@@ -59,21 +67,22 @@ pub const Probe = struct {
     residual: rig_.Ref = undefined,
     weights: rig_.Ref = undefined,
     router: rig_.Ref = undefined,
-    x: rig_.Ref = undefined,
+    /// Canonical hidden state input, and per layout the strided state inputs (columns other than the read one are NaN).
     h: rig_.Ref = undefined,
-    out: rig_.Ref = undefined,
+    src: [layouts.len]rig_.Ref = undefined,
+    x: [layouts.len]rig_.Ref = undefined,
+    dst: [layouts.len]rig_.Ref = undefined,
     bx: rig_.Ref = undefined,
     bh: rig_.Ref = undefined,
-    bout: rig_.Ref = undefined,
+    bdst: rig_.Ref = undefined,
     baseline: std.ArrayList(u8) = .empty,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, w: Which, control: bool) !Probe {
-        const from = "size_t(row) * tap_at.x + tap_at.y + 4 * t";
-        const to = "size_t(row) * tap_at.x + 4 * t";
-        const src = if (control) try std.mem.replaceOwned(u8, a, sources.lfm2, from, to) else sources.lfm2;
-        defer if (control) a.free(src);
-        if (control and std.mem.indexOf(u8, sources.lfm2, from) == null) return error.ControlEditMissing;
-        const fused = try rig_.pipeline(device, src, if (w == .combine) "lfm2_combine_norm_tap" else "lfm2_norm_tap");
+        const needle = "size_t(ctz(m)) * D";
+        if (control and std.mem.indexOf(u8, sources.lfm2, needle) == null) return error.ControlEditMissing;
+        const text = if (control) try std.mem.replaceOwned(u8, a, sources.lfm2, needle, "size_t(ctz(m) ^ uint(at.y > D)) * D") else sources.lfm2;
+        defer if (control) a.free(text);
+        const fused = try rig_.pipeline(device, text, if (w == .combine) "lfm2_combine_norm_tap" else "lfm2_norm_tap");
         errdefer fused.deinit();
         const old = try rig_.pipeline(device, sources.lfm2, if (w == .combine) "lfm2_combine_norm" else "lfm2_norm");
         errdefer old.deinit();
@@ -110,7 +119,7 @@ pub const Probe = struct {
         r.fill(fill, seed);
         p.initial = try p.a.dupe(u16, r.x);
         const n = r.outputs();
-        p.prior = try p.a.alloc(u16, n * taps);
+        p.prior = try p.a.alloc(u16, n * max_cols);
         @memset(p.prior, 0x3f80);
         const res = try p.a.alloc(u16, n * if (p.which == .combine) @as(usize, topk) else 1);
         defer p.a.free(res);
@@ -145,30 +154,42 @@ pub const Probe = struct {
         p.residual = try p.rig.input(std.mem.sliceAsBytes(res));
         p.weights = try p.rig.input(std.mem.sliceAsBytes(r.w));
         p.router = try p.rig.input(std.mem.sliceAsBytes(rw));
-        // x must be first: gate 4 reads its normalized outputs for the sum test.
-        p.x = try p.rig.output(n * 2);
-        p.h = try p.rig.output(n * 2);
-        p.out = try p.rig.output(n * taps * 2);
+        // x of the first layout must be first: gate 4 reads its normalized outputs for the sum test.
+        p.h = try p.rig.input(std.mem.sliceAsBytes(p.initial));
+        for (layouts, 0..) |l, i| {
+            if (l.src_cols > 1) {
+                const wide = try p.a.alloc(u16, n * l.src_cols);
+                defer p.a.free(wide);
+                @memset(wide, 0x7fc0);
+                for (0..shape.rows) |row| @memcpy(wide[row * l.src_cols * hidden + l.src_col * hidden ..][0..hidden], p.initial[row * hidden ..][0..hidden]);
+                p.src[i] = try p.rig.input(std.mem.sliceAsBytes(wide));
+            } else p.src[i] = p.h;
+            p.x[i] = try p.rig.output(n * 2);
+            p.dst[i] = try p.rig.output(n * l.dst_cols * 2);
+        }
         p.bx = try p.rig.scratch(n * 2);
         p.bh = try p.rig.scratch(n * 2);
-        p.bout = try p.rig.scratch(n * taps * 2);
+        p.bdst = try p.rig.scratch(n * max_cols * 2);
         return true;
     }
     pub fn count(p: *Probe) usize {
         return p.r.?.outputs();
     }
-    fn launch(p: *Probe, fused: bool) !void {
+    /// One layout through the fused kernel, or through the original norm and the copy kernel.
+    fn launch(p: *Probe, li: usize, fused: bool) !void {
         const n = p.count();
-        const x = if (fused) p.x else p.bx;
-        const h = if (fused) p.h else p.bh;
-        const tap = if (fused) p.out else p.bout;
-        @memcpy(p.rig.bytes(h, n * 2), std.mem.sliceAsBytes(p.initial));
-        @memcpy(p.rig.bytes(tap, n * taps * 2), std.mem.sliceAsBytes(p.prior));
+        const l = layouts[li];
+        const x = if (fused) p.x[li] else p.bx;
+        const dst = if (fused) p.dst[li] else p.bdst;
+        const h = if (fused) p.src[li] else p.bh;
+        const h_off = if (fused) h.off + l.src_col * hidden * 2 else h.off;
+        if (!fused) @memcpy(p.rig.bytes(p.bh, n * 2), std.mem.sliceAsBytes(p.initial));
+        @memcpy(p.rig.bytes(dst, n * l.dst_cols * 2), std.mem.sliceAsBytes(p.prior[0 .. n * l.dst_cols]));
         const pass = p.rig.begin();
         const e = pass.e;
         e.setPipeline(if (fused) p.fused else p.old);
         if (p.which != .combine) {
-            e.setBuffer(h.buf, h.off, 0);
+            e.setBuffer(h.buf, h_off, 0);
             e.setBuffer(p.residual.buf, p.residual.off, 1);
             e.setBuffer(p.weights.buf, p.weights.off, 2);
             e.setValue(p.r.?.eps, 3);
@@ -176,35 +197,39 @@ pub const Probe = struct {
         } else {
             e.setBuffer(p.residual.buf, p.residual.off, 0);
             e.setBuffer(p.router.buf, p.router.off, 1);
-            e.setBuffer(h.buf, h.off, 2);
+            e.setBuffer(h.buf, h_off, 2);
             e.setBuffer(p.weights.buf, p.weights.off, 3);
             e.setValue(p.r.?.eps, 4);
         }
         e.setBuffer(x.buf, x.off, 5);
         if (fused) {
-            e.setBuffer(tap.buf, tap.off, 6);
-            e.setValue([2]u32{ taps * hidden, hidden }, 7);
+            e.setBuffer(dst.buf, dst.off, 6);
+            e.setValue([4]u32{ @intCast(l.src_cols * hidden), @intCast(l.dst_cols * hidden), l.mask, 0 }, 7);
         }
         e.dispatchGroups(mtl.Size.of(p.r.?.shape.rows, 1, 1), mtl.Size.of(hidden / 4, 1, 1));
-        if (!fused) {
+        if (!fused) for (0..l.dst_cols) |col| {
+            if (l.mask >> @intCast(col) & 1 == 0) continue;
             e.setPipeline(p.tap);
-            e.setBuffer(h.buf, h.off, 0);
-            e.setBuffer(tap.buf, tap.off, 1);
-            e.setValue([2]u32{ taps * hidden, hidden }, 2);
+            e.setBuffer(h.buf, h_off, 0);
+            e.setBuffer(dst.buf, dst.off, 1);
+            e.setValue([2]u32{ @intCast(l.dst_cols * hidden), @intCast(col * hidden) }, 2);
             e.dispatchThreads(mtl.Size.of(hidden / 8, p.r.?.shape.rows, 1), mtl.Size.of(256, 1, 1));
-        }
+        };
         try p.rig.finish(pass);
     }
     pub fn run(p: *Probe) !void {
-        try p.launch(true);
+        for (0..layouts.len) |i| try p.launch(i, true);
     }
+    /// The original norm, which updates its own copy of the state, then the copy kernel into each requested column.
     pub fn replaced(p: *Probe) ![]const u8 {
-        try p.launch(false);
         p.baseline.clearRetainingCapacity();
         const n = p.count();
-        try p.baseline.appendSlice(p.a, p.rig.bytes(p.bx, n * 2));
-        try p.baseline.appendSlice(p.a, p.rig.bytes(p.bh, n * 2));
-        try p.baseline.appendSlice(p.a, p.rig.bytes(p.bout, n * taps * 2));
+        for (layouts, 0..) |l, i| {
+            // The tap copy reads the original norm's updated canonical state: the buffer the old kernel wrote.
+            try p.launch(i, false);
+            try p.baseline.appendSlice(p.a, p.rig.bytes(p.bx, n * 2));
+            try p.baseline.appendSlice(p.a, p.rig.bytes(p.bdst, n * l.dst_cols * 2));
+        }
         return p.baseline.items;
     }
     pub fn check(p: *Probe, _: g.Gate) !?[]const u8 {
