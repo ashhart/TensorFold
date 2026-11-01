@@ -34,7 +34,11 @@ pub fn requireMapped(d: limits.MetalLaunch) !void {
 pub fn supported(device: mtl.Device, d: limits.MetalLaunch) bool {
     if (std.mem.startsWith(u8, d.name, "lfm2 masked prompt "))
         return @import("metal_support.zig").tensor(tf.lfm2_moe.source.optionalAvailable(device), d.name);
-    return !std.mem.startsWith(u8, d.name, "qwen27 q8 ") or @import("metal_support.zig").tensor(device.tensorUnits(), d.name);
+    if (std.mem.startsWith(u8, d.name, "qwen27 q8 ") or
+        std.mem.startsWith(u8, d.name, "LFM3 NAX prompt ") or
+        std.mem.startsWith(u8, d.name, "LFM3 tiled attention "))
+        return @import("metal_support.zig").tensor(device.tensorUnits(), d.name);
+    return true;
 }
 
 fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comptime assemble: bool) !Launch {
@@ -83,6 +87,23 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         const body = try tf.frags.sourceMode(device, a, raw, full);
         return .{ .decl = d, .function = fun, .here = body, .pre_m5 = try preM5(a, "", raw) };
     }
+    if (std.mem.startsWith(u8, d.name, "LFM3 split attention ")) {
+        if (!assemble) return undefined;
+        const body = try std.mem.concat(a, u8, &.{ sources.lfm3_attention, "\n", sources.lfm3_attention_split });
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
+    if (std.mem.startsWith(u8, d.name, "LFM3 tiled attention ")) {
+        if (!assemble) return undefined;
+        const body = try std.mem.concat(a, u8, &.{ sources.lfm3_attention, "\n", sources.lfm3_attention_tiled });
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
+    if (std.mem.startsWith(u8, d.name, "LFM3 NAX prompt ")) {
+        if (!assemble) return undefined;
+        const tag = d.name["LFM3 NAX prompt q".len..std.mem.lastIndexOfScalar(u8, d.name, ' ').?];
+        const split = std.mem.indexOfScalar(u8, tag, 'g').?;
+        const body = try tf.lfm3.prompt_nax.source(device, a, try std.fmt.parseInt(u8, tag[0..split], 10), try std.fmt.parseInt(u16, tag[split + 1 ..], 10));
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
     if (std.mem.startsWith(u8, d.name, "binned ")) {
         if (!assemble) return undefined;
         const prefix = if (has(d.name, " bad-rows ")) "#define TF_BP_BAD_ROWS 1\n" else if (has(d.name, " bad-acc ")) "#define TF_BP_BAD_ACC 1\n" else if (has(d.name, " bad-nonfinite ")) "#define TF_BP_BAD_NONFINITE 1\n" else "";
@@ -105,13 +126,19 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         const body = try std.mem.concat(a, u8, &.{ prefix, source });
         return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
     }
+    if (std.mem.startsWith(u8, d.name, "lfm3-vision ")) {
+        if (!assemble) return undefined;
+        const lfm3_head = if (has(d.name, " segment-bad ")) "#define L3_SEGMENT_BAD_TAIL 1\n" else if (has(d.name, " square-bad ")) "#define L3_SQUARE_ACC half\n" else if (has(d.name, " attention-bad ")) "#define L3_ATTN_ACC half\n" else "";
+        const body = try std.mem.concat(a, u8, &.{ lfm3_head, sources.lfm3_vision });
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
     if (std.mem.startsWith(u8, d.name, "lfm3-image ")) {
         if (!assemble) return undefined;
         return .{ .decl = d, .function = fun, .here = sources.lfm3_image_rows, .pre_m5 = sources.lfm3_image_rows };
     }
     if (std.mem.startsWith(u8, d.name, "lfm3 ")) {
         if (!assemble) return undefined;
-        const lfm3_head = if (has(d.name, " range-skip ")) "#define L3_RANGE_SKIP_REPAIR 1\n" else if (has(d.name, " range-clear ")) "#define L3_RANGE_CLEAR_RISK 1\n" else if (has(d.name, " postnorm-bad ")) "#define L3_POSTNORM_SKIP_ROUND 1\n" else if (has(d.name, " conv-state-bad ")) "#define L3_CONV_BAD_STATE 1\n" else if (has(d.name, " segment-bad ")) "#define L3_SEGMENT_BAD_TAIL 1\n" else if (has(d.name, " square-bad ")) "#define L3_SQUARE_ACC half\n" else if (has(d.name, " attention-bad ")) "#define L3_ATTN_ACC half\n" else "";
+        const lfm3_head = if (has(d.name, " risk-fast ")) "#define L3_RISK_FAST 1\n" else if (has(d.name, " range-skip ")) "#define L3_RANGE_SKIP_REPAIR 1\n" else if (has(d.name, " range-clear ")) "#define L3_RANGE_CLEAR_RISK 1\n" else if (has(d.name, " postnorm-bad ")) "#define L3_POSTNORM_SKIP_ROUND 1\n" else if (has(d.name, " conv-state-bad ")) "#define L3_CONV_BAD_STATE 1\n" else if (has(d.name, " segment-bad ")) "#define L3_SEGMENT_BAD_TAIL 1\n" else if (has(d.name, " square-bad ")) "#define L3_SQUARE_ACC half\n" else if (has(d.name, " attention-bad ")) "#define L3_ATTN_ACC half\n" else "";
         const body = try std.mem.concat(a, u8, &.{ lfm3_head, sources.lfm3, "\n", sources.lfm3_attention });
         return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
     }

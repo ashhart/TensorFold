@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "scope": "Private exact attention chunk fusion; M5 VL4 cold text prefill; bounded runtime diagnostic, production default unchanged",
+  "candidate": "One128thread group per row/head computes up to3 original4096key chunks sequentially, retains1024key part and chunk merge order, fuses final merge dispatch",
+  "baseline": "Current fused-risk native attention, samebinary deferredheads enabled",
+  "numeric": {
+    "synthetic_cases": 35,
+    "five_repeat_all_intermediate_bytes_equal": true,
+    "negative_operator_controls": 2,
+    "real_model_prompts": [
+      2048,
+      8192
+    ],
+    "all_active_state_and_logits_equal": true,
+    "snapshot_marks": [
+      129,
+      257
+    ],
+    "resume_prefix": 257,
+    "greedy_decode_tokens": 16,
+    "actual_fused_hits": [
+      660,
+      2772
+    ],
+    "actual_zero_store_control_rejected": true
+  },
+  "served": {
+    "protocol": "FreshserverABBA, samebinary envselector0/1, exactpinnedIDs, promptcache0,16outputs, no retries",
+    "binary_sha256": "806a30d6e816a4adca45faed72d192be4316b4076224e71910bb147e2b61fe74",
+    "cases": [
+      {
+        "prompt_tokens": 2048,
+        "baseline_ttft_s": [
+          0.8451337078586221,
+          0.8453265000134706
+        ],
+        "candidate_ttft_s": [
+          0.8443755409680307,
+          0.8437215420417488
+        ],
+        "baseline_median_s": 0.8452301039360464,
+        "candidate_median_s": 0.8440485415048897,
+        "baseline_over_candidate": 1.001399874975259,
+        "baseline_first_last_drift": 0.00022812029984820015,
+        "stable_at_5percent": true,
+        "output_text_sha256_equal": true,
+        "output_token_id_equality": "not emitted by cold client; separate model qualification covers16 IDs/logits",
+        "prompt_ids": "both routes /tokenize exact pinned arrays"
+      },
+      {
+        "prompt_tokens": 8192,
+        "baseline_ttft_s": [
+          4.424025000073016,
+          4.418909166939557
+        ],
+        "candidate_ttft_s": [
+          4.239424915984273,
+          4.240528000053018
+        ],
+        "baseline_median_s": 4.421467083506286,
+        "candidate_median_s": 4.239976458018646,
+        "baseline_over_candidate": 1.042804630470154,
+        "baseline_first_last_drift": -0.0011563752766710067,
+        "stable_at_5percent": true,
+        "output_text_sha256_equal": true,
+        "output_token_id_equality": "not emitted by cold client; separate model qualification covers16 IDs/logits",
+        "prompt_ids": "both routes /tokenize exact pinned arrays"
+      }
+    ],
+    "server_token_digest_equal": true
+  },
+  "limits": [
+    "OnlyVL4 text fullmodel/served qualified so far; notimages,otherwidths or M4",
+    "Two legs pervariant; fivepercentbaseline driftgate retained",
+    "No MLXcomparison and no10xspeedclaim",
+    "Coldclient outputtextdigest matched; tokenIDs andfullstate/logits verified separately inmodel harness",
+    "Sharedmultistream,decode and morethan3chunks retainoriginalpath",
+    "SingleSG slidingwindow source prototype not yet qualified"
+  ]
+}

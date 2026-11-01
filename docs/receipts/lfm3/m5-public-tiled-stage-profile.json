@@ -1,0 +1,901 @@
+{
+  "scope": "Calibrated M5 TEXT4 diagnostic attribution for public default-off paths; not a new served performance or fidelity qualification.",
+  "source_commit": "8df18abc47568246c0d38b70c2e280521a24b31a",
+  "manifest_sha256": "e86ae5704cee80ca65b9f55409c8cfbc5880a3dd906e33a3f5ac652219ad841b",
+  "receipt_sha256": "d1e684ecf15408b6333e58d205041cea2430ede0814f3673fd1abaedf1018363",
+  "events_sha256": "50ad47ca4ebf325521d3bd5f6c1ff4b4bbe46e5f7f170e441f2f1657937a40fa",
+  "commands": 8,
+  "all_exit_zero": true,
+  "final_lock_released": true,
+  "method": "Two mirrored runs per default/enabled and 2k/8k context. Calibrated timestamp instrumentation; every chunk logit byte-identical to uninstrumented same-route execution, repeated chunk-logit digests equal. Stage sums are diagnostic and not HTTP TTFT.",
+  "runs": {
+    "default-2048": {
+      "stages": {
+        "ffn_gate_up": {
+          "gpu_seconds_median": 0.36670456,
+          "calls": [
+            384,
+            384
+          ],
+          "fraction": 0.4304667386158554
+        },
+        "ffn_down": {
+          "gpu_seconds_median": 0.1799675685,
+          "calls": [
+            384,
+            384
+          ],
+          "fraction": 0.2112601279591957
+        },
+        "attention": {
+          "gpu_seconds_median": 0.12023944650000001,
+          "calls": [
+            704,
+            704
+          ],
+          "fraction": 0.14114654693094253
+        },
+        "conv_in": {
+          "gpu_seconds_median": 0.0809096085,
+          "calls": [
+            208,
+            208
+          ],
+          "fraction": 0.09497808070257072
+        },
+        "conv_out": {
+          "gpu_seconds_median": 0.028126993500000003,
+          "calls": [
+            208,
+            208
+          ],
+          "fraction": 0.03301768366069504
+        },
+        "attn_out": {
+          "gpu_seconds_median": 0.0237998375,
+          "calls": [
+            176,
+            176
+          ],
+          "fraction": 0.027938126616730192
+        },
+        "attn_q": {
+          "gpu_seconds_median": 0.023795313499999998,
+          "calls": [
+            176,
+            176
+          ],
+          "fraction": 0.027932815988671734
+        },
+        "attn_kv": {
+          "gpu_seconds_median": 0.012722100500000002,
+          "calls": [
+            176,
+            176
+          ],
+          "fraction": 0.014934205101180481
+        },
+        "activation": {
+          "gpu_seconds_median": 0.0058169565,
+          "calls": [
+            768,
+            768
+          ],
+          "fraction": 0.006828402388084022
+        },
+        "norm": {
+          "gpu_seconds_median": 0.0042347255,
+          "calls": [
+            784,
+            784
+          ],
+          "fraction": 0.004971054832038078
+        },
+        "output_head": {
+          "gpu_seconds_median": 0.002278064,
+          "calls": [
+            16,
+            16
+          ],
+          "fraction": 0.002674171219573026
+        },
+        "attn_gate": {
+          "gpu_seconds_median": 0.0019773969999999997,
+          "calls": [
+            176,
+            176
+          ],
+          "fraction": 0.0023212245780057286
+        },
+        "attention_prepare": {
+          "gpu_seconds_median": 0.0012086955,
+          "calls": [
+            176,
+            176
+          ],
+          "fraction": 0.0014188621212254918
+        },
+        "embedding": {
+          "gpu_seconds_median": 9.537550000000001e-05,
+          "calls": [
+            16,
+            16
+          ],
+          "fraction": 0.00011195928523184036
+        },
+        "ffn_gate": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "ffn_up": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "attn_k": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "attn_v": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "dense": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "xsum": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "copy": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "gdn_prepare": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "gdn_scan": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "gdn_gate": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "state_publish": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        }
+      },
+      "stage_sum": 0.8518766425000001,
+      "plain_wall": [
+        0.880904,
+        0.880832
+      ],
+      "profiled_wall": [
+        0.915819,
+        0.916234
+      ],
+      "counter_modes": [
+        "stage",
+        "stage"
+      ],
+      "logits_sha256": "62f262beea3c59b4e537cb7d3c5c15383686f31201bf68193048970cdd54208c"
+    },
+    "default-8192": {
+      "stages": {
+        "attention": {
+          "gpu_seconds_median": 1.6782165900000003,
+          "calls": [
+            2816,
+            2816
+          ],
+          "fraction": 0.3644590474611633
+        },
+        "ffn_gate_up": {
+          "gpu_seconds_median": 1.4670490225,
+          "calls": [
+            1536,
+            1536
+          ],
+          "fraction": 0.3185996923789084
+        },
+        "ffn_down": {
+          "gpu_seconds_median": 0.7196665485,
+          "calls": [
+            1536,
+            1536
+          ],
+          "fraction": 0.15629030622082757
+        },
+        "conv_in": {
+          "gpu_seconds_median": 0.32362187500000006,
+          "calls": [
+            832,
+            832
+          ],
+          "fraction": 0.07028110733912818
+        },
+        "conv_out": {
+          "gpu_seconds_median": 0.11248509949999999,
+          "calls": [
+            832,
+            832
+          ],
+          "fraction": 0.024428439369285564
+        },
+        "attn_out": {
+          "gpu_seconds_median": 0.095198976,
+          "calls": [
+            704,
+            704
+          ],
+          "fraction": 0.02067440419727834
+        },
+        "attn_q": {
+          "gpu_seconds_median": 0.09502975549999998,
+          "calls": [
+            704,
+            704
+          ],
+          "fraction": 0.020637654505606593
+        },
+        "attn_kv": {
+          "gpu_seconds_median": 0.050905192500000015,
+          "calls": [
+            704,
+            704
+          ],
+          "fraction": 0.011055103423436637
+        },
+        "activation": {
+          "gpu_seconds_median": 0.02329471950000001,
+          "calls": [
+            3072,
+            3072
+          ],
+          "fraction": 0.005058924652773805
+        },
+        "norm": {
+          "gpu_seconds_median": 0.016906372,
+          "calls": [
+            3136,
+            3136
+          ],
+          "fraction": 0.0036715643689019194
+        },
+        "output_head": {
+          "gpu_seconds_median": 0.0091181655,
+          "calls": [
+            64,
+            64
+          ],
+          "fraction": 0.0019801960798893317
+        },
+        "attn_gate": {
+          "gpu_seconds_median": 0.0078879645,
+          "calls": [
+            704,
+            704
+          ],
+          "fraction": 0.0017130327784910474
+        },
+        "attention_prepare": {
+          "gpu_seconds_median": 0.004899619500000002,
+          "calls": [
+            704,
+            704
+          ],
+          "fraction": 0.0010640525582530094
+        },
+        "embedding": {
+          "gpu_seconds_median": 0.00039818800000000006,
+          "calls": [
+            64,
+            64
+          ],
+          "fraction": 8.64746660563436e-05
+        },
+        "ffn_gate": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "ffn_up": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "attn_k": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "attn_v": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "dense": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "xsum": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "copy": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "gdn_prepare": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "gdn_scan": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "gdn_gate": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "state_publish": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        }
+      },
+      "stage_sum": 4.6046780885,
+      "plain_wall": [
+        4.640737,
+        4.637995
+      ],
+      "profiled_wall": [
+        4.819606,
+        4.828097
+      ],
+      "counter_modes": [
+        "stage",
+        "stage"
+      ],
+      "logits_sha256": "44061d8b62260e616a7ab4539194c77cca4193d699df4596a289e6050fda26c5"
+    },
+    "enabled-2048": {
+      "stages": {
+        "ffn_down": {
+          "gpu_seconds_median": 0.15348988599999996,
+          "calls": [
+            384,
+            384
+          ],
+          "fraction": 0.2806297718512267
+        },
+        "ffn_up": {
+          "gpu_seconds_median": 0.0877102045,
+          "calls": [
+            384,
+            384
+          ],
+          "fraction": 0.16036297452106676
+        },
+        "ffn_gate": {
+          "gpu_seconds_median": 0.087660356,
+          "calls": [
+            384,
+            384
+          ],
+          "fraction": 0.1602718351401819
+        },
+        "conv_in": {
+          "gpu_seconds_median": 0.08123227600000002,
+          "calls": [
+            208,
+            208
+          ],
+          "fraction": 0.14851920002622118
+        },
+        "attention": {
+          "gpu_seconds_median": 0.032313975499999995,
+          "calls": [
+            352,
+            352
+          ],
+          "fraction": 0.05908052842107869
+        },
+        "conv_out": {
+          "gpu_seconds_median": 0.028146275,
+          "calls": [
+            208,
+            208
+          ],
+          "fraction": 0.05146060719409151
+        },
+        "attn_q": {
+          "gpu_seconds_median": 0.023827164499999998,
+          "calls": [
+            176,
+            176
+          ],
+          "fraction": 0.0435638589079195
+        },
+        "attn_out": {
+          "gpu_seconds_median": 0.0238000405,
+          "calls": [
+            176,
+            176
+          ],
+          "fraction": 0.04351426735416923
+        },
+        "attn_kv": {
+          "gpu_seconds_median": 0.012818893500000001,
+          "calls": [
+            176,
+            176
+          ],
+          "fraction": 0.023437134863010932
+        },
+        "activation": {
+          "gpu_seconds_median": 0.0058541045,
+          "calls": [
+            768,
+            768
+          ],
+          "fraction": 0.010703219951757863
+        },
+        "norm": {
+          "gpu_seconds_median": 0.00436006,
+          "calls": [
+            784,
+            784
+          ],
+          "fraction": 0.007971617381080468
+        },
+        "output_head": {
+          "gpu_seconds_median": 0.0023417094999999997,
+          "calls": [
+            16,
+            16
+          ],
+          "fraction": 0.004281411758471501
+        },
+        "attn_gate": {
+          "gpu_seconds_median": 0.0020024250000000004,
+          "calls": [
+            176,
+            176
+          ],
+          "fraction": 0.0036610885938060623
+        },
+        "attention_prepare": {
+          "gpu_seconds_median": 0.0011686905000000002,
+          "calls": [
+            176,
+            176
+          ],
+          "fraction": 0.0021367489215523695
+        },
+        "embedding": {
+          "gpu_seconds_median": 0.00022191600000000006,
+          "calls": [
+            16,
+            16
+          ],
+          "fraction": 0.0004057351143653651
+        },
+        "ffn_gate_up": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "attn_k": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "attn_v": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "dense": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "xsum": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "copy": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "gdn_prepare": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "gdn_scan": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "gdn_gate": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "state_publish": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        }
+      },
+      "stage_sum": 0.546947977,
+      "plain_wall": [
+        0.577531,
+        0.576574
+      ],
+      "profiled_wall": [
+        0.612701,
+        0.651447
+      ],
+      "counter_modes": [
+        "stage",
+        "stage"
+      ],
+      "logits_sha256": "749937125e1d436fe591e893039c9b1f4f4800a27f354f879ddc8cc32c948be6"
+    },
+    "enabled-8192": {
+      "stages": {
+        "ffn_down": {
+          "gpu_seconds_median": 0.6144221610000001,
+          "calls": [
+            1536,
+            1536
+          ],
+          "fraction": 0.25381376755675106
+        },
+        "attention": {
+          "gpu_seconds_median": 0.36267626900000005,
+          "calls": [
+            1408,
+            1408
+          ],
+          "fraction": 0.14981918960816212
+        },
+        "ffn_gate": {
+          "gpu_seconds_median": 0.3502354495000001,
+          "calls": [
+            1536,
+            1536
+          ],
+          "fraction": 0.14467996861449017
+        },
+        "ffn_up": {
+          "gpu_seconds_median": 0.35005327650000007,
+          "calls": [
+            1536,
+            1536
+          ],
+          "fraction": 0.14460471414222006
+        },
+        "conv_in": {
+          "gpu_seconds_median": 0.3250024225000001,
+          "calls": [
+            832,
+            832
+          ],
+          "fraction": 0.13425637054747447
+        },
+        "conv_out": {
+          "gpu_seconds_median": 0.11259111749999998,
+          "calls": [
+            832,
+            832
+          ],
+          "fraction": 0.04651065267500961
+        },
+        "attn_q": {
+          "gpu_seconds_median": 0.09530000250000001,
+          "calls": [
+            704,
+            704
+          ],
+          "fraction": 0.0393678064009361
+        },
+        "attn_out": {
+          "gpu_seconds_median": 0.09522042200000003,
+          "calls": [
+            704,
+            704
+          ],
+          "fraction": 0.03933493221798643
+        },
+        "attn_kv": {
+          "gpu_seconds_median": 0.05122985049999999,
+          "calls": [
+            704,
+            704
+          ],
+          "fraction": 0.021162715461973878
+        },
+        "activation": {
+          "gpu_seconds_median": 0.023562301,
+          "calls": [
+            3072,
+            3072
+          ],
+          "fraction": 0.009733432106977994
+        },
+        "norm": {
+          "gpu_seconds_median": 0.017552623499999996,
+          "calls": [
+            3136,
+            3136
+          ],
+          "fraction": 0.0072508737213991285
+        },
+        "output_head": {
+          "gpu_seconds_median": 0.009236876000000002,
+          "calls": [
+            64,
+            64
+          ],
+          "fraction": 0.003815692933664436
+        },
+        "attn_gate": {
+          "gpu_seconds_median": 0.0079516615,
+          "calls": [
+            704,
+            704
+          ],
+          "fraction": 0.003284779247490336
+        },
+        "attention_prepare": {
+          "gpu_seconds_median": 0.0047380140000000005,
+          "calls": [
+            704,
+            704
+          ],
+          "fraction": 0.0019572425286864484
+        },
+        "embedding": {
+          "gpu_seconds_median": 0.0009873365000000003,
+          "calls": [
+            64,
+            64
+          ],
+          "fraction": 0.0004078622367777782
+        },
+        "ffn_gate_up": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "attn_k": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "attn_v": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "dense": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "xsum": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "copy": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "gdn_prepare": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "gdn_scan": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "gdn_gate": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        },
+        "state_publish": {
+          "gpu_seconds_median": 0.0,
+          "calls": [
+            0,
+            0
+          ],
+          "fraction": 0.0
+        }
+      },
+      "stage_sum": 2.4207597835000003,
+      "plain_wall": [
+        2.435951,
+        2.436173
+      ],
+      "profiled_wall": [
+        2.641021,
+        2.853679
+      ],
+      "counter_modes": [
+        "stage",
+        "stage"
+      ],
+      "logits_sha256": "2ca71e1e89e5cf00d362d9513785ccd2fa710822420f46d149039d7d56728b7d"
+    }
+  },
+  "raw_json_sha256": {
+    "default-2048-0.json": "e6252e5dd057188bf8e8b8a82ee33f1010ce3874d7dab5a02375e2fc71dd0663",
+    "default-2048-1.json": "67661aad13667767651bee344ec7aa756c982373a1f642f2a1aeb66cb7fb3ff0",
+    "default-8192-0.json": "6ed4268a5f1c82b35ab56836fe5f8399ecf3dca3fe322eccbf0be0fff9a2206f",
+    "default-8192-1.json": "5af4550d90339a5749838af77c8a14928eaa2d8b04c3ce9375596937bf0cd024",
+    "enabled-2048-0.json": "83df955a70c18bd0ea472c82f5e45eea4ed4d2b83a344df7c349d723b792de6b",
+    "enabled-2048-1.json": "76f12fb75915074933f43bd4cede4491aa1b22702f1f767f5bf2df9bceeb856c",
+    "enabled-8192-0.json": "0b3e50b5b3d17fdd80d2e4bd16207fac98733c14352a9d30b7e151044d9e8555",
+    "enabled-8192-1.json": "6ff34af901bba1d3ff4844cc03ad786fd52b763d1914f383086f65017c313294"
+  },
+  "limitations": [
+    "TEXT4 only; no new width/image/cancellation/kernel-contract coverage.",
+    "Per-stage instrumentation may alter scheduling; percentages are measured diagnostic shares, not universal bottleneck attribution.",
+    "No occupancy, compute or bandwidth saturation inference.",
+    "Only two diagnostic observations per cell; not the five-round operator performance protocol."
+  ]
+}

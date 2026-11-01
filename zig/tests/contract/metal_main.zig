@@ -186,7 +186,7 @@ pub fn main(init: std.process.Init) !u8 {
         gemma_list.deinit(a);
     }
     var kernels: std.ArrayList(g.Kernel) = .empty;
-    var lfm3_suite: @import("metal_lfm3_suite.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    var lfm3_suite: @import("metal_lfm3_suite.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels, .tensor = tensor };
     defer lfm3_suite.deinit();
     try lfm3_suite.collect(o.only);
     for (gemma.all_entries) |v| {

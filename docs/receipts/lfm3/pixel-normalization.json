@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "scope": "LFM3-VL CPU image preparation normalization correction; downstream GPU image outputs are not rerun by this receipt",
+  "review_comment": "https://github.com/ashhart/TensorFold/pull/1502#issuecomment-6494523293",
+  "reference_fixture": {
+    "source": "https://github.com/jschmied/TensorFold/blob/1325da3bfab19d2ada499e613f1f0c90b7d95dd3/zig/src/core/picture/patches_test.zig",
+    "processor": "transformers 5.19.0 / torchvision 0.29.0 as recorded by fixture author",
+    "input": "RGB217x300; (7*x+13*y+50*c+(x*y)%31)%256",
+    "grid": [
+      14,
+      20
+    ],
+    "pixel_values_sha256": "53153c22eb4e065031bbdf4de0f038db37ef736a880e3438ac8e0d73f82dcea8"
+  },
+  "change": {
+    "before": "(f32(pixel)*f32(1/255)-0.5)/0.5",
+    "after": "(f32(pixel)-127.5)/127.5",
+    "changed_lut_entries": 207,
+    "lut_entries": 256,
+    "max_absolute_difference": 1.1920928955078125e-07
+  },
+  "regression": {
+    "before_exit": 1,
+    "before_pixel_values_sha256": "6e7d91ab24b4b18bc383dc5fcf441e2a973904f5a9b6a2af0272f34c48cf0229",
+    "after_exit": 0,
+    "after_pixel_values_sha256": "53153c22eb4e065031bbdf4de0f038db37ef736a880e3438ac8e0d73f82dcea8",
+    "command": "zig build test-lfm3-host -Dcpu=apple_m1 --summary all",
+    "after_build_steps": [
+      12,
+      12
+    ],
+    "image_tests": [
+      26,
+      26
+    ],
+    "optional_JPEG_cases": "three unavailable JPEG fixture cases; unrelated to RGB preparation regression",
+    "logs_sha256": {
+      "lfm3-pixel-parity-before.log": "ac5bdb487acc143649eb9db314387148d2deeb4c0d2f49efd17580e67ef70941",
+      "lfm3-pixel-parity-after.log": "028c13fb4b3378574ce6f140297c4352ecf7b72f2c8053916e82c37be349a57d"
+    }
+  },
+  "validation": {
+    "zig_fmt_check_exit": 0,
+    "git_diff_check_exit": 0
+  },
+  "limits": [
+    "One external processor fixture hash checked, not all five cited pictures.",
+    "Earlier image GPU/model receipts retain their original pixel-input scope; this correction does not imply their byte identity.",
+    "No performance claim."
+  ]
+}
