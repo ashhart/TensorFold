@@ -294,6 +294,12 @@ pub const Attention = struct {
     }
     /// `encode` whose rows read every key before `end` (the prompt kernel only; 0: causal, as `encode`).
     pub fn encodeTo(a: *const Attention, input_encoder: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, q: Ref, k: Ref, v: Ref, out: Ref, caches: []const Cache, raw_gate: ?Ref, prompt: bool, split: bool, end: u32) !void {
+        return a.encodeImpl(input_encoder, scratch, binding, plan, q, k, v, out, caches, raw_gate, prompt, split, &.{end});
+    }
+    fn encodeImpl(a: *const Attention, input_encoder: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, q: Ref, k: Ref, v: Ref, out: Ref, caches: []const Cache, raw_gate: ?Ref, prompt: bool, split: bool, ends: []const u32) !void {
+        const blocks = ends.len > 1; // a stream's own end each: the prompt kernel once a stream
+        if (blocks and ends.len != plan.streams) return error.BidirectionalBlockEnd;
+        const end = ends[0];
         try plan.geometry.check();
         const g = plan.geometry;
         const q_bytes = @as(usize, plan.rows) * g.heads * g.dim * 2;
@@ -332,11 +338,11 @@ pub const Attention = struct {
         bind(e, .{ q, scratch.get(.q_rows), scratch.get(.qa) });
         e.setValue(args, 3);
         e.dispatchThreads(mtl.Size.of(g.dim, args.packed_rows, g.kv_heads), mtl.Size.of(32, 4, 1));
-        const prompt_kernel = prompt and a.prompt != null and (plan.geometry.shared_prefix or !a.units) and plan.streams == 1;
+        const prompt_kernel = prompt and a.prompt != null and (plan.geometry.shared_prefix or !a.units) and (plan.streams == 1 or blocks);
         if (end != 0 and !prompt_kernel) return error.BidirectionalNeedsPromptKernel;
         if (prompt_kernel) {
             e.barrier();
-            try a.promptRows(e, scratch, binding, plan, out, split, end);
+            for (ends, 0..) |stream_end, s| try a.promptRows(e, scratch, binding, plan, out, split, stream_end, @intCast(s));
             if (raw_gate) |gate| {
                 e.setPipeline(a.io[9]);
                 bind(e, .{ out, gate });
@@ -348,12 +354,26 @@ pub const Attention = struct {
         } else try a.treeRows(e, scratch, binding, plan, q, out, raw_gate, args, split);
         try timing.end();
     }
-    /// A prompt chunk's rows over absolute 512-key chunks (attention_prompt.metal), merged in key order.
-    fn promptRows(a: *const Attention, e: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, out: Ref, split: bool, end: u32) !void {
+    /// `encodeTo` over several chain streams, stream s's rows reading keys before `ends[s]`: one-stream bytes each.
+    pub fn encodeBlocks(a: *const Attention, input_encoder: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, q: Ref, k: Ref, v: Ref, out: Ref, caches: []const Cache, raw_gate: ?Ref, split: bool, ends: []const u32) !void {
+        if (ends.len != plan.streams or ends.len < 2) return error.BidirectionalBlockEnd;
+        for (ends) |stream_end| if (stream_end == 0) return error.BidirectionalBlockEnd;
+        return a.encodeImpl(input_encoder, scratch, binding, plan, q, k, v, out, caches, raw_gate, true, split, ends);
+    }
+    /// Stream `s`'s prompt rows over absolute 512-key chunks (attention_prompt.metal), merged in key order.
+    fn promptRows(a: *const Attention, e: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, out_all: Ref, split: bool, end: u32, s: u32) !void {
         const g = plan.geometry;
-        const start: i32 = plan.meta[planning.global_words + 4];
-        for (plan.positions, 0..) |position, i| if (position != start + @as(i32, @intCast(i))) return error.PromptRowsNotChain; // the kernel places row i at start + i
-        const own_end = start + @as(i32, @intCast(plan.rows));
+        const at = planning.global_words + @as(usize, s) * planning.stream_words;
+        const start: i32 = plan.meta[at + 4];
+        const rows: u32 = @intCast(plan.meta[at + 2]);
+        const first: usize = @intCast(plan.meta[at + 6]);
+        const first_tile: usize = @intCast(plan.meta[at + 3]);
+        const tiles: u32 = @intCast((g.group() * rows + 15) / 16);
+        for (plan.positions[first..][0..rows], 0..) |position, i| if (position != start + @as(i32, @intCast(i))) return error.PromptRowsNotChain; // the kernel places row i at start + i
+        const out = Ref{ .buffer = out_all.buffer, .offset = out_all.offset + first * g.heads * g.dim * 2 };
+        const qa = scratch.get(.qa);
+        const table = binding.get(.caches);
+        const own_end = start + @as(i32, @intCast(rows));
         if (end != 0 and (end < own_end or end > binding.limits.keys)) return error.BidirectionalBlockEnd;
         const keys_end: i32 = if (end != 0) @intCast(end) else own_end;
         const chunks: u32 = @intCast(@divFloor(keys_end + planning.chunk - 1, planning.chunk));
@@ -361,21 +381,23 @@ pub const Attention = struct {
         // before M5 (no shared prefix) the partials take the tail's buffers, which hold every chunk's packed rows
         const parts = if (g.shared_prefix) [3]Field{ .poa, .pma, .pla } else [3]Field{ .pob, .pmb, .plb };
         if (!g.shared_prefix and @as(usize, chunks) * plan.tiles * 16 > @as(usize, scratch.tail_chunks) * scratch.limits.rows * 16) return error.AttentionLimits;
-        const args = PromptArgs{ .start = start, .rows = @intCast(plan.rows), .chunks = @intCast(chunks), .rp = @intCast(plan.tiles * 16), .key_stride = @intCast(binding.strides[0][0]), .value_stride = @intCast(binding.strides[0][1]), .scale2 = 0.0625 * std.math.log2e, .kv_heads = @intCast(g.kv_heads), .end = @intCast(end) };
+        // rp: the packed rows' stride, the whole plan's (one stream: its own)
+        const args = PromptArgs{ .start = start, .rows = @intCast(rows), .chunks = @intCast(chunks), .rp = @intCast(plan.tiles * 16), .key_stride = @intCast(binding.strides[s][0]), .value_stride = @intCast(binding.strides[s][1]), .scale2 = 0.0625 * std.math.log2e, .kv_heads = @intCast(g.kv_heads), .end = @intCast(end) };
         const pairs = prompt_threads / 64; // simdgroup pairs, each halving the head dim of one 16-row tile
         e.setPipeline(a.prompt.?[if (end != 0) 3 else 0]); // the causal kernel is the one main compiles
-        bind(e, .{ scratch.get(.qa), binding.get(.caches) });
+        e.setBuffer(qa.buffer, qa.offset + first_tile * 16 * g.dim * 2, 0);
+        e.setBuffer(table.buffer, table.offset + @as(usize, s) * @sizeOf(CachePtrs), 1);
         e.setValue(args, 2);
         e.setBuffer(scratch.get(parts[0]).buffer, 0, 3);
         e.setBuffer(scratch.get(parts[1]).buffer, 0, 4);
         e.setBuffer(scratch.get(parts[2]).buffer, 0, 5);
-        e.dispatchGroups(mtl.Size.of(g.kv_heads, chunks, (plan.tiles + pairs - 1) / pairs), mtl.Size.of(prompt_threads, 1, 1));
+        e.dispatchGroups(mtl.Size.of(g.kv_heads, chunks, (tiles + pairs - 1) / pairs), mtl.Size.of(prompt_threads, 1, 1));
         e.barrier();
         e.setPipeline(a.prompt.?[if (split) 1 else 2]);
         bind(e, .{ scratch.get(parts[0]), scratch.get(parts[1]), scratch.get(parts[2]) });
         e.setValue(args, 3);
         e.setBuffer(out.buffer, out.offset, 4);
-        e.dispatchGroups(mtl.Size.of(g.kv_heads, plan.rows * g.group(), 1), mtl.Size.of(32, 1, 1));
+        e.dispatchGroups(mtl.Size.of(g.kv_heads, rows * g.group(), 1), mtl.Size.of(32, 1, 1));
         e.barrier();
     }
     /// Trees and decoded rows: cached keys by chunk (prefix), the round's own by path (tail), merged and gated.
