@@ -116,6 +116,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         h.wrap = try lanes.drafted.Drafted.init(gpa, h.metal.backend(), d.drafter());
         // the verify copies the drafts on the GPU after the unwaited hold
         h.metal.held_source = d.heldSource();
+        h.metal.stage_source = d.stageSource();
         h.wrap.?.held_on_target = true;
     }
     errdefer if (h.wrap) |*w| w.deinit();

@@ -62,7 +62,7 @@ off; the lane core verifies every draft, so a drafted reply equals its `"draft":
 
 The drafter has no embedding and no head of its own:
 
-- Context: the target's rows after layers 2, 10, 18, 26 and 34 (the backend's taps, `lfm2_tap`), through `fc` and
+- Context: the target's rows after layers 2, 10, 18, 26 and 34 (the backend's taps, `lfm2_tap_rows`), through `fc` and
   `hidden_norm`, give each of its five layers' context keys and values (k_norm, then RoPE at the row's position).
 - Block: the pending token and mask tokens run five Qwen3 layers with non-causal attention over the context and the
   block, then the target's head. A block is as long as the deepest chain its pass holds, at most the nine rows the
@@ -74,7 +74,7 @@ quantizes them at load to 8-bit MLX affine codes in groups of 64: about 361 MiB 
 against 625 MiB. Weight storage does not guarantee serving throughput; the server logs the mode, and 4 bits is refused.
 Both run on the family's kernels
 (bf16 on `lfm2_bf16_rows`, `lfm2_bf16_mma` and `lfm2_markov_scan_bf16`, 8-bit on `core/tile_qmm`); the q and k rows are reordered so that the target's half-split RoPE kernel gives the
-checkpoint's interleaved RoPE. Its own kernels are `lfm2_tap`, `lfm2_attn_block` and `lfm2_attn_block_merge`
+checkpoint's interleaved RoPE. Its own kernels are `lfm2_tap_rows`, `lfm2_attn_block` and `lfm2_attn_block_merge`
 (non-causal block attention, the target's attention kernels with a template flag), `lfm2_markov_scan` and
 `lfm2_markov_pick` (a Markov step) and `lfm2_draft_ids` (a hold's drafts into the next verify's rows on the GPU, so
 the host does not wait for a hold that fits one pass). Each kept prompt state keeps the drafter's context too, so a
@@ -87,6 +87,10 @@ cohort into several passes, priced in execution order rather than as one impossi
 A new stream waits for its first funded hold while retaining its prompt context. Each lane owns incoming prompt
 and verified taps before the target overwrites them, projecting them only for a hold, snapshot or stage overflow.
 Zero-grant rounds therefore retain contiguous context for later drafts; they do not disable drafting by stream count.
+Decode and verify forwards copy their taps (`lfm2_tap_rows`) through each row's destination straight into the lane's
+stage, without a per-round host copy. A forward waits on a pending hold before replacing rows that hold still
+reads; only accepted rows become staged context. Stage overflow projects only the retained prefix before the next
+capture's anchor, so a reused anchor can replace its old row without losing contiguous context.
 
 `tf-kernel-contract --only lfm2` checks these kernels. `tf-lfm2-dspark MODEL DRAFTER TOKENS [ROWS]` runs the drafter
 against an fp32 host reference of the released checkpoint (the same taps and the target's embedding and head),

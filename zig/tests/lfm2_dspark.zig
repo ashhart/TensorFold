@@ -227,7 +227,7 @@ pub fn main(init: std.process.Init) !void {
     var scratch = try st.Scratch.init(gpa, m.device, &m.config.attention, length);
     defer scratch.deinit();
     const width = cfg.tap_count * c.hidden;
-    var taps: st.Taps = .{ .count = cfg.tap_count, .buf = try scratch.memory.alloc(length * width * 2) };
+    var taps: st.Taps = .{ .count = cfg.tap_count, .buf = try scratch.memory.alloc(length * (width * 2 + @sizeOf(u64))), .table_at = length * width * 2 };
     @memcpy(taps.layers[0..cfg.tap_count], cfg.taps[0..cfg.tap_count]);
     scratch.taps = taps;
     var cache = try st.Cache.init(gpa, m.device, &m.config.attention, length + 16);
@@ -284,6 +284,7 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("the owned stage: {d} rows staged in uneven absorbs, absorbed as one {d}-row piece like the direct absorbs' ({s} regime): keys, values and picks equal\n", .{ ctx, ctx, if (ctx <= 32) "<= 32-row" else "> 32-row" });
     }
     try @import("lfm2_dspark_lifecycle.zig").run(gpa, d, taps.buf, ids, ctx);
+    try @import("lfm2_dspark_capture.zig").targetTaps(gpa, m, &scratch, ids);
     // Absorb time is consumed once without repricing; a hold reprices only participating shapes.
     if (ctx > 0) {
         const grid = d.holds;
