@@ -189,6 +189,7 @@ pub const Lanes = struct {
         const ids = s.prompt();
         x.target.admit(slot, s.max_new);
         st.first = try x.target.prefill(slot, ids, s.sampling, ids.len);
+        s.cached = @intCast(x.target.resumedRows(slot));
         st.len = ids.len;
         _ = x.scratch.reset(.retain_capacity);
         // the taps hold the prompt's last rows (after a verify-tail prompt only that row), at their positions
