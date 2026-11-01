@@ -73,7 +73,7 @@ pub const Pages = struct {
         errdefer if (p.arena) |*a| a.free();
         if (host) {
             if (kv_host.shared()) {
-                p.shared = try kv_host.SharedPages.open(e.d, pages * page, leader);
+                p.shared = try kv_host.SharedPages.open(e.d, pages * page, leader, e.share.world);
                 p.host_ptr = p.shared.?.dev;
             } else {
                 p.host = try cuda.HostBuffer.allocMapped(e.d, pages * page);
