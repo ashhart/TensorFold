@@ -274,6 +274,24 @@ zig build video -Dffmpeg=$HOME/ffmpeg-9.0.2     # zig-out/native/lib/libtfvideo.
 - **Checks:** `tools/zig/glm_video_fixtures.py` checks the patches bit for bit against the processor on frames PyAV
   decodes, over 13 clips. `tools/zig/video_served.py` checks a served model's prompt ids against the processor's.
 
+### PDF inputs
+
+With `--vision`, user messages and tool results also accept inline PDF documents: `file` parts in
+`/v1/chat/completions`, `input_file` parts in `/v1/responses`, `document` blocks in `/v1/messages`, or
+`data:application/pdf;base64,...` URLs. Remote URLs (`file_url` or `document.source.type: "url"`) are refused.
+
+- **Libraries:** rendering requires PDFium (`chromium/7725`, `libpdfium.so` on Linux, `libpdfium.dylib` on macOS,
+  `pdfium.dll` on Windows; override with `TENSORFOLD_LIBPDFIUM`) and libjpeg-turbo 3.1.4.1 (`libturbojpeg`,
+  `TENSORFOLD_LIBTURBOJPEG`). Both are reported in `capabilities --json` and refused by name when missing.
+- **Page limit:** a PDF may have at most `min(16, --vision-max-images)` pages (`TENSORFOLD_MAX_PDF_PAGES` can lower or
+  raise the 16-page cap up to `--vision-max-images`). A PDF with more pages than the limit is refused with both counts
+  rather than truncated.
+- **Images only, no text layer:** each page is rendered at 144 DPI (bounded to 2,048 pixels a side and 3.6 megapixels)
+  and passed to the vision tower as a JPEG image (bounded by the 10 MiB per-image and 20 MiB per-request encoded byte
+  limits). No PDF text layer is extracted.
+- **In-process parsing:** PDFium parses and renders the PDF bytes directly inside the server process under a blocking
+  render lock, so one PDF renders at a time.
+
 ### Nemotron 3.5 Super VL on CUDA
 
 With `--vision`, Nemotron 3.5 Super VL reads images through the checkpoint's own RADIO tower and projector, run in
