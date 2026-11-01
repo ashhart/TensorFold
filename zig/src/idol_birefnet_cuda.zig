@@ -1,6 +1,7 @@
 //! Idol's background removal on CUDA; rooted here so preprocess.zig reaches core/picture as on Metal.
 pub const config = @import("families/idol/birefnet_config.zig");
 pub const preprocess = @import("families/idol/preprocess.zig");
+pub const photo = @import("families/idol/photo_host.zig");
 pub const reference = @import("families/idol/birefnet_reference.zig");
 pub const safetensors = @import("core/safetensors.zig");
 pub const kernels = @import("families/idol/cuda_birefnet_kernels.zig");
@@ -15,6 +16,7 @@ pub const admitted = net.admitted;
 test {
     _ = config;
     _ = preprocess;
+    _ = photo;
     _ = reference;
     _ = kernels;
     _ = weights;

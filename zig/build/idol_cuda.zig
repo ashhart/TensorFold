@@ -1,4 +1,4 @@
-//! Idol on CUDA in the build: each component's kernels for the contract, its CUDA tool, the host tests.
+//! Idol on CUDA in the build: each component's kernels for the contract, its CUDA tool, tf-idol-generate, host tests.
 const std = @import("std");
 
 /// The family's module over the runtime and the core.
@@ -38,6 +38,19 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         b.installArtifact(exe);
         b.step(t[2], t[3]).dependOn(&b.addInstallArtifact(exe, .{}).step);
     }
+    const gen = b.createModule(.{ .root_source_file = b.path("zig/tests/idol_generate_cuda.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "idol_e2e", .module = e2e(b, target, optimize, cuda, core) } } });
+    const exe = b.addExecutable(.{ .name = "tf-idol-generate", .root_module = gen });
+    b.installArtifact(exe);
+    b.step("idol-generate-cuda", "Build tf-idol-generate: Idol end to end on CUDA, a picture or a photo to a 3DGS PLY").dependOn(&b.addInstallArtifact(exe, .{}).step);
+}
+
+/// tf-idol-generate's module (idol_cuda_e2e.zig), its own `core` (BiRefNet reaches core by path), with core's imports.
+fn e2e(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module) *std.Build.Module {
+    const m = b.createModule(.{ .root_source_file = b.path("zig/src/idol_cuda_e2e.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "cuda", .module = cuda }} });
+    var it = core.import_table.iterator();
+    while (it.next()) |e| m.addImport(e.key_ptr.*, e.value_ptr.*);
+    m.addImport("core", m);
+    return m;
 }
 
 /// The family's host tests (config, scratch, admission, launch geometry, each component's contract ranges) in `all`.

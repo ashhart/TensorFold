@@ -1,4 +1,4 @@
-//! Idol on CUDA, each component driven by its tool (tf-idol, tf-idol-dino, tf-idol-vae, tf-idol-decode) as on Metal.
+//! Idol on CUDA, each component driven by its tool as on Metal, and all by tf-idol-generate (idol_cuda_e2e.zig).
 pub const config = @import("config.zig");
 pub const host = @import("host.zig");
 pub const reference = @import("reference.zig");
@@ -12,6 +12,7 @@ pub const admitted = @import("cuda_model.zig").admitted;
 pub const dino = @import("dino_cuda.zig");
 pub const vae = @import("cuda_vae.zig");
 pub const vae_kernels = @import("cuda_vae_kernels.zig");
+pub const vae_config = @import("vae_config.zig");
 pub const decoder_config = @import("decoder_config.zig");
 pub const decoder_kernels = @import("cuda_decoder_kernels.zig");
 pub const octree = @import("octree.zig");
@@ -29,7 +30,7 @@ test {
     _ = @import("cuda_vae.zig");
     _ = @import("cuda_vae_kernels.zig");
     _ = @import("cuda_vae_weights.zig");
-    _ = @import("vae_config.zig");
+    _ = vae_config;
     _ = @import("cuda_decoder.zig");
     _ = @import("cuda_decoder_kernels.zig");
     _ = @import("cuda_decoder_weights.zig");

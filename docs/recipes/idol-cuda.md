@@ -1,11 +1,12 @@
-# Idol's denoiser on CUDA
+# Idol on CUDA
 
 Idol's denoiser (see `idol.md`) on the CUDA runtime, beside the Metal family and driven by the same case driver
 (`zig/tests/idol_run.zig`): `tf-idol` on Metal and on CUDA reads the same case and runs the same gates. The other
 components are ported too, each with its own tool sharing its Metal driver: the DINOv3 image encoder
 ([DINOv3 encoder](#dinov3-encoder)), the FLUX.2 VAE image encoder ([VAE encoder](#vae-encoder)), the decoders
-([Decoders](#decoders)) and background removal ([BiRefNet](#background-removal-birefnet)). Nothing registers with the
-lane engine or the server.
+([Decoders](#decoders)) and background removal ([BiRefNet](#background-removal-birefnet)), and `tf-idol-generate`
+runs them all ([End to end](#end-to-end)); [GB10 qualification](#gb10-qualification) is one script. Nothing registers
+with the lane engine or the server.
 
 **Not run on a GPU yet.** It compiles for sm_120 and sm_121 and its host tests pass; no CUDA kernel of this family has
 run on a device. Until a GB10 or an RTX 50 card has run the kernel contract and a case, treat it as unqualified.
@@ -274,3 +275,79 @@ export TENSORFOLD_LIBTURBOJPEG="$HOME/opt/libjpeg-turbo-3.1.4.1/lib/libturbojpeg
 
 The build needs CMake and a C compiler; with NASM installed it also builds the SIMD paths. The prefix may install to
 `lib64/` instead of `lib/` on some distributions.
+
+## End to end
+
+`tf-idol-generate` runs on CUDA as on Metal: one driver (`zig/tests/idol_generate_run.zig`) with a thin main for each
+(`idol_generate.zig` on Metal, `idol_generate_cuda.zig` on CUDA). The arguments, flags, defaults (seed 42, 50 steps,
+guidance 3, 262,144 Gaussians), outputs (`generate.ply`, `camera.json`, `start.f32`, `sample.f32`,
+`tf-idol-generate.json`, and `preprocessed.png` for a photo) and JSON keys are the same. The one exception is the peak.
+On CUDA it is `cuda_peak_allocated_gb`, the process's peak device allocation as `cuda.usage` counts it (the CUDA
+context and cuBLASLt's own pools are not in it), and the summary line says `CUDA peak`. Metal keeps
+`metal_peak_allocated_gb`. Each stage loads its CUDA model, runs it and frees it before the next: BiRefNet for a photo
+(`photo_host.zig`'s preprocessing, shared with Metal), DINOv3, the VAE, the denoiser, then the decoders.
+
+**It compiles and passes host tests; it has never run on a GPU; GB10 qualification is pending.** Every stage admits
+sm_121 and sm_120 alone.
+
+```sh
+zig build idol-generate-cuda -Dnvcc=/usr/local/cuda-13.0/bin/nvcc -Dsm=121
+zig-out/bin/tf-idol-generate SNAPSHOT VAE_DIR DINO_DIR picture.safetensors out/
+zig-out/bin/tf-idol-generate SNAPSHOT VAE_DIR DINO_DIR photo.png out/ --mode synthetic
+```
+
+The tool is one module, `zig/src/idol_cuda_e2e.zig`, which the build also passes to the family as its `core`.
+BiRefNet's host steps reach `core/` by path, as on Metal, so a separate core module beside them would hold the same
+files twice.
+
+## GB10 qualification
+
+`tools/zig/idol_gb10_qualify.sh WEIGHTS NOTES [OUT]` qualifies every component and the end-to-end tool on a DGX Spark
+in one run. It needs nvcc 13.0 with `cuobjdump`, Zig 0.17, GNU time and python3 with numpy. In order, it:
+
+1. checks that `nvidia-smi` reports sm_121 (or sm_120). Without one, it records that the GPU steps did not run;
+2. builds the fatbins for `SM` (121), the CUDA tools and `tf-cuda-test`; checks that `tf_idol_attention`'s SASS is
+   identical with #1767's `idol_attention.cuh` at sm_80, 86, 89, 120 and 121; builds the contract images for every
+   SM;
+3. runs `idol-contract`, `idol-dino-contract`, `idol-vae-contract`, `idol-decoder-contract`,
+   `idol-birefnet-contract`, the full `kernel-contract` and `kernel-contract-limits` over every SM;
+4. runs each tool on its Mac case: the denoiser's case50 (and `blocks 0`), the decoders' decode262k and decode32k
+   (and a timed 262,144-Gaussian run), the VAE's and DINOv3's cases, and BiRefNet's six. The JPEG case runs only
+   when `TENSORFOLD_LIBTURBOJPEG` is set;
+5. runs `tf-idol-generate` from the safetensors picture and from the opaque photo (seed 42, 50 steps, 262,144
+   Gaussians), then once more with the SDK's noise (`--noise`). The SDK-noise run must reach a sample cosine of at
+   least 0.998 against the SDK's sample and a sampled nearest-neighbour mean of at most 0.0100 against its PLY
+   (Metal: 0.99835 and 0.00922, baseline 0.00896). Each sample is also compared with Metal's.
+
+Each case runs in a directory of links to its inputs, so no tool writes into NOTES. Every timed run is under
+`/usr/bin/time -v`, with nvidia-smi's memory and `MemAvailable` sampled every half second. GB10's memory is unified,
+so nvidia-smi may report none of it. Each step's log goes to `OUT/logs/`, outputs and samples to `OUT/runs/`, and
+results to `OUT/steps.tsv`. `OUT/summary.md` holds one page: each step's result and seconds, the contract lines, and
+timings and peaks beside Metal's. The run continues past a failed step and exits non-zero if any step failed.
+`--build-only` checks the GPU and builds; `--skip-build` reuses `zig-out/`; `--dry-run` prints the steps.
+`SKIP_LIMITS=1` leaves out the all-SM build, the longest step, and `SKIP_SASS=1` the SASS check.
+
+Copy these from the Mac:
+
+- WEIGHTS: the speridlabs/idol snapshot (`config.json`, `denoiser.safetensors`, `decoder.safetensors`,
+  `decoder_gs.safetensors`, `birefnet.safetensors`), with FLUX.2-klein-4B's `vae/` in `WEIGHTS/flux2-vae` and timm's
+  DINOv3 ViT-H+/16 in `WEIGHTS/dino-timm-base` (or point `VAE_DIR` and `DINO_DIR` at them). DINOv3's weights are
+  under Meta's DINOv3 License.
+- NOTES, the case root, with these files under it:
+  - `case50/`: `case.safetensors`, `exact.safetensors`, `reference.json`, `blocks0.safetensors`,
+    `blocks0_f32.safetensors` and Metal's `tf-idol.json`;
+  - `decode262k/` and `decode32k/`: `decode.safetensors`, `decode.json`, `reference.ply` and Metal's
+    `tf-idol-decode.json`;
+  - `vae/case/`: `vae.safetensors`, `vae.json` and Metal's `tf-idol-vae.json`;
+  - `dino/case/`: `dino.safetensors`, `dino.json` and Metal's `tf-idol-dino.json`. Add `dino_blocks.safetensors`
+    and `dino_blocks_f32.safetensors` (`idol_case.py dino` without `--no-blocks`) for the per-block gates;
+  - `birefnet/cases/{avocado,webp,opaque,opaque-real,rgba,jpeg}/`: `birefnet.safetensors`, `birefnet.json`, Metal's
+    `tf-idol-birefnet.json` and avocado's `birefnet_stages.safetensors`;
+  - `birefnet/photos/`: `reference-avocado-input.png`, `food-avocado.webp`, `avocado-opaque.png`,
+    `avocado-rgba.png` and `avocado-opaque.jpg`;
+  - `e2e/sdk/`: the SDK's `sdk-record.safetensors` and `sdk.ply`. From Metal's runs: `sample.f32` in each of
+    `e2e/sdknoise/`, `e2e/cold/` and `birefnet/e2e/ours-opaque-final/`.
+
+The Metal numbers to compare (M5 Ultra, avocado, seed 42, 50 steps, 262,144 Gaussians) are 29.1 s and a 2.71 GB peak
+footprint from the picture, and 30.07 s and 2.77 GB from the opaque photo. The SDK on MPS takes about 100.8 s and
+12.88 GB.

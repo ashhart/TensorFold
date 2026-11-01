@@ -56,8 +56,8 @@ pub fn Attention(comptime E: type) type {
 
         const Self = @This();
 
-        pub fn spec(name: []const u8, at: []const c.Shape) c.Spec {
-            return .{ .name = name, .accum = .f32, .depth = keyChain, .ops = 6, .out = E.elem, .tiles = .{ .{}, .{ .size = 16 * E.warps }, .{} }, .served = at, .sums = .{ .why = E.why } };
+        pub fn spec(name: []const u8, calls: []const c.Shape) c.Spec {
+            return .{ .name = name, .accum = .f32, .depth = keyChain, .ops = 6, .out = E.elem, .tiles = .{ .{}, .{ .size = 16 * E.warps }, .{} }, .served = calls, .sums = .{ .why = E.why } };
         }
 
         pub fn deinit(t: *Self) void {

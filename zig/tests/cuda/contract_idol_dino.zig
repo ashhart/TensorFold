@@ -38,7 +38,7 @@ pub const Set = struct {
     ctl_swiglu: case.Case(ops.Swiglu) = undefined,
 
     /// The planted controls: the function each replaces, its symbol in contract_controls, the gate it must fail.
-    const planted = [_]struct { []const u8, []const u8, g.Gate }{
+    const planted = [_]struct { []const u8, [:0]const u8, g.Gate }{
         .{ "bias", "tf_ctl_idol_dino_bias_twice", .shapes },
         .{ "norm", "tf_ctl_idol_dino_norm_half", .sums },
         .{ "final", "tf_ctl_idol_dino_final_half", .sums },
