@@ -103,8 +103,7 @@ pub fn forward(d: anytype, items: []const dr.Hold, contexts: []const *draft.Ctx)
         try d.norm(d.h2, l.post_norm, d.x, B);
         try d.projAgain(l.mlp_conv, d.x, d.dyn, B);
         try conv(d, d.x, l.mlp_base, 0, d.xin, B, 0);
-        try d.proj(l.gate, d.xin, d.gate, B);
-        try d.projAgain(l.up, d.xin, d.up, B);
+        try d.projManySums(&.{ l.gate, l.up }, d.xin, &.{ d.gate, d.up }, B, true);
         try e.run(e.fns.mlp_act, .{ (B * c.intermediate + 1023) / 1024, 1, 1 }, .{ 256, 1, 1 }, .{ d.gate, d.up, d.act, @as(c_longlong, @intCast(B * c.intermediate)), @as(u64, 0), @as(c_int, @intCast(c.intermediate)), d.xs });
         try d.projAgain(l.down, d.act, d.o, B);
         try conv(d, d.o, l.mlp_base, d.h2, d.h, B, 1);
@@ -178,8 +177,12 @@ fn head(d: anytype, rows: usize) !?u64 {
     const a = d.logits; // rows x 98,304, then rows x the tail's columns, then the packed rows x 98,592
     const b = a + rows * spans[0][1] * 2;
     const out = b + rows * tail_n * 2;
-    try draft.precision.project(e, first, d.x, d.xs, a, rows, .proposal, draft.precision.dflash_projection_prompt_cutoff);
-    try draft.precision.project(e, tail, d.x, d.xs, b, rows, .proposal, draft.precision.dflash_projection_prompt_cutoff);
+    if (e.affine.pdl and first == .a4 and tail == .a4) {
+        try e.projManySums(&.{ first, tail }, d.x, d.xs, &.{ a, b }, rows, false, 0);
+    } else {
+        try draft.precision.project(e, first, d.x, d.xs, a, rows, .proposal, draft.precision.dflash_projection_prompt_cutoff);
+        try draft.precision.project(e, tail, d.x, d.xs, b, rows, .proposal, draft.precision.dflash_projection_prompt_cutoff);
+    }
     const skip = spans[1][0] - tail_at;
     const copies = [2]cuda.abi.Memcpy2D{
         .{ .src = a, .src_pitch = spans[0][1] * 2, .dst = out, .dst_pitch = span_width * 2, .width = spans[0][1] * 2, .height = rows },
