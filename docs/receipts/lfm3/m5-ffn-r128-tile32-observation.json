@@ -1,0 +1,116 @@
+{
+  "schema": 1,
+  "status": "numerically-passed-no-material-incremental-gain",
+  "scope": "M5 actual TEXT4 layer0 FFN gate R128 K2048 N7680 GS64 q4; standalone operator only; no public runtime change or serving qualification.",
+  "change": "Two independent original16x32 row halves share a32x32 threadgroup; all4SIMDgroups active; original per-output MPP, group and DD order retained.",
+  "geometry": {
+    "prior_threadgroups": 7680,
+    "candidate_threadgroups": 3840,
+    "threads": 128,
+    "prior_static_lds_bytes": 4864,
+    "candidate_static_lds_bytes": 9216,
+    "prior_live_output_pairs_per_thread": 4,
+    "candidate_live_output_pairs_per_thread": 8
+  },
+  "numerical": {
+    "full_raw_arrays_byte_identical_to_prior_qualified_route": 24,
+    "final_primary_qualified_words": 983040,
+    "metadata_reflection_pass": true,
+    "wrong_rowhalf_control_exit": 1,
+    "wrong_band_control_exit": 1,
+    "negative_control_error": "Tile32IdentityMismatch",
+    "strict_primary_gate_inherited_by_full_output_identity": true,
+    "universal_MPP_contract_claim": false
+  },
+  "stage_diagnostic": {
+    "scope": "20singleton GPUstage diagnostics; no throughput/occupancy qualification",
+    "median_us": {
+      "baseline": 612.4377250671387,
+      "fullroute": 585.3958427906036,
+      "prepare": 22.979220375418663,
+      "producer": 469.43756751716137,
+      "fused_finish": 103.99986058473587,
+      "sum_stages": 597.9789420962334
+    },
+    "min_us": {
+      "baseline": 483.91660675406456,
+      "fullroute": 466.0417325794697,
+      "prepare": 18.500257283449173,
+      "producer": 374.62497130036354,
+      "fused_finish": 85.87492629885674,
+      "sum_stages": 479.58362847566605
+    },
+    "max_us": {
+      "baseline": 661.1663848161697,
+      "fullroute": 634.0001709759235,
+      "prepare": 24.79134127497673,
+      "producer": 509.08373668789864,
+      "fused_finish": 113.58316987752914,
+      "sum_stages": 644.2503072321415
+    },
+    "all_final_identities": true,
+    "selected": 1068
+  },
+  "stage_caveats": [
+    "Separate command buffers perturb scheduling; stage times are nonadditive diagnostics.",
+    "Singleton sample clocks drift substantially; no stable throughput qualification from stage medians."
+  ],
+  "complete_cost": {
+    "scope": "Exploratory actual R128 fullwidth gate operator screen, five balanced rounds; operator confirmation only, not model/HTTP qualification",
+    "rows": 128,
+    "n": 7680,
+    "group": 64,
+    "bits": 4,
+    "equal_useful_matrix_work_per_sample": true,
+    "common_repetitions": 64,
+    "median_gpu_seconds_per_op": {
+      "public_row_pairs": 0.0004781292300322093,
+      "tile_fullroute": 0.00044869270641356707
+    },
+    "candidate_throughput_vs_public": {
+      "tile": 1.0656050860597457
+    },
+    "baseline_first_last_drift_fraction": 7.079625654597148e-05,
+    "exploratory_drift_limit": 0.05,
+    "stable_for_exploratory_screen": true,
+    "within_round_spreads": [
+      5.311100043867556e-05,
+      0.00011321098934207741,
+      2.7238328266015176e-05,
+      0.0005251213227473937,
+      4.630868883476131e-05,
+      0.0005439663894102429,
+      9.541302781807912e-06,
+      0.00018286797618239498,
+      2.1761088027618503e-05,
+      0.0008134824366681932
+    ],
+    "all_stability_gates_passed": true,
+    "actual_selected_outputs": [
+      1068,
+      0
+    ],
+    "actual_repair_fractions": [
+      0.00108642578125,
+      0.0
+    ],
+    "diagnostics_in_timed_work": {
+      "centers_bounds_stores": true,
+      "raw_groupdot_capture": false,
+      "snapshot": false,
+      "prepare_each_op": true,
+      "actual_repair_dispatch": true
+    },
+    "final_performance_qualification": false
+  },
+  "interpretation": "448.693us candidate versus478.129us public confirms existing roughly6% standalone gain. Prior16x32 candidate about448.6us; no meaningful incremental gain established. Half the threadgroup count did not produce a large speedup. No serving promotion.",
+  "provenance": {
+    "numerical_manifest_sha256": "588e8c651cc2f26b698568a5d584f9461e2f416ab92b7ba2e36232c0bb92d74f",
+    "cost_manifest_sha256": "ecc58f84fabf040e39d8ffd71dd90bd72023bfdadfca38fb005998f35fb45269",
+    "cost_raw_sha256": "efca3ab94ff357e2395a49d066fdc812619c83e699a0c734331c048e8430a634",
+    "cost_analysis_sha256": "b86012b8f459221a03710b67d63e40ac39f4608652a35b0efb8c97bca0c22fd3",
+    "stage_analysis_sha256": "75a18e951cae2b1fbd249cdf92a9703e016c0e73c43986bdd54d19ad5eacdefa",
+    "numerical_identity_sha256": "e6d3158b1aaa1baa0d1d26529f62be327468c184311a4692da3ca2ccb2c84912",
+    "all_jobs_exited_and_leases_released": true
+  }
+}

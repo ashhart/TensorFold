@@ -1,0 +1,10 @@
+{
+  "scope": "Extracted text normal contract build and host verification after compensated-cancellation correction; no GPU run is asserted for this executable.",
+  "source_commit": "c53423d0edfe11936ce77825a72ba1d45b85c4f2",
+  "command": "zig build test-kernel-contract tf-kernel-contract -Dcpu=apple_m1 --summary all",
+  "summary": "Build Summary: 61/61 steps succeeded; 121/121 tests passed",
+  "binary_sha256": "8adc967eaaa618f957c26f7ef2e8abd6dfe0edeacf53d2f33ce17035b37cf5b7",
+  "log_sha256": "1a103b6409def0b10b99e6e1b9fb737f9c613cb0e57de8becf5258141a9c011b",
+  "host": "Apple M4 Pro, macOS 26.5.1",
+  "compiler": "Zig 0.17.0"
+}

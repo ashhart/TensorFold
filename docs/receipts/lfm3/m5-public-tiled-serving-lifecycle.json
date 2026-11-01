@@ -1,0 +1,635 @@
+{
+  "scope": "Bounded M5 TEXT4 enabled public tiled prompt serving/lifecycle checks; no performance or broad numerical qualification.",
+  "source_commit": "8df18abc47568246c0d38b70c2e280521a24b31a",
+  "build_options": {
+    "lfm3-residual-ffn": true,
+    "lfm3-tiled-attention": true
+  },
+  "binary_sha256": "84b6716b59b19e10592e38f48d159f2c0e440c48cf707bbacf20ba62688537bc",
+  "instrumentation": "Only aggregate dispatch counters and model-deinit logging; shaders and forward control flow unchanged.",
+  "instrumentation_sha256": "211810b34c79ad89e9d7b6c22068ff8e3e98dde7fe35d45f96c8467de18a64bf",
+  "shader_sha256": {
+    "residual_ffn.metal": "add7140a9ec0589fe674c2066317b9e511430596892cbeb1b831feadd465c86b",
+    "attention_tiled.metal": "126a69dbfcf1e57d6fb1f9ceabaab840741a7acb54902b622c534648335521b9"
+  },
+  "model": "LFM3-1.7B-MLX-4bit",
+  "checkpoint_sha256": "1be5bf672013cd91aa62148f77c5eea8d2784a95845d5fe826e08c7b84823815",
+  "serving": {
+    "model": "LFM3-1.7B-MLX-4bit",
+    "binary_sha256": "84b6716b59b19e10592e38f48d159f2c0e440c48cf707bbacf20ba62688537bc",
+    "tests": [
+      {
+        "name": "code/fresh_plain",
+        "status": "passed",
+        "evidence": {
+          "prompt_tokens": 193,
+          "cached_tokens": 0,
+          "tokens": 24,
+          "cache_state": "cold",
+          "complete": true,
+          "token_sha": "644594753a98",
+          "token_sha256": "644594753a98675a02af5cb19ca628a3264567727d10849d9155051c08668310",
+          "output_sha256": "5d4e262cc905e76142ebc5e775f2f5ffbf2b18e2981e56d5eb8e7da1a7d58d90",
+          "text": " \nWrite a Python function that returns the smaller of two integers. \nWrite a Python function that returns the sum of two"
+        }
+      },
+      {
+        "name": "chat/fresh_plain",
+        "status": "passed",
+        "evidence": {
+          "prompt_tokens": 202,
+          "cached_tokens": 0,
+          "tokens": 24,
+          "cache_state": "cold",
+          "complete": true,
+          "token_sha": "f6d87f5c720c",
+          "token_sha256": "f6d87f5c720cc029037a27f699cad20ac08a471e5d1c3c26c78fd0633cd35fdb",
+          "output_sha256": "d1f5745bade9df792ecbaabfaa0d71992c4ca82ef25a9fb955682ef523d84b61",
+          "text": "The sky appears blue because molecules in the atmosphere scatter sunlight, and shorter wavelengths of light (like blue) are scattered more"
+        }
+      },
+      {
+        "name": "long_prefix/fresh_plain",
+        "status": "passed",
+        "evidence": {
+          "prompt_tokens": 910,
+          "cached_tokens": 0,
+          "tokens": 24,
+          "cache_state": "cold",
+          "complete": true,
+          "token_sha": "aa7eae3dfd00",
+          "token_sha256": "aa7eae3dfd0032e7c2e2242fb31bb477741ec3b1431b9eb2bcf937254f60e351",
+          "output_sha256": "997ba91a7473fbabe7bef7f814cd62ffcdb9a0ee609e152cc3eb92f06fce589e",
+          "text": " The river flows past a quiet village. Children watch birds near the bridge. The river flows past a quiet village. Children"
+        }
+      },
+      {
+        "name": "edited_prefix/fresh_plain",
+        "status": "passed",
+        "evidence": {
+          "prompt_tokens": 904,
+          "cached_tokens": 0,
+          "tokens": 24,
+          "cache_state": "cold",
+          "complete": true,
+          "token_sha": "aa7eae3dfd00",
+          "token_sha256": "aa7eae3dfd0032e7c2e2242fb31bb477741ec3b1431b9eb2bcf937254f60e351",
+          "output_sha256": "997ba91a7473fbabe7bef7f814cd62ffcdb9a0ee609e152cc3eb92f06fce589e",
+          "text": " The river flows past a quiet village. Children watch birds near the bridge. The river flows past a quiet village. Children"
+        }
+      },
+      {
+        "name": "long_prefix/length_over_256",
+        "status": "passed",
+        "evidence": 910
+      },
+      {
+        "name": "code/plain_equals_fresh",
+        "status": "passed",
+        "evidence": {
+          "prompt_tokens": 193,
+          "cached_tokens": 0,
+          "tokens": 24,
+          "cache_state": "cold",
+          "complete": true,
+          "token_sha": "644594753a98",
+          "token_sha256": "644594753a98675a02af5cb19ca628a3264567727d10849d9155051c08668310",
+          "output_sha256": "5d4e262cc905e76142ebc5e775f2f5ffbf2b18e2981e56d5eb8e7da1a7d58d90",
+          "text": " \nWrite a Python function that returns the smaller of two integers. \nWrite a Python function that returns the sum of two"
+        }
+      },
+      {
+        "name": "code/drafted_equals_fresh",
+        "status": "passed",
+        "evidence": {
+          "prompt_tokens": 193,
+          "cached_tokens": 0,
+          "tokens": 24,
+          "cache_state": "cold",
+          "complete": true,
+          "token_sha": "644594753a98",
+          "token_sha256": "644594753a98675a02af5cb19ca628a3264567727d10849d9155051c08668310",
+          "output_sha256": "5d4e262cc905e76142ebc5e775f2f5ffbf2b18e2981e56d5eb8e7da1a7d58d90",
+          "text": " \nWrite a Python function that returns the smaller of two integers. \nWrite a Python function that returns the sum of two"
+        }
+      },
+      {
+        "name": "chat/plain_equals_fresh",
+        "status": "passed",
+        "evidence": {
+          "prompt_tokens": 202,
+          "cached_tokens": 0,
+          "tokens": 24,
+          "cache_state": "cold",
+          "complete": true,
+          "token_sha": "f6d87f5c720c",
+          "token_sha256": "f6d87f5c720cc029037a27f699cad20ac08a471e5d1c3c26c78fd0633cd35fdb",
+          "output_sha256": "d1f5745bade9df792ecbaabfaa0d71992c4ca82ef25a9fb955682ef523d84b61",
+          "text": "The sky appears blue because molecules in the atmosphere scatter sunlight, and shorter wavelengths of light (like blue) are scattered more"
+        }
+      },
+      {
+        "name": "chat/drafted_equals_fresh",
+        "status": "passed",
+        "evidence": {
+          "prompt_tokens": 202,
+          "cached_tokens": 128,
+          "tokens": 24,
+          "cache_state": "reused",
+          "complete": true,
+          "token_sha": "f6d87f5c720c",
+          "token_sha256": "f6d87f5c720cc029037a27f699cad20ac08a471e5d1c3c26c78fd0633cd35fdb",
+          "output_sha256": "d1f5745bade9df792ecbaabfaa0d71992c4ca82ef25a9fb955682ef523d84b61",
+          "text": "The sky appears blue because molecules in the atmosphere scatter sunlight, and shorter wavelengths of light (like blue) are scattered more"
+        }
+      },
+      {
+        "name": "long_prefix/plain_equals_fresh",
+        "status": "passed",
+        "evidence": {
+          "prompt_tokens": 910,
+          "cached_tokens": 0,
+          "tokens": 24,
+          "cache_state": "cold",
+          "complete": true,
+          "token_sha": "aa7eae3dfd00",
+          "token_sha256": "aa7eae3dfd0032e7c2e2242fb31bb477741ec3b1431b9eb2bcf937254f60e351",
+          "output_sha256": "997ba91a7473fbabe7bef7f814cd62ffcdb9a0ee609e152cc3eb92f06fce589e",
+          "text": " The river flows past a quiet village. Children watch birds near the bridge. The river flows past a quiet village. Children"
+        }
+      },
+      {
+        "name": "long_prefix/drafted_equals_fresh",
+        "status": "passed",
+        "evidence": {
+          "prompt_tokens": 910,
+          "cached_tokens": 0,
+          "tokens": 24,
+          "cache_state": "cold",
+          "complete": true,
+          "token_sha": "aa7eae3dfd00",
+          "token_sha256": "aa7eae3dfd0032e7c2e2242fb31bb477741ec3b1431b9eb2bcf937254f60e351",
+          "output_sha256": "997ba91a7473fbabe7bef7f814cd62ffcdb9a0ee609e152cc3eb92f06fce589e",
+          "text": " The river flows past a quiet village. Children watch birds near the bridge. The river flows past a quiet village. Children"
+        }
+      },
+      {
+        "name": "long_prefix/warm_reuses_and_matches_fresh",
+        "status": "passed",
+        "evidence": {
+          "prompt_tokens": 910,
+          "cached_tokens": 896,
+          "tokens": 24,
+          "cache_state": "reused",
+          "complete": true,
+          "token_sha": "aa7eae3dfd00",
+          "token_sha256": "aa7eae3dfd0032e7c2e2242fb31bb477741ec3b1431b9eb2bcf937254f60e351",
+          "output_sha256": "997ba91a7473fbabe7bef7f814cd62ffcdb9a0ee609e152cc3eb92f06fce589e",
+          "text": " The river flows past a quiet village. Children watch birds near the bridge. The river flows past a quiet village. Children"
+        }
+      },
+      {
+        "name": "edited_prefix/no_stale_prefix_reuse",
+        "status": "passed",
+        "evidence": {
+          "prompt_tokens": 904,
+          "cached_tokens": 0,
+          "tokens": 24,
+          "cache_state": "cold",
+          "complete": true,
+          "token_sha": "aa7eae3dfd00",
+          "token_sha256": "aa7eae3dfd0032e7c2e2242fb31bb477741ec3b1431b9eb2bcf937254f60e351",
+          "output_sha256": "997ba91a7473fbabe7bef7f814cd62ffcdb9a0ee609e152cc3eb92f06fce589e",
+          "text": " The river flows past a quiet village. Children watch birds near the bridge. The river flows past a quiet village. Children"
+        }
+      },
+      {
+        "name": "edited_prefix/plain_equals_fresh",
+        "status": "passed",
+        "evidence": {
+          "prompt_tokens": 904,
+          "cached_tokens": 0,
+          "tokens": 24,
+          "cache_state": "cold",
+          "complete": true,
+          "token_sha": "aa7eae3dfd00",
+          "token_sha256": "aa7eae3dfd0032e7c2e2242fb31bb477741ec3b1431b9eb2bcf937254f60e351",
+          "output_sha256": "997ba91a7473fbabe7bef7f814cd62ffcdb9a0ee609e152cc3eb92f06fce589e",
+          "text": " The river flows past a quiet village. Children watch birds near the bridge. The river flows past a quiet village. Children"
+        }
+      },
+      {
+        "name": "edited_prefix/drafted_equals_fresh",
+        "status": "passed",
+        "evidence": {
+          "prompt_tokens": 904,
+          "cached_tokens": 0,
+          "tokens": 24,
+          "cache_state": "cold",
+          "complete": true,
+          "token_sha": "aa7eae3dfd00",
+          "token_sha256": "aa7eae3dfd0032e7c2e2242fb31bb477741ec3b1431b9eb2bcf937254f60e351",
+          "output_sha256": "997ba91a7473fbabe7bef7f814cd62ffcdb9a0ee609e152cc3eb92f06fce589e",
+          "text": " The river flows past a quiet village. Children watch birds near the bridge. The river flows past a quiet village. Children"
+        }
+      },
+      {
+        "name": "edited_prefix/matches_cache_off",
+        "status": "passed",
+        "evidence": {
+          "prompt_tokens": 904,
+          "cached_tokens": 896,
+          "tokens": 24,
+          "cache_state": "reused",
+          "complete": true,
+          "token_sha": "aa7eae3dfd00",
+          "token_sha256": "aa7eae3dfd0032e7c2e2242fb31bb477741ec3b1431b9eb2bcf937254f60e351",
+          "output_sha256": "997ba91a7473fbabe7bef7f814cd62ffcdb9a0ee609e152cc3eb92f06fce589e",
+          "text": " The river flows past a quiet village. Children watch birds near the bridge. The river flows past a quiet village. Children"
+        }
+      },
+      {
+        "name": "code/concurrent_1_equals_solo",
+        "status": "passed",
+        "evidence": [
+          {
+            "prompt_tokens": 193,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "644594753a98",
+            "token_sha256": "644594753a98675a02af5cb19ca628a3264567727d10849d9155051c08668310",
+            "output_sha256": "5d4e262cc905e76142ebc5e775f2f5ffbf2b18e2981e56d5eb8e7da1a7d58d90",
+            "text": " \nWrite a Python function that returns the smaller of two integers. \nWrite a Python function that returns the sum of two"
+          }
+        ]
+      },
+      {
+        "name": "chat/concurrent_1_equals_solo",
+        "status": "passed",
+        "evidence": [
+          {
+            "prompt_tokens": 202,
+            "cached_tokens": 128,
+            "tokens": 24,
+            "cache_state": "reused",
+            "complete": true,
+            "token_sha": "f6d87f5c720c",
+            "token_sha256": "f6d87f5c720cc029037a27f699cad20ac08a471e5d1c3c26c78fd0633cd35fdb",
+            "output_sha256": "d1f5745bade9df792ecbaabfaa0d71992c4ca82ef25a9fb955682ef523d84b61",
+            "text": "The sky appears blue because molecules in the atmosphere scatter sunlight, and shorter wavelengths of light (like blue) are scattered more"
+          }
+        ]
+      },
+      {
+        "name": "code/concurrent_2_equals_solo",
+        "status": "passed",
+        "evidence": [
+          {
+            "prompt_tokens": 193,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "644594753a98",
+            "token_sha256": "644594753a98675a02af5cb19ca628a3264567727d10849d9155051c08668310",
+            "output_sha256": "5d4e262cc905e76142ebc5e775f2f5ffbf2b18e2981e56d5eb8e7da1a7d58d90",
+            "text": " \nWrite a Python function that returns the smaller of two integers. \nWrite a Python function that returns the sum of two"
+          },
+          {
+            "prompt_tokens": 193,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "644594753a98",
+            "token_sha256": "644594753a98675a02af5cb19ca628a3264567727d10849d9155051c08668310",
+            "output_sha256": "5d4e262cc905e76142ebc5e775f2f5ffbf2b18e2981e56d5eb8e7da1a7d58d90",
+            "text": " \nWrite a Python function that returns the smaller of two integers. \nWrite a Python function that returns the sum of two"
+          }
+        ]
+      },
+      {
+        "name": "chat/concurrent_2_equals_solo",
+        "status": "passed",
+        "evidence": [
+          {
+            "prompt_tokens": 202,
+            "cached_tokens": 128,
+            "tokens": 24,
+            "cache_state": "reused",
+            "complete": true,
+            "token_sha": "f6d87f5c720c",
+            "token_sha256": "f6d87f5c720cc029037a27f699cad20ac08a471e5d1c3c26c78fd0633cd35fdb",
+            "output_sha256": "d1f5745bade9df792ecbaabfaa0d71992c4ca82ef25a9fb955682ef523d84b61",
+            "text": "The sky appears blue because molecules in the atmosphere scatter sunlight, and shorter wavelengths of light (like blue) are scattered more"
+          },
+          {
+            "prompt_tokens": 202,
+            "cached_tokens": 128,
+            "tokens": 24,
+            "cache_state": "reused",
+            "complete": true,
+            "token_sha": "f6d87f5c720c",
+            "token_sha256": "f6d87f5c720cc029037a27f699cad20ac08a471e5d1c3c26c78fd0633cd35fdb",
+            "output_sha256": "d1f5745bade9df792ecbaabfaa0d71992c4ca82ef25a9fb955682ef523d84b61",
+            "text": "The sky appears blue because molecules in the atmosphere scatter sunlight, and shorter wavelengths of light (like blue) are scattered more"
+          }
+        ]
+      },
+      {
+        "name": "code/concurrent_4_equals_solo",
+        "status": "passed",
+        "evidence": [
+          {
+            "prompt_tokens": 193,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "644594753a98",
+            "token_sha256": "644594753a98675a02af5cb19ca628a3264567727d10849d9155051c08668310",
+            "output_sha256": "5d4e262cc905e76142ebc5e775f2f5ffbf2b18e2981e56d5eb8e7da1a7d58d90",
+            "text": " \nWrite a Python function that returns the smaller of two integers. \nWrite a Python function that returns the sum of two"
+          },
+          {
+            "prompt_tokens": 193,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "644594753a98",
+            "token_sha256": "644594753a98675a02af5cb19ca628a3264567727d10849d9155051c08668310",
+            "output_sha256": "5d4e262cc905e76142ebc5e775f2f5ffbf2b18e2981e56d5eb8e7da1a7d58d90",
+            "text": " \nWrite a Python function that returns the smaller of two integers. \nWrite a Python function that returns the sum of two"
+          },
+          {
+            "prompt_tokens": 193,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "644594753a98",
+            "token_sha256": "644594753a98675a02af5cb19ca628a3264567727d10849d9155051c08668310",
+            "output_sha256": "5d4e262cc905e76142ebc5e775f2f5ffbf2b18e2981e56d5eb8e7da1a7d58d90",
+            "text": " \nWrite a Python function that returns the smaller of two integers. \nWrite a Python function that returns the sum of two"
+          },
+          {
+            "prompt_tokens": 193,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "644594753a98",
+            "token_sha256": "644594753a98675a02af5cb19ca628a3264567727d10849d9155051c08668310",
+            "output_sha256": "5d4e262cc905e76142ebc5e775f2f5ffbf2b18e2981e56d5eb8e7da1a7d58d90",
+            "text": " \nWrite a Python function that returns the smaller of two integers. \nWrite a Python function that returns the sum of two"
+          }
+        ]
+      },
+      {
+        "name": "chat/concurrent_4_equals_solo",
+        "status": "passed",
+        "evidence": [
+          {
+            "prompt_tokens": 202,
+            "cached_tokens": 128,
+            "tokens": 24,
+            "cache_state": "reused",
+            "complete": true,
+            "token_sha": "f6d87f5c720c",
+            "token_sha256": "f6d87f5c720cc029037a27f699cad20ac08a471e5d1c3c26c78fd0633cd35fdb",
+            "output_sha256": "d1f5745bade9df792ecbaabfaa0d71992c4ca82ef25a9fb955682ef523d84b61",
+            "text": "The sky appears blue because molecules in the atmosphere scatter sunlight, and shorter wavelengths of light (like blue) are scattered more"
+          },
+          {
+            "prompt_tokens": 202,
+            "cached_tokens": 128,
+            "tokens": 24,
+            "cache_state": "reused",
+            "complete": true,
+            "token_sha": "f6d87f5c720c",
+            "token_sha256": "f6d87f5c720cc029037a27f699cad20ac08a471e5d1c3c26c78fd0633cd35fdb",
+            "output_sha256": "d1f5745bade9df792ecbaabfaa0d71992c4ca82ef25a9fb955682ef523d84b61",
+            "text": "The sky appears blue because molecules in the atmosphere scatter sunlight, and shorter wavelengths of light (like blue) are scattered more"
+          },
+          {
+            "prompt_tokens": 202,
+            "cached_tokens": 128,
+            "tokens": 24,
+            "cache_state": "reused",
+            "complete": true,
+            "token_sha": "f6d87f5c720c",
+            "token_sha256": "f6d87f5c720cc029037a27f699cad20ac08a471e5d1c3c26c78fd0633cd35fdb",
+            "output_sha256": "d1f5745bade9df792ecbaabfaa0d71992c4ca82ef25a9fb955682ef523d84b61",
+            "text": "The sky appears blue because molecules in the atmosphere scatter sunlight, and shorter wavelengths of light (like blue) are scattered more"
+          },
+          {
+            "prompt_tokens": 202,
+            "cached_tokens": 128,
+            "tokens": 24,
+            "cache_state": "reused",
+            "complete": true,
+            "token_sha": "f6d87f5c720c",
+            "token_sha256": "f6d87f5c720cc029037a27f699cad20ac08a471e5d1c3c26c78fd0633cd35fdb",
+            "output_sha256": "d1f5745bade9df792ecbaabfaa0d71992c4ca82ef25a9fb955682ef523d84b61",
+            "text": "The sky appears blue because molecules in the atmosphere scatter sunlight, and shorter wavelengths of light (like blue) are scattered more"
+          }
+        ]
+      }
+    ],
+    "logs": [
+      "server-sj2gki7v.log",
+      "server-qv4xq_o5.log"
+    ],
+    "commands": [
+      "instrumented-native serve TEXT4 --host loopback --context 2048 --parallel 4 --temperature 0 --prompt-cache-gib 0 --no-thinking --no-update-check",
+      "instrumented-native serve TEXT4 --host loopback --context 2048 --parallel 4 --temperature 0 --prompt-cache-gib 0.1 --no-thinking --no-update-check"
+    ],
+    "speed_qualified": false,
+    "counts": {
+      "passed": 22,
+      "failed": 0,
+      "skipped": 0
+    },
+    "cancellation_checks": 0
+  },
+  "cancellation": {
+    "model": "LFM3-1.7B-MLX-4bit",
+    "binary_sha256": "84b6716b59b19e10592e38f48d159f2c0e440c48cf707bbacf20ba62688537bc",
+    "tests": [
+      {
+        "name": "code/fresh_plain",
+        "status": "passed",
+        "evidence": {
+          "prompt_tokens": 193,
+          "cached_tokens": 0,
+          "tokens": 24,
+          "cache_state": "cold",
+          "complete": true,
+          "token_sha": "644594753a98",
+          "token_sha256": "644594753a98675a02af5cb19ca628a3264567727d10849d9155051c08668310",
+          "output_sha256": "5d4e262cc905e76142ebc5e775f2f5ffbf2b18e2981e56d5eb8e7da1a7d58d90",
+          "text": " \nWrite a Python function that returns the smaller of two integers. \nWrite a Python function that returns the sum of two"
+        }
+      },
+      {
+        "name": "chat/fresh_plain",
+        "status": "passed",
+        "evidence": {
+          "prompt_tokens": 202,
+          "cached_tokens": 0,
+          "tokens": 24,
+          "cache_state": "cold",
+          "complete": true,
+          "token_sha": "f6d87f5c720c",
+          "token_sha256": "f6d87f5c720cc029037a27f699cad20ac08a471e5d1c3c26c78fd0633cd35fdb",
+          "output_sha256": "d1f5745bade9df792ecbaabfaa0d71992c4ca82ef25a9fb955682ef523d84b61",
+          "text": "The sky appears blue because molecules in the atmosphere scatter sunlight, and shorter wavelengths of light (like blue) are scattered more"
+        }
+      },
+      {
+        "name": "code/cancel_server_confirmed",
+        "status": "passed",
+        "evidence": {
+          "request_id": "cmpl-42d70d05d00cef9032d26e7a5b7e27ec",
+          "first_content": " \n",
+          "requested_tokens": 512,
+          "closed_before_done": true,
+          "server_disconnections_before": 0,
+          "server_disconnections_after": 1,
+          "server_confirmed_cancel": true
+        }
+      },
+      {
+        "name": "code/cancel_next_plain_equals_fresh",
+        "status": "passed",
+        "evidence": {
+          "prompt_tokens": 193,
+          "cached_tokens": 0,
+          "tokens": 24,
+          "cache_state": "cold",
+          "complete": true,
+          "token_sha": "644594753a98",
+          "token_sha256": "644594753a98675a02af5cb19ca628a3264567727d10849d9155051c08668310",
+          "output_sha256": "5d4e262cc905e76142ebc5e775f2f5ffbf2b18e2981e56d5eb8e7da1a7d58d90",
+          "text": " \nWrite a Python function that returns the smaller of two integers. \nWrite a Python function that returns the sum of two"
+        }
+      },
+      {
+        "name": "code/cancel_next_drafted_equals_fresh",
+        "status": "passed",
+        "evidence": {
+          "prompt_tokens": 193,
+          "cached_tokens": 0,
+          "tokens": 24,
+          "cache_state": "cold",
+          "complete": true,
+          "token_sha": "644594753a98",
+          "token_sha256": "644594753a98675a02af5cb19ca628a3264567727d10849d9155051c08668310",
+          "output_sha256": "5d4e262cc905e76142ebc5e775f2f5ffbf2b18e2981e56d5eb8e7da1a7d58d90",
+          "text": " \nWrite a Python function that returns the smaller of two integers. \nWrite a Python function that returns the sum of two"
+        }
+      },
+      {
+        "name": "chat/cancel_server_confirmed",
+        "status": "passed",
+        "evidence": {
+          "request_id": "chatcmpl-a2eb3266cdc140dad39c2ede23e6294f",
+          "first_content": "The",
+          "requested_tokens": 512,
+          "closed_before_done": true,
+          "server_disconnections_before": 1,
+          "server_disconnections_after": 2,
+          "server_confirmed_cancel": true
+        }
+      },
+      {
+        "name": "chat/cancel_next_plain_equals_fresh",
+        "status": "passed",
+        "evidence": {
+          "prompt_tokens": 202,
+          "cached_tokens": 0,
+          "tokens": 24,
+          "cache_state": "cold",
+          "complete": true,
+          "token_sha": "f6d87f5c720c",
+          "token_sha256": "f6d87f5c720cc029037a27f699cad20ac08a471e5d1c3c26c78fd0633cd35fdb",
+          "output_sha256": "d1f5745bade9df792ecbaabfaa0d71992c4ca82ef25a9fb955682ef523d84b61",
+          "text": "The sky appears blue because molecules in the atmosphere scatter sunlight, and shorter wavelengths of light (like blue) are scattered more"
+        }
+      },
+      {
+        "name": "chat/cancel_next_drafted_equals_fresh",
+        "status": "passed",
+        "evidence": {
+          "prompt_tokens": 202,
+          "cached_tokens": 0,
+          "tokens": 24,
+          "cache_state": "cold",
+          "complete": true,
+          "token_sha": "f6d87f5c720c",
+          "token_sha256": "f6d87f5c720cc029037a27f699cad20ac08a471e5d1c3c26c78fd0633cd35fdb",
+          "output_sha256": "d1f5745bade9df792ecbaabfaa0d71992c4ca82ef25a9fb955682ef523d84b61",
+          "text": "The sky appears blue because molecules in the atmosphere scatter sunlight, and shorter wavelengths of light (like blue) are scattered more"
+        }
+      }
+    ],
+    "logs": [
+      "server-zkwzoo3t.log",
+      "server-412qwbc7.log"
+    ],
+    "commands": [
+      "instrumented-native serve TEXT4 --host loopback --context 2048 --parallel 4 --temperature 0 --prompt-cache-gib 0 --no-thinking --no-update-check",
+      "instrumented-native serve TEXT4 --host loopback --context 2048 --parallel 4 --temperature 0 --prompt-cache-gib 0 --no-thinking --no-update-check"
+    ],
+    "speed_qualified": false,
+    "counts": {
+      "passed": 8,
+      "failed": 0,
+      "skipped": 0
+    },
+    "cancellation_checks": 6
+  },
+  "actual_dispatches": {
+    "serving_fresh": {
+      "ffn": 1440,
+      "attention": 704
+    },
+    "serving_cache_enabled": {
+      "ffn": 4176,
+      "attention": 1518
+    },
+    "cancel_fresh": {
+      "ffn": 432,
+      "attention": 385
+    },
+    "cancel_and_recovery_cache_off": {
+      "ffn": 1008,
+      "attention": 550
+    }
+  },
+  "cleanup": "Both harnesses exited zero; four servers stopped by owned harness; admission empty after each harness; shared GPU lock held throughout then released.",
+  "limits": [
+    "Cancellation closes HTTP after first content, not during an in-flight prefill kernel.",
+    "Counters aggregate per server, not per request.",
+    "Text4 only; image and other quantization widths untested here.",
+    "Raw token evidence retained; this same-engine check does not substitute for FP32/official-BF16 fidelity."
+  ],
+  "raw_sha256": {
+    "serving.public.json": "7738c75b4da102ccc39c53f35976d9860cdb008ce83c4c28cc4147670c1597df",
+    "events.json": "dfc762b99f85b37f5f3982c06c919df588d871c7934e54d5d46d268c244782b9",
+    "serving.json": "ed93b42a565ed7209cb1896a63e3e65b96bd68122076ec685dcec96d8e99d4ed",
+    "cancellation-server-0.log": "ca726859124aee078faec3047a5149a218f7b8a03b8770633576f9a61230e1c6",
+    "cancellation-server-1.log": "59d705644712aab9cfe5617b3bb54d505e38100947ec1949ed2c310264ef7253",
+    "cancellation.json": "7ed65389456fef3121a231b9a0a9f251c4f1c8cab93d5f5acd5df5a6595cb8ae",
+    "cancellation.log": "a1180c100df550d9ae7315c7c49e6b3325ed2f0b2071d2fe5e9b3fbdb8c4828b",
+    "instrumentation.diff": "211810b34c79ad89e9d7b6c22068ff8e3e98dde7fe35d45f96c8467de18a64bf",
+    "serving.log": "5566755682627ad00526d67b5fcb487e69a0ae5e22e6f75c07ce29418b7d1c1f",
+    "serving-server-0.log": "d340a4602fea390e5918fbddc91b5abbf7acc4a65a9fc7e8b9350cfbbb705cf4",
+    "serving-server-1.log": "11f4d11bd7cb5f8b5f4751cd52e0fea51e38544817d045784aad64388b3463d7",
+    "pins.json": "67f9464acdaf91f8882d476181f8e9ac57275a2e89458ca89c054a557204a8ca",
+    "cancellation.public.json": "4358f00aee369f53c43d4f53e743d2727ded615402736e658b470cac421329b1"
+  }
+}

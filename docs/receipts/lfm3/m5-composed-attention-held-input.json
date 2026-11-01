@@ -1,0 +1,702 @@
+{
+  "scope": "Genuine TEXT4 baseline/composed128-row post-RoPE query and cached key/value held-input SDPA,11attentionlayers each; finite only; no propagated model or long-history qualification",
+  "cells": [
+    {
+      "name": "baseline-layer10",
+      "pass": true,
+      "native": {
+        "mean_absolute_error": 0.00010594119835396392,
+        "rms_error": 0.00021550765407174605,
+        "relative_rms": 0.0015259195565940598,
+        "maximum_absolute_error": 0.015355110168457031,
+        "maximum_coordinate": [
+          2,
+          1,
+          103
+        ]
+      },
+      "reference": {
+        "mean_absolute_error": 0.00010726264637057415,
+        "rms_error": 0.00021789633100235262,
+        "relative_rms": 0.0015428327788111428,
+        "maximum_absolute_error": 0.015355110168457031,
+        "maximum_coordinate": [
+          2,
+          1,
+          103
+        ]
+      },
+      "metrics": {
+        "rms_error": true,
+        "maximum_absolute_error": true
+      }
+    },
+    {
+      "name": "baseline-layer12",
+      "pass": true,
+      "native": {
+        "mean_absolute_error": 7.395126232685473e-05,
+        "rms_error": 0.0001150114182268993,
+        "relative_rms": 0.001648756981157906,
+        "maximum_absolute_error": 0.0013636946678161621,
+        "maximum_coordinate": [
+          10,
+          12,
+          117
+        ]
+      },
+      "reference": {
+        "mean_absolute_error": 7.479105307990532e-05,
+        "rms_error": 0.00011664460840612599,
+        "relative_rms": 0.0016721697322662021,
+        "maximum_absolute_error": 0.0013636946678161621,
+        "maximum_coordinate": [
+          10,
+          12,
+          117
+        ]
+      },
+      "metrics": {
+        "rms_error": true,
+        "maximum_absolute_error": true
+      }
+    },
+    {
+      "name": "baseline-layer14",
+      "pass": true,
+      "native": {
+        "mean_absolute_error": 7.412607476845953e-05,
+        "rms_error": 0.00011659142212767856,
+        "relative_rms": 0.0016626462764450763,
+        "maximum_absolute_error": 0.0019254684448242188,
+        "maximum_coordinate": [
+          3,
+          4,
+          21
+        ]
+      },
+      "reference": {
+        "mean_absolute_error": 7.504565638619641e-05,
+        "rms_error": 0.00011844840975364292,
+        "relative_rms": 0.0016891277577184853,
+        "maximum_absolute_error": 0.0019254684448242188,
+        "maximum_coordinate": [
+          3,
+          4,
+          21
+        ]
+      },
+      "metrics": {
+        "rms_error": true,
+        "maximum_absolute_error": true
+      }
+    },
+    {
+      "name": "baseline-layer16",
+      "pass": true,
+      "native": {
+        "mean_absolute_error": 6.565777003919885e-05,
+        "rms_error": 0.00010105450152199125,
+        "relative_rms": 0.0016662280876570976,
+        "maximum_absolute_error": 0.0009753108024597168,
+        "maximum_coordinate": [
+          84,
+          6,
+          54
+        ]
+      },
+      "reference": {
+        "mean_absolute_error": 6.641923482766975e-05,
+        "rms_error": 0.00010248465323955035,
+        "relative_rms": 0.001689809016022663,
+        "maximum_absolute_error": 0.001065760850906372,
+        "maximum_coordinate": [
+          19,
+          6,
+          54
+        ]
+      },
+      "metrics": {
+        "rms_error": true,
+        "maximum_absolute_error": true
+      }
+    },
+    {
+      "name": "baseline-layer18",
+      "pass": true,
+      "native": {
+        "mean_absolute_error": 1.4001119790051363e-05,
+        "rms_error": 2.7138564834208702e-05,
+        "relative_rms": 0.0017797468423647758,
+        "maximum_absolute_error": 0.0004876852035522461,
+        "maximum_coordinate": [
+          52,
+          3,
+          21
+        ]
+      },
+      "reference": {
+        "mean_absolute_error": 1.556294355272247e-05,
+        "rms_error": 2.809986246218312e-05,
+        "relative_rms": 0.0018427887323251334,
+        "maximum_absolute_error": 0.0005100518465042114,
+        "maximum_coordinate": [
+          60,
+          0,
+          79
+        ]
+      },
+      "metrics": {
+        "rms_error": true,
+        "maximum_absolute_error": true
+      }
+    },
+    {
+      "name": "baseline-layer2",
+      "pass": true,
+      "native": {
+        "mean_absolute_error": 4.413009259408515e-05,
+        "rms_error": 7.805294035885002e-05,
+        "relative_rms": 0.0016863690845297266,
+        "maximum_absolute_error": 0.0019491910934448242,
+        "maximum_coordinate": [
+          18,
+          0,
+          87
+        ]
+      },
+      "reference": {
+        "mean_absolute_error": 4.476193206600276e-05,
+        "rms_error": 7.927686684144782e-05,
+        "relative_rms": 0.0017128125698423987,
+        "maximum_absolute_error": 0.0019491910934448242,
+        "maximum_coordinate": [
+          18,
+          0,
+          87
+        ]
+      },
+      "metrics": {
+        "rms_error": true,
+        "maximum_absolute_error": true
+      }
+    },
+    {
+      "name": "baseline-layer20",
+      "pass": true,
+      "native": {
+        "mean_absolute_error": 3.917284894791747e-05,
+        "rms_error": 6.70369759858605e-05,
+        "relative_rms": 0.0015679623941835079,
+        "maximum_absolute_error": 0.0009984374046325684,
+        "maximum_coordinate": [
+          4,
+          6,
+          50
+        ]
+      },
+      "reference": {
+        "mean_absolute_error": 3.9700066141687114e-05,
+        "rms_error": 6.813284616510957e-05,
+        "relative_rms": 0.001593594266813504,
+        "maximum_absolute_error": 0.001111745834350586,
+        "maximum_coordinate": [
+          117,
+          7,
+          50
+        ]
+      },
+      "metrics": {
+        "rms_error": true,
+        "maximum_absolute_error": true
+      }
+    },
+    {
+      "name": "baseline-layer22",
+      "pass": true,
+      "native": {
+        "mean_absolute_error": 3.3669950547364404e-05,
+        "rms_error": 5.628150388543914e-05,
+        "relative_rms": 0.001671012112142587,
+        "maximum_absolute_error": 0.0009761154651641846,
+        "maximum_coordinate": [
+          94,
+          7,
+          94
+        ]
+      },
+      "reference": {
+        "mean_absolute_error": 3.416266679137419e-05,
+        "rms_error": 5.7299750519919624e-05,
+        "relative_rms": 0.0017012441127449295,
+        "maximum_absolute_error": 0.001028984785079956,
+        "maximum_coordinate": [
+          114,
+          7,
+          94
+        ]
+      },
+      "metrics": {
+        "rms_error": true,
+        "maximum_absolute_error": true
+      }
+    },
+    {
+      "name": "baseline-layer4",
+      "pass": true,
+      "native": {
+        "mean_absolute_error": 5.230709027901747e-05,
+        "rms_error": 8.98947544824526e-05,
+        "relative_rms": 0.0016505846531944756,
+        "maximum_absolute_error": 0.0012113451957702637,
+        "maximum_coordinate": [
+          1,
+          7,
+          109
+        ]
+      },
+      "reference": {
+        "mean_absolute_error": 5.300656258128925e-05,
+        "rms_error": 9.112962872549464e-05,
+        "relative_rms": 0.0016732585509755546,
+        "maximum_absolute_error": 0.0012113451957702637,
+        "maximum_coordinate": [
+          1,
+          7,
+          109
+        ]
+      },
+      "metrics": {
+        "rms_error": true,
+        "maximum_absolute_error": true
+      }
+    },
+    {
+      "name": "baseline-layer6",
+      "pass": true,
+      "native": {
+        "mean_absolute_error": 7.294471913596444e-05,
+        "rms_error": 0.00012866378806297889,
+        "relative_rms": 0.0016581336303815512,
+        "maximum_absolute_error": 0.0032798051834106445,
+        "maximum_coordinate": [
+          3,
+          2,
+          38
+        ]
+      },
+      "reference": {
+        "mean_absolute_error": 7.400460207339584e-05,
+        "rms_error": 0.00013074124021856306,
+        "relative_rms": 0.001684906456959583,
+        "maximum_absolute_error": 0.0032798051834106445,
+        "maximum_coordinate": [
+          3,
+          2,
+          38
+        ]
+      },
+      "metrics": {
+        "rms_error": true,
+        "maximum_absolute_error": true
+      }
+    },
+    {
+      "name": "baseline-layer8",
+      "pass": true,
+      "native": {
+        "mean_absolute_error": 5.9115582082743e-05,
+        "rms_error": 9.577837283847067e-05,
+        "relative_rms": 0.001668083770351387,
+        "maximum_absolute_error": 0.0009766817092895508,
+        "maximum_coordinate": [
+          55,
+          9,
+          120
+        ]
+      },
+      "reference": {
+        "mean_absolute_error": 5.980964068350405e-05,
+        "rms_error": 9.711988195074954e-05,
+        "relative_rms": 0.0016914475999055265,
+        "maximum_absolute_error": 0.001072615385055542,
+        "maximum_coordinate": [
+          88,
+          8,
+          120
+        ]
+      },
+      "metrics": {
+        "rms_error": true,
+        "maximum_absolute_error": true
+      }
+    },
+    {
+      "name": "candidate-layer10",
+      "pass": true,
+      "native": {
+        "mean_absolute_error": 0.00010553484145395611,
+        "rms_error": 0.00021304710107183093,
+        "relative_rms": 0.0015085044325107025,
+        "maximum_absolute_error": 0.01345968246459961,
+        "maximum_coordinate": [
+          1,
+          2,
+          103
+        ]
+      },
+      "reference": {
+        "mean_absolute_error": 0.00010687674114391642,
+        "rms_error": 0.0002160143358914129,
+        "relative_rms": 0.0015295142789489807,
+        "maximum_absolute_error": 0.01345968246459961,
+        "maximum_coordinate": [
+          1,
+          2,
+          103
+        ]
+      },
+      "metrics": {
+        "rms_error": true,
+        "maximum_absolute_error": true
+      }
+    },
+    {
+      "name": "candidate-layer12",
+      "pass": true,
+      "native": {
+        "mean_absolute_error": 7.394120734161447e-05,
+        "rms_error": 0.00011502306016155579,
+        "relative_rms": 0.0016489296643631783,
+        "maximum_absolute_error": 0.0010012984275817871,
+        "maximum_coordinate": [
+          26,
+          12,
+          95
+        ]
+      },
+      "reference": {
+        "mean_absolute_error": 7.479174766955327e-05,
+        "rms_error": 0.00011669720624184763,
+        "relative_rms": 0.00167292962689585,
+        "maximum_absolute_error": 0.0011237263679504395,
+        "maximum_coordinate": [
+          120,
+          13,
+          95
+        ]
+      },
+      "metrics": {
+        "rms_error": true,
+        "maximum_absolute_error": true
+      }
+    },
+    {
+      "name": "candidate-layer14",
+      "pass": true,
+      "native": {
+        "mean_absolute_error": 7.426683930036827e-05,
+        "rms_error": 0.00011692272740483567,
+        "relative_rms": 0.0016664167991819168,
+        "maximum_absolute_error": 0.0018712282180786133,
+        "maximum_coordinate": [
+          9,
+          4,
+          21
+        ]
+      },
+      "reference": {
+        "mean_absolute_error": 7.518459540593837e-05,
+        "rms_error": 0.00011876118757111996,
+        "relative_rms": 0.0016926190694652233,
+        "maximum_absolute_error": 0.0018712282180786133,
+        "maximum_coordinate": [
+          9,
+          4,
+          21
+        ]
+      },
+      "metrics": {
+        "rms_error": true,
+        "maximum_absolute_error": true
+      }
+    },
+    {
+      "name": "candidate-layer16",
+      "pass": true,
+      "native": {
+        "mean_absolute_error": 6.56544750982954e-05,
+        "rms_error": 0.00010096562425795954,
+        "relative_rms": 0.001664785982118596,
+        "maximum_absolute_error": 0.0009687840938568115,
+        "maximum_coordinate": [
+          87,
+          6,
+          54
+        ]
+      },
+      "reference": {
+        "mean_absolute_error": 6.643148362238697e-05,
+        "rms_error": 0.00010242254834008744,
+        "relative_rms": 0.0016888086810001547,
+        "maximum_absolute_error": 0.0010988712310791016,
+        "maximum_coordinate": [
+          111,
+          4,
+          54
+        ]
+      },
+      "metrics": {
+        "rms_error": true,
+        "maximum_absolute_error": true
+      }
+    },
+    {
+      "name": "candidate-layer18",
+      "pass": true,
+      "native": {
+        "mean_absolute_error": 1.3927175131937954e-05,
+        "rms_error": 2.6936330654066946e-05,
+        "relative_rms": 0.001767880277342061,
+        "maximum_absolute_error": 0.0004877150058746338,
+        "maximum_coordinate": [
+          93,
+          3,
+          79
+        ]
+      },
+      "reference": {
+        "mean_absolute_error": 1.55402708957821e-05,
+        "rms_error": 2.7944179012469313e-05,
+        "relative_rms": 0.001834027194613516,
+        "maximum_absolute_error": 0.0005096942186355591,
+        "maximum_coordinate": [
+          19,
+          2,
+          79
+        ]
+      },
+      "metrics": {
+        "rms_error": true,
+        "maximum_absolute_error": true
+      }
+    },
+    {
+      "name": "candidate-layer2",
+      "pass": true,
+      "native": {
+        "mean_absolute_error": 4.411905693170721e-05,
+        "rms_error": 7.792555527646081e-05,
+        "relative_rms": 0.0016842156568792179,
+        "maximum_absolute_error": 0.0019272565841674805,
+        "maximum_coordinate": [
+          19,
+          0,
+          87
+        ]
+      },
+      "reference": {
+        "mean_absolute_error": 4.474380736595533e-05,
+        "rms_error": 7.908844566105766e-05,
+        "relative_rms": 0.0017093493654042817,
+        "maximum_absolute_error": 0.0019789934158325195,
+        "maximum_coordinate": [
+          19,
+          0,
+          87
+        ]
+      },
+      "metrics": {
+        "rms_error": true,
+        "maximum_absolute_error": true
+      }
+    },
+    {
+      "name": "candidate-layer20",
+      "pass": true,
+      "native": {
+        "mean_absolute_error": 3.926719299077717e-05,
+        "rms_error": 6.714418695789652e-05,
+        "relative_rms": 0.0015701435351544247,
+        "maximum_absolute_error": 0.0014007091522216797,
+        "maximum_coordinate": [
+          3,
+          6,
+          50
+        ]
+      },
+      "reference": {
+        "mean_absolute_error": 3.980428101430411e-05,
+        "rms_error": 6.830684421057062e-05,
+        "relative_rms": 0.0015973318719501532,
+        "maximum_absolute_error": 0.0014007091522216797,
+        "maximum_coordinate": [
+          3,
+          6,
+          50
+        ]
+      },
+      "metrics": {
+        "rms_error": true,
+        "maximum_absolute_error": true
+      }
+    },
+    {
+      "name": "candidate-layer22",
+      "pass": true,
+      "native": {
+        "mean_absolute_error": 3.3827553837209546e-05,
+        "rms_error": 5.647171576988976e-05,
+        "relative_rms": 0.0016724742124102996,
+        "maximum_absolute_error": 0.0009740591049194336,
+        "maximum_coordinate": [
+          91,
+          7,
+          94
+        ]
+      },
+      "reference": {
+        "mean_absolute_error": 3.431406171326983e-05,
+        "rms_error": 5.74845218685334e-05,
+        "relative_rms": 0.0017024696191207246,
+        "maximum_absolute_error": 0.001048445701599121,
+        "maximum_coordinate": [
+          5,
+          7,
+          94
+        ]
+      },
+      "metrics": {
+        "rms_error": true,
+        "maximum_absolute_error": true
+      }
+    },
+    {
+      "name": "candidate-layer4",
+      "pass": true,
+      "native": {
+        "mean_absolute_error": 5.255698228174297e-05,
+        "rms_error": 9.072950274258105e-05,
+        "relative_rms": 0.0016651707576544098,
+        "maximum_absolute_error": 0.0018589496612548828,
+        "maximum_coordinate": [
+          1,
+          7,
+          109
+        ]
+      },
+      "reference": {
+        "mean_absolute_error": 5.326737022220843e-05,
+        "rms_error": 9.200325722568675e-05,
+        "relative_rms": 0.0016885481448722876,
+        "maximum_absolute_error": 0.0018589496612548828,
+        "maximum_coordinate": [
+          1,
+          7,
+          109
+        ]
+      },
+      "metrics": {
+        "rms_error": true,
+        "maximum_absolute_error": true
+      }
+    },
+    {
+      "name": "candidate-layer6",
+      "pass": true,
+      "native": {
+        "mean_absolute_error": 7.304410733427111e-05,
+        "rms_error": 0.00012859638127734113,
+        "relative_rms": 0.0016562644199458122,
+        "maximum_absolute_error": 0.0031279325485229492,
+        "maximum_coordinate": [
+          3,
+          15,
+          29
+        ]
+      },
+      "reference": {
+        "mean_absolute_error": 7.412466821033706e-05,
+        "rms_error": 0.0001306955614176869,
+        "relative_rms": 0.0016833009301724352,
+        "maximum_absolute_error": 0.0031279325485229492,
+        "maximum_coordinate": [
+          3,
+          15,
+          29
+        ]
+      },
+      "metrics": {
+        "rms_error": true,
+        "maximum_absolute_error": true
+      }
+    },
+    {
+      "name": "candidate-layer8",
+      "pass": true,
+      "native": {
+        "mean_absolute_error": 5.915452997777779e-05,
+        "rms_error": 9.591084322232719e-05,
+        "relative_rms": 0.0016681196436167838,
+        "maximum_absolute_error": 0.0009767115116119385,
+        "maximum_coordinate": [
+          112,
+          8,
+          120
+        ]
+      },
+      "reference": {
+        "mean_absolute_error": 5.985122606659514e-05,
+        "rms_error": 9.728514212980673e-05,
+        "relative_rms": 0.0016920219984157463,
+        "maximum_absolute_error": 0.0010822713375091553,
+        "maximum_coordinate": [
+          93,
+          11,
+          97
+        ]
+      },
+      "metrics": {
+        "rms_error": true,
+        "maximum_absolute_error": true
+      }
+    }
+  ],
+  "passed": 22,
+  "count": 22,
+  "bad_scale_rejected": true,
+  "capture_identity": {
+    "routes": 2,
+    "finite_files_per_route": 33,
+    "selected_full_vocabulary_logit_rows": 17,
+    "all_logit_bytes_equal_untraced": true,
+    "query_shape": [
+      128,
+      16,
+      128
+    ],
+    "kv_shape": [
+      4,
+      128,
+      128
+    ],
+    "history": 0,
+    "all_input_pins_verified": true
+  },
+  "reference": "Independent CPU FP32 plus actual installed MLX0.32.4 BF16 SDPA on identical inputs",
+  "candidate": "Strict QK and BF16high+residual probability PV intoFP32 accumulator",
+  "zero_added_slack": true,
+  "processes": {
+    "all_exit_zero": true,
+    "guard_lock_released": true,
+    "timing_claim": false
+  },
+  "raw_archive_sha256": "f72fed61980aa18e6fbb4c63d2ce2e555a17d3915b46cb0643eb47f07a618e74",
+  "summary_sha256": "1d587ba21ee12fd84cea9b65b55dabae73df954fce6d226435da5712a4da30c9",
+  "limits": [
+    "Whole-cell RMS/max pass, no elementwise-dominance claim",
+    "Input-boundary test does not erase upstream propagated differences",
+    "SmallH0R3 failure retained separately; original small-query route remains",
+    "No allfamily, image, NF, longhistory or concurrency qualification"
+  ]
+}

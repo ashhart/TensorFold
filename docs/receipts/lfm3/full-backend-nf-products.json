@@ -1,0 +1,20 @@
+{
+  "scope": "Complete frozen backend at first nonfinite-product fix, before the later compensated-cancellation refinement and profiled GLM fixture scheduling extension.",
+  "source_commit": "3d62c571564b4c59d495c012a51b114e85976a3f",
+  "binary_sha256": "3871f11da6a0d45bb8536161983cba4a820494923bfe833db77845f056dbeded",
+  "exit_status": 1,
+  "summary": "SUMMARY 310 kernels: 309 pass gates 1-4, 1 fail, 2 known findings; 317 controls: 317 red as planted, 0 missed; 0 limit problems; gates 1377229 ms, limits 108 ms",
+  "registered_lfm3_failures": 0,
+  "production_failures": [
+    "FAIL shapes metal Qwen4 native HC act production: at 128x14336x1 output 218116 is -3.997803e-3 where float64 gives -4.028320e-3: 1.94 of its bound"
+  ],
+  "known_findings": [
+    "KNOWN nonfinite metal affine_mm q4 g64: an infinite input gives NaN where MLX's s*sum(q x) + b*sum(x) keeps the infinity (the +128 code offset moves the bias to b - 128 s)",
+    "KNOWN nonfinite metal affine_mm q4 g64 fp32 out: an infinite input gives NaN where MLX's s*sum(q x) + b*sum(x) keeps the infinity (the +128 code offset moves the bias to b - 128 s)"
+  ],
+  "inherited_failure_baseline": "b30d5b9d36786ff778b4bb7a7e1c4b5d26de126e",
+  "baseline_reproduces_exact_failure": true,
+  "log_sha256": "6e5d5138913f2384d379b9ff44cb6e12454859364bc233e79381957f902b2d96",
+  "host": "Apple M5 Ultra 256 GiB, macOS 27.0 build 26A428",
+  "global_pass": false
+}

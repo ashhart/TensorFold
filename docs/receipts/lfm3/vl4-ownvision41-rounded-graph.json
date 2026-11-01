@@ -1,0 +1,194 @@
+{
+  "scope": "Four-bit real-image own-vision replay: independently compute all 70 projected image rows, then decoder prefix41 and vocabulary heads34/40 only.",
+  "runtime_change": false,
+  "native_activation_injection": false,
+  "checkpoint": {
+    "repository": "LiquidAI/LFM3-VL-2B-MLX-4bit",
+    "revision": "c823fade98e35a3d6942ad4d38b1ea15f675cd12"
+  },
+  "image": {
+    "url": "https://placecats.com/300/200",
+    "jpeg_sha256": "d1b324f529a96d8d8a16d973d88e1e974905d9c2c0e3e8b21a50b1c0e3fe2379",
+    "canonical_png_sha256": "005500792ee8ea6f35ac369d900fc788cd77667f145e7100c2cff57fae5355d9",
+    "conversion": "macOS sips JPEG to PNG; canonical PNG is the exact native/reference input"
+  },
+  "input_grid": [
+    14,
+    20
+  ],
+  "pixel_patches_shape": [
+    280,
+    1536
+  ],
+  "projected_image_rows_shape": [
+    70,
+    2048
+  ],
+  "decoder_image_start": 4,
+  "decoder_independent_image_rows_used": 37,
+  "decoder_prefix_rows": 41,
+  "token_ids": [
+    124899,
+    5922,
+    207,
+    125009,
+    125030,
+    125030,
+    125030,
+    125030,
+    125030,
+    125030,
+    125030,
+    125030,
+    125030,
+    125030,
+    125030,
+    125030,
+    125030,
+    125030,
+    125030,
+    125030,
+    125030,
+    125030,
+    125030,
+    125030,
+    125030,
+    125030,
+    125030,
+    125030,
+    125030,
+    125030,
+    125030,
+    125030,
+    125030,
+    125030,
+    125030,
+    125030,
+    125030,
+    125030,
+    125030,
+    125030,
+    125030
+  ],
+  "measured_identity": {
+    "independent_projected_BF16_words_equal": 143360,
+    "projected_BF16_words_total": 143360,
+    "heads": [
+      {
+        "row": 34,
+        "native_equal_logits": 128000,
+        "values": 128000,
+        "native_top": 5594,
+        "independent_named_top": 5594,
+        "ideal_FP64_top": 2911,
+        "contenders": {
+          "2911": {
+            "native": 4.40625,
+            "independent_named": 4.40625,
+            "ideal_FP64": 4.5625
+          },
+          "5594": {
+            "native": 4.65625,
+            "independent_named": 4.65625,
+            "ideal_FP64": 4.53125
+          }
+        }
+      },
+      {
+        "row": 40,
+        "native_equal_logits": 128000,
+        "values": 128000,
+        "native_top": 4899,
+        "independent_named_top": 4899,
+        "ideal_FP64_top": 34541,
+        "contenders": {
+          "4899": {
+            "native": 7.375,
+            "independent_named": 7.375,
+            "ideal_FP64": 7.125
+          },
+          "34541": {
+            "native": 7.25,
+            "independent_named": 7.25,
+            "ideal_FP64": 7.1875
+          }
+        }
+      }
+    ],
+    "compared_intermediate_stages": 0,
+    "native_stage_trace_available": false
+  },
+  "independence": "Only checkpoint weights and frozen preprocessed image pixels enter VisionOracle. All70 projected rows are computed before selecting its first37 rows for the causal decoder prefix. Native image/logit artifacts are read only for comparison.",
+  "elementary_evaluations": {
+    "batches": 648,
+    "scalar_values": 33924773,
+    "operations": {
+      "rsqrt": 161,
+      "exp": 385,
+      "exp2": 34,
+      "cos": 34,
+      "sin": 34
+    },
+    "ordered_chunk_groups": 39,
+    "max_payload_bytes": 1048448,
+    "functions": {
+      "exp": "metal::precise::exp",
+      "exp2": "metal::exp2",
+      "cos": "metal::precise::cos",
+      "sin": "metal::precise::sin",
+      "rsqrt": "metal::precise::rsqrt"
+    },
+    "CompileOptions": {
+      "math_mode": "safe",
+      "math_functions": "fast",
+      "language_code": 262144
+    },
+    "calls_manifest_sha256": "9b23c8b5717c5f4e607b3b2cc6d65ed4514e8c8405c8c69f38e1c15fe45cea59",
+    "groups_manifest_sha256": "2c02e290c38501ba102db8b629a3e331f62aaaae87d33c2b780a397ec95e323b"
+  },
+  "source_sha256": {
+    "fp64_reference.py": "0fb1128ade095db87b6126792ab14930792ab1f7b41b998570356bc586f16b2e",
+    "row_projection_reference.py": "d03f224a037a920ba66b9828059d1489e48729cd168077e76789d0ec5c199c0c",
+    "elementary_reference.py": "3e4db276278867b7683536044ed7bcbe4c7643867d722fdda5b8ad895b3963e7",
+    "vision_fp64_reference.py": "742b8b4f44dde824c3a5c2d72a632401a0f9df7b7f23a8d3729d15f4f8c6a4d2",
+    "text_rounding_reference.py": "52665eef48570d45a2554861fe8f22b31874f8f464366adf882f40c3d311db27",
+    "vision_rounding_reference.py": "8b2f5679bbd3f05b3e86a5748c3803f744502cffd0159bee2a218da38bd6f1c4",
+    "text_attention_rounding.py": "ae67f2b2c26f89f75b1f36822a4b30a9f710df2b42f9f7ec42679373028b89e8"
+  },
+  "artifact_sha256": {
+    "run.py": "866a4c925e7abe43188164cad2fa48c1648db1fca8a6a629f97cfbe4b4dfbbed",
+    "provider.py": "97aec6e37977bbef32c60e7f86253c29c7b8161159dd6c9aded657e4bd69ddd0",
+    "lfm3-real-cat-patches.npy": "f1c55a0dd28b91d9929f074995adadea79d7c0862c8cdcd0be6dbfda57383dc1",
+    "lfm3-real-cat-tokens.npy": "54c970db8c6ba82895cb2f18a48d397ea568ae885241129e9c5ee7dbbc91a24d",
+    "lfm3-real-cat-native.bf16": "ab2ac7db759e5c4a32fe7d60680ec47f7d1cbc5938fa7d8091bf4756bfeea4fc",
+    "lfm3-real-cat-native-text.bf16": "d2dc2c1014716cb9ead7543ee00562a1816bf50d4a18b927cd8d8151f0074d54",
+    "lfm3-real-cat-fp64-text.bf16": "c16af1c1ff0095b2ced285886f4c54e21c48f244cb74b4fa615c8954163e620f",
+    "row.so": "11ad0f66632bfcba548dbede9027ffdb112cd418ff2be80610af56a957424753",
+    "row_projection_replay.c": "ff336f75fcf0a4f6c0ac92ed627bc1a6abb0b36b8f4cc95d876f2a8bb2f5cc42"
+  },
+  "independent_image70_sha256": "ab2ac7db759e5c4a32fe7d60680ec47f7d1cbc5938fa7d8091bf4756bfeea4fc",
+  "two_heads_sha256": "b412201478b2c3335691675e069eb86d92c4db98e901bd67b849e8f86ed4724a",
+  "executed_manifest_sha256": "bdbf40ef29b656ebe9a91ed282a38f4a76742146dbf326c26ea7542ca315c483",
+  "original_graph_receipt_sha256": "e23628491a8cbbea05f8746ba97030996d24020428bd328043b7f6acc2018dfc",
+  "guarded_execution": {
+    "lock": "/tmp/tensorfold-model.lock",
+    "inode": 46835039,
+    "single_model_admission_passed": true,
+    "graph_child_exit": 0,
+    "all_primitive_children_exited": true,
+    "lock_released_after_completion": true,
+    "events_sha256": "d9c624a97b385a7529f01e8a78c82893a53f6186ebf5758c9ad180e4679ba07c"
+  },
+  "ideal_FP64_difference_retained": true,
+  "limits": [
+    "No intermediate native stage comparison; stage hashes only.",
+    "Ordinary text attention reference lacks selected integer-exponent repair.",
+    "FP64 multiply/add then FP32 fma helper is not universally correctly rounded fmaf.",
+    "Observed graph equality only; ideal FP64 differences are retained without threshold change.",
+    "The selected decoder rows are inside the image-placeholder span, not generated suffix text.",
+    "No performance, 6/8-bit, all-position or final fidelity acceptance is claimed.",
+    "The dense C helper and row helper have pinned source/binary identity; historical binary compiler provenance is limited."
+  ],
+  "fidelity_pass": null,
+  "accepted_threshold": null
+}

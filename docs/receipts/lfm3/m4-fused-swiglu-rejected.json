@@ -1,0 +1,50 @@
+{
+  "scope": "Actual TEXT4 full7680-column gate+up+SwiGLU rows64, matched five-round operator screen, not model/serving qualification",
+  "modes": {
+    "public_dual_activation": {
+      "seconds": 0.0019839440210489556,
+      "first_last_drift": 0.0008691182443005818,
+      "within_round_spreads": [
+        0.0023387788655644393,
+        0.00015884899138818298,
+        7.218093726524266e-05,
+        0.00022838467355179581,
+        3.807140167411127e-05
+      ],
+      "stable": true
+    },
+    "fused": {
+      "seconds": 0.002006229173275642,
+      "first_last_drift": -0.0006157325280637949,
+      "within_round_spreads": [
+        0.0003530385890222476,
+        0.0010237456636403852,
+        0.0003246003034091949,
+        0.00016615617853843467,
+        0.00014673585857649663
+      ],
+      "stable": true
+    }
+  },
+  "stable": true,
+  "throughput_ratio": 0.9888920206507112,
+  "device": "Apple M4 Pro",
+  "outcome": "Rejected performance candidate; exact public arithmetic retained but complete route slower. No production change.",
+  "numerical": {
+    "actual_words": 491520,
+    "gate_up_each_match_frozen_public_canonical": true,
+    "fused_final_matches_complete_public_baseline": true,
+    "five_repeat_identity": true,
+    "bounded_cases": 5,
+    "negative_controls": 3,
+    "guard_regions": 22,
+    "note": "Literal full output identity establishes unchanged error against the same primary reference in every column; no new independent FP64 computation in this fused screen."
+  },
+  "pins": {
+    "numerical_manifest": "8a787c4ec45e3aee70b6030057e578e02109d444185f665e008759f11bc523f4",
+    "cost_manifest": "d7bfdc7c65028bc06a181be170bddfa97ae64270e7f458e520c1bda3eb64fa12",
+    "analysis": "8f9ed0c017c00caeedec6758f4d4ee0a2b7f3e3091232506a5d1f9123e67fee1",
+    "shader": "7369ffe684be904e90aa9aba32d65c34d615a09e54d0e148f723845e26e3986b"
+  },
+  "cleanup": "All owned children exited, local GPU lease released."
+}

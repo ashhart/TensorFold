@@ -1,0 +1,80 @@
+{
+  "status": "exploratory operator evidence only; no fullmodel qualification or promotion",
+  "device": "M5",
+  "algorithm": "64-query by32-key tiled SDPA; strict QK and relaxed float-by-BF16 PV; actual descriptor mapping verified",
+  "reference": "independent CPU FP32 plus actual official MLX0.32.4 BF16 on identical heldinputs",
+  "gates": "zero-added-slack whole-cell RMS and maximum error; per-row and pointwise diagnostics retained",
+  "scope": "four synthetic R64 timing cells; finite only; not model or MLX performance comparison",
+  "cases": [
+    {
+      "case": "h2048-r64-w0",
+      "native_fused_baseline_seconds": 0.005553991211854736,
+      "tiled_seconds": 0.00020092789600312244,
+      "throughput_ratio": 27.641712884747605,
+      "baseline_drift": -0.0003676429450156782,
+      "max_withinround_spread": 0.0015301493214530115,
+      "stable": true,
+      "raw_sha256": "d2ce762a9ea2e81aab097414b43a41d93ce293e88b2ffeabdbba8181f3f731f2"
+    },
+    {
+      "case": "h2048-r64-w256",
+      "native_fused_baseline_seconds": 0.00011196785499123507,
+      "tiled_seconds": 4.293196616345085e-05,
+      "throughput_ratio": 2.6080299831820035,
+      "baseline_drift": 0.0002964367730724504,
+      "max_withinround_spread": 0.002822034885964664,
+      "stable": true,
+      "raw_sha256": "7834eaa7a0416fd692b875338240cb3e12693534c8645f3444440d28a0c46573"
+    },
+    {
+      "case": "h8192-r64-w0",
+      "native_fused_baseline_seconds": 0.00331929622188909,
+      "tiled_seconds": 0.0007470677082892507,
+      "throughput_ratio": 4.443099581281754,
+      "baseline_drift": 0.0028380385134672004,
+      "max_withinround_spread": 0.004884279005040737,
+      "stable": true,
+      "raw_sha256": "7d1e7f6b3df65fa771f0f61b5740bdfe456ba5418caae97f6c378b66cac58716"
+    },
+    {
+      "case": "h8192-r64-w256",
+      "native_fused_baseline_seconds": 0.0001659166869103501,
+      "tiled_seconds": 4.302250158616516e-05,
+      "throughput_ratio": 3.856509519281517,
+      "baseline_drift": 0.00018921527823456685,
+      "max_withinround_spread": 0.002591717554035977,
+      "stable": true,
+      "raw_sha256": "fcb0e787cbabb5e4bddcd82b44d5715e4032348bb7d1343cbdc658289fb8284b"
+    }
+  ],
+  "protocol": {
+    "balanced_rounds": 5,
+    "min_calibration_ms": 25,
+    "min_sample_ms": 20,
+    "max_batch_seconds": 1,
+    "stability_fraction": 0.05,
+    "retries": 0
+  },
+  "excluded_failure": {
+    "case": "history0 rows3 fullattention",
+    "native_rms": 0.00026754235842233083,
+    "reference_rms": 0.00026530804824486114,
+    "maximum_equal": true,
+    "decision": "not qualified; keep original small-query path"
+  },
+  "genuine_heldinput": {
+    "model": "VL4",
+    "layer": 4,
+    "rows": 18,
+    "history": 0,
+    "window": 256,
+    "envelope_pass": true,
+    "wholemodel_pass": false
+  },
+  "limits": [
+    "2k full baseline is potentially replay-sensitive; not representative of universal gain",
+    "No nonfinite or extreme input qualification",
+    "Fullmodel propagated FP32/BF16 acceptance and end-to-end timing pending",
+    "Earlier strict-PV kernel had one diagnostic row-max exceedance despite whole-cell pass; retained separately"
+  ]
+}

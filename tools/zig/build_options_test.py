@@ -16,7 +16,7 @@ PLATFORM_ONLY = {"metal-std", "step5-filter"}
 # the options the acceptance test does not pass: a release version and the test hooks cannot be combined
 NOT_PASSED = {"version", "slide-test-hooks"}
 # the options whose value the build reads while it configures, with a value it accepts
-VALUES = {"hip-arch": "gfx1151", "sm": "121", "optimize": "fast", "fuzz-optimize": "safe"}
+VALUES = {"hip-arch": "gfx1151", "sm": "121", "optimize": "fast", "fuzz-optimize": "safe", "lfm3-prompt-rows": "128"}
 
 
 def declared() -> dict[str, list[str]]:
