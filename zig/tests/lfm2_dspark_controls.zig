@@ -5,13 +5,7 @@ const tf = @import("tensorfold");
 const q = tf.lfm2_moe;
 const c = q.config;
 const st = q.state;
-/// Public hold on eight real lanes of capacity 64 (empty contexts, anchor 0), depths [9, 1 x 7], stock block 9.
-/// The expected greedy partition is 3 blocks at 9 rows (27 <= 32; a fourth would make 36), then 5 at 1 row.
-/// Separate lanes run those same groups through the same block kernels, not an independent numerical oracle. Picks
-/// must match, and synthetic grid prices make the expected repricing steps observable: 2 and 8 blocks move once, 4
-/// blocks twice; 1 and 16 blocks are controls. This is not a performance measurement. The combined settled GPU time is
-/// consumed once and bounded by wall time; the individual group times and their sum cannot be independently checked
-/// without production telemetry.
+/// 3x9 + 5x1 physical passes: same-kernel reference and synthetic grid controls, not a speed measurement.
 pub fn splitHold(gpa: std.mem.Allocator, io: std.Io, d: *q.dspark.Drafter, ids: []const u32) !void {
     const depths = [8]u32{ 9, 1, 1, 1, 1, 1, 1, 1 };
     const groups = [2][2]usize{ .{ 0, 3 }, .{ 3, 8 } }; // the lanes each physical pass holds
