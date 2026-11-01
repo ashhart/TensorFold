@@ -231,6 +231,9 @@ output within float64's range over the spread its fp32 steps and tensor-core sum
 seven controls, each one planted fault).
 CUDA also checks Dory's nGPT rows: the L2 norm rows with and without their bf16 add, and the normalized lerp residual
 (`norms_l2.cuh`), each output within float64's range at its bf16 points (three controls, each dropping one point).
+CUDA also checks the Qwen3.5 family's pending kept rows (`contract_qwen_pending.zig`): each `tf_q35_gdn_slots_*` scan
+replaying them, written back or not, and `tf_q35k_apply_pend`, bit-equal to `tf_q35k_apply` and then the scan at the
+27B's widths (two controls: the last pending row dropped, the last two swapped).
 CUDA also checks Dory's paged caches (`window_pages.cu`): `tf_wrows_put` places rows in a shuffled arena bit for bit, and the
 head dim 256 decode and prompt kernels read them through a page table, each output within float64's range (two controls:
 swapped stream tables, a stale page id).
