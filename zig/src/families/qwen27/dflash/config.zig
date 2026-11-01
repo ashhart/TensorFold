@@ -340,7 +340,7 @@ test "Flint DFlash2 binds only its published target shape and post-block taps" {
     bad.theta = 10000000;
     try std.testing.expectError(error.NotStockDFlash2, bad.requireStock());
 }
-// Ornith-1.5-9B-DFlash's config.json, as published.
+// z-lab/Qwen3.5-9B-DFlash's config.json, as published (Ornith-1.5-9B-DFlash publishes the same file).
 const v1_fixture =
     \\{"architectures":["DFlashDraftModel"],"attention_bias":false,"attention_dropout":0.0,
     \\"auto_map":{"AutoModel":"dflash.DFlashDraftModel"},"bos_token_id":null,
