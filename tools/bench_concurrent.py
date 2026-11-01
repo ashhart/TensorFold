@@ -34,6 +34,7 @@ import urllib.request
 
 from bench_evidence import Evidence, token_equal
 from bench_auth import authorize, read_api_key, redact
+from bench_args import validate_temperatures
 import bench_metrics
 import bench_timing
 
@@ -232,6 +233,8 @@ def main() -> None:
     if not bench_timing.timestamp(args.stagger_ms):
         p.error("--stagger-ms must be finite and nonnegative")
     api_key = read_api_key(p, args.api_key_env)
+    if not args.mixed:
+        validate_temperatures(p, args.temperatures)
     if args.no_seed:
         args.alone = args.serial = False
     levels = [int(x) for x in args.levels.split(",")]
