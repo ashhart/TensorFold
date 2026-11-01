@@ -19,6 +19,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Internal: 15 more lean findings fixed in the CLI, cluster and CUDA comments, with no change in behaviour (#2320).
 
 - Internal: 15 more lean findings fixed in the Metal kernels' comments, with no change in behaviour (#2318).
+- HIP: Qwen3.8-Flash-Next's MTP head takes a prompt chunk on the prompt tiles, not a decode window at a time, so cold prompts finish about 3% sooner at 8K and 32K on a Radeon 8060S (gfx1151). Replies are unchanged; the head's drafts are not bit-identical to before (#1878).
 
 - Internal: 42 more lean findings fixed in the tests' comments and the tools' docstrings, with no change in behaviour (#2315).
 

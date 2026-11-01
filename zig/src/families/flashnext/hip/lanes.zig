@@ -356,6 +356,7 @@ pub const Fx = struct {
             const n = if (last) rows - 1 else rows;
             if (n > 0) _ = try head_mod.run(
                 e.ops(&e.arena),
+                true,
                 m,
                 &e.host,
                 hc,
@@ -539,6 +540,7 @@ pub const Fx = struct {
             const o = e.ops(&e.arena);
             var out = try head_mod.run(
                 o,
+                false,
                 m,
                 &e.host,
                 hc,
@@ -563,6 +565,7 @@ pub const Fx = struct {
                 if (d + 1 == depth or prob[0] < stop_under) break;
                 out = try head_mod.run(
                     o,
+                    false,
                     m,
                     &e.host,
                     hc,
