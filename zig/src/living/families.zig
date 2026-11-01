@@ -16,6 +16,16 @@ pub const nemotron_h: Family = .{
     .quant = .{ .bits = 4, .group = 64 },
     .keys = .{ .width = "moe_shared_expert_intermediate_size" },
     .experts = .pattern,
+    .widths = .{
+        .embedding = "backbone.embeddings",
+        .head = "lm_head",
+        .mixer = "mixer.",
+        .aliases = &.{"language_model."},
+        .residuals = &.{ "out_proj", "o_proj", "shared_experts.down_proj" },
+        .mamba = &.{ "in_proj", "out_proj" },
+        .attention = &.{ "q_proj", "k_proj", "v_proj", "o_proj" },
+        .expert = &.{ "switch_mlp.fc1", "switch_mlp.fc2", "shared_experts.up_proj", "shared_experts.down_proj" },
+    },
 };
 
 /// Qwen3.8 Flash Next (qwen4_exp): a SwiGLU shared expert at every layer behind its own gate, 4-bit groups of 32.
