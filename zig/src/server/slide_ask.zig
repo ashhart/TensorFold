@@ -94,7 +94,7 @@ pub fn askBase(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, max
     return askBaseAt(srv, cx, system, user, max_tokens, 0, gone);
 }
 
-/// `askBase` sampled at `temperature`, seeded by the prompt so it repeats: other words than the greedy reply's.
+/// `askBase` sampled at `temperature`, using the server's seed policy: extra wordings can differ between lessons.
 pub fn askBaseAt(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, max_tokens: i64, temperature: f64, gone: anytype) chat.Failure!chat.Reply {
     const a = cx.a;
     var list: std.ArrayList(Value) = .empty;
