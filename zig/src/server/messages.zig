@@ -3,6 +3,7 @@ const std = @import("std");
 const json = @import("json");
 const errors = @import("errors.zig");
 const fields = @import("fields.zig");
+const pdf = @import("pdf.zig");
 const api = @import("engine_api");
 const Value = json.Value;
 const Cx = errors.Cx;
@@ -32,9 +33,10 @@ pub const Media = struct {
     images: bool = false,
     videos: bool = false,
     image_type: []const u8 = "image_url", // the part type the template reads (Vision.part_type)
+    max_images: u32 = 50,
 
     pub fn of(v: ?api.Vision) Media {
-        return .{ .images = v != null, .videos = v != null and v.?.video != null, .image_type = if (v) |x| x.part_type else "image_url" };
+        return .{ .images = v != null, .videos = v != null and v.?.video != null, .image_type = if (v) |x| x.part_type else "image_url", .max_images = if (v) |x| x.max_images else 50 };
     }
 };
 
@@ -101,7 +103,17 @@ pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_u
                 if (images and (std.mem.eql(u8, kind, "image_url") or std.mem.eql(u8, kind, media.image_type))) {
                     // tool results carry screenshots too; the template renders them in its response
                     if (!std.mem.eql(u8, role.?.string, "user") and !std.mem.eql(u8, role.?.string, "tool")) return cx.refuse("image parts are accepted in user and tool messages only");
-                    try parts.append(cx.a, try imagePart(cx, part, media.image_type));
+                    if (pdf.isPdfImagePart(part)) {
+                        try pdf.expandPart(cx, part, media.image_type, media.max_images, &parts);
+                    } else {
+                        try parts.append(cx.a, try imagePart(cx, part, media.image_type));
+                    }
+                    has_image = true;
+                    continue;
+                }
+                if (images and (std.mem.eql(u8, kind, "file") or std.mem.eql(u8, kind, "input_file"))) {
+                    if (!std.mem.eql(u8, role.?.string, "user") and !std.mem.eql(u8, role.?.string, "tool")) return cx.refuse("file parts are accepted in user and tool messages only");
+                    try pdf.expandPart(cx, part, media.image_type, media.max_images, &parts);
                     has_image = true;
                     continue;
                 }
@@ -325,4 +337,37 @@ test "a call's arguments become objects: blank text is no arguments, bad text is
     try std.testing.expect(calls[5].get("function").?.get("arguments") == null); // none sent, none added
     try std.testing.expectEqual(@as(usize, 3), out.array.len); // the tool results stay as they were, in order
     try std.testing.expectEqualStrings("two", out.array[2].get("content").?.string);
+}
+
+test "a user message with a PDF file content part normalizes into image_url parts under vision" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cx: Cx = .{ .a = arena.allocator() };
+    const bgra = [_]u8{ 255, 255, 255, 255 };
+    const png = try pdf.encodePngBgra(cx.a, &bgra, 1, 1, 4);
+    var pdf_doc: std.ArrayList(u8) = .empty;
+    try pdf_doc.appendSlice(cx.a,
+        "%PDF-1.4\n" ++
+            "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n" ++
+            "2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n" ++
+            "3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] >> endobj\n" ++
+            "4 0 obj << /Length ",
+    );
+    try pdf_doc.appendSlice(cx.a, try std.fmt.allocPrint(cx.a, "{d}", .{png.len}));
+    try pdf_doc.appendSlice(cx.a, " >>\nstream\n");
+    try pdf_doc.appendSlice(cx.a, png);
+    try pdf_doc.appendSlice(cx.a, "\nendstream\nendobj\ntrailer << /Root 1 0 R >>\n%%EOF\n");
+    const enc = std.base64.standard.Encoder;
+    const b64 = try cx.a.alloc(u8, enc.calcSize(pdf_doc.items.len));
+    _ = enc.encode(b64, pdf_doc.items);
+    const req = try std.fmt.allocPrint(cx.a,
+        \\[{{"role": "user", "content": [{{"type": "text", "text": "Analyze this PDF"}}, {{"type": "file", "file": {{"filename": "document.pdf", "file_data": "data:application/pdf;base64,{s}"}}}}]}}]
+    , .{b64});
+    const messages = (try json.parse(cx.a, req)).ok;
+    const out1 = try normalizeWith(&cx, messages, "system", false, .{ .images = true });
+    const out2 = try normalizeWith(&cx, out1, "system", false, .{ .images = true });
+    const content = out2.array[0].get("content").?.array;
+    try std.testing.expectEqual(@as(usize, 2), content.len);
+    try std.testing.expectEqualStrings("text", content[0].get("type").?.string);
+    try std.testing.expectEqualStrings("image_url", content[1].get("type").?.string);
 }
