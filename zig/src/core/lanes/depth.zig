@@ -372,7 +372,7 @@ pub const Rule = struct {
         return o.ms;
     }
 
-    /// A round's overhead before any is measured: a timed hold grid's tables are wall times, so none is assumed (else 8).
+    /// Grid entries are wall times; do not invent fixed overhead before observation.
     fn unmeasuredMs(r: *const Rule) f64 {
         return if (r.k.hold_costs.len > 0) 0.0 else 8.0;
     }
@@ -387,7 +387,7 @@ pub const Rule = struct {
         return best;
     }
 
-    /// The priced hold passes (a batch past the pass's rows takes several), otherwise the modeled head steps, kept out of a round's fixed overhead.
+    /// Physical hold passes, or modeled head steps, excluded from measured fixed overhead.
     pub fn headMs(r: *const Rule, depths: []const i64) f64 {
         if (r.k.hold_costs.len > 0) return @import("hold_price.zig").passMs(r.k.hold_costs, r.k.hold_rows, depths);
         var steps: i64 = 0;

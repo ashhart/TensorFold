@@ -18,8 +18,7 @@ const shared = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 /// Block rows one hold pass takes (the decode twin's rows), and context rows one absorb pass takes.
 pub const pass_rows = 32;
 pub const absorb_rows = 2048;
-/// Tapped rows (prompt and verified) a lane owns until a hold, snapshot or overflow absorbs them: one absorb pass at
-/// most, and never more than the lane has positions.
+/// Owned prompt and verified rows, deferred until a hold, snapshot or stage overflow.
 pub const stage_rows = absorb_rows;
 /// The blocks a hold is timed with at load, each at one draft and at four (two at 16 blocks: one 32-row pass).
 const hold_grid = [_]u32{ 1, 2, 4, 8, 16 };
@@ -350,8 +349,7 @@ pub const Drafter = struct {
         };
     }
 
-    /// Rows from `start` replace the context there. Rows that fit the lane's stage are copied before the target
-    /// overwrites its taps, for the next hold, snapshot or overflow; others and the stage's rows are absorbed now.
+    /// Owns taps before the target overwrites them; materializes context on hold, snapshot or overflow.
     fn absorbFn(ptr: *anyopaque, items: []const dr.Absorb) anyerror!void {
         const d = cast(ptr);
         try d.settle();
@@ -477,8 +475,7 @@ pub const Drafter = struct {
         try block.readPicks(d, d.pass[0..d.pass_len], d.depths[0..d.pass_len]);
     }
 
-    /// A completed hold pass of `streams` blocks at `depth`, `ms` of GPU time against its price: timed passes at its
-    /// block counts move a tenth of the way to it. Signalled holds settle here and synchronous ones as they complete.
+    /// Reprices neighboring grid shapes toward a completed physical pass's measured GPU time.
     pub fn priceHold(d: *Drafter, streams: usize, depth: u32, ms: f64) void {
         const timed = d.holds[0..d.holds_len];
         if (timed.len == 0 or streams == 0 or !(ms > 0)) return;

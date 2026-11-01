@@ -122,7 +122,7 @@ test "a head that prices its hold passes holds nothing at open: the whole prompt
         var s = try sm.Stream.init(gpa, .{ .id = "s", .prompt = &dt.p1, .max_new = 64 });
         defer s.deinit(gpa);
         try engine.addStream(&s);
-        // every prompt row reaches the drafter either way; only the hold after it waits for the depth rule's first round
+        // Deferring holds must not drop prompt context.
         try std.testing.expectEqual(@as(u64, dt.p1.len), head.prompt_rows);
         try std.testing.expectEqual(@as(u32, if (grid) 0 else 1), head.holds);
         try std.testing.expectEqual(!grid, s.next.?.count > 0);
