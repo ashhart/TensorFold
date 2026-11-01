@@ -75,8 +75,11 @@ RoCE writes (as GLM's); `TF_ROCE=0` leaves them to NCCL and `TF_ROCE_MAX_KB` cap
   `tf_mm3_attn_prompt_tc`: fp32 online softmax, bf16 probabilities into P.V), so drafted replies equal plain ones and a
   resumed prompt equals a fresh one.
 - Drafts: DSpark's block over the anchor's 4,096-key window, the Markov walk kept on the device (one host read a
-  block). The lane costs (`cuda_lanes.zig`) were timed on two GB10s, every rank at once after the load: verify windows
-  of 1 to 32 rows at positions 1k and 8k (their mean, never less than a narrower window's) and a draft block.
+  block). Several streams' blocks share one pass (`Drafter.blocks`, as many as a 16-row decode window holds: two
+  blocks of 7): their rows go through the projections, MLPs and head together, so the drafter's weights are read
+  once, while each block attends to its own stream's cache and walks its own picks. The lane costs (`cuda_lanes.zig`)
+  were timed on two GB10s, every rank at once after the load: verify windows of 1 to 32 rows at positions 1k and 8k
+  (their mean, never less than a narrower window's) and a draft block.
 - Rounding follows transformers' and the Metal backend's (Gemma norms rounded once, the residual rounded to bf16 after
   every add, cos and sin rounded to bf16, the rotary frequencies' power rounded once to fp32 as torch and Metal's
   `precise::pow`), with one difference: the MoE sums its weighted picks in fp32 and rounds once, where transformers

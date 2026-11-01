@@ -179,16 +179,27 @@ pub fn tapAt(c: *const Config, layers: usize, out: []i32) void {
 
 /// A rank's (value, id) in the picks' gather, padded so two ranks' gathers can go by RoCE writes (16-byte rows).
 const pick_stride = 16;
+/// Blocks a pass may hold: as many as a decode window's rows take (`perPass`).
+const max_blocks = state.window_rows;
+/// One block's picks: up to 8 ranks' (value, id), then its walk i32 [17]; 256 keeps the gathers 16-byte aligned.
+const pick_set = 256;
+comptime {
+    std.debug.assert(8 * pick_stride + 17 * 4 <= pick_set);
+}
+
+/// One stream's block: its caches, anchor at `p`, context absorbed from `from`; `out.len` drafts.
+pub const Block = struct { caches: *const Caches, anchor: u32, p: usize, from: usize, out: []u32 };
 
 /// Runs the drafter's steps on one rank's forward machinery (`f.b` holds at least `rows` rows).
 pub const Drafter = struct {
     w: Weights,
-    picks: cuda.DeviceBuffer, // every rank's (value, id) of a Markov pick at pick_stride bytes, then the walk: i32 [17]
+    picks: cuda.DeviceBuffer, // per block (pick_set): every rank's (value, id) at pick_stride bytes, then the walk
     scores: cuda.DeviceBuffer, // fp32 [this rank's vocabulary]: one row's Markov scores
     zero: cuda.DeviceBuffer, // fp32 [prompt rows][hidden] zeros: the residual a context row's norm adds to
 
     pub fn init(d: *const cuda.Driver, w: Weights, world: usize, vocab_share: usize, hidden: usize) !Drafter {
-        var picks = try cuda.DeviceBuffer.alloc(d, world * pick_stride + 17 * 4);
+        if (world > 8) return error.TooManyRanks;
+        var picks = try cuda.DeviceBuffer.alloc(d, max_blocks * pick_set);
         errdefer picks.free();
         var scores = try cuda.DeviceBuffer.alloc(d, vocab_share * 4);
         errdefer scores.free();
@@ -224,62 +235,85 @@ pub const Drafter = struct {
 
     /// A block at anchor position `p` (its context absorbed below p): `n` greedy drafts into `out`, every rank alike.
     pub fn block(dr: *Drafter, f: *const fw.Forward, caches: *const Caches, anchor: u32, p: usize, from: usize, n: usize, out: []u32) !void {
+        try dr.blocks(f, &.{.{ .caches = caches, .anchor = anchor, .p = p, .from = from, .out = out[0..n] }});
+    }
+
+    /// Blocks one pass holds: the decode window's rows over a block's.
+    pub fn perPass(dr: *const Drafter) usize {
+        return state.window_rows / dr.w.c.block;
+    }
+
+    /// Several streams' blocks in one pass: rows stacked through the linears (weights read once), attention per stream.
+    pub fn blocks(dr: *Drafter, f: *const fw.Forward, items: []const Block) !void {
         const c = &f.w.config;
         const s = f.w.share;
         const b = f.b;
         const h: usize = c.hidden;
         const D: usize = c.head_dim;
         const T: usize = dr.w.c.block;
-        if (n > T or p + T > caches.capacity) return error.BadDraft;
-        var ids: [16]i32 = undefined;
-        ids[0] = @intCast(anchor);
-        for (1..T) |j| ids[j] = @intCast(dr.w.c.noise);
-        try cuda.copy_source.enqueue(f.d, b.ids, std.mem.sliceAsBytes(ids[0..T]), f.stream);
-        try kern.embed(&f.m.k, f.stream, b.ids, f.w.embed, b.resid, T, h);
+        const R = items.len * T;
+        if (items.len == 0 or items.len > dr.perPass() or R > b.rows) return error.BadDraft;
+        var ids: [state.window_rows]i32 = undefined; // R <= window_rows: perPass
+        for (items, 0..) |it, k| {
+            if (it.out.len > T or it.p + T > it.caches.capacity) return error.BadDraft;
+            ids[k * T] = @intCast(it.anchor);
+            for (1..T) |j| ids[k * T + j] = @intCast(dr.w.c.noise);
+        }
+        try cuda.copy_source.enqueue(f.d, b.ids, std.mem.sliceAsBytes(ids[0..R]), f.stream);
+        try kern.embed(&f.m.k, f.stream, b.ids, f.w.embed, b.resid, R, h);
         const hq = s.queries(c).len();
         const hk = s.kv.len();
-        const lo = @max((p + 1) -| dr.w.c.window, from); // the anchor's window, within the context absorbed
+        const stride = (hq + 2 * hk) * D;
         const scale: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(D)));
         const L = dr.w.layers[0..dr.w.c.layers];
-        try kern.norm(&f.m.k, f.stream, b.resid, L[0].in_norm, b.x, T, h, c.eps);
+        try kern.norm(&f.m.k, f.stream, b.resid, L[0].in_norm, b.x, R, h, c.eps);
         for (L, 0..) |l, i| {
-            try f.mx(l.qkv, b.x, h, T, b.qkv, .bf16);
-            const in = kern.stacked(b.qkv, (hq + 2 * hk) * D, hq, hk, D);
-            try kern.prep(&f.m.k, f.stream, .{ .xq = in[0], .xk = in[1], .xv = in[2], .xi = in[3], .qw = l.q_norm, .kw = l.k_norm, .iqw = 0, .ikw = 0, .q = b.q, .iq = 0, .kc = caches.keys(i), .vc = caches.values(i), .ik = 0, .rows = T, .pos = p, .hq = hq, .hk = hk, .hi = 0, .rotary = c.rotary, .eps = c.eps, .theta = c.theta });
-            try kern.attnWindow(&f.m.k, f.stream, b.q, caches.keys(i), caches.values(i), b.o, T, hq, hk, lo, p + T - 1, scale);
-            try f.mx(l.o, b.o, hq * D, T, f.slot(T, 1), .f32);
-            try f.gather(T, 1);
-            try kern.addNorm(&f.m.k, f.stream, b.resid, b.gathered, s.world, 1, 1.0, l.post_norm, b.x, T, h, c.eps);
-            try f.mlpMx(l.mlp, s.dense.len(), T, f.slot(T, 1), .f32);
-            try f.gather(T, 1);
-            const next = if (i + 1 < L.len) L[i + 1].in_norm else dr.w.final_norm;
-            try kern.addNorm(&f.m.k, f.stream, b.resid, b.gathered, s.world, 1, 1.0, next, b.x, T, h, c.eps);
-        }
-        try f.x3(f.w.head, b.x, T, b.logits, .bf16);
-        // the Markov walk: row j's pick biased by the pick before it (the anchor first), every rank's best gathered
-        const nv = s.vocab.len();
-        // the walk stays on the device: walk[0] the anchor, walk[j + 1] row j's pick; one download at the end
-        const walk = dr.picks.ptr + s.world * pick_stride;
-        const head = [1]i32{@intCast(anchor)};
-        try cuda.copy_source.enqueue(f.d, walk, std.mem.sliceAsBytes(&head), f.stream);
-        for (0..n) |j| {
-            try kern.markov(&f.m.k, f.stream, b.logits + j * nv * 2, dr.w.w2, dr.w.w1, walk + j * 4, dr.scores.ptr, nv);
-            const mine = dr.picks.ptr + s.rank * pick_stride;
-            try kern.top1f(&f.m.k, f.stream, dr.scores.ptr, nv, s.vocab.lo, mine, mine + 4);
-            switch (f.exchange) {
-                .local => {},
-                .nccl => |x| if (x.group) |g| try g.allGather(f.stream, mine, dr.picks.ptr, pick_stride) else try x.lib.check(x.lib.api.ncclAllGather(mine, dr.picks.ptr, pick_stride, .u8, x.comm, f.stream.handle), "ncclAllGather"),
+            try f.mx(l.qkv, b.x, h, R, b.qkv, .bf16);
+            for (items, 0..) |it, k| {
+                const lo = @max((it.p + 1) -| dr.w.c.window, it.from); // the anchor's window, as absorbed
+                const q = b.q + k * T * hq * D * 2;
+                const in = kern.stacked(b.qkv + k * T * stride * 2, stride, hq, hk, D);
+                try kern.prep(&f.m.k, f.stream, .{ .xq = in[0], .xk = in[1], .xv = in[2], .xi = in[3], .qw = l.q_norm, .kw = l.k_norm, .iqw = 0, .ikw = 0, .q = q, .iq = 0, .kc = it.caches.keys(i), .vc = it.caches.values(i), .ik = 0, .rows = T, .pos = it.p, .hq = hq, .hk = hk, .hi = 0, .rotary = c.rotary, .eps = c.eps, .theta = c.theta });
+                try kern.attnWindow(&f.m.k, f.stream, q, it.caches.keys(i), it.caches.values(i), b.o + k * T * hq * D * 2, T, hq, hk, lo, it.p + T - 1, scale);
             }
-            try kern.pickMerge(&f.m.k, f.stream, dr.picks.ptr, s.world, pick_stride, walk, j);
+            try f.mx(l.o, b.o, hq * D, R, f.slot(R, 1), .f32);
+            try f.gather(R, 1);
+            try kern.addNorm(&f.m.k, f.stream, b.resid, b.gathered, s.world, 1, 1.0, l.post_norm, b.x, R, h, c.eps);
+            try f.mlpMx(l.mlp, s.dense.len(), R, f.slot(R, 1), .f32);
+            try f.gather(R, 1);
+            const next = if (i + 1 < L.len) L[i + 1].in_norm else dr.w.final_norm;
+            try kern.addNorm(&f.m.k, f.stream, b.resid, b.gathered, s.world, 1, 1.0, next, b.x, R, h, c.eps);
         }
-        var got: [17]i32 = undefined;
+        try f.x3(f.w.head, b.x, R, b.logits, .bf16);
+        // each walk on the device: row j's pick biased by the one before (walk[0] the anchor), ranks' best gathered
+        const nv = s.vocab.len();
+        for (items, 0..) |it, k| {
+            const base = dr.picks.ptr + k * pick_set;
+            const walk = base + s.world * pick_stride;
+            const head = [1]i32{@intCast(it.anchor)};
+            try cuda.copy_source.enqueue(f.d, walk, std.mem.sliceAsBytes(&head), f.stream);
+            for (0..it.out.len) |j| {
+                try kern.markov(&f.m.k, f.stream, b.logits + (k * T + j) * nv * 2, dr.w.w2, dr.w.w1, walk + j * 4, dr.scores.ptr, nv);
+                const mine = base + s.rank * pick_stride;
+                try kern.top1f(&f.m.k, f.stream, dr.scores.ptr, nv, s.vocab.lo, mine, mine + 4);
+                switch (f.exchange) {
+                    .local => {},
+                    .nccl => |x| if (x.group) |g| try g.allGather(f.stream, mine, base, pick_stride) else try x.lib.check(x.lib.api.ncclAllGather(mine, base, pick_stride, .u8, x.comm, f.stream.handle), "ncclAllGather"),
+                }
+                try kern.pickMerge(&f.m.k, f.stream, base, s.world, pick_stride, walk, j);
+            }
+        }
         try f.stream.synchronize();
         switch (f.exchange) {
             .local => {},
             .nccl => |x| if (x.group) |g| try g.check(),
         }
-        try cuda.DeviceBuffer.download(.{ .d = f.d, .ptr = walk, .len = (n + 1) * 4 }, 0, std.mem.sliceAsBytes(got[0 .. n + 1]));
-        for (out[0..n], got[1 .. n + 1]) |*o, g| o.* = @intCast(g);
+        for (items, 0..) |it, k| {
+            var got: [17]i32 = undefined;
+            const n = it.out.len;
+            try cuda.DeviceBuffer.download(.{ .d = f.d, .ptr = dr.picks.ptr + k * pick_set + s.world * pick_stride, .len = (n + 1) * 4 }, 0, std.mem.sliceAsBytes(got[0 .. n + 1]));
+            for (it.out, got[1 .. n + 1]) |*o, g| o.* = @intCast(g);
+        }
     }
 };
 
