@@ -23,7 +23,7 @@ pub const Group = struct {
         errdefer self.tile.unload();
         for (&self.entries, 0..) |*x, i| x.* = .{ .rig = .{ .gpu = gpu, .s = stream }, .kind = if (i < kinds.len) kinds[i] else kinds[i - kinds.len], .k = &self.four, .k1 = &self.one, .tile = if (i >= kinds.len) &self.tile else null, .router = router };
         errdefer for (&self.entries) |*x| x.deinit();
-        for (&self.entries) |*x| try kernels.append(a, x.kernel());
+        for (&self.entries) |*x| try kernels.append(a, try x.kernel());
         return self;
     }
     pub fn destroy(self: *Group) void {
