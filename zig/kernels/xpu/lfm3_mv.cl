@@ -69,3 +69,86 @@ __kernel void qmv4_swiglu(__global const uint *w1, __global const ushort *s1, __
     const float u = bf(to_bf(qmv_row(w3, s3, b3, x, row, in_dim)));
     if (get_sub_group_local_id() == 0) act[row] = to_bf(bf(to_bf(a / (1.0f + exp(-a)))) * u);
 }
+
+// Prompt windows: bf16(x . (q * scale + bias)), one fma chain a 64-wide k block, blocks in order: any cut, same rows.
+__attribute__((reqd_work_group_size(16, 16, 1)))
+__kernel void pgemm(__global const uint *w, __global const ushort *scales, __global const ushort *biases, __global const ushort *x,
+                    __global ushort *y, uint k, uint n, uint m, uint ldy, uint y_off, uint qg) {
+    __local float xs[16][64];
+    __local float ws[16][64];
+    const uint lx = get_local_id(0), ly = get_local_id(1), t = ly * 16 + lx;
+    const ulong m0 = (ulong)get_group_id(1) * 64, n0 = (ulong)get_group_id(0) * 64;
+    const uint lr = t / 4, lk = (t % 4) * 4, words = k / 8, groups = k / qg;
+    float acc[4][4];
+#pragma unroll
+    for (uint i = 0; i < 4; i++)
+#pragma unroll
+        for (uint j = 0; j < 4; j++) acc[i][j] = 0.0f;
+    float part[4][4];
+    for (uint k0 = 0; k0 < k; k0 += 16) {
+        const ulong xr = m0 + lr, wr = n0 + lr;
+        const uint kk = k0 + lk;
+        ushort4 xv = (ushort4)(0);
+        if (xr < m) xv = vload4(0, x + xr * k + kk);
+        float4 wv = (float4)(0.0f);
+        if (wr < n) {
+            const uint p = w[wr * words + kk / 8] >> (4 * (kk % 8));
+            const float sc = bf(scales[wr * groups + kk / qg]), bi = bf(biases[wr * groups + kk / qg]);
+            wv = (float4)((float)(p & 15u) * sc + bi, (float)((p >> 4) & 15u) * sc + bi, (float)((p >> 8) & 15u) * sc + bi,
+                          (float)((p >> 12) & 15u) * sc + bi);
+        }
+        xs[lk][lr] = bf(xv.s0);
+        xs[lk + 1][lr] = bf(xv.s1);
+        xs[lk + 2][lr] = bf(xv.s2);
+        xs[lk + 3][lr] = bf(xv.s3);
+        ws[lk][lr] = wv.s0;
+        ws[lk + 1][lr] = wv.s1;
+        ws[lk + 2][lr] = wv.s2;
+        ws[lk + 3][lr] = wv.s3;
+        barrier(CLK_LOCAL_MEM_FENCE);
+        if (k0 % 64 == 0) {
+#pragma unroll
+            for (uint i = 0; i < 4; i++)
+#pragma unroll
+                for (uint j = 0; j < 4; j++) part[i][j] = 0.0f;
+        }
+#pragma unroll
+        for (uint q = 0; q < 16; q++) {
+            const float4 a = vload4(ly, &xs[q][0]);
+            const float4 b = vload4(lx, &ws[q][0]);
+            part[0][0] = fma(a.s0, b.s0, part[0][0]);
+            part[0][1] = fma(a.s0, b.s1, part[0][1]);
+            part[0][2] = fma(a.s0, b.s2, part[0][2]);
+            part[0][3] = fma(a.s0, b.s3, part[0][3]);
+            part[1][0] = fma(a.s1, b.s0, part[1][0]);
+            part[1][1] = fma(a.s1, b.s1, part[1][1]);
+            part[1][2] = fma(a.s1, b.s2, part[1][2]);
+            part[1][3] = fma(a.s1, b.s3, part[1][3]);
+            part[2][0] = fma(a.s2, b.s0, part[2][0]);
+            part[2][1] = fma(a.s2, b.s1, part[2][1]);
+            part[2][2] = fma(a.s2, b.s2, part[2][2]);
+            part[2][3] = fma(a.s2, b.s3, part[2][3]);
+            part[3][0] = fma(a.s3, b.s0, part[3][0]);
+            part[3][1] = fma(a.s3, b.s1, part[3][1]);
+            part[3][2] = fma(a.s3, b.s2, part[3][2]);
+            part[3][3] = fma(a.s3, b.s3, part[3][3]);
+        }
+        if ((k0 + 16) % 64 == 0 || k0 + 16 >= k) {
+#pragma unroll
+            for (uint i = 0; i < 4; i++)
+#pragma unroll
+                for (uint j = 0; j < 4; j++) acc[i][j] += part[i][j];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+#pragma unroll
+    for (uint i = 0; i < 4; i++) {
+        const ulong r = m0 + ly * 4 + i;
+        if (r >= m) continue;
+#pragma unroll
+        for (uint j = 0; j < 4; j++) {
+            const ulong o = n0 + lx * 4 + j;
+            if (o < n) y[r * ldy + y_off + o] = to_bf(acc[i][j]);
+        }
+    }
+}

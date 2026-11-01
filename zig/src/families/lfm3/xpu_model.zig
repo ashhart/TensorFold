@@ -48,6 +48,7 @@ const Kernels = struct {
     qkvg: rt.Kernel,
     w13: rt.Kernel,
     rope_store: rt.Kernel,
+    pgemm: rt.Kernel,
 };
 
 /// One stream's state: each conv layer's last six B*x rows, each attention layer's KV slots, and its position.
@@ -125,6 +126,10 @@ pub const Model = struct {
     own: *Seq = undefined,
     /// Fused launches by bit (1 w1+w3+SwiGLU, 2 q/k/v/gate, 4 rope and KV store); LFM3_FUSE sets them for A/B.
     fuse: u32 = 7,
+    /// In forwardPrompt: projections take pgemm, whose rows are the same however the prompt is cut.
+    prompt: bool = false,
+    /// The MLX group size of the projections.
+    qg: u32 = 64,
 
     /// The affine tensors of module `m` (in layer `layer`, or a model tensor) by names.zig in namespace `ns`.
     fn table(l: *ld.Loader, ns: names.Namespace, layer: ?usize, m: names.Module) !Table {
@@ -178,6 +183,7 @@ pub const Model = struct {
             .qkvg = try vm.kernel("qmv4_bf_x4", .{ 64, 1, 1 }),
             .w13 = try vm.kernel("qmv4_swiglu", .{ 64, 1, 1 }),
             .rope_store = try fm.kernel("lfm3_rope_store", .{ 64, 1, 1 }),
+            .pgemm = try vm.kernel("pgemm", .{ 16, 16, 1 }),
         };
         const maxc = (cap + chunk - 1) / chunk;
         const w: usize = max_rows;
@@ -254,6 +260,7 @@ pub const Model = struct {
             .max_rows = max_rows,
             .maxc = maxc,
             .device_bytes = l.total,
+            .qg = c.quant.global.group,
         };
         if (std.c.getenv("LFM3_FUSE")) |v| m.fuse = std.fmt.parseInt(u32, std.mem.span(v), 10) catch 7;
         m.own = try m.newSeq();
@@ -372,8 +379,9 @@ pub const Model = struct {
         m.gpa.destroy(sn);
     }
 
-    /// y[r * y_stride + y_off + o] = x[r] . W[o] for n rows: the decode matvec for one row, pdense for a window.
+    /// y[r * y_stride + y_off + o] = x[r] . W[o] for n rows: pgemm in a prompt window, else qmv (one row) or pdense.
     fn proj(m: *Model, t: Table, x: Buf, y: Buf, in_dim: u32, rows: u32, n: u32, y_stride: u32, y_off: u32) !void {
+        if (m.prompt) return run(&m.k.pgemm, .{ (rows + 63) / 64, (n + 63) / 64, 1 }, .{ t.w, t.s, t.b, x, y, in_dim, rows, n, y_stride, y_off, m.qg });
         if (n == 1) return run(&m.k.qmv, .{ (rows + 3) / 4, 1, 1 }, .{ t.w, t.s, t.b, x, y, in_dim, @as(u32, 0), y_off, rows });
         try run(&m.k.pdense, .{ (rows + 15) / 16, (n + tile_rows - 1) / tile_rows, 1 }, .{ t.w, t.s, t.b, x, y, in_dim, rows, n, y_stride, y_off, @as(u32, 0) });
     }
@@ -442,6 +450,18 @@ pub const Model = struct {
     /// The tokens as one window of the bound stream (1 .. max_rows rows); `logits`: the last row's logits and argmax.
     pub fn forward(m: *Model, ids: []const u32, logits: bool, h: ?Hook) !void {
         try m.forwardSegs(&.{.{ .q = m.seq, .ids = ids }}, if (logits) .last else .none, false, h);
+    }
+
+    /// A prompt window of the bound stream, every projection in pgemm (verified windows and decode keep theirs).
+    pub fn forwardPrompt(m: *Model, ids: []const u32, logits: bool, h: ?Hook) !void {
+        const fuse = m.fuse;
+        m.prompt = true;
+        m.fuse = fuse & 4; // a one-row window too: not the decode matvecs
+        defer {
+            m.prompt = false;
+            m.fuse = fuse;
+        }
+        try m.forward(ids, logits, h);
     }
 
     /// One forward over every segment's rows, each at its stream's position; `hist` keeps a window's rollback source.
@@ -536,7 +556,7 @@ pub const Model = struct {
         var i: usize = 0;
         while (i < ids.len) {
             const n = @min(ids.len - i, m.max_rows);
-            try m.forward(ids[i .. i + n], i + n == ids.len, h);
+            try m.forwardPrompt(ids[i .. i + n], i + n == ids.len, h);
             i += n;
         }
     }
