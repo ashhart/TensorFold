@@ -107,6 +107,8 @@ pub fn main() !void {
     var k_conv = try m.kernel("vit_dwconv", .{ 64, 1, 1 });
     var k_rope = try m.kernel("vit_qk_norm_rope", .{ 64, 1, 1 });
     var k_attn = try m.kernel("vit_attn", .{ 64, 1, 1 });
+    var k_attn_q4 = try m.kernel("vit_attn_q4", .{ 128, 1, 1 });
+    var k_attn_qr = try m.kernel("vit_attn_qr", .{ 128, 1, 1 });
     var k_swi = try m.kernel("vit_swiglu", .{ 64, 1, 1 });
     var t: Tally = .{};
     var prng = std.Random.DefaultPrng.init(1024);
@@ -289,26 +291,26 @@ pub fn main() !void {
         t.control("vit_qk_norm_rope with rows and columns swapped", relErr(got, ctl));
     }
 
-    // attention, 16 query heads over 8 KV heads, no mask; controls: a causal mask, and query head h on KV head h % 8
+    // attention, 16 query heads on 8 KV heads; controls: causal, KV head h % 8, q rows transposed; candidates' bytes
+    const Attn = struct { name: []const u8, k: *o.rt.Kernel };
+    const attns = [_]Attn{ .{ .name = "vit_attn", .k = &k_attn }, .{ .name = "vit_attn_q4", .k = &k_attn_q4 }, .{ .name = "vit_attn_qr", .k = &k_attn_qr } };
     for ([_]u32{ NP, 1156 }) |n| {
         const HQ: u32 = 16;
         const HK: u32 = 8;
         const q = try randF(n * HQ * HD, rnd, 0, 1.0);
         const k = try randF(n * HK * HD, rnd, 0, 1.0);
         const v = try randF(n * HK * HD, rnd, 0, 1.0);
-        const y = try r.alloc(n * HQ * HD * 4);
-        try o.run(&k_attn, .{ (n + 31) / 32, HQ, 1 }, .{ try up(&r, q.h), try up(&r, k.h), try up(&r, v.h), y, n, HQ, HK, @as(f32, 0.125), no });
-        const got = try get(&r, y, n * HQ * HD);
         const sc = try gpa.alloc(f64, n);
-        var outs: [3][]f64 = undefined;
+        var outs: [4][]f64 = undefined;
         for (&outs) |*a| a.* = try gpa.alloc(f64, n * HQ * HD);
-        for (0..3) |mode| for (0..n) |i| for (0..HQ) |h| {
+        for (0..4) |mode| for (0..n) |i| for (0..HQ) |h| {
             const kv = if (mode == 2) h % HK else h / (HQ / HK);
             const last = if (mode == 1) i + 1 else n;
+            const qi = if (mode == 3) (h * n + i) * HD else (i * HQ + h) * HD;
             var mx: f64 = -std.math.inf(f64);
             for (0..last) |j| {
                 var s: f64 = 0;
-                for (0..HD) |d| s += q.f[(i * HQ + h) * HD + d] * k.f[(j * HK + kv) * HD + d];
+                for (0..HD) |d| s += q.f[qi + d] * k.f[(j * HK + kv) * HD + d];
                 sc[j] = s * 0.125;
                 mx = @max(mx, sc[j]);
             }
@@ -323,10 +325,27 @@ pub fn main() !void {
                 outs[mode][(i * HQ + h) * HD + d] = a / l;
             }
         };
-        var buf: [64]u8 = undefined;
-        t.check(try std.fmt.bufPrint(&buf, "vit_attn over {d} patches", .{n}), relErr(got, outs[0]));
-        t.control(try std.fmt.bufPrint(&buf, "vit_attn against a causal mask, {d}", .{n}), relErr(got, outs[1]));
-        t.control(try std.fmt.bufPrint(&buf, "vit_attn with KV head h % 8, {d}", .{n}), relErr(got, outs[2]));
+        const bq = try up(&r, q.h);
+        const bk = try up(&r, k.h);
+        const bv = try up(&r, v.h);
+        var base: []f32 = &.{};
+        for (attns) |at| {
+            const y = try r.alloc(n * HQ * HD * 4);
+            try o.run(at.k, .{ (n + 31) / 32, HQ, 1 }, .{ bq, bk, bv, y, n, HQ, HK, @as(f32, 0.125), no });
+            const got = try get(&r, y, n * HQ * HD);
+            var buf: [96]u8 = undefined;
+            t.check(try std.fmt.bufPrint(&buf, "{s} over {d} patches", .{ at.name, n }), relErr(got, outs[0]));
+            t.control(try std.fmt.bufPrint(&buf, "{s} against a causal mask, {d}", .{ at.name, n }), relErr(got, outs[1]));
+            t.control(try std.fmt.bufPrint(&buf, "{s} with KV head h % 8, {d}", .{ at.name, n }), relErr(got, outs[2]));
+            t.control(try std.fmt.bufPrint(&buf, "{s} with q's rows transposed, {d}", .{ at.name, n }), relErr(got, outs[3]));
+            if (base.len == 0) {
+                base = got;
+                continue;
+            }
+            const same = std.mem.eql(u8, std.mem.sliceAsBytes(got), std.mem.sliceAsBytes(base));
+            if (!same) t.bad = true;
+            std.debug.print("  {s} bytes against vit_attn's, {d}: {s}\n", .{ at.name, n, if (same) "same" else "DIFFER (FAIL)" });
+        }
     }
     std.debug.print("lfm3_vit: {s}\n", .{if (t.bad) "FAILED" else "ok"});
     if (t.bad) return error.TestFailed;
