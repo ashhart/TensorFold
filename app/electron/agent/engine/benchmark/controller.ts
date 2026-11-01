@@ -125,7 +125,7 @@ export class ModelBenchmarks {
       job.receipt = receipt ? parseBenchmarkReceipt(JSON.stringify(receipt), { ...input, engineVersion: checkpoint?.engineVersion ?? BENCHMARK_ENGINE_VERSION }, this.now()) : null
       if (job.receipt) {
         if (checkpoint && (job.receipt.model.revision !== checkpoint.revision || job.receipt.model.config_sha256 !== checkpoint.configSha256)) { job.receipt = null; throw new Error('The cached checkpoint changed during the benchmark.') }
-        job.snapshot.metadata = structuredClone({ runtime: job.receipt.runtime, model: job.receipt.model, hardware: job.receipt.hardware, settings: job.receipt.settings })
+        job.snapshot.metadata = structuredClone({ suite: job.receipt.suite, runtime: job.receipt.runtime, model: job.receipt.model, hardware: job.receipt.hardware, settings: job.receipt.settings })
         job.snapshot.cells = benchmarkCells(job.receipt)
         job.snapshot.receiptAvailable = true
         job.snapshot.protocolComplete = benchmarkProtocolComplete(job.receipt)
