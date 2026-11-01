@@ -240,6 +240,7 @@ pub fn restoreSlot(a: std.mem.Allocator, r: *Runner, slot: u32, ring: ?Ring, st:
     try st.landed();
     try r.reset(slot);
     try r.cover(slot, st.at); // a paged slot's pages for the state's rows before the copy writes them
+    try r.reserve(slot, st.at); // a slot whose K/V grows as used holds the state's rows first
     try copy(a, r, slot, ring, st, false);
     r.offsets[slot] = st.at;
     if (ring) |g| g.end.* = st.draft_end;
@@ -253,6 +254,7 @@ pub fn moveSlot(a: std.mem.Allocator, r: *Runner, from: u32, from_ring: ?Ring, t
     if (from_ring) |g| if (g.end.* != at) return error.NotAtMark;
     try r.reset(to);
     try r.cover(to, at);
+    try r.reserve(to, at);
     var src: std.ArrayList(Part) = .empty;
     defer src.deinit(a);
     var dst: std.ArrayList(Part) = .empty;

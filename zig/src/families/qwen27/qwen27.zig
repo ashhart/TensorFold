@@ -33,6 +33,7 @@ pub const model = @import("model.zig");
 pub const moe_gpu = @import("moe_gpu.zig");
 pub const projection = @import("projection.zig");
 pub const prompt_memory = @import("prompt_memory.zig");
+pub const kv_grow = @import("kv_grow.zig");
 pub const prompt_rows = @import("prompt_rows.zig");
 pub const prompt_marks = @import("prompt_marks.zig");
 pub const prompt_tail = @import("prompt_tail.zig");
