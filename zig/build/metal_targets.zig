@@ -87,12 +87,14 @@ pub fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     const libc_mem = b.addSystemCommand(&.{ "sh", "-c", "nm -m \"$0\" | grep -q 'external _memcpy (from libSystem)' || { echo 'tensorfold-native links its own memcpy: find the typed std.json int parse or 128-bit float conversion that pulled in compiler-rt'; exit 1; }" });
     libc_mem.addArtifactArg(exe);
     test_step.?.dependOn(&libc_mem.step);
+    // core/root.zig, as cuda.zig gives the server tests: the engine's tensorfold.zig shares files with qwen_draw
+    const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{.{ .name = "tokenizer", .module = tokenizer }} });
     const server_tests = b.createModule(.{
         .root_source_file = b.path("zig/src/server/root.zig"),
         .target = target,
         .optimize = .Debug, // the server's unit tests run with safety checks, as zig_test.sh builds them
         .link_libc = true,
-        .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template }, .{ .name = "living", .module = living } },
+        .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template }, .{ .name = "living", .module = living }, .{ .name = "core", .module = core } },
     });
     // the required-tools tests' 27B mask policy and lane fake, on the engine API's own lanes module
     if (api.import_table.get("lanes")) |lanes_mod| {
@@ -103,7 +105,7 @@ pub fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     const server_json = server_build.addTo(b, server_tests, target, .Debug);
     test_step.?.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests })).step);
     test_step.?.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_json })).step);
-    @import("cortheon_fuzz.zig").add(b, target, api, tokenizer, template);
+    @import("cortheon_fuzz.zig").add(b, target, api, tokenizer, template, core);
     // the parse half's tests, as their own test binary (zig/src/server/tool_parse_test.zig)
     const tool_parse_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/server/tool_parse_test.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template } } }) });
     _ = server_build.addTo(b, tool_parse_tests.root_module, target, .Debug);
