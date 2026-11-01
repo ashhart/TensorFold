@@ -126,7 +126,7 @@ test "pool growth: active reservations refuse without mutation, partial prefill 
     const free = pool.freePages();
     const available = pool.available();
     var h2: Host = .{ .gpa = a, .store = &store, .kx = .{ .slot = next } };
-    try t.expectError(error.PoolExhausted, admission.resumeRequest(&h2, &prompt, 64));
+    try t.expectError(error.LaneMemory, admission.resumeRequest(&h2, &prompt, 64));
     try t.expectEqual(@as(usize, 0), h2.sent);
     try t.expectEqual(free, pool.freePages());
     try t.expectEqual(available, pool.available());

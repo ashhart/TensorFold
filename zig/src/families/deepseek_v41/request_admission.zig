@@ -29,8 +29,8 @@ fn apply(s: anytype, prompt: []const u32, max_new: u64, hit: anytype) !Resumed {
     defer spills.deinit(s.gpa);
     const held: []const u32 = if (hit) |h| &.{h.id} else &.{};
     const plan = try s.poolPlan(prompt.len, max_new, hit, held, 0, &spills);
-    // A direct target has no queue: refuse before sending operations, evicting entries or mutating the slot.
-    if (plan.wait) return error.PoolExhausted;
+    // Refuse before sending operations, evicting entries or mutating the slot; the lane host queues a LaneMemory job.
+    if (plan.wait) return error.LaneMemory;
     const r = try s.resumePlanned(prompt, plan.need, hit, spills.items);
     return .{ .at = r.at, .damaged = r.damaged };
 }
