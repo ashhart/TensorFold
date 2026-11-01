@@ -69,3 +69,5 @@ test {
 test {
     _ = @import("pocket_quiet_legacy_test.zig");
 }
+
+pub const restart_fixture = @import("restart_fixture.zig");

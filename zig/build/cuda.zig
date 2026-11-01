@@ -421,6 +421,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     b.step("test-qwen27-required-host", "Qwen27 required tool routes through the masked lane fake").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"qwen27 tool calls:"} })).step);
     b.step("test-save-graph-host", "Actual graph receipts paired with generic learner persistence failures").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"Save recovery:"} })).step);
     b.step("test-lesson-gate-host", "Production server rounds and earlier-fact retention").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"Learning persistence:"} })).step);
+    b.step("test-slide-delete-host", "Single and multiple fact deletion without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{ "delete", "a graph file", "allocation that fails anywhere in recording" } })).step);
     b.step("test-frame-cache-identity-host", "Image frame identities through the actual shared cache").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native_modules.api, .filters = &.{"Frame cache:"} })).step);
     const media_gate = b.step("test-media-request-ownership-host", "Shared request ownership, image frame caches and media expansion on the CPU");
     media_gate.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native_modules.api })).step);
