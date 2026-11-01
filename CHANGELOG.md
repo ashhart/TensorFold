@@ -155,6 +155,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Tests: the serve-config fixtures no longer depend on a group-friendly umask, while the permission refusals stay; 39/39 host tests pass under umask 002 and 022 on Linux and macOS (#4115, fixes #4113). Thanks to @AIFlowML.
 
+- Idol's octree and Gaussian decoders on CUDA, beside the Metal decoders and driven by the same `tf-idol-decode` case driver and gates. The stem, `to_kv` and the head norms run in fp32 and `input_layer` and the head in true fp32 (no TF32), the blocks through the denoiser's CUDA linears and norms. Attention keeps fp32 scores and sums and rounds P to nearest fp16 as torch's CUDA kernels do, fp32 throughout at 8 query rows or fewer as the cases' SDK runs them. The six kernels and 13 controls are registered with the kernel contract (`tf-cuda-test idol-decoder-contract`). It admits sm_121 (GB10) and sm_120 and refuses other GPUs. Its host tests pass; its nvcc build is pending and it has not yet run on a GPU (after #1773 and #1767, for #1757). Thanks to @jayleaton.
+
 
 ## 1.3.2
 
