@@ -46,6 +46,7 @@ pub const Fns = struct {
         a.add(int(top_k));
         a.add(params);
         try launch_.launch(f.topk_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = 32 } }, s, &a);
+        @import("route_tap_copy.zig").afterPick(s, picks, wts, rows, top_k + 1);
     }
 
     /// out[r] = bf16(sum of w[r][s] * y[r][s]) over the slots in order; y fp32 (decode rows) or bf16 (prompt rows).

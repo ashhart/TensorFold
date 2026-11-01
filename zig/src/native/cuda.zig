@@ -182,6 +182,7 @@ const record = @import("cuda_record.zig");
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const report = platform.optional_libraries.atBoundary();
     defer report.deinit();
+    if (!@import("core").route_tap.admit(a, gpa, o.model_type, o.rank, problem)) return null;
     if (o.fsrRefusal("cuda")) |why| {
         problem.* = why;
         return null;

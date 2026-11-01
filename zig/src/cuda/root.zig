@@ -63,6 +63,7 @@ pub const tree_attention = @import("tree_attention.zig");
 pub const block_attention = @import("block_attention.zig");
 pub const window_attention = @import("window_attention.zig");
 pub const moe_glue = @import("moe_glue.zig");
+pub const route_tap_copy = @import("route_tap_copy.zig");
 pub const dense_rows = @import("dense_rows.zig");
 pub const exl3 = @import("exl3.zig");
 pub const exl3_experts = @import("exl3_experts.zig");
@@ -126,6 +127,7 @@ test {
     _ = @import("block_attention.zig");
     _ = @import("window_attention.zig");
     _ = @import("moe_glue.zig");
+    _ = route_tap_copy;
     _ = @import("dense_rows.zig");
 }
 

@@ -82,6 +82,7 @@ pub fn run(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, prefill: bool)
     if (r.remap != 0) {
         // every rank picks the same pairs, runs the ones it holds (the others group under an id past its experts)
         try o.moeSelect(logits, pick, wts, null, 0, rows, r.count(), r.top_k);
+        @import("route_tap_copy.zig").afterSelect(o.l.r, o.stream, pick, wts, rows, slots);
         const local = try o.arena.of(i32, size * slots);
         try o.moeLocalize(pick, r.remap, local, pairs, ex.count);
         tile = tileFor(o, rows);
@@ -136,6 +137,7 @@ fn expertParts(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, logits: u6
         tile = tileFor(o, rows);
         try o.moeRoute(pick, pairs, r.rows, tile, members, items, cap);
     }
+    @import("route_tap_copy.zig").afterSelect(o.l.r, o.stream, pick, wts, rows, slots);
     // the gate and up's activation is the launch's epilogue when the tile takes the shape
     const act_t: Tensor = if (try o.projectRoutedAct(x, ex.fused, items, count, members, pairs, slots, @min(tile, rows), ex.limit)) |t| t else blk: {
         const both = try o.projectRouted(x, ex.fused, items, count, members, pairs, slots, @min(tile, rows));

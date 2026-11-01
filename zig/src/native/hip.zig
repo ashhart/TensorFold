@@ -209,6 +209,7 @@ const Host = struct {
     fn close(p: *anyopaque) void {
         const h: *Host = @ptrCast(@alignCast(p));
         h.host.stop();
+        @import("core").route_tap.stop();
         h.core.deinit();
         h.cfg.deinit(h.gpa);
         h.release(h.family);
@@ -228,6 +229,7 @@ fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const report = @import("sys").optional_libraries.atBoundary();
     defer report.deinit();
+    if (!@import("core").route_tap.admit(a, gpa, o.model_type, o.rank, problem)) return null;
     if (try o.slideRefusal(a, "HIP")) |why| {
         problem.* = why;
         return null;

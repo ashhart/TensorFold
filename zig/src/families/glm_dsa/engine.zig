@@ -68,6 +68,7 @@ pub const Engine = struct {
         e.io = io;
         e.device = try mtl.Device.init();
         e.queue = try e.device.queue();
+        @import("../../core/route_tap_metal.zig").attach(e.device);
         try frags.check(e.device, e.queue, gpa); // the fragment layout nax.h gives the EXLR8 prompt kernels
         e.pair = try pr.Pair.init(gpa, io, e.device, settings, gpu.prompt_rows * 6144 * 4);
         const text = try std.Io.Dir.cwd().readFileAlloc(io, try std.fmt.allocPrint(gpa, "{s}/config.json", .{dir}), gpa, .limited(1 << 20));
@@ -96,6 +97,7 @@ pub const Engine = struct {
     pub fn deinit(e: *Engine) void {
         snap.deinit(e);
         @import("residency.zig").drop(e);
+        @import("../../core/route_tap_metal.zig").detach();
         e.pair.deinit();
         for (e.slots) |*s| s.prompt.deinit(e.gpa);
         e.m.deinit();
@@ -134,6 +136,7 @@ pub const Engine = struct {
     fn finish(e: *Engine, cb: mtl.CommandBuffer) !void {
         cb.commit();
         cb.wait();
+        @import("../../core/route_tap_metal.zig").afterWait();
         if (cb.failure()) |msg| {
             std.log.err("glm_dsa: GPU command failed: {s}", .{msg});
             return error.GpuFailure;
