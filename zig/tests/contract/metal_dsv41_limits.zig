@@ -29,10 +29,13 @@ pub fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch,
     }
     if (std.mem.startsWith(u8, d.name, "dsv41 engram ")) return .{ .decl = d, .function = fun, .here = sources.dsv41.engram, .pre_m5 = sources.dsv41.engram };
     if (std.mem.startsWith(u8, d.name, "dsv41 glue_tmp ")) return .{ .decl = d, .function = fun, .here = sources.dsv41.glue_tmp, .pre_m5 = sources.dsv41.glue_tmp };
+    if (std.mem.startsWith(u8, d.name, "dsv41 fused ")) return .{ .decl = d, .function = fun, .here = sources.dsv41.fused, .pre_m5 = sources.dsv41.fused };
     if (std.mem.startsWith(u8, d.name, "dsv41 glue ")) return .{ .decl = d, .function = fun, .here = sources.dsv41.glue, .pre_m5 = sources.dsv41.glue };
     if (std.mem.startsWith(u8, d.name, "dsv41 cand ")) return .{ .decl = d, .function = fun, .here = sources.dsv41.cand, .pre_m5 = sources.dsv41.cand };
     if (std.mem.startsWith(u8, d.name, "dsv41 compress ")) return .{ .decl = d, .function = fun, .here = sources.dsv41.compress, .pre_m5 = sources.dsv41.compress };
     if (std.mem.startsWith(u8, d.name, "dsv41 mv ")) return .{ .decl = d, .function = fun, .here = sources.dsv41.mv, .pre_m5 = sources.dsv41.mv };
+    if (std.mem.startsWith(u8, d.name, "dsv41 fold ")) return .{ .decl = d, .function = fun, .here = sources.dsv41.fold, .pre_m5 = sources.dsv41.fold };
+    if (std.mem.startsWith(u8, d.name, "dsv41 hc ")) return .{ .decl = d, .function = fun, .here = sources.dsv41.hc, .pre_m5 = sources.dsv41.hc };
     if (std.mem.startsWith(u8, d.name, "dsv41 fp8 rows ")) return .{ .decl = d, .function = fun, .here = sources.dsv41.fp8_rows, .pre_m5 = sources.dsv41.fp8_rows };
     return null;
 }
