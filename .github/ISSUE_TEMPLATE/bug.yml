@@ -1,0 +1,136 @@
+name: Bug report
+description: Something TensorFold does wrong, such as a crash, hang, refusal, token mismatch or API error.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. A public request we can run lands a fix fastest.
+        Write "n/a" and why for a field that does not apply, such as the checkpoint for a build bug.
+        Do not paste private paths, hostnames, tokens, keys or confidential prompts. Maintainers may relabel the issue.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Engine or server
+        - Desktop app
+        - Mobile app
+        - Tools, build or CI
+        - Documentation or website
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind of failure
+      options:
+        - Crash or startup error
+        - Hang or timeout
+        - Wrong refusal
+        - Token mismatch (drafted, resumed or concurrent differs from plain)
+        - API or streaming error
+        - Wrong state after cancel, reset or restart
+        - Build or install failure
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and actual behavior
+      description: What you expected, what happened instead, and how often it happens.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: TensorFold version or commit
+      description: The `--version` output or the commit SHA. Say whether it is a release archive, a source build or a fork with changes.
+      placeholder: "the `--version` output"
+    validations:
+      required: true
+  - type: input
+    id: last-good
+    attributes:
+      label: Last version that worked
+      description: Optional. A release or commit where this did not happen.
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend
+      multiple: true
+      options:
+        - Metal
+        - CUDA
+        - HIP
+        - XPU
+        - None (no GPU involved)
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      multiple: true
+      options:
+        - macOS
+        - Linux
+        - Windows
+        - iOS
+        - Android
+    validations:
+      required: true
+  - type: textarea
+    id: hardware
+    attributes:
+      label: Hardware and runtime
+      description: Chip or GPU, RAM or VRAM, OS version, and driver, CUDA, ROCm or Xcode versions. Hosts and ranks when it runs on several.
+      placeholder: Apple M4 Max, 128 GB, macOS 26.1
+    validations:
+      required: true
+  - type: textarea
+    id: model
+    attributes:
+      label: Checkpoint and revision
+      description: Repository and immutable revision, format or quantization, and the drafter and its revision. "n/a" for a model-free bug.
+      placeholder: org/model at revision 0123abcd, 4-bit, drafter org/drafter at revision 4567ef01
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Exact command and request
+      description: The full launch command, environment options by name, and a public request JSON, token IDs or a script that generates them.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Startup output, error and logs
+      description: The startup lines, error or stack trace, and exit status. Say why if none is available.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: mismatch
+    attributes:
+      label: Token mismatch details
+      description: Optional. The first differing index, both token arrays or `token_sha` hashes, and the drafted and plain settings.
+  - type: textarea
+    id: related
+    attributes:
+      label: Related issues and pull requests
+      description: Links to similar reports and how this one differs, or "none found".
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy
+      options:
+        - label: This report holds no private paths, hostnames, tokens, keys or confidential prompts.
+          required: true
