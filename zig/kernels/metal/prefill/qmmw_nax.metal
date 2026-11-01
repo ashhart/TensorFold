@@ -225,6 +225,87 @@ inline bool expert_tile(const device int32_t* offsets, int experts, int total, i
   return false;
 }
 
+// Eight groups' scales or biases for 64 rows, group-major, from one 16 byte load a row.
+template <typename T>
+inline void put_window(threadgroup T* dst, uint4 v) {
+  dst[0 * 64] = as_type<T>(ushort(v.x & 0xffffu));
+  dst[1 * 64] = as_type<T>(ushort(v.x >> 16));
+  dst[2 * 64] = as_type<T>(ushort(v.y & 0xffffu));
+  dst[3 * 64] = as_type<T>(ushort(v.y >> 16));
+  dst[4 * 64] = as_type<T>(ushort(v.z & 0xffffu));
+  dst[5 * 64] = as_type<T>(ushort(v.z >> 16));
+  dst[6 * 64] = as_type<T>(ushort(v.w & 0xffffu));
+  dst[7 * 64] = as_type<T>(ushort(v.w >> 16));
+}
+
+// k_loopw for K a multiple of eight groups: win holds a window of scales then biases, so no step loads them alone.
+template <typename T, int TM>
+inline void k_loopw_win(thread frag<float> (&acc)[TM][2], const device T* x, int K, int ldx, int live, bool inside,
+                        const device uint* wq, const device T* S, const device T* B, int KG, int col, int N,
+                        threadgroup T* tile, threadgroup T* win, int tn, uint t, short2 home) {
+  constexpr int PAD = 64 + 16 / sizeof(T);
+  constexpr int PER = 8 * WG / 64;  // steps a window serves
+  threadgroup T* mine = tile + (t / 2) * PAD + 32 * (t % 2);
+  TF_UNROLL
+  for (short i = 0; i < TM; i++) {
+    acc[i][0] = frag<float>(0);
+    acc[i][1] = frag<float>(0);
+  }
+  const device T* meta = ((t & 64) ? B : S) + long(min(col + int(t & 63), N - 1)) * KG;
+  const int row = int(t / 2), part = int(t % 2);
+  uint w[WB + 1];
+  loadw(w, wq);
+  uint4 next = *reinterpret_cast<const device uint4*>(meta);
+  for (int k = 0, step = 0; k < K; k += 64, step++) {
+    if (step % PER == 0) put_window(win + ((t & 64) ? 8 * 64 : 0) + (t & 63), next);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const int g = WG == 64 ? step % 8 : 2 * (step % PER) + part;
+    dequantw<T>(w, win[g * 64 + row], win[8 * 64 + g * 64 + row], mine);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (k + 64 < K) {
+      wq += 2 * WB;
+      loadw(w, wq);
+      if (step % PER == PER - 1) {
+        meta += 8;
+        next = *reinterpret_cast<const device uint4*>(meta);
+      }
+    }
+#pragma clang loop unroll(disable)
+    for (int kk = 0; kk < 64; kk += 32) {
+      if (live > 0) {
+        frag<T> a[TM][2], b[2][2];
+        TF_UNROLL
+        for (short i = 0; i < 2; i++) {
+          TF_UNROLL
+          for (short j = 0; j < 2; j++) {
+            frag_get_t(b[j][i], (const threadgroup T*)tile, PAD, tn + 16 * i, kk + 16 * j, home);
+          }
+        }
+        TF_UNROLL
+        for (short i = 0; i < TM; i++) {
+          TF_UNROLL
+          for (short j = 0; j < 2; j++) {
+            if (inside) {
+              frag_get(a[i][j], x, ldx, 16 * i, kk + 16 * j, home);
+            } else {
+              frag_get_in(a[i][j], x, ldx, 16 * i, kk + 16 * j, home, live, kk + 32);
+            }
+          }
+        }
+        TF_UNROLL
+        for (short m = 0; m < TM; m++) {
+          TF_UNROLL
+          for (short j = 0; j < 2; j++) {
+            mma_16x32<false, true>(acc[m][0], acc[m][1], a[m][j], b[j][0], b[j][1]);
+          }
+        }
+      }
+    }
+    x += 64;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+}
+
 }  // namespace tfqw
 
 // y = x W^T for W [N, K] at WB/WG: 64 x 64 tiles, 4 simdgroups of 32 x 32. P: K N M, y's row stride (0: N).
@@ -241,6 +322,25 @@ inline bool expert_tile(const device int32_t* offsets, int experts, int total, i
   frag<float> acc[2][2];
   tfqw::k_loopw<bfloat16_t, 2>(acc, X + long(row + tm) * K, K, K, live, live == 32, W + wrow * WPR + WB * (t % 2),
                                S + wrow * KG, B + wrow * KG, 0, tile, tn, uint(t), frag_home(ushort(lane)));
+  if (col + tn < N && live > 0)
+    tfqw::store<bfloat16_t, 2>(acc, Y + long(row + tm) * LD + col + tn, LD, live, N - (col + tn), frag_home(ushort(lane)));
+}
+
+// tf_qmmw_t_nax for k a multiple of eight groups, scales and biases by window. P: K N M, y's row stride (0: N).
+[[kernel]] void tf_qmmw_t_nax_win(const device uint* W [[buffer(0)]], const device bfloat16_t* S [[buffer(1)]],
+    const device bfloat16_t* B [[buffer(2)]], const device bfloat16_t* X [[buffer(3)]], const device int* P [[buffer(4)]],
+    device bfloat16_t* Y [[buffer(5)]], uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]], uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup bfloat16_t tile[64 * (64 + 16 / sizeof(bfloat16_t))];
+  threadgroup bfloat16_t win[16 * 64];
+  const int K = P[0], N = P[1], M = P[2], LD = P[3] > 0 ? P[3] : N;
+  const int row = int(tg.y) * 64, col = int(tg.x) * 64, t = int(sg) * 32 + int(lane);
+  const int tm = 32 * int(sg / 2), tn = 32 * int(sg % 2), live = min(32, M - (row + tm));
+  const long wrow = long(min(col + t / 2, N - 1));
+  const int WPR = K * WB / 32, KG = K / WG;
+  frag<float> acc[2][2];
+  tfqw::k_loopw_win<bfloat16_t, 2>(acc, X + long(row + tm) * K, K, K, live, live == 32, W + wrow * WPR + WB * (t % 2), S, B, KG,
+                                   col, N, tile, win, tn, uint(t), frag_home(ushort(lane)));
   if (col + tn < N && live > 0)
     tfqw::store<bfloat16_t, 2>(acc, Y + long(row + tm) * LD + col + tn, LD, live, N - (col + tn), frag_home(ushort(lane)));
 }

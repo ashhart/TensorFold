@@ -1,0 +1,162 @@
+{
+  "scope": "PROVISIONAL M5 TEXT4 combined FFN-only plus residual-PV tiled-attention prompt path. Bounded logit envelope evidence; not full production qualification.",
+  "cases": [
+    {
+      "prompt_tokens": 2048,
+      "baseline_ttft_s": [
+        0.8463148330338299,
+        0.8463252908550203
+      ],
+      "candidate_ttft_s": [
+        0.5536723751574755,
+        0.5533634996972978
+      ],
+      "baseline_median_s": 0.8463200619444251,
+      "candidate_median_s": 0.5535179374273866,
+      "baseline_over_candidate": 1.5289839853752702,
+      "baseline_first_last_drift": 1.2356892236997652e-05,
+      "stable_at_5percent": true,
+      "output_text_sha256_equal": true,
+      "output_token_id_equality": "not asserted; output text digest equal",
+      "prompt_ids": "both routes /tokenize exact pinned arrays",
+      "candidate_spread": 0.0005581782324757256,
+      "ttft_reduction_fraction": 0.34597091299516636
+    },
+    {
+      "prompt_tokens": 8192,
+      "baseline_ttft_s": [
+        4.403437749948353,
+        4.400628083385527
+      ],
+      "candidate_ttft_s": [
+        2.405512291006744,
+        2.4054756248369813
+      ],
+      "baseline_median_s": 4.40203291666694,
+      "candidate_median_s": 2.4054939579218626,
+      "baseline_over_candidate": 1.8299912590385026,
+      "baseline_first_last_drift": -0.0006380620602297604,
+      "stable_at_5percent": true,
+      "output_text_sha256_equal": true,
+      "output_token_id_equality": "not asserted; output text digest equal",
+      "prompt_ids": "both routes /tokenize exact pinned arrays",
+      "candidate_spread": 1.524279414177876e-05,
+      "ttft_reduction_fraction": 0.4535493024565532
+    }
+  ],
+  "predeclared_max_baseline_drift": 0.05,
+  "no_timing_retries": true,
+  "default_off": true,
+  "same_binary_sha256": "29f5aa69af84200ffb7d85293f9a40ddb433b4930f6ea4747bb6435edadde359",
+  "protocol": {
+    "env_order": [
+      0,
+      1,
+      1,
+      0
+    ],
+    "cache_tokens": 0,
+    "completion_tokens": 16,
+    "fresh_servers": 4,
+    "all_server_exit_zero": true,
+    "all_client_exit_zero": true,
+    "same_pinned_prompt_ids": true,
+    "ffn_calls_per_candidate": [
+      1152,
+      4608
+    ],
+    "attention_route_hits_verified": true,
+    "no_retries": true,
+    "device_scope": "M5 only"
+  },
+  "bounded_model_evidence": {
+    "prompt_tokens": 128,
+    "teacher_forced_continuation_tokens": 16,
+    "reference": "Independent propagated CPU FP32 and actual pinned official MLX BF16",
+    "phases": {
+      "prompt_boundary": {
+        "native_logit_metrics": {
+          "mean_absolute_error": 0.03329696540903778,
+          "rms_error": 0.041121336314284725,
+          "relative_rms": 0.011827876222482102,
+          "maximum_absolute_error": 0.20430231094360352,
+          "maximum_coordinate": [
+            0,
+            49445
+          ]
+        },
+        "reference_bf16_logit_metrics": {
+          "mean_absolute_error": 0.03884851189472984,
+          "rms_error": 0.04764064939088356,
+          "relative_rms": 0.01370304943028551,
+          "maximum_absolute_error": 0.20851778984069824,
+          "maximum_coordinate": [
+            0,
+            91107
+          ]
+        },
+        "metric_results": {
+          "rms_error": true,
+          "maximum_absolute_error": true,
+          "top20_probability_mean": false,
+          "top20_probability_max": false
+        },
+        "probability_diagnostics": {
+          "native_mean": 1.3686212832679892e-05,
+          "reference_mean": 9.179301337359821e-06,
+          "native_max": 0.0001479777967422491,
+          "reference_max": 9.084144305366725e-05
+        },
+        "native_fp32_top1_misses": 0,
+        "reference_fp32_top1_misses": 0
+      },
+      "teacher_forced_continuation": {
+        "native_logit_metrics": {
+          "mean_absolute_error": 0.02985543358314638,
+          "rms_error": 0.037950087085717864,
+          "relative_rms": 0.010836676663429445,
+          "maximum_absolute_error": 0.20357131958007812,
+          "maximum_coordinate": [
+            10,
+            26150
+          ]
+        },
+        "reference_bf16_logit_metrics": {
+          "mean_absolute_error": 0.032687712900759155,
+          "rms_error": 0.0425864734405558,
+          "relative_rms": 0.01216060036617698,
+          "maximum_absolute_error": 0.256467342376709,
+          "maximum_coordinate": [
+            14,
+            4438
+          ]
+        },
+        "metric_results": {
+          "rms_error": true,
+          "maximum_absolute_error": true,
+          "top20_probability_mean": true,
+          "top20_probability_max": false
+        },
+        "probability_diagnostics": {
+          "native_mean": 1.5765819037637397e-05,
+          "reference_mean": 1.6550785692252214e-05,
+          "native_max": 0.0005338205920233374,
+          "reference_max": 0.00043348867067471986
+        },
+        "native_fp32_top1_misses": 0,
+        "reference_fp32_top1_misses": 0
+      }
+    }
+  },
+  "limits": [
+    "No addition or multiplication of individual optimization gains; combined graph measured directly",
+    "Bounded prompt and continuation logit RMS/max pass with zero added slack",
+    "Proposed top20 probability diagnostics still have breaches; retained explicitly",
+    "No all-family/image/tail/concurrency qualification or nonfinite attention proof",
+    "H0R3 relaxed and residual operator failures remain excluded by original small-query path",
+    "No production enablement or10xclaim"
+  ],
+  "raw_records_sha256": "76abebe29aed7c1410e4c3614eb4618cc7e1d5380e475d85b7c9ea1ddcf82b45",
+  "raw_events_sha256": "19000f599395068050297e1c4b81d7c6d38db7b60b5dc40da89109261d1b328a",
+  "phase_receipt_sha256": "22304036617e4975a851d781c496accf451f9a6250543535bec6cc8d74eaa4c5"
+}

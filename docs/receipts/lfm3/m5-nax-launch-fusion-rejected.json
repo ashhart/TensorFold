@@ -1,0 +1,87 @@
+{
+ "scope": "Decode launch reduction candidate on one M5 Ultra: the FFN gate and up projections and SwiGLU in one dispatch (the paired row projection's arithmetic, each product rounded to BF16 before the activation), and the attention query and head-gate projections as one paired dispatch. 26 fewer dispatches a token of about 250.",
+ "method": "Same harness, prompts and settings for both builds, greedy, max_tokens 128, prompt cache disabled, builds alternated for two rounds of three runs, medians of six.",
+ "rows": [
+  {
+   "checkpoint": "text4",
+   "prompt_tokens_target": 0,
+   "streams": 1,
+   "decode_tok_s_aggregate_base": 438.1,
+   "decode_tok_s_aggregate_candidate": 444.3,
+   "candidate_over_base": 1.014,
+   "itl_mean_ms_base": 2.282,
+   "itl_mean_ms_candidate": 2.25
+  },
+  {
+   "checkpoint": "text4",
+   "prompt_tokens_target": 2048,
+   "streams": 1,
+   "decode_tok_s_aggregate_base": 431.3,
+   "decode_tok_s_aggregate_candidate": 438.3,
+   "candidate_over_base": 1.016,
+   "itl_mean_ms_base": 2.279,
+   "itl_mean_ms_candidate": 2.242
+  },
+  {
+   "checkpoint": "text4",
+   "prompt_tokens_target": 0,
+   "streams": 4,
+   "decode_tok_s_aggregate_base": 1075.0,
+   "decode_tok_s_aggregate_candidate": 1055.4,
+   "candidate_over_base": 0.982,
+   "itl_mean_ms_base": 3.897,
+   "itl_mean_ms_candidate": 3.966
+  },
+  {
+   "checkpoint": "text4",
+   "prompt_tokens_target": 2048,
+   "streams": 4,
+   "decode_tok_s_aggregate_base": 1069.1,
+   "decode_tok_s_aggregate_candidate": 1052.3,
+   "candidate_over_base": 0.984,
+   "itl_mean_ms_base": 6.146,
+   "itl_mean_ms_candidate": 6.207
+  },
+  {
+   "checkpoint": "vl4",
+   "prompt_tokens_target": 0,
+   "streams": 1,
+   "decode_tok_s_aggregate_base": 410.7,
+   "decode_tok_s_aggregate_candidate": 415.1,
+   "candidate_over_base": 1.011,
+   "itl_mean_ms_base": 2.434,
+   "itl_mean_ms_candidate": 2.408
+  },
+  {
+   "checkpoint": "vl4",
+   "prompt_tokens_target": 2048,
+   "streams": 1,
+   "decode_tok_s_aggregate_base": 397.6,
+   "decode_tok_s_aggregate_candidate": 402.7,
+   "candidate_over_base": 1.013,
+   "itl_mean_ms_base": 2.484,
+   "itl_mean_ms_candidate": 2.452
+  },
+  {
+   "checkpoint": "vl4",
+   "prompt_tokens_target": 0,
+   "streams": 4,
+   "decode_tok_s_aggregate_base": 1074.5,
+   "decode_tok_s_aggregate_candidate": 1052.6,
+   "candidate_over_base": 0.98,
+   "itl_mean_ms_base": 3.888,
+   "itl_mean_ms_candidate": 3.966
+  },
+  {
+   "checkpoint": "vl4",
+   "prompt_tokens_target": 2048,
+   "streams": 4,
+   "decode_tok_s_aggregate_base": 1021.5,
+   "decode_tok_s_aggregate_candidate": 1001.8,
+   "candidate_over_base": 0.981,
+   "itl_mean_ms_base": 5.715,
+   "itl_mean_ms_candidate": 5.795
+  }
+ ],
+ "outcome": "Rejected. One stream gains 1.1 to 1.6 percent, four streams lose 1.6 to 2.0 percent. No production change."
+}

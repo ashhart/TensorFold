@@ -1,0 +1,50 @@
+{
+  "scope": "Actual TEXT4 full7680-column gate+up+SwiGLU rows64, matched five-round operator screen, not model/serving qualification",
+  "modes": {
+    "public_dual_activation": {
+      "seconds": 0.0004813688137801364,
+      "first_last_drift": -5.411151046130769e-06,
+      "within_round_spreads": [
+        2.4335360861993394e-05,
+        5.140975960693517e-05,
+        2.569575760480447e-05,
+        0.0006370785072513652,
+        1.6233672745613603e-05
+      ],
+      "stable": true
+    },
+    "fused": {
+      "seconds": 0.00047985742276068777,
+      "first_last_drift": 0.00018995511613772997,
+      "within_round_spreads": [
+        9.091387751891666e-05,
+        5.413057285741374e-06,
+        0.0,
+        0.0002469324900127301,
+        0.00019672310616303257
+      ],
+      "stable": true
+    }
+  },
+  "stable": true,
+  "throughput_ratio": 1.0031496668546949,
+  "device": "Apple M5",
+  "observation": "Within this five-round operator run fused was0.314% faster in time. This tiny observation does not establish a material full-model gain; M4 samecase was1.1%slower. No default promotion.",
+  "numerical": {
+    "bounded_cases": 5,
+    "actual_rows": 64,
+    "full_output_columns": 7680,
+    "final_words": 491520,
+    "all_final_words_equal_public": true,
+    "gate_up_equal_frozen_canonical": true,
+    "negative_controls_actual_exit1": 3,
+    "five_repeat_identity": true,
+    "guards": 22
+  },
+  "provenance": {
+    "cost_analysis_sha256": "1634a410b850e4b62abd18ffff5c09fa06fd88d443763fba6a356a2273fc0860",
+    "numeric_receipt_sha256": "4a8efa351aa30d319bbeca0ca6a8fb6c6d01dead83e11c63e71c40b3287f0569",
+    "control_receipt_sha256": "03e35e0156f13950f228b5d4f31ab420c75cad6dd89bb9e80ff7f1b96e357eb9"
+  },
+  "cleanup": "All owned numerical and cost stages completed, controls failed as intended, leases released."
+}

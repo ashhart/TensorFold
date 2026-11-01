@@ -1,0 +1,107 @@
+{
+  "scope": "Independent read-only review of the public tiled runtime receipt and its preserved raw artifacts. No new GPU execution, width/image qualification or release claim.",
+  "reviewed_receipt": "m5-public-tiled-prompt-runtime.json",
+  "reviewed_receipt_commit": "33b1f4fbe",
+  "reviewed_receipt_sha256": "ffcc20e0dd01d859078bf9f018af7bdaa400ca36576ede1ce396b13ac2019f71",
+  "source_commit": "8df18abc47568246c0d38b70c2e280521a24b31a",
+  "verification": {
+    "serving_raw_hashes_matched": 63,
+    "basic_raw_hashes_matched": 11,
+    "source_files_identical_to_precommit_review": 11,
+    "server_binary_hashes_matched": {
+      "baseline": "d9d5ee7f8a04f1e8caeaea789a8bd026a15eb87964ccd4262e56bb840ba10069",
+      "candidate": "44fdcc3d4f95e5af399fe598e8bb063c0bfc7dc752494b9114249af3c41eb553"
+    },
+    "actual_tokenize_arrays_match_pinned_inputs": 8,
+    "cold_requests_complete_zero_cached_and_16_output_tokens": 8,
+    "owned_servers_exit_zero": 4,
+    "clients_exit_zero": 8,
+    "lock_released": true,
+    "ABBA_order_verified": true,
+    "recomputed_ratios": [
+      1.5457624285449318,
+      1.9135882671369862
+    ],
+    "output_text_hashes_equal": true,
+    "output_token_ids": "not emitted; no equality claim",
+    "instrumented_probe_output_bytes_equal_prior_composed": {
+      "baseline": true,
+      "candidate": true
+    }
+  },
+  "independent_phase_check": {
+    "actual_exit": 1,
+    "unchanged_frozen_references_and_scorer": true,
+    "phases_exactly_equal_recorded_receipt": true,
+    "independent_phase_receipt_sha256": "1c525ce36259e53193bd6234d03fac99ada3ac8eda37a251b4b490c90287f15d",
+    "prompt_logit_rms_and_max_no_worse": true,
+    "continuation_logit_rms_and_max_no_worse": true,
+    "top1_matches_fp32_all_17_rows": true,
+    "proposed_probability_diagnostics": "Prompt mean/max and continuation max still breach; no pooling or tie waiver.",
+    "scope": "128 prompt tokens plus 16 fixed teacher-forced continuation tokens, Text4 only; no long-context numerical claim."
+  },
+  "policy": {
+    "source": "https://github.com/ashhart/TensorFold/issues/1491#issuecomment-6537143418",
+    "author": "ashhart",
+    "acceptance": "The native result must be no farther from FP32 than the reference BF16 result. Retain every top1 difference and margin; partial comparisons remain partial.",
+    "performance": "The recorded prefill gap is a follow-up and does not block the opt-in text slice. This does not independently qualify a new tiled kernel.",
+    "release_context_tier": 32768,
+    "longer_context": "Memory/time execution is not fidelity qualification.",
+    "metric_definition_limit": "The comment does not itself define logit RMS/max, fixed top20 aggregation, pointwise dominance, or a tie exception. The executable probability diagnostics remain labeled as proposed."
+  },
+  "candidate_coverage": [
+    {
+      "checkpoint": "LFM3-1.7B-MLX-4bit",
+      "ffn_route": "Q4 GS64 tiled candidate for eligible rows",
+      "attention_route": "tiled candidate for eligible nonshared slices",
+      "actual_evidence": "bounded propagated128+16 comparison and cold2k/8k provisional timing",
+      "status": "partial"
+    },
+    {
+      "checkpoint": "LFM3-1.7B-MLX-6bit",
+      "ffn_route": "source-established fallback",
+      "attention_route": "tiled candidate remains eligible",
+      "actual_evidence": "no candidate model receipt in reviewed evidence",
+      "status": "unqualified"
+    },
+    {
+      "checkpoint": "LFM3-1.7B-MLX-8bit",
+      "ffn_route": "source-established fallback",
+      "attention_route": "tiled candidate remains eligible",
+      "actual_evidence": "no candidate model receipt in reviewed evidence",
+      "status": "unqualified"
+    },
+    {
+      "checkpoint": "LFM3-VL-2B-MLX-4bit",
+      "ffn_route": "source-established GS32 fallback",
+      "attention_route": "tiled candidate remains eligible",
+      "actual_evidence": "no candidate projected-image/model receipt in reviewed evidence",
+      "status": "unqualified"
+    },
+    {
+      "checkpoint": "LFM3-VL-2B-MLX-6bit",
+      "ffn_route": "source-established fallback",
+      "attention_route": "tiled candidate remains eligible",
+      "actual_evidence": "no candidate projected-image/model receipt in reviewed evidence",
+      "status": "unqualified"
+    },
+    {
+      "checkpoint": "LFM3-VL-2B-MLX-8bit",
+      "ffn_route": "source-established fallback",
+      "attention_route": "tiled candidate remains eligible",
+      "actual_evidence": "no candidate projected-image/model receipt in reviewed evidence",
+      "status": "unqualified"
+    }
+  ],
+  "pending_at_review": [
+    "Integrated structural kernel contracts with actual nonfinite, tails, repeat/guard checks and planted controls.",
+    "Actual opt-in cancellation, resume, partial-acceptance and concurrency evidence; earlier family checks are not candidate checks.",
+    "Candidate Text6/8 and VL4/6/8 checks with actual attention execution, including corrected projected-image inputs and separate reference pins.",
+    "Propagated FP32/actual-official-BF16 checks across the advertised context tier and checkpoint cells."
+  ],
+  "nonclaims": [
+    "Old fused-risk width/image receipts do not qualify the new tiled arithmetic.",
+    "No status ladder L0-L4 inferred without an agreed schema.",
+    "No new M4 speed, sustained decode, token-level ITL, or full production qualification claim."
+  ]
+}

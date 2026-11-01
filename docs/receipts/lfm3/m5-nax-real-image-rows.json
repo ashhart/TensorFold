@@ -1,0 +1,113 @@
+{
+ "device": "Apple M5 Ultra",
+ "width": 2048,
+ "comparison": "native tower and projector rows against an independent FP64 graph (BF16 stage rounding) and official MLX BF16 rows, same FP32 patches, five images",
+ "images": {
+  "cat": "photograph 300x200",
+  "hero": "wide banner 2172x724",
+  "logo": "square RGBA 1254x1254",
+  "speeds": "wide banner 2172x724",
+  "banner": "wide banner 2172x724"
+ },
+ "summary": {
+  "4-bit": {
+   "pooled_native_over_official_rms": 0.9464499527820002,
+   "images_native_better": 4,
+   "images": 5,
+   "worst_image_ratio": 1.2307257512424175
+  },
+  "6-bit": {
+   "pooled_native_over_official_rms": 0.9409219038850172,
+   "images_native_better": 3,
+   "images": 5,
+   "worst_image_ratio": 1.1834671920246838
+  }
+ },
+ "per_image": {
+  "4-bit": {
+   "cat": {
+    "rows": 70,
+    "native_rms": 0.0005607575567752688,
+    "official_bf16_rms": 0.0006883479542354507,
+    "native_over_official": 0.8146425849381702,
+    "native_max": 0.005889892578125,
+    "official_bf16_max": 0.01220703125
+   },
+   "hero": {
+    "rows": 243,
+    "native_rms": 0.0007350691218118744,
+    "official_bf16_rms": 0.0008488824078536666,
+    "native_over_official": 0.8659257336601424,
+    "native_max": 0.01556396484375,
+    "official_bf16_max": 0.0369873046875
+   },
+   "logo": {
+    "rows": 256,
+    "native_rms": 0.0007009128255279245,
+    "official_bf16_rms": 0.0008589674420230505,
+    "native_over_official": 0.8159946363940479,
+    "native_max": 0.02294921875,
+    "official_bf16_max": 0.030029296875
+   },
+   "speeds": {
+    "rows": 243,
+    "native_rms": 0.0009210555023401223,
+    "official_bf16_rms": 0.0007483840339005802,
+    "native_over_official": 1.2307257512424175,
+    "native_max": 0.02783203125,
+    "official_bf16_max": 0.0224609375
+   },
+   "banner": {
+    "rows": 243,
+    "native_rms": 0.0006093903407848782,
+    "official_bf16_rms": 0.0006702709013569544,
+    "native_over_official": 0.9091702169244937,
+    "native_max": 0.0185546875,
+    "official_bf16_max": 0.021484375
+   }
+  },
+  "6-bit": {
+   "cat": {
+    "rows": 70,
+    "native_rms": 0.0006593466304518665,
+    "official_bf16_rms": 0.0005571313128873913,
+    "native_over_official": 1.1834671920246838,
+    "native_max": 0.015380859375,
+    "official_bf16_max": 0.009765625
+   },
+   "hero": {
+    "rows": 243,
+    "native_rms": 0.0006466961528856249,
+    "official_bf16_rms": 0.0007456945528259121,
+    "native_over_official": 0.8672400119256348,
+    "native_max": 0.01025390625,
+    "official_bf16_max": 0.024169921875
+   },
+   "logo": {
+    "rows": 256,
+    "native_rms": 0.0008679905243361081,
+    "official_bf16_rms": 0.0008087146100048135,
+    "native_over_official": 1.0732964553848505,
+    "native_max": 0.025634765625,
+    "official_bf16_max": 0.02685546875
+   },
+   "speeds": {
+    "rows": 243,
+    "native_rms": 0.0008073823003217872,
+    "official_bf16_rms": 0.0009493058472850353,
+    "native_over_official": 0.8504975531656715,
+    "native_max": 0.029296875,
+    "official_bf16_max": 0.0390625
+   },
+   "banner": {
+    "rows": 243,
+    "native_rms": 0.0005997713149630199,
+    "official_bf16_rms": 0.0006459829484743785,
+    "native_over_official": 0.9284630753482009,
+    "native_max": 0.017578125,
+    "official_bf16_max": 0.013671875
+   }
+  }
+ },
+ "note": "6- and 8-bit checkpoints share one tower, so their rows are identical; teacher-forced text from real-image rows is in m5-nax-route-fidelity.json"
+}

@@ -1,0 +1,254 @@
+{
+  "scope": "Targeted M5 mechanical attention contract and finite captured-output regression check. Independent official-BF16/FP32 fidelity remains a separate partial qualification.",
+  "runtime_source_base": "8df18abc47568246c0d38b70c2e280521a24b31a",
+  "source_sha256": {
+    "zig/kernels/metal/lfm3/attention_tiled.metal": "6b134e9062fd55dc2b04bf5124c54c540e9a74d669cdb88336460093abb24c81",
+    "zig/tests/contract/metal_lfm3_tiled.zig": "7df293e5fcd84581c17d1c0add99176ef2f4de0ba86ff3f1192e7cbe43f28eb9",
+    "zig/tests/contract/metal_lfm3_residual.zig": "34b283ef26141f964230cccd3aaf332c94cc6c9dbfebc23674a5321ca7837463",
+    "zig/tests/contract/metal_main.zig": "47b96d3d956a71347899d796f6be823893c05bb3e79c6dbfaff4410623d321f2",
+    "zig/tests/contract/metal_limits.zig": "96e9bc9fd60083ec29fc5cb352542404817c9799445c2c54f70d59fe01934d82",
+    "zig/src/core/contract/lfm3_records.zig": "6b0a47c6d23f022ece4dd2fd5a09ccd3ce49dc71e0d6798e10814a2b5ddba431",
+    "binary": "2f6773f4a7285e1dd9cb15ffd1386c45ddef248ba761187a480d592c23d6eb08"
+  },
+  "command": "tf-kernel-contract --only \"LFM3 tiled structural\" --no-limits",
+  "result": {
+    "exit": 0,
+    "elapsed_s": 8.608491875,
+    "binary_sha256": "2f6773f4a7285e1dd9cb15ffd1386c45ddef248ba761187a480d592c23d6eb08",
+    "scope": "Targeted diagnostic; full runner and independent FP32/BF16 fidelity separate."
+  },
+  "log": [
+    "tf-kernel-contract on Apple M5 Ultra (applegpu_g17, tensor units true), seed 0x6b63",
+    "tiled structural nonfinite: expanding fixture rows 8 to eligible 9",
+    "PASS nonfinite metal LFM3 tiled structural full: the stated rule holds: visible-query/key/value nonfinite classes; masked future values must not contaminate",
+    "PASS repeat metal LFM3 tiled structural full: five runs byte-identical (36864 bytes), inputs and guards untouched, no overlap",
+    "PASS shapes metal LFM3 tiled structural full: 13 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel",
+    "tiled structural stress: expanding fixture rows 4 to eligible 9",
+    "PASS sums metal LFM3 tiled structural full: within its bound at k 8192; fp16 sums would miss 0x, bf16 0.0x (uniform-score structural fixture; no claimed 100x reduced-accumulator witness)",
+    "tiled class mismatch row=8 head=0 col=0: got=nan want=finite",
+    "FAIL shapes metal LFM3 tiled structural bad-tail: at 9x2048x0: visible/masked nonfinite class mismatch",
+    "CONTROL metal LFM3 tiled structural bad-tail: red at shapes, as planted",
+    "tiled structural nonfinite: expanding fixture rows 8 to eligible 9",
+    "tiled class mismatch row=0 head=0 col=0: got=finite want=nan",
+    "FAIL nonfinite metal LFM3 tiled structural bad-nonfinite: visible/masked nonfinite class mismatch",
+    "CONTROL metal LFM3 tiled structural bad-nonfinite: red at nonfinite, as planted",
+    "tiled structural nonfinite: expanding fixture rows 8 to eligible 9",
+    "tiled sliding nonfinite: expanding history to 257 for a masked-past plant",
+    "PASS nonfinite metal LFM3 tiled structural sliding: the stated rule holds: visible-query/key/value nonfinite classes; masked future values must not contaminate",
+    "PASS repeat metal LFM3 tiled structural sliding: five runs byte-identical (36864 bytes), inputs and guards untouched, no overlap",
+    "PASS shapes metal LFM3 tiled structural sliding: 13 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel",
+    "tiled structural stress: expanding fixture rows 4 to eligible 9",
+    "PASS sums metal LFM3 tiled structural sliding: within its bound at k 8192; fp16 sums would miss 0x, bf16 0.0x (uniform-score structural fixture; no claimed 100x reduced-accumulator witness)",
+    "SUMMARY 2 kernels: 2 pass gates 1-4, 0 fail, 0 known findings; 2 controls: 2 red as planted, 0 missed; 0 limit problems; gates 7405 ms, limits 0 ms"
+  ],
+  "raw_log_sha256": "285f900c1204c44ba8a23654894485491b4a75aa762e83202ed8203e36e55c87",
+  "repair": {
+    "trigger": "Nonfinite BF16 result in a SIMD-owned query row.",
+    "action": "Uniform SIMD device-memory barrier after fragment stores, then existing extended-range causal/window replay overwrites only flagged visible rows. No CPU scan, global flags, allocation, or extra dispatch.",
+    "finite_arithmetic": "Unchanged; captured byte identity measured below. Instruction-cost impact has not been measured."
+  },
+  "fixtures": {
+    "reference": "Uniform zero Q/K and bounded integer V: scalar FP32 visible-value sum times FP32 reciprocal, then BF16 rounding. This is not labeled official MLX BF16.",
+    "nonfinite": "Real Q NaN/+Inf/-Inf; future K NaN; future V NaN; sliding masked-past V NaN; visible V signed infinities and mixed infinities. Eligible 9-row cases, sliding history257.",
+    "shapes": "Full and sliding each 13 served/tail shapes; declared rows9,17,31,32,33,63,64 and histories0,31,255,256,257,2048,8192; 19 poisoned extra capacity rows.",
+    "repeat": "Five byte-identical runs, unchanged inputs and guards, no overlap.",
+    "accumulation": "Uniform-score fixture has no claimed 100x reduced-accumulator witness; sums diagnostic is explicitly limited."
+  },
+  "prior_failure": {
+    "exit": 1,
+    "raw_log_sha256": "7013e5580fb0453fa57cbab2ce7820c9764114fc6350742d340b0b9068c44d6a",
+    "shader_sha256": "126a69dbfcf1e57d6fb1f9ceabaab840741a7acb54902b622c534648335521b9",
+    "observed": "Both full/sliding NF gates failed: masked future V NaN contaminated an earlier finite query. Valid failing evidence retained, not reclassified."
+  },
+  "finite_regression": {
+    "cases": 22,
+    "rows_per_case": 128,
+    "histories": [
+      0
+    ],
+    "windows": [
+      0,
+      256
+    ],
+    "captures": "11 real attention layers times baseline/candidate propagated inputs from the prior text4 128-prompt capture.",
+    "result": {
+      "cases": [
+        {
+          "case": "baseline-layer10.normal.pair.out.bf16",
+          "bytes": 524288,
+          "sha256": "fe8fa34850f838464182a4e08c71db6ba9addab8559a51c05725e418787fb6fe",
+          "equal": true
+        },
+        {
+          "case": "baseline-layer12.normal.pair.out.bf16",
+          "bytes": 524288,
+          "sha256": "ecab322a30bf5c4ab160a2ea927185fe04c164067340827ae252b7a8dca4bed6",
+          "equal": true
+        },
+        {
+          "case": "baseline-layer14.normal.pair.out.bf16",
+          "bytes": 524288,
+          "sha256": "10fb1243c4f529d3d120d2aa3d4317923e2cefa505b2882cf940cc9e2094e304",
+          "equal": true
+        },
+        {
+          "case": "baseline-layer16.normal.pair.out.bf16",
+          "bytes": 524288,
+          "sha256": "91b49ca7cca79fb86cf55e49a57044a6c369bdb59c7c88e60a3cccb889d72e9e",
+          "equal": true
+        },
+        {
+          "case": "baseline-layer18.normal.pair.out.bf16",
+          "bytes": 524288,
+          "sha256": "568bc8fb2d0b8f92da55372b96ef8bb8abeb0129e29203a7ce317f55a75e1a23",
+          "equal": true
+        },
+        {
+          "case": "baseline-layer2.normal.pair.out.bf16",
+          "bytes": 524288,
+          "sha256": "85ff34be2a28de74eb6a022c7ed045fb4c25c53dbc488bbd5edb6bcd9da103c0",
+          "equal": true
+        },
+        {
+          "case": "baseline-layer20.normal.pair.out.bf16",
+          "bytes": 524288,
+          "sha256": "36d3090814266bf63ff60e4aa6ffe2d079e79f2b9f30f8f74257021fe1e29475",
+          "equal": true
+        },
+        {
+          "case": "baseline-layer22.normal.pair.out.bf16",
+          "bytes": 524288,
+          "sha256": "a8219b759942fbb06c3e22c940910fb6fb319feb634e183fae692b0a9d59009c",
+          "equal": true
+        },
+        {
+          "case": "baseline-layer4.normal.pair.out.bf16",
+          "bytes": 524288,
+          "sha256": "7c511a38caf2d2d0a8f21d1e26eab05d778db396082c9c57774e313d198f43f2",
+          "equal": true
+        },
+        {
+          "case": "baseline-layer6.normal.pair.out.bf16",
+          "bytes": 524288,
+          "sha256": "7744851abf8c8486274cf29dd7bfef11904799fc2a7cbec109387fbb5e2bf362",
+          "equal": true
+        },
+        {
+          "case": "baseline-layer8.normal.pair.out.bf16",
+          "bytes": 524288,
+          "sha256": "885422dfda4181d6dd7263562389ee9007e6fb06fa933861ec4a87dbac18a59d",
+          "equal": true
+        },
+        {
+          "case": "candidate-layer10.normal.pair.out.bf16",
+          "bytes": 524288,
+          "sha256": "b72ed2cc8dfb12b434410d9990918998ec1fcf25fa86eaebf30c1744a7dbafad",
+          "equal": true
+        },
+        {
+          "case": "candidate-layer12.normal.pair.out.bf16",
+          "bytes": 524288,
+          "sha256": "0c7c84f23b842c97133bc02185818d6e752b37bc777fa754c70f701572746e2c",
+          "equal": true
+        },
+        {
+          "case": "candidate-layer14.normal.pair.out.bf16",
+          "bytes": 524288,
+          "sha256": "e0ec62481bbc69bd5e20a5cc8bec354f55a1fd4880ace5bda1bd547bf7c58321",
+          "equal": true
+        },
+        {
+          "case": "candidate-layer16.normal.pair.out.bf16",
+          "bytes": 524288,
+          "sha256": "af28ed5395e31c216622261b68468e7ecbee603897c597674b66f45467dca87f",
+          "equal": true
+        },
+        {
+          "case": "candidate-layer18.normal.pair.out.bf16",
+          "bytes": 524288,
+          "sha256": "0977391be5bdba267351d94fc8ff6f5af303f4b6ee4f64000d3afb3d64eb92a3",
+          "equal": true
+        },
+        {
+          "case": "candidate-layer2.normal.pair.out.bf16",
+          "bytes": 524288,
+          "sha256": "445ca5e6b8c765b4e99cf5cc638cb944c1c020ef38377a184385de7b3190f66d",
+          "equal": true
+        },
+        {
+          "case": "candidate-layer20.normal.pair.out.bf16",
+          "bytes": 524288,
+          "sha256": "364b79b37fbe2b57812aaae003ef0f5a1289ae5ff2b3827360ca2caf6a9721ed",
+          "equal": true
+        },
+        {
+          "case": "candidate-layer22.normal.pair.out.bf16",
+          "bytes": 524288,
+          "sha256": "8a00eabaffe5c486fe2fcffe977fbeddab6417c70e7b3f5b682aad1f6611bbdd",
+          "equal": true
+        },
+        {
+          "case": "candidate-layer4.normal.pair.out.bf16",
+          "bytes": 524288,
+          "sha256": "5af9ba9c1f72d09de9890cca342fa87122491e6fc19892b051d61a1fad1a117e",
+          "equal": true
+        },
+        {
+          "case": "candidate-layer6.normal.pair.out.bf16",
+          "bytes": 524288,
+          "sha256": "cc7abd9a9009f7cd181c10c974ffe326baf6ea029c1ab39bead464ae44b1c554",
+          "equal": true
+        },
+        {
+          "case": "candidate-layer8.normal.pair.out.bf16",
+          "bytes": 524288,
+          "sha256": "c62fd3977be8e9cbaabefc29771cc7806dfbbc064add5b83e6ccd7661346978e",
+          "equal": true
+        }
+      ],
+      "all_22_byte_equal": true,
+      "bytes_checked": 11534336
+    },
+    "all_children_exit_zero": true,
+    "guarded_controller_released": true,
+    "manifest_sha256": "aa307c6ff1b0f84d4786f969e787b9cd5dfd2e24106cb678ab3b492bb84e028d",
+    "raw_files_sha256": {
+      "000.log": "c7a3c0aaf76c88435c22eb9dba2cfcd9c7289c2cbcd9613578e5ab0b5ff422d5",
+      "001.log": "a86abe4210b242b65c6833a59bf34f829f502b34f2cdb42d7412cdde1d4a6867",
+      "002.log": "c7a3c0aaf76c88435c22eb9dba2cfcd9c7289c2cbcd9613578e5ab0b5ff422d5",
+      "003.log": "a86abe4210b242b65c6833a59bf34f829f502b34f2cdb42d7412cdde1d4a6867",
+      "004.log": "c7a3c0aaf76c88435c22eb9dba2cfcd9c7289c2cbcd9613578e5ab0b5ff422d5",
+      "005.log": "a86abe4210b242b65c6833a59bf34f829f502b34f2cdb42d7412cdde1d4a6867",
+      "006.log": "c7a3c0aaf76c88435c22eb9dba2cfcd9c7289c2cbcd9613578e5ab0b5ff422d5",
+      "007.log": "a86abe4210b242b65c6833a59bf34f829f502b34f2cdb42d7412cdde1d4a6867",
+      "008.log": "c7a3c0aaf76c88435c22eb9dba2cfcd9c7289c2cbcd9613578e5ab0b5ff422d5",
+      "009.log": "a86abe4210b242b65c6833a59bf34f829f502b34f2cdb42d7412cdde1d4a6867",
+      "010.log": "c7a3c0aaf76c88435c22eb9dba2cfcd9c7289c2cbcd9613578e5ab0b5ff422d5",
+      "011.log": "c7a3c0aaf76c88435c22eb9dba2cfcd9c7289c2cbcd9613578e5ab0b5ff422d5",
+      "012.log": "a86abe4210b242b65c6833a59bf34f829f502b34f2cdb42d7412cdde1d4a6867",
+      "013.log": "c7a3c0aaf76c88435c22eb9dba2cfcd9c7289c2cbcd9613578e5ab0b5ff422d5",
+      "014.log": "a86abe4210b242b65c6833a59bf34f829f502b34f2cdb42d7412cdde1d4a6867",
+      "015.log": "c7a3c0aaf76c88435c22eb9dba2cfcd9c7289c2cbcd9613578e5ab0b5ff422d5",
+      "016.log": "a86abe4210b242b65c6833a59bf34f829f502b34f2cdb42d7412cdde1d4a6867",
+      "017.log": "c7a3c0aaf76c88435c22eb9dba2cfcd9c7289c2cbcd9613578e5ab0b5ff422d5",
+      "018.log": "a86abe4210b242b65c6833a59bf34f829f502b34f2cdb42d7412cdde1d4a6867",
+      "019.log": "c7a3c0aaf76c88435c22eb9dba2cfcd9c7289c2cbcd9613578e5ab0b5ff422d5",
+      "020.log": "a86abe4210b242b65c6833a59bf34f829f502b34f2cdb42d7412cdde1d4a6867",
+      "021.log": "c7a3c0aaf76c88435c22eb9dba2cfcd9c7289c2cbcd9613578e5ab0b5ff422d5",
+      "events.json": "9d576412b02704d0c0735c3e60efc5d163ad88f702bf9f2113cd309d757fd485",
+      "identity.json": "c560fa12820872e41e9ee99002f79d048f648d8730891e7f141a35df5df82fa0",
+      "receipt.json": "6ec7769e7ccc9bff776a69be73eeec2f6b97bed29ded007c2e6e801d405c3066"
+    }
+  },
+  "build_checks": {
+    "tf-kernel-contract": "exit0, Zig0.17.0, -Dcpu=apple_m1",
+    "test-kernel-contract": "exit0, host contract tests"
+  },
+  "limitations": [
+    "--no-limits skips the global device/offline launch-limit suite; zero limit problems in SUMMARY is not that suite passing. Probe runtime reflection checked SIMD32, threads>=128, TG memory0.",
+    "Older-GPU capability skip is source-reviewed; this receipt is M5 only.",
+    "No full-model rerun, width/image promotion, new FP32/BF16 fidelity acceptance, or performance claim.",
+    "Existing proposed whole-model probability diagnostic failures remain unchanged."
+  ],
+  "qualification": false
+}

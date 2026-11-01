@@ -1,0 +1,87 @@
+{
+ "scope": "Four concurrent greedy requests on one M5 Ultra, text 4-bit checkpoint, native server with and without the lane host's --decode-share row cap (512-row prompt chunks while replies are decoding), and mlx-vlm.",
+ "method": "Same harness, prompts and settings for every server, greedy, max_tokens 128, prompt cache disabled, three timed runs after a warm-up; medians over runs (per-request values pooled over the four requests).",
+ "note": "The cap changes only where a prompt pass is cut; chunk cuts are byte-equal (tf-lfm3-nax-exact). With the flag absent the server keeps its own cuts.",
+ "rows": [
+  {
+   "server": "default (no flag)",
+   "prompt_tokens": 2048,
+   "streams": 4,
+   "ttft_s_per_request": 0.257,
+   "prefill_tok_s_aggregate": 19686,
+   "decode_tok_s_aggregate": 1059,
+   "itl_mean_ms": 6.196,
+   "itl_p95_ms": 10.779
+  },
+  {
+   "server": "default (no flag)",
+   "prompt_tokens": 8192,
+   "streams": 4,
+   "ttft_s_per_request": 1.055,
+   "prefill_tok_s_aggregate": 21946,
+   "decode_tok_s_aggregate": 936,
+   "itl_mean_ms": 10.795,
+   "itl_p95_ms": 45.77
+  },
+  {
+   "server": "--decode-share 0.5",
+   "prompt_tokens": 2048,
+   "streams": 4,
+   "ttft_s_per_request": 0.467,
+   "prefill_tok_s_aggregate": 10244,
+   "decode_tok_s_aggregate": 1538,
+   "itl_mean_ms": 4.421,
+   "itl_p95_ms": 22.084
+  },
+  {
+   "server": "--decode-share 0.5",
+   "prompt_tokens": 8192,
+   "streams": 4,
+   "ttft_s_per_request": 1.246,
+   "prefill_tok_s_aggregate": 16030,
+   "decode_tok_s_aggregate": 1523,
+   "itl_mean_ms": 5.109,
+   "itl_p95_ms": 26.845
+  },
+  {
+   "server": "--decode-share 0.75",
+   "prompt_tokens": 2048,
+   "streams": 4,
+   "ttft_s_per_request": 0.52,
+   "prefill_tok_s_aggregate": 11611,
+   "decode_tok_s_aggregate": 1302,
+   "itl_mean_ms": 3.091,
+   "itl_p95_ms": 2.694
+  },
+  {
+   "server": "--decode-share 0.75",
+   "prompt_tokens": 8192,
+   "streams": 4,
+   "ttft_s_per_request": 1.346,
+   "prefill_tok_s_aggregate": 16378,
+   "decode_tok_s_aggregate": 1530,
+   "itl_mean_ms": 3.737,
+   "itl_p95_ms": 2.6
+  },
+  {
+   "server": "mlx-vlm",
+   "prompt_tokens": 2048,
+   "streams": 4,
+   "ttft_s_per_request": 0.358,
+   "prefill_tok_s_aggregate": 22829,
+   "decode_tok_s_aggregate": 901,
+   "itl_mean_ms": 4.19,
+   "itl_p95_ms": 4.532
+  },
+  {
+   "server": "mlx-vlm",
+   "prompt_tokens": 8192,
+   "streams": 4,
+   "ttft_s_per_request": 1.401,
+   "prefill_tok_s_aggregate": 23377,
+   "decode_tok_s_aggregate": 755,
+   "itl_mean_ms": 4.628,
+   "itl_p95_ms": 5.161
+  }
+ ]
+}

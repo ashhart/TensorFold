@@ -1,0 +1,86 @@
+{
+  "schema": 1,
+  "status": "bounded-operator-pass-fullmodel-open",
+  "acceptance": "User-authorized independentFP32/referenceBF16 envelope; historicalFP64ledgers remain diagnostic. Zero-added-slack RMS and maximumerror; actualMLXBF16 reference on identical held input.",
+  "scope": "M5 actual TEXT4 layer 0 gate R128 K2048 N7680 GS64 Q4 only. Standalone operator; full-model fidelity and prefill speed remain open.",
+  "arithmetic": "BF16activation. Exactcodes/scales/bias promotedFP32; explicit fma(q,scale,bias) roundedBF16 weights; strictMPP FP32 destination acrossascendingK; finalBF16. InlineNF detection+tileflagged unchangedpublicfallback.",
+  "normal": {
+    "normal_all_MLX_words_equal": true,
+    "nf_flagged_tile_public_words_equal": false,
+    "finite_unaffected_rms": 0.0007270719176299991,
+    "reference_rms": 0.0007270719176299991,
+    "finite_unaffected_max": 0.008344173431396484,
+    "reference_max": 0.008344173431396484,
+    "flags_set": 0,
+    "fp32_envelope_pass": true
+  },
+  "mixed_nonfinite": {
+    "normal_all_MLX_words_equal": false,
+    "nf_flagged_tile_public_words_equal": true,
+    "finite_unaffected_rms": 0.0006944474587162433,
+    "reference_rms": 0.0007285995888639391,
+    "finite_unaffected_max": 0.007863044738769531,
+    "reference_max": 0.008344173431396484,
+    "flags_set": 120,
+    "fp32_envelope_pass": true
+  },
+  "controls": {
+    "wrong_bias_exit": 1,
+    "wrong_NF_repair_exit": 1,
+    "missing_tile_flag_exit": 1,
+    "error": "TileFlagNumericalMismatch",
+    "wrong_packed_code_exit": 1
+  },
+  "diagnostic_old_3pass_stage_us": {
+    "matrix": 436.68760918080807,
+    "mask": 233.85416716337204,
+    "fallback": 83.16664025187492,
+    "complete": 720.3752174973488,
+    "caveat": "Singleton separateCB lowclock diagnostics perturb scheduling; not additive or performance qualification."
+  },
+  "provenance": {
+    "numerical_manifest_sha256": "43c5e440d7ac107485970251ac6dd1064d6060230c6a9869e77d0caea24ae4dd",
+    "cost_manifest_sha256": "0de739cf0d404c898c1510cf7bedb1b764fcdd3a1afb092fdb4548c08e706146",
+    "normal_analysis_sha256": "306dc68b117629410581ed5e36f12cd7cf1e3d6e8cad9bfb06801405d3722d96",
+    "NF_analysis_sha256": "c1b260519dbd343eb4273e333bda71f963f2897ad3a1e5a1dbbf4bb3c6963560",
+    "cost_raw_sha256": "ee1f2aa8c81cc150243a3a417892977dfac9518258902e800431958c88b229ce",
+    "all_raw_logs_verified": true,
+    "all_leases_released": true
+  },
+  "implementation": "Packed Q4 vector load and scale/bias reuse: one uint4 supplies 32 codes per thread/group, preserving each reconstructed weight and matrix accumulation. Inline nonfinite detection and public row-pair fallback for flagged 64x64 output tiles.",
+  "previous_tileflag_cost": {
+    "scope": "GenuineR128fullgate complete2pass fastBF16dequantNAX vspublic; fivebalancedround operator only, nofullforwardqualification",
+    "public_seconds": 0.000478620606372715,
+    "candidate_seconds": 0.0002579306637926493,
+    "throughput_ratio": 1.8556173172084671,
+    "drift": {
+      "0": -0.00011153008576125778,
+      "1": -0.0006045067231486012
+    },
+    "max_within_round_spread": 0.0007058914216269141,
+    "stable_at_5percent": true,
+    "all_outputs_match_FP32_envelope_screen": true,
+    "repeats": 128,
+    "raw_sha256": "aff1254dddc1c30c5421b14aa8325d019da500a0266d8b3f2846920779130fc5"
+  },
+  "complete_cost": {
+    "scope": "GenuineR128fullgate complete2pass fastBF16dequantNAX vspublic; fivebalancedround operator only, nofullforwardqualification",
+    "public_seconds": 0.00047858015932433773,
+    "candidate_seconds": 9.947525995812612e-05,
+    "throughput_ratio": 4.8110470837250885,
+    "drift": {
+      "0": -5.645172011958799e-05,
+      "1": 0.0007756388573689765
+    },
+    "max_within_round_spread": 0.0011559775749903078,
+    "stable_at_5percent": true,
+    "all_outputs_match_FP32_envelope_screen": true,
+    "repeats": 256,
+    "raw_sha256": "ee1f2aa8c81cc150243a3a417892977dfac9518258902e800431958c88b229ce"
+  },
+  "limitations": [
+    "Held-input operator envelope uses independent FP32 and actual MLX 0.32.4 BF16 reference; it is not a full-forward qualification.",
+    "Only this genuine layer-0 Q4 shape has measured performance; no extrapolation to other layers, widths, shapes, chips, or serving.",
+    "Candidate matrix plus fallback is two dispatches; baseline is one. Complete graph is timed."
+  ]
+}
