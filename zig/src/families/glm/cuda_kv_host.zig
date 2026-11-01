@@ -159,6 +159,14 @@ fn shmName(buf: *[96:0]u8, id: []const u8) ![]u8 {
     return name;
 }
 
+/// The shared file's tail past the pages: a count of the ranks that have mapped it.
+const mark_bytes = 4096;
+
+/// Counts this rank's mapping; true for the last of `world` ranks, which takes the file's name away.
+fn lastToMap(count: *u32, world: usize) bool {
+    return @atomicRmw(u32, count, .Add, 1, .seq_cst) + 1 == world;
+}
+
 /// The pages as one /dev/shm file every rank maps: rank 0 makes it, the others wait for it at its full length.
 pub const SharedPages = struct {
     region: []align(std.heap.page_size_min) u8,
@@ -166,9 +174,11 @@ pub const SharedPages = struct {
     lib: std.DynLib,
     unregister: *const fn (?*anyopaque) callconv(.c) cuda.abi.Result,
     leader: bool,
+    world: usize, // ranks that map the file; the last to map it unlinks it, so nothing outlives the ranks
     path: [96:0]u8,
 
-    pub fn open(d: *const cuda.Driver, len: usize, leader: bool) !SharedPages {
+    pub fn open(d: *const cuda.Driver, len: usize, leader: bool, world: usize) !SharedPages {
+        const file_len = len + mark_bytes;
         var path: [96:0]u8 = undefined;
         const name = try shmName(&path, if (std.c.getenv("NCCL_COMM_ID")) |v| std.mem.span(v) else "local");
         const flags: std.c.O = if (leader) .{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true, .CLOEXEC = true } else .{ .ACCMODE = .RDWR, .CLOEXEC = true };
@@ -177,15 +187,15 @@ pub const SharedPages = struct {
         while (true) : (tries += 1) { // the others may get rank 0's pool before it has made the file
             fd = std.c.open(&path, flags, @as(std.c.mode_t, 0o600));
             if (fd >= 0 and leader) break;
-            if (fd >= 0 and std.c.lseek(fd, 0, std.c.SEEK.END) == @as(std.c.off_t, @intCast(len))) break;
+            if (fd >= 0 and std.c.lseek(fd, 0, std.c.SEEK.END) == @as(std.c.off_t, @intCast(file_len))) break;
             if (fd >= 0) _ = std.c.close(fd);
             if (tries == 600) return error.SharedMemoryUnavailable;
             const ts: std.c.timespec = .{ .sec = 0, .nsec = 50_000_000 };
             _ = std.c.nanosleep(&ts, null);
         }
         defer _ = std.c.close(fd);
-        if (leader and std.c.ftruncate(fd, @intCast(len)) != 0) return error.SharedMemoryUnavailable;
-        const region = try posix.mmap(null, len, .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, fd, 0);
+        if (leader and std.c.ftruncate(fd, @intCast(file_len)) != 0) return error.SharedMemoryUnavailable;
+        const region = try posix.mmap(null, file_len, .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, fd, 0);
         errdefer posix.munmap(region);
         var lib = std.DynLib.open("libcuda.so.1") catch return error.DriverUnavailable;
         errdefer lib.close();
@@ -195,14 +205,18 @@ pub const SharedPages = struct {
         errdefer _ = unregister(region.ptr);
         var dev: u64 = 0;
         try d.check(d.api.cuMemHostGetDevicePointer_v2(&dev, region.ptr, 0), "cuMemHostGetDevicePointer");
-        std.log.info("kv host: pages shared through {s} ({d} MiB, {s})", .{ name, len >> 20, if (leader) "made" else "mapped" });
-        return .{ .region = region, .dev = dev, .lib = lib, .unregister = unregister, .leader = leader, .path = path };
+        const last = lastToMap(@ptrCast(@alignCast(region.ptr + len)), world);
+        if (last) _ = std.c.unlink(&path);
+        std.log.info("kv host: pages shared through {s} ({d} MiB, {s}{s})", .{ name, len >> 20, if (leader) "made" else "mapped", if (last) ", every rank mapped: unlinked" else "" });
+        return .{ .region = region, .dev = dev, .lib = lib, .unregister = unregister, .leader = leader, .world = world, .path = path };
     }
 
     pub fn close(s: *SharedPages) void {
+        const count: *u32 = @ptrCast(@alignCast(s.region.ptr + s.region.len - mark_bytes));
+        const named = s.leader and @atomicLoad(u32, count, .seq_cst) < s.world; // a rank never mapped it: still named
         _ = s.unregister(s.region.ptr);
         posix.munmap(s.region);
-        if (s.leader) _ = std.c.unlink(&s.path);
+        if (named) _ = std.c.unlink(&s.path);
         s.lib.close();
     }
 };
@@ -217,6 +231,17 @@ test "kv host pages: one full window and 16 by default, TF_GLM_KV_HOST_GIB's wor
     try std.testing.expectEqual(@as(usize, 1 + 16), pagesOf(null, page, 300));
     try std.testing.expectEqual(@as(usize, 2088), pagesOf(13, page, 1 << 20));
     try std.testing.expectEqual(@as(usize, 0), pagesOf(0, page, 1 << 20));
+}
+
+test "kv host shared pages: the last of the ranks to map the file takes its name away" {
+    var count: u32 = 0;
+    try std.testing.expect(!lastToMap(&count, 2));
+    try std.testing.expect(lastToMap(&count, 2));
+    count = 0;
+    try std.testing.expect(lastToMap(&count, 1));
+    count = 0;
+    for (0..2) |_| try std.testing.expect(!lastToMap(&count, 3));
+    try std.testing.expect(lastToMap(&count, 3));
 }
 
 test "kv host shared pages: one file name per NCCL id, with no separators past /dev/shm" {
