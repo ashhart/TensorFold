@@ -96,9 +96,12 @@ pub const Engine = struct {
     moe: cuda.moe.Fns,
     fns: Fns,
     keeps: Keeps,
-    /// Every weight and scratch buffer in one allocation: WDDM's launch cost grows with the allocation count.
+    /// Persistent weights only. Scratch has an independent, growable allocation.
     arena: DeviceBuffer,
     arena_at: usize = 0,
+    /// Forward scratch, sized for the largest row count used so far.
+    scratch_buf: ?DeviceBuffer = null,
+    scratch_capacity: usize = 0,
     /// Rows a verify forward takes at most, and a window's rows at most.
     verify_rows: usize,
     window_rows: usize,
@@ -197,6 +200,9 @@ pub const Engine = struct {
         e.rope_buf = null;
         e.window_rows = most_window;
         e.arena_at = 0;
+        e.scratch_buf = null;
+        e.scratch_capacity = 0;
+        errdefer if (e.scratch_buf) |*b| b.free();
         e.graphs = .empty;
         try @import("cuda_rope_table.zig").set(e, g.rope); // a YaRN config's table, before any weight or forward
         errdefer @import("cuda_rope_table.zig").free(e);
@@ -210,7 +216,7 @@ pub const Engine = struct {
         defer ck.close();
         // an EXL3 checkpoint's weights are sized by a dry run of its loader (trellis widths come from the tensors)
         const wbytes = if (g.exl3) try x3w.measure(e, &ck) else weights.total(g);
-        e.arena = try DeviceBuffer.alloc(d, wbytes + try e.scratch(.measure));
+        e.arena = try DeviceBuffer.alloc(d, wbytes);
         errdefer e.arena.free();
         try e.arena.fill8(0, null); // touched once now: the driver commits memory on first touch, slowly
         const kk = cuda.kernels;
@@ -294,6 +300,9 @@ pub const Engine = struct {
         var it = e.graphs.valueIterator();
         while (it.next()) |x| x.deinit();
         e.graphs.deinit(e.gpa);
+        if (e.scratch_buf) |*b| b.free();
+        e.scratch_buf = null;
+        e.scratch_capacity = 0;
         e.penalties.deinit(e.gpa);
         e.host_logits.free();
         e.staged.free();
@@ -336,34 +345,45 @@ pub const Engine = struct {
         return e.arena.ptr + at;
     }
 
-    /// The scratch rows' bytes (`measure`: summed, nothing taken), or the rows themselves from the arena.
-    pub fn scratch(e: *Engine, mode: enum { measure, allocate }) !usize {
+    /// Measure or carve row-dependent forward scratch and fixed verify buffers.
+    /// Addresses are offsets into the independent scratch allocation, not the weights arena.
+    pub fn scratch(e: *Engine, rows: usize, mode: enum { measure, allocate }) !usize {
         var total: usize = 0;
         const Take = struct {
             e: *Engine,
             mode: @TypeOf(mode),
             total: *usize,
+
             pub fn alloc(t: @This(), bytes: usize) !u64 {
+                const at = t.total.*;
                 t.total.* += aligned(bytes);
-                return if (t.mode == .measure) 0 else try t.e.alloc(bytes);
+                return if (t.mode == .measure) 0 else t.e.scratch_buf.?.ptr + at;
             }
         };
         const t = Take{ .e = e, .mode = mode, .total = &total };
         const g = e.g;
-        const R = max_rows;
-        const wide = @max(g.valueWidth(), g.attnWidth(), g.hidden); // y and mix: either mixer's rows
-        inline for (.{ "h", "x", "r" }) |name| @field(e, name) = try t.alloc(R * g.hidden * 2);
-        inline for (.{ "y", "mix", "z", "v" }) |name| @field(e, name) = try t.alloc(R * wide * 2);
-        inline for (.{ "q", "k" }) |name| @field(e, name) = try t.alloc(R * g.k_heads * geometry.dk * 2);
+        const R = rows;
+        const wide = @max(g.valueWidth(), g.attnWidth(), g.hidden);
+
+        inline for (.{ "h", "x", "r" }) |name|
+            @field(e, name) = try t.alloc(R * g.hidden * 2);
+        inline for (.{ "y", "mix", "z", "v" }) |name|
+            @field(e, name) = try t.alloc(R * wide * 2);
+        inline for (.{ "q", "k" }) |name|
+            @field(e, name) = try t.alloc(R * g.k_heads * geometry.dk * 2);
         e.qkv = try t.alloc(R * g.convWidth() * 2);
-        inline for (.{ "gate", "up", "act" }) |name| @field(e, name) = try t.alloc(R * g.intermediate * 2);
+        inline for (.{ "gate", "up", "act" }) |name|
+            @field(e, name) = try t.alloc(R * g.intermediate * 2);
         e.xs = try t.alloc(R * (@max(g.intermediate, wide) / 64) * 4);
-        inline for (.{ "a", "b", "beta" }) |name| @field(e, name) = try t.alloc(R * g.v_heads * 2);
+        inline for (.{ "a", "b", "beta" }) |name|
+            @field(e, name) = try t.alloc(R * g.v_heads * 2);
         e.g_ = try t.alloc(R * g.v_heads * 4);
         e.qraw = try t.alloc(R * 2 * g.attnWidth() * 2);
         e.qn = try t.alloc(R * g.attnWidth() * 2);
-        inline for (.{ "kraw", "vraw", "kn" }) |name| @field(e, name) = try t.alloc(R * g.kv_heads * head_dim * 2);
-        // the decode partials: verify rows only (a prompt chunk's attention runs cuda_prompt_attention's tiles)
+        inline for (.{ "kraw", "vraw", "kn" }) |name|
+            @field(e, name) = try t.alloc(R * g.kv_heads * head_dim * 2);
+
+        // Verify-only buffers retain their existing most_verify limits.
         e.pm = try t.alloc(most_verify * g.q_heads * max_chunks * 4);
         e.pl = try t.alloc(most_verify * g.q_heads * max_chunks * 4);
         e.po = try t.alloc(most_verify * g.q_heads * max_chunks * head_dim * 4);
@@ -372,6 +392,29 @@ pub const Engine = struct {
         e.amax = try t.alloc(most_verify * argmaxSlices(g.vocab) * 8);
         e.picks = try t.alloc(most_verify * cuda.sample.Draws.row_scratch);
         return total;
+    }
+
+    /// Grow scratch before a forward. Graphs must not retain pointers into a replaced allocation.
+    pub fn ensureScratch(e: *Engine, rows: usize) !void {
+        if (rows == 0 or rows > max_rows) return error.InvalidScratchRows;
+        if (rows <= e.scratch_capacity) return;
+
+        var capacity = if (e.scratch_capacity == 0) rows else e.scratch_capacity;
+        while (capacity < rows) capacity = @min(max_rows, capacity * 2);
+
+        try e.stream.synchronize();
+        var it = e.graphs.valueIterator();
+        while (it.next()) |graph| graph.deinit();
+        e.graphs.clearRetainingCapacity();
+
+        if (e.scratch_buf) |*old| old.free();
+        e.scratch_buf = null;
+        e.scratch_capacity = 0;
+
+        const bytes = try e.scratch(capacity, .measure);
+        e.scratch_buf = try DeviceBuffer.alloc(e.d, bytes);
+        e.scratch_capacity = capacity;
+        _ = try e.scratch(capacity, .allocate);
     }
 
     pub fn run(e: *Engine, f: cuda.Function, grid: [3]usize, block: [3]usize, args: anytype) !void {
@@ -439,9 +482,10 @@ pub const Engine = struct {
 
     /// One forward over `parts`' windows, with every input admitted before an unkept verify is settled.
     pub fn forward(e: *Engine, parts: []const Part, ids: []const u32, keep: Keep) !void {
+        const total = ids.len;
+        try e.ensureScratch(total);
         try e.admit(parts, ids, keep);
         const g = e.g;
-        const total = ids.len;
         const record = keep != .last;
         const heads: usize = if (record) total else 1;
         // the prompt GEMM only for prompt chunks: a window's rows keep the bits of one-row steps
