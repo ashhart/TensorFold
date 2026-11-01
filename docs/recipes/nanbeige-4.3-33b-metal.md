@@ -61,7 +61,7 @@ control (`metal_llama_controls.zig`: one edit of its source, which its gate must
 llama` on the M5 Ultra:
 
 ```
-SUMMARY 28 kernels: 28 pass gates 1-4, 0 fail, 0 known findings; 0 controls: 0 red as planted, 0 missed; 0 limit problems; gates 480758 ms, limits 8694 ms
+SUMMARY 28 kernels: 28 pass gates 1-4, 0 fail, 0 known findings; 14 controls: 14 red as planted, 0 missed; 0 limit problems; gates 611490 ms, limits 163 ms
 ```
 
 ## Measured (M5 Ultra, the bf16 release, 26 Oct 2026)
