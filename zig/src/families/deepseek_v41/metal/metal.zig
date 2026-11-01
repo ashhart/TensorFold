@@ -1,4 +1,4 @@
-//! DeepSeek V4.1 on Metal, the backend package: the decode forward (1-16 rows).
+//! DeepSeek V4.1 on Metal, the backend package: the decode forward (1-16 rows) and the prompt path.
 const std = @import("std");
 
 pub const host = @import("dsv41");
@@ -17,10 +17,15 @@ pub const attn = @import("attn.zig");
 pub const indexer = @import("indexer.zig");
 pub const moe = @import("moe.zig");
 pub const forward = @import("forward.zig");
+pub const prompt = @import("prompt.zig");
+pub const prompt_layer = @import("prompt_layer.zig");
+pub const prompt_scratch = @import("prompt_scratch.zig");
 pub const engram = pipelines.engram;
 
 test {
     std.testing.refAllDecls(@This());
     _ = ctx;
     _ = forward;
+    _ = prompt;
+    _ = prompt_scratch;
 }
