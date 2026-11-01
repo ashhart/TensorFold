@@ -146,11 +146,11 @@ fn checkRun(ctx: *const anyopaque, r: runs.Run, bytes: []const u8) bool {
 
 /// A width file's header: a safetensors index of this layer's trellis at this width, data from byte 65536.
 fn headerOk(t: Target, bytes: []const u8) bool {
-    if (bytes.len != header_bytes) return false;
-    const n = std.mem.readInt(u64, bytes[0..8], .little);
-    if (n + 8 != header_bytes) return false;
+    if (bytes.len != header_bytes or t.size < header_bytes) return false;
+    if (std.mem.readInt(u64, bytes[0..8], .little) != header_bytes - 8) return false;
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
+    _ = exlr8.safetensors.parseHeader(arena.allocator(), bytes[8..], std.math.cast(usize, t.size - header_bytes) orelse return false) catch return false;
     const v = std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), bytes[8..], .{}) catch return false;
     if (v != .object) return false;
     const meta = v.object.get("__metadata__") orelse return false;
@@ -223,7 +223,27 @@ test "a width file's header names its layer and width" {
     const json = "{\"__metadata__\":{\"format\":\"exlr8-v2\",\"contents\":\"trellis\",\"layer\":\"40\",\"k\":\"3\"}}";
     std.mem.writeInt(u64, bytes[0..8], header_bytes - 8, .little);
     @memcpy(bytes[8..][0..json.len], json);
-    try std.testing.expect(headerOk(.{ .rel = "", .size = 0, .layer = 40, .k = 3 }, &bytes));
-    try std.testing.expect(!headerOk(.{ .rel = "", .size = 0, .layer = 40, .k = 4 }, &bytes));
-    try std.testing.expect(!headerOk(.{ .rel = "", .size = 0, .layer = 3, .k = 3 }, &bytes));
+    try std.testing.expect(headerOk(.{ .rel = "", .size = header_bytes, .layer = 40, .k = 3 }, &bytes));
+    try std.testing.expect(!headerOk(.{ .rel = "", .size = header_bytes, .layer = 40, .k = 4 }, &bytes));
+    try std.testing.expect(!headerOk(.{ .rel = "", .size = header_bytes, .layer = 3, .k = 3 }, &bytes));
+}
+
+test "a width file's header run is refetched when its length word or its tensor entries are corrupt" {
+    const meta = "{\"__metadata__\":{\"format\":\"exlr8-v2\",\"contents\":\"trellis\",\"layer\":\"40\",\"k\":\"3\"}";
+    const t: Target = .{ .rel = "", .size = header_bytes + 4, .layer = 40, .k = 3 };
+    var bytes: [header_bytes]u8 = @splat(' ');
+    std.mem.writeInt(u64, bytes[0..8], header_bytes - 8, .little);
+    @memcpy(bytes[8..][0 .. meta.len + 1], meta ++ "}");
+    try std.testing.expect(headerOk(t, &bytes));
+    for ([_]u64{ std.math.maxInt(u64), std.math.maxInt(u64) - 7, header_bytes }) |n| {
+        std.mem.writeInt(u64, bytes[0..8], n, .little);
+        try std.testing.expect(!headerOk(t, &bytes));
+    }
+    std.mem.writeInt(u64, bytes[0..8], header_bytes - 8, .little);
+    for ([_][]const u8{ ",\"t\":0}", ",\"t\":{\"dtype\":\"U8\",\"shape\":[4],\"data_offsets\":[0,999999]}}", ",\"t\":{\"dtype\":\"Q4\",\"shape\":[4],\"data_offsets\":[0,4]}}" }) |entry| {
+        @memset(bytes[8..], ' ');
+        @memcpy(bytes[8..][0..meta.len], meta);
+        @memcpy(bytes[8 + meta.len ..][0..entry.len], entry);
+        try std.testing.expect(!headerOk(t, &bytes));
+    }
 }
