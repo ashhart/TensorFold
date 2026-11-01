@@ -54,14 +54,23 @@ fn offerFor(rule: anytype, who: anytype, index: usize, wanted: i64, base: price.
     else
         null;
     var offer: Offer = if (prefix) |p| .{
-        .index = index, .gain = p.gain, .rows = p.rows, .depth = p.depth,
-        .lowered = p.lowered, .shortened = p.shortened, .pays = false,
+        .index = index,
+        .gain = p.gain,
+        .rows = p.rows,
+        .depth = p.depth,
+        .lowered = p.lowered,
+        .shortened = p.shortened,
+        .pays = false,
     } else legacy: {
         const gain = try gainOf(rule, who);
         break :legacy .{
-            .index = index, .gain = gain, .rows = @floatFromInt(@max(1, who.granted orelse 1)),
-            .depth = wanted, .lowered = (who.granted orelse 0) > 0 and who.gain != null and gain < who.gain.?,
-            .shortened = false, .pays = false,
+            .index = index,
+            .gain = gain,
+            .rows = @floatFromInt(@max(1, who.granted orelse 1)),
+            .depth = wanted,
+            .lowered = (who.granted orelse 0) > 0 and who.gain != null and gain < who.gain.?,
+            .shortened = false,
+            .pays = false,
         };
     };
     if (rule.shared_costs.get(@as(i64, base.rows) + @as(i64, @intFromFloat(offer.rows)))) |verify| {
