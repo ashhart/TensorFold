@@ -70,14 +70,23 @@ The drafter has no embedding and no head of its own:
 - Markov head: row i's logits plus `W2 W1[previous token]` (rank 256); draft i is their argmax.
 
 The drafter runs the released bf16 matrices as they are (`--drafter-bits 0`, the default). `--drafter-bits 8` instead
-quantizes them at load to 8-bit MLX affine codes in groups of 64, about 5% faster on one stream and 361 MiB of weights
-against 625 MiB; the server logs which mode runs, and 4 bits is refused. Both run on the family's kernels
+quantizes them at load to 8-bit MLX affine codes in groups of 64: about 361 MiB of weights
+against 625 MiB. Weight storage does not guarantee serving throughput; the server logs the mode, and 4 bits is refused.
+Both run on the family's kernels
 (bf16 on `lfm2_bf16_rows`, `lfm2_bf16_mma` and `lfm2_markov_scan_bf16`, 8-bit on `core/tile_qmm`); the q and k rows are reordered so that the target's half-split RoPE kernel gives the
 checkpoint's interleaved RoPE. Its own kernels are `lfm2_tap`, `lfm2_attn_block` and `lfm2_attn_block_merge`
 (non-causal block attention, the target's attention kernels with a template flag), `lfm2_markov_scan` and
 `lfm2_markov_pick` (a Markov step) and `lfm2_draft_ids` (a hold's drafts into the next verify's rows on the GPU, so
 the host does not wait for a hold that fits one pass). Each kept prompt state keeps the drafter's context too, so a
 drafting stream resumes prompts. Hold lengths follow the lane core's per-round depth pricing; no stream-count guard disables drafting.
+
+Priced shared rounds use the existing lane allocator and the measured block-count/depth grid. Only neural blocks
+incur hold cost; copies and forced rows still occupy verify capacity. The native 32-row hold limit can split a
+cohort into several passes, priced in execution order rather than as one impossible padded batch.
+
+A new stream waits for its first funded hold while retaining its prompt context. Each lane owns incoming prompt
+and verified taps before the target overwrites them, projecting them only for a hold, snapshot or stage overflow.
+Zero-grant rounds therefore retain contiguous context for later drafts; they do not disable drafting by stream count.
 
 `tf-kernel-contract --only lfm2` checks these kernels. `tf-lfm2-dspark MODEL DRAFTER TOKENS [ROWS]` runs the drafter
 against an fp32 host reference of the released checkpoint (the same taps and the target's embedding and head),
