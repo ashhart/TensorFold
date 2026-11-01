@@ -27,6 +27,7 @@ pub const Model = struct {
     draft_prior: []const f64 = &.{}, // the head's acceptance by depth until a stream has its own
     depth_rate: f64 = 0, // the newest round's weight in a depth's acceptance estimate (0: the core's)
     plain_guard: bool = false, // plain rounds compete with drafted depths
+    rate_guard: bool = false, // with plain_guard: a stream's plain rounds also compete on measured tokens a ms (the EXL3 backend with offloaded experts)
     draft_confidence: ?f64 = null,
     drafts: u32 = 1, // head drafts a round at most
     window_costs: []const Cost = &.{}, // forward ms by exact window width (timed at load)
@@ -68,6 +69,7 @@ pub const Config = struct {
     speculate_early: bool,
     pipelined: bool,
     plain_guard: bool,
+    rate_guard: bool = false, // Model.rate_guard, within plain_guard
     most_drafts: u32,
     draft_confidence: ?f64 = null,
     family_streams: bool,
@@ -154,6 +156,7 @@ pub const Config = struct {
             .speculate_early = m.speculate_early and !(m.root_copies and m.copy_drafts),
             .pipelined = m.gpu_tokens,
             .plain_guard = m.plain_guard,
+            .rate_guard = m.rate_guard and m.plain_guard,
             .most_drafts = @min(m.drafts, @min(width - 1, max_draft)),
             .draft_confidence = m.draft_confidence,
             .family_streams = streams,

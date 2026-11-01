@@ -61,7 +61,7 @@ __device__ __forceinline__ int media_pos(int pos, int d, int half, const int* ro
 }
 
 // glue._attn_prep (text positions, bf16 cache), program (row, head): heads normed, rounded, roped, rounded, stored.
-template <bool PAGED>
+template <bool PAGED, typename G>
 __device__ __forceinline__ void fn_attn_prep_body(const __nv_bfloat16* __restrict__ P, const int* __restrict__ POS0,
                                                                const float* __restrict__ QW, const float* __restrict__ KW,
                                                                const float* __restrict__ IW, const float* __restrict__ INV,
@@ -69,13 +69,13 @@ __device__ __forceinline__ void fn_attn_prep_body(const __nv_bfloat16* __restric
                                                                __nv_bfloat16* __restrict__ VC, __nv_bfloat16* __restrict__ IQ,
                                                                __nv_bfloat16* __restrict__ IKC, float eps, int PW, int NQ, int NKV,
                                                                int NI, int IHD, int HALF, const int* rope3, int n,
-                                                               int delta, const Pg& pg) {
+                                                               int delta, const G& pg) {
     __shared__ float scratch[32];
     const int r = blockIdx.x, head = blockIdx.y, d = threadIdx.x;
     const int pos = POS0[0] + r;
     const long long row = static_cast<long long>(r) * PW;
     if (head >= NQ + NKV + NI) {
-        const long long at = PAGED ? page_row(pg, pos, pg.ptok, IHD) : static_cast<long long>(pos) * IHD;
+        const long long at = PAGED ? ix_row(pg, pos, pg.ptok, IHD) : static_cast<long long>(pos) * IHD;
         if (d < IHD) IKC[at + d] = P[row + NQ * 2 * HD + 2 * NKV * HD + NI * IHD + d];
         return;
     }
@@ -160,19 +160,19 @@ extern "C" __global__ void __launch_bounds__(256) fn_attn_gate(const __nv_bfloat
 }
 
 // attention._pool, a block a completed block of RATIO indexer keys: their mean, rounded, normed and roped at its start.
-template <bool PAGED>
+template <bool PAGED, typename G>
 __device__ __forceinline__ void fn_qsa_pool_body(const __nv_bfloat16* __restrict__ IKC, __nv_bfloat16* __restrict__ POOLED,
                                                               const int* __restrict__ POS0, const float* __restrict__ W,
                                                               const float* __restrict__ INV, float eps, int R, int DI, int HALF,
                                                               int RATIO, const int* rope3, int n, int delta,
-                                                              const Pg& pg) {
+                                                              const G& pg) {
     __shared__ float scratch[32];
     __shared__ float xs[256];
     const int p0 = POS0[0];
     const int b = p0 / RATIO + blockIdx.x, d = threadIdx.x;
     if (RATIO * b + RATIO > p0 + R) return;
     // the block's keys: rows RATIO * b on, or (PAGED) the same rows of its one page (a page holds whole blocks)
-    const __nv_bfloat16* keys = IKC + (PAGED ? page_row(pg, RATIO * b, pg.ptok, DI) : 0);
+    const __nv_bfloat16* keys = IKC + (PAGED ? ix_row(pg, RATIO * b, pg.ptok, DI) : 0);
     const long long first = PAGED ? 0 : static_cast<long long>(RATIO) * b;
     float acc = bf(keys[first * DI + d]);
     for (int k = 1; k < RATIO; ++k) acc = __fadd_rn(acc, bf(keys[(first + k) * DI + d]));
@@ -182,7 +182,7 @@ __device__ __forceinline__ void fn_qsa_pool_body(const __nv_bfloat16* __restrict
     const int p = partner(d, HALF);
     const float xn = rbf(__fmul_rn(__fmul_rn(x, rinv), W[d]));
     const float xpn = rbf(__fmul_rn(__fmul_rn(xs[p], rinv), W[p]));
-    const long long at = PAGED ? page_row(pg, b, pg.ptok / RATIO, DI) : static_cast<long long>(b) * DI;
+    const long long at = PAGED ? ix_row(pg, b, pg.ptok / RATIO, DI) : static_cast<long long>(b) * DI;
     POOLED[at + d] = __float2bfloat16_rn(rope(xn, xpn, d, HALF, media_pos(RATIO * b, d, HALF, rope3, n, delta), INV));
 }
 
@@ -584,3 +584,6 @@ extern "C" __global__ void __launch_bounds__(256)
                         Pg pg) {
     qsa_tile::scores_body<8, 4, true>(IQ, POOLED, POS0, SC, NB, RATIO, TOP, rows, pg);
 }
+
+// The EXL3 launches through a host tier's two planes (PgP): the same bodies, the indexer keys by logical page.
+#include "flashnext_planes.cuh"

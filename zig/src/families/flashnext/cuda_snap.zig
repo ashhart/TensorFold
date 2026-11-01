@@ -30,6 +30,8 @@ pub fn bytes(at: usize, head: bool) usize {
 pub const Snap = struct {
     rank_id: u64 = 0,
     buf: cuda.DeviceBuffer,
+    /// The pinned host memory `buf` borrows (states parked on the host: `on_host`), or null (device memory).
+    host: ?cuda.HostBuffer = null,
     at: usize,
     history: [2]i64,
     head: bool,
@@ -86,7 +88,7 @@ fn move(stream: cuda.Stream, seq: *prompt.Seq, d: ?*Draft, base: u64, at: usize,
                 var r: usize = 0;
                 while (r < n) {
                     const run = @min(per - r % per, n - r);
-                    const at_row = pg.rowAt(at_layer, part, r);
+                    const at_row = if (pg.hbase != 0 and (part == .key or part == .value)) pg.hostRowAt(at_layer, part, r) else pg.rowAt(at_layer, part, r);
                     const dst, const src = if (way == .save) .{ base + off, at_row } else .{ at_row, base + off };
                     try dr.check(dr.api.cuMemcpyDtoDAsync_v2(dst, src, run * row, stream.handle), "cuMemcpyDtoDAsync");
                     off += run * row;
@@ -102,17 +104,39 @@ fn move(stream: cuda.Stream, seq: *prompt.Seq, d: ?*Draft, base: u64, at: usize,
     std.debug.assert(off == bytes(at, d != null));
 }
 
+fn discard(gpa: std.mem.Allocator, stream: cuda.Stream, snap: *Snap) void {
+    cuda.completion.drain(stream.d, stream, "snapshot copies did not drain");
+    if (snap.host) |*h| h.free() else snap.buf.free();
+    gpa.destroy(snap);
+}
+
+/// Kept states go to mapped pinned host memory, set once at load (TF_FLASHNEXT_SNAP_HOST); the host budgets the cache.
+pub var on_host: bool = false;
+
 /// A copy of `seq` (and of the head's cache, with `d`) as it stands after `seq.fed` tokens.
 pub fn save(gpa: std.mem.Allocator, driver: *const cuda.Driver, stream: cuda.Stream, seq: *prompt.Seq, d: ?*Draft) !*Snap {
     const at = seq.fed;
-    if (d) |h| if (h.len != at or h.drafted != 0) return error.NotAtMark;
-    const snap = try gpa.create(Snap);
-    errdefer gpa.destroy(snap);
-    snap.* = .{ .buf = try cuda.DeviceBuffer.alloc(driver, bytes(at, d != null)), .at = at, .history = seq.history, .head = d != null };
-    errdefer snap.buf.free();
-    errdefer cuda.completion.drain(driver, stream, "a failed snapshot save did not drain");
+    if (at > seq.cap) return error.SequenceTooShort;
+    if (d) |h| if (h.len != at or h.drafted != 0 or h.open or at > h.cap) return error.NotAtMark;
+    if (seq.sel) |t| try t.flushAll(stream, at); // a host tier: the window's rows reach the host store first
+    const n = bytes(at, d != null);
+    const snap = try allocate(gpa, driver, n, at, seq.history, d != null);
+    errdefer discard(gpa, stream, snap);
     try move(stream, seq, d, snap.buf.ptr, at, .save);
     try stream.synchronize();
+    return snap;
+}
+
+fn allocate(gpa: std.mem.Allocator, driver: *const cuda.Driver, n: usize, at: usize, history: [2]i64, head: bool) !*Snap {
+    const snap = try gpa.create(Snap);
+    errdefer gpa.destroy(snap);
+    snap.* = .{ .buf = undefined, .at = at, .history = history, .head = head };
+    if (on_host) {
+        var host = try cuda.HostBuffer.allocMapped(driver, @max(n, 256));
+        errdefer host.free();
+        snap.buf = .{ .d = driver, .ptr = try host.device(), .len = n, .borrowed = true };
+        snap.host = host;
+    } else snap.buf = try cuda.DeviceBuffer.alloc(driver, n);
     return snap;
 }
 
@@ -123,18 +147,19 @@ pub fn restore(stream: cuda.Stream, seq: *prompt.Seq, d: ?*Draft, snap: *const S
     // a state with the head's rows serves a stream without drafts too: those rows stay in the buffer
     try move(stream, seq, d, snap.buf.ptr, snap.at, .restore);
     try stream.synchronize();
+    if (seq.sel) |t| t.restored();
     seq.history = snap.history;
     seq.fed = snap.at;
     if (d) |h| {
         h.reset();
         h.len = snap.at;
+        h.open = false;
+        h.fed0 = snap.at;
     }
 }
 
 pub fn drop(gpa: std.mem.Allocator, stream: cuda.Stream, snap: *Snap) void {
-    cuda.completion.drain(stream.d, stream, "a snapshot drop did not drain");
-    snap.buf.free();
-    gpa.destroy(snap);
+    discard(gpa, stream, snap);
 }
 
 test "a state's bytes: about 110 MiB of DeltaNet states and the n-gram tail, then 27 KiB a token" {

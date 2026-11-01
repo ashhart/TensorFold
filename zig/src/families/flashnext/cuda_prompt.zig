@@ -116,6 +116,7 @@ pub fn pooledBytes(cap: usize) usize {
     return (cap + weights.index_ratio - 1) / weights.index_ratio * index_dim * 2;
 }
 const round_graph = @import("cuda_round_graph.zig");
+const cache_telemetry = @import("cuda_prompt_telemetry.zig");
 const pages = @import("cuda_pages.zig");
 /// One loaded checkpoint: the embedding table, every layer, the mixer and head, and the batched pass's scratch.
 pub const Engine = struct {
@@ -136,6 +137,9 @@ pub const Engine = struct {
     ngram: ple.Ngram,
     /// The pass's scratch, grown to the widest chunk run.
     batch_s: ?batch.Scratch = null,
+    scratch_format: @import("cuda_batch_state.zig").ScratchFormat = .classic,
+    /// Local head staging bound for this engine, fixed before its first scratch allocation.
+    head_local_rows: usize = std.math.maxInt(usize),
     /// Block scores for the sparse rows of an attention block, grown to the longest sequence's need.
     scores: ?cuda.DeviceBuffer = null,
     /// Rows a batched chunk takes at most: TF_FLASHNEXT_CHUNK_SOLO if set, else TF_FLASHNEXT_CHUNK (cuda_chunk.zig).
@@ -145,10 +149,18 @@ pub const Engine = struct {
     round_graph: round_graph.Cache = .{},
     image_factory: ?*@import("cuda_images.zig").Vision = null,
     collective: ?*@import("cuda_collective.zig").Collective = null,
+    /// This engine's EXL3 device planner (cuda_exl3_dplan.zig): nothing of it is shared with another engine.
+    exl3_chain: @import("exl3/model/cuda_exl3_chain.zig").Runtime = .{},
+    exl3_prefill: @import("exl3/prefill/cuda_exl3_prefill_state.zig").Runtime = .{},
+    exl3_dplan: @import("exl3/dplan/cuda_exl3_dplan.zig").State = .{},
+    telemetry: cache_telemetry.State = .{},
     /// Each layer's Living Weights pocket, from a taught folder's shards or the learner: every pass adds it.
     pockets: pocket.Pockets = .{},
     /// During a round of taught and untaught streams: its rows' pocket scales (0 on an untaught row); 0: none.
     taught_rows: u64 = 0,
+
+    const measured = cache_telemetry.Operations(Engine, Seq, batch.Hooks, .{ .forward = forwardUnmeasured, .round = roundUnmeasured });
+
     pub fn init(gpa: std.mem.Allocator, io: std.Io, driver: *cuda.Driver, stream: *cuda.Stream, model_dir: []const u8) !*Engine {
         return initRank(gpa, io, driver, stream, model_dir, 1, 0);
     }
@@ -165,8 +177,14 @@ pub const Engine = struct {
         e.driver = driver;
         e.stream = stream;
         e.n_layers = 0;
+        e.scratch_format = .classic;
+        e.head_local_rows = std.math.maxInt(usize);
         e.collective = null;
+        e.exl3_dplan = .{};
+        e.exl3_chain = .{};
+        e.exl3_prefill = .{ .options = @import("exl3/prefill/cuda_exl3_prefill_state.zig").optionsFromEnv() };
         e.image_factory = null;
+        e.telemetry = cache_telemetry.State.fromEnv(rank, world);
         e.round_graph = .{};
         errdefer for (e.layers[0..e.n_layers]) |*l| l.free(gpa);
         e.model_dir = try gpa.dupe(u8, model_dir);
@@ -176,7 +194,8 @@ pub const Engine = struct {
         try e.store.detectNorms();
         const weight = try e.store.tensor(embed.weight_name);
         if (weight.dtype == .bf16) {
-            e.table = try embed.Table.uploadDense(driver, weight);
+            // an EXL3 pack keeps its BF16 table in mapped host memory, every other checkpoint on the device
+            e.table = try embed.Table.uploadDenseIn(driver, weight, @import("exl3/pack/cuda_exl3_load.zig").has(&e.store, "language_model.lm_head"));
         } else {
             const scales = try e.store.tensor(embed.scales_name);
             const biases = try e.store.tensor(embed.biases_name);
@@ -186,8 +205,9 @@ pub const Engine = struct {
         e.eos = try ple.eosOf(gpa, io, e.model_dir);
         e.mixer = try loadHc(gpa, driver, &e.store, "language_model.model.hyper_connection_mixer", false);
         errdefer e.mixer.free();
-        const head_tensor = try e.store.tensor("language_model.lm_head.weight");
-        if (head_tensor.dtype == .bf16) {
+        const exl3_head = try @import("exl3/pack/cuda_exl3_load.zig").head(gpa, driver, &e.store, world, rank);
+        const head_tensor = if (exl3_head == null) try e.store.tensor("language_model.lm_head.weight") else undefined;
+        if (exl3_head) |q| e.head_q = q else if (head_tensor.dtype == .bf16) {
             if (!head_tensor.is(.bf16, &.{ vocab, dims })) return error.UnexpectedTensor;
             e.head_q = try @import("cuda_projection.zig").dense(gpa, driver, if (try @import("cuda_head.zig").enabled()) try @import("cuda_head.zig").shard(head_tensor, world, rank) else head_tensor);
         } else {
@@ -233,6 +253,11 @@ pub const Engine = struct {
     }
 
     pub fn deinit(e: *Engine) void {
+        @import("exl3/model/cuda_exl3_chain.zig").releaseRuntime(&e.exl3_chain);
+        @import("exl3/prefill/cuda_exl3_prefill.zig").releaseFor(&e.exl3_prefill, e);
+        @import("exl3/graph/cuda_exl3_graph.zig").releaseFor(e);
+        @import("exl3/dplan/cuda_exl3_dplan.zig").release(&e.exl3_dplan);
+        @import("exl3/offload/cuda_exl3_recycle.zig").drain(e);
         e.round_graph.clear();
         e.pockets.deinit();
         if (e.batch_s) |*bs| bs.free(e.gpa);
@@ -279,7 +304,7 @@ pub const Engine = struct {
     /// The resident weights a pass reads, with the taught layers' pockets.
     pub fn model(e: *Engine) batch.Model {
         const m = e.pockets.mask();
-        return .{ .table_w = e.table.w.ptr, .table_s = e.table.s.ptr, .table_b = e.table.b.ptr, .table_dense = e.table.dense, .collective = e.collective, .layers = e.layers[0..e.n_layers], .mixer = e.mixer, .head = e.head_q, .ngram = &e.ngram, .pocket = if (m != 0) .{ .ctx = e, .add = servePocket, .layers = m } else null };
+        return .{ .table_w = e.table.w.ptr, .table_s = e.table.s.ptr, .table_b = e.table.b.ptr, .table_dense = e.table.dense, .collective = e.collective, .dplan = &e.exl3_dplan, .prefill = &e.exl3_prefill, .layers = e.layers[0..e.n_layers], .mixer = e.mixer, .head = e.head_q, .ngram = &e.ngram, .pocket = if (m != 0) .{ .ctx = e, .add = servePocket, .layers = m } else null };
     }
 
     /// The weights a pass of streams that read the model as shipped reads (untaught): the pockets left out.
@@ -301,6 +326,9 @@ pub const Engine = struct {
         var paged = given;
         errdefer if (paged) |*p| p.deinit(e.gpa);
         e.round_graph.clear();
+        if (paged == null and cap != 0) {
+            if (try @import("exl3/offload/cuda_exl3_recycle.zig").takeSeq(e, cap)) |kept| return kept;
+        }
         if (cap == 0 or cap > max_tokens) return error.UnexpectedTensor;
         _ = try seqBytesPaged(cap, if (paged) |p| p.tokens else 0);
         var seq: Seq = .{
@@ -317,6 +345,7 @@ pub const Engine = struct {
             .fed = 0,
             .logits = &.{},
             .cap = cap,
+            .recycle_owner = if (paged == null) e else null,
         };
         paged = null; // seq owns the pages from here
         // One rollback owns every published array, and drains before releasing any destination.
@@ -350,10 +379,7 @@ pub const Engine = struct {
         return e.forward(Tri, tri, seq, ids, .{});
     }
 
-    pub fn complete(e: *Engine) !void {
-        if (e.collective) |c| return c.finish(e.stream.*);
-        try e.stream.synchronize();
-    }
+    pub const complete = measured.complete;
 
     /// Block scores for a `cap`-token sequence's chunks of up to `rows` rows, reallocated only to grow.
     pub fn reserveScores(e: *Engine, cap: usize, rows: usize) !u64 {
@@ -377,19 +403,23 @@ pub const Engine = struct {
     /// Scratch for chunks of `rows` rows, reallocated only to grow.
     pub fn reserve(e: *Engine, rows: usize) !*batch.Scratch {
         if (e.batch_s) |*bs| {
+            if (bs.format != e.scratch_format) return error.ScratchFormatChanged;
             if (bs.cap >= rows) return bs;
             try e.complete();
             e.round_graph.clear();
             bs.free(e.gpa);
             e.batch_s = null;
         }
-        e.batch_s = try batch.Scratch.alloc(e.gpa, e.driver, e.stream.*, rows);
+        e.batch_s = try batch.Scratch.allocForHead(e.gpa, e.driver, e.stream.*, rows, e.scratch_format, e.head_local_rows);
         return &e.batch_s.?;
     }
 
     /// The batched pass over `ids` from `seq.fed` in chunks of at most `chunk` rows; a window's hooks take one chunk.
-    pub fn forward(e: *Engine, comptime Tri: type, tri: Tri, seq: *Seq, ids: []const u32, hooks: batch.Hooks) !void {
-        if (ids.len == 0 or seq.fed + ids.len > seq.cap) return error.UnexpectedTensor;
+    pub const forward = measured.forward;
+
+    fn forwardUnmeasured(e: *Engine, comptime Tri: type, tri: Tri, seq: *Seq, ids: []const u32, hooks: batch.Hooks) !void {
+        if (ids.len == 0 or seq.fed > seq.cap or ids.len > seq.cap - seq.fed) return error.UnexpectedTensor;
+        if (try @import("exl3/prefill/cuda_exl3_prefill.zig").forward(e, Tri, tri, seq, ids, hooks)) return;
         if ((hooks.keep != null or hooks.logits == .all) and ids.len > e.chunk) return error.UnexpectedTensor;
         const s = try e.reserve(@min(ids.len, e.chunk));
         const scores = try e.reserveScores(seq.cap, s.cap);
@@ -404,6 +434,7 @@ pub const Engine = struct {
             .seq = seq.view(scores),
             .hooks = hooks,
         };
+        if (try @import("exl3/graph/cuda_exl3_graph.zig").forward(e, &p, seq, ids)) return;
         var at: usize = 0;
         while (at < ids.len) {
             const n = @min(s.cap, ids.len - at);
@@ -422,7 +453,9 @@ pub const Engine = struct {
     pub const windows = @import("cuda_prompt_windows.zig").windows;
 
     /// One decode round: each of `seqs` takes its token of `ids` in one batched pass; scores as if alone.
-    pub fn round(e: *Engine, comptime Tri: type, tri: Tri, seqs: []const *Seq, ids: []const u32, out: u64) !void {
+    pub const round = measured.round;
+
+    fn roundUnmeasured(e: *Engine, comptime Tri: type, tri: Tri, seqs: []const *Seq, ids: []const u32, out: u64) !void {
         if (seqs.len == 0 or seqs.len != ids.len) return error.UnexpectedTensor;
         var cap: usize = 0;
         for (seqs) |q| {
@@ -459,7 +492,11 @@ pub const Engine = struct {
         const has_media = for (seqs) |q| {
             if (q.media != null) break true;
         } else false;
-        if (e.collective != null and round_graph.enabled() and !has_media) {
+        const has_paged = for (seqs) |q| {
+            if (q.paged != null) break true;
+        } else false;
+        // a captured round fixes the lanes' tables: paged streams run the plain pass
+        if (try @import("exl3/graph/cuda_exl3_graph.zig").round(e, &p, seqs, ids, scores, out)) {} else if (e.collective != null and round_graph.enabled() and !has_media and !has_paged) {
             const key = try round_graph.Key.init(seqs, s.ids, scores, out);
             try e.round_graph.run(key, &p, ids);
         } else try p.chunk(ids, 0, null);
@@ -474,6 +511,7 @@ pub const Engine = struct {
 
 /// One stream's caches. `fed` tokens have already gone through the model.
 pub const Seq = struct {
+    recycle_owner: ?*Engine = null,
     /// The owning compute stream; synthetic non-device fixtures may leave it absent.
     stream: ?cuda.Stream = null,
     media: ?@import("cuda_media.zig").State = null,
@@ -486,6 +524,8 @@ pub const Seq = struct {
     pooled: []cuda.DeviceBuffer,
     /// kc, vc, ikc and pooled as borrowed views of page 0 of these pages (null: each its own contiguous buffer).
     paged: ?pages.Paged = null,
+    /// On a host tier: which blocks of the stream's K/V are in slots (null: every page is in a frame).
+    sel: ?*@import("exl3/kv/cuda_exl3_kvtier.zig").LaneSel = null,
     tail: cuda.DeviceBuffer,
     history: [2]i64,
     fed: usize,
@@ -496,7 +536,7 @@ pub const Seq = struct {
 
     /// The caches a batched pass reads and leaves; `scores` the engine's block scores (Engine.reserveScores).
     pub fn view(s: *Seq, scores: u64) batch.SeqState {
-        return .{ .media = if (s.media) |*m| m.view() else null, .conv = s.conv, .state = s.state, .kc = s.kc, .vc = s.vc, .ikc = s.ikc, .pooled = s.pooled, .tail = s.tail, .history = &s.history, .cap = s.cap, .scores = scores, .pg = s.pg() };
+        return .{ .media = if (s.media) |*m| m.view() else null, .conv = s.conv, .state = s.state, .kc = s.kc, .vc = s.vc, .ikc = s.ikc, .pooled = s.pooled, .tail = s.tail, .history = &s.history, .cap = s.cap, .scores = scores, .pg = s.pg(), .sel = s.sel };
     }
 
     /// The attention kernels' page argument (zero: contiguous caches).
@@ -505,23 +545,7 @@ pub const Seq = struct {
     }
 
     pub fn deinit(s: *Seq, gpa: std.mem.Allocator) void {
-        if (s.stream) |stream| cuda.completion.drain(stream.d, stream, "Flash Next sequence work did not drain before release");
-        if (s.media) |*m| m.deinit();
-        freeBufs(s.conv);
-        freeBufs(s.state);
-        freeBufs(s.kc);
-        freeBufs(s.vc);
-        freeBufs(s.ikc);
-        freeBufs(s.pooled);
-        gpa.free(s.conv);
-        gpa.free(s.state);
-        gpa.free(s.kc);
-        gpa.free(s.vc);
-        gpa.free(s.ikc);
-        gpa.free(s.pooled);
-        if (s.paged) |*p| p.deinit(gpa);
-        if (s.tail.ptr != 0) s.tail.free();
-        gpa.free(s.logits);
+        @import("cuda_prompt_lifecycle.zig").deinit(s, gpa);
     }
 };
 
@@ -529,55 +553,21 @@ fn freeBufs(bs: []cuda.DeviceBuffer) void {
     for (bs) |*b| b.free();
 }
 
+fn freeOwned(gpa: std.mem.Allocator, bs: []cuda.DeviceBuffer) void {
+    freeBufs(bs);
+    gpa.free(bs);
+}
+
 test "linear layers skip every fourth index and attention starts at 3" {
-    try std.testing.expect(linearLayer(0));
-    try std.testing.expect(!linearLayer(3));
-    try std.testing.expect(!linearLayer(47));
-    try std.testing.expectEqual(@as(usize, 0), linearIndex(0));
-    try std.testing.expectEqual(@as(usize, 2), linearIndex(2));
-    try std.testing.expectEqual(@as(usize, 35), linearIndex(46));
-    try std.testing.expectEqual(@as(usize, 0), attnIndex(3));
-    try std.testing.expectEqual(@as(usize, 11), attnIndex(47));
+    try @import("cuda_prompt_test.zig").layerIndices();
 }
 
 test "a sequence's device bytes grow by the twelve attention layers' keys, values, indexer keys and pooled blocks" {
-    const per_token = attn_n * (2 * kv_heads * head_dim * 2 + index_dim * 2);
-    try std.testing.expectEqual(per_token, seqBytes(6) - seqBytes(5));
-    try std.testing.expectEqual(per_token + attn_n * index_dim * 2, seqBytes(5) - seqBytes(4));
-    try std.testing.expect(seqBytes(max_tokens) > max_tokens * per_token);
+    try @import("cuda_prompt_test.zig").sequenceBytes(seqBytes);
 }
 
 test "a failed fill frees the buffer it was filling and every one before it" {
-    const Fake = struct {
-        live: *usize,
-        pub fn free(b: *@This()) void {
-            b.live.* -= 1;
-        }
-    };
-    const Src = struct {
-        live: *usize,
-        fills: *usize,
-        fail_at: usize,
-        fn make(s: @This()) !Fake {
-            s.live.* += 1;
-            return .{ .live = s.live };
-        }
-        fn fill(s: @This(), _: *Fake) !void {
-            s.fills.* += 1;
-            if (s.fills.* == s.fail_at) return error.FillFailed;
-        }
-    };
-    for ([_]usize{ 1, 2, 4 }) |fail_at| {
-        var live: usize = 0;
-        var fills: usize = 0;
-        try std.testing.expectError(error.FillFailed, made(Fake, std.testing.allocator, 4, Src{ .live = &live, .fills = &fills, .fail_at = fail_at }));
-        try std.testing.expectEqual(@as(usize, 0), live);
-    }
-    var live: usize = 0;
-    var fills: usize = 0;
-    const all = try made(Fake, std.testing.allocator, 3, Src{ .live = &live, .fills = &fills, .fail_at = 0 });
-    defer std.testing.allocator.free(all);
-    try std.testing.expectEqual(@as(usize, 3), live);
+    try @import("cuda_prompt_test.zig").failedFill(made);
 }
 
 pub const parseChunk = chunks.parseChunk;

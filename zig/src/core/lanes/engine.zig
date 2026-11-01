@@ -53,7 +53,6 @@ pub const Engine = struct {
     grammar_round: @import("grammar_time.zig").Round = .{},
     arena: std.heap.ArenaAllocator, // a round's temporaries
     unread: std.ArrayList(Unread) = .empty, // queued draws the log reads at the step's end
-
     pub fn init(gpa: Allocator, cfg: *const Config, backend: be.Backend, clock: be.Clock) Engine {
         return .{
             .gpa = gpa,
@@ -71,6 +70,7 @@ pub const Engine = struct {
                 .mtp_step_ms = cfg.mtp_step_ms,
                 .draft_step_ms = cfg.draft_step_ms,
                 .plain_guard = cfg.plain_guard,
+                .rate_guard = cfg.rate_guard,
                 .node_probabilities = cfg.node_probabilities,
                 .granted_depth = cfg.granted_depth,
                 .confidence_floor = cfg.draft_confidence,
@@ -231,7 +231,7 @@ pub const Engine = struct {
                 const ms = e.clock.elapsedMs(.cost);
                 const first = s.rounds == 1; // a stream's first round carries the prefill-to-decode switch
                 try trail.event(e, &.{ f("ev", str("cost")), f("stream", str(s.id)), f("drafts", int(rows - 1)), f("init", .{ .bool = first }), f("ms", ev.bits(ms)) });
-                try e.rule.observeCost(@intCast(rows - 1), ms, first, win.who(s));
+                try @import("rate_guard_round.zig").observe(e, s, rows, ms, first, o.got.len);
                 lone_costs.observe(s, plan.cost_probe_rows, rows, ms);
             }
         }
@@ -267,7 +267,7 @@ pub const Engine = struct {
         const out = try a.alloc(be.Verified, plans.len);
         var total: u64 = 0;
         for (plans, windows, out) |p, *w, *o| {
-            w.* = try win.build(e, p, false);
+            w.* = try @import("rate_guard_round.zig").build(e, p);
             o.* = .{ .sampled = try a.alloc(u32, w.rows()), .drafts = try a.alloc(u32, w.rows() - 1), .rows = if (p.stream.logprobs != null) try a.alloc(LogRow, w.rows()) else &.{} };
             total += w.rows();
         }
@@ -312,7 +312,7 @@ pub const Engine = struct {
                 d.* = 0;
             };
         };
-        try e.backend.keep(windows, paths);
+        try @import("rate_guard_round.zig").keep(e, windows, paths, heads.items, plans, outcomes);
         if (e.cfg.timed) {
             // the drafts budgets priced past each stream's first are no part of the round's overhead
             var steps: i64 = 0;

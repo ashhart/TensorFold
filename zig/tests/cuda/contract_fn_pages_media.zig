@@ -33,6 +33,7 @@ pub fn at(d: *const cuda.Driver, f: anytype, rope: u64, p: Plan) View {
         .pool = f.pool_media,
         .prep_paged = f.prep_media_paged,
         .pool_paged = f.pool_media_paged,
+        .planes = .{ .prep = f.prep_media_planes, .pool = f.pool_media_planes },
         .image = .{ .features = 0, .src = 0, .rope = rope, .n = p.src.len, .delta = p.delta, .width = 5120, .splice_fn = .{ .d = d, .handle = null } },
     };
 }
@@ -61,29 +62,32 @@ test "paged media contract: real plans retain image axes, text suffixes and a ne
 }
 
 const Capture = struct {
+    const MainPages = @TypeOf((@as(flash.Pg, .{})).main());
     var calls: usize = 0;
     var symbols: [2]usize = undefined;
-    var pages: [2]flash.Pg = undefined;
+    var pages: [2]MainPages = undefined;
+    var plane_pages: [2]flash.Pg = undefined;
     var configs: [2][7]u32 = undefined;
     var rope: [2]u64 = undefined;
     var n: [2]i32 = undefined;
     var delta: [2]i32 = undefined;
 
     fn launch(f: cuda.abi.Function, gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32, sm: u32, _: cuda.abi.Stream, args: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) c_int {
-        const prep = @intFromPtr(f) == 3;
+        const symbol = @intFromPtr(f);
+        const prep = symbol == 3 or symbol == 5;
         const i: usize = if (prep) 18 else 10;
         symbols[calls] = @intFromPtr(f);
         rope[calls] = @as(*const u64, @ptrCast(@alignCast(args.?[i].?))).*;
         n[calls] = @as(*const i32, @ptrCast(@alignCast(args.?[i + 1].?))).*;
         delta[calls] = @as(*const i32, @ptrCast(@alignCast(args.?[i + 2].?))).*;
-        pages[calls] = @as(*const flash.Pg, @ptrCast(@alignCast(args.?[i + 3].?))).*;
+        if (symbol >= 5) plane_pages[calls] = @as(*const flash.Pg, @ptrCast(@alignCast(args.?[i + 3].?))).* else pages[calls] = @as(*const MainPages, @ptrCast(@alignCast(args.?[i + 3].?))).*;
         configs[calls] = .{ gx, gy, gz, bx, by, bz, sm };
         calls += 1;
         return 0;
     }
 };
 
-test "paged media contract: production wrappers select both media symbols with full Pages and image arguments" {
+test "paged media contract: production wrappers select each page ABI and its media symbols" {
     var d: cuda.Driver = undefined;
     d.api.cuLaunchKernel = Capture.launch;
     const s: cuda.Stream = .{ .d = &d, .handle = null };
@@ -92,23 +96,28 @@ test "paged media contract: production wrappers select both media symbols with f
         .pool_media = cuda.Function{ .d = &d, .handle = @ptrFromInt(2) },
         .prep_media_paged = cuda.Function{ .d = &d, .handle = @ptrFromInt(3) },
         .pool_media_paged = cuda.Function{ .d = &d, .handle = @ptrFromInt(4) },
+        .prep_media_planes = cuda.Function{ .d = &d, .handle = @ptrFromInt(5) },
+        .pool_media_planes = cuda.Function{ .d = &d, .handle = @ptrFromInt(6) },
     };
     var plans = try specs[1].plans(std.testing.allocator);
     defer for (&plans) |*p| p.deinit();
-    const pg: flash.Pg = .{ .pt = 0x7000, .ps = 13 * 64 * 1184, .ptok = 64 };
-    for (plans) |p| {
+    const main: flash.Pg = .{ .pt = 0x7000, .ps = 13 * 64 * 1184, .ptok = 64 };
+    var planes = main;
+    planes.ips = 13 * 64 * 160;
+    planes.ipt = 0x9000;
+    for ([_]flash.Pg{ main, planes }) |pg| for (plans) |p| {
         Capture.calls = 0;
         const v = at(&d, f, 0x8000, p);
         try v.attn(s, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 1e-6, 16, pg);
         try v.pooled(s, 1, 2, 3, 4, 5, 1e-6, 16, pg);
-        try std.testing.expectEqualSlices(usize, &.{ 3, 4 }, &Capture.symbols);
+        try std.testing.expectEqualSlices(usize, if (pg.planes()) &.{ 5, 6 } else &.{ 3, 4 }, &Capture.symbols);
         for (0..2) |i| {
-            try std.testing.expectEqual(pg, Capture.pages[i]);
+            if (pg.planes()) try std.testing.expectEqual(pg, Capture.plane_pages[i]) else try std.testing.expectEqual(pg.main(), Capture.pages[i]);
             try std.testing.expectEqual(@as(u64, 0x8000), Capture.rope[i]);
             try std.testing.expectEqual(@as(i32, @intCast(p.src.len)), Capture.n[i]);
             try std.testing.expectEqual(p.delta, Capture.delta[i]);
         }
         try std.testing.expectEqual([7]u32{ 16, 31, 1, 256, 1, 1, 0 }, Capture.configs[0]);
         try std.testing.expectEqual([7]u32{ 6, 1, 1, 128, 1, 1, 0 }, Capture.configs[1]);
-    }
+    };
 }

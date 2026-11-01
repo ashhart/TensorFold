@@ -43,8 +43,21 @@ pub const Chain = struct {
     }
 };
 
+test "exl3: reset and settlement discard completed verification records" {
+    var window: Draft = undefined;
+    window.verify_cache = .{};
+    window.verify_cache.publish(window.verify_cache.generation, 4, 10);
+    window.reset();
+    try std.testing.expect(!window.verify_cache.take(4, 10, true));
+    window.verify_cache.publish(window.verify_cache.generation, 4, 10);
+    window.open = false;
+    window.settle(undefined);
+    try std.testing.expect(!window.verify_cache.take(4, 10, true));
+}
+
 /// A sequence's head cache and the buffers a window needs: its rows' scores and streams, and what it rolls back to.
 pub const Draft = struct {
+    sel: ?*@import("exl3/kv/cuda_exl3_kvtier.zig").LaneSel = null, // a host tier's selection of the stream's blocks
     stream: ?cuda.Stream = null,
     media: ?@import("cuda_media.zig").View = null,
     gpa: std.mem.Allocator,
@@ -64,6 +77,11 @@ pub const Draft = struct {
     rows_cap: usize,
     /// The prompt's last row of streams in `streams`, which the first draft reads with the first token.
     prompt_last: u64 = 0,
+    /// Rounds the head has not absorbed: their rows sit in `streams` past the widest window, their next tokens here.
+    stashed: usize = 0,
+    /// `streams` holds the last window's rows (false after a plain round that left them out; the head cannot draft)
+    fresh: bool = true,
+    stash_next: [stash_rows]u32 = undefined,
     /// The head's last output row (its streams after the MoE write-back): the next chained draft's input.
     out: cuda.DeviceBuffer,
     /// A window's scores [max_rows, vocab], the draft head's [ids], best values [max_rows, 4].
@@ -85,6 +103,17 @@ pub const Draft = struct {
     /// The scores a sampled draw reads on the host (a window's rows, or the draft head's row).
     host: []u16,
     best_host: [max_rows * 4]f32 = undefined,
+    verify_host: ?cuda.HostBuffer = null,
+    verify_pending: ?cuda.Stream = null,
+    verify_cache: @import("cuda_mtp_verify_cache.zig").Cache = .{},
+
+    /// Rounds the head defers at most; they need `streams` rows past a window's.
+    pub const stash_rows: usize = 32;
+
+    /// Whether `streams` has room for the deferred rows.
+    pub fn canStash(d: *const Draft) bool {
+        return d.rows_cap >= max_rows + stash_rows;
+    }
 
     const hist_at: usize = 0;
     const proj_at: usize = hist_at + linear_n * conv_bytes;
@@ -100,6 +129,7 @@ pub const Draft = struct {
 
     /// A head cache of `cap` entries; `rows` the widest prompt chunk whose streams it keeps.
     pub fn init(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: cuda.Stream, cap: usize, draft_n: usize, rows: usize) !Draft {
+        if (try @import("exl3/offload/cuda_exl3_recycle.zig").takeDraft(stream, cap, draft_n, rows)) |kept| return kept; // graphs: stable addresses
         var d: Draft = .{ .stream = stream, .gpa = gpa, .cap = cap, .rows_cap = @max(rows, max_rows), .kc = undefined, .vc = undefined, .ikc = undefined, .pooled = undefined, .streams = undefined, .out = undefined, .logits = undefined, .dlogits = undefined, .best = undefined, .saved = undefined, .host = undefined };
         d.kc = try cuda.DeviceBuffer.alloc(driver, cap * kv_heads * head_dim * 2);
         errdefer d.kc.free();
@@ -179,6 +209,11 @@ pub const Draft = struct {
         return d;
     }
 
+    /// The head's one layer as a pass reads its cache: contiguous, or the lane's pages (`pg`) after the model's.
+    pub fn headSeq(d: *Draft, media: ?@import("cuda_media.zig").View, scores: u64) batch.SeqState {
+        return .{ .media = media, .conv = &.{}, .state = &.{}, .kc = (&d.kc)[0..1], .vc = (&d.vc)[0..1], .ikc = (&d.ikc)[0..1], .pooled = (&d.pooled)[0..1], .pg = d.pg, .tail = d.kc, .history = &d.unused_history, .cap = d.cap, .scores = scores, .sel = d.sel, .sel_layer = wt.attn_n };
+    }
+
     /// Each DeltaNet layer's window end state into its spare buffer.
     fn aim(d: *Draft) void {
         var li: usize = 0;
@@ -191,6 +226,7 @@ pub const Draft = struct {
 
     /// An open window kept whole: its end states become the sequence's (buffers swapped, nothing copied).
     pub fn settle(d: *Draft, seq: *prompt.Seq) void {
+        d.verify_cache.invalidate();
         if (!d.open) return;
         for (seq.state, &d.spare) |*a, *b| std.mem.swap(cuda.DeviceBuffer, a, b);
         d.aim();
@@ -198,7 +234,14 @@ pub const Draft = struct {
     }
 
     pub fn deinit(d: *Draft) void {
+        d.verify_cache.invalidate();
+        if (d.verify_pending) |stream| {
+            stream.synchronize() catch {};
+            d.verify_pending = null;
+        }
         if (d.stream) |stream| cuda.completion.drain(stream.d, stream, "Flash Next draft work did not drain before release");
+        if (@import("exl3/offload/cuda_exl3_recycle.zig").giveDraft(d)) return; // graphs: kept for the next stream
+        if (d.verify_host) |*host| host.free();
         d.gpa.free(d.host);
         for (&d.spare) |*b| b.free();
         d.saved.free();
@@ -215,8 +258,11 @@ pub const Draft = struct {
 
     /// Drop the head's cache (a new prompt).
     pub fn reset(d: *Draft) void {
+        d.verify_cache.invalidate();
         d.len = 0;
         d.drafted = 0;
         d.rows = 0;
+        d.stashed = 0;
+        d.fresh = true;
     }
 };
