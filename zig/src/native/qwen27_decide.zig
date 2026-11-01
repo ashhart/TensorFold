@@ -82,13 +82,16 @@ pub const Decider = struct {
     hidden: []f32,
     slot: u32 = 0,
     bidirectional: bool,
+    /// A decision's questions in one several-slot pass (TF_DECIDE_BATCH=0: one pass each, as before).
+    batch: bool = true,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, runner: *Runner, chunk: u32, bidirectional: bool) !Decider {
         var head = try Head.open(gpa, io, dir, runner.model.config.hidden);
         errdefer head.deinit();
         const rewind = try runner.model.device.buffer(q.snapshot.rewindBytes(runner, null), mtl.ResourceOptions.private | mtl.ResourceOptions.untracked);
         errdefer rewind.deinit();
-        return .{ .gpa = gpa, .runner = runner, .head = head, .rewind = rewind, .chunk = blockRows(runner.promptRows(chunk)), .hidden = try gpa.alloc(f32, runner.model.config.hidden), .bidirectional = bidirectional };
+        const off = if (std.c.getenv("TF_DECIDE_BATCH")) |v| std.mem.eql(u8, std.mem.span(v), "0") else false;
+        return .{ .gpa = gpa, .runner = runner, .head = head, .rewind = rewind, .chunk = blockRows(runner.promptRows(chunk)), .hidden = try gpa.alloc(f32, runner.model.config.hidden), .bidirectional = bidirectional, .batch = bidirectional and !off };
     }
 
     pub fn deinit(d: *Decider) void {
@@ -98,8 +101,8 @@ pub const Decider = struct {
         d.gpa.free(d.hidden);
     }
 
-    /// Each branch's label logits at its last row, after the shared trunk; slot `d.slot` must hold no stream.
-    pub fn decide(d: *Decider, x: *api.Decision) !void {
+    /// A decision this server can answer, or its refusal.
+    fn check(d: *const Decider, x: *api.Decision) !void {
         if (x.pictures.len > 0) return refuse(x, "this decision model reads text only: send no pictures");
         if (x.branches.len == 0 or x.counts.len != x.branches.len) return refuse(x, "a decision needs one or more questions");
         var labels: usize = 0;
@@ -111,6 +114,147 @@ pub const Decider = struct {
         }
         if (labels != x.labels.len or labels != x.logits.len) return error.BadDecision;
         if (x.trunk.len + longest > d.runner.capacity) return refuse(x, "the state and its longest question exceed this server's --context");
+    }
+
+    /// Slots a batch may take: the runner's, at most block_forward.max_blocks.
+    fn batchSlots(d: *const Decider) usize {
+        return @min(d.runner.slots, q.block_forward.max_blocks);
+    }
+
+    /// Whether `x` (checked) can join a batch: its trunk and each question fit one pass, its questions the slots.
+    fn batchable(d: *const Decider, x: *const api.Decision) bool {
+        if (!d.batch or x.trunk.len > d.chunk or x.branches.len > d.batchSlots()) return false;
+        for (x.branches) |b| if (b.len > d.chunk) return false;
+        return true;
+    }
+
+    /// Several decisions (errs[i]: i's error or null) in slot-filling groups of shared passes, same bytes as alone.
+    pub fn decideMany(d: *Decider, xs: []const *api.Decision, errs: []?anyerror) void {
+        var group: [q.block_forward.max_blocks]usize = undefined;
+        var members: usize = 0;
+        var slots: usize = 0;
+        for (xs, 0..) |x, j| {
+            errs[j] = null;
+            d.check(x) catch |err| {
+                errs[j] = err;
+                continue;
+            };
+            if (!d.batchable(x)) {
+                d.flush(xs, errs, group[0..members]);
+                members = 0;
+                slots = 0;
+                d.decide(x) catch |err| {
+                    errs[j] = err;
+                };
+                continue;
+            }
+            if (slots + x.branches.len > d.batchSlots()) {
+                d.flush(xs, errs, group[0..members]);
+                members = 0;
+                slots = 0;
+            }
+            group[members] = j;
+            members += 1;
+            slots += x.branches.len;
+        }
+        d.flush(xs, errs, group[0..members]);
+    }
+
+    fn flush(d: *Decider, xs: []const *api.Decision, errs: []?anyerror, group: []const usize) void {
+        if (group.len == 0) return;
+        if (group.len == 1) {
+            d.decide(xs[group[0]]) catch |err| {
+                errs[group[0]] = err;
+            };
+            return;
+        }
+        d.runGroup(xs, group) catch |err| {
+            std.log.warn("qwen27: a batch of {d} decisions failed ({s})", .{ group.len, @errorName(err) });
+            for (group) |j| errs[j] = err;
+            for (0..d.batchSlots()) |s| if (s < d.runner.ready) d.runner.reset(@intCast(s)) catch {};
+        };
+    }
+
+    /// One block of a shared pass: a slot, its rows, and which decision's question it answers (null: a trunk).
+    const Piece = struct { slot: u32, ids: []const u32, member: usize, question: ?usize };
+
+    fn runGroup(d: *Decider, xs: []const *api.Decision, group: []const usize) !void {
+        const r = d.runner;
+        var base: [q.block_forward.max_blocks]u32 = undefined;
+        var used: u32 = 0;
+        for (group, 0..) |j, k| {
+            base[k] = used;
+            used += @intCast(xs[j].branches.len);
+        }
+        for (0..used) |s| {
+            _ = try r.ensure(@intCast(s));
+            try r.reset(@intCast(s));
+        }
+        var pieces: [q.block_forward.max_blocks]Piece = undefined;
+        var n: usize = 0;
+        for (group, 0..) |j, k| if (xs[j].trunk.len > 0) {
+            pieces[n] = .{ .slot = base[k], .ids = xs[j].trunk, .member = k, .question = null };
+            n += 1;
+        };
+        try d.passes(xs, group, pieces[0..n]);
+        for (group, 0..) |j, k| for (1..xs[j].branches.len) |i| {
+            const slot = base[k] + @as(u32, @intCast(i));
+            if (xs[j].trunk.len > 0) try q.snapshot.moveSlot(d.gpa, r, base[k], null, slot, null);
+        };
+        n = 0;
+        for (group, 0..) |j, k| for (xs[j].branches, 0..) |b, i| {
+            pieces[n] = .{ .slot = base[k] + @as(u32, @intCast(i)), .ids = b, .member = k, .question = i };
+            n += 1;
+        };
+        try d.passes(xs, group, pieces[0..n]);
+        for (group) |j| {
+            var read = xs[j].trunk.len;
+            for (xs[j].branches) |b| read += b.len;
+            xs[j].read = read;
+        }
+        for (0..used) |s| try r.reset(@intCast(s));
+    }
+
+    /// `pieces` in passes of at most `chunk` rows (one block alone: the one-slot pass); questions read their labels.
+    fn passes(d: *Decider, xs: []const *api.Decision, group: []const usize, pieces: []const Piece) !void {
+        const r = d.runner;
+        var first: usize = 0;
+        while (first < pieces.len) {
+            var end = first;
+            var rows: usize = 0;
+            while (end < pieces.len and rows + pieces[end].ids.len <= d.chunk) : (end += 1) rows += pieces[end].ids.len;
+            const take = pieces[first..end];
+            var firsts: [q.block_forward.max_blocks]u32 = undefined;
+            if (take.len == 1) {
+                const got = try q.block_forward.run(r, &d.store, take[0].slot, take[0].ids, d.chunk, d.bidirectional);
+                if (got != take[0].ids.len) return error.BadPrompt; // one pass: its rows from frame row 0
+                firsts[0] = 0;
+            } else {
+                var blocks: [q.block_forward.max_blocks]q.block_forward.Block = undefined;
+                for (take, 0..) |p, i| blocks[i] = .{ .slot = p.slot, .ids = p.ids };
+                try q.block_forward.runMany(r, blocks[0..take.len], firsts[0..take.len]);
+            }
+            for (take, 0..) |p, i| {
+                const qi = p.question orelse continue;
+                const x = xs[group[p.member]];
+                var at: usize = 0;
+                for (x.counts[0..qi]) |c| at += c;
+                const count = x.counts[qi];
+                try q.block_forward.hiddenRow(r, firsts[i] + @as(u32, @intCast(p.ids.len)) - 1, d.hidden);
+                for (x.labels[at..][0..count], x.logits[at..][0..count]) |id, *logit| {
+                    const w = try d.head.row(id);
+                    var acc: f64 = 0;
+                    for (w, d.hidden) |a, h| acc += @as(f64, a) * h;
+                    logit.* = acc;
+                }
+            }
+            first = end;
+        }
+    }
+
+    /// Each branch's label logits at its last row, after the shared trunk; slot `d.slot` must hold no stream.
+    pub fn decide(d: *Decider, x: *api.Decision) !void {
+        try d.check(x);
         const r = d.runner;
         try r.reset(d.slot);
         const trunk: u32 = @intCast(x.trunk.len);
@@ -120,7 +264,33 @@ pub const Decider = struct {
         }
         var at: usize = 0;
         var read: usize = x.trunk.len;
-        for (x.branches, x.counts, 0..) |b, n, i| {
+        var total: usize = 0;
+        for (x.branches) |b| total += b.len;
+        const n_q = x.branches.len;
+        if (d.batch and n_q > 1 and n_q <= @min(r.slots, q.block_forward.max_blocks) and total <= d.chunk) {
+            // every question in one pass: slot i takes the trunk's state, block-bidirectional over its own rows
+            for (1..n_q) |i| {
+                const slot: u32 = @intCast(i);
+                _ = try r.ensure(slot);
+                if (trunk > 0) try q.snapshot.moveSlot(d.gpa, r, 0, null, slot, null) else try r.reset(slot);
+            }
+            var blocks: [q.block_forward.max_blocks]q.block_forward.Block = undefined;
+            var firsts: [q.block_forward.max_blocks]u32 = undefined;
+            for (x.branches, 0..) |b, i| blocks[i] = .{ .slot = @intCast(i), .ids = b };
+            try q.block_forward.runMany(r, blocks[0..n_q], firsts[0..n_q]);
+            for (x.branches, x.counts, 0..) |b, n, i| {
+                try q.block_forward.hiddenRow(r, firsts[i] + @as(u32, @intCast(b.len)) - 1, d.hidden);
+                for (x.labels[at..][0..n], x.logits[at..][0..n]) |id, *logit| {
+                    const w = try d.head.row(id);
+                    var acc: f64 = 0;
+                    for (w, d.hidden) |a, h| acc += @as(f64, a) * h;
+                    logit.* = acc;
+                }
+                at += n;
+                read += b.len;
+            }
+            for (0..n_q) |i| try r.reset(@intCast(i));
+        } else for (x.branches, x.counts, 0..) |b, n, i| {
             if (i > 0) if (trunk > 0) try q.snapshot.rewindSlot(d.gpa, r, d.slot, null, trunk, d.rewind) else try r.reset(d.slot);
             const rows = try q.block_forward.run(r, &d.store, d.slot, b, d.chunk, d.bidirectional);
             try q.block_forward.lastHidden(r, rows, d.hidden);

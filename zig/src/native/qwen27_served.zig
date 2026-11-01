@@ -105,6 +105,16 @@ pub const Host = struct {
         return h.decider.?.decide(d);
     }
 
+    /// Engine.decide's batches: queued decisions together (qwen27_decide.zig decideMany).
+    fn decideMany(ptr: *anyopaque, ds: []const *api.Decision, errs: []?anyerror) void {
+        const h = of(ptr);
+        if (h.back.owners[0] != null) {
+            for (errs) |*e| e.* = error.DecisionSlotBusy;
+            return;
+        }
+        h.decider.?.decideMany(ds, errs);
+    }
+
     /// Info.vision's prepare, on the HTTP thread.
     fn prepareImage(ptr: *anyopaque, a: Allocator, bytes: []const u8, max_tokens: u32) anyerror!api.PreparedImage {
         const h = of(ptr);
@@ -310,7 +320,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     var with = o;
     if (readout) |r| {
         with.decision = .{ .dir = dir, .readout = r };
-        with.streams = 1; // decisions take turns on slot 0; chat is refused, so no other slot is used
+        with.streams = 8; // a decision's questions run as slots of one pass; chat is refused
         with.streams_fixed = false;
     }
     // the tower before the slots: their room and the cache's budget count it as taken
@@ -451,7 +461,7 @@ fn attachDecider(h: *Host, io: std.Io, dec: Decision) !void {
     errdefer h.gpa.destroy(d);
     d.* = try .init(h.gpa, io, dec.dir, &h.runner, @intCast(h.back.chunk), dec.readout.attention == .block_bidirectional);
     h.decider = d;
-    h.host.decider = .{ .ctx = h, .run = Host.decide };
+    h.host.decider = .{ .ctx = h, .run = Host.decide, .run_many = Host.decideMany };
     h.host.info_.decides = true;
     std.log.info("qwen27: decisions only (slot_lm readout, {t} full attention, {d}-row passes)", .{ dec.readout.attention, d.chunk });
 }
