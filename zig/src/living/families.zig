@@ -28,6 +28,14 @@ pub const nemotron_h: Family = .{
     },
 };
 
+/// Omni's language-model geometry lives under llm_config, with the same writable widths as Nemotron.
+pub const nemotron_h_omni: Family = blk: {
+    var f = nemotron_h;
+    f.model_type = "nemotron_h_omni";
+    f.keys.scope = "llm_config";
+    break :blk f;
+};
+
 /// Qwen3.8 Flash Next (qwen4_exp): a SwiGLU shared expert at every layer behind its own gate, 4-bit groups of 32.
 pub const qwen4_exp: Family = .{
     .model_type = "qwen4_exp",
@@ -54,7 +62,7 @@ pub const qwen3_5: Family = .{
     .experts = .every,
 };
 
-pub const all = [_]Family{ nemotron_h, qwen4_exp, qwen3_5 };
+pub const all = [_]Family{ nemotron_h, nemotron_h_omni, qwen4_exp, qwen3_5 };
 
 /// The family of a checkpoint's top-level model_type, or null.
 pub fn byModelType(model_type: []const u8) ?Family {
