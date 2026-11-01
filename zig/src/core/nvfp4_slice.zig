@@ -27,6 +27,16 @@ pub const Linear = struct {
 
 /// Validate a projection's original geometry before allocating rank-local storage.
 pub fn dimensions(source: Source) !Dims {
+    const d = try shapes(source);
+    switch (source.scales) {
+        .plain => {},
+        .csf => |s| _ = try csf.Plane.init(d.n, d.k / 16, s.fixed.bytes, s.exceptions.bytes),
+    }
+    return d;
+}
+
+/// dimensions without reading a byte: shapes, dtypes and lengths only (the CSF planes' contents left unchecked).
+pub fn shapes(source: Source) !Dims {
     const w = source.weight;
     if (w.rank != 2 or w.dtype != .u8 or w.shape[0] == 0 or w.shape[1] == 0) return error.BadNvfp4;
     const k = std.math.mul(usize, w.shape[1], 2) catch return error.BadNvfp4;
@@ -42,7 +52,6 @@ pub fn dimensions(source: Source) !Dims {
             if (s.exceptions.shape[0] > std.math.maxInt(usize) / 4 or s.exceptions.bytes.len != s.exceptions.shape[0] * 4)
                 return error.BadNvfp4;
             if (!s.fixed.is(.u8, &.{ d.n / 16, 16 + 8 * (d.k / 16) })) return error.BadNvfp4;
-            _ = try csf.Plane.init(d.n, d.k / 16, s.fixed.bytes, s.exceptions.bytes);
         },
     }
     return d;

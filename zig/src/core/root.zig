@@ -11,6 +11,7 @@ pub const checkpoint_identity = @import("checkpoint_identity.zig");
 pub const checkpoint = @import("checkpoint.zig");
 pub const exl3_load = @import("exl3_load.zig");
 pub const direct_io = @import("direct_io.zig");
+pub const direct_gather = @import("direct_gather.zig");
 pub const Checkpoint = checkpoint.Checkpoint;
 pub const draft_depth = @import("draft_depth.zig");
 pub const CopyIndex = @import("copy_index.zig").CopyIndex;
@@ -100,6 +101,7 @@ test {
     _ = @import("checkpoint_prefetch.zig");
     _ = checkpoint_identity;
     _ = direct_io;
+    _ = direct_gather;
     _ = frame_rounds;
     _ = draft_depth;
     _ = @import("copy_index.zig");
