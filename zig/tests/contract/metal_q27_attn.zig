@@ -26,15 +26,15 @@ pub fn label(h: Heads) []const u8 {
     return if (h == .q27b) "27B" else "27B rank";
 }
 
-/// A planted control's one edit to the shipped source; `from` must occur once.
-pub const Edit = struct { from: []const u8, to: []const u8 };
+/// A planted control's edit to the shipped source; `from` must occur exactly `count` times.
+pub const Edit = struct { from: []const u8, to: []const u8, count: usize = 1 };
 
 /// The source as decode_round.zig builds it here (simd_attention.library, the prompt kernels included).
 pub fn source(a: std.mem.Allocator, tensor: bool, edit: ?Edit) ![]u8 {
     const text = try q.simd_attention.library(a, tensor, true);
     const e = edit orelse return text;
     defer a.free(text);
-    if (std.mem.count(u8, text, e.from) != 1) return error.ControlEdit;
+    if (std.mem.count(u8, text, e.from) != e.count) return error.ControlEdit;
     return std.mem.replaceOwned(u8, a, text, e.from, e.to);
 }
 
