@@ -23,6 +23,7 @@ pub const Ask = struct {
     /// A whole decision for the host's decider instead of one score; `refused` keeps its problem words.
     decision: ?*Decision = null,
     refused: bool = false,
+    cancelled: bool = false, // the decider stopped at the asker's word (Decision.stop)
 };
 
 /// Questions waiting for the engine thread (under the host's lock).
@@ -44,16 +45,39 @@ pub fn score(ctx: *anyopaque, prompt: []const u32, labels: []const u32, logits: 
     return ask.logsumexp;
 }
 
-/// Engine.decide: one queued decision answered whole on the engine thread, so concurrent ones take turns.
+/// Engine.decide: queued decisions take turns on the engine thread; past timeout_ms or a gone client, Failed.
 pub fn decide(ctx: *anyopaque, d: *Decision) error{ Failed, Refused }!void {
     const h: *LaneHost = @ptrCast(@alignCast(ctx));
     var ask: Ask = .{ .prompt = &.{}, .labels = &.{}, .logits = &.{}, .mass = false, .decision = d };
+    const began = std.Io.Clock.awake.now(h.io).toNanoseconds();
+    var why: Decision.Stopped = .no;
     h.lock();
     defer h.unlock();
     if (h.closing) return error.Failed;
     h.scores.asks.append(h.gpa, &ask) catch return error.Failed;
     h.wake.broadcast(h.io);
-    while (!ask.done) h.wake.waitUncancelable(h.io, &h.mutex);
+    while (!ask.done) {
+        if (why == .no) {
+            const late = d.timeout_ms > 0 and std.Io.Clock.awake.now(h.io).toNanoseconds() - began >= @as(i96, d.timeout_ms) * std.time.ns_per_ms;
+            const gone = if (d.gone) |g| g.check(g.ctx) else false;
+            if (late or gone) {
+                why = if (gone) .gone else .timed_out;
+                if (std.mem.indexOfScalar(*Ask, h.scores.asks.items, &ask)) |at| {
+                    _ = h.scores.asks.orderedRemove(at); // still queued: the engine never sees it
+                    d.stopped = why;
+                    return error.Failed;
+                }
+                d.stop.store(true, .release); // running: the decider stops at its next pass
+            }
+        }
+        if (d.timeout_ms == 0 and d.gone == null) {
+            h.wake.waitUncancelable(h.io, &h.mutex);
+        } else h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(10), .clock = .awake } }) catch {};
+    }
+    if (ask.cancelled) {
+        d.stopped = why;
+        return error.Failed;
+    }
     if (ask.refused) return error.Refused;
     if (ask.failed) return error.Failed;
 }
@@ -87,6 +111,7 @@ pub fn answer(h: *LaneHost) void {
             };
             decider.run(decider.ctx, d) catch |err| switch (err) {
                 error.Refused => a.refused = true,
+                error.Cancelled => a.cancelled = true,
                 else => {
                     std.log.warn("lane host: a decision failed ({s})", .{@errorName(err)});
                     a.failed = true;
@@ -129,6 +154,7 @@ fn batched(h: *LaneHost, decider: Decider, many: *const fn (ctx: *anyopaque, ds:
     for (list, handled) |a, *done| if (a.decision != null) {
         if (errs[i]) |err| switch (err) {
             error.Refused => a.refused = true,
+            error.Cancelled => a.cancelled = true,
             else => {
                 std.log.warn("lane host: a decision failed ({s})", .{@errorName(err)});
                 a.failed = true;
