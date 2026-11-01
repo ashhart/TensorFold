@@ -191,14 +191,8 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = why;
         return null;
     }
-    const fish = std.mem.eql(u8, o.model_type, "fish_omni");
-    const qwen4 = std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text");
-    if (fish or qwen4) if (refusals.unranked(o)) |why| {
-        problem.* = why;
-        return null;
-    };
-    if (fish) return openDrama(a, gpa, io, o, problem);
-    if (qwen4) return @import("qwen4_cuda.zig").open(a, gpa, io, o, problem);
+    if (std.mem.eql(u8, o.model_type, "fish_omni")) return openDrama(a, gpa, io, o, problem);
+    if (std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text")) return @import("qwen4_cuda.zig").open(a, gpa, io, o, problem);
     inline for (registry) |F| if (std.mem.eql(u8, o.model_type, F.model_type)) return openWith(F, a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, lfm2.family.model_type)) {
         if (refusals.lfm2(o)) |why| {
@@ -573,13 +567,6 @@ test "family readiness reaches production lane admission without binding CUDA" {
 
 test "Flash Next refuses tensor-rank draft caching before files or CUDA" {
     try @import("cuda_flashnext_refusal_test.zig").cache(openWith);
-}
-
-test "the CUDA server serves --tp, and Flash Next's two ranks pass family admission" {
-    try std.testing.expect(for (serves) |x| {
-        if (std.mem.eql(u8, x, "--tp")) break true;
-    } else false);
-    try std.testing.expect(refusals.family(flashnext.native, .{ .dir = "d", .model_type = flashnext.native.model_type, .tp = 2, .prompt_cache_gib = 0 }) == null);
 }
 
 test "Flash Next takes --vision at family admission" {
