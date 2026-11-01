@@ -5,20 +5,8 @@ const u = 0x1p-24;
 fn power(exponent: i32) f64 {
     return @bitCast(@as(u64, @intCast(exponent + 1023)) << 52);
 }
-pub fn bf64(value: f64) f64 {
-    if (!std.math.isFinite(value) or value == 0) return value;
-    const x = @abs(value);
-    const bits: u64 = @bitCast(x);
-    const exponent = @as(i32, @intCast((bits >> 52) & 2047)) - 1023;
-    if (exponent > 127) return std.math.copysign(std.math.inf(f64), value);
-    const step = @max(@as(i32, -133), exponent - 7);
-    const scaled = x * power(-step);
-    const low = @floor(scaled);
-    const rest = scaled - low;
-    const odd = @as(u64, @intFromFloat(low)) & 1 != 0;
-    const rounded = (low + @as(f64, if (rest > 0.5 or (rest == 0.5 and odd)) 1 else 0)) * power(step);
-    return std.math.copysign(if (rounded >= power(128)) std.math.inf(f64) else rounded, value);
-}
+/// An f64 to the nearest bf16 in one rounding, ties to even, overflow to Inf, NaN and infinities kept.
+pub const bf64 = @import("core").contract.bf16_round.bf16;
 fn reduced(acc: c.Accum, x: f64) f64 {
     return switch (acc) {
         .none => x,
@@ -86,4 +74,28 @@ test "Qwen4 rounding bounds: direct binary64 BF16 ties and explicit nonlinear en
     const v = Value.exact(@as(f64, 0.352294921875)).bf().silu().bf();
     try t.expectEqual(@as(f64, 0.2060546875), v.v);
     try t.expectEqual(@as(f64, 0), v.e);
+}
+/// bf64 as this file spelled it before it moved to core, kept to show the two agree.
+fn replaced(value: f64) f64 {
+    if (!std.math.isFinite(value) or value == 0) return value;
+    const x = @abs(value);
+    const bits: u64 = @bitCast(x);
+    const exponent = @as(i32, @intCast((bits >> 52) & 2047)) - 1023;
+    if (exponent > 127) return std.math.copysign(std.math.inf(f64), value);
+    const step = @max(@as(i32, -133), exponent - 7);
+    const scaled = x * power(-step);
+    const low = @floor(scaled);
+    const rest = scaled - low;
+    const odd = @as(u64, @intFromFloat(low)) & 1 != 0;
+    const rounded = (low + @as(f64, if (rest > 0.5 or (rest == 0.5 and odd)) 1 else 0)) * power(step);
+    return std.math.copysign(if (rounded >= power(128)) std.math.inf(f64) else rounded, value);
+}
+fn expectReplaced(x: f64) !void {
+    try std.testing.expectEqual(@as(u64, @bitCast(replaced(x))), @as(u64, @bitCast(bf64(x))));
+}
+test "the replaced bf64 equals core's on every fp32 tie and its neighbours, the fp32 edges and 1M random f64 words" {
+    for (0..1 << 16) |hi| for ([_]u32{ 0x7fff, 0x8000, 0x8001 }) |lo| try expectReplaced(@as(f32, @bitCast(@as(u32, @intCast(hi)) << 16 | lo)));
+    for ([_]u32{ 0, 1, 0x7f_ffff, 0x80_0000, 0x7f7f_ffff, 0x7f80_0000, 0x7fc0_0000 }) |w| for ([_]u32{ 0, 0x8000_0000 }) |s| try expectReplaced(@as(f32, @bitCast(w | s)));
+    var prng = std.Random.DefaultPrng.init(64);
+    for (0..1 << 20) |_| try expectReplaced(@bitCast(prng.random().int(u64)));
 }
