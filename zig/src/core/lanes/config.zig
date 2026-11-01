@@ -13,6 +13,7 @@ pub const default_prior = [_]f64{ 0.85, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5, 0.5, 0.
 /// What a backend reports about its loaded model: the attributes the Python engine reads at setup.
 pub const Model = struct {
     allocate_shared_drafts: bool = false, // reserve useful shared head rows before a proposal pass
+    limit_shared_drafts: bool = false, // retain the cost rule's depth cap before reserving shared rows
     root_copies: bool = false, // verified context copies precede head drafts and skip their proposal pass
     copy_drafts: bool = true, // global serving switch, independent of shared verification capacity
     own_copy_rates: bool = false, // a copy window is priced by its stream's own copies, not copy_rate's prior
@@ -57,6 +58,7 @@ pub const Model = struct {
 
 pub const Config = struct {
     allocate_shared_drafts: bool = false, // reserve useful shared head rows before a proposal pass
+    limit_shared_drafts: bool = false, // retain the cost rule's depth cap before reserving shared rows
     root_copies: bool = false,
     family_width: u32,
     max_copy: u32,
@@ -139,6 +141,7 @@ pub const Config = struct {
         errdefer gpa.free(depth_prior);
         return .{
             .allocate_shared_drafts = m.allocate_shared_drafts,
+            .limit_shared_drafts = m.limit_shared_drafts,
             .root_copies = m.root_copies and m.copy_drafts,
             .context_copies = m.context_copies and m.copy_drafts,
             .enter_match = @max(1, m.copy_match),

@@ -1,0 +1,123 @@
+//! The real Metal adapter policy with a counted host target and no device allocations.
+const std = @import("std");
+const lanes = @import("lanes");
+const win = lanes.windows;
+const a = std.testing.allocator;
+const t = std.testing;
+const code = [_]u32{ 112, 114, 105, 110, 116, 40, 105, 41, 10, 32, 32, 32, 32, 105, 43 };
+const Copy = struct {
+    fn propose(ptr: *anyopaque, _: []const u32, most: i64) ![]const u32 {
+        const calls: *usize = @ptrCast(@alignCast(ptr));
+        calls.* += 1;
+        return code[0..@intCast(@min(most, code.len))];
+    }
+    fn match(_: *anyopaque) i64 {
+        return 32;
+    }
+};
+const Result = struct { calls: usize = 0, depths: [16]i64 = @splat(0), grants: [16]usize = @splat(0) };
+
+fn replay(model: lanes.Model, shared: bool, stale: bool, sampled: bool) !Result {
+    var m = model;
+    const n = @min(16, m.max_streams, m.batch_rows / 2);
+    try t.expect(n >= 2);
+    const rows = n + @min(8, m.batch_rows - n);
+    const costs = try a.alloc(lanes.config.Cost, m.batch_rows);
+    defer a.free(costs);
+    for (costs, 1..) |*c, row| c.* = .{ .width = @intCast(row), .ms = if (row <= rows) 5 + 0.2 * @as(f64, @floatFromInt(row)) else 1000 };
+    m.window_costs = costs;
+    m.shared_costs = costs;
+    var cfg = try lanes.Config.init(a, m, m.exact_width, m.drafts);
+    defer cfg.deinit(a);
+    cfg.timed = false;
+    var target: lanes.fake.Fake = .{ .gpa = a };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var e = lanes.Engine.init(a, &cfg, target.backend(), clock.clock());
+    defer e.deinit();
+    e.alone = false;
+    var streams: [16]lanes.Stream = undefined;
+    var made: usize = 0;
+    defer for (streams[0..made]) |*s| s.deinit(a);
+    var current: [16]win.Plan = undefined;
+    var who: [16]lanes.depth.Who = undefined;
+    var heads: [16]usize = undefined;
+    var got: Result = .{};
+    for (streams[0..n], current[0..n], who[0..n], heads[0..n], 0..) |*s, *p, *w, *h, i| {
+        s.* = try lanes.Stream.init(a, .{ .id = "code", .prompt = &.{ 1, 2, 3 }, .max_new = 128, .sampling = if (sampled) .{ .seed = 1234, .temperature = 1 } else null });
+        made += 1;
+        @memset(try e.rule.rates(win.who(s)), if (i == 0) (if (stale) @as(f64, 0.983) else 0.99) else 0.01);
+        if (stale and i == 0) {
+            var chance: f64 = 1;
+            for (0..cfg.most_drafts) |_| {
+                chance *= 0.98;
+                try s.draft_chances.append(a, chance);
+            }
+        }
+        if (i == 1) s.proposer = .{ .ptr = &got.calls, .vtable = &.{ .propose = Copy.propose, .last_match = Copy.match, .priced = true } };
+        p.* = .{ .stream = s, .position = 0, .kind = .none };
+        w.* = win.who(s);
+        h.* = i;
+    }
+    if (shared) try lanes.shared_drafts.budgets(&e, current[0..n], heads[0..n], got.depths[0..n]) else try e.rule.budgets(who[0..n], win.probe(&e), sampled, got.depths[0..n]);
+    for (current[0..n], got.depths[0..n], 0..) |*p, depth, i| {
+        p.kind = if (i == 1) .copy else if (depth > 0) .head else .none;
+        p.held = if (i == 1) 0 else @intCast(depth);
+        p.tokens = if (i == 1) &code else &.{};
+    }
+    try win.allocate(&e, current[0..n]);
+    for (current[0..n], got.grants[0..n]) |p, *g| g.* = p.count();
+    return got;
+}
+
+fn check(model: lanes.Model) !void {
+    try t.expect(model.allocate_shared_drafts);
+    try t.expect(!model.draft_probabilities and model.draft_confidence == null);
+    for ([_]f64{ 4, 0 }) |ms| for ([_]bool{ false, true }) |stale| for ([_]bool{ false, true }) |sampled| {
+        var m = model;
+        m.mtp_step_ms = ms;
+        const old = try replay(m, false, stale, sampled);
+        const next = try replay(m, true, stale, sampled);
+        try t.expect(old.calls <= 1);
+        try t.expectEqual(@as(usize, 1), next.calls);
+        const hot: usize = if (ms == 0) @min(7, m.drafts) else @intFromBool(!m.plain_guard);
+        try t.expectEqual(hot, old.grants[0]);
+        try t.expectEqual(8 - hot, old.grants[1]);
+        try t.expectEqualSlices(usize, &old.grants, &next.grants);
+        for (old.depths, next.depths) |was, now| try t.expect(now <= was);
+        if (ms > 0) {
+            var uncapped = m;
+            uncapped.limit_shared_drafts = false;
+            const lost = try replay(uncapped, true, stale, sampled);
+            try t.expect(lost.grants[0] > old.grants[0]);
+            try t.expect(lost.grants[1] < old.grants[1]);
+        }
+    };
+}
+
+const Metal = @import("backend.zig").Metal;
+const mtp = @import("mtp.zig");
+
+test "zero grant: Nemotron Metal preserves later drafts through a long shared skip" {
+    var b: Metal = undefined;
+    b.head = @as(mtp.Head, undefined);
+    b.o = .{ .capacity = 512, .streams = 16 };
+    b.costs = .{};
+    try lanes.shared_draft_check.check(b.facts(), false);
+}
+
+test "shared head costs: Nemotron Metal retains measured head prices and costed copy grants" {
+    var b: Metal = undefined;
+    b.head = @as(mtp.Head, undefined);
+    b.costs = .{ .head_ms = 0.375 };
+    for ([_]usize{ 4, 8, 16 }) |streams| {
+        b.o = .{ .capacity = 512, .streams = streams };
+        const facts = b.facts();
+        try t.expectEqual(@as(f64, 0.375), facts.mtp_step_ms);
+        try check(facts);
+    }
+    b.head = null;
+    const plain = b.facts();
+    try t.expect(!plain.mtp and !plain.allocate_shared_drafts and !plain.limit_shared_drafts);
+    try t.expectEqual(@as(u32, 1), plain.exact_width);
+}

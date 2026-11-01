@@ -430,6 +430,7 @@ pub fn draw(gpa: std.mem.Allocator, logits: []const u16, settings: ?lanes.Sampli
 /// The lane facts at `width` exact rows: at one row (the wider check failed) no forward is shared between streams.
 fn factsFor(width: u32, streams: u32, costs: []const lanes.config.Cost) lanes.Model {
     return .{
+        .limit_shared_drafts = true,
         .exact_width = width,
         .hidden_rows = width > 1,
         .batch_rows = st.batch_rows,
@@ -519,4 +520,20 @@ test "measured shared rows price the batch without widening a stream's qualified
     try std.testing.expectEqual(@as(?f64, 2), cfg.family_costs.get(1));
     try std.testing.expectEqual(@as(?f64, null), cfg.family_costs.get(17));
     try std.testing.expectEqual(@as(?f64, 9), cfg.shared_costs.get(17));
+}
+
+test "zero grant: an attached LFM2 drafter retains committed taps and resumes after a long shared skip" {
+    try lanes.shared_draft_check.check(factsFor(st.window_rows, 16, &.{}), true);
+}
+
+test "shared head costs: an attached LFM2 drafter retains costed copy grants" {
+    for ([_]bool{ false, true }) |guard| for ([_]bool{ false, true }) |batched| {
+        const m = try lanes.shared_head_cost_check.attached(factsFor(st.window_rows, 16, &.{}), .{
+            .depth = 6,
+            .step_ms = 2,
+            .plain_guard = guard,
+            .batched = batched,
+        });
+        try lanes.shared_head_cost_check.check(m);
+    };
 }

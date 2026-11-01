@@ -19,6 +19,7 @@ pub const residency = @import("residency.zig");
 pub const snapshot = @import("snapshot.zig");
 
 test {
+    _ = backend;
     _ = assistant;
     _ = assistant_weights;
     _ = config;
