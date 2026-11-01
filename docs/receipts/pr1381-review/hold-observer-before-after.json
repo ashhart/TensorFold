@@ -1,0 +1,52 @@
+{
+  "scope": "Constructed-timing native public-API reproduction; not a device performance measurement",
+  "before_source_revision": "913b437954364e5f45b771e027bd1068d61f1492",
+  "after_source_files": {
+    "zig/src/core/lanes/depth.zig": "5fe97433fd23d4fbb18699fc96b19b3cb41a4767da92344f2942aac706969d61",
+    "zig/src/core/lanes/pricing_test.zig": "b9c9e134d0a256f348018659e24703509393caef851d76f3028fe2c981df45fa"
+  },
+  "compiler": "Zig 0.17.0, zig run default Debug",
+  "native_public_api": {
+    "before": {
+      "returncode": 1,
+      "stdout": "",
+      "stderr": "host_ms=0.0 observed_head_ms=3.0 fixed_ms=3.0 kept={ 1, 3, 0 }\nerror: UnpaidHold\n<worktrees>/tf-dspark-current/../../../../../tmp/hold-observer-smoke.zig:25:45: 0x102fd2933 in main (root)\n        if (!std.mem.eql(i64, &want, &out)) return error.UnpaidHold;\n                                            ^\n",
+      "argv": [
+        "<home>/.local/zig-0.17.0/zig",
+        "run",
+        "--dep",
+        "depth",
+        "-Mroot=/tmp/hold-observer-smoke.zig",
+        "-Mdepth=<worktrees>/tf-dspark-1391/zig/src/core/lanes/depth.zig"
+      ]
+    },
+    "after": {
+      "returncode": 0,
+      "stdout": "",
+      "stderr": "host_ms=0.0 observed_head_ms=6.0 fixed_ms=0.0 kept={ 0, 0, 0 }\nhost_ms=2.5 observed_head_ms=6.0 fixed_ms=2.5 kept={ 1, 3, 0 }\n",
+      "argv": [
+        "<home>/.local/zig-0.17.0/zig",
+        "run",
+        "--dep",
+        "depth",
+        "-Mroot=/tmp/hold-observer-smoke.zig",
+        "-Mdepth=<worktrees>/tf-pr1381/zig/src/core/lanes/depth.zig"
+      ]
+    }
+  },
+  "regression_before": {
+    "passed": 299,
+    "failed": 1
+  },
+  "regression_after": {
+    "passed": 300,
+    "failed": 0
+  },
+  "fixed_overhead_cases_ms": [
+    0,
+    2.5
+  ],
+  "sampled_and_greedy_regression": true,
+  "measured_padded_pass_fixture_ms": 6,
+  "legacy_linear_estimate_ms": 3
+}
