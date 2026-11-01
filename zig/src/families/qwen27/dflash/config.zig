@@ -83,6 +83,10 @@ pub const Config = struct {
         _ = try std.math.mul(u32, c.hidden / c.group, 4);
         if (q % 64 != 0) return error.BadDraftConfig;
     }
+    /// The drafters name in the serving and startup lines: DFlash for z-labs v1 layout, DFlash2 for its successor.
+    pub fn kind(c: Config) []const u8 {
+        return if (c.variant == .v1) "DFlash" else "DFlash2";
+    }
     /// A draft reads one target's taps and vocabulary: its width, vocabulary and tapped depth.
     pub fn bind(c: Config, hidden: usize, vocab: usize, layers: usize) !void {
         if (hidden != c.hidden or vocab != c.vocab or layers != c.target_layers) return error.DraftForAnotherTarget;
@@ -395,4 +399,8 @@ test "the stock DFlash2 config keeps its five taps and twenty-five-thousand-wide
     try std.testing.expectEqual(Variant.dflash2, c.variant);
     try std.testing.expectEqual(@as(u32, 5), c.tap_count);
     try std.testing.expectEqual(@as(u32, 25600), c.tapWidth());
+}
+test "a v1 config names its drafter DFlash, and DFlash2 stays DFlash2" {
+    try std.testing.expectEqualStrings("DFlash", (try parse(std.testing.allocator, v1_fixture)).kind());
+    try std.testing.expectEqualStrings("DFlash2", (try parse(std.testing.allocator, fixture)).kind());
 }
