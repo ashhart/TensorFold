@@ -322,9 +322,9 @@ test "Flash Next expert loader: plain and CSF layers over 36 shards load on thre
     defer store.deinit();
     var buf: [96]u8 = undefined;
     const per = try experts.packedBytes(layer_w, layer_d, 2) + try experts.packedBytes(layer_d, layer_w, 1);
-    // the whole layer in one chunk, then 5 experts a chunk (5, 5, 2): the same words
-    for ([_]usize{ threads.staging_bytes, 5 * per + per / 2 }) |cap| for ([_]usize{ 0, 1 }) |layer| {
-        var owned = try threads.loadChunked(ta, &d, &store, try prefixOf(&buf, layer), layer_d, layer_w, layer_n, 4, cap);
+    // the whole layer in one chunk, then 5 experts a chunk (5, 5, 2), mapped or direct: the same words
+    inline for (.{ false, true }) |direct| for ([_]usize{ threads.staging_bytes, 5 * per + per / 2 }) |cap| for ([_]usize{ 0, 1 }) |layer| {
+        var owned = try threads.loadMode(ta, &d, &store, try prefixOf(&buf, layer), layer_d, layer_w, layer_n, 4, cap, direct);
         defer owned.free();
         try expectLoopWords(owned, planes[layer * 3 * layer_n ..][0 .. 3 * layer_n]);
     };
@@ -443,22 +443,24 @@ test "Flash Next expert loader: a host allocation failing at any point leaves no
     defer ta.free(path);
     var buf: [96]u8 = undefined;
     var d = Fake.driver();
-    var fails: usize = 0;
-    while (true) : (fails += 1) {
-        Fake.reset();
-        var store = try wt.Store.open(ta, io, path);
-        defer store.deinit();
-        // the loader's own allocations (the views, both globals' host copies) fail in turn until none is left
-        var failing = std.testing.FailingAllocator.init(ta, .{ .fail_index = fails });
-        if (threads.load(failing.allocator(), &d, &store, try prefixOf(&buf, 0), layer_d, layer_w, layer_n, 4)) |owned| {
-            var o = owned;
-            defer o.free();
-            try expectLoopWords(o, &planes);
-            break;
-        } else |err| try std.testing.expectEqual(@as(anyerror, error.OutOfMemory), err);
-        try std.testing.expectEqual(@as(usize, 0), Fake.live_device);
+    // mapped: the views and both globals' copies fail in turn; direct adds the gather's plan, pointers and arena
+    inline for (.{ false, true }) |direct| {
+        var fails: usize = 0;
+        while (true) : (fails += 1) {
+            Fake.reset();
+            var store = try wt.Store.open(ta, io, path);
+            defer store.deinit();
+            var failing = std.testing.FailingAllocator.init(ta, .{ .fail_index = fails });
+            if (threads.loadMode(failing.allocator(), &d, &store, try prefixOf(&buf, 0), layer_d, layer_w, layer_n, 4, threads.staging_bytes, direct)) |owned| {
+                var o = owned;
+                defer o.free();
+                try expectLoopWords(o, &planes);
+                break;
+            } else |err| try std.testing.expectEqual(@as(anyerror, error.OutOfMemory), err);
+            try std.testing.expectEqual(@as(usize, 0), Fake.live_device);
+        }
+        if (direct) try std.testing.expect(fails > 3) else try std.testing.expectEqual(@as(usize, 3), fails);
     }
-    try std.testing.expectEqual(@as(usize, 3), fails);
 }
 
 test "Flash Next expert loader: two stores in one process each own and free their staging" {
@@ -508,7 +510,7 @@ test "Flash Next expert loader: uneven geometry is refused before the store or t
     try std.testing.expectError(error.UnevenExpertSplit, experts.loadShape(ta, &d, &store, prefix, 1, 1, layer_d, layer_w, layer_n));
     try std.testing.expectError(error.UnevenExpertSplit, experts.loadShape(ta, &d, &store, prefix, 1, 0, layer_d, 0, layer_n));
     try std.testing.expectError(error.UnevenExpertSplit, experts.loadShape(ta, &d, &store, prefix, 1, 0, layer_d, layer_w - 16, layer_n));
-    try std.testing.expectEqual(@as(usize, 0), store.held.items.len + store.nreleased);
+    try std.testing.expectEqual(@as(usize, 0), store.held.items.len + store.released.items.len);
     try std.testing.expect(store.staging == null);
     for (Fake.calls) |n| try std.testing.expectEqual(@as(usize, 0), n);
 }
