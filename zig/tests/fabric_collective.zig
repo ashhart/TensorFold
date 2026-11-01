@@ -18,6 +18,14 @@ const bulk_at = pipe_at + n * pipe_bytes;
 const bulk_flag = bulk_at - 64;
 const window = bulk_at + (12 << 20);
 
+test "a Mac rank and a Linux rank lay out a channel and a pipe at the same offsets" {
+    // Fixed numbers, not page multiples: a host-page alignment gives 4 KiB multiples on Linux and 16 KiB on macOS.
+    try std.testing.expectEqual(@as(usize, 16384), fabric.rdma.layout_align);
+    try std.testing.expectEqual(@as(usize, 16384), collective.Channel.bytes(2, 64));
+    try std.testing.expectEqual(@as(usize, 4931584), collective.Channel.bytes(2, 300 * 1024 * 4));
+    try std.testing.expectEqual(@as(usize, 147456), collective.Pipe.bytes(64 << 10));
+}
+
 /// A row's partial on one rank depends only on (rank, row id): never on the batch it rides in.
 fn partialRow(rank: u32, id: u64, out: []u8) void {
     var prng: std.Random.DefaultPrng = .init(id * 131 + rank);
