@@ -78,6 +78,12 @@ pub const Host = struct {
         std.log.info("Qwen3.8-27B: a slot took its memory ({d} of {d} ready)", .{ h.runner.ready, h.runner.slots });
     }
 
+    /// A slot's grown K/V buffers join the residency set now, as a new slot's do.
+    fn grownKv(ptr: *anyopaque, buffers: []const mtl.Buffer) void {
+        const h = of(ptr);
+        if (h.resident) |*r| r.addNow(buffers);
+    }
+
     /// A finished reply's state stands where a prompt pass of prompt and reply would: keep it for the next turn.
     fn keepReply(ptr: *anyopaque, s: *lanes.Stream, slot: u32) void {
         const h = of(ptr);
@@ -362,7 +368,12 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.disk_stage = null;
     h.vision = o.images; // closed with the host; a failed attach leaves it to the caller
     h.trace = null;
-    h.runner = try q.decode_round.Runner.initReady(gpa, model, slots, capacity + window, 1);
+    const kv_step = q.kv_grow.step(if (std.c.getenv("TF_Q27_KV_GROW")) |v| std.mem.span(v) else null) catch |err| {
+        why.* = "TF_Q27_KV_GROW must be 0 (off) or a row count that is a multiple of 16";
+        return err;
+    };
+    h.runner = try q.decode_round.Runner.initGrow(gpa, model, slots, capacity + window, 1, kv_step);
+    if (kv_step) |s| std.log.info("qwen27: K/V grows as used: a slot starts at {d} rows and grows by {d} or a quarter, up to {d}", .{ q.kv_grow.first(s, capacity + window), s, capacity + window });
     errdefer h.runner.deinit();
     if (profileEvery()) |every| {
         h.trace = .{ .queue = model.queue, .report_every = every }; // enabled once measure() has priced the windows
@@ -375,6 +386,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     errdefer h.back.deinit();
     h.back.chunk = h.runner.promptRows(@min(rows, row_policy.requested(model.device.generation(), value)));
     h.back.grow = .{ .ctx = h, .room = Host.roomFor, .added = Host.added };
+    h.runner.grown = .{ .ctx = h, .added = Host.grownKv };
     h.back.vision = o.images;
     if (h.draft != null) try h.back.measure(io);
     h.cfg = try lanes.Config.init(gpa, h.back.facts(), window, h.back.nodes);

@@ -80,3 +80,48 @@ test "qwen27 memory: working sets account for weights and the unchanged 8 GiB ma
     try std.testing.expectEqual(@as(usize, 16 << 30), try memory.room(192 << 30, weights, "42949672960"));
     try std.testing.expectEqual(@as(usize, 0), try memory.room(192 << 30, 200 << 30, null));
 }
+
+const kv_grow = @import("families/qwen27/kv_grow.zig");
+
+test "qwen27 memory: grow-as-used K/V is off unless TF_Q27_KV_GROW names a 16-row step" {
+    try std.testing.expectEqual(@as(?u32, null), try kv_grow.step(null));
+    try std.testing.expectEqual(@as(?u32, null), try kv_grow.step("0"));
+    try std.testing.expectEqual(@as(?u32, 4096), try kv_grow.step("4096"));
+    try std.testing.expectEqual(@as(?u32, 16), try kv_grow.step("16"));
+    for ([_][]const u8{ "", "-1", "15", "4097", "x", "99999999999" }) |text| try std.testing.expectError(error.BadKvGrowStep, kv_grow.step(text));
+}
+
+test "qwen27 memory: a slot starts at one step and grows to the need, a quarter more, or the context" {
+    // first rows: one step, never past the context
+    try std.testing.expectEqual(@as(u32, 4096), kv_grow.first(4096, 32784));
+    try std.testing.expectEqual(@as(u32, 2000), kv_grow.first(4096, 2000));
+    // enough already: unchanged
+    try std.testing.expectEqual(@as(u32, 4096), kv_grow.rows(4096, 4096, 4096, 32784));
+    try std.testing.expectEqual(@as(u32, 4096), kv_grow.rows(4096, 10, 4096, 32784));
+    // the need rounded up to the step
+    try std.testing.expectEqual(@as(u32, 8192), kv_grow.rows(4096, 4097, 4096, 32784));
+    try std.testing.expectEqual(@as(u32, 32768), kv_grow.rows(4096, 30001, 4096, 32784));
+    // a quarter more than held when that is past the rounded need
+    try std.testing.expectEqual(@as(u32, 20480), kv_grow.rows(16384, 16385, 4096, 32784));
+    try std.testing.expectEqual(@as(u32, 20480), kv_grow.rows(16384, 16385, 16, 32784));
+    // never past the context
+    try std.testing.expectEqual(@as(u32, 32784), kv_grow.rows(32768, 32780, 4096, 32784));
+    try std.testing.expectEqual(@as(u32, 32784), kv_grow.rows(28672, 28673, 4096, 32784));
+}
+
+test "qwen27 memory: growing moves every K/V head to its place in the wider buffer" {
+    // 4 heads of dim 256 in bf16: head h starts at h * rows * 256 * 2 bytes
+    var moves: [4]kv_grow.Move = undefined;
+    const got = kv_grow.moves(&moves, 4, 256, 4096, 8192);
+    try std.testing.expectEqual(@as(usize, 4), got.len);
+    for (got, 0..) |m, h| {
+        try std.testing.expectEqual(h * 4096 * 256 * 2, m.from);
+        try std.testing.expectEqual(h * 8192 * 256 * 2, m.to);
+        try std.testing.expectEqual(@as(usize, 4096 * 256 * 2), m.len);
+    }
+    // the old buffer's bytes are exactly covered, the new head regions never overlap
+    try std.testing.expectEqual(@as(usize, 4 * 4096 * 256 * 2), got[3].from + got[3].len);
+    try std.testing.expect(got[2].to + got[2].len <= got[3].to);
+    // a slot's bytes at a row count, for the residency set and the memory receipts
+    try std.testing.expectEqual(@as(usize, 8 * 2 * 4096 * 1024 * 2), kv_grow.slotBytes(8, 1024, 4096));
+}
