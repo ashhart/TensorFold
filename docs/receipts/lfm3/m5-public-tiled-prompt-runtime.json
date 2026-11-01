@@ -1,0 +1,251 @@
+{
+  "scope": "PROVISIONAL actual public source revision default/enabled M5 TEXT4. Runtime and timing evidence, not broad production qualification.",
+  "source_commit": "8df18abc47568246c0d38b70c2e280521a24b31a",
+  "build_options": {
+    "baseline": {
+      "lfm3-residual-ffn": false,
+      "lfm3-tiled-attention": false
+    },
+    "candidate": {
+      "lfm3-residual-ffn": true,
+      "lfm3-tiled-attention": true
+    }
+  },
+  "binary_sha256": {
+    "baseline": "d9d5ee7f8a04f1e8caeaea789a8bd026a15eb87964ccd4262e56bb840ba10069",
+    "candidate": "44fdcc3d4f95e5af399fe598e8bb063c0bfc7dc752494b9114249af3c41eb553"
+  },
+  "early_checks": {
+    "enabled_native_and_dev_tools_exit": 0,
+    "default_native_exit": 0,
+    "both_strict_Metal_compiles_exit": 0,
+    "zig_fmt_and_diff_check_exit": 0,
+    "independent_source_reviews": "pass"
+  },
+  "basic": {
+    "source": "Same public source with test-only counters and explicit model enable APIs; not the unmodified server binary. Shader/math unchanged.",
+    "commands": 4,
+    "all_exit_zero": true,
+    "prompt_tokens": 128,
+    "teacher_forced_tokens": 16,
+    "logit_shape": [
+      17,
+      128000
+    ],
+    "finite": true,
+    "cache_length": 144,
+    "ffn_dispatch_hits": 72,
+    "attention_dispatch_hits": 22,
+    "baseline_zero_routes": "Source-established by null fields; not independently counted in baseline.",
+    "candidate_matches_prior_private_composed_all_words": true,
+    "candidate_logits_sha256": "583760763110f09b4557d7d66e4c8801ce2f1996f1052214c9bf99db2cf34cf1",
+    "baseline_logits_sha256": "ac5b5fd5fb92bc650b9048ea8b5e2233e5b6e4f98c3166f0eebb1fedbc15b8b8",
+    "instrumentation_diff_sha256": "f1d7cb23550f431a0789304d78f413082d100250e939deca0b66848e6b969edf",
+    "manifest_sha256": "f1273bde39b6fd9155f6cf475d298da74e888dc10602861b7b55824f304ab579"
+  },
+  "numerical_policy": "Independent propagated FP32 F and actual official MLX-VLM BF16 B; no FP64 acceptance claim. RMS/max logits pass each phase. Extra top20 probability diagnostics are executable proposal, not a source-verbatim maintainer rule, and still breach. No tie waiver.",
+  "phase_check_exit": 1,
+  "phases": {
+    "prompt_boundary": {
+      "native_logit_errors": {
+        "mean_absolute_error": 0.03329696540903778,
+        "rms_error": 0.041121336314284725,
+        "relative_rms": 0.011827876222482102,
+        "maximum_absolute_error": 0.20430231094360352,
+        "maximum_coordinate": [
+          0,
+          49445
+        ]
+      },
+      "reference_bf16_logit_errors": {
+        "mean_absolute_error": 0.03884851189472984,
+        "rms_error": 0.04764064939088356,
+        "relative_rms": 0.01370304943028551,
+        "maximum_absolute_error": 0.20851778984069824,
+        "maximum_coordinate": [
+          0,
+          91107
+        ]
+      },
+      "logit_rms_and_max_no_worse": true,
+      "all_proposed_metrics_pass": false,
+      "native_fp32_top1_misses": 0,
+      "reference_fp32_top1_misses": 0
+    },
+    "teacher_forced_continuation": {
+      "native_logit_errors": {
+        "mean_absolute_error": 0.02985543358314638,
+        "rms_error": 0.037950087085717864,
+        "relative_rms": 0.010836676663429445,
+        "maximum_absolute_error": 0.20357131958007812,
+        "maximum_coordinate": [
+          10,
+          26150
+        ]
+      },
+      "reference_bf16_logit_errors": {
+        "mean_absolute_error": 0.032687712900759155,
+        "rms_error": 0.0425864734405558,
+        "relative_rms": 0.01216060036617698,
+        "maximum_absolute_error": 0.256467342376709,
+        "maximum_coordinate": [
+          14,
+          4438
+        ]
+      },
+      "logit_rms_and_max_no_worse": true,
+      "all_proposed_metrics_pass": false,
+      "native_fp32_top1_misses": 0,
+      "reference_fp32_top1_misses": 0
+    }
+  },
+  "phase_receipt_sha256": "1c525ce36259e53193bd6234d03fac99ada3ac8eda37a251b4b490c90287f15d",
+  "serving": {
+    "order": [
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline"
+    ],
+    "prompt_ids_exact": true,
+    "prompt_cache_tokens": 0,
+    "completion_tokens_per_request": 16,
+    "fresh_servers": 4,
+    "all_server_exit_zero": true,
+    "all_client_exit_zero": true,
+    "same_source_separate_builds": true,
+    "server_route_counts": "Not logged. Actual route counts belong only to separate test probe.",
+    "no_timing_retries": true,
+    "max_baseline_drift": 0.05,
+    "cases": [
+      {
+        "prompt_tokens": 2048,
+        "baseline_ttft_s": [
+          0.8587595410645008,
+          0.8587297503836453
+        ],
+        "candidate_ttft_s": [
+          0.5555961248464882,
+          0.5554991248063743
+        ],
+        "baseline_median_s": 0.858744645724073,
+        "candidate_median_s": 0.5555476248264313,
+        "baseline_over_candidate": 1.5457624285449318,
+        "baseline_first_last_drift": -3.4690363752587494e-05,
+        "stable_at_5percent": true,
+        "output_text_sha256_equal": true,
+        "output_token_id_equality": "Not emitted by HTTP client; output text SHA equal. Separate teacher-forced check reports top1 picks.",
+        "prompt_ids": "both routes /tokenize exact pinned arrays",
+        "ttft_reduction_fraction": 0.35307005686421866,
+        "candidate_spread": 0.0001746025647112279
+      },
+      {
+        "prompt_tokens": 8192,
+        "baseline_ttft_s": [
+          4.621298334095627,
+          4.616932542063296
+        ],
+        "candidate_ttft_s": [
+          2.4133794172666967,
+          2.4143210002221167
+        ],
+        "baseline_median_s": 4.6191154380794615,
+        "candidate_median_s": 2.4138502087444067,
+        "baseline_over_candidate": 1.9135882671369862,
+        "baseline_first_last_drift": -0.0009447111432129285,
+        "stable_at_5percent": true,
+        "output_text_sha256_equal": true,
+        "output_token_id_equality": "Not emitted by HTTP client; output text SHA equal. Separate teacher-forced check reports top1 picks.",
+        "prompt_ids": "both routes /tokenize exact pinned arrays",
+        "ttft_reduction_fraction": 0.4774215450765962,
+        "candidate_spread": 0.00039007513888353204
+      }
+    ],
+    "new_ITL_or_long_decode_claim": false,
+    "TTFT_is_not_engine_prefill_time": true
+  },
+  "unrun": [
+    "New public kernel-contract registrations/full summaries",
+    "Broad 6/8-bit, VL images, cancellation, resume and concurrency qualification for these candidates",
+    "Long-context FP32/BF16 full-model qualification",
+    "Sustained decode and token-level ITL benchmark"
+  ],
+  "raw_sha256": {
+    "text-4-0-public.cold-2048.json": "91762cbe91fbe1a0e4ff80547016a166385f794f792e8a9e6bfc1f07663ba6eb",
+    "text-4-1-candidate.cold-8192.client.log": "18f75c2de925022e78161813eeaca41be447ebf22b7d9c1911e4a6528d2167d6",
+    "text-4-1-candidate.before.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+    "text-4-0-public.before.health": "e41f1fa5fa63b41398632c5ab9622e881079971c2bec31b6d54da709ab256599",
+    "text-4-0-public.after.metrics": "12cbb5fb1980f5ae63fbd59b03f96c0d03b7ba8fe1288176819122e51f9eb8ee",
+    "text-4-3-public.cold-8192.client.log": "bd4153b629678bd46ab8a6569a971aeadb500cc7bd3db34cb3ff49743ecdc5ea",
+    "text-4-3-public.cold-2048.tokenize.response.json": "7f59448440e4d3f003e40ef5773b12b7ef17c6808bc21ea16cb1bf3807ad06f6",
+    "text-4-1-candidate.before.health": "e41f1fa5fa63b41398632c5ab9622e881079971c2bec31b6d54da709ab256599",
+    "text-4-1-candidate.after.metrics": "a36438bee19b17953929b26c83045f47eb36d39ed63c140f4bc330d3c15e8b47",
+    "text-4-0-public.cold-8192.tokenize.request.json": "c196be253a6a7f7928e3f427e0faad10300dc3216279a3ae8a80a9cd46f77dab",
+    "text-4-1-candidate.cold-2048.tokenize.response.json": "7f59448440e4d3f003e40ef5773b12b7ef17c6808bc21ea16cb1bf3807ad06f6",
+    "text-4-1-candidate.before.metrics": "1f67cac48f3a1ecb0870882b7823b73e7ae75c005c523532c629e7fae789f8bb",
+    "text-4-0-public.cold-8192.json": "675f1f368fd033814f9017dd8f00db1f7c74b9d2457a2e8206baa39bd4d79d45",
+    "events.json": "fabc69a1819cdb23ab4506bd75d591d24f296701db15119f5434da425303961f",
+    "text-4-3-public.cold-8192.tokenize.request.json": "c196be253a6a7f7928e3f427e0faad10300dc3216279a3ae8a80a9cd46f77dab",
+    "text-4-0-public.cold-2048.tokenize.response.json": "7f59448440e4d3f003e40ef5773b12b7ef17c6808bc21ea16cb1bf3807ad06f6",
+    "text-4-1-candidate.cold-8192.tokenize.request.json": "c196be253a6a7f7928e3f427e0faad10300dc3216279a3ae8a80a9cd46f77dab",
+    "text-4-0-public.cold-2048.client.log": "f9777000adce6a8d2aee6bf377622105a0eac7ccd00ec67abe1082031a2db0bc",
+    "text-4-1-candidate.cold-2048.json": "90955fdc97a531da7af16c3cd18e0a93fef3e8685676de10fe6a46b05cf8ccf8",
+    "text-4-2-candidate.after.metrics": "5e422c69ce85d464540cc4439d3609732621b1e12bdc7f04106e6e311f0d7a61",
+    "text-4-2-candidate.before.health": "e41f1fa5fa63b41398632c5ab9622e881079971c2bec31b6d54da709ab256599",
+    "text-4-2-candidate.cold-2048.tokenize.response.json": "7f59448440e4d3f003e40ef5773b12b7ef17c6808bc21ea16cb1bf3807ad06f6",
+    "text-4-3-public.after.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+    "text-4-3-public.cold-2048.tokenize.request.json": "f69a5dcb97950c19f12fd93b89b288ec0dd214a89ed83fbe5fb1e60270f6dabd",
+    "text-4-0-public.before.metrics": "c8cc1d0dff40410f5d21c9cd9a8ad2c393b9f3a1bb76783e656b5b872cae7dbc",
+    "text-4-1-candidate.cold-2048.tokenize.request.json": "f69a5dcb97950c19f12fd93b89b288ec0dd214a89ed83fbe5fb1e60270f6dabd",
+    "text-4-2-candidate.server.log": "7642893f45baf0d055471029ffb8b3b2a040e07ca6987b12e68f4cfa117e9cc2",
+    "text-4-2-candidate.before.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+    "text-4-2-candidate.cold-2048.client.log": "83b55e34e609feb589817e8ef87180478ae6155ada9cc810a68068aed8b44cf3",
+    "text-4-1-candidate.cold-8192.json": "7531eb0319c49413620d8b0dee5d9d4dbef70864ad51a06bc46eb162468af460",
+    "text-4-0-public.cold-2048.tokenize.request.json": "f69a5dcb97950c19f12fd93b89b288ec0dd214a89ed83fbe5fb1e60270f6dabd",
+    "text-4-0-public.after.health": "5c202b6bd43cec4e548a4addeba7d85d065f54da93bd1c39ac731db5654cdf6b",
+    "text-4-1-candidate.after.health": "fcef26e2c0024e0e9829bbe0c2d7200ff0231a0bdfc8b384fbd87ff255b441b3",
+    "text-4-0-public.server.log": "d9daeb9b19053093b3729ca933f7476452c63b2eb492b8851e45258a537b0753",
+    "text-4-3-public.cold-8192.json": "1a5b62fc597042dea706cea3a9182f36572d173bdbdbd064ae0fb80c1e20b0d1",
+    "text-4-0-public.after.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+    "text-4-1-candidate.server.log": "209758f443d654ddc42650596ba4de8e12abac534338ffe5fde36f2e92ad259e",
+    "text-4-3-public.after.health": "e99b46b99af09e76fc16af3aed7cd238ef16dfcddde2e34182860b11f2a921d8",
+    "text-4-2-candidate.before.metrics": "6eeb470af860fbb30df4be5e224c64ba91adc8ef7879adeed0bdbf014a522870",
+    "text-4-2-candidate.cold-8192.tokenize.request.json": "c196be253a6a7f7928e3f427e0faad10300dc3216279a3ae8a80a9cd46f77dab",
+    "text-4-1-candidate.cold-2048.client.log": "cb4619e839c1d6d7bceae803ab56c81de90c0ea3368e6c2e28d2c4d63720065e",
+    "manifest.json": "c0d08d17dae60d5056d93b161228f1fd67339b6c3eb6db8512849d59bf7ae986",
+    "text-4-2-candidate.after.health": "c3883cf23f1059d836ec3744b631dd2f2f9d159c7439e57356e8212bee60bc11",
+    "text-4-3-public.cold-2048.client.log": "988eb699dd8163901433785f01c983595f8981825f65a3ab0928f6051abe8154",
+    "text-4-2-candidate.cold-8192.tokenize.response.json": "1e924ba32cf41b050291eaf02707b996b9f656171f816c15c24c7045a92600ee",
+    "text-4-3-public.cold-2048.json": "8a1a8a4d40f3ca6560b78ad0edb6e4310855210b951bd6213927aad052e4398b",
+    "records.json": "d85f122c4c670df812fff9967dbca544c1b6d66b12bfb997ceb20bcfa7db71bd",
+    "text-4-2-candidate.cold-8192.json": "7ffbd4d45de384ca75de517cf6c7d56276152131747ef62c7bccfa638baa7bae",
+    "text-4-2-candidate.after.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+    "text-4-1-candidate.cold-8192.tokenize.response.json": "1e924ba32cf41b050291eaf02707b996b9f656171f816c15c24c7045a92600ee",
+    "text-4-2-candidate.cold-8192.client.log": "7a387b5b7fbe8572e1bfc31c84272e3d6ac3ce292c1efea5c0b654823737d721",
+    "text-4-3-public.before.metrics": "6dd999e386e8622f51b7f48f688618a503ae80e19b5b35503ad1374001169cb3",
+    "text-4-0-public.cold-8192.tokenize.response.json": "1e924ba32cf41b050291eaf02707b996b9f656171f816c15c24c7045a92600ee",
+    "text-4-0-public.before.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+    "text-4-0-public.cold-8192.client.log": "8b06958eb699bce4d58077ec90cdbb85040b66d859ffced3fa7a0c1442b07d79",
+    "text-4-3-public.server.log": "8fd0a3b9d81b047276147dc41d8cd5dd01e81d9d8806e8486f127832025b2a33",
+    "text-4-1-candidate.after.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+    "text-4-3-public.before.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+    "text-4-3-public.before.health": "e41f1fa5fa63b41398632c5ab9622e881079971c2bec31b6d54da709ab256599",
+    "text-4-3-public.after.metrics": "984f726dd55d3e2519685961da487fc011d43d878c05a2345474b4dc4bb1ea69",
+    "text-4-2-candidate.cold-2048.json": "e5a39a00378970b81cdb748b2efb2439c09ccca8fb5f844e400b78f623511d19",
+    "text-4-3-public.cold-8192.tokenize.response.json": "1e924ba32cf41b050291eaf02707b996b9f656171f816c15c24c7045a92600ee",
+    "text-4-2-candidate.cold-2048.tokenize.request.json": "f69a5dcb97950c19f12fd93b89b288ec0dd214a89ed83fbe5fb1e60270f6dabd"
+  },
+  "basic_raw_sha256": {
+    "candidate.phases.aggregate.json": "1d185e278d83d66ea5f1b04009dfa562426e41b0ff53e6b78d4c6ecd01412002",
+    "phase-check.log": "c666175ceca215ed1c5ef63e934dcc049ce62d060bf50651ecb901dd8b63a3c1",
+    "candidate.phases.json": "1c525ce36259e53193bd6234d03fac99ada3ac8eda37a251b4b490c90287f15d",
+    "positive/candidate.bf16": "583760763110f09b4557d7d66e4c8801ce2f1996f1052214c9bf99db2cf34cf1",
+    "positive/events.json": "764a7b477079f98363fcf55393c1a2390488178b0c7d69e130ae20bdbe3d5cf8",
+    "positive/baseline.bf16": "ac5b5fd5fb92bc650b9048ea8b5e2233e5b6e4f98c3166f0eebb1fedbc15b8b8",
+    "positive/002.log": "fc53f966b6cc57e6f6eb7dfdfc2174b7e9f9f86f99109be304c95f273363028b",
+    "positive/003.log": "b6e4827a57124fd59b886fb26c0d0cb42ef0256a6799f944a7aadfd06ddb36a4",
+    "positive/001.log": "e379c00ba397b39da362cb18233058f130a8967a56b8b427087da3f22666bed7",
+    "positive/000.log": "aa542502c37939707c493b1a622cfda5d3fc51ce13a720b9d6e5231a3986b9c2",
+    "positive/receipt.json": "6190b436654e1cc6580ecacdbd85bff0e555e552dfb701983a295e369e40e76a"
+  }
+}

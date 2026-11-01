@@ -1,0 +1,129 @@
+{
+  "status": "default-off development experiment; not a performance improvement",
+  "date": "2026-10-29",
+  "backend": "Metal",
+  "device": "Apple M5",
+  "scope": "Synthetic attention operator, 64 query rows, full history 2048 and8192; not actual-model prefill or serving",
+  "candidate": "Exponent predicate early exits and absorbing per-lane risk OR",
+  "build_option": "-Dlfm3-risk-fast=true",
+  "default_enabled": false,
+  "cpu_equivalence": {
+    "pair_classes": 4194304,
+    "sum_classes": 20480000,
+    "random_words": 1000000,
+    "sticky_sequences": 512,
+    "mismatches": 0
+  },
+  "device_numerical": {
+    "devices": [
+      "Apple M4",
+      "Apple M5"
+    ],
+    "normal_cases_per_device": 35,
+    "repeats": 5,
+    "negative_controls_per_device": 2,
+    "checks": [
+      "pm/pl/po byte identity",
+      "range flags byte identity",
+      "final BF16 byte identity",
+      "input immutability",
+      "guard regions"
+    ]
+  },
+  "cost_protocol": {
+    "balanced_rounds": 5,
+    "legs": 20,
+    "minimum_leg_seconds": 0.02,
+    "maximum_leg_seconds": 1,
+    "baseline_drift_limit": 0.05,
+    "within_round_spread_limit": 0.05
+  },
+  "cost": [
+    {
+      "case": "h2048-r64-w0",
+      "stable": true,
+      "baseline_first_last_drift": -0.0011672461352403296,
+      "baseline_within_round_spreads": [
+        0.00028488954797434296,
+        0.004006824676436649,
+        0.0023022151292024784,
+        0.008804105837239673,
+        0.0009227079128673044
+      ],
+      "median_candidate_over_public_throughput": 0.8900864888254163,
+      "public_seconds_per_op": 0.005706671858206391,
+      "pair_seconds_per_op": 0.00641652345075272,
+      "geometry": {
+        "rows": 64,
+        "history": 2048,
+        "window": 0
+      },
+      "full_output_matches_frozen_canonical": true,
+      "analysis_sha256": "50241ab2cbf0f8330c972efc3be5939156ae1cbbd213b5fe0ca63414e4a08775"
+    },
+    {
+      "case": "h8192-r64-w0",
+      "stable": true,
+      "baseline_first_last_drift": -0.00960170710028363,
+      "baseline_within_round_spreads": [
+        0.012505571895359058,
+        0.009459609353000609,
+        0.007941873258114018,
+        0.027025251958851193,
+        0.00567250180932688
+      ],
+      "median_candidate_over_public_throughput": 0.5774839407016837,
+      "public_seconds_per_op": 0.0037078906316310167,
+      "pair_seconds_per_op": 0.0063853828178253025,
+      "geometry": {
+        "rows": 64,
+        "history": 8192,
+        "window": 0
+      },
+      "full_output_matches_frozen_canonical": true,
+      "analysis_sha256": "0a9b9cb856dcf6f13eb422ea5659966858e17db16fc9a7df029aaa8ef6194cce"
+    }
+  ],
+  "remaining": [
+    "Full public kernel contract suite",
+    "Real-checkpoint prompt/decode state and token equality",
+    "Cold 2k/8k prefill, TTFT, ITL and serving comparison to MLX-VLM"
+  ],
+  "promotion": "Not recommended: both measured operator cases regressed",
+  "build_validation": {
+    "native": "pass",
+    "kernel_contract_binary": "pass",
+    "all_developer_tools": "pass",
+    "cpu_target": "apple_m1",
+    "lean_baseline_problems": 428,
+    "lean_current_problems": 428,
+    "lean_new_problems": 0,
+    "diff_check": "pass",
+    "targeted_public_device_contract": "pass on Apple M5"
+  },
+  "reproduce": [
+    "clang++ -O2 -std=c++17 tools/check_lfm3_risk.cpp -o risk-proof && ./risk-proof",
+    "zig build native tf-kernel-contract dev-tools -Dcpu=apple_m1 -Dlfm3-risk-fast=true",
+    "zig-out/bin/tf-kernel-contract --only risk-fast"
+  ],
+  "targeted_public_device_contract": {
+    "device": "Apple M5",
+    "exit_code": 0,
+    "kernels": 2,
+    "passed": 2,
+    "failed": 0,
+    "known": 0,
+    "controls": 0,
+    "missed_controls": 0,
+    "limit_problems": 0,
+    "gates": "1-4 plus launch limits",
+    "full_shapes": 7,
+    "sliding_shapes": 10,
+    "nonfinite_values_each": 512,
+    "repeats": 5,
+    "log_sha256": "31c86c8db07677f4714aa6c136d70ea802ca22cefa1d4720f06f1b3117dea3c8",
+    "scope": "targeted risk-fast full/sliding contracts; no full-suite or negative-control claim"
+  },
+  "archived_candidate_commit": "1543227fc657c88d8300015a1e1590af7633f1ee",
+  "superseded_by": "risk-fused-experiment.json"
+}

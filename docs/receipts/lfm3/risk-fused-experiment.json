@@ -1,0 +1,563 @@
+{
+  "status": "default-off measured M5 operator/served improvement; all six checkpoint widths passed baseline equivalence; M4 and broader qualification pending",
+  "date": "2026-10-30",
+  "backend": "Metal",
+  "device": "Apple M5 Ultra",
+  "baseline_commit": "1543227fc657c88d8300015a1e1590af7633f1ee",
+  "baseline": "Original attention with L3_RISK_FAST=0; the slower early-return experiment is not the baseline",
+  "candidate": "Branch-free fused product/sum range predicates with shared alpha/probability classification",
+  "build_option": "-Dlfm3-risk-fast=true",
+  "default_enabled": false,
+  "scope": "Synthetic complete attention partial plus merge, 64 query rows; not model prefill or serving",
+  "cpu_equivalence": {
+    "pair_class_checks": 4194304,
+    "fused_operand_result_classes": 20480000,
+    "random_fused_words": 10000000,
+    "boolean_truth_table_rows": 256,
+    "control_witnesses": 2,
+    "mismatches": 0,
+    "scope": "Exhaustive predicate category identity plus deterministic random sample; not exhaustive floating-point arithmetic or GPU qualification"
+  },
+  "air": {
+    "scope": "Optimized AIR static counts, not native instructions or measured registers",
+    "partial_instructions_before": 423,
+    "partial_instructions_after": 409,
+    "conditional_branches_before": 16,
+    "conditional_branches_after": 16,
+    "floating_arithmetic_and_exp_call_counts_unchanged": true,
+    "compile_options": [
+      "metal4.0",
+      "-fmetal-math-mode=safe",
+      "-fmetal-math-fp32-functions=fast",
+      "-O2"
+    ]
+  },
+  "device_numerical": {
+    "normal_cases": 35,
+    "repeats": 5,
+    "guard_regions": 26,
+    "negative_controls": 2,
+    "controls_detected": 2,
+    "checks": [
+      "pm/pl/po byte identity",
+      "range flags byte identity",
+      "final BF16 byte identity",
+      "input immutability",
+      "guard regions"
+    ],
+    "metadata": {
+      "partial_max_threads": 128,
+      "partial_static_threadgroup_bytes": 2096,
+      "merge_max_threads": 32,
+      "merge_static_threadgroup_bytes": 0,
+      "simd_width": 32
+    }
+  },
+  "cost_protocol": {
+    "dispatches_per_operation": 2,
+    "barriers_per_operation": 2,
+    "balanced_rounds": 5,
+    "legs": 20,
+    "minimum_leg_seconds": 0.02,
+    "maximum_leg_seconds": 1,
+    "baseline_drift_limit": 0.05,
+    "within_round_spread_limit": 0.05
+  },
+  "cost": [
+    {
+      "case": "h2048-r64-w0",
+      "stable": true,
+      "baseline_first_last_drift": 0.0002169915226417629,
+      "baseline_within_round_spreads": [
+        0.0015848936687099524,
+        0.0003504886096892257,
+        0.0026541543167410975,
+        0.0007725650054322131,
+        0.00026146651287706213
+      ],
+      "round_candidate_over_public_throughput": [
+        1.0186291411709285,
+        1.023372901498002,
+        1.0216203211937869,
+        1.023195084673455,
+        1.021426741046012
+      ],
+      "median_candidate_over_public_throughput": 1.0216203211937869,
+      "public_seconds_per_op": 0.005678570305462927,
+      "pair_seconds_per_op": 0.005563093756791204,
+      "geometry": {
+        "rows": 64,
+        "history": 2048,
+        "window": 0
+      },
+      "full_output_matches_frozen_canonical": true,
+      "raw_records": [
+        {
+          "round": 0,
+          "leg": 0,
+          "variant": 1,
+          "repeats": 8,
+          "gpu_seconds": 0.04459441639482975,
+          "wall_seconds": 0.044812,
+          "warm_gpu_seconds": 0.04455345869064331
+        },
+        {
+          "round": 0,
+          "leg": 1,
+          "variant": 0,
+          "repeats": 8,
+          "gpu_seconds": 0.04537637485191226,
+          "wall_seconds": 0.045591,
+          "warm_gpu_seconds": 0.04538462497293949
+        },
+        {
+          "round": 0,
+          "leg": 2,
+          "variant": 0,
+          "repeats": 8,
+          "gpu_seconds": 0.04544829158112407,
+          "wall_seconds": 0.045658,
+          "warm_gpu_seconds": 0.04558699997141957
+        },
+        {
+          "round": 0,
+          "leg": 3,
+          "variant": 1,
+          "repeats": 8,
+          "gpu_seconds": 0.04456920828670263,
+          "wall_seconds": 0.044781,
+          "warm_gpu_seconds": 0.04432191653177142
+        },
+        {
+          "round": 1,
+          "leg": 4,
+          "variant": 1,
+          "repeats": 8,
+          "gpu_seconds": 0.0443487917073071,
+          "wall_seconds": 0.044552,
+          "warm_gpu_seconds": 0.04441529139876366
+        },
+        {
+          "round": 1,
+          "leg": 5,
+          "variant": 0,
+          "repeats": 8,
+          "gpu_seconds": 0.045413083396852016,
+          "wall_seconds": 0.045623,
+          "warm_gpu_seconds": 0.04539479175582528
+        },
+        {
+          "round": 1,
+          "leg": 6,
+          "variant": 0,
+          "repeats": 8,
+          "gpu_seconds": 0.04542900016531348,
+          "wall_seconds": 0.045647,
+          "warm_gpu_seconds": 0.04542329162359238
+        },
+        {
+          "round": 1,
+          "leg": 7,
+          "variant": 1,
+          "repeats": 8,
+          "gpu_seconds": 0.044418541714549065,
+          "wall_seconds": 0.044629,
+          "warm_gpu_seconds": 0.04462050041183829
+        },
+        {
+          "round": 2,
+          "leg": 8,
+          "variant": 1,
+          "repeats": 8,
+          "gpu_seconds": 0.04459858359768987,
+          "wall_seconds": 0.044811,
+          "warm_gpu_seconds": 0.04444362502545118
+        },
+        {
+          "round": 2,
+          "leg": 9,
+          "variant": 0,
+          "repeats": 8,
+          "gpu_seconds": 0.04538512462750077,
+          "wall_seconds": 0.045597,
+          "warm_gpu_seconds": 0.045675250235944986
+        },
+        {
+          "round": 2,
+          "leg": 10,
+          "variant": 0,
+          "repeats": 8,
+          "gpu_seconds": 0.04550558375194669,
+          "wall_seconds": 0.045723,
+          "warm_gpu_seconds": 0.045425708405673504
+        },
+        {
+          "round": 2,
+          "leg": 11,
+          "variant": 1,
+          "repeats": 8,
+          "gpu_seconds": 0.04436862515285611,
+          "wall_seconds": 0.044585,
+          "warm_gpu_seconds": 0.044558833353221416
+        },
+        {
+          "round": 3,
+          "leg": 12,
+          "variant": 1,
+          "repeats": 8,
+          "gpu_seconds": 0.04449574975296855,
+          "wall_seconds": 0.044707,
+          "warm_gpu_seconds": 0.0445182085968554
+        },
+        {
+          "round": 3,
+          "leg": 13,
+          "variant": 0,
+          "repeats": 8,
+          "gpu_seconds": 0.0455546248704195,
+          "wall_seconds": 0.04577,
+          "warm_gpu_seconds": 0.04532674979418516
+        },
+        {
+          "round": 3,
+          "leg": 14,
+          "variant": 0,
+          "repeats": 8,
+          "gpu_seconds": 0.04551945813000202,
+          "wall_seconds": 0.04573,
+          "warm_gpu_seconds": 0.04546125000342727
+        },
+        {
+          "round": 3,
+          "leg": 15,
+          "variant": 1,
+          "repeats": 8,
+          "gpu_seconds": 0.04451375035569072,
+          "wall_seconds": 0.044724,
+          "warm_gpu_seconds": 0.044589916709810495
+        },
+        {
+          "round": 4,
+          "leg": 16,
+          "variant": 1,
+          "repeats": 8,
+          "gpu_seconds": 0.04451524978503585,
+          "wall_seconds": 0.044733,
+          "warm_gpu_seconds": 0.044402250088751316
+        },
+        {
+          "round": 4,
+          "leg": 17,
+          "variant": 0,
+          "repeats": 8,
+          "gpu_seconds": 0.045428124722093344,
+          "wall_seconds": 0.045637,
+          "warm_gpu_seconds": 0.04541187500581145
+        },
+        {
+          "round": 4,
+          "leg": 18,
+          "variant": 0,
+          "repeats": 8,
+          "gpu_seconds": 0.04541624989360571,
+          "wall_seconds": 0.045642,
+          "warm_gpu_seconds": 0.0455421251244843
+        },
+        {
+          "round": 4,
+          "leg": 19,
+          "variant": 1,
+          "repeats": 8,
+          "gpu_seconds": 0.04442345816642046,
+          "wall_seconds": 0.044643,
+          "warm_gpu_seconds": 0.04442120809108019
+        }
+      ],
+      "analysis_sha256": "385ebccaacdc63ccd455f87fcdb1f50a6f9cf69609487ee51de4fa6fd7def83e"
+    },
+    {
+      "case": "h8192-r64-w0",
+      "stable": true,
+      "baseline_first_last_drift": 0.0027091003804535774,
+      "baseline_within_round_spreads": [
+        0.0009845777467132333,
+        0.0057089602158091335,
+        0.0045751819192068055,
+        0.014541111915817195,
+        0.013068006608485394
+      ],
+      "round_candidate_over_public_throughput": [
+        1.1252255285291899,
+        1.1189308038566097,
+        1.122841759973785,
+        1.1278408129252813,
+        1.1364275184827335
+      ],
+      "median_candidate_over_public_throughput": 1.1252255285291899,
+      "public_seconds_per_op": 0.003703492198837921,
+      "pair_seconds_per_op": 0.0032891718728933483,
+      "geometry": {
+        "rows": 64,
+        "history": 8192,
+        "window": 0
+      },
+      "full_output_matches_frozen_canonical": true,
+      "raw_records": [
+        {
+          "round": 0,
+          "leg": 0,
+          "variant": 1,
+          "repeats": 8,
+          "gpu_seconds": 0.026430791709572077,
+          "wall_seconds": 0.026641,
+          "warm_gpu_seconds": 0.05235574999824166
+        },
+        {
+          "round": 0,
+          "leg": 1,
+          "variant": 0,
+          "repeats": 8,
+          "gpu_seconds": 0.029623083770275116,
+          "wall_seconds": 0.029842,
+          "warm_gpu_seconds": 0.05940175009891391
+        },
+        {
+          "round": 0,
+          "leg": 2,
+          "variant": 0,
+          "repeats": 8,
+          "gpu_seconds": 0.02965224999934435,
+          "wall_seconds": 0.029875,
+          "warm_gpu_seconds": 0.059093999676406384
+        },
+        {
+          "round": 0,
+          "leg": 3,
+          "variant": 1,
+          "repeats": 8,
+          "gpu_seconds": 0.026247833389788866,
+          "wall_seconds": 0.026456,
+          "warm_gpu_seconds": 0.052706167101860046
+        },
+        {
+          "round": 1,
+          "leg": 4,
+          "variant": 1,
+          "repeats": 8,
+          "gpu_seconds": 0.02627137489616871,
+          "wall_seconds": 0.026489,
+          "warm_gpu_seconds": 0.053468083031475544
+        },
+        {
+          "round": 1,
+          "leg": 5,
+          "variant": 0,
+          "repeats": 8,
+          "gpu_seconds": 0.02971287490800023,
+          "wall_seconds": 0.029926,
+          "warm_gpu_seconds": 0.05965212546288967
+        },
+        {
+          "round": 1,
+          "leg": 6,
+          "variant": 0,
+          "repeats": 8,
+          "gpu_seconds": 0.029544208198785782,
+          "wall_seconds": 0.029758,
+          "warm_gpu_seconds": 0.05920074973255396
+        },
+        {
+          "round": 1,
+          "leg": 7,
+          "variant": 1,
+          "repeats": 8,
+          "gpu_seconds": 0.02668729145079851,
+          "wall_seconds": 0.026907,
+          "warm_gpu_seconds": 0.05246133357286453
+        },
+        {
+          "round": 2,
+          "leg": 8,
+          "variant": 1,
+          "repeats": 8,
+          "gpu_seconds": 0.026162500027567148,
+          "wall_seconds": 0.026381,
+          "warm_gpu_seconds": 0.05277195805683732
+        },
+        {
+          "round": 2,
+          "leg": 9,
+          "variant": 0,
+          "repeats": 8,
+          "gpu_seconds": 0.02949783345684409,
+          "wall_seconds": 0.029718,
+          "warm_gpu_seconds": 0.059847208205610514
+        },
+        {
+          "round": 2,
+          "leg": 10,
+          "variant": 0,
+          "repeats": 8,
+          "gpu_seconds": 0.02963279141113162,
+          "wall_seconds": 0.029845,
+          "warm_gpu_seconds": 0.05959666660055518
+        },
+        {
+          "round": 2,
+          "leg": 11,
+          "variant": 1,
+          "repeats": 8,
+          "gpu_seconds": 0.026499083265662193,
+          "wall_seconds": 0.026714,
+          "warm_gpu_seconds": 0.05233533354476094
+        },
+        {
+          "round": 3,
+          "leg": 12,
+          "variant": 1,
+          "repeats": 8,
+          "gpu_seconds": 0.026355375070124865,
+          "wall_seconds": 0.026566,
+          "warm_gpu_seconds": 0.05321375001221895
+        },
+        {
+          "round": 3,
+          "leg": 13,
+          "variant": 0,
+          "repeats": 8,
+          "gpu_seconds": 0.029652458149939775,
+          "wall_seconds": 0.02986,
+          "warm_gpu_seconds": 0.059119750279933214
+        },
+        {
+          "round": 3,
+          "leg": 14,
+          "variant": 0,
+          "repeats": 8,
+          "gpu_seconds": 0.029227458406239748,
+          "wall_seconds": 0.029442,
+          "warm_gpu_seconds": 0.05924620805308223
+        },
+        {
+          "round": 3,
+          "leg": 15,
+          "variant": 1,
+          "repeats": 8,
+          "gpu_seconds": 0.025850499980151653,
+          "wall_seconds": 0.026063,
+          "warm_gpu_seconds": 0.05283687496557832
+        },
+        {
+          "round": 4,
+          "leg": 16,
+          "variant": 1,
+          "repeats": 8,
+          "gpu_seconds": 0.026503500062972307,
+          "wall_seconds": 0.026718,
+          "warm_gpu_seconds": 0.05225620837882161
+        },
+        {
+          "round": 4,
+          "leg": 17,
+          "variant": 0,
+          "repeats": 8,
+          "gpu_seconds": 0.029525041580200195,
+          "wall_seconds": 0.029738,
+          "warm_gpu_seconds": 0.05905879195779562
+        },
+        {
+          "round": 4,
+          "leg": 18,
+          "variant": 0,
+          "repeats": 8,
+          "gpu_seconds": 0.029910875018686056,
+          "wall_seconds": 0.030126,
+          "warm_gpu_seconds": 0.05888850009068847
+        },
+        {
+          "round": 4,
+          "leg": 19,
+          "variant": 1,
+          "repeats": 8,
+          "gpu_seconds": 0.025797166395932436,
+          "wall_seconds": 0.026001,
+          "warm_gpu_seconds": 0.052467874716967344
+        }
+      ],
+      "analysis_sha256": "fe857afa6c5349fb9b6b09dc1611ea1cbd4f356025a386e0e1ec5ea7a7480151"
+    }
+  ],
+  "evidence": {
+    "baseline_source_sha256": "087e7bd23450117b626fb467d6750c46ae74c85ed06f41d7bee025de7617fba0",
+    "private_candidate_source_sha256": "8014cc1904ac440b4445e0444b46b445cc65662e9de73af2dc76719606ca1f3e",
+    "remote_manifest_sha256": "217152ba10beeca10bf199faed254eb962346ecbea63ff3a7350dc29e61c4114",
+    "stage_receipt_sha256": {
+      "metadata": "deb335a1b3d447e7ea5426040fc68a7d4e75df99194ffb1004d5b646fa17b059",
+      "smoke": "3a5618a6ff7b83bfd6f6c36bcbe354668ca6eed4bb0df18ae9c42126a8952aaa",
+      "positive": "d7cc88eaec51a261ac4cf92074d111d18396fe466f9025406f874f269d34183f",
+      "controls": "7226594720b4938df851b473ed50bda9959af52e0d831842238880d7b3cb4965",
+      "cost": "54b426df3b7e0c1c2cd1828ee730858f4ffa975f2c0b4f8b91285d7ac7d34223"
+    }
+  },
+  "remaining": [
+    "Full public kernel contract suite",
+    "M1-M4 and other backend qualification not established by this M5 receipt",
+    "Broader image, checkpoint-width, cancellation and concurrent-stream baseline/candidate validation",
+    "Broader served contexts, image requests,6/8-bit checkpoints, decode/ITL and MLX comparisons"
+  ],
+  "reproduce": [
+    "python3 tools/check_lfm3_risk.py",
+    "zig build native tf-kernel-contract dev-tools -Dcpu=apple_m1 -Dlfm3-risk-fast=true",
+    "zig-out/bin/tf-kernel-contract --only risk-fast"
+  ],
+  "os": {
+    "version": "macOS 27.0",
+    "build": "26A428"
+  },
+  "runtime_metal_options": {
+    "language": "4.1",
+    "math_mode": "safe",
+    "fp32_functions": "fast",
+    "exp": "metal::precise::exp"
+  },
+  "build_validation": {
+    "zig": "0.17.0",
+    "cpu_target": "apple_m1",
+    "native": "pass",
+    "kernel_contract_binary": "pass",
+    "all_developer_tools": "pass",
+    "exit_code": 0,
+    "source_linked_cpu_proof": "pass",
+    "integrated_flag_off_on_air_static_counts_match_measured_sources": true,
+    "lean_baseline_problems": 428,
+    "lean_current_problems": 428,
+    "lean_new_problems": 0,
+    "diff_check": "pass",
+    "full_host_suite": "not run",
+    "full_kernel_contract_suite": "not run",
+    "targeted_integrated_contract": "pass on Apple M5 Ultra",
+    "host_contract_golden_fuzz_subset": "pass; details in risk-fused-fullmodel.json"
+  },
+  "targeted_integrated_contract": {
+    "source_commit": "de7cf96ed",
+    "device": "Apple M5 Ultra",
+    "architecture": "applegpu_g17",
+    "exit_code": 0,
+    "full_shapes": 7,
+    "sliding_shapes": 10,
+    "nonfinite_outputs_each": 512,
+    "finite_outputs_each": 15872,
+    "repeats": 5,
+    "summary": "SUMMARY 2 kernels: 2 pass gates 1-4, 0 fail, 0 known findings; 0 controls: 0 red as planted, 0 missed; 0 limit problems; gates 1033 ms, limits 6323 ms",
+    "accumulation_caveat": "Nonlinear BF16 nodes do not guarantee a 100x reduced-accumulator witness; full case reports FP16 0x/BF16 0.4x, sliding FP16 0x/BF16 0.1x",
+    "launch_records_checked": 361,
+    "scope": "Targeted full/sliding replacements and launch-limit checks; no complete kernel-suite claim; the two mutation controls are recorded separately in private operator qualification",
+    "log_sha256": "35e5a0c0e68c2f0a0c72b66f72f29c2636fabb3ee6027b6d060b7f1d7f218c2e",
+    "manifest_sha256": "5b6223276399163e9c626634639a1e13a162de3edf7e31cd296702ebb7e6d508"
+  },
+  "fullmodel_receipt": "risk-fused-fullmodel.json",
+  "serving_receipt": "risk-fused-serving.json",
+  "width_image_receipt": "risk-fused-width-image.json",
+  "text_widths_receipt": "risk-fused-text-widths.json",
+  "m4_receipt": "risk-fused-m4.json"
+}

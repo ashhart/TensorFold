@@ -1,0 +1,68 @@
+{
+  "scope": "Secondary MLX developer vision reference comparison on identical frozen native image patches, not official MLX-VLM end-to-end serving or a fidelity pass. 6/8 vision weights are identical by prior full-tensor hash verification; only distinct 4/8 sets are run here.",
+  "grid": [
+    14,
+    20
+  ],
+  "patches_sha256": "f1c55a0dd28b91d9929f074995adadea79d7c0862c8cdcd0be6dbfda57383dc1",
+  "host": "Apple M4 Pro, macOS 26.5.1, MLX 0.32.4",
+  "records": [
+    {
+      "vision_weight_set": "4bit export",
+      "target": "Ideal FP64 vision oracle with its recorded BF16 stores; no acceptance threshold",
+      "comparators": {
+        "native": {
+          "output_sha256": "ab2ac7db759e5c4a32fe7d60680ec47f7d1cbc5938fa7d8091bf4756bfeea4fc",
+          "rms": 0.000641842947115359,
+          "relative_rms": 0.01813030697564529,
+          "max_abs": 0.009981155395507812,
+          "worst_column": 1990,
+          "worst_column_rms": 0.0015688593706404128,
+          "equal_bf16_values": 16235,
+          "values": 143360
+        },
+        "mlx_developer_reference": {
+          "output_sha256": "34a2b8adfb6b17949d16a7f6d0762d1196c8151c5fde19a2bcb93d83c4f84f83",
+          "rms": 0.0005991838235835683,
+          "relative_rms": 0.016925303464397964,
+          "max_abs": 0.00634765625,
+          "worst_column": 397,
+          "worst_column_rms": 0.0012908817021458044,
+          "equal_bf16_values": 16157,
+          "values": 143360
+        }
+      }
+    },
+    {
+      "vision_weight_set": "8bit export",
+      "target": "Ideal FP64 vision oracle with its recorded BF16 stores; no acceptance threshold",
+      "comparators": {
+        "native": {
+          "output_sha256": "aceb2b880177abfae718bdd660398b3cd7ee990d2dfcdce2a110d08dc4e33135",
+          "rms": 0.0005656584034634817,
+          "relative_rms": 0.016063874280294436,
+          "max_abs": 0.0087890625,
+          "worst_column": 498,
+          "worst_column_rms": 0.0013091940942879653,
+          "equal_bf16_values": 16945,
+          "values": 143360
+        },
+        "mlx_developer_reference": {
+          "output_sha256": "4eb3954a4b7c0d5d8e31d01ca2393ef754dbcc1605ad5c71b6679f3b7bbe6039",
+          "rms": 0.0005638638806455016,
+          "relative_rms": 0.016012912447561735,
+          "max_abs": 0.0078125,
+          "worst_column": 128,
+          "worst_column_rms": 0.0012127937651889588,
+          "equal_bf16_values": 17083,
+          "values": 143360
+        }
+      }
+    }
+  ],
+  "source_sha256": {
+    "tools/lfm3/vision_reference.py": "99ec81e9ff78e58f9e75c5562466b87aaf520a9a2c2da9a45a0593e587d7b711",
+    "tools/lfm3/reference.py": "fd4622a6fc35ed61ba4bf7a9d48c06a43e7cc390bc6505e7e6445300386b9f39"
+  },
+  "command": "python tools/lfm3/vision_reference.py --model-dir MODEL --patches PATCHES.npy --grid-h 14 --grid-w 20 --output OUTPUT.bf16"
+}

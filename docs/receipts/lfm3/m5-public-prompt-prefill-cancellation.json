@@ -1,0 +1,133 @@
+{
+  "scope": "M5 public native HTTP cancellation during unfinished 8192-token prefill and subsequent cold recovery, one observation per prompt width.",
+  "passed": true,
+  "hardware": "Apple M5",
+  "os": "macOS 27.0 (26A428)",
+  "model": {
+    "repository": "LiquidAI/LFM3-1.7B-MLX-4bit",
+    "revision": "d0ca73dcfa70ce18733754a492cdc1fb0123262d"
+  },
+  "public_builds": {
+    "128": {
+      "source_revision": "1e43c6722",
+      "binary_sha256": "3c987ac2decf021380122a22f2e30c12590045a959e6f160e9ed7570577248bd"
+    },
+    "256": {
+      "implementation_revision": "13d590bbf",
+      "binary_sha256": "b4fae76cecbeb35bacfd9bf6508103e514dea8bde227b3bb9b158adbb4715221"
+    }
+  },
+  "build_options": {
+    "cpu": "apple_m1",
+    "lfm3-residual-ffn": true,
+    "lfm3-tiled-attention": true,
+    "lfm3-prompt-rows": [
+      128,
+      256
+    ]
+  },
+  "protocol": {
+    "fresh_server_per_width": true,
+    "request_order": [
+      "cold_before",
+      "disconnect_during_prefill",
+      "cold_recovery"
+    ],
+    "context": 70000,
+    "parallel": 4,
+    "active_requests": 1,
+    "prompt_cache_gib": 0,
+    "thinking": false,
+    "temperature": 0,
+    "output_tokens": 16,
+    "dashboard_and_metrics_enabled": true,
+    "exact_prompt_ids_checked_by_tokenize": 8192,
+    "disconnect_trigger": "Observe at least one configured-width chunk complete, unfinished prefill, and no generated SSE content.",
+    "release_observation": "Running and waiting both zero, and server disconnection counter increased.",
+    "poll_sleep_s": 0.01
+  },
+  "cases": [
+    {
+      "prompt_rows": 128,
+      "passed": true,
+      "observations": 1,
+      "cancel_to_observed_release_ms": 32.11075,
+      "unfinished_prefill_tokens_at_disconnect": 8064,
+      "generation_tokens_running_at_disconnect": 0,
+      "generated_sse_content_before_disconnect": false,
+      "server_disconnect_counter_delta": 1,
+      "recovery_completion_tokens": 16,
+      "before_and_recovery_cached_tokens": 0,
+      "recovery_text_sha256_equal": true,
+      "recovery_text_sha256": "e2476773ac8616580547ee0cb0ea44121f776b7988e7eba184743b0d51441349"
+    },
+    {
+      "prompt_rows": 256,
+      "passed": true,
+      "observations": 1,
+      "cancel_to_observed_release_ms": 63.6395,
+      "unfinished_prefill_tokens_at_disconnect": 7936,
+      "generation_tokens_running_at_disconnect": 0,
+      "generated_sse_content_before_disconnect": false,
+      "server_disconnect_counter_delta": 1,
+      "recovery_completion_tokens": 16,
+      "before_and_recovery_cached_tokens": 0,
+      "recovery_text_sha256_equal": true,
+      "recovery_text_sha256": "e2476773ac8616580547ee0cb0ea44121f776b7988e7eba184743b0d51441349"
+    }
+  ],
+  "execution": {
+    "runner_exit": 0,
+    "clients_exit_zero": 6,
+    "servers_exit_zero": 2,
+    "lock_released": true,
+    "model_admission_checked": true,
+    "owned_process_cleanup_verified": true
+  },
+  "packet_pins_sha256": "5949a612b46fe8b5b00920157a9094068471ec60ac1858f4badac650ce2e8166",
+  "packet_files_sha256": {
+    "baseline/tensorfold-native": "3c987ac2decf021380122a22f2e30c12590045a959e6f160e9ed7570577248bd",
+    "cancel_prefill.py": "3a99f29a3834e11b234216ce1eaf2fd3ed1b02a35173c967aaeac100180fb56a",
+    "candidate/tensorfold-native": "b4fae76cecbeb35bacfd9bf6508103e514dea8bde227b3bb9b158adbb4715221",
+    "cold_client.py": "7b8ea55aa88834814f95a6f679654e16074b7a8364e34b39a276f009fe0231f2",
+    "config.json": "af5adbac9613c1f5f82cca8955fe95d2307f34a604ec403ff272db98076b0e72",
+    "fixtures/text-2048.body.json": "e6932e72d2a5ea89eec6f20a0aeb42b8e632262ecfb0482a6ac2017f17352896",
+    "fixtures/text-2048.ids.json": "f5edac3447405086d7ec361d6c899410ea7cbbb2ef697c27fd7486ef5ff877fe",
+    "fixtures/text-8192.body.json": "655407f5dc3614476ec857a0309ed5437000c2be91d3859659b256d83e1bb407",
+    "fixtures/text-8192.ids.json": "a9b3cdf070b9ca5ea523565bcb82c80b6af5aae71f640a8fba0460c9069d22cd",
+    "freeze.py": "c4f0e5585516781604fa88be7ac930d60477da24813fb0ca83e1c92fadce3193",
+    "guard.py": "ee70dc087509a6e16e3b82dde8c5eca89be481a59a630a956412b335f7d3b4ce",
+    "model-revisions.json": "fbe3ba2fea04e926e5c237044f2c5315b31a3d991e5c9c528521dc597a924f88",
+    "run.py": "37c2293d87eb647150ee7cc26781c7516d7eea2113b9f13b47e56e7bd5a011ed",
+    "server.py": "dded32e854d813eadf1f128ae184ae69993de5209fa802227c5b6ec175a5ac79"
+  },
+  "raw_sha256": {
+    "events.json": "56abd35c505d8fdfbbc1a47926ff0bed8dfeff205988613106f72d12000522fe",
+    "records.json": "5a20e08e936f500cf119a8ce087c3aa99e53b24d6c6e01cfee6128640e901ef8",
+    "rows128-candidate-after.client.log": "56b8d68f459766b53a10a942f2377c5bce76d433e93f14f5180bc145e242fc9f",
+    "rows128-candidate-before.client.log": "2c446b6ab8668de14af3c1014e10d27c74ccc434b65ff8f682accc531d3d1c24",
+    "rows128-candidate-cancel.client.log": "5d18e1b9d95b4fde3707b252a62b64d44c88c5db69cdace0169001538ea3d39f",
+    "rows128-candidate.after.json": "31cf6f5fdb2ed5dfd2c41a0b3f71a6a2bd2fc22b87f9d9098e799b14f0df3077",
+    "rows128-candidate.before.json": "c56c6acef61c0a56c0d6795d512f5dc0f5a4ea05f70a3f5e1dba234fad9193a9",
+    "rows128-candidate.cancel.json": "68ee1c50438b4e5255abc64e8d1e769f03669a37d32a28c895210e39addfa31b",
+    "rows128-candidate.server.log": "64bdb42cd94613248b3ad3bc8ef290bd687615a53ee1486d6498f2ef0cc74465",
+    "rows128-candidate.tokenize.request.json": "c196be253a6a7f7928e3f427e0faad10300dc3216279a3ae8a80a9cd46f77dab",
+    "rows128-candidate.tokenize.response.json": "1e924ba32cf41b050291eaf02707b996b9f656171f816c15c24c7045a92600ee",
+    "rows256-candidate-after.client.log": "b80cf45e4b70a4281bd2192bd4e1ec4c34fb328b1116d3f35010517e21b215da",
+    "rows256-candidate-before.client.log": "7f60404dfb3341791666a446e64c74b3025f5fe438db7f121ac9c4b8dff1d773",
+    "rows256-candidate-cancel.client.log": "e4589c66b29a6d9e0610f8c79a80e8b5bf28e137c86565e9bc123fe96cd086b7",
+    "rows256-candidate.after.json": "33a2c3a64aad8241ea59b359173f897e471d552f4d177cd4ebf71679826c1789",
+    "rows256-candidate.before.json": "165e2066a9b460d546ab1dc9cd84d2ddb62af67b6fbe8bfde391a29567294013",
+    "rows256-candidate.cancel.json": "3af49697625fefe2dbcbb3e5226f12cf80d441f24e9fd160b0244aaca6e53fae",
+    "rows256-candidate.server.log": "25580fc9050549e39de71eaeffd75c3a1ba980a5996d186e70dd38ebc485302c",
+    "rows256-candidate.tokenize.request.json": "c196be253a6a7f7928e3f427e0faad10300dc3216279a3ae8a80a9cd46f77dab",
+    "rows256-candidate.tokenize.response.json": "1e924ba32cf41b050291eaf02707b996b9f656171f816c15c24c7045a92600ee"
+  },
+  "limitations": [
+    "Single observation per width; no latency bound, distribution, SLA or isolated throughput comparison. Two unrelated CPU builds were visible on the test host.",
+    "Latency includes client/server detection, remaining work, cleanup and polling granularity. HTTP evidence does not locate the disconnect signal inside an individual GPU command.",
+    "Recovery compares emitted text hashes, not output token arrays or internal state. Separate test-only in-flight cancellation/state checks are not this public HTTP run.",
+    "Only text 4-bit checkpoint, 8192-token prompt and widths128/256. No image, other quantization, multi-request contention, long-context or independent numerical-fidelity claim.",
+    "Public route selection comes from the pinned binaries/build options; these servers do not expose per-layer route counters."
+  ]
+}

@@ -1,0 +1,281 @@
+{
+  "date": "2026-10-30",
+  "status": "All six LFM3-1.7B text4/6/8 baseline-equivalence cases passed; three kernel faults rejected",
+  "device": "Apple M5 Ultra",
+  "os": "macOS27.0 build26A428",
+  "source_commit": "de7cf96ed",
+  "scope": "2k/8k exact text histories through LFM3-1.7B checkpoints at4/6/8 bits",
+  "comparison": "Fused attention versus original attention within each checkpoint; original prompt-head and projection behavior retained",
+  "fidelity_scope": "Baseline equivalence only; no new independent FP64 fidelity result, tie policy or ledger change",
+  "checkpoints": {
+    "LFM3-1.7B-MLX-4bit": {
+      "repository": "LiquidAI/LFM3-1.7B-MLX-4bit",
+      "revision": "d0ca73dcfa70ce18733754a492cdc1fb0123262d",
+      "files": {
+        "model.safetensors": "1be5bf672013cd91aa62148f77c5eea8d2784a95845d5fe826e08c7b84823815",
+        "config.json": "7df2ea819f9a31b770192a0a9dc1b7953a7dd8c41b816cc3905bbec99ef332bd",
+        "tokenizer.json": "41927bd314d17d7d7fadb44e10cd0919f7b71528d7741596d8cbd15c6945ec44"
+      }
+    },
+    "LFM3-1.7B-MLX-6bit": {
+      "repository": "LiquidAI/LFM3-1.7B-MLX-6bit",
+      "revision": "26be898c36b545d625d84ac0761c6c3eb664aef3",
+      "files": {
+        "model.safetensors": "503d68675793fba64907842e176d066c8c3adca22e14c8b3538f9ffb76bd5e0e",
+        "config.json": "2b5879bf6d1d99b43e17726c7ee3fb4868e4c2e29c4a49784803df90f494fc2e",
+        "tokenizer.json": "41927bd314d17d7d7fadb44e10cd0919f7b71528d7741596d8cbd15c6945ec44"
+      }
+    },
+    "LFM3-1.7B-MLX-8bit": {
+      "repository": "LiquidAI/LFM3-1.7B-MLX-8bit",
+      "revision": "ee7667f3cfccb2a41725f91820531823fcabc6b7",
+      "files": {
+        "model.safetensors": "2b06cea98d75527c248a0b04383f7cf0a1c72fb4ed7b45096618fc4e59d015ad",
+        "config.json": "4ef95e289e7105a09bf010b3ceaa015d3f01163104c039a4e7948739d5b9035b",
+        "tokenizer.json": "41927bd314d17d7d7fadb44e10cd0919f7b71528d7741596d8cbd15c6945ec44"
+      }
+    }
+  },
+  "checks": [
+    "Full active KV and convolution state after each prompt chunk",
+    "Full last-row logits after each prompt chunk",
+    "Snapshot bytes at129 and257 tokens",
+    "Restore257-token snapshot and finish with full state/logit equality",
+    "16greedy decode tokens plus state/logits each step"
+  ],
+  "cases": [
+    {
+      "prompt_tokens": 2048,
+      "compared_prompt_chunks": 17,
+      "mark_snapshots_equal": 2,
+      "resumed_prefix": 257,
+      "resume_state_logits_equal": true,
+      "full_active_kv_conv_equal": true,
+      "full_logits_equal": true,
+      "decode_tokens": [
+        597,
+        8055,
+        509,
+        4116,
+        9543,
+        11004,
+        302,
+        278,
+        2936,
+        2837,
+        496,
+        73,
+        10,
+        10601,
+        890,
+        309
+      ],
+      "vision_rows": false,
+      "case": "text4-2048",
+      "result_sha256": "06044f9099be682e34015cd3978c891b48817b4c20846e12bf94bb3d63991ae1"
+    },
+    {
+      "prompt_tokens": 8192,
+      "compared_prompt_chunks": 65,
+      "mark_snapshots_equal": 2,
+      "resumed_prefix": 257,
+      "resume_state_logits_equal": true,
+      "full_active_kv_conv_equal": true,
+      "full_logits_equal": true,
+      "decode_tokens": [
+        597,
+        4695,
+        4116,
+        267,
+        1442,
+        1286,
+        4160,
+        302,
+        10601,
+        496,
+        73,
+        10,
+        8426,
+        20,
+        643,
+        7204
+      ],
+      "vision_rows": false,
+      "case": "text4-8192",
+      "result_sha256": "56e25597aa103d53dfea5ca3c718b4a38fc27dd48d42dc71ea907932ffeb2262"
+    },
+    {
+      "prompt_tokens": 2048,
+      "compared_prompt_chunks": 17,
+      "mark_snapshots_equal": 2,
+      "resumed_prefix": 257,
+      "resume_state_logits_equal": true,
+      "full_active_kv_conv_equal": true,
+      "full_logits_equal": true,
+      "decode_tokens": [
+        597,
+        8055,
+        509,
+        18304,
+        355,
+        267,
+        1286,
+        4160,
+        302,
+        278,
+        2936,
+        7126,
+        7575,
+        73,
+        962,
+        10601
+      ],
+      "vision_rows": false,
+      "case": "text6-2048",
+      "result_sha256": "06d91573f9ddccb9a29e5d784ceaaa33989557bcbd067edaddaa813cbedfff6e"
+    },
+    {
+      "prompt_tokens": 8192,
+      "compared_prompt_chunks": 65,
+      "mark_snapshots_equal": 2,
+      "resumed_prefix": 257,
+      "resume_state_logits_equal": true,
+      "full_active_kv_conv_equal": true,
+      "full_logits_equal": true,
+      "decode_tokens": [
+        597,
+        8055,
+        509,
+        5901,
+        4116,
+        9543,
+        11004,
+        302,
+        278,
+        2936,
+        2837,
+        496,
+        73,
+        10,
+        10601,
+        890
+      ],
+      "vision_rows": false,
+      "case": "text6-8192",
+      "result_sha256": "e3ef945f323aef02de3933bc0d1810a68b2e92dd95ad0dbe705af85ab43faebb"
+    },
+    {
+      "prompt_tokens": 2048,
+      "compared_prompt_chunks": 17,
+      "mark_snapshots_equal": 2,
+      "resumed_prefix": 257,
+      "resume_state_logits_equal": true,
+      "full_active_kv_conv_equal": true,
+      "full_logits_equal": true,
+      "decode_tokens": [
+        597,
+        8055,
+        509,
+        5901,
+        4116,
+        9543,
+        11004,
+        302,
+        278,
+        2936,
+        2837,
+        496,
+        73,
+        10,
+        10601,
+        890
+      ],
+      "vision_rows": false,
+      "case": "text8-2048",
+      "result_sha256": "01fe6c8cad183c70775e243224485fe0fdd62baf3280c195f1697e6f1e086ba0"
+    },
+    {
+      "prompt_tokens": 8192,
+      "compared_prompt_chunks": 65,
+      "mark_snapshots_equal": 2,
+      "resumed_prefix": 257,
+      "resume_state_logits_equal": true,
+      "full_active_kv_conv_equal": true,
+      "full_logits_equal": true,
+      "decode_tokens": [
+        597,
+        8055,
+        509,
+        5901,
+        4116,
+        355,
+        267,
+        1286,
+        4160,
+        302,
+        278,
+        7126,
+        89889,
+        73,
+        90645,
+        10601
+      ],
+      "vision_rows": false,
+      "case": "text8-8192",
+      "result_sha256": "bc70501214e17ea78c0a34398a4be073ae962669745a30d2bef301f0e0359bd0"
+    }
+  ],
+  "controls": [
+    {
+      "checkpoint_bits": 4,
+      "prompt_tokens": 2048,
+      "mutation": "Candidate final attention stores write zero",
+      "exit_code": 1,
+      "required_error": "AttentionFusedByteMismatch",
+      "log_sha256": "ad9d7a7a025bfccf06104d2e48d5323f7d0ba2aa86039cc47cb71925b2311dd5"
+    },
+    {
+      "checkpoint_bits": 6,
+      "prompt_tokens": 2048,
+      "mutation": "Candidate final attention stores write zero",
+      "exit_code": 1,
+      "required_error": "AttentionFusedByteMismatch",
+      "log_sha256": "ad9d7a7a025bfccf06104d2e48d5323f7d0ba2aa86039cc47cb71925b2311dd5"
+    },
+    {
+      "checkpoint_bits": 8,
+      "prompt_tokens": 2048,
+      "mutation": "Candidate final attention stores write zero",
+      "exit_code": 1,
+      "required_error": "AttentionFusedByteMismatch",
+      "log_sha256": "ad9d7a7a025bfccf06104d2e48d5323f7d0ba2aa86039cc47cb71925b2311dd5"
+    }
+  ],
+  "evidence": {
+    "remote_manifest_sha256": "a7f4fd40241922b7f873a8b961c2c05ed71f6a1ae2d64da4dba5b76beeec5cb2",
+    "probe_sha256": "1e4053893a30190b24e27c9dffba24f32ab98179c56059b27ee263a914e803ae",
+    "probe_source_sha256": "7d571c502e44eb75915b66b32018d7aac7ab0a231bad546dd0ac0b3888677cc2",
+    "baseline_shader_sha256": "760ea921822580f7973070fa915808570cbb27214017e5ebe14a5e844faedbfe",
+    "candidate_shader_sha256": "193a16770a6da1085fbde3247d26da7fa22a3ac4f0f937d9233ea0ffedfb11b3",
+    "stage_receipts_sha256": {
+      "smoke": "4d71db1fe5fdb7b20e2a4d51f2595f13b0f38450dde2d2139756cd6da81a8ff7",
+      "positive": "b181649c76b0b30e52059b00812609d3443c0f59b07f2c42619ad76c9a4d74ec",
+      "controls": "205b76de0b3bf69217ec586b255791a127383c823eb8b951ef060adbe5625cf1"
+    }
+  },
+  "combined_coverage": {
+    "text_and_VL_checkpoints": 6,
+    "text_history_cases_at_2k_and_8k": 12,
+    "corrected_projected_image_cases": 3,
+    "other_receipts": [
+      "risk-fused-fullmodel.json",
+      "risk-fused-width-image.json"
+    ]
+  },
+  "remaining": [
+    "M4 fused-attention numerical/performance qualification",
+    "Longer contexts, full suites and other GPU generations",
+    "Fresh image-to-decoder and HTTP image requests",
+    "Independent FP64 difference ledger remains unchanged"
+  ]
+}

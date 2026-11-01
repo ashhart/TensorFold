@@ -14,7 +14,8 @@ const steps = @import("prefill_steps.zig");
 const image_rows = @import("image_rows.zig");
 pub const greedy = @import("greedy.zig");
 
-pub const Options = struct { capacity: usize, chunk: usize = 128, streams: u32 = 8 };
+pub const prompt_rows = @import("lfm3_options").prompt_rows;
+pub const Options = struct { capacity: usize, chunk: usize = prompt_rows, streams: u32 = 8, defer_prompt_head: bool = @import("lfm3_options").defer_prompt_head };
 
 pub const Metal = struct {
     residency: ?mtl.ResidencySet.Follow = null,
@@ -35,8 +36,10 @@ pub const Metal = struct {
     const Pass = struct { at: usize, images: ?image_rows.Images };
 
     pub fn init(gpa: std.mem.Allocator, model: *Model, options: Options) !*Metal {
-        if (options.chunk == 0 or options.capacity == 0 or options.capacity > st.max_context or options.streams == 0)
+        if (options.chunk == 0 or options.chunk > 2048 or options.capacity == 0 or options.capacity > st.max_context or options.streams == 0)
             return error.InvalidLfmOptions;
+        if (@import("lfm3_options").nax_prompt) try model.enableNaxPrompt();
+        if (@import("lfm3_options").tiled_attention) try model.enableTiledAttention();
         const out = try gpa.create(Metal);
         errdefer gpa.destroy(out);
         out.* = .{ .gpa = gpa, .model = model, .options = options, .scratch = try st.Scratch.init(gpa, model.device, &model.config.layer_types, @max(options.chunk, st.batch_rows)) };

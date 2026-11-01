@@ -1,0 +1,184 @@
+{
+  "scope": "M5 TEXT4 cold serving overhead of nonfinite-row attention repair, comparing two combined-enabled builds. Not a default-versus-enabled, MLX, or broad fidelity comparison.",
+  "source_commits": {
+    "before": "8df18abc47568246c0d38b70c2e280521a24b31a",
+    "after": "1e43c6722ad2aa4458413c3ddb1c2fe79c911fe1"
+  },
+  "build": {
+    "source_commits": {
+      "before": "8df18abc4",
+      "after": "1e43c6722"
+    },
+    "command_common": "zig build native -Dcpu=apple_m1 -Dlfm3-residual-ffn=true -Dlfm3-tiled-attention=true -j4 (isolated --cache-dir and --prefix)",
+    "zig_version": "0.17.0",
+    "zig_sha256": "1c5f706db0ed6d55451940f31dc05a6177d05696bc1fa5d853696d04c718b523",
+    "build_exit": {
+      "before": 0,
+      "after": 0
+    },
+    "build_log_sha256": {
+      "before": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "after": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "finite_identity_packet_sha256": "12acac0296114928c4e232806f342543d357a335cd947dd8c68a8595bb35fe26"
+  },
+  "binary_sha256": {
+    "before": "ebbe95416279a5d5304e414a496631d0eddbe089b29d239e66d52c0e0c5f3aa3",
+    "after": "3c987ac2decf021380122a22f2e30c12590045a959e6f160e9ed7570577248bd"
+  },
+  "protocol": {
+    "order": [
+      "before",
+      "after",
+      "after",
+      "before"
+    ],
+    "fresh_owned_servers": 4,
+    "prompt_tokens": [
+      2048,
+      8192
+    ],
+    "output_tokens": 16,
+    "cached_tokens": 0,
+    "context": 70000,
+    "parallel_setting": 4,
+    "exact_tokenize_ids_equal_pinned": true,
+    "baseline_first_last_max_drift": 0.05,
+    "candidate_max_relative_spread": 0.05,
+    "timing_retries": 0,
+    "allocator_or_memory_limit_raised": false,
+    "existing_model_lock_preserved": true,
+    "owned_cleanup_all_exit_zero": true
+  },
+  "results": [
+    {
+      "prompt_tokens": 2048,
+      "baseline_ttft_s": [
+        0.5555327502079308,
+        0.5556167499162257
+      ],
+      "candidate_ttft_s": [
+        0.5581228327937424,
+        0.558499707840383
+      ],
+      "baseline_median_s": 0.5555747500620782,
+      "candidate_median_s": 0.5583112703170627,
+      "baseline_over_candidate": 0.9950985760086297,
+      "baseline_first_last_drift": 0.00015120568186732797,
+      "candidate_relative_spread": 0.0006752546652752933,
+      "stable_at_5percent": true,
+      "output_text_sha256_equal": true,
+      "output_token_id_equality": "not emitted by cold client; consult separate joint-model observation; full-model fidelity remains open",
+      "prompt_ids": "both routes /tokenize exact pinned arrays",
+      "candidate_over_baseline_minus_one": 0.004925566280106652
+    },
+    {
+      "prompt_tokens": 8192,
+      "baseline_ttft_s": [
+        2.413786290679127,
+        2.4111012499779463
+      ],
+      "candidate_ttft_s": [
+        2.43808350013569,
+        2.439888416789472
+      ],
+      "baseline_median_s": 2.4124437703285366,
+      "candidate_median_s": 2.438985958462581,
+      "baseline_over_candidate": 0.9891175313896537,
+      "baseline_first_last_drift": -0.0011123771443847241,
+      "candidate_relative_spread": 0.0007403014103830596,
+      "stable_at_5percent": true,
+      "output_text_sha256_equal": true,
+      "output_token_id_equality": "not emitted by cold client; consult separate joint-model observation; full-model fidelity remains open",
+      "prompt_ids": "both routes /tokenize exact pinned arrays",
+      "candidate_over_baseline_minus_one": 0.011002199703261883
+    }
+  ],
+  "full_model_finite_identity": {
+    "prompt": 128,
+    "teacher_forced_continuation": 16,
+    "observed_logit_rows": 17,
+    "vocabulary": 128000,
+    "all_bytes_equal": true,
+    "all_values_finite": true,
+    "bytes": 4352000,
+    "sha256": "583760763110f09b4557d7d66e4c8801ce2f1996f1052214c9bf99db2cf34cf1",
+    "guarded_run_exit": 0,
+    "receipt_sha256": "16fb015982b855a9a5e65fe3a9c6b03f3557136e0ac0acbdbf484ee473826a68"
+  },
+  "interpretation": "Repair costs +0.493% median TTFT at2k and +1.100% at8k versus the prior enabled route. Both cells satisfy the predeclared stability gates. No speedup claim.",
+  "limitations": [
+    "Two observations per route per prompt length; not a confidence interval.",
+    "Serving text digests equal; no new claim of generated-token-ID equality.",
+    "Actual per-request route counters are not in the served binaries; both flags and production source are pinned, with separate model identity test.",
+    "No full kernel runner or launch-limit suite is part of this timing receipt.",
+    "Finite identity is bounded to the pinned128prompt+16teacher-forced observations; broader FP32/official-BF16 qualification remains separate."
+  ],
+  "packet_pins_sha256": "28f8ac96f9c832401cb149224934831004406df629fb51132b7ffd15e5e0830e",
+  "packet_archive_sha256": "b5a4cdb5c8df0713975e208886abf233ad4d066d066cfaa8666ba7a03566938f",
+  "raw_sha256": {
+    "text-4-0-public.cold-2048.json": "42f3c8d5a1c527628899c7638163a500d69f90d4a608d964119ef2fdfea3d186",
+    "text-4-1-candidate.cold-8192.client.log": "3f28a98187cfcd258820dd43746740fca4427e4c64b1bab382c948a18f58a20e",
+    "text-4-1-candidate.before.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+    "text-4-0-public.before.health": "e41f1fa5fa63b41398632c5ab9622e881079971c2bec31b6d54da709ab256599",
+    "text-4-0-public.after.metrics": "77af64b73088c8eb7e87376026210ea16e41529defda7b002d5cb26d76ec78dd",
+    "text-4-3-public.cold-8192.client.log": "927d83cc152d70b3fec8e660d04e1c8dd1fac690a66237bd1564698ba58cf4e0",
+    "text-4-3-public.cold-2048.tokenize.response.json": "7f59448440e4d3f003e40ef5773b12b7ef17c6808bc21ea16cb1bf3807ad06f6",
+    "text-4-1-candidate.before.health": "e41f1fa5fa63b41398632c5ab9622e881079971c2bec31b6d54da709ab256599",
+    "text-4-1-candidate.after.metrics": "e522d21eda682d7d49c01eb82a9657df5f9ba7d630483972c5e29523753d82d0",
+    "text-4-0-public.cold-8192.tokenize.request.json": "c196be253a6a7f7928e3f427e0faad10300dc3216279a3ae8a80a9cd46f77dab",
+    "text-4-1-candidate.cold-2048.tokenize.response.json": "7f59448440e4d3f003e40ef5773b12b7ef17c6808bc21ea16cb1bf3807ad06f6",
+    "text-4-1-candidate.before.metrics": "87c6f7a1aec5b481154e085cb4afccaa94085b879a25ec4f79e2a0ae02751aeb",
+    "text-4-0-public.cold-8192.json": "299abc9057ea882e4ca13ae47381c2ea67ec71f124531bc3949f5c7832af31e8",
+    "events.json": "2b476e74299788cb570207d854c96b861dcb81c064a465b053ba4dc634eaafc1",
+    "text-4-3-public.cold-8192.tokenize.request.json": "c196be253a6a7f7928e3f427e0faad10300dc3216279a3ae8a80a9cd46f77dab",
+    "text-4-0-public.cold-2048.tokenize.response.json": "7f59448440e4d3f003e40ef5773b12b7ef17c6808bc21ea16cb1bf3807ad06f6",
+    "text-4-1-candidate.cold-8192.tokenize.request.json": "c196be253a6a7f7928e3f427e0faad10300dc3216279a3ae8a80a9cd46f77dab",
+    "text-4-0-public.cold-2048.client.log": "43f8b34131523a069ead62c037d26c404d478fc1ddda5f1536d3a68f0b7b2b45",
+    "text-4-1-candidate.cold-2048.json": "ea7720c9198cd93be8628c875b6464efc5fcaa4deaf718843e0acdcef300f0e4",
+    "text-4-2-candidate.after.metrics": "074c5325d47924479cc1844e9ce98ad12aaee4c07cc61cd206360fa73d8419a4",
+    "text-4-2-candidate.before.health": "e41f1fa5fa63b41398632c5ab9622e881079971c2bec31b6d54da709ab256599",
+    "text-4-2-candidate.cold-2048.tokenize.response.json": "7f59448440e4d3f003e40ef5773b12b7ef17c6808bc21ea16cb1bf3807ad06f6",
+    "text-4-3-public.after.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+    "text-4-3-public.cold-2048.tokenize.request.json": "f69a5dcb97950c19f12fd93b89b288ec0dd214a89ed83fbe5fb1e60270f6dabd",
+    "text-4-0-public.before.metrics": "850d5807aaa3b32d412334a2c201d5878023930b830922cb0c251bd4e2e5d9d9",
+    "text-4-1-candidate.cold-2048.tokenize.request.json": "f69a5dcb97950c19f12fd93b89b288ec0dd214a89ed83fbe5fb1e60270f6dabd",
+    "text-4-2-candidate.server.log": "2e60a35122446ed99d437ffa53e1f7a3732c53cb2e03c4d7acaa8ea9698473bb",
+    "text-4-2-candidate.before.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+    "text-4-2-candidate.cold-2048.client.log": "75bd26d4fcf78def26742d1fb631d21fa34f8c082038ea281870e4adba5127bf",
+    "text-4-1-candidate.cold-8192.json": "ece0444b55565afb90207660500654c56e64f57d9e66761a9d22bc294a965004",
+    "text-4-0-public.cold-2048.tokenize.request.json": "f69a5dcb97950c19f12fd93b89b288ec0dd214a89ed83fbe5fb1e60270f6dabd",
+    "text-4-0-public.after.health": "96185b80b9e6bc456410a78382a59c47e8cdf331b0fc871e538d9c0ca6b75f75",
+    "text-4-1-candidate.after.health": "359c581fd4470bccce5c1371da6e01f7943847df537cdab096bdcd61862d173b",
+    "text-4-0-public.server.log": "d2c977d85347b019d36ca9b73d30532a0be488381fb326f8988f373656d9913a",
+    "text-4-3-public.cold-8192.json": "2eb31179323698e1a80c9cf726cddd0ea648b9696feeeaaec85cca4034038c4c",
+    "text-4-0-public.after.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+    "text-4-1-candidate.server.log": "3832c305427ecbd44af2ebc35977b1013ff0896ced878d904633bc58bed94537",
+    "text-4-3-public.after.health": "ca6f5ab8f24552b9436181c0358b18512a93225b17311efd9b09a21805b15d27",
+    "text-4-2-candidate.before.metrics": "237b97431ebcc704c60a59294fc10eae1eee497d0aa84ae96b9c6894d6a1c487",
+    "text-4-2-candidate.cold-8192.tokenize.request.json": "c196be253a6a7f7928e3f427e0faad10300dc3216279a3ae8a80a9cd46f77dab",
+    "text-4-1-candidate.cold-2048.client.log": "77e1d8f1266dbe28b7ce935d1c91f6d18baa1b2a8d189a497d9e42b60d6e7382",
+    "manifest.json": "d5178b371c4576392e5ea7f039e9d28fa00e8a8a2d1c8e4fff7d5308ecae82ed",
+    "text-4-2-candidate.after.health": "70dcace072d916a0ba6b1700bd1e6cac3e6b2714c52b8dfca11f709c9567063e",
+    "text-4-3-public.cold-2048.client.log": "fb28a9b2f2412a5d993e216c56c0d108426b129e4c8ff2040e3f64b691a7957e",
+    "text-4-2-candidate.cold-8192.tokenize.response.json": "1e924ba32cf41b050291eaf02707b996b9f656171f816c15c24c7045a92600ee",
+    "text-4-3-public.cold-2048.json": "3253f3a4103ef69dd865c5147e640fab60e7b0a9fc170591788c19818edf79b5",
+    "records.json": "c66a77433950fcb6b2afce5d9f28d7b92b49c3388174ad3a2d56d21a10a3c9e8",
+    "text-4-2-candidate.cold-8192.json": "8687ad013df3dad3af1f933ea6159229d2ffb2c391678d040f3458ad10e19f30",
+    "text-4-2-candidate.after.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+    "text-4-1-candidate.cold-8192.tokenize.response.json": "1e924ba32cf41b050291eaf02707b996b9f656171f816c15c24c7045a92600ee",
+    "text-4-2-candidate.cold-8192.client.log": "acd250d72a4201810caf3f0a89973dafa40ba7207e737b629b81ca472ec8bbe3",
+    "text-4-3-public.before.metrics": "b7e2f9da4dbd325b275cb07c66a50f60672d7ca53dd59025ef8269bc26e82e7b",
+    "text-4-0-public.cold-8192.tokenize.response.json": "1e924ba32cf41b050291eaf02707b996b9f656171f816c15c24c7045a92600ee",
+    "text-4-0-public.before.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+    "text-4-0-public.cold-8192.client.log": "fd58f2fe167fb1644e132ca2c6b7ed24e9dcc2eb7571206795efa02221150021",
+    "text-4-3-public.server.log": "0d4ef6e1fb9d32e5948476b870e9b94a4b3e670f89109be49c073a1be922d8c5",
+    "text-4-1-candidate.after.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+    "text-4-3-public.before.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+    "text-4-3-public.before.health": "e41f1fa5fa63b41398632c5ab9622e881079971c2bec31b6d54da709ab256599",
+    "text-4-3-public.after.metrics": "b7c374c0d2d0903d4c0e626d19014aff9cae1859d118b92db46ff0fbf9143c15",
+    "text-4-2-candidate.cold-2048.json": "da11dd38b92c441439f7eda849a6ce0a35615510877434f95c135fc795049dc6",
+    "text-4-3-public.cold-8192.tokenize.response.json": "1e924ba32cf41b050291eaf02707b996b9f656171f816c15c24c7045a92600ee",
+    "text-4-2-candidate.cold-2048.tokenize.request.json": "f69a5dcb97950c19f12fd93b89b288ec0dd214a89ed83fbe5fb1e60270f6dabd"
+  }
+}
