@@ -1,6 +1,7 @@
 //! Device plumbing of the Gemma 4 E4B XPU runner: safetensors shards (mmap), Level Zero device, launches, GPU time.
 const std = @import("std");
 const ze = @import("ze");
+const st = @import("core").safetensors;
 
 pub const alloc = std.heap.c_allocator;
 
@@ -21,36 +22,35 @@ pub fn now() f64 {
 
 pub const Tensor = struct { name: []const u8, dtype: []const u8, shape: [8]u64, rank: usize, bytes: []const u8 };
 
-/// Appends a safetensors file's tensors (offsets checked against the file); names and dtypes live in the header
-fn parseShard(gpa: std.mem.Allocator, file: []const u8, out: *std.ArrayList(Tensor)) !std.json.Parsed(std.json.Value) {
+/// A dtype's safetensors name ("BF16", "F8_E4M3", ...): core's tag in upper case.
+fn dtypeName(d: st.DType) []const u8 {
+    return switch (d) {
+        inline else => |tag| comptime blk: {
+            const s = @tagName(tag);
+            var b: [s.len]u8 = undefined;
+            for (s, 0..) |ch, i| b[i] = std.ascii.toUpper(ch);
+            const out = b;
+            break :blk &out;
+        },
+    };
+}
+
+/// Appends a safetensors file's tensors as core indexes them (ranges, sizes, overlaps checked); names live in arena.
+fn parseShard(gpa: std.mem.Allocator, file: []const u8, out: *std.ArrayList(Tensor)) !std.heap.ArenaAllocator {
     if (file.len < 8) return error.BadSafetensors;
-    const n = std.mem.readInt(u64, file[0..8], .little);
-    if (n > file.len - 8) return error.BadSafetensors;
+    const n = try st.headerSize(std.mem.readInt(u64, file[0..8], .little), file.len);
     const data = file[8 + n ..];
-    const parsed = std.json.parseFromSlice(std.json.Value, gpa, file[8 .. 8 + n], .{}) catch return error.BadSafetensors;
-    errdefer parsed.deinit();
-    if (parsed.value != .object) return error.BadSafetensors;
-    var it = parsed.value.object.iterator();
-    while (it.next()) |e| {
-        if (std.mem.eql(u8, e.key_ptr.*, "__metadata__")) continue;
-        if (e.value_ptr.* != .object) return error.BadSafetensors;
-        const o = e.value_ptr.object;
-        const dtype = o.get("dtype") orelse return error.BadSafetensors;
-        const shape = o.get("shape") orelse return error.BadSafetensors;
-        const span = o.get("data_offsets") orelse return error.BadSafetensors;
-        if (dtype != .string or shape != .array or span != .array or span.array.items.len != 2 or shape.array.items.len > 8) return error.BadSafetensors;
-        var t: Tensor = .{ .name = e.key_ptr.*, .dtype = dtype.string, .shape = @splat(1), .rank = shape.array.items.len, .bytes = &.{} };
-        for (shape.array.items, 0..) |x, i| {
-            if (x != .integer or x.integer < 0) return error.BadSafetensors;
-            t.shape[i] = @intCast(x.integer);
-        }
-        const a = span.array.items[0];
-        const b = span.array.items[1];
-        if (a != .integer or b != .integer or a.integer < 0 or b.integer < a.integer or @as(usize, @intCast(b.integer)) > data.len) return error.BadSafetensors;
-        t.bytes = data[@intCast(a.integer)..@intCast(b.integer)];
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    errdefer arena.deinit();
+    const names = try st.parseHeader(arena.allocator(), file[8..][0..n], data.len);
+    const had = out.items.len;
+    errdefer out.shrinkRetainingCapacity(had);
+    for (names.keys(), names.values()) |name, e| {
+        var t: Tensor = .{ .name = name, .dtype = dtypeName(e.dtype), .shape = @splat(1), .rank = e.rank, .bytes = data[e.begin..e.end] };
+        for (e.shape[0..e.rank], 0..) |d, i| t.shape[i] = d;
         try out.append(gpa, t);
     }
-    return parsed;
+    return arena;
 }
 
 /// A whole file mapped read-only (the caller never unmaps it: the process is short-lived).
@@ -87,7 +87,7 @@ pub fn writeFile(path: []const u8, parts: []const []const u8) !void {
 pub const Checkpoint = struct {
     tensors: std.ArrayList(Tensor) = .empty,
     maps: std.ArrayList([]const u8) = .empty,
-    headers: std.ArrayList(std.json.Parsed(std.json.Value)) = .empty,
+    headers: std.ArrayList(std.heap.ArenaAllocator) = .empty,
 
     pub fn addShard(c: *Checkpoint, path: []const u8) !void {
         const bytes = try mapFile(path);
@@ -277,3 +277,37 @@ pub const Dev = struct {
         d.total.clearRetainingCapacity();
     }
 };
+
+test "a shard header is read as core reads it: wrong sizes, overlaps and malformed entries are refused, names kept" {
+    const a = std.testing.allocator;
+    const bad = [_][]const u8{
+        "[]",
+        "{\"w\":{\"dtype\":\"U8\",\"shape\":[],\"data_offsets\":[0,4]}}",
+        "{\"w\":{\"dtype\":\"U8\",\"shape\":[2],\"data_offsets\":[0,2]},\"v\":{\"dtype\":\"U8\",\"shape\":[2],\"data_offsets\":[1,3]}}",
+        "{\"w\":{\"dtype\":\"Q4\",\"shape\":[4],\"data_offsets\":[0,4]}}",
+        "{\"w\":{\"dtype\":\"U8\",\"shape\":[1,1,1,1,1,4],\"data_offsets\":[0,4]}}",
+    };
+    for (bad) |header| {
+        var file: [8 + 128]u8 = @splat(0);
+        std.mem.writeInt(u64, file[0..8], header.len, .little);
+        @memcpy(file[8..][0..header.len], header);
+        var out: std.ArrayList(Tensor) = .empty;
+        defer out.deinit(a);
+        if (parseShard(a, file[0 .. 8 + header.len + 4], &out)) |arena| {
+            arena.deinit();
+            return error.TestUnexpectedResult;
+        } else |_| try std.testing.expectEqual(@as(usize, 0), out.items.len);
+    }
+    const header = "{\"__metadata__\":{\"format\":\"mlx\"},\"w\":{\"dtype\":\"BF16\",\"shape\":[2,1],\"data_offsets\":[0,4]}}";
+    var file: [8 + header.len + 4]u8 = @splat(0);
+    std.mem.writeInt(u64, file[0..8], header.len, .little);
+    @memcpy(file[8..][0..header.len], header);
+    var out: std.ArrayList(Tensor) = .empty;
+    defer out.deinit(a);
+    const arena = try parseShard(a, &file, &out);
+    defer arena.deinit();
+    try std.testing.expectEqual(@as(usize, 1), out.items.len);
+    try std.testing.expectEqualStrings("BF16", out.items[0].dtype);
+    try std.testing.expectEqual(@as(usize, 2), out.items[0].rank);
+    try std.testing.expectEqual(@as(usize, 4), out.items[0].bytes.len);
+}
