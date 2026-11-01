@@ -300,7 +300,7 @@ test "a 9B target refuses the 27B's DFlash2 and a 9B-shaped DFlash2 by name from
     }
     try std.testing.expectError(error.NotStockDFlash2, admitFolders(nine, small));
 }
-// Ornith-1.5-9B-DFlash's config.json, as published.
+// z-lab/Qwen3.5-9B-DFlash's config.json, as published (Ornith-1.5-9B-DFlash publishes the same file).
 const v1_fixture =
     \\{"architectures":["DFlashDraftModel"],"attention_bias":false,"attention_dropout":0.0,
     \\"auto_map":{"AutoModel":"dflash.DFlashDraftModel"},"bos_token_id":null,
