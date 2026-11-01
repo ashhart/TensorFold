@@ -121,8 +121,13 @@ pub const Share = struct {
 
     /// A step that took `ns` while `decoding` streams were live: the decode time it owes them.
     pub fn stepped(s: *Share, ns: i64, decoding: bool) void {
-        if (s.p >= 1 or !decoding) return;
-        const owed = @as(f64, @floatFromInt(ns)) * (1 - s.p) / s.p;
+        s.steppedAt(ns, decoding, s.p);
+    }
+
+    /// `stepped` with this step's own share `p` (TENSORFOLD_PREFILL_ORDER=srpt varies it a step at a time).
+    pub fn steppedAt(s: *Share, ns: i64, decoding: bool, p: f64) void {
+        if (p >= 1 or !decoding) return;
+        const owed = @as(f64, @floatFromInt(ns)) * (1 - p) / p;
         s.debt_ns +|= @intFromFloat(@min(owed, @as(f64, @floatFromInt(std.math.maxInt(i64) / 2))));
     }
 
@@ -221,12 +226,29 @@ fn step(h: *LaneHost, at: usize) u64 {
 /// A long prompt's step, timed while its share owes decoders a part of it; its rows as `step` counts them.
 fn longStep(h: *LaneHost, at: usize) u64 {
     const decoding = runnable(h) > 0;
+    if (h.srpt.on) return srptStep(h, at, decoding);
     // timed on the host, so a step owed to decoders ends on the GPU; at p = 1 none is owed, and no earlier mark stays
     h.filling.items[at].stream.settle_step = decoding and h.share.p < 1;
     if (h.share.p >= 1) return step(h, at);
     const t0 = std.Io.Clock.awake.now(h.io);
     const rows = step(h, at);
     h.share.stepped(@intCast(t0.durationTo(std.Io.Clock.awake.now(h.io)).toNanoseconds()), decoding);
+    return rows;
+}
+
+/// TENSORFOLD_PREFILL_ORDER=srpt: a step timed always, its share the floor when a reply has less work left.
+fn srptStep(h: *LaneHost, at: usize, decoding: bool) u64 {
+    const job = h.filling.items[at];
+    var buf: [64]i64 = undefined;
+    const left = @import("lane_host_srpt.zig").replyTokens(h.core.live.items, &buf);
+    const first = h.srpt.decodeFirst(remaining(h, job), left);
+    const p = h.srpt.share(first);
+    h.filling.items[at].stream.settle_step = decoding and p < 1;
+    const t0 = std.Io.Clock.awake.now(h.io);
+    const rows = step(h, at);
+    const ns: i64 = @intCast(t0.durationTo(std.Io.Clock.awake.now(h.io)).toNanoseconds());
+    h.srpt.filled(if (rows == std.math.maxInt(u64)) 0 else rows, ns); // no progress shown is no sample
+    h.share.steppedAt(ns, decoding, p);
     return rows;
 }
 
