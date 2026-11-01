@@ -222,6 +222,17 @@ pub const Drafter = struct {
         }
     }
 
+    pub fn projectMany(x: *Drafter, ls: []const Affine4, in: u64, xs: u64, outs: []const u64, rows: usize) !void {
+        const A = cuda.qlinear.Affine4Kernels;
+        if (ls.len < 2 or ls.len > A.segs_max or ls.len != outs.len) return error.ShapeMismatch;
+        if (x.k.affine.pdl) {
+            var many: [A.segs_max]A.Out = undefined;
+            for (ls, outs, many[0..ls.len]) |l, out, *v| v.* = .{ .q = l, .out = out };
+            return x.k.affine.verifyManyRows(x.s, in, xs, many[0..ls.len], rows);
+        }
+        for (ls, outs) |l, out| try x.project(l, in, xs, out, rows);
+    }
+
     fn copy2d(x: *Drafter, dst: u64, dst_pitch: usize, src: u64, src_pitch: usize, width: usize, rows: usize) !void {
         const p: cuda.abi.Memcpy2D = .{ .src = src, .src_pitch = src_pitch, .dst = dst, .dst_pitch = dst_pitch, .width = width, .height = rows };
         try x.d.check(x.d.api.cuMemcpy2DAsync_v2(&p, x.s.handle), "cuMemcpy2DAsync");
@@ -252,8 +263,7 @@ pub const Drafter = struct {
         try x.k.act.groupSums(x.s, s.att, qw, s.xs, rows, qw);
         try x.project(l.o, s.att, s.xs, s.o, rows);
         try x.k.norms.addRmsTail(x.s, s.o, s.h[cur], l.pre_feedforward, s.hn, s.nmlp, s.xs, rows, c.hidden, cfg.eps, .{ .round = true, .branch = l.post_attention });
-        try x.project(l.gate, s.nmlp, s.xs, s.gate, rows);
-        try x.project(l.up, s.nmlp, s.xs, s.up, rows);
+        try x.projectMany(&.{ l.gate, l.up }, s.nmlp, s.xs, &.{ s.gate, s.up }, rows);
         try x.k.act.geglu(x.s, s.gate, c.intermediate, s.up, c.intermediate, s.act, s.xs, rows, c.intermediate);
         try x.project(l.down, s.act, s.xs, s.y, rows);
         const next = if (i + 1 < c.layers) x.w.layers[i + 1].input_norm else x.w.norm;
