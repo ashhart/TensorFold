@@ -50,6 +50,23 @@ Intel Arc Pro B70 Graphics (32.5 GB maximum single allocation), Linux 7.0.0 (`xe
 Nemotron MLX 4-bit checkpoint (`TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit`, revision `d9d758fb83953437f7263256b0d96157e2a348b8`,
 729 tensors, 17.27 GiB of weights). The commit under test is the head of the pull request.
 
+LFM3-1.7B (`LiquidAI/LFM3-1.7B-MLX-4bit`, MLX affine 4-bit, group 64) on an Intel Iris Xe laptop GPU (Gen12LP, `tgllp`, 96 EUs, no
+DPAS) under WSL2 (Ubuntu 24.04, 8 GB given to WSL), Ubuntu's compute runtime 23.43.27642 and Level Zero loader 1.16, Zig 0.17.0,
+`zig build xpu-native -Dxpu-device=tgllp` (DPAS off, so the server is built without the Qwen3.8-27B runner):
+
+| Setup | Decode, c=1, `--no-drafts` | Decode, c=1, copy drafts | Decode, c=4, aggregate | TTFT, 1,024 tokens | TTFT, 8,192 tokens | Memory (`serve --context 16384`) |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| Iris Xe, LFM3-1.7B MLX 4-bit | 15.6 to 16.8 tok/s | 15.9 (chat) to 26.3 (prose) tok/s | 25 to 32 tok/s | 11.7 to 12.2 s | 116.3 to 117.7 s | 1.33 GB device allocation, 448 MB host resident |
+
+Decode, c=1: two short chats (160 tokens), a 1,001-token prose prompt and a 601-token code prompt (128 tokens), greedy, three runs
+each, with copy drafts (the default) and with `--no-drafts`; c=4: four concurrent 128-token completions of distinct 32-token prompts,
+six runs a mode, with or without drafts; TTFT: prompts of numbered item sentences, one token generated; three runs each, through
+`/v1/completions`. Copy-draft gains depend on how repetitive the text is: prose and code that repeat their own context decode at 26
+and 22 tok/s, the chats, with few copies to draft, at the speed without drafts. A `/v1/chat/completions` request with the
+checkpoint's chat template answers (thinking on, `finish_reason` stop).
+With `--parallel N` each stream has its own sequence (about 196 MiB of KV at 16,384 tokens); a second chat turn over an
+8,037-token document resumes from the prompt cache in 0.80 s instead of 122.6 s, with the same reply.
+
 ## Measurements
 
 Decode, 128 greedy tokens from a 5-token prompt: 5.72 ms/token, 175 tok/s (`tensorfold-xpu run`, five runs on different

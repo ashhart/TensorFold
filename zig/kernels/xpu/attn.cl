@@ -2,6 +2,9 @@
 #define HD 128   // head dim
 #define GQ 16    // query heads per KV head (32 / 2)
 #define TILE 64  // keys per online-softmax step
+#ifndef QG
+#define QG 64 // MLX group size (the _g32 images: 32)
+#endif
 
 inline float bf(ushort v) { return as_float((uint)v << 16); }
 inline ushort to_bf(float f) {
@@ -11,15 +14,15 @@ inline ushort to_bf(float f) {
 }
 inline float bf_round(float f) { return as_float((uint)to_bf(f) << 16); }
 
-// y[row] = sum_i x[i] * (q[row][i] * scale + bias), groups of 64; one 16-lane sub-group per row, 4 rows a work-group.
+// y[row] = sum_i x[i] * (q[row][i] * scale + bias), groups of QG; one 16-lane sub-group per row, 4 rows a work-group.
 inline float qmv_row(__global const uint *w, __global const ushort *scales, __global const ushort *biases,
                      __global const ushort *x, uint row, uint in_dim) {
     const uint lane = get_sub_group_local_id();
     const uint words = in_dim / 8;
-    const uint groups = in_dim / 64;
+    const uint groups = in_dim / QG;
     float acc = 0.0f;
     for (uint wi = lane; wi < words; wi += 16) {
-        const uint g = wi / 8;
+        const uint g = wi / (QG / 8);
         const float sc = bf(scales[row * groups + g]);
         const float bi = bf(biases[row * groups + g]);
         const uint pk = w[row * words + wi];

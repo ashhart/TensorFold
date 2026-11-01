@@ -1,8 +1,15 @@
 // Nemotron-H prompt rows (any count) with the decode step's arithmetic: each output sums as the one-token path does.
 #define SG 16
+#ifndef PR
 #define PR 8 // prompt rows a sub-group holds
-#define PO 8 // output rows a sub-group holds: one load and one sum of a word's inputs serve all of them
+#endif
+#ifndef PO
+#define PO 8 // output rows a sub-group holds: one load and one sum of a word's inputs serve all (nem_prow_gen12: 4)
+#endif
 #define PSG (16 / PO) // sub-groups a work-group: 16 output rows
+#ifndef QG
+#define QG 64 // MLX group size (the _g32 images: 32)
+#endif
 inline float bf(ushort v) { return as_float((uint)v << 16); }
 inline ushort to_bf(float f) {
     uint u = as_uint(f);
@@ -34,7 +41,7 @@ inline ushort to_bf(float f) {
 inline void ptile(__global const uint *w, __global const ushort *scales, __global const ushort *biases, __global const ushort *x, const ulong *xo,
                   uint n, ulong row0, uint nout, uint in_dim, float acc[PR][PO]) {
     const uint lane = get_sub_group_local_id();
-    const uint words = in_dim / 8, groups = in_dim / 64;
+    const uint words = in_dim / 8, groups = in_dim / QG;
 #pragma unroll
     for (uint r = 0; r < PR; r++)
 #pragma unroll
@@ -45,8 +52,8 @@ inline void ptile(__global const uint *w, __global const ushort *scales, __globa
         for (uint o = 0; o < PO; o++) {
             const ulong row = row0 + (o < nout ? o : 0);
             const uint pk = w[row * words + wi];
-            sc[o] = bf(scales[row * groups + wi / 8]);
-            bi[o] = bf(biases[row * groups + wi / 8]);
+            sc[o] = bf(scales[row * groups + wi / (QG / 8)]);
+            bi[o] = bf(biases[row * groups + wi / (QG / 8)]);
 #pragma unroll
             for (uint j = 0; j < 8; j++) q[o][j] = (float)((pk >> (4 * j)) & 15u);
         }
