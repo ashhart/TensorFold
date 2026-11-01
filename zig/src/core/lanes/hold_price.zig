@@ -30,6 +30,41 @@ pub fn holdMs(costs: []const HoldCost, streams: usize, depth: i64) f64 {
     return at_lo + t * (atDepth(costs, hi, depth) - at_lo);
 }
 
+/// The padded pass's price; zero-depth lanes take no block.
+pub fn passMs(costs: []const HoldCost, depths: []const i64) f64 {
+    var held: usize = 0;
+    var deepest: i64 = 0;
+    for (depths) |d| if (d > 0) {
+        held += 1;
+        deepest = @max(deepest, d);
+    };
+    return if (held == 0) 0 else holdMs(costs, held, deepest);
+}
+
+/// The observed prefix's expected drafts, optimistic about conditionals not tried yet.
+pub fn observedGain(probabilities: []const f64, tried: usize, count: usize) f64 {
+    const n = @min(count, @min(tried, probabilities.len));
+    var survival: f64 = 1;
+    var gain: f64 = 0;
+    for (probabilities[0..n]) |chance| {
+        survival *= chance;
+        gain += survival;
+    }
+    return gain + survival * @as(f64, @floatFromInt(count - n));
+}
+
+/// Ignore work settled outside this round; the clock measures only what follows its start.
+pub fn startRound(engine: anytype) void {
+    if (engine.backend.draft_timing) |t| _ = t.take(t.ptr);
+    engine.clock.start();
+}
+
+/// A deferred hold belongs to the round that settles it, not the round that just launches another hold.
+pub fn observedHeadMs(backend: anytype, rule: anytype, depths: []const i64) f64 {
+    if (backend.draft_timing) |t| return t.take(t.ptr);
+    return rule.headMs(depths);
+}
+
 /// Interpolate neighboring depths, or extrapolate the nearest end segment (one alone: as timed).
 fn atDepth(costs: []const HoldCost, streams: u32, depth: i64) f64 {
     var a: ?HoldCost = null;

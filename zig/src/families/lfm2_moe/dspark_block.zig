@@ -173,6 +173,13 @@ pub fn end(cb: mtl.CommandBuffer, e: mtl.ComputeEncoder) !void {
     return finish(cb, e);
 }
 
+pub fn takeHoldMs(ptr: *anyopaque) f64 {
+    const d: *Drafter = @ptrCast(@alignCast(ptr));
+    const ms = d.hold_spent_ms;
+    d.hold_spent_ms = 0;
+    return ms;
+}
+
 /// A GPU event a hold signals instead of being waited on, and the value it sets.
 pub const Signal = struct { event: mtl.Event, value: u64 };
 
@@ -263,6 +270,7 @@ pub fn hold(d: *Drafter, blocks: []const Block, signal: ?Signal) !?mtl.CommandBu
         return kept;
     }
     try finish(cb, e);
+    d.hold_spent_ms += (cb.gpuEnd() - cb.gpuStart()) * 1000;
     const picks = s.picks.slice(Pick, d.config.block * ds.pass_rows);
     for (blocks, 0..) |b, bi| {
         for (b.lane.held[0..steps], 0..) |*h, i| {

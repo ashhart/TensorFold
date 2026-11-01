@@ -96,7 +96,25 @@ without the head verifies by the core's depth rule, from each stream's measured 
 
 A stream with a copy ahead verifies the copy and asks no hold, and a drafting stream prices its copy
 windows by its own copies. The lane core also weighs the hold pass itself: the drafter times holds of 1 to 16
-blocks at load and corrects those prices toward each settled hold's GPU time. The lane core prices each round from the drafter's confidence chances and measured hold costs.
+blocks at load and corrects those prices toward each settled hold's GPU time. Confidence still allocates verify
+rows unchanged, but a hold's expected gain is capped by that stream's actual head acceptance. Its separate
+hold-value estimate starts each newly tried conditional from the observed outcome; later trials use the
+existing depth learning rate. The reservation fallback keeps its original prior-initialized rates, and untested
+conditionals do not discount the confidence gain. The same fresh-row and padded-pass pricing runs for one
+stream and many, without disabling drafts at any stream count.
+
+A hold suppressed by this acceptance cap retains its context and uses the existing periodic probe backoff to
+try again. A probe requires a positive fresh reservation and is included in the whole padded pass's price
+before other holds are selected. Actual profitable trials restore ordinary holds; copies do not train the
+head acceptance estimate. These controller rules do not establish throughput qualification: that still needs
+the complete same-head no-drafter/BF16/8-bit matrix, including sampled one-stream replies.
+
+Observed fixed overhead excludes the completed hold's GPU time in the round that actually settles it, not
+the modeled price of a new unwaited hold. Work settled outside a round is discarded before its clock starts.
+Reading this accounting never submits GPU work or adds a wait; backends without it retain modeled pricing.
+
+[Controller regression and native API receipts](../receipts/dspark-chain-restack/hold-value-controller.json)
+record the constructed timing cases and source hashes; they are not device-throughput qualification.
 
 `tf-lfm2-dspark` also prints the confidence
 head against its fp32 reference and times shared holds of 2 to 16 streams.

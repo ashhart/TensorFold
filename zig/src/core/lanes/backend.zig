@@ -71,10 +71,13 @@ pub const DraftRequest = struct {
 
 pub const Committed = struct { ptr: *anyopaque, call: *const fn (*anyopaque) void };
 pub const RoundObserver = struct { ptr: *anyopaque, done: *const fn (*anyopaque, []const []const u32) void };
+/// Already-settled draft GPU ms since the last take; reading this never submits or waits for GPU work.
+pub const DraftTiming = struct { ptr: *anyopaque, take: *const fn (*anyopaque) f64 };
 
 pub const Backend = struct {
     proposal_head: ?*const @import("proposal_head.zig").Service = null,
     round_observer: ?RoundObserver = null,
+    draft_timing: ?DraftTiming = null,
     first_before_draft: bool = false,
     /// A single-slot target lets its asynchronous keep progress between host steps before drafting again.
     defer_lone_draft: bool = false,
