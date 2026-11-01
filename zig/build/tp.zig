@@ -17,16 +17,24 @@ pub fn verbsModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     return b.createModule(.{ .root_source_file = b.path("zig/src/fabric/verbs.zig"), .target = target, .optimize = optimize, .link_libc = true });
 }
 
-/// The `tp` module over `cuda` (an engine passes its own runtime module); verbs (zig/src/fabric/verbs.zig) for RoCE.
+var tp_verbs: std.AutoHashMapUnmanaged(*std.Build.Module, *std.Build.Module) = .empty;
+var tp_modules: std.AutoHashMapUnmanaged(struct { cuda: *std.Build.Module, verbs: *std.Build.Module }, *std.Build.Module) = .empty;
+
+/// The `tp` module over `cuda` (an engine passes its own runtime module), one per cuda module; verbs for RoCE.
 pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module) *std.Build.Module {
-    return moduleWith(b, target, optimize, cuda, verbsModule(b, target, optimize));
+    const verbs = tp_verbs.getOrPut(b.allocator, cuda) catch @panic("OOM");
+    if (!verbs.found_existing) verbs.value_ptr.* = verbsModule(b, target, optimize);
+    return moduleWith(b, target, optimize, cuda, verbs.value_ptr.*);
 }
 
-/// Same as `module`, using a verbs module the caller already owns.
+/// Same as `module`, using a verbs module the caller already owns; one per (cuda, verbs), so families share it.
 pub fn moduleWith(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, verbs: *std.Build.Module) *std.Build.Module {
+    const slot = tp_modules.getOrPut(b.allocator, .{ .cuda = cuda, .verbs = verbs }) catch @panic("OOM");
+    if (slot.found_existing) return slot.value_ptr.*;
     const m = b.createModule(.{ .root_source_file = b.path("zig/src/fabric/tp/tp.zig"), .target = target, .optimize = optimize, .link_libc = true });
     m.addImport("cuda", cuda);
     m.addImport("verbs", verbs);
+    slot.value_ptr.* = m;
     return m;
 }
 
