@@ -100,7 +100,8 @@ for each pass to end. A pass that takes more rows reads each routed expert's wei
 comes sooner. `TF_GLM_CHUNK_SOLO=4096` lets a pass take two of those chunks when no other stream is decoding as it
 starts. With one decoding, or with `prompt_logprobs` or image rows, the pass takes 2,048. Beside `--drafter`, DFlash2
 reads a solo pass's taps whole and keeps the prompt's last 2,048 rows as before; its tap buffer holds 4,096 rows, 80 MiB
-more on each rank.
+more on each rank. Solo passes take the place of `TF_GLM_PROMPT_PAIR`'s paired steps, whose second set of buffers they
+do not hold.
 
 The grid does not move, so warm turns resume where they do unset, and streams decoding beside a prompt see the same
 passes. Replies are the same bytes either way. Two costs remain:
