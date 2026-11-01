@@ -45,6 +45,7 @@ pub const asset_names = struct {
 
 pub const Options = struct {
     drafts: bool = true,
+    cache_bytes: u64 = @import("session_budget.zig").default_bytes,
     /// rows a prefill window takes (the decode buckets the plan sizes for) when the prompt runs as decode windows
     prefill_rows: u32 = 16,
     /// the prompt through the forward's own prefill (2,048-row segments) instead: TF_DSV41_OWN_PREFILL (default on)
@@ -216,6 +217,7 @@ pub const Model = struct {
         const comm = m.session.comm();
         const world: u32 = @intCast(comm.world());
         try @import("session_protocol.zig").preflight(&m.session.plan);
+        const cache_bytes = try @import("session_protocol.zig").cacheBudget(&m.session.plan, o.cache_bytes);
         m.cfg = try Config.read(gpa, io, pack_dir);
         // the release's FP8 blocks parse (Metal runs them); refused here, before any pack or launch on CUDA
         if (@import("cuda_format.zig").problem(&m.cfg)) |text| {
@@ -384,7 +386,7 @@ pub const Model = struct {
         m.f.engram = &m.host;
         if (world > 1) m.f.link = &m.session.plan;
         m.f.on_stop = .{ .ctx = &m.session, .run = announceStop };
-        const so = try sg.optionsFromEnv();
+        const so = @import("session_budget.zig").options(try sg.optionsFromEnv(), cache_bytes);
         const several_ok = m.slots == 1 or so.several;
         if (so.enabled and m.f.kv != null and !several_ok)
             if (!quiet) std.log.scoped(.dsv41).warn("sessions: off with {d} live slots (TF_DSV41_SESSION_SLOTS=1 opens them over every slot; the session-slots check has not run on hardware)", .{m.slots});
@@ -396,6 +398,7 @@ pub const Model = struct {
             const ds_blocks: u32 = if (o.drafts) @intCast(dspark_emit.blocks(&m.cfg, &dsb).len) else 0;
             m.sessions = try sg.Sessions.init(gpa, io, &m.f, &bp, so, .{ .slots = m.slots, .ds_blocks = ds_blocks, .checkpoint = if (so.disk != null) try prepared.packIdentity(io, &m.pack, if (cache) |*c| c else null) else null });
         }
+        if (m.sessions) |s| std.log.scoped(.dsv41).info("sessions: retained payload cap {d} bytes per rank (KV pages, snapshots and token payload; pool allocation separate)", .{s.cache_bytes});
         tr.step("engram host and sessions", cuda.usage(false));
         m.gt = .{ .f = &m.f, .prefill_rows = o.prefill_rows, .max_rows = nb, .own_prefill = o.own_prefill, .sessions = m.sessions };
         // TF_DSV41_PROMPT_TAIL: the prompt's last token as the first decode row

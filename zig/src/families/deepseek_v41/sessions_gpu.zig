@@ -33,6 +33,8 @@ pub const Options = struct {
     resident_bytes: ?u64 = null,
     /// TF_DSV41_SESSION_RAM_MIB (default 256)
     ram_bytes: u64 = 256 << 20,
+    /// Combined retained KV and host snapshot payload, separate from the preallocated pool and disk tier.
+    cache_bytes: u64 = @import("session_budget.zig").default_bytes,
     staging_mib: u32 = 128,
     skip_covered: bool = false,
     delta: bool = false,
@@ -98,6 +100,7 @@ pub const Sessions = struct {
     disk: ?*sessions.Disk = null,
     pieces: []Piece,
     bounded_bytes: u64,
+    cache_bytes: u64,
     /// each slot's committed ids (prefill and kept windows append): a saved entry's ids
     hist: []std.ArrayList(i32),
     /// each slot's drafter context start (0 after a reset, pos - n after restoring n rows), for the measure
@@ -121,7 +124,7 @@ pub const Sessions = struct {
         if (kx.slots.len != shape.slots) return error.SlotRange;
         const s = try gpa.create(Sessions);
         errdefer gpa.destroy(s);
-        s.* = .{ .gpa = gpa, .io = io, .f = f, .kx = kx, .store = undefined, .pieces = &.{}, .bounded_bytes = 0, .hist = &.{}, .ds_valid = &.{}, .measure = undefined, .names = std.heap.ArenaAllocator.init(gpa) };
+        s.* = .{ .gpa = gpa, .io = io, .f = f, .kx = kx, .store = undefined, .pieces = &.{}, .bounded_bytes = 0, .cache_bytes = o.cache_bytes, .hist = &.{}, .ds_valid = &.{}, .measure = undefined, .names = std.heap.ArenaAllocator.init(gpa) };
         errdefer s.names.deinit();
         const na = s.names.allocator();
         s.hist = try na.alloc(std.ArrayList(i32), shape.slots);
@@ -367,7 +370,7 @@ pub const Sessions = struct {
 
     // -- the operations (every rank, the leader's order) ----
 
-    /// An entry for the slot's committed ids (null: a duplicate), then the slot's pages go back (the entry holds them).
+    /// Save committed ids, then let go of the slot's pages; null means no new RAM entry remains.
     pub fn save(s: *Sessions) !?u32 {
         const h = &s.hist[s.cur()];
         if (h.items.len != s.f.slot.pos or s.f.slot.pending != null) return error.BadWindow;
@@ -382,8 +385,8 @@ pub const Sessions = struct {
         };
         try s.reset();
         // the residency budget past the save: the least recently used chats parked (streamed) or dropped
-        try s.store.settleAll();
-        return id;
+        try kv.sessions.retention.trim(&s.store, s.cache_bytes);
+        return if (id) |i| (if (s.store.index.has(i) and s.store.entry(i).ram) i else null) else null;
     }
 
     /// The served shape's prompt snapshot at its replay point; the slot keeps its pages and goes on prefilling.
@@ -400,8 +403,8 @@ pub const Sessions = struct {
             Snap.release(snap);
             return e;
         };
-        try s.store.settleAll();
-        return id;
+        try kv.sessions.retention.trim(&s.store, s.cache_bytes);
+        return if (id) |i| (if (s.store.index.has(i) and s.store.entry(i).ram) i else null) else null;
     }
 
     /// sessions.Entry.kind: a prompt's replay point (a turn's end is 0)

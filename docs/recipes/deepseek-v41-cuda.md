@@ -36,3 +36,17 @@ zig build dsv41-serve -Doptimize=ReleaseSafe -Dnvcc=/usr/local/cuda/bin/nvcc -Dd
 This installs rank zero's `tensorfold-dsv41` and the follower tool `tf-dsv41`. The runtime reads
 `TF_DSV41_ASSETS/{rope.bin,engram-token-map.bin,aot/}`. Compile-only targets use inert synthetic images and
 cannot produce a serving qualification receipt. Keep generated images and compiler caches outside source control.
+
+## Prompt retention
+
+`--prompt-cache-gib` caps retained KV and host snapshot payload per rank, with a default of 16 GiB.
+Zero disables both RAM and disk prompt reuse on every rank. Rank zero sends its option to followers before boot;
+use the same binary revision on every rank. Existing session RAM, residency and disk limits still apply.
+Shared KV pages count once, and split KV uses the most-loaded rank's charge so eviction order stays identical.
+A snapshot larger than the cap is dropped, including the newest one; live slots keep their own page references.
+The flag does not resize `TF_DSV41_POOL_TOKENS`, bound live buffers or set a process RSS limit.
+The pool's existing allocation and memory-floor checks still apply separately.
+
+Whole-prompt and piece scheduling keep the existing 16-row snapshot grid, separate from prefill chunk size.
+The session index can restore a partial 256-token page and the saved compression carries and attention rings.
+Host seam tests establish that storage behavior; whole-model resumed/plain token equality remains a device gate.

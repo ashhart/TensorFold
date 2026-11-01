@@ -18,6 +18,10 @@ pub fn addImportsAt(b: *std.Build, m: *std.Build.Module, target: std.Build.Resol
 pub fn steps(b: *std.Build) void {
     const source = @import("dsv41_cuda.zig").module(b, b.graph.host, "serve_engine.zig", false);
     b.step("test-draft-dsv41-host", "DeepSeek draft source metadata without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = source, .filters = &.{"draft sources:"} })).step);
+    const cache = @import("dsv41_cuda.zig").module(b, b.graph.host, "prompt_cache_host_test.zig", false);
+    const cache_run = b.addRunArtifact(b.addTest(.{ .root_module = cache }));
+    cache_run.setEnvironmentVariable("TF_EXPERIMENTAL", "deepseek");
+    b.step("test-dsv41-prompt-cache", "DeepSeek retained prefix boundaries and budget without devices").dependOn(&cache_run.step);
     inline for (.{ false, true }) |cross| {
         const target = if (cross) b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu }) else b.graph.host;
         const root = @import("dsv41_cuda.zig").module(b, target, "device_host_test.zig", cross);

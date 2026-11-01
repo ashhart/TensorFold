@@ -18,6 +18,7 @@ pub const jobs = @import("jobs.zig");
 pub const restore = @import("restore.zig");
 pub const store = @import("store.zig");
 pub const Store = store.Store;
+pub const retention = @import("retention.zig");
 
 test {
     _ = @import("restore.zig");
