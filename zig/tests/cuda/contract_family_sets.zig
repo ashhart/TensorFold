@@ -1,5 +1,4 @@
-//! The family sets in the full kernel contract: Nemotron's pocket, MiniMax-M3's, MOSS-Image's, GB10's grouped affine-4,
-//! Flash Next NVFP4's BF16 dense and FP8 expert downs.
+//! Family contract sets: pocket, MiniMax-M3, MOSS-Image, grouped affine-4, Flash Next BF16 dense and FP8 expert downs.
 const std = @import("std");
 const cuda = @import("cuda");
 const check = @import("check.zig");
