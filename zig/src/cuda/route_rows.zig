@@ -54,8 +54,8 @@ pub const RouteRows = struct {
         // up to 16 rows, deeper staging (the same sums: the router rows' reads set the time)
         const few = rows <= 16;
         if (rows >= 64) {
-            // 128 rows and 64 experts a block: each router row read once per 128 input rows (the same sums)
-            try launch_.launch(g.wide_fn, .{ .grid = .{ .x = @intCast((rows + 127) / 128), .y = @intCast((e + 63) / 64), .z = 1 }, .block = .{ .x = 256 }, .shared = wide_shared }, s, &a);
+            // 128 rows and 64 experts a block (the same sums); x walks the expert blocks: a row tile's run together
+            try launch_.launch(g.wide_fn, .{ .grid = .{ .x = @intCast((e + 63) / 64), .y = @intCast((rows + 127) / 128), .z = 1 }, .block = .{ .x = 256 }, .shared = wide_shared }, s, &a);
             return;
         }
         try launch_.launch(if (few) g.few_fn else g.logits_fn, .{ .grid = .{ .x = @intCast((rows + 15) / 16), .y = @intCast((e + 31) / 32), .z = 1 }, .block = .{ .x = 128 }, .shared = if (few) few_shared else many_shared }, s, &a);

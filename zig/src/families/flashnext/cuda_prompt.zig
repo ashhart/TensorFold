@@ -59,7 +59,7 @@ pub fn argmax(raw: []const u8) u32 {
     return @intCast(at);
 }
 /// `n` zeroed buffers, the fill on the compute stream: a legacy-stream memset returns before it lands.
-fn zeros(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: cuda.Stream, n: usize, len: usize) ![]cuda.DeviceBuffer {
+pub fn zeros(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: cuda.Stream, n: usize, len: usize) ![]cuda.DeviceBuffer {
     const Zeroed = struct {
         driver: *cuda.Driver,
         stream: cuda.Stream,
@@ -383,7 +383,10 @@ pub const Engine = struct {
             bs.free(e.gpa);
             e.batch_s = null;
         }
-        e.batch_s = try batch.Scratch.alloc(e.gpa, e.driver, e.stream.*, rows);
+        // head_local: the draft head's lanes on one GPU, a pass's rows split; native_part only where the lane reduces
+        const parts = @import("cuda_batch_state.zig");
+        const z: parts.Sizes = .{ .head_rows = if (e.collective != null) @max(rows, parts.head_rows_one) else parts.head_rows_one, .lane_reduce = !e.batch_k.native_lane.clusters };
+        e.batch_s = try batch.Scratch.alloc(e.gpa, e.driver, e.stream.*, rows, z);
         return &e.batch_s.?;
     }
 

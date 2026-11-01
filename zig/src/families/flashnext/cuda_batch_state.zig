@@ -7,6 +7,7 @@ const ple = @import("cuda_ple.zig");
 const wt = @import("cuda_prompt_wt.zig");
 const tk = @import("cuda_tile_kernels.zig");
 const load = @import("cuda_prompt_load.zig");
+const shared = @import("cuda_batch_side.zig");
 const layers_n = wt.layers_n;
 const linear_n = wt.linear_n;
 const dims = wt.dims;
@@ -87,6 +88,9 @@ pub const LayerKeep = struct {
     hist: u64 = 0,
     /// The chain's end state goes here, the sequence's own left as before the chunk; 0: in place.
     state_out: u64 = 0,
+    /// This layer's pending-row log and its control word (fn_late in flashnext_batch.cu); 0: none.
+    log: u64 = 0,
+    log_ctl: u64 = 0,
     attn_hc: HcKeep = .{},
     mlp_hc: HcKeep = .{},
     /// The mixer's and the MoE's branches [rows, dims] bf16 as the write-backs add them (the MoE's with its pocket).
@@ -138,7 +142,24 @@ pub const Hooks = struct {
     streams: u64 = 0,
     /// A training pass's adds to each layer's MoE output, in place of the model's own (Model.pocket).
     moe_add: ?MoeAdd = null,
+    /// The rows are prompt tokens (a fill), not a decode or verify window.
+    prompt: bool = false,
 };
+
+/// Rows a layer's pending-row log holds, and the pending count past which a chain stores its state in place.
+pub const late_rows: usize = 48;
+pub const late_store: usize = 12;
+/// One log row of a layer: k [nk, dk], v [nv, dv], decay and beta [nv, 2], fp32.
+pub const late_row_bytes: usize = (gdn.nk * gdn.dk + gdn.nv * gdn.dv + gdn.nv * 2) * 4;
+
+/// A rolled-back lane's windows for fn_late_roll (fn_roll::Job, by value): its conv windows and the n-gram tail.
+pub const RollJob = extern struct { win: u64 = 0, hist: u64 = 0, rows: u64 = 0, stride: c_longlong = 0, taps: c_int = 0, c: c_int = 0 };
+pub const roll_jobs_max = 40;
+pub const RollJobs = extern struct { j: [roll_jobs_max]RollJob = @splat(.{}), n: c_int = 0 };
+
+comptime {
+    std.debug.assert(@sizeOf(RollJob) == 40 and @sizeOf(RollJobs) == 1608);
+}
 
 /// The kernels the pass launches besides the captured Triton ones, loaded once.
 pub const Kernels = @import("cuda_batch_kernels.zig").Kernels;
@@ -191,9 +212,17 @@ pub fn Staging(comptime Q: type) type {
     };
 }
 
+const sizes = @import("cuda_scratch_sizes.zig");
+pub const head_rows_one = sizes.head_rows_one;
+pub const Sizes = sizes.Sizes;
+const hcPartRows = sizes.hcPartRows;
+const partRows = sizes.partRows;
+
 /// Device scratch for chunks of up to `cap` rows.
 pub const Scratch = struct {
     cap: usize,
+    /// The shared expert's stream (cuda_batch_side.zig); null: it runs after the routed experts on the pass's stream.
+    side: ?shared.Side = null,
     bufs: std.ArrayList(cuda.DeviceBuffer) = .empty,
     ids: u64 = 0,
     pos: u64 = 0,
@@ -260,7 +289,11 @@ pub const Scratch = struct {
     ple_pss: u64 = 0,
     ple_nrow: u64 = 0,
     logits: u64 = 0,
+    /// A split head's local columns before the gather, or the grouped draft head's scores: head_rows * vocab bytes.
     head_local: u64 = 0,
+    head_rows: usize = 0,
+    /// hc_part's bytes (hcPartRows): a read-out that would write more refuses (Pass.readoutKeep / readoutNative).
+    hc_part_bytes: usize = 0,
     inv: u64 = 0,
     dummy: u64 = 0,
     /// Pinned host copies of what a pass uploads (ids, positions, n-gram rows and sums), owned until the copies land.
@@ -313,16 +346,17 @@ pub const Scratch = struct {
     }
 
     /// Bytes `alloc(cap)` takes on the device.
-    pub fn bytes(cap: usize) usize {
+    pub fn bytes(cap: usize, z: Sizes) usize {
+        const head_rows = z.head_rows;
         const pairs = cap * slots;
         const nblk = cdiv(pairs, plan_small);
         const items = cdiv(pairs, tile) + experts_n + 1;
         var n: usize = 0;
         n += cap * 4 + (cap + 1) * 16;
-        n += cap * streams * 4 + cap * wide * 2 * 2 + cap * pss_n * 4 + cap * (low + 4) * 2 + hc_sk * cap * (low + 4) * 4;
-        n += cap * wide * 2 + 8 * cap * dims * 4;
+        n += cap * streams * 4 + cap * wide * 2 * 2 + cap * pss_n * 4 + cap * (low + 4) * 2 + hcPartRows(cap) * (low + 4) * 4;
+        n += cap * wide * 2 + (if (z.lane_reduce) 8 * cap * dims * 4 else 0);
         n += cap * low * 2 + cap * (low / 32) * 4 + cap * streams * 2 + cap * dims * 2 + cap * (dims / 32) * 4;
-        n += cap * proj_row * 2 + out_sk * cap * dims * 4 + cap * gdn.value_dim * (2 + 4 + 4) + cap * (gdn.value_dim / 32) * 4;
+        n += cap * proj_row * 2 + partRows(cap) * dims * 4 + cap * gdn.value_dim * (2 + 4 + 4) + cap * (gdn.value_dim / 32) * 4;
         n += cap * (2 * gdn.nk * gdn.dk + 2 * gdn.nv) * 4;
         n += cap * q_heads * head_dim * 2 + cap * index_heads * index_dim * 2;
         n += att_rows * nch * q_heads * (head_dim + 2) * 4 + cap * out_k * 2 * 2 + cap * (out_k / 32) * 4;
@@ -331,13 +365,14 @@ pub const Scratch = struct {
         n += cap * moe_w * 6 + cap * dims * 4;
         n += pairs * moe_w * 2 + pairs * dims * 4 + cap * dims * 2;
         n += cap * dims * 2 + cap * (dims / 32) * 4 + cap * wide * 2 + cap * dims * 2 + 4 * cap * dims * 4;
-        n += cap * wide * 2 * 2 + cap * streams * 4 + vocab * 2 + cap * vocab + half * 4 + 4096;
+        n += cap * wide * 2 * 2 + cap * streams * 4 + vocab * 2 + head_rows * vocab + half * 4 + 4096;
         n += cap * dims * 4 + cap * pocket_stride * 4;
         return n;
     }
 
-    pub fn alloc(gpa: std.mem.Allocator, d: *const cuda.Driver, stream: cuda.Stream, cap: usize) !Scratch {
-        var s: Scratch = .{ .cap = cap };
+    pub fn alloc(gpa: std.mem.Allocator, d: *const cuda.Driver, stream: cuda.Stream, cap: usize, z: Sizes) !Scratch {
+        const head_rows = z.head_rows;
+        var s: Scratch = .{ .cap = cap, .head_rows = head_rows };
         errdefer {
             cuda.completion.drain(d, stream, "Flash Next scratch work did not drain before rollback");
             s.free(gpa);
@@ -353,16 +388,17 @@ pub const Scratch = struct {
         s.norm = try s.add(gpa, d, cap * wide * 2);
         s.rinv = try s.add(gpa, d, cap * streams * 4);
         s.dn = try s.add(gpa, d, cap * (low + 4) * 2);
-        s.hc_part = try s.add(gpa, d, hc_sk * cap * (low + 4) * 4);
+        s.hc_part_bytes = hcPartRows(cap) * (low + 4) * 4;
+        s.hc_part = try s.add(gpa, d, s.hc_part_bytes);
         s.hc_up = try s.add(gpa, d, cap * wide * 2);
-        s.native_part = try s.add(gpa, d, 8 * cap * dims * 4);
+        if (z.lane_reduce) s.native_part = try s.add(gpa, d, 8 * cap * dims * 4);
         s.act = try s.add(gpa, d, cap * low * 2);
         s.xs_act = try s.add(gpa, d, cap * (low / 32) * 4);
         s.inj = try s.add(gpa, d, cap * streams * 2);
         s.mixed = try s.add(gpa, d, cap * dims * 2);
         s.xsm = try s.add(gpa, d, cap * (dims / 32) * 4);
         s.proj = try s.add(gpa, d, cap * proj_row * 2);
-        s.part = try s.add(gpa, d, out_sk * cap * dims * 4);
+        s.part = try s.add(gpa, d, partRows(cap) * dims * 4);
         try s.bufs.items[s.bufs.items.len - 1].fill8(0, stream.handle);
         s.part_zero = true;
         s.gout = try s.add(gpa, d, cap * gdn.value_dim * 2);
@@ -409,7 +445,7 @@ pub const Scratch = struct {
         s.ple_pss = try s.add(gpa, d, cap * streams * 4);
         s.ple_nrow = try s.add(gpa, d, cap * wide * 2);
         s.logits = try s.add(gpa, d, vocab * 2);
-        s.head_local = try s.add(gpa, d, cap * vocab);
+        s.head_local = try s.add(gpa, d, head_rows * vocab);
         var inv: [half]f32 = undefined;
         for (&inv, 0..) |*o, i| o.* = @floatCast(std.math.pow(f64, 10_000_000.0, -@as(f64, @floatFromInt(i)) / @as(f64, half)));
         s.inv = try s.add(gpa, d, half * 4);
@@ -419,6 +455,7 @@ pub const Scratch = struct {
         try stream.synchronize();
         s.host = try cuda.HostBuffer.alloc(d, hostAt(cap)[4]);
         s.staging = .{ .q = .{ .stream = stream, .event = try cuda.Event.init(d, false) } };
+        if (shared.on()) s.side = try shared.Side.init(d); // last: a refused allocation above never makes a stream
         return s;
     }
 
@@ -429,6 +466,7 @@ pub const Scratch = struct {
             g.q.event.deinit();
         }
         if (s.host) |*h| h.free();
+        if (s.side) |*x| x.deinit();
         for (s.bufs.items) |*b| b.free();
         s.bufs.deinit(gpa);
         s.* = undefined;

@@ -8,6 +8,9 @@ const ple = @import("cuda_ple.zig");
 const wt = @import("cuda_prompt_wt.zig");
 const load = @import("cuda_prompt_load.zig");
 const parts = @import("cuda_batch_state.zig");
+const late = @import("cuda_batch_late.zig");
+const shared = @import("cuda_batch_side.zig");
+const hc = @import("cuda_batch_hc.zig");
 const batch_lanes = @import("cuda_batch_lanes.zig");
 const tiles = @import("cuda_tiles.zig");
 const tk = @import("cuda_tile_kernels.zig");
@@ -38,7 +41,6 @@ const out_k = wt.out_k;
 const nch = wt.nch;
 const ple_layer = wt.ple_layer;
 const ple_tail_n = wt.ple_tail_n;
-const state_n = wt.state_n;
 const hc_sk = wt.hc_sk;
 const out_sk = wt.out_sk;
 const Q4 = wt.Q4;
@@ -77,6 +79,9 @@ pub const Span = parts.Span;
 pub const MoeAdd = parts.MoeAdd;
 pub const pocket_stride = parts.pocket_stride;
 pub const Hooks = parts.Hooks;
+pub const late_rows = parts.late_rows;
+pub const late_store = parts.late_store;
+pub const late_row_bytes = parts.late_row_bytes;
 pub const Kernels = parts.Kernels;
 pub const Scratch = parts.Scratch;
 pub const SeqState = parts.SeqState;
@@ -202,18 +207,13 @@ pub fn Pass(comptime Tri: type) type {
             const norm = s.norm + r0 * wide * 2;
             const act = s.act + r0 * low * 2;
             const xs_act = s.xs_act + r0 * (low / 32) * 4;
-            if (hc_w.down.native) |down| {
-                const up = hc_w.up.native orelse return error.UnexpectedTensor;
+            if (hc_w.down.native != null) {
                 try self.tri.hcNormalize(h, pss, hc_w.scale.ptr, norm, eps, n, dims, streams);
-                try self.k.native_lane.matmulF32(self.stream, norm, wide, n, down, s.hc_part, s.native_part);
-                const inj_ptr = if (hc_w.has_inj == 1) inj else act;
-                try self.tri.hcReduceAct(s.hc_part, act, xs_act, inj_ptr, 1, n, streams, low, hc_w.n_down, hc_w.has_inj);
-                try self.k.native_lane.matmul(self.stream, act, low, n, up, s.hc_up, s.native_part);
-                try self.tri.hcDenseMix(s.hc_up, norm, s.mixed + r0 * dims * 2, s.xsm + r0 * (dims / 32) * 4, n, dims, streams);
-                return;
+                return hc.readoutNative(self, hc_w, r0, n);
             }
             if (n >= 64 and self.tri.readoutTilesOwned() and std.meta.eql(keep, HcKeep{})) return self.readoutTiles(hc_w, r0, n);
             try self.copy(keep.h, h, n * wide * 2);
+            if (hc_sk * n * hc_w.n_down * 4 > s.hc_part_bytes) return error.UnexpectedTensor;
             try self.tri.hcDown(h, pss, hc_w.scale.ptr, norm, hc_w.down.w.ptr, hc_w.down.s.ptr, hc_w.down.b.ptr, s.dn, s.hc_part, eps, n, hc_w.n_down, wide, dims, dims / 256, streams, hc_sk);
             if (keep.v != 0) try self.sumSlices(s.hc_part, keep.v, false, n * hc_w.n_down, hc_sk);
             const inj_ptr = if (hc_w.has_inj == 1) inj else act;
@@ -262,11 +262,16 @@ pub fn Pass(comptime Tri: type) type {
             }
             // every row's conv, norms and gates, the recurrence, then the gated norm: the one-block chain's bits
             const fused = self.lanes.len == 0 and n >= 64 and gdn_fused.on();
+            if (fused and keep.log != 0) return error.UnexpectedTensor;
             if (fused) {
                 // the three in one kernel a value head: the same per-row op sequences, no fp32 rows through memory
                 const st = self.seq.state[li].ptr;
                 const in: gdn_fused.In = .{ .proj = s.proj, .conv = self.seq.conv[li].ptr, .cw = lw.cw.ptr, .a_log = lw.a_log.ptr, .dt = lw.dt.ptr, .state = st, .state_out = if (keep.state_out != 0) keep.state_out else st, .norm = lw.norm.ptr };
                 try gdn_fused.launch(self.k.gdn_fused, self.stream, in, n, s.gout, s.gxs);
+            } else if (self.lanes.len == 0 and keep.log != 0) {
+                // pending rows: the window goes into the log after them, the chain runs from before them
+                try late.front(self.k, self.stream, lw, s.proj, self.seq.conv[li].ptr, n, s.gq, keep);
+                try late.chain(self.k, self.stream, s.gq, keep, self.seq.state[li].ptr, n, s.ys);
             } else if (self.lanes.len == 0) {
                 try self.gdnFront(lw, s.proj, self.seq.conv[li].ptr, n, s.gq, s.gk, s.gv, s.ggb);
                 try self.gdnChain(s.gq, s.gk, s.gv, s.ggb, self.seq.state[li].ptr, keep.state_out, n, s.ys);
@@ -281,8 +286,13 @@ pub fn Pass(comptime Tri: type) type {
                     const gb = row0 * gdn.nv * 2 * 4;
                     try self.copy(lk.proj, proj, l.rows * gdn.proj_width * 2);
                     try self.copy(lk.hist, l.seq.conv[li].ptr, (gdn.taps - 1) * gdn.conv_dim * 2);
-                    try self.gdnFront(lw, proj, l.seq.conv[li].ptr, l.rows, s.gq + qk, s.gk + qk, s.gv + v, s.ggb + gb);
-                    try self.gdnChain(s.gq + qk, s.gk + qk, s.gv + v, s.ggb + gb, l.seq.state[li].ptr, lk.state_out, l.rows, s.ys + v);
+                    if (lk.log != 0) {
+                        try late.front(self.k, self.stream, lw, proj, l.seq.conv[li].ptr, l.rows, s.gq + qk, lk);
+                        try late.chain(self.k, self.stream, s.gq + qk, lk, l.seq.state[li].ptr, l.rows, s.ys + v);
+                    } else {
+                        try self.gdnFront(lw, proj, l.seq.conv[li].ptr, l.rows, s.gq + qk, s.gk + qk, s.gv + v, s.ggb + gb);
+                        try self.gdnChain(s.gq + qk, s.gk + qk, s.gv + v, s.ggb + gb, l.seq.state[li].ptr, lk.state_out, l.rows, s.ys + v);
+                    }
                     // the lane's conv window moves on now: the gated norm below reads none of it
                     try self.shiftWindow(l.seq.conv[li].ptr, proj, gdn.proj_width, l.rows, gdn.taps - 1, gdn.conv_dim);
                     row0 += l.rows;
@@ -440,16 +450,10 @@ pub fn Pass(comptime Tri: type) type {
                 const pt = nvfp4_tile.size(n);
                 try self.k.router.route(self.stream, s.picks, pairs, e, pt, plan);
                 const items = cuda.grouped.maxItems(pairs, e, pt);
+                const side = try shared.fork(self, native, n);
                 try nvfp4_tile.run(self.k, pt, self.stream, .up, .{ .x = s.mixed, .stride = dims, .slots = slots }, owned.view(), plan, s.moe_act, items, experts_n);
                 try nvfp4_tile.run(self.k, pt, self.stream, .down_f32, .{ .x = s.moe_act, .stride = owned.width }, owned.view(), plan, s.y, items, experts_n);
-                if (native.rank == 0) {
-                    const glue = self.tri.own orelse return error.NativeGlueRequired;
-                    try self.k.native_lane.matmul(self.stream, s.mixed, dims, n, native.shared[0].native.?, s.shared_gate, s.native_part);
-                    try self.k.native_lane.matmul(self.stream, s.mixed, dims, n, native.shared[1].native.?, s.shared_up, s.native_part);
-                    try glue.sharedSwiGLU(self.stream, s.shared_gate, s.shared_up, s.shared_act, n, moe_w);
-                    try self.k.native_lane.matmulF32(self.stream, s.shared_act, moe_w, n, native.shared[2].native.?, s.shared_out, s.native_part);
-                    try glue.sharedScatter(self.stream, s.shared_out, s.y, n, dims, slots);
-                }
+                try shared.join(self, side, native, n);
                 if (native.world != 1) {
                     const collective = self.m.collective orelse return error.TensorParallelUnavailable;
                     try collective.sum(self.stream, s.y, pairs * dims);
@@ -535,8 +539,13 @@ pub fn Pass(comptime Tri: type) type {
                     if (self.pending != null) try self.writeback(0, n);
                     try self.pleBlock(lw, ids);
                 }
-                try self.writeback(0, n);
-                try self.readoutKeep(lw.attn_hc, 0, n, keep.attn_hc);
+                if (hc.fuses(self, lw.attn_hc, n, keep.attn_hc)) {
+                    try hc.writebackNorm(self, lw.attn_hc, 0, n);
+                    try hc.readoutNative(self, lw.attn_hc, 0, n);
+                } else {
+                    try self.writeback(0, n);
+                    try self.readoutKeep(lw.attn_hc, 0, n, keep.attn_hc);
+                }
                 self.zero_slices = zs.usable(self.s.part_zero, keep.mix_branch, self.m.collective != null, lw.out.native != null);
                 if (lw.linear) {
                     try self.gdnBlock(lw, layer, wt.linearIndex(layer), keep);
@@ -546,8 +555,13 @@ pub fn Pass(comptime Tri: type) type {
                 if (keep.mix_branch != 0) try self.sumSlices(s.part, keep.mix_branch, true, n * dims, self.out_slices);
                 const sl = zs.slices(self.zero_slices, s.cap, n, self.out_slices);
                 self.zero_slices = false;
-                try self.tri.hcWriteback(s.h, s.h, s.pss, s.part, "*fp32", s.inj, s.dummy, "*bf16", s.dummy, "*bf16", sl.stride, n, dims, streams, 4, 1, 1, sl.count);
-                try self.readoutKeep(lw.mlp_hc, 0, n, keep.mlp_hc);
+                if (hc.fuses(self, lw.mlp_hc, n, keep.mlp_hc)) {
+                    try self.tri.hcWritebackNorm(s.h, s.h, s.pss, s.part, s.inj, s.dummy, s.dummy, lw.mlp_hc.scale.ptr, s.norm, eps, sl.stride, n, dims, streams, 4, 1, 1, sl.count);
+                    try hc.readoutNative(self, lw.mlp_hc, 0, n);
+                } else {
+                    try self.tri.hcWriteback(s.h, s.h, s.pss, s.part, "*fp32", s.inj, s.dummy, "*bf16", s.dummy, "*bf16", sl.stride, n, dims, streams, 4, 1, 1, sl.count);
+                    try self.readoutKeep(lw.mlp_hc, 0, n, keep.mlp_hc);
+                }
                 try self.moeBlockKeep(lw, keep);
                 try self.moeAdds(layer, keep);
                 self.pending = layer;
@@ -578,6 +592,7 @@ pub fn Pass(comptime Tri: type) type {
 
 test "a pass's scratch at the dense cap stays near a gigabyte and a half" {
     _ = @import("cuda_paging_batch_test.zig");
-    try std.testing.expect(Scratch.bytes(default_chunk) < 2 << 30);
-    try std.testing.expect(Scratch.bytes(1) < Scratch.bytes(2));
+    try std.testing.expect(Scratch.bytes(default_chunk, .{ .head_rows = default_chunk }) < 2 << 30);
+    try std.testing.expect(Scratch.bytes(1, .{}) < Scratch.bytes(2, .{}));
+    try std.testing.expect(Scratch.bytes(4096, .{ .lane_reduce = false }) < Scratch.bytes(4096, .{}));
 }

@@ -34,6 +34,10 @@ const Fns = struct {
     wb0: cuda.Function,
     wb_moe: cuda.Function,
     wb_slices: cuda.Function,
+    // each writeback with fn_hc_normalize in one block a row (2560 columns, 4 streams): the same bits
+    wbn0: cuda.Function,
+    wbn_moe: cuda.Function,
+    wbn_slices: cuda.Function,
     normalize: cuda.Function,
     normalize_cols: cuda.Function, // fn_hc_normalize's bits over 256-column slices (dims a multiple of 256)
     dense_mix8: cuda.Function, // fn_hc_dense_mix's bits, a warp a 32-column group, eight a block
@@ -121,6 +125,9 @@ pub const Glue = struct {
             .wb0 = try g.hc.function("fn_hc_writeback0"),
             .wb_moe = try g.hc.function("fn_hc_writeback_moe"),
             .wb_slices = try g.hc.function("fn_hc_writeback_slices"),
+            .wbn0 = try g.hc.function("fn_hc_writeback_norm0"),
+            .wbn_moe = try g.hc.function("fn_hc_writeback_norm_moe"),
+            .wbn_slices = try g.hc.function("fn_hc_writeback_norm_slices"),
             .normalize = try g.hc.function("fn_hc_normalize"),
             .normalize_cols = try g.hc.function("fn_hc_normalize_cols"),
             .dense_mix8 = try g.hc.function("fn_hc_dense_mix8"),
@@ -387,6 +394,35 @@ pub const Glue = struct {
         ints(&a, &.{ n, k, dims, nc, streams, sk });
         const shared: u32 = @intCast(16 * (per * 32 + 8) * 2 + 16 * per * 4);
         try go(g.f.down, s, .{ cdiv(rows, 16), cdiv(n, 64), sk }, 128, shared, &a);
+    }
+
+    /// hcWriteback then hcNormalize with `scale` into `norm`, one block a row: Flash Next's 2560 columns and 4 streams.
+    pub fn hcWritebackNorm(g: *const Glue, s: cuda.Stream, h: u64, hout: u64, pss: u64, branch: u64, inj: u64, y: u64, wts: u64, scale: u64, norm: u64, eps: f32, rs: usize, rows: usize, dims: usize, streams: usize, mode: usize, topk: usize, slots: usize, world: usize) !void {
+        if (dims != 2560 or streams != 4) return error.RowShape;
+        var a: cuda.Args = .{};
+        const grid: [3]usize = .{ rows, 1, 1 };
+        switch (mode) {
+            0 => {
+                ptrs(&a, &.{ h, pss, scale, norm });
+                a.add(eps);
+                try go(g.f.wbn0, s, grid, 256, 0, &a);
+            },
+            2 => {
+                ptrs(&a, &.{ h, hout, pss, inj, y, wts, scale, norm });
+                a.add(eps);
+                ints(&a, &.{ topk, slots });
+                try go(g.f.wbn_moe, s, grid, 256, 0, &a);
+            },
+            4 => {
+                ptrs(&a, &.{ h, hout, pss, branch, inj });
+                a.add(@as(i64, @intCast(rs)));
+                ptrs(&a, &.{ scale, norm });
+                a.add(eps);
+                ints(&a, &.{world});
+                try go(g.f.wbn_slices, s, grid, 256, 0, &a);
+            },
+            else => return error.RowShape,
+        }
     }
 
     /// Mode 0: the streams' sums; 2: the MoE slots (fp32 y and weights) written back; 4: `world` fp32 K slices.
