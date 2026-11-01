@@ -160,3 +160,82 @@ test "decisions queued together reach the decider's run_many in one call, each w
     try std.testing.expectEqualStrings("branch zero", d2.problem);
     try std.testing.expect(!asks[2].failed and !asks[2].refused);
 }
+
+/// A decider that stalls on a trunk starting 99 until the asker stops it (error.Cancelled), or 2 s pass.
+const Stalls = struct {
+    var saw_stop: bool = false;
+    var calls: usize = 0;
+
+    fn run(ctx: *anyopaque, d: *api.Decision) anyerror!void {
+        calls += 1;
+        if (d.trunk[0] == 99) {
+            const began = std.Io.Clock.awake.now(std.testing.io).toNanoseconds();
+            while (std.Io.Clock.awake.now(std.testing.io).toNanoseconds() - began < 2 * std.time.ns_per_s) {
+                if (d.stop.load(.acquire)) {
+                    saw_stop = true;
+                    return error.Cancelled;
+                }
+                std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+            }
+        }
+        return Decides.run(ctx, d);
+    }
+};
+
+fn alwaysGone(_: *anyopaque) bool {
+    return true;
+}
+
+test "a queued decision past its timeout, or whose client is gone, leaves the queue unanswered" {
+    const gpa = std.testing.allocator;
+    var cfg = try lanes.Config.init(gpa, .{}, 1, 0);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer core.deinit();
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 1 }); // not started: nothing answers
+    defer host.scores.asks.deinit(gpa);
+    var unused: u8 = 0;
+    host.decider = .{ .ctx = &unused, .run = Decides.run };
+    Decides.calls = 0;
+    var logits: [1]f64 = undefined;
+    var late: api.Decision = .{ .trunk = &.{1}, .branches = &.{&.{2}}, .counts = &.{1}, .labels = &.{9}, .logits = &logits, .timeout_ms = 30 };
+    try std.testing.expectError(error.Failed, host.engine().decide(&late));
+    try std.testing.expectEqual(api.Decision.Stopped.timed_out, late.stopped);
+    try std.testing.expectEqual(@as(usize, 0), host.scores.asks.items.len);
+    var left: api.Decision = .{ .trunk = &.{1}, .branches = &.{&.{2}}, .counts = &.{1}, .labels = &.{9}, .logits = &logits, .gone = .{ .ctx = &unused, .check = alwaysGone } };
+    try std.testing.expectError(error.Failed, host.engine().decide(&left));
+    try std.testing.expectEqual(api.Decision.Stopped.gone, left.stopped);
+    try std.testing.expectEqual(@as(usize, 0), host.scores.asks.items.len);
+    try std.testing.expectEqual(@as(usize, 0), Decides.calls);
+}
+
+test "a running decision past its timeout stops at its next pass, and the next decision is answered" {
+    const gpa = std.testing.allocator;
+    var cfg = try lanes.Config.init(gpa, .{}, 1, 0);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer core.deinit();
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 1 });
+    var unused: u8 = 0;
+    host.decider = .{ .ctx = &unused, .run = Stalls.run };
+    try host.start();
+    defer host.stop();
+    Stalls.saw_stop = false;
+    Stalls.calls = 0;
+    var logits: [1]f64 = undefined;
+    var slow: api.Decision = .{ .trunk = &.{ 99, 1 }, .branches = &.{&.{2}}, .counts = &.{1}, .labels = &.{9}, .logits = &logits, .timeout_ms = 50 };
+    try std.testing.expectError(error.Failed, host.engine().decide(&slow));
+    try std.testing.expect(Stalls.saw_stop);
+    try std.testing.expectEqual(api.Decision.Stopped.timed_out, slow.stopped);
+    var next: api.Decision = .{ .trunk = &.{ 1, 2, 3 }, .branches = &.{&.{ 5, 6 }}, .counts = &.{1}, .labels = &.{9}, .logits = &logits, .timeout_ms = 1000 };
+    try host.engine().decide(&next);
+    try std.testing.expectEqual(@as(f64, 5), logits[0]);
+    try std.testing.expectEqual(api.Decision.Stopped.no, next.stopped);
+    try std.testing.expectEqual(@as(usize, 2), Stalls.calls);
+}

@@ -47,7 +47,11 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator, systemone: bool) void {
             _ = cx.refuse("request body must be an object") catch {};
             break :blk null;
         }
-        break :blk reply(srv, &cx, raw, systemone) catch |e| {
+        break :blk replyFor(srv, &cx, raw, systemone, conn) catch |e| {
+            if (e == error.Cancelled) {
+                conn.close = true; // the client left: nothing to send
+                return;
+            }
             if (e == error.OutOfMemory) {
                 cx.kind = .server;
                 cx.message = "out of memory";
@@ -61,8 +65,19 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator, systemone: bool) void {
     routes.sendValue(conn, a, cx.status(), openai.wrapError(a, err) catch return);
 }
 
+/// How long a decision may wait and run before it is dropped with 503.
+pub const timeout_ms: u32 = 60_000;
+
 /// The answers to a decisions (oMLX's OpenAI Decisions) or System One body, or its refusal.
 pub fn reply(srv: *Server, cx: *Cx, body: Value, systemone: bool) errors.Refused!Value {
+    return replyFor(srv, cx, body, systemone, null) catch |e| switch (e) {
+        error.Cancelled => unreachable, // only a connection's client can leave
+        else => |x| x,
+    };
+}
+
+/// `reply` for a connection's request: the decision is dropped when its client leaves (error.Cancelled).
+pub fn replyFor(srv: *Server, cx: *Cx, body: Value, systemone: bool, conn: ?*Conn) (errors.Refused || error{Cancelled})!Value {
     const a = cx.a;
     const model = body.get("model") orelse return cx.refuse("a request needs a model");
     if (model != .string) return cx.refuse("model must be a string");
@@ -103,10 +118,15 @@ pub fn reply(srv: *Server, cx: *Cx, body: Value, systemone: bool) errors.Refused
     if (cut.prefix.len + longest > max_branch_tokens) return cx.fail(.request, "state plus longest question is {d} tokens, limit is {d}", .{ cut.prefix.len + longest, max_branch_tokens });
     if (total > max_request_tokens) return cx.fail(.request, "request is {d} tokens, limit is {d}", .{ total, max_request_tokens });
     const logits = try a.alloc(f64, labels.items.len);
-    var d: api.Decision = .{ .trunk = cut.prefix, .branches = cut.suffixes, .counts = counts, .labels = labels.items, .logits = logits, .arena = a };
+    const gone: ?api.Decision.Gone = if (conn) |c| .{ .ctx = c, .check = peerGone } else null;
+    var d: api.Decision = .{ .trunk = cut.prefix, .branches = cut.suffixes, .counts = counts, .labels = labels.items, .logits = logits, .arena = a, .timeout_ms = timeout_ms, .gone = gone };
     srv.engine.decide(&d) catch |e| switch (e) {
         error.Refused => return cx.refuse(d.problem),
-        else => return cx.fail(.server, "decision scoring failed", .{}),
+        else => switch (d.stopped) {
+            .gone => return error.Cancelled,
+            .timed_out => return cx.fail(.capacity, "the decision did not finish within {d} s", .{timeout_ms / 1000}),
+            .no => return cx.fail(.server, "decision scoring failed", .{}),
+        },
     };
     var at: usize = 0;
     const answers = try a.alloc(Value, asked.len);
@@ -379,4 +399,9 @@ fn decisionAnswer(a: Allocator, q: Asked, p: []const f64) Allocator.Error!Value 
         },
     }
     return .{ .object = o };
+}
+
+fn peerGone(ctx: *anyopaque) bool {
+    const c: *Conn = @ptrCast(@alignCast(ctx));
+    return c.peerGone();
 }

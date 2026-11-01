@@ -139,6 +139,10 @@ pub const Decider = struct {
                 errs[j] = err;
                 continue;
             };
+            if (x.stop.load(.acquire)) {
+                errs[j] = error.Cancelled;
+                continue;
+            }
             if (!d.batchable(x)) {
                 d.flush(xs, errs, group[0..members]);
                 members = 0;
@@ -252,16 +256,24 @@ pub const Decider = struct {
         }
     }
 
+    /// A decision stopped at its asker's word: its slot emptied for the next one.
+    fn stopped(d: *Decider) error{Cancelled} {
+        d.runner.reset(d.slot) catch {};
+        return error.Cancelled;
+    }
+
     /// Each branch's label logits at its last row, after the shared trunk; slot `d.slot` must hold no stream.
     pub fn decide(d: *Decider, x: *api.Decision) !void {
         try d.check(x);
         const r = d.runner;
+        if (x.stop.load(.acquire)) return error.Cancelled;
         try r.reset(d.slot);
         const trunk: u32 = @intCast(x.trunk.len);
         if (trunk > 0) {
             _ = try q.block_forward.run(r, &d.store, d.slot, x.trunk, d.chunk, d.bidirectional);
             try q.snapshot.saveRewind(d.gpa, r, d.slot, null, trunk, d.rewind);
         }
+        if (x.stop.load(.acquire)) return d.stopped();
         var at: usize = 0;
         var read: usize = x.trunk.len;
         var total: usize = 0;
@@ -291,6 +303,7 @@ pub const Decider = struct {
             }
             for (0..n_q) |i| try r.reset(@intCast(i));
         } else for (x.branches, x.counts, 0..) |b, n, i| {
+            if (i > 0 and x.stop.load(.acquire)) return d.stopped();
             if (i > 0) if (trunk > 0) try q.snapshot.rewindSlot(d.gpa, r, d.slot, null, trunk, d.rewind) else try r.reset(d.slot);
             const rows = try q.block_forward.run(r, &d.store, d.slot, b, d.chunk, d.bidirectional);
             try q.block_forward.lastHidden(r, rows, d.hidden);
@@ -306,6 +319,7 @@ pub const Decider = struct {
         try r.reset(d.slot);
         x.read = read;
     }
+
 };
 
 /// TF_QWEN27_BLOCK_ROWS (16 to `most`, a multiple of 16) runs longer blocks layer-major at that width; a check's knob.
