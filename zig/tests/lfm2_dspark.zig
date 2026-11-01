@@ -137,8 +137,6 @@ fn ownAbsorb(key: *tf.lanes.Stream, buf: mtl.Buffer, row_bytes: usize, row: usiz
     };
 }
 
-
-
 /// Served rounds through the drafter's interface: after four warm rounds, no host allocation and one hold pass a round.
 fn steady(gpa: std.mem.Allocator, d: *q.dspark.Drafter, taps: mtl.Buffer, ids: []const u32, ctx: usize) !void {
     const lanes = tf.lanes;
@@ -245,7 +243,6 @@ fn deferred(gpa: std.mem.Allocator, d: *q.dspark.Drafter, taps: mtl.Buffer, ids:
     };
     std.debug.print("deferred context: {d} zero-grant rows, {d} overwritten pending rows, {d} complete context rows and 3 later drafts match the independent replay\n", .{ skip, rewound, anchor });
 }
-
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
