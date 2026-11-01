@@ -376,6 +376,7 @@ pub fn run(gpa: std.mem.Allocator, b: *Metal, s: *lanes.Stream, o: Options, hook
             j.r.chain(e, j.r.wins[0], 0, j.levels, j.rate, j.chunks, false, false);
         }
     };
+    try kvp.grow(c, @max(len_known, mtp_known) + rows + o.depth + 1); // the rounds' rows, taken before they are queued
     try b.submit(.draft, b.next, Pre{ .r = &r, .levels = levels, .rate = rate, .chunks = (mtp_known + o.depth + 511) / 512 + 1 });
     const Job = struct {
         r: *Round,
@@ -474,6 +475,7 @@ pub fn run(gpa: std.mem.Allocator, b: *Metal, s: *lanes.Stream, o: Options, hook
         if (log) std.debug.print("queue {d}: verify rows {d}, head levels {d}, copy rows {d}\n", .{ queued, verify_rows, levels, copy });
         windows[queued % ring] = verify_rows;
         inflight += verify_rows;
+        try kvp.grow(c, @max(len_known, mtp_known) + inflight + rows + o.depth + 1);
         try b.submit(.verify, b.next, Job{ .r = &r, .n = queued, .rows = verify_rows, .levels = levels, .copy = copy, .tail = tail, .rate = rate, .chunks = (len_known + ahead + rows + 511) / 512, .head_chunks = head_chunks });
         if (o.split) try b.submit(.draft, b.next, Head{ .r = &r, .n = queued, .rows = verify_rows, .levels = levels, .copy = copy, .tail = tail, .rate = rate, .head_chunks = head_chunks });
         queued += 1;

@@ -29,6 +29,11 @@ pub const Sampled = struct { sampling: Sampling, position: u64 };
 /// How a row is drawn: argmax (ties to the lowest id), or the keyed GPU sampler.
 pub const Draw = union(enum) { greedy, sampled: Sampled };
 
+/// A stream's draw at `position`: argmax, or its keyed sampler (rows after it at the next positions).
+pub fn drawOf(s: *const @import("lanes").Stream, position: u64) Draw {
+    return if (s.sampling) |t| .{ .sampled = .{ .sampling = t, .position = position } } else .greedy;
+}
+
 /// Where a segment's Mamba state goes: after all its rows (prompts, steps), its replayed rows (windows), or each row.
 pub const Store = enum { full, lag, all };
 
