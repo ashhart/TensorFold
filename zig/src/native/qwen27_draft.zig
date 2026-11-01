@@ -70,6 +70,7 @@ pub const Draft = struct {
         defer pool.pop();
         d.generation.deinit();
         d.runner.capture_taps = d.previous_capture;
+        d.runner.taps.setFuser(d.runner.model.device, null) catch unreachable; // dropping a fuser allocates nothing
         d.runner.taps.ids = d.previous_taps;
         if (d.runner.taps.count > d.previous_count) d.runner.taps.count = d.previous_count;
         d.model.backend.profile(null); // a borrowed drafter outlives the host and its trace

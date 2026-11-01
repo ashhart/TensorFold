@@ -17,11 +17,11 @@ pub const Session = struct {
     }
     pub fn admit(s: Session, batch: Batch) !op.Context {
         if (!std.mem.eql(u32, &batch.layers, &s.config.taps) or batch.positions.len == 0) return error.BadCommittedTaps;
-        try batch.values.check(@intCast(batch.positions.len), s.config.tapWidth(), .bf16);
+        try batch.values.check(@intCast(batch.positions.len), s.config.ringWidth(), .bf16);
         const end = try std.math.add(u64, s.context.end, batch.positions.len);
         if (end != batch.target_end) return error.BadCommittedTaps;
         for (batch.positions, 0..) |position, i| if (position != s.context.end + i or position >= batch.target_end) return error.BadCommittedTaps;
-        const begin = @max(s.context.begin, end -| (@as(u64, s.config.window) - 1));
+        const begin = @max(s.context.begin, end -| (@as(u64, s.config.span()) - 1));
         return .{ .cache = s.context.cache, .begin = begin, .end = end };
     }
     pub fn absorb(s: *Session, ops: op.Ops, graph: *const weights.Graph, preparation: op.Preparation, batch: Batch) !void {

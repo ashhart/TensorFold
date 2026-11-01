@@ -332,14 +332,14 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     const gpa = if (profiling) h.counted.allocator() else parent;
     var draft_model = drafter;
     const owns_draft = drafter == null and o.drafter != null;
-    if (owns_draft) draft_model = q.dflash.runtime_model.Model.load(gpa, io, model, o.drafter.?, if (o.drafter_bits == 4) .prepared_q4_reference else .bf16_reference) catch |err| {
+    if (owns_draft) draft_model = q.dflash.runtime_model.Model.loadSpan(gpa, io, model, o.drafter.?, if (o.drafter_bits == 4) .prepared_q4_reference else .bf16_reference, capacity + window) catch |err| {
         why.* = try std.fmt.allocPrint(a, "the native Qwen3.8-27B drafter cannot load {s} ({s})", .{ o.drafter.?, @errorName(err) });
         return error.DrafterLoad;
     };
     var draft_owned = owns_draft;
     errdefer if (draft_owned) draft_model.?.deinit();
     const memory = q.prompt_memory;
-    const fit_prompt = memory.Fit{ .config = model.config, .context = capacity + window, .slots = @max(o.streams, 1), .shared = model.device.tensorUnits(), .ring = if (draft_model) |d| @as(usize, d.ring().window) * d.ring().stride else 0, .current_rows = model.frame.capacity, .left = room(model) };
+    const fit_prompt = memory.Fit{ .config = model.config, .context = capacity + window, .slots = @max(o.streams, 1), .shared = model.device.tensorUnits(), .ring = if (draft_model) |d| @as(usize, d.ring().window) * d.ring().stride else 0, .tap_row = if (draft_model) |d| memory.tapRowBytes(model.config.hidden, d.graph.config.tap_count, d.graph.config.variant == .v1) else 0, .current_rows = model.frame.capacity, .left = room(model) };
     const value = if (std.c.getenv("TF_PROMPT_ROWS")) |v| std.mem.span(v) else null;
     const row_policy = q.prompt_rows;
     const rows = @max(window, try fit_prompt.choose(row_policy.requested(model.device.generation(), value), row_policy.override(value) != null));
@@ -352,7 +352,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
         model.frame.deinit();
         model.frame = next;
     }
-    std.log.info("qwen27: prompt capacity={d} rows, startup stream and scratch reserve={d} bytes", .{ rows, try memory.runnerBytes(model.config, capacity + window, slots, rows, model.device.tensorUnits(), fit_prompt.ring) });
+    std.log.info("qwen27: prompt capacity={d} rows, startup stream and scratch reserve={d} bytes", .{ rows, try memory.runnerBytesTaps(model.config, capacity + window, slots, rows, model.device.tensorUnits(), fit_prompt.ring, if (fit_prompt.tap_row > 0) fit_prompt.tap_row else memory.tapRowBytes(model.config.hidden, 5, false)) });
     h.gpa = gpa;
     h.model = model;
     h.owns_model = false;

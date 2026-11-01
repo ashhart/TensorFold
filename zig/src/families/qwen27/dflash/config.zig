@@ -30,6 +30,20 @@ pub const Config = struct {
     tap_count: u32 = 5,
     /// v1: the layers whose layer_types entry is full_attention (DFlash2 layers are all sliding).
     full: [8]bool = @splat(false),
+    /// v1: the positions a stream's drafter context keeps (its full layers see all of them; 0: the window).
+    history: u32 = 0,
+    /// Positions kept: the ring's rows and the full layers' context; sliding layers see the last `window` - 1.
+    pub fn span(c: Config) u32 {
+        return if (c.variant == .v1 and c.history > c.window) c.history else c.window;
+    }
+    /// Rows layer `i` attends behind its block: its own window, or the whole span for a full layer.
+    pub fn layerWindow(c: Config, i: usize) u32 {
+        return if (c.full[i]) c.span() else c.window;
+    }
+    /// A ring row: v1 keeps fused, normed taps (fc and hidden_norm ran in the taps pass); DFlash2 keeps raw taps.
+    pub fn ringWidth(c: Config) u32 {
+        return if (c.variant == .v1) c.hidden else c.tapWidth();
+    }
     pub fn qWidth(c: Config) u32 {
         return c.heads * c.head_dim;
     }
@@ -359,6 +373,22 @@ test "a DFlash v1 config that asks for a causal draft is refused" {
     const causal = try std.mem.replaceOwned(u8, a, v1_fixture, "\"attention_bias\":false", "\"attention_bias\":false,\"is_causal\":true");
     defer a.free(causal);
     try std.testing.expectError(error.BadDraftConfig, parse(a, causal));
+}
+test "a v1 draft keeps fused ring rows and gives its full layer the whole span" {
+    var c = try parse(std.testing.allocator, v1_fixture);
+    try std.testing.expectEqual(@as(u32, 4096), c.ringWidth());
+    try std.testing.expectEqual(@as(u32, 4096), c.span());
+    c.history = 32768;
+    try std.testing.expectEqual(@as(u32, 32768), c.span());
+    try std.testing.expectEqual(@as(u32, 4096), c.layerWindow(0));
+    try std.testing.expectEqual(@as(u32, 32768), c.layerWindow(5));
+}
+test "DFlash2 keeps raw tap rows and its window everywhere" {
+    var c = Config{};
+    c.history = 32768;
+    try std.testing.expectEqual(@as(u32, 25600), c.ringWidth());
+    try std.testing.expectEqual(@as(u32, 2048), c.layerWindow(0));
+    try std.testing.expectEqual(@as(u32, 2048), c.span());
 }
 test "the stock DFlash2 config keeps its five taps and twenty-five-thousand-wide rows" {
     const c = try parse(std.testing.allocator, fixture);

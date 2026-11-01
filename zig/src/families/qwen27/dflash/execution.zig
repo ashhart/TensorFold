@@ -41,9 +41,9 @@ pub fn append(ops: op.Ops, g: *const w.Graph, preparation: op.Preparation, conte
     try preparation.check();
     const c = g.config;
     try c.check();
-    if (context.cache == 0 or context.begin > context.end or next.cache != context.cache or positions.len == 0 or next.end != try std.math.add(u64, context.end, positions.len) or next.begin != @max(context.begin, next.end -| (@as(u64, c.window) - 1))) return error.BadDraftContext;
+    if (context.cache == 0 or context.begin > context.end or next.cache != context.cache or positions.len == 0 or next.end != try std.math.add(u64, context.end, positions.len) or next.begin != @max(context.begin, next.end -| (@as(u64, c.span()) - 1))) return error.BadDraftContext;
     for (positions, 0..) |p, i| if (p != context.end + i or p >= next.end) return error.BadCommittedTaps;
-    try taps.check(@intCast(positions.len), c.tapWidth(), .bf16);
+    try taps.check(@intCast(positions.len), c.ringWidth(), .bf16);
     const frame = try ops.vtable.begin(ops.ptr);
     defer ops.vtable.release(ops.ptr, frame);
     const transaction = try ops.vtable.context_begin(ops.ptr, context);
@@ -56,9 +56,9 @@ fn checkAppend(g: *const w.Graph, preparation: op.Preparation, context: op.Conte
     try preparation.check();
     const c = g.config;
     try c.check();
-    if (context.cache == 0 or context.begin > context.end or next.cache != context.cache or positions.len == 0 or next.end != try std.math.add(u64, context.end, positions.len) or next.begin != @max(context.begin, next.end -| (@as(u64, c.window) - 1))) return error.BadDraftContext;
+    if (context.cache == 0 or context.begin > context.end or next.cache != context.cache or positions.len == 0 or next.end != try std.math.add(u64, context.end, positions.len) or next.begin != @max(context.begin, next.end -| (@as(u64, c.span()) - 1))) return error.BadDraftContext;
     for (positions, 0..) |p, i| if (p != context.end + i or p >= next.end) return error.BadCommittedTaps;
-    try taps.check(@intCast(positions.len), c.tapWidth(), .bf16);
+    try taps.check(@intCast(positions.len), c.ringWidth(), .bf16);
 }
 
 /// Where appended keys and values go: a transaction's context, or a batched pass's stream.
@@ -68,8 +68,8 @@ fn encodeAppend(ops: op.Ops, g: *const w.Graph, preparation: op.Preparation, tap
 }
 fn encodeAppendTo(ops: op.Ops, g: *const w.Graph, preparation: op.Preparation, taps: op.View, positions: []const u64, frame: u64, sink: Sink) !void {
     const c = g.config;
-    const fusion = try project(ops, frame, taps, g.fusion, preparation.mode);
-    const hidden = try norm(ops, frame, fusion, g.hidden_norm, c.eps, 1, c.hidden);
+    // a v1 ring holds rows already fused and normed (the target's taps pass ran fc and hidden_norm)
+    const hidden = if (c.variant == .v1) taps else try norm(ops, frame, try project(ops, frame, taps, g.fusion, preparation.mode), g.hidden_norm, c.eps, 1, c.hidden);
     for (g.layers, 0..) |layer, i| {
         const raw_keys = try project(ops, frame, hidden, layer.attention.k, preparation.mode);
         const keys = try rotate(ops, frame, try norm(ops, frame, raw_keys, layer.attention.k_norm, c.eps, c.kv_heads, c.head_dim), positions, c.kv_heads, c);
@@ -85,7 +85,7 @@ fn encodeAppendTo(ops: op.Ops, g: *const w.Graph, preparation: op.Preparation, t
 pub fn appendBlock(ops: op.Ops, g: *const w.Graph, preparation: op.Preparation, context: op.Context, taps: op.View, positions: []const u64, next: op.Context, anchor: u32, block: u32) !op.Lattice {
     if (block < 2 or block > 16) return error.BadRuntimeBlock;
     try checkAppend(g, preparation, context, taps, positions, next);
-    if (anchor >= g.config.vocab or next.end - next.begin > g.config.window - 1) return error.BadDraftContext;
+    if (anchor >= g.config.vocab or next.end - next.begin > g.config.span() - 1) return error.BadDraftContext;
     const frame = try ops.vtable.begin(ops.ptr);
     defer ops.vtable.release(ops.ptr, frame);
     const transaction = try ops.vtable.context_begin(ops.ptr, context);
@@ -105,7 +105,7 @@ pub const Consumer = struct { ptr: *anyopaque, call: *const fn (*anyopaque, u64,
 fn start(ops: op.Ops, g: *const w.Graph, preparation: op.Preparation, context: op.Context, anchor: u32) !u64 {
     try preparation.check();
     try g.config.check();
-    if (anchor >= g.config.vocab or context.cache == 0 or context.begin > context.end or context.end - context.begin > g.config.window - 1) return error.BadDraftContext;
+    if (anchor >= g.config.vocab or context.cache == 0 or context.begin > context.end or context.end - context.begin > g.config.span() - 1) return error.BadDraftContext;
     return ops.vtable.begin(ops.ptr);
 }
 fn encode(ops: op.Ops, g: *const w.Graph, preparation: op.Preparation, context: op.Context, anchor: u32, frame: u64, block: u32, given: []const u32) !Output {
@@ -198,9 +198,9 @@ pub fn absorbBlocks(ops: op.Ops, g: *const w.Graph, preparation: op.Preparation,
     try preparation.check();
     try g.config.check();
     if (block < 2 or block > 16 or streams.len < 2 or streams.len * block > 128 or out.len != streams.len or absorbs.len != streams.len) return error.BadRuntimeBlock;
-    for (streams) |s| if (s.anchor >= g.config.vocab or s.context.cache == 0 or s.context.begin > s.context.end or s.context.end - s.context.begin > g.config.window - 1) return error.BadDraftContext;
+    for (streams) |s| if (s.anchor >= g.config.vocab or s.context.cache == 0 or s.context.begin > s.context.end or s.context.end - s.context.begin > g.config.span() - 1) return error.BadDraftContext;
     for (absorbs, 0..) |a, k| if (a) |x| {
-        try x.taps.check(@intCast(x.positions.len), g.config.tapWidth(), .bf16);
+        try x.taps.check(@intCast(x.positions.len), g.config.ringWidth(), .bf16);
         try encodeAppendTo(ops, g, preparation, x.taps, x.positions, frame, .{ .stream = @intCast(k) });
     };
     const output = try encodeStreams(ops, g, preparation, streams, frame, block, &.{});
