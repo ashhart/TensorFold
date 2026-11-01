@@ -31,7 +31,7 @@ pub fn holdMs(costs: []const HoldCost, streams: usize, depth: i64) f64 {
     return at_lo + t * (atDepth(costs, hi, depth) - at_lo);
 }
 
-/// Price the executor's greedy, ordered groups; nonpositive depths take no block and `rows=0` is unbounded.
+/// Greedy stream-order passes pad blocks to the deepest; `rows == 0` means no physical row limit.
 pub fn rowsMs(costs: []const HoldCost, rows: u32, view: anytype) f64 {
     const n = view.len();
     var ms: f64 = 0;
@@ -67,7 +67,7 @@ pub fn passMs(costs: []const HoldCost, rows: u32, depths: []const i64) f64 {
     return rowsMs(costs, rows, View{ .d = depths });
 }
 
-/// Allocated counts past the free first nodes; an empty charged mask charges every stream.
+/// Only charged counts above free-first nodes form hold blocks; an empty charged mask includes all streams.
 pub fn countsMs(costs: []const HoldCost, rows: u32, counts: []const u32, charged: []const bool, free: u32) f64 {
     const View = struct {
         counts: []const u32,
@@ -131,9 +131,7 @@ pub const ProbeCache = struct {
     marginal: f64,
 };
 
-/// A full requested hold stays when it beats plain rounds alone; otherwise the best-scoring nonempty prefix
-/// (the full offer on ties) is offered. `probabilities` are cumulative joint chances per reserved draft;
-/// `observed` conditionals are initialized only for min(tried, len). Null: no pricing input.
+/// Retains paying full holds or the best prefix; only tried drafts cap raw gain by observed acceptance.
 pub fn prefix(costs: *const Table, holds: []const HoldCost, base: Base, fixed: f64, probabilities: []const f64, observed: []const f64, tried: usize, wanted: i64) ?Prefix {
     if (holds.len == 0 or wanted <= 0 or probabilities.len == 0) return null;
     const full: usize = @min(probabilities.len, @as(usize, @intCast(wanted)));
@@ -173,9 +171,7 @@ pub fn prefix(costs: *const Table, holds: []const HoldCost, base: Base, fixed: f
     return chosen;
 }
 
-/// Whether a perfect-acceptance exploration pass could beat plain rounds under the price model
-/// (unknown costs: it could).
-/// Caches the cheapest marginal ms a draft row on `rule.explore_price`, keyed by the cost values it read.
+/// Cached optimistic exploration bound; live cost changes invalidate it, and unknown costs remain feasible.
 pub fn canExplore(rule: anytype, whos: anytype, base: Base, fixed: f64) bool {
     const costs = rule.shared_costs;
     const holds = rule.k.hold_costs;
@@ -217,9 +213,7 @@ pub fn canExplore(rule: anytype, whos: anytype, base: Base, fixed: f64) bool {
         var lowest = std.math.inf(f64);
         var blocks: u32 = 1;
         while (blocks <= @min(heads, rule.batch_rows)) : (blocks += 1) {
-            // Rows R need padded depth at least ceil(R/blocks); any feasible deeper padding may be cheaper.
-            // Price R at the lowest hold over its class depth and every deeper feasible one
-            // (descending depths keep that minimum).
+            // Deeper padding can be cheaper; descending depths retain a suffix minimum for each row-count class.
             var padded: u32 = @min(depth, rule.batch_rows / blocks);
             var hold = std.math.inf(f64);
             while (padded >= 1) : (padded -= 1) {
@@ -317,8 +311,7 @@ test "a hold's ms between and past the timed passes" {
     try std.testing.expectApproxEqAbs(@as(f64, 5.0), holdMs(&t, 12, 1), 1e-12); // past the widest: the slope below it
 }
 
-// SYNTHETIC grids: `flat` costs 10 ms whatever the pass, `product` a block-row (blocks x depth) ms,
-// each up to 32 blocks.
+// Synthetic flat and block-row grids, not device or performance evidence.
 const flat = [_]HoldCost{ .{ .streams = 1, .depth = 1, .ms = 10 }, .{ .streams = 1, .depth = 9, .ms = 10 }, .{ .streams = 32, .depth = 1, .ms = 10 }, .{ .streams = 32, .depth = 9, .ms = 10 } };
 const product = [_]HoldCost{ .{ .streams = 1, .depth = 1, .ms = 1 }, .{ .streams = 1, .depth = 9, .ms = 9 }, .{ .streams = 32, .depth = 1, .ms = 32 }, .{ .streams = 32, .depth = 9, .ms = 288 } };
 

@@ -17,11 +17,7 @@ pub fn allocate(gpa: Allocator, fixed: []const u32, probs: []const []const f64, 
     return allocateDrafts(gpa, fixed, probs, costs, overhead_ms, max_rows, .{});
 }
 
-/// What drafting the counted nodes costs: a head step each, or the deepest stream's steps when one batch drafts all.
-/// A timed `hold_costs` grid replaces the steps: it prices the pass the counted nodes actually make. `charged`
-/// (empty: every stream, else one flag a stream) names the streams whose nodes the head drafts; the others' nodes
-/// (a copy's, say) still take rows and count as expected tokens but add no head cost. `hold_rows` (0: unbounded) is
-/// the rows a drafter's hold pass holds at most: a batch past it runs as several passes (hold_price.rowsMs).
+/// Grid prices replace steps; empty `charged` means all streams, and `hold_rows == 0` means unbounded passes.
 pub const HeadCost = struct {
     step_ms: f64 = 0.0,
     batched: bool = false,
@@ -31,9 +27,7 @@ pub const HeadCost = struct {
     hold_rows: u32 = 0,
 };
 
-/// The grid's price of the counted nodes' hold pass, regrown a node at a time: one pass of the active streams' blocks
-/// as deep as the deepest when batched (as several in stream order once their rows pass `rows`), else each stream's own
-/// block. A `free_first` node is the round's own draft.
+/// Prices growing blocks in stream order; batched blocks pad to each physical pass's deepest, excluding free nodes.
 const GridPass = struct {
     costs: []const hold_price.HoldCost,
     batched: bool,
@@ -261,8 +255,7 @@ test "a timed hold grid prices the pass the drafts make, not a linear step each"
     const priced = try allocateDrafts(gpa, &.{ 1, 1 }, &probs, &flat, 0.0, 8, .{ .step_ms = 1.2, .batched = true, .hold_costs = &grid });
     defer gpa.free(priced);
     try std.testing.expectEqualSlices(u32, &.{ 0, 0 }, priced); // 2.9 tokens in 16.2 ms lose
-    // A block deeper costs 3 ms but another block 0.2: second drafts pay at a linear 2 ms a step,
-    // not at their pass's price.
+    // Scalar steps cannot represent cheap additional streams and expensive additional depths.
     const deep = [_]hold_price.HoldCost{ .{ .streams = 1, .depth = 1, .ms = 2.0 }, .{ .streams = 1, .depth = 2, .ms = 5.0 }, .{ .streams = 2, .depth = 1, .ms = 2.2 }, .{ .streams = 2, .depth = 2, .ms = 5.2 } };
     const chain = [_][]const f64{ &.{ 0.9, 0.5 }, &.{ 0.8, 0.3 } };
     const stepped = try allocateDrafts(gpa, &.{ 1, 1 }, &chain, &flat, 0.0, 8, .{ .step_ms = 2.0, .batched = true });
@@ -278,8 +271,7 @@ test "a hold grid prices a batch by its active blocks and deepest, or each strea
     var flat = try extendCosts(gpa, &.{ .{ .width = 1, .ms = 10.0 }, .{ .width = 8, .ms = 10.0 } }, 8);
     defer flat.deinit(gpa);
     const probs = [_][]const f64{ &.{ 0.9, 0.7 }, &.{ 0.8, 0.6 } };
-    // Two blocks are dear: a batch pays them, while a stream's own block is the one-block price.
-    // The 2-block ms are never read.
+    // Serial passes ignore multi-stream prices; free first nodes add no hold cost.
     const grid = [_]hold_price.HoldCost{ .{ .streams = 1, .depth = 1, .ms = 3.0 }, .{ .streams = 1, .depth = 2, .ms = 4.0 }, .{ .streams = 2, .depth = 1, .ms = 9.0 }, .{ .streams = 2, .depth = 2, .ms = 14.0 } };
     const Case = struct { batched: bool, free_first: bool, want: [2]u32 };
     const cases = [_]Case{
@@ -346,7 +338,7 @@ test "a hold past the pass's rows is priced as the passes it takes: an asymmetri
         .{ .deep_at = 0, .rows = 0, .want = .{ 9, 1, 1, 1, 1, 1, 1, 1 } },
         // 32 rows hold three such blocks: eight make two passes, 23.21 in 30 ms, below the three blocks' 18.71 in 20
         .{ .deep_at = 0, .rows = 32, .want = .{ 9, 1, 1, 0, 0, 0, 0, 0 } },
-        // The deep stream is fourth: streams 0 and 1 fit beside it, a third small one splits the pass.
+        // A deep fourth stream splits the preceding shallow group before that stream is added.
         .{ .deep_at = 3, .rows = 32, .want = .{ 1, 1, 0, 9, 0, 0, 0, 0 } },
         .{ .deep_at = 3, .rows = 0, .want = .{ 1, 1, 1, 9, 1, 1, 1, 1 } },
         // 36 rows fit four blocks of nine; the fifth would need a second pass

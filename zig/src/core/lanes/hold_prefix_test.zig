@@ -1,5 +1,4 @@
-//! Reserved head holds price shorter prefixes, recovery trials, and companion rows against the whole round.
-//! Every timing is SYNTHETIC and makes a shared_drafts.budgets decision unambiguous; none is device data.
+//! Synthetic consumer regressions for full-round hold pricing, retained prefixes and funded recovery.
 const std = @import("std");
 const Config = @import("config.zig").Config;
 const Cost = @import("config.zig").Cost;
@@ -111,8 +110,7 @@ test "a profitable observed head prefix survives when the full reserved hold can
 }
 
 test "a futile exploration never fires, and a real recovery is available the moment its hold becomes affordable" {
-    // F(rows) = 9 + rows; one draft at most. The first draft was observed to miss, so a hold pays only on exploration.
-    // At 1000 ms even perfect acceptance cannot pay, so no round may spend its probe on it.
+    // Perfect acceptance cannot pay at 1000 ms; an impossible round must preserve the due probe.
     for ([_]bool{ false, true }) |sampled| {
         var f: Fixture = .{};
         try f.init(.{
@@ -138,8 +136,7 @@ test "a futile exploration never fires, and a real recovery is available the mom
 }
 
 test "a head's hold is priced against the whole cohort's rows: forced companion rows are base, not free" {
-    // F(1..5) = 10 ms, F(6..8) = 11 ms. The head's draft row alone pays (5.9 / 11 > 5 / 10); adding its 1 ms hold does
-    // not (5.9 / 12 < 5 / 10). Priced against the head alone the hold looks profitable (1.9 / 11 > 1 / 10).
+    // Companion rows make the marginal hold lose even though the isolated head and its verify row would pay.
     for ([_]bool{ false, true }) |sampled| {
         var f: Fixture = .{};
         try f.init(.{
@@ -223,10 +220,7 @@ test "a historical-zero probe fires on its fourth shared round with no timed for
 }
 
 test "a due exploration is feasible when a deeper padded hold is cheaper than a shallower one" {
-    // F(rows) = 10 ms and no fixed overhead; four streams give four pending rows, two of them heads of
-    // capacity 3 and 1. The hold pass costs 11 ms (1 block, 1 deep), 12 ms (2 blocks, 1 deep) and
-    // 9 ms (2 blocks, 3 deep): the padded future [3, 1] shape is cheaper than balanced [2, 2].
-    // Perfect acceptance pays: 8 / (10 + 9) > 4 / 10.
+    // Nonmonotonic costs make padded [3, 1] cheaper than [2, 2]; the bound must retain that probe.
     for ([_]bool{ false, true }) |sampled| {
         var f: Fixture = .{};
         try f.init(.{
@@ -264,7 +258,7 @@ test "a due exploration is feasible when a deeper padded hold is cheaper than a 
         var out: [2]i64 = undefined;
         try f.budgetsFor(&plans, &heads, &out);
         try std.testing.expectEqualSlices(i64, &.{ 0, 0 }, &out);
-        // Two due intervals: each must offer a real positive probe; both heads missed, so the next stands aside again.
+        // Both due intervals must fund a positive probe, then stand aside after that probe misses.
         for (0..2) |_| {
             var probed = false;
             for (0..16) |_| {

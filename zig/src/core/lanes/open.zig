@@ -140,8 +140,7 @@ fn openedCommitted(e: *Engine, s: *Stream, reach: Reach, hook: ?be.Committed) !v
     try e.live.append(e.gpa, s);
 }
 
-/// The first drafts' depth for `reach`. A head that prices its hold passes holds none before the stream's first grant:
-/// its prompt context is still absorbed at open, and the depth rule and shared allocation price every hold after.
+/// Priced heads wait for the first funded grant; prompt context is still owned at open.
 pub fn firstDepth(e: *Engine, s: *Stream, reach: Reach) !u32 {
     var who = win.who(s);
     if (who.granted == null and @import("hold_price.zig").pricesPasses(e)) return 0;

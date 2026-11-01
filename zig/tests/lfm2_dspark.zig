@@ -126,7 +126,7 @@ fn absorb(d: *q.dspark.Drafter, piece: q.dspark_block.Piece) !void {
     try q.dspark_block.absorbNow(d, &.{piece});
 }
 
-/// `rows` tapped rows from row `row` of `buf` (the target's rows), also starting at `row` in the context.
+/// An owned tapped-row span; `row` is both the source row and context start.
 fn ownAbsorb(key: *tf.lanes.Stream, buf: mtl.Buffer, row_bytes: usize, row: usize, rows: u32, prompt: bool) tf.lanes.drafter.Absorb {
     return .{
         .stream = key,
@@ -136,6 +136,7 @@ fn ownAbsorb(key: *tf.lanes.Stream, buf: mtl.Buffer, row_bytes: usize, row: usiz
         .prompt = prompt,
     };
 }
+
 
 
 /// Served rounds through the drafter's interface: after four warm rounds, no host allocation and one hold pass a round.
@@ -302,11 +303,7 @@ pub fn main(init: std.process.Init) !void {
     var conf: [16]f32 = undefined;
     @memcpy(conf[0..block], lane.conf[0..block]);
     const gpu = held[0..block];
-    // The owned stage takes uneven absorbs (prompt rows first, last rows taken again) and holds them on the host.
-    // One hold absorbs them as one piece of ctx rows from position 0; those staged bytes come from the same taps.
-    // The direct absorbs above are also one piece while ctx <= absorb_rows, so fc, k, v and qk see the same row count
-    // and run the same kernels: bf16 uses 16-row kernels up to 32 rows, then 64x64 tiles; 8-bit uses twin kernels up to
-    // 32 rows, then tensor or tile kernels. Keys, values and picks must be exactly equal, without tolerance.
+    // Compare identical taps through staged and direct paths in the same numerical regime.
     if (ctx > 3 and ctx <= @min(q.dspark.absorb_rows, @min(q.dspark.stage_rows, lane.cap))) {
         const key: *tf.lanes.Stream = @ptrFromInt(0x1000);
         const own = try d.newLane(length + 32);
@@ -343,8 +340,7 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("the owned stage: {d} rows staged in uneven absorbs, absorbed as one {d}-row piece like the direct absorbs' ({s} regime): keys, values and picks equal\n", .{ ctx, ctx, if (ctx <= 32) "<= 32-row" else "> 32-row" });
     }
     try @import("lfm2_dspark_lifecycle.zig").run(gpa, d, taps.buf, ids, ctx);
-    // settled GPU time is taken once: a standalone absorb adds its time and leaves the grid as it was; a synchronous
-    // one-block hold adds its own and reprices exactly the passes at one block (other block counts stay as timed)
+    // Absorb time is consumed once without repricing; a hold reprices only participating shapes.
     if (ctx > 0) {
         const grid = d.holds;
         const grid_len = d.holds_len;
