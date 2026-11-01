@@ -53,6 +53,7 @@ Never leave a line blank or claim a check you did not run.
     ```
 
   - Prompt speed: cold, with `--prompt-cache-gib 0` and fresh KV, at 2k, 8k, 32k and 64k where admitted. A faster new path does not excuse a slower default.
+  - Decode and prompt processing are no slower than main at one stream and the widest admitted; with `--drafter`, no slower than without it, greedy and sampled.
   - Attach raw results and commit the comparison tool; a table nobody can rerun is not a receipt.
 - **Kernel contract:** fill it from step 4 when a GPU kernel is new or changed; otherwise delete it, as the template says.
 - **Checklist:** tick a line only when step 7 confirms it on this head. Skip the inference-only block when the Receipt is "n/a".
@@ -62,14 +63,15 @@ Never leave a line blank or claim a check you did not run.
 - A new or changed GPU kernel registers with the [kernel contract](../kernel-contract.md#adding-a-kernel): its test type, the runner list with served shapes and tiles, `registry.zig` launches and records (`hip_records.zig` for HIP).
 - Cover every dispatch variant and served width the change reaches, not one convenient shape. A replacement kernel names the kernel it replaces.
 - Paste each backend's complete `SUMMARY` line and exit status. Launch records alone are not the contract.
+- Each new kernel has a planted control that fails as planted, and that backend's `SUMMARY` line shows it red.
 - Metal: `zig build kernel-contract -Dcpu=apple_m1`.
 - CUDA: `zig build kernel-contract -Dnvcc=PATH`; for the served SMs' limits, `zig build fatbins kernel-contract-fatbins -Dnvcc=PATH -Dsm=LIST`, then `tf-cuda-test kernel-contract-limits zig-out/fatbin`.
 - HIP: `zig build hip-kernel-contract -Dhip-arch=ARCH -Dhipcc=PATH` on that chip, and `zig build hip-kernel-contract-limits -Dhipcc=PATH` for every served chip.
-- A changed reduction order or precision needs an independent FP64 reference for each affected projection class; report worst per-column differences, not only the average.
-- For model fidelity, use teacher-forced histories and list every top-token difference with both margins.
+- A changed reduction order or precision, and model fidelity, follow [exactness and precision](../../CONTRIBUTING.md#exactness-and-precision).
 - Keep same-engine equality separate from independent fidelity. An FP64 receipt does not waive a bit-identity gate.
 - Do not loosen a tolerance, add a known exemption or change a tie policy after seeing results.
 - Keep the checkpoint's published precision; an opt-in lossy weight or cache conversion still needs an agreed gate.
+- A change to output tokens on a default path needs proof and an opt-in.
 - State which platforms you ran and which you could not: Metal by chip (M1 to M5), CUDA by SM, HIP by gfx target, Windows, desktop or mobile app. A result on one chip does not qualify another; unrun is not passed.
 
 ## 5. Tests and checks
@@ -103,14 +105,11 @@ Never leave a line blank or claim a check you did not run.
 
 ## 6. Source and publication hygiene
 
-- Comments and docstrings are one line of at most 120 columns. Files stay at or below 600 lines.
-- Measurements, debugging history and fork history belong in the receipt or a recipe, not in source, tests or fixtures.
+- Comments, docstrings, file length and source history follow [lean code and review](../../CONTRIBUTING.md#lean-code-and-review).
+- Private identity, privacy and authorship follow [public identity and privacy](../../CONTRIBUTING.md#public-identity-and-privacy); check the author and committer of every outgoing commit with `git log --format='%an %ae | %cn %ce' origin/main..HEAD`.
 - Add a setting only with a production caller and a measured benefit; never turn drafts off on an advertised path.
 - Extend the existing shared cache, scheduler or operator; explain why it cannot be extended before adding a second one.
-- Keep private emails, machine names, internal hosts, local user paths, keys and confidential prompts out of source, fixtures, receipts and commit messages. Use fictional identities and reserved documentation addresses in examples.
 - Kill only the processes a script started, keep normal SSH host verification, and pin and inspect external reference code before running it.
-- Check author and committer of every outgoing commit with `git log --format='%an %ae | %cn %ce' origin/main..HEAD`. Use your approved public identity and GitHub noreply address.
-- Keep every contributor's authorship. Add no AI co-author trailers or "Generated with" lines to commits or the description.
 
 ## 7. Final self-check
 
