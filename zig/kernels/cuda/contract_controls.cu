@@ -593,3 +593,6 @@ extern "C" __global__ void __launch_bounds__(256) tf_ctl_idol_bias_late(const fl
     if (act) v = 0.5f * v * (1.0f + tanhf(0.7978845608028654f * (v + 0.044715f * v * v * v)));
     Y[i] = __float2half_rn(act ? v : h(v));
 }
+
+// Idol decoders: their templates at the BREAK values that drop or add one rounding point, sum or rule.
+#include "contract_controls_idol_decoder.cuh"
