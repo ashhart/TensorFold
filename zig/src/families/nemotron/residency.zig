@@ -3,11 +3,11 @@ const std = @import("std");
 const mtl = @import("metal");
 const fields = mtl.resident.fields;
 
-pub fn openCache(b: anytype, stream: *@import("lanes").Stream, capacity: usize) !*@import("state.zig").Cache {
+pub fn openCache(b: anytype, stream: *@import("lanes").Stream, capacity: usize, held: usize) !*@import("state.zig").Cache {
     const state = @import("state.zig");
     const cache = try b.gpa.create(state.Cache);
     errdefer b.gpa.destroy(cache);
-    const lease = try leasePages(b, capacity);
+    const lease = try leasePages(b, capacity, held);
     errdefer if (lease) |l| l.pages.finish(l.lane);
     cache.* = try state.Cache.initPaged(b.m.device, b.m.config, capacity, b.head != null, lease);
     cache.setResident(b.residency);
@@ -22,13 +22,13 @@ pub fn openCache(b: anytype, stream: *@import("lanes").Stream, capacity: usize) 
     return cache;
 }
 
-/// TF_NEMOTRON_METAL_KV_PAGES: a free lane promised the pages of `capacity` rows; LaneMemory: none now.
-fn leasePages(b: anytype, capacity: usize) !?@import("state.zig").Lease {
+/// TF_NEMOTRON_METAL_KV_PAGES: a free lane promised the pages of `capacity` rows less `held` adopted; LaneMemory: none.
+fn leasePages(b: anytype, capacity: usize, held: usize) !?@import("state.zig").Lease {
     const pages = b.kv_pages orelse return null;
     const lane = for (pages.leases, 0..) |l, i| {
         if (l.promised == 0 and l.ids.items.len == 0) break i;
     } else return error.LaneMemory;
-    try pages.admit(lane, pages.layout.pages(capacity)); // its pages are taken as its rows grow (kv_pages.grow)
+    try pages.admit(lane, pages.layout.pages(capacity) -| held); // its pages are taken as its rows grow (kv_pages.grow)
     return .{ .pages = pages, .lane = lane };
 }
 

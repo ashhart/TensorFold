@@ -9,7 +9,7 @@ const st = @import("state.zig");
 const kv_pages = @import("kv_pages.zig");
 const kvp = @import("../../core/metal_kv_pages.zig");
 const lesson_route = @import("living").lesson_route;
-const layers = @import("layers.zig");
+const prompt_pages = @import("prompt_pages.zig");
 const mtp = @import("mtp.zig");
 const timing = @import("timing.zig");
 const tree = @import("tree.zig");
@@ -85,6 +85,8 @@ pub const Metal = struct {
     kv_tables: ?mtl.Buffer = null, // and every lane's page table
     kv_pages: ?*kvp.Pages = null, // the core pool over them: a stream leases a lane's pages when it opens
     kv_pipes: ?*kv_pages.Pipelines = null, // the paged twins (the model's kernels point at them)
+    prompts: ?@import("../../core/kv_prompts.zig").Prompts = null, // TF_KV_SHARE: the store keeping prompts as pages
+    pending: ?*const snapshot.Snap = null, // the store's resume, restored once the stream's lane adopts its pages
 
     pub fn init(gpa: std.mem.Allocator, m: *Model, o: Options) !*Metal {
         const b = try gpa.create(Metal);
