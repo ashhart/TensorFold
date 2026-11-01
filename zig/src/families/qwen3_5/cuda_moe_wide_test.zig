@@ -34,6 +34,14 @@ test "MoE learning: shared shards reopen exact base bytes and zero or judged poc
             try ts.append(scratch, .{ .name = try std.fmt.allocPrint(scratch, "{s}{s}.{s}", .{ stem, proj, part }), .dtype = if (si == 0) .u32 else .bf16, .shape = try scratch.dupe(usize, &.{ rows, words }), .bytes = bytes });
         }
     }
+    // The separately stored MLX MTP expert stays at routed width, even after the target widens.
+    const mtp = "language_model.mtp.layers.0.mlp.shared_expert.";
+    const target = try scratch.dupe(core.shard_edit.New, ts.items);
+    for (target) |tensor| {
+        var copy = tensor;
+        copy.name = try std.fmt.allocPrint(scratch, "{s}{s}", .{ mtp, tensor.name[stem.len..] });
+        try ts.append(scratch, copy);
+    }
     const sentinel: [8]u8 = @splat(13);
     const untouched = [_][]const u8{ "language_model.mtp.shared", "language_model.model.layers.0.mlp.switch_mlp.gate_proj.weight", "language_model.model.layers.0.mlp.shared_expert_gate.weight" };
     for (untouched) |name| try ts.append(scratch, .{ .name = name, .dtype = .bf16, .shape = &.{4}, .bytes = &sentinel });
@@ -76,6 +84,15 @@ test "MoE learning: shared shards reopen exact base bytes and zero or judged poc
             const name = ([_][]const u8{ "gate_proj", "up_proj", "down_proj" })[pi];
             try wide.read(&ck, stem, name, if (pi < 2) width else d, if (pi < 2) d else width, restored);
             try std.testing.expectEqualSlices(f32, ([_][]f32{ gate, up, down })[pi], restored);
+        }
+        for ([_][]const u8{ "gate_proj", "up_proj", "down_proj" }, 0..) |name, projection| {
+            const n: usize = if (projection < 2) width else d;
+            const k: usize = if (projection < 2) d else width;
+            for ([_][]const u8{ stem, mtp }) |prefix| {
+                const base_parts = try wide.parts(a, &ck, prefix, name, n, k, cap);
+                defer for (base_parts) |bytes| a.free(bytes);
+                for (base_parts, 0..) |bytes, part| try std.testing.expectEqualSlices(u8, target[projection * 3 + part].bytes, bytes);
+            }
         }
         for (untouched) |name| try std.testing.expectEqualSlices(u8, &sentinel, (try ck.get(name)).bytes);
     }

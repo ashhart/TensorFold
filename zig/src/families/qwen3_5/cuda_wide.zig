@@ -10,6 +10,26 @@ pub fn base(a: std.mem.Allocator, bytes: []const u8, rows: usize, stride: usize,
     for (0..rows) |row| @memcpy(out[row * kept ..][0..kept], bytes[row * stride ..][0..kept]);
     return out;
 }
+/// Base affine parts: only target layers carry the saved pocket; an MLX MTP layer keeps its original width.
+pub fn parts(a: std.mem.Allocator, ck: anytype, prefix: []const u8, name: []const u8, n: usize, k: usize, pocket: usize) ![3][]u8 {
+    const extra = if (std.mem.startsWith(u8, prefix, "language_model.model.layers.")) pocket else 0;
+    const down = std.mem.endsWith(u8, name, "down_proj");
+    const na = n + if (down) @as(usize, 0) else extra;
+    const ka = k + if (down) extra else 0;
+    var out: [3][]u8 = undefined;
+    var made: usize = 0;
+    errdefer for (out[0..made]) |bytes| a.free(bytes);
+    var buf: [192]u8 = undefined;
+    inline for (.{ "weight", "scales", "biases" }, 0..) |suffix, i| {
+        const unit: usize = if (i == 0) 4 else 2;
+        const per: usize = if (i == 0) 8 else 64;
+        const t = try ck.expect(try std.fmt.bufPrint(&buf, "{s}{s}.{s}", .{ prefix, name, suffix }), if (i == 0) .u32 else .bf16, &.{ na, ka / per });
+        out[i] = try base(a, t.bytes, n, ka / per * unit, k / per * unit);
+        made += 1;
+    }
+    return out;
+}
+
 fn value(ts: anytype, width: usize, row: usize, col: usize) f32 {
     const w = std.mem.readInt(u32, ts[0].bytes[(row * width + col) / 8 * 4 ..][0..4], .little);
     const i = (row * width + col) / 64;
