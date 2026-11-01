@@ -93,6 +93,7 @@ def _stream(base: str, model: str, item: dict, tokens: int, temperature: float, 
     pieces: list[tuple[float, int]] = []           # (arrival, characters) of every text chunk
     usage: dict = {}
     runtime: dict = {}
+    speculative: dict = {}
     evidence = Evidence()
     complete = False
     with urllib.request.urlopen(req, timeout=1800) as resp:
@@ -108,6 +109,7 @@ def _stream(base: str, model: str, item: dict, tokens: int, temperature: float, 
                 raise RuntimeError("server_stream_error")
             usage = chunk.get("usage") or usage
             runtime = chunk.get("tensorfold") or runtime
+            speculative = chunk.get("speculative") or speculative
             for choice in chunk.get("choices", []):
                 evidence.add(choice)
                 delta = choice.get("delta") or {}
@@ -119,7 +121,8 @@ def _stream(base: str, model: str, item: dict, tokens: int, temperature: float, 
     observed = evidence.finish(usage, runtime, complete)
     n = observed["tokens"]
     out = {"prompt": item["name"], "seed": seed, "sent": sent, "first": None, "last": None, "tokens": n,
-           "pieces": pieces, "completed": completed, "ttft_s": None, "decode_tps": None, **observed}
+           "pieces": pieces, "completed": completed, "ttft_s": None, "decode_tps": None, "speculative": speculative,
+           **observed}
     if not complete:
         out["error"] = "incomplete_stream"
     if pieces:

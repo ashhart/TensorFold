@@ -53,10 +53,15 @@ pub const Storage = struct {
 pub const Attention = struct { keys: mtl.Buffer, values: mtl.Buffer };
 /// Layers a drafter reads at most (each layer's output, hidden wide).
 pub const max_taps = 8;
-/// The drafter's layers in its order and every forward row's outputs of them, [rows][count][hidden] bf16.
-pub const Taps = struct { layers: [max_taps]u32 = @splat(0), count: u32 = 0, buf: mtl.Buffer };
-/// Where a stream's latest tapped rows sit in the scratch: cache rows [start, start + rows) from scratch row `row`.
-pub const TapRows = struct { start: usize, row: usize, rows: usize, gen: u64 };
+/// Captured bf16 rows followed by the forward's row destination addresses, all in the same buffer.
+pub const Taps = struct {
+    layers: [max_taps]u32 = @splat(0),
+    count: u32 = 0,
+    buf: mtl.Buffer,
+    table_at: usize,
+};
+/// A stream's latest tapped rows: scratch rows from `row`, or its drafter's stage from byte `stage`.
+pub const TapRows = struct { start: usize, row: usize, rows: usize, gen: u64, stage: ?usize = null };
 pub const Mixer = union(enum) { conv: mtl.Buffer, attention: Attention };
 
 pub const Cache = struct {
@@ -119,6 +124,7 @@ pub const Scratch = struct {
     memory: Storage,
     rows: usize,
     ids: mtl.Buffer,
+    bad: mtl.Buffer, // set by lfm2_draft_ids when a held pick is flagged nonfinite or past the vocabulary
     h: mtl.Buffer,
     x: mtl.Buffer,
     r: mtl.Buffer,
@@ -157,7 +163,7 @@ pub const Scratch = struct {
     segs: mtl.Buffer,
     rowseg: mtl.Buffer,
     tiles: mtl.Buffer,
-    /// A drafter's taps of every row, once the backend is told its layers (null: none kept).
+    /// A drafter's taps (null: none kept).
     taps: ?Taps = null,
 
     pub fn init(gpa: std.mem.Allocator, device: mtl.Device, attention: *const [c.layers]bool, rows: usize) !Scratch {
@@ -170,6 +176,7 @@ pub const Scratch = struct {
         const mem = &out.memory;
         const slots = rows * c.topk;
         out.ids = try mem.alloc(rows * 4);
+        out.bad = try mem.alloc(4);
         inline for (.{ "h", "x", "r", "y", "q" }) |name| @field(out, name) = try mem.alloc(rows * c.hidden * 2);
         out.queries = try mem.alloc((rows + attn_rows) * c.hidden * 2); // a prompt attention tile reads attn_rows from its first
         out.bcx = try mem.alloc(rows * 3 * c.hidden * 2);

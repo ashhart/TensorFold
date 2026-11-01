@@ -1,0 +1,6480 @@
+{
+  "status": "diagnostic ablations; not the final qualification",
+  "base_source": "b4deee277",
+  "cells": {
+    "hold-accounting": [
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 643.8116172492632,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 810.867035866988,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 798.5423014255949,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 618.5128631346989,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 796.2133939448045,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 792.4367288813849,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 645.8721684421929,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 809.7932585902063,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 799.4562456021381,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 618.8137429002606,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 789.3984943094403,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 793.8443467942008,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 645.5811969949731,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 807.0467578834366,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 795.2596029922896,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 621.5561777345076,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 793.5782789844875,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 792.4435265630628,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 644.5340653194621,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 810.5585853396626,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 799.2073874838301,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 619.1406888714015,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 789.2432337384452,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 792.516776880887,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 645.4465736255986,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 816.2421107964317,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 801.4234367658562,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 619.2008415099642,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 796.1245903763303,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 794.8434530980279,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 644.6861008016517,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 809.9269786391927,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 798.755833324863,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 618.0226926953744,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 789.1412486868718,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 792.3587036469579,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 644.835932459204,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 812.0914984701523,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 799.7322856971059,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 618.7651138042481,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 793.82458947546,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 792.9645002134771,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 645.7695329258135,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 811.4545693919375,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 800.0092092040525,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 618.6754308114879,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 790.5291124697678,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 793.4332636301492,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      }
+    ],
+    "overhead-isolation": [
+      {
+        "round": 0,
+        "arm": "suffix",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 651.9139356848392,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "suffix",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 833.2857206535231,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "suffix",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 835.9149562840696,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "suffix",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 622.5227827317697,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "suffix",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 805.6569359731286,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "suffix",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 804.9583461183761,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "oracle",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 626.6944335227236,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "oracle",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 825.5618638981348,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "oracle",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 807.9078668331922,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "oracle",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 623.0965393401463,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "oracle",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 819.1073107777997,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "oracle",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 801.4843109125941,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "attached-oracle",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 626.0999271344892,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "attached-oracle",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 825.3660475662691,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "attached-oracle",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 808.7132776040836,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "attached-oracle",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 622.8070889888528,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "attached-oracle",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 819.3872788376917,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "attached-oracle",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 802.0719142132929,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "drafted",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 644.4951725611897,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "drafted",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 813.6689741091631,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "drafted",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 798.5743750044154,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "drafted",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 618.2681572690839,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "drafted",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 795.5278723676245,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "drafted",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 791.9102164944356,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "oracle",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 626.7752548814751,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "oracle",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 826.4489176329733,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "oracle",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 814.3368120131368,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "oracle",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 624.0155122915002,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "oracle",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 819.9828479123096,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "oracle",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 807.0855718239884,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "attached-oracle",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 627.5720069660566,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "attached-oracle",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 826.5574111735665,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "attached-oracle",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 807.7942775788831,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "attached-oracle",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 623.9850367213689,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "attached-oracle",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 820.0032146939689,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "attached-oracle",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 799.4948745920863,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "drafted",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 643.34881150891,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "drafted",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 810.2084276073556,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "drafted",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 798.9371330451237,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "drafted",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 618.4374389899364,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "drafted",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 797.593366173878,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "drafted",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 793.8016607458413,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "suffix",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 652.8149539538148,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "suffix",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 832.4678228630254,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "suffix",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 834.935003851258,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "suffix",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 623.4896993541838,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "suffix",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 805.5968445877305,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "suffix",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 806.6520853665469,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "attached-oracle",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 626.7696387571307,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "attached-oracle",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 825.1367948484931,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "attached-oracle",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 811.6072972447571,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "attached-oracle",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 622.8303818140437,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "attached-oracle",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 818.3383747369702,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "attached-oracle",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 804.5607618463806,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "drafted",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 644.1967607125431,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "drafted",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 811.2916555717073,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "drafted",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 802.4850089088366,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "drafted",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 618.8951732623875,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "drafted",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 790.0171013259228,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "drafted",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 796.1992414445897,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "suffix",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 652.174121539032,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "suffix",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 831.2944461737667,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "suffix",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 830.5753163876966,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "suffix",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 621.904087145793,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "suffix",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 804.5647612762093,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "suffix",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 799.7848749620825,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "oracle",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 627.0169140117872,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "oracle",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 826.5210064063601,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "oracle",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 807.9543369033614,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "oracle",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 623.4856976506851,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "oracle",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 819.3914477642772,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "oracle",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 800.6927365909038,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      }
+    ],
+    "stage512": [
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 645.1002045152331,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 814.9288441624107,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 799.8704065651071,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 618.3453986463694,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 796.8361178213568,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 793.4605239532948,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 647.0598716246051,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 810.761762946578,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 797.2266217842038,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 619.7187047950405,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 793.6964676341051,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 791.9282262125578,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 645.6156236352848,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 811.4996930937969,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 796.9250218318138,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 619.1732304780877,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 795.2503544715339,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 790.6492548130739,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 646.3248762331575,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 819.4069301341176,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 800.3348459760032,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 619.1482365327016,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 797.5113084161665,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 794.1212643120977,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 644.1309082097619,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 810.3449806490839,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 805.1574545463609,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 617.9347379131115,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 789.7694274931367,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 798.4068000516954,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 646.753663704301,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 811.5240391620009,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 798.9495509997312,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 620.3189108172958,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 795.7201955248429,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 792.3067276189817,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 646.4792771524011,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 811.5435304341598,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 798.3027979206439,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 620.4576444123596,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 795.7101729324681,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 792.2221391903555,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 644.5922266917154,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 815.1055165738466,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 799.7626064655209,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 618.5919007482223,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 796.3130704836641,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 793.7674920479974,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      }
+    ],
+    "phase-profile": [
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 813.7582181726698,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 803.2588749638213,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 796.8194277588038,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 796.3293510847767,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      }
+    ],
+    "copy-depth": [
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 644.5698231050824,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 814.7629997636277,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 800.0639724877383,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 617.9960916291277,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 795.9623119914172,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 794.7418540342475,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 635.8934085469378,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 807.7355727142193,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 798.4841326720517,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 619.4876546058689,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 795.8177306537868,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 792.8294791877873,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 638.8025415387899,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 807.1041519517509,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 800.2587895703317,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 620.0329453289825,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 795.0620024133443,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 792.5038779934085,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 645.2277789842284,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 812.2673339855877,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 799.2146474955022,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 618.8763193119653,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 791.5135137810487,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 792.9955237163615,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 644.5560253073638,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 814.1310537239268,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 798.7291201709987,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 617.7886021016695,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 796.1646976219921,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 792.1174413121428,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 638.2320557580033,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 807.8213740625819,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 802.7977304140775,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 620.561499278725,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 795.2709574286852,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 796.4268285351809,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 638.227196466546,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 807.7983826312196,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 799.0928664875843,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 620.9553872994748,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 796.0486200617715,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 792.4298028030543,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 644.2620333699359,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 810.6097290154547,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 799.0296424216548,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 617.5224101622193,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 792.2134225010636,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 796.9240813401055,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      }
+    ],
+    "shared-calibration": [
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 643.8672263414753,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 813.9204466072154,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 802.9999395980669,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 618.4098645026263,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 796.4934765134461,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 796.519437923307,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 632.7546042477178,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 812.8668321079678,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 883.5558321243161,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 616.2815390808294,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 794.8857673170639,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 864.9476620371097,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 642.7653023631718,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 813.3024790027683,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 886.3494767826272,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 615.9106785368859,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 795.1002468003629,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 863.7629682596074,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 644.8423531708951,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 814.731652812001,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 799.9885752219824,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 618.1531583535735,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 796.1099619610673,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 792.8953852759796,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 646.5601085995847,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 816.3072854901848,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 799.0876756467267,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 620.0547751768422,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 797.6908152230244,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 793.9558939987153,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 631.9349732717102,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 818.4119552954095,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 886.1439262176706,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 615.5384379760573,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 794.5709769513013,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 858.454954141176,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 632.4218011605403,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 809.1906073092416,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 893.9342616519325,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 615.1052974606797,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 795.9776983826855,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 863.5671192631019,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 645.0327904885318,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 814.5371187032524,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 801.2341625038504,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 619.3005940883706,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 796.3631061944923,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 794.7691593006111,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      }
+    ],
+    "shared-marginals": [
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 354.5886231883915,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 645.4363968702983,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 815.142402372856,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 799.5113247260725,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 356.2809506501271,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 618.7709316101826,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 796.6648510154018,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 793.1585280677888,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 353.7739736251266,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 634.0287094589685,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 816.4624306041238,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 884.521164233605,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 355.8545247109968,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 616.1133419790036,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 796.799379381399,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 873.9905629905045,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 352.80406289491833,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 640.5591704758675,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 811.1867558931708,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 884.3521287512664,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 355.4347333932498,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 616.0818501751139,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 794.3131848396016,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 855.1736597157891,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 354.6546246354652,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 645.2599910212919,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 814.5617690125395,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 798.9874073825234,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 356.3302798758094,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 618.2849439885823,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 796.289525016227,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 792.6706139105225,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 353.80283106837254,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 646.0808791826066,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 817.6687392464844,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 803.463096563945,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 356.94066175605167,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 618.753712363033,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 796.8178065343876,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 796.6235333344594,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 353.1044925522018,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 641.4679975502607,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 817.0524999042318,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 883.7644908150517,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 355.67978776377765,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 616.7057736525313,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 796.9200860651677,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 866.0757645413831,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 356.73545076881857,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 634.2505232845108,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 808.2288258497729,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 887.379851891824,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 357.8520668127788,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 617.5722305987382,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 797.2344692851619,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 869.1247893304921,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 353.3519734489903,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 646.7524678883676,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 811.3515369455441,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 801.0417076206649,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 356.6051195970564,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 619.3686599154357,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 790.4226986163708,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 794.2841328092665,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      }
+    ],
+    "measured-prices": [
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 353.0022900836704,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 645.9552174966029,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 814.2109343140315,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 800.0504673403519,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 355.97894559035507,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 618.2240166544733,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 796.9694197067382,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 793.6122963222863,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 354.01016860474147,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 640.0832692608378,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 817.2512662810595,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 884.2269914436348,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 355.7104043697476,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 615.6818234805448,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 796.4519626733392,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 871.3791667713392,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 355.9226963149118,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 633.7833723015253,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 816.4369707828996,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 891.9506536966762,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 356.46207199869406,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 616.7867743413317,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 795.6865724814223,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 865.635197618233,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 357.03236762615666,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 645.7116359452439,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 810.2915099254717,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 797.9448746694952,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 356.6425874924987,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 618.6005297600364,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 789.4981140441996,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 792.5205934261813,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 356.01922357491236,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 645.976694323631,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 813.7685110062342,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 801.4986519230725,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 357.2613187916304,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 618.6761967062737,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 794.976076048426,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 795.080562490925,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 355.67672827826306,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 632.6198973604828,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 814.5936174787505,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 884.0863563323007,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 357.4915866808473,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 616.2536911028309,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 796.881160887471,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 863.5395353215404,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 355.40053191862216,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 633.304800985909,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 813.0419770200965,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 890.198521413689,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 355.9898165971873,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 615.3958309968295,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 795.5456075523746,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 854.7344795212484,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 354.1874092587419,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 645.0248363588287,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 814.2082939387749,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 799.786965293864,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 356.80092292505157,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 618.4432510106634,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 795.7560584978334,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 793.5494222195109,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      }
+    ],
+    "marginals-plain-pair": [
+      {
+        "round": 0,
+        "arm": "suffix",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 852.3819711186778,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "suffix",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 806.1499360834738,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "drafted",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 883.6145218099846,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "drafted",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 858.096648332815,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "drafted",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 899.202057482918,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "drafted",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 853.9158417247984,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "suffix",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 850.6813351383993,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "suffix",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 804.1592377201139,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      }
+    ],
+    "calibrated-copies": [
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 356.89736524019355,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 646.0187324759729,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 811.741024728307,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 800.8279409915956,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 357.3997695121801,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 618.9712879245058,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 791.1426154787024,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 795.5312979171122,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 353.52706500963103,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 652.9291232633993,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 834.3728340701181,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 896.0390296891412,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 356.3516920037488,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 607.1620416563453,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 798.5301043013338,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 846.7292730391139,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 354.29895451504433,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 652.0235878379984,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 835.1149319822576,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 893.3051216132275,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 355.54066244519555,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 607.1129835703065,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 797.5689915729046,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 851.143583751972,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 355.0785690913475,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 646.2397188970659,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 813.6934232531094,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 799.3406355080527,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 356.1190771418354,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 618.5714398365352,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 795.9064139170582,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 793.1322137306603,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 354.8496704697536,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 645.2522864038602,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 810.7563792827749,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 798.9494270904845,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 356.3042033795154,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 618.7675067526858,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 790.0338392986995,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 793.2412667992925,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 352.7139871670889,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 653.4023148264475,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 833.2547333810215,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 893.8013643122059,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 355.8086370453564,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 608.1383521142291,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 796.8971661927403,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 845.9306402571432,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 355.5316157451344,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 653.3602519209168,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 827.3174545834751,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 883.7418866118552,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 354.71168708573737,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 608.7052764114708,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 796.1492785220543,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 849.1226837895985,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 354.5878835834863,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 644.8822390501088,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 809.1773804578008,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 800.1935435968933,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 355.4614062043814,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 617.77057953921,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 788.3009568824,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 797.1140434478928,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      }
+    ],
+    "calibrated-gain": [
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 645.2817616928971,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 814.9503439569837,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 803.8429669050786,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 618.5966217081203,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 796.32050492397,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 797.9728034474932,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 655.3612739129389,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 827.2921520260961,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 898.5541125939604,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 606.792747118611,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 795.4692566729715,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 821.9535259414042,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 655.2422011190923,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 828.6847884374228,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 894.6143884256593,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 607.2807456583097,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 795.5083803054556,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 855.4259251192357,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 648.0985030732918,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 816.4987719920528,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 799.1220168619425,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 617.3380293389913,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 795.8212232749717,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 791.9775841739299,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 644.8868087939861,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 812.0902189272058,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 797.0857463577217,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 618.0180434003239,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 795.494097756085,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 791.2460709694569,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 653.0580187301645,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 835.413492111602,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 895.501733536294,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 607.4044991617268,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 796.8515252520928,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 832.4465777775944,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 653.4216220485712,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 831.42931875777,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 888.9539789126455,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 608.5829135640643,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 798.6085551885681,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 853.6166076448628,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 644.6175853573202,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 809.5462435922141,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 798.0284264896051,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 618.2663303179743,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 790.1055546163396,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 791.8703317129626,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      }
+    ],
+    "matched-copies": [
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 356.99646309324595,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 645.5492258005319,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 810.932885862684,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 798.4129715234225,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 357.4566124315358,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 618.514504013522,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 790.6443901963735,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 793.6781654196443,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 353.9166515876299,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 636.5545013305285,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 812.5945113141222,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 884.1927466504886,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 356.3840436381793,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 616.1584535260791,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 796.2157635169305,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 893.7677444400998,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 355.37209374435827,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 635.9167330704526,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 817.0502363738213,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 884.0799546586949,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 361.10016599986983,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 615.1828176051994,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 794.5240802161732,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 865.3193294761426,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 354.909861719153,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 645.5712374499714,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 814.4099866625494,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 806.3952546542248,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 364.7132316568852,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 618.8644444174694,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 796.2592729217582,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 799.9076839089588,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 353.6164532172002,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 645.5204569248906,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 811.3272957694173,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 798.8247552364493,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 356.5363752860445,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 619.1669033437117,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 790.4741917389516,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 792.224337544272,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 354.3822285167143,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 643.1026126925138,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 817.2482925015051,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 887.860611670729,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 356.2976482608588,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 615.9026517552672,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 795.9401589558827,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 863.9163041746773,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 356.5314107668125,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 642.0221936686764,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 818.1466807506825,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 894.9686721601435,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 356.0136938950127,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 614.8136328635114,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 796.8489442845871,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 869.8564982576298,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 354.3171899590034,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 646.1645619597977,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 815.0506427042201,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 799.7105753344185,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 357.6725195491522,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 618.5951679719228,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 796.3423294154909,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 792.7533728687552,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      }
+    ],
+    "bounded-confidence": [
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 353.7680835371117,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 646.4244961929077,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 811.3872230675005,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 799.6378632970965,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 356.8454649311719,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 619.0103072043429,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 790.0616695687706,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 793.1290787796452,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 354.23021507526397,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 639.8778292050813,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 818.2102040596474,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 885.2290261607424,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 309.35306237543205,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 615.7962295598645,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 795.8960891596205,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 848.1177087601202,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 355.25533529325133,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 633.9190341655305,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 816.0504998162892,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 888.8641337322866,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 309.14059004467447,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 616.2354478566609,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 794.6971622280608,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 840.2660430574568,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 352.79436176834565,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 644.7725475329029,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 810.6250426792632,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 798.1671109568664,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 355.79316424556134,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 617.8735213883067,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 790.8595630646305,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 792.2957843037145,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 353.3220468785289,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 645.9442405213639,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 810.3759503855246,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 804.0110891455896,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 356.20103217979846,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 618.5346952243924,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 789.9944749219242,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 797.1396234203783,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 337.8638929272364,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 633.1106635542818,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 812.8522702261672,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 889.1705482858504,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 309.107753777448,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 615.7568709687713,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 796.9285305610407,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 848.7950205273687,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 353.1499910053361,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 632.756452274153,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 811.2639894531362,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 892.7542082734848,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 308.4919982383707,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 615.2449557076353,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 795.8510800728106,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 841.5034449047317,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 355.47022188523215,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 645.9453486741286,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 815.271025412628,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 798.9898000662508,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 357.18306525053754,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 619.3419270640579,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 797.317080241428,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 792.4595338818068,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      }
+    ],
+    "timed-holds": [
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 353.9551745170593,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 645.5637468488261,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 807.984763992905,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 801.3765279189241,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 356.38041169909104,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 618.5369303550488,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 789.8099675056259,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 794.3285718721822,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 318.8819043039091,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 635.7543080729808,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 812.5681185512982,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 866.5437186969713,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 330.05866983125316,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 599.7307974258288,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 795.8508341728242,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 852.1405741041499,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 309.5573087694549,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 637.0282173004123,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 811.9433552924245,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 864.755605766611,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 319.1617018393784,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 606.9957448592583,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 791.4377684287101,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 843.8802420178199,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 355.5790235851849,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 645.3876625965851,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 811.5176633383138,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 798.4212262894329,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 356.35965996407475,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 618.3677654913529,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 795.1475215096297,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 792.3545361241212,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 352.9918656139329,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 645.4623325663915,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 813.3962240076326,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 799.0035368390922,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 356.2320914269661,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 617.9899757409191,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 795.6455306086262,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 793.9715825415828,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 319.64008095683903,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 632.433123684852,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 807.5030357403751,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 888.4345016760495,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 330.9378911041061,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 613.1681927115468,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 798.5116500646026,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 857.913514905577,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 309.67663598459416,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 628.2013924361069,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 800.2961748637547,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 865.7712022424788,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 330.26751182770295,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 607.0239816131244,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 797.2986689404338,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 844.216850754568,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 355.51257406986366,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 645.8473415590147,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 813.826905724031,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 799.0203905043105,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 355.75225545744615,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 618.0301509608252,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 795.9903673990456,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 3,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 795.2775134771482,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      }
+    ],
+    "timed-holds-v2": [
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 356.69230829755,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 645.353736357899,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 810.2646631217915,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 800.3407202667829,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 368.6266218893763,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 618.5935735594454,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 798.2022191584463,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 794.2045453854204,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 312.80102959084525,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 630.5094565366052,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 811.3749866698848,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 883.7831479112893,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 329.9267678631863,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 606.6705659128554,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 796.2822335082275,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 872.3305412753763,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 309.5502005426481,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 631.7242635070509,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 816.0669308718341,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 889.0877551566958,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 329.0866104337284,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 613.4056960736302,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 796.3302836453324,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      }
+    ],
+    "timed-holds-v3": [
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 355.86114646948226,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 645.242574970228,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 809.9454150389603,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 797.3900848713985,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 344.9797439664245,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 617.8759538569072,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 789.1299924459802,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 792.2399449618346,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 306.32830748608166,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 630.5045032779684,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 809.9874900767422,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 892.590961629742,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 317.42741882026826,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 604.5410814558361,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 796.1636361881042,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 0,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 852.6768131157207,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 319.5727336112319,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 637.1253074031247,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 809.0727058996663,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 885.7462905748039,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 318.3155657011862,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 612.6436896536846,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 795.8719992041238,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "live-price",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 841.9255394243237,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 353.3181104124031,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 645.2442586943916,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 8,
+        "tps": 810.2098888274344,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 16,
+        "tps": 799.6865282121868,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 1,
+        "tps": 356.3090988418972,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 4,
+        "tps": 618.5141289547389,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 8,
+        "tps": 788.8790864432178,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 1,
+        "arm": "old",
+        "prompt": "prose",
+        "streams": 16,
+        "tps": 793.3453621679392,
+        "reply_sha256": "756f2e35886612286b0797e4b20f7a65f5434e1c0997b033a224a1b9830c452c"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 1,
+        "tps": 354.0687445295109,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      },
+      {
+        "round": 2,
+        "arm": "old",
+        "prompt": "code",
+        "streams": 4,
+        "tps": 644.2289378363188,
+        "reply_sha256": "dcc30ceea29dc7510fd59ee9a4c2554b780db9dcafe7a843c29afdfd57231edc"
+      }
+    ]
+  },
+  "incomplete": [
+    "timed-holds-v2",
+    "timed-holds-v3"
+  ],
+  "notes": [
+    "All runs use public code/prose prompts, greedy seed 1234, 256 tokens, context 4096, cache off.",
+    "Generic old/live-price labels mean the frozen published drafter baseline and the private experiment.",
+    "The overhead isolation uses the same frozen binary with suffix, literal draft:false oracle, attached-but-disabled oracle and drafted arms.",
+    "Phase-profile is instrumented and diagnostic; its rates are not release evidence.",
+    "Timed-holds-v2/v3 were explicitly interrupted and are not recorded as completed qualification.",
+    "M4 hold-accounting was interrupted after its controls drifted under unrelated CPU/memory load."
+  ],
+  "m4_interrupted_contended_cells": [
+    {
+      "round": 0,
+      "arm": "old",
+      "prompt": "code",
+      "streams": 4,
+      "tps": 255.42985115303972,
+      "reply_sha256": "f66e3fd7e5093c8bd530e7b6782d587fd8df18f17a2b4cbbe2e22ee71038890f"
+    },
+    {
+      "round": 0,
+      "arm": "old",
+      "prompt": "code",
+      "streams": 8,
+      "tps": 285.8897351673643,
+      "reply_sha256": "f66e3fd7e5093c8bd530e7b6782d587fd8df18f17a2b4cbbe2e22ee71038890f"
+    },
+    {
+      "round": 0,
+      "arm": "old",
+      "prompt": "code",
+      "streams": 16,
+      "tps": 324.9759499855657,
+      "reply_sha256": "f66e3fd7e5093c8bd530e7b6782d587fd8df18f17a2b4cbbe2e22ee71038890f"
+    },
+    {
+      "round": 0,
+      "arm": "old",
+      "prompt": "prose",
+      "streams": 4,
+      "tps": 230.79741035226908,
+      "reply_sha256": "5a6a547bd3c4834ce019f947db389a30e48e297485f20f2b721d340a5432d784"
+    },
+    {
+      "round": 0,
+      "arm": "old",
+      "prompt": "prose",
+      "streams": 8,
+      "tps": 292.03948326150095,
+      "reply_sha256": "5a6a547bd3c4834ce019f947db389a30e48e297485f20f2b721d340a5432d784"
+    },
+    {
+      "round": 0,
+      "arm": "old",
+      "prompt": "prose",
+      "streams": 16,
+      "tps": 321.8635097788463,
+      "reply_sha256": "5a6a547bd3c4834ce019f947db389a30e48e297485f20f2b721d340a5432d784"
+    },
+    {
+      "round": 0,
+      "arm": "live-price",
+      "prompt": "code",
+      "streams": 4,
+      "tps": 250.61604654799328,
+      "reply_sha256": "f66e3fd7e5093c8bd530e7b6782d587fd8df18f17a2b4cbbe2e22ee71038890f"
+    },
+    {
+      "round": 0,
+      "arm": "live-price",
+      "prompt": "code",
+      "streams": 8,
+      "tps": 280.35161705555925,
+      "reply_sha256": "f66e3fd7e5093c8bd530e7b6782d587fd8df18f17a2b4cbbe2e22ee71038890f"
+    },
+    {
+      "round": 0,
+      "arm": "live-price",
+      "prompt": "code",
+      "streams": 16,
+      "tps": 321.89181286452697,
+      "reply_sha256": "f66e3fd7e5093c8bd530e7b6782d587fd8df18f17a2b4cbbe2e22ee71038890f"
+    },
+    {
+      "round": 0,
+      "arm": "live-price",
+      "prompt": "prose",
+      "streams": 4,
+      "tps": 233.3064872375181,
+      "reply_sha256": "5a6a547bd3c4834ce019f947db389a30e48e297485f20f2b721d340a5432d784"
+    },
+    {
+      "round": 0,
+      "arm": "live-price",
+      "prompt": "prose",
+      "streams": 8,
+      "tps": 293.4532362980501,
+      "reply_sha256": "5a6a547bd3c4834ce019f947db389a30e48e297485f20f2b721d340a5432d784"
+    },
+    {
+      "round": 0,
+      "arm": "live-price",
+      "prompt": "prose",
+      "streams": 16,
+      "tps": 322.88252957986236,
+      "reply_sha256": "5a6a547bd3c4834ce019f947db389a30e48e297485f20f2b721d340a5432d784"
+    },
+    {
+      "round": 1,
+      "arm": "live-price",
+      "prompt": "code",
+      "streams": 4,
+      "tps": 254.92513702804413,
+      "reply_sha256": "f66e3fd7e5093c8bd530e7b6782d587fd8df18f17a2b4cbbe2e22ee71038890f"
+    },
+    {
+      "round": 1,
+      "arm": "live-price",
+      "prompt": "code",
+      "streams": 8,
+      "tps": 280.49323867369213,
+      "reply_sha256": "f66e3fd7e5093c8bd530e7b6782d587fd8df18f17a2b4cbbe2e22ee71038890f"
+    },
+    {
+      "round": 1,
+      "arm": "live-price",
+      "prompt": "code",
+      "streams": 16,
+      "tps": 316.1699880648688,
+      "reply_sha256": "f66e3fd7e5093c8bd530e7b6782d587fd8df18f17a2b4cbbe2e22ee71038890f"
+    },
+    {
+      "round": 1,
+      "arm": "live-price",
+      "prompt": "prose",
+      "streams": 4,
+      "tps": 228.74850682582047,
+      "reply_sha256": "5a6a547bd3c4834ce019f947db389a30e48e297485f20f2b721d340a5432d784"
+    },
+    {
+      "round": 1,
+      "arm": "live-price",
+      "prompt": "prose",
+      "streams": 8,
+      "tps": 286.0613003174711,
+      "reply_sha256": "5a6a547bd3c4834ce019f947db389a30e48e297485f20f2b721d340a5432d784"
+    },
+    {
+      "round": 1,
+      "arm": "live-price",
+      "prompt": "prose",
+      "streams": 16,
+      "tps": 295.7224222852996,
+      "reply_sha256": "5a6a547bd3c4834ce019f947db389a30e48e297485f20f2b721d340a5432d784"
+    },
+    {
+      "round": 1,
+      "arm": "old",
+      "prompt": "code",
+      "streams": 4,
+      "tps": 213.9599629051815,
+      "reply_sha256": "f66e3fd7e5093c8bd530e7b6782d587fd8df18f17a2b4cbbe2e22ee71038890f"
+    },
+    {
+      "round": 1,
+      "arm": "old",
+      "prompt": "code",
+      "streams": 8,
+      "tps": 236.19510069268986,
+      "reply_sha256": "f66e3fd7e5093c8bd530e7b6782d587fd8df18f17a2b4cbbe2e22ee71038890f"
+    },
+    {
+      "round": 1,
+      "arm": "old",
+      "prompt": "code",
+      "streams": 16,
+      "tps": 268.95459868424456,
+      "reply_sha256": "f66e3fd7e5093c8bd530e7b6782d587fd8df18f17a2b4cbbe2e22ee71038890f"
+    },
+    {
+      "round": 1,
+      "arm": "old",
+      "prompt": "prose",
+      "streams": 4,
+      "tps": 220.88028624348414,
+      "reply_sha256": "5a6a547bd3c4834ce019f947db389a30e48e297485f20f2b721d340a5432d784"
+    },
+    {
+      "round": 1,
+      "arm": "old",
+      "prompt": "prose",
+      "streams": 8,
+      "tps": 233.47344218749308,
+      "reply_sha256": "5a6a547bd3c4834ce019f947db389a30e48e297485f20f2b721d340a5432d784"
+    },
+    {
+      "round": 1,
+      "arm": "old",
+      "prompt": "prose",
+      "streams": 16,
+      "tps": 262.46936902073395,
+      "reply_sha256": "5a6a547bd3c4834ce019f947db389a30e48e297485f20f2b721d340a5432d784"
+    },
+    {
+      "round": 2,
+      "arm": "old",
+      "prompt": "code",
+      "streams": 4,
+      "tps": 199.02623810574727,
+      "reply_sha256": "f66e3fd7e5093c8bd530e7b6782d587fd8df18f17a2b4cbbe2e22ee71038890f"
+    },
+    {
+      "round": 2,
+      "arm": "old",
+      "prompt": "code",
+      "streams": 8,
+      "tps": 178.4980914699512,
+      "reply_sha256": "f66e3fd7e5093c8bd530e7b6782d587fd8df18f17a2b4cbbe2e22ee71038890f"
+    },
+    {
+      "round": 2,
+      "arm": "old",
+      "prompt": "code",
+      "streams": 16,
+      "tps": 269.9027915810738,
+      "reply_sha256": "f66e3fd7e5093c8bd530e7b6782d587fd8df18f17a2b4cbbe2e22ee71038890f"
+    },
+    {
+      "round": 2,
+      "arm": "old",
+      "prompt": "prose",
+      "streams": 4,
+      "tps": 208.81805728442896,
+      "reply_sha256": "5a6a547bd3c4834ce019f947db389a30e48e297485f20f2b721d340a5432d784"
+    },
+    {
+      "round": 2,
+      "arm": "old",
+      "prompt": "prose",
+      "streams": 8,
+      "tps": 217.0602358439617,
+      "reply_sha256": "5a6a547bd3c4834ce019f947db389a30e48e297485f20f2b721d340a5432d784"
+    },
+    {
+      "round": 2,
+      "arm": "old",
+      "prompt": "prose",
+      "streams": 16,
+      "tps": 270.8059638616868,
+      "reply_sha256": "5a6a547bd3c4834ce019f947db389a30e48e297485f20f2b721d340a5432d784"
+    },
+    {
+      "round": 2,
+      "arm": "live-price",
+      "prompt": "code",
+      "streams": 4,
+      "tps": 211.2455862941568,
+      "reply_sha256": "f66e3fd7e5093c8bd530e7b6782d587fd8df18f17a2b4cbbe2e22ee71038890f"
+    },
+    {
+      "round": 2,
+      "arm": "live-price",
+      "prompt": "code",
+      "streams": 8,
+      "tps": 235.13649439640818,
+      "reply_sha256": "f66e3fd7e5093c8bd530e7b6782d587fd8df18f17a2b4cbbe2e22ee71038890f"
+    },
+    {
+      "round": 2,
+      "arm": "live-price",
+      "prompt": "code",
+      "streams": 16,
+      "tps": 272.7727044611459,
+      "reply_sha256": "f66e3fd7e5093c8bd530e7b6782d587fd8df18f17a2b4cbbe2e22ee71038890f"
+    },
+    {
+      "round": 2,
+      "arm": "live-price",
+      "prompt": "prose",
+      "streams": 4,
+      "tps": 202.21801607515494,
+      "reply_sha256": "5a6a547bd3c4834ce019f947db389a30e48e297485f20f2b721d340a5432d784"
+    },
+    {
+      "round": 2,
+      "arm": "live-price",
+      "prompt": "prose",
+      "streams": 8,
+      "tps": 230.89681390141425,
+      "reply_sha256": "5a6a547bd3c4834ce019f947db389a30e48e297485f20f2b721d340a5432d784"
+    }
+  ],
+  "descriptions": {
+    "hold-accounting": "Models outgoing batched heads from the timed shape rather than per-step multiplication.",
+    "overhead-isolation": "Same binary: suffix, literal draft:false oracle, drafter attached but disabled, and active drafting.",
+    "stage512": "128 to 512 staged context rows.",
+    "phase-profile": "Instrumented host-absorb and GPU-hold phase counters, including warmups.",
+    "copy-depth": "Conditional acceptance by copied position, learned separately by source.",
+    "shared-calibration": "Absolute shared-forward timings above 16 rows.",
+    "shared-marginals": "Shared increments anchored to the original 16-row window cost.",
+    "measured-prices": "Shared increments plus outgoing hold-shape overhead accounting.",
+    "marginals-plain-pair": "Same calibrated binary with and without the external drafter.",
+    "calibrated-copies": "Shared increments with the ordinary fixed copy prior restored.",
+    "calibrated-gain": "Shared increments, ordinary copy policy, and gain scaled relative to the acceptance prior.",
+    "matched-copies": "Shared increments with the fixed prior retained for long suffix matches.",
+    "bounded-confidence": "A deeper pending hold falls back entirely when cached confidence is too short.",
+    "timed-holds": "Uniform late-hold budgeting; pending work inferred from selected streams.",
+    "timed-holds-v2": "Uniform budgeting with a drafter-owned pending-cost query; interrupted.",
+    "timed-holds-v3": "Pending-cost metadata and one proposer query; interrupted."
+  },
+  "phase_profile_totals": {
+    "includes_warmups": true,
+    "absorb_calls": 1131,
+    "absorb_rows": 13102,
+    "absorb_wall_ms": 17.757,
+    "explicit_absorb_gpu_ms": 7.58,
+    "hold_calls": 101,
+    "hold_gpu_ms": 434.471,
+    "note": "Hold GPU time also includes staged-context ingestion; these counters are not a pure context-versus-drafting decomposition."
+  }
+}

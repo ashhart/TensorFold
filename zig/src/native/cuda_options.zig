@@ -36,6 +36,10 @@ pub fn set(comptime F: type, o: api.Open, opts: *F.Options, problem: *[]const u8
             return false;
         };
     }
+    if (o.drafter_bits_given and o.drafter_bits == 8) {
+        problem.* = "--drafter-bits 8: only LFM2.5-24B-A2B's Metal DSpark drafter takes it; this family takes 0 (bf16) or 4";
+        return false;
+    }
     if (comptime @hasField(F.Options, "drafter")) opts.drafter = o.drafter;
     if (comptime @hasField(F.Options, "drafter_bits")) opts.drafter_bits = o.drafter_bits;
     if (comptime @hasField(F.Options, "rope_yarn")) opts.rope_yarn = o.rope_yarn;

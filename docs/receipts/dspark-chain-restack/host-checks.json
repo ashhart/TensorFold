@@ -1,0 +1,33 @@
+{
+  "base": "d33dcfc767ee093393c6bfa00b3949bd7b4d8e88",
+  "source_identity": "All Zig/build sources match prior integration f73bb5590; receipt/history changes only",
+  "no_m5_access": true,
+  "stages": {
+    "1390": {
+      "head": "4156e9e62a8b403ecf50f6c39d49f321199e79c1",
+      "checks": "Build Summary: 57/57 steps succeeded; 11/11 tests passed",
+      "new_lean_findings": 0
+    },
+    "1391": {
+      "head": "8e9b548fd406115d1920fbc79a4cdd4c81a747a1",
+      "checks": "Build Summary: 67/67 steps succeeded; 353/356 tests passed (3 skipped)",
+      "new_lean_findings": 0
+    },
+    "1392": {
+      "head": "51cbe02b15aa9319e2f3a3403ea76030fac60a0b",
+      "checks": "Build Summary: 67/67 steps succeeded; 353/356 tests passed (3 skipped)",
+      "new_lean_findings": 0
+    },
+    "1393": {
+      "head": "d9a0185246a399ff509c8e1a67266c4cbccd32d2",
+      "checks": "Build Summary: 73/73 steps succeeded; 353/356 tests passed (3 skipped)",
+      "new_lean_findings": 0
+    },
+    "1394": {
+      "head": "b8d94d6181ed9b54ba790ed5dacd4a2b7f04580b",
+      "checks": "Build Summary: 73/73 steps succeeded; 355/358 tests passed (3 skipped)",
+      "new_lean_findings": 0
+    }
+  },
+  "default_build": "Build Summary: 239/239 steps succeeded"
+}

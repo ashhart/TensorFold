@@ -54,3 +54,57 @@ test "own_copy_rates: copies that keep breaking are cut, by source; without it e
         }
     }
 }
+
+test "strong context copies recover independently of earlier weak misses" {
+    var cfg = try Config.init(gpa, .{ .exact_width = 16, .own_copy_rates = true, .matched_copy_rates = true }, 16, 15);
+    defer cfg.deinit(gpa);
+    var target: fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: fake.FixedClock = .{};
+    var e = Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer e.deinit();
+    var s = try Stream.init(gpa, .{ .id = "strong", .prompt = &.{ 1, 2 }, .max_new = 64 });
+    defer s.deinit(gpa);
+    for (0..8) |_| win.observePricedCopied(&e, &s, false, false, 0, 4);
+    try std.testing.expect(win.pricedCopiedRate(&e, &s, false, false) < 0.5);
+    try std.testing.expectApproxEqAbs(cfg.copy_rate, win.pricedCopiedRate(&e, &s, false, true), 1e-12);
+    try std.testing.expectApproxEqAbs(cfg.copy_rate, win.pricedCopiedRate(&e, &s, true, true), 1e-12);
+    for (0..8) |_| win.observePricedCopied(&e, &s, false, true, 0, 4);
+    try std.testing.expect(win.pricedCopiedRate(&e, &s, false, true) < cfg.copy_rate);
+    cfg.matched_copy_rates = false;
+    try std.testing.expectApproxEqAbs(win.copiedRate(&e, &s, false), win.pricedCopiedRate(&e, &s, false, true), 1e-12);
+}
+
+test "a strong match can be allocated after weaker matches failed" {
+    var costs: [8]Cost = undefined;
+    for (&costs, 1..) |*c, width| c.* = .{ .width = @intCast(width), .ms = 10 + 6 * @as(f64, @floatFromInt(width - 1)) };
+    var cfg = try Config.init(gpa, .{ .exact_width = 8, .batch_rows = 8, .window_costs = &costs, .own_copy_rates = true, .matched_copy_rates = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: fake.FixedClock = .{};
+    var e = Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer e.deinit();
+    var s = try Stream.init(gpa, .{ .id = "match", .prompt = &.{ 1, 2 }, .max_new = 64 });
+    defer s.deinit(gpa);
+    for (0..12) |_| win.observePricedCopied(&e, &s, false, false, 0, 4);
+    var lookup = try @import("proposer.zig").SuffixLookup.init(gpa, .{ .ngram = 3, .min_match = 3 });
+    defer lookup.deinit();
+    var history: [51]u32 = undefined;
+    for (0..25) |i| {
+        history[i] = @intCast(i + 1);
+        history[26 + i] = @intCast(i + 1);
+    }
+    history[25] = 123;
+    try std.testing.expect((try lookup.propose(&history, 7)).len > 0);
+    s.proposer = lookup.proposer();
+    try std.testing.expect(win.trustedCopy(&s));
+    var plan: [1]win.Plan = .{.{ .stream = &s, .position = 0, .kind = .copy, .tokens = &copied }};
+    try win.allocate(&e, &plan);
+    try std.testing.expect(plan[0].count() > 0);
+    cfg.matched_copy_rates = false;
+    _ = e.arena.reset(.retain_capacity);
+    plan = .{.{ .stream = &s, .position = 0, .kind = .copy, .tokens = &copied }};
+    try win.allocate(&e, &plan);
+    try std.testing.expectEqual(@as(usize, 0), plan[0].count());
+}
