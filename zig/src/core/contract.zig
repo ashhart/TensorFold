@@ -3,6 +3,7 @@ pub const delta_slots_ref = @import("contract/delta_slots_ref.zig");
 pub const delta_slots_records = @import("contract/delta_slots_records.zig");
 pub const spec = @import("contract/contract.zig");
 pub const gates = @import("contract/gates.zig");
+pub const attention_pv = @import("contract/attention_pv.zig");
 pub const rows = @import("contract/rows.zig");
 pub const affine = @import("contract/affine.zig");
 pub const dense = @import("contract/dense.zig");
@@ -29,6 +30,7 @@ test {
     _ = spec;
     _ = gates;
     _ = rows;
+    _ = attention_pv;
     _ = affine;
     _ = dense;
     _ = limits;
