@@ -248,13 +248,13 @@ pub const Lanes = struct {
         self.x.e.prompt_logprobs = sink.want();
         defer self.x.e.prompt_logprobs = null;
         var keeps: prefix_mod.Keeps = undefined;
-        if (try self.x.chunk(s.prompt(), at, from, .{ .ptr = s, .check = cancelled }, self.marksOf(s, &keeps))) |first| {
+        const step = try self.x.chunk(s.prompt(), at, !@import("cuda_prompt_solo.zig").othersDecode(&self.lanes, s), from, .{ .ptr = s, .check = cancelled }, self.marksOf(s, &keeps));
+        if (step.first) |first| {
             l.first = self.take(first);
             l.fill = null;
             return true;
         }
-        // its chunks sit on the 2048 grid (cuda_engine.zig): l.fill stays uncapped; the share still works by time.
-        l.fill = at + engine.prompt_rows;
+        l.fill = at + step.rows; // on the 2048 grid (cuda_engine.zig), so uncapped; the share still works by time
         if (s.settle_step) try self.x.e.stream.synchronize(); // its tail would land in the next decode round's time
         return false;
     }
@@ -266,7 +266,7 @@ pub const Lanes = struct {
         if (at <= s.cached or s.reuse.hook == null) return;
         try self.x.bind(l.slot);
         var keeps: prefix_mod.Keeps = undefined;
-        _ = self.x.chunk(s.prompt(), at, null, .{ .ptr = null, .check = cancelNow }, self.marksOf(s, &keeps)) catch |err| {
+        _ = self.x.chunk(s.prompt(), at, false, null, .{ .ptr = null, .check = cancelNow }, self.marksOf(s, &keeps)) catch |err| {
             if (err == error.Cancelled) return;
             return err;
         };

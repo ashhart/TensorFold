@@ -25,6 +25,8 @@ pub const prompt_heads = 16;
 pub const dense_reach = 2560;
 /// Index-key and gate rows a DSA cache holds (a ring): pool_keys reads only from the current pool's first row on.
 pub const index_ring = 2 * prefill_rows;
+/// A solo prompt pass's rows (TF_GLM_CHUNK_SOLO): a whole ring, which a rebase at a grid point leaves it.
+pub const solo_rows = index_ring;
 
 /// Sub-allocations of one device allocation, 256-byte aligned like the driver's own.
 const Arena = struct {
