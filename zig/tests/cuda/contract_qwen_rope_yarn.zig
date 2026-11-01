@@ -19,7 +19,7 @@ const images = [_][3]i32{ .{ 1048000, 5, 7 }, .{ 300000, 300001, 2 }, .{ 262144,
 
 // qwen35.cuh's Geo, Seg and Ancestor (contract_qwen_pages.zig mirrors them too)
 const Geo = extern struct { hid: c_int, nk: c_int, nv: c_int, qh: c_int, kvh: c_int, nl: c_int };
-const Seg = extern struct { rec: u64 = 0, conv: u64 = 0, kv: u64, tap: u64 = 0, log: u64 = 0, before: u64 = 0, cap: c_int, len: c_int, row0: c_int, rows: c_int, tap_rows: c_int = 0, taps: c_int = 0, delta: c_int = 0, pt: u64 = 0, ps: u64 = 0, ptok: c_int = 0 };
+const Seg = extern struct { rec: u64 = 0, conv: u64 = 0, kv: u64, tap: u64 = 0, log: u64 = 0, before: u64 = 0, cap: c_int, len: c_int, row0: c_int, rows: c_int, tap_rows: c_int = 0, taps: c_int = 0, delta: c_int = 0, pt: u64 = 0, ps: u64 = 0, ptok: c_int = 0, pn: c_int = 0, plog: u64 = 0 };
 const Ancestor = extern struct { bits: u64, depth: u32, chain: u32 };
 
 /// The engine's table for Qwen3.6 (theta 1e7, factor 4 over 262,144): the attention factor, then 32 frequencies.

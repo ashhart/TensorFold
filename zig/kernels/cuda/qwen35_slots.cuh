@@ -44,10 +44,42 @@ __device__ __forceinline__ void q35_slots(Geo geo, const __nv_bfloat16* q, const
 #pragma unroll
     for (int r = 0; r < R; ++r)
 #pragma unroll
-        for (int i = 0; i < PT; ++i) {
-            root[r][i] = st[r * DK + i];
-            if (sg.rows == 1) reinterpret_cast<float*>(sg.before)[(size_t)layer * geo.rec() + at + r * DK + i] = root[r][i];
+        for (int i = 0; i < PT; ++i) root[r][i] = st[r * DK + i];
+    // pending kept rows into the loaded state: tf_q35k_apply's steps in row order, eight rows' loads in flight
+    const int pn = sg.pn < 0 ? -sg.pn : sg.pn;
+    if (pn > 0) {
+        constexpr int PB = 8;
+        for (int j0 = 0; j0 < pn; j0 += PB) {
+            float pg[PB], pd[PB][R];
+            uint2 pk[PB];
+#pragma unroll
+            for (int u = 0; u < PB; ++u) {
+                if (j0 + u >= pn) break;
+                const LogRow l = pend_row(geo, sg.plog, layer, j0 + u);
+                pg[u] = l.g[hv];
+#pragma unroll
+                for (int r = 0; r < R; ++r) pd[u][r] = l.delta[hv * DK + dv0 + r];
+                pk[u] = *reinterpret_cast<const uint2*>(l.k + hk * DK + PT * dk);
+            }
+#pragma unroll
+            for (int u = 0; u < PB; ++u) {
+                if (j0 + u >= pn) break;
+                const __nv_bfloat16* kb = reinterpret_cast<const __nv_bfloat16*>(&pk[u]);
+#pragma unroll
+                for (int r = 0; r < R; ++r)
+#pragma unroll
+                    for (int i = 0; i < PT; i++) {
+                        root[r][i] = root[r][i] * pg[u];
+                        root[r][i] = fmaf(bf(kb[i]), pd[u][r], root[r][i]);
+                    }
+            }
         }
+    }
+    if (sg.rows == 1)
+#pragma unroll
+        for (int r = 0; r < R; ++r)
+#pragma unroll
+            for (int i = 0; i < PT; ++i) reinterpret_cast<float*>(sg.before)[(size_t)layer * geo.rec() + at + r * DK + i] = root[r][i];
     const bool record = recorded(P);
     // row inputs as stored, the next row's loaded while this one computes
     struct In { uint2 k, q; __nv_bfloat16 v[R], beta; float g; };
@@ -151,7 +183,15 @@ __device__ __forceinline__ void q35_slots(Geo geo, const __nv_bfloat16* q, const
         const float tot = spread_sum<R>(pend, dk);
         if ((dk & ((1 << SR) - 1)) == 0) y[((size_t)pend_row * NV + hv) * DK + dv0 + (dk >> SR)] = __float2bfloat16_rn(tot);
     }
-    if (record && sg.rows != 1) return;
+    if (record && sg.rows != 1) {
+        // a committing count: the state with the pending rows landed (the window's own rows wait for keep)
+        if (sg.pn > 0)
+#pragma unroll
+            for (int r = 0; r < R; ++r)
+#pragma unroll
+                for (int i = 0; i < PT; ++i) st[r * DK + i] = root[r][i];
+        return;
+    }
 #pragma unroll
     for (int r = 0; r < R; ++r)
 #pragma unroll

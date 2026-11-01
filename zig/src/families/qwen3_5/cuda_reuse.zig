@@ -155,6 +155,7 @@ pub fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
     const t: *Target = @ptrCast(@alignCast(ptr));
     const s: *lanes.Stream = @ptrCast(@alignCast(owner orelse return error.NoStream));
     const cache = t.caches.get(s) orelse return error.UnknownStream;
+    try cache.flush(t.e);
     return @ptrCast(try saveCache(t.e, cache, at, t.seen.get(s) orelse &.{}));
 }
 
@@ -233,7 +234,9 @@ pub fn restoreCache(e: *Engine, cache: *Cache, saved: *anyopaque, seen: []const 
 pub fn restore(ptr: *anyopaque, owner: ?*anyopaque, saved: *anyopaque) anyerror!void {
     const t: *Target = @ptrCast(@alignCast(ptr));
     const s: *lanes.Stream = @ptrCast(@alignCast(owner orelse return error.NoStream));
-    return restoreCache(t.e, t.caches.get(s) orelse return error.UnknownStream, saved, t.seen.get(s) orelse &.{});
+    const cache = t.caches.get(s) orelse return error.UnknownStream;
+    try cache.flush(t.e);
+    return restoreCache(t.e, cache, saved, t.seen.get(s) orelse &.{});
 }
 
 /// Free a kept state's host copy.
