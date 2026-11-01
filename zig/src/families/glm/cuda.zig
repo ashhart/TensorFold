@@ -90,6 +90,8 @@ test {
 pub const dflash = @import("dflash.zig");
 pub const dflash_candidates = @import("dflash_candidates.zig");
 pub const dflash_load_owner = @import("dflash_load_owner.zig");
+pub const dflash_load = @import("dflash_load.zig");
+pub const taps = @import("cuda_taps.zig");
 
 pub const prompts = @import("cuda_prompts.zig");
 pub const prompt_hold = @import("cuda_prompt_hold.zig");
