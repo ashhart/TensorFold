@@ -13,7 +13,7 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len < 5) {
-        std.debug.print("skipped: usage tf-xpu-lfm3_vl_logits-test MODEL_DIR TOKENS_JSON IMAGE OUT_DIR\n", .{});
+        std.debug.print("skipped: usage tf-xpu-lfm3_vl_logits-test MODEL_DIR TOKENS_JSON IMAGE OUT_DIR [PATCHES_F32]\n", .{});
         return;
     }
     const doc = try std.json.parseFromSlice(std.json.Value, gpa, try std.Io.Dir.cwd().readFileAlloc(io, args[2], gpa, .unlimited), .{});
@@ -22,6 +22,12 @@ pub fn main(init: std.process.Init) !void {
     const ids = try gpa.alloc(u32, vals.len);
     for (vals, ids) |v, *o| o.* = @intCast(v.integer);
     const p = try img.prepare(io, gpa, try std.Io.Dir.cwd().readFileAlloc(io, args[3], gpa, .limited(64 << 20)), 4096);
+    // PATCHES_F32: the tower's input from a file (fp32 [patches][1536], the picture's grid), e.g. a receipt's patches
+    if (args.len > 5) {
+        const raw = try std.Io.Dir.cwd().readFileAlloc(io, args[5], gpa, .limited(256 << 20));
+        if (raw.len != p.pixels.len * 4) return error.PatchesDiffer;
+        @memcpy(std.mem.sliceAsBytes(p.pixels), raw);
+    }
     for (ids[at .. at + p.tokens]) |t| if (t != 125030) return error.PromptRowsDiffer;
     if (ids[at + p.tokens] == 125030) return error.PromptRowsDiffer;
     var r = try rt.open();
