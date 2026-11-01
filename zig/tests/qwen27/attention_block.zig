@@ -92,7 +92,7 @@ pub fn main(init: std.process.Init) !void {
         return error.NoPromptKernel;
     }
     const geometry = planning.Geometry{ .heads = heads, .kv_heads = kv_heads, .shared_prefix = units };
-    const limits = attn.Limits{ .rows = max_rows, .streams = 1, .keys = capacity, .shared_prefix = units, .geometry = geometry };
+    const limits = attn.Limits{ .rows = max_rows, .streams = 3, .keys = capacity, .shared_prefix = units, .geometry = geometry };
     var scratch = try attn.Scratch.init(device, limits);
     defer scratch.deinit();
     var binding = try attn.Binding.init(device, limits);
@@ -155,5 +155,67 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("{s} start {d} rows {d} end {d}: bidirectional worst {d:.5} (vs causal reference {d:.4}), causal worst {d:.5} (vs bidirectional reference {d:.4})\n", .{ if (ok) "ok  " else "FAIL", c.start, c.rows, c.end, errs[0], crossed[0], errs[1], crossed[1] });
     }
     if (failed) return error.BidirectionalAttention;
+    // Several streams in one plan, each reading keys before its own end: each stream's bytes equal its one-stream pass.
+    const keys2 = try filled(device, &rng, cache_bytes);
+    const values2 = try filled(device, &rng, cache_bytes);
+    const keys3 = try filled(device, &rng, cache_bytes);
+    const values3 = try filled(device, &rng, cache_bytes);
+    const solo = try device.buffer(max_rows * heads * dim * 2, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+    defer for ([_]mtl.Buffer{ keys2, values2, keys3, values3, solo }) |b| b.deinit();
+    const all_caches = [_]attn.Cache{ caches[0], .{ .keys = .{ .buffer = keys2 }, .values = .{ .buffer = values2 }, .capacity = capacity }, .{ .keys = .{ .buffer = keys3 }, .values = .{ .buffer = values3 }, .capacity = capacity } };
+    const groups = [_][]const Case{
+        &.{ .{ .start = 37, .rows = 50, .end = 87 }, .{ .start = 100, .rows = 40, .end = 140 } },
+        &.{ .{ .start = 0, .rows = 64, .end = 64 }, .{ .start = 896, .rows = 64, .end = 960 } },
+        &.{ .{ .start = 37, .rows = 50, .end = 87 }, .{ .start = 490, .rows = 40, .end = 530 }, .{ .start = 100, .rows = 30, .end = 130 } },
+        &.{ .{ .start = 5, .rows = 1, .end = 6 }, .{ .start = 640, .rows = 100, .end = 740 }, .{ .start = 0, .rows = 3, .end = 3 } },
+    };
+    for (groups) |set| {
+        var parents: [max_rows]i32 = undefined;
+        var windows: [3]planning.Window = undefined;
+        var ends: [3]u32 = undefined;
+        var first: u32 = 0;
+        for (set, 0..) |c, s| {
+            for (parents[first..][0..c.rows], 0..) |*p, r| p.* = @as(i32, @intCast(r)) - 1;
+            windows[s] = .{ .parents = parents[first..][0..c.rows], .start = c.start, .capacity = capacity };
+            ends[s] = c.end;
+            first += c.rows;
+        }
+        var plan = try attn.Plan.init(a, windows[0..set.len], geometry);
+        defer plan.deinit();
+        try scratch.upload(plan);
+        try binding.upload(plan, all_caches[0..set.len]);
+        @memset(out.contents()[0 .. @as(usize, first) * heads * dim * 2], 0);
+        {
+            const cb = queue.commandBuffer();
+            const e = cb.compute(.concurrent);
+            try op.encodeBlocks(e, &scratch, &binding, plan, .{ .buffer = query }, .{ .buffer = key }, .{ .buffer = value }, .{ .buffer = out }, all_caches[0..set.len], null, false, ends[0..set.len]);
+            e.end();
+            cb.commit();
+            cb.wait();
+            if (cb.failure() != null) return error.GpuFailed;
+        }
+        var at: u32 = 0;
+        for (set, 0..) |c, s| {
+            var one = try attn.Plan.init(a, &.{.{ .parents = windows[s].parents, .start = c.start, .capacity = capacity }}, geometry);
+            defer one.deinit();
+            try scratch.upload(one);
+            try binding.upload(one, all_caches[s..][0..1]);
+            const qo = @as(usize, at) * heads * dim * 2;
+            const ko = @as(usize, at) * kv_heads * dim * 2;
+            const cb = queue.commandBuffer();
+            const e = cb.compute(.concurrent);
+            try op.encodeTo(e, &scratch, &binding, one, .{ .buffer = query, .offset = qo }, .{ .buffer = key, .offset = ko }, .{ .buffer = value, .offset = ko }, .{ .buffer = solo }, all_caches[s..][0..1], null, true, false, c.end);
+            e.end();
+            cb.commit();
+            cb.wait();
+            if (cb.failure() != null) return error.GpuFailed;
+            const n = @as(usize, c.rows) * heads * dim * 2;
+            const same = std.mem.eql(u8, out.contents()[qo..][0..n], solo.contents()[0..n]);
+            if (!same) failed = true;
+            std.debug.print("{s} streams {d}, stream {d} (start {d} rows {d} end {d}): {s}\n", .{ if (same) "ok  " else "FAIL", set.len, s, c.start, c.rows, c.end, if (same) "bytes equal its one-stream pass" else "bytes differ from its one-stream pass" });
+            at += c.rows;
+        }
+    }
+    if (failed) return error.BidirectionalStreams;
     std.debug.print("attention_block: {d} cases on {s} ({s} prompt kernel) within {d} of float64\n", .{ cases.len, std.mem.span(device.name()), if (units) "tensor-unit" else "simdgroup", tolerance });
 }
