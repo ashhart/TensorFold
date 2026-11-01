@@ -74,7 +74,8 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         .ok => |v| v,
         .err => |message| return refuse(conn, a, 400, message),
     };
-    const text = body.strField("text") orelse return refuse(conn, a, 400, "text is required");
+    const text = @import("slide_input.zig").read(body) catch |e|
+        return refuse(conn, a, 400, @import("slide_input.zig").message(e));
     const source = body.strField("source") orelse "chat";
     const supplied = supplied_questions.read(a, body) catch |e| switch (e) {
         error.OutOfMemory => return,

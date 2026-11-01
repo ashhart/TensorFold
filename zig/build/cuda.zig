@@ -211,6 +211,9 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const runtime_host = b.step("test-runtime-host", "Shared CUDA runtime and graph host regressions");
     runtime_host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda })).step);
     const mods = family(b, host, .debug, cuda, draft_ids);
+    const omni_slide = b.addRunArtifact(b.addTest(.{ .root_module = mods.nemotron, .filters = &.{"Omni learner:"} }));
+    b.step("test-omni-slide-host", "Omni learner registration, widths and scoped tensors without devices").dependOn(&omni_slide.step);
+    step.dependOn(&omni_slide.step);
     const skip_drafts = b.step("test-drafter-skip-cuda-host", "Counted shared draft skips without devices");
     for ([_]*std.Build.Module{ mods.nemotron, mods.qwen35, flashnextModule(b, host, .debug, cuda, mods.core, mods.lanes, mods.qwen_vision, mods.api) }) |m| skip_drafts.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"zero grant:"} })).step);
     @import("qwen_contract.zig").host(b, mods.core, step);
@@ -411,6 +414,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     b.step("test-benchmark-manifest-host", "Manifest identity through the HTTP server without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"manifest"} })).step);
     b.step("test-lesson-questions-host", "Supplied questions through the production lesson without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"Lesson questions:"} })).step);
     b.step("test-grammar-metrics-host", "Grammar totals in whole and streamed replies without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"grammar timing:"} })).step);
+    b.step("test-slide-input-host", "Text-only lesson admission before any engine work").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"slide input:"} })).step);
     b.step("test-slide-recovery-host", "Living Weights conversation and stream regressions without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{ "lesson conversations:", "lesson stream:", "lesson writer:" } })).step);
     b.step("test-issue-934", "Benchmark config admission and receipt regressions").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"issue 934:"} })).step);
     b.step("test-issue-969", "First-EOS classification and incomplete benchmark messages without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"issue 969"} })).step);
