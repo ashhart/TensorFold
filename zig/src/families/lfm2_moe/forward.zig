@@ -20,14 +20,11 @@ const tile_rows = 33;
 /// A buffer and byte offset as core/affine_mm binds them.
 const Ref = struct { buf: Buffer, off: usize = 0 };
 
-/// Where the residual stream's rows are right now, `stride` bf16 words apart: the canonical `Scratch.h`, or the first column a tapped norm
-/// captured them in. A tapped norm writes its raw state to the requested tap columns alone, so the next norm reads that column in place
-/// (it is never written again until the next forward) and restores the canonical `h`. One lives on the stack of each forward: the final norm
-/// may leave `h` stale, since only `x`, the logits and the taps are read after it, and the next forward embeds into `h` again.
+/// Per-forward residual location: canonical h or a captured, immutable tap column.
 const Residual = struct {
     buf: Buffer,
-    off: usize,
-    stride: u32,
+    off: usize, // bytes
+    stride: u32, // bf16 words per row
 
     fn canonical(s: *const st.Scratch) Residual {
         return .{ .buf = s.h, .off = 0, .stride = c.hidden };
@@ -90,9 +87,7 @@ const Encoder = struct {
             tile.encode(self.e, t, matrix(w), x, x_off, self.s.sums, 0, y, y_off, rows) catch unreachable;
         } else tile.encodeTwin(self.e, t, matrix(w), x, x_off, y, y_off, rows) catch unreachable;
     }
-    /// h += r unless first, then x = norm(h); `combine`: r is the decode experts' combine, taken here instead. The rows' h is the current
-    /// residual: a norm that taps `tap_layer` writes the raw sum only to every tap column of that layer (and carries the first), the one that
-    /// follows reads the carried column and writes the canonical h; the others work in place on the canonical h as before.
+    /// Capture raw residuals in taps; the next untapped norm restores canonical h.
     fn norm(self: Encoder, s: *st.Scratch, weight: wts.Tensor, first: bool, rows: usize, combine: bool, tap_layer: ?usize) void {
         const res = self.residual.*;
         var mask: u32 = 0; // the tap columns of this layer, bit i: column i
@@ -101,7 +96,6 @@ const Encoder = struct {
             if (mask == 0) carry = i;
             mask |= @as(u32, 1) << @intCast(i);
         };
-        // The raw sum goes to the tap columns, or to the canonical h when a carried column held the residual; else the norm is in place.
         const direct = mask == 0 and res.isCanonical(s);
         const into: Residual = if (mask != 0)
             .{ .buf = s.taps.?.buf, .off = carry * c.hidden * 2, .stride = s.taps.?.count * c.hidden }
@@ -220,6 +214,7 @@ pub fn runHeld(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []c
             .moe => |x| combine = moe(enc, s, x, m.config.scale, total),
         }
     }
+    // A final tap leaves h stale; consumers read x/logits and the next forward re-embeds.
     enc.norm(s, m.weights.norm, false, total, combine, c.layers - 1);
     if (head == .all) {
         enc.projection(embedding, s.x, 0, s.logits, 0, total);

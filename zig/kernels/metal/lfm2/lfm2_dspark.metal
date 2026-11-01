@@ -257,9 +257,7 @@ constant constexpr uint BF16_ROWS = 16;
   lfm2_attn_rows<1, true>(queries, keys, values, p, pm, pl, po, rows, tg, tid, sg, lane, ks, vs);
 }
 
-// A tapped norm's raw bf16 state goes ONLY to the destination columns `at.z` selects (bit i: column i, i * D words from a row's start, rows
-// `at.y` words apart), duplicates of one layer in the same pass. It is read from the input rows `at.x` words apart (the canonical hidden rows, or a
-// tap column that holds them, in place and never written). `at` = {input row stride, destination row stride, column mask, 0}.
+// Tap ABI: {input row stride, output row stride, destination column mask, 0}; h is readonly.
 inline void lfm2_store_columns(device bfloat* dst, uint row, constant uint4& at, uint t, bfloat4 saved) {
   device bfloat* out = dst + size_t(row) * at.y + 4 * t;
   for (uint m = at.z; m != 0; m &= m - 1) *(device bfloat4*)(out + size_t(ctz(m)) * D) = saved;
@@ -285,7 +283,7 @@ inline void lfm2_store_columns(device bfloat* dst, uint row, constant uint4& at,
   lfm2_rms(v, w, eps, x, base, t, sg, lane, sums, inv);
 }
 
-// lfm2_combine_norm with a readonly, strided h and the raw state stored to the masked destination columns instead of back to h.
+// Combine norm with readonly strided h and masked raw-state output.
 [[kernel]] void lfm2_combine_norm_tap(const device bfloat* y [[buffer(0)]], const device bfloat* wts [[buffer(1)]], const device bfloat* h [[buffer(2)]],
                                   const device bfloat* w [[buffer(3)]], constant float& eps [[buffer(4)]], device bfloat* x [[buffer(5)]], device bfloat* dst [[buffer(6)]], constant uint4& at [[buffer(7)]],
                                   uint row [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]],

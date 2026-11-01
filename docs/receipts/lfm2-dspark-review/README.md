@@ -1,4 +1,39 @@
-# DSpark review fixes on current main
+# DSpark review receipts
+
+## Shared-reservation performance candidate `62bd342d3`
+
+Requested main `cb036e00f` and the separately verified PR 1381 composition (`8fcaca5f5`) are integrated.
+This candidate carries residuals directly in immutable captured tap columns and retains bounded owned
+raw context until a hold, snapshot or overflow needs it. A fresh zero reservation still offers no hold;
+context is never dropped because no hold was offered. The larger stage is clipped to lane capacity and
+included in admission (up to 40 MiB per lane for the released five-tap checkpoint).
+
+Current correctness proof is on **Apple M4 Pro, 48 GiB**, not a new M5 measurement:
+
+- Native build and scoped checks pass, including 57 DSpark tests, 93 native tests with three skips,
+  48 Metal family head-cost checks and 11 draft-host checks. Shared-lane regressions pass 299/299.
+- All three norm-tap variants pass direct-replacement byte equality, nonfinite, input/guard immutability
+  and unchanged FP64/sum gates across canonical/strided layouts. All three shader-mutant controls are red;
+  436 registered Metal launches have zero limit problems.
+- The real-model replay passes in both BF16 and 8-bit. Released, duplicate-final and eight-column tap
+  layouts preserve **all normalized-output and logit bytes** against the untapped forward at 1/4/16/64 rows.
+- Each mode retains 2081 zero-grant rows despite poisoning the borrowed source after every absorb, rewrites
+  29 pending rows, then matches all 2144 context rows' KV bytes and three later drafts against independently
+  retained history. Twenty steady rounds still make zero host allocations/resizes.
+
+[Exact source/binary/model provenance and raw correctness output](context-proof-62bd342d3.json).
+Reproduce with `tf-kernel-contract --only 'norm tap'` and `tf-lfm2-dspark MODEL DRAFTER 64 3 BITS`
+(`BITS=0` and `8`), after building those targets with Zig 0.17.0 and `-Dcpu=apple_m1 -Dversion=1.2.0`.
+
+**This is not the performance gate.** The preceding candidate's all-width 64-token diagnostic was exact
+but slower in all 32 drafter-versus-plain comparisons. Qualification still requires the complete same-head
+no-drafter/BF16/8-bit, code/chat, greedy/sampled, 1/4/8/16-stream, 512-token matrix with balanced rotations.
+Neither these correctness runs nor the older 1–2% wording establish that gate.
+
+## Historical evidence and provenance
+
+Every section below retains its original source, device and measurement scope. The new proof above does
+not replace historical long-context, cancellation, load-memory or other-device receipts.
 
 Source `14565fa73`, rebased onto main `d0c9dc9fb`, tested on 2026-10-28.
 Apple M4 Pro, 20 GPU cores, 48 GiB RAM, macOS 26.5.1, Zig 0.17.0,

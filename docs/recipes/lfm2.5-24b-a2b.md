@@ -116,9 +116,13 @@ Held blocks use one bf16 16-row group, then 64x64 tiles past 16 rows. Context in
 keeps the original row kernel through 32 rows, preserving the persistent context projections. A hold gathers
 adjacent small staged pieces into preallocated scratch: at most 128 rows per hold and 32 per call, or 8 per call
 on the coded scalar twin without tensor units. This preserves each piece's projection regime; lone, larger or
-out-of-room pieces use their original calls. Every context row is still projected.
-When one lane's stage of 128 verified rows fills, its absorb pass takes
-every lane's staged rows, so the lanes' stages fill together.
+out-of-room pieces use their original calls. A lane retains every verified raw tap in its own buffer before
+the target overwrites its taps. At most 2048 rows, clipped to the lane's capacity, wait for that lane's next
+hold, snapshot or overflow; an unrelated lane's absorb no longer flushes them. A later hold projects the
+entire retained prefix first, including rows from zero-grant rounds. The released five-tap checkpoint uses
+at most 40 MiB of raw staging per lane; this larger bounded storage is included in memory admission.
+Captured target residuals are carried in the tap columns themselves and restored by the next norm, rather
+than stored both in the canonical residual and the taps. Duplicate columns are captured in the same dispatch.
 
 Shared verification past the 16-row qualified window uses measured increments
 from the shared forward path through 32 rows, anchored at the 16-row window

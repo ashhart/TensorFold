@@ -4,7 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- LFM2 DSpark holds gather adjacent small context pieces in preallocated scratch without dropping rows or changing their projection regime. Target tap capture retains the raw BF16 values instead of reading the residual again.
+- LFM2 DSpark holds gather adjacent small context pieces in preallocated scratch. Target normalization carries raw BF16 residuals in captured tap columns instead of storing them twice. Bounded, admission-priced lane storage retains verified taps until a hold, snapshot or overflow needs their projections, preserving context across zero-grant rounds and target-tap overwrites.
 
 - `tools/bench_lfm2_dspark.py` records the complete same-head no-drafter/BF16/8-bit qualification matrix, checks token equality across solo, draft-disabled and concurrent runs, and fails every cell below its plain baseline. Reduced runs are explicitly smoke evidence, not qualification.
 

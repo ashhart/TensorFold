@@ -1,4 +1,4 @@
-//! Fused LFM2 norm and tap: identical to norm followed by a tap on the same rows, with the state read strided and the raw state written to any columns.
+//! Readonly-strided norm/tap capture replaces norm plus copies, bit for bit.
 const std = @import("std");
 const mtl = @import("metal");
 const contract = @import("contract");
