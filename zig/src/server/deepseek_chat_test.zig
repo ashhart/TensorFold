@@ -410,3 +410,7 @@ test "DeepSeek chat: schema and legacy tool grammar retain precedence and refuse
     _ = env.setenv("TENSORFOLD_TOOL_GRAMMAR", "1", 1);
     try t.expect(try grammar.autoAllEnv());
 }
+
+test {
+    _ = @import("deepseek_admission_test.zig");
+}
