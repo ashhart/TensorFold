@@ -22,6 +22,14 @@ pub const prefill_launch = @import("prefill_launch.zig");
 pub const prefill_kernels = @import("prefill_kernels.zig");
 pub const simd_attention = @import("simd_attention.zig");
 pub const slide = @import("slide.zig");
+pub const model_type = @import("living").families.nemotron_h.model_type;
+pub const linked = @import("../../core/shard_edit.zig").linked;
+pub const plainShared = @import("../../core/shard_edit.zig").plainShared;
+
+/// The existing Metal learner reads the same backend and checkpoint it has always received.
+pub fn learnModel(b: *backend.Metal, _: []const u8) *backend.Metal {
+    return b;
+}
 pub const adapters = @import("adapters.zig");
 pub const learned = @import("learned.zig");
 pub const train_ops = @import("train_ops.zig");
