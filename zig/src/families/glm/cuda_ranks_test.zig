@@ -186,7 +186,7 @@ test "every media limit is part of the ranks' agreement" {
 test "every scheduling and identity field that differs stops the ranks" {
     const zero = Fingerprint.of(2, 0, .{}, 8192, true, @splat(0), @splat(0), hashBytes("/same"));
     const one = Fingerprint.of(2, 1, .{}, 8192, true, @splat(0), @splat(0), hashBytes("/same"));
-    inline for (.{ "layout", "world", "rank", "pages", "split", "kda_wide", "pieces", "solo", "layers", "mtp", "vision", "video_tokens", "max_images", "max_videos", "max_frames", "roce_multi", "capacity", "heat_high", "heat_low" }) |name| {
+    inline for (.{ "layout", "world", "rank", "pages", "split", "kda_wide", "pieces", "solo", "layers", "mtp", "vision", "video_tokens", "max_images", "max_videos", "max_frames", "roce_multi", "kv_host", "capacity", "heat_high", "heat_low", "kv_host_gib" }) |name| {
         var all = [_]Fingerprint{ zero, one };
         @field(all[1], name) += 1;
         try std.testing.expectEqual(@field(Fingerprint.Field, name), mismatch(&all).?.field);
@@ -346,4 +346,41 @@ test "TF_GLM_ROCE_MULTI: off by default, 1 and 0, and refusals naming a bad valu
     try std.testing.expectEqualStrings("TF_GLM_ROCE_MULTI=1 requires TF_TP_MASTER and TF_TP_KERNEL_IMAGE", problem);
     const h: [32]u8 = @splat(0);
     try std.testing.expectEqual(@as(u32, 1), Fingerprint.of(3, 0, .{ .roce_multi = true }, 8192, true, h, h, h).roce_multi);
+}
+
+test "TF_GLM_KV_HOST, _SHARED and _GIB: off by default, the choices, and refusals naming a bad value or a missing base" {
+    const Reader = struct {
+        var vars: []const [2][]const u8 = &.{};
+        fn get(key: [:0]const u8) ?[]const u8 {
+            for (vars) |kv| if (std.mem.eql(u8, kv[0], key)) return kv[1];
+            return null;
+        }
+    };
+    var problem: []const u8 = "";
+    Reader.vars = &.{};
+    try std.testing.expectEqual(@as(u8, 0), (try Settings.read(Reader.get, &problem)).kv_host);
+    Reader.vars = &.{.{ "TF_GLM_KV_HOST", "1" }};
+    try std.testing.expectEqual(@as(u8, 1), (try Settings.read(Reader.get, &problem)).kv_host);
+    Reader.vars = &.{ .{ "TF_GLM_KV_HOST", "1" }, .{ "TF_GLM_KV_HOST_SHARED", "1" }, .{ "TF_GLM_KV_HOST_GIB", "13" } };
+    const shared = try Settings.read(Reader.get, &problem);
+    try std.testing.expectEqual(@as(u8, 2), shared.kv_host);
+    try std.testing.expectEqual(@as(f64, 13), shared.kv_host_gib);
+    const refusals = .{
+        .{ &[_][2][]const u8{.{ "TF_GLM_KV_HOST", "yes" }}, "TF_GLM_KV_HOST: 0 or 1" },
+        .{ &[_][2][]const u8{.{ "TF_GLM_KV_HOST_SHARED", "1" }}, "TF_GLM_KV_HOST_SHARED=1 requires TF_GLM_KV_HOST=1" },
+        .{ &[_][2][]const u8{ .{ "TF_GLM_KV_HOST", "1" }, .{ "TF_GLM_KV_HOST_SHARED", "2" } }, "TF_GLM_KV_HOST_SHARED: 0 or 1" },
+        .{ &[_][2][]const u8{.{ "TF_GLM_KV_HOST_GIB", "13" }}, "TF_GLM_KV_HOST_GIB: the host pages' GiB, more than 0, with TF_GLM_KV_HOST=1" },
+        .{ &[_][2][]const u8{ .{ "TF_GLM_KV_HOST", "1" }, .{ "TF_GLM_KV_HOST_GIB", "0" } }, "TF_GLM_KV_HOST_GIB: the host pages' GiB, more than 0, with TF_GLM_KV_HOST=1" },
+    };
+    inline for (refusals) |r| {
+        Reader.vars = r[0];
+        try std.testing.expectError(error.BadSetting, Settings.read(Reader.get, &problem));
+        try std.testing.expectEqualStrings(r[1], problem);
+    }
+    const h: [32]u8 = @splat(0);
+    const f = Fingerprint.of(2, 0, shared, 8192, true, h, h, h);
+    try std.testing.expectEqual(@as(u32, 2), f.kv_host);
+    try std.testing.expectEqual(@as(f64, 13), f.kv_host_gib);
+    var all = [_]Fingerprint{ f, Fingerprint.of(2, 1, .{ .kv_host = 1 }, 8192, true, h, h, h) };
+    try std.testing.expectEqual(Fingerprint.Field.kv_host, mismatch(&all).?.field);
 }
