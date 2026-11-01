@@ -13,11 +13,16 @@ fn runtime(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     return cuda;
 }
 
-/// The `tp` module over `cuda` (an engine passes its own runtime module); verbs (zig/src/fabric/verbs.zig) for RoCE.
+var tp_modules: std.AutoHashMapUnmanaged(*std.Build.Module, *std.Build.Module) = .empty;
+
+/// The `tp` module over `cuda`, one per cuda module (a file belongs to one module); verbs for RoCE.
 pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module) *std.Build.Module {
+    const slot = tp_modules.getOrPut(b.allocator, cuda) catch @panic("OOM");
+    if (slot.found_existing) return slot.value_ptr.*;
     const m = b.createModule(.{ .root_source_file = b.path("zig/src/fabric/tp/tp.zig"), .target = target, .optimize = optimize, .link_libc = true });
     m.addImport("cuda", cuda);
     m.addImport("verbs", b.createModule(.{ .root_source_file = b.path("zig/src/fabric/verbs.zig"), .target = target, .optimize = optimize, .link_libc = true }));
+    slot.value_ptr.* = m;
     return m;
 }
 
