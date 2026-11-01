@@ -15,12 +15,9 @@ const bits = 4;
 const group = 64;
 const experts = 8; // the experts the plan's items pick from (a layer has 128; the kernel reads the picked ones)
 const top_k = 6;
-/// launches/affine.zig's stream tile constants: columns a lane, row counts, waves a block, waves wanted, code words.
+/// launches/affine.zig's stream tile constants: columns a lane and waves a block.
 const stream_cbs = [_]c_int{ 2, 4, 8 };
-const stream_rows = [_]u8{ 1, 2, 4 };
 const stream_waves = 4;
-const streams_wanted = 3000;
-const stream_code_words = 32;
 const bit_index = 2; // 4 in launches/affine.zig's bit_widths
 
 fn depth(s: c.Shape) usize {
@@ -155,17 +152,7 @@ pub const Pair = struct {
         var lpc_log2: u5 = 0;
         while ((@as(c_int, 1) << lpc_log2) < (a.k >> 5) and lpc_log2 < 5) lpc_log2 += 1;
         const ri: usize = 0; // one row
-        var pick: usize = 0;
-        var cbi: usize = stream_cbs.len;
-        while (cbi > 0) {
-            cbi -= 1;
-            const cb = stream_cbs[cbi];
-            if (cb * stream_rows[ri] > 16 or cb * a.bits > stream_code_words) continue;
-            pick = cbi;
-            const per: c_int = stream_waves * (@as(c_int, 32) >> lpc_log2) * cb;
-            const waves = @as(u64, cdiv(a.n, per)) * stream_waves * top_k;
-            if (waves * cdiv(a.m, stream_rows[ri]) >= streams_wanted) break;
-        }
+        const pick = hip.launches.stream_pick.pick(self.l.affine.caps.generation, a.m, lpc_log2, a.bits, a.n, top_k, 1);
         const per: c_int = stream_waves * (@as(c_int, 32) >> lpc_log2) * stream_cbs[pick];
         const split = cdiv(a.n, per);
         const f = self.l.affine.relu2_pair[bit_index][ri][pick].?;
