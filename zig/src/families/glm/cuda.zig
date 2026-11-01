@@ -50,6 +50,7 @@ test {
     _ = @import("cuda_ranks_test.zig");
     _ = @import("cuda_roce_multi.zig");
     _ = @import("cuda_lanes_test.zig");
+    _ = @import("dflash_load.zig");
     _ = prompt_solo;
     _ = experts;
     _ = exl3;
