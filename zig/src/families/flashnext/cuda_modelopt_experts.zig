@@ -1,4 +1,4 @@
-//! Routed experts: NVFP4 with intermediate-channel TP, or block FP8 at world 1; the shared expert keeps its format.
+//! Routed experts: NVFP4 (whole experts a rank at --tp), or block FP8 at world 1; the shared expert keeps its format.
 const std = @import("std");
 const core = @import("core");
 const cuda = @import("cuda");
@@ -24,6 +24,17 @@ pub const Cut = struct {
     }
 };
 
+/// A rank's routed experts at --tp: `count / world` whole ones from `first`, so every pair keeps one GPU's sums.
+pub const Experts = struct {
+    first: usize,
+    count: usize,
+
+    pub fn init(total: usize, world: usize, rank: usize) !Experts {
+        if (world == 0 or rank >= world or total == 0 or total % world != 0) return error.UnevenExpertSplit;
+        return .{ .first = rank * (total / world), .count = total / world };
+    }
+};
+
 pub const Owned = struct {
     up: cuda.DeviceBuffer,
     down: cuda.DeviceBuffer,
@@ -32,6 +43,8 @@ pub const Owned = struct {
     width: usize,
     dims: usize,
     count: usize,
+    /// The global id of the rank's first expert (0 at world 1); `count` experts from it are this rank's.
+    first: usize = 0,
     /// .nvfp4 (global scales a projection) or .fp8g (f32 128x128 block scales, cuda_fp8_experts_load.zig).
     format: cuda.experts.Format = .nvfp4,
 
@@ -68,7 +81,8 @@ pub fn load(a: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, prefix: []c
 }
 
 pub fn loadShape(a: std.mem.Allocator, d: *const cuda.Driver, store: anytype, prefix: []const u8, world: usize, rank: usize, dims: usize, full_width: usize, count: usize) !Owned {
-    const cut = try Cut.init(full_width, world, rank);
+    const cut = try Cut.init(full_width, 1, 0); // every expert whole: --tp splits experts, not their channels
+    const own = try Experts.init(count, world, rank);
     if (dims == 0 or dims % 32 != 0 or count == 0) return error.UnexpectedTensor;
     // F8_E4M3 weights load in their own loop; U8 (NVFP4) goes on to the threaded or one-expert paths below
     if (try formatOf(store, prefix) == .fp8g) return fp8.load(a, d, store, prefix, world, dims, full_width, count);
@@ -80,32 +94,33 @@ pub fn loadShape(a: std.mem.Allocator, d: *const cuda.Driver, store: anytype, pr
     const width = cut.width();
     const up_bytes = try packedBytes(width, dims, 2);
     const down_bytes = try packedBytes(dims, width, 1);
-    const up_total = std.math.mul(usize, count, up_bytes) catch return error.UnexpectedTensor;
-    const down_total = std.math.mul(usize, count, down_bytes) catch return error.UnexpectedTensor;
-    const globals_count = std.math.mul(usize, count, 2) catch return error.UnexpectedTensor;
+    const up_total = std.math.mul(usize, own.count, up_bytes) catch return error.UnexpectedTensor;
+    const down_total = std.math.mul(usize, own.count, down_bytes) catch return error.UnexpectedTensor;
+    const globals_count = std.math.mul(usize, own.count, 2) catch return error.UnexpectedTensor;
     var up = try cuda.DeviceBuffer.alloc(d, up_total);
     errdefer up.free();
     var down = try cuda.DeviceBuffer.alloc(d, down_total);
     errdefer down.free();
     const up_globals = try a.alloc(f32, globals_count);
     defer a.free(up_globals);
-    const down_globals = try a.alloc(f32, count);
+    const down_globals = try a.alloc(f32, own.count);
     defer a.free(down_globals);
     const packed_up = try a.alloc(u32, up_bytes / 4);
     defer a.free(packed_up);
     const packed_down = try a.alloc(u32, down_bytes / 4);
     defer a.free(packed_down);
     var buf: [512]u8 = undefined;
-    for (0..count) |i| {
-        var gate = try readPart(a, store, try std.fmt.bufPrint(&buf, "{s}.experts.{d}.gate_proj", .{ prefix, i }), cut, false, dims, full_width);
+    for (0..own.count) |i| {
+        const e = own.first + i;
+        var gate = try readPart(a, store, try std.fmt.bufPrint(&buf, "{s}.experts.{d}.gate_proj", .{ prefix, e }), cut, false, dims, full_width);
         defer gate.deinit(a);
-        var value = try readPart(a, store, try std.fmt.bufPrint(&buf, "{s}.experts.{d}.up_proj", .{ prefix, i }), cut, false, dims, full_width);
+        var value = try readPart(a, store, try std.fmt.bufPrint(&buf, "{s}.experts.{d}.up_proj", .{ prefix, e }), cut, false, dims, full_width);
         defer value.deinit(a);
         ex.packGateUp(packed_up, .{ gate.codes, gate.scales }, .{ value.codes, value.scales }, width, dims);
         try up.upload(i * up_bytes, std.mem.sliceAsBytes(packed_up));
         up_globals[i * 2] = gate.global;
         up_globals[i * 2 + 1] = value.global;
-        var output = try readPart(a, store, try std.fmt.bufPrint(&buf, "{s}.experts.{d}.down_proj", .{ prefix, i }), cut, true, dims, full_width);
+        var output = try readPart(a, store, try std.fmt.bufPrint(&buf, "{s}.experts.{d}.down_proj", .{ prefix, e }), cut, true, dims, full_width);
         defer output.deinit(a);
         ex.packOne(packed_down, output.codes, output.scales, dims, width);
         try down.upload(i * down_bytes, std.mem.sliceAsBytes(packed_down));
@@ -114,7 +129,7 @@ pub fn loadShape(a: std.mem.Allocator, d: *const cuda.Driver, store: anytype, pr
     var us = try cuda.DeviceBuffer.fromHost(d, std.mem.sliceAsBytes(up_globals));
     errdefer us.free();
     const ds = try cuda.DeviceBuffer.fromHost(d, std.mem.sliceAsBytes(down_globals));
-    return .{ .up = up, .down = down, .up_scale = us, .down_scale = ds, .width = width, .dims = dims, .count = count };
+    return .{ .up = up, .down = down, .up_scale = us, .down_scale = ds, .width = width, .dims = dims, .count = own.count, .first = own.first };
 }
 
 /// The layer's format from its first expert's gate weight dtype; the loader's next release returns the borrow.
@@ -127,6 +142,17 @@ fn formatOf(store: anytype, prefix: []const u8) !cuda.experts.Format {
         .f8_e4m3 => .fp8g,
         else => error.UnsupportedQuantization,
     };
+}
+
+test "expert-parallel ranges give each rank whole experts and cover every expert once" {
+    const a = try Experts.init(512, 2, 0);
+    const b = try Experts.init(512, 2, 1);
+    try std.testing.expectEqual(@as(usize, 0), a.first);
+    try std.testing.expectEqual(a.count, b.first);
+    try std.testing.expectEqual(@as(usize, 512), b.first + b.count);
+    try std.testing.expectEqual(Experts{ .first = 0, .count = 512 }, try Experts.init(512, 1, 0));
+    try std.testing.expectError(error.UnevenExpertSplit, Experts.init(512, 2, 2));
+    try std.testing.expectError(error.UnevenExpertSplit, Experts.init(511, 2, 0));
 }
 
 test "intermediate-channel cuts cover the source once and preserve 32-input kernel groups" {

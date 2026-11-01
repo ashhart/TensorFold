@@ -1,4 +1,4 @@
-//! NVIDIA's NVFP4 Flash Next checkpoint: BF16 dense and shared projections and FP8 MTP-head expert downs, gates 1-4.
+//! NVIDIA's NVFP4 Flash Next checkpoint: BF16 dense and shared projections, FP8 MTP-head expert downs, --tp picks.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -26,11 +26,11 @@ fn stress(rng: std.Random, n: usize, k: usize, out: []f32) void {
 
 // The dense and shared layers at decode rows: DeltaNet qkvz+ab, attention qkv+indexer, both outs, shared gate+up, down.
 const bf16_served = [_]c.Shape{
-    .{ .rows = 1, .n = 16480, .k = 2560 },  .{ .rows = 16, .n = 16480, .k = 2560 },
-    .{ .rows = 1, .n = 13952, .k = 2560 },  .{ .rows = 64, .n = 13952, .k = 2560 },
-    .{ .rows = 1, .n = 2560, .k = 6144 },   .{ .rows = 16, .n = 2560, .k = 6144 },
-    .{ .rows = 4, .n = 1280, .k = 2560 },   .{ .rows = 64, .n = 1280, .k = 2560 },
-    .{ .rows = 1, .n = 2560, .k = 640 },    .{ .rows = 64, .n = 2560, .k = 640 },
+    .{ .rows = 1, .n = 16480, .k = 2560 }, .{ .rows = 16, .n = 16480, .k = 2560 },
+    .{ .rows = 1, .n = 13952, .k = 2560 }, .{ .rows = 64, .n = 13952, .k = 2560 },
+    .{ .rows = 1, .n = 2560, .k = 6144 },  .{ .rows = 16, .n = 2560, .k = 6144 },
+    .{ .rows = 4, .n = 1280, .k = 2560 },  .{ .rows = 64, .n = 1280, .k = 2560 },
+    .{ .rows = 1, .n = 2560, .k = 640 },   .{ .rows = 64, .n = 2560, .k = 640 },
 };
 
 /// The qmmf lane's BF16-weight product (16-, 32- and 64-row tiles, K slices as the lane plans them) as Flash Next calls it.
@@ -249,6 +249,91 @@ pub const Fp8Down = struct {
     }
 };
 
+fn noSums(_: c.Shape) usize {
+    return 0;
+}
+
+// Pairs a pass routes (tokens times eleven slots) at decode, a verify round and a 4,608-row prompt pass.
+const picks_served = [_]c.Shape{ .{ .rows = 11, .n = 512, .k = 1 }, .{ .rows = 176, .n = 512, .k = 1 }, .{ .rows = 50688, .n = 512, .k = 1 } };
+
+/// fn_ep_picks at --tp 2's second rank (first 256): its experts' picks to 0..255, every other id to 256.
+pub const EpPicks = struct {
+    rig: Rig,
+    set: *const Set,
+    control: bool = false,
+    shape: c.Shape = .{ .rows = 0, .n = 0, .k = 0 },
+    picks: std.ArrayList(i32) = .empty,
+    dev: [2]u64 = @splat(0),
+    msg: [160]u8 = undefined,
+
+    const vt = g.hooks(EpPicks);
+    const first = 256;
+    const local = 256;
+
+    pub fn deinit(self: *EpPicks) void {
+        self.picks.deinit(self.rig.gpu.gpa);
+        self.rig.deinit();
+    }
+
+    pub fn kernel(self: *EpPicks) g.Kernel {
+        return .{ .ctx = self, .vt = &vt, .control = if (self.control) .shapes else null, .spec = .{
+            .name = if (self.control) "control: fn_ep_picks one expert off" else "cuda flashnext fn_ep_picks (a rank's expert ids at --tp)",
+            .accum = .none,
+            .depth = noSums,
+            .out = .raw,
+            .nan = .{ .stated = "integer expert ids: an owned id less the rank's first, any other id the rank's count" },
+            .tiles = .{ .{ .size = 256 }, .{}, .{} },
+            .served = &picks_served,
+        } };
+    }
+
+    pub fn prepare(self: *EpPicks, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
+        _ = fill;
+        self.rig.reset();
+        if (shape.rows == 0 or shape.n != 512) return false;
+        var prng = std.Random.DefaultPrng.init(seed);
+        const rng = prng.random();
+        self.shape = shape;
+        try self.picks.resize(self.rig.gpu.gpa, shape.rows);
+        for (self.picks.items, 0..) |*p, i| p.* = if (i % 11 == 10) 512 else @intCast(rng.uintLessThan(u32, 512)); // slot 10: shared
+        for ([_]i32{ 0, first - 1, first, first + local - 1 }, 0..) |edge, i| if (i < shape.rows) {
+            self.picks.items[i] = edge;
+        };
+        self.dev[0] = try self.rig.input(std.mem.sliceAsBytes(self.picks.items));
+        self.dev[1] = try self.rig.output(shape.rows * 4);
+        return true;
+    }
+
+    pub fn run(self: *EpPicks) !void {
+        var a: cuda.Args = .{};
+        a.add(self.dev[0]);
+        a.add(self.dev[1]);
+        const start: usize = if (self.control) first + 1 else first;
+        for ([_]usize{ self.shape.rows, start, local }) |v| a.add(@as(i32, @intCast(v)));
+        try cuda.launch.launch(self.set.ep_picks, .{ .grid = .{ .x = @intCast((self.shape.rows + 255) / 256) }, .block = .{ .x = 256 } }, self.rig.s, &a);
+        try self.rig.s.synchronize();
+    }
+
+    pub fn count(self: *EpPicks) usize {
+        return self.shape.rows * 4;
+    }
+
+    pub fn reference(_: *EpPicks, want: []f64, mag: []f64) !void {
+        @memset(want, 0);
+        @memset(mag, 0);
+    }
+
+    /// Every pick by the rule exactly.
+    pub fn check(self: *EpPicks, _: g.Gate) !?[]const u8 {
+        const got = std.mem.bytesAsSlice(i32, @as([]align(1) const u8, try self.rig.outputBytes()));
+        for (self.picks.items, 0..) |p, i| {
+            const want: i32 = if (p >= first and p < first + local) p - first else local;
+            if (got[i] != want) return try std.fmt.bufPrint(&self.msg, "pick {d} ({d}) mapped to {d}, not {d}", .{ i, p, got[i], want });
+        }
+        return null;
+    }
+};
+
 /// The E4M3 code of an integer the stress weights use (1 to 7 and their negatives).
 fn codeOf(v: f32) !u8 {
     for (0..256) |i| if (core.quant.fp8.e4m3(@intCast(i)) == v) return @intCast(i);
@@ -261,9 +346,12 @@ pub const Set = struct {
     lane: q.Lane,
     fp8: ex.Fp8Experts,
     mod: cuda.Module,
+    batch: cuda.Module,
+    ep_picks: cuda.Function = undefined,
     router: grouped.Router = undefined,
     bf16: [3]Bf16 = undefined,
     down: [3]Fp8Down = undefined,
+    picks: [2]EpPicks = undefined,
 
     pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel)) !*Set {
         const set = try gpu.gpa.create(Set);
@@ -276,19 +364,26 @@ pub const Set = struct {
         errdefer fp8.unload();
         var mod = try cuda.Module.load(gpu.d, cuda.kernels.experts);
         errdefer mod.unload();
-        set.* = .{ .gpa = gpu.gpa, .lane = lane, .fp8 = fp8, .mod = mod };
+        var batch = try cuda.Module.load(gpu.d, cuda.kernels.flashnext_batch);
+        errdefer batch.unload();
+        set.* = .{ .gpa = gpu.gpa, .lane = lane, .fp8 = fp8, .mod = mod, .batch = batch };
+        set.ep_picks = try set.batch.function("fn_ep_picks");
         set.router = try grouped.Router.resolve(set.mod);
         const r: Rig = .{ .gpu = gpu, .s = s };
         set.bf16 = .{ .{ .rig = r, .lane = &set.lane, .format = .bf16 }, .{ .rig = r, .lane = &set.lane, .format = .f32 }, .{ .rig = r, .lane = &set.lane, .format = .bf16, .control = true } };
         set.down = .{ .{ .rig = r, .set = set, .prompt = false }, .{ .rig = r, .set = set, .prompt = true }, .{ .rig = r, .set = set, .prompt = false, .control = true } };
         for (&set.bf16) |*x| try list.append(a, x.kernel());
         for (&set.down) |*x| try list.append(a, x.kernel());
+        set.picks = .{ .{ .rig = r, .set = set }, .{ .rig = r, .set = set, .control = true } };
+        for (&set.picks) |*x| try list.append(a, x.kernel());
         return set;
     }
 
     pub fn deinit(set: *Set) void {
+        for (&set.picks) |*x| x.deinit();
         for (&set.down) |*x| x.deinit();
         for (&set.bf16) |*x| x.deinit();
+        set.batch.unload();
         set.mod.unload();
         set.fp8.unload();
         set.lane.unload();

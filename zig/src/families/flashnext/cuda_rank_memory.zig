@@ -37,7 +37,7 @@ fn tensorBytes(name: []const u8, e: Entry, world: usize, rank: usize) !u64 {
         if (std.mem.endsWith(u8, name, ".weight_scale_2")) return bytes;
         if (!std.mem.endsWith(u8, name, ".weight")) return 0;
         if (e.dtype != .u8 or e.rank != 2 or bytes % (8 * world) != 0) return error.UnexpectedTensor;
-        // NVFP4 device blocks hold 128 code words and 16 scale words; global scales stay replicated.
+        // NVFP4 device blocks hold 128 code words and 16 scale words; a rank's whole experts average bytes / world.
         return try std.math.mul(u64, bytes / (8 * world), 9);
     }
     if (std.mem.indexOf(u8, name, ".weight_scale") != null or std.mem.endsWith(u8, name, ".input_scale")) return 0;

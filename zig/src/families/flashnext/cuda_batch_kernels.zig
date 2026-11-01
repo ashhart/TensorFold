@@ -33,6 +33,7 @@ pub const Kernels = struct {
     sum: cuda.Function,
     moe_sum: cuda.Function,
     copy_cols: cuda.Function,
+    ep_picks: cuda.Function,
     shift: cuda.Function,
     /// Each sparse row's top blocks (attention._select / _select_tiles), native.
     select: cuda.Function,
@@ -71,6 +72,7 @@ pub const Kernels = struct {
         k.sum = try k.batch.function("fn_sum_slices");
         k.moe_sum = try k.batch.function("fn_moe_sum");
         k.copy_cols = try k.batch.function("fn_copy_cols");
+        k.ep_picks = try k.batch.function("fn_ep_picks");
         k.shift = try k.batch.function("fn_shift_window");
         k.select = try k.batch.function("fn_qsa_select");
         k.front = try k.batch.function("fn_gdn_front");

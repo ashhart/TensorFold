@@ -331,6 +331,14 @@ extern "C" __global__ void fn_copy_cols(const uint16_t* __restrict__ src, long l
     if (col < width) dst[r * dst_pitch + col] = src[r * src_pitch + col];
 }
 
+// A rank's picks as its experts' ids: first..first+local-1 become 0..local-1, any other id (the shared slot too) local.
+extern "C" __global__ void fn_ep_picks(const int* __restrict__ picks, int* __restrict__ out, int n, int first, int local) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const int p = picks[i];
+    out[i] = p >= first && p < first + local ? p - first : local;
+}
+
 #include "flashnext_gdn_tpr.cuh"
 
 // The prompt chain on two threads a state row (gdn_tpr): fn_gdn_rows_to's bits, state_in == state_out in place.
