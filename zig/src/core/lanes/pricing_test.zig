@@ -100,7 +100,7 @@ test "observed padded holds do not make unpaid holds look profitable" {
         // The actual padded pass costs 6 ms; its linear head-step estimate is only 3 ms.
         try rule.observeOverhead(3, 5, 10 + host_ms + 6, sampled, rule.headMs(&depths));
         var out = depths;
-        try rule.payHolds(&who, sampled, &out);
+        try rule.payHolds(&who, sampled, &out, price.Base.pending(who.len));
         const want: [3]i64 = if (host_ms == 0) .{ 0, 0, 0 } else depths;
         try std.testing.expectEqualSlices(i64, &want, &out);
     };
@@ -167,9 +167,9 @@ const HoldRun = struct {
     /// One round's offered drafts, `accepted` of them kept; `fresh_zero`: the window reserved no rows.
     fn round(h: *HoldRun, accepted: i64, fresh_zero: bool) !i64 {
         const probe: depth.Probe = .{ .ptr = h, .copy = noCopy };
-        var out = [_]i64{try h.rule.headDepth(&h.who, null, probe)};
+        var out = [_]i64{try h.rule.reserveDepth(&h.who, null, probe)};
         if (fresh_zero) out[0] = 0;
-        try h.rule.payHolds(&.{h.who}, h.who.sampled, &out);
+        try h.rule.payHolds(&.{h.who}, h.who.sampled, &out, price.Base.pending(1));
         if (out[0] > 0) try h.rule.observeDepth(h.who, out[0], @min(accepted, out[0]));
         return out[0];
     }
@@ -208,11 +208,11 @@ test "a first successful conditional never lowers a profitable confident hold, a
         defer h.deinit();
         try h.init(.{ .sampled = sampled, .granted = 3, .gain = 2.8, .prior = c.prior, .k = .{} });
         var out = [_]i64{3};
-        try h.rule.payHolds(&.{h.who}, sampled, &out);
+        try h.rule.payHolds(&.{h.who}, sampled, &out, price.Base.pending(1));
         try std.testing.expectEqualSlices(i64, &.{3}, &out); // before any head trial the grant's confidence holds
         try h.rule.observeDepth(h.who, c.offered, c.accepted);
         out = .{3};
-        try h.rule.payHolds(&.{h.who}, sampled, &out);
+        try h.rule.payHolds(&.{h.who}, sampled, &out, price.Base.pending(1));
         try std.testing.expectEqualSlices(i64, &.{c.kept}, &out);
     };
 }
@@ -476,3 +476,4 @@ fn deferredRun(host_ms: f64, seed: ?u64) !void {
 test "a hold settled by a later verify is charged to that round: unpaid holds stop, paid ones stay, tokens are unchanged" {
     for ([_]f64{ 0, 2.5 }) |host_ms| for ([_]?u64{ null, 1234 }) |seed| try deferredRun(host_ms, seed);
 }
+

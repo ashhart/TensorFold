@@ -69,6 +69,7 @@ test {
     _ = @import("drafted_grammar_test.zig");
     _ = @import("windows_grammar_test.zig");
     _ = @import("pricing_test.zig");
+    _ = @import("hold_prefix_test.zig");
     _ = @import("depth_probe_test.zig");
     _ = @import("proposal_external_test.zig");
     _ = @import("lone_costs_test.zig");

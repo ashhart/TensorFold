@@ -45,6 +45,7 @@ const Setup = struct {
         s.target = .{ .gpa = a };
         s.e = lanes.Engine.init(a, &s.cfg, s.target.backend(), s.clock.clock());
         s.e.alone = false;
+        try s.e.rule.observeOverhead(@intCast(n), @intCast(n), s.costs[n - 1].ms + 8, false, 0);
         for (0..n) |i| {
             s.streams[i] = try lanes.Stream.init(a, .{ .id = "reserve", .prompt = &.{ 1, 2, 3 }, .max_new = 128 });
             s.n += 1;
@@ -136,21 +137,23 @@ test "a hold is priced at the rows and drafts reserved now, not at its last gran
     }
 }
 
-test "a probe after a grant of none keeps its hold only while its reservation is positive" {
+test "a historical-zero trial needs a viable pass and a positive fresh reservation" {
     for ([_]f64{ 0.9, 0.01 }) |chance| {
         var s: Setup = .{};
-        try s.init(.{ .hold_ms = 1000 }, 1); // far too dear for any granted hold to pay
+        try s.init(.{ .hold_ms = 1000 }, 1);
         defer s.deinit();
         s.history(0, 0, false, null);
         try s.chain(0, &.{}, chance);
-        const probe: i64 = if (chance > 0.5) 2 else 0; // two drafts, the depth rule's slack past a grant of none
+        try t.expectEqualSlices(i64, &.{0}, try s.budgets()); // even perfect acceptance cannot pay
+        s.holds[0].ms = 1; // a changed live cost must release the saved trial immediately
+        const probe: i64 = if (chance > 0.5) 2 else 0;
         try t.expectEqualSlices(i64, &.{probe}, try s.budgets());
     }
 }
 
 test "a historical zero grant consumes one probe tick per round at the configured interval" {
     var s: Setup = .{};
-    try s.init(.{ .plain_guard = true, .hold_ms = 1000 }, 1);
+    try s.init(.{ .plain_guard = true, .hold_ms = 1 }, 1);
     defer s.deinit();
     s.e.rule.k.depth_probe_every = 5;
     s.history(0, 0, false, null);

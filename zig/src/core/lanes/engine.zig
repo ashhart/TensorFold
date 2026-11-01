@@ -123,7 +123,7 @@ pub const Engine = struct {
         for (e.live.items) |s| {
             if (!s.finished and !s.paused) try live.append(a, s);
         }
-        const priced = e.cfg.family_mtp and e.cfg.allocate_shared_drafts and e.cfg.granted_depth and e.cfg.k.hold_costs.len > 0;
+        const priced = @import("hold_price.zig").priced(e);
         if (e.cfg.family_streams and (live.items.len > 1 or (live.items.len == 1 and priced and live.items[0].drafts))) {
             // Row-allocated rounds land queued tokens before constructing their windows.
             for (live.items) |s| {

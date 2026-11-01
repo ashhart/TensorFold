@@ -1,5 +1,6 @@
 //! A drafter's hold pass priced from its timed passes: by the blocks it holds and their depth.
 const std = @import("std");
+const Table = @import("table.zig").Table;
 
 /// A drafter's hold pass of `streams` blocks, each `depth` drafts deep, in ms (timed at load).
 pub const HoldCost = struct { streams: u32, depth: u32, ms: f64 };
@@ -51,6 +52,145 @@ pub fn observedGain(probabilities: []const f64, tried: usize, count: usize) f64 
         gain += survival;
     }
     return gain + survival * @as(f64, @floatFromInt(count - n));
+}
+
+/// Confidence-head holds use the same reserved-row controller at admission and during decoding.
+pub fn priced(engine: anytype) bool {
+    return engine.cfg.family_streams and engine.cfg.family_mtp and engine.cfg.allocate_shared_drafts and engine.cfg.granted_depth and engine.cfg.k.hold_costs.len > 0;
+}
+
+/// The round's committed work before any hold: live rows and the tokens they are expected to yield.
+pub const Base = struct {
+    streams: usize,
+    rows: u32,
+    tokens: f64,
+
+    /// Every stream awaits one row and keeps one token (a round no reservation has touched).
+    pub fn pending(streams: usize) Base {
+        return .{ .streams = streams, .rows = @intCast(streams), .tokens = @floatFromInt(streams) };
+    }
+};
+
+/// A hold offer: `depth` is the hold's priced depth, `rows` the reserved rows it keeps, `gain` its expected drafts.
+pub const Prefix = struct {
+    depth: i64,
+    gain: f64,
+    rows: f64,
+    lowered: bool, // full observed gain was below full raw confidence gain
+    shortened: bool,
+};
+
+/// The cheapest per-extra-row price at which a perfect-acceptance pass could exist, for one cost shape.
+pub const ProbeCache = struct {
+    rows: u32,
+    heads: u32,
+    depth: u32,
+    stamp: u64,
+    marginal: f64,
+};
+
+/// A full requested hold stays when it beats plain rounds alone; otherwise the best-scoring nonempty prefix
+/// (the full offer on ties) is offered. `probabilities` are cumulative joint chances per reserved draft;
+/// `observed` conditionals are initialized only for min(tried, len). Null: no pricing input.
+pub fn prefix(costs: *const Table, holds: []const HoldCost, base: Base, fixed: f64, probabilities: []const f64, observed: []const f64, tried: usize, wanted: i64) ?Prefix {
+    if (holds.len == 0 or wanted <= 0 or probabilities.len == 0) return null;
+    const full: usize = @min(probabilities.len, @as(usize, @intCast(wanted)));
+    const plain = costs.get(base.rows) orelse return null;
+    const plain_score = base.tokens / (plain + fixed);
+    const seen = @min(tried, observed.len);
+    var survival: f64 = 1;
+    var observed_gain: f64 = 0;
+    var raw: f64 = 0;
+    var best: ?Prefix = null;
+    var best_score: f64 = undefined;
+    var lowered = false;
+    for (probabilities[0..full], 1..) |chance, n| {
+        raw += chance;
+        if (n <= seen) {
+            survival *= observed[n - 1];
+            observed_gain += survival;
+        }
+        const seen_gain = if (n <= seen) observed_gain else observed_gain + survival * @as(f64, @floatFromInt(n - seen));
+        const gain = @min(raw, seen_gain);
+        const last = n == full;
+        if (last) lowered = seen_gain < raw;
+        const depth: i64 = if (last) wanted else @intCast(n);
+        const verify = costs.get(@as(i64, base.rows) + @as(i64, @intCast(n))) orelse continue;
+        const score = (base.tokens + gain) / (verify + fixed + holdMs(holds, 1, depth));
+        if (last and score > plain_score) {
+            best = .{ .depth = depth, .gain = gain, .rows = @floatFromInt(n), .lowered = false, .shortened = false };
+            break;
+        }
+        if (best == null or score >= best_score) {
+            best_score = score;
+            best = .{ .depth = depth, .gain = gain, .rows = @floatFromInt(n), .lowered = false, .shortened = !last };
+        }
+    }
+    var chosen = best orelse return null;
+    chosen.lowered = lowered;
+    return chosen;
+}
+
+/// Whether a perfect-acceptance exploration pass could beat plain rounds under the price model (unknown costs: it could).
+/// Caches the cheapest marginal ms a draft row on `rule.explore_price`, keyed by the cost values it read.
+pub fn canExplore(rule: anytype, whos: anytype, base: Base, fixed: f64) bool {
+    const costs = rule.shared_costs;
+    const holds = rule.k.hold_costs;
+    const plain = costs.get(base.rows) orelse return true;
+    if (holds.len == 0) return true;
+    var heads: u32 = 0;
+    var depth: u32 = 0;
+    for (whos) |w| {
+        if (w.finished or w.forced or w.draft_room <= 1) continue;
+        heads += 1;
+        const room: i64 = @min(@as(i64, rule.most_drafts), w.draft_room - 1);
+        depth = @max(depth, @as(u32, @intCast(room)));
+    }
+    const room_rows = if (rule.batch_rows > base.rows) rule.batch_rows - base.rows else 0;
+    if (heads == 0 or depth == 0 or room_rows == 0) return false;
+    var hasher = std.hash.Wyhash.init(0);
+    inline for (.{ base.rows, heads, depth, rule.batch_rows }) |v| {
+        const x: u64 = v;
+        hasher.update(std.mem.asBytes(&x));
+    }
+    for (holds) |c| {
+        const w = [3]u64{ c.streams, c.depth, @as(u64, @bitCast(c.ms)) };
+        hasher.update(std.mem.asBytes(&w));
+    }
+    var rows: u32 = base.rows;
+    while (rows <= rule.batch_rows) : (rows += 1) {
+        const ms = costs.get(rows);
+        const w = [2]u64{ @intFromBool(ms != null), if (ms) |v| @as(u64, @bitCast(v)) else 0 };
+        hasher.update(std.mem.asBytes(&w));
+    }
+    const stamp = hasher.final();
+    const marginal = if (rule.explore_price) |c|
+        if (c.rows == base.rows and c.heads == heads and c.depth == depth and c.stamp == stamp) c.marginal else null
+    else
+        null;
+    const cheapest = marginal orelse m: {
+        var lowest = std.math.inf(f64);
+        var blocks: u32 = 1;
+        while (blocks <= @min(heads, rule.batch_rows)) : (blocks += 1) {
+            // Rows R need padded depth at least ceil(R/blocks); any feasible deeper padding may be cheaper, so price R at the
+            // lowest hold over its class depth and every deeper feasible one (descending depths keep that minimum).
+            var padded: u32 = @min(depth, rule.batch_rows / blocks);
+            var hold = std.math.inf(f64);
+            while (padded >= 1) : (padded -= 1) {
+                hold = @min(hold, holdMs(holds, blocks, padded));
+                var extra: u32 = @max(blocks, (padded - 1) * blocks + 1);
+                const last = @min(room_rows, padded * blocks);
+                while (extra <= last) : (extra += 1) {
+                    const verify = costs.get(@as(i64, base.rows) + extra) orelse return true;
+                    lowest = @min(lowest, (verify - plain + hold) / @as(f64, @floatFromInt(extra)));
+                }
+            }
+        }
+        rule.explore_price = .{ .rows = base.rows, .heads = heads, .depth = depth, .stamp = stamp, .marginal = lowest };
+        break :m lowest;
+    };
+    if (!std.math.isFinite(cheapest)) return false;
+    return base.tokens * cheapest < plain + fixed;
 }
 
 /// Ignore work settled outside this round; the clock measures only what follows its start.
