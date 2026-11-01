@@ -139,4 +139,5 @@ test "contract architecture: modern gate 3 retains bit equality and rejects a pl
 
 test {
     _ = @import("contract_exl3_grouped_ref.zig");
+    _ = @import("contract_nvfp4_waves_test.zig");
 }
