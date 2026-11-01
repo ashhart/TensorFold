@@ -61,6 +61,7 @@ test {
 }
 
 pub const train_ops = @import("cuda_train_ops.zig");
+pub const learn_direction = @import("cuda_learn_direction.zig");
 pub const train = @import("cuda_train.zig");
 pub const Engine = engine.Engine;
 
