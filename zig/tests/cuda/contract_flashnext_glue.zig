@@ -49,7 +49,7 @@ pub fn spec(kind: Kind) c.Spec {
     return switch (kind) {
         .chain => .{ .name = "cuda flashnext DeltaNet prompt chain fn_gdn_chain_tpr", .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = "ys and the state bit-equal to fn_gdn_rows_to's, non-finite inputs included" }, .replaces = "fn_gdn_rows_to", .tiles = .{ .{ .size = 16 }, .{}, .{} }, .served = &prompt_served },
         .scores => .{ .name = "cuda flashnext indexer scores qsa_tile::scores<8, 4>", .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = "every score byte equal to fn_qsa_scores', non-finite inputs included" }, .replaces = "fn_qsa_scores", .tiles = .{ .{ .size = 8 }, .{ .size = 256, .step = 1, .min = 1 }, .{} }, .served = &.{ .{ .rows = 64, .n = 600, .k = di }, .{ .rows = 300, .n = 2100, .k = di } } },
-        .fused => .{ .name = "cuda flashnext DeltaNet prompt block fn_gdn_fused (front, chain, gated norm)", .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = "gated-norm rows, xs, the state and the readouts bit-equal to fn_gdn_front -> fn_gdn_rows_to -> fn_gdn_norm, non-finite inputs included" }, .replaces = "fn_gdn_front, fn_gdn_chain_tpr and fn_gdn_norm", .tiles = .{ .{ .size = 16 }, .{}, .{} }, .in_place = true, .served = &prompt_served },
+        .fused => .{ .name = "cuda flashnext DeltaNet prompt block fn_gdn_fused (front, chain, gated norm)", .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = "gated-norm rows, xs, the state, the readouts and two cache marks' kept states bit-equal to fn_gdn_front -> fn_gdn_rows_to -> fn_gdn_norm (rows_to over each mark's rows), non-finite inputs included" }, .replaces = "fn_gdn_front, fn_gdn_chain_tpr and fn_gdn_norm", .tiles = .{ .{ .size = 16 }, .{}, .{} }, .in_place = true, .served = &prompt_served },
         .readout => .{ .name = "cuda flashnext hyper-connection read-out on prompt tiles (hcf down, reduce, hcf up, rinv, mix_h)", .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = "act, xs, inj, mixed and xsm bit-equal to #952's chain, non-finite inputs included" }, .replaces = "fn_hc_down, fn_hc_reduce_act and fn_hc_upmix", .tiles = .{ .{ .size = 64 }, .{}, .{} }, .served = &.{ .{ .rows = 64, .n = dims, .k = wide }, .{ .rows = 130, .n = dims, .k = wide } } },
     };
 }
@@ -62,7 +62,16 @@ pub fn fusedArgs(ins: []const u64, o: []const u64, rows: usize, norm: u64) cuda.
     a.add(norm);
     a.add(eps);
     for ([_]u64{ o[0], o[1], o[3] }) |v| a.add(v);
+    for (cutRows(rows), [_]u64{ o[4], o[5] }) |at, st| { // two prompt cache marks inside the pass
+        a.add(@as(c_int, @intCast(at)));
+        a.add(if (at == 0) 0 else st);
+    }
     return a;
+}
+
+/// The rows after which the contract's two cache marks keep the state: the pass's middle and its last (0: none).
+pub fn cutRows(rows: usize) [2]usize {
+    return .{ (rows + 1) / 2, if (rows >= 2) rows else 0 };
 }
 
 pub const Fns = struct { tpr: cuda.Function, rows_to: cuda.Function, tile: cuda.Function, scores: cuda.Function, hcf_down: cuda.Function, hcf_up: cuda.Function, front: cuda.Function, norm: cuda.Function, fused: cuda.Function };
@@ -74,8 +83,8 @@ pub const Glue = struct {
     glue: *const flash.Glue,
     shape: c.Shape = .{ .rows = 0, .n = 0, .k = 0 },
     ins: [12]u64 = @splat(0),
-    outs: [5]u64 = @splat(0),
-    lens: [5]usize = @splat(0),
+    outs: [6]u64 = @splat(0),
+    lens: [6]usize = @splat(0),
     nout: usize = 0,
     base: u64 = 0,
     pos0: usize = 0,
@@ -225,6 +234,8 @@ pub const Glue = struct {
                 _ = try self.out(m * (nv * dv / 32) * 4); // their 32-wide sums
                 self.state = try self.out(nv * dv * dk * 4); // the state after the pass: read and written where it lies
                 _ = try self.out(m * nv * dv * 4); // the chain's readouts
+                _ = try self.out(nv * dv * dk * 4); // the state a cache mark keeps at the pass's middle row
+                _ = try self.out(nv * dv * dk * 4); // and at its last row
                 // the fused block reads and writes the state where it lies: every launch starts from these bytes
                 self.fresh = try a.dupe(u8, std.mem.sliceAsBytes(st));
             },
@@ -369,6 +380,14 @@ pub const Glue = struct {
                 a.add(@as(c_int, @intCast(m)));
                 a.add(o[3]);
                 try cuda.launch.launch(self.f.rows_to, .{ .grid = .{ .x = nv, .y = dv / 16 }, .block = .{ .x = 128 } }, s, &a);
+                const ys = try self.rig.scratch(m * nv * dv * 4);
+                for (cutRows(m), [_]u64{ o[4], o[5] }) |at, st| if (at > 0) { // a mark's state: the chain over its first rows
+                    var cut: cuda.Args = .{};
+                    for ([_]u64{ gq, gk, gv, ggb, self.ins[5], st }) |v| cut.add(v);
+                    cut.add(@as(c_int, @intCast(at)));
+                    cut.add(ys);
+                    try cuda.launch.launch(self.f.rows_to, .{ .grid = .{ .x = nv, .y = dv / 16 }, .block = .{ .x = 128 } }, s, &cut);
+                };
                 var b: cuda.Args = .{};
                 for ([_]u64{ o[3], self.ins[0], self.ins[6] }) |v| b.add(v);
                 b.add(eps);
@@ -403,7 +422,7 @@ pub const Glue = struct {
     /// The scratch the baseline writes: the outputs' layout back to back, poisoned like them (0xff).
     fn baseline(self: *Glue) ![]const u8 {
         var at = self.base;
-        var o: [5]u64 = undefined;
+        var o: [6]u64 = undefined;
         var total: usize = 0;
         for (self.lens[0..self.nout], 0..) |l, i| {
             o[i] = at;

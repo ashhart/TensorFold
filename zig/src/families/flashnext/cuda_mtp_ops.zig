@@ -4,10 +4,14 @@ const std = @import("std");
 const cuda = @import("cuda");
 const wt = @import("cuda_prompt_wt.zig");
 const batch = @import("cuda_batch.zig");
+const parts = @import("cuda_batch_state.zig");
 const prompt = @import("cuda_prompt.zig");
 const gdn = @import("cuda_gdn.zig");
 const mtp = @import("cuda_mtp.zig");
 const plan = @import("cuda_mtp_plan.zig");
+const roll = @import("cuda_mtp_roll.zig");
+const pieces = @import("cuda_mtp_pieces.zig");
+const draw = @import("cuda_mtp_draw.zig");
 
 /// One group of lanes in the batched head's pass: the lanes' drafts, their rows and whether the head scores.
 const Group = struct {
@@ -46,8 +50,6 @@ const Draft = mtp.Draft;
 const Chain = mtp.Chain;
 const Pick = mtp.Pick;
 const Sampling = mtp.Sampling;
-const drawRow = mtp.drawRow;
-const maskRow = mtp.maskRow;
 const promote = mtp.promote;
 
 fn cint(v: usize) c_int {
@@ -93,13 +95,13 @@ pub fn Ops(comptime Tri: type) type {
             return o.e.stream.*;
         }
 
-        /// Prompt rows [at, stop): the pass with its streams kept, then the head over each row with a known next token.
-        pub fn prefillChunk(o: Self, seq: *prompt.Seq, d: *Draft, ids: []const u32, at: usize, stop: usize) !void {
+        /// Prompt rows [at, stop): the pass (keeping `marks` on its way) and its streams, then the head over the rows.
+        pub fn prefillChunk(o: Self, seq: *prompt.Seq, d: *Draft, ids: []const u32, at: usize, stop: usize, marks: [parts.max_marks]parts.Mark) !void {
             if (stop > d.cap or stop <= at or stop - at > d.rows_cap) return error.PromptTooLong;
-            if (seq.fed != at or d.len != at or d.drafted != 0) return error.PositionMismatch;
+            if (seq.fed != at or d.len != at or d.drafted != 0 or d.pending != 0) return error.PositionMismatch;
             d.media = if (seq.media) |*m| m.view() else null;
             const last = stop == ids.len;
-            try o.forwardMain(seq, ids[at..stop], .{ .logits = if (last) .last else .none, .streams = d.streams.ptr });
+            try o.forwardMain(seq, ids[at..stop], .{ .logits = if (last) .last else .none, .streams = d.streams.ptr, .prompt = true, .marks = marks });
             const head_to = @min(stop, ids.len - 1);
             if (head_to > at) try o.forwardHead(d, ids[at + 1 .. head_to + 1], d.streams.ptr, false);
             if (last) d.prompt_last = d.streams.ptr + (stop - 1 - at) * wide * 2;
@@ -111,7 +113,7 @@ pub fn Ops(comptime Tri: type) type {
             var at: usize = 0;
             while (at < ids.len) {
                 const stop = @min(ids.len, at + @min(o.e.chunk, d.rows_cap));
-                try o.prefillChunk(seq, d, ids, at, stop);
+                try o.prefillChunk(seq, d, ids, at, stop, .{ .{}, .{} });
                 at = stop;
             }
         }
@@ -144,44 +146,11 @@ pub fn Ops(comptime Tri: type) type {
                 const m = @min(piece, next.len - at);
                 p.rows = m;
                 p.pos0 = d.len;
-                p.pending = null;
                 try p.stage(next[at..][0..m]);
-                // the embedding branch: the token's row (stream 0 of the four copies), normed, fc_embedding
-                if (e.table.dense) {
-                    try tri.embedDense(s.ids, e.table.w.ptr, s.ple_keys, dims, streams, m);
-                } else {
-                    try tri.embed(s.ids, e.table.w.ptr, e.table.s.ptr, e.table.b.ptr, s.ple_keys, dims, streams, m);
-                }
-                try @import("cuda_media.zig").injectNext(d.media, o.stream(), s.ple_keys, d.len, m);
-                try tri.rmsnorm(s.ple_keys, h.norm_e.ptr, s.mixed, s.xsm, eps, wide, m, dims, dims);
-                const esk = try p.lane(s.mixed, s.xsm, h.fc_e, s.dummy, s.part, m, fc_sk);
-                try p.sumSlices(s.part, s.branch, true, m * dims, esk);
-                // the hidden branch: the four streams normed as one row, fc_hidden on each stream
-                try tri.rmsnorm(rows + at * wide * 2, h.norm_h.ptr, s.norm, s.gq, eps, wide, m, wide, wide);
-                const hsk = try p.lane(s.norm, s.gq, h.fc_h, s.dummy, s.part, streams * m, fc_sk);
-                try p.sumSlices(s.part, s.ple_gated, true, streams * m * dims, hsk);
-                try tri.addStreams(s.branch, s.ple_gated, s.h, m, dims, streams);
-                // the layer: attention over the head's own cache, its experts
-                try p.writeback(0, m);
-                try p.readout(h.layer.attn_hc, 0, m);
-                try p.attnBlock(&h.layer, 0);
-                try tri.hcWriteback(s.h, s.h, s.pss, s.part, "*fp32", s.inj, s.dummy, "*bf16", s.dummy, "*bf16", m * dims, m, dims, streams, 4, 1, 1, p.out_slices);
-                try p.readout(h.layer.mlp_hc, 0, m);
-                try p.moeBlock(&h.layer);
-                p.pending = 0;
-                try p.writeback(0, m);
-                try p.copy(d.out.ptr, s.h + (m - 1) * wide * 2, wide * 2);
+                const one: pieces.Piece(Self, batch.Pass(Tri)) = .{ .o = o, .p = &p, .d = d, .input = rows + at * wide * 2, .m = m, .score = at + m == next.len and scores };
+                try pieces.runPiece(one, score_rows);
                 d.len += m;
                 at += m;
-                if (at == next.len and scores) {
-                    // the last row's streams and sums at row 0, where the captured kernels' pointers stay aligned
-                    if (m > 1) {
-                        try p.copy(s.h, s.h + (m - 1) * wide * 2, wide * 2);
-                        try p.copy(s.pss, s.pss + (m - 1) * pss_n * 4, pss_n * 4);
-                    }
-                    try p.readout(h.mixer, 0, 1);
-                    try h.project(&p, s.mixed, s.xsm, d.dlogits.ptr, 1);
-                }
             }
         }
 
@@ -208,24 +177,26 @@ pub fn Ops(comptime Tri: type) type {
                 const col: usize = @intCast(@as(i32, @bitCast(d.best_host[2])));
                 return .{ .token = try view_.global(@intCast(col)), .prob = @exp(@as(f64, top) - @as(f64, lse)) };
             }
+            if (sm) |x| if (draw.usable(x)) return draw.pickHead(h, o.stream(), o.e.gpa, d, lse, position, x);
             const row = d.host[0..n];
             try download(o.stream(), std.mem.sliceAsBytes(row), d.dlogits.ptr);
             return mtp.drawPick(o.e.gpa, row, h.ids, lse, position, sm);
         }
 
-        /// Python decode.draft: absorb the kept rows, then chain up to `count` drafts, the first always kept.
+        /// Python decode.draft: absorb the kept rows, then chain up to `count` drafts under mtp.Stop, the first kept.
         pub fn draft(o: Self, d: *Draft, next: []const u32, rows: u64, position: u64, count: usize, sm: ?Sampling, confidence: f64, out: *Chain) !void {
             out.n = 0;
             try o.absorb(d, next, rows, count > 0);
+            var stop: mtp.Stop = .{ .c = confidence };
             var j: usize = 0;
             while (j < @min(count, max_chain)) : (j += 1) {
                 const got = try o.pick(d, position + j, sm);
-                const low = confidence > 0 and got.prob < confidence;
-                if (low and j > 0) break;
+                const t = stop.take(j, got.prob);
+                if (!t.propose) break;
                 out.tokens[out.n] = got.token;
                 out.probs[out.n] = got.prob;
                 out.n += 1;
-                if (low) break;
+                if (!t.more) break;
                 if (j + 1 < count) {
                     try o.forwardHead(d, &.{got.token}, d.out.ptr, true);
                     d.drafted += 1;
@@ -299,49 +270,8 @@ pub fn Ops(comptime Tri: type) type {
             p.pos0 = 0;
             p.pending = null;
             try p.stage(ids_buf[0..total]);
-            if (e.table.dense) {
-                try tri.embedDense(s.ids, e.table.w.ptr, s.ple_keys, dims, streams, total);
-            } else {
-                try tri.embed(s.ids, e.table.w.ptr, e.table.s.ptr, e.table.b.ptr, s.ple_keys, dims, streams, total);
-            }
-            try tri.rmsnorm(s.ple_keys, h.norm_e.ptr, s.mixed, s.xsm, eps, wide, total, dims, dims);
-            const esk = try p.lane(s.mixed, s.xsm, h.fc_e, s.dummy, s.part, total, fc_sk);
-            try p.sumSlices(s.part, s.branch, true, total * dims, esk);
-            // each lane's rows of main-model streams, side by side (the head reads them as one block of rows)
-            at = 0;
-            for (group.rows, nexts) |r, nx| {
-                try p.copy(s.ple_nrow + at * wide * 2, r, nx.len * wide * 2);
-                at += nx.len;
-            }
-            try tri.rmsnorm(s.ple_nrow, h.norm_h.ptr, s.norm, s.gq, eps, wide, total, wide, wide);
-            const hsk = try p.lane(s.norm, s.gq, h.fc_h, s.dummy, s.part, streams * total, fc_sk);
-            try p.sumSlices(s.part, s.ple_gated, true, streams * total * dims, hsk);
-            try tri.addStreams(s.branch, s.ple_gated, s.h, total, dims, streams);
-            try p.writeback(0, total);
-            try p.readout(h.layer.attn_hc, 0, total);
-            try p.attnBlock(&h.layer, 0);
-            try tri.hcWriteback(s.h, s.h, s.pss, s.part, "*fp32", s.inj, s.dummy, "*bf16", s.dummy, "*bf16", total * dims, total, dims, streams, 4, 1, 1, p.out_slices);
-            try p.readout(h.layer.mlp_hc, 0, total);
-            try p.moeBlock(&h.layer);
-            p.pending = 0;
-            try p.writeback(0, total);
-            // each lane's last row: its d.out, and gathered to row i for the draft head (row i <= its last row)
-            at = 0;
-            for (ds, nexts, 0..) |d, nx, i| {
-                const last = at + nx.len - 1;
-                try p.copy(d.out.ptr, s.h + last * wide * 2, wide * 2);
-                if (group.scores and last != i) {
-                    try p.copy(s.h + i * wide * 2, s.h + last * wide * 2, wide * 2);
-                    try p.copy(s.pss + i * pss_n * 4, s.pss + last * pss_n * 4, pss_n * 4);
-                }
-                d.len += nx.len;
-                at += nx.len;
-            }
-            if (!group.scores) return;
-            try p.readout(h.mixer, 0, n_l);
-            const n_ids = h.ids.len;
-            _ = try p.lane(s.mixed, s.xsm, h.draft, s.head_local, s.dummy, n_l, 1);
-            for (ds, 0..) |d, i| try p.copy(d.dlogits.ptr, s.head_local + i * n_ids * 2, n_ids * 2);
+            try pieces.runGroup(pieces.Group(Self, batch.Pass(Tri), Group){ .o = o, .p = &p, .group = group, .total = total }, score_rows);
+            for (ds, nexts) |d, nx| d.len += nx.len;
         }
 
         /// draft over several drafts, greedy or sampled: kept rows in one pass, then one a step, each as it would alone
@@ -362,6 +292,8 @@ pub fn Ops(comptime Tri: type) type {
                 act[n_act] = i;
                 n_act += 1;
             };
+            var stops: [max_lanes]mtp.Stop = undefined;
+            for (stops[0..ds.len]) |*st| st.* = .{ .c = confidence };
             var j: usize = 0;
             var best_host: [max_lanes * 4]f32 = undefined;
             var step_ds: [max_lanes]*Draft = undefined;
@@ -380,17 +312,18 @@ pub fn Ops(comptime Tri: type) type {
                     const col: usize = @intCast(@as(i32, @bitCast(best_host[r * 4 + 2])));
                     // a sampled lane draws from its own row, as its lone pick does; a greedy one takes its best column
                     const got: Pick = if (mtp.isSampled(sms[i])) sampled: {
+                        if (draw.usable(sms[i].?)) break :sampled try draw.pickHead(h, o.stream(), o.e.gpa, ds[i], lse, positions[i] + j, sms[i].?);
                         const row = ds[i].host[0..h.view().logical];
                         try download(o.stream(), std.mem.sliceAsBytes(row), ds[i].dlogits.ptr);
                         break :sampled try mtp.drawPick(o.e.gpa, row, h.ids, lse, positions[i] + j, sms[i]);
                     } else .{ .token = h.ids[col], .prob = @exp(@as(f64, top) - @as(f64, lse)) };
                     const out = outs[i];
-                    const low = confidence > 0 and got.prob < confidence;
-                    if (low and j > 0) continue;
+                    const t = stops[i].take(j, got.prob);
+                    if (!t.propose) continue;
                     out.tokens[out.n] = got.token;
                     out.probs[out.n] = got.prob;
                     out.n += 1;
-                    if (low) continue;
+                    if (!t.more) continue;
                     if (j + 1 < @min(counts[i], max_chain)) {
                         step_ds[n_step] = ds[i];
                         step_next[n_step] = .{got.token};
@@ -418,13 +351,13 @@ pub fn Ops(comptime Tri: type) type {
             if (n == 0 or n > max_rows) return error.WindowTooWide;
             if (seq.fed + n > seq.cap) return error.PromptTooLong;
             d.settle(seq);
+            const keeps = try o.lateBefore(seq, d, n);
             d.fed0 = seq.fed;
             d.rows = n;
             d.history = seq.history;
             @memcpy(d.ids[0..n], ids);
-            const keeps = n > 1;
             if (keeps) try copyAsync(o.stream(), d.saved.ptr + Draft.tail_at, seq.tail.ptr, ple_tail_n * wide * 2);
-            try o.e.forward(Tri, o.tri, seq, ids, .{ .logits = .all, .logits_out = d.logits.ptr, .keep = if (keeps) &d.keep else null, .streams = d.streams.ptr });
+            try o.e.forward(Tri, o.tri, seq, ids, .{ .logits = .all, .logits_out = d.logits.ptr, .keep = if (keeps) &d.keep else null, .streams = d.streams.ptr, .host_logits = @import("cuda_batch_state.zig").verifyHostLogits() });
             if (keeps) try copyAsync(o.stream(), d.saved.ptr + Draft.nrow_at, o.e.batch_s.?.ple_nrow, n * wide * 2);
             d.open = keeps;
         }
@@ -443,42 +376,69 @@ pub fn Ops(comptime Tri: type) type {
             for (seqs, ds, idss, wins) |seq, d, ids, *w| {
                 const n = ids.len;
                 d.settle(seq);
+                const keeps = try o.lateBefore(seq, d, n);
                 d.fed0 = seq.fed;
                 d.rows = n;
                 d.history = seq.history;
                 @memcpy(d.ids[0..n], ids);
-                const keeps = n > 1;
                 if (keeps) try copyAsync(o.stream(), d.saved.ptr + Draft.tail_at, seq.tail.ptr, ple_tail_n * wide * 2);
                 w.* = .{ .seq = seq, .ids = ids, .keep = if (keeps) &d.keep else null, .streams = d.streams.ptr, .logits = d.logits.ptr };
             }
             try o.e.windows(Tri, o.tri, wins, out);
             var row0: usize = 0;
-            for (ds, idss) |d, ids| {
-                const keeps = ids.len > 1;
+            for (ds, idss, wins) |d, ids, w| {
+                const keeps = w.keep != null;
                 if (keeps) try copyAsync(o.stream(), d.saved.ptr + Draft.nrow_at, o.e.batch_s.?.ple_nrow + row0 * wide * 2, ids.len * wide * 2);
                 d.open = keeps;
                 row0 += ids.len;
             }
         }
 
+        /// Whether an n-row window keeps a rollback; with a log its control word goes to the device (full: flushed).
+        fn lateBefore(o: Self, seq: *prompt.Seq, d: *Draft, n: usize) !bool {
+            if (d.log == null) return n > 1;
+            if (d.pending + n > batch.late_rows) try o.flushLate(seq, d);
+            if (n == 1 and d.pending == 0) return false;
+            try o.lateCtl(d);
+            return true;
+        }
+
+        /// The log's first pending row | its pending rows << 16 on the device (fn_late's ctl), in stream order.
+        fn lateCtl(o: Self, d: *const Draft) !void {
+            const st = o.stream();
+            try st.d.check(st.d.api.cuMemsetD32Async(d.log.?.ptr, d.log_first | d.pending << 16, 1, st.handle), "cuMemsetD32Async");
+        }
+
+        /// The pending rows applied to the DeltaNet states in place: they stand at seq.fed as without a log.
+        pub fn flushLate(o: Self, seq: *prompt.Seq, d: *Draft) !void {
+            if (d.log == null or d.pending == 0) return;
+            if (d.open) return error.CannotRewind;
+            const st = o.stream();
+            try o.lateCtl(d);
+            var li: usize = 0;
+            for (o.e.layers[0..o.e.n_layers], 0..) |*lw, layer| {
+                if (!lw.linear) continue;
+                defer li += 1;
+                const lk = d.keep.layers[layer];
+                var a: cuda.Args = .{};
+                a.add(@as(u64, 0));
+                a.add(lk.log);
+                a.add(lk.log_ctl);
+                a.add(cint(batch.late_rows));
+                a.add(cint(batch.late_rows));
+                a.add(seq.state[li].ptr);
+                a.add(seq.state[li].ptr);
+                a.add(cint(0));
+                a.add(@as(u64, 0));
+                try cuda.launch.launch(o.e.batch_k.chain_late, .{ .grid = .{ .x = gdn.nv, .y = gdn.dv / 16 }, .block = .{ .x = 128 } }, st, &a);
+            }
+            d.log_first = 0;
+            d.pending = 0;
+        }
+
         /// The window's rows drawn at their keyed positions (fed0 + 1 + r), each within its `masks` row if any.
         pub fn draws(o: Self, d: *Draft, sm: ?Sampling, masks: []const u32, out: []u32) !void {
-            const n = d.rows;
-            const greedy = if (sm) |s| s.temperature <= 0 else true;
-            if (greedy and masks.len == 0) {
-                try o.h.best(o.stream(), d.logits.ptr, vocab, vocab, n, d.best.ptr);
-                try download(o.stream(), std.mem.sliceAsBytes(d.best_host[0 .. 4 * n]), d.best.ptr);
-                for (out[0..n], 0..) |*t, r| t.* = @intCast(@as(i32, @bitCast(d.best_host[4 * r + 2])));
-                return;
-            }
-            const rows = d.host[0 .. n * vocab];
-            try download(o.stream(), std.mem.sliceAsBytes(rows), d.logits.ptr);
-            const words = masks.len / n;
-            for (out[0..n], 0..) |*t, r| {
-                const row = rows[r * vocab ..][0..vocab];
-                if (words > 0) maskRow(row, masks[r * words ..][0..words]);
-                t.* = try drawRow(o.e.gpa, row, null, d.fed0 + 1 + r, sm);
-            }
+            return draw.draws(o.h, o.stream(), o.e.gpa, d, sm, masks, out);
         }
 
         /// Keep the window's first `keep` rows (Python forward.commit) from its saved rows; a repeat is a no-op.
@@ -489,57 +449,22 @@ pub fn Ops(comptime Tri: type) type {
             if (keep == d.rows) return d.settle(seq);
             if (!d.open) return error.CannotRewind;
             const e = o.e;
-            const st = o.stream();
             const s = if (e.batch_s) |*bs| bs else return error.CannotRewind;
-            const k = &e.batch_k;
             seq.fed = d.fed0 + keep;
             var hist = d.history;
             for (d.ids[0..keep]) |t| hist = .{ hist[1], t };
             seq.history = hist;
-            try copyAsync(st, seq.tail.ptr, d.saved.ptr + Draft.tail_at, ple_tail_n * wide * 2);
-            try shift(k, st, seq.tail.ptr, d.saved.ptr + Draft.nrow_at, wide, keep, ple_tail_n, wide);
-            var li: usize = 0;
-            for (e.layers[0..e.n_layers], 0..) |*lw, layer| {
-                if (!lw.linear) continue;
-                defer li += 1;
-                // the sequence's state is still the window's start (the pass wrote its end state to the spare)
-                const lk = d.keep.layers[layer];
-                try copyAsync(st, seq.conv[li].ptr, lk.hist, conv_bytes);
-                var f: cuda.Args = .{};
-                f.add(lk.proj);
-                f.add(seq.conv[li].ptr);
-                f.add(lw.cw.ptr);
-                f.add(lw.a_log.ptr);
-                f.add(lw.dt.ptr);
-                f.add(s.gq);
-                f.add(s.gk);
-                f.add(s.gv);
-                f.add(s.ggb);
-                try cuda.launch.launch(k.front, .{ .grid = .{ .x = @intCast(keep), .y = gdn.nk + gdn.nv }, .block = .{ .x = 256 } }, st, &f);
-                var a: cuda.Args = .{};
-                a.add(s.gq);
-                a.add(s.gk);
-                a.add(s.gv);
-                a.add(s.ggb);
-                a.add(seq.state[li].ptr);
-                a.add(cint(keep));
-                a.add(s.ys);
-                try cuda.launch.launch(k.chain, .{ .grid = .{ .x = gdn.nv, .y = gdn.dv / 16 }, .block = .{ .x = 128 } }, st, &a);
-                try shift(k, st, seq.conv[li].ptr, lk.proj, gdn.proj_width, keep, gdn.taps - 1, gdn.conv_dim);
+            if (d.log != null) {
+                // pending rows: the kept rows stay in the log; the conv windows and n-gram tail move on in one launch
+                try roll.lateRoll(o, seq, d, keep);
+                d.keptLate(keep);
+                d.rows = keep;
+                d.open = false;
+                return;
             }
+            try roll.replay(e, s, seq, d, keep);
             d.rows = keep;
             d.open = false;
-        }
-
-        fn shift(k: *const batch.Kernels, st: cuda.Stream, win: u64, rows_ptr: u64, stride: usize, n: usize, taps: usize, c: usize) !void {
-            var a: cuda.Args = .{};
-            a.add(win);
-            a.add(rows_ptr);
-            a.add(@as(c_longlong, @intCast(stride)));
-            a.add(cint(n));
-            a.add(cint(taps));
-            a.add(cint(c));
-            try cuda.launch.launch(k.shift, .{ .grid = .{ .x = @intCast((c + 255) / 256) }, .block = .{ .x = 256 } }, st, &a);
         }
     };
 }

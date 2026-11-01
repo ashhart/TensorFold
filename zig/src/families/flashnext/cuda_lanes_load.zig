@@ -24,10 +24,17 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     if (o.slide and captured != null) return error.TrainingOnCapturedGlue;
     const page_tokens = try @import("cuda_kv_lanes.zig").paging();
     if (page_tokens > 0 and (o.tp != 1 or o.slide or captured != null)) return error.FlashNextPagesUnsupported;
+    // pending DeltaNet rows run on one GPU only: TF_FLASHNEXT_KEEP_LATE=1 with tensor parallel is refused
+    const Draft = @import("cuda_mtp_draft.zig").Draft;
+    const late_fits = o.tp == 1;
+    if (Draft.lateWanted() == true and !late_fits) return error.FlashNextKeepLateUnsupported;
+    Draft.late_on = (Draft.lateWanted() orelse true) and late_fits;
     const driver: *cuda.Driver = @constCast(ctx.d);
     const own = try gpa.create(Cuda);
     errdefer gpa.destroy(own);
     own.* = .{ .gpa = gpa, .context = o.context, .engine = undefined, .glue = undefined, .stream = undefined, .logits = undefined };
+    // fixed-size lane buffers reused across streams (cuda_lane_parts.zig; TF_FLASHNEXT_LANE_PARTS=0: allocate each)
+    own.parts.on = if (std.c.getenv("TF_FLASHNEXT_LANE_PARTS")) |v| !std.mem.eql(u8, std.mem.span(v), "0") else true;
     own.stream = try cuda.Stream.init(driver, true);
     errdefer own.stream.deinit();
     own.glue = try Glue.load(driver);
@@ -69,6 +76,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     if (o.drafts and (o.tp == 1 or o.rank == 0)) {
         own.head = try mtp.Head.init(gpa, io, driver, &own.stream, dir);
         own.depth = @max(1, @min(mtp.max_chain, F.envUsize("TF_FLASHNEXT_DRAFTS", mtp.default_depth)));
+        own.depth_greedy = @max(1, @min(mtp.max_chain, F.envUsize("TF_FLASHNEXT_DRAFTS_GREEDY", mtp.default_depth_greedy)));
         if (std.c.getenv("TF_FLASHNEXT_CONFIDENCE")) |v| own.confidence = std.fmt.parseFloat(f64, std.mem.span(v)) catch mtp.default_confidence;
     }
     errdefer if (own.head) |h| h.deinit();
@@ -93,6 +101,8 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
         const head_bytes = if (own.head) |h| mtp.Draft.bytes(window, h.ids.len, own.engine.chunk) else 0;
         own.kv.layout = @import("cuda_kv_lanes.zig").layout(o.context, page_tokens, own.kv.head, stream_bytes - own_seq_bytes - head_bytes);
     }
+    // the weights are in: the n-gram table into the page cache behind them, so the first prompt finds its rows in RAM
+    own.engine.ngram.warm();
     return .{
         .layout = own.kv.layout,
         .vision = own.vision,
