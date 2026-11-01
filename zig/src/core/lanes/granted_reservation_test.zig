@@ -45,6 +45,9 @@ const Setup = struct {
         s.target = .{ .gpa = a };
         s.e = lanes.Engine.init(a, &s.cfg, s.target.backend(), s.clock.clock());
         s.e.alone = false;
+        // the fixture's 8 ms of fixed overhead, measured: a hold grid assumes none of its own before one is
+        try s.e.rule.overhead.append(a, .{ .streams = 1, .ms = 8 });
+        try s.e.rule.greedy_overhead.append(a, .{ .streams = 1, .ms = 8 });
         for (0..n) |i| {
             s.streams[i] = try lanes.Stream.init(a, .{ .id = "reserve", .prompt = &.{ 1, 2, 3 }, .max_new = 128 });
             s.n += 1;
@@ -205,6 +208,24 @@ test "a stateful copy proposer is asked once a round, and its copy takes the rou
         const out = try s.budgets();
         try t.expectEqual(@as(usize, 1), ask.calls);
         try t.expectEqual(@as(i64, 0), out[0]);
+    }
+}
+
+test "the final shared reservation charges a hold to the head stream alone, over the fixed overhead without the head's own" {
+    // Costly versus free holds: the same cohort and copy offers, only the hold price differs.
+    for ([_]f64{ 1000, 0 }) |hold_ms| {
+        var s: Setup = .{};
+        try s.init(.{ .legacy = true, .hold_ms = hold_ms }, 2);
+        defer s.deinit();
+        s.cfg.limit_shared_drafts = false; // no preliminary cap: the final global allocation alone prices the holds
+        // Past head work must not inflate the next cohort's fixed cost; the seeded fixed work stays 8 ms.
+        try s.e.rule.observeOverhead(2, 2, s.e.rule.shared_costs.get(2).? + 8 + 10000, false, 10000);
+        var ask: Ask = .{};
+        s.streams[0].proposer = .{ .ptr = &ask, .vtable = &.{ .propose = propose, .last_match = match, .priced = true } };
+        try s.chain(1, &.{}, 0.9);
+        // stream 0 offers four copied tokens, which take rows but no hold; stream 1 is the head
+        const keep: i64 = if (hold_ms > 0) 0 else 7; // a dear hold does not pay at 8 ms of overhead; a free one keeps the chain
+        try t.expectEqualSlices(i64, &.{ 0, keep }, try s.budgets());
     }
 }
 

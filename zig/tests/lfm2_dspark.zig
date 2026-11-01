@@ -112,9 +112,95 @@ fn compare(label: []const u8, gpu: []const u16, row: []const f32, bias: []const 
 }
 
 fn absorb(d: *q.dspark.Drafter, piece: q.dspark_block.Piece) !void {
-    const run = q.dspark_block.begin(d);
-    try q.dspark_block.absorbPass(d, run.e, &.{piece});
-    try q.dspark_block.end(run.cb, run.e);
+    try q.dspark_block.absorbNow(d, &.{piece});
+}
+
+/// An absorb of `rows` tapped rows from row `row` of `buf` (the target's rows, as the drafter takes them), `row` the context's start.
+fn ownAbsorb(key: *tf.lanes.Stream, buf: mtl.Buffer, row_bytes: usize, row: usize, rows: u32, prompt: bool) tf.lanes.drafter.Absorb {
+    return .{
+        .stream = key,
+        .features = .{ .buffer = @intFromPtr(buf.id), .offset = row * row_bytes, .rows = rows, .row_bytes = @intCast(row_bytes), .space = .device, .dtype = .bf16 },
+        .start = row,
+        .follow = &.{},
+        .prompt = prompt,
+    };
+}
+
+/// The public hold path on eight real lanes of capacity 64 (empty contexts, anchor 0) at depths [9, 1 x 7], stock block 9.
+/// holdFn's greedy partition gives a pass of 3 blocks of 9 rows (27 <= 32; a 4th would make 36) then one of 5 blocks of 1
+/// row: both synchronous, so nothing stays pending. The grid is a SYNTHETIC control (10000 ms scale, real GPU times are a
+/// thousandth of it), so each completed group's tenth-of-the-way step lands just under x0.9 and the shapes that
+/// participated are visible: 3 blocks move the timed 2- and 4-block passes, 5 blocks the 4- and 8-block ones (so the
+/// 4-block ones move twice); the 1- and 16-block passes are untouched controls. A single combined pass of 8 blocks would
+/// move only the 8-block passes. Each group's own GPU ms is not separately observable without production telemetry, so
+/// the bounds below are on the grid's steps, and the taken time is only bounded by the call's wall time.
+fn splitHold(gpa: std.mem.Allocator, io: std.Io, d: *q.dspark.Drafter, ids: []const u32) !void {
+    const depths = [8]u32{ 9, 1, 1, 1, 1, 1, 1, 1 };
+    const groups = [2][2]usize{ .{ 0, 3 }, .{ 3, 8 } }; // the lanes each physical pass holds
+    var pending: [8]u32 = undefined;
+    for (&pending, 0..) |*p, i| p.* = ids[(i * 131 + 5) % ids.len];
+    const drafter = d.drafter();
+    var streams: [8]tf.lanes.Stream = undefined;
+    var made: usize = 0;
+    defer for (streams[0..made]) |*s| s.deinit(gpa);
+    while (made < streams.len) : (made += 1) streams[made] = try tf.lanes.Stream.init(gpa, .{ .id = "split", .prompt = &.{1}, .max_new = 1 });
+    var opened: usize = 0;
+    defer for (streams[0..opened]) |*s| drafter.release(s);
+    while (opened < streams.len) : (opened += 1) {
+        try drafter.open(&streams[opened]);
+        if ((d.lanes.get(&streams[opened]) orelse return error.LaneNotOpened).cap != 64 + d.config.block) return error.LaneNotAtCapacity64;
+    }
+    // the reference: the same two groups straight through the block pass, on lanes of their own
+    var refs: [8]*q.dspark.Lane = undefined;
+    var ref_n: usize = 0;
+    defer for (refs[0..ref_n]) |l| d.dropLane(l);
+    while (ref_n < refs.len) : (ref_n += 1) refs[ref_n] = try d.newLane(64);
+    var blocks: [8]q.dspark_block.Block = undefined;
+    for (&blocks, refs, 0..) |*b, l, i| b.* = .{ .lane = l, .pending = pending[i], .anchor = 0, .depth = depths[i] };
+    const real_grid = d.holds;
+    const real_len = d.holds_len;
+    const step_ms = d.step_ms;
+    const hold_ms = d.hold_ms;
+    defer {
+        d.holds = real_grid;
+        d.holds_len = real_len;
+        d.step_ms = step_ms;
+        d.hold_ms = hold_ms;
+    }
+    for (groups) |g| _ = try q.dspark_block.hold(d, blocks[g[0]..g[1]], null);
+    for (d.holds[0..d.holds_len]) |*h| h.ms = 1e4 * (1 + 0.25 * @as(f64, @floatFromInt(h.streams))) * (1 + 0.5 * @as(f64, @floatFromInt(h.depth)));
+    const synthetic = d.holds;
+    _ = q.dspark_block.takeHoldMs(d);
+    var items: [8]tf.lanes.drafter.Hold = undefined;
+    for (&items, 0..) |*it, i| it.* = .{ .stream = &streams[i], .pending = pending[i], .position = 1, .depth = depths[i] };
+    const t0 = std.Io.Clock.awake.now(io);
+    try drafter.hold(&items);
+    const wall = @as(f64, @floatFromInt(t0.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds())) / 1e6;
+    // nothing pending (one 8-block signalled pass would be), and no lane points into a signalled pass
+    if (d.pending != null or d.pass_len != 0) return error.SplitHoldLeftAPassPending;
+    for (&streams) |*s| if (d.lanes.get(s).?.slot != null) return error.SplitHoldLaneInASignalledPass;
+    const taken = q.dspark_block.takeHoldMs(d);
+    if (!(taken > 0) or q.dspark_block.takeHoldMs(d) != 0) return error.SplitHoldTimeNotTakenOnce;
+    if (taken > wall) return error.SplitHoldTimeExceedsWall;
+    // each lane's picks: its depth of them, the same as the reference pass of its group
+    for (&streams, refs, depths, 0..) |*s, ref, depth, i| {
+        var got: [16]u32 = undefined;
+        try drafter.held(&.{s}, &.{got[0..depth]});
+        if (!std.mem.eql(u32, got[0..depth], ref.held[0..depth])) return error.SplitHoldPicksDiffer;
+        if (depth == 1 and i > 0) if (drafter.held(&.{s}, &.{got[0 .. depth + 1]})) |_| return error.SplitHoldHeldMoreThanAsked else |err| if (err != error.DraftHeldFewer) return err;
+    }
+    // the grid: participating shapes stepped down by about a tenth, the controls exactly as set
+    if (d.holds_len != real_len) return error.GridResized;
+    for (synthetic[0..real_len], d.holds[0..real_len]) |before, now| {
+        const ratio = now.ms / before.ms;
+        const ok = switch (before.streams) {
+            2, 8 => ratio > 0.9 and ratio < 0.91, // one group's step
+            4 => ratio > 0.81 and ratio < 0.83, // both groups' steps
+            else => now.ms == before.ms, // 1 and 16 blocks: in neither pass
+        };
+        if (!ok) return error.SplitHoldGridStepsWrong;
+    }
+    std.debug.print("split hold, 8 lanes at depths [9, 1 x 7]: passes of 3x9 and 5x1 rows, both synchronous; {d:.2} ms GPU taken once ({d:.2} ms wall); picks equal the reference groups'; 2-, 8- and 4-block passes repriced once, once and twice, 1- and 16-block passes untouched\n", .{ taken, wall });
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -159,6 +245,70 @@ pub fn main(init: std.process.Init) !void {
     var held: [16]u32 = undefined;
     @memcpy(held[0..block], lane.held[0..block]);
     const gpu = held[0..block];
+    // the owned stage: the context taken in uneven absorbs (the prompt's rows first, the last rows taken again) waits on the
+    // host and one hold absorbs it as ONE piece of ctx rows from position 0 (the staged rows are bytes of the same taps).
+    // The direct absorbs above are also one piece of ctx rows while ctx <= absorb_rows, so fc, k, v and qk see the same row
+    // count in both lanes and run the same kernels (bf16: rows <= 32 the 16-row kernel, above it the 64x64 tiles; 8-bit: the
+    // twin to 32 rows, above it the tensor or tile kernels): exact equality of keys, values and picks, no tolerance.
+    if (ctx > 3 and ctx <= @min(q.dspark.absorb_rows, @min(q.dspark.stage_rows, lane.cap))) {
+        const key: *tf.lanes.Stream = @ptrFromInt(0x1000);
+        const own = try d.newLane(length + 32);
+        d.lanes.put(gpa, key, own) catch |err| {
+            d.dropLane(own);
+            return err;
+        };
+        const staged = d.drafter();
+        const sizes = [_]u32{ 5, 1, 9, 33, 2 };
+        const row_bytes = width * 2;
+        var pos: usize = 0;
+        var step: usize = 0;
+        while (pos < ctx) : (step += 1) {
+            const n: u32 = @intCast(@min(sizes[step % sizes.len], ctx - pos));
+            try staged.absorb(&.{ownAbsorb(key, taps.buf, row_bytes, pos, n, step == 0)});
+            pos += n;
+        }
+        try staged.absorb(&.{ownAbsorb(key, taps.buf, row_bytes, ctx - 3, 3, false)});
+        if (own.staged != ctx or own.end != 0) return error.OwnedStageMissesRows;
+        try staged.hold(&.{.{ .stream = key, .pending = ids[ctx], .position = ctx + 1, .depth = block }});
+        var own_held: [16]u32 = undefined;
+        try staged.held(&.{key}, &.{own_held[0..block]});
+        if (!std.mem.eql(u32, gpu, own_held[0..block])) return error.OwnedStagePicksDiffer;
+        const span = ctx * hd * 2;
+        for (0..cfg.layers) |li| for ([_][2]mtl.Buffer{ .{ lane.keys[li], own.keys[li] }, .{ lane.values[li], own.values[li] } }) |pair| for (0..c.kv_heads) |h| {
+            const off = h * lane.cap * hd * 2;
+            if (!std.mem.eql(u8, (pair[0].contents() + off)[0..span], (pair[1].contents() + off)[0..span])) return error.OwnedStageContextDiffers;
+        };
+        std.debug.print("the owned stage: {d} rows staged in uneven absorbs, absorbed as one {d}-row piece like the direct absorbs' ({s} regime): keys, values and picks equal\n", .{ ctx, ctx, if (ctx <= 32) "<= 32-row" else "> 32-row" });
+    }
+    // settled GPU time is taken once: a standalone absorb adds its time and leaves the grid as it was; a synchronous
+    // one-block hold adds its own and reprices exactly the passes at one block (other block counts stay as timed)
+    {
+        const grid = d.holds;
+        const grid_len = d.holds_len;
+        defer {
+            d.holds = grid;
+            d.holds_len = grid_len;
+        }
+        _ = q.dspark_block.takeHoldMs(d);
+        try absorb(d, .{ .lane = lane, .src = .{ .buf = taps.buf, .off = (ctx - 1) * width * 2 }, .rows = 1, .p0 = ctx - 1 });
+        const absorb_ms = q.dspark_block.takeHoldMs(d);
+        if (!(absorb_ms > 0)) return error.AbsorbTimeNotTaken;
+        for (grid[0..grid_len], d.holds[0..grid_len]) |before, now| if (before.ms != now.ms) return error.AbsorbRepricedAHold;
+        _ = try q.dspark_block.hold(d, &.{.{ .lane = lane, .pending = ids[ctx], .anchor = ctx, .depth = block }}, null);
+        const hold_ms = q.dspark_block.takeHoldMs(d);
+        if (!(hold_ms > 0) or q.dspark_block.takeHoldMs(d) != 0) return error.HoldTimeNotTakenOnce;
+        if (d.holds_len != grid_len) return error.GridResized;
+        var moved = false;
+        for (grid[0..grid_len], d.holds[0..grid_len]) |before, now| {
+            if (before.streams != 1 and before.ms != now.ms) return error.OtherBlockCountsRepriced;
+            if (before.streams == 1 and before.ms != now.ms) moved = true;
+        }
+        if (!moved) return error.SyncHoldNotRepriced;
+        std.debug.print("a synchronous hold of one block: {d:.2} ms GPU taken once, the one-block passes repriced toward it; a standalone absorb {d:.2} ms priced none\n", .{ hold_ms, absorb_ms });
+    }
+    if (cfg.block < 9) {
+        std.debug.print("split-hold fixture skipped: this drafter's block is {d} rows and its depths [9, 1 x 7] need 9\n", .{cfg.block});
+    } else try splitHold(gpa, init.io, d, ids);
     for ([_]usize{ 1, 4, 16 }) |rows| {
         var best: f64 = std.math.floatMax(f64);
         for (0..5) |_| {

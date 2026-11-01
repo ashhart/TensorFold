@@ -127,11 +127,16 @@ fn failed(msg: [*:0]const u8) anyerror {
     return error.GpuFailed;
 }
 
-fn finish(cb: mtl.CommandBuffer, e: mtl.ComputeEncoder) !void {
+/// The encoder ended, the buffer committed and waited on; its GPU ms join the settled time and are returned, both before
+/// the caller releases the buffer. A failed buffer returns its error with no time taken.
+fn finish(d: *Drafter, cb: mtl.CommandBuffer, e: mtl.ComputeEncoder) !f64 {
     e.end();
     cb.commit();
     cb.wait();
     if (cb.failure()) |msg| return failed(msg);
+    const ms = cb.gpuSeconds() * 1000;
+    d.hold_spent_ms += ms;
+    return ms;
 }
 
 /// One stream's tapped rows in an absorb pass: `rows` rows at `src`, the context from position `p0`.
@@ -168,12 +173,40 @@ pub fn begin(d: *Drafter) struct { cb: mtl.CommandBuffer, e: mtl.ComputeEncoder 
     return .{ .cb = cb, .e = cb.compute(.serial) };
 }
 
-pub fn end(cb: mtl.CommandBuffer, e: mtl.ComputeEncoder) !void {
-    return finish(cb, e);
+/// The passes on `e` committed and waited on; their GPU ms are taken with the holds' (takeHoldMs).
+pub fn end(d: *Drafter, cb: mtl.CommandBuffer, e: mtl.ComputeEncoder) !void {
+    _ = try finish(d, cb, e);
+}
+
+/// `pieces` absorbed in a command buffer of their own (the encoder closed when encoding fails).
+pub fn absorbNow(d: *Drafter, pieces: []const Piece) !void {
+    const run = begin(d);
+    absorbPass(d, run.e, pieces) catch |err| {
+        run.e.end();
+        return err;
+    };
+    return end(d, run.cb, run.e);
+}
+
+/// The drafter's GPU ms since the last take: signalled holds once settled, and every command buffer it waited on.
+/// Reads what completed; never submits, waits or allocates.
+pub fn takeHoldMs(ptr: *anyopaque) f64 {
+    const d: *Drafter = @ptrCast(@alignCast(ptr));
+    const ms = d.hold_spent_ms;
+    d.hold_spent_ms = 0;
+    return ms;
 }
 
 /// A GPU event a hold signals instead of being waited on, and the value it sets.
 pub const Signal = struct { event: mtl.Event, value: u64 };
+
+/// The blocks' staged rows are their lanes' context now: the command buffer that absorbs them was committed.
+fn absorbed(blocks: []const Block) void {
+    for (blocks) |b| {
+        b.lane.end += b.lane.staged;
+        b.lane.staged = 0;
+    }
+}
 
 /// The blocks' drafts (backbone, then Markov chain) into the lanes' held chains; with `signal`, left for readPicks.
 pub fn hold(d: *Drafter, blocks: []const Block, signal: ?Signal) !?mtl.CommandBuffer {
@@ -197,6 +230,8 @@ pub fn hold(d: *Drafter, blocks: []const Block, signal: ?Signal) !?mtl.CommandBu
     const cb = d.target.queue.commandBuffer();
     const x = Enc{ .d = d, .e = cb.compute(.serial) };
     const e = x.e;
+    var open = true; // the encoder is open until it ends below: an error before then closes it
+    errdefer if (open) e.end();
     // the blocks' staged context rows first, in the same command buffer
     var staged: [ds.pass_rows]Piece = undefined;
     var count: usize = 0;
@@ -212,10 +247,6 @@ pub fn hold(d: *Drafter, blocks: []const Block, signal: ?Signal) !?mtl.CommandBu
         held += pc.rows;
     };
     if (count > 0) try absorbPass(d, e, staged[0..count]);
-    for (blocks) |b| {
-        b.lane.end += b.lane.staged;
-        b.lane.staged = 0;
-    }
     const t = d.target;
     const emb = t.weights.embedding;
     e.setPipeline(t.kernels.embed(emb.bits));
@@ -254,13 +285,18 @@ pub fn hold(d: *Drafter, blocks: []const Block, signal: ?Signal) !?mtl.CommandBu
     try x.project(.{ .codes = fwd.matrix(emb) }, .{ .buf = s.x }, .{ .buf = s.logits }, tail);
     try markov(x, blocks.len, n, steps);
     if (signal) |sg| { // committed unwaited, the command buffer returned retained
+        open = false;
         e.end();
         cb.signalEvent(sg.event, sg.value);
         const kept = cb.retain();
         cb.commit();
+        absorbed(blocks);
         return kept;
     }
-    try finish(cb, e);
+    open = false;
+    const ms = try finish(d, cb, e);
+    absorbed(blocks);
+    d.priceHold(blocks.len, depth, ms); // this group's pass, its staged rows absorbed too, as completed
     const picks = s.picks.slice(Pick, d.config.block * ds.pass_rows);
     for (blocks, 0..) |b, bi| {
         for (b.lane.held[0..steps], 0..) |*h, i| {

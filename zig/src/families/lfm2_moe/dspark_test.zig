@@ -7,6 +7,9 @@ const quant = @import("dspark_quant.zig");
 const block = @import("dspark_block.zig");
 const ds = @import("dspark.zig");
 const Pick = @import("tree_round_gpu").contract.Pick;
+const dc = @import("dspark_config.zig");
+const lanes = @import("lanes");
+const Model = @import("model.zig").Model;
 
 const shared = mtl.ResourceOptions.shared;
 
@@ -249,4 +252,123 @@ test "lfm2 dspark: a settled hold refuses a NaN, infinity or invalid pick as the
     }
     picks[3 * ds.pass_rows] = .{ .nonfinite = 1 }; // a step past the block's depth is not read
     try block.copyPicks(&picks, &chains, &.{ 2, 2 });
+}
+
+test "lfm2 dspark: a completed hold moves the timed passes at its block counts a tenth of the way to its GPU ms" {
+    var d: ds.Drafter = undefined;
+    const grid = [_]lanes.hold_price.HoldCost{ .{ .streams = 1, .depth = 1, .ms = 1 }, .{ .streams = 4, .depth = 1, .ms = 2 }, .{ .streams = 4, .depth = 4, .ms = 4 }, .{ .streams = 8, .depth = 1, .ms = 3 } };
+    @memcpy(d.holds[0..grid.len], &grid);
+    d.holds_len = grid.len;
+    d.priceHold(4, 1, 4); // priced 2 ms: the 4-block passes rise by a tenth of the doubling
+    try std.testing.expectApproxEqAbs(@as(f64, 2.2), d.holds[1].ms, 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 4.4), d.holds[2].ms, 1e-12);
+    try std.testing.expectEqual(@as(f64, 1), d.holds[0].ms);
+    try std.testing.expectEqual(@as(f64, 3), d.holds[3].ms);
+    d.priceHold(6, 1, 0); // between 4 and 8 blocks, no GPU time: nothing learned
+    try std.testing.expectEqual(@as(f64, 2.2), d.holds[1].ms);
+    d.priceHold(6, 1, 2.6 * 2); // both neighbors move
+    try std.testing.expect(d.holds[1].ms > 2.2 and d.holds[3].ms > 3 and d.holds[0].ms == 1);
+    const before = d.holds[1].ms;
+    d.priceHold(0, 1, 5); // a pass of no blocks prices nothing
+    try std.testing.expectEqual(before, d.holds[1].ms);
+    d.holds_len = 0; // no grid (the load's timing holds): nothing to move
+    d.priceHold(4, 1, 100);
+    try std.testing.expectEqual(before, d.holds[1].ms);
+}
+
+/// A drafter with a device and a config but no weights: absorbs that only stage never reach the GPU.
+fn bare(target: *Model) !ds.Drafter {
+    return .{
+        .gpa = std.testing.allocator,
+        .io = undefined,
+        .target = target,
+        .config = try dc.Config.parse(std.testing.allocator, dc.stock),
+        .w = undefined,
+        .options = .{ .capacity = 64 },
+        .s = undefined,
+    };
+}
+
+/// `rows` rows of `width` bytes that differ by position and `salt`.
+fn pattern(buf: mtl.Buffer, rows: usize, width: usize, salt: u8) void {
+    for (buf.slice(u8, rows * width), 0..) |*b, i| b.* = @as(u8, @truncate((i *% 2654435761) >> 7)) +% salt;
+}
+
+/// An absorb of `rows` rows of the target's taps at `row` of `src`, the context from position `start`.
+fn tapped(key: *lanes.Stream, src: mtl.Buffer, width: usize, row: usize, rows: u32, start: u64, prompt: bool) lanes.drafter.Absorb {
+    return .{
+        .stream = key,
+        .features = .{ .buffer = @intFromPtr(src.id), .offset = row * width, .rows = rows, .row_bytes = @intCast(width), .space = .device, .dtype = .bf16 },
+        .start = start,
+        .follow = &.{},
+        .prompt = prompt,
+    };
+}
+
+test "lfm2 dspark: an absorb owns the rows it stages, prompt rows too, and a refused call stages none of its items" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    var target: Model = undefined;
+    target.device = device;
+    var d = try bare(&target);
+    defer d.lanes.deinit(d.gpa);
+    const width = d.tapBytes();
+    const l = try d.newLane(64); // 73 positions: at most 73 staged rows
+    defer d.dropLane(l);
+    const key: *lanes.Stream = @ptrFromInt(0x1000);
+    try d.lanes.put(d.gpa, key, l);
+    const src = try device.buffer(80 * width, shared);
+    defer src.deinit();
+    pattern(src, 80, width, 0);
+    const first = try std.testing.allocator.dupe(u8, src.contents()[0 .. 80 * width]);
+    defer std.testing.allocator.free(first);
+    const drafter = d.drafter();
+    try drafter.absorb(&.{tapped(key, src, width, 0, 10, 0, true)}); // the prompt's rows
+    try drafter.absorb(&.{tapped(key, src, width, 10, 20, 10, false)}); // a round's verified rows
+    try std.testing.expectEqual(@as(u32, 30), l.staged);
+    try std.testing.expectEqual(@as(u64, 0), l.end);
+    @memset(src.contents()[0 .. 80 * width], 0xee); // the target's next forward overwrites its taps
+    try std.testing.expectEqualSlices(u8, first[0 .. 30 * width], l.stage.contents()[0 .. 30 * width]);
+    pattern(src, 80, width, 1);
+    const second = try std.testing.allocator.dupe(u8, src.contents()[0 .. 80 * width]);
+    defer std.testing.allocator.free(second);
+    try drafter.absorb(&.{tapped(key, src, width, 40, 4, 25, false)}); // a rewrite: rows from 25 are replaced
+    try std.testing.expectEqual(@as(u32, 29), l.staged);
+    try std.testing.expectEqualSlices(u8, first[0 .. 25 * width], l.stage.contents()[0 .. 25 * width]);
+    try std.testing.expectEqualSlices(u8, second[40 * width .. 44 * width], l.stage.contents()[25 * width .. 29 * width]);
+    const stranger: *lanes.Stream = @ptrFromInt(0x2000);
+    try std.testing.expectError(error.DraftStreamUnknown, drafter.absorb(&.{ tapped(key, src, width, 0, 2, 29, false), tapped(stranger, src, width, 0, 2, 0, false) }));
+    try std.testing.expectError(error.DraftContextGap, drafter.absorb(&.{ tapped(key, src, width, 0, 2, 29, false), tapped(key, src, width, 0, 60, 29, false) }));
+    try std.testing.expectEqual(@as(u32, 29), l.staged);
+    try std.testing.expectEqualSlices(u8, second[40 * width .. 44 * width], l.stage.contents()[25 * width .. 29 * width]);
+    try std.testing.expectEqual(@as(u64, 0), l.end);
+    try std.testing.expectEqual(@as(f64, 0), d.hold_spent_ms); // staging runs no GPU work
+}
+
+test "lfm2 dspark: a lane's accounted bytes are the buffers it allocates, and its stage holds a whole 2048-row prompt chunk" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    var target: Model = undefined;
+    target.device = device;
+    var d = try bare(&target);
+    defer d.lanes.deinit(d.gpa);
+    const width = d.tapBytes();
+    for ([_]usize{ 64, 4096 }) |capacity| { // a warm-up lane's stage is clipped to its positions, a long lane's to one absorb pass
+        const l = try d.newLane(capacity);
+        defer d.dropLane(l);
+        var bytes = l.stage.length();
+        for (0..d.config.layers) |i| bytes += l.keys[i].length() + l.values[i].length();
+        try std.testing.expectEqual(d.laneBytes(capacity), bytes);
+        try std.testing.expectEqual(@min(ds.stage_rows, capacity + d.config.block) * width, l.stage.length());
+    }
+    const l = try d.newLane(4096);
+    defer d.dropLane(l);
+    const key: *lanes.Stream = @ptrFromInt(0x1000);
+    try d.lanes.put(d.gpa, key, l);
+    const chunk = try device.buffer(ds.absorb_rows * width, shared);
+    defer chunk.deinit();
+    pattern(chunk, ds.absorb_rows, width, 7);
+    try d.drafter().absorb(&.{tapped(key, chunk, width, 0, ds.absorb_rows, 0, true)});
+    try std.testing.expectEqual(@as(u32, ds.absorb_rows), l.staged);
+    try std.testing.expectEqualSlices(u8, chunk.contents()[0 .. ds.absorb_rows * width], l.stage.contents()[0 .. ds.absorb_rows * width]);
 }
