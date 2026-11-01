@@ -23,6 +23,7 @@ pub const Generation = struct {
     pending: ?u32 = null, // runRound's next token as the last accept picked it; anything else that moves the target clears it
     pub fn init(a: std.mem.Allocator, runner: *Runner, draft: *Draft) !Generation {
         if (&runner.model.checkpoint != draft.backend.target.checkpoint or runner.model.config.hidden != draft.graph.config.hidden or runner.model.config.layers != draft.graph.config.target_layers) return error.TargetBinding;
+        try runner.taps.setFuser(runner.model.device, null); // a fused ring keeps its count: no drafter's fuser before use
         runner.capture_taps = true;
         try runner.taps.use(runner.model.device, draft.graph.config.tapIds());
         const options = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
@@ -34,6 +35,8 @@ pub const Generation = struct {
         errdefer matcher.deinit();
         const commit = try @import("core").tree_commit_gpu.Ops.init(runner.model.device);
         errdefer commit.deinit();
+        // a v1 ring keeps fused rows: the target's taps pass runs the drafter's fc and hidden_norm as they complete
+        if (draft.graph.config.variant == .v1) try runner.taps.setFuser(runner.model.device, try draft.fuser(runner.taps.capacity));
         return .{ .allocator = a, .runner = runner, .draft = draft, .kept = kept, .taps = taps, .matcher = matcher, .commit = commit };
     }
     pub fn deinit(g: Generation) void {
@@ -164,7 +167,8 @@ pub const Generation = struct {
         const width: u32 = @intCast(g.runner.model.config.vocab);
         const shape = try g.matcher.encode(e, .{ .buf = logits.buffer, .off = logits.offset }, ids, parents, width, budget, eos);
         const result = @import("core").tree_commit_gpu.Ref{ .buf = g.matcher.buffers[4] };
-        try g.commit.taps(e, result, .{ .buf = g.runner.taps.buffer }, .{ .buf = g.taps }, .{ .rows = shape.rows, .width = g.runner.taps.width, .capacity = g.runner.taps.capacity, .planes = @intCast(g.runner.taps.count) });
+        const src = g.runner.taps.source();
+        try g.commit.taps(e, result, .{ .buf = src.buffer }, .{ .buf = g.taps }, .{ .rows = shape.rows, .width = src.width, .capacity = g.runner.taps.capacity, .planes = src.planes });
         try g.commit.head(e, result, .{ .buf = logits.buffer, .off = logits.offset }, .{ .rows = shape.rows, .width = width, .stride = width });
         return shape;
     }
