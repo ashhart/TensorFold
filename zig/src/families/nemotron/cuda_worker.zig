@@ -90,7 +90,7 @@ fn loadLayers(gpa: std.mem.Allocator, io: std.Io, ops: kern.Ops, dir: []const u8
         L.held.deinit(gpa);
     }
     var ck = try core.Checkpoint.openModel(gpa, io, dir);
-    defer ck.close();
+    defer core.checkpoint.cache.close(&ck);
     try src.add(&ck);
     var out: Layers = .{ .blocks = try gpa.alloc(?latent.Tables, c.layers) };
     errdefer gpa.free(out.blocks);

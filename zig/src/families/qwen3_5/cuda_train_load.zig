@@ -79,7 +79,7 @@ pub fn weights(t: *Trainer, io: std.Io) !void {
     const e = t.e;
     const g = t.g;
     var ck = try core.Checkpoint.openModelPrefix(t.gpa, io, e.dir, prefix);
-    defer ck.close();
+    defer core.checkpoint.cache.close(&ck);
     const r: Reader = .{ .t = t, .ck = &ck };
     var nb: [160]u8 = undefined;
     var nb2: [160]u8 = undefined;

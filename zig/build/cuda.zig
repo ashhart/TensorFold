@@ -211,6 +211,8 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const runtime_host = b.step("test-runtime-host", "Shared CUDA runtime and graph host regressions");
     runtime_host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda })).step);
     const mods = family(b, host, .debug, cuda, draft_ids);
+    @import("cuda_checkpoint_cache_host.zig").steps(b, step);
+    b.step("test-lfm2-load-host", "LFM2 decision model metadata and load ownership without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = lfm2Module(b, host, .debug, cuda, mods.core) })).step);
     const omni_slide = b.addRunArtifact(b.addTest(.{ .root_module = mods.nemotron, .filters = &.{"Omni learner:"} }));
     const omni_slide_step = b.step("test-omni-slide-host", "Omni learner registration, widths and scoped tensors without devices");
     omni_slide_step.dependOn(&omni_slide.step);
