@@ -10,7 +10,7 @@ pub const Cost = lanes.config.Cost;
 pub const warm = 3;
 pub const reps = 5;
 /// Forwards of at least this many rows run once warm and once timed: one run of that length already reads steady.
-pub const long_rows = 128;
+pub const long_rows = 8;
 
 /// The warm and timed runs a forward of `rows` rows takes.
 pub fn runs(rows: usize) struct { warm: usize, reps: usize } {
@@ -111,6 +111,13 @@ test "a forward of long_rows rows or more runs once warm and once timed, a short
     try std.testing.expectEqual(@as(usize, 1), runs(long_rows).warm);
     try std.testing.expectEqual(@as(usize, 1), runs(long_rows).reps);
     try std.testing.expectEqual(@as(usize, 1), runs(256).reps);
+}
+
+test "a forward of 8 rows reads steady in one run, so it runs once warm and once timed, and 7 rows keeps the default" {
+    try std.testing.expectEqual(@as(usize, 1), runs(8).warm);
+    try std.testing.expectEqual(@as(usize, 1), runs(8).reps);
+    try std.testing.expectEqual(@as(usize, warm), runs(7).warm);
+    try std.testing.expectEqual(@as(usize, reps), runs(7).reps);
 }
 
 test "lone widths to the widest, shared totals the streams can hold" {
