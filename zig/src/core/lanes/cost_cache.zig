@@ -81,9 +81,32 @@ pub fn load(comptime T: type, a: Allocator, io: std.Io, k: [32]u8) ?T {
 pub fn loadAt(comptime T: type, a: Allocator, io: std.Io, k: [32]u8, root: ?[]const u8) ?T {
     const p = (path(a, k, ".bin", root) catch return null) orelse return null;
     defer a.free(p);
+    if (platform.windows) return loadShared(T, a, p);
     const bytes = std.Io.Dir.cwd().readFileAlloc(io, p, a, .limited(1 << 20)) catch return null;
     defer a.free(bytes);
     return parse(T, bytes);
+}
+
+/// Win32's shared open permits replacement and reports a pending delete without std.Io's unexpected-status log.
+fn loadShared(comptime T: type, a: Allocator, p: []const u8) ?T {
+    const size = magic.len + @sizeOf(T);
+    if (size > 1 << 20 or std.mem.indexOfScalar(u8, p, 0) != null) return null;
+    const name = a.dupeSentinel(u8, p, 0) catch return null;
+    defer a.free(name);
+    const bytes = a.alloc(u8, size + 1) catch return null;
+    defer a.free(bytes);
+    const fd = platform.c.open(name, .{ .ACCMODE = .RDONLY });
+    if (fd < 0) return null;
+    defer _ = platform.c.close(fd);
+    if (comptime platform.windows) if (fd >= platform.c.dir_base) return null;
+    var used: usize = 0;
+    while (used < bytes.len) {
+        const n = platform.c.read(fd, bytes[used..].ptr, bytes.len - used);
+        if (n < 0) return null;
+        if (n == 0) break;
+        used += @intCast(n);
+    }
+    return parse(T, bytes[0..used]);
 }
 
 fn parse(comptime T: type, bytes: []const u8) ?T {
@@ -139,4 +162,34 @@ test "CUDA reference identity retains the existing newline-delimited hash" {
     const k = cudaReferenceKey(&parts);
     try std.testing.expectEqualStrings("05bf67c358f200cc54686bcaa5890a607f39f392c8059d84314fdc24608102ff", &std.fmt.bytesToHex(k, .lower));
     try std.testing.expect(!std.mem.eql(u8, &k, &referenceKey(&parts)));
+}
+
+test "window cost cache: shared reader retains exact envelopes and treats failed opens as misses" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const V = struct { n: u32, ms: [3]f64 };
+    const v: V = .{ .n = 3, .ms = .{ 33.56, 34.1, 37.3 } };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(dir);
+    const file = try std.fs.path.join(a, &.{ dir, "table.bin" });
+    defer a.free(file);
+    const bytes = try std.mem.concat(a, u8, &.{ magic, std.mem.asBytes(&v), "extra" });
+    defer a.free(bytes);
+    const size = magic.len + @sizeOf(V);
+    try std.testing.expect(loadShared(V, a, file) == null);
+    try std.testing.expect(loadShared(V, a, dir) == null);
+    for ([_]usize{ 0, 3, size - 1, size, size + 1, bytes.len }) |len| {
+        try tmp.dir.writeFile(io, .{ .sub_path = "table.bin", .data = bytes[0..len] });
+        if (len == size) try std.testing.expectEqualDeep(v, loadShared(V, a, file).?) else try std.testing.expect(loadShared(V, a, file) == null);
+    }
+    bytes[0] = 'X';
+    try tmp.dir.writeFile(io, .{ .sub_path = "table.bin", .data = bytes[0..size] });
+    try std.testing.expect(loadShared(V, a, file) == null);
+    try std.testing.expect(loadShared(V, a, "bad\x00path") == null);
+}
+
+test "window cost cache: pending deletion is a silent miss and the next publication reads whole" {
+    try @import("cost_cache_windows_test.zig").pendingDelete();
 }
