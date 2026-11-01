@@ -59,3 +59,53 @@ test "a backend's score runs on the engine thread, a failure comes back as Faile
     try std.testing.expectError(error.Failed, engine.score(&.{1}, &.{2}, logits[0..1], false));
     try std.testing.expectEqual(@as(usize, 2), Scorer.calls);
 }
+
+/// A fake decider: label j of a branch scores trunk.len + branch.len + j; a branch of token 0 is refused.
+const Decides = struct {
+    var engine_thread: ?std.Thread.Id = null;
+    var calls: usize = 0;
+
+    fn run(_: *anyopaque, d: *api.Decision) anyerror!void {
+        engine_thread = std.Thread.getCurrentId();
+        calls += 1;
+        var at: usize = 0;
+        for (d.branches, d.counts) |b, n| {
+            if (b[0] == 0) {
+                d.problem = "branch zero";
+                return error.Refused;
+            }
+            for (d.logits[at..][0..n], 0..) |*v, j| v.* = @floatFromInt(d.trunk.len + b.len + j);
+            at += n;
+        }
+        d.read = d.trunk.len;
+    }
+};
+
+test "a host's decider answers whole decisions on the engine thread, refusals keep their words, a stopped host fails" {
+    const gpa = std.testing.allocator;
+    var cfg = try lanes.Config.init(gpa, .{}, 1, 0);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer core.deinit();
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 1 });
+    var unused: u8 = 0;
+    host.decider = .{ .ctx = &unused, .run = Decides.run };
+    try host.start();
+    const engine = host.engine();
+    try std.testing.expect(engine.vtable.decide != null);
+    Decides.calls = 0;
+    var logits: [3]f64 = undefined;
+    var d: api.Decision = .{ .trunk = &.{ 1, 2, 3 }, .branches = &.{ &.{ 5, 6 }, &.{7} }, .counts = &.{ 2, 1 }, .labels = &.{ 9, 8, 7 }, .logits = &logits };
+    try engine.decide(&d);
+    try std.testing.expectEqualSlices(f64, &.{ 5, 6, 4 }, &logits);
+    try std.testing.expect(Decides.engine_thread.? != std.Thread.getCurrentId());
+    var refused: api.Decision = .{ .trunk = &.{1}, .branches = &.{&.{0}}, .counts = &.{1}, .labels = &.{9}, .logits = logits[0..1] };
+    try std.testing.expectError(error.Refused, engine.decide(&refused));
+    try std.testing.expectEqualStrings("branch zero", refused.problem);
+    host.stop();
+    try std.testing.expectError(error.Failed, engine.decide(&d));
+    try std.testing.expectEqual(@as(usize, 2), Decides.calls);
+}

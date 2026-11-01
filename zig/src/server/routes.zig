@@ -11,6 +11,7 @@ const openai = @import("openai.zig");
 const responses = @import("responses.zig");
 const anthropic = @import("anthropic.zig");
 const tokens = @import("tokens.zig");
+const qev = @import("qev.zig");
 const decisions = @import("decisions.zig");
 const systemone = @import("systemone.zig");
 const status = @import("status_routes.zig");
@@ -165,6 +166,7 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     if (is_embedding) return embeddings.post(srv, conn, a);
     if (is_slide) return slide.learn(srv, conn, a);
     if (imprint_op) |op| return imprint.post(srv, conn, a, op);
+    if ((is_decisions or is_systemone) and qev.serves(srv, a)) return qev.post(srv, conn, a, is_systemone);
     if (is_decisions) return decisions.post(srv, conn, a);
     if (is_systemone) return systemone.post(srv, conn, a);
     if (is_anthropic) return anthropic.post(srv, conn, a);

@@ -301,7 +301,7 @@ fn writePrefix(w: *std.Io.Writer, state: Value, head: bool) std.Io.Writer.Error!
 }
 
 /// ``json.dumps(v, ensure_ascii=False, indent=2)``.
-fn indented(w: *std.Io.Writer, v: Value, level: usize) std.Io.Writer.Error!void {
+pub fn indented(w: *std.Io.Writer, v: Value, level: usize) std.Io.Writer.Error!void {
     const o: json.Options = .{ .ascii = false };
     switch (v) {
         .array => |items| {
