@@ -22,7 +22,7 @@ pub fn run(gpu: check.Gpu, dir: []const u8, rank: usize, port: u16, ids_path: []
     defer glue.deinit();
     const tri: flash.Tri = .{ .s = stream, .own = &glue };
     const identity = try ranks.identity(gpu.gpa, gpu.io, dir, context, chunk);
-    const session = try ranks.Session.init(gpu.gpa, gpu.io, "127.0.0.1", port, rank, identity);
+    const session = try ranks.Session.init(gpu.gpa, gpu.io, "127.0.0.1", port, rank, identity, ranks.linkWait());
     const engine = prompt.Engine.initRank(gpu.gpa, gpu.io, @constCast(gpu.d), &stream, dir, 2, rank) catch |err| {
         session.poison();
         session.deinit();

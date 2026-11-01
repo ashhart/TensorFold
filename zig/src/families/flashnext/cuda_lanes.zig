@@ -202,7 +202,7 @@ pub fn Namespace(comptime Tri: type) type {
                     .score = @import("cuda_score.zig").Hook(Cuda, Tri).call,
                     .first_masked = firstMaskedFn,
                 };
-                const ranked_table = @import("cuda_score.zig").withoutScore(scoring_table);
+                const ranked_table = comptime @import("cuda_score.zig").withoutScore(scoring_table);
                 return .{ .ptr = self, .proposal_head = if (self.head) |h| &h.service else null, .vtable = if (self.ranks == null) &scoring_table else &ranked_table };
             }
 

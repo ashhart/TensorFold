@@ -43,7 +43,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
             id.image_tokens = v.image_tokens;
             id.max_images = v.max_images;
         }
-        own.ranks = try ranks.Session.init(gpa, io, o.master orelse "127.0.0.1", o.master_port, o.rank, id);
+        own.ranks = try ranks.Session.init(gpa, io, o.master orelse "127.0.0.1", o.master_port, o.rank, id, ranks.linkWait());
     }
     errdefer if (own.ranks) |r| {
         r.poison();

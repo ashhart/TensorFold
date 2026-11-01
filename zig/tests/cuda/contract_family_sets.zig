@@ -1,4 +1,4 @@
-//! The family sets in the full kernel contract: Nemotron's pocket, MiniMax-M3's, MOSS-Image's, GB10's grouped affine-4.
+//! Family contract sets: pocket, MiniMax-M3, MOSS-Image, grouped affine-4, Flash Next BF16 dense and FP8 expert downs.
 const std = @import("std");
 const cuda = @import("cuda");
 const check = @import("check.zig");
@@ -11,6 +11,7 @@ pub const Sets = struct {
     pocket: *@import("contract_pocket.zig").Set,
     minimax: *@import("contract_minimax.zig").Set,
     moss: *@import("contract_moss_image.zig").Set,
+    modelopt: *@import("contract_flashnext_modelopt.zig").Set,
     grouped: *Grouped,
 
     /// Each set's kernels appended to `list`, in this order.
@@ -21,17 +22,20 @@ pub const Sets = struct {
         errdefer minimax.deinit();
         const moss = try @import("contract_moss_image.zig").Set.init(gpu, s, a, list);
         errdefer moss.deinit();
+        const modelopt = try @import("contract_flashnext_modelopt.zig").Set.init(gpu, s, a, list);
+        errdefer modelopt.deinit();
         const grouped = try gpu.gpa.create(Grouped);
         errdefer gpu.gpa.destroy(grouped);
         grouped.* = Grouped.init(gpu, s, affine4);
         errdefer grouped.deinit();
         try grouped.append(cap, a, list);
-        return .{ .gpa = gpu.gpa, .pocket = pocket, .minimax = minimax, .moss = moss, .grouped = grouped };
+        return .{ .gpa = gpu.gpa, .pocket = pocket, .minimax = minimax, .moss = moss, .modelopt = modelopt, .grouped = grouped };
     }
 
     pub fn deinit(sets: Sets) void {
         sets.grouped.deinit();
         sets.gpa.destroy(sets.grouped);
+        sets.modelopt.deinit();
         sets.moss.deinit();
         sets.minimax.deinit();
         sets.pocket.deinit();

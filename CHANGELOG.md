@@ -129,6 +129,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Flash Next's MTP head norms its 10,240-value rows with tiled launches on CUDA sm_120 and sm_121 and split wave launches on HIP gfx1201, storing the same bytes as before: the norm kernel runs 1.4x to 2.5x faster on a GB10 and 4x to 5x on a Radeon AI PRO R9700 at 1 to 16 rows (#1702, fixes #1689). Thanks to @laudney.
 
 
+- Qwen3.8 Flash Next on CUDA serves `nvidia/Qwen3.8-Flash-Next-NVFP4` at `--tp 2` on two GPUs, one rank a host: its BF16 attention, DeltaNet and shared-expert projections, its n-gram table of E4M3 rows with one BF16 scale, and its MTP head's E4M3 experts with 128x128 block scales load as stored. The CUDA server now serves `--tp` (`--rank`, `--master`, `--master-port`); families that open without ranks refuse it by name, and `--idle-unload` is refused with it. The ranks compute and compare a cached digest of every checkpoint byte, so `TENSORFOLD_CHECKPOINT_SHA256` is no longer required (it still overrides the digest). A crash on the first prompt at `--tp 2`, a vtable built on the stack, is fixed. At `--tp 2` each rank owns half the routed experts whole, so replies are one GPU's bytes; on two GB10s drafted replies equal `"draft": false` (6 of 6) and concurrent replies their solo runs (8 of 8 cells).
+
 ## 1.2.0
 
 - CUDA EXL3: the dense projections zero their split-K counters only when the buffer grows, on the calls' stream, instead of before every 128-row block of every call; each block's last program already resets its own counter. Replies are token-identical, and on a GB10 with the Qwen3.8-27B 3.50 bpw pack decode is 0.4% to 0.9% faster (#1475). Thanks to @diwakergupta.
