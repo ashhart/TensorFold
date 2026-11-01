@@ -11,6 +11,8 @@ pub const Mutation = enum {
     attention_first_cache,
     tap_packed_rows,
     tap_clobbers_column,
+    tap_rows_first_destination,
+    tap_rows_clobbers_column,
     markov_nan_dropped,
     markov_first_prev,
     draft_ids_unzeroed,
@@ -31,6 +33,8 @@ pub const Mutation = enum {
             .attention_first_cache => "control: metal lfm2 stream attention, every stream writes the first stream's cache",
             .tap_packed_rows => "control: metal lfm2 tap copy, rows packed at the hidden size, not the taps' row",
             .tap_clobbers_column => "control: metal lfm2 tap copy, a column of another tap is overwritten",
+            .tap_rows_first_destination => "control: metal lfm2 tap rows, every row writes the first row's destination",
+            .tap_rows_clobbers_column => "control: metal lfm2 tap rows, a column of another tap is overwritten",
             .markov_nan_dropped => "control: metal lfm2 markov step, a NaN score is not flagged",
             .markov_first_prev => "control: metal lfm2 markov step, every stream reads the first stream's previous token",
             .draft_ids_unzeroed => "control: metal lfm2 draft ids, a pick past the vocabulary keeps its token",
@@ -74,6 +78,8 @@ pub const Mutation = enum {
             .bf16_tile_untransposed => .{ .from = "32, ulong2(0, 0), true);", .to = "32, ulong2(0, 0), false);" },
             .bf16_tile_last_column => .{ .from = "if (row < p.rows && col < p.n) y[", .to = "if (row < p.rows && col + 1 < p.n) y[" },
             .tap_clobbers_column => .{ .from = "[i.x] = from[i.x];\n}\n", .to = "[i.x] = from[i.x];\n  *(device bfloat*)(taps + size_t(i.y) * at.x) = 0;\n}\n" },
+            .tap_rows_first_destination => .{ .from = "device bfloat* out = dst[i.y].row;", .to = "device bfloat* out = dst[0].row;" },
+            .tap_rows_clobbers_column => .{ .from = "* D))[i.x] = saved;\n}\n", .to = "* D))[i.x] = saved;\n  *out = 0;\n}\n" },
         };
     }
 };

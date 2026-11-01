@@ -9,6 +9,8 @@ pub fn holdMs(costs: []const HoldCost, streams: usize, depth: i64) f64 {
     var below: ?u32 = null;
     var above: ?u32 = null;
     for (costs) |c| {
+        // An exact point retains the first duplicate, as atDepth does.
+        if (c.streams == streams and c.depth == depth) return c.ms;
         if (c.streams <= streams and (below == null or c.streams > below.?)) below = c.streams;
         if (c.streams >= streams and (above == null or c.streams < above.?)) above = c.streams;
     }
@@ -141,6 +143,22 @@ test "hold prices retain measured kernel transitions and use the adjacent depth 
     try std.testing.expectEqual(@as(f64, 17.5), holdMs(&t, 8, 3));
     try std.testing.expectEqual(@as(f64, 18.5), holdMs(&t, 8, 5));
     try std.testing.expectEqual(@as(f64, 3), holdMs(&t, 8, 0));
+}
+
+test "an exact timed point is the first duplicate; other points interpolate unsorted grids as before" {
+    const t = [_]HoldCost{
+        .{ .streams = 8, .depth = 4, .ms = 18 },
+        .{ .streams = 4, .depth = 2, .ms = 5 },
+        .{ .streams = 8, .depth = 2, .ms = 17 },
+        .{ .streams = 8, .depth = 2, .ms = 99 },
+        .{ .streams = 8, .depth = 1, .ms = 10 },
+        .{ .streams = 4, .depth = 3, .ms = 7 },
+    };
+    try std.testing.expectEqual(@as(f64, 17), holdMs(&t, 8, 2)); // not the later duplicate
+    try std.testing.expectEqual(@as(f64, 17.5), holdMs(&t, 8, 3)); // the first duplicate bounds the segment
+    try std.testing.expectEqual(@as(f64, 5), holdMs(&t, 4, 2)); // another count's depth-2 point is its own
+    try std.testing.expectEqual(@as(f64, 11), holdMs(&t, 6, 2)); // halfway between the counts' exact points
+    try std.testing.expectEqual(@as(f64, 1), holdMs(&t, 4, 0)); // the adjacent segment, extended past the shallowest
 }
 
 test "a hold's ms between and past the timed passes" {

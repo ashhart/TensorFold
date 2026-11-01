@@ -30,6 +30,7 @@ const names = [_][:0]const u8{
     "lfm2_attn_segs",
     "lfm2_attn_merge_segs",
     "lfm2_tap",
+    "lfm2_tap_rows",
     "lfm2_markov_scan",
     "lfm2_markov_scan_bf16",
     "lfm2_bf16_rows",
