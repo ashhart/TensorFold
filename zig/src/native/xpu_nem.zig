@@ -1,4 +1,4 @@
-//! Nemotron on the XPU server: its lane host (one family behind the lane core, one stream, host sampling).
+//! Nemotron and LFM3 on the XPU server: their lane host (a family behind the lane core, one stream, host sampling).
 const std = @import("std");
 const xpu = @import("xpu");
 const api = @import("engine_api");
@@ -6,11 +6,11 @@ const lanes = @import("lanes");
 const lane = @import("xpu_lane.zig");
 const Allocator = std.mem.Allocator;
 
+/// Gemma 4 E4B's GEMMs are nGEN DPAS kernels: a build without DPAS (-Dxpu-dpas=false, Gen12LP) leaves it out.
+pub const has_gemma4 = @import("xpu_engine_options").gemma4;
+
 /// The families this host serves, each a file with its table row, loader and prompt window.
-const specs = .{
-    @import("xpu_nemotron.zig"),
-    @import("xpu_gemma4.zig"),
-};
+const specs = if (has_gemma4) .{ @import("xpu_nemotron.zig"), @import("xpu_gemma4.zig"), @import("xpu_lfm3.zig") } else .{ @import("xpu_nemotron.zig"), @import("xpu_lfm3.zig") };
 
 /// Prompt plus reply tokens when --context names none (and the model's window is larger).
 const default_context: i64 = 32768;
@@ -146,6 +146,7 @@ fn openFamily(comptime S: type, a: Allocator, gpa: Allocator, io: std.Io, o: api
     h.backend.started = chainStopHandlers;
     try h.backend.measure();
     if (@hasDecl(S.Engine, "copy_only")) {
+        if (@hasDecl(S, "copy_match")) h.backend.copy_match = S.copy_match;
         if (getenv("XPU_COPY_MATCH")) |v| h.backend.copy_match = std.fmt.parseInt(i64, v, 10) catch 4;
         h.backend.streams = @min(@max(1, o.lanes), 8); // one sequence each (the engine holds up to 8)
     } else if (h.backend.facts().exact_width > 1) h.backend.streams = @max(1, o.lanes); // drafted windows: up to --parallel streams a round
