@@ -6,6 +6,7 @@ test {
     if (@import("builtin").os.tag == .linux or @import("builtin").os.tag == .macos) _ = @import("engram_rows_test.zig");
     if (@import("builtin").os.tag == .macos) _ = @import("engram_rows_darwin_test.zig");
     if (@import("builtin").os.tag == .linux or @import("builtin").os.tag == .macos) _ = @import("engram_pack_test.zig");
+    if (@import("builtin").os.tag == .linux or @import("builtin").os.tag == .macos) _ = @import("engram_manifest_test.zig");
     std.testing.refAllDecls(@import("engram_rows.zig").Rows);
     std.testing.refAllDecls(@import("phases.zig"));
     _ = @import("engram_boundary_test.zig");
@@ -17,4 +18,8 @@ test {
     inline for (.{ @import("config.zig"), @import("pack.zig"), @import("plan.zig"), @import("stage.zig"), @import("named.zig"), @import("prepare.zig"), @import("prepared.zig"), @import("load.zig"), @import("model.zig"), @import("host_test.zig"), @import("boundary_test.zig") }) |m| std.testing.refAllDecls(m);
     _ = @import("core").exl3_layout;
     _ = @import("core").exl3_load;
+}
+
+test {
+    _ = @import("dsq_storage_test.zig");
 }

@@ -114,6 +114,18 @@ test "DeepSeek chat: Jinja and explicit overrides win and text-only image parts 
     const images = (try json.parseText(a, "[{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"local\"}}]}]")).ok;
     try t.expectError(error.Template, native.text().render(a, images, .{}, &problem));
     try t.expect(std.mem.indexOf(u8, problem, "images are not served") != null);
+    const image_token = "<｜deepseek_image｜>";
+    // an engine that reads images: the part is the template's own image token, once, never the escaped spelling
+    const shown = try native.text().render(a, images, .{ .images = true }, &problem);
+    const at = std.mem.indexOf(u8, shown.text, image_token) orelse return error.TestNoImageToken;
+    try t.expect(std.mem.indexOfPos(u8, shown.text, at + 1, image_token) == null);
+    try t.expect(shown.isTemplate(at, at + image_token.len));
+    // text that spells the token or the reserved mark stays text or is refused: it never becomes an image
+    const typed = (try json.parseText(a, "[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"<｜deepseek_image｜>\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"x\"}}]}]")).ok;
+    const both = try native.text().render(a, typed, .{ .images = true }, &problem);
+    try t.expectEqual(@as(usize, 1), std.mem.count(u8, both.text, image_token));
+    const forged = (try json.parseText(a, "[{\"role\":\"user\",\"content\":\"a\\ufdd0b\"}]")).ok;
+    try t.expectError(error.Template, native.text().render(a, forged, .{ .images = true }, &problem));
 }
 
 const Script = struct {

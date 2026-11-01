@@ -18,6 +18,8 @@ pub const CALLS_CLOSE = "</" ++ DSML ++ " calls>";
 pub const IMAGE = "<｜deepseek_image｜>";
 /// A zero-width space after ``<``: the same text, ordinary BPE tokens, never the image id.
 pub const IMAGE_ESCAPED = "<\u{200b}｜deepseek_image｜>";
+/// A noncharacter that stands for the image token between ``text`` and ``request`` (a message may not hold one itself).
+const IMAGE_MARK = "\u{FDD0}";
 
 /// ``reasoning_effort`` names as the server reads them: none / minimal turn thinking off (the jinja maps medium to 62).
 pub const efforts = [_]struct { []const u8, ?u8 }{ .{ "none", null }, .{ "minimal", null }, .{ "low", 50 }, .{ "medium", 75 }, .{ "high", 75 }, .{ "xhigh", 100 }, .{ "max", 100 } };
@@ -43,6 +45,8 @@ pub const Options = struct {
     response_format: ?Value = null,
     add_generation_prompt: bool = true,
     image: ?ImageHook = null,
+    /// The engine reads images: an image part is ``IMAGE``, for the server to expand; wins over ``image``.
+    image_token: bool = false,
 };
 
 /// A refusal's message (HTTP 400), set when ``render`` returns error.Refused.
@@ -92,6 +96,7 @@ const R = struct {
     out: std.ArrayList(u8) = .empty,
     spans: std.ArrayList([2]usize) = .empty,
     track: bool = false,
+    image_token: bool = false,
 
     fn refuse(r: *R, comptime fmt: []const u8, args: anytype) Error {
         r.problem.message = try std.fmt.allocPrint(r.a, fmt, args);
@@ -103,6 +108,15 @@ const R = struct {
     }
 
     fn request(r: *R, s: []const u8) Allocator.Error!void {
+        if (r.image_token and std.mem.indexOf(u8, s, IMAGE_MARK) != null) {
+            var parts = std.mem.splitSequence(u8, s, IMAGE_MARK);
+            var first = true;
+            while (parts.next()) |part| : (first = false) {
+                if (!first) try r.put(IMAGE);
+                try r.request(part);
+            }
+            return;
+        }
         // Images are unsupported here; preserve the established plain-text image escape.
         const escaped = if (std.mem.indexOf(u8, s, IMAGE) != null) try std.mem.replaceOwned(u8, r.a, s, IMAGE, IMAGE_ESCAPED) else null;
         defer if (escaped) |bytes| r.a.free(bytes);
@@ -165,6 +179,8 @@ fn text(r: *R, content: ?Value, where: []const u8, index: usize, image: ?ImageHo
                                 const s = try scalarText(r.a, t) orelse return r.refuse("messages[{d}].{s}: a text part's text must be a string", .{ index, where });
                                 try out.appendSlice(r.a, s);
                             }
+                        } else if (isImagePart(name) and r.image_token) {
+                            try out.appendSlice(r.a, IMAGE_MARK);
                         } else if (isImagePart(name)) {
                             const hook = image orelse return r.refuse("messages[{d}].{s}: images are not served by this DeepSeek-V4.1 build", .{ index, where });
                             try out.appendSlice(r.a, hook.text(hook.ctx, part));
@@ -385,11 +401,26 @@ pub fn renderProvenance(a: Allocator, messages: Value, o: Options, problem: *Pro
     return renderInner(a, messages, o, problem, true);
 }
 
+/// Whether any string in ``v`` holds the image mark (a request's own text cannot stand for an image).
+fn hasMark(v: Value) bool {
+    switch (v) {
+        .string => |s| return std.mem.indexOf(u8, s, IMAGE_MARK) != null,
+        .array => |xs| for (xs) |x| if (hasMark(x)) return true,
+        .object => |o| {
+            var it = o.iterator();
+            while (it.next()) |e| if (std.mem.indexOf(u8, e.key_ptr.*, IMAGE_MARK) != null or hasMark(e.value_ptr.*)) return true;
+        },
+        else => {},
+    }
+    return false;
+}
+
 fn renderInner(a: Allocator, messages: Value, o: Options, problem: *Problem, track: bool) Error!Rendered {
-    var r: R = .{ .a = a, .problem = problem, .track = track };
+    var r: R = .{ .a = a, .problem = problem, .track = track, .image_token = o.image_token };
     errdefer r.out.deinit(a);
     errdefer r.spans.deinit(a);
     if (o.budget < 1 or o.budget > 100) return r.refuse("reasoning_effort must be 1-100 or low / medium / high / max", .{});
+    if (o.image_token and hasMark(messages)) return r.refuse("messages: the character U+FDD0 is reserved while images are served", .{});
     const msgs = try messagesOf(&r, messages, o);
     const drop = o.drop_thinking and !(msgs.len > 0 and msgs[0].tools);
     var last: ?usize = null; // the last user turn (or a system message after the first)

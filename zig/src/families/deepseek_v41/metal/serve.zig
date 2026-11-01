@@ -8,6 +8,7 @@ const prompt = @import("prompt.zig");
 const target_ = @import("target.zig");
 const pass_ = @import("pass.zig");
 const pipelines = @import("pipelines.zig");
+const vision_prepare = @import("vision_prepare.zig");
 
 const serve_lanes = host.serve_lanes;
 const iface = host.iface;
@@ -21,7 +22,12 @@ pub const Parts = struct {
     /// the drafter's weights (null: serial windows, no drafts)
     dspark: ?*const dspark.Weights,
     owner: ?Owner = null,
+    /// what a request's images may hold (null: the server is told of no image input)
+    images: ?Images = null,
 };
+
+/// Image input as served: the decoder's io and a request's limits.
+pub const Images = struct { io: std.Io, tokens: u32 = 4096, count: u32 = 4 };
 
 pub const Owner = struct { ctx: *anyopaque, close: *const fn (ctx: *anyopaque) void };
 
@@ -44,6 +50,9 @@ pub const Metal = struct {
     t: *target_.Target,
     dp: ?*dspark.Pass = null,
     ad: pass_.Pass = undefined,
+    prep: Prep = undefined,
+
+    const Prep = struct { io: std.Io, cfg: @import("vision.zig").Config };
 
     pub fn open(a: Allocator, parts: Parts, opt: Options) !*Metal {
         const m = try a.create(Metal);
@@ -65,6 +74,7 @@ pub const Metal = struct {
         const shape: host.dspark.Shape = .{ .block = c.dspark_block, .noise = c.dspark_noise_token, .window = c.window, .rank = c.dspark_markov_rank, .hidden = c.hidden, .candidates = @min(candidates, c.vocab) };
         return .{
             .ptr = m,
+            .vision = m.vision(),
             .name = "dsv41-metal",
             .slots = m.opt.slots,
             .limit = m.opt.limit,
@@ -81,6 +91,20 @@ pub const Metal = struct {
             // the default cost table: TF_DSV41_CALIB has nothing to time on Metal
             .calib = .{ .mode = "default" },
         };
+    }
+
+    /// The server's image input: PNG, JPEG or WebP bytes to the tower's patches (null: no tower, or no limits given).
+    fn vision(m: *Metal) ?api.Vision {
+        const v = m.parts.env.vision orelse return null;
+        const lim = m.parts.images orelse return null;
+        m.prep = .{ .io = lim.io, .cfg = v.w.cfg };
+        return .{ .ctx = &m.prep, .prepare = prepare, .image_token = v.w.cfg.image_token_id, .image_tokens = lim.tokens, .max_images = lim.count };
+    }
+
+    fn prepare(ctx: *anyopaque, a: Allocator, bytes: []const u8, max_tokens: u32) anyerror!api.PreparedImage {
+        const p: *const Prep = @ptrCast(@alignCast(ctx));
+        const got = try vision_prepare.prepare(p.io, a, bytes, max_tokens, p.cfg);
+        return .{ .pixels = got.pixels, .gh = got.gh, .gw = got.gw, .tokens = got.tokens, .hash = got.hash };
     }
 
     fn self(ctx: *anyopaque) *Metal {
