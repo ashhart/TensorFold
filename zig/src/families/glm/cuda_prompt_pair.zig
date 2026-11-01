@@ -51,6 +51,13 @@ pub fn ringsAgree(base: usize, ring: usize, start: usize, rb: usize) bool {
     return start + ra > base + ring or start + ra + rb <= base + ring;
 }
 
+/// The pieces a forward over `b` exchanges in: the engine's, or the pair's for its twin; none for other buffers.
+pub fn piecesOf(e: *const Engine, b: *const fw.Buffers) ?*const fw.Pieces {
+    if (b == &e.bp) return &e.pieces;
+    const p = if (e.pair) |*p| p else return null;
+    return if (b == &p.bp) &p.pieces else null;
+}
+
 /// Rank 0's choice for the step at `start` (the others take the ids it sends); not with a drafter, prompt rows or prof.
 pub fn pairedAt(e: *const Engine, start: usize, len: usize, from: ?engine.Resume, marks: ?engine.Marks) bool {
     if (e.pair == null or !e.settings.pair or e.drafter != null or e.prompt_logprobs != null or e.prompt_profs[3] != null) return false;

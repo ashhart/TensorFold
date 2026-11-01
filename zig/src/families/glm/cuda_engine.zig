@@ -21,9 +21,6 @@ const pages_mod = @import("cuda_pages.zig");
 const prompt_pair = @import("cuda_prompt_pair.zig");
 pub const Options = @import("cuda_engine_types.zig").Options;
 
-/// Rank 0's own word on its request (cancelled or not); the other ranks have none and hear rank 0's.
-pub const Cancel = struct { ptr: ?*anyopaque, check: *const fn (?*anyopaque) bool };
-
 /// The most drafts a chain holds (decode.DepthPolicy's top depth).
 pub const max_drafts = 3;
 /// A greedy pick as it crosses ranks: (value, id) and padding, so the RoCE gather (16-byte packs) can carry it.
@@ -47,6 +44,7 @@ pub const Kept = types.Kept;
 const Seq = types.Seq;
 const Snap = types.Snap;
 pub const Resume = types.Resume;
+pub const Cancel = types.Cancel;
 pub const Marks = types.Marks;
 
 pub const Engine = struct {
@@ -255,8 +253,7 @@ pub const Engine = struct {
     pub fn view(e: *Engine, b: *fw.Buffers, out: *[1]fw.Rank) fw.Forward {
         out.* = .{.{ .w = &e.w, .st = &e.cur.st, .b = b }};
         const im: ?fw.ImageRows = if (e.images) |v| .{ .v = v, .slot = e.slot } else null;
-        const twin = if (e.pair) |*p| (if (b == &p.bp) &p.pieces else null) else null;
-        return .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = out, .exchange = e.exchange(), .pieces = if (b == &e.bp) &e.pieces else twin, .split = e.settings.split, .ring = e.settings.ring, .kda_wide = e.settings.kda_wide, .images = im, .taps = if (e.drafter) |dr| dr.taps(b == &e.bp) else null };
+        return .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = out, .exchange = e.exchange(), .pieces = prompt_pair.piecesOf(e, b), .split = e.settings.split, .ring = e.settings.ring, .kda_wide = e.settings.kda_wide, .images = im, .taps = if (e.drafter) |dr| dr.taps(b == &e.bp) else null };
     }
 
     /// Binds slot `slot`'s sequence for the steps that follow, making it (a zeroed state) on first use.
@@ -521,7 +518,6 @@ pub const Engine = struct {
     }
 
     pub const holdPrompt = @import("cuda_prompt_hold.zig").save;
-    pub const pairedAt = prompt_pair.pairedAt;
     pub const prefillMany = @import("cuda_prompts.zig").prefillMany;
 
     /// forward.commit of the last window's first `n` rows (the KDA replay when fewer than it ran).
