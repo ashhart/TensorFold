@@ -1,0 +1,168 @@
+{
+  "native_sha256": "5c8a04d4af599879797f4f5bed8e00ab7d9d70732e698bd2a1ec2a01ec762e09",
+  "variant": "strict row-axis only; original attention",
+  "families": {
+    "text": {
+      "decode": [
+        {
+          "prompt": "fibonacci-raw-chat",
+          "decode_tps_median": 317.6004846170962,
+          "ttft_s_median": 0.011276375036686659
+        },
+        {
+          "prompt": "gpu-chat-no-think-chat",
+          "decode_tps_median": 316.8637201461089,
+          "ttft_s_median": 0.012718458194285631
+        }
+      ],
+      "concurrency": [
+        {
+          "prompt": "code-chat",
+          "streams": 1,
+          "aggregate_tps": 316.9,
+          "failed": 0,
+          "alone": {
+            "equal": 3,
+            "unequal": 0,
+            "failed": 0
+          },
+          "serial": {
+            "equal": 1,
+            "unequal": 0,
+            "failed": 0
+          }
+        },
+        {
+          "prompt": "code-chat",
+          "streams": 4,
+          "aggregate_tps": 538.4,
+          "failed": 0,
+          "alone": {
+            "equal": 12,
+            "unequal": 0,
+            "failed": 0
+          },
+          "serial": {
+            "equal": 1,
+            "unequal": 0,
+            "failed": 0
+          }
+        },
+        {
+          "prompt": "chat-chat",
+          "streams": 1,
+          "aggregate_tps": 317.3,
+          "failed": 0,
+          "alone": {
+            "equal": 3,
+            "unequal": 0,
+            "failed": 0
+          },
+          "serial": {
+            "equal": 1,
+            "unequal": 0,
+            "failed": 0
+          }
+        },
+        {
+          "prompt": "chat-chat",
+          "streams": 4,
+          "aggregate_tps": 530.6,
+          "failed": 0,
+          "alone": {
+            "equal": 12,
+            "unequal": 0,
+            "failed": 0
+          },
+          "serial": {
+            "equal": 1,
+            "unequal": 0,
+            "failed": 0
+          }
+        }
+      ],
+      "peak_physical_footprint_bytes": 1476495016
+    },
+    "vl": {
+      "decode": [
+        {
+          "prompt": "fibonacci-raw-chat",
+          "decode_tps_median": 302.95882338372087,
+          "ttft_s_median": 0.011537457816302776
+        },
+        {
+          "prompt": "gpu-chat-no-think-chat",
+          "decode_tps_median": 297.51584456535494,
+          "ttft_s_median": 0.012835666071623564
+        }
+      ],
+      "concurrency": [
+        {
+          "prompt": "code-chat",
+          "streams": 1,
+          "aggregate_tps": 303.0,
+          "failed": 0,
+          "alone": {
+            "equal": 3,
+            "unequal": 0,
+            "failed": 0
+          },
+          "serial": {
+            "equal": 1,
+            "unequal": 0,
+            "failed": 0
+          }
+        },
+        {
+          "prompt": "code-chat",
+          "streams": 4,
+          "aggregate_tps": 536.4,
+          "failed": 0,
+          "alone": {
+            "equal": 12,
+            "unequal": 0,
+            "failed": 0
+          },
+          "serial": {
+            "equal": 1,
+            "unequal": 0,
+            "failed": 0
+          }
+        },
+        {
+          "prompt": "chat-chat",
+          "streams": 1,
+          "aggregate_tps": 296.6,
+          "failed": 0,
+          "alone": {
+            "equal": 3,
+            "unequal": 0,
+            "failed": 0
+          },
+          "serial": {
+            "equal": 1,
+            "unequal": 0,
+            "failed": 0
+          }
+        },
+        {
+          "prompt": "chat-chat",
+          "streams": 4,
+          "aggregate_tps": 521.8,
+          "failed": 0,
+          "alone": {
+            "equal": 12,
+            "unequal": 0,
+            "failed": 0
+          },
+          "serial": {
+            "equal": 1,
+            "unequal": 0,
+            "failed": 0
+          }
+        }
+      ],
+      "peak_physical_footprint_bytes": 2136000672
+    }
+  }
+}

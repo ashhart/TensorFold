@@ -1,0 +1,400 @@
+{
+  "scope": "First actual divergence on identical input rows, with production reduction rounding and unchanged existing bounds; not whole-model acceptance",
+  "cases": [
+    {
+      "case": "realcat8",
+      "checkpoint": "LiquidAI/LFM3-VL-2B-MLX-8bit",
+      "native_diagnostic_sha256": "a6f6d5c4dfa719d9a2e90526a210bae07641da158c39b7772c200d0a1f17b468",
+      "embedding_equal": 184320,
+      "first_norm_equal": 184320,
+      "first_norm_values": 184320,
+      "projection": {
+        "values": 552960,
+        "replay_bf16_equal": 552960,
+        "replay_vs_fp64_raw_bound_exceedances": 0,
+        "native_vs_fp64_store_bound_exceedances": 0,
+        "existing_contract_depth": 36,
+        "worst_raw_bound_fraction": 0.004461910283213048,
+        "first_boundary_crossing": {
+          "row": 0,
+          "column": 5962,
+          "fp64": -6.937049874977674e-05,
+          "replayed_fp32": -6.938725709915161e-05,
+          "ideal_bf16": -6.914138793945312e-05,
+          "native_bf16": -6.961822509765625e-05,
+          "raw_error": 1.6758349374867976e-08,
+          "existing_raw_bound": 5.486111173345787e-05,
+          "factorized_magnitude": 25.567076293120408
+        },
+        "actual_raw_fp32_replay_equal": 552960,
+        "actual_raw_fp32_values": 552960,
+        "actual_raw_fp32_max_error_vs_replay": 0.0,
+        "actual_raw_fp32_sha256": "b0ae65908e77508efa4af926ab951461db3f9e7df00d0f9bd8bd20941a60c4b1",
+        "helper_source_sha256": "86963d6266a982f4cac7c85265048703841a9545c19f2d2c5271eb8e02a0879b"
+      },
+      "same_native_input_conv": {
+        "values": 184320,
+        "fp32_replay_equal": 184320,
+        "max_error": 0.0
+      },
+      "guided_first_two_layers": {
+        "arithmetic": "Independent FP32 affine, RMS norm and convolution reduction replay; other operations retain FP64",
+        "stages": [
+          {
+            "stage": "layer_00_act",
+            "values": 691200,
+            "equal_values": 691200
+          },
+          {
+            "stage": "layer_00_conv_gated",
+            "values": 184320,
+            "equal_values": 184320
+          },
+          {
+            "stage": "layer_00_conv_in",
+            "values": 552960,
+            "equal_values": 552960
+          },
+          {
+            "stage": "layer_00_down",
+            "values": 184320,
+            "equal_values": 184320
+          },
+          {
+            "stage": "layer_00_ffn_norm",
+            "values": 184320,
+            "equal_values": 184320
+          },
+          {
+            "stage": "layer_00_gate",
+            "values": 691200,
+            "equal_values": 691200
+          },
+          {
+            "stage": "layer_00_mixer",
+            "values": 184320,
+            "equal_values": 184320
+          },
+          {
+            "stage": "layer_00_operator_norm",
+            "values": 184320,
+            "equal_values": 184320
+          },
+          {
+            "stage": "layer_00_output",
+            "values": 184320,
+            "equal_values": 184320
+          },
+          {
+            "stage": "layer_00_post_operator",
+            "values": 184320,
+            "equal_values": 184320
+          },
+          {
+            "stage": "layer_00_up",
+            "values": 691200,
+            "equal_values": 691200
+          },
+          {
+            "stage": "layer_01_act",
+            "values": 691200,
+            "equal_values": 691200
+          },
+          {
+            "stage": "layer_01_conv_gated",
+            "values": 184320,
+            "equal_values": 184320
+          },
+          {
+            "stage": "layer_01_conv_in",
+            "values": 552960,
+            "equal_values": 552960
+          },
+          {
+            "stage": "layer_01_down",
+            "values": 184320,
+            "equal_values": 184320
+          },
+          {
+            "stage": "layer_01_ffn_norm",
+            "values": 184320,
+            "equal_values": 184320
+          },
+          {
+            "stage": "layer_01_gate",
+            "values": 691200,
+            "equal_values": 691200
+          },
+          {
+            "stage": "layer_01_mixer",
+            "values": 184320,
+            "equal_values": 184320
+          },
+          {
+            "stage": "layer_01_operator_norm",
+            "values": 184320,
+            "equal_values": 184320
+          },
+          {
+            "stage": "layer_01_output",
+            "values": 184320,
+            "equal_values": 184320
+          },
+          {
+            "stage": "layer_01_post_operator",
+            "values": 184320,
+            "equal_values": 184320
+          },
+          {
+            "stage": "layer_01_up",
+            "values": 691200,
+            "equal_values": 691200
+          }
+        ],
+        "values": 7833600,
+        "equal_values": 7833600
+      }
+    },
+    {
+      "case": "reasoning64-vl6",
+      "checkpoint": "LiquidAI/LFM3-VL-2B-MLX-6bit",
+      "native_diagnostic_sha256": "a6f6d5c4dfa719d9a2e90526a210bae07641da158c39b7772c200d0a1f17b468",
+      "embedding_equal": 131072,
+      "first_norm_equal": 131072,
+      "first_norm_values": 131072,
+      "projection": {
+        "values": 393216,
+        "replay_bf16_equal": 393216,
+        "replay_vs_fp64_raw_bound_exceedances": 0,
+        "native_vs_fp64_store_bound_exceedances": 0,
+        "existing_contract_depth": 36,
+        "worst_raw_bound_fraction": 0.0038237892749845067,
+        "first_boundary_crossing": {
+          "row": 0,
+          "column": 246,
+          "fp64": 0.0001032436775858514,
+          "replayed_fp32": 0.00010323524475097656,
+          "ideal_bf16": 0.00010347366333007812,
+          "native_bf16": 0.000102996826171875,
+          "raw_error": 8.43283487483859e-09,
+          "existing_raw_bound": 6.220623788976059e-05,
+          "factorized_magnitude": 28.990145838870376
+        },
+        "actual_raw_fp32_replay_equal": 393216,
+        "actual_raw_fp32_values": 393216,
+        "actual_raw_fp32_max_error_vs_replay": 0.0,
+        "actual_raw_fp32_sha256": "9e7b26fa0a4e1b6e77dc7a76c3437a2e4444abcade4fd905a2632acb65300da4",
+        "helper_source_sha256": "86963d6266a982f4cac7c85265048703841a9545c19f2d2c5271eb8e02a0879b"
+      },
+      "same_native_input_conv": {
+        "values": 131072,
+        "fp32_replay_equal": 131072,
+        "max_error": 0.0
+      },
+      "guided_first_two_layers": {
+        "arithmetic": "Independent FP32 affine, RMS norm and convolution reduction replay; other operations retain FP64",
+        "stages": [
+          {
+            "stage": "layer_00_act",
+            "values": 491520,
+            "equal_values": 491520
+          },
+          {
+            "stage": "layer_00_conv_gated",
+            "values": 131072,
+            "equal_values": 131072
+          },
+          {
+            "stage": "layer_00_conv_in",
+            "values": 393216,
+            "equal_values": 393216
+          },
+          {
+            "stage": "layer_00_down",
+            "values": 131072,
+            "equal_values": 131072
+          },
+          {
+            "stage": "layer_00_ffn_norm",
+            "values": 131072,
+            "equal_values": 131072
+          },
+          {
+            "stage": "layer_00_gate",
+            "values": 491520,
+            "equal_values": 491520
+          },
+          {
+            "stage": "layer_00_mixer",
+            "values": 131072,
+            "equal_values": 131072
+          },
+          {
+            "stage": "layer_00_operator_norm",
+            "values": 131072,
+            "equal_values": 131072
+          },
+          {
+            "stage": "layer_00_output",
+            "values": 131072,
+            "equal_values": 131072
+          },
+          {
+            "stage": "layer_00_post_operator",
+            "values": 131072,
+            "equal_values": 131072
+          },
+          {
+            "stage": "layer_00_up",
+            "values": 491520,
+            "equal_values": 491520
+          },
+          {
+            "stage": "layer_01_act",
+            "values": 491520,
+            "equal_values": 491520
+          },
+          {
+            "stage": "layer_01_conv_gated",
+            "values": 131072,
+            "equal_values": 131072
+          },
+          {
+            "stage": "layer_01_conv_in",
+            "values": 393216,
+            "equal_values": 393216
+          },
+          {
+            "stage": "layer_01_down",
+            "values": 131072,
+            "equal_values": 131072
+          },
+          {
+            "stage": "layer_01_ffn_norm",
+            "values": 131072,
+            "equal_values": 131072
+          },
+          {
+            "stage": "layer_01_gate",
+            "values": 491520,
+            "equal_values": 491520
+          },
+          {
+            "stage": "layer_01_mixer",
+            "values": 131072,
+            "equal_values": 131072
+          },
+          {
+            "stage": "layer_01_operator_norm",
+            "values": 131072,
+            "equal_values": 131072
+          },
+          {
+            "stage": "layer_01_output",
+            "values": 131072,
+            "equal_values": 131072
+          },
+          {
+            "stage": "layer_01_post_operator",
+            "values": 131072,
+            "equal_values": 131072
+          },
+          {
+            "stage": "layer_01_up",
+            "values": 491520,
+            "equal_values": 491520
+          }
+        ],
+        "values": 5570560,
+        "equal_values": 5570560
+      }
+    }
+  ],
+  "raw_capture": "Diagnostic Metal tap calls unchanged production tf_rp_rows_at<4,2,BITS,false> before BF16 storage; every rounded captured output matches native.",
+  "query_underflow_observation": {
+    "case": "realcat8",
+    "layer": 2,
+    "values": 184320,
+    "differing_values": 470,
+    "columns": [
+      56,
+      59,
+      108
+    ],
+    "all_differing_native_values_zero": true,
+    "maximum_absolute_error": 1.1663108012064884e-38,
+    "examples": [
+      {
+        "row": 0,
+        "head": 1,
+        "column": 59,
+        "reference": -7.071333204165323e-39,
+        "native": 0.0
+      },
+      {
+        "row": 0,
+        "head": 3,
+        "column": 59,
+        "reference": -7.989688165745235e-39,
+        "native": 0.0
+      },
+      {
+        "row": 0,
+        "head": 14,
+        "column": 56,
+        "reference": -2.938735877055719e-39,
+        "native": 0.0
+      },
+      {
+        "row": 0,
+        "head": 14,
+        "column": 59,
+        "reference": 1.0101904577379033e-39,
+        "native": 0.0
+      },
+      {
+        "row": 0,
+        "head": 14,
+        "column": 108,
+        "reference": 1.0285575569695016e-38,
+        "native": 0.0
+      },
+      {
+        "row": 1,
+        "head": 1,
+        "column": 56,
+        "reference": -3.03057137321371e-39,
+        "native": -0.0
+      },
+      {
+        "row": 1,
+        "head": 1,
+        "column": 59,
+        "reference": -1.285696946211877e-39,
+        "native": 0.0
+      },
+      {
+        "row": 1,
+        "head": 1,
+        "column": 108,
+        "reference": 5.969307250269429e-39,
+        "native": 0.0
+      },
+      {
+        "row": 1,
+        "head": 3,
+        "column": 59,
+        "reference": -9.09171411964113e-39,
+        "native": 0.0
+      },
+      {
+        "row": 1,
+        "head": 14,
+        "column": 56,
+        "reference": 4.408103815583578e-39,
+        "native": 0.0
+      }
+    ],
+    "scope": "Observed native zeros versus preserved BF16 subnormals in the CPU reference; not an end-to-end acceptance waiver"
+  }
+}

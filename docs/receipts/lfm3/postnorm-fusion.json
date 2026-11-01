@@ -1,0 +1,383 @@
+{
+  "scope": "Qualified private exact post-add plus next RMSNorm fusion; public application requires rebuilding and checking the applied source. Performance measured only for the two 4-bit checkpoints.",
+  "base_commit": "6b318cedb9d9520ee53ee4a56abeb5d6ced5d461",
+  "algorithm": "Fuse 48 adjacent dispatch pairs per forward; retain both unchanged 256-thread FP32 reduction trees, all BF16 round sites and the residual h store. No carry crosses a forward call. Norm-class dispatches decrease from 97 to 49.",
+  "source_sha256": {
+    "zig/kernels/metal/lfm3/ops.metal": "1659bb9185d966dd30276a6668465d25c06753a03c4cb38a02c3684514a657ae",
+    "zig/src/families/lfm3/forward.zig": "1ab4e29b47056c3232d3e8278c40c6b7dcf295d52d1f172e71ea47d95e92ff0f",
+    "zig/src/families/lfm3/kernels.zig": "7f04b485a2e9d1dc5ad6d2c7e49a4278ad61128fb946daee878a665e7ba21fed",
+    "zig/tests/contract/metal_lfm3_postnorm.zig": "8c362ca20a90fe093f1f08d65ace30affabe63879456ba0394ba84532d688594",
+    "zig/tests/contract/metal_main.zig": "3eff9d0bb4cfdbd0c990ed4201a094bcf91107e0e2ad5c4792551eda85db6922",
+    "zig/tests/contract/metal_limits.zig": "5d74368ae9b00d65373421719423ba98b6627d02645909d114e418ab9cc2a0e9",
+    "zig/src/core/contract/lfm3_records.zig": "33cf7203d5e371a016cceecb165923355a72dbcc4eadd1a3ceb6a92dbad0bd54"
+  },
+  "native_tested_source_sha256": {
+    "zig/kernels/metal/lfm3/ops.metal": "1659bb9185d966dd30276a6668465d25c06753a03c4cb38a02c3684514a657ae",
+    "zig/src/families/lfm3/forward.zig": "1ab4e29b47056c3232d3e8278c40c6b7dcf295d52d1f172e71ea47d95e92ff0f",
+    "zig/src/families/lfm3/kernels.zig": "b5f5406605f665cd6ab3bacbeca4ccf53c39245d13e827ab0819247a981b6dfa"
+  },
+  "source_provenance": "After native binaries were frozen, kernels.zig changed only Zig formatting. Later changes affect contract metadata/reference/simulation only, not runtime arithmetic.",
+  "artifact_sha256": {
+    "zig-out/native/bin/tensorfold-native": "a20ea31aa466b7e20a85022a6932ad069ae4f9100d899d9a70743daef9132bae",
+    "zig-out/bin/tf-lfm3-forward": "4e350b7d02a793d375ba72db48b468b14e1255bfd47e51f9913429befaeea186",
+    "zig-out/bin/tf-lfm3-exact": "bd899ef674c8668fb8dc7491f45540d4435c070bb4f5bc500af4573f21312286",
+    "zig-out/bin/tf-kernel-contract": "c29de86253f66822af91b73f753b65247e42a33c41aeaa171e79223b1607542c"
+  },
+  "hosts": [
+    {
+      "chip": "Apple M4 Pro",
+      "macos": "26.5.1",
+      "memory_gib": 48
+    },
+    {
+      "chip": "Apple M5 Ultra",
+      "macos": "27.0",
+      "memory_gib": 256
+    }
+  ],
+  "primitive": {
+    "hosts": [
+      "M4 Pro",
+      "M5 Ultra"
+    ],
+    "cases_per_host": 320,
+    "bytes_equal_per_host": 124354560,
+    "rows": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      7,
+      8,
+      9,
+      15,
+      16,
+      17,
+      31,
+      32,
+      33,
+      63,
+      64,
+      65,
+      127,
+      128,
+      129
+    ],
+    "distributions": [
+      "random finite",
+      "signed zero",
+      "BF16 subnormal",
+      "maximum finite",
+      "NaN",
+      "positive infinity",
+      "negative infinity",
+      "random raw BF16"
+    ],
+    "outputs": [
+      "residual BF16",
+      "next normalized BF16",
+      "next normalized pre-store FP32"
+    ],
+    "guards": true,
+    "independent_post_and_next_gain_inputs": true,
+    "embedded_source_sha256": "e09a71920a04f1e6f864ff9c7a71db3b57f3b23b6fde4efdeb31a372374c240c",
+    "driver_sha256": "fc67f80fae27155c327c8b161c9585202b7358bee201b55867bf158525a5545e",
+    "binary_sha256": "65764baa7acf6b5cb76e8400f222a7e07d06169c84c9ee442ddf2de8e7380755"
+  },
+  "canonical_model_logits": {
+    "hosts": [
+      "M4 Pro",
+      "M5 Ultra"
+    ],
+    "quantizations_per_host": 6,
+    "rows_per_checkpoint": 257,
+    "bytes_equal_per_host": 394752000
+  },
+  "trace": {
+    "files": 620,
+    "bytes_equal": 68474208,
+    "rows": 33,
+    "chunk": 32
+  },
+  "image_conditioned": {
+    "family": "VL8",
+    "rows": 90,
+    "bytes_equal": 23040000,
+    "sha256": "db730509b6d7dcb3d6d134b59b6434dfb43ebc85cdd3fe351bc8cc4148b47642"
+  },
+  "state": {
+    "host": "M4 Pro",
+    "models": 6,
+    "passed": 408,
+    "failed": 0,
+    "skipped": 0,
+    "per_checkpoint_passed": 68,
+    "binary_sha256": "bd899ef674c8668fb8dc7491f45540d4435c070bb4f5bc500af4573f21312286",
+    "log_sha256": {
+      "LFM3-1.7B-MLX-4bit": "3f460abee50d57fe6fbde0290b441415f9a7e748f6a79e69088d77ca87cd8ec2",
+      "LFM3-1.7B-MLX-6bit": "16075f3068f51a7baa8edff1c73a504275b3798d917d33a3596f6bff85baf000",
+      "LFM3-1.7B-MLX-8bit": "db4169b0e9803ef90f230c3896ba51f0a664e7f29a3ae65af8cd321319c77a92",
+      "LFM3-VL-2B-MLX-4bit": "005371e44f10619eaa1aeac4b1438334bf34cdd70abcf603a325ebc0a2cc72b8",
+      "LFM3-VL-2B-MLX-6bit": "5723cdb4ceebcb5ab9668d77d2a8f4d7a21acbf4be99c104b3359d734ba7a75c",
+      "LFM3-VL-2B-MLX-8bit": "ffca558c50d192a2e296ee82d66a8b527dc1cb3279f080b37f7c1ef6cc25b978"
+    }
+  },
+  "serving": {
+    "host": "M5 Ultra",
+    "models": 6,
+    "passed": 303,
+    "failed": 0,
+    "skipped": 0,
+    "modes": [
+      "greedy shared versus solo",
+      "seeded sampling",
+      "cancellation",
+      "vision inputs"
+    ],
+    "receipt_sha256": {
+      "LFM3-1.7B-MLX-4bit": "d0ba2a8adc090d2e40259456e65e04f60fe2157f3221369b3b961336ff17f408",
+      "LFM3-1.7B-MLX-6bit": "d9634eeb767ba195531d35e1694dce4df7bbcc38b6782a6825ce456fc96c6a4c",
+      "LFM3-1.7B-MLX-8bit": "6e1108d7f5158fc27c8560a06a595614bd1d3bf746005c24b9a36bf2ec61abce",
+      "LFM3-VL-2B-MLX-4bit": "7337b3300a191858cef3858fc813739e99fbe0704f803b64f911783ab04a2642",
+      "LFM3-VL-2B-MLX-6bit": "fbcc9fec889ff54adcd61e2371d20bf8682a663829bc76b0194c08fcf456d33d",
+      "LFM3-VL-2B-MLX-8bit": "e9ca9565030968665abb8585c922d768494b095862b2eecf4680c174f4f19640"
+    }
+  },
+  "contract": {
+    "hosts": [
+      "M4 Pro",
+      "M5 Ultra"
+    ],
+    "kernels": 1,
+    "gates_1_4_pass": true,
+    "rounding_controls_red": 1,
+    "normal_launch_records": 355,
+    "limit_problems": 0,
+    "threads": 256,
+    "static_threadgroup_bytes": 144,
+    "declared_intermediate_bf16_rounds": 4,
+    "round_sites": [
+      "first normalization before gain",
+      "first normalization after gain",
+      "residual addition",
+      "second normalization before gain"
+    ],
+    "prior_stricter_mids2_probe": {
+      "host": "Apple M4 Pro",
+      "result": "all four gates pass and removed-rounding control red",
+      "source_sha256": "27e59b782478d210f80ee5fbee52fd7f156ce94b5b69922dd555dfe74232362a",
+      "binary_sha256": "5b62de7efd7280a78b7ddeee98dae58ae26015b9ef4dcff4bd6b78d23309571d",
+      "log_sha256": "b68f40af159eac40419ca1a73878c400e78f24210334dd1cf395ea963617594f"
+    },
+    "metadata_reason": "Four intermediate BF16 nodes describe the actual two-stage graph. The earlier mids2 probe already passed. Exact replacement and raw-byte requirements remain mandatory.",
+    "log_sha256": {
+      "m4": "288fdd9dd60928f489a68a779db164399c203045f9e4efade9954f6fc6c5a1ff",
+      "m5": "acac3a048ebd0a35c7ec29f046cd48ae59deb5e85bcf29c4fb8050b60ef34d0b"
+    }
+  },
+  "performance": {
+    "scope": "Same-machine old/new native HTTP ABBA. No new comparison against the standard runtime and no claim that the remaining concurrency target is met.",
+    "host": "M5 Ultra",
+    "checkpoint_bits": 4,
+    "context": 70000,
+    "parallel": 4,
+    "prompt_cache_gib": 0,
+    "temperature": 0,
+    "drafting": "default enabled",
+    "thinking": false,
+    "output_tokens_per_request": 256,
+    "repetitions_per_leg": 3,
+    "order": [
+      "old",
+      "new",
+      "new",
+      "old"
+    ],
+    "measured_requests": 240,
+    "all_output_lengths_and_token_hashes_equal": true,
+    "decode": [
+      {
+        "family": "text",
+        "prompt": "long-code-chat",
+        "streams": 1,
+        "old_tps": 323.37859207406774,
+        "new_tps": 340.56213946137177,
+        "throughput_gain_percent": 5.313755396451314,
+        "all_same_token_hash": true
+      },
+      {
+        "family": "text",
+        "prompt": "long-code-chat",
+        "streams": 4,
+        "old_tps": 877.3614816835146,
+        "new_tps": 909.6937766053586,
+        "throughput_gain_percent": 3.6851737393124973,
+        "all_same_token_hash": true
+      },
+      {
+        "family": "text",
+        "prompt": "long-prose-chat",
+        "streams": 1,
+        "old_tps": 338.05606841419115,
+        "new_tps": 355.5690832078852,
+        "throughput_gain_percent": 5.180505966317073,
+        "all_same_token_hash": true
+      },
+      {
+        "family": "text",
+        "prompt": "long-prose-chat",
+        "streams": 4,
+        "old_tps": 897.5693493427952,
+        "new_tps": 928.0139771021795,
+        "throughput_gain_percent": 3.3918969917673847,
+        "all_same_token_hash": true
+      },
+      {
+        "family": "vl",
+        "prompt": "long-code-chat",
+        "streams": 1,
+        "old_tps": 307.4211480014529,
+        "new_tps": 323.0724303307775,
+        "throughput_gain_percent": 5.091153432700946,
+        "all_same_token_hash": true
+      },
+      {
+        "family": "vl",
+        "prompt": "long-code-chat",
+        "streams": 4,
+        "old_tps": 852.5923561448815,
+        "new_tps": 883.2251823336844,
+        "throughput_gain_percent": 3.5929041549602525,
+        "all_same_token_hash": true
+      },
+      {
+        "family": "vl",
+        "prompt": "long-prose-chat",
+        "streams": 1,
+        "old_tps": 305.46397849556536,
+        "new_tps": 320.49747408261396,
+        "throughput_gain_percent": 4.921528116372276,
+        "all_same_token_hash": true
+      },
+      {
+        "family": "vl",
+        "prompt": "long-prose-chat",
+        "streams": 4,
+        "old_tps": 848.7382388763339,
+        "new_tps": 879.6497949219245,
+        "throughput_gain_percent": 3.642060016821591,
+        "all_same_token_hash": true
+      }
+    ],
+    "cold_prefill": "Exact 2k/8k cached_tokens=0 exercised; tiny TTFT changes are not claimed as an improvement.",
+    "status_sha256": "83410ab791e78510de0e4a1980ea9b205bac36ae74f7b57503ea40f166e290d2"
+  },
+  "applied_public_validation": {
+    "parent_commit": "6b318cedb9d9520ee53ee4a56abeb5d6ced5d461",
+    "scope": "Actual public checkout with only the reviewed fusion patch applied. The frozen six-quantization model/state/serving proofs above were not repeated because the runtime source hashes match.",
+    "source_sha256": {
+      "zig/kernels/metal/lfm3/ops.metal": "1659bb9185d966dd30276a6668465d25c06753a03c4cb38a02c3684514a657ae",
+      "zig/src/families/lfm3/forward.zig": "1ab4e29b47056c3232d3e8278c40c6b7dcf295d52d1f172e71ea47d95e92ff0f",
+      "zig/src/families/lfm3/kernels.zig": "7f04b485a2e9d1dc5ad6d2c7e49a4278ad61128fb946daee878a665e7ba21fed",
+      "zig/tests/contract/metal_lfm3_postnorm.zig": "8c362ca20a90fe093f1f08d65ace30affabe63879456ba0394ba84532d688594",
+      "zig/tests/contract/metal_main.zig": "3eff9d0bb4cfdbd0c990ed4201a094bcf91107e0e2ad5c4792551eda85db6922",
+      "zig/tests/contract/metal_limits.zig": "5d74368ae9b00d65373421719423ba98b6627d02645909d114e418ab9cc2a0e9",
+      "zig/src/core/contract/lfm3_records.zig": "33cf7203d5e371a016cceecb165923355a72dbcc4eadd1a3ceb6a92dbad0bd54"
+    },
+    "build_command": "zig build native tf-kernel-contract dev-tools test-cuda-host -Dcpu=apple_m1 -Dversion=1.0.0 --summary all",
+    "build_exit_code": 0,
+    "build_summary": "Build Summary: 494/494 steps succeeded; 3429/3444 tests passed (15 skipped)",
+    "build_log_sha256": "1e4579b3d905dc834b6709210418e2a37f68769473ef402accd76b2d8b03d129",
+    "artifact_sha256": {
+      "zig-out/native/bin/tensorfold-native": "ad3ca5a0d39daa399b5bde058514291ec52f87a50799528127c654d30a139672",
+      "zig-out/bin/tf-kernel-contract": "0769ba295330784fffce2f7fd98f31ecf71edb44a3dbc55070863c3854d9b82b",
+      "zig-out/bin/tf-lfm3-forward": "8ef7afff7df80dda6d573c1c8c9b0079ecdfc0752fe35c827c4355d6cde549e2"
+    },
+    "gpu_contract": {
+      "m4": {
+        "binary_sha256": "0769ba295330784fffce2f7fd98f31ecf71edb44a3dbc55070863c3854d9b82b",
+        "summary": "SUMMARY 1 kernels: 1 pass gates 1-4, 0 fail, 0 known findings; 1 controls: 1 red as planted, 0 missed; 0 limit problems; gates 27 ms, limits 388 ms",
+        "full_normal_launch_reflection": true,
+        "log_sha256": "98e12c1a886974cf94b52b4be60ed9f087b9c59f4570801715df1c70fa2a8467"
+      },
+      "m5": {
+        "binary_sha256": "0769ba295330784fffce2f7fd98f31ecf71edb44a3dbc55070863c3854d9b82b",
+        "summary": "SUMMARY 1 kernels: 1 pass gates 1-4, 0 fail, 0 known findings; 1 controls: 1 red as planted, 0 missed; 0 limit problems; gates 15 ms, limits 120 ms",
+        "full_normal_launch_reflection": true,
+        "log_sha256": "993f191b92e0f69cd78e019260b4b1bf62d0c7881f938a77a84134ccd6244b1b"
+      }
+    },
+    "format": "zig fmt --check passes for all six changed Zig files",
+    "lean": {
+      "base_findings": 428,
+      "applied_findings": 428,
+      "new_findings": 0
+    },
+    "not_claimed": "This combined host build is not a rerun of zig build test test-golden or the complete backend kernel numerical suite."
+  },
+  "limits_source_selection_correction": {
+    "reason": "The original Gate 5 postnorm-bad record selected normal source because its fault macro was placed in the vision branch. The numerical removed-rounding control already used its fault macro correctly. Move the macro selection to the generic LFM3 branch and remove it from the vision branch. Runtime arithmetic is unchanged.",
+    "supersedes": "Only the earlier fault-variant launch-reflection source selection; all exact runtime/model proofs and normal/control numerical checks remain valid.",
+    "record": "lfm3 postnorm-bad lfm3_post_norm",
+    "macro": "L3_POSTNORM_SKIP_ROUND=1",
+    "variants": {
+      "main": {
+        "parent_commit": "1cdcd2c1d580f8a4b9bf3f9dec1984548097328e",
+        "source_selector_sha256": "3cefea93fa4d813d0b2e79fa781d2df4a07d91e150f9ecf4d3e6fb8b7216e684",
+        "previously_misselected_normal_source_sha256": "2a9edd589a50dea6c3289770d386459e14aa60c707e797e8e23d8f9fc3d73678",
+        "corrected_fault_source_sha256": "00068f4c021a65ef139e07ba9991f17a15ee3bc3a36a28d68cf88ae6fefa01f6",
+        "source_construction": "#define L3_POSTNORM_SKIP_ROUND 1 plus newline, ops.metal, newline, attention.metal",
+        "contract_binary_sha256": "dc23cf60560fd688f873bafb3fe2b31339b13af214d9489c65d9ff42aac1672b",
+        "build_exit_code": 0,
+        "build_summary": "Build Summary: 43/43 steps succeeded",
+        "checks": {
+          "m4": {
+            "summary": "SUMMARY 1 kernels: 1 pass gates 1-4, 0 fail, 0 known findings; 1 controls: 1 red as planted, 0 missed; 0 limit problems; gates 9 ms, limits 165 ms",
+            "full_normal_launch_reflection": true,
+            "normal_launch_records": 355,
+            "fault_reflection": {
+              "threads": 256,
+              "static_threadgroup_bytes": 144
+            },
+            "log_sha256": "20d7a6766a63fe4bd4d1262491947436e6c01a6a997c60703debd566df7963c0"
+          },
+          "m5": {
+            "summary": "SUMMARY 1 kernels: 1 pass gates 1-4, 0 fail, 0 known findings; 1 controls: 1 red as planted, 0 missed; 0 limit problems; gates 9 ms, limits 9644 ms",
+            "full_normal_launch_reflection": true,
+            "normal_launch_records": 355,
+            "fault_reflection": {
+              "threads": 256,
+              "static_threadgroup_bytes": 144
+            },
+            "log_sha256": "da6c1ad478b9b91cd5bae7d44f9e176e86d7d6aeaea97db50f3b569899abd6d4"
+          }
+        }
+      },
+      "text_foundation": {
+        "parent_commit": "fea79f5fad0c8e951ae1157fa245f244c68c492c",
+        "source_selector_sha256": "b23efe8d782cd45ba452375bab0d72ad297b5bd35e299ddb5ce4a959cea89b9a",
+        "previously_misselected_normal_source_sha256": "2a9edd589a50dea6c3289770d386459e14aa60c707e797e8e23d8f9fc3d73678",
+        "corrected_fault_source_sha256": "00068f4c021a65ef139e07ba9991f17a15ee3bc3a36a28d68cf88ae6fefa01f6",
+        "source_construction": "#define L3_POSTNORM_SKIP_ROUND 1 plus newline, ops.metal, newline, attention.metal",
+        "contract_binary_sha256": "69153461afe40f5f45d14fd838306b70b85e86d2c937a304a7e9b4d9adf9e249",
+        "build_exit_code": 0,
+        "build_summary": "Build Summary: 43/43 steps succeeded",
+        "checks": {
+          "m4": {
+            "summary": "SUMMARY 1 kernels: 1 pass gates 1-4, 0 fail, 0 known findings; 1 controls: 1 red as planted, 0 missed; 0 limit problems; gates 8 ms, limits 1137 ms",
+            "full_normal_launch_reflection": true,
+            "normal_launch_records": 337,
+            "fault_reflection": {
+              "threads": 256,
+              "static_threadgroup_bytes": 144
+            },
+            "log_sha256": "e39f929d7cc6eebd5b92e186cd8177d91b0a34d1ce8720e1fb6e915fb299f95d"
+          }
+        }
+      }
+    },
+    "formatting": "zig fmt --check passes in main and text",
+    "model_repetition": "None: this correction changes contract source selection only."
+  }
+}

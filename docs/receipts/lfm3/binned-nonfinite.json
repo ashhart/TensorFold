@@ -1,0 +1,145 @@
+{
+  "status": "verified; binned candidate remains disabled by default",
+  "regression": {
+    "inputs": "BF16 X=+1 [1,64], codes=1, scale=+1, bias=+Inf, group64, bits4",
+    "before": "NaN (0x7fc0), where the independent factored FP64 expression is +Inf",
+    "cause": "FMA product residual inf-inf contaminated the low component of an infinite product.",
+    "fix": "Keep the original computed compensated product when both components are finite. On nonfinite/overflow results only, normalize the input pair and recompute, returning nonfinite results with a zero low component.",
+    "before_public_shader_sha256": "8119aa792197ebf3c9b12f767fe0dfe12482189340be8e75ae93f7910ac944ca",
+    "probe_binary_sha256": "18a8d11c077ae817f560d7ed31ea0045c8a1b2c058612d793feb60b627025588",
+    "before_probe_shader_hash": "not retained; original arithmetic is re-executed by the registered nonfinite negative control",
+    "finite_domain_scope": "The operation order is unchanged for original compensated products whose two components are finite. Finite operands that overflow can intentionally change; this is not a universal all-finite-input equivalence claim."
+  },
+  "native_nonfinite_probe": {
+    "shader_sha256": "3fd70fb76ff2ea9ec12b55f3cccb7a2c8ddeeb1e8010f244a7910b101e1d463c",
+    "cases_per_host": 30,
+    "raw_candidate_corrected_canonical_pairs_per_host": 960,
+    "finite_outputs_per_host": 96,
+    "nonfinite_outputs_per_host": 864,
+    "axes": [
+      "input",
+      "scale",
+      "bias"
+    ],
+    "planted_values": [
+      "NaN",
+      "+Inf",
+      "-Inf"
+    ],
+    "bits": [
+      4,
+      6,
+      8
+    ],
+    "group": 64,
+    "hosts": {
+      "M4 Pro": {
+        "raw_bytes_equal": true,
+        "signed_inf_nan_classes_match": true,
+        "nonfinite_outputs_certified": 0
+      },
+      "M5 Ultra": {
+        "raw_bytes_equal": true,
+        "signed_inf_nan_classes_match": true,
+        "nonfinite_outputs_certified": 0
+      }
+    }
+  },
+  "kernel_contract": {
+    "fixture": "Existing nonfinite input rows plus a positive finite last row, NaN and both infinities in scales/biases, and q6/q8 nibble/bin cancellation leaving (high=0,low=2).",
+    "new_control": "TF_BP_BAD_NONFINITE restores the original product-residual bug and must fail gate1.",
+    "M4 Pro": {
+      "kernels_pass": 6,
+      "kernels_fail": 0,
+      "controls_red_as_planted": 3,
+      "controls_missed": 0,
+      "limit_problems": 0
+    },
+    "M5 Ultra": {
+      "kernels_pass": 6,
+      "kernels_fail": 0,
+      "controls_red_as_planted": 3,
+      "controls_missed": 0,
+      "limit_problems": 0
+    }
+  },
+  "finite_checkpoint_proof": {
+    "host": "M5 Ultra",
+    "cases": 132,
+    "bytes": 123814080,
+    "all_canonical_bytes_equal": true,
+    "prompt_decode_pairs": 66,
+    "all_prompt_decode_first_row_bytes_equal": true,
+    "comparison": "All132 captures match the frozen FP64-exact canonical captures in binned-projection.json; includes six unchanged n16 fallbacks.",
+    "binary_sha256": "18d7dbf6148dc0541dc69422b0a4026fe2aa325482a1941095ffcda5da2eb465",
+    "capture_manifest_sha256": "60c0243fd00107f3e16c73efb3022d02ad19d50022d3fb52414597687f525bdf"
+  },
+  "artifacts": {
+    "project": "18d7dbf6148dc0541dc69422b0a4026fe2aa325482a1941095ffcda5da2eb465",
+    "contract": "09506e643820fecac7be980dff611bb96f010e81b7e5239238fbc76527665b87"
+  },
+  "source_sha256": {
+    "zig/kernels/metal/core/binned_projection.metal": "3029d1cee80ad6897d0a5dd3e788291ad9bb5f74d1fe1fb689c04368569d618f",
+    "zig/tests/contract/metal_binned_projection.zig": "100d93e632d73d5ce73221646e4ce2d1be42f06ac3aa9b0862a667c3262e31b6",
+    "zig/tests/contract/metal_main.zig": "b6e42170977de56d6c12c68c994b7b7fe1fd0f2af7f5865a94d3274116e548db",
+    "zig/tests/contract/metal_limits.zig": "a898d53688271ca6da39daac167e582d7237c9e24d8ba849b211e1b3a9b3a864",
+    "zig/src/core/contract/lfm3_records.zig": "9ba50b5b5e4d0ffc9834e2c83c6b4c11872e57758b6372402ee293a0d41fd34f"
+  },
+  "scope": "No production candidate activation or performance acceptance is asserted by this receipt.",
+  "reproduce_kernel_contract": [
+    "zig build tf-kernel-contract tf-lfm3-project",
+    "zig-out/bin/tf-kernel-contract --only 'LFM3 binned'"
+  ],
+  "tested_source_commit": "43e5f1a90",
+  "comment_only_successor_commit": "8955faee0",
+  "comment_only_successor_scope": "Comments only; tested mathematical operations and line positions are unchanged. The source hashes below identify the actual pre-comment binaries, not the successor.",
+  "low_component_regression": {
+    "before_shader_sha256": "c839dbf5d8945f907b516de9f8ca0cb2e7d47b8acc4d63c349dc22ec863e1a3c",
+    "operator_fixture": {
+      "bits": [
+        6,
+        8
+      ],
+      "input_first_group": [
+        "2^26",
+        "-2^22",
+        "2",
+        "remaining entries zero"
+      ],
+      "codes_first_group": [
+        1,
+        16,
+        1
+      ],
+      "remaining_codes": "zero",
+      "compensated_qx": [
+        "high=0",
+        "low=2"
+      ],
+      "scales": [
+        "+Inf",
+        "-Inf",
+        "NaN"
+      ],
+      "bias_inf_columns": "Retained, with a positive input sum; original nonfinite input rows also remain."
+    },
+    "before_native_helper_cases": 4,
+    "before_native_helper_result": "(0,+/-2)*+Inf produced NaN; finite BF16-maximum products produced signed infinity with a NaN low component.",
+    "after_native_helper_cases_per_host": 7,
+    "after_checks": [
+      "signed low-only products with +/-Inf",
+      "low-component overflow with finite BF16 maximum",
+      "zero represented sum (1,-1) times Inf gives NaN",
+      "low-component overflow with full finite FP32 maximum"
+    ],
+    "after_result": "Six infinite products match raw pair/BF16 bytes with zero low components; the zero-sum case matches the NaN class and a zero low component.",
+    "M4 Pro": "pass",
+    "M5 Ultra": "pass",
+    "probe_program_sha256": "763320e00066edcd336a17a103c666d71ad84db90c2a7c349410a4f58b90e9c1",
+    "before_probe_shader_sha256": "a474c1dec0889494a33b1bca611d02947fd170caaa49248e321890fd81601e9f",
+    "after_probe_shader_sha256": "c8e8a0dbf3cf65fd3d64de428690e21a7e8ffa16eb823ce6f9df715a225d421e",
+    "inputs_sha256": "a92318e04f453f7278b534d246aa528935351e4c4165622a936b4c5fba106057",
+    "expected_sha256": "d5be7739c64d768ca08422016ae6977a0499aafd7794bc054aa54b6729285d09",
+    "before_native_helper_host": "M4 Pro"
+  }
+}

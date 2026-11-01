@@ -1,0 +1,376 @@
+{
+ "scope": "Byte-preserving paired FFN gate/up projection plus exact CPU unmasked greedy selection. No tensor-unit attention qualification or agreed performance gate pass is asserted.",
+ "candidate_sha256": "b804c6ed1859710a7766f66480d569f163e3287b2eb1f8fc6a7ea29434e0562c",
+ "baseline_sha256": "d1656249bdb581b147faacbd3b3c557c00b6c45b710eeddce517a67178b6ba2b",
+ "proof_forward_sha256": "a05dfd241f67e05ab5ba8a0ea978c094b889818a463edab80f29848ceb25d4e3",
+ "source_hash_scope": "These hashes identify the GPU operator and greedy function; they are not a whole-tree build manifest.",
+ "gpu_operator_source_sha256": "05a21d65ec7563d9fadecf49bd88269b17d351591f674a5359c5aacccbfc6601",
+ "greedy_function_sha256": "2c445419e11cd674dbf88289654a1ce87d04c49e9081d726c515bbb8234cad9e",
+ "contract": {
+  "hardware": "M4 Pro, 48 GB, macOS 26.5.1",
+  "exit_status": 0,
+  "summary": "SUMMARY 58 kernels: 58 pass gates 1-4, 0 fail, 0 known findings; 16 controls: 16 red as planted, 0 missed; 0 limit problems; gates 62629 ms, limits 127 ms"
+ },
+ "exactness": {
+  "hardware": "M4 Pro, 48 GB, macOS 26.5.1",
+  "checkpoint": "LFM3-1.7B-MLX-4bit",
+  "exit_status": 0,
+  "summary": "LFM3_EXACT mode=default passed=68 failed=0 skipped=0 prompt=5 windows=60 shared=2 snapshots=1 long=0 gpu_seconds=141.060"
+ },
+ "cpu_greedy": {
+  "tests": 3,
+  "exit_status": 0,
+  "build": "Zig 0.17.0, -Ofast",
+  "scope": "All finite BF16 encodings and adjacent pairs in both orders, every nonfinite encoding, signed zero, vector/remainder boundaries, randomized full vocabularies. Masked and positive-temperature sampling retain the original path."
+ },
+ "actual_projection_pairs": {
+  "cases": 132,
+  "distinct_weight_cases": 120,
+  "identical_bytes": 247628160,
+  "cells": {
+   "_trimmed_list": {
+    "count": 132,
+    "sha256": "cfb0950381106e29e45c43c18d58e72121873ec4a561eced1259833300869a7c",
+    "first": [
+     {
+      "name": "1.7B-4-conv_in",
+      "checkpoint": "1.7B-4",
+      "module_a": "language_model.model.layers.0.conv.in_proj",
+      "module_b": "language_model.model.layers.1.conv.in_proj",
+      "distinct_weights": true,
+      "rows": 1,
+      "n": 6144,
+      "k": 2048,
+      "bits": 4,
+      "group": 64,
+      "exit_status": 0,
+      "equal_bytes": 24576
+     },
+     {
+      "name": "1.7B-4-conv_in",
+      "checkpoint": "1.7B-4",
+      "module_a": "language_model.model.layers.0.conv.in_proj",
+      "module_b": "language_model.model.layers.1.conv.in_proj",
+      "distinct_weights": true,
+      "rows": 64,
+      "n": 6144,
+      "k": 2048,
+      "bits": 4,
+      "group": 64,
+      "exit_status": 0,
+      "equal_bytes": 1572864
+     }
+    ],
+    "last": [
+     {
+      "name": "VL-2B-8-vocabulary_head",
+      "checkpoint": "VL-2B-8",
+      "module_a": "language_model.model.embed_tokens",
+      "module_b": "language_model.model.embed_tokens",
+      "distinct_weights": false,
+      "rows": 64,
+      "n": 128000,
+      "k": 2048,
+      "bits": 8,
+      "group": 64,
+      "exit_status": 0,
+      "equal_bytes": 32768000
+     }
+    ]
+   }
+  },
+  "scope": "All 66 projection/layout classes at widths1 and64. The12 vocabulary-head cases use the same tied matrix on both branches; other120 use different stored matrices."
+ },
+ "whole_model": {
+  "identical_bytes": 394752000,
+  "cells": [
+   {
+    "checkpoint": "LFM3-1.7B-MLX-4bit",
+    "rows": 257,
+    "columns": 128000,
+    "equal_bytes": 65792000,
+    "baseline_sha256": "f1dbd42c2556fcb05031a00b209c61fadee45e74ee1ff94628d4802479fcb518",
+    "candidate_sha256": "f1dbd42c2556fcb05031a00b209c61fadee45e74ee1ff94628d4802479fcb518",
+    "identical": true
+   },
+   {
+    "checkpoint": "LFM3-1.7B-MLX-6bit",
+    "rows": 257,
+    "columns": 128000,
+    "equal_bytes": 65792000,
+    "baseline_sha256": "08bf833a94fa0403bc65c70677d20372b5ab0616fb0a58d26119c486069ef59c",
+    "candidate_sha256": "08bf833a94fa0403bc65c70677d20372b5ab0616fb0a58d26119c486069ef59c",
+    "identical": true
+   },
+   {
+    "checkpoint": "LFM3-1.7B-MLX-8bit",
+    "rows": 257,
+    "columns": 128000,
+    "equal_bytes": 65792000,
+    "baseline_sha256": "1345bd80acaa16fe08a00a14d839e3e37cf9d0d8cd7e98c01b68cd1b8d2f51d4",
+    "candidate_sha256": "1345bd80acaa16fe08a00a14d839e3e37cf9d0d8cd7e98c01b68cd1b8d2f51d4",
+    "identical": true
+   },
+   {
+    "checkpoint": "LFM3-VL-2B-MLX-4bit",
+    "rows": 257,
+    "columns": 128000,
+    "equal_bytes": 65792000,
+    "baseline_sha256": "a4dde0a00ee9acb294c2b5a791e7e73cd05c5d6904ffe171e439ad1b01e25c5d",
+    "candidate_sha256": "a4dde0a00ee9acb294c2b5a791e7e73cd05c5d6904ffe171e439ad1b01e25c5d",
+    "identical": true
+   },
+   {
+    "checkpoint": "LFM3-VL-2B-MLX-6bit",
+    "rows": 257,
+    "columns": 128000,
+    "equal_bytes": 65792000,
+    "baseline_sha256": "93ea83c90c5623f4e17502a526e2358f9e1ba3f2d03999295745257dc95bbca6",
+    "candidate_sha256": "93ea83c90c5623f4e17502a526e2358f9e1ba3f2d03999295745257dc95bbca6",
+    "identical": true
+   },
+   {
+    "checkpoint": "LFM3-VL-2B-MLX-8bit",
+    "rows": 257,
+    "columns": 128000,
+    "equal_bytes": 65792000,
+    "baseline_sha256": "5a013f3eed97f143429f09a81a829b07dc32360734cd54855e18e514160e0a48",
+    "candidate_sha256": "5a013f3eed97f143429f09a81a829b07dc32360734cd54855e18e514160e0a48",
+    "identical": true
+   }
+  ],
+  "scope": "Six full 257-row by128000-column teacher-forced arrays, developer-enabled dual versus plain from the same immutable proof binary. Temporary candidate flag was removed after qualification."
+ },
+ "served": {
+  "hardware": "M5 Ultra, 256 GiB, macOS27.0 (26A428)",
+  "counts": {
+   "passed": 303,
+   "failed": 0,
+   "skipped": 0
+  },
+  "cells": {
+   "_trimmed_value": {
+    "bytes": 131212,
+    "sha256": "db298436a2b5b333780c5491efb55cc1e0873fed6a36763f263f89e8eeb5cfd5",
+    "keys": null,
+    "count": 6
+   }
+  },
+  "lifecycle": "One owned server process at a time; all owned servers stopped after testing."
+ },
+ "abba": {
+  "hardware": "M5 Ultra, 256 GiB, macOS27.0 (26A428)",
+  "settings": {
+   "context": 70000,
+   "parallel": 4,
+   "prompt_cache_gib": 0,
+   "temperature": 0,
+   "thinking": false,
+   "output_tokens": 256,
+   "repetitions_per_leg": 3
+  },
+  "summary": {
+   "baseline_sha256": "d1656249bdb581b147faacbd3b3c557c00b6c45b710eeddce517a67178b6ba2b",
+   "candidate_sha256": "b804c6ed1859710a7766f66480d569f163e3287b2eb1f8fc6a7ea29434e0562c",
+   "order": [
+    "old",
+    "new",
+    "new",
+    "old"
+   ],
+   "counts": {
+    "alone_equal": 240,
+    "alone_unequal": 0,
+    "alone_failed": 0,
+    "serial_equal": 32,
+    "serial_unequal": 0,
+    "serial_failed": 0
+   },
+   "full_hash_requests": 240,
+   "hash_groups": [
+    {
+     "family": "text",
+     "prompt": "long-code-chat",
+     "token_sha256": "7ffd540d4c865156a86d2dc134d3ac3b2a5c6508f5f7821217f5abcbc89cb9b7"
+    },
+    {
+     "family": "text",
+     "prompt": "long-prose-chat",
+     "token_sha256": "97f95aa70ea3cdfeb18f05c2b71620d477f3cb71f84ce72236eb1ee8bc636b1a"
+    },
+    {
+     "family": "vl",
+     "prompt": "long-code-chat",
+     "token_sha256": "cd53eb1c94a6051695a27472ab8e927126dacf6884d506996a6ce19c35abe9ee"
+    },
+    {
+     "family": "vl",
+     "prompt": "long-prose-chat",
+     "token_sha256": "a6dac318d3938bbe33f79d9a9c09bc030f9da35dc346d8c2d535909b0c3513aa"
+    }
+   ],
+   "cells": [
+    {
+     "family": "text",
+     "mode": "four_stream",
+     "prompt": "long-code-chat",
+     "old_run_medians": [
+      682.4,
+      682.6
+     ],
+     "new_run_medians": [
+      836.1,
+      837.2
+     ],
+     "old_median": 682.5,
+     "new_median": 836.6500000000001,
+     "rate_ratio": 1.225860805860806
+    },
+    {
+     "family": "text",
+     "mode": "four_stream",
+     "prompt": "long-prose-chat",
+     "old_run_medians": [
+      703.4,
+      731.1
+     ],
+     "new_run_medians": [
+      855.5,
+      857.9
+     ],
+     "old_median": 717.25,
+     "new_median": 856.7,
+     "rate_ratio": 1.1944231439525967
+    },
+    {
+     "family": "text",
+     "mode": "solo",
+     "prompt": "long-code-chat",
+     "old_run_medians": [
+      309.5521887347931,
+      308.9845434949348
+     ],
+     "new_run_medians": [
+      316.93726744380007,
+      317.8355443591904
+     ],
+     "old_median": 309.26836611486397,
+     "new_median": 317.3864059014952,
+     "rate_ratio": 1.0262491760428423
+    },
+    {
+     "family": "text",
+     "mode": "solo",
+     "prompt": "long-prose-chat",
+     "old_run_medians": [
+      322.6483820721299,
+      322.53863627043455
+     ],
+     "new_run_medians": [
+      332.1536092548651,
+      333.4991928050717
+     ],
+     "old_median": 322.5935091712822,
+     "new_median": 332.8264010299684,
+     "rate_ratio": 1.03172069979019
+    },
+    {
+     "family": "vl",
+     "mode": "four_stream",
+     "prompt": "long-code-chat",
+     "old_run_medians": [
+      661.4,
+      650.6
+     ],
+     "new_run_medians": [
+      813.4,
+      813.4
+     ],
+     "old_median": 656.0,
+     "new_median": 813.4,
+     "rate_ratio": 1.239939024390244
+    },
+    {
+     "family": "vl",
+     "mode": "four_stream",
+     "prompt": "long-prose-chat",
+     "old_run_medians": [
+      646.9,
+      669.4
+     ],
+     "new_run_medians": [
+      810.7,
+      809.5
+     ],
+     "old_median": 658.15,
+     "new_median": 810.1,
+     "rate_ratio": 1.2308744207247588
+    },
+    {
+     "family": "vl",
+     "mode": "solo",
+     "prompt": "long-code-chat",
+     "old_run_medians": [
+      293.25580648869806,
+      292.12128843744097
+     ],
+     "new_run_medians": [
+      301.64586239108235,
+      301.7186871597126
+     ],
+     "old_median": 292.68854746306954,
+     "new_median": 301.68227477539745,
+     "rate_ratio": 1.030727978222184
+    },
+    {
+     "family": "vl",
+     "mode": "solo",
+     "prompt": "long-prose-chat",
+     "old_run_medians": [
+      291.50744489745637,
+      290.28747891593963
+     ],
+     "new_run_medians": [
+      299.8096793417327,
+      299.99547068513067
+     ],
+     "old_median": 290.897461906698,
+     "new_median": 299.9025750134317,
+     "rate_ratio": 1.0309563137736208
+    }
+   ]
+  },
+  "raw_cells": {
+   "_trimmed_value": {
+    "bytes": 398772,
+    "sha256": "7496166808e0978744b4857d1b85daacd547f5b887a8d07afda50f09e1d2fc31",
+    "keys": [
+     "text-4-0-old.concurrent.json",
+     "text-4-0-old.decode.json",
+     "text-4-1-new.concurrent.json",
+     "text-4-1-new.decode.json",
+     "text-4-2-new.concurrent.json",
+     "text-4-2-new.decode.json",
+     "text-4-3-old.concurrent.json",
+     "text-4-3-old.decode.json",
+     "vl-4-0-old.concurrent.json",
+     "vl-4-0-old.decode.json",
+     "vl-4-1-new.concurrent.json",
+     "vl-4-1-new.decode.json"
+    ],
+    "count": 16
+   }
+  },
+  "limitations": [
+   "Only4-bit checkpoint performance was compared in this ABBA experiment.",
+   "The decode client retains a12-digit token digest and full output-text digest; the concurrent client retains full256-token SHA-256 digests. All240 concurrent request digests match across legs for their respective prompts.",
+   "Each reported rate is the median of two per-leg medians; the raw three-repetition cells are retained.",
+   "These improvements do not by themselves establish parity with the standard server."
+  ]
+ },
+ "_trim": {
+  "note": "Raw capture replaced by counts, first/last items and SHA-256 of the canonical JSON of each trimmed list or string.",
+  "original_sha256": "b8d38bb642fe49aa664110e20b77aa9b7384dba315fc9ed608cbaff303f2c4a1",
+  "original_bytes": 1006569
+ }
+}
