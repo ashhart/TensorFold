@@ -77,6 +77,9 @@ pub const Graph = struct {
     pub const Fault = enum { none, write, rename };
     pub const record = deleting.record;
     pub const remove = deleting.remove;
+    pub const recordMany = deleting.recordMany;
+    pub const recordStates = deleting.recordStates;
+    pub const removeMany = deleting.removeMany;
     pub const snapshot = deleting.snapshot;
 
     /// A graph that starts from `path`'s file when it reads, else empty.

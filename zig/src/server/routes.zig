@@ -31,12 +31,16 @@ const fact_path = "/v1/slide/fact/";
 
 pub fn dispatch(srv: *Server, conn: *Conn, a: Allocator) void {
     const m = conn.method;
-    if (!std.mem.eql(u8, m, "POST") and !consumeBody(conn, a)) return;
+    const path = auth.routePath(conn.path);
+    const delete_body = std.mem.eql(u8, m, "DELETE") and
+        (std.mem.eql(u8, path, "/v1/slide/facts") or std.mem.startsWith(u8, path, fact_path));
+    if (!std.mem.eql(u8, m, "POST") and !delete_body and !consumeBody(conn, a)) return;
     if (std.mem.eql(u8, m, "GET")) return get(srv, conn, a);
     if (std.mem.eql(u8, m, "POST")) return post(srv, conn, a);
     if (std.mem.eql(u8, m, "DELETE")) {
         const route = auth.routePath(conn.path);
         if (std.mem.eql(u8, route, "/v1/slide/graph")) return slide.forget(srv, conn, a);
+        if (std.mem.eql(u8, route, "/v1/slide/facts")) return @import("slide_forget_many.zig").route(srv, conn, a);
         if (std.mem.startsWith(u8, route, fact_path)) return slide_forget.route(srv, conn, a, route[fact_path.len..]);
         if (std.mem.eql(u8, route, recall.path)) return recall.empty(srv, conn, a);
         if (std.mem.eql(u8, route, "/v1/imprint")) return imprint.forget(srv, conn, a);

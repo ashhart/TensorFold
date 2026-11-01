@@ -34,6 +34,52 @@ pub fn remove(g: *Graph, id: u32, at: i64, why: []const u8) !void {
     try g.persist();
 }
 
+/// Selected states written once; a failed allocation, lookup or file write changes none of them.
+pub fn recordStates(g: *Graph, ids: []const u32, states: []const slide_graph.State) !void {
+    if (ids.len != states.len) return error.BadSelection;
+    return update(g, ids, states, null, "");
+}
+
+pub fn recordMany(g: *Graph, ids: []const u32, state: slide_graph.State) !void {
+    const states = try g.gpa.alloc(slide_graph.State, ids.len);
+    defer g.gpa.free(states);
+    @memset(states, state);
+    try recordStates(g, ids, states);
+}
+
+/// Every selected fact marked deleted in one graph write, or every original record restored.
+pub fn removeMany(g: *Graph, ids: []const u32, at: i64, why: []const u8) !void {
+    const states = try g.gpa.alloc(slide_graph.State, ids.len);
+    defer g.gpa.free(states);
+    @memset(states, .deleted);
+    try update(g, ids, states, at, why);
+}
+
+fn update(g: *Graph, ids: []const u32, states: []const slide_graph.State, at: ?i64, why: []const u8) !void {
+    g.mutex.lockUncancelable(g.io);
+    defer g.mutex.unlock(g.io);
+    const old = try g.gpa.alloc(Fact, ids.len);
+    defer g.gpa.free(old);
+    for (ids, 0..) |id, i| {
+        if (std.mem.indexOfScalar(u32, ids[0..i], id) != null) return error.DuplicateFact;
+        old[i] = (g.find(id) orelse return error.NoSuchFact).*;
+    }
+    const message = if (at != null) try g.arena.allocator().dupe(u8, why) else "";
+    errdefer for (old) |f| {
+        g.find(f.id).?.* = f;
+    };
+    for (ids, states) |id, state| {
+        const f = g.find(id).?;
+        f.state = state;
+        if (at) |when| {
+            f.neurons = &.{};
+            f.deleted = when;
+            f.message = message;
+        }
+    }
+    try g.persist();
+}
+
 /// Every fact as it stands, copied into `a`, for reading outside the lock.
 pub fn snapshot(g: *Graph, a: Allocator) ![]Fact {
     g.mutex.lockUncancelable(g.io);
