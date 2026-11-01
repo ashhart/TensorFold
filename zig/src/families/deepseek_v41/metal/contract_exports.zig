@@ -9,4 +9,7 @@ pub const mv = @import("mv.zig");
 pub const glue = @import("glue_k.zig");
 pub const compress = @import("compress.zig");
 pub const xmma = @import("experts_mma.zig");
+pub const hc = @import("hc.zig");
+pub const fused = @import("fused.zig");
+pub const fold = @import("fold.zig");
 pub const glue_tmp = @import("glue.zig");
