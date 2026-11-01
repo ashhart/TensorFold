@@ -1,7 +1,9 @@
 //! XPU engines (Intel Xe2 over Level Zero): Qwen3.8-27B behind the lane host; a lone stream uses the backend's driver.
 const std = @import("std");
 const api = @import("engine_api");
-const xq = @import("xpu_qwen27");
+/// The Qwen3.8-27B runner needs DPAS and nGEN: a build without DPAS (-Dxpu-dpas=false, Gen12LP) leaves it out.
+const has_qwen27 = @import("xpu_engine_options").qwen27;
+const xq = if (has_qwen27) @import("xpu_qwen27") else struct {};
 const Drafter = xq.drafter.Drafter;
 const lanes = @import("lanes");
 const sampling = lanes.sampling;
@@ -11,7 +13,9 @@ const admit = @import("xpu_admit.zig");
 const Allocator = std.mem.Allocator;
 
 pub const backends: []const []const u8 = &.{"xpu"};
-pub const families: []const api.Family = &.{ .{ .model_type = "qwen3_5", .formats = &.{ "mlx-q4g64", "gptq-int4-g128" } }, .{ .model_type = "nemotron_h", .formats = &.{"mlx-q4g64"} }, .{ .model_type = "gemma4", .formats = &.{"mlx-q4g64"} } };
+const qwen27_family: []const api.Family = if (has_qwen27) &.{.{ .model_type = "qwen3_5", .formats = &.{ "mlx-q4g64", "gptq-int4-g128" } }} else &.{};
+const gemma4_family: []const api.Family = if (nem.has_gemma4) &.{.{ .model_type = "gemma4", .formats = &.{"mlx-q4g64"} }} else &.{};
+pub const families: []const api.Family = qwen27_family ++ &[_]api.Family{.{ .model_type = "nemotron_h", .formats = &.{"mlx-q4g64"} }} ++ gemma4_family;
 
 pub fn chip(_: Allocator) ?[]const u8 {
     return "Intel Xe2 (Level Zero)";
@@ -175,10 +179,14 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         return null;
     }
     if (nem.serves(o.model_type)) return nem.open(a, gpa, io, o, problem);
-    if (!std.mem.eql(u8, o.model_type, "qwen3_5")) {
+    if (comptime has_qwen27) {
+        if (std.mem.eql(u8, o.model_type, "qwen3_5")) return openQwen27(a, gpa, io, o, problem);
         problem.* = try std.fmt.allocPrint(a, "the XPU engine serves Qwen3.8-27B (qwen3_5, MLX affine 4/64 or symmetric GPTQ 4/128) and Nemotron-H (nemotron_h, MLX 4/64), not {s}", .{o.model_type});
-        return null;
-    }
+    } else problem.* = try std.fmt.allocPrint(a, "this XPU build (no DPAS) serves Nemotron-H (nemotron_h, MLX 4/64), not {s}: Qwen3.8-27B and Gemma 4 E4B need DPAS (-Dxpu-dpas=true)", .{o.model_type});
+    return null;
+}
+
+fn openQwen27(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const context = xq.limits.context(o.context orelse 32768) catch {
         problem.* = try std.fmt.allocPrint(a, "the XPU engine holds 1 to {d} tokens a stream, not {d}", .{ xq.limits.MAX_CONTEXT, o.context.? });
         return null;
