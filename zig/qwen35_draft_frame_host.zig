@@ -150,6 +150,7 @@ fn actualFrame(block: usize) !void {
     e.embed_w = 1;
     e.embed_s = 2;
     e.embed_b = 3;
+    e.affine.mlp128 = false;
     e.affine.prefill_fn = function(&driver, 11);
     e.affine.group_fn = function(&driver, 10);
     e.affine.pdl = false;

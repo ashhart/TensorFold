@@ -10,7 +10,7 @@ test "contract architecture: older SMs omit the standalone cluster kernels" {
         for (std.enums.values(mm.Kind)) |kind| {
             var m: mm.Mm = .{ .rig = undefined, .kind = kind, .sm = sm };
             const k = m.kernel();
-            try std.testing.expectEqual((kind == .qmm_group or mm.verifyTile(kind) > 0), k == null);
+            try std.testing.expectEqual((kind == .qmm_group or kind == .mlp128_bits or kind == .mlp128_fp64 or mm.verifyTile(kind) > 0), k == null);
             if (k != null) count += 1;
         }
         try std.testing.expectEqual(@as(usize, 9), count);
@@ -22,12 +22,16 @@ test "contract architecture: SM90 and Blackwell retain every kernel and the GEMV
         var count: usize = 0;
         for (std.enums.values(mm.Kind)) |kind| {
             var m: mm.Mm = .{ .rig = undefined, .kind = kind, .sm = sm };
+            if ((kind == .mlp128_bits or kind == .mlp128_fp64) and sm != 120) {
+                try std.testing.expect(m.kernel() == null);
+                continue;
+            }
             const k = m.kernel().?;
             count += 1;
             const bits = kind == .verify32_bits or kind == .verify64_bits or kind == .verify128_bits;
-            try std.testing.expectEqual(kind == .lane_gemv or kind == .lane_gemv_split or kind == .lane_gemv_seg or bits or mm.lean(kind), k.spec.replaces != null);
+            try std.testing.expectEqual(kind == .lane_gemv or kind == .lane_gemv_split or kind == .lane_gemv_seg or bits or kind == .mlp128_bits or mm.lean(kind), k.spec.replaces != null);
         }
-        try std.testing.expectEqual(@as(usize, 16), count);
+        try std.testing.expectEqual(@as(usize, if (sm == 120) 18 else 16), count);
     }
 }
 
