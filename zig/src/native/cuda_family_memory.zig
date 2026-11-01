@@ -51,8 +51,16 @@ pub fn weights(comptime F: type, a: Allocator, io: std.Io, o: api.Open, problem:
         problem.* = try std.fmt.allocPrint(a, "cannot estimate checkpoint weight files ({s}); refusing CUDA admission", .{@errorName(err)});
         return null;
     };
-    const text = if (@hasDecl(F, "placementWeightBytes")) try F.placementWeightBytes(a, io, o.dir, o.tp, o.rank, o.drafts) else if (@hasDecl(F, "weightShare")) F.weightShare(a, io, o.dir, whole) else whole;
+    const text = if (@hasDecl(F, "placementWeightBytes")) try F.placementWeightBytes(a, io, o.dir, o.tp, o.rank, o.drafts) else if (@hasDecl(F, "weightShare")) share(F, a, io, o.dir, whole) catch |err| {
+        problem.* = (if (@hasDecl(F, "explains_open")) F.explain(null, err) else null) orelse try std.fmt.allocPrint(a, "cannot size this rank's weights ({s})", .{@errorName(err)});
+        return null;
+    } else whole;
     return text + try @import("cuda_vision_offer.zig").weightBytes(F, a, io, o);
+}
+
+/// `F.weightShare`, plain bytes or an error union (a family whose split settings can be refused).
+fn share(comptime F: type, a: Allocator, io: std.Io, dir: []const u8, whole: u64) anyerror!u64 {
+    return F.weightShare(a, io, dir, whole);
 }
 
 /// Logs, from 0.25 GiB, the free pages on the per-CPU lists that a pool's reading counted.
@@ -64,6 +72,15 @@ pub fn noteParked(p: budget.Pool, what: []const u8) void {
 pub fn room(comptime F: type, ptr: *anyopaque, local: u64) !u64 {
     if (@hasDecl(F, "rankRoom")) return F.rankRoom(ptr, local);
     return local;
+}
+
+/// `o` with the family's own prompt-cache budget (`prompt_cache_gib`) when --prompt-cache-gib is not given.
+pub fn familyOpen(comptime F: type, o: api.Open) api.Open {
+    if (comptime !@hasDecl(F, "prompt_cache_gib")) return o;
+    if (o.prompt_cache_gib != null) return o;
+    var q = o;
+    q.prompt_cache_gib = F.prompt_cache_gib;
+    return q;
 }
 
 pub fn read(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
@@ -90,6 +107,18 @@ test "rank room is agreed before stream admission and preserves a single-rank fa
     try std.testing.expectEqual(@as(u64, 30), try room(Single, &context, 30));
     try std.testing.expectEqual(@as(u64, 19), try room(Pair, &context, 30));
     try std.testing.expectEqual(@as(u64, 7), try room(Pair, &context, 7));
+}
+
+test "a family's own prompt-cache budget applies only where the operator set none" {
+    const Plain = struct {};
+    const Own = struct {
+        pub const prompt_cache_gib: f64 = 1;
+    };
+    const unset: api.Open = .{ .dir = "d", .model_type = "m" };
+    try std.testing.expectEqual(@as(?f64, null), familyOpen(Plain, unset).prompt_cache_gib);
+    try std.testing.expectEqual(@as(?f64, 1), familyOpen(Own, unset).prompt_cache_gib);
+    const off: api.Open = .{ .dir = "d", .model_type = "m", .prompt_cache_gib = 0 };
+    try std.testing.expectEqual(@as(?f64, 0), familyOpen(Own, off).prompt_cache_gib);
 }
 
 test {

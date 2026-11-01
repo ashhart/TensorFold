@@ -45,9 +45,14 @@ pub const Tp = struct {
     fatbin: ?[]const u8,
 };
 
+var tp_options: ?Tp = null;
+
+/// Read once: tp.zig's runner and every family that embeds the mailbox kernel share them.
 pub fn tp(b: *std.Build) Tp {
-    return .{
+    if (tp_options) |o| return o;
+    tp_options = .{
         .nvcc = b.option([]const u8, "tp-nvcc", "nvcc that builds the TP mailbox kernel"),
         .fatbin = b.option([]const u8, "tp-fatbin", "absolute path of a prebuilt tp_mailbox.fatbin to embed"),
     };
+    return tp_options.?;
 }
