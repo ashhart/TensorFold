@@ -271,15 +271,25 @@ pub const Draft = struct {
 
     /// proj of each of `ls` into `outs` over one x, its group sums taken once; decode() keeps each one's bits.
     pub fn projMany(d: *Draft, ls: []const cuda.qlinear.Affine4, x: u64, outs: []const u64, rows: usize) !void {
+        return d.projManyInner(ls, x, outs, rows, true, true);
+    }
+
+    pub fn projManySums(d: *Draft, ls: []const cuda.qlinear.Affine4, x: u64, outs: []const u64, rows: usize, sums: bool) !void {
+        return d.projManyInner(ls, x, outs, rows, sums, false);
+    }
+
+    fn projManyInner(d: *Draft, ls: []const cuda.qlinear.Affine4, x: u64, outs: []const u64, rows: usize, sums: bool, segmented: bool) !void {
         const e = d.e;
-        if (rows > 16 or ls.len > cuda.qlinear.Affine4Kernels.segs_max) {
-            for (ls, outs, 0..) |l, out, i| try d.projSums(l, x, out, rows, i == 0);
+        if (ls.len == 0 or ls.len != outs.len) return error.UnexpectedTensor;
+        const prompt = precision.prompt(d.projection_role, rows, precision.dflash_projection_prompt_cutoff);
+        if ((!e.affine.pdl and !segmented) or (rows > 16 and (!e.affine.pdl or prompt)) or ls.len > cuda.qlinear.Affine4Kernels.segs_max or ls.len == 1) {
+            for (ls, outs, 0..) |l, out, i| try d.projSums(l, x, out, rows, sums and i == 0);
             return;
         }
-        try e.run(e.fns.sums, .{ rows, (ls[0].k / 64 + 63) / 64, 1 }, .{ 64, 1, 1 }, .{ x, d.xs, @as(c_int, @intCast(ls[0].k)), @as(u64, 0) });
+        if (sums) try e.run(e.fns.sums, .{ rows, (ls[0].k / 64 + 63) / 64, 1 }, .{ 64, 1, 1 }, .{ x, d.xs, @as(c_int, @intCast(ls[0].k)), @as(u64, 0) });
         var many: [cuda.qlinear.Affine4Kernels.segs_max]cuda.qlinear.Affine4Kernels.Out = undefined;
         for (ls, outs, many[0..ls.len]) |l, out, *m| m.* = .{ .q = l, .out = out };
-        try e.affine.decodeMany(e.stream, x, d.xs, many[0..ls.len], rows);
+        try e.affine.verifyManyRows(e.stream, x, d.xs, many[0..ls.len], rows);
     }
 
     pub fn projSums(d: *Draft, l: cuda.qlinear.Affine4, x: u64, out: u64, rows: usize, sums: bool) !void {
@@ -328,9 +338,14 @@ pub const Draft = struct {
             try d.proj(d.w.fc, d.taps_in, d.th, rows);
             try d.norm(d.th, d.w.hidden_norm, d.thn, rows);
             for (d.w.layers, 0..) |l, i| {
-                try d.projAgain(l.k, d.thn, d.kabs, rows);
-                try d.normRope(d.kabs, l.k_norm, d.kn, rows, c.kv_heads, start);
-                try d.projAgain(l.v, d.thn, d.vabs, rows);
+                if (e.affine.pdl) {
+                    try d.projManySums(&.{ l.k, l.v }, d.thn, &.{ d.kabs, d.vabs }, rows, false);
+                    try d.normRope(d.kabs, l.k_norm, d.kn, rows, c.kv_heads, start);
+                } else {
+                    try d.projAgain(l.k, d.thn, d.kabs, rows);
+                    try d.normRope(d.kabs, l.k_norm, d.kn, rows, c.kv_heads, start);
+                    try d.projAgain(l.v, d.thn, d.vabs, rows);
+                }
                 try e.run(d.fns.ring_put, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ d.kn, d.vabs, d.ringK(ctx, i), d.ringV(ctx, i), @as(c_int, @intCast(c.kvWidth())), @as(c_longlong, @intCast(start)), @as(c_int, @intCast(c.ringRows())) });
             }
             start += rows;

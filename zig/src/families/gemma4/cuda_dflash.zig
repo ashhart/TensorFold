@@ -332,6 +332,17 @@ pub const Drafter = struct {
         try x.k.affine.verify(x.s, in, xs.?, l, out, rows);
     }
 
+    pub fn projectMany(x: *Drafter, ls: []const Affine4, in: u64, xs: u64, outs: []const u64, rows: usize) !void {
+        const A = cuda.qlinear.Affine4Kernels;
+        if (ls.len < 2 or ls.len > A.segs_max or ls.len != outs.len) return error.ShapeMismatch;
+        if (x.k.affine.pdl and rows <= x.k.affine.verifyRows()) {
+            var many: [A.segs_max]A.Out = undefined;
+            for (ls, outs, many[0..ls.len]) |l, out, *v| v.* = .{ .q = l, .out = out };
+            return x.k.affine.verifyManyRows(x.s, in, xs, many[0..ls.len], rows);
+        }
+        for (ls, outs) |l, out| try x.project(l, in, xs, out, rows);
+    }
+
     fn copy2d(x: *Drafter, dst: u64, dst_pitch: usize, src: u64, src_pitch: usize, width: usize, rows: usize) !void {
         const p: cuda.abi.Memcpy2D = .{ .src = src, .src_pitch = src_pitch, .dst = dst, .dst_pitch = dst_pitch, .width = width, .height = rows };
         try x.d.check(x.d.api.cuMemcpy2DAsync_v2(&p, x.s.handle), "cuMemcpy2DAsync");
@@ -351,8 +362,7 @@ pub const Drafter = struct {
         try x.k.norms.addRmsTail(x.s, s.fcx, null, x.w.hidden_norm, s.hs, s.normed, s.xs, n, h, c.eps, .{ .round = true });
         for (0..c.layers) |i| {
             const lw = &x.w.layers[i];
-            try x.project(lw.k, s.normed, s.xs, s.kk, n);
-            try x.project(lw.v, s.normed, s.xs, s.vv, n);
+            try x.projectMany(&.{ lw.k, lw.v }, s.normed, s.xs, &.{ s.kk, s.vv }, n);
             const src_: cuda.qk_rows.Src = .{ .q = s.kk, .q_ld = @intCast(kw), .q_hs = dim, .k = s.kk, .k_ld = @intCast(kw), .k_hs = dim, .v = s.vv, .v_ld = @intCast(kw), .v_hs = dim };
             const shape: cuda.qk_rows.Shape = .{ .norms = lw.k_norm, .norm_k = lw.k_norm, .norms_bf16 = true, .inv = s.inv, .rot = dim, .eps = c.eps, .round = true };
             const at = p0 * dim * 2;
@@ -411,9 +421,7 @@ pub const Drafter = struct {
         var cur: usize = 0;
         for (0..c.layers) |i| {
             const lw = &x.w.layers[i];
-            try x.project(lw.q, s.normed, s.xs, s.q, rows);
-            try x.project(lw.k, s.normed, s.xs, s.kk, rows);
-            try x.project(lw.v, s.normed, s.xs, s.vv, rows);
+            try x.projectMany(&.{ lw.q, lw.k, lw.v }, s.normed, s.xs, &.{ s.q, s.kk, s.vv }, rows);
             const src: cuda.qk_rows.Src = .{ .q = s.q, .q_ld = @intCast(qw), .q_hs = dim, .k = s.kk, .k_ld = @intCast(kw), .k_hs = dim, .v = s.vv, .v_ld = @intCast(kw), .v_hs = dim };
             const shape: cuda.qk_rows.Shape = .{ .norms = lw.q_norm, .norm_k = lw.k_norm, .norms_bf16 = true, .inv = s.inv, .rot = dim, .eps = c.eps, .round = true };
             // head-major rows for block_attention: q [heads, rows, 128], k and v [kv heads, rows, 128]
@@ -433,8 +441,7 @@ pub const Drafter = struct {
             try x.project(lw.o, s.att, s.xs, s.o, rows);
             try x.k.norms.addRmsTail(x.s, s.o, s.h[cur], lw.post_attention, s.h[1 - cur], s.normed, s.xs, rows, h, c.eps, .{ .round = true });
             cur = 1 - cur;
-            try x.project(lw.gate, s.normed, s.xs, s.gate, rows);
-            try x.project(lw.up, s.normed, s.xs, s.up, rows);
+            try x.projectMany(&.{ lw.gate, lw.up }, s.normed, s.xs, &.{ s.gate, s.up }, rows);
             try x.k.act.swigluRound(x.s, s.gate, c.intermediate, s.up, c.intermediate, s.act, s.xs, rows, c.intermediate);
             try x.project(lw.down, s.act, s.xs, s.y, rows);
             const next = if (i + 1 < c.layers) x.w.layers[i + 1].input_norm else x.w.norm;

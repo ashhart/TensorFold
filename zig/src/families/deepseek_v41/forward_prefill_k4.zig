@@ -54,6 +54,7 @@ pub fn planWorkspace(f: *Forward, wp: *buffers.Plan, rows: u32, layers: []const 
             const cs = try block_prefill.emitReplay(ka.allocator(), f.cfg, f.widths, o4, enc, K4.rows, start, .encoder);
             try wp.add(try block_prefill.ownCalls(ka.allocator(), cs, K4.tag));
         }
+        try @import("index_scratch.zig").plan(wp, K4.rows, o4, f.cfg, K4.tag);
     }
     if (replay and f.opts.pf_tbo and rows >= 2 * block_prefill.tbo_min) {
         const enc = try encoderLayers(f, layers);
@@ -67,6 +68,15 @@ pub fn planWorkspace(f: *Forward, wp: *buffers.Plan, rows: u32, layers: []const 
             const cs = try block_prefill.emitTbo(ta.allocator(), f.cfg, f.widths, op, enc, seg, seg, start);
             try wp.add(try wsPair(ta.allocator(), cs, k4));
         }
+        // B at full rows can stream even at start zero; the minimum legal pair seeds its materialised branch.
+        {
+            var ta = std.heap.ArenaAllocator.init(f.gpa);
+            defer ta.deinit();
+            const n = block_prefill.tbo_min;
+            const cs = try block_prefill.emitTbo(ta.allocator(), f.cfg, f.widths, op, enc, n, n, 0);
+            try wp.add(try wsPair(ta.allocator(), cs, k4));
+        }
+        try @import("index_scratch.zig").plan(wp, seg, op, f.cfg, K4.tag ++ "b~");
     }
 }
 
