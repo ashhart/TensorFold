@@ -44,8 +44,13 @@ fn epiOf(kind: Kind) cuda.experts.Epi {
 
 const experts = 4;
 const slots = 2; // pairs a token row, both routed
-const waves_rows = 1024; // the waves kinds' two-wave shape: cut_waves and cut_waves_one go red only there
+const waves_rows = 1024; // the waves kinds' least two-wave shape: cut_waves and cut_waves_one go red only past one wave
 const rule = "as the decode form it replaces gives them: NaN and infinite global scales, a NaN block scale, NaN and infinite inputs";
+
+/// Rows whose items of 16 pairs route more units than `warps` resident warps hold over `nb` column blocks: two waves.
+fn wavesRows(warps: usize, nb: usize) !usize {
+    return @max(waves_rows, try std.math.mul(usize, try std.math.add(usize, warps / nb, 1), 16 / slots));
+}
 
 /// Each 16-input block's mma (16 products) and its fma into the running sum, blocks in ascending K.
 fn depth(s: c.Shape) usize {
@@ -64,7 +69,7 @@ pub fn spec(kind: Kind) c.Spec {
     // a decode item of 16 pairs (8 token rows) by a warp's 32 columns (half: 16 of them) over all K, 32 inputs a step
     const unit = [3]c.Tile{ .{ .size = 16 / slots }, .{ .size = 32, .step = 32, .min = 32 }, .{ .size = 32, .step = 32, .min = 32 } };
     const why = "a bf16 sum that collapses moves the output by about itself, and the epilogue's three bf16 roundings already allow 3 u of it: at most 1 / (3 u) = 85x is provable";
-    // 1,024 rows: 128+ items of 16 pairs, 2,560+ gate-up and 10,240+ down units: two waves below 2,560 resident warps
+    // 1,024 rows: 128+ items of 16 pairs, 2,560+ gate-up and 10,240+ down units; waves kinds grow it past one wave
     const up_served = &[_]c.Shape{ .{ .rows = 1, .n = 640, .k = 2560 }, .{ .rows = 4, .n = 640, .k = 2560 }, .{ .rows = 16, .n = 640, .k = 2560 }, .{ .rows = waves_rows, .n = 640, .k = 2560 } };
     const down_served = &[_]c.Shape{ .{ .rows = 1, .n = 2560, .k = 640 }, .{ .rows = 4, .n = 2560, .k = 640 }, .{ .rows = 16, .n = 2560, .k = 640 }, .{ .rows = waves_rows, .n = 2560, .k = 640 } };
     const why2 = "the bf16 rounding before the square is allowed in the bound (2 u of the output), so a short sum stands out less than in SwiGLU: fp16 and bf16 sums miss by 64x";
@@ -106,6 +111,7 @@ pub const Experts = struct {
     sd: u64 = 0,
     xd: u64 = 0,
     plan: grouped.Plan = undefined, // 16 pairs an item: the decode form's
+    served: [4]c.Shape = undefined, // a waves kind's shapes: the last sized past one wave of the entry it launches
     wide: grouped.Plan = undefined, // promptTile pairs an item: the fact tiles'
     out: u64 = 0,
     base: u64 = 0,
@@ -130,7 +136,7 @@ pub const Experts = struct {
         self.allow_extra = &.{};
     }
 
-    pub fn kernel(self: *Experts) g.Kernel {
+    pub fn kernel(self: *Experts) !g.Kernel {
         var entry = spec(self.kind);
         if (self.tile != null) {
             entry.name = switch (self.kind) {
@@ -143,6 +149,13 @@ pub const Experts = struct {
             // the K32 tile is Flash Next's alone: its own shapes
             if (self.kind != .control) entry.served = if (self.kind == .up) prompt_up_served[0..2] else prompt_down_served[0..2];
         }
+        // a waves entry's two-wave shape from its measured residency as loaded (half, entry 6, serves one wave only)
+        if (wavesEntry(self.kind)) |fi| if (fi != 6) {
+            const k = if (isOne(self.kind)) self.k1 else self.k;
+            self.served = entry.served[0..4].*;
+            self.served[3].rows = try wavesRows(try std.math.mul(usize, k.resident[fi], k.warps), self.served[3].n / fx.cols);
+            entry.served = &self.served;
+        };
         return .{ .spec = entry, .ctx = self, .vt = &vt, .control = switch (self.kind) {
             .control, .cut_waves, .cut_waves_one => .shapes,
             else => null,
