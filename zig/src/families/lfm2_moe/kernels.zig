@@ -16,6 +16,8 @@ const names = [_][:0]const u8{
     "lfm2_attn_mma",
     "lfm2_attn_mma_r2",
     "lfm2_attn_merge",
+    "lfm2_attn_block",
+    "lfm2_attn_block_merge",
     "lfm2_route_logits",
     "lfm2_route_select",
     "lfm2_swiglu",
@@ -28,6 +30,12 @@ const names = [_][:0]const u8{
     "lfm2_attn_segs",
     "lfm2_attn_merge_segs",
     "lfm2_tap",
+    "lfm2_markov_scan",
+    "lfm2_markov_scan_bf16",
+    "lfm2_bf16_rows",
+    "lfm2_bf16_mma",
+    "lfm2_markov_pick",
+    "lfm2_draft_ids",
 };
 
 pub const Kernels = struct {

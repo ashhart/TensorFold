@@ -163,8 +163,10 @@ test "parse and capabilities share the table" {
     try std.testing.expectEqual(@as(usize, 2), args.api_key.len);
     try std.testing.expect(!args.thinking);
     try std.testing.expectEqualStrings("x", (try parse(a, &.{ "m", "--drafter", "x" }, &u)).drafter.?);
-    try std.testing.expectEqual(@as(u8, 0), (try parse(a, &.{ "m", "--drafter-bits", "0" }, &u)).drafter_bits);
-    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--drafter-bits", "8" }, &u));
+    try std.testing.expectEqual(@as(?u8, 0), (try parse(a, &.{ "m", "--drafter-bits", "0" }, &u)).drafter_bits);
+    try std.testing.expectEqual(@as(?u8, 8), (try parse(a, &.{ "m", "--drafter-bits", "8" }, &u)).drafter_bits);
+    try std.testing.expectEqual(@as(?u8, null), (try parse(a, &.{ "m", "--drafter", "x" }, &u)).drafter_bits);
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--drafter-bits", "3" }, &u));
     try std.testing.expectEqualStrings("/r", (try parse(a, &.{ "m", "--record", "/r" }, &u)).record.?);
     try std.testing.expectEqualStrings("fp8", (try parse(a, &.{ "m", "--kv-cache", "fp8" }, &u)).kv_cache);
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--kv-cache", "int4" }, &u));
