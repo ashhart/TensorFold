@@ -14,10 +14,13 @@ pub fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch,
         return .{ .decl = d, .function = fun, .here = b, .pre_m5 = b };
     }
     if (std.mem.startsWith(u8, d.name, "dsv41 fp8 mma ")) return .{ .decl = d, .function = fun, .here = sources.dsv41.fp8_mma, .pre_m5 = sources.dsv41.fp8_mma };
+    if (std.mem.startsWith(u8, d.name, "dsv41 attn ")) return .{ .decl = d, .function = fun, .here = sources.dsv41.csa2_attn, .pre_m5 = sources.dsv41.csa2_attn };
     if (std.mem.startsWith(u8, d.name, "dsv41 experts ")) {
         const body = try tf.dsv41_metal.experts.source(a, "", &.{});
         return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
     }
+    if (std.mem.startsWith(u8, d.name, "dsv41 glue_tmp ")) return .{ .decl = d, .function = fun, .here = sources.dsv41.glue_tmp, .pre_m5 = sources.dsv41.glue_tmp };
+    if (std.mem.startsWith(u8, d.name, "dsv41 mv ")) return .{ .decl = d, .function = fun, .here = sources.dsv41.mv, .pre_m5 = sources.dsv41.mv };
     if (std.mem.startsWith(u8, d.name, "dsv41 fp8 rows ")) return .{ .decl = d, .function = fun, .here = sources.dsv41.fp8_rows, .pre_m5 = sources.dsv41.fp8_rows };
     return null;
 }
