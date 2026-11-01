@@ -1,5 +1,6 @@
 //! DFlash2 is a separate five-layer GQA contract; the target's GDN and draft conventions are not interchangeable.
 const std = @import("std");
+const target_config = @import("../config.zig");
 pub const repository = "z-lab/Qwen3.8-27B-DFlash2";
 pub const tap_ids = [5]u32{ 5, 19, 33, 47, 61 };
 pub const Config = struct {
@@ -55,6 +56,10 @@ pub const Config = struct {
         _ = try std.math.mul(u32, c.hidden, 5);
         _ = try std.math.mul(u32, c.hidden / c.group, 4);
         if (q % 64 != 0) return error.BadDraftConfig;
+    }
+    /// A draft reads one target's taps and vocabulary: its width, vocabulary and tapped depth.
+    pub fn bind(c: Config, hidden: usize, vocab: usize, layers: usize) !void {
+        if (hidden != c.hidden or vocab != c.vocab or layers != c.target_layers) return error.DraftForAnotherTarget;
     }
     pub fn requireStock(c: Config) !void {
         try c.check();
@@ -115,6 +120,23 @@ pub fn parse(gpa: std.mem.Allocator, raw: []const u8) !Config {
     return c;
 }
 
+/// --drafter's config against the target's, from the two folders' config.json: a refusal comes before either loads.
+pub fn admit(gpa: std.mem.Allocator, io: std.Io, target_dir: []const u8, draft_dir: []const u8) !Config {
+    const target_text = try readConfig(gpa, io, target_dir, 16 << 20);
+    defer gpa.free(target_text);
+    const draft_text = try readConfig(gpa, io, draft_dir, 1 << 20);
+    defer gpa.free(draft_text);
+    const t = try target_config.parse(gpa, target_text, null);
+    const c = try parse(gpa, draft_text);
+    try c.bind(t.hidden, t.vocab, t.layers);
+    return c;
+}
+fn readConfig(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, limit: usize) ![]u8 {
+    const path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
+    defer gpa.free(path);
+    return std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(limit));
+}
+
 test "stock contracts count81native tensors47eligiblelinears and seven mask predictions" {
     const c = Config{};
     try c.requireStock();
@@ -168,4 +190,49 @@ test "a draft whose rope is scaled by a rope_scaling block is refused, not read 
     const scaled = try std.mem.replaceOwned(u8, a, fixture, "\"layer_types\"", "\"rope_scaling\":{\"type\":\"yarn\",\"factor\":4.0},\"layer_types\"");
     defer a.free(scaled);
     try std.testing.expectError(error.BadDraftConfig, parse(a, scaled));
+}
+
+fn targetJson(a: std.mem.Allocator, hidden: u32, intermediate: u32, layers: u32, heads: u32, v_heads: u32) ![]u8 {
+    return std.fmt.allocPrint(a,
+        \\{{"model_type":"qwen3_5","text_config":{{"model_type":"qwen3_5_text","hidden_size":{d},"intermediate_size":{d},
+        \\"num_hidden_layers":{d},"num_attention_heads":{d},"num_key_value_heads":4,"head_dim":256,"vocab_size":248320,
+        \\"linear_num_key_heads":16,"linear_num_value_heads":{d},"linear_key_head_dim":128,"linear_value_head_dim":128,
+        \\"linear_conv_kernel_dim":4,"partial_rotary_factor":0.25,"eos_token_id":248044}}}}
+    , .{ hidden, intermediate, layers, heads, v_heads });
+}
+/// Two checkpoint folders holding only their config.json: `admit` reads no weights, since none exist.
+fn admitFolders(target: []const u8, draft: []const u8) !Config {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "target");
+    try tmp.dir.createDirPath(io, "draft");
+    try tmp.dir.writeFile(io, .{ .sub_path = "target/config.json", .data = target });
+    try tmp.dir.writeFile(io, .{ .sub_path = "draft/config.json", .data = draft });
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer a.free(root);
+    const t = try std.fs.path.join(a, &.{ root, "target" });
+    defer a.free(t);
+    const d = try std.fs.path.join(a, &.{ root, "draft" });
+    defer a.free(d);
+    return admit(a, io, t, d);
+}
+test "a 9B target refuses the 27B's DFlash2 and a 9B-shaped DFlash2 by name from their configs alone" {
+    const a = std.testing.allocator;
+    const nine = try targetJson(a, 4096, 12288, 32, 16, 32);
+    defer a.free(nine);
+    const big = try targetJson(a, 5120, 17408, 64, 24, 48);
+    defer a.free(big);
+    try std.testing.expectEqualDeep(Config{}, try admitFolders(big, fixture));
+    try std.testing.expectError(error.DraftForAnotherTarget, admitFolders(nine, fixture));
+    var small = try a.dupe(u8, fixture);
+    defer a.free(small);
+    const edits = [_][2][]const u8{ .{ "\"hidden_size\":5120", "\"hidden_size\":4096" }, .{ "\"intermediate_size\":17408", "\"intermediate_size\":12288" }, .{ "\"num_target_layers\":64", "\"num_target_layers\":32" }, .{ "[5,19,33,47,61]", "[1,8,15,22,29]" } };
+    for (edits) |e| {
+        const next = try std.mem.replaceOwned(u8, a, small, e[0], e[1]);
+        a.free(small);
+        small = next;
+    }
+    try std.testing.expectError(error.NotStockDFlash2, admitFolders(nine, small));
 }
