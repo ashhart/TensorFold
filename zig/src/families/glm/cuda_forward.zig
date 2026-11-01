@@ -27,6 +27,7 @@ const shared = @import("cuda_shared.zig");
 const index_mod = @import("cuda_index.zig");
 
 pub const prefill_rows = state.prefill_rows;
+pub const solo_rows = state.solo_rows;
 pub const window_rows = state.window_rows;
 pub const State = state.State;
 pub const Buffers = state.Buffers;

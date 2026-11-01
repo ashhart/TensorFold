@@ -228,7 +228,6 @@ test "the final shared reservation charges a hold to the head stream alone, over
         try t.expectEqualSlices(i64, &.{ 0, keep }, try s.budgets());
     }
 }
-
 /// The drafter of drafted_test, pricing every held chain by 0.9 a draft and holding each hold to the grant's bound.
 const Scripted = struct {
     head: dt.FakeDrafter,

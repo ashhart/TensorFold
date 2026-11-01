@@ -103,7 +103,6 @@ pub fn pricesPasses(engine: anytype) bool {
     const c = engine.cfg;
     return c.family_streams and c.family_mtp and c.allocate_shared_drafts and (c.granted_depth or c.limit_shared_drafts) and c.k.hold_costs.len > 0;
 }
-
 /// Interpolate neighboring depths, or extrapolate the nearest end segment (one alone: as timed).
 fn atDepth(costs: []const HoldCost, streams: u32, depth: i64) f64 {
     var a: ?HoldCost = null;

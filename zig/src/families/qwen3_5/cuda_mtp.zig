@@ -46,8 +46,8 @@ pub const Ctx = struct {
 /// How a layer pass attends: absorbed or chained rows over the ring and the block's earlier rows, into the ring too.
 const Pass = union(enum) { ring, tree: u64 };
 
-/// Where a stream's ring and state are when its target lane's run holds them (Mtp.ring_of).
-pub const RingOf = struct { ctx: *anyopaque, area: *const fn (*anyopaque, *Stream) ?u64 };
+/// Where a stream's ring and state are when its lane's run holds them (Mtp.ring_of); all: every stream's.
+pub const RingOf = struct { ctx: *anyopaque, area: *const fn (*anyopaque, *Stream) ?u64, all: bool = false };
 
 pub const Mtp = struct {
     gpa: std.mem.Allocator,
@@ -261,7 +261,8 @@ pub const Mtp = struct {
 
     /// `n` contexts ready in the pool, for the streams the server admits.
     pub fn reserve(d: *Mtp, n: usize) !void {
-        const own = if (d.ring_of != null) @min(n, 1) else n; // with a pool the other streams' buffers are lane runs
+        // with a pool the other streams' buffers are lane runs (all: every stream's)
+        const own = if (d.ring_of) |r| (if (r.all) 0 else @min(n, 1)) else n;
         try d.pool.ensureTotalCapacity(d.gpa, own);
         while (d.pool.items.len < own) d.pool.appendAssumeCapacity(try d.create());
     }
