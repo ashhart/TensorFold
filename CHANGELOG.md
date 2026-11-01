@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Idol's DINOv3 ViT-H+/16 image encoder on CUDA, beside the Metal encoder and driven by the same `tf-idol-dino` case driver and gates: cuBLASLt bf16 linears with fp32 sums, each bias and its one bf16 rounding in the step after, fp32 LayerNorm statistics, and the denoiser's head-64 attention instanced for bf16 (a new template instance; `idol.cu`'s source is unchanged). It admits sm_121 (GB10) and sm_120 and refuses other GPUs. It compiles for both and its host tests pass, but it has not yet run on a GPU (after #1775 and #1767, for #1757). Thanks to @jayleaton.
+
 - Idol's denoiser on CUDA, beside the Metal family and driven by the same `tf-idol` case driver and gates: cuBLASLt fp16 projections with fp32 sums, true fp32 (no TF32) for RePo, the condition and the output, and its own head-64 attention. It admits sm_121 (GB10) and sm_120 and refuses other GPUs. It compiles for both and its host tests pass, but it has not yet run on a GPU (#1767, after #1766, for #1757). Thanks to @jayleaton.
 
 - Idol's background removal on CUDA: BiRefNet's fp32 forward and its resizes run beside the Metal family, driven by the same `tf-idol-birefnet` case driver and gates, while the host's preprocessing stays shared code. Every conv is its own fp32 kernel, with blocked 256-term sums and no TF32 or cuBLASLt. The deformable conv samples as torchvision's `deform_conv2d`. Its kernels pass the kernel contract's host checks under `tf-cuda-test idol-birefnet-contract`. It admits sm_121 (GB10) and sm_120 and refuses other GPUs. It compiles and passes host tests but has never run on a GPU; GB10 qualification is pending (after #1787 and #1767, for #1757). Thanks to @jayleaton.

@@ -21,7 +21,15 @@ pub const sqrt_ulps = 0.5;
 pub const fn_ulps = 2;
 
 /// An input's element type on the device.
-pub const Kind = enum { f16, f32 };
+pub const Kind = enum {
+    f16,
+    f32,
+    bf16,
+
+    pub fn size(k: Kind) usize {
+        return if (k == .f32) 4 else 2;
+    }
+};
 
 /// A value as fp32, then fp16, round to nearest even (overflow to infinity).
 pub fn h(v: f64) f64 {

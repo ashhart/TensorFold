@@ -595,5 +595,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_ctl_idol_bias_late(const fl
     Y[i] = __float2half_rn(act ? v : h(v));
 }
 
+// Gates 3 and 4: Idol's DINOv3 glue (idol_dino.cu), one bf16 rounding dropped or added, or its sums in fp16.
+#include "idol_dino_controls.cuh"
 // Idol's background remover's controls (fp16 rounding points or sums, a dropped NaN); none ship.
 #include "idol_birefnet_controls.cuh"

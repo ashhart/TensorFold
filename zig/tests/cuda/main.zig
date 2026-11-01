@@ -238,6 +238,7 @@ const usage =
     \\  minimax-contract          MiniMax-M3.1-Flash's indexer and block-sparse attention through gates 1-4, controls red
     \\  moss-contract             MOSS-Image's own kernels and its full attention through gates 1-4, controls red
     \\  idol-contract             Idol's denoiser glue and head-64 attention through gates 1-4, controls red
+    \\  idol-dino-contract        Idol's DINOv3 encoder glue and bf16 head-64 attention through gates 1-4, controls red
     \\  idol-birefnet-contract    Idol's background remover (BiRefNet, fp32) through gates 1-4, controls red
     \\  glm-exl3                  GLM's EXL3 routed experts, decode and prompt, against float64 (synthetic)
     \\  glm-vision MODEL F32 BF16 IMG  GLM's image tower and preparation against vision_ref.py's torch runs
@@ -461,6 +462,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "qwen-pages")) return @import("contract_qwen_pages.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "minimax-contract")) return @import("contract_minimax.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "idol-contract")) return @import("contract_idol.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "idol-dino-contract")) return @import("contract_idol_dino.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "idol-birefnet-contract")) return @import("contract_birefnet.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "kernel-contract-limits")) return contract_tests.fatbins(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "pocket-contract")) return @import("contract_pocket.zig").run(gpu);
