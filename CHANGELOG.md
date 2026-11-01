@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Lane rounds count the time each stream spends in grammar mask fills, per round and per reply, reported with the round metrics; nothing is read when no stream is constrained, and behaviour is unchanged (part of #1455).
+
 - CUDA tensor parallel: a rank that cannot bind its liveness port (`NCCL_COMM_ID`'s port + 1, often held by an earlier server still exiting) says so, as do a rank that never arrives and a failed accept, instead of reporting a generic "glue kernels" error (fixes #1761).
 
 - Gemma 4 E4B on Intel GPUs: prompts are read 2.0 to 2.6 times faster on an Arc Pro B70 (layers past the KV-owning ones run only for the last row, 1,024-row forwards, the GeGLU fused into the gate_up GEMM), and decode is 4% to 8% faster at 32K to 64K tokens, with the same logits (#1746, part of #1222). Thanks to @Mirrdhyn.
