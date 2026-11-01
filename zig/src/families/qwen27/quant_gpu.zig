@@ -60,6 +60,10 @@ pub const Kernels = struct {
     long_prompt: bool = false,
     lanes: std.AutoHashMapUnmanaged(Key, lane.Projection) = .empty,
     cache: std.AutoHashMapUnmanaged(Key, mtl.Pipeline) = .empty,
+    /// A stack's lane member writes its prompt rows here; `stack_pipeline` places them at the stack's stride.
+    stage: ?mtl.Buffer = null,
+    stage_bytes: usize = 0,
+    stack_pipeline: ?mtl.Pipeline = null,
 
     pub fn setResident(k: *Kernels, hook: ?mtl.ResidencySet.Follow) void {
         var it = k.lanes.valueIterator();
@@ -88,6 +92,8 @@ pub const Kernels = struct {
         var it = k.cache.valueIterator();
         while (it.next()) |p| p.deinit();
         k.cache.deinit(k.allocator);
+        if (k.stage) |b| b.deinit();
+        if (k.stack_pipeline) |p| p.deinit();
     }
 
     fn get(k: *Kernels, key: Key) !mtl.Pipeline {
@@ -289,13 +295,51 @@ pub const Kernels = struct {
                 }
                 continue;
             }
-            for (0..rows) |r| { // lane kernels take one row a launch until they write at a stride
+            if (k.prompt and rows > 1) { // all prompt rows in one lane product, then placed at the stack's stride
+                const width = run.linear.n;
+                const stage = try k.staging(@as(usize, rows) * width * 2);
+                try k.quantOne(input_encoder, run.linear, x, xs, dims, stage, rows, 0, .{ 0, 0 });
+                try k.place(input_encoder, stage, .{ .buffer = y.buffer, .offset = y.offset + @as(usize, run.first) * 2 }, .{ .rows = rows, .width = width, .stride = p.n, .offset = 0 });
+                continue;
+            }
+            for (0..rows) |r| { // decoded rows: lane kernels take one row a launch until they write at a stride
                 const xr = Ref{ .buffer = x.buffer, .offset = x.offset + r * p.k * 2 };
                 const sr: ?Sums = if (xs) |s| .{ .ref = .{ .buffer = s.ref.buffer, .offset = s.ref.offset + r * 4 }, .stride = s.stride } else null;
                 const yr = Ref{ .buffer = y.buffer, .offset = y.offset + (r * p.n + run.first) * 2 };
                 try k.quantOne(input_encoder, run.linear, xr, sr, dims, yr, 1, 0, .{ 0, 0 });
             }
         }
+    }
+
+    /// The stage buffer, grown to at least `bytes`.
+    fn staging(k: *Kernels, bytes: usize) !Ref {
+        if (bytes > k.stage_bytes) {
+            const b = try k.device.buffer(bytes, mtl.ResourceOptions.private | mtl.ResourceOptions.untracked);
+            if (k.stage) |old| old.deinit();
+            k.stage = b;
+            k.stage_bytes = bytes;
+        }
+        return .{ .buffer = k.stage.?, .offset = 0 };
+    }
+
+    /// Rows of `p.width` values at `x` into `y` at a stride of `p.stride` (bf16 bits kept), between barriers.
+    fn place(k: *Kernels, input_encoder: mtl.ComputeEncoder, x: Ref, y: Ref, p: Stack) !void {
+        if (k.stack_pipeline == null) {
+            const library = try mtl.Library.fromSource(k.device, stack_source, mtl.CompileOptions.mlx());
+            defer library.deinit();
+            k.stack_pipeline = try mtl.Pipeline.init(k.device, library, "q27_stack", false);
+        }
+        var span = profile.begin(k.profiler, input_encoder, .copy);
+        errdefer span.cancel();
+        const e = span.encoder;
+        e.barrier(); // the lane product's rows are written
+        e.setPipeline(k.stack_pipeline.?);
+        e.setBuffer(x.buffer, x.offset, 0);
+        e.setValue(p, 1);
+        e.setBuffer(y.buffer, y.offset, 2);
+        e.dispatchThreads(mtl.Size.of(p.width, p.rows, 1), mtl.Size.of(256, 1, 1));
+        e.barrier(); // the stage is free for the next member
+        try span.end();
     }
 
     /// simd_qmm's tiles at any width (4-bit: its bits), else the row kernel; output row m at y + m * stride values.
@@ -432,6 +476,18 @@ pub const Kernels = struct {
         try span.end();
     }
 };
+
+const Stack = extern struct { rows: u32, width: u32, stride: u32, offset: u32 };
+const stack_source =
+    \\#include <metal_stdlib>
+    \\using namespace metal;
+    \\struct Stack { uint rows, width, stride, offset; };
+    \\[[max_total_threads_per_threadgroup(256)]]
+    \\kernel void q27_stack(device const ushort* X [[buffer(0)]], constant Stack& p [[buffer(1)]],
+    \\                      device ushort* Y [[buffer(2)]], uint2 t [[thread_position_in_grid]]) {
+    \\  if (t.x < p.width && t.y < p.rows) Y[t.y * p.stride + p.offset + t.x] = X[t.y * p.width + t.x];
+    \\}
+;
 
 pub fn padded(rows: u32) u32 {
     return 16 * ((rows + 15) / 16);
