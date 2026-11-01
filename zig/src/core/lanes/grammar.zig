@@ -65,7 +65,11 @@ pub fn swapLibrary(f: ?Fns) ?Fns {
 }
 
 /// The library's file name, for the refusal when it cannot be loaded.
-pub const library = if (builtin.os.tag == .macos) "libtfgrammar.dylib" else "libtfgrammar.so";
+pub const library = switch (builtin.os.tag) {
+    .macos => "libtfgrammar.dylib",
+    .windows => "tfgrammar.dll",
+    else => "libtfgrammar.so",
+};
 
 /// libtfgrammar's kinds in order: structural_tag is xgrammar's JSON form (a tool call's markup around its arguments).
 pub const Kind = enum(u8) { json, json_schema, regex, choice, grammar, structural_tag };

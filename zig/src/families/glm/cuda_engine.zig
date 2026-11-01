@@ -542,7 +542,7 @@ pub const Engine = struct {
         var s0: usize = 0;
         while (s0 < next.len) : (s0 += fw.window_rows) {
             const part = next[s0..@min(next.len, s0 + fw.window_rows)];
-            try f.mtp(part, &.{hidden + s0 * D * 2});
+            try f.mtpMode(part, &.{hidden + s0 * D * 2}, depth > 0);
             try e.cur.st.setMtpLen(e.stream, e.cur.st.mtp_len + part.len);
         }
         for (0..depth) |j| {

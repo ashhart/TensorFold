@@ -6,7 +6,6 @@ pub const tfvideo = @import("tfvideo.zig");
 pub const DraftSources = @import("draft_sources.zig").Sources;
 /// The server's name for one request, unique while the process lives.
 pub const Id = u64;
-
 /// One request's sampling (Python's exact_sampling.Sampling); a request without one decodes greedily.
 pub const Sampling = lanes.Sampling;
 /// presence_penalty and frequency_penalty, applied where ``Info.penalties``.
@@ -284,6 +283,7 @@ pub const Precision = enum { checkpoint, full };
 
 /// What a server asks of the engine it opens: the checkpoint, and the serve flags an engine reads.
 pub const Open = struct {
+    pub const slideRefusal = @import("engine_slide.zig").refusal;
     pub fn fsrRefusal(o: Open, backend: []const u8) ?[]const u8 {
         if (o.ssd_experts_gib == null and !o.ple_on_ssd and o.fsr_trace == null) return null;
         if (!std.mem.eql(u8, backend, "metal") or !std.mem.eql(u8, o.model_type, "qwen4_exp"))

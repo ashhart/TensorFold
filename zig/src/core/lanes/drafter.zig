@@ -8,6 +8,7 @@ const Allocator = @import("std").mem.Allocator;
 
 /// What the round loop's depth rule needs from the drafter itself (not from the target, whose own head may not exist).
 pub const Facts = struct {
+    limit_shared_drafts: bool = false, // retain the depth rule's head-step price before reserving shared rows
     depth: u32, // drafts a round at most
     step_ms: f64, // one more draft's cost (timed at load); the rule prices a round as forward(rows) + step_ms x drafts
     prior: []const f64 = &.{}, // acceptance by depth until a stream has its own
@@ -29,6 +30,7 @@ pub const Absorb = struct {
     follow: []const u32,
     rows: ?[]const u32 = null,
     prompt: bool = true, // prompt ingestion keeps its historical arithmetic; accepted live rows set false
+    propose: bool = true, // false: retain committed context without computing unused proposal outputs
     offered: u32 = 0, // the drafter's grown tree's first nodes the verified window carried (0: none of its own)
 };
 

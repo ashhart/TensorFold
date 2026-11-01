@@ -43,6 +43,26 @@ pub const Api = struct {
     zeContextDestroy: *const fn (H) callconv(.c) u32,
 };
 
+/// The core memory table, Gpu.memory's fallback where Sysman cannot run.
+pub const MemApi = struct {
+    zeDeviceGetMemoryProperties: *const fn (H, *u32, ?[*]DeviceMemoryProperties) callconv(.c) u32,
+};
+/// ze_device_memory_properties_t.
+pub const DeviceMemoryProperties = extern struct {
+    stype: u32 = 0x5, // ZE_STRUCTURE_TYPE_DEVICE_MEMORY_PROPERTIES
+    pNext: ?*anyopaque = null,
+    flags: u32 = 0,
+    max_clock_rate: u32 = 0,
+    max_bus_width: u32 = 0,
+    total_size: u64 = 0,
+    name: [256]u8 = @splat(0),
+};
+
+/// Sysman needs DRM: under WSL2 (/dev/dxg, no /dev/dri) NEO 23.43's zesInit faults in libze_intel_gpu (C2 receipt).
+fn sysmanUsable() bool {
+    return std.c.access("/dev/dri", 0) == 0 or std.c.access("/dev/dxg", 0) != 0;
+}
+
 /// Sysman, for the free memory of the device's own memory modules (Gpu.freeMemory).
 pub const SysApi = struct {
     zesInit: *const fn (u32) callconv(.c) u32,
@@ -242,14 +262,20 @@ pub const Gpu = struct {
         errdefer lib.close();
         const api = try resolve(Api, &lib);
         try check(api.zeInit(1)); // ZE_INIT_FLAG_GPU_ONLY
-        var nd: u32 = 8;
+        var nd: u32 = 0;
+        try check(api.zeDriverGet(&nd, null));
         var drivers: [8]H = @splat(null);
+        nd = @min(nd, drivers.len);
         try check(api.zeDriverGet(&nd, &drivers));
         for (drivers[0..nd]) |drv| {
-            var nv: u32 = 8;
+            if (drv == null) continue;
+            var nv: u32 = 0; // the count first, as context.enumerate (a padded list holds nulls)
+            try check(api.zeDeviceGet(drv, &nv, null));
             var devs: [8]H = @splat(null);
+            nv = @min(nv, devs.len);
             try check(api.zeDeviceGet(drv, &nv, &devs));
             for (devs[0..nv]) |dev| {
+                if (dev == null) continue;
                 var p: DeviceProperties = .{};
                 try check(api.zeDeviceGetProperties(dev, &p));
                 if (p.deviceId != device_id) continue;
@@ -261,27 +287,40 @@ pub const Gpu = struct {
         return error.NoDevice;
     }
 
-    /// On-board bytes free and in all by Sysman (device matched by UUID); an allocation leaves `free` once written.
+    /// On-board bytes free and in all by Sysman (by UUID); without Sysman (WSL2) both are the core total, less nothing.
     pub fn memory(g: *Gpu) Error!struct { free: u64, size: u64 } {
+        if (!sysmanUsable()) {
+            const total = try g.coreMemory();
+            return .{ .free = total, .size = total };
+        }
         const sys = try resolve(SysApi, &g.lib);
         try check(sys.zesInit(0));
-        var nd: u32 = 8;
+        var nd: u32 = 0; // counts first: loader 1.16 + NEO 23.43 keep a larger count as asked, padded with nulls
+        try check(sys.zesDriverGet(&nd, null));
         var drivers: [8]H = @splat(null);
+        nd = @min(nd, drivers.len);
         try check(sys.zesDriverGet(&nd, &drivers));
         for (drivers[0..nd]) |drv| {
-            var nv: u32 = 8;
+            if (drv == null) continue;
+            var nv: u32 = 0;
+            try check(sys.zesDeviceGet(drv, &nv, null));
             var devs: [8]H = @splat(null);
+            nv = @min(nv, devs.len);
             try check(sys.zesDeviceGet(drv, &nv, &devs));
             for (devs[0..nv]) |dev| {
+                if (dev == null) continue;
                 var p: SysDeviceProperties = .{};
                 try check(sys.zesDeviceGetProperties(dev, &p));
                 if (!std.mem.eql(u8, &p.core.uuid, &g.props.uuid)) continue;
-                var nm: u32 = 16;
+                var nm: u32 = 0;
+                try check(sys.zesDeviceEnumMemoryModules(dev, &nm, null));
                 var mods: [16]H = @splat(null);
+                nm = @min(nm, mods.len);
                 try check(sys.zesDeviceEnumMemoryModules(dev, &nm, &mods));
                 var left: u64 = 0;
                 var all: u64 = 0;
                 for (mods[0..nm]) |m| {
+                    if (m == null) continue;
                     var mp: MemProperties = .{};
                     try check(sys.zesMemoryGetProperties(m, &mp));
                     if (mp.location != 1) continue;
@@ -294,6 +333,17 @@ pub const Gpu = struct {
             }
         }
         return error.NoDevice;
+    }
+
+    /// The memory modules' total by the core API, asked with room for 8 (NEO answers a count query with 0).
+    pub fn coreMemory(g: *Gpu) Error!u64 {
+        const mem = try resolve(MemApi, &g.lib);
+        var props: [8]DeviceMemoryProperties = @splat(.{});
+        var n: u32 = props.len;
+        try check(mem.zeDeviceGetMemoryProperties(g.device, &n, &props));
+        var total: u64 = 0;
+        for (props[0..@min(n, props.len)]) |m| total += m.total_size;
+        return total;
     }
 
     pub fn deviceAlloc(g: *Gpu, size: usize) Error!*anyopaque {
