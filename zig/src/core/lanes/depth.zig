@@ -396,8 +396,17 @@ pub const Rule = struct {
         return best;
     }
 
-    /// The modeled time of a shared round's head steps for the depths it drafted.
+    /// The priced hold pass, otherwise the modeled head steps, kept out of a round's fixed overhead.
     pub fn headMs(r: *const Rule, depths: []const i64) f64 {
+        if (r.k.hold_costs.len > 0) {
+            var held: usize = 0;
+            var deepest: i64 = 0;
+            for (depths) |d| if (d > 0) {
+                held += 1;
+                deepest = @max(deepest, d);
+            };
+            return if (held == 0) 0 else holdMs(r.k.hold_costs, held, deepest);
+        }
         var steps: i64 = 0;
         for (depths) |d| steps = if (r.batched_heads) @max(steps, d) else steps + d;
         return r.mtp_step_ms * @as(f64, @floatFromInt(steps));
