@@ -11,14 +11,6 @@
 namespace tf {
 namespace rocm {
 
-// The product in fp32 at its (row, col) of out, the plan's pair row for a routed item.
-struct F32Out {
-    template <class Args>
-    __device__ static void store(const Args& a, int row, int col, float v) {
-        a.out[out_row(a, row) * a.n + col] = v;
-    }
-};
-
 // A float as the activation type, rounded to nearest even.
 template <typename T>
 __device__ inline typename T::elem narrow(float v) {
@@ -30,6 +22,19 @@ __device__ inline typename T::elem narrow(float v) {
         return __builtin_bit_cast(typename T::elem, static_cast<unsigned short>(bits));
     }
 }
+
+// The product at its (row, col), the plan's pair row for a routed item: rounded to T into out16 when set, else fp32.
+template <typename T>
+struct GemmOut {
+    template <class Args>
+    __device__ static void store(const Args& a, int row, int col, float v) {
+        if (a.out16 != nullptr) {
+            static_cast<typename T::elem*>(static_cast<void*>(a.out16))[out_row(a, row) * a.n + col] = narrow<T>(v);
+        } else {
+            a.out[out_row(a, row) * a.n + col] = v;
+        }
+    }
+};
 
 // A float product rounded to T: FP16 is one rounding of the exact product (fma, zero addend), never fp32 then FP16.
 template <typename T>

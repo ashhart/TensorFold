@@ -65,7 +65,11 @@ pub fn swapLibrary(f: ?Fns) ?Fns {
 }
 
 /// The library's file name, for the refusal when it cannot be loaded.
-pub const library = if (builtin.os.tag == .macos) "libtfgrammar.dylib" else "libtfgrammar.so";
+pub const library = switch (builtin.os.tag) {
+    .macos => "libtfgrammar.dylib",
+    .windows => "tfgrammar.dll",
+    else => "libtfgrammar.so",
+};
 
 /// libtfgrammar's kinds in order: structural_tag is xgrammar's JSON form (a tool call's markup around its arguments).
 pub const Kind = enum(u8) { json, json_schema, regex, choice, grammar, structural_tag };
@@ -222,6 +226,7 @@ pub const Window = struct {
 
 /// One reply's grammar at its committed tokens (Python Constraint).
 pub const Constraint = struct {
+    profile: ?*@import("grammar_time.zig").Profile = null,
     rules: Rules,
     words: usize,
     after: ?u32, // with thinking on, the grammar starts at the token after this one
@@ -306,6 +311,11 @@ pub const Constraint = struct {
 
     /// The next token's bits at the matcher's place; a row that allows nothing is a dead grammar, never a draw.
     fn fill(c: *Constraint, bits: []u32, left: ?u32) !void {
+        const began = if (c.profile) |p| p.now() else 0;
+        defer if (c.profile) |p| {
+            p.total.fills += 1;
+            p.total.fill_ns += p.since(began);
+        };
         try c.rules.vtable.fill(c.rules.ptr, bits);
         if (left) |l| _ = try c.rules.vtable.budget.?(c.rules.ptr, bits, l);
         for (bits) |w| if (w != 0) return;

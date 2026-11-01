@@ -91,7 +91,7 @@ pub const Drafter = struct {
     step_ms: f64 = 0,
     holds: [2 * pass_rows]lanes.hold_price.HoldCost = undefined, // the power-of-two block counts sum to fewer than 2 * pass_rows depths
     holds_len: usize = 0,
-    hold_spent_ms: f64 = 0, // completed hold GPU time; drained at round boundaries, never waits to read it
+    hold_spent_ms: f64 = 0, // GPU ms of every buffer waited on or settled; drained at round boundaries, never waits to read it
     event: mtl.Event = undefined,
     signalled: u64 = 0,
     pending: ?mtl.CommandBuffer = null,
@@ -209,6 +209,7 @@ pub const Drafter = struct {
         var f: dr.Facts = .{ .depth = d.config.block, .step_ms = d.step_ms, .prior = prior[0..d.config.block], .batched = true, .stream_bytes = d.laneBytes(d.options.capacity), .copy_first = true };
         f.chances = d.confident();
         f.hold_costs = d.holds[0..d.holds_len];
+        f.hold_rows = pass_rows;
         return f;
     }
 
@@ -259,9 +260,7 @@ pub const Drafter = struct {
         const pc = stagedPiece(l) orelse return;
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
-        const run = block.begin(d);
-        try block.absorbPass(d, run.e, &.{pc});
-        try block.end(run.cb, run.e);
+        try block.absorbNow(d, &.{pc});
         l.end += l.staged;
         l.staged = 0;
     }
@@ -326,7 +325,7 @@ pub const Drafter = struct {
         const saved = s.reuse.saved orelse return error.DraftContextGap;
         const snap: *const snapshot.Snap = @ptrCast(@alignCast(saved));
         const bytes = snap.draft orelse return error.DraftContextGap;
-        if (s.cached != start or snap.at != start or l.end != 0 or start + d.config.block > l.cap) return error.DraftContextGap;
+        if (s.cached != start or snap.at != start or l.end != 0 or l.staged != 0 or start + d.config.block > l.cap) return error.DraftContextGap;
         copyLane(d, l, snap.at, bytes, false);
         l.end = start;
     }
@@ -342,23 +341,30 @@ pub const Drafter = struct {
         };
     }
 
-    /// Rows from `start` replace the context there: rows that fit the stage wait on the host for the next hold.
+    /// Rows from `start` replace the context there. Rows that fit the lane's stage are copied before the target
+    /// overwrites its taps, for the next hold, snapshot or overflow; others and the stage's rows are absorbed now.
     fn absorbFn(ptr: *anyopaque, items: []const dr.Absorb) anyerror!void {
         const d = cast(ptr);
         try d.settle();
         const width = d.tapBytes();
-        const pool = mtl.objc.Pool.push();
-        defer pool.pop();
-        var run: ?@TypeOf(block.begin(d)) = null;
-        var pieces: [32]block.Piece = undefined;
-        var count: usize = 0;
-        var rows: usize = 0;
+        // every item is accepted before any row is staged or encoded: a refused call leaves no command buffer open
         for (items) |it| {
             const l = d.lanes.get(it.stream) orelse return error.DraftStreamUnknown;
             const f = it.features;
             if (f.space != .device or f.dtype != .bf16 or f.row_bytes != width or it.rows != null) return error.DraftFeaturesUnsupported;
             if (it.start > l.end + l.staged) try d.resumeLane(it.stream, l, it.start); // a prompt pass that resumed
             if (it.start + f.rows + d.config.block > l.cap) return error.DraftContextGap;
+        }
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
+        var run: ?@TypeOf(block.begin(d)) = null;
+        errdefer if (run) |r| r.e.end(); // an encoding error closes the open encoder
+        var pieces: [32]block.Piece = undefined;
+        var count: usize = 0;
+        var rows: usize = 0;
+        for (items) |it| {
+            const l = d.lanes.get(it.stream).?;
+            const f = it.features;
             l.held_len = 0;
             l.slot = null;
             const src = mtl.Buffer{ .id = @ptrFromInt(f.buffer) };
@@ -401,7 +407,8 @@ pub const Drafter = struct {
         }
         const r = run orelse return;
         if (count > 0) try block.absorbPass(d, r.e, pieces[0..count]);
-        try block.end(r.cb, r.e);
+        run = null; // `end` closes the encoder, even when the buffer fails
+        try block.end(d, r.cb, r.e);
     }
 
     /// Each stream's chain of `depth` drafts after `pending` at `position`, its block's rows in a pass of pass_rows.
@@ -455,25 +462,25 @@ pub const Drafter = struct {
             std.log.err("lfm2 dspark: a hold failed on the GPU: {s}", .{msg});
             return error.DraftGpuFailed;
         }
-        const ms = (cb.gpuEnd() - cb.gpuStart()) * 1000;
+        const ms = cb.gpuSeconds() * 1000; // the whole buffer, its lanes' staged rows absorbed too
         d.hold_spent_ms += ms;
-        d.priceHold(ms);
+        d.priceHold(d.pass_len, std.mem.max(u32, d.depths[0..d.pass_len]), ms);
         try block.readPicks(d, d.pass[0..d.pass_len], d.depths[0..d.pass_len]);
     }
 
-    /// A settled hold's GPU ms against its price: the timed passes at its block counts move a tenth of the way to it.
-    pub fn priceHold(d: *Drafter, ms: f64) void {
+    /// A completed hold pass of `streams` blocks at `depth`, `ms` of GPU time against its price: timed passes at its
+    /// block counts move a tenth of the way to it. Signalled holds settle here and synchronous ones as they complete.
+    pub fn priceHold(d: *Drafter, streams: usize, depth: u32, ms: f64) void {
         const timed = d.holds[0..d.holds_len];
-        if (timed.len == 0 or d.pass_len == 0 or !(ms > 0)) return;
-        const deepest = std.mem.max(u32, d.depths[0..d.pass_len]);
-        const priced = lanes.hold_price.holdMs(timed, d.pass_len, deepest);
+        if (timed.len == 0 or streams == 0 or !(ms > 0)) return;
+        const priced = lanes.hold_price.holdMs(timed, streams, depth);
         if (!(priced > 0)) return;
         const step = 1 + 0.1 * (ms / priced - 1);
         var lo: u32 = 0;
         var hi: u32 = std.math.maxInt(u32);
         for (timed) |h| {
-            if (h.streams <= d.pass_len) lo = @max(lo, h.streams);
-            if (h.streams >= d.pass_len) hi = @min(hi, h.streams);
+            if (h.streams <= streams) lo = @max(lo, h.streams);
+            if (h.streams >= streams) hi = @min(hi, h.streams);
         }
         for (timed) |*h| if (h.streams >= lo and h.streams <= hi) {
             h.ms *= step;
@@ -532,7 +539,8 @@ pub const Drafter = struct {
         std.log.info("lfm2 dspark: weights {d:.1} MiB, scratch {d:.1} MiB, a stream {d} KiB a position and at most {d} KiB staged", .{ mibOf(d.w.buffers()), mibOf(d.owned.items), d.keptBytes(1) / 1024, @min(stage_rows, d.options.capacity + d.config.block) * d.tapBytes() / 1024 });
         var blocks: [hold_grid[hold_grid.len - 1]]block.Block = undefined;
         for (made, &blocks) |lane, *b| b.* = .{ .lane = lane, .pending = 1, .anchor = 0, .depth = 1 };
-        d.holds_len = 0;
+        // Publish the entire grid at once, so the timing holds cannot reprice it.
+        var timed: usize = 0;
         for (hold_grid) |streams| for (1..@min(d.config.block, pass_rows / streams) + 1) |depth| {
             for (blocks[0..streams]) |*b| b.depth = @intCast(depth);
             var ms_best = std.math.floatMax(f64);
@@ -542,9 +550,11 @@ pub const Drafter = struct {
                 const ms = @as(f64, @floatFromInt(t0.durationTo(std.Io.Clock.awake.now(d.io)).toNanoseconds())) / 1e6;
                 if (i > 0) ms_best = @min(ms_best, ms);
             }
-            d.holds[d.holds_len] = .{ .streams = streams, .depth = @intCast(depth), .ms = ms_best };
-            d.holds_len += 1;
+            d.holds[timed] = .{ .streams = streams, .depth = @intCast(depth), .ms = ms_best };
+            timed += 1;
         };
+        d.holds_len = timed;
+        d.hold_spent_ms = 0; // the load's timing holds are no round's work
     }
 };
 

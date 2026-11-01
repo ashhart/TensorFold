@@ -9,13 +9,13 @@ const c = contract.spec;
 const g = contract.gates;
 const ref = tf.attention_ref;
 
-const D = 128;
-const kvh = 2;
-const heads = 32;
-const G = heads / kvh;
+pub const D = 128;
+pub const kvh = 2;
+pub const heads = 32;
+pub const G = heads / kvh;
 const maxd = 64; // tf_tree_tail's MAXD
 const chunk = 512; // the partials' and the tail's keys a chunk
-const scale: f32 = 1.0 / @sqrt(@as(f32, D));
+pub const scale: f32 = 1.0 / @sqrt(@as(f32, D));
 
 /// decode: attn_partial_N then attn_merge; tree: a partial, tf_tree_tail and tf_tree_merge; prompt: tf_attention_nax.
 pub const Which = enum { decode, tree, prompt, write, put, compact };
@@ -210,7 +210,7 @@ pub const Probe = struct {
         return .{ .ctx = p, .vt = &vt, .spec = spec(p.which, p.tiles, p.control), .control = if (p.control) .shapes else null };
     }
 
-    fn at(p: *const Probe, values: bool, h: usize, pos: usize) usize {
+    pub fn at(p: *const Probe, values: bool, h: usize, pos: usize) usize {
         return ((@as(usize, @intFromBool(values)) * kvh + h) * p.cap + pos) * D;
     }
 
@@ -481,12 +481,12 @@ pub const Probe = struct {
     }
 
     /// Output index of query `qi`, head `h`: [heads, rows, D] after a merge, [rows, heads, D] from the prompt kernel.
-    fn outAt(p: *const Probe, qi: usize, h: usize) usize {
+    pub fn outAt(p: *const Probe, qi: usize, h: usize) usize {
         return if (p.which == .prompt) (qi * heads + h) * D else (h * p.rows + qi) * D;
     }
 
     /// Query `qi` of head `h` as float64: Qp's row qi * G + g of its kv head, or the prompt's row.
-    fn query(p: *const Probe, qi: usize, h: usize, out: []f64) void {
+    pub fn query(p: *const Probe, qi: usize, h: usize, out: []f64) void {
         const at_ = if (p.which == .prompt) (qi * heads + h) * D else ((h / G) * 16 * p.rows + qi * G + h % G) * D;
         for (out, 0..) |*x, d| x.* = c.fromBf16(p.q[at_ + d]);
     }
@@ -581,6 +581,7 @@ pub const Suite = struct {
     pub fn collect(s: *Suite, only: ?[]const u8) !void {
         for (std.enums.values(Which)) |w| for (1..if (w == .decode) 17 else 2) |tiles| for ([_]bool{ false, true }) |control| {
             if (only) |o| if (std.mem.indexOf(u8, name(w, tiles, control), o) == null) continue;
+            if (w == .prompt and !control and s.device.tensorUnits()) continue; // M5: metal_nemotron_prompt_range.zig
             const p = try s.a.create(Probe);
             errdefer s.a.destroy(p);
             p.* = try Probe.init(s.a, s.device, s.queue, w, tiles, control);

@@ -18,6 +18,8 @@ pub const Form = struct {
     chunk_exp: bool,
     /// P's error into P x V, relative: bf16 2^-8, two bf16 halves 2^-16, fp32 0.
     p_rel: f64,
+    /// An fp32 P cut toward zero as it enters P x V, relative and one-sided (the M5's tensor units: operand_cut).
+    p_cut: f64 = 0,
     /// The chains of o's terms p_j v_j and of l's terms p_j, as roundings of their terms' magnitude.
     num: f64,
     den: f64,
@@ -32,6 +34,9 @@ pub const Form = struct {
 
 /// An mma k16 step's error in 2^-24 of |acc| + sum |a b|: 17 terms cut at the largest's ulp, then rounded down.
 pub const mma_step = 36;
+
+/// What the M5's tensor units keep of an fp32 operand: 10 mantissa bits, cut toward zero (metal_mma_operand.zig).
+pub const operand_cut = 0x1p-10;
 
 /// window_rows.cu's decode at head dim d over n keys: lanes' chains of d / 32 then a 5-level tree, 256-key chunks.
 pub fn decode(d: usize, n: usize) Form {
@@ -105,6 +110,47 @@ pub fn head(q: []const f64, k: []const f64, v: []const f64, n: usize, d: usize, 
     }
 }
 
+/// P's cut after `head` (w, tau as it left them): each p only shrinks, so positive values move o down, negative up.
+pub fn cutSides(f: Form, w: []const f64, tau: []const f64, v: []const f64, n: usize, d: usize, down: []f64, up: []f64) void {
+    var l: f64 = 0;
+    var tmax: f64 = 0;
+    for (w[0..n], tau[0..n]) |p, t| {
+        l += p;
+        if (std.math.isFinite(t)) tmax = @max(tmax, t);
+    }
+    const kappa = (1 + tmax) / (1 - tmax);
+    for (0..d) |e| {
+        var pos: f64 = 0;
+        var neg: f64 = 0;
+        for (0..n) |j| {
+            const x = v[j * d + e];
+            if (x > 0) pos += w[j] * x else neg -= w[j] * x;
+        }
+        const finite = std.math.isFinite(pos) and std.math.isFinite(neg) and tmax < 0.5;
+        down[e] = if (finite) f.p_cut * pos / l * kappa * (1 + 0x1p-20) else 0;
+        up[e] = if (finite) f.p_cut * neg / l * kappa * (1 + 0x1p-20) else 0;
+    }
+}
+
+/// A bf16 output's ends, point - half - down to point + half + up, each rounded to nearest as the output is.
+pub fn ends(point: f64, half: f64, down: f64, up: f64) [2]f64 {
+    return .{ bfr.bf16(point - half - down), bfr.bf16(point + half + up) };
+}
+
+/// A bf16 output's allowance: the range's half width and the cut's wider side, plus the output's rounding.
+pub fn allowBf16(point: f64, half: f64, down: f64, up: f64) f64 {
+    if (!std.math.isFinite(point)) return 0;
+    if (!std.math.isFinite(half)) return std.math.floatMax(f64); // scores too far apart for the first order: any value
+    const h = half + @max(down, up);
+    return h + 0x1p-8 * (@abs(point) + h) + 0x1p-133;
+}
+
+/// A bf16 output's signed interval: its range's rounded ends, open where float64 or the range is not finite.
+pub fn intervalBf16(point: f64, half: f64, down: f64, up: f64) [2]f64 {
+    if (!std.math.isFinite(point) or !std.math.isFinite(half)) return .{ -std.math.floatMax(f64), std.math.floatMax(f64) };
+    return ends(point, half, down, up);
+}
+
 /// What a check saw: outputs whose range holds one bf16 value, several, and outputs non-finite in float64.
 pub const Stats = struct { decided: usize = 0, ranged: usize = 0, nonfinite: usize = 0 };
 
@@ -174,4 +220,22 @@ test "a weight's spread moves an output by about its share of |v - o|" {
     const small = hf[0];
     head(&.{1}, &.{ 30, 30 }, &.{ 0, 1 }, 2, 1, 1, prompt(256, 2, true), &w, &t, &pt, &hf);
     try std.testing.expect(hf[0] > small and hf[0] < 0x1p-9);
+}
+
+test "the cut widens a range on one side: down by positive values' share, up by negative values'" {
+    var w: [2]f64 = undefined;
+    var t: [2]f64 = undefined;
+    var pt: [2]f64 = undefined;
+    var hf: [2]f64 = undefined;
+    var down: [2]f64 = undefined;
+    var up: [2]f64 = undefined;
+    var f = prompt(256, 2, false);
+    f.p_rel = 0;
+    f.p_cut = operand_cut;
+    // equal scores, values 2 and 6 in one column, -2 and -6 in the other: o = 4 and -4
+    head(&.{ 1, 0 }, &.{ 1, 0, 1, 0 }, &.{ 2, -2, 6, -6 }, 2, 2, 1, f, &w, &t, &pt, &hf);
+    cutSides(f, &w, &t, &.{ 2, -2, 6, -6 }, 2, 2, &down, &up);
+    try std.testing.expectEqualSlices(f64, &.{ 4, -4 }, &pt);
+    try std.testing.expect(down[0] >= 4 * operand_cut and down[0] < 4.01 * operand_cut and up[0] == 0);
+    try std.testing.expect(up[1] >= 4 * operand_cut and up[1] < 4.01 * operand_cut and down[1] == 0);
 }

@@ -50,6 +50,10 @@ fn release(h: *Host) void {
 }
 
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (try o.slideRefusal(a, "Macs")) |why| {
+        problem.* = why;
+        return null;
+    }
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const config = q.config.Config.read(gpa, io, o.dir) catch |err| {
@@ -115,12 +119,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         h.wrap.?.held_on_target = true;
     }
     errdefer if (h.wrap) |*w| w.deinit();
-    var facts = if (h.wrap) |*w| w.facts(h.metal.facts()) else h.metal.facts();
-    // a drafting stream prices its copy windows by its own copies: on distinct prompts they keep breaking
-    if (h.wrap != null) {
-        facts.own_copy_rates = true;
-        facts.matched_copy_rates = true;
-    }
+    const facts = if (h.wrap) |*w| w.facts(h.metal.facts()) else h.metal.facts();
     h.config = try lanes.Config.init(gpa, facts, q.state.window_rows, q.state.window_rows - 1);
     errdefer h.config.deinit(gpa);
     h.clock = .{ .io = io };

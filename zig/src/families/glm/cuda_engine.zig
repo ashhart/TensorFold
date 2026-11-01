@@ -30,6 +30,7 @@ const pair_bytes = 16;
 
 /// A prompt pass's chunk rows (decode.prefill's).
 pub const prompt_rows = fw.prefill_rows;
+pub const solo_rows = fw.solo_rows;
 pub const max_together = @import("cuda_state.zig").prompt_heads;
 pub const Prompt = struct { slot: u32, ids: []const u32 };
 
@@ -39,6 +40,7 @@ pub const max_shared = 16;
 
 const types = @import("cuda_engine_types.zig");
 const snapshots = @import("cuda_snapshots.zig");
+const prompt_solo = @import("cuda_prompt_solo.zig");
 pub const Part = types.Part;
 pub const Kept = types.Kept;
 const Seq = types.Seq;
@@ -175,8 +177,9 @@ pub const Engine = struct {
             e.free(0);
             e.seqs.deinit(gpa);
         }
-        e.bp = try fw.Buffers.init(d, &e.w, fw.prefill_rows, true, o.capacity);
+        e.bp = try fw.Buffers.init(d, &e.w, prompt_solo.bufferRows(o.settings.solo), true, o.capacity);
         errdefer e.bp.deinit();
+        if (o.settings.solo and rank == 0) std.log.info("glm: prompt passes of {d} rows, {d} while another stream decodes", .{ fw.solo_rows, fw.prefill_rows });
         e.bd = try fw.Buffers.init(d, &e.w, fw.window_rows, false, o.capacity);
         errdefer e.bd.deinit();
         e.bm = try fw.Buffers.init(d, &e.w, fw.window_rows, false, o.capacity);
@@ -338,8 +341,9 @@ pub const Engine = struct {
         e.index_split = false;
         if ((from != null or start == 0) and try e.prefillStart(len, from) != start) return error.BadChunk;
         if (start >= len or start % fw.prefill_rows != 0) return error.BadChunk;
-        const rows = @min(len - start, fw.prefill_rows);
+        const rows = @min(len - start, @as(usize, if (part.len > fw.prefill_rows + 1) fw.solo_rows else fw.prefill_rows));
         if (part.len != @min(len - start, rows + 1)) return error.BadChunk;
+        if (rows > fw.prefill_rows and !prompt_solo.allowed(e, start, rows)) return error.BadChunk;
         var one: [1]fw.Rank = undefined;
         var f = e.view(&e.bp, &one);
         f.index_split = split;
@@ -383,17 +387,7 @@ pub const Engine = struct {
         if (f.prof) |p| p.mark(e.stream, .draw);
         if (last) try e.holdPrompt(e.bp.fnormed + (rows - 1) * e.c.hidden * 2);
         stamp = prof_mod.span(f.prof, e.stream, .mtp);
-        if (e.mtp) {
-            const nxt = as_i32[1..];
-            if (nxt.len > 0) { // decode._absorb_rows
-                const mp = f.prof;
-                defer f.prof = mp;
-                f.prof = null; // the head's pass as one section
-                try f.mtp(nxt, &.{e.bp.fnormed});
-                f.prof = mp;
-                try e.cur.st.setMtpLen(e.stream, e.cur.st.mtp_len + nxt.len);
-            }
-        }
+        if (e.mtp) try prompt_solo.mtpRows(e, &f, as_i32);
         stamp.end();
         if (f.prof) |p| p.mark(e.stream, .mtp);
         stamp = prof_mod.span(f.prof, e.stream, .commit);

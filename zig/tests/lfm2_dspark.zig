@@ -7,6 +7,7 @@ const c = q.config;
 const st = q.state;
 const ck = tf.checkpoint;
 const quant = q.dspark_quant;
+const controls = @import("lfm2_dspark_controls.zig");
 
 const hd = c.head_dim;
 const kw = c.kv_heads * hd;
@@ -122,10 +123,20 @@ fn gpuHold(d: *q.dspark.Drafter, blocks: []const q.dspark_block.Block) !f64 {
 }
 
 fn absorb(d: *q.dspark.Drafter, piece: q.dspark_block.Piece) !void {
-    const run = q.dspark_block.begin(d);
-    try q.dspark_block.absorbPass(d, run.e, &.{piece});
-    try q.dspark_block.end(run.cb, run.e);
+    try q.dspark_block.absorbNow(d, &.{piece});
 }
+
+/// `rows` tapped rows from row `row` of `buf` (the target's rows), also starting at `row` in the context.
+fn ownAbsorb(key: *tf.lanes.Stream, buf: mtl.Buffer, row_bytes: usize, row: usize, rows: u32, prompt: bool) tf.lanes.drafter.Absorb {
+    return .{
+        .stream = key,
+        .features = .{ .buffer = @intFromPtr(buf.id), .offset = row * row_bytes, .rows = rows, .row_bytes = @intCast(row_bytes), .space = .device, .dtype = .bf16 },
+        .start = row,
+        .follow = &.{},
+        .prompt = prompt,
+    };
+}
+
 
 /// Served rounds through the drafter's interface: after four warm rounds, no host allocation and one hold pass a round.
 fn steady(gpa: std.mem.Allocator, d: *q.dspark.Drafter, taps: mtl.Buffer, ids: []const u32, ctx: usize) !void {
@@ -234,49 +245,6 @@ fn deferred(gpa: std.mem.Allocator, d: *q.dspark.Drafter, taps: mtl.Buffer, ids:
     std.debug.print("deferred context: {d} zero-grant rows, {d} overwritten pending rows, {d} complete context rows and 3 later drafts match the independent replay\n", .{ skip, rewound, anchor });
 }
 
-/// Untapped target outputs versus capture/restore, including duplicate final taps and every admitted column.
-fn targetTaps(gpa: std.mem.Allocator, m: *q.Model, scratch: *st.Scratch, ids: []const u32) !void {
-    const original = scratch.taps.?;
-    defer scratch.taps = original;
-    for ([_]usize{ 1, 4, 16, ids.len }, 0..) |n, shape| {
-        if (n > ids.len or (shape == 3 and (n == 1 or n == 4 or n == 16))) continue;
-        scratch.taps = null;
-        var plain = try st.Cache.init(gpa, m.device, &m.config.attention, n + 16);
-        defer plain.deinit();
-        const record = n <= st.batch_rows;
-        try q.forward.run(m, scratch, &.{.{ .cache = &plain, .rows = n }}, ids[0..n], record, .last);
-        const x = try gpa.dupe(u8, scratch.x.contents()[0 .. n * c.hidden * 2]);
-        defer gpa.free(x);
-        const logits = try gpa.dupe(u8, scratch.logits.contents()[0 .. c.vocab * 2]);
-        defer gpa.free(logits);
-        for (0..3) |layout| {
-            var taps = original;
-            if (layout == 1) {
-                taps.count = 3;
-                taps.layers[0..3].* = .{ 0, c.layers - 1, c.layers - 1 };
-            } else if (layout == 2) {
-                taps.count = st.max_taps;
-                for (0..st.max_taps) |i| taps.layers[i] = @intCast(if (i >= st.max_taps - 2) c.layers - 1 else i);
-            }
-            taps.buf = try m.device.buffer(n * taps.count * c.hidden * 2, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
-            defer {
-                scratch.taps = null;
-                taps.buf.deinit();
-            }
-            scratch.taps = taps;
-            var captured = try st.Cache.init(gpa, m.device, &m.config.attention, n + 16);
-            defer captured.deinit();
-            try q.forward.run(m, scratch, &.{.{ .cache = &captured, .rows = n }}, ids[0..n], record, .last);
-            if (!std.mem.eql(u8, x, scratch.x.contents()[0..x.len]) or !std.mem.eql(u8, logits, scratch.logits.contents()[0..logits.len])) return error.TargetTapOutputMismatch;
-            const data = taps.buf.slice(u16, n * taps.count * c.hidden);
-            for (taps.layers[0..taps.count], 0..) |layer, i| for (taps.layers[0..i], 0..) |other, j| {
-                if (layer != other) continue;
-                for (0..n) |row| if (!std.mem.eql(u16, data[(row * taps.count + i) * c.hidden ..][0..c.hidden], data[(row * taps.count + j) * c.hidden ..][0..c.hidden])) return error.RepeatedTapMismatch;
-            };
-        }
-        std.debug.print("target taps: {d} rows, released/duplicate/max-column layouts preserve all normalized and logit bytes\n", .{n});
-    }
-}
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
@@ -305,7 +273,7 @@ pub fn main(init: std.process.Init) !void {
     const ids = try gpa.alloc(u32, length);
     defer gpa.free(ids);
     for (ids, 0..) |*id, i| id.* = @intCast((i * 7919 + 13) % 120000);
-    try targetTaps(gpa, m, &scratch, ids);
+    try controls.targetTaps(gpa, m, &scratch, ids);
     try q.forward.run(m, &scratch, &.{.{ .cache = &cache, .rows = length }}, ids, false, .last);
     // Repeated target layers are legal: every requested column must receive the same hidden row.
     const tapped = taps.buf.slice(u16, length * width);
@@ -334,6 +302,79 @@ pub fn main(init: std.process.Init) !void {
     var conf: [16]f32 = undefined;
     @memcpy(conf[0..block], lane.conf[0..block]);
     const gpu = held[0..block];
+    // The owned stage takes uneven absorbs (prompt rows first, last rows taken again) and holds them on the host.
+    // One hold absorbs them as one piece of ctx rows from position 0; those staged bytes come from the same taps.
+    // The direct absorbs above are also one piece while ctx <= absorb_rows, so fc, k, v and qk see the same row count
+    // and run the same kernels: bf16 uses 16-row kernels up to 32 rows, then 64x64 tiles; 8-bit uses twin kernels up to
+    // 32 rows, then tensor or tile kernels. Keys, values and picks must be exactly equal, without tolerance.
+    if (ctx > 3 and ctx <= @min(q.dspark.absorb_rows, @min(q.dspark.stage_rows, lane.cap))) {
+        const key: *tf.lanes.Stream = @ptrFromInt(0x1000);
+        const own = try d.newLane(length + 32);
+        d.lanes.put(gpa, key, own) catch |err| {
+            d.dropLane(own);
+            return err;
+        };
+        const staged = d.drafter();
+        const sizes = [_]u32{ 5, 1, 9, 33, 2 };
+        const row_bytes = width * 2;
+        var pos: usize = 0;
+        var step: usize = 0;
+        while (pos < ctx) : (step += 1) {
+            const n: u32 = @intCast(@min(sizes[step % sizes.len], ctx - pos));
+            try staged.absorb(&.{ownAbsorb(key, taps.buf, row_bytes, pos, n, step == 0)});
+            pos += n;
+        }
+        try staged.absorb(&.{ownAbsorb(key, taps.buf, row_bytes, ctx - 3, 3, false)});
+        if (own.staged != ctx or own.end != 0) return error.OwnedStageMissesRows;
+        try staged.hold(&.{.{ .stream = key, .pending = ids[ctx], .position = ctx + 1, .depth = block }});
+        var own_held: [16]u32 = undefined;
+        try staged.held(&.{key}, &.{own_held[0..block]});
+        if (!std.mem.eql(u32, gpu, own_held[0..block])) return error.OwnedStagePicksDiffer;
+        const span = ctx * hd * 2;
+        for (0..cfg.layers) |li| for ([_]bool{ false, true }) |values| for (0..c.kv_heads) |h| {
+            const a = lane.kv(li, values);
+            const b = own.kv(li, values);
+            const a_off = a.off + h * lane.cap * hd * 2;
+            const b_off = b.off + h * own.cap * hd * 2;
+            if (!std.mem.eql(u8, (a.buf.contents() + a_off)[0..span], (b.buf.contents() + b_off)[0..span])) return error.OwnedStageContextDiffers;
+        };
+        std.debug.print("the owned stage: {d} rows staged in uneven absorbs, absorbed as one {d}-row piece like the direct absorbs' ({s} regime): keys, values and picks equal\n", .{ ctx, ctx, if (ctx <= 32) "<= 32-row" else "> 32-row" });
+    }
+    // settled GPU time is taken once: a standalone absorb adds its time and leaves the grid as it was; a synchronous
+    // one-block hold adds its own and reprices exactly the passes at one block (other block counts stay as timed)
+    if (ctx > 0) {
+        const grid = d.holds;
+        const grid_len = d.holds_len;
+        const step_ms = d.step_ms;
+        const hold_ms = d.hold_ms;
+        const spent_ms = d.hold_spent_ms;
+        defer {
+            d.holds = grid;
+            d.holds_len = grid_len;
+            d.step_ms = step_ms;
+            d.hold_ms = hold_ms;
+            d.hold_spent_ms = spent_ms;
+        }
+        _ = q.dspark_block.takeHoldMs(d);
+        try absorb(d, .{ .lane = lane, .src = .{ .buf = taps.buf, .off = (ctx - 1) * width * 2 }, .rows = 1, .p0 = ctx - 1 });
+        const absorb_ms = q.dspark_block.takeHoldMs(d);
+        if (!(absorb_ms > 0)) return error.AbsorbTimeNotTaken;
+        for (grid[0..grid_len], d.holds[0..grid_len]) |before, now| if (before.ms != now.ms) return error.AbsorbRepricedAHold;
+        _ = try q.dspark_block.hold(d, &.{.{ .lane = lane, .pending = ids[ctx], .anchor = ctx, .depth = block }}, null);
+        const hold_ms = q.dspark_block.takeHoldMs(d);
+        if (!(hold_ms > 0) or q.dspark_block.takeHoldMs(d) != 0) return error.HoldTimeNotTakenOnce;
+        if (d.holds_len != grid_len) return error.GridResized;
+        var moved = false;
+        for (grid[0..grid_len], d.holds[0..grid_len]) |before, now| {
+            if (before.streams != 1 and before.ms != now.ms) return error.OtherBlockCountsRepriced;
+            if (before.streams == 1 and before.ms != now.ms) moved = true;
+        }
+        if (!moved) return error.SyncHoldNotRepriced;
+        std.debug.print("a synchronous hold of one block: {d:.2} ms GPU taken once, the one-block passes repriced toward it; a standalone absorb {d:.2} ms priced none\n", .{ hold_ms, absorb_ms });
+    }
+    if (cfg.block < 9) {
+        std.debug.print("split-hold fixture skipped: this drafter's block is {d} rows and its depths [9, 1 x 7] need 9\n", .{cfg.block});
+    } else try controls.splitHold(gpa, init.io, d, ids);
     for ([_]usize{ 1, 4, 16, 128, q.dspark.absorb_rows }) |rows| {
         if (rows > ctx) continue;
         var best: f64 = std.math.floatMax(f64);

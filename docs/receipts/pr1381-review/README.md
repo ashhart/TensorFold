@@ -21,7 +21,6 @@ It covers greedy and sampled overhead separately, unequal depths, a zero-depth l
 profitable control. The separate native program fails with `UnpaidHold` before and exits zero
 after. [Native output and exact source-file identities](hold-observer-before-after.json).
 This corrects pricing attribution; it does not establish the downstream no-slowdown gate.
-
 ## Composition with requested main `cb036e00f`
 
 The shared-reservation stack is integrated without restoring the rejected shared-round guard.

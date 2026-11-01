@@ -538,7 +538,10 @@ pub fn constrain(e: *Engine, p: *Plan) !void {
     }
     const grows = p.stream.drafts and p.kind != .forced and e.alone;
     const room = if (grows) @max(rows.len, e.cfg.family_width) else rows.len;
-    const w = try g.window(a, rows, try accept.rowParents(a, rows.len, p.parents), p.kind == .forced, room);
+    const row_parents = try accept.rowParents(a, rows.len, p.parents);
+    var timing: @import("grammar_time.zig").Profile = .{ .clock = e.clock };
+    defer @import("grammar_time.zig").record(e, p.stream, timing);
+    const w = try @import("grammar_time.zig").window(g, a, rows, row_parents, p.kind == .forced, room, &timing);
     p.masks = w.masks;
     if (w.rows.len == rows.len and w.extra.len == 0) return;
     if (w.rows.len < rows.len) p.lanes = null; // the tree shape no longer matches the rows
