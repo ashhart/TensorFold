@@ -299,13 +299,13 @@ pub fn main(init: std.process.Init) !void {
         const grid = d.holds;
         const grid_len = d.holds_len;
         const step_ms = d.step_ms;
-        const hold_ms = d.hold_ms;
+        const saved_hold_ms = d.hold_ms;
         const spent_ms = d.hold_spent_ms;
         defer {
             d.holds = grid;
             d.holds_len = grid_len;
             d.step_ms = step_ms;
-            d.hold_ms = hold_ms;
+            d.hold_ms = saved_hold_ms;
             d.hold_spent_ms = spent_ms;
         }
         _ = q.dspark_block.takeHoldMs(d);
