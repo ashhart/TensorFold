@@ -167,8 +167,22 @@ fn lastToMap(count: *u32, world: usize) bool {
     return @atomicRmw(u32, count, .Add, 1, .seq_cst) + 1 == world;
 }
 
-/// The pages as one /dev/shm file every rank maps: rank 0 makes it, the others wait for it at its full length.
-pub const SharedPages = struct {
+/// The pages as one /dev/shm file every rank maps (Linux; elsewhere TF_GLM_KV_HOST_SHARED is refused).
+pub const SharedPages = if (@import("builtin").os.tag == .linux) ShmPages else NoSharedPages;
+
+/// Off Linux: no /dev/shm, so the shared copy is refused and each rank keeps its own pages.
+const NoSharedPages = struct {
+    dev: u64,
+
+    pub fn open(_: *const cuda.Driver, _: usize, _: bool, _: usize) !NoSharedPages {
+        return error.SharedMemoryUnavailable;
+    }
+
+    pub fn close(_: *NoSharedPages) void {}
+};
+
+/// Rank 0 makes the file, the others wait for it at its full length; the last rank to map it unlinks it.
+const ShmPages = struct {
     region: []align(std.heap.page_size_min) u8,
     dev: u64,
     lib: std.DynLib,
@@ -177,7 +191,7 @@ pub const SharedPages = struct {
     world: usize, // ranks that map the file; the last to map it unlinks it, so nothing outlives the ranks
     path: [96:0]u8,
 
-    pub fn open(d: *const cuda.Driver, len: usize, leader: bool, world: usize) !SharedPages {
+    pub fn open(d: *const cuda.Driver, len: usize, leader: bool, world: usize) !ShmPages {
         const file_len = len + mark_bytes;
         var path: [96:0]u8 = undefined;
         const name = try shmName(&path, if (std.c.getenv("NCCL_COMM_ID")) |v| std.mem.span(v) else "local");
@@ -211,7 +225,7 @@ pub const SharedPages = struct {
         return .{ .region = region, .dev = dev, .lib = lib, .unregister = unregister, .leader = leader, .world = world, .path = path };
     }
 
-    pub fn close(s: *SharedPages) void {
+    pub fn close(s: *ShmPages) void {
         const count: *u32 = @ptrCast(@alignCast(s.region.ptr + s.region.len - mark_bytes));
         const named = s.leader and @atomicLoad(u32, count, .seq_cst) < s.world; // a rank never mapped it: still named
         _ = s.unregister(s.region.ptr);
