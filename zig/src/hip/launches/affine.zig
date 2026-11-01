@@ -14,6 +14,7 @@ const registry = @import("core").registry;
 const quant = @import("core").quant;
 const tuning = @import("../tuning/tuning.zig");
 const mlx_entries = @import("mlx_entries.zig");
+const stream_pick = @import("stream_pick.zig");
 
 const Error = runtime.Error;
 
@@ -346,16 +347,7 @@ pub const Kernels = struct {
         var lpc_log2: u5 = 0;
         while ((@as(c_int, 1) << lpc_log2) < (a.k >> 5) and lpc_log2 < 5) lpc_log2 += 1;
         const ri: usize = if (a.m == 1) 0 else if (a.m == 2) 1 else 2;
-        // the widest column count that still fills the card with waves, within the registers the lane's code words take
-        var pick: usize = 0;
-        var c: usize = stream_cbs.len;
-        while (c > 0) {
-            c -= 1;
-            if (stream_cbs[c] * stream_rows[ri] > 16 or stream_cbs[c] * a.bits > stream_code_words) continue;
-            pick = c;
-            const per_block: c_int = stream_waves * (@as(c_int, 32) >> lpc_log2) * @divExact(stream_cbs[c], pair_div);
-            if (@as(u64, cdiv(total_n, per_block)) * stream_waves * @as(u64, @intCast(items)) * cdiv(a.m, stream_rows[ri]) >= streams_wanted) break;
-        }
+        const pick = stream_pick.pick(k.caps.generation, a.m, lpc_log2, a.bits, total_n, items, pair_div);
         const per_block: c_int = stream_waves * (@as(c_int, 32) >> lpc_log2) * @divExact(stream_cbs[pick], pair_div);
         var blocks: c_uint = cdiv(total_n, per_block);
         if (sides.count > 0) {
@@ -596,4 +588,5 @@ test "the lane groups of a row tile" {
 
 test {
     _ = mlx_entries;
+    _ = stream_pick;
 }
