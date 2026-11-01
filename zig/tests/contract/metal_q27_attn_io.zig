@@ -26,6 +26,7 @@ fn noSums(_: c.Shape) usize {
 }
 
 fn nameOf(comptime r: Reg) []const u8 {
+    if (r.control and r.which == .device_keep) return "control: qwen27 attention io keep staging 4 heads a row on a rank";
     if (r.control) return "control: qwen27 attention io append one row late";
     const what = comptime switch (r.which) {
         .pack => "pack q27_attn_pack_a q27_attn_pack_b",
@@ -71,7 +72,10 @@ pub const Io = struct {
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, r: Reg) !Io {
         const tensor = device.tensorUnits();
-        const edit: ?at_.Edit = if (r.control) .{ .from = "row = uint(meta[base + 4]) + local;", .to = "row = uint(meta[base + 4]) + local + 1;" } else null;
+        // controls: an append one row late; keep's gather and scatter both indexing 4 heads a staging row again
+        const late: at_.Edit = .{ .from = "row = uint(meta[base + 4]) + local;", .to = "row = uint(meta[base + 4]) + local + 1;" };
+        const four: at_.Edit = .{ .from = "(ulong(r.row) * a.kv_heads + at.y)", .to = "(ulong(r.row) * 4 + at.y)", .count = 2 };
+        const edit: ?at_.Edit = if (!r.control) null else if (r.which == .device_keep) four else late;
         const text = try at_.source(a, tensor, edit);
         defer a.free(text);
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
