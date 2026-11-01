@@ -13,6 +13,7 @@ pub fn numerical(gpu: check.Gpu) !void {
     try @import("q27_back_tests.zig").run(gpu, .all);
     try @import("q27_gemm_tests.zig").run(gpu);
     try @import("gdn_back_tests.zig").runShape(gpu, 5120, 64);
+    try @import("gdn_back_tests.zig").runQwen27(gpu);
 }
 pub fn live(gpu: check.Gpu) !usize {
     var missing = try registry.checkCuda(gpu.gpa, &registry.qwen_learning_pending, false);

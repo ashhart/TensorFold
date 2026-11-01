@@ -88,6 +88,7 @@ pub fn main(init: std.process.Init) !u8 {
     var push: [D]f32 = undefined;
     var dir: [D]f32 = undefined;
     var checks: usize = 0;
+    var failed: usize = 0;
     for (rows) |row| for (layers) |layer| {
         sq.nudge = .{ .layers = .{ @as(u64, 1) << @intCast(layer), 0, 0 }, .rows = .{ row, 0, 0 } };
         try t.pass(&.{sq}, .target, turn, &result);
@@ -99,16 +100,21 @@ pub fn main(init: std.process.Init) !u8 {
         for (t.residual(layer + 1, row)) |v| size += bf(v) * bf(v);
         if (!std.math.isFinite(size) or size <= 0) return error.BadResidual;
         var errors: [3]f64 = undefined;
-        for ([_]f64{ 0.002, 0.004, 0.008 }, &errors) |fraction, *relative| {
+        for (@import("qwen35_gradient.zig").fractions(row), &errors) |fraction, *relative| {
             const fd = try slope(t, sq, layer, &dir, fraction * @sqrt(size));
             relative.* = @abs(fd - length) / length;
             if (!std.math.isFinite(relative.*)) return error.NonfiniteGradient;
+            std.debug.print("SLOPE owned 27B layer {d} row {d}: fraction {d:.6}, fd {d:.8}, grad {d:.8}, relative {d:.5}\n", .{ layer, row, fraction, fd, length, relative.* });
         }
         std.mem.sort(f64, &errors, {}, std.sort.asc(f64));
         std.debug.print("RESULT owned 27B layer {d} row {d}: median {d:.5}, worst {d:.5}\n", .{ layer, row, errors[1], errors[2] });
-        if (errors[1] >= 0.15 or errors[2] >= 0.15) return error.GradientMismatch;
+        if (errors[1] >= 0.15 or errors[2] >= 0.15) failed += 1;
         checks += 1;
     };
+    if (failed > 0) {
+        std.debug.print("FAIL {d} of {d} owned directional checks\n", .{ failed, checks });
+        return error.GradientMismatch;
+    }
     std.debug.print("PASS {d} owned directional checks, every configured step within bound\n", .{checks});
     return 0;
 }

@@ -20,6 +20,9 @@ pub const ck = 4;
 /// Blocks of 256 threads a value head's chain runs in, each 32 of its state rows (gdn_train.cu's SPLIT).
 pub const split = 4;
 
+/// The served GDN arithmetic replayed before its backward. Flash Next keeps its existing sigmoid gate.
+pub const Mode = enum(c_int) { flash_next = 0, qwen27 = 1 };
+
 /// The layer's shape as the kernels read it (gdn_train.cu's GdnShape).
 pub const Shape = extern struct {
     rows: c_int,
@@ -27,6 +30,7 @@ pub const Shape = extern struct {
     nv: c_int,
     conv: c_int,
     proj: c_int,
+    mode: Mode = .flash_next,
 
     pub fn init(rows: usize, nk: usize, nv: usize) Shape {
         const conv = 2 * nk * dk + nv * dv;
@@ -47,12 +51,19 @@ pub const Layer = struct {
     nv: usize,
     hidden: usize,
     eps: f32,
+    mode: Mode = .flash_next,
     conv_w: u64,
     a_log: u64,
     dt_bias: u64,
     norm_w: u64,
     in_proj: Q4, // [qkv | z | b | a] x hidden
     out_proj: Q4, // hidden x nv dv
+
+    pub fn shape(l: Layer, rows: usize) Shape {
+        var s = Shape.init(rows, l.nk, l.nv);
+        s.mode = l.mode;
+        return s;
+    }
 };
 
 /// Both family adapters use the same fixed head width and affine layouts; reject before shape casts or launches.
@@ -290,7 +301,7 @@ pub const Ops = struct {
     pub fn forward(o: Ops, l: Layer, sc: Scratch, p: u64, hist: ?u64, init: ?u64, rows: usize) !void {
         try validate(l, rows);
         if (rows > 512) return error.BadGdnShape;
-        const s = Shape.init(rows, l.nk, l.nv);
+        const s = l.shape(rows);
         try o.front(p, hist, l.conv_w, l.a_log, l.dt_bias, sc, s);
         try o.scanFwd(init, sc, s);
     }
@@ -298,7 +309,7 @@ pub const Ops = struct {
     /// dx [rows, hidden] (+)= the layer's input gradient from gy [rows, hidden] fp32, its output's.
     pub fn backward(o: Ops, l: Layer, sc: Scratch, p: u64, hist: ?u64, init: ?u64, gy: u64, dx: u64, rows: usize, add: bool) !void {
         try validate(l, rows);
-        const s = Shape.init(rows, l.nk, l.nv);
+        const s = l.shape(rows);
         try o.forward(l, sc, p, hist, init, rows);
         try o.product(gy, l.out_proj, sc.dout, rows, sc, false);
         try o.normBack(p, l.norm_w, sc, s, l.eps);
@@ -321,7 +332,7 @@ pub const Ops = struct {
         const proj: usize = @intCast(Shape.init(1, l.nk, l.nv).proj);
         if (o.q4) |q| try q.f(q.ctx, gy, l.out_proj, w.dout, rows, false) else try o.productWith(gy, l.out_proj, w.dout, rows, w.xb, sc.wt, false);
         for (runs) |r| {
-            const s = Shape.init(r.rows, l.nk, l.nv);
+            const s = l.shape(r.rows);
             var one = sc;
             one.dout = w.dout + r.at * l.nv * dv * 4;
             one.dproj = w.dproj + r.at * proj * 4;
@@ -380,4 +391,8 @@ test "Trainer admission: one shared GDN descriptor accepts both group sizes and 
     layer.nk = 16;
     layer.out_proj.group = 63;
     try std.testing.expectError(error.BadGdnShape, validate(layer, 512));
+}
+
+test {
+    _ = @import("gdn_train_mode_test.zig");
 }

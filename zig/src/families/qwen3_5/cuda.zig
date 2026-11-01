@@ -86,3 +86,6 @@ test {
 }
 
 pub const learn_main = @import("cuda_learn_main.zig");
+test "dense gradient: loaded GDN layers replay the served 27B arithmetic" {
+    try @import("std").testing.expectEqual(@import("cuda").gdn_train.Mode.qwen27, @import("cuda_train_load.zig").gdn_mode);
+}

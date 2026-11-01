@@ -192,6 +192,7 @@ const usage =
     \\  radio-kernels             RADIO's float-patch cast and position rows against host references (synthetic rows)
     \\  radio-attention           the head-dim-80 tower attention's time at five sizes, outputs finite (synthetic rows)
     \\  gdn-back                  DeltaNet input gradients against FP64
+    \\  gdn-back-q27-serving      The 27B SiLU/rounded DeltaNet replay against FP64
     \\  q4-back                  Affine input gradients against FP64
     \\  moe-back                  Expert and router input gradients against FP64
     \\  attn-back                  Gated attention input gradients against FP64
@@ -504,6 +505,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "qwen-moe-back")) return @import("qwen_moe_back_tests.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "q27-back")) return q27_back_tests.run(gpu, .all);
     if (std.mem.eql(u8, cmd, "q27-gemm")) return q27_gemm_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "gdn-back-q27-serving")) return gdn_back_tests.runQwen27(gpu);
     if (std.mem.eql(u8, cmd, "gdn-back-27b")) return gdn_back_tests.runShape(gpu, 5120, 64);
     if (std.mem.eql(u8, cmd, "kernel-contract")) return contract_tests.run(gpu, rest);
     if (std.mem.eql(u8, cmd, "gb10-grouped-contract")) return gb10_many_contract.runAll(gpu);

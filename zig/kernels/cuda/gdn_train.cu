@@ -9,7 +9,7 @@ typedef __nv_bfloat16 bf16;
 
 // The layer's shape: rows, key and value heads, conv channels (2 nk DK + nv DV) and projection row width.
 struct GdnShape {
-    int rows, nk, nv, conv, proj;
+    int rows, nk, nv, conv, proj, mode; // mode: 0 Flash Next, 1 the 27B's op-by-op front and SiLU gate
 };
 
 namespace {
@@ -44,6 +44,12 @@ __device__ __forceinline__ float conv_acc(const bf16* P, const bf16* hist, const
         acc = acc + f32(cw[c * TAPS + tap]) * x;
     }
     return acc;
+}
+
+// The 27B rounds the conv and sigmoid separately before multiplying; Flash Next rounds SiLU once.
+__device__ __forceinline__ float conv_act(float x, const GdnShape& s) {
+    if (s.mode == 1) { x = bf(x); return bf(x * bf(sigmoidf_(x))); }
+    return bf(x / (1.0f + expf(-x)));
 }
 
 // This thread's 4 x 4 block of a [DV][DK] state: rows 4 warp .. 4 warp + 3, columns 4 lane .. 4 lane + 3.
@@ -95,8 +101,8 @@ extern "C" __global__ void __launch_bounds__(128) tf_gdn_front(const bf16* __res
     if (head < s.nk) {
         const int cq = head * DK + t, ck = s.nk * DK + head * DK + t;
         const float aq = conv_acc(P, hist, cw, r, cq, s), ak = conv_acc(P, hist, cw, r, ck, s);
-        xs[0][t] = bf(aq / (1.0f + expf(-aq)));
-        xs[1][t] = bf(ak / (1.0f + expf(-ak)));
+        xs[0][t] = conv_act(aq, s);
+        xs[1][t] = conv_act(ak, s);
         act[(size_t)r * s.conv + cq] = b16(xs[0][t]);
         act[(size_t)r * s.conv + ck] = b16(xs[1][t]);
         __syncthreads();
@@ -109,17 +115,25 @@ extern "C" __global__ void __launch_bounds__(128) tf_gdn_front(const bf16* __res
             if (warp == 0) inv = inv * (1.0f / sqrtf((float)DK));
             float* out = (warp == 0 ? q : k) + ((size_t)r * s.nk + head) * DK + lane * 4;
 #pragma unroll
-            for (int i = 0; i < 4; ++i) out[i] = v4[i] * inv;
+            for (int i = 0; i < 4; ++i) {
+                if (s.mode == 1) {
+                    const float ri = rsqrtf(ss / (float)DK + 1e-6f / (float)DK);
+                    const float scale = warp == 0 ? bf(1.0f / (float)DK) : bf(1.0f / sqrtf((float)DK));
+                    out[i] = bf(scale * bf(v4[i] * ri));
+                } else out[i] = v4[i] * inv;
+            }
         }
         return;
     }
     const int hv = head - s.nk, c = 2 * s.nk * DK + hv * DV + t;
     const float av = conv_acc(P, hist, cw, r, c, s);
-    act[(size_t)r * s.conv + c] = b16(av / (1.0f + expf(-av)));
+    act[(size_t)r * s.conv + c] = b16(conv_act(av, s));
     if (t == 0) {
         const size_t at = (size_t)r * s.proj + s.conv + s.nv * DV;
         const float b = f32(P[at + hv]), a = f32(P[at + s.nv + hv]);
-        g[r * s.nv + hv] = expf(-expf(a_log[hv]) * softplusf_(a + dt_bias[hv]));
+        const float x = bf(a + dt_bias[hv]);
+        const float sp = s.mode == 1 ? bf(fmaxf(x, 0.0f) + logf(1.0f + expf(-fabsf(x)))) : softplusf_(a + dt_bias[hv]);
+        g[r * s.nv + hv] = expf(-expf(a_log[hv]) * sp);
         beta[r * s.nv + hv] = bf(sigmoidf_(b));
     }
 }
@@ -181,11 +195,12 @@ extern "C" __global__ void __launch_bounds__(128) tf_gdn_norm_back(const bf16* _
     }
     __syncthreads();
     const float w = f32(norm_w[t]), yv = ys[t], ri = rinv;
-    const float yn = bf(bf(yv * ri) * w);
+    const float yn = s.mode == 1 ? bf(w * (yv * ri)) : bf(bf(yv * ri) * w);
     const size_t zc = (size_t)r * s.proj + s.conv + h * DV + t;
-    const float sg = sigmoidf_(f32(P[zc])), d = dout[row + t];
-    dproj[zc] = d * yn * sg * (1.0f - sg);
-    const float dn = d * sg * w;
+    const float z = f32(P[zc]), sg = sigmoidf_(z), d = dout[row + t];
+    const float gate = s.mode == 1 ? z * sg : sg;
+    dproj[zc] = s.mode == 1 ? d * yn * sg * (1.0f + z * (1.0f - sg)) : d * yn * sg * (1.0f - sg);
+    const float dn = d * gate * w;
     const float dot = block_sum_tree(yv * dn, scratch, 4);
     dy[row + t] = ri * dn - ri * ri * ri * yv * dot / (float)DV;
 }
@@ -360,7 +375,8 @@ extern "C" __global__ void __launch_bounds__(128) tf_gdn_qk_back(const bf16* __r
         const float ss = block_sum_tree(x * x, scratch, 4);
         const float dot = block_sum_tree(x * d, scratch, 4);
         const float inv = 1.0f / sqrtf(ss + 1e-6f), sc = which == 0 ? 1.0f / sqrtf((float)DK) : 1.0f;
-        dact[(size_t)r * s.conv + c] = sc * inv * (d - inv * inv * x * dot);
+        const float scale = s.mode == 1 && which == 1 ? bf(1.0f / sqrtf((float)DK)) * sqrtf((float)DK) : sc;
+        dact[(size_t)r * s.conv + c] = scale * inv * (d - inv * inv * x * dot);
     }
 }
 
@@ -372,7 +388,8 @@ extern "C" __global__ void tf_gdn_gates_back(const bf16* __restrict__ P, const f
     const int h = threadIdx.x, r = blockIdx.x;
     if (h >= s.nv || r >= s.rows) return;
     const size_t at = (size_t)r * s.proj + s.conv + s.nv * DV;
-    const float b = f32(P[at + h]), x = f32(P[at + s.nv + h]) + dt_bias[h];
+    const float b = f32(P[at + h]), pre = f32(P[at + s.nv + h]) + dt_bias[h];
+    const float x = s.mode == 1 ? bf(pre) : pre;
     const float sb = sigmoidf_(b), sx = x > 20.0f ? 1.0f : sigmoidf_(x);
     float db = 0.0f, dgs = 0.0f;
     for (int p = 0; p < SPLIT; ++p) {
@@ -395,7 +412,10 @@ extern "C" __global__ void tf_gdn_conv_back(const bf16* __restrict__ P, const bf
         const int at = r + TAPS - 1 - tap;
         if (at >= s.rows) continue;
         const float pre = conv_acc(P, hist, cw, at, c, s);
-        acc += f32(cw[c * TAPS + tap]) * dact[(size_t)at * s.conv + c] * silu_grad(pre);
+        const float x = s.mode == 1 ? bf(pre) : pre;
+        const float sg = sigmoidf_(x);
+        const float slope = s.mode == 1 ? bf(sg) + x * sg * (1.0f - sg) : silu_grad(pre);
+        acc += f32(cw[c * TAPS + tap]) * dact[(size_t)at * s.conv + c] * slope;
     }
     dproj[(size_t)r * s.proj + c] = acc;
 }

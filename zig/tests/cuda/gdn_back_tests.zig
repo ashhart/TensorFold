@@ -10,6 +10,7 @@ const NK = 16;
 const NV = 48;
 var HIDDEN: usize = 2560;
 var GROUP: usize = 32;
+var MODE: gt.Mode = .flash_next;
 const EPS: f32 = 1e-6;
 const DK = gt.dk;
 const DV = gt.dv;
@@ -203,7 +204,8 @@ const Case = struct { rows: usize, prefix: bool, every: usize }; // every: rows 
 
 fn runCase(r: *Rig, case: Case, kern: *const gt.Kernels) !void {
     const rows = case.rows;
-    const s = gt.Shape.init(rows, NK, NV);
+    var s = gt.Shape.init(rows, NK, NV);
+    s.mode = MODE;
     const C: usize = @intCast(s.conv);
     const P: usize = @intCast(s.proj);
     const d: ref.Dims = .{ .rows = rows, .nk = NK, .nv = NV };
@@ -230,6 +232,7 @@ fn runCase(r: *Rig, case: Case, kern: *const gt.Kernels) !void {
         .nv = NV,
         .hidden = HIDDEN,
         .eps = EPS,
+        .mode = MODE,
         .conv_w = try r.dev(std.mem.sliceAsBytes(cw16)),
         .a_log = try r.dev(std.mem.sliceAsBytes(a_log)),
         .dt_bias = try r.dev(std.mem.sliceAsBytes(dt_bias)),
@@ -342,6 +345,7 @@ fn runCase(r: *Rig, case: Case, kern: *const gt.Kernels) !void {
         .norm_w = try widen(r.a, u16, nw16),
         .init = if (init) |x| try widen(r.a, f32, x) else null,
         .eps = EPS,
+        .qwen27 = MODE == .qwen27,
     };
     const f = try ref.forward(r.a, d, in, true);
     ulps("act", g_act, f.act);
@@ -412,6 +416,12 @@ fn runCase(r: *Rig, case: Case, kern: *const gt.Kernels) !void {
 pub fn run(gpu: Gpu) !void {
     return runShape(gpu, 2560, 32);
 }
+pub fn runQwen27(gpu: Gpu) !void {
+    const old = MODE;
+    defer MODE = old;
+    MODE = .qwen27;
+    return runShape(gpu, 5120, 64);
+}
 pub fn runShape(gpu: Gpu, hidden: usize, group: usize) !void {
     const old_h = HIDDEN;
     const old_g = GROUP;
@@ -464,7 +474,7 @@ fn runCurrent(gpu: Gpu) !void {
             for (s0) |*v| v.* = r.uniform(-0.3, 0.3);
             const dout = try a.alloc(f64, d.rows * d.nv * d.dv);
             for (dout) |*v| v.* = r.uniform(-1, 1);
-            const in: ref.Inputs = .{ .p = p, .hist = hist, .conv_w = cw, .a_log = al, .dt_bias = db, .norm_w = nw, .init = s0, .eps = EPS };
+            const in: ref.Inputs = .{ .p = p, .hist = hist, .conv_w = cw, .a_log = al, .dt_bias = db, .norm_w = nw, .init = s0, .eps = EPS, .qwen27 = MODE == .qwen27 };
             const fd = try ref.finiteCheck(a, d, in, dout, r.rng, 120);
             const ok = fd.worst < 1e-5;
             if (!ok) r.bad += 1;

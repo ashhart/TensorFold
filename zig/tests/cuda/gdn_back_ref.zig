@@ -42,6 +42,7 @@ pub const Inputs = struct {
     norm_w: []const f64,
     init: ?[]const f64,
     eps: f64,
+    qwen27: bool = false,
 };
 
 pub const Fwd = struct {
@@ -97,9 +98,25 @@ fn convPre(d: Dims, in: Inputs, r: usize, c: usize) f64 {
     return acc;
 }
 
-fn gate(d: Dims, in: Inputs, r: usize, h: usize) f64 {
+// The 27B's four-tap fp32 point before its first bf16 rounding.
+fn convPoint(d: Dims, in: Inputs, r: usize, c: usize) f32 {
+    var acc: f32 = 0;
+    for (0..taps) |tap| {
+        const at = @as(isize, @intCast(r)) - (taps - 1) + @as(isize, @intCast(tap));
+        const x = if (at >= 0) in.p[@as(usize, @intCast(at)) * d.proj() + c] else if (in.hist) |h| h[@as(usize, @intCast(at + taps - 1)) * d.conv() + c] else 0;
+        acc += @as(f32, @floatCast(in.conv_w[c * taps + tap])) * @as(f32, @floatCast(x));
+    }
+    return acc;
+}
+
+fn gate(d: Dims, in: Inputs, r: usize, h: usize, round: bool) f64 {
     const a = in.p[r * d.proj() + d.aAt() + h];
-    return @exp(-@exp(in.a_log[h]) * softplus(a + in.dt_bias[h]));
+    const x = a + in.dt_bias[h];
+    const sp = if (in.qwen27 and round) blk: {
+        const v: f32 = @floatCast(bfRound(@as(f32, @floatCast(a)) + @as(f32, @floatCast(in.dt_bias[h]))));
+        break :blk bfRound(@max(v, 0) + @log(1 + @exp(-@abs(v))));
+    } else softplus(x);
+    return @exp(-@exp(in.a_log[h]) * sp);
 }
 
 /// q (or k) of row r, key head hk from act: x r (times dk^-0.5 for q), r = 1 / sqrt(|x|^2 + 1e-6).
@@ -110,16 +127,38 @@ fn l2(d: Dims, act: []const f64, r: usize, col: usize, scale: f64, out: []f64) v
     for (0..d.dk) |i| out[i] = act[r * d.conv() + col + i] * inv * scale;
 }
 
-fn qk(d: Dims, act: []const f64, q: []f64, k: []f64) void {
+fn qk(d: Dims, act: []const f64, q: []f64, k: []f64, qwen27: bool, round: bool) void {
     const sc = 1 / @sqrt(@as(f64, @floatFromInt(d.dk)));
     for (0..d.rows) |r| for (0..d.nk) |hk| {
         l2(d, act, r, hk * d.dk, sc, q[(r * d.nk + hk) * d.dk ..][0..d.dk]);
         l2(d, act, r, d.nk * d.dk + hk * d.dk, 1, k[(r * d.nk + hk) * d.dk ..][0..d.dk]);
+        if (qwen27 and round) for (0..2) |which| {
+            const xs = act[r * d.conv() + which * d.nk * d.dk + hk * d.dk ..][0..d.dk];
+            const out = (if (which == 0) q else k)[(r * d.nk + hk) * d.dk ..][0..d.dk];
+            var lanes: [32]f32 = @splat(0);
+            for (&lanes, 0..) |*sum, lane| {
+                var i = lane * 4;
+                while (i < d.dk and i < (lane + 1) * 4) : (i += 1) {
+                    const x: f32 = @floatCast(xs[i]);
+                    sum.* += x * x;
+                }
+            }
+            var span: usize = 16;
+            while (span > 0) : (span >>= 1) {
+                var next: [32]f32 = undefined;
+                for (&next, 0..) |*v, lane| v.* = lanes[lane] + lanes[lane ^ span];
+                lanes = next;
+            }
+            const width: f32 = @floatFromInt(d.dk);
+            const inv = 1 / @sqrt(lanes[0] / width + 1e-6 / width);
+            const scale: f32 = @floatCast(bfRound(if (which == 0) 1 / width else 1 / @sqrt(width)));
+            for (out, xs) |*o, x| o.* = bfRound(scale * @as(f32, @floatCast(bfRound(@as(f32, @floatCast(x)) * inv))));
+        };
     };
 }
 
 /// One head's bf16(bf16(y rms) w) in the GPU's own fp32 steps, so the rounded forward point is the GPU's bit for bit.
-fn normedRounded(y: []const f64, w: []const f64, eps: f64, out: []f64) void {
+fn normedRounded(y: []const f64, w: []const f64, eps: f64, qwen27: bool, out: []f64) void {
     var lanes: [32]f32 = undefined;
     for (&lanes, 0..) |*l, lane| {
         var ss: f32 = 0;
@@ -137,14 +176,15 @@ fn normedRounded(y: []const f64, w: []const f64, eps: f64, out: []f64) void {
     }
     const rinv: f32 = 1.0 / @sqrt(lanes[0] / @as(f32, @floatFromInt(y.len)) + @as(f32, @floatCast(eps)));
     for (out, y, w) |*x, v, wv| {
-        const n = bf16Value(bf16Bits(@as(f32, @floatCast(v)) * rinv));
+        const yn = @as(f32, @floatCast(v)) * rinv;
+        const n = if (qwen27) yn else bf16Value(bf16Bits(yn));
         x.* = bf16Value(bf16Bits(n * @as(f32, @floatCast(wv))));
     }
 }
 
 /// yn of one head: the rounded forward's (normedRounded), else y rms(y) w in float64.
-fn normed(y: []const f64, w: []const f64, eps: f64, round: bool, out: []f64) void {
-    if (round) return normedRounded(y, w, eps, out);
+fn normed(y: []const f64, w: []const f64, eps: f64, qwen27: bool, round: bool, out: []f64) void {
+    if (round) return normedRounded(y, w, eps, qwen27, out);
     var ss: f64 = 0;
     for (y) |v| ss += v * v;
     const rinv = 1 / @sqrt(ss / @as(f64, @floatFromInt(y.len)) + eps);
@@ -158,7 +198,9 @@ pub fn forward(a: std.mem.Allocator, d: Dims, in: Inputs, round: bool) !Fwd {
     const beta = try a.alloc(f64, d.rows * d.nv);
     for (0..d.rows) |r| for (0..C) |c| {
         const pre = convPre(d, in, r, c);
-        const v = pre * sigmoid(pre);
+        const x = if (in.qwen27 and round) bfRound(convPoint(d, in, r, c)) else pre;
+        const sig = if (in.qwen27 and round) bfRound(@as(f32, 1) / (1 + @exp(-@as(f32, @floatCast(x))))) else sigmoid(x);
+        const v = x * sig;
         act[r * C + c] = if (round) bfRound(v) else v;
     };
     for (0..d.rows) |r| for (0..d.nv) |h| {
@@ -181,9 +223,9 @@ pub fn forwardFrom(a: std.mem.Allocator, d: Dims, in: Inputs, act: []f64, betas:
         .y = try a.alloc(f64, d.rows * d.nv * d.dv),
         .out = try a.alloc(f64, d.rows * d.nv * d.dv),
     };
-    qk(d, f.act, f.q, f.k);
+    qk(d, f.act, f.q, f.k, in.qwen27, round);
     for (0..d.rows) |r| for (0..d.nv) |h| {
-        f.g[r * d.nv + h] = gate(d, in, r, h);
+        f.g[r * d.nv + h] = gate(d, in, r, h, round);
     };
     const S = try a.alloc(f64, d.dv * d.dk);
     defer a.free(S);
@@ -215,10 +257,10 @@ pub fn forwardFrom(a: std.mem.Allocator, d: Dims, in: Inputs, act: []f64, betas:
     const yn = try a.alloc(f64, d.dv);
     defer a.free(yn);
     for (0..d.rows) |r| for (0..d.nv) |h| {
-        normed(f.y[(r * d.nv + h) * d.dv ..][0..d.dv], in.norm_w, in.eps, round, yn);
+        normed(f.y[(r * d.nv + h) * d.dv ..][0..d.dv], in.norm_w, in.eps, in.qwen27, round, yn);
         for (0..d.dv) |j| {
             const z = in.p[r * P + d.zAt() + h * d.dv + j];
-            const o = yn[j] * sigmoid(z);
+            const o = yn[j] * sigmoid(z) * (if (in.qwen27) z else 1);
             f.out[(r * d.nv + h) * d.dv + j] = if (round) bfRound(o) else o;
         }
     };
@@ -245,7 +287,7 @@ pub fn backward(a: std.mem.Allocator, d: Dims, in: Inputs, act: []const f64, bet
     defer a.free(q);
     const k = try a.alloc(f64, d.rows * d.nk * dkn);
     defer a.free(k);
-    qk(d, act, q, k);
+    qk(d, act, q, k, in.qwen27, round);
     // the gated RMS norm
     for (0..d.rows) |r| for (0..d.nv) |h| {
         const yr = y[(r * d.nv + h) * d.dv ..][0..d.dv];
@@ -257,13 +299,15 @@ pub fn backward(a: std.mem.Allocator, d: Dims, in: Inputs, act: []const f64, bet
         defer a.free(dn);
         const yn = try a.alloc(f64, d.dv);
         defer a.free(yn);
-        normed(yr, in.norm_w, in.eps, round, yn);
+        normed(yr, in.norm_w, in.eps, in.qwen27, round, yn);
         for (0..d.dv) |j| {
             const zc = r * P + d.zAt() + h * d.dv + j;
-            const sg = sigmoid(in.p[zc]);
+            const z = in.p[zc];
+            const sg = sigmoid(z);
             const go = dout[(r * d.nv + h) * d.dv + j];
-            gr.dproj[zc] = go * yn[j] * sg * (1 - sg);
-            dn[j] = go * sg * in.norm_w[j];
+            const slope = if (in.qwen27) sg * (1 + z * (1 - sg)) else sg * (1 - sg);
+            gr.dproj[zc] = if (in.qwen27) go * yn[j] * slope else go * yn[j] * sg * (1 - sg);
+            dn[j] = go * sg * (if (in.qwen27) z else 1) * in.norm_w[j];
             dot += yr[j] * dn[j];
         }
         for (0..d.dv) |j| gr.dy[(r * d.nv + h) * d.dv + j] = rinv * dn[j] - rinv * rinv * rinv * yr[j] * dot / @as(f64, @floatFromInt(d.dv));
@@ -285,7 +329,7 @@ pub fn backward(a: std.mem.Allocator, d: Dims, in: Inputs, act: []const f64, bet
         const v0 = 2 * d.nk * dkn + h * d.dv;
         if (in.init) |s0| @memcpy(states[0..size], s0[h * size ..][0..size]) else @memset(states[0..size], 0);
         for (0..d.rows) |r| {
-            const g = gate(d, in, r, h);
+            const g = gate(d, in, r, h, round);
             const b = beta[r * d.nv + h];
             const kr = k[(r * d.nk + hk) * dkn ..][0..dkn];
             const cur = states[(r + 1) * size ..][0..size];
@@ -305,7 +349,7 @@ pub fn backward(a: std.mem.Allocator, d: Dims, in: Inputs, act: []const f64, bet
         var r = d.rows;
         while (r > 0) {
             r -= 1;
-            const g = gate(d, in, r, h);
+            const g = gate(d, in, r, h, round);
             const b = beta[r * d.nv + h];
             const kr = k[(r * d.nk + hk) * dkn ..][0..dkn];
             const qr = q[(r * d.nk + hk) * dkn ..][0..dkn];
@@ -363,16 +407,17 @@ pub fn backward(a: std.mem.Allocator, d: Dims, in: Inputs, act: []const f64, bet
             dot += xi * di;
         }
         const inv = 1 / @sqrt(ss + 1e-6);
-        const s = if (which == 0) sc else 1;
+        const s = if (which == 0) sc else if (in.qwen27 and round) bfRound(sc) / sc else 1;
         for (0..dkn) |i| gr.dact[r * C + col + i] = s * inv * (dqk[i] - inv * inv * x[i] * dot);
     };
     // the gates
     for (0..d.rows) |r| for (0..d.nv) |h| {
         const b = sigmoid(in.p[r * P + d.bAt() + h]);
-        const x = in.p[r * P + d.aAt() + h] + in.dt_bias[h];
+        const pre = in.p[r * P + d.aAt() + h] + in.dt_bias[h];
+        const x = if (in.qwen27 and round) bfRound(pre) else pre;
         const slope = if (x > 20) 1 else sigmoid(x);
         gr.dproj[r * P + d.bAt() + h] = gr.dbeta[r * d.nv + h] * b * (1 - b);
-        gr.dproj[r * P + d.aAt() + h] = -gr.dg[r * d.nv + h] * gate(d, in, r, h) * @exp(in.a_log[h]) * slope;
+        gr.dproj[r * P + d.aAt() + h] = -gr.dg[r * d.nv + h] * gate(d, in, r, h, round) * @exp(in.a_log[h]) * slope;
     };
     // the conv and its SiLU
     for (0..d.rows) |r| for (0..C) |c| {
@@ -381,8 +426,13 @@ pub fn backward(a: std.mem.Allocator, d: Dims, in: Inputs, act: []const f64, bet
             const at = r + taps - 1 - tap;
             if (at >= d.rows) continue;
             const pre = convPre(d, in, at, c);
-            const s = sigmoid(pre);
-            acc += in.conv_w[c * taps + tap] * gr.dact[at * C + c] * s * (1 + pre * (1 - s));
+            const x = if (in.qwen27 and round) bfRound(convPoint(d, in, at, c)) else pre;
+            const sig = sigmoid(x);
+            const slope = if (in.qwen27 and round) bfRound(sig) + x * sig * (1 - sig) else sig * (1 + x * (1 - sig));
+            acc += if (in.qwen27 and round)
+                in.conv_w[c * taps + tap] * gr.dact[at * C + c] * slope
+            else
+                in.conv_w[c * taps + tap] * gr.dact[at * C + c] * sig * (1 + pre * (1 - sig));
         }
         gr.dproj[r * P + c] = acc;
     };
