@@ -4,7 +4,12 @@ const LaneHost = @import("lane_host.zig").LaneHost;
 const Decision = @import("engine_api.zig").Decision;
 
 /// A family's whole-decision runner (opt-in): the trunk once and each branch after it, on the engine thread.
-pub const Decider = struct { ctx: *anyopaque, run: *const fn (ctx: *anyopaque, d: *Decision) anyerror!void };
+pub const Decider = struct {
+    ctx: *anyopaque,
+    run: *const fn (ctx: *anyopaque, d: *Decision) anyerror!void,
+    /// Several queued decisions at once (one batched pass where they fit); errs[i]: decision i's error, null when done.
+    run_many: ?*const fn (ctx: *anyopaque, ds: []const *Decision, errs: []?anyerror) void = null,
+};
 
 /// One scoring question, on the asking thread's stack until `done`.
 pub const Ask = struct {
@@ -67,7 +72,14 @@ pub fn answer(h: *LaneHost) void {
     h.unlock();
     defer h.gpa.free(list);
     const backend = h.core.backend;
-    for (list) |a| {
+    const handled: ?[]bool = h.gpa.alloc(bool, list.len) catch null; // out of memory: one at a time, as before
+    defer if (handled) |x| h.gpa.free(x);
+    if (handled) |x| {
+        @memset(x, false);
+        if (h.decider) |decider| if (decider.run_many) |many| batched(h, decider, many, list, x);
+    }
+    for (list, 0..) |a, at| {
+        if (handled) |x| if (x[at]) continue; // answered in a batch
         if (a.decision) |d| {
             const decider = h.decider orelse {
                 a.failed = true;
@@ -95,6 +107,36 @@ pub fn answer(h: *LaneHost) void {
     for (list) |a| a.done = true;
     h.wake.broadcast(h.io);
     h.unlock();
+}
+
+/// Queued decisions (two or more) through `many` at once, marked `handled`; `answer` sets done with the rest.
+fn batched(h: *LaneHost, decider: Decider, many: *const fn (ctx: *anyopaque, ds: []const *Decision, errs: []?anyerror) void, list: []*Ask, handled: []bool) void {
+    var count: usize = 0;
+    for (list) |a| count += @intFromBool(a.decision != null);
+    if (count < 2) return;
+    const ds = h.gpa.alloc(*Decision, count) catch return;
+    defer h.gpa.free(ds);
+    const errs = h.gpa.alloc(?anyerror, count) catch return;
+    defer h.gpa.free(errs);
+    var i: usize = 0;
+    for (list) |a| if (a.decision) |d| {
+        ds[i] = d;
+        i += 1;
+    };
+    @memset(errs, null);
+    many(decider.ctx, ds, errs);
+    i = 0;
+    for (list, handled) |a, *done| if (a.decision != null) {
+        if (errs[i]) |err| switch (err) {
+            error.Refused => a.refused = true,
+            else => {
+                std.log.warn("lane host: a decision failed ({s})", .{@errorName(err)});
+                a.failed = true;
+            },
+        };
+        done.* = true;
+        i += 1;
+    };
 }
 
 /// Questions left when the engine stops: each fails.

@@ -3,6 +3,7 @@ const std = @import("std");
 const lanes = @import("lanes");
 const api = @import("engine_api.zig");
 const LaneHost = @import("lane_host.zig").LaneHost;
+const scoring = @import("lane_host_score.zig");
 
 /// The fake backend's entries with a score of its own: label i scores prompt.len + i, the mass 7.5.
 const Scorer = struct {
@@ -108,4 +109,54 @@ test "a host's decider answers whole decisions on the engine thread, refusals ke
     host.stop();
     try std.testing.expectError(error.Failed, engine.decide(&d));
     try std.testing.expectEqual(@as(usize, 2), Decides.calls);
+}
+
+/// A fake many-decision runner: records each batch's size, answers each decision as Decides does.
+const Many = struct {
+    var sizes: [4]usize = @splat(0);
+    var batches: usize = 0;
+
+    fn run(ctx: *anyopaque, ds: []const *api.Decision, errs: []?anyerror) void {
+        sizes[batches] = ds.len;
+        batches += 1;
+        for (ds, errs) |d, *e| e.* = if (Decides.run(ctx, d)) |_| null else |err| err;
+    }
+};
+
+test "decisions queued together reach the decider's run_many in one call, each with its own answer or refusal" {
+    const gpa = std.testing.allocator;
+    var cfg = try lanes.Config.init(gpa, .{}, 1, 0);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer core.deinit();
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 1 });
+    var unused: u8 = 0;
+    host.decider = .{ .ctx = &unused, .run = Decides.run, .run_many = Many.run };
+    Many.batches = 0;
+    var l1: [3]f64 = undefined;
+    var l2: [1]f64 = undefined;
+    var l3: [1]f64 = undefined;
+    var d1: api.Decision = .{ .trunk = &.{ 1, 2, 3 }, .branches = &.{ &.{ 5, 6 }, &.{7} }, .counts = &.{ 2, 1 }, .labels = &.{ 9, 8, 7 }, .logits = &l1 };
+    var d2: api.Decision = .{ .trunk = &.{1}, .branches = &.{&.{0}}, .counts = &.{1}, .labels = &.{9}, .logits = &l2 };
+    var d3: api.Decision = .{ .trunk = &.{ 4, 4 }, .branches = &.{&.{ 1, 1, 1 }}, .counts = &.{1}, .labels = &.{9}, .logits = &l3 };
+    var asks = [_]scoring.Ask{
+        .{ .prompt = &.{}, .labels = &.{}, .logits = &.{}, .mass = false, .decision = &d1 },
+        .{ .prompt = &.{}, .labels = &.{}, .logits = &.{}, .mass = false, .decision = &d2 },
+        .{ .prompt = &.{}, .labels = &.{}, .logits = &.{}, .mass = false, .decision = &d3 },
+    };
+    for (&asks) |*a| try host.scores.asks.append(gpa, a);
+    scoring.answer(&host);
+    host.scores.asks.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 1), Many.batches);
+    try std.testing.expectEqual(@as(usize, 3), Many.sizes[0]);
+    try std.testing.expectEqualSlices(f64, &.{ 5, 6, 4 }, &l1);
+    try std.testing.expectEqualSlices(f64, &.{5}, &l3);
+    for (asks) |a| try std.testing.expect(a.done);
+    try std.testing.expect(!asks[0].failed and !asks[0].refused);
+    try std.testing.expect(asks[1].refused);
+    try std.testing.expectEqualStrings("branch zero", d2.problem);
+    try std.testing.expect(!asks[2].failed and !asks[2].refused);
 }
