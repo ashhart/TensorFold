@@ -3,7 +3,7 @@ const std = @import("std");
 const cache = @import("cost_cache.zig");
 
 pub fn pendingDelete() !void {
-    if (comptime @import("builtin").os.tag != .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .windows or !@import("builtin").link_libc) return error.SkipZigTest;
     const w = std.os.windows;
     const a = std.testing.allocator;
     const io = std.testing.io;

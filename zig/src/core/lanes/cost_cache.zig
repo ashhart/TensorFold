@@ -165,6 +165,7 @@ test "CUDA reference identity retains the existing newline-delimited hash" {
 }
 
 test "window cost cache: shared reader retains exact envelopes and treats failed opens as misses" {
+    if (comptime !@import("builtin").link_libc) return error.SkipZigTest;
     const a = std.testing.allocator;
     const io = std.testing.io;
     const V = struct { n: u32, ms: [3]f64 };
