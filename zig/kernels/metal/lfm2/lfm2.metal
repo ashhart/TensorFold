@@ -580,3 +580,16 @@ constant constexpr uint SORT_CHUNKS = 16;  // thread (e, c) counts expert e's pi
   const device vec<bfloat, 8>* from = (const device vec<bfloat, 8>*)(h + size_t(i.y) * D);
   ((device vec<bfloat, 8>*)(taps + size_t(i.y) * at.x + at.y))[i.x] = from[i.x];
 }
+
+// A row's tap destination (null: none), the address of its first column.
+struct lfm2_tap_row_dst { device bfloat* row; };
+
+// A drafter's tap into each row's own destination: H's rows [rows, D] copied there, column i of `mask` at i * D values, 8 a thread.
+[[kernel]] void lfm2_tap_rows(const device bfloat* h [[buffer(0)]], const device lfm2_tap_row_dst* dst [[buffer(1)]], constant uint& mask [[buffer(2)]],
+                              uint2 i [[thread_position_in_grid]]) {
+  if (i.x >= D / 8) return;
+  device bfloat* out = dst[i.y].row;
+  if (out == nullptr) return;
+  const vec<bfloat, 8> saved = ((const device vec<bfloat, 8>*)(h + size_t(i.y) * D))[i.x];
+  for (uint m = mask; m != 0; m &= m - 1) ((device vec<bfloat, 8>*)(out + size_t(ctz(m)) * D))[i.x] = saved;
+}

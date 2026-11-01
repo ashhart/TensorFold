@@ -10,7 +10,10 @@ const tile = @import("../../core/tile_qmm.zig");
 const am = @import("../../core/affine_mm.zig");
 const segs = @import("segments.zig");
 const Buffer = mtl.Buffer;
-pub const Segment = struct { cache: *st.Cache, rows: usize };
+/// Where a segment's tapped rows go: the scratch's taps, nowhere, or a stage.
+pub const Tap = union(enum) { scratch, none, stage: Place };
+pub const Place = struct { buf: Buffer, off: usize };
+pub const Segment = struct { cache: *st.Cache, rows: usize, tap: Tap = .scratch };
 /// GPU seconds of every call so far (the bench reports a chunk's GPU time beside its wall time).
 pub var gpu_seconds: f64 = 0;
 /// `all`: every row's logits and greedy pick (Scratch.best); `last`: the last row's logits alone.
@@ -19,6 +22,24 @@ pub const Head = enum { last, all };
 const tile_rows = 33;
 /// A buffer and byte offset as core/affine_mm binds them.
 const Ref = struct { buf: Buffer, off: usize = 0 };
+
+/// Each row's tap destination into the scratch's table, every buffer it names declared on `e`.
+fn tapTable(e: mtl.ComputeEncoder, s: *st.Scratch, segments: []const Segment) void {
+    const taps = s.taps orelse return;
+    const width = taps.count * c.hidden * 2;
+    const table = @as([*]u64, @ptrCast(@alignCast(taps.buf.contents() + taps.table_at)))[0..s.rows];
+    var base: usize = 0;
+    for (segments) |seg| {
+        const place: ?Place = switch (seg.tap) {
+            .scratch => .{ .buf = taps.buf, .off = base * width },
+            .none => null,
+            .stage => |p| p,
+        };
+        if (place) |p| e.useResource(p.buf, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
+        for (table[base..][0..seg.rows], 0..) |*dst, i| dst.* = if (place) |p| p.buf.gpuAddress() + p.off + i * width else 0;
+        base += seg.rows;
+    }
+}
 
 const QkArgs = extern struct { len: u32, cap: u32, eps: f32, log2_theta: f32 };
 const AttnArgs = extern struct { len: u32, cap: u32, scale: f32, subs: u32 };
@@ -145,6 +166,7 @@ pub fn runHeld(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []c
     const prompt = (!record and head == .last) or total >= tile_rows;
     const e = cb.compute(.serial);
     const plan = if (segs.batched(record, segments.len)) segs.prepare(e, s, segments) else null;
+    tapTable(e, s, segments);
     const enc = Encoder{ .e = e, .m = m, .s = s, .prompt = prompt, .record = record, .plan = plan };
     if (held.len > 0) @memset(s.bad.contents()[0..4], 0);
     for (held) |h| {
@@ -210,16 +232,19 @@ pub fn runHeld(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []c
     }
 }
 
-/// Layer `layer`'s output rows (h, just summed by the next norm) into each tap of it, when a drafter reads them.
+/// Layer `layer`'s output rows (h, just summed by the next norm) into each row's destination, at every tap of it.
 fn tap(enc: Encoder, s: *st.Scratch, layer: usize, total: usize) void {
     const taps = s.taps orelse return;
-    for (taps.layers[0..taps.count], 0..) |l, t| if (l == layer) {
-        enc.pipe("lfm2_tap");
-        enc.e.setBuffer(s.h, 0, 0);
-        enc.e.setBuffer(taps.buf, 0, 1);
-        enc.e.setValue([2]u32{ taps.count * c.hidden, @intCast(t * c.hidden) }, 2);
-        enc.threads(.{ c.hidden / 8, total, 1 }, .{ 256, 1, 1 });
+    var mask: u32 = 0; // the tap columns of this layer, bit i: column i
+    for (taps.layers[0..taps.count], 0..) |l, i| if (l == layer) {
+        mask |= @as(u32, 1) << @intCast(i);
     };
+    if (mask == 0) return;
+    enc.pipe("lfm2_tap_rows");
+    enc.e.setBuffer(s.h, 0, 0);
+    enc.e.setBuffer(taps.buf, taps.table_at, 1);
+    enc.e.setValue(mask, 2);
+    enc.threads(.{ c.hidden / 8, total, 1 }, .{ 256, 1, 1 });
 }
 
 fn conv(enc: Encoder, s: *st.Scratch, cv: wts.Conv, layer: usize, segments: []const Segment, total: usize) void {

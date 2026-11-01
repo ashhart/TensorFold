@@ -31,6 +31,7 @@ const gemma_mixed = @import("metal_gemma4_mixed.zig");
 const lfm2_argmax = @import("metal_lfm2_argmax.zig");
 const lfm2_streams = @import("metal_lfm2_streams.zig");
 const lfm2_tap = @import("metal_lfm2_tap.zig");
+const lfm2_tap_rows = @import("metal_lfm2_tap_rows.zig");
 const lfm2_dspark = @import("metal_lfm2_dspark.zig");
 const lfm2_bf16 = @import("metal_lfm2_bf16.zig");
 const lfm2_attn = @import("metal_lfm2_attn.zig");
@@ -214,6 +215,22 @@ pub fn main(init: std.process.Init) !u8 {
         errdefer a.destroy(p);
         p.* = try lfm2_tap.Probe.init(a, device, queue, m);
         try tap_list.append(a, p);
+        try kernels.append(a, p.kernel());
+    }
+    var tap_rows_list: std.ArrayList(*lfm2_tap_rows.Probe) = .empty;
+    defer {
+        for (tap_rows_list.items) |p| {
+            p.deinit();
+            a.destroy(p);
+        }
+        tap_rows_list.deinit(a);
+    }
+    for ([_]lfm2_controls.Mutation{ .none, .tap_rows_first_destination, .tap_rows_clobbers_column }) |m| {
+        if (!wanted(o, if (m == .none) lfm2_tap_rows.name else m.name())) continue;
+        const p = try a.create(lfm2_tap_rows.Probe);
+        errdefer a.destroy(p);
+        p.* = try lfm2_tap_rows.Probe.init(a, device, queue, m);
+        try tap_rows_list.append(a, p);
         try kernels.append(a, p.kernel());
     }
     var drafter_list: std.ArrayList(*lfm2_dspark.Probe) = .empty;

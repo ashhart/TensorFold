@@ -30,13 +30,13 @@ const names = [_][:0]const u8{
     "lfm2_attn_segs",
     "lfm2_attn_merge_segs",
     "lfm2_tap",
+    "lfm2_tap_rows",
     "lfm2_markov_scan",
     "lfm2_markov_scan_bf16",
     "lfm2_bf16_rows",
     "lfm2_bf16_mma",
     "lfm2_markov_pick",
     "lfm2_draft_ids",
-    "lfm2_dspark_confidence",
 };
 
 pub const Kernels = struct {
