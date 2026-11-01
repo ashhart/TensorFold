@@ -4,7 +4,7 @@ const std = @import("std");
 const dir = "zig/kernels/metal/drama3";
 const sources = [_][]const u8{ "dense.metal", "gdn.metal", "attn.metal", "moe.metal", "nvfp4.metal", "guidance.metal", "sample.metal", "codec.metal" };
 
-/// Drama in the Metal engines: its `core` is the engine's safetensors, the server's tokenizer and frame_rounds.
+/// Drama in the Metal engines: its `core` is the engine's safetensors and KV pool, the tokenizer and frame_rounds.
 pub fn addNative(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, native: *std.Build.Module, metal_std: []const u8) void {
     const tokenizer = native.import_table.get("tokenizer") orelse tok: {
         const t = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
@@ -12,7 +12,7 @@ pub fn addNative(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
         break :tok t;
     };
     const rounds = b.createModule(.{ .root_source_file = b.path("zig/src/core/frame_rounds.zig"), .target = target, .optimize = optimize });
-    const shim = b.addWriteFiles().add("drama3_core.zig", "pub const safetensors = @import(\"tensorfold\").safetensors;\npub const tokenizer = @import(\"tokenizer\");\npub const frame_rounds = @import(\"frame_rounds\");\n");
+    const shim = b.addWriteFiles().add("drama3_core.zig", "pub const safetensors = @import(\"tensorfold\").safetensors;\npub const kv_pool = @import(\"tensorfold\").kv_pool;\npub const kv_prompts = @import(\"tensorfold\").kv_prompts;\npub const tokenizer = @import(\"tokenizer\");\npub const frame_rounds = @import(\"frame_rounds\");\n");
     const core = b.createModule(.{ .root_source_file = shim, .target = target, .optimize = optimize, .imports = &.{
         .{ .name = "tensorfold", .module = native.import_table.get("tensorfold").? },
         .{ .name = "tokenizer", .module = tokenizer },

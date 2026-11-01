@@ -9,7 +9,7 @@ const st = @import("state.zig");
 const kv_pages = @import("kv_pages.zig");
 const kvp = @import("../../core/metal_kv_pages.zig");
 const lesson_route = @import("living").lesson_route;
-const layers = @import("layers.zig");
+const prompt_pages = @import("prompt_pages.zig");
 const mtp = @import("mtp.zig");
 const timing = @import("timing.zig");
 const tree = @import("tree.zig");
@@ -82,6 +82,8 @@ pub const Metal = struct {
     kv_tables: ?mtl.Buffer = null, // and every lane's page table
     kv_pages: ?*kvp.Pages = null, // the core pool over them: a stream leases a lane's pages when it opens
     kv_pipes: ?*kv_pages.Pipelines = null, // the paged twins (the model's kernels point at them)
+    prompts: ?@import("../../core/kv_prompts.zig").Prompts = null, // TF_KV_SHARE: the store keeping prompts as pages
+    pending: ?*const snapshot.Snap = null, // the store's resume, restored once the stream's lane adopts its pages
 
     pub fn init(gpa: std.mem.Allocator, m: *Model, o: Options) !*Metal {
         const b = try gpa.create(Metal);
@@ -227,11 +229,6 @@ pub const Metal = struct {
         if (c.pending) |p| c.commit(&self.pool, p.rows);
     }
 
-    /// A stream's draw at `position`: argmax, or its keyed sampler (rows after it at the next positions).
-    fn drawOf(s: *const lanes.Stream, position: u64) fwd.Draw {
-        return if (s.sampling) |t| .{ .sampled = .{ .sampling = t, .position = position } } else .greedy;
-    }
-
     /// The fresh state slot a segment stores to: always after all its rows, after its replayed rows if it has any.
     pub fn slotFor(self: *Metal, c: *const st.Cache, store: fwd.Store) !i32 {
         return if (store == .full or c.replay > 0) @intCast(try self.pool.take()) else -1;
@@ -256,7 +253,10 @@ pub const Metal = struct {
             self.gpa.destroy(old);
             _ = self.caches.remove(s);
         }
-        const c = try @import("residency.zig").openCache(self, s, rows_needed);
+        var pass = try prompt_pages.Pass.begin(self, s);
+        var ok = false;
+        defer pass.end(self, s, ok);
+        const c = try @import("residency.zig").openCache(self, s, rows_needed, pass.held());
         @memcpy(self.prompt.slice(u32, ids.len), ids);
         const Chunks = struct {
             n: usize,
@@ -296,7 +296,7 @@ pub const Metal = struct {
             }
         };
         s.cached = 0;
-        var at: usize = 0;
+        var at = try pass.resume_(self, s, c); // TF_KV_SHARE: the store's kept pages and state
         if (s.reuse.saved) |saved| { // a kept state of this prompt's prefix: the pass starts there
             const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
             if (snap.at < ids.len) if (snapshot.restore(self, c, snap)) |_| {
@@ -313,31 +313,20 @@ pub const Metal = struct {
             var end = if (k < s.chunks.len) @min(s.chunks[k], ids.len) else ids.len;
             // the decision row ends its chunk: the rows after it read the lessons it latched
             if (c.decide != lesson_route.none and c.decide >= at and c.decide + 1 < end) end = @intCast(c.decide + 1);
+            end = pass.cut(at, end); // TF_KV_SHARE: a chunk ends at the store's next mark
             const rows = @min(self.o.chunk, end - at);
             if (s.isCancelled()) return error.Cancelled; // release() waits for the chunk still in flight
+            try kv_pages.grow(c, at + rows);
             try self.submit(.prefill, self.next, Chunks{ .n = ids.len, .c = c, .at = at, .rows = rows });
             while (self.flights.items.len > 1) try self.land();
             at += rows;
             // landed tokens only: the newest chunk is still queued on the GPU
             s.fill_at.store(@intCast(at - rows), .monotonic);
             if (s.reuse.hook) |hk| if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(at)) != null) hk.at(hk.ptr, s, @intCast(at));
+            pass.mark(self, s, c, at);
         }
-        if (self.trace and c.decide != lesson_route.none) try self.traceLessons(c);
-    }
-
-    /// Dev trace (TF_SLIDE_TRACE): the stream's router scores at its decision row and the lessons acting on its reply.
-    fn traceLessons(self: *Metal, c: *const st.Cache) !void {
-        const ad = layers.firstAdapter(&self.m.weights) orelse return;
-        try self.drain();
-        const n = lesson_route.max_blocks;
-        const at: usize = @intCast(@max(c.rid, 0));
-        const score = ad.score.slice(f32, lesson_route.max_slots * n)[at * n ..][0..n];
-        const flags = ad.latch.slice(u32, lesson_route.max_slots * n)[at * n ..][0..n];
-        const need = ad.need.slice(f32, n);
-        var line: [2048]u8 = undefined;
-        var w: std.Io.Writer = .fixed(&line);
-        for (0..ad.rank / 16) |b| w.print(" {d:.2}/{d:.2}{s}", .{ score[b], need[b], if (flags[b] != 0) "*" else "" }) catch break;
-        std.log.info("slide trace: decision row {d}: scores{s} (* acting)", .{ c.decide, w.buffered() });
+        ok = true;
+        if (self.trace and c.decide != lesson_route.none) try @import("slide.zig").traceLessons(self, c);
     }
 
     fn firstFn(ptr: *anyopaque, s: *lanes.Stream, position: u64) anyerror!u64 {
@@ -359,7 +348,7 @@ pub const Metal = struct {
                 b.forward().draw(e, &segs, .last, b.tokens, slot(j.h));
             }
         };
-        try self.submit(.prefill, h + 1, Head{ .h = h, .c = c, .how = drawOf(s, position), .mask_row = mask_row });
+        try self.submit(.prefill, h + 1, Head{ .h = h, .c = c, .how = fwd.drawOf(s, position), .mask_row = mask_row });
         return h;
     }
 
@@ -382,6 +371,7 @@ pub const Metal = struct {
         const in = self.feedSlot(feed);
         const out = self.take(1);
         if (c.len + 1 > c.kv[0].capacity) return error.ContextFull;
+        try kv_pages.grow(c, c.len + 1);
         const state = try self.slotFor(c, .full);
         errdefer self.pool.give(@intCast(state));
         const Step = struct {
@@ -398,7 +388,7 @@ pub const Metal = struct {
                 f.draw(e, &segs, .all, b.tokens, slot(j.out));
             }
         };
-        try self.submit(.step, out + 1, Step{ .in = in, .out = out, .c = c, .state = state, .how = drawOf(s, position) });
+        try self.submit(.step, out + 1, Step{ .in = in, .out = out, .c = c, .state = state, .how = fwd.drawOf(s, position) });
         hold(c, 1, .full, state);
         c.commit(&self.pool, 1);
         c.start = 0;
@@ -426,6 +416,7 @@ pub const Metal = struct {
             self.settle(c);
             const rows = w.rows();
             if (rows > max_lanes or c.len + rows > c.kv[0].capacity) return error.WindowTooWide;
+            try kv_pages.grow(c, c.len + rows);
             if (w.parents == null) {
                 for (w.positions, 0..) |p, r| if (p != w.positions[0] + r) return error.PositionsNotAChain;
             } else if (windows.len > 1) return error.SharedTreesNotBuilt else if (w.stream.sampling != null) return error.SampledTreesNotBuilt;
@@ -436,7 +427,7 @@ pub const Metal = struct {
             for (w.tokens, 0..) |t, r| staged[(stage + 1 + r) % ring] = t;
             fills[i] = .{ .stage = stage, .held = w.held, .n = w.tokens.len };
             const mask_row = try grammar.stage(self, w, total);
-            segs[i] = .{ .rows = rows, .cache = c, .store = .lag, .slot = try self.slotFor(c, .lag), .parents = w.parents, .draw = drawOf(w.stream, w.positions[0]), .mask_row = mask_row };
+            segs[i] = .{ .rows = rows, .cache = c, .store = .lag, .slot = try self.slotFor(c, .lag), .parents = w.parents, .draw = fwd.drawOf(w.stream, w.positions[0]), .mask_row = mask_row };
             taken = i + 1;
             c.start = total;
             c.rows = rows;
@@ -495,6 +486,7 @@ pub const Metal = struct {
                 @memcpy(c.compact.?.path[0..path.len], path);
             }
             c.commit(&self.pool, path.len);
+            if (self.flights.items.len == 0) kv_pages.keep(c); // the dropped rows' pages: the verify has landed
             for (path, 0..) |r, i| c.replay_map[i] = @intCast(r);
         }
     }
@@ -528,8 +520,9 @@ pub const Metal = struct {
         for (requests, 0..) |r, i| {
             const c = try self.cacheOf(r.stream);
             if (r.lanes == null and r.depth + 1 > max_window) return error.WindowTooWide;
+            try kv_pages.grow(c, @max(c.len, c.mtp_len) + max_lanes + max_window); // the head's kept rows and drafts
             if (r.lanes) |l| if (l.parents.len + 1 > max_lanes or r.stream.sampling != null) return error.WindowTooWide;
-            jobs[i] = .{ .c = c, .kept = 0, .depth = r.depth, .how = drawOf(r.stream, r.position), .token = 0, .lanes = r.lanes, .ranks = r.ranks or self.ranks_always };
+            jobs[i] = .{ .c = c, .kept = 0, .depth = r.depth, .how = fwd.drawOf(r.stream, r.position), .token = 0, .lanes = r.lanes, .ranks = r.ranks or self.ranks_always };
             if (r.rows) |rows| {
                 jobs[i].kept = rows.len;
                 jobs[i].path = rows;

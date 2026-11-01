@@ -179,6 +179,22 @@ pub const Pages = struct {
         p.tables.set(lane, i, id);
     }
 
+    /// Lane `lane`'s table starts with a kept prompt's pages, held once more (TF_KV_SHARE); a failure releases them.
+    pub fn adopt(p: *Pages, lane: usize, held: []const u32) !void {
+        const old = p.leases[lane].ids.items.len;
+        if (old + held.len > p.tables.most) {
+            for (held) |id| p.pool.release(id);
+            return error.PastTable;
+        }
+        try p.pool.adopt(&p.leases[lane], held);
+        for (held, old..) |id, i| p.tables.set(lane, i, id);
+    }
+
+    /// Lane `lane` keeps the pages of its first `tokens` rows; those past them go back to its promise.
+    pub fn trim(p: *Pages, lane: usize, tokens: u64) void {
+        p.pool.trim(&p.leases[lane], p.layout.pages(tokens));
+    }
+
     /// Lane `lane`'s stream ended: its promise and pages go back.
     pub fn finish(p: *Pages, lane: usize) void {
         p.pool.finish(&p.leases[lane]);
@@ -266,6 +282,24 @@ test "an idle pool holds no page: interleaved lanes, a run between them, every p
     try std.testing.expectEqual(@as(usize, 0), c.leased);
 }
 
+test "a rolled-back window's pages go back to the promise and are taken again as the rows grow" {
+    const p = try Pages.init(std.testing.allocator, null, testLayout(), 2, 6, 4 * page_tokens, 0);
+    defer p.deinit();
+    try p.admit(0, 4);
+    try p.cover(0, page_tokens + 9); // a window across the edge: two pages
+    try std.testing.expectEqual(@as(usize, 2), p.ids(0).len);
+    p.trim(0, page_tokens - 3); // its rows past the first page dropped
+    try std.testing.expectEqual(@as(usize, 1), p.ids(0).len);
+    try std.testing.expectEqual(@as(usize, 3), p.leases[0].promised); // back to its promise, not to another lane
+    try std.testing.expectEqual(@as(usize, 2), p.pool.available());
+    p.trim(0, 2 * page_tokens); // a trim past the table keeps it
+    try std.testing.expectEqual(@as(usize, 1), p.ids(0).len);
+    try p.cover(0, 3 * page_tokens);
+    try std.testing.expectEqualSlices(u32, p.ids(0), p.tables.entries(0, 3));
+    p.finish(0);
+    try std.testing.expect(p.idle());
+}
+
 test "a page shared with the store's copy is written to the table" {
     const p = try Pages.init(std.testing.allocator, null, testLayout(), 2, 4, 2 * page_tokens, 0);
     defer p.deinit();
@@ -290,4 +324,23 @@ test "the kernels' address helper pages by TF_PAGE_TOKENS" {
 
 test {
     _ = @import("metal_kv_pages_test.zig");
+}
+
+test "a kept prompt's pages head a new lane's table, held by both, and stay the store's when the stream ends" {
+    const p = try Pages.init(std.testing.allocator, null, testLayout(), 2, 6, 4 * page_tokens, 0);
+    defer p.deinit();
+    var kept: [2]u32 = undefined;
+    try std.testing.expect(p.pool.hold(&kept)); // the store's two pages
+    for (kept) |id| p.pool.retain(id); // a resume holds them once more for the stream
+    try p.admit(1, 4 - kept.len);
+    try p.adopt(1, &kept);
+    try p.cover(1, 3 * page_tokens); // the stream's own pages past them, from its promise
+    try std.testing.expectEqualSlices(u32, &kept, p.tables.entries(1, 2));
+    try std.testing.expectEqualSlices(u32, p.ids(1), p.tables.entries(1, 3));
+    try std.testing.expectEqual(@as(u32, 2), p.pool.holders(kept[0]));
+    p.finish(1);
+    try std.testing.expect(p.idle()); // kept pages are the store's, not a lane's
+    try std.testing.expectEqual(@as(usize, 2), p.pool.census().kept);
+    for (kept) |id| try p.pool.drop(id);
+    try std.testing.expectEqual(@as(usize, 6), p.pool.census().free);
 }

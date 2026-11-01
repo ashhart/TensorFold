@@ -168,3 +168,19 @@ pub fn loadLiving(gpa: std.mem.Allocator, io: std.Io, b: *backend.Metal) !void {
     b.living = sites;
     std.log.info("slide: {d} saved lessons act on the replies their routers choose", .{blocks});
 }
+
+/// Dev trace (TF_SLIDE_TRACE): the stream's router scores at its decision row and the lessons acting on its reply.
+pub fn traceLessons(b: *backend.Metal, c: *const @import("state.zig").Cache) !void {
+    const lesson_route = @import("living").lesson_route;
+    const ad = @import("layers.zig").firstAdapter(&b.m.weights) orelse return;
+    try b.drain();
+    const n = lesson_route.max_blocks;
+    const at: usize = @intCast(@max(c.rid, 0));
+    const score = ad.score.slice(f32, lesson_route.max_slots * n)[at * n ..][0..n];
+    const flags = ad.latch.slice(u32, lesson_route.max_slots * n)[at * n ..][0..n];
+    const need = ad.need.slice(f32, n);
+    var line: [2048]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&line);
+    for (0..ad.rank / 16) |k| w.print(" {d:.2}/{d:.2}{s}", .{ score[k], need[k], if (flags[k] != 0) "*" else "" }) catch break;
+    std.log.info("slide trace: decision row {d}: scores{s} (* acting)", .{ c.decide, w.buffered() });
+}

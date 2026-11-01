@@ -42,12 +42,26 @@ pub fn detach(b: anytype) void {
     }
 }
 
-/// With no stream open every page must be free: the census says so, or warns.
+/// A paged stream holds the pages of its first `rows` rows (its capacity at most) before a pass writes them.
+pub fn grow(c: *st.Cache, rows: usize) !void {
+    if (c.attentions == 0) return;
+    const p = c.kv[0].paged orelse return;
+    try p.lease.pages.cover(p.lease.lane, @min(rows, c.kv[0].capacity));
+}
+
+/// A rolled-back window's pages past the rows a stream keeps go back to its promise; none in flight reads them.
+pub fn keep(c: *st.Cache) void {
+    if (c.attentions == 0 or c.compact != null) return; // a tree path's rows still move from past the kept ones
+    const p = c.kv[0].paged orelse return;
+    p.lease.pages.trim(p.lease.lane, @max(c.len, c.mtp_len));
+}
+
+/// With no stream open every page is free or the store's (TF_KV_SHARE): the census says so, or warns.
 pub fn census(b: anytype) void {
     const p = b.kv_pages orelse return;
     const c = p.pool.census();
-    if (p.idle() and c.free == c.total) {
-        std.log.info("nemotron: KV pages idle, {d} of {d} free", .{ c.free, c.total });
+    if (p.idle() and (b.prompts != null or c.free == c.total)) {
+        std.log.info("nemotron: KV pages idle, {d} of {d} free, {d} kept", .{ c.free, c.total, c.kept });
     } else std.log.warn("nemotron: no stream open, yet {d} of {d} KV pages are not free", .{ c.total - c.free, c.total });
 }
 
