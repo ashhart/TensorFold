@@ -9,26 +9,6 @@ const turn: train.Turn = .{ .decide = 0, .bits = .empty, .whole = true };
 fn bf(v: u16) f64 {
     return @as(f32, @bitCast(@as(u32, v) << 16));
 }
-fn dot(a: []const f32, b: []const f32) f64 {
-    var sum: f64 = 0;
-    for (a, b) |x, y| sum += @as(f64, x) * y;
-    return sum;
-}
-fn slope(t: *Trainer, sq: train.Seq, layer: usize, dir: []const f32, step: f64) !f64 {
-    var num: f64 = 0;
-    var den: f64 = 0;
-    defer @memset(t.deltaAt(0, 0, layer), 0);
-    for (1..7) |m| for ([_]f64{ -1, 1 }) |sign| {
-        const x = sign * @as(f64, @floatFromInt(m)) * step;
-        for (t.deltaAt(0, 0, layer), dir) |*out, v| out.* = @floatCast(x * v);
-        var result: [1]train.Result = undefined;
-        try t.pass(&.{sq}, .loss, turn, &result);
-        if (!std.math.isFinite(result[0].loss)) return error.NonfiniteLoss;
-        num += x * result[0].loss;
-        den += x * x;
-    };
-    return num / den;
-}
 fn readIds(a: std.mem.Allocator, io: std.Io, path: []const u8) ![]u32 {
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 24));
     defer a.free(bytes);
@@ -92,29 +72,8 @@ pub fn main(init: std.process.Init) !u8 {
     defer a.free(push);
     const dir = try a.alloc(f32, D);
     defer a.free(dir);
-    var checks: usize = 0;
-    for (rows) |row| for (layers) |layer| {
-        sq.nudge = .{ .layers = .{ @as(u64, 1) << @intCast(layer), 0, 0 }, .rows = .{ row, 0, 0 } };
-        try t.pass(&.{sq}, .target, turn, &result);
-        @memcpy(push, t.pushAt(0, 0, layer));
-        const length = @sqrt(dot(push, push));
-        if (!std.math.isFinite(length) or length <= 0) return error.BadGradient;
-        for (dir, push) |*out, v| out.* = @floatCast(v / length);
-        var size: f64 = 0;
-        for (t.residual(layer + 1, row)) |v| size += bf(v) * bf(v);
-        if (!std.math.isFinite(size) or size <= 0) return error.BadResidual;
-        var errors: [3]f64 = undefined;
-        for ([_]f64{ 0.002, 0.004, 0.008 }, &errors) |fraction, *relative| {
-            const fd = try slope(t, sq, layer, dir, fraction * @sqrt(size));
-            relative.* = @abs(fd - length) / length;
-            if (!std.math.isFinite(relative.*)) return error.NonfiniteGradient;
-        }
-        std.mem.sort(f64, &errors, {}, std.sort.asc(f64));
-        std.debug.print("RESULT Qwen MoE layer {d} row {d}: median {d:.5}, worst {d:.5}\n", .{ layer, row, errors[1], errors[2] });
-        if (errors[1] >= 0.15 or errors[2] >= 0.15) return error.GradientMismatch;
-        checks += 1;
-    };
-    std.debug.print("PASS {d} Qwen MoE directional checks, every configured step within bound\n", .{checks});
+    var check: qwen.learn_direction.Case = .{ .t = t, .sq = sq, .push = push, .dir = dir, .label = "Qwen MoE" };
+    try qwen.learn_direction.run(&check, &rows, &layers);
     // Exercise the same forward and adjoint with a live gated pocket, leaving the checkpoint on disk unchanged.
     const pocket = try a.alloc(f32, 3 * 64 * D);
     defer a.free(pocket);
