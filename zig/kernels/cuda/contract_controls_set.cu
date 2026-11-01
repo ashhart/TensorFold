@@ -7,3 +7,5 @@
 #include "contract_nemo_audio_controls.cuh"
 #include "contract_idol_controls.cuh"
 #include "contract_embed_controls.cuh"
+// Idol decoders: controls for rounding, sums and exceptional values.
+#include "contract_controls_idol_decoder.cuh"

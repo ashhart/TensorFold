@@ -6,4 +6,6 @@ test {
     _ = @import("contract_idol_rotary.zig");
     _ = @import("contract_idol_case.zig");
     _ = @import("contract_idol_attn.zig");
+    _ = @import("contract_idol_dec_steps.zig");
+    _ = @import("contract_idol_dec_attn.zig");
 }

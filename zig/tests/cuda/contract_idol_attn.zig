@@ -19,8 +19,8 @@ fn keyChain(s: c.Shape) usize {
 /// Heads (rows) over tokens (n, each a query and key): served token counts at one head, the head strides at 16.
 const served = [_]c.Shape{ .{ .rows = 1, .n = r.cond, .k = r.cond }, .{ .rows = 1, .n = r.latent, .k = r.latent }, .{ .rows = 1, .n = r.joint, .k = r.joint }, .{ .rows = r.heads, .n = 300, .k = 300 } };
 
-pub fn spec(name: []const u8) c.Spec {
-    return .{ .name = name, .accum = .f32, .depth = keyChain, .ops = 6, .out = .f16, .tiles = .{ .{}, .{ .size = 16 * idol.attention_warps }, .{} }, .served = &served, .sums = .{ .why = why } };
+pub fn spec(name: []const u8, at: []const c.Shape) c.Spec {
+    return .{ .name = name, .accum = .f32, .depth = keyChain, .ops = 6, .out = .f16, .tiles = .{ .{}, .{ .size = 16 * idol.attention_warps }, .{} }, .served = at, .sums = .{ .why = why } };
 }
 
 fn half(x: f64) u16 {
@@ -35,6 +35,8 @@ pub const Attn = struct {
     rig: rig_.Rig,
     k: *const idol.Kernels,
     name: []const u8,
+    /// The calls it is registered at: the denoiser's, or the Gaussian decoder's self attention over its anchors.
+    served: []const c.Shape = &served,
     ref: ?attn.Ref = null,
     heads: usize = 0,
     tokens: usize = 0,
@@ -51,7 +53,7 @@ pub const Attn = struct {
     }
 
     pub fn kernel(t: *Attn) g.Kernel {
-        return .{ .spec = spec(t.name), .ctx = t, .vt = &vt };
+        return .{ .spec = spec(t.name, t.served), .ctx = t, .vt = &vt };
     }
     const vt = g.hooks(Attn);
 
