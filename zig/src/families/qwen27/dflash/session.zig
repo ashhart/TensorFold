@@ -5,7 +5,7 @@ const op = @import("operators.zig");
 const weights = @import("weights.zig");
 const execution = @import("execution.zig");
 const selector = @import("selector.zig");
-pub const Batch = struct { values: op.View, positions: []const u64, layers: [5]u32, target_end: u64 };
+pub const Batch = struct { values: op.View, positions: []const u64, layers: [8]u32, target_end: u64 };
 pub const Session = struct {
     config: cfg.Config,
     context: op.Context,
