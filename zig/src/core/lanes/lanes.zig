@@ -38,6 +38,7 @@ pub const drafted = @import("drafted.zig");
 pub const recorder = @import("recorder.zig");
 pub const logprob = @import("logprob.zig");
 pub const grammar = @import("grammar.zig");
+pub const grammar_time = @import("grammar_time.zig");
 pub const grammar_fake = @import("grammar_fake.zig"); // a stand-in libtfgrammar for tests
 
 pub const Engine = engine.Engine;
@@ -68,7 +69,10 @@ test {
     _ = @import("root_copy_test.zig");
     _ = @import("drafted_grammar_test.zig");
     _ = @import("windows_grammar_test.zig");
+    _ = @import("grammar_time_test.zig");
     _ = @import("pricing_test.zig");
+    _ = @import("hold_prefix_test.zig");
+    _ = @import("pass_pricing_test.zig");
     _ = @import("depth_probe_test.zig");
     _ = @import("proposal_external_test.zig");
     _ = @import("lone_costs_test.zig");

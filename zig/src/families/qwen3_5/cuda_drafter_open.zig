@@ -69,8 +69,9 @@ fn calibrateDrafter(p: *anyopaque) !lanes.drafter.Facts {
     const l: *Lanes = @ptrCast(@alignCast(p));
     const d = l.calibration orelse return error.MissingCalibrationDrafter;
     if (d.n_costs == 0) {
-        if (l.pool.items.len == 0) return error.MissingReservedQwenCache;
-        try l.timeWindows(d, l.pool.items[0]);
+        if (l.pool.items.len == 0 and !l.engine_paged) return error.MissingReservedQwenCache;
+        // engine_paged: no reserved window, so the timing makes a window_rows cache of its own (null)
+        try l.timeWindows(d, if (l.pool.items.len > 0) l.pool.items[0] else null);
     }
     if (d.n_costs != l.e.window_rows) return error.IncompleteWindowMeasurements;
     l.calibration = null;

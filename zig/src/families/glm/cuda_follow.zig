@@ -3,6 +3,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const engine = @import("cuda_engine.zig");
+const prompt_solo = @import("cuda_prompt_solo.zig");
 const images_mod = @import("cuda_images.zig");
 const vcfg = @import("vision_config.zig");
 const sampler = @import("cuda_sampler.zig");
@@ -120,6 +121,9 @@ pub const Link = struct {
     }
 };
 
+/// A prompt step's outcome (Leader.chunk): the first token once it ends the prompt, and the rows it took.
+pub const Chunk = struct { first: ?u32, rows: usize };
+
 /// Rank 0's engine: every step goes to the other ranks first.
 pub const Leader = struct {
     e: *Engine,
@@ -219,15 +223,17 @@ pub const Leader = struct {
         return x.e.prefill(ids, from, cancel, marks);
     }
 
-    /// One chunk of a prompt pass on every rank (Engine.prefillChunk); the first token once the chunk ends the prompt.
-    pub fn chunk(x: Leader, ids: []const u32, start: usize, from: ?engine.Resume, cancel: ?engine.Cancel, marks: ?engine.Marks) !?u32 {
+    /// One prompt step on every rank (Engine.prefillChunk): a chunk, or a solo pass if `solo` and prompt_solo.at allow.
+    pub fn chunk(x: Leader, ids: []const u32, start: usize, solo: bool, from: ?engine.Resume, cancel: ?engine.Cancel, marks: ?engine.Marks) !Chunk {
         if (start >= ids.len) return error.BadChunk;
         try x.flush();
-        const part = ids[start..@min(ids.len, start + engine.prompt_rows + 1)];
+        const n: usize = if (solo and prompt_solo.at(x.e, start, ids.len, from, marks)) engine.solo_rows else engine.prompt_rows;
+        const part = ids[start..@min(ids.len, start + n + 1)];
         const split = sparse.splitAt(start, x.e.settings.index_split, x.e.share.world);
         try x.send(.{ .kind = @backingInt(Kind.chunk), .flags = x.rows() | @as(u32, @intFromBool(split)) << 1, .a = if (from) |r| r.id else 0, .seed = if (from) |r| r.at else 0, .depth = @intCast(start), .top_k = @intCast(ids.len) }, part);
         x.e.index_split = split;
-        return x.e.prefillChunk(part, start, ids.len, from, cancel, marks);
+        const first = try x.e.prefillChunk(part, start, ids.len, from, cancel, marks);
+        return .{ .first = first, .rows = @min(ids.len - start, n) };
     }
 
     /// `bits`: the rows' grammar words (structured output, with Engine.structured), else 0.

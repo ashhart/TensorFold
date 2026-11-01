@@ -28,6 +28,10 @@
     ],
     "app": [
       "app/"
+    ],
+    "xpu": [
+      "zig/kernels/xpu/",
+      "zig/src/xpu/"
     ]
   },
   "areaIds": {
@@ -38,7 +42,8 @@
     "server": 5,
     "docs": 6,
     "tests": 7,
-    "app": 8
+    "app": 8,
+    "xpu": 9
   },
   "maxClaimsPerUser": 8
 }

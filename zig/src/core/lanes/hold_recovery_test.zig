@@ -16,7 +16,7 @@ const Sampling = @import("sampling.zig").Sampling;
 
 const gpa = std.testing.allocator;
 
-/// SYNTHETIC TIMING, not a device or performance measurement: a shared forward of `w` rows costs 9 + w ms.
+/// SYNTHETIC, not device timing: a forward of w rows costs 9 + w ms; fixed round work costs 8 ms.
 var scenario_costs: [16]Cost = undefined;
 
 /// SYNTHETIC TIMING: a lone block's hold pays above a measured gain of about 0.86 (3.5 promised; first hold pays).
@@ -117,7 +117,7 @@ fn recovers(live: usize, seed: ?u64) !void {
     const prompts = [2][]const u32{ &dt.p1, dt.long[0..11] };
     const plain_subject = try plainTokens(prompts[0], subject_new, seed);
     defer gpa.free(plain_subject);
-    const plain_companion = try plainTokens(prompts[1], 520, seed);
+    const plain_companion = try plainTokens(prompts[1], 1040, seed);
     defer gpa.free(plain_companion);
 
     var target: fake.Fake = .{ .gpa = gpa };
@@ -135,11 +135,12 @@ fn recovers(live: usize, seed: ?u64) !void {
     var clock: fake.FixedClock = .{};
     var engine = Engine.init(gpa, &cfg, wrapped.backend(), clock.clock());
     defer engine.deinit();
+    try engine.rule.observeOverhead(@intCast(live), @intCast(live), 17 + @as(f64, @floatFromInt(live)), seed != null, 0);
     var streams: [2]sm.Stream = undefined;
     var made: usize = 0;
     defer for (streams[0..made]) |*s| s.deinit(gpa);
     for (0..live) |i| {
-        streams[i] = try sm.Stream.init(gpa, .{ .id = if (i == 0) "subject" else "companion", .prompt = prompts[i], .max_new = if (i == 0) subject_new else 520, .sampling = sampling(seed) });
+        streams[i] = try sm.Stream.init(gpa, .{ .id = if (i == 0) "subject" else "companion", .prompt = prompts[i], .max_new = if (i == 0) subject_new else 1040, .sampling = sampling(seed) });
         made += 1;
         try engine.addStream(&streams[i]);
     }
@@ -202,14 +203,19 @@ fn recovers(live: usize, seed: ?u64) !void {
     try std.testing.expect(subject.accepted > kept); // the trial's drafts were kept
     try std.testing.expect(subject.depth.?.p[0] > missed); // the acceptance it measured
 
-    // that measured acceptance pays the hold again, round after round
+    // One-row probes may need several genuine successes before a larger retained prefix pays again.
     var streak: u32 = 0;
-    for (0..8) |_| {
+    for (0..192) |_| {
+        if (subject.finished) break;
         const was = subject.accepted;
         const got = try offered(&engine, subject);
-        if (got == 0) break;
+        if (got == 0) {
+            streak = 0;
+            continue;
+        }
         try std.testing.expectEqual(got, subject.accepted - was);
         streak += 1;
+        if (streak >= 6) break;
     }
     try std.testing.expect(streak >= 6);
     try std.testing.expectEqual(live, engine.activeCount()); // not the only stream, and none finished
@@ -305,6 +311,7 @@ fn copyBoundary(live: usize, seed: ?u64) !void {
     var clock: fake.FixedClock = .{};
     var engine = Engine.init(gpa, &cfg, seen, clock.clock());
     defer engine.deinit();
+    try engine.rule.observeOverhead(@intCast(live), @intCast(live), 17 + @as(f64, @floatFromInt(live)), seed != null, 0);
     var copier: Copier = .{ .sampling = sampling(seed) };
     var streams: [2]sm.Stream = undefined;
     var made: usize = 0;
@@ -322,7 +329,14 @@ fn copyBoundary(live: usize, seed: ?u64) !void {
     const every: u32 = @intCast(engine.rule.k.depth_probe_every);
 
     // the first conditional's trial misses: its measured acceptance stands the hold aside
-    try std.testing.expectEqual(Kind.head, try stepped(&engine));
+    var first_head = false;
+    for (0..16) |_| {
+        if (try stepped(&engine) == .head) {
+            first_head = true;
+            break;
+        }
+    }
+    if (!first_head) return error.InitialHeadNeverScheduled;
     try std.testing.expect(subject.drafted > 0 and subject.accepted == 0);
     try std.testing.expect(subject.granted.? > 0); // a positive verified grant, priced by the drafter's chances
     script.wrong = null; // later holds are right
@@ -364,5 +378,56 @@ fn copyBoundary(live: usize, seed: ?u64) !void {
 test "a copy clearing a stream's cached head chances cannot starve its held-aside hold of real head trials" {
     for ([_]usize{ 1, 2 }) |live| {
         for ([_]?u64{ null, 1234 }) |seed| try copyBoundary(live, seed);
+    }
+}
+
+/// Startup must reserve and price a head's rows before paying for its first hold (SYNTHETIC).
+fn firstReservation(seed: ?u64, expensive: bool) !void {
+    const max_new = 7;
+    const expected = try plainTokens(&dt.p1, max_new, seed);
+    defer gpa.free(expected);
+    var target: fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var strict: dt.Strict = .{ .inner = target.backend() };
+    defer strict.deinit();
+    const prohibitive = [_]HoldCost{.{ .streams = 1, .depth = 4, .ms = 1000 }};
+    var script: Script = .{ .head = .{ .facts_ = .{
+        .depth = 4,
+        .step_ms = 0.5,
+        .plain_guard = false,
+        .batched = true,
+        .chances = true,
+        .hold_costs = if (expensive) &prohibitive else &holds_one,
+    } } };
+    defer script.head.deinit();
+    var wrapped = try Drafted.init(gpa, strict.backend(), script.drafter());
+    defer wrapped.deinit();
+    var cfg = try Config.init(gpa, wrapped.facts(scenarioModel()), 16, 15);
+    defer cfg.deinit(gpa);
+    cfg.timed = false; // the synthetic tables determine whether any hold can pay
+    var clock: fake.FixedClock = .{};
+    var engine = Engine.init(gpa, &cfg, wrapped.backend(), clock.clock());
+    defer engine.deinit();
+    try engine.rule.observeOverhead(1, 1, 10, seed != null, 0);
+    var s = try sm.Stream.init(gpa, .{ .id = "first-reservation", .prompt = &dt.p1, .max_new = max_new, .sampling = sampling(seed) });
+    defer s.deinit(gpa);
+    script.watched = &s;
+    try engine.backend.prefill(&s);
+    try @import("open.zig").openedWith(&engine, &s, .head);
+    try std.testing.expectEqual(@as(u32, 0), script.asked); // no full-depth work before the cohort's reservation
+    try engine.step();
+    if (expensive) {
+        try std.testing.expectEqual(@as(u32, 0), script.asked);
+    } else {
+        try std.testing.expect(script.asked > 0); // a fresh positive grant must price its full prefix, not just p[0]
+    }
+    while (engine.activeCount() > 0) try engine.step();
+    try std.testing.expectEqualSlices(u32, expected, s.emitted());
+}
+
+test "initial confidence holds wait for a priced reservation without starving a profitable fresh prefix" {
+    for ([_]?u64{ null, 1234 }) |seed| {
+        try firstReservation(seed, false);
+        try firstReservation(seed, true);
     }
 }

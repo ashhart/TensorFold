@@ -56,11 +56,27 @@ pub fn budgets(e: *Engine, plans: []const win.Plan, heads: []const usize, out: [
         @memset(out, 0);
         return;
     }
-    const counts = try alloc.allocate(a, fixed, probs, &e.cfg.shared_costs, e.rule.overheadMs(@intCast(live), sampled), @max(live, e.cfg.batch_rows));
+    // A rich hold grid prices the cohort's actual pass: the head streams' blocks, while copy and forced rows add
+    // forward rows but no hold. Granted depths price their holds in payReserved; other heads keep the old overhead.
+    const rich = e.cfg.k.hold_costs.len > 0 and !e.cfg.granted_depth;
+    const head_cost: alloc.HeadCost = if (rich) .{ .hold_costs = e.cfg.k.hold_costs, .hold_rows = e.cfg.k.hold_rows, .batched = e.cfg.draft_streams and depth.pricedBatched(), .charged = neural } else .{};
+    const overhead = if (rich) e.rule.fixedMs(@intCast(live), sampled) else e.rule.overheadMs(@intCast(live), sampled);
+    const counts = try alloc.allocateDrafts(a, fixed, probs, &e.cfg.shared_costs, overhead, @max(live, e.cfg.batch_rows), head_cost);
     for (heads, out) |i, *budget| {
         budget.* = if (neural[i]) counts[i] else 0;
     }
-    if (limits) |l| if (e.cfg.granted_depth) try payReserved(e, l.who, probs, heads, sampled, out);
+    if (limits) |l| if (e.cfg.granted_depth) {
+        var base = @import("hold_price.zig").Base.pending(live);
+        for (fixed, probs, neural, counts) |rows, chances, head, count| {
+            if (rows == 0) continue;
+            base.rows += rows - 1;
+            base.tokens += @floatFromInt(rows - 1);
+            if (head) continue;
+            base.rows += count;
+            for (chances[0..@min(count, chances.len)]) |chance| base.tokens += chance;
+        }
+        try payReserved(e, l.who, probs, heads, sampled, out, base);
+    };
 }
 
 // Copy lookups may advance a proposer's backoff; the reservation loop, not this depth cap, asks it once.
@@ -81,7 +97,7 @@ fn costLimits(e: *Engine, plans: []const win.Plan, heads: []const usize, sampled
     for (heads, who) |i, *w| w.* = win.who(plans[i].stream);
     const probe: depth.Probe = .{ .ptr = e, .copy = noCopy };
     if (e.cfg.granted_depth) {
-        for (who, out) |*w, *d| d.* = try e.rule.headDepth(w, null, probe); // each stream's grant plus slack, once
+        for (who, out) |*w, *d| d.* = try e.rule.reserveDepth(w, null, probe); // each stream's grant plus slack, once
     } else try e.rule.budgets(who, probe, sampled, out);
     const limits = try a.alloc(u32, plans.len);
     @memset(limits, e.cfg.most_drafts);
@@ -90,19 +106,19 @@ fn costLimits(e: *Engine, plans: []const win.Plan, heads: []const usize, sampled
 }
 
 /// Price only reserved holds; a historical zero-grant probe survives only if it received fresh rows.
-fn payReserved(e: *Engine, who: []depth.Who, probs: []const []const f64, heads: []const usize, sampled: bool, out: []i64) !void {
+fn payReserved(e: *Engine, who: []depth.Who, probs: []const []const f64, heads: []const usize, sampled: bool, out: []i64, base: @import("hold_price.zig").Base) !void {
     depth.Rule.capPass(out, e.rule.batch_rows);
     if (e.rule.k.hold_costs.len == 0) return;
     for (who, heads, out) |*w, i, d| {
-        const last = w.granted orelse continue;
-        if (last == 0 or d <= 0) continue;
-        const kept: u32 = @intCast(@min(@as(i64, last), d)); // a grant prices no row that was not reserved
-        w.granted = kept;
+        if (d <= 0) continue;
+        w.prices = probs[i][0..@min(@as(usize, @intCast(d)), probs[i].len)];
+        if (w.granted == @as(?u32, 0)) continue; // only a freshly funded historical-zero probe survives
+        w.granted = @intCast(d); // price every row reserved now, not only the previous verified grant
         var gain: f64 = 0;
-        for (probs[i][0..@min(kept, probs[i].len)]) |chance| gain += chance;
+        for (w.prices) |chance| gain += chance;
         w.gain = gain;
     }
-    try e.rule.payHolds(who, sampled, out);
+    try e.rule.payHolds(who, sampled, out, base);
 }
 
 test "shared draft prices: a short cached tree can grow when allocation returns more rows" {

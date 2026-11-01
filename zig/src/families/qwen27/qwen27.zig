@@ -58,6 +58,7 @@ test {
     _ = projection;
     _ = model;
     _ = quant_gpu;
+    _ = @import("quant_rows_test.zig");
     _ = round_plan;
     _ = attention;
     _ = prompt_glue;
