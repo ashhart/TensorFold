@@ -62,7 +62,6 @@ const q35_contiguous = @import("contract_q35_contiguous.zig");
 const contract = core.contract;
 const g = contract.gates;
 const kk = cuda.kernels;
-
 const images = struct {
     pub const controls align(16) = @embedFile("fatbin_contract_controls").*;
     pub const h3 align(16) = @embedFile("fatbin_h3").*;
@@ -253,6 +252,8 @@ pub fn run(gpu: check.Gpu) !void {
     }
     defer for (&writebacks) |*w| w.deinit();
     for (&writebacks) |*w| try kernels.append(a, w.kernel());
+    const exl3 = try @import("contract_flashnext_exl3_suite.zig").Suite.create(a, gpu, s, &kernels);
+    defer exl3.destroy();
     var hcnorms: [2]hcnorm_k.Normalize = undefined;
     for (std.enums.values(hcnorm_k.Kind), &hcnorms) |kind, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .cols_fn = try hc.function("fn_hc_normalize_cols"), .old_fn = try hc.function("fn_hc_normalize") };
     defer for (&hcnorms) |*x| x.deinit();

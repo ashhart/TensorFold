@@ -54,6 +54,10 @@ pub const Stream = struct {
     pub fn wait(self: Stream, event: Event) Error!void {
         try self.d.check(self.d.api.cuStreamWaitEvent(self.handle, event.handle, 0), "cuStreamWaitEvent");
     }
+
+    pub fn waitExternal(self: Stream, event: Event) Error!void {
+        try self.d.check(self.d.api.cuStreamWaitEvent(self.handle, event.handle, abi.event_wait_external), "cuStreamWaitEvent");
+    }
 };
 
 pub const Event = struct {

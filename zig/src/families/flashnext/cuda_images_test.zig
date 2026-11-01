@@ -36,6 +36,8 @@ fn run(comptime Cuda: type, comptime open: anytype, comptime drop: anytype, draf
     var stream: cuda.Stream = .{ .d = &driver, .handle = null };
     const f: cuda.Function = .{ .d = &driver, .handle = null };
     var engine: prompt.Engine = undefined;
+    engine.exl3_prefill = .{};
+    engine.exl3_chain = .{};
     engine.gpa = a;
     engine.driver = &driver;
     engine.stream = &stream;
@@ -134,6 +136,8 @@ fn release(comptime Cuda: type, comptime open: anytype) !void {
     driver.api.cuCtxSynchronize = Wait.context;
     var stream: cuda.Stream = .{ .d = &driver, .handle = null };
     var engine: prompt.Engine = undefined;
+    engine.exl3_prefill = .{};
+    engine.exl3_chain = .{};
     engine.gpa = a;
     engine.driver = &driver;
     engine.stream = &stream;

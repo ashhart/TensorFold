@@ -30,6 +30,8 @@ pub const Kernels = struct {
     gnorm: cuda.Function,
     sum: cuda.Function,
     moe_sum: cuda.Function,
+    leaf_tree: cuda.Function,
+    leaf_finish: cuda.Function,
     copy_cols: cuda.Function,
     shift: cuda.Function,
     /// Each sparse row's top blocks (attention._select / _select_tiles), native.
@@ -66,6 +68,8 @@ pub const Kernels = struct {
         errdefer if (k.expert_tile) |*tile| tile.unload();
         k.sum = try k.batch.function("fn_sum_slices");
         k.moe_sum = try k.batch.function("fn_moe_sum");
+        k.leaf_tree = try k.batch.function("fn_exl3_leaf_tree");
+        k.leaf_finish = try k.batch.function("fn_exl3_leaf_finish");
         k.copy_cols = try k.batch.function("fn_copy_cols");
         k.shift = try k.batch.function("fn_shift_window");
         k.select = try k.batch.function("fn_qsa_select");
