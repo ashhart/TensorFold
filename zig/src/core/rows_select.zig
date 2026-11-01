@@ -17,7 +17,7 @@ pub fn choose(s: *const pc.Store, prompt: []const u32, starts: []const u32, span
     var out: Choice = .{};
     var best_saved: f64 = 0;
     for (r.states.items, 0..) |*state, i| {
-        if (s.family.vtable.bytes(s.family.ptr, state.at) > room) continue;
+        if (r.blankBytes(state.at) > room) continue;
         if (!r.matches(state, prompt, starts, spans)) continue;
         if (out.disk == null or state.at > r.states.items[out.disk.?].at) out.disk = i;
         if (state.at <= from) continue;
