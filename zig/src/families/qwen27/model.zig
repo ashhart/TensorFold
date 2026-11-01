@@ -203,7 +203,7 @@ fn qualifiedSize(c: cfg.Config) bool {
 /// A qualified shape and layer schedule; per-module widths are admitted by widths.admit once the chip is known.
 pub fn supported(c: cfg.Config) !void {
     if (!qualifiedSize(c) or c.vocab != 248320 or c.kv_heads != 4 or c.head_dim != 256 or c.k_heads != 16 or c.dk != 128 or c.dv != 128 or c.conv_kernel != 4 or c.rope_dims != 64) return error.UnqualifiedQwenShape;
-    for (c.kinds[0..c.layers], 0..) |kind, i| if (kind != (if ((i + 1) % 4 == 0) cfg.Kind.attention else cfg.Kind.linear)) return error.UnqualifiedLayerSchedule;
+    try @import("geometry.zig").supported(c);
 }
 
 fn qualifiedGeneration(generation: u32) bool {
