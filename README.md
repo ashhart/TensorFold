@@ -351,6 +351,7 @@ Sampling defaults come from the checkpoint's `generation_config.json`, then serv
 `--context 0` is family-specific; use a positive limit for GLM and inspect the capacity reported at startup.
 The supported environment variables are listed in `capabilities --json`, including API keys, request logging and Hugging Face cache paths.
 `TF_Q27_PROFILE=N` makes a native Metal Qwen3.8-27B server log a per-class GPU-time breakdown every N decode rounds (`1` means 64) and add `gpu_seconds` to its replies; it is diagnostic only, and a profiled round runs slower.
+`TF_ROUTE_TAP=/path` writes a versioned trace of each MoE layer's global top-k on rank 0 of a tapped family, for inspecting or monitoring routing; unset, nothing changes. Other families, including DeepSeek V4.1, refuse the switch by name. See [MoE route tap](docs/route-tap.md).
 
 ## Community benchmarks
 
