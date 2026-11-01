@@ -13,20 +13,24 @@ const Proposer = lanes.proposer.Proposer;
 const pricing = @import("pricing.zig");
 const Fit = pricing.Fit;
 const depth = pricing.depth;
+const depthDrafting = pricing.depthDrafting;
 const depthShared = pricing.depthShared;
 const ema = pricing.ema;
 
 /// Up to `capacity` tokens for each of `streams` caches (one a request, kept for its prefix), in the target's ledger.
-pub const Options = struct { capacity: usize, streams: u32, ledger: *budget.Ledger };
+pub const Options = struct { capacity: usize, streams: u32, ledger: *budget.Ledger, copy_min_match: i64 = 4, copy_enter_match: i64 = 8 };
 
 /// Token slots the chained steps draw into; a round takes at most window_rows of them.
 const ring = 4096;
 /// Drafts a round until the rates are measured.
 const first_depth: usize = 6;
 /// The acceptance prior (two drafts of three) and how much of the history a round keeps.
-const prior_kept = 2.0;
+pub const prior_kept = 2.0;
 const prior_tried = 3.0;
 const decay = 0.9;
+/// While a request stands aside a round drafts after probe_every, then twice as many each time, up to probe_most.
+const probe_every = 64;
+const probe_most = 1024;
 
 /// A cache a stream synced to its context by longest common prefix; greedy steps chained on the GPU; a measured depth.
 pub const Drafter = struct {
@@ -40,10 +44,12 @@ pub const Drafter = struct {
     slots: []Slot,
     follow: ?mtl.ResidencySet.Follow = null,
     step_ms: ?f64 = null, // one chained step, wall (null: not measured yet)
+    kept: f64 = 0, // decayed drafts landed and judged over recent requests: a new request's prior
+    tried: f64 = 0,
     rounds: Fit = .{}, // the target's round by its window's rows, from a proposal's return to its outcome
 
     /// A stream's cache and what it holds; a freed slot keeps both for the next request sharing its prefix.
-    const Slot = struct {
+    pub const Slot = struct {
         cache: ?st.Cache = null, // made or grown when its stream is admitted, to that stream's capacity
         seen: std.ArrayList(u32) = .empty, // the tokens whose keys and values the cache holds, in order
         next: ?u32 = null, // the token drawn after `seen` (the last fed row's argmax)
@@ -134,7 +140,12 @@ pub const Drafter = struct {
         const slot = &d.slots[i];
         if (prompt.len + 1 > d.options.capacity) return error.LlamaDrafterPromptTooLong;
         const r = try gpa.create(Request);
-        r.* = .{ .d = d, .gpa = gpa, .slot = i, .eos = eos };
+        errdefer gpa.destroy(r);
+        r.* = .{ .d = d, .gpa = gpa, .slot = i, .eos = eos, .copies = try lanes.SuffixLookup.init(gpa, .{ .min_match = d.options.copy_min_match }) };
+        if (d.tried > 0) { // the recent requests' acceptance, at the prior's weight
+            r.kept = prior_tried * d.kept / d.tried;
+            r.tried = prior_tried;
+        }
         slot.taken = true;
         return r.proposer();
     }
@@ -145,6 +156,7 @@ pub const Drafter = struct {
         d.slots[r.slot].taken = false;
         if (r.rounds > 0) std.log.debug("llama drafter: {d} rounds, {d} drafts offered, {d} kept, {d:.2} tokens a round", .{ r.rounds, r.offered, r.landed, @as(f64, @floatFromInt(r.rounds + r.landed)) / @as(f64, @floatFromInt(r.rounds)) });
         r.out.deinit(r.gpa);
+        r.copies.deinit();
         r.gpa.destroy(r);
     }
 
@@ -339,6 +351,10 @@ pub const Request = struct {
     landed: u64 = 0,
     unfit: bool = false, // a context token past the drafter's vocabulary: no proposals for this request
     alone: bool = true, // the last proposal's round had this stream alone: its time fits the rounds' line
+    aside: u32 = 0, // rounds stood aside since the last drafted one
+    gap: u32 = probe_every, // rounds stood aside before a probe drafts
+    copies: lanes.SuffixLookup = undefined, // the lane host's copy proposals from the stream's own context, asked first
+    copied: bool = false, // the last proposal was the copies'
 
     pub fn proposer(r: *Request) Proposer {
         return .{ .ptr = r, .vtable = &vtable };
@@ -362,11 +378,12 @@ pub const Request = struct {
         self(p).round(rows, kept);
     }
 
-    /// Drafts a round at the measured rates (first_depth before), within the ask and window; shared rounds priced.
-    pub fn want(r: *const Request, max_draft: i64) usize {
+    /// Drafts at the measured rates (first_depth before); 0 where a plain round lands more; a probe drafts anyway.
+    pub fn want(r: *const Request, max_draft: i64, probe: bool) usize {
         const most: usize = @intCast(@min(max_draft, @as(i64, st.window_rows - 1)));
         const step = r.d.step_ms orelse return @min(first_depth, most);
         if (r.d.rounds.samples == 0) return @min(first_depth, most);
+        if (probe) return if (most == 0) 0 else depthDrafting(r.kept / r.tried, r.d.rounds, step, most);
         const streams = r.d.sharers();
         if (streams > 1) return depthShared(r.kept / r.tried, r.d.rounds, step, most, streams);
         return depth(r.kept / r.tried, r.d.rounds, step, most);
@@ -378,12 +395,26 @@ pub const Request = struct {
         r.out.clearRetainingCapacity();
         r.asked = .{ .len = context.len, .max_draft = max_draft };
         r.returned = null; // an empty answer times no round
+        r.copied = false;
         if (max_draft <= 0 or r.unfit or context.len == 0) return r.out.items;
+        // where the text repeats itself, its own copies cost no drafter steps: the lane core's gate, as for its own
+        const copied = try r.copies.proposeAfter(context, &.{}, max_draft);
+        if (copied.len >= 2 and r.copies.last_match >= r.d.options.copy_enter_match) {
+            try r.out.appendSlice(r.gpa, copied);
+            r.copied = true;
+            return r.out.items;
+        }
         const d = r.d;
         const slot = &d.slots[r.slot];
-        const n = r.want(max_draft);
-        if (n == 0) return r.out.items; // the shared round's drafts cost more than they land
         r.alone = d.sharers() <= 1;
+        const probe = r.aside + 1 >= r.gap;
+        const n = r.want(max_draft, probe);
+        if (n == 0) { // drafts cost more than they land: a plain round
+            r.aside += 1;
+            return r.out.items;
+        }
+        r.gap = if (probe) @min(2 * r.gap, probe_most) else probe_every;
+        r.aside = 0;
         // the cache keeps the context's prefix it agrees with (an earlier round's drafts past the context included)
         const shared = commonPrefix(slot.seen.items, context);
         if (shared < context.len and shared < slot.seen.items.len) {
@@ -453,14 +484,22 @@ pub const Request = struct {
     pub fn round(r: *Request, rows: u32, kept: u32) void {
         r.rounds += 1;
         defer r.asked = null;
-        if (r.asked == null or rows < 2) return;
+        if (r.asked == null) return;
+        if (r.copied) {
+            r.copies.observe(rows -| 1, kept) catch {};
+            return;
+        }
+        if (rows < 2) return;
         if (r.returned) |t| if (r.alone) r.d.rounds.add(@floatFromInt(rows), now() - t);
         const offered = rows - 1;
         r.offered += offered;
         r.landed += kept;
         const k: f64 = @floatFromInt(kept);
+        const judged = k + @as(f64, if (kept < offered) 1.0 else 0.0);
         r.kept = decay * r.kept + k;
-        r.tried = decay * r.tried + k + @as(f64, if (kept < offered) 1.0 else 0.0);
+        r.tried = decay * r.tried + judged;
+        r.d.kept = decay * r.d.kept + k;
+        r.d.tried = decay * r.d.tried + judged;
     }
 };
 
@@ -492,11 +531,14 @@ test "llama drafter: the common prefix and the acceptance history" {
     try std.testing.expectEqual(@as(usize, 2), commonPrefix(&.{ 1, 2 }, &.{ 1, 2, 3 }));
     try std.testing.expectEqual(@as(usize, 0), commonPrefix(&.{}, &.{1}));
     var d: Drafter = undefined;
+    d.kept = 0;
+    d.tried = 0;
     var r: Request = .{ .d = &d, .gpa = std.testing.allocator, .slot = 0, .eos = &.{} };
     r.asked = .{ .len = 10, .max_draft = 15 };
     r.round(7, 6); // six drafts, all landed: no break counted
     try std.testing.expectApproxEqAbs(decay * prior_kept + 6, r.kept, 1e-9);
     try std.testing.expectApproxEqAbs(decay * prior_tried + 6, r.tried, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 6), d.kept, 1e-9); // the next request's prior
     try std.testing.expect(r.asked == null);
     r.asked = .{ .len = 17, .max_draft = 15 };
     r.round(7, 2); // two of six: the third broke

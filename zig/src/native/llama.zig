@@ -143,8 +143,10 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     try fl.residency.hold(h);
     errdefer fl.residency.drop(h);
     if (h.drafter) |d| {
+        d.options.copy_min_match = h.host.min_match; // its requests' copies match and enter as the host's would
+        d.options.copy_enter_match = h.config.enter_match;
         h.host.proposers = .{ .ctx = d, .make = fl.drafter.Drafter.make, .free = fl.drafter.Drafter.free };
-        // the serving line's sources: the drafter proposes through the copy proposer, which ofLanes does not name
+        // the serving line's sources: the drafter, beside its requests' own copies, which ofLanes does not name
         h.host.info_.draft_sources.drafter = .{ .kind = "Llama drafter", .name = o.drafter_name orelse o.drafter.? };
     }
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
