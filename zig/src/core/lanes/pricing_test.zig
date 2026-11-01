@@ -1,4 +1,4 @@
-//! Window pricing on the fake target: sampled streams' host draws never reach a later greedy stream's windows.
+//! Window and hold pricing: sampled draws stay local, and paid holds stay out of fixed overhead.
 const std = @import("std");
 const Config = @import("config.zig").Config;
 const Cost = @import("config.zig").Cost;
@@ -56,4 +56,52 @@ test "a greedy stream after sampled streams drafts as on a fresh engine, by dept
         try std.testing.expectEqual(fresh, after);
         try std.testing.expect(fresh[1] > fresh[0]); // it drafted
     }
+}
+
+test "observed padded holds do not make unpaid holds look profitable" {
+    const depth = @import("depth.zig");
+    const Table = @import("table.zig").Table;
+    var shared: Table = .{};
+    defer shared.deinit(gpa);
+    for (1..7) |rows| try shared.put(gpa, @intCast(rows), 10);
+    const holds = [_]depth.HoldCost{
+        .{ .streams = 1, .depth = 1, .ms = 4 },
+        .{ .streams = 2, .depth = 1, .ms = 4 },
+        .{ .streams = 2, .depth = 3, .ms = 6 },
+        .{ .streams = 3, .depth = 3, .ms = 24 },
+    };
+    const depths = [_]i64{ 1, 3, 0 };
+    for ([_]bool{ false, true }) |sampled| for ([_]f64{ 0, 2.5 }) |host_ms| {
+        var rule: depth.Rule = .{
+            .gpa = gpa,
+            .k = .{ .hold_costs = &holds },
+            .prior = &.{0.75},
+            .most_drafts = 3,
+            .family_costs = &shared,
+            .shared_costs = &shared,
+            .mtp_step_ms = 1,
+            .batched_heads = true,
+            .plain_guard = true,
+            .node_probabilities = true,
+            .granted_depth = true,
+            .batch_rows = 32,
+        };
+        defer rule.deinit();
+        var states: [3]?depth.State = @splat(null);
+        var who: [3]depth.Who = undefined;
+        for (&who, &states, 0..) |*w, *state, i| w.* = .{
+            .state = state,
+            .draft_room = 32,
+            .finished = false,
+            .forced = false,
+            .granted = if (i < 2) 1 else 0,
+            .gain = if (i < 2) 0.75 else 0,
+        };
+        // The actual padded pass costs 6 ms; its linear head-step estimate is only 3 ms.
+        try rule.observeOverhead(3, 5, 10 + host_ms + 6, sampled, rule.headMs(&depths));
+        var out = depths;
+        try rule.payHolds(&who, sampled, &out);
+        const want: [3]i64 = if (host_ms == 0) .{ 0, 0, 0 } else depths;
+        try std.testing.expectEqualSlices(i64, &want, &out);
+    };
 }
