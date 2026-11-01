@@ -131,7 +131,7 @@ reproduces the baseline exactly.
 - 66 new Zig tests: 26 in the container reader, 4 in the publication metadata, 13 in
   the serve surface, 4 in the family, 8 in the producer, 5 in the two prompt sets
   and 6 in the contract; 8 gate unit tests and 6 parity unit tests in Python.
-- `zig build test`: 603 steps succeeded, 9250 of 9305 tests passed and 55 skipped.
+- `zig build test`: 605 steps succeeded, 9293 of 9348 tests passed and 55 skipped.
 - CI: the format check, the code, the tests and the tools are green on Linux,
   Windows and macOS. The app's macOS packaging job is cancelled by the runner
   pool, four attempts across two runs, while the base tree's own runs are
