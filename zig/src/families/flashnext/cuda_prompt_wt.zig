@@ -110,8 +110,8 @@ pub const Store = struct {
     held: std.ArrayList(Held) = .empty, // as many shards as one layer's borrowed planes span (no fixed cap)
     /// Pinned upload staging for this store's loaders, grown on demand; freed by dropStaging or deinit.
     staging: ?cuda.HostBuffer = null,
-    released: [2]Held = undefined,
-    nreleased: usize = 0,
+    /// Shards a load already opened, kept open until it ends (loaded or deinit): reopening one parses its header again.
+    released: std.ArrayList(Held) = .empty,
     norm_offset: f32 = 0,
 
     pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Store {
@@ -159,6 +159,7 @@ pub const Store = struct {
         self.release();
         self.held.deinit(self.gpa);
         self.closeReleased();
+        self.released.deinit(self.gpa);
         self.closeFile();
         self.parsed.deinit();
     }
@@ -177,34 +178,41 @@ pub const Store = struct {
         self.staging = null;
     }
 
-    /// A finished load: the pinned staging freed, borrowed planes released, the open shard closed.
+    /// A finished load: the pinned staging freed, borrowed planes released, every open shard closed.
     pub fn loaded(self: *Store) void {
         self.dropStaging();
         self.release();
+        self.closeReleased();
         self.closeFile();
     }
 
-    /// Borrowers expire here; two indexed shards cover separate weight and calibration planes.
+    /// Borrowers expire here; their shards stay open, pages dropped, until the load ends (or close if not kept).
     pub fn release(self: *Store) void {
         for (self.held.items) |h| {
-            if (self.nreleased == self.released.len) {
-                self.released[0].file.close();
-                self.gpa.free(self.released[0].rel);
-                self.released[0] = self.released[1];
-                self.nreleased -= 1;
-            }
-            self.released[self.nreleased] = h;
-            self.nreleased += 1;
+            // the borrowers' pages leave this process (their bytes are copied), so kept shards pin nothing
+            h.file.f.release();
+            self.released.append(self.gpa, h) catch {
+                var kept = h.file;
+                kept.close();
+                self.gpa.free(h.rel);
+            };
         }
         self.held.clearRetainingCapacity();
     }
 
     fn closeReleased(self: *Store) void {
-        for (self.released[0..self.nreleased]) |*h| {
+        for (self.released.items) |*h| {
             h.file.close();
             self.gpa.free(h.rel);
         }
-        self.nreleased = 0;
+        self.released.clearRetainingCapacity();
+    }
+
+    /// The held shards as core.direct_gather reads them: each one's path and mapping.
+    pub fn sources(self: *const Store, out: []core.direct_gather.Source) ![]core.direct_gather.Source {
+        if (self.held.items.len > out.len) return error.TooManySources;
+        for (self.held.items, out[0..self.held.items.len]) |h, *o| o.* = .{ .path = h.file.f.path, .memory = h.file.f.map.memory };
+        return out[0..self.held.items.len];
     }
 
     /// hold, the tensor's pages read ahead: only for a reader that copies all of it (the one-GPU threaded loader).
@@ -222,11 +230,10 @@ pub const Store = struct {
             if (std.mem.eql(u8, h.rel, file)) return h.file.get(key) orelse return error.MissingTensor;
         }
         try self.held.ensureUnusedCapacity(self.gpa, 1);
-        for (self.released[0..self.nreleased], 0..) |cached, i| {
+        for (self.released.items, 0..) |cached, i| {
             if (std.mem.eql(u8, cached.rel, file)) {
                 self.held.appendAssumeCapacity(cached);
-                self.nreleased -= 1;
-                if (i < self.nreleased) self.released[i] = self.released[self.nreleased];
+                _ = self.released.swapRemove(i);
                 return self.held.items[self.held.items.len - 1].file.get(key) orelse return error.MissingTensor;
             }
         }
