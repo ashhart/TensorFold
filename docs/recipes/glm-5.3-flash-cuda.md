@@ -68,7 +68,8 @@ left after a 12.2 GiB reserve` and a 5.8 GiB prompt cache
 A prompt runs in passes of 2,048 rows. Kept prompt states sit on that grid, and a stream decoding beside a prompt waits
 for each pass to end. A pass that takes more rows reads each routed expert's weights fewer times, so a lone prompt
 comes sooner. `TF_GLM_CHUNK_SOLO=4096` lets a pass take two of those chunks when no other stream is decoding as it
-starts. With one decoding, or with the DFlash2 drafter, `prompt_logprobs` or image rows, the pass takes 2,048.
+starts. With one decoding, or with `prompt_logprobs` or image rows, the pass takes 2,048. A drafter's steps take one
+chunk, so `--drafter` beside it is refused at load.
 
 The grid does not move, so warm turns resume where they do unset, and streams decoding beside a prompt see the same
 passes. Replies are the same bytes either way. Two costs remain:
