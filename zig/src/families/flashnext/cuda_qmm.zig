@@ -84,11 +84,7 @@ pub fn pack(gpa: std.mem.Allocator, words: []const u8, scales: []const u8, biase
     return .{ .weight = weight, .scales = scales_out, .biases = biases_out, .n = n, .k = k, .npad = npad };
 }
 
-fn toBf16(v: f32) u16 {
-    const bits: u32 = @bitCast(v);
-    if (std.math.isNan(v)) return @intCast((bits >> 16) | 0x40);
-    return @intCast((bits + 0x7FFF + ((bits >> 16) & 1)) >> 16);
-}
+const toBf16 = @import("core").bf16_round.bits;
 
 fn promote(bits: u16) f32 {
     return @bitCast(@as(u32, bits) << 16);
