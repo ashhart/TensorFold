@@ -4,6 +4,7 @@ const xpu = @import("xpu");
 const cfg = @import("config.zig");
 const model = @import("xpu_model.zig");
 const vision = @import("xpu_vision.zig");
+const spec = @import("vision_spec.zig");
 
 pub const Options = struct { context: usize = 4096, window_rows: u32 = 64 };
 
@@ -94,17 +95,18 @@ pub const Engine = struct {
     /// The bound stream's pictures past prompt row `from` through the tower; the next prompt windows read their rows.
     pub fn pictures(e: *Engine, imgs: anytype, from: usize) !void {
         e.m.images = &.{};
-        var used: u32 = 0;
+        var placed: [max_pictures]spec.Span = undefined;
+        const spans = try spec.place(&placed, imgs, from, std.math.maxInt(usize), e.image_tokens);
+        if (spans.len == 0) return;
+        const t = e.tower orelse return error.NoVisionTower;
         var n: usize = 0;
-        for (imgs) |im| {
-            if (@as(usize, im.at) + im.tokens <= from) continue;
-            const t = e.tower orelse return error.NoVisionTower;
-            if (n == max_pictures or im.tokens > e.image_tokens - used) return error.ImageTooLarge;
-            const rows = model.from(e.image_rows.?, @as(usize, used) * vision.out_width * 2);
+        for (imgs) |im| { // the placed spans in picture order: each picture's rows from its span's source row
+            if (n == spans.len) break;
+            if (im.at != spans[n].at) continue;
+            const rows = model.from(e.image_rows.?, @as(usize, spans[n].source) * vision.out_width * 2);
             try t.image(im.pixels, im.gh, im.gw, rows, null);
             e.spans[n] = .{ .rows = rows, .at = im.at, .n = im.tokens };
             n += 1;
-            used += im.tokens;
         }
         e.m.images = e.spans[0..n];
     }

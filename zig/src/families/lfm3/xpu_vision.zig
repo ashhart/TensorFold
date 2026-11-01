@@ -6,15 +6,17 @@ const rt = xpu.rt;
 const ld = xpu.loader;
 
 const Buf = rt.Buffer;
-pub const width: u32 = 1024;
-pub const intermediate: u32 = 2560;
-pub const depth = 14;
-pub const patch_width: u32 = 1536;
-pub const out_width: u32 = 2048;
-const heads: u32 = 16;
-const kv_heads: u32 = 8;
-const head_dim: u32 = 64;
-const proj_hidden: u32 = 4096;
+const spec = @import("vision_spec.zig");
+const vs = spec.lfm3_vl_2b;
+pub const width: u32 = @intCast(vs.hidden);
+pub const intermediate: u32 = @intCast(vs.intermediate);
+pub const depth = vs.layers;
+pub const patch_width: u32 = @intCast(vs.patchWidth());
+pub const out_width: u32 = @intCast(vs.text_hidden);
+const heads: u32 = @intCast(vs.heads);
+const kv_heads: u32 = @intCast(vs.kv_heads);
+const head_dim: u32 = @intCast(vs.headDim());
+const proj_hidden: u32 = @intCast(vs.projector_hidden);
 const eps: f32 = 1e-5;
 const ln_eps: f32 = 1e-6;
 
@@ -63,16 +65,14 @@ fn run(k: *rt.Kernel, groups: [3]u32, a: anytype) !void {
     try k.launch(groups);
 }
 
-/// A bf16 tensor by name, checked against its shape (#1502's vision_weights.zig names and shapes).
-fn get(l: *ld.Loader, seen: *u32, prefix: []const u8, suffix: []const u8, shape: []const usize) !Buf {
+/// A bf16 tower or projector tensor by vision_spec's name and shape (module `m`, in `layer` when it sits in one).
+fn get(l: *ld.Loader, seen: *u32, layer: ?usize, m: spec.Module) !Buf {
     var b: [160]u8 = undefined;
-    const name = try std.fmt.bufPrint(&b, "{s}{s}", .{ prefix, suffix });
-    const info = try l.info(name);
-    var bytes: u64 = 2;
-    for (shape) |d| bytes *= d;
-    if (!std.mem.eql(u8, info.dtype, "BF16") or info.len != bytes) return error.UnexpectedLfm3VisionTensor;
+    const t = try spec.tensor(&b, vs, layer, m);
+    const info = try l.info(t.name);
+    if (!std.mem.eql(u8, info.dtype, "BF16") or info.len != t.bytes()) return error.UnexpectedLfm3VisionTensor;
     seen.* += 1;
-    return l.load(name);
+    return l.load(t.name);
 }
 
 pub const Tower = struct {
@@ -110,15 +110,15 @@ pub const Tower = struct {
         t.* = .{
             .gpa = gpa,
             .r = r,
-            .patchifier = try get(l, &seen, "vision_tower.", "patchifier.weight", &.{ width, patch_width }),
-            .norm = try get(l, &seen, "vision_tower.", "embedding_norm.weight", &.{width}),
+            .patchifier = try get(l, &seen, null, .patchifier),
+            .norm = try get(l, &seen, null, .embedding_norm),
             .layers = undefined,
-            .pn_w = try get(l, &seen, "multi_modal_projector.", "layer_norm.weight", &.{width}),
-            .pn_b = try get(l, &seen, "multi_modal_projector.", "layer_norm.bias", &.{width}),
-            .l1 = try get(l, &seen, "multi_modal_projector.", "linear_1.weight", &.{ proj_hidden, proj_hidden }),
-            .b1 = try get(l, &seen, "multi_modal_projector.", "linear_1.bias", &.{proj_hidden}),
-            .l2 = try get(l, &seen, "multi_modal_projector.", "linear_2.weight", &.{ out_width, proj_hidden }),
-            .b2 = try get(l, &seen, "multi_modal_projector.", "linear_2.bias", &.{out_width}),
+            .pn_w = try get(l, &seen, null, .projector_norm),
+            .pn_b = try get(l, &seen, null, .projector_norm_bias),
+            .l1 = try get(l, &seen, null, .linear_1),
+            .b1 = try get(l, &seen, null, .linear_1_bias),
+            .l2 = try get(l, &seen, null, .linear_2),
+            .b2 = try get(l, &seen, null, .linear_2_bias),
             .inv_freq = try l.empty(16 * 4),
             .k = .{
                 .gemm = try m.kernel("vit_gemm", .{ 16, 16, 1 }),
@@ -136,29 +136,27 @@ pub const Tower = struct {
             .host = try gpa.alloc(f32, @as(usize, max_patches) * patch_width),
         };
         for (&t.layers, 0..) |*ly, i| {
-            var b: [64]u8 = undefined;
-            const p = try std.fmt.bufPrint(&b, "vision_tower.layers.{d}.", .{i});
             ly.* = .{
-                .operator_norm = try get(l, &seen, p, "operator_norm.weight", &.{width}),
-                .ffn_norm = try get(l, &seen, p, "ffn_norm.weight", &.{width}),
-                .w1 = try get(l, &seen, p, "feed_forward.w1.weight", &.{ intermediate, width }),
-                .w3 = try get(l, &seen, p, "feed_forward.w3.weight", &.{ intermediate, width }),
-                .w2 = try get(l, &seen, p, "feed_forward.w2.weight", &.{ width, intermediate }),
-                .mixer = if (i >= 2 and i % 2 == 0) .{ .attention = .{
-                    .q = try get(l, &seen, p, "self_attn.q_proj.weight", &.{ width, width }),
-                    .k = try get(l, &seen, p, "self_attn.k_proj.weight", &.{ kv_heads * head_dim, width }),
-                    .v = try get(l, &seen, p, "self_attn.v_proj.weight", &.{ kv_heads * head_dim, width }),
-                    .out = try get(l, &seen, p, "self_attn.out_proj.weight", &.{ width, width }),
-                    .q_norm = try get(l, &seen, p, "self_attn.q_layernorm.weight", &.{head_dim}),
-                    .k_norm = try get(l, &seen, p, "self_attn.k_layernorm.weight", &.{head_dim}),
+                .operator_norm = try get(l, &seen, i, .operator_norm),
+                .ffn_norm = try get(l, &seen, i, .ffn_norm),
+                .w1 = try get(l, &seen, i, .w1),
+                .w3 = try get(l, &seen, i, .w3),
+                .w2 = try get(l, &seen, i, .w2),
+                .mixer = if (vs.mixers[i] == .attention) .{ .attention = .{
+                    .q = try get(l, &seen, i, .q_proj),
+                    .k = try get(l, &seen, i, .k_proj),
+                    .v = try get(l, &seen, i, .v_proj),
+                    .out = try get(l, &seen, i, .out_proj),
+                    .q_norm = try get(l, &seen, i, .q_norm),
+                    .k_norm = try get(l, &seen, i, .k_norm),
                 } } else .{ .conv = .{
-                    .in = try get(l, &seen, p, "conv.in_proj.weight", &.{ 3 * width, width }),
-                    .out = try get(l, &seen, p, "conv.out_proj.weight", &.{ width, width }),
-                    .spatial = try get(l, &seen, p, "conv.spatial_conv.weight", &.{ width, 3, 3, 1 }),
+                    .in = try get(l, &seen, i, .conv_in),
+                    .out = try get(l, &seen, i, .conv_out),
+                    .spatial = try get(l, &seen, i, .spatial_conv),
                 } },
             };
         }
-        if (seen != 138) return error.UnexpectedLfm3VisionTensor;
+        if (seen != spec.count(vs)) return error.UnexpectedLfm3VisionTensor;
         // axial RoPE's 16 inverse frequencies as transformers builds them in fp32: theta^(-2i/32)
         var inv: [16]f32 = undefined;
         for (&inv, 0..) |*f, i| f.* = 1.0 / std.math.pow(f32, 1e6, @as(f32, @floatFromInt(2 * i)) / 32.0);
