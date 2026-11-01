@@ -43,6 +43,41 @@ const Cache = struct {
     }
 };
 
+/// A score as plan.hip sums it: lane l over l, l + 32, ... in fp32, lanes folded by xor 16 to 1, times scale.
+fn scoreBits(q: []const f32, k: []const f32, visible: usize, key: usize, scale: f32) u32 {
+    if (key >= visible) return @bitCast(-std.math.inf(f32));
+    var lanes: [32]f32 = undefined;
+    for (&lanes, 0..) |*x, lane| {
+        x.* = 0;
+        var idx = lane;
+        while (idx < q.len) : (idx += 32) x.* = x.* + q[idx] * k[idx];
+    }
+    var mask: usize = 16;
+    while (mask > 0) : (mask >>= 1) {
+        var next: [32]f32 = undefined;
+        for (&next, 0..) |*x, lane| x.* = lanes[lane] + lanes[lane ^ mask];
+        lanes = next;
+    }
+    return @bitCast(lanes[0] * scale);
+}
+
+/// Every score of the planned walk's buffer against scoreBits: `qv` the query values the kernel reads.
+fn expectScores(t: *const Rig, c: Cache, qv: []const f32, scores: DeviceBuffer, heads: usize, kv_heads: usize, d: usize, span: usize, pos: []const i32, scale: f32) !void {
+    const got = try rig.download(u32, scores);
+    defer gpa.free(got);
+    const kv = try gpa.alloc(f32, d);
+    defer gpa.free(kv);
+    for (pos, 0..) |p, r| for (0..heads) |h| {
+        const kh = h / (heads / kv_heads);
+        const visible: usize = @intCast(p + 1);
+        for (0..span) |key| {
+            for (kv, 0..) |*x, j| x.* = @floatCast(t.value(c.k[(kh * span + key) * d + j]));
+            const want = scoreBits(qv[(r * heads + h) * d ..][0..d], kv, visible, key, scale);
+            try std.testing.expectEqual(want, got[(r * heads + h) * span + key]);
+        }
+    };
+}
+
 /// softmax(q . k * scale) v in float64 for one query of `head` seeing positions [0, visible).
 fn reference(t: *const Rig, c: Cache, q: []const f32, head: usize, group: usize, span: usize, d: usize, visible: usize, scale: f64, out: []f64) void {
     const kv = head / group;
@@ -145,6 +180,21 @@ fn decode(t: *Rig, rng: *rig.Rng, heads: usize, kv_heads: usize, d: usize, pos: 
     const planned = try rig.download(f32, outs[1]);
     defer gpa.free(planned);
     try std.testing.expectEqualSlices(u32, @ptrCast(flat), @ptrCast(planned));
+    try expectScores(t, c, hq, scores, heads, kv_heads, d, span, pos, scale);
+    // q in the activation type: the score reads its widened values
+    const hq16 = try gpa.alloc(u16, hq.len);
+    defer gpa.free(hq16);
+    const qv = try gpa.alloc(f32, hq.len);
+    defer gpa.free(qv);
+    for (hq16, qv, hq) |*b, *w, x| {
+        b.* = t.bits(x);
+        w.* = @floatCast(t.value(b.*));
+    }
+    var q16 = try t.upload(hq16);
+    defer q16.free();
+    try t.on.planCausalAs(at(q16), at(outs[1]), at(scores), at(stats), at(partials), p, 0, heads, kv_heads, d, span, scale, t.kind(), true, s);
+    try t.stream.synchronize();
+    try expectScores(t, c, qv, scores, heads, kv_heads, d, span, pos, scale);
     const want = try gpa.alloc(f64, rows * heads * d);
     defer gpa.free(want);
     for (0..rows) |r| for (0..heads) |h| {
@@ -154,7 +204,7 @@ fn decode(t: *Rig, rng: *rig.Rng, heads: usize, kv_heads: usize, d: usize, pos: 
     try std.testing.expect(worst(planned, want) < 1e-5);
 }
 
-test "the planned decode walk over pages writes the flat walk's bits for grouped heads, within 1e-5 of float64" {
+test "the planned decode walk over pages writes the flat walk's bits for grouped heads, each score in its lane order, within 1e-5 of float64" {
     const t = try Rig.open(1 << 20);
     defer t.close();
     var rng: rig.Rng = .{ .state = 0xA77E57 };
