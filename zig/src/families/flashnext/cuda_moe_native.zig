@@ -31,14 +31,7 @@ pub fn run(self: anytype, native: *const mixed.Owned, n: usize, pairs: usize, pl
         .fp8g => try fp8(self.k, self.stream, s.picks, s.mixed, owned.view(), plan, pairs, n, s.y, s.moe_act),
         else => return error.UnsupportedQuantization,
     }
-    if (native.rank == 0) {
-        const glue = self.tri.own orelse return error.NativeGlueRequired;
-        try self.k.native_lane.matmul(self.stream, s.mixed, dims, n, native.shared[0].native.?, s.shared_gate, s.native_part);
-        try self.k.native_lane.matmul(self.stream, s.mixed, dims, n, native.shared[1].native.?, s.shared_up, s.native_part);
-        try glue.sharedSwiGLU(self.stream, s.shared_gate, s.shared_up, s.shared_act, n, moe_w);
-        try self.k.native_lane.matmulF32(self.stream, s.shared_act, moe_w, n, native.shared[2].native.?, s.shared_out, s.native_part);
-        try glue.sharedScatter(self.stream, s.shared_out, s.y, n, dims, slots);
-    }
+    try @import("cuda_shared_split.zig").run(self, native, n);
     if (native.world != 1) {
         const collective = self.m.collective orelse return error.TensorParallelUnavailable;
         try collective.sum(self.stream, s.y, pairs * dims);

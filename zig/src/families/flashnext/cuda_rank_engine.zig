@@ -7,6 +7,7 @@ const wire = @import("cuda_rank_wire.zig");
 const Collective = @import("cuda_collective.zig").Collective;
 const wt = @import("cuda_prompt_wt.zig");
 const mtp = @import("cuda_mtp.zig");
+const verify_rows = @import("cuda_rank_verify.zig");
 
 pub const Identity = extern struct {
     config: [32]u8,
@@ -20,6 +21,7 @@ pub const Identity = extern struct {
     head_sharded: u64 = 0,
     image_tokens: u64 = 0,
     max_images: u64 = 0,
+    dense_split: u64 = 0,
 };
 
 fn fileHash(a: std.mem.Allocator, io: std.Io, path: []const u8) ![32]u8 {
@@ -44,7 +46,7 @@ pub fn identity(a: std.mem.Allocator, io: std.Io, dir: []const u8, context: usiz
     defer a.free(index);
     const program = try std.process.executablePathAlloc(io, a);
     defer a.free(program);
-    return .{ .config = try fileHash(a, io, config), .index = try fileHash(a, io, index), .program = try fileHash(a, io, program), .checkpoint = checkpoint, .context = context, .chunk = chunk, .decode_graph = @intFromBool(@import("cuda_round_graph.zig").enabled()), .head_sharded = @intFromBool(try @import("cuda_head.zig").enabled()) };
+    return .{ .config = try fileHash(a, io, config), .index = try fileHash(a, io, index), .program = try fileHash(a, io, program), .checkpoint = checkpoint, .context = context, .chunk = chunk, .decode_graph = @intFromBool(@import("cuda_round_graph.zig").enabled()), .head_sharded = @intFromBool(try @import("cuda_head.zig").enabled()), .dense_split = @intFromBool(try @import("cuda_dense_split.zig").appliesDir(a, io, dir, 2)) };
 }
 
 /// How long a rank waits for its peer: a minute with a given digest, 30 when the peer may be hashing every byte.
@@ -232,6 +234,8 @@ pub const Session = struct {
         try s.ack(h);
     }
 
+    pub const verifyMany = verify_rows.send;
+
     pub fn keep(s: *Session, comptime Tri: type, tri: Tri, q: *prompt.Seq, d: *mtp.Draft, count: usize) !void {
         if (!s.drafting or count == 0 or count > d.rows) return error.CannotRewind;
         const h = try s.command(.{ .kind = .keep, .object = q.rank_id, .arg = count }, &.{});
@@ -246,7 +250,7 @@ pub const Session = struct {
         const item = try s.windows.getOrPut(s.gpa, q.rank_id);
         if (!item.found_existing) {
             errdefer _ = s.windows.remove(q.rank_id);
-            item.value_ptr.* = try mtp.Draft.init(s.gpa, s.engine.driver, s.engine.stream.*, q.cap, 1, s.engine.chunk);
+            item.value_ptr.* = try verify_rows.makeWindow(s, q);
         }
         return item.value_ptr;
     }
@@ -350,6 +354,7 @@ pub const Session = struct {
                 const ops: mtp.Ops(Tri) = .{ .e = s.engine, .tri = tri, .h = undefined };
                 try ops.verify(q, try s.window(q), ids[0..n]);
             },
+            .verify_many => try verify_rows.receive(s, Tri, tri, h, payload, logits),
             .keep => {
                 if (!s.drafting) return error.UnsupportedRankOperation;
                 const q = s.seqs.get(h.object) orelse return error.UnknownRankSequence;
@@ -420,6 +425,7 @@ pub fn shape(h: wire.Header) !void {
         .forward => if (h.object == 0 or h.arg != 0 or h.bytes == 0 or h.bytes % 4 != 0 or (h.flags != @backingInt(prompt.batch.Logits.last) and h.flags != @backingInt(prompt.batch.Logits.none))) return error.BadRankFrame,
         .verify => if (h.object == 0 or h.arg != 0 or h.flags != 0 or h.bytes == 0 or h.bytes % 4 != 0 or h.bytes / 4 > mtp.max_rows) return error.BadRankFrame,
         .keep => if (h.object == 0 or h.arg == 0 or h.arg > mtp.max_rows or h.bytes != 0 or h.flags != 0) return error.BadRankFrame,
+        .verify_many => if (h.object != 0 or h.flags != 0 or h.arg == 0 or h.arg > verify_rows.max_windows or h.bytes < 16 * h.arg or h.bytes > verify_rows.max_bytes) return error.BadRankFrame,
         .round => if (h.object != 0 or h.arg != 0 or h.flags != 0 or h.bytes == 0 or h.bytes % 12 != 0 or h.bytes / 12 > 32) return error.BadRankFrame,
         .save, .restore => if (h.object == 0 or h.arg == 0 or h.bytes != 0 or h.flags != 0) return error.BadRankFrame,
         .drop_seq, .drop_snap => if (h.object == 0 or h.arg != 0 or h.bytes != 0 or h.flags != 0) return error.BadRankFrame,
@@ -459,7 +465,15 @@ test "rank operations refuse invalid geometry and unsupported hooks before execu
     try shape(.{ .kind = .round, .bytes = 24 });
     try shape(.{ .kind = .verify, .object = 1, .bytes = mtp.max_rows * 4 });
     try shape(.{ .kind = .keep, .object = 1, .arg = mtp.max_rows });
+    try shape(.{ .kind = .verify_many, .arg = 2, .bytes = 32 });
+    try shape(.{ .kind = .verify_many, .arg = verify_rows.max_windows, .bytes = verify_rows.max_bytes });
     for ([_]wire.Header{
+        .{ .kind = .verify_many, .bytes = 16 },
+        .{ .kind = .verify_many, .arg = verify_rows.max_windows + 1, .bytes = verify_rows.max_bytes },
+        .{ .kind = .verify_many, .arg = 2, .bytes = 31 },
+        .{ .kind = .verify_many, .arg = 1, .bytes = verify_rows.max_bytes + 4 },
+        .{ .kind = .verify_many, .object = 1, .arg = 1, .bytes = 16 },
+        .{ .kind = .verify_many, .arg = 1, .bytes = 16, .flags = 1 },
         .{ .kind = .verify, .object = 1, .bytes = (mtp.max_rows + 1) * 4 },
         .{ .kind = .verify, .object = 1, .bytes = 3 },
         .{ .kind = .verify, .bytes = 4 },

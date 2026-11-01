@@ -57,7 +57,7 @@ pub fn run(gpu: check.Gpu, dir: []const u8, rank: usize, port: u16, ids_path: []
     }
     var window = try session.create(context);
     defer session.drop(&window);
-    var draft = try mtp.Draft.init(gpu.gpa, e.driver, stream, context, 1, 32);
+    var draft = try mtp.Draft.init(gpu.gpa, e.driver, stream, context, 1, 32, e.heads);
     defer draft.deinit();
     const rows = try gpu.gpa.alloc(u8, expected.len);
     defer gpu.gpa.free(rows);

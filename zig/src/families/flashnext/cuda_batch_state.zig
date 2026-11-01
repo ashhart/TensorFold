@@ -212,6 +212,10 @@ pub const Scratch = struct {
     xsm: u64 = 0,
     proj: u64 = 0,
     part: u64 = 0,
+    rank_input: u64 = 0,
+    rank_gather: u64 = 0,
+    rank_output: u64 = 0,
+    rank_result: u64 = 0,
     /// part's second cap-stride slice is zeros (native lanes write only the first): a writeback adds it once.
     part_zero: bool = false,
     gout: u64 = 0,
@@ -334,6 +338,7 @@ pub const Scratch = struct {
         n += cap * dims * 2 + cap * (dims / 32) * 4 + cap * wide * 2 + cap * dims * 2 + 4 * cap * dims * 4;
         n += cap * wide * 2 * 2 + cap * streams * 4 + vocab * 2 + cap * vocab + half * 4 + 4096;
         n += cap * dims * 4 + cap * pocket_stride * 4;
+        n += cap * out_k * 4 + cap * dims * 6;
         return n;
     }
 
@@ -363,6 +368,10 @@ pub const Scratch = struct {
         s.mixed = try s.add(gpa, d, cap * dims * 2);
         s.xsm = try s.add(gpa, d, cap * (dims / 32) * 4);
         s.proj = try s.add(gpa, d, cap * proj_row * 2);
+        s.rank_input = try s.add(gpa, d, cap * out_k * 2);
+        s.rank_gather = try s.add(gpa, d, cap * out_k * 2);
+        s.rank_output = try s.add(gpa, d, cap * dims * 2);
+        s.rank_result = try s.add(gpa, d, cap * dims * 4);
         s.part = try s.add(gpa, d, out_sk * cap * dims * 4);
         try s.bufs.items[s.bufs.items.len - 1].fill8(0, stream.handle);
         s.part_zero = true;
