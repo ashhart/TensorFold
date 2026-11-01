@@ -229,6 +229,8 @@ pub const Clock = struct {
         start: *const fn (ptr: *anyopaque) void,
         elapsed_ms: *const fn (ptr: *anyopaque, mark: Mark) f64,
         host_ns: ?*const fn (ptr: *anyopaque) i128 = null,
+        /// The optional host reader can be called by independent grammar workers.
+        parallel_host_ns: bool = false,
     };
 
     pub fn start(c: Clock) void {
@@ -245,7 +247,7 @@ pub const WallClock = struct {
     started: std.Io.Timestamp = .zero,
 
     pub fn clock(w: *WallClock) Clock {
-        return .{ .ptr = w, .vtable = &.{ .start = startFn, .elapsed_ms = elapsedFn, .host_ns = hostNs } };
+        return .{ .ptr = w, .vtable = &.{ .start = startFn, .elapsed_ms = elapsedFn, .host_ns = hostNs, .parallel_host_ns = true } };
     }
 
     pub fn hostNs(ptr: *anyopaque) i128 {
