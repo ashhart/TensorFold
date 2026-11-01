@@ -79,10 +79,11 @@ fn expectScores(t: *const Rig, c: Cache, qv: []const f32, scores: DeviceBuffer, 
 }
 
 /// softmax(q . k * scale) v in float64 for one query of `head` seeing positions [0, visible).
-fn reference(t: *const Rig, c: Cache, q: []const f32, head: usize, group: usize, span: usize, d: usize, visible: usize, scale: f64, out: []f64) void {
+fn reference(t: *const Rig, c: Cache, q: []const f32, head: usize, group: usize, span: usize, d: usize, visible: usize, scale: f64, out: []f64) !void {
     const kv = head / group;
     var top: f64 = -std.math.inf(f64);
-    var scores: [4096]f64 = undefined;
+    const scores = try gpa.alloc(f64, visible);
+    defer gpa.free(scores);
     for (0..visible) |key| {
         var dot: f64 = 0;
         for (0..d) |j| dot += @as(f64, q[j]) * t.value(c.k[(kv * span + key) * d + j]);
@@ -111,8 +112,7 @@ fn worst(got: []const f32, want: []const f64) f64 {
 }
 
 /// Rows at positions `pos` over one slot's cache: the planned walk (grouped heads, pages) and the flat walk agree.
-fn decode(t: *Rig, rng: *rig.Rng, heads: usize, kv_heads: usize, d: usize, pos: []const i32) !void {
-    const span: usize = 1024;
+fn decode(t: *Rig, rng: *rig.Rng, heads: usize, kv_heads: usize, d: usize, span: usize, pos: []const i32) !void {
     const rows = pos.len;
     const group = heads / kv_heads;
     const scale: f32 = 1 / @sqrt(@as(f32, @floatFromInt(d)));
@@ -163,6 +163,12 @@ fn decode(t: *Rig, rng: *rig.Rng, heads: usize, kv_heads: usize, d: usize, pos: 
     defer dev_count.free();
     const tiles = span / 128;
     var scores = try t.alloc(rows * heads * span * 4);
+    // the planned walk's own scores start as NaN, so a key it skips cannot pass for the flat walk's bits
+    const poison = try gpa.alloc(u32, rows * heads * span);
+    defer gpa.free(poison);
+    @memset(poison, 0x7fc00000);
+    var planned_scores = try t.upload(poison);
+    defer planned_scores.free();
     defer scores.free();
     var stats = try t.alloc(rows * heads * 2 * 4);
     defer stats.free();
@@ -173,14 +179,14 @@ fn decode(t: *Rig, rng: *rig.Rng, heads: usize, kv_heads: usize, d: usize, pos: 
     const s = t.stream.handle;
     try t.on.tf_causal(@ptrFromInt(at(q)), @ptrFromInt(at(k)), @ptrFromInt(at(v)), @ptrFromInt(at(outs[0])), @intCast(rows), 1, @intCast(span), @intCast(heads), @intCast(kv_heads), @intCast(d), scale, 0, 0, @intCast(span * d), @intCast(d), 0, @intCast(span * d), @intCast(d), if (t.bf16) 1 else 0, @ptrFromInt(at(scores)), @ptrFromInt(at(stats)), @ptrFromInt(at(partials)), s, @ptrFromInt(at(dev_pos)));
     const p: plan.PlanRef = .{ .rows = rows, .slots = 1, .args = .{ .pos = at(dev_pos), .slot = at(slot), .first = at(dev_first), .count = at(dev_count), .desc = at(descs), .pages = words, .pool = @intCast(c.table.len) } };
-    try t.on.planCausal(at(q), at(outs[1]), at(scores), at(stats), at(partials), p, 0, heads, kv_heads, d, span, scale, t.kind(), s);
+    try t.on.planCausal(at(q), at(outs[1]), at(planned_scores), at(stats), at(partials), p, 0, heads, kv_heads, d, span, scale, t.kind(), s);
     try t.stream.synchronize();
     const flat = try rig.download(f32, outs[0]);
     defer gpa.free(flat);
     const planned = try rig.download(f32, outs[1]);
     defer gpa.free(planned);
     try std.testing.expectEqualSlices(u32, @ptrCast(flat), @ptrCast(planned));
-    try expectScores(t, c, hq, scores, heads, kv_heads, d, span, pos, scale);
+    try expectScores(t, c, hq, planned_scores, heads, kv_heads, d, span, pos, scale);
     // q in the activation type: the score reads its widened values
     const hq16 = try gpa.alloc(u16, hq.len);
     defer gpa.free(hq16);
@@ -192,14 +198,16 @@ fn decode(t: *Rig, rng: *rig.Rng, heads: usize, kv_heads: usize, d: usize, pos: 
     }
     var q16 = try t.upload(hq16);
     defer q16.free();
-    try t.on.planCausalAs(at(q16), at(outs[1]), at(scores), at(stats), at(partials), p, 0, heads, kv_heads, d, span, scale, t.kind(), true, s);
+    var act_scores = try t.upload(poison);
+    defer act_scores.free();
+    try t.on.planCausalAs(at(q16), at(outs[1]), at(act_scores), at(stats), at(partials), p, 0, heads, kv_heads, d, span, scale, t.kind(), true, s);
     try t.stream.synchronize();
-    try expectScores(t, c, qv, scores, heads, kv_heads, d, span, pos, scale);
+    try expectScores(t, c, qv, act_scores, heads, kv_heads, d, span, pos, scale);
     const want = try gpa.alloc(f64, rows * heads * d);
     defer gpa.free(want);
     for (0..rows) |r| for (0..heads) |h| {
         const at_q = (r * heads + h) * d;
-        reference(t, c, hq[at_q..][0..d], h, group, span, d, @intCast(pos[r] + 1), scale, want[at_q..][0..d]);
+        try reference(t, c, hq[at_q..][0..d], h, group, span, d, @intCast(pos[r] + 1), scale, want[at_q..][0..d]);
     };
     try std.testing.expect(worst(planned, want) < 1e-5);
 }
@@ -209,10 +217,13 @@ test "the planned decode walk over pages writes the flat walk's bits for grouped
     defer t.close();
     var rng: rig.Rng = .{ .state = 0xA77E57 };
     const pos = [_]i32{ 0, 37, 300, 1023 };
-    try decode(t, &rng, 16, 2, 256, &pos); // 8 query heads a KV head, Qwen3.6-35B-A3B's attention
-    try decode(t, &rng, 24, 4, 256, &pos); // 6, Qwen3.8-27B
-    try decode(t, &rng, 16, 4, 128, &pos); // 4
-    try decode(t, &rng, 4, 4, 128, &pos); // no sharing
+    try decode(t, &rng, 16, 2, 256, 1024, &pos); // 8 query heads a KV head, Qwen3.6-35B-A3B's attention
+    try decode(t, &rng, 24, 4, 256, 1024, &pos); // 6, Qwen3.8-27B
+    try decode(t, &rng, 16, 4, 128, 1024, &pos); // 4
+    try decode(t, &rng, 4, 4, 128, 1024, &pos); // no sharing
+    // spans long enough for the four-key warps, ending mid-warp
+    try decode(t, &rng, 16, 2, 256, 16384, &.{ 9001, 16382 });
+    try decode(t, &rng, 16, 4, 128, 16384, &.{16381});
 }
 
 /// A prompt of `qlen` queries from `q_pos0` over `span` positions: the paged 64-row tile writes the flat tile's bits.
@@ -258,7 +269,7 @@ fn prompt(t: *Rig, rng: *rig.Rng, heads: usize, kv_heads: usize, d: usize, qlen:
     defer gpa.free(want);
     for (0..heads) |h| for (0..qlen) |i| {
         const at_q = (h * qlen + i) * d;
-        reference(t, c, hq[at_q..][0..d], h, group, span, d, q_pos0 + i + 1, scale, want[at_q..][0..d]);
+        try reference(t, c, hq[at_q..][0..d], h, group, span, d, q_pos0 + i + 1, scale, want[at_q..][0..d]);
     };
     const bound: f64 = if (t.bf16) 2e-2 else 4e-3;
     try std.testing.expect(worst(paged, want) < bound);
