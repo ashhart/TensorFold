@@ -4,6 +4,20 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Shared draft rounds price each stream's drafts before drafting, and a stream whose drafts would get no verify rows skips the drafter's proposal work, for Nemotron, Qwen's MTP, GLM, Gemma 4 (assistant and DFlash) and attached LFM2 drafters, on CUDA and Metal; each family keeps its head step's cost in the price. Replies are unchanged. Nemotron 3.5 Lightning with its MTP head: on an M5 Ultra, 16-stream chat +9.0% greedy and +4.7% sampled; on a GB10, 16 streams +2.1% and 8 streams +1.1%.
+
+- GLM shared MTP and DFlash2 rounds preserve committed context while skipping proposals with no verify rows.
+
+- Gemma 4 assistant and DFlash attachments price shared proposals before running them; assistants skip unused row norms.
+
+- Attached LFM2 drafters use the shared zero-row budget while retaining context needed by later proposals.
+
+- Qwen3.6 MTP and external draft adapters reserve shared verify rows before proposing. A zero-row budget keeps committed context current without running the proposal pass (#1621).
+
+- Nemotron on Metal and CUDA reserves shared verify rows before proposing MTP drafts, skipping unused proposals while still absorbing committed rows into the head cache (#1621).
+
+- Nemotron on CUDA, with default MTP sizing, keeps the measured head-step cost and current acceptance rates in shared draft reservations, so skipping unused proposals does not let deeper neural drafts displace the code-copy rows selected by the earlier cost rule. The change is covered by host grant and token tests; device performance qualification remains pending (#1621).
+
 - MOSS-Image's image decoder (the checkpoint's FLUX.2 small VAE, in float32 as the pipeline runs it) runs on Metal inside the `moss_image` family, and `tf-moss-image` writes `picture.png` itself, so torch no longer decodes (#1687, #1504). Thanks to @BobClawblaw.
 
 - On CUDA, a driver older than CUDA 13.0 is refused at startup with a plain message naming the driver to install (R580 or newer), before any kernel loads; an R550 driver had ended the process with SIGILL inside libcuda on the first module load (#1791, #1724). Thanks to @rootsbymenda.
@@ -104,14 +118,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - DeepSeek V4.1 on CUDA (experimental) copies its weights and persistent forms to the GPU through one reusable 64 MiB pinned stage instead of a host copy of the whole image, so the public Flash-1017 EXL3 pack no longer stops at boot with `CopySourceLimit` at TP=2; with it, a rank loaded all 95.1 GiB of its weights. The bytes on the GPU, their addresses and their digests are unchanged, a failed later chunk keeps the same cleanup, and uploads under 64 MiB make the same single copy as before (#1643). Thanks to @jayleaton.
 
 - Nemotron 3.5 on Metal: the decode attention kernel on M3-class GPUs and the experts' 2-row tiles unroll their fixed loops, with bit-identical outputs. On an M3 Ultra, Nemotron 3.5 Lightning decodes 1.8% faster at one stream (0.8% at 4 streams), and 0.8% and 1.5% faster after 2k and 8k prompts, with the same tokens (#1621).
-- GLM shared MTP and DFlash2 rounds preserve committed context while skipping proposals with no verify rows.
-- Gemma 4 assistant and DFlash attachments price shared proposals before running them; assistants skip unused row norms.
-- Attached LFM2 drafters use the shared zero-row budget while retaining context needed by later proposals.
-
-
-- Qwen3.6 MTP and external draft adapters reserve shared verify rows before proposing. A zero-row budget keeps committed context current without running the proposal pass (#1621).
-
-- Nemotron on Metal and CUDA reserves shared verify rows before proposing MTP drafts, skipping unused proposals while still absorbing committed rows into the head cache (#1621).
 
 - DeepSeek-V4.1-Flash on CUDA (experimental) plans EXL3 packs that keep a BF16 `.weight` beside a projection's EXL3 trellis, such as `jayleaton/DeepSeek-V4.1-Flash-1017-EXL3-2.8bpw`, which used to stop at planning with `UnsupportedDenseProjection` (booting that pack also needs the upload-stage change, #1643): the CUDA rank planner takes the stored trellis, still checked by the shared trellis validator, and still refuses dense-only and malformed projections. Metal and every other family keep reading the dense weight first, and packs without a dense sibling plan as before. Thanks to @jayleaton.
 
@@ -134,8 +140,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - LFM2.5-24B-A2B on Metal can hand an external drafter the rows of the layers it reads (its taps), copied on the GPU by a new kernel, `lfm2_tap`, that the kernel contract checks bit for bit with two planted controls (#1390, part of #1374). A drafting stream resumes a kept prompt state only when it also holds the drafter's context. Nothing uses the taps yet: without a drafter none are kept and every forward runs as before. Thanks to @BlivionIaG.
 
 - Nemotron on CUDA: the MoE residual's norm, Mamba's group norm, the MTP input norms and the bf16 token rows run on the shared norm and embedding kernels instead of Nemotron's own copies, which are removed. The shared kernels keep Nemotron's summation order, so replies are the same tokens as before, and one fewer CUDA image loads (#1353, step 1 of #548). Thanks to @jschmied.
-
-- Nemotron on CUDA, with default MTP sizing, keeps the measured head-step cost and current acceptance rates in shared draft reservations, so skipping unused proposals does not let deeper neural drafts displace the code-copy rows selected by the earlier cost rule. The change is covered by host grant and token tests; device performance qualification remains pending (#1621).
 
 - Qwen3.8-27B on two Macs, first step: the pair seam's Metal kernels, which exchange whole output rows between the two Macs as bf16 copies, so every sum stays on one Mac and no partial sum crosses the link, plus a one-Mac loopback peer and six kernel-contract controls that each go red as planted (#1432). Nothing serves through it yet, and one Mac's projections keep the same reduction order, so replies are byte-identical. Thanks to @akol1.
 
