@@ -32,7 +32,7 @@ pub const Model = struct {
         const text = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20));
         defer a.free(text);
         const c = try cfg.parse(a, text);
-        if (target.config.hidden != c.hidden or target.config.vocab != c.vocab or target.config.layers != c.target_layers) return error.TargetBinding;
+        try c.bind(target.config.hidden, target.config.vocab, target.config.layers);
         const shards = try core.checkpoint_host.shardFiles(a, io, dir);
         defer core.checkpoint_host.freeShardFiles(a, shards);
         return open(a, target, c, shards, mode);

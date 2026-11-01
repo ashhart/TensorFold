@@ -96,13 +96,14 @@ pub const Runner = struct {
         const units = m.device.tensorUnits();
         // before M5 the tail attention reads its tensor-op results in the simdgroup-matrix layout (simd_attention.zig)
         if (!units) try @import("simd_attention.zig").check(m.device, m.queue);
-        const text = try @import("simd_attention.zig").library(a, units, true);
+        // both builds take the kernels' KV group as the defines attention_mpp.metal reads
+        const text = try @import("simd_attention.zig").grouped(a, units, true, geometry.group(), geometry.kv_heads);
         defer a.free(text);
         // before M5 the prompt kernels are optional: a chip that cannot build them keeps the decode path for prompts
         const library = mtl.Library.fromSource(m.device, text, mtl.CompileOptions.mlx()) catch |err| blk: {
             if (units) return err;
             std.log.info("qwen27: the prompt attention kernels do not build here ({t}); prompt rows take the decode path", .{err});
-            const base = try @import("simd_attention.zig").library(a, units, false);
+            const base = try @import("simd_attention.zig").grouped(a, units, false, geometry.group(), geometry.kv_heads);
             defer a.free(base);
             break :blk try mtl.Library.fromSource(m.device, base, mtl.CompileOptions.mlx());
         };

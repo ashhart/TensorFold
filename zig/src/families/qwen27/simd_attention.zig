@@ -40,6 +40,14 @@ pub fn library(a: std.mem.Allocator, units: bool, prompt: bool) ![]u8 {
     return std.mem.concat(a, u8, &.{ tail, source.attention_prompt, source.attention_prompt_sg });
 }
 
+/// `library` behind the KV-group defines attention_mpp.metal reads: Q27_G query heads over each of Q27_KVH heads.
+pub fn grouped(a: std.mem.Allocator, units: bool, prompt: bool, group: u32, kv_heads: u32) ![]u8 {
+    const body = try library(a, units, prompt);
+    defer a.free(body);
+    var defines: [64]u8 = undefined;
+    return std.mem.concat(a, u8, &.{ try std.fmt.bufPrint(&defines, "#define Q27_G {d}\n#define Q27_KVH {d}\n", .{ group, kv_heads }), body });
+}
+
 /// The attention source with the tail kernel's result indexing in the simdgroup-matrix layout; the caller frees it.
 pub fn rewrite(a: std.mem.Allocator, source: []const u8) ![]u8 {
     const begin = std.mem.indexOf(u8, source, "kernel void q27_attn_tail(") orelse return error.AttentionSource;
@@ -130,4 +138,17 @@ test "the rewrite changes every M5-indexed line of the tail kernel once and leav
     try std.testing.expect(std.mem.indexOf(u8, text[begin..end], "float4(Olo") == null);
     try std.testing.expectEqualStrings(source[0..begin], text[0..begin]);
     try std.testing.expectEqualStrings(source[source.len - (text.len - end) ..], text[end..]);
+}
+
+test "both attention builds, with and without the prompt kernels, open with the KV-group defines" {
+    const a = std.testing.allocator;
+    const defines = "#define Q27_G 4\n#define Q27_KVH 4\n";
+    for ([_]bool{ false, true }) |units| for ([_]bool{ false, true }) |prompt| {
+        const text = try grouped(a, units, prompt, 4, 4);
+        defer a.free(text);
+        const body = try library(a, units, prompt);
+        defer a.free(body);
+        try std.testing.expect(std.mem.startsWith(u8, text, defines));
+        try std.testing.expectEqualStrings(body, text[defines.len..]);
+    };
 }
