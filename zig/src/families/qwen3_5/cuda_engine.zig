@@ -139,6 +139,7 @@ pub const Engine = struct {
     pl: u64,
     po: u64,
     logits: u64,
+    mt2: @import("cuda_mt2.zig").Mt2,
     routed: routed.Scratch = .{}, // qwen3_5_moe's routed rows
     amax: u64, // the argmax slices' bests: most_verify rows of argmaxSlices(vocab) (f32, i32)
     picks: u64, // drawRows' slice scratch: most_verify rows of cuda.sample.Draws.row_scratch
@@ -224,6 +225,7 @@ pub const Engine = struct {
         const sms: usize = @intCast(try ctx.attribute(.multiprocessor_count));
         const major = try ctx.attribute(.compute_capability_major);
         const minor = try ctx.attribute(.compute_capability_minor);
+        e.mt2 = try @import("cuda_mt2.zig").Mt2.resolve(e.mods[9], @intCast(10 * major + minor), sms, geometry.dense27(g));
         const gb10 = major == 12 and minor == 1;
         e.affine = try cuda.qlinear.Affine4Kernels.resolve(d, e.mods[0], e.mods[1], e.mods[2], e.mods[3], sms, gb10);
         e.affine.half_prompt = !gb10; // the 27B's prompt tile (Tile<64, 128, 128, 2, 2, 2>), quicker on an RTX 5090
@@ -494,6 +496,7 @@ pub const Engine = struct {
         };
         shape.hidden = keep == .hidden;
         shape.paged = @import("cuda_attention.zig").hasPages(segs);
+        shape.mt2 = @import("cuda_shapes.zig").useMt2(e.mt2.enabled, e.kv8, prompt, total, parts.len, parts[0].cache.len);
         if (e.learning != null or e.pockets.any()) {
             var exact = shape;
             exact.total = @intCast(total);

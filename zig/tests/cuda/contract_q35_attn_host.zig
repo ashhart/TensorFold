@@ -28,7 +28,7 @@ const Trace = struct {
         attrs = .empty;
     }
     fn function(out: *cuda.abi.Function, _: cuda.abi.Module, name: [*:0]const u8) callconv(.c) cuda.abi.Result {
-        const names = [_][]const u8{ "tf_q35_attn_partial", "tf_q35_attn_rows", "tf_q35_attn_merge", "tf_q35_attn_partial8", "tf_q35_attn_rows8" };
+        const names = [_][]const u8{ "tf_q35_attn_partial", "tf_q35_attn_rows", "tf_q35_attn_merge", "tf_q35_attn_partial8", "tf_q35_attn_rows8", "tf_q35_attn_rows8_mt2", "tf_q35_attn_rows8_mt2_whole" };
         for (names, 1..) |n, id| if (std.mem.eql(u8, n, std.mem.span(name))) {
             out.* = @ptrFromInt(id);
             return 0;
@@ -49,7 +49,7 @@ const Trace = struct {
     }
     fn launch(f: cuda.abi.Function, gx: c_uint, gy: c_uint, gz: c_uint, bx: c_uint, by: c_uint, bz: c_uint, shared: c_uint, _: cuda.abi.Stream, a: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
         const id = @intFromPtr(f);
-        const long = id == 2 or id == 5;
+        const long = id == 2 or id == 5 or id == 6 or id == 7;
         var call: Call = .{ .id = id, .grid = .{ gx, gy, gz }, .block = .{ bx, by, bz }, .shared = shared, .geo = read(Geo, a, 0) };
         if (id == 3) {
             for (1..9) |i| call.args[i] = read(u64, a, i);
@@ -88,12 +88,15 @@ fn make(d: *cuda.Driver, form: adapter.Form, rows: usize, keys: usize) !adapter.
     q.chunks = 10;
     return q;
 }
-fn partial(call: Call, cache: adapter.Cache, long: bool, rows: usize, first: usize, chunks: u32, p: [3]u64) !void {
-    try T.expectEqual(if (cache == .bf16) (if (long) @as(usize, 2) else 1) else if (long) @as(usize, 5) else 4, call.id);
+fn partial(call: Call, form: adapter.Form, long: bool, rows: usize, first: usize, chunks: u32, p: [3]u64) !void {
+    const cache = form.cache;
+    const narrow = long and form.mt2;
+    if (narrow) try T.expectEqual(@as(usize, if (form.whole) 7 else 6), call.id) else try T.expectEqual(if (cache == .bf16) (if (long) @as(usize, 2) else 1) else if (long) @as(usize, 5) else 4, call.id);
     // Engine: short rows each get a block, long rows pack 64/G rows, chunk is y and KV head is z.
-    const groups = (rows + 64 / 6 - 1) / (64 / 6);
+    const tile: usize = if (narrow) 32 / 6 else 64 / 6;
+    const groups = (rows + tile - 1) / tile;
     try T.expectEqual([3]u32{ @intCast(if (long) groups else rows), chunks, 4 }, call.grid);
-    try T.expectEqual([3]u32{ if (long) 256 else 128, 1, 1 }, call.block);
+    try T.expectEqual([3]u32{ if (long and !narrow) 256 else 128, 1, 1 }, call.block);
     try T.expectEqual(@as(u32, if (cache == .bf16) 65536 else 0), call.shared);
     try T.expectEqualDeep(Geo{ .hid = 5120, .nk = 16, .nv = 48, .qh = 24, .kvh = 4, .nl = 1 }, call.geo);
     try T.expectEqualSlices(u64, &.{ 0x100000 + first * 24 * 256 * 2, 0x400000, 0x200000 + first * 4, 0x300000 + first * 16, 0, 0, @as(u32, @bitCast(@as(f32, 1.0 / 16.0))) }, call.args[1..8]);
@@ -121,8 +124,8 @@ test "q35 contract host: actual adapter launches short and long TC paths then me
             try q.run();
             try T.expectEqual(@as(usize, 3), Trace.calls.items.len);
             const z: u32 = if (form.control) 9 else 64;
-            try partial(Trace.calls.items[0], form.cache, false, rows, 0, z, q.part);
-            try partial(Trace.calls.items[1], form.cache, true, rows, 0, z, q.part);
+            try partial(Trace.calls.items[0], form, false, rows, 0, z, q.part);
+            try partial(Trace.calls.items[1], form, true, rows, 0, z, q.part);
             try merge(Trace.calls.items[2], rows, q.part, q.out);
             try T.expect(!Trace.bad_attribute);
             try T.expectEqualSlices(usize, if (form.cache == .bf16) &.{ 1, 2 } else &.{}, Trace.attrs.items);
@@ -140,9 +143,30 @@ test "q35 contract host: each-row replacement retains TC paths, offsets and long
         _ = try q.replaced();
         try T.expectEqual(@as(usize, 35), Trace.calls.items.len);
         for (0..17) |row| {
-            try partial(Trace.calls.items[2 * row], form.cache, false, 1, row, 64, q.base[0..3].*);
-            try partial(Trace.calls.items[2 * row + 1], form.cache, true, 1, row, 64, q.base[0..3].*);
+            try partial(Trace.calls.items[2 * row], form, false, 1, row, 64, q.base[0..3].*);
+            try partial(Trace.calls.items[2 * row + 1], form, true, 1, row, 64, q.base[0..3].*);
         }
         try merge(Trace.calls.items[34], 17, q.base[0..3].*, q.base[3]);
+    }
+}
+
+test "q35 contract host: MT2 replacement launches the unchanged MT4 baseline" {
+    defer Trace.deinit();
+    var d = driver();
+    for (adapter.forms) |form| {
+        if (!form.mt2) continue;
+        for ([_]usize{ 1, 5, 6, 16 }) |rows| {
+            Trace.reset();
+            var q = try make(&d, form, rows, 32768);
+            defer q.deinit();
+            _ = try q.replaced();
+            try T.expectEqual(2 * rows + 1, Trace.calls.items.len);
+            const baseline: adapter.Form = .{ .cache = .fp8 };
+            for (0..rows) |row| {
+                try partial(Trace.calls.items[2 * row], baseline, false, 1, row, 64, q.base[0..3].*);
+                try partial(Trace.calls.items[2 * row + 1], baseline, true, 1, row, 64, q.base[0..3].*);
+            }
+            try T.expect(q.form.mt2 and q.form.whole == form.whole);
+        }
     }
 }

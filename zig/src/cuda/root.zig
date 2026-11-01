@@ -1,5 +1,6 @@
 //! TensorFold's CUDA runtime: the driver, cuBLASLt and NCCL through dlopen, our kernels and Triton's, no Python.
 
+pub const sm120_test_override = @import("sm120_test_override.zig");
 pub const abi = @import("abi.zig");
 pub const Driver = @import("driver.zig").Driver;
 pub const copy_source = @import("copy_source.zig");
