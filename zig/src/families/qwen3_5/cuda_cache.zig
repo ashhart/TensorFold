@@ -11,8 +11,33 @@ const recurrent = @import("cuda_recurrent.zig");
 /// Rows a drafter's tap ring holds a stream: its window and a prompt chunk more.
 pub const tap_rows = 2048 + engine.max_rows;
 
+/// Kept rows a cache may hold pending, and the pending count at which a recorded slot scan writes the state back.
+pub const pend_cap = 48;
+pub const pend_commit = 24;
+
+/// TF_QWEN_KEEP_LATE=0: every keep replays its path into the state at once.
+pub fn keepLate() bool {
+    const S = struct {
+        var on: ?bool = null;
+    };
+    if (S.on) |v| return v;
+    const v = if (std.c.getenv("TF_QWEN_KEEP_LATE")) |x| !std.mem.eql(u8, std.mem.span(x), "0") else true;
+    S.on = v;
+    return v;
+}
+
+/// One kept row's decay, write and key in one linear layer: the head of its log row (qwen35.cuh pend_row).
+pub fn headBytes(g: anytype) usize {
+    return g.v_heads * 4 + g.v_heads * geometry.dk * 4 + g.k_heads * geometry.dk * 2;
+}
+
+/// A cache's pending buffer: pend_cap rows of every linear layer's head.
+pub fn pendBytes(g: anytype) usize {
+    return pend_cap * g.deltas() * headBytes(g);
+}
+
 /// qwen35.cuh's Seg and Path.
-pub const Seg = extern struct { rec: u64, conv: u64, kv: u64, tap: u64, log: u64, before: u64, cap: c_int, len: c_int, row0: c_int, rows: c_int, tap_rows: c_int, taps: c_int, delta: c_int, pt: u64 = 0, ps: u64 = 0, ptok: c_int = 0 };
+pub const Seg = extern struct { rec: u64, conv: u64, kv: u64, tap: u64, log: u64, before: u64, cap: c_int, len: c_int, row0: c_int, rows: c_int, tap_rows: c_int, taps: c_int, delta: c_int, pt: u64 = 0, ps: u64 = 0, ptok: c_int = 0, pn: c_int = 0, plog: u64 = 0 };
 pub const Path = extern struct { n: c_int, rows: [engine.most_window]c_int };
 
 /// A cache's keys and values as pages (qwen35.cuh kv_row): page i of the stream's positions at `base` + ids[i] pages.
@@ -94,6 +119,10 @@ pub const Cache = struct {
     logits: []u16,
     /// The newest verify window, until its path is kept: where it started, its rows.
     last: ?struct { start: usize, rows: usize } = null,
+    /// Kept rows (rows 0..pend-1 of `pbuf`) the state does not hold yet: recorded slot scans replay them.
+    pend: c_int = 0,
+    /// The pending heads (pendBytes), allocated at the first deferred keep.
+    pbuf: ?DeviceBuffer = null,
     /// An image prompt's rotary shift (get_rope_index's rope_delta): rows after its prompt rotate at position + delta.
     pub fn init(gpa: std.mem.Allocator, e: *Engine, cap: usize) !Cache {
         const test_pages = try pageTest();
@@ -153,6 +182,7 @@ pub const Cache = struct {
             at += std.mem.alignForward(usize, n, 256);
         }
         self.state = views[0];
+        self.pend = 0;
         self.before = views[1];
         self.log = views[2];
         self.tap = if (e.n_taps > 0) views[3] else null;
@@ -164,6 +194,7 @@ pub const Cache = struct {
     pub fn unmapRun(self: *Cache, e: *const Engine) void {
         const none: DeviceBuffer = .{ .d = e.d, .ptr = 0, .len = 0, .borrowed = true };
         self.state = none;
+        self.pend = 0;
         self.before = none;
         self.log = none;
         self.tap = null;
@@ -212,6 +243,7 @@ pub const Cache = struct {
         self.written = 0;
         self.last = null;
         self.untaught = false;
+        self.pend = 0;
         self.delta = 0;
         try self.state.fill8(0, e.stream.handle);
     }
@@ -225,6 +257,7 @@ pub const Cache = struct {
         if (self.paged) |*p| freePaged(gpa, p);
         self.log.free();
         if (self.tap) |*t| t.free();
+        if (self.pbuf) |*b| b.free();
         gpa.free(self.logits);
     }
 
@@ -269,11 +302,59 @@ pub const Cache = struct {
         const g = e.g;
         const sg = self.seg(e, last.start, 0, last.rows);
         try recurrent.mark(self, false);
-        try e.run(e.keeps.apply, .{ 1, geometry.dk / 4, g.v_heads * g.deltas() }, .{ 32, 4, 1 }, .{ e.geo, sg, p });
+        // the path's rows join the pending ones, or without a log (or with the switch off) land in the state now
+        const deferred = keepLate() and self.log.len > 0;
+        if (!deferred) {
+            try self.flush(e);
+            try e.run(e.keeps.apply, .{ 1, geometry.dk / 4, g.v_heads * g.deltas() }, .{ 32, 4, 1 }, .{ e.geo, sg, p });
+        }
         try e.run(e.keeps.conv, .{ g.deltas(), (g.convBytes() / 2 + 255) / 256, 1 }, .{ 256, 1, 1 }, .{ e.geo, sg, @as(c_int, @intCast(path[path.len - 1])) });
         if (!prefix and g.attentions() > 0) try e.run(if (e.kv8) e.fp8.compact else e.keeps.compact, .{ g.attentions(), g.kv_heads, 1 }, .{ geometry.head_dim, 1, 1 }, .{ e.geo, sg, p });
+        if (deferred) try self.pendRows(e, sg.log, path);
         self.last = null;
         self.len = last.start + path.len;
+    }
+
+    /// The kept path's heads after the pending rows, a run of consecutive rows one copy; a full buffer lands first.
+    fn pendRows(self: *Cache, e: *Engine, log: u64, path: []const u32) !void {
+        const g = e.g;
+        if (self.pbuf == null) self.pbuf = try DeviceBuffer.alloc(e.d, pendBytes(g));
+        if (@as(usize, @intCast(self.pend)) + path.len > pend_cap) try self.flush(e);
+        const hb = headBytes(g);
+        const row_log = g.deltas() * g.logRowBytes();
+        const base = self.pbuf.?.ptr;
+        var j: usize = 0;
+        while (j < path.len) {
+            var run: usize = 1;
+            while (j + run < path.len and path[j + run] == path[j] + run) run += 1;
+            const at: usize = @as(usize, @intCast(self.pend)) + j;
+            const m: cuda.abi.Memcpy2D = .{ .src = log + path[j] * row_log, .src_pitch = g.logRowBytes(), .dst = base + at * g.deltas() * hb, .dst_pitch = hb, .width = hb, .height = run * g.deltas() };
+            try e.d.check(e.d.api.cuMemcpy2DAsync_v2(&m, e.stream.handle), "cuMemcpy2DAsync");
+            j += run;
+        }
+        self.pend += @intCast(path.len);
+    }
+
+    /// The pending rows landed in the state now (before anything but a recorded slot scan reads it).
+    pub fn flush(self: *Cache, e: *Engine) !void {
+        if (self.pend == 0) return;
+        var sg = self.seg(e, self.len, 0, 0);
+        sg.plog = self.pbuf.?.ptr;
+        const n = self.pend;
+        self.pend = 0;
+        const g = e.g;
+        try e.run(e.keeps.apply_pend, .{ 1, geometry.dk / 4, g.v_heads * g.deltas() }, .{ 32, 4, 1 }, .{ e.geo, sg, n });
+    }
+
+    /// This forward's scan entry with the pending rows, written back (a positive count) at one row or pend_commit.
+    pub fn fold(self: *Cache, seg_: Seg) Seg {
+        var sg = seg_;
+        if (self.pend == 0) return sg;
+        sg.plog = self.pbuf.?.ptr;
+        const commit = seg_.rows == 1 or self.pend >= pend_commit;
+        sg.pn = if (commit) self.pend else -self.pend;
+        if (commit) self.pend = 0;
+        return sg;
     }
 
     /// The newest window kept whole (the round loop keeps nothing when every row landed), before the next forward.

@@ -312,7 +312,7 @@ pub const Engine = struct {
 
     /// A stream's device bytes at a `cap`-token window: recurrences, convolution tails, keys and values, taps, log.
     pub fn streamBytes(e: *const Engine, cap: usize) usize {
-        return 2 * e.g.stateBytes() + e.g.kvBytes(cap, e.kv8) + e.tapBytes() + e.g.logBytes(most_window);
+        return 2 * e.g.stateBytes() + e.g.kvBytes(cap, e.kv8) + e.tapBytes() + e.g.logBytes(most_window) + @import("cuda_cache.zig").pendBytes(e.g);
     }
 
     /// A stream's tap ring: tap_rows rows of the tapped layers' residuals.
@@ -454,11 +454,13 @@ pub const Engine = struct {
         const slot_peak = try Round.build(st, parts, record);
         for (parts) |p| {
             try p.cache.settle(e);
+            // pending kept rows ride in a recorded slot scan; any other pass reads the state as written
+            if (!(record and keep != .hidden)) try p.cache.flush(e);
             try recurrent.prepare(e, p.cache, p.rows, record);
         }
         var row0: usize = 0;
         for (parts, 0..) |p, i| {
-            segs[i] = p.cache.seg(e, p.cache.len, row0, p.rows);
+            segs[i] = p.cache.fold(p.cache.seg(e, p.cache.len, row0, p.rows));
             row0 += p.rows;
         }
         if (keep == .draws) {

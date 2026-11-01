@@ -73,6 +73,7 @@ pub const Prefix = struct {
         const s: *Snap = @ptrCast(@alignCast(saved));
         const cache = owner.cache.?;
         const e = x.e;
+        try cache.flush(e);
         try e.d.check(e.d.api.cuMemcpyHtoDAsync_v2(cache.state.ptr, s.host.bytes.ptr, e.g.stateBytes(), e.stream.handle), "cuMemcpyHtoDAsync");
         try e.stream.synchronize();
     }
@@ -139,6 +140,7 @@ pub const Prefix = struct {
         errdefer x.gpa.destroy(s);
         s.* = .{ .host = try cuda.HostBuffer.alloc(e.d, e.g.stateBytes()) };
         errdefer s.host.free();
+        try cache.flush(e);
         try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(s.host.bytes.ptr, cache.state.ptr, e.g.stateBytes(), e.stream.handle), "cuMemcpyDtoHAsync");
         try e.stream.synchronize();
         return @ptrCast(s);
