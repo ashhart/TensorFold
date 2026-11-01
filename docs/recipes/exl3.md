@@ -196,6 +196,10 @@ row's bits match it:
   layer's shape alone. `exl3.Dense` runs prompt rows in 128-row blocks of the same kernel, so a prompt row's bits
   equal its decode-row bits wherever its chunk starts; `qlinear.Weight` has an `.exl3` arm for both.
   The split counters are zeroed on the calls' stream when they grow, and each block's last program resets its own.
+  On sm_90 and newer the input rotations and the linear, alone or grouped, go out as programmatic dependent
+  launches: a linear loads its weights while the kernel before it finishes, then waits for its rows.
+  `TF_EXL3_PDL=0` makes them plain stream-ordered launches with the same bits, to time a change without them or to
+  rule them out when chasing a fault; below sm_90 they are plain already.
 - `zig/kernels/cuda/exl3_experts.cu`, `zig/src/cuda/exl3_experts.zig`: grouped routed experts (member lists,
   each expert's rotation, gate and up, GLM's SwiGLU roundings, down and the weighted combine), widths mixed within
   a layer; an expert's member count never changes a row's bits.
