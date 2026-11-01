@@ -44,6 +44,18 @@ pub fn prepare(d: *const cuda.Driver, page: u64, capacity: usize, row_bytes: usi
 /// The engine's gather, set when its pages go to host memory.
 pub var active: ?Gather = null;
 
+/// Engine.checkGathers' part: the engine's gather refuses a call past its slots by name (none: nothing to check).
+pub fn checkActive() !void {
+    if (active) |*g| try g.check();
+}
+
+/// Whether mark flagged a call past the slots since the last look; the flag is cleared for the next.
+fn taken(flag: *volatile i32) bool {
+    if (flag.* == 0) return false;
+    flag.* = 0;
+    return true;
+}
+
 /// Rows a KV page holds; the row cache's layers (11 DSA and MTP, with room), rows a layer, and its largest call.
 const page_rows = 512;
 const layers = 16;
@@ -100,9 +112,7 @@ pub const Gather = struct {
 
     /// After a synchronize: refuses (and clears) a call since the last check whose distinct picks passed the slots.
     pub fn check(g: *const Gather) !void {
-        const flag: *volatile i32 = @ptrCast(g.over.slice(i32).ptr);
-        if (flag.* == 0) return;
-        flag.* = 0;
+        if (!taken(@ptrCast(g.over.slice(i32).ptr))) return;
         std.log.err("kv host: a call picked more distinct rows than the gather's {d} slots", .{g.cap});
         return error.GlmKvHostSlots;
     }
@@ -261,6 +271,15 @@ test "kv host pages: one full window and 16 by default, TF_GLM_KV_HOST_GIB's wor
     try std.testing.expectEqual(@as(usize, 1 + 16), pagesOf(null, page, 300));
     try std.testing.expectEqual(@as(usize, 2088), pagesOf(13, page, 1 << 20));
     try std.testing.expectEqual(@as(usize, 0), pagesOf(0, page, 1 << 20));
+}
+
+test "kv host slots: mark's flag is seen once, then cleared for the next call" {
+    var flag: i32 = 0;
+    try std.testing.expect(!taken(&flag));
+    flag = 1; // mark: a call picked more distinct rows than the slots
+    try std.testing.expect(taken(&flag));
+    try std.testing.expectEqual(@as(i32, 0), flag);
+    try std.testing.expect(!taken(&flag));
 }
 
 test "kv host shared pages: the last of the ranks to map the file takes its name away" {
