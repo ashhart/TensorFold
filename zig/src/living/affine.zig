@@ -30,6 +30,15 @@ pub fn dequantize(comptime q: Quant, words: []const u32, scales: []const u16, bi
 
 /// Codes, scales and biases for row-major values: a group's minimum is its bias, its range over the top code its scale.
 pub fn quantize(comptime q: Quant, values: []const f32, words: []u32, scales: []u16, biases: []u16) void {
+    encode(q, values, words, scales, biases, false);
+}
+
+/// Fit a new learned group to a grid whose endpoint codes are present before the ordinary writer sees it.
+pub fn quantizeFixed(comptime q: Quant, values: []const f32, words: []u32, scales: []u16, biases: []u16) void {
+    encode(q, values, words, scales, biases, true);
+}
+
+fn encode(comptime q: Quant, values: []const f32, words: []u32, scales: []u16, biases: []u16, comptime fixed: bool) void {
     comptime std.debug.assert(32 % q.bits == 0);
     const per = 32 / q.bits;
     const top: f32 = @floatFromInt((1 << q.bits) - 1);
@@ -38,12 +47,22 @@ pub fn quantize(comptime q: Quant, values: []const f32, words: []u32, scales: []
         const v = values[g * q.group ..][0..q.group];
         const lo = std.mem.min(f32, v);
         const hi = std.mem.max(f32, v);
-        scales[g] = bf16of((hi - lo) / top);
         biases[g] = bf16of(lo);
-        const s = f32of(scales[g]);
+        if (fixed and f32of(biases[g]) == 0) biases[g] = 0;
         const b = f32of(biases[g]);
+        // Use the stored bias for the range; near an exponent seam it can have a coarser f32 grid than lo.
+        const range = if (fixed) (if (lo == hi) 0 else @max(hi - b, 0)) else hi - lo;
+        scales[g] = bf16of(range / top);
+        const s = f32of(scales[g]);
         for (v, g * q.group..) |x, i| {
-            const c: u32 = if (s == 0) 0 else @intFromFloat(std.math.clamp(@round((x - b) / s), 0, top));
+            // A rounded bias can push every code away from an endpoint in a narrow group far from zero.
+            const invalid = fixed and (!std.math.isFinite(s) or !std.math.isFinite(b));
+            const c: u32 = if (s == 0 or invalid or (fixed and x == lo))
+                0
+            else if (fixed and x == hi)
+                @intFromFloat(top)
+            else
+                @intFromFloat(std.math.clamp(@round((x - b) / s), 0, top));
             words[i / per] |= c << @intCast(q.bits * (i % per));
         }
     }
