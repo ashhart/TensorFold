@@ -52,6 +52,36 @@ pub fn run(r: *Runner, store: *Store, slot: u32, ids: []const u32, chunk: u32, b
     return layerMajor(r, store, slot, ids, chunk, start, end);
 }
 
+/// One slot's block of a several-slot pass.
+pub const Block = struct { slot: u32, ids: []const u32 };
+/// The most blocks one pass takes.
+pub const max_blocks = 8;
+
+/// `blocks` in one frame-sized pass, each block-bidirectional over itself and its cache; `firsts[i]`: its first row.
+pub fn runMany(r: *Runner, blocks: []const Block, firsts: []u32) !void {
+    if (blocks.len < 2 or blocks.len > max_blocks or firsts.len < blocks.len) return error.BadPrompt;
+    if (r.model.ane != null or r.reduce != null or r.tail != null or r.capture_taps) return error.BlockUnsupported;
+    var inputs: [max_blocks]@import("round_plan.zig").Input = undefined;
+    var ends: [max_blocks]u32 = undefined;
+    var total: u32 = 0;
+    for (blocks, 0..) |b, i| {
+        const start = r.offsets[b.slot];
+        if (b.ids.len == 0 or b.ids.len > r.capacity - start) return error.BadPrompt;
+        inputs[i] = .{ .slot = b.slot, .start = start, .capacity = r.capacity, .ids = b.ids };
+        ends[i] = start + @as(u32, @intCast(b.ids.len));
+        firsts[i] = total;
+        total += @intCast(b.ids.len);
+    }
+    if (total > r.model.frame.capacity) return error.BadPrompt;
+    r.model.kernels.prompt = true;
+    defer r.model.kernels.prompt = false;
+    r.block_ends = ends[0..blocks.len];
+    defer r.block_ends = &.{};
+    var round = try Round.init(r.allocator, inputs[0..blocks.len], @intCast(r.model.config.conv_kernel), r.slots, @intCast(r.model.shard.global.vocab));
+    defer round.deinit();
+    try r.advance(&round, .none);
+}
+
 /// One chunk's plans, built once and replayed at every layer.
 const Piece = struct {
     round: Round,
@@ -175,8 +205,14 @@ fn pass(r: *Runner, store: *Store, p: *Piece, step: Step, index: usize, end: u32
 
 /// The last row of the frame's `.input` (rows `rows`) as float32: the final norm's output the readout reads.
 pub fn lastHidden(r: *const Runner, rows: u32, out: []f32) !void {
+    if (rows == 0) return error.BadReadout;
+    return hiddenRow(r, rows - 1, out);
+}
+
+/// Frame row `row` of `.input` as float32 (a several-slot pass: each block's last row).
+pub fn hiddenRow(r: *const Runner, row: u32, out: []f32) !void {
     const h = r.model.config.hidden;
-    if (rows == 0 or out.len != h) return error.BadReadout;
-    const words = r.model.frame.get(.input).buffer.slice(u16, @as(usize, rows) * h);
-    for (out, words[(rows - 1) * h ..][0..h]) |*o, bits| o.* = @bitCast(@as(u32, bits) << 16);
+    if (out.len != h or row >= r.model.frame.capacity) return error.BadReadout;
+    const words = r.model.frame.get(.input).buffer.slice(u16, (@as(usize, row) + 1) * h);
+    for (out, words[@as(usize, row) * h ..][0..h]) |*o, bits| o.* = @bitCast(@as(u32, bits) << 16);
 }
