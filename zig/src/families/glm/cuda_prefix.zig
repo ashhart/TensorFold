@@ -5,8 +5,19 @@ const kv = @import("core").kv_pool;
 const engine = @import("cuda_engine.zig");
 const pages_mod = @import("cuda_pages.zig");
 const page_rows = @import("cuda_state.zig").page_rows;
+const Stream = @import("lanes").Stream;
 
 const Engine = engine.Engine;
+
+/// Image passes require the server's content key; text without a key retains its token identity.
+pub fn cacheKey(s: *const Stream) ?[]const u32 {
+    if (s.key.len != 0) return if (s.key.len == s.prompt_len) s.key else null;
+    return if (s.images.len == 0) s.prompt() else null;
+}
+
+pub fn cacheable(s: *const Stream) bool {
+    return s.prompt_logprobs == null and !s.untaught and s.embedding == null and cacheKey(s) != null;
+}
 
 /// TF_GLM_KV_SHARE=n: keep prompts as pool pages and at most n states past them (0 or unset: off).
 pub fn sharing() !usize {
@@ -80,6 +91,16 @@ pub const Prefix = struct {
     /// Before a prompt pass: the deepest kept state's pages in `adopt` (held for the stream), the state in `owner`.
     pub fn begin(x: *Prefix, prompt: []const u32, history_len: u32, shared: []const u32, owner: *Owner, adopt: *std.ArrayList(u32)) !radix.Plan {
         return x.store.begin(x.gpa, prompt, history_len, shared, owner, adopt);
+    }
+
+    pub fn beginStream(x: *Prefix, s: *const Stream, owner: *Owner, adopt: *std.ArrayList(u32)) !radix.Plan {
+        return x.begin(cacheKey(s) orelse return error.ImageCacheKeyRequired, s.history_len, s.shared_prefixes, owner, adopt);
+    }
+
+    /// The same content key names lookup and every completed or interrupted keep.
+    pub fn marks(x: *Prefix, slot: u32, s: *const Stream, at: []const u32, keeps: *Keeps) ?engine.Marks {
+        keeps.* = .{ .x = x, .slot = slot, .prompt = cacheKey(s) orelse return null };
+        return if (at.len == 0) null else .{ .at = at, .ctx = keeps, .call = Keeps.at, .interrupted = Keeps.at };
     }
 
     /// Slot `slot`'s pass at mark `at`: the tree takes the pages below it it lacks, and the state (no table swaps).
