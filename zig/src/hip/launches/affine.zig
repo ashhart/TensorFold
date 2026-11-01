@@ -6,7 +6,6 @@ const runtime = @import("../runtime.zig");
 const hl = @import("../launch.zig");
 const Module = @import("../module.zig").Module;
 const Function = @import("../module.zig").Function;
-const Stream = @import("../stream.zig").Stream;
 const util = @import("util.zig");
 
 const Caps = @import("../caps.zig").Caps;
@@ -14,7 +13,6 @@ const registry = @import("core").registry;
 const quant = @import("core").quant;
 const tuning = @import("../tuning/tuning.zig");
 const mlx_entries = @import("mlx_entries.zig");
-
 const Error = runtime.Error;
 
 /// Matrix cores for products: `off` keeps every product on dot2 tiles; `auto` and `on` use them where a tile exists.
@@ -137,6 +135,7 @@ pub const Kernels = struct {
     block: [bit_widths.len]Function,
     gemm: [bit_widths.len]Function,
     wmma_gemm: [bit_widths.len]Function,
+    item: @import("matrix_item.zig").Functions,
     kp: [bit_widths.len][kp_tiles.len]Function,
     span: [2]Function,
     fold: Function,
@@ -175,6 +174,7 @@ pub const Kernels = struct {
         inline for (bit_widths, 0..) |bits, b| {
             k.block[b] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm17affine_dot2_blockINS0_{s}ELi{d}EEEvNS0_6AffineE", .{ dot, bits }));
             if (k.matrix) k.wmma_gemm[b] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm16affine_wmma_gemmILi{d}EEEvNS0_6AffineE", .{bits}));
+            if (k.matrix) k.item[b] = try @import("matrix_item.zig").load(m, bits);
             k.gemm[b] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm17affine_gemm_blockINS0_{s}ELi{d}E{s}EEvNS0_6AffineE", .{ dot, bits, shape }));
             inline for (kp_tiles, 0..) |t, i| {
                 k.kp[b][i] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm14affine_gemm_kpINS0_{s}ELi{d}ELi{d}ELi{d}ELi{d}ELi{d}ELb{d}EEEvNS0_6AffineE", .{ dot, bits, t.cb, t.r, t.waves, t.rb, @intFromBool(t.loop) }));
@@ -289,7 +289,8 @@ pub const Kernels = struct {
     pub fn tableFor(caps: Caps) *const tuning.Table {
         return switch (caps.generation) {
             .rdna2 => &tuning.gfx1030,
-            .rdna3, .rdna3_5 => &tuning.gfx1100,
+            .rdna3 => &tuning.gfx1100,
+            .rdna3_5 => &tuning.gfx1151,
             .rdna4 => &tuning.gfx1201,
         };
     }
