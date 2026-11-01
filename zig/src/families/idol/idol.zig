@@ -15,6 +15,7 @@ pub const decode = @import("decode.zig");
 pub const decode_reference = @import("decode_reference.zig");
 pub const Decoder = decoder.Decoder;
 pub const vae = @import("vae.zig");
+pub const vae_config = @import("vae_config.zig");
 pub const vae_kernels = @import("vae_kernels.zig");
 pub const vae_weights = @import("vae_weights.zig");
 /// Its DINOv3 ViT-H+/16 image encoder: an image to feature1.
@@ -48,6 +49,7 @@ test {
     _ = decode;
     _ = decode_reference;
     _ = vae;
+    _ = vae_config;
     _ = vae_kernels;
     _ = vae_weights;
     _ = dino;

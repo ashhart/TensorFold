@@ -237,6 +237,9 @@ Older SMs build main's loop, and their records are main's.
 CUDA also checks MOSS-Image's glue (`moss_image.cu`: the norm, plain and modulated; q/k norm and rotary into packed
 rows; situ; the gated add), each output within float64's range at its torch bf16 points (five controls, each dropping
 one point), and `vision_kernel` at head dim 128 against `contract_attn.zig`'s float64 reference (`moss-contract`).
+Idol's CUDA image encoder (`idol_vae.cu`, fp32) registers its implicit-GEMM convolutions, GroupNorm's passes, the
+attention's biases and softmax, and the condition rows against float64; eleven controls each build one body of
+`idol_vae.cuh` with a planted flaw (`idol-vae-contract`).
 
 ## CUDA records per nvcc release
 

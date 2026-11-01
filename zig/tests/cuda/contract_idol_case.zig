@@ -9,7 +9,7 @@ const c = r.c;
 const g = r.g;
 const bf16 = @import("core").contract.bf16_round;
 
-/// The kernels an Op launches: its own `Kernels` (DINOv3's), else the denoiser's.
+/// The kernels an Op launches: its own `Kernels` (another component's), else the denoiser's.
 pub fn KernelsOf(comptime Op: type) type {
     return if (@hasDecl(Op, "Kernels")) Op.Kernels else idol.Kernels;
 }

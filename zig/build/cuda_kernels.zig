@@ -106,6 +106,7 @@ pub const kernels = [_]Kernel{
     .{ .name = "minimax_m3_attn", .flags = glue }, // ours: MiniMax-M3.1-Flash's indexer and block-sparse attention
     .{ .name = "idol", .flags = glue }, // ours: Idol's denoiser glue and its fp16 head-64 attention
     .{ .name = "idol_dino", .flags = glue }, // ours: Idol's DINOv3 encoder glue and its bf16 head-64 attention
+    .{ .name = "idol_vae", .flags = glue }, // ours: Idol's fp32 image encoder (implicit-GEMM convs, GroupNorm, rows)
     .{ .name = "idol_birefnet", .flags = glue }, // ours: Idol's BiRefNet background remover in fp32
     .{ .name = "glm_quant", .flags = torch_ops }, // ours: GLM's draft-only weight quantizers, torch at load in the Python family
     .{ .name = "exl3_linear", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } }, // exl3/linear.cu's device code, tensorfold_exl3_linear_v5

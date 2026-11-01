@@ -74,6 +74,7 @@ pub const minimax_m3: []const u8 = if (available) &Blob("fatbin_minimax_m3").byt
 pub const minimax_m3_attn: []const u8 = if (available) &Blob("fatbin_minimax_m3_attn").bytes else &.{};
 pub const idol: []const u8 = if (available) &Blob("fatbin_idol").bytes else &.{};
 pub const idol_dino: []const u8 = if (available) &Blob("fatbin_idol_dino").bytes else &.{};
+pub const idol_vae: []const u8 = if (available) &Blob("fatbin_idol_vae").bytes else &.{};
 pub const idol_birefnet: []const u8 = if (available) &Blob("fatbin_idol_birefnet").bytes else &.{};
 pub const glm_quant: []const u8 = if (available) &Blob("fatbin_glm_quant").bytes else &.{};
 pub const glm_vision: []const u8 = if (available) &Blob("fatbin_glm_vision").bytes else &.{};

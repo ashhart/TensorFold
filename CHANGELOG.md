@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Idol's FLUX.2 VAE image encoder on CUDA, driven by the same `tf-idol-vae` case driver and float64 gate as on Metal: fp32 throughout on the SDK's bf16 weights, every convolution an fp32 implicit GEMM on the FMA units (no Winograd, no tensor cores, no TF32), two-pass GroupNorm, and the mid block's attention on cuBLASLt in true fp32 with its own softmax. The posterior's noise stays an input. It admits sm_121 (GB10) and sm_120 and refuses other GPUs. It compiles for both and its host tests pass, but it has never run on a GPU; GB10 qualification is pending (after #1774 and #1767, for #1757). Thanks to @jayleaton.
+
 - Idol's DINOv3 ViT-H+/16 image encoder on CUDA, beside the Metal encoder and driven by the same `tf-idol-dino` case driver and gates: cuBLASLt bf16 linears with fp32 sums, each bias and its one bf16 rounding in the step after, fp32 LayerNorm statistics, and the denoiser's head-64 attention instanced for bf16 (a new template instance; `idol.cu`'s source is unchanged). It admits sm_121 (GB10) and sm_120 and refuses other GPUs. It compiles for both and its host tests pass, but it has not yet run on a GPU (after #1775 and #1767, for #1757). Thanks to @jayleaton.
 
 - Idol's denoiser on CUDA, beside the Metal family and driven by the same `tf-idol` case driver and gates: cuBLASLt fp16 projections with fp32 sums, true fp32 (no TF32) for RePo, the condition and the output, and its own head-64 attention. It admits sm_121 (GB10) and sm_120 and refuses other GPUs. It compiles for both and its host tests pass, but it has not yet run on a GPU (#1767, after #1766, for #1757). Thanks to @jayleaton.

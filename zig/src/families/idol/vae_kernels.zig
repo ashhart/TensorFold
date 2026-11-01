@@ -3,15 +3,16 @@ const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
 pub const Ref = @import("../../core/qwen_vl/weights.zig").Ref;
+const cfg = @import("vae_config.zig");
 
 /// Each pipeline by its function.
 pub const names = [_][]const u8{ "iv_conv_in", "iv_conv", "iv_wino", "iv_norm", "iv_group_part", "iv_group_finish", "iv_attention", "iv_tokens" };
 
 /// GroupNorm's groups and epsilon, the pixels a statistics part sums, and the mid block's attention width.
-pub const groups = 32;
-pub const eps: f32 = 1e-6;
+pub const groups = cfg.groups;
+pub const eps = cfg.eps;
 pub const chunk = 256;
-pub const width = 512;
+pub const width = cfg.width;
 
 pub const Kernels = struct {
     lib: mtl.Library,
