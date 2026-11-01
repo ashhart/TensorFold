@@ -3,20 +3,19 @@ const std = @import("std");
 const mtl = @import("metal");
 const ks = @import("vae_kernels.zig");
 const wts = @import("vae_weights.zig");
-const ref = @import("reference.zig");
+const cfg = @import("vae_config.zig");
 const Ref = ks.Ref;
 
-/// The picture the encoder sees, its latent grid, and the condition rows: 5 zero rows, then a row a 2 x 2 patch.
-pub const size = 1024;
-pub const latent = size / 8;
-pub const pad = 5;
-pub const rows = pad + (latent / 2) * (latent / 2);
-pub const channels = 4 * wts.latent_channels;
+/// The picture the encoder sees, its latent grid, and the condition rows (vae_config.zig).
+pub const size = cfg.size;
+pub const latent = cfg.latent;
+pub const pad = cfg.pad;
+pub const rows = cfg.rows;
+pub const channels = cfg.channels;
 
 pub const Timing = struct { wall: f64, gpu: f64 };
 
-/// Where `encode` copies each stage's output when asked, [rows, columns, channels] fp32 (null: not wanted).
-pub const Stages = struct { down: [4]?[]f32 = @splat(null), mid: ?[]f32 = null, moments: ?[]f32 = null };
+pub const Stages = cfg.Stages;
 
 /// The widest picture tensor: the first stage's 1024 x 1024 x 128.
 const most = size * size * wts.widths[0];
@@ -186,48 +185,10 @@ fn floats(r: Ref, n: usize) []f32 {
     return @as([*]f32, @ptrCast(@alignCast(r.addr())))[0..n];
 }
 
-/// The encoder's gate against the float64 ruler: worst row and 1 - cosine within twice the SDK's own, rows of 128.
-pub const Verdict = struct { ours: ref.Match, sdk: ref.Match, pass: bool };
+/// The encoder's gate against the float64 ruler (vae_config.zig).
+pub const Verdict = cfg.Verdict;
+pub const gate = cfg.gate;
 
-pub fn gate(ours: []const f32, sdk: []const f32, ruler: []const f32) Verdict {
-    const o = ref.match(ours[pad * channels ..], ruler[pad * channels ..], channels);
-    const s = ref.match(sdk[pad * channels ..], ruler[pad * channels ..], channels);
-    const zeros = for (ours[0 .. pad * channels]) |z| {
-        if (z != 0) break false;
-    } else true;
-    return .{ .ours = o, .sdk = s, .pass = zeros and ref.within(o, s) };
-}
-
-test "the encoder's scratch fits a GPU buffer and the rows are the denoiser's condition rows" {
-    try std.testing.expectEqual(@as(usize, 4101), rows);
-    try std.testing.expectEqual(@as(usize, 128), channels);
+test "the encoder's scratch fits a GPU buffer" {
     try std.testing.expect(4 * most * 4 < 1 << 33);
-}
-
-test "a planted mismatch in one condition row fails the encoder's gate, as does a padding row not zero" {
-    const a = std.testing.allocator;
-    const n = rows * channels;
-    const ruler = try a.alloc(f32, n);
-    defer a.free(ruler);
-    const sdk = try a.alloc(f32, n);
-    defer a.free(sdk);
-    const ours = try a.alloc(f32, n);
-    defer a.free(ours);
-    var rng = std.Random.DefaultPrng.init(11);
-    for (ruler, sdk, ours, 0..) |*r, *s, *o, i| {
-        const z = i < pad * channels;
-        r.* = if (z) 0 else rng.random().floatNorm(f32);
-        s.* = r.* * (1 + 4e-3 * rng.random().floatNorm(f32));
-        o.* = r.* * (1 + 1e-6 * rng.random().floatNorm(f32));
-    }
-    try std.testing.expect(gate(ours, sdk, ruler).pass);
-    const row = 2000;
-    for (ours[row * channels ..][0..channels]) |*o| o.* *= 1.02;
-    const v = gate(ours, sdk, ruler);
-    try std.testing.expect(!v.pass);
-    try std.testing.expect(v.ours.worst_row > 0.019);
-    for (ours[row * channels ..][0..channels], ruler[row * channels ..][0..channels]) |*o, r| o.* = r;
-    try std.testing.expect(gate(ours, sdk, ruler).pass);
-    ours[3 * channels + 7] = 1e-3;
-    try std.testing.expect(!gate(ours, sdk, ruler).pass);
 }

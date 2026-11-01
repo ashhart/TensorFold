@@ -8,13 +8,18 @@ const r = @import("contract_idol_ref.zig");
 const c = r.c;
 const g = r.g;
 
+/// The kernels an Op launches: its own `Kernels` (the image encoder's), else the denoiser's.
+pub fn KernelsOf(comptime Op: type) type {
+    return if (@hasDecl(Op, "Kernels")) Op.Kernels else idol.Kernels;
+}
+
 /// The gates' hooks over an Op: its kinds, out, in_place (input the output starts as), spec, sizes, fill, launch, ref.
 pub fn Case(comptime Op: type) type {
     const n = Op.kinds.len;
     return struct {
         const Self = @This();
         rig: rig_.Rig,
-        k: idol.Kernels,
+        k: KernelsOf(Op),
         name: []const u8,
         /// The Op's own form (a norm's mode, the bias's GELU), passed to each of its functions.
         variant: u32 = 0,
@@ -130,6 +135,6 @@ pub fn Case(comptime Op: type) type {
 }
 
 /// The usual registration of a test: its rig on the stream, the kernels (or a control's copy), name and form.
-pub fn make(comptime Op: type, rig: rig_.Rig, k: idol.Kernels, name: []const u8, variant: u32, control: ?g.Gate) Case(Op) {
+pub fn make(comptime Op: type, rig: rig_.Rig, k: KernelsOf(Op), name: []const u8, variant: u32, control: ?g.Gate) Case(Op) {
     return .{ .rig = rig, .k = k, .name = name, .variant = variant, .control = control, .ends = .{ .a = rig.gpu.gpa } };
 }

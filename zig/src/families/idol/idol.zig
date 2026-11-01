@@ -6,6 +6,7 @@ pub const kernels = @import("kernels.zig");
 pub const model = @import("model.zig");
 pub const reference = @import("reference.zig");
 pub const vae = @import("vae.zig");
+pub const vae_config = @import("vae_config.zig");
 pub const vae_kernels = @import("vae_kernels.zig");
 pub const vae_weights = @import("vae_weights.zig");
 pub const Model = model.Model;
@@ -20,6 +21,7 @@ test {
     _ = model;
     _ = reference;
     _ = vae;
+    _ = vae_config;
     _ = vae_kernels;
     _ = vae_weights;
 }
