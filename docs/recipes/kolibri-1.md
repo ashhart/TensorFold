@@ -48,6 +48,11 @@ rounds run eager. Both give a row the same bits.
 - Refused at load: other quantizations, `norm_topk_prob`, other layer kinds, a config with a vision tower, shapes the
   shared kernels do not take, `--vision`, `--precision` and a captured kernel set (`TENSORFOLD_CUDA_KERNELS`).
 
+`TF_KV_SHARE=N` selects the experimental shared prompt store, with at most N kept states; unset or zero keeps the
+existing linear-cache path. Full-layer K/V is held as core-pool pages, while each snapshot keeps the sliding layers'
+last 512 K/V rows in pages of the same pool. Shared keeps and resumes use 256-token page edges. Copy drafts use
+the existing lane core; this does not add EAGLE-3 or a draft head. The new paged prompt kernels and complete shared-cache checkpoint path still require CUDA qualification.
+
 ## Checks
 
 ```bash

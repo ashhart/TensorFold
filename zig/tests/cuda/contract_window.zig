@@ -14,9 +14,12 @@ const wa = cuda.window_attention;
 const split_why = "a score's absolute rounding error is its weight's relative error: gates 1 and 3 hold outputs to attention_ref's bound";
 
 /// A decode or prompt call's fixed heads, window and ring (the variant), and which kernels it runs.
-pub const Cfg = struct { name: []const u8, h: usize, hk: usize, d: usize, win: usize, ring: usize, streams: usize = 1, prompt: bool = false, served: []const c.Shape };
+pub const Cfg = struct { name: []const u8, h: usize, hk: usize, d: usize, win: usize, ring: usize, streams: usize = 1, prompt: bool = false, pages: usize = 0, swap: bool = false, served: []const c.Shape };
 
 pub const cfgs = [_]Cfg{
+    .{ .name = "cuda window prompt 128 h4 over shuffled pages, same bytes as linear", .h = 48, .hk = 4, .d = 128, .win = 0, .ring = 0, .prompt = true, .pages = 256, .served = &.{ .{ .rows = 128, .n = 48, .k = 0 }, .{ .rows = 96, .n = 48, .k = 8177 }, .{ .rows = 31, .n = 48, .k = 513 } } },
+    .{ .name = "cuda window prompt 128 h8 over shuffled pages, same bytes as linear", .h = 16, .hk = 2, .d = 128, .win = 0, .ring = 0, .prompt = true, .pages = 256, .served = &.{ .{ .rows = 64, .n = 16, .k = 100 }, .{ .rows = 48, .n = 16, .k = 511 } } },
+    .{ .name = "control: window prompt 128 reads an unheld page", .h = 48, .hk = 4, .d = 128, .win = 0, .ring = 0, .prompt = true, .pages = 256, .swap = true, .served = &.{.{ .rows = 64, .n = 48, .k = 513 }} },
     // Kolibri's sliding layers (48 heads over 4, window 513): decode on tensor cores, prompt rows 4 heads a block
     .{ .name = "cuda window decode tf_window_decode_tc, 48/4 heads, window 513, ring 640", .h = 48, .hk = 4, .d = 128, .win = 513, .ring = 640, .streams = 2, .served = &.{ .{ .rows = 16, .n = 48, .k = 3000 }, .{ .rows = 64, .n = 48, .k = 1000 } } },
     .{ .name = "cuda window decode tf_window_decode_tc, 16/1 heads, no window, ring 300", .h = 16, .hk = 1, .d = 128, .win = 0, .ring = 300, .served = &.{.{ .rows = 16, .n = 16, .k = 300 }} },
@@ -60,6 +63,10 @@ pub const Window = struct {
     dev: [5]u64 = @splat(0),
     scratch: u64 = 0,
     out: u64 = 0,
+    pg: ?wa.Pages = null,
+    paged_k: u64 = 0,
+    paged_v: u64 = 0,
+    plain: u64 = 0,
 
     pub fn deinit(self: *Window) void {
         const a = self.rig.gpu.gpa;
@@ -69,7 +76,7 @@ pub const Window = struct {
     }
 
     pub fn kernel(self: *Window) g.Kernel {
-        return .{ .spec = spec(self.f), .ctx = self, .vt = &vt };
+        return .{ .spec = spec(self.f), .ctx = self, .vt = &vt, .control = if (self.f.swap) .shapes else null };
     }
 
     const vt = g.hooks(Window);
@@ -133,8 +140,36 @@ pub const Window = struct {
         }
         for ([_][]const u8{ std.mem.sliceAsBytes(self.q.items), std.mem.sliceAsBytes(self.kc.items), std.mem.sliceAsBytes(self.vc.items), std.mem.sliceAsBytes(self.pos.items), std.mem.sliceAsBytes(self.slot.items) }, &self.dev) |bytes, *p| p.* = try self.rig.input(bytes);
         self.scratch = if (f.prompt) 0 else try self.rig.scratch(wa.WindowAttention.scratchBytes(self.win(), n));
+        self.pg = null;
+        if (f.pages > 0) try self.place(rng);
         self.out = try self.rig.output(n * f.h * f.d * 2);
+        if (f.pages > 0) self.plain = try self.rig.scratch(n * f.h * f.d * 2);
         return true;
+    }
+
+    fn place(self: *Window, rng: std.Random) !void {
+        const a = self.rig.gpu.gpa;
+        const row = self.f.hk * self.f.d;
+        const tok = self.f.pages;
+        const n = self.kc.items.len / row;
+        const per = (n + tok - 1) / tok;
+        const ids = try a.alloc(u32, per + 1);
+        defer a.free(ids);
+        for (ids, 0..) |*id, i| id.* = @intCast(i);
+        rng.shuffle(u32, ids);
+        const pool = try a.alloc(u16, (per + 1) * tok * row);
+        defer a.free(pool);
+        for ([_][]const u16{ self.kc.items, self.vc.items }, 0..) |src, part| {
+            @memset(pool, c.toBf16(std.math.nan(f32)));
+            for (0..n) |i| {
+                const dst = (@as(usize, ids[i / tok]) * tok + i % tok) * row;
+                @memcpy(pool[dst..][0..row], src[i * row ..][0..row]);
+            }
+            const ptr = try self.rig.input(std.mem.sliceAsBytes(pool));
+            if (part == 0) self.paged_k = ptr else self.paged_v = ptr;
+        }
+        if (self.f.swap) ids[0] = ids[per];
+        self.pg = .{ .table = try self.rig.input(std.mem.sliceAsBytes(ids[0..per])), .page_elems = tok * row, .tokens = tok, .stride = per };
     }
 
     fn cell(self: *Window, x: []u16, r: usize, key: usize, kh: usize, e: usize) *u16 {
@@ -226,7 +261,12 @@ pub const Window = struct {
     pub fn run(self: *Window) !void {
         const n = self.shape.rows;
         if (self.f.prompt) {
-            try self.g.prompt(self.rig.s, self.dev[0], self.dev[1], self.dev[2], self.out, self.shape.k, n, self.win());
+            if (self.pg) |pg| {
+                var w = self.win();
+                w.pg = pg;
+                try self.g.prompt(self.rig.s, self.dev[0], self.paged_k, self.paged_v, self.out, self.shape.k, n, w);
+                try self.g.prompt(self.rig.s, self.dev[0], self.dev[1], self.dev[2], self.plain, self.shape.k, n, self.win());
+            } else try self.g.prompt(self.rig.s, self.dev[0], self.dev[1], self.dev[2], self.out, self.shape.k, n, self.win());
         } else try self.g.decode(self.rig.s, self.dev[0], self.dev[1], self.dev[2], self.out, self.dev[3], self.dev[4], self.win(), self.scratch, n);
         try self.rig.s.synchronize();
     }
@@ -262,7 +302,12 @@ pub const Window = struct {
     }
 
     pub fn check(self: *Window, gate: g.Gate) !?[]const u8 {
-        return self.r.?.check(self, self.heads(), self.scale(), try self.rig.outputBytes(), gate);
+        const got = try self.rig.outputBytes();
+        if (self.pg != null) {
+            const plain = try self.rig.bytes(self.plain, got.len);
+            if (!std.mem.eql(u8, got, plain)) return "paged prompt differs from its original linear kernel";
+        }
+        return self.r.?.check(self, self.heads(), self.scale(), got, gate);
     }
 
     pub fn reference(self: *Window, want: []f64, mag: []f64) !void {

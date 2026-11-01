@@ -9,6 +9,7 @@ pub fn host(b: *std.Build, m: *std.Build.Module, api: *std.Build.Module, all: *s
     const run = b.addRunArtifact(b.addTest(.{ .root_module = m }));
     b.step("test-kolibri-host", "Kolibri config, ownership and copy-draft metadata without a GPU").dependOn(&run.step);
     all.dependOn(&run.step);
+    @import("kolibri_shared_host.zig").host(b, m.import_table.get("cuda").?, m.import_table.get("core").?, m.import_table.get("lanes").?, api, m, all);
     b.step("test-kolibri-context-host", "Logical Kolibri context and physical verification reserve").dependOn(
         &b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"Kolibri context:"} })).step,
     );

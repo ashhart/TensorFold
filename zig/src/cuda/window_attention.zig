@@ -10,7 +10,7 @@ const Module = module.Module;
 const Function = module.Function;
 const Stream = stream_.Stream;
 
-/// A Window's `pg` (win 0, head dims 256, 512): caches name a layer in page 0; `table` rows of ids, `stride` a slot.
+/// Global cache pages: layer K/V in page 0, table rows of IDs, stride a stream (head dims 128, 256, 512).
 pub const Pages = struct { table: u64, page_elems: usize, tokens: usize, stride: usize = 0 };
 
 /// A row's heads and keys (pos - win, pos] (win 0: all) at cache row slot * ring + key % ring; p32: wide P in halves.
@@ -22,22 +22,22 @@ pub const page_unit = chunk_keys;
 /// Keys a prompt tile (window_rows.cuh's BN): a paged tile takes one page base, so prompt pages hold whole tiles.
 pub const prompt_tile = 32;
 
-/// Pages any paged kernel reads or `put` writes: no window, a wide head dim, a position count, i64 page steps.
+/// Pages any paged kernel reads or `put` writes: no window, a served head dim, a position count, i64 page steps.
 fn pageShape(w: Window) bool {
     const p = w.pg orelse return true;
-    return w.win == 0 and wide(w.d) and p.tokens > 0 and p.page_elems <= std.math.maxInt(i63);
+    return w.win == 0 and (w.d == 128 or wide(w.d)) and p.tokens > 0 and p.page_elems <= std.math.maxInt(i63);
 }
 
 /// Head dim 256 decode pages hold whole chunks; 512's decode looks up each key's page (prompt rows: promptShape).
 fn pagedShape(w: Window) bool {
     const p = w.pg orelse return true;
-    return pageShape(w) and (w.d != 256 or p.tokens % page_unit == 0);
+    return wide(w.d) and pageShape(w) and (w.d != 256 or p.tokens % page_unit == 0);
 }
 
 /// Prompt rows at either head dim: a 32-key tile takes one page base, so pages hold whole tiles (prompt_tile).
 fn promptShape(w: Window) bool {
     const p = w.pg orelse return true;
-    return pageShape(w) and p.tokens % prompt_tile == 0;
+    return wide(w.d) and pageShape(w) and p.tokens % prompt_tile == 0;
 }
 
 /// Head dims window_rows.cu serves, with any query heads a key head up to 16.
@@ -69,6 +69,7 @@ pub const WindowAttention = struct {
     tc_fn: Function,
     prompt_fns: [2]Function, // 4, then 8 query heads a block
     rows: Module, // window_rows.cu
+    prompt_pages128: [2]?Function = .{ null, null },
     pages: ?Module = null, // window_pages.cu (loadPages): window_rows.cuh over paged caches
     put_fn: ?Function = null, // tf_wrows_put: rows into paged caches
     wide_fns: [rows_smem.len]Wide,
@@ -103,7 +104,7 @@ pub const WindowAttention = struct {
         }, .prompt_fns = p, .rows = rows, .wide_fns = wf };
     }
 
-    /// Loads window_pages.cu: decode, prompt rows (bf16 P and P32) and `put` over caches in pages (head dims 256, 512).
+    /// Page functions: 128-dimensional prompt rows, wide decode/prompt rows, and the shared cache writer.
     pub fn loadPages(g: *WindowAttention, d: *const Driver) !void {
         if (g.pages != null) return;
         var pages = try Module.load(d, kernels.window_pages);
@@ -113,6 +114,8 @@ pub const WindowAttention = struct {
         const p512: Paged = .{ .part = try pages.function("tf_wrows_part_512_pg"), .merge = try pages.function("tf_wrows_merge_512_pg"), .prompt = .{ try pages.function("tf_wrows_prompt_512_pg"), try pages.function("tf_wrows_prompt_512_p32_pg") } };
         try p512.part.allowDynamicShared(staged_smem);
         for (p512.prompt) |pf| try pf.?.allowDynamicShared(rows_smem[1]);
+        g.prompt_pages128 = .{ try g.mod.function("tf_window_prompt_128_h4_pg"), try g.mod.function("tf_window_prompt_128_h8_pg") };
+        for (g.prompt_pages128) |pf| try pf.?.allowDynamicShared(prompt_smem);
         g.put_fn = try pages.function("tf_wrows_put");
         g.wide_fns[0].paged = p;
         g.wide_fns[1].paged = p512;
@@ -157,6 +160,7 @@ pub const WindowAttention = struct {
 
     /// n rows q [n, h, d] at pos/slot (int32 [n]) -> out [n, h, d]; `scratch`: scratchBytes(w, n) (d != 128).
     pub fn decode(g: *const WindowAttention, s: Stream, q: u64, kc: u64, vc: u64, out: u64, pos: u64, slot: ?u64, w: Window, scratch: u64, n: usize) !void {
+        if (w.d == 128 and w.pg != null) return error.WindowShape;
         if (wide(w.d)) return decodeWith(g.wideFns(w.d), s, q, kc, vc, out, pos, slot, w, scratch, n);
         if (w.hk == 0 or w.h % w.hk != 0 or w.h / w.hk > 16 or w.d > 128 or w.ring == 0) return error.WindowShape;
         if (w.win == 0 and w.ring > 4096) return error.WindowShape; // an unwindowed row's tiles come from the ring
@@ -262,9 +266,15 @@ pub const WindowAttention = struct {
         a.add(w.scale);
         a.add(@as(i32, @intCast(w.win)));
         a.add(@as(i32, @intCast(w.ring)));
+        if (w.pg != null) {
+            if (w.win != 0 or !pageShape(w)) return error.WindowShape;
+            addPages(&a, w.pg.?, false);
+        }
         const rows = 16 * (8 / hpc);
         const cfg: launch_.Config = .{ .grid = .{ .x = @intCast((n + rows - 1) / rows), .y = @intCast(w.hk * (grp / hpc)), .z = 1 }, .block = .{ .x = 256 }, .shared = prompt_smem };
-        try launch_.launch(g.prompt_fns[if (hpc == 8) 1 else 0], cfg, s, &a);
+        const which: usize = if (hpc == 8) 1 else 0;
+        const fun = if (w.pg != null) g.prompt_pages128[which] orelse return error.WindowShape else g.prompt_fns[which];
+        try launch_.launch(fun, cfg, s, &a);
     }
 
     /// Wide prompt rows, G up to 16; row i's last key hi[i] (int32, in [p0 + i, p0 + n)) or its position (null).

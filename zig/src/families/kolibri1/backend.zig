@@ -6,6 +6,7 @@ const fwd = @import("forward.zig");
 const kern = @import("kernels.zig");
 const snap = @import("snap.zig");
 const limits = @import("context.zig");
+pub const shared = @import("shared.zig");
 
 const be = lanes.backend;
 const Stream = lanes.Stream;
@@ -21,6 +22,10 @@ const ring = 1024;
 
 const Lane = struct {
     slot: usize,
+    lease: @import("core").kv_pool.Lease = .{},
+    marks: []const u32 = &.{},
+    shared: bool = false,
+    kept: u32 = 0,
     len: u64 = 0, // the cache length: positions [0, len) hold this stream's keys
     base: u64 = 0, // the cache length the last verify started from
     rows: std.ArrayList(u32) = .empty, // the last verify's row tokens
@@ -44,6 +49,10 @@ pub const Kolibri = struct {
     meta: cuda.DeviceBuffer, // a draw's first position minus one, a window each
     slot_bufs: []cuda.DeviceBuffer, // a slot's last-row logits, then its rule: two a slot
     next: u64 = 0,
+    pool: ?@import("core").kv_pool.Pool = null,
+    prompts: ?@import("core").kv_prompts.Prompts = null,
+    restore_slot: ?usize = null,
+    restored_at: u32 = 0,
     steps: []?fwd.Model.Step, // a slot's one-row step, captured at its first use (null: not yet)
     graphed: bool, // TENSORFOLD_KOLIBRI_GRAPHS=0 runs every step eager
 
@@ -54,7 +63,8 @@ pub const Kolibri = struct {
 
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, m: *fwd.Model, k: *const kern.Kernels, s: cuda.Stream) !Kolibri {
         const v = m.c.vocab;
-        const free = try gpa.alloc(bool, m.slots);
+        const slots = if (m.paged) round_rows else m.slots;
+        const free = try gpa.alloc(bool, slots);
         errdefer gpa.free(free);
         @memset(free, true);
         var logits = try cuda.DeviceBuffer.alloc(d, round_rows * v * 4);
@@ -65,7 +75,7 @@ pub const Kolibri = struct {
         errdefer tok.free();
         var meta = try cuda.DeviceBuffer.alloc(d, round_rows * 16);
         errdefer meta.free();
-        const bufs = try gpa.alloc(cuda.DeviceBuffer, 2 * m.slots);
+        const bufs = try gpa.alloc(cuda.DeviceBuffer, 2 * slots);
         errdefer gpa.free(bufs);
         var made: usize = 0;
         errdefer for (bufs[0..made]) |*b| b.free();
@@ -73,24 +83,36 @@ pub const Kolibri = struct {
             b.* = try cuda.DeviceBuffer.alloc(d, if (i % 2 == 0) v * 4 else @sizeOf(cuda.sample.Rule));
             made += 1;
         }
-        const steps = try gpa.alloc(?fwd.Model.Step, m.slots);
+        const steps = try gpa.alloc(?fwd.Model.Step, slots);
         @memset(steps, null);
         return .{ .gpa = gpa, .d = d, .m = m, .k = k, .s = s, .free = free, .logits = logits, .logits16 = logits16, .tok = tok, .meta = meta, .slot_bufs = bufs, .steps = steps, .graphed = !envOff("TENSORFOLD_KOLIBRI_GRAPHS") };
     }
 
     pub fn deinit(x: *Kolibri) void {
         var it = x.lanes.valueIterator();
-        while (it.next()) |l| l.rows.deinit(x.gpa);
+        while (it.next()) |l| {
+            if (x.pool) |*p| p.finish(&l.lease);
+            x.gpa.free(l.marks);
+            l.rows.deinit(x.gpa);
+        }
+        if (x.pool) |*p| p.deinit();
         x.lanes.deinit(x.gpa);
         for (x.slot_bufs) |*b| b.free();
         x.gpa.free(x.slot_bufs);
-        for (x.steps) |*g| if (g.*) |*e| e.exec.deinit();
+        x.dropGraphs();
         x.gpa.free(x.steps);
         x.gpa.free(x.free);
         x.logits.free();
         x.logits16.free();
         x.tok.free();
         x.meta.free();
+    }
+
+    pub fn dropGraphs(x: *Kolibri) void {
+        for (x.steps) |*g| if (g.*) |*e| {
+            e.exec.deinit();
+            g.* = null;
+        };
     }
 
     pub fn backend(x: *Kolibri) be.Backend {
@@ -101,7 +123,7 @@ pub const Kolibri = struct {
 
     /// The round loop's facts: no draft head; host copies verified in windows up to 16 rows, streams sharing a forward.
     pub fn facts(x: *const Kolibri) lanes.Model {
-        return .{ .exact_width = max_window, .gpu_tokens = false, .mtp = false, .speculate = false, .hidden_rows = true, .batch_rows = round_rows, .max_streams = @intCast(@min(x.m.slots, round_rows)) };
+        return .{ .exact_width = max_window, .gpu_tokens = false, .mtp = false, .speculate = false, .hidden_rows = true, .batch_rows = round_rows, .max_streams = @intCast(@min(if (x.m.paged) round_rows else x.m.slots, round_rows)) };
     }
 
     fn envOff(name: [*:0]const u8) bool {
@@ -117,7 +139,7 @@ pub const Kolibri = struct {
         return .{ .k = x.k, .s = x.s };
     }
 
-    fn upload(x: *Kolibri, dst: u64, bytes: []const u8) !void {
+    pub fn upload(x: *Kolibri, dst: u64, bytes: []const u8) !void {
         try x.d.check(x.d.api.cuMemcpyHtoDAsync_v2(dst, bytes.ptr, bytes.len, x.s.handle), "cuMemcpyHtoDAsync");
     }
 
@@ -139,11 +161,12 @@ pub const Kolibri = struct {
         const s: *const Stream = @ptrCast(@alignCast(owner orelse return error.NoOwner));
         const l = x.lanes.getPtr(s) orelse return error.UnknownStream;
         if ((l.fill orelse l.len) != at) return error.NotAtMark; // a state is copied only where the pass stands
-        return snap.save(x.gpa, x.m, x.s, l.slot, at);
+        return if (x.prompts != null) shared.save(x, l.slot, at) else snap.save(x.gpa, x.m, x.s, l.slot, at);
     }
 
     /// The stream's slot made to hold `k`'s state (a restore outside its prompt pass).
     pub fn restoreState(x: *Kolibri, owner: ?*anyopaque, k: *const snap.Saved) !void {
+        if (x.prompts != null) return shared.restore(x, k);
         const s: *const Stream = @ptrCast(@alignCast(owner orelse return error.NoOwner));
         const l = x.lanes.getPtr(s) orelse return error.UnknownStream;
         try snap.restore(x.m, x.s, l.slot, k);
@@ -151,7 +174,7 @@ pub const Kolibri = struct {
     }
 
     pub fn dropState(x: *Kolibri, k: *snap.Saved) void {
-        snap.drop(x.gpa, x.s, k);
+        shared.drop(x, k);
     }
 
     /// The lowest free slot.
@@ -160,34 +183,12 @@ pub const Kolibri = struct {
     }
 
     /// A prompt pass begins: a slot, the stream's rule, a kept state restored; where its first chunk starts.
-    fn opening(x: *Kolibri, s: *Stream) !*Lane {
-        const p = s.prompt();
-        if (p.len == 0) return error.EmptyPrompt;
-        if (!limits.fits(x.m.context, p.len, @as(usize, s.max_new))) return error.PastContext;
-        const got = try x.lanes.getOrPut(x.gpa, s);
-        if (!got.found_existing) {
-            const slot = x.freeSlot() orelse {
-                x.lanes.removeByPtr(got.key_ptr);
-                return error.NoFreeSlot;
-            };
-            x.free[slot] = false;
-            got.value_ptr.* = .{ .slot = slot, .last = x.slot_bufs[2 * slot].ptr, .rule = x.slot_bufs[2 * slot + 1].ptr };
-        }
-        const l = got.value_ptr;
-        l.sampled = false;
-        if (s.sampling) |sp| if (sp.temperature > 0) {
-            const r = cuda.sample.Rule.from(lanes.gpu_rule.rule(sp));
-            try x.upload(l.rule, std.mem.asBytes(&r));
-            l.sampled = true;
-        };
-        s.cached = 0;
-        l.fill = x.resumeAt(s, l, p.len);
-        s.fill_at.store(@intCast(l.fill.?), .monotonic);
-        return l;
+    pub fn opening(x: *Kolibri, s: *Stream) !*Lane {
+        return if (x.pool != null) shared.opening(Lane, x, s) else shared.legacyOpening(Lane, x, s);
     }
 
     /// The kept state's position, restored into the slot (0: none, or not this prompt's); any row resumes exactly.
-    fn resumeAt(x: *Kolibri, s: *Stream, l: *const Lane, len: usize) usize {
+    pub fn resumeAt(x: *Kolibri, s: *Stream, l: *const Lane, len: usize) usize {
         const saved = s.reuse.saved orelse return 0;
         const k: *const snap.Saved = @ptrCast(@alignCast(saved));
         if (k.at != s.reuse.at or k.at == 0 or k.at >= len) {
@@ -211,7 +212,7 @@ pub const Kolibri = struct {
             return error.Cancelled;
         }
         var end = @min(p.len, (at / prompt_rows + 1) * prompt_rows);
-        for (s.reuse.marks) |mk| if (mk > at and mk < end) {
+        for (if (l.shared) l.marks else s.reuse.marks) |mk| if (mk > at and mk < end) {
             end = mk;
         };
         try x.m.forward(x.ops(), &.{.{ .slot = l.slot, .p0 = at, .tokens = p[at..end] }}, true, null, l.last);
@@ -219,8 +220,16 @@ pub const Kolibri = struct {
         const done = end == p.len;
         l.fill = if (done) null else end;
         if (done) l.len = p.len;
-        if (s.reuse.hook) |hk| if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(end)) != null) hk.at(hk.ptr, s, @intCast(end));
+        x.marked(s, end);
         return done;
+    }
+
+    pub fn marked(x: *Kolibri, s: *Stream, at: usize) void {
+        if (x.lanes.getPtr(s)) |l| if (l.shared) {
+            shared.marked(x, s, l, at) catch |err| std.log.warn("kolibri1: prompt pages not kept: {s}", .{@errorName(err)});
+            return;
+        };
+        if (s.reuse.hook) |hk| if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(at)) != null) hk.at(hk.ptr, s, @intCast(at));
     }
 
     fn prefill(ptr: *anyopaque, s: *Stream) anyerror!void {
@@ -270,6 +279,7 @@ pub const Kolibri = struct {
         const l = x.lanes.getPtr(s) orelse return error.UnknownStream;
         const t = try x.value(feed);
         if (position != l.len + 1) return error.PositionMismatch;
+        try shared.reach(x, l, l.len + 1);
         const logits = try x.step(l, t);
         l.len += 1;
         const h = x.next;
@@ -314,6 +324,7 @@ pub const Kolibri = struct {
             try l.rows.append(x.gpa, w.pending);
             try l.rows.appendSlice(x.gpa, w.tokens);
             for (w.positions, 0..) |pos, r| if (pos != l.base + r + 1) return error.PositionMismatch;
+            try shared.reach(x, l, l.base + l.rows.items.len);
             c.* = .{ .slot = l.slot, .p0 = l.base, .tokens = l.rows.items };
             total += l.rows.items.len;
         }
@@ -367,6 +378,9 @@ pub const Kolibri = struct {
         if (x.lanes.fetchRemove(s)) |kv| {
             var l = kv.value;
             x.free[l.slot] = true;
+            if (x.pool) |*p| p.finish(&l.lease);
+            if (x.m.paged) x.m.caps[l.slot] = 0;
+            x.gpa.free(l.marks);
             l.rows.deinit(x.gpa);
         }
     }

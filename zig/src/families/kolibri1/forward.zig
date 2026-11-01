@@ -5,6 +5,7 @@ const Config = @import("config.zig").Config;
 const wts = @import("weights.zig");
 const kern = @import("kernels.zig");
 const tree = @import("tree.zig");
+pub const pages = @import("pages.zig");
 
 const DeviceBuffer = cuda.DeviceBuffer;
 const grouped = cuda.grouped;
@@ -37,6 +38,12 @@ pub const Model = struct {
     groups: usize, // tree attention's key groups at the context and a full chain
     k: []u64, // per layer: the cache [slots, len, HK, D] bf16 (len: context for full layers, the ring for sliding)
     v: []u64,
+    paged: bool = false,
+    pages: usize = 0,
+    table: u64 = 0,
+    tree_table: u64 = 0,
+    ids: []u32 = &.{},
+    caps: []usize = &.{},
     norms: []u64, // per layer: q_norm then k_norm, fp32 [2, D]
     cos: u64,
     sin: u64,
@@ -47,7 +54,7 @@ pub const Model = struct {
 
     const Scratch = struct { ids: u64, pos: u64, slot: u64, res: u64, x: u64, qkv: u64, q: u64, kn: u64, vn: u64, att: u64, o: u64, part: u64, logits_e: u64, pick: u64, wts: u64, plan: grouped.Plan, act: u64, y: u64, mo: u64, flat: u64, paths: u64, depths: u64, offs: u64, sel: u64, win: u64, tree: u64 };
 
-    fn alloc(m: *Model, bytes: usize) !u64 {
+    pub fn alloc(m: *Model, bytes: usize) !u64 {
         if (m.planned) |*p| {
             p.* += @max(bytes, 256);
             return 0;
@@ -61,7 +68,7 @@ pub const Model = struct {
         return b.ptr;
     }
 
-    fn zeros(m: *Model, s: cuda.Stream, bytes: usize) !u64 {
+    pub fn zeros(m: *Model, s: cuda.Stream, bytes: usize) !u64 {
         const p = try m.alloc(bytes);
         if (m.planned != null) return p;
         try m.d.check(m.d.api.cuMemsetD8Async(p, 0, @max(bytes, 256), s.handle), "cuMemsetD8Async");
@@ -77,7 +84,12 @@ pub const Model = struct {
 
     /// Caches for `slots` streams of `context` positions, RoPE tables, and scratch for `max_rows` rows a forward.
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, s: cuda.Stream, w: *const wts.Weights, k: *const kern.Kernels, context: usize, slots: usize, max_rows: usize) !Model {
-        var m = blank(gpa, d, w, context, slots, max_rows);
+        return initPaged(gpa, d, s, w, k, context, slots, max_rows, false);
+    }
+
+    pub fn initPaged(gpa: std.mem.Allocator, d: *const cuda.Driver, s: cuda.Stream, w: *const wts.Weights, k: *const kern.Kernels, context: usize, slots: usize, max_rows: usize, paged: bool) !Model {
+        var m = blank(gpa, d, w, context, if (paged) 1 else slots, max_rows);
+        m.paged = paged;
         errdefer m.deinit();
         try m.build(s, k);
         return m;
@@ -85,7 +97,12 @@ pub const Model = struct {
 
     /// The device bytes `init` allocates for these sizes, counted by the same path without allocating.
     pub fn openBytes(gpa: std.mem.Allocator, d: *const cuda.Driver, s: cuda.Stream, w: *const wts.Weights, k: *const kern.Kernels, context: usize, slots: usize, max_rows: usize) !usize {
-        var m = blank(gpa, d, w, context, slots, max_rows);
+        return openBytesPaged(gpa, d, s, w, k, context, slots, max_rows, false);
+    }
+
+    pub fn openBytesPaged(gpa: std.mem.Allocator, d: *const cuda.Driver, s: cuda.Stream, w: *const wts.Weights, k: *const kern.Kernels, context: usize, slots: usize, max_rows: usize, paged: bool) !usize {
+        var m = blank(gpa, d, w, context, if (paged) 1 else slots, max_rows);
+        m.paged = paged;
         defer m.deinit();
         m.planned = 0;
         try m.build(s, k);
@@ -103,17 +120,18 @@ pub const Model = struct {
         const d = m.d;
         const c = m.c;
         const w = m.w;
-        const slots = m.slots;
-        const context = m.context;
         const dh = c.head_dim;
         m.k = try gpa.alloc(u64, c.layers);
         m.v = try gpa.alloc(u64, c.layers);
         m.norms = try gpa.alloc(u64, c.layers);
+        if (m.paged) try pages.build(m, s);
         for (0..c.layers) |i| {
-            const len = if (c.full[i]) context else m.ring;
-            const bytes = slots * len * c.kv_heads * dh * 2;
-            m.k[i] = try m.zeros(s, bytes);
-            m.v[i] = try m.zeros(s, bytes);
+            if (!m.paged) {
+                const len = if (c.full[i]) m.context else m.ring;
+                const bytes = m.slots * len * c.kv_heads * dh * 2;
+                m.k[i] = try m.zeros(s, bytes);
+                m.v[i] = try m.zeros(s, bytes);
+            }
             m.norms[i] = try m.alloc(2 * dh * 4);
             if (m.planned != null) continue;
             const L = w.layers[i];
@@ -132,6 +150,8 @@ pub const Model = struct {
         m.gpa.free(m.k);
         m.gpa.free(m.v);
         m.gpa.free(m.norms);
+        m.gpa.free(m.ids);
+        m.gpa.free(m.caps);
     }
 
     /// RoPE tables: angle p / theta^(2j / D) in float64, cos and sin rounded to fp32, the halves repeated (neox).
@@ -211,10 +231,10 @@ pub const Model = struct {
             .act = try m.alloc(pairs * c.moe_width * 2),
             .y = try m.alloc(pairs * c.hidden * 4),
             .mo = try m.alloc(r * c.hidden * 2),
-            .flat = try m.alloc((2 * cap + 4 * m.slots) * 4),
+            .flat = try m.alloc((2 * cap + 4 * (if (m.paged) round_rows else m.slots)) * 4),
             .paths = try m.alloc(cap * tree.max_rows * 4),
             .depths = try m.alloc(cap * 4),
-            .offs = try m.alloc(c.layers * m.slots * 2 * 8),
+            .offs = try m.alloc(c.layers * (if (m.paged) round_rows else m.slots) * 2 * 8),
             .sel = try m.alloc(r * c.hidden * 2),
             .tree = try m.alloc(TreeAttention.scratchBytes(cap, c.heads, c.kv_heads, m.groups, dh)),
             .win = try m.alloc(cuda.window_attention.WindowAttention.scratchBytes(m.window(), cap)),
@@ -243,6 +263,7 @@ pub const Model = struct {
             if (ch.tokens.len > m.ring - m.c.window) return error.ChainOverrunsRing;
             if (ch.p0 + ch.tokens.len > m.context) return error.PastContext;
             if (ch.slot >= m.slots) return error.NoSuchSlot;
+            if (m.paged and ch.p0 + ch.tokens.len > m.caps[ch.slot]) return error.PastPages;
             n += ch.tokens.len;
         }
         if (n > m.max_rows or (!prompt and n > round_rows)) return error.TooManyRows;
@@ -272,7 +293,8 @@ pub const Model = struct {
             }
             plan = try tree.build(gpa, windows);
             try m.upload(s, m.s.flat, std.mem.sliceAsBytes(plan.?.flat));
-            t = m.treeRows(m.s.flat, plan.?, m.s.paths, m.s.depths, m.s.offs);
+            try pages.chains(m, s, chains);
+            t = m.treeRows(m.s.flat, plan.?, m.s.paths, m.s.depths, m.s.offs, null);
             try o.k.tree.paths(s, m.s.flat + plan.?.parentsAt(), m.s.paths, m.s.depths, n);
             try m.offsets(s, chains, m.s.offs);
             ng = TreeAttention.groups(most);
@@ -291,19 +313,22 @@ pub const Model = struct {
         try m.launch(o, n, if (prompt) chains[0] else null, t, chains.len, ng, @min(m.max_rows, round_rows), pick, out);
     }
 
-    fn treeRows(m: *const Model, base: u64, p: tree.Plan, paths: u64, depths: u64, offs: u64) cuda.tree_attention.Rows {
-        return .{ .row_stream = base, .streams = base + p.streamsAt(), .offs = offs, .origin = m.origin, .paths = paths, .depths = depths };
+    pub fn treeRows(m: *const Model, base: u64, p: tree.Plan, paths: u64, depths: u64, offs: u64, slot: ?usize) cuda.tree_attention.Rows {
+        return .{ .row_stream = base, .streams = base + p.streamsAt(), .offs = offs, .origin = m.origin, .paths = paths, .depths = depths, .pages = pages.treeView(m, slot) };
     }
 
     /// Each full layer's cache offsets a chain, K then V, in bf16 elements from `origin`: [layer][chain][2].
-    fn offsets(m: *Model, s: cuda.Stream, chains: []const Chain, dst: u64) !void {
+    pub fn offsets(m: *Model, s: cuda.Stream, chains: []const Chain, dst: u64) !void {
         const c = m.c;
         const per = m.context * c.kv_heads * c.head_dim * 2;
         const offs = try m.gpa.alloc(i64, c.layers * 2 * chains.len);
         defer m.gpa.free(offs);
         for (0..c.layers) |i| for (chains, 0..) |ch, j| {
-            offs[(i * chains.len + j) * 2] = @intCast((m.k[i] + ch.slot * per - m.origin) / 2);
-            offs[(i * chains.len + j) * 2 + 1] = @intCast((m.v[i] + ch.slot * per - m.origin) / 2);
+            const shift = if (m.paged and c.full[i]) 0 else ch.slot * per;
+            const key = m.k[i] + shift;
+            const val = m.v[i] + shift;
+            offs[(i * chains.len + j) * 2] = if (m.paged) @divExact(@as(i64, @bitCast(key -% m.origin)), 2) else @intCast((key - m.origin) / 2);
+            offs[(i * chains.len + j) * 2 + 1] = if (m.paged) @divExact(@as(i64, @bitCast(val -% m.origin)), 2) else @intCast((val - m.origin) / 2);
         };
         try m.upload(s, dst, std.mem.sliceAsBytes(offs));
     }
@@ -328,13 +353,22 @@ pub const Model = struct {
         for (w.layers, 0..) |L, i| {
             try (if (prompt) lin.prompt(s, L.qkv, .{ .x = m.s.x, .part = m.s.part }, m.s.qkv, n) else lin.decode(s, L.qkv, .{ .x = m.s.x, .part = m.s.part }, m.s.qkv, n));
             const len = if (c.full[i]) m.context else m.ring;
-            try o.qkv(.{ .rows = m.s.qkv, .norms = m.norms[i], .cos = m.cos, .sin = m.sin, .pos = m.s.pos, .slots = m.s.slot, .q = m.s.q, .k = m.s.kn, .v = m.s.vn, .kc = m.k[i], .vc = m.v[i], .len = len }, n, h, hk, dh, c.eps, !c.full[i]);
+            const pg = if (c.full[i]) pages.view(m, null) else null;
+            try o.qkv(.{ .rows = m.s.qkv, .norms = m.norms[i], .cos = m.cos, .sin = m.sin, .pos = m.s.pos, .slots = m.s.slot, .q = m.s.q, .k = m.s.kn, .v = m.s.vn, .kc = if (pg != null) null else m.k[i], .vc = if (pg != null) null else m.v[i], .len = len }, n, h, hk, dh, c.eps, !c.full[i]);
+            if (pg != null) {
+                var win = m.window();
+                win.win = 0;
+                win.ring = m.context;
+                win.pg = pg;
+                try o.k.win.put(s, m.s.kn, m.s.vn, m.k[i], m.v[i], m.s.pos, m.s.slot, win, n);
+            }
             if (prompt_chain) |ch| {
-                const per = len * hk * dh * 2; // a stream's rows of this layer's cache
+                const per = if (pg != null) 0 else len * hk * dh * 2; // a stream's rows of this layer's cache
                 var win = m.window();
                 if (c.full[i]) {
                     win.win = 0; // every key before the row
                     win.ring = m.context;
+                    win.pg = pages.view(m, ch.slot);
                 }
                 try o.promptRows(m.s.q, m.k[i] + ch.slot * per, m.v[i] + ch.slot * per, m.s.att, ch.p0, n, win);
             } else if (!c.full[i]) {
@@ -385,7 +419,7 @@ pub const Model = struct {
         const logits = try m.alloc(c.vocab * 4);
         try s.synchronize();
         try cuda.graph.beginCapture(s, .thread_local);
-        m.launch(o, 1, null, m.treeRows(flat, p, paths, depths, offs), 1, m.groups, 1, &.{0}, logits) catch |e| {
+        m.launch(o, 1, null, m.treeRows(flat, p, paths, depths, offs, slot), 1, m.groups, 1, &.{0}, logits) catch |e| {
             if (cuda.graph.endCapture(s)) |g| {
                 var gg = g;
                 gg.deinit();
@@ -401,6 +435,7 @@ pub const Model = struct {
     pub fn step(m: *Model, o: kern.Ops, g: *const Step, token: u32, p0: usize) !void {
         const s = o.s;
         if (p0 + 1 > m.context) return error.PastContext;
+        if (m.paged and p0 + 1 > m.caps[g.slot]) return error.PastPages;
         const staged = [3]i32{ @intCast(token), @intCast(p0), @intCast(g.slot) };
         try m.upload(s, m.s.ids, std.mem.asBytes(&staged[0]));
         try m.upload(s, m.s.pos, std.mem.asBytes(&staged[1]));

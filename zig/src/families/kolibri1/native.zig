@@ -8,6 +8,8 @@ const fwd = @import("forward.zig");
 const be = @import("backend.zig");
 const snap = @import("snap.zig");
 const limits = @import("context.zig");
+const kv = @import("core").kv_pool;
+const shared = @import("shared.zig");
 
 pub const model_type = "kolibri1";
 pub const formats: []const []const u8 = &.{"fp8-block"};
@@ -16,6 +18,7 @@ pub const max_segments: u32 = 1;
 pub const prompt_rows: u32 = be.prompt_rows;
 /// A kept state is the caches through its position and nothing past it (no draft head reads a token on).
 pub const snap_lookahead: u32 = 0;
+pub const window_rows: u32 = be.max_window;
 /// No drafter yet: --drafter is refused before the load.
 pub const takes_drafter = false;
 pub const drafter_refusal = "--drafter: Kolibri-1 on CUDA loads no drafter yet; serve it without --drafter";
@@ -41,6 +44,8 @@ pub const Loaded = struct {
     deinit: *const fn (*anyopaque) void,
     lone: ?LoneRun = null,
     learn_bytes: usize = 0,
+    layout: ?kv.Layout = null,
+    engine_paged: bool = false,
     target: *be.Kolibri, // the prompt cache keeps this backend's states (snap_*)
 };
 
@@ -62,10 +67,11 @@ const Plan = struct {
     own: *const Owned,
     d: *const cuda.Driver,
     context: usize,
+    paged: bool,
 
     fn bytes(p: Plan, n: usize) !u64 {
         const o = p.own;
-        return try fwd.Model.openBytes(o.gpa, p.d, o.s, &o.w, &o.k, p.context, n, be.prompt_rows) + be.Kolibri.openBytes(o.w.config.vocab, n);
+        return try fwd.Model.openBytesPaged(o.gpa, p.d, o.s, &o.w, &o.k, p.context, n, be.prompt_rows, p.paged) + be.Kolibri.openBytes(o.w.config.vocab, if (p.paged) be.round_rows else n);
     }
 };
 
@@ -79,6 +85,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     if (kernels != null) return error.CapturedKernels;
     if (o.lanes_fixed and o.lanes > be.round_rows) return error.ParallelPastRound; // before the weights load
     const context = try positions(o.context);
+    const paged = try @import("core").kv_prompts.sharing() > 0;
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
     own.gpa = gpa;
@@ -86,19 +93,20 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer own.w.deinit();
     own.k = try kern.Kernels.load(ctx);
     errdefer own.k.deinit();
+    if (paged) try own.k.win.loadPages(ctx.d);
     own.s = try cuda.Stream.init(ctx.d, false);
     errdefer own.s.deinit();
-    // every stream's caches are allocated here and none later: plan them inside the room the weights leave
-    const plan: Plan = .{ .own = own, .d = ctx.d, .context = context };
+    // Price the original caches, or the first paged slot and metadata, inside the room the weights leave.
+    const plan: Plan = .{ .own = own, .d = ctx.d, .context = context, .paged = paged };
     const room: u64 = if (o.room) |r| r.read(r.ctx) orelse 0 else std.math.maxInt(u64);
-    const n = fit(room, o.lanes, o.lanes_fixed, plan) catch |e| {
+    const n = (if (paged) fitFirst(room, plan) else fit(room, o.lanes, o.lanes_fixed, plan)) catch |e| {
         if (e == error.ParallelPastMemory) {
             const most = fit(room, o.lanes, false, plan) catch 0;
             std.log.err("--parallel {d} needs {d:.2} GiB at a {d}-token window and the CUDA memory budget leaves {d:.2} GiB after the weights: {d} stream{s} fit", .{ o.lanes, gib(try plan.bytes(o.lanes)), context, gib(room), most, if (most == 1) "" else "s" });
         }
         return e;
     };
-    own.m = try fwd.Model.init(gpa, ctx.d, own.s, &own.w, &own.k, context, n, be.prompt_rows);
+    own.m = try fwd.Model.initPaged(gpa, ctx.d, own.s, &own.w, &own.k, context, n, be.prompt_rows, paged);
     errdefer own.m.deinit();
     own.kb = try be.Kolibri.init(gpa, ctx.d, &own.m, &own.k, own.s);
     return .{
@@ -110,6 +118,8 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .ctx = own,
         .deinit = release,
         .target = &own.kb,
+        .layout = if (paged) fwd.pages.layout(&own.m) else null,
+        .engine_paged = paged,
     };
 }
 
@@ -121,9 +131,39 @@ fn kolibri(ptr: *anyopaque) *be.Kolibri {
     return @ptrCast(@alignCast(ptr));
 }
 
+fn fitFirst(room: u64, plan: Plan) !usize {
+    if (try plan.bytes(1) > room) return error.NoStreamFits;
+    return 1;
+}
+
+pub fn attach(p: *anyopaque, extra: u32, count: usize) !void {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    try shared.attach(&own.kb, extra, count);
+}
+
+pub fn fits(p: *anyopaque, prompt: u32, max_new: u32) bool {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    return shared.admits(&own.kb, prompt, max_new);
+}
+
+pub fn share_pool(p: *anyopaque) ?*kv.Pool {
+    const x = kolibri(p);
+    return if (x.pool) |*pool| pool else null;
+}
+
+pub fn share_attach(p: *anyopaque, prompts: ?@import("core").kv_prompts.Prompts) void {
+    kolibri(p).prompts = prompts;
+}
+
+pub fn kvPool(p: *anyopaque) ?kv.Source {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    return if (own.kb.pool) |*pool| .{ .pool = pool, .page_tokens = fwd.pages.tokens } else null;
+}
+
 /// Bytes a state at `at` prompt tokens takes.
 pub fn snap_bytes(ptr: *anyopaque, at: u32) u64 {
-    return snap.bytes(kolibri(ptr).m, at);
+    const x = kolibri(ptr);
+    return if (x.prompts != null) snap.blobPages(x.m, at, at) * fwd.pages.pageBytes(x.m) else snap.bytes(x.m, at);
 }
 
 /// The prompt pass stands at `at` (a chunk start): copy the stream's caches there.
@@ -142,6 +182,7 @@ pub fn snap_drop(ptr: *anyopaque, saved: *anyopaque) void {
 /// A request or load this engine refuses, in words; null: none of its own.
 pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
     return switch (err) {
+        error.BadKvShare => "TF_KV_SHARE takes a nonnegative count of kept prompt states (0 or unset: copies)",
         error.PastContext => "the prompt and its reply exceed this server's context window: shorten it or lower max_tokens",
         error.NoFreeSlot => "every stream's caches are in use: retry once another request ends",
         error.NoDraftHead => "Kolibri-1 on CUDA has no draft head yet: drafts come from the prompt's own text only",
