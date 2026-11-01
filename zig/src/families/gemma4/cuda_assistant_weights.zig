@@ -246,7 +246,7 @@ pub const Loader = struct {
 /// Every tensor checked by name, dtype and shape; the bf16 linears and the tied head made 4-bit as Metal's.
 pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.Stream, k: *const kern.Kernels, dir: []const u8, c: *const Config, geo: cfg.Geometry) !Weights {
     var ck = try core.checkpoint.Checkpoint.openModel(gpa, io, dir);
-    defer ck.close();
+    defer core.checkpoint.cache.close(&ck);
     var w: Weights = .{ .pre = undefined, .post = undefined, .head = undefined, .norm = 0, .layers = undefined };
     errdefer w.deinit(gpa);
     var x: Loader = .{ .gpa = gpa, .d = d, .s = s, .k = k, .ck = &ck, .bufs = &w.buffers };

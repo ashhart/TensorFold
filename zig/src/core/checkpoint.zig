@@ -6,6 +6,7 @@ const st = @import("safetensors.zig");
 const index_format = @import("checkpoint_index.zig");
 const prefetching = @import("checkpoint_prefetch.zig");
 
+pub const cache = @import("checkpoint_cache.zig");
 pub const Tensor = st.Tensor;
 pub const DType = st.DType;
 pub const Ahead = prefetching.Ahead;

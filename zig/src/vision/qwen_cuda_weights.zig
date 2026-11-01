@@ -12,7 +12,7 @@ pub const grid_side = 48;
 /// The actual tower load into a byte sink; `put` finishes using its source before it returns.
 pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, c: anytype, sink: anytype) !void {
     var reader = try Reader.open(gpa, io, dir);
-    defer reader.ck.close();
+    defer core.checkpoint.cache.close(&reader.ck);
     try reader.copy(gpa, c, sink);
 }
 
@@ -25,7 +25,7 @@ const Reader = struct {
         var ck = try core.Checkpoint.openModelPrefix(gpa, io, dir, hf_prefix);
         const hf = ck.has(hf_prefix ++ "patch_embed.proj.weight");
         if (!hf) {
-            ck.close();
+            core.checkpoint.cache.close(&ck);
             ck = try core.Checkpoint.openModelPrefix(gpa, io, dir, mlx_prefix);
         }
         return .{ .ck = ck, .prefix = if (hf) hf_prefix else mlx_prefix, .hf = hf };
