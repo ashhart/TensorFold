@@ -162,10 +162,10 @@ const own_records = [_]Record{
             .dynamic = 16 * 128 * 4,
         },
         .usage = .{
-            .{ .vgprs = 17, .sgprs = 34, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 17, .sgprs = 33, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 17, .sgprs = 34, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 17, .sgprs = 29, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 48, .sgprs = 34, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 48, .sgprs = 33, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 48, .sgprs = 34, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 48, .sgprs = 30, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
         },
     },
     .{
@@ -177,10 +177,10 @@ const own_records = [_]Record{
             .dynamic = 16 * 128 * 4,
         },
         .usage = .{
-            .{ .vgprs = 17, .sgprs = 34, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 17, .sgprs = 33, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 17, .sgprs = 34, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 17, .sgprs = 29, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 48, .sgprs = 34, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 48, .sgprs = 33, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 48, .sgprs = 34, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 48, .sgprs = 30, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
         },
     },
     .{
@@ -394,10 +394,10 @@ const own_records = [_]Record{
             .dynamic = 16 * 128 * 4,
         },
         .usage = .{
-            .{ .vgprs = 17, .sgprs = 32, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 17, .sgprs = 32, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 17, .sgprs = 32, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 17, .sgprs = 28, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 48, .sgprs = 34, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 48, .sgprs = 32, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 48, .sgprs = 32, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 48, .sgprs = 29, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
         },
     },
     .{
@@ -409,10 +409,10 @@ const own_records = [_]Record{
             .dynamic = 16 * 128 * 4,
         },
         .usage = .{
-            .{ .vgprs = 17, .sgprs = 32, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 17, .sgprs = 32, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 17, .sgprs = 32, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 17, .sgprs = 28, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 48, .sgprs = 34, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 48, .sgprs = 32, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 48, .sgprs = 32, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 48, .sgprs = 29, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
         },
     },
     .{
@@ -493,7 +493,8 @@ const own_records = [_]Record{
             .{ .vgprs = 36, .sgprs = 32, .lds = 50688, .private = 0, .bound = 1024, .wave = 32 },
         },
     },
-} ++ @import("hip_records_pair.zig").records ++ @import("hip_records_prompt.zig").records;
+} ++ @import("hip_records_pair.zig").records ++ @import("hip_records_prompt.zig").records ++
+    @import("hip_records_score.zig").records;
 
 pub const records = own_records ++ @import("hip_records_stream.zig").records;
 
