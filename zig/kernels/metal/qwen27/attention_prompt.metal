@@ -4,8 +4,8 @@
 using namespace metal;
 using namespace mpp::tensor_ops;
 constant constexpr int PG = Q27_G, PKVH = Q27_KVH, PD = 256, PH = 128, PCK = 512, PTK = 32; // after attention_mpp.metal's G
-// kv_heads is the rank's, not the model's: a split attention writes local node rows.
-struct Q27PromptArgs { int start, rows, chunks, rp, key_stride, value_stride; float scale2; int kv_heads; };
+// kv_heads is the rank's (a split attention writes local node rows); a BLOCK kernel's rows read keys [0, end).
+struct Q27PromptArgs { int start, rows, chunks, rp, key_stride, value_stride; float scale2; int kv_heads, end; };
 typedef vec<float, 8> q27f8;
 typedef vec<bfloat, 8> q27b8;
 typedef vec<half, 8> q27h8;
@@ -107,7 +107,7 @@ inline void q27_prompt_step(thread Q27PromptRun& r, int kt, int kend, const devi
 }
 
 // One chunk's partial per packed row: a simdgroup pair halves the head dim; only the last step reads bounded.
-template <int SG>
+template <int SG, bool BLOCK>
 kernel void q27_attn_prompt(device const bfloat* QA [[buffer(0)]], device const Q27AttnReadPtrs* caches [[buffer(1)]], constant Q27PromptArgs& args [[buffer(2)]],
     device float* PO [[buffer(3)]], device float* PM [[buffer(4)]], device float* PL [[buffer(5)]],
     uint3 tg [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]], ushort sg [[simdgroup_index_in_threadgroup]]) {
@@ -118,9 +118,9 @@ kernel void q27_attn_prompt(device const bfloat* QA [[buffer(0)]], device const 
   const bool live = tile * 16 < args.rp;
   threadgroup float xs[SG][32][16];
   const int r0 = tile * 16 + fm, r1 = r0 + 8;
-  const int n0 = live && r0 < args.rows * PG ? args.start + r0 / PG + 1 : 0;
-  const int n1 = live && r1 < args.rows * PG ? args.start + r1 / PG + 1 : 0;
-  const int kbeg = c * PCK, kend = min(kbeg + PCK, args.start + args.rows);
+  const int n0 = live && r0 < args.rows * PG ? (BLOCK ? args.end : args.start + r0 / PG + 1) : 0;
+  const int n1 = live && r1 < args.rows * PG ? (BLOCK ? args.end : args.start + r1 / PG + 1) : 0;
+  const int kbeg = c * PCK, kend = min(kbeg + PCK, BLOCK ? args.end : args.start + args.rows);
   const device bfloat* q = QA + ((int64_t)hk * args.rp + (live ? tile * 16 : 0)) * PD + h * PH;
   const device bfloat* k = caches[0].keys + (int64_t)hk * args.key_stride + h * PH;
   const device bfloat* v = caches[0].values + (int64_t)hk * args.value_stride + h * PH;
@@ -144,8 +144,9 @@ kernel void q27_attn_prompt(device const bfloat* QA [[buffer(0)]], device const 
     PM[base + fm + 8] = r.m1; PL[base + fm + 8] = r.l1;
   }
 }
-#define Q27_PROMPT(SG) template [[host_name("q27_attn_prompt_" #SG)]] kernel void q27_attn_prompt<SG>(device const bfloat*, device const Q27AttnReadPtrs*, constant Q27PromptArgs&, device float*, device float*, device float*, uint3, ushort, ushort);
-Q27_PROMPT(8)
+#define Q27_PROMPT(SG, B, NAME) template [[host_name(NAME)]] kernel void q27_attn_prompt<SG, B>(device const bfloat*, device const Q27AttnReadPtrs*, constant Q27PromptArgs&, device float*, device float*, device float*, uint3, ushort, ushort);
+Q27_PROMPT(8, false, "q27_attn_prompt_8")
+Q27_PROMPT(8, true, "q27_attn_prompt_block_8")
 
 // A packed row's chunks merged in key order, normalized and written as the row's head output.
 kernel void q27_attn_prompt_merge(device const float* PO [[buffer(0)]], device const float* PM [[buffer(1)]], device const float* PL [[buffer(2)]],

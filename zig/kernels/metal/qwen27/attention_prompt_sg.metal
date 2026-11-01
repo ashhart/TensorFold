@@ -104,7 +104,7 @@ inline void q27_sg_step(thread Q27SgRun& r, int kt, int kend, const device bfloa
 }
 
 // One chunk's partial per packed row, in attention_prompt.metal's layout for q27_attn_prompt_merge.
-template <int SG>
+template <int SG, bool BLOCK>
 kernel void q27_attn_prompt_sg(device const bfloat* QA [[buffer(0)]], device const Q27AttnReadPtrs* caches [[buffer(1)]], constant Q27PromptArgs& args [[buffer(2)]],
     device float* PO [[buffer(3)]], device float* PM [[buffer(4)]], device float* PL [[buffer(5)]],
     uint3 tg [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]], ushort sg [[simdgroup_index_in_threadgroup]]) {
@@ -115,9 +115,9 @@ kernel void q27_attn_prompt_sg(device const bfloat* QA [[buffer(0)]], device con
   const bool live = tile * 16 < args.rp;
   threadgroup float xs[SG][32][16];
   const int r0 = tile * 16 + fm, r1 = r0 + 8;
-  const int n0 = live && r0 < args.rows * PG ? args.start + r0 / PG + 1 : 0;
-  const int n1 = live && r1 < args.rows * PG ? args.start + r1 / PG + 1 : 0;
-  const int kbeg = c * PCK, kend = min(kbeg + PCK, args.start + args.rows);
+  const int n0 = live && r0 < args.rows * PG ? (BLOCK ? args.end : args.start + r0 / PG + 1) : 0;
+  const int n1 = live && r1 < args.rows * PG ? (BLOCK ? args.end : args.start + r1 / PG + 1) : 0;
+  const int kbeg = c * PCK, kend = min(kbeg + PCK, BLOCK ? args.end : args.start + args.rows);
   const device bfloat* q = QA + ((int64_t)hk * args.rp + (live ? tile * 16 : 0)) * PD + h * PH;
   const device bfloat* k = caches[0].keys + (int64_t)hk * args.key_stride + h * PH;
   const device bfloat* v = caches[0].values + (int64_t)hk * args.value_stride + h * PH;
@@ -140,5 +140,6 @@ kernel void q27_attn_prompt_sg(device const bfloat* QA [[buffer(0)]], device con
     PM[base + fm + 8] = r.m1; PL[base + fm + 8] = r.l1;
   }
 }
-#define Q27_PROMPT_SG(SG) template [[host_name("q27_attn_prompt_sg_" #SG)]] kernel void q27_attn_prompt_sg<SG>(device const bfloat*, device const Q27AttnReadPtrs*, constant Q27PromptArgs&, device float*, device float*, device float*, uint3, ushort, ushort);
-Q27_PROMPT_SG(8)
+#define Q27_PROMPT_SG(SG, B, NAME) template [[host_name(NAME)]] kernel void q27_attn_prompt_sg<SG, B>(device const bfloat*, device const Q27AttnReadPtrs*, constant Q27PromptArgs&, device float*, device float*, device float*, uint3, ushort, ushort);
+Q27_PROMPT_SG(8, false, "q27_attn_prompt_sg_8")
+Q27_PROMPT_SG(8, true, "q27_attn_prompt_sg_block_8")
