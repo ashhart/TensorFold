@@ -93,6 +93,10 @@ On Windows with an NVIDIA GPU, follow [the native Windows build guide](docs/WIND
 Use `tensorfold --help`, `tensorfold capabilities --json` and `tensorfold serve REPO --help` to inspect your binary.
 You can also serve a complete local checkpoint directory or an existing Hugging Face cache.
 
+`tensorfold web [ARGS...]` opens TensorFold Web, a small local web app for picking, running and chatting with models.
+If it needs installing, an interactive release binary offers to install its matching version with `uv` after you say yes.
+See [the web launcher](docs/web.md) for manual installation and unattended use.
+
 `--parallel N` caps active requests at N; extra requests wait for a free slot.
 Omitting the flag uses `--parallel auto`, which asks for up to eight streams as memory and the engine allow.
 An explicit number is refused if the engine cannot fit that many streams.
@@ -539,6 +543,7 @@ Thank you to everyone who has sent TensorFold a pull request, a measurement or a
 [@spenchey](https://github.com/spenchey),
 [@squarrier](https://github.com/squarrier),
 [@ss-cong](https://github.com/ss-cong),
+[@Stephane-Eden](https://github.com/Stephane-Eden),
 [@styles01](https://github.com/styles01),
 [@SvangenStudios](https://github.com/SvangenStudios),
 [@swbiggart](https://github.com/swbiggart),

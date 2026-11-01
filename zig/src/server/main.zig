@@ -14,6 +14,7 @@ const api = @import("engine_api");
 const recall_open = @import("recall_open.zig");
 const benchmark = @import("benchmark.zig");
 const checkpoint_cli = @import("checkpoint_cli");
+const web_cli = @import("web_cli.zig");
 
 const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--name NAME] [--chat-template FILE]" ++
     " [--alias ALIAS] [--allowed-host NAME] [--allowed-origin ORIGIN] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard]" ++
@@ -57,8 +58,12 @@ pub fn main(init: std.process.Init) !u8 {
         return 0;
     }
     if (argv.len == 2 and (std.mem.eql(u8, argv[1], "--help") or std.mem.eql(u8, argv[1], "-h"))) {
-        try std.Io.File.stdout().writeStreamingAll(io, "usage: tensorfold-native --version | capabilities --json | models | info MODEL | pull REPO[@REVISION] | slide rollback FOLDER | serve MODEL [flags] | benchmark MODEL [flags]\n" ++ usage_line);
+        try std.Io.File.stdout().writeStreamingAll(io, "usage: tensorfold-native --version | capabilities --json | models | info MODEL | pull REPO[@REVISION] | slide rollback FOLDER | web [ARGS...] | serve MODEL [flags] | benchmark MODEL [flags]\n" ++ usage_line);
         return 0;
+    }
+    if (argv.len >= 2 and std.mem.eql(u8, argv[1], "web")) {
+        const options = @import("build_options");
+        return web_cli.main(init, argv[2..], .{ .version = options.version, .is_release = options.is_release });
     }
     if (argv.len >= 3 and std.mem.eql(u8, argv[1], "serve")) {
         for (argv[2..]) |arg| if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {

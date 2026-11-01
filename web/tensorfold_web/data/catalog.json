@@ -1,0 +1,269 @@
+{
+ "updated": "2026-10-14",
+ "note": "Curated metadata for the checkpoints TensorFold serves. Sizes are refreshed from Hugging Face when online; bytes_per_token values are estimates used for the context estimate. bytes_per_token for Gemma 4, Qwen3.8-27B and Bonsai 2 are the engine's own startup figures on a Mac mini M6 (TensorFold 0.6.5). workspace_bytes covers what the engine keeps beyond the files (fused projections, an MTP head) plus its prompt and draft work; the 27B's and Bonsai's values reproduce the context the engine admitted on that Mac. Tags describe what TensorFold can serve from the checkpoint here, not the vendor's model card: 'vision' means TensorFold's --vision path reads images for this family. The oQ entries are mixed-width checkpoints: `native_from` names the first native release that serves them, as `capabilities --json` lists uniform formats only; their bytes_per_token and workspace_bytes are the 4-bit 27B's until measured.",
+ "models": [
+  {
+   "id": "mlx-community/gemma-4-26b-a4b-it-4bit",
+   "family": "gemma4",
+   "name": "Gemma 4 26B-A4B",
+   "vendor": "Google",
+   "license": "Apache-2.0",
+   "description": "Great all-rounder. A mixture of experts with 3.8B active parameters, so it is quick.",
+   "tags": [
+    "chat",
+    "writing"
+   ],
+   "backends": [
+    "mlx"
+   ],
+   "drafter": null,
+   "drafter_optional": "z-lab/gemma-4-26B-A4B-it-DFlash",
+   "max_context": 262144,
+   "bytes_per_token": 40000,
+   "size_bytes": null,
+   "speed_hint": "fast",
+   "workspace_bytes": 2684354560,
+   "format": "mlx-q4g64"
+  },
+  {
+   "id": "TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit",
+   "family": "nemotron_h",
+   "name": "Nemotron 3.5 Lightning 30B-A3B",
+   "vendor": "NVIDIA",
+   "license": "Open Model License",
+   "description": "The fastest model here, strong at code edits. Ships its own draft head.",
+   "tags": [
+    "code",
+    "tools",
+    "fast"
+   ],
+   "backends": [
+    "mlx",
+    "cuda"
+   ],
+   "drafter": null,
+   "drafter_optional": null,
+   "max_context": 262144,
+   "bytes_per_token": 13500,
+   "size_bytes": null,
+   "speed_hint": "fastest",
+   "workspace_bytes": 2684354560,
+   "native": true,
+   "native_overhead_bytes": 4509715660,
+   "format": "mlx-q4g64"
+  },
+  {
+   "id": "prism-ml/Ternary-Bonsai-2-27B-mlx-2bit",
+   "family": "prism_hadamard_qwen35",
+   "name": "Ternary Bonsai 2 27B",
+   "vendor": "Prism ML",
+   "license": "Apache-2.0",
+   "description": "Qwen3.8-27B's knowledge retrained to 2-bit weights: 8 GB on disk, 12 GiB resident with its drafter, 61k tokens of context on a 32 GB Mac.",
+   "tags": [
+    "chat",
+    "code",
+    "fast"
+   ],
+   "backends": [
+    "mlx"
+   ],
+   "drafter": "z-lab/Qwen3.8-27B-DFlash2",
+   "drafter_size_bytes": 3849125888,
+   "drafter_optional": null,
+   "max_context": 262144,
+   "bytes_per_token": 64000,
+   "size_bytes": null,
+   "speed_hint": "fast",
+   "workspace_bytes": 8267812044,
+   "drafter_fraction": 0.3,
+   "format": null
+  },
+  {
+   "id": "TensorFold/Qwen3.8-27B-MLX-4bit",
+   "family": "qwen3_5",
+   "name": "Qwen3.8-27B",
+   "vendor": "Alibaba",
+   "license": "Apache-2.0",
+   "description": "The best quality that fits a 32 GB Mac, with z-lab's draft model for speed. Reads images.",
+   "tags": [
+    "chat",
+    "code",
+    "vision",
+    "tools"
+   ],
+   "backends": [
+    "mlx",
+    "cuda"
+   ],
+   "drafter": "z-lab/Qwen3.8-27B-DFlash2",
+   "drafter_size_bytes": 3849125888,
+   "drafter_optional": null,
+   "max_context": 262144,
+   "bytes_per_token": 64000,
+   "size_bytes": null,
+   "speed_hint": "medium",
+   "workspace_bytes": 6442450944,
+   "drafter_fraction": 0.3,
+   "format": "mlx-q4g64"
+  },
+  {
+   "id": "TensorFold/Qwen3.8-27B-oQ4",
+   "family": "qwen3_5",
+   "name": "Qwen3.8-27B",
+   "vendor": "Alibaba",
+   "license": "Apache-2.0",
+   "description": "Qwen3.8-27B in mixed 4- to 6-bit widths (oMLX's oQ4): close to the 4-bit model, a little larger. Native on Macs from TensorFold 1.0.10, with the DFlash2 drafter.",
+   "tags": [
+    "chat",
+    "code",
+    "tools"
+   ],
+   "backends": [
+    "mlx"
+   ],
+   "drafter": "z-lab/Qwen3.8-27B-DFlash2",
+   "drafter_size_bytes": 3849125888,
+   "drafter_optional": null,
+   "max_context": 262144,
+   "bytes_per_token": 64000,
+   "size_bytes": null,
+   "speed_hint": "medium",
+   "workspace_bytes": 6442450944,
+   "drafter_fraction": 0.3,
+   "format": null,
+   "native_from": "1.0.10",
+   "native": true
+  },
+  {
+   "id": "TensorFold/Qwen3.8-27B-oQ2",
+   "family": "qwen3_5",
+   "name": "Qwen3.8-27B",
+   "vendor": "Alibaba",
+   "license": "Apache-2.0",
+   "description": "Qwen3.8-27B in mixed 2- to 8-bit widths (oMLX's oQ2): 11 GB on disk, so a 32 GB Mac keeps more room for context, at some cost in quality. Native on Macs from TensorFold 1.0.10, with the DFlash2 drafter.",
+   "tags": [
+    "chat",
+    "code",
+    "tools"
+   ],
+   "backends": [
+    "mlx"
+   ],
+   "drafter": "z-lab/Qwen3.8-27B-DFlash2",
+   "drafter_size_bytes": 3849125888,
+   "drafter_optional": null,
+   "max_context": 262144,
+   "bytes_per_token": 64000,
+   "size_bytes": null,
+   "speed_hint": "fast",
+   "workspace_bytes": 6442450944,
+   "drafter_fraction": 0.3,
+   "format": null,
+   "native_from": "1.0.10",
+   "native": true
+  },
+  {
+   "id": "TensorFold/Qwen3.6-35B-A3B-MLX-4bit-MTP",
+   "family": "qwen3_5_moe",
+   "name": "Qwen3.6-35B-A3B",
+   "vendor": "Alibaba",
+   "license": "Apache-2.0",
+   "description": "A fast mixture of experts with its own draft head.",
+   "tags": [
+    "chat",
+    "code",
+    "fast"
+   ],
+   "backends": [
+    "mlx",
+    "cuda"
+   ],
+   "drafter": null,
+   "drafter_optional": "z-lab/Qwen3.6-35B-A3B-DFlash",
+   "max_context": 262144,
+   "bytes_per_token": 40000,
+   "size_bytes": null,
+   "speed_hint": "fast",
+   "workspace_bytes": 2684354560,
+   "format": "mlx-q4g64"
+  },
+  {
+   "id": "TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP",
+   "family": "qwen4_exp",
+   "name": "Qwen3.8 Flash Next",
+   "vendor": "Alibaba",
+   "license": "Qwen Community",
+   "description": "The large one: 125B parameters, 6B active, 1M context, reads images. For 128 GB machines and DGX Sparks.",
+   "tags": [
+    "agents",
+    "code",
+    "vision",
+    "long context"
+   ],
+   "backends": [
+    "mlx",
+    "cuda"
+   ],
+   "drafter": null,
+   "drafter_optional": null,
+   "max_context": 262144,
+   "bytes_per_token": 30784,
+   "size_bytes": null,
+   "speed_hint": "medium",
+   "workspace_bytes": 6442450944,
+   "format": "mlx-q4g64"
+  },
+  {
+   "id": "TensorFold/GLM-5.3-Flash-MLX-4bit-MTP",
+   "family": "glm5_next",
+   "name": "GLM-5.3-Flash",
+   "vendor": "Z.ai",
+   "license": "MIT",
+   "description": "320B parameters, 18B active, 1M context, reads images. For a 256 GB Mac or two DGX Sparks.",
+   "tags": [
+    "agents",
+    "reasoning",
+    "vision",
+    "long context"
+   ],
+   "backends": [
+    "mlx",
+    "cuda"
+   ],
+   "drafter": null,
+   "drafter_optional": "incoai/GLM-5.3-Flash-DFlash2",
+   "max_context": 1048576,
+   "bytes_per_token": 14000,
+   "size_bytes": null,
+   "speed_hint": "medium",
+   "fraction": 0.85,
+   "workspace_bytes": 8589934592,
+   "format": "mlx-q4g64"
+  },
+  {
+   "id": "mlx-community/DeepSeek-V4-Flash-4bit",
+   "family": "deepseek_v4",
+   "name": "DeepSeek-V4-Flash",
+   "vendor": "DeepSeek",
+   "license": "MIT",
+   "description": "284B parameters, 13B active, 1M context. For a 256 GB Mac.",
+   "tags": [
+    "agents",
+    "reasoning",
+    "long context"
+   ],
+   "backends": [
+    "mlx"
+   ],
+   "drafter": "TensorFold/DeepSeek-V4-Flash-DSpark-MLX",
+   "drafter_optional": null,
+   "max_context": 1048576,
+   "bytes_per_token": 6700,
+   "size_bytes": null,
+   "speed_hint": "medium",
+   "workspace_bytes": 8589934592,
+   "drafter_fraction": 1.0,
+   "format": "mlx-q4g64"
+  }
+ ]
+}
