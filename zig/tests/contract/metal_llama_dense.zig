@@ -4,6 +4,7 @@ const mtl = @import("metal");
 const contract = @import("contract");
 const rig_ = @import("rig.zig");
 const llama = @import("metal_llama.zig");
+const controls = @import("metal_llama_controls.zig");
 const c = contract.spec;
 const g = contract.gates;
 const dense_in = contract.dense;
@@ -26,6 +27,7 @@ pub const Matvec = struct {
     lib: mtl.Library,
     pipe: mtl.Pipeline,
     per: u32,
+    mutation: controls.Mutation,
     name: []const u8,
     served: [2]c.Shape,
     shape: c.Shape = .{ .rows = 0, .n = 0, .k = 0 },
@@ -35,13 +37,13 @@ pub const Matvec = struct {
     w: rig_.Ref = undefined,
     y: rig_.Ref = undefined,
 
-    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, per: u32) !Matvec {
-        const lib = try family.glueLibrary(device, a);
+    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, per: u32, mutation: controls.Mutation) !Matvec {
+        const lib = try controls.glueLibrary(device, a, mutation);
         errdefer lib.deinit();
         const name = try std.fmt.allocPrint(a, "llama glue ll_matvec_{d}", .{per});
         errdefer a.free(name);
         const fun = name[std.mem.lastIndexOfScalar(u8, name, ' ').? + 1 ..];
-        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .lib = lib, .pipe = try llama.pipelineOf(lib, device, fun), .per = per, .name = name, .served = .{ .{ .rows = per, .n = 1024, .k = G33.intermediate }, .{ .rows = per, .n = G33.hidden, .k = G3.hidden } } };
+        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .lib = lib, .pipe = try llama.pipelineOf(lib, device, fun), .per = per, .mutation = mutation, .name = name, .served = .{ .{ .rows = per, .n = 1024, .k = G33.intermediate }, .{ .rows = per, .n = G33.hidden, .k = G3.hidden } } };
     }
 
     fn drop(p: *Matvec) void {
@@ -63,7 +65,7 @@ pub const Matvec = struct {
     const vt = g.hooks(Matvec);
 
     pub fn kernel(p: *Matvec) g.Kernel {
-        return .{ .spec = .{ .name = p.name, .accum = .f32, .depth = matvecDepth, .out = .bf16, .tiles = .{ .{ .size = p.per, .step = 1, .min = 1 }, .{ .size = 8, .step = 1, .min = 1 }, .{ .size = 256, .step = 8, .min = 8 } }, .served = &p.served }, .ctx = p, .vt = &vt };
+        return controls.mark(.{ .spec = .{ .name = p.name, .accum = .f32, .depth = matvecDepth, .out = .bf16, .tiles = .{ .{ .size = p.per, .step = 1, .min = 1 }, .{ .size = 8, .step = 1, .min = 1 }, .{ .size = 256, .step = 8, .min = 8 } }, .served = &p.served }, .ctx = p, .vt = &vt }, p.mutation);
     }
 
     pub fn prepare(p: *Matvec, s: c.Shape, fill: g.Fill, seed: u64) !bool {
@@ -135,6 +137,7 @@ pub const Gemm = struct {
     pipe: mtl.Pipeline,
     am: bool,
     an: bool,
+    mutation: controls.Mutation,
     name: []const u8,
     served: [2]c.Shape,
     shape: c.Shape = .{ .rows = 0, .n = 0, .k = 0 },
@@ -144,15 +147,17 @@ pub const Gemm = struct {
     w: rig_.Ref = undefined,
     y: rig_.Ref = undefined,
 
-    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, am: bool, an: bool) !Gemm {
-        const src = try family.gemmSource(device, a);
+    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, am: bool, an: bool, mutation: controls.Mutation) !Gemm {
+        const plain = try family.gemmSource(device, a);
+        defer a.free(plain);
+        const src = try controls.apply(a, plain, mutation);
         defer a.free(src);
         const name = try std.fmt.allocPrint(a, "llama gemm ll_gemm_{d}{d}", .{ @intFromBool(am), @intFromBool(an) });
         errdefer a.free(name);
         const fun = name[std.mem.lastIndexOfScalar(u8, name, ' ').? + 1 ..];
         const rows: usize = if (am) 256 else 100;
         const n: usize = if (an) 1024 else 1088;
-        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .pipe = try rig_.pipeline(device, src, fun), .am = am, .an = an, .name = name, .served = .{ .{ .rows = rows, .n = n, .k = G33.hidden }, .{ .rows = if (am) 64 else 33, .n = if (an) G3.hidden else G3.hidden + 64, .k = G3.hidden } } };
+        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .pipe = try rig_.pipeline(device, src, fun), .am = am, .an = an, .mutation = mutation, .name = name, .served = .{ .{ .rows = rows, .n = n, .k = G33.hidden }, .{ .rows = if (am) 64 else 33, .n = if (an) G3.hidden else G3.hidden + 64, .k = G3.hidden } } };
     }
 
     fn drop(p: *Gemm) void {
@@ -173,7 +178,7 @@ pub const Gemm = struct {
     const vt = g.hooks(Gemm);
 
     pub fn kernel(p: *Gemm) g.Kernel {
-        return .{ .spec = .{ .name = p.name, .accum = .f32, .depth = gemmDepth, .out = .bf16, .tiles = .{ .{ .size = 64, .step = 1, .min = 1 }, .{ .size = 128, .step = 1, .min = 1 }, .{ .size = 256, .step = 256, .min = 256 } }, .served = &p.served }, .ctx = p, .vt = &vt };
+        return controls.mark(.{ .spec = .{ .name = p.name, .accum = .f32, .depth = gemmDepth, .out = .bf16, .tiles = .{ .{ .size = 64, .step = 1, .min = 1 }, .{ .size = 128, .step = 1, .min = 1 }, .{ .size = 256, .step = 256, .min = 256 } }, .served = &p.served }, .ctx = p, .vt = &vt }, p.mutation);
     }
 
     /// The shape the kernel runs at: whole tiles where its form assumes them (the padded rows are the probe's too).

@@ -6,6 +6,7 @@ const limits_k = @import("metal_limits.zig");
 const llama = @import("metal_llama.zig");
 const dense = @import("metal_llama_dense.zig");
 const attention = @import("metal_llama_attention.zig");
+const controls = @import("metal_llama_controls.zig");
 const g = contract.gates;
 const family = llama.family;
 
@@ -22,9 +23,9 @@ pub const Set = struct {
     glue: std.ArrayList(*llama.Glue) = .empty,
     matvec: std.ArrayList(*dense.Matvec) = .empty,
     gemm: std.ArrayList(*dense.Gemm) = .empty,
-    argmax: ?*llama.Argmax = null,
-    decode: ?*attention.DecodeVec = null,
-    merge: ?*attention.MergeVec = null,
+    argmax: std.ArrayList(*llama.Argmax) = .empty,
+    decode: std.ArrayList(*attention.DecodeVec) = .empty,
+    merge: std.ArrayList(*attention.MergeVec) = .empty,
     prompt: std.ArrayList(*attention.Prompt) = .empty,
 
     pub fn deinit(s: *Set, a: std.mem.Allocator) void {
@@ -44,18 +45,21 @@ pub const Set = struct {
             p.deinit();
             a.destroy(p);
         }
-        if (s.argmax) |p| {
+        for (s.argmax.items) |p| {
             p.deinit();
             a.destroy(p);
         }
-        if (s.decode) |p| {
+        for (s.decode.items) |p| {
             p.deinit();
             a.destroy(p);
         }
-        if (s.merge) |p| {
+        for (s.merge.items) |p| {
             p.deinit();
             a.destroy(p);
         }
+        s.argmax.deinit(a);
+        s.decode.deinit(a);
+        s.merge.deinit(a);
         s.glue.deinit(a);
         s.matvec.deinit(a);
         s.gemm.deinit(a);
@@ -72,7 +76,7 @@ pub const Set = struct {
             if (!wanted(only, llama.spec(w).name)) continue;
             const p = try a.create(llama.Glue);
             errdefer a.destroy(p);
-            p.* = try llama.Glue.init(a, device, queue, w);
+            p.* = try llama.Glue.init(a, device, queue, w, .none);
             try s.glue.append(a, p);
             try kernels.append(a, p.kernel());
         }
@@ -81,8 +85,8 @@ pub const Set = struct {
         if (wanted(only, "llama glue ll_argmax")) {
             const p = try a.create(llama.Argmax);
             errdefer a.destroy(p);
-            p.* = try llama.Argmax.init(a, device, queue);
-            s.argmax = p;
+            p.* = try llama.Argmax.init(a, device, queue, .none);
+            try s.argmax.append(a, p);
             try kernels.append(a, p.kernel());
         }
         for ([_][]const u8{ "ll_decode_vec", "ll_merge_vec" }) |f| {
@@ -92,15 +96,15 @@ pub const Set = struct {
         if (wanted(only, "llama glue ll_decode_vec")) {
             const p = try a.create(attention.DecodeVec);
             errdefer a.destroy(p);
-            p.* = try attention.DecodeVec.init(a, device, queue);
-            s.decode = p;
+            p.* = try attention.DecodeVec.init(a, device, queue, .none);
+            try s.decode.append(a, p);
             try kernels.append(a, p.kernel());
         }
         if (wanted(only, "llama glue ll_merge_vec")) {
             const p = try a.create(attention.MergeVec);
             errdefer a.destroy(p);
-            p.* = try attention.MergeVec.init(a, device, queue);
-            s.merge = p;
+            p.* = try attention.MergeVec.init(a, device, queue, .none);
+            try s.merge.append(a, p);
             try kernels.append(a, p.kernel());
         }
         for (matvec_rows, matvec_names) |rows, fun| {
@@ -110,7 +114,7 @@ pub const Set = struct {
             if (!wanted(only, try std.fmt.bufPrint(&name_buf, "llama glue {s}", .{fun}))) continue;
             const p = try a.create(dense.Matvec);
             errdefer a.destroy(p);
-            p.* = try dense.Matvec.init(a, device, queue, rows);
+            p.* = try dense.Matvec.init(a, device, queue, rows, .none);
             try s.matvec.append(a, p);
             try kernels.append(a, p.kernel());
         }
@@ -122,7 +126,7 @@ pub const Set = struct {
             if (!tensor or !wanted(only, try std.fmt.bufPrint(&name_buf, "llama gemm {s}", .{fun}))) continue;
             const p = try a.create(dense.Gemm);
             errdefer a.destroy(p);
-            p.* = try dense.Gemm.init(a, device, queue, form[0], form[1]);
+            p.* = try dense.Gemm.init(a, device, queue, form[0], form[1], .none);
             try s.gemm.append(a, p);
             try kernels.append(a, p.kernel());
         }
@@ -133,11 +137,81 @@ pub const Set = struct {
             if (!tensor or !wanted(only, try std.fmt.bufPrint(&name_buf, "llama {s} attention ll_prompt_attention", .{geo.name}))) continue;
             const p = try a.create(attention.Prompt);
             errdefer a.destroy(p);
-            p.* = try attention.Prompt.init(a, device, queue, geo);
+            p.* = try attention.Prompt.init(a, device, queue, geo, .none);
             try s.prompt.append(a, p);
             try kernels.append(a, p.kernel());
         }
         try family.requireComplete(functions[0..n]);
+        try s.plant(a, device, queue, tensor, kernels, only);
+    }
+
+    /// Each control: its kernel built with one planted fault, registered beside the kernels.
+    fn plant(s: *Set, a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, tensor: bool, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !void {
+        for (std.enums.values(controls.Mutation)) |m| {
+            if (m == .none or !wanted(only, m.name())) continue;
+            const glue: ?llama.Which = switch (m) {
+                .embed_own_row => .embed,
+                .norm_mean_over_threads => .norm,
+                .add_wrong_sign => .add,
+                .add_norm_no_residual => .add_norm,
+                .silu_swapped => .silu,
+                .prep_first_position => .prep,
+                else => null,
+            };
+            if (glue) |w| {
+                const p = try a.create(llama.Glue);
+                errdefer a.destroy(p);
+                p.* = try llama.Glue.init(a, device, queue, w, m);
+                try s.glue.append(a, p);
+                try kernels.append(a, p.kernel());
+                continue;
+            }
+            switch (m) {
+                .argmax_nan_loses => {
+                    const p = try a.create(llama.Argmax);
+                    errdefer a.destroy(p);
+                    p.* = try llama.Argmax.init(a, device, queue, m);
+                    try s.argmax.append(a, p);
+                    try kernels.append(a, p.kernel());
+                },
+                .decode_no_rescale => {
+                    const p = try a.create(attention.DecodeVec);
+                    errdefer a.destroy(p);
+                    p.* = try attention.DecodeVec.init(a, device, queue, m);
+                    try s.decode.append(a, p);
+                    try kernels.append(a, p.kernel());
+                },
+                .merge_unscaled_mass => {
+                    const p = try a.create(attention.MergeVec);
+                    errdefer a.destroy(p);
+                    p.* = try attention.MergeVec.init(a, device, queue, m);
+                    try s.merge.append(a, p);
+                    try kernels.append(a, p.kernel());
+                },
+                .matvec_drops_tail => {
+                    const p = try a.create(dense.Matvec);
+                    errdefer a.destroy(p);
+                    p.* = try dense.Matvec.init(a, device, queue, 4, m);
+                    try s.matvec.append(a, p);
+                    try kernels.append(a, p.kernel());
+                },
+                .gemm_untransposed => if (tensor) {
+                    const p = try a.create(dense.Gemm);
+                    errdefer a.destroy(p);
+                    p.* = try dense.Gemm.init(a, device, queue, false, false, m);
+                    try s.gemm.append(a, p);
+                    try kernels.append(a, p.kernel());
+                },
+                .prompt_sees_next_key => if (tensor) {
+                    const p = try a.create(attention.Prompt);
+                    errdefer a.destroy(p);
+                    p.* = try attention.Prompt.init(a, device, queue, family.nanbeige41, m);
+                    try s.prompt.append(a, p);
+                    try kernels.append(a, p.kernel());
+                },
+                else => unreachable,
+            }
+        }
     }
 };
 
