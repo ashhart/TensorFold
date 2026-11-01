@@ -9,7 +9,7 @@ const st = @import("state.zig");
 const kv_pages = @import("kv_pages.zig");
 const kvp = @import("../../core/metal_kv_pages.zig");
 const lesson_route = @import("living").lesson_route;
-const layers = @import("layers.zig");
+const prompt_pages = @import("prompt_pages.zig");
 const mtp = @import("mtp.zig");
 const timing = @import("timing.zig");
 const tree = @import("tree.zig");
@@ -82,6 +82,8 @@ pub const Metal = struct {
     kv_tables: ?mtl.Buffer = null, // and every lane's page table
     kv_pages: ?*kvp.Pages = null, // the core pool over them: a stream leases a lane's pages when it opens
     kv_pipes: ?*kv_pages.Pipelines = null, // the paged twins (the model's kernels point at them)
+    prompts: ?@import("../../core/kv_prompts.zig").Prompts = null, // TF_KV_SHARE: the store keeping prompts as pages
+    pending: ?*const snapshot.Snap = null, // the store's resume, restored once the stream's lane adopts its pages
 
     pub fn init(gpa: std.mem.Allocator, m: *Model, o: Options) !*Metal {
         const b = try gpa.create(Metal);
@@ -251,7 +253,10 @@ pub const Metal = struct {
             self.gpa.destroy(old);
             _ = self.caches.remove(s);
         }
-        const c = try @import("residency.zig").openCache(self, s, rows_needed);
+        var pass = try prompt_pages.Pass.begin(self, s);
+        var ok = false;
+        defer pass.end(self, s, ok);
+        const c = try @import("residency.zig").openCache(self, s, rows_needed, pass.held());
         @memcpy(self.prompt.slice(u32, ids.len), ids);
         const Chunks = struct {
             n: usize,
@@ -291,7 +296,7 @@ pub const Metal = struct {
             }
         };
         s.cached = 0;
-        var at: usize = 0;
+        var at = try pass.resume_(self, s, c); // TF_KV_SHARE: the store's kept pages and state
         if (s.reuse.saved) |saved| { // a kept state of this prompt's prefix: the pass starts there
             const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
             if (snap.at < ids.len) if (snapshot.restore(self, c, snap)) |_| {
@@ -308,6 +313,7 @@ pub const Metal = struct {
             var end = if (k < s.chunks.len) @min(s.chunks[k], ids.len) else ids.len;
             // the decision row ends its chunk: the rows after it read the lessons it latched
             if (c.decide != lesson_route.none and c.decide >= at and c.decide + 1 < end) end = @intCast(c.decide + 1);
+            end = pass.cut(at, end); // TF_KV_SHARE: a chunk ends at the store's next mark
             const rows = @min(self.o.chunk, end - at);
             if (s.isCancelled()) return error.Cancelled; // release() waits for the chunk still in flight
             try kv_pages.grow(c, at + rows);
@@ -317,23 +323,10 @@ pub const Metal = struct {
             // landed tokens only: the newest chunk is still queued on the GPU
             s.fill_at.store(@intCast(at - rows), .monotonic);
             if (s.reuse.hook) |hk| if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(at)) != null) hk.at(hk.ptr, s, @intCast(at));
+            pass.mark(self, s, c, at);
         }
-        if (self.trace and c.decide != lesson_route.none) try self.traceLessons(c);
-    }
-
-    /// Dev trace (TF_SLIDE_TRACE): the stream's router scores at its decision row and the lessons acting on its reply.
-    fn traceLessons(self: *Metal, c: *const st.Cache) !void {
-        const ad = layers.firstAdapter(&self.m.weights) orelse return;
-        try self.drain();
-        const n = lesson_route.max_blocks;
-        const at: usize = @intCast(@max(c.rid, 0));
-        const score = ad.score.slice(f32, lesson_route.max_slots * n)[at * n ..][0..n];
-        const flags = ad.latch.slice(u32, lesson_route.max_slots * n)[at * n ..][0..n];
-        const need = ad.need.slice(f32, n);
-        var line: [2048]u8 = undefined;
-        var w: std.Io.Writer = .fixed(&line);
-        for (0..ad.rank / 16) |b| w.print(" {d:.2}/{d:.2}{s}", .{ score[b], need[b], if (flags[b] != 0) "*" else "" }) catch break;
-        std.log.info("slide trace: decision row {d}: scores{s} (* acting)", .{ c.decide, w.buffered() });
+        ok = true;
+        if (self.trace and c.decide != lesson_route.none) try @import("slide.zig").traceLessons(self, c);
     }
 
     fn firstFn(ptr: *anyopaque, s: *lanes.Stream, position: u64) anyerror!u64 {

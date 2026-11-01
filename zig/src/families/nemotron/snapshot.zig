@@ -10,7 +10,7 @@ const kvp = @import("../../core/metal_kv_pages.zig");
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
 /// One kept state: `at` prompt tokens of one stream, in one buffer the GPU copies on the engine's queue.
-pub const Snap = struct { at: u32, head: bool, buf: mtl.Buffer, bytes: usize, residency: ?mtl.ResidencySet.Follow = null };
+pub const Snap = struct { at: u32, head: bool, buf: mtl.Buffer, bytes: usize, residency: ?mtl.ResidencySet.Follow = null, pages: bool = false };
 
 fn convBytes(c: cfg.Config) usize {
     return (c.conv_kernel - 1) * c.convDim() * 2;
@@ -30,10 +30,10 @@ pub fn diskShape(c: cfg.Config, head: bool) struct { mamba: usize, planes: usize
     return .{ .mamba = c.count(.mamba) * (convBytes(c) + ssmBytes(c)), .planes = (c.count(.attention) + @intFromBool(head)) * 2 * c.kv_heads, .row = @intCast(rowBytes(c, 1)) };
 }
 
-/// The bytes a state at `at` tokens takes (with the head's cache when `head`).
-pub fn bytes(c: cfg.Config, at: usize, head: bool) usize {
+/// The bytes a state at `at` tokens takes (with the head's cache when `head`; `pages`: its rows stay in pool pages).
+pub fn bytes(c: cfg.Config, at: usize, head: bool, pages: bool) usize {
     const kvs = c.count(.attention) + @intFromBool(head);
-    return c.count(.mamba) * (convBytes(c) + ssmBytes(c)) + kvs * 2 * c.kv_heads * rowBytes(c, at);
+    return c.count(.mamba) * (convBytes(c) + ssmBytes(c)) + if (pages) 0 else kvs * 2 * c.kv_heads * rowBytes(c, at);
 }
 
 /// Copies between a stream's live rows (Mamba states in `slot`) and `snap`, a dispatch each (`into`: live to snap).
@@ -65,7 +65,8 @@ const Copies = struct {
             self.part(b, e, &off, b.pool.ssm[m], self.slot * ssmBytes(c), ssmBytes(c));
         }
         const n = rowBytes(c, self.snap.at);
-        for (0..self.c.attentions + @intFromBool(self.c.mtp != null)) |i| {
+        const kvs = if (self.snap.pages) 0 else self.c.attentions + @intFromBool(self.c.mtp != null); // TF_KV_SHARE: shared
+        for (0..kvs) |i| {
             const kv = if (i < self.c.attentions) self.c.kv[i] else self.c.mtp.?;
             if (kv.paged) |p| {
                 // the same bytes as a contiguous cache's: a head's rows in order, a page's run of them a part
@@ -86,13 +87,13 @@ const Copies = struct {
 };
 
 /// The stream's state after `at` prompt tokens (its pass stands there) into a new buffer, copied on the queue.
-pub fn save(b: *Metal, cache: *st.Cache, at: u32) !*Snap {
+pub fn save(b: *Metal, cache: *st.Cache, at: u32, pages: bool) !*Snap {
     const head = cache.mtp != null;
     if (at == 0 or cache.len != at or cache.replay != 0 or cache.pending != null or (head and cache.mtp_len != at)) return error.SnapshotOutOfStep;
-    const n = bytes(b.m.config, at, head);
+    const n = bytes(b.m.config, at, head, pages);
     const snap = try b.gpa.create(Snap);
     errdefer b.gpa.destroy(snap);
-    snap.* = .{ .at = at, .head = head, .buf = try b.m.device.buffer(n, opts), .bytes = n };
+    snap.* = .{ .at = at, .head = head, .buf = try b.m.device.buffer(n, opts), .bytes = n, .pages = pages };
     errdefer snap.buf.deinit();
     try b.submit(.prefill, b.next, Copies{ .c = cache, .slot = cache.slot, .snap = snap, .into = true });
     snap.residency = b.residency;
@@ -104,7 +105,7 @@ pub fn save(b: *Metal, cache: *st.Cache, at: u32) !*Snap {
 pub fn restore(b: *Metal, cache: *st.Cache, snap: *const Snap) !void {
     if (cache.len != 0 or snap.head != (cache.mtp != null)) return error.SnapshotLayout;
     if (snap.at + 1 > cache.kv[0].capacity) return error.ContextFull;
-    try @import("kv_pages.zig").grow(cache, snap.at);
+    if (!snap.pages) try @import("kv_pages.zig").grow(cache, snap.at); // shared: the pages are the adopted ones
     const slot = try b.pool.take();
     errdefer b.pool.give(slot);
     try b.submit(.prefill, b.next, Copies{ .c = cache, .slot = slot, .snap = snap, .into = false });
@@ -122,19 +123,19 @@ pub fn drop(b: *Metal, snap: *Snap) void {
 
 /// The prompt cache's Snapshots functions over the Metal backend (`ptr`: the *Metal, `owner`: the stream).
 pub const Cached = struct {
-    fn metal(ptr: *anyopaque) *Metal {
+    pub fn metal(ptr: *anyopaque) *Metal {
         return @ptrCast(@alignCast(ptr));
     }
 
     pub fn snapBytes(ptr: *anyopaque, at: u32) u64 {
         const b = metal(ptr);
-        return bytes(b.m.config, at, b.head != null);
+        return bytes(b.m.config, at, b.head != null, false);
     }
 
     pub fn snapSave(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
         const b = metal(ptr);
         const c = try b.cacheOf(@ptrCast(@alignCast(owner orelse return error.NoStream)));
-        return @ptrCast(try save(b, c, at));
+        return @ptrCast(try save(b, c, at, false));
     }
 
     pub fn snapRestore(_: *anyopaque, _: ?*anyopaque, _: *anyopaque) anyerror!void {
@@ -144,6 +145,38 @@ pub const Cached = struct {
     pub fn snapDrop(ptr: *anyopaque, saved: *anyopaque) void {
         drop(metal(ptr), @ptrCast(@alignCast(saved)));
     }
+};
+
+/// TF_KV_SHARE: the prompt store's functions over the Metal backend; a state is its Mamba states, its rows the pages.
+pub const Shared = struct {
+    const metal = Cached.metal;
+    pub const snap_lookahead: u32 = 1; // the head's row for a token waits for the next one
+
+    pub fn share_pool(ptr: *anyopaque) ?*@import("../../core/kv_pool.zig").Pool {
+        return if (metal(ptr).kv_pages) |p| &p.pool else null;
+    }
+
+    pub fn share_attach(ptr: *anyopaque, prompts: ?@import("../../core/kv_prompts.zig").Prompts) void {
+        metal(ptr).prompts = prompts;
+    }
+
+    pub fn snap_bytes(ptr: *anyopaque, at: u32) u64 {
+        const b = metal(ptr);
+        return bytes(b.m.config, at, b.head != null, true);
+    }
+
+    pub fn snap_save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
+        const b = metal(ptr);
+        const c = try b.cacheOf(@ptrCast(@alignCast(owner orelse return error.NoStream)));
+        return @ptrCast(try save(b, c, at, true));
+    }
+
+    /// The store's resume: the stream's pass restores it once its lane holds the adopted pages.
+    pub fn snap_restore(ptr: *anyopaque, _: ?*anyopaque, saved: *anyopaque) anyerror!void {
+        metal(ptr).pending = @ptrCast(@alignCast(saved));
+    }
+
+    pub const snap_drop = Cached.snapDrop;
 };
 
 test "a state's bytes: fixed Mamba states, then a key and value row per KV head and attention layer a token" {
@@ -160,7 +193,8 @@ test "a state's bytes: fixed Mamba states, then a key and value row per KV head 
     c.kinds[1] = .moe;
     c.kinds[2] = .attention;
     const fixed = 3 * 6144 * 2 + 64 * 64 * 128 * 4;
-    try std.testing.expectEqual(@as(usize, fixed), bytes(c, 0, true));
-    try std.testing.expectEqual(@as(usize, 2 * 2 * 2 * 128 * 2), bytes(c, 1, true) - bytes(c, 0, true));
-    try std.testing.expectEqual(@as(usize, 2 * 2 * 128 * 2), bytes(c, 1, false) - bytes(c, 0, false));
+    try std.testing.expectEqual(@as(usize, fixed), bytes(c, 0, true, false));
+    try std.testing.expectEqual(@as(usize, 2 * 2 * 2 * 128 * 2), bytes(c, 1, true, false) - bytes(c, 0, true, false));
+    try std.testing.expectEqual(@as(usize, 2 * 2 * 128 * 2), bytes(c, 1, false, false) - bytes(c, 0, false, false));
+    try std.testing.expectEqual(@as(usize, fixed), bytes(c, 4096, true, true)); // TF_KV_SHARE: the rows stay in pages
 }

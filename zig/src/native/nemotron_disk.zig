@@ -38,7 +38,7 @@ fn gather(ptr: *anyopaque, saved: api.prompt_cache.Saved, ranges: []const rows.i
 fn blank(ptr: *anyopaque, at: u32) anyerror!api.prompt_cache.Saved {
     const b = metal(ptr);
     const head = b.head != null;
-    const n = nemotron.snapshot.bytes(b.m.config, at, head);
+    const n = nemotron.snapshot.bytes(b.m.config, at, head, false);
     const snap = try b.gpa.create(Snap);
     errdefer b.gpa.destroy(snap);
     snap.* = .{ .at = at, .head = head, .buf = try b.m.device.buffer(n, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked), .bytes = n };
