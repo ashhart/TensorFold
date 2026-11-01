@@ -152,8 +152,21 @@ pub const Kernels = struct {
         if ((skip > 0 or cut[1] > 0) and p.raw != null) return error.BadCoreProjectionRows;
         if (skip > 0 and (p.raw != null or skip >= p.n / 64)) return error.BadCoreProjectionRows;
         if (p.raw) |raw| if (raw.bits != 4 and k.tiled(raw)) {
-            if (rows == 0 or rows > 128 or p.tile != 32) return error.BadCoreProjectionRows;
-            return k.strided(input_encoder, raw, x, y, rows, @intCast(raw.n), p.gn);
+            if (rows == 0 or p.tile != 32) return error.BadCoreProjectionRows;
+            // A raw matrix takes at most 128 rows a dispatch; a prompt pass can hand it up to the frame's 2,048.
+            const stride: u32 = @intCast(raw.n);
+            var done: u32 = 0;
+            while (done < rows) : (done += 128) {
+                const take = @min(rows - done, 128);
+                try k.strided(input_encoder, raw, .{
+                    .buffer = x.buffer,
+                    .offset = x.offset + @as(usize, done) * raw.k * 2,
+                }, .{
+                    .buffer = y.buffer,
+                    .offset = y.offset + @as(usize, done) * @as(usize, stride) * 2,
+                }, take, stride, p.gn);
+            }
+            return;
         };
         var span = profile.begin(k.profiler, input_encoder, .dense);
         // Prompt rows take the checkpoint matrix's split, as decoded rows already do through `p.slices`.
@@ -217,10 +230,21 @@ pub const Kernels = struct {
 
     /// A mixed stack: each member its own product into its columns; row kernels write the fused rows at a stride.
     fn quantRuns(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: ?Sums, dims: Ref, y: Ref, rows: u32, skip: u32, cut: [2]u32) !void {
-        if (skip > 0 or cut[1] > 0 or rows == 0 or rows > 128) return error.BadCoreProjectionRows;
+        if (skip > 0 or cut[1] > 0 or rows == 0) return error.BadCoreProjectionRows;
         for (p.runs) |run| {
             if (run.linear.raw) |raw| {
-                try k.strided(input_encoder, raw, x, .{ .buffer = y.buffer, .offset = y.offset + @as(usize, run.first) * 2 }, rows, p.n, run.linear.gn);
+                // The raw member takes 128 rows a dispatch, as quantOne does; lane siblings below run one row a launch.
+                var done: u32 = 0;
+                while (done < rows) : (done += 128) {
+                    const take = @min(rows - done, 128);
+                    try k.strided(input_encoder, raw, .{
+                        .buffer = x.buffer,
+                        .offset = x.offset + @as(usize, done) * raw.k * 2,
+                    }, .{
+                        .buffer = y.buffer,
+                        .offset = y.offset + (@as(usize, done) * p.n + run.first) * 2,
+                    }, take, p.n, run.linear.gn);
+                }
                 continue;
             }
             for (0..rows) |r| { // lane kernels take one row a launch until they write at a stride
