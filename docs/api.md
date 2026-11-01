@@ -237,9 +237,10 @@ the next one: a short request starts at the next chunk, and a long prompt still 
 between chunks for `--decode-share` of each chunk's time (0.25 is the Python engine's default). On a native server
 the flag is the reply's share, and the prompt owes its complement: it also offers a 512-row cap on a filling
 prompt's chunks to families that declare chunk-independent prompt arithmetic. That offer is gated per family
-behind device token-hash qualification; every native family is gated out today, so no native server caps chunk
-rows yet. Absent the flag the engines keep their own cuts and `TENSORFOLD_PREFILL_SHARE` keeps its old meaning:
-the prompt's share of a fill step's wall time, time only, never smaller chunks. The CUDA, qwen27 Metal and
+behind device token-hash qualification; LFM3 on Metal declares it (cut-invariance by `tf-lfm3-nax-exact`, served
+token equality under the flag), and no other native family does yet. Absent the flag the engines keep their own cuts
+and `TENSORFOLD_PREFILL_SHARE` keeps its old meaning:
+the prompt's share of a fill step's wall time, time only, never smaller chunks. The CUDA, qwen27 Metal, LFM3 Metal and
 hip_serve servers pass the flag to their lane host and take its time share; the DeepSeek, Spark-X on Metal, Qwen4
 and XPU servers do not parse or apply the flag. `--decode-share 0` prefills each prompt
 whole

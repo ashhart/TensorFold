@@ -18,6 +18,15 @@ pub fn steps(b: *std.Build, all: *std.Build.Step) void {
         const run = b.addRunArtifact(b.addTest(.{ .root_module = root }));
         checks.dependOn(&run.step);
     }
+    const image = b.createModule(.{
+        .root_source_file = b.path("zig/src/lfm3_image_tests.zig"),
+        .target = b.graph.host,
+        .link_libc = true,
+    });
+    const image_run = b.addRunArtifact(b.addTest(.{ .root_module = image }));
+    const image_checks = b.step("test-lfm3-image-host", "LFM3 image geometry and shared decoder checks");
+    image_checks.dependOn(&image_run.step);
+    checks.dependOn(image_checks);
     const memory = b.createModule(.{ .root_source_file = b.path("zig/src/gpu_memory.zig"), .target = b.graph.host });
     const contract = b.createModule(.{
         .root_source_file = b.path("zig/src/core/contract.zig"),

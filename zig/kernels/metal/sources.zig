@@ -30,7 +30,10 @@ pub const lfm2_attn_nax = @embedFile("lfm2/lfm2_attn_nax.metal");
 
 pub const lfm3 = @embedFile("lfm3/ops.metal");
 pub const lfm3_attention = @embedFile("lfm3/attention.metal");
+pub const lfm3_attention_tiled = @embedFile("lfm3/attention_tiled.metal");
+pub const lfm3_attention_split = @embedFile("lfm3/attention_split.metal");
 pub const lfm3_image_rows = @embedFile("lfm3/image_rows.metal");
+pub const lfm3_vision = @embedFile("lfm3/vision.metal");
 pub const lfm3_projection_dual = @embedFile("lfm3/projectiondual.metal");
 pub const lfm3_projection = @embedFile("lfm3/projection.metal");
 

@@ -1,0 +1,349 @@
+{
+  "checkpoint": "LiquidAI/LFM3-VL-2B-MLX-8bit",
+  "phase": "prompt",
+  "image": {
+    "url": "https://placecats.com/300/200",
+    "jpeg_sha256": "d1b324f529a96d8d8a16d973d88e1e974905d9c2c0e3e8b21a50b1c0e3fe2379",
+    "canonical_png_sha256": "005500792ee8ea6f35ac369d900fc788cd77667f145e7100c2cff57fae5355d9",
+    "conversion": "macOS sips JPEG to PNG; canonical PNG is the exact native/reference input"
+  },
+  "grid": [
+    14,
+    20
+  ],
+  "image_start": 4,
+  "image_rows": 70,
+  "suffix_start": 74,
+  "suffix_rows": 16,
+  "scope": "Independent CPU FP32 arithmetic replay with explicitly delegated Metal scalar elementary functions; not an independent FP64 pass",
+  "ideal_fp64_retained": {
+    "receipt": "real-image-fp64.json",
+    "suffix_differences": [
+      {
+        "row": 81,
+        "native_top": 78,
+        "reference_top": 851,
+        "native_maximum_set": [
+          78
+        ],
+        "reference_maximum_set": [
+          851
+        ],
+        "maximum_sets_overlap": false,
+        "native_margin": 0.125,
+        "reference_margin": 0.40625,
+        "native_reference_contender_gap": 0.125,
+        "reference_native_contender_gap": 0.40625
+      },
+      {
+        "row": 88,
+        "native_top": 309,
+        "reference_top": 22,
+        "native_maximum_set": [
+          309
+        ],
+        "reference_maximum_set": [
+          22
+        ],
+        "maximum_sets_overlap": false,
+        "native_margin": 0.0625,
+        "reference_margin": 0.0625,
+        "native_reference_contender_gap": 0.0625,
+        "reference_native_contender_gap": 0.0625
+      }
+    ]
+  },
+  "vision_stages": [
+    {
+      "stage": "patchifier",
+      "values": 286720,
+      "different_bf16": 0
+    },
+    {
+      "stage": "embedding_norm",
+      "values": 286720,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_00",
+      "values": 286720,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_01",
+      "values": 286720,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_02",
+      "values": 286720,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_03",
+      "values": 286720,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_04",
+      "values": 286720,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_05",
+      "values": 286720,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_06",
+      "values": 286720,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_07",
+      "values": 286720,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_08",
+      "values": 286720,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_09",
+      "values": 286720,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_10",
+      "values": 286720,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_11",
+      "values": 286720,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_12",
+      "values": 286720,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_13",
+      "values": 286720,
+      "different_bf16": 0
+    },
+    {
+      "stage": "projector_norm",
+      "values": 286720,
+      "different_bf16": 0
+    },
+    {
+      "stage": "projector_gelu",
+      "values": 286720,
+      "different_bf16": 0
+    }
+  ],
+  "text_stages": [
+    {
+      "stage": "layer_00_output",
+      "values": 184320,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_01_output",
+      "values": 184320,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_02_output",
+      "values": 184320,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_03_output",
+      "values": 184320,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_04_output",
+      "values": 184320,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_05_output",
+      "values": 184320,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_06_output",
+      "values": 184320,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_07_output",
+      "values": 184320,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_08_output",
+      "values": 184320,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_09_output",
+      "values": 184320,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_10_output",
+      "values": 184320,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_11_output",
+      "values": 184320,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_12_output",
+      "values": 184320,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_13_output",
+      "values": 184320,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_14_output",
+      "values": 184320,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_15_output",
+      "values": 184320,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_16_output",
+      "values": 184320,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_17_output",
+      "values": 184320,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_18_output",
+      "values": 184320,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_19_output",
+      "values": 184320,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_20_output",
+      "values": 184320,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_21_output",
+      "values": 184320,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_22_output",
+      "values": 184320,
+      "different_bf16": 0
+    },
+    {
+      "stage": "layer_23_output",
+      "values": 184320,
+      "different_bf16": 0
+    }
+  ],
+  "projected_image": {
+    "values": 143360,
+    "different_bf16": 0,
+    "sha256": "aceb2b880177abfae718bdd660398b3cd7ee990d2dfcdce2a110d08dc4e33135"
+  },
+  "decoder_logits": {
+    "values": 11520000,
+    "different_bf16": 0,
+    "sha256": "db730509b6d7dcb3d6d134b59b6434dfb43ebc85cdd3fe351bc8cc4148b47642",
+    "suffix_top1_differences": 0
+  },
+  "first_attention_elementary_diagnostic": {
+    "scope": "Fixed native Q/K/V, independently replayed FP32 arithmetic with captured elementary functions",
+    "rows": 280,
+    "score_values": 1254400,
+    "score_differences": 0,
+    "raw_values": 291200,
+    "raw_differences": 0,
+    "helper_context_differences": 0,
+    "exp_values": 2508800,
+    "exp_differences_vs_fp64_rounded": 463691,
+    "maximum_exp_ulp_vs_fp64_rounded": 1,
+    "accepted_threshold": null,
+    "whole_model_fidelity_pass": null
+  },
+  "rounding_causes": [
+    "FP32 lane reduction/FMA sites",
+    "FP32 normalization reduction and rsqrt sites",
+    "Metal exp/exp2/cos/sin elementary rounding",
+    "FP32 subnormal normalization products flushed before BF16 store"
+  ],
+  "rotary_fixed_primitive_replay": {
+    "query_values": 286720,
+    "key_values": 143360,
+    "different_bf16": 0
+  },
+  "accepted_threshold": null,
+  "independent_fp64_fidelity_pass": null,
+  "runtime_changes": "Trace-only snapshots; no arithmetic changes",
+  "reproduction": "fidelity-replay.md#real-image-rounding-causality",
+  "artifact_identity": {
+    "tested_host": {
+      "chip": "Apple M4 Pro",
+      "model_identifier": "Mac16,7",
+      "memory_gib": 48,
+      "macos": "26.5.1",
+      "macos_build": "25F80",
+      "architecture": "arm64"
+    },
+    "native_decoder_baseline": {
+      "diagnostic_sha256": "e80a2a14c0d8ed20b62088d0d8b87be4beb5fed3eb1a7336b3b00f8ac5f74bee",
+      "logits_sha256": "db730509b6d7dcb3d6d134b59b6434dfb43ebc85cdd3fe351bc8cc4148b47642",
+      "scope": "Previously frozen native baseline from real-image-fp64.json; not a claim that later runtime revisions were requalified"
+    },
+    "native_vision_canonical_recapture": {
+      "diagnostic_sha256": "7a635c8439842ae2bf8e7993cacf1a8cea0a386f57033654d74c08e65292efea",
+      "projected_image_sha256": "aceb2b880177abfae718bdd660398b3cd7ee990d2dfcdce2a110d08dc4e33135",
+      "source_sha256": {
+        "zig/src/families/lfm3/vision.zig": "c80661799c9e9fd7d71d6cbb2838c9701388cd3f292496f346956b3edd8a21e0",
+        "zig/kernels/metal/lfm3/vision.metal": "7f6338698948bebe80fe21b60b2c68c0a55a08208e8a768715016a02976e846a"
+      }
+    },
+    "reference_source_sha256": {
+      "tools/lfm3/fp64_reference.py": "0fb1128ade095db87b6126792ab14930792ab1f7b41b998570356bc586f16b2e",
+      "tools/lfm3/row_projection_reference.py": "d03f224a037a920ba66b9828059d1489e48729cd168077e76789d0ec5c199c0c",
+      "tools/lfm3/row_projection_replay.c": "ff336f75fcf0a4f6c0ac92ed627bc1a6abb0b36b8f4cc95d876f2a8bb2f5cc42",
+      "tools/lfm3/elementary_reference.py": "3e4db276278867b7683536044ed7bcbe4c7643867d722fdda5b8ad895b3963e7",
+      "tools/lfm3/text_rounding_reference.py": "52665eef48570d45a2554861fe8f22b31874f8f464366adf882f40c3d311db27",
+      "tools/lfm3/text_attention_rounding.py": "ae67f2b2c26f89f75b1f36822a4b30a9f710df2b42f9f7ec42679373028b89e8",
+      "tools/lfm3/vision_fp64_reference.py": "742b8b4f44dde824c3a5c2d72a632401a0f9df7b7f23a8d3729d15f4f8c6a4d2",
+      "tools/lfm3/vision_rounding_reference.py": "8b2f5679bbd3f05b3e86a5748c3803f744502cffd0159bee2a218da38bd6f1c4",
+      "tools/lfm3/vision_attention_rounding.py": "37d99908f7b324740d098276f3d014cc9cc740587a8b798cde8be83d6dcef60d"
+    },
+    "optional_c_accelerator_sha256": "fd3bdcc07800ca3e4bda472228c5fc86afa1f8eab7c2ba4669b0eae1e07df82b",
+    "elementary_capture": {
+      "shader_sha256": "7f6338698948bebe80fe21b60b2c68c0a55a08208e8a768715016a02976e846a",
+      "scope": "Actual production helper diagnostic, not independent FP64 reference"
+    }
+  }
+}

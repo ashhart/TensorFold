@@ -53,7 +53,7 @@ pub const Kernels = struct {
 
 pub fn load(device: mtl.Device) !Kernels {
     const gpa = std.heap.c_allocator;
-    const source = try std.mem.concat(gpa, u8, &.{ sources.lfm3, "\n", sources.lfm3_attention });
+    const source = try std.mem.concat(gpa, u8, &.{ if (@import("lfm3_options").risk_fast) "#define L3_RISK_FAST 1\n" else "", sources.lfm3, "\n", sources.lfm3_attention });
     defer gpa.free(source);
     const library = try mtl.Library.fromSource(device, source, mtl.CompileOptions.mlx());
     defer library.deinit();

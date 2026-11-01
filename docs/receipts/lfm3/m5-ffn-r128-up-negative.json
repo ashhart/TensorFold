@@ -1,0 +1,215 @@
+{
+  "scope": "Private TEXT4 layer00 genuineR128 fullwidth UP projection; five balanced rounds; negative performance result",
+  "production_default_changed": false,
+  "shape": {
+    "rows": 128,
+    "n": 7680,
+    "k": 2048,
+    "group": 64,
+    "bits": 4
+  },
+  "numerical": {
+    "candidate_rounded_fp64_word_differences": 0,
+    "public_rounded_fp64_word_differences": 16,
+    "worse_columns": 0,
+    "output_count": 983040,
+    "captured_public_up_identity": true,
+    "selected_g53_repairs": 2297,
+    "serial_fallback": 0,
+    "all_eight_controls_rejected": true
+  },
+  "timing": {
+    "public_median_us": 478.09114403207786,
+    "candidate_median_us": 480.5013049917761,
+    "candidate_throughput_ratio": 0.9949840698981255,
+    "candidate_latency_increase_fraction": 0.005041216491423972,
+    "rounds": 5,
+    "common_repetitions": 64,
+    "baseline_drift_fraction": 6.263831105199126e-05,
+    "within_round_spread_fractions": [
+      6.944327925683365e-05,
+      0.00022094080929065723,
+      6.817742877562606e-06,
+      0.0011866840284097755,
+      4.9033397572359836e-05,
+      0.00019503463908279985,
+      1.225191647940069e-05,
+      0.0008984324228322081,
+      2.3148138107818685e-05,
+      0.0010228061269593458
+    ],
+    "all_stability_gates_passed": true,
+    "raw_records": [
+      {
+        "round": 0,
+        "leg": 0,
+        "variant": 1,
+        "repeats": 64,
+        "gpu_seconds": 0.030736375134438276,
+        "warm_gpu_seconds": 0.03074458334594965
+      },
+      {
+        "round": 0,
+        "leg": 1,
+        "variant": 0,
+        "repeats": 64,
+        "gpu_seconds": 0.030598875135183334,
+        "warm_gpu_seconds": 0.03059916663914919
+      },
+      {
+        "round": 0,
+        "leg": 2,
+        "variant": 0,
+        "repeats": 64,
+        "gpu_seconds": 0.03059675032272935,
+        "warm_gpu_seconds": 0.030608583241701126
+      },
+      {
+        "round": 0,
+        "leg": 3,
+        "variant": 1,
+        "repeats": 64,
+        "gpu_seconds": 0.03074316680431366,
+        "warm_gpu_seconds": 0.03080249996855855
+      },
+      {
+        "round": 1,
+        "leg": 0,
+        "variant": 0,
+        "repeats": 64,
+        "gpu_seconds": 0.03059912519529462,
+        "warm_gpu_seconds": 0.030600666534155607
+      },
+      {
+        "round": 1,
+        "leg": 1,
+        "variant": 1,
+        "repeats": 64,
+        "gpu_seconds": 0.030739666894078255,
+        "warm_gpu_seconds": 0.03081958368420601
+      },
+      {
+        "round": 1,
+        "leg": 2,
+        "variant": 1,
+        "repeats": 64,
+        "gpu_seconds": 0.030776166822761297,
+        "warm_gpu_seconds": 0.030767499934881926
+      },
+      {
+        "round": 1,
+        "leg": 3,
+        "variant": 0,
+        "repeats": 64,
+        "gpu_seconds": 0.030598916579037905,
+        "warm_gpu_seconds": 0.03059904184192419
+      },
+      {
+        "round": 2,
+        "leg": 0,
+        "variant": 1,
+        "repeats": 64,
+        "gpu_seconds": 0.030761000234633684,
+        "warm_gpu_seconds": 0.030730499885976315
+      },
+      {
+        "round": 2,
+        "leg": 1,
+        "variant": 0,
+        "repeats": 64,
+        "gpu_seconds": 0.0305995000526309,
+        "warm_gpu_seconds": 0.030598958488553762
+      },
+      {
+        "round": 2,
+        "leg": 2,
+        "variant": 0,
+        "repeats": 64,
+        "gpu_seconds": 0.030597999691963196,
+        "warm_gpu_seconds": 0.030620625242590904
+      },
+      {
+        "round": 2,
+        "leg": 3,
+        "variant": 1,
+        "repeats": 64,
+        "gpu_seconds": 0.030767000280320644,
+        "warm_gpu_seconds": 0.0307437083683908
+      },
+      {
+        "round": 3,
+        "leg": 0,
+        "variant": 0,
+        "repeats": 64,
+        "gpu_seconds": 0.03059599967673421,
+        "warm_gpu_seconds": 0.03060012497007847
+      },
+      {
+        "round": 3,
+        "leg": 1,
+        "variant": 1,
+        "repeats": 64,
+        "gpu_seconds": 0.030734583269804716,
+        "warm_gpu_seconds": 0.030730499885976315
+      },
+      {
+        "round": 3,
+        "leg": 2,
+        "variant": 1,
+        "repeats": 64,
+        "gpu_seconds": 0.030762208625674248,
+        "warm_gpu_seconds": 0.03075666632503271
+      },
+      {
+        "round": 3,
+        "leg": 3,
+        "variant": 0,
+        "repeats": 64,
+        "gpu_seconds": 0.030595624819397926,
+        "warm_gpu_seconds": 0.030600874684751034
+      },
+      {
+        "round": 4,
+        "leg": 0,
+        "variant": 1,
+        "repeats": 64,
+        "gpu_seconds": 0.030741041991859674,
+        "warm_gpu_seconds": 0.030798583291471004
+      },
+      {
+        "round": 4,
+        "leg": 1,
+        "variant": 0,
+        "repeats": 64,
+        "gpu_seconds": 0.03059766674414277,
+        "warm_gpu_seconds": 0.03059862507507205
+      },
+      {
+        "round": 4,
+        "leg": 2,
+        "variant": 0,
+        "repeats": 64,
+        "gpu_seconds": 0.030596958473324776,
+        "warm_gpu_seconds": 0.030605708248913288
+      },
+      {
+        "round": 4,
+        "leg": 3,
+        "variant": 1,
+        "repeats": 64,
+        "gpu_seconds": 0.030772500205785036,
+        "warm_gpu_seconds": 0.030771125108003616
+      }
+    ]
+  },
+  "decision": "Do not promote standalone UP route. Joint gate/up must be measured as a complete graph against native dual projection; adding separate medians is not joint evidence.",
+  "limits": [
+    "Conditional MPP/DD device proof remains open.",
+    "No fullmodel/HTTP/image or other-layer qualification.",
+    "Comparison is native row-pair operator, not MLX."
+  ],
+  "evidence_sha256": {
+    "raw_cost": "b0a05487404e7036f197d2ff4c391c6cfa1bb876a8cad8013c8347db404136a9",
+    "analysis": "98cf925e826a0c15a2d2949617125e78a60204dfceac785d425701f16f2a1cd2"
+  }
+}

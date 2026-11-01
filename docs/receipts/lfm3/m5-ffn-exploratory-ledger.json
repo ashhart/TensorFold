@@ -1,0 +1,201 @@
+{
+  "status": "Private exploratory operator results only; no production or final performance qualification",
+  "shape": {
+    "rows": 64,
+    "K": 2048,
+    "N_tested": 2048,
+    "N_full_gate": 7680,
+    "group_size": 64,
+    "quantization_bits": 4,
+    "output_elements": 131072
+  },
+  "method": [
+    "Same actual checkpoint activation and weight slice, equal matrix work and output shape for both routes.",
+    "Complete candidate cost includes preparation, producer, selection/combine and repair; persistent scratch allocated before timing.",
+    "Five complete output/selector/route identity checks precede timing; fused routes additionally check the exact timed graph.",
+    "Two mirrored rounds per experiment; 512 common repetitions per sample; >=25 ms calibration minimum, >=20 ms measured samples, 1 s cap, unchanged 5% baseline drift limit. These are bounded exploratory screens, not final five-round qualification.",
+    "All timing rows below passed their exploratory drift gate. Cross-experiment differences are observations, not a single randomized comparison of all variants."
+  ],
+  "measurements": [
+    {
+      "variant": "Exact-band producer + cooperative integer repair",
+      "baseline_us": 67.18440772601753,
+      "candidate_us": 360.50899279871373,
+      "candidate_over_baseline": 5.365962207613608,
+      "candidate_throughput_fraction": 0.1863598663779497,
+      "selected_outputs": 137,
+      "repetitions": 512,
+      "baseline_first_last_drift_fraction": 0.0003585299460018923,
+      "exploratory_stability_pass": true,
+      "raw_measurement_sha256": "b61ffc27084fcdb1c5832b6337a83ecce4dfd0e81b9a4aaeb1a46e20cb3e4d3c"
+    },
+    {
+      "variant": "Shared weight decoding and coefficient metadata",
+      "baseline_us": 67.23319484081003,
+      "candidate_us": 353.1779789227585,
+      "candidate_over_baseline": 5.2530298427583,
+      "candidate_throughput_fraction": 0.19036632761159272,
+      "selected_outputs": 137,
+      "repetitions": 512,
+      "baseline_first_last_drift_fraction": 0.00032798360352506625,
+      "exploratory_stability_pass": true,
+      "raw_measurement_sha256": "9d709506c736a63edd1de302668ae6a7fcb456ec724d9e4c30e683bfc08e1833"
+    },
+    {
+      "variant": "16 x 16 producer tile",
+      "baseline_us": 67.10314937663497,
+      "candidate_us": 255.05448456897284,
+      "candidate_over_baseline": 3.8009316543014853,
+      "candidate_throughput_fraction": 0.26309339155528033,
+      "selected_outputs": 137,
+      "repetitions": 512,
+      "baseline_first_last_drift_fraction": 0.0001540187112675435,
+      "exploratory_stability_pass": true,
+      "raw_measurement_sha256": "6808393a249c2468b3b64ee1ab1438284c52a580c8dbcd26120c962481122bb2"
+    },
+    {
+      "variant": "Four ordered split-K chunks",
+      "baseline_us": 67.26973424520111,
+      "candidate_us": 249.81339447549544,
+      "candidate_over_baseline": 3.71360757223917,
+      "candidate_throughput_fraction": 0.2692799334737021,
+      "selected_outputs": 121,
+      "repetitions": 512,
+      "baseline_first_last_drift_fraction": 7.864628450250831e-05,
+      "exploratory_stability_pass": true,
+      "raw_measurement_sha256": "b2f6bfdb997d1e558465b0cf9ffeaac28a49e5a22a2d95c87a9442f9cb81e15d"
+    },
+    {
+      "variant": "Compensated products + bucket repair scheduling",
+      "baseline_us": 67.31465646225843,
+      "candidate_us": 142.85559109339374,
+      "candidate_over_baseline": 2.1222063455599622,
+      "candidate_throughput_fraction": 0.4712077136571475,
+      "selected_outputs": 120,
+      "repetitions": 512,
+      "baseline_first_last_drift_fraction": 6.045342473718198e-05,
+      "exploratory_stability_pass": true,
+      "raw_measurement_sha256": "8e40ea0e61ff573324d9a0ab8c6d91fa6d0c91941d0c96bbf7fa425441aa2d91"
+    },
+    {
+      "variant": "Affine double-double group accumulation",
+      "baseline_us": 67.31860321451677,
+      "candidate_us": 141.2617589267029,
+      "candidate_over_baseline": 2.098405970732334,
+      "candidate_throughput_fraction": 0.4765522086515054,
+      "selected_outputs": 120,
+      "repetitions": 512,
+      "baseline_first_last_drift_fraction": 0.0002393863397320616,
+      "exploratory_stability_pass": true,
+      "raw_measurement_sha256": "f247ccee601d04715de88191421a802efd9f6522472eb8a967a11b97f31ef392"
+    },
+    {
+      "variant": "Shared conservative row/column budgets",
+      "baseline_us": 67.25435423504678,
+      "candidate_us": 127.99157684639795,
+      "candidate_over_baseline": 1.9030972537343986,
+      "candidate_throughput_fraction": 0.5254592207716793,
+      "selected_outputs": 238,
+      "repetitions": 512,
+      "baseline_first_last_drift_fraction": 8.34901218501411e-05,
+      "exploratory_stability_pass": true,
+      "raw_measurement_sha256": "7367abb02bc0dade8e3ad4eac3e41f5240a5a303b955bb4db7a0b79794cb5575"
+    },
+    {
+      "variant": "Fused combine, selection, and repair",
+      "baseline_us": 67.14213077430031,
+      "candidate_us": 123.46203584456816,
+      "candidate_over_baseline": 1.838816171318548,
+      "candidate_throughput_fraction": 0.5438281518282148,
+      "selected_outputs": 238,
+      "repetitions": 512,
+      "baseline_first_last_drift_fraction": 0.00014179077468150984,
+      "exploratory_stability_pass": true,
+      "raw_measurement_sha256": "02cb19f9f7111794904d0a77c18300b7e4671e6da92981cde66d67fa7e8cb5c3"
+    },
+    {
+      "variant": "Materialized activation bands",
+      "baseline_us": 67.15637209708802,
+      "candidate_us": 127.79545068042353,
+      "candidate_over_baseline": 1.9029534605542648,
+      "candidate_throughput_fraction": 0.5254989261317691,
+      "selected_outputs": 238,
+      "repetitions": 512,
+      "baseline_first_last_drift_fraction": 0.0008676486827685353,
+      "exploratory_stability_pass": true,
+      "raw_measurement_sha256": "1d8c9ebaedb22f4e44fe5f0c35a4088df8269a9a32550aa22ff1cc2d6598b3fc"
+    },
+    {
+      "variant": "Explicit strict MPP, serial band chains",
+      "baseline_us": 67.25260391249321,
+      "candidate_us": 117.20515885826899,
+      "candidate_over_baseline": 1.7427601615362334,
+      "candidate_throughput_fraction": 0.5738024210505854,
+      "selected_outputs": 238,
+      "repetitions": 512,
+      "baseline_first_last_drift_fraction": 8.712257596004663e-05,
+      "exploratory_stability_pass": true,
+      "raw_measurement_sha256": "58449d9cad27133a849e9bbe92a9e16d64a1b365449de4253265fb0fae8e144d"
+    },
+    {
+      "variant": "Explicit strict MPP, parallel band chains",
+      "baseline_us": 67.27791333105415,
+      "candidate_us": 110.96643083874369,
+      "candidate_over_baseline": 1.6493738486315952,
+      "candidate_throughput_fraction": 0.6062906846920431,
+      "selected_outputs": 238,
+      "repetitions": 512,
+      "baseline_first_last_drift_fraction": 5.322268134651951e-05,
+      "exploratory_stability_pass": true,
+      "raw_measurement_sha256": "dfa1568c7e0dc3a7e76e226e64ba22f380d4cbb3e28cf194c2c4e9bb152931e8"
+    },
+    {
+      "variant": "Four SIMD groups with exact half-K sums",
+      "baseline_us": 67.25386538164457,
+      "candidate_us": 114.54093373686192,
+      "candidate_over_baseline": 1.703113019406068,
+      "candidate_throughput_fraction": 0.5871600936670269,
+      "selected_outputs": 238,
+      "repetitions": 512,
+      "baseline_first_last_drift_fraction": 0.0001427854323591979,
+      "exploratory_stability_pass": true,
+      "raw_measurement_sha256": "3ee51193facfd9079e20277261fa40d24265655e16791aa19612be484b58ec2c"
+    }
+  ],
+  "numerical": [
+    "Every listed cost candidate passed independent streamed FP64 primary checks on the entire tested output slice, every-column no-worse gates, aggregate/worst-column/max-error checks and planted fault controls.",
+    "Latest four-SIMD-group result is byte-identical to the two-SIMD-group predecessor for all captured producer/final arrays, centers, budgets, selectors and activation bands. Eight fault controls were rejected.",
+    "The latest output slice matches rounded FP64 primary words; the public comparison differs in five words on this fixture. No tolerance was increased.",
+    "Exact-band integer admission and the retained 128*d*d*u^2 radius are conditional on the stated full-FP32 MPP/RNE/lattice assumptions. Universal Apple device reduction/FTZ guarantees remain open; finite-fixture success does not establish them."
+  ],
+  "early_results": [
+    "Fixed two-band admission selected 16502/131072 outputs; three-band admission selected 228; actual-mass two-band admission selected 137.",
+    "Serial repair variant reached approximately 2162 us per operation in calibration, versus approximately 67 us public baseline. It failed bounded calibration and is not a qualified timing row.",
+    "Earlier stage diagnostics attributed approximately 1990 us to serial repair and 249 us to its producer; cooperative repair and bucket scheduling addressed that observed bottleneck."
+  ],
+  "latest_stage_diagnostic_us": {
+    "baseline": 71.6252252459526,
+    "full_route": 135.5626154690981,
+    "prepare": 18.500257283449173,
+    "producer": 79.02085781097412,
+    "fused_finish": 43.00009459257126,
+    "scope": "20 singleton command-buffer samples of the serial-band explicit MPP route; all endpoint identities passed; not throughput qualification or hardware utilization evidence"
+  },
+  "conclusions": [
+    "Best current private route is two parallel MPP band chains: 110.966 us versus its 67.278 us baseline, still 1.6494x slower. Do not integrate or enable it.",
+    "Materialized activation bands regressed relative to fused finish, and four-SIMD-group half-K splitting regressed by approximately 3.22% relative to two parallel bands. Neither is a promotion candidate.",
+    "The executed tile call graph explicitly reaches the strict MPP 16x32x16 BF16/BF16/FP32 primitive. This is compiler call-graph evidence, not a whole-device tensor-unit disable or hardware utilization counter.",
+    "Available hardware audit exposed no useful compute/occupancy/bandwidth counters. No saturation, cache or spill claim is supported."
+  ],
+  "audit_notes": [
+    "Earlier shared-budget/fused/preband host source accidentally changed a calibration repeat ceiling from 4096 to 4608 during an unrelated reflection edit. Every affected measured run used 512 repetitions, so neither ceiling was reached. Historical raw artifacts are preserved; later hosts restore the original 4096 ceiling.",
+    "The candidate dispatch-count description remained stale at four after fusion; inspected executed code uses three dispatches. Later stage metadata records three. This does not change recorded timings.",
+    "A local NumPy 2 verifier required an explicit unsigned mask in place of a negative Python integer mask. Shader outputs were unchanged and the corrected verifier passed every activation-band word."
+  ],
+  "scope_limits": [
+    "One checkpoint class and 2048-column gate slice only; no full-width 7680-column gate/up/down sweep.",
+    "No whole-model, HTTP serving, image-path or end-to-end prefill qualification for these private FFN kernels.",
+    "No public runtime/default changes, no installed MLX mutation, no promotion of a non-winning kernel."
+  ],
+  "baseline": "Existing public native row-pair projection kernel"
+}

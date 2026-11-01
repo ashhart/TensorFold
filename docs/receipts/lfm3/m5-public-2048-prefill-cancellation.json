@@ -1,0 +1,43 @@
+{
+  "scope": "Actual public TEXT4 native HTTP disconnect during unfinished 8192-token prefill and cold recovery, one observation per width.",
+  "model_revision": "d0ca73dcfa70ce18733754a492cdc1fb0123262d",
+  "hardware": "Apple M5 Ultra",
+  "source_revisions": {
+    "128": "1e43c6722",
+    "2048": "d9c1ea531"
+  },
+  "binary_sha256": {
+    "128": "3c987ac2decf021380122a22f2e30c12590045a959e6f160e9ed7570577248bd",
+    "2048": "46a9b73c763b4c94957332f4d8099098d4883b9a00486b5b4f1fd9121a6faec6"
+  },
+  "prompt_tokens": 8192,
+  "prompt_cache_tokens": 0,
+  "output_tokens": 16,
+  "cases": [
+    {
+      "prompt_rows": 128,
+      "cancel_to_observed_release_ms": 31.826874999999998,
+      "completed_tokens_at_disconnect": 128,
+      "generation_tokens_running": 0,
+      "recovery_text_equal": true
+    },
+    {
+      "prompt_rows": 2048,
+      "cancel_to_observed_release_ms": 479.790375,
+      "completed_tokens_at_disconnect": 2048,
+      "generation_tokens_running": 0,
+      "recovery_text_equal": true
+    }
+  ],
+  "events_sha256": "f41547c5094a00495bf8d7d2b4e6cc240b6cb5c6a71163d1aecee86cda6cd2c3",
+  "records_sha256": "810240488972be4460409a970d5c3120238b6963ad7e1b43eddf105bc3f516e7",
+  "packet_pins_sha256": "c2f9945a05da81125055e874af76179384482335d2490f3bcd26c7a6a8f77a2b",
+  "all_clients_and_servers_exit_zero": true,
+  "lock_released": true,
+  "limitations": [
+    "One observation per width; no latency percentile or worst-case guarantee.",
+    "Disconnect is observed after a completed chunk while prefill remains active; it does not prove the signal arrived during a particular GPU command.",
+    "Different public source revisions: this is a bounded lifecycle check, not an isolated performance comparison.",
+    "No broad image, width, or full-model FP32/BF16 fidelity qualification."
+  ]
+}

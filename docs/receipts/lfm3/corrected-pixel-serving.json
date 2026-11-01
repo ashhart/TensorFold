@@ -1,0 +1,3449 @@
+{
+  "schema_version": 1,
+  "source_commit": "50b4e0da3",
+  "scope": "Corrected CPU normalization; real native VL4/6/8 serving self-consistency using generated solid red/blue PNGs and ordered-image requests",
+  "binary_sha256": "b8404ae0c6edec9968f59dbe699bfb61fa8638c564519b94ce7a2863dfcb3377",
+  "client_sha256": "87327328ef1a1fcc35536efa0c18829779ee278a4d325f2af69356bc68a71f5c",
+  "counts": {
+    "passed": 183,
+    "failed": 0,
+    "skipped": 0,
+    "cancellation_checks": 27
+  },
+  "cases": [
+    {
+      "model": "LFM3-VL-2B-MLX-4bit",
+      "counts": {
+        "passed": 61,
+        "failed": 0,
+        "skipped": 0
+      },
+      "cancellation_checks": 9,
+      "tests": [
+        {
+          "name": "code/fresh_plain",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 12,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "4c9e7e4a0163",
+            "token_sha256": "4c9e7e4a01637b5054a8cb88295edf6a7697ec454a29a1d4b1e063e85ea643ee",
+            "output_sha256": "eca8c5913ce3f457045e92b8b046177804d82af0e5833f6b65dda607e3da2095",
+            "text": " The larger of two integers is the larger of the larger of the larger of the larger of the larger of the larger of"
+          }
+        },
+        {
+          "name": "chat/fresh_plain",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 21,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "d420544d7d90",
+            "token_sha256": "d420544d7d906a2a1698a1f0df0600d5bed16adb41f30771e510378fca0609ca",
+            "output_sha256": "ac270e5fb966fbfb96ba953f0c88497ded174bae52f5457b208e5455c56f6d6d",
+            "text": "The sky appears blue because molecules in the atmosphere scatter shorter blue wavelengths of sunlight more strongly than longer red wavelengths. This scattered"
+          }
+        },
+        {
+          "name": "long_prefix/fresh_plain",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 910,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "ab41c21abe0b",
+            "token_sha256": "ab41c21abe0bf2e4979170d6433bf6e2676eb81c1673f9c96a96a556d8545520",
+            "output_sha256": "5fd2f9777cad888e3c4ece35ca38402dc33b86a94bf4e7dea9b0ef49a123365c",
+            "text": " \nThe story is a summary of the events that occur in the events that occur in the events that occur in the events"
+          }
+        },
+        {
+          "name": "edited_prefix/fresh_plain",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 904,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "077371ff4132",
+            "token_sha256": "077371ff4132fe3eeb4ad7d35eb3d3c06cf4daf570681ee2b68d5058c88671b7",
+            "output_sha256": "2e28d98dcdf15a2dc9b9e0849e4325b58d672b44cdc9f616b854e767d7c58e5a",
+            "text": " The river flows past a quiet village. The river flows past a quiet village. The river flows past a quiet village."
+          }
+        },
+        {
+          "name": "sampled_code/fresh_plain",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 12,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "9bc07ad8197c",
+            "token_sha256": "9bc07ad8197cb9d4a6420567b6576b4aeaaf05e8ff576fab3a708c4826d3184f",
+            "output_sha256": "fb4d9a3ea9e1362803bdb7189900b7e50b593f5df47041771a822f9137b89370",
+            "text": " A Python function that returns the larger of two integers can be written as: A can be returned as: A can be"
+          }
+        },
+        {
+          "name": "sampled_chat/fresh_plain",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 21,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "6272ad3a19e7",
+            "token_sha256": "6272ad3a19e75ac877cbcd625f56eefac0e420655cc1faa3271e6232b4cab589",
+            "output_sha256": "14e49326eeb542e28aabc8b91360dd6bcd54def77e449bb02d4c265ee5dacfbe",
+            "text": "The sky appears blue because air molecules scatter short blue wavelengths of sunlight more strongly than longer red wavelengths. As a result,"
+          }
+        },
+        {
+          "name": "red/fresh_plain",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 93,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "6851da15a29c",
+            "token_sha256": "6851da15a29cf4d33e588fa208228cd0cf614245e31195187a67dc0b85d68387",
+            "output_sha256": "b1dc85d579d8dddb7cef7fb30ac8f367d02cfd6fbcbaed9e48573677fee77ead",
+            "text": "Red<|im_end|>\n<|im_end|>\n \"Red\" is a broad category; the specific shade appears to be a bright, saturated red"
+          }
+        },
+        {
+          "name": "blue/fresh_plain",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 93,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "bcec37a41abb",
+            "token_sha256": "bcec37a41abba395144f48096269c577079973a1928356de2fd42f3dd6d02408",
+            "output_sha256": "119d8bb715f7c83eed561340e759f37316cbff470c8aa826b058b4d6bd9b28ef",
+            "text": "Blue<|im_end|>\n<|im_end|>\n \"Blue\" is a broad category, but the image matches the specific shade \"Blue\" as"
+          }
+        },
+        {
+          "name": "red_blue/fresh_plain",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 166,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "f7ddc7461925",
+            "token_sha256": "f7ddc7461925c8442c245e0a38577f66aa708992a852b9b81f819caf0304b5b2",
+            "output_sha256": "76fe0e2af8a801091c6b60b4c11a94c647e639fc3f64e045991beb299ea2bd40",
+            "text": "Red, Blue<|im_end|>\n<|im_end|>\n<|im_end|>\n  Name the solid color of the first image, then the second image."
+          }
+        },
+        {
+          "name": "blue_red/fresh_plain",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 166,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "436350619b55",
+            "token_sha256": "436350619b55b33ef20f6a7ce774723e3aaa718328dbdea67982f2245de6f349",
+            "output_sha256": "a12ce2084797b364b555240ca6ee7053ec7a653d67ee60107ff5fbaffb690caf",
+            "text": "Blue, Red<|im_end|>\n<|im_end|>\n<|im_end|>\n you have to think about the visual characteristics of the images and the visual characteristics"
+          }
+        },
+        {
+          "name": "long_prefix/length_over_256",
+          "status": "passed",
+          "evidence": 910
+        },
+        {
+          "name": "code/plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 12,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "4c9e7e4a0163",
+            "token_sha256": "4c9e7e4a01637b5054a8cb88295edf6a7697ec454a29a1d4b1e063e85ea643ee",
+            "output_sha256": "eca8c5913ce3f457045e92b8b046177804d82af0e5833f6b65dda607e3da2095",
+            "text": " The larger of two integers is the larger of the larger of the larger of the larger of the larger of the larger of"
+          }
+        },
+        {
+          "name": "code/drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 12,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "4c9e7e4a0163",
+            "token_sha256": "4c9e7e4a01637b5054a8cb88295edf6a7697ec454a29a1d4b1e063e85ea643ee",
+            "output_sha256": "eca8c5913ce3f457045e92b8b046177804d82af0e5833f6b65dda607e3da2095",
+            "text": " The larger of two integers is the larger of the larger of the larger of the larger of the larger of the larger of"
+          }
+        },
+        {
+          "name": "chat/plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 21,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "d420544d7d90",
+            "token_sha256": "d420544d7d906a2a1698a1f0df0600d5bed16adb41f30771e510378fca0609ca",
+            "output_sha256": "ac270e5fb966fbfb96ba953f0c88497ded174bae52f5457b208e5455c56f6d6d",
+            "text": "The sky appears blue because molecules in the atmosphere scatter shorter blue wavelengths of sunlight more strongly than longer red wavelengths. This scattered"
+          }
+        },
+        {
+          "name": "chat/drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 21,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "d420544d7d90",
+            "token_sha256": "d420544d7d906a2a1698a1f0df0600d5bed16adb41f30771e510378fca0609ca",
+            "output_sha256": "ac270e5fb966fbfb96ba953f0c88497ded174bae52f5457b208e5455c56f6d6d",
+            "text": "The sky appears blue because molecules in the atmosphere scatter shorter blue wavelengths of sunlight more strongly than longer red wavelengths. This scattered"
+          }
+        },
+        {
+          "name": "long_prefix/plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 910,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "ab41c21abe0b",
+            "token_sha256": "ab41c21abe0bf2e4979170d6433bf6e2676eb81c1673f9c96a96a556d8545520",
+            "output_sha256": "5fd2f9777cad888e3c4ece35ca38402dc33b86a94bf4e7dea9b0ef49a123365c",
+            "text": " \nThe story is a summary of the events that occur in the events that occur in the events that occur in the events"
+          }
+        },
+        {
+          "name": "long_prefix/drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 910,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "ab41c21abe0b",
+            "token_sha256": "ab41c21abe0bf2e4979170d6433bf6e2676eb81c1673f9c96a96a556d8545520",
+            "output_sha256": "5fd2f9777cad888e3c4ece35ca38402dc33b86a94bf4e7dea9b0ef49a123365c",
+            "text": " \nThe story is a summary of the events that occur in the events that occur in the events that occur in the events"
+          }
+        },
+        {
+          "name": "long_prefix/warm_reuses_and_matches_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 910,
+            "cached_tokens": 896,
+            "tokens": 24,
+            "cache_state": "reused",
+            "complete": true,
+            "token_sha": "ab41c21abe0b",
+            "token_sha256": "ab41c21abe0bf2e4979170d6433bf6e2676eb81c1673f9c96a96a556d8545520",
+            "output_sha256": "5fd2f9777cad888e3c4ece35ca38402dc33b86a94bf4e7dea9b0ef49a123365c",
+            "text": " \nThe story is a summary of the events that occur in the events that occur in the events that occur in the events"
+          }
+        },
+        {
+          "name": "edited_prefix/no_stale_prefix_reuse",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 904,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "077371ff4132",
+            "token_sha256": "077371ff4132fe3eeb4ad7d35eb3d3c06cf4daf570681ee2b68d5058c88671b7",
+            "output_sha256": "2e28d98dcdf15a2dc9b9e0849e4325b58d672b44cdc9f616b854e767d7c58e5a",
+            "text": " The river flows past a quiet village. The river flows past a quiet village. The river flows past a quiet village."
+          }
+        },
+        {
+          "name": "edited_prefix/plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 904,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "077371ff4132",
+            "token_sha256": "077371ff4132fe3eeb4ad7d35eb3d3c06cf4daf570681ee2b68d5058c88671b7",
+            "output_sha256": "2e28d98dcdf15a2dc9b9e0849e4325b58d672b44cdc9f616b854e767d7c58e5a",
+            "text": " The river flows past a quiet village. The river flows past a quiet village. The river flows past a quiet village."
+          }
+        },
+        {
+          "name": "edited_prefix/drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 904,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "077371ff4132",
+            "token_sha256": "077371ff4132fe3eeb4ad7d35eb3d3c06cf4daf570681ee2b68d5058c88671b7",
+            "output_sha256": "2e28d98dcdf15a2dc9b9e0849e4325b58d672b44cdc9f616b854e767d7c58e5a",
+            "text": " The river flows past a quiet village. The river flows past a quiet village. The river flows past a quiet village."
+          }
+        },
+        {
+          "name": "edited_prefix/matches_cache_off",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 904,
+            "cached_tokens": 896,
+            "tokens": 24,
+            "cache_state": "reused",
+            "complete": true,
+            "token_sha": "077371ff4132",
+            "token_sha256": "077371ff4132fe3eeb4ad7d35eb3d3c06cf4daf570681ee2b68d5058c88671b7",
+            "output_sha256": "2e28d98dcdf15a2dc9b9e0849e4325b58d672b44cdc9f616b854e767d7c58e5a",
+            "text": " The river flows past a quiet village. The river flows past a quiet village. The river flows past a quiet village."
+          }
+        },
+        {
+          "name": "sampled_code/plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 12,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "9bc07ad8197c",
+            "token_sha256": "9bc07ad8197cb9d4a6420567b6576b4aeaaf05e8ff576fab3a708c4826d3184f",
+            "output_sha256": "fb4d9a3ea9e1362803bdb7189900b7e50b593f5df47041771a822f9137b89370",
+            "text": " A Python function that returns the larger of two integers can be written as: A can be returned as: A can be"
+          }
+        },
+        {
+          "name": "sampled_code/drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 12,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "9bc07ad8197c",
+            "token_sha256": "9bc07ad8197cb9d4a6420567b6576b4aeaaf05e8ff576fab3a708c4826d3184f",
+            "output_sha256": "fb4d9a3ea9e1362803bdb7189900b7e50b593f5df47041771a822f9137b89370",
+            "text": " A Python function that returns the larger of two integers can be written as: A can be returned as: A can be"
+          }
+        },
+        {
+          "name": "sampled_chat/plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 21,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "6272ad3a19e7",
+            "token_sha256": "6272ad3a19e75ac877cbcd625f56eefac0e420655cc1faa3271e6232b4cab589",
+            "output_sha256": "14e49326eeb542e28aabc8b91360dd6bcd54def77e449bb02d4c265ee5dacfbe",
+            "text": "The sky appears blue because air molecules scatter short blue wavelengths of sunlight more strongly than longer red wavelengths. As a result,"
+          }
+        },
+        {
+          "name": "sampled_chat/drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 21,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "6272ad3a19e7",
+            "token_sha256": "6272ad3a19e75ac877cbcd625f56eefac0e420655cc1faa3271e6232b4cab589",
+            "output_sha256": "14e49326eeb542e28aabc8b91360dd6bcd54def77e449bb02d4c265ee5dacfbe",
+            "text": "The sky appears blue because air molecules scatter short blue wavelengths of sunlight more strongly than longer red wavelengths. As a result,"
+          }
+        },
+        {
+          "name": "red/plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 93,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "6851da15a29c",
+            "token_sha256": "6851da15a29cf4d33e588fa208228cd0cf614245e31195187a67dc0b85d68387",
+            "output_sha256": "b1dc85d579d8dddb7cef7fb30ac8f367d02cfd6fbcbaed9e48573677fee77ead",
+            "text": "Red<|im_end|>\n<|im_end|>\n \"Red\" is a broad category; the specific shade appears to be a bright, saturated red"
+          }
+        },
+        {
+          "name": "red/drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 93,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "6851da15a29c",
+            "token_sha256": "6851da15a29cf4d33e588fa208228cd0cf614245e31195187a67dc0b85d68387",
+            "output_sha256": "b1dc85d579d8dddb7cef7fb30ac8f367d02cfd6fbcbaed9e48573677fee77ead",
+            "text": "Red<|im_end|>\n<|im_end|>\n \"Red\" is a broad category; the specific shade appears to be a bright, saturated red"
+          }
+        },
+        {
+          "name": "blue/plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 93,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "bcec37a41abb",
+            "token_sha256": "bcec37a41abba395144f48096269c577079973a1928356de2fd42f3dd6d02408",
+            "output_sha256": "119d8bb715f7c83eed561340e759f37316cbff470c8aa826b058b4d6bd9b28ef",
+            "text": "Blue<|im_end|>\n<|im_end|>\n \"Blue\" is a broad category, but the image matches the specific shade \"Blue\" as"
+          }
+        },
+        {
+          "name": "blue/drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 93,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "bcec37a41abb",
+            "token_sha256": "bcec37a41abba395144f48096269c577079973a1928356de2fd42f3dd6d02408",
+            "output_sha256": "119d8bb715f7c83eed561340e759f37316cbff470c8aa826b058b4d6bd9b28ef",
+            "text": "Blue<|im_end|>\n<|im_end|>\n \"Blue\" is a broad category, but the image matches the specific shade \"Blue\" as"
+          }
+        },
+        {
+          "name": "red_blue/plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 166,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "f7ddc7461925",
+            "token_sha256": "f7ddc7461925c8442c245e0a38577f66aa708992a852b9b81f819caf0304b5b2",
+            "output_sha256": "76fe0e2af8a801091c6b60b4c11a94c647e639fc3f64e045991beb299ea2bd40",
+            "text": "Red, Blue<|im_end|>\n<|im_end|>\n<|im_end|>\n  Name the solid color of the first image, then the second image."
+          }
+        },
+        {
+          "name": "red_blue/drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 166,
+            "cached_tokens": 128,
+            "tokens": 24,
+            "cache_state": "reused",
+            "complete": true,
+            "token_sha": "f7ddc7461925",
+            "token_sha256": "f7ddc7461925c8442c245e0a38577f66aa708992a852b9b81f819caf0304b5b2",
+            "output_sha256": "76fe0e2af8a801091c6b60b4c11a94c647e639fc3f64e045991beb299ea2bd40",
+            "text": "Red, Blue<|im_end|>\n<|im_end|>\n<|im_end|>\n  Name the solid color of the first image, then the second image."
+          }
+        },
+        {
+          "name": "blue_red/plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 166,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "436350619b55",
+            "token_sha256": "436350619b55b33ef20f6a7ce774723e3aaa718328dbdea67982f2245de6f349",
+            "output_sha256": "a12ce2084797b364b555240ca6ee7053ec7a653d67ee60107ff5fbaffb690caf",
+            "text": "Blue, Red<|im_end|>\n<|im_end|>\n<|im_end|>\n you have to think about the visual characteristics of the images and the visual characteristics"
+          }
+        },
+        {
+          "name": "blue_red/drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 166,
+            "cached_tokens": 128,
+            "tokens": 24,
+            "cache_state": "reused",
+            "complete": true,
+            "token_sha": "436350619b55",
+            "token_sha256": "436350619b55b33ef20f6a7ce774723e3aaa718328dbdea67982f2245de6f349",
+            "output_sha256": "a12ce2084797b364b555240ca6ee7053ec7a653d67ee60107ff5fbaffb690caf",
+            "text": "Blue, Red<|im_end|>\n<|im_end|>\n<|im_end|>\n you have to think about the visual characteristics of the images and the visual characteristics"
+          }
+        },
+        {
+          "name": "code/concurrent_1_equals_solo",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "4c9e7e4a0163",
+              "token_sha256": "4c9e7e4a01637b5054a8cb88295edf6a7697ec454a29a1d4b1e063e85ea643ee",
+              "output_sha256": "eca8c5913ce3f457045e92b8b046177804d82af0e5833f6b65dda607e3da2095",
+              "text": " The larger of two integers is the larger of the larger of the larger of the larger of the larger of the larger of"
+            }
+          ]
+        },
+        {
+          "name": "chat/concurrent_1_equals_solo",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "d420544d7d90",
+              "token_sha256": "d420544d7d906a2a1698a1f0df0600d5bed16adb41f30771e510378fca0609ca",
+              "output_sha256": "ac270e5fb966fbfb96ba953f0c88497ded174bae52f5457b208e5455c56f6d6d",
+              "text": "The sky appears blue because molecules in the atmosphere scatter shorter blue wavelengths of sunlight more strongly than longer red wavelengths. This scattered"
+            }
+          ]
+        },
+        {
+          "name": "sampled_code/concurrent_1_equals_solo",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "9bc07ad8197c",
+              "token_sha256": "9bc07ad8197cb9d4a6420567b6576b4aeaaf05e8ff576fab3a708c4826d3184f",
+              "output_sha256": "fb4d9a3ea9e1362803bdb7189900b7e50b593f5df47041771a822f9137b89370",
+              "text": " A Python function that returns the larger of two integers can be written as: A can be returned as: A can be"
+            }
+          ]
+        },
+        {
+          "name": "sampled_chat/concurrent_1_equals_solo",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "6272ad3a19e7",
+              "token_sha256": "6272ad3a19e75ac877cbcd625f56eefac0e420655cc1faa3271e6232b4cab589",
+              "output_sha256": "14e49326eeb542e28aabc8b91360dd6bcd54def77e449bb02d4c265ee5dacfbe",
+              "text": "The sky appears blue because air molecules scatter short blue wavelengths of sunlight more strongly than longer red wavelengths. As a result,"
+            }
+          ]
+        },
+        {
+          "name": "code/concurrent_2_equals_solo",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "4c9e7e4a0163",
+              "token_sha256": "4c9e7e4a01637b5054a8cb88295edf6a7697ec454a29a1d4b1e063e85ea643ee",
+              "output_sha256": "eca8c5913ce3f457045e92b8b046177804d82af0e5833f6b65dda607e3da2095",
+              "text": " The larger of two integers is the larger of the larger of the larger of the larger of the larger of the larger of"
+            },
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "4c9e7e4a0163",
+              "token_sha256": "4c9e7e4a01637b5054a8cb88295edf6a7697ec454a29a1d4b1e063e85ea643ee",
+              "output_sha256": "eca8c5913ce3f457045e92b8b046177804d82af0e5833f6b65dda607e3da2095",
+              "text": " The larger of two integers is the larger of the larger of the larger of the larger of the larger of the larger of"
+            }
+          ]
+        },
+        {
+          "name": "chat/concurrent_2_equals_solo",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "d420544d7d90",
+              "token_sha256": "d420544d7d906a2a1698a1f0df0600d5bed16adb41f30771e510378fca0609ca",
+              "output_sha256": "ac270e5fb966fbfb96ba953f0c88497ded174bae52f5457b208e5455c56f6d6d",
+              "text": "The sky appears blue because molecules in the atmosphere scatter shorter blue wavelengths of sunlight more strongly than longer red wavelengths. This scattered"
+            },
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "d420544d7d90",
+              "token_sha256": "d420544d7d906a2a1698a1f0df0600d5bed16adb41f30771e510378fca0609ca",
+              "output_sha256": "ac270e5fb966fbfb96ba953f0c88497ded174bae52f5457b208e5455c56f6d6d",
+              "text": "The sky appears blue because molecules in the atmosphere scatter shorter blue wavelengths of sunlight more strongly than longer red wavelengths. This scattered"
+            }
+          ]
+        },
+        {
+          "name": "sampled_code/concurrent_2_equals_solo",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "9bc07ad8197c",
+              "token_sha256": "9bc07ad8197cb9d4a6420567b6576b4aeaaf05e8ff576fab3a708c4826d3184f",
+              "output_sha256": "fb4d9a3ea9e1362803bdb7189900b7e50b593f5df47041771a822f9137b89370",
+              "text": " A Python function that returns the larger of two integers can be written as: A can be returned as: A can be"
+            },
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "9bc07ad8197c",
+              "token_sha256": "9bc07ad8197cb9d4a6420567b6576b4aeaaf05e8ff576fab3a708c4826d3184f",
+              "output_sha256": "fb4d9a3ea9e1362803bdb7189900b7e50b593f5df47041771a822f9137b89370",
+              "text": " A Python function that returns the larger of two integers can be written as: A can be returned as: A can be"
+            }
+          ]
+        },
+        {
+          "name": "sampled_chat/concurrent_2_equals_solo",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "6272ad3a19e7",
+              "token_sha256": "6272ad3a19e75ac877cbcd625f56eefac0e420655cc1faa3271e6232b4cab589",
+              "output_sha256": "14e49326eeb542e28aabc8b91360dd6bcd54def77e449bb02d4c265ee5dacfbe",
+              "text": "The sky appears blue because air molecules scatter short blue wavelengths of sunlight more strongly than longer red wavelengths. As a result,"
+            },
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "6272ad3a19e7",
+              "token_sha256": "6272ad3a19e75ac877cbcd625f56eefac0e420655cc1faa3271e6232b4cab589",
+              "output_sha256": "14e49326eeb542e28aabc8b91360dd6bcd54def77e449bb02d4c265ee5dacfbe",
+              "text": "The sky appears blue because air molecules scatter short blue wavelengths of sunlight more strongly than longer red wavelengths. As a result,"
+            }
+          ]
+        },
+        {
+          "name": "code/concurrent_4_equals_solo",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "4c9e7e4a0163",
+              "token_sha256": "4c9e7e4a01637b5054a8cb88295edf6a7697ec454a29a1d4b1e063e85ea643ee",
+              "output_sha256": "eca8c5913ce3f457045e92b8b046177804d82af0e5833f6b65dda607e3da2095",
+              "text": " The larger of two integers is the larger of the larger of the larger of the larger of the larger of the larger of"
+            },
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "4c9e7e4a0163",
+              "token_sha256": "4c9e7e4a01637b5054a8cb88295edf6a7697ec454a29a1d4b1e063e85ea643ee",
+              "output_sha256": "eca8c5913ce3f457045e92b8b046177804d82af0e5833f6b65dda607e3da2095",
+              "text": " The larger of two integers is the larger of the larger of the larger of the larger of the larger of the larger of"
+            },
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "4c9e7e4a0163",
+              "token_sha256": "4c9e7e4a01637b5054a8cb88295edf6a7697ec454a29a1d4b1e063e85ea643ee",
+              "output_sha256": "eca8c5913ce3f457045e92b8b046177804d82af0e5833f6b65dda607e3da2095",
+              "text": " The larger of two integers is the larger of the larger of the larger of the larger of the larger of the larger of"
+            },
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "4c9e7e4a0163",
+              "token_sha256": "4c9e7e4a01637b5054a8cb88295edf6a7697ec454a29a1d4b1e063e85ea643ee",
+              "output_sha256": "eca8c5913ce3f457045e92b8b046177804d82af0e5833f6b65dda607e3da2095",
+              "text": " The larger of two integers is the larger of the larger of the larger of the larger of the larger of the larger of"
+            }
+          ]
+        },
+        {
+          "name": "chat/concurrent_4_equals_solo",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "d420544d7d90",
+              "token_sha256": "d420544d7d906a2a1698a1f0df0600d5bed16adb41f30771e510378fca0609ca",
+              "output_sha256": "ac270e5fb966fbfb96ba953f0c88497ded174bae52f5457b208e5455c56f6d6d",
+              "text": "The sky appears blue because molecules in the atmosphere scatter shorter blue wavelengths of sunlight more strongly than longer red wavelengths. This scattered"
+            },
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "d420544d7d90",
+              "token_sha256": "d420544d7d906a2a1698a1f0df0600d5bed16adb41f30771e510378fca0609ca",
+              "output_sha256": "ac270e5fb966fbfb96ba953f0c88497ded174bae52f5457b208e5455c56f6d6d",
+              "text": "The sky appears blue because molecules in the atmosphere scatter shorter blue wavelengths of sunlight more strongly than longer red wavelengths. This scattered"
+            },
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "d420544d7d90",
+              "token_sha256": "d420544d7d906a2a1698a1f0df0600d5bed16adb41f30771e510378fca0609ca",
+              "output_sha256": "ac270e5fb966fbfb96ba953f0c88497ded174bae52f5457b208e5455c56f6d6d",
+              "text": "The sky appears blue because molecules in the atmosphere scatter shorter blue wavelengths of sunlight more strongly than longer red wavelengths. This scattered"
+            },
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "d420544d7d90",
+              "token_sha256": "d420544d7d906a2a1698a1f0df0600d5bed16adb41f30771e510378fca0609ca",
+              "output_sha256": "ac270e5fb966fbfb96ba953f0c88497ded174bae52f5457b208e5455c56f6d6d",
+              "text": "The sky appears blue because molecules in the atmosphere scatter shorter blue wavelengths of sunlight more strongly than longer red wavelengths. This scattered"
+            }
+          ]
+        },
+        {
+          "name": "sampled_code/concurrent_4_equals_solo",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "9bc07ad8197c",
+              "token_sha256": "9bc07ad8197cb9d4a6420567b6576b4aeaaf05e8ff576fab3a708c4826d3184f",
+              "output_sha256": "fb4d9a3ea9e1362803bdb7189900b7e50b593f5df47041771a822f9137b89370",
+              "text": " A Python function that returns the larger of two integers can be written as: A can be returned as: A can be"
+            },
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "9bc07ad8197c",
+              "token_sha256": "9bc07ad8197cb9d4a6420567b6576b4aeaaf05e8ff576fab3a708c4826d3184f",
+              "output_sha256": "fb4d9a3ea9e1362803bdb7189900b7e50b593f5df47041771a822f9137b89370",
+              "text": " A Python function that returns the larger of two integers can be written as: A can be returned as: A can be"
+            },
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "9bc07ad8197c",
+              "token_sha256": "9bc07ad8197cb9d4a6420567b6576b4aeaaf05e8ff576fab3a708c4826d3184f",
+              "output_sha256": "fb4d9a3ea9e1362803bdb7189900b7e50b593f5df47041771a822f9137b89370",
+              "text": " A Python function that returns the larger of two integers can be written as: A can be returned as: A can be"
+            },
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "9bc07ad8197c",
+              "token_sha256": "9bc07ad8197cb9d4a6420567b6576b4aeaaf05e8ff576fab3a708c4826d3184f",
+              "output_sha256": "fb4d9a3ea9e1362803bdb7189900b7e50b593f5df47041771a822f9137b89370",
+              "text": " A Python function that returns the larger of two integers can be written as: A can be returned as: A can be"
+            }
+          ]
+        },
+        {
+          "name": "sampled_chat/concurrent_4_equals_solo",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "6272ad3a19e7",
+              "token_sha256": "6272ad3a19e75ac877cbcd625f56eefac0e420655cc1faa3271e6232b4cab589",
+              "output_sha256": "14e49326eeb542e28aabc8b91360dd6bcd54def77e449bb02d4c265ee5dacfbe",
+              "text": "The sky appears blue because air molecules scatter short blue wavelengths of sunlight more strongly than longer red wavelengths. As a result,"
+            },
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "6272ad3a19e7",
+              "token_sha256": "6272ad3a19e75ac877cbcd625f56eefac0e420655cc1faa3271e6232b4cab589",
+              "output_sha256": "14e49326eeb542e28aabc8b91360dd6bcd54def77e449bb02d4c265ee5dacfbe",
+              "text": "The sky appears blue because air molecules scatter short blue wavelengths of sunlight more strongly than longer red wavelengths. As a result,"
+            },
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "6272ad3a19e7",
+              "token_sha256": "6272ad3a19e75ac877cbcd625f56eefac0e420655cc1faa3271e6232b4cab589",
+              "output_sha256": "14e49326eeb542e28aabc8b91360dd6bcd54def77e449bb02d4c265ee5dacfbe",
+              "text": "The sky appears blue because air molecules scatter short blue wavelengths of sunlight more strongly than longer red wavelengths. As a result,"
+            },
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "6272ad3a19e7",
+              "token_sha256": "6272ad3a19e75ac877cbcd625f56eefac0e420655cc1faa3271e6232b4cab589",
+              "output_sha256": "14e49326eeb542e28aabc8b91360dd6bcd54def77e449bb02d4c265ee5dacfbe",
+              "text": "The sky appears blue because air molecules scatter short blue wavelengths of sunlight more strongly than longer red wavelengths. As a result,"
+            }
+          ]
+        },
+        {
+          "name": "red/color_semantics",
+          "status": "passed",
+          "evidence": {
+            "expected": [
+              "red"
+            ],
+            "observed": [
+              "red",
+              "red",
+              "red"
+            ],
+            "text": "Red<|im_end|>\n<|im_end|>\n \"Red\" is a broad category; the specific shade appears to be a bright, saturated red"
+          }
+        },
+        {
+          "name": "blue/color_semantics",
+          "status": "passed",
+          "evidence": {
+            "expected": [
+              "blue"
+            ],
+            "observed": [
+              "blue",
+              "blue",
+              "blue"
+            ],
+            "text": "Blue<|im_end|>\n<|im_end|>\n \"Blue\" is a broad category, but the image matches the specific shade \"Blue\" as"
+          }
+        },
+        {
+          "name": "red_blue/color_semantics",
+          "status": "passed",
+          "evidence": {
+            "expected": [
+              "red",
+              "blue"
+            ],
+            "observed": [
+              "red",
+              "blue"
+            ],
+            "text": "Red, Blue<|im_end|>\n<|im_end|>\n<|im_end|>\n  Name the solid color of the first image, then the second image."
+          }
+        },
+        {
+          "name": "blue_red/color_semantics",
+          "status": "passed",
+          "evidence": {
+            "expected": [
+              "blue",
+              "red"
+            ],
+            "observed": [
+              "blue",
+              "red"
+            ],
+            "text": "Blue, Red<|im_end|>\n<|im_end|>\n<|im_end|>\n you have to think about the visual characteristics of the images and the visual characteristics"
+          }
+        },
+        {
+          "name": "images/concurrent_equals_solos",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 93,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "6851da15a29c",
+              "token_sha256": "6851da15a29cf4d33e588fa208228cd0cf614245e31195187a67dc0b85d68387",
+              "output_sha256": "b1dc85d579d8dddb7cef7fb30ac8f367d02cfd6fbcbaed9e48573677fee77ead",
+              "text": "Red<|im_end|>\n<|im_end|>\n \"Red\" is a broad category; the specific shade appears to be a bright, saturated red"
+            },
+            {
+              "prompt_tokens": 93,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "bcec37a41abb",
+              "token_sha256": "bcec37a41abba395144f48096269c577079973a1928356de2fd42f3dd6d02408",
+              "output_sha256": "119d8bb715f7c83eed561340e759f37316cbff470c8aa826b058b4d6bd9b28ef",
+              "text": "Blue<|im_end|>\n<|im_end|>\n \"Blue\" is a broad category, but the image matches the specific shade \"Blue\" as"
+            },
+            {
+              "prompt_tokens": 166,
+              "cached_tokens": 128,
+              "tokens": 24,
+              "cache_state": "reused",
+              "complete": true,
+              "token_sha": "f7ddc7461925",
+              "token_sha256": "f7ddc7461925c8442c245e0a38577f66aa708992a852b9b81f819caf0304b5b2",
+              "output_sha256": "76fe0e2af8a801091c6b60b4c11a94c647e639fc3f64e045991beb299ea2bd40",
+              "text": "Red, Blue<|im_end|>\n<|im_end|>\n<|im_end|>\n  Name the solid color of the first image, then the second image."
+            },
+            {
+              "prompt_tokens": 166,
+              "cached_tokens": 128,
+              "tokens": 24,
+              "cache_state": "reused",
+              "complete": true,
+              "token_sha": "436350619b55",
+              "token_sha256": "436350619b55b33ef20f6a7ce774723e3aaa718328dbdea67982f2245de6f349",
+              "output_sha256": "a12ce2084797b364b555240ca6ee7053ec7a653d67ee60107ff5fbaffb690caf",
+              "text": "Blue, Red<|im_end|>\n<|im_end|>\n<|im_end|>\n you have to think about the visual characteristics of the images and the visual characteristics"
+            }
+          ]
+        },
+        {
+          "name": "images/corrupt_png_rejected",
+          "status": "passed",
+          "evidence": {
+            "error": "{\"error\": {\"message\": \"image 1 could not be decoded; send PNG, JPEG or WebP\", \"type\": \"invalid_request_error\"}}",
+            "status": 400,
+            "complete": false
+          }
+        },
+        {
+          "name": "code/cancel_server_confirmed",
+          "status": "passed",
+          "evidence": {
+            "request_id": "cmpl-e3b621ee6c97577bdeda474bdf75e6c1",
+            "first_content": " The",
+            "requested_tokens": 512,
+            "closed_before_done": true,
+            "server_disconnections_before": 0,
+            "server_disconnections_after": 1,
+            "server_confirmed_cancel": true
+          }
+        },
+        {
+          "name": "code/cancel_next_plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 12,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "4c9e7e4a0163",
+            "token_sha256": "4c9e7e4a01637b5054a8cb88295edf6a7697ec454a29a1d4b1e063e85ea643ee",
+            "output_sha256": "eca8c5913ce3f457045e92b8b046177804d82af0e5833f6b65dda607e3da2095",
+            "text": " The larger of two integers is the larger of the larger of the larger of the larger of the larger of the larger of"
+          }
+        },
+        {
+          "name": "code/cancel_next_drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 12,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "4c9e7e4a0163",
+            "token_sha256": "4c9e7e4a01637b5054a8cb88295edf6a7697ec454a29a1d4b1e063e85ea643ee",
+            "output_sha256": "eca8c5913ce3f457045e92b8b046177804d82af0e5833f6b65dda607e3da2095",
+            "text": " The larger of two integers is the larger of the larger of the larger of the larger of the larger of the larger of"
+          }
+        },
+        {
+          "name": "chat/cancel_server_confirmed",
+          "status": "passed",
+          "evidence": {
+            "request_id": "chatcmpl-eb11c533a1224b98f9286b1d894e1f07",
+            "first_content": "The",
+            "requested_tokens": 512,
+            "closed_before_done": true,
+            "server_disconnections_before": 1,
+            "server_disconnections_after": 2,
+            "server_confirmed_cancel": true
+          }
+        },
+        {
+          "name": "chat/cancel_next_plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 21,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "d420544d7d90",
+            "token_sha256": "d420544d7d906a2a1698a1f0df0600d5bed16adb41f30771e510378fca0609ca",
+            "output_sha256": "ac270e5fb966fbfb96ba953f0c88497ded174bae52f5457b208e5455c56f6d6d",
+            "text": "The sky appears blue because molecules in the atmosphere scatter shorter blue wavelengths of sunlight more strongly than longer red wavelengths. This scattered"
+          }
+        },
+        {
+          "name": "chat/cancel_next_drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 21,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "d420544d7d90",
+            "token_sha256": "d420544d7d906a2a1698a1f0df0600d5bed16adb41f30771e510378fca0609ca",
+            "output_sha256": "ac270e5fb966fbfb96ba953f0c88497ded174bae52f5457b208e5455c56f6d6d",
+            "text": "The sky appears blue because molecules in the atmosphere scatter shorter blue wavelengths of sunlight more strongly than longer red wavelengths. This scattered"
+          }
+        },
+        {
+          "name": "red/cancel_server_confirmed",
+          "status": "passed",
+          "evidence": {
+            "request_id": "chatcmpl-7b2d6bc31c4c2ef8fee8254e582683eb",
+            "first_content": "Red",
+            "requested_tokens": 512,
+            "closed_before_done": true,
+            "server_disconnections_before": 2,
+            "server_disconnections_after": 3,
+            "server_confirmed_cancel": true
+          }
+        },
+        {
+          "name": "red/cancel_next_plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 93,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "6851da15a29c",
+            "token_sha256": "6851da15a29cf4d33e588fa208228cd0cf614245e31195187a67dc0b85d68387",
+            "output_sha256": "b1dc85d579d8dddb7cef7fb30ac8f367d02cfd6fbcbaed9e48573677fee77ead",
+            "text": "Red<|im_end|>\n<|im_end|>\n \"Red\" is a broad category; the specific shade appears to be a bright, saturated red"
+          }
+        },
+        {
+          "name": "red/cancel_next_drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 93,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "6851da15a29c",
+            "token_sha256": "6851da15a29cf4d33e588fa208228cd0cf614245e31195187a67dc0b85d68387",
+            "output_sha256": "b1dc85d579d8dddb7cef7fb30ac8f367d02cfd6fbcbaed9e48573677fee77ead",
+            "text": "Red<|im_end|>\n<|im_end|>\n \"Red\" is a broad category; the specific shade appears to be a bright, saturated red"
+          }
+        }
+      ],
+      "raw_receipt_sha256": "194a953509382b29dfcebfb30371cd1329f2bbfb13f7aec69d284c4a1a3a7c12"
+    },
+    {
+      "model": "LFM3-VL-2B-MLX-6bit",
+      "counts": {
+        "passed": 61,
+        "failed": 0,
+        "skipped": 0
+      },
+      "cancellation_checks": 9,
+      "tests": [
+        {
+          "name": "code/fresh_plain",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 12,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "b8b714c6eafc",
+            "token_sha256": "b8b714c6eafc118c48d77868ccb78c889405ce0d12388774695f4c856da9aed3",
+            "output_sha256": "6fd3442d9bccd71bdbbdc1882163a95325e8d71deb681db61a61782eafc71258",
+            "text": " The larger of two integers is the larger of the two integers. The larger of two integers is the larger of the two"
+          }
+        },
+        {
+          "name": "chat/fresh_plain",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 21,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "146558fe1b2c",
+            "token_sha256": "146558fe1b2c249165dcf74e148e01adde16df3443e86827466ab5219ceeda3f",
+            "output_sha256": "30174e992e3bff60e0fa7976ad3305512b10594afd47a55512eb1b45c95e7955",
+            "text": "The sky appears blue because molecules in the atmosphere scatter short-wavelength blue light more efficiently than longer-wavelength colors"
+          }
+        },
+        {
+          "name": "long_prefix/fresh_plain",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 910,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "8b53481ee7d4",
+            "token_sha256": "8b53481ee7d405c1a3df2b1e75889f087990d6bf2ab9fc7711b12f57cd89d63b",
+            "output_sha256": "20cbbb99875361fe61bd0834fef3a2e6145115242d0943e6645ada9310f44942",
+            "text": " The story is about a child who watches birds near a certain place. The story is about a child who watches birds near"
+          }
+        },
+        {
+          "name": "edited_prefix/fresh_plain",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 904,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "077371ff4132",
+            "token_sha256": "077371ff4132fe3eeb4ad7d35eb3d3c06cf4daf570681ee2b68d5058c88671b7",
+            "output_sha256": "2e28d98dcdf15a2dc9b9e0849e4325b58d672b44cdc9f616b854e767d7c58e5a",
+            "text": " The river flows past a quiet village. The river flows past a quiet village. The river flows past a quiet village."
+          }
+        },
+        {
+          "name": "sampled_code/fresh_plain",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 12,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "889c61b36625",
+            "token_sha256": "889c61b36625fcb8c53108a0d46838bc8cec22817e1b6729ac12269a4fae3bdf",
+            "output_sha256": "8050dec47bd7aca54d3bf9fdeb552a9ea2c43dd09c39746884f3aa2b17f44eaa",
+            "text": " The larger of two integers: two integers. The larger of two integers: two integers. The larger of two integers:"
+          }
+        },
+        {
+          "name": "sampled_chat/fresh_plain",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 21,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "d7c4ef4c23b1",
+            "token_sha256": "d7c4ef4c23b14a34a8ee8caba156ed22dc4842aeefd138131f84091ef3f99deb",
+            "output_sha256": "f7f24024489e7a275bf5fabecc41af629a76f055ad3434886b70ed2f3ba377d8",
+            "text": "The sky appears blue because molecules in the atmosphere scatter short blue wavelengths of sunlight more efficiently than longer red wavelengths. This scattering"
+          }
+        },
+        {
+          "name": "red/fresh_plain",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 93,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "c5496640ef02",
+            "token_sha256": "c5496640ef023df732de814235bdd625043a8a04430bfedecc9d4cab124cde73",
+            "output_sha256": "f24021cc28a529f519ccb366576b4be11645c4ad7d1f406aab9be260c7e2060f",
+            "text": "Red<|im_end|>\n<|im_end|>\n one single solid color fills this image, and it is Red.<|im_end|>\n, ., and"
+          }
+        },
+        {
+          "name": "blue/fresh_plain",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 93,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "1ebda8dbe53a",
+            "token_sha256": "1ebda8dbe53a1f60e352998add4472e43cbd50d1e9827f5e04c4b8d94cddbe1a",
+            "output_sha256": "3250f8bff0dd329ca4f245e88f024b27b9562e9106d0bae0ec5fe39cb2342bb0",
+            "text": "Blue<|im_end|>\n<|im_end|>\nfollowing the instruction to not mention the reasoning. Here is the final answer:\n\nBlue<|im_end|>\n"
+          }
+        },
+        {
+          "name": "red_blue/fresh_plain",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 166,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "4d716fe0a620",
+            "token_sha256": "4d716fe0a6208d813d10547bb2b0fe6f67936375629c437b71d438815db2aa54",
+            "output_sha256": "edae4971bed5e05dc1c4d3bc8812b0a54c6285e75a19e9840015b6ddf61aaff5",
+            "text": "Red, blue<|im_end|>\n<|im_end|>\n<|im_end|>\n named after the color of the sky on a clear day, but with a"
+          }
+        },
+        {
+          "name": "blue_red/fresh_plain",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 166,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "73ebfb49f03d",
+            "token_sha256": "73ebfb49f03d91c3eceac28dcf4f8e7ae26b09bee8fd7e686b8588e00f8ad421",
+            "output_sha256": "c4c679768ae53538b9b57e7aedd1f67f4eefd0121cf8bb5ff1557525f3797603",
+            "text": "Blue, red<|im_end|>\n<|im_end|>\n  2. The first image has a blue color, and the second image has"
+          }
+        },
+        {
+          "name": "long_prefix/length_over_256",
+          "status": "passed",
+          "evidence": 910
+        },
+        {
+          "name": "code/plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 12,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "b8b714c6eafc",
+            "token_sha256": "b8b714c6eafc118c48d77868ccb78c889405ce0d12388774695f4c856da9aed3",
+            "output_sha256": "6fd3442d9bccd71bdbbdc1882163a95325e8d71deb681db61a61782eafc71258",
+            "text": " The larger of two integers is the larger of the two integers. The larger of two integers is the larger of the two"
+          }
+        },
+        {
+          "name": "code/drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 12,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "b8b714c6eafc",
+            "token_sha256": "b8b714c6eafc118c48d77868ccb78c889405ce0d12388774695f4c856da9aed3",
+            "output_sha256": "6fd3442d9bccd71bdbbdc1882163a95325e8d71deb681db61a61782eafc71258",
+            "text": " The larger of two integers is the larger of the two integers. The larger of two integers is the larger of the two"
+          }
+        },
+        {
+          "name": "chat/plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 21,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "146558fe1b2c",
+            "token_sha256": "146558fe1b2c249165dcf74e148e01adde16df3443e86827466ab5219ceeda3f",
+            "output_sha256": "30174e992e3bff60e0fa7976ad3305512b10594afd47a55512eb1b45c95e7955",
+            "text": "The sky appears blue because molecules in the atmosphere scatter short-wavelength blue light more efficiently than longer-wavelength colors"
+          }
+        },
+        {
+          "name": "chat/drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 21,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "146558fe1b2c",
+            "token_sha256": "146558fe1b2c249165dcf74e148e01adde16df3443e86827466ab5219ceeda3f",
+            "output_sha256": "30174e992e3bff60e0fa7976ad3305512b10594afd47a55512eb1b45c95e7955",
+            "text": "The sky appears blue because molecules in the atmosphere scatter short-wavelength blue light more efficiently than longer-wavelength colors"
+          }
+        },
+        {
+          "name": "long_prefix/plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 910,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "8b53481ee7d4",
+            "token_sha256": "8b53481ee7d405c1a3df2b1e75889f087990d6bf2ab9fc7711b12f57cd89d63b",
+            "output_sha256": "20cbbb99875361fe61bd0834fef3a2e6145115242d0943e6645ada9310f44942",
+            "text": " The story is about a child who watches birds near a certain place. The story is about a child who watches birds near"
+          }
+        },
+        {
+          "name": "long_prefix/drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 910,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "8b53481ee7d4",
+            "token_sha256": "8b53481ee7d405c1a3df2b1e75889f087990d6bf2ab9fc7711b12f57cd89d63b",
+            "output_sha256": "20cbbb99875361fe61bd0834fef3a2e6145115242d0943e6645ada9310f44942",
+            "text": " The story is about a child who watches birds near a certain place. The story is about a child who watches birds near"
+          }
+        },
+        {
+          "name": "long_prefix/warm_reuses_and_matches_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 910,
+            "cached_tokens": 896,
+            "tokens": 24,
+            "cache_state": "reused",
+            "complete": true,
+            "token_sha": "8b53481ee7d4",
+            "token_sha256": "8b53481ee7d405c1a3df2b1e75889f087990d6bf2ab9fc7711b12f57cd89d63b",
+            "output_sha256": "20cbbb99875361fe61bd0834fef3a2e6145115242d0943e6645ada9310f44942",
+            "text": " The story is about a child who watches birds near a certain place. The story is about a child who watches birds near"
+          }
+        },
+        {
+          "name": "edited_prefix/no_stale_prefix_reuse",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 904,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "077371ff4132",
+            "token_sha256": "077371ff4132fe3eeb4ad7d35eb3d3c06cf4daf570681ee2b68d5058c88671b7",
+            "output_sha256": "2e28d98dcdf15a2dc9b9e0849e4325b58d672b44cdc9f616b854e767d7c58e5a",
+            "text": " The river flows past a quiet village. The river flows past a quiet village. The river flows past a quiet village."
+          }
+        },
+        {
+          "name": "edited_prefix/plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 904,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "077371ff4132",
+            "token_sha256": "077371ff4132fe3eeb4ad7d35eb3d3c06cf4daf570681ee2b68d5058c88671b7",
+            "output_sha256": "2e28d98dcdf15a2dc9b9e0849e4325b58d672b44cdc9f616b854e767d7c58e5a",
+            "text": " The river flows past a quiet village. The river flows past a quiet village. The river flows past a quiet village."
+          }
+        },
+        {
+          "name": "edited_prefix/drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 904,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "077371ff4132",
+            "token_sha256": "077371ff4132fe3eeb4ad7d35eb3d3c06cf4daf570681ee2b68d5058c88671b7",
+            "output_sha256": "2e28d98dcdf15a2dc9b9e0849e4325b58d672b44cdc9f616b854e767d7c58e5a",
+            "text": " The river flows past a quiet village. The river flows past a quiet village. The river flows past a quiet village."
+          }
+        },
+        {
+          "name": "edited_prefix/matches_cache_off",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 904,
+            "cached_tokens": 896,
+            "tokens": 24,
+            "cache_state": "reused",
+            "complete": true,
+            "token_sha": "077371ff4132",
+            "token_sha256": "077371ff4132fe3eeb4ad7d35eb3d3c06cf4daf570681ee2b68d5058c88671b7",
+            "output_sha256": "2e28d98dcdf15a2dc9b9e0849e4325b58d672b44cdc9f616b854e767d7c58e5a",
+            "text": " The river flows past a quiet village. The river flows past a quiet village. The river flows past a quiet village."
+          }
+        },
+        {
+          "name": "sampled_code/plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 12,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "889c61b36625",
+            "token_sha256": "889c61b36625fcb8c53108a0d46838bc8cec22817e1b6729ac12269a4fae3bdf",
+            "output_sha256": "8050dec47bd7aca54d3bf9fdeb552a9ea2c43dd09c39746884f3aa2b17f44eaa",
+            "text": " The larger of two integers: two integers. The larger of two integers: two integers. The larger of two integers:"
+          }
+        },
+        {
+          "name": "sampled_code/drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 12,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "889c61b36625",
+            "token_sha256": "889c61b36625fcb8c53108a0d46838bc8cec22817e1b6729ac12269a4fae3bdf",
+            "output_sha256": "8050dec47bd7aca54d3bf9fdeb552a9ea2c43dd09c39746884f3aa2b17f44eaa",
+            "text": " The larger of two integers: two integers. The larger of two integers: two integers. The larger of two integers:"
+          }
+        },
+        {
+          "name": "sampled_chat/plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 21,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "d7c4ef4c23b1",
+            "token_sha256": "d7c4ef4c23b14a34a8ee8caba156ed22dc4842aeefd138131f84091ef3f99deb",
+            "output_sha256": "f7f24024489e7a275bf5fabecc41af629a76f055ad3434886b70ed2f3ba377d8",
+            "text": "The sky appears blue because molecules in the atmosphere scatter short blue wavelengths of sunlight more efficiently than longer red wavelengths. This scattering"
+          }
+        },
+        {
+          "name": "sampled_chat/drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 21,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "d7c4ef4c23b1",
+            "token_sha256": "d7c4ef4c23b14a34a8ee8caba156ed22dc4842aeefd138131f84091ef3f99deb",
+            "output_sha256": "f7f24024489e7a275bf5fabecc41af629a76f055ad3434886b70ed2f3ba377d8",
+            "text": "The sky appears blue because molecules in the atmosphere scatter short blue wavelengths of sunlight more efficiently than longer red wavelengths. This scattering"
+          }
+        },
+        {
+          "name": "red/plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 93,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "c5496640ef02",
+            "token_sha256": "c5496640ef023df732de814235bdd625043a8a04430bfedecc9d4cab124cde73",
+            "output_sha256": "f24021cc28a529f519ccb366576b4be11645c4ad7d1f406aab9be260c7e2060f",
+            "text": "Red<|im_end|>\n<|im_end|>\n one single solid color fills this image, and it is Red.<|im_end|>\n, ., and"
+          }
+        },
+        {
+          "name": "red/drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 93,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "c5496640ef02",
+            "token_sha256": "c5496640ef023df732de814235bdd625043a8a04430bfedecc9d4cab124cde73",
+            "output_sha256": "f24021cc28a529f519ccb366576b4be11645c4ad7d1f406aab9be260c7e2060f",
+            "text": "Red<|im_end|>\n<|im_end|>\n one single solid color fills this image, and it is Red.<|im_end|>\n, ., and"
+          }
+        },
+        {
+          "name": "blue/plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 93,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "1ebda8dbe53a",
+            "token_sha256": "1ebda8dbe53a1f60e352998add4472e43cbd50d1e9827f5e04c4b8d94cddbe1a",
+            "output_sha256": "3250f8bff0dd329ca4f245e88f024b27b9562e9106d0bae0ec5fe39cb2342bb0",
+            "text": "Blue<|im_end|>\n<|im_end|>\nfollowing the instruction to not mention the reasoning. Here is the final answer:\n\nBlue<|im_end|>\n"
+          }
+        },
+        {
+          "name": "blue/drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 93,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "1ebda8dbe53a",
+            "token_sha256": "1ebda8dbe53a1f60e352998add4472e43cbd50d1e9827f5e04c4b8d94cddbe1a",
+            "output_sha256": "3250f8bff0dd329ca4f245e88f024b27b9562e9106d0bae0ec5fe39cb2342bb0",
+            "text": "Blue<|im_end|>\n<|im_end|>\nfollowing the instruction to not mention the reasoning. Here is the final answer:\n\nBlue<|im_end|>\n"
+          }
+        },
+        {
+          "name": "red_blue/plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 166,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "4d716fe0a620",
+            "token_sha256": "4d716fe0a6208d813d10547bb2b0fe6f67936375629c437b71d438815db2aa54",
+            "output_sha256": "edae4971bed5e05dc1c4d3bc8812b0a54c6285e75a19e9840015b6ddf61aaff5",
+            "text": "Red, blue<|im_end|>\n<|im_end|>\n<|im_end|>\n named after the color of the sky on a clear day, but with a"
+          }
+        },
+        {
+          "name": "red_blue/drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 166,
+            "cached_tokens": 128,
+            "tokens": 24,
+            "cache_state": "reused",
+            "complete": true,
+            "token_sha": "4d716fe0a620",
+            "token_sha256": "4d716fe0a6208d813d10547bb2b0fe6f67936375629c437b71d438815db2aa54",
+            "output_sha256": "edae4971bed5e05dc1c4d3bc8812b0a54c6285e75a19e9840015b6ddf61aaff5",
+            "text": "Red, blue<|im_end|>\n<|im_end|>\n<|im_end|>\n named after the color of the sky on a clear day, but with a"
+          }
+        },
+        {
+          "name": "blue_red/plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 166,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "73ebfb49f03d",
+            "token_sha256": "73ebfb49f03d91c3eceac28dcf4f8e7ae26b09bee8fd7e686b8588e00f8ad421",
+            "output_sha256": "c4c679768ae53538b9b57e7aedd1f67f4eefd0121cf8bb5ff1557525f3797603",
+            "text": "Blue, red<|im_end|>\n<|im_end|>\n  2. The first image has a blue color, and the second image has"
+          }
+        },
+        {
+          "name": "blue_red/drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 166,
+            "cached_tokens": 128,
+            "tokens": 24,
+            "cache_state": "reused",
+            "complete": true,
+            "token_sha": "73ebfb49f03d",
+            "token_sha256": "73ebfb49f03d91c3eceac28dcf4f8e7ae26b09bee8fd7e686b8588e00f8ad421",
+            "output_sha256": "c4c679768ae53538b9b57e7aedd1f67f4eefd0121cf8bb5ff1557525f3797603",
+            "text": "Blue, red<|im_end|>\n<|im_end|>\n  2. The first image has a blue color, and the second image has"
+          }
+        },
+        {
+          "name": "code/concurrent_1_equals_solo",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "b8b714c6eafc",
+              "token_sha256": "b8b714c6eafc118c48d77868ccb78c889405ce0d12388774695f4c856da9aed3",
+              "output_sha256": "6fd3442d9bccd71bdbbdc1882163a95325e8d71deb681db61a61782eafc71258",
+              "text": " The larger of two integers is the larger of the two integers. The larger of two integers is the larger of the two"
+            }
+          ]
+        },
+        {
+          "name": "chat/concurrent_1_equals_solo",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "146558fe1b2c",
+              "token_sha256": "146558fe1b2c249165dcf74e148e01adde16df3443e86827466ab5219ceeda3f",
+              "output_sha256": "30174e992e3bff60e0fa7976ad3305512b10594afd47a55512eb1b45c95e7955",
+              "text": "The sky appears blue because molecules in the atmosphere scatter short-wavelength blue light more efficiently than longer-wavelength colors"
+            }
+          ]
+        },
+        {
+          "name": "sampled_code/concurrent_1_equals_solo",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "889c61b36625",
+              "token_sha256": "889c61b36625fcb8c53108a0d46838bc8cec22817e1b6729ac12269a4fae3bdf",
+              "output_sha256": "8050dec47bd7aca54d3bf9fdeb552a9ea2c43dd09c39746884f3aa2b17f44eaa",
+              "text": " The larger of two integers: two integers. The larger of two integers: two integers. The larger of two integers:"
+            }
+          ]
+        },
+        {
+          "name": "sampled_chat/concurrent_1_equals_solo",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "d7c4ef4c23b1",
+              "token_sha256": "d7c4ef4c23b14a34a8ee8caba156ed22dc4842aeefd138131f84091ef3f99deb",
+              "output_sha256": "f7f24024489e7a275bf5fabecc41af629a76f055ad3434886b70ed2f3ba377d8",
+              "text": "The sky appears blue because molecules in the atmosphere scatter short blue wavelengths of sunlight more efficiently than longer red wavelengths. This scattering"
+            }
+          ]
+        },
+        {
+          "name": "code/concurrent_2_equals_solo",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "b8b714c6eafc",
+              "token_sha256": "b8b714c6eafc118c48d77868ccb78c889405ce0d12388774695f4c856da9aed3",
+              "output_sha256": "6fd3442d9bccd71bdbbdc1882163a95325e8d71deb681db61a61782eafc71258",
+              "text": " The larger of two integers is the larger of the two integers. The larger of two integers is the larger of the two"
+            },
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "b8b714c6eafc",
+              "token_sha256": "b8b714c6eafc118c48d77868ccb78c889405ce0d12388774695f4c856da9aed3",
+              "output_sha256": "6fd3442d9bccd71bdbbdc1882163a95325e8d71deb681db61a61782eafc71258",
+              "text": " The larger of two integers is the larger of the two integers. The larger of two integers is the larger of the two"
+            }
+          ]
+        },
+        {
+          "name": "chat/concurrent_2_equals_solo",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "146558fe1b2c",
+              "token_sha256": "146558fe1b2c249165dcf74e148e01adde16df3443e86827466ab5219ceeda3f",
+              "output_sha256": "30174e992e3bff60e0fa7976ad3305512b10594afd47a55512eb1b45c95e7955",
+              "text": "The sky appears blue because molecules in the atmosphere scatter short-wavelength blue light more efficiently than longer-wavelength colors"
+            },
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "146558fe1b2c",
+              "token_sha256": "146558fe1b2c249165dcf74e148e01adde16df3443e86827466ab5219ceeda3f",
+              "output_sha256": "30174e992e3bff60e0fa7976ad3305512b10594afd47a55512eb1b45c95e7955",
+              "text": "The sky appears blue because molecules in the atmosphere scatter short-wavelength blue light more efficiently than longer-wavelength colors"
+            }
+          ]
+        },
+        {
+          "name": "sampled_code/concurrent_2_equals_solo",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "889c61b36625",
+              "token_sha256": "889c61b36625fcb8c53108a0d46838bc8cec22817e1b6729ac12269a4fae3bdf",
+              "output_sha256": "8050dec47bd7aca54d3bf9fdeb552a9ea2c43dd09c39746884f3aa2b17f44eaa",
+              "text": " The larger of two integers: two integers. The larger of two integers: two integers. The larger of two integers:"
+            },
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "889c61b36625",
+              "token_sha256": "889c61b36625fcb8c53108a0d46838bc8cec22817e1b6729ac12269a4fae3bdf",
+              "output_sha256": "8050dec47bd7aca54d3bf9fdeb552a9ea2c43dd09c39746884f3aa2b17f44eaa",
+              "text": " The larger of two integers: two integers. The larger of two integers: two integers. The larger of two integers:"
+            }
+          ]
+        },
+        {
+          "name": "sampled_chat/concurrent_2_equals_solo",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "d7c4ef4c23b1",
+              "token_sha256": "d7c4ef4c23b14a34a8ee8caba156ed22dc4842aeefd138131f84091ef3f99deb",
+              "output_sha256": "f7f24024489e7a275bf5fabecc41af629a76f055ad3434886b70ed2f3ba377d8",
+              "text": "The sky appears blue because molecules in the atmosphere scatter short blue wavelengths of sunlight more efficiently than longer red wavelengths. This scattering"
+            },
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "d7c4ef4c23b1",
+              "token_sha256": "d7c4ef4c23b14a34a8ee8caba156ed22dc4842aeefd138131f84091ef3f99deb",
+              "output_sha256": "f7f24024489e7a275bf5fabecc41af629a76f055ad3434886b70ed2f3ba377d8",
+              "text": "The sky appears blue because molecules in the atmosphere scatter short blue wavelengths of sunlight more efficiently than longer red wavelengths. This scattering"
+            }
+          ]
+        },
+        {
+          "name": "code/concurrent_4_equals_solo",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "b8b714c6eafc",
+              "token_sha256": "b8b714c6eafc118c48d77868ccb78c889405ce0d12388774695f4c856da9aed3",
+              "output_sha256": "6fd3442d9bccd71bdbbdc1882163a95325e8d71deb681db61a61782eafc71258",
+              "text": " The larger of two integers is the larger of the two integers. The larger of two integers is the larger of the two"
+            },
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "b8b714c6eafc",
+              "token_sha256": "b8b714c6eafc118c48d77868ccb78c889405ce0d12388774695f4c856da9aed3",
+              "output_sha256": "6fd3442d9bccd71bdbbdc1882163a95325e8d71deb681db61a61782eafc71258",
+              "text": " The larger of two integers is the larger of the two integers. The larger of two integers is the larger of the two"
+            },
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "b8b714c6eafc",
+              "token_sha256": "b8b714c6eafc118c48d77868ccb78c889405ce0d12388774695f4c856da9aed3",
+              "output_sha256": "6fd3442d9bccd71bdbbdc1882163a95325e8d71deb681db61a61782eafc71258",
+              "text": " The larger of two integers is the larger of the two integers. The larger of two integers is the larger of the two"
+            },
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "b8b714c6eafc",
+              "token_sha256": "b8b714c6eafc118c48d77868ccb78c889405ce0d12388774695f4c856da9aed3",
+              "output_sha256": "6fd3442d9bccd71bdbbdc1882163a95325e8d71deb681db61a61782eafc71258",
+              "text": " The larger of two integers is the larger of the two integers. The larger of two integers is the larger of the two"
+            }
+          ]
+        },
+        {
+          "name": "chat/concurrent_4_equals_solo",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "146558fe1b2c",
+              "token_sha256": "146558fe1b2c249165dcf74e148e01adde16df3443e86827466ab5219ceeda3f",
+              "output_sha256": "30174e992e3bff60e0fa7976ad3305512b10594afd47a55512eb1b45c95e7955",
+              "text": "The sky appears blue because molecules in the atmosphere scatter short-wavelength blue light more efficiently than longer-wavelength colors"
+            },
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "146558fe1b2c",
+              "token_sha256": "146558fe1b2c249165dcf74e148e01adde16df3443e86827466ab5219ceeda3f",
+              "output_sha256": "30174e992e3bff60e0fa7976ad3305512b10594afd47a55512eb1b45c95e7955",
+              "text": "The sky appears blue because molecules in the atmosphere scatter short-wavelength blue light more efficiently than longer-wavelength colors"
+            },
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "146558fe1b2c",
+              "token_sha256": "146558fe1b2c249165dcf74e148e01adde16df3443e86827466ab5219ceeda3f",
+              "output_sha256": "30174e992e3bff60e0fa7976ad3305512b10594afd47a55512eb1b45c95e7955",
+              "text": "The sky appears blue because molecules in the atmosphere scatter short-wavelength blue light more efficiently than longer-wavelength colors"
+            },
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "146558fe1b2c",
+              "token_sha256": "146558fe1b2c249165dcf74e148e01adde16df3443e86827466ab5219ceeda3f",
+              "output_sha256": "30174e992e3bff60e0fa7976ad3305512b10594afd47a55512eb1b45c95e7955",
+              "text": "The sky appears blue because molecules in the atmosphere scatter short-wavelength blue light more efficiently than longer-wavelength colors"
+            }
+          ]
+        },
+        {
+          "name": "sampled_code/concurrent_4_equals_solo",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "889c61b36625",
+              "token_sha256": "889c61b36625fcb8c53108a0d46838bc8cec22817e1b6729ac12269a4fae3bdf",
+              "output_sha256": "8050dec47bd7aca54d3bf9fdeb552a9ea2c43dd09c39746884f3aa2b17f44eaa",
+              "text": " The larger of two integers: two integers. The larger of two integers: two integers. The larger of two integers:"
+            },
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "889c61b36625",
+              "token_sha256": "889c61b36625fcb8c53108a0d46838bc8cec22817e1b6729ac12269a4fae3bdf",
+              "output_sha256": "8050dec47bd7aca54d3bf9fdeb552a9ea2c43dd09c39746884f3aa2b17f44eaa",
+              "text": " The larger of two integers: two integers. The larger of two integers: two integers. The larger of two integers:"
+            },
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "889c61b36625",
+              "token_sha256": "889c61b36625fcb8c53108a0d46838bc8cec22817e1b6729ac12269a4fae3bdf",
+              "output_sha256": "8050dec47bd7aca54d3bf9fdeb552a9ea2c43dd09c39746884f3aa2b17f44eaa",
+              "text": " The larger of two integers: two integers. The larger of two integers: two integers. The larger of two integers:"
+            },
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "889c61b36625",
+              "token_sha256": "889c61b36625fcb8c53108a0d46838bc8cec22817e1b6729ac12269a4fae3bdf",
+              "output_sha256": "8050dec47bd7aca54d3bf9fdeb552a9ea2c43dd09c39746884f3aa2b17f44eaa",
+              "text": " The larger of two integers: two integers. The larger of two integers: two integers. The larger of two integers:"
+            }
+          ]
+        },
+        {
+          "name": "sampled_chat/concurrent_4_equals_solo",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "d7c4ef4c23b1",
+              "token_sha256": "d7c4ef4c23b14a34a8ee8caba156ed22dc4842aeefd138131f84091ef3f99deb",
+              "output_sha256": "f7f24024489e7a275bf5fabecc41af629a76f055ad3434886b70ed2f3ba377d8",
+              "text": "The sky appears blue because molecules in the atmosphere scatter short blue wavelengths of sunlight more efficiently than longer red wavelengths. This scattering"
+            },
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "d7c4ef4c23b1",
+              "token_sha256": "d7c4ef4c23b14a34a8ee8caba156ed22dc4842aeefd138131f84091ef3f99deb",
+              "output_sha256": "f7f24024489e7a275bf5fabecc41af629a76f055ad3434886b70ed2f3ba377d8",
+              "text": "The sky appears blue because molecules in the atmosphere scatter short blue wavelengths of sunlight more efficiently than longer red wavelengths. This scattering"
+            },
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "d7c4ef4c23b1",
+              "token_sha256": "d7c4ef4c23b14a34a8ee8caba156ed22dc4842aeefd138131f84091ef3f99deb",
+              "output_sha256": "f7f24024489e7a275bf5fabecc41af629a76f055ad3434886b70ed2f3ba377d8",
+              "text": "The sky appears blue because molecules in the atmosphere scatter short blue wavelengths of sunlight more efficiently than longer red wavelengths. This scattering"
+            },
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "d7c4ef4c23b1",
+              "token_sha256": "d7c4ef4c23b14a34a8ee8caba156ed22dc4842aeefd138131f84091ef3f99deb",
+              "output_sha256": "f7f24024489e7a275bf5fabecc41af629a76f055ad3434886b70ed2f3ba377d8",
+              "text": "The sky appears blue because molecules in the atmosphere scatter short blue wavelengths of sunlight more efficiently than longer red wavelengths. This scattering"
+            }
+          ]
+        },
+        {
+          "name": "red/color_semantics",
+          "status": "passed",
+          "evidence": {
+            "expected": [
+              "red"
+            ],
+            "observed": [
+              "red",
+              "red"
+            ],
+            "text": "Red<|im_end|>\n<|im_end|>\n one single solid color fills this image, and it is Red.<|im_end|>\n, ., and"
+          }
+        },
+        {
+          "name": "blue/color_semantics",
+          "status": "passed",
+          "evidence": {
+            "expected": [
+              "blue"
+            ],
+            "observed": [
+              "blue",
+              "blue"
+            ],
+            "text": "Blue<|im_end|>\n<|im_end|>\nfollowing the instruction to not mention the reasoning. Here is the final answer:\n\nBlue<|im_end|>\n"
+          }
+        },
+        {
+          "name": "red_blue/color_semantics",
+          "status": "passed",
+          "evidence": {
+            "expected": [
+              "red",
+              "blue"
+            ],
+            "observed": [
+              "red",
+              "blue"
+            ],
+            "text": "Red, blue<|im_end|>\n<|im_end|>\n<|im_end|>\n named after the color of the sky on a clear day, but with a"
+          }
+        },
+        {
+          "name": "blue_red/color_semantics",
+          "status": "passed",
+          "evidence": {
+            "expected": [
+              "blue",
+              "red"
+            ],
+            "observed": [
+              "blue",
+              "red",
+              "blue"
+            ],
+            "text": "Blue, red<|im_end|>\n<|im_end|>\n  2. The first image has a blue color, and the second image has"
+          }
+        },
+        {
+          "name": "images/concurrent_equals_solos",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 93,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "c5496640ef02",
+              "token_sha256": "c5496640ef023df732de814235bdd625043a8a04430bfedecc9d4cab124cde73",
+              "output_sha256": "f24021cc28a529f519ccb366576b4be11645c4ad7d1f406aab9be260c7e2060f",
+              "text": "Red<|im_end|>\n<|im_end|>\n one single solid color fills this image, and it is Red.<|im_end|>\n, ., and"
+            },
+            {
+              "prompt_tokens": 93,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "1ebda8dbe53a",
+              "token_sha256": "1ebda8dbe53a1f60e352998add4472e43cbd50d1e9827f5e04c4b8d94cddbe1a",
+              "output_sha256": "3250f8bff0dd329ca4f245e88f024b27b9562e9106d0bae0ec5fe39cb2342bb0",
+              "text": "Blue<|im_end|>\n<|im_end|>\nfollowing the instruction to not mention the reasoning. Here is the final answer:\n\nBlue<|im_end|>\n"
+            },
+            {
+              "prompt_tokens": 166,
+              "cached_tokens": 128,
+              "tokens": 24,
+              "cache_state": "reused",
+              "complete": true,
+              "token_sha": "4d716fe0a620",
+              "token_sha256": "4d716fe0a6208d813d10547bb2b0fe6f67936375629c437b71d438815db2aa54",
+              "output_sha256": "edae4971bed5e05dc1c4d3bc8812b0a54c6285e75a19e9840015b6ddf61aaff5",
+              "text": "Red, blue<|im_end|>\n<|im_end|>\n<|im_end|>\n named after the color of the sky on a clear day, but with a"
+            },
+            {
+              "prompt_tokens": 166,
+              "cached_tokens": 128,
+              "tokens": 24,
+              "cache_state": "reused",
+              "complete": true,
+              "token_sha": "73ebfb49f03d",
+              "token_sha256": "73ebfb49f03d91c3eceac28dcf4f8e7ae26b09bee8fd7e686b8588e00f8ad421",
+              "output_sha256": "c4c679768ae53538b9b57e7aedd1f67f4eefd0121cf8bb5ff1557525f3797603",
+              "text": "Blue, red<|im_end|>\n<|im_end|>\n  2. The first image has a blue color, and the second image has"
+            }
+          ]
+        },
+        {
+          "name": "images/corrupt_png_rejected",
+          "status": "passed",
+          "evidence": {
+            "error": "{\"error\": {\"message\": \"image 1 could not be decoded; send PNG, JPEG or WebP\", \"type\": \"invalid_request_error\"}}",
+            "status": 400,
+            "complete": false
+          }
+        },
+        {
+          "name": "code/cancel_server_confirmed",
+          "status": "passed",
+          "evidence": {
+            "request_id": "cmpl-6a67bcb048b34befb20a0bbef9010b66",
+            "first_content": " The",
+            "requested_tokens": 512,
+            "closed_before_done": true,
+            "server_disconnections_before": 0,
+            "server_disconnections_after": 1,
+            "server_confirmed_cancel": true
+          }
+        },
+        {
+          "name": "code/cancel_next_plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 12,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "b8b714c6eafc",
+            "token_sha256": "b8b714c6eafc118c48d77868ccb78c889405ce0d12388774695f4c856da9aed3",
+            "output_sha256": "6fd3442d9bccd71bdbbdc1882163a95325e8d71deb681db61a61782eafc71258",
+            "text": " The larger of two integers is the larger of the two integers. The larger of two integers is the larger of the two"
+          }
+        },
+        {
+          "name": "code/cancel_next_drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 12,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "b8b714c6eafc",
+            "token_sha256": "b8b714c6eafc118c48d77868ccb78c889405ce0d12388774695f4c856da9aed3",
+            "output_sha256": "6fd3442d9bccd71bdbbdc1882163a95325e8d71deb681db61a61782eafc71258",
+            "text": " The larger of two integers is the larger of the two integers. The larger of two integers is the larger of the two"
+          }
+        },
+        {
+          "name": "chat/cancel_server_confirmed",
+          "status": "passed",
+          "evidence": {
+            "request_id": "chatcmpl-b2dc19d2fd409ca9371fcda393f9a48a",
+            "first_content": "The",
+            "requested_tokens": 512,
+            "closed_before_done": true,
+            "server_disconnections_before": 1,
+            "server_disconnections_after": 2,
+            "server_confirmed_cancel": true
+          }
+        },
+        {
+          "name": "chat/cancel_next_plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 21,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "146558fe1b2c",
+            "token_sha256": "146558fe1b2c249165dcf74e148e01adde16df3443e86827466ab5219ceeda3f",
+            "output_sha256": "30174e992e3bff60e0fa7976ad3305512b10594afd47a55512eb1b45c95e7955",
+            "text": "The sky appears blue because molecules in the atmosphere scatter short-wavelength blue light more efficiently than longer-wavelength colors"
+          }
+        },
+        {
+          "name": "chat/cancel_next_drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 21,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "146558fe1b2c",
+            "token_sha256": "146558fe1b2c249165dcf74e148e01adde16df3443e86827466ab5219ceeda3f",
+            "output_sha256": "30174e992e3bff60e0fa7976ad3305512b10594afd47a55512eb1b45c95e7955",
+            "text": "The sky appears blue because molecules in the atmosphere scatter short-wavelength blue light more efficiently than longer-wavelength colors"
+          }
+        },
+        {
+          "name": "red/cancel_server_confirmed",
+          "status": "passed",
+          "evidence": {
+            "request_id": "chatcmpl-a8a2656e3aa816b19358432a6f397cbc",
+            "first_content": "Red",
+            "requested_tokens": 512,
+            "closed_before_done": true,
+            "server_disconnections_before": 2,
+            "server_disconnections_after": 3,
+            "server_confirmed_cancel": true
+          }
+        },
+        {
+          "name": "red/cancel_next_plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 93,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "c5496640ef02",
+            "token_sha256": "c5496640ef023df732de814235bdd625043a8a04430bfedecc9d4cab124cde73",
+            "output_sha256": "f24021cc28a529f519ccb366576b4be11645c4ad7d1f406aab9be260c7e2060f",
+            "text": "Red<|im_end|>\n<|im_end|>\n one single solid color fills this image, and it is Red.<|im_end|>\n, ., and"
+          }
+        },
+        {
+          "name": "red/cancel_next_drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 93,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "c5496640ef02",
+            "token_sha256": "c5496640ef023df732de814235bdd625043a8a04430bfedecc9d4cab124cde73",
+            "output_sha256": "f24021cc28a529f519ccb366576b4be11645c4ad7d1f406aab9be260c7e2060f",
+            "text": "Red<|im_end|>\n<|im_end|>\n one single solid color fills this image, and it is Red.<|im_end|>\n, ., and"
+          }
+        }
+      ],
+      "raw_receipt_sha256": "12be5ff9e214b398748cebb682c4f9e99d9d2ce274b57259a4a61f0395d2d2d5"
+    },
+    {
+      "model": "LFM3-VL-2B-MLX-8bit",
+      "counts": {
+        "passed": 61,
+        "failed": 0,
+        "skipped": 0
+      },
+      "cancellation_checks": 9,
+      "tests": [
+        {
+          "name": "code/fresh_plain",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 12,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "b8b714c6eafc",
+            "token_sha256": "b8b714c6eafc118c48d77868ccb78c889405ce0d12388774695f4c856da9aed3",
+            "output_sha256": "6fd3442d9bccd71bdbbdc1882163a95325e8d71deb681db61a61782eafc71258",
+            "text": " The larger of two integers is the larger of the two integers. The larger of two integers is the larger of the two"
+          }
+        },
+        {
+          "name": "chat/fresh_plain",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 21,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "146558fe1b2c",
+            "token_sha256": "146558fe1b2c249165dcf74e148e01adde16df3443e86827466ab5219ceeda3f",
+            "output_sha256": "30174e992e3bff60e0fa7976ad3305512b10594afd47a55512eb1b45c95e7955",
+            "text": "The sky appears blue because molecules in the atmosphere scatter short-wavelength blue light more efficiently than longer-wavelength colors"
+          }
+        },
+        {
+          "name": "long_prefix/fresh_plain",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 910,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "01966fd5bc9c",
+            "token_sha256": "01966fd5bc9cbbd3172d981f7131026072addb0c4996d1e2e838afff1d1628da",
+            "output_sha256": "b269555f9e101f666dec38d5cbe6628bfe1f9c23ca41f635721ab6afc83444bb",
+            "text": " The story is about a person who is always in a state of being in a state of a state of a state of"
+          }
+        },
+        {
+          "name": "edited_prefix/fresh_plain",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 904,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "077371ff4132",
+            "token_sha256": "077371ff4132fe3eeb4ad7d35eb3d3c06cf4daf570681ee2b68d5058c88671b7",
+            "output_sha256": "2e28d98dcdf15a2dc9b9e0849e4325b58d672b44cdc9f616b854e767d7c58e5a",
+            "text": " The river flows past a quiet village. The river flows past a quiet village. The river flows past a quiet village."
+          }
+        },
+        {
+          "name": "sampled_code/fresh_plain",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 12,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "889c61b36625",
+            "token_sha256": "889c61b36625fcb8c53108a0d46838bc8cec22817e1b6729ac12269a4fae3bdf",
+            "output_sha256": "8050dec47bd7aca54d3bf9fdeb552a9ea2c43dd09c39746884f3aa2b17f44eaa",
+            "text": " The larger of two integers: two integers. The larger of two integers: two integers. The larger of two integers:"
+          }
+        },
+        {
+          "name": "sampled_chat/fresh_plain",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 21,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "6272ad3a19e7",
+            "token_sha256": "6272ad3a19e75ac877cbcd625f56eefac0e420655cc1faa3271e6232b4cab589",
+            "output_sha256": "14e49326eeb542e28aabc8b91360dd6bcd54def77e449bb02d4c265ee5dacfbe",
+            "text": "The sky appears blue because air molecules scatter short blue wavelengths of sunlight more strongly than longer red wavelengths. As a result,"
+          }
+        },
+        {
+          "name": "red/fresh_plain",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 93,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "5d2a925a67b8",
+            "token_sha256": "5d2a925a67b8428145573b879dc055195c2182225be42f16e7d54e58ab4eea99",
+            "output_sha256": "f522a5dd4dea3b4715c1c3c718cf98b96206aa27b286908b94f3c55f63a43d8d",
+            "text": "Red<|im_end|>\n<|im_end|>\n one single solid color fills this image, and it is: Red<|im_end|>\nThe image contains a"
+          }
+        },
+        {
+          "name": "blue/fresh_plain",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 93,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "443110d479d4",
+            "token_sha256": "443110d479d465bdf94e0f0593e04fccc97bf6c691a303b18790653d09a2a484",
+            "output_sha256": "6289ced39f197fde2b527b584d41664646ae63a2b89a7264ef87186c27e7d2d6",
+            "text": "Blue<|im_end|>\nThe image contains a single solid color: Blue.<|im_end|>\n, I see a uniform blue hue throughout the"
+          }
+        },
+        {
+          "name": "red_blue/fresh_plain",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 166,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "58a1049f0edd",
+            "token_sha256": "58a1049f0edda40c71e9d2f870e53b73ae4a684f6e28a01a9c9613cbbb6e87de",
+            "output_sha256": "c0e8cbed442b0a75be06ef30ae7095b02049d7ea14246713c7ca470ac4a2493f",
+            "text": "Red, blue<|im_end|>\n<|im_end|>\n<|im_end|>\n colored with colored pencils pencil? No, solid color.<|im_end|>\n correction:"
+          }
+        },
+        {
+          "name": "blue_red/fresh_plain",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 166,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "04bedc0c3730",
+            "token_sha256": "04bedc0c3730c152af9ba4e7b11d4ca29ac0c152e61cc4a537dfc0164418caed",
+            "output_sha256": "ba7b61007919184772a256b54f96d2d18ffe25be19c24ffd36ecaba9a8a70005",
+            "text": "Blue, red<|im_end|>\n<|im_end|>\n<|im_end|>\n you have to rely on the visual information from the images provided. Rely"
+          }
+        },
+        {
+          "name": "long_prefix/length_over_256",
+          "status": "passed",
+          "evidence": 910
+        },
+        {
+          "name": "code/plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 12,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "b8b714c6eafc",
+            "token_sha256": "b8b714c6eafc118c48d77868ccb78c889405ce0d12388774695f4c856da9aed3",
+            "output_sha256": "6fd3442d9bccd71bdbbdc1882163a95325e8d71deb681db61a61782eafc71258",
+            "text": " The larger of two integers is the larger of the two integers. The larger of two integers is the larger of the two"
+          }
+        },
+        {
+          "name": "code/drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 12,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "b8b714c6eafc",
+            "token_sha256": "b8b714c6eafc118c48d77868ccb78c889405ce0d12388774695f4c856da9aed3",
+            "output_sha256": "6fd3442d9bccd71bdbbdc1882163a95325e8d71deb681db61a61782eafc71258",
+            "text": " The larger of two integers is the larger of the two integers. The larger of two integers is the larger of the two"
+          }
+        },
+        {
+          "name": "chat/plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 21,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "146558fe1b2c",
+            "token_sha256": "146558fe1b2c249165dcf74e148e01adde16df3443e86827466ab5219ceeda3f",
+            "output_sha256": "30174e992e3bff60e0fa7976ad3305512b10594afd47a55512eb1b45c95e7955",
+            "text": "The sky appears blue because molecules in the atmosphere scatter short-wavelength blue light more efficiently than longer-wavelength colors"
+          }
+        },
+        {
+          "name": "chat/drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 21,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "146558fe1b2c",
+            "token_sha256": "146558fe1b2c249165dcf74e148e01adde16df3443e86827466ab5219ceeda3f",
+            "output_sha256": "30174e992e3bff60e0fa7976ad3305512b10594afd47a55512eb1b45c95e7955",
+            "text": "The sky appears blue because molecules in the atmosphere scatter short-wavelength blue light more efficiently than longer-wavelength colors"
+          }
+        },
+        {
+          "name": "long_prefix/plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 910,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "01966fd5bc9c",
+            "token_sha256": "01966fd5bc9cbbd3172d981f7131026072addb0c4996d1e2e838afff1d1628da",
+            "output_sha256": "b269555f9e101f666dec38d5cbe6628bfe1f9c23ca41f635721ab6afc83444bb",
+            "text": " The story is about a person who is always in a state of being in a state of a state of a state of"
+          }
+        },
+        {
+          "name": "long_prefix/drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 910,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "01966fd5bc9c",
+            "token_sha256": "01966fd5bc9cbbd3172d981f7131026072addb0c4996d1e2e838afff1d1628da",
+            "output_sha256": "b269555f9e101f666dec38d5cbe6628bfe1f9c23ca41f635721ab6afc83444bb",
+            "text": " The story is about a person who is always in a state of being in a state of a state of a state of"
+          }
+        },
+        {
+          "name": "long_prefix/warm_reuses_and_matches_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 910,
+            "cached_tokens": 896,
+            "tokens": 24,
+            "cache_state": "reused",
+            "complete": true,
+            "token_sha": "01966fd5bc9c",
+            "token_sha256": "01966fd5bc9cbbd3172d981f7131026072addb0c4996d1e2e838afff1d1628da",
+            "output_sha256": "b269555f9e101f666dec38d5cbe6628bfe1f9c23ca41f635721ab6afc83444bb",
+            "text": " The story is about a person who is always in a state of being in a state of a state of a state of"
+          }
+        },
+        {
+          "name": "edited_prefix/no_stale_prefix_reuse",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 904,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "077371ff4132",
+            "token_sha256": "077371ff4132fe3eeb4ad7d35eb3d3c06cf4daf570681ee2b68d5058c88671b7",
+            "output_sha256": "2e28d98dcdf15a2dc9b9e0849e4325b58d672b44cdc9f616b854e767d7c58e5a",
+            "text": " The river flows past a quiet village. The river flows past a quiet village. The river flows past a quiet village."
+          }
+        },
+        {
+          "name": "edited_prefix/plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 904,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "077371ff4132",
+            "token_sha256": "077371ff4132fe3eeb4ad7d35eb3d3c06cf4daf570681ee2b68d5058c88671b7",
+            "output_sha256": "2e28d98dcdf15a2dc9b9e0849e4325b58d672b44cdc9f616b854e767d7c58e5a",
+            "text": " The river flows past a quiet village. The river flows past a quiet village. The river flows past a quiet village."
+          }
+        },
+        {
+          "name": "edited_prefix/drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 904,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "077371ff4132",
+            "token_sha256": "077371ff4132fe3eeb4ad7d35eb3d3c06cf4daf570681ee2b68d5058c88671b7",
+            "output_sha256": "2e28d98dcdf15a2dc9b9e0849e4325b58d672b44cdc9f616b854e767d7c58e5a",
+            "text": " The river flows past a quiet village. The river flows past a quiet village. The river flows past a quiet village."
+          }
+        },
+        {
+          "name": "edited_prefix/matches_cache_off",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 904,
+            "cached_tokens": 896,
+            "tokens": 24,
+            "cache_state": "reused",
+            "complete": true,
+            "token_sha": "077371ff4132",
+            "token_sha256": "077371ff4132fe3eeb4ad7d35eb3d3c06cf4daf570681ee2b68d5058c88671b7",
+            "output_sha256": "2e28d98dcdf15a2dc9b9e0849e4325b58d672b44cdc9f616b854e767d7c58e5a",
+            "text": " The river flows past a quiet village. The river flows past a quiet village. The river flows past a quiet village."
+          }
+        },
+        {
+          "name": "sampled_code/plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 12,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "889c61b36625",
+            "token_sha256": "889c61b36625fcb8c53108a0d46838bc8cec22817e1b6729ac12269a4fae3bdf",
+            "output_sha256": "8050dec47bd7aca54d3bf9fdeb552a9ea2c43dd09c39746884f3aa2b17f44eaa",
+            "text": " The larger of two integers: two integers. The larger of two integers: two integers. The larger of two integers:"
+          }
+        },
+        {
+          "name": "sampled_code/drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 12,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "889c61b36625",
+            "token_sha256": "889c61b36625fcb8c53108a0d46838bc8cec22817e1b6729ac12269a4fae3bdf",
+            "output_sha256": "8050dec47bd7aca54d3bf9fdeb552a9ea2c43dd09c39746884f3aa2b17f44eaa",
+            "text": " The larger of two integers: two integers. The larger of two integers: two integers. The larger of two integers:"
+          }
+        },
+        {
+          "name": "sampled_chat/plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 21,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "6272ad3a19e7",
+            "token_sha256": "6272ad3a19e75ac877cbcd625f56eefac0e420655cc1faa3271e6232b4cab589",
+            "output_sha256": "14e49326eeb542e28aabc8b91360dd6bcd54def77e449bb02d4c265ee5dacfbe",
+            "text": "The sky appears blue because air molecules scatter short blue wavelengths of sunlight more strongly than longer red wavelengths. As a result,"
+          }
+        },
+        {
+          "name": "sampled_chat/drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 21,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "6272ad3a19e7",
+            "token_sha256": "6272ad3a19e75ac877cbcd625f56eefac0e420655cc1faa3271e6232b4cab589",
+            "output_sha256": "14e49326eeb542e28aabc8b91360dd6bcd54def77e449bb02d4c265ee5dacfbe",
+            "text": "The sky appears blue because air molecules scatter short blue wavelengths of sunlight more strongly than longer red wavelengths. As a result,"
+          }
+        },
+        {
+          "name": "red/plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 93,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "5d2a925a67b8",
+            "token_sha256": "5d2a925a67b8428145573b879dc055195c2182225be42f16e7d54e58ab4eea99",
+            "output_sha256": "f522a5dd4dea3b4715c1c3c718cf98b96206aa27b286908b94f3c55f63a43d8d",
+            "text": "Red<|im_end|>\n<|im_end|>\n one single solid color fills this image, and it is: Red<|im_end|>\nThe image contains a"
+          }
+        },
+        {
+          "name": "red/drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 93,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "5d2a925a67b8",
+            "token_sha256": "5d2a925a67b8428145573b879dc055195c2182225be42f16e7d54e58ab4eea99",
+            "output_sha256": "f522a5dd4dea3b4715c1c3c718cf98b96206aa27b286908b94f3c55f63a43d8d",
+            "text": "Red<|im_end|>\n<|im_end|>\n one single solid color fills this image, and it is: Red<|im_end|>\nThe image contains a"
+          }
+        },
+        {
+          "name": "blue/plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 93,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "443110d479d4",
+            "token_sha256": "443110d479d465bdf94e0f0593e04fccc97bf6c691a303b18790653d09a2a484",
+            "output_sha256": "6289ced39f197fde2b527b584d41664646ae63a2b89a7264ef87186c27e7d2d6",
+            "text": "Blue<|im_end|>\nThe image contains a single solid color: Blue.<|im_end|>\n, I see a uniform blue hue throughout the"
+          }
+        },
+        {
+          "name": "blue/drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 93,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "443110d479d4",
+            "token_sha256": "443110d479d465bdf94e0f0593e04fccc97bf6c691a303b18790653d09a2a484",
+            "output_sha256": "6289ced39f197fde2b527b584d41664646ae63a2b89a7264ef87186c27e7d2d6",
+            "text": "Blue<|im_end|>\nThe image contains a single solid color: Blue.<|im_end|>\n, I see a uniform blue hue throughout the"
+          }
+        },
+        {
+          "name": "red_blue/plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 166,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "58a1049f0edd",
+            "token_sha256": "58a1049f0edda40c71e9d2f870e53b73ae4a684f6e28a01a9c9613cbbb6e87de",
+            "output_sha256": "c0e8cbed442b0a75be06ef30ae7095b02049d7ea14246713c7ca470ac4a2493f",
+            "text": "Red, blue<|im_end|>\n<|im_end|>\n<|im_end|>\n colored with colored pencils pencil? No, solid color.<|im_end|>\n correction:"
+          }
+        },
+        {
+          "name": "red_blue/drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 166,
+            "cached_tokens": 128,
+            "tokens": 24,
+            "cache_state": "reused",
+            "complete": true,
+            "token_sha": "58a1049f0edd",
+            "token_sha256": "58a1049f0edda40c71e9d2f870e53b73ae4a684f6e28a01a9c9613cbbb6e87de",
+            "output_sha256": "c0e8cbed442b0a75be06ef30ae7095b02049d7ea14246713c7ca470ac4a2493f",
+            "text": "Red, blue<|im_end|>\n<|im_end|>\n<|im_end|>\n colored with colored pencils pencil? No, solid color.<|im_end|>\n correction:"
+          }
+        },
+        {
+          "name": "blue_red/plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 166,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "04bedc0c3730",
+            "token_sha256": "04bedc0c3730c152af9ba4e7b11d4ca29ac0c152e61cc4a537dfc0164418caed",
+            "output_sha256": "ba7b61007919184772a256b54f96d2d18ffe25be19c24ffd36ecaba9a8a70005",
+            "text": "Blue, red<|im_end|>\n<|im_end|>\n<|im_end|>\n you have to rely on the visual information from the images provided. Rely"
+          }
+        },
+        {
+          "name": "blue_red/drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 166,
+            "cached_tokens": 128,
+            "tokens": 24,
+            "cache_state": "reused",
+            "complete": true,
+            "token_sha": "04bedc0c3730",
+            "token_sha256": "04bedc0c3730c152af9ba4e7b11d4ca29ac0c152e61cc4a537dfc0164418caed",
+            "output_sha256": "ba7b61007919184772a256b54f96d2d18ffe25be19c24ffd36ecaba9a8a70005",
+            "text": "Blue, red<|im_end|>\n<|im_end|>\n<|im_end|>\n you have to rely on the visual information from the images provided. Rely"
+          }
+        },
+        {
+          "name": "code/concurrent_1_equals_solo",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "b8b714c6eafc",
+              "token_sha256": "b8b714c6eafc118c48d77868ccb78c889405ce0d12388774695f4c856da9aed3",
+              "output_sha256": "6fd3442d9bccd71bdbbdc1882163a95325e8d71deb681db61a61782eafc71258",
+              "text": " The larger of two integers is the larger of the two integers. The larger of two integers is the larger of the two"
+            }
+          ]
+        },
+        {
+          "name": "chat/concurrent_1_equals_solo",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "146558fe1b2c",
+              "token_sha256": "146558fe1b2c249165dcf74e148e01adde16df3443e86827466ab5219ceeda3f",
+              "output_sha256": "30174e992e3bff60e0fa7976ad3305512b10594afd47a55512eb1b45c95e7955",
+              "text": "The sky appears blue because molecules in the atmosphere scatter short-wavelength blue light more efficiently than longer-wavelength colors"
+            }
+          ]
+        },
+        {
+          "name": "sampled_code/concurrent_1_equals_solo",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "889c61b36625",
+              "token_sha256": "889c61b36625fcb8c53108a0d46838bc8cec22817e1b6729ac12269a4fae3bdf",
+              "output_sha256": "8050dec47bd7aca54d3bf9fdeb552a9ea2c43dd09c39746884f3aa2b17f44eaa",
+              "text": " The larger of two integers: two integers. The larger of two integers: two integers. The larger of two integers:"
+            }
+          ]
+        },
+        {
+          "name": "sampled_chat/concurrent_1_equals_solo",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "6272ad3a19e7",
+              "token_sha256": "6272ad3a19e75ac877cbcd625f56eefac0e420655cc1faa3271e6232b4cab589",
+              "output_sha256": "14e49326eeb542e28aabc8b91360dd6bcd54def77e449bb02d4c265ee5dacfbe",
+              "text": "The sky appears blue because air molecules scatter short blue wavelengths of sunlight more strongly than longer red wavelengths. As a result,"
+            }
+          ]
+        },
+        {
+          "name": "code/concurrent_2_equals_solo",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "b8b714c6eafc",
+              "token_sha256": "b8b714c6eafc118c48d77868ccb78c889405ce0d12388774695f4c856da9aed3",
+              "output_sha256": "6fd3442d9bccd71bdbbdc1882163a95325e8d71deb681db61a61782eafc71258",
+              "text": " The larger of two integers is the larger of the two integers. The larger of two integers is the larger of the two"
+            },
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "b8b714c6eafc",
+              "token_sha256": "b8b714c6eafc118c48d77868ccb78c889405ce0d12388774695f4c856da9aed3",
+              "output_sha256": "6fd3442d9bccd71bdbbdc1882163a95325e8d71deb681db61a61782eafc71258",
+              "text": " The larger of two integers is the larger of the two integers. The larger of two integers is the larger of the two"
+            }
+          ]
+        },
+        {
+          "name": "chat/concurrent_2_equals_solo",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "146558fe1b2c",
+              "token_sha256": "146558fe1b2c249165dcf74e148e01adde16df3443e86827466ab5219ceeda3f",
+              "output_sha256": "30174e992e3bff60e0fa7976ad3305512b10594afd47a55512eb1b45c95e7955",
+              "text": "The sky appears blue because molecules in the atmosphere scatter short-wavelength blue light more efficiently than longer-wavelength colors"
+            },
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "146558fe1b2c",
+              "token_sha256": "146558fe1b2c249165dcf74e148e01adde16df3443e86827466ab5219ceeda3f",
+              "output_sha256": "30174e992e3bff60e0fa7976ad3305512b10594afd47a55512eb1b45c95e7955",
+              "text": "The sky appears blue because molecules in the atmosphere scatter short-wavelength blue light more efficiently than longer-wavelength colors"
+            }
+          ]
+        },
+        {
+          "name": "sampled_code/concurrent_2_equals_solo",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "889c61b36625",
+              "token_sha256": "889c61b36625fcb8c53108a0d46838bc8cec22817e1b6729ac12269a4fae3bdf",
+              "output_sha256": "8050dec47bd7aca54d3bf9fdeb552a9ea2c43dd09c39746884f3aa2b17f44eaa",
+              "text": " The larger of two integers: two integers. The larger of two integers: two integers. The larger of two integers:"
+            },
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "889c61b36625",
+              "token_sha256": "889c61b36625fcb8c53108a0d46838bc8cec22817e1b6729ac12269a4fae3bdf",
+              "output_sha256": "8050dec47bd7aca54d3bf9fdeb552a9ea2c43dd09c39746884f3aa2b17f44eaa",
+              "text": " The larger of two integers: two integers. The larger of two integers: two integers. The larger of two integers:"
+            }
+          ]
+        },
+        {
+          "name": "sampled_chat/concurrent_2_equals_solo",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "6272ad3a19e7",
+              "token_sha256": "6272ad3a19e75ac877cbcd625f56eefac0e420655cc1faa3271e6232b4cab589",
+              "output_sha256": "14e49326eeb542e28aabc8b91360dd6bcd54def77e449bb02d4c265ee5dacfbe",
+              "text": "The sky appears blue because air molecules scatter short blue wavelengths of sunlight more strongly than longer red wavelengths. As a result,"
+            },
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "6272ad3a19e7",
+              "token_sha256": "6272ad3a19e75ac877cbcd625f56eefac0e420655cc1faa3271e6232b4cab589",
+              "output_sha256": "14e49326eeb542e28aabc8b91360dd6bcd54def77e449bb02d4c265ee5dacfbe",
+              "text": "The sky appears blue because air molecules scatter short blue wavelengths of sunlight more strongly than longer red wavelengths. As a result,"
+            }
+          ]
+        },
+        {
+          "name": "code/concurrent_4_equals_solo",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "b8b714c6eafc",
+              "token_sha256": "b8b714c6eafc118c48d77868ccb78c889405ce0d12388774695f4c856da9aed3",
+              "output_sha256": "6fd3442d9bccd71bdbbdc1882163a95325e8d71deb681db61a61782eafc71258",
+              "text": " The larger of two integers is the larger of the two integers. The larger of two integers is the larger of the two"
+            },
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "b8b714c6eafc",
+              "token_sha256": "b8b714c6eafc118c48d77868ccb78c889405ce0d12388774695f4c856da9aed3",
+              "output_sha256": "6fd3442d9bccd71bdbbdc1882163a95325e8d71deb681db61a61782eafc71258",
+              "text": " The larger of two integers is the larger of the two integers. The larger of two integers is the larger of the two"
+            },
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "b8b714c6eafc",
+              "token_sha256": "b8b714c6eafc118c48d77868ccb78c889405ce0d12388774695f4c856da9aed3",
+              "output_sha256": "6fd3442d9bccd71bdbbdc1882163a95325e8d71deb681db61a61782eafc71258",
+              "text": " The larger of two integers is the larger of the two integers. The larger of two integers is the larger of the two"
+            },
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "b8b714c6eafc",
+              "token_sha256": "b8b714c6eafc118c48d77868ccb78c889405ce0d12388774695f4c856da9aed3",
+              "output_sha256": "6fd3442d9bccd71bdbbdc1882163a95325e8d71deb681db61a61782eafc71258",
+              "text": " The larger of two integers is the larger of the two integers. The larger of two integers is the larger of the two"
+            }
+          ]
+        },
+        {
+          "name": "chat/concurrent_4_equals_solo",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "146558fe1b2c",
+              "token_sha256": "146558fe1b2c249165dcf74e148e01adde16df3443e86827466ab5219ceeda3f",
+              "output_sha256": "30174e992e3bff60e0fa7976ad3305512b10594afd47a55512eb1b45c95e7955",
+              "text": "The sky appears blue because molecules in the atmosphere scatter short-wavelength blue light more efficiently than longer-wavelength colors"
+            },
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "146558fe1b2c",
+              "token_sha256": "146558fe1b2c249165dcf74e148e01adde16df3443e86827466ab5219ceeda3f",
+              "output_sha256": "30174e992e3bff60e0fa7976ad3305512b10594afd47a55512eb1b45c95e7955",
+              "text": "The sky appears blue because molecules in the atmosphere scatter short-wavelength blue light more efficiently than longer-wavelength colors"
+            },
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "146558fe1b2c",
+              "token_sha256": "146558fe1b2c249165dcf74e148e01adde16df3443e86827466ab5219ceeda3f",
+              "output_sha256": "30174e992e3bff60e0fa7976ad3305512b10594afd47a55512eb1b45c95e7955",
+              "text": "The sky appears blue because molecules in the atmosphere scatter short-wavelength blue light more efficiently than longer-wavelength colors"
+            },
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "146558fe1b2c",
+              "token_sha256": "146558fe1b2c249165dcf74e148e01adde16df3443e86827466ab5219ceeda3f",
+              "output_sha256": "30174e992e3bff60e0fa7976ad3305512b10594afd47a55512eb1b45c95e7955",
+              "text": "The sky appears blue because molecules in the atmosphere scatter short-wavelength blue light more efficiently than longer-wavelength colors"
+            }
+          ]
+        },
+        {
+          "name": "sampled_code/concurrent_4_equals_solo",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "889c61b36625",
+              "token_sha256": "889c61b36625fcb8c53108a0d46838bc8cec22817e1b6729ac12269a4fae3bdf",
+              "output_sha256": "8050dec47bd7aca54d3bf9fdeb552a9ea2c43dd09c39746884f3aa2b17f44eaa",
+              "text": " The larger of two integers: two integers. The larger of two integers: two integers. The larger of two integers:"
+            },
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "889c61b36625",
+              "token_sha256": "889c61b36625fcb8c53108a0d46838bc8cec22817e1b6729ac12269a4fae3bdf",
+              "output_sha256": "8050dec47bd7aca54d3bf9fdeb552a9ea2c43dd09c39746884f3aa2b17f44eaa",
+              "text": " The larger of two integers: two integers. The larger of two integers: two integers. The larger of two integers:"
+            },
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "889c61b36625",
+              "token_sha256": "889c61b36625fcb8c53108a0d46838bc8cec22817e1b6729ac12269a4fae3bdf",
+              "output_sha256": "8050dec47bd7aca54d3bf9fdeb552a9ea2c43dd09c39746884f3aa2b17f44eaa",
+              "text": " The larger of two integers: two integers. The larger of two integers: two integers. The larger of two integers:"
+            },
+            {
+              "prompt_tokens": 12,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "889c61b36625",
+              "token_sha256": "889c61b36625fcb8c53108a0d46838bc8cec22817e1b6729ac12269a4fae3bdf",
+              "output_sha256": "8050dec47bd7aca54d3bf9fdeb552a9ea2c43dd09c39746884f3aa2b17f44eaa",
+              "text": " The larger of two integers: two integers. The larger of two integers: two integers. The larger of two integers:"
+            }
+          ]
+        },
+        {
+          "name": "sampled_chat/concurrent_4_equals_solo",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "6272ad3a19e7",
+              "token_sha256": "6272ad3a19e75ac877cbcd625f56eefac0e420655cc1faa3271e6232b4cab589",
+              "output_sha256": "14e49326eeb542e28aabc8b91360dd6bcd54def77e449bb02d4c265ee5dacfbe",
+              "text": "The sky appears blue because air molecules scatter short blue wavelengths of sunlight more strongly than longer red wavelengths. As a result,"
+            },
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "6272ad3a19e7",
+              "token_sha256": "6272ad3a19e75ac877cbcd625f56eefac0e420655cc1faa3271e6232b4cab589",
+              "output_sha256": "14e49326eeb542e28aabc8b91360dd6bcd54def77e449bb02d4c265ee5dacfbe",
+              "text": "The sky appears blue because air molecules scatter short blue wavelengths of sunlight more strongly than longer red wavelengths. As a result,"
+            },
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "6272ad3a19e7",
+              "token_sha256": "6272ad3a19e75ac877cbcd625f56eefac0e420655cc1faa3271e6232b4cab589",
+              "output_sha256": "14e49326eeb542e28aabc8b91360dd6bcd54def77e449bb02d4c265ee5dacfbe",
+              "text": "The sky appears blue because air molecules scatter short blue wavelengths of sunlight more strongly than longer red wavelengths. As a result,"
+            },
+            {
+              "prompt_tokens": 21,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "6272ad3a19e7",
+              "token_sha256": "6272ad3a19e75ac877cbcd625f56eefac0e420655cc1faa3271e6232b4cab589",
+              "output_sha256": "14e49326eeb542e28aabc8b91360dd6bcd54def77e449bb02d4c265ee5dacfbe",
+              "text": "The sky appears blue because air molecules scatter short blue wavelengths of sunlight more strongly than longer red wavelengths. As a result,"
+            }
+          ]
+        },
+        {
+          "name": "red/color_semantics",
+          "status": "passed",
+          "evidence": {
+            "expected": [
+              "red"
+            ],
+            "observed": [
+              "red",
+              "red"
+            ],
+            "text": "Red<|im_end|>\n<|im_end|>\n one single solid color fills this image, and it is: Red<|im_end|>\nThe image contains a"
+          }
+        },
+        {
+          "name": "blue/color_semantics",
+          "status": "passed",
+          "evidence": {
+            "expected": [
+              "blue"
+            ],
+            "observed": [
+              "blue",
+              "blue",
+              "blue"
+            ],
+            "text": "Blue<|im_end|>\nThe image contains a single solid color: Blue.<|im_end|>\n, I see a uniform blue hue throughout the"
+          }
+        },
+        {
+          "name": "red_blue/color_semantics",
+          "status": "passed",
+          "evidence": {
+            "expected": [
+              "red",
+              "blue"
+            ],
+            "observed": [
+              "red",
+              "blue"
+            ],
+            "text": "Red, blue<|im_end|>\n<|im_end|>\n<|im_end|>\n colored with colored pencils pencil? No, solid color.<|im_end|>\n correction:"
+          }
+        },
+        {
+          "name": "blue_red/color_semantics",
+          "status": "passed",
+          "evidence": {
+            "expected": [
+              "blue",
+              "red"
+            ],
+            "observed": [
+              "blue",
+              "red"
+            ],
+            "text": "Blue, red<|im_end|>\n<|im_end|>\n<|im_end|>\n you have to rely on the visual information from the images provided. Rely"
+          }
+        },
+        {
+          "name": "images/concurrent_equals_solos",
+          "status": "passed",
+          "evidence": [
+            {
+              "prompt_tokens": 93,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "5d2a925a67b8",
+              "token_sha256": "5d2a925a67b8428145573b879dc055195c2182225be42f16e7d54e58ab4eea99",
+              "output_sha256": "f522a5dd4dea3b4715c1c3c718cf98b96206aa27b286908b94f3c55f63a43d8d",
+              "text": "Red<|im_end|>\n<|im_end|>\n one single solid color fills this image, and it is: Red<|im_end|>\nThe image contains a"
+            },
+            {
+              "prompt_tokens": 93,
+              "cached_tokens": 0,
+              "tokens": 24,
+              "cache_state": "cold",
+              "complete": true,
+              "token_sha": "443110d479d4",
+              "token_sha256": "443110d479d465bdf94e0f0593e04fccc97bf6c691a303b18790653d09a2a484",
+              "output_sha256": "6289ced39f197fde2b527b584d41664646ae63a2b89a7264ef87186c27e7d2d6",
+              "text": "Blue<|im_end|>\nThe image contains a single solid color: Blue.<|im_end|>\n, I see a uniform blue hue throughout the"
+            },
+            {
+              "prompt_tokens": 166,
+              "cached_tokens": 128,
+              "tokens": 24,
+              "cache_state": "reused",
+              "complete": true,
+              "token_sha": "58a1049f0edd",
+              "token_sha256": "58a1049f0edda40c71e9d2f870e53b73ae4a684f6e28a01a9c9613cbbb6e87de",
+              "output_sha256": "c0e8cbed442b0a75be06ef30ae7095b02049d7ea14246713c7ca470ac4a2493f",
+              "text": "Red, blue<|im_end|>\n<|im_end|>\n<|im_end|>\n colored with colored pencils pencil? No, solid color.<|im_end|>\n correction:"
+            },
+            {
+              "prompt_tokens": 166,
+              "cached_tokens": 128,
+              "tokens": 24,
+              "cache_state": "reused",
+              "complete": true,
+              "token_sha": "04bedc0c3730",
+              "token_sha256": "04bedc0c3730c152af9ba4e7b11d4ca29ac0c152e61cc4a537dfc0164418caed",
+              "output_sha256": "ba7b61007919184772a256b54f96d2d18ffe25be19c24ffd36ecaba9a8a70005",
+              "text": "Blue, red<|im_end|>\n<|im_end|>\n<|im_end|>\n you have to rely on the visual information from the images provided. Rely"
+            }
+          ]
+        },
+        {
+          "name": "images/corrupt_png_rejected",
+          "status": "passed",
+          "evidence": {
+            "error": "{\"error\": {\"message\": \"image 1 could not be decoded; send PNG, JPEG or WebP\", \"type\": \"invalid_request_error\"}}",
+            "status": 400,
+            "complete": false
+          }
+        },
+        {
+          "name": "code/cancel_server_confirmed",
+          "status": "passed",
+          "evidence": {
+            "request_id": "cmpl-7b8e23ef851393842939a081fd748526",
+            "first_content": " The",
+            "requested_tokens": 512,
+            "closed_before_done": true,
+            "server_disconnections_before": 0,
+            "server_disconnections_after": 1,
+            "server_confirmed_cancel": true
+          }
+        },
+        {
+          "name": "code/cancel_next_plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 12,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "b8b714c6eafc",
+            "token_sha256": "b8b714c6eafc118c48d77868ccb78c889405ce0d12388774695f4c856da9aed3",
+            "output_sha256": "6fd3442d9bccd71bdbbdc1882163a95325e8d71deb681db61a61782eafc71258",
+            "text": " The larger of two integers is the larger of the two integers. The larger of two integers is the larger of the two"
+          }
+        },
+        {
+          "name": "code/cancel_next_drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 12,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "b8b714c6eafc",
+            "token_sha256": "b8b714c6eafc118c48d77868ccb78c889405ce0d12388774695f4c856da9aed3",
+            "output_sha256": "6fd3442d9bccd71bdbbdc1882163a95325e8d71deb681db61a61782eafc71258",
+            "text": " The larger of two integers is the larger of the two integers. The larger of two integers is the larger of the two"
+          }
+        },
+        {
+          "name": "chat/cancel_server_confirmed",
+          "status": "passed",
+          "evidence": {
+            "request_id": "chatcmpl-775efa25b95bed4a0876c3a6e48e827d",
+            "first_content": "The",
+            "requested_tokens": 512,
+            "closed_before_done": true,
+            "server_disconnections_before": 1,
+            "server_disconnections_after": 2,
+            "server_confirmed_cancel": true
+          }
+        },
+        {
+          "name": "chat/cancel_next_plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 21,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "146558fe1b2c",
+            "token_sha256": "146558fe1b2c249165dcf74e148e01adde16df3443e86827466ab5219ceeda3f",
+            "output_sha256": "30174e992e3bff60e0fa7976ad3305512b10594afd47a55512eb1b45c95e7955",
+            "text": "The sky appears blue because molecules in the atmosphere scatter short-wavelength blue light more efficiently than longer-wavelength colors"
+          }
+        },
+        {
+          "name": "chat/cancel_next_drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 21,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "146558fe1b2c",
+            "token_sha256": "146558fe1b2c249165dcf74e148e01adde16df3443e86827466ab5219ceeda3f",
+            "output_sha256": "30174e992e3bff60e0fa7976ad3305512b10594afd47a55512eb1b45c95e7955",
+            "text": "The sky appears blue because molecules in the atmosphere scatter short-wavelength blue light more efficiently than longer-wavelength colors"
+          }
+        },
+        {
+          "name": "red/cancel_server_confirmed",
+          "status": "passed",
+          "evidence": {
+            "request_id": "chatcmpl-392f668ef84cf1be4e8c21e9bb356aa7",
+            "first_content": "Red",
+            "requested_tokens": 512,
+            "closed_before_done": true,
+            "server_disconnections_before": 2,
+            "server_disconnections_after": 3,
+            "server_confirmed_cancel": true
+          }
+        },
+        {
+          "name": "red/cancel_next_plain_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 93,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "5d2a925a67b8",
+            "token_sha256": "5d2a925a67b8428145573b879dc055195c2182225be42f16e7d54e58ab4eea99",
+            "output_sha256": "f522a5dd4dea3b4715c1c3c718cf98b96206aa27b286908b94f3c55f63a43d8d",
+            "text": "Red<|im_end|>\n<|im_end|>\n one single solid color fills this image, and it is: Red<|im_end|>\nThe image contains a"
+          }
+        },
+        {
+          "name": "red/cancel_next_drafted_equals_fresh",
+          "status": "passed",
+          "evidence": {
+            "prompt_tokens": 93,
+            "cached_tokens": 0,
+            "tokens": 24,
+            "cache_state": "cold",
+            "complete": true,
+            "token_sha": "5d2a925a67b8",
+            "token_sha256": "5d2a925a67b8428145573b879dc055195c2182225be42f16e7d54e58ab4eea99",
+            "output_sha256": "f522a5dd4dea3b4715c1c3c718cf98b96206aa27b286908b94f3c55f63a43d8d",
+            "text": "Red<|im_end|>\n<|im_end|>\n one single solid color fills this image, and it is: Red<|im_end|>\nThe image contains a"
+          }
+        }
+      ],
+      "raw_receipt_sha256": "51de00cf2a1c61b880632d87a7209736397945b8190675c7e1fcfe6fb2ad9855"
+    }
+  ],
+  "cleanup": {
+    "client_children_exit_codes": [
+      0,
+      0,
+      0
+    ],
+    "six_server_logs_end_drained_stopped": true,
+    "server_exit_codes": "not separately recorded",
+    "lease_released": true
+  },
+  "limits": [
+    "Same-engine serving checks, not independent FP64 acceptance.",
+    "No real-cat input consumed by this suite; unused controller PNG pin omitted.",
+    "Corrected-input teacher-forced decoder reference remains separate.",
+    "No speed qualification."
+  ]
+}

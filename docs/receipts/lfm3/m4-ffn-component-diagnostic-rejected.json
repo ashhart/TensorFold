@@ -1,0 +1,105 @@
+{
+  "scope": "Rejected M4 counterfactual decomposition diagnostic on actual TEXT4 FFN gate rows64 K2048 first2048/7680 columns. Not additive attribution to the original kernel and not a production candidate.",
+  "stable": false,
+  "stability_limit": 0.05,
+  "fp64": {
+    "rms": 0.0005267428383594065,
+    "max_abs": 0.0075808195397257805,
+    "worst_column_rms": 0.004595861546563877,
+    "every_column_no_worse": true,
+    "words": 131072
+  },
+  "decoded_code_words_equal": 4194304,
+  "components": [
+    {
+      "mode": "public",
+      "median_gpu_seconds_per_op": 0.0002631956376717426,
+      "median_wall_seconds_per_op": 0.00026455468750000003,
+      "first_last_drift": 0.0002428999546797428,
+      "within_round_spreads": [
+        0.0009473604771508943,
+        0.0003384318514383975,
+        8.752778165050982e-05,
+        0.0001538135695963428,
+        0.001586878958627219
+      ],
+      "stable": true
+    },
+    {
+      "mode": "packed_decode",
+      "median_gpu_seconds_per_op": 4.374155696496018e-05,
+      "median_wall_seconds_per_op": 4.392578125e-05,
+      "first_last_drift": 0.0002347722056248447,
+      "within_round_spreads": [
+        0.001459919626688347,
+        0.001842322369902333,
+        0.03586655677122039,
+        0.06131780008675758,
+        0.002390031492256755
+      ],
+      "stable": false
+    },
+    {
+      "mode": "input_prepare",
+      "median_gpu_seconds_per_op": 2.7438939298463083e-06,
+      "median_wall_seconds_per_op": 2.784088134765625e-06,
+      "first_last_drift": 0.009196062636040114,
+      "within_round_spreads": [
+        0.009050100160004031,
+        0.09418500123531458,
+        0.034338642051004904,
+        0.10100869005936197,
+        0.0026607969687828838
+      ],
+      "stable": false
+    },
+    {
+      "mode": "dot_affine",
+      "median_gpu_seconds_per_op": 0.000819583328848239,
+      "median_wall_seconds_per_op": 0.000825890625,
+      "first_last_drift": 0.001882662879938879,
+      "within_round_spreads": [
+        0.001232538869545966,
+        0.001871578372259783,
+        0.00011273648065029056,
+        2.062623227549552e-05,
+        0.0014560840447383036
+      ],
+      "stable": true
+    },
+    {
+      "mode": "reduce_pack",
+      "median_gpu_seconds_per_op": 4.914851842841017e-05,
+      "median_wall_seconds_per_op": 4.9447265625e-05,
+      "first_last_drift": -0.0037752107294741766,
+      "within_round_spreads": [
+        0.001829691530696208,
+        0.04876328099464931,
+        0.007236481577243632,
+        0.04276429918835022,
+        0.023502143823044663
+      ],
+      "stable": true
+    },
+    {
+      "mode": "whole_decomposed",
+      "median_gpu_seconds_per_op": 0.0009281731763621792,
+      "median_wall_seconds_per_op": 0.00093384375,
+      "first_last_drift": 0.0010547062489185688,
+      "within_round_spreads": [
+        0.0001979186618144672,
+        0.0029819320484378545,
+        0.00044058661435578784,
+        0.0034756845837579996,
+        0.00023276829068437607
+      ],
+      "stable": true
+    }
+  ],
+  "raw_sha256": "e29c79e34a61a14d56699ac1573ff52cfa63eb3c23001663c54385cca4748e95",
+  "scratch_footprint_bytes": 34111488,
+  "analysis_sha256": "46711af8f6bcb678d2157f1c7fb2f250888d625cf7e97b689e497c4e249cdced",
+  "outcome": "Numerical gates passed; complete diagnostic rejected because packed decode and input preparation exceeded predeclared 5% within-round stability limit. No retry.",
+  "counter_evidence": "M4 public Metal counter API enumerated timestamp/GPUTimestamp only. No measured register, occupancy, cache or spill attribution.",
+  "cleanup": "GPU host exit0; analyzer exit1 DiagnosticStability; lock released."
+}

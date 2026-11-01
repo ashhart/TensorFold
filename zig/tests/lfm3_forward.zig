@@ -22,10 +22,12 @@ pub fn main(init: std.process.Init) !void {
     const raw_args = try init.minimal.args.toSlice(init.arena.allocator());
     const tiles = raw_args.len > 1 and std.mem.eql(u8, raw_args[raw_args.len - 1], "--tiles");
     const binned = raw_args.len > 1 and std.mem.eql(u8, raw_args[raw_args.len - 1], "--binned");
-    const args = raw_args[0 .. raw_args.len - @intFromBool(tiles or binned)];
+    const tiled_attention_only = raw_args.len > 1 and std.mem.eql(u8, raw_args[raw_args.len - 1], "--tiled-attention");
+    const nax_prompt = raw_args.len > 1 and std.mem.eql(u8, raw_args[raw_args.len - 1], "--nax-prompt");
+    const args = raw_args[0 .. raw_args.len - @intFromBool(tiles or binned or tiled_attention_only or nax_prompt)];
     if (args.len < 4 or args.len > 8) return error.ExpectedModelTokensOutput;
-    if (args.len >= 7 and !std.mem.eql(u8, args[4], "images")) return error.ExpectedImageRowsAndStart;
-    if (args.len == 5 and !std.mem.eql(u8, args[4], "embedding") and !std.mem.eql(u8, args[4], "prefix") and !std.mem.eql(u8, args[4], "decode")) return error.ExpectedEmbeddingPrefixOrDecode;
+    if (args.len >= 7 and !std.mem.eql(u8, args[4], "images") and !std.mem.startsWith(u8, args[4], "prompt:")) return error.ExpectedImageRowsAndStart;
+    if (args.len == 5 and !std.mem.eql(u8, args[4], "embedding") and !std.mem.eql(u8, args[4], "prefix") and !std.mem.eql(u8, args[4], "decode") and !std.mem.startsWith(u8, args[4], "prompt:")) return error.ExpectedEmbeddingPrefixOrDecode;
     if (args.len == 6 and !std.mem.eql(u8, args[4], "trace")) return error.ExpectedTraceDirectory;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
@@ -42,6 +44,15 @@ pub fn main(init: std.process.Init) !void {
     defer m.deinit();
     if (tiles) try m.enableProjectionCandidate();
     if (binned) try m.enableBinnedProjectionCandidate();
+    if (nax_prompt) {
+        try m.enableNaxPrompt();
+        try m.enableTiledAttention();
+        if (m.prompt_nax == null or m.tiled_attention == null) return error.NaxPromptUnavailable;
+    }
+    if (tiled_attention_only) {
+        try m.enableTiledAttention();
+        if (m.tiled_attention == null) return error.TiledAttentionUnavailable;
+    }
     var image_buffer: ?mtl.Buffer = null;
     defer if (image_buffer) |buffer| buffer.deinit();
     var image_pipeline: ?mtl.Pipeline = null;
@@ -93,6 +104,30 @@ pub fn main(init: std.process.Init) !void {
         cb.wait();
         if (cb.failure() != null) return error.GpuFailed;
         try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = args[3], .data = scratch.h.contents()[0 .. ids.len * q.config.hidden * 2] });
+        return;
+    }
+    if ((args.len == 5 or args.len == 7) and std.mem.startsWith(u8, args[4], "prompt:")) {
+        const prompt_rows = try std.fmt.parseInt(usize, args[4][7..], 10);
+        if (prompt_rows == 0 or prompt_rows > ids.len) return error.InvalidPromptRows;
+        var prompt_scratch = try q.state.Scratch.init(init.gpa, m.device, &m.config.layer_types, 128);
+        defer prompt_scratch.deinit();
+        const selected = 1 + ids.len - prompt_rows;
+        const logits = try init.gpa.alloc(u8, selected * q.config.vocab * 2);
+        defer init.gpa.free(logits);
+        var done: usize = 0;
+        while (done < prompt_rows) {
+            const n = @min(prompt_rows - done, 128);
+            try q.forward.runPromptWithImages(m, &prompt_scratch, &.{.{ .cache = &cache, .rows = n }}, ids[done..][0..n], .last, images, if (nax_prompt) .nax else .baseline);
+            done += n;
+        }
+        @memcpy(logits[0 .. q.config.vocab * 2], prompt_scratch.logits.contents()[0 .. q.config.vocab * 2]);
+        for (prompt_rows..ids.len) |at| {
+            try q.forward.run(m, &prompt_scratch, &.{.{ .cache = &cache, .rows = 1 }}, ids[at..][0..1], false, .last);
+            const off = (at - prompt_rows + 1) * q.config.vocab * 2;
+            @memcpy(logits[off..][0 .. q.config.vocab * 2], prompt_scratch.logits.contents()[0 .. q.config.vocab * 2]);
+        }
+        try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = args[3], .data = logits });
+        std.debug.print("native prompt observation: prompt {d}, selected {d}, cache {d}\n", .{ prompt_rows, selected, cache.len });
         return;
     }
     // `prefix`: each block's history read again in 128-row chunks, the fidelity tool's gate for the tensor path.

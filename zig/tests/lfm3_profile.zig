@@ -16,12 +16,21 @@ const Result = struct {
     wall_seconds: f64,
     command_gpu_seconds: f64,
     totals: [counters.class_count]counters.Aggregate,
+    decode_totals: [counters.class_count]counters.Aggregate,
+    decode_wall_seconds: f64,
 };
+
+fn decode_steps() usize {
+    const text = std.c.getenv("TF_LFM3_DECODE_STEPS") orelse return 0;
+    return std.fmt.parseInt(usize, std.mem.span(text), 10) catch 0;
+}
 
 fn run(a: std.mem.Allocator, model: *q.Model, ids: []const u32, chunk: usize, profile: ?*counters.Recorder) !*Result {
     const result = try a.create(Result);
     errdefer a.destroy(result);
     result.totals = @splat(.{});
+    result.decode_totals = @splat(.{});
+    result.decode_wall_seconds = 0;
     var scratch = try q.state.Scratch.init(a, model.device, &model.config.layer_types, chunk);
     defer scratch.deinit();
     var cache = try q.state.Cache.init(a, model.device, &model.config.layer_types, ids.len + 32);
@@ -33,7 +42,7 @@ fn run(a: std.mem.Allocator, model: *q.Model, ids: []const u32, chunk: usize, pr
     var at: usize = 0;
     while (at < ids.len) {
         const rows = @min(chunk, ids.len - at);
-        try q.forward.run(model, &scratch, &.{.{ .cache = &cache, .rows = rows }}, ids[at..][0..rows], false, .last);
+        try q.forward.runPromptWithImages(model, &scratch, &.{.{ .cache = &cache, .rows = rows }}, ids[at..][0..rows], .last, null, if (model.prompt_nax != null) .nax else .baseline);
         if (profile) |recorder| {
             for (&result.totals, recorder.aggregates()) |*total, part| {
                 total.calls += part.calls;
@@ -45,6 +54,18 @@ fn run(a: std.mem.Allocator, model: *q.Model, ids: []const u32, chunk: usize, pr
     result.wall_seconds = @as(f64, @floatFromInt(now() - t0)) / 1e9;
     result.command_gpu_seconds = q.forward.gpu_seconds - g0;
     @memcpy(&result.logits, cache.logits.slice(u16, q.config.vocab));
+    const steps = decode_steps();
+    const d0 = now();
+    for (0..steps) |_| {
+        try q.forward.run(model, &scratch, &.{.{ .cache = &cache, .rows = 1 }}, ids[0..1], true, .all);
+        if (profile) |recorder| {
+            for (&result.decode_totals, recorder.aggregates()) |*total, part| {
+                total.calls += part.calls;
+                total.gpu_seconds += part.gpu_seconds;
+            }
+        }
+    }
+    if (steps > 0) result.decode_wall_seconds = @as(f64, @floatFromInt(now() - d0)) / 1e9 / @as(f64, @floatFromInt(steps));
     return result;
 }
 
@@ -52,7 +73,7 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len != 4 and args.len != 5) return error.ExpectedModelTokensOutputOptionalChunk;
     const chunk = if (args.len == 5) try std.fmt.parseInt(usize, args[4], 10) else 128;
-    if (chunk == 0 or chunk > 128) return error.ProfileChunkOutsideSupportedSpanBudget;
+    if (chunk == 0 or chunk > 2048) return error.ProfileChunkOutsideSupportedSpanBudget;
     const bytes = try std.Io.Dir.cwd().readFileAlloc(init.io, args[2], init.gpa, .limited(4 << 20));
     defer init.gpa.free(bytes);
     const input = try tf.npy.parse(bytes);
@@ -65,7 +86,11 @@ pub fn main(init: std.process.Init) !void {
     defer pool.pop();
     const model = try q.Model.load(init.gpa, init.io, args[1]);
     defer model.deinit();
-    var recorder = try counters.Recorder.init(init.gpa, model.device, .{ .enabled = true, .max_spans = 512 });
+    if (std.c.getenv("TF_LFM3_NAX_PROMPT") != null) {
+        try model.enableNaxPrompt();
+        try model.enableTiledAttention();
+    }
+    var recorder = try counters.Recorder.init(init.gpa, model.device, .{ .enabled = true, .max_spans = 2048 });
     defer recorder.deinit() catch unreachable;
     const plain = try run(init.gpa, model, ids, chunk, null);
     defer init.gpa.destroy(plain);
@@ -88,6 +113,10 @@ pub fn main(init: std.process.Init) !void {
         .timing_source = "calibrated_gpu_counter_samples",
         .aggregate_classes = std.meta.tags(counters.Class),
         .aggregates = measured.totals,
+        .decode_steps = decode_steps(),
+        .decode_plain_seconds_per_step = plain.decode_wall_seconds,
+        .decode_profiled_seconds_per_step = measured.decode_wall_seconds,
+        .decode_aggregates = measured.decode_totals,
         .activation_includes_convolution = true,
     }, .{ .whitespace = .indent_2 });
     defer init.gpa.free(json);

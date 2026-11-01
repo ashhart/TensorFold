@@ -1,0 +1,24 @@
+{
+  "scope": "Full M5 Metal contract runner, built from 65ae5f75d before the later development-default host/build change; not an exact-head or model-fidelity qualification.",
+  "source_revision": "65ae5f75d",
+  "hardware": "Apple M5 Ultra",
+  "command": "tf-kernel-contract --rotary-accuracy rotary.json",
+  "exit": 1,
+  "elapsed_seconds": 1393.7855796250515,
+  "binary_sha256": "ca7fd00d0e2d6c6c7ec62e5aa749e4352ad71c2fa6137caad5da791e654195b8",
+  "raw_log_sha256": "2406e57623a1277c27841a2ac8a106d322ca9b470a7079882561152d1e2d22fd",
+  "summary": "SUMMARY 321 kernels: 320 pass gates 1-4, 1 fail, 2 known findings; 325 controls: 325 red as planted, 0 missed; 0 limit problems; gates 1388992 ms, limits 2982 ms",
+  "production_failure": "FAIL shapes metal Qwen4 native HC act production: at 128x14336x1 output 218116 is -3.997803e-3 where float64 gives -4.028320e-3: 1.94 of its bound",
+  "baseline_note": "The same Qwen4 HC case was previously reproduced on pinned base b30d5b9d; see final-current-backend-m5.json.",
+  "limits_summary": "PASS limits: 364 registered Metal launches against M1-M5, 0 problems",
+  "lfm3_new_kernels": {
+    "residual_ffn": true,
+    "attention_full": true,
+    "attention_sliding": true
+  },
+  "limitations": [
+    "Runner binary predates 765538940 development-default host/build selection.",
+    "Attention sums fixture explicitly does not establish a reduced-accumulator stress witness.",
+    "Full backend exit 1; no global pass claimed."
+  ]
+}

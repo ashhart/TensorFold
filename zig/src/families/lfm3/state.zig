@@ -152,7 +152,9 @@ pub const Scratch = struct {
         out.attention_rows = try mem.alloc(batch_rows * 4);
         out.pm = try mem.alloc(partials * 4);
         out.pl = try mem.alloc(partials * 4);
-        out.po = try mem.alloc(partials * c.head_dim * 4);
+        const logit_rows: usize = @min(rows, batch_rows);
+        const logits_bytes = logit_rows * c.vocab * 2;
+        out.po = try mem.alloc(@max(partials * c.head_dim * 4, logits_bytes));
         out.attention_risk = try mem.alloc(partials * @sizeOf(u32));
         inline for (.{ "gate", "up", "act" }) |name| @field(out, name) = try mem.alloc(rows * c.intermediate * 2);
         comptime std.debug.assert(c.intermediate >= 3 * c.hidden);
@@ -161,8 +163,7 @@ pub const Scratch = struct {
         out.binned_sums = null;
         out.binned_meta = null;
         out.head_gate = try mem.alloc(rows * c.query_heads * 2);
-        const logit_rows: usize = @min(rows, batch_rows);
-        out.logits = try mem.alloc(logit_rows * c.vocab * 2);
+        out.logits = out.po; // Attention partials expire before the final head writes logits.
         for (&out.snapshots, layer_types) |*s, kind| if (kind == .conv) { // a recorded window's rows, or a prompt call's last row
             s.* = try mem.alloc(logit_rows * conv_bytes);
         };

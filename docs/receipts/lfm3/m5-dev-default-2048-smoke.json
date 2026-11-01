@@ -1,0 +1,45 @@
+{
+  "scope": "Unversioned development build default options, M5 Ultra TEXT4, bounded 2k/8k serving smoke. No release or complete fidelity claim.",
+  "parent_revision": "65ae5f75d",
+  "source_sha256": {
+    "build.zig": "094d54b752b57cdec616d7b7ceca2c48ee24077d6f30e76d7a7c1f6160da8f45",
+    "zig/src/native/lfm3.zig": "d10de60063de6a7d3abcc197b8e04af75a112d5babdd6dc697656cc51d4e09c2",
+    "zig/src/families/lfm3/attention_tiled.zig": "c048143311a4dabd056089d5317a0401c9ee1f46da3f3501488b2768cf710cf6"
+  },
+  "binary_sha256": "de1935f09c7be56e025fb3d94c9c6eb992688dde274effebc6806c1cb19946c3",
+  "build": "zig build native -Dcpu=apple_m1 (exit 0; no LFM3 options)",
+  "generated_options": {
+    "residual_ffn": true,
+    "tiled_attention": true,
+    "prompt_rows": 2048
+  },
+  "release_guard": "Versioned build defaults candidates off. Explicit candidate with -Dversion=1.0.0 rejected by build graph (exit 1).",
+  "non_tensor_unit_fallback": "Source selects 128 rows when the device has no tensor units; no new M4 model run.",
+  "cases": [
+    {
+      "prompt_tokens": 2048,
+      "ttft_s": 0.47437008284032345,
+      "cached_tokens": 0,
+      "completion_tokens": 16,
+      "output_text_sha256": "a9f963e9ea3381adb9633cbe50e9c3e84ba88e0f646c6280583320a8097c1da9"
+    },
+    {
+      "prompt_tokens": 8192,
+      "ttft_s": 2.0478952089324594,
+      "cached_tokens": 0,
+      "completion_tokens": 16,
+      "output_text_sha256": "e2476773ac8616580547ee0cb0ea44121f776b7988e7eba184743b0d51441349"
+    }
+  ],
+  "matches_prior_opt_in_2048_output_text": true,
+  "all_clients_and_server_exit_zero": true,
+  "lock_released": true,
+  "records_sha256": "e37e2f77288f166e4d7779b03b41563f06dfc09e36a80f286937b625f4166511",
+  "events_sha256": "40f9cc4985a1a157e530cff4d38284834f840c661172ec5645fc7a9291e580b7",
+  "limitations": [
+    "One observation per length, not a matched speed comparison.",
+    "Source default enables experimental tiled attention for all M5 LFM3 checkpoint widths; width/image full fidelity remains unqualified.",
+    "Proposed probability diagnostics fail in the retained bounded text comparison.",
+    "The 2048 HTTP cancellation test is one sample, not a latency bound."
+  ]
+}
