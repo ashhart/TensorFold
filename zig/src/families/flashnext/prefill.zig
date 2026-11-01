@@ -23,9 +23,7 @@ pub fn start(b: anytype, s: *Stream, slot: ?usize) !void {
     b.filling.putAssumeCapacity(s, begun);
 }
 
-/// A family the cap cannot stand in for consumes the hint as `_: u32`: GLM CUDA's chunks fix `at + prompt_rows`.
-/// A nonzero `max_rows` (the lane host's hint) caps the call in place of `decode_rows`;
-/// the host sends this family 0 (capRows is 0 without `chunk_invariant`), so only a prefill policy sets it.
+/// A nonzero `max_rows` caps the call in place of `decode_rows`; only a prefill policy sends this family one.
 pub fn step(b: anytype, s: *Stream, max_rows: u32) !bool {
     errdefer b.abortPrompt(s);
     if (s.isCancelled()) return error.Cancelled;
