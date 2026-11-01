@@ -26,6 +26,8 @@ pub const Cx = struct {
     message: []const u8 = "",
     /// The request's ``chat_template_kwargs.clear_thinking``, over the server's (GLM-5.3 templates only).
     clear_thinking: ?bool = null,
+    /// The request's ``response_format``, for templates that show its schema in the prompt (DeepSeek-V4.1's).
+    response_format: ?@import("json").Value = null,
 
     pub fn fail(cx: *Cx, kind: Kind, comptime fmt: []const u8, args: anytype) Refused {
         cx.kind = kind;

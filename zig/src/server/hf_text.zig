@@ -18,12 +18,20 @@ pub fn glmClearThinking(value: ?[]const u8) ?bool {
     return if (std.mem.eql(u8, v, "1")) true else null;
 }
 
+/// ``TF_DSV41_SCHEMA_PROMPT``: on unless 0 (the published engine's default).
+pub fn schemaPrompt(value: ?[]const u8) bool {
+    return !std.mem.eql(u8, std.mem.trim(u8, value orelse "", " \t\r\n"), "0");
+}
+
 pub const HfText = struct {
     gpa: Allocator,
     arena: std.heap.ArenaAllocator,
     tok: tokenizer.Tokenizer,
     source: []const u8 = "",
     native_deepseek: bool = false,
+    schema_prompt: bool = true, // TF_DSV41_SCHEMA_PROMPT: response_format's schema as the encoder's ``## Response Format``
+    overridden: bool = false, // the chat template is --chat-template's file
+    unread_template: bool = false, // a native DeepSeek checkpoint's own Jinja, which its encoder replaces
     clear_thinking: ?bool = null, // GLM-5.3's, given to its template on every render (``glmClearThinking``)
     tool_source: []const u8 = "",
     compiled: ?template.Compiled = null,
@@ -72,7 +80,15 @@ pub const HfText = struct {
                 problem.* = try std.fmt.allocPrint(pa, "cannot read chat template override ({s})", .{@errorName(e)});
                 return error.Load;
             };
+            t.overridden = true;
         } else try t.readTemplates(io, a, dir, config);
+        // DeepSeek-V4.x releases ship encoding.py, not Jinja: a checkpoint's Jinja is a third party's (--chat-template)
+        if (t.native_deepseek) {
+            t.unread_template = t.source.len > 0 or t.tool_source.len > 0;
+            t.source = "";
+            t.tool_source = "";
+            t.schema_prompt = schemaPrompt(if (std.c.getenv("TF_DSV41_SCHEMA_PROMPT")) |v| std.mem.span(v) else null);
+        }
         t.specials = try specialsOf(a, config);
         t.eos = t.eosIds(a, model_config, generation, config, t.tok.id_to_token.tokens.items.len) catch |e| {
             if (e == error.OutOfMemory) return e;
@@ -326,8 +342,19 @@ pub const HfText = struct {
         return if (t.tool_source.len > 0) std.mem.concat(t.arena.allocator(), u8, &.{ source, " ", t.tool_source }) catch source else source;
     }
 
-    fn renderDeepseek(_: *HfText, a: Allocator, messages: Value, options: model_text.RenderOptions, problem: *[]const u8) model_text.Error!model_text.Rendered {
+    /// What renders chat, for the start-up line: an operator sees when a checkpoint's own Jinja goes unused.
+    pub fn renderer(t: *const HfText) []const u8 {
+        if (t.native_deepseek) return if (t.unread_template) "the DeepSeek-V4.x encoder (encoding.py); the checkpoint's own chat template is not used, --chat-template FILE uses it" else "the DeepSeek-V4.x encoder (encoding.py)";
+        if (t.overridden) return "the --chat-template file";
+        return if (t.source.len > 0 or t.tool_source.len > 0) "the checkpoint's" else "none: chat requests are refused, completion prompts are served";
+    }
+
+    fn renderDeepseek(t: *HfText, a: Allocator, messages: Value, options: model_text.RenderOptions, problem: *[]const u8) model_text.Error!model_text.Rendered {
         var opts: dsv41.Options = .{ .thinking = options.enable_thinking, .add_generation_prompt = options.add_generation_prompt };
+        if (options.images) opts.image = .{ .text = imageMarker }; // the image token, expanded by images.zig
+        if (t.schema_prompt) if (options.response_format) |rf| {
+            opts.response_format = try schemaFor(a, rf);
+        };
         if (options.tools) |tools| {
             if (tools != .array) {
                 problem.* = "tools must be a list";
@@ -350,6 +377,30 @@ pub const HfText = struct {
             return error.Template;
         };
         return .{ .text = out.text, .spans = out.spans };
+    }
+
+    fn imageMarker(_: ?*anyopaque, _: Value) []const u8 {
+        return dsv41.IMAGE;
+    }
+
+    /// ``schema_for_prompt``: what ``## Response Format`` shows for a ``response_format``, or null.
+    fn schemaFor(a: Allocator, rf: Value) Allocator.Error!?Value {
+        if (rf != .object) return null;
+        const kind = rf.get("type") orelse return null;
+        if (kind != .string) return null;
+        if (std.mem.eql(u8, kind.string, "json_object")) return switch (try json.parseText(a, "{\"type\": \"object\"}")) {
+            .ok => |v| v,
+            .err => null,
+        };
+        if (!std.mem.eql(u8, kind.string, "json_schema")) return null;
+        const js = rf.get("json_schema") orelse return null;
+        if (js != .object) return null;
+        var schema = js.get("schema") orelse js.get("json_schema") orelse return null;
+        if (schema == .string) schema = switch (try json.parseText(a, schema.string)) {
+            .ok => |v| v,
+            .err => return null,
+        };
+        return schema;
     }
 
     fn renderFn(ctx: *anyopaque, a: Allocator, messages: Value, options: model_text.RenderOptions, problem: *[]const u8) model_text.Error!model_text.Rendered {
