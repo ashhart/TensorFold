@@ -420,7 +420,7 @@ pub fn main(init: std.process.Init) !u8 {
     var io_regs: std.ArrayList(io_k.Reg) = .empty;
     defer io_regs.deinit(a);
     for (std.enums.values(attn_k.Heads)) |h| for (std.enums.values(io_k.Which)) |w| try io_regs.append(a, .{ .heads = h, .which = w });
-    try io_regs.append(a, .{ .heads = .q27b, .which = .append, .control = true });
+    try io_regs.appendSlice(a, &.{ .{ .heads = .q27b, .which = .append, .control = true }, .{ .heads = .rank, .which = .device_keep, .control = true } });
     for (io_regs.items) |r| {
         if (!wanted(o, io_k.spec(r).name)) continue;
         const x = try a.create(io_k.Io);
