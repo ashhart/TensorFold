@@ -32,6 +32,7 @@
 <!-- See docs/kernel-contract.md. Delete this section when no kernel changes. -->
 
 - Kernels registered with the contract, and the kernel each one replaces:
+- A planted control for each new kernel, and each one fails as planted:
 - Each backend's `SUMMARY` line and exit status:
 - Chips I could not run:
 
@@ -49,4 +50,4 @@
 - [ ] Every token still goes through the lane rounds. No serial path, and nothing that needs drafts off.
 - [ ] Drafted output equals `"draft": false`, a resumed prompt equals a fresh one, and concurrent equals solo.
 - [ ] No precision traded for speed. If the bits change, the description says which sums change and why.
-- [ ] Prompt processing is no slower than the last release.
+- [ ] Decode and prompt processing are no slower than main at one stream and the widest admitted; with `--drafter`, no slower than without it, greedy and sampled
