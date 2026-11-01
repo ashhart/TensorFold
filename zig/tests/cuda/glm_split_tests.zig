@@ -54,11 +54,11 @@ pub fn splitCheck(gpu: Gpu, checkpoint: []const u8, dc_path: []const u8, rank: c
             const before = e.index_splits;
             var at: usize = 0;
             const t = while (true) : (at += C) {
-                const r = x.chunk(ids, at, null, null, null) catch |err| {
+                const r = x.chunk(ids, at, false, null, null, null) catch |err| {
                     std.debug.print("FAIL split: prompt of {d}, twin {d}: the chunk at {d}: {s}\n", .{ len, twin, at, @errorName(err) });
                     return err;
                 };
-                if (r) |f| break f;
+                if (r.first) |f| break f;
             };
             splits[twin] = e.index_splits - before;
             firsts[twin] = t;

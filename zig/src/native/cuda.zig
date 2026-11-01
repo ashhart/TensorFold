@@ -317,7 +317,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     }
     const loaded = F.open(gpa, io, &g.ctx, o.dir, kernels, opts) catch |e| {
         cuda.tp_watch.fail(@errorName(e)); // a family over hosts: its other ranks stop with this error
-        if (@import("sys").optional_libraries.explain(e) orelse (if (@hasDecl(F, "explains_open")) F.explain(null, e) else null)) |text| {
+        if (@import("sys").optional_libraries.explain(e) orelse (if (@hasDecl(F, "explains_open")) F.explain(null, e) else null) orelse cuda.tp_watch.explain(e)) |text| {
             problem.* = text;
             return null;
         }
@@ -591,4 +591,9 @@ test "Save recovery: real native close drains the accepted trainer before any ch
 
 test "Save recovery: real native close drains the dense trainer before any child or parent is released" {
     try @import("dense_trainer_close_test.zig").run(Host, Host.serve, Host.close);
+}
+
+test "slide admission: cuda refuses before checkpoint or device access" {
+    try @import("slide_open_test.zig").omni(open);
+    try @import("slide_open_test.zig").check(open, "CUDA", &.{ "qwen4", "qwen4_text", "lfm2_vl", "glm5_next", "gemma4", "fish_omni" });
 }

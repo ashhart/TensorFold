@@ -8,6 +8,18 @@ It is not a prompt cache, a retrieval index or an adapter: each fact it keeps be
 model, written into the checkpoint's own safetensors files. Nothing the model already had is changed. It shipped in 1.0.3
 as Sliding Weights (experimental), and its flag and API use the name `slide`.
 
+## Repeating a lesson
+
+The same text and supplied questions can take different steps and choose different neurons on separate runs.
+The lesson writer generates extra question wordings at temperature 0.9, including when you supply questions.
+Sampled requests use a fresh random seed by default. The fitter also shuffles examples, with deterministic seeds
+from its round and pass counters; the lesson history affects those counters.
+
+For a repeatability check, start each run from fresh copies of the same checkpoint and graph. Use
+`--prompt-seed` to key sampled generations by their rendered prompt. Keep the build, backend, seed salt and settings fixed.
+This controls the writer's random seeds; it does not promise identical lessons across devices or builds.
+The acceptance checks still decide what is kept on every run.
+
 ## What you need
 
 - An Apple-silicon Mac (tested on an M5 Ultra and an M3 Ultra), or an NVIDIA GB10 (DGX Spark) with the CUDA build,
@@ -247,6 +259,34 @@ the shards are written.
 A kept fact passes when each answer that came back before the delete still does, and at least half of its other
 wordings do if they did before. The deleted fact passes when none of its questions gives its answer, or when the model
 as shipped gives that answer too (a likely guess, such as a common colour, is no trace of the fact).
+
+To delete a statement learned as several facts, select their IDs explicitly in one request:
+
+```sh
+curl -N -X DELETE http://127.0.0.1:8080/v1/slide/facts \
+  -H "Authorization: Bearer $(cat ~/models/slide-key)" \
+  -H 'Content-Type: application/json' -d '{"ids": [1, 2], "reason": "duplicate statement"}'
+```
+
+`ids` must contain 1 to 256 distinct positive integer IDs. Every selected fact must exist and hold neurons; an invalid
+selection refuses the entire request before any cut. A fact left `deleting` can also be selected for retry. Graph
+links never select another fact: they are not proven dependencies. The selected neurons are silenced in one cut,
+then every selected fact must stop answering under the same shipped-model exception, and every retained fact must
+pass the same checks as for a single delete. Any regression restores the whole selection, with no shard save.
+The graph marks the selection `deleting` in one write, the shards save once, and the graph marks the selection
+`deleted` in one write. On a write failure, the same recovery rules above apply to all selected facts; retry with
+the same IDs. Each selected ID gets a final `forgot` event. Successful batch events include `selected` and
+`total_neurons`, the count for the whole selection. This operation silences the selected facts and does not rebuild
+an older value or scrub their unused output columns.
+For disjoint additive neurons whose retained weights never moved, silencing gives the same forward values as never
+teaching the selected rows. Refitted neighbours, replacements and shared quantization groups can retain history, so
+a delete does not promise byte equality to a separately trained folder. The retained-answer checks detect regressions
+on their questions; they do not prove equality for every possible prompt.
+
+Host qualification covers duplicate orientations refused one at a time but deleted together, a retained-answer
+regression restoring the whole cut, invalid selections, graph allocation/write failures, shard-write restoration,
+retry of the pending selection, and both HTTP routes with JSON bodies. Checkpoint qualification must repeat the
+duplicate and retained-fact cases on each backend after save and restart.
 
 - A fact a newer one replaced has its neurons at zero already: deleting it answers "nothing to delete" and changes
   nothing. Deleting the newer fact does not bring back the one it replaced.

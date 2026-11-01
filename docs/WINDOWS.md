@@ -38,6 +38,20 @@ tensorfold-native serve <model path> --name local-model --parallel 1 --context 8
 
 The server listens on `http://127.0.0.1:8080/v1`. Ctrl+C (or closing the console) stops it cleanly.
 
+### Structured output and required tool calls
+
+`response_format` and a required or named `tool_choice` need the grammar library, `tfgrammar.dll`, in
+`zig-out\native\lib` beside the server's `bin`. Without it those requests get HTTP 400 and everything else serves.
+Build it from the pinned xgrammar checkout:
+
+```bat
+git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
+zig build grammar -Dxgrammar=%CD%\xgrammar
+```
+
+Tested on an RTX 5090 with Nemotron 3.5 Lightning: OpenAI `"required"` and named tools, Anthropic `any` and `tool`,
+`json_schema` and `json_object`.
+
 ## Models on CUDA
 
 Nemotron 3.5 Lightning serves as on Linux. The Qwen3.5 hybrids have a CUDA engine of their own in this port

@@ -51,6 +51,9 @@ Receipts include token hashes supplied by the server, but the command does not r
 
 ## Protocol versions
 
+community-v1 results come from one or two ranks. Results from more than two ranks will be their own category in
+community-v2, ranked apart, once the receiver records the rank count (#974).
+
 New runs use `community-v2` and its manifest digest. Existing `community-v1` receipts keep their original
 full-output rule and remain readable; inspection never upgrades them. Every ranking must select exactly
 one suite ID and digest, including contributor speed standings and profiles. A receiver must validate the

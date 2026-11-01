@@ -1,6 +1,7 @@
 //! Living Weights, family-neutral: the learner, its pocket of new neurons, their fits and the shard writer.
 pub const family = @import("family.zig");
 pub const families = @import("families.zig");
+pub const widths = @import("widths.zig");
 pub const Family = family.Family;
 pub const Layout = family.Layout;
 pub const Layers = family.Layers;
@@ -36,6 +37,7 @@ pub const pocket_values = @import("pocket_values.zig");
 test {
     _ = family;
     _ = families;
+    _ = widths;
     _ = neuron;
     _ = affine;
     _ = shards;
@@ -62,8 +64,11 @@ pub const host_test = @import("host_test.zig");
 pub const pocket_round = @import("pocket_round.zig");
 test {
     _ = @import("commit_test.zig");
+    _ = @import("pocket_round_test.zig");
 }
 
 test {
     _ = @import("pocket_quiet_legacy_test.zig");
 }
+
+pub const restart_fixture = @import("restart_fixture.zig");

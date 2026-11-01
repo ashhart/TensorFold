@@ -134,6 +134,7 @@ test {
     _ = @import("slide_recheck.zig");
     _ = @import("slide_forget.zig");
     _ = @import("slide_forget_test.zig");
+    _ = @import("slide_forget_many_test.zig");
     _ = @import("slide_supplied.zig");
     _ = @import("slide_questions_test.zig");
     _ = @import("slide_teacher_test.zig");
@@ -153,6 +154,7 @@ test {
     _ = @import("cortheon/cortheon.zig");
     _ = @import("cortheon/cortheon_test.zig");
     _ = @import("cortheon/research.zig");
+    _ = @import("cortheon/program.zig");
     _ = @import("recall_routes.zig");
     // the benchmark command's serve child runs under POSIX signals and waits; Windows refuses the command
     if (comptime @import("builtin").os.tag != .windows) {

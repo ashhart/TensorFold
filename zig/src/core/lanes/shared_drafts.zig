@@ -3,13 +3,15 @@ const std = @import("std");
 const win = @import("windows.zig");
 const alloc = @import("allocate.zig");
 const Engine = @import("engine.zig").Engine;
+const depth = @import("depth.zig");
 
 pub fn budgets(e: *Engine, plans: []const win.Plan, heads: []const usize, out: []i64) !void {
     const a = e.arena.allocator();
     const fixed = try a.alloc(u32, plans.len);
     const probs = try a.alloc([]const f64, plans.len);
     const neural = try a.alloc(bool, plans.len);
-    const limits = try costLimits(e, plans, heads);
+    const sampled = win.anySampled(plans);
+    const limits = try costLimits(e, plans, heads, sampled, out);
     var live: usize = 0;
     for (plans, fixed, probs, neural, 0..) |p, *fx, *pr, *head, i| {
         const s = p.stream;
@@ -30,11 +32,12 @@ pub fn budgets(e: *Engine, plans: []const win.Plan, heads: []const usize, out: [
         }
         if (!s.drafts) continue;
         const cap = if (e.backend.vtable.draft_capacity) |f| f(e.backend.ptr, s) else e.cfg.most_drafts;
-        const most = @min(cap, e.cfg.most_drafts, if (limits) |l| l[i] else e.cfg.most_drafts, @as(u32, @intCast(@max(0, s.draftRoom() - 1))));
+        const most = @min(cap, e.cfg.most_drafts, if (limits) |l| l.depths[i] else e.cfg.most_drafts, @as(u32, @intCast(@max(0, s.draftRoom() - 1))));
         if (most == 0) continue;
         head.* = true;
         const cached = s.draft_chances.items;
-        if (cached.len > 0 and limits == null) {
+        // a legacy cap prices by the rule's rates; granted depths keep the drafter's own chances under their bound
+        if (cached.len > 0 and (limits == null or e.cfg.granted_depth)) {
             const prices = try a.alloc(f64, most);
             const known = @min(cached.len, most);
             @memcpy(prices[0..known], cached[0..known]);
@@ -53,28 +56,53 @@ pub fn budgets(e: *Engine, plans: []const win.Plan, heads: []const usize, out: [
         @memset(out, 0);
         return;
     }
-    const counts = try alloc.allocate(a, fixed, probs, &e.cfg.shared_costs, e.rule.overheadMs(@intCast(live), win.anySampled(plans)), @max(live, e.cfg.batch_rows));
+    const counts = try alloc.allocate(a, fixed, probs, &e.cfg.shared_costs, e.rule.overheadMs(@intCast(live), sampled), @max(live, e.cfg.batch_rows));
     for (heads, out) |i, *budget| {
         budget.* = if (neural[i]) counts[i] else 0;
     }
+    if (limits) |l| if (e.cfg.granted_depth) try payReserved(e, l.who, probs, heads, sampled, out);
 }
 
 // Copy lookups may advance a proposer's backoff; the reservation loop, not this depth cap, asks it once.
-fn noCopy(_: *anyopaque, _: *const @import("depth.zig").Who) bool {
+fn noCopy(_: *anyopaque, _: *const depth.Who) bool {
     return false;
 }
 
-fn costLimits(e: *Engine, plans: []const win.Plan, heads: []const usize) !?[]const u32 {
-    if (!e.cfg.limit_shared_drafts) return null;
+const Limits = struct {
+    depths: []const u32, // by plan: the most drafts the rule lets a head stream reserve
+    who: []depth.Who, // by head: its last verified grant, repriced by payReserved to the rows reserved now
+};
+
+/// What the depth rule lets each head stream reserve; `out` is its scratch, `budgets` overwrites it.
+fn costLimits(e: *Engine, plans: []const win.Plan, heads: []const usize, sampled: bool, out: []i64) !?Limits {
+    if (!e.cfg.granted_depth and !e.cfg.limit_shared_drafts) return null;
     const a = e.arena.allocator();
-    const who = try a.alloc(@import("depth.zig").Who, heads.len);
+    const who = try a.alloc(depth.Who, heads.len);
     for (heads, who) |i, *w| w.* = win.who(plans[i].stream);
-    const depths = try a.alloc(i64, heads.len);
-    try e.rule.budgets(who, .{ .ptr = e, .copy = noCopy }, win.anySampled(plans), depths);
+    const probe: depth.Probe = .{ .ptr = e, .copy = noCopy };
+    if (e.cfg.granted_depth) {
+        for (who, out) |*w, *d| d.* = try e.rule.headDepth(w, null, probe); // each stream's grant plus slack, once
+    } else try e.rule.budgets(who, probe, sampled, out);
     const limits = try a.alloc(u32, plans.len);
     @memset(limits, e.cfg.most_drafts);
-    for (heads, depths) |i, d| limits[i] = @intCast(@max(0, d));
-    return limits;
+    for (heads, out) |i, d| limits[i] = @intCast(@max(0, d));
+    return .{ .depths = limits, .who = who };
+}
+
+/// Price only reserved holds; a historical zero-grant probe survives only if it received fresh rows.
+fn payReserved(e: *Engine, who: []depth.Who, probs: []const []const f64, heads: []const usize, sampled: bool, out: []i64) !void {
+    depth.Rule.capPass(out, e.rule.batch_rows);
+    if (e.rule.k.hold_costs.len == 0) return;
+    for (who, heads, out) |*w, i, d| {
+        const last = w.granted orelse continue;
+        if (last == 0 or d <= 0) continue;
+        const kept: u32 = @intCast(@min(@as(i64, last), d)); // a grant prices no row that was not reserved
+        w.granted = kept;
+        var gain: f64 = 0;
+        for (probs[i][0..@min(kept, probs[i].len)]) |chance| gain += chance;
+        w.gain = gain;
+    }
+    try e.rule.payHolds(who, sampled, out);
 }
 
 test "shared draft prices: a short cached tree can grow when allocation returns more rows" {

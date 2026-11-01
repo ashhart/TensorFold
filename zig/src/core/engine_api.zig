@@ -6,7 +6,6 @@ pub const tfvideo = @import("tfvideo.zig");
 pub const DraftSources = @import("draft_sources.zig").Sources;
 /// The server's name for one request, unique while the process lives.
 pub const Id = u64;
-
 /// One request's sampling (Python's exact_sampling.Sampling); a request without one decodes greedily.
 pub const Sampling = lanes.Sampling;
 /// presence_penalty and frequency_penalty, applied where ``Info.penalties``.
@@ -149,26 +148,7 @@ pub const SpeechSubmitError = error{ Closed, Busy, InvalidRequest, Unsupported }
 pub const Reason = enum { stop, length, cancelled, failed, silence };
 pub const speech_guard = @import("speech_guard.zig");
 
-/// What a finished reply's rounds did, for its runtime fields and /metrics.
-pub const Stats = struct {
-    rounds: u64 = 0,
-    drafted: u64 = 0,
-    accepted: u64 = 0,
-    /// The narrowest verify window of the reply's rounds (drafted replies: 2 or more).
-    min_rows: u32 = 0,
-    prefill_widths: []const u32 = &.{},
-    prefill_raised: []const bool = &.{},
-    /// The loop period that ended or interrupted the think block, if any.
-    loop_period: ?u32 = null,
-    /// Prompt prefill duration measured by the engine host, in seconds.
-    prefill_seconds: ?f64 = null,
-    /// The GPU-busy seconds of the forward passes the reply ran in, where profiling times them (TF_Q27_PROFILE).
-    gpu_seconds: ?f64 = null,
-    /// Seconds from engine submission to first admission; an engine that admits immediately leaves zero.
-    queued_seconds: f64 = 0,
-    /// The drafter's own counters as a JSON object, or empty.
-    telemetry_json: []const u8 = "",
-};
+pub const Stats = @import("engine_stats.zig").Stats;
 
 pub const Event = union(enum) {
     /// The prompt is in the cache: ``cached`` of its tokens came from a kept prefix.
@@ -284,6 +264,7 @@ pub const Precision = enum { checkpoint, full };
 
 /// What a server asks of the engine it opens: the checkpoint, and the serve flags an engine reads.
 pub const Open = struct {
+    pub const slideRefusal = @import("engine_slide.zig").refusal;
     pub fn fsrRefusal(o: Open, backend: []const u8) ?[]const u8 {
         if (o.ssd_experts_gib == null and !o.ple_on_ssd and o.fsr_trace == null) return null;
         if (!std.mem.eql(u8, backend, "metal") or !std.mem.eql(u8, o.model_type, "qwen4_exp"))

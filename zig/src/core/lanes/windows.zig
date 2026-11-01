@@ -230,7 +230,7 @@ pub fn probe(e: *Engine) depth.Probe {
 }
 
 pub fn who(s: *Stream) depth.Who {
-    return .{ .state = &s.depth, .draft_room = s.draftRoom(), .finished = s.finished, .forced = s.force.items.len > 0, .granted = s.granted, .stream = s, .sampled = s.sampling != null };
+    return .{ .state = &s.depth, .draft_room = s.draftRoom(), .finished = s.finished, .forced = s.force.items.len > 0, .granted = s.granted, .grant_short = s.grant_short, .gain = s.grant_gain, .stream = s, .sampled = s.sampling != null };
 }
 
 /// Whether any of a round's streams draws keyed samples (its rows carry their host work).
@@ -295,8 +295,16 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
         const ms = own.get(1 + @as(i64, counts[0]));
         try trail.event(e, &.{ f("ev", trail.str("lone-price")), f("stream", trail.str(plans[0].stream.id)), f("rows", trail.int(counts[0] + 1)), f("expected", ev.bits(expected)), f("ms", if (ms) |value| ev.bits(value) else .null), f("probe", .{ .bool = trial != null }) });
     }
-    for (plans, counts) |*p, c| {
-        if (p.kind == .head) p.stream.granted = c;
+    for (plans, counts, probs) |*p, c, pr| {
+        if (p.kind == .head) {
+            p.stream.granted = c;
+            if (e.cfg.granted_depth) {
+                p.stream.grant_short = c < p.count();
+                var gain: f64 = 0;
+                for (pr[0..@min(c, pr.len)]) |chance| gain += chance;
+                p.stream.grant_gain = gain;
+            }
+        }
         if (p.kind == .forced or p.count() == 0 or c == p.count()) continue;
         try cut.prefix(a, p, c);
     }
@@ -512,7 +520,10 @@ pub fn constrain(e: *Engine, p: *Plan) !void {
     @memcpy(rows[1..], p.tokens);
     const grows = p.stream.drafts and p.kind != .forced and e.alone;
     const room = if (grows) @max(rows.len, e.cfg.family_width) else rows.len;
-    const w = try g.window(a, rows, try accept.rowParents(a, rows.len, p.parents), p.kind == .forced, room);
+    const row_parents = try accept.rowParents(a, rows.len, p.parents);
+    var timing: @import("grammar_time.zig").Profile = .{ .clock = e.clock };
+    defer @import("grammar_time.zig").record(e, p.stream, timing);
+    const w = try @import("grammar_time.zig").window(g, a, rows, row_parents, p.kind == .forced, room, &timing);
     p.masks = w.masks;
     if (w.rows.len == rows.len and w.extra.len == 0) return;
     if (w.rows.len < rows.len) p.lanes = null; // the tree shape no longer matches the rows

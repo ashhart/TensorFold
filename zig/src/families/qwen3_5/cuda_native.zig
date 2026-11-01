@@ -11,7 +11,6 @@ pub const cost_adapter = @import("cuda_cost_adapter.zig");
 const draws = @import("draw.zig");
 const Draft = @import("cuda_draft.zig").Draft;
 const cuda_rope = @import("cuda_rope.zig");
-const draft_config = @import("cuda_draft_config.zig");
 const prefill = @import("cuda_prefill.zig");
 const Fill = prefill.Fill;
 const reuse = @import("cuda_reuse.zig");
@@ -81,9 +80,11 @@ pub const Loaded = struct {
     own_prompt_cache: bool = false,
     /// TF_QWEN_KV_SHARE or TF_QWEN_KV_PAGES_ALL: every stream runs on the pool's pages; the engine's window sits idle.
     all_on_pages: bool = false,
+    /// TF_QWEN_KV_PAGES_ALL=1: the engine's own stream takes pages too, a window of them set aside by the plan.
+    engine_paged: bool = false,
 };
 
-fn cacheBytes(e: *const E.Engine, cap: usize, test_tokens: usize) !usize {
+pub fn cacheBytes(e: *const E.Engine, cap: usize, test_tokens: usize) !usize {
     return std.math.add(usize, e.streamBytes(cap), try cache_mod.pageExtra(e.g, cap, test_tokens, e.kv8));
 }
 
@@ -97,17 +98,17 @@ pub fn pagedLayout(p: *anyopaque, extra: u64) ?kv_pool.Layout {
     return pages_mod.layout(l.e, l.capacity, l.page_tokens, ring, l.extra);
 }
 
-/// The pool beside the first stream's window: `streams` lanes and `pages` pages, made now.
+/// The pool beside the first stream's window (engine_paged: for it too): `streams` more lanes and `pages` pages.
 pub fn attach(p: *anyopaque, streams: u32, pages: usize) !void {
     const l: *Lanes = @ptrCast(@alignCast(p));
     const ring = l.ringBytes();
-    // checks, and TF_QWEN_KV_SHARE: every stream on pages (each can adopt the kept ones), the window idle: a lane each
-    l.paged_only = (pages_mod.pagedOnly() or l.share_snaps > 0) and streams > 0;
+    // TF_QWEN_KV_SHARE and TF_QWEN_KV_PAGES_ALL: every stream on pages, a lane each (PAGES_ALL: no window reserved)
+    l.paged_only = (l.engine_paged or l.share_snaps > 0) and (streams > 0 or l.engine_paged);
     const pool_lanes = if (l.paged_only) streams + 1 else streams;
     l.pages = try pages_mod.Pages.init(l.gpa, l.e, pages_mod.layout(l.e, l.capacity, l.page_tokens, ring, l.extra), l.capacity, ring, pool_lanes, pages);
-    if (streams > 0) {
-        if (l.draft) |d| d.ring_of = .{ .ctx = l, .ring = Lanes.ringOf };
-        if (l.mtp) |m| m.ring_of = .{ .ctx = l, .area = Lanes.ringOf };
+    if (pool_lanes > 0) {
+        if (l.draft) |d| d.ring_of = .{ .ctx = l, .ring = Lanes.ringOf, .all = l.engine_paged };
+        if (l.mtp) |m| m.ring_of = .{ .ctx = l, .area = Lanes.ringOf, .all = l.engine_paged };
     }
     if (l.share_snaps > 0 and streams > 0) l.prefix = try prefix_mod.Prefix.init(l.gpa, l.e, l.pages.?, l.share_snaps);
     if (l.prefix != null and prefix_mod.fewSnapshots(l.share_snaps, streams + 1)) std.log.warn("TF_QWEN_KV_SHARE={d} keeps under 4 recurrent-state snapshots a stream at --parallel {d}: live streams evict each other's before a resume; set it to {d} or more", .{ l.share_snaps, streams + 1, 4 * (streams + 1) });
@@ -125,6 +126,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     if (kernels != null) return error.QwenHasNoCapturedKernels;
     if (o.slide and o.kv8) return error.UnsupportedLearningFormat;
     const page_tokens = try pages_mod.paging();
+    const engine_paged = page_tokens > 0 and pages_mod.pagedOnly();
     const page_test = try cache_mod.pageTest();
     _ = try cache_mod.cacheRows(o.context, page_test);
     if (page_tokens > 0 and o.slide) return error.QwenPagesNoLearner;
@@ -150,7 +152,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     const trace = try round_timing.Trace.create(gpa, timing_on and e.g.hidden == 5120 and e.g.layers == 64 and e.g.experts == 0);
     errdefer if (trace) |x| gpa.destroy(x);
     const l = try gpa.create(Lanes);
-    l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context, .page_tokens = page_tokens, .page_test = page_test, .share_snaps = share_snaps, .cost_context = ctx, .startup = e.startup, .vision = v, .target = undefined, .timing_on = timing_on, .trace = trace };
+    l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context, .page_tokens = page_tokens, .engine_paged = engine_paged, .page_test = page_test, .share_snaps = share_snaps, .cost_context = ctx, .startup = e.startup, .vision = v, .target = undefined, .timing_on = timing_on, .trace = trace };
     l.target = .{ .e = e, .caches = &l.caches, .seen = &l.seen };
     return .{
         .learns = if (o.slide) e else null,
@@ -166,7 +168,8 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .target = &l.target,
         .layout = if (page_tokens > 0) pages_mod.layout(e, o.context, page_tokens, 0, 0) else null,
         .own_prompt_cache = share_snaps > 0,
-        .all_on_pages = page_tokens > 0 and (share_snaps > 0 or pages_mod.pagedOnly()),
+        .all_on_pages = page_tokens > 0 and share_snaps > 0 and !engine_paged, // the engine's window idle
+        .engine_paged = engine_paged,
     };
 }
 
@@ -191,87 +194,9 @@ fn reserve(p: *anyopaque, streams: u32) anyerror!void {
     const l: *Lanes = @ptrCast(@alignCast(p));
     try reservation.target(E.Cache, E.Part, l, streams); // with a pool: the first window, the shapes on its lanes
 }
-/// A drafter opened over the engine; DFlash2's `prepare` times the target's windows once the pool is reserved.
-pub const Opened = struct {
-    drafter: lanes.drafter.Drafter,
-    ctx: *anyopaque,
-    close: *const fn (*anyopaque) void,
-    reserve: *const fn (*anyopaque, u32) anyerror!void,
-    prepare: ?struct { ctx: *anyopaque, run: *const fn (*anyopaque) anyerror!lanes.drafter.Facts, bytes: usize } = null,
-};
-
-/// --drafter's directory over engine `p`: a DFlash2 draft (its config's dflash_config), else the MoE's MTP layer.
-pub fn openDrafter(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []const u8, bits: u8) !Opened {
-    const l: *Lanes = @ptrCast(@alignCast(p));
-    if (!l.e.g.moe() or draft_config.declared(gpa, io, dir)) return openDFlash(gpa, io, p, dir, bits);
-    return openMtp(gpa, io, p, dir, bits);
-}
-
-/// The DFlash2 drafter in `dir` over engine `p`, 4-bit only, and the target's windows timed for the round loop.
-fn openDFlash(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []const u8, bits: u8) !Opened {
-    if (bits != 4) return error.DrafterBitsUnsupported;
-    const l: *Lanes = @ptrCast(@alignCast(p));
-    if (l.e.g.exl3 and l.e.g.moe()) return error.Exl3DrafterUnsupported; // a dense checkpoint drafts as an MLX one
-    if (l.caches.count() != 0 or l.pool.items.len != 0) return error.TapsAfterStreams;
-    const d = try Draft.init(gpa, io, l.e, dir);
-    errdefer d.deinit();
-    try l.e.setTaps(d.taps());
-    d.target_taps = l.e.tapBytes();
-    cost_adapter.identify(l, dir, .dflash);
-    l.calibration = d;
-    l.draft = d;
-    return .{ .drafter = d.drafter(), .ctx = d, .close = closeDrafter, .reserve = reserveDrafter, .prepare = .{ .ctx = l, .run = calibrateDrafter, .bytes = if (l.capacity < l.e.window_rows) try cacheBytes(l.e, l.e.window_rows, l.page_test) else 0 } };
-}
-
-/// The MTP layer beside the checkpoint in `dir` as the drafter over engine `p` (qwen3_5_moe), its ring the window.
-fn openMtp(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []const u8, bits: u8) !Opened {
-    if (bits != 4) return error.DrafterBitsUnsupported;
-    const l: *Lanes = @ptrCast(@alignCast(p));
-    if (l.e.g.exl3 and l.e.g.moe()) return error.Exl3DrafterUnsupported; // a dense checkpoint drafts as an MLX one
-    if (l.caches.count() != 0 or l.pool.items.len != 0) return error.TapsAfterStreams;
-    const d = try Mtp.init(gpa, io, l.e, dir, l.capacity);
-    errdefer d.deinit();
-    try l.e.setTaps(d.taps());
-    cost_adapter.identify(l, dir, .mtp);
-    try l.timeWindows(d, null);
-    l.mtp = d;
-    return .{ .drafter = d.drafter(), .ctx = d, .close = closeMtp, .reserve = reserveMtp };
-}
-
-fn reserveMtp(p: *anyopaque, streams: u32) anyerror!void {
-    const d: *Mtp = @ptrCast(@alignCast(p));
-    try d.reserve(streams);
-}
-
-fn closeMtp(p: *anyopaque) void {
-    const d: *Mtp = @ptrCast(@alignCast(p));
-    d.deinit();
-}
-
-fn calibrateDrafter(p: *anyopaque) !lanes.drafter.Facts {
-    const l: *Lanes = @ptrCast(@alignCast(p));
-    const d = l.calibration orelse return error.MissingCalibrationDrafter;
-    if (d.n_costs == 0) {
-        if (l.pool.items.len == 0) return error.MissingReservedQwenCache;
-        try l.timeWindows(d, l.pool.items[0]);
-    }
-    if (d.n_costs != l.e.window_rows) return error.IncompleteWindowMeasurements;
-    l.calibration = null;
-    var phases = l.startup;
-    phases.add(d.startup);
-    phases.print();
-    return d.drafter().facts();
-}
-
-fn reserveDrafter(p: *anyopaque, streams: u32) anyerror!void {
-    const d: *Draft = @ptrCast(@alignCast(p));
-    try d.reserve(streams);
-}
-
-fn closeDrafter(p: *anyopaque) void {
-    const d: *Draft = @ptrCast(@alignCast(p));
-    d.deinit();
-}
+const drafter_open = @import("cuda_drafter_open.zig");
+pub const Opened = drafter_open.Opened;
+pub const openDrafter = drafter_open.openDrafter;
 
 /// A request this engine refuses, in words, or with no engine (null) its open; null: none of its own.
 pub fn explain(ctx: ?*anyopaque, err: anyerror) ?[]const u8 {
@@ -307,7 +232,7 @@ fn pick(sampling: ?lanes.Sampling, position: u64) E.Draw {
     return .{ .rule = cuda.sample.Rule.from(lanes.gpu_rule.rule(s)), .position = position };
 }
 
-const Lanes = struct {
+pub const Lanes = struct {
     timing_on: bool = false,
     trace: ?*round_timing.Trace = null,
     gpa: std.mem.Allocator,
@@ -322,6 +247,7 @@ const Lanes = struct {
     /// TF_QWEN_KV_SHARE's snapshots (0: off) and the prompt cache over the pool's pages `attach` made.
     share_snaps: usize = 0,
     prefix: ?*prefix_mod.Prefix = null,
+    engine_paged: bool = false, // TF_QWEN_KV_PAGES_ALL=1: no window reserved, the engine's own stream a pool lane
     /// The DFlash2 drafter, when one is attached: its rings go into the pool lanes' runs.
     draft: ?*Draft = null,
     /// The MTP drafter (qwen3_5_moe), when attached: its ring and state go into the pool lanes' runs.
@@ -398,7 +324,7 @@ const Lanes = struct {
     }
 
     /// Each width timed on a reset cache after its captured launch shape is warm.
-    fn timeWindows(self: *Lanes, d: anytype, reserved: ?*E.Cache) !void {
+    pub fn timeWindows(self: *Lanes, d: anytype, reserved: ?*E.Cache) !void {
         self.startup.add(try cost_adapter.measure(self, d, reserved));
     }
 

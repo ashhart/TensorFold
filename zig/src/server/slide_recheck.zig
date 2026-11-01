@@ -161,9 +161,14 @@ pub fn recalled(asks: []const Ask, got: []const bool, f: usize) bool {
 
 /// The first thing wrong after the cut: fact 0 answering where the model as shipped does not, or a kept answer lost.
 pub fn judge(asks: []const Ask, before: []const bool, after: []const bool, shipped: []const bool, facts: usize) ?Miss {
-    for (asks, after, shipped, 0..) |x, g, s, i| if (x.fact == 0 and g and !s) return .{ .fact = 0, .ask = i, .why = "it still gives the deleted fact" };
-    for (asks, before, after, 0..) |x, b, g, i| if (x.fact > 0 and !x.probe and b and !g) return .{ .fact = x.fact, .ask = i, .why = "it no longer brings its fact back" };
-    for (1..facts) |f| {
+    return judgeMany(asks, before, after, shipped, facts, 1);
+}
+
+/// The first `removed` facts were explicitly selected; every other fact keeps the same retention checks.
+pub fn judgeMany(asks: []const Ask, before: []const bool, after: []const bool, shipped: []const bool, facts: usize, removed: usize) ?Miss {
+    for (asks, after, shipped, 0..) |x, g, s, i| if (x.fact < removed and g and !s) return .{ .fact = x.fact, .ask = i, .why = "it still gives the deleted fact" };
+    for (asks, before, after, 0..) |x, b, g, i| if (x.fact >= removed and !x.probe and b and !g) return .{ .fact = x.fact, .ask = i, .why = "it no longer brings its fact back" };
+    for (removed..facts) |f| {
         var n: usize = 0;
         var was: usize = 0;
         var now: usize = 0;

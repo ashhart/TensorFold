@@ -16,6 +16,24 @@ pub const nemotron_h: Family = .{
     .quant = .{ .bits = 4, .group = 64 },
     .keys = .{ .width = "moe_shared_expert_intermediate_size" },
     .experts = .pattern,
+    .widths = .{
+        .embedding = "backbone.embeddings",
+        .head = "lm_head",
+        .mixer = "mixer.",
+        .aliases = &.{"language_model."},
+        .residuals = &.{ "out_proj", "o_proj", "shared_experts.down_proj" },
+        .mamba = &.{ "in_proj", "out_proj" },
+        .attention = &.{ "q_proj", "k_proj", "v_proj", "o_proj" },
+        .expert = &.{ "switch_mlp.fc1", "switch_mlp.fc2", "shared_experts.up_proj", "shared_experts.down_proj" },
+    },
+};
+
+/// Omni's language-model geometry lives under llm_config, with the same writable widths as Nemotron.
+pub const nemotron_h_omni: Family = blk: {
+    var f = nemotron_h;
+    f.model_type = "nemotron_h_omni";
+    f.keys.scope = "llm_config";
+    break :blk f;
 };
 
 /// Qwen3.8 Flash Next (qwen4_exp): a SwiGLU shared expert at every layer behind its own gate, 4-bit groups of 32.
@@ -44,7 +62,7 @@ pub const qwen3_5: Family = .{
     .experts = .every,
 };
 
-pub const all = [_]Family{ nemotron_h, qwen4_exp, qwen3_5 };
+pub const all = [_]Family{ nemotron_h, nemotron_h_omni, qwen4_exp, qwen3_5 };
 
 /// The family of a checkpoint's top-level model_type, or null.
 pub fn byModelType(model_type: []const u8) ?Family {

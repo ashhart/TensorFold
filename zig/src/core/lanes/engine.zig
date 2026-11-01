@@ -50,6 +50,7 @@ pub const Engine = struct {
     alone: bool = true, // this step has one live stream: its copies may take their ramp
     lone_kept: [2][lone_costs.bands]?lone_costs.Kept = @splat(@splat(null)), // the newest lone calibrations, greedy then sampled, a band each
     steps: u64 = 0,
+    grammar_round: @import("grammar_time.zig").Round = .{},
     arena: std.heap.ArenaAllocator, // a round's temporaries
     unread: std.ArrayList(Unread) = .empty, // queued draws the log reads at the step's end
 
@@ -71,6 +72,7 @@ pub const Engine = struct {
                 .draft_step_ms = cfg.draft_step_ms,
                 .plain_guard = cfg.plain_guard,
                 .node_probabilities = cfg.node_probabilities,
+                .granted_depth = cfg.granted_depth,
                 .confidence_floor = cfg.draft_confidence,
                 .batch_rows = cfg.batch_rows,
                 .batched_heads = cfg.draft_streams,
