@@ -9,7 +9,7 @@ pub fn steps(b: *std.Build, all: *std.Build.Step) void {
     });
     const checks = b.step("test-lfm3-host", "LFM3 text and VL checkpoint config and tensor admission without a GPU");
     const rope = b.createModule(.{ .root_source_file = b.path("zig/src/core/rope_freq.zig"), .target = b.graph.host });
-    for ([_][]const u8{ "config_test", "weights" }) |part| {
+    for ([_][]const u8{ "config_test", "weights", "vision_spec_test" }) |part| {
         const root = b.createModule(.{
             .root_source_file = b.path(b.fmt("zig/src/families/lfm3/{s}.zig", .{part})),
             .target = b.graph.host,
