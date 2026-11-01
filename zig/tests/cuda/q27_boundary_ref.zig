@@ -24,6 +24,7 @@ const W = struct {
     v: Mat,
 };
 const Keep = struct { h: X, norm: X, p: [R * P]f64, mid: X, y: X, gate: [R][I]f64, up: [R][I]f64, prob: [R][R]f64, q: X, k: X, v: X };
+const Control = enum { none, adjoint, sigmoid };
 const Stack = struct {
     w: [L]W,
     input: X,
@@ -110,7 +111,7 @@ const Stack = struct {
         return loss;
     }
 
-    fn backward(s: *const Stack, al: std.mem.Allocator, kept: *const [L]Keep, last: *const X, layer: usize, legacy: bool) !X {
+    fn backward(s: *const Stack, al: std.mem.Allocator, kept: *const [L]Keep, last: *const X, layer: usize, control: Control) !X {
         var grad: X = @splat(@splat(0));
         for (start - 1..R) |r| {
             var y: [D]f64 = undefined;
@@ -141,7 +142,7 @@ const Stack = struct {
             }
             var dy: X = @splat(@splat(0));
             if (l % 4 != 3) {
-                const in = inputs(w, &kp.p, !legacy);
+                const in = inputs(w, &kp.p, control != .sigmoid);
                 const f = try gdn.forward(al, GD, in, false);
                 var dout: X = @splat(@splat(0));
                 for (0..R) |r| for (0..D) |j| axpy(&dout[r], grad[r][j], &w.output[j]);
@@ -174,6 +175,9 @@ const Stack = struct {
                 };
             }
             for (0..R) |r| normBack(&kp.h[r], &dy[r], &grad[r]);
+            if (control == .adjoint and l == L / 2) for (&grad) |*row| for (row) |*v| {
+                v.* *= 1.2;
+            };
         }
         return grad;
     }
@@ -213,8 +217,8 @@ test "dense gradient: hybrid prompt/answer boundary matches FD and catches the s
     _ = try s.run(al, L, 0, @splat(0), &kept, &last);
     var caught: usize = 0;
     for ([_]usize{ 0, 3, 6 }) |layer| {
-        const g = try s.backward(al, &kept, &last, layer, false);
-        const old = try s.backward(al, &kept, &last, layer, true);
+        const g = try s.backward(al, &kept, &last, layer, .none);
+        const old = try s.backward(al, &kept, &last, layer, .sigmoid);
         for ([_]usize{ 0, start - 2, start - 1, R - 1 }) |row| {
             const length = @sqrt(dot(&g[row], &g[row]));
             const old_len = @sqrt(dot(&old[row], &old[row]));
@@ -271,5 +275,109 @@ test "dense gradient: the old boundary gate gives a five-thirds state gradient" 
         const check = try gdn.finiteCheck(al, GD, check_in, go, rng.random(), 100);
         try std.testing.expect(check.worst < 1e-5);
     }
+    const directional = @import("core").directional;
+    const row = start - 1;
+    const yr = f.y[row * D ..][0..D];
+    const true_grad = corrected.dy[row * D ..][0..D];
+    const wrong_grad = old.dy[row * D ..][0..D];
+    const length = @sqrt(dot(true_grad, true_grad));
+    const wrong_length = @sqrt(dot(wrong_grad, wrong_grad));
+    var slopes: [6]f64 = undefined;
+    for (directional.fractions, &slopes) |fraction, *slope| {
+        const h = fraction * @sqrt(dot(yr, yr));
+        var losses: [2]f64 = undefined;
+        for ([_]f64{ -1, 1 }, &losses) |sign, *loss| {
+            var shifted: [D]f64 = undefined;
+            for (&shifted, yr, true_grad) |*v, y, g| v.* = y + sign * h * g / length;
+            const ri = 1 / @sqrt(dot(&shifted, &shifted) / D + eps);
+            loss.* = 0;
+            for (shifted, in.norm_w, dout[row]) |y, weight, g| loss.* += y * ri * weight * silu(0.6) * g;
+        }
+        slope.* = directional.central(losses, h);
+    }
+    const right = directional.evaluate(slopes, length);
+    const wrong = directional.evaluate(slopes, wrong_length);
+    try std.testing.expectEqual(directional.Verdict.pass, right.verdict);
+    try std.testing.expectEqual(directional.Verdict.mismatch, wrong.verdict);
+    std.debug.print("CONTROL boundary row {d}: sigmoid gradient {s}, relative {d:.8}\n", .{ row, @tagName(wrong.verdict), wrong.relative });
     std.debug.print("WITNESS boundary row {d}: sigmoid/SiLU state gradient 1.666667; both adjoints match their own FD\n", .{start - 1});
+}
+
+fn profile(s: *const Stack, layer: usize, row: usize, dir: [D]f64, residual_norm: f64) ![6]f64 {
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    var slopes: [6]f64 = undefined;
+    for (@import("core").directional.fractions, &slopes) |fraction, *slope| {
+        const h = fraction * residual_norm;
+        var losses: [2]f64 = undefined;
+        for ([_]f64{ -1, 1 }, &losses) |sign, *loss| {
+            var delta = dir;
+            for (&delta) |*v| v.* *= sign * h;
+            var kept: [L]Keep = undefined;
+            var last: X = undefined;
+            loss.* = try s.run(arena.allocator(), layer, row, delta, &kept, &last);
+        }
+        slope.* = @import("core").directional.central(losses, h);
+    }
+    return slopes;
+}
+
+test "dense gradient: v2 counts reported scale actual adjoint scale and sigmoid changed probes" {
+    const gate = @import("core").directional;
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const al = arena.allocator();
+    const s = Stack.init(0x27ba_c004);
+    var kept: [L]Keep = undefined;
+    var last: X = undefined;
+    _ = try s.run(al, L, 0, @splat(0), &kept, &last);
+    const Kind = enum { reported, adjoint, sigmoid };
+    for ([_]Kind{ .reported, .adjoint, .sigmoid }) |kind| {
+        var changed: usize = 0;
+        var caught: usize = 0;
+        var unit_changed: usize = 0;
+        var baseline_pass: usize = 0;
+        var eligible: usize = 0;
+        for ([_]usize{ 0, 3, 6 }) |layer| {
+            const correct = try s.backward(al, &kept, &last, layer, .none);
+            const wrong = try s.backward(al, &kept, &last, layer, if (kind == .adjoint) .adjoint else if (kind == .sigmoid) .sigmoid else .none);
+            for ([_]usize{ 0, start - 2, start - 1, R - 1 }) |row| {
+                const length = @sqrt(dot(&correct[row], &correct[row]));
+                var control_grad = wrong[row];
+                if (kind == .reported and layer == 3) for (&control_grad) |*v| {
+                    v.* *= 1.2;
+                };
+                const control_norm = @sqrt(dot(&control_grad, &control_grad));
+                var dir: [D]f64 = undefined;
+                var true_dir: [D]f64 = undefined;
+                var delta: f64 = 0;
+                for (&dir, &true_dir, control_grad, correct[row]) |*d, *td, g, truth| {
+                    d.* = if (kind == .reported) truth / length else g / control_norm;
+                    td.* = truth / length;
+                    delta += (g - truth) * (g - truth);
+                }
+                const residual = if (layer + 1 < L) kept[layer + 1].h[row] else last[row];
+                const size = @sqrt(dot(&residual, &residual));
+                const baseline = gate.evaluate(try profile(&s, layer, row, true_dir, size), length);
+                const result = gate.evaluate(try profile(&s, layer, row, dir, size), control_norm);
+                const differs = @sqrt(delta) > 1e-8 * length;
+                var direction_delta: f64 = 0;
+                for (dir, true_dir) |d, truth| direction_delta += (d - truth) * (d - truth);
+                if (@sqrt(direction_delta) > 1e-8) unit_changed += 1;
+                if (baseline.verdict == .pass) baseline_pass += 1;
+                if (differs) {
+                    changed += 1;
+                    if (baseline.verdict == .pass) {
+                        eligible += 1;
+                        if (result.verdict == .mismatch) caught += 1;
+                    }
+                }
+                std.debug.print("CONTROL-PROBE {s} layer {d} row {d}: changed {any}, baseline {s}, control {s}, g {e:.8}, estimate {e:.8}, relative {e:.8}\n", .{ @tagName(kind), layer, row, differs, @tagName(baseline.verdict), @tagName(result.verdict), control_norm, result.estimate, result.relative });
+            }
+        }
+        std.debug.print("CONTROL-COUNT {s}: total 12, baseline_pass {d}, changed {d}, unit_changed {d}, eligible {d}, caught {d}, missed {d}\n", .{ @tagName(kind), baseline_pass, changed, unit_changed, eligible, caught, eligible - caught });
+        try std.testing.expectEqual(@as(usize, if (kind == .reported) 4 else 8), changed);
+        try std.testing.expect(eligible > 0);
+        try std.testing.expect(caught > 0);
+    }
 }

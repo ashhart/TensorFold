@@ -67,7 +67,7 @@ pub fn main(init: std.process.Init) !u8 {
     const layers = [_]usize{ train.keepLow(e.g.layers), 23, 31, e.g.layers - 2 };
     var push: [D]f32 = undefined;
     var dir: [D]f32 = undefined;
-    var check: qwen.learn_direction.Case = .{ .t = t, .sq = sq, .push = &push, .dir = &dir, .label = "owned 27B", .sink_fractions = @import("qwen35_gradient.zig").fractions(0) };
+    var check: qwen.learn_direction.Case = .{ .t = t, .sq = sq, .push = &push, .dir = &dir, .label = "owned 27B" };
     try qwen.learn_direction.run(&check, &rows, &layers);
     return 0;
 }

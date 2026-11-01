@@ -18,21 +18,28 @@ pub const Case = struct {
     push: []f32,
     dir: []f32,
     label: []const u8,
-    sink_fractions: [3]f64 = .{ 0.002, 0.004, 0.008 },
 
     fn sample(v: *Case, layer: usize, step: f64) !f64 {
-        var losses: [6][2]f64 = undefined;
+        var losses: [2]f64 = undefined;
         defer @memset(v.t.deltaAt(0, 0, layer), 0);
-        for (&losses, 1..) |*pair, m| for ([_]f64{ -1, 1 }, pair) |sign, *loss| {
-            const x = sign * @as(f64, @floatFromInt(m)) * step;
-            for (v.t.deltaAt(0, 0, layer), v.dir) |*out, d| out.* = @floatCast(x * d);
+        for ([_]f64{ -1, 1 }, &losses) |sign, *loss| {
+            for (v.t.deltaAt(0, 0, layer), v.dir) |*out, d| out.* = @floatCast(sign * step * d);
             var result: [1]train.Result = undefined;
             try v.t.pass(&.{v.sq}, .loss, turn, &result);
             loss.* = result[0].loss;
-            if (!std.math.isFinite(loss.*)) return error.NonfiniteLoss;
-            std.debug.print("SAMPLE {s} layer {d} row {d}: step {e:.12}, multiple {d}, sign {d:.0}, loss {d:.16}\n", .{ v.label, layer, v.sq.nudge.rows[0], step, m, sign, loss.* });
-        };
-        return gradient.slope(losses, step);
+            std.debug.print("SAMPLE {s} layer {d} row {d}: step {e:.16}, sign {d:.0}, loss {e:.16}\n", .{ v.label, layer, v.sq.nudge.rows[0], step, sign, loss.* });
+        }
+        return gradient.central(losses, step);
+    }
+
+    fn report(v: *Case, row: usize, layer: usize, slopes: [6]f64, length: f64) gradient.Verdict {
+        for (gradient.fractions, slopes) |fraction, fd| {
+            std.debug.print("SLOPE {s} layer {d} row {d}: fraction {d:.7}, fd {e:.16}, grad {e:.16}\n", .{ v.label, layer, row, fraction, fd, length });
+        }
+        const judgment = gradient.evaluate(slopes, length);
+        const status: []const u8 = if (judgment.verdict == .pass) "PASS" else "FAIL";
+        std.debug.print("RESULT {s} layer {d} row {d}: {s}, estimate {e:.16}, g {e:.16}, relative {e:.16}\n", .{ v.label, layer, row, status, judgment.estimate, length, judgment.relative });
+        return judgment.verdict;
     }
 
     pub fn check(v: *Case, row: usize, layer: usize) !gradient.Verdict {
@@ -42,39 +49,26 @@ pub const Case = struct {
         @memcpy(v.push, v.t.pushAt(0, 0, layer));
         const length = @sqrt(dot(v.push, v.push));
         if (!std.math.isFinite(length) or length <= 0) {
-            std.debug.print("RESULT {s} layer {d} row {d}: BadGradient\n", .{ v.label, layer, row });
-            return .unresolved;
+            std.debug.print("DETAIL {s} layer {d} row {d}: BadGradient\n", .{ v.label, layer, row });
+            return v.report(row, layer, @splat(std.math.nan(f64)), length);
         }
         for (v.dir, v.push) |*out, d| out.* = @floatCast(d / length);
+        std.debug.print("DIRECTION {s} layer {d} row {d}: gradient {x:0>16}, unit {x:0>16}\n", .{ v.label, layer, row, std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(v.push)), std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(v.dir)) });
         var size: f64 = 0;
         for (v.t.residual(layer + 1, row)) |x| size += bf(x) * bf(x);
         if (!std.math.isFinite(size) or size <= 0) {
-            std.debug.print("RESULT {s} layer {d} row {d}: BadResidual\n", .{ v.label, layer, row });
-            return .unresolved;
+            std.debug.print("DETAIL {s} layer {d} row {d}: BadResidual\n", .{ v.label, layer, row });
+            return v.report(row, layer, @splat(std.math.nan(f64)), length);
         }
-        var errors: [3]f64 = undefined;
-        var unresolved = false;
-        for (if (row == 0) v.sink_fractions else [3]f64{ 0.002, 0.004, 0.008 }, &errors) |fraction, *relative| {
-            const fd = v.sample(layer, fraction * @sqrt(size)) catch |err| switch (err) {
-                error.NonfiniteLoss => {
-                    std.debug.print("RESULT {s} layer {d} row {d}: NonfiniteLoss\n", .{ v.label, layer, row });
-                    return .unresolved;
-                },
-                else => return err,
-            };
-            relative.* = @abs(fd - length) / length;
-            std.debug.print("SLOPE {s} layer {d} row {d}: fraction {d:.6}, fd {d:.8}, grad {d:.8}, relative {d:.5}\n", .{ v.label, layer, row, fraction, fd, length, relative.* });
-            if (!std.math.isFinite(relative.*)) unresolved = true;
-        }
-        std.mem.sort(f64, &errors, {}, std.sort.asc(f64));
-        std.debug.print("RESULT {s} layer {d} row {d}: median {d:.5}, worst {d:.5}\n", .{ v.label, layer, row, errors[1], errors[2] });
-        return if (unresolved) .unresolved else if (errors[1] >= 0.15 or errors[2] >= 0.15) .mismatch else .pass;
+        var slopes: [6]f64 = undefined;
+        for (gradient.fractions, &slopes) |fraction, *fd| fd.* = try v.sample(layer, fraction * @sqrt(size));
+        return v.report(row, layer, slopes, length);
     }
 };
 
 pub fn run(v: *Case, rows: []const usize, layers: []const usize) !void {
     const out = try gradient.run(v, rows, layers);
-    std.debug.print("SUMMARY {s}: {d} checks, {d} failed, {d} unresolved\n", .{ v.label, out.checks, out.failed, out.unresolved });
+    std.debug.print("SUMMARY {s}: {d} checks, {d} failed\n", .{ v.label, out.checks, out.failed });
     try out.finish();
     std.debug.print("PASS {d} {s} directional checks\n", .{ out.checks, v.label });
 }
