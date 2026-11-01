@@ -46,8 +46,6 @@ pub const proj_row = @max(gdn.proj_width, proj_n);
 pub const att_rows: usize = 256;
 /// Neurons a pocket's activations take a row (fn_back's max_pocket).
 pub const pocket_stride: usize = 128;
-/// Rows from which a read-out takes the prompt tiles: a shared round below that keeps the row kernels, the same bits.
-pub const readout_tile_rows: usize = 128;
 /// Prompt rows one fused attention launch takes (their selections staged att_rows at a time).
 pub const fused_rows: usize = 1024;
 /// Rows a pass holds at most unless asked for more.
@@ -549,3 +547,14 @@ test {
 }
 
 pub const Pg = @import("cuda_glue.zig").Pg;
+
+var readout_rows: ?usize = null;
+
+/// Rows from which a read-out takes the tiles (TF_FLASHNEXT_READOUT_ROWS, default 64, 0 never): same bits, only speed.
+pub fn readoutTileRows() usize {
+    if (readout_rows == null) {
+        const r = if (std.c.getenv("TF_FLASHNEXT_READOUT_ROWS")) |v| std.fmt.parseInt(usize, std.mem.span(v), 10) catch 64 else 64;
+        readout_rows = if (r == 0) std.math.maxInt(usize) else r;
+    }
+    return readout_rows.?;
+}
