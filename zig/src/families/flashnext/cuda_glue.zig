@@ -16,7 +16,7 @@ fn oneSmem() u32 {
     return (tile_heads + 32) * (tile_head_dim + 8) * 2 + tile_heads * (32 + 8) * 2;
 }
 /// Rows up to which attention reads the next tile ahead (fewer blocks, so latency, not occupancy, sets the time).
-const ahead_rows = 16;
+pub const ahead_rows = 16;
 
 fn int(x: usize) c_int {
     return @intCast(x);
@@ -68,6 +68,12 @@ const Fns = struct {
     pool_media_paged: cuda.Function,
     scores_paged: cuda.Function,
     chunks_ahead_paged: cuda.Function,
+    /// A shared round's lanes in one launch a kernel (flashnext_attn_lanes.cuh, TF_FLASHNEXT_ATTN_LANES=1).
+    prep_lanes: cuda.Function,
+    pool_lanes: cuda.Function,
+    scores_lanes: cuda.Function,
+    chunks_lanes: cuda.Function,
+    merge_lanes: cuda.Function,
     chunks_one_paged: cuda.Function,
     fused_paged: cuda.Function,
 };
@@ -154,6 +160,11 @@ pub const Glue = struct {
             .pool_media_paged = try g.attn.function("fn_qsa_pool_media_paged"),
             .scores_paged = try g.attn.function("fn_qsa_scores_paged"),
             .chunks_ahead_paged = try g.attn.function("fn_attn_chunks_ahead_paged"),
+            .prep_lanes = try g.attn.function("fn_attn_prep_lanes"),
+            .pool_lanes = try g.attn.function("fn_qsa_pool_lanes"),
+            .scores_lanes = try g.attn.function("fn_qsa_scores_lanes"),
+            .chunks_lanes = try g.attn.function("fn_attn_chunks_lanes"),
+            .merge_lanes = try g.attn.function("fn_attn_merge_lanes"),
             .chunks_one_paged = try g.attn.function("fn_attn_chunks_one_paged"),
             .fused_paged = try g.attn.function("fn_attn_fused_paged"),
         };
@@ -162,6 +173,7 @@ pub const Glue = struct {
         try g.f.chunks_one.allowDynamicShared(oneSmem());
         try g.f.fused.allowDynamicShared(oneSmem());
         try g.f.chunks_ahead_paged.allowDynamicShared(chunkSmem(2));
+        try g.f.chunks_lanes.allowDynamicShared(chunkSmem(2));
         try g.f.chunks_one_paged.allowDynamicShared(oneSmem());
         try g.f.fused_paged.allowDynamicShared(oneSmem());
         return g;
@@ -291,6 +303,56 @@ pub const Glue = struct {
         if (pg.pt != 0) return error.RowShape; // pages hold the tiles' four indexer heads only
         ints(&a, &.{ nb, wt.index_heads, wt.index_ratio, wt.index_top });
         try go(g.f.scores, s, .{ rows, cdiv(blocks, 64), 1 }, 256, 0, &a);
+    }
+
+    // ---- a shared round's lanes in one launch (flashnext_attn_lanes.cuh): lp [lane][4] addresses, li the ints
+
+    /// attnPrep over the round's `rows` rows, each into its lane's caches at its lane's positions.
+    pub fn attnPrepLanes(g: *const Glue, s: cuda.Stream, proj: u64, lp: u64, li: u64, q_scale: u64, k_scale: u64, i_scale: u64, inv: u64, q: u64, iq: u64, eps: f32, rows: usize) !void {
+        if (wt.head_dim != tile_head_dim) return error.RowShape;
+        var a: cuda.Args = .{};
+        ptrs(&a, &.{ proj, lp, li, q_scale, k_scale, i_scale, inv, q, iq });
+        a.add(eps);
+        ints(&a, &.{ wt.proj_n, wt.q_heads, wt.kv_heads, wt.index_heads, wt.index_dim, wt.half });
+        try go(g.f.prep_lanes, s, .{ rows, wt.q_heads + wt.kv_heads + wt.index_heads + 1, 1 }, tile_head_dim, 0, &a);
+    }
+
+    /// qsaPool for `lanes` lanes of up to `max_rows` rows each.
+    pub fn qsaPoolLanes(g: *const Glue, s: cuda.Stream, lp: u64, li: u64, k_scale: u64, inv: u64, eps: f32, lanes: usize, max_rows: usize) !void {
+        var a: cuda.Args = .{};
+        ptrs(&a, &.{ lp, li, k_scale, inv });
+        a.add(eps);
+        ints(&a, &.{ wt.index_dim, wt.half, wt.index_ratio });
+        try go(g.f.pool_lanes, s, .{ max_rows / wt.index_ratio + 2, lanes, 1 }, wt.index_dim, 0, &a);
+    }
+
+    /// qsaScores (four indexer heads) for `lanes` lanes, each lane's rows at its first row of sc, rows nb apart.
+    pub fn qsaScoresLanes(g: *const Glue, s: cuda.Stream, iq: u64, lp: u64, li: u64, sc: u64, nb: usize, lanes: usize, max_rows: usize, max_blocks: usize) !void {
+        if (wt.index_dim != 128 or wt.index_heads != 4) return error.RowShape;
+        var a: cuda.Args = .{};
+        ptrs(&a, &.{ iq, lp, li, sc });
+        ints(&a, &.{ nb, wt.index_ratio, wt.index_top });
+        try go(g.f.scores_lanes, s, .{ cdiv(max_rows, 8), cdiv(max_blocks, 256), lanes }, 256, 0, &a);
+    }
+
+    /// attnChunks (sparse, the next tile ahead) over the round's rows, up to `chunks` chunks a row.
+    pub fn attnChunksLanes(g: *const Glue, s: cuda.Stream, q: u64, lp: u64, li: u64, po: u64, pm: u64, pl: u64, ids: u64, nk: u64, sparse: u64, rows: usize, kv: usize, chunks: usize) !void {
+        const group = wt.q_heads / kv;
+        if (group > tile_heads) return error.RowShape;
+        var a: cuda.Args = .{};
+        ptrs(&a, &.{ q, lp, li, po, pm, pl, ids, nk, sparse });
+        ints(&a, &.{ wt.q_heads, kv, group, 512, wt.nch });
+        a.add(@as(f32, 0.0625));
+        ints(&a, &.{ wt.index_idw, 1 });
+        try go(g.f.chunks_lanes, s, .{ rows, kv, chunks }, 128, chunkSmem(2), &a);
+    }
+
+    /// attnMerge (sparse) over the round's rows.
+    pub fn attnMergeLanes(g: *const Glue, s: cuda.Stream, po: u64, pm: u64, pl: u64, li: u64, out: u64, nk: u64, sparse: u64, rows: usize, kv: usize) !void {
+        var a: cuda.Args = .{};
+        ptrs(&a, &.{ po, pm, pl, li, out, nk, sparse });
+        ints(&a, &.{ wt.q_heads, kv, wt.q_heads / kv, 512, wt.nch, 1 });
+        try go(g.f.merge_lanes, s, .{ rows, wt.q_heads, 1 }, tile_head_dim, 0, &a);
     }
 
     pub fn hcNormalize(g: *const Glue, s: cuda.Stream, h: u64, pss: u64, scale: u64, out: u64, eps: f32, rows: usize, dims: usize, streams: usize) !void {

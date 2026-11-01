@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on CUDA: `TF_FLASHNEXT_ATTN_LANES=1` (off by default) runs a shared decode round's attention in one launch a kernel, with each row's caches and position in a table uploaded once a round, instead of a launch per stream. Replies are the same tokens; the kernels are bit-equal to the per-stream launches (`tf-cuda-test flashnext-attn-lanes`).
+- `--slide` on a checkpoint whose family doesn't learn on that backend now stops before loading with "`--slide`: <model type> checkpoints do not learn on <backend> yet", on CUDA, Metal, HIP and XPU, instead of serving and learning nothing. Metal learners register by family, as CUDA's do, and read their widths from the family's Living Weights description, so a new family's learner plugs in without editing the Metal host.
 - Lane rounds count the time each stream spends in grammar mask fills, per round and per reply, reported with the round metrics; nothing is read when no stream is constrained, and behaviour is unchanged (part of #1455).
 
 - CUDA tensor parallel: a rank that cannot bind its liveness port (`NCCL_COMM_ID`'s port + 1, often held by an earlier server still exiting) says so, as do a rank that never arrives and a failed accept, instead of reporting a generic "glue kernels" error (fixes #1761).

@@ -238,10 +238,9 @@ __device__ __forceinline__ int fn_block_scan(int v, int* warp_sums, int* total) 
 }
 
 // attention._select and _select_tiles, a row a block: a row past `top` complete blocks lists the best, then its tail.
-extern "C" __global__ void __launch_bounds__(1024) fn_qsa_select(const float* __restrict__ sc,
-                                                                 const int* __restrict__ pos0, int* __restrict__ ids,
-                                                                 int* __restrict__ nkr, int* __restrict__ spr, int nb,
-                                                                 int idw, int top, int ratio) {
+__device__ __forceinline__ void fn_qsa_select_body(const float* __restrict__ sc, const int* __restrict__ pos0,
+                                                   int* __restrict__ ids, int* __restrict__ nkr, int* __restrict__ spr,
+                                                   int nb, int idw, int top, int ratio) {
     __shared__ int hist[256];
     __shared__ int warp_sums[32];
     __shared__ uint32_t cut_s;
@@ -311,6 +310,22 @@ extern "C" __global__ void __launch_bounds__(1024) fn_qsa_select(const float* __
         nkr[r] = top * ratio + end - ratio * complete;
         spr[r] = 1;
     }
+}
+
+extern "C" __global__ void __launch_bounds__(1024) fn_qsa_select(const float* __restrict__ sc,
+                                                                 const int* __restrict__ pos0, int* __restrict__ ids,
+                                                                 int* __restrict__ nkr, int* __restrict__ spr, int nb,
+                                                                 int idw, int top, int ratio) {
+    fn_qsa_select_body(sc, pos0, ids, nkr, spr, nb, idw, top, ratio);
+}
+
+// fn_qsa_select over a shared round's rows in one launch: each row reads its lane's position from LI.
+extern "C" __global__ void __launch_bounds__(1024) fn_qsa_select_lanes(const float* __restrict__ sc,
+                                                                       const int* __restrict__ LI, int* __restrict__ ids,
+                                                                       int* __restrict__ nkr, int* __restrict__ spr, int nb,
+                                                                       int idw, int top, int ratio) {
+    constexpr int MAX = 32;
+    fn_qsa_select_body(sc, LI + LI[4 * MAX + blockIdx.x], ids, nkr, spr, nb, idw, top, ratio);
 }
 
 // Training or a live pocket requests the ordered FP32 expert sum.

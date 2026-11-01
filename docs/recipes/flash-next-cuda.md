@@ -234,6 +234,13 @@ On one GB10 with `nvidia/Qwen3.8-Flash-Next-FP4-Local` and
 4,096 rows took most of 8,192's gain for 2.25 GiB instead of 5.86 GiB. A solo pass lasts about 1.9 s at 4,096 rows
 and about 3.8 s at 8,192: that is the longest a request arriving during one waits before its own prompt starts.
 
+### One-launch attention
+
+`TF_FLASHNEXT_ATTN_LANES=1` runs a shared decode round's attention in one launch a kernel: each row finds its stream's
+caches and position in a table uploaded once a round, in place of a launch per stream. It applies to two to 32 streams
+of up to 16 rows each, text on contiguous caches, on our own glue; page-table KV, media and captured sets keep the
+per-stream launches. The bytes equal the per-stream launches': `tf-cuda-test flashnext-attn-lanes` compares them.
+
 ## Not yet
 
 - The dense projections run a copy of the Python engine's group-32 lane matmul (`qmm.cu`); the core's `qmm_group` and

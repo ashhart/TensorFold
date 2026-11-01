@@ -47,6 +47,10 @@ pub const att_rows: usize = 256;
 pub const pocket_stride: usize = 128;
 /// Prompt rows one fused attention launch takes (their selections staged att_rows at a time).
 pub const fused_rows: usize = 1024;
+/// Lanes one attention launch takes at once (fn_lanes MAX); the table: [lane][4] cache addresses, ints, row lanes.
+pub const attn_lanes: usize = 32;
+pub const lanes_ptrs: usize = (wt.layers_n / 4) * attn_lanes * 4 * 8;
+pub const lanes_bytes: usize = lanes_ptrs + (4 * attn_lanes + att_rows) * 4;
 /// Rows a pass holds at most unless asked for more.
 pub const default_chunk: usize = 1536;
 /// The most rows TF_FLASHNEXT_CHUNK may ask for (the largest measured pass; its scratch is about 13 GiB more).
@@ -230,6 +234,8 @@ pub const Scratch = struct {
     qids: u64 = 0,
     qnk: u64 = 0,
     qspr: u64 = 0,
+    /// A shared round's lane table (lanes_bytes) for its one-launch attention.
+    lanes_tab: u64 = 0,
     ao: u64 = 0,
     gated: u64 = 0,
     gxs_attn: u64 = 0,
@@ -276,11 +282,12 @@ pub const Scratch = struct {
     }
 
     /// Byte offsets of the staged ids, positions, n-gram rows and their sums in `host`, and its length.
-    fn hostAt(cap: usize) [5]usize {
+    fn hostAt(cap: usize) [6]usize {
         const pos = std.mem.alignForward(usize, cap * 4, 16);
         const emb = pos + (cap + 1) * 16;
         const xs = emb + cap * dims * 2;
-        return .{ 0, pos, emb, xs, xs + cap * (dims / 32) * 4 };
+        const tab = std.mem.alignForward(usize, xs + cap * (dims / 32) * 4, 16);
+        return .{ 0, pos, emb, xs, tab, tab + lanes_bytes };
     }
 
     /// Waits until the last pass's uploads have read `host` (they are queued behind its kernels), so it may change.
@@ -305,6 +312,10 @@ pub const Scratch = struct {
     pub fn hostPos(s: *const Scratch, n: usize) []i32 {
         return @alignCast(std.mem.bytesAsSlice(i32, s.host.?.bytes[hostAt(s.cap)[1]..][0 .. n * 4]));
     }
+    /// The staged lane table (lanes_bytes).
+    pub fn hostLanes(s: *const Scratch) []u8 {
+        return s.host.?.bytes[hostAt(s.cap)[4]..][0..lanes_bytes];
+    }
     pub fn hostEmb(s: *const Scratch, n: usize) []u16 {
         return @alignCast(std.mem.bytesAsSlice(u16, s.host.?.bytes[hostAt(s.cap)[2]..][0 .. n * dims * 2]));
     }
@@ -326,7 +337,7 @@ pub const Scratch = struct {
         n += cap * (2 * gdn.nk * gdn.dk + 2 * gdn.nv) * 4;
         n += cap * q_heads * head_dim * 2 + cap * index_heads * index_dim * 2;
         n += att_rows * nch * q_heads * (head_dim + 2) * 4 + cap * out_k * 2 * 2 + cap * (out_k / 32) * 4;
-        n += fused_rows * (idw + 2) * 4;
+        n += fused_rows * (idw + 2) * 4 + lanes_bytes;
         n += cap * (experts_n + 1) * 4 + pairs * 4 * 2 + pairs * 4 + items * 3 * 4 + 8 + pairs * 4 + nblk * (experts_n + 1) * 4;
         n += cap * moe_w * 6 + cap * dims * 4;
         n += pairs * moe_w * 2 + pairs * dims * 4 + cap * dims * 2;
@@ -380,6 +391,7 @@ pub const Scratch = struct {
         s.qids = try s.add(gpa, d, fused_rows * idw * 4);
         s.qnk = try s.add(gpa, d, fused_rows * 4);
         s.qspr = try s.add(gpa, d, fused_rows * 4);
+        s.lanes_tab = try s.add(gpa, d, lanes_bytes);
         s.ao = try s.add(gpa, d, cap * out_k * 2);
         s.gated = try s.add(gpa, d, cap * out_k * 2);
         s.gxs_attn = try s.add(gpa, d, cap * (out_k / 32) * 4);
@@ -417,7 +429,7 @@ pub const Scratch = struct {
         s.dummy = try s.add(gpa, d, 4096);
         try s.bufs.items[s.bufs.items.len - 1].fill8(0, stream.handle);
         try stream.synchronize();
-        s.host = try cuda.HostBuffer.alloc(d, hostAt(cap)[4]);
+        s.host = try cuda.HostBuffer.alloc(d, hostAt(cap)[5]);
         s.staging = .{ .q = .{ .stream = stream, .event = try cuda.Event.init(d, false) } };
         return s;
     }
