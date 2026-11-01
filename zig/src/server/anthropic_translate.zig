@@ -61,7 +61,10 @@ fn document(cx: *Cx, block: Value) errors.Refused!Value {
         if (!std.mem.eql(u8, media, "application/pdf")) return cx.refuse("unsupported document media_type; only application/pdf is supported");
         file_data = try std.fmt.allocPrint(a, "data:{s};base64,{s}", .{ media, try string(cx, source.get("data"), "document.source.data", false) });
     } else if (source.typeIs("url")) {
-        file_data = try string(cx, source.get("url"), "document.source.url", false);
+        const u = try string(cx, source.get("url"), "document.source.url", false);
+        if (!std.ascii.startsWithIgnoreCase(std.mem.trim(u8, u, " \t\r\n"), "data:"))
+            return cx.refuse("URLs are not accepted for PDF inputs; send inline base64 or a data:application/pdf;base64,... URL");
+        file_data = u;
     } else return cx.refuse("document.source.type must be base64 or url; file IDs are unsupported");
     const inner = try json.newObject(a);
     try inner.put(a, "file_data", .{ .string = file_data });
@@ -315,4 +318,15 @@ pub fn translate(cx: *Cx, body: Value, count: bool) errors.Refused!Value {
         try chat.put(a, "thinking_budget", thinking.get("budget_tokens").?);
     }
     return .{ .object = chat };
+}
+
+test "document block refuses remote url source" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cx: Cx = .{ .a = arena.allocator() };
+    const body = (try json.parse(cx.a,
+        \\{"model": "m", "max_tokens": 16, "messages": [{"role": "user", "content": [{"type": "document", "source": {"type": "url", "url": "https://example.com/doc.pdf"}}]}]}
+    )).ok;
+    try std.testing.expectError(error.Refused, translate(&cx, body, false));
+    try std.testing.expect(std.mem.indexOf(u8, cx.message, "URLs are not accepted") != null);
 }

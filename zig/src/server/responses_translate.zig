@@ -68,6 +68,11 @@ fn content(cx: *Cx, c: ?Value) errors.Refused!Value {
                 if (part.get("file_id")) |v| try f.put(a, "file_id", v);
                 break :blk f;
             };
+            if ((Value{ .object = inner }).strField("url") orelse (Value{ .object = inner }).strField("file_url")) |u| {
+                const trimmed = std.mem.trim(u8, u, " \t\r\n");
+                if (trimmed.len > 0 and !std.ascii.startsWithIgnoreCase(trimmed, "data:"))
+                    return cx.refuse("URLs are not accepted for PDF inputs; send inline base64 or a data:application/pdf;base64,... URL");
+            }
             const p = try json.newObject(a);
             try p.put(a, "type", .{ .string = "file" });
             try p.put(a, "file", .{ .object = inner });
@@ -362,4 +367,15 @@ pub fn translate(cx: *Cx, body: Value, history: anytype) errors.Refused!Request 
     try echo.put(a, "user", body.get("user") orelse .null);
     try echo.put(a, "background", .{ .bool = false });
     return .{ .chat = .{ .object = chat }, .echo = echo, .added = added, .store = store, .stream = json.truthyField(body, "stream") };
+}
+
+test "input_file refuses remote file_url" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cx: Cx = .{ .a = arena.allocator() };
+    const items = (try json.parse(cx.a,
+        \\[{"role": "user", "content": [{"type": "input_file", "file_url": "https://example.com/doc.pdf"}]}]
+    )).ok.array;
+    try std.testing.expectError(error.Refused, messages(&cx, items));
+    try std.testing.expect(std.mem.indexOf(u8, cx.message, "URLs are not accepted") != null);
 }
