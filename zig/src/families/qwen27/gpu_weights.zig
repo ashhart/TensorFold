@@ -227,7 +227,7 @@ const Builder = struct {
                 }, g.hidden),
                 .out = try b.linear(&.{.{ .module = try Name.full(a, prefix, "linear_attn.out_proj"), .n = g.hidden, .w = w[@backingInt(M.out)], .span = s.outputRows() }}, g.gdnValueDim()),
                 .conv = try b.conv(try Name.full(a, prefix, "linear_attn.conv1d.weight"), g.conv_kernel, g.gdnQkvDim(), &convRows),
-                .a_log = try rowView(try b.tensor(try Name.full(a, prefix, "linear_attn.A_log"), .bf16, &.{g.v_heads}), s.valueRows()),
+                .a_log = try rowView(try decayLog(try b.get(try Name.full(a, prefix, "linear_attn.A_log")), &.{g.v_heads}), s.valueRows()),
                 .dt = try rowView(try b.tensor(try Name.full(a, prefix, "linear_attn.dt_bias"), .bf16, &.{g.v_heads}), s.valueRows()),
                 .norm = try b.tensor(try Name.full(a, prefix, "linear_attn.norm.weight"), .bf16, &.{c.dv}),
             } },
@@ -281,6 +281,11 @@ fn rowView(t: Tensor, span: cfg.Span) !Tensor {
 fn checked(t: Tensor, dtype: cp.DType, shape: []const usize) !Tensor {
     if (t.dtype != dtype or t.rank != shape.len or !std.mem.eql(usize, t.shape[0..t.rank], shape)) return error.BadNativeTensor;
     return t;
+}
+
+/// A_log as stored: bf16, or f32 (mlx-vlm and mlx_lm conversions); the GDN kernels read either through weight_flags.
+fn decayLog(t: Tensor, shape: []const usize) !Tensor {
+    return checked(t, if (t.dtype == .f32) .f32 else .bf16, shape);
 }
 
 /// Graph from `checkpoint`; each Linear is staged, repacked, dropped. `s` is the rank's share, `local` from `global`.
@@ -348,4 +353,18 @@ test "repacked names the modules the graph reads only through owned copies" {
     try std.testing.expect(!repacked("language_model.model.layers.3.self_attn.q_norm.weight", 2));
     try std.testing.expect(!repacked("language_model.model.norm.weight", 2));
     try std.testing.expect(!repacked("language_model.model.layers.0.linear_attn.A_log", 2));
+}
+
+test "A_log loads in bf16 or in f32, as mlx-vlm conversions store it, and refuses other dtypes and shapes" {
+    var t: Tensor = .{ .buffer = undefined, .offset = 0, .bytes = 32 * 4, .dtype = .f32, .rank = 1 };
+    t.shape[0] = 32;
+    try std.testing.expectEqual(cp.DType.f32, (try decayLog(t, &.{32})).dtype);
+    t.dtype = .bf16;
+    t.bytes = 32 * 2;
+    try std.testing.expectEqual(cp.DType.bf16, (try decayLog(t, &.{32})).dtype);
+    t.dtype = .f16;
+    try std.testing.expectError(error.BadNativeTensor, decayLog(t, &.{32}));
+    t.dtype = .f32;
+    t.bytes = 32 * 4;
+    try std.testing.expectError(error.BadNativeTensor, decayLog(t, &.{48}));
 }
