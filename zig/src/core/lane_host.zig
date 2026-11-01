@@ -80,6 +80,7 @@ pub const LaneHost = struct {
     rounds: ?Rounds = null,
     pieces: std.ArrayList(Rounds.Piece) = .empty,
     share: fill.Share = .{}, // prompt work's share of wall time beside decoding streams (lane_host_fill.zig)
+    srpt: @import("lane_host_srpt.zig").Srpt = .{}, // TENSORFOLD_PREFILL_ORDER=srpt: less work left goes first
     decode_cap: bool = false, // --decode-share given by flag (the env never opts in): a chunk-invariant family may cap
     prefix: @import("lane_host_prefix.zig").Wait = .{}, // a request's wait for a cut another prompt is filling
     finals: std.ArrayList(usize) = .empty,
@@ -99,7 +100,7 @@ pub const LaneHost = struct {
     pub fn init(gpa: Allocator, io: std.Io, core: *lanes.Engine, info_: Info) LaneHost {
         var shown = info_.ofLanes();
         shown.draft_sources = shown.draft_sources.ofLanes(core.cfg, shown.lanes);
-        return .{ .gpa = gpa, .io = io, .core = core, .info_ = shown, .share = .withDecode(info_.decode_share), .decode_cap = info_.decode_share != null, .prefix = .fromEnv(), .pressure = .fromEnv() };
+        return .{ .gpa = gpa, .io = io, .core = core, .info_ = shown, .share = .withDecode(info_.decode_share), .decode_cap = info_.decode_share != null, .prefix = .fromEnv(), .pressure = .fromEnv(), .srpt = .fromEnv() };
     }
 
     pub fn start(h: *LaneHost) !void {
@@ -533,12 +534,18 @@ pub const LaneHost = struct {
             }
             h.unlock();
             const owed = h.share.debt_ns > 0; // a round is timed only while it pays a prompt step's debt down
-            const r0 = if (owed) std.Io.Clock.awake.now(h.io) else std.Io.Timestamp.zero;
+            const timed = owed or h.srpt.on; // srpt samples every round's time and tokens
+            const r0 = if (timed) std.Io.Clock.awake.now(h.io) else std.Io.Timestamp.zero;
+            const before = if (h.srpt.on) @import("lane_host_srpt.zig").emittedTotal(h.core.live.items) else 0;
             h.core.step() catch |e| {
                 ends.failRound(h, e);
                 continue;
             };
-            if (owed) h.share.rounded(@intCast(r0.durationTo(std.Io.Clock.awake.now(h.io)).toNanoseconds()));
+            if (timed) {
+                const ns: i64 = @intCast(r0.durationTo(std.Io.Clock.awake.now(h.io)).toNanoseconds());
+                if (owed) h.share.rounded(ns);
+                if (h.srpt.on) @import("lane_host_srpt.zig").round(&h.srpt, ns, h.core.live.items, before);
+            }
             ends.deliverPending(h);
             lone.reclaim(h);
         }
@@ -547,6 +554,7 @@ pub const LaneHost = struct {
 
 test {
     _ = @import("lane_host_decode_share_test.zig");
+    _ = @import("lane_host_srpt.zig");
 }
 test {
     _ = @import("lane_host_frame_test.zig");
