@@ -1,0 +1,293 @@
+{
+ "scope": "Existing post-RoPE baseline prompt captures against direct FP64/BF16 oracle, selected 17 cells previously containing native/MLX disjoint maxima; not final prompt-tile qualification; nominal fixture names can exceed actual encoded row count, which is reported per cell",
+ "accepted_threshold": null,
+ "fidelity_pass": null,
+ "cells": {
+  "_trimmed_list": {
+   "count": 17,
+   "sha256": "d7c68c084ca9b8616e0e0d7b4b2428a8291cd6bd2d849b45c730793884627e07",
+   "first": [
+    {
+     "rows": 257,
+     "vocabulary": 128000,
+     "top1_differences": 1,
+     "disjoint_maximum_sets": 0,
+     "relative_rms": 0.0259931724353837,
+     "maximum_absolute_error": 2.3125,
+     "differences": [
+      {
+       "row": 58,
+       "native_top": 3599,
+       "reference_top": 2292,
+       "native_maximum_set": [
+        3599
+       ],
+       "reference_maximum_set": [
+        2292,
+        3599
+       ],
+       "maximum_sets_overlap": true,
+       "native_margin": 0.375,
+       "reference_margin": 0.0,
+       "native_reference_contender_gap": 0.375,
+       "reference_native_contender_gap": 0.0
+      }
+     ],
+     "worst_rows": {
+      "_trimmed_list": {
+       "count": 20,
+       "sha256": "3ccf7ff882d65195a0d7b7f65f1e0073641db0b9d054f9c39bd93f4055e5f299",
+       "first": [
+        {
+         "row": 106,
+         "rms_error": 0.3824222834630468,
+         "maximum_absolute_error": 2.3125
+        },
+        {
+         "row": 82,
+         "rms_error": 0.30074669025232487,
+         "maximum_absolute_error": 1.609375
+        }
+       ],
+       "last": [
+        {
+         "row": 77,
+         "rms_error": 0.09738425343068764,
+         "maximum_absolute_error": 0.34375
+        }
+       ]
+      }
+     },
+     "worst_columns": {
+      "_trimmed_list": {
+       "count": 20,
+       "sha256": "30caf217b30f5c02c6179ddecf1a69bcb564f48d3e4e27d31d2f8585afa0a2fd",
+       "first": [
+        {
+         "column": 2789,
+         "rms_error": 0.19791373342423282,
+         "maximum_absolute_error": 2.3125
+        },
+        {
+         "column": 17913,
+         "rms_error": 0.18852943222159388,
+         "maximum_absolute_error": 2.0625
+        }
+       ],
+       "last": [
+        {
+         "column": 33006,
+         "rms_error": 0.15496943800268753,
+         "maximum_absolute_error": 1.66015625
+        }
+       ]
+      }
+     },
+     "accepted_threshold": null,
+     "fidelity_pass": null,
+     "cell": "1.7B-6-prose-257",
+     "phase": "prompt",
+     "native_logits_sha256": "2fb12160d203b843337c07b5a3e5b7a1f35de658857c3e06d3827c77dac1d001",
+     "reference_logits_sha256": "3f4c9736cbcbbb893519fa7d1e70e3953df7337e09c4d4764a642cc6e116c89f",
+     "token_fixture_sha256": "522ec0f7a7ef8481d2f5533e3962ddad1f418d4337b095282e40c096e2befb1d"
+    },
+    {
+     "rows": 481,
+     "vocabulary": 128000,
+     "top1_differences": 1,
+     "disjoint_maximum_sets": 0,
+     "relative_rms": 0.024320309575124863,
+     "maximum_absolute_error": 2.3125,
+     "differences": [
+      {
+       "row": 58,
+       "native_top": 3599,
+       "reference_top": 2292,
+       "native_maximum_set": [
+        3599
+       ],
+       "reference_maximum_set": [
+        2292,
+        3599
+       ],
+       "maximum_sets_overlap": true,
+       "native_margin": 0.375,
+       "reference_margin": 0.0,
+       "native_reference_contender_gap": 0.375,
+       "reference_native_contender_gap": 0.0
+      }
+     ],
+     "worst_rows": {
+      "_trimmed_list": {
+       "count": 20,
+       "sha256": "d9c1eb0ea949368664537761d9a1e96d0818ec8cf3e638ed44a0cdeb6fa4a56e",
+       "first": [
+        {
+         "row": 106,
+         "rms_error": 0.3824222834630468,
+         "maximum_absolute_error": 2.3125
+        },
+        {
+         "row": 82,
+         "rms_error": 0.30074669025232487,
+         "maximum_absolute_error": 1.609375
+        }
+       ],
+       "last": [
+        {
+         "row": 214,
+         "rms_error": 0.10219409674230935,
+         "maximum_absolute_error": 0.4375
+        }
+       ]
+      }
+     },
+     "worst_columns": {
+      "_trimmed_list": {
+       "count": 20,
+       "sha256": "3c0cc6aea45e742f24c20a41fa20eecbb3003ba61c370e68b19165ce8d34b054",
+       "first": [
+        {
+         "column": 2789,
+         "rms_error": 0.1578289865837652,
+         "maximum_absolute_error": 2.3125
+        },
+        {
+         "column": 17913,
+         "rms_error": 0.15538353652730102,
+         "maximum_absolute_error": 2.0625
+        }
+       ],
+       "last": [
+        {
+         "column": 8639,
+         "rms_error": 0.13764913746301133,
+         "maximum_absolute_error": 1.15625
+        }
+       ]
+      }
+     },
+     "accepted_threshold": null,
+     "fidelity_pass": null,
+     "cell": "1.7B-6-prose-513",
+     "phase": "prompt",
+     "native_logits_sha256": "b6c07fed3bdccf311a1a46b1b2dc3a5f3de069d0b0a433d679a25b41cfa15968",
+     "reference_logits_sha256": "3906de3fe32531a42940b5a11bb42bde5bfa5f7e574e65b1220e561aebe88f42",
+     "token_fixture_sha256": "4b9e533cc1948ee72c4231178ec3af21808d7542c97f35997bb9538161d9a4cb"
+    }
+   ],
+   "last": [
+    {
+     "rows": 513,
+     "vocabulary": 128000,
+     "top1_differences": 2,
+     "disjoint_maximum_sets": 0,
+     "relative_rms": 0.00937199471206947,
+     "maximum_absolute_error": 1.03125,
+     "differences": [
+      {
+       "row": 5,
+       "native_top": 440,
+       "reference_top": 334,
+       "native_maximum_set": [
+        440
+       ],
+       "reference_maximum_set": [
+        334,
+        440
+       ],
+       "maximum_sets_overlap": true,
+       "native_margin": 0.0625,
+       "reference_margin": 0.0,
+       "native_reference_contender_gap": 0.0625,
+       "reference_native_contender_gap": 0.0
+      },
+      {
+       "row": 33,
+       "native_top": 1579,
+       "reference_top": 2925,
+       "native_maximum_set": [
+        1579,
+        2925
+       ],
+       "reference_maximum_set": [
+        2925
+       ],
+       "maximum_sets_overlap": true,
+       "native_margin": 0.0,
+       "reference_margin": 0.0625,
+       "native_reference_contender_gap": 0.0,
+       "reference_native_contender_gap": 0.0625
+      }
+     ],
+     "worst_rows": {
+      "_trimmed_list": {
+       "count": 20,
+       "sha256": "c7eb19b07754ef4dd2cc6f9befd30c455d576d9ac2f73ce6ff9c0d19111f8e3f",
+       "first": [
+        {
+         "row": 477,
+         "rms_error": 0.11058203618233109,
+         "maximum_absolute_error": 0.25
+        },
+        {
+         "row": 461,
+         "rms_error": 0.10228833277998309,
+         "maximum_absolute_error": 0.6875
+        }
+       ],
+       "last": [
+        {
+         "row": 23,
+         "rms_error": 0.07232874153553556,
+         "maximum_absolute_error": 0.1875
+        }
+       ]
+      }
+     },
+     "worst_columns": {
+      "_trimmed_list": {
+       "count": 20,
+       "sha256": "c611ad7791b56c188fa597ba82b87f7e78e0338d06c6acc828ed72d54d904ca2",
+       "first": [
+        {
+         "column": 334,
+         "rms_error": 0.09123395835991276,
+         "maximum_absolute_error": 0.59375
+        },
+        {
+         "column": 10625,
+         "rms_error": 0.0874009612140456,
+         "maximum_absolute_error": 0.40625
+        }
+       ],
+       "last": [
+        {
+         "column": 16420,
+         "rms_error": 0.07075007746790489,
+         "maximum_absolute_error": 0.359375
+        }
+       ]
+      }
+     },
+     "accepted_threshold": null,
+     "fidelity_pass": null,
+     "cell": "VL-2B-8-reasoning-513",
+     "phase": "prompt",
+     "native_logits_sha256": "0fbe7f9ff161bf9b0961bd4d64b081f775dc51bb8eb72e7c1bcef7ac9bcbd582",
+     "reference_logits_sha256": "3abcad4537454a6995fc3a7a75fc74d47a0e148eb0f2e914ee9c46bc1fd9595a",
+     "token_fixture_sha256": "c8ce58a8d512375ea4635bc85d0ea8a235506aa56026087bda216ea61357a863"
+    }
+   ]
+  }
+ },
+ "rows": 5581,
+ "top1_differences": 37,
+ "disjoint_maximum_sets": 12,
+ "native_diagnostic_sha256": "67750e460820140f18649f3a6b93a9f379be152d5cb90d414a97bb339586b655",
+ "_trim": {
+  "note": "Raw capture replaced by counts, first/last items and SHA-256 of the canonical JSON of each trimmed list or string.",
+  "original_sha256": "7abcce70668e3d60b27ac1d7a60e199f84b5ca214b6a73ec0a65f75fbb057477",
+  "original_bytes": 119943
+ }
+}
