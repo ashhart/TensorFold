@@ -4,3 +4,4 @@
 #include "ngram.hpp"
 #include "indexer.hpp"
 #include "sparse.hpp"
+#include "sparse_lanes.hpp"

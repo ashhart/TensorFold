@@ -360,6 +360,7 @@ pub const Launcher = struct {
     pub const fn_idx_scores = flashnext.idxScores;
     pub const fn_idx_select = flashnext.idxSelect;
     pub const fn_sparse_attention = flashnext.sparseAttention;
+    pub const fn_sparse_attention_scalar = flashnext.sparseAttentionScalar;
     pub const tf_mamba_conv = mamba.tf_mamba_conv;
     pub const tf_mamba_dt = mamba.tf_mamba_dt;
     pub const tf_mamba_scan = mamba.tf_mamba_scan;

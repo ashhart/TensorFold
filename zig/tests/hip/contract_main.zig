@@ -18,6 +18,7 @@ const relu2_k = @import("contract_relu2.zig");
 const kv_k = @import("contract_kv_write.zig");
 const argmax_k = @import("contract_argmax.zig");
 const pair_k = @import("contract_relu2_pair.zig");
+const sparse_k = @import("contract_sparse_lanes.zig");
 
 const g = core.contract.gates;
 
@@ -145,6 +146,9 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     var pair = pair_k.Pair.init(a, &r, s, &l);
     defer pair.deinit();
     try kernels.append(a, pair.kernel());
+    var sparse = sparse_k.SparseLanes.init(a, &r, s, &l);
+    defer sparse.deinit();
+    try kernels.append(a, sparse.kernel());
     var t: g.Tally = .{};
     const t0 = ms(io);
     try g.runAll(a, kernels.items, 0x6b63, &t);
