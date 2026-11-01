@@ -284,6 +284,10 @@ fn laterBytes(h: *const Host) u64 {
 pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocator, why: *[]const u8) !*Host {
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
+    if (o.drafter) |d| _ = q.dflash.config.admit(gpa, io, dir, d) catch |err| {
+        why.* = try drafterRefusal(a, dir, d, err);
+        return err;
+    };
     const model = try q.model.Model.loadDeferred(gpa, io, dir, 128);
     errdefer model.deinit();
     var with = o;
@@ -293,6 +297,12 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     const h = try attach(gpa, io, model, null, with, a, why);
     h.owns_model = true;
     return h;
+}
+
+/// Why --drafter is refused before the target or the drafter loads.
+fn drafterRefusal(a: Allocator, dir: []const u8, drafter: []const u8, err: anyerror) ![]const u8 {
+    if (err == error.DraftForAnotherTarget) return std.fmt.allocPrint(a, "--drafter {s} drafts for another target: its width, vocabulary or tapped layers do not fit {s} (DraftForAnotherTarget)", .{ drafter, dir });
+    return std.fmt.allocPrint(a, "--drafter {s} is not a drafter the native Qwen engine serves for {s} ({s}): it takes z-lab/Qwen3.8-27B-DFlash2 as released, for Qwen3.8-27B", .{ drafter, dir, @errorName(err) });
 }
 
 /// A loaded model served as `open` serves one, `drafter` bound in place of `o.drafter`; both stay the caller's.
