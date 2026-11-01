@@ -24,7 +24,7 @@ fn registered(fault: bool) !void {
         @field(functions, name) = .{ .d = &d, .handle = null };
     const gpu: check.Gpu = .{ .d = &d, .ctx = &ctx, .gpa = t.allocator, .io = t.io };
     const stream: cuda.Stream = .{ .d = &d, .handle = null };
-    var controls = Controls.init(gpu, stream, functions, .{ .d = &d, .handle = null });
+    var controls = Controls.init(gpu, stream, functions, .{ .d = &d, .handle = null }, null);
     // Only descriptors are read: empty rigs own no allocations and no CUDA callback is invoked.
     if (fault) controls.lat.wrong_table = false;
     var kernels: std.ArrayList(g.Kernel) = .empty;

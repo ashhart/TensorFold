@@ -60,6 +60,8 @@ pub const Gather = struct {
     prev_rows: cuda.DeviceBuffer, // i32 [layers][cache_rows]: each layer's last decode call's rows
     prev_n: cuda.DeviceBuffer, // i32 [layers]
     cache: cuda.DeviceBuffer, // bf16 [layers][cache_rows][lw]
+    over: cuda.HostBuffer, // i32 in mapped host memory: set when a call picked more distinct rows than `cap`
+    over_dev: u64, // its device address
     cap: usize,
     row_bytes: usize,
     tags: [layers]u64 = @splat(0),
@@ -79,16 +81,30 @@ pub const Gather = struct {
         errdefer prev_rows.free();
         var prev_n = try cuda.DeviceBuffer.alloc(d, layers * 4);
         errdefer prev_n.free();
-        const cache = try cuda.DeviceBuffer.alloc(d, layers * cache_rows * row_bytes);
+        var cache = try cuda.DeviceBuffer.alloc(d, layers * cache_rows * row_bytes);
+        errdefer cache.free();
+        var over = try cuda.HostBuffer.allocMapped(d, 16);
+        errdefer over.free();
+        @memset(over.bytes, 0);
+        const over_dev = try over.device();
         try d.check(d.api.cuMemsetD32_v2(slot_of.ptr, 0xFFFF_FFFF, arena_rows), "cuMemsetD32");
         try d.check(d.api.cuMemsetD32_v2(prev_of.ptr, 0xFFFF_FFFF, arena_rows), "cuMemsetD32");
         try d.check(d.api.cuMemsetD32_v2(prev_n.ptr, 0, layers), "cuMemsetD32");
         std.log.info("kv host: {d} gather slots ({d} MiB), {d} MiB of row marks and a {d} MiB row cache on the device", .{ cap, cap * row_bytes >> 20, 2 * arena_rows * 4 >> 20, layers * cache_rows * row_bytes >> 20 });
-        return .{ .slot_of = slot_of, .list = list, .slots = slots, .n = n, .prev_of = prev_of, .prev_rows = prev_rows, .prev_n = prev_n, .cache = cache, .cap = cap, .row_bytes = row_bytes };
+        return .{ .slot_of = slot_of, .list = list, .slots = slots, .n = n, .prev_of = prev_of, .prev_rows = prev_rows, .prev_n = prev_n, .cache = cache, .over = over, .over_dev = over_dev, .cap = cap, .row_bytes = row_bytes };
     }
 
     pub fn deinit(g: *Gather) void {
-        inline for (.{ &g.slot_of, &g.list, &g.slots, &g.n, &g.prev_of, &g.prev_rows, &g.prev_n, &g.cache }) |b| b.free();
+        inline for (.{ &g.slot_of, &g.list, &g.slots, &g.n, &g.prev_of, &g.prev_rows, &g.prev_n, &g.cache, &g.over }) |b| b.free();
+    }
+
+    /// After a synchronize: refuses (and clears) a call since the last check whose distinct picks passed the slots.
+    pub fn check(g: *const Gather) !void {
+        const flag: *volatile i32 = @ptrCast(g.over.slice(i32).ptr);
+        if (flag.* == 0) return;
+        flag.* = 0;
+        std.log.err("kv host: a call picked more distinct rows than the gather's {d} slots", .{g.cap});
+        return error.GlmKvHostSlots;
     }
 
     /// Pages changed hands: no layer's cached rows may be used again.
@@ -116,7 +132,7 @@ pub const Gather = struct {
         const cap: c_int = @intCast(g.cap);
         const rv: c_int = @intCast(g.row_bytes / 16);
         try stream.d.check(stream.d.api.cuMemsetD32Async(g.n.ptr, 0, 1, stream.handle), "cuMemsetD32Async");
-        try launch(ops, stream, "tf_glm_kvh_mark", cdiv(total, 256), .{ tokens, counts, @as(c_int, @intCast(width)), @as(i64, @intCast(total)), g.slot_of.ptr, g.list.ptr, g.n.ptr, cap });
+        try launch(ops, stream, "tf_glm_kvh_mark", cdiv(total, 256), .{ tokens, counts, @as(c_int, @intCast(width)), @as(i64, @intCast(total)), g.slot_of.ptr, g.list.ptr, g.n.ptr, cap, g.over_dev });
         const l = layer orelse {
             try launch(ops, stream, "tf_glm_kvh_copy", cdiv(upper, 8), .{ lc, g.list.ptr, g.n.ptr, g.slots.ptr, rv, cap });
             try launch(ops, stream, "tf_glm_kvh_remap", cdiv(total, 256), .{ tokens, counts, @as(c_int, @intCast(width)), @as(i64, @intCast(total)), g.slot_of.ptr });
