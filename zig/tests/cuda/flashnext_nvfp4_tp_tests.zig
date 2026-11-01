@@ -1,4 +1,4 @@
-//! Intermediate-channel NVFP4 partitions: exact source cuts, owned upload and FP32 expert partials against FP64.
+//! Expert-parallel NVFP4 ranks: whole experts a rank, fn_ep_picks, FP64 rows, and their sum equal to one GPU's bytes.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -10,7 +10,6 @@ const width = 64;
 const experts = 2;
 const slots = 3;
 const most = 17;
-const rank_width = width / 2;
 const fx = cuda.experts.Nvfp4Experts;
 
 const Source = struct {
@@ -77,11 +76,14 @@ pub fn run(gpu: check.Gpu) !void {
     var r = try rig.Rig.init(gpu, a, rng.random());
     defer r.deinit();
     var source = Source.init();
-    var left = try flash.modelopt_experts.loadShape(a, gpu.d, &source, "model.mlp", 2, 0, d, width, experts);
-    defer left.free();
-    var right = try flash.modelopt_experts.loadShape(a, gpu.d, &source, "model.mlp", 2, 1, d, width, experts);
-    defer right.free();
-    try check.expect(source.releases == 2 * experts * 3, "every source projection released after its owned rank cut", .{});
+    var whole = try flash.modelopt_experts.loadShape(a, gpu.d, &source, "model.mlp", 1, 0, d, width, experts);
+    defer whole.free();
+    const one_gpu_reads = source.releases;
+    var ranks: [2]flash.modelopt_experts.Owned = undefined;
+    for (&ranks, 0..) |*o, rank| o.* = try flash.modelopt_experts.loadShape(a, gpu.d, &source, "model.mlp", 2, rank, d, width, experts);
+    defer for (&ranks) |*o| o.free();
+    try check.expect(source.releases - one_gpu_reads == one_gpu_reads, "the two ranks read every expert once between them", .{});
+    for (ranks, 0..) |o, rank| try check.expect(o.first == rank and o.count == 1 and o.width == width, "rank {d} owns one whole expert", .{rank});
     const x = r.bfs(most * d, 0.125);
     const dx = try r.dev(std.mem.sliceAsBytes(x));
     const picks = try a.alloc(i32, most * slots);
@@ -91,6 +93,7 @@ pub fn run(gpu: check.Gpu) !void {
         picks[row * slots + 2] = experts; // shared expert is a separate format, skipped here
     }
     const dp = try r.dev(std.mem.sliceAsBytes(picks));
+    const local = try r.out(most * slots * 4);
     const plan: cuda.grouped.Plan = .{
         .members = try r.out(most * slots * 4),
         .items = try r.out((most * slots + experts + 1) * 12),
@@ -101,65 +104,71 @@ pub fn run(gpu: check.Gpu) !void {
     var mod = try cuda.Module.load(gpu.d, cuda.kernels.experts);
     defer mod.unload();
     const router = try cuda.grouped.Router.resolve(mod);
-    var prior: [2]?[]f32 = .{ null, null };
-    for ([_]usize{ 4, 1 }) |warps| {
-        var kernels = try fx.loadWarps(gpu.d, @intCast(try gpu.ctx.attribute(.multiprocessor_count)), warps);
-        defer kernels.unload();
-        const act = try r.out(most * slots * rank_width * 2);
-        const out = try r.out(most * slots * d * 4);
-        const combined = try a.alloc(f32, most * slots * d);
-        @memset(combined, 0);
-        const reference_full = try a.alloc(f64, combined.len);
-        @memset(reference_full, 0);
-        const reference_abs = try a.alloc(f64, combined.len);
-        @memset(reference_abs, 0);
-        for ([_]*const flash.modelopt_experts.Owned{ &left, &right }, 0..) |owned, rank| {
-            var all: []f32 = undefined;
-            for ([_]usize{ most, 1, 7 }) |rows| {
-                try gpu.d.check(gpu.d.api.cuMemsetD8Async(out, 0, most * slots * d * 4, r.s.handle), "cuMemsetD8Async");
-                const items = cuda.grouped.maxItems(rows * slots, experts + 1, 16);
-                try router.route(r.s, dp, rows * slots, experts + 1, 16, plan);
-                try kernels.run(r.s, .up, .{ .x = dx, .stride = d, .slots = slots }, owned.view(), plan, act, items, experts);
-                try kernels.run(r.s, .down_f32, .{ .x = act, .stride = rank_width }, owned.view(), plan, out, items, experts);
-                if (rows == most) all = try r.back(f32, out, most * slots * d) else try r.sameRows("NVFP4 rank output rows", f32, out, all[0 .. rows * slots * d]);
-            }
-            if (prior[rank]) |ref| try check.sameBytes("NVFP4 CTA grouping leaves every rank output byte-exact", std.mem.sliceAsBytes(all), std.mem.sliceAsBytes(ref)) else prior[rank] = all;
-            for (0..most) |row| for (0..slots) |slot| {
-                const e: usize = @intCast(picks[row * slots + slot]);
-                if (e == experts) {
-                    for (all[(row * slots + slot) * d ..][0..d]) |v| try check.expect(v == 0, "shared slot untouched by NVFP4", .{});
-                    continue;
-                }
-                var activation: [rank_width]f64 = undefined;
-                for (&activation, 0..) |*v, j| {
-                    const channel = rank * rank_width + j;
-                    var gate: f64 = 0;
-                    var up: f64 = 0;
-                    for (0..d) |k| {
-                        gate += rig.bf(x[row * d + k]) * weight(&source, e, 0, channel, k);
-                        up += rig.bf(x[row * d + k]) * weight(&source, e, 1, channel, k);
-                    }
-                    gate = rig.rbf(gate);
-                    up = rig.rbf(up);
-                    v.* = rig.rbf(rig.rbf(gate / (1 + @exp(-gate))) * up);
-                }
-                for (0..d) |j| {
-                    var want: f64 = 0;
-                    var mag: f64 = 0;
-                    for (activation, 0..) |v, k| {
-                        const term = v * weight(&source, e, 2, j, rank * rank_width + k);
-                        want += term;
-                        mag += @abs(term);
-                    }
-                    const at = (row * slots + slot) * d + j;
-                    try r.within("NVFP4 rank FP32 down", all[at], want, rig.sumTol(mag, rank_width) + 1e-6);
-                    combined[at] += all[at];
-                    reference_full[at] += want;
-                    reference_abs[at] += mag;
-                }
-            };
+    var batch = try cuda.Module.load(gpu.d, cuda.kernels.flashnext_batch);
+    defer batch.unload();
+    const ep_picks = try batch.function("fn_ep_picks");
+    var kernels = try fx.loadWarps(gpu.d, @intCast(try gpu.ctx.attribute(.multiprocessor_count)), 4);
+    defer kernels.unload();
+    const act = try r.out(most * slots * width * 2);
+    const out = try r.out(most * slots * d * 4);
+    const pairs = most * slots;
+    // one GPU: both experts, global picks, the shared slot skipped
+    try gpu.d.check(gpu.d.api.cuMemsetD8Async(out, 0, pairs * d * 4, r.s.handle), "cuMemsetD8Async");
+    try router.route(r.s, dp, pairs, experts + 1, 16, plan);
+    try kernels.run(r.s, .up, .{ .x = dx, .stride = d, .slots = slots }, whole.view(), plan, act, cuda.grouped.maxItems(pairs, experts + 1, 16), experts);
+    try kernels.run(r.s, .down_f32, .{ .x = act, .stride = width }, whole.view(), plan, out, cuda.grouped.maxItems(pairs, experts + 1, 16), experts);
+    const one = try r.back(f32, out, pairs * d);
+    const summed = try a.alloc(f32, pairs * d);
+    @memset(summed, 0);
+    for (ranks, 0..) |o, rank| {
+        var args: cuda.Args = .{};
+        args.add(dp);
+        args.add(local);
+        for ([_]usize{ pairs, o.first, o.count }) |v| args.add(@as(i32, @intCast(v)));
+        try cuda.launch.launch(ep_picks, .{ .grid = .{ .x = 1 }, .block = .{ .x = 256 } }, r.s, &args);
+        const got_picks = try r.back(i32, local, pairs);
+        for (picks, got_picks) |g, l| {
+            const want: i32 = if (g >= o.first and g < o.first + o.count) g - @as(i32, @intCast(o.first)) else @intCast(o.count);
+            try check.expect(l == want, "fn_ep_picks maps global pick {d} to {d} on rank {d}, not {d}", .{ g, want, rank, l });
         }
-        for (combined, reference_full, reference_abs) |got, want, mag| try r.within("NVFP4 summed rank partials", got, want, rig.sumTol(mag, width) + 2e-6);
-        r.report("NVFP4 TP cuts: both intermediate halves, exact source reader and packing, independent FP64 reference, FP32 partials and untouched shared slot; rows 1/7/17 equal");
+        try gpu.d.check(gpu.d.api.cuMemsetD8Async(out, 0, pairs * d * 4, r.s.handle), "cuMemsetD8Async");
+        const skip: i32 = @intCast(o.count);
+        try router.route(r.s, local, pairs, o.count + 1, 16, plan);
+        try kernels.run(r.s, .up, .{ .x = dx, .stride = d, .slots = slots }, o.view(), plan, act, cuda.grouped.maxItems(pairs, o.count + 1, 16), skip);
+        try kernels.run(r.s, .down_f32, .{ .x = act, .stride = width }, o.view(), plan, out, cuda.grouped.maxItems(pairs, o.count + 1, 16), skip);
+        const all = try r.back(f32, out, pairs * d);
+        for (0..most) |row| for (0..slots) |slot| {
+            const e: usize = @intCast(picks[row * slots + slot]);
+            const at = (row * slots + slot) * d;
+            if (e == experts or e < o.first or e >= o.first + o.count) {
+                for (all[at..][0..d]) |v| try check.expect(@as(u32, @bitCast(v)) == 0, "a pair rank {d} does not own stays +0", .{rank});
+                continue;
+            }
+            var activation: [width]f64 = undefined;
+            for (&activation, 0..) |*v, j| {
+                var gate: f64 = 0;
+                var up: f64 = 0;
+                for (0..d) |k| {
+                    gate += rig.bf(x[row * d + k]) * weight(&source, e, 0, j, k);
+                    up += rig.bf(x[row * d + k]) * weight(&source, e, 1, j, k);
+                }
+                gate = rig.rbf(gate);
+                up = rig.rbf(up);
+                v.* = rig.rbf(rig.rbf(gate / (1 + @exp(-gate))) * up);
+            }
+            for (0..d) |j| {
+                var want: f64 = 0;
+                var mag: f64 = 0;
+                for (activation, 0..) |v, k| {
+                    const term = v * weight(&source, e, 2, j, k);
+                    want += term;
+                    mag += @abs(term);
+                }
+                try r.within("NVFP4 whole-expert FP32 down", all[at + j], want, rig.sumTol(mag, width) + 1e-6);
+            }
+        };
+        for (summed, all) |*s, v| s.* += v; // the all-reduce: one rank's row plus the other's +0
     }
+    try check.sameBytes("two expert-parallel ranks summed equal one GPU's bytes", std.mem.sliceAsBytes(summed), std.mem.sliceAsBytes(one));
+    r.report("NVFP4 expert parallel: whole experts a rank, fn_ep_picks' local ids, FP64 rows, untouched skipped pairs, and the ranks' sum byte-equal to one GPU");
 }
