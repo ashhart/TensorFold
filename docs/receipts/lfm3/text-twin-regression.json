@@ -1,0 +1,10 @@
+{
+  "scope": "Host/native/developer-tool regression after shared opt-in projection twin. No device/model qualification of this rebuilt binary is asserted.",
+  "source_commit": "5965e23d8e322275b8c813308c9d7edf72f001aa",
+  "command": "zig build native dev-tools test test-golden -Dcpu=apple_m1 --summary all",
+  "summary": "Build Summary: 721/721 steps succeeded; 7233/7278 tests passed (45 skipped)",
+  "native_binary_sha256": "0027180c77ef97cc3095c7596bd44aa05e9d3fe8ebe87abceb20123f515b627d",
+  "compiler": "Zig 0.17.0",
+  "host": "Apple M4 Pro, macOS 26.5.1",
+  "log_sha256": "89ddf8140264ee52b53be73ee0731252077cccd2f93f9c25e4adbd7c1bc6ee19"
+}

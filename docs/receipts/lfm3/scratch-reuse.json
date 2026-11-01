@@ -1,0 +1,173 @@
+{
+  "scope": "Private one-allocation bcx/act alias; local M4 Pro text and VL 4-bit correctness only",
+  "runtime_change": {
+    "file": "zig/src/families/lfm3/state.zig",
+    "baseline_sha256": "1161aea9174fd6a6dbecc09bfd26565459c9d7b8d1674ca06c7c78c1b0265517",
+    "candidate_sha256": "8a7083b1c43c75803596d441f20c5cfefb00820738adbcc65ffc6b043e647e10",
+    "patch_sha256": "3748e191f85ff8871df3fe108a836764ba6b269276f937169a565aed65aabba6",
+    "source_base": "Private GPU proof predates lifecycle92c64e96f; final applied public-source host/build check below combines lifecycle plus the exact same state alias. GPU binaries and final public build binaries are distinct artifacts."
+  },
+  "allocation": {
+    "method": "Same instrumentedMetal mock invokes actual baseline/candidateScratch.init withactualconfig.schedule,rows128;testingallocator checkslifetime. No mirroredallocationimplementation.",
+    "baseline": {
+      "owned_allocations": 34,
+      "requested_buffer_bytes": 63677056,
+      "joins": 34,
+      "leaves": 34,
+      "frees": 34,
+      "actual_exit": 0
+    },
+    "candidate": {
+      "owned_allocations": 33,
+      "requested_buffer_bytes": 62104192,
+      "joins": 33,
+      "leaves": 33,
+      "frees": 33,
+      "actual_exit": 0
+    },
+    "saved_bytes": 1572864,
+    "saved_allocations": 1,
+    "test_sources_sha256": {
+      "lfm3-scratch-alias-ownership-test.zig": "5bbd1fc7ae26ebcc3f72dfbdd1f243e84795f038c915abdd50bcc19f75022d2c",
+      "lfm3-scratch-alias-metal-mock.zig": "e4f52bcadfaf21d56116fe98d71f15d9033e718f0ecc28e82329f2cc4ba139c6"
+    },
+    "limits": "Allocation counts are requested-buffer bytes from the instrumented host allocator; actual 4-bit GPU correctness is recorded below. No physical-footprint or speed claim."
+  },
+  "saved_requested_buffer_bytes_at128rows": 1572864,
+  "build": {
+    "native_forward_exact": "65/65 steps succeeded",
+    "profile": "Build succeeded",
+    "clock_fields_discarded": true
+  },
+  "binaries": {
+    "zig-out/bin/tf-lfm3-forward": "160b350b19fc5c8f9273cb23d4cb2de649a8cdb4eca22f8318686ef7beeab2d5",
+    "zig-out/bin/tf-lfm3-exact": "addf6e1bd5e1a27e58f2a98104dd083ed9debe01efd85f3c34f650cb07df0463",
+    "zig-out/bin/tf-lfm3-profile": "d06ef0507b33b1ae3900e67eccd648bc2e4553c87b3de32d4189e370ab8db1fb",
+    "zig-out/native/bin/tensorfold-native": "da3157a08b0b7899d4c37ed74b0251b112f6f09bd3108032baa4c9d5f9a67507"
+  },
+  "models": [
+    {
+      "model": "LFM3-1.7B-MLX-4bit",
+      "state_passed": 68,
+      "state_failed": 0,
+      "logit_bytes": 65792000,
+      "logits_current_public_exact": true,
+      "logits_sha256": "f1dbd42c2556fcb05031a00b209c61fadee45e74ee1ff94628d4802479fcb518"
+    },
+    {
+      "model": "LFM3-VL-2B-MLX-4bit",
+      "state_passed": 68,
+      "state_failed": 0,
+      "logit_bytes": 65792000,
+      "logits_current_public_exact": true,
+      "logits_sha256": "a4dde0a00ee9acb294c2b5a791e7e73cd05c5d6904ffe171e439ad1b01e25c5d"
+    }
+  ],
+  "traces": [
+    {
+      "event": "trace_complete",
+      "model": "LFM3-1.7B",
+      "files": 620,
+      "bytes": 68474208,
+      "exact": true
+    },
+    {
+      "event": "trace_complete",
+      "model": "LFM3-VL-2B",
+      "files": 620,
+      "bytes": 68474208,
+      "exact": true
+    },
+    {
+      "event": "image_complete",
+      "rows": 90,
+      "image_rows": 70,
+      "trace_files": 930,
+      "exact": true,
+      "decoder_logit_bytes": 23040000,
+      "trace_bytes": 186747840
+    }
+  ],
+  "profile_identity": [
+    {
+      "event": "profile_identity",
+      "model": "LFM3-1.7B",
+      "mode": "stage",
+      "plain_profile_current_public_final_logits_equal": true,
+      "timing_fields_discarded": true
+    },
+    {
+      "event": "profile_identity",
+      "model": "LFM3-VL-2B",
+      "mode": "stage",
+      "plain_profile_current_public_final_logits_equal": true,
+      "timing_fields_discarded": true
+    }
+  ],
+  "lease": {
+    "path": "/tmp/tensorfold-model.lock",
+    "exclusive": true,
+    "same_alias_inode": true,
+    "single_model_admission_before_and_after_child": true,
+    "owned_children_exited_before_release": true,
+    "local_only": true
+  },
+  "scope_limits": [
+    "No 6/8-bit runs.",
+    "No speed, independent FP64 fidelity, or physical-footprint reduction claim.",
+    "Image test injects retained real-cat projected rows; vision tower itself is unchanged and was not rerun.",
+    "All timing fields from correctness tools are discarded."
+  ],
+  "evidence_sha256": {
+    "lfm3-scratch-alias-proof/LFM3-1.7B-MLX-4bit-state.log": "fca04ca0d1f4afdde25a037178a11177a62909f668eca86ed8923d47bc00c1f0",
+    "lfm3-scratch-alias-proof/events.json": "e6b6e0682e6badd3070ada9243bce39a7e3d24ed0eac87f949eb935a38476231",
+    "lfm3-scratch-alias-proof/LFM3-1.7B-MLX-4bit-combined-logits.log": "da6d8a43e75cd674009591a7a830d2907f6b8f558c0c494f40d1cc4178bd82dc",
+    "lfm3-scratch-alias-proof/complete.json": "ceb54aca0f65edf2a3ad310e66a956075b4c9881d5557bfca5f09ed5f29b7405",
+    "lfm3-scratch-alias-proof/LFM3-VL-2B-MLX-4bit-state.log": "e7ccee7df28d5c8188e225b2064bffb275ca94e835da1548dc912b0456ba16d5",
+    "lfm3-scratch-alias-proof/LFM3-VL-2B-MLX-4bit-public-logits.log": "da6d8a43e75cd674009591a7a830d2907f6b8f558c0c494f40d1cc4178bd82dc",
+    "lfm3-scratch-alias-proof/records.json": "38b3e5edcfa2b6db327578ab4a19d1064ab105d126d15c4526b1f44201185309",
+    "lfm3-scratch-alias-proof/LFM3-1.7B-old-trace.log": "790d8930bff73e6e081f6e535f57733e9ea8b951dc3cb473c9a309bba80cb2ba",
+    "lfm3-scratch-alias-proof/LFM3-1.7B-MLX-4bit-public-logits.log": "da6d8a43e75cd674009591a7a830d2907f6b8f558c0c494f40d1cc4178bd82dc",
+    "lfm3-scratch-alias-proof/LFM3-1.7B-new-trace.log": "790d8930bff73e6e081f6e535f57733e9ea8b951dc3cb473c9a309bba80cb2ba",
+    "lfm3-scratch-alias-proof/LFM3-VL-2B-new-trace.log": "790d8930bff73e6e081f6e535f57733e9ea8b951dc3cb473c9a309bba80cb2ba",
+    "lfm3-scratch-alias-proof/LFM3-VL-2B-MLX-4bit-combined-logits.log": "da6d8a43e75cd674009591a7a830d2907f6b8f558c0c494f40d1cc4178bd82dc",
+    "lfm3-scratch-alias-proof/LFM3-VL-2B-old-trace.log": "790d8930bff73e6e081f6e535f57733e9ea8b951dc3cb473c9a309bba80cb2ba",
+    "lfm3-scratch-alias-image-proof/LFM3-1.7B-profile.log": "d930bc329a5754114b8de4a5ef47a0674fcdfacc593b37007d7a073de2b6e1f4",
+    "lfm3-scratch-alias-image-proof/image-old.log": "aafffce9158d8f03ef1a53cabcbc801a169cf1f973d8a2faaf5cee07d5787444",
+    "lfm3-scratch-alias-image-proof/events.json": "4f708b7320dd227d9f17495f1f97d68ef7bab04592f1e58ad309d4b7acb28d57",
+    "lfm3-scratch-alias-image-proof/LFM3-VL-2B-profile.json": "382ada3c09848ebc0eb8c2d2db6c53eda087863ff9281b8daf1f7dd69c11b121",
+    "lfm3-scratch-alias-image-proof/LFM3-1.7B-profile.json": "2b29b7e287e1b5f917509f7a6e3bcf038c2c8de2e6fb634afe5446e63bdc6380",
+    "lfm3-scratch-alias-image-proof/LFM3-VL-2B-profile.log": "d930bc329a5754114b8de4a5ef47a0674fcdfacc593b37007d7a073de2b6e1f4",
+    "lfm3-scratch-alias-image-proof/image-new.log": "aafffce9158d8f03ef1a53cabcbc801a169cf1f973d8a2faaf5cee07d5787444"
+  },
+  "inputs": {
+    "code-257.npy": "96859365056d513a414e6eeef9d4a85bf72c3f9630d3e13a9ea0f57dd81b8bea",
+    "tokens.npy": "ab18390677209ae355cbc0d64e33f94856dc70264f01c8b94a18df310a7712e8",
+    "lfm3-real-cat-tokens.npy": "54c970db8c6ba82895cb2f18a48d397ea568ae885241129e9c5ee7dbbc91a24d",
+    "lfm3-real-cat-native.bf16": "ab2ac7db759e5c4a32fe7d60680ec47f7d1cbc5938fa7d8091bf4756bfeea4fc"
+  },
+  "combined_public_build": {
+    "base_commit": "92c64e96f56d1a7a68f8476362696b4419b973b9",
+    "command": "ZIG_GLOBAL_CACHE_DIR=$WRITABLE_CACHE zig build test-lfm3-host native tf-lfm3-forward tf-lfm3-exact --cache-dir $PUBLIC_CACHE --summary all",
+    "actual_exit": 0,
+    "steps_passed": 77,
+    "steps_total": 77,
+    "host_tests_passed": 44,
+    "host_tests_total": 44,
+    "jpeg_limitation": "Pinned libjpeg-turbo3.1.4.1 unavailable; JPEG pixel cases skipped, warning retained.",
+    "fmt_check": true,
+    "diff_check": true,
+    "lean_problems": 428,
+    "lean_new_problems": 0,
+    "state_source_sha256": "8a7083b1c43c75803596d441f20c5cfefb00820738adbcc65ffc6b043e647e10",
+    "backend_source_sha256": "4ed5d33b869dc4be0d82d406cff4abc0f65a63687c45d8b3aaa61e26361db233",
+    "binaries_sha256": {
+      "zig-out/native/bin/tensorfold-native": "aae2de20cec9698afa9c108a4f7de27b83e5695b61f45cbb5e3dc21c34f6fbb3",
+      "zig-out/bin/tf-lfm3-forward": "7b81ba7487d3c07625ea3c6be45e0e4ae475373b6797af3ac6aae0717aa78b14",
+      "zig-out/bin/tf-lfm3-exact": "6dda9934d296db6bc76147fba113848fdf22df0ae45d1ead56f827cc00eb290b"
+    },
+    "build_log_sha256": "2bacc236d342187ff20fdc4e1ce7a809e969af40da610c544ccfd36b4d2b4ddd",
+    "lean_log_sha256": "2aceae81fc338ffce3e33e5ec0a51b733e33eee717e102384f750bf41e808a01",
+    "gpu_rerun": false
+  }
+}

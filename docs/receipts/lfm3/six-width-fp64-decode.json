@@ -1,0 +1,769 @@
+{
+  "scope": "Actual one-row decode after 63-row teacher-forced history, all six quantizations; reference re-evaluates identical full history in FP64",
+  "binary_sha256": "e80a2a14c0d8ed20b62088d0d8b87be4beb5fed3eb1a7336b3b00f8ac5f74bee",
+  "fidelity_pass": null,
+  "cells": [
+    {
+      "rows": 1,
+      "vocabulary": 128000,
+      "top1_differences": 0,
+      "disjoint_maximum_sets": 0,
+      "relative_rms": 0.01665075641707762,
+      "maximum_absolute_error": 0.21875,
+      "differences": [],
+      "worst_rows": [
+        {
+          "row": 63,
+          "rms_error": 0.04319844149784029,
+          "maximum_absolute_error": 0.21875
+        }
+      ],
+      "worst_columns": [
+        {
+          "column": 48006,
+          "rms_error": 0.21875,
+          "maximum_absolute_error": 0.21875
+        },
+        {
+          "column": 30122,
+          "rms_error": 0.21197509765625,
+          "maximum_absolute_error": 0.21197509765625
+        },
+        {
+          "column": 3568,
+          "rms_error": 0.20703125,
+          "maximum_absolute_error": 0.20703125
+        },
+        {
+          "column": 42890,
+          "rms_error": 0.203125,
+          "maximum_absolute_error": 0.203125
+        },
+        {
+          "column": 6723,
+          "rms_error": 0.203125,
+          "maximum_absolute_error": 0.203125
+        },
+        {
+          "column": 3641,
+          "rms_error": 0.203125,
+          "maximum_absolute_error": 0.203125
+        },
+        {
+          "column": 7068,
+          "rms_error": 0.203125,
+          "maximum_absolute_error": 0.203125
+        },
+        {
+          "column": 38765,
+          "rms_error": 0.203125,
+          "maximum_absolute_error": 0.203125
+        },
+        {
+          "column": 30663,
+          "rms_error": 0.2001953125,
+          "maximum_absolute_error": 0.2001953125
+        },
+        {
+          "column": 116632,
+          "rms_error": 0.1953125,
+          "maximum_absolute_error": 0.1953125
+        },
+        {
+          "column": 20560,
+          "rms_error": 0.1953125,
+          "maximum_absolute_error": 0.1953125
+        },
+        {
+          "column": 20326,
+          "rms_error": 0.1953125,
+          "maximum_absolute_error": 0.1953125
+        },
+        {
+          "column": 12263,
+          "rms_error": 0.1953125,
+          "maximum_absolute_error": 0.1953125
+        },
+        {
+          "column": 469,
+          "rms_error": 0.1875,
+          "maximum_absolute_error": 0.1875
+        },
+        {
+          "column": 11460,
+          "rms_error": 0.1875,
+          "maximum_absolute_error": 0.1875
+        },
+        {
+          "column": 23796,
+          "rms_error": 0.1875,
+          "maximum_absolute_error": 0.1875
+        },
+        {
+          "column": 31233,
+          "rms_error": 0.1875,
+          "maximum_absolute_error": 0.1875
+        },
+        {
+          "column": 36584,
+          "rms_error": 0.1875,
+          "maximum_absolute_error": 0.1875
+        },
+        {
+          "column": 9178,
+          "rms_error": 0.1875,
+          "maximum_absolute_error": 0.1875
+        },
+        {
+          "column": 93833,
+          "rms_error": 0.1875,
+          "maximum_absolute_error": 0.1875
+        }
+      ],
+      "accepted_threshold": null,
+      "fidelity_pass": null,
+      "checkpoint": "LiquidAI/LFM3-1.7B-MLX-4bit",
+      "phase": "decode",
+      "prefilled_history": 63,
+      "current_row": 63,
+      "token_fixture_sha256": "cce7d631dcbf26f43abb6d551a62e51c06582f958a5b5be57b7b5e32e6760748",
+      "native_logits_sha256": "6d6828e56b463b0a09f9f559ec1251a21ff1445d53e67811dda0318185ce39ff",
+      "reference_full_logits_sha256": "6286092ef4d800dd2fefe310628c1a5270cc489f33c72a373010b02d38164023"
+    },
+    {
+      "rows": 1,
+      "vocabulary": 128000,
+      "top1_differences": 0,
+      "disjoint_maximum_sets": 0,
+      "relative_rms": 0.021845787266094638,
+      "maximum_absolute_error": 0.328125,
+      "differences": [],
+      "worst_rows": [
+        {
+          "row": 63,
+          "rms_error": 0.06023315568323548,
+          "maximum_absolute_error": 0.328125
+        }
+      ],
+      "worst_columns": [
+        {
+          "column": 20341,
+          "rms_error": 0.328125,
+          "maximum_absolute_error": 0.328125
+        },
+        {
+          "column": 35931,
+          "rms_error": 0.3203125,
+          "maximum_absolute_error": 0.3203125
+        },
+        {
+          "column": 43041,
+          "rms_error": 0.3125,
+          "maximum_absolute_error": 0.3125
+        },
+        {
+          "column": 8553,
+          "rms_error": 0.3125,
+          "maximum_absolute_error": 0.3125
+        },
+        {
+          "column": 35725,
+          "rms_error": 0.3125,
+          "maximum_absolute_error": 0.3125
+        },
+        {
+          "column": 6953,
+          "rms_error": 0.3125,
+          "maximum_absolute_error": 0.3125
+        },
+        {
+          "column": 15136,
+          "rms_error": 0.3125,
+          "maximum_absolute_error": 0.3125
+        },
+        {
+          "column": 12603,
+          "rms_error": 0.310546875,
+          "maximum_absolute_error": 0.310546875
+        },
+        {
+          "column": 9323,
+          "rms_error": 0.3046875,
+          "maximum_absolute_error": 0.3046875
+        },
+        {
+          "column": 7032,
+          "rms_error": 0.3046875,
+          "maximum_absolute_error": 0.3046875
+        },
+        {
+          "column": 94782,
+          "rms_error": 0.296875,
+          "maximum_absolute_error": 0.296875
+        },
+        {
+          "column": 23812,
+          "rms_error": 0.2939453125,
+          "maximum_absolute_error": 0.2939453125
+        },
+        {
+          "column": 36145,
+          "rms_error": 0.28125,
+          "maximum_absolute_error": 0.28125
+        },
+        {
+          "column": 93950,
+          "rms_error": 0.28125,
+          "maximum_absolute_error": 0.28125
+        },
+        {
+          "column": 117795,
+          "rms_error": 0.28125,
+          "maximum_absolute_error": 0.28125
+        },
+        {
+          "column": 52318,
+          "rms_error": 0.28125,
+          "maximum_absolute_error": 0.28125
+        },
+        {
+          "column": 94667,
+          "rms_error": 0.28125,
+          "maximum_absolute_error": 0.28125
+        },
+        {
+          "column": 53589,
+          "rms_error": 0.28125,
+          "maximum_absolute_error": 0.28125
+        },
+        {
+          "column": 58716,
+          "rms_error": 0.28125,
+          "maximum_absolute_error": 0.28125
+        },
+        {
+          "column": 32140,
+          "rms_error": 0.28125,
+          "maximum_absolute_error": 0.28125
+        }
+      ],
+      "accepted_threshold": null,
+      "fidelity_pass": null,
+      "checkpoint": "LiquidAI/LFM3-1.7B-MLX-6bit",
+      "phase": "decode",
+      "prefilled_history": 63,
+      "current_row": 63,
+      "token_fixture_sha256": "cce7d631dcbf26f43abb6d551a62e51c06582f958a5b5be57b7b5e32e6760748",
+      "native_logits_sha256": "e86739c46d55e1f137ac55c9e43119fda97914902334f12df9069907c1a0cab9",
+      "reference_full_logits_sha256": "badfeed6f4b81e8f448eb0bd1f523d8dc3f8891e56f0067fe170f566e87eb9e5"
+    },
+    {
+      "rows": 1,
+      "vocabulary": 128000,
+      "top1_differences": 0,
+      "disjoint_maximum_sets": 0,
+      "relative_rms": 0.03398969064458055,
+      "maximum_absolute_error": 0.35546875,
+      "differences": [],
+      "worst_rows": [
+        {
+          "row": 63,
+          "rms_error": 0.09125710667798623,
+          "maximum_absolute_error": 0.35546875
+        }
+      ],
+      "worst_columns": [
+        {
+          "column": 19987,
+          "rms_error": 0.35546875,
+          "maximum_absolute_error": 0.35546875
+        },
+        {
+          "column": 21929,
+          "rms_error": 0.34716796875,
+          "maximum_absolute_error": 0.34716796875
+        },
+        {
+          "column": 7600,
+          "rms_error": 0.34375,
+          "maximum_absolute_error": 0.34375
+        },
+        {
+          "column": 34767,
+          "rms_error": 0.34375,
+          "maximum_absolute_error": 0.34375
+        },
+        {
+          "column": 54720,
+          "rms_error": 0.34375,
+          "maximum_absolute_error": 0.34375
+        },
+        {
+          "column": 29199,
+          "rms_error": 0.34375,
+          "maximum_absolute_error": 0.34375
+        },
+        {
+          "column": 6143,
+          "rms_error": 0.33984375,
+          "maximum_absolute_error": 0.33984375
+        },
+        {
+          "column": 60109,
+          "rms_error": 0.3359375,
+          "maximum_absolute_error": 0.3359375
+        },
+        {
+          "column": 29486,
+          "rms_error": 0.3330078125,
+          "maximum_absolute_error": 0.3330078125
+        },
+        {
+          "column": 33211,
+          "rms_error": 0.328125,
+          "maximum_absolute_error": 0.328125
+        },
+        {
+          "column": 54050,
+          "rms_error": 0.328125,
+          "maximum_absolute_error": 0.328125
+        },
+        {
+          "column": 10936,
+          "rms_error": 0.328125,
+          "maximum_absolute_error": 0.328125
+        },
+        {
+          "column": 14054,
+          "rms_error": 0.322540283203125,
+          "maximum_absolute_error": 0.322540283203125
+        },
+        {
+          "column": 46076,
+          "rms_error": 0.3125,
+          "maximum_absolute_error": 0.3125
+        },
+        {
+          "column": 23955,
+          "rms_error": 0.3125,
+          "maximum_absolute_error": 0.3125
+        },
+        {
+          "column": 1985,
+          "rms_error": 0.3125,
+          "maximum_absolute_error": 0.3125
+        },
+        {
+          "column": 63853,
+          "rms_error": 0.3125,
+          "maximum_absolute_error": 0.3125
+        },
+        {
+          "column": 123494,
+          "rms_error": 0.3125,
+          "maximum_absolute_error": 0.3125
+        },
+        {
+          "column": 49094,
+          "rms_error": 0.3125,
+          "maximum_absolute_error": 0.3125
+        },
+        {
+          "column": 10534,
+          "rms_error": 0.3125,
+          "maximum_absolute_error": 0.3125
+        }
+      ],
+      "accepted_threshold": null,
+      "fidelity_pass": null,
+      "checkpoint": "LiquidAI/LFM3-1.7B-MLX-8bit",
+      "phase": "decode",
+      "prefilled_history": 63,
+      "current_row": 63,
+      "token_fixture_sha256": "cce7d631dcbf26f43abb6d551a62e51c06582f958a5b5be57b7b5e32e6760748",
+      "native_logits_sha256": "03d2ff5c67ec8bb02539d7fe526dd0bc4f0e9833a8d6474cd1174874fe79c905",
+      "reference_full_logits_sha256": "e890b65e52b7071b80f6052d520bca1b857466a6453a3b1fdc43df33ea6089eb"
+    },
+    {
+      "rows": 1,
+      "vocabulary": 128000,
+      "top1_differences": 0,
+      "disjoint_maximum_sets": 0,
+      "relative_rms": 0.030637681948585384,
+      "maximum_absolute_error": 0.193359375,
+      "differences": [],
+      "worst_rows": [
+        {
+          "row": 63,
+          "rms_error": 0.06189983119754214,
+          "maximum_absolute_error": 0.193359375
+        }
+      ],
+      "worst_columns": [
+        {
+          "column": 6095,
+          "rms_error": 0.193359375,
+          "maximum_absolute_error": 0.193359375
+        },
+        {
+          "column": 6049,
+          "rms_error": 0.1796875,
+          "maximum_absolute_error": 0.1796875
+        },
+        {
+          "column": 44706,
+          "rms_error": 0.17919921875,
+          "maximum_absolute_error": 0.17919921875
+        },
+        {
+          "column": 65418,
+          "rms_error": 0.17578125,
+          "maximum_absolute_error": 0.17578125
+        },
+        {
+          "column": 105864,
+          "rms_error": 0.171875,
+          "maximum_absolute_error": 0.171875
+        },
+        {
+          "column": 24030,
+          "rms_error": 0.171875,
+          "maximum_absolute_error": 0.171875
+        },
+        {
+          "column": 42266,
+          "rms_error": 0.171875,
+          "maximum_absolute_error": 0.171875
+        },
+        {
+          "column": 3136,
+          "rms_error": 0.171875,
+          "maximum_absolute_error": 0.171875
+        },
+        {
+          "column": 47240,
+          "rms_error": 0.171875,
+          "maximum_absolute_error": 0.171875
+        },
+        {
+          "column": 1718,
+          "rms_error": 0.171875,
+          "maximum_absolute_error": 0.171875
+        },
+        {
+          "column": 40928,
+          "rms_error": 0.171875,
+          "maximum_absolute_error": 0.171875
+        },
+        {
+          "column": 61448,
+          "rms_error": 0.1640625,
+          "maximum_absolute_error": 0.1640625
+        },
+        {
+          "column": 108148,
+          "rms_error": 0.1640625,
+          "maximum_absolute_error": 0.1640625
+        },
+        {
+          "column": 30586,
+          "rms_error": 0.1640625,
+          "maximum_absolute_error": 0.1640625
+        },
+        {
+          "column": 53574,
+          "rms_error": 0.1640625,
+          "maximum_absolute_error": 0.1640625
+        },
+        {
+          "column": 12960,
+          "rms_error": 0.1640625,
+          "maximum_absolute_error": 0.1640625
+        },
+        {
+          "column": 97794,
+          "rms_error": 0.1640625,
+          "maximum_absolute_error": 0.1640625
+        },
+        {
+          "column": 33311,
+          "rms_error": 0.1640625,
+          "maximum_absolute_error": 0.1640625
+        },
+        {
+          "column": 27756,
+          "rms_error": 0.1640625,
+          "maximum_absolute_error": 0.1640625
+        },
+        {
+          "column": 97838,
+          "rms_error": 0.158203125,
+          "maximum_absolute_error": 0.158203125
+        }
+      ],
+      "accepted_threshold": null,
+      "fidelity_pass": null,
+      "checkpoint": "LiquidAI/LFM3-VL-2B-MLX-4bit",
+      "phase": "decode",
+      "prefilled_history": 63,
+      "current_row": 63,
+      "token_fixture_sha256": "cce7d631dcbf26f43abb6d551a62e51c06582f958a5b5be57b7b5e32e6760748",
+      "native_logits_sha256": "2103df493c16eaf3f7e13751dcf6c2f7bdbe9976f12fa84c6e1a7725053c411e",
+      "reference_full_logits_sha256": "f5c18f0b75b86711e663904ec4011913ee23bf76b565317e8741de74d5b23dd6"
+    },
+    {
+      "rows": 1,
+      "vocabulary": 128000,
+      "top1_differences": 0,
+      "disjoint_maximum_sets": 0,
+      "relative_rms": 0.013336827988498537,
+      "maximum_absolute_error": 0.16796875,
+      "differences": [],
+      "worst_rows": [
+        {
+          "row": 63,
+          "rms_error": 0.028049199550743174,
+          "maximum_absolute_error": 0.16796875
+        }
+      ],
+      "worst_columns": [
+        {
+          "column": 2819,
+          "rms_error": 0.16796875,
+          "maximum_absolute_error": 0.16796875
+        },
+        {
+          "column": 28100,
+          "rms_error": 0.1640625,
+          "maximum_absolute_error": 0.1640625
+        },
+        {
+          "column": 15484,
+          "rms_error": 0.1640625,
+          "maximum_absolute_error": 0.1640625
+        },
+        {
+          "column": 93,
+          "rms_error": 0.1640625,
+          "maximum_absolute_error": 0.1640625
+        },
+        {
+          "column": 893,
+          "rms_error": 0.15625,
+          "maximum_absolute_error": 0.15625
+        },
+        {
+          "column": 74,
+          "rms_error": 0.15625,
+          "maximum_absolute_error": 0.15625
+        },
+        {
+          "column": 96,
+          "rms_error": 0.15625,
+          "maximum_absolute_error": 0.15625
+        },
+        {
+          "column": 84,
+          "rms_error": 0.15625,
+          "maximum_absolute_error": 0.15625
+        },
+        {
+          "column": 8260,
+          "rms_error": 0.15625,
+          "maximum_absolute_error": 0.15625
+        },
+        {
+          "column": 7511,
+          "rms_error": 0.15625,
+          "maximum_absolute_error": 0.15625
+        },
+        {
+          "column": 98,
+          "rms_error": 0.15625,
+          "maximum_absolute_error": 0.15625
+        },
+        {
+          "column": 47335,
+          "rms_error": 0.15625,
+          "maximum_absolute_error": 0.15625
+        },
+        {
+          "column": 79,
+          "rms_error": 0.15625,
+          "maximum_absolute_error": 0.15625
+        },
+        {
+          "column": 1384,
+          "rms_error": 0.142578125,
+          "maximum_absolute_error": 0.142578125
+        },
+        {
+          "column": 7577,
+          "rms_error": 0.140625,
+          "maximum_absolute_error": 0.140625
+        },
+        {
+          "column": 61735,
+          "rms_error": 0.140625,
+          "maximum_absolute_error": 0.140625
+        },
+        {
+          "column": 1056,
+          "rms_error": 0.140625,
+          "maximum_absolute_error": 0.140625
+        },
+        {
+          "column": 51446,
+          "rms_error": 0.140625,
+          "maximum_absolute_error": 0.140625
+        },
+        {
+          "column": 375,
+          "rms_error": 0.140625,
+          "maximum_absolute_error": 0.140625
+        },
+        {
+          "column": 59800,
+          "rms_error": 0.140625,
+          "maximum_absolute_error": 0.140625
+        }
+      ],
+      "accepted_threshold": null,
+      "fidelity_pass": null,
+      "checkpoint": "LiquidAI/LFM3-VL-2B-MLX-6bit",
+      "phase": "decode",
+      "prefilled_history": 63,
+      "current_row": 63,
+      "token_fixture_sha256": "cce7d631dcbf26f43abb6d551a62e51c06582f958a5b5be57b7b5e32e6760748",
+      "native_logits_sha256": "1a033068012e72b9b60be106be6eee6058faaece4b0d439a151b683c1b94c1ef",
+      "reference_full_logits_sha256": "d16f06c7813c231e4f3b7172456959da94d32adf024381666104fa28c0d3a859"
+    },
+    {
+      "rows": 1,
+      "vocabulary": 128000,
+      "top1_differences": 0,
+      "disjoint_maximum_sets": 0,
+      "relative_rms": 0.013220059903007179,
+      "maximum_absolute_error": 0.15625,
+      "differences": [],
+      "worst_rows": [
+        {
+          "row": 63,
+          "rms_error": 0.027668003667474416,
+          "maximum_absolute_error": 0.15625
+        }
+      ],
+      "worst_columns": [
+        {
+          "column": 984,
+          "rms_error": 0.15625,
+          "maximum_absolute_error": 0.15625
+        },
+        {
+          "column": 53,
+          "rms_error": 0.15625,
+          "maximum_absolute_error": 0.15625
+        },
+        {
+          "column": 42847,
+          "rms_error": 0.1328125,
+          "maximum_absolute_error": 0.1328125
+        },
+        {
+          "column": 5820,
+          "rms_error": 0.1328125,
+          "maximum_absolute_error": 0.1328125
+        },
+        {
+          "column": 15460,
+          "rms_error": 0.125,
+          "maximum_absolute_error": 0.125
+        },
+        {
+          "column": 51446,
+          "rms_error": 0.125,
+          "maximum_absolute_error": 0.125
+        },
+        {
+          "column": 48949,
+          "rms_error": 0.125,
+          "maximum_absolute_error": 0.125
+        },
+        {
+          "column": 16019,
+          "rms_error": 0.125,
+          "maximum_absolute_error": 0.125
+        },
+        {
+          "column": 71,
+          "rms_error": 0.125,
+          "maximum_absolute_error": 0.125
+        },
+        {
+          "column": 86,
+          "rms_error": 0.125,
+          "maximum_absolute_error": 0.125
+        },
+        {
+          "column": 15532,
+          "rms_error": 0.125,
+          "maximum_absolute_error": 0.125
+        },
+        {
+          "column": 1443,
+          "rms_error": 0.125,
+          "maximum_absolute_error": 0.125
+        },
+        {
+          "column": 3592,
+          "rms_error": 0.125,
+          "maximum_absolute_error": 0.125
+        },
+        {
+          "column": 3698,
+          "rms_error": 0.125,
+          "maximum_absolute_error": 0.125
+        },
+        {
+          "column": 5872,
+          "rms_error": 0.125,
+          "maximum_absolute_error": 0.125
+        },
+        {
+          "column": 503,
+          "rms_error": 0.125,
+          "maximum_absolute_error": 0.125
+        },
+        {
+          "column": 4353,
+          "rms_error": 0.125,
+          "maximum_absolute_error": 0.125
+        },
+        {
+          "column": 27348,
+          "rms_error": 0.125,
+          "maximum_absolute_error": 0.125
+        },
+        {
+          "column": 1224,
+          "rms_error": 0.125,
+          "maximum_absolute_error": 0.125
+        },
+        {
+          "column": 4507,
+          "rms_error": 0.125,
+          "maximum_absolute_error": 0.125
+        }
+      ],
+      "accepted_threshold": null,
+      "fidelity_pass": null,
+      "checkpoint": "LiquidAI/LFM3-VL-2B-MLX-8bit",
+      "phase": "decode",
+      "prefilled_history": 63,
+      "current_row": 63,
+      "token_fixture_sha256": "cce7d631dcbf26f43abb6d551a62e51c06582f958a5b5be57b7b5e32e6760748",
+      "native_logits_sha256": "472b3ad8ec2237267664292acae4be66f78e80271830962d2d4570e088fcec04",
+      "reference_full_logits_sha256": "c2263cda17da88664fad1fbb499035c33899760ec5cad02a35a4ba1ac1b908c8"
+    }
+  ]
+}

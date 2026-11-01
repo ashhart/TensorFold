@@ -3,6 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
 const contract = @import("contract");
+const lfm3_suite_k = @import("metal_lfm3_suite.zig");
 const rows_k = @import("metal_rows.zig");
 const affine_k = @import("metal_affine.zig");
 const topk_k = @import("metal_topk.zig");
@@ -134,6 +135,9 @@ pub fn main(init: std.process.Init) !u8 {
         gemma_list.deinit(a);
     }
     var kernels: std.ArrayList(g.Kernel) = .empty;
+    var lfm3_suite: lfm3_suite_k.Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer lfm3_suite.deinit();
+    try lfm3_suite.collect(o.only);
     for (gemma.all_entries) |v| {
         if (!wanted(o, v.name)) continue;
         if (!tensor) {
