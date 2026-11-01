@@ -138,8 +138,9 @@ fn patches(gpa: std.mem.Allocator, src: picture.Rgb, side: u32) Error![]f32 {
     const n = src.width * src.height;
     const plane = try gpa.alloc(f32, n * 3);
     defer gpa.free(plane);
+    const lut = picture.normalize.table(.unfused, 1.0 / 255.0, mean, std_dev); // x / 255 in f32: unfused's bits
     for (0..n) |i| for (0..3) |c| {
-        plane[c * n + i] = (@as(f32, @floatFromInt(src.pixels[i * 3 + c])) / 255.0 - mean[c]) / std_dev[c];
+        plane[c * n + i] = lut[c][src.pixels[i * 3 + c]];
     };
     const out = try resizeFloat(gpa, plane, @intCast(src.width), @intCast(src.height), side);
     defer gpa.free(out);

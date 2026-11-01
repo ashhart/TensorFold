@@ -15,6 +15,14 @@ const head_dim = geometry.head_dim;
 
 pub const file = "mtp-4bit.safetensors";
 
+/// Whether `dir` holds `file`.
+fn hasFile(io: std.Io, dir: []const u8) bool {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ dir, file }) catch return false;
+    std.Io.Dir.cwd().access(io, path, .{}) catch return false;
+    return true;
+}
+
 pub const Weights = struct {
     arena: DeviceBuffer,
     arena_at: usize = 0,
@@ -54,13 +62,15 @@ pub fn total(g: geometry.Geometry) usize {
 }
 
 /// The largest tensor `load` stages, as stored: fc's whole rows, an attention projection or an expert table.
-fn stageBytes(g: geometry.Geometry) usize {
+pub fn stageBytes(g: geometry.Geometry) usize {
     const raw = weights.rawBytes;
     return @max(@max(raw(g.hidden, 2 * g.hidden, 4), raw(2 * g.attnWidth(), g.hidden, 4)), @max(raw(g.experts * g.intermediate, g.hidden, 4), raw(g.experts * g.hidden, g.intermediate, 4)));
 }
 
 pub fn load(gpa: std.mem.Allocator, io: std.Io, e: *Engine, dir: []const u8) !Weights {
     const g = e.g;
+    // a ModelOpt checkpoint keeps its MTP layer in bf16 in its own shards: quantized at load unless the file is there
+    if (g.kinds.modelopt and !hasFile(io, dir)) return @import("cuda_mtp_bf16.zig").load(gpa, io, e, dir);
     var ck: core.Checkpoint = .{ .gpa = gpa, .io = io };
     defer ck.close();
     try ck.add(dir, file);

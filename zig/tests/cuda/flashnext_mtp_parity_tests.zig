@@ -1,4 +1,4 @@
-//! A shared round's greedy streams' MTP heads in one pass against each stream's own pass, bit for bit.
+//! A shared round's streams' MTP heads in one pass against each stream's own pass, bit for bit: greedy, sampled, mixed.
 const std = @import("std");
 const cuda = @import("cuda");
 const flash = @import("flashnext");
@@ -8,6 +8,24 @@ const mtp = flash.mtp;
 
 /// The streams' rows in one shared pass: two one-row heads, four 16-row paths, and both together.
 const shapes = [_][]const usize{ &.{ 1, 1 }, &.{ 16, 16, 16, 16 }, &.{ 1, 1, 16, 16, 16, 16 } };
+
+/// How a shape's streams draw: every stream greedy, every stream sampled under its own seed, or alternate lanes.
+const Mode = enum { greedy, sampled, mixed };
+
+/// Stream i's rule: greedy (null), or a keyed draw under its own seed.
+fn rule(mode: Mode, i: usize) ?mtp.Sampling {
+    const sampled = switch (mode) {
+        .greedy => false,
+        .sampled => true,
+        .mixed => i % 2 == 1,
+    };
+    return if (sampled) .{ .seed = 19 + @as(u64, i), .temperature = 1.0, .top_k = 20, .top_p = 0.95 } else null;
+}
+
+/// Stream i's first draft position: the greedy shapes keep position 0, the others each their own.
+fn position(mode: Mode, i: usize) u64 {
+    return if (mode == .greedy) 0 else 5 + 3 * @as(u64, i);
+}
 
 /// The streams one side holds: a sequence and a draft each.
 const Side = struct {
@@ -55,15 +73,22 @@ pub fn run(gpu: check.Gpu, dir: []const u8, ids_path: []const u8) !void {
     for (ids, 0..) |*t, i| t.* = base.items[i % base.items.len];
     // no confidence stop (the whole chain), then a stop above every probability (each chain keeps one token)
     for ([_]f64{ 0, 2 }) |confidence| {
-        for (shapes) |widths| try shape(gpu, e, ops, &stream, ids, widths, confidence);
+        for (shapes) |widths| try shape(gpu, e, ops, &stream, ids, widths, confidence, .greedy);
+    }
+    // sampled streams under their own seeds and positions, alone and beside greedy ones; a stop some draws fall under
+    for ([_]f64{ 0, 0.5 }) |confidence| {
+        for (shapes) |widths| {
+            try shape(gpu, e, ops, &stream, ids, widths, confidence, .sampled);
+            try shape(gpu, e, ops, &stream, ids, widths, confidence, .mixed);
+        }
     }
 }
 
 /// One shape's streams drafted alone and in one shared pass: the logits, the proposals, the probabilities and the stop.
-fn shape(gpu: check.Gpu, e: *prompt.Engine, ops: mtp.Ops(flash.Tri), stream: *cuda.Stream, ids: []const u32, widths: []const usize, confidence: f64) !void {
+fn shape(gpu: check.Gpu, e: *prompt.Engine, ops: mtp.Ops(flash.Tri), stream: *cuda.Stream, ids: []const u32, widths: []const usize, confidence: f64, mode: Mode) !void {
     const gpa = gpu.gpa;
     const cap = ids.len + 64;
-    const count = 2;
+    const count: usize = if (mode == .greedy) 2 else 4;
     const n = widths.len;
     var alone: Side = .{};
     defer alone.deinit(gpa);
@@ -86,16 +111,18 @@ fn shape(gpu: check.Gpu, e: *prompt.Engine, ops: mtp.Ops(flash.Tri), stream: *cu
         }
         rows[i] = alone.drafts[i].prompt_last;
     }
-    // each stream's head alone: its own pass, its own chain
+    // each stream's head alone: its own pass, its own chain, its own rule and position
     var alone_chains: [6]mtp.Chain = undefined;
     for (widths, 0..) |w, i| {
-        try ops.draft(&alone.drafts[i], nexts[i][0..w], rows[i], 0, count, null, confidence, &alone_chains[i]);
+        try ops.draft(&alone.drafts[i], nexts[i][0..w], rows[i], position(mode, i), count, rule(mode, i), confidence, &alone_chains[i]);
     }
     // the same heads in one shared pass: one lane a stream
     var ds: [6]*mtp.Draft = undefined;
     var nexts_s: [6][]const u32 = undefined;
     var rows_s: [6]u64 = undefined;
     var counts: [6]usize = undefined;
+    var positions: [6]u64 = undefined;
+    var sms: [6]?mtp.Sampling = undefined;
     var chains: [6]mtp.Chain = undefined;
     var outs: [6]*mtp.Chain = undefined;
     for (widths, 0..) |w, i| {
@@ -103,9 +130,11 @@ fn shape(gpu: check.Gpu, e: *prompt.Engine, ops: mtp.Ops(flash.Tri), stream: *cu
         nexts_s[i] = nexts[i][0..w];
         rows_s[i] = rows[i];
         counts[i] = count;
+        positions[i] = position(mode, i);
+        sms[i] = rule(mode, i);
         outs[i] = &chains[i];
     }
-    try ops.draftMany(ds[0..n], nexts_s[0..n], rows_s[0..n], counts[0..n], confidence, outs[0..n]);
+    try ops.draftMany(ds[0..n], nexts_s[0..n], rows_s[0..n], counts[0..n], positions[0..n], sms[0..n], confidence, outs[0..n]);
     try stream.synchronize();
     for (widths, 0..) |_, i| {
         try check.expect(try sameLogits(gpu, &alone.drafts[i], &together.drafts[i]), "a shared head's logits equal its lone pass's", .{});
@@ -122,5 +151,5 @@ fn shape(gpu: check.Gpu, e: *prompt.Engine, ops: mtp.Ops(flash.Tri), stream: *cu
         try stream.synchronize();
         try check.expect(!(try sameLogits(gpu, &alone.drafts[1], &together.drafts[1])), "the planted broken gather is caught", .{});
     }
-    check.pass("a shared MTP head over {d} streams ({any} rows) equals each stream's own pass: logits, proposals, probabilities and the confidence stop", .{ n, widths });
+    check.pass("a shared MTP head over {d} {s} streams ({any} rows) equals each stream's own pass: logits, proposals, probabilities and the stop", .{ n, @tagName(mode), widths });
 }

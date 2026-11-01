@@ -16,15 +16,9 @@ pub const chunk_blocks = 64;
 
 /// The native kernels, by their extern "C" names.
 pub const Fns = struct {
-    embed16: cuda.Function,
-    add_moe_norm: cuda.Function,
-    concat_norms: cuda.Function,
-    group_rmsnorm: cuda.Function,
     router: cuda.Function,
     router_rows: cuda.Function,
     router_tiles: cuda.Function,
-    topk: cuda.Function,
-    topk_wide: cuda.Function, // past 256 experts or 8 picks
     conv: cuda.Function,
     conv_rows: cuda.Function,
     conv_commit: cuda.Function,
@@ -40,32 +34,26 @@ pub const Fns = struct {
     attn_merge_segs: cuda.Function,
     keyed: cuda.Function,
 
-    /// The modules of nemotron_norms, _route, _mamba, _attention and _keyed, in that order.
+    /// The modules of nemotron_route, _mamba, _attention and _keyed, in that order.
     pub fn resolve(m: []const cuda.Module) !Fns {
         return .{
-            .embed16 = try m[0].function("tf_nemo_embed16"),
-            .add_moe_norm = try m[0].function("tf_nemo_add_moe_norm"),
-            .concat_norms = try m[0].function("tf_nemo_concat_norms"),
-            .group_rmsnorm = try m[0].function("tf_nemo_group_rmsnorm"),
-            .router = try m[1].function("tf_nemo_router"),
-            .router_rows = try m[1].function("tf_nemo_router_rows"),
-            .router_tiles = try m[1].function("tf_nemo_router_tiles"),
-            .topk = try m[1].function("tf_nemo_topk"),
-            .topk_wide = try m[1].function("tf_nemo_topk_wide"),
-            .conv = try m[2].function("tf_nemo_conv"),
-            .conv_rows = try m[2].function("tf_nemo_conv_rows"),
-            .conv_commit = try m[2].function("tf_nemo_conv_commit"),
-            .scan = try m[2].function("tf_nemo_scan"),
-            .conv_segs = try m[2].function("tf_nemo_conv_segs"),
-            .scan_segs = try m[2].function("tf_nemo_scan_segs"),
-            .kv_write = try m[3].function("tf_nemo_kv_write"),
-            .attn_chunk = try m[3].function("tf_nemo_attn_chunk"),
-            .attn_chunk_pf = try m[3].function("tf_nemo_attn_chunk_pf"),
-            .attn_merge = try m[3].function("tf_nemo_attn_merge"),
-            .kv_write_segs = try m[3].function("tf_nemo_kv_write_segs"),
-            .attn_chunk_segs = try m[3].function("tf_nemo_attn_chunk_segs"),
-            .attn_merge_segs = try m[3].function("tf_nemo_attn_merge_segs"),
-            .keyed = try m[4].function("tf_nemo_keyed_greedy"),
+            .router = try m[0].function("tf_nemo_router"),
+            .router_rows = try m[0].function("tf_nemo_router_rows"),
+            .router_tiles = try m[0].function("tf_nemo_router_tiles"),
+            .conv = try m[1].function("tf_nemo_conv"),
+            .conv_rows = try m[1].function("tf_nemo_conv_rows"),
+            .conv_commit = try m[1].function("tf_nemo_conv_commit"),
+            .scan = try m[1].function("tf_nemo_scan"),
+            .conv_segs = try m[1].function("tf_nemo_conv_segs"),
+            .scan_segs = try m[1].function("tf_nemo_scan_segs"),
+            .kv_write = try m[2].function("tf_nemo_kv_write"),
+            .attn_chunk = try m[2].function("tf_nemo_attn_chunk"),
+            .attn_chunk_pf = try m[2].function("tf_nemo_attn_chunk_pf"),
+            .attn_merge = try m[2].function("tf_nemo_attn_merge"),
+            .kv_write_segs = try m[2].function("tf_nemo_kv_write_segs"),
+            .attn_chunk_segs = try m[2].function("tf_nemo_attn_chunk_segs"),
+            .attn_merge_segs = try m[2].function("tf_nemo_attn_merge_segs"),
+            .keyed = try m[3].function("tf_nemo_keyed_greedy"),
         };
     }
 };
@@ -117,6 +105,7 @@ pub const Glue = struct {
     s: cuda.Stream,
     emb: *const cuda.embed_rows.EmbedRows, // the shared token rows (embed_rows.cu)
     norms: *const cuda.norms.Norms, // the shared RMS norm rows (norms.cu)
+    moe: *const cuda.moe_glue.MoeGlue, // the shared expert combine and top-k (moe_glue.cu)
 
     fn tri(g: Glue) ?triton.Tri {
         return if (g.set) |x| .{ .set = x, .s = g.s } else null;
@@ -149,10 +138,7 @@ pub const Glue = struct {
 
     /// Rows of a bf16 table [n, d] (ours with or without a captured set, whose embed reads MLX words).
     pub fn embed16(g: Glue, ids: u64, w: u64, out: u64, rows: usize, d: usize) !void {
-        var a: cuda.Args = .{};
-        ptrs(&a, &.{ ids, w, out });
-        a.add(int(d));
-        try g.go(g.f.embed16, .{ rows, 1, 1 }, 256, 0, &a);
+        try g.emb.bf16(g.s, ids, w, out, rows, d);
     }
 
     /// h = x + r (or x itself without r), y = rmsnorm(h) * w, xs = y's 64-group sums.
@@ -161,18 +147,10 @@ pub const Glue = struct {
         try g.norms.addRmsH(g.s, x, r, w, .bf16, h, y, xs, rows, d, eps);
     }
 
-    /// The routed and shared expert sums in slot order, added to h, then its RMSNorm.
+    /// The routed and shared expert sums in slot order, added to h, then its RMSNorm (norms.cu's strided rows).
     pub fn addMoeNorm(g: Glue, h: u64, y: u64, y_f32: bool, wt: u64, w: u64, hn: u64, out: u64, xs: u64, rows: usize, d: usize, eps: f32, top_k: usize, slots: usize) !void {
         if (g.tri()) |t| return t.addMoeNorm(h, y, y_f32, wt, w, hn, out, xs, rows, d, eps, top_k, slots);
-        if (d > 4096) return error.RowTooWide;
-        if (slots > 8) return error.TooManySlots; // the kernel's MAXS
-        var a: cuda.Args = .{};
-        ptrs(&a, &.{ h, y });
-        a.add(@as(c_int, @intFromBool(y_f32)));
-        ptrs(&a, &.{ wt, w, hn, out, xs });
-        a.add(eps);
-        ints(&a, &.{ d, top_k, slots });
-        try g.go(g.f.add_moe_norm, .{ rows, 1, 1 }, 1024, 0, &a);
+        try g.norms.moeAddRmsH(g.s, h, y, if (y_f32) .f32 else .bf16, wt, top_k, slots, w, hn, out, xs, rows, d, eps);
     }
 
     /// fp32 router logits over `sk` K slices, each one fma chain in input order whichever kernel runs it.
@@ -192,20 +170,16 @@ pub const Glue = struct {
         try g.go(g.f.router, .{ cdiv(rows, 16), cdiv(e, 16), sk }, 256, routerShared(per), &a);
     }
 
-    /// fp32 router logits over K slices, then each row's top-k and the shared halves' slots (`slots` past top-k).
+    /// fp32 router logits over K slices summed in order, then each row's top-k and the shared halves' slots.
     pub fn route(g: Glue, x: u64, w: u64, bias: u64, part: u64, ids: u64, wts: u64, rows: usize, d: usize, e: usize, top_k: usize, slots: usize, scaling: f32, norm: bool) !void {
         if (g.tri()) |t| return t.route(x, w, bias, part, ids, wts, rows, d, e, top_k, scaling, norm);
-        if (e > 512 or top_k > 16 or slots < top_k or slots > top_k + 2) return error.RouterTooWide; // the wide top-k kernel's MAXC
+        if (slots < top_k or slots > top_k + 2) return error.RouterTooWide;
         const shape = routerShape(d);
-        if (shape.sk > 8) return error.RouterTooWide; // topk's MAXSK
+        if (shape.sk > max_router_slices) return error.RouterTooWide;
         try g.logits(x, w, part, rows, d, e, shape.sk);
-        var b: cuda.Args = .{};
-        ptrs(&b, &.{ part, bias, ids, wts });
-        b.add(int(rows));
-        b.add(scaling);
-        ints(&b, &.{ e, shape.sk, top_k, slots });
-        b.add(@as(c_int, @intFromBool(norm)));
-        try g.go(if (e > 256 or top_k > 8) g.f.topk_wide else g.f.topk, .{ rows, 1, 1 }, 32, 0, &b);
+        // the top-k adds the slices itself, in slice order: no launch summing them
+        const r: cuda.moe_glue.Route = .{ .experts = e, .topk = top_k, .shared = slots > top_k, .shared_slots = slots - top_k, .normalize = norm, .scale = scaling, .score = true, .slices = shape.sk };
+        try g.moe.topk(g.s, part, bias, r, ids, wts, rows);
     }
 
     /// The Mamba conv of a window: the last window's kept rows replay from RAW, then the window's rows.
@@ -275,12 +249,8 @@ pub const Glue = struct {
     /// Weight * RMSNorm over groups of xd / groups, and the 64-input group sums.
     pub fn groupRmsnorm(g: Glue, x: u64, w: u64, out: u64, xs: u64, rows: usize, xd: usize, groups: usize, eps: f32) !void {
         if (g.tri()) |t| return t.groupRmsnorm(x, w, out, xs, rows, xd, groups, eps);
-        if (xd / groups > 1024) return error.RowTooWide;
-        var a: cuda.Args = .{};
-        ptrs(&a, &.{ x, w, out, xs });
-        a.add(eps);
-        ints(&a, &.{ xd, xd / groups });
-        try g.go(g.f.group_rmsnorm, .{ rows, groups, 1 }, 128, 0, &a);
+        const gs = xd / groups;
+        try g.norms.rmsParts(g.s, x, xd, @intCast(gs), w, @intCast(gs), out, xd, gs, xs, rows, groups, gs, eps, true);
     }
 
     /// A prompt chunk's conv rows in parallel, then BASE takes its last three inputs.
@@ -375,12 +345,10 @@ pub const Glue = struct {
     /// The MTP input [rmsnorm(e) * enorm | rmsnorm(h) * hnorm] and its group sums.
     pub fn concatNorms(g: Glue, e: u64, h: u64, we: u64, wh: u64, out: u64, xs: u64, rows: usize, d: usize, eps: f32) !void {
         if (g.tri()) |t| return t.concatNorms(e, h, we, wh, out, xs, rows, d, eps);
-        if (d > 4096) return error.RowTooWide;
-        var a: cuda.Args = .{};
-        ptrs(&a, &.{ e, h, we, wh, out, xs });
-        a.add(eps);
-        a.add(int(d));
-        try g.go(g.f.concat_norms, .{ rows, 2, 1 }, 256, 0, &a);
+        // one launch, two parts a row: part 1 reads h and wh, (h - e) / 2 and (wh - we) / 2 elements past part 0's
+        const x_part = @divExact(@as(isize, @bitCast(h -% e)), 2);
+        const w_part = @divExact(@as(isize, @bitCast(wh -% we)), 2);
+        try g.norms.rmsParts(g.s, e, d, x_part, we, w_part, out, 2 * d, d, xs, rows, 2, d, eps, false);
     }
 
     /// A draw over candidate rows; our kernel takes the greedy rule (the head's draw), with or without its share.

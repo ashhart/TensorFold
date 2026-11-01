@@ -51,13 +51,20 @@ __device__ __forceinline__ void load_lane_words(const uint32_t* tile, int lane, 
     for (int i = 0; i < lane_words<K2>(); ++i) w[i] = tile[(word + i) % tile_words<K2>()];
 }
 
+// The weight stream is read once, so do not allocate L1 for it: same value as __ldg, cache policy only.
+__device__ __forceinline__ uint32_t ldg_stream_u32(const uint32_t* p) {
+    uint32_t v;
+    asm volatile("ld.global.nc.L1::no_allocate.u32 %0, [%1];" : "=r"(v) : "l"(p));
+    return v;
+}
+
 // The same from global memory through the read-only cache.
 template <int K2>
 __device__ __forceinline__ void ldg_lane_words(const uint32_t* tile, int lane, uint32_t (&w)[lane_words<K2>()]) {
     int word, offset;
     lane_start<K2>(lane, word, offset);
 #pragma unroll
-    for (int i = 0; i < lane_words<K2>(); ++i) w[i] = __ldg(tile + (word + i) % tile_words<K2>());
+    for (int i = 0; i < lane_words<K2>(); ++i) w[i] = ldg_stream_u32(tile + (word + i) % tile_words<K2>());
 }
 
 // Bits [d, d + 16) of the 96-bit big-endian stream hi:mid:lo (d a compile-time constant after unrolling).

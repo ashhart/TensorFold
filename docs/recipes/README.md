@@ -21,6 +21,7 @@ For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.
 | DeepSeek-V4-Flash | [MLX on a 256 GB Mac, DSpark and MTP drafts](deepseek-v4-flash.md) |
 | Qwen3.6-35B-A3B | [MLX with MTP drafts, one-GPU CUDA](qwen3.6-moe.md) |
 | Step-5-Preview | [Native Metal on one 256 GB Mac: 2-bit experts, MTP drafts, images](step-5-preview.md) |
+| MiniMax-M3.1-Flash | [Native Metal on one 256 GB Mac: affine 3/4-bit experts, exact bf16 cache, DFlash2 drafts, images](minimax-m3.1-flash.md) |
 | Kolibri-1 | [Native CUDA, block FP8, research checkpoint](kolibri-1.md) |
 | LFM2.5-24B-A2B | [Native Metal, MLX 4-bit, shared rounds](lfm2.5-24b-a2b.md) |
 | Spark-X2.6-4B | [Native CUDA](spark-x2.6-4b-cuda.md), [native Metal, the bf16 release, contexts to 1M](spark-x2.6-4b-metal.md) |

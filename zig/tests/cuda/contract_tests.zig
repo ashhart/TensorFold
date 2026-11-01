@@ -7,6 +7,7 @@ const options = @import("contract_options");
 const check = @import("check.zig");
 const rows_k = @import("contract_rows.zig");
 const tail_k = @import("contract_norms_tail.zig");
+const tiles_k = @import("contract_rms_tiles.zig");
 const dory_k = @import("contract_dory.zig");
 const router_k = @import("contract_router.zig");
 const mm_k = @import("contract_mm.zig");
@@ -62,12 +63,9 @@ const contract = core.contract;
 const g = contract.gates;
 const kk = cuda.kernels;
 
-const controls = struct {
-    pub const bytes align(16) = @embedFile("fatbin_contract_controls").*;
-};
-
-const h3_image = struct {
-    pub const bytes align(16) = @embedFile("fatbin_h3").*;
+const images = struct {
+    pub const controls align(16) = @embedFile("fatbin_contract_controls").*;
+    pub const h3 align(16) = @embedFile("fatbin_h3").*;
 };
 
 /// Gates 1-4 on every registered CUDA kernel and each control at its own gate, then gate 5 on this GPU.
@@ -85,7 +83,7 @@ pub fn run(gpu: check.Gpu) !void {
     var mods: [8]cuda.Module = undefined;
     var loaded: usize = 0;
     defer for (mods[0..loaded]) |*m| m.unload();
-    for ([_][]const u8{ kk.nemotron_route, kk.qmm_group, kk.qmm_prefill, kk.lane_gemv, kk.affine4_pack, &controls.bytes, kk.experts, kk.nemotron_mamba }, 0..) |img, i| {
+    for ([_][]const u8{ kk.nemotron_route, kk.qmm_group, kk.qmm_prefill, kk.lane_gemv, kk.affine4_pack, &images.controls, kk.experts, kk.nemotron_mamba }, 0..) |img, i| {
         mods[i] = try cuda.Module.load(gpu.d, img);
         loaded += 1;
     }
@@ -155,6 +153,9 @@ pub fn run(gpu: check.Gpu) !void {
     for (tail_which, &tails) |w, *t| t.* = .{ .rig = .{ .gpu = gpu, .s = s }, .which = w, .norms = &norms, .ctl = if (tail_k.control(w) != null) try mods[5].function(tail_k.symbol(w)) else null };
     defer for (&tails) |*t| t.deinit();
     for (&tails) |*t| try kernels.append(a, t.kernel());
+    var tiles = [_]tiles_k.Tiles{ tiles_k.init(gpu, s, &norms, .y), tiles_k.init(gpu, s, &norms, .xs) };
+    defer for (&tiles) |*t| t.deinit();
+    for (&tiles) |*t| try kernels.append(a, t.kernel());
     var dory: dory_k.Dory = .{};
     defer dory.deinit();
     try dory.add(gpu, s, &norms, mods[5], &kernels);
@@ -162,15 +163,12 @@ pub fn run(gpu: check.Gpu) !void {
     defer logits.deinit();
     var logits_tiles = router_k.Logits{ .rig = .{ .gpu = gpu, .s = s }, .f = logits.f, .tiles = try mods[0].function("tf_nemo_router_tiles") };
     defer logits_tiles.deinit();
-    var topk = router_k.TopK{ .rig = .{ .gpu = gpu, .s = s }, .f = try mods[0].function("tf_nemo_topk") };
-    defer topk.deinit();
     var latent = try nemotron.latent.Fns.load(gpu.d);
     defer latent.unload();
     var latent_topk = router_k.LatentTopK{ .rig = .{ .gpu = gpu, .s = s }, .fns = &latent };
     defer latent_topk.deinit();
     try kernels.append(a, logits.kernel());
     try kernels.append(a, logits_tiles.kernel());
-    try kernels.append(a, topk.kernel());
     try kernels.append(a, latent_topk.kernel());
     var scan = scan_k.Scan{ .rig = .{ .gpu = gpu, .s = s }, .f = try mods[7].function("tf_nemo_scan"), .host = .init(a) };
     defer scan.deinit();
@@ -285,7 +283,7 @@ pub fn run(gpu: check.Gpu) !void {
         selection.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = try batch.function("fn_qsa_select"), .padded = padded };
     defer for (&selections) |*selection| selection.deinit();
     for (&selections) |*selection| try kernels.append(a, selection.kernel());
-    var h3_mod = try cuda.Module.load(gpu.d, &h3_image.bytes);
+    var h3_mod = try cuda.Module.load(gpu.d, &images.h3);
     defer h3_mod.unload();
     const h3_which = comptime std.enums.values(h3_k.Which);
     var h3_list: [h3_which.len]h3_k.H3 = undefined;
@@ -339,6 +337,10 @@ pub fn run(gpu: check.Gpu) !void {
     for (std.enums.values(e3_k.Fault), &e3_splits) |f, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .k = &e3_mods.k, .fault = f };
     defer for (&e3_splits) |*x| x.deinit();
     for (&e3_splits) |*x| try kernels.append(a, x.kernel());
+    const exl3_finish = try @import("contract_exl3_finish.zig").Group.create(a, gpu, s, mods[5], &kernels);
+    defer exl3_finish.destroy();
+    const exl3_grouped = try @import("contract_exl3_grouped.zig").Group.create(a, gpu, s, mods[5], &kernels);
+    defer exl3_grouped.destroy();
     const nvfp4_facts = try @import("contract_nvfp4_tile.zig").Group.create(a, gpu, s, sms, try cuda.grouped.Router.resolve(mods[6]), &kernels);
     defer nvfp4_facts.destroy();
     var round_mod = try cuda.Module.load(gpu.d, kk.tree_round);
@@ -540,6 +542,8 @@ pub fn run(gpu: check.Gpu) !void {
     try glm_index.append(a, &kernels);
     const glm_fast = try @import("contract_glm_pools.zig").Fast.create(a, gpu, s, glm_fns, &kernels);
     defer glm_fast.destroy(a);
+    const glm_top1 = try @import("contract_glm_top1.zig").Top1.create(a, gpu, s, glm_fns, &kernels);
+    defer glm_top1.destroy(a);
     var glm_ops = try cuda.Module.load(gpu.d, kk.glm_ops);
     defer glm_ops.unload();
     var glm_tokens = glm_index_k.Tokens{ .rig = .{ .gpu = gpu, .s = s }, .f = try glm_ops.function("tf_glm_dsa_tokens") };
@@ -567,20 +571,17 @@ pub fn run(gpu: check.Gpu) !void {
     };
     defer for (&contiguous) |*x| x.deinit();
     for (&contiguous) |*x| try kernels.append(a, x.kernel());
+    const mtp_rows = try @import("contract_qwen_mtp_rows.zig").Group.create(a, gpu, s, &kernels);
+    defer mtp_rows.destroy();
     const weight_only = try @import("contract_weight_only_suite.zig").Suite.create(a, gpu, s, &kernels);
     defer weight_only.destroy(a);
+    const families = try @import("contract_family_sets.zig").Sets.init(gpu, s, a, &kernels, &affine4, cap);
+    defer families.deinit();
     var t: g.Tally = .{};
     try @import("contract_dump.zig").run(a, kernels.items);
     const t0 = check.now(gpu.io);
     try g.runAll(a, kernels.items, 0x6b63, &t);
-    try @import("gdn_back_tests.zig").run(gpu);
-    try @import("q4_back_tests.zig").run(gpu);
-    try @import("moe_back_tests.zig").run(gpu);
-    try @import("attn_back_tests.zig").run(gpu);
-    try @import("fn_hc_back_tests.zig").run(gpu);
-    try @import("fn_moe_back_tests.zig").run(gpu);
-    try @import("fn_pocket_tests.zig").run(gpu, 0);
-    std.debug.print("PASS gradient component suites (FP64 and finite-difference checks); resource receipts still required\n", .{});
+    try @import("contract_back_suites.zig").run(gpu);
     const t1 = check.now(gpu.io);
     try @import("contract_qwen_served.zig").run(gpu);
     try @import("contract_qwen_pages.zig").run(gpu);

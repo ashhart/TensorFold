@@ -242,21 +242,9 @@ fn roundBy(x: usize, factor: usize) usize {
 /// smart_resize: (width, height), multiples of 32 holding 64 to 256 image tokens, near the picture's aspect.
 fn smartSize(w: usize, h: usize) [2]usize {
     const f = patch * downsample;
-    const fw: f64, const fh: f64 = .{ @floatFromInt(w), @floatFromInt(h) };
-    var hb = @max(f, roundBy(h, f));
-    var wb = @max(f, roundBy(w, f));
-    const most = max_tokens * patch * patch * downsample * downsample;
-    const least = min_tokens * patch * patch * downsample * downsample;
-    if (hb * wb > most) {
-        const beta = @sqrt(fh * fw / most);
-        hb = @max(f, @as(usize, @intFromFloat(@floor(fh / beta / f))) * f);
-        wb = @max(f, @as(usize, @intFromFloat(@floor(fw / beta / f))) * f);
-    } else if (hb * wb < least) {
-        const beta = @sqrt(@as(f64, least) / (fh * fw));
-        hb = @as(usize, @intFromFloat(@ceil(fh * beta / f))) * f;
-        wb = @as(usize, @intFromFloat(@ceil(fw * beta / f))) * f;
-    }
-    return .{ wb, hb };
+    const v: picture.patches.Variant = .{ .at_least_factor = true, .max_aspect = null };
+    const s = picture.patches.smartResizeWith(@intCast(h), @intCast(w), f, min_tokens * f * f, max_tokens * f * f, v) catch unreachable;
+    return .{ s.w, s.h };
 }
 
 /// _is_image_too_large: past the single-tile pixel budget times the tolerance.
@@ -285,11 +273,8 @@ fn closestGrid(w: usize, h: usize) [2]usize {
 
 /// The (x0, y0, tw, th) region of an RGB image of width `w` as normalized patches at `patches[at..]`; the next `at`.
 fn cut(patches: []f32, at: usize, rgb: []const u8, w: usize, x0: usize, y0: usize, tw: usize, th: usize) usize {
-    const normalized = comptime blk: {
-        var t: [256]f32 = undefined;
-        for (&t, 0..) |*v, i| v.* = (@as(f32, @floatFromInt(i)) - 127.5) / 127.5;
-        break :blk t;
-    };
+    // (x - 127.5) / 127.5 on every channel: torchvision's fused rescale and normalize
+    const normalized = comptime picture.normalize.table(.fused, 1.0 / 255.0, @splat(0.5), @splat(0.5))[0];
     var out = at;
     for (0..th / patch) |py| for (0..tw / patch) |px| {
         for (0..patch) |r| {

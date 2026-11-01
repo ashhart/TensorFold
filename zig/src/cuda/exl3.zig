@@ -59,13 +59,16 @@ pub fn variantIndex(halves: u32, codebook: Codebook, warps: u32) ?usize {
     return null;
 }
 
+/// From this many 128-column blocks a shape plans one K split, so a view that wide keeps the whole matrix's bits.
+pub const wide_blocks = 64;
+
 /// What one shape launches, from the shape alone so a row's bits never depend on the row count (linear.py plan).
 pub fn plan(k: usize, n: usize, blocks: usize, min_tiles: usize) struct { sk: u32, wk: u32 } {
     const kt = k / 16;
     const nb = n / 128;
     var sk: usize = 1;
-    var wk: usize = if (nb >= 64) 8 else 4;
-    if (nb < 64) {
+    var wk: usize = if (nb >= wide_blocks) 8 else 4;
+    if (nb < wide_blocks) {
         while (nb * sk < blocks and sk < 64) sk *= 2;
     }
     while ((wk > 4 or sk > 1) and (kt % (sk * wk) != 0 or kt / (sk * wk) < min_tiles)) {
@@ -95,6 +98,17 @@ pub const Weight = struct {
     codebook: Codebook,
     stride_k: u64,
     stride_nb: u64,
+
+    /// Columns [from, from + n) as a view of the stored matrix: whole 128-column blocks, the parent's strides.
+    pub fn columns(w: Weight, from: u32, n: u32) !Weight {
+        if (from % 128 != 0 or n % 128 != 0 or n == 0 or @as(u64, from) + n > w.n) return error.Exl3Shape;
+        var v = w;
+        v.n = n;
+        v.trellis = w.trellis + @as(u64, from / 128) * w.stride_nb * 4;
+        v.svh = w.svh + @as(u64, from) * 2;
+        if (w.bias != 0) v.bias = w.bias + @as(u64, from) * 2;
+        return v;
+    }
 };
 
 /// The module and its kernels.
@@ -190,7 +204,7 @@ pub const Dense = struct {
     candidate_mod: ?Module = null,
     candidate_k: ?candidate.Kernels = null,
     implementation: enum { reference, tiles } = .reference,
-    counters: ?memory.DeviceBuffer = null, // per pass and block, zeroed before every call
+    counters: ?memory.DeviceBuffer = null, // per pass and block: zeroed on the calls' stream, reset by the kernel
 
     pub fn load(d: *const Driver) !Dense {
         return .{ .d = d, .lin = try Linear.load(d) };
@@ -216,11 +230,19 @@ pub const Dense = struct {
         return slot.*.?.ptr;
     }
 
-    /// Grow every scratch buffer to what 128 rows of `w` need, so a call inside a graph capture allocates nothing.
-    pub fn reserve(de: *Dense, w: Weight) !void {
+    /// Grow every scratch buffer to what 128 rows of `w` need on `s`, so a call in a graph capture allocates nothing.
+    pub fn reserve(de: *Dense, s: Stream, w: Weight) !void {
         if (plan(w.k, w.n, 192, 8).sk > 1) _ = try de.scratch(&de.z, Linear.zBytes(w, 128));
-        _ = try de.scratch(&de.counters, Linear.counterBytes(w));
+        _ = try de.grownCounters(s, Linear.counterBytes(w));
         _ = try de.scratch(&de.xh, 128 * w.k * 2);
+    }
+
+    /// The counters, zeroed on `s` when they grow: each block's last arriving program resets its own.
+    fn grownCounters(de: *Dense, s: Stream, bytes: usize) !u64 {
+        if (de.counters != null and de.counters.?.len >= bytes) return de.counters.?.ptr;
+        const ptr = try de.scratch(&de.counters, bytes);
+        try de.counters.?.fill8(0, s.handle);
+        return ptr;
     }
 
     /// Decode rows: one call (the kernel takes 1..128), any count above in 128-row blocks.
@@ -264,14 +286,13 @@ pub const Dense = struct {
     fn blocks(de: *Dense, s: Stream, w: Weight, x: u64, x_dtype: DType, rows: usize, y: u64, y_dtype: DType) !void {
         const p = plan(w.k, w.n, 192, 8);
         const z: u64 = if (p.sk > 1) try de.scratch(&de.z, Linear.zBytes(w, 128)) else 0;
-        const counters = try de.scratch(&de.counters, Linear.counterBytes(w));
+        const counters = try de.grownCounters(s, Linear.counterBytes(w));
         const xe: u64 = if (x_dtype == .f32) 4 else 2;
         const ye: u64 = if (y_dtype == .f32) 4 else 2;
         var r: usize = 0;
         while (r < rows) : (r += 128) {
             const m = @min(rows - r, 128);
             const xh = try de.scratch(&de.xh, m * w.k * 2);
-            try de.counters.?.fill8(0, s.handle);
             try de.lin.matmul(s, w, x + @as(u64, r) * w.k * xe, x_dtype, m, y + @as(u64, r) * w.n * ye, y_dtype, xh, z, counters);
         }
     }
@@ -329,6 +350,42 @@ test "a failed scratch allocation keeps the old scratch owned" {
     try std.testing.expectError(error.NotReady, de.scratch(&slot, 32));
     try std.testing.expectEqual(@as(usize, 0), mock.frees);
     try std.testing.expectEqual(@as(usize, 16), slot.?.len);
+}
+
+test "a column view keeps the parent's strides and moves to its first 128-column block" {
+    for ([_]bool{ false, true }) |strips| {
+        const st = strides(256, 1024, 6, strips);
+        const w: Weight = .{ .trellis = 0x1000, .suh = 0x2000, .svh = 0x3000, .bias = 0x4000, .k = 256, .n = 1024, .halves = 6, .codebook = .mul1, .stride_k = st.k, .stride_nb = st.nb };
+        const v = try w.columns(384, 512);
+        try std.testing.expectEqual(@as(u32, 512), v.n);
+        try std.testing.expectEqual(w.trellis + 3 * st.nb * 4, v.trellis);
+        try std.testing.expectEqual(w.svh + 384 * 2, v.svh);
+        try std.testing.expectEqual(w.bias + 384 * 2, v.bias);
+        try std.testing.expectEqual(w.suh, v.suh);
+        try std.testing.expectEqual(w.stride_k, v.stride_k);
+        try std.testing.expectEqual(w.stride_nb, v.stride_nb);
+        try std.testing.expectEqual(w, try w.columns(0, 1024));
+        try std.testing.expectError(error.Exl3Shape, w.columns(64, 128));
+        try std.testing.expectError(error.Exl3Shape, w.columns(0, 192));
+        try std.testing.expectError(error.Exl3Shape, w.columns(896, 256));
+    }
+}
+
+test "the counters are zeroed on the calls' stream only as they grow" {
+    const mock = @import("exl3_mock.zig");
+    var d = mock.init();
+    var de: Dense = .{ .d = &d, .lin = undefined };
+    defer if (de.counters) |*c| c.free();
+    const s: Stream = .{ .d = &d, .handle = @ptrFromInt(0x5100) };
+    _ = try de.grownCounters(s, 64);
+    try std.testing.expectEqual(@as(usize, 1), mock.memsets);
+    try std.testing.expectEqual(s.handle, mock.memset_stream);
+    _ = try de.grownCounters(s, 64);
+    _ = try de.grownCounters(s, 32);
+    try std.testing.expectEqual(@as(usize, 1), mock.memsets);
+    _ = try de.grownCounters(s, 128);
+    try std.testing.expectEqual(@as(usize, 2), mock.memsets);
+    try std.testing.expectEqual(@as(usize, 0), mock.legacy_memsets);
 }
 
 test "candidate selection refuses layouts it cannot represent" {

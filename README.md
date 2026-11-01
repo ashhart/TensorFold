@@ -57,11 +57,12 @@ tensorfold serve mlx-community/Qwen3.5-2B-MLX-4bit --name local-model --context 
 ### Linux with an NVIDIA GPU
 
 Use the release archive for your CPU: `linux-aarch64` on a GB10, `linux-x86_64` on an x86_64 host.
-It needs glibc 2.28 or newer and an NVIDIA driver providing `libcuda.so.1`. Keep the archive's directories together.
+It needs glibc 2.28 or newer and NVIDIA driver R580 or newer (CUDA 13.0), providing `libcuda.so.1`. Keep the archive's directories together.
+Its kernels are built with CUDA 13, so TensorFold refuses an older driver at startup; `nvidia-smi` shows the installed one.
 See the [CUDA runbook](RUNBOOK.md#linux-and-cuda) for runtime libraries and supported GPUs.
 
 ```sh
-V=1.1.9
+V=1.2.0
 case "$(uname -m)" in
   aarch64|arm64) PLATFORM=linux-aarch64 ;;
   x86_64) PLATFORM=linux-x86_64 ;;
@@ -175,9 +176,11 @@ Conversions are explicitly marked: their upstream weights need the linked conver
 | GLM-5.3, EXLR8 `home` | `tensorfold pull kindlingai/glm-5.3-exlr8-k2-k3-k4@f459f5d0272a529403dd9b3fd32f771f4250a0d4 --exlr8 home --node 0/2 --dir ~/models/glm-5.3-exlr8-home` | Two M5 Ultra Macs, 256 GB each; about 160 GB resident per Mac at 8k context / four streams. | [Two-Mac recipe](docs/glm-5.3-exlr8.md). Use `--node 1/2` on the other Mac; Thunderbolt 5 and MCDMA required. No CUDA backend. |
 | LFM2.5-24B-A2B, MLX 4 / 6 / 8-bit | `tensorfold pull LiquidAI/LFM2.5-24B-A2B-MLX-4bit@667408d494bde191c2cb9dd4f4549827816b9275`<br>`tensorfold pull LiquidAI/LFM2.5-24B-A2B-MLX-6bit@1deec53eb49571e21cdcbf82fd5839248f07ed88`<br>`tensorfold pull LiquidAI/LFM2.5-24B-A2B-MLX-8bit@67ab417dd02d0c9545802a726df668620eae049d` | One Mac; M4 Pro checked. | [Native recipe](docs/recipes/lfm2.5-24b-a2b.md), [release history](CHANGELOG.md). |
 | Qwen3.6-35B-A3B, MLX with MTP | `tensorfold pull TensorFold/Qwen3.6-35B-A3B-MLX-4bit-MTP@81169a9bc511a27c1b4eedb77a2cd98ced431847` | One GB10; 20.9 GB checkpoint. | [Qwen3.6](docs/recipes/qwen3.6-moe.md). Native CUDA; the recipe's Metal path belongs to Python. |
+| Qwen3.6-35B-A3B, NVIDIA NVFP4 with MTP | `tensorfold pull nvidia/Qwen3.6-35B-A3B-NVFP4@1355db6a052410cfd62085d94b58866fd0f2c3c5` | One GB10; 20.3 GiB on the device, 20.9 GiB with the drafter. | [Native CUDA](docs/recipes/qwen3.6-moe.md#nvidias-nvfp4-checkpoint-native-cuda). Serve with `--drafter` naming the same checkpoint for MTP drafts. |
 | Gemma 4 31B, MLX 4-bit | `tensorfold pull mlx-community/gemma-4-31B-it-4bit@696d436c404745a59f30e4939a658162b0a9e57f`<br>`tensorfold pull z-lab/gemma-4-31B-it-DFlash@eabd648301ce28583cc14757912e5e0f84e152e1` | One M5 Mac; M5 Ultra checked. M1-M4 refused. | [Native 31B](docs/recipes/gemma-4-native.md). Name the drafter with `--drafter`; images with `--vision`. |
 | Gemma 4 12B, converted MLX 4-bit | `hf download google/gemma-4-12B-it --revision 707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7 --local-dir ~/models/gemma-4-12b-hf`<br>`hf download google/gemma-4-12B-it-assistant --revision 46d4c6f13f0ac0ad827b915669b8df9b81c64c51 --local-dir ~/models/gemma-4-12b-assistant` | One M5 Mac; converted text weights 6.3 GB, image weights 100 MB, plus assistant/caches. M1-M4 refused. | [Convert and serve](docs/recipes/gemma-4-12b-native.md). Upstream download needs `hf`; conversion needs Python, mlx and mlx-lm. Serving is native. |
 | Step-5-Preview, converted affine | `hf download stepfun-ai/Step-5-Preview --local-dir ~/models/step5-preview-fp8` | One 256 GB Mac; text 166.9 GiB, MTP adds 2.5 GiB and vision 3.7 GiB. | [Convert and serve](docs/recipes/step-5-preview.md). The documented 256 GB setup serves converted affine weights; converting the upstream FP8 download needs Python and mlx. |
+| MiniMax-M3.1-Flash, community affine 3/4-bit | `hf download BobClawblaw/MiniMax-M3.1-Flash-MLX-mix34 --revision 9524999057e0d277d26438606e033e2191fb465c --local-dir ~/models/MiniMax-M3.1-Flash-MLX-mix34`<br>`hf download BobClawblaw/MiniMax-M3.1-Flash-MLX-mix256k --revision 916e7ca1044f1c3e7566163096243c940327224d --local-dir ~/models/MiniMax-M3.1-Flash-MLX-mix256k` | One 256 GB M5 Ultra; 203.7 GiB (32,768-token window) or 189.2 GiB (147,456), plus caches. | [MiniMax-M3.1-Flash](docs/recipes/minimax-m3.1-flash.md). Set `MINIMAX_LOAD_LIMIT_GB`; images with `--vision`. Community checkpoints: lossy conversions of MiniMax's NVFP4 release (KL 0.244 / 0.295). MiniMax Community License. |
 | Kolibri-1, block FP8 (research) | `tensorfold pull Aleph-Alpha/Kolibri-1@e52eb4627d11516b0c01de49210ab5a4e4061444` | One NVIDIA GPU; GB10 measured; 74 GB checkpoint. | [Kolibri](docs/recipes/kolibri-1.md). Text only; copy drafts, no EAGLE-3/neural drafter. |
 | Liquid AI d1-3B, decisions | Not documented yet. | Native CUDA; RAM minimum not published. | [API section below](#serve-flags). `/v1/systemone` and `/v1/decisions`. |
 | Fish Audio Drama 3, speech | Not documented yet. | Native Metal or CUDA; GB10 measured. | [Release audio instructions](CHANGELOG.md#110), [reference voices and dialogue speakers](docs/drama-http-voices.md). `/v1/audio/speech` with [sampling controls](docs/speech-sampling.md); checkpoint and `codec.pth` required. |
@@ -272,7 +275,7 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--alias NAME` | Another accepted model ID; repeat for multiple aliases. |
 | `--api-key KEY` | Require a bearer key; repeat for multiple keys. |
 | `--api-key-file FILE` | Read keys from a restricted-permission file; a key can be limited to [some routes](docs/api.md#key-scopes). |
-| `--metrics-open` | Allow `/metrics` without a key when API authentication is enabled. |
+| `--metrics-open` | Allow `/metrics` and `/v1/load` without a key when API authentication is enabled. |
 | `--dashboard` | Enable the local `/dashboard` page and `/stats` endpoint. |
 | `--max-inflight N`, `--max-inflight-per-key N` | Refuse model requests past N in progress at once, overall or per key, with 429; 0, the default, is off. See [admission](docs/api.md#admission). |
 | `--requests-per-second N`, `--request-burst N` | Refuse a key's model requests past N a second, after a burst; 0, the default, is off. |
@@ -385,10 +388,14 @@ Thank you to everyone who has sent TensorFold a pull request, a measurement or a
 
 [@0mao0](https://github.com/0mao0),
 [@321sssrt-bit](https://github.com/321sssrt-bit),
+[@AbrahamCete](https://github.com/AbrahamCete),
 [@aditya1503](https://github.com/aditya1503),
 [@AdrianBinDC](https://github.com/AdrianBinDC),
+[@ajensenwaud](https://github.com/ajensenwaud),
 [@akol1](https://github.com/akol1),
+[@alenperic](https://github.com/alenperic),
 [@Alexbob0](https://github.com/Alexbob0),
+[@alexderz](https://github.com/alexderz),
 [@anvilsong](https://github.com/anvilsong),
 [@Arminova](https://github.com/Arminova),
 [@b-ostrov](https://github.com/b-ostrov),
@@ -406,6 +413,7 @@ Thank you to everyone who has sent TensorFold a pull request, a measurement or a
 [@boxabirds](https://github.com/boxabirds),
 [@brandonmmusic-max](https://github.com/brandonmmusic-max),
 [@bunnyfu](https://github.com/bunnyfu),
+[@CanadaApollo6](https://github.com/CanadaApollo6),
 [@CerebralCoding](https://github.com/CerebralCoding),
 [@cesarswong](https://github.com/cesarswong),
 [@chadhurley25075-png](https://github.com/chadhurley25075-png),
@@ -423,13 +431,17 @@ Thank you to everyone who has sent TensorFold a pull request, a measurement or a
 [@Defilan](https://github.com/Defilan),
 [@DevRico003](https://github.com/DevRico003),
 [@di37](https://github.com/di37),
+[@diwakergupta](https://github.com/diwakergupta),
 [@drowzeys](https://github.com/drowzeys),
+[@easthambuilds](https://github.com/easthambuilds),
 [@ecohash-co](https://github.com/ecohash-co),
 [@edurdias](https://github.com/edurdias),
 [@eleqtrizit](https://github.com/eleqtrizit),
 [@ericlsimplifi](https://github.com/ericlsimplifi),
 [@EugeneClaw](https://github.com/EugeneClaw),
+[@fche](https://github.com/fche),
 [@feni6](https://github.com/feni6),
+[@florianbrede-ayet](https://github.com/florianbrede-ayet),
 [@gbgbgbg](https://github.com/gbgbgbg),
 [@GDACONSULT](https://github.com/GDACONSULT),
 [@gecobattya](https://github.com/gecobattya),
@@ -447,20 +459,29 @@ Thank you to everyone who has sent TensorFold a pull request, a measurement or a
 [@hichaiuse](https://github.com/hichaiuse),
 [@ivanfioravanti](https://github.com/ivanfioravanti),
 [@jasontitus](https://github.com/jasontitus),
+[@javierbits](https://github.com/javierbits),
 [@jayleaton](https://github.com/jayleaton),
 [@jeffpeng3](https://github.com/jeffpeng3),
 [@jeidbugs404](https://github.com/jeidbugs404),
+[@Jenpo](https://github.com/Jenpo),
+[@jerryfane](https://github.com/jerryfane),
 [@jetnet](https://github.com/jetnet),
+[@jishnuvenugopal](https://github.com/jishnuvenugopal),
 [@jkuepker](https://github.com/jkuepker),
+[@joeynyc](https://github.com/joeynyc),
 [@johnymoo](https://github.com/johnymoo),
 [@JordiPosthumus](https://github.com/JordiPosthumus),
+[@joshuaswarren](https://github.com/joshuaswarren),
 [@JRaxworthy](https://github.com/JRaxworthy),
 [@jrb-ai](https://github.com/jrb-ai),
 [@jschmied](https://github.com/jschmied),
 [@juliankang4](https://github.com/juliankang4),
+[@justincasey](https://github.com/justincasey),
 [@kelchm](https://github.com/kelchm),
+[@kieranscotney](https://github.com/kieranscotney),
 [@kingjamez](https://github.com/kingjamez),
 [@kky42](https://github.com/kky42),
+[@laudney](https://github.com/laudney),
 [@lcgutierrez](https://github.com/lcgutierrez),
 [@LECYWZA](https://github.com/LECYWZA),
 [@lijian1999](https://github.com/lijian1999),
@@ -482,6 +503,7 @@ Thank you to everyone who has sent TensorFold a pull request, a measurement or a
 [@MV10](https://github.com/MV10),
 [@NeoAiLabs](https://github.com/NeoAiLabs),
 [@Nipale-ai](https://github.com/Nipale-ai),
+[@nmcbride](https://github.com/nmcbride),
 [@nood-co1](https://github.com/nood-co1),
 [@nullburn](https://github.com/nullburn),
 [@olexale](https://github.com/olexale),
@@ -494,13 +516,16 @@ Thank you to everyone who has sent TensorFold a pull request, a measurement or a
 [@philip-pentatonic](https://github.com/philip-pentatonic),
 [@plotarmordev](https://github.com/plotarmordev),
 [@pmeenan](https://github.com/pmeenan),
+[@ppardus](https://github.com/ppardus),
 [@pulseandthread](https://github.com/pulseandthread),
 [@quigles1977](https://github.com/quigles1977),
 [@rafafortes](https://github.com/rafafortes),
 [@raymondkpwong](https://github.com/raymondkpwong),
 [@robertpitt](https://github.com/robertpitt),
+[@rootsbymenda](https://github.com/rootsbymenda),
 [@RoscoeTT](https://github.com/RoscoeTT),
 [@RS91Dev](https://github.com/RS91Dev),
+[@russellmm](https://github.com/russellmm),
 [@salmanarshad321](https://github.com/salmanarshad321),
 [@samwang0041-star](https://github.com/samwang0041-star),
 [@sanjaibalajee](https://github.com/sanjaibalajee),
@@ -516,23 +541,28 @@ Thank you to everyone who has sent TensorFold a pull request, a measurement or a
 [@ss-cong](https://github.com/ss-cong),
 [@styles01](https://github.com/styles01),
 [@SvangenStudios](https://github.com/SvangenStudios),
+[@swbiggart](https://github.com/swbiggart),
 [@SxMShaDoW](https://github.com/SxMShaDoW),
 [@sxuff](https://github.com/sxuff),
 [@taussoe](https://github.com/taussoe),
 [@tfolkman](https://github.com/tfolkman),
 [@ThinkOffApp](https://github.com/ThinkOffApp),
+[@ThomasHalwax](https://github.com/ThomasHalwax),
 [@Thotheris](https://github.com/Thotheris),
 [@tinyapps](https://github.com/tinyapps),
 [@tolewis](https://github.com/tolewis),
 [@tomByrer](https://github.com/tomByrer),
 [@tonydehnke](https://github.com/tonydehnke),
 [@tournierjc](https://github.com/tournierjc),
+[@tovereast](https://github.com/tovereast),
 [@tpischke](https://github.com/tpischke),
 [@urtho](https://github.com/urtho),
+[@valacroix](https://github.com/valacroix),
 [@vcruz305](https://github.com/vcruz305),
 [@vinicius-symetrix](https://github.com/vinicius-symetrix),
 [@wojo](https://github.com/wojo),
 [@xjqx2z](https://github.com/xjqx2z),
+[@yguanrong](https://github.com/yguanrong),
 [@Yuepixel](https://github.com/Yuepixel),
 [@YvesLaRose](https://github.com/YvesLaRose),
 [@ZackSample](https://github.com/ZackSample),

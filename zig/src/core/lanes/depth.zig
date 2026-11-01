@@ -144,7 +144,7 @@ pub const Rule = struct {
     pub fn depth(r: *Rule, who: Who) !i64 {
         const most = @min(@as(i64, r.most_drafts), @max(1, who.draft_room - 1));
         if (most <= 0) return 0;
-        if (r.confidence_floor != null) return most;
+        if (r.confidence_floor != null and !who.sampled) return most;
         const p = try r.rates(who);
         if (r.family_costs.empty()) {
             const want: i64 = if (p[0] < 0.8) 1 else if (p[0] < 0.9) 2 else 3;
@@ -192,9 +192,9 @@ pub const Rule = struct {
         return true;
     }
 
-    /// Python `_head_depth`: the next round's head drafts for a stream (0 when forced, 1 with a copy ahead).
+    /// Python `_head_depth`: next head drafts (0 forced, 1 with a copy); a floor leaves a sampled stream its rates'.
     pub fn headDepth(r: *Rule, who: *const Who, budget: ?i64, probe: Probe) !i64 {
-        const d: i64 = if (who.finished) 0 else if (budget) |b| b else if (r.node_probabilities)
+        const d: i64 = if (who.finished) 0 else if (budget) |b| b else if (r.node_probabilities and !(who.sampled and r.confidence_floor != null))
             @min(@as(i64, r.most_drafts), @max(1, who.draft_room - 1))
         else
             try r.depth(who.*);
@@ -351,6 +351,26 @@ test "depth picks the most tokens a ms and probes deeper" {
     defer if (st) |*s| s.deinit(gpa);
     const who: Who = .{ .state = &st, .draft_room = 100, .finished = false, .forced = false };
     try std.testing.expectEqual(@as(i64, 3), try rule.depth(who));
+}
+
+test "under a confidence floor a greedy stream drafts the most, and a sampled one keeps its rates' depth" {
+    const gpa = std.testing.allocator;
+    const empty: Table = .{};
+    const No = struct {
+        fn copy(_: *anyopaque, _: *const Who) bool {
+            return false;
+        }
+    };
+    var unused: u8 = 0;
+    const probe: Probe = .{ .ptr = &unused, .copy = No.copy };
+    var rule: Rule = .{ .gpa = gpa, .prior = &.{ 0.5, 0.5, 0.5 }, .most_drafts = 3, .family_costs = &empty, .shared_costs = &empty, .mtp_step_ms = 0.5, .plain_guard = false, .node_probabilities = true, .confidence_floor = 0.5, .batch_rows = 8 };
+    defer rule.deinit();
+    var states: [2]?State = .{ null, null };
+    defer for (&states) |*s| if (s.*) |*x| x.deinit(gpa);
+    const greedy: Who = .{ .state = &states[0], .draft_room = 100, .finished = false, .forced = false };
+    const sampled: Who = .{ .state = &states[1], .draft_room = 100, .finished = false, .forced = false, .sampled = true };
+    try std.testing.expectEqual(@as(i64, 3), try rule.headDepth(&greedy, null, probe));
+    try std.testing.expectEqual(@as(i64, 1), try rule.headDepth(&sampled, null, probe)); // a first rate under 0.8: one draft
 }
 
 test "a shared round's drafts come out the same whichever depths its overhead was measured at" {

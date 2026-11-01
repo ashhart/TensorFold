@@ -1,0 +1,346 @@
+#version 460
+
+// From omarchy-mlx overlay/mlx/backend/omarchy/shaders/qmm.comp at 388b41f509fb: code unchanged, comments condensed.
+
+// Copyright © 2026 Joshua Warren and mlx-omarchy contributors; MIT License, full text in LICENSES/mlx-omarchy-MIT.txt.
+
+// QuantizedMatmul: out[m, n] = x row m . dequantized w row n (transposed) or column n (flags bit 0 set).
+
+// Affine: q * scale + bias per group_size run; bits 2/4/8 pack low bits first in uint32, bits 3/5/6 in byte packs.
+
+// FP_MODE: fp4 e2m1 or fp8 e4m3 codes with one scale byte per group through the uint view and no bias.
+
+// Straight-line per-thread loads at linear addresses in uniform-trip loops (Honeykrisp: no lane-divergent words).
+
+#ifdef USE_FP16
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#define STORAGE_TYPE float16_t
+#define LOAD_VALUE(x) float(x)
+#define STORE_VALUE(f) STORAGE_TYPE(f)
+#elif defined(USE_BF16)
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#define STORAGE_TYPE uint16_t
+#define LOAD_VALUE(x) uintBitsToFloat(uint(x) << 16u)
+uint16_t bf16_store(float value) {
+  uint bits = floatBitsToUint(value);
+  if (isnan(value)) {
+    return uint16_t((bits >> 16) | 0x40u);
+  }
+  return uint16_t((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16);
+}
+#define STORE_VALUE(f) bf16_store(f)
+#else
+#define STORAGE_TYPE float
+#define LOAD_VALUE(x) float(x)
+#define STORE_VALUE(f) STORAGE_TYPE(f)
+#endif
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer InputX {
+  STORAGE_TYPE values[];
+} input_x;
+layout(set = 0, binding = 1, std430) readonly buffer InputW {
+  uint values[];
+} input_w;
+#ifdef FP_MODE
+// Scale bytes addressed through the word view; no bias term.
+layout(set = 0, binding = 2, std430) readonly buffer ScaleBias {
+  uint values[];
+} scale_bias;
+layout(set = 0, binding = 3, std430) writeonly buffer Output {
+  STORAGE_TYPE values[];
+} output_data;
+#else
+// Separate scale and bias streams: aux_offset is the scale base item, aux_size the bias base item.
+layout(set = 0, binding = 2, std430) readonly buffer Scales {
+  STORAGE_TYPE values[];
+} scales;
+layout(set = 0, binding = 3, std430) readonly buffer Biases {
+  STORAGE_TYPE values[];
+} biases;
+layout(set = 0, binding = 4, std430) writeonly buffer Output {
+  STORAGE_TYPE values[];
+} output_data;
+#endif
+
+// Routing: operation = bits, reduce_size = group, shape[0] batch, shape[1]/[2] w words/params a batch (0: shared).
+layout(push_constant) uniform Params {
+  uint count;
+  uint operation;
+  uint lhs_size;
+  uint rhs_size;
+  uint reduce_size;
+  uint output_size;
+  uint lhs_offset;
+  uint rhs_offset;
+  uint output_offset;
+  uint aux_size;
+  uint aux_offset;
+  uint matrix_m;
+  uint matrix_n;
+  uint matrix_k;
+  uint flags;
+  float alpha;
+  float beta;
+  uint dims;
+  uint shape[4];
+  uint in_strides[4];
+  uint out_strides[4];
+} params;
+
+// Constant-shift select chain from omarchy-mlx scatter.comp: runtime word and lane, constant shift per lane.
+uint byte_at(uint word, uint lane) {
+  return (lane == 0u)
+      ? (word & 0xFFu)
+      : (lane == 1u)
+      ? ((word >> 8u) & 0xFFu)
+      : (lane == 2u)
+      ? ((word >> 16u) & 0xFFu)
+      : ((word >> 24u) & 0xFFu);
+}
+
+#ifdef FP_MODE
+float fp8_decode(uint bits) {
+  float magnitude = unpackHalf2x16((bits & 127u) << 7u).x * 256.0;
+  return ((bits & 128u) != 0u) ? -magnitude : magnitude;
+}
+
+float e8m0_decode(uint bits) {
+  return uintBitsToFloat(bits == 0u ? 0x400000u : bits << 23u);
+}
+
+// FP4 E2M1 via the fp16 bit trick of Metal's fp4_e2m1: (bits & 7) << 9 is an fp16 subnormal, 2^14 in the scale.
+float fp4_decode(uint code) {
+  float magnitude = unpackHalf2x16((code & 7u) << 9u).x * 16384.0;
+  return ((code & 8u) != 0u) ? -magnitude : magnitude;
+}
+#else
+// Affine byte-pack decode: element e of a pack by the upstream extract table, constant shifts only.
+uint q3_at(uint e, uint c0, uint c1, uint c2) {
+  if (e == 0u) return c0 & 0x7u;
+  if (e == 1u) return (c0 >> 3) & 0x7u;
+  if (e == 2u) return ((c0 >> 6) & 0x3u) + ((c1 & 0x1u) << 2);
+  if (e == 3u) return (c1 >> 1) & 0x7u;
+  if (e == 4u) return (c1 >> 4) & 0x7u;
+  if (e == 5u) return ((c1 >> 7) & 0x1u) + ((c2 & 0x3u) << 1);
+  if (e == 6u) return (c2 >> 2) & 0x7u;
+  return (c2 >> 5) & 0x7u;
+}
+
+uint q5_at(uint e, uint c0, uint c1, uint c2, uint c3, uint c4) {
+  if (e == 0u) return c0 & 0x1fu;
+  if (e == 1u) return ((c0 >> 5) & 0x7u) + ((c1 & 0x3u) << 3);
+  if (e == 2u) return (c1 >> 2) & 0x1fu;
+  if (e == 3u) return ((c1 >> 7) & 0x1u) + ((c2 & 0xfu) << 1);
+  if (e == 4u) return ((c2 >> 4) & 0xfu) + ((c3 & 0x1u) << 4);
+  if (e == 5u) return (c3 >> 1) & 0x1fu;
+  if (e == 6u) return ((c3 >> 6) & 0x3u) + ((c4 & 0x7u) << 2);
+  return (c4 >> 3) & 0x1fu;
+}
+
+uint q6_at(uint e, uint c0, uint c1, uint c2) {
+  if (e == 0u) return c0 & 0x3fu;
+  if (e == 1u) return ((c0 >> 6) & 0x3u) + ((c1 & 0xfu) << 2);
+  if (e == 2u) return ((c1 >> 4) & 0xfu) + ((c2 & 0x3u) << 4);
+  return (c2 >> 2) & 0x3fu;
+}
+#endif
+
+// Transposed (bit 0 clear): w [N, Kp], scale [n][k / group]; non-transposed: w [K, Np], scale [k][n / group].
+void main() {
+  uint bits = params.operation;
+  uint group_size = params.reduce_size;
+  bool non_transposed = (params.flags & 1u) != 0u;
+  uint is_byte_bits = (bits == 3u || bits == 5u || bits == 6u) ? 1u : 0u;
+  uint pack_factor = is_byte_bits == 1u
+      ? (bits == 6u ? 4u : 8u)
+      : (32u / bits);
+  uint bytes_per_pack = is_byte_bits == 1u ? (bits == 5u ? 5u : 3u) : 1u;
+  uint value_mask = (1u << bits) - 1u;
+  uint packs_per_group = group_size / pack_factor;
+  uint words_per_row = params.matrix_k * bits / 32u;
+  uint groups_per_row = params.matrix_k / group_size;
+  uint batch = params.shape[0];
+  uint w_batch_words = params.shape[1];
+  uint param_batch = params.shape[2];
+  uint matrix = params.matrix_m * params.matrix_n;
+  uint x_batch_rows = params.matrix_m * params.matrix_k;
+#ifdef FP_MODE
+  // FP_MODE has no w batch: a 2D w is shared across the flattened x rows, so shape[0] stays 0 and b = 0.
+  uint total = params.matrix_m * params.matrix_n;
+#else
+  uint total = batch * matrix;
+#endif
+  uint stride = gl_NumWorkGroups.x * 256u;
+
+  for (uint index = gl_GlobalInvocationID.x; index < total;
+       index += stride) {
+    uint b = index / matrix;
+    uint within = index - b * matrix;
+    uint row = within / params.matrix_n;
+    uint column = within - row * params.matrix_n;
+    uint x_base = params.lhs_offset + b * x_batch_rows +
+        row * params.matrix_k;
+    float accumulator = 0.0;
+#ifdef FP_MODE
+    uint fp_pack_factor = (bits == 8u) ? 1u : 2u;
+    if (non_transposed) {
+      // FP_MODE non-transposed: w [K, Np], two nibbles a byte little-endian, scale bytes [K, n / group]; walk k.
+      uint n_bytes_per_row = params.matrix_n * bits / 8u;
+      uint col_byte = column / fp_pack_factor;
+      uint col_group = column / group_size;
+      uint nibble = column & 1u;
+      uint groups_per_col_row = params.matrix_n / group_size;
+      for (uint k = 0u; k < params.matrix_k; ++k) {
+        uint scale_addr = params.aux_offset +
+            k * groups_per_col_row + col_group;
+        uint scale_byte = byte_at(
+            scale_bias.values[scale_addr >> 2u], scale_addr & 3u);
+        float scale = (group_size == 16u) ? fp8_decode(scale_byte)
+                                          : e8m0_decode(scale_byte);
+        uint byte_addr = params.rhs_offset * 4u +
+            k * n_bytes_per_row + col_byte;
+        uint packed_byte = byte_at(
+            input_w.values[byte_addr >> 2u], byte_addr & 3u);
+        uint code = (bits == 8u)
+            ? packed_byte
+            : ((nibble == 0u) ? (packed_byte & 0xFu)
+                              : (packed_byte >> 4u));
+        float value = (bits == 8u) ? fp8_decode(code) : fp4_decode(code);
+        accumulator += LOAD_VALUE(input_x.values[x_base + k]) *
+            (scale * value);
+      }
+    } else {
+      // FP_MODE transposed: w [N, Kp], scales [N, k / group_size].
+      for (uint k = 0u; k < params.matrix_k; ++k) {
+        uint group = k / group_size;
+        uint scale_addr = params.aux_offset +
+            column * groups_per_row + group;
+        uint scale_byte = byte_at(
+            scale_bias.values[scale_addr >> 2u], scale_addr & 3u);
+        float scale = (group_size == 16u) ? fp8_decode(scale_byte)
+                                          : e8m0_decode(scale_byte);
+        uint byte_addr = (params.rhs_offset + column * words_per_row) *
+                4u +
+            k / fp_pack_factor;
+        uint packed_byte = byte_at(
+            input_w.values[byte_addr >> 2u], byte_addr & 3u);
+        uint code = (bits == 8u)
+            ? packed_byte
+            : (((k & 1u) == 0u) ? (packed_byte & 0xFu)
+                                : (packed_byte >> 4u));
+        float value = (bits == 8u) ? fp8_decode(code) : fp4_decode(code);
+        accumulator += LOAD_VALUE(input_x.values[x_base + k]) *
+            (scale * value);
+      }
+    }
+#else
+    if (non_transposed) {
+      // One fixed lane and scale column a thread walks the k rows; bits 3/5/6 decode one lane of the row's packs.
+      uint n_bytes_per_row = params.matrix_n * bits / 8u;
+      uint n_words_per_row = params.matrix_n * bits / 32u;
+      uint group_bytes = packs_per_group * bytes_per_pack;
+      uint col_byte_off = (column / group_size) * group_bytes +
+          ((column % group_size) / pack_factor) * bytes_per_pack;
+      uint param_base = params.aux_offset + b * param_batch +
+          column / group_size;
+      uint param_step = params.matrix_n / group_size;
+      uint lane = column % pack_factor;
+      uint col_word_off = column / pack_factor;
+      uint lane_shift = lane * bits;
+      for (uint k = 0u; k < params.matrix_k; ++k) {
+        float scale = LOAD_VALUE(
+            scales.values[param_base + k * param_step]);
+        float bias = LOAD_VALUE(
+            biases.values[params.aux_size + b * param_batch +
+                column / group_size + k * param_step]);
+        uint q;
+        if (is_byte_bits == 1u) {
+          uint byte_addr =
+              (params.rhs_offset + b * w_batch_words) * 4u +
+              k * n_bytes_per_row + col_byte_off;
+          uint c0 = byte_at(
+              input_w.values[byte_addr >> 2u], byte_addr & 3u);
+          uint c1 = byte_at(
+              input_w.values[(byte_addr + 1u) >> 2u],
+              (byte_addr + 1u) & 3u);
+          uint c2 = byte_at(
+              input_w.values[(byte_addr + 2u) >> 2u],
+              (byte_addr + 2u) & 3u);
+          q = (bits == 3u)
+              ? q3_at(lane, c0, c1, c2)
+              : (bits == 5u)
+              ? q5_at(lane, c0, c1, c2, byte_at(
+                    input_w.values[(byte_addr + 3u) >> 2u],
+                    (byte_addr + 3u) & 3u), byte_at(
+                    input_w.values[(byte_addr + 4u) >> 2u],
+                    (byte_addr + 4u) & 3u))
+              : q6_at(lane, c0, c1, c2);
+        } else {
+          uint word = input_w.values[params.rhs_offset +
+              b * w_batch_words + k * n_words_per_row + col_word_off];
+          q = (word >> lane_shift) & value_mask;
+        }
+        accumulator += LOAD_VALUE(input_x.values[x_base + k]) *
+            (scale * float(q) + bias);
+      }
+    } else {
+      uint w_base = params.rhs_offset + b * w_batch_words +
+          column * words_per_row;
+      uint param_base = params.aux_offset + b * param_batch +
+          column * groups_per_row;
+      uint bias_base = params.aux_size + b * param_batch +
+          column * groups_per_row;
+      uint group = 0u;
+      for (uint k = 0u; k < params.matrix_k; k += group_size) {
+        float scale = LOAD_VALUE(scales.values[param_base + group]);
+        float bias = LOAD_VALUE(biases.values[bias_base + group]);
+        ++group;
+        for (uint pack = 0u; pack < packs_per_group; ++pack) {
+          uint k_base = k + pack * pack_factor;
+          if (is_byte_bits == 1u) {
+            uint byte_addr = w_base * 4u +
+                ((k / group_size) * packs_per_group + pack) *
+                    bytes_per_pack;
+            uint c0 = byte_at(
+                input_w.values[byte_addr >> 2u], byte_addr & 3u);
+            uint c1 = byte_at(
+                input_w.values[(byte_addr + 1u) >> 2u],
+                (byte_addr + 1u) & 3u);
+            uint c2 = byte_at(
+                input_w.values[(byte_addr + 2u) >> 2u],
+                (byte_addr + 2u) & 3u);
+            for (uint lane = 0u; lane < pack_factor; ++lane) {
+              uint q = (bits == 3u)
+                  ? q3_at(lane, c0, c1, c2)
+                  : (bits == 5u)
+                  ? q5_at(lane, c0, c1, c2, byte_at(
+                        input_w.values[(byte_addr + 3u) >> 2u],
+                        (byte_addr + 3u) & 3u), byte_at(
+                        input_w.values[(byte_addr + 4u) >> 2u],
+                        (byte_addr + 4u) & 3u))
+                  : q6_at(lane, c0, c1, c2);
+              accumulator +=
+                  LOAD_VALUE(input_x.values[x_base + k_base + lane]) *
+                  (scale * float(q) + bias);
+            }
+          } else {
+            uint word = input_w.values[w_base + (k / pack_factor) + pack];
+            for (uint lane = 0u; lane < pack_factor; ++lane) {
+              uint q = (word >> (lane * bits)) & value_mask;
+              accumulator +=
+                  LOAD_VALUE(input_x.values[x_base + k_base + lane]) *
+                  (scale * float(q) + bias);
+            }
+          }
+        }
+      }
+    }
+#endif
+    output_data.values[params.output_offset + index] =
+        STORE_VALUE(accumulator);
+  }
+}

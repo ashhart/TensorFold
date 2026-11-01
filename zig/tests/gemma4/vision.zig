@@ -137,7 +137,7 @@ pub fn main(init: std.process.Init) !void {
         const f = try mtl.MappedFile.open(image_path);
         defer f.deinit();
         const max_tokens: u32 = @intCast(meta.object.get("max_tokens").?.integer);
-        const prep = try g.image.prepare(init.io, a, f.bytes[0..f.size], max_tokens, layout);
+        const prep = try g.image_steps.prepare(init.io, a, f.bytes[0..f.size], max_tokens, layout);
         const want_patches = try floats(a, ref, "patches.f32");
         var differ: usize = 0;
         var largest: f32 = 0;

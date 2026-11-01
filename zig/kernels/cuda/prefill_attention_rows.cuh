@@ -124,7 +124,7 @@
     float m0 = -INFINITY, m1 = -INFINITY, l0 = 0.0f, l1 = 0.0f;
     const int pos0 = causal ? p0 + wrow + g : limit - 1, pos1 = causal ? pos0 + 8 : pos0;
     auto take = [&](int it) -> const uint4* {           // item it's slot, once every thread's copy has landed
-        wait_group<NS - 1>();
+        cp_wait<NS - 1>();
         __syncthreads();
         return slots + (it % NS) * HALF * CS;
     };
@@ -239,7 +239,7 @@
         values(pa[2], pa[3], take(it + 3));
         done(it + 3);
     }
-    wait_group<0>();
+    cp_wait<0>();
     const int r0 = wrow + g, r1 = r0 + 8;
 #pragma unroll
     for (int i = 0; i < C; ++i) {

@@ -17,7 +17,8 @@ pub const Kernels = struct {
     to_bf16_fn: cuda.Function = undefined,
     draws: cuda.sample.Draws = undefined,
 
-    pub fn load(ctx: *const cuda.Context) !Kernels {
+    /// `paged`: also window_pages.cu (the paged caches' attention); else that module is not loaded.
+    pub fn load(ctx: *const cuda.Context, paged: bool) !Kernels {
         const d = ctx.d;
         var k: Kernels = undefined;
         k.served = false;
@@ -37,7 +38,7 @@ pub const Kernels = struct {
         errdefer k.dense.unload();
         k.win = try cuda.window_attention.WindowAttention.load(d);
         errdefer k.win.unload();
-        try k.win.loadPages(d);
+        if (paged) try k.win.loadPages(d);
         if (!cuda.kernels.available) return k;
         const kk = cuda.kernels;
         const images = [_][]const u8{ kk.sample, kk.torch_argmax, kk.torch_pointwise };

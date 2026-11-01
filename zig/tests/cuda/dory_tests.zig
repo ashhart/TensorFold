@@ -27,7 +27,7 @@ pub const Rig = struct {
         r.gpu = gpu;
         r.w = try dory.cuda_weights.load(gpu.gpa, gpu.io, gpu.d, model, loops);
         errdefer r.w.deinit();
-        r.k = try fwd.Kernels.load(gpu.ctx);
+        r.k = try fwd.Kernels.load(gpu.ctx, pages);
         errdefer r.k.deinit();
         r.s = try cuda.Stream.init(gpu.d, false);
         errdefer r.s.deinit();

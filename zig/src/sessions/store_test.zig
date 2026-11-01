@@ -28,7 +28,7 @@ const HostBounded = struct {
         const h = try gpa.create(HostBounded);
         h.* = .{ .gpa = gpa, .bytes = try gpa.alloc(u8, 3000) };
         for (h.bytes, 0..) |*b, i| b.* = @truncate(i +% chat *% 17 +% pos);
-        return .{ .ptr = h, .vtable = &vt };
+        return .{ .ptr = h, .vtable = &vt, .logical_bytes = 3000 };
     }
     const vt: Bounded.VTable = .{ .nbytes = nbytes, .blobs = blobs, .release = release };
     fn nbytes(p: *anyopaque) u64 {
@@ -167,6 +167,11 @@ fn restart(gpa: std.mem.Allocator, root: []const u8, world: u32, rank: u32) !voi
     var r: Rank = undefined;
     try r.init(gpa, root, world, rank, .{ .chats = 1 });
     defer r.deinit();
+    if (world > 1) {
+        try testing.expectError(error.SplitReconcileUnsupported, r.store.reconcile());
+        try testing.expectEqual(@as(u64, 0), r.disk.used);
+        return;
+    }
     try testing.expectEqual(@as(u32, 4), try r.store.reconcile());
     const s = try r.pool.newSlot(64 * page);
     const a = try chatIds(gpa, 1, 20 * page);
@@ -277,4 +282,131 @@ test "zero chat or byte budgets evict idle residency while null remains unlimite
     r.store.policy.resident_bytes = 0;
     try testing.expectEqual(@as(u32, 1), try r.store.enforce());
     try testing.expectEqual(@as(u64, 0), r.store.resident().bytes);
+}
+
+/// One rank of the trim scenario: chats of 3, 5 and 7 pages through a small tier (odd counts: the ranks' files differ).
+fn trimScenario(gpa: std.mem.Allocator, root: []const u8, world: u32, rank: u32, trace: *std.ArrayList(u64)) !void {
+    var r: Rank = undefined;
+    try r.init(gpa, root, world, rank, .{ .chats = 1, .skip_covered = false, .delta = false });
+    defer r.deinit();
+    r.disk.opts.budget = 400 << 10; // two or three of these files
+    const s = try r.pool.newSlot(64 * page);
+    var chat: u32 = 1;
+    while (chat <= 16) : (chat += 1) {
+        const ids = try chatIds(gpa, chat, (3 + 2 * (chat % 3)) * page); // 3, 5 or 7 pages
+        defer gpa.free(ids);
+        try testing.expectEqualStrings("fresh", try turn(gpa, &r, s, chat, ids));
+        try trace.appendSlice(gpa, &.{ chat, r.disk.used, r.disk.stats.evicted, r.store.stats.parks });
+        var id = r.disk.oldest;
+        while (id != disk_mod.none) : (id = r.disk.recs.items[id].newer) try trace.append(gpa, std.mem.readInt(u64, r.disk.recs.items[id].key[0..8], .little));
+        var e: u32 = 0;
+        while (e < r.store.index.entries.items.len) : (e += 1) {
+            const x = r.store.entry(e);
+            if (x.live) try trace.appendSlice(gpa, &.{ e, x.pos, @intFromBool(x.ram), @intFromBool(x.extra.file) });
+        }
+    }
+    try testing.expect(r.disk.stats.evicted >= 8); // the budget did trim, many times
+    try testing.expect(r.disk.used <= r.disk.opts.budget);
+}
+
+test "two split ranks trim the same NVMe files: the budget counts a file alike on every rank" {
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var t0: std.ArrayList(u64) = .empty;
+    defer t0.deinit(gpa);
+    var t1: std.ArrayList(u64) = .empty;
+    defer t1.deinit(gpa);
+    const root = try tmpRoot(gpa, &tmp, "trim");
+    defer gpa.free(root);
+    try trimScenario(gpa, root, 2, 0, &t0);
+    try trimScenario(gpa, root, 2, 1, &t1);
+    try testing.expectEqualSlices(u64, t0.items, t1.items);
+}
+
+test "holds: an entry by its id, position and key" {
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmpRoot(gpa, &tmp, "holds");
+    defer gpa.free(root);
+    var r: Rank = undefined;
+    try r.init(gpa, root, 1, 0, .{});
+    defer r.deinit();
+    const s = try r.pool.newSlot(64 * page);
+    const a = try chatIds(gpa, 1, 4 * page);
+    defer gpa.free(a);
+    try s.ensure(a.len);
+    r.write(s, 1, 0);
+    const id = (try r.store.save(s, try HostBounded.make(gpa, 1, a.len), a, 1, 0)).?;
+    _ = try s.releaseAll();
+    const e = r.store.entry(id);
+    var other = e.key;
+    other[0] +%= 1;
+    try testing.expect(r.store.index.holds(id, e.pos, e.key));
+    try testing.expect(!r.store.index.holds(id, e.pos - 1, e.key));
+    try testing.expect(!r.store.index.holds(id, e.pos, other));
+    try testing.expect(!r.store.index.has(id + 1000) and !r.store.index.holds(id + 1000, e.pos, e.key));
+    const pos = e.pos;
+    const key = e.key;
+    try r.store.drop(id); // out of RAM with no file: out of the index
+    try testing.expect(!r.store.index.holds(id, pos, key));
+}
+
+test "wrong same-length RAM entry and absent id are refused before slot mutation" {
+    const Want = @import("restore.zig").Want;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmpRoot(gpa, &tmp, "wrong-ram");
+    defer gpa.free(root);
+    var r: Rank = undefined;
+    try r.init(gpa, root, 1, 0, .{});
+    defer r.deinit();
+    const slot = try r.pool.newSlot(64 * page);
+    const a = try chatIds(gpa, 1, 4 * page + 1);
+    defer gpa.free(a);
+    const b = try chatIds(gpa, 2, a.len);
+    defer gpa.free(b);
+    _ = try turn(gpa, &r, slot, 1, a[0 .. a.len - 1]);
+    const hit = (try r.store.find(1, a)).?;
+    const want: Want = .{ .pos = hit.pos, .key = r.store.entry(hit.id).key };
+    _ = try turn(gpa, &r, slot, 2, b[0 .. b.len - 1]);
+    const other = (try r.store.find(1, b)).?;
+    try testing.expect(other.ram and other.pos == hit.pos);
+    try testing.expectError(error.NotTheEntry, want.check(&r.store.index, other.id));
+    const original = r.store.entry(hit.id).key;
+    r.store.entry(hit.id).key = r.store.entry(other.id).key;
+    try testing.expectError(error.NotTheEntry, want.check(&r.store.index, hit.id));
+    r.store.entry(hit.id).key = original;
+    try testing.expectError(error.NotTheEntry, want.check(&r.store.index, other.id + 1000));
+    try testing.expectEqual(@as(u32, 0), slot.len);
+    try want.check(&r.store.index, hit.id);
+    _ = try r.store.restoreRam(hit.id, slot);
+    try r.check(slot, 1, hit.pos);
+    _ = try slot.releaseAll();
+}
+
+test "split parking refuses a physical-only bounded measure before submitting work" {
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmpRoot(gpa, &tmp, "missing-logical");
+    defer gpa.free(root);
+    var r: Rank = undefined;
+    try r.init(gpa, root, 2, 0, .{});
+    defer r.deinit();
+    const slot = try r.pool.newSlot(64 * page);
+    const ids = try chatIds(gpa, 1, 5 * page + 1);
+    defer gpa.free(ids);
+    _ = try turn(gpa, &r, slot, 1, ids[0 .. ids.len - 1]);
+    const hit = (try r.store.find(1, ids)).?;
+    r.store.entry(hit.id).extra.bounded.?.logical_bytes = null;
+    try testing.expectError(error.MissingLogicalCharge, r.store.beginPark(hit.id));
+    try testing.expect(r.store.entry(hit.id).ram);
+    try testing.expectEqual(@as(usize, 0), r.store.pending.items.len);
+    r.store.entry(hit.id).extra.bounded.?.logical_bytes = 3000;
+    const job = (try r.store.beginPark(hit.id)).?;
+    _ = try r.store.settle(job);
+    try testing.expect(!r.store.entry(hit.id).ram);
 }

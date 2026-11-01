@@ -82,6 +82,8 @@ const Setup = struct {
     requests: usize = 5,
     shared: u32 = system_len, // the shared block the requests name
     hook: Hook = .{},
+    prefill_chunks: usize = 13, // fake prompt chunks: 1 means one call would fill the whole prompt
+    decode_share: ?f64 = null, // --decode-share: on a fake that opts in, it caps fill chunks at 512 rows
 };
 
 const Run = struct {
@@ -109,7 +111,7 @@ fn promptOf(buf: *[prompt_len]u32, i: usize) []const u32 {
 fn fanout(su: Setup, out: *Run) !void {
     var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
     defer cfg.deinit(gpa);
-    var target: lanes.fake.Fake = .{ .gpa = gpa, .prefill_chunks = 13 };
+    var target: lanes.fake.Fake = .{ .gpa = gpa, .prefill_chunks = su.prefill_chunks };
     defer target.deinit();
     var clock: lanes.fake.FixedClock = .{};
     var core = lanes.Engine.init(gpa, &cfg, if (su.stepped) target.stepped() else target.backend(), clock.clock());
@@ -117,7 +119,7 @@ fn fanout(su: Setup, out: *Run) !void {
     const rules: pc.Rules = .{ .lookahead = 1, .min_prompt = 0, .planned = true, .grid = 16, .chunk = 16 };
     var store = pc.Store.init(gpa, .{ .ptr = &target, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop } }, rules, 1 << 24);
     defer store.deinit();
-    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 8 });
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 8, .decode_share = su.decode_share });
     host.cache = &store;
     if (su.wait_ms) |ms| host.prefix.ns = @as(i96, ms) * std.time.ns_per_ms;
     const e = host.engine();
@@ -219,4 +221,20 @@ test "prefix wait: TENSORFOLD_PREFIX_WAIT_MS is whole milliseconds, 0 off, anyth
     try std.testing.expectEqual(default_ns, prefix.Wait.fromText("1.5").ns);
     try std.testing.expectEqual(@as(i96, 0), prefix.Wait.fromText("0").ns);
     try std.testing.expectEqual(@as(i96, 250) * std.time.ns_per_ms, prefix.Wait.fromText("250").ns);
+}
+
+test "prefix wait: with an active share and the cap on, a waiter is released within the bound and replies equal the no-share run" {
+    _ = @import("sys").env.unsetenv("TENSORFOLD_PREFILL_SHARE"); // the flag carries the share here; the env must not leak in
+    var on: Run = .{};
+    defer on.deinit();
+    try fanout(.{ .requests = 2, .wait_ms = 25, .prefill_chunks = 1, .decode_share = 0.5 }, &on);
+    var off: Run = .{};
+    defer off.deinit();
+    try fanout(.{ .requests = 2, .wait_ms = 25, .prefill_chunks = 1 }, &off);
+    for (0..2) |i| {
+        try std.testing.expectEqual(Reason.length, on.reasons[i]);
+        try std.testing.expectEqualSlices(u32, off.boxes[i].tokens.items, on.boxes[i].tokens.items); // capped chunks: resumed == fresh
+    }
+    try std.testing.expectEqual(@as(u64, 1), on.waits); // the leader's cut released the waiter
+    try std.testing.expectEqual(@as(u64, 0), on.timeouts); // within the 25 ms bound, not at it
 }

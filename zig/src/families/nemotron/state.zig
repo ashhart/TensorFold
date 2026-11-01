@@ -4,6 +4,8 @@ const mtl = @import("metal");
 const cfg = @import("config.zig");
 const fwd = @import("forward.zig");
 const lesson_route = @import("living").lesson_route;
+const kv_pool = @import("../../core/kv_pool.zig");
+const kvp = @import("../../core/metal_kv_pages.zig");
 
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
@@ -123,11 +125,56 @@ pub const Pool = struct {
     }
 };
 
-/// One attention cache: [KVH, capacity, HD] bf16 keys and values, `len` rows written.
+/// TF_NEMOTRON_METAL_KV_PAGES=1: a page holds 256 rows of every attention layer's keys then values, the head's last.
+pub fn pagedLayout(c: cfg.Config, head: bool) kv_pool.Layout {
+    const caches = c.count(.attention) + @intFromBool(head);
+    return .{ .fixed_bytes = Cache.bytes(c, 0, head) + Pool.bytes(c, 2, 1), .token_bytes = caches * 2 * c.kv_heads * c.head_dim * 2, .page_tokens = kvp.page_tokens, .snap_bytes = 0 };
+}
+
+/// A stream's lease of pages: the pool, and the lane whose table maps its rows.
+pub const Lease = struct { pages: *kvp.Pages, lane: usize };
+
+/// A paged cache's rows: cache `index`'s keys and values in every page of the arena, by the lane's table.
+pub const Paged = struct {
+    lease: Lease,
+    k_off: usize, // cache `index`'s keys in a page
+    v_off: usize,
+
+    pub fn arena(p: Paged) mtl.Buffer {
+        return p.lease.pages.arena.buf.?;
+    }
+
+    pub fn table(p: Paged) mtl.Buffer {
+        return p.lease.pages.tables.buf.?;
+    }
+
+    pub fn tableOff(p: Paged) usize {
+        return p.lease.pages.tables.offset(p.lease.lane);
+    }
+
+    pub fn pageBytes(p: Paged) u64 {
+        return p.lease.pages.arena.page_bytes;
+    }
+
+    /// The stream's page ids in row order (all its rows' pages, covered when it opened).
+    pub fn ids(p: Paged) []const u32 {
+        return p.lease.pages.ids(p.lease.lane);
+    }
+};
+
+/// One attention cache: [KVH, capacity, HD] bf16 keys and values, `len` rows written; or its rows in pages.
 pub const Kv = struct {
-    k: mtl.Buffer,
+    k: mtl.Buffer, // paged: the arena (`paged` says where its rows are)
     v: mtl.Buffer,
     capacity: usize,
+    paged: ?Paged = null,
+
+    /// Cache `index` of `caches` over the lease's pages, `capacity` rows covered.
+    fn initPaged(c: cfg.Config, lease: Lease, index: usize, capacity: usize) Kv {
+        const half = c.kv_heads * kvp.page_tokens * c.head_dim * 2;
+        const arena = lease.pages.arena.buf.?;
+        return .{ .k = arena, .v = arena, .capacity = capacity, .paged = .{ .lease = lease, .k_off = 2 * index * half, .v_off = (2 * index + 1) * half } };
+    }
 
     fn init(device: mtl.Device, c: cfg.Config, capacity: usize) !Kv {
         const bytes = c.kv_heads * capacity * c.head_dim * 2;
@@ -137,6 +184,7 @@ pub const Kv = struct {
     }
 
     fn deinit(self: Kv) void {
+        if (self.paged != null) return; // the pool's arena
         self.k.deinit();
         self.v.deinit();
     }
@@ -182,17 +230,22 @@ pub const Cache = struct {
 
     fn followBuffers(self: *Cache, hook: mtl.ResidencySet.Follow, joining: bool) void {
         mtl.resident.fields.apply(self, hook, joining);
-        for (self.kv[0..self.attentions]) |*kv| mtl.resident.fields.apply(kv, hook, joining);
-        if (self.mtp) |*kv| mtl.resident.fields.apply(kv, hook, joining);
+        for (self.kv[0..self.attentions]) |*kv| if (kv.paged == null) mtl.resident.fields.apply(kv, hook, joining);
+        if (self.mtp) |*kv| if (kv.paged == null) mtl.resident.fields.apply(kv, hook, joining);
     }
 
     pub fn appendBuffers(self: *const Cache, gpa: std.mem.Allocator, list: *std.ArrayList(mtl.Buffer)) !void {
         try mtl.resident.fields.append(gpa, list, self);
-        for (self.kv[0..self.attentions]) |*kv| try mtl.resident.fields.append(gpa, list, kv);
-        if (self.mtp) |*kv| try mtl.resident.fields.append(gpa, list, kv);
+        for (self.kv[0..self.attentions]) |*kv| if (kv.paged == null) try mtl.resident.fields.append(gpa, list, kv);
+        if (self.mtp) |*kv| if (kv.paged == null) try mtl.resident.fields.append(gpa, list, kv);
     }
 
     pub fn init(device: mtl.Device, c: cfg.Config, capacity: usize, head: bool) !Cache {
+        return initPaged(device, c, capacity, head, null);
+    }
+
+    /// `lease`: every cache's rows in the lease's pages (covered for `capacity` rows), no buffers of its own.
+    pub fn initPaged(device: mtl.Device, c: cfg.Config, capacity: usize, head: bool, lease: ?Lease) !Cache {
         const first = try device.buffer(max_rows * 4, opts);
         errdefer first.deinit();
         const second = try device.buffer(max_rows * 4, opts);
@@ -210,10 +263,10 @@ pub const Cache = struct {
         var made: usize = 0;
         errdefer for (s.kv[0..made]) |kv| kv.deinit();
         for (0..s.attentions) |a| {
-            s.kv[a] = try Kv.init(device, c, capacity);
+            s.kv[a] = if (lease) |l| Kv.initPaged(c, l, a, capacity) else try Kv.init(device, c, capacity);
             made += 1;
         }
-        if (head) s.mtp = try Kv.init(device, c, capacity);
+        if (head) s.mtp = if (lease) |l| Kv.initPaged(c, l, s.attentions, capacity) else try Kv.init(device, c, capacity);
         return s;
     }
 
@@ -251,6 +304,7 @@ pub const Cache = struct {
         if (self.pending) |p| if (p.slot) |s| pool.give(s);
         pool.give(self.slot);
         pool.giveRid(self.rid);
+        if (self.attentions > 0) if (self.kv[0].paged) |p| p.lease.pages.finish(p.lease.lane); // its promise and pages
         for (0..self.attentions) |a| self.kv[a].deinit();
         if (self.mtp) |m| m.deinit();
         for (self.windows) |w| w.deinit();

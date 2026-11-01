@@ -255,6 +255,7 @@ fn norm(f: *Fixture, rows: usize, query: bool) !void {
     try f.int(step);
     try f.float(1e-6);
     try f.float(10000000);
+    try f.long(0); // no YaRN table: theta's plain rope
     f.grid[0] = @intCast(rows * heads);
 }
 fn attention(f: *Fixture, rows: usize, wrapped: bool) !void {

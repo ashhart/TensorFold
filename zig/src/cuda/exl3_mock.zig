@@ -15,6 +15,9 @@ pub var fail_copy: usize = 0; // the copy (1 for the first) whose waits fail, 0 
 pub var fail_waits: usize = 0; // how many of its waits fail before one completes
 pub var pending: bool = false; // a copy is accepted and no wait has completed it
 pub var bad_frees: usize = 0; // device frees while a copy was pending
+pub var memsets: usize = 0; // memsets on a stream the caller named
+pub var legacy_memsets: usize = 0; // memsets on the legacy default stream
+pub var memset_stream: abi.Stream = null;
 pub fn init() Driver {
     shared_calls = 0;
     shared_bytes = 0;
@@ -27,6 +30,9 @@ pub fn init() Driver {
     fail_waits = 0;
     pending = false;
     bad_frees = 0;
+    memsets = 0;
+    legacy_memsets = 0;
+    memset_stream = null;
     var d: Driver = undefined;
     d.api.cuMemAlloc_v2 = alloc;
     d.api.cuMemFree_v2 = free;
@@ -34,6 +40,8 @@ pub fn init() Driver {
     d.api.cuStreamSynchronize = sync;
     d.api.cuFuncSetAttribute = attribute;
     d.api.cuCtxSynchronize = context;
+    d.api.cuMemsetD8Async = memsetAsync;
+    d.api.cuMemsetD8_v2 = memsetLegacy;
     d.api.cuGetErrorName = name;
     d.api.cuGetErrorString = name;
     return d;
@@ -57,6 +65,15 @@ fn copy(_: abi.DevicePtr, src: ?*const anyopaque, n: usize) callconv(.c) abi.Res
     if (copy_count < copies.len) copies[copy_count] = copied;
     copy_count += 1;
     pending = true;
+    return 0;
+}
+fn memsetAsync(_: abi.DevicePtr, _: u8, _: usize, s: abi.Stream) callconv(.c) abi.Result {
+    memsets += 1;
+    memset_stream = s;
+    return 0;
+}
+fn memsetLegacy(_: abi.DevicePtr, _: u8, _: usize) callconv(.c) abi.Result {
+    legacy_memsets += 1;
     return 0;
 }
 fn sync(_: abi.Stream) callconv(.c) abi.Result {

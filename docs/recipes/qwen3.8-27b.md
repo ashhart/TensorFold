@@ -4,13 +4,56 @@ The native engine serves `TensorFold/Qwen3.8-27B-MLX-4bit` on Metal, qualified o
 `zig/src/families/qwen27/`. It drafts with DFlash2 (`zig/src/families/qwen27/dflash/`) only when `--drafter` names
 the drafter; without it the model decodes plain. On CUDA the native engine serves the MLX affine checkpoints (2, 3,
 4, 5, 6 and 8 bits in groups of 64) from `zig/src/families/qwen3_5/cuda_*.zig`, with DFlash2 drafts and
-`--kv-cache fp8`; it reads no NVFP4 or EXL3 checkpoint yet.
+`--kv-cache fp8`. It also reads ModelOpt NVFP4 and FP8 exports, and turboderp's EXL3 packs (`mul1` codebook) with
+DFlash2 drafts through the shared EXL3 module, on one GPU.
 
 ```bash
 tensorfold pull TensorFold/Qwen3.8-27B-MLX-4bit
 tensorfold pull z-lab/Qwen3.8-27B-DFlash2
 tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --drafter z-lab/Qwen3.8-27B-DFlash2 --name bench
 ```
+
+A lone Metal DFlash2 stream can verify 16, 32 or 64 rows (`TF_QWEN27_WINDOW`), on tensor units and earlier chips.
+Both device classes retain the 16-row default. Startup prices every row count through
+the selected width, in a width-tagged cache.
+Tensor-unit servers with several slots also measure wider unfused row shapes, through 64 rows when the context fits.
+Shared allocation uses those prices beyond the lone window; the lone window retains its own measured prices.
+Shared DFlash2 proposals use the allocator's grants before their batched pass, on both projection paths.
+Lone, cost-pruned trees keep their learned landing counts; shared requests and their tails use the node log-probability prior.
+Wide tensor-unit windows enable context copies by default; earlier chips keep copies opt-in.
+A lone lane request may propose up to 15/31/63 tree nodes at 16/32/64 rows, including the drafter's next-most-likely siblings at each depth. It chooses a parent-closed prefix
+by expected accepted tokens per measured millisecond in the common lane allocator, using its calibrated landing rates.
+The proposal keeps every candidate available until that decision. Copies compete for the same verification window;
+`TF_QWEN27_COPIES=0` disables them. The narrow tensor-unit default keeps copies off.
+The masked drafter block is unchanged. Both device classes use the lane loop by default, including at 16 rows.
+`TF_QWEN27_LANES=0` selects the legacy greedy shortcut; sampled requests retain the shared lane loop.
+Startup names the selected lone loop and width beside the lane window and copy policy.
+`tf-qwen27-bench --model DIR --widths costs` measures rows 1 through 64, with GPU and wall time including keep.
+The wall price excludes the diagnostic's host logit hash and scan.
+
+A greedy single-window lane pass gathers its matching taps with its target picks
+in the final verify command buffer. The lane core still chooses
+its authoritative keep. A matching prefix publishes its cache keep behind the next drafter frame; other paths
+keep synchronously. Target-state users drain outstanding keeps before verification, prefill, release or reset.
+The completed shared logit row is restored by an exact host word copy on that prefetched path.
+The cache keep is encoded while the target verify runs, using its existing plans. It remains uncommitted until
+the lane core supplies the authoritative path. Failure or a changed path drops the unused prepared buffer.
+Selector scratch is bounded on the stack; only the three owned result arrays allocate. A full tree that loses
+weak nodes during common pricing can offer context copies into the freed rows and price them once more.
+Drafter scratch reserves 64 KiB chunks, so small context growth reuses its existing buffers.
+On a single-slot server, a lone greedy lane starts its next draft at the following host step. Its target keep
+can finish while the host publishes the current reply chunk, as in the serial loop. The saved request owns
+its row indices and following tokens, and release or handoff cancels it. Shared, sampled and structured
+requests retain their existing scheduling.
+
+`TF_Q27_PASS_PROFILE=1` records host phases, GPU spans, command-buffer waits and commits, and forwarding-allocator
+calls on the serving thread. The `q27_offer` and `q27_keep` lines show verified tree and copy rows and the kept path.
+It preserves command boundaries. Leave it unset for throughput measurements.
+
+The legacy lone shortcut handles greedy requests; sampled requests use the shared lane loop.
+For bounded top-k requests, the BF16 host draw validates and selects candidates in one scan, using owned stack
+scratch. The same FP64 keyed sampler applies temperature, top-p and min-p to the same ordered candidates.
+Larger or unbounded cuts keep the general draw. Sampling time has its own pass-profile phase.
 
 On Metal, M5 prompt passes request 2,048 rows when no other request is decoding; earlier chips keep the 512-row
 default. The larger frame must fit the configured context and all streams beside loaded weights and the 8 GiB
@@ -80,6 +123,12 @@ least 256 tokens beyond the previous chunk start, or after 2,048 tokens if no ea
 Prefix reuse resumes only at these chunk starts, so a follow-up can reuse the state before its previous
 reply. The plan comes from rendered tokens; a template without detected markers uses 2,048-token chunks.
 
+On the native pre-M5 lane loop, `TF_QWEN27_WINDOW=32` or `64` requests an experimental wider window and
+`TF_QWEN27_COPIES=1` enables lane context copies. Defaults remain 16 and copies off until served qualification.
+`TF_QWEN27_LANES=0` selects the legacy lone serial loop; its 16-row width and copy policy remain independent of
+those lane switches. Startup logs the effective lone loop and width beside the configured lane window and copies.
+The lane switch accepts only 0 or 1; the copy switch accepts only 0 or 1. Invalid settings name their variable.
+
 ## Weights other than 4-bit
 
 The M5 lane kernels accept MLX affine 2-, 3-, 4-, 5-, 6- and 8-bit projections in groups of 64.
@@ -98,9 +147,9 @@ quality comparisons are TBD [release-0.3.5].
 
 ## CUDA
 
-This section is the Python engine's (0.6.6). The native CUDA engine reads only MLX affine checkpoints so far: the
-NVFP4 and EXL3 readers below have not been ported to it (1.1.0 carries the shared EXL3 module of #832, which the
-27B does not read through yet).
+This section is the Python engine's (0.6.6). The native CUDA engine reads the MLX affine checkpoints, ModelOpt
+NVFP4 and FP8 exports, and turboderp's EXL3 packs through the shared EXL3 module of #832; its own measurements are
+not the ones below.
 
 On CUDA the 27B serves NVFP4 and EXL3 checkpoints, and the MLX 4-bit checkpoint as the portable option: the same
 files a Mac serves, and the only format two ranks read. `tensorfold serve` loads the checkpoint you name; it picks

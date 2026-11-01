@@ -6,6 +6,7 @@ const st = @import("state.zig");
 const fwd = @import("forward.zig");
 const kern = @import("kernels.zig");
 const tree = @import("tree.zig");
+const kvp = @import("kv_pages.zig");
 const lesson_route = @import("living").lesson_route;
 const max_blocks = @import("learn_shape.zig").max_blocks;
 
@@ -365,8 +366,9 @@ fn experts4(f: Forward, e: *Enc, m: wts.Moe, comptime key: []const u8, comptime 
     const s = f.s;
     const fc = if (j == 0) m.fc1 else m.fc2;
     const many = rows > 1 and f.members > 0;
-    const geo: [2]usize = if (f.geometry > 0 and !many) kern.geometries[f.geometry - 1] else if (many and f.members == 3) .{ 4, 4 } else .{ 4, 2 };
-    e.pipe(if (many) expertRows(f, j, f.members) else if (f.geometry > 0) expertGeo(f, j, f.geometry - 1) else f.k.get(key));
+    const r8 = many and rows >= f.k.wide_rows; // over any `members`: each member row's dot in tf_qdot16's order
+    const geo: [2]usize = if (r8) .{ 8, 2 } else if (f.geometry > 0 and !many) kern.geometries[f.geometry - 1] else if (many and f.members == 3) .{ 4, 4 } else .{ 4, 2 };
+    e.pipe(if (r8) (if (j == 0) f.k.get("tf_xup_rows2r8") else f.k.get("tf_xdown_rows2r8")) else if (many) expertRows(f, j, f.members) else if (f.geometry > 0) expertGeo(f, j, f.geometry - 1) else f.k.get(key));
     e.buf(if (j == 0) s.x else s.act, 0, 0);
     if (rows == 1) {
         e.buf(s.idx, 0, 1);
@@ -473,10 +475,10 @@ pub fn attend(f: Forward, e: *Enc, a: wts.Attention, segs: []const Kvs, rows: us
                     chainAttend(f, e, sg, qp, qp_off);
                     var tree_gate = d.gate(sg.layer, 1);
                     e.gate = &tree_gate;
-                    tree.attentionGpu(f, e, sg.kv, t, partial(f, @min(t, 16)), gt);
+                    tree.attentionGpu(f, e, sg.kv, t, partialFor(f, sg.kv, @min(t, 16)), gt);
                     e.gate = null;
-                } else tree.attentionGpu(f, e, sg.kv, t, partial(f, @min(t, 16)), gt);
-            } else tree.attention(f, e, sg.kv, sg.len, t, sg.deepest, partial(f, @min(t, 16)), sg.tables);
+                } else tree.attentionGpu(f, e, sg.kv, t, partialFor(f, sg.kv, @min(t, 16)), gt);
+            } else tree.attention(f, e, sg.kv, sg.len, t, sg.deepest, partialFor(f, sg.kv, @min(t, 16)), sg.tables);
             e.pipe(f.k.get("tf_attn_out"));
             e.buf(s.att, 0, 0);
             e.buf(s.ax, r0 * c.heads * hd * 2, 1);
@@ -491,17 +493,17 @@ pub fn attend(f: Forward, e: *Enc, a: wts.Attention, segs: []const Kvs, rows: us
         const dims = [5]i32{ @intCast(keys), @intCast(chunks), @intCast(t), 1, @intCast(sga) };
         const grid_chunks = if (sg.gpu) |ga| ga.chunks else chunks;
         const strides = [4]i64{ @intCast(c.kv_heads * sg.kv.capacity * hd), @intCast(sg.kv.capacity * hd), @intCast(hd), 1 };
-        e.pipe(partial(f, tiles));
+        e.pipe(partialFor(f, sg.kv, tiles));
         e.buf(qp, qp_off, 0);
-        e.buf(sg.kv.k, 0, 1);
+        kvp.bindKv(e, sg.kv, 1, 3);
         e.bytes(strides, 2);
-        e.buf(sg.kv.v, 0, 3);
         e.bytes(strides, 4);
         e.bytes(@as(f32, @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(hd))))), 5);
         if (sg.gpu) |ga| e.buf(ga.buffer, ga.attn, 6) else e.bytes(dims, 6);
         e.buf(s.po, 0, 7);
         e.buf(s.pm, 0, 8);
         e.buf(s.pl, 0, 9);
+        if (sg.kv.paged) |pg| kvp.bindTable(e, pg, 10);
         e.run(.{ c.kv_heads * 32 * tiles, grid_chunks, (sga + tiles - 1) / tiles }, .{ 32 * tiles, 1, 1 });
 
         e.pipe(f.k.get("attn_merge"));
@@ -537,17 +539,17 @@ fn chainAttend(f: Forward, e: *Enc, sg: Kvs, qp: Buffer, qp_off: usize) void {
     const sga = g * t / 16;
     const tiles: usize = @min(sga, 16);
     const strides = [4]i64{ @intCast(c.kv_heads * sg.kv.capacity * hd), @intCast(sg.kv.capacity * hd), @intCast(hd), 1 };
-    e.pipe(partial(f, tiles));
+    e.pipe(partialFor(f, sg.kv, tiles));
     e.buf(qp, qp_off, 0);
-    e.buf(sg.kv.k, 0, 1);
+    kvp.bindKv(e, sg.kv, 1, 3);
     e.bytes(strides, 2);
-    e.buf(sg.kv.v, 0, 3);
     e.bytes(strides, 4);
     e.bytes(@as(f32, @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(hd))))), 5);
     e.buf(ga.buffer, ga.attn, 6);
     e.buf(s.po, 0, 7);
     e.buf(s.pm, 0, 8);
     e.buf(s.pl, 0, 9);
+    if (sg.kv.paged) |pg| kvp.bindTable(e, pg, 10);
     e.run(.{ c.kv_heads * 32 * tiles, ga.chunks, (sga + tiles - 1) / tiles }, .{ 32 * tiles, 1, 1 });
     e.pipe(f.k.get("attn_merge"));
     e.buf(s.po, 0, 0);
@@ -561,23 +563,28 @@ fn chainAttend(f: Forward, e: *Enc, sg: Kvs, qp: Buffer, qp_off: usize) void {
 /// kvWrite with its (QKV, KOFF, capacity, start) read from a GPU buffer at `at`.
 pub fn kvWriteAt(f: Forward, e: *Enc, kv: st.Kv, args: Buffer, at: usize, row0: usize, rows: usize) void {
     const c = f.c;
-    e.pipe(f.k.get("tf_kv_write"));
+    e.pipe(if (kv.paged != null) f.k.paged.?.glue[0] else f.k.get("tf_kv_write"));
     e.buf(f.s.qkv, row0 * c.qkvDim() * 2, 0);
-    e.buf(kv.k, 0, 1);
-    e.buf(kv.v, 0, 2);
+    kvp.bindKv(e, kv, 1, 2);
     e.buf(args, at, 3);
+    if (kv.paged) |pg| kvp.bindTable(e, pg, 4);
     e.run(.{ c.head_dim, c.kv_heads, rows }, .{ c.head_dim, 1, 1 });
 }
 
 /// The stacked q/k/v rows from `row0` (their keys and values) into a cache after its `len` rows.
 pub fn kvWrite(f: Forward, e: *Enc, kv: st.Kv, len: usize, row0: usize, rows: usize) void {
     const c = f.c;
-    e.pipe(f.k.get("tf_kv_write"));
+    e.pipe(if (kv.paged != null) f.k.paged.?.glue[0] else f.k.get("tf_kv_write"));
     e.buf(f.s.qkv, row0 * c.qkvDim() * 2, 0);
-    e.buf(kv.k, 0, 1);
-    e.buf(kv.v, 0, 2);
+    kvp.bindKv(e, kv, 1, 2);
     e.bytes([4]u32{ @intCast(c.qkvDim()), @intCast(c.heads * c.head_dim), @intCast(kv.capacity), @intCast(len) }, 3);
+    if (kv.paged) |pg| kvp.bindTable(e, pg, 4);
     e.run(.{ c.head_dim, c.kv_heads, rows }, .{ c.head_dim, 1, 1 });
+}
+
+/// attn_partial at `tiles` tiles, or its paged twin for a paged cache.
+pub fn partialFor(f: Forward, kv: st.Kv, tiles: usize) mtl.Pipeline {
+    return if (kv.paged != null) f.k.paged.?.partial[tiles - 1] else partial(f, tiles);
 }
 
 fn partial(f: Forward, tiles: usize) mtl.Pipeline {

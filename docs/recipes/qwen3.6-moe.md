@@ -72,7 +72,8 @@ The chat template thinks by default, as on vLLM: replies reason in `reasoning_co
 
 ## CUDA execution
 
-CUDA reads this model's MLX 4-bit checkpoint only; NVFP4 and EXL3 exports of it are not read yet. Prompts take bf16
+In 0.6.6, CUDA read this model's MLX 4-bit checkpoint only; the native CUDA engine also reads EXL3 exports and
+[NVIDIA's NVFP4 export](#nvidias-nvfp4-checkpoint-native-cuda). Prompts take bf16
 activations by default: 0.90-0.96x the FP8 prompt path from 2k to 128k, and 1.23-1.89x vLLM on NVIDIA's NVFP4 export
 from 2k to 64k. `--prefill-fp8` restores the FP8 path ([prompt precision](cuda.md#prompt-precision)).
 
@@ -101,8 +102,9 @@ tensorfold serve TensorFold/Qwen3.6-35B-A3B-MLX-4bit-MTP --parallel 8 --name ben
 
 `--parallel N` decodes up to N requests in shared rounds, and every reply equals the same request served alone
 and its `"draft": false` run. A round verifies every stream's MTP chain or copied continuation in one forward;
-the head absorbs every stream's kept rows in one call, then the chains advance a step at a time for all streams
-by the one-stream rule, so a stream drafts what it drafts alone. A new prompt prefills 1,024 tokens a round
+the head absorbs every stream's kept rows in passes of up to 16 rows, then each draft level runs every stream
+still drafting in passes of up to 16 rows, with one vocabulary-head read and one synchronization a pass, so a
+stream drafts exactly what it drafts alone (`TF_MTP_BATCH=0` drafts one stream at a time, for comparison). A new prompt prefills 1,024 tokens a round
 while the others decode, states are kept at message starts and prompt ends, and each stream's caches are sized
 once, at admission. Startup admits N full prompt/reply windows, three kept prompt ends and the graph buffers
 before loading; an explicit `--context` that does not fit is refused with the window that does. Rounds over
@@ -123,6 +125,95 @@ checkpoint revision 81169a9), with 8 client threads over HTTP:
 Every reply's token SHA-256 is the same at each N and with `"draft": false`. The label replies repeat their JSON,
 so copied continuations keep 9.3 tokens a round per stream; chats keep 2.9. One client at a time gets 912 tok/s
 on the label requests at `--parallel 8`, as a lone stream replays the graphs.
+
+On one DGX Spark (GB10, sm_121, CUDA 13.0), checkpoint revision f84b054, the fleet benchmark's 4.2K-token prompt
+(`bench.py` of spark-sglang-docker, 512 tokens, thinking on) gives 115.7 tok/s single-stream decode and 136.8 /
+181.7 / 220.1 tok/s aggregate at 2 / 4 / 8 users, against 112.6 and 115.5 / 137.9 / 159.0 with `TF_MTP_BATCH=0` on
+the same binary. The drafter's attention over its ring loads eight slots ahead of the fold, in the same order: a
+4,200-slot ring takes 0.24 ms where it took 1.6 ms.
+
+## NVIDIA's NVFP4 checkpoint (native CUDA)
+
+The native CUDA engine serves `nvidia/Qwen3.6-35B-A3B-NVFP4` as downloaded, MTP drafts included:
+
+```bash
+tensorfold pull nvidia/Qwen3.6-35B-A3B-NVFP4@1355db6a052410cfd62085d94b58866fd0f2c3c5
+tensorfold serve nvidia/Qwen3.6-35B-A3B-NVFP4 --drafter nvidia/Qwen3.6-35B-A3B-NVFP4
+```
+
+Every target projection runs as stored, with bf16 activations: the routed and shared experts' W4A16 NVFP4 codes and
+e4m3 block scales with their global scale, the FP8 attention and DeltaNet projections with their per-tensor scale, the
+W4A16 NVFP4 head, and bf16 `in_proj_a`/`in_proj_b`, router and embedding rows. Admission reads every expert
+projection's effective recipe, so a checkpoint that quantizes one expert, the shared expert or the router differently
+is refused before loading. The shared expert sits last in the routed table, as in the MLX layout. Decode rows run the
+grouped NVFP4 expert kernel and prompt tiles its decode-sum form, so an expert pair has the same bits in a prompt
+chunk, a verify window and a one-row step.
+
+The checkpoint keeps its MTP layer in bf16 in its own shards. Without `mtp-4bit.safetensors` beside it, the drafter
+quantizes that layer to MLX affine-4 at load, as Nemotron's ModelOpt drafter does; this changes only which rows a
+round proposes, never a reply, and the startup log says so. With the file present, the file is read instead.
+
+`--drafter` can also name a DFlash2 draft model: a directory whose `config.json` has `dflash_config` drafts with it,
+any other with the target's MTP layer. `incoai/Qwen3.6-35B-A3B-DFlash2` (revision `51ef7b69`, the SGLang DFlash
+recipe's draft) reads eight target layers and is quantized to affine-4 at load:
+
+```bash
+hf download incoai/Qwen3.6-35B-A3B-DFlash2 --revision 51ef7b6923ad6c14cb1bb41c37a9041446496ab6
+tensorfold serve nvidia/Qwen3.6-35B-A3B-NVFP4 --drafter incoai/Qwen3.6-35B-A3B-DFlash2
+```
+
+On the fleet benchmark's 4.2K-token prompt (`bench.py`, 512 tokens), one build with either drafter, it decodes 130.3
+tok/s at one stream against MTP's 98.6, and gives 131.3 / 161.4 / 198.0 tok/s aggregate at 2 / 4 / 8 users against
+124.7 / 170.6 / 208.4: it proposes more rows a round and keeps fewer of them, so it leads at one and two streams and
+MTP leads under load. Every drafted reply equals its `"draft": false` run with either drafter.
+
+The rules come from @gilby's Python port ([#345](https://github.com/ashhart/TensorFold/pull/345)): bf16 activations
+for the W4A16 layers, the shared expert last in the table, and the MTP layer drafting through the target's head.
+
+One DGX Spark (GB10, sm_121, CUDA 13.0), checkpoint revision `1355db6a`, greedy unless noted, thinking off, 256 tokens:
+
+| | Code | Chat |
+| --- | ---: | ---: |
+| `--no-drafts` (`tools/bench_openai.py`) | 66.6 tok/s | 66.2 tok/s |
+| MTP drafts, one stream (`tools/bench_concurrent.py`) | 124.7 tok/s | 111.8 tok/s |
+| MTP drafts, four streams, aggregate | 240.3 tok/s | 236.2 tok/s |
+
+The model takes 20.3 GiB (20.9 GiB with the drafter) and loads in about 30 s. Every drafted reply equals its
+`"draft": false` run (6 of 6, greedy and two seeded temperatures), every concurrent reply equals its solo run (40 of
+40 at one and four streams, greedy and sampled), and a second turn that resumes from 8,192 cached tokens equals its
+run on a server with the prompt cache off.
+
+Cold prefill: a fresh server per size with `--prompt-cache-gib 0 --context 66560`, exact token arrays of Python
+standard-library source from the checkpoint's own tokenizer, one request each through `tools/bench_cache.py
+--require-cold` (time to first token):
+
+| Prompt tokens | 2,048 | 8,192 | 32,768 | 65,536 |
+| --- | ---: | ---: | ---: | ---: |
+| Time to first token | 0.38 s | 1.42 s | 6.59 s | 15.91 s |
+| Prompt rate | 5,441 tok/s | 5,757 tok/s | 4,975 tok/s | 4,120 tok/s |
+
+### A 1M-token window (YaRN)
+
+The checkpoint was trained on 262,144 positions. Static YaRN rope with factor 4 serves 1,048,576, as SGLang's Spark
+recipe does: either name the factor on the checkpoint as downloaded, or serve a copy whose `config.json` carries the
+YaRN block (`rope_type: yarn`, `factor: 4.0`, `original_max_position_embeddings: 262144`,
+`max_position_embeddings: 1048576`, the copy SGLang's `extend-qwen3.6-35b-a3b-nvfp4-context-1m` mod stages):
+
+```bash
+tensorfold serve nvidia/Qwen3.6-35B-A3B-NVFP4 --drafter nvidia/Qwen3.6-35B-A3B-NVFP4 --rope-yarn 4 --context 1048576
+```
+
+YaRN turns every position, so replies differ from plain rope at any length; without the flag or the block, every
+byte is as before. Both ways give the same reply bytes. A 1M window takes 22.2 GiB a stream, so a GB10 admits two;
+`--context 0` serves the whole window. The target's and the MTP layer's rope read the YaRN table; the DFlash2 drafter
+keeps its own rope over its 2,048-row window, and a scaled rope in a config TensorFold cannot honor (HIP, Metal, the
+DFlash2 drafters, another scaling type) is refused rather than read as plain rope.
+
+On one GB10 with `--parallel 2`: drafted replies equal their `"draft": false` runs (6 of 6), concurrent ones their
+solo runs, and a resumed second turn its fresh run. A passphrase 5% into a 300,000-token prompt comes back after
+173 s of prefill (1,740 tok/s). A prompt of 1,048,512 tokens with the passphrase prefills in 1,546 s (680 tok/s),
+returns it, and decodes its 64 tokens to the window's last position at 31 tok/s; one token more is refused with the
+server's context-window error. The MTP drafter's cost over a continuation of many thousands of tokens is not measured.
 
 ## Measurements
 

@@ -48,3 +48,9 @@ test "contract image: all 32 Qwen4 launches select their own embedded images" {
     try std.testing.expectEqual(@as(usize, 32), count);
     try std.testing.expectEqual(@as(usize, 4), names.count());
 }
+
+test "contract image: every registered CUDA launch and control selects its own image" {
+    const registry = @import("core").contract.registry;
+    for (registry.all_cuda ++ registry.cuda_controls) |r|
+        try std.testing.expectEqualStrings(r.launch.image, try resolve(r.launch.image));
+}

@@ -238,13 +238,7 @@ pub fn For(comptime picture: type) type {
             const M = vision.merge;
             const gh = p.target_h / P;
             const gw = p.target_w / P;
-            var m255: [3]f32 = undefined;
-            var s255: [3]f32 = undefined;
-            const by: f32 = @floatCast(@as(f64, 1.0) / (@as(f64, 1.0) / 255.0));
-            for (0..3) |ch| {
-                m255[ch] = mean[ch] * by;
-                s255[ch] = sd[ch] * by;
-            }
+            const lut = picture.normalize.table(.fused_f32, 1.0 / 255.0, mean, sd);
             const n = p.indices.len;
             const out = try a.alloc(Pair, p.pairs());
             for (out, 0..) |*pair, g| {
@@ -261,8 +255,7 @@ pub fn For(comptime picture: type) type {
                             const y = py0 + dy;
                             const x = px0 + dx;
                             const v: u8 = if (y < p.content_h and x < p.content_w) frame[(y * p.content_w + x) * 3 + ch] else 0;
-                            dst[((ch * vision.temporal + t) * P + dy) * P + dx] =
-                                (@as(f32, @floatFromInt(v)) - m255[ch]) / s255[ch];
+                            dst[((ch * vision.temporal + t) * P + dy) * P + dx] = lut[ch][v];
                         };
                     };
                     row += 1;

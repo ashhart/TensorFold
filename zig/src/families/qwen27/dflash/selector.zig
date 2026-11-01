@@ -3,7 +3,7 @@ const std = @import("std");
 const weights = @import("weights.zig");
 const op = @import("operators.zig");
 pub const Noise = struct { ptr: *anyopaque, draw: *const fn (*anyopaque, u64, u32) anyerror!f64 };
-pub const Options = struct { nodes: u32 = 15, children: u32 = 4, tau: f64 = 1.5, edge: f64 = 0.6, noise_weight: f64 = 0.7, temperature: f64 = 1, noise: ?Noise = null };
+pub const Options = struct { nodes: u32 = 15, children: u32 = 4, tau: f64 = 1.5, edge: f64 = 0.6, noise_weight: f64 = 0.7, temperature: f64 = 1, noise: ?Noise = null, costs: []const f64 = &.{}, overhead_ms: f64 = 0 };
 pub const Tree = struct {
     gpa: std.mem.Allocator,
     tokens: []u32,
@@ -77,21 +77,27 @@ fn expand(g: *const weights.Graph, lattice: op.Lattice, options: Options, first:
         }
     };
     std.mem.sort(u32, order[0..lattice.topk], Rank{ .scores = scores[0..lattice.topk] }, Rank.less);
-    for (order[0..@min(options.children, lattice.topk)]) |i| try frontier.append(lattice.gpa, .{ .score = cumulative + scores[i], .parent = parent, .token = lattice.candidates[row + i], .depth = depth });
+    for (order[0..@min(options.children, lattice.topk)]) |i| {
+        std.debug.assert(frontier.items.len < frontier.capacity);
+        frontier.appendAssumeCapacity(.{ .score = cumulative + scores[i], .parent = parent, .token = lattice.candidates[row + i], .depth = depth });
+    }
 }
 pub fn propose(gpa: std.mem.Allocator, g: *const weights.Graph, lattice: op.Lattice, anchor: u32, first_position: u64, options: Options) !Tree {
     try g.config.check();
     for ([_]weights.Tensor{ g.predecessor, g.successor }) |t| if (t.dtype != .bf16 or t.rank != 2 or t.shape[0] != g.config.vocab or t.shape[1] != g.config.rank) return error.DraftCodebookShape;
     try lattice.check(g.config);
-    if (anchor >= g.config.vocab or options.nodes > 32 or options.children == 0 or options.children > 4 or lattice.topk > 16 or !std.math.isFinite(options.tau) or options.tau <= 0 or !std.math.isFinite(options.edge) or !std.math.isFinite(options.noise_weight) or !std.math.isFinite(options.temperature) or options.temperature <= 0) return error.BadDraftSelector;
-    var frontier: std.ArrayList(Node) = .empty;
-    defer frontier.deinit(lattice.gpa);
-    const tokens = try gpa.alloc(u32, options.nodes);
-    defer gpa.free(tokens);
-    const parents = try gpa.alloc(i32, options.nodes);
-    defer gpa.free(parents);
-    const scores = try gpa.alloc(f64, options.nodes);
-    defer gpa.free(scores);
+    if (anchor >= g.config.vocab or options.nodes > 63 or options.children == 0 or options.children > 16 or lattice.topk > 16 or !std.math.isFinite(options.tau) or options.tau <= 0 or !std.math.isFinite(options.edge) or !std.math.isFinite(options.noise_weight) or !std.math.isFinite(options.temperature) or options.temperature <= 0) return error.BadDraftSelector;
+    if (!std.math.isFinite(options.overhead_ms) or options.overhead_ms < 0) return error.BadDraftCosts;
+    if (options.costs.len > 0) {
+        if (options.costs.len <= options.nodes) return error.BadDraftCosts;
+        for (options.costs) |ms| if (!std.math.isFinite(ms) or ms <= 0) return error.BadDraftCosts;
+    }
+    // At most sixteen roots and sixteen children for each of the sixty-three selected nodes.
+    var storage: [16 * 64]Node = undefined;
+    var frontier: std.ArrayList(Node) = .initBuffer(&storage);
+    var tokens: [63]u32 = undefined;
+    var parents: [63]i32 = undefined;
+    var scores: [63]f64 = undefined;
     if (options.nodes > 0) try expand(g, lattice, options, first_position, anchor, -1, 0, 0, &frontier);
     var count: usize = 0;
     while (frontier.items.len > 0 and count < options.nodes) {
@@ -106,6 +112,21 @@ pub fn propose(gpa: std.mem.Allocator, g: *const weights.Graph, lattice: op.Latt
         const me = count;
         count += 1;
         if (node.depth + 1 < lattice.depth) try expand(g, lattice, options, first_position, node.token, @intCast(me), node.depth + 1, node.score, &frontier);
+    }
+    // Each included path contributes its probability to expected accepted depth; every prefix is parent-closed.
+    if (options.costs.len > 0) {
+        var best: usize = 0;
+        var expected: f64 = 1;
+        var rate = expected / (options.costs[0] + options.overhead_ms);
+        for (scores[0..count], 0..) |score, i| {
+            expected += @exp(score);
+            const next = expected / (options.costs[i + 1] + options.overhead_ms);
+            if (next > rate) {
+                rate = next;
+                best = i + 1;
+            }
+        }
+        count = best;
     }
     const out_tokens = try gpa.dupe(u32, tokens[0..count]);
     errdefer gpa.free(out_tokens);

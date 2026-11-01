@@ -116,20 +116,32 @@ pub const Pages = struct {
 
     /// A free lane's cache, reset, holding the pages of `prompt` + `max_tokens` rows and a window; LaneMemory: not now.
     pub fn open(p: *Pages, prompt: usize, max_tokens: usize) !*Cache {
+        return p.openWith(prompt, max_tokens, &.{});
+    }
+
+    /// `open` with `adopted` (the prompt cache's pages, held for it) heading its table; released on any failure.
+    pub fn openWith(p: *Pages, prompt: usize, max_tokens: usize, adopted: []const u32) !*Cache {
+        var held = adopted.len > 0;
+        errdefer if (held) for (adopted) |id| p.pool.release(id);
         if (prompt > p.capacity or max_tokens > p.capacity - prompt) return error.InvalidQwenPrompt;
         const x = for (p.lanes) |*x| {
             if (!x.used) break x;
         } else return error.LaneMemory;
         const k = p.layout.runPages();
         const n = p.need(prompt, max_tokens) - k; // keys and values
-        if (n > mostPages(p.capacity, p.layout.page_tokens) or n * p.layout.page_tokens > std.math.maxInt(c_int)) return error.InvalidQwenPrompt;
-        try p.pool.promise(&x.lease, n + k);
+        if (n > mostPages(p.capacity, p.layout.page_tokens) or adopted.len > n or n * p.layout.page_tokens > std.math.maxInt(c_int)) return error.InvalidQwenPrompt;
+        try p.pool.promise(&x.lease, n - adopted.len + k);
         errdefer p.pool.finish(&x.lease);
+        if (adopted.len > 0) {
+            held = false;
+            try p.pool.adopt(&x.lease, adopted); // the lease holds them now (its finish releases them)
+        }
         // the run first: KV pages fill from the bottom, runs from the top; a fragmented pool waits (LaneMemory)
         const run = p.pool.claimRun(&x.lease, k) orelse return error.LaneMemory;
         errdefer p.pool.releaseRun(run, k);
         errdefer cuda.completion.drain(p.e.d, p.e.stream, "qwen3_5: a failed lane open did not drain");
         var up: Upload = .{ .p = p, .cache = x.cache };
+        if (adopted.len > 0) try Upload.write(&up, x.lease.ids.items, 0);
         try p.pool.cover(&x.lease, n, .{ .ctx = &up, .write = Upload.write });
         try x.cache.mapRun(p.e, p.arena.ptr + run * p.layout.pageBytes(), k * p.layout.pageBytes(), p.ring);
         try x.cache.reset(p.e);
@@ -154,6 +166,28 @@ pub const Pages = struct {
         cache.cap = 0;
         x.used = false;
         return true;
+    }
+
+    /// The lane's first pages become `path`'s (the store's), table first; QwenLaneTable: it failed, end the stream.
+    pub fn swap(p: *Pages, cache: *Cache, path: []const u32) !void {
+        const x = for (p.lanes) |*x| {
+            if (x.cache == cache) break x;
+        } else return error.UnknownQwenLane;
+        if (std.mem.eql(u32, x.lease.ids.items[0..path.len], path)) return;
+        var up: Upload = .{ .p = p, .cache = cache };
+        Upload.write(&up, path, 0) catch |err| {
+            std.log.warn("qwen3_5: a lane's table did not take the kept pages: {s}", .{@errorName(err)});
+            return error.QwenLaneTable;
+        };
+        for (path, 0..) |id, i| p.pool.share(&x.lease, i, id);
+    }
+
+    /// TF_QWEN_POOL_LOG=1: the pool's census after a prompt pass (the agent replay's memory readings).
+    pub fn log(p: *const Pages, prompt: usize, cached: usize) void {
+        const v = std.c.getenv("TF_QWEN_POOL_LOG") orelse return;
+        if (!std.mem.eql(u8, std.mem.span(v), "1")) return;
+        const n = p.pool.census();
+        std.log.info("qwen3_5 pool after a prompt of {d} (resumed at {d}): {d} pages leased, {d} held by the prompt cache, {d} free of {d}", .{ prompt, cached, n.leased, n.kept, n.free, n.total });
     }
 
     /// Whether `cache` is one of the pool's lanes.

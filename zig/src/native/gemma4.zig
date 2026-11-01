@@ -50,6 +50,10 @@ const Host = struct {
 };
 
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (try o.slideRefusal(a, "Macs")) |why| {
+        problem.* = why;
+        return null;
+    }
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const h = start(a, gpa, io, o, problem) catch |err| switch (err) {
@@ -124,8 +128,8 @@ fn start(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, 
     h.clock = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.config, if (h.wrap) |*w| w.backend() else h.metal.backend(), h.clock.clock());
     errdefer h.core.deinit();
-    const vis: ?api.Vision = if (o.vision) |v| .{ .ctx = h, .prepare = prepareImage, .image_token = h.markers[1], .markers = &h.markers, .wrap = .{ h.markers[0], h.markers[2] }, .part_type = "image", .image_tokens = v.image_tokens, .max_images = v.max_images, .explain = g.image.decoderProblem } else null;
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = served, .context_window = @intCast(window), .prefill_step = g.state.chunk_rows, .draft_sources = .{ .drafter = if (drafter != null) .{ .kind = drafter.?.kind, .name = o.drafter_name orelse draft_dir orelse "" } else null }, .structures = true, .vision = vis });
+    const vis: ?api.Vision = if (o.vision) |v| .{ .ctx = h, .prepare = prepareImage, .image_token = h.markers[1], .markers = &h.markers, .wrap = .{ h.markers[0], h.markers[2] }, .part_type = "image", .image_tokens = v.image_tokens, .max_images = v.max_images, .explain = g.image_steps.decoderProblem } else null;
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = served, .context_window = @intCast(window), .prefill_step = g.state.chunk_rows, .decode_share = o.decode_share, .draft_sources = .{ .drafter = if (drafter != null) .{ .kind = drafter.?.kind, .name = o.drafter_name orelse draft_dir orelse "" } else null }, .structures = true, .vision = vis });
     h.cache = null;
     try enableCache(h, a, o, served, @intCast(window), problem);
     errdefer if (h.cache) |*store| store.deinit();
@@ -189,6 +193,6 @@ fn enableCache(h: *Host, a: std.mem.Allocator, o: api.Open, served: u32, window:
 /// Info.vision's prepare (on the HTTP thread); the template writes <|image|> alone: the server adds boi and eoi.
 fn prepareImage(ctx: *anyopaque, a: std.mem.Allocator, bytes: []const u8, max_tokens: u32) anyerror!api.PreparedImage {
     const h: *Host = @ptrCast(@alignCast(ctx));
-    const p = try g.image.prepare(h.io, a, bytes, max_tokens, h.model.vision.?.layout());
+    const p = try g.image_steps.prepare(h.io, a, bytes, max_tokens, h.model.vision.?.layout());
     return .{ .pixels = p.pixels, .gh = p.gh, .gw = p.gw, .tokens = p.tokens, .hash = p.hash };
 }

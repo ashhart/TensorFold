@@ -2,10 +2,7 @@
 #pragma once
 // x3gm v2 (TF_DSV41_GM_V2): gm_kernel's items, chains and bits with less issue work (member groups, width per item)
 
-__device__ __forceinline__ void ldsm2(uint32_t (&a)[2], const void* p) {
-    const unsigned s = (unsigned)__cvta_generic_to_shared(p);
-    asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];\n" : "=r"(a[0]), "=r"(a[1]) : "r"(s));
-}
+using qmm_frag::ldmatrix2;
 
 // The K loop of one item with N8 active n8 member groups (acc[l][0 .. N8 - 1]; the rest stay 0.0, never stored)
 template <int N8, int MATS, int XM, int K2, int MTL, int NG, int KS, int NSA, int NGR, typename LoadFn>
@@ -36,7 +33,7 @@ __device__ __forceinline__ void kloop2(float (&acc)[MTL][NG][4], const unsigned 
 #pragma unroll
             for (int np = 0; np < PAIRS; ++np) {
                 uint32_t b[4];
-                ldsm4(b, A + (16 * np + lr) * LDA + chunk * 8);
+                ldmatrix4(b, A + (16 * np + lr) * LDA + chunk * 8);
                 const uint32_t b01[2] = {b[0], b[1]}, b23[2] = {b[2], b[3]};
 #pragma unroll
                 for (int l = 0; l < MTL; ++l) {
@@ -46,7 +43,7 @@ __device__ __forceinline__ void kloop2(float (&acc)[MTL][NG][4], const unsigned 
             }
             if constexpr ((N8 & 1) != 0) {                // members 16 PAIRS .. + 7 (x2: lanes 0-15's addresses)
                 uint32_t b[2];
-                ldsm2(b, A + (16 * PAIRS + lr) * LDA + chunk * 8);
+                ldmatrix2(b, A + (16 * PAIRS + lr) * LDA + chunk * 8);
 #pragma unroll
                 for (int l = 0; l < MTL; ++l) mma16816(acc[l][2 * PAIRS], af[l], b);
             }

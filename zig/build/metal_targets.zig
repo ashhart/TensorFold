@@ -116,6 +116,7 @@ pub fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     golden_build.step(b, target, server_tests, api, tokenizer, template, engines);
     engines.addImport("lanes", api.import_table.get("lanes").?);
     b.step("test-draft-metal-host", "Metal draft source metadata without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engines, .filters = &.{"draft sources:"} })).step);
+    b.step("test-drafter-skip-metal-host", "Counted shared draft skips without device execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engine, .filters = &.{"zero grant:"} })).step);
     b.step("test-native", "The Metal engines module's host-side tests").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engines })).step);
     const reuse = b.addExecutable(.{ .name = "tf-flashnext-reuse", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/flashnext_reuse.zig"),
@@ -166,6 +167,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .link_libc = true,
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "engine_api", .module = api }, .{ .name = "tensorfold", .module = mods.engine } },
     });
+    engines.addImport("living", mods.living);
     @import("drama3_metal.zig").addNative(b, target, optimize, metal, engines, metal_std);
     @import("drama3_metal.zig").targets(b, target, optimize, metal, metal_std, test_step);
 
@@ -316,7 +318,9 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .{ .name = "tf-glm-video", .path = "zig/tests/glm_video.zig", .about = "GLM-5.3-Flash's video preparation on a clip (libtfvideo), written for tools/zig/glm_video_fixtures.py" },
         .{ .name = "tf-qwen-vision", .path = "zig/tests/qwen_vision.zig", .about = "The Qwen-VL tower on picture files: patches, grids and merged rows written for a float32 reference" },
         .{ .name = "tf-qwen-image", .path = "zig/tests/qwen_image.zig", .about = "Qwen-Image-2.1's transformer on a reference case: each step compared, then the schedule timed" },
-        .{ .name = "tf-moss-image", .path = "zig/tests/moss_image.zig", .about = "MOSS-Image's transformer on a reference case: each step's two branches compared, then the guided schedule timed" },
+        .{ .name = "tf-moss-image", .path = "zig/tests/moss_image.zig", .about = "MOSS-Image on a reference case: each step's two branches compared, then the guided schedule timed and decoded" },
+        .{ .name = "tf-moss-image-encoder", .path = "zig/tests/moss_image_encoder.zig", .about = "MOSS-Image's prompt encoder on a reference case: the ids checked, each step gated against float32, then timed" },
+        .{ .name = "tf-moss-image-decoder", .path = "zig/tests/moss_image_decoder.zig", .about = "MOSS-Image's image decoder on latents, gated against float64 beside torch float32, then timed" },
         .{ .name = "tf-glm-attn-probe", .path = "zig/tests/glm_attn_probe.zig", .about = "GLM-5.3-Flash's dense latent attention kernels on given inputs (scores, probabilities, outputs)" },
         .{ .name = "tf-moe-bench", .path = "zig/tests/moe_bench.zig", .about = "Routed-expert prompt kernels from .metal files on a skewed routing: chained speed, bits against the first" },
         .{ .name = "tf-mm-bench", .path = "zig/tests/mm_bench.zig", .about = "Prompt matmul kernels from .metal files: chained speed at one shape, bits against the first, error against fp64" },
@@ -329,15 +333,19 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .{ .name = "tf-gemma4-bench", .path = "zig/tests/gemma4/bench.zig", .about = "Gemma 4 dense step costs: projections alone by rows against whole forwards" },
         .{ .name = "tf-gemma4-no-tensor", .path = "zig/tests/gemma4/no_tensor.zig", .about = "Gemma 4's Metal kernels on a Mac without tensor units: what builds, and the row path's bits" },
         .{ .name = "tf-spark-run", .path = "zig/tests/spark25/run.zig", .about = "Spark2.5 on Metal: greedy tokens, every position's logits or a prompt's last logits, for the reference's check" },
+        .{ .name = "tf-minimax-run", .path = "zig/tests/minimax_m3/run.zig", .about = "MiniMax-M3.1-Flash greedy tokens, every position's logits or a prompt's last logits, for the reference's check" },
+        .{ .name = "tf-minimax-vision", .path = "zig/tests/minimax_m3/vision.zig", .about = "MiniMax-M3.1-Flash's image tower alone: an image's patches and text rows, for tools/vision_ref.py's check" },
         .{ .name = "tf-qwen36-row-seam", .path = "zig/tests/qwen36_row_seam.zig", .about = "Model-free fixture: the row projection's bias sums stay fp32 at every width" },
     };
+    // the tokenizer for the programs that tokenize prompts themselves (the engine module has none)
+    const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = optimize, .link_libc = true });
     for (engine_programs) |p| {
         const mod = b.createModule(.{
             .root_source_file = b.path(p.path),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
-            .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "core", .module = engine }, .{ .name = "cluster", .module = cluster }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "native_engines", .module = engines }, .{ .name = "engine_api", .module = api }, exlr8_build.cliImport(b, target, optimize, engine) },
+            .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "core", .module = engine }, .{ .name = "cluster", .module = cluster }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "native_engines", .module = engines }, .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, exlr8_build.cliImport(b, target, optimize, engine) },
         });
         if (p.c_source) |file| {
             mod.addCSourceFile(.{ .file = b.path(file), .flags = &.{"-std=c11"} });
@@ -462,6 +470,8 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     b.step("test-nemotron-round-depth-host", "Priced head depth, nonlanding levels and fixed-depth controls without devices").dependOn(&round_depth.step);
     const lfm2_tests = b.addRunArtifact(b.addTest(.{ .root_module = engine, .filters = &.{"lfm2_moe"} }));
     b.step("test-lfm2", "The LFM2-MoE family's tests: config, draws, state and its shared rounds on this Mac's GPU").dependOn(&lfm2_tests.step);
+    const lfm2_dspark = b.addRunArtifact(b.addTest(.{ .root_module = engine, .filters = &.{"lfm2 dspark:"} }));
+    b.step("test-lfm2-dspark", "LFM2's taps for a drafter: the tap kernel on this Mac's GPU").dependOn(&lfm2_dspark.step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = lanes })).step);
     // the fake fabric maps its windows with mmap: the Macs' RDMA, not Windows
     if (target.result.os.tag != .windows) test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = fabric })).step);
@@ -512,6 +522,7 @@ pub fn distMetalServer(b: *std.Build, target: std.Build.ResolvedTarget, draft_id
     m.metal.addSystemIncludePath(b.graph.cwdRelativePath(b.pathJoin(&.{ sdk, "usr/include" })));
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = .fast, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = m.lanes }} });
     const engines = b.createModule(.{ .root_source_file = b.path("zig/src/native/metal.zig"), .target = target, .optimize = .fast, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = m.metal }, .{ .name = "engine_api", .module = api }, .{ .name = "tensorfold", .module = m.engine } } });
+    engines.addImport("living", m.living);
     @import("drama3_metal.zig").addNative(b, target, .fast, m.metal, engines, mlxMetalStd(b));
     return nativeServer(b, target, .fast, m.metal, m.engine, m.living, api, engines, build_options, null);
 }

@@ -1,5 +1,6 @@
 //! Portable session bookkeeping tests; the Linux NVMe tier is tested separately.
 test {
+    _ = @import("restore.zig");
     _ = @import("prefix_fail_test.zig");
     _ = @import("store_residency_test.zig");
     _ = @import("lanes.zig");

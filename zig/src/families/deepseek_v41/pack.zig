@@ -185,7 +185,7 @@ pub const Pack = struct {
     /// Current CUDA rank adapter. Complete dense/packed storage remains available through projection().
     pub fn group(p: *const Pack, prefix: []const u8, buf: []u8) !exl3.Group {
         _ = buf;
-        return (try p.projection(prefix)).cudaGroup();
+        return @import("projection.zig").cudaGroup(p, prefix);
     }
 
     /// The group's marker tensor name (mul1 or mcg) if it has one; its value picks the codebook at load time.
@@ -201,6 +201,12 @@ pub const Pack = struct {
             }
         }
         return found;
+    }
+
+    /// The release's block-scale tensor of a prefix, when it has one; its shape says how the weights are scaled.
+    pub fn scale(p: *const Pack, prefix: []const u8, buf: []u8) !?Info {
+        const name = try std.fmt.bufPrint(buf, "{s}.scale", .{prefix});
+        return p.get(name);
     }
 
     /// `span` of tensor `info`'s bytes into `out` (span.bytes() long), run by run.
@@ -267,6 +273,28 @@ const testing = std.testing;
 
 /// One tensor of an in-memory image.
 pub const Spec = struct { name: []const u8, dtype: []const u8, shape: []const usize, fill: u8 = 0 };
+
+/// A safetensors header alone: the tensors' names, dtypes, shapes and byte ranges, without their bytes.
+pub fn headerOnly(a: std.mem.Allocator, specs: []const Spec) ![]u8 {
+    var json: std.Io.Writer.Allocating = .init(a);
+    defer json.deinit();
+    try json.writer.writeAll("{\"__metadata__\":{\"format\":\"pt\"}");
+    var at: usize = 0;
+    for (specs) |s| {
+        var n = (DType.parse(s.dtype) orelse return error.UnsupportedDType).size();
+        for (s.shape) |d| n *= d;
+        try json.writer.print(",\"{s}\":{{\"dtype\":\"{s}\",\"shape\":[", .{ s.name, s.dtype });
+        for (s.shape, 0..) |d, i| try json.writer.print("{s}{d}", .{ if (i == 0) "" else ",", d });
+        try json.writer.print("],\"data_offsets\":[{d},{d}]}}", .{ at, at + n });
+        at += n;
+    }
+    try json.writer.writeAll("}");
+    const head = json.written();
+    const out = try a.alloc(u8, 8 + head.len);
+    std.mem.writeInt(u64, out[0..8], head.len, .little);
+    @memcpy(out[8..][0..head.len], head);
+    return out;
+}
 
 /// A safetensors image in memory: tensors in order, each filled with `fill`.
 pub fn image(a: std.mem.Allocator, specs: []const Spec) ![]u8 {

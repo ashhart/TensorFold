@@ -83,9 +83,9 @@ test "Qwen4 lanes: shared verify, prefix rejection, stale handles and cold-cut p
     defer left.deinit(a);
     var right = try L.Stream.init(a, .{ .id = "right", .prompt = &.{ 7, 8 }, .max_new = 10 });
     defer right.deinit(a);
-    try t.expect(!try b.vtable.prefill_step.?(b.ptr, &left));
+    try t.expect(!try b.vtable.prefill_step.?(b.ptr, &left, 0));
     try t.expectEqual(@as(u32, 3), left.fill_at.load(.acquire));
-    try t.expect(try b.vtable.prefill_step.?(b.ptr, &left));
+    try t.expect(try b.vtable.prefill_step.?(b.ptr, &left, 0));
     try b.prefill(&right);
     const lh = try b.first(&left, 6);
     const rh = try b.first(&right, 2);
@@ -145,7 +145,7 @@ test "Qwen4 lanes: kept full-prompt logits resume without replay and cancelled f
     var hook: Hook = .{};
     var cancelled = try L.Stream.init(a, .{ .id = "cancelled", .prompt = &.{ 1, 2, 3, 4, 5, 6, 7, 8 }, .max_new = 8, .reuse = .{ .hook = .{ .ptr = &hook, .at = Hook.save } } });
     defer cancelled.deinit(a);
-    try t.expect(!try b.vtable.prefill_step.?(b.ptr, &cancelled));
+    try t.expect(!try b.vtable.prefill_step.?(b.ptr, &cancelled, 0));
     const submitted = f.e.gpu.submits;
     try b.vtable.cancel_prefill.?(b.ptr, &cancelled);
     try t.expectEqual(@as(u32, 4), hook.at);

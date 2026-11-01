@@ -125,6 +125,7 @@ pub const Forward = struct {
     multi: ?*ft.Multi = null,
     /// the keyed sampler (sampling_gpu.zig): a follower runs rank 0's sampled choices too (their gathers pair up)
     sampler: ?Sampler = null,
+    progress: ?*@import("round_progress.zig").Progress = null,
     grammar: ?Grammar = null, // TF_DSV41_GRAMMAR=1: grammar masks applied to "w.logits" before a pick
     calib_marks: std.ArrayList(u64) = .empty, // TF_DSV41_CALIB=measure: a follower's clock at each op_calib_mark
 
@@ -133,9 +134,14 @@ pub const Forward = struct {
     }
 
     pub fn upload(f: *Forward, destination: u64, bytes: []const u8) !void {
-        const owned = try f.uploads.take(f.runner.d, bytes.len);
-        @memcpy(owned, bytes);
-        try f.uploads.copyTo(.{ .d = f.runner.d, .ptr = destination, .len = bytes.len }, 0, f.runner.stream);
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            const len = @min(bytes.len - offset, @import("host_stage.zig").upload_chunk);
+            const owned = try f.uploads.take(f.runner.d, len);
+            @memcpy(owned, bytes[offset..][0..len]);
+            try f.uploads.copyTo(.{ .d = f.runner.d, .ptr = destination, .len = bytes.len }, offset, f.runner.stream);
+            offset += len;
+        }
         try f.uploads.wait();
     }
     pub fn drain(f: *Forward) !void {
@@ -395,14 +401,16 @@ pub const Forward = struct {
     /// A workstream's follower side: rank 0's message of an operation number this file does not know.
     pub const Ext = struct { ptr: *anyopaque, run: *const fn (ptr: *anyopaque, msg: []const i64) anyerror!void };
 
-    /// The session store's side: `commit` hears every committed id; `save` / `restore` run in the leader's order.
+    pub const Want = @import("kv").sessions.restore.Want;
+
+    /// The session store's side: commits and restores run in the leader's order.
     pub const Sess = struct {
         ptr: *anyopaque,
         commit: *const fn (ptr: *anyopaque, ids: []const u32) anyerror!void,
         reserve: ?*const fn (ptr: *anyopaque, ids: []const u32) anyerror!void = null,
         save: *const fn (ptr: *anyopaque) anyerror!void,
         /// `ids`: an NVMe entry's ids (the leader's prompt prefix: its tokens are not indexed)
-        restore: *const fn (ptr: *anyopaque, id: u32, ids: []const i64) anyerror!void,
+        restore: *const fn (ptr: *anyopaque, id: u32, want: Want, ids: []const i64) anyerror!void,
         /// CED replay's prompt snapshot: an entry at the slot's position, the slot keeps going (sessions_gpu.zig)
         prompt: *const fn (ptr: *anyopaque) anyerror!void,
         /// the slot empty: its pages back, the committed ids cleared

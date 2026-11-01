@@ -67,9 +67,9 @@ fn write(rt: *v.Rt, out: *Out, value: Value, o: Options, level: usize) v.Error!v
         .str => |s| try writeString(rt, out, s.s, o.ensure_ascii),
         .list => |l| {
             if (l.seq != .list and l.seq != .tuple) return rt.fail("Object of type {s} is not JSON serializable", .{v.typeName(value)});
-            if (l.items.len == 0) return out.appendSlice(a, "[]");
+            if (l.count() == 0) return out.appendSlice(a, "[]");
             try out.append(a, '[');
-            for (l.items, 0..) |item, i| {
+            for (try l.values(a), 0..) |item, i| {
                 if (i > 0) try out.appendSlice(a, o.item_sep);
                 try newline(rt, out, o, level + 1);
                 try write(rt, out, item, o, level + 1);

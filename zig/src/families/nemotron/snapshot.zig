@@ -5,6 +5,7 @@ const cfg = @import("config.zig");
 const st = @import("state.zig");
 const fwd = @import("forward.zig");
 const Metal = @import("backend.zig").Metal;
+const kvp = @import("../../core/metal_kv_pages.zig");
 
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
@@ -66,6 +67,18 @@ const Copies = struct {
         const n = rowBytes(c, self.snap.at);
         for (0..self.c.attentions + @intFromBool(self.c.mtp != null)) |i| {
             const kv = if (i < self.c.attentions) self.c.kv[i] else self.c.mtp.?;
+            if (kv.paged) |p| {
+                // the same bytes as a contiguous cache's: a head's rows in order, a page's run of them a part
+                for ([2]usize{ p.k_off, p.v_off }) |half| for (0..c.kv_heads) |h| {
+                    var row: usize = 0;
+                    while (row < self.snap.at) : (row += kvp.page_tokens) {
+                        const rows = @min(kvp.page_tokens, self.snap.at - row);
+                        const at = half + p.ids()[row / kvp.page_tokens] * p.pageBytes() + rowBytes(c, h * kvp.page_tokens);
+                        self.part(b, e, &off, p.arena(), at, rowBytes(c, rows));
+                    }
+                };
+                continue;
+            }
             for ([2]mtl.Buffer{ kv.k, kv.v }) |live| for (0..c.kv_heads) |h| self.part(b, e, &off, live, rowBytes(c, h * kv.capacity), n);
         }
         if (off != self.snap.bytes) return error.SnapshotSize;

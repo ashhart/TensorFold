@@ -86,6 +86,7 @@ const Loader = struct {
     host: std.ArrayList(u8) = .empty,
     name_buf: [192]u8 = undefined,
     last: []const u8 = "", // the tensor `get` read last, named when its values are refused
+    staging: @import("cuda_load_pack.zig").Staging = .{}, // the packed experts' mapped pinned memory, piece to piece
     recipes: ?*const core.modelopt.Recipes = null, // MIXED_PRECISION's table; null: the tensors decide (NVFP4)
 
     pub fn get(L: *Loader, comptime fmt: []const u8, args: anytype) !Tensor {
@@ -471,52 +472,43 @@ const Loader = struct {
         const count: usize = c.experts;
         const up_len = X.bytes(1, ni, d, 2) / 4;
         const down_len = X.bytes(1, d, ni, 1) / 4;
-        const up = try L.gpa.alloc(u32, count * up_len);
-        defer L.gpa.free(up);
-        const down = try L.gpa.alloc(u32, count * down_len);
-        defer L.gpa.free(down);
+        const keep = @import("cuda_upload_owner.zig").keep;
+        const up = try cuda.DeviceBuffer.alloc(L.d, count * up_len * 4);
+        const up_at = try keep(L, up, "layers.{d}.moe.experts.up", .{i});
+        const down = try cuda.DeviceBuffer.alloc(L.d, count * down_len * 4);
+        const down_at = try keep(L, down, "layers.{d}.moe.experts.down", .{i});
         const up_scale = try L.gpa.alloc(f32, count * 2);
         defer L.gpa.free(up_scale);
         const down_scale = try L.gpa.alloc(f32, count);
         defer L.gpa.free(down_scale);
-        const codes = try L.gpa.alloc(u8, d * ni / 2);
-        defer L.gpa.free(codes);
-        const scales = try L.gpa.alloc(u8, d * ni / 16);
-        defer L.gpa.free(scales);
-        const per = c.moe_inter * d / 16; // a whole gate, up or down's e4m3 scales
-        const decoded = try L.gpa.alloc(u8, 3 * per); // csf_32x2_v1's, decoded before the rank's cut
-        defer L.gpa.free(decoded);
         // the MTP layer's experts: bf16 (nvidia's), quantized here, or W4A16_NVFP4 (FP4-Local's), read as stored
         const bf16 = i == c.layers and (try L.get("layers.{d}.mlp.experts.0.gate_proj.weight", .{i})).dtype == .bf16;
-        if (bf16) try L.quantizedExperts(i, up, down, up_scale, down_scale) else for (0..count) |e| {
-            var ls: [3]core.nvfp4.Linear = undefined;
-            inline for (.{ "gate_proj", "up_proj", "down_proj" }, 0..) |proj, m| {
-                const name = try std.fmt.bufPrint(&L.name_buf, prefix ++ "layers.{d}.mlp.experts.{d}." ++ proj, .{ i, e });
-                ls[m] = try formats.expert(L, name, decoded[m * per ..][0..per]);
-            }
-            // gate and up: the rank's rows; down: every row, the rank's columns
-            const gate = .{ ls[0].codes[cut.lo * d / 2 ..][0 .. ni * d / 2], ls[0].scales[cut.lo * d / 16 ..][0 .. ni * d / 16] };
-            const upm = .{ ls[1].codes[cut.lo * d / 2 ..][0 .. ni * d / 2], ls[1].scales[cut.lo * d / 16 ..][0 .. ni * d / 16] };
-            X.packGateUp(up[e * up_len ..][0..up_len], gate, upm, ni, d);
-            const l = ls[2];
-            for (0..d) |r| {
-                @memcpy(codes[r * ni / 2 ..][0 .. ni / 2], l.codes[r * l.k / 2 + cut.lo / 2 ..][0 .. ni / 2]);
-                @memcpy(scales[r * ni / 16 ..][0 .. ni / 16], l.scales[r * l.k / 16 + cut.lo / 16 ..][0 .. ni / 16]);
-            }
-            X.packOne(down[e * down_len ..][0..down_len], codes, scales, d, ni);
-            up_scale[e * 2] = ls[0].global;
-            up_scale[e * 2 + 1] = ls[1].global;
-            down_scale[e] = l.global;
+        if (bf16) {
+            const words = try L.gpa.alloc(u32, count * (up_len + down_len));
+            defer L.gpa.free(words);
+            try L.quantizedExperts(i, words[0 .. count * up_len], words[count * up_len ..], up_scale, down_scale);
+            try up.upload(0, std.mem.sliceAsBytes(words[0 .. count * up_len]));
+            try down.upload(0, std.mem.sliceAsBytes(words[count * up_len ..]));
+        } else {
+            const packing = @import("cuda_load_pack.zig");
+            const threads = packing.packers(@import("cuda_ranks.zig").environment("TF_GLM_LOAD_PACK")) catch |err| {
+                std.log.err("TF_GLM_LOAD_PACK: 1 to {d} packer threads", .{packing.max_packers});
+                return err;
+            };
+            const pending = try L.gpa.alloc([3]formats.Pending, count); // read here: the checkpoint marks what is read
+            defer L.gpa.free(pending);
+            for (pending, 0..) |*p, e| inline for (.{ "gate_proj", "up_proj", "down_proj" }, 0..) |proj, m| {
+                p[m] = try formats.expert(L, try std.fmt.bufPrint(&L.name_buf, prefix ++ "layers.{d}.mlp.experts.{d}." ++ proj, .{ i, e }));
+            };
+            const at: packing.Cut = .{ .index = i, .d = d, .ni = ni, .lo = cut.lo, .per = c.moe_inter * d / 16 };
+            try packing.pieces(L.gpa, &L.staging, L.d, L.stream, pending, at, up, down, up_scale, down_scale, threads);
         }
-        var ptrs: [4]u64 = undefined;
-        for (&ptrs, [_][]const u8{ std.mem.sliceAsBytes(up), std.mem.sliceAsBytes(down), std.mem.sliceAsBytes(up_scale), std.mem.sliceAsBytes(down_scale) }, [_][]const u8{ "up", "down", "up_scale", "down_scale" }) |*p, bytes, what| {
-            try L.host.appendSlice(L.gpa, bytes);
-            p.* = try L.put("layers.{d}.moe.experts.{s}", .{ i, what });
-        }
-        return .{ .format = .nvfp4, .up = ptrs[0], .down = ptrs[1], .up_scale = ptrs[2], .down_scale = ptrs[3], .width = ni, .dims = d, .experts = count, .limit = c.swiglu_limit };
+        const us = try keep(L, try cuda.DeviceBuffer.fromHost(L.d, std.mem.sliceAsBytes(up_scale)), "layers.{d}.moe.experts.up_scale", .{i});
+        const ds = try keep(L, try cuda.DeviceBuffer.fromHost(L.d, std.mem.sliceAsBytes(down_scale)), "layers.{d}.moe.experts.down_scale", .{i});
+        return .{ .format = .nvfp4, .up = up_at, .down = down_at, .up_scale = us, .down_scale = ds, .width = ni, .dims = d, .experts = count, .limit = c.swiglu_limit };
     }
 
-    fn layer(L: *Loader, i: u32) !Layer {
+    pub fn layer(L: *Loader, i: u32) !Layer {
         const c = &L.w.config;
         const in_norm = try L.norm("layers.{d}.input_layernorm.weight", .{i}, "layers.{d}.in_norm");
         const post_norm = try L.norm("layers.{d}.post_attention_layernorm.weight", .{i}, "layers.{d}.post_norm");
@@ -549,15 +541,12 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, stream: c
     defer head_ck.close();
     var L: Loader = .{ .gpa = gpa, .d = d, .stream = stream, .pack_dense = tools.pack_dense, .tools = tools, .w = &w, .ck = &ck };
     defer L.host.deinit(gpa);
+    defer L.staging.deinit();
     var recipes = try formats.readRecipes(gpa, io, dir);
     defer if (recipes) |*r| r.deinit();
     if (recipes) |*r| L.recipes = recipeTable(r);
     w.layers = try gpa.alloc(Layer, layers.len);
-    for (layers, w.layers) |i, *l| {
-        if (i >= c.layers) return error.BadLayer;
-        l.* = try L.layer(i);
-        ck.release(); // a rank reads about half the checkpoint: its pages would crowd the GPU's allocations out
-    }
+    try @import("cuda_load_ahead.zig").layers(&L, prefix, layers, w.layers);
     try L.whole(try L.get("embed_tokens.weight", .{}), .bf16);
     w.embed = try L.put("embed", .{});
     w.norm = try L.norm("norm.weight", .{}, "norm");
@@ -585,6 +574,8 @@ test {
     _ = @import("cuda_proj.zig");
     _ = @import("cuda_fp8pb.zig");
     _ = @import("cuda_mxfp8.zig");
+    _ = @import("cuda_load_ahead.zig");
+    _ = @import("cuda_load_pack.zig");
 }
 
 test "an empty mixed recipe table cannot make an undeclared NVFP4 projection look declared" {

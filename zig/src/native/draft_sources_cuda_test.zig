@@ -33,11 +33,15 @@ test "draft sources: CUDA GLM distinguishes its checkpoint head from loaded DFla
     var b: g.lanes.Lanes = undefined;
     b.x.e = &e;
     b.alone = false;
+    b.mtp_confidence = null;
     e.mtp = false;
     e.drafter = null;
     try check(b.facts(), null, false, false);
     e.mtp = true;
     try check(b.facts(), null, true, true);
+    b.mtp_confidence = 0.3; // --mtp-confidence: the head's chances size its windows, still a checkpoint head
+    try check(b.facts(), null, true, true);
+    b.mtp_confidence = null;
     e.drafter = present(@TypeOf(e.drafter.?));
     try check(b.facts(), .{ .kind = "DFlash2", .name = "example/draft" }, true, false);
 }
@@ -53,6 +57,7 @@ test "draft sources: CUDA Gemma, Spark, Kolibri and Dory have copy windows and n
     var sb: s.backend.Spark = undefined;
     var sm: @typeInfo(@TypeOf(sb.m)).pointer.child = undefined;
     sm.slots = 4;
+    sm.paged = false;
     sb.m = &sm;
     try check(sb.facts(), null, true, false);
     const k = @import("kolibri1");

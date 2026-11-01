@@ -47,7 +47,12 @@ pub const Rope = struct {
 /// The attention a layer runs: sliding window only, KV source + indexer, own indexer on a source's keys, or reuse.
 pub const Mode = enum { swa, full, reindex, reuse };
 
+/// How the checkpoint stores its weights: the EXL3 trellises or the release's own FP8 blocks and MXFP4 experts.
+pub const Format = enum { exl3, release_fp8 };
+
 pub const Config = struct {
+    /// how the checkpoint stores its weights; the release's own format is admitted beside the EXL3 trellises
+    format: Format = .exl3,
     vocab: u32 = 129280,
     hidden: u32 = 5120,
     layers: u32 = 40,
@@ -109,8 +114,25 @@ pub const Config = struct {
         return parse(gpa, bytes);
     }
 
+    /// How far a config.json is read: a full checkpoint, asset metadata, or a small backend checkpoint's shapes.
+    const Check = enum { checkpoint, metadata, shapes };
+
     /// Checkpoint JSON (text_config, else top level); absent keys keep release values, unknown routing is refused.
     pub fn parse(gpa: std.mem.Allocator, json: []const u8) !Config {
+        return parseWith(gpa, json, .checkpoint);
+    }
+
+    /// CPU asset generation checks release geometry without admitting the checkpoint's matrix representation.
+    pub fn parseMetadata(gpa: std.mem.Allocator, json: []const u8) !Config {
+        return parseWith(gpa, json, .metadata);
+    }
+
+    /// As `parse`, the release's shapes not required: a small checkpoint of the same format (a backend's smoke test).
+    pub fn parseShapes(gpa: std.mem.Allocator, json: []const u8) !Config {
+        return parseWith(gpa, json, .shapes);
+    }
+
+    fn parseWith(gpa: std.mem.Allocator, json: []const u8, check: Check) !Config {
         const parsed = try std.json.parseFromSlice(std.json.Value, gpa, json, .{ .parse_numbers = false });
         defer parsed.deinit();
         if (parsed.value != .object) return error.BadConfig;
@@ -170,8 +192,12 @@ pub const Config = struct {
             }
         }
         try c.validate();
-        try requireCheckpoint(top, text);
-        try c.validateRelease();
+        switch (check) {
+            .checkpoint => c.format = try requireCheckpoint(top, text),
+            .metadata => try requireMetadata(top, text),
+            .shapes => c.format = try requireFormat(top),
+        }
+        if (check != .shapes) try c.validateRelease();
         return c;
     }
 
@@ -429,15 +455,32 @@ pub fn tiny() Config {
     };
 }
 
-fn requireCheckpoint(top: std.json.ObjectMap, text: std.json.ObjectMap) !void {
+/// The checkpoint's storage format, its shapes not required: a backend's small checkpoint admits it this way.
+fn requireFormat(top: std.json.ObjectMap) !Format {
     const model = top.get("model_type") orelse return error.MissingField;
     if (model != .string or !std.mem.eql(u8, model.string, "deepseek_v41")) return error.UnsupportedCheckpoint;
     const quant = top.get("quantization_config") orelse return error.MissingField;
     if (quant != .object) return error.BadConfig;
     const method = quant.object.get("quant_method") orelse return error.MissingField;
-    const version = quant.object.get("version") orelse return error.MissingField;
-    if (method != .string or !std.mem.eql(u8, method.string, "exl3") or version != .string or
-        (!std.mem.eql(u8, version.string, "1") and !std.mem.startsWith(u8, version.string, "1."))) return error.UnsupportedCheckpoint;
+    if (method != .string) return error.UnsupportedCheckpoint;
+    if (std.mem.eql(u8, method.string, "exl3")) {
+        try @import("checkpoint_metadata.zig").require(quant);
+        return .exl3;
+    }
+    if (std.mem.eql(u8, method.string, "fp8")) return requireReleaseFp8(quant.object);
+    return error.UnsupportedCheckpoint;
+}
+
+/// A full checkpoint: the storage format, then the release's metadata.
+fn requireCheckpoint(top: std.json.ObjectMap, text: std.json.ObjectMap) !Format {
+    const format = try requireFormat(top);
+    try requireMetadata(top, text);
+    return format;
+}
+
+fn requireMetadata(top: std.json.ObjectMap, text: std.json.ObjectMap) !void {
+    const model = top.get("model_type") orelse return error.MissingField;
+    if (model != .string or !std.mem.eql(u8, model.string, "deepseek_v41")) return error.UnsupportedCheckpoint;
     inline for (.{ "candidate_block_size", "candidate_source_layer_id", "candidate_topk_blocks", "compress_ratios", "compress_rope_theta", "engram_compressed_vocab_size", "engram_head_dim", "engram_layer_ids", "engram_max_ngram_size", "engram_n_heads", "engram_num_embeddings", "engram_pad_token_id", "engram_vocab_size", "hc_eps", "hc_mult", "hc_sinkhorn_iters", "head_dim", "hidden_size", "index_head_dim", "index_n_heads", "index_source_layer_ids", "index_topk", "kv_source_layer_ids", "max_position_embeddings", "moe_intermediate_size", "n_routed_experts", "n_shared_experts", "norm_topk_prob", "num_attention_heads", "num_experts_per_tok", "num_hidden_layers", "num_key_value_heads", "num_nextn_predict_layers", "o_groups", "o_lora_rank", "q_lora_rank", "qk_rope_head_dim", "rms_norm_eps", "rope_theta", "routed_scaling_factor", "scoring_func", "sliding_window", "swiglu_limit", "topk_method", "vocab_size" }) |key| {
         if (!text.contains(key)) return error.MissingField;
     }
@@ -448,6 +491,21 @@ fn requireCheckpoint(top: std.json.ObjectMap, text: std.json.ObjectMap) !void {
         if (!r.object.contains(key)) return error.MissingField;
     const kind = r.object.get("rope_type").?;
     if (kind != .string or !std.mem.eql(u8, kind.string, "yarn")) return error.UnsupportedArchitecture;
+}
+
+/// The release's own format: FP8 weights in 32x32 blocks with E8M0 scales, the routed experts in MXFP4.
+fn requireReleaseFp8(quant: std.json.ObjectMap) !Format {
+    const block = quant.get("weight_block_size") orelse return error.UnsupportedCheckpoint;
+    if (block != .array or block.array.items.len != 2) return error.UnsupportedCheckpoint;
+    for (block.array.items) |v| {
+        const n = unsigned(u64, v) catch return error.UnsupportedCheckpoint;
+        if (n != 32) return error.UnsupportedCheckpoint;
+    }
+    const scale_fmt = quant.get("scale_fmt") orelse return error.UnsupportedCheckpoint;
+    if (scale_fmt != .string or !std.mem.eql(u8, scale_fmt.string, "ue8m0")) return error.UnsupportedCheckpoint;
+    const expert_dtype = quant.get("expert_dtype") orelse return error.UnsupportedCheckpoint;
+    if (expert_dtype != .string or !std.mem.eql(u8, expert_dtype.string, "fp4")) return error.UnsupportedCheckpoint;
+    return .release_fp8;
 }
 
 test "config integers retain exact unsigned boundaries and integral notation" {
@@ -478,4 +536,25 @@ test "Engram pad alias cannot override the admitted token id" {
     const conflict = try std.fmt.allocPrint(a, "{{\"engram_pad_id\":3,{s}", .{good[1..]});
     defer a.free(conflict);
     try std.testing.expectError(error.BadConfig, Config.parse(a, conflict));
+}
+
+test "asset metadata preserves release checks, and the release's own config parses as its FP8 format" {
+    const a = std.testing.allocator;
+    const bytes = @embedFile("fixtures/flash1017-config.json");
+    const c = try Config.parseMetadata(a, bytes);
+    try std.testing.expectEqual(@as(u32, 99092), c.engram_compressed_vocab);
+    try std.testing.expectEqual(@as(u32, 5120), c.hidden);
+    // the release's own config parses for the backends that run it; the metadata path stays the asset generator's
+    const full = try Config.parse(a, bytes);
+    try std.testing.expectEqual(Format.release_fp8, full.format);
+    const missing = try std.mem.replaceOwned(u8, a, bytes, "engram_n_heads", "unused_engram_heads");
+    defer a.free(missing);
+    try std.testing.expectError(error.MissingField, Config.parseMetadata(a, missing));
+    const changed = try std.mem.replaceOwned(u8, a, bytes, "5120", "5248");
+    defer a.free(changed);
+    try std.testing.expectError(error.UnsupportedArchitecture, Config.parseMetadata(a, changed));
+}
+
+test {
+    _ = @import("dsq_admission_test.zig");
 }

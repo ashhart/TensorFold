@@ -5,6 +5,7 @@ const core = @import("core");
 const geometry = @import("cuda_geometry.zig");
 const engine = @import("cuda_engine.zig");
 const modelopt = @import("cuda_modelopt.zig");
+const modelopt_experts = @import("cuda_modelopt_experts.zig");
 
 const Geometry = geometry.Geometry;
 const Slot = geometry.Slot;
@@ -85,7 +86,7 @@ pub fn total(g: Geometry) usize {
     t += aligned(g.hidden * 2);
     for (0..g.layers) |i| {
         t += 2 * aligned(g.hidden * 2);
-        if (g.moe()) t += routedBytes(g.experts, g.intermediate, g.hidden, g.expert_bits);
+        if (g.moe()) t += if (mo) modelopt_experts.routedBytes(g) else routedBytes(g.experts, g.intermediate, g.hidden, g.expert_bits);
         for (slots(g, i)) |slot| {
             const nk = shape(g, slot);
             t += if (mo) modelopt.packedBytes(nk[0], nk[1], g.kinds.of(i, slot)) else packedBytes(nk[0], nk[1], g.bits.of(i, slot));
@@ -107,7 +108,7 @@ pub fn stageBytes(g: Geometry) usize {
             const nk = shape(g, slot);
             raw = @max(raw, modelopt.rawBytes(nk[0], nk[1], g.kinds.of(i, slot)));
         };
-        return raw;
+        return if (g.moe()) @max(raw, modelopt_experts.stageBytes(g)) else raw;
     }
     var most = rawBytes(g.vocab, g.hidden, g.bits.head);
     if (rowBits(g.bits.embed) != g.bits.embed) most = @max(most, rawBytes(g.vocab, g.hidden, g.bits.embed));
@@ -190,18 +191,23 @@ pub fn linear(e: *Engine, into: anytype, ck: *core.Checkpoint, stage: *DeviceBuf
     var parts: [3][]const u8 = undefined;
     const specs = [_]struct { []const u8, core.checkpoint.DType, usize }{ .{ "weight", .u32, k * bits / 32 }, .{ "scales", .bf16, k / 64 }, .{ "biases", .bf16, k / 64 } };
     for (specs, &parts) |p, *part| part.* = (try ck.expect(try std.fmt.bufPrint(&buf, "{s}{s}.{s}", .{ prefix, name, p[0] }), p[1], &.{ n, p[2] })).bytes;
-    const raw = try stageParts(stage, parts);
     const served = servedBits(bits);
-    const out: Proj = if (served == 4) .{ .a4 = try pack4(e, into, raw, n, k) } else blk: {
-        const l = AffineN.layout(n, k, served);
-        const q: AffineN = .{ .w = try into.alloc(l.words), .s = try into.alloc(l.scales), .b = try into.alloc(l.scales), .n = n, .k = k, .npad = l.npad, .bits = served };
-        try e.wide.packWords(e.stream, raw[0], bits, n, k, q.w);
-        try e.wide.packTable(e.stream, raw[1], n, k, q.npad, q.s);
-        try e.wide.packTable(e.stream, raw[2], n, k, q.npad, q.b);
-        break :blk .{ .an = q };
-    };
+    if (served == 4) return packLinear(e, into, stage, parts, n, k);
+    const raw = try stageParts(stage, parts);
+    const l = AffineN.layout(n, k, served);
+    const q: AffineN = .{ .w = try into.alloc(l.words), .s = try into.alloc(l.scales), .b = try into.alloc(l.scales), .n = n, .k = k, .npad = l.npad, .bits = served };
+    try e.wide.packWords(e.stream, raw[0], bits, n, k, q.w);
+    try e.wide.packTable(e.stream, raw[1], n, k, q.npad, q.s);
+    try e.wide.packTable(e.stream, raw[2], n, k, q.npad, q.b);
     try e.stream.synchronize(); // the next projection's staging overwrites this one's
-    return out;
+    return .{ .an = q };
+}
+
+/// MLX affine-4 parts (words, scales, biases) of an n-by-k projection, staged and packed into `into`'s arena.
+pub fn packLinear(e: *Engine, into: anytype, stage: *DeviceBuffer, parts: [3][]const u8, n: usize, k: usize) !Proj {
+    const q = try pack4(e, into, try stageParts(stage, parts), n, k);
+    try e.stream.synchronize(); // the next projection's staging overwrites this one's
+    return .{ .a4 = q };
 }
 
 /// Inputs [from, from + len) of an n-by-k affine-4 projection as their own packed projection (the MTP's fc halves).
@@ -272,17 +278,21 @@ fn expertTable(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer, prefix: [
         const one: []const usize = &.{ n, p[2] };
         part.* = (try ck.expect(try std.fmt.bufPrint(&buf, "{s}{s}.{s}", .{ prefix, name, p[0] }), p[1], if (count == 0) one else stacked)).bytes;
     }
+    if (bits == 4) return packTable(e, stage, parts, count, n, k, out, m, mi);
     const raw = try stageParts(stage, parts);
-    if (bits == 4) {
-        try e.experts.packInto(e.stream, raw[0], raw[1], raw[2], out, @max(count, 1), n, k, m, mi);
-    } else {
-        const Pack = struct {
-            fn run(owner: *Engine, w: u64, sc: u64, bias: u64, tmp: [2]u64, dst: u64, chunk_count: usize, nn: usize, kk: usize, mm: usize, index: usize) !void {
-                try owner.experts3.packInto(&owner.experts, owner.stream, w, sc, bias, tmp, dst, chunk_count, nn, kk, mm, index);
-            }
-        };
-        try @import("cuda_expert_pack.zig").chunks(e, Pack.run, stage.ptr, stage.len, raw, parts[0].len + parts[1].len + parts[2].len, out, count, n, k, m, mi);
-    }
+    const Pack = struct {
+        fn run(owner: *Engine, w: u64, sc: u64, bias: u64, tmp: [2]u64, dst: u64, chunk_count: usize, nn: usize, kk: usize, mm: usize, index: usize) !void {
+            try owner.experts3.packInto(&owner.experts, owner.stream, w, sc, bias, tmp, dst, chunk_count, nn, kk, mm, index);
+        }
+    };
+    try @import("cuda_expert_pack.zig").chunks(e, Pack.run, stage.ptr, stage.len, raw, parts[0].len + parts[1].len + parts[2].len, out, count, n, k, m, mi);
+    try e.stream.synchronize(); // the next table's staging overwrites this one's
+}
+
+/// MLX affine-4 parts of `count` stacked experts (one at count 0), staged and packed as `out`'s mi-th table of m.
+pub fn packTable(e: *Engine, stage: *DeviceBuffer, parts: [3][]const u8, count: usize, n: usize, k: usize, out: u64, m: usize, mi: usize) !void {
+    const raw = try stageParts(stage, parts);
+    try e.experts.packInto(e.stream, raw[0], raw[1], raw[2], out, @max(count, 1), n, k, m, mi);
     try e.stream.synchronize(); // the next table's staging overwrites this one's
 }
 
@@ -358,7 +368,7 @@ pub fn load(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer) !void {
         l.* = .{
             .input_norm = try normVec(e, ck, mo, "{s}input_layernorm.weight", .{p}, .bf16, &.{g.hidden}),
             .post_norm = try normVec(e, ck, mo, "{s}post_attention_layernorm.weight", .{p}, .bf16, &.{g.hidden}),
-            .mlp = if (g.moe()) try routed(e, e, ck, stage, p, g.expert_bits) else .{ .dense = .{ .gate = ps.get(.gate), .up = ps.get(.up), .down = ps.get(.down) } },
+            .mlp = if (g.moe() and mo) try modelopt_experts.routed(e, ck, stage, p) else if (g.moe()) try routed(e, e, ck, stage, p, g.expert_bits) else .{ .dense = .{ .gate = ps.get(.gate), .up = ps.get(.up), .down = ps.get(.down) } },
             .mixer = undefined,
         };
         if (g.pocket > 0) try loadPocket(e, ck, p, i);

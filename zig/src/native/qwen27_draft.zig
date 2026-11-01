@@ -40,22 +40,26 @@ pub const Draft = struct {
     pub fn reset(d: *Draft) !void {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
+        try d.generation.settle();
         try d.runner.reset(0);
         try d.model.reset();
     }
     pub fn promptChunk(d: *Draft, ids: []const u32, last: bool) !void {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
+        try d.generation.settle();
         try d.generation.promptChunk(ids, last);
     }
     pub fn decodeChunk(d: *Draft, ids: []const u32, last: bool) !void {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
+        try d.generation.settle();
         try d.generation.decodeChunk(ids, last);
     }
     pub fn advance(d: *Draft, token: u32) !void {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
+        try d.generation.settle();
         try d.generation.advance(token);
     }
     pub fn deinit(d: *Draft) void {

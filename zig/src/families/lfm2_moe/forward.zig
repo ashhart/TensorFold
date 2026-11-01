@@ -146,6 +146,7 @@ pub fn run(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []const
     for (m.weights.blocks, 0..) |block, i| {
         enc.norm(s, block.operator_norm, i == 0, total, combine);
         combine = false;
+        if (i > 0) tap(enc, s, i - 1, total);
         switch (block.mixer) {
             .conv => |cv| conv(enc, s, cv, i, segments, total),
             .attention => |a| attention(enc, s, a, &m.config, segments, i, total),
@@ -162,6 +163,7 @@ pub fn run(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []const
         }
     }
     enc.norm(s, m.weights.norm, false, total, combine);
+    tap(enc, s, c.layers - 1, total);
     if (head == .all) {
         enc.projection(embedding, s.x, 0, s.logits, 0, total);
         enc.pipe("lfm2_argmax");
@@ -185,6 +187,18 @@ pub fn run(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []const
         seg.cache.commit(s, base, seg.rows, record);
         base += seg.rows;
     }
+}
+
+/// Layer `layer`'s output rows (h, just summed by the next norm) into each tap of it, when a drafter reads them.
+fn tap(enc: Encoder, s: *st.Scratch, layer: usize, total: usize) void {
+    const taps = s.taps orelse return;
+    for (taps.layers[0..taps.count], 0..) |l, t| if (l == layer) {
+        enc.pipe("lfm2_tap");
+        enc.e.setBuffer(s.h, 0, 0);
+        enc.e.setBuffer(taps.buf, 0, 1);
+        enc.e.setValue([2]u32{ taps.count * c.hidden, @intCast(t * c.hidden) }, 2);
+        enc.threads(.{ c.hidden / 8, total, 1 }, .{ 256, 1, 1 });
+    };
 }
 
 fn conv(enc: Encoder, s: *st.Scratch, cv: wts.Conv, layer: usize, segments: []const Segment, total: usize) void {

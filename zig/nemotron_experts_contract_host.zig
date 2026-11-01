@@ -16,18 +16,18 @@ const Collector = struct {
     }
 };
 
-test "Nemotron experts contract: all eighteen pipelines and two controls reach the actual collector" {
+test "Nemotron experts contract: all twenty pipelines and two controls reach the actual collector" {
     var found: Collector = .{ .a = a };
     defer found.list.deinit(a);
     try cases.visit(&found, null);
-    try std.testing.expectEqual(@as(usize, 20), found.list.items.len);
+    try std.testing.expectEqual(@as(usize, 22), found.list.items.len);
     var plain: usize = 0;
     for (found.list.items, 0..) |v, i| {
         if (v.fault != .none) continue;
         plain += 1;
         for (found.list.items[i + 1 ..]) |w| if (w.fault == .none) try std.testing.expect(!std.mem.eql(u8, v.symbol, w.symbol));
     }
-    try std.testing.expectEqual(@as(usize, 18), plain);
+    try std.testing.expectEqual(@as(usize, 20), plain);
     for (found.list.items) |v| if (!v.geo) {
         const tag = try std.fmt.allocPrint(a, "[[host_name(\"{s}\")]]", .{v.symbol});
         defer a.free(tag);
@@ -122,7 +122,9 @@ test "Nemotron experts contract: the reference sums x as tf_load16 does, in bf16
 }
 
 test "Nemotron experts contract: the fp32 x-sum control leaves w3's float64 bound at a served window" {
-    const v = cases.entries[19];
+    const v = for (cases.entries) |e| {
+        if (e.fault == .fp32_sums) break e;
+    } else unreachable;
     try std.testing.expectEqual(cases.Fault.fp32_sums, v.fault);
     const served = cases.served(v);
     const s = cases.spec(v, "control", &served);
@@ -220,4 +222,28 @@ test "Nemotron experts contract: relu2's interval holds every fp32 dot within th
     try std.testing.expectEqual(@as(f64, -1 - 0x1p-7), fixture.bfSide(-1 - 0x1p-20, false));
     try std.testing.expectEqual(@as(f64, -1), fixture.bfSide(-1 - 0x1p-20, true));
     try std.testing.expect(std.math.isNan(fixture.relu2(std.math.nan(f64))));
+}
+
+test "two-column source hints preserve every arithmetic token in the captured template" {
+    const captured = @import("kernels/metal/nemotron/kernels.zig");
+    const adapter = @import("src/families/nemotron/geo_source.zig");
+    inline for (captured.all) |k| if (comptime std.mem.eql(u8, k.key, "expert_up") or std.mem.eql(u8, k.key, "expert_down")) {
+        const body = comptime adapter.body(k.source, k.function);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, body, "#pragma clang loop unroll(full)"));
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, body, "max_total_threads_per_threadgroup(SG * 32)"));
+        const strip = [_][2][]const u8{
+            .{ "tf_geo_rowdot", "tf_rowdot" },                           .{ "tf_geo_experts", k.function },
+            .{ "[[max_total_threads_per_threadgroup(SG * 32)]]\n", "" }, .{ "  #pragma clang loop unroll(full)\n", "" },
+        };
+        var plain = try a.dupe(u8, body);
+        defer a.free(plain);
+        for (strip) |edit| {
+            const next = try std.mem.replaceOwned(u8, a, plain, edit[0], edit[1]);
+            a.free(plain);
+            plain = next;
+        }
+        const start = std.mem.indexOf(u8, k.source, "template <int K, int GS, int RPS>").?;
+        const end = std.mem.indexOf(u8, k.source, "\ntemplate [[host_name").?;
+        try std.testing.expectEqualStrings(std.mem.trim(u8, k.source[start..end], "\n"), std.mem.trim(u8, plain, "\n"));
+    };
 }

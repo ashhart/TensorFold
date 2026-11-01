@@ -79,11 +79,15 @@ pub const CommandBuffer = struct {
     }
 
     pub fn commit(self: CommandBuffer) void {
+        @import("pass_metrics.zig").commit();
         objc.msg(void, self.id, "commit", .{});
     }
 
     pub fn wait(self: CommandBuffer) void {
+        const metrics = @import("pass_metrics.zig");
+        const start = metrics.time();
         objc.msg(void, self.id, "waitUntilCompleted", .{});
+        if (start != 0) metrics.wait(start, self.gpuSeconds());
     }
 
     pub fn status(self: CommandBuffer) types.CommandBufferStatus {
@@ -194,5 +198,15 @@ pub const ComputeEncoder = struct {
 
     pub fn end(self: ComputeEncoder) void {
         objc.msg(void, self.id, "endEncoding", .{});
+    }
+
+    /// The command buffer this encoder was opened from, for the event ops a seam encodes BETWEEN encoders.
+    pub fn commandBuffer(self: ComputeEncoder) CommandBuffer {
+        return .{ .id = objc.msg(Id, self.id, "commandBuffer", .{}) };
+    }
+
+    /// Whether this encoder dispatches serially or concurrently: a seam reopens it in the same mode.
+    pub fn dispatchType(self: ComputeEncoder) types.DispatchType {
+        return @fromBackingInt(@intCast(objc.msg(usize, self.id, "dispatchType", .{})));
     }
 };

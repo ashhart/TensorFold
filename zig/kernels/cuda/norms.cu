@@ -536,3 +536,29 @@ extern "C" __global__ void __launch_bounds__(tf_l2::NT) tf_slerp_rows(const __nv
                                                                       __nv_bfloat16* h, int width, float eps) {
     tf_l2::slerp_rows<tf_l2::A | tf_l2::B>(res, out, alpha, scale, h, width, eps);
 }
+
+// Nemotron's rows in its own order (norms_strided.cuh): a thread's elements strided by the block, sums in order.
+#include "norms_strided.cuh"
+
+// y = bf16((x inv) w), xs its 64-sums, on parts of rows (part p of row r at x + r x_ld + p x_part), to 4,096 wide.
+extern "C" __global__ void __launch_bounds__(256) tf_rms_rows_bf16h_parts(
+    const __nv_bfloat16* x, long long x_ld, long long x_part, const __nv_bfloat16* w, long long w_part, __nv_bfloat16* y,
+    long long y_ld, long long y_part, float* xs, int width, float eps) {
+    tf_rms_strided::parts<256, 16, false>(x, x_ld, x_part, w, w_part, y, y_ld, y_part, xs, width, eps);
+}
+
+// The same parts with MLX's bf16 steps, y = bf16(w bf16(x inv)), 128 threads a part, to 1,024 wide.
+extern "C" __global__ void __launch_bounds__(128) tf_rms_rows_bf16h_parts_round(
+    const __nv_bfloat16* x, long long x_ld, long long x_part, const __nv_bfloat16* w, long long w_part, __nv_bfloat16* y,
+    long long y_ld, long long y_part, float* xs, int width, float eps) {
+    tf_rms_strided::parts<128, 8, true>(x, x_ld, x_part, w, w_part, y, y_ld, y_part, xs, width, eps);
+}
+
+// h = bf16(x + bf16(routed fma chain + shared sum)) over a row's expert slots ys (fp32 or bf16), then the strided norm.
+extern "C" __global__ void __launch_bounds__(tf_rms_strided::LT) tf_moe_add_rms_rows_bf16h(
+    const __nv_bfloat16* x, const void* ys, int y_f32, const float* wt, const __nv_bfloat16* w, __nv_bfloat16* h,
+    __nv_bfloat16* y, float* xs, float eps, int width, int routed, int slots) {
+    tf_rms_strided::moe_row<false>(x, ys, y_f32, wt, w, h, y, xs, eps, width, routed, slots);
+}
+
+#include "rms_tiles.cuh"

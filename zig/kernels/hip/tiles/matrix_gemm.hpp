@@ -14,8 +14,9 @@ template <class Dec, class Act, class T, class Epi>
 __device__ __forceinline__ void wmma_gemm_tile(typename Dec::Args& a) {
 #if TF_DEVICE_WMMA_GFX11
     if (!Dec::take_item(a, blockIdx.z)) return;
-    const int bx = blockIdx.x;
-    const int m0 = blockIdx.y * kGemmM;
+    int bx, by;
+    band_tile(bx, by);
+    const int m0 = by * kGemmM;
     if (m0 >= a.m) return;
     constexpr int kLdw = kGemmLd / 2;
     __shared__ __attribute__((aligned(16))) uint32_t xs[2][kGemmM * kLdw];
@@ -30,6 +31,10 @@ __device__ __forceinline__ void wmma_gemm_tile(typename Dec::Args& a) {
     const int groups = a.k / a.group;
     const int stages = a.k / kGemmK;
     const int per = a.group / kGemmK;
+    const int per_log2 = __builtin_ctz(per);  // groups are 32, 64 or 128 codes: one, two or four stages
+    auto group_of = [&](int st) { return st >> per_log2; };
+    auto group_start = [&](int st) { return (st & (per - 1)) == 0; };
+    auto group_end = [&](int st) { return (st & (per - 1)) == per - 1; };
     const int rows_left = a.m - m0;
     const int line = tid & (kGemmN - 1);
     const int side = __builtin_amdgcn_readfirstlane(tid >> 7);
@@ -61,8 +66,8 @@ __device__ __forceinline__ void wmma_gemm_tile(typename Dec::Args& a) {
             for (int v = 0; v < 4; ++v) xreg[v] = xsrc[sx_ * 4 + v];
         }
         const long long base = static_cast<long long>(col_s) * groups;
-        term[0] = Dec::term(a, base + st / per);
-        term[1] = Dec::term(a, base + st1 / per);
+        term[0] = Dec::term(a, base + group_of(st));
+        term[1] = Dec::term(a, base + group_of(st1));
     };
     auto stash = [&]<int J>(std::integral_constant<int, J>, int st, int buf) {
         u32x4* dst = reinterpret_cast<u32x4*>(ws[buf] + line * kLdw + side * 8);
@@ -84,13 +89,13 @@ __device__ __forceinline__ void wmma_gemm_tile(typename Dec::Args& a) {
 #pragma unroll
             for (int v = 0; v < 4; ++v) xdst[v] = xreg[v];
         }
-        if (side == 0 && st % per == per - 1) {
-            sc[(st / per) % 3][line] = Dec::scale_value(a, term[J]);
-            bi[(st / per) % 3][line] = Dec::bias_value(a, term[J]);
+        if (side == 0 && group_end(st)) {
+            sc[group_of(st) % 3][line] = Dec::scale_value(a, term[J]);
+            bi[group_of(st) % 3][line] = Dec::bias_value(a, term[J]);
         }
     };
     auto sumx = [&](int st, int buf) {
-        if (st % per == 0) run = 0.f;
+        if (group_start(st)) run = 0.f;
         const u32x4* src = reinterpret_cast<const u32x4*>(xs[buf] + line * kLdw);
 #pragma unroll
         for (int v = 0; v < 4; ++v) {
@@ -103,7 +108,7 @@ __device__ __forceinline__ void wmma_gemm_tile(typename Dec::Args& a) {
                 run += T::hi(p);
             }
         }
-        if (st % per == per - 1) sx[(st / per) & 1][line] = run;
+        if (group_end(st)) sx[group_of(st) & 1][line] = run;
     };
 
     // Wave (wm, wn) owns rows 32 wm.., columns 64 wn.. (2 x 4 tiles); a lane: column lane % 16, rows 2 i + lane / 16.
@@ -144,7 +149,7 @@ __device__ __forceinline__ void wmma_gemm_tile(typename Dec::Args& a) {
     __syncthreads();
     auto step = [&]<int P>(std::integral_constant<int, P>, int s) {
         constexpr int cur = P;
-        if (live0 && s > 0 && (s - 1) % per == per - 1) apply_bias(((s - 1) / per) % 3, ((s - 1) / per) & 1);
+        if (live0 && s > 0 && group_end(s - 1)) apply_bias(group_of(s - 1) % 3, group_of(s - 1) & 1);
         if constexpr (P == 1) fetch(s + 1);
         if (live0) {
 #pragma unroll
@@ -152,19 +157,23 @@ __device__ __forceinline__ void wmma_gemm_tile(typename Dec::Args& a) {
                 bf16x16 bf[4];
 #pragma unroll
                 for (int nt = 0; nt < 4; ++nt) bf[nt] = frag16(ws[cur] + (wn * 64 + nt * 16 + rl) * kLdw + t * 8);
-                const bool first = t == 0 && s % per == 0;
+                // A group's first product starts from zero on a uniform branch, not a select per accumulator.
+                const bool first = t == 0 && group_start(s);
 #pragma unroll
                 for (int mt = 0; mt < 2; ++mt) {
                     if (mt == 1 && !live1) continue;
                     const bf16x16 af = frag16(xs[cur] + (wm * 32 + mt * 16 + rl) * kLdw + t * 8);
+                    if (first) {
 #pragma unroll
-                    for (int nt = 0; nt < 4; ++nt) {
-                        d[mt][nt] = T::mma(af, bf[nt], first ? zero : d[mt][nt]);
+                        for (int nt = 0; nt < 4; ++nt) d[mt][nt] = T::mma(af, bf[nt], zero);
+                    } else {
+#pragma unroll
+                        for (int nt = 0; nt < 4; ++nt) d[mt][nt] = T::mma(af, bf[nt], d[mt][nt]);
                     }
                 }
             }
-            if (s % per == per - 1) {
-                const int g = (s / per) % 3;
+            if (group_end(s)) {
+                const int g = group_of(s) % 3;
 #pragma unroll
                 for (int mt = 0; mt < 2; ++mt) {
                     if (mt == 1 && !live1) continue;
@@ -185,7 +194,7 @@ __device__ __forceinline__ void wmma_gemm_tile(typename Dec::Args& a) {
         step(std::integral_constant<int, 0>{}, s);
         if (s + 1 < stages) step(std::integral_constant<int, 1>{}, s + 1);
     }
-    if (live0 && (stages - 1) % per == per - 1) apply_bias(((stages - 1) / per) % 3, ((stages - 1) / per) & 1);
+    if (live0 && group_end(stages - 1)) apply_bias(group_of(stages - 1) % 3, group_of(stages - 1) & 1);
 #pragma unroll
     for (int mt = 0; mt < 2; ++mt) {
 #pragma unroll

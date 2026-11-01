@@ -1,4 +1,4 @@
-//! MTP's ring and state in a pool lane's run: the area's layout, borrowed on open, given back on release.
+//! MTP's ring and states in a pool lane's run: the area's layout, borrowed on open, given back on release.
 const std = @import("std");
 const lanes = @import("lanes");
 const mtp = @import("cuda_mtp.zig");
@@ -15,7 +15,7 @@ const Runs = struct {
     }
 };
 
-test "MTP on a pool lane borrows its run's area: ring, then 256-aligned state, given back with the lane" {
+test "MTP on a pool lane borrows its run's area: ring, then 256-aligned states, given back with the lane" {
     var e: E = undefined;
     e.d = undefined;
     e.g.kv_heads = 2;
@@ -31,7 +31,7 @@ test "MTP on a pool lane borrows its run's area: ring, then 256-aligned state, g
     defer d.streams.deinit(t.allocator);
     defer d.pool.deinit(t.allocator);
     // the reserved window's stream takes the drafter's own context
-    var own = mtp.Ctx{ .ring = .{ .d = undefined, .ptr = 0x1000, .len = 1 }, .last = .{ .d = undefined, .ptr = 0x2000, .len = 1 } };
+    var own = mtp.Ctx{ .ring = .{ .d = undefined, .ptr = 0x1000, .len = 1 }, .last = .{ .d = undefined, .ptr = 0x2000, .len = 1 }, .step = .{ .d = undefined, .ptr = 0x3000, .len = 1 } };
     try d.pool.append(t.allocator, &own);
     // with lane runs, the drafter keeps one context of its own however many streams are admitted
     try d.reserve(8);
@@ -43,15 +43,19 @@ test "MTP on a pool lane borrows its run's area: ring, then 256-aligned state, g
         try drafter.open(&streams[0]);
         try t.expectError(error.StreamOpen, drafter.open(&streams[0]));
         const ctx = d.streams.get(&streams[0]).?;
-        try t.expect(ctx.ring.borrowed and ctx.last.borrowed);
+        try t.expect(ctx.ring.borrowed and ctx.last.borrowed and ctx.step.borrowed);
         try t.expectEqual(runs.base, ctx.ring.ptr);
         try t.expectEqual(ring, ctx.ring.len);
         try t.expectEqual(runs.base + std.mem.alignForward(usize, ring, 256), ctx.last.ptr);
         try t.expect(ctx.ring.ptr + ctx.ring.len <= ctx.last.ptr);
         try t.expectEqual(@as(u64, 0), ctx.last.ptr % 256);
         try t.expectEqual(e.g.hidden * 2, ctx.last.len);
-        // the area's last byte is the state's: areaBytes is the run's ring part, nothing past it
-        try t.expectEqual(runs.base + d.areaBytes(), ctx.last.ptr + ctx.last.len);
+        // the batched chain's step state follows, 256-aligned, the same size
+        try t.expect(ctx.last.ptr + ctx.last.len <= ctx.step.ptr);
+        try t.expectEqual(@as(u64, 0), ctx.step.ptr % 256);
+        try t.expectEqual(e.g.hidden * 2, ctx.step.len);
+        // the area's last byte is the step state's: areaBytes is the run's ring part, nothing past it
+        try t.expectEqual(runs.base + d.areaBytes(), ctx.step.ptr + ctx.step.len);
         try drafter.open(&streams[1]);
         try t.expectEqual(&own, d.streams.get(&streams[1]).?);
         try t.expectEqual(@as(usize, 0), d.pool.items.len);

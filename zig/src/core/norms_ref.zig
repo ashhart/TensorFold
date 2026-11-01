@@ -68,6 +68,8 @@ pub fn gatedRms(y: []const f64, z: []const f64, w: []const f64, eps: f64, out: [
 pub const Tail = struct {
     round: bool,
     residual: ?[]const f64 = null,
+    /// The residual's upper ends where it is a range (an fp32 combine rounded to bf16); null: `residual` is exact.
+    residual_hi: ?[]const f64 = null,
     branch: ?[]const f64 = null,
     scalar: ?f64 = null,
     eps: f64 = 1e-6,
@@ -100,13 +102,16 @@ pub fn tail(t: Tail, x: []const f64, w: []const f64, sums: anytype, h_lo: []f64,
     const n: f64 = @floatFromInt(x.len);
     const inv1 = if (t.branch != null) 1 / @sqrt(sums.squares(x) / n + t.eps) else 0;
     for (x, h_lo, h_hi, 0..) |v, *lo, *hi, i| {
-        var ends: [2]f64 = undefined;
-        for (&ends, [_]f64{ 1 - t.spread, 1 + t.spread }) |*e, f| {
+        var ends: [4]f64 = undefined; // monotone in the inverse and in the residual: their corners bound it
+        for (0..4) |j| {
+            const f = if (j % 2 == 0) 1 - t.spread else 1 + t.spread;
             var s = if (t.branch) |wb| normed(v, inv1 * f, wb[i], t.round) else v;
-            if (t.residual) |r| s = r[i] + s;
-            e.* = if (t.scalar) |sc| bf.bf16(bf.bf16(s) * sc) else bf.bf16(s);
+            if (t.residual) |r| s = (if (j >= 2) if (t.residual_hi) |rh| rh[i] else r[i] else r[i]) + s;
+            ends[j] = if (t.scalar) |sc| bf.bf16(bf.bf16(s) * sc) else bf.bf16(s);
         }
-        lo.*, hi.* = order(ends[0], ends[1]);
+        const a = order(ends[0], ends[1]);
+        const b = order(ends[2], ends[3]);
+        lo.*, hi.* = if (std.math.isNan(a[0])) a else if (std.math.isNan(b[0])) b else .{ @min(a[0], b[0]), @max(a[1], b[1]) };
     }
     for (h_lo, h_hi, y_lo, y_hi) |lo, hi, *small, *big| { // the squares' least and largest terms, as scratch
         const a, const b = order(@abs(lo), @abs(hi));

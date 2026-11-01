@@ -58,6 +58,13 @@ tensorfold-native serve /path/to/checkpoint --temperature 0
 - `--parallel N` admits N streams. Each stream's caches are its own: about 110 MiB of DeltaNet state and the n-gram
   tail, plus 28 KiB a token of keys, values and indexer keys, and with drafts its MTP head's cache.
 - `--no-drafts` serves without the MTP head; `"draft": false` on a request does the same for that request.
+- `TF_FLASHNEXT_CHUNK` (1 to 16,384, default 1,536) caps the rows of one prompt pass. Every pass reads the weights
+  of every expert its rows route to, so fewer, larger passes cost less a token; but a pass runs to its end, so a
+  stream decoding during a pass waits up to the whole pass for its next token. See
+  [Prompt chunk size](#prompt-chunk-size).
+- `TF_FLASHNEXT_CHUNK_SOLO` (opt-in; `TF_FLASHNEXT_CHUNK` to 16,384) is the chunk a pass takes when no other stream
+  is decoding as it starts; with one decoding, the pass takes `TF_FLASHNEXT_CHUNK`. Unset, every pass takes
+  `TF_FLASHNEXT_CHUNK`. See [Prompt chunk size](#prompt-chunk-size).
 - `TF_FLASHNEXT_DRAFTS` (1 to 15, default 6) and `TF_FLASHNEXT_CONFIDENCE` (default 0.60) set the head's chain.
 - `TF_FLASHNEXT_LOAD_THREADS` (1 to 32, default 8) packs the routed NVFP4 experts on that many threads at load, staged
   through at most 192 MiB of pinned memory: every layer on one GPU, and the MTP head's layer on rank 0 at `--tp 2`.
@@ -192,6 +199,40 @@ The engine holds 73.2 GiB and keeps a 12.2 GiB reserve. A 32,768-token window th
 and a 131,136-token window (the cold prompts above) 2 of 4.03 GiB; a 262,144-token stream takes 7.79 GiB, which fitted
 in one start of four on this machine. After the 131,072-token prompt the process had peaked at 6.5 GB of host and
 83.0 GB of device memory. Absolute speeds on this machine moved by about a tenth between sessions.
+
+### Prompt chunk size
+
+`TF_FLASHNEXT_CHUNK` sets how many prompt rows one pass takes. A prompt of N rows runs in ceil(N / chunk) passes: a
+1,922-row prompt is two passes at the default 1,536 and one at 8,192.
+
+- **For:** every pass reads the gate, up and down weights of each routed expert its rows route to (1.84 MB of gate and
+  up weights an expert, 512 experts a layer). Fewer passes read each expert fewer times, so a prompt longer than one
+  chunk gets faster as the chunk grows.
+- **Against:** a pass is not interrupted, so a stream that is decoding waits up to the whole pass for its next token,
+  and a pass's time grows with its rows. The prompt scratch grows with the chunk too, and at 16,384 rows the n-gram
+  tables of the MLX 4-bit checkpoint page (see `docs/known-issues.md`).
+- One stream at a time (an agent loop, a single user): a larger chunk shortens every prompt longer than the default
+  chunk. Several streams that decode while others send long prompts: the default keeps each wait to one short pass.
+
+`TF_FLASHNEXT_CHUNK_SOLO` takes both: each pass picks its rows when it starts, the solo chunk when no other stream is
+decoding and `TF_FLASHNEXT_CHUNK` otherwise. Replies are the same bytes either way, because a pass's rows do not
+change the sums. Two costs remain:
+- A request that arrives during a solo pass waits for that pass to end before its own prompt runs. After that, the
+  passes are short again.
+- The prompt scratch is sized for the solo chunk for the whole run.
+
+On one GB10 with `nvidia/Qwen3.8-Flash-Next-FP4-Local` and
+`--parallel 3 --context 40960 --no-drafts --prompt-cache-gib 0` (two fresh servers for each setting, medians):
+
+| | unset (1,536) | `TF_FLASHNEXT_CHUNK_SOLO=4096` | `=8192` |
+| --- | --- | --- | --- |
+| First token, one stream, at 1,927 / 8,320 / 31,736 tokens | 0.99 / 4.07 / 16.05 s | 0.91 / 3.88 / 14.94 s | 0.89 / 3.86 / 14.78 s |
+| Longest wait between a decoding stream's tokens while an 8k prompt runs | 0.81 s | 0.81 s | 0.85 s |
+| First token of a short request sent 2 s into a 31,736-token prompt | 0.36 s | 1.91 s | 1.94 s |
+| Model and scratch at startup | 71.39 GiB | 73.64 GiB | 77.25 GiB |
+
+4,096 rows took most of 8,192's gain for 2.25 GiB instead of 5.86 GiB. A solo pass lasts about 1.9 s at 4,096 rows
+and about 3.8 s at 8,192: that is the longest a request arriving during one waits before its own prompt starts.
 
 ## Not yet
 

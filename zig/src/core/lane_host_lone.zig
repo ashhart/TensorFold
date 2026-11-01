@@ -68,12 +68,15 @@ pub fn run(h: *LaneHost, job: *Job, began: i96, resumed: bool) bool {
         }
     };
     var context: Hooks.Context = .{ .host = h };
+    @import("lane_host_load.zig").calling(h, job);
     const paused = lone.run(lone.ctx, &job.stream, .{ .ctx = &context, .committed = Hooks.committed, .yield = Hooks.yield, .resumed = resumed, .prefill_yield = Hooks.prefillYield });
     h.lone_job = null;
+    @import("lane_host_load.zig").returned(h, job); // a hand-off keeps this call's time for the pass's later report
     const handed = paused catch |e| {
         if (!job.prefill_sent) LaneHost.emit(job, .{ .prefilled = 0 });
         if (e == error.Cancelled) return h.cancel(job);
         h.remove(job);
+        @import("lane_host_end.zig").failed(h, e);
         h.finish(job, .failed, h.words(e));
         return true;
     };
