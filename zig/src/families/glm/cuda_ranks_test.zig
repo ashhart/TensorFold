@@ -347,3 +347,25 @@ test "TF_GLM_ROCE_MULTI: off by default, 1 and 0, and refusals naming a bad valu
     const h: [32]u8 = @splat(0);
     try std.testing.expectEqual(@as(u32, 1), Fingerprint.of(3, 0, .{ .roce_multi = true }, 8192, true, h, h, h).roce_multi);
 }
+
+test "TF_GLM_L2PF: read with the settings, carried in the fingerprint, and ranks that prefetch differently disagree" {
+    const Reader = struct {
+        fn on(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_L2PF")) "1" else null;
+        }
+        fn bad(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_L2PF")) "2" else null;
+        }
+    };
+    var problem: []const u8 = "";
+    const s = try Settings.read(Reader.on, &problem);
+    try std.testing.expect(s.l2pf.on);
+    try std.testing.expectError(error.BadSetting, Settings.read(Reader.bad, &problem));
+    try std.testing.expectEqualStrings("TF_GLM_L2PF: 0 or 1", problem);
+    const h: [32]u8 = @splat(0);
+    var all = [_]Fingerprint{ Fingerprint.of(2, 0, s, 8192, true, h, h, h), Fingerprint.of(2, 1, s, 8192, true, h, h, h) };
+    try std.testing.expectEqual([4]u32{ 1, 12, 2, 150 }, all[0].l2pf);
+    try std.testing.expectEqual(@as(?Mismatch, null), mismatch(&all));
+    all[1].l2pf[3] = 0; // rank 1 unpaced
+    try std.testing.expectEqual(Mismatch{ .field = .l2pf, .rank = 1 }, mismatch(&all).?);
+}
