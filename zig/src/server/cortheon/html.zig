@@ -396,9 +396,9 @@ test "a page of unclosed tags reads in linear time" {
             for (page.*, 0..) |*c, i| c.* = case[0][i % case[0].len];
         }
         defer for (u.pages) |page| std.testing.allocator.free(page);
-        const ns = try @import("../linear_time.zig").fastest(3, &u, Unclosed.run);
-        try std.testing.expect(ns[1] < 5 * std.time.ns_per_s); // 2 MiB took minutes while each '<' rescanned the rest
-        try std.testing.expect(ns[1] < 24 * @max(ns[0], 1)); // 8x the bytes: near 8x the time, not a quadratic's 64x
+        const f = try @import("../linear_time.zig").fastest(3, &u, Unclosed.run);
+        try std.testing.expect(f.ns[1] < 5 * std.time.ns_per_s); // 2 MiB took minutes while each '<' rescanned the rest
+        try std.testing.expect(f.work[1] < 24 * @max(f.work[0], 1)); // 8x the bytes: near 8x, not a quadratic's 64x
     }
 }
 
