@@ -27,6 +27,9 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     b.step("test-qwen35-formats-host", "MLX, ModelOpt and EXL3 admission and actual embedding dispatch without devices").dependOn(&formats_run.step);
     step.dependOn(&formats_run.step);
     @import("glm_contract_host.zig").host(b, cuda, mods.core, step);
+    const nemo_audio = b.addRunArtifact(b.addTest(.{ .root_module = mods.nemotron.import_table.get("nemo_audio").? }));
+    b.step("test-nemo-audio-host", "Transcribe's audio config, FFT, bf16 rounding and Sortformer FIFO without devices").dependOn(&nemo_audio.step);
+    step.dependOn(&nemo_audio.step);
     @import("dory.zig").host(b, @import("dory.zig").module(b, host, .debug, cuda, mods.core, mods.lanes), step);
     const attention = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen attention path:"} }));
     b.step("test-qwen35-attention-path-host", "Contiguous and paged CUDA attention selection and graph identity without devices").dependOn(&attention.step);
