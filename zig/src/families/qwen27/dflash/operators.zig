@@ -81,6 +81,8 @@ pub const Ops = struct {
         context_abort: *const fn (*anyopaque, u64) void,
         // a batched pass's stream k.
         stream_append: *const fn (*anyopaque, u64, u32, u32, View, View, []const u64) anyerror!void,
+        // x + y, row for row: a DFlash v1 layer's residuals (DFlash2 adds them inside its conv).
+        add: ?*const fn (*anyopaque, u64, View, View) anyerror!View = null,
     };
 };
 

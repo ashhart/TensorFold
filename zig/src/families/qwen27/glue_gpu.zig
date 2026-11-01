@@ -107,7 +107,7 @@ pub const Kernels = struct {
     }
 
     pub fn tapRows(k: Kernels, e: mtl.ComputeEncoder, x: Ref, kept: Ref, y: Ref, p: Gather) !void {
-        if (p.rows == 0 or p.rows > p.capacity or p.planes != 5 or p.width == 0) return error.BadTapGather;
+        if (p.rows == 0 or p.rows > p.capacity or p.planes == 0 or p.planes > 8 or p.width == 0) return error.BadTapGather;
         if (x.offset > x.buffer.length() or @as(usize, p.capacity) * p.width * p.planes * 2 > x.buffer.length() - x.offset or kept.offset > kept.buffer.length() or @as(usize, p.rows) * 4 > kept.buffer.length() - kept.offset or y.offset > y.buffer.length() or @as(usize, p.rows) * p.width * p.planes * 2 > y.buffer.length() - y.offset) return error.BadTapGather;
         e.setPipeline(k.gather);
         bind(e, .{ x, kept });

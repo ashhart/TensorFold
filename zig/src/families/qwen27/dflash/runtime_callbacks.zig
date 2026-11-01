@@ -89,6 +89,18 @@ fn swiglu(ptr: *anyopaque, epoch: u64, g: op.View, u: op.View) !op.View {
     e.barrier();
     return y;
 }
+fn add(ptr: *anyopaque, epoch: u64, x: op.View, y: op.View) !op.View {
+    const b = backend(ptr);
+    const e = try b.encoder(epoch);
+    if (x.rows != y.rows or x.width != y.width or x.dtype != .bf16 or y.dtype != .bf16 or x.stride != x.width or y.stride != y.width) return error.DraftOperatorShape;
+    const z = try b.frame.alloc(x.rows, x.width, .bf16);
+    const xr = try b.frame.ref(x);
+    const yr = try b.frame.ref(y);
+    const zr = try b.frame.ref(z);
+    b.target.glue.residual(e, .{ .buffer = xr.buf, .offset = xr.off }, .{ .buffer = yr.buf, .offset = yr.off }, .{ .buffer = zr.buf, .offset = zr.off }, x.width, x.rows);
+    e.barrier();
+    return z;
+}
 fn maskRows(ptr: *anyopaque, epoch: u64, x: op.View, first: u32, rows: u32) !op.View {
     const b = backend(ptr);
     _ = try b.encoder(epoch);
@@ -153,4 +165,4 @@ fn lattices(ptr: *anyopaque, epoch: u64, h: op.Head, projected: op.View, c: Conf
         made += 1;
     }
 }
-pub const vtable = op.Ops.VTable{ .begin = begin, .release = release, .project = project, .norm = norm, .embed = embed, .conv = conv, .rope = rope, .attention = context.attention, .swiglu = swiglu, .mask_rows = maskRows, .head = head, .lattice = lattice, .lattices = lattices, .context_begin = context.begin, .context_append = context.append, .context_commit = context.commit, .context_stage = context.stage, .context_abort = context.abort, .stream_append = context.streamAppend };
+pub const vtable = op.Ops.VTable{ .begin = begin, .release = release, .project = project, .norm = norm, .embed = embed, .conv = conv, .rope = rope, .attention = context.attention, .swiglu = swiglu, .mask_rows = maskRows, .head = head, .lattice = lattice, .lattices = lattices, .context_begin = context.begin, .context_append = context.append, .context_commit = context.commit, .context_stage = context.stage, .context_abort = context.abort, .stream_append = context.streamAppend, .add = add };
