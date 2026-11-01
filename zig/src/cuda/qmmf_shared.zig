@@ -4,13 +4,18 @@ const launch = @import("launch.zig");
 const Stream = @import("stream.zig").Stream;
 pub const symbols = [4][:0]const u8{ "tf_qmmf_shared16_half", "tf_qmmf_shared16", "tf_qmmf_shared32", "tf_qmmf_shared64" };
 
-/// Keep the existing geometry and refuse products that require a K-slice reduction.
-pub fn eligible(l: q.Lane, m: usize, w: q.Weight) bool {
+/// A forced strided launch supports one pinned BF16 K slice.
+pub fn supported(l: q.Lane, m: usize, w: q.Weight) bool {
     return w.mode == .bf16 and q.planFor(m, w, l.clusters).sk == 1;
 }
 
+/// Prefer an available 128-row prompt projection over the smaller strided tile.
+pub fn eligible(l: q.Lane, m: usize, w: q.Weight) bool {
+    return supported(l, m, w) and !l.usesPrompt(m, w);
+}
+
 pub fn matmulF32Strided(l: q.Lane, s: Stream, x: u64, ldx: usize, m: usize, w: q.Weight, y: u64, ldy: usize) !void {
-    if (!eligible(l, m, w)) return error.StridedLaneNotSupported;
+    if (!supported(l, m, w)) return error.StridedLaneNotSupported;
     if (m == 0 or w.n == 0 or w.k == 0 or w.k % q.group != 0 or w.npad < w.n or w.npad % 128 != 0 or
         ldy < w.n or ldx < w.k) return error.BadStridedLaneShape;
     const bm: usize = q.bucket(m);
@@ -52,6 +57,7 @@ test "shared down stride: geometry, output address and stride match the contiguo
     d.api.cuLaunchKernel = Mock.run;
     var l: q.Lane = undefined;
     l.clusters = true;
+    l.prompt = null;
     l.half_below = 96;
     for (&l.shared_down, 0..) |*f, i| f.* = .{ .d = &d, .handle = @ptrFromInt(101 + i) };
     const s: Stream = .{ .d = &d, .handle = null };
@@ -70,8 +76,22 @@ test "shared down stride: geometry, output address and stride match the contiguo
     other.k = 6144;
     try std.testing.expect(!eligible(l, 64, other));
     try std.testing.expectError(error.BadStridedLaneShape, l.matmulF32Strided(s, 12, 640, 64, w, 1000, 2559));
+    for ([_]bool{ false, true }) |loaded| {
+        l.prompt = if (loaded) @splat(@splat(l.shared_down[0])) else null;
+        for ([_]usize{ 511, 512, 513 }) |m| {
+            try std.testing.expectEqual(loaded and m >= q.prompt_rows, l.usesPrompt(m, w));
+            try std.testing.expectEqual(!loaded or m < q.prompt_rows, eligible(l, m, w));
+            try std.testing.expect(supported(l, m, w));
+            try l.matmulF32Strided(s, 12, 640, m, w, 1000, 28160);
+            try std.testing.expectEqual(@as(usize, 104), Mock.id);
+        }
+    }
     other = w;
+    other.k = 6144;
+    other.sk = 1;
+    try std.testing.expect(supported(l, 64, other));
+    try std.testing.expect(eligible(l, 511, other));
+    try std.testing.expect(!eligible(l, 512, other));
     other.sk = 4;
-    try std.testing.expect(!eligible(l, 64, other));
-    try std.testing.expectError(error.StridedLaneNotSupported, l.matmulF32Strided(s, 12, 640, 64, other, 1000, 28160));
+    try std.testing.expect(!supported(l, 64, other));
 }

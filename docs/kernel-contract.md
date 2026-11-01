@@ -320,3 +320,5 @@ Later compiler receipts remain pending. Check each build with `tf-cuda-test kern
 `tf-cuda-test moetile` compares the direct slot with the contiguous product and scatter at 1, 16, 17, 32, 64, 65,
 1536 and 4218 rows, five repeats with guards. `moetile-contract` runs the replacement gates and planted control.
 `moetile-bench` alternates baseline and direct-slot GPU event timings at 4218 rows; no current timing is claimed.
+Automatic shared-down dispatch yields to an eligible 128-row prompt projection from 512 rows.
+The direct entry remains available for forced byte fixtures; automatic selection and direct support are checked separately.

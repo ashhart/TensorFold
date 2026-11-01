@@ -122,7 +122,7 @@ pub fn Ops(comptime Tri: type) type {
             const h = o.h;
             if (next.len == 0) return;
             if (d.len + next.len > d.cap) return error.PromptTooLong;
-            const want = @max(@as(usize, 32), 2 * @min(next.len, piece_rows));
+            const want = plan.reserveRows(next.len);
             const s = try e.reserve(want);
             const piece = @max(@as(usize, 1), @min(piece_rows, s.cap / 2));
             // the engine's block scores (the passes share one stream), for rows past 2,048 keys of the head's cache

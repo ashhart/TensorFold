@@ -267,8 +267,9 @@ test "shared expert composition keeps whole direct slots and split full-K output
         stream: cuda.Stream,
         tri: struct { own: ?*SharedGlue },
     };
-    for ([_]bool{ false, true }) |split| for ([_]usize{ 64, 512 }) |n| for (0..2) |rank| {
+    for ([_]bool{ false, true }) |split| for ([_]bool{ false, true }) |prompt_loaded| for ([_]usize{ 64, 512 }) |n| for (0..2) |rank| {
         r.c.rank = rank;
+        r.k.native_lane.prompt = if (prompt_loaded) @splat(@splat(cuda.Function{ .d = &r.d, .handle = @ptrFromInt(qmmf_id) })) else null;
         var native: @import("cuda_mixed_experts.zig").Owned = undefined;
         native.rank = rank;
         native.split_shared = split;
@@ -282,7 +283,7 @@ test "shared expert composition keeps whole direct slots and split full-K output
             try std.testing.expectEqual(@as(usize, 0), Rec.n);
             continue;
         }
-        const direct = !split;
+        const direct = !split and !(prompt_loaded and n >= cuda.qmmf.prompt_rows);
         const last = recorded()[Rec.n - 1];
         if (direct) {
             try std.testing.expectEqual(strided_id, last.f);
