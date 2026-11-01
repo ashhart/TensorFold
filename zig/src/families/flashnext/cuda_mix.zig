@@ -21,19 +21,13 @@ const Triple = struct { w: Tensor, s: Tensor, b: Tensor };
 
 const Gap = struct { off: usize = 0, steps: u32 = 0, at: usize = 0 };
 
-fn toBf16(v: f32) u16 {
-    const bits: u32 = @bitCast(v);
-    if (std.math.isNan(v)) return @intCast((bits >> 16) | 0x40);
-    return @intCast((bits + 0x7FFF + ((bits >> 16) & 1)) >> 16);
-}
+const toBf16 = core.bf16_round.bits;
 
 fn promote(bits: u16) f32 {
     return @bitCast(@as(u32, bits) << 16);
 }
 
-fn roundBf16(v: f32) f32 {
-    return promote(toBf16(v));
-}
+const roundBf16 = core.bf16_round.round32;
 
 fn tree32(buf: *[32]f32) f32 {
     var n: usize = 32;

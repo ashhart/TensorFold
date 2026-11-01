@@ -120,11 +120,7 @@ pub const Table = struct {
 };
 
 /// fp32 to bf16, round to nearest even, the rounding Triton uses.
-fn toBf16(v: f32) u16 {
-    const bits: u32 = @bitCast(v);
-    if (std.math.isNan(v)) return @intCast((bits >> 16) | 0x40);
-    return @intCast((bits + 0x7FFF + ((bits >> 16) & 1)) >> 16);
-}
+const toBf16 = core.bf16_round.bits;
 
 fn f32FromBf16(b: []const u8, i: usize) f32 {
     return @bitCast(@as(u32, std.mem.readInt(u16, b[2 * i ..][0..2], .little)) << 16);
