@@ -15,6 +15,15 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
     b.step("test-kernel-seed-host", "Named contract fixtures keep their seed when entries are inserted").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module(b, b.graph.host, .debug), .filters = &.{"contract seed:"} })).step);
     const step = b.step("test-kernel-contract", "The kernel contract's host tests: gate logic, controls, every launch against every chip");
     step.dependOn(&run.step);
+    const rig = b.createModule(.{
+        .root_source_file = b.path("zig/tests/cuda/contract_rig.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+        .imports = &.{.{ .name = "cuda", .module = @import("cuda_runtime.zig").runtime(b, b.graph.host, .debug, &.{}) }},
+    });
+    const rig_test = b.addRunArtifact(b.addTest(.{ .root_module = rig, .filters = &.{"completed CUDA fixtures"} }));
+    b.step("test-cuda-contract-lifetime-host", "Completed CUDA fixtures free buffers once and remain reusable").dependOn(&rig_test.step);
+    step.dependOn(&rig_test.step);
     step.dependOn(family);
     const rotary = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/contract/rotary_cache_positions.zig"),

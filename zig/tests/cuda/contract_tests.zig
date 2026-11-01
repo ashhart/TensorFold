@@ -70,6 +70,12 @@ const images = struct {
 
 /// Gates 1-4 on every registered CUDA kernel and each control at its own gate, then gate 5 on this GPU.
 pub fn run(gpu: check.Gpu) !void {
+    const t0 = check.now(gpu.io);
+    try @import("contract_finish.zig").run(gpu, try registered(gpu), t0);
+}
+
+// Tear down all registered fixtures before standalone suites allocate their working sets.
+fn registered(gpu: check.Gpu) !g.Tally {
     const a = gpu.gpa;
     if (!kk.available) return error.BuiltWithoutKernels;
     if (!options.controls) {
@@ -579,18 +585,8 @@ pub fn run(gpu: check.Gpu) !void {
     defer families.deinit();
     var t: g.Tally = .{};
     try @import("contract_dump.zig").run(a, kernels.items);
-    const t0 = check.now(gpu.io);
     try g.runAll(a, kernels.items, 0x6b63, &t);
-    try @import("contract_back_suites.zig").run(gpu);
-    const t1 = check.now(gpu.io);
-    try @import("contract_qwen_served.zig").run(gpu);
-    try @import("contract_qwen_pages.zig").run(gpu);
-    try @import("contract_qwen_learning.zig").numerical(gpu);
-    try @import("contract_fn_pages.zig").run(gpu);
-    const lim = try live(gpu);
-    const t2 = check.now(gpu.io);
-    std.debug.print("SUMMARY {d} kernels: {d} pass gates 1-4, {d} fail, {d} known findings; {d} controls: {d} red as planted, {d} missed; {d} limit problems; gates {d} ms, limits {d} ms\n", .{ t.kernels, t.passed, t.failed, t.known, t.controls, t.caught, t.missed, lim, @divTrunc(t1 - t0, std.time.ns_per_ms), @divTrunc(t2 - t1, std.time.ns_per_ms) });
-    try check.expect(t.problems() + lim == 0, "kernel-contract: {d} gate failures, {d} controls missed, {d} limit problems", .{ t.failed, t.missed, lim });
+    return t;
 }
 
 /// The named embedded image and gate 5: in the contract's own file, so the gates' registrations stay short.

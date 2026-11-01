@@ -19,11 +19,20 @@ pub const Rig = struct {
     host: std.ArrayList(u8) = .empty,
 
     pub fn deinit(r: *Rig) void {
+        r.finishGates();
+    }
+
+    /// Drop completed fixtures while preserving the GPU and stream for later prepares.
+    pub fn finishGates(r: *Rig) void {
         r.reset();
         r.slots.deinit(r.gpu.gpa);
         r.seen.deinit(r.gpu.gpa);
         r.outs.deinit(r.gpu.gpa);
         r.host.deinit(r.gpu.gpa);
+        r.slots = .empty;
+        r.seen = .empty;
+        r.outs = .empty;
+        r.host = .empty;
     }
 
     pub fn reset(r: *Rig) void {
@@ -113,3 +122,49 @@ pub const Rig = struct {
         return false;
     }
 };
+
+test "completed CUDA fixtures release each buffer once and remain reusable" {
+    const Fake = struct {
+        var freed: usize = 0;
+        var synced: usize = 0;
+        fn alloc(ptr: *cuda.abi.DevicePtr, _: usize) callconv(.c) cuda.abi.Result {
+            ptr.* = 256;
+            return 0;
+        }
+        fn free(_: cuda.abi.DevicePtr) callconv(.c) cuda.abi.Result {
+            freed += 1;
+            return 0;
+        }
+        fn sync(_: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+            synced += 1;
+            return 0;
+        }
+    };
+    var d: cuda.Driver = undefined;
+    d.api.cuMemAlloc_v2 = Fake.alloc;
+    d.api.cuMemFree_v2 = Fake.free;
+    d.api.cuStreamSynchronize = Fake.sync;
+    var r: Rig = .{
+        .gpu = .{ .d = &d, .ctx = undefined, .gpa = std.testing.allocator, .io = undefined },
+        .s = .{ .d = &d, .handle = null },
+    };
+    defer r.deinit();
+    Fake.freed = 0;
+    Fake.synced = 0;
+    for (0..2) |i| {
+        try r.slots.append(r.gpu.gpa, .{ .buf = try cuda.DeviceBuffer.alloc(&d, 64), .len = 64, .kind = .input });
+        try r.seen.resize(r.gpu.gpa, 4096);
+        try r.outs.resize(r.gpu.gpa, 2048);
+        try r.host.resize(r.gpu.gpa, 1024);
+        const before = Fake.synced;
+        r.finishGates();
+        try std.testing.expect(Fake.synced > before);
+        try std.testing.expectEqual(i + 1, Fake.freed);
+        inline for (.{ "slots", "seen", "outs", "host" }) |field| {
+            try std.testing.expectEqual(@as(usize, 0), @field(r, field).capacity);
+            try std.testing.expectEqual(@as(usize, 0), @field(r, field).items.len);
+        }
+        r.finishGates();
+        try std.testing.expectEqual(i + 1, Fake.freed);
+    }
+}

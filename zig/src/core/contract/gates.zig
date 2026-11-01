@@ -23,6 +23,8 @@ pub const Kernel = struct {
 
 /// The hooks a kernel's test gives the harness; the harness owns no device memory.
 pub const VTable = struct {
+    /// Release completed gate buffers; called once after all gates or the planted control.
+    finish: ?*const fn (*anyopaque) void = null,
     /// Inputs for a shape filled as asked (seeded), outputs poisoned and guarded; false when the shape is refused.
     prepare: *const fn (*anyopaque, c.Shape, Fill, u64) anyerror!bool,
     /// One launch on the prepared buffers, waited for.
@@ -53,7 +55,15 @@ pub const VTable = struct {
 
 /// The VTable of a test type T: its prepare, run, count and reference, its `rig`'s bytes, and the optional hooks.
 pub fn hooks(comptime T: type) VTable {
+    const R = @FieldType(T, "rig");
+    const Rig = switch (@typeInfo(R)) {
+        .pointer => |p| p.child,
+        else => R,
+    };
     const H = struct {
+        fn finish(ctx: *anyopaque) void {
+            of(ctx).rig.finishGates();
+        }
         fn of(ctx: *anyopaque) *T {
             return @ptrCast(@alignCast(ctx));
         }
@@ -98,6 +108,7 @@ pub fn hooks(comptime T: type) VTable {
         }
     };
     return .{
+        .finish = if (@hasDecl(Rig, "finishGates")) H.finish else null,
         .prepare = H.prepare,
         .run = H.run,
         .output = H.output,
@@ -341,6 +352,7 @@ pub fn one(a: std.mem.Allocator, which: Gate, k: Kernel, seed: u64) !Verdict {
 /// Gates 1-4 on each kernel, and each control at its own gate (which must fail).
 pub fn runAll(a: std.mem.Allocator, kernels: []const Kernel, seed: u64, t: *Tally) !void {
     for (kernels) |k| {
+        defer if (k.vt.finish) |finish| finish(k.ctx);
         const s = std.hash.Wyhash.hash(seed, k.spec.name);
         if (k.control) |g| {
             t.controls += 1;

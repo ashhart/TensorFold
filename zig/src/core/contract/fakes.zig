@@ -177,3 +177,41 @@ test "a prepare that runs out of memory leaves nothing to free twice" {
     failing.fail_index = failing.alloc_index;
     try std.testing.expectError(error.OutOfMemory, Fake.prepare(&f, shape, .random, 2));
 }
+
+test "completed gate buffers release after success, failure and controls and can be reused" {
+    const Cleanup = struct {
+        var calls: usize = 0;
+        var completed_runs: usize = 0;
+        fn finish(ctx: *anyopaque) void {
+            const f: *Fake = @ptrCast(@alignCast(ctx));
+            calls += 1;
+            completed_runs = f.runs;
+            f.deinit();
+        }
+    };
+    var f = Fake{ .a = std.testing.allocator, .op = .sum };
+    defer f.deinit();
+    var vt = Fake.vt;
+    vt.finish = Cleanup.finish;
+    var k = f.kernel("cleanup", null);
+    k.vt = &vt;
+    g.quiet = true;
+    defer g.quiet = false;
+    Cleanup.calls = 0;
+    var t: g.Tally = .{};
+    try g.runAll(f.a, &.{k}, 1, &t);
+    try std.testing.expectEqual(@as(usize, 1), t.passed);
+    try std.testing.expectEqual(@as(usize, 1), Cleanup.calls);
+    try std.testing.expect(Cleanup.completed_runs > 5);
+    try std.testing.expect(f.r == null);
+    f.fault = .tail;
+    try g.runAll(f.a, &.{k}, 1, &t);
+    try std.testing.expectEqual(@as(usize, 1), t.failed);
+    try std.testing.expectEqual(@as(usize, 2), Cleanup.calls);
+    try std.testing.expect(f.r == null);
+    k.control = .shapes;
+    try g.runAll(f.a, &.{k}, 1, &t);
+    try std.testing.expectEqual(@as(usize, 1), t.caught);
+    try std.testing.expectEqual(@as(usize, 3), Cleanup.calls);
+    try std.testing.expect(f.r == null);
+}
