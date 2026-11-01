@@ -104,14 +104,44 @@ test "prompt int8: enable allocates once, failure retains no owner, and deinit i
     Trace.fail = false;
     try e.int8.enable(&e);
     try e.int8.enable(&e);
-    try T.expectEqual(@as(usize, 3), Trace.allocations);
+    try T.expectEqual(@as(usize, 2), Trace.allocations);
     try T.expect(e.int8.on);
-    try T.expectEqual(cuda.w4a8.Kernels.scratch(q.engine.max_rows, 512), e.int8.buf.?.len);
-    e.int8.deinit();
-    try T.expect(!e.int8.on and e.int8.buf == null and e.int8.ws == 0);
-    e.int8.deinit();
+    try T.expect(e.int8.buf == null and e.int8.ws == 0 and e.int8.capacity == 0);
+
+    // The first projection allocates only the rows it actually needs.
+    try e.int8.ensureRows(&e, 1);
+    try T.expectEqual(@as(usize, 3), Trace.allocations);
+    try T.expectEqual(cuda.w4a8.Kernels.scratch(1, 512), e.int8.buf.?.len);
+    try T.expectEqual(@as(usize, 1), e.int8.capacity);
+
+    // Growing the workspace replaces its old allocation.
+    try e.int8.ensureRows(&e, 17);
+    try T.expectEqual(@as(usize, 4), Trace.allocations);
+    try T.expectEqual(cuda.w4a8.Kernels.scratch(32, 512), e.int8.buf.?.len);
+    try T.expectEqual(@as(usize, 32), e.int8.capacity);
+    try T.expectEqual(@as(usize, 1), Trace.frees);
+
+    // Failed growth must leave no stale workspace; a subsequent
+    // allocation must recover successfully.
+    Trace.fail = true;
+    try T.expectError(error.NotReady, e.int8.ensureRows(&e, 33));
+    try T.expect(e.int8.buf == null and e.int8.ws == 0 and e.int8.capacity == 0);
+    try T.expectEqual(@as(usize, 5), Trace.allocations);
     try T.expectEqual(@as(usize, 2), Trace.frees);
-    try T.expect(!e.int8.on and e.int8.buf == null and e.int8.ws == 0);
+
+    Trace.fail = false;
+    try e.int8.ensureRows(&e, 33);
+    try T.expect(e.int8.buf != null and e.int8.ws != 0);
+    try T.expectEqual(@as(usize, 33), e.int8.capacity);
+    try T.expectEqual(cuda.w4a8.Kernels.scratch(33, 512), e.int8.buf.?.len);
+    try T.expectEqual(@as(usize, 6), Trace.allocations);
+    try T.expectEqual(@as(usize, 2), Trace.frees);
+
+    e.int8.deinit();
+    try T.expect(!e.int8.on and e.int8.buf == null and e.int8.ws == 0 and e.int8.capacity == 0);
+    e.int8.deinit();
+    try T.expectEqual(@as(usize, 4), Trace.frees);
+    try T.expect(!e.int8.on and e.int8.buf == null and e.int8.ws == 0 and e.int8.capacity == 0);
 }
 
 test "prompt int8: actual dispatch keeps option, role and affine width separate at all row edges" {
@@ -176,4 +206,105 @@ test "prompt int8: hand-built projection fixture initializes all newly read sele
     try T.expect(!e.int8.on and e.int8.buf == null and e.int8.flag == null and e.int8.ws == 0);
     try T.expect(!e.affine.half_prompt);
     try T.expectEqual(@as(usize, 4), @intFromPtr(e.affine.prefill22_fn.handle));
+}
+
+
+test "cuda scratch: lazy allocation, growth, failed allocation clears owners, and retry recovers" {
+    var d: cuda.Driver = undefined;
+    var e = engine(&d);
+
+    // Exercise the routed scratch too: its pointers must be cleared by
+    // the measure pass when a replacement allocation fails.
+    e.g = .{
+        .hidden = 256,
+        .intermediate = 512,
+        .layers = 0,
+        .vocab = 1024,
+        .k_heads = 1,
+        .v_heads = 1,
+        .q_heads = 1,
+        .kv_heads = 1,
+        .eps = 1e-6,
+        .tied = false,
+        .context = 128,
+        .linear = @splat(false),
+        .experts = 2,
+        .top_k = 1,
+    };
+
+    Trace.reset();
+    try T.expect(e.scratch_buf == null);
+    try T.expectEqual(@as(usize, 0), e.scratch_capacity);
+
+    // Invalid sizes must not allocate or mutate ownership.
+    try T.expectError(error.InvalidScratchRows, e.ensureScratch(0));
+    try T.expect(e.scratch_buf == null);
+    try T.expectEqual(@as(usize, 0), Trace.allocations);
+
+    // First allocation is lazy and sized for one row.
+    try e.ensureScratch(1);
+    try T.expect(e.scratch_buf != null);
+    try T.expectEqual(@as(usize, 1), e.scratch_capacity);
+    try T.expect(e.h != 0 and e.x != 0 and e.r != 0);
+    try T.expect(e.routed.logits != 0 and e.routed.act != 0);
+    try T.expectEqual(@as(usize, 1), Trace.allocations);
+    try T.expectEqual(@as(usize, 0), Trace.frees);
+
+    // Capacity grows geometrically: 1 -> 2.
+    const first_ptr = e.scratch_buf.?.ptr;
+    try e.ensureScratch(2);
+    try T.expect(e.scratch_buf != null);
+    try T.expectEqual(@as(usize, 2), e.scratch_capacity);
+    try T.expect(e.scratch_buf.?.ptr != 0);
+    try T.expectEqual(@as(usize, 2), Trace.allocations);
+    try T.expectEqual(@as(usize, 1), Trace.frees);
+    _ = first_ptr;
+
+    // A failed growth must not leave the old allocation or any carved
+    // pointer reachable. The next call must be able to recover.
+    Trace.fail = true;
+    try T.expectError(error.NotReady, e.ensureScratch(3));
+
+    try T.expect(e.scratch_buf == null);
+    try T.expectEqual(@as(usize, 0), e.scratch_capacity);
+
+    inline for (.{
+        "h", "x", "r", "y", "mix", "z", "v", "q", "k", "qkv",
+        "gate", "up", "act", "xs", "a", "b", "beta", "g_",
+        "qraw", "qn", "kraw", "vraw", "kn", "pm", "pl", "po",
+        "logits", "amax", "picks",
+    }) |field| {
+        try T.expectEqual(@as(u64, 0), @field(e, field));
+    }
+
+    try T.expectEqual(@as(u64, 0), e.routed.logits);
+    try T.expectEqual(@as(u64, 0), e.routed.picks);
+    try T.expectEqual(@as(u64, 0), e.routed.wts);
+    try T.expectEqual(@as(u64, 0), e.routed.members);
+    try T.expectEqual(@as(u64, 0), e.routed.items);
+    try T.expectEqual(@as(u64, 0), e.routed.counts);
+    try T.expectEqual(@as(u64, 0), e.routed.rank);
+    try T.expectEqual(@as(u64, 0), e.routed.hist);
+    try T.expectEqual(@as(u64, 0), e.routed.act);
+    try T.expectEqual(@as(u64, 0), e.routed.y);
+
+    try T.expectEqual(@as(usize, 3), Trace.allocations);
+    try T.expectEqual(@as(usize, 2), Trace.frees);
+
+    // Retry after the injected CUDA allocation error.
+    Trace.fail = false;
+    try e.ensureScratch(3);
+    try T.expect(e.scratch_buf != null);
+    try T.expectEqual(@as(usize, 3), e.scratch_capacity);
+    try T.expect(e.h != 0 and e.x != 0 and e.r != 0);
+    try T.expect(e.routed.logits != 0 and e.routed.act != 0);
+    try T.expectEqual(@as(usize, 4), Trace.allocations);
+    try T.expectEqual(@as(usize, 2), Trace.frees);
+
+    // Release the test-owned device buffer; this fixture does not own
+    // the rest of Engine's production resources.
+    e.scratch_buf.?.free();
+    e.scratch_buf = null;
+    e.scratch_capacity = 0;
+    try T.expectEqual(@as(usize, 3), Trace.frees);
 }
