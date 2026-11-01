@@ -7,6 +7,12 @@ the drafter; without it the model decodes plain. On CUDA the native engine serve
 `--kv-cache fp8`. It also reads ModelOpt NVFP4 and FP8 exports, and turboderp's EXL3 packs (`mul1` codebook) with
 DFlash2 drafts through the shared EXL3 module, on one GPU.
 
+The Metal dense loader reads aligned hidden, intermediate, layer and head counts from `config.json`.
+It retains the existing attention/DeltaNet head layouts and layer schedule. The untied 9B geometry
+(4096 hidden, 12288 intermediate, 32 layers) uses the same runtime-shaped projections; full checkpoint
+reference, draft, resume, concurrency and performance qualification remains pending. The pinned 2B
+continues to open its separate engine. Host header checks do not qualify another checkpoint.
+
 ```bash
 tensorfold pull TensorFold/Qwen3.8-27B-MLX-4bit
 tensorfold pull z-lab/Qwen3.8-27B-DFlash2
