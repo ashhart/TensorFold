@@ -18,8 +18,10 @@ struct Rows {
     float b, a;
 };
 
+template <int NK, int NV>
 __device__ __forceinline__ void load_rows(const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs, int r0,
                                           int n, const int (&ch)[3], int hv, int p, Rows& in) {
+    constexpr int C = G<NK, NV>::C, PW = G<NK, NV>::PW;
 #pragma unroll
     for (int c3 = 0; c3 < 3; ++c3)
 #pragma unroll
@@ -75,9 +77,11 @@ __device__ __forceinline__ void front_rows(const Rows& in, const float (&w)[3][T
 }
 
 // the chain's 256 threads after a batch's steps: fn_gdn_norm's arithmetic for its n rows from row r0 (ys[j][dv])
+template <int NK, int NV>
 __device__ __forceinline__ void norm_rows(const float (*ys)[DV], const __nv_bfloat16* __restrict__ P,
                                           const __nv_bfloat16* __restrict__ norm_w, float eps, __nv_bfloat16* __restrict__ out,
                                           float* __restrict__ xs, int r0, int n, int hv, float* rinv) {
+    constexpr int C = G<NK, NV>::C, PW = G<NK, NV>::PW;
     const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
     cbar();  // every readout of the batch is in ys
     for (int j = warp; j < n; j += CH / 32) {
@@ -114,6 +118,7 @@ __device__ __forceinline__ void norm_rows(const float (*ys)[DV], const __nv_bflo
     }
 }
 
+template <int NK, int NV>
 __device__ __forceinline__ void run(const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs,
                                     const __nv_bfloat16* __restrict__ cw, const float* __restrict__ a_log,
                                     const float* __restrict__ dt_bias, const float* state_in, float* state_out, int rows,
@@ -135,10 +140,10 @@ __device__ __forceinline__ void run(const __nv_bfloat16* __restrict__ P, const _
     auto fill = [&](int bi) {
         const int r0 = bi * STEPS, n = min(STEPS, rows - r0);
         Rows in;
-        load_rows(P, cs, r0, n, ch, hv, p, in);
+        load_rows<NK, NV>(P, cs, r0, n, ch, hv, p, in);
         front_rows(in, w, nea, dtb, n, p, stage + (bi & 1) * STAGE, xb);
     };
-    // the chain's registers (gdn_tpr::chain<2, 16>'s)
+    // the chain's registers (gdn_tpr::chain<NK, NV, 2, 16>'s)
     constexpr int L = 32 / TPR;
     const int row = threadIdx.x / TPR, t = threadIdx.x % TPR;
     const size_t sbase = (size_t)hv * DV * DK + (size_t)row * DK;
@@ -203,7 +208,7 @@ __device__ __forceinline__ void run(const __nv_bfloat16* __restrict__ P, const _
                     if (ys_out) ys_out[((size_t)(r0 + rr) * NV + hv) * DV + row] = o;
                 }
             }
-            norm_rows(ysb[bi & 1], P, norm_w, eps, out, xs, r0, n, hv, rinv);  // on the chain: it would wait at the barrier
+            norm_rows<NK, NV>(ysb[bi & 1], P, norm_w, eps, out, xs, r0, n, hv, rinv);  // on the chain: it would wait at the barrier
         }
         __syncthreads();
     }
@@ -221,5 +226,14 @@ extern "C" __global__ void __launch_bounds__(gdn_fused::THREADS) fn_gdn_fused(
         const float* __restrict__ a_log, const float* __restrict__ dt_bias, const float* state_in, float* state_out, int rows,
         const __nv_bfloat16* __restrict__ norm_w, float eps, __nv_bfloat16* __restrict__ out, float* __restrict__ xs,
         float* __restrict__ ys_out) {
-    gdn_fused::run(P, cs, cw, a_log, dt_bias, state_in, state_out, rows, norm_w, eps, out, xs, ys_out);
+    gdn_fused::run<16, 48>(P, cs, cw, a_log, dt_bias, state_in, state_out, rows, norm_w, eps, out, xs, ys_out);
+}
+
+// fn_gdn_fused on one rank's 8 key and 24 value heads (8,240-wide projection rows, a 5,120-channel conv window).
+extern "C" __global__ void __launch_bounds__(gdn_fused::THREADS) fn_gdn_fused_h8(
+        const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs, const __nv_bfloat16* __restrict__ cw,
+        const float* __restrict__ a_log, const float* __restrict__ dt_bias, const float* state_in, float* state_out, int rows,
+        const __nv_bfloat16* __restrict__ norm_w, float eps, __nv_bfloat16* __restrict__ out, float* __restrict__ xs,
+        float* __restrict__ ys_out) {
+    gdn_fused::run<8, 24>(P, cs, cw, a_log, dt_bias, state_in, state_out, rows, norm_w, eps, out, xs, ys_out);
 }

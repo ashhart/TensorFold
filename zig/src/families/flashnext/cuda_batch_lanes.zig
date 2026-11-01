@@ -64,11 +64,13 @@ pub fn putLane(tab: []u8, i: usize, row0: usize, pos: usize, rows: usize) void {
     for (0..rows) |r| ints[4 * lanes_n + row0 + r] = @intCast(i);
 }
 
-/// Whether a round's `n` rows take attn: two to 32 lanes of decode rows, text on contiguous caches, our glue.
+/// Whether a round's `n` rows take attn: 2 to 32 lanes of decode rows, text on contiguous whole-head caches, our glue.
 pub fn useAttn(pass: anytype, n: usize) bool {
     if (comptime !@hasDecl(@TypeOf(pass.tri), "lanesGlue")) return false;
     if (!attnLanesOn() or pass.lanes.len < 2 or pass.lanes.len > lanes_n or n > att_rows) return false;
     if (wt.index_heads != 4 or pass.tri.lanesGlue() == null) return false;
+    // its launches take the whole layer's heads; a rank's half under the head split goes lane by lane
+    if (!pass.m.layers[0].heads.eql(.full)) return false;
     for (pass.lanes) |l| {
         if (l.seq.media != null or l.seq.pg.pt != 0 or l.rows == 0 or l.rows > glue.ahead_rows) return false;
         if (l.seq.kc.len > wt.layers_n / 4 or l.seq.scores != pass.lanes[0].seq.scores or l.pos + l.rows > l.seq.cap) return false;

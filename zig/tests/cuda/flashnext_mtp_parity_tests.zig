@@ -102,7 +102,7 @@ fn shape(gpu: check.Gpu, e: *prompt.Engine, ops: mtp.Ops(flash.Tri), stream: *cu
         for (nexts[i][0..w], 0..) |*t, r| t.* = @intCast((37 + 101 * i + 17 * r) % 50_000);
         inline for (.{ &alone, &together }) |side| {
             side.seqs[i] = try e.newSeq(cap);
-            side.drafts[i] = mtp.Draft.init(gpa, e.driver, stream.*, cap, ops.h.ids.len, e.chunk) catch |err| {
+            side.drafts[i] = mtp.Draft.init(gpa, e.driver, stream.*, cap, ops.h.ids.len, e.chunk, e.heads) catch |err| {
                 side.seqs[i].deinit(gpa);
                 return err;
             };

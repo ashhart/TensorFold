@@ -77,7 +77,7 @@ fn prep(r: *Rig, g: *const flash.Glue) !void {
         kcs[c] = try r.out(cap * kv_heads * head_dim * 2);
         vcs[c] = try r.out(cap * kv_heads * head_dim * 2);
         ikcs[c] = try r.out(cap * index_dim * 2);
-        try g.attnPrep(r.s, dp, dpos, dqw, dkw, diw, dinv, qs[c], kcs[c], vcs[c], iqs[c], ikcs[c], eps, m, .{});
+        try g.attnPrep(r.s, dp, dpos, dqw, dkw, diw, dinv, qs[c], kcs[c], vcs[c], iqs[c], ikcs[c], eps, m, .full, .{});
     }
     const last = counts.len - 1;
     const q = try r.back(u16, qs[last], most * q_heads * head_dim);
@@ -227,8 +227,8 @@ fn attention(r: *Rig, g: *const flash.Glue, sparse: bool) !void {
     for (counts, 0..) |m, c| {
         outs[c] = try r.out(m * q_heads * head_dim * 2);
         const chunks = if (sparse) (idw + 511) / 512 else (pos0 + m + 511) / 512;
-        try g.attnChunks(r.s, dq, dkc, dvc, dpos, po, pm, pl, dids, dnk, dspr, m, kv_heads, chunks, true, .{});
-        try g.attnMerge(r.s, po, pm, pl, dpos, outs[c], dnk, dspr, m, kv_heads, true);
+        try g.attnChunks(r.s, dq, dkc, dvc, dpos, po, pm, pl, dids, dnk, dspr, m, .full, chunks, true, .{});
+        try g.attnMerge(r.s, po, pm, pl, dpos, outs[c], dnk, dspr, m, .full, true);
     }
     const got = try r.back(u16, outs[counts.len - 1], rows * q_heads * head_dim);
     const name = if (sparse) "attention sparse" else "attention dense";
@@ -266,7 +266,7 @@ fn attention(r: *Rig, g: *const flash.Glue, sparse: bool) !void {
     for (counts[0 .. counts.len - 1], 0..) |m, c| try r.sameRows(name, u16, outs[c], got[0 .. m * q_heads * head_dim]);
     // prompt rows' fused launch (every chunk merged in the program): the chunks then merge's bytes
     const fused = try r.out(rows * q_heads * head_dim * 2);
-    try g.attnFused(r.s, dq, dkc, dvc, dpos, fused, dids, dnk, dspr, rows, kv_heads, .{});
+    try g.attnFused(r.s, dq, dkc, dvc, dpos, fused, dids, dnk, dspr, rows, .full, .{});
     try r.sameRows(if (sparse) "attention sparse fused" else "attention dense fused", u16, fused, got);
 }
 

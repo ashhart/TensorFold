@@ -36,7 +36,7 @@ pub fn run(gpu: check.Gpu, dir: []const u8, rank: usize, port: u16, ids_path: []
     engine.collective = &session.collective;
     if (engine.chunk != chunk) return error.RankIdentity;
     const room = try session.room((try gpu.ctx.memInfo()).free);
-    try check.expect(room > prompt.seqBytes(context) * 3, "both ranks have room for experimental caches", .{});
+    try check.expect(room > prompt.seqBytes(context, engine.heads) * 3, "both ranks have room for experimental caches", .{});
     var logits = try cuda.DeviceBuffer.alloc(gpu.d, 2 * prompt.vocabulary * 2);
     defer logits.free();
     if (rank == 1) {
