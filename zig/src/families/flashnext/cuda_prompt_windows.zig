@@ -4,8 +4,20 @@ const prompt = @import("cuda_prompt.zig");
 const batch = prompt.batch;
 const pocket = @import("cuda_pocket.zig");
 const vocab = @import("cuda_prompt_wt.zig").vocab;
+const window_graph = @import("cuda_window_graph.zig");
 const Engine = prompt.Engine;
 const Seq = prompt.Seq;
+
+/// A drafted window on one GPU as a graph (one chunk, scores left on the device, no media or adds); true once run.
+pub fn forwardGraph(e: *Engine, comptime Tri: type, p: *batch.Pass(Tri), seq: *Seq, ids: []const u32, hooks: batch.Hooks) !bool {
+    if (!window_graph.enabled() or hooks.logits != .all or hooks.host_logits or hooks.moe_add != null) return false;
+    if (ids.len > @import("cuda_mtp.zig").max_rows or ids.len > p.s.cap or e.collective != null or seq.media != null or p.m.pocket != null) return false;
+    const key = window_graph.Key.init(seq, seq.fed, ids.len, p.s, p.seq.scores, @intFromPtr(p.m.layers.ptr), hooks);
+    try window_graph.stageWindow(p, ids, seq.fed);
+    try e.graphs.window.run(e.gpa, e.stream.*, key, window_graph.Chunk(batch.Pass(Tri)){ .p = p, .ids = ids, .pos0 = seq.fed });
+    seq.fed += ids.len;
+    return true;
+}
 
 /// A stream's window in a shared pass: its rows, and where its rollback rows, hidden rows and scores go (0: none).
 pub const Window = struct { seq: *Seq, ids: []const u32, keep: ?*const batch.Keep = null, streams: u64 = 0, logits: u64 = 0 };
@@ -54,14 +66,23 @@ pub fn windows(e: *Engine, comptime Tri: type, tri: Tri, wins: []const Window, o
         .lanes = lanes,
         .hooks = .{ .logits = .all, .logits_out = out },
     };
-    try p.chunk(ids, 0, null);
+    const media = for (wins) |w| {
+        if (w.seq.media != null) break true;
+    } else false;
+    if (window_graph.enabled() and reads == .none and p.m.pocket == null and e.collective == null and !media) {
+        // on one GPU: staged, then the pass as a graph keyed by every lane's buffers
+        const key = window_graph.SharedKey.init(lanes, s, scores, @intFromPtr(p.m.layers.ptr), out);
+        try window_graph.stageWindow(&p, ids, 0);
+        try e.graphs.shared.run(e.gpa, e.stream.*, key, window_graph.Chunk(batch.Pass(Tri)){ .p = &p, .ids = ids, .pos0 = 0 });
+    } else try p.chunk(ids, 0, null);
     try e.complete();
-    // each stream's last row in its host scores, as its lone pass leaves them
+    // each stream's last row in its host scores only when asked: the drafted windows' draws read `out`
     const d = e.stream.d;
+    const host = @import("cuda_batch_state.zig").verifyHostLogits();
     at = 0;
     for (wins) |w| {
         at += w.ids.len;
-        try d.check(d.api.cuMemcpyDtoH_v2(w.seq.logits.ptr, out + (at - 1) * vocab * 2, vocab * 2), "cuMemcpyDtoH");
+        if (host) try d.check(d.api.cuMemcpyDtoH_v2(w.seq.logits.ptr, out + (at - 1) * vocab * 2, vocab * 2), "cuMemcpyDtoH");
         w.seq.fed += w.ids.len;
     }
 }

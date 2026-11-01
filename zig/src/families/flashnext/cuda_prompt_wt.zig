@@ -78,7 +78,10 @@ const Shard = struct {
         return .{ .f = try core.safetensors.File.open(gpa, io, path), .io = io };
     }
 
+    /// Its pages out of the page cache: on unified memory they starve the n-gram table (TF_FLASHNEXT_DROP_LOADED=0).
     fn close(self: *Shard) void {
+        const keep = if (std.c.getenv("TF_FLASHNEXT_DROP_LOADED")) |v| std.mem.eql(u8, std.mem.span(v), "0") else false;
+        if (!keep) self.f.release();
         self.f.close(self.io);
     }
 

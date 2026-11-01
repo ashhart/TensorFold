@@ -97,6 +97,7 @@ test "draft sources: CUDA Flash Next follows the loaded checkpoint head" {
     var b: @import("flashnext").native.Cuda = undefined;
     b.head = null;
     b.depth = 8;
+    b.depth_greedy = 8;
     try check(b.facts(), null, true, false);
     b.head = present(@TypeOf(b.head.?));
     try check(b.facts(), null, true, true);

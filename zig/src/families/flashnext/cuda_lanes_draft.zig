@@ -49,7 +49,7 @@ pub fn batched(self: anytype, requests: []const be.DraftRequest, done: []bool) !
         }
         if (r.position != l.seq.fed + 1) return error.PositionMismatch;
         const room = l.seq.cap - l.seq.fed - 1;
-        counts[n] = @min(@min(r.depth, self.depth), room);
+        counts[n] = @min(@min(r.depth, mtp.depthFor(r.stream.sampling, self.depth, self.depth_greedy)), room);
         if (r.rows) |path| {
             nexts[n] = r.follow[0..path.len];
             rows[n] = d.streams.ptr;
