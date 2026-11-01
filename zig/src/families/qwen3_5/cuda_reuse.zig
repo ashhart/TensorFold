@@ -155,13 +155,13 @@ pub fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
     const t: *Target = @ptrCast(@alignCast(ptr));
     const s: *lanes.Stream = @ptrCast(@alignCast(owner orelse return error.NoStream));
     const cache = t.caches.get(s) orelse return error.UnknownStream;
-    try cache.flush(t.e);
     return @ptrCast(try saveCache(t.e, cache, at, t.seen.get(s) orelse &.{}));
 }
 
 /// A host copy of `cache` at `at` rows, naming the prompt's images that start before it.
-pub fn saveCache(e: *Engine, cache: *const Cache, at: usize, seen: []const Seen) !*Copy {
+pub fn saveCache(e: *Engine, cache: *Cache, at: usize, seen: []const Seen) !*Copy {
     if (cache.len != at or cache.last != null or at > cache.cap) return error.NotAtMark;
+    try cache.flush(e); // the copy holds the state with the pending kept rows landed
     const l: Layout = .{ .g = e.g, .format = formatOf(e), .cap = cache.cap, .at = at };
     var n: usize = 0;
     for (seen) |im| n += @intFromBool(im.at < at);
@@ -227,6 +227,7 @@ pub fn restoreCache(e: *Engine, cache: *Cache, saved: *anyopaque, seen: []const 
     cache.len = copy.at;
     cache.written = copy.at;
     cache.last = null;
+    cache.pend = 0; // kept rows pending in the replaced state go with it
     cache.delta = copy.delta;
 }
 
@@ -234,9 +235,7 @@ pub fn restoreCache(e: *Engine, cache: *Cache, saved: *anyopaque, seen: []const 
 pub fn restore(ptr: *anyopaque, owner: ?*anyopaque, saved: *anyopaque) anyerror!void {
     const t: *Target = @ptrCast(@alignCast(ptr));
     const s: *lanes.Stream = @ptrCast(@alignCast(owner orelse return error.NoStream));
-    const cache = t.caches.get(s) orelse return error.UnknownStream;
-    try cache.flush(t.e);
-    return restoreCache(t.e, cache, saved, t.seen.get(s) orelse &.{});
+    return restoreCache(t.e, t.caches.get(s) orelse return error.UnknownStream, saved, t.seen.get(s) orelse &.{});
 }
 
 /// Free a kept state's host copy.
