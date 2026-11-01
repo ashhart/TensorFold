@@ -238,10 +238,15 @@ pub const Drafter = struct {
         return true;
     }
 
-    /// A stream's lane at `capacity` positions: its context keys and values a layer, and its staged rows.
+    /// A stream's lane at `capacity` positions: its context keys and values a layer, and the tapped rows it owns.
     pub fn laneBytes(d: *const Drafter, capacity: usize) usize {
         const cap = capacity + d.config.block;
-        return @intCast(d.keptBytes(cap) + @min(stage_rows, cap) * d.tapBytes());
+        return @intCast(d.keptBytes(cap) + d.stageBytes(cap));
+    }
+
+    /// Bytes of the tapped rows a lane of `cap` positions owns: stage_rows, never more rows than positions.
+    fn stageBytes(d: *const Drafter, cap: usize) usize {
+        return @min(stage_rows, cap) * d.tapBytes();
     }
 
     /// A tapped row's bytes: every tap's hidden row, bf16.
@@ -536,7 +541,7 @@ pub const Drafter = struct {
         d.hold_ms = best[1];
         d.step_ms = best[1] / @as(f64, @floatFromInt(d.config.block));
         std.log.info("lfm2 dspark: a 1-draft hold takes {d:.2} ms, a {d}-draft hold {d:.2} ms", .{ best[0], d.config.block, best[1] });
-        std.log.info("lfm2 dspark: weights {d:.1} MiB, scratch {d:.1} MiB, a stream {d} KiB a position and at most {d} KiB staged", .{ mibOf(d.w.buffers()), mibOf(d.owned.items), d.keptBytes(1) / 1024, @min(stage_rows, d.options.capacity + d.config.block) * d.tapBytes() / 1024 });
+        std.log.info("lfm2 dspark: weights {d:.1} MiB, scratch {d:.1} MiB, a stream {d} KiB a position and up to {d} KiB staged", .{ mibOf(d.w.buffers()), mibOf(d.owned.items), d.keptBytes(1) / 1024, d.stageBytes(d.options.capacity + d.config.block) / 1024 });
         var blocks: [hold_grid[hold_grid.len - 1]]block.Block = undefined;
         for (made, &blocks) |lane, *b| b.* = .{ .lane = lane, .pending = 1, .anchor = 0, .depth = 1 };
         // Publish the entire grid at once, so the timing holds cannot reprice it.

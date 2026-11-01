@@ -331,15 +331,18 @@ pub fn main(init: std.process.Init) !void {
         try staged.held(&.{key}, &.{own_held[0..block]});
         if (!std.mem.eql(u32, gpu, own_held[0..block])) return error.OwnedStagePicksDiffer;
         const span = ctx * hd * 2;
-        for (0..cfg.layers) |li| for ([_]bool{ false, true }) |values| for (0..c.kv_heads) |h| {
-            const a = lane.kv(li, values);
-            const b = own.kv(li, values);
-            const a_off = a.off + h * lane.cap * hd * 2;
-            const b_off = b.off + h * own.cap * hd * 2;
-            if (!std.mem.eql(u8, (a.buf.contents() + a_off)[0..span], (b.buf.contents() + b_off)[0..span])) return error.OwnedStageContextDiffers;
+        for (0..cfg.layers) |li| for ([_]bool{ false, true }) |values| {
+            const reference = lane.kv(li, values);
+            const staged_kv = own.kv(li, values);
+            for (0..c.kv_heads) |h| {
+                const reference_off = reference.off + h * lane.cap * hd * 2;
+                const staged_off = staged_kv.off + h * own.cap * hd * 2;
+                if (!std.mem.eql(u8, (reference.buf.contents() + reference_off)[0..span], (staged_kv.buf.contents() + staged_off)[0..span])) return error.OwnedStageContextDiffers;
+            }
         };
         std.debug.print("the owned stage: {d} rows staged in uneven absorbs, absorbed as one {d}-row piece like the direct absorbs' ({s} regime): keys, values and picks equal\n", .{ ctx, ctx, if (ctx <= 32) "<= 32-row" else "> 32-row" });
     }
+    try @import("lfm2_dspark_lifecycle.zig").run(gpa, d, taps.buf, ids, ctx);
     // settled GPU time is taken once: a standalone absorb adds its time and leaves the grid as it was; a synchronous
     // one-block hold adds its own and reprices exactly the passes at one block (other block counts stay as timed)
     if (ctx > 0) {

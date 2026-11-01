@@ -544,7 +544,7 @@ test "lfm2 dspark: an absorb owns the rows it stages, prompt rows too, and a ref
     try std.testing.expectEqual(@as(f64, 0), d.hold_spent_ms); // staging runs no GPU work
 }
 
-test "lfm2 dspark: a lane's accounted bytes are the buffers it allocates, and its stage holds a whole 2048-row prompt chunk" {
+test "lfm2 dspark: packed lane accounting, alignment and a whole prompt chunk" {
     const device = mtl.Device.init() catch return error.SkipZigTest;
     defer device.deinit();
     var target: Model = undefined;
@@ -552,17 +552,20 @@ test "lfm2 dspark: a lane's accounted bytes are the buffers it allocates, and it
     var d = try bare(&target);
     defer d.lanes.deinit(d.gpa);
     const width = d.tapBytes();
-    for ([_]usize{ 64, 4096 }) |capacity| { // a warm-up lane's stage is clipped to its positions, a long lane's to one absorb pass
+    for ([_]usize{ 1, 64, 2039, 4096 }) |capacity| {
         const l = try d.newLane(capacity);
         defer d.dropLane(l);
         try std.testing.expectEqual(d.laneBytes(capacity), l.mem.length());
         try std.testing.expectEqual(@as(usize, @intCast(d.keptBytes(l.cap))), l.stage_at);
+        try std.testing.expectEqual(@min(ds.stage_rows, l.cap) * width, l.mem.length() - l.stage_at);
         try std.testing.expectEqual(@as(usize, 0), l.stage_at % 64);
-        try std.testing.expectEqual(@min(ds.stage_rows, capacity + d.config.block) * width, l.mem.length() - l.stage_at);
         for (0..d.config.layers) |i| for ([_]bool{ false, true }) |values| {
-            const ref = l.kv(i, values);
-            try std.testing.expectEqual(@as(usize, 0), ref.off % 64);
-            try std.testing.expect(ref.off + l.cap * c.kv_heads * c.head_dim * 2 <= l.stage_at);
+            const kv = l.kv(i, values);
+            const off = (2 * i + @intFromBool(values)) * l.cap * c.kv_heads * c.head_dim * 2;
+            try std.testing.expectEqual(l.mem.id, kv.buf.id);
+            try std.testing.expectEqual(off, kv.off);
+            try std.testing.expectEqual(@as(usize, 0), kv.off % 64);
+            try std.testing.expect(kv.off + l.cap * c.kv_heads * c.head_dim * 2 <= l.stage_at);
         };
     }
     const l = try d.newLane(4096);
@@ -575,4 +578,23 @@ test "lfm2 dspark: a lane's accounted bytes are the buffers it allocates, and it
     try d.drafter().absorb(&.{tapped(key, chunk, width, 0, ds.absorb_rows, 0, true)});
     try std.testing.expectEqual(@as(u32, ds.absorb_rows), l.staged);
     try std.testing.expectEqualSlices(u8, chunk.contents()[0 .. ds.absorb_rows * width], (l.mem.contents() + l.stage_at)[0 .. ds.absorb_rows * width]);
+}
+
+test "lfm2 dspark: failed lane creation and map insertion clean up" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    var target: Model = undefined;
+    target.device = device;
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var d = try bare(&target);
+    d.gpa = failing.allocator();
+    defer d.lanes.deinit(d.gpa);
+    try std.testing.expectError(error.OutOfMemory, d.newLane(64));
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    var stream = try lanes.Stream.init(std.testing.allocator, .{ .id = "failed-open", .prompt = &.{1}, .max_new = 1 });
+    defer stream.deinit(std.testing.allocator);
+    try std.testing.expectError(error.OutOfMemory, d.drafter().open(&stream));
+    try std.testing.expectEqual(@as(usize, 0), d.lanes.count());
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
 }
