@@ -52,6 +52,7 @@ pub const Bf16Experts = struct {
     /// One call on a plan of at most `items` items: 16 pairs an item in decode, 64 in a prompt.
     pub fn run(e: *const Bf16Experts, s: Stream, prompt: bool, epi: Epi, in: Rows, l: Layer, p: Plan, out: u64, items: usize, skip: i32) !void {
         if (!l.relu2 or l.swiglu or l.limit != 0) return error.OptionNotBuilt;
+        if (l.width % 32 != 0 or l.dims % 32 != 0) return error.UnexpectedShape; // whole blocks, as pack takes
         const up = epi == .up;
         const kg = (if (up) l.dims else l.width) / 32;
         const nb = (if (up) l.width else l.dims) / cols;
