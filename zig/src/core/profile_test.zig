@@ -73,9 +73,19 @@ test "stable profile: reporting follows the original count and exact-one flag se
     const count = p.entry(.TF_QWEN_KV_SHARE);
     for ([_][]const u8{ "0", "00", "+0" }) |v| try t.expect(!count.differs(v));
     for ([_][]const u8{ "1", "256", "", "-1", "not-a-count" }) |v| try t.expect(count.differs(v));
-    const flag = p.entry(.TF_QWEN_KV_PAGES_ALL);
+    const flag = p.entry(.TF_FLASHNEXT_KV_PAGES_ALL);
     try t.expect(flag.differs("1"));
     for ([_][]const u8{ "0", "", "01", "true", " 1 " }) |v| try t.expect(!flag.differs(v));
+}
+
+test "stable profile: Qwen's page switches report a change from the family's paged default" {
+    const pages = p.entry(.TF_QWEN_KV_PAGES);
+    for ([_][]const u8{ "256", "0256", "+256" }) |v| try t.expect(!pages.differs(v));
+    for ([_][]const u8{ "0", "128", "", "not-a-count" }) |v| try t.expect(pages.differs(v));
+    const all = p.entry(.TF_QWEN_KV_PAGES_ALL);
+    try t.expectEqual(p.Syntax.off, all.syntax);
+    try t.expect(all.differs("0"));
+    for ([_][]const u8{ "1", "", "00", "false" }) |v| try t.expect(!all.differs(v));
 }
 
 test "stable profile: GLM paging registers automatic policy without supplying or coercing its value" {

@@ -53,13 +53,13 @@ test "profile line: only applicable allowlisted changes are shown, without claim
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const env: TestEnv = .{ .qwen = "256", .all = "1", .share = "8" };
+    const env: TestEnv = .{ .qwen = "128", .all = "0", .share = "8" };
     const line = try format(a, .stable, "qwen3_5", "cuda", env);
-    try std.testing.expectEqualStrings("profile: stable; registered overrides: TF_QWEN_KV_PAGES=256 (identical, env); TF_QWEN_KV_PAGES_ALL=1 (debug, env); TF_QWEN_KV_SHARE=8 (identical, env)", line);
+    try std.testing.expectEqualStrings("profile: stable; registered overrides: TF_QWEN_KV_PAGES=128 (identical, env); TF_QWEN_KV_PAGES_ALL=0 (debug, env); TF_QWEN_KV_SHARE=8 (identical, env)", line);
     for ([_][2][]const u8{ .{ "unknown", "cuda" }, .{ "qwen3_5", "metal" }, .{ "qwen3_5", "hip" } }) |scope| {
         try std.testing.expectEqualStrings("profile: stable; registered overrides: none", try format(a, .stable, scope[0], scope[1], env));
     }
-    try std.testing.expectEqualStrings("profile: stable; registered overrides: none", try format(a, .stable, "qwen3_5", "cuda", TestEnv{ .qwen = "00", .all = "true", .share = "+0" }));
+    try std.testing.expectEqualStrings("profile: stable; registered overrides: none", try format(a, .stable, "qwen3_5", "cuda", TestEnv{ .qwen = "256", .all = "1", .share = "+0" }));
 }
 
 test "profile line: GLM reports explicit page policies including off without treating auto as an override" {
