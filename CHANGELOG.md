@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- RoPE: transformers' inverse frequencies are computed in one place (`core.rope_freq`), and Gemma 4 on CUDA uses them, with the same bits (#1853, for #1852). Thanks to @jschmied.
+
 - On CUDA, every family's loader drops its checkpoint from the page cache once the weights are on the GPU, as Flash Next does since 1.2.1, so a GB10's shared memory doesn't hold them twice: a served Qwen3.8-27B frees about 15 GiB. Files read at runtime (PLE rows, DeepSeek's Engram tables) are kept (part of #1868).
 
 - Lanes: grammar masks for constrained streams are filled in parallel across streams, with the same masks and tokens; one stream is unchanged. On an M5 Ultra, Qwen3.5-2B serves 0.7% to 1.3% faster at 4 to 32 constrained streams (fixes #1455).
