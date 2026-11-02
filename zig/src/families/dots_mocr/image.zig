@@ -88,10 +88,17 @@ pub fn positions(a: std.mem.Allocator, gh: u32, gw: u32, merge: u32) ![][2]u32 {
     if (merge == 0 or gh == 0 or gw == 0 or gh % merge != 0 or gw % merge != 0) return error.DotsGrid;
     const count = std.math.mul(usize, gh, gw) catch return error.DotsGrid;
     const out = try a.alloc([2]u32, count);
+    errdefer a.free(out);
+    try fillPositions(out, gh, gw, merge);
+    return out;
+}
+
+pub fn fillPositions(out: [][2]u32, gh: u32, gw: u32, merge: u32) !void {
+    if (merge == 0 or gh == 0 or gw == 0 or gh % merge != 0 or gw % merge != 0 or
+        out.len != @as(u64, gh) * gw) return error.DotsGrid;
     var i: usize = 0;
     for (0..gh / merge) |by| for (0..gw / merge) |bx| for (0..merge) |dy| for (0..merge) |dx| {
         out[i] = .{ @intCast(by * merge + dy), @intCast(bx * merge + dx) };
         i += 1;
     };
-    return out;
 }
