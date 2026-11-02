@@ -72,6 +72,11 @@ pub fn live(a: std.mem.Allocator, r: *const hip.Runtime, ctx: hip.Context, arch:
         std.debug.print(say, .{ word, arch, d[0], got, d[2] });
     }
     for (all) |rec| {
+        // a planted control is checked on every chip: only a registered launch may be unserved somewhere
+        if (!rec.usage[at].served and !isControl(rec)) {
+            std.debug.print("N/A  limits live {s}: not served on {s}\n", .{ rec.launch.name, arch });
+            continue;
+        }
         const bytes = try image(rec.launch.image);
         const listed = try hsaco.kernels(a, bytes);
         defer a.free(listed);
@@ -108,6 +113,11 @@ pub fn objects(a: std.mem.Allocator, io: std.Io, dir: []const u8) !usize {
         var line: std.ArrayList(u8) = .empty;
         defer line.deinit(a);
         for (limits.rdna, 0..) |t, i| {
+            if (!rec.usage[i].served and !control) {
+                std.debug.print("N/A  limits {s} {s}: not served there\n", .{ t.name, rec.launch.name });
+                try line.appendSlice(a, ".{ .vgprs = 0, .served = false }, ");
+                continue;
+            }
             const path = try file(a, dir, t.name, rec.launch.image);
             defer a.free(path);
             const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 28)) catch |err| {

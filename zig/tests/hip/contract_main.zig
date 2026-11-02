@@ -19,6 +19,7 @@ const kv_k = @import("contract_kv_write.zig");
 const argmax_k = @import("contract_argmax.zig");
 const pair_k = @import("contract_relu2_pair.zig");
 const heads_rows_k = @import("contract_heads_rows.zig");
+const dense_k = @import("contract_dense.zig");
 const gate_k = @import("contract_moe_gate.zig");
 const router_k = @import("contract_router.zig");
 const kit = @import("contract_kit.zig");
@@ -156,6 +157,13 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     var heads_rows = heads_rows_k.HeadsRows.init(a, &r, s, &l);
     defer heads_rows.deinit();
     try kernels.append(a, heads_rows.kernel());
+    var dense: [2]dense_k.DenseGemm = undefined;
+    for (&dense, [_]bool{ true, false }) |*d, fp32_out| d.* = .init(a, &r, s, &l, fp32_out);
+    defer for (&dense) |*d| d.deinit();
+    // the BF16 dense GEMM runs on BF16 builds only; an FP16 build keeps its trap body and serves no shape of it
+    if (l.dense.bf16) {
+        for (&dense) |*d| try kernels.append(a, d.kernel());
+    } else std.debug.print("N/A  hip dense_gemm_block: not served on this FP16 build\n", .{});
     var gates: [3]gate_k.Gate = undefined;
     for (&gates, std.enums.values(gate_k.Which)) |*m, w| m.* = .init(a, &r, s, &l, w);
     defer for (&gates) |*m| m.deinit();
