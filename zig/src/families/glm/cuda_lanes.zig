@@ -11,19 +11,16 @@ const prefix_mod = @import("cuda_prefix.zig");
 const cuda = @import("cuda");
 
 const be = lanes.backend;
-
+const wire = @import("cuda_verify_wire.zig");
 /// First tokens a handle names.
 const ring = 1024;
-
 /// The widest verify window: the pending token and a copy (the lane core proposes them), as the decode buffers hold.
 pub const max_rows = fw.window_rows;
 const mtp_rows = 1 + engine.max_drafts;
 const max_held = dflash.BLOCK - 1; // a DFlash2 block's drafts (the MTP head's chains stop at max_drafts)
-
 /// With DFlash2: a window's ms by rows on two GB10s (EXL3, TF_GLM_PROF: 86 to 107 ms at 5 to 8), shared as glm_cuda's.
 const gb10_window_costs = costTable(max_rows, 52.0, 6.8);
 const gb10_shared_costs = costTable(engine.shared_rows, 76.0, 4.1);
-
 fn costTable(comptime n: usize, comptime one: f64, comptime row: f64) [n]lanes.config.Cost {
     var c: [n]lanes.config.Cost = undefined;
     for (&c, 0..) |*x, i| x.* = .{ .width = i + 1, .ms = one + row * @as(f64, @floatFromInt(i)) };
@@ -45,6 +42,7 @@ const Lane = struct {
 pub const Lanes = struct {
     x: follow.Leader,
     whole: bool = false, // prompt passes run whole (TF_GLM_PROMPT_STEPS=0): no other stream's round between chunks
+    copy_drafts: bool = true, // the global draft switch also controls context copies
     alone: bool = false, // each window in its own forward (TF_GLM_SHARED=0)
     mtp_confidence: ?f64 = null, // --mtp-confidence: the MTP head's chains stop where their chance falls under it
     shared: u64 = 0, // forwards that held several streams' windows (checks read it)
@@ -113,8 +111,12 @@ pub const Lanes = struct {
         const block = self.x.e.drafter != null;
         const sharing = drafting and !self.alone;
         return .{
+            .copy_drafts = self.copy_drafts,
+            .root_copies = self.copy_drafts,
+            .context_copies = self.copy_drafts,
+            .copy_match = 4,
             .allocate_shared_drafts = drafting,
-            .exact_width = if (drafting) max_rows else 1,
+            .exact_width = if (drafting or self.copy_drafts) max_rows else 1,
             .first_copy_rows = mtp_rows, // a first copy as wide as a head round; it grows as its tokens land
             .gpu_tokens = false,
             .mtp = drafting,
@@ -451,14 +453,13 @@ pub const Lanes = struct {
             const pos = self.x.e.pos();
             for (w.positions, 0..) |p, r| if (p != pos + 1 + r) return error.PositionMismatch;
             var ids: [max_rows]u32 = undefined;
-            ids[0] = w.pending;
             const drafts = if (w.held > 0) l.held[0..w.held] else w.tokens;
-            @memcpy(ids[1..][0..drafts.len], drafts);
+            const words = try wire.window(w.pending, drafts, &ids);
             var sampled: [max_rows]u32 = undefined;
             const bits = try self.putBits(0, rows, w.masks); // before the step goes out: a refusal after it strands the ranks
             self.x.e.structured = bits != 0;
             defer self.x.e.structured = false;
-            try self.x.verify(ids[0..rows], sampled[0..rows], bits);
+            try self.x.verify(words, sampled[0..rows], bits);
             @memcpy(o.sampled[0..rows], sampled[0..rows]);
             @memcpy(o.drafts[0..drafts.len], drafts);
             l.pending_rows = rows;
@@ -482,12 +483,11 @@ pub const Lanes = struct {
             if (w.held > l.held_n) return error.NoHeldDrafts;
             const pos = self.x.e.pos();
             for (w.positions, 0..) |p, r| if (p != pos + 1 + r) return error.PositionMismatch;
-            ids[k][0] = w.pending;
             const drafts = if (w.held > 0) l.held[0..w.held] else w.tokens;
-            @memcpy(ids[k][1..][0..drafts.len], drafts);
+            const words = try wire.window(w.pending, drafts, &ids[k]);
             const bits = try self.putBits(row, rows, w.masks);
             structured = structured or bits != 0;
-            parts[k] = .{ .slot = l.slot, .ids = ids[k][0..rows], .out = sampled[k][0..rows], .bits = bits };
+            parts[k] = .{ .slot = l.slot, .ids = words, .out = sampled[k][0..rows], .bits = bits };
             lane[k] = l;
             row += rows;
         }

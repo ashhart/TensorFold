@@ -12,6 +12,7 @@ const dflash = @import("dflash.zig");
 const pages_mod = @import("cuda_pages.zig");
 const sparse = @import("cuda_sparse.zig");
 const Engine = engine.Engine;
+const verify_wire = @import("cuda_verify_wire.zig");
 
 pub const Kind = enum(u32) { begin = 1, prefill, verify, keep, draft, end, drop, release, chunk, shared, image, block, many, redraw, idle, snapshots, pool };
 
@@ -248,15 +249,8 @@ pub const Leader = struct {
         if (parts.len == 0 or parts.len > engine.max_shared) return error.WindowTooWide;
         try x.flush();
         var buf: [2 * engine.max_shared + engine.shared_rows]u32 = undefined;
-        var n: usize = 2 * parts.len;
-        for (parts, 0..) |p, i| {
-            if (n + p.ids.len > buf.len) return error.WindowTooWide;
-            buf[2 * i] = p.slot;
-            buf[2 * i + 1] = @intCast(p.ids.len);
-            @memcpy(buf[n..][0..p.ids.len], p.ids);
-            n += p.ids.len;
-        }
-        try x.send(.{ .kind = @backingInt(Kind.shared), .flags = @intFromBool(x.e.structured), .depth = @intCast(parts.len) }, buf[0..n]);
+        const words = try verify_wire.shared(parts, &buf, engine.max_shared, engine.shared_rows);
+        try x.send(.{ .kind = @backingInt(Kind.shared), .flags = @intFromBool(x.e.structured), .depth = @intCast(parts.len) }, words);
         try x.e.verifyShared(parts);
     }
 
@@ -370,14 +364,12 @@ pub fn follow(e: *Engine, link: *Link) !void {
                 if (k == 0 or k > engine.max_shared or step.ids.len < 2 * k) return error.BadStep;
                 var parts: [engine.max_shared]engine.Part = undefined;
                 var outs: [engine.shared_rows]u32 = undefined;
-                var at: usize = 2 * k;
+                var decoded: [engine.max_shared]verify_wire.Part = undefined;
+                const received = try verify_wire.following(step.ids, k, &decoded, outs.len);
                 var row: usize = 0;
-                for (parts[0..k], 0..) |*p, i| {
-                    const n = step.ids[2 * i + 1];
-                    if (at + n > step.ids.len or row + n > outs.len) return error.BadStep;
-                    p.* = .{ .slot = step.ids[2 * i], .ids = step.ids[at..][0..n], .out = outs[row..][0..n] };
-                    at += n;
-                    row += n;
+                for (parts[0..k], received) |*p, q| {
+                    p.* = .{ .slot = q.slot, .ids = q.ids, .out = outs[row..][0..q.ids.len] };
+                    row += q.ids.len;
                 }
                 try e.verifyShared(parts[0..k]);
             },

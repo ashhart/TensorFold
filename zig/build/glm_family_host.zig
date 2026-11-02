@@ -38,6 +38,13 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
     b.step("test-glm-admission-host", "Real GLM admission capabilities through the lane worker without GPU work").dependOn(&admission_run.step);
     step.dependOn(&admission_run.step);
     const copies = b.createModule(.{ .root_source_file = b.path("zig/src/native/cuda_snaps.zig"), .target = host, .optimize = .debug, .imports = &.{.{ .name = "engine_api", .module = api }} });
+    const copy_step = b.step("test-glm-copies-host", "Actual GLM copy planning, target verification and peer window replay without devices");
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |mode| {
+        const copy_root = b.createModule(.{ .root_source_file = b.path("zig/glm_copies_host.zig"), .target = host, .optimize = mode, .link_libc = true, .imports = &.{ .{ .name = "glm", .module = glm }, .{ .name = "lanes", .module = mods.lanes } } });
+        const copy_run = b.addRunArtifact(b.addTest(.{ .root_module = copy_root, .filters = &.{"GLM copies:"} }));
+        copy_step.dependOn(&copy_run.step);
+        step.dependOn(&copy_run.step);
+    }
     const snapshots = b.createModule(.{ .root_source_file = b.path("zig/glm_snapshot_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm", .module = glm }, .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core }, .{ .name = "engine_api", .module = api }, .{ .name = "copies", .module = copies } } });
     b.step("test-glm-snapshots-host", "Prompt-sized GLM state copies, page budgets and rank ordering without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = snapshots })).step);
     b.step("test-glm-prompt-settings-host", "Actual opt-in settings and rank agreement on the CPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"prompt K experiment"} })).step);

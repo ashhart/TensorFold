@@ -32,11 +32,15 @@ test "draft sources: CUDA GLM distinguishes its checkpoint head from loaded DFla
     var e: g.engine.Engine = undefined;
     var b: g.lanes.Lanes = undefined;
     b.x.e = &e;
+    b.copy_drafts = true;
     b.alone = false;
     b.mtp_confidence = null;
     e.mtp = false;
     e.drafter = null;
+    try check(b.facts(), null, true, false);
+    b.copy_drafts = false;
     try check(b.facts(), null, false, false);
+    b.copy_drafts = true;
     e.mtp = true;
     try check(b.facts(), null, true, true);
     b.mtp_confidence = 0.3; // --mtp-confidence: the head's chances size its windows, still a checkpoint head
