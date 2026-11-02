@@ -488,23 +488,28 @@ test "Flash Next expert loader: a host allocation failing at any point leaves no
     defer ta.free(path);
     var buf: [96]u8 = undefined;
     var d = Fake.driver();
-    // mapped: the views and both globals' copies fail in turn; direct adds the gather's plan, pointers and arena
+    const per = try experts.packedBytes(layer_w, layer_d, 2) + try experts.packedBytes(layer_d, layer_w, 1);
+    // each allocation fails in turn: mapped's views and globals, plus direct's gathers (chunked: on the side thread)
     inline for (.{ false, true }) |direct| {
-        var fails: usize = 0;
-        while (true) : (fails += 1) {
-            Fake.reset();
-            var store = try wt.Store.open(ta, io, path);
-            defer store.deinit();
-            var failing = std.testing.FailingAllocator.init(ta, .{ .fail_index = fails });
-            if (threads.loadMode(failing.allocator(), &d, &store, try prefixOf(&buf, 0), layer_d, layer_w, layer_n, 4, threads.staging_bytes, direct)) |owned| {
-                var o = owned;
-                defer o.free();
-                try expectLoopWords(o, &planes);
-                break;
-            } else |err| try std.testing.expectEqual(@as(anyerror, error.OutOfMemory), err);
-            try std.testing.expectEqual(@as(usize, 0), Fake.live_device);
+        var walked: [2]usize = undefined;
+        for ([_]usize{ threads.staging_bytes, 5 * per + per / 2 }, &walked) |cap, *w| {
+            var fails: usize = 0;
+            while (true) : (fails += 1) {
+                Fake.reset();
+                var store = try wt.Store.open(ta, io, path);
+                defer store.deinit();
+                var failing = std.testing.FailingAllocator.init(ta, .{ .fail_index = fails });
+                if (threads.loadMode(failing.allocator(), &d, &store, try prefixOf(&buf, 0), layer_d, layer_w, layer_n, 4, cap, direct)) |owned| {
+                    var o = owned;
+                    defer o.free();
+                    try expectLoopWords(o, &planes);
+                    break;
+                } else |err| try std.testing.expectEqual(@as(anyerror, error.OutOfMemory), err);
+                try std.testing.expectEqual(@as(usize, 0), Fake.live_device);
+            }
+            w.* = fails;
         }
-        if (direct) try std.testing.expect(fails > 3) else try std.testing.expectEqual(@as(usize, 3), fails);
+        if (direct) try std.testing.expect(walked[0] > 3 and walked[1] > walked[0]) else try std.testing.expect(walked[0] == 3 and walked[1] == 3);
     }
 }
 
@@ -558,4 +563,68 @@ test "Flash Next expert loader: uneven geometry is refused before the store or t
     try std.testing.expectEqual(@as(usize, 0), store.held.items.len + store.released.items.len);
     try std.testing.expect(store.staging == null);
     for (Fake.calls) |n| try std.testing.expectEqual(@as(usize, 0), n);
+}
+
+/// The weight store with a rendezvous: chunk k + 1's gather start and chunk k's pack end wait for each other.
+const Marked = struct {
+    store: *wt.Store,
+    chunks: usize,
+    started: std.atomic.Value(usize) = .init(0),
+    ended: std.atomic.Value(usize) = .init(0),
+    met: std.atomic.Value(usize) = .init(0),
+
+    pub fn hold(self: *Marked, name: []const u8) !core.safetensors.Tensor {
+        return self.store.hold(name);
+    }
+    pub fn has(self: *Marked, name: []const u8) bool {
+        return self.store.has(name);
+    }
+    pub fn release(self: *Marked) void {
+        self.store.release();
+    }
+    pub fn sources(self: *Marked, out: []core.direct_gather.Source) ![]core.direct_gather.Source {
+        return self.store.sources(out);
+    }
+    pub fn pinned(self: *Marked, d: *const cuda.Driver, len: usize) ![]align(16) u8 {
+        return self.store.pinned(d, len);
+    }
+    /// Only code running both at once meets: run one after the other, either side waits out its 5 s.
+    pub fn chunkMark(self: *Marked, gather: bool, k: usize) void {
+        if (gather) {
+            _ = self.started.fetchAdd(1, .acq_rel);
+            if (k > 0 and reach(&self.ended, k)) _ = self.met.fetchAdd(1, .acq_rel);
+        } else {
+            _ = self.ended.fetchAdd(1, .acq_rel);
+            if (k + 1 < self.chunks and reach(&self.started, k + 2)) _ = self.met.fetchAdd(1, .acq_rel);
+        }
+    }
+    fn reach(v: *std.atomic.Value(usize), n: usize) bool {
+        var waited: usize = 0;
+        while (v.load(.acquire) < n and waited < 500) : (waited += 1) std.Io.sleep(io, .fromMilliseconds(10), .awake) catch {};
+        return v.load(.acquire) >= n;
+    }
+};
+
+test "Flash Next expert loader: a direct load gathers each next chunk while the chunk before it packs, with the same words" {
+    Fake.reset();
+    var d = Fake.driver();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var planes: [3 * layer_n]Planes = undefined;
+    try fixture(tmp.dir, &.{.{ .index = 0, .csf = true }}, null, &planes);
+    defer freePlanes(&planes);
+    const path = try tmp.dir.realPathFileAlloc(io, ".", ta);
+    defer ta.free(path);
+    var store = try wt.Store.open(ta, io, path);
+    defer store.deinit();
+    var buf: [96]u8 = undefined;
+    const per = try experts.packedBytes(layer_w, layer_d, 2) + try experts.packedBytes(layer_d, layer_w, 1);
+    // 5 experts a chunk: chunks (5, 5, 2); chunk 0's and chunk 1's packs each meet the next chunk's gather
+    var marked: Marked = .{ .store = &store, .chunks = 3 };
+    var owned = try threads.loadMode(ta, &d, &marked, try prefixOf(&buf, 0), layer_d, layer_w, layer_n, 4, 5 * per + per / 2, true);
+    defer owned.free();
+    try expectLoopWords(owned, &planes);
+    try std.testing.expectEqual(@as(usize, 3), marked.ended.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 3), marked.started.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 4), marked.met.load(.acquire));
 }
