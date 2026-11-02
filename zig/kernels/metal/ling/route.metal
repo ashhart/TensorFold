@@ -113,14 +113,17 @@ inline void keep_groups(thread float* choice, int lane, int ne, int gs, int ng, 
   if (a.ng > 1) keep_groups(choice, int(lane), ne, ne / a.ng, a.ng, a.keep);
   float total = 0.0f, mine = 0.0f;
   int mine_id = 0;
+  bool mine_real = false;
   for (int k = 0; k < topk; ++k) {
     float mx = choice[0];
     for (int i = 1; i < MAXE; ++i) mx = fmax(mx, choice[i]);
     mx = simd_max(mx);
     int id = 1 << 30;
     for (int i = MAXE - 1; i >= 0; --i)
-      if (choice[i] == mx) id = i * 32 + int(lane);
+      if (choice[i] == mx && i * 32 + int(lane) < ne) id = i * 32 + int(lane);
     for (int o = 16; o > 0; o >>= 1) id = min(id, simd_shuffle_xor(id, o));
+    // Every expert left is NaN (padded slots never match): this pick and the rest are empty, id 0 with weight 0.
+    if (id >= ne) break;
     float sk = 0.0f;
     for (int i = 0; i < MAXE; ++i)
       if (i * 32 + int(lane) == id) {
@@ -132,10 +135,11 @@ inline void keep_groups(thread float* choice, int lane, int ne, int gs, int ng, 
     if (int(lane) == k) {
       mine = sk;
       mine_id = id;
+      mine_real = true;
     }
   }
   if (int(lane) < topk) {
     PICK[r * topk + int(lane)] = mine_id;
-    WTS[r * topk + int(lane)] = (mine / (total + 1e-20f)) * a.scale;
+    WTS[r * topk + int(lane)] = mine_real ? (mine / (total + 1e-20f)) * a.scale : 0.0f;
   }
 }
