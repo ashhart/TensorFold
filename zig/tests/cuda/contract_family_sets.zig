@@ -1,4 +1,4 @@
-//! The contract's family sets: Nemotron's pocket, MiniMax-M3's, MOSS-Image's, GB10's grouped affine-4, Flash Next's, dense EXL3.
+//! The contract's family sets: Nemotron's pocket, MiniMax-M3, MOSS-Image, GB10's grouped affine-4, Flash Next, EXL3.
 const std = @import("std");
 const cuda = @import("cuda");
 const check = @import("check.zig");
@@ -37,7 +37,15 @@ pub const Sets = struct {
             gpu.gpa.destroy(exl3);
         }
         try exl3.add(gpu, s, list);
-        return .{ .gpa = gpu.gpa, .pocket = pocket, .minimax = minimax, .moss = moss, .grouped = grouped, .flashnext = flashnext, .exl3 = exl3 };
+        return .{
+            .gpa = gpu.gpa,
+            .pocket = pocket,
+            .minimax = minimax,
+            .moss = moss,
+            .grouped = grouped,
+            .flashnext = flashnext,
+            .exl3 = exl3,
+        };
     }
 
     pub fn deinit(sets: Sets) void {
