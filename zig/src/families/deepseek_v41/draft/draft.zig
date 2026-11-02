@@ -47,6 +47,7 @@ test {
     _ = @import("drive_test.zig");
     _ = @import("lanes_test.zig");
     _ = @import("lanes_grammar_test.zig");
+    _ = @import("lanes_first_test.zig");
     _ = @import("golden_test.zig");
     _ = spec;
     _ = @import("spec_test.zig");
