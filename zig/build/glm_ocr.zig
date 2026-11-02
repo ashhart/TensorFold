@@ -24,3 +24,24 @@ pub fn hostTests(b: *std.Build, all: *std.Build.Step) void {
         b.step(name, "GLM-OCR metadata, tensor geometry and image preparation without a GPU").dependOn(&run.step);
     }
 }
+
+pub fn hipTests(b: *std.Build, hip: *std.Build.Module, all: *std.Build.Step) void {
+    const family = b.createModule(.{
+        .root_source_file = b.path("zig/src/families/glm_ocr/hip.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "hip", .module = hip }, .{ .name = "core", .module = hip.import_table.get("core").? } },
+    });
+    const weight_tests = b.addRunArtifact(b.addTest(.{ .root_module = family, .filters = &.{"GLM-OCR HIP weights:"} }));
+    all.dependOn(&weight_tests.step);
+    b.step("test-glm-ocr-hip-host", "GLM-OCR HIP ownership and preallocation refusal without GPU execution").dependOn(&weight_tests.step);
+    const upload = b.addTest(.{ .name = "tf-glm-ocr-weights-test", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/hip/glm_ocr_weights_test.zig"),
+        .target = b.graph.host,
+        .optimize = .safe,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "hip", .module = hip }, .{ .name = "glm_ocr", .module = family } },
+    }), .filters = &.{"GLM-OCR HIP device weights:"} });
+    b.step("build-glm-ocr-weights-test", "Build real GLM-OCR upload checks; execution requires the device lease").dependOn(&b.addInstallArtifact(upload, .{}).step);
+}
