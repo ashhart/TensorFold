@@ -1,9 +1,11 @@
-//! tf-hip-kernel-contract: HIP kernels through gates 1-4, the controls and gate 5; `limits DIR` audits code objects.
+//! tf-hip-kernel-contract: HIP kernels through gates 1-4, controls and gate 5; `image`: one family; `limits DIR`.
 const std = @import("std");
 const hip = @import("hip");
 const core = @import("core");
 const controls = @import("hip_controls");
 const gate5 = @import("contract_limits.zig");
+const families = @import("contract_families.zig");
+const select = @import("contract_select.zig");
 const rows_k = @import("contract_rows.zig");
 const wide_k = @import("contract_rms_wide.zig");
 const stream_k = @import("contract_stream.zig");
@@ -40,8 +42,10 @@ pub fn main(init: std.process.Init) !u8 {
     const a = init.gpa;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len == 1) return if (try run(a, init.io) > 0) 1 else 0;
+    const image_args = args.len == 3 or args.len == 4;
+    if (image_args and std.mem.eql(u8, args[1], "image")) return image(a, init.io, args[2], if (args.len == 4) args[3] else "full");
     if (args.len != 3 or !std.mem.eql(u8, args[1], "limits")) {
-        std.debug.print("usage: tf-hip-kernel-contract [limits DIR]\n", .{});
+        std.debug.print("usage: tf-hip-kernel-contract [image GROUP [smoke|full] | limits DIR]\n", .{});
         return 2;
     }
     const n = try gate5.objects(a, init.io, args[2]);
@@ -54,11 +58,64 @@ pub fn main(init: std.process.Init) !u8 {
     return 0;
 }
 
+/// `image GROUP [smoke|full]`: the entry's own gates 1-4, then gate 5 on its records; returns the exit status.
+fn image(a: std.mem.Allocator, io: std.Io, group_name: []const u8, profile_name: []const u8) !u8 {
+    const profile = std.meta.stringToEnum(families.Profile, profile_name) orelse {
+        std.debug.print("FAIL image {s}: the profile is smoke or full, not {s}\n", .{ group_name, profile_name });
+        return 2;
+    };
+    var bad: []const u8 = "";
+    const sel = select.resolve(a, &families.entries, &core.contract.hip_records.records, group_name, &bad) catch |err| {
+        const why = switch (err) {
+            error.OutOfMemory => return err,
+            error.UnknownGroup => "no kernel group has that name",
+            error.NoEntry => "the group has no entry in contract_families.zig",
+            error.MissingRecord => "the entry names a record that is not registered",
+            error.AmbiguousRecord => "the entry names a record that is registered more than once",
+            error.EmptySelection => "the entry selects no gate-5 record",
+        };
+        std.debug.print("FAIL image {s}: {s} ({s})\n", .{ group_name, why, bad });
+        if (err == error.UnknownGroup) {
+            std.debug.print("groups:", .{});
+            for (@typeInfo(hip.kernels.Group).@"enum".field_names) |name| std.debug.print(" {s}", .{name});
+            std.debug.print("\n", .{});
+        }
+        return 2;
+    };
+    defer a.free(sel.records);
+    var built: usize = hip.kernels.images[@backingInt(sel.entry.group)].len;
+    _ = &built; // runtime-known, so a stub build still compiles all that follows
+    if (built == 0) {
+        std.debug.print("FAIL image {s}: built without hipcc, so no gate is proven\n", .{group_name});
+        return 1;
+    }
+    var r = try hip.Runtime.open();
+    defer r.close();
+    var ctx = try hip.Context.init(&r, 0);
+    defer ctx.deinit();
+    var arch_buffer: [256]u8 = undefined;
+    const arch = try hip.Device.archName(&r, 0, &arch_buffer);
+    if (!std.mem.eql(u8, arch, hip.kernels.arch)) {
+        const say = "FAIL image {s}: this GPU is {s}, the kernels are built for {s}\n";
+        std.debug.print(say, .{ group_name, arch, hip.kernels.arch });
+        return 1;
+    }
+    const t0 = ms(io);
+    const t = try sel.entry.run(a, io, profile);
+    const t1 = ms(io);
+    const lim = try gate5.tableOf(a, sel.records) + try gate5.liveOf(a, &r, ctx, arch, sel.records);
+    const t2 = ms(io);
+    const tally = .{ t.kernels, t.passed, t.failed, t.known, t.controls, t.caught, t.missed, lim, t1 - t0, t2 - t1 };
+    std.debug.print("SUMMARY {s} HIP {t}: {d} kernels: {d} pass gates 1-4, {d} fail, {d} known findings; {d} controls: " ++
+        "{d} red as planted, {d} missed; {d} limit problems; gates {d} ms, limits {d} ms\n", .{ group_name, profile } ++ tally);
+    return select.verdict(t, lim);
+}
+
 fn ms(io: std.Io) i96 {
     return @divTrunc(std.Io.Clock.awake.now(io).toNanoseconds(), std.time.ns_per_ms);
 }
 
-/// Gates 1-4 on every registered HIP kernel and each control at its own gate, then gate 5; returns the problems.
+/// Gates 1-4 on every registered HIP kernel, each control and every family entry, then gate 5; returns the problems.
 fn run(a: std.mem.Allocator, io: std.Io) !usize {
     var built: [2]usize = .{ hip.kernels.images[0].len, controls.bytes.len };
     _ = &built; // runtime-known, so a stub build still compiles all that follows
@@ -233,6 +290,7 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     for (&norms) |*op| try kernels.append(a, op.kernel());
     const t0 = ms(io);
     try g.runAll(a, kernels.items, 0x6b63, &t);
+    t = select.merge(t, try select.runEntries(a, io, &families.entries, .full)); // each family's own gates 1-4
     const t1 = ms(io);
     const lim = try gate5.table(a) + try gate5.live(a, &r, ctx, arch);
     const t2 = ms(io);

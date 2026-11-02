@@ -42,6 +42,7 @@ test {
     _ = hsaco;
     _ = hip_records;
     _ = @import("contract/hip_records_qwen3.zig");
+    _ = @import("contract/hip_records_families.zig");
     _ = @import("contract/fakes.zig");
 }
 
