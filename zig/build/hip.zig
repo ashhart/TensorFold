@@ -197,7 +197,7 @@ fn checksExe(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     }) });
 }
 
-const Engine = struct {
+pub const Engine = struct {
     hip: *std.Build.Module,
     lanes: *std.Build.Module,
     api: *std.Build.Module,
@@ -209,7 +209,7 @@ const Engine = struct {
 };
 
 /// The HIP backend, the Qwen3.5 family over it and the native engines, on `kernels` (a stub on the host).
-fn engineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, kernels: *std.Build.Module, hip_include: ?[]const u8) Engine {
+pub fn engineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, kernels: *std.Build.Module, hip_include: ?[]const u8) Engine {
     const core = coreModule(b, target);
     const hip = b.createModule(.{ .root_source_file = b.path("zig/src/hip/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
     hip.addImport("core", core);
@@ -298,7 +298,7 @@ fn engineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
 }
 
 /// The server over the HIP engines, as the CUDA build makes it: the HTTP side keeps its safety checks.
-fn server(b: *std.Build, target: std.Build.ResolvedTarget, e: Engine, build_options: *std.Build.Step.Options) *std.Build.Step.Compile {
+pub fn server(b: *std.Build, target: std.Build.ResolvedTarget, e: Engine, build_options: *std.Build.Step.Options) *std.Build.Step.Compile {
     const api = e.api;
     const engines = e.native;
     const tokenizer = e.hip.import_table.get("core").?.import_table.get("tokenizer").?;
@@ -341,7 +341,7 @@ const flags = [_][]const u8{ "-D__HIP_PLATFORM_AMD__=1", "-DUSE_ROCM=1", "-DHIPB
 const stub = "pub const arch = \"\";\npub const images: [11][]align(8) const u8 = @splat(&.{});\n";
 
 /// One code object a group for `arch`, built with the caps table's instruction switches, as the `hip_kernels` module.
-fn kernelObjects(b: *std.Build, hipcc: []const u8, hipcc_resolved: []const u8, device_lib: ?[]const u8, relax_branches: bool, arch: []const u8) *std.Build.Module {
+pub fn kernelObjects(b: *std.Build, hipcc: []const u8, hipcc_resolved: []const u8, device_lib: ?[]const u8, relax_branches: bool, arch: []const u8) *std.Build.Module {
     const files = objectFiles(b, .{ .name = hipcc, .resolved = hipcc_resolved, .device_lib = device_lib, .relax_branches = relax_branches }, arch);
     var decls: []const u8 = "";
     var refs: []const u8 = "";

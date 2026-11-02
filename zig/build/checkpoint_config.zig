@@ -2,9 +2,13 @@
 
 const std = @import("std");
 
+/// `test-checkpoint-config`: the development build registers it right before `wire`, which then walks it too.
+pub fn tests(b: *std.Build) void {
+    const t = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/core/checkpoint_config.zig"), .target = b.graph.host, .link_libc = true }) });
+    b.step("test-checkpoint-config", "Shared config byte-boundary tests").dependOn(&b.addRunArtifact(t).step);
+}
+
 pub fn wire(b: *std.Build) void {
-    const tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/core/checkpoint_config.zig"), .target = b.graph.host, .link_libc = true }) });
-    b.step("test-checkpoint-config", "Shared config byte-boundary tests").dependOn(&b.addRunArtifact(tests).step);
     var seen_steps: std.AutoHashMapUnmanaged(*std.Build.Step, void) = .empty;
     var seen_mods: std.AutoHashMapUnmanaged(*std.Build.Module, void) = .empty;
     var per_target: std.StringHashMapUnmanaged(*std.Build.Module) = .empty;
