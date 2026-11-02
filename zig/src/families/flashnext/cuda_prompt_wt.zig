@@ -189,8 +189,8 @@ pub const Store = struct {
     /// Borrowers expire here; their shards stay open, pages dropped, until the load ends (or close if not kept).
     pub fn release(self: *Store) void {
         for (self.held.items) |h| {
-            // the borrowers' pages leave this process (their bytes are copied), so kept shards pin nothing
-            h.file.f.release();
+            // the borrowers' pages leave this process (their bytes are copied), except the n-gram table's (Shard.close)
+            if (!runtimePages(h.file.f.names.keys())) h.file.f.release();
             self.released.append(self.gpa, h) catch {
                 var kept = h.file;
                 kept.close();

@@ -182,13 +182,16 @@ pub fn loadMode(a: std.mem.Allocator, d: *const cuda.Driver, store: anytype, pre
     var gather = core.direct_gather.Gather.init(a, direct_readers);
     defer gather.deinit();
     var held: [core.direct_gather.max_sources]core.direct_gather.Source = undefined;
-    const sources = if (direct) try store.sources(&held) else held[0..0];
+    // a layer whose shards don't fit one gather reads through the mapping, as a file system without O_DIRECT does
+    const sources: ?[]core.direct_gather.Source = if (direct) store.sources(&held) catch |err| switch (err) {
+        error.TooManySources => null,
+    } else null;
     const ptrs = try a.alloc(*[]const u8, if (direct) 4 * view_count else 0);
     defer a.free(ptrs);
     if (direct) {
         // every global first (a 4-byte read each, joined where they sit together), checked as viewOf checks them
         for (views, 0..) |*v, j| ptrs[j] = &v.global_bytes;
-        try gather.read(sources, ptrs[0..view_count]);
+        if (sources) |s| try gather.read(s, ptrs[0..view_count]);
         for (views) |*v| try globalOf(v);
     }
     var up = try cuda.DeviceBuffer.alloc(d, up_total);
@@ -201,7 +204,7 @@ pub fn loadMode(a: std.mem.Allocator, d: *const cuda.Driver, store: anytype, pre
     var lo: usize = 0;
     while (lo < count) : (lo += chunk) {
         const m = @min(chunk, count - lo);
-        if (direct) {
+        if (sources) |s| {
             const part = views[3 * lo ..][0 .. 3 * m];
             for (part, 0..) |*v, j| {
                 ptrs[4 * j] = &v.codes;
@@ -209,7 +212,7 @@ pub fn loadMode(a: std.mem.Allocator, d: *const cuda.Driver, store: anytype, pre
                 ptrs[4 * j + 2] = &v.fixed;
                 ptrs[4 * j + 3] = &v.exceptions;
             }
-            try gather.read(sources, ptrs[0 .. 4 * part.len]);
+            try gather.read(s, ptrs[0 .. 4 * part.len]);
         }
         const up_words = std.mem.bytesAsSlice(u32, stage[0 .. m * up_bytes]);
         const down_words: []u32 = @alignCast(std.mem.bytesAsSlice(u32, stage[m * up_bytes ..][0 .. m * down_bytes]));
@@ -217,6 +220,8 @@ pub fn loadMode(a: std.mem.Allocator, d: *const cuda.Driver, store: anytype, pre
         // synchronous from pinned memory, as cuda_pocket.zig's staged: done before return, so the next chunk may refill
         try d.check(d.api.cuMemcpyHtoD_v2(try up.at(lo * up_bytes), stage.ptr, m * up_bytes), "cuMemcpyHtoD pinned experts");
         try d.check(d.api.cuMemcpyHtoD_v2(try down.at(lo * down_bytes), stage.ptr + m * up_bytes, m * down_bytes), "cuMemcpyHtoD pinned experts");
+        // the next chunk's gather reuses these views' memory: only their globals are read after this
+        for (views[3 * lo ..][0 .. 3 * m]) |*v| v.* = .{ .codes = &.{}, .global = v.global };
     }
     const up_globals = try a.alloc(f32, 2 * count);
     defer a.free(up_globals);
