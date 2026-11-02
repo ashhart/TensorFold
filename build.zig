@@ -90,6 +90,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Unit tests (macOS includes available Metal device checks)");
     @import("zig/build/gguf_host.zig").steps(b, test_step);
     @import("zig/build/glm_ocr.zig").hostTests(b, test_step);
+    @import("zig/build/dots_mocr.zig").hostTests(b, test_step);
     @import("zig/build/qwen4.zig").steps(b, test_step);
     @import("zig/build/fsr.zig").steps(b, test_step);
     @import("zig/build/kernel_symbols.zig").tests(b, test_step);
