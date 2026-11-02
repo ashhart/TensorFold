@@ -28,6 +28,8 @@ pub const counting = @import("launches/util.zig").counting;
 pub const raw = @import("raw.zig");
 pub const ops = @import("ops/ops.zig");
 pub const blas = @import("blas.zig");
+pub const convolution = @import("convolution.zig");
+pub const attention_aotriton = @import("attention_aotriton.zig");
 pub const plan_ops = @import("ops/plan.zig");
 pub const policy = @import("policy.zig");
 pub const Policy = policy.Policy;
@@ -54,6 +56,8 @@ pub const loopback = @import("comm/loopback.zig");
 
 test {
     _ = blas;
+    _ = convolution;
+    _ = attention_aotriton;
     _ = policy;
     _ = admission;
     _ = Device;
