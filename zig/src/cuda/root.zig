@@ -176,3 +176,8 @@ test {
     _ = @import("graph_instantiate_failure_test.zig");
 }
 pub const qwen35_bf16_rows = @import("qwen35_bf16_rows.zig");
+
+pub const gdn_chain = @import("gdn_chain.zig");
+test {
+    _ = @import("gdn_chain_host_test.zig");
+}

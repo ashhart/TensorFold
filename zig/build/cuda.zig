@@ -216,6 +216,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const mods = family(b, host, .ReleaseSafe, cuda, draft_ids);
     const mods = family(b, host, .debug, cuda, draft_ids);
     @import("prompt_bf16_host.zig").tests(b, step, cuda, runtime(b, host, .fast, &.{}), mods.core);
+    @import("gdn_chain_host.zig").tests(b, step, cuda, runtime(b, host, .fast, &.{}), mods.core);
     @import("cuda_checkpoint_cache_host.zig").steps(b, step);
     b.step("test-lfm2-load-host", "LFM2 decision model metadata and load ownership without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = lfm2Module(b, host, .debug, cuda, mods.core) })).step);
     const omni_slide = b.addRunArtifact(b.addTest(.{ .root_module = mods.nemotron, .filters = &.{"Omni learner:"} }));

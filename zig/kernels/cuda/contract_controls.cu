@@ -542,3 +542,6 @@ extern "C" __global__ void __launch_bounds__(64) tf_ctl_ple_rows(const __nv_bflo
                                                                  int drop) {
     tf_ple::rows(p, t, w, out, parts, scale, token, mix, eps, drop);
 }
+
+#define TF_GDN_CHAIN_CONTROLS
+#include "gdn_prefill.cu"
