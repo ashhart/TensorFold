@@ -74,7 +74,8 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         .ok => |v| v,
         .err => |message| return refuse(conn, a, 400, message),
     };
-    const text = body.strField("text") orelse return refuse(conn, a, 400, "text is required");
+    const text = @import("slide_input.zig").read(body) catch |e|
+        return refuse(conn, a, 400, @import("slide_input.zig").message(e));
     const source = body.strField("source") orelse "chat";
     const supplied = supplied_questions.read(a, body) catch |e| switch (e) {
         error.OutOfMemory => return,
@@ -464,7 +465,7 @@ pub fn runReported(srv: *Server, a: Allocator, request: *const api.LearnRequest,
                     if (out) |o| o.progress(id, p);
                 },
                 .done => if (c.text.len > 0) {
-                    outcome = .{ .failed = a.dupe(u8, c.text) catch "the learner failed" };
+                    outcome = .{ .failed = a.dupe(u8, lessonWords(c.text)) catch "the learner failed" };
                 },
             }
             srv.gpa.free(c.text);
@@ -484,6 +485,14 @@ pub const unplaced = "a delete could not be put back on the device, so replies a
 pub fn engineWords(message: []const u8) []const u8 {
     if (std.mem.eql(u8, message, "LayerRoundsAgain")) return rounds_again;
     return if (std.mem.eql(u8, message, "PutBackNotOnDevice")) unplaced else message;
+}
+
+/// A lesson failure in words, without the delete path's put-back claims.
+pub fn lessonWords(message: []const u8) []const u8 {
+    return if (std.mem.eql(u8, message, "LayerRoundsAgain"))
+        "a fitted layer would change its 4-bit values when saved, so this lesson could not be accepted"
+    else
+        message;
 }
 
 /// What a delete says when a layer it touched would move again at the save: it was put back, and nothing written.
