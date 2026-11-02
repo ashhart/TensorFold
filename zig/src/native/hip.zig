@@ -10,12 +10,13 @@ const nemotron = @import("nemotron");
 const serve = @import("hip_serve");
 const glm_ocr = @import("glm_ocr");
 const qwen3 = @import("qwen3");
+const dots = @import("dots_mocr");
 const Allocator = std.mem.Allocator;
 const admission = hip.admission;
 const modelContext = admission.modelContext;
 
 /// The HIP families: namespaces with `model_type`, `formats`, `default_context`, `prefill_step`, `open` and `follow`.
-const registry = .{ qwen35.native, qwen35.native_moe, flashnext.native, nemotron.native, glm_ocr.native, qwen3.native };
+const registry = .{ qwen35.native, qwen35.native_moe, flashnext.native, nemotron.native, glm_ocr.native, qwen3.native, dots.native };
 
 pub const backends: []const []const u8 = &.{"hip"};
 /// No per-thread alternate signal stack: its thread-local leaves RCCL's and HIP's threads too little stack to start.
@@ -209,6 +210,7 @@ fn reasoning(comptime F: type) bool {
 fn flagRefused(comptime F: type, o: api.Open) ?[]const u8 {
     if (o.tp != 1 and @hasDecl(F, "tp_refusal")) return F.tp_refusal;
     if (o.mtp_drafts) |n| if (n > 0 and @hasDecl(F, "mtp_refusal")) return F.mtp_refusal;
+    if (@hasDecl(F, "refusal")) if (F.refusal(o)) |why| return why;
     if (o.rope_yarn != null) return "--rope-yarn: the native HIP engine has no YaRN rope; serve without --rope-yarn, or on CUDA";
     if (o.slide and @hasDecl(F, "slide_refusal")) return F.slide_refusal;
     if (o.mtp_confidence != null and @hasDecl(F, "confidence_refusal")) return F.confidence_refusal;
@@ -295,7 +297,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     };
     var served = false;
     defer if (!served) r.deinit(gpa);
-    const loaded = F.open(a, gpa, io, r.dev, o.dir, r.options, problem) catch |err| switch (err) {
+    const result = if (@hasDecl(F, "openVision")) F.openVision(a, gpa, io, r.dev, o.dir, r.options, o.vision, problem) else F.open(a, gpa, io, r.dev, o.dir, r.options, problem);
+    const loaded = result catch |err| switch (err) {
         error.Refused => return null,
         else => |x| return x,
     };
@@ -320,6 +323,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         h.host.info_.prompt_cache = loaded.cache != null;
         h.host.info_.prompt_cache_capacity = loaded.cache_capacity;
     }
+    if (@hasDecl(F, "attach")) F.attach(h.family, &h.host, o);
     try h.host.start();
     served = true;
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
@@ -392,6 +396,7 @@ test "every registered family is listed for capabilities" {
     try std.testing.expectEqualStrings("nemotron_h", families[3].model_type);
     try std.testing.expectEqualStrings("glm_ocr", families[4].model_type);
     try std.testing.expectEqualStrings("qwen3", families[5].model_type);
+    try std.testing.expectEqualStrings("dots_ocr", families[6].model_type);
 }
 
 test "GLM-OCR native flags: MTP and tensor ranks refuse before readiness; copy drafts remain" {
@@ -421,6 +426,29 @@ test "a one-GPU family refuses --tp before the group forms; the others are not r
     try std.testing.expect(flagRefused(nemotron.native, .{ .dir = "d", .model_type = "nemotron_h", .tp = 2 }) == null);
     try std.testing.expectEqualStrings(qwen3.native.tp_refusal, flagRefused(qwen3.native, .{ .dir = "d", .model_type = "qwen3", .tp = 2, .rank = 1 }).?);
     try std.testing.expect(!reasoning(qwen3.native));
+}
+
+test "dots refuses unsupported group and head options before opening a device" {
+    const base: api.Open = .{ .dir = "d", .model_type = "dots_ocr" };
+    try std.testing.expect(flagRefused(dots.native, base) == null);
+    var o = base;
+    o.tp = 2;
+    try std.testing.expect(std.mem.indexOf(u8, flagRefused(dots.native, o).?, "--tp 1") != null);
+    o = base;
+    o.mtp_drafts = 1;
+    try std.testing.expect(std.mem.indexOf(u8, flagRefused(dots.native, o).?, "no MTP head") != null);
+    o.mtp_drafts = 0;
+    try std.testing.expect(flagRefused(dots.native, o) == null);
+    o = base;
+    o.lanes = 129;
+    o.lanes_fixed = true;
+    try std.testing.expect(flagRefused(dots.native, o) != null);
+    try std.testing.expect(dots.native.policyRefusal(.{}) == null);
+    try std.testing.expect(dots.native.policyRefusal(.{ .graphs = .off }) == null);
+    try std.testing.expect(dots.native.policyRefusal(.{ .attention = .f32 }) != null);
+    try std.testing.expect(dots.native.policyRefusal(.{ .graphs = .on }) != null);
+    try std.testing.expect(dots.native.policyRefusal(.{ .kernels = .reference }) != null);
+    try std.testing.expect(dots.native.policyRefusal(.{ .prefill_step = 64 }) != null);
 }
 
 test "a family that names a --slide or --mtp-confidence refusal is refused before it loads; the others are not" {

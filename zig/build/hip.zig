@@ -143,6 +143,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     b.step("test-hip-family-offers-host", "HIP optional native family metadata without device execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native, .filters = &.{"HIP optional family offers:"} })).step);
     b.step("test-hip-native-options-host", "Shared HIP native open settings without device execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.serve, .filters = &.{"HIP native options:"} })).step);
     @import("dots_mocr.zig").hipTests(b, host.hip, test_step);
+    b.step("test-dots-native-host", "dots.mocr registry, reasoning, and unsupported flags without GPU execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native, .filters = &.{ "dots refuses", "every registered family", "a HIP family declares replies without reasoning" } })).step);
     b.step("test-draft-hip-host", "HIP draft source metadata without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native, .filters = &.{"draft sources:"} })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.hip })).step);
     const family_host = b.addRunArtifact(b.addTest(.{ .root_module = host.family }));
@@ -205,6 +206,14 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         "Nemotron-H load and skeleton checks on the GPU (-Dhip-arch)",
     ).dependOn(&b.addInstallArtifact(nem_test, .{}).step);
     @import("dots_mocr.zig").modelChecks(b, gpu.hip);
+    const dots_owner = b.addTest(.{ .name = "tf-dots-hip-owner-test", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/hip/dots_owner_test.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "hip", .module = gpu.hip }, .{ .name = "dots_mocr", .module = gpu.native.import_table.get("dots_mocr").? } },
+    }), .filters = &.{"dots HIP device owner:"} });
+    b.step("build-dots-hip-owner-test", "Build real owner close and failure cleanup checks without GPU execution").dependOn(&b.addInstallArtifact(dots_owner, .{}).step);
     const native = server(b, target, gpu, build_options);
     b.step("native-hip", "tensorfold-native with the HIP engines into zig-out/native-hip/bin (-Dhip-arch)").dependOn(&b.addInstallArtifact(native, .{ .dest_dir = .{ .override = .{ .custom = "native-hip/bin" } } }).step);
     @import("hip_contract.zig").steps(b, .{
@@ -318,6 +327,10 @@ pub fn engineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: 
             .{ .name = "engine_api", .module = api },
         },
     });
+    const dots = @import("dots_mocr.zig").hipModule(b, hip);
+    dots.addImport("lanes", lanes);
+    dots.addImport("engine_api", api);
+    dots.addImport("hip_serve", serve);
     const native = b.createModule(.{
         .root_source_file = b.path("zig/src/native/hip.zig"),
         .target = target,
@@ -333,6 +346,7 @@ pub fn engineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: 
             .{ .name = "glm_ocr", .module = glm_ocr },
             .{ .name = "hip_serve", .module = serve },
             .{ .name = "qwen3", .module = qwen3 },
+            .{ .name = "dots_mocr", .module = dots },
         },
     });
     return .{

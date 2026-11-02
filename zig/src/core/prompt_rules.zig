@@ -18,6 +18,8 @@ pub const Rules = struct {
     chunk_marks: bool = true,
     /// Background reply passes kept at their end: .on drops a history mark near the resume point, .waits keeps it.
     warm: enum { off, on, waits } = .off,
+    /// A warm pass keeps its end only where `usable` resumes it; its marks still keep (false: any end, as before).
+    warm_usable: bool = false,
     /// A paged store (prompt_radix.zig): the tokens a page holds, where its marks and resumes sit (0: not paged).
     page: u32 = 0,
     /// A paged store also keeps the prompt's last whole page, for a later turn whose history the request did not name.
