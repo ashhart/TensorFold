@@ -46,23 +46,92 @@ pub fn weightBytes(io: std.Io, dir: []const u8) u64 {
     return total;
 }
 
-/// What a plan may take on `ctx`'s GPU, as the native backends count it: free (host's if integrated), reserve, cap.
+/// What a plan may take on `ctx`'s GPU: free (the host's when integrated without a carve-out), reserve, cap.
 pub fn budget(gpa: Allocator, io: std.Io, ctx: Context) !Pool {
     const unified = (try ctx.attribute(.integrated)) != 0;
     const card = try ctx.memInfo();
     const text = if (unified) procText(gpa, io, "/proc/meminfo") else null;
     defer if (text) |t| gpa.free(t);
+    const vram = if (unified) vramBytes(gpa, io, ctx) else null;
     const own: MemInfo = .{ .total = card.total, .available = card.free };
-    const host = counts(unified, own, text) catch return error.HostMemoryUnavailable;
-    const c = carved(unified, own, host);
-    const reserve = reserveBytes(getenv("TENSORFOLD_MEMORY_RESERVE_GIB"), c.total, unified) catch return error.BadReserve;
-    const limit = limitBytes(getenv("TENSORFOLD_HIP_MEMORY_LIMIT_GB")) catch return error.BadLimit;
-    return .{ .free = c.available, .total = c.total, .reserve = reserve, .limit = limit, .unified = unified };
+    const env: Env = .{
+        .reserve = getenv("TENSORFOLD_MEMORY_RESERVE_GIB"),
+        .limit = getenv("TENSORFOLD_HIP_MEMORY_LIMIT_GB"),
+    };
+    const p = try plan(unified, own, text, vram, env);
+    announce(p);
+    return p.pool;
 }
 
-/// The integrated GPU's count: its own when a firmware carve-out gives it more than the host's /proc/meminfo total.
-pub fn carved(unified: bool, card: MemInfo, host: MemInfo) MemInfo {
-    return if (unified and card.total > host.total) card else host;
+/// Where a budget's count comes from: a discrete card, an integrated GPU's firmware carve-out, or the host's pages.
+pub const Source = enum { card, carve_out, host };
+
+/// The reserve and cap variables' text, unset as null.
+pub const Env = struct { reserve: ?[]const u8 = null, limit: ?[]const u8 = null };
+
+pub const Plan = struct { pool: Pool, source: Source };
+
+pub const PlanError = error{ HostMemoryUnavailable, BadReserve, BadLimit };
+
+/// The pool from the card's count, /proc/meminfo's text and the device's dedicated VRAM (sysfs), without I/O.
+pub fn plan(unified: bool, card: MemInfo, text: ?[]const u8, vram: ?u64, env: Env) PlanError!Plan {
+    const source = sourceOf(unified, card, vram);
+    const c = if (source == .host) counts(true, card, text) catch return error.HostMemoryUnavailable else card;
+    const shared = source == .host;
+    const reserve = reserveBytes(env.reserve, c.total, shared) catch return error.BadReserve;
+    const limit = limitBytes(env.limit) catch return error.BadLimit;
+    const pool: Pool = .{
+        .free = c.available,
+        .total = c.total,
+        .reserve = reserve,
+        .limit = limit,
+        .unified = shared,
+    };
+    return .{ .pool = pool, .source = source };
+}
+
+/// An integrated GPU counts its own memory only when the card's total fits in the firmware's dedicated VRAM.
+pub fn sourceOf(unified: bool, card: MemInfo, vram: ?u64) Source {
+    if (!unified) return .card;
+    const v = vram orelse return .host;
+    return if (v > 0 and card.total <= v) .carve_out else .host;
+}
+
+/// The device's dedicated VRAM from sysfs (mem_info_vram_total under its PCI address), null when unreadable.
+fn vramBytes(gpa: Allocator, io: std.Io, ctx: Context) ?u64 {
+    const domain = ctx.attribute(.pci_domain_id) catch return null;
+    const bus = ctx.attribute(.pci_bus_id) catch return null;
+    const dev = ctx.attribute(.pci_device_id) catch return null;
+    var buf: [96]u8 = undefined;
+    const path = vramPath(&buf, domain, bus, dev) catch return null;
+    const text = procText(gpa, io, path) orelse return null;
+    defer gpa.free(text);
+    return std.fmt.parseInt(u64, std.mem.trim(u8, text, " \n"), 10) catch null;
+}
+
+/// sysfs's dedicated-VRAM file for the GPU at PCI domain:bus:device, function 0.
+pub fn vramPath(buf: []u8, domain: c_int, bus: c_int, dev: c_int) ![]const u8 {
+    if (domain < 0 or bus < 0 or dev < 0) return error.Invalid;
+    const fmt = "/sys/bus/pci/devices/{x:0>4}:{x:0>2}:{x:0>2}.0/mem_info_vram_total";
+    const at = .{ @as(u32, @intCast(domain)), @as(u32, @intCast(bus)), @as(u32, @intCast(dev)) };
+    return std.fmt.bufPrint(buf, fmt, at);
+}
+
+var announced = std.atomic.Value(bool).init(false);
+
+/// Logs once per process which count the budget uses, so a GTT-backed or carve-out pool is visible at start-up.
+fn announce(p: Plan) void {
+    if (announced.swap(true, .monotonic)) return;
+    const g = @as(f64, 1 << 30);
+    const what = switch (p.source) {
+        .card => "the card's memory",
+        .carve_out => "the card's memory (firmware VRAM carve-out)",
+        .host => "the host's /proc/meminfo (integrated, shared memory)",
+    };
+    const f = @as(f64, @floatFromInt(p.pool.free)) / g;
+    const t = @as(f64, @floatFromInt(p.pool.total)) / g;
+    const r = @as(f64, @floatFromInt(p.pool.reserve)) / g;
+    std.log.info("HIP memory budget from {s}: {d:.1} of {d:.1} GiB free, {d:.1} GiB reserve", .{ what, f, t, r });
 }
 
 fn getenv(name: [:0]const u8) ?[]const u8 {
@@ -88,12 +157,36 @@ test "context windows: the family default inside the model's, 0 for the model's,
     try std.testing.expectError(error.NoNative, contextWindow(0, 0, 16384));
 }
 
-test "an integrated GPU counts its carve-out when the card holds more than the host, else the host's pages" {
+test "a budget counts an integrated GPU's own memory only when it fits the firmware's dedicated VRAM" {
     const g: u64 = 1 << 30;
-    const card: MemInfo = .{ .total = 96 * g, .available = 95 * g };
-    const host: MemInfo = .{ .total = 31 * g, .available = 25 * g };
-    try std.testing.expectEqual(card, carved(true, card, host));
-    const shared: MemInfo = .{ .total = 120 * g, .available = 118 * g };
-    const pages: MemInfo = .{ .total = 122 * g, .available = 110 * g };
-    try std.testing.expectEqual(pages, carved(true, shared, pages));
+    const pages = "MemTotal: 32505856 kB\nMemAvailable: 26214400 kB\n"; // 31 GiB, 25 GiB available
+    const carve = try plan(true, .{ .total = 96 * g, .available = 95 * g }, pages, 96 * g, .{});
+    try std.testing.expectEqual(Source.carve_out, carve.source);
+    try std.testing.expectEqual(@as(u64, 95 * g), carve.pool.free);
+    try std.testing.expectEqual(@as(u64, 3 * g), carve.pool.reserve); // a discrete card's share, not unified memory's
+    try std.testing.expect(!carve.pool.unified);
+    const big = "MemTotal: 127926272 kB\nMemAvailable: 115343360 kB\n"; // 122 GiB, 110 GiB available
+    // a GTT pool past MemTotal beside a small carve-out
+    const gtt = try plan(true, .{ .total = 128 * g, .available = 127 * g }, big, g / 2, .{});
+    try std.testing.expectEqual(Source.host, gtt.source);
+    try std.testing.expectEqual(@as(u64, 110 * g), gtt.pool.free);
+    try std.testing.expect(gtt.pool.unified);
+    const mid = "MemTotal: 98566144 kB\nMemAvailable: 94371840 kB\n"; // 94 GiB, 90 GiB available
+    const medium = try plan(true, .{ .total = 32 * g, .available = 31 * g }, mid, 32 * g, .{}); // a 32 GiB carve-out
+    try std.testing.expectEqual(Source.carve_out, medium.source);
+    try std.testing.expectEqual(@as(u64, 31 * g), medium.pool.free);
+    const unread = try plan(true, .{ .total = 96 * g, .available = 95 * g }, pages, null, .{});
+    try std.testing.expectEqual(Source.host, unread.source); // no sysfs reading: the host's pages
+    const discrete = try plan(false, .{ .total = 48 * g, .available = 47 * g }, null, null, .{ .reserve = "3" });
+    try std.testing.expectEqual(Source.card, discrete.source);
+    try std.testing.expectEqual(@as(u64, 3 * g), discrete.pool.reserve);
+    const blind = plan(true, .{ .total = 8 * g, .available = 8 * g }, null, null, .{});
+    try std.testing.expectError(error.HostMemoryUnavailable, blind);
+}
+
+test "sysfs's dedicated-VRAM path names the GPU's PCI address" {
+    var buf: [96]u8 = undefined;
+    const want = "/sys/bus/pci/devices/0000:c3:00.0/mem_info_vram_total";
+    try std.testing.expectEqualStrings(want, try vramPath(&buf, 0, 0xc3, 0));
+    try std.testing.expectError(error.Invalid, vramPath(&buf, 0, -1, 0));
 }
