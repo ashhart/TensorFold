@@ -26,6 +26,9 @@
             const uint8_t* src = reinterpret_cast<const uint8_t*>(item % 4 < 2 ? kc : vc);
             const float* sc = item % 4 < 2 ? ks : vs;
             const int key0 = (item / 4) * BN + (item % 2) * HALF;
+            // HM with PT: the item's first page looked up once, as stage does
+            const int lo = HM && PT ? min(key0 + skip, limit - 1 + skip) / PTOK * PTOK : 0;
+            const int64_t first = HM && PT ? (int64_t)PT[lo / PTOK] * PS : 0;
 #pragma unroll
             for (int j = 0; j < PER; ++j) {
                 const int i = threadIdx.x + j * THREADS, key = key0 + i / C;
@@ -34,7 +37,8 @@
                 if (i < HALF * C && key < limit) {
                     if constexpr (HPAGED) {
                         const int row = key + (key < p0 ? 0 : skip);
-                        const int64_t r = row_of(row), pg = page_of(row);
+                        const bool near = HM && PT && row >= lo && row - lo < PTOK;
+                        const int64_t r = near ? (int64_t)hk * PTOK + (row - lo) : row_of(row), pg = near ? first : page_of(row);
                         pre[j] = __ldg(reinterpret_cast<const uint2*>(src + pg + r * D + (i % C) * 8));
                         pre_s[j] = __ldg(reinterpret_cast<const float*>(reinterpret_cast<const uint8_t*>(sc) + pg) + r);
                     } else {
@@ -73,13 +77,19 @@
             const __nv_bfloat16* src = reinterpret_cast<const __nv_bfloat16*>(item % 4 < 2 ? kc : vc);
             const int key0 = (item / 4) * BN + (item % 2) * HALF;
             uint4* dst = slots + (item % NS) * HALF * CS;
+            // HM with PT: the item's first page looked up once; a row past it (PTOK % HALF != 0) finds its own
+            const int lo = HM && PT ? min(key0 + skip, limit - 1 + skip) / PTOK * PTOK : 0;
+            const int64_t first = HM && PT ? (int64_t)PT[lo / PTOK] * PS : 0;
             for (int i = threadIdx.x; i < HALF * NB; i += THREADS) {
                 const int key = key0 + i / NB, chunk = i % NB;
                 const bool in = key < limit && (NB == C || chunk < C);  // past the filled keys or the head dim: zeros
                 const int row = in ? key + (key < p0 ? 0 : skip) : 0;
                 if constexpr (HM) {
-                    if constexpr (HPAGED) cp16z(dst + sw<8 * CS>(i / NB, chunk), src + page_of(row) + row_of(row) * D + chunk * 8, in);
-                    else cp16z(dst + sw<8 * CS>(i / NB, chunk), src + row_of(row) * D + chunk * 8, in);
+                    if constexpr (HPAGED) {
+                        const bool near = PT && row >= lo && row - lo < PTOK;
+                        const int64_t at = near ? first + ((int64_t)hk * PTOK + (row - lo)) * D : page_of(row) + row_of(row) * D;
+                        cp16z(dst + sw<8 * CS>(i / NB, chunk), src + at + chunk * 8, in);
+                    } else cp16z(dst + sw<8 * CS>(i / NB, chunk), src + row_of(row) * D + chunk * 8, in);
                 } else {
                     // a page's rows are contiguous: PT names each 512-row page, PS elements apart (null PT: one run)
                     const int64_t at = PT ? (int64_t)PT[row / 512] * PS + (int64_t)(row % 512) * HK * D : (int64_t)row * HK * D;
