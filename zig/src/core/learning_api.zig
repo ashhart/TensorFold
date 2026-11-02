@@ -14,6 +14,7 @@ pub const LearnRequest = struct {
     reroute: bool = false, // the last lesson's router fitted again with `unasked` among what it must not take
     drop: bool = false, // the last lesson taken out whole
     save: bool = false, // every kept lesson written beside the model's shards, each with its router
+    shrink: enum { none, next, keep, restore } = .none, // one trial removal, resolved by the server's checks
     retire: []const Neuron = &.{}, // instead zero these neurons of facts a newer fact replaces
     unretire: bool = false, // instead put back the neurons the last retire zeroed (the newer fact was not learned)
     // instead zero these neurons' input weights (a fact deleted on request), kept to put back
@@ -34,7 +35,7 @@ pub const LearnProgress = struct { phase: LearnPhase, at: u32 = 0, of: u32 = 0, 
 
 /// A lesson's outcome in order, ending with `done` (a message says why it failed); slices live only during the call.
 pub const LearnEvent = union(enum) {
-    learned: struct { recalled: bool, steps: u32, loss: f32, neurons: []const Neuron = &.{} }, // neurons: a pocket's
+    learned: struct { recalled: bool, steps: u32, loss: f32, neurons: []const Neuron = &.{}, candidate: bool = false }, // neurons: a pocket's
     progress: LearnProgress,
     done: struct { message: []const u8 = "" },
 };

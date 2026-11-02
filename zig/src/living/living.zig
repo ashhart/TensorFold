@@ -20,6 +20,7 @@ pub const lesson_route = @import("lesson_route.zig");
 pub const neuron = @import("neuron.zig");
 pub const affine = @import("affine.zig");
 pub const shards = @import("shards.zig");
+pub const pocket_locate = @import("pocket_locate.zig");
 pub const pocket = @import("pocket.zig");
 pub const pocket_clock = @import("pocket_clock.zig");
 pub const pocket_dump = @import("pocket_dump.zig");
@@ -72,3 +73,8 @@ test {
 }
 
 pub const restart_fixture = @import("restart_fixture.zig");
+
+test {
+    _ = @import("pocket_locate_test.zig");
+    _ = @import("pocket_shrink_test.zig");
+}

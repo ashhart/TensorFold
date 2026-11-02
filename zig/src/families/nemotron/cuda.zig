@@ -75,3 +75,7 @@ test {
 test {
     _ = @import("cuda_subset_host_test.zig");
 }
+
+test {
+    _ = @import("cuda_train_locate.zig");
+}

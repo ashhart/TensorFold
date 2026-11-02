@@ -185,6 +185,7 @@ test {
 
 test {
     _ = @import("slide_retention_test.zig");
+    _ = @import("slide_shrink_test.zig");
 }
 
 test {

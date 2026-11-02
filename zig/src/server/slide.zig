@@ -278,6 +278,10 @@ pub fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone
                 return out;
             };
             if (lost.len == 0) {
+                @import("slide_shrink.zig").run(srv, a, cx, plan, gone, id, o) catch |e| {
+                    out.why = words(cx, e);
+                    return out;
+                };
                 committed = true;
                 // a diagnostic: every kept lesson taken out again, to see the facts before it come back as they were
                 if (std.c.getenv("TF_SLIDE_TAKE_OUT_CHECK") != null) {
@@ -432,7 +436,7 @@ fn missed(srv: *Server, out: *Out, id: u32, why: []const u8) void {
 
 pub const Outcome = union(enum) {
     none,
-    learned: struct { recalled: bool, steps: u32 },
+    learned: struct { recalled: bool, steps: u32, candidate: bool = false },
     failed: []const u8,
     refused: api.LearnError,
 };
@@ -455,7 +459,7 @@ pub fn runReported(srv: *Server, a: Allocator, request: *const api.LearnRequest,
         for (batch.items) |c| {
             switch (c.kind) {
                 .learned => {
-                    outcome = .{ .learned = .{ .recalled = c.recalled, .steps = c.steps } };
+                    outcome = .{ .learned = .{ .recalled = c.recalled, .steps = c.steps, .candidate = c.candidate } };
                     if (id != 0) srv.slide.placed(id, c.neurons);
                 },
                 .progress => if (id != 0) {
@@ -534,7 +538,7 @@ const Box = struct {
     events: std.ArrayList(Copy) = .empty,
     done: bool = false,
 
-    const Copy = struct { kind: std.meta.Tag(api.LearnEvent), text: []const u8 = "", recalled: bool = false, steps: u32 = 0, progress: api.LearnProgress = .{ .phase = .reading }, neurons: []const api.Neuron = &.{} };
+    const Copy = struct { kind: std.meta.Tag(api.LearnEvent), text: []const u8 = "", recalled: bool = false, steps: u32 = 0, candidate: bool = false, progress: api.LearnProgress = .{ .phase = .reading }, neurons: []const api.Neuron = &.{} };
 
     fn sink(b: *Box) api.LearnSink {
         return .{ .ctx = b, .event = onEvent };
@@ -546,6 +550,7 @@ const Box = struct {
         switch (e.*) {
             .learned => |l| {
                 c.recalled = l.recalled;
+                c.candidate = l.candidate;
                 c.steps = l.steps;
                 c.neurons = b.gpa.dupe(api.Neuron, l.neurons) catch &.{};
             },
