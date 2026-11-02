@@ -649,7 +649,9 @@ tensorfold serve MODEL --prompt-cache-disk ./prompt-cache
 
 This is equivalent to `--learn-conversations --learn-dir DIR`; both legacy flags remain supported.
 `--learn-conversations` alone keeps its existing default directory, `~/.cache/tensorfold/learned`.
-Both spellings imply `--learn`. If directory flags are repeated or combined, the last directory wins.
+Both spellings imply `--learn`. Do not combine `--prompt-cache-disk` with `--learn-dir` or
+`--learn-conversations`: the server refuses either combination, in either order, even if the directories match.
+Repeating the same directory flag keeps its usual last-value behavior.
 The startup line names the disk tier's directory and the device budget reported by the engine; when the engine
 does not report a device budget, the line says so. `--prompt-cache-gib` still controls the in-memory budget,
 and the existing disk limits described below apply to either spelling.
@@ -725,9 +727,10 @@ it read ahead on an I/O thread, as described above.
 
 Three routes let a client such as the Mac app ask about a conversation. Each takes the body of a chat completion
 (`messages`, `tools`, `chat_template_kwargs`), renders it as that request would be rendered, and answers on the engine's
-thread between rounds. A server started without `--prompt-cache-disk DIR` or `--learn-conversations` answers each with 404 and the error message
-"saved conversations are off: start the server with --learn-conversations"; an engine that keeps no prompt states
-answers 501.
+thread between rounds. A server started without `--prompt-cache-disk DIR` or `--learn-conversations` answers each
+with 404 and the error message
+"saved conversations are off: start the server with --prompt-cache-disk DIR (or --learn-conversations)";
+an engine that keeps no prompt states answers 501.
 
 - `POST /v1/imprint/resume` answers how much of the conversation's next request would resume, and from where:
   `tokens` (the rendered prompt), `ram_tokens` and `disk_tokens` (the longest kept state in RAM and on disk),
