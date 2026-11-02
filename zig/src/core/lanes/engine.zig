@@ -462,9 +462,13 @@ pub const Engine = struct {
 
     /// Read the kept rows with their following tokens and ask the head for the next round's drafts.
     fn draftLate(e: *Engine, s: *Stream, start: u64, follow: []const u32, path: []const u32, budget: ?i64) !void {
+        var request: be.DraftRequest = .{ .stream = s, .follow = follow, .rows = path, .start = start, .position = s.cache_len + 1, .depth = 0 };
+        if (e.backend.vtable.prepare_draft) |prepare| {
+            try prepare(e.backend.ptr, &.{request});
+            request.prepared = true;
+        }
         var w = win.who(s);
-        const d: u32 = @intCast(try e.rule.headDepth(&w, budget, win.probe(e)));
-        const request: be.DraftRequest = .{ .stream = s, .follow = follow, .rows = path, .start = start, .position = s.cache_len + 1, .depth = d };
+        request.depth = @intCast(try e.rule.headDepth(&w, budget, win.probe(e)));
         if (!e.late.put(e.backend.defer_lone_draft and e.alone, request)) try e.askDrafts(&.{request});
     }
 

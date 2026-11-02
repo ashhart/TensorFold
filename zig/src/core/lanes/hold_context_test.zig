@@ -150,12 +150,13 @@ test "a due context-unfunded recovery keeps its trial until debt becomes afforda
 }
 
 test "a due probe cannot borrow context from an unselected zero-row companion" {
-    for ([_]bool{ false, true }) |normal| {
+    for ([_]bool{ false, true }) |normal| for ([_]u32{ 0, 1 }) |hold_rows| {
         const contexts = [_]price.ContextCost{.{ .streams = 1, .rows = 1, .ms = 1000 }};
         var f: Fixture = .{};
         try f.init(.{ .drafts = 1, .forward = flat, .holds = &holds, .prior = &.{1}, .contexts = &contexts });
         defer f.deinit();
         f.engine.rule.k.depth_probe_every = 4;
+        f.engine.rule.k.hold_rows = hold_rows;
         var selected = try head("selected", &.{1});
         defer selected.deinit(gpa);
         var companion = try head("companion", if (normal) &.{1} else &.{0});
@@ -183,7 +184,7 @@ test "a due probe cannot borrow context from an unselected zero-row companion" {
         }
         try f.budgetsFor(&plans, &.{ 0, 1 }, &out);
         try std.testing.expectEqualSlices(i64, &.{ 1, other }, &out);
-    }
+    };
 }
 
 test "copy allocations owe no neural context and serial depths pay their projection only once" {

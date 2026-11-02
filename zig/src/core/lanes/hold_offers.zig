@@ -148,9 +148,9 @@ pub fn pay(rule: anytype, whos: anytype, sampled: bool, out: []i64, base: price.
     var deepest: i64 = 0;
     var context_rows: u32 = 0;
     if (probes > 0) {
-        const possible = price.canExplore(rule, whos, base, fixed);
+        var funded: usize = 0;
         for (rule.hold_order[rule.hold_order.len - probes ..]) |probe| {
-            if (!possible) {
+            if (!price.canExplore(rule, whos, base, fixed, probe.hold_context_rows)) {
                 out[probe.index] = 0;
                 continue;
             }
@@ -159,12 +159,13 @@ pub fn pay(rule: anytype, whos: anytype, sampled: bool, out: []i64, base: price.
                 if (who.granted != @as(?u32, 0) or rule.plain_guard) spent(state, rule.k);
                 state.hold_capped = probe.lowered;
             }
+            funded += 1;
             rows += probe.rows;
             tokens += probe.gain;
             deepest = @max(deepest, probe.depth);
             context_rows = @max(context_rows, probe.hold_context_rows);
         }
-        if (!possible) probes = 0;
+        probes = funded;
     }
     if (normal == 0) return;
     const order = rule.hold_order[0..normal];

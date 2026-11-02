@@ -155,12 +155,15 @@ pub const Rule = struct {
         return r.mtp_step_ms * @as(f64, @floatFromInt(drafts));
     }
 
-    /// Measured round time when there is one, else the load-time forward cost plus head steps.
+    /// Measured whole-round time when available, else forward plus clean head and its staged context.
     pub fn roundCost(r: *Rule, drafts: i64, who: ?Who) !?f64 {
         const table = try r.costs(who);
         if (table.get(drafts)) |v| return v;
         const forward = r.family_costs.get(drafts + 1) orelse return null;
         var modeled = forward + r.loneHeadMs(drafts);
+        if (drafts > 0) if (who) |w| {
+            modeled += @import("hold_price.zig").contextMs(r.k.hold_context_costs, 1, w.hold_context_rows);
+        };
         if (r.plain_guard) {
             // untimed: its model plus the least time a row of a timed round took beyond its model
             var least: ?f64 = null;

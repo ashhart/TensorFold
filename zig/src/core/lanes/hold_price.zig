@@ -209,26 +209,36 @@ pub fn prefix(costs: *const Table, holds: []const HoldCost, context_ms: f64, bas
     return chosen;
 }
 
-/// Cached optimistic exploration bound; live cost changes invalidate it, and unknown costs remain feasible.
-pub fn canExplore(rule: anytype, whos: anytype, base: Base, fixed: f64) bool {
+/// Cached optimistic exploration bound, including the selected probe's debt; unknown costs remain feasible.
+pub fn canExplore(rule: anytype, whos: anytype, base: Base, fixed: f64, context_rows: u32) bool {
     const costs = rule.shared_costs;
     const holds = rule.k.hold_costs;
     const plain = costs.get(base.rows) orelse return true;
     if (holds.len == 0) return true;
     var heads: u32 = 0;
     var depth: u32 = 0;
-    var context_rows: u32 = std.math.maxInt(u32);
     for (whos) |w| {
         if (w.finished or w.forced or w.draft_room <= 1) continue;
         heads += 1;
-        context_rows = @min(context_rows, w.hold_context_rows);
         const room: i64 = @min(@as(i64, rule.most_drafts), w.draft_room - 1);
         depth = @max(depth, @as(u32, @intCast(room)));
     }
     const room_rows = if (rule.batch_rows > base.rows) rule.batch_rows - base.rows else 0;
     if (heads == 0 or depth == 0 or room_rows == 0) return false;
-    // A smaller physical cap can split a reserved cohort; the single-pass bound cannot exclude those shapes.
-    if (rule.k.hold_rows != 0 and rule.batch_rows > rule.k.hold_rows) return true;
+    // Split clean shapes remain optimistic; even free clean work must repay the selected probe's context.
+    if (rule.k.hold_rows != 0 and rule.batch_rows > rule.k.hold_rows) {
+        var context = std.math.inf(f64);
+        var blocks: u32 = 1;
+        while (blocks <= @min(heads, rule.k.hold_rows)) : (blocks += 1)
+            context = @min(context, contextMs(rule.k.hold_context_costs, blocks, context_rows));
+        if (context == 0) return true;
+        var extra: u32 = 1;
+        while (extra <= room_rows) : (extra += 1) {
+            const verify = costs.get(@as(i64, base.rows) + extra) orelse return true;
+            if (base.tokens * (verify - plain + context) < @as(f64, @floatFromInt(extra)) * (plain + fixed)) return true;
+        }
+        return false;
+    }
     var hasher = std.hash.Wyhash.init(0);
     inline for (.{ base.rows, heads, depth, rule.batch_rows, context_rows }) |v| {
         const x: u64 = v;

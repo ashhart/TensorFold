@@ -143,7 +143,9 @@ The verify rows follow it: a chain's chance at draft j is the product of its fir
 lane core's window allocator takes the likeliest drafts over all streams while the expected tokens a ms rise, so
 each stream gets its own verify length, and the next hold drafts as deep as the stream's grant. A hold still
 running on the GPU is priced by its lane's last confidences, so the host does not wait for it. A checkpoint
-without the head verifies by the core's depth rule, from each stream's measured acceptance by depth.
+without the head verifies by the core's depth rule, from each stream's measured acceptance by depth. Its lone
+depth decision stages the newly kept target rows first and includes their context quote in modeled hold work;
+observed whole-round prices already include that work and are not charged a second time.
 
 A stream with a copy ahead verifies the copy and asks no hold, and a drafting stream prices its copy
 windows by its own copies. The lane core also weighs the hold pass itself: clean holds are calibrated at
@@ -173,7 +175,8 @@ that still needs the complete same-head no-drafter/BF16/8-bit matrix, including 
 This allocation stage retains probability-priority row allocation, gain-per-row hold ordering, grant/slack
 rules and probe cadence. Context prices correct the existing normal, group and physical-pass prices and the
 optimistic `canExplore` bound; they do not import later cost-aware reordering or cheap-peer cohort searches.
-Due probes still advance their clocks, and only the existing funding rule spends their trials.
+Due probes still advance their clocks, but their own selected context debt must be fundable before their trial
+is spent, even when no ordinary hold remains. An unselected zero-row companion cannot lend them free context.
 
 Observed fixed overhead excludes encoding in its launch interval and GPU work in its settlement interval,
 each once. Pending encoding metadata is retained only for matching EMA repricing, never charged again.
