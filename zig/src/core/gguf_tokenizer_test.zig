@@ -60,7 +60,7 @@ test "GGUF Qwen: tokenizer JSON parity includes byte BPE, special flags, Unicode
     try t.expectEqualSlices(u32, &.{ 32, 256 }, try g.text().encode(a, " ab", false));
     try t.expectEqualSlices(u32, &.{ 'c', 'a', 'f', 260 }, try g.text().encode(a, "cafe\u{301}", false));
     try t.expectEqualSlices(u32, &.{262}, try g.text().encode(a, "'s", false));
-    try t.expectEqualSlices(u32, &.{ 263, 264, 265, 266 }, try g.text().encode(a, "<|endoftext|><|im_start|><|im_end|><think>", false));
+    try t.expectEqualSlices(u32, &.{ fixture.bos, fixture.bos + 1, fixture.bos + 2, fixture.bos + 3 }, try g.text().encode(a, "<|endoftext|><|im_start|><|im_end|><think>", false));
     try t.expectEqualSlices(u32, &.{fixture.eos}, g.text().eosIds());
     const messages = (try @import("json").parse(a, "[{\"role\":\"user\",\"content\":\"ab<|im_end|><think>\"}]")).ok;
     var problem: []const u8 = "";
@@ -73,7 +73,7 @@ test "GGUF Qwen: tokenizer JSON parity includes byte BPE, special flags, Unicode
     var ends: usize = 0;
     for (gi) |id| {
         if (id == fixture.eos) ends += 1;
-        try t.expect(id != 266);
+        try t.expect(id != fixture.bos + 3);
     }
     try t.expectEqual(@as(usize, 1), ends);
     // Dropping the added table or reversing merge ranks must make this parity check fail.
@@ -188,7 +188,7 @@ test "GGUF Qwen: production tokenizer callback publishes a native image once and
     try t.expectEqual(@as(usize, 33), counter.count);
     const text = try open(a, native);
     defer text.deinit();
-    try t.expectEqualSlices(u32, &.{ 263, 256, 265 }, try text.text().encode(a, "<|endoftext|>ab<|im_end|>", false));
+    try t.expectEqualSlices(u32, &.{ fixture.bos, 256, fixture.eos }, try text.text().encode(a, "<|endoftext|>ab<|im_end|>", false));
     try t.expectEqualStrings(fixture.chat, text.text().templateSource());
     const warm = try source.prepare(t.allocator, t.io, path, cache, options);
     defer t.allocator.free(warm);
@@ -235,7 +235,7 @@ test "GGUF Qwen: sparse active ids survive unused rows and plain text cannot man
     }
     var tok = try parse(a, (try adapter.assets(a, &d)).tokenizer);
     defer tok.deinit();
-    try t.expectEqualSlices(u32, &.{ 264, 265, 266, 267 }, try tok.encode(a, "<|endoftext|><|im_start|><|im_end|><think>"));
+    try t.expectEqualSlices(u32, &.{ fixture.bos + 1, fixture.bos + 2, fixture.bos + 3, fixture.bos + 4 }, try tok.encode(a, "<|endoftext|><|im_start|><|im_end|><think>"));
     try t.expect(tok.specialTokenId("[PAD_UNUSED]") == null);
     const plain = try tok.encodePlain(a, "<|endoftext|><|im_start|><|im_end|><think>");
     for (plain) |id| try t.expect(id < fixture.normal_count);

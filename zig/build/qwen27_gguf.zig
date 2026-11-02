@@ -8,5 +8,8 @@ pub fn steps(b: *std.Build, all: *std.Build.Step) void {
         root.addImport("core", root);
         host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"GGUF Qwen:"} })).step);
     }
+    const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host, .optimize = .fast, .link_libc = true });
+    const cli = b.addExecutable(.{ .name = "tf-gguf-tokenizer-compare", .root_module = @import("server.zig").plain(b, "zig/gguf_tokenizer_compare.zig", b.graph.host, .fast, lanes) });
+    b.step("gguf-tokenizer-compare-host", "Build the CPU-only GGUF and tokenizer.json case comparison tool").dependOn(&b.addInstallArtifact(cli, .{}).step);
     all.dependOn(host);
 }

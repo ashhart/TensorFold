@@ -4,8 +4,32 @@ const gg = @import("gguf.zig");
 const V = std.json.Value;
 const A = std.mem.Allocator;
 pub const source = @embedFile("gguf_tokenizer.zig") ++ @embedFile("gguf_required.zig");
-pub const pattern = "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?[\\p{L}\\p{M}]+|\\p{N}| ?[^\\s\\p{L}\\p{M}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
+pub const pattern = "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
 pub const Assets = struct { tokenizer: V, config: V };
+/// Qwen's actual tokenizer.json keeps these added tokens ordinary, including when GGUF calls them control tokens.
+pub fn qwenOrdinaryAdded(text: []const u8) bool {
+    return std.StaticStringMap(void).initComptime(.{
+        .{ "<|fim_prefix|>", {} }, .{ "<|fim_middle|>", {} }, .{ "<|fim_suffix|>", {} },
+        .{ "<|fim_pad|>", {} },    .{ "<|repo_name|>", {} },  .{ "<|file_sep|>", {} },
+    }).has(text);
+}
+/// Keep the declared EOS and Qwen's end-of-text control; an ordinary spelling never becomes a stop.
+pub fn eosIds(a: A, d: *const gg.Document) !V {
+    const view = try d.tokenizer();
+    const words = view.tokens orelse return error.@"MissingGgufMetadata:tokenizer.ggml.tokens";
+    const eos = view.eos orelse return error.MissingGgufSpecialToken;
+    if (eos >= words.len) return error.BadGgufSpecialToken;
+    var out = try array(a, &.{.{ .integer = @intCast(eos) }});
+    var it = words.iterator();
+    var id: usize = 0;
+    while (try it.next()) |word| : (id += 1) {
+        if (!std.mem.eql(u8, word.string, "<|endoftext|>")) continue;
+        const kinds = view.types orelse return error.BadGgufEndOfTextControl;
+        if ((try kinds.at(id)).int32 != 3) return error.BadGgufEndOfTextControl;
+        if (id != eos) try out.array.append(.{ .integer = @intCast(id) });
+    }
+    return out;
+}
 const Token = struct { text: []const u8, kind: i32 };
 fn object() V {
     return .{ .object = .empty };
@@ -68,7 +92,7 @@ pub fn assets(a: A, d: *const gg.Document) !Assets {
             var value = object();
             try put(a, &value, "id", .{ .integer = @intCast(id) });
             try put(a, &value, "content", string(text));
-            try put(a, &value, "special", .{ .bool = kind == 3 });
+            try put(a, &value, "special", .{ .bool = kind == 3 and !qwenOrdinaryAdded(text) });
             for ([_][]const u8{ "single_word", "lstrip", "rstrip", "normalized" }) |key| try put(a, &value, key, .{ .bool = false });
             try added.array.append(value);
         }
@@ -110,7 +134,7 @@ pub fn assets(a: A, d: *const gg.Document) !Assets {
     try put(a, &split, "pattern", regex);
     try put(a, &split, "behavior", string("Isolated"));
     try put(a, &split, "invert", .{ .bool = false });
-    const bytelevel = try byteLevel(a);
+    const bytelevel = try byteLevel(a, .pre);
     var pre = object();
     try put(a, &pre, "type", string("Sequence"));
     try put(a, &pre, "pretokenizers", try array(a, &.{ split, bytelevel }));
@@ -122,7 +146,7 @@ pub fn assets(a: A, d: *const gg.Document) !Assets {
     try put(a, &normal, "type", string("NFC"));
     try put(a, &root, "normalizer", normal);
     try put(a, &root, "pre_tokenizer", pre);
-    try put(a, &root, "decoder", bytelevel);
+    try put(a, &root, "decoder", try byteLevel(a, .decoder));
     try put(a, &root, "model", model);
     try put(a, &root, "added_tokens", added);
     var config = object();
@@ -140,14 +164,17 @@ pub fn assets(a: A, d: *const gg.Document) !Assets {
         if (v != .string or !std.unicode.utf8ValidateSlice(v.string)) return error.BadGgufChatTemplate;
         try put(a, &config, "chat_template", string(v.string));
     }
-    const post = if (flags[0] or flags[1]) try processor(a, tokens, ids, flags) else bytelevel;
+    const post = if (flags[0] or flags[1]) try processor(a, tokens, ids, flags) else try byteLevel(a, .post);
     try put(a, &root, "post_processor", post);
     return .{ .tokenizer = root, .config = config };
 }
-fn byteLevel(a: A) !V {
+const ByteMode = enum { pre, decoder, post };
+fn byteLevel(a: A, mode: ByteMode) !V {
     var v = object();
     try put(a, &v, "type", string("ByteLevel"));
-    for ([_][]const u8{ "add_prefix_space", "trim_offsets", "use_regex" }) |key| try put(a, &v, key, .{ .bool = false });
+    try put(a, &v, "add_prefix_space", .{ .bool = mode == .decoder });
+    try put(a, &v, "trim_offsets", .{ .bool = mode != .post });
+    try put(a, &v, "use_regex", .{ .bool = mode == .decoder });
     return v;
 }
 fn sequence(a: A, name: []const u8, type_id: i64) !V {

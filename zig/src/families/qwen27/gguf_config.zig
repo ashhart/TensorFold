@@ -34,9 +34,11 @@ pub fn build(a: std.mem.Allocator, d: *const gg.Document) !std.json.Value {
         .{ "num_key_value_heads", "qwen35.attention.head_count_kv" }, .{ "head_dim", "qwen35.attention.key_length" },
         .{ "linear_num_key_heads", "qwen35.ssm.group_count" },        .{ "linear_num_value_heads", "qwen35.ssm.time_step_rank" },
         .{ "linear_key_head_dim", "qwen35.ssm.state_size" },          .{ "linear_conv_kernel_dim", "qwen35.ssm.conv_kernel" },
-        .{ "max_position_embeddings", "qwen35.context_length" },      .{ "eos_token_id", "tokenizer.ggml.eos_token_id" },
+        .{ "max_position_embeddings", "qwen35.context_length" },
     };
     inline for (fields) |f| try set(a, &out, f[0], try integer(try required(d, f[1])));
+    _ = try required(d, "tokenizer.ggml.eos_token_id");
+    try set(a, &out, "eos_token_id", try @import("../../core/gguf_tokenizer.zig").eosIds(a, d));
     const heads = try required(d, "qwen35.ssm.time_step_rank");
     const inner = try required(d, "qwen35.ssm.inner_size");
     if (heads == 0 or inner % heads != 0) return error.BadGgufConfig;
