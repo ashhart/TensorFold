@@ -7,12 +7,15 @@ pub const Info = struct {
     max_batch_tokens: u32,
     max_inputs: u32 = 128,
     mrl_dimensions: []const u32 = &.{},
+    /// Every width from this one to `dimensions` crops (a model trained for any MRL width); 0: only the list's.
+    mrl_min: u32 = 0,
 
     pub fn dimension(i: Info, requested: ?u32) !u32 {
         const n = requested orelse return i.dimensions;
         if (n == 0 or n > i.dimensions) return error.UnsupportedEmbeddingDimension;
-        if (i.mrl_dimensions.len == 0) return error.MrlNotDeclared;
+        if (i.mrl_dimensions.len == 0 and i.mrl_min == 0) return error.MrlNotDeclared;
         if (n == i.dimensions or std.mem.indexOfScalar(u32, i.mrl_dimensions, n) != null) return n;
+        if (i.mrl_min > 0 and n >= i.mrl_min) return n;
         return error.UnsupportedEmbeddingDimension;
     }
 };
@@ -46,4 +49,17 @@ fn overlap(a: []const u8, b: []const u8) bool {
     const ap = @intFromPtr(a.ptr);
     const bp = @intFromPtr(b.ptr);
     return if (ap <= bp) bp - ap < a.len else ap - bp < b.len;
+}
+
+test "an MRL range takes every width from its least to the full one; a list takes its own widths" {
+    const range: Info = .{ .dimensions = 4096, .vocabulary = 10, .max_batch_tokens = 8, .mrl_min = 32 };
+    for ([_]u32{ 32, 384, 2049, 4096 }) |n| try std.testing.expectEqual(n, try range.dimension(n));
+    for ([_]u32{ 0, 31, 4097 }) |n| try std.testing.expectError(error.UnsupportedEmbeddingDimension, range.dimension(n));
+    try std.testing.expectEqual(@as(u32, 4096), try range.dimension(null));
+    const list: Info = .{ .dimensions = 8, .vocabulary = 10, .max_batch_tokens = 8, .mrl_dimensions = &.{ 2, 4 } };
+    try std.testing.expectEqual(@as(u32, 4), try list.dimension(4));
+    try std.testing.expectError(error.UnsupportedEmbeddingDimension, list.dimension(3));
+    const none: Info = .{ .dimensions = 8, .vocabulary = 10, .max_batch_tokens = 8 };
+    try std.testing.expectError(error.MrlNotDeclared, none.dimension(4));
+    try std.testing.expectEqual(@as(u32, 8), try none.dimension(null));
 }
