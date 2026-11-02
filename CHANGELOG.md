@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- `pull` fetches an EXL8 width file's header again when its length word or tensor entries are corrupt, instead of crashing or keeping a bad copy (#1907, part of #1872). Thanks to @jschmied.
+
 - DeepSeek V4.1 packs refuse a shard whose header length runs past its file or past 100 MB before anything is allocated, instead of allocating up to 1 GiB first (#1903, part of #1872). Thanks to @jschmied.
 
 - EAQ containers refuse a shard whose header length runs past its file or past 100 MB before anything is allocated (#1902, part of #1872). Thanks to @jschmied.
