@@ -9,6 +9,7 @@ pub const records = [_]M{
     .{ .name = "metal lfm2 stream attention lfm2_attn_segs", .threads = 128, .tg_memory = 18688, .reserved = 128 },
     .{ .name = "metal lfm2 stream attention merge lfm2_attn_merge_segs", .threads = 32, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
     .{ .name = "metal lfm2 tap lfm2_tap", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "metal lfm2 tap rows lfm2_tap_rows", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
     .{ .name = "metal lfm2 markov scan lfm2_markov_scan", .threads = 256, .tg_memory = 1088, .m1 = 1024, .m2 = 1024 },
     .{ .name = "metal lfm2 markov scan bf16 lfm2_markov_scan_bf16", .threads = 256, .tg_memory = 1088, .m1 = 1024, .m2 = 1024 },
     .{ .name = "metal lfm2 bf16 rows lfm2_bf16_rows", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
