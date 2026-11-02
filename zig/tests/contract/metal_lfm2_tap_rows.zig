@@ -1,4 +1,4 @@
-//! LFM2's tap copy into each row's own destination (lfm2_tap_rows): a layer's rows into their destinations' masked columns, the others kept.
+//! Row-owned LFM2 taps: exact copies into masked columns; null destinations and other columns stay unchanged.
 const std = @import("std");
 const mtl = @import("metal");
 const contract = @import("contract");
