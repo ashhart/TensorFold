@@ -146,6 +146,7 @@ pub const Host = struct {
     fn learner(h: *Host) api.Learner {
         return .{
             .ctx = h,
+            .read_only_audit = h.learn.?.read_only_audit,
             .begin = struct {
                 fn f(p: *anyopaque, request: *const api.LearnRequest, sink: api.LearnSink) anyerror!void {
                     const l = bind(p).learn.?;
