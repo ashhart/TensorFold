@@ -83,6 +83,23 @@ test "tiny's index accounts for all 9,283 names, none of the MTP layer's" {
     try t.expectEqual(@as(usize, 0), r.mtp);
 }
 
+test "the real tiny index (TF_LING_INDEX=<Ling-3.0-tiny model.safetensors.index.json>) against tiny_config.json" {
+    const path = std.mem.span(std.c.getenv("TF_LING_INDEX") orelse return error.SkipZigTest);
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(t.io, path, a, .unlimited);
+    const doc = try std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{});
+    const map = doc.object.get("weight_map").?.object;
+    if (map.count() != 9283) return error.SkipZigTest; // flash's index is names_test.zig's TF_LING_INDEX case
+    const c = try load();
+    const r = try names.check(a, &c, map.keys());
+    for (r.missing.items) |n| std.debug.print("missing {s}\n", .{n});
+    for (r.unknown.items) |n| std.debug.print("unaccounted {s}\n", .{n});
+    try t.expectEqual(@as(usize, 0), r.missing.items.len + r.unknown.items.len);
+    try t.expectEqual(@as(usize, map.count()), r.expected);
+}
+
 test "what tiny shares with flash is still refused when it changes: other q_lora ranks, limit lists of the wrong length, MTP" {
     try refused("\"q_lora_rank\": 256", "\"q_lora_rank\": 384", error.MlaGeometry, "q_lora_rank 384");
     try refused("\"q_lora_rank\": 256", "\"q_lora_rank\": 128", error.MlaGeometry, "q_lora_rank 128");
