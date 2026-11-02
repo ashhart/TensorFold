@@ -395,6 +395,11 @@ pub const Engine = struct {
 
     /// Run `prompt[pos0..end]` into `caches`, its logits not read: a cut where the caches are kept.
     pub fn advance(e: *Engine, caches: *state.Caches, prompt: []const u32, pos0: usize, end: usize, cancel: ?Cancel) !void {
+        _ = try e.spanRows(caches, prompt, pos0, end, cancel);
+    }
+
+    /// `advance`, keeping the span's final-norm rows (end - pos0, hidden) in the prompts arena until its next reset.
+    pub fn spanRows(e: *Engine, caches: *state.Caches, prompt: []const u32, pos0: usize, end: usize, cancel: ?Cancel) !hip.ops.Tensor {
         if (e.stopped) return error.GroupStopped;
         if (end <= pos0 or end > caches.total or end - pos0 > e.o.prompt_rows) return error.PromptTooLong;
         e.prompts.reset();
@@ -402,8 +407,9 @@ pub const Engine = struct {
         @memcpy(ids, prompt[pos0..end]);
         try e.ids_dev.uploadAsync(0, e.ids.view(0, 4 * ids.len), e.stream);
         var p: Poll = undefined;
-        _ = try fwd.span(e.ops(&e.prompts), e.model(), caches, e.ids_dev.base(), end - pos0, pos0, e.poll(cancel, end - pos0, &p));
+        const rows = try fwd.span(e.ops(&e.prompts), e.model(), caches, e.ids_dev.base(), end - pos0, pos0, e.poll(cancel, end - pos0, &p));
         try e.stream.synchronize();
+        return rows;
     }
 
     /// Prefill `prompt[pos0..]` into `caches`; the last row's token, its final row copied to `last` (MTP's input).
