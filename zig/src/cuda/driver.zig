@@ -199,18 +199,23 @@ pub fn refusal(v: c_int, buf: []u8) ?[]const u8 {
 pub fn gpuRefusal(built: ?u32, capability: u32, ordinal: c_int, buf: []u8) ?[]const u8 {
     const sm = built orelse return null;
     if (sm == capability) return null;
-    const fmt = "this server was built for sm_{d} (-Dgpu=sm_{d}), and CUDA device {d} is sm_{d}: build it with -Dgpu=sm_{d}, or use the release server";
-    return std.fmt.bufPrint(buf, fmt, .{ sm, sm, ordinal, capability, capability }) catch "this server was built for another GPU (-Dgpu): build it for this one, or use the release server";
+    const head = "this server was built for sm_{d} (-Dgpu=sm_{d}), and CUDA device {d} is sm_{d}";
+    const text = if (std.mem.indexOfScalar(u32, &@import("gpu_builds.zig").sms, capability) != null)
+        std.fmt.bufPrint(buf, head ++ ": build it with -Dgpu=sm_{d}, or use the release server", .{ sm, sm, ordinal, capability, capability })
+    else
+        std.fmt.bufPrint(buf, head ++ ", which -Dgpu does not build a server for", .{ sm, sm, ordinal, capability });
+    return text catch "this server was built for another GPU (-Dgpu)";
 }
 
-test "a -Dgpu server: a GPU of another SM is refused naming both SMs; any GPU passes a build of several" {
+test "a -Dgpu server: a GPU of another SM is refused naming both SMs, and a -Dgpu only when it builds one" {
     var buf: [256]u8 = undefined;
     try std.testing.expectEqualStrings("this server was built for sm_120 (-Dgpu=sm_120), and CUDA device 0 is sm_121: build it with -Dgpu=sm_121, or use the release server", gpuRefusal(120, 121, 0, &buf).?);
     try std.testing.expectEqualStrings("this server was built for sm_121 (-Dgpu=sm_121), and CUDA device 2 is sm_86: build it with -Dgpu=sm_86, or use the release server", gpuRefusal(121, 86, 2, &buf).?);
+    try std.testing.expectEqualStrings("this server was built for sm_120 (-Dgpu=sm_120), and CUDA device 0 is sm_90, which -Dgpu does not build a server for", gpuRefusal(120, 90, 0, &buf).?);
     try std.testing.expect(gpuRefusal(120, 120, 0, &buf) == null);
     try std.testing.expect(gpuRefusal(null, 121, 0, &buf) == null);
     var short: [8]u8 = undefined;
-    try std.testing.expectEqualStrings("this server was built for another GPU (-Dgpu): build it for this one, or use the release server", gpuRefusal(80, 86, 0, &short).?);
+    try std.testing.expectEqualStrings("this server was built for another GPU (-Dgpu)", gpuRefusal(80, 86, 0, &short).?);
 }
 
 test "CUresult names without the driver: DEINITIALIZED is 4, unknown codes stay unknown" {
