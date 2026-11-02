@@ -31,6 +31,21 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
             return std.mem.indexOf(u8, s, p) != null;
         }
     }.f;
+    if (std.mem.startsWith(u8, d.name, "GGUF row metadata ")) {
+        const body = tf.row_projection.source(.f32);
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
+    if (std.mem.startsWith(u8, d.name, "GGUF embedding ")) {
+        const body = tf.qwen27.runtime_sources.glue;
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
+    if (std.mem.startsWith(u8, d.name, "GGUF lane ")) {
+        const bits: u8 = if (has(d.name, "q4 ")) 4 else if (has(d.name, "q5 ")) 5 else if (has(d.name, "q6 ")) 6 else 8;
+        const group: usize = if (bits == 6) 16 else 32;
+        const sk: usize = if (has(d.name, "sk8 ")) 8 else 1;
+        const body = try tf.lane_projection.source(a, .{ .n = 64, .k = 5120, .format = .{ .bits = bits, .group = group, .metadata = .f32 }, .sk = sk });
+        return .{ .decl = d, .function = fun, .here = try tf.frags.source(device, a, body), .pre_m5 = "" };
+    }
     if (std.mem.startsWith(u8, d.name, "attention pv ")) {
         const full = std.mem.indexOf(u8, d.name, " fp32 ") != null;
         const probe = @import("metal_attention_pv.zig");

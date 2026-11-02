@@ -370,6 +370,9 @@ pub fn main(init: std.process.Init) !u8 {
         ntiles += 1;
     };
     for (tiles[0..ntiles]) |*x| try kernels.append(a, x.kernel());
+    var gguf_affine: @import("metal_gguf_affine.zig").Suite = .{ .a = a };
+    defer gguf_affine.deinit();
+    try gguf_affine.collect(device, queue, o.only, &kernels);
     var glm_windows: glm_rows_k.Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer glm_windows.deinit();
     try glm_windows.collect(o.only);
@@ -460,6 +463,7 @@ pub fn main(init: std.process.Init) !u8 {
         for (flash_list[0..flash_made]) |*probe| try probe.rowCountInvariant();
         try dsv41_suites.gates(init.io, o.seed, &t);
     }
+    if (o.gates and t.problems() == 0) for (gguf_affine.probes.items) |p| try p.extra();
     const t1 = std.Io.Clock.awake.now(init.io);
     var lim: usize = 0;
     if (o.limits) {
