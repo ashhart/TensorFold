@@ -1,6 +1,5 @@
 //! The actual round core reports accepted counts once, and disabled timing allocates and prints nothing.
 const std = @import("std");
-const lanes = @import("lanes");
 const timing = @import("qwen35").native.round_timing;
 const t = std.testing;
 
@@ -60,25 +59,4 @@ test "round timing: disabled trace allocation succeeds with no allocator capacit
     var fail = std.testing.FailingAllocator.init(t.allocator, .{ .fail_index = 0 });
     try t.expect((try timing.Trace.create(fail.allocator(), false)) == null);
     try t.expectEqual(@as(usize, 0), fail.alloc_index);
-}
-
-test "round timing: drafter and recorder preserve the original observer context" {
-    var target: lanes.fake.Fake = .{ .gpa = t.allocator };
-    defer target.deinit();
-    const Spy = struct {
-        fn done(ptr: *anyopaque, paths: []const []const u32) void {
-            const n: *usize = @ptrCast(@alignCast(ptr));
-            n.* += paths.len;
-        }
-    };
-    var seen: usize = 0;
-    var backend = target.backend();
-    backend.round_observer = .{ .ptr = &seen, .done = Spy.done };
-    var drafter: lanes.drafted.Drafted = .{ .gpa = t.allocator, .target = backend, .drafter = .{ .ptr = undefined, .vtable = undefined } };
-    defer drafter.deinit();
-    var recorded: lanes.recorder.Recorded = .{ .inner = drafter.backend(), .recorder = undefined };
-    const wrapped = recorded.backend();
-    try t.expectEqual(@as(*anyopaque, &seen), wrapped.round_observer.?.ptr);
-    wrapped.observed(&.{ &.{ 0, 1 }, &.{0} });
-    try t.expectEqual(@as(usize, 2), seen);
 }

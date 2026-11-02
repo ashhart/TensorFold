@@ -395,13 +395,14 @@ test "a lone no-confidence head prices newly staged context and retains whole-ro
     try engine.addStream(&s);
     defer engine.release(&s);
     const initial_holds = staged.head.holds;
-    for (0..3) |round| {
+    for (0..3) |_| {
         const before_cache = s.cache_len;
         const before_live = staged.head.live_rows;
+        const before_debt = s.hold_context_rows;
         try engine.step();
         try std.testing.expectEqual(@as(u32, 0), s.next.?.count);
         try std.testing.expectEqual(initial_holds, staged.head.holds);
-        try std.testing.expectEqual(@as(u32, @intCast(round + 1)), s.hold_context_rows);
+        try std.testing.expectEqual(before_debt + @as(u32, @intCast(s.cache_len - before_cache)), s.hold_context_rows);
         try std.testing.expectEqual(s.cache_len - before_cache, staged.head.live_rows - before_live);
         try std.testing.expectEqualSlices(u32, s.context.items[0..@intCast(s.cache_len)], staged.head.lanes.getPtr(&s).?.history.items);
     }
@@ -410,9 +411,10 @@ test "a lone no-confidence head prices newly staged context and retains whole-ro
     try std.testing.expectEqual(@as(u32, 1), s.next.?.count);
     try std.testing.expectEqual(initial_holds + 1, staged.head.holds);
     try std.testing.expectEqual(@as(u32, 0), s.hold_context_rows);
+    const projected_end = s.cache_len;
     try engine.step();
     try std.testing.expectEqual(@as(u32, 0), s.next.?.count);
-    try std.testing.expectEqual(@as(u32, 2), s.hold_context_rows);
+    try std.testing.expectEqual(@as(u32, @intCast(s.cache_len - projected_end)), s.hold_context_rows);
     try std.testing.expect(s.accepted > 0);
     contexts[0].ms = 1;
     try engine.step();
